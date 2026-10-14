@@ -29,7 +29,6 @@ proxy or cache repos and is not compatible with the Nexus API.
 | `internal/auth` | Users (kinds `local`/`oidc`), argon2id passwords, Basic-auth cache, API tokens, sessions, rate limiting, permission checks |
 | `internal/oidc` | OIDC admin sign-on: `/api/auth/oidc/login` and `/callback` (go-oidc + x/oauth2, PKCE S256) |
 | `internal/publish` | Publish sessions: device enrollment, nonces, trust policies, the CI token exchange, `Verify` for `trs_` tokens and the cleanup job |
-| `clients/` | The publisher clients: Gradle settings plugin (`clients/gradle`) and Maven extension, plugin and client library (`clients/maven`). They are built and released apart from the server |
 | `internal/repos` | Repos and their per-format JSON config. A `Validator` (from `internal/format`) checks the config |
 | `internal/format` | The plugin contract: `Format` and the optional interfaces, `Host`, and the registry (`Register`, `All`, `Get`, `ValidateRepoConfig`) |
 | `internal/formats` | `all.go`: the one list of built-in formats. The only file that names them |
@@ -405,8 +404,10 @@ unknown, closed or expired token counts toward the rate limit and answers 401. T
 enrollments and seen CI tokens, and sessions that expired more than 30 days ago (the audit
 trail for the **Publish log**).
 
-**Clients** (`clients/`, Java 17, JDK only). The group and plugin id are `com.telesphorepo`.
-- **Gradle plugin** (`clients/gradle`): a settings plugin. `telesphorepo { url = "https://repo.acme.com"; oidcTokenEnv = "..." }`
+**Clients** (Java 17, JDK only). They live in their own repository,
+[github.com/Telesphorepo/clients](https://github.com/Telesphorepo/clients), under the MIT license.
+The group and plugin id are `com.telesphorepo`.
+- **Gradle plugin** (`gradle/` in the clients repo): a settings plugin. `telesphorepo { url = "https://repo.acme.com"; oidcTokenEnv = "..." }`
   in `settings.gradle`. Each `PublishToMavenRepository` task whose repo is under `<url>/maven/<name>`
   gets credentials (user `telesphorepo`, the token as password) just before it runs. A session
   is minted once per repo and closed at build end by a build service. Proof order: GitHub
@@ -414,7 +415,7 @@ trail for the **Publish log**).
   `oidcTokenEnv`, the device key. Tasks that publish to the server opt out of the configuration
   cache. Without a proof the build fails and names `./gradlew telesphorepoLogin`, the task that
   enrolls a device.
-- **Maven** (`clients/maven`, parent `telesphorepo-maven-parent`): `telesphorepo-maven-client`
+- **Maven** (`maven/` in the clients repo, parent `telesphorepo-maven-parent`): `telesphorepo-maven-client`
   (library), `telesphorepo-maven-extension` (declared in `.mvn/extensions.xml`) and
   `telesphorepo-maven-plugin` (goal `telesphorepo:login`). The server URL is the property
   `telesphorepo.url` (or env `TELESPHOREPO_URL`). `telesphorepo.oidcTokenEnv` names the env var
@@ -422,17 +423,11 @@ trail for the **Publish log**).
   `maven-deploy-plugin` starts and closes it at the end. A `deploy` without proof stops with a
   message that names `mvn telesphorepo:login`. With `-DdeployAtEnd=true` a session older than
   `publish.session_ttl` at the last module fails.
-- **Release.** `.github/workflows/release-clients.yml` runs on a `clients-v*` tag with JDK 17.
-  The version comes from the tag and must be final. It publishes the plugin (with its marker,
-  through the maven-publish repository `release` in `clients/gradle/build.gradle.kts`) and the
-  Maven artifacts (`mvn deploy -DaltDeploymentRepository`) to a Nexus release repository.
-  Secrets: `NEXUS_MAVEN_URL`, `NEXUS_USERNAME`, `NEXUS_PASSWORD`. The Plugin Portal and Maven
-  Central jobs are comments in the workflow until the namespace `com.telesphorepo` is verified.
-  Their secrets: `GRADLE_PUBLISH_KEY`, `GRADLE_PUBLISH_SECRET`, `MAVEN_CENTRAL_USERNAME`,
-  `MAVEN_CENTRAL_PASSWORD`, `MAVEN_GPG_PRIVATE_KEY`, `MAVEN_GPG_PASSPHRASE`. `clients/` is
-  MIT-licensed (`clients/LICENSE`, declared in the poms); the server is AGPL-3.0.
-- **CI without a client.** The UI **Publishing** page and `clients/README.md` show `curl` steps
-  for GitHub Actions and Jenkins.
+- **Release.** The clients repo releases from its own workflow (`.github/workflows/release.yml`)
+  on a `v*` tag. The server repo has no release job for the clients. The clients repo is
+  MIT-licensed; the server is AGPL-3.0.
+- **CI without a client.** The UI **Publishing** page and the server `README.md` show `curl`
+  steps for GitHub Actions and Jenkins.
 
 **UI pages.** Login (second step), **Security** (`#/security`: TOTP with a QR code, passkeys,
 recovery codes), **Devices** (`#/devices`), the approval page (`#/device?code=`), **Publishing**
@@ -607,7 +602,7 @@ and raw insert asset rows, debian inserts one package and its asset row per unit
 | `go tool task test [go test args]` | Runs the core zone: `go test -tags e2e ./e2e/... -count=1 -v` |
 | `go tool task test import [go test args]` | Runs the import zone: `-tags import`, 30 min timeout. It starts a Nexus container |
 | `go tool task test scale [go test args]` | Runs `TestScale` (`-tags scale`, 60 min timeout) |
-| `go tool task test clients [go test args]` | Runs the clients zone: `-tags clients`, 40 min timeout. It builds the Gradle plugin and the Maven extension from `clients/` |
+| `go tool task test clients [go test args]` | Runs the clients zone: `-tags clients`, 40 min timeout. It builds the Gradle plugin and the Maven extension from the clients repo (`E2E_CLIENTS_DIR`, or a shallow clone of `E2E_CLIENTS_REF`, default `main`) |
 | `go tool task test all [go test args]` | Runs core, import, scale and clients one after the other. It runs every zone, lists the failed zones and exits non-zero if any failed |
 | `go tool task release [version]` | Builds the UI once. Then it cross-compiles `bin/release/telesphorepo_<version>_<os>_<arch>` for linux, darwin and windows on amd64 and arm64 (`CGO_ENABLED=0`, `-trimpath`). Each binary goes into a `.tar.gz` (`.zip` on Windows) with `LICENSE` and `README.md`. The command writes `SHA256SUMS`. The version defaults to `git describe` |
 | `go tool task gen` | Runs `go tool sqlc generate` for every `internal/**/sqlc.yaml` |
@@ -649,7 +644,7 @@ and the client helpers (`harness_test.go`, `main_test.go`, `clients_test.go`) ca
 | core | `e2e` | `go tool task test` | Formats, auth, API, settings, storage move, query plans |
 | import | `import` | `go tool task test import` | `TestNexus` |
 | scale | `scale` | `go tool task test scale` | `TestScale` |
-| clients | `clients` | `go tool task test clients` | `TestClients` (`e2e/publish_clients_test.go`) |
+| clients | `clients` | `go tool task test clients` | `TestClients` (`e2e/publish_clients_test.go`). It needs `git` unless `E2E_CLIENTS_DIR` points at a checkout of the clients repo |
 | all | all tags | `go tool task test all` | Every zone |
 
 **Publishing tests.** Every publish in the suite uses a publish session. The harness helper

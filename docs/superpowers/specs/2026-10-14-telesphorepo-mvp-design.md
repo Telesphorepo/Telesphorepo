@@ -680,23 +680,25 @@ that repo, and still checks the user's current permission (device and manual ses
 `locked_by`. Anything else gets 401 with `WWW-Authenticate: Basic` and
 `{"error":"publishing needs a publish session: <base_url>/#/publishing"}`.
 
-**Clients** (`clients/`, Java 17, no dependencies beyond the build tool's API and the JDK):
-- **Gradle plugin** `clients/gradle`, settings plugin id `com.telesphorepo`:
+**Clients** (own repository, https://github.com/Telesphorepo/clients, MIT; Java 17, no
+dependencies beyond the build tool's API and the JDK):
+- **Gradle plugin** `gradle/`, settings plugin id `com.telesphorepo`:
   `telesphorepo { url = "https://repo.acme.com" }` in `settings.gradle.kts`. It gives every Maven
   repository on that host lazy credentials. At the first task that publishes to such a repo it
   mints a session for that repo (GitHub OIDC when `ACTIONS_ID_TOKEN_REQUEST_URL` is set; an OIDC
   token from the env var named by `telesphorepo.oidcTokenEnv` for Jenkins; else the device key)
   and closes it at build end through a `BuildService`. `telesphorepoLogin` enrolls; with no
   device and no CI token, a publish fails with "run ./gradlew telesphorepoLogin".
-- **Maven extension** `clients/maven`, `com.telesphorepo:telesphorepo-maven-extension`,
+- **Maven extension** `maven/`, `com.telesphorepo:telesphorepo-maven-extension`,
   declared in `.mvn/extensions.xml`. It mints a session per target repo before `deploy` uploads
   (same three proofs) and closes them when the build ends. `mvn telesphorepo:login` enrolls.
   `settings.xml` needs no password for the server.
 - **CI without the plugin/extension**: documented `curl` snippets for GitHub Actions and Jenkins
-  in the UI's **Publishing** page and in `clients/README.md`.
-- **Releases**: `.github/workflows/release-clients.yml` publishes the Gradle plugin and the Maven
-  artifacts to a Nexus release repository on a `clients-v*` tag, with the credentials in GitHub
-  secrets. The Plugin Portal and Maven Central jobs follow after namespace verification.
+  in the UI's **Publishing** page and in the server `README.md`.
+- **Releases**: the clients repo has a workflow (`.github/workflows/release.yml`) that publishes
+  the Gradle plugin and the Maven artifacts to a Nexus release repository on a `v*` tag, with the
+  credentials in GitHub secrets. The Plugin Portal and Maven Central jobs follow after namespace
+  verification.
 
 **UI:** login with second factor; **Security** (TOTP, passkeys, recovery codes); **Devices**;
 device approval page (`#/device`); **Publishing** (new manual session, client setup snippets);
@@ -711,7 +713,8 @@ admin **Trust policies** (with presets) and **Publish log**; **Tokens** renamed 
   the CI issuer (a client whose tokens carry GitHub-shaped claims), wrong claim, wrong audience,
   replayed token, pasted JWKS.
 - Zone `clients` (`go tool task test clients`): Gradle and Maven containers build the plugin and
-  the extension from `clients/`, publish them to a test server, then (1) enroll (the test reads
+  the extension from the clients repo (`E2E_CLIENTS_DIR`, or a shallow `git clone` of
+  `E2E_CLIENTS_REF`, default `main`), publish them to a test server, then (1) enroll (the test reads
   the code from the container output and approves through the API), publish a library and a
   Gradle plugin, resolve them; (2) publish as "GitHub Actions" with a fake
   `ACTIONS_ID_TOKEN_REQUEST_URL` container that serves a Keycloak-minted token.
@@ -1005,7 +1008,7 @@ harness files carry every tag.
 | core | `e2e` | `go tool task test` | Formats, auth, API, settings, storage move, query plans |
 | import | `import` | `go tool task test import` | Nexus source, sync and cut-over (starts a Nexus container) |
 | scale | `scale` | `go tool task test scale` | 100k vs 1M latency (§5.5) |
-| clients | `clients` | `go tool task test clients` | Gradle plugin and Maven extension built from `clients/` (§7.6) |
+| clients | `clients` | `go tool task test clients` | Gradle plugin and Maven extension built from the clients repo (§7.6) |
 | all | all tags | `go tool task test all` | Every zone, one after the other |
 
 Extra `go test` args still pass through (`go tool task test import -run TestNexus`). A milestone

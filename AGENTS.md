@@ -12,7 +12,7 @@ go tool task preview        # build, then run the production binary at :8080
 go tool task test [args]    # core zone (tag e2e); args go to go test, e.g. -run TestMaven
 go tool task test import    # import zone (tag import): TestNexus, starts a Nexus container (slow)
 go tool task test scale     # scale zone (tag scale): 100k and 1M asset latency test (slow)
-go tool task test clients   # clients zone (tag clients): builds clients/gradle and clients/maven in containers (slow)
+go tool task test clients   # clients zone (tag clients): builds the Gradle and Maven clients in containers (slow); needs git, or E2E_CLIENTS_DIR
 go tool task test all       # core, import, scale and clients one after the other
 go tool task release [ver]  # cross-compiled archives + SHA256SUMS in bin/release
 go tool task gen            # run sqlc for every internal/**/sqlc.yaml
@@ -24,7 +24,7 @@ go vet -tags e2e ./e2e/...  # e2e files only compile with a tag; also vet -tags 
 E2E_SKIP_BUILD=1 go tool task test -run TestX   # reuse the already-built image
 ```
 
-Run the core zone for every change. Run the import zone when you touch internal/nexus, internal/api/nexus.go, an importer, the repo lock or the mirror gate. Run the scale zone when you touch a hot query or an index. Run the clients zone when you touch `clients/`, `internal/publish`, the write gate or the device and OIDC routes. Run all before a push that touches several zones. A subagent builds and vets with the tags; the main session runs the zones.
+Run the core zone for every change. Run the import zone when you touch internal/nexus, internal/api/nexus.go, an importer, the repo lock or the mirror gate. Run the scale zone when you touch a hot query or an index. Run the clients zone when you touch `internal/publish`, the write gate or the device and OIDC routes. Run all before a push that touches several zones. A subagent builds and vets with the tags; the main session runs the zones.
 
 `go tool task` is registered with `tool` in `go.mod`. There is no root `package.json`, Makefile
 or shell script, so it works the same on Windows, macOS and Linux. The UI build needs bun (npm is
@@ -94,7 +94,7 @@ the fallback) and Node 26+ (see `.node-version`). The e2e suite needs Docker or 
 | JSON API route | `internal/api/api.go` (register) + handler file; errors via `httpx.Error` |
 | Auth / permission checks | `internal/auth` (`Identify`, repo access and the write gate, second factor) |
 | Publish sessions, devices, trust policies | `internal/publish`; routes in `internal/api/publish.go` and `internal/api/security.go` |
-| Publisher clients (Gradle plugin, Maven extension) | `clients/gradle`, `clients/maven`; release in `.github/workflows/release-clients.yml` |
+| Publisher clients (Gradle plugin, Maven extension) | Separate repo [Telesphorepo/clients](https://github.com/Telesphorepo/clients) (MIT). The clients zone clones it, or reads `E2E_CLIENTS_DIR`; `E2E_CLIENTS_REF` picks the branch or tag (default `main`) |
 | Blob I/O | `internal/assets` (spool, store, serve) on top of `internal/storage` |
 | UI page | `web/src/pages/*.tsx`, routes and nav in `web/src/App.tsx`, fetch helpers in `web/src/api.ts` |
 | Storage move (FS ↔ S3) | `internal/move` (service, copier), `internal/storage/mirror.go`, `internal/api/moves.go`, `web/src/pages/MovePanel.tsx` |

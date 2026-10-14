@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -24,13 +25,13 @@ import (
 )
 
 // Zone clients (spec §7.6, §15): the Gradle plugin and the Maven extension are built from
-// clients/ and published to a test server, then real Gradle and Maven projects use them to
+// the clients repo (E2E_CLIENTS_DIR or a clone) and published to a test server, then real Gradle and Maven projects use them to
 // enroll a device and publish, and to publish as GitHub Actions with a Keycloak-minted token.
 
 const (
 	clientsGradleImage = "gradle:9.8.1-jdk21"
 
-	// Coordinates that clients/ publishes. The Gradle build takes its version from -Pversion.
+	// Coordinates that the clients repo publishes. The Gradle build takes its version from -Pversion.
 	clientsGroup         = "com.telesphorepo"
 	gradleSettingsPlugin = "com.telesphorepo"
 	mavenExtensionID     = "telesphorepo-maven-extension"
@@ -107,13 +108,14 @@ const publishInitScript = `allprojects {
 }
 `
 
-// buildClients builds clients/gradle and clients/maven in parallel containers and publishes
+// buildClients builds gradle/ and maven/ of the clients repo in parallel containers and publishes
 // both to repo with publish sessions from the harness.
 func buildClients(t *testing.T, s *Server, repo string) *builtClients {
 	t.Helper()
 	repoURL := s.InternalURL + "/maven/" + repo
-	gradleSrc := hostDirFiles(t, filepath.Join("..", "clients", "gradle"), "/src/gradle")
-	mavenSrc := hostDirFiles(t, filepath.Join("..", "clients", "maven"), "/src/maven")
+	clientsDir := clientsSourceDir(t)
+	gradleSrc := hostDirFiles(t, filepath.Join(clientsDir, "gradle"), "/src/gradle")
+	mavenSrc := hostDirFiles(t, filepath.Join(clientsDir, "maven"), "/src/maven")
 	// Mint both sessions before the builds start: each one needs a fresh second-factor step.
 	gradleToken := PublishToken(t, s, s.AdminUser, repo)
 	mavenToken := PublishToken(t, s, s.AdminUser, repo)
@@ -134,7 +136,7 @@ func buildClients(t *testing.T, s *Server, repo string) *builtClients {
 				Timeout: 20 * time.Minute,
 			})
 			if code != 0 {
-				t.Fatalf("build and publish clients/gradle: exit %d\n%s", code, out)
+				t.Fatalf("build and publish gradle/: exit %d\n%s", code, out)
 			}
 		})
 		t.Run("maven extension", func(t *testing.T) {
@@ -148,7 +150,7 @@ func buildClients(t *testing.T, s *Server, repo string) *builtClients {
 				Timeout: 20 * time.Minute,
 			})
 			if code != 0 {
-				t.Fatalf("build and deploy clients/maven: exit %d\n%s", code, out)
+				t.Fatalf("build and deploy maven/: exit %d\n%s", code, out)
 			}
 		})
 	})
@@ -156,7 +158,7 @@ func buildClients(t *testing.T, s *Server, repo string) *builtClients {
 		t.FailNow()
 	}
 
-	// The Maven clients carry the version of clients/maven/pom.xml; read it from what arrived.
+	// The Maven clients carry the version of maven/pom.xml; read it from what arrived.
 	groupPath := strings.ReplaceAll(clientsGroup, ".", "/")
 	paths := clientsAssetPaths(t, s, repo, groupPath+"/")
 	extRe := regexp.MustCompile(`^` + regexp.QuoteMeta(groupPath+"/"+mavenExtensionID) + `/([^/]+)/[^/]+\.pom$`)
@@ -175,6 +177,36 @@ func buildClients(t *testing.T, s *Server, repo string) *builtClients {
 		groupPath+"/"+mavenPluginID+"/"+cl.ExtVersion+"/"+mavenPluginID+"-"+cl.ExtVersion+".jar")
 	t.Logf("clients: gradle plugin %s, maven extension and plugin %s", gradleClientVersion, cl.ExtVersion)
 	return cl
+}
+
+// clientsRepoURL is the repository that holds the client sources.
+const clientsRepoURL = "https://github.com/Telesphorepo/clients"
+
+// clientsSourceDir returns the directory with the client sources (gradle/ and maven/). It is
+// E2E_CLIENTS_DIR when set. Otherwise it shallow-clones clientsRepoURL at E2E_CLIENTS_REF
+// (default main) into a temp dir, which the test removes at the end.
+func clientsSourceDir(t *testing.T) string {
+	t.Helper()
+	if dir := os.Getenv("E2E_CLIENTS_DIR"); dir != "" {
+		return dir
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatalf("the clients zone needs git to clone %s (or set E2E_CLIENTS_DIR to a local checkout): %v", clientsRepoURL, err)
+	}
+	ref := os.Getenv("E2E_CLIENTS_REF")
+	if ref == "" {
+		ref = "main"
+	}
+	dir, err := os.MkdirTemp("", "telesphorepo-clients-")
+	if err != nil {
+		t.Fatalf("make temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	out, err := exec.Command("git", "clone", "--depth", "1", "--branch", ref, clientsRepoURL, dir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("git clone %s (ref %s): %v\n%s", clientsRepoURL, ref, err, out)
+	}
+	return dir
 }
 
 // hostDirFiles returns every file under the host directory dir as container files under

@@ -31,7 +31,7 @@ const usage = `Usage: go tool task <command>
   test [args]      run the core e2e zone; args pass to go test (e.g. go tool task test -run TestMaven)
   test import      run the import zone: Nexus sources, sync and cut-over (e.g. go tool task test import -run TestNexus)
   test scale       run the scale zone: 100k and 1M seeded assets, p95 must not double
-  test clients     run the clients zone: the Gradle plugin and Maven extension built from clients/
+  test clients     run the clients zone: the Gradle plugin and Maven extension built from the clients repo (E2E_CLIENTS_DIR or a git clone)
   test all         run the core, import, scale and clients zones one after the other; fails if any fails
   release [version]  build the UI once, then bin/release/telesphorepo_<version>_<os>_<arch> archives
                    (.tar.gz, .zip on Windows) for linux, darwin and windows on amd64 and arm64,

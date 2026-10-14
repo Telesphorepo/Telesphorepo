@@ -18,7 +18,7 @@ Nexus 3 container) and scale (flat from 100k to 1M assets).
 | M2.5: format plugins (Maven, Debian and `raw` are plugins), per-owner sqlc queries and migrations, plan guard, scale test (§5.4, §5.5) | done |
 | M3: storage move (FS ↔ S3), Nexus sources with mirroring syncs and cut-over (§12) | done |
 | M4: full admin UI polish, deletes + blob/by-hash GC | designed |
-| M3.5: publisher credentials: publish sessions as the only way to write, second factor (TOTP, passkeys, recovery codes), device keys, CI trust policies (OIDC), Gradle plugin and Maven extension in `clients/` (§7.6) | built, pending verification |
+| M3.5: publisher credentials: publish sessions as the only way to write, second factor (TOTP, passkeys, recovery codes), device keys, CI trust policies (OIDC), Gradle plugin and Maven extension in the clients repo (§7.6) | built, pending verification |
 
 Design spec (source of truth for what's next):
 `docs/superpowers/specs/2026-10-14-telesphorepo-mvp-design.md`. System as built: `SPEC.md`.
@@ -65,20 +65,21 @@ Things to know when the first run fails:
   Under `go tool task dev` the page origin is `:5173`, so the WebAuthn origin check would fail
   anyway.
 - The design doc §7.6 still says `90d`. The built value is `2160h`. SPEC.md has the built values.
-- `clients/` is MIT (`clients/LICENSE`). The server is AGPL-3.0 (`LICENSE`).
+- The clients are MIT and live in https://github.com/Telesphorepo/clients. The clients zone
+  clones that repo (needs `git`) or reads `E2E_CLIENTS_DIR`. The server is AGPL-3.0 (`LICENSE`).
 
 ## Owner tasks before the first client release
 
-The clients are published by a `clients-v<version>` tag, for example `clients-v0.1.0`. The owner
-must do these steps first:
+The clients are published by a `v<version>` tag in the clients repo, for example `v0.1.0`. The
+owner must do these steps first:
 
-1. Add these GitHub repository secrets: `NEXUS_MAVEN_URL` (full URL of the hosted release
-   repository), `NEXUS_USERNAME`, `NEXUS_PASSWORD`. The release goes to Nexus first.
+1. Add the GitHub repository secrets `NEXUS_USERNAME` and `NEXUS_PASSWORD` to the clients repo.
+   The release goes to Nexus first.
 2. Later, for the Gradle Plugin Portal and Maven Central: create the accounts, verify the
    namespace `com.telesphorepo`, create a GPG key, add the secrets listed in
-   `.github/workflows/release-clients.yml`, and enable the commented jobs there.
-3. After the first release, replace the `VERSION` placeholders in `web/src/pages/Publishing.tsx`,
-   `README.md` and `clients/README.md`.
+   `.github/workflows/release.yml` of the clients repo, and enable the commented jobs there.
+3. After the first release, replace the `VERSION` placeholders in `web/src/pages/Publishing.tsx`
+   and `README.md`.
 
 ## Known gaps / small follow-ups
 

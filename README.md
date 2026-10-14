@@ -75,7 +75,7 @@ session. See **Publishing**.
 Every upload needs a publish session. It is a credential for one repo that ends after
 `publish.session_ttl` (15 min by default). To publish from a laptop, add a second factor (an
 authenticator app or a passkey) on the **Security** page. A new user does this at the first
-sign-in. The clients below are in `clients/`. Replace `VERSION` with the latest `clients-v` release.
+sign-in. The clients below are in [github.com/Telesphorepo/clients](https://github.com/Telesphorepo/clients). Replace `VERSION` with the latest `v` release there.
 
 **Gradle.** In `settings.gradle.kts`:
 
@@ -107,7 +107,7 @@ and then run `mvn deploy`.
 on the **Trust policies** page (preset "GitHub Actions"): the repo, the branch or tag, and the
 workflow that may publish. The Gradle plugin and the Maven extension then use the GitHub token
 with no secret. Without them, post the token to `/api/publish/sessions/oidc`; the **Publishing**
-page and `clients/README.md` show the `curl` steps.
+page shows the `curl` steps.
 
 **Jenkins.** Install the OpenID Connect Provider plugin and bind an "OpenID Connect id token"
 credential to an environment variable, for example `OIDC_TOKEN`. An admin adds a trust policy
@@ -154,4 +154,4 @@ everything else: [SPEC.md](SPEC.md).
 
 ## License
 
-The server is licensed under AGPL-3.0 (see [LICENSE](LICENSE)). The code in [clients/](clients/) is licensed under MIT (see [clients/LICENSE](clients/LICENSE)).
+The server is licensed under AGPL-3.0 (see [LICENSE](LICENSE)). The [clients](https://github.com/Telesphorepo/clients) (Gradle plugin and Maven extension) are in their own repository under the MIT license.

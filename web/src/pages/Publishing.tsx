@@ -151,6 +151,7 @@ function Clients() {
       <p className="muted">
         The Gradle plugin and the Maven extension create a publish session for every publish and end it afterwards.
         Use the latest release in place of <code>VERSION</code>.
+        The source is at <a href="https://github.com/Telesphorepo/clients" target="_blank" rel="noreferrer">github.com/Telesphorepo/clients</a> (MIT).
       </p>
       <Snippet title="Gradle plugin" code={`// settings.gradle.kts
 plugins { id("com.telesphorepo") version "VERSION" }
