@@ -345,6 +345,66 @@ Format-specific per-repo settings live in `repos.config` (JSON object).
 
 Repo name: `^[a-z0-9][a-z0-9._-]{0,63}$`, immutable after creation.
 
+### 5.4 Format plugins **[M2.5]**
+
+**Goal:** formats are plugins. Adding Cargo, npm, PyPI, Yum/RPM or a generic "raw" format means
+writing one package and adding one registration line; nothing in the core (DB schema, repos, API,
+server wiring, settings, CLI, UI shell, dev tooling) names a specific format. Maven and Debian get
+no special treatment — they are just the first two plugins.
+
+**Plugin contract** (`internal/format`):
+```go
+type Format interface {
+    Name() string                                   // URL segment and repos.format value: "maven", "debian", "cargo"
+    Title() string                                  // "Maven / Gradle", "Debian (apt)"
+    DefaultConfig() json.RawMessage                 // repo config for new repos
+    ValidateConfig(raw json.RawMessage) (json.RawMessage, error) // normalize + validate repo config
+    Register(mux *http.ServeMux, h Host)            // mounts /{name}/{repo}/... (and any extra paths it owns)
+}
+// Optional capabilities, discovered by type assertion:
+type Starter      interface { Start(ctx context.Context) }                        // background workers
+type Migrator     interface { Migrations() fs.FS }                                 // format-owned schema
+type Configurable interface { Settings() []settings.Def }                          // contributes a settings group
+type StatusReporter interface { Status(ctx context.Context, repo *repos.Repo) (any, error) } // e.g. {"pending": n}
+type ConfigObserver interface { RepoConfigChanged(ctx context.Context, old, new *repos.Repo) error }
+type Describer    interface { Usage(repo *repos.Repo, baseURL string) []Snippet } // client setup snippets for UI/CLI
+```
+`Host` is the narrow set of core services a plugin may use: auth gate, assets (spool, lock, put,
+serve, upsert-in-tx), DB handle, live config, settings, signing, logger. Plugins never import each
+other.
+
+**Registry:** `internal/formats/all.go` is the only file listing formats
+(`format.Register(maven.New, debian.New, …)`); the server iterates the registry for mounting,
+migrations, `Start`, settings and status.
+
+**Core changes:**
+- Schema: drop the `repos.format` CHECK (migration rebuilds `repos` once); the format is validated
+  against the registry instead. Format tables keep a format prefix (`deb_*`, `cargo_*`).
+- Migrations: core migrations stay on `PRAGMA user_version`; each `Migrator` gets its own track in
+  `schema_migrations(component TEXT, version INTEGER, PRIMARY KEY(component))`, applied after core.
+  The existing `deb_*` tables move from `0001_init.sql` ownership to the debian plugin's track by
+  recording them as already applied (no data movement).
+- `repos`: no format constants or config rules; `Create`/`Update` call the plugin's
+  `ValidateConfig`. Unknown format → 400 with the list of available formats.
+- API: `GET /api/formats` → `[{name, title, default_config, settings_group?}]`;
+  `GET /api/repos/{name}/status` (generic, from `StatusReporter`, `{}` otherwise) replaces
+  `/debian/status`; `GET /api/repos/{name}/usage` returns `Describer` snippets. The repo PATCH calls
+  `ConfigObserver` generically.
+- Settings: the registry merges plugin `Settings()`; the Debian group moves into the debian plugin.
+  Signing stays a core service because several formats (Debian, Yum) need it.
+- CLI `dev`: creates one demo repo per registered format and prints each one's `Usage` snippets.
+- UI: a format UI registry (`web/src/formats/<name>.tsx`, optional) for custom config editors;
+  everything else is generic and data-driven (`/api/formats`, `/status`, `/usage`), with a JSON
+  config editor fallback.
+- Dev proxy: Vite proxies every non-UI path to the backend (one rule), not a per-format list.
+- E2E: `ForEachStorage` stays; each format owns its `e2e/<format>_test.go`.
+
+**Proof of pluggability (acceptance):** in the same milestone add a third format, **raw** (generic
+hosted files: `PUT/GET/HEAD /raw/{repo}/{path...}`, overwrite policy in its repo config), touching
+only `internal/raw/`, `internal/formats/all.go` and `e2e/raw_test.go`. If that requires editing any
+other core file, the abstraction is incomplete and must be fixed before M3. AGENTS.md's "Adding a
+repo format" section is rewritten to this flow.
+
 ## 6. Path validation (all formats)
 
 Applied to the raw request before any storage key is built:
@@ -724,6 +784,7 @@ is tested without a real bucket. `ForEachStorage` runs `fs`, `seaweedfs`, and `r
   UI shell, CLI `serve`/`user create`/`signing-key generate`, Dockerfile, e2e suite above.
 - **M1.1**: DX (§16). **M1.2**: in-app settings (§3), SPEC.md/AGENTS.md, lean README.
 - **M2**: OIDC admin sign-on (§7.5) + Keycloak e2e.
+- **M2.5**: format plugins (§5.4) + `raw` format as the pluggability proof.
 - **M3**: `move`, `import nexus` + e2e.
 - **M4**: full admin UI polish, deletes (assets, deb packages) + blob/by-hash GC, scaling test
   behind `//go:build scale`.
