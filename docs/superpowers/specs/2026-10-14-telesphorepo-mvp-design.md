@@ -78,7 +78,56 @@ constantly) and serving straight from storage without DB rows (no fast 404, no s
 
 No other runtime dependencies without a written justification in this file.
 
-## 3. Configuration (environment variables)
+## 3. Configuration **[M1.2: in-app settings]**
+
+**Principle:** environment variables are a bare-minimum bootstrap plus an override mechanism for
+tests. Everything an operator tunes is configured in the app (admin UI / `/api/settings`) and
+stored in SQLite, with secret values encrypted at rest. There is no `.env` file to maintain.
+
+**Boot environment (the only variables a deployment needs, all optional):**
+
+| Var | Default | Meaning |
+|---|---|---|
+| `TR_DATA_DIR` | `./data` (image: `/data`) | DB, upload spool, FS blobs, master key |
+| `TR_LISTEN` | `:8080` | listen address (restart to change) |
+| `TR_MASTER_KEY` | contents of `$TR_DATA_DIR/master.key`, generated on first start (0600) | 32-byte key (base64) that encrypts secret settings. Set it from a secret manager to keep it off the data volume. Losing it means re-entering secrets. |
+
+**Settings store** (next migration):
+```sql
+CREATE TABLE settings (
+  key        TEXT PRIMARY KEY,          -- e.g. "storage.s3.secret_access_key"
+  value      TEXT NOT NULL,             -- JSON value; for secrets: base64(nonce || AES-256-GCM ciphertext)
+  secret     INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL
+) WITHOUT ROWID;
+```
+- Encryption: AES-256-GCM (stdlib), key = HKDF-SHA256(master key, info "telesphorepo settings v1"),
+  AAD = the setting key (a ciphertext cannot be moved to another key). Random 12-byte nonce.
+- The server holds the effective settings in memory (atomic snapshot), reloaded on every write;
+  request paths never query `settings`.
+- **Override:** any setting can be forced with env `TR_<KEY>` (dots → `_`, upper-case, e.g.
+  `TR_STORAGE_S3_BUCKET`). Overridden settings are shown read-only in the UI as "set by
+  environment". This exists for e2e tests and container platforms, not as the primary config path.
+- Secret settings are write-only over the API (`GET` returns `{"set": true}`), never logged.
+- Changes apply live, except: storage backend changes are validated first (`POST
+  /api/settings/storage/test` performs put/head/get/delete of a probe object), then hot-swapped;
+  existing blobs are **not** moved (the UI warns and points to `telesphorepo move`, M3).
+- Debian signing key: generated on first start (or uploaded / regenerated in the UI) and stored as
+  an encrypted secret setting; the public key stays at `/keys/debian.asc`. This supersedes the
+  brief's "key from a mounted file, never in the DB": the key is never stored in plaintext and the
+  master key is not in the DB. A mounted file via `TR_SIGNING_KEY_FILE` remains as an override.
+- OIDC settings (M2), including the client secret, are configured the same way.
+- First-run admin: random password printed once (§4); `TR_BOOTSTRAP_ADMIN_USER/PASSWORD` stay
+  as an override for tests.
+- API: `GET /api/settings` (admin; grouped, with `source: "db"|"env"|"default"`),
+  `PATCH /api/settings` (admin; partial update, validated), `POST /api/settings/storage/test`,
+  `POST /api/settings/signing-key` (generate or upload). UI: an admin **Settings** page with
+  sections General, Storage, Security, Debian, SSO.
+
+**Setting catalogue** (M1 env names shown; in M1.2 each becomes a DB setting with the same default,
+overridable by env):
+
 
 | Var | Default | Meaning |
 |---|---|---|
@@ -107,7 +156,7 @@ No other runtime dependencies without a written justification in this file.
 | `TR_BOOTSTRAP_ADMIN_USER` / `TR_BOOTSTRAP_ADMIN_PASSWORD` | — | if set and the users table is empty at startup, create this admin |
 | `TR_LOG_LEVEL` | `info` | `debug`/`info`/`warn`/`error` |
 
-Secrets are never logged and never stored in the DB.
+Secrets are never logged and never stored in plaintext.
 
 ## 4. CLI (one binary: `telesphorepo`)
 
@@ -641,7 +690,9 @@ Gotchas for test authors:
 | `bun run test` | Runs the e2e suite (`go test -tags e2e ./e2e/... -count=1`); extra args pass through, e.g. `bun run test -run TestMaven`. |
 | `bun run doctor` | Prints what was detected (Go, bun/npm, container engine) and what is missing. |
 
-Production is the container image (or `bin/telesphorepo serve`) configured by `TR_*` env (§3).
+Production is the container image (or `bin/telesphorepo serve`); first start prints the admin password and everything else is configured in the UI (§3).
+
+**Repo documentation:** `README.md` is for humans and stays short: what it is, how to run it locally, how to run it in production, and the few commands people use most — not a changelog, wiki or full CLI reference (a website will hold detailed docs later). `SPEC.md` describes the system as currently built (architecture, data model, endpoints, conventions) and is updated whenever behaviour changes. `AGENTS.md` holds agent-oriented working rules (build/test commands, no unit tests, no flag slop, minimal env, package `path` for keys, where things live); `CLAUDE.md` contains only `@AGENTS.md`.
 
 **Package manager:** the web app's committed lockfile is `web/bun.lock`; the Dockerfile's UI stage
 uses the official `oven/bun` image with `bun install --frozen-lockfile`. The npm fallback runs
@@ -661,6 +712,7 @@ is tested without a real bucket. `ForEachStorage` runs `fs`, `seaweedfs`, and `r
 ## 17. Milestones
 - **M1 (now)**: everything marked [M1]: config, DB, storage FS+S3, auth, Maven, Debian, JSON API,
   UI shell, CLI `serve`/`user create`/`signing-key generate`, Dockerfile, e2e suite above.
+- **M1.1**: DX (§16). **M1.2**: in-app settings (§3), SPEC.md/AGENTS.md/CLAUDE.md, lean README.
 - **M2**: OIDC admin sign-on (§7.5) + Keycloak e2e.
 - **M3**: `move`, `import nexus` + e2e.
 - **M4**: full admin UI polish, deletes (assets, deb packages) + blob/by-hash GC, scaling test
