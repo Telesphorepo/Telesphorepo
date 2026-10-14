@@ -18,6 +18,7 @@ import (
 const (
 	maxControlTar  = 16 << 20
 	maxControlFile = 1 << 20
+	maxArMembers   = 16 // a .deb has 3; bounds the member walk
 )
 
 func init() { deb.SetXZMaxDict(64 << 20) }
@@ -54,18 +55,36 @@ func (d *debInfo) poolPath(component string) string {
 		d.Package + "_" + d.VersionNoEpoch + "_" + d.Architecture + ".deb"
 }
 
+// validKey reports whether a storage key derived from untrusted fields satisfies the
+// spec §6 limits (non-empty segments of at most 255 bytes, whole key at most 1024).
+func validKey(k string) bool {
+	if k == "" || len(k) > 1024 {
+		return false
+	}
+	for _, seg := range strings.Split(k, "/") {
+		if seg == "" || seg == "." || seg == ".." || len(seg) > 255 {
+			return false
+		}
+	}
+	return true
+}
+
 // parseDeb reads only the control member of a .deb; data.tar is never touched.
 func parseDeb(f io.ReaderAt) (*debInfo, error) {
 	ar, err := deb.LoadAr(f)
 	if err != nil {
 		return nil, badDeb("not a .deb (ar) archive")
 	}
-	for {
+	for range maxArMembers {
 		e, err := ar.Next()
 		if err == io.EOF {
 			return nil, badDeb("missing control.tar member")
 		}
 		if err != nil {
+			return nil, badDeb("malformed ar archive")
+		}
+		// deb.Ar accepts negative sizes, which would stall or rewind its offset.
+		if e.Size < 0 {
 			return nil, badDeb("malformed ar archive")
 		}
 		name := strings.TrimRight(e.Name, " /")
@@ -84,6 +103,7 @@ func parseDeb(f io.ReaderAt) (*debInfo, error) {
 		}
 		return parseControl(data)
 	}
+	return nil, badDeb("missing control.tar member")
 }
 
 func readControlFile(r io.Reader, ext string) ([]byte, error) {

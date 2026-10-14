@@ -3,6 +3,7 @@ package debian
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -105,6 +106,50 @@ func (h *Handler) Pending(ctx context.Context, repoID int64) (int, error) {
 	var n int
 	err := h.db.R.QueryRowContext(ctx, `SELECT COUNT(*) FROM deb_dirty WHERE repo_id = ?`, repoID).Scan(&n)
 	return n, err
+}
+
+// ConfigChanged marks for rebuild every (dist, component, arch) of repo whose configured
+// architecture has no Packages index yet although the component holds packages, so
+// arch:all packages appear for architectures added after they were uploaded.
+func (h *Handler) ConfigChanged(ctx context.Context, repo *repos.Repo) error {
+	if repo.Format != repos.FormatDebian {
+		return nil
+	}
+	var dists []string
+	err := h.db.Tx(ctx, func(tx *sql.Tx) error {
+		mark := h.tick()
+		for _, arch := range repo.Debian().Architectures {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO deb_dirty (repo_id, distribution, component, architecture, marked_at)
+				SELECT DISTINCT p.repo_id, p.distribution, p.component, ?, ? FROM deb_packages p
+				WHERE p.repo_id = ? AND NOT EXISTS (SELECT 1 FROM deb_index_files f
+					WHERE f.repo_id = p.repo_id AND f.distribution = p.distribution
+					AND f.path = p.component || '/binary-' || ? || '/Packages')
+				ON CONFLICT (repo_id, distribution, component, architecture) DO UPDATE SET marked_at = excluded.marked_at`,
+				arch, mark, repo.ID, arch); err != nil {
+				return err
+			}
+		}
+		rows, err := tx.QueryContext(ctx, `SELECT DISTINCT distribution FROM deb_dirty WHERE repo_id = ?`, repo.ID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var d string
+			if err := rows.Scan(&d); err != nil {
+				return err
+			}
+			dists = append(dists, d)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return err
+	}
+	for _, d := range dists {
+		h.idx.notify(distKey{repo.ID, d})
+	}
+	return nil
 }
 
 // tick returns a strictly increasing timestamp for deb_dirty.marked_at and rebuild starts.

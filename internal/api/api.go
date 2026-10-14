@@ -22,6 +22,7 @@ import (
 // DebianStatus is satisfied by *debian.Handler.
 type DebianStatus interface {
 	Pending(ctx context.Context, repoID int64) (int, error)
+	ConfigChanged(ctx context.Context, repo *repos.Repo) error
 }
 
 type API struct {
@@ -212,6 +213,11 @@ func (a *API) createToken(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// A token must not mint further tokens: that would escape its expiry (spec §7.1).
+	if p.TokenID != 0 {
+		httpx.Error(w, http.StatusForbidden, "cannot create tokens with an API token")
+		return
+	}
 	var in struct {
 		Name          string `json:"name"`
 		ExpiresInDays *int   `json:"expires_in_days"`
@@ -307,6 +313,11 @@ func (a *API) updateUser(w http.ResponseWriter, r *http.Request) {
 		Disabled *bool   `json:"disabled"`
 	}
 	if !httpx.DecodeJSON(w, r, a.cfg.MaxJSONBytes, &in) {
+		return
+	}
+	// A token holder must not be able to take over the account by setting its password.
+	if in.Password != nil && p.TokenID != 0 {
+		httpx.Error(w, http.StatusForbidden, "cannot change passwords with an API token")
 		return
 	}
 	name := r.PathValue("username")
@@ -435,6 +446,12 @@ func (a *API) updateRepo(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		fail(w, r, err)
 		return
+	}
+	if in.Config != nil {
+		if err := a.debian.ConfigChanged(r.Context(), repo); err != nil {
+			fail(w, r, err)
+			return
+		}
 	}
 	httpx.WriteJSON(w, http.StatusOK, toRepoJSON(repo, "admin"))
 }

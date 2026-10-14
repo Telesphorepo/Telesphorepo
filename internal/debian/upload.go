@@ -80,6 +80,10 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pool := info.poolPath(comp)
+	if !validKey(pool) {
+		httpx.Error(w, http.StatusBadRequest, "package name, source or version too long")
+		return
+	}
 	res := uploadResult{info.Package, info.Version, info.Architecture, pool, sp.SHA256}
 	var uploadedBy int64
 	if p != nil {

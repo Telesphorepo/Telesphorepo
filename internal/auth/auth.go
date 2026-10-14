@@ -80,6 +80,9 @@ type Service struct {
 	dummy   string // hash verified against when the user does not exist
 	touchMu sync.Mutex
 	touched map[int64]int64 // token id -> unix second of last last_used_at write
+
+	flightMu sync.Mutex
+	flights  map[[32]byte]*flight // in-progress uncached password checks by cache key
 }
 
 func New(d *db.DB, cfg *config.Config, rs *repos.Service) *Service {
@@ -92,5 +95,6 @@ func New(d *db.DB, cfg *config.Config, rs *repos.Service) *Service {
 		cache:   newVerifyCache(),
 		limits:  newLimiterSet(),
 		touched: map[int64]int64{},
+		flights: map[[32]byte]*flight{},
 	}
 }

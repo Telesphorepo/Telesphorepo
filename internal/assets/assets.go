@@ -270,21 +270,34 @@ RETURNING id, kind, created_at, updated_at`,
 }
 
 // Put = PutBlob + UpsertTx in its own transaction. Caller holds Lock.
+// Once the body is spooled the store and upsert run detached from ctx cancellation (a client
+// disconnect must not leave a replaced blob behind a stale row), and the upsert is retried.
 func (s *Service) Put(ctx context.Context, repo *repos.Repo, p string, sp *Spooled, contentType, kind string, uploadedBy int64) (a *Asset, created bool, err error) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), putTimeout)
+	defer cancel()
 	if err := s.PutBlob(ctx, repo.Name, p, sp, contentType); err != nil {
 		return nil, false, err
 	}
 	a = &Asset{RepoID: repo.ID, Path: p, Size: sp.Size, SHA256: sp.SHA256, ContentType: contentType, Kind: kind, UploadedBy: uploadedBy}
-	err = s.db.Tx(ctx, func(tx *sql.Tx) error {
-		var err error
-		created, err = UpsertTx(ctx, tx, a)
-		return err
-	})
-	if err != nil {
-		return nil, false, err
+	for attempt := 0; ; attempt++ {
+		err = s.db.Tx(ctx, func(tx *sql.Tx) error {
+			var err error
+			created, err = UpsertTx(ctx, tx, a)
+			return err
+		})
+		if err == nil {
+			return a, created, nil
+		}
+		if attempt >= 2 || ctx.Err() != nil {
+			slog.Error("asset upsert failed after blob write", "repo", repo.Name, "path", p, "err", err)
+			return nil, false, err
+		}
+		time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)
 	}
-	return a, created, nil
 }
+
+// putTimeout bounds a detached store+upsert in Put.
+const putTimeout = 5 * time.Minute
 
 func etagMatch(header, etag string) bool {
 	for _, t := range strings.Split(header, ",") {
@@ -314,6 +327,13 @@ func (s *Service) Serve(w http.ResponseWriter, r *http.Request, repo *repos.Repo
 	}
 	etag := `"` + a.SHA256 + `"`
 	h := w.Header()
+	// Repo content is publisher-controlled and served from the UI/API origin: never let a
+	// browser sniff or render it as active content (e.g. XHTML-namespace .xml/.pom).
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Content-Security-Policy", "default-src 'none'; sandbox")
+	if a.ContentType != "text/plain" {
+		h.Set("Content-Disposition", "attachment")
+	}
 	h.Set("ETag", etag)
 	h.Set("Last-Modified", a.UpdatedAt.Format(http.TimeFormat))
 	if inm := r.Header.Get("If-None-Match"); inm != "" && etagMatch(inm, etag) {
@@ -340,7 +360,7 @@ func (s *Service) Serve(w http.ResponseWriter, r *http.Request, repo *repos.Repo
 		w.WriteHeader(http.StatusFound)
 		return
 	}
-	body, _, err := s.st.Get(ctx, key)
+	body, info, err := s.st.Get(ctx, key)
 	if errors.Is(err, storage.ErrNotFound) {
 		slog.Warn("asset row without blob", "repo", repo.Name, "path", p)
 		h.Del("ETag")
@@ -361,14 +381,18 @@ func (s *Service) Serve(w http.ResponseWriter, r *http.Request, repo *repos.Repo
 		http.ServeContent(w, r, "", a.UpdatedAt, rs)
 		return
 	}
-	h.Set("Content-Length", strconv.FormatInt(a.Size, 10))
+	size := a.Size
+	if info.Size > 0 || a.Size == 0 {
+		size = info.Size // the blob's real length, in case it diverged from the row
+	}
+	h.Set("Content-Length", strconv.FormatInt(size, 10))
 	w.WriteHeader(http.StatusOK)
 	if _, err := io.Copy(w, body); err != nil {
 		slog.Debug("asset stream aborted", "repo", repo.Name, "path", p, "err", err)
 	}
 }
 
-// List: keyset by path within prefix range (path >= prefix AND path < prefix||x'FFFF'..),
+// List: keyset by path within prefix range (path >= prefix AND path < prefixEnd(prefix)),
 // path > after. Returns next = last path when the page is full, else "".
 func (s *Service) List(ctx context.Context, repoID int64, prefix, after string, limit int) ([]*Asset, string, error) {
 	if limit <= 0 {
@@ -377,8 +401,12 @@ func (s *Service) List(ctx context.Context, repoID int64, prefix, after string, 
 	q := "SELECT " + assetCols + " FROM assets WHERE repo_id = ?"
 	args := []any{repoID}
 	if prefix != "" {
-		q += " AND path >= ? AND path < ?"
-		args = append(args, prefix, prefix+"\U0010FFFF")
+		q += " AND path >= ?"
+		args = append(args, prefix)
+		if end, ok := prefixEnd(prefix); ok {
+			q += " AND path < ?"
+			args = append(args, end)
+		}
 	}
 	if after != "" {
 		q += " AND path > ?"
@@ -459,4 +487,17 @@ func (s *Service) Search(ctx context.Context, q string, repoIDs []int64, after i
 		next = out[len(out)-1].Asset.ID
 	}
 	return out, next, nil
+}
+
+// prefixEnd returns the smallest string greater than every string starting with prefix under
+// byte-wise (SQLite BINARY) ordering; ok=false when there is none (prefix is all 0xFF bytes).
+func prefixEnd(prefix string) (string, bool) {
+	b := []byte(prefix)
+	for i := len(b) - 1; i >= 0; i-- {
+		if b[i] != 0xFF {
+			b[i]++
+			return string(b[:i+1]), true
+		}
+	}
+	return "", false
 }

@@ -23,7 +23,7 @@ type distState struct {
 	timer   *time.Timer
 	running bool
 	again   bool // notified while running
-	fails   int
+	fails   int  // consecutive failed rebuilds; >0 means a backoff timer is armed
 }
 
 // indexer debounces rebuilds per (repo, dist) (spec §9.3). Rebuilds of one key never
@@ -103,7 +103,13 @@ func (ix *indexer) notify(k distKey) {
 	}
 	if st.running {
 		st.again = true
+		if st.first.IsZero() {
+			st.first = time.Now() // max delay counts from this mark, not the rebuild's end
+		}
 		return
+	}
+	if st.fails > 0 {
+		return // the pending backoff retry covers this mark; don't shorten it
 	}
 	ix.scheduleLocked(k, st)
 }
