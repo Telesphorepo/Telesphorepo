@@ -5,9 +5,9 @@ Claude Code session, point it at this file plus `AGENTS.md`.
 
 ## State
 
-M1 to M2.5 are on `main` and pushed. The e2e suite is green on Windows 11 + Podman 5.8 (28 tests
-incl. a real Keycloak sign-in and `TestQueryPlans`), and `go tool task test scale` is flat from
-100k to 1M assets:
+M1 to M3 are on `main` and pushed. All three e2e zones are green on Windows 11 + Podman 5.8:
+core (incl. a real Keycloak sign-in, `TestQueryPlans` and the storage-move tests), import (a real
+Nexus 3 container) and scale (flat from 100k to 1M assets).
 
 | Milestone | Status |
 |---|---|
@@ -16,7 +16,7 @@ incl. a real Keycloak sign-in and `TestQueryPlans`), and `go tool task test scal
 | M1.2: in-app encrypted settings (env is only `TR_DATA_DIR`, `TR_LISTEN`, `TR_MASTER_KEY`), Settings page, SPEC.md, AGENTS.md, short README | done |
 | M2: OIDC admin sign-on (Keycloak or any OIDC IdP; settings in the Settings page's SSO section), §7.5 | done |
 | M2.5: format plugins (Maven, Debian and `raw` are plugins), per-owner sqlc queries and migrations, plan guard, scale test (§5.4, §5.5) | done |
-| M3: storage move (FS ↔ S3), Nexus sources with mirroring syncs and cut-over (§12) | built; the build, vet and e2e run (core and import zones) is pending |
+| M3: storage move (FS ↔ S3), Nexus sources with mirroring syncs and cut-over (§12) | done |
 | M4: full admin UI polish, deletes + blob/by-hash GC | designed |
 | Publisher credentials: short-lived, per-publish credentials as the only way to publish, OIDC exchange for CI, device keys, Gradle plugin/CLI (§7.6, owner's direction) | designed |
 
@@ -42,6 +42,7 @@ Design spec (source of truth for what's next):
   clicked through it yet (no UI tests, by design). M2.5 changed the repo create form, the
   config editor, the Usage panel and the Settings signing card.
 - **Real R2.** The e2e suite no longer has R2 runs. R2 works through the generic S3 backend.
+- **The M3 UI pages** (the storage move panel and the Nexus page) have not been clicked through.
 
 ## Known gaps / small follow-ups
 
@@ -49,15 +50,11 @@ Design spec (source of truth for what's next):
 
 ## Suggested next step
 
-1. Verify M3. Run `go build ./...`, `go vet ./...`, `go vet -tags e2e ./e2e/...`,
-   `go vet -tags import ./e2e/...`, `go vet -tags scale ./e2e/...`, and `go build ./tools/task`.
-   Then run the core zone (it includes `TestQueryPlans`, which checks the new `nexus_*` queries)
-   and `go tool task test import -run TestNexus`. Fix every failure of the M3 code. Nobody has
-   compiled or run the Nexus sources code, the cut-over, the `locked_by` gate or the UI page.
-2. Decide two M3 points. A cut-over stops on any failed file, so a file that can never import
-   blocks it. Sync history is never pruned (96 syncs per source per day at the 15m default).
-3. Start **M4**: full admin UI polish, deleting assets and deb packages, blob and by-hash GC.
-4. Then build the **publisher credentials** milestone. Design §7.6 holds the owner's direction:
+1. M3 decisions that stand: a cut-over stops on any failed file, so a file that can never import
+   blocks it until it is fixed in Nexus or here. Sync history is kept (96 small rows per source per
+   day at the 15m default).
+2. Start **M4**: full admin UI polish, deleting assets and deb packages, blob and by-hash GC.
+3. Then build the **publisher credentials** milestone. Design §7.6 holds the owner's direction:
    short-lived credentials are the only way to publish, scoped to one repo and one publish
    session, and CI exchanges its OIDC identity token (GitHub Actions, Jenkins) instead of storing
    a secret.
