@@ -19,9 +19,15 @@ some client snippets. A demo repo for each format (`maven`, `debian`, `raw`) is 
 ## Run it in production
 
 ```sh
-go tool task build image        # builds telesphorepo:local
-docker run -d -p 8080:8080 -v telesphorepo-data:/data telesphorepo:local
+docker run -d -p 8080:8080 -v telesphorepo-data:/data ghcr.io/telesphorepo/telesphorepo:latest
 ```
+
+The image supports `linux/amd64` and `linux/arm64`. To build the image yourself, run
+`go tool task build image`. It builds `telesphorepo:local`.
+
+You can also download a binary for Linux, macOS or Windows (amd64 or arm64) from the
+[GitHub Releases](https://github.com/Telesphorepo/Telesphorepo/releases) page. Check the
+download against `SHA256SUMS`, unpack it, and run `./telesphorepo serve`.
 
 - **Admin password:** on first start the server prints a generated `admin` password once to
   the container log (`docker logs <container>`).
@@ -30,7 +36,9 @@ docker run -d -p 8080:8080 -v telesphorepo-data:/data telesphorepo:local
   secrets are stored encrypted.
 - **Single sign-on:** admins can sign in through an OIDC provider (Keycloak, Entra, Google...).
   Set the issuer, client and admin group under **Settings > Single sign-on**, and register
-  `<public URL>/api/auth/oidc/callback` at the provider. Publishers keep passwords and tokens.
+  `<public URL>/api/auth/oidc/callback` at the provider. Publishers use local accounts with a
+  second factor.
+- **Passkeys:** they need the public URL (`base_url`) in Settings. Authenticator-app codes do not.
 - **Environment variables:** none are required. Three are optional:
 
 | Variable | Default | |
@@ -47,9 +55,10 @@ volume.
 
 ```sh
 go tool task dev | build | test       # develop, build bin/telesphorepo, run the e2e suite
-go tool task test import | scale | all # other test zones (import needs a Nexus container)
+go tool task test import | scale | clients | all # other test zones (import needs a Nexus container)
 telesphorepo user add alice [--admin] # prompts for the password
 telesphorepo user passwd alice        # reset a password
+telesphorepo user reset-2fa alice     # remove the second factors of a user
 docker exec -it <container> /telesphorepo user add alice
 ```
 
@@ -58,13 +67,66 @@ copies the existing blobs in the background. To move hosted repos from Nexus 3, 
 server on the **Nexus** page. The server mirrors the repos you pick, and they stay read only. Click
 **Cut over** when you are ready to publish here.
 
-To use the repo from CI, create an API token in the UI. Use the token as the password, with any
-username.
+A password or an API token (a read token) only reads. To publish, a client needs a publish
+session. See **Publishing**.
+
+## Publishing
+
+Every upload needs a publish session. It is a credential for one repo that ends after
+`publish.session_ttl` (15 min by default). To publish from a laptop, add a second factor (an
+authenticator app or a passkey) on the **Security** page. A new user does this at the first
+sign-in. The clients below are in `clients/`. Replace `VERSION` with the latest `clients-v` release.
+
+**Gradle.** In `settings.gradle.kts`:
+
+```kotlin
+plugins { id("com.telesphorepo") version "VERSION" }
+telesphorepo { url = "https://packages.example.com" }
+```
+
+Run `./gradlew telesphorepoLogin` once. Open the printed link, sign in, and enter the second
+factor to approve the device. After that, `./gradlew publish` gets a session by itself.
+
+**Maven.** In `.mvn/extensions.xml`:
+
+```xml
+<extensions>
+  <extension>
+    <groupId>com.telesphorepo</groupId>
+    <artifactId>telesphorepo-maven-extension</artifactId>
+    <version>VERSION</version>
+  </extension>
+</extensions>
+```
+
+Add `-Dtelesphorepo.url=https://packages.example.com` to `.mvn/maven.config`. Run
+`mvn com.telesphorepo:telesphorepo-maven-plugin:VERSION:login` once, approve the device,
+and then run `mvn deploy`.
+
+**GitHub Actions.** Give the job `permissions: id-token: write`. An admin adds a trust policy
+on the **Trust policies** page (preset "GitHub Actions"): the repo, the branch or tag, and the
+workflow that may publish. The Gradle plugin and the Maven extension then use the GitHub token
+with no secret. Without them, post the token to `/api/publish/sessions/oidc`; the **Publishing**
+page and `clients/README.md` show the `curl` steps.
+
+**Jenkins.** Install the OpenID Connect Provider plugin and bind an "OpenID Connect id token"
+credential to an environment variable, for example `OIDC_TOKEN`. An admin adds a trust policy
+with the preset "Jenkins" (issuer `<jenkins url>/oidc`). Set `oidcTokenEnv = "OIDC_TOKEN"` in the
+Gradle plugin block, or `-Dtelesphorepo.oidcTokenEnv=OIDC_TOKEN` for Maven.
+
+**By hand.** On the **Publishing** page, choose a repo, enter a second-factor code, and copy the
+token. Use it as the password with any username:
+
+```sh
+curl -f -u publish:trs_TOKEN -T file.tar.gz https://packages.example.com/raw/raw/path/file.tar.gz
+```
+
+A user who loses every factor can be reset with `telesphorepo user reset-2fa NAME`.
 
 ## Clients
 
-Maven, in `pom.xml`, with matching credentials (server id `telesphorepo`) in
-`~/.m2/settings.xml`:
+Maven reads from `https://packages.example.com/maven/maven`. Put the URL in `pom.xml`. A private
+repo needs matching credentials (server id `telesphorepo`) in `~/.m2/settings.xml`:
 
 ```xml
 <distributionManagement>
@@ -78,14 +140,18 @@ apt:
 sudo curl -fsSL https://packages.example.com/keys/debian.asc -o /etc/apt/keyrings/telesphorepo.asc
 echo "deb [signed-by=/etc/apt/keyrings/telesphorepo.asc] https://packages.example.com/debian/debian stable main" \
   | sudo tee /etc/apt/sources.list.d/telesphorepo.list
-curl -u USER:TOKEN -T pkg_1.0_amd64.deb https://packages.example.com/debian/debian/upload/stable/main
+curl -u publish:trs_TOKEN -T pkg_1.0_amd64.deb https://packages.example.com/debian/debian/upload/stable/main
 ```
 
 Raw files:
 
 ```sh
-curl -f -u USER:TOKEN -T file.tar.gz https://packages.example.com/raw/raw/path/file.tar.gz
+curl -f -u publish:trs_TOKEN -T file.tar.gz https://packages.example.com/raw/raw/path/file.tar.gz
 ```
 
 The repo page in the UI shows the snippets for each repo. Gradle, private apt repos, the API and
 everything else: [SPEC.md](SPEC.md).
+
+## License
+
+The server is licensed under AGPL-3.0 (see [LICENSE](LICENSE)). The code in [clients/](clients/) is licensed under MIT (see [clients/LICENSE](clients/LICENSE)).

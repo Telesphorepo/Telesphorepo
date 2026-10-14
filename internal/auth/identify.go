@@ -14,26 +14,40 @@ import (
 
 const challenge = `Basic realm="telesphorepo"`
 
+// errPublishEnded is a failed publish-session token: unknown, malformed, closed, expired, or its
+// device or trust policy ended. The response is the same for all of them.
+var errPublishEnded = errors.New("publish session ended")
+
 // rateLimitedError carries the Retry-After duration.
 type rateLimitedError struct{ wait time.Duration }
 
 func (e *rateLimitedError) Error() string { return ErrRateLimited.Error() }
 func (e *rateLimitedError) Unwrap() error { return ErrRateLimited }
 
-// authenticate verifies username/password (or an API token as password when allowToken),
-// applying the failed-attempt rate limits. Errors: ErrBadCredentials, *rateLimitedError, or
-// an internal error.
+// authenticate verifies username/password (or a read token or publish-session token as
+// password when allowToken), applying the failed-attempt rate limits. Errors:
+// ErrBadCredentials, *rateLimitedError, or an internal error.
 func (s *Service) authenticate(ctx context.Context, ip netip.Addr, username, password string, allowToken bool) (*Principal, error) {
 	keys := limitKeys(ip, username)
 	if d := s.limits.blocked(keys...); d > 0 {
 		return nil, &rateLimitedError{d}
 	}
-	if allowToken && strings.HasPrefix(password, tokenPrefix) {
+	if allowToken && (strings.HasPrefix(password, tokenPrefix) || strings.HasPrefix(password, publishTokenPrefix)) {
 		// Tokens carry 256 random bits and are checked with one SHA-256, so a plain
 		// check-then-record is enough here; reserving would throttle parallel CI clients.
-		p, err := s.verifyToken(ctx, password)
+		var p *Principal
+		var err error
+		if strings.HasPrefix(password, publishTokenPrefix) {
+			p, err = s.verifyPublishToken(ctx, password)
+		} else {
+			p, err = s.verifyToken(ctx, password)
+		}
 		if errors.Is(err, ErrBadCredentials) {
 			s.limits.fail(keys...)
+			if strings.HasPrefix(password, publishTokenPrefix) {
+				return nil, errPublishEnded
+			}
+			return nil, ErrBadCredentials
 		}
 		return p, err
 	}
@@ -172,6 +186,12 @@ func writeAuthError(w http.ResponseWriter, err error) {
 	}
 }
 
+// Identify authenticates the request: HTTP Basic (password, read token or publish-session
+// token) everywhere, and the session cookie when allowSession (the JSON API). It writes the
+// error response and returns ok=false when the request must stop. On the JSON API:
+//   - a publish-session token reaches only /api/publish/ (403 elsewhere);
+//   - a session of a local user without a second factor reaches only /api/me,
+//     /api/auth/logout and /api/security (403 {"error":"second_factor_required"} elsewhere).
 func (s *Service) Identify(w http.ResponseWriter, r *http.Request, allowSession bool) (*Principal, bool) {
 	if h := r.Header.Get("Authorization"); h != "" {
 		user, pass, ok := r.BasicAuth()
@@ -182,8 +202,16 @@ func (s *Service) Identify(w http.ResponseWriter, r *http.Request, allowSession 
 			}
 		} else {
 			p, err := s.authenticate(r.Context(), s.clientIP(r), user, pass, true)
+			if errors.Is(err, errPublishEnded) {
+				s.publishRequired(w)
+				return nil, false
+			}
 			if err != nil {
 				writeAuthError(w, err)
+				return nil, false
+			}
+			if allowSession && p.Publish != nil && !strings.HasPrefix(r.URL.Path, "/api/publish/") {
+				httpx.Error(w, http.StatusForbidden, "a publish session token only publishes")
 				return nil, false
 			}
 			return p, true
@@ -196,8 +224,25 @@ func (s *Service) Identify(w http.ResponseWriter, r *http.Request, allowSession 
 				httpx.Error(w, http.StatusInternalServerError, "internal error")
 				return nil, false
 			}
+			if p != nil && p.Kind == KindLocal && !setupRoute(r.URL.Path) {
+				has, err := s.rq.HasSecondFactor(r.Context(), p.UserID)
+				if err != nil {
+					httpx.Error(w, http.StatusInternalServerError, "internal error")
+					return nil, false
+				}
+				if has == 0 {
+					httpx.Error(w, http.StatusForbidden, ErrNoSecondFactor.Error())
+					return nil, false
+				}
+			}
 			return p, true
 		}
 	}
 	return nil, true
+}
+
+// setupRoute reports whether a session without a second factor may reach path.
+func setupRoute(path string) bool {
+	return path == "/api/me" || path == "/api/auth/logout" ||
+		path == "/api/security" || strings.HasPrefix(path, "/api/security/")
 }

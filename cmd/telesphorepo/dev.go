@@ -142,9 +142,12 @@ func printDevBanner(st *devState, base string) {
 		"  password: "+shownPW,
 		"  data dir: "+st.dataDir,
 		"",
+		"After the first sign-in, add an authenticator app on the",
+		"Security page; until then the sign-in reaches only that page.",
 		"Start fresh by deleting the data dir.",
 	)
-	b.WriteString("Use the username and password above where a snippet asks for credentials.\n")
+	b.WriteString("Reads take the username and password above, or a read token.\n")
+	b.WriteString("Uploads take a publish session: create one on the Publishing page.\n")
 	for _, f := range format.All() {
 		d, ok := f.(format.Describer)
 		if !ok {

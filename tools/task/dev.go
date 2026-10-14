@@ -46,7 +46,8 @@ func dev(ctx context.Context) error {
 	defer close(stopBanner)
 
 	startAPI := func() (*child, error) {
-		return startChild("api", "35", ".", []string{"TELESPHOREPO_RUNNER=1"}, b.filter, bin, "dev")
+		// The page is served by Vite, so links, device codes and passkeys use its origin.
+		return startChild("api", "35", ".", []string{"TELESPHOREPO_RUNNER=1", "TR_BASE_URL=" + viteURL}, b.filter, bin, "dev")
 	}
 	api, err := startAPI()
 	if err != nil {

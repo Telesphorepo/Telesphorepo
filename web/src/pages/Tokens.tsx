@@ -26,14 +26,15 @@ export default function Tokens() {
 
   return (
     <>
-      <h1>My tokens</h1>
+      <h1>Read tokens</h1>
+      <p className="muted">A read token downloads packages from repositories you can read. It cannot publish. Publishing needs a publish session.</p>
       {created && (
         <div className="card notice">
           <p>Copy your new token now. It will not be shown again.</p>
           <div className="row"><code className="mono grow">{created}</code><button onClick={copy}>{copied ? "Copied" : "Copy"}</button><button onClick={() => setCreated(undefined)}>Dismiss</button></div>
         </div>
       )}
-      {sso && <p className="muted">Access tokens are for publisher accounts. You are signed in through single sign-on, so tokens cannot be created for this account.</p>}
+      {sso && <p className="muted">Read tokens are for publisher accounts. You are signed in through single sign-on, so tokens cannot be created for this account.</p>}
       {!sso && <form className="row" onSubmit={create}>
         <input placeholder="Token name" required value={name} onChange={(e) => setName(e.target.value)} />
         <input type="number" min="1" placeholder="Expires in days (optional)" value={days} onChange={(e) => setDays(e.target.value)} />

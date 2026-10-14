@@ -132,7 +132,8 @@ func (s *Service) DeleteToken(ctx context.Context, p *Principal, id int64) error
 	return nil
 }
 
-// verifyToken authenticates a "trp_<id>_<secret>" token; the owner is the principal.
+// verifyToken authenticates a "trp_<id>_<secret>" read token; the owner is the principal. A
+// read token never writes: the write gate accepts only publish sessions.
 func (s *Service) verifyToken(ctx context.Context, tok string) (*Principal, error) {
 	if len(tok) != tokenLen || tok[len(tokenPrefix)+tokenIDHexLen] != '_' {
 		return nil, ErrBadCredentials

@@ -179,7 +179,7 @@ func putGetMaven(t *testing.T, s *Server, repo, name, content string) {
 	t.Helper()
 	p := "/maven/" + repo + "/com/example/lib/1.0.0/" + name
 	req := s.NewRequest(t, http.MethodPut, p, strings.NewReader(content))
-	if resp, b := s.Do(t, req, s.Admin()); resp.StatusCode/100 != 2 {
+	if resp, b := s.Do(t, req, s.PublishAuth(t, s.AdminUser, repo)); resp.StatusCode/100 != 2 {
 		t.Fatalf("PUT %s: status %d: %s", p, resp.StatusCode, b)
 	}
 	resp, b := s.Do(t, s.NewRequest(t, http.MethodGet, p, nil), s.Admin())

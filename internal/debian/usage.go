@@ -7,7 +7,8 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
-// Usage returns the apt setup (key, source, credentials for a private repo) and a curl upload.
+// Usage returns the apt setup (key, source, read credentials for a private repo) and a curl
+// upload with a publish session token.
 // The dist "stable" and the component "main" are examples: any valid names work.
 func (h *Handler) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
 	url := baseURL + "/debian/" + repo.Name
@@ -22,11 +23,11 @@ func (h *Handler) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
 	if !repo.AnonymousRead {
 		// apt applies an auth.conf entry to plain http only when the scheme is spelled out.
 		out = append(out, format.Snippet{Title: "/etc/apt/auth.conf.d/" + repo.Name + ".conf", Lang: "sh", Code: fmt.Sprintf(
-			"echo \"machine %s login <user> password <token>\" \\\n"+
+			"echo \"machine %s login <user> password <read-token>\" \\\n"+
 				"  | sudo tee /etc/apt/auth.conf.d/%s.conf\n"+
 				"sudo chmod 600 /etc/apt/auth.conf.d/%s.conf\n", url, repo.Name, repo.Name)})
 	}
-	out = append(out, format.Snippet{Title: "Upload a package", Lang: "sh", Code: fmt.Sprintf(
-		"curl -fsS -u <user>:<token> -T hello_1.0_amd64.deb %s/upload/stable/main\n", url)})
+	out = append(out, format.Snippet{Title: "Upload a package (publish session token from the Publishing page)", Lang: "sh", Code: fmt.Sprintf(
+		"curl -fsS -u publish:<publish-token> -T hello_1.0_amd64.deb %s/upload/stable/main\n", url)})
 	return out
 }

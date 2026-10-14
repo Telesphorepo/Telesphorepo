@@ -1,5 +1,5 @@
 // Command telesphorepo is the single Telesphorepo binary (spec §4): serve (default), dev,
-// user add|passwd, keygen, version, help.
+// user add|passwd|reset-2fa, keygen, version, help.
 package main
 
 import (
@@ -47,12 +47,13 @@ var commands []*command
 func init() {
 	userCmd := &command{
 		name:    "user",
-		summary: "add a user or reset a password",
+		summary: "add a user, reset a password or second factors",
 		usage: `Manage users in the local database.
 
   telesphorepo user add alice            prompt for alice's password, create her
   telesphorepo user add ops --admin      create an admin
   telesphorepo user passwd alice         reset alice's password
+  telesphorepo user reset-2fa alice      remove alice's second factors (lost phone and codes)
 
 Passwords are prompted twice (hidden) on a terminal, or read as one line from a pipe:
   echo 's3cretpass' | telesphorepo user add ci-bot
@@ -70,6 +71,13 @@ Passwords are prompted twice (hidden) on a terminal, or read as one line from a 
   telesphorepo user passwd alice
   echo 'n3wpassword' | telesphorepo user passwd alice
 `, run: userPasswd},
+		{name: "reset-2fa", summary: "remove a user's second factors", usage: `Remove every authenticator app, passkey and recovery code of a user who lost them all.
+
+  telesphorepo user reset-2fa alice
+
+The user then signs in with the password and adds a new second factor on the Security page;
+until then the sign-in reaches only that page. Enrolled devices stay valid.
+`, run: userReset2FA},
 	}
 	userCmd.run = func(args []string) error {
 		if len(args) == 0 {

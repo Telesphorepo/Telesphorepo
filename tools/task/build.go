@@ -76,14 +76,16 @@ func preview(ctx context.Context) error {
 
 // testZones maps each e2e zone (spec §15) to its go test arguments before the package.
 var testZones = map[string][]string{
-	"core":   {"-tags", "e2e"},
-	"import": {"-tags", "import", "-timeout", "30m"},
-	"scale":  {"-tags", "scale", "-run", "TestScale", "-timeout", "60m"},
+	"core":    {"-tags", "e2e"},
+	"import":  {"-tags", "import", "-timeout", "30m"},
+	"scale":   {"-tags", "scale", "-run", "TestScale", "-timeout", "60m"},
+	"clients": {"-tags", "clients", "-timeout", "40m"},
 }
 
 // test runs e2e zones with the detected container engine. An optional first argument picks
-// the zone ("import", "scale" or "all"; the default is core); the remaining args pass to
-// go test. "all" runs core, import and scale one after the other and fails if any fails.
+// the zone ("import", "scale", "clients" or "all"; the default is core); the remaining args
+// pass to go test. "all" runs core, import, scale and clients one after the other and fails if
+// any fails.
 func test(ctx context.Context, args []string) error {
 	if _, err := checkGo(); err != nil {
 		return err
@@ -91,10 +93,10 @@ func test(ctx context.Context, args []string) error {
 	zones := []string{"core"}
 	if len(args) > 0 {
 		switch args[0] {
-		case "import", "scale":
+		case "import", "scale", "clients":
 			zones, args = []string{args[0]}, args[1:]
 		case "all":
-			zones, args = []string{"core", "import", "scale"}, args[1:]
+			zones, args = []string{"core", "import", "scale", "clients"}, args[1:]
 		}
 	}
 	eng, err := containerengine.Detect(ctx)

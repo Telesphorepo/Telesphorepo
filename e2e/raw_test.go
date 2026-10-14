@@ -92,7 +92,7 @@ func TestRaw(t *testing.T) {
 		s.CreateUser(t, reader, "reader-pass-1234", false)
 		s.SetPermission(t, repo, writer, "write")
 		s.SetPermission(t, repo, reader, "read")
-		writerAuth := Basic{writer, s.CreateToken(t, writer, "writer-pass-1234", "ci")}
+		writerAuth := s.PublishAuth(t, writer, repo)
 		readerAuth := Basic{reader, s.CreateToken(t, reader, "reader-pass-1234", "ci")}
 
 		data := rawRandom(t, 256<<10)
@@ -143,20 +143,23 @@ func TestRaw(t *testing.T) {
 			rawWantStatus(t, resp, body, http.StatusNotFound)
 		})
 
-		t.Run("anonymous and token access", func(t *testing.T) {
+		t.Run("anonymous, read token and password writes", func(t *testing.T) {
 			resp, body := s.Do(t, s.NewRequest(t, http.MethodGet, path, nil), nil)
 			rawWantStatus(t, resp, body, http.StatusUnauthorized)
 			resp, body = rawPut(t, s, "/raw/"+repo+"/anon.bin", []byte("x"), nil)
 			rawWantStatus(t, resp, body, http.StatusUnauthorized)
+			// Writes need a publish session: a read token or a password is refused.
 			resp, body = rawPut(t, s, "/raw/"+repo+"/reader.bin", []byte("x"), readerAuth)
-			rawWantStatus(t, resp, body, http.StatusForbidden)
+			rawWantStatus(t, resp, body, http.StatusUnauthorized)
+			resp, body = rawPut(t, s, "/raw/"+repo+"/pw.bin", []byte("x"), Basic{writer, "writer-pass-1234"})
+			rawWantStatus(t, resp, body, http.StatusUnauthorized)
 			resp, body = rawPut(t, s, "/raw/"+repo+"/bad.bin", []byte("x"), Basic{writer, "not-a-token"})
 			rawWantStatus(t, resp, body, http.StatusUnauthorized)
 
 			pub := RandName("rawpub")
 			s.CreateRepo(t, pub, "raw", true, nil)
 			p := "/raw/" + pub + "/readme.txt"
-			resp, body = rawPut(t, s, p, []byte("public"), s.Admin())
+			resp, body = rawPut(t, s, p, []byte("public"), s.PublishAuth(t, "admin", pub))
 			rawWantStatus(t, resp, body, http.StatusCreated)
 			rawWantGet(t, s, tg, p, nil, []byte("public"))
 			resp, body = rawPut(t, s, p, []byte("changed"), nil)
@@ -193,7 +196,7 @@ func TestRaw(t *testing.T) {
 		t.Run("wrong format is 404", func(t *testing.T) {
 			mvn := RandName("mvn")
 			s.CreateRepo(t, mvn, "maven", false, nil)
-			resp, body := rawPut(t, s, "/raw/"+mvn+"/file.bin", []byte("x"), s.Admin())
+			resp, body := rawPut(t, s, "/raw/"+mvn+"/file.bin", []byte("x"), s.PublishAuth(t, "admin", mvn))
 			rawWantStatus(t, resp, body, http.StatusNotFound)
 		})
 

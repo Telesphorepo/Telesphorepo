@@ -68,15 +68,16 @@ func (f *Format) Register(mux *http.ServeMux, h format.Host) {
 	mux.HandleFunc("PUT /raw/{repo}/{path...}", f.handle)
 }
 
-// Usage returns curl commands to upload and download a file.
+// Usage returns curl commands to upload and download a file. An upload takes a publish session
+// token (Publishing page); a download takes a password or read token.
 func (f *Format) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
 	u := baseURL + "/raw/" + repo.Name + "/path/to/file.tar.gz"
-	dl := "curl -fL -u USER:TOKEN -O " + u
+	dl := "curl -fL -u USER:READ_TOKEN -O " + u
 	if repo.AnonymousRead {
 		dl = "curl -fL -O " + u
 	}
 	return []format.Snippet{
-		{Title: "Upload", Lang: "sh", Code: "curl -f -u USER:TOKEN -T file.tar.gz " + u},
+		{Title: "Upload (publish session token from the Publishing page)", Lang: "sh", Code: "curl -f -u publish:PUBLISH_TOKEN -T file.tar.gz " + u},
 		{Title: "Download", Lang: "sh", Code: dl},
 	}
 }

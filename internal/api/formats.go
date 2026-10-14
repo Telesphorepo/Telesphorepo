@@ -62,14 +62,7 @@ func (a *API) repoUsage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	base := a.cfg().BaseURL
-	if base == "" {
-		scheme := "http"
-		if r.TLS != nil {
-			scheme = "https"
-		}
-		base = scheme + "://" + r.Host
-	}
+	base := a.baseURL(r)
 	snippets := []format.Snippet{}
 	if d, ok := format.Get(repo.Format).(format.Describer); ok {
 		if s := d.Usage(repo, base); s != nil {

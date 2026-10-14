@@ -24,9 +24,23 @@ func hashSession(v string) ([]byte, bool) {
 	return sum[:], true
 }
 
-// Login checks a password for UI sign-in and starts a session. SSO accounts are refused like a
-// wrong password; local admins get ErrPasswordLoginDisabled when admin_password_login is off.
-func (s *Service) Login(w http.ResponseWriter, r *http.Request, username, password string) (*User, error) {
+// LoginResult is the outcome of the password step of a UI sign-in. Exactly one of User and
+// SecondFactor is set.
+type LoginResult struct {
+	// User is set when a session started. SetupOnly is true when the user has no second factor
+	// yet, so the session reaches only the setup routes.
+	User      *User
+	SetupOnly bool
+	// SecondFactor lists the factor kinds the user can finish the sign-in with ("totp",
+	// "passkey", "recovery"). The pending sign-in lives in the tr_login cookie.
+	SecondFactor []string
+}
+
+// Login checks a password for UI sign-in. A user with a second factor gets a pending sign-in
+// (cookie tr_login) that LoginSecondFactor completes; a user without one gets a setup-only
+// session. SSO accounts are refused like a wrong password; local admins get
+// ErrPasswordLoginDisabled when admin_password_login is off.
+func (s *Service) Login(w http.ResponseWriter, r *http.Request, username, password string) (*LoginResult, error) {
 	ctx := r.Context()
 	p, err := s.authenticate(ctx, s.clientIP(r), username, password, false)
 	if err != nil {
@@ -40,10 +54,24 @@ func (s *Service) Login(w http.ResponseWriter, r *http.Request, username, passwo
 	if p.IsAdmin && !s.cfg().AdminPasswordLogin {
 		return nil, ErrPasswordLoginDisabled
 	}
+	kinds, has, err := s.factorKinds(ctx, p.UserID)
+	if err != nil {
+		return nil, err
+	}
+	if has {
+		if err := s.startPendingLogin(w, r, p.UserID); err != nil {
+			return nil, err
+		}
+		return &LoginResult{SecondFactor: kinds}, nil
+	}
 	if err := s.StartSession(w, r, p.UserID, s.cfg().SessionTTL); err != nil {
 		return nil, err
 	}
-	return s.GetUser(ctx, p.Username)
+	u, err := s.GetUser(ctx, p.Username)
+	if err != nil {
+		return nil, err
+	}
+	return &LoginResult{User: u, SetupOnly: true}, nil
 }
 
 // StartSession creates a session for userID with an absolute ttl and sets the tr_session cookie.
@@ -108,5 +136,5 @@ func (s *Service) sessionPrincipal(ctx context.Context, val string) (*Principal,
 	if row.Disabled {
 		return nil, nil
 	}
-	return &Principal{UserID: row.UserID, Username: row.Username, IsAdmin: row.IsAdmin, Kind: row.Kind}, nil
+	return &Principal{UserID: row.UserID, Username: row.Username, IsAdmin: row.IsAdmin, Kind: row.Kind, Session: true}, nil
 }

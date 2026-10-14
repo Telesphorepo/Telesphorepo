@@ -112,7 +112,8 @@ func TestGradlePlugin(t *testing.T) {
 			})
 		}
 
-		if code, out := run("/work/plugin", gradlePluginProject(group, pluginID, repoURL, writer, token, marker), "publish"); code != 0 {
+		publishToken := PublishToken(t, s, writer, repo)
+		if code, out := run("/work/plugin", gradlePluginProject(group, pluginID, repoURL, writer, publishToken, marker), "publish"); code != 0 {
 			t.Fatalf("gradle publish: exit %d\n%s", code, out)
 		}
 

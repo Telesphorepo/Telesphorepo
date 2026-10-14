@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"math"
 	"net/http"
 	"net/netip"
@@ -137,10 +138,25 @@ func limitKeys(ip netip.Addr, username string) []string {
 	if ip.IsValid() {
 		ipk = "ip:" + ip.Unmap().String()
 	}
+	return []string{ipk, userLimitKey(username)}
+}
+
+// userLimitKey is the per-username key that password and second-factor failures share.
+func userLimitKey(username string) string {
 	if len(username) > 128 {
 		username = username[:128]
 	}
-	return []string{ipk, "u:" + username}
+	return "u:" + username
+}
+
+// RetryAfter returns how long the caller must wait when err is a rate-limit error from this
+// package.
+func RetryAfter(err error) (time.Duration, bool) {
+	var rl *rateLimitedError
+	if errors.As(err, &rl) {
+		return rl.wait, true
+	}
+	return 0, false
 }
 
 func (s *Service) clientIP(r *http.Request) netip.Addr {

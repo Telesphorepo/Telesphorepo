@@ -1,6 +1,10 @@
 import { useEffect, useState } from "react";
 
-export type User = { id: number; username: string; is_admin: boolean; disabled: boolean; created_at: string; kind?: "local" | "oidc"; email?: string };
+export type User = {
+  id: number; username: string; is_admin: boolean; disabled: boolean; created_at: string; kind?: "local" | "oidc"; email?: string;
+  // True while the session can only reach the second-factor setup routes.
+  second_factor_required?: boolean;
+};
 export type RepoConfig = Record<string, unknown>;
 export type Repo = { name: string; format: string; anonymous_read: boolean; config?: RepoConfig; permission: string; locked_by?: string | null };
 export type Format = { name: string; title: string; default_config: RepoConfig; settings_group?: string };
@@ -14,6 +18,9 @@ export class ApiError extends Error {
   constructor(public status: number, message: string, public fields?: Record<string, string>) { super(message); }
 }
 
+// A wrong password or second-factor code answers 401 here. It must not look like an expired session.
+const carriesSecondFactor = /^\/api\/(auth\/login|devices\/approve|publish\/sessions\/manual|security\/)/;
+
 export async function api<T = unknown>(method: string, url: string, body?: unknown): Promise<T> {
   const res = await fetch(url, {
     method,
@@ -21,19 +28,41 @@ export async function api<T = unknown>(method: string, url: string, body?: unkno
     headers: body === undefined ? undefined : { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  if (res.status === 401 && url !== "/api/auth/login") {
+  if (res.status === 401 && !carriesSecondFactor.test(url)) {
     window.dispatchEvent(new Event("unauthorized"));
   }
   if (!res.ok) {
     let msg = res.statusText;
     let fields: Record<string, string> | undefined;
     try { const j = await res.json(); msg = j.error ?? msg; fields = j.fields; } catch { /* not JSON */ }
+    if (res.status === 403 && msg === "second_factor_required") {
+      window.dispatchEvent(new Event("secondfactor"));
+    }
     throw new ApiError(res.status, msg, fields);
   }
   return res.status === 204 ? (undefined as T) : res.json();
 }
 
-export const qs = (o: Record<string, string | undefined>) => {
+// Second-factor proof sent with a login step, a device approval or a manual publish session.
+export type Proof = { totp_code?: string; recovery_code?: string; passkey?: unknown };
+export type Methods = { totp: boolean; passkey: boolean; recovery: boolean };
+
+export type PublishSession = { id: string; token: string; repo: string; expires_at: string };
+export type Device = {
+  id: number; name: string; kind: "gradle" | "maven"; username?: string;
+  created_at: string; expires_at: string; last_used_at: string | null; revoked_at: string | null;
+};
+export type Trust = {
+  id: number; name: string; issuer: string; audience: string; claims: Record<string, string[]>;
+  jwks: string; repos: string[]; disabled: boolean; created_at: string;
+};
+export type PublishLogEntry = {
+  id: number; repo: string; via: "device" | "oidc" | "manual"; subject: string;
+  username?: string; device_name?: string; trust_name?: string;
+  created_at: string; expires_at: string; closed_at: string | null;
+};
+
+export const qs =(o: Record<string, string | undefined>) => {
   const p = new URLSearchParams();
   for (const [k, v] of Object.entries(o)) if (v) p.set(k, v);
   const s = p.toString();
@@ -52,6 +81,27 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[]) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [...deps, n]);
   return { data, error, reload: () => setN((x) => x + 1) };
+}
+
+// Keyset-paged list: the first page loads at once, "more" appends the next one.
+export function usePaged<T>(path: string, limit = 50) {
+  const [items, setItems] = useState<T[]>([]);
+  const [next, setNext] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const [n, setN] = useState(0);
+  const load = async (after?: string) => {
+    try {
+      const p = await api<Page<T>>("GET", path + qs({ after, limit: String(limit) }));
+      setItems((old) => (after ? [...old, ...p.items] : p.items));
+      setNext(p.next);
+      setError("");
+    } catch (e) { setError((e as Error).message); }
+  };
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [path, n]);
+  return { items, error, more: next ? () => load(next) : null, reload: () => setN((x) => x + 1) };
 }
 
 export function useHash() {

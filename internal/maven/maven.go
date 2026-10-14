@@ -45,20 +45,22 @@ func (h *Handler) ValidateConfig(raw json.RawMessage) (json.RawMessage, error) {
 	return h.DefaultConfig(), nil
 }
 
-// Usage returns the Maven and Gradle client setup for a repo.
+// Usage returns the Maven and Gradle client setup for a repo. The credentials are for reads; a
+// deploy gets a publish session from the Telesphorepo Maven extension or Gradle plugin
+// (Publishing page).
 func (h *Handler) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
 	url := fmt.Sprintf("%s/maven/%s", baseURL, repo.Name)
 	return []format.Snippet{
-		{Title: "~/.m2/settings.xml", Lang: "xml", Code: fmt.Sprintf(`<settings>
+		{Title: "~/.m2/settings.xml (reads)", Lang: "xml", Code: fmt.Sprintf(`<settings>
   <servers>
     <server>
       <id>%[1]s</id>
       <username>YOUR_USERNAME</username>
-      <password>YOUR_TOKEN</password>
+      <password>YOUR_READ_TOKEN</password>
     </server>
   </servers>
 </settings>`, repo.Name)},
-		{Title: "pom.xml", Lang: "xml", Code: fmt.Sprintf(`<repositories>
+		{Title: "pom.xml (deploy credentials come from the Telesphorepo Maven extension)", Lang: "xml", Code: fmt.Sprintf(`<repositories>
   <repository>
     <id>%[1]s</id>
     <url>%[2]s</url>
@@ -70,15 +72,11 @@ func (h *Handler) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
     <url>%[2]s</url>
   </repository>
 </distributionManagement>`, repo.Name, url)},
-		{Title: "build.gradle.kts (publishing)", Lang: "kotlin", Code: fmt.Sprintf(`publishing {
+		{Title: "build.gradle.kts (publishing; credentials come from the Telesphorepo Gradle plugin)", Lang: "kotlin", Code: fmt.Sprintf(`publishing {
     repositories {
         maven {
             name = "%[1]s"
             url = uri("%[2]s")
-            credentials {
-                username = providers.gradleProperty("telesphorepoUser").get()
-                password = providers.gradleProperty("telesphorepoToken").get()
-            }
         }
     }
 }`, repo.Name, url)},

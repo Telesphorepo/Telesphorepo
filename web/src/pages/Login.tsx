@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { api } from "../api";
+import { api, type Methods, type Proof } from "../api";
+import SecondFactor from "./SecondFactor";
 
 const errorText: Record<string, string> = {
   not_authorized: "Your SSO account is not an administrator here.",
@@ -16,19 +17,50 @@ const hashError = () => {
   return code ? errorText[code] ?? "Sign-in failed. Please try again." : "";
 };
 
+// POST /api/auth/login answers {second_factor: true, methods: [...]} when the account has a second
+// factor, and the user otherwise (the session is then setup-only).
+type LoginAnswer = { second_factor?: boolean; methods?: string[] };
+
 export default function Login({ onDone }: { onDone: () => void }) {
   const [username, setU] = useState("");
   const [password, setP] = useState("");
   const [err, setErr] = useState(hashError);
   const [oidc, setOidc] = useState(false);
+  const [methods, setMethods] = useState<Methods>();
+  const [busy, setBusy] = useState(false);
   useEffect(() => {
     api<{ oidc?: boolean }>("GET", "/api/auth/config").then((c) => setOidc(!!c.oidc), () => {});
   }, []);
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    try { await api("POST", "/api/auth/login", { username, password }); onDone(); }
-    catch (e) { setErr((e as Error).message); }
+    setErr("");
+    try {
+      const a = await api<LoginAnswer | undefined>("POST", "/api/auth/login", { username, password });
+      if (a?.second_factor) {
+        const m = a.methods ?? [];
+        setMethods({ totp: m.includes("totp"), passkey: m.includes("passkey"), recovery: m.includes("recovery") });
+        setP("");
+      } else onDone();
+    } catch (e) { setErr((e as Error).message); }
   };
+  const second = async (proof: Proof) => {
+    setErr(""); setBusy(true);
+    try { await api("POST", "/api/auth/login/second", proof); onDone(); }
+    catch (e) { setErr((e as Error).message); }
+    setBusy(false);
+  };
+
+  if (methods) {
+    return (
+      <div className="card login">
+        <h1>Second step</h1>
+        <p className="muted">Signing in as {username}. Enter a code from your authenticator app, or use a passkey.</p>
+        <SecondFactor methods={methods} label="Verify" busy={busy} onProof={second} passkeyOptions="/api/auth/login/passkey" />
+        {err && <p className="error">{err}</p>}
+        <button type="button" className="link" onClick={() => { setMethods(undefined); setErr(""); }}>Back</button>
+      </div>
+    );
+  }
   return (
     <form className="card login" onSubmit={submit}>
       <h1>Telesphorepo</h1>

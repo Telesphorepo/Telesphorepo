@@ -1,9 +1,11 @@
-// Package auth: users, passwords, API tokens, sessions, rate limiting, permissions (spec §7).
+// Package auth: users, passwords, read tokens, sessions, second factors, rate limiting,
+// permissions (spec §7).
 package auth
 
 import (
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -28,6 +30,13 @@ var (
 	ErrUsernameConflict = errors.New("username belongs to another account")
 	// ErrDisabled: the account exists but is disabled.
 	ErrDisabled = errors.New("account disabled")
+	// ErrBadSecondFactor: a TOTP code, passkey assertion or recovery code did not verify. It
+	// wraps ErrBadCredentials, so callers that map ErrBadCredentials answer 401.
+	ErrBadSecondFactor = fmt.Errorf("%w: second factor did not verify", ErrBadCredentials)
+	// ErrNoSecondFactor: the user has no TOTP factor and no passkey yet.
+	ErrNoSecondFactor = errors.New("second_factor_required")
+	// ErrPasskeysUnavailable: passkeys need base_url for the WebAuthn RP ID and origin.
+	ErrPasskeysUnavailable = errors.New("passkeys need the public base URL (setting base_url)")
 )
 
 // Account kinds (users.kind).
@@ -60,11 +69,17 @@ func (l Level) String() string {
 
 // Principal is an authenticated caller. A nil *Principal means anonymous.
 type Principal struct {
-	UserID   int64
+	UserID   int64 // 0 for a publish session minted from a CI identity token
 	Username string
 	IsAdmin  bool
-	TokenID  int64  // non-zero when authenticated with an API token
-	Kind     string // KindLocal or KindOIDC
+	TokenID  int64  // non-zero when authenticated with a read token
+	Kind     string // KindLocal or KindOIDC; "" for a publish session without a user
+	// Session is true when the caller authenticated with the UI session cookie.
+	Session bool
+	// Publish is non-nil only when the caller authenticated with a publish-session token. The
+	// write gate limits such a principal to the session's repo, and Identify limits it to
+	// /api/publish/ on the JSON API.
+	Publish *PublishSession
 }
 
 type User struct {
@@ -108,7 +123,19 @@ type Service struct {
 
 	flightMu sync.Mutex
 	flights  map[[32]byte]*flight // in-progress uncached password checks by cache key
+
+	sealer  Sealer        // seals TOTP secrets; set by the server
+	publish PublishTokens // verifies publish-session tokens; set by the server
 }
+
+// Sealer encrypts secrets at rest, bound to their place by aad. settings.Service implements it.
+type Sealer interface {
+	Encrypt(aad string, plaintext []byte) []byte
+	Decrypt(aad string, sealed []byte) ([]byte, error)
+}
+
+// SetSealer sets the encryption for TOTP secrets. TOTP enrolment and checks fail without it.
+func (s *Service) SetSealer(sl Sealer) { s.sealer = sl }
 
 func New(d *db.DB, cfg config.Provider, rs *repos.Service) *Service {
 	secret := make([]byte, 32)

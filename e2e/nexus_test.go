@@ -730,27 +730,26 @@ func TestNexus(t *testing.T) {
 			}
 		}
 
-		// Mirrored repos refuse uploads, so the two servers cannot diverge.
-		mavenPut := "/maven/" + targets[rs.maven] + "/" + groupPath + "/hello/9.9.9/hello-9.9.9.jar"
-		resp, b := rawPut(t, s, mavenPut, []byte("not from nexus"), s.Admin())
-		nexusWantMirrorBlocked(t, "maven PUT", resp.StatusCode, b)
-		rawPath := "/raw/" + targets[rs.raw] + "/dist/after-cutover.txt"
-		resp, b = rawPut(t, s, rawPath, []byte("written here"), s.Admin())
-		nexusWantMirrorBlocked(t, "raw PUT", resp.StatusCode, b)
-		st, b = debUpload(t, s, targets[rs.apt], debs.hello2, s.Admin())
-		nexusWantMirrorBlocked(t, "debian upload", st, b)
+		// Mirrored repos refuse publish sessions, so nothing uploads and the two servers cannot
+		// diverge.
+		for _, repo := range []string{targets[rs.maven], targets[rs.raw], targets[rs.apt]} {
+			st, b := s.Mint(t, s.device(t, s.AdminUser), repo)
+			nexusWantMirrorBlocked(t, "publish session for "+repo, st, b)
+		}
 
 		// Cut over: uploads work here, and the source can no longer sync.
 		nexusCutOver(t, s, src.ID)
-		resp, b = rawPut(t, s, mavenPut, []byte("not from nexus"), s.Admin())
+		mavenPut := "/maven/" + targets[rs.maven] + "/" + groupPath + "/hello/9.9.9/hello-9.9.9.jar"
+		resp, b := rawPut(t, s, mavenPut, []byte("not from nexus"), s.PublishAuth(t, s.AdminUser, targets[rs.maven]))
 		if resp.StatusCode != http.StatusCreated {
 			t.Fatalf("maven PUT after cut-over: status %d, want 201: %s", resp.StatusCode, b)
 		}
-		resp, b = rawPut(t, s, rawPath, []byte("written here"), s.Admin())
+		rawPath := "/raw/" + targets[rs.raw] + "/dist/after-cutover.txt"
+		resp, b = rawPut(t, s, rawPath, []byte("written here"), s.PublishAuth(t, s.AdminUser, targets[rs.raw]))
 		if resp.StatusCode != http.StatusCreated {
 			t.Fatalf("raw PUT after cut-over: status %d, want 201: %s", resp.StatusCode, b)
 		}
-		if st, b := debUpload(t, s, targets[rs.apt], debs.hello2, s.Admin()); st != http.StatusOK {
+		if st, b := debUpload(t, s, targets[rs.apt], debs.hello2, s.PublishAuth(t, s.AdminUser, targets[rs.apt])); st != http.StatusOK {
 			t.Fatalf("identical debian upload after cut-over: status %d, want 200: %s", st, b)
 		}
 

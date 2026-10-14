@@ -40,15 +40,46 @@ func (s *Service) Access(ctx context.Context, p *Principal, repo *repos.Repo) (L
 	return max(lvl, parseLevel(l)), nil
 }
 
+// gateLevel is what p may do on repo through a format route (spec §7.6). Only a publish session
+// writes, and only to its own repo: an OIDC session writes there outright, a device or manual
+// session as far as its user's current permission allows. A session reads no other repo beyond
+// anonymous read. Every other credential reads at most.
+func (s *Service) gateLevel(ctx context.Context, p *Principal, repo *repos.Repo) (Level, error) {
+	if p != nil && p.Publish != nil {
+		if p.Publish.RepoID != repo.ID {
+			return s.Access(ctx, nil, repo)
+		}
+		if p.Publish.Via == "oidc" {
+			return Write, nil
+		}
+		return s.Access(ctx, p, repo)
+	}
+	lvl, err := s.Access(ctx, p, repo)
+	return min(lvl, Read), err
+}
+
+// publishRequired answers a write without an open publish session for the repo.
+func (s *Service) publishRequired(w http.ResponseWriter) {
+	base := strings.TrimSuffix(s.cfg().BaseURL, "/")
+	unauthorized(w, "publishing needs a publish session: "+base+"/#/publishing")
+}
+
+// RepoGate authenticates a format-route request and checks it may do need on repo name. A write
+// (need >= Write) needs an open publish session for that repo; anything else gets 401 with the
+// Basic challenge. A user who lost write permission gets 403, a locked repo 409.
 func (s *Service) RepoGate(w http.ResponseWriter, r *http.Request, name, format string, need Level, allowSession bool) (*repos.Repo, *Principal, bool) {
 	p, ok := s.Identify(w, r, allowSession)
 	if !ok {
 		return nil, nil, false
 	}
+	var repo *repos.Repo
 	denied := func() (*repos.Repo, *Principal, bool) {
-		if p == nil {
+		switch {
+		case need >= Write && (p == nil || p.Publish == nil || (repo != nil && p.Publish.RepoID != repo.ID)):
+			s.publishRequired(w)
+		case p == nil:
 			unauthorized(w, "authentication required")
-		} else {
+		default:
 			httpx.Error(w, http.StatusForbidden, "forbidden")
 		}
 		return nil, nil, false
@@ -65,7 +96,7 @@ func (s *Service) RepoGate(w http.ResponseWriter, r *http.Request, name, format 
 		httpx.Error(w, http.StatusInternalServerError, "internal error")
 		return nil, nil, false
 	}
-	lvl, err := s.Access(r.Context(), p, repo)
+	lvl, err := s.gateLevel(r.Context(), p, repo)
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "internal error")
 		return nil, nil, false

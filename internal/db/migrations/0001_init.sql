@@ -7,7 +7,8 @@ CREATE TABLE schema_migrations (
   version   INTEGER NOT NULL
 ) STRICT, WITHOUT ROWID;
 
--- kind 'oidc' users have password_hash '!' (never verifies), no tokens and no Basic auth.
+-- kind 'oidc' users have password_hash '!' (never verifies), no tokens, no Basic auth and no
+-- second factor of their own.
 CREATE TABLE users (
   id                  INTEGER PRIMARY KEY,
   username            TEXT NOT NULL UNIQUE,          -- ^[a-z0-9][a-z0-9._-]{0,63}$
@@ -23,6 +24,7 @@ CREATE TABLE users (
 ) STRICT;
 CREATE UNIQUE INDEX users_oidc ON users(oidc_issuer, oidc_subject) WHERE oidc_subject IS NOT NULL;
 
+-- Read tokens (spec §7.1): they read repos and call the API, but never publish (§7.6).
 CREATE TABLE api_tokens (
   id           INTEGER PRIMARY KEY,
   user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -32,7 +34,6 @@ CREATE TABLE api_tokens (
   created_at   INTEGER NOT NULL,
   expires_at   INTEGER,                              -- NULL = never
   last_used_at INTEGER,                              -- updated at most once per minute
-  kind         TEXT NOT NULL DEFAULT 'personal' CHECK (kind IN ('personal','minted')),
   UNIQUE (user_id, name)                             -- also the user_id foreign-key index
 ) STRICT;
 
@@ -211,3 +212,151 @@ CREATE TABLE nexus_sync_failures (
   UNIQUE (sync_id, source_repo, path)
 ) STRICT;
 CREATE INDEX nexus_sync_failures_sync ON nexus_sync_failures(sync_id);
+-- Publisher credentials (spec §7.6) ------------------------------------------------------------
+
+-- TOTP second factors. secret is sealed (settings.Service.Encrypt, AAD "user_totp:<id>"), so
+-- the service inserts an empty secret and sets it in the same transaction. last_step is the
+-- last accepted 30 s time step; a code of that step or an earlier one is refused.
+CREATE TABLE user_totp (
+  id         INTEGER PRIMARY KEY,
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  secret     BLOB NOT NULL,
+  name       TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  last_step  INTEGER NOT NULL DEFAULT 0
+) STRICT;
+CREATE INDEX user_totp_user ON user_totp(user_id);
+
+-- Passkeys (WebAuthn credentials). credential holds the JSON of the library's
+-- webauthn.Credential (flags, transports, authenticator data) that a login check needs;
+-- public_key and sign_count are its key fields as columns.
+CREATE TABLE user_passkeys (
+  id            INTEGER PRIMARY KEY,
+  user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  credential_id BLOB NOT NULL UNIQUE,
+  public_key    BLOB NOT NULL,
+  sign_count    INTEGER NOT NULL DEFAULT 0,
+  credential    BLOB NOT NULL,
+  name          TEXT NOT NULL,
+  created_at    INTEGER NOT NULL,
+  last_used_at  INTEGER
+) STRICT;
+CREATE INDEX user_passkeys_user ON user_passkeys(user_id);
+
+-- One-time recovery codes, argon2id PHC strings. A used code keeps its row with used_at set
+-- until the user generates a new set.
+CREATE TABLE user_recovery_codes (
+  user_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  code_hash TEXT NOT NULL,
+  used_at   INTEGER,
+  PRIMARY KEY (user_id, code_hash)
+) STRICT, WITHOUT ROWID;
+
+-- Enrolled device keys (Gradle plugin, Maven extension). public_key is the raw 32-byte Ed25519
+-- key. A revoked or expired device cannot mint publish sessions.
+CREATE TABLE devices (
+  id           INTEGER PRIMARY KEY,
+  user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name         TEXT NOT NULL,
+  kind         TEXT NOT NULL CHECK (kind IN ('gradle','maven')),
+  public_key   BLOB NOT NULL UNIQUE,
+  created_at   INTEGER NOT NULL,
+  expires_at   INTEGER NOT NULL,
+  last_used_at INTEGER,
+  revoked_at   INTEGER
+) STRICT;
+CREATE INDEX devices_user ON devices(user_id);
+
+-- Pending device enrollments (the RFC 8628 device flow). device_code_hash is SHA-256 of the
+-- device code. Approval creates the device and sets approved_by and device_id; the poll that
+-- returns the device_id deletes the row. polled_at is the time of the last poll (0: none).
+CREATE TABLE device_enrollments (
+  device_code_hash BLOB PRIMARY KEY,
+  user_code        TEXT NOT NULL UNIQUE,             -- "ABCD-EFGH"
+  name             TEXT NOT NULL,
+  kind             TEXT NOT NULL CHECK (kind IN ('gradle','maven')),
+  public_key       BLOB NOT NULL,
+  created_at       INTEGER NOT NULL,
+  expires_at       INTEGER NOT NULL,
+  polled_at        INTEGER NOT NULL DEFAULT 0,
+  approved_by      INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  device_id        INTEGER REFERENCES devices(id) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
+CREATE INDEX device_enrollments_expires ON device_enrollments(expires_at);
+CREATE INDEX device_enrollments_approved_by ON device_enrollments(approved_by);
+CREATE INDEX device_enrollments_device ON device_enrollments(device_id);
+
+-- CI trust policies (OIDC). claims is a JSON object: claim name -> allowed values, each exact
+-- or a "*" glob; every listed claim must match. jwks is a pasted JWKS ('' = fetch the issuer's
+-- keys). publish_trusts_issuer finds the enabled policies of a token's issuer.
+CREATE TABLE publish_trusts (
+  id         INTEGER PRIMARY KEY,
+  name       TEXT NOT NULL UNIQUE,
+  issuer     TEXT NOT NULL,
+  audience   TEXT NOT NULL,
+  claims     TEXT NOT NULL DEFAULT '{}',
+  jwks       TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  disabled   INTEGER NOT NULL DEFAULT 0
+) STRICT;
+CREATE INDEX publish_trusts_issuer ON publish_trusts(issuer) WHERE disabled = 0;
+CREATE INDEX publish_trusts_created_by ON publish_trusts(created_by);
+
+-- The repos a trust policy may publish to.
+CREATE TABLE publish_trust_repos (
+  trust_id INTEGER NOT NULL REFERENCES publish_trusts(id) ON DELETE CASCADE,
+  repo_id  INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+  PRIMARY KEY (trust_id, repo_id)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX publish_trust_repos_repo ON publish_trust_repos(repo_id);
+
+-- Publish sessions: the only credential that writes on a format route. The token is
+-- "trs_<public_id>_<secret>"; secret_hash is SHA-256(secret). subject is who published: the
+-- username (device, manual) or the CI token's sub (oidc). A session is open while closed_at is
+-- NULL and expires_at is in the future. Ended rows stay 30 days as the publish log, keyset by id.
+CREATE TABLE publish_sessions (
+  id          INTEGER PRIMARY KEY,
+  public_id   TEXT NOT NULL UNIQUE,
+  secret_hash BLOB NOT NULL,
+  repo_id     INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+  user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  device_id   INTEGER REFERENCES devices(id) ON DELETE SET NULL,
+  trust_id    INTEGER REFERENCES publish_trusts(id) ON DELETE SET NULL,
+  via         TEXT NOT NULL CHECK (via IN ('device','oidc','manual')),
+  subject     TEXT NOT NULL,
+  created_at  INTEGER NOT NULL,
+  expires_at  INTEGER NOT NULL,
+  closed_at   INTEGER
+) STRICT;
+CREATE INDEX publish_sessions_expires ON publish_sessions(expires_at);
+CREATE INDEX publish_sessions_repo ON publish_sessions(repo_id);
+CREATE INDEX publish_sessions_user ON publish_sessions(user_id);
+CREATE INDEX publish_sessions_device ON publish_sessions(device_id);
+CREATE INDEX publish_sessions_trust ON publish_sessions(trust_id);
+
+-- Short-lived single-use challenges: the publish nonce (kind 'publish_nonce', device_id set),
+-- WebAuthn ceremony data, a pending TOTP setup and the second step of a sign-in. id_hash is
+-- SHA-256 of the value the client holds; data is kind-specific (sealed when it holds a secret).
+-- Taking a challenge deletes it.
+CREATE TABLE auth_challenges (
+  id_hash    BLOB PRIMARY KEY,
+  kind       TEXT NOT NULL,
+  user_id    INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  device_id  INTEGER REFERENCES devices(id) ON DELETE CASCADE,
+  data       BLOB NOT NULL DEFAULT X'',
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+) STRICT, WITHOUT ROWID;
+CREATE INDEX auth_challenges_expires ON auth_challenges(expires_at);
+CREATE INDEX auth_challenges_user ON auth_challenges(user_id);
+CREATE INDEX auth_challenges_device ON auth_challenges(device_id);
+
+-- CI identity tokens already exchanged for a publish session. id_hash is SHA-256 of
+-- "<issuer>\n<jti>", or of the whole token when it has no jti; the row lives until the
+-- token's exp.
+CREATE TABLE publish_oidc_seen (
+  id_hash    BLOB PRIMARY KEY,
+  expires_at INTEGER NOT NULL
+) STRICT, WITHOUT ROWID;
+CREATE INDEX publish_oidc_seen_expires ON publish_oidc_seen(expires_at);

@@ -681,22 +681,22 @@ that repo, and still checks the user's current permission (device and manual ses
 `{"error":"publishing needs a publish session: <base_url>/#/publishing"}`.
 
 **Clients** (`clients/`, Java 17, no dependencies beyond the build tool's API and the JDK):
-- **Gradle plugin** `clients/gradle`, settings plugin id `io.github.telesphorepo`:
+- **Gradle plugin** `clients/gradle`, settings plugin id `com.telesphorepo`:
   `telesphorepo { url = "https://repo.acme.com" }` in `settings.gradle.kts`. It gives every Maven
   repository on that host lazy credentials. At the first task that publishes to such a repo it
   mints a session for that repo (GitHub OIDC when `ACTIONS_ID_TOKEN_REQUEST_URL` is set; an OIDC
   token from the env var named by `telesphorepo.oidcTokenEnv` for Jenkins; else the device key)
   and closes it at build end through a `BuildService`. `telesphorepoLogin` enrolls; with no
   device and no CI token, a publish fails with "run ./gradlew telesphorepoLogin".
-- **Maven extension** `clients/maven`, `io.github.telesphorepo:telesphorepo-maven-extension`,
+- **Maven extension** `clients/maven`, `com.telesphorepo:telesphorepo-maven-extension`,
   declared in `.mvn/extensions.xml`. It mints a session per target repo before `deploy` uploads
   (same three proofs) and closes them when the build ends. `mvn telesphorepo:login` enrolls.
   `settings.xml` needs no password for the server.
 - **CI without the plugin/extension**: documented `curl` snippets for GitHub Actions and Jenkins
   in the UI's **Publishing** page and in `clients/README.md`.
-- **Releases**: `.github/workflows/release-clients.yml` publishes the Gradle plugin to the Gradle
-  Plugin Portal and the extension to Maven Central on a `clients-v*` tag, with the keys in GitHub
-  secrets (owner creates the accounts).
+- **Releases**: `.github/workflows/release-clients.yml` publishes the Gradle plugin and the Maven
+  artifacts to a Nexus release repository on a `clients-v*` tag, with the credentials in GitHub
+  secrets. The Plugin Portal and Maven Central jobs follow after namespace verification.
 
 **UI:** login with second factor; **Security** (TOTP, passkeys, recovery codes); **Devices**;
 device approval page (`#/device`); **Publishing** (new manual session, client setup snippets);

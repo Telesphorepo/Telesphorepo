@@ -46,6 +46,15 @@ label.inline { display: inline-flex; gap: 6px; align-items: center; }
 .mono, code, pre { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; }
 .mono { word-break: break-all; }
 pre { background: var(--code); padding: 12px; border-radius: 6px; overflow-x: auto; }
+input.code { width: 11em; font-family: ui-monospace, Menlo, monospace; letter-spacing: .1em; }
+textarea { font: inherit; color: inherit; background: var(--card); border: 1px solid var(--border); border-radius: 5px; padding: 6px 10px; }
+select[multiple] { min-width: 280px; }
+h3 { font-size: 14px; margin: 18px 0 6px; }
+.stack { display: flex; flex-direction: column; gap: 10px; }
+.stack label { display: flex; flex-direction: column; gap: 4px; }
+.row.top { align-items: flex-start; }
+td.actions { white-space: nowrap; }
+td.actions button { margin-left: 4px; }
 details { margin-bottom: 12px; }
 summary { cursor: pointer; }
 

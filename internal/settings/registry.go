@@ -28,24 +28,26 @@ const (
 
 // Core groups. Format plugins add one group each (see Register).
 const (
-	GroupGeneral  = "general"
-	GroupStorage  = "storage"
-	GroupSecurity = "security"
-	GroupSSO      = "sso"
-	GroupSigning  = "signing"
+	GroupGeneral    = "general"
+	GroupStorage    = "storage"
+	GroupSecurity   = "security"
+	GroupPublishing = "publishing"
+	GroupSSO        = "sso"
+	GroupSigning    = "signing"
 )
 
 // Groups lists the groups in display order (UI sections): the core groups, then the plugin
 // groups in registration order.
-var Groups = []string{GroupGeneral, GroupStorage, GroupSecurity, GroupSSO, GroupSigning}
+var Groups = []string{GroupGeneral, GroupStorage, GroupSecurity, GroupPublishing, GroupSSO, GroupSigning}
 
 // GroupLabels are the display names of the groups.
 var GroupLabels = map[string]string{
-	GroupGeneral:  "General",
-	GroupStorage:  "Storage",
-	GroupSecurity: "Security",
-	GroupSSO:      "Single sign-on",
-	GroupSigning:  "Signing",
+	GroupGeneral:    "General",
+	GroupStorage:    "Storage",
+	GroupSecurity:   "Security",
+	GroupPublishing: "Publishing",
+	GroupSSO:        "Single sign-on",
+	GroupSigning:    "Signing",
 }
 
 // Def describes one setting. Its env override is TR_<KEY upper-cased, dots -> '_'>.
@@ -116,6 +118,9 @@ const (
 	KeyAdminPasswordLogin = "admin_password_login"
 
 	KeyNexusSyncInterval = "nexus.sync_interval"
+
+	KeyPublishSessionTTL = "publish.session_ttl"
+	KeyPublishDeviceTTL  = "publish.device_ttl"
 )
 
 // SSOKeys are the settings whose change re-validates SSO by fetching the issuer's discovery
@@ -140,7 +145,7 @@ func lower(v any) any { return strings.ToLower(strings.TrimSpace(v.(string))) }
 
 var registry = []*Def{
 	// General
-	{Key: KeyBaseURL, Type: TypeString, Group: GroupGeneral, Label: "Public base URL",
+	{Key: KeyBaseURL, Type: TypeString, Group: GroupGeneral, Label: "Public base URL", Dev: "http://localhost:8080",
 		Help:      "URL clients use to reach this server, e.g. https://repo.example.com (used in UI hints).",
 		normalize: func(v any) any { return strings.TrimRight(strings.TrimSpace(v.(string)), "/") },
 		Validate: func(v any) error {
@@ -242,6 +247,18 @@ var registry = []*Def{
 			}
 			return nil
 		}},
+
+	// Publishing (publish sessions and enrolled devices)
+	{Key: KeyPublishSessionTTL, Type: TypeDuration, Default: "15m", Group: GroupPublishing, Label: "Publish session lifetime",
+		Help: "Longest life of a publish session, the credential that every upload needs, e.g. 15m. A client ends its session when the publish is done. The maximum is 1h.",
+		Validate: func(v any) error {
+			if durationOf(v) > time.Hour {
+				return errors.New("must be at most 1h")
+			}
+			return nil
+		}},
+	{Key: KeyPublishDeviceTTL, Type: TypeDuration, Default: "2160h", Group: GroupPublishing, Label: "Device lifetime",
+		Help: "How long an enrolled device key (Gradle plugin, Maven extension) can start publish sessions, e.g. 2160h (90 days). After that the developer enrolls the device again."},
 
 	// Single sign-on (OIDC, admins only)
 	{Key: KeyOIDCIssuer, Type: TypeString, Group: GroupSSO, Label: "OIDC issuer URL",

@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.telesphorepo</groupId>
+    <artifactId>telesphorepo-maven-parent</artifactId>
+    <version>0.1.0</version>
+  </parent>
+
+  <artifactId>telesphorepo-maven-extension</artifactId>
+  <packaging>jar</packaging>
+
+  <name>Telesphorepo Maven extension</name>
+  <description>Maven core extension: mints a Telesphorepo publish session for each deployment repository and closes it when the build ends.</description>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.telesphorepo</groupId>
+      <artifactId>telesphorepo-maven-client</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.maven</groupId>
+      <artifactId>maven-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>javax.inject</groupId>
+      <artifactId>javax.inject</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+    </dependency>
+  </dependencies>
+
+  <!-- Maven finds the extension's components only through META-INF/sisu/javax.inject.Named.
+       sisu-maven-plugin writes that index from the compiled classes after javac has run;
+       annotation processing is off, so javac does not touch the index. -->
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <configuration>
+          <proc>none</proc>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.eclipse.sisu</groupId>
+        <artifactId>sisu-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>index</id>
+            <goals><goal>main-index</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

@@ -45,14 +45,14 @@ func sha256Hex(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// movePut uploads body to path as the admin and requires 201. It does not take t, so worker
-// goroutines can call it.
-func movePut(s *Server, p string, body []byte) error {
+// movePut uploads body to path with the publish-session token and requires 201. It does not
+// take t, so worker goroutines can call it.
+func movePut(s *Server, p string, body []byte, token string) error {
 	req, err := http.NewRequest(http.MethodPut, s.URL+p, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
-	req.SetBasicAuth(s.AdminUser, s.AdminPass)
+	req.SetBasicAuth(s.AdminUser, token)
 	resp, err := s.HTTPClient(nil).Do(req)
 	if err != nil {
 		return fmt.Errorf("PUT %s: %w", p, err)
@@ -76,13 +76,14 @@ func moveRawSeed(t *testing.T, s *Server, repo, dir string, n, size int) map[str
 		files[p] = rawRandom(t, size)
 		paths = append(paths, p)
 	}
+	token := PublishToken(t, s, s.AdminUser, repo)
 	jobs := make(chan string)
 	errs := make(chan error, n)
 	var wg sync.WaitGroup
 	for range 8 {
 		wg.Go(func() {
 			for p := range jobs {
-				errs <- movePut(s, "/raw/"+repo+"/"+p, files[p])
+				errs <- movePut(s, "/raw/"+repo+"/"+p, files[p], token)
 			}
 		})
 	}
@@ -223,10 +224,11 @@ func moveContent(t *testing.T, s *Server, pkgs *debPackages, patch map[string]an
 	repoURL := s.InternalURL + "/maven/" + mvnRepo
 	msg := "hello from " + group
 	settingsXML := ContainerFile{Path: "/work/settings.xml", Content: mavenSettingsXML(s.AdminUser, s.AdminPass)}
+	deploySettings := ContainerFile{Path: "/work/settings.xml", Content: mavenSettingsXML(s.AdminUser, PublishToken(t, s, s.AdminUser, mvnRepo))}
 	m2 := map[string]string{M2Volume: "/root/.m2/repository"}
 	code, out := RunClient(t, mavenImage, ClientOpts{
 		Cmd:     []string{"cd /work/lib && mvn -B -ntp -s /work/settings.xml deploy"},
-		Files:   append(mavenLibProject(group, "1.0.0", repoURL, msg), settingsXML),
+		Files:   append(mavenLibProject(group, "1.0.0", repoURL, msg), deploySettings),
 		Mounts:  m2,
 		Timeout: 15 * time.Minute,
 	})
@@ -234,8 +236,9 @@ func moveContent(t *testing.T, s *Server, pkgs *debPackages, patch map[string]an
 		t.Fatalf("mvn deploy: exit %d\n%s", code, out)
 	}
 
-	debMustUpload(t, s, debRepo, pkgs.hello1, admin, "e2e-hello", "1.0", "all")
-	debMustUpload(t, s, debRepo, pkgs.native, admin, "e2e-native", "1.0", pkgs.arch)
+	debAuth := s.PublishAuth(t, s.AdminUser, debRepo)
+	debMustUpload(t, s, debRepo, pkgs.hello1, debAuth, "e2e-hello", "1.0", "all")
+	debMustUpload(t, s, debRepo, pkgs.native, debAuth, "e2e-native", "1.0", pkgs.arch)
 	s.WaitDebianIndexed(t, debRepo)
 
 	raw := moveRawSeed(t, s, rawRepo, "seed", 500, 2048)
@@ -251,10 +254,11 @@ func moveContent(t *testing.T, s *Server, pkgs *debPackages, patch map[string]an
 	// Uploads while the move copies go to both stores. An upload counts only when the move
 	// still reported unfinished work after the upload returned, so it ran before the swap.
 	during := map[string][]byte{}
+	duringToken := PublishToken(t, s, s.AdminUser, rawRepo)
 	for i := range 300 {
 		p := fmt.Sprintf("during/f%05d.bin", i)
 		body := rawRandom(t, 2048)
-		if err := movePut(s, "/raw/"+rawRepo+"/"+p, body); err != nil {
+		if err := movePut(s, "/raw/"+rawRepo+"/"+p, body, duringToken); err != nil {
 			t.Fatal(err)
 		}
 		cur := s.GetMove(t, m.ID)
@@ -320,7 +324,7 @@ func moveContent(t *testing.T, s *Server, pkgs *debPackages, patch map[string]an
 
 	// A new upload lands in the new store.
 	body := rawRandom(t, 4096)
-	if err := movePut(s, "/raw/"+rawRepo+"/after/new.bin", body); err != nil {
+	if err := movePut(s, "/raw/"+rawRepo+"/after/new.bin", body, PublishToken(t, s, s.AdminUser, rawRepo)); err != nil {
 		t.Fatal(err)
 	}
 	moveWantBlobs(t, "target (upload after the move)", dst(t),
@@ -362,7 +366,7 @@ func TestStorageMoveFailure(t *testing.T) {
 	}
 	moveWantRaw(t, s, repo, rest)
 	body := rawRandom(t, 4096)
-	if err := movePut(s, "/raw/"+repo+"/after/new.bin", body); err != nil {
+	if err := movePut(s, "/raw/"+repo+"/after/new.bin", body, PublishToken(t, s, s.AdminUser, repo)); err != nil {
 		t.Fatal(err)
 	}
 	newKey := path.Join("repos", repo, "after/new.bin")
@@ -440,7 +444,7 @@ func TestStorageMoveCancel(t *testing.T) {
 	// Reads and writes use the source store again.
 	moveWantRaw(t, s, repo, files)
 	body := rawRandom(t, 4096)
-	if err := movePut(s, "/raw/"+repo+"/after/new.bin", body); err != nil {
+	if err := movePut(s, "/raw/"+repo+"/after/new.bin", body, PublishToken(t, s, s.AdminUser, repo)); err != nil {
 		t.Fatal(err)
 	}
 	files["after/new.bin"] = body

@@ -40,10 +40,11 @@ func apiPostTokenWith(t testing.TB, s *Server, sess *Session, hdr map[string]str
 	return resp.StatusCode, b
 }
 
+// apiMavenPut uploads body as the admin with a publish session for repo.
 func apiMavenPut(t testing.TB, s *Server, repo, path, body string) {
 	t.Helper()
 	req := s.NewRequest(t, http.MethodPut, "/maven/"+repo+"/"+path, strings.NewReader(body))
-	resp, b := s.Do(t, req, s.Admin())
+	resp, b := s.Do(t, req, s.PublishAuth(t, s.AdminUser, repo))
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("PUT %s: status %d: %s", path, resp.StatusCode, b)
 	}
@@ -95,7 +96,7 @@ func TestAPISession(t *testing.T) {
 func TestAPICSRF(t *testing.T) {
 	s := StartServer(t, ServerOpts{})
 	s.CreateUser(t, "alice", "alice-password-1", false)
-	sess := s.Login(t, "alice", "alice-password-1")
+	sess := s.LoginTOTP(t, "alice")
 
 	st, b := apiPostTokenWith(t, s, sess, map[string]string{"Sec-Fetch-Site": "cross-site", "Origin": "https://evil.example"})
 	if st != http.StatusForbidden {

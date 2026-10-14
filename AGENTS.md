@@ -12,17 +12,19 @@ go tool task preview        # build, then run the production binary at :8080
 go tool task test [args]    # core zone (tag e2e); args go to go test, e.g. -run TestMaven
 go tool task test import    # import zone (tag import): TestNexus, starts a Nexus container (slow)
 go tool task test scale     # scale zone (tag scale): 100k and 1M asset latency test (slow)
-go tool task test all       # core, import and scale one after the other
+go tool task test clients   # clients zone (tag clients): builds clients/gradle and clients/maven in containers (slow)
+go tool task test all       # core, import, scale and clients one after the other
+go tool task release [ver]  # cross-compiled archives + SHA256SUMS in bin/release
 go tool task gen            # run sqlc for every internal/**/sqlc.yaml
 go tool task doctor         # show detected Go / bun / Node / Docker-Podman
 
 go build ./...
 go vet ./...
-go vet -tags e2e ./e2e/...  # e2e files only compile with a tag; also vet -tags import and -tags scale
+go vet -tags e2e ./e2e/...  # e2e files only compile with a tag; also vet -tags import, scale and clients
 E2E_SKIP_BUILD=1 go tool task test -run TestX   # reuse the already-built image
 ```
 
-Run the core zone for every change. Run the import zone when you touch internal/nexus, internal/api/nexus.go, an importer, the repo lock or the mirror gate. Run the scale zone when you touch a hot query or an index. Run ll before a push that touches several zones. A subagent builds and vets with the tags; the main session runs the zones.
+Run the core zone for every change. Run the import zone when you touch internal/nexus, internal/api/nexus.go, an importer, the repo lock or the mirror gate. Run the scale zone when you touch a hot query or an index. Run the clients zone when you touch `clients/`, `internal/publish`, the write gate or the device and OIDC routes. Run all before a push that touches several zones. A subagent builds and vets with the tags; the main session runs the zones.
 
 `go tool task` is registered with `tool` in `go.mod`. There is no root `package.json`, Makefile
 or shell script, so it works the same on Windows, macOS and Linux. The UI build needs bun (npm is
@@ -33,6 +35,12 @@ the fallback) and Node 26+ (see `.node-version`). The e2e suite needs Docker or 
 - **E2E tests only.** Don't write unit tests or mocks. Test behaviour through the real image and
   real clients (`mvn`, `gradle`, `apt`, curl) in `e2e/` (`//go:build e2e`). Each test should
   start its own server via the harness.
+- **Writes need a publish session.** A password or read token never writes to a format route.
+  The gate is `auth.RepoGate`. Tests get a session with `PublishToken(t, s, user, repo)` from
+  `e2e/harness_test.go`, or `s.PublishAuth(t, user, repo)` for a Basic header. Never add a
+  write path that accepts a password or a read token.
+- **Never log second-factor material.** That covers TOTP secrets and codes, recovery codes,
+  device keys, publish tokens and OIDC tokens. Compare secrets in constant time.
 - **Storage keys and repo paths use package `path`, never `path/filepath`.** Keys are
   forward-slash on every OS. Use `filepath` only for local OS paths, such as the data dir.
 - **Every query on a request path uses an index.** Lists use keyset pagination
@@ -84,12 +92,14 @@ the fallback) and Node 26+ (see `.node-version`). The e2e suite needs Docker or 
 | New repo format | `internal/<format>` + one line in `internal/formats/all.go` (see below) |
 | Plugin contract | `internal/format/format.go` |
 | JSON API route | `internal/api/api.go` (register) + handler file; errors via `httpx.Error` |
-| Auth / permission checks | `internal/auth` (`Identify`, repo access) |
+| Auth / permission checks | `internal/auth` (`Identify`, repo access and the write gate, second factor) |
+| Publish sessions, devices, trust policies | `internal/publish`; routes in `internal/api/publish.go` and `internal/api/security.go` |
+| Publisher clients (Gradle plugin, Maven extension) | `clients/gradle`, `clients/maven`; release in `.github/workflows/release-clients.yml` |
 | Blob I/O | `internal/assets` (spool, store, serve) on top of `internal/storage` |
 | UI page | `web/src/pages/*.tsx`, routes and nav in `web/src/App.tsx`, fetch helpers in `web/src/api.ts` |
 | Storage move (FS ↔ S3) | `internal/move` (service, copier), `internal/storage/mirror.go`, `internal/api/moves.go`, `web/src/pages/MovePanel.tsx` |
 | Nexus sources, syncs, cut-over | `internal/nexus` (client, service, `sync.go` scheduler and runner), `internal/api/nexus.go`, `web/src/pages/Nexus.tsx`. Per-format import code is the plugin's `Importer`. Repo lock: `repos.locked_by`, checked in `auth.RepoGate` |
-| E2E harness | `e2e/harness_test.go` (servers, storage matrix `fs` + SeaweedFS), `e2e/clients_test.go` (Maven, Debian and curl helpers that several zones share) |
+| E2E harness | `e2e/harness_test.go` (servers, storage matrix `fs` + SeaweedFS), `e2e/clients_test.go` (Maven, Debian and curl helpers that several zones share), publish helpers at the end of `harness_test.go`, `e2e/keycloak_test.go` (Keycloak fixture), `e2e/publish_clients_test.go` (clients zone) |
 | Dev tooling | `tools/task` |
 
 ## Adding a repo format

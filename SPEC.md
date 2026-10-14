@@ -16,7 +16,7 @@ proxy or cache repos and is not compatible with the Nexus API.
 
 | Package | Role |
 |---|---|
-| `cmd/telesphorepo` | CLI: `serve` (default), `dev`, `user add/passwd`, `keygen`, `version`, `help`; hidden `dbcheck` and `seed` |
+| `cmd/telesphorepo` | CLI: `serve` (default), `dev`, `user add/passwd/reset-2fa`, `keygen`, `version`, `help`; hidden `dbcheck` and `seed` |
 | `internal/server` | Wires everything together: logger, DB, settings, live storage, services, bootstrap admin, mux, access log |
 | `internal/config` | Boot env (`LoadBoot`) and the effective `Config` struct; services read it through `config.Provider` |
 | `internal/settings` | Settings registry, AES-256-GCM secrets, master key, atomic snapshot, env overrides, subscribers |
@@ -28,6 +28,8 @@ proxy or cache repos and is not compatible with the Nexus API.
 | `internal/nexus` | Nexus 3 REST client, sources, mapping, the sync scheduler and runner, and cut-over. Names no format; it calls each plugin's `format.Importer` |
 | `internal/auth` | Users (kinds `local`/`oidc`), argon2id passwords, Basic-auth cache, API tokens, sessions, rate limiting, permission checks |
 | `internal/oidc` | OIDC admin sign-on: `/api/auth/oidc/login` and `/callback` (go-oidc + x/oauth2, PKCE S256) |
+| `internal/publish` | Publish sessions: device enrollment, nonces, trust policies, the CI token exchange, `Verify` for `trs_` tokens and the cleanup job |
+| `clients/` | The publisher clients: Gradle settings plugin (`clients/gradle`) and Maven extension, plugin and client library (`clients/maven`). They are built and released apart from the server |
 | `internal/repos` | Repos and their per-format JSON config. A `Validator` (from `internal/format`) checks the config |
 | `internal/format` | The plugin contract: `Format` and the optional interfaces, `Host`, and the registry (`Register`, `All`, `Get`, `ValidateRepoConfig`) |
 | `internal/formats` | `all.go`: the one list of built-in formats. The only file that names them |
@@ -40,7 +42,7 @@ proxy or cache repos and is not compatible with the Nexus API.
 | `internal/containerengine` | Docker/Podman detection for tooling and e2e; not linked into the server |
 | `web/` | React + Vite UI, embedded via `web/embed.go` (`go:embed all:dist`) |
 | `tools/task` | `go tool task`: dev, build, preview, test, gen and doctor |
-| `e2e/` | End-to-end suite in three zones (tags `e2e`, `import`, `scale`) using testcontainers |
+| `e2e/` | End-to-end suite in four zones (tags `e2e`, `import`, `scale`, `clients`) using testcontainers |
 
 ## Data model (SQLite)
 
@@ -55,7 +57,7 @@ close and every 6 hours.
 | Table | Key / indexes | Notes |
 |---|---|---|
 | `users` | PK `id`, UNIQUE `username`, UNIQUE `users_oidc (oidc_issuer, oidc_subject)` where `oidc_subject` is set | argon2id PHC hash (`!` for SSO users, never verifies), `is_admin`, `disabled`, `password_changed_at`, `kind` (`local`/`oidc`), `email` |
-| `api_tokens` | UNIQUE `public_id`, UNIQUE `(user_id, name)` | `secret_hash` = SHA-256(secret); optional `expires_at`; `last_used_at` written at most once per minute; `kind` (`personal`, `minted` reserved for §7.6) |
+| `api_tokens` | UNIQUE `public_id`, UNIQUE `(user_id, name)` | `secret_hash` = SHA-256(secret); optional `expires_at`; `last_used_at` written at most once per minute. These are **read tokens**: they never publish |
 | `sessions` | PK `id_hash` (WITHOUT ROWID), idx `expires_at`, idx `user_id` | `id_hash` = SHA-256(cookie value) |
 | `repos` | UNIQUE `name`, partial idx `repos_anonymous (id) WHERE anonymous_read = 1` | `format` is any registered format name (no CHECK); `anonymous_read`; `config` JSON; `locked_by` (NULL, or the text that a write answers with 409, set while the repo mirrors a Nexus source) |
 | `repo_permissions` | PK `(repo_id, user_id)`, idx `user_id` | `level` is `read` or `write` |
@@ -70,6 +72,16 @@ close and every 6 hours.
 | `nexus_syncs` | PK `id`, UNIQUE partial `nexus_syncs_running (source_id) WHERE state = 'running'`, idx `source_id`, idx `started_by` | `state` `running`/`done`/`failed`/`cancelled`; `cutover` (0/1); `started_by` is NULL for the scheduler; `started_at`, `finished_at`, `error` |
 | `nexus_sync_repos` | PK `(sync_id, source_repo)` (WITHOUT ROWID), idx `target_repo_id` | Copy of the mapping at sync start, with `continuation` (token of the next Nexus page), `imported`/`skipped`/`ignored`/`failed` and `state` `pending`/`running`/`done`/`failed`/`cancelled` |
 | `nexus_sync_failures` | PK `id`, UNIQUE `(sync_id, source_repo, path)`, idx `sync_id` | One row per source file that a sync did not import |
+| `user_totp` | PK `id`, idx `user_id` | `secret` is sealed (AAD `user_totp:<id>`); `last_step` is the last accepted 30 s step of this factor (0 for none) |
+| `user_passkeys` | PK `id`, UNIQUE `credential_id`, idx `user_id` | `public_key`, `sign_count`, `credential` (JSON of the `webauthn.Credential`: flags, transports, AAGUID), `last_used_at` |
+| `user_recovery_codes` | PK `(user_id, code_hash)` (WITHOUT ROWID) | `code_hash` is argon2id PHC; `used_at` is set when the code is used |
+| `devices` | PK `id`, UNIQUE `public_key`, idx `user_id` | `kind` `gradle`/`maven`; `public_key` is the raw Ed25519 key; `expires_at`, `last_used_at`, `revoked_at` |
+| `device_enrollments` | PK `device_code_hash` (WITHOUT ROWID), UNIQUE `user_code`, idx `expires_at`, idx `approved_by`, idx `device_id` | `polled_at` rate-limits the poll; `approved_by` and `device_id` are set on approval; a row is taken once by the poll |
+| `publish_trusts` | PK `id`, UNIQUE `name`, partial idx `publish_trusts_issuer (issuer) WHERE disabled = 0`, idx `created_by` | `claims` is JSON `{claim: [allowed values]}`; `jwks` is `''` when the server fetches the issuer's keys; `audience` `''` means `base_url` |
+| `publish_trust_repos` | PK `(trust_id, repo_id)` (WITHOUT ROWID), idx `repo_id` | The repos a policy may publish to |
+| `publish_sessions` | PK `id`, UNIQUE `public_id`, idx `expires_at`, `repo_id`, `user_id`, `device_id`, `trust_id` | `secret_hash` = SHA-256(secret); `via` `device`/`oidc`/`manual`; `subject`; `closed_at`. `repo_id` cascades; `user_id`, `device_id` and `trust_id` are SET NULL |
+| `auth_challenges` | PK `id_hash` (WITHOUT ROWID), idx `expires_at`, `user_id`, `device_id` | Short-lived single-use state: `kind` is `login`, `totp_setup`, `webauthn_register`, `webauthn_assert` or `publish_nonce`; `data` holds the payload |
+| `publish_oidc_seen` | PK `id_hash` (WITHOUT ROWID), idx `expires_at` | SHA-256 of `<issuer>\n<jti>`, or of the whole token when it has no `jti`. A second insert means a replay |
 
 Tables of the `debian` track:
 
@@ -135,6 +147,7 @@ before `settings.Load`.
 | general | `base_url`, `log.level`, `max_upload_bytes`, `max_json_bytes`, `nexus.sync_interval` (`15m`, minimum `1m`) |
 | storage | `storage` (`fs`/`s3`, with `r2` as an alias for `s3`), `fs.root`, `s3.endpoint`, `s3.region`, `s3.bucket`, `s3.access_key_id`, `s3.secret_access_key`*, `s3.prefix`, `s3.path_style`, `s3.redirect`, `presign_ttl` |
 | security | `cookie.secure`, `session_ttl`, `trusted_proxies` |
+| publishing | `publish.session_ttl` (`15m`, maximum `1h`), `publish.device_ttl` (`2160h`, which is 90 days; Go durations have no `d` unit) |
 | sso | `oidc.issuer`, `oidc.client_id`, `oidc.client_secret`*, `oidc.redirect_url`, `oidc.scopes` (`openid profile email`), `oidc.admin_claim` (`groups`; dotted paths allowed), `oidc.admin_values`, `oidc.admin_emails`, `oidc.session_ttl` (`12h`), `admin_password_login` (`true`) |
 | signing | `signing.key`* (only through its own endpoint), `gpg.key_file`, `gpg.passphrase_file` |
 | debian (plugin) | `deb.debounce` (`2s`), `deb.max_delay` (`30s`) |
@@ -177,8 +190,9 @@ before `settings.Load`.
 ## HTTP surface
 
 Each format mounts its own routes through `Format.Register(mux, Host)`. The core names no format.
-Format routes (package clients use HTTP Basic only: a password, or any username with a token as
-the password):
+Format routes (package clients use HTTP Basic only). A **read** takes a password, or any username
+with a read token as the password. A **write** (PUT or upload) takes only a publish session token
+(`trs_...`) as the password (see **Publishing**). In the table, "write" means this rule:
 
 | Route | Auth | Behaviour |
 |---|---|---|
@@ -194,20 +208,30 @@ The repo decision table: anonymous read is allowed when `anonymous_read` is on. 
 credentials or bad credentials get 401 with a Basic challenge, valid credentials without
 permission get 403, and an unknown repo gets 404 (401 for anonymous callers, so repo names don't
 leak). A write to a repo with `locked_by` set gets 409 `{"error": <locked_by>}` after the
-permission check. A mirrored repo is read only until cut-over.
+permission check. A mirrored repo is read only until cut-over. A write without an open publish
+session for that repo gets 401 with a Basic challenge and
+`{"error":"publishing needs a publish session: <base_url>/#/publishing"}`. A device or manual
+session writes only while its user still has `write` on the repo (else 403).
 
-JSON API (`/api/`). Auth is a session cookie or HTTP Basic. Errors are `{"error": "..."}`, plus
+JSON API (`/api/`). Auth is a session cookie or HTTP Basic. A publish session token (`trs_...`)
+reaches only `/api/publish/...`; every other `/api` route answers it with 403. Errors are `{"error": "..."}`, plus
 `fields` for settings validation. Bodies are capped at `max_json_bytes`. Lists are
 `{items, next}` with `?after=&limit=`.
 
 | Method & path | Auth | Notes |
 |---|---|---|
-| `POST /api/auth/login` · `POST /api/auth/logout` | none · session | Login sets `tr_session` and returns the User. 401 for SSO users; 403 for a local admin when `admin_password_login=false`. Logout ends the local session only |
+| `POST /api/auth/login` · `POST /api/auth/logout` | none · session | Login `{username, password}`. A user with a second factor gets `{second_factor: true, methods: [...]}` and the cookie `tr_login`; a user without one gets the User plus `second_factor_required: true` and a setup-only session (see **Auth model**). 401 for SSO users; 403 for a local admin when `admin_password_login=false`. Logout ends the local session only |
+| `POST /api/auth/login/passkey` | `tr_login` cookie | Returns `{publicKey: {...}}`, the WebAuthn assertion options for the pending sign-in |
+| `POST /api/auth/login/second` | `tr_login` cookie | `{totp_code}`, `{passkey: <assertion>}` or `{recovery_code}`. 200 sets `tr_session` and returns the User with `second_factor_required: false`. 401 for a wrong proof (the sign-in stays pending) or an expired sign-in; 429 with `Retry-After` after too many failures |
+| `GET /api/security` | UI session | `{totp: [{id, name, created_at}], passkeys: [{id, name, created_at, last_used_at}], recovery_codes: <unused count>, second_factor: bool}` |
+| `POST /api/security/totp/begin` · `.../totp/confirm` · `DELETE .../totp/{id}` | UI session | `{name}` returns `{setup_id, secret, otpauth_url}` (the secret is shown once; the setup lasts 10 min). `{setup_id, code}` returns 201 `{id, name, created_at}`. Delete is 204 |
+| `POST /api/security/passkeys/begin` · `.../passkeys/finish` · `.../passkeys/assert` · `DELETE .../passkeys/{id}` | UI session | `begin` returns `{publicKey}` creation options. `finish` `{name, credential}` returns 201 `{id, name, created_at, last_used_at}`. `assert` returns `{publicKey}` options for a fresh check before an approval or a manual session. 409 when `base_url` is empty |
+| `POST /api/security/recovery-codes` | UI session | 201 `{codes: [10 x "abcd-efgh-ijkl-mnop"]}`; replaces the old set. Shown once |
 | `GET /api/auth/config` | none | `{password_login: true, oidc, admin_password_login}` |
 | `GET /api/auth/oidc/login` | none | 404 when SSO is off, 503 when discovery fails. Stores state/nonce/PKCE verifier in memory (10 min, single use, keyed by SHA-256(state)), sets `tr_oidc` (HttpOnly, SameSite=Lax, Path `/api/auth/oidc`, 600 s), 302 to the IdP |
 | `GET /api/auth/oidc/callback` | none | 400 for missing/mismatched/unknown/reused/expired state, state from before an issuer or client change, or missing `code`; 503 on discovery failure. Verifies the ID token (signature, issuer, audience, expiry, nonce) and the admin rule. Success: upsert user, session with `oidc.session_ttl`, 302 `/`. Failure: 302 `/#/login?error=` `not_authorized` \| `username_conflict` \| `invalid_username` \| `account_disabled` \| `sso_failed` |
-| `GET /api/me` | any | Current user. User JSON includes `kind` (`local`/`oidc`) and `email` (`""` when unset) |
-| `GET/POST /api/tokens`, `DELETE /api/tokens/{id}` | any | The token is shown once. A token cannot mint tokens. POST is 403 for SSO users |
+| `GET /api/me` | any | Current user. User JSON includes `kind` (`local`/`oidc`), `email` (`""` when unset) and `second_factor_required` (true only for a setup-only UI session) |
+| `GET/POST /api/tokens`, `DELETE /api/tokens/{id}` | any | **Read tokens.** The token is shown once. A token cannot mint tokens. POST is 403 for SSO users |
 | `GET/POST /api/users`, `PATCH /api/users/{username}` | admin (self may change own password) | The user list is paginated |
 | `GET /api/formats` | none | `[{name, title, default_config, settings_group?}]` for every registered format |
 | `GET/POST /api/repos`, `GET/PATCH /api/repos/{name}` | any/anon · admin | The list shows only repos the caller can see. `format` must be a registered name. `config` must be a JSON object that the format validates (400 otherwise; an unknown format lists the available ones). An empty config becomes the format default. Repo JSON has `locked_by` (`""` when the repo is not locked). A PATCH with `config` calls the format's `RepoConfigChanged` |
@@ -240,24 +264,26 @@ JSON API (`/api/`). Auth is a session cookie or HTTP Basic. Errors are `{"error"
 
 ## Client setup
 
-The UI shows these snippets per repo (`/usage`), and `telesphorepo dev` prints them. `HOST` is the server URL. Credentials are a user and password, or any username with an API
-token as the password.
+The UI shows these snippets per repo (`/usage`), and `telesphorepo dev` prints them. `HOST` is the server URL. For reads, credentials are a user and password, or any username with a
+read token as the password. Uploads use a publish session token; the Maven and Gradle clients
+(see **Publishing**) get it themselves.
 
 | Client | Setup |
 |---|---|
-| Maven | URL `HOST/maven/{repo}` in `<distributionManagement>` / `<repositories>`; credentials go in `~/.m2/settings.xml` `<server>` with the same `<id>`. Maven 3.8.1+ blocks `http://` on non-localhost hosts |
-| Gradle | `maven { url = uri("HOST/maven/{repo}"); credentials { username = ...; password = ... } }` in `publishing.repositories`, and in `pluginManagement.repositories` to consume plugins; `isAllowInsecureProtocol = true` only for plain http |
+| Maven | URL `HOST/maven/{repo}` in `<distributionManagement>` / `<repositories>`. Reads of a private repo need `~/.m2/settings.xml` `<server>` with the same `<id>`. Deploys use the Telesphorepo extension. Maven 3.8.1+ blocks `http://` on non-localhost hosts |
+| Gradle | `maven { url = uri("HOST/maven/{repo}") }` in `publishing.repositories`, and in `pluginManagement.repositories` to consume plugins; add `credentials { ... }` with a read token to read a private repo. The settings plugin adds the publish credentials. `isAllowInsecureProtocol = true` only for plain http |
 | apt | Key: `curl -fsSL HOST/keys/debian.asc -o /etc/apt/keyrings/telesphorepo.asc`. Source: `deb [signed-by=/etc/apt/keyrings/telesphorepo.asc] HOST/debian/{repo} {dist} {component}`. For a private repo add `/etc/apt/auth.conf.d/telesphorepo.conf` (`machine host login USER password TOKEN`, mode 600) |
-| Upload `.deb` | `curl -u USER:TOKEN -T x.deb HOST/debian/{repo}/upload/{dist}/{component}`. Indexes rebuild after `deb.debounce`; poll `GET /api/repos/{repo}/status` for `pending: 0` |
-| Raw | Upload: `curl -f -u USER:TOKEN -T file.tar.gz HOST/raw/{repo}/path/file.tar.gz`. Download: `curl -fL [-u USER:TOKEN] -O HOST/raw/{repo}/path/file.tar.gz` |
+| Upload `.deb` | `curl -u publish:SESSION_TOKEN -T x.deb HOST/debian/{repo}/upload/{dist}/{component}`. Indexes rebuild after `deb.debounce`; poll `GET /api/repos/{repo}/status` for `pending: 0` |
+| Raw | Upload: `curl -f -u publish:SESSION_TOKEN -T file.tar.gz HOST/raw/{repo}/path/file.tar.gz`. Download: `curl -fL [-u USER:READ_TOKEN] -O HOST/raw/{repo}/path/file.tar.gz` |
 
 ## Auth model
 
 | Credential | Storage | Accepted on |
 |---|---|---|
 | Password | argon2id (64 MiB, t=3, p=2), at most 4 hashes at once; successful Basic checks are cached for 10 min under an HMAC key | Basic auth (formats + API), login |
-| API token `trp_<12hex>_<secret>` | SHA-256(secret), looked up by id, constant-time compare | Basic password (any username), `/api/` |
+| Read token `trp_<12hex>_<secret>` | SHA-256(secret), looked up by id, constant-time compare | Basic password (any username), `/api/`. Reads only |
 | Session `tr_session` | SHA-256(id), absolute `session_ttl` | `/api/` only. HttpOnly, SameSite=Strict, Secure per `cookie.secure` |
+| Publish session `trs_<12hex>_<secret>` | SHA-256(secret) in `publish_sessions`, constant-time compare | Basic password (any username) on format routes of its one repo, and `/api/publish/...`. The only credential that writes |
 
 - **Account kinds.** `local` users have a password, API tokens and Basic auth; publishers and the
   break-glass admin. `oidc` users are created on their first SSO login, keyed by
@@ -270,6 +296,23 @@ token as the password.
   deletes an existing SSO user's sessions. The username is `preferred_username` lower-cased with
   chars outside `[a-z0-9._-]` mapped to `-`; if a different account owns it the login fails
   (`username_conflict`); accounts are never merged by name.
+- **Second factor.** A local user may register several TOTP factors (SHA-1, 6 digits, 30 s, +-1
+  step; a step that a factor accepted is refused again), several passkeys (RP ID is the host of
+  `base_url`, the one accepted origin is its scheme and host, a clone warning fails the check) and
+  10 one-time recovery codes (80 bits each, argon2id-hashed). Recovery codes work only at
+  sign-in. Passkeys need `base_url`; without it the routes answer 409. TOTP secrets are sealed
+  with the settings key. Failed checks count against the `u:<username>` rate-limit key. SSO
+  users have no second factor.
+- **Sign-in.** A user with a factor sends password, then a second step with the cookie
+  `tr_login` (HttpOnly, SameSite=Strict, Path `/api/auth/login`, 5 min). The state is a row in
+  `auth_challenges`, so it survives a restart. A wrong code keeps the sign-in pending.
+- **Setup-only session.** A UI session of a local user with no factor reaches only `/api/me`,
+  `/api/auth/logout` and `/api/security...`. Every other `/api` route answers 403
+  `{"error":"second_factor_required"}`. The break-glass `admin` follows the same rule. The
+  `/api/security` routes need a UI session, so Basic auth and tokens get 403. A password alone
+  cannot add a factor and cannot publish.
+- **Lost factors.** `telesphorepo user reset-2fa NAME` removes the TOTP factors, passkeys and
+  recovery codes of a user.
 - **Roles.** Admins can do everything. Repo permission `write` includes `read`. A disabled user
   fails authentication.
 - **CSRF.** `http.CrossOriginProtection` plus SameSite=Strict.
@@ -278,6 +321,124 @@ token as the password.
   `X-Forwarded-For` only when the peer is in `trusted_proxies`.
 - **First start.** On first start with no users, the server creates `admin` with a random
   password and prints it once to stderr, outside the JSON log stream.
+
+## Publishing
+
+Every write on a format route needs a **publish session**: a random credential that the server
+generates for one repo. It lives at most `publish.session_ttl`. A leaked password or read token
+cannot publish. The Nexus sync and the storage move write in-process and do not pass this gate.
+The server generates, stores (SHA-256), scopes, expires and revokes every session. A caller only
+proves who it is. There are four proofs:
+
+| Who | Proof | Route |
+|---|---|---|
+| Developer with Gradle or Maven | An enrolled device key (Ed25519) | `POST /api/publish/sessions` |
+| CI (GitHub Actions, Jenkins, any OIDC issuer) | The CI identity token and an admin trust policy | `POST /api/publish/sessions/oidc` |
+| Anyone, by hand | UI session plus a fresh second factor | `POST /api/publish/sessions/manual` |
+
+Routes (`{items, next}` lists are keyset, `?after=&limit=`):
+
+| Method & path | Auth | Notes |
+|---|---|---|
+| `POST /api/devices/enroll` | none | `{name, kind: "gradle"\|"maven", public_key}` (`public_key` is the raw 32-byte key, base64url, no padding). Returns `{device_code, user_code: "ABCD-EFGH", verification_url: "<base_url>/#/device", expires_in: 600, interval: 5}`. `verification_url` uses the request URL when `base_url` is empty. Each IP gets a burst of 10, then 1 per 30 s (429) |
+| `POST /api/devices/enroll/poll` | none | `{device_code}`. 200 `{device_id}` once approved (single use). 400 `{"error": "authorization_pending" \| "slow_down" \| "expired_token"}`. `slow_down` answers a poll less than 4 s after the last. An unknown or used code gets `expired_token` |
+| `GET /api/devices/enroll?user_code=` | UI session or password | `{user_code, name, kind, expires_at}`; 404 for an unknown or expired code |
+| `POST /api/devices/approve` | UI session or password | `{user_code, totp_code \| passkey}`. 201 Device. 401 for a wrong second factor, 404 unknown or expired code, 409 used code, 403 `second_factor_required` |
+| `GET /api/devices` | session | Own devices; an admin sees all devices, with `username`. Newest first, `{items, next}` |
+| `DELETE /api/devices/{id}` | session | 204. An admin may revoke any device. It ends the device's open sessions |
+| `POST /api/publish/challenge` | none | `{device_id}` returns `{nonce}` (32 random bytes, base64url, single use, 60 s) |
+| `POST /api/publish/sessions` | none | `{device_id, repo, nonce, signature}` returns 201 `{id, token: "trs_...", repo, expires_at}` |
+| `POST /api/publish/sessions/manual` | UI session or password | `{repo, totp_code \| passkey}`; same answer. The proof is a fresh check, not recovery codes. 401 for a wrong proof, 429 with `Retry-After` when limited |
+| `POST /api/publish/sessions/oidc` | none | `{token, repo}`; same answer |
+| `GET /api/publish/sessions` | session | The caller's own sessions |
+| `DELETE /api/publish/sessions/{id}` | the session's own token | 204. The token is the Basic password or a Bearer token. Another token or none gets 401 |
+| `GET /api/publish/log` | admin | Every session, newest first |
+| `GET, POST /api/publish/trusts` · `GET, PATCH, DELETE /api/publish/trusts/{id}` | admin | Trust policies. The list is keyset by name |
+
+Shapes:
+
+```
+Device       = {id, user_id, username?, name, kind, created_at, expires_at, last_used_at, revoked_at, state}
+SessionItem  = {id, repo, via, subject, username?, device_id, device_name?, trust_id, trust_name?,
+                created_at, expires_at, closed_at, state}
+Trust input  = {name, issuer, audience, claims: {claim: [value...]}, jwks, repos: [name...], disabled}
+Trust output = {id, name, issuer, audience, claims, jwks, repos, created_at, disabled}
+```
+
+PATCH changes only the fields that are set. Approve, manual session and the pending lookup
+refuse read tokens and publish session tokens. A `trs_` token never reaches the admin routes,
+also not for an admin user.
+
+**Device flow** (RFC 8628 style):
+1. The client creates an Ed25519 key pair, stores it in `~/.telesphorepo/<host>[_<port>]/device.json`
+   (owner only) and calls `enroll`. It prints `Open <verification_url>?code=<USER-CODE> and
+   approve code <USER-CODE>`.
+2. The user opens the page, signs in with the second factor, checks name and kind, and approves
+   with a fresh TOTP code or passkey check.
+3. The client polls until it gets `device_id`. An enrollment code expires after 10 min.
+4. A device lives `publish.device_ttl` unless revoked. The client then enrolls again.
+
+**Minting from a device.** `signature` is the Ed25519 signature (base64url, no padding) over the
+UTF-8 text `"telesphorepo publish v1\n" + nonce + "\n" + device_id + "\n" + repo` (`device_id` in
+decimal). The server checks the signature and nonce, that the device is not revoked or expired,
+and that its user has `write` on the repo now. The token is the Basic password for the upload, and
+it also reads that repo.
+
+**Trust policies and the CI exchange.**
+- A policy needs at least one claim, and each claim at least one allowed value. A value is exact
+  or a `*` glob; `*` matches any text, `/` included. Every listed claim must match.
+- `audience` `""` means the current `base_url`, resolved at exchange time. A pasted `jwks` is
+  checked when the policy is saved and replaces key discovery (for a Jenkins the server cannot
+  reach). Signing algorithms are RS, ES and PS (256, 384, 512) and EdDSA. Issuer keys are cached.
+- The server checks signature, issuer, audience, `exp`, and `iat` (at most 10 min old and 1 min
+  in the future). It finds an enabled policy that matches the issuer, audience and claims and
+  lists the repo. It refuses a token seen before (`publish_oidc_seen`, kept until `exp`). The
+  replay row and the session are written in one transaction. `subject` is the token's `sub`.
+- An edit of issuer, audience, claims, jwks or repos, a disable, and a delete end the policy's
+  open sessions.
+- A CI session writes outright. A device or manual session needs the user's `write` permission.
+
+**Sessions.** An open session has `closed_at` empty and `expires_at` ahead. A device session also
+needs a device that is not revoked or expired. An OIDC session needs an enabled policy. A bad,
+unknown, closed or expired token counts toward the rate limit and answers 401. The job in
+`internal/publish` runs every minute. In batches of 100 it deletes expired challenges,
+enrollments and seen CI tokens, and sessions that expired more than 30 days ago (the audit
+trail for the **Publish log**).
+
+**Clients** (`clients/`, Java 17, JDK only). The group and plugin id are `com.telesphorepo`.
+- **Gradle plugin** (`clients/gradle`): a settings plugin. `telesphorepo { url = "https://repo.acme.com"; oidcTokenEnv = "..." }`
+  in `settings.gradle`. Each `PublishToMavenRepository` task whose repo is under `<url>/maven/<name>`
+  gets credentials (user `telesphorepo`, the token as password) just before it runs. A session
+  is minted once per repo and closed at build end by a build service. Proof order: GitHub
+  (`ACTIONS_ID_TOKEN_REQUEST_URL`, audience = the server URL), the env var named by
+  `oidcTokenEnv`, the device key. Tasks that publish to the server opt out of the configuration
+  cache. Without a proof the build fails and names `./gradlew telesphorepoLogin`, the task that
+  enrolls a device.
+- **Maven** (`clients/maven`, parent `telesphorepo-maven-parent`): `telesphorepo-maven-client`
+  (library), `telesphorepo-maven-extension` (declared in `.mvn/extensions.xml`) and
+  `telesphorepo-maven-plugin` (goal `telesphorepo:login`). The server URL is the property
+  `telesphorepo.url` (or env `TELESPHOREPO_URL`). `telesphorepo.oidcTokenEnv` names the env var
+  with a CI token. `telesphorepo.deviceName` names the device. The extension mints a session when
+  `maven-deploy-plugin` starts and closes it at the end. A `deploy` without proof stops with a
+  message that names `mvn telesphorepo:login`. With `-DdeployAtEnd=true` a session older than
+  `publish.session_ttl` at the last module fails.
+- **Release.** `.github/workflows/release-clients.yml` runs on a `clients-v*` tag with JDK 17.
+  The version comes from the tag and must be final. It publishes the plugin (with its marker,
+  through the maven-publish repository `release` in `clients/gradle/build.gradle.kts`) and the
+  Maven artifacts (`mvn deploy -DaltDeploymentRepository`) to a Nexus release repository.
+  Secrets: `NEXUS_MAVEN_URL`, `NEXUS_USERNAME`, `NEXUS_PASSWORD`. The Plugin Portal and Maven
+  Central jobs are comments in the workflow until the namespace `com.telesphorepo` is verified.
+  Their secrets: `GRADLE_PUBLISH_KEY`, `GRADLE_PUBLISH_SECRET`, `MAVEN_CENTRAL_USERNAME`,
+  `MAVEN_CENTRAL_PASSWORD`, `MAVEN_GPG_PRIVATE_KEY`, `MAVEN_GPG_PASSPHRASE`. `clients/` is
+  MIT-licensed (`clients/LICENSE`, declared in the poms); the server is AGPL-3.0.
+- **CI without a client.** The UI **Publishing** page and `clients/README.md` show `curl` steps
+  for GitHub Actions and Jenkins.
+
+**UI pages.** Login (second step), **Security** (`#/security`: TOTP with a QR code, passkeys,
+recovery codes), **Devices** (`#/devices`), the approval page (`#/device?code=`), **Publishing**
+(`#/publishing`: new manual session, client setup), **Read tokens** (`#/tokens`), and for
+admins **Trust policies** (`#/trusts`, presets for GitHub Actions and Jenkins) and **Publish log**
+(`#/publish-log`). A setup-only session sees only the Security page.
 
 ## Debian indexing pipeline
 
@@ -424,6 +585,7 @@ input or refused credentials, 404, 409 (exists, running, not running, cut over, 
 | `telesphorepo dev` | Zero-config local server. Data goes in `./.telesphorepo-dev`. The first run creates `admin` and one anonymous-read demo repo per registered format, named after the format. The banner prints each format's usage snippets |
 | `telesphorepo user add NAME [--admin]` | Asks for the password twice on a TTY, or reads one line from a pipe |
 | `telesphorepo user passwd NAME` | Resets the password and signs out the user's sessions. Refused for SSO users |
+| `telesphorepo user reset-2fa NAME` | Removes the TOTP factors, passkeys and recovery codes of a user, so the user sets up a new factor at the next sign-in |
 | `telesphorepo keygen [FILE]` | Writes a new Ed25519 key (default `./signing.asc`; never overwrites) and prints the fingerprint |
 | `telesphorepo version` / `help [cmd]` | |
 
@@ -445,9 +607,23 @@ and raw insert asset rows, debian inserts one package and its asset row per unit
 | `go tool task test [go test args]` | Runs the core zone: `go test -tags e2e ./e2e/... -count=1 -v` |
 | `go tool task test import [go test args]` | Runs the import zone: `-tags import`, 30 min timeout. It starts a Nexus container |
 | `go tool task test scale [go test args]` | Runs `TestScale` (`-tags scale`, 60 min timeout) |
-| `go tool task test all [go test args]` | Runs core, import and scale one after the other. It runs every zone, lists the failed zones and exits non-zero if any failed |
+| `go tool task test clients [go test args]` | Runs the clients zone: `-tags clients`, 40 min timeout. It builds the Gradle plugin and the Maven extension from `clients/` |
+| `go tool task test all [go test args]` | Runs core, import, scale and clients one after the other. It runs every zone, lists the failed zones and exits non-zero if any failed |
+| `go tool task release [version]` | Builds the UI once. Then it cross-compiles `bin/release/telesphorepo_<version>_<os>_<arch>` for linux, darwin and windows on amd64 and arm64 (`CGO_ENABLED=0`, `-trimpath`). Each binary goes into a `.tar.gz` (`.zip` on Windows) with `LICENSE` and `README.md`. The command writes `SHA256SUMS`. The version defaults to `git describe` |
 | `go tool task gen` | Runs `go tool sqlc generate` for every `internal/**/sqlc.yaml` |
 | `go tool task doctor` | Shows the detected toolchain and container engine |
+
+CI runs on GitHub Actions with the built-in `GITHUB_TOKEN` and no repository secrets:
+
+| Workflow | Runs | Does |
+|---|---|---|
+| `ci.yml` | Push to `main`, pull requests | `build` job: `go tool task build`, `go vet` for the `e2e`, `import`, `scale` and `clients` tags, `telesphorepo dbcheck`. `e2e-core` job: `go tool task test` (uploads the log on failure). A newer push cancels the running pull request jobs |
+| `e2e-extended.yml` | Manual (zone `import`, `scale` or `all`), weekly for `import` | `go tool task test <zone>` |
+| `release.yml` | Push of a `v*` tag | `binaries` job: `go tool task release`, then a GitHub Release with the archives and `SHA256SUMS`. `image` job: multi-arch image (`linux/amd64`, `linux/arm64`) pushed to `ghcr.io/telesphorepo/telesphorepo` with tags `X.Y.Z`, `X.Y` and `latest` (no `latest` for pre-releases) |
+
+The Dockerfile builds the UI and the Go binary on the build platform and cross-compiles with
+`TARGETOS` and `TARGETARCH`. It takes `VERSION` as a build argument. A plain `docker build` or
+`podman build` builds for the host.
 
 The web lockfile is `web/bun.lock`. bun is preferred and npm is the fallback. The Docker image is
 distroless static, runs as uid 65532, and has `/data` as a volume.
@@ -468,13 +644,31 @@ SeaweedFS and back with uploads during the move, a forced failure, a restart mid
 
 **Zones.** A build tag picks the zone, so a run starts only the containers it needs. The harness
 and the client helpers (`harness_test.go`, `main_test.go`, `clients_test.go`) carry every tag.
-
 | Zone | Tag | Command | Contents |
 |---|---|---|---|
 | core | `e2e` | `go tool task test` | Formats, auth, API, settings, storage move, query plans |
 | import | `import` | `go tool task test import` | `TestNexus` |
 | scale | `scale` | `go tool task test scale` | `TestScale` |
+| clients | `clients` | `go tool task test clients` | `TestClients` (`e2e/publish_clients_test.go`) |
 | all | all tags | `go tool task test all` | Every zone |
+
+**Publishing tests.** Every publish in the suite uses a publish session. The harness helper
+`PublishToken(t, s, user, repo)` enrolls a device the real way (the test computes the TOTP
+codes), approves it and mints a session. The harness enrolls 3 TOTP factors per user, so tests
+never wait 30 s for a new step. `publish_test.go` covers: `TestPublishGate` (a password or read
+token is refused; a session for another repo; lost permission; closed and expired sessions;
+replayed nonce; bad signature; revoked and expired devices; manual sessions),
+`TestSecondFactorLogin` (including the setup-only session), `TestDeviceEnrollment`,
+`TestDeviceEnrollmentExpiry` (ages the row with `editDB` on a data volume) and `TestPublishOIDC`
+(Keycloak as the CI issuer through the client `ci-github` in `realm-e2e.json`, whose tokens carry
+GitHub-shaped claims: wrong claim, wrong audience, replayed token, an unlisted repo, a disabled
+policy, a pasted JWKS). The Keycloak fixture is in `keycloak_test.go` (tags `e2e` and `clients`).
+
+`TestClients` builds the Gradle plugin and the Maven extension in containers, publishes them to
+the test server, and then (1) runs `telesphorepoLogin` and `mvn telesphorepo:login`, approves the
+code through the API, publishes a library and a Gradle plugin, and resolves them; (2) publishes as
+"GitHub Actions" with a `jwebserver` container that serves a Keycloak token at
+`ACTIONS_ID_TOKEN_REQUEST_URL`.
 
 `TestNexus` runs a Nexus container (`sonatype/nexus3`) and starts the server with
 `TR_NEXUS_SYNC_INTERVAL=12h`, so that no scheduled sync changes the counters. On each storage
@@ -498,5 +692,4 @@ See the milestones in the design doc (§17).
 | Item | Milestone |
 |---|---|
 | Full admin UI polish, deleting assets and deb packages, blob/by-hash GC | M4 |
-| Publisher device keys, 2FA, short-lived tokens | Future (§7.6) |
 | Restart-persistence e2e for settings (`Server.Restart` exists) | open |

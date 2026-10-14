@@ -1,12 +1,14 @@
-//go:build e2e || import || scale
+//go:build e2e || import || scale || clients
 
 package e2e
 
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -18,6 +20,7 @@ import (
 	"os"
 	osexec "os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -27,6 +30,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/moby/moby/api/types/container"
+	"github.com/pquerna/otp"
+	"github.com/pquerna/otp/totp"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/network"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -60,6 +65,9 @@ type Server struct {
 	Alias       string
 	AdminUser   string
 	AdminPass   string
+
+	mu    sync.Mutex
+	users map[string]*harnessUser // what the harness knows about each user (see publish helpers)
 }
 
 // StartServer starts a server container on TestNetwork and waits for /healthz.
@@ -206,12 +214,19 @@ func (s *Server) Logs(t testing.TB) string { t.Helper(); return containerLogs(s.
 
 // Restart stops the server container gracefully (SIGTERM) and starts it again, then waits for
 // /healthz. The container keeps its /data, env and network alias; URL follows the new host port.
-func (s *Server) Restart(t testing.TB) {
+func (s *Server) Restart(t testing.TB) { t.Helper(); s.RestartAfter(t, nil) }
+
+// RestartAfter is Restart that runs whileStopped (when non-nil) between stop and start, e.g. to
+// edit the data volume.
+func (s *Server) RestartAfter(t testing.TB, whileStopped func()) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	if err := s.Stop(ctx, nil); err != nil {
 		t.Fatalf("stop server %s: %v", s.Alias, err)
+	}
+	if whileStopped != nil {
+		whileStopped()
 	}
 	if err := s.Start(ctx); err != nil {
 		t.Fatalf("start server %s again: %v\n%s", s.Alias, err, containerLogs(s.Container))
@@ -468,9 +483,12 @@ func (s *Server) Login(t testing.TB, user, pass string) *Session {
 	return sess
 }
 
+// CreateUser creates a local user. The harness keeps the password, so the publish helpers can
+// sign in as the user.
 func (s *Server) CreateUser(t testing.TB, name, pass string, admin bool) {
 	t.Helper()
 	s.MustAPI(t, http.MethodPost, "/api/users", map[string]any{"username": name, "password": pass, "is_admin": admin}, s.Admin(), nil)
+	s.user(name).pass = pass
 }
 
 func (s *Server) CreateRepo(t testing.TB, name, format string, anon bool, config map[string]any) {
@@ -809,4 +827,339 @@ func RunClientResult(t testing.TB, image string, opts ClientOpts) *ClientResult 
 		t.Fatalf("client state: %v", err)
 	}
 	return &ClientResult{ExitCode: st.ExitCode, Output: containerLogs(c), container: c}
+}
+
+// ---------------------------------------------------------------- publisher credentials (spec §7.6)
+
+// Every write on a format route needs a publish session. The harness gets one the way a
+// developer does: it enrolls a TOTP factor for the user (it computes the codes itself), signs in
+// with both steps, enrolls an Ed25519 device key through the device flow, approves it, and then
+// mints a session per publish with a signed challenge. Reads keep using passwords and read
+// tokens.
+
+// harnessUser is what the harness knows about one user of one server.
+type harnessUser struct {
+	pass    string
+	factors []*totpFactor // TOTP factors the harness enrolled; empty until EnrollTOTP
+	device  *Device
+}
+
+// totpFactor is one enrolled TOTP factor. The server refuses a step that was used once with the
+// same factor, so the harness tracks the last step it used.
+type totpFactor struct {
+	secret   string // base32
+	lastStep int64
+}
+
+// totpFactors is how many TOTP factors EnrollTOTP enrolls per user. Each factor gives one fresh
+// code per 30 s step, so several factors let a test sign in, approve and mint without waiting
+// for the next step.
+const totpFactors = 3
+
+// user returns the harness record of name, creating an empty one. The bootstrap admin's
+// record starts with the admin password.
+func (s *Server) user(name string) *harnessUser {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.users == nil {
+		s.users = map[string]*harnessUser{}
+	}
+	u := s.users[name]
+	if u == nil {
+		u = &harnessUser{}
+		if name == s.AdminUser {
+			u.pass = s.AdminPass
+		}
+		s.users[name] = u
+	}
+	return u
+}
+
+// Password returns the password the harness created user with.
+func (s *Server) Password(t testing.TB, user string) string {
+	t.Helper()
+	pass := s.user(user).pass
+	if pass == "" {
+		t.Fatalf("harness: no password known for user %q (create the user with Server.CreateUser)", user)
+	}
+	return pass
+}
+
+// EnrollTOTP adds totpFactors TOTP factors to user through the API. It signs in with the
+// password only, so the user must not have a second factor yet; the session reaches the setup
+// routes, and the factors are added one after the other on it.
+func (s *Server) EnrollTOTP(t testing.TB, user string) {
+	t.Helper()
+	u := s.user(user)
+	sess := s.Login(t, user, s.Password(t, user))
+	for i := range totpFactors {
+		var setup struct {
+			SetupID string `json:"setup_id"`
+			Secret  string `json:"secret"`
+		}
+		s.MustAPI(t, http.MethodPost, "/api/security/totp/begin", map[string]string{"name": fmt.Sprintf("e2e %d", i+1)}, sess, &setup)
+		if setup.Secret == "" || setup.SetupID == "" {
+			t.Fatalf("POST /api/security/totp/begin for %s: no setup_id or secret in the answer", user)
+		}
+		f := &totpFactor{secret: setup.Secret}
+		s.MustAPI(t, http.MethodPost, "/api/security/totp/confirm", map[string]string{"setup_id": setup.SetupID, "code": totpCodeOf(t, f)}, sess, nil)
+		u.factors = append(u.factors, f)
+	}
+}
+
+// TOTPCode returns a TOTP code of user for a step that the harness has not used with the
+// chosen factor yet.
+func (s *Server) TOTPCode(t testing.TB, user string) string {
+	t.Helper()
+	u := s.user(user)
+	if len(u.factors) == 0 {
+		t.Fatalf("harness: user %q has no TOTP factor (use Server.EnrollTOTP)", user)
+	}
+	best := u.factors[0]
+	for _, f := range u.factors[1:] {
+		if f.lastStep < best.lastStep {
+			best = f
+		}
+	}
+	return totpCodeOf(t, best)
+}
+
+// totpCodeOf returns a code of f for a step after its last used one and marks that step used.
+// The server accepts one step either side of its clock, so the harness uses the current step or
+// the next one, and waits when both are used. It keeps 3 s of margin at step boundaries for
+// clock skew between the host and the server container.
+func totpCodeOf(t testing.TB, f *totpFactor) string {
+	t.Helper()
+	const margin = 3
+	for {
+		now := time.Now().Unix()
+		cur := now / 30
+		step := max(f.lastStep+1, cur)
+		if step == cur || (step == cur+1 && now%30 >= margin) {
+			f.lastStep = step
+			code, err := totp.GenerateCodeCustom(f.secret, time.Unix(step*30, 0), totp.ValidateOpts{
+				Period: 30, Digits: otp.DigitsSix, Algorithm: otp.AlgorithmSHA1,
+			})
+			if err != nil {
+				t.Fatalf("TOTP code: %v", err)
+			}
+			return code
+		}
+		time.Sleep(time.Until(time.Unix((step-1)*30+margin, 0)))
+	}
+}
+
+// LoginTOTP signs in as user with the password and then a TOTP code, and returns the full
+// session. It enrolls TOTP factors first when the harness has none for the user.
+func (s *Server) LoginTOTP(t testing.TB, user string) *Session {
+	t.Helper()
+	if len(s.user(user).factors) == 0 {
+		s.EnrollTOTP(t, user)
+	}
+	jar, _ := cookiejar.New(nil)
+	sess := &Session{Jar: jar}
+	var step struct {
+		SecondFactor bool `json:"second_factor"`
+	}
+	s.MustAPI(t, http.MethodPost, "/api/auth/login", map[string]string{"username": user, "password": s.Password(t, user)}, sess, &step)
+	if !step.SecondFactor {
+		t.Fatalf("login as %s with a TOTP factor: the answer does not ask for the second factor", user)
+	}
+	s.MustAPI(t, http.MethodPost, "/api/auth/login/second", map[string]string{"totp_code": s.TOTPCode(t, user)}, sess, nil)
+	return sess
+}
+
+// Device is an enrolled device key.
+type Device struct {
+	ID   int64
+	User string
+	Key  ed25519.PrivateKey
+}
+
+// Enrollment is the answer of POST /api/devices/enroll.
+type Enrollment struct {
+	DeviceCode      string `json:"device_code"`
+	UserCode        string `json:"user_code"`
+	VerificationURL string `json:"verification_url"`
+	ExpiresIn       int    `json:"expires_in"`
+	Interval        int    `json:"interval"`
+}
+
+// b64 is the encoding of device keys, nonces and signatures on the wire.
+func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
+
+// StartEnrollment generates an Ed25519 key and starts the device flow for it, without auth.
+func (s *Server) StartEnrollment(t testing.TB, name, kind string) (Enrollment, ed25519.PrivateKey) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var en Enrollment
+	s.MustAPI(t, http.MethodPost, "/api/devices/enroll", map[string]string{"name": name, "kind": kind, "public_key": b64(pub)}, nil, &en)
+	if en.DeviceCode == "" || en.UserCode == "" {
+		t.Fatalf("POST /api/devices/enroll: incomplete answer %+v", en)
+	}
+	return en, priv
+}
+
+// PollAnswer is the answer of POST /api/devices/enroll/poll: a device id, or an RFC 8628 error.
+type PollAnswer struct {
+	DeviceID int64  `json:"device_id"`
+	Error    string `json:"error"`
+}
+
+// PollEnrollment polls the device flow once.
+func (s *Server) PollEnrollment(t testing.TB, deviceCode string) (int, PollAnswer) {
+	t.Helper()
+	st, b := s.API(t, http.MethodPost, "/api/devices/enroll/poll", map[string]string{"device_code": deviceCode}, nil)
+	var a PollAnswer
+	if err := json.Unmarshal(b, &a); err != nil {
+		t.Fatalf("POST /api/devices/enroll/poll: status %d, decode %s: %v", st, b, err)
+	}
+	return st, a
+}
+
+// ApproveEnrollment approves userCode as user with a fresh TOTP code.
+func (s *Server) ApproveEnrollment(t testing.TB, sess *Session, user, userCode string) (int, []byte) {
+	t.Helper()
+	return s.API(t, http.MethodPost, "/api/devices/approve", map[string]string{"user_code": userCode, "totp_code": s.TOTPCode(t, user)}, sess)
+}
+
+// EnrollDevice enrolls a new device key for user the real way: start the flow, sign in with
+// both factors, approve with a fresh code, poll for the device id.
+func (s *Server) EnrollDevice(t testing.TB, user string) *Device {
+	t.Helper()
+	en, key := s.StartEnrollment(t, "e2e "+user, "gradle")
+	sess := s.LoginTOTP(t, user)
+	if st, b := s.ApproveEnrollment(t, sess, user, en.UserCode); st/100 != 2 {
+		t.Fatalf("approve device of %s: status %d: %s", user, st, b)
+	}
+	st, a := s.PollEnrollment(t, en.DeviceCode)
+	if st != http.StatusOK || a.DeviceID == 0 {
+		t.Fatalf("poll after approval: status %d, answer %+v", st, a)
+	}
+	return &Device{ID: a.DeviceID, User: user, Key: key}
+}
+
+// device returns the cached device of user, enrolling it on first use.
+func (s *Server) device(t testing.TB, user string) *Device {
+	t.Helper()
+	u := s.user(user)
+	if u.device == nil {
+		u.device = s.EnrollDevice(t, user)
+	}
+	return u.device
+}
+
+// Challenge asks for a publish nonce for device id.
+func (s *Server) Challenge(t testing.TB, deviceID int64) string {
+	t.Helper()
+	var c struct {
+		Nonce string `json:"nonce"`
+	}
+	s.MustAPI(t, http.MethodPost, "/api/publish/challenge", map[string]any{"device_id": deviceID}, nil, &c)
+	if c.Nonce == "" {
+		t.Fatal("POST /api/publish/challenge: empty nonce")
+	}
+	return c.Nonce
+}
+
+// Sign signs the mint message of nonce and repo with the device key.
+func (d *Device) Sign(nonce, repo string) string {
+	msg := "telesphorepo publish v1\n" + nonce + "\n" + strconv.FormatInt(d.ID, 10) + "\n" + repo
+	return b64(ed25519.Sign(d.Key, []byte(msg)))
+}
+
+// MintWith sends POST /api/publish/sessions with the given proof.
+func (s *Server) MintWith(t testing.TB, deviceID int64, repo, nonce, signature string) (int, []byte) {
+	t.Helper()
+	return s.API(t, http.MethodPost, "/api/publish/sessions",
+		map[string]any{"device_id": deviceID, "repo": repo, "nonce": nonce, "signature": signature}, nil)
+}
+
+// Mint asks for a challenge and mints a session for repo with device d.
+func (s *Server) Mint(t testing.TB, d *Device, repo string) (int, []byte) {
+	t.Helper()
+	nonce := s.Challenge(t, d.ID)
+	return s.MintWith(t, d.ID, repo, nonce, d.Sign(nonce, repo))
+}
+
+// PublishSession is a minted session as the API returns it.
+type PublishSession struct {
+	ID    string // the {id} of DELETE /api/publish/sessions/{id}
+	Token string
+	Repo  string
+}
+
+// Auth returns Basic credentials that carry the session token.
+func (p PublishSession) Auth() Basic { return Basic{User: "publisher", Pass: p.Token} }
+
+// ParseSession decodes a mint answer {id, token, repo, expires_at}.
+func ParseSession(t testing.TB, b []byte) PublishSession {
+	t.Helper()
+	var raw struct {
+		ID    json.RawMessage `json:"id"`
+		Token string          `json:"token"`
+		Repo  string          `json:"repo"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatalf("decode publish session %s: %v", b, err)
+	}
+	if !strings.HasPrefix(raw.Token, "trs_") || len(raw.ID) == 0 {
+		t.Fatalf("publish session answer %s: want an id and a trs_ token", b)
+	}
+	return PublishSession{ID: strings.Trim(string(raw.ID), `"`), Token: raw.Token, Repo: raw.Repo}
+}
+
+// mustSession returns a function that fails the test unless st is 2xx and decodes the session,
+// so that a mint call's results pass straight in: mustSession(t, "mint")(s.Mint(t, d, repo)).
+func mustSession(t testing.TB, what string) func(st int, b []byte) PublishSession {
+	return func(st int, b []byte) PublishSession {
+		t.Helper()
+		if st/100 != 2 {
+			t.Fatalf("%s: status %d: %s", what, st, b)
+		}
+		return ParseSession(t, b)
+	}
+}
+
+// MintSession mints a session for repo with the user's cached device.
+func (s *Server) MintSession(t testing.TB, user, repo string) PublishSession {
+	t.Helper()
+	return mustSession(t, "mint a publish session for "+user+" on "+repo)(s.Mint(t, s.device(t, user), repo))
+}
+
+// PublishToken returns a new publish-session token of user for repo: the password for one
+// publish (any username). The user's TOTP factor and device are set up on first use and
+// cached per server; every call mints a new session.
+func PublishToken(t testing.TB, s *Server, user, repo string) string {
+	t.Helper()
+	return s.MintSession(t, user, repo).Token
+}
+
+// PublishAuth is PublishToken as Basic credentials with the user's name.
+func (s *Server) PublishAuth(t testing.TB, user, repo string) Basic {
+	t.Helper()
+	return Basic{User: user, Pass: PublishToken(t, s, user, repo)}
+}
+
+// ManualSession asks for a manual publish session of user for repo with a UI session and a
+// fresh TOTP code.
+func (s *Server) ManualSession(t testing.TB, sess *Session, user, repo string) (int, []byte) {
+	t.Helper()
+	return s.API(t, http.MethodPost, "/api/publish/sessions/manual", map[string]string{"repo": repo, "totp_code": s.TOTPCode(t, user)}, sess)
+}
+
+// OIDCSession exchanges a CI identity token for a publish session for repo.
+func (s *Server) OIDCSession(t testing.TB, token, repo string) (int, []byte) {
+	t.Helper()
+	return s.API(t, http.MethodPost, "/api/publish/sessions/oidc", map[string]string{"token": token, "repo": repo}, nil)
+}
+
+// CloseSession ends p with its own token and returns the status.
+func (s *Server) CloseSession(t testing.TB, p PublishSession) int {
+	t.Helper()
+	st, _ := s.API(t, http.MethodDelete, "/api/publish/sessions/"+p.ID, nil, p.Auth())
+	return st
 }

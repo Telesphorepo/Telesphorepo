@@ -111,6 +111,37 @@ func userPasswd(args []string) error {
 	})
 }
 
+// userReset2FA removes every second factor of a user who lost them all.
+func userReset2FA(args []string) error {
+	cmd := find(find(commands, "user").subs, "reset-2fa")
+	var name string
+	for _, a := range args {
+		switch {
+		case strings.HasPrefix(a, "-"):
+			return &usageError{fmt.Sprintf("unknown flag %q", a), cmd}
+		case name == "":
+			name = a
+		default:
+			return &usageError{fmt.Sprintf("unexpected argument %q", a), cmd}
+		}
+	}
+	if name == "" {
+		return &usageError{"missing user name", cmd}
+	}
+
+	return withUsers(func(ctx context.Context, as *auth.Service, _ string) error {
+		totp, passkeys, err := as.ResetSecondFactors(ctx, name)
+		if errors.Is(err, auth.ErrNotFound) {
+			return fmt.Errorf("no user %q", name)
+		} else if err != nil {
+			return fmt.Errorf("reset second factors: %w", err)
+		}
+		fmt.Printf("Removed %d authenticator app(s), %d passkey(s) and the recovery codes of %s.\n", totp, passkeys, name)
+		fmt.Printf("%s signs in with the password and adds a new second factor on the Security page.\n", name)
+		return nil
+	})
+}
+
 // withUsers opens the database in the CLI data dir and runs fn with an auth service.
 func withUsers(fn func(ctx context.Context, as *auth.Service, dataDir string) error) error {
 	dir, fromDev := config.CLIDataDir()

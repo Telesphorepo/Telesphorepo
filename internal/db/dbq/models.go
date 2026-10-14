@@ -17,7 +17,6 @@ type ApiToken struct {
 	CreatedAt  int64
 	ExpiresAt  sql.NullInt64
 	LastUsedAt sql.NullInt64
-	Kind       string
 }
 
 type Asset struct {
@@ -35,6 +34,41 @@ type Asset struct {
 
 type AssetsFt struct {
 	Path string
+}
+
+type AuthChallenge struct {
+	IDHash    []byte
+	Kind      string
+	UserID    sql.NullInt64
+	DeviceID  sql.NullInt64
+	Data      []byte
+	CreatedAt int64
+	ExpiresAt int64
+}
+
+type Device struct {
+	ID         int64
+	UserID     int64
+	Name       string
+	Kind       string
+	PublicKey  []byte
+	CreatedAt  int64
+	ExpiresAt  int64
+	LastUsedAt sql.NullInt64
+	RevokedAt  sql.NullInt64
+}
+
+type DeviceEnrollment struct {
+	DeviceCodeHash []byte
+	UserCode       string
+	Name           string
+	Kind           string
+	PublicKey      []byte
+	CreatedAt      int64
+	ExpiresAt      int64
+	PolledAt       int64
+	ApprovedBy     sql.NullInt64
+	DeviceID       sql.NullInt64
 }
 
 type NexusSource struct {
@@ -89,6 +123,43 @@ type NexusSyncRepo struct {
 	Failed       int64
 	State        string
 	Error        string
+}
+
+type PublishOidcSeen struct {
+	IDHash    []byte
+	ExpiresAt int64
+}
+
+type PublishSession struct {
+	ID         int64
+	PublicID   string
+	SecretHash []byte
+	RepoID     int64
+	UserID     sql.NullInt64
+	DeviceID   sql.NullInt64
+	TrustID    sql.NullInt64
+	Via        string
+	Subject    string
+	CreatedAt  int64
+	ExpiresAt  int64
+	ClosedAt   sql.NullInt64
+}
+
+type PublishTrust struct {
+	ID        int64
+	Name      string
+	Issuer    string
+	Audience  string
+	Claims    string
+	Jwks      string
+	CreatedBy sql.NullInt64
+	CreatedAt int64
+	Disabled  int64
+}
+
+type PublishTrustRepo struct {
+	TrustID int64
+	RepoID  int64
 }
 
 type Repo struct {
@@ -161,4 +232,31 @@ type User struct {
 	OidcIssuer        sql.NullString
 	OidcSubject       sql.NullString
 	Email             sql.NullString
+}
+
+type UserPasskey struct {
+	ID           int64
+	UserID       int64
+	CredentialID []byte
+	PublicKey    []byte
+	SignCount    int64
+	Credential   []byte
+	Name         string
+	CreatedAt    int64
+	LastUsedAt   sql.NullInt64
+}
+
+type UserRecoveryCode struct {
+	UserID   int64
+	CodeHash string
+	UsedAt   sql.NullInt64
+}
+
+type UserTotp struct {
+	ID        int64
+	UserID    int64
+	Secret    []byte
+	Name      string
+	CreatedAt int64
+	LastStep  int64
 }

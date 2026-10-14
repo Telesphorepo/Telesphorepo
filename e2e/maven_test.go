@@ -58,11 +58,12 @@ func TestMaven(t *testing.T) {
 		group := "com.example.e2e" + randHex(4)
 		groupPath := strings.ReplaceAll(group, ".", "/")
 		repoURL := s.InternalURL + "/maven/" + repo
-		deploySettings := ContainerFile{Path: "/work/settings.xml", Content: mavenSettingsXML(writer, writerPass)}
 		mounts := map[string]string{M2Volume: "/root/.m2/repository"}
 
+		// Each deploy runs with a new publish session, minted before the container starts.
 		deploy := func(version, message string) (int, string) {
 			t.Helper()
+			deploySettings := ContainerFile{Path: "/work/settings.xml", Content: mavenSettingsXML(writer, PublishToken(t, s, writer, repo))}
 			files := append(mavenLibProject(group, version, repoURL, message), deploySettings)
 			return RunClient(t, mavenImage, ClientOpts{
 				Cmd:     []string{"cd /work/lib && mvn -B -ntp -s /work/settings.xml deploy"},

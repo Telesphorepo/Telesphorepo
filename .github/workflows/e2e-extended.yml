@@ -1,0 +1,40 @@
+name: E2E extended
+
+on:
+  workflow_dispatch:
+    inputs:
+      zone:
+        description: E2E zone to run
+        type: choice
+        options: [import, scale, all]
+        default: import
+  schedule:
+    - cron: "0 4 * * 1" # weekly, Monday 04:00 UTC: import zone
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest # one runner label per job; change it here to switch runner provider
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - uses: oven-sh/setup-bun@v2
+      - name: Run the e2e zone
+        shell: bash
+        env:
+          ZONE: ${{ inputs.zone || 'import' }}
+        run: go tool task test "$ZONE" 2>&1 | tee e2e-extended.log
+      - name: Upload the test output
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-extended-log
+          path: e2e-extended.log

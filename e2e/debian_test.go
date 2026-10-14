@@ -39,24 +39,30 @@ func TestDebian(t *testing.T) {
 		s.CreateUser(t, reader, readerPass, false)
 		s.SetPermission(t, repo, writer, "write")
 		s.SetPermission(t, repo, reader, "read")
-		wauth := Basic{User: "ci", Pass: s.CreateToken(t, writer, writerPass, "deb-upload")}
+		// Each upload phase mints a new publish session, so no session outlives the default TTL
+		// while apt runs.
+		wauth := func() Auth { return Basic{User: "ci", Pass: PublishToken(t, s, writer, repo)} }
 		rauth := Basic{User: reader, Pass: readerPass}
 
 		// Upload: auth checks, created, idempotent re-upload, conflict.
 		if st, b := debUpload(t, s, repo, pkgs.hello1, nil); st != http.StatusUnauthorized {
 			t.Fatalf("anonymous upload: status %d, want 401: %s", st, b)
 		}
-		if st, b := debUpload(t, s, repo, pkgs.hello1, rauth); st != http.StatusForbidden {
-			t.Fatalf("reader upload: status %d, want 403: %s", st, b)
+		if st, b := debUpload(t, s, repo, pkgs.hello1, rauth); st != http.StatusUnauthorized {
+			t.Fatalf("upload with a reader password: status %d, want 401: %s", st, b)
 		}
-		debMustUpload(t, s, repo, pkgs.hello1, wauth, "e2e-hello", "1.0", "all")
-		if st, b := debUpload(t, s, repo, pkgs.hello1, wauth); st != http.StatusOK {
+		if st, b := debUpload(t, s, repo, pkgs.hello1, Basic{User: "ci", Pass: s.CreateToken(t, writer, writerPass, "deb-read")}); st != http.StatusUnauthorized {
+			t.Fatalf("upload with a read token: status %d, want 401: %s", st, b)
+		}
+		w := wauth()
+		debMustUpload(t, s, repo, pkgs.hello1, w, "e2e-hello", "1.0", "all")
+		if st, b := debUpload(t, s, repo, pkgs.hello1, w); st != http.StatusOK {
 			t.Fatalf("identical re-upload: status %d, want 200: %s", st, b)
 		}
-		if st, b := debUpload(t, s, repo, pkgs.hello1Conflict, wauth); st != http.StatusConflict {
+		if st, b := debUpload(t, s, repo, pkgs.hello1Conflict, w); st != http.StatusConflict {
 			t.Fatalf("conflicting upload: status %d, want 409: %s", st, b)
 		}
-		debMustUpload(t, s, repo, pkgs.native, wauth, "e2e-native", "1.0", pkgs.arch)
+		debMustUpload(t, s, repo, pkgs.native, w, "e2e-native", "1.0", pkgs.arch)
 
 		poolPath := "pool/main/e/e2e-hello/e2e-hello_1.0_all.deb"
 		if st, b := debGet(t, s, opts.S3, "/debian/"+repo+"/"+poolPath, rauth); st != http.StatusOK || !bytes.Equal(b, pkgs.hello1) {
@@ -82,7 +88,7 @@ func TestDebian(t *testing.T) {
 		}
 
 		// Second version → incremental rebuild picked up by a fresh client.
-		debMustUpload(t, s, repo, pkgs.hello2, wauth, "e2e-hello", "2.0", "all")
+		debMustUpload(t, s, repo, pkgs.hello2, wauth(), "e2e-hello", "2.0", "all")
 		s.WaitDebianIndexed(t, repo)
 		out = debAptInstall(t, s, repo, reader, readerPass, key)
 		if !strings.Contains(out, "RESULT: hello 2.0\n") {
@@ -90,7 +96,7 @@ func TestDebian(t *testing.T) {
 		}
 
 		debCheckIndexes(t, s, opts.S3, repo, rauth, key)
-		debCheckSecurity(t, s, opts.S3, repo, wauth, rauth)
+		debCheckSecurity(t, s, opts.S3, repo, wauth(), rauth)
 		debCheckArchRemoval(t, s, opts.S3, repo, archs, pkgs.arch, rauth)
 	})
 }
@@ -139,7 +145,7 @@ func TestDebianOversizeUpload(t *testing.T) {
 	repo := RandName("deb")
 	s.CreateRepo(t, repo, "debian", false, nil)
 	body := bytes.Repeat([]byte("x"), 256<<10)
-	if st, b := debUpload(t, s, repo, body, s.Admin()); st != http.StatusRequestEntityTooLarge {
+	if st, b := debUpload(t, s, repo, body, s.PublishAuth(t, "admin", repo)); st != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversize upload: status %d, want 413: %s", st, b)
 	}
 }

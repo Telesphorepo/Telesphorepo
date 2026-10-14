@@ -42,7 +42,7 @@ func TestAuth(t *testing.T) {
 
 	const artifact = "/maven/%s/com/example/auth/1.0/auth-1.0.txt"
 	path := strings.Replace(artifact, "%s", repo, 1)
-	resp, body := authPut(t, s, path, "hello", s.Admin())
+	resp, body := authPut(t, s, path, "hello", s.PublishAuth(t, "admin", repo))
 	wantStatus(t, resp, body, http.StatusCreated)
 
 	t.Run("wrong password on PUT", func(t *testing.T) {
@@ -61,7 +61,7 @@ func TestAuth(t *testing.T) {
 		anon := RandName("anon")
 		s.CreateRepo(t, anon, "maven", true, nil)
 		p := "/maven/" + anon + "/com/example/anon/1.0/anon-1.0.txt"
-		resp, body := authPut(t, s, p, "public", s.Admin())
+		resp, body := authPut(t, s, p, "public", s.PublishAuth(t, "admin", anon))
 		wantStatus(t, resp, body, http.StatusCreated)
 
 		resp, body = authGet(t, s, p, nil)
@@ -85,8 +85,10 @@ func TestAuth(t *testing.T) {
 		s.MustAPI(t, http.MethodPatch, "/api/users/"+u, map[string]any{"password": pw}, s.Admin(), nil)
 		resp, body := authGet(t, s, path, Basic{u, pw})
 		wantStatus(t, resp, body, http.StatusForbidden)
+		// Writes need a publish session; a password is refused before any permission check.
 		resp, body = authPut(t, s, path+".y", "x", Basic{u, pw})
-		wantStatus(t, resp, body, http.StatusForbidden)
+		wantStatus(t, resp, body, http.StatusUnauthorized)
+		wantChallenge(t, resp)
 	})
 
 	t.Run("read-only user", func(t *testing.T) {
@@ -96,7 +98,11 @@ func TestAuth(t *testing.T) {
 		resp, body := authGet(t, s, path, Basic{u, pw})
 		wantStatus(t, resp, body, http.StatusOK)
 		resp, body = authPut(t, s, path+".z", "x", Basic{u, pw})
-		wantStatus(t, resp, body, http.StatusForbidden)
+		wantStatus(t, resp, body, http.StatusUnauthorized)
+		// The user cannot mint a session for a repo it only reads.
+		if st, b := s.Mint(t, s.EnrollDevice(t, u), repo); st != http.StatusForbidden {
+			t.Fatalf("mint a publish session as a read-only user: status %d, want 403: %s", st, b)
+		}
 
 		group := "com.example.authdeploy" + randHex(4)
 		settings := `<settings><servers><server><id>tr</id><username>` + u + `</username><password>` + pw + `</password></server></servers>
@@ -113,8 +119,8 @@ func TestAuth(t *testing.T) {
 		if code == 0 {
 			t.Fatalf("mvn deploy as read-only user succeeded:\n%s", out)
 		}
-		if !strings.Contains(out, "403") {
-			t.Fatalf("mvn output lacks 403:\n%s", out)
+		if !strings.Contains(out, "401") {
+			t.Fatalf("mvn output lacks 401:\n%s", out)
 		}
 	})
 

@@ -19,6 +19,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/move"
 	"github.com/Telesphorepo/Telesphorepo/internal/nexus"
+	"github.com/Telesphorepo/Telesphorepo/internal/publish"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 )
@@ -31,6 +32,7 @@ type API struct {
 	settings *settings.Service
 	moves    *move.Service
 	nexus    *nexus.Service
+	publish  *publish.Service
 	sso      Routes
 }
 
@@ -41,9 +43,9 @@ type Routes interface {
 
 // New builds the API. sso (may be nil) mounts GET /api/auth/oidc/{login,callback}. The format
 // endpoints read the format registry (internal/format).
-func New(a *auth.Service, rs *repos.Service, as *assets.Service, st *settings.Service, mv *move.Service, nx *nexus.Service, sso Routes) *API {
+func New(a *auth.Service, rs *repos.Service, as *assets.Service, st *settings.Service, mv *move.Service, nx *nexus.Service, ps *publish.Service, sso Routes) *API {
 	return &API{
-		auth: a, repos: rs, assets: as, cfg: st.Config, settings: st, moves: mv, nexus: nx, sso: sso,
+		auth: a, repos: rs, assets: as, cfg: st.Config, settings: st, moves: mv, nexus: nx, publish: ps, sso: sso,
 	}
 }
 
@@ -51,7 +53,7 @@ func New(a *auth.Service, rs *repos.Service, as *assets.Service, st *settings.Se
 // The server mounts it at "/api/".
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/auth/login", a.login)
+	a.registerSecurity(mux) // sign-in (password, then second factor) and second-factor setup
 	mux.HandleFunc("POST /api/auth/logout", a.logout)
 	mux.HandleFunc("GET /api/auth/config", a.authConfig)
 	mux.HandleFunc("GET /api/me", a.me)
@@ -91,6 +93,7 @@ func (a *API) Handler() http.Handler {
 
 	a.registerMoves(mux)
 	a.registerNexus(mux)
+	a.registerPublish(mux)
 
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusNotFound, "not found")
@@ -126,7 +129,9 @@ func fail(w http.ResponseWriter, r *http.Request, err error) {
 	}
 }
 
-// user identifies the caller and requires authentication (401 JSON when anonymous).
+// user identifies the caller and requires authentication (401 JSON when anonymous). A
+// publish-session token gets 403: it only publishes, and only DELETE /api/publish/sessions/{id}
+// (which checks the token itself) takes it on the API.
 func (a *API) user(w http.ResponseWriter, r *http.Request) (*auth.Principal, bool) {
 	p, ok := a.auth.Identify(w, r, true)
 	if !ok {
@@ -134,6 +139,10 @@ func (a *API) user(w http.ResponseWriter, r *http.Request) (*auth.Principal, boo
 	}
 	if p == nil {
 		httpx.Error(w, http.StatusUnauthorized, "authentication required")
+		return nil, false
+	}
+	if p.Publish != nil {
+		httpx.Error(w, http.StatusForbidden, "a publish session token only publishes")
 		return nil, false
 	}
 	return p, true
@@ -165,6 +174,18 @@ func (a *API) adminRepo(w http.ResponseWriter, r *http.Request) (*repos.Repo, bo
 	return repo, true
 }
 
+// baseURL is the base_url setting, else the URL the request came in on.
+func (a *API) baseURL(r *http.Request) string {
+	if base := a.cfg().BaseURL; base != "" {
+		return base
+	}
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	return scheme + "://" + r.Host
+}
+
 type list[T any] struct {
 	Items []T     `json:"items"`
 	Next  *string `json:"next"`
@@ -179,25 +200,6 @@ func cursor(s string) *string {
 
 // --- auth ---
 
-func (a *API) login(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-	}
-	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
-		return
-	}
-	u, err := a.auth.Login(w, r, in.Username, in.Password)
-	if err != nil {
-		if errors.Is(err, auth.ErrNotFound) || errors.Is(err, auth.ErrInvalid) {
-			err = auth.ErrBadCredentials
-		}
-		fail(w, r, err)
-		return
-	}
-	httpx.WriteJSON(w, http.StatusOK, u)
-}
-
 func (a *API) logout(w http.ResponseWriter, r *http.Request) {
 	if err := a.auth.Logout(w, r); err != nil {
 		fail(w, r, err)
@@ -206,6 +208,8 @@ func (a *API) logout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// me returns the caller. second_factor_required is true for a UI session of a local account
+// without a TOTP factor or a passkey: that session reaches only the setup routes.
 func (a *API) me(w http.ResponseWriter, r *http.Request) {
 	p, ok := a.user(w, r)
 	if !ok {
@@ -216,7 +220,16 @@ func (a *API) me(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, u)
+	setupOnly := false
+	if p.Session && p.Kind == auth.KindLocal {
+		f, err := a.auth.ListFactors(r.Context(), p.UserID)
+		if err != nil {
+			fail(w, r, err)
+			return
+		}
+		setupOnly = !f.SecondFactor
+	}
+	httpx.WriteJSON(w, http.StatusOK, loginUser{u, setupOnly})
 }
 
 // --- tokens ---

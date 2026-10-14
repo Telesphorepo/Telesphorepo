@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest # one runner label per job; change it here to switch runner provider
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - uses: oven-sh/setup-bun@v2
+      - name: Build UI and binary
+        run: go tool task build
+      - name: Vet
+        run: |
+          go vet ./...
+          go vet -tags e2e ./e2e/...
+          go vet -tags import ./e2e/...
+          go vet -tags scale ./e2e/...
+          go vet -tags clients ./e2e/...
+      - name: Check the database
+        run: bin/telesphorepo dbcheck
+
+  e2e-core:
+    needs: build
+    runs-on: ubuntu-latest # one runner label per job; change it here to switch runner provider
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - uses: oven-sh/setup-bun@v2
+      - name: Run the core e2e zone
+        shell: bash
+        run: go tool task test 2>&1 | tee e2e-core.log
+      - name: Upload the test output
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-core-log
+          path: e2e-core.log
