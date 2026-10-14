@@ -16,6 +16,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
+	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 	"github.com/Telesphorepo/Telesphorepo/internal/signing"
 )
 
@@ -167,4 +168,61 @@ func (h *Handler) raiseClock(n int64) {
 		h.clock = n
 	}
 	h.clockMu.Unlock()
+}
+
+// SigningKeyChanged is a settings subscriber: when the signing key differs between old and new
+// it marks every unit with index files dirty so InRelease/Release.gpg are re-signed.
+func (h *Handler) SigningKeyChanged(old, new *settings.Snapshot) {
+	if fingerprint(old) == fingerprint(new) {
+		return
+	}
+	// Subscribers run inside the settings writer; do the DB work elsewhere.
+	go func() {
+		ctx := context.Background()
+		if err := h.resignAll(ctx); err != nil {
+			h.log.Error("debian: mark indexes dirty after signing key change", "err", err)
+		}
+	}()
+}
+
+func fingerprint(s *settings.Snapshot) string {
+	if s == nil || s.Signer == nil {
+		return ""
+	}
+	return s.Signer.Fingerprint()
+}
+
+func (h *Handler) resignAll(ctx context.Context) error {
+	var keys []distKey
+	err := h.db.Tx(ctx, func(tx *sql.Tx) error {
+		ts := h.tick()
+		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO deb_dirty (repo_id, distribution, component, architecture, marked_at)
+			SELECT DISTINCT repo_id, distribution,
+				substr(path, 1, instr(path, '/binary-') - 1),
+				substr(path, instr(path, '/binary-') + 8, instr(substr(path, instr(path, '/binary-') + 8), '/') - 1),
+				?
+			FROM deb_index_files WHERE path LIKE '%/binary-%/%'`, ts); err != nil {
+			return err
+		}
+		rows, err := tx.QueryContext(ctx, `SELECT DISTINCT repo_id, distribution FROM deb_dirty`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var k distKey
+			if err := rows.Scan(&k.repoID, &k.dist); err != nil {
+				return err
+			}
+			keys = append(keys, k)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return err
+	}
+	for _, k := range keys {
+		h.idx.notify(k)
+	}
+	return nil
 }

@@ -11,22 +11,18 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 )
 
-// backendKeys are the settings that select or address the blob store; a PATCH that changes one
-// of them must pass the storage probe before it is saved (spec §3).
-var backendKeys = map[string]bool{
-	settings.KeyStorage:           true,
-	settings.KeyFSRoot:            true,
-	settings.KeyS3Endpoint:        true,
-	settings.KeyS3Region:          true,
-	settings.KeyS3Bucket:          true,
-	settings.KeyS3AccessKeyID:     true,
-	settings.KeyS3SecretAccessKey: true,
-	settings.KeyS3Prefix:          true,
-	settings.KeyS3PathStyle:       true,
-}
+// ssoKeys are the settings whose change must pass the OIDC discovery check before it is saved.
+var ssoKeys = func() map[string]bool {
+	m := map[string]bool{}
+	for _, k := range settings.SSOKeys {
+		m[k] = true
+	}
+	return m
+}()
 
 type settingsGroup struct {
 	Name     string          `json:"name"`
+	Label    string          `json:"label"`
 	Settings []settings.Item `json:"settings"`
 }
 
@@ -43,15 +39,21 @@ func (a *API) settingsList(r *http.Request) settingsJSON {
 	out := settingsJSON{Groups: []settingsGroup{}}
 	for _, g := range settings.Groups {
 		if s := byGroup[g]; len(s) > 0 {
-			out.Groups = append(out.Groups, settingsGroup{g, s})
+			out.Groups = append(out.Groups, settingsGroup{g, settings.GroupLabels[g], s})
 		}
 	}
 	return out
 }
 
-// authConfig tells the UI which sign-in methods exist (M2 adds OIDC).
+// authConfig tells the UI which sign-in methods exist. password_login is always true (publishers
+// sign in with a password); admin_password_login false means local admins must use SSO.
 func (a *API) authConfig(w http.ResponseWriter, r *http.Request) {
-	httpx.WriteJSON(w, http.StatusOK, map[string]bool{"password_login": true})
+	c := a.cfg()
+	httpx.WriteJSON(w, http.StatusOK, map[string]bool{
+		"password_login":       true,
+		"oidc":                 c.OIDCEnabled(),
+		"admin_password_login": c.AdminPasswordLogin,
+	})
 }
 
 func (a *API) getSettings(w http.ResponseWriter, r *http.Request) {
@@ -76,11 +78,11 @@ func (a *API) decodePatch(w http.ResponseWriter, r *http.Request) (map[string]js
 	return patch, true
 }
 
-// changesBackend reports whether patch would change a storage backend setting's effective value.
-func changesBackend(items []settings.Item, patch map[string]json.RawMessage) bool {
+// changesAny reports whether patch would change the effective value of one of the keys isKey accepts.
+func changesAny(items []settings.Item, patch map[string]json.RawMessage, isKey func(string) bool) bool {
 	for _, it := range items {
 		raw, ok := patch[it.Key]
-		if !ok || !backendKeys[it.Key] || it.Locked {
+		if !ok || !isKey(it.Key) || it.Locked {
 			continue
 		}
 		if string(bytes.TrimSpace(raw)) == "null" {
@@ -133,7 +135,13 @@ func (a *API) patchSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items := a.settings.List(r.Context())
-	if changesBackend(items, patch) {
+	if changesAny(items, patch, func(k string) bool { return ssoKeys[k] }) {
+		if err := a.settings.TestOIDC(r.Context(), patch); err != nil {
+			a.settingsError(w, r, err, items)
+			return
+		}
+	}
+	if changesAny(items, patch, settings.IsStorageKey) {
 		if err := a.settings.TestStorage(r.Context(), patch); err != nil {
 			var ve *settings.ValidationError
 			if errors.As(err, &ve) {
@@ -163,6 +171,29 @@ func (a *API) testStorage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.settings.TestStorage(r.Context(), patch); err != nil {
+		body := map[string]any{"ok": false, "error": err.Error()}
+		var ve *settings.ValidationError
+		if errors.As(err, &ve) {
+			body["fields"] = ve.Fields
+		}
+		httpx.WriteJSON(w, http.StatusBadRequest, body)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// testOIDC validates the SSO settings patch would produce (merged over the current values, not
+// saved), including fetching the issuer's discovery document. {ok:true} or 400 {ok:false, error,
+// fields}.
+func (a *API) testOIDC(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.admin(w, r); !ok {
+		return
+	}
+	patch, ok := a.decodePatch(w, r)
+	if !ok {
+		return
+	}
+	if err := a.settings.TestOIDC(r.Context(), patch); err != nil {
 		body := map[string]any{"ok": false, "error": err.Error()}
 		var ve *settings.ValidationError
 		if errors.As(err, &ve) {

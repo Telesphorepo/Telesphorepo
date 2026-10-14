@@ -26,15 +26,25 @@ const (
 	TypeList     Type = "list"
 )
 
-// Groups in display order (UI sections; SSO arrives with M2).
+// Groups in display order (UI sections).
 const (
 	GroupGeneral  = "general"
 	GroupStorage  = "storage"
 	GroupSecurity = "security"
+	GroupSSO      = "sso"
 	GroupDebian   = "debian"
 )
 
-var Groups = []string{GroupGeneral, GroupStorage, GroupSecurity, GroupDebian}
+var Groups = []string{GroupGeneral, GroupStorage, GroupSecurity, GroupSSO, GroupDebian}
+
+// GroupLabels are the display names of the groups.
+var GroupLabels = map[string]string{
+	GroupGeneral:  "General",
+	GroupStorage:  "Storage",
+	GroupSecurity: "Security",
+	GroupSSO:      "Single sign-on",
+	GroupDebian:   "Debian",
+}
 
 // Def describes one setting. Its env override is TR_<KEY upper-cased, dots -> '_'>.
 type Def struct {
@@ -54,6 +64,12 @@ type Def struct {
 	storage bool
 	// apiReadOnly settings cannot be changed through Update (they have a dedicated endpoint).
 	apiReadOnly bool
+}
+
+// IsStorageKey reports whether key selects or configures the blob store.
+func IsStorageKey(key string) bool {
+	d := byKey[key]
+	return d != nil && d.storage
 }
 
 // Env is the environment variable that overrides this setting.
@@ -86,7 +102,36 @@ const (
 	KeyGPGKeyFile        = "gpg.key_file"
 	KeyGPGPassphraseFile = "gpg.passphrase_file"
 	KeySigningKey        = "debian.signing_key"
+
+	KeyOIDCIssuer         = "oidc.issuer"
+	KeyOIDCClientID       = "oidc.client_id"
+	KeyOIDCClientSecret   = "oidc.client_secret"
+	KeyOIDCRedirectURL    = "oidc.redirect_url"
+	KeyOIDCScopes         = "oidc.scopes"
+	KeyOIDCAdminClaim     = "oidc.admin_claim"
+	KeyOIDCAdminValues    = "oidc.admin_values"
+	KeyOIDCAdminEmails    = "oidc.admin_emails"
+	KeyOIDCSessionTTL     = "oidc.session_ttl"
+	KeyAdminPasswordLogin = "admin_password_login"
 )
+
+// SSOKeys are the settings whose change re-validates SSO by fetching the issuer's discovery
+// document (see Service.TestOIDC).
+var SSOKeys = []string{KeyOIDCIssuer, KeyOIDCClientID, KeyOIDCClientSecret, KeyOIDCRedirectURL, KeyOIDCScopes}
+
+func trim(v any) any { return strings.TrimSpace(v.(string)) }
+
+func httpURL(v any) error {
+	s := v.(string)
+	if s == "" {
+		return nil
+	}
+	u, err := url.Parse(s)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return errors.New("must be an http:// or https:// URL")
+	}
+	return nil
+}
 
 func lower(v any) any { return strings.ToLower(strings.TrimSpace(v.(string))) }
 
@@ -186,6 +231,54 @@ var registry = []*Def{
 			}
 			return nil
 		}},
+
+	// Single sign-on (OIDC, admins only)
+	{Key: KeyOIDCIssuer, Type: TypeString, Group: GroupSSO, Label: "OIDC issuer URL",
+		Help:      "Issuer of your identity provider, e.g. https://kc.example.com/realms/ops. Setting it enables \"Sign in with SSO\" for administrators; saving checks the issuer's discovery document.",
+		normalize: trim, Validate: httpURL},
+	{Key: KeyOIDCClientID, Type: TypeString, Group: GroupSSO, Label: "Client ID",
+		Help: "Client ID of the confidential client registered at the identity provider.", normalize: trim},
+	{Key: KeyOIDCClientSecret, Type: TypeString, Secret: true, Group: GroupSSO, Label: "Client secret"},
+	{Key: KeyOIDCRedirectURL, Type: TypeString, Group: GroupSSO, Label: "Redirect URL",
+		Help:      "Callback URL registered at the identity provider (default: <public base URL>/api/auth/oidc/callback).",
+		normalize: trim, Validate: httpURL},
+	{Key: KeyOIDCScopes, Type: TypeString, Default: "openid profile email", Group: GroupSSO, Label: "Scopes",
+		Help:      "Space-separated scopes requested at sign-in; openid is always included.",
+		normalize: func(v any) any { return strings.Join(strings.Fields(v.(string)), " ") }},
+	{Key: KeyOIDCAdminClaim, Type: TypeString, Default: "groups", Group: GroupSSO, Label: "Admin claim",
+		Help:      "ID token claim checked for admin rights; dotted paths allowed (realm_access.roles for Keycloak realm roles).",
+		normalize: trim,
+		Validate: func(v any) error {
+			s := v.(string)
+			if s == "" {
+				return errors.New("must not be empty")
+			}
+			for _, seg := range strings.Split(s, ".") {
+				if seg == "" {
+					return errors.New("must be a claim name or a dotted path such as realm_access.roles")
+				}
+			}
+			return nil
+		}},
+	{Key: KeyOIDCAdminValues, Type: TypeList, Group: GroupSSO, Label: "Admin claim values",
+		Help: "The admin claim (a string or a list) must contain one of these, e.g. repo-admins."},
+	{Key: KeyOIDCAdminEmails, Type: TypeList, Group: GroupSSO, Label: "Admin emails",
+		Help: "Additional allowlist of admin email addresses; matched only when the provider marks the email verified.",
+		normalize: func(v any) any {
+			l := v.([]string)
+			out := make([]string, 0, len(l))
+			for _, e := range l {
+				out = append(out, strings.ToLower(e))
+			}
+			if len(out) == 0 {
+				return []string(nil)
+			}
+			return out
+		}},
+	{Key: KeyOIDCSessionTTL, Type: TypeDuration, Default: "12h", Group: GroupSSO, Label: "SSO session lifetime",
+		Help: "Absolute lifetime of a UI sign-in through SSO."},
+	{Key: KeyAdminPasswordLogin, Type: TypeBool, Default: "true", Group: GroupSSO, Label: "Password sign-in for admins",
+		Help: "Off: local admins can no longer sign in to the UI with a password (publishers still can). Requires SSO. Break-glass: set TR_ADMIN_PASSWORD_LOGIN=true and restart."},
 
 	// Debian
 	{Key: KeyDebDebounce, Type: TypeDuration, Default: "2s", Group: GroupDebian, Label: "Index rebuild delay",

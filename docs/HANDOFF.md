@@ -5,15 +5,16 @@ Claude Code session, point it at this file plus `AGENTS.md`.
 
 ## State
 
-All of this is on `main`, pushed, and the e2e suite is green (24 tests; R2 runs skipped without
-credentials):
+All of this is on `main`, pushed, and the e2e suite is green (25 tests incl. a real Keycloak
+sign-in; R2 runs skipped without credentials):
 
 | Milestone | Status |
 |---|---|
 | M1: Maven (+ Gradle plugins) and Debian hosted repos, auth/tokens/permissions, FS + S3 storage, JSON API, UI shell, Dockerfile, e2e suite | done |
 | M1.1: DX — `go tool task dev/build/preview/test/doctor`, human CLI (`dev`, `user add/passwd`, `keygen`, `version`), Docker/Podman auto-detection, bun + Node 26 | done |
 | M1.2: in-app encrypted settings (env is only `TR_DATA_DIR`, `TR_LISTEN`, `TR_MASTER_KEY`), Settings page, SPEC.md, AGENTS.md, short README | done |
-| M2: OIDC admin sign-on (Keycloak or any OIDC IdP), §7.5 of the design | **next** |
+| M2: OIDC admin sign-on (Keycloak or any OIDC IdP; settings in the Settings page's SSO section), §7.5 | done |
+| M2.5: format plugins — make Maven/Debian ordinary plugins, add `raw` as the proof (§5.4) | **next** |
 | M3: `move` (FS ↔ S3) and `import nexus` | designed |
 | M4: full admin UI polish, deletes + blob/by-hash GC, scaling test | designed |
 | Future: publisher device keys + passkey/TOTP + short-lived minted tokens, Gradle plugin/CLI (§7.6) | designed |
@@ -43,17 +44,29 @@ Design spec (source of truth for what's next):
 
 ## Known gaps / small follow-ups
 
-- Changing the Debian signing key doesn't re-sign existing `InRelease`/`Release.gpg` until that
-  distribution next rebuilds. Fix: subscribe to signer changes and mark all Debian dists dirty.
-- `internal/api` keeps its own copy of which setting keys are "storage backend" keys, because
-  `settings.Def.storage` is unexported. Export it and delete the copy.
 - Debian `by-hash/` files are never pruned (planned for M4).
 - Changing a Debian repo's architecture list marks missing arches dirty, but removed arches keep
   their old index files.
+- The Settings page's SSO hint shows `<browser origin>/api/auth/oidc/callback`, which is wrong
+  when `oidc.redirect_url` or `base_url` is set to something else.
 
 ## Suggested next step
 
-Start M2 (OIDC admin sign-on). §7.5 has the full design: generic OIDC with PKCE via
-`golang.org/x/oauth2` + `github.com/coreos/go-oidc/v3`, admins-only SSO, publishers stay local
-users. Per §3, its settings (issuer, client id, client secret, admin claim/values) go into the
-settings registry and the Settings page's SSO section, not env vars. E2E uses a Keycloak container.
+**M2.5: format plugins** (design §5.4). The goal is that adding Cargo/npm/PyPI/Yum later means one
+new package plus one registration line. Today the core still names Maven/Debian in these places,
+which M2.5 removes:
+
+| Where | Coupling |
+|---|---|
+| `internal/db/migrations/0001_init.sql` | `CHECK (format IN ('maven','debian'))` |
+| `internal/repos` | format constants; validates Debian config itself |
+| `internal/api` | `/api/repos/{name}/debian/status`, `DebianStatus` interface, Debian config hook |
+| `internal/server` | hand-wires `maven.New` / `debian.New` |
+| `internal/settings/registry.go` | Debian settings group lives in core |
+| `cmd/telesphorepo/dev.go` | creates maven/debian demo repos and prints their snippets |
+| `web/src` (api.ts, Browser, Admin, Settings) | per-format snippets/config/status |
+| `web/vite.config.ts` | per-format proxy list |
+
+Acceptance: add the `raw` format touching only `internal/raw/`, `internal/formats/all.go` and
+`e2e/raw_test.go`. If anything else needs editing, the abstraction isn't done. Do this before M3,
+because `import nexus` would otherwise add more format-specific code to the core.

@@ -28,6 +28,9 @@ docker run -d -p 8080:8080 -v telesphorepo-data:/data telesphorepo:local
 - **Configuration:** sign in, then set up storage (local disk or S3/R2), the public URL, the
   Debian signing key and the rest on the **Settings** page. Changes apply without a restart, and
   secrets are stored encrypted.
+- **Single sign-on:** admins can sign in through an OIDC provider (Keycloak, Entra, Google...).
+  Set the issuer, client and admin group under **Settings > Single sign-on**, and register
+  `<public URL>/api/auth/oidc/callback` at the provider. Publishers keep passwords and tokens.
 - **Environment variables:** none are required. Three are optional:
 
 | Variable | Default | |

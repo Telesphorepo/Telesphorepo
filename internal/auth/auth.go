@@ -18,7 +18,26 @@ var (
 	ErrNotFound       = errors.New("not found")
 	ErrExists         = errors.New("already exists")
 	ErrInvalid        = errors.New("invalid input")
+	// ErrSSOAccount: the operation needs a local account (SSO accounts have no password and no
+	// API tokens).
+	ErrSSOAccount = errors.New("not available for SSO accounts")
+	// ErrPasswordLoginDisabled: admin_password_login is off and the user is a local admin.
+	ErrPasswordLoginDisabled = errors.New("password sign-in is disabled for administrators; sign in with SSO")
+	// ErrUsernameConflict: an SSO login's username belongs to a different account.
+	ErrUsernameConflict = errors.New("username belongs to another account")
+	// ErrDisabled: the account exists but is disabled.
+	ErrDisabled = errors.New("account disabled")
 )
+
+// Account kinds (users.kind).
+const (
+	KindLocal = "local"
+	KindOIDC  = "oidc"
+)
+
+// noPassword is the password_hash of accounts without a password (SSO). It is not a PHC string,
+// so verifyPassword never accepts it.
+const noPassword = "!"
 
 type Level int
 
@@ -43,7 +62,8 @@ type Principal struct {
 	UserID   int64
 	Username string
 	IsAdmin  bool
-	TokenID  int64 // non-zero when authenticated with an API token
+	TokenID  int64  // non-zero when authenticated with an API token
+	Kind     string // KindLocal or KindOIDC
 }
 
 type User struct {
@@ -51,6 +71,8 @@ type User struct {
 	Username  string    `json:"username"`
 	IsAdmin   bool      `json:"is_admin"`
 	Disabled  bool      `json:"disabled"`
+	Kind      string    `json:"kind"`  // "local" or "oidc"
+	Email     string    `json:"email"` // "" when unknown (SSO accounts only)
 	CreatedAt time.Time `json:"created_at"`
 }
 

@@ -1,0 +1,74 @@
+{
+  "realm": "e2e",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": false,
+  "groups": [
+    { "name": "repo-admins", "path": "/repo-admins" }
+  ],
+  "clients": [
+    {
+      "clientId": "telesphorepo",
+      "name": "Telesphorepo e2e",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "e2e-telesphorepo-client-secret",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["__REDIRECT_URI__"],
+      "webOrigins": [],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "groups",
+            "full.path": "false",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "alice",
+      "enabled": true,
+      "email": "alice@e2e.test",
+      "emailVerified": true,
+      "firstName": "Alice",
+      "lastName": "Admin",
+      "requiredActions": [],
+      "groups": ["/repo-admins"],
+      "credentials": [
+        { "type": "password", "value": "alice-e2e-password", "temporary": false }
+      ]
+    },
+    {
+      "username": "bob",
+      "enabled": true,
+      "email": "bob@e2e.test",
+      "emailVerified": true,
+      "firstName": "Bob",
+      "lastName": "User",
+      "requiredActions": [],
+      "groups": [],
+      "credentials": [
+        { "type": "password", "value": "bob-e2e-password", "temporary": false }
+      ]
+    }
+  ]
+}

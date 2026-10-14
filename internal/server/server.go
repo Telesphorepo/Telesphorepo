@@ -23,6 +23,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/debian"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/maven"
+	"github.com/Telesphorepo/Telesphorepo/internal/oidc"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 	"github.com/Telesphorepo/Telesphorepo/internal/storage"
@@ -130,6 +131,8 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 	if err != nil {
 		return fmt.Errorf("debian: %w", err)
 	}
+	// A new signing key re-signs every published Release (indexes are marked dirty).
+	set.Subscribe(deb.SigningKeyChanged)
 	mvn := maven.New(as, ss, set.Config)
 
 	mux := http.NewServeMux()
@@ -141,7 +144,8 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		io.WriteString(w, "ok\n")
 	})
-	mux.Handle("/api/", api.New(as, rs, ss, deb, set).Handler())
+	sso := oidc.New(as, set.Config, log.With("component", "oidc"))
+	mux.Handle("/api/", api.New(as, rs, ss, deb, set, sso).Handler())
 	mvn.Register(mux)
 	deb.Register(mux)
 	mux.Handle("/", web.Handler())

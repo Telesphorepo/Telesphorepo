@@ -23,7 +23,8 @@ proxy or cache repos and is not compatible with the Nexus API.
 | `internal/db` | SQLite (modernc, no cgo), WAL, separate writer/reader pools, embedded migrations |
 | `internal/storage` | `Store` interface; `fs`, `s3`, and `Live`, a hot-swappable wrapper with `Open`, `SameBackend` and `Probe` |
 | `internal/assets` | The `assets` table: spooled uploads, point lookups, downloads (stream or presigned redirect), listing, FTS search |
-| `internal/auth` | Users, argon2id passwords, Basic-auth cache, API tokens, sessions, rate limiting, permission checks |
+| `internal/auth` | Users (kinds `local`/`oidc`), argon2id passwords, Basic-auth cache, API tokens, sessions, rate limiting, permission checks |
+| `internal/oidc` | OIDC admin sign-on: `/api/auth/oidc/login` and `/callback` (go-oidc + x/oauth2, PKCE S256) |
 | `internal/repos` | Repos, per-format config (Debian architectures) |
 | `internal/maven` | `/maven/{repo}/...` GET/HEAD/PUT and the overwrite rules |
 | `internal/debian` | `.deb` upload/parse, durable dirty queue, debounced indexer, signing, `/keys/debian.asc` |
@@ -39,8 +40,8 @@ proxy or cache repos and is not compatible with the Nexus API.
 
 | Table | Key / indexes | Notes |
 |---|---|---|
-| `users` | PK `id`, UNIQUE `username` | argon2id PHC hash, `is_admin`, `disabled`, `password_changed_at` |
-| `api_tokens` | UNIQUE `public_id`, UNIQUE `(user_id, name)` | `secret_hash` = SHA-256(secret); optional `expires_at`; `last_used_at` written at most once per minute |
+| `users` | PK `id`, UNIQUE `username`, UNIQUE `users_oidc (oidc_issuer, oidc_subject)` where `oidc_subject` is set | argon2id PHC hash (`!` for SSO users, never verifies), `is_admin`, `disabled`, `password_changed_at`, `kind` (`local`/`oidc`), `email` |
+| `api_tokens` | UNIQUE `public_id`, UNIQUE `(user_id, name)` | `secret_hash` = SHA-256(secret); optional `expires_at`; `last_used_at` written at most once per minute; `kind` (`personal`, `minted` reserved for §7.6) |
 | `sessions` | PK `id_hash` (WITHOUT ROWID), idx `expires_at`, idx `user_id` | `id_hash` = SHA-256(cookie value) |
 | `repos` | UNIQUE `name` | `format` CHECK in (`maven`, `debian`); `anonymous_read`; `config` JSON |
 | `repo_permissions` | PK `(repo_id, user_id)`, idx `user_id` | `level` is `read` or `write` |
@@ -88,6 +89,7 @@ Precedence is env override, then DB row, then default. `telesphorepo dev` change
 | general | `base_url`, `log.level`, `max_upload_bytes`, `max_json_bytes` |
 | storage | `storage` (`fs`/`s3`, with `r2` as an alias for `s3`), `fs.root`, `s3.endpoint`, `s3.region`, `s3.bucket`, `s3.access_key_id`, `s3.secret_access_key`*, `s3.prefix`, `s3.path_style`, `s3.redirect`, `presign_ttl` |
 | security | `cookie.secure`, `session_ttl`, `trusted_proxies` |
+| sso | `oidc.issuer`, `oidc.client_id`, `oidc.client_secret`*, `oidc.redirect_url`, `oidc.scopes` (`openid profile email`), `oidc.admin_claim` (`groups`; dotted paths allowed), `oidc.admin_values`, `oidc.admin_emails`, `oidc.session_ttl` (`12h`), `admin_password_login` (`true`) |
 | debian | `deb.debounce`, `deb.max_delay`, `debian.signing_key`* (only through its own endpoint), `gpg.key_file`, `gpg.passphrase_file` |
 
 \* secret
@@ -103,14 +105,23 @@ Precedence is env override, then DB row, then default. `telesphorepo dev` change
 - **Storage changes.** A PATCH that changes a backend key runs the storage probe first
   (put/head/get/delete of `_telesphorepo/probe-<hex>`). Nothing is saved if the probe fails.
   Existing blobs are **not** moved.
+- **SSO changes.** SSO is on iff `oidc.issuer` is set; it then needs `oidc.client_id`, `oidc.client_secret` (confidential client) and at least
+  one of `oidc.admin_values` / `oidc.admin_emails`. The redirect URL is `oidc.redirect_url`, else
+  `base_url` + `/api/auth/oidc/callback`; one of them must be set. `admin_password_login=false` is
+  only accepted while the issuer is set. A PATCH that changes the issuer, client id/secret,
+  redirect URL or scopes fetches the discovery document first; on failure nothing is saved and the
+  error is under `fields["oidc.issuer"]`. The issuer is only whitespace-trimmed (trailing slashes
+  must match the IdP). Incomplete SSO settings in the DB (e.g. undecryptable secret) are logged
+  and turn SSO off at startup; invalid env values are a startup error.
 - **Startup validation.** Env values must be valid at startup, or the server refuses to start;
   `TR_STORAGE=s3` without a bucket, endpoint or keys is a startup error. An invalid or
   undecryptable DB value is logged and ignored. A `TR_*` variable that matches no setting or boot
   variable (`TR_E2E_*` and `TR_ENGINE` excepted) is logged as a warning by name and ignored.
 - **Signing key.** On first start the server generates an Ed25519 key, or imports the legacy
   `signing.asc`, and stores it encrypted in `debian.signing_key`. Setting `gpg.key_file` /
-  `TR_GPG_KEY_FILE` replaces it, and the file must then exist. Replacing the key does not re-sign
-  existing `InRelease`/`Release.gpg` until the next rebuild of that dist.
+  `TR_GPG_KEY_FILE` replaces it, and the file must then exist. Changing the key marks every
+  dist with index files dirty so `InRelease`/`Release.gpg` are re-signed (`debian.Handler.SigningKeyChanged`
+  is a settings subscriber).
 - **Lost master key.** Without the master key the secret settings cannot be decrypted and must be
   entered again.
 
@@ -139,19 +150,22 @@ JSON API (`/api/`). Auth is a session cookie or HTTP Basic. Errors are `{"error"
 
 | Method & path | Auth | Notes |
 |---|---|---|
-| `POST /api/auth/login` · `POST /api/auth/logout` | none · session | Login sets `tr_session` and returns the User |
-| `GET /api/auth/config` | none | `{password_login: true}` |
-| `GET /api/me` | any | Current user |
-| `GET/POST /api/tokens`, `DELETE /api/tokens/{id}` | any | The token is shown once. A token cannot mint tokens |
+| `POST /api/auth/login` · `POST /api/auth/logout` | none · session | Login sets `tr_session` and returns the User. 401 for SSO users; 403 for a local admin when `admin_password_login=false`. Logout ends the local session only |
+| `GET /api/auth/config` | none | `{password_login: true, oidc, admin_password_login}` |
+| `GET /api/auth/oidc/login` | none | 404 when SSO is off, 503 when discovery fails. Stores state/nonce/PKCE verifier in memory (10 min, single use, keyed by SHA-256(state)), sets `tr_oidc` (HttpOnly, SameSite=Lax, Path `/api/auth/oidc`, 600 s), 302 to the IdP |
+| `GET /api/auth/oidc/callback` | none | 400 for missing/mismatched/unknown/reused/expired state, state from before an issuer or client change, or missing `code`; 503 on discovery failure. Verifies the ID token (signature, issuer, audience, expiry, nonce) and the admin rule. Success: upsert user, session with `oidc.session_ttl`, 302 `/`. Failure: 302 `/#/login?error=` `not_authorized` \| `username_conflict` \| `invalid_username` \| `account_disabled` \| `sso_failed` |
+| `GET /api/me` | any | Current user. User JSON includes `kind` (`local`/`oidc`) and `email` (`""` when unset) |
+| `GET/POST /api/tokens`, `DELETE /api/tokens/{id}` | any | The token is shown once. A token cannot mint tokens. POST is 403 for SSO users |
 | `GET/POST /api/users`, `PATCH /api/users/{username}` | admin (self may change own password) | The user list is paginated |
 | `GET/POST /api/repos`, `GET/PATCH /api/repos/{name}` | any/anon · admin | The list shows only repos the caller can see |
 | `GET /api/repos/{name}/permissions`, `PUT/DELETE .../permissions/{username}` | admin | `{level: read\|write}` |
 | `GET /api/repos/{name}/assets?prefix=&after=&limit=` | read | Ordered by path; the prefix is a range scan |
 | `GET /api/search?q=&repo=&after=&limit=` | any/anon | FTS5 trigram, `q` ≥ 3 chars, readable repos only |
 | `GET /api/repos/{name}/debian/status` | read | `{pending}`: the count of dirty rows |
-| `GET /api/settings` | admin | `{groups:[{name, settings:[Item]}]}`. An Item has key, env, group, label, help, type, options, secret, value, default, source (`db`/`env`/`default`), locked, read_only |
-| `PATCH /api/settings` | admin | `{key: value}`. `null` resets a key; `""` for a secret means unchanged. Returns 400 `{error, fields}`, or 409 when an env-locked key gets a different value. Backend changes must pass the probe |
+| `GET /api/settings` | admin | `{groups:[{name, label, settings:[Item]}]}`. An Item has key, env, group, label, help, type, options, secret, value, default, source (`db`/`env`/`default`), locked, read_only |
+| `PATCH /api/settings` | admin | `{key: value}`. `null` resets a key; `""` for a secret means unchanged. Returns 400 `{error, fields}`, or 409 when an env-locked key gets a different value. Backend changes must pass the probe; SSO changes must pass discovery |
 | `POST /api/settings/storage/test` | admin | Same body as the PATCH, merged over the current values and not saved. Returns `{ok:true}`, or 400 `{ok:false, error}` |
+| `POST /api/settings/oidc/test` | admin | Same, for SSO discovery. Returns `{ok:true}`, or 400 `{ok:false, error, fields}` |
 | `GET/POST /api/settings/signing-key` | admin | Returns `{public_key, fingerprint}`. POST `{armored?}`: an empty value generates a new key. 409 when the key comes from `gpg.key_file` |
 
 ## Client setup
@@ -174,6 +188,17 @@ token as the password.
 | API token `trp_<12hex>_<secret>` | SHA-256(secret), looked up by id, constant-time compare | Basic password (any username), `/api/` |
 | Session `tr_session` | SHA-256(id), absolute `session_ttl` | `/api/` only. HttpOnly, SameSite=Strict, Secure per `cookie.secure` |
 
+- **Account kinds.** `local` users have a password, API tokens and Basic auth; publishers and the
+  break-glass admin. `oidc` users are created on their first SSO login, keyed by
+  `(oidc_issuer, oidc_subject)`, and are always admins. They have no usable password, cannot
+  create tokens, get 401 on Basic auth and password login, and cannot have their password changed
+  (403, also `user passwd`). Their session only comes from SSO.
+- **SSO admin rule.** The `oidc.admin_claim` (ID token, falling back to UserInfo; string or array)
+  must contain one of `oidc.admin_values`, or the email must be verified and in
+  `oidc.admin_emails`. It is re-checked at every SSO login: a refused login creates no user and
+  deletes an existing SSO user's sessions. The username is `preferred_username` lower-cased with
+  chars outside `[a-z0-9._-]` mapped to `-`; if a different account owns it the login fails
+  (`username_conflict`); accounts are never merged by name.
 - **Roles.** Admins can do everything. Repo permission `write` includes `read`. A disabled user
   fails authentication.
 - **CSRF.** `http.CrossOriginProtection` plus SameSite=Strict.
@@ -207,7 +232,7 @@ token as the password.
 | `telesphorepo [serve]` | Runs the server from the boot env and DB settings |
 | `telesphorepo dev` | Zero-config local server. Data goes in `./.telesphorepo-dev`, and the first run creates `admin` + demo repos `maven` and `debian` |
 | `telesphorepo user add NAME [--admin]` | Asks for the password twice on a TTY, or reads one line from a pipe |
-| `telesphorepo user passwd NAME` | Resets the password and signs out the user's sessions |
+| `telesphorepo user passwd NAME` | Resets the password and signs out the user's sessions. Refused for SSO users |
 | `telesphorepo keygen [FILE]` | Writes a new Ed25519 key (default `./signing.asc`; never overwrites) and prints the fingerprint |
 | `telesphorepo version` / `help [cmd]` | |
 
@@ -230,7 +255,9 @@ The suite is E2E only, with no unit tests and no mocks. `e2e/` builds the real i
 build with `E2E_SKIP_BUILD=1`, or override the image with `E2E_IMAGE`). It runs real `mvn`,
 `gradle` and `apt` clients in containers against the server. Each test runs on `fs` and on
 SeaweedFS S3 (`E2E_SEAWEEDFS_IMAGE`), plus R2 when the `TR_E2E_R2_*` vars are set. The engine
-comes from `internal/containerengine`; `TR_ENGINE=docker|podman` forces one.
+comes from `internal/containerengine`; `TR_ENGINE=docker|podman` forces one. `TestOIDC` runs a
+Keycloak container (`E2E_KEYCLOAK_IMAGE`, realm `e2e/testdata/keycloak/realm-e2e.json`) and
+drives the browser flow with a cookie-jar HTTP client.
 
 ## Not yet built
 
@@ -238,7 +265,6 @@ See the milestones in the design doc (§17).
 
 | Item | Milestone |
 |---|---|
-| OIDC admin sign-on, SSO settings group | M2 (§7.5) |
 | `telesphorepo move` (copy blobs between backends), `import nexus` | M3 (§11, §12) |
 | Full admin UI polish, deleting assets and deb packages, blob/by-hash GC, scaling test | M4 |
 | Publisher device keys, 2FA, short-lived tokens | Future (§7.6) |

@@ -3,12 +3,13 @@ import { api, ApiError, useAsync } from "../api";
 
 type Val = string | number | boolean | string[] | { set: boolean } | null;
 type Setting = { key: string; label: string; help?: string; type: "string" | "bool" | "int" | "duration" | "list"; options?: string[]; value: Val; secret: boolean; source: "db" | "env" | "default"; locked: boolean; read_only?: boolean };
-type Group = { name: string; settings: Setting[] };
+type Group = { name: string; label?: string; settings: Setting[] };
 type KeyInfo = { fingerprint?: string; public_key?: string };
 
-const show = (s: Setting) => (Array.isArray(s.value) ? s.value.join(", ") : String(s.value ?? ""));
+const show = (s: Setting) => (Array.isArray(s.value) ? s.value.join(s.type === "list" ? "\n" : ", ") : String(s.value ?? ""));
+const splitList = (v: string) => v.split(/[,\n]/).map((x) => x.trim()).filter(Boolean);
 const parse = (s: Setting, v: string): Val =>
-  s.type === "list" ? v.split(",").map((x) => x.trim()).filter(Boolean) : s.type === "int" ? (v === "" ? null : Number(v)) : v;
+  s.type === "int" ? (v === "" ? null : Number(v)) : v;
 
 function Field({ s, draft, error, replacing, set }: { s: Setting; draft: Val | undefined; error?: string; replacing: boolean; set: (v: Val | undefined) => void }) {
   const ro = s.locked || s.read_only;
@@ -20,6 +21,9 @@ function Field({ s, draft, error, replacing, set }: { s: Setting; draft: Val | u
     input = <span>{(s.value as { set: boolean })?.set ? "••• set" : "not set"}</span>;
   } else if (s.type === "bool") {
     input = <input type="checkbox" disabled={ro} checked={!!cur} onChange={(e) => set(e.target.checked)} />;
+  } else if (s.type === "list") {
+    input = <textarea className="grow" rows={Math.min(6, Math.max(2, String(cur ?? "").split("\n").length))} disabled={ro} autoComplete="off"
+      placeholder="comma or newline separated" value={String(cur ?? "")} onChange={(e) => set(e.target.value)} />;
   } else if (s.options?.length) {
     input = <select disabled={ro} value={String(cur)} onChange={(e) => set(e.target.value)}>{s.options.map((o) => <option key={o}>{o}</option>)}</select>;
   } else {
@@ -47,7 +51,10 @@ function Section({ g, reload, children }: { g: Group; reload: () => void; childr
   const [err, setErr] = useState("");
   const patch = () => {
     const p: Record<string, Val> = {};
-    for (const s of g.settings) if (s.key in draft && !s.locked) p[s.key] = s.secret && draft[s.key] === "" ? null : draft[s.key];
+    for (const s of g.settings) if (s.key in draft && !s.locked) {
+      const d = draft[s.key];
+      p[s.key] = s.secret && d === "" ? null : s.type === "list" && typeof d === "string" ? splitList(d) : d;
+    }
     return p;
   };
   const dirty = Object.keys(patch()).length > 0;
@@ -64,7 +71,7 @@ function Section({ g, reload, children }: { g: Group; reload: () => void; childr
   };
   return (
     <section>
-      <h2>{g.name[0].toUpperCase() + g.name.slice(1)}</h2>
+      <h2>{g.label || g.name[0].toUpperCase() + g.name.slice(1)}</h2>
       <div className="card">
         {g.settings.map((s) => (
           <Field key={s.key} s={s} draft={draft[s.key]} error={errs[s.key]} replacing={s.key in draft}
@@ -72,12 +79,35 @@ function Section({ g, reload, children }: { g: Group; reload: () => void; childr
         ))}
         {children?.(patch)}
         <div className="row">
-          <button className="primary" disabled={!dirty} onClick={save}>Save {g.name}</button>
+          <button className="primary" disabled={!dirty} onClick={save}>Save {g.label || g.name}</button>
           {msg && <span className="muted">{msg}</span>}
           {err && <span className="error">{err}</span>}
         </div>
       </div>
     </section>
+  );
+}
+
+function SSOExtras({ patch }: { patch: () => Record<string, Val> }) {
+  const [res, setRes] = useState<{ ok: boolean; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const test = async () => {
+    setBusy(true); setRes(null);
+    try { await api("POST", "/api/settings/oidc/test", patch()); setRes({ ok: true, text: "Discovery OK." }); }
+    catch (e) {
+      const f = e instanceof ApiError ? e.fields : undefined;
+      setRes({ ok: false, text: f ? Object.values(f).join("; ") : (e as Error).message });
+    }
+    setBusy(false);
+  };
+  return (
+    <>
+      <p className="muted">Register this redirect URL at your IdP: <code>{window.location.origin}/api/auth/oidc/callback</code> (used when no redirect URL or base URL is set below).</p>
+      <div className="row">
+        <button disabled={busy} onClick={test}>Test discovery</button>
+        {res && <span className={res.ok ? "muted" : "error"}>{res.text}</span>}
+      </div>
+    </>
   );
 }
 
@@ -149,7 +179,8 @@ export default function Settings() {
       {groups.map((g) => (
         <Section key={g.name} g={g} reload={reload}>
           {g.name.toLowerCase() === "storage" ? (patch) => <StorageExtras settings={g.settings} patch={patch} /> :
-            g.name.toLowerCase() === "debian" ? () => <DebianKey /> : undefined}
+            g.name.toLowerCase() === "debian" ? () => <DebianKey /> :
+            g.name.toLowerCase() === "sso" ? (patch) => <SSOExtras patch={patch} /> : undefined}
         </Section>
       ))}
     </>

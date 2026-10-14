@@ -86,11 +86,30 @@ type Config struct {
 	DebDebounce       time.Duration
 	DebMaxDelay       time.Duration
 
+	// OIDC admin sign-on (design doc §7.5). SSO is enabled iff OIDCIssuer is set.
+	OIDCIssuer         string
+	OIDCClientID       string
+	OIDCClientSecret   string
+	OIDCRedirectURL    string   // effective: oidc.redirect_url, else BaseURL + OIDCCallbackPath
+	OIDCScopes         []string // split on whitespace
+	OIDCAdminClaim     string   // dotted claim path, e.g. "groups" or "realm_access.roles"
+	OIDCAdminValues    []string
+	OIDCAdminEmails    []string
+	OIDCSessionTTL     time.Duration
+	AdminPasswordLogin bool // false: local admins cannot use UI password login
+
 	BootstrapAdminUser     string
 	BootstrapAdminPassword string
 
 	LogLevel slog.Level
 }
+
+// OIDCCallbackPath is the OIDC redirect endpoint, appended to BaseURL when oidc.redirect_url is
+// empty.
+const OIDCCallbackPath = "/api/auth/oidc/callback"
+
+// OIDCEnabled reports whether SSO is configured.
+func (c *Config) OIDCEnabled() bool { return c.OIDCIssuer != "" }
 
 // Provider returns the current effective configuration (an atomic snapshot; cheap to call on
 // every request).

@@ -12,12 +12,12 @@ import (
 
 const minPasswordLen = 8
 
-const userCols = `id, username, is_admin, disabled, created_at`
+const userCols = `id, username, is_admin, disabled, kind, COALESCE(email, ''), created_at`
 
 func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	u := &User{}
 	var created int64
-	if err := row.Scan(&u.ID, &u.Username, &u.IsAdmin, &u.Disabled, &created); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.IsAdmin, &u.Disabled, &u.Kind, &u.Email, &created); err != nil {
 		return nil, err
 	}
 	u.CreatedAt = time.Unix(created, 0)
@@ -43,7 +43,7 @@ func (s *Service) CreateUser(ctx context.Context, username, password string, adm
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
-	return &User{ID: id, Username: username, IsAdmin: admin, CreatedAt: time.Unix(now, 0)}, nil
+	return &User{ID: id, Username: username, IsAdmin: admin, Kind: KindLocal, CreatedAt: time.Unix(now, 0)}, nil
 }
 
 func (s *Service) GetUser(ctx context.Context, username string) (*User, error) {
@@ -95,11 +95,15 @@ func (s *Service) UpdateUser(ctx context.Context, username string, password *str
 	revoke := password != nil || (disabled != nil && *disabled)
 	var id int64
 	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
-		if err := tx.QueryRowContext(ctx, `SELECT id FROM users WHERE username = ?`, username).Scan(&id); err != nil {
+		var kind string
+		if err := tx.QueryRowContext(ctx, `SELECT id, kind FROM users WHERE username = ?`, username).Scan(&id, &kind); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return ErrNotFound
 			}
 			return err
+		}
+		if password != nil && kind != KindLocal {
+			return ErrSSOAccount // SSO accounts keep the unusable "!" hash
 		}
 		if password != nil {
 			if _, err := tx.ExecContext(ctx, `UPDATE users SET password_hash = ?, password_changed_at = ? WHERE id = ?`,
@@ -137,4 +141,60 @@ func (s *Service) HasUsers(ctx context.Context) (bool, error) {
 	var ok bool
 	err := s.db.R.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM users)`).Scan(&ok)
 	return ok, err
+}
+
+// UpsertOIDCUser creates or updates the SSO admin identified by (issuer, subject): is_admin is
+// set and the email updated. A new account gets username (already normalized); if that name
+// belongs to another account the result is ErrUsernameConflict (accounts are never merged by
+// name). A disabled account returns ErrDisabled.
+func (s *Service) UpsertOIDCUser(ctx context.Context, issuer, subject, username, email string) (*User, error) {
+	var mail any
+	if email != "" {
+		mail = email
+	}
+	var id int64
+	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
+		var disabled bool
+		err := tx.QueryRowContext(ctx,
+			`SELECT id, disabled FROM users WHERE oidc_issuer = ? AND oidc_subject = ? AND oidc_subject IS NOT NULL`,
+			issuer, subject).Scan(&id, &disabled)
+		switch {
+		case err == nil:
+			if disabled {
+				return ErrDisabled
+			}
+			_, err = tx.ExecContext(ctx, `UPDATE users SET is_admin = 1, email = ? WHERE id = ?`, mail, id)
+			return err
+		case !errors.Is(err, sql.ErrNoRows):
+			return err
+		}
+		if !repos.NameRE.MatchString(username) {
+			return ErrInvalid
+		}
+		now := time.Now().Unix()
+		res, err := tx.ExecContext(ctx, `INSERT INTO users
+			(username, password_hash, is_admin, disabled, password_changed_at, created_at, kind, oidc_issuer, oidc_subject, email)
+			VALUES (?, ?, 1, 0, ?, ?, ?, ?, ?, ?)`,
+			username, noPassword, now, now, KindOIDC, issuer, subject, mail)
+		if err != nil {
+			if strings.Contains(err.Error(), "users.username") {
+				return ErrUsernameConflict
+			}
+			return err
+		}
+		id, _ = res.LastInsertId()
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return scanUser(s.db.W.QueryRowContext(ctx, `SELECT `+userCols+` FROM users WHERE id = ?`, id))
+}
+
+// RevokeOIDCUser deletes the sessions of the SSO account (issuer, subject), if it exists. Used
+// when a login no longer qualifies as admin.
+func (s *Service) RevokeOIDCUser(ctx context.Context, issuer, subject string) error {
+	_, err := s.db.W.ExecContext(ctx, `DELETE FROM sessions WHERE user_id IN
+		(SELECT id FROM users WHERE oidc_issuer = ? AND oidc_subject = ? AND oidc_subject IS NOT NULL)`, issuer, subject)
+	return err
 }

@@ -104,13 +104,14 @@ func (s *Service) verifyUncached(ctx context.Context, keys []string, key [32]byt
 
 	var (
 		id              int64
-		hash            string
+		hash, kind      string
 		admin, disabled bool
 	)
 	err = s.db.R.QueryRowContext(ctx,
-		`SELECT id, password_hash, is_admin, disabled FROM users WHERE username = ?`, username).
-		Scan(&id, &hash, &admin, &disabled)
-	if errors.Is(err, sql.ErrNoRows) {
+		`SELECT id, password_hash, is_admin, disabled, kind FROM users WHERE username = ?`, username).
+		Scan(&id, &hash, &admin, &disabled, &kind)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && kind != KindLocal) {
+		// SSO accounts never authenticate with a password; same timing as an unknown user.
 		s.verifyPassword(ctx, s.dummyHash(ctx), password)
 		return nil, ErrBadCredentials
 	}
@@ -132,7 +133,7 @@ func (s *Service) verifyUncached(ctx context.Context, keys []string, key [32]byt
 	if err := s.db.R.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE id = ?`, id).Scan(&cur); err == nil && cur == hash {
 		s.cache.put(key, id, hash, gen)
 	}
-	return &Principal{UserID: id, Username: username, IsAdmin: admin}, nil
+	return &Principal{UserID: id, Username: username, IsAdmin: admin, Kind: kind}, nil
 }
 
 // principalByID re-reads the user so admin/disabled changes apply immediately.
@@ -143,9 +144,9 @@ func (s *Service) principalAndHash(ctx context.Context, id int64) (*Principal, s
 		disabled bool
 		hash     string
 	)
-	err := s.db.R.QueryRowContext(ctx, `SELECT username, is_admin, disabled, password_hash FROM users WHERE id = ?`, id).
-		Scan(&p.Username, &p.IsAdmin, &disabled, &hash)
-	if errors.Is(err, sql.ErrNoRows) || (err == nil && disabled) {
+	err := s.db.R.QueryRowContext(ctx, `SELECT username, is_admin, disabled, password_hash, kind FROM users WHERE id = ?`, id).
+		Scan(&p.Username, &p.IsAdmin, &disabled, &hash, &p.Kind)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && (disabled || p.Kind != KindLocal)) {
 		return nil, "", ErrBadCredentials
 	}
 	if err != nil {
@@ -157,8 +158,8 @@ func (s *Service) principalAndHash(ctx context.Context, id int64) (*Principal, s
 func (s *Service) principalByID(ctx context.Context, id int64) (*Principal, error) {
 	p := &Principal{UserID: id}
 	var disabled bool
-	err := s.db.R.QueryRowContext(ctx, `SELECT username, is_admin, disabled FROM users WHERE id = ?`, id).
-		Scan(&p.Username, &p.IsAdmin, &disabled)
+	err := s.db.R.QueryRowContext(ctx, `SELECT username, is_admin, disabled, kind FROM users WHERE id = ?`, id).
+		Scan(&p.Username, &p.IsAdmin, &disabled, &p.Kind)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && disabled) {
 		return nil, ErrBadCredentials
 	}

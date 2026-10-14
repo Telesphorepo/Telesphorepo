@@ -22,6 +22,8 @@ func hashSession(v string) ([]byte, bool) {
 	return sum[:], true
 }
 
+// Login checks a password for UI sign-in and starts a session. SSO accounts are refused like a
+// wrong password; local admins get ErrPasswordLoginDisabled when admin_password_login is off.
 func (s *Service) Login(w http.ResponseWriter, r *http.Request, username, password string) (*User, error) {
 	ctx := r.Context()
 	p, err := s.authenticate(ctx, s.clientIP(r), username, password, false)
@@ -33,19 +35,30 @@ func (s *Service) Login(w http.ResponseWriter, r *http.Request, username, passwo
 		}
 		return nil, err
 	}
+	if p.IsAdmin && !s.cfg().AdminPasswordLogin {
+		return nil, ErrPasswordLoginDisabled
+	}
+	if err := s.StartSession(w, r, p.UserID, s.cfg().SessionTTL); err != nil {
+		return nil, err
+	}
+	return s.GetUser(ctx, p.Username)
+}
 
+// StartSession creates a session for userID with an absolute ttl and sets the tr_session cookie.
+func (s *Service) StartSession(w http.ResponseWriter, r *http.Request, userID int64, ttl time.Duration) error {
+	ctx := r.Context()
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
-		return nil, err
+		return err
 	}
 	val := base64.RawURLEncoding.EncodeToString(raw)
 	h, _ := hashSession(val)
 	now := time.Now()
-	exp := now.Add(s.cfg().SessionTTL)
+	exp := now.Add(ttl)
 	if _, err := s.db.W.ExecContext(ctx,
 		`INSERT INTO sessions (id_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)`,
-		h, p.UserID, now.Unix(), exp.Unix()); err != nil {
-		return nil, err
+		h, userID, now.Unix(), exp.Unix()); err != nil {
+		return err
 	}
 	// Opportunistic bounded cleanup of expired sessions (served by sessions_expires).
 	s.db.W.ExecContext(ctx, `DELETE FROM sessions WHERE id_hash IN
@@ -53,10 +66,10 @@ func (s *Service) Login(w http.ResponseWriter, r *http.Request, username, passwo
 
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: val, Path: "/",
-		MaxAge: int(s.cfg().SessionTTL / time.Second), Expires: exp,
+		MaxAge: int(ttl / time.Second), Expires: exp,
 		HttpOnly: true, Secure: s.cfg().CookieSecure, SameSite: http.SameSiteStrictMode,
 	})
-	return s.GetUser(ctx, p.Username)
+	return nil
 }
 
 func (s *Service) Logout(w http.ResponseWriter, r *http.Request) error {
@@ -87,9 +100,9 @@ func (s *Service) sessionPrincipal(ctx context.Context, val string) (*Principal,
 		disabled bool
 	)
 	err := s.db.R.QueryRowContext(ctx, `
-		SELECT s.expires_at, u.id, u.username, u.is_admin, u.disabled
+		SELECT s.expires_at, u.id, u.username, u.is_admin, u.disabled, u.kind
 		FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id_hash = ?`, h).
-		Scan(&exp, &p.UserID, &p.Username, &p.IsAdmin, &disabled)
+		Scan(&exp, &p.UserID, &p.Username, &p.IsAdmin, &disabled, &p.Kind)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

@@ -38,6 +38,16 @@ func (s *Service) CreateToken(ctx context.Context, userID int64, name string, ex
 	if !validTokenName(name) || expiresIn < 0 {
 		return nil, "", ErrInvalid
 	}
+	var kind string
+	if err := s.db.R.QueryRowContext(ctx, `SELECT kind FROM users WHERE id = ?`, userID).Scan(&kind); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, "", ErrNotFound
+		}
+		return nil, "", err
+	}
+	if kind != KindLocal {
+		return nil, "", ErrSSOAccount
+	}
 	now := time.Now()
 	t := &Token{Name: name, CreatedAt: time.Unix(now.Unix(), 0)}
 	var exp sql.NullInt64
@@ -148,9 +158,9 @@ func (s *Service) verifyToken(ctx context.Context, tok string) (*Principal, erro
 		disabled  bool
 	)
 	err := s.db.R.QueryRowContext(ctx, `
-		SELECT t.id, t.secret_hash, t.expires_at, t.last_used_at, u.id, u.username, u.is_admin, u.disabled
+		SELECT t.id, t.secret_hash, t.expires_at, t.last_used_at, u.id, u.username, u.is_admin, u.disabled, u.kind
 		FROM api_tokens t JOIN users u ON u.id = t.user_id WHERE t.public_id = ?`, pub).
-		Scan(&p.TokenID, &hash, &exp, &used, &p.UserID, &p.Username, &p.IsAdmin, &disabled)
+		Scan(&p.TokenID, &hash, &exp, &used, &p.UserID, &p.Username, &p.IsAdmin, &disabled, &p.Kind)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrBadCredentials
 	}
@@ -159,7 +169,7 @@ func (s *Service) verifyToken(ctx context.Context, tok string) (*Principal, erro
 	}
 	sum := sha256.Sum256([]byte(sec))
 	now := time.Now().Unix()
-	if subtle.ConstantTimeCompare(sum[:], hash) != 1 || disabled || (exp.Valid && now >= exp.Int64) {
+	if subtle.ConstantTimeCompare(sum[:], hash) != 1 || disabled || p.Kind != KindLocal || (exp.Valid && now >= exp.Int64) {
 		return nil, ErrBadCredentials
 	}
 	if !used.Valid || now-used.Int64 >= 60 {

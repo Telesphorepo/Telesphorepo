@@ -33,10 +33,17 @@ type API struct {
 	debian   DebianStatus
 	cfg      config.Provider
 	settings *settings.Service
+	sso      Routes
 }
 
-func New(a *auth.Service, rs *repos.Service, as *assets.Service, deb DebianStatus, st *settings.Service) *API {
-	return &API{auth: a, repos: rs, assets: as, debian: deb, cfg: st.Config, settings: st}
+// Routes is a set of extra routes mounted on the API mux (the OIDC handler).
+type Routes interface {
+	Register(mux *http.ServeMux)
+}
+
+// New builds the API. sso (may be nil) mounts GET /api/auth/oidc/{login,callback}.
+func New(a *auth.Service, rs *repos.Service, as *assets.Service, deb DebianStatus, st *settings.Service, sso Routes) *API {
+	return &API{auth: a, repos: rs, assets: as, debian: deb, cfg: st.Config, settings: st, sso: sso}
 }
 
 // Handler returns the /api/ handler, already wrapped in http.CrossOriginProtection.
@@ -47,6 +54,9 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /api/auth/logout", a.logout)
 	mux.HandleFunc("GET /api/auth/config", a.authConfig)
 	mux.HandleFunc("GET /api/me", a.me)
+	if a.sso != nil {
+		a.sso.Register(mux)
+	}
 
 	mux.HandleFunc("GET /api/tokens", a.listTokens)
 	mux.HandleFunc("POST /api/tokens", a.createToken)
@@ -71,6 +81,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /api/settings", a.getSettings)
 	mux.HandleFunc("PATCH /api/settings", a.patchSettings)
 	mux.HandleFunc("POST /api/settings/storage/test", a.testStorage)
+	mux.HandleFunc("POST /api/settings/oidc/test", a.testOIDC)
 	mux.HandleFunc("GET /api/settings/signing-key", a.getSigningKey)
 	mux.HandleFunc("POST /api/settings/signing-key", a.setSigningKey)
 
@@ -91,6 +102,8 @@ func fail(w http.ResponseWriter, r *http.Request, err error) {
 		httpx.Error(w, http.StatusNotFound, "not found")
 	case errors.Is(err, auth.ErrExists), errors.Is(err, repos.ErrExists):
 		httpx.Error(w, http.StatusConflict, "already exists")
+	case errors.Is(err, auth.ErrSSOAccount), errors.Is(err, auth.ErrPasswordLoginDisabled):
+		httpx.Error(w, http.StatusForbidden, err.Error())
 	case errors.Is(err, auth.ErrBadCredentials):
 		httpx.Error(w, http.StatusUnauthorized, "invalid credentials")
 	case errors.Is(err, auth.ErrRateLimited):
@@ -225,6 +238,11 @@ func (a *API) createToken(w http.ResponseWriter, r *http.Request) {
 	// A token must not mint further tokens: that would escape its expiry (spec §7.1).
 	if p.TokenID != 0 {
 		httpx.Error(w, http.StatusForbidden, "cannot create tokens with an API token")
+		return
+	}
+	// SSO accounts are UI-only (spec §7.5).
+	if p.Kind != auth.KindLocal {
+		httpx.Error(w, http.StatusForbidden, "SSO accounts cannot create API tokens")
 		return
 	}
 	var in struct {

@@ -27,7 +27,7 @@ export default function App() {
   if (!ready) return null;
 
   // Anonymous visitors may still browse repos with anonymous read.
-  const loginRoute = route === "/login";
+  const loginRoute = route === "/login" || route.startsWith("/login?");
   if (loginRoute) return <Login onDone={async () => { await refresh(); go("/"); }} />;
 
   const logout = async () => { try { await api("POST", "/api/auth/logout"); } catch { /* ignore */ } setMe(null); go("/login"); };

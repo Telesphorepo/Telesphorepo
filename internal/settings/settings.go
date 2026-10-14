@@ -23,6 +23,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	gooidc "github.com/coreos/go-oidc/v3/oidc"
+
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
 	"github.com/Telesphorepo/Telesphorepo/internal/signing"
@@ -337,9 +339,61 @@ func (s *Service) build(rows map[string]any, lenient bool) (*Snapshot, error) {
 		}
 	}
 	snap.Config = c
+	strict := func(k string) bool { return !lenient || snap.sources[k] == SourceEnv }
+
+	// SSO (design doc §7.5).
+	c.OIDCIssuer = str(KeyOIDCIssuer)
+	c.OIDCClientID = str(KeyOIDCClientID)
+	c.OIDCClientSecret = str(KeyOIDCClientSecret)
+	c.OIDCRedirectURL = str(KeyOIDCRedirectURL)
+	if c.OIDCRedirectURL == "" && c.BaseURL != "" {
+		c.OIDCRedirectURL = c.BaseURL + config.OIDCCallbackPath
+	}
+	c.OIDCScopes = strings.Fields(str(KeyOIDCScopes))
+	if !slices.Contains(c.OIDCScopes, "openid") {
+		c.OIDCScopes = append([]string{"openid"}, c.OIDCScopes...)
+	}
+	c.OIDCAdminClaim = str(KeyOIDCAdminClaim)
+	c.OIDCAdminValues = snap.values[KeyOIDCAdminValues].([]string)
+	c.OIDCAdminEmails = snap.values[KeyOIDCAdminEmails].([]string)
+	c.OIDCSessionTTL = durationOf(snap.values[KeyOIDCSessionTTL])
+	c.AdminPasswordLogin = b(KeyAdminPasswordLogin)
+	if c.OIDCIssuer != "" {
+		sso := newVE()
+		if c.OIDCClientID == "" {
+			sso.add(KeyOIDCClientID, "required when SSO is enabled")
+		}
+		if c.OIDCClientSecret == "" {
+			sso.add(KeyOIDCClientSecret, "required when SSO is enabled")
+		}
+		if len(c.OIDCAdminValues) == 0 && len(c.OIDCAdminEmails) == 0 {
+			sso.add(KeyOIDCAdminValues, "set admin claim values or admin emails (at least one) when SSO is enabled")
+		}
+		if c.OIDCRedirectURL == "" {
+			sso.add(KeyOIDCRedirectURL, "required when SSO is enabled and the public base URL is empty")
+		}
+		if len(sso.Fields) > 0 {
+			if strict(KeyOIDCIssuer) {
+				for k, m := range sso.Fields {
+					ve.add(k, m)
+				}
+			} else {
+				// e.g. the client secret could not be decrypted: start without SSO.
+				s.log.Error("SSO settings incomplete; SSO is disabled until they are fixed", "error", sso.Error())
+				c.OIDCIssuer = ""
+			}
+		}
+	}
+	if !c.AdminPasswordLogin && c.OIDCIssuer == "" {
+		if strict(KeyAdminPasswordLogin) {
+			ve.add(KeyAdminPasswordLogin, "can be turned off only while SSO is enabled (set the OIDC issuer)")
+		} else {
+			s.log.Error("admin password sign-in is off but SSO is not enabled; allowing admin password sign-in")
+			c.AdminPasswordLogin = true
+		}
+	}
 
 	// Signing key: gpg.key_file wins over the stored key.
-	strict := func(k string) bool { return !lenient || snap.sources[k] == SourceEnv }
 	pass, err := signing.ReadPassphrase(c.GPGPassphraseFile)
 	if err != nil {
 		if strict(KeyGPGPassphraseFile) {
@@ -598,6 +652,31 @@ func (s *Service) TestStorage(ctx context.Context, patch map[string]json.RawMess
 		return err
 	}
 	return storage.Probe(ctx, st)
+}
+
+// TestOIDC checks the SSO configuration that patch would produce: the whole configuration must
+// validate, and when SSO is enabled the issuer's discovery document must be fetchable (10 s
+// timeout). Failures are *ValidationError; discovery errors are reported under oidc.issuer.
+// Nothing is saved.
+func (s *Service) TestOIDC(ctx context.Context, patch map[string]json.RawMessage) error {
+	cur := s.Current()
+	rows, _, ve := s.candidate(cur, patch)
+	if err := ve.orNil(); err != nil {
+		return err
+	}
+	next, err := s.build(rows, false)
+	if err != nil {
+		return err
+	}
+	if next.Config.OIDCIssuer == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if _, err := gooidc.NewProvider(ctx, next.Config.OIDCIssuer); err != nil {
+		return &ValidationError{Fields: map[string]string{KeyOIDCIssuer: "OIDC discovery failed: " + err.Error()}}
+	}
+	return nil
 }
 
 // SigningKeyInfo describes the active Debian signing key.

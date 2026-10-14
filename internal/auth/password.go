@@ -49,6 +49,9 @@ func (s *Service) hashPassword(ctx context.Context, password string) (string, er
 
 // verifyPassword checks password against a PHC argon2id string, using the parameters it encodes.
 func (s *Service) verifyPassword(ctx context.Context, encoded, password string) (bool, error) {
+	if encoded == noPassword || !strings.HasPrefix(encoded, "$argon2id$") {
+		return false, errBadHash
+	}
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 6 || parts[0] != "" || parts[1] != "argon2id" {
 		return false, errBadHash

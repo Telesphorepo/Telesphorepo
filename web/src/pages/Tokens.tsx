@@ -1,8 +1,10 @@
 import { useState } from "react";
-import { api, fmtTime, useAsync, type Token } from "../api";
+import { api, fmtTime, useAsync, type Token, type User } from "../api";
 
 export default function Tokens() {
-  const { data, error, reload } = useAsync(() => api<Token[]>("GET", "/api/tokens"), []);
+  const me = useAsync(() => api<User>("GET", "/api/me"), []);
+  const sso = me.data?.kind === "oidc";
+  const { data, error, reload } = useAsync(() => (sso ? Promise.resolve([] as Token[]) : api<Token[]>("GET", "/api/tokens")), [sso]);
   const [name, setName] = useState("");
   const [days, setDays] = useState("");
   const [created, setCreated] = useState<string>();
@@ -31,11 +33,12 @@ export default function Tokens() {
           <div className="row"><code className="mono grow">{created}</code><button onClick={copy}>{copied ? "Copied" : "Copy"}</button><button onClick={() => setCreated(undefined)}>Dismiss</button></div>
         </div>
       )}
-      <form className="row" onSubmit={create}>
+      {sso && <p className="muted">Access tokens are for publisher accounts. You are signed in through single sign-on, so tokens cannot be created for this account.</p>}
+      {!sso && <form className="row" onSubmit={create}>
         <input placeholder="Token name" required value={name} onChange={(e) => setName(e.target.value)} />
         <input type="number" min="1" placeholder="Expires in days (optional)" value={days} onChange={(e) => setDays(e.target.value)} />
         <button className="primary">Create</button>
-      </form>
+      </form>}
       {(err || error) && <p className="error">{err || error}</p>}
       <table>
         <thead><tr><th>Name</th><th>Created</th><th>Expires</th><th>Last used</th><th /></tr></thead>
@@ -49,7 +52,7 @@ export default function Tokens() {
           ))}
         </tbody>
       </table>
-      {data?.length === 0 && <p className="muted">No tokens.</p>}
+      {!sso && data?.length === 0 && <p className="muted">No tokens.</p>}
     </>
   );
 }

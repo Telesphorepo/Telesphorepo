@@ -32,14 +32,16 @@ function Users() {
       </form>
       {(err || error) && <p className="error">{err || error}</p>}
       <table>
-        <thead><tr><th>User</th><th>Admin</th><th>Disabled</th><th /></tr></thead>
+        <thead><tr><th>User</th><th>Type</th><th>Email</th><th>Admin</th><th>Disabled</th><th /></tr></thead>
         <tbody>
           {data?.map((u) => (
             <tr key={u.id}>
               <td>{u.username}</td>
+              <td>{u.kind === "oidc" ? "sso" : "local"}</td>
+              <td>{u.email || ""}</td>
               <td><input type="checkbox" checked={u.is_admin} onChange={(e) => patch(u, { is_admin: e.target.checked })} /></td>
               <td><input type="checkbox" checked={u.disabled} onChange={(e) => patch(u, { disabled: e.target.checked })} /></td>
-              <td><button onClick={() => { const p = prompt(`New password for ${u.username}`); if (p) patch(u, { password: p }); }}>Reset password</button></td>
+              <td>{u.kind !== "oidc" && <button onClick={() => { const p = prompt(`New password for ${u.username}`); if (p) patch(u, { password: p }); }}>Reset password</button>}</td>
             </tr>
           ))}
         </tbody>
