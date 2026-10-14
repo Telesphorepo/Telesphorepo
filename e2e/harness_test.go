@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"os"
+	osexec "os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -42,7 +44,10 @@ type ServerOpts struct {
 	Storage      string            // "fs" (default) | "s3"
 	S3           *S3Target         // required when Storage == "s3"
 	Files        []ContainerFile   // extra files copied into the server container
-	NoSigningKey bool              // do not configure TR_GPG_KEY_FILE
+	NoSigningKey bool              // do not configure TR_GPG_KEY_FILE (server auto-generates its key)
+	// NoBootstrapAdmin omits TR_BOOTSTRAP_ADMIN_*: the server creates "admin" with a random
+	// password and prints it in its startup banner; StartServer reads it from the logs.
+	NoBootstrapAdmin bool
 }
 
 type Server struct {
@@ -63,13 +68,15 @@ func StartServer(t testing.TB, opts ServerOpts) *Server {
 	}
 	adminPass := randHex(16)
 	env := map[string]string{
-		"TR_COOKIE_SECURE":            "false",
-		"TR_BOOTSTRAP_ADMIN_USER":     "admin",
-		"TR_BOOTSTRAP_ADMIN_PASSWORD": adminPass,
-		"TR_DEB_DEBOUNCE":             "300ms",
-		"TR_DEB_MAX_DELAY":            "3s",
-		"TR_LOG_LEVEL":                "debug",
-		"TR_BASE_URL":                 "http://" + opts.Alias + ":8080",
+		"TR_COOKIE_SECURE": "false",
+		"TR_DEB_DEBOUNCE":  "300ms",
+		"TR_DEB_MAX_DELAY": "3s",
+		"TR_LOG_LEVEL":     "debug",
+		"TR_BASE_URL":      "http://" + opts.Alias + ":8080",
+	}
+	if !opts.NoBootstrapAdmin {
+		env["TR_BOOTSTRAP_ADMIN_USER"] = "admin"
+		env["TR_BOOTSTRAP_ADMIN_PASSWORD"] = adminPass
 	}
 	var files []testcontainers.ContainerFile
 	if !opts.NoSigningKey {
@@ -110,7 +117,53 @@ func StartServer(t testing.TB, opts ServerOpts) *Server {
 	if err != nil {
 		t.Fatalf("server endpoint: %v", err)
 	}
-	return &Server{Container: c, URL: ep, InternalURL: "http://" + opts.Alias + ":8080", Alias: opts.Alias, AdminUser: "admin", AdminPass: adminPass}
+	srv := &Server{Container: c, URL: ep, InternalURL: "http://" + opts.Alias + ":8080", Alias: opts.Alias, AdminUser: "admin", AdminPass: adminPass}
+	if opts.NoBootstrapAdmin {
+		srv.AdminPass = srv.BannerPassword(t)
+	}
+	return srv
+}
+
+// bannerPasswordRe matches the "password: <pw>" line of the first-start admin banner; the
+// value stops at whitespace or a box-drawing border character.
+var bannerPasswordRe = regexp.MustCompile(`(?m)password:[ \t]*([^\s│|║┃*#]+)`)
+
+// BannerPassword returns the random admin password the server printed on first start
+// (no TR_BOOTSTRAP_ADMIN_*). It polls the logs briefly, since log delivery may lag /healthz.
+func (s *Server) BannerPassword(t testing.TB) string {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		logs := s.Logs(t)
+		if m := bannerPasswordRe.FindAllStringSubmatch(logs, -1); len(m) > 0 {
+			return m[len(m)-1][1]
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no \"password: ...\" bootstrap banner in server logs:\n%s", logs)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// Exec runs "<engine CLI> exec -i <container> args..." on the host with stdin fed from the
+// given string, returning the exit code and combined output. It goes through the real CLI
+// (not the API) so piped-stdin behaviour matches what an operator gets.
+func (s *Server) Exec(t testing.TB, stdin string, args ...string) (int, string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	argv := append([]string{"exec", "-i", s.GetContainerID()}, args...)
+	cmd := osexec.CommandContext(ctx, Engine.CLI, argv...)
+	cmd.Stdin = strings.NewReader(stdin)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		var ee *osexec.ExitError
+		if errors.As(err, &ee) {
+			return ee.ExitCode(), string(out)
+		}
+		t.Fatalf("%s %s: %v\n%s", Engine.CLI, strings.Join(argv, " "), err, out)
+	}
+	return 0, string(out)
 }
 
 // registerCleanup terminates c at test end, dumping its logs first if the test failed.

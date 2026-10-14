@@ -61,11 +61,30 @@ func joinOS(dir, name string) string {
 	return dir + string(os.PathSeparator) + name
 }
 
-func Load() (*Config, error) {
+// DefaultDataDir is the data directory when TR_DATA_DIR is unset (the image sets /data).
+const DefaultDataDir = "./data"
+
+// SigningKeyFileName is the auto-generated signing key's name inside the data dir.
+const SigningKeyFileName = "signing.asc"
+
+// DefaultSigningKeyFile is where the signing key lives when TR_GPG_KEY_FILE is unset.
+func (c *Config) DefaultSigningKeyFile() string { return joinOS(c.DataDir, SigningKeyFileName) }
+
+// DataDirFromEnv returns TR_DATA_DIR or DefaultDataDir, without loading the rest of the config.
+func DataDirFromEnv() string { return env("TR_DATA_DIR", DefaultDataDir) }
+
+// Load reads the configuration from TR_* environment variables.
+func Load() (*Config, error) { return LoadWithDefaults(nil) }
+
+// LoadWithDefaults is Load with overridden built-in defaults (keyed by env var name, e.g.
+// "TR_DATA_DIR"). Values set in the environment still win. Used by "telesphorepo dev".
+func LoadWithDefaults(defaults map[string]string) (*Config, error) {
+	overrides = defaults
+	defer func() { overrides = nil }()
 	var errs []string
 	c := &Config{
 		Listen:            env("TR_LISTEN", ":8080"),
-		DataDir:           env("TR_DATA_DIR", "/data"),
+		DataDir:           env("TR_DATA_DIR", DefaultDataDir),
 		BaseURL:           env("TR_BASE_URL", ""),
 		Storage:           strings.ToLower(env("TR_STORAGE", "fs")),
 		S3Endpoint:        env("TR_S3_ENDPOINT", ""),
@@ -79,6 +98,9 @@ func Load() (*Config, error) {
 
 		BootstrapAdminUser:     env("TR_BOOTSTRAP_ADMIN_USER", ""),
 		BootstrapAdminPassword: env("TR_BOOTSTRAP_ADMIN_PASSWORD", ""),
+	}
+	if (c.BootstrapAdminUser == "") != (c.BootstrapAdminPassword == "") {
+		errs = append(errs, "TR_BOOTSTRAP_ADMIN_USER and TR_BOOTSTRAP_ADMIN_PASSWORD must be set together")
 	}
 	if c.Storage == "r2" {
 		c.Storage = "s3"
@@ -145,8 +167,14 @@ func Load() (*Config, error) {
 	return c, nil
 }
 
+// overrides holds LoadWithDefaults' replacement defaults for the duration of a load.
+var overrides map[string]string
+
 func env(k, def string) string {
 	if v, ok := os.LookupEnv(k); ok && v != "" {
+		return v
+	}
+	if v, ok := overrides[k]; ok {
 		return v
 	}
 	return def

@@ -13,5 +13,9 @@ const keep = (): Plugin => ({
 export default defineConfig({
   plugins: [react(), keep()],
   build: { outDir: "dist", emptyOutDir: true },
-  server: { proxy: { "/api": "http://localhost:8080" } },
+  server: {
+    proxy: Object.fromEntries(
+      ["/api", "/maven", "/debian", "/keys", "/healthz"].map((p) => [p, "http://localhost:8080"]),
+    ),
+  },
 });

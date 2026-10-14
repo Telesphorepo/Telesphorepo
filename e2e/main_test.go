@@ -17,6 +17,8 @@ import (
 	"github.com/ProtonMail/go-crypto/openpgp/packet"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/network"
+
+	"telesphorepo/internal/containerengine"
 )
 
 const defaultImage = "telesphorepo-e2e:latest"
@@ -33,6 +35,9 @@ var (
 	SigningPublicKeyFile string
 	// RunID is unique per test-binary run (used in S3 prefixes, group ids, ...).
 	RunID string
+	// Engine is the detected container engine (docker or podman); its CLI is used for
+	// "build" and "exec -i" shell-outs.
+	Engine containerengine.Engine
 )
 
 func TestMain(m *testing.M) {
@@ -42,6 +47,18 @@ func TestMain(m *testing.M) {
 func runMain(m *testing.M) int {
 	ctx := context.Background()
 	RunID = randHex(6)
+
+	// Engine detection must precede every testcontainers call: it sets DOCKER_HOST (and the
+	// Ryuk privileged flag for Podman) in this process's environment.
+	eng, err := containerengine.Detect(ctx)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "e2e: no container engine:", err)
+		return 1
+	}
+	eng.ApplyEnv()
+	Engine = eng
+	fmt.Fprintf(os.Stderr, "e2e: container engine %s (cli %s, host %q)\n", eng.Name, eng.CLI, eng.Host)
+
 	if img := os.Getenv("E2E_IMAGE"); img != "" {
 		ServerImage = img
 	}
@@ -75,7 +92,8 @@ func runMain(m *testing.M) int {
 	return m.Run()
 }
 
-// buildImage shells out to "docker build" (BuildKit, respects .dockerignore and cache mounts).
+// buildImage shells out to "<engine> build" (docker: BuildKit; podman: buildah). Both respect
+// .dockerignore and RUN --mount=type=cache.
 func buildImage(ctx context.Context) error {
 	root, err := filepath.Abs("..")
 	if err != nil {
@@ -83,7 +101,7 @@ func buildImage(ctx context.Context) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "docker", "build", "-t", ServerImage, "-f", filepath.Join(root, "Dockerfile"), root)
+	cmd := exec.CommandContext(ctx, Engine.CLI, "build", "-t", ServerImage, "-f", filepath.Join(root, "Dockerfile"), root)
 	cmd.Env = append(os.Environ(), "DOCKER_BUILDKIT=1")
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out

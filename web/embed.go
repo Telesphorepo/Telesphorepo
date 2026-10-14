@@ -47,8 +47,7 @@ func Handler() http.Handler {
 		}
 		b, err := fs.ReadFile(sub, "index.html")
 		if err != nil {
-			http.Error(w, "UI not built", http.StatusNotFound)
-			return
+			b = []byte(notBuiltPage)
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache")
@@ -57,3 +56,28 @@ func Handler() http.Handler {
 		}
 	})
 }
+
+// notBuiltPage is served in place of the UI when web/dist has no index.html (only .keep).
+const notBuiltPage = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Telesphorepo - UI not built</title>
+<style>
+:root{color-scheme:light dark;--bg:#fafafa;--fg:#1d1d1f;--mute:#666;--code:#ececec}
+@media (prefers-color-scheme:dark){:root{--bg:#141416;--fg:#ededed;--mute:#a0a0a0;--code:#26262a}}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 system-ui,sans-serif}
+main{max-width:40rem;margin:0 auto;padding:3rem 1rem}
+h1{font-size:1.4rem;margin:0 0 .5rem}p{color:var(--mute)}
+pre{background:var(--code);padding:.75rem 1rem;border-radius:6px;overflow-x:auto}
+</style></head>
+<body><main>
+<h1>UI not built</h1>
+<p>The server is running, but this binary was built without the web UI. The Maven, Debian and JSON API endpoints work normally.</p>
+<p>Build the UI once, then restart the server with <code>go run</code> or rebuild it so the UI is embedded:</p>
+<pre>npm --prefix web install
+npm --prefix web run build</pre>
+<p>Or run the Vite dev server for hot reload (it proxies API calls to this server on :8080):</p>
+<pre>npm --prefix web run dev</pre>
+<p>and open <a href="http://localhost:5173">http://localhost:5173</a>.</p>
+</main></body></html>
+`

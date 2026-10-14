@@ -74,7 +74,7 @@ constantly) and serving straight from storage without DB rows (no fast 404, no s
 | Logging | `log/slog` (JSON) |
 | Frontend | React 19 + TypeScript + Vite, embedded with `go:embed`, no UI framework |
 | Tests | `go test` + `testcontainers-go` (behind `//go:build e2e`) |
-| Image | `node` → `golang` → `gcr.io/distroless/static-debian12:nonroot` |
+| Image | `oven/bun` → `golang` → `gcr.io/distroless/static-debian12:nonroot` |
 
 No other runtime dependencies without a written justification in this file.
 
@@ -590,7 +590,7 @@ search, my tokens (create/revoke), and simple admin pages (users, create repo, p
 The UI is purely a client of §10. No tests for the UI.
 
 ## 14. Docker image
-Multi-stage: `node:22-alpine` builds `web/` → `golang:1.27-alpine` builds with
+Multi-stage: `oven/bun` builds `web/` → `golang:1.27-alpine` builds with
 `CGO_ENABLED=0 -trimpath -ldflags="-s -w"` → `gcr.io/distroless/static-debian12:nonroot`.
 `VOLUME /data`, `EXPOSE 8080`, `ENTRYPOINT ["/telesphorepo"]`, `CMD ["serve"]`. The nonroot user is
 uid 65532; the data volume must be writable by it.
@@ -628,26 +628,35 @@ Gotchas for test authors:
 
 ## 16. Developer experience **[M1.1]**
 
-Three ways to run, from lightest to fullest; all work on macOS, Linux and Windows:
-1. **Native:** `go run ./cmd/telesphorepo dev` (UI: `npm --prefix web run dev` for hot reload,
-   proxied to :8080, or `npm --prefix web run build` once to embed it).
-2. **Container stack:** `go run ./tools/stack up` builds the image and starts it with persistent
-   data; `go run ./tools/stack up s3` adds a Garage S3 server and points the app at it;
-   `down`, `logs`, `reset` (deletes stack data after confirmation). Uses `compose.yaml`, which also
-   works directly with `docker compose up` / `podman compose up`.
-3. **E2E:** `go test -tags e2e ./e2e/...`.
+**One command to run everything locally**, mirroring `bun run dev / build / preview`. The root
+`package.json` holds scripts only (no dependencies); each delegates to a cross-platform Go tool
+(`tools/run`), so behaviour is identical on Windows, macOS and Linux and nothing needs bash or make.
+`npm run <script>` works the same, but bun is the preferred and canonical package manager.
 
-**Container engine auto-detection** (`internal/containerengine`, used by `tools/stack` and the e2e
-harness; not linked into the server binary): honour `TR_ENGINE=docker|podman` and an existing
-`DOCKER_HOST`; otherwise use Docker if its daemon responds, else Podman: socket from
-`podman info` (Linux rootless/rootful) or `podman machine inspect` (macOS unix socket, Windows named
-pipe); then set `DOCKER_HOST` and, for Podman, `TESTCONTAINERS_RYUK_CONTAINER_PRIVILEGED=true` for
-testcontainers. Clear error listing what was tried when nothing is found.
+| Command | What it does |
+|---|---|
+| `bun run dev` | Checks the environment (Go version from `go.mod`; bun, else npm, else a clear install hint). Installs web deps when `node_modules` is missing or the lockfile changed. Starts the backend (`telesphorepo dev`, §4) on :8080 and rebuilds/restarts it when `.go`, `go.mod` or migration files change (polling watcher, no extra deps; a failed build keeps the old process running and prints the error). Starts Vite with HMR on :5173, proxying `/api`, `/maven`, `/debian`, `/keys` to :8080. Interleaved, prefixed logs (`api │`, `web │`). Prints one banner: open http://localhost:5173, admin username/password, data dir. Ctrl+C stops both cleanly. |
+| `bun run build` | Same checks/installs, builds the UI, then `bin/telesphorepo` (`.exe` on Windows) with the UI embedded, `CGO_ENABLED=0`, version stamped from git. `bun run build image` also builds the container image `telesphorepo:local` with the detected engine. |
+| `bun run preview` | `build`, then runs `bin/telesphorepo dev` on :8080 — the production binary with the embedded UI, local dev data. |
+| `bun run test` | Runs the e2e suite (`go test -tags e2e ./e2e/... -count=1`); extra args pass through, e.g. `bun run test -run TestMaven`. |
+| `bun run doctor` | Prints what was detected (Go, bun/npm, container engine) and what is missing. |
 
-**S3 test targets:** SeaweedFS and **Garage** (`dxflrs/garage`, configured via its CLI: layout
-assign/apply, key import, bucket create/allow, region `garage`) both run in e2e via
-`ForEachStorage`; real R2 runs when `TR_E2E_R2_*` is set. Garage is the closest local stand-in for
-R2's strict S3 behaviour (SigV4 region checks, no ACLs).
+Production is the container image (or `bin/telesphorepo serve`) configured by `TR_*` env (§3).
+
+**Package manager:** the web app's committed lockfile is `web/bun.lock`; the Dockerfile's UI stage
+uses the official `oven/bun` image with `bun install --frozen-lockfile`. The npm fallback runs
+`npm install` and prints a note that bun is preferred.
+
+**Container engine auto-detection** (`internal/containerengine`, used by `tools/run` and the e2e
+harness; not linked into the server): honour `TR_ENGINE=docker|podman` and an existing `DOCKER_HOST`;
+otherwise Docker if its daemon responds, else Podman: socket from `podman info` (Linux rootless or
+rootful) or `podman machine inspect` (macOS unix socket, Windows named pipe); then set `DOCKER_HOST`
+and, for Podman, `TESTCONTAINERS_RYUK_CONTAINER_PRIVILEGED=true`. A clear error lists what was tried
+(e.g. "podman machine exists but is stopped: run podman machine start").
+
+**Local S3 for tests:** e2e uses one S3-compatible server, **SeaweedFS**, so the S3 storage adapter
+is tested without a real bucket. `ForEachStorage` runs `fs`, `seaweedfs`, and `r2` (only when the
+`TR_E2E_R2_*` env vars are set).
 
 ## 17. Milestones
 - **M1 (now)**: everything marked [M1]: config, DB, storage FS+S3, auth, Maven, Debian, JSON API,
