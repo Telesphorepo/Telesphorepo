@@ -26,16 +26,18 @@ const (
 	TypeList     Type = "list"
 )
 
-// Groups in display order (UI sections).
+// Core groups. Format plugins add one group each (see Register).
 const (
 	GroupGeneral  = "general"
 	GroupStorage  = "storage"
 	GroupSecurity = "security"
 	GroupSSO      = "sso"
-	GroupDebian   = "debian"
+	GroupSigning  = "signing"
 )
 
-var Groups = []string{GroupGeneral, GroupStorage, GroupSecurity, GroupSSO, GroupDebian}
+// Groups lists the groups in display order (UI sections): the core groups, then the plugin
+// groups in registration order.
+var Groups = []string{GroupGeneral, GroupStorage, GroupSecurity, GroupSSO, GroupSigning}
 
 // GroupLabels are the display names of the groups.
 var GroupLabels = map[string]string{
@@ -43,7 +45,7 @@ var GroupLabels = map[string]string{
 	GroupStorage:  "Storage",
 	GroupSecurity: "Security",
 	GroupSSO:      "Single sign-on",
-	GroupDebian:   "Debian",
+	GroupSigning:  "Signing",
 }
 
 // Def describes one setting. Its env override is TR_<KEY upper-cased, dots -> '_'>.
@@ -51,6 +53,7 @@ type Def struct {
 	Key     string
 	Type    Type
 	Default string // text form, parsed like an env value ("" = empty/none)
+	Dev     string // default of "telesphorepo dev" instead of Default ("" = same as Default)
 	Secret  bool
 	Group   string
 	Label   string
@@ -97,11 +100,9 @@ const (
 	KeyCookieSecure      = "cookie.secure"
 	KeySessionTTL        = "session_ttl"
 	KeyTrustedProxies    = "trusted_proxies"
-	KeyDebDebounce       = "deb.debounce"
-	KeyDebMaxDelay       = "deb.max_delay"
 	KeyGPGKeyFile        = "gpg.key_file"
 	KeyGPGPassphraseFile = "gpg.passphrase_file"
-	KeySigningKey        = "debian.signing_key"
+	KeySigningKey        = "signing.key"
 
 	KeyOIDCIssuer         = "oidc.issuer"
 	KeyOIDCClientID       = "oidc.client_id"
@@ -217,7 +218,7 @@ var registry = []*Def{
 	{Key: KeyPresignTTL, Type: TypeDuration, Default: "5m", Group: GroupStorage, Label: "Presigned URL lifetime"},
 
 	// Security
-	{Key: KeyCookieSecure, Type: TypeBool, Default: "true", Group: GroupSecurity, Label: "Secure session cookie",
+	{Key: KeyCookieSecure, Type: TypeBool, Default: "true", Dev: "false", Group: GroupSecurity, Label: "Secure session cookie",
 		Help: "Send the session cookie only over HTTPS. Turn off only for plain-HTTP setups."},
 	{Key: KeySessionTTL, Type: TypeDuration, Default: "168h", Group: GroupSecurity, Label: "Session lifetime",
 		Help: "Absolute lifetime of a UI sign-in."},
@@ -280,18 +281,14 @@ var registry = []*Def{
 	{Key: KeyAdminPasswordLogin, Type: TypeBool, Default: "true", Group: GroupSSO, Label: "Password sign-in for admins",
 		Help: "Off: local admins can no longer sign in to the UI with a password (publishers still can). Requires SSO. Break-glass: set TR_ADMIN_PASSWORD_LOGIN=true and restart."},
 
-	// Debian
-	{Key: KeyDebDebounce, Type: TypeDuration, Default: "2s", Group: GroupDebian, Label: "Index rebuild delay",
-		Help: "Quiet period after an upload before the Debian indexes are rebuilt."},
-	{Key: KeyDebMaxDelay, Type: TypeDuration, Default: "30s", Group: GroupDebian, Label: "Max index rebuild delay",
-		Help: "Longest a rebuild waits under continuous uploads."},
-	{Key: KeySigningKey, Type: TypeString, Secret: true, Group: GroupDebian, Label: "Signing key",
-		Help:        "Armored OpenPGP private key that signs the Debian indexes. Generated on first start; upload or regenerate it here.",
+	// Signing
+	{Key: KeySigningKey, Type: TypeString, Secret: true, Group: GroupSigning, Label: "Signing key",
+		Help:        "Armored OpenPGP private key that signs repository indexes. Generated on first start; upload or regenerate it here.",
 		apiReadOnly: true},
-	{Key: KeyGPGKeyFile, Type: TypeString, Group: GroupDebian, Label: "Signing key file",
+	{Key: KeyGPGKeyFile, Type: TypeString, Group: GroupSigning, Label: "Signing key file",
 		Help:      "Path of a mounted armored private key; when set it replaces the stored signing key.",
 		normalize: func(v any) any { return strings.TrimSpace(v.(string)) }},
-	{Key: KeyGPGPassphraseFile, Type: TypeString, Group: GroupDebian, Label: "Signing key passphrase file",
+	{Key: KeyGPGPassphraseFile, Type: TypeString, Group: GroupSigning, Label: "Signing key passphrase file",
 		Help:      "Path of a file holding the signing key's passphrase (only for encrypted keys).",
 		normalize: func(v any) any { return strings.TrimSpace(v.(string)) }},
 }
@@ -303,6 +300,30 @@ var byKey = func() map[string]*Def {
 	}
 	return m
 }()
+
+// Register adds a settings group contributed by a format plugin: group is the format name and
+// label its title. Every Def gets Group = group. It must run before Load, once per process;
+// a key or group that already exists is an error.
+func Register(group, label string, defs []Def) error {
+	if _, ok := GroupLabels[group]; ok {
+		return fmt.Errorf("settings: group %q already registered", group)
+	}
+	seen := map[string]bool{}
+	for _, d := range defs {
+		if byKey[d.Key] != nil || seen[d.Key] {
+			return fmt.Errorf("settings: key %q already registered", d.Key)
+		}
+		seen[d.Key] = true
+	}
+	for _, d := range defs {
+		d.Group = group
+		registry = append(registry, &d)
+		byKey[d.Key] = &d
+	}
+	Groups = append(Groups, group)
+	GroupLabels[group] = label
+	return nil
+}
 
 // Definitions returns the setting registry in display order.
 func Definitions() []*Def { return registry }

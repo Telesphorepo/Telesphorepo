@@ -9,6 +9,7 @@ import (
 
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
+	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
@@ -91,6 +92,8 @@ type Permission struct {
 
 type Service struct {
 	db    *db.DB
+	rq    *dbq.Queries // reads, on the read pool
+	wq    *dbq.Queries // writes, on the write pool
 	cfg   config.Provider
 	repos *repos.Service
 
@@ -111,7 +114,7 @@ func New(d *db.DB, cfg config.Provider, rs *repos.Service) *Service {
 	secret := make([]byte, 32)
 	rand.Read(secret)
 	return &Service{
-		db: d, cfg: cfg, repos: rs,
+		db: d, rq: dbq.New(d.R), wq: dbq.New(d.W), cfg: cfg, repos: rs,
 		secret:  secret,
 		sem:     make(chan struct{}, 4),
 		cache:   newVerifyCache(),

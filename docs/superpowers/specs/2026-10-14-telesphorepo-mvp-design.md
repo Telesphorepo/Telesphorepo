@@ -380,10 +380,11 @@ migrations, `Start`, settings and status.
 **Core changes:**
 - Schema: drop the `repos.format` CHECK (migration rebuilds `repos` once); the format is validated
   against the registry instead. Format tables keep a format prefix (`deb_*`, `cargo_*`).
-- Migrations: core migrations stay on `PRAGMA user_version`; each `Migrator` gets its own track in
-  `schema_migrations(component TEXT, version INTEGER, PRIMARY KEY(component))`, applied after core.
-  The existing `deb_*` tables move from `0001_init.sql` ownership to the debian plugin's track by
-  recording them as already applied (no data movement).
+- Migrations: every owner (core, and each `Migrator` plugin) has its own track in
+  `schema_migrations(component TEXT PRIMARY KEY, version INTEGER NOT NULL)`; core is applied first.
+  Nobody runs the system yet, so each track starts as one `0001_init.sql`: core's holds the core
+  tables, and the debian plugin's holds the `deb_*` tables. A track gets a second file only once a
+  release has shipped.
 - `repos`: no format constants or config rules; `Create`/`Update` call the plugin's
   `ValidateConfig`. Unknown format → 400 with the list of available formats.
 - API: `GET /api/formats` → `[{name, title, default_config, settings_group?}]`;
@@ -404,6 +405,59 @@ hosted files: `PUT/GET/HEAD /raw/{repo}/{path...}`, overwrite policy in its repo
 only `internal/raw/`, `internal/formats/all.go` and `e2e/raw_test.go`. If that requires editing any
 other core file, the abstraction is incomplete and must be fixed before M3. AGENTS.md's "Adding a
 repo format" section is rewritten to this flow.
+
+### 5.5 Data access and query performance **[M2.5]**
+
+**Goal:** the cost of a request does not grow with the data (§1.1), and a test proves it. The
+choice of data-access layer was measured, not guessed: raw `database/sql`, sqlc and Bun ran the
+same seven request-path operations on 100k and 1M seeded assets. Per-row cost was the same in all
+three; the access pattern decided speed. Bun used about 3× the memory per operation, formats
+argument values into the SQL text on the client (no prepared-statement reuse), and needed raw
+SQL fragments for FTS, joins and upserts anyway.
+
+**Layer: sqlc** (`go tool sqlc`, registered with `tool` in `go.mod`; codegen only, nothing is
+linked into the binary).
+- Each owner keeps its queries in `queries/*.sql` next to its package: `internal/db/queries` for
+  core, `internal/<format>/queries` for a plugin. Each owner has its own `sqlc.yaml` in its
+  package directory (so a new format edits no core file); a plugin's config reads the core
+  schema plus its own migration. Generated code goes in a `dbq` subpackage of the owner and is
+  committed. `go tool task gen` runs sqlc for every `internal/**/sqlc.yaml`.
+- Services call the generated `Queries` on the reader pool or on a write transaction
+  (`db.Tx`). The generated code uses `database/sql`, so the writer/reader pools and pragmas stay.
+- Two kinds of query stay hand-written, in the owner's `dbq/extra.go`: the FTS5 search (sqlc
+  cannot reference `rowid` or `assets_fts MATCH`, and its fallback sorts with a temp B-tree, 3×
+  slower at 1M rows and growing) and row streaming with `iter.Seq2` (sqlc has no iterator mode).
+  Optional filters become separate named queries, not runtime string building.
+- Every hand-written query is a named constant registered with the plan guard below.
+
+**Schema rules:**
+- Every foreign key has an index on the child column (e.g. `deb_packages(asset_id)`): otherwise
+  each parent write scans the child table. The 1M spike showed `SCAN deb_packages` on every asset
+  upsert.
+- Low-cardinality filters on request paths use partial indexes (e.g. `repos(id) WHERE
+  anonymous_read = 1`).
+- Keyset pagination only: `WHERE key > ? ORDER BY key LIMIT ?` on an index whose order matches,
+  with exactly one lower bound per key column. SQLite uses one lower bound in the range scan and
+  checks a second one (e.g. `path >= prefix AND path > after`) row by row, so deep pages scan
+  from the start. The 1M scale test showed this as a 2× slower asset page.
+  Substring search only through `assets_fts` (trigram).
+- `STRICT` tables, `WITHOUT ROWID` where the key is the natural primary key, `ANALYZE` stats
+  refreshed with `PRAGMA optimize` on close and every 6 h.
+
+**Plan guard.** `telesphorepo dbcheck` (hidden command) opens a fresh database, runs `EXPLAIN QUERY
+PLAN` on every query (all sqlc queries, read from the embedded query files, and every registered
+hand-written one), and fails on a `SCAN` of a real table or a `USE TEMP B-TREE`. The few queries
+that scan by design (startup recovery, background index rebuilds) are named in an allow-list
+with the reason. The e2e test `TestQueryPlans` runs it in the real image, so every query is
+checked even if no other test reaches it.
+
+**Scale test** (brought forward from M4 into M2.5): `e2e/scale_test.go` behind `//go:build scale`
+(`go tool task test scale`). The hidden command `telesphorepo seed N` bulk-inserts N synthetic
+asset rows, split over 10 repos per format that implements `format.Seeder` (Debian adds a package row per
+asset), straight into the database; the test runs it in the image at
+100k and at 1M, then measures over HTTP: Maven GET (point lookup), asset list pages, search, and
+Basic-auth with a token. It fails when the p95 of an operation at 1M is more than 2× its p95 at
+100k.
 
 ## 6. Path validation (all formats)
 
@@ -784,7 +838,7 @@ is tested without a real bucket. `ForEachStorage` runs `fs`, `seaweedfs`, and `r
   UI shell, CLI `serve`/`user create`/`signing-key generate`, Dockerfile, e2e suite above.
 - **M1.1**: DX (§16). **M1.2**: in-app settings (§3), SPEC.md/AGENTS.md, lean README.
 - **M2**: OIDC admin sign-on (§7.5) + Keycloak e2e.
-- **M2.5**: format plugins (§5.4) + `raw` format as the pluggability proof.
+- **M2.5**: format plugins (§5.4) + `raw` format as the pluggability proof; sqlc data layer, one
+  migration per owner, plan guard and scale test (§5.5).
 - **M3**: `move`, `import nexus` + e2e.
-- **M4**: full admin UI polish, deletes (assets, deb packages) + blob/by-hash GC, scaling test
-  behind `//go:build scale`.
+- **M4**: full admin UI polish, deletes (assets, deb packages) + blob/by-hash GC.

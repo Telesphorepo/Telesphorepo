@@ -1,0 +1,21 @@
+# Core data layer (spec §5.5). Run "go tool task gen" after editing queries/ or migrations/.
+version: "2"
+sql:
+  - engine: sqlite
+    schema: migrations
+    queries: queries
+    gen:
+      go:
+        package: dbq
+        out: dbq
+        sql_package: database/sql
+        emit_json_tags: false
+        overrides:
+          - column: users.is_admin
+            go_type: bool
+          - column: users.disabled
+            go_type: bool
+          - column: repos.anonymous_read
+            go_type: bool
+          - column: settings.secret
+            go_type: bool

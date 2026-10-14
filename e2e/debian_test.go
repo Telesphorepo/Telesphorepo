@@ -137,7 +137,46 @@ func TestDebian(t *testing.T) {
 
 		debCheckIndexes(t, s, opts.S3, repo, rauth, key)
 		debCheckSecurity(t, s, opts.S3, repo, wauth, rauth)
+		debCheckArchRemoval(t, s, opts.S3, repo, archs, pkgs.arch, rauth)
 	})
+}
+
+// debCheckArchRemoval removes a non-native architecture from the repo config and checks that
+// its index files are no longer served or listed in Release.
+func debCheckArchRemoval(t *testing.T, s *Server, tg *S3Target, repo string, archs []string, native string, auth Auth) {
+	t.Helper()
+	if st, b := s.API(t, http.MethodPatch, "/api/repos/"+repo, map[string]any{"config": map[string]any{"architectures": []string{"amd64", "all"}}}, s.Admin()); st != http.StatusBadRequest {
+		t.Fatalf("PATCH architectures with \"all\": status %d, want 400: %s", st, b)
+	}
+	i := slices.IndexFunc(archs, func(a string) bool { return a != native })
+	removed := archs[i]
+	keep := slices.Delete(slices.Clone(archs), i, i+1)
+	base := "/debian/" + repo + "/dists/trixie/"
+	if st, _ := debGet(t, s, tg, base+"main/binary-"+removed+"/Packages", auth); st != http.StatusOK {
+		t.Fatalf("GET binary-%s/Packages before removal: status %d, want 200", removed, st)
+	}
+
+	s.MustAPI(t, http.MethodPatch, "/api/repos/"+repo, map[string]any{"config": map[string]any{"architectures": keep}}, s.Admin(), nil)
+	s.WaitDebianIndexed(t, repo)
+
+	for _, f := range []string{"Packages", "Packages.gz"} {
+		if st, _ := debGet(t, s, tg, base+"main/binary-"+removed+"/"+f, auth); st != http.StatusNotFound {
+			t.Fatalf("GET binary-%s/%s after removal: status %d, want 404", removed, f, st)
+		}
+	}
+	st, release := debGet(t, s, tg, base+"Release", auth)
+	if st != http.StatusOK {
+		t.Fatalf("GET Release: status %d: %s", st, release)
+	}
+	if bytes.Contains(release, []byte("binary-"+removed+"/")) {
+		t.Fatalf("Release still lists binary-%s after removal:\n%s", removed, release)
+	}
+	if !bytes.Contains(release, []byte("\nArchitectures: "+strings.Join(keep, " ")+"\n")) {
+		t.Fatalf("Release Architectures is not %q:\n%s", strings.Join(keep, " "), release)
+	}
+	if st, _ := debGet(t, s, tg, base+"main/binary-"+native+"/Packages", auth); st != http.StatusOK {
+		t.Fatalf("GET binary-%s/Packages after removal: status %d, want 200", native, st)
+	}
 }
 
 // TestDebianOversizeUpload checks TR_MAX_UPLOAD_BYTES on a dedicated server.

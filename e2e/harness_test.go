@@ -1,4 +1,4 @@
-//go:build e2e
+//go:build e2e || scale
 
 package e2e
 
@@ -44,6 +44,7 @@ type ServerOpts struct {
 	Storage      string            // "fs" (default) | "s3"
 	S3           *S3Target         // required when Storage == "s3"
 	Files        []ContainerFile   // extra files copied into the server container
+	DataVolume   string            // named volume mounted at /data; default: the container's own
 	NoSigningKey bool              // do not configure TR_GPG_KEY_FILE (server auto-generates its key)
 	// NoBootstrapAdmin omits TR_BOOTSTRAP_ADMIN_*: the server creates "admin" with a random
 	// password and prints it in its startup banner; StartServer reads it from the logs.
@@ -101,11 +102,16 @@ func StartServer(t testing.TB, opts ServerOpts) *Server {
 	for _, f := range opts.Files {
 		files = append(files, f.tc())
 	}
+	var mounts []testcontainers.ContainerMount
+	if opts.DataVolume != "" {
+		mounts = append(mounts, testcontainers.VolumeMount(opts.DataVolume, "/data"))
+	}
 
 	c, err := testcontainers.Run(ctx, ServerImage,
 		testcontainers.WithEnv(env),
 		testcontainers.WithExposedPorts("8080/tcp"),
 		testcontainers.WithFiles(files...),
+		testcontainers.WithMounts(mounts...),
 		network.WithNetwork([]string{opts.Alias}, TestNetwork),
 		testcontainers.WithWaitStrategy(wait.ForHTTP("/healthz").WithPort("8080/tcp").WithStartupTimeout(90*time.Second)),
 	)
@@ -338,7 +344,7 @@ func (s *Server) CreateToken(t testing.TB, user, pass, name string) string {
 	return out.Token
 }
 
-// WaitDebianIndexed polls /api/repos/{repo}/debian/status until pending == 0 (60s timeout).
+// WaitDebianIndexed polls /api/repos/{repo}/status until pending == 0 (60s timeout).
 func (s *Server) WaitDebianIndexed(t testing.TB, repo string) {
 	t.Helper()
 	deadline := time.Now().Add(60 * time.Second)
@@ -346,7 +352,7 @@ func (s *Server) WaitDebianIndexed(t testing.TB, repo string) {
 		var st struct {
 			Pending int64 `json:"pending"`
 		}
-		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/debian/status", nil, s.Admin(), &st)
+		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/status", nil, s.Admin(), &st)
 		if st.Pending == 0 {
 			return
 		}
@@ -427,21 +433,6 @@ func (s *S3Target) listKeys(ctx context.Context) ([]string, error) {
 		}
 	}
 	return keys, nil
-}
-
-func (s *S3Target) deleteAll(ctx context.Context) error {
-	keys, err := s.listKeys(ctx)
-	if err != nil {
-		return err
-	}
-	c := s.Client()
-	var errs []error
-	for _, k := range keys {
-		if _, err := c.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &s.Bucket, Key: aws.String(k)}); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	return errors.Join(errs...)
 }
 
 const (
@@ -525,39 +516,10 @@ func StartSeaweedFS(t testing.TB) *S3Target {
 	return tg
 }
 
-// R2FromEnv returns a target on a real R2 (or any S3) bucket from TR_E2E_R2_* env vars, or skips.
-// Objects under the unique prefix are deleted at test end.
-func R2FromEnv(t testing.TB) *S3Target {
-	t.Helper()
-	get := func(k string) string { return os.Getenv("TR_E2E_R2_" + k) }
-	if get("ENDPOINT") == "" || get("BUCKET") == "" || get("ACCESS_KEY_ID") == "" || get("SECRET_ACCESS_KEY") == "" {
-		t.Skip("TR_E2E_R2_ENDPOINT/BUCKET/ACCESS_KEY_ID/SECRET_ACCESS_KEY not set")
-	}
-	tg := &S3Target{
-		Endpoint:     get("ENDPOINT"),
-		HostEndpoint: get("ENDPOINT"),
-		Region:       "auto",
-		Bucket:       get("BUCKET"),
-		AccessKey:    get("ACCESS_KEY_ID"),
-		SecretKey:    get("SECRET_ACCESS_KEY"),
-		Prefix:       "telesphorepo-e2e/" + RunID + "/" + randHex(4),
-		PathStyle:    true,
-	}
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
-		if err := tg.deleteAll(ctx); err != nil {
-			t.Errorf("r2 cleanup of %s: %v", tg.Prefix, err)
-		}
-	})
-	return tg
-}
-
-// ForEachStorage runs fn as subtests "fs", "seaweedfs" and "r2" (skipped without env).
+// ForEachStorage runs fn as subtests "fs" and "seaweedfs".
 func ForEachStorage(t *testing.T, fn func(t *testing.T, opts ServerOpts)) {
 	t.Run("fs", func(t *testing.T) { fn(t, ServerOpts{Storage: "fs"}) })
 	t.Run("seaweedfs", func(t *testing.T) { fn(t, ServerOpts{Storage: "s3", S3: StartSeaweedFS(t)}) })
-	t.Run("r2", func(t *testing.T) { fn(t, ServerOpts{Storage: "s3", S3: R2FromEnv(t)}) })
 }
 
 // ---------------------------------------------------------------- client containers
@@ -651,7 +613,7 @@ func RunClientResult(t testing.TB, image string, opts ClientOpts) *ClientResult 
 				c.User = opts.User
 			}
 		}),
-		testcontainers.WithWaitStrategy(wait.ForExit().WithExitTimeout(opts.Timeout)),
+		testcontainers.WithWaitStrategyAndDeadline(opts.Timeout, wait.ForExit()),
 	}
 	c, err := testcontainers.Run(ctx, image, customizers...)
 	registerCleanup(t, c, "client "+image)

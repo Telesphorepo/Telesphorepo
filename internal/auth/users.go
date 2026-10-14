@@ -7,21 +7,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
 const minPasswordLen = 8
 
-const userCols = `id, username, is_admin, disabled, kind, COALESCE(email, ''), created_at`
-
-func scanUser(row interface{ Scan(...any) error }) (*User, error) {
-	u := &User{}
-	var created int64
-	if err := row.Scan(&u.ID, &u.Username, &u.IsAdmin, &u.Disabled, &u.Kind, &u.Email, &created); err != nil {
-		return nil, err
+func newUser(id int64, username string, admin, disabled bool, kind string, email sql.NullString, created int64) *User {
+	return &User{
+		ID: id, Username: username, IsAdmin: admin, Disabled: disabled, Kind: kind,
+		Email: email.String, CreatedAt: time.Unix(created, 0),
 	}
-	u.CreatedAt = time.Unix(created, 0)
-	return u, nil
 }
 
 func (s *Service) CreateUser(ctx context.Context, username, password string, admin bool) (*User, error) {
@@ -33,45 +29,45 @@ func (s *Service) CreateUser(ctx context.Context, username, password string, adm
 		return nil, err
 	}
 	now := time.Now().Unix()
-	res, err := s.db.W.ExecContext(ctx,
-		`INSERT INTO users (username, password_hash, is_admin, disabled, password_changed_at, created_at) VALUES (?, ?, ?, 0, ?, ?)`,
-		username, hash, admin, now, now)
+	id, err := s.wq.CreateUser(ctx, dbq.CreateUserParams{
+		Username: username, PasswordHash: hash, IsAdmin: admin, PasswordChangedAt: now, CreatedAt: now})
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return nil, ErrExists
 		}
 		return nil, err
 	}
-	id, _ := res.LastInsertId()
 	return &User{ID: id, Username: username, IsAdmin: admin, Kind: KindLocal, CreatedAt: time.Unix(now, 0)}, nil
 }
 
 func (s *Service) GetUser(ctx context.Context, username string) (*User, error) {
-	u, err := scanUser(s.db.R.QueryRowContext(ctx, `SELECT `+userCols+` FROM users WHERE username = ?`, username))
+	r, err := s.rq.GetUserByUsername(ctx, username)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
-	return u, err
+	if err != nil {
+		return nil, err
+	}
+	return newUser(r.ID, r.Username, r.IsAdmin, r.Disabled, r.Kind, r.Email, r.CreatedAt), nil
+}
+
+func getUserByID(ctx context.Context, q *dbq.Queries, id int64) (*User, error) {
+	r, err := q.GetUserByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return newUser(r.ID, r.Username, r.IsAdmin, r.Disabled, r.Kind, r.Email, r.CreatedAt), nil
 }
 
 func (s *Service) ListUsers(ctx context.Context, after string, limit int) ([]*User, string, error) {
 	limit = min(max(limit, 1), 200)
-	rows, err := s.db.R.QueryContext(ctx,
-		`SELECT `+userCols+` FROM users WHERE username > ? ORDER BY username LIMIT ?`, after, limit+1)
+	rows, err := s.rq.ListUsers(ctx, dbq.ListUsersParams{After: after, Limit: int64(limit + 1)})
 	if err != nil {
 		return nil, "", err
 	}
-	defer rows.Close()
-	out := []*User{}
-	for rows.Next() {
-		u, err := scanUser(rows)
-		if err != nil {
-			return nil, "", err
-		}
-		out = append(out, u)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, "", err
+	out := make([]*User, len(rows))
+	for i, r := range rows {
+		out[i] = newUser(r.ID, r.Username, r.IsAdmin, r.Disabled, r.Kind, r.Email, r.CreatedAt)
 	}
 	next := ""
 	if len(out) > limit {
@@ -95,34 +91,36 @@ func (s *Service) UpdateUser(ctx context.Context, username string, password *str
 	revoke := password != nil || (disabled != nil && *disabled)
 	var id int64
 	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
-		var kind string
-		if err := tx.QueryRowContext(ctx, `SELECT id, kind FROM users WHERE username = ?`, username).Scan(&id, &kind); err != nil {
+		q := s.wq.WithTx(tx)
+		row, err := q.GetUserIDKind(ctx, username)
+		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return ErrNotFound
 			}
 			return err
 		}
-		if password != nil && kind != KindLocal {
+		id = row.ID
+		if password != nil && row.Kind != KindLocal {
 			return ErrSSOAccount // SSO accounts keep the unusable "!" hash
 		}
 		if password != nil {
-			if _, err := tx.ExecContext(ctx, `UPDATE users SET password_hash = ?, password_changed_at = ? WHERE id = ?`,
-				hash, time.Now().Unix(), id); err != nil {
+			if err := q.SetUserPassword(ctx, dbq.SetUserPasswordParams{
+				PasswordHash: hash, PasswordChangedAt: time.Now().Unix(), ID: id}); err != nil {
 				return err
 			}
 		}
 		if admin != nil {
-			if _, err := tx.ExecContext(ctx, `UPDATE users SET is_admin = ? WHERE id = ?`, *admin, id); err != nil {
+			if err := q.SetUserAdmin(ctx, dbq.SetUserAdminParams{IsAdmin: *admin, ID: id}); err != nil {
 				return err
 			}
 		}
 		if disabled != nil {
-			if _, err := tx.ExecContext(ctx, `UPDATE users SET disabled = ? WHERE id = ?`, *disabled, id); err != nil {
+			if err := q.SetUserDisabled(ctx, dbq.SetUserDisabledParams{Disabled: *disabled, ID: id}); err != nil {
 				return err
 			}
 		}
 		if revoke {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ?`, id); err != nil {
+			if err := q.DeleteUserSessions(ctx, id); err != nil {
 				return err
 			}
 		}
@@ -134,13 +132,11 @@ func (s *Service) UpdateUser(ctx context.Context, username string, password *str
 	if revoke {
 		s.cache.invalidate(id)
 	}
-	return scanUser(s.db.W.QueryRowContext(ctx, `SELECT `+userCols+` FROM users WHERE id = ?`, id))
+	return getUserByID(ctx, s.wq, id)
 }
 
 func (s *Service) HasUsers(ctx context.Context) (bool, error) {
-	var ok bool
-	err := s.db.R.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM users)`).Scan(&ok)
-	return ok, err
+	return s.rq.HasUsers(ctx)
 }
 
 // UpsertOIDCUser creates or updates the SSO admin identified by (issuer, subject): is_admin is
@@ -148,23 +144,22 @@ func (s *Service) HasUsers(ctx context.Context) (bool, error) {
 // belongs to another account the result is ErrUsernameConflict (accounts are never merged by
 // name). A disabled account returns ErrDisabled.
 func (s *Service) UpsertOIDCUser(ctx context.Context, issuer, subject, username, email string) (*User, error) {
-	var mail any
-	if email != "" {
-		mail = email
+	mail := sql.NullString{String: email, Valid: email != ""}
+	oidcID := dbq.GetOIDCUserParams{
+		OidcIssuer:  sql.NullString{String: issuer, Valid: true},
+		OidcSubject: sql.NullString{String: subject, Valid: true},
 	}
 	var id int64
 	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
-		var disabled bool
-		err := tx.QueryRowContext(ctx,
-			`SELECT id, disabled FROM users WHERE oidc_issuer = ? AND oidc_subject = ? AND oidc_subject IS NOT NULL`,
-			issuer, subject).Scan(&id, &disabled)
+		q := s.wq.WithTx(tx)
+		row, err := q.GetOIDCUser(ctx, oidcID)
 		switch {
 		case err == nil:
-			if disabled {
+			id = row.ID
+			if row.Disabled {
 				return ErrDisabled
 			}
-			_, err = tx.ExecContext(ctx, `UPDATE users SET is_admin = 1, email = ? WHERE id = ?`, mail, id)
-			return err
+			return q.UpdateOIDCUser(ctx, dbq.UpdateOIDCUserParams{Email: mail, ID: id})
 		case !errors.Is(err, sql.ErrNoRows):
 			return err
 		}
@@ -172,29 +167,28 @@ func (s *Service) UpsertOIDCUser(ctx context.Context, issuer, subject, username,
 			return ErrInvalid
 		}
 		now := time.Now().Unix()
-		res, err := tx.ExecContext(ctx, `INSERT INTO users
-			(username, password_hash, is_admin, disabled, password_changed_at, created_at, kind, oidc_issuer, oidc_subject, email)
-			VALUES (?, ?, 1, 0, ?, ?, ?, ?, ?, ?)`,
-			username, noPassword, now, now, KindOIDC, issuer, subject, mail)
+		id, err = q.CreateOIDCUser(ctx, dbq.CreateOIDCUserParams{
+			Username: username, PasswordHash: noPassword, PasswordChangedAt: now, CreatedAt: now,
+			Kind: KindOIDC, OidcIssuer: oidcID.OidcIssuer, OidcSubject: oidcID.OidcSubject, Email: mail})
 		if err != nil {
 			if strings.Contains(err.Error(), "users.username") {
 				return ErrUsernameConflict
 			}
 			return err
 		}
-		id, _ = res.LastInsertId()
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return scanUser(s.db.W.QueryRowContext(ctx, `SELECT `+userCols+` FROM users WHERE id = ?`, id))
+	return getUserByID(ctx, s.wq, id)
 }
 
 // RevokeOIDCUser deletes the sessions of the SSO account (issuer, subject), if it exists. Used
 // when a login no longer qualifies as admin.
 func (s *Service) RevokeOIDCUser(ctx context.Context, issuer, subject string) error {
-	_, err := s.db.W.ExecContext(ctx, `DELETE FROM sessions WHERE user_id IN
-		(SELECT id FROM users WHERE oidc_issuer = ? AND oidc_subject = ? AND oidc_subject IS NOT NULL)`, issuer, subject)
-	return err
+	return s.wq.DeleteOIDCUserSessions(ctx, dbq.DeleteOIDCUserSessionsParams{
+		OidcIssuer:  sql.NullString{String: issuer, Valid: true},
+		OidcSubject: sql.NullString{String: subject, Valid: true},
+	})
 }

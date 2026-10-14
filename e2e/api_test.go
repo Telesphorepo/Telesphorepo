@@ -379,3 +379,66 @@ func TestAPIErrors(t *testing.T) {
 		t.Fatalf("error body: %s", b)
 	}
 }
+
+// TestAPIFormats covers the format registry routes: /api/formats, and the generic per-repo
+// /status and /usage.
+func TestAPIFormats(t *testing.T) {
+	s := StartServer(t, ServerOpts{})
+	s.CreateUser(t, "erin", "erin-password-1", false)
+	erin := Basic{"erin", "erin-password-1"}
+
+	var formats []struct {
+		Name          string          `json:"name"`
+		Title         string          `json:"title"`
+		DefaultConfig json.RawMessage `json:"default_config"`
+		SettingsGroup string          `json:"settings_group"`
+	}
+	apiJSON(t, s, http.MethodGet, "/api/formats", nil, nil, 200, &formats)
+	byName := map[string]bool{}
+	for _, f := range formats {
+		byName[f.Name] = true
+		if f.Title == "" || !strings.HasPrefix(strings.TrimSpace(string(f.DefaultConfig)), "{") {
+			t.Errorf("format %s: title %q, default_config %s", f.Name, f.Title, f.DefaultConfig)
+		}
+		if f.Name == "debian" && f.SettingsGroup != "debian" {
+			t.Errorf("debian settings_group = %q, want debian", f.SettingsGroup)
+		}
+	}
+	for _, n := range []string{"maven", "debian"} {
+		if !byName[n] {
+			t.Errorf("format %q missing from /api/formats: %+v", n, formats)
+		}
+	}
+
+	st, b := s.API(t, http.MethodPost, "/api/repos", map[string]any{"name": RandName("x"), "format": "nope"}, s.Admin())
+	if st != http.StatusBadRequest || !strings.Contains(string(b), "maven") {
+		t.Fatalf("unknown format: status %d, want 400 listing the formats: %s", st, b)
+	}
+
+	mvn, deb := RandName("mvn"), RandName("deb")
+	s.CreateRepo(t, mvn, "maven", false, nil)
+	s.CreateRepo(t, deb, "debian", false, nil)
+
+	var empty map[string]any
+	apiJSON(t, s, http.MethodGet, "/api/repos/"+mvn+"/status", nil, s.Admin(), 200, &empty)
+	var debStatus map[string]any
+	apiJSON(t, s, http.MethodGet, "/api/repos/"+deb+"/status", nil, s.Admin(), 200, &debStatus)
+	if _, ok := debStatus["pending"]; !ok {
+		t.Fatalf("debian status has no pending: %v", debStatus)
+	}
+	apiWant(t, s, http.MethodGet, "/api/repos/"+deb+"/status", nil, erin, http.StatusForbidden)
+
+	var usage struct {
+		BaseURL  string `json:"base_url"`
+		Snippets []struct {
+			Title string `json:"title"`
+			Lang  string `json:"lang"`
+			Code  string `json:"code"`
+		} `json:"snippets"`
+	}
+	apiJSON(t, s, http.MethodGet, "/api/repos/"+mvn+"/usage", nil, s.Admin(), 200, &usage)
+	if usage.BaseURL != "http://"+s.Alias+":8080" || usage.Snippets == nil {
+		t.Fatalf("usage: %+v", usage)
+	}
+	apiWant(t, s, http.MethodGet, "/api/repos/"+mvn+"/usage", nil, erin, http.StatusForbidden)
+}

@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react";
 
 export type User = { id: number; username: string; is_admin: boolean; disabled: boolean; created_at: string; kind?: "local" | "oidc"; email?: string };
-export type Repo = { name: string; format: "maven" | "debian"; anonymous_read: boolean; config?: { architectures?: string[] }; permission: string };
+export type RepoConfig = Record<string, unknown>;
+export type Repo = { name: string; format: string; anonymous_read: boolean; config?: RepoConfig; permission: string };
+export type Format = { name: string; title: string; default_config: RepoConfig; settings_group?: string };
+export type Snippet = { title: string; lang: string; code: string };
+export type Usage = { base_url: string; snippets: Snippet[] };
 export type Asset = { path: string; size: number; sha256: string; content_type: string; kind: string; updated_at: string };
 export type Page<T> = { items: T[]; next: string | null };
 export type Token = { id: string; name: string; created_at: string; expires_at: string | null; last_used_at: string | null; token?: string };

@@ -1,5 +1,5 @@
 // Command task is the cross-platform developer entry point
-// (spec §16): "go tool task dev | build | preview | test | doctor". It needs only Go and
+// (spec §16): "go tool task dev | build | preview | test | gen | doctor". It needs only Go and
 // bun (or npm); nothing here depends on bash or make, so it behaves the same on Windows,
 // macOS and Linux.
 //
@@ -7,6 +7,8 @@
 //	go tool task build [image]  bin/telesphorepo with the UI embedded (+ container image)
 //	go tool task preview        build, then run the production binary locally
 //	go tool task test [args]    e2e suite; args go to "go test"
+//	go tool task test scale     scale test (100k vs 1M seeded assets)
+//	go tool task gen            regenerate the sqlc data layer (every internal/**/sqlc.yaml)
 //	go tool task doctor         show what was detected
 package main
 
@@ -27,6 +29,8 @@ const usage = `Usage: go tool task <command>
   build image      ...and the container image telesphorepo:local (Docker or Podman)
   preview          build, then run the production binary at http://localhost:8080
   test [args]      run the e2e suite; args pass to go test (e.g. go tool task test -run TestMaven)
+  test scale       run the scale test: 100k and 1M seeded assets, p95 must not double
+  gen              regenerate the sqlc query code for every internal/**/sqlc.yaml
   doctor           show detected tools (Go, bun/npm, Docker/Podman) and what is missing
 
 Data for dev/preview lives in ./.telesphorepo-dev (delete it to start over).
@@ -99,6 +103,11 @@ func run(ctx context.Context, args []string) error {
 			return err
 		}
 		return preview(ctx)
+	case "gen":
+		if err := noArgs(verb, rest); err != nil {
+			return err
+		}
+		return gen(ctx)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", verb, usage)
 		return exitError{2}

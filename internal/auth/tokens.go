@@ -13,6 +13,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
 )
 
 const (
@@ -38,8 +40,8 @@ func (s *Service) CreateToken(ctx context.Context, userID int64, name string, ex
 	if !validTokenName(name) || expiresIn < 0 {
 		return nil, "", ErrInvalid
 	}
-	var kind string
-	if err := s.db.R.QueryRowContext(ctx, `SELECT kind FROM users WHERE id = ?`, userID).Scan(&kind); err != nil {
+	kind, err := s.rq.GetUserKind(ctx, userID)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, "", ErrNotFound
 		}
@@ -68,9 +70,8 @@ func (s *Service) CreateToken(ctx context.Context, userID int64, name string, ex
 		pub := hex.EncodeToString(idb)
 		sec := base64.RawURLEncoding.EncodeToString(secret)
 		sum := sha256.Sum256([]byte(sec))
-		res, err := s.db.W.ExecContext(ctx,
-			`INSERT INTO api_tokens (user_id, public_id, secret_hash, name, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)`,
-			userID, pub, sum[:], name, now.Unix(), exp)
+		id, err := s.wq.CreateToken(ctx, dbq.CreateTokenParams{
+			UserID: userID, PublicID: pub, SecretHash: sum[:], Name: name, CreatedAt: now.Unix(), ExpiresAt: exp})
 		if err != nil {
 			msg := err.Error()
 			switch {
@@ -83,31 +84,24 @@ func (s *Service) CreateToken(ctx context.Context, userID int64, name string, ex
 			}
 			return nil, "", err
 		}
-		t.ID, _ = res.LastInsertId()
+		t.ID = id
 		return t, tokenPrefix + pub + "_" + sec, nil
 	}
 }
 
 func (s *Service) ListTokens(ctx context.Context, userID int64) ([]*Token, error) {
-	rows, err := s.db.R.QueryContext(ctx,
-		`SELECT id, name, created_at, expires_at, last_used_at FROM api_tokens WHERE user_id = ? ORDER BY name`, userID)
+	rows, err := s.rq.ListTokens(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := []*Token{}
-	for rows.Next() {
-		t := &Token{}
-		var created int64
-		var exp, used sql.NullInt64
-		if err := rows.Scan(&t.ID, &t.Name, &created, &exp, &used); err != nil {
-			return nil, err
+	out := make([]*Token, len(rows))
+	for i, r := range rows {
+		out[i] = &Token{
+			ID: r.ID, Name: r.Name, CreatedAt: time.Unix(r.CreatedAt, 0),
+			ExpiresAt: optTime(r.ExpiresAt), LastUsedAt: optTime(r.LastUsedAt),
 		}
-		t.CreatedAt = time.Unix(created, 0)
-		t.ExpiresAt, t.LastUsedAt = optTime(exp), optTime(used)
-		out = append(out, t)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func optTime(v sql.NullInt64) *time.Time {
@@ -122,17 +116,17 @@ func (s *Service) DeleteToken(ctx context.Context, p *Principal, id int64) error
 	if p == nil {
 		return ErrNotFound
 	}
-	var res sql.Result
+	var n int64
 	var err error
 	if p.IsAdmin {
-		res, err = s.db.W.ExecContext(ctx, `DELETE FROM api_tokens WHERE id = ?`, id)
+		n, err = s.wq.DeleteToken(ctx, id)
 	} else {
-		res, err = s.db.W.ExecContext(ctx, `DELETE FROM api_tokens WHERE id = ? AND user_id = ?`, id, p.UserID)
+		n, err = s.wq.DeleteUserToken(ctx, dbq.DeleteUserTokenParams{ID: id, UserID: p.UserID})
 	}
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if n == 0 {
 		return ErrNotFound
 	}
 	return nil
@@ -151,16 +145,7 @@ func (s *Service) verifyToken(ctx context.Context, tok string) (*Principal, erro
 	if b, err := base64.RawURLEncoding.DecodeString(sec); err != nil || len(b) != 32 {
 		return nil, ErrBadCredentials
 	}
-	var (
-		p         Principal
-		hash      []byte
-		exp, used sql.NullInt64
-		disabled  bool
-	)
-	err := s.db.R.QueryRowContext(ctx, `
-		SELECT t.id, t.secret_hash, t.expires_at, t.last_used_at, u.id, u.username, u.is_admin, u.disabled, u.kind
-		FROM api_tokens t JOIN users u ON u.id = t.user_id WHERE t.public_id = ?`, pub).
-		Scan(&p.TokenID, &hash, &exp, &used, &p.UserID, &p.Username, &p.IsAdmin, &disabled, &p.Kind)
+	row, err := s.rq.GetTokenAuth(ctx, pub)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrBadCredentials
 	}
@@ -169,13 +154,14 @@ func (s *Service) verifyToken(ctx context.Context, tok string) (*Principal, erro
 	}
 	sum := sha256.Sum256([]byte(sec))
 	now := time.Now().Unix()
-	if subtle.ConstantTimeCompare(sum[:], hash) != 1 || disabled || p.Kind != KindLocal || (exp.Valid && now >= exp.Int64) {
+	if subtle.ConstantTimeCompare(sum[:], row.SecretHash) != 1 || row.Disabled || row.Kind != KindLocal ||
+		(row.ExpiresAt.Valid && now >= row.ExpiresAt.Int64) {
 		return nil, ErrBadCredentials
 	}
-	if !used.Valid || now-used.Int64 >= 60 {
-		s.touchToken(p.TokenID, now)
+	if !row.LastUsedAt.Valid || now-row.LastUsedAt.Int64 >= 60 {
+		s.touchToken(row.TokenID, now)
 	}
-	return &p, nil
+	return &Principal{UserID: row.UserID, Username: row.Username, IsAdmin: row.IsAdmin, TokenID: row.TokenID, Kind: row.Kind}, nil
 }
 
 // touchToken updates last_used_at in the background, at most once per minute per token.
@@ -197,6 +183,6 @@ func (s *Service) touchToken(id, now int64) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		s.db.W.ExecContext(ctx, `UPDATE api_tokens SET last_used_at = ? WHERE id = ?`, now, id)
+		s.wq.TouchToken(ctx, dbq.TouchTokenParams{LastUsedAt: sql.NullInt64{Int64: now, Valid: true}, ID: id})
 	}()
 }

@@ -9,6 +9,8 @@ import (
 	"errors"
 	"net/http"
 	"time"
+
+	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
 )
 
 const sessionCookie = "tr_session"
@@ -55,14 +57,12 @@ func (s *Service) StartSession(w http.ResponseWriter, r *http.Request, userID in
 	h, _ := hashSession(val)
 	now := time.Now()
 	exp := now.Add(ttl)
-	if _, err := s.db.W.ExecContext(ctx,
-		`INSERT INTO sessions (id_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)`,
-		h, userID, now.Unix(), exp.Unix()); err != nil {
+	if err := s.wq.CreateSession(ctx, dbq.CreateSessionParams{
+		IDHash: h, UserID: userID, CreatedAt: now.Unix(), ExpiresAt: exp.Unix()}); err != nil {
 		return err
 	}
 	// Opportunistic bounded cleanup of expired sessions (served by sessions_expires).
-	s.db.W.ExecContext(ctx, `DELETE FROM sessions WHERE id_hash IN
-		(SELECT id_hash FROM sessions WHERE expires_at <= ? LIMIT 100)`, now.Unix())
+	s.wq.DeleteExpiredSessions(ctx, now.Unix())
 
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: val, Path: "/",
@@ -75,7 +75,7 @@ func (s *Service) StartSession(w http.ResponseWriter, r *http.Request, userID in
 func (s *Service) Logout(w http.ResponseWriter, r *http.Request) error {
 	if c, err := r.Cookie(sessionCookie); err == nil {
 		if h, ok := hashSession(c.Value); ok {
-			if _, err := s.db.W.ExecContext(r.Context(), `DELETE FROM sessions WHERE id_hash = ?`, h); err != nil {
+			if err := s.wq.DeleteSession(r.Context(), h); err != nil {
 				return err
 			}
 		}
@@ -94,27 +94,19 @@ func (s *Service) sessionPrincipal(ctx context.Context, val string) (*Principal,
 	if !ok {
 		return nil, nil
 	}
-	var (
-		p        Principal
-		exp      int64
-		disabled bool
-	)
-	err := s.db.R.QueryRowContext(ctx, `
-		SELECT s.expires_at, u.id, u.username, u.is_admin, u.disabled, u.kind
-		FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id_hash = ?`, h).
-		Scan(&exp, &p.UserID, &p.Username, &p.IsAdmin, &disabled, &p.Kind)
+	row, err := s.rq.GetSessionPrincipal(ctx, h)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	if time.Now().Unix() >= exp {
-		s.db.W.ExecContext(ctx, `DELETE FROM sessions WHERE id_hash = ?`, h)
+	if time.Now().Unix() >= row.ExpiresAt {
+		s.wq.DeleteSession(ctx, h)
 		return nil, nil
 	}
-	if disabled {
+	if row.Disabled {
 		return nil, nil
 	}
-	return &p, nil
+	return &Principal{UserID: row.UserID, Username: row.Username, IsAdmin: row.IsAdmin, Kind: row.Kind}, nil
 }

@@ -1,4 +1,4 @@
-// Package signing wraps ProtonMail go-crypto for Debian index signing (spec §9.3).
+// Package signing wraps ProtonMail go-crypto for repository index signing (spec §9.3).
 package signing
 
 import (
@@ -138,7 +138,7 @@ func (s *Signer) PublicKeyArmored() []byte { return s.pub }
 // Generate creates a new Ed25519 signing key (no passphrase), returning armored private
 // and public key blocks.
 func Generate(name, email string) (privateArmored, publicArmored []byte, err error) {
-	e, err := openpgp.NewEntity(name, "Debian repository signing key", email, &packet.Config{
+	e, err := openpgp.NewEntity(name, "Telesphorepo repository signing key", email, &packet.Config{
 		Algorithm:   packet.PubKeyAlgoEdDSA,
 		DefaultHash: crypto.SHA256,
 		V6Keys:      false,

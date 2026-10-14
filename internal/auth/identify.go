@@ -102,15 +102,8 @@ func (s *Service) verifyUncached(ctx context.Context, keys []string, key [32]byt
 	}
 	defer func() { s.limits.end(errors.Is(err, ErrBadCredentials), keys...) }()
 
-	var (
-		id              int64
-		hash, kind      string
-		admin, disabled bool
-	)
-	err = s.db.R.QueryRowContext(ctx,
-		`SELECT id, password_hash, is_admin, disabled, kind FROM users WHERE username = ?`, username).
-		Scan(&id, &hash, &admin, &disabled, &kind)
-	if errors.Is(err, sql.ErrNoRows) || (err == nil && kind != KindLocal) {
+	u, err := s.rq.GetUserLogin(ctx, username)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && u.Kind != KindLocal) {
 		// SSO accounts never authenticate with a password; same timing as an unknown user.
 		s.verifyPassword(ctx, s.dummyHash(ctx), password)
 		return nil, ErrBadCredentials
@@ -118,55 +111,46 @@ func (s *Service) verifyUncached(ctx context.Context, keys []string, key [32]byt
 	if err != nil {
 		return nil, err
 	}
+	id, hash := u.ID, u.PasswordHash
 	gen := s.cache.generation(id)
 	ok, err := s.verifyPassword(ctx, hash, password)
 	if err != nil && !errors.Is(err, errBadHash) {
 		return nil, err
 	}
-	if !ok || disabled {
+	if !ok || u.Disabled {
 		return nil, ErrBadCredentials
 	}
 	// The hash was read before gen was captured, so a password change committed in between
 	// would not stop the put below. Re-read it and only cache if it is unchanged; any later
 	// change bumps the generation after gen was captured and so voids the entry.
-	var cur string
-	if err := s.db.R.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE id = ?`, id).Scan(&cur); err == nil && cur == hash {
+	if cur, err := s.rq.GetUserPasswordHash(ctx, id); err == nil && cur == hash {
 		s.cache.put(key, id, hash, gen)
 	}
-	return &Principal{UserID: id, Username: username, IsAdmin: admin, Kind: kind}, nil
+	return &Principal{UserID: id, Username: username, IsAdmin: u.IsAdmin, Kind: u.Kind}, nil
 }
 
 // principalByID re-reads the user so admin/disabled changes apply immediately.
 // principalAndHash is principalByID plus the stored password hash, in one PK lookup.
 func (s *Service) principalAndHash(ctx context.Context, id int64) (*Principal, string, error) {
-	p := &Principal{UserID: id}
-	var (
-		disabled bool
-		hash     string
-	)
-	err := s.db.R.QueryRowContext(ctx, `SELECT username, is_admin, disabled, password_hash, kind FROM users WHERE id = ?`, id).
-		Scan(&p.Username, &p.IsAdmin, &disabled, &hash, &p.Kind)
-	if errors.Is(err, sql.ErrNoRows) || (err == nil && (disabled || p.Kind != KindLocal)) {
+	u, err := s.rq.GetPrincipalAndHash(ctx, id)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && (u.Disabled || u.Kind != KindLocal)) {
 		return nil, "", ErrBadCredentials
 	}
 	if err != nil {
 		return nil, "", err
 	}
-	return p, hash, nil
+	return &Principal{UserID: id, Username: u.Username, IsAdmin: u.IsAdmin, Kind: u.Kind}, u.PasswordHash, nil
 }
 
 func (s *Service) principalByID(ctx context.Context, id int64) (*Principal, error) {
-	p := &Principal{UserID: id}
-	var disabled bool
-	err := s.db.R.QueryRowContext(ctx, `SELECT username, is_admin, disabled, kind FROM users WHERE id = ?`, id).
-		Scan(&p.Username, &p.IsAdmin, &disabled, &p.Kind)
-	if errors.Is(err, sql.ErrNoRows) || (err == nil && disabled) {
+	u, err := s.rq.GetPrincipal(ctx, id)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && u.Disabled) {
 		return nil, ErrBadCredentials
 	}
 	if err != nil {
 		return nil, err
 	}
-	return p, nil
+	return &Principal{UserID: id, Username: u.Username, IsAdmin: u.IsAdmin, Kind: u.Kind}, nil
 }
 
 func unauthorized(w http.ResponseWriter, msg string) {

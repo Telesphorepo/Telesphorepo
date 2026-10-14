@@ -51,10 +51,11 @@ type Keycloak struct {
 }
 
 // freeHostPort asks the OS for a free TCP port on the host. There is a small window in which
-// another process could take it; that is acceptable for a test.
+// another process could take it; that is acceptable for a test. It listens on loopback only: a
+// listener on all interfaces makes the Windows firewall prompt for every new test binary.
 func freeHostPort(t testing.TB) int {
 	t.Helper()
-	l, err := net.Listen("tcp", ":0")
+	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("find free port: %v", err)
 	}

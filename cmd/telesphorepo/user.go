@@ -129,7 +129,7 @@ func withUsers(fn func(ctx context.Context, as *auth.Service, dataDir string) er
 		return fmt.Errorf("open database %s: %w", cfg.DBFile(), err)
 	}
 	defer d.Close()
-	return fn(ctx, auth.New(d, config.Static(cfg), repos.New(d)), cfg.DataDir)
+	return fn(ctx, auth.New(d, config.Static(cfg), repos.New(d, nil)), cfg.DataDir)
 }
 
 // readPassword prompts twice without echo on a terminal, else reads one line from stdin.

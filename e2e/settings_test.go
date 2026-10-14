@@ -65,7 +65,7 @@ func TestSettingsAccess(t *testing.T) {
 	for _, it := range items {
 		groups[it.Group] = true
 	}
-	for _, g := range []string{"general", "storage", "security", "debian"} {
+	for _, g := range []string{"general", "storage", "security", "signing", "debian"} {
 		if !groups[g] {
 			t.Errorf("group %q missing from settings (have %v)", g, groups)
 		}
@@ -165,8 +165,8 @@ func TestSettingsSigningKey(t *testing.T) {
 		t.Fatal("GET /api/settings leaks private key material after generation")
 	}
 	// The signing key cannot be written through PATCH.
-	if st, _ := s.API(t, http.MethodPatch, "/api/settings", map[string]any{"debian.signing_key": SigningPrivateKey}, s.Admin()); st != http.StatusBadRequest {
-		t.Fatalf("PATCH debian.signing_key: status %d, want 400", st)
+	if st, _ := s.API(t, http.MethodPatch, "/api/settings", map[string]any{"signing.key": SigningPrivateKey}, s.Admin()); st != http.StatusBadRequest {
+		t.Fatalf("PATCH signing.key: status %d, want 400", st)
 	}
 	// Non-admins cannot generate keys.
 	s.CreateUser(t, "plain", "plainpass123", false)

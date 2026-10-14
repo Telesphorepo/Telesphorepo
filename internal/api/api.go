@@ -15,22 +15,16 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
+	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 )
 
-// DebianStatus is satisfied by *debian.Handler.
-type DebianStatus interface {
-	Pending(ctx context.Context, repoID int64) (int, error)
-	ConfigChanged(ctx context.Context, repo *repos.Repo) error
-}
-
 type API struct {
 	auth     *auth.Service
 	repos    *repos.Service
 	assets   *assets.Service
-	debian   DebianStatus
 	cfg      config.Provider
 	settings *settings.Service
 	sso      Routes
@@ -41,9 +35,10 @@ type Routes interface {
 	Register(mux *http.ServeMux)
 }
 
-// New builds the API. sso (may be nil) mounts GET /api/auth/oidc/{login,callback}.
-func New(a *auth.Service, rs *repos.Service, as *assets.Service, deb DebianStatus, st *settings.Service, sso Routes) *API {
-	return &API{auth: a, repos: rs, assets: as, debian: deb, cfg: st.Config, settings: st, sso: sso}
+// New builds the API. sso (may be nil) mounts GET /api/auth/oidc/{login,callback}. The format
+// endpoints read the format registry (internal/format).
+func New(a *auth.Service, rs *repos.Service, as *assets.Service, st *settings.Service, sso Routes) *API {
+	return &API{auth: a, repos: rs, assets: as, cfg: st.Config, settings: st, sso: sso}
 }
 
 // Handler returns the /api/ handler, already wrapped in http.CrossOriginProtection.
@@ -66,6 +61,8 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /api/users", a.createUser)
 	mux.HandleFunc("PATCH /api/users/{username}", a.updateUser)
 
+	mux.HandleFunc("GET /api/formats", a.listFormats)
+
 	mux.HandleFunc("GET /api/repos", a.listRepos)
 	mux.HandleFunc("POST /api/repos", a.createRepo)
 	mux.HandleFunc("GET /api/repos/{name}", a.getRepo)
@@ -74,7 +71,8 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/repos/{name}/permissions/{username}", a.setPermission)
 	mux.HandleFunc("DELETE /api/repos/{name}/permissions/{username}", a.deletePermission)
 	mux.HandleFunc("GET /api/repos/{name}/assets", a.listAssets)
-	mux.HandleFunc("GET /api/repos/{name}/debian/status", a.debianStatus)
+	mux.HandleFunc("GET /api/repos/{name}/status", a.repoStatus)
+	mux.HandleFunc("GET /api/repos/{name}/usage", a.repoUsage)
 
 	mux.HandleFunc("GET /api/search", a.search)
 
@@ -469,13 +467,13 @@ func (a *API) updateRepo(w http.ResponseWriter, r *http.Request) {
 	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
 		return
 	}
-	repo, err := a.repos.Update(r.Context(), r.PathValue("name"), in.AnonymousRead, in.Config)
+	old, repo, err := a.repos.Update(r.Context(), r.PathValue("name"), in.AnonymousRead, in.Config)
 	if err != nil {
 		fail(w, r, err)
 		return
 	}
-	if in.Config != nil {
-		if err := a.debian.ConfigChanged(r.Context(), repo); err != nil {
+	if o, ok := format.Get(repo.Format).(format.ConfigObserver); ok && in.Config != nil {
+		if err := o.RepoConfigChanged(r.Context(), old, repo); err != nil {
 			fail(w, r, err)
 			return
 		}
@@ -640,19 +638,4 @@ func (a *API) search(w http.ResponseWriter, r *http.Request) {
 		out.Next = cursor(strconv.FormatInt(next, 10))
 	}
 	httpx.WriteJSON(w, http.StatusOK, out)
-}
-
-// --- debian ---
-
-func (a *API) debianStatus(w http.ResponseWriter, r *http.Request) {
-	repo, _, ok := a.auth.RepoGate(w, r, r.PathValue("name"), repos.FormatDebian, auth.Read, true)
-	if !ok {
-		return
-	}
-	n, err := a.debian.Pending(r.Context(), repo.ID)
-	if err != nil {
-		fail(w, r, err)
-		return
-	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]int{"pending": n})
 }

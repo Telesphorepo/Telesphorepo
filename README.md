@@ -1,6 +1,6 @@
 # Telesphorepo
 
-A small self-hosted package repository for Maven/Gradle artifacts and Debian packages. It is a
+A small self-hosted package repository for Maven/Gradle artifacts, Debian packages and raw files. It is a
 single Go binary with a web UI, and stores files on local disk or in any S3-compatible bucket.
 
 ## Run it locally
@@ -13,7 +13,7 @@ go tool task dev
 ```
 
 Open **http://localhost:5173**. The startup banner prints the admin username and password and
-some client snippets. The `maven` and `debian` demo repos are already created. Data lives in
+some client snippets. A demo repo for each format (`maven`, `debian`, `raw`) is already created. Data lives in
 `.telesphorepo-dev/`; delete it to start over. Press Ctrl+C to stop.
 
 ## Run it in production
@@ -75,4 +75,11 @@ echo "deb [signed-by=/etc/apt/keyrings/telesphorepo.asc] https://packages.exampl
 curl -u USER:TOKEN -T pkg_1.0_amd64.deb https://packages.example.com/debian/debian/upload/stable/main
 ```
 
-Gradle, private apt repos, the API and everything else: [SPEC.md](SPEC.md).
+Raw files:
+
+```sh
+curl -f -u USER:TOKEN -T file.tar.gz https://packages.example.com/raw/raw/path/file.tar.gz
+```
+
+The repo page in the UI shows the snippets for each repo. Gradle, private apt repos, the API and
+everything else: [SPEC.md](SPEC.md).

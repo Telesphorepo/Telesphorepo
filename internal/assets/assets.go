@@ -23,6 +23,7 @@ import (
 
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
+	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/storage"
 )
@@ -202,31 +203,31 @@ func (s *Service) Lock(repoID int64, key string) (unlock func()) {
 	}
 }
 
-const assetCols = "id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at"
-
-type scanner interface{ Scan(dest ...any) error }
-
-func scanAsset(sc scanner, extra ...any) (*Asset, error) {
-	a := &Asset{}
-	var by sql.NullInt64
-	var created, updated int64
-	dest := append([]any{&a.ID, &a.RepoID, &a.Path, &a.Size, &a.SHA256, &a.ContentType, &a.Kind, &by, &created, &updated}, extra...)
-	if err := sc.Scan(dest...); err != nil {
-		return nil, err
+func fromRow(r dbq.Asset) *Asset {
+	return &Asset{
+		ID:          r.ID,
+		RepoID:      r.RepoID,
+		Path:        r.Path,
+		Size:        r.Size,
+		SHA256:      r.Sha256,
+		ContentType: r.ContentType,
+		Kind:        r.Kind,
+		UploadedBy:  r.UploadedBy.Int64,
+		CreatedAt:   time.Unix(r.CreatedAt, 0).UTC(),
+		UpdatedAt:   time.Unix(r.UpdatedAt, 0).UTC(),
 	}
-	a.UploadedBy = by.Int64
-	a.CreatedAt, a.UpdatedAt = time.Unix(created, 0).UTC(), time.Unix(updated, 0).UTC()
-	return a, nil
 }
 
 // Get is an indexed point lookup on (repo_id, path).
 func (s *Service) Get(ctx context.Context, repoID int64, p string) (*Asset, error) {
-	a, err := scanAsset(s.db.R.QueryRowContext(ctx,
-		"SELECT "+assetCols+" FROM assets WHERE repo_id = ? AND path = ?", repoID, p))
+	r, err := dbq.New(s.db.R).GetAsset(ctx, dbq.GetAssetParams{RepoID: repoID, Path: p})
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
-	return a, err
+	if err != nil {
+		return nil, err
+	}
+	return fromRow(r), nil
 }
 
 // PutBlob writes the spooled file to storage at Key(repoName, p).
@@ -242,30 +243,31 @@ func (s *Service) PutBlob(ctx context.Context, repoName, p string, sp *Spooled, 
 // asset row keyed by (RepoID, Path) and sets a.ID. Returns created=true on insert.
 // Path and kind are never changed on update (the FTS triggers rely on it).
 func UpsertTx(ctx context.Context, tx *sql.Tx, a *Asset) (created bool, err error) {
-	var existing int64
-	err = tx.QueryRowContext(ctx, "SELECT id FROM assets WHERE repo_id = ? AND path = ?", a.RepoID, a.Path).Scan(&existing)
+	q := dbq.New(tx)
+	_, err = q.GetAssetID(ctx, dbq.GetAssetIDParams{RepoID: a.RepoID, Path: a.Path})
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		created = true
 	case err != nil:
 		return false, err
 	}
-	var by any
-	if a.UploadedBy != 0 {
-		by = a.UploadedBy
-	}
 	now := time.Now().Unix()
-	var ct, ut int64
-	err = tx.QueryRowContext(ctx, `INSERT INTO assets (repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (repo_id, path) DO UPDATE SET size = excluded.size, sha256 = excluded.sha256,
-  content_type = excluded.content_type, updated_at = excluded.updated_at, uploaded_by = excluded.uploaded_by
-RETURNING id, kind, created_at, updated_at`,
-		a.RepoID, a.Path, a.Size, a.SHA256, a.ContentType, a.Kind, by, now, now).Scan(&a.ID, &a.Kind, &ct, &ut)
+	row, err := q.UpsertAsset(ctx, dbq.UpsertAssetParams{
+		RepoID:      a.RepoID,
+		Path:        a.Path,
+		Size:        a.Size,
+		Sha256:      a.SHA256,
+		ContentType: a.ContentType,
+		Kind:        a.Kind,
+		UploadedBy:  sql.NullInt64{Int64: a.UploadedBy, Valid: a.UploadedBy != 0},
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	})
 	if err != nil {
 		return false, err
 	}
-	a.CreatedAt, a.UpdatedAt = time.Unix(ct, 0).UTC(), time.Unix(ut, 0).UTC()
+	a.ID, a.Kind = row.ID, row.Kind
+	a.CreatedAt, a.UpdatedAt = time.Unix(row.CreatedAt, 0).UTC(), time.Unix(row.UpdatedAt, 0).UTC()
 	return created, nil
 }
 
@@ -398,37 +400,32 @@ func (s *Service) List(ctx context.Context, repoID int64, prefix, after string, 
 	if limit <= 0 {
 		limit = 50
 	}
-	q := "SELECT " + assetCols + " FROM assets WHERE repo_id = ?"
-	args := []any{repoID}
-	if prefix != "" {
-		q += " AND path >= ?"
-		args = append(args, prefix)
-		if end, ok := prefixEnd(prefix); ok {
-			q += " AND path < ?"
-			args = append(args, end)
-		}
+	q := dbq.New(s.db.R)
+	var rows []dbq.Asset
+	var err error
+	// One lower bound per query (see queries/assets.sql): the cursor when it is past the prefix.
+	cursor := after != "" && after >= prefix
+	lower, n := prefix, int64(limit)+1
+	if cursor {
+		lower = after
 	}
-	if after != "" {
-		q += " AND path > ?"
-		args = append(args, after)
+	end, bounded := prefixEnd(prefix)
+	switch {
+	case bounded && cursor:
+		rows, err = q.ListAssetsAfterRange(ctx, dbq.ListAssetsAfterRangeParams{RepoID: repoID, Lower: lower, Upper: end, Limit: n})
+	case bounded:
+		rows, err = q.ListAssetsFromRange(ctx, dbq.ListAssetsFromRangeParams{RepoID: repoID, Lower: lower, Upper: end, Limit: n})
+	case cursor:
+		rows, err = q.ListAssetsAfter(ctx, dbq.ListAssetsAfterParams{RepoID: repoID, Lower: lower, Limit: n})
+	default:
+		rows, err = q.ListAssetsFrom(ctx, dbq.ListAssetsFromParams{RepoID: repoID, Lower: lower, Limit: n})
 	}
-	q += " ORDER BY path LIMIT ?"
-	args = append(args, limit+1)
-	rows, err := s.db.R.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, "", err
 	}
-	defer rows.Close()
-	var out []*Asset
-	for rows.Next() {
-		a, err := scanAsset(rows)
-		if err != nil {
-			return nil, "", err
-		}
-		out = append(out, a)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, "", err
+	out := make([]*Asset, len(rows))
+	for i, r := range rows {
+		out[i] = fromRow(r)
 	}
 	next := ""
 	if len(out) > limit {
@@ -439,7 +436,7 @@ func (s *Service) List(ctx context.Context, repoID int64, prefix, after string, 
 }
 
 // Search: FTS5 trigram MATCH on assets_fts (q quoted as a phrase, len(q) >= 3), restricted to
-// repoIDs when non-nil, optional single repo filter, keyset on asset id > after.
+// repoIDs when non-nil, keyset on asset id > after.
 // A non-nil empty repoIDs matches nothing.
 func (s *Service) Search(ctx context.Context, q string, repoIDs []int64, after int64, limit int) ([]SearchHit, int64, error) {
 	if utf8.RuneCountInString(q) < 3 || (repoIDs != nil && len(repoIDs) == 0) {
@@ -448,39 +445,22 @@ func (s *Service) Search(ctx context.Context, q string, repoIDs []int64, after i
 	if limit <= 0 {
 		limit = 50
 	}
-	var b strings.Builder
-	b.WriteString("SELECT a.id, a.repo_id, a.path, a.size, a.sha256, a.content_type, a.kind, a.uploaded_by, a.created_at, a.updated_at, r.name" +
-		" FROM assets_fts f JOIN assets a ON a.id = f.rowid JOIN repos r ON r.id = a.repo_id" +
-		" WHERE assets_fts MATCH ? AND f.rowid > ?")
-	args := []any{`"` + strings.ReplaceAll(q, `"`, `""`) + `"`, after}
-	if repoIDs != nil {
-		b.WriteString(" AND a.repo_id IN (")
-		for i, id := range repoIDs {
-			if i > 0 {
-				b.WriteByte(',')
-			}
-			b.WriteByte('?')
-			args = append(args, id)
-		}
-		b.WriteByte(')')
+	match := `"` + strings.ReplaceAll(q, `"`, `""`) + `"`
+	dq := dbq.New(s.db.R)
+	var rows []dbq.SearchAssetsRow
+	var err error
+	if repoIDs == nil {
+		rows, err = dq.SearchAssets(ctx, dbq.SearchAssetsParams{Match: match, After: after, Limit: int64(limit)})
+	} else {
+		rows, err = dq.SearchAssetsInRepos(ctx, dbq.SearchAssetsInReposParams{
+			Match: match, After: after, RepoIDs: repoIDs, Limit: int64(limit)})
 	}
-	b.WriteString(" ORDER BY f.rowid LIMIT ?")
-	args = append(args, limit)
-	rows, err := s.db.R.QueryContext(ctx, b.String(), args...)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer rows.Close()
-	var out []SearchHit
-	for rows.Next() {
-		var h SearchHit
-		if h.Asset, err = scanAsset(rows, &h.RepoName); err != nil {
-			return nil, 0, err
-		}
-		out = append(out, h)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, 0, err
+	out := make([]SearchHit, len(rows))
+	for i, r := range rows {
+		out[i] = SearchHit{Asset: fromRow(r.Asset), RepoName: r.RepoName}
 	}
 	var next int64
 	if len(out) == limit {

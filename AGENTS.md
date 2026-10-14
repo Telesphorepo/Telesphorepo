@@ -10,11 +10,13 @@ go tool task dev            # backend :8080 + Vite UI :5173 with live reload (op
 go tool task build [image]  # bin/telesphorepo with UI embedded (+ image telesphorepo:local)
 go tool task preview        # build, then run the production binary at :8080
 go tool task test [args]    # e2e suite; args go to go test, e.g. -run TestMaven
+go tool task test scale     # 100k and 1M asset latency test (slow)
+go tool task gen            # run sqlc for every internal/**/sqlc.yaml
 go tool task doctor         # show detected Go / bun / Node / Docker-Podman
 
 go build ./...
 go vet ./...
-go vet -tags e2e ./e2e/...  # e2e files only compile with the tag
+go vet -tags e2e ./e2e/...  # e2e files only compile with the tag (`scale` for scale_test.go)
 E2E_SKIP_BUILD=1 go tool task test -run TestX   # reuse the already-built image
 ```
 
@@ -30,9 +32,16 @@ the fallback) and Node 26+ (see `.node-version`). The e2e suite needs Docker or 
 - **Storage keys and repo paths use package `path`, never `path/filepath`.** Keys are
   forward-slash on every OS. Use `filepath` only for local OS paths, such as the data dir.
 - **Every query on a request path uses an index.** Lists use keyset pagination
-  (`?after=&limit=`, `httpx.Limit`). Never use `OFFSET` or `LIKE '%x%'`; substring search goes
+  (`?after=&limit=`, `httpx.Limit`) with one lower bound per key column: pick the tighter of prefix and cursor in Go, because SQLite checks a second bound row by row. Never use `OFFSET` or `LIKE '%x%'`; substring search goes
   through `assets_fts` (trigram). Request paths read settings from the in-memory snapshot,
   never from the `settings` table.
+- **Write queries in `queries/*.sql`.** Core and each format keep their SQL in `queries/*.sql`
+  next to a `sqlc.yaml`. Run `go tool task gen` after you change a query or a migration, and
+  commit the generated `dbq/` package. Write a query by hand (`dbq/extra.go`) only when sqlc
+  cannot express it, such as FTS5 `MATCH` or a streaming `iter.Seq2` read. Register each
+  hand-written query in the package `Extra` map so the plan guard (`db.CheckPlans`, run by
+  `TestQueryPlans`) checks it. A query that must scan goes in the `Allow` map with a reason.
+  Do not write inline SQL in services.
 - **Keep dependencies few and mature.** Use the stdlib first: `crypto/*`, `crypto/hkdf`,
   `net/http` routing, `http.CrossOriginProtection` and `log/slog`. Explain any new module in the
   change, and don't run `go mod tidy` unless an import needs it.
@@ -47,7 +56,7 @@ the fallback) and Node 26+ (see `.node-version`). The e2e suite needs Docker or 
   `Secret` if sensitive) rather than in a new env var. It then gets a `TR_<KEY>` override, the UI
   and the API for free. The only env vars outside the registry are the boot env (`TR_DATA_DIR`,
   `TR_LISTEN`, `TR_MASTER_KEY`), the bootstrap admin, and test/tooling vars (`TR_ENGINE`,
-  `E2E_*`, `TR_E2E_R2_*`).
+  `E2E_*`).
 - **Read configuration live.** Services take a `config.Provider` (`set.Config`) and call it per
   request. Don't keep a `*config.Config` around. To react to changes, use
   `settings.Service.Subscribe`.
@@ -63,28 +72,42 @@ the fallback) and Node 26+ (see `.node-version`). The e2e suite needs Docker or 
 | Need | Place |
 |---|---|
 | Wiring and startup order | `internal/server/server.go` |
-| New setting | `internal/settings/registry.go` (+ a field in `config.Config` if code reads it) |
-| Schema change | New `internal/db/migrations/000N_name.sql` (never edit applied migrations) |
+| New core setting | `internal/settings/registry.go` (+ a field in `config.Config` if code reads it) |
+| New format setting | `Settings()` of the format (`format.Configurable`) |
+| Core schema change | New `internal/db/migrations/000N_name.sql` (never edit applied migrations) |
+| Format schema change | New `internal/<format>/migrations/000N_name.sql` |
+| Query | `queries/*.sql` of the owner (`internal/db` or the format), then `go tool task gen` |
+| New repo format | `internal/<format>` + one line in `internal/formats/all.go` (see below) |
+| Plugin contract | `internal/format/format.go` |
 | JSON API route | `internal/api/api.go` (register) + handler file; errors via `httpx.Error` |
 | Auth / permission checks | `internal/auth` (`Identify`, repo access) |
 | Blob I/O | `internal/assets` (spool, store, serve) on top of `internal/storage` |
 | UI page | `web/src/pages/*.tsx`, routes and nav in `web/src/App.tsx`, fetch helpers in `web/src/api.ts` |
-| E2E harness | `e2e/harness_test.go` (servers, storage matrix, clients) |
+| E2E harness | `e2e/harness_test.go` (servers, storage matrix `fs` + SeaweedFS, clients) |
 | Dev tooling | `tools/task` |
 
 ## Adding a repo format
 
-1. Add a migration that widens the `repos.format` CHECK. SQLite needs a table rebuild for this;
-   do it in a new migration file.
-2. Add the format constant and any config validation in `internal/repos`.
-3. Create `internal/<format>` with a `Handler` that has `Register(mux)`. Authorize through
-   `internal/auth`, store and serve through `internal/assets` (key `repos/{repo}/{path}`), and
-   read limits from `config.Provider`.
-4. Wire it in `internal/server/server.go`, add it to the Vite proxy list in `web/vite.config.ts`,
-   and expose it in the UI.
-5. Add e2e tests that use the format's real client and run on every storage backend.
-6. Document the routes and tables in `SPEC.md`, and add a short client snippet to `README.md`
-   only if the format is common.
+A format is one package that implements `format.Format` (`internal/format`). The core names no
+format, so you edit no core file.
+
+1. Create `internal/<format>` with `func New() format.Format`. The type implements `Name`,
+   `Title`, `DefaultConfig`, `ValidateConfig` and `Register(mux, format.Host)`. The name is the URL
+   segment, the `repos.format` value and the migration component.
+2. In `Register`, keep the fields you need from `format.Host` (`Auth`, `Assets`, `Config`, ...).
+   Authorize through `Host.Auth.RepoGate`, store and serve through `Host.Assets` (key
+   `repos/{repo}/{path}`), and read limits from `Host.Config`.
+3. Implement the optional interfaces you need: `Migrator` (own tables), `Queryable` (plan guard),
+   `Configurable` (settings group), `Starter` (background work), `StatusReporter`,
+   `ConfigObserver` and `Describer` (client snippets that the UI and `dev` show).
+4. If the format has tables, add `migrations/NNNN_*.sql`, `queries/*.sql` and a `sqlc.yaml`
+   (copy `internal/debian/sqlc.yaml`). Run `go tool task gen`.
+5. Add one line to `internal/formats/all.go`: the import and the `format.Register(...)` argument.
+6. Add `e2e/<format>_test.go` that uses the format's real client and runs on every storage backend.
+7. Document the routes and tables in `SPEC.md`.
+
+`raw` (`internal/raw`) is the smallest example. `debian` shows migrations, settings and a
+background worker.
 
 ## How the maintainer likes to work
 

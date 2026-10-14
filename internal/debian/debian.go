@@ -1,12 +1,16 @@
-// Package debian serves hosted Debian repos (spec §9): uploads, signed incremental indexes.
+// Package debian is the Debian (apt) format plugin (spec §9): uploads, signed incremental
+// indexes.
 package debian
 
 import (
 	"context"
 	"database/sql"
+	"embed"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 
@@ -14,19 +18,46 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
+	"github.com/Telesphorepo/Telesphorepo/internal/debian/dbq"
+	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 	"github.com/Telesphorepo/Telesphorepo/internal/signing"
 )
 
+// name is the format name: URL segment, repos.format value, settings group and migration track.
+const name = "debian"
+
+// Settings of the debian group.
+const (
+	KeyDebounce = "deb.debounce"
+	KeyMaxDelay = "deb.max_delay"
+)
+
+//go:embed migrations/*.sql
+var migrationsFS embed.FS
+
+//go:embed queries/*.sql
+var queriesFS embed.FS
+
+func sub(f embed.FS, dir string) fs.FS {
+	s, err := fs.Sub(f, dir)
+	if err != nil {
+		panic(err) // the embedded directory always exists
+	}
+	return s
+}
+
 type Handler struct {
-	db     *db.DB
-	auth   *auth.Service
-	assets *assets.Service
-	repos  *repos.Service
-	cfg    config.Provider
-	log    *slog.Logger
+	db       *db.DB
+	q        *dbq.Queries // on the reader pool
+	auth     *auth.Service
+	assets   *assets.Service
+	repos    *repos.Service
+	cfg      config.Provider
+	settings *settings.Service
+	log      *slog.Logger
 
 	signer func() *signing.Signer // current key (live; nil = unsigned indexes)
 
@@ -36,23 +67,54 @@ type Handler struct {
 	idx indexer
 }
 
-// New returns the Debian handler. cfg and signer are read on every use, so setting changes
-// (including a replaced signing key) apply live.
-func New(d *db.DB, a *auth.Service, as *assets.Service, rs *repos.Service, cfg config.Provider, signer func() *signing.Signer, log *slog.Logger) (*Handler, error) {
-	h := &Handler{db: d, auth: a, assets: as, repos: rs, cfg: cfg, signer: signer, log: log}
+// New returns the Debian format. Register supplies the core services.
+func New() format.Format {
+	h := &Handler{}
 	h.idx.init(h)
-	return h, nil
+	return h
 }
 
-func (h *Handler) Name() string { return "debian" }
+func (h *Handler) Name() string  { return name }
+func (h *Handler) Title() string { return "Debian (apt)" }
 
 // Register mounts /debian/{repo}/upload/{dist}/{component} (PUT, POST),
-// GET/HEAD /debian/{repo}/{path...} (dists/ and pool/) and GET /keys/debian.asc.
-func (h *Handler) Register(mux *http.ServeMux) {
+// GET/HEAD /debian/{repo}/{path...} (dists/ and pool/) and GET /keys/debian.asc. Configuration
+// and the signing key are read on every use, so setting changes apply live.
+func (h *Handler) Register(mux *http.ServeMux, host format.Host) {
+	h.db, h.q = host.DB, dbq.New(host.DB.R)
+	h.auth, h.assets, h.repos = host.Auth, host.Assets, host.Repos
+	h.cfg, h.settings, h.signer, h.log = host.Config, host.Settings, host.Signer, host.Log
+
 	mux.HandleFunc("PUT /debian/{repo}/upload/{dist}/{component}", h.upload)
 	mux.HandleFunc("POST /debian/{repo}/upload/{dist}/{component}", h.upload)
 	mux.HandleFunc("GET /debian/{repo}/{path...}", h.download)
 	mux.HandleFunc("GET /keys/debian.asc", h.publicKey)
+}
+
+// Migrations holds the deb_* tables.
+func (h *Handler) Migrations() fs.FS { return sub(migrationsFS, "migrations") }
+
+// QuerySet lists the plugin's queries for the plan guard.
+func (h *Handler) QuerySet() db.QuerySet {
+	return db.QuerySet{
+		Component: name,
+		Files:     sub(queriesFS, "queries"),
+		Extra:     dbq.Extra,
+		Allow: map[string]string{
+			"ListAllDirtyDists": "startup recovery: enqueues every pending rebuild once per start; deb_dirty holds only units not yet rebuilt",
+			"ListAllIndexFiles": "background re-sign after a signing-key change, an admin action; two rows per (dist, component, architecture)",
+		},
+	}
+}
+
+// Settings returns the debian settings group.
+func (h *Handler) Settings() []settings.Def {
+	return []settings.Def{
+		{Key: KeyDebounce, Type: settings.TypeDuration, Default: "2s", Dev: "300ms", Label: "Index rebuild delay",
+			Help: "Quiet period after an upload before the Debian indexes are rebuilt."},
+		{Key: KeyMaxDelay, Type: settings.TypeDuration, Default: "30s", Label: "Max index rebuild delay",
+			Help: "Longest a rebuild waits under continuous uploads."},
+	}
 }
 
 func (h *Handler) download(w http.ResponseWriter, r *http.Request) {
@@ -61,7 +123,7 @@ func (h *Handler) download(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "invalid path")
 		return
 	}
-	repo, _, ok := h.auth.RepoGate(w, r, r.PathValue("repo"), repos.FormatDebian, auth.Read, false)
+	repo, _, ok := h.auth.RepoGate(w, r, r.PathValue("repo"), name, auth.Read, false)
 	if !ok {
 		return
 	}
@@ -87,65 +149,123 @@ func (h *Handler) publicKey(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Start launches the background indexer and enqueues all durable deb_dirty rows.
-// It returns immediately; the indexer stops when ctx is cancelled.
+// Start launches the background indexer, enqueues all durable deb_dirty rows and re-signs the
+// indexes whenever the signing key changes. It returns immediately; the indexer stops when ctx
+// is cancelled.
 func (h *Handler) Start(ctx context.Context) {
 	if h.signer() == nil {
 		h.log.Warn("no usable signing key: Debian indexes are unsigned; clients need [trusted=yes]")
 	}
+	h.settings.Subscribe(h.signingKeyChanged)
 	h.idx.start(ctx)
 }
 
-// Pending returns the number of deb_dirty rows for repoID (for /api/repos/{name}/debian/status).
-// It must count rows still dirty OR currently being rebuilt.
-func (h *Handler) Pending(ctx context.Context, repoID int64) (int, error) {
-	var n int
-	err := h.db.R.QueryRowContext(ctx, `SELECT COUNT(*) FROM deb_dirty WHERE repo_id = ?`, repoID).Scan(&n)
-	return n, err
+// Status reports the number of units waiting for an index rebuild, counting rows still dirty
+// and rows being rebuilt.
+func (h *Handler) Status(ctx context.Context, repo *repos.Repo) (any, error) {
+	n, err := h.q.CountDirty(ctx, repo.ID)
+	if err != nil {
+		return nil, err
+	}
+	return struct {
+		Pending int64 `json:"pending"`
+	}{n}, nil
 }
 
-// ConfigChanged marks for rebuild every (dist, component, arch) of repo whose configured
-// architecture has no Packages index yet although the component holds packages, so
-// arch:all packages appear for architectures added after they were uploaded.
-func (h *Handler) ConfigChanged(ctx context.Context, repo *repos.Repo) error {
-	if repo.Format != repos.FormatDebian {
+// RepoConfigChanged applies an architecture change. It removes the index files of removed
+// architectures (so they are no longer served or listed in Release) and their pending
+// rebuilds, then marks the added architectures of every (dist, component) with packages for a
+// rebuild, so arch:all packages appear for them. Every dist is rebuilt, so each Release lists
+// the new architectures; without an added architecture the first configured one is marked.
+func (h *Handler) RepoConfigChanged(ctx context.Context, old, new *repos.Repo) error {
+	oldArchs, newArchs := architectures(old), architectures(new)
+	if slices.Equal(oldArchs, newArchs) {
 		return nil
 	}
-	var dists []string
+	var removed, added []string
+	for _, a := range oldArchs {
+		if !slices.Contains(newArchs, a) {
+			removed = append(removed, a)
+		}
+	}
+	for _, a := range newArchs {
+		if !slices.Contains(oldArchs, a) {
+			added = append(added, a)
+		}
+	}
+	mark := added
+	if len(mark) == 0 {
+		mark = newArchs[:1]
+	}
+
+	var dists, dropped []string
 	err := h.db.Tx(ctx, func(tx *sql.Tx) error {
-		mark := h.tick()
-		for _, arch := range repo.Debian().Architectures {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO deb_dirty (repo_id, distribution, component, architecture, marked_at)
-				SELECT DISTINCT p.repo_id, p.distribution, p.component, ?, ? FROM deb_packages p
-				WHERE p.repo_id = ? AND NOT EXISTS (SELECT 1 FROM deb_index_files f
-					WHERE f.repo_id = p.repo_id AND f.distribution = p.distribution
-					AND f.path = p.component || '/binary-' || ? || '/Packages')
-				ON CONFLICT (repo_id, distribution, component, architecture) DO UPDATE SET marked_at = excluded.marked_at`,
-				arch, mark, repo.ID, arch); err != nil {
+		q := dbq.New(tx)
+		if len(removed) > 0 {
+			files, err := q.ListRepoIndexFiles(ctx, new.ID)
+			if err != nil {
 				return err
 			}
+			for _, f := range files {
+				if _, arch, ok := unitOf(f.Path); !ok || !slices.Contains(removed, arch) {
+					continue
+				}
+				if err := q.DeleteIndexFile(ctx, dbq.DeleteIndexFileParams{RepoID: new.ID, Distribution: f.Distribution, Path: f.Path}); err != nil {
+					return err
+				}
+				p := "dists/" + f.Distribution + "/" + f.Path
+				if err := q.DeleteIndexAsset(ctx, dbq.DeleteIndexAssetParams{RepoID: new.ID, Path: p}); err != nil {
+					return err
+				}
+				dropped = append(dropped, p)
+			}
+			for _, a := range removed {
+				if err := q.DeleteDirtyArch(ctx, dbq.DeleteDirtyArchParams{RepoID: new.ID, Architecture: a}); err != nil {
+					return err
+				}
+			}
 		}
-		rows, err := tx.QueryContext(ctx, `SELECT DISTINCT distribution FROM deb_dirty WHERE repo_id = ?`, repo.ID)
+		units, err := q.ListPackageComponents(ctx, new.ID)
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var d string
-			if err := rows.Scan(&d); err != nil {
-				return err
+		ts := h.tick()
+		for _, u := range units {
+			for _, a := range mark {
+				if err := q.MarkDirty(ctx, dbq.MarkDirtyParams{RepoID: new.ID, Distribution: u.Distribution,
+					Component: u.Component, Architecture: a, MarkedAt: ts}); err != nil {
+					return err
+				}
 			}
-			dists = append(dists, d)
 		}
-		return rows.Err()
+		dists, err = q.ListRepoDirtyDists(ctx, new.ID)
+		return err
 	})
 	if err != nil {
 		return err
 	}
+	for _, p := range dropped {
+		unlock := h.assets.Lock(new.ID, p)
+		if err := h.assets.Store().Delete(ctx, assets.Key(new.Name, p)); err != nil {
+			h.log.Warn("delete index file of a removed architecture", "repo", new.Name, "path", p, "err", err)
+		}
+		unlock()
+	}
 	for _, d := range dists {
-		h.idx.notify(distKey{repo.ID, d})
+		h.idx.notify(distKey{new.ID, d})
 	}
 	return nil
+}
+
+// unitOf splits an index file path relative to dists/{dist}/, e.g.
+// main/binary-amd64/Packages.gz, into its component and architecture.
+func unitOf(p string) (component, arch string, ok bool) {
+	component, rest, ok := strings.Cut(p, "/binary-")
+	if !ok {
+		return "", "", false
+	}
+	arch, _, ok = strings.Cut(rest, "/")
+	return component, arch, ok && component != "" && arch != ""
 }
 
 // tick returns a strictly increasing timestamp for deb_dirty.marked_at and rebuild starts.
@@ -170,17 +290,16 @@ func (h *Handler) raiseClock(n int64) {
 	h.clockMu.Unlock()
 }
 
-// SigningKeyChanged is a settings subscriber: when the signing key differs between old and new
-// it marks every unit with index files dirty so InRelease/Release.gpg are re-signed.
-func (h *Handler) SigningKeyChanged(old, new *settings.Snapshot) {
+// signingKeyChanged is a settings subscriber: when the signing key differs between old and new
+// it marks one unit of every dist with index files dirty, so each Release is signed again.
+func (h *Handler) signingKeyChanged(old, new *settings.Snapshot) {
 	if fingerprint(old) == fingerprint(new) {
 		return
 	}
 	// Subscribers run inside the settings writer; do the DB work elsewhere.
 	go func() {
-		ctx := context.Background()
-		if err := h.resignAll(ctx); err != nil {
-			h.log.Error("debian: mark indexes dirty after signing key change", "err", err)
+		if err := h.resignAll(context.Background()); err != nil {
+			h.log.Error("mark indexes dirty after signing key change", "err", err)
 		}
 	}()
 }
@@ -195,28 +314,28 @@ func fingerprint(s *settings.Snapshot) string {
 func (h *Handler) resignAll(ctx context.Context) error {
 	var keys []distKey
 	err := h.db.Tx(ctx, func(tx *sql.Tx) error {
-		ts := h.tick()
-		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO deb_dirty (repo_id, distribution, component, architecture, marked_at)
-			SELECT DISTINCT repo_id, distribution,
-				substr(path, 1, instr(path, '/binary-') - 1),
-				substr(path, instr(path, '/binary-') + 8, instr(substr(path, instr(path, '/binary-') + 8), '/') - 1),
-				?
-			FROM deb_index_files WHERE path LIKE '%/binary-%/%'`, ts); err != nil {
-			return err
-		}
-		rows, err := tx.QueryContext(ctx, `SELECT DISTINCT repo_id, distribution FROM deb_dirty`)
+		q := dbq.New(tx)
+		files, err := q.ListAllIndexFiles(ctx)
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var k distKey
-			if err := rows.Scan(&k.repoID, &k.dist); err != nil {
+		ts := h.tick()
+		for _, f := range files {
+			k := distKey{f.RepoID, f.Distribution}
+			if len(keys) > 0 && keys[len(keys)-1] == k {
+				continue // files are ordered by (repo, dist): one unit per dist is enough
+			}
+			comp, arch, ok := unitOf(f.Path)
+			if !ok {
+				continue
+			}
+			if err := q.MarkDirty(ctx, dbq.MarkDirtyParams{RepoID: f.RepoID, Distribution: f.Distribution,
+				Component: comp, Architecture: arch, MarkedAt: ts}); err != nil {
 				return err
 			}
 			keys = append(keys, k)
 		}
-		return rows.Err()
+		return nil
 	})
 	if err != nil {
 		return err

@@ -11,6 +11,7 @@ import (
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
+	"github.com/Telesphorepo/Telesphorepo/internal/debian/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
@@ -28,7 +29,7 @@ type uploadResult struct {
 var errConflict = errors.New("conflict")
 
 func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
-	repo, p, ok := h.auth.RepoGate(w, r, r.PathValue("repo"), repos.FormatDebian, auth.Write, false)
+	repo, p, ok := h.auth.RepoGate(w, r, r.PathValue("repo"), name, auth.Write, false)
 	if !ok {
 		return
 	}
@@ -69,7 +70,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	archs := repo.Debian().Architectures
+	archs := architectures(repo)
 	if info.Architecture != "all" && !slices.Contains(archs, info.Architecture) {
 		httpx.Error(w, http.StatusBadRequest, "architecture "+info.Architecture+" is not configured for this repository")
 		return
@@ -96,10 +97,8 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 	unlockPool := h.assets.Lock(repo.ID, pool)
 	defer unlockPool()
 
-	var existing string
-	err = h.db.R.QueryRowContext(ctx, `SELECT sha256 FROM deb_packages
-		WHERE repo_id = ? AND distribution = ? AND component = ? AND architecture = ? AND package = ? AND version = ?`,
-		repo.ID, dist, comp, info.Architecture, info.Package, info.Version).Scan(&existing)
+	existing, err := h.q.GetPackageSHA256(ctx, dbq.GetPackageSHA256Params{RepoID: repo.ID, Distribution: dist,
+		Component: comp, Architecture: info.Architecture, Package: info.Package, Version: info.Version})
 	switch {
 	case err == nil && existing == sp.SHA256:
 		httpx.WriteJSON(w, http.StatusOK, res)
@@ -127,21 +126,17 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 		if _, err := assets.UpsertTx(ctx, tx, a); err != nil {
 			return err
 		}
-		now := time.Now().Unix()
-		if _, err := tx.ExecContext(ctx, `INSERT INTO deb_packages
-			(repo_id, distribution, component, architecture, package, version, asset_id, filename,
-			 size, md5, sha1, sha256, control, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			repo.ID, dist, comp, info.Architecture, info.Package, info.Version, a.ID, pool,
-			sp.Size, sp.MD5, sp.SHA1, sp.SHA256, info.Control, now); err != nil {
+		q := dbq.New(tx)
+		if err := q.InsertPackage(ctx, dbq.InsertPackageParams{RepoID: repo.ID, Distribution: dist, Component: comp,
+			Architecture: info.Architecture, Package: info.Package, Version: info.Version, AssetID: a.ID,
+			Filename: pool, Size: sp.Size, Md5: sp.MD5, Sha1: sp.SHA1, Sha256: sp.SHA256,
+			Control: info.Control, CreatedAt: time.Now().Unix()}); err != nil {
 			return err
 		}
 		mark := h.tick()
 		for _, arch := range dirtyArchs {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO deb_dirty (repo_id, distribution, component, architecture, marked_at)
-				VALUES (?, ?, ?, ?, ?)
-				ON CONFLICT (repo_id, distribution, component, architecture) DO UPDATE SET marked_at = excluded.marked_at`,
-				repo.ID, dist, comp, arch, mark); err != nil {
+			if err := q.MarkDirty(ctx, dbq.MarkDirtyParams{RepoID: repo.ID, Distribution: dist, Component: comp,
+				Architecture: arch, MarkedAt: mark}); err != nil {
 				return err
 			}
 		}

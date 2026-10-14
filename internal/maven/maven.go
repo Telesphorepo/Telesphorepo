@@ -2,7 +2,9 @@
 package maven
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"path"
 	"strings"
@@ -10,23 +12,93 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
+	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
+// Handler is the Maven format plugin.
 type Handler struct {
 	auth   *auth.Service
 	assets *assets.Service
 	cfg    config.Provider
 }
 
-func New(a *auth.Service, as *assets.Service, cfg config.Provider) *Handler {
-	return &Handler{auth: a, assets: as, cfg: cfg}
+// New returns the Maven format.
+func New() format.Format { return &Handler{} }
+
+func (h *Handler) Name() string  { return "maven" }
+func (h *Handler) Title() string { return "Maven / Gradle" }
+
+func (h *Handler) DefaultConfig() json.RawMessage { return json.RawMessage(`{}`) }
+
+// ValidateConfig accepts only an empty JSON object: Maven repos have no options.
+func (h *Handler) ValidateConfig(raw json.RawMessage) (json.RawMessage, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil || m == nil {
+		return nil, errors.New("maven config must be a JSON object")
+	}
+	if len(m) > 0 {
+		return nil, errors.New("maven repos take no config options")
+	}
+	return h.DefaultConfig(), nil
 }
 
-func (h *Handler) Name() string { return "maven" }
+// Usage returns the Maven and Gradle client setup for a repo.
+func (h *Handler) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
+	url := fmt.Sprintf("%s/maven/%s", baseURL, repo.Name)
+	return []format.Snippet{
+		{Title: "~/.m2/settings.xml", Lang: "xml", Code: fmt.Sprintf(`<settings>
+  <servers>
+    <server>
+      <id>%[1]s</id>
+      <username>YOUR_USERNAME</username>
+      <password>YOUR_TOKEN</password>
+    </server>
+  </servers>
+</settings>`, repo.Name)},
+		{Title: "pom.xml", Lang: "xml", Code: fmt.Sprintf(`<repositories>
+  <repository>
+    <id>%[1]s</id>
+    <url>%[2]s</url>
+  </repository>
+</repositories>
+<distributionManagement>
+  <repository>
+    <id>%[1]s</id>
+    <url>%[2]s</url>
+  </repository>
+</distributionManagement>`, repo.Name, url)},
+		{Title: "build.gradle.kts (publishing)", Lang: "kotlin", Code: fmt.Sprintf(`publishing {
+    repositories {
+        maven {
+            name = "%[1]s"
+            url = uri("%[2]s")
+            credentials {
+                username = providers.gradleProperty("telesphorepoUser").get()
+                password = providers.gradleProperty("telesphorepoToken").get()
+            }
+        }
+    }
+}`, repo.Name, url)},
+		{Title: "settings.gradle.kts (pluginManagement)", Lang: "kotlin", Code: fmt.Sprintf(`pluginManagement {
+    repositories {
+        maven {
+            url = uri("%s")
+            credentials {
+                username = providers.gradleProperty("telesphorepoUser").get()
+                password = providers.gradleProperty("telesphorepoToken").get()
+            }
+        }
+        gradlePluginPortal()
+    }
+}`, url)},
+	}
+}
 
 // Register mounts GET/HEAD/PUT /maven/{repo}/{path...}.
-func (h *Handler) Register(mux *http.ServeMux) {
+func (h *Handler) Register(mux *http.ServeMux, host format.Host) {
+	h.auth, h.assets, h.cfg = host.Auth, host.Assets, host.Config
 	mux.HandleFunc("GET /maven/{repo}/{path...}", h.handle)
 	mux.HandleFunc("PUT /maven/{repo}/{path...}", h.handle)
 }

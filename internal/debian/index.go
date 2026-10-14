@@ -14,12 +14,14 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"iter"
 	"os"
 	"path"
 	"strings"
 	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
+	"github.com/Telesphorepo/Telesphorepo/internal/debian/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
@@ -88,45 +90,37 @@ func (h *Handler) putByHash(ctx context.Context, repo *repos.Repo, dir string, s
 	return h.put(ctx, repo, p, sp, "application/octet-stream")
 }
 
-type pkgRow struct {
-	pkg, ver, control, filename, md5, sha1, sha256 string
-	size                                           int64
-}
-
-// pkgCursor streams one architecture's rows in (package, version) order straight off the
-// UNIQUE index, so no SQL sort is needed.
+// pkgCursor pulls one architecture's rows in (package, version) order from
+// dbq.StreamPackages.
 type pkgCursor struct {
-	rows *sql.Rows
-	cur  pkgRow
+	pull func() (dbq.StreamPackagesRow, error, bool)
+	stop func()
+	cur  dbq.StreamPackagesRow
 	ok   bool
 }
 
 func (h *Handler) openCursor(ctx context.Context, repoID int64, dist, comp, arch string) (*pkgCursor, error) {
-	rows, err := h.db.R.QueryContext(ctx, `SELECT package, version, control, filename, size, md5, sha1, sha256
-		FROM deb_packages
-		WHERE repo_id = ? AND distribution = ? AND component = ? AND architecture = ?
-		ORDER BY package, version`, repoID, dist, comp, arch)
-	if err != nil {
-		return nil, err
-	}
-	c := &pkgCursor{rows: rows}
+	pull, stop := iter.Pull2(h.q.StreamPackages(ctx, dbq.StreamPackagesParams{
+		RepoID: repoID, Distribution: dist, Component: comp, Architecture: arch}))
+	c := &pkgCursor{pull: pull, stop: stop}
 	return c, c.next()
 }
 
 func (c *pkgCursor) next() error {
-	c.ok = c.rows.Next()
-	if !c.ok {
-		return c.rows.Err()
+	r, err, ok := c.pull()
+	if err != nil {
+		c.ok = false
+		return err
 	}
-	r := &c.cur
-	return c.rows.Scan(&r.pkg, &r.ver, &r.control, &r.filename, &r.size, &r.md5, &r.sha1, &r.sha256)
+	c.cur, c.ok = r, ok
+	return nil
 }
 
-func lessRow(a, b *pkgRow) bool {
-	if a.pkg != b.pkg {
-		return a.pkg < b.pkg
+func lessRow(a, b *dbq.StreamPackagesRow) bool {
+	if a.Package != b.Package {
+		return a.Package < b.Package
 	}
-	return a.ver < b.ver
+	return a.Version < b.Version
 }
 
 // buildPackages writes Packages and Packages.gz for (dist, comp, arch) — rows of arch
@@ -172,12 +166,10 @@ func (h *Handler) buildPackages(ctx context.Context, repo *repos.Repo, dist, com
 	rel := comp + "/binary-" + arch + "/"
 	now := time.Now().Unix()
 	return h.db.Tx(ctx, func(tx *sql.Tx) error {
-		for name, sp := range map[string]*assets.Spooled{"Packages": plainSp, "Packages.gz": gzSp} {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO deb_index_files
-				(repo_id, distribution, path, size, md5, sha256, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
-				ON CONFLICT (repo_id, distribution, path) DO UPDATE SET
-				size = excluded.size, md5 = excluded.md5, sha256 = excluded.sha256, updated_at = excluded.updated_at`,
-				repo.ID, dist, rel+name, sp.Size, sp.MD5, sp.SHA256, now); err != nil {
+		q := dbq.New(tx)
+		for file, sp := range map[string]*assets.Spooled{"Packages": plainSp, "Packages.gz": gzSp} {
+			if err := q.UpsertIndexFile(ctx, dbq.UpsertIndexFileParams{RepoID: repo.ID, Distribution: dist,
+				Path: rel + file, Size: sp.Size, Md5: sp.MD5, Sha256: sp.SHA256, UpdatedAt: now}); err != nil {
 				return err
 			}
 		}
@@ -195,7 +187,7 @@ func (h *Handler) writePackages(ctx context.Context, repoID int64, dist, comp, a
 	var cursors []*pkgCursor
 	defer func() {
 		for _, c := range cursors {
-			c.rows.Close()
+			c.stop()
 		}
 	}()
 	for _, a := range []string{arch, "all"} {
@@ -227,12 +219,12 @@ func (h *Handler) writePackages(ctx context.Context, repoID int64, dist, comp, a
 			w.WriteString("\n")
 		}
 		first = false
-		w.WriteString(r.control)
-		if !strings.HasSuffix(r.control, "\n") {
+		w.WriteString(r.Control)
+		if !strings.HasSuffix(r.Control, "\n") {
 			w.WriteString("\n")
 		}
 		fmt.Fprintf(w, "Filename: %s\nSize: %d\nMD5sum: %s\nSHA1: %s\nSHA256: %s\n",
-			r.filename, r.size, r.md5, r.sha1, r.sha256)
+			r.Filename, r.Size, r.Md5, r.Sha1, r.Sha256)
 		if err := pick.next(); err != nil {
 			return err
 		}
@@ -243,48 +235,31 @@ func (h *Handler) writePackages(ctx context.Context, repoID int64, dist, comp, a
 	return zw.Close()
 }
 
-type indexFile struct {
-	path, md5, sha256 string
-	size              int64
-}
-
 // buildRelease regenerates Release (and, when signing, Release.gpg and InRelease last)
 // from deb_index_files only.
 func (h *Handler) buildRelease(ctx context.Context, repo *repos.Repo, dist string) error {
-	rows, err := h.db.R.QueryContext(ctx, `SELECT path, size, md5, sha256 FROM deb_index_files
-		WHERE repo_id = ? AND distribution = ? ORDER BY path`, repo.ID, dist)
+	files, err := h.q.ListIndexFiles(ctx, dbq.ListIndexFilesParams{RepoID: repo.ID, Distribution: dist})
 	if err != nil {
 		return err
 	}
-	var files []indexFile
 	var comps []string
-	for rows.Next() {
-		var f indexFile
-		if err := rows.Scan(&f.path, &f.size, &f.md5, &f.sha256); err != nil {
-			rows.Close()
-			return err
-		}
-		files = append(files, f)
-		if c, _, _ := strings.Cut(f.path, "/"); len(comps) == 0 || comps[len(comps)-1] != c {
+	for _, f := range files {
+		if c, _, _ := strings.Cut(f.Path, "/"); len(comps) == 0 || comps[len(comps)-1] != c {
 			comps = append(comps, c)
 		}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
 	}
 
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "Origin: %s\nLabel: %s\nSuite: %s\nCodename: %s\nDate: %s\nArchitectures: %s\nComponents: %s\nAcquire-By-Hash: yes\n",
 		repo.Name, repo.Name, dist, dist, time.Now().UTC().Format(time.RFC1123Z),
-		strings.Join(repo.Debian().Architectures, " "), strings.Join(comps, " "))
+		strings.Join(architectures(repo), " "), strings.Join(comps, " "))
 	b.WriteString("MD5Sum:\n")
 	for _, f := range files {
-		fmt.Fprintf(&b, " %s %16d %s\n", f.md5, f.size, f.path)
+		fmt.Fprintf(&b, " %s %16d %s\n", f.Md5, f.Size, f.Path)
 	}
 	b.WriteString("SHA256:\n")
 	for _, f := range files {
-		fmt.Fprintf(&b, " %s %16d %s\n", f.sha256, f.size, f.path)
+		fmt.Fprintf(&b, " %s %16d %s\n", f.Sha256, f.Size, f.Path)
 	}
 	release := b.Bytes()
 

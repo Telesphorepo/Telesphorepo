@@ -27,6 +27,7 @@ import (
 
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
+	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/signing"
 	"github.com/Telesphorepo/Telesphorepo/internal/storage"
 )
@@ -82,7 +83,7 @@ func newVE() *ValidationError { return &ValidationError{Fields: map[string]strin
 // Snapshot is an immutable view of the effective settings.
 type Snapshot struct {
 	Config *config.Config
-	// Signer signs Debian indexes; nil only if no usable key is configured.
+	// Signer signs repository indexes; nil only if no usable key is configured.
 	Signer *signing.Signer
 	// SignerFromFile is true when Signer was loaded from gpg.key_file.
 	SignerFromFile bool
@@ -98,13 +99,43 @@ func (s *Snapshot) Value(key string) any { return s.values[key] }
 // Source returns where key's effective value comes from.
 func (s *Snapshot) Source(key string) Source { return s.sources[key] }
 
+// Typed reads of a setting's effective value (the zero value for an unknown key or another
+// type). Format plugins read their own settings with these.
+
+func (s *Snapshot) String(key string) string {
+	v, _ := s.values[key].(string)
+	return v
+}
+
+func (s *Snapshot) Bool(key string) bool {
+	v, _ := s.values[key].(bool)
+	return v
+}
+
+func (s *Snapshot) Int(key string) int64 {
+	v, _ := s.values[key].(int64)
+	return v
+}
+
+func (s *Snapshot) List(key string) []string {
+	v, _ := s.values[key].([]string)
+	return v
+}
+
+func (s *Snapshot) Duration(key string) time.Duration {
+	v, ok := s.values[key].(string)
+	if !ok {
+		return 0
+	}
+	return durationOf(v)
+}
+
 // Options configures Load.
 type Options struct {
-	// Defaults replaces built-in defaults, keyed by setting key in text form (e.g.
-	// "cookie.secure": "false"). Used by "telesphorepo dev"; env still wins and the UI shows
-	// these as defaults, not as locked.
-	Defaults map[string]string
-	Log      *slog.Logger
+	// Dev makes the Dev value of every Def replace its Default. Used by "telesphorepo dev";
+	// env still wins and the UI shows these as defaults, not as locked.
+	Dev bool
+	Log *slog.Logger
 }
 
 // Service owns the settings table and the effective snapshot.
@@ -113,8 +144,8 @@ type Service struct {
 	boot     *config.Boot
 	aead     cipher.AEAD
 	log      *slog.Logger
-	defaults map[string]string
-	env      map[string]string // non-empty TR_* overrides, captured at Load
+	dev      bool
+	env     map[string]string // non-empty TR_* overrides, captured at Load
 
 	mu   sync.Mutex // serializes writers
 	snap atomic.Pointer[Snapshot]
@@ -139,12 +170,7 @@ func Load(ctx context.Context, d *db.DB, boot *config.Boot, opts Options) (*Serv
 	if err != nil {
 		return nil, err
 	}
-	s := &Service{db: d, boot: boot, aead: aead, log: log, defaults: opts.Defaults, env: map[string]string{}}
-	for k := range opts.Defaults {
-		if Lookup(k) == nil {
-			return nil, fmt.Errorf("settings: unknown default %q", k)
-		}
-	}
+	s := &Service{db: d, boot: boot, aead: aead, log: log, dev: opts.Dev, env: map[string]string{}}
 	for _, def := range registry {
 		if v := os.Getenv(def.Env()); v != "" {
 			s.env[def.Key] = v
@@ -197,7 +223,7 @@ func (s *Service) Current() *Snapshot { return s.snap.Load() }
 // Config returns the current effective configuration (usable as a config.Provider).
 func (s *Service) Config() *config.Config { return s.snap.Load().Config }
 
-// Signer returns the current Debian signing key (nil if none).
+// Signer returns the current signing key (nil if none).
 func (s *Service) Signer() *signing.Signer { return s.snap.Load().Signer }
 
 // Subscribe registers fn to run after every applied change, with the previous and the new
@@ -211,26 +237,21 @@ func (s *Service) Subscribe(fn func(old, new *Snapshot)) {
 // readDB returns the decoded settings rows, skipping (and logging) unknown, undecryptable or
 // invalid ones.
 func (s *Service) readDB(ctx context.Context) (map[string]any, error) {
-	rows, err := s.db.R.QueryContext(ctx, `SELECT key, value, secret FROM settings`)
+	rows, err := dbq.New(s.db.R).ListSettings(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("read settings: %w", err)
 	}
-	defer rows.Close()
 	out := map[string]any{}
-	for rows.Next() {
-		var key, value string
-		var secret bool
-		if err := rows.Scan(&key, &value, &secret); err != nil {
-			return nil, err
-		}
+	for _, row := range rows {
+		key := row.Key
 		def := Lookup(key)
 		if def == nil {
 			s.log.Warn("ignoring unknown stored setting", "key", key)
 			continue
 		}
-		raw := []byte(value)
-		if secret {
-			if raw, err = open(s.aead, key, value); err != nil {
+		raw := []byte(row.Value)
+		if row.Secret {
+			if raw, err = open(s.aead, key, row.Value); err != nil {
 				s.log.Warn("ignoring stored secret setting: "+err.Error()+"; set it again", "key", key)
 				continue
 			}
@@ -242,12 +263,12 @@ func (s *Service) readDB(ctx context.Context) (map[string]any, error) {
 		}
 		out[key] = v
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (s *Service) defaultText(def *Def) string {
-	if v, ok := s.defaults[def.Key]; ok {
-		return v
+	if s.dev && def.Dev != "" {
+		return def.Dev
 	}
 	if def.Key == KeyFSRoot {
 		return config.JoinDataDir(s.boot.DataDir, "blobs")
@@ -312,8 +333,6 @@ func (s *Service) build(rows map[string]any, lenient bool) (*Snapshot, error) {
 		SessionTTL:             durationOf(snap.values[KeySessionTTL]),
 		GPGKeyFile:             str(KeyGPGKeyFile),
 		GPGPassphraseFile:      str(KeyGPGPassphraseFile),
-		DebDebounce:            durationOf(snap.values[KeyDebDebounce]),
-		DebMaxDelay:            durationOf(snap.values[KeyDebMaxDelay]),
 	}
 	if c.FSRoot == "" {
 		c.FSRoot = config.JoinDataDir(s.boot.DataDir, "blobs")
@@ -425,7 +444,7 @@ func (s *Service) build(rows map[string]any, lenient bool) (*Snapshot, error) {
 		case strict(KeySigningKey):
 			ve.add(KeySigningKey, err.Error())
 		default:
-			s.log.Error("stored signing key unusable; Debian indexes stay unsigned until a new key is set", "error", err.Error())
+			s.log.Error("stored signing key unusable; repository indexes stay unsigned until a new key is set", "error", err.Error())
 		}
 	}
 	if err := ve.orNil(); err != nil {
@@ -574,16 +593,17 @@ func (s *Service) Update(ctx context.Context, patch map[string]json.RawMessage, 
 // write persists the changed keys of rows, reloads the snapshot and notifies subscribers.
 // Caller holds s.mu.
 func (s *Service) write(ctx context.Context, rows map[string]any, changed []string, userID int64) error {
-	var by any
+	var by sql.NullInt64
 	if userID > 0 {
-		by = userID
+		by = sql.NullInt64{Int64: userID, Valid: true}
 	}
 	now := time.Now().Unix()
 	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
+		q := dbq.New(s.db.R).WithTx(tx)
 		for _, key := range changed {
 			v, ok := rows[key]
 			if !ok {
-				if _, err := tx.ExecContext(ctx, `DELETE FROM settings WHERE key = ?`, key); err != nil {
+				if err := q.DeleteSetting(ctx, key); err != nil {
 					return err
 				}
 				continue
@@ -597,11 +617,9 @@ func (s *Service) write(ctx context.Context, rows map[string]any, changed []stri
 			if def.Secret {
 				value = seal(s.aead, key, raw)
 			}
-			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO settings (key, value, secret, updated_at, updated_by) VALUES (?, ?, ?, ?, ?)
-				ON CONFLICT (key) DO UPDATE SET value = excluded.value, secret = excluded.secret,
-					updated_at = excluded.updated_at, updated_by = excluded.updated_by`,
-				key, value, def.Secret, now, by); err != nil {
+			if err := q.UpsertSetting(ctx, dbq.UpsertSettingParams{
+				Key: key, Value: value, Secret: def.Secret, UpdatedAt: now, UpdatedBy: by,
+			}); err != nil {
 				return err
 			}
 		}
@@ -679,7 +697,7 @@ func (s *Service) TestOIDC(ctx context.Context, patch map[string]json.RawMessage
 	return nil
 }
 
-// SigningKeyInfo describes the active Debian signing key.
+// SigningKeyInfo describes the active signing key.
 type SigningKeyInfo struct {
 	PublicKey   string `json:"public_key"` // armored
 	Fingerprint string `json:"fingerprint"`
@@ -690,7 +708,7 @@ type SigningKeyInfo struct {
 var ErrSigningKeyFromFile = errors.New("the signing key is loaded from the signing key file setting (TR_GPG_KEY_FILE); clear it to manage the key in the app")
 
 // SetSigningKey stores armored (an armored OpenPGP private key, decrypted with the configured
-// passphrase file if encrypted) as the Debian signing key, or generates a new Ed25519 key when
+// passphrase file if encrypted) as the signing key, or generates a new Ed25519 key when
 // armored is empty. Invalid keys return a *ValidationError.
 func (s *Service) SetSigningKey(ctx context.Context, armored string, userID int64) (*SigningKeyInfo, error) {
 	s.mu.Lock()
@@ -728,7 +746,7 @@ func (s *Service) SetSigningKey(ctx context.Context, armored string, userID int6
 	if signer == nil {
 		return nil, errors.New("signing key was saved but could not be loaded")
 	}
-	s.log.Info("debian signing key replaced", "fingerprint", signer.Fingerprint())
+	s.log.Info("signing key replaced", "fingerprint", signer.Fingerprint())
 	return &SigningKeyInfo{PublicKey: string(signer.PublicKeyArmored()), Fingerprint: signer.Fingerprint()}, nil
 }
 
@@ -742,8 +760,8 @@ func (s *Service) SigningKey() *SigningKeyInfo {
 }
 
 // EnsureSigningKey runs at startup: when no signing key is configured (no gpg.key_file and an
-// empty debian.signing_key) it imports <DataDir>/signing.asc left by M1.1 if present, else
-// generates a key; either way the key is stored encrypted as debian.signing_key.
+// empty signing.key) it imports <DataDir>/signing.asc left by M1.1 if present, else
+// generates a key; either way the key is stored encrypted as signing.key.
 func (s *Service) EnsureSigningKey(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -775,7 +793,7 @@ func (s *Service) EnsureSigningKey(ctx context.Context) error {
 		return err
 	}
 	if signer := s.Signer(); signer != nil {
-		s.log.Info("stored debian signing key", "fingerprint", signer.Fingerprint())
+		s.log.Info("stored signing key", "fingerprint", signer.Fingerprint())
 	}
 	return nil
 }

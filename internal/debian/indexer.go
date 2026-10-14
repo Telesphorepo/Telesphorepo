@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"slices"
 	"sync"
 	"time"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/debian/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
@@ -69,24 +71,19 @@ func (ix *indexer) start(ctx context.Context) {
 }
 
 func (h *Handler) loadDirty(ctx context.Context) ([]distKey, int64, error) {
-	var maxMark sql.NullInt64
-	if err := h.db.R.QueryRowContext(ctx, `SELECT MAX(marked_at) FROM deb_dirty`).Scan(&maxMark); err != nil {
-		return nil, 0, err
-	}
-	rows, err := h.db.R.QueryContext(ctx, `SELECT DISTINCT repo_id, distribution FROM deb_dirty`)
+	maxMark, err := h.q.MaxDirtyMark(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer rows.Close()
-	var keys []distKey
-	for rows.Next() {
-		var k distKey
-		if err := rows.Scan(&k.repoID, &k.dist); err != nil {
-			return nil, 0, err
-		}
-		keys = append(keys, k)
+	rows, err := h.q.ListAllDirtyDists(ctx)
+	if err != nil {
+		return nil, 0, err
 	}
-	return keys, maxMark.Int64, rows.Err()
+	keys := make([]distKey, len(rows))
+	for i, r := range rows {
+		keys[i] = distKey{r.RepoID, r.Distribution}
+	}
+	return keys, maxMark, nil
 }
 
 // notify records a mark for k. Before Start it is a no-op: Start enqueues all durable rows.
@@ -120,8 +117,9 @@ func (ix *indexer) scheduleLocked(k distKey, st *distState) {
 	if st.first.IsZero() {
 		st.first = now
 	}
-	d := ix.h.cfg().DebDebounce
-	if limit := st.first.Add(ix.h.cfg().DebMaxDelay).Sub(now); limit < d {
+	snap := ix.h.settings.Current()
+	d := snap.Duration(KeyDebounce)
+	if limit := st.first.Add(snap.Duration(KeyMaxDelay)).Sub(now); limit < d {
 		d = max(limit, 0)
 	}
 	ix.armLocked(k, st, d)
@@ -180,31 +178,19 @@ func (ix *indexer) run(k distKey, gen int) {
 	delete(ix.states, k)
 }
 
-type dirtyUnit struct{ component, arch string }
-
 // rebuild regenerates the dirty Packages files of one dist, then its Release files, and
-// clears the dirty rows that were marked before it started. remaining reports dirty rows
-// left over (marked during the rebuild).
+// clears the dirty rows that were marked before it started. A unit of an architecture that is
+// no longer configured is cleared without a build. remaining reports dirty rows left over
+// (marked during the rebuild).
 func (h *Handler) rebuild(ctx context.Context, k distKey) (remaining bool, err error) {
 	var start int64
-	var units []dirtyUnit
+	var units []dbq.ListDirtyUnitsRow
 	// Taking the start under the single writer orders it after every committed mark.
 	err = h.db.Tx(ctx, func(tx *sql.Tx) error {
 		start = h.tick()
-		rows, err := tx.QueryContext(ctx, `SELECT component, architecture FROM deb_dirty
-			WHERE repo_id = ? AND distribution = ? ORDER BY component, architecture`, k.repoID, k.dist)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var u dirtyUnit
-			if err := rows.Scan(&u.component, &u.arch); err != nil {
-				return err
-			}
-			units = append(units, u)
-		}
-		return rows.Err()
+		var err error
+		units, err = dbq.New(tx).ListDirtyUnits(ctx, dbq.ListDirtyUnitsParams{RepoID: k.repoID, Distribution: k.dist})
+		return err
 	})
 	if err != nil || len(units) == 0 {
 		return false, err
@@ -218,8 +204,12 @@ func (h *Handler) rebuild(ctx context.Context, k distKey) (remaining bool, err e
 		return false, err
 	}
 
+	archs := architectures(repo)
 	for _, u := range units {
-		if err := h.buildPackages(ctx, repo, k.dist, u.component, u.arch); err != nil {
+		if !slices.Contains(archs, u.Architecture) {
+			continue
+		}
+		if err := h.buildPackages(ctx, repo, k.dist, u.Component, u.Architecture); err != nil {
 			return false, err
 		}
 	}
@@ -228,15 +218,15 @@ func (h *Handler) rebuild(ctx context.Context, k distKey) (remaining bool, err e
 	}
 
 	err = h.db.Tx(ctx, func(tx *sql.Tx) error {
+		q := dbq.New(tx)
 		for _, u := range units {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM deb_dirty
-				WHERE repo_id = ? AND distribution = ? AND component = ? AND architecture = ? AND marked_at <= ?`,
-				k.repoID, k.dist, u.component, u.arch, start); err != nil {
+			if err := q.ClearDirty(ctx, dbq.ClearDirtyParams{RepoID: k.repoID, Distribution: k.dist,
+				Component: u.Component, Architecture: u.Architecture, MarkedAt: start}); err != nil {
 				return err
 			}
 		}
-		return tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM deb_dirty WHERE repo_id = ? AND distribution = ?)`,
-			k.repoID, k.dist).Scan(&remaining)
+		remaining, err = q.HasDirty(ctx, dbq.HasDirtyParams{RepoID: k.repoID, Distribution: k.dist})
+		return err
 	})
 	return remaining, err
 }

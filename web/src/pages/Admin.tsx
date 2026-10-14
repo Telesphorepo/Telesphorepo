@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { api, useAsync, type Page, type Repo, type User } from "../api";
+import { api, useAsync, type Format, type Page, type Repo, type RepoConfig, type User } from "../api";
+import { ConfigEditor } from "../formats";
 
 type Perm = { username: string; level: "read" | "write" };
 
@@ -50,29 +51,47 @@ function Users() {
   );
 }
 
-function CreateRepo({ onDone }: { onDone: () => void }) {
-  const [f, setF] = useState({ name: "", format: "maven", anon: false, arch: "amd64,arm64" });
+function CreateRepo({ formats, onDone }: { formats: Format[]; onDone: () => void }) {
+  const [f, setF] = useState({ name: "", format: "", anon: false });
+  // undefined: the default config of the format; null: the editor holds an invalid config.
+  const [config, setConfig] = useState<RepoConfig | null | undefined>(undefined);
   const [err, setErr] = useState("");
+  const cur = formats.find((x) => x.name === f.format) ?? formats[0];
   const submit = async (e: React.FormEvent) => {
     e.preventDefault(); setErr("");
-    const config = f.format === "debian" ? { architectures: f.arch.split(",").map((s) => s.trim()).filter(Boolean) } : undefined;
     try {
-      await api("POST", "/api/repos", { name: f.name, format: f.format, anonymous_read: f.anon, config });
+      await api("POST", "/api/repos", { name: f.name, format: cur.name, anonymous_read: f.anon, config: config ?? cur.default_config });
       setF({ ...f, name: "" }); onDone();
     } catch (e) { setErr((e as Error).message); }
   };
+  if (!cur) return null;
   return (
     <section>
       <h2>Create repository</h2>
       <form className="row" onSubmit={submit}>
         <input placeholder="name" required pattern="[a-z0-9][a-z0-9._-]{0,63}" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} />
-        <select value={f.format} onChange={(e) => setF({ ...f, format: e.target.value })}><option>maven</option><option>debian</option></select>
-        {f.format === "debian" && <input placeholder="architectures (comma separated)" value={f.arch} onChange={(e) => setF({ ...f, arch: e.target.value })} />}
+        <select value={cur.name} onChange={(e) => { setF({ ...f, format: e.target.value }); setConfig(undefined); }}>
+          {formats.map((x) => <option key={x.name} value={x.name}>{x.title}</option>)}
+        </select>
+        <ConfigEditor key={cur.name} format={cur.name} value={cur.default_config} onChange={setConfig} />
         <label className="inline"><input type="checkbox" checked={f.anon} onChange={(e) => setF({ ...f, anon: e.target.checked })} />anonymous read</label>
-        <button className="primary">Create</button>
+        <button className="primary" disabled={config === null}>Create</button>
       </form>
       {err && <p className="error">{err}</p>}
     </section>
+  );
+}
+
+function RepoConfigForm({ repo, onSave }: { repo: Repo; onSave: (config: RepoConfig) => void }) {
+  const [config, setConfig] = useState<RepoConfig | null>(repo.config ?? {});
+  return (
+    <details>
+      <summary>Config</summary>
+      <div className="row">
+        <ConfigEditor format={repo.format} value={repo.config ?? {}} onChange={setConfig} />
+        <button disabled={config === null} onClick={() => config && onSave(config)}>Save config</button>
+      </div>
+    </details>
   );
 }
 
@@ -95,6 +114,7 @@ function Perms({ repo, onChange }: { repo: Repo; onChange: () => void }) {
           onChange={(e) => act(() => api("PATCH", `/api/repos/${n}`, { anonymous_read: e.target.checked }))} />anonymous read</label>
       </div>
       {(err || error) && <p className="error">{err || error}</p>}
+      <RepoConfigForm repo={repo} onSave={(config) => act(() => api("PATCH", `/api/repos/${n}`, { config }))} />
       <table>
         <tbody>
           {data?.map((p) => (
@@ -117,11 +137,13 @@ function Perms({ repo, onChange }: { repo: Repo; onChange: () => void }) {
 
 export default function Admin() {
   const repos = useAsync(() => api<Repo[]>("GET", "/api/repos"), []);
+  const formats = useAsync(() => api<Format[]>("GET", "/api/formats"), []);
   return (
     <>
       <h1>Admin</h1>
       <Users />
-      <CreateRepo onDone={repos.reload} />
+      {formats.error && <p className="error">{formats.error}</p>}
+      <CreateRepo formats={formats.data ?? []} onDone={repos.reload} />
       <section>
         <h2>Repository permissions</h2>
         {repos.error && <p className="error">{repos.error}</p>}

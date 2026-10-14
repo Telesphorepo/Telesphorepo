@@ -1,7 +1,9 @@
-// Package repos manages repository records (spec §5.3).
+// Package repos manages repository records (spec §5.3). The format of a repo and its config
+// are checked by a Validator that the server builds from the format registry.
 package repos
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
+	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
 )
 
 var (
@@ -23,11 +26,6 @@ var (
 // NameRE validates repo, distribution, component and user names.
 var NameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 
-const (
-	FormatMaven  = "maven"
-	FormatDebian = "debian"
-)
-
 type Repo struct {
 	ID            int64
 	Name          string
@@ -37,165 +35,146 @@ type Repo struct {
 	CreatedAt     time.Time
 }
 
-// DebianConfig is the repos.config shape for debian repos.
-type DebianConfig struct {
-	Architectures []string `json:"architectures"` // default ["amd64","arm64"]
+// Validator validates the config of a repo of the given format and returns its normalized
+// form; an empty config selects the format's default. It rejects unknown formats.
+type Validator func(format string, config json.RawMessage) (json.RawMessage, error)
+
+type Service struct {
+	db       *db.DB
+	validate Validator
 }
 
-// Debian returns the parsed debian config with defaults applied.
-func (r *Repo) Debian() DebianConfig {
-	var c DebianConfig
-	_ = json.Unmarshal(r.Config, &c)
-	if len(c.Architectures) == 0 {
-		c.Architectures = []string{"amd64", "arm64"}
+// New returns the repo service. validate checks formats and configs in Create and Update; with
+// a nil validate (offline commands that only read repos) both reject every format.
+func New(d *db.DB, validate Validator) *Service { return &Service{db: d, validate: validate} }
+
+func fromRow(r dbq.Repo, err error) (*Repo, error) {
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
 	}
-	return c
-}
-
-type Service struct{ db *db.DB }
-
-func New(d *db.DB) *Service { return &Service{db: d} }
-
-const cols = `id, name, format, anonymous_read, config, created_at`
-
-type scanner interface{ Scan(...any) error }
-
-func scan(s scanner) (*Repo, error) {
-	var (
-		r    Repo
-		anon int
-		cfg  string
-		ts   int64
-	)
-	if err := s.Scan(&r.ID, &r.Name, &r.Format, &anon, &cfg, &ts); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrNotFound
-		}
+	if err != nil {
 		return nil, err
 	}
-	r.AnonymousRead = anon != 0
-	r.Config = json.RawMessage(cfg)
-	r.CreatedAt = time.Unix(ts, 0)
-	return &r, nil
+	return &Repo{
+		ID:            r.ID,
+		Name:          r.Name,
+		Format:        r.Format,
+		AnonymousRead: r.AnonymousRead,
+		Config:        json.RawMessage(r.Config),
+		CreatedAt:     time.Unix(r.CreatedAt, 0),
+	}, nil
 }
 
 // ByName is an indexed point lookup (used on every request).
 func (s *Service) ByName(ctx context.Context, name string) (*Repo, error) {
-	return scan(s.db.R.QueryRowContext(ctx, `SELECT `+cols+` FROM repos WHERE name = ?`, name))
+	return fromRow(dbq.New(s.db.R).GetRepoByName(ctx, name))
 }
 
 func (s *Service) ByID(ctx context.Context, id int64) (*Repo, error) {
-	return scan(s.db.R.QueryRowContext(ctx, `SELECT `+cols+` FROM repos WHERE id = ?`, id))
+	return fromRow(dbq.New(s.db.R).GetRepoByID(ctx, id))
 }
 
-// List returns all repos ordered by name (admin/UI only; repo count is small).
+// listPage is the page size List reads with.
+const listPage = 500
+
+// List returns all repos ordered by name (admin/UI only; repo count is small). It reads
+// keyset pages of listPage repos.
 func (s *Service) List(ctx context.Context) ([]*Repo, error) {
-	rows, err := s.db.R.QueryContext(ctx, `SELECT `+cols+` FROM repos ORDER BY name`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+	q := dbq.New(s.db.R)
 	var out []*Repo
-	for rows.Next() {
-		r, err := scan(rows)
+	after := ""
+	for {
+		rows, err := q.ListRepos(ctx, dbq.ListReposParams{After: after, Limit: listPage})
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, r)
+		for _, row := range rows {
+			r, _ := fromRow(row, nil)
+			out = append(out, r)
+		}
+		if len(rows) < listPage {
+			return out, nil
+		}
+		after = rows[len(rows)-1].Name
 	}
-	return out, rows.Err()
 }
 
-var archRE = regexp.MustCompile(`^[a-z0-9-]+$`)
-
-// normalizeConfig checks cfg is a JSON object and, for debian, validates and re-encodes it.
-func normalizeConfig(format string, cfg json.RawMessage) (json.RawMessage, error) {
-	if len(strings.TrimSpace(string(cfg))) == 0 {
-		cfg = json.RawMessage("{}")
-	}
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(cfg, &obj); err != nil || obj == nil {
+// normalizeConfig checks that cfg is empty or a JSON object, then runs the format's validation,
+// which must return a JSON object.
+func (s *Service) normalizeConfig(format string, cfg json.RawMessage) (json.RawMessage, error) {
+	if t := bytes.TrimSpace(cfg); len(t) > 0 && string(t) != "null" && !isObject(t) {
 		return nil, fmt.Errorf("%w: config must be a JSON object", ErrInvalid)
 	}
-	if format != FormatDebian {
-		return cfg, nil
+	if s.validate == nil {
+		return nil, fmt.Errorf("%w: unknown format %q", ErrInvalid, format)
 	}
-	if raw, ok := obj["architectures"]; ok {
-		var archs []string
-		if err := json.Unmarshal(raw, &archs); err != nil || len(archs) == 0 {
-			return nil, fmt.Errorf("%w: architectures must be a non-empty list of strings", ErrInvalid)
-		}
-		for _, a := range archs {
-			if !archRE.MatchString(a) || a == "all" {
-				return nil, fmt.Errorf("%w: invalid architecture %q", ErrInvalid, a)
-			}
-		}
-		obj["architectures"], _ = json.Marshal(archs)
-	} else {
-		obj["architectures"] = json.RawMessage(`["amd64","arm64"]`)
+	out, err := s.validate(format, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
-	out, err := json.Marshal(obj)
-	return out, err
+	if !isObject(out) {
+		return nil, fmt.Errorf("format %q returned a config that is not a JSON object", format)
+	}
+	return out, nil
+}
+
+func isObject(raw json.RawMessage) bool {
+	var obj map[string]json.RawMessage
+	return json.Unmarshal(raw, &obj) == nil && obj != nil
 }
 
 func isUnique(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
 }
 
-// Create validates name/format/config (debian config: arch names ^[a-z0-9-]+$, non-empty) and inserts.
+// Create validates the name, the format and the config (empty: the format's default) and
+// inserts the repo.
 func (s *Service) Create(ctx context.Context, name, format string, anonymousRead bool, config json.RawMessage) (*Repo, error) {
 	if !NameRE.MatchString(name) {
 		return nil, fmt.Errorf("%w: bad name", ErrInvalid)
 	}
-	if format != FormatMaven && format != FormatDebian {
-		return nil, fmt.Errorf("%w: unknown format %q", ErrInvalid, format)
-	}
-	cfg, err := normalizeConfig(format, config)
+	cfg, err := s.normalizeConfig(format, config)
 	if err != nil {
 		return nil, err
 	}
 	now := time.Now().Unix()
-	res, err := s.db.W.ExecContext(ctx,
-		`INSERT INTO repos (name, format, anonymous_read, config, created_at) VALUES (?, ?, ?, ?, ?)`,
-		name, format, anonymousRead, string(cfg), now)
+	id, err := dbq.New(s.db.W).CreateRepo(ctx, dbq.CreateRepoParams{
+		Name: name, Format: format, AnonymousRead: anonymousRead, Config: string(cfg), CreatedAt: now})
 	if isUnique(err) {
 		return nil, ErrExists
 	}
 	if err != nil {
 		return nil, err
 	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return nil, err
-	}
 	return &Repo{ID: id, Name: name, Format: format, AnonymousRead: anonymousRead, Config: cfg, CreatedAt: time.Unix(now, 0)}, nil
 }
 
-// Update changes only the non-nil fields.
-func (s *Service) Update(ctx context.Context, name string, anonymousRead *bool, config json.RawMessage) (*Repo, error) {
-	var out *Repo
-	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
-		r, err := scan(tx.QueryRowContext(ctx, `SELECT `+cols+` FROM repos WHERE name = ?`, name))
+// Update changes only the non-nil fields and returns the repo before and after the change.
+func (s *Service) Update(ctx context.Context, name string, anonymousRead *bool, config json.RawMessage) (old, updated *Repo, err error) {
+	err = s.db.Tx(ctx, func(tx *sql.Tx) error {
+		q := dbq.New(tx)
+		r, err := fromRow(q.GetRepoByName(ctx, name))
 		if err != nil {
 			return err
 		}
+		prev := *r
 		if anonymousRead != nil {
 			r.AnonymousRead = *anonymousRead
 		}
 		if config != nil {
-			if r.Config, err = normalizeConfig(r.Format, config); err != nil {
+			if r.Config, err = s.normalizeConfig(r.Format, config); err != nil {
 				return err
 			}
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE repos SET anonymous_read = ?, config = ? WHERE id = ?`,
-			r.AnonymousRead, string(r.Config), r.ID); err != nil {
+		if err := q.UpdateRepo(ctx, dbq.UpdateRepoParams{
+			AnonymousRead: r.AnonymousRead, Config: string(r.Config), ID: r.ID}); err != nil {
 			return err
 		}
-		out = r
+		old, updated = &prev, r
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return out, nil
+	return old, updated, nil
 }

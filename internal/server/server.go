@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/api"
@@ -20,9 +21,9 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
-	"github.com/Telesphorepo/Telesphorepo/internal/debian"
+	"github.com/Telesphorepo/Telesphorepo/internal/format"
+	_ "github.com/Telesphorepo/Telesphorepo/internal/formats" // registers the built-in formats
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
-	"github.com/Telesphorepo/Telesphorepo/internal/maven"
 	"github.com/Telesphorepo/Telesphorepo/internal/oidc"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
@@ -40,9 +41,8 @@ type Services struct {
 
 // Options customises Run (used by "telesphorepo dev"). The zero value is plain "serve".
 type Options struct {
-	// Defaults replaces built-in setting defaults (setting key -> text value), see
-	// settings.Options.Defaults.
-	Defaults map[string]string
+	// Dev applies the Dev default of every setting, see settings.Options.Dev.
+	Dev bool
 	// Init runs after the DB and services are ready and before the default first-run admin
 	// bootstrap (so it may create its own admin) and before listening.
 	Init func(ctx context.Context, s *Services) error
@@ -55,11 +55,62 @@ type Options struct {
 // Run starts the HTTP server and blocks until ctx is cancelled (graceful shutdown).
 func Run(ctx context.Context, boot *config.Boot) error { return RunWith(ctx, boot, Options{}) }
 
+// Migrate applies the migration track of every format that owns tables (format.Migrator).
+// db.Open has already applied the core track.
+func Migrate(ctx context.Context, d *db.DB) error {
+	for _, f := range format.All() {
+		if m, ok := f.(format.Migrator); ok {
+			if err := d.Migrate(ctx, f.Name(), m.Migrations()); err != nil {
+				return fmt.Errorf("migrate %s: %w", f.Name(), err)
+			}
+		}
+	}
+	return nil
+}
+
+// QuerySets returns the queries the plan guard checks: core first, then every
+// format.Queryable.
+func QuerySets() []db.QuerySet {
+	sets := []db.QuerySet{db.CoreQueries()}
+	for _, f := range format.All() {
+		if q, ok := f.(format.Queryable); ok {
+			sets = append(sets, q.QuerySet())
+		}
+	}
+	return sets
+}
+
+var (
+	settingsOnce sync.Once
+	settingsErr  error
+)
+
+// registerSettings adds each format.Configurable's settings to the settings registry as a
+// group named after the format. It runs once per process, before settings.Load.
+func registerSettings() error {
+	settingsOnce.Do(func() {
+		for _, f := range format.All() {
+			c, ok := f.(format.Configurable)
+			if !ok {
+				continue
+			}
+			if defs := c.Settings(); len(defs) > 0 {
+				if err := settings.Register(f.Name(), f.Title(), defs); err != nil {
+					settingsErr = fmt.Errorf("format %s: %w", f.Name(), err)
+					return
+				}
+			}
+		}
+	})
+	return settingsErr
+}
+
 // RunWith is Run with Options.
-// Steps: logger; mkdir DataDir/TmpDir; db.Open; settings.Load (master key, DB, env overrides);
-// live storage (hot-swapped on storage setting changes); repos/auth/assets services; bootstrap
-// admin if no users; signing key (setting, generated on first start); debian.New + Start;
-// maven.New; mux: GET /healthz, /api/ -> api.Handler(), formats Register, "/" -> web UI.
+// Steps: logger; mkdir DataDir/TmpDir; db.Open (core migrations); format migrations; format
+// settings; settings.Load (master key, DB, env overrides); query optimizer; live storage
+// (hot-swapped on storage setting changes); repos/auth/assets services; bootstrap admin if no
+// users; signing key (setting, generated on first start); mux: GET /healthz, /api/ ->
+// api.Handler(), each format's Register, "/" -> web UI; listen; each format.Starter's Start.
 // Access logging must never log Authorization headers, cookies, or query strings.
 func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 	level := new(slog.LevelVar)
@@ -83,13 +134,20 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 		return fmt.Errorf("open db: %w", err)
 	}
 	defer d.Close()
+	if err := Migrate(ctx, d); err != nil {
+		return err
+	}
+	if err := registerSettings(); err != nil {
+		return err
+	}
 
-	set, err := settings.Load(ctx, d, boot, settings.Options{Defaults: opts.Defaults, Log: log.With("component", "settings")})
+	set, err := settings.Load(ctx, d, boot, settings.Options{Dev: opts.Dev, Log: log.With("component", "settings")})
 	if err != nil {
 		return err
 	}
 	cfg := set.Config()
 	level.Set(cfg.LogLevel)
+	d.StartOptimizer(ctx)
 
 	st, err := storage.Open(ctx, cfg)
 	if err != nil {
@@ -111,7 +169,7 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 		log.Info("storage switched; existing blobs were not moved", "storage", new.Config.Storage)
 	})
 
-	rs := repos.New(d)
+	rs := repos.New(d, format.ValidateRepoConfig)
 	as := auth.New(d, set.Config, rs)
 	ss := assets.New(d, live, set.Config)
 
@@ -127,14 +185,6 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 		return err
 	}
 
-	deb, err := debian.New(d, as, ss, rs, set.Config, set.Signer, log.With("component", "debian"))
-	if err != nil {
-		return fmt.Errorf("debian: %w", err)
-	}
-	// A new signing key re-signs every published Release (indexes are marked dirty).
-	set.Subscribe(deb.SigningKeyChanged)
-	mvn := maven.New(as, ss, set.Config)
-
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		if err := d.R.PingContext(r.Context()); err != nil {
@@ -145,9 +195,19 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 		io.WriteString(w, "ok\n")
 	})
 	sso := oidc.New(as, set.Config, log.With("component", "oidc"))
-	mux.Handle("/api/", api.New(as, rs, ss, deb, set, sso).Handler())
-	mvn.Register(mux)
-	deb.Register(mux)
+	mux.Handle("/api/", api.New(as, rs, ss, set, sso).Handler())
+	for _, f := range format.All() {
+		f.Register(mux, format.Host{
+			DB:       d,
+			Auth:     as,
+			Assets:   ss,
+			Repos:    rs,
+			Config:   set.Config,
+			Settings: set,
+			Signer:   set.Signer,
+			Log:      log.With("component", f.Name()),
+		})
+	}
 	mux.Handle("/", web.Handler())
 
 	srv := &http.Server{
@@ -164,7 +224,11 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 		return fmt.Errorf("listen: %w", err)
 	}
 
-	deb.Start(ctx)
+	for _, f := range format.All() {
+		if s, ok := f.(format.Starter); ok {
+			s.Start(ctx)
+		}
+	}
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()

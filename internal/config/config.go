@@ -83,8 +83,6 @@ type Config struct {
 
 	GPGKeyFile        string
 	GPGPassphraseFile string
-	DebDebounce       time.Duration
-	DebMaxDelay       time.Duration
 
 	// OIDC admin sign-on (design doc §7.5). SSO is enabled iff OIDCIssuer is set.
 	OIDCIssuer         string
@@ -135,7 +133,7 @@ func joinOS(dir, name string) string {
 const DefaultDataDir = "./data"
 
 // LegacySigningKeyFileName is the M1.1 auto-generated signing key inside the data dir. It is
-// imported once into the "debian.signing_key" setting and no longer written.
+// imported once into the "signing.key" setting and no longer written.
 const LegacySigningKeyFileName = "signing.asc"
 
 // MasterKeyFileName holds the generated master key when TR_MASTER_KEY is unset.

@@ -75,6 +75,7 @@ func preview(ctx context.Context) error {
 }
 
 // test runs the e2e suite with the detected container engine; args pass to go test.
+// "test scale" runs the scale test (spec §5.5) instead.
 func test(ctx context.Context, args []string) error {
 	if _, err := checkGo(); err != nil {
 		return err
@@ -86,6 +87,9 @@ func test(ctx context.Context, args []string) error {
 	eng.ApplyEnv()
 	step("container engine: %s %s", eng.Name, dim(eng.Host))
 	argv := append([]string{"go", "test", "-tags", "e2e", "./e2e/...", "-count=1", "-v"}, args...)
+	if len(args) == 1 && args[0] == "scale" {
+		argv = []string{"go", "test", "-tags", "scale", "./e2e/...", "-run", "TestScale", "-count=1", "-timeout", "60m", "-v"}
+	}
 	step("%s", strings.Join(argv, " "))
 	err = runStep(ctx, ".", nil, argv...)
 	if ctx.Err() != nil {

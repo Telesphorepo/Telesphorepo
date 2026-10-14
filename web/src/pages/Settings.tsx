@@ -88,7 +88,16 @@ function Section({ g, reload, children }: { g: Group; reload: () => void; childr
   );
 }
 
-function SSOExtras({ patch }: { patch: () => Record<string, Val> }) {
+// redirectURL is the OIDC callback URL: oidc.redirect_url, else base_url + the callback path,
+// else the browser origin + the callback path.
+function redirectURL(groups: Group[], draft: Record<string, Val>): string {
+  const path = "/api/auth/oidc/callback";
+  const all = groups.flatMap((g) => g.settings);
+  const val = (k: string) => String((k in draft ? draft[k] : all.find((s) => s.key === k)?.value) ?? "").trim();
+  return val("oidc.redirect_url") || (val("base_url") ? val("base_url").replace(/\/+$/, "") + path : window.location.origin + path);
+}
+
+function SSOExtras({ patch, groups }: { patch: () => Record<string, Val>; groups: Group[] }) {
   const [res, setRes] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const test = async () => {
@@ -102,7 +111,7 @@ function SSOExtras({ patch }: { patch: () => Record<string, Val> }) {
   };
   return (
     <>
-      <p className="muted">Register this redirect URL at your IdP: <code>{window.location.origin}/api/auth/oidc/callback</code> (used when no redirect URL or base URL is set below).</p>
+      <p className="muted">Register this redirect URL at your IdP: <code>{redirectURL(groups, patch())}</code></p>
       <div className="row">
         <button disabled={busy} onClick={test}>Test discovery</button>
         {res && <span className={res.ok ? "muted" : "error"}>{res.text}</span>}
@@ -132,7 +141,7 @@ function StorageExtras({ settings, patch }: { settings: Setting[]; patch: () => 
   );
 }
 
-function DebianKey() {
+function SigningKey() {
   const { data, error, reload } = useAsync(() => api<KeyInfo & { from_file?: boolean }>("GET", "/api/settings/signing-key"), []);
   const [upload, setUpload] = useState<string | null>(null);
   const [err, setErr] = useState("");
@@ -144,7 +153,7 @@ function DebianKey() {
   return (
     <div className="card">
       <strong>Signing key</strong>
-      <p>Fingerprint: <code>{data?.fingerprint || "none"}</code> · <a href="/keys/debian.asc" download>Download public key</a></p>
+      <p>Fingerprint: <code>{data?.fingerprint || "none"}</code> · {data?.public_key && <a href={"data:text/plain;charset=utf-8," + encodeURIComponent(data.public_key)} download="signing-key.asc">Download public key</a>}</p>
       {(err || error) && <p className="error">{err || error}</p>}
       {upload === null ? (
         <div className="row">
@@ -179,8 +188,8 @@ export default function Settings() {
       {groups.map((g) => (
         <Section key={g.name} g={g} reload={reload}>
           {g.name.toLowerCase() === "storage" ? (patch) => <StorageExtras settings={g.settings} patch={patch} /> :
-            g.name.toLowerCase() === "debian" ? () => <DebianKey /> :
-            g.name.toLowerCase() === "sso" ? (patch) => <SSOExtras patch={patch} /> : undefined}
+            g.name.toLowerCase() === "signing" ? () => <SigningKey /> :
+            g.name.toLowerCase() === "sso" ? (patch) => <SSOExtras patch={patch} groups={groups} /> : undefined}
         </Section>
       ))}
     </>

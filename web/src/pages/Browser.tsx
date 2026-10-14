@@ -1,32 +1,38 @@
 import { useEffect, useState } from "react";
-import { api, fmtSize, fmtTime, qs, useAsync, type Asset, type Page, type Repo } from "../api";
+import { api, fmtSize, fmtTime, qs, useAsync, type Asset, type Page, type Repo, type Usage } from "../api";
 
-function Usage({ repo }: { repo: Repo }) {
-  const o = window.location.origin;
-  const url = `${o}/${repo.format}/${repo.name}`;
-  if (repo.format === "maven") {
-    return (
-      <pre>{`<!-- pom.xml -->
-<repositories>
-  <repository>
-    <id>${repo.name}</id>
-    <url>${url}</url>
-  </repository>
-</repositories>
+function Copy({ text }: { text: string }) {
+  const [done, setDone] = useState(false);
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(text); setDone(true); setTimeout(() => setDone(false), 1500); } catch { /* clipboard unavailable */ }
+  };
+  return <button type="button" onClick={copy}>{done ? "Copied" : "Copy"}</button>;
+}
 
-<!-- ~/.m2/settings.xml -->
-<servers>
-  <server>
-    <id>${repo.name}</id>
-    <username>USER</username>
-    <password>TOKEN</password>
-  </server>
-</servers>`}</pre>
-    );
-  }
+function UsagePanel({ name }: { name: string }) {
+  const { data, error } = useAsync(() => api<Usage>("GET", `/api/repos/${encodeURIComponent(name)}/usage`), [name]);
   return (
-    <pre>{`curl -fsSL ${o}/keys/debian.asc | sudo tee /etc/apt/keyrings/tr.asc >/dev/null
-echo "deb [signed-by=/etc/apt/keyrings/tr.asc] ${url} DIST COMPONENT" | sudo tee /etc/apt/sources.list.d/${repo.name}.list`}</pre>
+    <>
+      {error && <p className="error">{error}</p>}
+      {data?.snippets.length === 0 && <p className="muted">No usage notes for this format.</p>}
+      {data?.snippets.map((s, i) => (
+        <div key={i}>
+          <div className="row"><strong className="grow">{s.title}</strong><Copy text={s.code} /></div>
+          <pre>{s.code}</pre>
+        </div>
+      ))}
+    </>
+  );
+}
+
+function Status({ name }: { name: string }) {
+  const { data } = useAsync(() => api<Record<string, unknown>>("GET", `/api/repos/${encodeURIComponent(name)}/status`), [name]);
+  return (
+    <>
+      {Object.entries(data ?? {}).map(([k, v]) => (
+        <span key={k} className="badge">{k}: {typeof v === "object" ? JSON.stringify(v) : String(v)}</span>
+      ))}
+    </>
   );
 }
 
@@ -57,9 +63,9 @@ export default function Browser({ name }: { name: string }) {
 
   return (
     <>
-      <h1>{name} {repo.data && <span className="badge">{repo.data.format}</span>} {repo.data?.anonymous_read && <span className="badge">anonymous</span>}</h1>
+      <h1>{name} {repo.data && <span className="badge">{repo.data.format}</span>} {repo.data?.anonymous_read && <span className="badge">anonymous</span>} <Status name={name} /></h1>
       {repo.error && <p className="error">{repo.error}</p>}
-      {repo.data && <details><summary>Usage</summary><Usage repo={repo.data} /></details>}
+      {repo.data && <details><summary>Usage</summary><UsagePanel name={name} /></details>}
       <input className="wide" placeholder="Filter by path prefix" value={filter} onChange={(e) => setFilter(e.target.value)} />
       {err && <p className="error">{err}</p>}
       <table>
@@ -67,7 +73,7 @@ export default function Browser({ name }: { name: string }) {
         <tbody>
           {items.map((a) => (
             <tr key={a.path}>
-              <td className="mono"><a href={`/${repo.data?.format ?? "maven"}/${name}/${a.path.split("/").map(encodeURIComponent).join("/")}`}>{a.path}</a></td>
+              <td className="mono">{repo.data ? <a href={`/${repo.data.format}/${name}/${a.path.split("/").map(encodeURIComponent).join("/")}`}>{a.path}</a> : a.path}</td>
               <td>{fmtSize(a.size)}</td><td>{a.kind}</td><td>{fmtTime(a.updated_at)}</td>
             </tr>
           ))}

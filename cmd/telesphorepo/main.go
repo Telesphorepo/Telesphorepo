@@ -26,6 +26,7 @@ type command struct {
 	usage   string // example-led help for "<cmd> --help"
 	run     func(args []string) error
 	subs    []*command
+	hidden  bool // not listed in the overview
 }
 
 // usageError prints the command's usage after the message and exits 2.
@@ -90,19 +91,19 @@ Any setting can also be forced with TR_<SETTING>, e.g. TR_STORAGE=s3; it is then
 in the UI.
 
 On first start an "admin" user is created and its random password is printed once, and a
-Debian signing key is generated and stored encrypted in the database.
+repository signing key is generated and stored encrypted in the database.
 `, run: serveCmd},
 		{name: "dev", summary: "zero-config local server with demo repos", usage: `Run a zero-config local server for development.
 
   telesphorepo dev
 
 Data lives in ./.telesphorepo-dev, the server listens on http://localhost:8080, cookies work
-over plain HTTP, and an admin user plus the repos "maven" and "debian" are created on first
-run. The URL, username and password are printed on every start. TR_* env still overrides.
+over plain HTTP, and an admin user plus one demo repo per format (named after the format) are
+created on first run, with client setup snippets for each. The URL, username and password are printed on every start. TR_* env still overrides.
 Start over with a fresh instance by deleting ./.telesphorepo-dev.
 `, run: devCmd},
 		userCmd,
-		{name: "keygen", summary: "write a new Debian signing key file", usage: `Write a new Ed25519 OpenPGP signing key and print its fingerprint. Never overwrites.
+		{name: "keygen", summary: "write a new repository signing key file", usage: `Write a new Ed25519 OpenPGP signing key and print its fingerprint. Never overwrites.
 
   telesphorepo keygen                  writes ./signing.asc
   telesphorepo keygen release.asc      writes ./release.asc
@@ -111,6 +112,22 @@ The server generates a key on first start and stores it (encrypted) in its datab
 keygen to create one ahead of time, then upload it under Admin > Settings or point
 TR_GPG_KEY_FILE at it.
 `, run: keygenCmd},
+		{name: "dbcheck", hidden: true, usage: `Check the query plans of every query against a fresh database.
+
+  telesphorepo dbcheck
+
+Applies all migrations to a temporary database, runs EXPLAIN QUERY PLAN on every query and
+exits 1 when one scans a table or uses a temp B-tree. Prints "ok: N queries" otherwise.
+`, run: dbcheckCmd},
+		{name: "seed", hidden: true, usage: `Bulk-insert synthetic data for the scale test.
+
+  telesphorepo seed 100000
+  TR_DATA_DIR=/srv/tr telesphorepo seed 1000000
+
+Splits N rows evenly over 10 repos per format (seed-<format>-00 to seed-<format>-09) for every
+format that supports seeding, then runs ANALYZE. A format adds its own rows, for example one
+package per row. Stop the server first.
+`, run: seedCmd},
 		{name: "version", summary: "print the version", usage: "Print the version.\n\n  telesphorepo version\n", run: versionCmd},
 		{name: "help", summary: "show help for a command", usage: "Show help.\n\n  telesphorepo help\n  telesphorepo help user add\n", run: helpCmd},
 	}
@@ -236,7 +253,7 @@ func levenshtein(a, b string) int {
 	return prev[len(b)]
 }
 
-const overview = `Telesphorepo - a small Maven and Debian repository server.
+const overview = `Telesphorepo - a small self-hosted artifact repository server.
 
 Usage:
   telesphorepo [command]
@@ -255,6 +272,9 @@ func printUsage(w *os.File, cmd *command) {
 	if cmd == nil {
 		var b strings.Builder
 		for _, c := range commands {
+			if c.hidden {
+				continue
+			}
 			fmt.Fprintf(&b, "  %-9s %s\n", c.name, c.summary)
 		}
 		fmt.Fprintf(w, overview, b.String())

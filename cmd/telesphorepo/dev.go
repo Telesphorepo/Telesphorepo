@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
+	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/server"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
@@ -21,8 +22,7 @@ const devAdminUser = "admin"
 type devState struct {
 	user, password string
 	dataDir        string
-	mavenRepo      string
-	debianRepo     string
+	repos          []*repos.Repo
 	firstRun       bool
 	settings       *settings.Service
 }
@@ -35,15 +35,12 @@ func devCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	st := &devState{dataDir: boot.DataDir, mavenRepo: "maven", debianRepo: "debian"}
+	st := &devState{dataDir: boot.DataDir}
 	ctx, stop := signalContext()
 	defer stop()
 	return server.RunWith(ctx, boot, server.Options{
 		// Dev defaults (shown as defaults in the UI, still changeable there or via TR_* env).
-		Defaults: map[string]string{
-			settings.KeyCookieSecure: "false",
-			settings.KeyDebDebounce:  "300ms",
-		},
+		Dev:      true,
 		TextLogs: true,
 		Init:     func(ctx context.Context, s *server.Services) error { return devInit(ctx, s, st) },
 		Ready:    func(addr net.Addr) { printDevBanner(st, baseURL(st.settings.Config(), addr)) },
@@ -88,31 +85,17 @@ func devInit(ctx context.Context, s *server.Services, st *devState) error {
 		return fmt.Errorf("list repos: %w", err)
 	}
 	if len(list) == 0 {
-		for _, r := range []struct{ name, format string }{
-			{"maven", repos.FormatMaven}, {"debian", repos.FormatDebian},
-		} {
-			// Anonymous read so mvn/gradle/apt can resolve without credentials locally.
-			if _, err := s.Repos.Create(ctx, r.name, r.format, true, nil); err != nil && !errors.Is(err, repos.ErrExists) {
-				return fmt.Errorf("create demo repo %s: %w", r.name, err)
+		for _, f := range format.All() {
+			// Anonymous read so package clients can resolve without credentials locally.
+			if _, err := s.Repos.Create(ctx, f.Name(), f.Name(), true, nil); err != nil && !errors.Is(err, repos.ErrExists) {
+				return fmt.Errorf("create demo repo %s: %w", f.Name(), err)
 			}
 		}
-		return nil
-	}
-	var mvn, deb string
-	for _, r := range list {
-		switch {
-		case r.Format == repos.FormatMaven && (mvn == "" || r.Name == "maven"):
-			mvn = r.Name
-		case r.Format == repos.FormatDebian && (deb == "" || r.Name == "debian"):
-			deb = r.Name
+		if list, err = s.Repos.List(ctx); err != nil {
+			return fmt.Errorf("list repos: %w", err)
 		}
 	}
-	if mvn != "" {
-		st.mavenRepo = mvn
-	}
-	if deb != "" {
-		st.debianRepo = deb
-	}
+	st.repos = list
 	return nil
 }
 
@@ -161,28 +144,43 @@ func printDevBanner(st *devState, base string) {
 		"",
 		"Start fresh by deleting the data dir.",
 	)
-	mvnURL := base + "/maven/" + st.mavenRepo
-	debURL := base + "/debian/" + st.debianRepo
-	fmt.Fprintf(&b, `Maven  ~/.m2/settings.xml:
-  <server><id>telesphorepo</id><username>%[1]s</username><password>%[2]s</password></server>
-  repository/distributionManagement url: %[3]s
-
-Gradle  (build.gradle.kts):
-  maven {
-      url = uri("%[3]s")
-      isAllowInsecureProtocol = true
-      credentials { username = "%[1]s"; password = "%[2]s" }
-  }
-
-apt:
-  curl -fsSL %[4]s/keys/debian.asc | sudo tee /etc/apt/keyrings/telesphorepo.asc >/dev/null
-  echo "deb [signed-by=/etc/apt/keyrings/telesphorepo.asc] %[5]s stable main" | sudo tee /etc/apt/sources.list.d/telesphorepo.list
-
-Upload with curl:
-  curl -u %[1]s:%[2]s -T hello_1.0_amd64.deb %[5]s/upload/stable/main
-  curl -u %[1]s:%[2]s -T app-1.0.jar %[3]s/com/example/app/1.0/app-1.0.jar
-
-`, st.user, pw, mvnURL, base, debURL)
+	b.WriteString("Use the username and password above where a snippet asks for credentials.\n")
+	for _, f := range format.All() {
+		d, ok := f.(format.Describer)
+		if !ok {
+			continue
+		}
+		r := demoRepo(st.repos, f.Name())
+		if r == nil {
+			continue
+		}
+		fmt.Fprintf(&b, "\n%s (repo %q):\n", f.Title(), r.Name)
+		for _, sn := range d.Usage(r, base) {
+			fmt.Fprintf(&b, "  %s\n", sn.Title)
+			for _, line := range strings.Split(strings.TrimRight(sn.Code, "\n"), "\n") {
+				fmt.Fprintf(&b, "    %s\n", line)
+			}
+		}
+	}
+	b.WriteString("\n")
 	b.WriteString(ready)
 	fmt.Fprint(os.Stdout, b.String())
+}
+
+// demoRepo picks the repo of the given format to show snippets for: the one named after the
+// format, else the first of that format.
+func demoRepo(list []*repos.Repo, formatName string) *repos.Repo {
+	var first *repos.Repo
+	for _, r := range list {
+		if r.Format != formatName {
+			continue
+		}
+		if r.Name == formatName {
+			return r
+		}
+		if first == nil {
+			first = r
+		}
+	}
+	return first
 }

@@ -16,8 +16,10 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
-    proxy: Object.fromEntries(
-      ["/api", "/maven", "/debian", "/keys", "/healthz"].map((p) => [p, "http://localhost:8080"]),
-    ),
+    // Everything that the dev server does not serve as UI goes to the backend, including the
+    // paths of every repo format.
+    proxy: {
+      "^/(?!$|index\\.html|src/|@|node_modules/|__vite)": "http://localhost:8080",
+    },
   },
 });
