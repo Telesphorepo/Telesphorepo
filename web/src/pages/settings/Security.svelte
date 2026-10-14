@@ -116,7 +116,7 @@
     if (!removal) return [];
     const what = removal.kind === "totp" ? "authenticator app" : "passkey";
     const out = [`Removes the ${what} ${removal.item.name}`, `You can no longer sign in with this ${what}`];
-    if (count <= 1) out.push("Your account has no second factor left, so you must set up a new one");
+    if (count <= 1) out.push("Two-step verification has no method left, so you must add a new one");
     return out;
   });
 
@@ -142,8 +142,8 @@
 </script>
 
 <PageHeader
-  title="Second factor"
-  description="Sign-in and sensitive actions ask for a code from an authenticator app or for a passkey."
+  title="Two-step verification"
+  description="When you sign in or do something sensitive, Telesphorepo asks for a code from an app on your phone, or for a passkey. Also called a second factor."
 />
 
 {#if factors.data}

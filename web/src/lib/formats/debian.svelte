@@ -19,5 +19,5 @@
 <div class="flex flex-col gap-2">
   <Label for="{id}-arch">Architectures</Label>
   <Input id="{id}-arch" class="max-w-sm font-mono" placeholder="amd64, arm64" bind:value={text} oninput={edit} />
-  <p class="text-sm text-muted-foreground">Separate them with commas.</p>
+  <p class="text-sm text-muted-foreground">The processor types that apt sees in this repository. Separate them with commas.</p>
 </div>

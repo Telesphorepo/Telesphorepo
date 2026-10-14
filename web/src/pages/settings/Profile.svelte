@@ -45,7 +45,7 @@
   }
 </script>
 
-<PageHeader title="Profile and password" description="Your account and the password you sign in with." />
+<PageHeader title="Profile" description="Your account and the password you sign in with." />
 
 {#if user}
   <Section title="Account" narrow>
@@ -56,8 +56,8 @@
       <dd>
         {#if user.is_admin}<Badge>Admin</Badge>{:else}<Badge variant="outline">User</Badge>{/if}
       </dd>
-      <dt class="text-muted-foreground">Account type</dt>
-      <dd>{local ? "Local" : "SSO"}</dd>
+      <dt class="text-muted-foreground">Signs in with</dt>
+      <dd>{local ? "Password" : "Single sign-on"}</dd>
       {#if user.email}
         <dt class="text-muted-foreground">Email</dt>
         <dd class="break-all">{user.email}</dd>

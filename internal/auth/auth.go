@@ -13,6 +13,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
 	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
+	"github.com/Telesphorepo/Telesphorepo/internal/netrules"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
@@ -125,9 +126,10 @@ type Service struct {
 	flightMu sync.Mutex
 	flights  map[[32]byte]*flight // in-progress uncached password checks by cache key
 
-	sealer  Sealer         // seals TOTP secrets; set by the server
-	publish PublishTokens  // verifies publish-session tokens; set by the server
-	audit   *audit.Service // records sign-ins; set by the server (nil: none)
+	sealer  Sealer            // seals TOTP secrets; set by the server
+	publish PublishTokens     // verifies publish-session tokens; set by the server
+	audit   *audit.Service    // records sign-ins; set by the server (nil: none)
+	rules   *netrules.Service // per-repo IP rules; set by the server (nil: none)
 
 	// dev makes the second factor optional (telesphorepo dev only): an admin without a factor
 	// gets a full session, and an approval or a manual session without a factor passes. A
@@ -137,6 +139,9 @@ type Service struct {
 
 // SetAudit sets the audit log that sign-ins are recorded in.
 func (s *Service) SetAudit(a *audit.Service) { s.audit = a }
+
+// SetNetRules sets the per-repo IP rules that the repo gates apply.
+func (s *Service) SetNetRules(n *netrules.Service) { s.rules = n }
 
 // SetDevMode makes the second factor optional. Only the dev command calls it.
 func (s *Service) SetDevMode(on bool) { s.dev = on }

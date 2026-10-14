@@ -28,9 +28,9 @@
         {#if auth.setupOnly}
           <Alert.Root class="mb-8">
             <ShieldAlertIcon />
-            <Alert.Title>Set up a second factor to continue</Alert.Title>
+            <Alert.Title>Set up two-step verification to continue</Alert.Title>
             <Alert.Description>
-              Your account needs an authenticator app or a passkey. Until you add one, only this page is open.
+              Your account needs an authenticator app or a passkey. Until you add one, only this page opens.
             </Alert.Description>
           </Alert.Root>
         {/if}

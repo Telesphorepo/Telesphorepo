@@ -137,6 +137,13 @@ type NexusSyncRepo struct {
 	Error        string
 }
 
+type PresetRange struct {
+	Name      string
+	Ranges    string
+	FetchedAt int64
+	Error     string
+}
+
 type PublishOidcSeen struct {
 	IDHash    []byte
 	ExpiresAt int64
@@ -175,14 +182,25 @@ type PublishTrustRepo struct {
 }
 
 type Repo struct {
-	ID            int64
-	Name          string
-	Format        string
-	AnonymousRead bool
-	Config        string
-	CreatedAt     int64
-	LockedBy      sql.NullString
-	Description   string
+	ID              int64
+	Name            string
+	Format          string
+	AnonymousRead   bool
+	Config          string
+	CreatedAt       int64
+	LockedBy        sql.NullString
+	Description     string
+	FileCount       int64
+	TotalSize       int64
+	LastPublishedAt int64
+}
+
+type RepoIpRule struct {
+	RepoID int64
+	Scope  string
+	Kind   string
+	Value  string
+	Note   string
 }
 
 type RepoPermission struct {

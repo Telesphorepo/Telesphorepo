@@ -148,8 +148,8 @@ func (f *Format) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Upload implements format.ManualUploader: every file goes to the folder in the field "folder"
-// ("" or missing: the repo root) under the repo's overwrite policy.
+// Upload implements format.ManualUploader: every file goes to its relative path (its name, or its
+// path inside a dropped folder) under the folder in the field "folder" ("" or missing: the repo root) under the repo's overwrite policy.
 func (f *Format) Upload(ctx context.Context, repo *repos.Repo, files []format.UploadFile, fields map[string]string, userID int64) ([]format.Uploaded, error) {
 	for k := range fields {
 		if k != "folder" {
@@ -166,9 +166,9 @@ func (f *Format) Upload(ctx context.Context, repo *repos.Repo, files []format.Up
 	}
 	out := make([]format.Uploaded, 0, len(files))
 	for _, file := range files {
-		p := path.Join(folder, file.Name)
+		p := path.Join(folder, file.Path)
 		if !validPath(p) {
-			return out, format.BadUpload("invalid file name %q", file.Name)
+			return out, format.BadUpload("invalid file name %q", file.Path)
 		}
 		created, unchanged, err := f.put(ctx, repo, c, p, file.Spool, userID)
 		if errors.Is(err, errExists) {
@@ -185,6 +185,16 @@ func (f *Format) Upload(ctx context.Context, repo *repos.Repo, files []format.Up
 			st = format.UploadUnchanged
 		}
 		out = append(out, format.Uploaded{Path: p, Status: st, Size: file.Spool.Size, SHA256: file.Spool.SHA256})
+	}
+	return out, nil
+}
+
+// Scan implements format.ManualUploader: every file is one Found of kind "file", titled with its
+// relative path.
+func (f *Format) Scan(ctx context.Context, repo *repos.Repo, files []format.UploadFile) ([]format.Found, error) {
+	out := make([]format.Found, 0, len(files))
+	for _, file := range files {
+		out = append(out, format.Found{Kind: "file", Title: file.Path, Files: []string{file.Path}})
 	}
 	return out, nil
 }

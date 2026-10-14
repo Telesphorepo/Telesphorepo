@@ -142,7 +142,7 @@
   };
 </script>
 
-<PageHeader title="Storage" description="Where the server keeps the files of every repository." />
+<PageHeader title="Storage" description="Where Telesphorepo keeps the files of every repository: a folder on this server or an S3 bucket." />
 
 {#if current.loading && !move}
   <Section title="Storage move"><LoadingRows rows={2} /></Section>
@@ -211,7 +211,7 @@
   </Section>
 {/if}
 
-<Section narrow title="Storage backend" description="Changing the location copies the existing files to the new one in the background.">
+<Section narrow title="Where files are stored" description="When you change the location, Telesphorepo copies the existing files to the new one in the background.">
   {#if settings.loading && !settings.data}
     <LoadingRows rows={5} />
   {:else if settings.error && !settings.data}

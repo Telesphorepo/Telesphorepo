@@ -1,4 +1,4 @@
-<!-- Repository settings, General tab: description and anonymous read. -->
+<!-- Repository settings, Details tab: description and "Anyone can download" (anonymous_read). -->
 <script lang="ts">
   import { untrack } from "svelte";
   import { toast } from "svelte-sonner";
@@ -59,9 +59,9 @@
     <div class="flex items-start gap-3">
       <Switch id="{id}-anon" class="mt-0.5" bind:checked={anonymous} />
       <div class="flex flex-col gap-1">
-        <Label for="{id}-anon">Anonymous read</Label>
+        <Label for="{id}-anon">Anyone can download</Label>
         <p class="text-sm text-muted-foreground">
-          Anyone can list and download the files without signing in. Only users with write access can publish.
+          People and builds can see and download the files without signing in. Publishing still needs access. Off: only people you give access can download.
         </p>
       </div>
     </div>
@@ -78,11 +78,11 @@
 
 <ConfirmDialog
   bind:open={confirming}
-  title={anonymous ? "Allow anonymous read" : "Require sign-in to read"}
-  confirmLabel={anonymous ? "Allow anonymous read" : "Require sign-in"}
+  title={anonymous ? "Let anyone download" : "Require sign-in to download"}
+  confirmLabel={anonymous ? "Let anyone download" : "Require sign-in"}
   destructive={anonymous}
   changes={anonymous
-    ? [`Anyone can list and download every file of ${repo.name} without signing in`, "Search results and the file tree show the files to anonymous visitors"]
-    : [`Visitors who are not signed in can no longer read ${repo.name}`, "Builds that use the repository without a read token fail"]}
+    ? [`Anyone can list and download every file of ${repo.name} without signing in`, "Search results and the file list show the files to visitors who are not signed in"]
+    : [`Visitors who are not signed in can no longer see or download ${repo.name}`, "Builds that download without a download token start to fail"]}
   onConfirm={save}
 />

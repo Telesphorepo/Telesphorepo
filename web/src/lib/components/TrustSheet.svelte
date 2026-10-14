@@ -1,5 +1,5 @@
 <!--
-  The side sheet that creates or edits a CI trust policy (Settings > Trust policies). The parent
+  The side sheet that creates or edits a CI publishing rule (a trust policy; Settings > CI publishing rules). The parent
   wraps it in {#key} so the form starts again for each trust it opens.
 
     {#key seq}<TrustSheet bind:open trust={editing} {repos} onSaved={list.reload} />{/key}
@@ -29,7 +29,7 @@
     onSaved,
   }: {
     open?: boolean;
-    /** null creates a new policy. */
+    /** null creates a new rule. */
     trust: Trust | null;
     repos: Repo[];
     onSaved: () => void;
@@ -51,7 +51,7 @@
   };
 
   const id = $props.id();
-  const editing = trust !== null;
+  const editing = $derived(trust !== null);
 
   /* svelte-ignore state_referenced_locally */
   let name = $state(trust?.name ?? "");
@@ -69,6 +69,7 @@
   let rows = $state<Row[]>(
     trust ? Object.entries(trust.claims).map(([key, v]) => ({ key, values: v.join("\n") })) : [{ key: "", values: "" }],
   );
+  /* svelte-ignore state_referenced_locally */
   let showJwks = $state(!!trust?.jwks);
   let busy = $state(false);
   let error = $state("");
@@ -95,7 +96,7 @@
       if (r.key.trim() && v.length) claims[r.key.trim()] = v;
     }
     if (Object.keys(claims).length === 0) {
-      error = "Add at least one claim with a value. Without a claim, every token of this issuer would match.";
+      error = "Add at least one condition with a value. Without a condition, every job of this CI system would match.";
       return;
     }
     if (selected.length === 0) {
@@ -129,9 +130,9 @@
 <Sheet.Root bind:open>
   <Sheet.Content side="right" class="overflow-y-auto data-[side=right]:w-full data-[side=right]:sm:max-w-form">
     <Sheet.Header>
-      <Sheet.Title>{editing ? `Edit ${trust?.name}` : "New trust policy"}</Sheet.Title>
+      <Sheet.Title>{editing ? `Edit ${trust?.name}` : "New CI publishing rule"}</Sheet.Title>
       <Sheet.Description>
-        A CI job that sends a signed identity token matching this policy gets a short publish session for the selected repositories.
+        A CI job whose identity token matches this rule gets a temporary publish password for the repositories you select.
       </Sheet.Description>
     </Sheet.Header>
 
@@ -151,7 +152,7 @@
           <Input id="{id}-name" class="max-w-sm" required bind:value={name} />
         </div>
         <div class="flex flex-col gap-2">
-          <Label for="{id}-issuer">Issuer</Label>
+          <Label for="{id}-issuer">CI system address (issuer)</Label>
           <Input
             id="{id}-issuer"
             class="font-mono"
@@ -162,21 +163,21 @@
           {#if hint}<p class="text-sm text-muted-foreground">{hint}</p>{/if}
         </div>
         <div class="flex flex-col gap-2">
-          <Label for="{id}-aud">Audience</Label>
+          <Label for="{id}-aud">Audience (optional)</Label>
           <Input id="{id}-aud" class="font-mono" placeholder="Empty: the base URL of this server" bind:value={audience} />
         </div>
       </div>
 
       <fieldset class="flex flex-col gap-4">
-        <legend class="text-sm font-semibold">Claims</legend>
+        <legend class="text-sm font-semibold">Conditions</legend>
         <p class="-mt-2 text-sm text-muted-foreground">
-          Every claim listed must match. Give one value per line. A value is exact, or a pattern with <code class="font-mono">*</code>.
+          Each condition checks one field (claim) of the job's token, such as the GitHub repository or the branch. Every condition must match. Give one value per line. A value is exact, or a pattern with <code class="font-mono">*</code>.
         </p>
         {#each rows as r, i (i)}
           <div class="flex items-start gap-2">
             <Input
               class="w-40 font-mono"
-              aria-label="Claim name"
+              aria-label="Claim (field of the token)"
               placeholder="repository"
               bind:value={r.key}
             />
@@ -191,7 +192,7 @@
               type="button"
               variant="ghost"
               size="icon-sm"
-              aria-label="Remove claim {r.key}"
+              aria-label="Remove condition {r.key}"
               onclick={() => (rows = rows.filter((_, j) => j !== i))}
             >
               <XIcon />
@@ -200,20 +201,20 @@
         {/each}
         <div>
           <Button type="button" variant="outline" size="sm" onclick={() => (rows = [...rows, { key: "", values: "" }])}>
-            <PlusIcon /> Add claim
+            <PlusIcon /> Add condition
           </Button>
         </div>
       </fieldset>
 
       <fieldset class="flex flex-col gap-3">
         <legend class="text-sm font-semibold">Repositories</legend>
-        <p class="-mt-1 text-sm text-muted-foreground">A session from this policy can write to the selected repositories only.</p>
+        <p class="-mt-1 text-sm text-muted-foreground">A job that matches can publish to these repositories only.</p>
         {#if repos.length === 0}
           <p class="text-sm text-muted-foreground">No repositories exist yet. Create one first.</p>
         {:else}
           <div class="flex max-h-56 flex-col gap-1 overflow-y-auto rounded-xl border p-2">
             {#each repos as r (r.name)}
-              <div class="flex items-center gap-3 rounded-lg px-2 py-1.5 hover:bg-muted/60">
+              <div class="flex items-center gap-3 rounded-lg px-2 py-1.5 hover:bg-hover has-data-[state=checked]:bg-selected has-data-[state=checked]:text-selected-foreground">
                 <Checkbox
                   id="{id}-repo-{r.name}"
                   checked={selected.includes(r.name)}
@@ -231,19 +232,19 @@
 
       <div class="flex flex-col gap-2">
         {#if showJwks}
-          <Label for="{id}-jwks">Pasted JWKS (optional)</Label>
+          <Label for="{id}-jwks">Signing keys (JWKS, optional)</Label>
           <Textarea id="{id}-jwks" class="font-mono text-[0.8125rem]" rows={6} spellcheck={false} bind:value={jwks} />
-          <p class="text-sm text-muted-foreground">When set, the server uses these keys instead of fetching them from the issuer.</p>
+          <p class="text-sm text-muted-foreground">Paste them only when this server cannot reach the CI system. When set, the server checks tokens with these keys instead of fetching them.</p>
         {:else}
           <div>
-            <Button type="button" variant="ghost" size="sm" onclick={() => (showJwks = true)}>Paste a JWKS</Button>
+            <Button type="button" variant="ghost" size="sm" onclick={() => (showJwks = true)}>Paste signing keys</Button>
           </div>
         {/if}
       </div>
 
       <div class="flex items-center gap-3">
         <Switch id="{id}-disabled" bind:checked={disabled} />
-        <Label for="{id}-disabled">Disabled</Label>
+        <Label for="{id}-disabled">Turned off</Label>
       </div>
 
       {#if error}<ErrorState inline {error} />{/if}
@@ -251,7 +252,7 @@
       <div class="flex flex-wrap gap-2">
         <Button type="submit" disabled={busy}>
           {#if busy}<Spinner />{/if}
-          {editing ? "Save changes" : "Create trust policy"}
+          {editing ? "Save changes" : "Create rule"}
         </Button>
         <Button type="button" variant="outline" disabled={busy} onclick={() => (open = false)}>Cancel</Button>
       </div>

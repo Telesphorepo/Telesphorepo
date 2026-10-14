@@ -38,6 +38,7 @@ proxy or cache repos and is not compatible with the Nexus API.
 | `internal/signing` | OpenPGP key `Generate`, `Parse`, `Load`, `ReadPassphrase`, clearsign/detach-sign (ProtonMail go-crypto) |
 | `internal/files` | File tree, deletes (files, folders, repos) and manual uploads. Calls the plugin interfaces `DeleteObserver` and `ManualUploader` |
 | `internal/audit` | The audit log: `Record`, the list query and the retention job |
+| `internal/netrules` | Client IP resolution behind trusted proxies, the IP range presets (fetch and refresh) and the per-repo IP rules. See **Network rules** |
 | `internal/api` | JSON API under `/api/`, wrapped in `http.CrossOriginProtection` |
 | `internal/httpx` | JSON helpers, error shape, `Limit` (default 50, max 200) |
 | `internal/containerengine` | Docker/Podman detection for tooling and e2e; not linked into the server |
@@ -50,7 +51,7 @@ proxy or cache repos and is not compatible with the Nexus API.
 Core tables are in `internal/db/migrations/0001_init.sql`. Each format plugin that stores data has
 its own track (for debian: `internal/debian/migrations/`). `schema_migrations` holds one row per
 track (`component`, `version`). `db.Migrate` applies the files `NNNN_*.sql` of a track in order.
-It refuses duplicate version numbers and a database newer than the binary. Core runs first, then
+It refuses duplicate version numbers and a database newer than the binary. It also stores the SHA-256 of every applied file in `schema_checksums`. Until the first release the schema files change in place, so a file whose checksum differs (or a database without checksums) gives `db.ErrSchemaChanged`: `telesphorepo dev` deletes and recreates its own data dir, and `serve` refuses to start and names the file. Core runs first, then
 each plugin in registration order. All tables are `STRICT`. Tables with a natural key are also
 `WITHOUT ROWID`. Every foreign-key child column has an index. SQLite runs `PRAGMA optimize` at
 close and every 6 hours.
@@ -60,9 +61,9 @@ close and every 6 hours.
 | `users` | PK `id`, UNIQUE `username`, UNIQUE `users_oidc (oidc_issuer, oidc_subject)` where `oidc_subject` is set | argon2id PHC hash (`!` for SSO users, never verifies), `is_admin`, `disabled`, `password_changed_at`, `kind` (`local`/`oidc`), `email` |
 | `api_tokens` | UNIQUE `public_id`, UNIQUE `(user_id, name)` | `secret_hash` = SHA-256(secret); optional `expires_at`; `last_used_at` written at most once per minute. These are **read tokens**: they never publish |
 | `sessions` | PK `id_hash` (WITHOUT ROWID), idx `expires_at`, idx `user_id` | `id_hash` = SHA-256(cookie value) |
-| `repos` | UNIQUE `name`, partial idx `repos_anonymous (id) WHERE anonymous_read = 1` | `format` is any registered format name (no CHECK); `description` (at most 500 characters); `anonymous_read`; `config` JSON; `locked_by` (NULL, or the text that a write answers with 409, set while the repo mirrors a Nexus source) |
+| `repos` | UNIQUE `name`, partial idx `repos_anonymous (id) WHERE anonymous_read = 1` | `format` is any registered format name (no CHECK); `description` (at most 500 characters); `anonymous_read`; `config` JSON; `locked_by` (NULL, or the text that a write answers with 409, set while the repo mirrors a Nexus source); the counters `file_count`, `total_size` and `last_published_at` (unix time, 0 for never) |
 | `repo_permissions` | PK `(repo_id, user_id)`, idx `user_id` | `level` is `read` or `write` |
-| `assets` | UNIQUE `(repo_id, path)`, idx `uploaded_by` | Every stored file; `kind` is `artifact`, `metadata` or `index` |
+| `assets` | UNIQUE `(repo_id, path)`, idx `uploaded_by` | Every stored file; `kind` is `artifact`, `metadata` or `index`. Triggers keep the repo counters in the transaction of each write: an insert adds 1 and its size, a replace adds the size change, a delete subtracts. Every asset row counts (artifacts, metadata, checksums and Debian index files). `last_published_at` is the newest `updated_at` of an insert or replace that is not an `index` row; a delete never lowers it |
 | `assets_fts` | FTS5 trigram on `path` | Kept in sync by triggers; `index` rows are not indexed |
 | `settings` | PK `key` (WITHOUT ROWID), idx `updated_by` | JSON value, or base64(nonce‖AES-GCM ciphertext) when `secret=1`; `updated_by` |
 | `schema_migrations` | PK `component` (WITHOUT ROWID) | Applied version per migration track |
@@ -84,6 +85,8 @@ close and every 6 hours.
 | `auth_challenges` | PK `id_hash` (WITHOUT ROWID), idx `expires_at`, `user_id`, `device_id` | Short-lived single-use state: `kind` is `login`, `totp_setup`, `webauthn_register`, `webauthn_assert` or `publish_nonce`; `data` holds the payload |
 | `audit_events` | PK `id`, idx `at`, idx `(repo_id, id)`, idx `(action, id)`, idx `actor_user_id` | `at` unix time; `actor` is a username, `cli` or the attempted username of a failed sign-in; `actor_user_id` and `repo_id` are SET NULL; `target`; `detail` is JSON and never holds a secret value; `ip` is the client address. This table is the only place that stores or shows an IP address. See **Audit log** |
 | `publish_oidc_seen` | PK `id_hash` (WITHOUT ROWID), idx `expires_at` | SHA-256 of `<issuer>\n<jti>`, or of the whole token when it has no `jti`. A second insert means a replay |
+| `preset_ranges` | PK `name` (WITHOUT ROWID) | The last good list of a fetched preset: `ranges` (JSON array of CIDRs), `fetched_at` (unix time), `error` (the last failure, `''` after a success) |
+| `repo_ip_rules` | PK `(repo_id, scope, kind, value)` (WITHOUT ROWID); `repo_id` cascades with the repo | One allow-list entry. `scope` is `read` or `publish`, `kind` is `cidr` or `preset`, `note` is free text. A scope without rows is unrestricted |
 
 Tables of the `debian` track:
 
@@ -181,6 +184,7 @@ before `settings.Load`.
   `TR_STORAGE=s3` without a bucket, endpoint or keys is a startup error. An invalid or
   undecryptable DB value is logged and ignored. A `TR_*` variable that matches no setting or boot
   variable (`TR_E2E_*` and `TR_ENGINE` excepted) is logged as a warning by name and ignored.
+  `TR_E2E_PRESET_BASE_URL` is a test variable (see **Network rules**).
 - **Signing key.** On first start the server generates an Ed25519 key, or imports the legacy
   `signing.asc`, and stores it encrypted in `signing.key`. Setting `gpg.key_file` /
   `TR_GPG_KEY_FILE` replaces it, and the file must then exist. Signing is a core service (`format.Host.Signer`). The
@@ -192,9 +196,10 @@ before `settings.Load`.
 ## HTTP surface
 
 Each format mounts its own routes through `Format.Register(mux, Host)`. The core names no format.
-Format routes (package clients use HTTP Basic only). A **read** takes a password, or any username
-with a read token as the password. A **write** (PUT or upload) takes only a publish session token
-(`trs_...`) as the password (see **Publishing**). In the table, "write" means this rule:
+Format routes (package clients use HTTP Basic). A **read** takes a password, or any username
+with a read token as the password. A GET or HEAD read also takes the UI session cookie, so a
+signed-in browser downloads from a private repo without a Basic prompt. A **write** (PUT or upload) takes only a publish session token
+(`trs_...`) as the password (see **Publishing**); the session cookie never writes. In the table, "write" means this rule:
 
 | Route | Auth | Behaviour |
 |---|---|---|
@@ -244,13 +249,18 @@ Every other `/api` route answers it with 403. Errors are `{"error": "..."}`, plu
 | `GET /api/tokens` · `POST /api/tokens`, `DELETE /api/tokens/{id}` | any credential · UI session | **Read tokens.** The token is shown once. A token cannot mint tokens. POST is 403 for SSO users |
 | `GET/POST /api/users`, `PATCH /api/users/{username}` | admin (a UI session may change its own password) | The user list is paginated |
 | `GET /api/formats` | none | `[{name, title, default_config, settings_group?}]` for every registered format |
-| `GET /api/repos`, `GET /api/repos/{name}` · `POST /api/repos`, `PATCH /api/repos/{name}` | any/anon · admin | The list shows only repos the caller can see. `format` must be a registered name. `description` (POST and PATCH) has at most 500 characters and no control characters except newline and tab. `config` must be a JSON object that the format validates (400 otherwise; an unknown format lists the available ones). An empty config becomes the format default. Repo JSON has `locked_by` (`""` when the repo is not locked). A PATCH with `config` calls the format's `RepoConfigChanged` |
+| `GET /api/repos`, `GET /api/repos/{name}` · `POST /api/repos`, `PATCH /api/repos/{name}` | any/anon · admin | The list shows only repos the caller can see. Repo JSON has `file_count`, `total_size` and `last_published_at` (null before the first publish), read from the repo row (see `assets` in **Data model**). `format` must be a registered name. `description` (POST and PATCH) has at most 500 characters and no control characters except newline and tab. `config` must be a JSON object that the format validates (400 otherwise; an unknown format lists the available ones). An empty config becomes the format default. Repo JSON has `locked_by` (`""` when the repo is not locked). A PATCH with `config` calls the format's `RepoConfigChanged` |
 | `GET /api/repos/{name}/permissions`, `PUT/DELETE .../permissions/{username}` | admin | `{level: read\|write}` |
 | `DELETE /api/repos/{name}` | admin | 200 `{deleted: n}`. Locks the repo (writes get 409 `RepoDeleting`), deletes the files in batches, then the repo row. See **Files, uploads and deletes** |
 | `GET /api/repos/{name}/assets?prefix=&after=&limit=` | read | Ordered by path; the prefix is a range scan |
 | `GET /api/repos/{name}/tree?path=&after=&limit=` | read | `{items: [{name, type: "dir"\|"file", path, size?, sha256?, updated_at?, uploaded_by?}], next}`. `path` is a folder (`""` or ending in `/`). A folder item's `path` and the `next` cursor end in `/`. `uploaded_by` is a username |
 | `DELETE /api/repos/{name}/files?path=` or `?prefix=` | publish session of the repo, or admin UI session | 200 `{deleted: n}`. 404 for a missing file; an empty folder gives `deleted: 0`. 409 on a locked repo. 401 `publishing needs a publish session` for any other credential |
-| `POST /api/repos/{name}/upload` | publish session of the repo | Multipart. 201 `{files: [{path, status: "created"\|"replaced"\|"unchanged", size, sha256}]}`. 400 or 409 for a client error of the plugin |
+| `POST /api/repos/{name}/upload` | publish session of the repo | Multipart. A file part may carry a relative path as its `filename` (folder upload). 201 `{files: [{path, status: "created"\|"replaced"\|"unchanged", size, sha256}]}`. 400 or 409 for a client error of the plugin |
+| `POST /api/repos/{name}/upload/scan` | publish session of the repo | Same multipart body as the upload. Stores nothing. 200 `{found: [{kind: "maven"\|"debian"\|"file", title, files: [paths], problems: [text]}], ignored: [paths]}`. See **Files, uploads and deletes** |
+| `GET, PUT /api/repos/{name}/ip-rules` | admin | `{read: [Rule], publish: [Rule]}` with `Rule` = `{kind: "cidr"\|"preset", value, note}`. PUT replaces both lists and returns them in canonical form. 400 for an invalid rule. See **Network rules** |
+| `GET /api/network/presets` | admin | `[{name, title, count, fetched_at\|null, error}]` for the fetched presets (`cloudflare`, `github-actions`) |
+| `POST /api/network/presets/{name}/refresh` | admin | Fetches the preset now and returns it. 404 for an unknown preset; 502 `{error}` when the fetch fails (the last good list stays) |
+| `GET /api/network/proxy-candidates` | admin | `[{address, last_seen, count, header}]`, newest first: the untrusted TCP peers that sent a forwarded header. See **Network rules** |
 | `GET /api/audit?after=&limit=&action=&repo=` | admin | `{items: [{id, at, actor, actor_user_id\|null, action, repo, target, detail, ip}], next}`, newest first. `repo` is a repo name |
 | `GET /api/search?q=&repo=&after=&limit=` | any/anon | FTS5 trigram, `q` ≥ 3 chars, readable repos only |
 | `GET /api/repos/{name}/status` | read | The format's `Status` result, or `{}`. Debian: `{pending}`, the count of dirty rows |
@@ -300,7 +310,7 @@ read token as the password. Uploads use a publish session token; the Maven and G
 |---|---|---|
 | Password | argon2id (64 MiB, t=3, p=2), at most 4 hashes at once; successful Basic checks are cached for 10 min under an HMAC key | Sign-in (`POST /api/auth/login`). As Basic auth: format reads, and the `/api/` GET routes that are not admin routes |
 | Read token `trp_<12hex>_<secret>` | SHA-256(secret), looked up by id, constant-time compare | Basic password (any username): format reads, and the `/api/` GET routes that are not admin routes |
-| Session `tr_session` | SHA-256(id), absolute `session_ttl` | `/api/` only, and the only credential for admin routes and for routes that change state. HttpOnly, SameSite=Strict, Secure per `cookie.secure`. An admin session may also delete files (see **Files, uploads and deletes**) |
+| Session `tr_session` | SHA-256(id), absolute `session_ttl` | `/api/`, and format reads (GET and HEAD) for downloads in the browser. The only credential for admin routes and for routes that change state on `/api/`; it never writes to a format route. HttpOnly, SameSite=Strict, Secure per `cookie.secure`. An admin session may also delete files (see **Files, uploads and deletes**) |
 | Publish session `trs_<12hex>_<secret>` | SHA-256(secret) in `publish_sessions`, constant-time compare | Basic password (any username) or `Authorization: Bearer` on format routes of its one repo, `/api/publish/...`, and the upload and delete routes of its repo. The only credential that writes to a format route |
 
 - **Account kinds.** `local` users have a password, API tokens and Basic auth; publishers and the
@@ -357,8 +367,8 @@ read token as the password. Uploads use a publish session token; the Maven and G
   fails authentication.
 - **CSRF.** `http.CrossOriginProtection` plus SameSite=Strict.
 - **Rate limit.** Failed attempts are limited per IP and per username: burst 10, then 1 every
-  6 s. Over the limit the response is 429 with `Retry-After`. The client IP comes from
-  `X-Forwarded-For` only when the peer is in `trusted_proxies`.
+  6 s. Over the limit the response is 429 with `Retry-After`. The client IP is resolved as
+  described in **Network rules**.
 - **First start.** On first start with no users, the server creates `admin` with a random
   password and prints it once to stderr, outside the JSON log stream.
 
@@ -643,19 +653,100 @@ format; it calls the optional plugin interfaces of `internal/format`.
   regenerates nothing: a deleted version folder stays in `maven-metadata.xml` until the next
   publish, and the UI says so.
 - **`format.ManualUploader`.** `Upload(ctx, repo, files, fields, userID)` stores the files of a
-  manual upload. `userID` is 0 for a CI session. `UploadFile`, `Uploaded`, `UploadError` and
-  `BadUpload` are the helper types. `Host.Audit` and `Host.RecordUpload` record the event.
-- **Upload limits.** At most 50 files, 16 text fields of up to 1 KiB each, and all files together
+  manual upload. `Scan(ctx, repo, files)` returns the `[]format.Found` that a folder holds and
+  stores nothing. `userID` is 0 for a CI session. `UploadFile` (with `Path`, the relative path),
+  `Uploaded`, `UploadError`, `BadUpload`, `Found` and `InFolder` are the helper types.
+  `Host.Audit` and `Host.RecordUpload` record the event.
+- **Upload limits.** At most 500 files, 16 text fields of up to 1 KiB each, and all files together
   within `max_upload_bytes`. Fields come before the files in the body.
-  - **Maven.** One pom (`*.pom` or `pom.xml`) plus files named
+- **Relative paths.** The `filename` of a multipart file part may be a relative path
+  (`folder/sub/file.jar`). The server reads it from the raw part header, because Go's
+  `Part.FileName()` keeps only the base name. There is no separate paths field.
+- **Folder scan.** `POST /api/repos/{name}/upload/scan` takes the same body as the upload and
+  answers `{found, ignored}`. Each `found` item has a `kind` (`maven`, `debian` or `file`), a
+  `title`, its `files` and its `problems`. `ignored` lists the files that no item uses. The scan
+  stores nothing. The UI shows the result as a preview and uploads only the files of the items the
+  user ticks.
+  - **Maven folder.** A folder upload (any path with a `/`, or more than one pom) stores every
+    artifact that the scan finds, and answers 400 when any of them has a problem. Each pom with
+    the files next to it named `<artifactId>-<version>[-<classifier>].<ext>` is one artifact;
+    `.module` files belong to it. Checksum and signature files (`.md5`, `.sha1`, `.sha256`,
+    `.sha512`, `.asc`) are ignored, because the server writes the checksums. In a Maven-layout
+    folder (`<group path>/<artifactId>/<version>/`) the pom's groupId, artifactId and version must
+    match the path. A `pom.xml` outside a Maven layout is a project file and is ignored.
+  - **Maven.** A single-pom upload: one pom (`*.pom` or `pom.xml`) plus files named
     `<artifactId>-<version>[-<classifier>].<ext>`. One file with any other name becomes the main
     artifact. The fields `groupId`, `artifactId`, `version` and `packaging` fill what the pom
     lacks. A lone artifact gets a generated pom. Every stored file gets `.md5`, `.sha1` and
     `.sha256`. `maven-metadata.xml` is created or merged, with the versions in Maven order, plus
     `latest`, `release` and `lastUpdated`.
   - **Debian.** `.deb` files with the fields `distribution` and `component` (default `main`),
-    through the normal ingest.
-  - **Raw.** The field `folder`, under the repo's overwrite policy.
+    through the normal ingest. A folder upload uses only the `.deb` files; the scan reports each
+    one that does not parse as a problem.
+  - **Raw.** The field `folder`, under the repo's overwrite policy. A folder upload stores each
+    file at `folder/<relative path>`.
+
+## Network rules
+
+`internal/netrules` resolves the client address, keeps the IP range presets and checks the IP
+rules of each repo. Request paths read in-memory snapshots only. The database holds the last good
+preset lists and the rules.
+
+**Client IP.** A middleware resolves the client address once per request and attaches it to the
+request context. `httpx.ClientIP(r)` reads it. The rate limits, the audit log, the IP rules,
+device enrollment and the access log all use it.
+
+- If the TCP peer is not in `trusted_proxies`, the peer is the client. The server ignores
+  `X-Forwarded-For` and `CF-Connecting-IP` from such a peer.
+- If the peer is trusted, the server reads `X-Forwarded-For` from right to left and skips trusted
+  addresses. The first untrusted address is the client. If every hop is trusted, the left-most
+  hop is the client. An entry that does not parse stops the walk at the last address read.
+- `CF-Connecting-IP` counts only when the request has no `X-Forwarded-For` and the peer is a
+  trusted Cloudflare address.
+- `trusted_proxies` is a list. The default is empty: the server trusts no proxy. An entry is a
+  CIDR, a plain address, the preset `private` (loopback, RFC 1918, ULA and link-local) or the
+  preset `cloudflare`. An invalid entry gives 400 on PATCH.
+- The default trusts nothing because Docker's userland proxy and rootless Podman make every outside
+  connection arrive from a private gateway address. With `private` trusted there, anyone who
+  reaches the port directly could forge `X-Forwarded-For` and get around the IP rules.
+- **Proxy candidates.** When a peer that is not trusted sends `X-Forwarded-For`, `Forwarded` or
+  `CF-Connecting-IP`, the server remembers the peer in memory: the last time, the count and the
+  header of the last request. It keeps at most 20 peers and drops the one seen longest ago. A
+  peer that `trusted_proxies` covers leaves the list. Nothing is stored in the database, so a
+  restart empties the list. `GET /api/network/proxy-candidates` returns it, and the UI offers
+  "Trust this address", which adds the address to `trusted_proxies` with the settings PATCH.
+
+**Presets.** `private` is built in. The server fetches the others:
+
+| Preset | Source |
+|---|---|
+| `cloudflare` | `https://www.cloudflare.com/ips-v4` and `/ips-v6` |
+| `github-actions` | the `actions` key of `https://api.github.com/meta` |
+
+At startup the server loads the stored lists. It then refreshes in the background each preset that
+was never fetched or is a day old, and it checks again every hour. The fetch client has timeouts.
+The body limit is 8 MiB and a list holds at most 100,000 ranges. A failed refresh keeps the last
+good list and stores the error text. An admin can refresh a preset at any time (UI or
+`POST /api/network/presets/{name}/refresh`). Blacksmith has no preset, because it publishes no
+machine-readable list of egress addresses. The test variable `TR_E2E_PRESET_BASE_URL` points every
+fetch at `<base>/ips-v4`, `<base>/ips-v6` and `<base>/meta`.
+
+**Repo IP rules.** Each repo has two allow-lists, `read` and `publish`. An entry is a CIDR or a
+preset name. An empty list is unrestricted (the default).
+
+- **Save.** `PUT /api/repos/{name}/ip-rules` replaces both lists. A CIDR is masked and an address
+  becomes `/32` or `/128`. Valid presets are `private`, `cloudflare` and `github-actions`. At most
+  200 rules per scope and 200 characters per note. A duplicate, a bad CIDR or an unknown preset
+  gives 400. The change is audited as `repo.ip_rules` with the counts only.
+- **Read rules** apply to every format read and to the repo read routes (`tree`, `assets`, `usage`,
+  `status`), for every caller, admins included. Search leaves out the repos whose read rules
+  refuse the caller. `GET /api/repos/{name}` is exempt (`auth.RepoMeta`), so an admin can still
+  open the repo and change its rules.
+- **Publish rules** apply to format writes, manual upload and scan, deletes (an admin UI session
+  too) and to minting device, manual and OIDC publish sessions.
+- **Refusal.** The answer is 403 `{"error":"your address is not allowed to read|publish this
+  repository"}` and the audit event `ip.denied` with `detail.scope` and the client IP. The IP
+  appears only in the audit log.
 
 ## Audit log
 
@@ -669,10 +760,12 @@ Actions:
 | Files | `upload`, `delete` |
 | Repos | `repo.create`, `repo.update`, `repo.delete`, `permission.set`, `permission.delete` |
 | Users and settings | `user.create`, `user.update`, `settings.update` (keys only, never values) |
+| Network rules | `repo.ip_rules` (counts of read and publish rules only), `ip.denied` (`detail.scope` is `read` or `publish`) |
 
 - Changes made with the `telesphorepo user` commands are recorded with the actor `cli`.
-- The IP address appears only in this table and its API. No other API returns an IP address, and
-  the publish log has none. The access log still records the IP.
+- Client IP addresses appear only in this table and its API. The only other API with an address
+  is `GET /api/network/proxy-candidates` (admin), which lists the addresses of untrusted proxies,
+  not of clients. The publish log has none. The access log still records the IP.
 - The setting `audit.retention` (default `8760h`) sets how long an event stays. A job deletes
   older events every hour.
 
@@ -684,21 +777,66 @@ embeds. Routing is hash-based (`/#/...`), so the URLs that the server and the cl
 working. The UI is only a client of the JSON API and has no tests of its own. The route table,
 the folder layout, the design rules and the steps to add a page are in `web/src/README.md`.
 
-- **Browse** (anyone; anonymous visitors see anonymous-read repos). Home lists the repos with
-  format, description and Public or Private. A repo opens as a file tree with breadcrumbs, folders
+- **Words and look.** The UI uses plain words, not jargon (the rename table is in
+  `web/src/README.md`). Hover and selected states fill the whole element. The UI has no left
+  border accent and no edge bar.
+- **Header.** The links "Repositories" and "Settings" are always there ("Settings" only when
+  signed in). Signed-out visitors see "Sign in".
+- **Browse** (anyone; anonymous visitors see anonymous-read repos). Home lists the repos, one row
+  each and the whole row is a link. A row shows the format icon, name, description, format, who
+  can download ("Anyone" or "People with access"), the caller's own access, the last publish, the
+  size and the file count (`last_published_at`, `total_size`, `file_count`). A filter box searches names
+  and descriptions, and format buttons filter by format. Empty states: "Create your first
+  repository" for admins, "ask an administrator" for signed-in users and "Sign in" for visitors.
+  Admins create a repo on Home. A repo opens as a file tree with breadcrumbs, folders
   first, and size, modified time and uploader username per file. A file opens a panel with the
   SHA-256, the checksum links, Download and the client snippet (Maven or Gradle dependency, apt
-  line, curl). Search opens `/#/search?q=&repo=`.
+  line, curl). The "How to use" button opens a side panel with the client snippets of the repo.
+  Search opens `/#/search?q=&repo=`.
 - **Upload and Delete** appear for users with `write`. Both use a publish session that the page
   holds in memory only (never in storage): the user creates it with a fresh second factor, which
   is `POST /api/publish/sessions/manual`. An admin deletes with the UI session. The delete
   dialog lists what changes. The upload dialog posts the multipart form with `Authorization:
-  Bearer` and shows progress.
+  Bearer` and shows progress. It takes up to 500 files.
+- **Upload a folder.** The repo page has a second button, "Upload a folder". The user drops a
+  folder or chooses one. The dialog sends the files to `upload/scan` with their relative paths as
+  the multipart filenames, with progress. A preview then shows each found item with its files,
+  its problems in plain words and a checkbox. An item with problems cannot be ticked. The files
+  that no item uses are listed as left out. Debian items use the fields `distribution` and
+  `component`, raw items the field `folder`; Maven takes no fields. The dialog uploads only the
+  files of the ticked items and shows the results. It uses the same publish session flow as
+  "Upload files". For Maven the browser sends only the files that can be part of an upload
+  (`*.pom`, `pom.xml`, `*.jar`, `*.war`, `*.aar`, `*.module`, `*.zip`, `*.tar.gz`), and for
+  Debian only `*.deb`; raw sends every file. The 500-file limit counts the sent files. The
+  preview counts the files that the browser left out with the ones the scan left out. The server
+  still checks every file it gets.
+- **A folder on "Upload files".** A folder dropped on the "Upload files" drop zone is not added.
+  The dialog says "That is a folder — use Upload a folder", and its button opens "Upload a folder"
+  with the dropped folder.
 - **Settings** (signed-in users; admin pages only for admins). A sidebar by category: Account
-  (profile, security, devices, read tokens, publish), Repositories (list; per repo the tabs
-  `general`, `permissions`, `config`, `status`, `danger`), Users and access (users, SSO),
-  Publishing (trust policies, publish log), Storage, Migration (Nexus), System and Audit log.
+  (profile, two-step verification, devices, download tokens, publish packages), Repositories
+  (list; per repo the tabs `general` "Details", `permissions` "Who has access", `network`
+  "Network access", `config` "Format options", `status` "How to use", `danger` "Delete"),
+  People and sign-in (users, single sign-on), Publishing (CI publishing rules, publish history),
+  Storage, Import from Nexus, Server settings and Activity log.
   Registry settings render by group with one form component.
+- **Network access tab** (admin). Two lists, "Who can download" (`read`) and "Who can publish"
+  (`publish`). Each list has checkboxes for the presets `private` and `github-actions`
+  and rows for addresses or ranges with a note. A row shows a check message or the number of
+  addresses it covers. An empty list shows that anyone with the right account can use the repo
+  from any address. The page says that the rules apply to admins too. It checks duplicates, more
+  than 200 entries and notes over 200 characters. A confirm dialog lists the changes before the
+  PUT. A `github-actions` list that the server has not fetched yet shows a warning. A stored
+  `cloudflare` rule stays visible so that an admin can remove it.
+- **Server settings cards** (admin). "Reverse proxy" edits `trusted_proxies`: checkboxes for
+  "Private networks" (with a warning for Docker port publishing, rootless Podman and shared
+  networks) and "Cloudflare", a text box for other proxies checked line by line, and "Reset to the
+  default". For each proxy candidate it shows "Requests from <address> carry forwarded headers. Is
+  this your reverse proxy?" with a note on what trusting means and a "Trust this address" button,
+  which adds the address after a confirm dialog. A setting that an
+  environment variable sets shows a badge and cannot change. A Caddyfile hint takes its host from
+  `base_url`. "Network lists" shows each preset with its range count, last refresh and last error,
+  and a Refresh button.
 - **Auth in the UI.** A 401 outside the sign-in routes signs the user out. A 403
   `second_factor_required` sets the setup-only state. Signing out returns to Browse.
 
@@ -763,7 +901,7 @@ comes from `internal/containerengine`; `TR_ENGINE=docker|podman` forces one. `Te
 Keycloak container (`E2E_KEYCLOAK_IMAGE`, realm `e2e/testdata/keycloak/realm-e2e.json`) and
 drives the browser flow with a cookie-jar HTTP client. `TestRaw` uses a curl container.
 `TestAPIFormats` covers `/api/formats`, `/status` and `/usage`. `TestQueryPlans` runs `dbcheck`
-inside a server container. `files_test.go` covers `TestTree`, `TestDelete` (who may delete, file, prefix and Bearer deletes, an admin UI session, blobs gone, repo delete and name reuse), `TestManualUploadMaven` (checksums, metadata order, `mvn` resolves the uploaded and the generated pom), `TestManualUploadRaw` and `TestDebianDeleteAndUpload` (apt sees the package, then not; 4 by-hash files remain). `audit_test.go` covers `TestAudit`: events, filters, paging, no secret values, admin only, and no IP outside the audit log. `TestStorageMove*` run each server on a named data volume: fs to
+inside a server container. `files_test.go` covers `TestTree`, `TestDelete` (who may delete, file, prefix and Bearer deletes, an admin UI session, blobs gone, repo delete and name reuse), `TestManualUploadMaven` (checksums, metadata order, `mvn` resolves the uploaded and the generated pom), `TestManualUploadRaw`, `TestRepoCounters` (`file_count`, `total_size` and `last_published_at` through uploads, a replace, a file delete and a folder delete) and `TestDebianDeleteAndUpload` (apt sees the package, then not; 4 by-hash files remain). `audit_test.go` covers `TestAudit`: events, filters, paging, no secret values, admin only, and no IP outside the audit log. `network_test.go` covers `TestClientIP` (with the default an `X-Forwarded-For` from the harness peer is ignored and the peer becomes a proxy candidate; trusting the candidate makes the header count and removes the candidate; `private`: a chain through a private hop, `CF-Connecting-IP` from a non-Cloudflare peer; an untrusted peer's header, an empty list, invalid entries, reset to the default). `TestIPRules` and `TestPresets` set `trusted_proxies` to `private` first, so `X-Forwarded-For` sets the client address, `TestIPRules` (validation; allowed and refused reads of the format route, tree, assets, usage and status; the repo record stays readable; search drops the repo; refused device and manual mints, PUT and admin delete, each audited with its IP and scope; empty lists lift the rule) and `TestPresets` (a second Telesphorepo server is the stub: startup fetch, a preset in read rules, a Cloudflare hop in the chain, a failed refresh that keeps the last good list, recovery, and stored lists after a restart without the stub). `folder_upload_test.go` covers `TestFolderUploadMaven` (a Maven-layout tree with checksum, signature and stray files; a flat folder with two poms; a bad tree that gives 400; scans store nothing; checksums and metadata) and `TestFolderUploadDebianAndRaw`. `TestStorageMove*` run each server on a named data volume: fs to
 SeaweedFS and back with uploads during the move, a forced failure, a restart mid-move
 (`Server.Restart`) and a cancel.
 
@@ -781,7 +919,7 @@ and the client helpers (`harness_test.go`, `main_test.go`, `clients_test.go`) ca
 the way the web UI does. `s.Admin()` is the bootstrap admin's UI session: on first use the
 harness enrolls TOTP factors through the setup-only session and signs in with the password and a
 code. `s.SignIn(t, user, pass)` gives any user's UI session, and `s.AdminBasic()` is the admin
-password for format reads. `TestAPISessionRule` checks where each credential works.
+password for format reads. `TestAPISessionRule` checks where each credential works, including a UI session that downloads from a private Maven repo and cannot PUT there.
 
 **Publishing tests.** Every publish in the suite uses a publish session. The harness helper
 `PublishToken(t, s, user, repo)` enrolls a device the real way (the test computes the TOTP

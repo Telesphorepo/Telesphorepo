@@ -5,10 +5,12 @@
   used, so the page can forget a session the server refused (401).
 
     <UploadDialog bind:open {repo} {folder} {token} onError={(e, t) => checkSession(e, t)}
-      onUploaded={() => version++} />
+      onUploaded={() => version++} onFolder={(d) => openFolderUpload(d)} />
 
   folder is the open folder ("" for the root, otherwise ending in "/"); Debian and raw use it for
   their first field values. Formats: maven, debian, raw (the ones with format.ManualUploader).
+  A folder dropped here is not added: the dialog says to use "Upload a folder", and its button
+  hands the dropped folder to onFolder.
 -->
 <script lang="ts">
   import { untrack } from "svelte";
@@ -27,6 +29,8 @@
   import RawFields from "./RawFields.svelte";
   import UploadResults from "./UploadResults.svelte";
   import type { UploadPlan } from "./types";
+  import type { FolderDrop } from "./folder";
+  import FolderUpIcon from "@lucide/svelte/icons/folder-up";
 
   let {
     open = $bindable(false),
@@ -35,6 +39,7 @@
     token,
     onError,
     onUploaded,
+    onFolder,
   }: {
     open?: boolean;
     repo: Repo;
@@ -45,12 +50,14 @@
     onError?: (e: unknown, token: string | undefined) => void;
     /** Runs after a successful upload, e.g. to reload the tree. */
     onUploaded?: (files: Uploaded[]) => void;
+    /** Opens "Upload a folder" with a folder that the user dropped here. */
+    onFolder: (drop: FolderDrop) => void;
   } = $props();
 
   const nFiles = (n: number) => `${n.toLocaleString()} ${n === 1 ? "file" : "files"}`;
 
   // The server takes at most this many files per upload (internal/api/files.go).
-  const maxFiles = 50;
+  const maxFiles = 500;
 
   const texts: Record<string, { description: string; hint: string; accept?: string }> = {
     maven: {
@@ -75,11 +82,13 @@
   let error = $state("");
   let progress = $state<UploadProgress | null>(null);
   let results = $state<Uploaded[]>([]);
+  let droppedFolder = $state<FolderDrop | null>(null);
   let abort: (() => void) | null = null;
 
   function reset() {
     phase = "form";
     picked = [];
+    droppedFolder = null;
     plan = undefined;
     error = "";
     progress = null;
@@ -92,6 +101,7 @@
 
   function add(list: File[]) {
     error = "";
+    droppedFolder = null;
     const byName = new Map(picked.map((f) => [f.name, f]));
     for (const f of list) byName.set(f.name, f);
     let all = [...byName.values()];
@@ -170,7 +180,22 @@
 
     {#if phase === "form"}
       <div class="flex flex-col gap-4">
-        <DropZone onFiles={add} hint={text.hint} accept={text.accept} disabled={busy} />
+        <DropZone onFiles={add} onFolder={(d) => (droppedFolder = d)} hint={text.hint} accept={text.accept} disabled={busy} />
+        {#if droppedFolder}
+          <div class="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-muted/60 px-4 py-3 text-sm" role="alert">
+            <p>That is a folder — use Upload a folder.</p>
+            <Button
+              size="sm"
+              onclick={() => {
+                const d = droppedFolder;
+                droppedFolder = null;
+                if (d) onFolder(d);
+              }}
+            >
+              <FolderUpIcon />Upload a folder
+            </Button>
+          </div>
+        {/if}
         <FileList rows={picked.map((file) => plan?.rows.find((r) => r.file === file) ?? { file })} onRemove={remove} disabled={busy} />
         {#if picked.length}
           {#if repo.format === "maven"}

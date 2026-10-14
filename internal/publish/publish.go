@@ -14,15 +14,18 @@ import (
 	"encoding/hex"
 	"errors"
 	"log/slog"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
 
 	gooidc "github.com/coreos/go-oidc/v3/oidc"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
 	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
+	"github.com/Telesphorepo/Telesphorepo/internal/netrules"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 )
@@ -75,6 +78,7 @@ type Service struct {
 	repos    *repos.Service
 	settings *settings.Service
 	log      *slog.Logger
+	rules    *netrules.Service // per-repo IP rules; set by the server (nil: none)
 
 	enrollLimits *ipLimiter
 
@@ -97,6 +101,20 @@ func New(d *db.DB, a *auth.Service, rs *repos.Service, st *settings.Service, log
 		enrollLimits: newIPLimiter(),
 		provs:        map[string]*gooidc.Provider{},
 	}
+}
+
+// SetNetRules sets the per-repo IP rules that minting a session checks (publish scope).
+func (s *Service) SetNetRules(n *netrules.Service) { s.rules = n }
+
+// ipAllowed returns a *netrules.DeniedError when the publish rules of repo refuse ip.
+func (s *Service) ipAllowed(repo *repos.Repo, ip netip.Addr, actor audit.Actor) error {
+	if s.rules == nil {
+		return nil
+	}
+	if d := s.rules.Check(repo, netrules.ScopePublish, ip, actor); d != nil {
+		return d
+	}
+	return nil
 }
 
 func (s *Service) sessionTTL() time.Duration {

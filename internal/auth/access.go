@@ -9,6 +9,7 @@ import (
 
 	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/netrules"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
@@ -67,12 +68,47 @@ func (s *Service) publishRequired(w http.ResponseWriter) {
 // RepoGate authenticates a format-route request and checks it may do need on repo name. A write
 // (need >= Write) needs an open publish session for that repo; anything else gets 401 with the
 // Basic challenge. A user who lost write permission gets 403, a locked repo 409.
+// The repo's IP rules apply to every caller, admins included: the read rules to a read, the
+// publish rules to a write. A refused address gets 403 and an ip.denied audit event.
+// allowSession is true on the JSON API. A format route (allowSession false) also takes the UI
+// session cookie for a GET or HEAD read, so a signed-in browser downloads without a Basic prompt.
 func (s *Service) RepoGate(w http.ResponseWriter, r *http.Request, name, format string, need Level, allowSession bool) (*repos.Repo, *Principal, bool) {
-	p, ok := s.Identify(w, r, allowSession)
+	p, ok := s.identify(w, r, allowSession, allowSession || (need < Write && safeMethod(r.Method)))
 	if !ok {
 		return nil, nil, false
 	}
-	return s.gate(w, r, p, name, format, need)
+	repo, p, ok := s.gate(w, r, p, name, format, need)
+	if !ok || !s.ipAllowed(w, r, p, repo, need) {
+		return nil, nil, false
+	}
+	return repo, p, true
+}
+
+// RepoMeta is RepoGate for a read of the repo record itself (GET /api/repos/{name}): it does not
+// apply the IP rules, so an admin can still open the repo to change them.
+func (s *Service) RepoMeta(w http.ResponseWriter, r *http.Request, name string) (*repos.Repo, *Principal, bool) {
+	p, ok := s.Identify(w, r, true)
+	if !ok {
+		return nil, nil, false
+	}
+	return s.gate(w, r, p, name, "", Read)
+}
+
+// ipAllowed checks the repo's IP rules for need (a read or a publish) and answers 403 when they
+// refuse the client address.
+func (s *Service) ipAllowed(w http.ResponseWriter, r *http.Request, p *Principal, repo *repos.Repo, need Level) bool {
+	if s.rules == nil {
+		return true
+	}
+	scope := netrules.ScopeRead
+	if need >= Write {
+		scope = netrules.ScopePublish
+	}
+	if d := s.rules.CheckRequest(r, repo, scope, ActorOf(p)); d != nil {
+		s.rules.Refuse(w, r, d)
+		return false
+	}
+	return true
 }
 
 // DeleteGate authorizes a delete of files through the JSON API (spec §13): a publish session
@@ -85,7 +121,11 @@ func (s *Service) DeleteGate(w http.ResponseWriter, r *http.Request, name string
 		return nil, nil, false
 	}
 	if p == nil || p.Publish != nil || !p.Session || !p.IsAdmin {
-		return s.gate(w, r, p, name, "", Write)
+		repo, p, ok := s.gate(w, r, p, name, "", Write)
+		if !ok || !s.ipAllowed(w, r, p, repo, Write) {
+			return nil, nil, false
+		}
+		return repo, p, true
 	}
 	repo, err := s.repos.ByName(r.Context(), name)
 	if errors.Is(err, repos.ErrNotFound) {
@@ -94,6 +134,9 @@ func (s *Service) DeleteGate(w http.ResponseWriter, r *http.Request, name string
 	}
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "internal error")
+		return nil, nil, false
+	}
+	if !s.ipAllowed(w, r, p, repo, Write) {
 		return nil, nil, false
 	}
 	if repo.LockedBy != "" {

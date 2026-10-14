@@ -27,6 +27,7 @@ import (
 	_ "github.com/Telesphorepo/Telesphorepo/internal/formats" // registers the built-in formats
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/move"
+	"github.com/Telesphorepo/Telesphorepo/internal/netrules"
 	"github.com/Telesphorepo/Telesphorepo/internal/nexus"
 	"github.com/Telesphorepo/Telesphorepo/internal/oidc"
 	"github.com/Telesphorepo/Telesphorepo/internal/publish"
@@ -178,13 +179,19 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 	})
 
 	rs := repos.New(d, format.ValidateRepoConfig)
-	au := audit.New(d, set.Config, func() time.Duration { return set.Current().Duration(settings.KeyAuditRetention) }, log.With("component", "audit"))
+	au := audit.New(d, func() time.Duration { return set.Current().Duration(settings.KeyAuditRetention) }, log.With("component", "audit"))
+	nr := netrules.New(d, set.Config, au, log.With("component", "netrules"))
+	if err := nr.Load(ctx); err != nil {
+		return err
+	}
 	as := auth.New(d, set.Config, rs)
 	as.SetSealer(set) // TOTP secrets are sealed with the master key
 	as.SetAudit(au)
+	as.SetNetRules(nr)      // per-repo IP rules on the repo gates
 	as.SetDevMode(opts.Dev) // only "telesphorepo dev" makes the second factor optional
 	ps := publish.New(d, as, rs, set, log.With("component", "publish"))
 	as.SetPublishTokens(ps) // publish-session tokens authenticate through the publish service
+	ps.SetNetRules(nr)      // minting a session checks the repo's publish rules
 	ss := assets.New(d, live, set.Config)
 	fs := files.New(d, ss, rs, as, log.With("component", "files"))
 	mv := move.New(d, set, live, ss, rs, log.With("component", "move"))
@@ -199,6 +206,7 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 		nx.Wait()
 		ps.Wait()
 		au.Wait()
+		nr.Wait()
 	}()
 
 	if opts.Init != nil {
@@ -223,7 +231,7 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 		io.WriteString(w, "ok\n")
 	})
 	sso := oidc.New(as, set.Config, log.With("component", "oidc"))
-	mux.Handle("/api/", api.New(as, rs, ss, set, mv, nx, ps, fs, au, sso).Handler())
+	mux.Handle("/api/", api.New(as, rs, ss, set, mv, nx, ps, fs, au, nr, sso).Handler())
 	for _, f := range format.All() {
 		f.Register(mux, format.Host{
 			DB:       d,
@@ -241,7 +249,7 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 
 	srv := &http.Server{
 		Addr:              boot.Listen,
-		Handler:           accessLog(log, set.Config, mux),
+		Handler:           nr.Middleware(accessLog(log, mux)), // client address first, then the log
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    64 << 10,
@@ -267,6 +275,7 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 	nx.Start(jobsCtx)
 	ps.Start(jobsCtx)
 	au.Start(jobsCtx)
+	nr.Start(jobsCtx)
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()
@@ -409,7 +418,7 @@ func (w *recorder) Flush() {
 
 func (w *recorder) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
-func accessLog(log *slog.Logger, cfg config.Provider, next http.Handler) http.Handler {
+func accessLog(log *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		w := &recorder{ResponseWriter: rw}
@@ -440,7 +449,7 @@ func accessLog(log *slog.Logger, cfg config.Provider, next http.Handler) http.Ha
 				"status", status,
 				"bytes", w.bytes,
 				"duration_ms", time.Since(start).Milliseconds(),
-				"ip", httpx.ClientIP(r, cfg().TrustedProxies).String(),
+				"ip", httpx.ClientIP(r).String(),
 			)
 		}()
 		next.ServeHTTP(w, r)

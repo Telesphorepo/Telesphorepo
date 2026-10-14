@@ -4,8 +4,10 @@ package db
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -134,6 +136,13 @@ func (d *DB) Tx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	return tx.Commit()
 }
 
+// ErrSchemaChanged means a migration file that this database already applied has different
+// contents now. Until the first release the schema files are edited in place (no migrations),
+// so the database must be created again: telesphorepo dev does that for its own data dir;
+// serve refuses to start.
+var ErrSchemaChanged = errors.New("the database was created by a different version of a schema file; " +
+	"delete the data directory to start fresh")
+
 // Migrate applies the NNNN_name.sql files at the root of fsys in order, each in its own
 // transaction, and records the version in schema_migrations under component. The core track
 // creates schema_migrations in its first file, so it must be applied before any other track.
@@ -169,20 +178,40 @@ func (d *DB) Migrate(ctx context.Context, component string, fsys fs.FS) error {
 		return fmt.Errorf("migration %s: database is at version %d, newer than this binary (%d)",
 			component, current, ms[len(ms)-1].num)
 	}
+	if _, err := d.W.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_checksums (
+		component TEXT NOT NULL, version INTEGER NOT NULL, sha256 TEXT NOT NULL,
+		PRIMARY KEY (component, version)) STRICT, WITHOUT ROWID`); err != nil {
+		return err
+	}
 	for _, m := range ms {
-		if m.num <= current {
-			continue
-		}
 		body, err := fs.ReadFile(fsys, m.name)
 		if err != nil {
 			return err
+		}
+		sum := sha256.Sum256(body)
+		hexSum := hex.EncodeToString(sum[:])
+		if m.num <= current {
+			var stored string
+			err := d.W.QueryRowContext(ctx, `SELECT sha256 FROM schema_checksums WHERE component = ? AND version = ?`,
+				component, m.num).Scan(&stored)
+			if errors.Is(err, sql.ErrNoRows) || (err == nil && stored != hexSum) {
+				return fmt.Errorf("%w: %s/%s", ErrSchemaChanged, component, m.name)
+			}
+			if err != nil {
+				return err
+			}
+			continue
 		}
 		err = d.Tx(ctx, func(tx *sql.Tx) error {
 			if _, err := tx.ExecContext(ctx, string(body)); err != nil {
 				return fmt.Errorf("migration %s/%s: %w", component, m.name, err)
 			}
-			_, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations (component, version) VALUES (?, ?)
-				ON CONFLICT (component) DO UPDATE SET version = excluded.version`, component, m.num)
+			if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations (component, version) VALUES (?, ?)
+				ON CONFLICT (component) DO UPDATE SET version = excluded.version`, component, m.num); err != nil {
+				return err
+			}
+			_, err := tx.ExecContext(ctx, `INSERT INTO schema_checksums (component, version, sha256) VALUES (?, ?, ?)
+				ON CONFLICT (component, version) DO UPDATE SET sha256 = excluded.sha256`, component, m.num, hexSum)
 			return err
 		})
 		if err != nil {

@@ -130,14 +130,41 @@ const RepoDeleting = "the repository is being deleted"
 // ManualUploader takes files uploaded through the web UI (POST /api/repos/{name}/upload, spec
 // §13). fields are the form's text fields; userID is the uploader (0 for a CI session). A
 // client mistake is an *UploadError.
+//
+// Scan (POST /api/repos/{name}/upload/scan, spec §13.1) looks at the files of a dropped folder
+// and returns what an Upload of them would store, one Found per artifact or package, with the
+// problems that would refuse it. It stores nothing. Files that no Found lists are ignored.
 type ManualUploader interface {
 	Upload(ctx context.Context, repo *repos.Repo, files []UploadFile, fields map[string]string, userID int64) ([]Uploaded, error)
+	Scan(ctx context.Context, repo *repos.Repo, files []UploadFile) ([]Found, error)
 }
 
-// UploadFile is one uploaded file: its base name as the client sent it and its spooled body.
+// UploadFile is one uploaded file: its base name, its path relative to the dropped folder
+// (forward slashes; the base name for a single file) and its spooled body.
 type UploadFile struct {
 	Name  string
+	Path  string
 	Spool *assets.Spooled
+}
+
+// InFolder reports whether any file came with a folder path, i.e. the client dropped a folder.
+func InFolder(files []UploadFile) bool {
+	for _, f := range files {
+		if strings.Contains(f.Path, "/") {
+			return true
+		}
+	}
+	return false
+}
+
+// Found is one artifact or package that a scan found: Kind is the format's word for it (e.g.
+// "maven", "debian", "file"), Title names it (e.g. "com.prism:api:1.2"), Files are the
+// relative paths it takes, and Problems say why an upload would refuse it (empty: it is fine).
+type Found struct {
+	Kind     string   `json:"kind"`
+	Title    string   `json:"title"`
+	Files    []string `json:"files"`
+	Problems []string `json:"problems"`
 }
 
 // Uploaded is one file a manual upload stored or found unchanged. Generated files (checksums,

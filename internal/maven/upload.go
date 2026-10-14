@@ -86,12 +86,22 @@ type artifactFile struct {
 	sp   *assets.Spooled
 }
 
-// Upload implements format.ManualUploader. Files: at most one pom (*.pom or pom.xml) and any artifacts named
+// Upload implements format.ManualUploader. A dropped folder (files with folder paths, or more
+// than one pom) is stored as the artifacts that Scan finds, each like an upload of its own,
+// and only when Scan reports no problem. Otherwise the files are at most one pom (*.pom or pom.xml) and any artifacts named
 // <artifactId>-<version>[-<classifier>].<ext>; one artifact may have any other name, it becomes
 // the main artifact. Coordinates come from the pom; the fields groupId, artifactId, version and
 // packaging give the ones the pom does not (or all of them for a lone artifact, which gets a
 // generated pom).
 func (h *Handler) Upload(ctx context.Context, repo *repos.Repo, files []format.UploadFile, fields map[string]string, userID int64) ([]format.Uploaded, error) {
+	if format.InFolder(files) || countPOMs(files) > 1 {
+		return h.uploadFolder(ctx, repo, files, fields, userID)
+	}
+	return h.uploadSet(ctx, repo, files, fields, userID)
+}
+
+// uploadSet stores one pom with its artifacts, or one lone artifact (see Upload).
+func (h *Handler) uploadSet(ctx context.Context, repo *repos.Repo, files []format.UploadFile, fields map[string]string, userID int64) ([]format.Uploaded, error) {
 	for k := range fields {
 		switch k {
 		case "groupId", "artifactId", "version", "packaging":

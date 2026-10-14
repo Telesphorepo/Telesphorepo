@@ -1,4 +1,4 @@
-<!-- Repository settings, Danger zone: delete the repository with all its files. -->
+<!-- Repository settings, Delete tab (id danger): delete the repository with all its files. -->
 <script lang="ts">
   import { toast } from "svelte-sonner";
   import { api, type Repo } from "$lib/api";
@@ -20,7 +20,7 @@
   });
 </script>
 
-<Section narrow tone="danger" title="Delete this repository" description="Deleting a repository cannot be undone.">
+<Section narrow tone="danger" title="Delete this repository" description="This deletes every file in the repository. You cannot undo it.">
   <Button variant="destructive" onclick={() => (open = true)}>Delete repository</Button>
 </Section>
 
@@ -31,8 +31,8 @@
   destructive
   changes={[
     `Deletes every file of ${repo.name} from the storage`,
-    "Removes its user permissions and its index data",
-    "Clients that use the repository get 404 from now on",
+    "Removes the access you gave people to it",
+    "Builds that use it can no longer download from it",
     "Uploads to it fail while the delete runs",
   ]}
   onConfirm={async () => {

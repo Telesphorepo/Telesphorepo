@@ -1,4 +1,4 @@
-<!-- Repository settings, Status tab: what the format reports, and the client setup snippets. -->
+<!-- Repository settings, "How to use" tab (id status): the client setup snippets, and what the format reports. -->
 <script lang="ts">
   import { api, type Repo } from "$lib/api";
   import { formatCount } from "$lib/format";
@@ -31,13 +31,28 @@
   const entries = $derived(Object.entries(status.data ?? {}));
 </script>
 
-<Section narrow title="Status">
+<Section narrow title="How to use" description="Copy these into a build or a system to download from {repo.name}.">
+  {#if usage.loading}
+    <LoadingRows rows={3} />
+  {:else if usage.error}
+    <ErrorState error={usage.error} onRetry={usage.reload} />
+  {:else}
+    <div class="flex flex-col gap-4">
+      <CopyField label="Server address" value={usage.data?.base_url ?? ""} />
+      {#each usage.data?.snippets ?? [] as s (s.title)}
+        <CopyField label={s.title} value={s.code} block />
+      {/each}
+    </div>
+  {/if}
+</Section>
+
+<Section narrow title="Repository status" description="What the {repo.format} format reports about this repository.">
   {#if status.loading}
     <LoadingRows rows={2} />
   {:else if status.error}
     <ErrorState error={status.error} onRetry={status.reload} />
   {:else if entries.length === 0}
-    <EmptyState title="Nothing to report" description="The {repo.format} format has no status for a repository." />
+    <EmptyState title="Nothing to report" description="The {repo.format} format reports no status for a repository." />
   {:else}
     <dl class="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-sm">
       {#each entries as [k, v] (k)}
@@ -45,20 +60,5 @@
         <dd class="min-w-0 font-medium break-words">{show(v)}</dd>
       {/each}
     </dl>
-  {/if}
-</Section>
-
-<Section narrow title="Client setup" description="Snippets for the {repo.format} clients that use this repository.">
-  {#if usage.loading}
-    <LoadingRows rows={3} />
-  {:else if usage.error}
-    <ErrorState error={usage.error} onRetry={usage.reload} />
-  {:else}
-    <div class="flex flex-col gap-4">
-      <CopyField label="Server URL" value={usage.data?.base_url ?? ""} />
-      {#each usage.data?.snippets ?? [] as s (s.title)}
-        <CopyField label={s.title} value={s.code} block />
-      {/each}
-    </div>
   {/if}
 </Section>

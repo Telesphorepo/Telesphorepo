@@ -1,6 +1,6 @@
 <!--
-  Admin: CI trust policies. A policy lets a CI system (GitHub Actions, Jenkins) publish without a
-  stored secret. Presets fill the issuer and the claims in the editor sheet.
+  Admin: CI publishing rules (the API calls them trust policies). A rule lets a CI system (GitHub
+  Actions, Jenkins) publish without a stored secret. Presets fill the issuer and the claims in the editor sheet.
 -->
 <script lang="ts">
   import type { PageProps } from "$lib/router.svelte";
@@ -41,7 +41,7 @@
     if (!toggling) return;
     const t = toggling;
     await api.publish.trusts.update(t.id, { disabled: !t.disabled });
-    toast.success(`${t.disabled ? "Enabled" : "Disabled"} ${t.name}`);
+    toast.success(`Turned ${t.disabled ? "on" : "off"} ${t.name}`);
     list.reload();
   }
 
@@ -57,21 +57,22 @@
 </script>
 
 <PageHeader
-  title="Trust policies"
-  description="A trust policy lets a CI system publish without a stored secret. The CI job sends its signed identity token, and the server opens a short publish session when the token matches a policy."
+  title="CI publishing rules"
+  description="Let a CI job, such as GitHub Actions or Jenkins, publish without a stored password. The job sends the identity token that its CI system signs. When the token matches a rule, the job gets a temporary publish password for the rule's repositories."
 >
   {#snippet actions()}
-    <Button onclick={() => openSheet(null)}><PlusIcon /> New trust policy</Button>
+    <Button onclick={() => openSheet(null)}><PlusIcon /> New rule</Button>
   {/snippet}
+  <p class="text-xs text-muted-foreground">Technical name: OIDC trust policy.</p>
 </PageHeader>
 
 {#if repos.error}<div class="mb-8"><ErrorState error={repos.error} title="The repository list did not load" onRetry={repos.reload} /></div>{/if}
 
-<KeysetTable {list} columns={6} caption="Trust policies">
+<KeysetTable {list} columns={6} caption="CI publishing rules">
   {#snippet head()}
     <Table.Head>Name</Table.Head>
-    <Table.Head>Issuer</Table.Head>
-    <Table.Head>Claims</Table.Head>
+    <Table.Head>CI system (issuer)</Table.Head>
+    <Table.Head>Conditions (claims)</Table.Head>
     <Table.Head>Repositories</Table.Head>
     <Table.Head>Created</Table.Head>
     <Table.Head class="w-px"><span class="sr-only">Actions</span></Table.Head>
@@ -80,7 +81,7 @@
     <Table.Row>
       <Table.Cell class="font-medium">
         {t.name}
-        {#if t.disabled}<Badge variant="secondary" class="ml-1">Disabled</Badge>{/if}
+        {#if t.disabled}<Badge variant="secondary" class="ml-1">Off</Badge>{/if}
       </Table.Cell>
       <Table.Cell class="max-w-64 font-mono text-[0.8125rem] break-all whitespace-normal">{t.issuer}</Table.Cell>
       <Table.Cell class="font-mono text-[0.8125rem] whitespace-normal">
@@ -99,7 +100,7 @@
             onclick={() => {
               toggling = t;
               confirmToggle = true;
-            }}>{t.disabled ? "Enable" : "Disable"}</Button
+            }}>{t.disabled ? "Turn on" : "Turn off"}</Button
           >
           <Button
             variant="destructive"
@@ -116,10 +117,10 @@
   {#snippet empty()}
     <EmptyState
       icon={ShieldCheckIcon}
-      title="No trust policies yet"
-      description="Add a policy to let GitHub Actions or Jenkins publish without a stored secret."
+      title="No CI publishing rules yet"
+      description="Add a rule to let GitHub Actions or Jenkins publish without a stored password."
     >
-      <Button onclick={() => openSheet(null)}><PlusIcon /> New trust policy</Button>
+      <Button onclick={() => openSheet(null)}><PlusIcon /> New rule</Button>
     </EmptyState>
   {/snippet}
 </KeysetTable>
@@ -130,23 +131,23 @@
 
 <ConfirmDialog
   bind:open={confirmToggle}
-  title={toggling?.disabled ? "Enable trust policy" : "Disable trust policy"}
-  confirmLabel={toggling?.disabled ? `Enable ${toggling.name}` : `Disable ${toggling?.name ?? "the policy"}`}
+  title={toggling?.disabled ? "Turn on the rule" : "Turn off the rule"}
+  confirmLabel={toggling?.disabled ? `Turn on ${toggling.name}` : `Turn off ${toggling?.name ?? "the rule"}`}
   destructive={!toggling?.disabled}
   changes={toggling?.disabled
     ? [`CI jobs that match ${toggling.name} can publish again`]
-    : ["Stops CI jobs from opening new publish sessions with this policy", "Keeps the policy, so you can enable it again"]}
+    : ["CI jobs can no longer get a publish password with this rule", "Keeps the rule, so you can turn it on again"]}
   onConfirm={toggle}
 />
 
 <ConfirmDialog
   bind:open={confirmDelete}
-  title="Delete trust policy"
-  confirmLabel={`Delete ${deleting?.name ?? "the policy"}`}
+  title="Delete CI publishing rule"
+  confirmLabel={`Delete ${deleting?.name ?? "the rule"}`}
   destructive
   changes={[
-    "Ends the open publish sessions that this policy created",
-    "Stops CI jobs from publishing with this policy",
+    "Revokes the temporary passwords that CI jobs got with this rule",
+    "CI jobs can no longer publish with this rule",
   ]}
   onConfirm={remove}
 />

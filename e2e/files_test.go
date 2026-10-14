@@ -354,6 +354,66 @@ func TestDelete(t *testing.T) {
 	})
 }
 
+type repoCounters struct {
+	FileCount       int64      `json:"file_count"`
+	TotalSize       int64      `json:"total_size"`
+	LastPublishedAt *time.Time `json:"last_published_at"`
+}
+
+// countersOf returns the counters of repo from the repo list (GET /api/repos).
+func countersOf(t *testing.T, s *Server, repo string) repoCounters {
+	t.Helper()
+	var list []struct {
+		Name string `json:"name"`
+		repoCounters
+	}
+	s.MustAPI(t, http.MethodGet, "/api/repos", nil, s.Admin(), &list)
+	for _, r := range list {
+		if r.Name == repo {
+			return r.repoCounters
+		}
+	}
+	t.Fatalf("repo %s is not in the repo list", repo)
+	return repoCounters{}
+}
+
+// TestRepoCounters checks file_count, total_size and last_published_at of the repo list through
+// uploads, a replace, a file delete and a folder delete.
+func TestRepoCounters(t *testing.T) {
+	s := StartServer(t, ServerOpts{})
+	repo := RandName("raw")
+	s.CreateRepo(t, repo, "raw", false, map[string]any{"overwrite": "allow"})
+	w := RandName("writer")
+	s.CreateUser(t, w, "writer-pass-1234", false)
+	s.SetPermission(t, repo, w, "write")
+	want := func(what string, n, size int, published bool) {
+		t.Helper()
+		c := countersOf(t, s, repo)
+		if c.FileCount != int64(n) || c.TotalSize != int64(size) || (c.LastPublishedAt != nil) != published {
+			t.Fatalf("%s: counters %+v, want %d files, %d bytes, last publish set %v", what, c, n, size, published)
+		}
+	}
+	want("a new repo", 0, 0, false)
+
+	ps := s.MintSession(t, w, repo)
+	one, two := []byte("the first file"), []byte("the second, longer file")
+	for p, b := range map[string][]byte{"a/one.bin": one, "a/two.bin": two} {
+		resp, body := rawPut(t, s, "/raw/"+repo+"/"+p, b, ps.Auth())
+		wantStatus(t, resp, body, http.StatusCreated)
+	}
+	want("two uploads", 2, len(one)+len(two), true)
+
+	three := []byte("a much longer replacement of the first file")
+	resp, body := rawPut(t, s, "/raw/"+repo+"/a/one.bin", three, ps.Auth())
+	wantStatus(t, resp, body, http.StatusOK)
+	want("a replace", 2, len(three)+len(two), true)
+
+	mustDelete(t, s, repo, "path", "a/two.bin", ps.Auth(), 1)
+	want("one file deleted", 1, len(three), true)
+	mustDelete(t, s, repo, "prefix", "a", ps.Auth(), 1)
+	want("the folder deleted", 0, 0, true)
+}
+
 // tinyJar returns a jar (zip) with a manifest and one marker entry.
 func tinyJar(t *testing.T, marker string) []byte {
 	t.Helper()

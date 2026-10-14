@@ -240,12 +240,33 @@ var registry = []*Def{
 	{Key: KeySessionTTL, Type: TypeDuration, Default: "168h", Group: GroupSecurity, Label: "Session lifetime",
 		Help: "Absolute lifetime of a UI sign-in."},
 	{Key: KeyTrustedProxies, Type: TypeList, Group: GroupSecurity, Label: "Trusted proxies",
-		Help: "CIDRs whose X-Forwarded-For header is trusted for the client IP, e.g. 10.0.0.0/8.",
+		Help: "Reverse proxies whose X-Forwarded-For header gives the client address: CIDRs or addresses (e.g. 10.89.0.5), \"private\" (loopback, RFC 1918, ULA and link-local) and \"cloudflare\" (Cloudflare's published ranges, refreshed daily). Empty (the default) trusts no proxy and uses the TCP peer address.",
+		normalize: func(v any) any {
+			l := v.([]string)
+			out := make([]string, 0, len(l))
+			for _, s := range l {
+				if k := strings.ToLower(s); k == "private" || k == "cloudflare" {
+					s = k
+				}
+				out = append(out, s)
+			}
+			if len(out) == 0 {
+				return []string(nil)
+			}
+			return out
+		},
 		Validate: func(v any) error {
 			for _, s := range v.([]string) {
-				if _, err := netip.ParsePrefix(s); err != nil {
-					return fmt.Errorf("%q is not a CIDR (e.g. 10.0.0.0/8)", s)
+				if s == "private" || s == "cloudflare" {
+					continue
 				}
+				if _, err := netip.ParsePrefix(s); err == nil {
+					continue
+				}
+				if _, err := netip.ParseAddr(s); err == nil {
+					continue
+				}
+				return fmt.Errorf("%q is not a CIDR, an address, \"private\" or \"cloudflare\"", s)
 			}
 			return nil
 		}},

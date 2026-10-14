@@ -1,6 +1,7 @@
 <!--
   Admin: the settings groups that are not Storage or SSO, rendered generically from
-  GET /api/settings (general, security, publishing, format groups), and the signing key card.
+  GET /api/settings (general, security, publishing, format groups), the signing key card, and
+  after the group that holds trusted_proxies the Reverse proxy and Network lists cards.
 -->
 <script lang="ts">
   import type { PageProps } from "$lib/router.svelte";
@@ -19,6 +20,8 @@
   import CopyField from "$lib/components/CopyField.svelte";
   import SettingsGroupForm from "$lib/components/SettingsGroupForm.svelte";
   import { Skeleton } from "$lib/components/ui/skeleton";
+  import ReverseProxyCard from "./system/ReverseProxyCard.svelte";
+  import NetworkListsCard from "./system/NetworkListsCard.svelte";
 
   let { params, query }: PageProps = $props();
 
@@ -37,7 +40,14 @@
   }
 
   // The signing key has its own routes; its settings group holds only the file options.
-  const editable = (g: SettingsGroup) => g.settings.filter((s) => !(g.name === "signing" && s.read_only));
+  // trusted_proxies has its own card (Reverse proxy).
+  const editable = (g: SettingsGroup) =>
+    g.settings.filter((s) => !(g.name === "signing" && s.read_only) && s.key !== "trusted_proxies");
+  const trustedProxies = (g: SettingsGroup) => g.settings.find((s) => s.key === "trusted_proxies");
+  const baseURL = $derived.by(() => {
+    const v = settings.data?.groups.flatMap((g) => g.settings).find((s) => s.key === "base_url")?.value;
+    return typeof v === "string" ? v : "";
+  });
 
   let confirmGenerate = $state(false);
   let confirmUpload = $state(false);
@@ -60,7 +70,7 @@
   const downloadHref = (pub: string) => "data:text/plain;charset=utf-8," + encodeURIComponent(pub);
 </script>
 
-<PageHeader title="General settings" description="Server-wide settings. A setting forced by an environment variable is read-only here." />
+<PageHeader title="Server settings" description="Settings for the whole server. A setting that an environment variable sets cannot change here." />
 
 {#if settings.loading && !settings.data}
   <LoadingRows rows={6} />
@@ -70,14 +80,24 @@
   <EmptyState title="No settings" description="The server reports no settings in these groups." />
 {:else}
   {#each groups as g (g.name)}
+    {@const proxies = trustedProxies(g)}
     {#if editable(g).length > 0}
       <Section narrow title={g.label}>
         <SettingsGroupForm settings={editable(g)} label={/settings$/i.test(g.label) ? g.label : `${g.label} settings`} onSaved={saved} />
       </Section>
     {/if}
 
+    {#if proxies}
+      <Section narrow title="Reverse proxy" description="How the server finds each visitor's address when a proxy sits in front of it.">
+        <ReverseProxyCard setting={proxies} {baseURL} onSaved={saved} />
+      </Section>
+      <Section title="Network lists" description="Lists of address ranges that the server downloads, for the reverse proxy option and for the network access of repositories.">
+        <NetworkListsCard />
+      </Section>
+    {/if}
+
     {#if g.name === "signing"}
-      <Section narrow title="Signing key" description="Signs the Debian repository indexes. Apt clients trust its public key.">
+      <Section narrow title="Signing key" description="Signs the package lists of Debian repositories, so apt can check them. Apt trusts its public key.">
         {#if key.loading && !key.data}
           <Skeleton class="h-20 w-full rounded-xl" />
         {:else if key.error}
@@ -132,7 +152,7 @@
   onConfirm={upload}
 >
   <div class="flex flex-col gap-2">
-    <Label for="signing-armored">Armored private key</Label>
+    <Label for="signing-armored">Private key (ASCII-armored)</Label>
     <Textarea
       id="signing-armored"
       class="font-mono text-[0.8125rem]"

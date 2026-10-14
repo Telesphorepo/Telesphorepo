@@ -20,6 +20,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/move"
+	"github.com/Telesphorepo/Telesphorepo/internal/netrules"
 	"github.com/Telesphorepo/Telesphorepo/internal/nexus"
 	"github.com/Telesphorepo/Telesphorepo/internal/publish"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
@@ -37,6 +38,7 @@ type API struct {
 	publish  *publish.Service
 	files    *files.Service
 	audit    *audit.Service
+	rules    *netrules.Service
 	sso      Routes
 }
 
@@ -47,10 +49,10 @@ type Routes interface {
 
 // New builds the API. sso (may be nil) mounts GET /api/auth/oidc/{login,callback}. The format
 // endpoints read the format registry (internal/format).
-func New(a *auth.Service, rs *repos.Service, as *assets.Service, st *settings.Service, mv *move.Service, nx *nexus.Service, ps *publish.Service, fs *files.Service, au *audit.Service, sso Routes) *API {
+func New(a *auth.Service, rs *repos.Service, as *assets.Service, st *settings.Service, mv *move.Service, nx *nexus.Service, ps *publish.Service, fs *files.Service, au *audit.Service, nr *netrules.Service, sso Routes) *API {
 	return &API{
 		auth: a, repos: rs, assets: as, cfg: st.Config, settings: st, moves: mv, nexus: nx, publish: ps,
-		files: fs, audit: au, sso: sso,
+		files: fs, audit: au, rules: nr, sso: sso,
 	}
 }
 
@@ -90,6 +92,13 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /api/repos/{name}/tree", a.tree)
 	mux.HandleFunc("DELETE /api/repos/{name}/files", a.deleteFiles)
 	mux.HandleFunc("POST /api/repos/{name}/upload", a.upload)
+	mux.HandleFunc("POST /api/repos/{name}/upload/scan", a.scanUpload)
+	mux.HandleFunc("GET /api/repos/{name}/ip-rules", a.getIPRules)
+	mux.HandleFunc("PUT /api/repos/{name}/ip-rules", a.putIPRules)
+
+	mux.HandleFunc("GET /api/network/presets", a.listPresets)
+	mux.HandleFunc("POST /api/network/presets/{name}/refresh", a.refreshPreset)
+	mux.HandleFunc("GET /api/network/proxy-candidates", a.listProxyCandidates)
 
 	mux.HandleFunc("GET /api/audit", a.listAudit)
 
@@ -421,6 +430,10 @@ type repoJSON struct {
 	Config        json.RawMessage `json:"config"`
 	Permission    string          `json:"permission"`
 	LockedBy      string          `json:"locked_by"` // why uploads answer 409; "" when they do not
+	// The repo counters: every asset row counts. LastPublishedAt is null before the first publish.
+	FileCount       int64      `json:"file_count"`
+	TotalSize       int64      `json:"total_size"`
+	LastPublishedAt *time.Time `json:"last_published_at"`
 }
 
 func toRepoJSON(r *repos.Repo, perm string) repoJSON {
@@ -428,7 +441,15 @@ func toRepoJSON(r *repos.Repo, perm string) repoJSON {
 	if len(cfg) == 0 {
 		cfg = json.RawMessage("{}")
 	}
-	return repoJSON{r.Name, r.Format, r.Description, r.AnonymousRead, cfg, perm, r.LockedBy}
+	out := repoJSON{
+		Name: r.Name, Format: r.Format, Description: r.Description, AnonymousRead: r.AnonymousRead, Config: cfg,
+		Permission: perm, LockedBy: r.LockedBy, FileCount: r.FileCount, TotalSize: r.TotalSize,
+	}
+	if !r.LastPublishedAt.IsZero() {
+		t := r.LastPublishedAt.UTC()
+		out.LastPublishedAt = &t
+	}
+	return out
 }
 
 // record writes an audit event of the caller p for repo (nil: none).
@@ -511,7 +532,7 @@ func (a *API) createRepo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) getRepo(w http.ResponseWriter, r *http.Request) {
-	repo, p, ok := a.auth.RepoGate(w, r, r.PathValue("name"), "", auth.Read, true)
+	repo, p, ok := a.auth.RepoMeta(w, r, r.PathValue("name"))
 	if !ok {
 		return
 	}
@@ -575,6 +596,9 @@ func (a *API) deleteRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n, err := a.files.DeleteRepo(r.Context(), repo)
+	if err == nil {
+		a.rules.Forget(repo.ID) // the rows cascaded with the repo; an id can be used again
+	}
 	if err != nil {
 		fail(w, r, err)
 		return
@@ -723,6 +747,21 @@ func (a *API) search(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		ids, isAll = []int64{repo.ID}, false
+	}
+	// Repos whose read rules refuse the caller's address drop out of the results.
+	if denied := a.rules.DeniedRepos(httpx.ClientIP(r)); len(denied) > 0 {
+		if isAll {
+			all, err := a.repos.List(ctx)
+			if err != nil {
+				fail(w, r, err)
+				return
+			}
+			ids, isAll = make([]int64, 0, len(all)), false
+			for _, repo := range all {
+				ids = append(ids, repo.ID)
+			}
+		}
+		ids = slices.DeleteFunc(ids, func(id int64) bool { return denied[id] })
 	}
 	if isAll {
 		ids = nil

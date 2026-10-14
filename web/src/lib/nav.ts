@@ -1,5 +1,6 @@
 // The Settings sidebar (spec §13): categories in display order, each with its pages. Admin
 // categories are hidden from other users. A page here must also have a route in src/routes.ts.
+// Labels use plain words (see src/README.md); a category with one page shows the category label.
 
 import type { Component } from "svelte";
 import UserIcon from "@lucide/svelte/icons/user";
@@ -20,11 +21,11 @@ export const settingsNav: NavCategory[] = [
     icon: UserIcon,
     admin: false,
     items: [
-      { label: "Profile and password", path: "/settings/profile" },
-      { label: "Second factor", path: "/settings/security" },
+      { label: "Profile", path: "/settings/profile" },
+      { label: "Two-step verification", path: "/settings/security" },
       { label: "Devices", path: "/settings/devices" },
-      { label: "Read tokens", path: "/settings/tokens" },
-      { label: "New publish session", path: "/settings/publish" },
+      { label: "Download tokens", path: "/settings/tokens" },
+      { label: "Publish packages", path: "/settings/publish" },
     ],
   },
   {
@@ -34,12 +35,12 @@ export const settingsNav: NavCategory[] = [
     items: [{ label: "Repositories", path: "/settings/repos" }],
   },
   {
-    label: "Users & access",
+    label: "People and sign-in",
     icon: UsersIcon,
     admin: true,
     items: [
       { label: "Users", path: "/settings/users" },
-      { label: "SSO", path: "/settings/sso" },
+      { label: "Single sign-on", path: "/settings/sso" },
     ],
   },
   {
@@ -47,8 +48,8 @@ export const settingsNav: NavCategory[] = [
     icon: SendIcon,
     admin: true,
     items: [
-      { label: "Trust policies", path: "/settings/trusts" },
-      { label: "Publish log", path: "/settings/publish-log" },
+      { label: "CI publishing rules", path: "/settings/trusts" },
+      { label: "Publish history", path: "/settings/publish-log" },
     ],
   },
   {
@@ -58,22 +59,22 @@ export const settingsNav: NavCategory[] = [
     items: [{ label: "Storage", path: "/settings/storage" }],
   },
   {
-    label: "Migration",
+    label: "Import from Nexus",
     icon: ArrowRightLeftIcon,
     admin: true,
-    items: [{ label: "Nexus sources", path: "/settings/nexus" }],
+    items: [{ label: "Import from Nexus", path: "/settings/nexus" }],
   },
   {
-    label: "System",
+    label: "Server settings",
     icon: SlidersIcon,
     admin: true,
-    items: [{ label: "General settings", path: "/settings/system" }],
+    items: [{ label: "Server settings", path: "/settings/system" }],
   },
   {
-    label: "Audit log",
+    label: "Activity log",
     icon: ScrollTextIcon,
     admin: true,
-    items: [{ label: "Audit log", path: "/settings/audit" }],
+    items: [{ label: "Activity log", path: "/settings/audit" }],
   },
 ];
 

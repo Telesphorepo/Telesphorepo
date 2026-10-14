@@ -85,6 +85,12 @@ export type Repo = {
   permission: RepoPermission;
   /** Why uploads answer 409 (a storage move, a Nexus mirror); "" when they do not. */
   locked_by: string;
+  /** Number of stored files; every file counts (artifacts, metadata, checksums, index files). */
+  file_count: number;
+  /** Total bytes of the stored files. */
+  total_size: number;
+  /** When a file was last published; null before the first publish. */
+  last_published_at: string | null;
 };
 export type NewRepo = { name: string; format: string; description?: string; anonymous_read: boolean; config?: RepoConfig };
 export type RepoPatch = { description?: string; anonymous_read?: boolean; config?: RepoConfig };
@@ -127,6 +133,26 @@ export type Uploaded = { path: string; status: "created" | "replaced" | "unchang
 export type UploadAnswer = { files: Uploaded[] };
 /** Bytes of an upload body sent so far. */
 export type UploadProgress = { sent: number; total: number };
+
+/**
+ * One artifact or package that POST /api/repos/{name}/upload/scan found: kind is "maven",
+ * "debian" or "file"; files are relative paths of the upload; problems say why an upload would
+ * refuse it (empty: it is fine).
+ */
+export type ScanFound = { kind: string; title: string; files: string[]; problems: string[] };
+/** POST /api/repos/{name}/upload/scan: nothing is stored. ignored are the paths no item takes. */
+export type ScanAnswer = { found: ScanFound[]; ignored: string[] };
+
+// --- network rules ---
+
+/** One entry of a repo's IP allow-list: a CIDR ("203.0.113.0/24") or a preset name. */
+export type IPRule = { kind: "cidr" | "preset"; value: string; note: string };
+/** GET/PUT /api/repos/{name}/ip-rules. An empty list leaves its scope open to every address. */
+export type IPRules = { read: IPRule[]; publish: IPRule[] };
+/** A fetched IP range preset (GET /api/network/presets). fetched_at is null before the first good fetch. */
+export type NetworkPreset = { name: string; title: string; count: number; fetched_at: string | null; error: string };
+/** GET /api/network/proxy-candidates: an untrusted peer that sent a forwarded header (header names which). */
+export type ProxyCandidate = { address: string; last_seen: string; count: number; header: string };
 
 export type SearchHit = {
   repo: string;

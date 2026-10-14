@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -188,7 +189,7 @@ func decodeB64URL(s string) ([]byte, error) {
 // DeviceSession mints a session from a device: the nonce must be one the device asked for, the
 // signature must verify with the device key, and the device's user must have write on the repo
 // now. The nonce is used up by the call whatever its outcome.
-func (s *Service) DeviceSession(ctx context.Context, deviceID int64, repoName, nonce, signature string) (*Minted, error) {
+func (s *Service) DeviceSession(ctx context.Context, ip netip.Addr, deviceID int64, repoName, nonce, signature string) (*Minted, error) {
 	now := time.Now().Unix()
 	ch, err := s.wq.TakeChallenge(ctx, dbq.TakeChallengeParams{IDHash: hashBytes([]byte(nonce)), Kind: nonceKind, Now: now})
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && ch.DeviceID.Int64 != deviceID) {
@@ -211,6 +212,9 @@ func (s *Service) DeviceSession(ctx context.Context, deviceID int64, repoName, n
 	if err != nil {
 		return nil, err
 	}
+	if err := s.ipAllowed(repo, ip, auth.ActorOf(p)); err != nil {
+		return nil, err
+	}
 	m, err := s.mint(ctx, s.wq, repo, ViaDevice, d.UserID, d.ID, 0, d.Username)
 	if err != nil {
 		return nil, err
@@ -223,12 +227,15 @@ func (s *Service) DeviceSession(ctx context.Context, deviceID int64, repoName, n
 
 // ManualSession mints a session for a signed-in user after a fresh second-factor check. The
 // second-factor error comes back unchanged (from auth.Service.VerifySecondFactor).
-func (s *Service) ManualSession(ctx context.Context, p *auth.Principal, repoName, totpCode string, passkey json.RawMessage) (*Minted, error) {
+func (s *Service) ManualSession(ctx context.Context, ip netip.Addr, p *auth.Principal, repoName, totpCode string, passkey json.RawMessage) (*Minted, error) {
 	if p.Kind != auth.KindLocal {
 		return nil, errorf(ErrForbidden, "publish sessions need a local account")
 	}
 	repo, err := s.writableRepo(ctx, p, repoName)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.ipAllowed(repo, ip, auth.ActorOf(p)); err != nil {
 		return nil, err
 	}
 	if err := s.auth.VerifySecondFactor(ctx, p.UserID, totpCode, passkey); err != nil {

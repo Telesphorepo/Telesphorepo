@@ -4,7 +4,7 @@
 -->
 <script lang="ts">
   import type { PageProps } from "$lib/router.svelte";
-  import { navigate } from "$lib/router.svelte";
+  import { href, navigate } from "$lib/router.svelte";
   import { auth } from "$lib/auth.svelte";
   import { api, errorMessage, type AuthConfig, type Proof, type SecondFactorMethod } from "$lib/api";
   import { Button } from "$lib/components/ui/button";
@@ -105,7 +105,7 @@
   {:else}
     <div>
       <h1 class="text-2xl font-semibold tracking-tight">Sign in</h1>
-      <p class="mt-1.5 text-sm text-muted-foreground">Sign in to read private repositories, upload files and manage the server.</p>
+      <p class="mt-1.5 text-sm text-muted-foreground">Sign in to see private repositories, publish and upload files, and manage the server.</p>
     </div>
     {#if config?.oidc}
       <Button size="lg" href={api.auth.oidcLoginURL}>Sign in with SSO</Button>
@@ -131,5 +131,9 @@
         Sign in
       </Button>
     </form>
+    <p class="text-sm text-muted-foreground">
+      No account? You can still
+      <a href={href("/")} class="text-link underline-offset-4 hover:underline">see the repositories that anyone can download from</a>.
+    </p>
   {/if}
 </div>

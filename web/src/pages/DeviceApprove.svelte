@@ -185,13 +185,13 @@
             <LoadingRows rows={2} />
           {:else if methods.length === 0}
             <div class="flex flex-col gap-3 text-sm">
-              <p>Approving a device needs a second factor, and your account has none yet.</p>
-              <Button class="self-start" href={href("/settings/security")}>Set up a second factor</Button>
+              <p>Approving a device needs two-step verification, and you have not set it up yet.</p>
+              <Button class="self-start" href={href("/settings/security")}>Set up two-step verification</Button>
               {#if optional}
-                <p class="text-muted-foreground">Dev mode makes the second factor optional.</p>
+                <p class="text-muted-foreground">Dev mode makes two-step verification optional.</p>
                 <Button variant="outline" class="self-start" disabled={devBusy} onclick={approveWithoutFactor}>
                   {#if devBusy}<Spinner />{/if}
-                  Approve without a second factor
+                  Approve without two-step verification
                 </Button>
                 {#if devError}<ErrorState inline error={devError} />{/if}
               {/if}

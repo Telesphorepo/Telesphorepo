@@ -51,6 +51,42 @@ Any setting can also be forced from the environment, e.g. `TR_COOKIE_SECURE=fals
 server is served over plain HTTP. A forced setting is read-only in the UI. Back up the data
 volume.
 
+## Behind a reverse proxy
+
+Run Telesphorepo behind a reverse proxy that ends TLS. [Caddy](https://caddyserver.com) is the
+simplest. This `Caddyfile` gets a certificate and forwards all requests to the server on port 8080:
+
+```
+packages.example.com {
+	reverse_proxy localhost:8080
+}
+```
+
+Caddy sets `X-Forwarded-For`. The server trusts that header only from the proxies in the setting
+`trusted_proxies`. By default the list is empty, so the server uses the address of the TCP peer.
+The server uses the client address for rate limits, the audit log and the IP rules of repos.
+
+To trust your proxy:
+
+1. Start Caddy and open the server through it once.
+2. Open **Settings > Server settings > Reverse proxy**. The page shows "Requests from 10.89.0.5
+   carry forwarded headers. Is this your reverse proxy?" with the proxy's address.
+3. Click **Trust this address**.
+
+Or set the list yourself, for example `TR_TRUSTED_PROXIES=10.89.0.5`.
+
+- **Docker and Podman:** with port publishing, every outside connection can arrive from a private
+  gateway address. Trust the proxy's own address, not `private`, so that a client cannot forge
+  its address.
+- **Cloudflare:** put `cloudflare` in `trusted_proxies`. The server then trusts Cloudflare's
+  published ranges, which it refreshes daily. If Caddy sits between Cloudflare and the server,
+  list Caddy's address and `cloudflare`.
+- Set `base_url` in Settings to the public URL.
+
+An admin can limit who may download from or publish to each repo by address. Open the repo in
+**Settings > Repositories > Network access**. Ranges can be addresses, CIDRs, or the lists
+**GitHub Actions** and **Private networks**. An empty list means no limit.
+
 ## Commands you'll use
 
 ```sh
@@ -71,7 +107,8 @@ A password or an API token (a read token) only reads. To publish, a client needs
 session. See **Publishing**.
 
 Anyone can browse the anonymous-read repos in the web UI. A user with write access can upload
-files and delete files or folders there. Both actions use a publish session that the UI asks for
+files or a whole folder, and delete files or folders there. A folder upload shows a preview of
+the artifacts it found, and stores nothing until the user confirms. Both actions use a publish session that the UI asks for
 with a second-factor code. Admins see every event, with its IP address, in **Settings > Audit
 log**. The server keeps events for 365 days (`audit.retention`).
 

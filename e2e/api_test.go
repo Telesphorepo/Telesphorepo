@@ -225,6 +225,30 @@ func TestAPISessionRule(t *testing.T) {
 		apiWant(t, s, http.MethodGet, "/api/users", nil, frank, http.StatusForbidden)
 		apiWant(t, s, http.MethodPatch, "/api/users/frank", map[string]any{"password": "frank-password-2"}, frank, http.StatusOK)
 	})
+
+	t.Run("a UI session on format routes", func(t *testing.T) {
+		// A signed-in browser downloads from a private repo with its session cookie; writes on
+		// format routes still need a publish session.
+		s.CreateUser(t, "gina", "gina-password-1", false)
+		s.SetPermission(t, repo, "gina", "write")
+		path := "/maven/" + repo + "/com/example/cookie/1.0/cookie-1.0.jar"
+		body := "cookie download " + randHex(8)
+		apiWant(t, s, http.MethodPut, path, body, s.PublishAuth(t, "gina", repo), http.StatusCreated)
+		gina := s.SignIn(t, "gina", "gina-password-1")
+		for _, sess := range []*Session{gina, s.Admin()} {
+			st, b := s.API(t, http.MethodGet, path, nil, sess)
+			if st != http.StatusOK || string(b) != body {
+				t.Fatalf("GET %s with a UI session: status %d, body %q", path, st, b)
+			}
+			apiWant(t, s, http.MethodHead, path, nil, sess, http.StatusOK)
+		}
+		apiWant(t, s, http.MethodGet, path, nil, nil, http.StatusUnauthorized)
+		st, b := s.API(t, http.MethodPut, path, "changed by a cookie", gina)
+		if st != http.StatusUnauthorized || !strings.Contains(string(b), "publishing needs a publish session") {
+			t.Fatalf("PUT %s with a UI session: status %d, want 401 publishing needs a publish session: %s", path, st, b)
+		}
+		apiWant(t, s, http.MethodPut, "/maven/"+repo+"/com/example/cookie/1.1/cookie-1.1.jar", "new", s.Admin(), http.StatusUnauthorized)
+	})
 }
 
 func TestAPIUsers(t *testing.T) {

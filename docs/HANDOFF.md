@@ -19,6 +19,7 @@ Nexus 3 container) and scale (flat from 100k to 1M assets).
 | M3: storage move (FS ↔ S3), Nexus sources with mirroring syncs and cut-over (§12) | done |
 | M4: Svelte UI (Browse and Settings), file tree, upload and delete, repo description, audit log, by-hash cleanup, admin second-factor rule, dev mode (§13) | done |
 | M3.5: publisher credentials: publish sessions as the only way to write, second factor (TOTP, passkeys, recovery codes), device keys, CI trust policies (OIDC), Gradle plugin and Maven extension in the clients repo (§7.6) | done |
+| M5: plain-words UI pass, folder upload with a scan preview, per-repo IP rules (read and publish), client IP behind trusted proxies, IP range presets (§13.1) | done; the follow-ups below are not yet verified |
 
 Design spec (source of truth for what's next):
 `docs/superpowers/specs/2026-10-14-telesphorepo-mvp-design.md`. System as built: `SPEC.md`.
@@ -75,18 +76,51 @@ owner must do these steps first:
 ## Known gaps / small follow-ups
 
 - During a repo delete, an index rebuild that already writes, or an upload that already passed the gate, can leave an orphan blob after the repo row is gone. The row upsert fails and the blob stays. A new repo with the same name overwrites a blob at the same key. A fix needs a repo-level drain mechanism.
-- HTTP Basic with an admin password works on the JSON API with no second factor. The e2e suite depends on it. The new sign-in rule covers UI sign-in only.
-- Downloads from a private repo ask the browser for a username and read token, because the format routes do not accept the UI session cookie.
 - The upload formats (maven, debian, raw) are a list in `web/src/pages/browse/repo/RepoView.svelte`. `/api/formats` does not report which formats take uploads.
-- `tools/task` prints its own dev banner. It lacks the line "2FA not enforced (dev)".
 - Maven `-DdeployAtEnd=true` fails when more than `publish.session_ttl` passes between the first
   and the last module. The cause: `maven-deploy-plugin` fixes the credentials at each module's
   deploy step and uploads at the end. The client README states the limit.
 
+## M5: verified
+
+The M5 verification run passed. The changes below came after it.
+
+### Added after the M5 verification run (not yet verified)
+
+These changes came after the run. Nobody has compiled or run them:
+
+1. **Trusted proxies.** The default `trusted_proxies` is empty. An untrusted peer that sends
+   forwarded headers becomes a proxy candidate (in memory, at most 20).
+   `GET /api/network/proxy-candidates` lists them, and the "Reverse proxy" card has "Trust this
+   address". Tests: `TestClientIP`, `TestIPRules`, `TestPresets`.
+2. **Browser downloads.** Format routes take the UI session cookie for GET and HEAD. Test: the
+   subtest "a UI session on format routes" of `TestAPISessionRule`.
+3. **Repo counters.** `repos.file_count`, `total_size` and `last_published_at`, kept by triggers on
+   `assets` (edited into `0001_init.sql`). `GET /api/repos` returns them and Home shows them.
+   Test: `TestRepoCounters`. `telesphorepo dev` recreates its data dir when a schema file changed; `serve` refuses to start with an old database.
+4. **Folder upload filter.** For Maven and Debian the UI sends only candidate files to the scan
+   and counts the rest in the preview's "left out" section.
+5. **A folder on "Upload files".** The dialog says "That is a folder — use Upload a folder", and
+   its button opens the folder upload with the dropped folder.
+
+Verify in this order: `go build ./...`, `go vet ./...`, `go vet -tags e2e ./e2e/...`,
+`telesphorepo dbcheck`, `bun run build`, the tests named above, then the whole core zone. Click
+through the "Reverse proxy" card (behind Caddy), a download from a private repo, Home, "Upload a
+folder" on a Maven build output, and a folder dropped on "Upload files".
+
+Things to know:
+- Blacksmith has no preset. It publishes no machine-readable egress list.
+- A search page can hold fewer items than `limit` when the read rules drop repos. Paging stays
+  correct.
+- The repo list shows only the caller's own access, because the API returns no other publisher.
+- The "Network access" tab does not offer the `cloudflare` preset. The server accepts it.
+
 ## Suggested next step
 
-1. Verify M3.5 (above), then commit it in logical chunks.
-2. M3 decisions that stand: a cut-over stops on any failed file, so a file that can never import
+1. Verify the changes added after the M5 run (above), then commit in logical chunks.
+2. Next milestone: **M6**, single sign-on for developers (design doc §13.2). The questions to
+   decide first are in that section: provisioning, device enrollment through SSO, and offboarding.
+
+3. M3 decisions that stand: a cut-over stops on any failed file, so a file that can never import
    blocks it until it is fixed in Nexus or here. Sync history is kept (96 small rows per source per
    day at the 15m default).
-3. Next milestone: **M5** (design doc §13.1).

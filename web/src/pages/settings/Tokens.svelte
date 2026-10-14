@@ -1,4 +1,4 @@
-<!-- Account: read tokens. A token downloads packages and cannot publish. The secret shows once. -->
+<!-- Account: download tokens (the API calls them read tokens). A token downloads packages and cannot publish. The secret shows once. -->
 <script lang="ts">
   import { toast } from "svelte-sonner";
   import type { PageProps } from "$lib/router.svelte";
@@ -66,15 +66,15 @@
 </script>
 
 <PageHeader
-  title="Read tokens"
-  description="A read token downloads packages from the repositories you can read. It cannot publish. Publishing needs a publish session."
+  title="Download tokens"
+  description="Give a download token to a build or a script so it can download from the repositories you can see. A token cannot publish. Also called a read token."
 />
 
 {#if sso}
   <EmptyState
     icon={KeyIcon}
     title="Tokens are not available for this account"
-    description="You sign in through single sign-on, so this account has no read tokens. Package clients use a publisher account."
+    description="You sign in through single sign-on, so this account has no download tokens. Builds use a separate account with a password."
   />
 {:else}
   <Section title="Create a token" narrow>
@@ -107,11 +107,11 @@
   <Section title="Your tokens">
     {#if tokens.data}
       {#if tokens.data.length === 0}
-        <EmptyState title="No read tokens yet" description="Create a token above to let a client download packages." />
+        <EmptyState title="No download tokens yet" description="Create a token above, then give it to a build or a script." />
       {:else}
         <div class="w-full overflow-x-auto rounded-2xl border">
           <Table.Root>
-            <Table.Caption class="sr-only">Read tokens</Table.Caption>
+            <Table.Caption class="sr-only">Download tokens</Table.Caption>
             <Table.Header>
               <Table.Row class="hover:bg-transparent">
                 <Table.Head>Name</Table.Head>
@@ -151,7 +151,7 @@
     destructive
     changes={[
       `Stops the token ${target?.name ?? ""} at once`,
-      "Clients that use it can no longer download packages",
+      "Builds and scripts that use it can no longer download",
     ]}
     onConfirm={revoke}
   />

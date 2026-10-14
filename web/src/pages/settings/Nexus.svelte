@@ -1,4 +1,4 @@
-<!-- Admin: Nexus sources, the servers whose repositories this server mirrors. -->
+<!-- Admin: import from Nexus. Nexus sources are the servers whose repositories this server copies and keeps in sync. -->
 <script lang="ts">
   import type { PageProps } from "$lib/router.svelte";
   import { href, navigate } from "$lib/router.svelte";
@@ -52,22 +52,22 @@
     }
   }
 
-  const stateLabel = (s: NexusSource["state"]) => (s === "cut_over" ? "Cut over" : "Mirroring");
+  const stateLabel = (s: NexusSource["state"]) => (s === "cut_over" ? "Switched over" : "Syncing");
 </script>
 
 <PageHeader
-  title="Nexus sources"
-  description="Mirror the repositories of a Nexus server here, then cut over when every client uploads to this server."
+  title="Import from Nexus"
+  description="Copy the repositories of a Nexus server to this server and keep them in sync. When every build uses this server, switch over to it."
 >
   {#snippet actions()}
-    <Button onclick={openDialog}><PlusIcon /> Add a source</Button>
+    <Button onclick={openDialog}><PlusIcon /> Add a Nexus server</Button>
   {/snippet}
 </PageHeader>
 
-<KeysetTable {list} columns={4} caption="Nexus sources">
+<KeysetTable {list} columns={4} caption="Nexus servers">
   {#snippet head()}
     <Table.Head>Name</Table.Head>
-    <Table.Head>Base URL</Table.Head>
+    <Table.Head>Address</Table.Head>
     <Table.Head>State</Table.Head>
     <Table.Head>Last sync</Table.Head>
   {/snippet}
@@ -93,10 +93,10 @@
   {#snippet empty()}
     <EmptyState
       icon={ArrowRightLeftIcon}
-      title="No Nexus source yet"
-      description="Add the address and a read account of a Nexus server to mirror its repositories."
+      title="No Nexus server yet"
+      description="Add the address of a Nexus server and an account that can read it. Then choose the repositories to copy."
     >
-      <Button onclick={openDialog}><PlusIcon /> Add a source</Button>
+      <Button onclick={openDialog}><PlusIcon /> Add a Nexus server</Button>
     </EmptyState>
   {/snippet}
 </KeysetTable>
@@ -104,8 +104,8 @@
 <Dialog.Root bind:open>
   <Dialog.Content class="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-lg">
     <Dialog.Header>
-      <Dialog.Title>Add a Nexus source</Dialog.Title>
-      <Dialog.Description>The server stores the credentials encrypted and uses them to read the repositories.</Dialog.Description>
+      <Dialog.Title>Add a Nexus server</Dialog.Title>
+      <Dialog.Description>Telesphorepo stores the password encrypted and uses it only to read the repositories.</Dialog.Description>
     </Dialog.Header>
     <form class="flex flex-col gap-4" onsubmit={create} autocomplete="off">
       <div class="flex flex-col gap-2">
@@ -113,7 +113,7 @@
         <Input id="nexus-name" class="max-w-sm" required bind:value={name} />
       </div>
       <div class="flex flex-col gap-2">
-        <Label for="nexus-url">Base URL</Label>
+        <Label for="nexus-url">Address</Label>
         <Input id="nexus-url" class="max-w-form font-mono" type="url" required placeholder="https://nexus.example.com" bind:value={baseURL} />
       </div>
       <div class="flex flex-col gap-2">
@@ -129,7 +129,7 @@
         <Button type="button" variant="outline" disabled={busy} onclick={() => (open = false)}>Cancel</Button>
         <Button type="submit" disabled={busy}>
           {#if busy}<Spinner />{/if}
-          Add source
+          Add server
         </Button>
       </Dialog.Footer>
     </form>

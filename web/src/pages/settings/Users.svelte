@@ -76,21 +76,21 @@
           title: `Make ${n} an admin`,
           label: `Make ${n} an admin`,
           destructive: true,
-          changes: [`${n} can manage users, repositories, settings and storage`, `${n} can read and write every repository`],
+          changes: [`${n} can manage users, repositories, settings and storage`, `${n} can download from and publish to every repository`],
         };
       case "remove-admin":
         return {
           title: `Remove admin rights of ${n}`,
           label: `Remove admin rights`,
           destructive: true,
-          changes: [`${n} can no longer manage users, repositories or settings`, `${n} keeps only the access that repository permissions give`],
+          changes: [`${n} can no longer manage users, repositories or settings`, `${n} keeps only the access given on each repository`],
         };
       case "disable":
         return {
           title: `Disable ${n}`,
           label: `Disable ${n}`,
           destructive: true,
-          changes: [`${n} can no longer sign in`, `Open sessions and read tokens of ${n} stop working`],
+          changes: [`${n} can no longer sign in`, `The download tokens and publish passwords of ${n} stop working`],
         };
       case "enable":
         return { title: `Enable ${n}`, label: `Enable ${n}`, destructive: false, changes: [`${n} can sign in again`] };
@@ -134,7 +134,7 @@
   }
 </script>
 
-<PageHeader title="Users" description="Local accounts and the SSO accounts that signed in.">
+<PageHeader title="Users" description="People who sign in with a password, and people who signed in with single sign-on.">
   {#snippet actions()}
     <Button onclick={() => (creating = true)}>
       <PlusIcon />
@@ -166,7 +166,7 @@
       <Table.Cell>
         <div class="flex flex-wrap gap-1.5">
           {#if u.is_admin}<Badge>Admin</Badge>{:else}<Badge variant="outline">User</Badge>{/if}
-          <Badge variant="secondary">{u.kind === "oidc" ? "SSO" : "Local"}</Badge>
+          <Badge variant="secondary">{u.kind === "oidc" ? "Single sign-on" : "Password"}</Badge>
         </div>
       </Table.Cell>
       <Table.Cell>

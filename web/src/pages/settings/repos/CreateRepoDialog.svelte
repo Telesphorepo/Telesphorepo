@@ -1,5 +1,5 @@
 <!--
-  The "New repository" dialog: name, format (from /api/formats), description, anonymous read and
+  The "New repository" dialog: name, format (from /api/formats), description, "Anyone can download" (anonymous_read) and
   the format's config (its editor starts from the format's default config).
 -->
 <script lang="ts">
@@ -74,7 +74,7 @@
   <Dialog.Content class="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-lg">
     <Dialog.Header>
       <Dialog.Title>New repository</Dialog.Title>
-      <Dialog.Description>The name and the format cannot change later.</Dialog.Description>
+      <Dialog.Description>A repository holds one kind of package. You cannot change the name or the format later.</Dialog.Description>
     </Dialog.Header>
 
     {#if formats.loading}
@@ -118,7 +118,7 @@
         </div>
 
         <div class="flex flex-col gap-2">
-          <Label for="{id}-desc">Description</Label>
+          <Label for="{id}-desc">Description (optional)</Label>
           <Textarea id="{id}-desc" rows={2} maxlength={500} bind:value={description} />
         </div>
 
@@ -126,9 +126,14 @@
           <ConfigEditor format={format.name} value={format.default_config} onChange={(v) => (config = v)} />
         {/key}
 
-        <div class="flex items-center gap-3">
-          <Switch id="{id}-anon" bind:checked={anonymous} />
-          <Label for="{id}-anon">Anyone can read without signing in</Label>
+        <div class="flex items-start gap-3">
+          <Switch id="{id}-anon" class="mt-0.5" bind:checked={anonymous} aria-describedby="{id}-anon-help" />
+          <div class="flex flex-col gap-1">
+            <Label for="{id}-anon">Anyone can download</Label>
+            <p id="{id}-anon-help" class="text-sm text-muted-foreground">
+              People and builds can download without signing in. Publishing still needs access. Off: only people you give access can download.
+            </p>
+          </div>
         </div>
 
         {#if error}<ErrorState inline {error} />{/if}

@@ -1,4 +1,4 @@
-<!-- Repository settings, Config tab: the format's config (custom editor, else JSON). -->
+<!-- Repository settings, "Format options" tab: the format's config (custom editor, else JSON). -->
 <script lang="ts">
   import { toast } from "svelte-sonner";
   import { api, type Repo, type RepoConfig } from "$lib/api";
@@ -24,7 +24,7 @@
 
   const list = (v: unknown) => (Array.isArray(v) ? (v as string[]) : []);
   const changes = $derived.by(() => {
-    const out = [`Saves the config of ${repo.name}`, ...changedKeys.map((k) => `Changes "${k}"`)];
+    const out = [`Saves the format options of ${repo.name}`, ...changedKeys.map((k) => `Changes the option "${k}"`)];
     if (repo.format === "debian" && config && changedKeys.includes("architectures")) {
       const had = list(current.architectures);
       const has = list(config.architectures);
@@ -37,7 +37,7 @@
   });
 </script>
 
-<Section narrow title="Config" description="Settings that belong to the {repo.format} format.">
+<Section narrow title="Format options" description="Options that only {repo.format} repositories have.">
   {#key repo.format + "/" + repo.name}
     <ConfigEditor
       format={repo.format}
@@ -49,19 +49,19 @@
     />
   {/key}
   <div class="mt-4 flex gap-2">
-    <Button disabled={!dirty} onclick={() => (confirming = true)}>Save config</Button>
+    <Button disabled={!dirty} onclick={() => (confirming = true)}>Save options</Button>
   </div>
 </Section>
 
 <ConfirmDialog
   bind:open={confirming}
-  title="Save the config"
-  confirmLabel="Save config"
+  title="Save the format options"
+  confirmLabel="Save options"
   {changes}
   onConfirm={async () => {
     if (!config) return;
     await api.repos.update(repo.name, { config });
-    toast.success("Saved the config of " + repo.name);
+    toast.success("Saved the format options of " + repo.name);
     touched = false;
     onChanged();
   }}

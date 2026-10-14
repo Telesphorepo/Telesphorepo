@@ -18,6 +18,10 @@
 	--primary-foreground: oklch(0.29 0.055 70);
 	/* Readable link text on the page background (yellow alone is too light on white). */
 	--link: oklch(0.5 0.11 72);
+	/* Hover and selected states fill the whole element (never a border accent). */
+	--hover: oklch(0.955 0.004 197);
+	--selected: oklch(0.94 0.06 88);
+	--selected-foreground: oklch(0.29 0.055 70);
 	--secondary: oklch(0.967 0.001 286.375);
 	--secondary-foreground: oklch(0.21 0.006 285.885);
 	--muted: oklch(0.963 0.002 197.1);
@@ -54,6 +58,9 @@
 	--primary: oklch(0.801 0.138 83);
 	--primary-foreground: oklch(0.29 0.055 70);
 	--link: oklch(0.83 0.12 83);
+	--hover: oklch(0.24 0.008 223.9);
+	--selected: oklch(0.33 0.055 80);
+	--selected-foreground: oklch(0.96 0.03 88);
 	--secondary: oklch(0.274 0.006 286.033);
 	--secondary-foreground: oklch(0.985 0 0);
 	--muted: oklch(0.275 0.011 216.9);
@@ -83,6 +90,9 @@
 	--font-sans: 'Instrument Sans Variable', ui-sans-serif, system-ui, sans-serif;
 	--font-mono: 'JetBrains Mono Variable', ui-monospace, monospace;
 	--color-link: var(--link);
+	--color-hover: var(--hover);
+	--color-selected: var(--selected);
+	--color-selected-foreground: var(--selected-foreground);
 	--color-brand: oklch(0.801 0.138 83);
 	/* The one width scale (see src/README.md). */
 	--container-page: 72rem;

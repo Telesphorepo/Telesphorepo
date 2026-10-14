@@ -55,7 +55,12 @@ CREATE TABLE repos (
   config         TEXT NOT NULL DEFAULT '{}',         -- JSON, format-specific
   created_at     INTEGER NOT NULL,
   locked_by      TEXT,                               -- set: uploads answer 409 with this text
-  description    TEXT NOT NULL DEFAULT ''
+  description    TEXT NOT NULL DEFAULT '',
+  -- Kept by the assets triggers below, in the transaction of each asset write: every asset row
+  -- counts (artifacts, metadata, checksums and index files).
+  file_count        INTEGER NOT NULL DEFAULT 0,
+  total_size        INTEGER NOT NULL DEFAULT 0,
+  last_published_at INTEGER NOT NULL DEFAULT 0       -- newest updated_at of a non-index asset; 0 for never
 ) STRICT;
 CREATE INDEX repos_anonymous ON repos(id) WHERE anonymous_read = 1;
 
@@ -92,7 +97,23 @@ CREATE TRIGGER assets_ad AFTER DELETE ON assets WHEN old.kind <> 'index' BEGIN
   INSERT INTO assets_fts(assets_fts, rowid, path) VALUES ('delete', old.id, old.path);
 END;
 -- path and kind never change on UPDATE (upserts only touch size/sha256/content_type/updated_at),
--- so no update trigger is needed.
+-- so no FTS update trigger is needed.
+
+-- The repo counters (repos.file_count, total_size, last_published_at) follow every asset insert,
+-- replace and delete in the same transaction. A delete never lowers last_published_at.
+CREATE TRIGGER assets_count_ai AFTER INSERT ON assets BEGIN
+  UPDATE repos SET file_count = file_count + 1, total_size = total_size + new.size,
+    last_published_at = CASE WHEN new.kind <> 'index' THEN max(last_published_at, new.updated_at) ELSE last_published_at END
+  WHERE id = new.repo_id;
+END;
+CREATE TRIGGER assets_count_au AFTER UPDATE OF size, updated_at ON assets BEGIN
+  UPDATE repos SET total_size = total_size + new.size - old.size,
+    last_published_at = CASE WHEN new.kind <> 'index' THEN max(last_published_at, new.updated_at) ELSE last_published_at END
+  WHERE id = new.repo_id;
+END;
+CREATE TRIGGER assets_count_ad AFTER DELETE ON assets BEGIN
+  UPDATE repos SET file_count = file_count - 1, total_size = total_size - old.size WHERE id = old.repo_id;
+END;
 
 -- In-app settings (spec §3). Secret values are base64(nonce || AES-256-GCM ciphertext).
 CREATE TABLE settings (
@@ -381,3 +402,25 @@ CREATE INDEX audit_events_at ON audit_events(at);
 CREATE INDEX audit_events_repo ON audit_events(repo_id, id);
 CREATE INDEX audit_events_action ON audit_events(action, id);
 CREATE INDEX audit_events_actor ON audit_events(actor_user_id);
+
+-- Named IP range lists that the server fetches (internal/netrules): cloudflare and
+-- github-actions. ranges is a JSON array of CIDRs, the last list that fetched and parsed.
+-- fetched_at is the unix time of that fetch (0: never); error is the last refresh error
+-- ('' after a good refresh). Request paths read the in-memory snapshot, never this table.
+CREATE TABLE preset_ranges (
+  name       TEXT PRIMARY KEY,
+  ranges     TEXT NOT NULL DEFAULT '[]',
+  fetched_at INTEGER NOT NULL DEFAULT 0,
+  error      TEXT NOT NULL DEFAULT ''
+) STRICT, WITHOUT ROWID;
+
+-- Per-repo IP allow-lists (internal/netrules). A scope without rows is unrestricted. kind
+-- 'cidr' holds a CIDR, kind 'preset' a preset name. Request paths read the in-memory copy.
+CREATE TABLE repo_ip_rules (
+  repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+  scope   TEXT NOT NULL CHECK (scope IN ('read', 'publish')),
+  kind    TEXT NOT NULL CHECK (kind IN ('cidr', 'preset')),
+  value   TEXT NOT NULL,
+  note    TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (repo_id, scope, kind, value)
+) STRICT, WITHOUT ROWID;

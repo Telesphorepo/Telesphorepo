@@ -52,7 +52,8 @@ func (q *Queries) DeleteRepo(ctx context.Context, id int64) (int64, error) {
 }
 
 const getRepoByID = `-- name: GetRepoByID :one
-SELECT id, name, format, anonymous_read, config, created_at, locked_by, description FROM repos WHERE id = ?
+SELECT id, name, format, anonymous_read, config, created_at, locked_by, description,
+  file_count, total_size, last_published_at FROM repos WHERE id = ?
 `
 
 func (q *Queries) GetRepoByID(ctx context.Context, id int64) (Repo, error) {
@@ -67,13 +68,17 @@ func (q *Queries) GetRepoByID(ctx context.Context, id int64) (Repo, error) {
 		&i.CreatedAt,
 		&i.LockedBy,
 		&i.Description,
+		&i.FileCount,
+		&i.TotalSize,
+		&i.LastPublishedAt,
 	)
 	return i, err
 }
 
 const getRepoByName = `-- name: GetRepoByName :one
 
-SELECT id, name, format, anonymous_read, config, created_at, locked_by, description FROM repos WHERE name = ?
+SELECT id, name, format, anonymous_read, config, created_at, locked_by, description,
+  file_count, total_size, last_published_at FROM repos WHERE name = ?
 `
 
 // Repository records (internal/repos).
@@ -90,12 +95,16 @@ func (q *Queries) GetRepoByName(ctx context.Context, name string) (Repo, error) 
 		&i.CreatedAt,
 		&i.LockedBy,
 		&i.Description,
+		&i.FileCount,
+		&i.TotalSize,
+		&i.LastPublishedAt,
 	)
 	return i, err
 }
 
 const listRepos = `-- name: ListRepos :many
-SELECT id, name, format, anonymous_read, config, created_at, locked_by, description FROM repos
+SELECT id, name, format, anonymous_read, config, created_at, locked_by, description,
+  file_count, total_size, last_published_at FROM repos
 WHERE name > ?1 ORDER BY name LIMIT ?2
 `
 
@@ -123,6 +132,9 @@ func (q *Queries) ListRepos(ctx context.Context, arg ListReposParams) ([]Repo, e
 			&i.CreatedAt,
 			&i.LockedBy,
 			&i.Description,
+			&i.FileCount,
+			&i.TotalSize,
+			&i.LastPublishedAt,
 		); err != nil {
 			return nil, err
 		}

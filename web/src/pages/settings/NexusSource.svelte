@@ -114,7 +114,7 @@
         .filter((r) => picks[r.name]?.on)
         .map((r) => ({ source_repo: r.name, target: picks[r.name].target.trim(), create: !picks[r.name].locked }));
       source.data = await api.nexus.setRepos(id, maps);
-      toast.success("Saved the repository mapping");
+      toast.success("Saved the repositories to copy");
     } catch (err) {
       mapError = errorMessage(err);
     } finally {
@@ -144,14 +144,14 @@
   async function cutOver() {
     const s = await api.nexus.cutOver(id);
     shown = s.id;
-    toast.success("Started the cut-over");
+    toast.success("Started the switch-over");
     reloadAll();
   }
 
   let confirmDelete = $state(false);
   async function remove() {
     await api.nexus.delete(id);
-    toast.success(`Deleted ${source.data?.name ?? "the source"}`);
+    toast.success(`Deleted ${source.data?.name ?? "the Nexus server"}`);
     navigate("/settings/nexus");
   }
 
@@ -169,7 +169,7 @@
     {#snippet breadcrumbs()}
       <Breadcrumb.Root>
         <Breadcrumb.List>
-          <Breadcrumb.Item><Breadcrumb.Link href={href("/settings/nexus")}>Nexus sources</Breadcrumb.Link></Breadcrumb.Item>
+          <Breadcrumb.Item><Breadcrumb.Link href={href("/settings/nexus")}>Import from Nexus</Breadcrumb.Link></Breadcrumb.Item>
           <Breadcrumb.Separator />
           <Breadcrumb.Item><Breadcrumb.Page>{d.name}</Breadcrumb.Page></Breadcrumb.Item>
         </Breadcrumb.List>
@@ -181,11 +181,11 @@
           {#if syncBusy}<Spinner />{/if}
           Sync now
         </Button>
-        <Button disabled={running} onclick={() => (confirmCut = true)}>Cut over</Button>
+        <Button disabled={running} onclick={() => (confirmCut = true)}>Switch to this server</Button>
       {/if}
     {/snippet}
     <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
-      <Badge variant={mirroring ? "default" : "secondary"}>{mirroring ? "Mirroring" : "Cut over"}</Badge>
+      <Badge variant={mirroring ? "default" : "secondary"}>{mirroring ? "Syncing" : "Switched over"}</Badge>
       <span class="font-mono text-[0.8125rem] break-all">{d.base_url}</span>
       <span class="text-muted-foreground">Last sync: <RelativeTime at={d.last_sync?.finished_at ?? d.last_sync?.started_at} empty="none yet" /></span>
     </div>
@@ -197,12 +197,12 @@
   {#if !mirroring}
     <Alert.Root class="mb-10">
       <TriangleAlertIcon />
-      <Alert.Title>Uploads go to this server</Alert.Title>
+      <Alert.Title>Switched over: uploads go to this server</Alert.Title>
       <Alert.Description>
-        <p>The server no longer syncs from Nexus and it deleted the stored Nexus credentials.</p>
+        <p>Telesphorepo no longer syncs from Nexus, and it deleted the saved Nexus password.</p>
         {#if d.cutover_failed > 0}
           <p class="mt-2 text-destructive">
-            {formatCount(d.cutover_failed)} files failed to import in the cut-over sync and are not on this server.
+            {formatCount(d.cutover_failed)} files failed to import in the final sync and are not on this server.
             <button type="button" class="underline underline-offset-4" onclick={() => (shown = d.cutover_sync_id)}>Show the failed files</button>
           </p>
         {/if}
@@ -214,7 +214,7 @@
     <Section narrow title="Connection" description="Change the address, or enter a new username and password. The saved password is never shown.">
       <form class="flex flex-col gap-4" onsubmit={saveConnection} autocomplete="off">
         <div class="flex flex-col gap-2">
-          <Label for="src-url">Base URL</Label>
+          <Label for="src-url">Address</Label>
           <Input id="src-url" class="font-mono" type="url" required bind:value={baseURL} />
         </div>
         <div class="flex flex-col gap-2">
@@ -236,9 +236,9 @@
     </Section>
   {/if}
 
-  <Section title="Nexus repositories" description="Choose the repositories to mirror and the name each gets here. A new target is read-only for uploads while it mirrors Nexus.">
+  <Section title="Nexus repositories" description="Choose the repositories to copy and the name each one gets here. Uploads to a copy are paused until you switch over.">
     {#if d.nexus_error}
-      <div class="mb-4"><ErrorState error={d.nexus_error} title="The list shows only the mapped repositories" onRetry={source.reload} /></div>
+      <div class="mb-4"><ErrorState error={d.nexus_error} title="The list shows only the repositories you chose before" onRetry={source.reload} /></div>
     {/if}
     {#if d.repos.length === 0}
       <EmptyState title="Nexus lists no repositories" description="Check the account's permissions on the Nexus server." />
@@ -246,13 +246,13 @@
       <form onsubmit={saveMapping} autocomplete="off">
         <div class="w-full overflow-x-auto rounded-2xl border">
           <Table.Root>
-            <Table.Caption class="sr-only">Nexus repositories and their targets</Table.Caption>
+            <Table.Caption class="sr-only">Nexus repositories and their names here</Table.Caption>
             <Table.Header>
               <Table.Row class="hover:bg-transparent">
-                <Table.Head class="w-10"><span class="sr-only">Mirror</span></Table.Head>
+                <Table.Head class="w-10"><span class="sr-only">Copy</span></Table.Head>
                 <Table.Head>Nexus repository</Table.Head>
                 <Table.Head>Type</Table.Head>
-                <Table.Head>Target name</Table.Head>
+                <Table.Head>Name on this server</Table.Head>
               </Table.Row>
             </Table.Header>
             <Table.Body>
@@ -263,7 +263,7 @@
                   <Table.Cell>
                     {#if p}
                       <Checkbox
-                        aria-label="Mirror {r.name}"
+                        aria-label="Copy {r.name}"
                         disabled={!editable}
                         checked={p.on}
                         onCheckedChange={(v) => (picks[r.name].on = v === true)}
@@ -279,7 +279,7 @@
                     {#if p}
                       <Input
                         class="max-w-64 font-mono"
-                        aria-label="Target name for {r.name}"
+                        aria-label="Name on this server for {r.name}"
                         disabled={!editable || !p.on}
                         required={p.on}
                         bind:value={picks[r.name].target}
@@ -296,7 +296,7 @@
           <div class="mt-4">
             <Button type="submit" disabled={mapBusy || !mappingDirty}>
               {#if mapBusy}<Spinner />{/if}
-              Save mapping
+              Save selection
             </Button>
           </div>
         {/if}
@@ -319,7 +319,7 @@
           <Table.Cell><RelativeTime at={s.started_at} /></Table.Cell>
           <Table.Cell><RelativeTime at={s.finished_at} empty="" /></Table.Cell>
           <Table.Cell class="whitespace-normal">
-            <span class="capitalize">{s.state}</span>{s.cutover ? " (cut-over)" : ""}
+            <span class="capitalize">{s.state}</span>{s.cutover ? " (final sync)" : ""}
             {#if s.error}<div class="text-sm break-words text-destructive">{s.error}</div>{/if}
           </Table.Cell>
           <Table.Cell class="text-right tabular-nums">{formatCount(s.imported)}</Table.Cell>
@@ -330,7 +330,7 @@
         </Table.Row>
       {/snippet}
       {#snippet empty()}
-        <EmptyState title="No sync yet" description={mirroring ? "Map at least one repository, then sync." : "This source never synced."}>
+        <EmptyState title="No sync yet" description={mirroring ? "Choose at least one repository above, then sync." : "This Nexus server never synced."}>
           {#if mirroring}
             <Button variant="outline" disabled={syncBusy} onclick={syncNow}>Sync now</Button>
           {/if}
@@ -347,35 +347,35 @@
     {/if}
   </Section>
 
-  <Section narrow tone="danger" title="Delete source" description="Mirrored repositories and their files stay on this server.">
-    <Button variant="destructive" disabled={running} onclick={() => (confirmDelete = true)}>Delete source</Button>
+  <Section narrow tone="danger" title="Delete this Nexus server" description="The copied repositories and their files stay on this server.">
+    <Button variant="destructive" disabled={running} onclick={() => (confirmDelete = true)}>Delete Nexus server</Button>
   </Section>
 
   <ConfirmDialog
     bind:open={confirmCut}
-    title="Cut over to this server"
-    confirmLabel="Run the final sync and cut over"
+    title="Switch to this server"
+    confirmLabel="Run the final sync and switch"
     destructive
     changes={[
-      "Runs a final sync of every mapped repository",
-      "Opens the mirrored repositories for uploads on this server",
+      "Runs a final sync of every chosen repository",
+      "Allows uploads to the copied repositories on this server",
       "Stops syncing from Nexus",
-      "Deletes the stored Nexus credentials",
+      "Deletes the saved Nexus password",
       "Does not delete files that were deleted in Nexus",
       ...(lastFailed > 0 ? [`Leaves ${formatCount(lastFailed)} files that failed in the last sync off this server`] : []),
     ]}
-    description="Make sure every client uploads to this server before you continue."
+    description="Make sure every build uses this server before you continue."
     onConfirm={cutOver}
   />
 
   <ConfirmDialog
     bind:open={confirmDelete}
-    title="Delete Nexus source"
+    title="Delete Nexus server"
     confirmLabel="Delete {d.name}"
     destructive
     changes={[
-      "Deletes the source, its sync history and its stored credentials",
-      "Keeps the mirrored repositories and their files",
+      "Deletes the Nexus server entry, its sync history and its saved password",
+      "Keeps the copied repositories and their files",
     ]}
     onConfirm={remove}
   />

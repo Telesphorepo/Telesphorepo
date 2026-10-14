@@ -212,6 +212,13 @@ func SessionRequired(w http.ResponseWriter) {
 //     /api/auth/logout and /api/security (403 {"error":"second_factor_required"} elsewhere),
 //     except in dev mode.
 func (s *Service) Identify(w http.ResponseWriter, r *http.Request, allowSession bool) (*Principal, bool) {
+	return s.identify(w, r, allowSession, allowSession)
+}
+
+// identify is Identify with the JSON API rules (api) and the session cookie (cookie) chosen
+// apart. A format route reads with the cookie (cookie) but keeps the format-route rules for the
+// other credentials (api false).
+func (s *Service) identify(w http.ResponseWriter, r *http.Request, api, cookie bool) (*Principal, bool) {
 	if h := r.Header.Get("Authorization"); h != "" {
 		user, pass, ok := r.BasicAuth()
 		if !ok && len(h) > 7 && strings.EqualFold(h[:7], "bearer ") && strings.HasPrefix(strings.TrimSpace(h[7:]), publishTokenPrefix) {
@@ -232,18 +239,18 @@ func (s *Service) Identify(w http.ResponseWriter, r *http.Request, allowSession 
 				writeAuthError(w, err)
 				return nil, false
 			}
-			if allowSession && p.Publish != nil && !publishTokenRoute(r) {
+			if api && p.Publish != nil && !publishTokenRoute(r) {
 				httpx.Error(w, http.StatusForbidden, "a publish session token only publishes")
 				return nil, false
 			}
-			if allowSession && p.Publish == nil && !safeMethod(r.Method) && !repoWriteRoute(r) {
+			if api && p.Publish == nil && !safeMethod(r.Method) && !repoWriteRoute(r) {
 				SessionRequired(w)
 				return nil, false
 			}
 			return p, true
 		}
 	}
-	if allowSession {
+	if cookie {
 		if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" {
 			p, err := s.sessionPrincipal(r.Context(), c.Value)
 			if err != nil {
@@ -284,8 +291,8 @@ func publishTokenRoute(r *http.Request) bool {
 	return strings.HasPrefix(r.URL.Path, "/api/publish/") || repoWriteRoute(r)
 }
 
-// repoWriteRoute reports whether r is POST /api/repos/{name}/upload or
-// DELETE /api/repos/{name}/files.
+// repoWriteRoute reports whether r is POST /api/repos/{name}/upload, POST
+// /api/repos/{name}/upload/scan or DELETE /api/repos/{name}/files.
 func repoWriteRoute(r *http.Request) bool {
 	rest, ok := strings.CutPrefix(r.URL.Path, "/api/repos/")
 	if !ok {
@@ -295,5 +302,5 @@ func repoWriteRoute(r *http.Request) bool {
 	if !ok || name == "" {
 		return false
 	}
-	return (r.Method == http.MethodPost && tail == "upload") || (r.Method == http.MethodDelete && tail == "files")
+	return (r.Method == http.MethodPost && (tail == "upload" || tail == "upload/scan")) || (r.Method == http.MethodDelete && tail == "files")
 }

@@ -21,7 +21,7 @@
   const sections = [
     {
       title: "Identity provider",
-      description: "Set the issuer to turn on \"Sign in with SSO\". Saving checks the issuer's discovery document.",
+      description: "Enter the issuer address to show \"Sign in with SSO\" on the sign-in page. Telesphorepo checks the address when you save.",
       keys: ["oidc.issuer", "oidc.client_id", "oidc.client_secret", "oidc.redirect_url", "oidc.scopes"],
     },
     {
@@ -64,7 +64,7 @@
   }
 </script>
 
-<PageHeader title="Single sign-on" description="Let administrators sign in with your OpenID Connect identity provider." />
+<PageHeader title="Single sign-on" description="Let administrators sign in with your company account (an OpenID Connect identity provider)." />
 
 {#if settings.loading && !settings.data}
   <LoadingRows rows={6} />

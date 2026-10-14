@@ -40,6 +40,12 @@ type Repo struct {
 	// the repo mirrors. The write gate (auth.RepoGate) answers uploads with 409 and this text.
 	// In-process writers such as importers do not pass the gate. "" means not locked.
 	LockedBy string
+	// FileCount and TotalSize count every asset row of the repo (artifacts, metadata, checksums
+	// and index files). LastPublishedAt is the newest write of a non-index asset; zero for
+	// never. Triggers on the assets table keep them (internal/db/migrations).
+	FileCount       int64
+	TotalSize       int64
+	LastPublishedAt time.Time
 }
 
 // Validator validates the config of a repo of the given format and returns its normalized
@@ -62,7 +68,7 @@ func fromRow(r dbq.Repo, err error) (*Repo, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Repo{
+	out := &Repo{
 		ID:            r.ID,
 		Name:          r.Name,
 		Format:        r.Format,
@@ -71,7 +77,13 @@ func fromRow(r dbq.Repo, err error) (*Repo, error) {
 		CreatedAt:     time.Unix(r.CreatedAt, 0),
 		LockedBy:      r.LockedBy.String,
 		Description:   r.Description,
-	}, nil
+		FileCount:     r.FileCount,
+		TotalSize:     r.TotalSize,
+	}
+	if r.LastPublishedAt > 0 {
+		out.LastPublishedAt = time.Unix(r.LastPublishedAt, 0)
+	}
+	return out, nil
 }
 
 // ByName is an indexed point lookup (used on every request).

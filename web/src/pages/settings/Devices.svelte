@@ -42,7 +42,7 @@
 
 <PageHeader
   title="Devices"
-  description={"A device is a machine that enrolled with the Gradle plugin or the Maven extension. It publishes with its own key and needs no password." +
+  description={"A device is a computer where someone signed in with the Gradle plugin or the Maven extension. It publishes with its own key and needs no password." +
     (admin ? " As an administrator you see the devices of all users." : "")}
 >
   {#snippet actions()}
@@ -55,8 +55,8 @@
     <Table.Head>Name</Table.Head>
     {#if admin}<Table.Head>User</Table.Head>{/if}
     <Table.Head>Client</Table.Head>
-    <Table.Head>Enrolled</Table.Head>
-    <Table.Head>Valid until</Table.Head>
+    <Table.Head>Added</Table.Head>
+    <Table.Head>Works until</Table.Head>
     <Table.Head>Last used</Table.Head>
     <Table.Head>State</Table.Head>
     <Table.Head class="w-0"><span class="sr-only">Actions</span></Table.Head>
@@ -98,8 +98,8 @@
   destructive
   changes={[
     `Stops the device ${target?.name ?? ""} at once`,
-    "Ends its open publish sessions",
-    "The machine must enroll again to publish",
+    "Revokes its temporary publish passwords",
+    "Someone must sign in on that computer again to publish from it",
   ]}
   onConfirm={revoke}
 />

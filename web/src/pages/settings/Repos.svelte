@@ -12,10 +12,9 @@
   import ErrorState from "$lib/components/ErrorState.svelte";
   import LoadingRows from "$lib/components/LoadingRows.svelte";
   import FormatBadge from "$lib/components/FormatBadge.svelte";
+  import AccessBadge from "$lib/components/AccessBadge.svelte";
   import PlusIcon from "@lucide/svelte/icons/plus";
   import PackageIcon from "@lucide/svelte/icons/package";
-  import GlobeIcon from "@lucide/svelte/icons/globe";
-  import LockIcon from "@lucide/svelte/icons/lock";
   import PauseIcon from "@lucide/svelte/icons/circle-pause";
   import CreateRepoDialog from "./repos/CreateRepoDialog.svelte";
 
@@ -28,7 +27,7 @@
   let creating = $state(false);
 </script>
 
-<PageHeader title="Repositories" description="Create repositories, set who can read and write, and edit their config.">
+<PageHeader title="Repositories" description="Create repositories and choose who can download from and publish to each one. Open a repository to change it.">
   {#snippet actions()}
     <Button onclick={() => (creating = true)}>
       <PlusIcon />
@@ -40,7 +39,7 @@
 {#if repos.error && !repos.data}
   <ErrorState error={repos.error} onRetry={repos.reload} />
 {:else if !repos.loading && repos.data?.length === 0}
-  <EmptyState title="No repositories yet" description="A repository holds the files of one format, for example Maven artifacts." icon={PackageIcon}>
+  <EmptyState title="Create your first repository" description="A repository holds one kind of package: Maven and Gradle libraries, Debian packages, or plain files." icon={PackageIcon}>
     <Button onclick={() => (creating = true)}>
       <PlusIcon />
       Create a repository
@@ -55,7 +54,7 @@
           <Table.Head>Name</Table.Head>
           <Table.Head>Format</Table.Head>
           <Table.Head class="w-full">Description</Table.Head>
-          <Table.Head>Access</Table.Head>
+          <Table.Head>Who can download</Table.Head>
         </Table.Row>
       </Table.Header>
       <Table.Body>
@@ -77,11 +76,7 @@
               </Table.Cell>
               <Table.Cell>
                 <div class="flex flex-wrap gap-1.5">
-                  {#if r.anonymous_read}
-                    <Badge variant="secondary" title="Anyone can read this repository without signing in"><GlobeIcon />Public</Badge>
-                  {:else}
-                    <Badge variant="outline" title="Only users with access can read this repository"><LockIcon />Private</Badge>
-                  {/if}
+                  <AccessBadge anyone={r.anonymous_read} />
                   {#if r.locked_by}<Badge variant="outline" title={r.locked_by}><PauseIcon />Uploads paused</Badge>{/if}
                 </div>
               </Table.Cell>

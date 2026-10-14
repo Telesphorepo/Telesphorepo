@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strconv"
@@ -19,6 +20,7 @@ import (
 	gooidc "github.com/coreos/go-oidc/v3/oidc"
 	jose "github.com/go-jose/go-jose/v4"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
@@ -493,7 +495,7 @@ func claimsMatch(policy map[string][]string, claims map[string]any) bool {
 // OIDCSession exchanges a CI identity token for a publish session for repo. The token must
 // verify against an enabled policy of its issuer that lists the repo (signature, issuer,
 // audience, exp, iat at most 10 min old, claims), and must not have been used before.
-func (s *Service) OIDCSession(ctx context.Context, raw, repoName string) (*Minted, error) {
+func (s *Service) OIDCSession(ctx context.Context, ip netip.Addr, raw, repoName string) (*Minted, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" || len(raw) > maxCITokenBytes {
 		return nil, errorf(ErrInvalid, "token must be a CI identity token (JWT)")
@@ -559,6 +561,9 @@ func (s *Service) OIDCSession(ctx context.Context, raw, repoName string) (*Minte
 	}
 	if repo.LockedBy != "" {
 		return nil, errorf(ErrConflict, repo.LockedBy)
+	}
+	if err := s.ipAllowed(repo, ip, audit.Actor{Name: idt.Subject}); err != nil {
+		return nil, err
 	}
 
 	var seen [32]byte

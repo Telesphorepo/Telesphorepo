@@ -1070,11 +1070,19 @@ use, easy to understand, no jargon.
   the database; a failed refresh keeps the last good list. A refused request gets 403 and an audit
   event. Admin UI sessions are not exempt from read rules on format routes.
 - **Client IP**: the server uses `X-Forwarded-For` only when the TCP peer is a trusted proxy. The
-  `trusted_proxies` setting accepts CIDRs and the presets `private` (loopback + RFC 1918 + ULA,
-  the default, which covers Caddy on the same host or Docker network) and `cloudflare` (Cloudflare's
-  published ranges, refreshed daily). The chain is read right to left, skipping trusted hops; the
-  first untrusted address is the client. Docs recommend Caddy as the reverse proxy and ship a
-  Caddyfile.
+  `trusted_proxies` setting accepts CIDRs, addresses and the presets `private` (loopback + RFC
+  1918 + ULA) and `cloudflare` (Cloudflare's published ranges, refreshed daily). The default is
+  empty: nothing is trusted. Behind Docker's userland proxy or rootless Podman every outside
+  request arrives from a private gateway address, so trusting `private` would let anyone who
+  reaches the port directly forge `X-Forwarded-For` and get around the IP rules. The chain is
+  read right to left, skipping trusted hops; the first untrusted address is the client. Docs
+  recommend Caddy as the reverse proxy and ship a Caddyfile.
+- **One-click proxy setup**: when an untrusted peer sends `X-Forwarded-For`, `Forwarded` or
+  `CF-Connecting-IP`, the server remembers it in memory (last seen, count, header; at most 20
+  peers, no database). The admin API `GET /api/network/proxy-candidates` lists them, and the
+  "Reverse proxy" card asks "Requests from 10.89.0.5 carry forwarded headers. Is this your reverse
+  proxy?" with a "Trust this address" button that adds the address to `trusted_proxies` through
+  the settings PATCH.
 ## 13.2 Single sign-on for developers **[M6, direction]**
 
 Owner's direction (2026-10-14): allow developers (not only admins) to use SSO, while local

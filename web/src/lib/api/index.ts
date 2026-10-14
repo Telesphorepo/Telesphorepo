@@ -96,6 +96,28 @@ export const api = {
       );
       return { done: r.done.then((a) => ({ files: Array.isArray(a?.files) ? a.files : [] })), abort: r.abort };
     },
+    /**
+     * Checks the files of a dropped folder and stores nothing. The body is like upload's: each
+     * `file` part's filename is its path inside the folder. Needs a publish session token.
+     */
+    scanUpload: (name: string, form: FormData, token: string, onProgress: (p: T.UploadProgress) => void) => {
+      const r = requestWithProgress<T.ScanAnswer | undefined>(repo(name) + "/upload/scan", form, token, (sent, total) =>
+        onProgress({ sent, total }),
+      );
+      return {
+        done: r.done.then((a) => ({
+          found: Array.isArray(a?.found) ? a.found : [],
+          ignored: Array.isArray(a?.ignored) ? a.ignored : [],
+        })),
+        abort: r.abort,
+      };
+    },
+    /** Admin: the repo's IP allow-lists for downloads (read) and publishing. */
+    ipRules: {
+      get: (name: string) => request<T.IPRules>("GET", repo(name) + "/ip-rules"),
+      /** Replaces both lists; answers them as stored (CIDRs masked, addresses as /32 or /128). */
+      set: (name: string, rules: T.IPRules) => request<T.IPRules>("PUT", repo(name) + "/ip-rules", { body: rules }),
+    },
     permissions: {
       list: (name: string) => request<T.Permission[]>("GET", repo(name) + "/permissions"),
       set: (name: string, username: string, level: "read" | "write") =>
@@ -125,6 +147,15 @@ export const api = {
     /** No armored key generates a new one. */
     setSigningKey: (armored?: string) =>
       request<T.SigningKey>("POST", "/api/settings/signing-key", armored ? { body: { armored } } : {}),
+  },
+
+  /** Admin: the IP range presets that the server fetches (Cloudflare, GitHub Actions). */
+  network: {
+    presets: () => request<T.NetworkPreset[]>("GET", "/api/network/presets"),
+    /** Fetches a preset now; a failed fetch is an ApiError (502) and the last good list stays. */
+    refreshPreset: (name: string) => request<T.NetworkPreset>("POST", `/api/network/presets/${enc(name)}/refresh`),
+    /** Untrusted peers that sent forwarded headers: likely reverse proxies, most recent first. */
+    proxyCandidates: () => request<T.ProxyCandidate[]>("GET", "/api/network/proxy-candidates"),
   },
 
   moves: {

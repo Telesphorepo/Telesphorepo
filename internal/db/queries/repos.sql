@@ -2,14 +2,17 @@
 
 -- Indexed point lookup, used on every request.
 -- name: GetRepoByName :one
-SELECT id, name, format, anonymous_read, config, created_at, locked_by, description FROM repos WHERE name = ?;
+SELECT id, name, format, anonymous_read, config, created_at, locked_by, description,
+  file_count, total_size, last_published_at FROM repos WHERE name = ?;
 
 -- name: GetRepoByID :one
-SELECT id, name, format, anonymous_read, config, created_at, locked_by, description FROM repos WHERE id = ?;
+SELECT id, name, format, anonymous_read, config, created_at, locked_by, description,
+  file_count, total_size, last_published_at FROM repos WHERE id = ?;
 
 -- Keyset page by name (pass "" for the first page).
 -- name: ListRepos :many
-SELECT id, name, format, anonymous_read, config, created_at, locked_by, description FROM repos
+SELECT id, name, format, anonymous_read, config, created_at, locked_by, description,
+  file_count, total_size, last_published_at FROM repos
 WHERE name > sqlc.arg(after) ORDER BY name LIMIT sqlc.arg(limit);
 
 -- name: CreateRepo :one

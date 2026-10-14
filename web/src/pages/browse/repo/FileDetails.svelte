@@ -36,9 +36,11 @@
 
   const deb = $derived(repo.format === "debian" ? debFile(path) : null);
   // The distributions of a Debian repo (folders under dists/), for the apt line.
-  const dists = deb
-    ? new Resource(async () => (await api.repos.tree(repo.name, "dists/", { limit: 20 })).items.filter((e) => e.type === "dir").map((e) => e.name.replace(/\/$/, "")))
-    : null;
+  const dists = $derived(
+    deb
+      ? new Resource(async () => (await api.repos.tree(repo.name, "dists/", { limit: 20 })).items.filter((e) => e.type === "dir").map((e) => e.name.replace(/\/$/, "")))
+      : null,
+  );
 
   const downloadURL = $derived(base + api.repos.fileURL(repo.format, repo.name, path));
 
@@ -92,12 +94,12 @@
     </section>
 
     <section class="flex flex-col gap-4">
-      <h3 class="text-sm font-semibold">Client setup</h3>
+      <h3 class="text-sm font-semibold">How to use</h3>
       {#if dists?.loading}
         <LoadingRows rows={2} />
       {:else}
         {#if dists?.error}
-          <ErrorState inline error="The distributions did not load ({dists.error}). The apt line is left out." />
+          <ErrorState inline error="The distributions did not load ({dists.error}), so the apt setup is not shown." />
         {/if}
         {#if deb && dists?.data && dists.data.length > 1}
           <p class="text-sm text-muted-foreground">
@@ -110,8 +112,9 @@
       {/if}
       {#if !repo.anonymous_read}
         <p class="text-sm text-muted-foreground">
-          This repository is private. Downloads ask for your username and a
-          <a href={href("/settings/tokens")} class="text-link underline-offset-4 hover:underline">read token</a>.
+          This repository is private. Build tools and scripts need your username and a
+          <a href={href("/settings/tokens")} class="text-link underline-offset-4 hover:underline">download token</a>.
+          In this browser, Download works while you are signed in.
         </p>
       {/if}
     </section>

@@ -10,6 +10,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/netrules"
 	"github.com/Telesphorepo/Telesphorepo/internal/publish"
 )
 
@@ -116,7 +117,7 @@ func (a *API) enrollDevice(w http.ResponseWriter, r *http.Request) {
 	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
 		return
 	}
-	e, err := a.publish.Enroll(r.Context(), httpx.ClientIP(r, a.cfg().TrustedProxies), in.Name, in.Kind, in.PublicKey)
+	e, err := a.publish.Enroll(r.Context(), httpx.ClientIP(r), in.Name, in.Kind, in.PublicKey)
 	if err != nil {
 		publishFail(w, r, err)
 		return
@@ -258,9 +259,9 @@ func (a *API) deviceSession(w http.ResponseWriter, r *http.Request) {
 	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
 		return
 	}
-	m, err := a.publish.DeviceSession(r.Context(), in.DeviceID, in.Repo, in.Nonce, in.Signature)
+	m, err := a.publish.DeviceSession(r.Context(), httpx.ClientIP(r), in.DeviceID, in.Repo, in.Nonce, in.Signature)
 	if err != nil {
-		publishFail(w, r, err)
+		a.mintFail(w, r, err)
 		return
 	}
 	a.recordMint(r, m)
@@ -281,9 +282,9 @@ func (a *API) manualSession(w http.ResponseWriter, r *http.Request) {
 	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
 		return
 	}
-	m, err := a.publish.ManualSession(r.Context(), p, in.Repo, in.TOTPCode, in.Passkey)
+	m, err := a.publish.ManualSession(r.Context(), httpx.ClientIP(r), p, in.Repo, in.TOTPCode, in.Passkey)
 	if err != nil {
-		publishFail(w, r, err)
+		a.mintFail(w, r, err)
 		return
 	}
 	a.recordMint(r, m)
@@ -300,9 +301,9 @@ func (a *API) oidcSession(w http.ResponseWriter, r *http.Request) {
 	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
 		return
 	}
-	m, err := a.publish.OIDCSession(r.Context(), in.Token, in.Repo)
+	m, err := a.publish.OIDCSession(r.Context(), httpx.ClientIP(r), in.Token, in.Repo)
 	if err != nil {
-		publishFail(w, r, err)
+		a.mintFail(w, r, err)
 		return
 	}
 	a.recordMint(r, m)
@@ -364,6 +365,17 @@ func (a *API) closeSession(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// mintFail answers a failed mint. An address that the repo's publish rules refuse gets 403 and an
+// ip.denied audit event.
+func (a *API) mintFail(w http.ResponseWriter, r *http.Request, err error) {
+	var d *netrules.DeniedError
+	if errors.As(err, &d) {
+		a.rules.Refuse(w, r, d)
+		return
+	}
+	publishFail(w, r, err)
 }
 
 // recordMint writes a new publish session to the audit log.

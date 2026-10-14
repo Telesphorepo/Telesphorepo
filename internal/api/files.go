@@ -3,6 +3,8 @@ package api
 import (
 	"errors"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"path"
 	"strconv"
@@ -20,7 +22,7 @@ import (
 // Browse, delete and upload repo files, and the audit log (spec §13).
 
 const (
-	maxUploadFiles  = 50   // files per manual upload
+	maxUploadFiles  = 500  // files per manual upload or scan
 	maxUploadFields = 16   // text fields per manual upload
 	maxFieldBytes   = 1024 // bytes per text field
 )
@@ -100,75 +102,9 @@ func (a *API) deleteFiles(w http.ResponseWriter, r *http.Request) {
 // the format's ManualUploader: 201 {files: [Uploaded]}. The files together may not exceed
 // max_upload_bytes.
 func (a *API) upload(w http.ResponseWriter, r *http.Request) {
-	repo, p, ok := a.auth.RepoGate(w, r, r.PathValue("name"), "", auth.Write, true)
+	repo, p, up, ups, fields, ok := a.readUpload(w, r)
+	defer closeUploads(ups)
 	if !ok {
-		return
-	}
-	up, ok := format.Get(repo.Format).(format.ManualUploader)
-	if !ok {
-		httpx.Error(w, http.StatusBadRequest, "repos of format "+repo.Format+" take no uploads from the web UI")
-		return
-	}
-	limit := a.cfg().MaxUploadBytes
-	r.Body = http.MaxBytesReader(w, r.Body, limit+1<<20) // the files plus the multipart framing
-	mr, err := r.MultipartReader()
-	if err != nil {
-		httpx.Error(w, http.StatusBadRequest, "send multipart/form-data")
-		return
-	}
-	var ups []format.UploadFile
-	defer func() {
-		for _, f := range ups {
-			f.Spool.Close()
-		}
-	}()
-	fields := map[string]string{}
-	var total int64
-	for {
-		part, err := mr.NextPart()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			uploadReadFail(w, r, err)
-			return
-		}
-		if part.FileName() == "" {
-			if len(fields) >= maxUploadFields {
-				httpx.Error(w, http.StatusBadRequest, "too many form fields")
-				return
-			}
-			b, err := io.ReadAll(io.LimitReader(part, maxFieldBytes+1))
-			if err != nil {
-				uploadReadFail(w, r, err)
-				return
-			}
-			if len(b) > maxFieldBytes {
-				httpx.Error(w, http.StatusBadRequest, "form field "+part.FormName()+" is too long")
-				return
-			}
-			fields[part.FormName()] = string(b)
-			continue
-		}
-		if len(ups) >= maxUploadFiles {
-			httpx.Error(w, http.StatusBadRequest, "upload at most "+strconv.Itoa(maxUploadFiles)+" files at a time")
-			return
-		}
-		name := path.Base(strings.ReplaceAll(part.FileName(), `\`, "/"))
-		if !files.ValidPath(name) {
-			httpx.Error(w, http.StatusBadRequest, "invalid file name")
-			return
-		}
-		sp, err := a.assets.Spool(part, limit-total)
-		if err != nil {
-			uploadReadFail(w, r, err)
-			return
-		}
-		total += sp.Size
-		ups = append(ups, format.UploadFile{Name: name, Spool: sp})
-	}
-	if len(ups) == 0 {
-		httpx.Error(w, http.StatusBadRequest, "no files in the upload")
 		return
 	}
 	var uid int64
@@ -187,6 +123,163 @@ func (a *API) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusCreated, map[string][]format.Uploaded{"files": res})
+}
+
+// scanUpload looks at the files of a dropped folder with the format's ManualUploader and stores
+// nothing: 200 {found: [Found], ignored: [path]}. It takes the same credential and body as
+// upload, so the client sends the confirmed files to upload afterwards.
+func (a *API) scanUpload(w http.ResponseWriter, r *http.Request) {
+	repo, _, up, ups, _, ok := a.readUpload(w, r)
+	defer closeUploads(ups)
+	if !ok {
+		return
+	}
+	found, err := up.Scan(r.Context(), repo, ups)
+	var ue *format.UploadError
+	if errors.As(err, &ue) {
+		httpx.Error(w, ue.Status, ue.Message)
+		return
+	}
+	if err != nil {
+		fail(w, r, err)
+		return
+	}
+	taken := map[string]bool{}
+	if found == nil {
+		found = []format.Found{}
+	}
+	for i := range found {
+		if found[i].Files == nil {
+			found[i].Files = []string{}
+		}
+		if found[i].Problems == nil {
+			found[i].Problems = []string{}
+		}
+		for _, f := range found[i].Files {
+			taken[f] = true
+		}
+	}
+	ignored := []string{}
+	for _, f := range ups {
+		if !taken[f.Path] {
+			ignored = append(ignored, f.Path)
+		}
+	}
+	httpx.WriteJSON(w, http.StatusOK, struct {
+		Found   []format.Found `json:"found"`
+		Ignored []string       `json:"ignored"`
+	}{found, ignored})
+}
+
+// readUpload authorizes a manual upload or scan of repo {name} (a publish session of the repo)
+// and reads its multipart body: text fields first, then files. A file's relative path is its
+// filename as sent (the browser's path inside the dropped folder); every path must be a valid
+// repo path and appear once. The files together may not exceed max_upload_bytes. On failure it
+// has answered and returns ok=false; the caller closes the files either way.
+func (a *API) readUpload(w http.ResponseWriter, r *http.Request) (*repos.Repo, *auth.Principal, format.ManualUploader, []format.UploadFile, map[string]string, bool) {
+	repo, p, ok := a.auth.RepoGate(w, r, r.PathValue("name"), "", auth.Write, true)
+	if !ok {
+		return nil, nil, nil, nil, nil, false
+	}
+	up, ok := format.Get(repo.Format).(format.ManualUploader)
+	if !ok {
+		httpx.Error(w, http.StatusBadRequest, "repos of format "+repo.Format+" take no uploads from the web UI")
+		return nil, nil, nil, nil, nil, false
+	}
+	limit := a.cfg().MaxUploadBytes
+	// The files plus the multipart framing.
+	r.Body = http.MaxBytesReader(w, r.Body, limit+1<<20+int64(maxUploadFiles)*1024)
+	mr, err := r.MultipartReader()
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "send multipart/form-data")
+		return nil, nil, nil, nil, nil, false
+	}
+	var ups []format.UploadFile
+	fields := map[string]string{}
+	seen := map[string]bool{}
+	var total int64
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			uploadReadFail(w, r, err)
+			return nil, nil, nil, ups, nil, false
+		}
+		rel, isFile := partPath(part)
+		if !isFile {
+			if len(fields) >= maxUploadFields {
+				httpx.Error(w, http.StatusBadRequest, "too many form fields")
+				return nil, nil, nil, ups, nil, false
+			}
+			b, err := io.ReadAll(io.LimitReader(part, maxFieldBytes+1))
+			if err != nil {
+				uploadReadFail(w, r, err)
+				return nil, nil, nil, ups, nil, false
+			}
+			if len(b) > maxFieldBytes {
+				httpx.Error(w, http.StatusBadRequest, "form field "+part.FormName()+" is too long")
+				return nil, nil, nil, ups, nil, false
+			}
+			fields[part.FormName()] = string(b)
+			continue
+		}
+		if len(ups) >= maxUploadFiles {
+			httpx.Error(w, http.StatusBadRequest, "upload at most "+strconv.Itoa(maxUploadFiles)+" files at a time")
+			return nil, nil, nil, ups, nil, false
+		}
+		if !files.ValidPath(rel) {
+			httpx.Error(w, http.StatusBadRequest, "invalid file name "+strconv.Quote(clipName(rel)))
+			return nil, nil, nil, ups, nil, false
+		}
+		if seen[rel] {
+			httpx.Error(w, http.StatusBadRequest, rel+" is in the upload twice")
+			return nil, nil, nil, ups, nil, false
+		}
+		seen[rel] = true
+		sp, err := a.assets.Spool(part, limit-total)
+		if err != nil {
+			uploadReadFail(w, r, err)
+			return nil, nil, nil, ups, nil, false
+		}
+		total += sp.Size
+		ups = append(ups, format.UploadFile{Name: path.Base(rel), Path: rel, Spool: sp})
+	}
+	if len(ups) == 0 {
+		httpx.Error(w, http.StatusBadRequest, "no files in the upload")
+		return nil, nil, nil, nil, nil, false
+	}
+	return repo, p, up, ups, fields, true
+}
+
+// partPath returns the relative path of a file part: the filename parameter as sent, with
+// backslashes as slashes and without leading slashes. multipart.Part.FileName keeps only the
+// base name, so the header is parsed here. isFile is false for a text field.
+func partPath(part *multipart.Part) (rel string, isFile bool) {
+	_, params, err := mime.ParseMediaType(part.Header.Get("Content-Disposition"))
+	if err != nil {
+		return "", part.FileName() != ""
+	}
+	name, ok := params["filename"]
+	if !ok {
+		return "", false
+	}
+	return strings.TrimLeft(strings.ReplaceAll(name, `\`, "/"), "/"), true
+}
+
+// clipName shortens a file name for an error message.
+func clipName(s string) string {
+	if len(s) > 200 {
+		return s[:200] + "..."
+	}
+	return s
+}
+
+func closeUploads(ups []format.UploadFile) {
+	for _, f := range ups {
+		f.Spool.Close()
+	}
 }
 
 // recordUploads writes each file a manual upload stored to the audit log.

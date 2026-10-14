@@ -1,4 +1,4 @@
-<!-- Admin: every publish session, newest first. -->
+<!-- Admin: publish history, every publish session, newest first. -->
 <script lang="ts">
   import type { PageProps } from "$lib/router.svelte";
   import { api, type SessionInfo } from "$lib/api";
@@ -15,10 +15,10 @@
 
   const list = new Keyset((p) => api.publish.log(p));
 
-  const viaLabel: Record<SessionInfo["via"], string> = { device: "Device", oidc: "CI policy", manual: "Manual" };
+  const viaLabel: Record<SessionInfo["via"], string> = { device: "Build tool", oidc: "CI rule", manual: "Temporary password" };
 
   function who(s: SessionInfo): string {
-    if (s.via === "oidc") return `${s.trust_name ?? "deleted policy"}: ${s.subject}`;
+    if (s.via === "oidc") return `${s.trust_name ?? "deleted rule"}: ${s.subject}`;
     if (s.via === "device") return `${s.username ?? "deleted user"} on ${s.device_name ?? "deleted device"}`;
     return s.username ?? "deleted user";
   }
@@ -26,13 +26,13 @@
   const stateVariant = (state: string) => (state === "open" ? "default" : "secondary");
 </script>
 
-<PageHeader title="Publish log" description="Every publish session, newest first. The server keeps ended sessions for 30 days." />
+<PageHeader title="Publish history" description="Each time a person, a build tool or a CI job got permission to publish, newest first. Ended entries stay for 30 days." />
 
-<KeysetTable {list} columns={6} caption="Publish sessions">
+<KeysetTable {list} columns={6} caption="Publish history">
   {#snippet head()}
     <Table.Head>Started</Table.Head>
     <Table.Head>Repository</Table.Head>
-    <Table.Head>Via</Table.Head>
+    <Table.Head>How</Table.Head>
     <Table.Head>Who</Table.Head>
     <Table.Head>Ended</Table.Head>
     <Table.Head>State</Table.Head>
@@ -50,8 +50,8 @@
   {#snippet empty()}
     <EmptyState
       icon={ScrollTextIcon}
-      title="No publish sessions yet"
-      description="A session appears here when a device, a CI job or a user opens one."
+      title="Nothing published yet"
+      description="An entry appears here when a build tool, a CI job or a person starts to publish."
     />
   {/snippet}
 </KeysetTable>

@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
-	"net/netip"
 	"os"
 	"reflect"
 	"slices"
@@ -337,9 +336,7 @@ func (s *Service) build(rows map[string]any, lenient bool) (*Snapshot, error) {
 	if c.FSRoot == "" {
 		c.FSRoot = config.JoinDataDir(s.boot.DataDir, "blobs")
 	}
-	for _, p := range snap.values[KeyTrustedProxies].([]string) {
-		c.TrustedProxies = append(c.TrustedProxies, netip.MustParsePrefix(p)) // validated
-	}
+	c.TrustedProxies = snap.values[KeyTrustedProxies].([]string) // validated
 	switch str(KeyLogLevel) {
 	case "debug":
 		c.LogLevel = slog.LevelDebug

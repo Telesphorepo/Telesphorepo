@@ -96,7 +96,7 @@ export function aptSnippets(repo: Repo, base: string, deb: NonNullable<ReturnTyp
   ];
   if (!repo.anonymous_read) {
     setup.push(
-      `echo "machine ${url} login USER password READ_TOKEN" \\`,
+      `echo "machine ${url} login USER password DOWNLOAD_TOKEN" \\`,
       `  | sudo tee /etc/apt/auth.conf.d/${repo.name}.conf`,
       `sudo chmod 600 /etc/apt/auth.conf.d/${repo.name}.conf`,
     );
@@ -109,6 +109,6 @@ export function aptSnippets(repo: Repo, base: string, deb: NonNullable<ReturnTyp
 
 /** A curl download of one file. */
 export function curlSnippet(repo: Repo, downloadURL: string): ClientSnippet {
-  const auth = repo.anonymous_read ? "" : "-u USER:READ_TOKEN ";
+  const auth = repo.anonymous_read ? "" : "-u USER:DOWNLOAD_TOKEN ";
   return { title: "Download with curl", code: `curl -fL ${auth}-O ${downloadURL}` };
 }

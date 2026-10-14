@@ -70,7 +70,7 @@
   <div class="flex flex-col gap-4">
     <div class="flex flex-wrap items-center justify-between gap-3">
       <div class="flex flex-wrap items-center gap-2">
-        <h3 class="text-sm font-semibold">Sync {s.id}{s.cutover ? " (cut-over)" : ""}</h3>
+        <h3 class="text-sm font-semibold">Sync {s.id}{s.cutover ? " (final sync)" : ""}</h3>
         <Badge variant={variant(s.state)} class="capitalize">
           {#if s.state === "running"}<Spinner class="size-3" />{/if}
           {s.state}
@@ -91,7 +91,7 @@
           <Table.Header>
             <Table.Row class="hover:bg-transparent">
               <Table.Head>Nexus repository</Table.Head>
-              <Table.Head>Target</Table.Head>
+              <Table.Head>Name here</Table.Head>
               <Table.Head>State</Table.Head>
               <Table.Head class="text-right">Imported</Table.Head>
               <Table.Head class="text-right">Skipped</Table.Head>

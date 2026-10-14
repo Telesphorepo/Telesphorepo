@@ -2,6 +2,7 @@
 package httpx
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -79,39 +80,30 @@ func DecodeJSON(w http.ResponseWriter, r *http.Request, max int64, v any) bool {
 	return false
 }
 
-func inPrefixes(a netip.Addr, ps []netip.Prefix) bool {
-	for _, p := range ps {
-		if p.Contains(a) {
-			return true
-		}
-	}
-	return false
+type clientIPKey struct{}
+
+// WithClientIP returns r with the resolved client address attached (see internal/netrules,
+// which resolves it once per request from the TCP peer and the trusted proxies).
+func WithClientIP(r *http.Request, a netip.Addr) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), clientIPKey{}, a))
 }
 
-// ClientIP returns RemoteAddr's IP, or the right-most X-Forwarded-For hop that is not
-// itself trusted when RemoteAddr is inside a trusted prefix (spec §7.4).
-func ClientIP(r *http.Request, trusted []netip.Prefix) netip.Addr {
+// PeerIP returns the address of the TCP peer of r.
+func PeerIP(r *http.Request) netip.Addr {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
 	}
-	remote, _ := netip.ParseAddr(host)
-	remote = remote.Unmap()
-	if !inPrefixes(remote, trusted) {
-		return remote
+	a, _ := netip.ParseAddr(host)
+	return a.Unmap()
+}
+
+// ClientIP returns the client address that WithClientIP attached to r, else the TCP peer.
+func ClientIP(r *http.Request) netip.Addr {
+	if a, ok := r.Context().Value(clientIPKey{}).(netip.Addr); ok {
+		return a
 	}
-	hops := strings.Split(strings.Join(r.Header.Values("X-Forwarded-For"), ","), ",")
-	for i := len(hops) - 1; i >= 0; i-- {
-		a, err := netip.ParseAddr(strings.TrimSpace(hops[i]))
-		if err != nil {
-			return remote
-		}
-		a = a.Unmap()
-		if !inPrefixes(a, trusted) {
-			return a
-		}
-	}
-	return remote
+	return PeerIP(r)
 }
 
 // Limit parses ?limit= (default 50, clamp 1..200).

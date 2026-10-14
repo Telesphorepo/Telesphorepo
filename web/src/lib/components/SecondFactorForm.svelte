@@ -107,7 +107,7 @@
     </Button>
   {/if}
   {#if !useCode && !hasPasskey}
-    <ErrorState inline error="This account has no second factor that works in this browser." />
+    <ErrorState inline error="This account has no two-step verification method that works in this browser." />
   {/if}
   {#if error}<ErrorState inline {error} />{/if}
 </div>

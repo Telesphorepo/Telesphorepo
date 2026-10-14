@@ -72,7 +72,7 @@ the fallback) and Node 26+ (see `.node-version`). The e2e suite needs Docker or 
   `Secret` if sensitive) rather than in a new env var. It then gets a `TR_<KEY>` override, the UI
   and the API for free. The only env vars outside the registry are the boot env (`TR_DATA_DIR`,
   `TR_LISTEN`, `TR_MASTER_KEY`), the bootstrap admin, and test/tooling vars (`TR_ENGINE`,
-  `E2E_*`).
+  `E2E_*`, `TR_E2E_PRESET_BASE_URL`).
 - **Read configuration live.** Services take a `config.Provider` (`set.Config`) and call it per
   request. Don't keep a `*config.Config` around. To react to changes, use
   `settings.Service.Subscribe`.
@@ -84,6 +84,12 @@ the fallback) and Node 26+ (see `.node-version`). The e2e suite needs Docker or 
   through `api.*` in `web/src/lib/api/`. `bun run build` runs `svelte-check` first.
 - **Never show an IP address outside the audit log.** `audit_events` is the only table and
   `GET /api/audit` the only API that returns one.
+- **Read the client address with `httpx.ClientIP(r)` only.** The `netrules` middleware resolves it
+  once per request. Never read `X-Forwarded-For` or `CF-Connecting-IP` in a handler, because
+  the server trusts them only from a trusted proxy. New read and write paths of a repo must call
+  the IP rule check (`netrules.Service.Check`) with the scope `read` or `publish`.
+- **Request paths use in-memory snapshots of presets and IP rules.** They never query
+  `preset_ranges` or `repo_ip_rules`. The service refreshes the snapshot when the data changes.
 - **Keep the docs current.** Update `SPEC.md` in the same change whenever behaviour, routes,
   tables, settings or commands change. Keep `README.md` short and for humans (run locally, run in
   production, a few commands); details belong in SPEC.md. Don't add a `CLAUDE.md`.
@@ -108,6 +114,8 @@ the fallback) and Node 26+ (see `.node-version`). The e2e suite needs Docker or 
 | UI page | `web/src/pages/{browse,settings}/*.svelte`; route in `web/src/routes.ts`; Settings nav in `web/src/lib/nav.ts`; API calls in `web/src/lib/api/`. See `web/src/README.md` |
 | UI format editor | `web/src/lib/formats/` |
 | File tree, deletes, manual upload | `internal/files`, `internal/api/files.go`; UI in `web/src/pages/browse/repo/` and `web/src/lib/browse/` |
+| Client IP, IP range presets, repo IP rules | `internal/netrules`, `internal/api/network.go`, `web/src/pages/settings/repos/NetworkTab.svelte`, `web/src/pages/settings/system/` (Reverse proxy and Network lists cards) |
+| Folder scan and upload | `Scan` of the format (`format.ManualUploader`), e.g. `internal/maven/scan.go`; route in `internal/api/files.go`; UI in `web/src/lib/browse/upload/` |
 | Audit log | `internal/audit`, `internal/api` (`GET /api/audit`), `web/src/pages/settings/Audit.svelte`. Call `a.record` in a handler, or `Host.Audit` in a plugin |
 | Storage move (FS ↔ S3) | `internal/move` (service, copier), `internal/storage/mirror.go`, `internal/api/moves.go`, `web/src/pages/settings/Storage.svelte` |
 | Nexus sources, syncs, cut-over | `internal/nexus` (client, service, `sync.go` scheduler and runner), `internal/api/nexus.go`, `web/src/pages/settings/Nexus.svelte`. Per-format import code is the plugin's `Importer`. Repo lock: `repos.locked_by`, checked in `auth.RepoGate` |
@@ -128,8 +136,8 @@ format, so you edit no core file.
 3. Implement the optional interfaces you need: `Migrator` (own tables), `Queryable` (plan guard),
    `Configurable` (settings group), `Starter` (background work), `StatusReporter`,
    `ConfigObserver` and `Describer` (client snippets that the UI and `dev` show), `DeleteObserver`
-   (`AssetsDeleted`: drop your own rows when files are deleted), `ManualUploader` (`Upload`: the
-   UI upload dialog calls it), and `Importer`
+   (`AssetsDeleted`: drop your own rows when files are deleted), `ManualUploader` (`Upload` and
+   `Scan`: the UI upload dialogs call them), and `Importer`
    (`ImportFormats` and `Import`: the Nexus import offers each source file to the plugin; share
    the code of your upload path with it, and return `imported`, `skipped` or `ignored`).
 4. If the format has tables, add `migrations/NNNN_*.sql`, `queries/*.sql` and a `sqlc.yaml`

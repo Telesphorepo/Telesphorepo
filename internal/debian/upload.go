@@ -185,6 +185,13 @@ func (h *Handler) Upload(ctx context.Context, repo *repos.Repo, files []format.U
 			return nil, format.BadUpload("unknown field %q; Debian uploads take distribution and component", k)
 		}
 	}
+	if format.InFolder(files) {
+		// A dropped folder: the .deb files in it, as Scan lists them.
+		files = slices.DeleteFunc(slices.Clone(files), func(f format.UploadFile) bool { return !strings.HasSuffix(f.Name, ".deb") })
+		if len(files) == 0 {
+			return nil, format.BadUpload("the folder has no .deb file")
+		}
+	}
 	for _, f := range files {
 		if !strings.HasSuffix(f.Name, ".deb") {
 			return nil, format.BadUpload("%s is not a .deb file", f.Name)
@@ -205,6 +212,35 @@ func (h *Handler) Upload(ctx context.Context, repo *repos.Repo, files []format.U
 			st = format.UploadUnchanged
 		}
 		out = append(out, format.Uploaded{Path: res.Filename, Status: st, Size: f.Spool.Size, SHA256: f.Spool.SHA256})
+	}
+	return out, nil
+}
+
+// Scan implements format.ManualUploader: one Found of kind "debian" per .deb file, titled
+// "<package> <version> (<architecture>)". A control file that does not parse, or an
+// architecture the repo does not configure, is a problem. Other files are ignored.
+func (h *Handler) Scan(ctx context.Context, repo *repos.Repo, files []format.UploadFile) ([]format.Found, error) {
+	archs := architectures(repo)
+	var out []format.Found
+	for _, f := range files {
+		if !strings.HasSuffix(f.Name, ".deb") {
+			continue
+		}
+		fd := format.Found{Kind: "debian", Title: f.Path, Files: []string{f.Path}}
+		info, err := parseDeb(f.Spool.File)
+		var bad badDeb
+		switch {
+		case errors.As(err, &bad):
+			fd.Problems = append(fd.Problems, bad.Error())
+		case err != nil:
+			return nil, fmt.Errorf("parse %s: %w", f.Path, err)
+		default:
+			fd.Title = info.Package + " " + info.Version + " (" + info.Architecture + ")"
+			if info.Architecture != "all" && !slices.Contains(archs, info.Architecture) {
+				fd.Problems = append(fd.Problems, "architecture "+info.Architecture+" is not configured for this repository")
+			}
+		}
+		out = append(out, fd)
 	}
 	return out, nil
 }

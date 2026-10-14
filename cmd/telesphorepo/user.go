@@ -165,7 +165,7 @@ func withUsers(fn func(ctx context.Context, as *auth.Service, dataDir string) er
 	}
 	defer d.Close()
 	as := auth.New(d, config.Static(cfg), repos.New(d, nil))
-	as.SetAudit(audit.New(d, config.Static(cfg), nil, nil)) // records only; the server runs the cleanup
+	as.SetAudit(audit.New(d, nil, nil)) // records only; the server runs the cleanup
 	return fn(ctx, as, cfg.DataDir)
 }
 

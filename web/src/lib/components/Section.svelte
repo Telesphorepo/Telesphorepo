@@ -19,7 +19,7 @@
     description?: string;
     actions?: Snippet;
     narrow?: boolean;
-    /** "danger" outlines the section in the destructive color (danger zones). */
+    /** "danger" fills the section with a light destructive tint (deletes that cannot be undone). */
     tone?: "default" | "danger";
     class?: string;
     children: Snippet;
@@ -30,7 +30,7 @@
   class={cn(
     "mb-10 last:mb-0",
     narrow && "max-w-form",
-    tone === "danger" && "rounded-2xl border border-destructive/40 p-5",
+    tone === "danger" && "rounded-2xl bg-destructive/8 p-5",
     className,
   )}
 >

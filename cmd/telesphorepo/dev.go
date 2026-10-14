@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
+	"github.com/Telesphorepo/Telesphorepo/internal/db"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/server"
@@ -38,6 +39,19 @@ func devCmd(args []string) error {
 	st := &devState{dataDir: boot.DataDir}
 	ctx, stop := signalContext()
 	defer stop()
+	err = runDev(ctx, boot, st)
+	if errors.Is(err, db.ErrSchemaChanged) {
+		// The dev data dir is throwaway: a schema file changed since it was created, so start over.
+		fmt.Fprintf(os.Stderr, "dev: the schema changed since %s was created (%v); starting with a fresh data dir\n", boot.DataDir, err)
+		if rmErr := os.RemoveAll(boot.DataDir); rmErr != nil {
+			return fmt.Errorf("reset dev data dir: %w", rmErr)
+		}
+		err = runDev(ctx, boot, st)
+	}
+	return err
+}
+
+func runDev(ctx context.Context, boot *config.Boot, st *devState) error {
 	return server.RunWith(ctx, boot, server.Options{
 		// Dev defaults (shown as defaults in the UI, still changeable there or via TR_* env), and
 		// the second factor is optional ("2FA not enforced (dev)" in the banner).

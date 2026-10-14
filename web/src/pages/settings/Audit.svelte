@@ -20,22 +20,25 @@
 
   let { params, query }: PageProps = $props();
 
-  const actions = [
-    "signin",
-    "signin.failed",
-    "session.create",
-    "session.close",
-    "upload",
-    "delete",
-    "repo.create",
-    "repo.update",
-    "repo.delete",
-    "permission.set",
-    "permission.delete",
-    "user.create",
-    "user.update",
-    "settings.update",
-  ];
+  /** The actions the server records, with the words the page shows for them. */
+  const actionLabels: Record<string, string> = {
+    signin: "Signed in",
+    "signin.failed": "Sign-in failed",
+    "session.create": "Started publishing",
+    "session.close": "Stopped publishing",
+    upload: "Uploaded",
+    delete: "Deleted files",
+    "repo.create": "Created a repository",
+    "repo.update": "Changed a repository",
+    "repo.delete": "Deleted a repository",
+    "permission.set": "Gave access",
+    "permission.delete": "Removed access",
+    "user.create": "Created a user",
+    "user.update": "Changed a user",
+    "settings.update": "Changed settings",
+  };
+  const actions = Object.keys(actionLabels);
+  const actionText = (a: string) => actionLabels[a] ?? a;
 
   const action = $derived(query.get("action") ?? "");
   const repo = $derived(query.get("repo") ?? "");
@@ -75,19 +78,19 @@
   const filtered = $derived(action !== "" || repo !== "");
 </script>
 
-<PageHeader title="Audit log" description="Sign-ins, sessions, uploads, deletes and configuration changes, newest first. This page is the only place the server shows IP addresses." />
+<PageHeader title="Activity log" description="Sign-ins, publishing, uploads, deletes and setting changes, newest first. This is the only page that shows IP addresses." />
 
 <form class="mb-8 flex flex-wrap items-end gap-4" onsubmit={applyRepo}>
   <div class="flex flex-col gap-2">
-    <Label for="audit-action">Action</Label>
+    <Label for="audit-action">What happened</Label>
     <Select.Root type="single" value={action || "all"} onValueChange={(v) => setFilter({ action: v === "all" ? "" : v })}>
       <Select.Trigger id="audit-action" class="w-48">
-        <span class="truncate {action ? 'font-mono' : ''}">{action || "All actions"}</span>
+        <span class="truncate">{action ? actionText(action) : "Everything"}</span>
       </Select.Trigger>
       <Select.Content>
-        <Select.Item value="all" label="All actions">All actions</Select.Item>
+        <Select.Item value="all" label="Everything">Everything</Select.Item>
         {#each actions as a (a)}
-          <Select.Item value={a} label={a} class="font-mono">{a}</Select.Item>
+          <Select.Item value={a} label={actionText(a)}>{actionText(a)}</Select.Item>
         {/each}
       </Select.Content>
     </Select.Root>
@@ -111,21 +114,21 @@
   {/if}
 </form>
 
-<KeysetTable {list} columns={7} caption="Audit events">
+<KeysetTable {list} columns={7} caption="Activity log">
   {#snippet head()}
     <Table.Head>When</Table.Head>
-    <Table.Head>Actor</Table.Head>
-    <Table.Head>Action</Table.Head>
+    <Table.Head>Who</Table.Head>
+    <Table.Head>What</Table.Head>
     <Table.Head>Repository</Table.Head>
-    <Table.Head>Target</Table.Head>
-    <Table.Head>Detail</Table.Head>
+    <Table.Head>Item</Table.Head>
+    <Table.Head>Details</Table.Head>
     <Table.Head>IP address</Table.Head>
   {/snippet}
   {#snippet row(e)}
     <Table.Row>
       <Table.Cell class="text-[0.8125rem]">{formatDateTime(e.at)}</Table.Cell>
       <Table.Cell class="break-words whitespace-normal">{e.actor}</Table.Cell>
-      <Table.Cell class="font-mono text-[0.8125rem]">{e.action}</Table.Cell>
+      <Table.Cell title={e.action}>{actionText(e.action)}</Table.Cell>
       <Table.Cell class="font-mono text-[0.8125rem]">{e.repo}</Table.Cell>
       <Table.Cell class="max-w-56 font-mono text-[0.8125rem] break-all whitespace-normal">{e.target}</Table.Cell>
       <Table.Cell class="max-w-64 text-[0.8125rem] break-words whitespace-normal text-muted-foreground">{detailText(e.detail)}</Table.Cell>
@@ -135,8 +138,8 @@
   {#snippet empty()}
     <EmptyState
       icon={ScrollTextIcon}
-      title={filtered ? "No events match these filters" : "No audit events yet"}
-      description={filtered ? "Change or clear the filters to see more events." : "The server records events here as people sign in and change things."}
+      title={filtered ? "Nothing matches these filters" : "No activity yet"}
+      description={filtered ? "Change or clear the filters to see more." : "Sign-ins, uploads and changes appear here as people use the server."}
     >
       {#if filtered}
         <Button

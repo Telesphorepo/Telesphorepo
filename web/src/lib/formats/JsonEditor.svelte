@@ -16,7 +16,7 @@
   function edit() {
     try {
       const v = JSON.parse(text);
-      if (v === null || typeof v !== "object" || Array.isArray(v)) throw new Error("The config must be a JSON object.");
+      if (v === null || typeof v !== "object" || Array.isArray(v)) throw new Error("The options must be a JSON object, for example {}.");
       error = "";
       onChange(v);
     } catch (e) {
@@ -27,7 +27,7 @@
 </script>
 
 <div class="flex flex-col gap-2">
-  <Label for="{id}-json">Config (JSON)</Label>
+  <Label for="{id}-json">Format options (JSON)</Label>
   <Textarea
     id="{id}-json"
     class="min-h-28 font-mono text-[0.8125rem]"

@@ -160,7 +160,7 @@ func RetryAfter(err error) (time.Duration, bool) {
 }
 
 func (s *Service) clientIP(r *http.Request) netip.Addr {
-	return httpx.ClientIP(r, s.cfg().TrustedProxies)
+	return httpx.ClientIP(r)
 }
 
 func setRetryAfter(w http.ResponseWriter, d time.Duration) {

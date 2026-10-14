@@ -6,7 +6,6 @@ package config
 import (
 	"errors"
 	"log/slog"
-	"net/netip"
 	"os"
 	"strings"
 	"time"
@@ -77,9 +76,11 @@ type Config struct {
 	MaxUploadBytes int64
 	MaxJSONBytes   int64
 
-	CookieSecure   bool
-	SessionTTL     time.Duration
-	TrustedProxies []netip.Prefix
+	CookieSecure bool
+	SessionTTL   time.Duration
+	// TrustedProxies are CIDRs, IP addresses and the presets "private" and "cloudflare" (see
+	// internal/netrules): the TCP peers whose X-Forwarded-For the server reads.
+	TrustedProxies []string
 
 	GPGKeyFile        string
 	GPGPassphraseFile string

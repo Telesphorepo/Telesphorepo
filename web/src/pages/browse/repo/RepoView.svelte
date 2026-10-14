@@ -11,22 +11,25 @@
   import { encodePath, href, navigate, router } from "$lib/router.svelte";
   import * as Breadcrumb from "$lib/components/ui/breadcrumb";
   import * as Alert from "$lib/components/ui/alert";
-  import { Badge } from "$lib/components/ui/badge";
   import { Button } from "$lib/components/ui/button";
   import PageHeader from "$lib/components/PageHeader.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import LoadingRows from "$lib/components/LoadingRows.svelte";
   import FormatBadge from "$lib/components/FormatBadge.svelte";
+  import AccessBadge from "$lib/components/AccessBadge.svelte";
   import SecondFactorPrompt from "$lib/components/SecondFactorPrompt.svelte";
   import FolderList, { type DeleteTarget } from "./FolderList.svelte";
   import FilePanel from "./FilePanel.svelte";
+  import UsageSheet from "./UsageSheet.svelte";
   import UploadDialog from "$lib/browse/upload/UploadDialog.svelte";
+  import FolderUploadDialog from "$lib/browse/upload/FolderUploadDialog.svelte";
+  import type { FolderDrop } from "$lib/browse/upload/folder";
   import DeleteDialog from "$lib/browse/delete/DeleteDialog.svelte";
   import { dropSession, keepSession, sessionToken } from "./session";
-  import GlobeIcon from "@lucide/svelte/icons/globe";
-  import LockIcon from "@lucide/svelte/icons/lock";
+  import BookOpenIcon from "@lucide/svelte/icons/book-open";
   import UploadIcon from "@lucide/svelte/icons/upload";
+  import FolderUpIcon from "@lucide/svelte/icons/folder-up";
   import SettingsIcon from "@lucide/svelte/icons/settings";
   import PauseIcon from "@lucide/svelte/icons/circle-pause";
   import SearchXIcon from "@lucide/svelte/icons/search-x";
@@ -89,7 +92,7 @@
   /** The session token for a request, or an error that tells the user to start over. */
   function token(): string {
     const t = sessionToken(name);
-    if (!t) throw new Error("The publish session has ended. Close this dialog and try again.");
+    if (!t) throw new Error("Your confirmation has expired. Close this dialog and try again.");
     return t;
   }
 
@@ -137,6 +140,20 @@
 
   let uploadOpen = $state(false);
   const startUpload = () => withSession(() => (uploadOpen = true));
+  let folderUploadOpen = $state(false);
+  // A folder dropped on "Upload files"; "Upload a folder" reads it when it opens.
+  let droppedFolder = $state<FolderDrop | null>(null);
+  const startFolderUpload = (drop: FolderDrop | null = null) =>
+    withSession(() => {
+      droppedFolder = drop;
+      folderUploadOpen = true;
+    });
+  function openFolderUpload(drop: FolderDrop) {
+    uploadOpen = false;
+    startFolderUpload(drop);
+  }
+
+  let usageOpen = $state(false);
 
   // --- file panel ---
 
@@ -155,11 +172,11 @@
     icon={SearchXIcon}
     title="Repository not found"
     description={auth.user
-      ? `No repository named ${name} exists, or you have no access to it. Ask an administrator for access.`
-      : `No public repository named ${name} exists. Sign in if it is private.`}
+      ? `No repository named ${name} exists, or you do not have access to it. Ask an administrator for access.`
+      : `No repository named ${name} is open to everyone. Sign in if it is private.`}
   >
     {#if auth.user}
-      <Button variant="outline" href={href("/")}>Open repositories</Button>
+      <Button variant="outline" href={href("/")}>Show all repositories</Button>
     {:else}
       <Button href={href("/login", { next: router.path })}>Sign in</Button>
     {/if}
@@ -192,24 +209,22 @@
       </Breadcrumb.Root>
     {/snippet}
     {#snippet actions()}
+      <Button variant="outline" onclick={() => (usageOpen = true)}><BookOpenIcon />How to use</Button>
       {#if isAdmin}
         <Button variant="outline" href={href("/settings/repos/" + encodeURIComponent(name))}>
-          <SettingsIcon />Settings
+          <SettingsIcon />Repository settings
         </Button>
       {/if}
       {#if canUpload}
-        <Button disabled={!!locked} onclick={startUpload}><UploadIcon />Upload</Button>
+        <Button variant="outline" disabled={!!locked} onclick={() => startFolderUpload()}><FolderUpIcon />Upload a folder</Button>
+        <Button disabled={!!locked} onclick={startUpload}><UploadIcon />Upload files</Button>
       {/if}
     {/snippet}
     <div class="flex flex-wrap items-center gap-2">
       <FormatBadge format={r.format} />
-      {#if r.anonymous_read}
-        <Badge variant="secondary"><GlobeIcon />Public</Badge>
-      {:else}
-        <Badge variant="outline"><LockIcon />Private</Badge>
-      {/if}
+      <AccessBadge anyone={r.anonymous_read} />
       {#if canWrite}
-        <Badge variant="outline">{isAdmin ? "Admin" : "Write access"}</Badge>
+        <span class="text-sm text-muted-foreground">{isAdmin ? "You are an admin" : "You can publish here"}</span>
       {/if}
     </div>
   </PageHeader>
@@ -218,7 +233,7 @@
     <Alert.Root class="mb-8">
       <PauseIcon />
       <Alert.Title>Uploads and deletes are paused</Alert.Title>
-      <Alert.Description>{locked}. Try again when it has finished.</Alert.Description>
+      <Alert.Description>{locked}. Try again when it has finished. Downloads keep working.</Alert.Description>
     </Alert.Root>
   {/if}
 
@@ -246,10 +261,12 @@
   <SecondFactorPrompt
     bind:open={factorOpen}
     title="Confirm it is you"
-    description="Uploads and deletes in {name} need a publish session. Confirm it is you with your authenticator app or a passkey to create one."
+    description="To upload or delete files in {name}, confirm it is you with your authenticator app or a passkey. The confirmation lasts a short time, so you can make several changes in a row."
     actionLabel="Continue"
     onProof={createSession}
   />
+
+  <UsageSheet bind:open={usageOpen} repo={r} {usage} />
 
   <DeleteDialog bind:open={deleteOpen} repo={r} target={deleting} onConfirm={runDelete} />
 
@@ -259,6 +276,16 @@
       repo={r}
       {folder}
       {token}
+      onError={(e, t) => checkSession(e, t)}
+      onUploaded={() => version++}
+      onFolder={openFolderUpload}
+    />
+    <FolderUploadDialog
+      bind:open={folderUploadOpen}
+      repo={r}
+      {folder}
+      {token}
+      dropped={droppedFolder}
       onError={(e, t) => checkSession(e, t)}
       onUploaded={() => version++}
     />

@@ -1,17 +1,22 @@
 <!--
   Where the user drops files or chooses them. onFiles gets the new files; the parent keeps the list.
+  A drop that holds a folder goes to onFolder instead, with nothing added.
 -->
 <script lang="ts">
   import { Button } from "$lib/components/ui/button";
   import UploadIcon from "@lucide/svelte/icons/upload";
+  import { dropEntries, dropHasFolder, type FolderDrop } from "./folder";
 
   let {
     onFiles,
+    onFolder,
     accept,
     hint,
     disabled = false,
   }: {
     onFiles: (files: File[]) => void;
+    /** Gets a dropped folder (read its entries with filesFromEntries). */
+    onFolder: (drop: FolderDrop) => void;
     /** The `accept` of the file input, e.g. ".deb". */
     accept?: string;
     /** What to drop, e.g. "A pom and its jars". */
@@ -25,8 +30,13 @@
   function drop(e: DragEvent) {
     e.preventDefault();
     over = false;
-    if (disabled) return;
-    const list = [...(e.dataTransfer?.files ?? [])];
+    if (disabled || !e.dataTransfer) return;
+    // A folder shows up as a broken file in dataTransfer.files, so it never goes to onFiles.
+    if (dropHasFolder(e.dataTransfer)) {
+      onFolder(dropEntries(e.dataTransfer));
+      return;
+    }
+    const list = [...e.dataTransfer.files];
     if (list.length) onFiles(list);
   }
 
