@@ -69,7 +69,7 @@ func TestPublishGate(t *testing.T) {
 
 	t.Run("password and read token cannot write", func(t *testing.T) {
 		readToken := s.CreateToken(t, w, "writer-pass-1234", "read")
-		for _, a := range []Basic{{w, "writer-pass-1234"}, {"ci", readToken}, s.Admin()} {
+		for _, a := range []Basic{{w, "writer-pass-1234"}, {"ci", readToken}, s.AdminBasic()} {
 			resp, body := pubPut(t, s, repo, a)
 			wantPublishRequired(t, resp, body)
 		}
@@ -174,7 +174,7 @@ func TestPublishGate(t *testing.T) {
 		}
 
 		// Another user cannot revoke the device.
-		st, b := s.API(t, http.MethodDelete, fmt.Sprintf("/api/devices/%d", d.ID), nil, Basic{r, "reader-pass-1234"})
+		st, b := s.API(t, http.MethodDelete, fmt.Sprintf("/api/devices/%d", d.ID), nil, s.SignIn(t, r, "reader-pass-1234"))
 		wantAPIStatus(t, "revoke another user's device", st, b, http.StatusNotFound)
 
 		st, b = s.API(t, http.MethodDelete, fmt.Sprintf("/api/devices/%d", d.ID), nil, sess)
@@ -213,24 +213,24 @@ func TestPublishGate(t *testing.T) {
 		resp, body := pubPut(t, s, repo, ps.Auth())
 		wantStatus(t, resp, body, http.StatusCreated)
 
-		// A sign-in without a second factor cannot mint.
+		// A user without a second factor signs in with the password but cannot mint.
 		u := RandName("nofactor")
 		s.CreateUser(t, u, "nofactor-pass-1234", false)
 		s.SetPermission(t, repo, u, "write")
-		setup := s.Login(t, u, "nofactor-pass-1234")
-		st, b = s.API(t, http.MethodPost, "/api/publish/sessions/manual", map[string]string{"repo": repo, "totp_code": "000000"}, setup)
-		wantAPIStatus(t, "manual session from a setup-only sign-in", st, b, http.StatusForbidden)
+		plain := s.Login(t, u, "nofactor-pass-1234")
+		st, b = s.API(t, http.MethodPost, "/api/publish/sessions/manual", map[string]string{"repo": repo, "totp_code": "000000"}, plain)
+		wantAPIStatus(t, "manual session of a user without a second factor", st, b, http.StatusForbidden)
 		if !strings.Contains(string(b), "second_factor_required") {
-			t.Fatalf("manual session from a setup-only sign-in: body %s, want second_factor_required", b)
+			t.Fatalf("manual session of a user without a second factor: body %s, want second_factor_required", b)
 		}
 	})
 }
 
+// TestSecondFactorLogin covers the sign-in rule of spec §13: an admin signs in with a second
+// factor (without one the session reaches only the setup routes); other users sign in with the
+// password and need a factor only to approve a device or create a manual publish session.
 func TestSecondFactorLogin(t *testing.T) {
 	s := StartServer(t, ServerOpts{})
-	u, pw := RandName("twofa"), "twofa-pass-1234"
-	s.CreateUser(t, u, pw, false)
-
 	wantSetupOnly := func(t *testing.T, sess *Session, method, path string) {
 		t.Helper()
 		st, b := s.API(t, method, path, nil, sess)
@@ -238,16 +238,62 @@ func TestSecondFactorLogin(t *testing.T) {
 			t.Fatalf("%s %s with a setup-only session: status %d, want 403 second_factor_required: %s", method, path, st, b)
 		}
 	}
+	// The bootstrap admin follows the rule too. This runs before s.Admin() enrolls its factors.
+	wantSetupOnly(t, s.Login(t, s.AdminUser, s.AdminPass), http.MethodGet, "/api/settings")
 
-	t.Run("without a second factor the session reaches setup only", func(t *testing.T) {
+	u, pw := RandName("twofa"), "twofa-pass-1234"
+	s.CreateUser(t, u, pw, true)
+	pub, pubPw := RandName("publisher"), "publisher-pass-1234"
+	s.CreateUser(t, pub, pubPw, false)
+	type me struct {
+		SecondFactorRequired bool `json:"second_factor_required"`
+	}
+
+	t.Run("an admin without a second factor reaches setup only", func(t *testing.T) {
 		sess := s.Login(t, u, pw)
-		s.MustAPI(t, http.MethodGet, "/api/me", nil, sess, nil)
+		var m me
+		s.MustAPI(t, http.MethodGet, "/api/me", nil, sess, &m)
+		if !m.SecondFactorRequired {
+			t.Fatal("GET /api/me of an admin without a second factor: second_factor_required is false")
+		}
 		wantSetupOnly(t, sess, http.MethodGet, "/api/repos")
-		wantSetupOnly(t, sess, http.MethodGet, "/api/tokens")
+		wantSetupOnly(t, sess, http.MethodGet, "/api/settings")
+		wantSetupOnly(t, sess, http.MethodGet, "/api/audit")
 		s.MustAPI(t, http.MethodGet, "/api/security", nil, sess, nil)
-		// The bootstrap admin follows the same rule.
-		admin := s.Login(t, s.AdminUser, s.AdminPass)
-		wantSetupOnly(t, admin, http.MethodGet, "/api/settings")
+	})
+
+	t.Run("other users sign in with the password", func(t *testing.T) {
+		sess := s.Login(t, pub, pubPw)
+		var m me
+		s.MustAPI(t, http.MethodGet, "/api/me", nil, sess, &m)
+		if m.SecondFactorRequired {
+			t.Fatal("GET /api/me of a publisher signed in with a password: second_factor_required is true")
+		}
+		s.MustAPI(t, http.MethodGet, "/api/repos", nil, sess, nil)
+		s.MustAPI(t, http.MethodGet, "/api/tokens", nil, sess, nil)
+
+		// A device approval still needs a second factor.
+		en, _ := s.StartEnrollment(t, "laptop", "gradle")
+		st, b := s.API(t, http.MethodPost, "/api/devices/approve", map[string]string{"user_code": en.UserCode, "totp_code": "000000"}, sess)
+		wantAPIStatus(t, "approve without a second factor", st, b, http.StatusForbidden)
+		if !strings.Contains(string(b), "second_factor_required") {
+			t.Fatalf("approve without a second factor: body %s, want second_factor_required", b)
+		}
+
+		// With a factor the password still signs in, in one step; the approval takes the code.
+		s.EnrollTOTP(t, pub)
+		var step struct {
+			SecondFactor bool `json:"second_factor"`
+		}
+		jar, _ := cookiejar.New(nil)
+		sess = &Session{Jar: jar}
+		s.MustAPI(t, http.MethodPost, "/api/auth/login", map[string]string{"username": pub, "password": pubPw}, sess, &step)
+		if step.SecondFactor {
+			t.Fatal("password sign-in of a publisher with a factor asks for the second factor")
+		}
+		s.MustAPI(t, http.MethodGet, "/api/repos", nil, sess, nil)
+		st, b = s.ApproveEnrollment(t, sess, pub, en.UserCode)
+		wantAPIStatus(t, "approve with a second factor", st, b, http.StatusCreated)
 	})
 
 	s.EnrollTOTP(t, u)

@@ -72,6 +72,39 @@ func (s *Service) RepoGate(w http.ResponseWriter, r *http.Request, name, format 
 	if !ok {
 		return nil, nil, false
 	}
+	return s.gate(w, r, p, name, format, need)
+}
+
+// DeleteGate authorizes a delete of files through the JSON API (spec §13): a publish session
+// for the repo (the write gate of RepoGate), or the UI session of an admin. An admin's UI
+// session needs a second factor (outside dev mode), so both paths had a fresh second factor or
+// a device or CI proof. A locked repo answers 409.
+func (s *Service) DeleteGate(w http.ResponseWriter, r *http.Request, name string) (*repos.Repo, *Principal, bool) {
+	p, ok := s.Identify(w, r, true)
+	if !ok {
+		return nil, nil, false
+	}
+	if p == nil || p.Publish != nil || !p.Session || !p.IsAdmin {
+		return s.gate(w, r, p, name, "", Write)
+	}
+	repo, err := s.repos.ByName(r.Context(), name)
+	if errors.Is(err, repos.ErrNotFound) {
+		httpx.Error(w, http.StatusNotFound, "repo not found")
+		return nil, nil, false
+	}
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "internal error")
+		return nil, nil, false
+	}
+	if repo.LockedBy != "" {
+		httpx.Error(w, http.StatusConflict, repo.LockedBy)
+		return nil, nil, false
+	}
+	return repo, p, true
+}
+
+// gate checks that the identified caller p may do need on repo name (see RepoGate).
+func (s *Service) gate(w http.ResponseWriter, r *http.Request, p *Principal, name, format string, need Level) (*repos.Repo, *Principal, bool) {
 	var repo *repos.Repo
 	denied := func() (*repos.Repo, *Principal, bool) {
 		switch {

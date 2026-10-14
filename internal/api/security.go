@@ -128,7 +128,7 @@ func (a *API) securityUser(w http.ResponseWriter, r *http.Request) (*auth.Princi
 		return nil, false
 	}
 	if !p.Session {
-		httpx.Error(w, http.StatusForbidden, "sign in to the web UI to manage second factors")
+		auth.SessionRequired(w)
 		return nil, false
 	}
 	if p.Kind != auth.KindLocal {

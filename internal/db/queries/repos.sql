@@ -2,23 +2,27 @@
 
 -- Indexed point lookup, used on every request.
 -- name: GetRepoByName :one
-SELECT id, name, format, anonymous_read, config, created_at, locked_by FROM repos WHERE name = ?;
+SELECT id, name, format, anonymous_read, config, created_at, locked_by, description FROM repos WHERE name = ?;
 
 -- name: GetRepoByID :one
-SELECT id, name, format, anonymous_read, config, created_at, locked_by FROM repos WHERE id = ?;
+SELECT id, name, format, anonymous_read, config, created_at, locked_by, description FROM repos WHERE id = ?;
 
 -- Keyset page by name (pass "" for the first page).
 -- name: ListRepos :many
-SELECT id, name, format, anonymous_read, config, created_at, locked_by FROM repos
+SELECT id, name, format, anonymous_read, config, created_at, locked_by, description FROM repos
 WHERE name > sqlc.arg(after) ORDER BY name LIMIT sqlc.arg(limit);
 
 -- name: CreateRepo :one
-INSERT INTO repos (name, format, anonymous_read, config, created_at) VALUES (?, ?, ?, ?, ?)
+INSERT INTO repos (name, format, anonymous_read, config, description, created_at) VALUES (?, ?, ?, ?, ?, ?)
 RETURNING id;
 
 -- name: UpdateRepo :exec
-UPDATE repos SET anonymous_read = ?, config = ? WHERE id = ?;
+UPDATE repos SET anonymous_read = ?, config = ?, description = ? WHERE id = ?;
 
 -- NULL clears the lock.
 -- name: SetRepoLockedBy :exec
 UPDATE repos SET locked_by = ? WHERE id = ?;
+
+-- Deletes the repo; its remaining rows cascade.
+-- name: DeleteRepo :execrows
+DELETE FROM repos WHERE id = ?;

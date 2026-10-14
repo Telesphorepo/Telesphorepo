@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
@@ -62,17 +63,25 @@ type Keycloak struct {
 	c *testcontainers.DockerContainer
 }
 
-// freeHostPort asks the OS for a free TCP port on the host. There is a small window in which
-// another process could take it; that is acceptable for a test. It listens on loopback only: a
-// listener on all interfaces makes the Windows firewall prompt for every new test binary.
+// freeHostPort picks a free TCP port on the host in 20000-29999. The OS's own ephemeral ports
+// (Windows 49152-65535) overlap the range the container engine uses for published ports
+// (Linux 32768-60999); a port that is free on the host can then be bound already inside a
+// Podman VM, and Keycloak, which listens on the same port inside its container, fails to start.
+// The probe listens on loopback only: a listener on all interfaces makes the Windows firewall
+// prompt for every new test binary.
 func freeHostPort(t testing.TB) int {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("find free port: %v", err)
+	for range 200 {
+		port := 20000 + rand.IntN(10000)
+		l, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
+		if err != nil {
+			continue
+		}
+		l.Close()
+		return port
 	}
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
+	t.Fatal("find free port: no free port in 20000-29999")
+	return 0
 }
 
 // newKeycloak picks the alias and the port so the issuer URL is known before anything starts.

@@ -176,7 +176,7 @@ func moveWantDone(t *testing.T, s *Server, m Move) {
 func moveWantRaw(t *testing.T, s *Server, repo string, files map[string][]byte) {
 	t.Helper()
 	for p, body := range files {
-		rawWantGet(t, s, nil, "/raw/"+repo+"/"+p, s.Admin(), body)
+		rawWantGet(t, s, nil, "/raw/"+repo+"/"+p, s.AdminBasic(), body)
 	}
 }
 

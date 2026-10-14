@@ -17,8 +17,8 @@ Nexus 3 container) and scale (flat from 100k to 1M assets).
 | M2: OIDC admin sign-on (Keycloak or any OIDC IdP; settings in the Settings page's SSO section), §7.5 | done |
 | M2.5: format plugins (Maven, Debian and `raw` are plugins), per-owner sqlc queries and migrations, plan guard, scale test (§5.4, §5.5) | done |
 | M3: storage move (FS ↔ S3), Nexus sources with mirroring syncs and cut-over (§12) | done |
-| M4: full admin UI polish, deletes + blob/by-hash GC | designed |
-| M3.5: publisher credentials: publish sessions as the only way to write, second factor (TOTP, passkeys, recovery codes), device keys, CI trust policies (OIDC), Gradle plugin and Maven extension in the clients repo (§7.6) | built, pending verification |
+| M4: Svelte UI (Browse and Settings), file tree, upload and delete, repo description, audit log, by-hash cleanup, admin second-factor rule, dev mode (§13) | done |
+| M3.5: publisher credentials: publish sessions as the only way to write, second factor (TOTP, passkeys, recovery codes), device keys, CI trust policies (OIDC), Gradle plugin and Maven extension in the clients repo (§7.6) | done |
 
 Design spec (source of truth for what's next):
 `docs/superpowers/specs/2026-10-14-telesphorepo-mvp-design.md`. System as built: `SPEC.md`.
@@ -44,29 +44,20 @@ Design spec (source of truth for what's next):
 - **Real R2.** The e2e suite no longer has R2 runs. R2 works through the generic S3 backend.
 - **The M3 UI pages** (the storage move panel and the Nexus page) have not been clicked through.
 
-## M3.5 status: written, not yet verified
+## M3.5 and M4: verified
 
-The code, UI, clients, e2e tests and docs for M3.5 are in the working tree. Nobody has built,
-vetted or run them yet. The orchestrator must do these checks in order:
+All four e2e zones pass on Windows 11 + Podman 5.8: core (incl. the session rule: admin and
+write routes need a signed-in UI session; passwords and read tokens only read), import, clients
+and scale. The UI build runs svelte-check. CI on GitHub runs build, vet, the plan guard and the
+core zone on every push, and publishes `ghcr.io/telesphorepo/telesphorepo:main` after a green push
+to `main`.
 
-1. `go build ./...`, `go vet ./...`, and `go vet -tags e2e|import|scale|clients ./e2e/...`.
-2. `cd web && bun install && bun run build` (the UI and the QR encoder in `web/src/qr.tsx` have
-   never compiled; scan one QR code with a real authenticator app).
-3. `go tool task test` (core zone, including the publish tests and `TestQueryPlans`), then
-   `go tool task test import`, then `go tool task test clients`.
-4. Open the UI and click through Security, Devices, the approval page, Publishing, Trust
-   policies and Publish log.
-
-Things to know when the first run fails:
-- The clients zone downloads `com.gradle.plugin-publish` from the Gradle Plugin Portal. The
-  container needs network access. There is no Gradle wrapper, so the zone uses a Gradle image.
-- The clients zone assumes that `jwebserver` is on the PATH of the Maven image.
-- Passkeys need `base_url`. `telesphorepo dev` does not set it, so passkeys answer 409 there.
-  Under `go tool task dev` the page origin is `:5173`, so the WebAuthn origin check would fail
-  anyway.
-- The design doc §7.6 still says `90d`. The built value is `2160h`. SPEC.md has the built values.
-- The clients are MIT and live in https://github.com/Telesphorepo/clients. The clients zone
-  clones that repo (needs `git`) or reads `E2E_CLIENTS_DIR`. The server is AGPL-3.0 (`LICENSE`).
+Things to know:
+- `index.html` has an inline script that sets the theme before the first paint. A future CSP needs a hash for it.
+- The Publish page snippets use the browser address, not `base_url` from `/usage`.
+- A whole-repo delete that races an in-flight upload or index rebuild can leave one orphan blob
+  (its row write fails). A new repo with the same name overwrites it. Fixing it needs a
+  repo-level drain of in-flight writes.
 
 ## Owner tasks before the first client release
 
@@ -78,12 +69,16 @@ owner must do these steps first:
 2. Later, for the Gradle Plugin Portal and Maven Central: create the accounts, verify the
    namespace `com.telesphorepo`, create a GPG key, add the secrets listed in
    `.github/workflows/release.yml` of the clients repo, and enable the commented jobs there.
-3. After the first release, replace the `VERSION` placeholders in `web/src/pages/Publishing.tsx`
+3. After the first release, replace the `VERSION` placeholders in `web/src/pages/settings/Publish.svelte`
    and `README.md`.
 
 ## Known gaps / small follow-ups
 
-- Debian `by-hash/` files are never pruned (planned for M4).
+- During a repo delete, an index rebuild that already writes, or an upload that already passed the gate, can leave an orphan blob after the repo row is gone. The row upsert fails and the blob stays. A new repo with the same name overwrites a blob at the same key. A fix needs a repo-level drain mechanism.
+- HTTP Basic with an admin password works on the JSON API with no second factor. The e2e suite depends on it. The new sign-in rule covers UI sign-in only.
+- Downloads from a private repo ask the browser for a username and read token, because the format routes do not accept the UI session cookie.
+- The upload formats (maven, debian, raw) are a list in `web/src/pages/browse/repo/RepoView.svelte`. `/api/formats` does not report which formats take uploads.
+- `tools/task` prints its own dev banner. It lacks the line "2FA not enforced (dev)".
 - Maven `-DdeployAtEnd=true` fails when more than `publish.session_ttl` passes between the first
   and the last module. The cause: `maven-deploy-plugin` fixes the credentials at each module's
   deploy step and uploads at the end. The client README states the limit.
@@ -94,4 +89,4 @@ owner must do these steps first:
 2. M3 decisions that stand: a cut-over stops on any failed file, so a file that can never import
    blocks it until it is fixed in Nexus or here. Sync history is kept (96 small rows per source per
    day at the 15m default).
-3. Start **M4**: full admin UI polish, deleting assets and deb packages, blob and by-hash GC.
+3. Next milestone: **M5** (design doc §13.1).

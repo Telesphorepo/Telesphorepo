@@ -16,6 +16,9 @@ ON CONFLICT (repo_id, path) DO UPDATE SET size = excluded.size, sha256 = exclude
   content_type = excluded.content_type, updated_at = excluded.updated_at, uploaded_by = excluded.uploaded_by
 RETURNING id, kind, created_at, updated_at;
 
+-- name: DeleteAsset :execrows
+DELETE FROM assets WHERE repo_id = ? AND path = ?;
+
 -- Keyset pages of a repo's assets, ordered by path. Each query has exactly one lower bound on
 -- path: SQLite's range scan uses one lower bound per index column and checks any other bound row
 -- by row, which would make deep pages scan from the start of the repo. The caller passes the

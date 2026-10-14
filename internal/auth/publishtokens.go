@@ -20,6 +20,7 @@ type PublishSession struct {
 	ID, RepoID int64
 	UserID     int64 // 0 for OIDC sessions
 	Via        string
+	Subject    string // the username (device, manual) or the CI token's sub (oidc)
 }
 
 // SetPublishTokens sets the verifier of publish-session tokens. Without it a "trs_" password

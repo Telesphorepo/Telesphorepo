@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/publish"
@@ -71,8 +72,9 @@ func publishFail(w http.ResponseWriter, r *http.Request, err error) {
 	}
 }
 
-// person requires a signed-in user that is not a read token: a UI session or a username and
-// password (a.user already refuses publish-session tokens).
+// person requires a signed-in user that is not a read token: a UI session, or a username and
+// password on a GET route (a.user already refuses publish-session tokens, and auth.Identify
+// refuses a password on a route that changes state).
 func (a *API) person(w http.ResponseWriter, r *http.Request) (*auth.Principal, bool) {
 	p, ok := a.user(w, r)
 	if !ok {
@@ -261,6 +263,7 @@ func (a *API) deviceSession(w http.ResponseWriter, r *http.Request) {
 		publishFail(w, r, err)
 		return
 	}
+	a.recordMint(r, m)
 	httpx.WriteJSON(w, http.StatusCreated, m)
 }
 
@@ -283,6 +286,7 @@ func (a *API) manualSession(w http.ResponseWriter, r *http.Request) {
 		publishFail(w, r, err)
 		return
 	}
+	a.recordMint(r, m)
 	httpx.WriteJSON(w, http.StatusCreated, m)
 }
 
@@ -301,6 +305,7 @@ func (a *API) oidcSession(w http.ResponseWriter, r *http.Request) {
 		publishFail(w, r, err)
 		return
 	}
+	a.recordMint(r, m)
 	httpx.WriteJSON(w, http.StatusCreated, m)
 }
 
@@ -347,11 +352,26 @@ func (a *API) closeSession(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusUnauthorized, "authenticate with the publish session token")
 		return
 	}
-	if err := a.publish.CloseSession(r.Context(), id, tok); err != nil {
+	cl, err := a.publish.CloseSession(r.Context(), id, tok)
+	if err != nil {
 		publishFail(w, r, err)
 		return
 	}
+	if cl != nil {
+		a.audit.Record(r.Context(), r, audit.Event{
+			Actor: audit.Actor{UserID: cl.UserID, Name: cl.Subject}, Action: audit.SessionClose,
+			RepoID: cl.RepoID, Repo: cl.Repo, Target: strconv.FormatInt(id, 10), Detail: map[string]any{"via": cl.Via},
+		})
+	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// recordMint writes a new publish session to the audit log.
+func (a *API) recordMint(r *http.Request, m *publish.Minted) {
+	a.audit.Record(r.Context(), r, audit.Event{
+		Actor: audit.Actor{UserID: m.UserID, Name: m.Subject}, Action: audit.SessionCreate,
+		RepoID: m.RepoID, Repo: m.Repo, Target: strconv.FormatInt(m.ID, 10), Detail: map[string]any{"via": m.Via},
+	})
 }
 
 // publishLog returns every session, newest first (admin): ?after=<id>&limit=.

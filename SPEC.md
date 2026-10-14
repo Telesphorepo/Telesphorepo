@@ -36,10 +36,12 @@ proxy or cache repos and is not compatible with the Nexus API.
 | `internal/debian` | Format `debian`: `.deb` upload/parse, durable dirty queue, debounced indexer, `/keys/debian.asc`. Owns its tables, queries (`queries/`, `dbq/`), `deb.*` settings and architecture config |
 | `internal/raw` | Format `raw`: plain files at `/raw/{repo}/{path...}` with an `overwrite` policy |
 | `internal/signing` | OpenPGP key `Generate`, `Parse`, `Load`, `ReadPassphrase`, clearsign/detach-sign (ProtonMail go-crypto) |
+| `internal/files` | File tree, deletes (files, folders, repos) and manual uploads. Calls the plugin interfaces `DeleteObserver` and `ManualUploader` |
+| `internal/audit` | The audit log: `Record`, the list query and the retention job |
 | `internal/api` | JSON API under `/api/`, wrapped in `http.CrossOriginProtection` |
 | `internal/httpx` | JSON helpers, error shape, `Limit` (default 50, max 200) |
 | `internal/containerengine` | Docker/Podman detection for tooling and e2e; not linked into the server |
-| `web/` | React + Vite UI, embedded via `web/embed.go` (`go:embed all:dist`) |
+| `web/` | Svelte 5 + Vite UI (Tailwind CSS v4, shadcn-svelte Maia style), embedded via `web/embed.go` (`go:embed all:dist`). See **Web UI** |
 | `tools/task` | `go tool task`: dev, build, preview, test, gen and doctor |
 | `e2e/` | End-to-end suite in four zones (tags `e2e`, `import`, `scale`, `clients`) using testcontainers |
 
@@ -58,7 +60,7 @@ close and every 6 hours.
 | `users` | PK `id`, UNIQUE `username`, UNIQUE `users_oidc (oidc_issuer, oidc_subject)` where `oidc_subject` is set | argon2id PHC hash (`!` for SSO users, never verifies), `is_admin`, `disabled`, `password_changed_at`, `kind` (`local`/`oidc`), `email` |
 | `api_tokens` | UNIQUE `public_id`, UNIQUE `(user_id, name)` | `secret_hash` = SHA-256(secret); optional `expires_at`; `last_used_at` written at most once per minute. These are **read tokens**: they never publish |
 | `sessions` | PK `id_hash` (WITHOUT ROWID), idx `expires_at`, idx `user_id` | `id_hash` = SHA-256(cookie value) |
-| `repos` | UNIQUE `name`, partial idx `repos_anonymous (id) WHERE anonymous_read = 1` | `format` is any registered format name (no CHECK); `anonymous_read`; `config` JSON; `locked_by` (NULL, or the text that a write answers with 409, set while the repo mirrors a Nexus source) |
+| `repos` | UNIQUE `name`, partial idx `repos_anonymous (id) WHERE anonymous_read = 1` | `format` is any registered format name (no CHECK); `description` (at most 500 characters); `anonymous_read`; `config` JSON; `locked_by` (NULL, or the text that a write answers with 409, set while the repo mirrors a Nexus source) |
 | `repo_permissions` | PK `(repo_id, user_id)`, idx `user_id` | `level` is `read` or `write` |
 | `assets` | UNIQUE `(repo_id, path)`, idx `uploaded_by` | Every stored file; `kind` is `artifact`, `metadata` or `index` |
 | `assets_fts` | FTS5 trigram on `path` | Kept in sync by triggers; `index` rows are not indexed |
@@ -80,6 +82,7 @@ close and every 6 hours.
 | `publish_trust_repos` | PK `(trust_id, repo_id)` (WITHOUT ROWID), idx `repo_id` | The repos a policy may publish to |
 | `publish_sessions` | PK `id`, UNIQUE `public_id`, idx `expires_at`, `repo_id`, `user_id`, `device_id`, `trust_id` | `secret_hash` = SHA-256(secret); `via` `device`/`oidc`/`manual`; `subject`; `closed_at`. `repo_id` cascades; `user_id`, `device_id` and `trust_id` are SET NULL |
 | `auth_challenges` | PK `id_hash` (WITHOUT ROWID), idx `expires_at`, `user_id`, `device_id` | Short-lived single-use state: `kind` is `login`, `totp_setup`, `webauthn_register`, `webauthn_assert` or `publish_nonce`; `data` holds the payload |
+| `audit_events` | PK `id`, idx `at`, idx `(repo_id, id)`, idx `(action, id)`, idx `actor_user_id` | `at` unix time; `actor` is a username, `cli` or the attempted username of a failed sign-in; `actor_user_id` and `repo_id` are SET NULL; `target`; `detail` is JSON and never holds a secret value; `ip` is the client address. This table is the only place that stores or shows an IP address. See **Audit log** |
 | `publish_oidc_seen` | PK `id_hash` (WITHOUT ROWID), idx `expires_at` | SHA-256 of `<issuer>\n<jti>`, or of the whole token when it has no `jti`. A second insert means a replay |
 
 Tables of the `debian` track:
@@ -145,7 +148,7 @@ before `settings.Load`.
 |---|---|
 | general | `base_url`, `log.level`, `max_upload_bytes`, `max_json_bytes`, `nexus.sync_interval` (`15m`, minimum `1m`) |
 | storage | `storage` (`fs`/`s3`, with `r2` as an alias for `s3`), `fs.root`, `s3.endpoint`, `s3.region`, `s3.bucket`, `s3.access_key_id`, `s3.secret_access_key`*, `s3.prefix`, `s3.path_style`, `s3.redirect`, `presign_ttl` |
-| security | `cookie.secure`, `session_ttl`, `trusted_proxies` |
+| security | `cookie.secure`, `session_ttl`, `trusted_proxies`, `audit.retention` (`8760h`, which is 365 days) |
 | publishing | `publish.session_ttl` (`15m`, maximum `1h`), `publish.device_ttl` (`2160h`, which is 90 days; Go durations have no `d` unit) |
 | sso | `oidc.issuer`, `oidc.client_id`, `oidc.client_secret`*, `oidc.redirect_url`, `oidc.scopes` (`openid profile email`), `oidc.admin_claim` (`groups`; dotted paths allowed), `oidc.admin_values`, `oidc.admin_emails`, `oidc.session_ttl` (`12h`), `admin_password_login` (`true`) |
 | signing | `signing.key`* (only through its own endpoint), `gpg.key_file`, `gpg.passphrase_file` |
@@ -212,30 +215,43 @@ session for that repo gets 401 with a Basic challenge and
 `{"error":"publishing needs a publish session: <base_url>/#/publishing"}`. A device or manual
 session writes only while its user still has `write` on the repo (else 403).
 
-JSON API (`/api/`). Auth is a session cookie or HTTP Basic. A publish session token (`trs_...`)
-reaches only `/api/publish/...`; every other `/api` route answers it with 403. Errors are `{"error": "..."}`, plus
+JSON API (`/api/`). Auth is a session cookie or HTTP Basic. Every route that changes state
+(POST, PUT, PATCH, DELETE) and every admin route (GET too) needs the UI session cookie. HTTP
+Basic with a password or a read token reaches only the GET routes that are not admin routes;
+elsewhere it gets 401 `{"error":"sign in through the web UI for this action"}`, as does a request
+with no credential. The routes that take no credential or their own token are the exceptions
+(sign-in, `/api/auth/config`, `/api/formats`, and the publish routes marked "none" or "token" in
+**Publishing**). A signed-in user without the right gets 403. A publish session token (`trs_...`,
+as the Basic password or as `Authorization: Bearer trs_...`) reaches only `/api/publish/...`,
+`POST /api/repos/{name}/upload` and `DELETE /api/repos/{name}/files`, and only for its own repo.
+Every other `/api` route answers it with 403. Errors are `{"error": "..."}`, plus
 `fields` for settings validation. Bodies are capped at `max_json_bytes`. Lists are
 `{items, next}` with `?after=&limit=`.
 
 | Method & path | Auth | Notes |
 |---|---|---|
-| `POST /api/auth/login` · `POST /api/auth/logout` | none · session | Login `{username, password}`. A user with a second factor gets `{second_factor: true, methods: [...]}` and the cookie `tr_login`; a user without one gets the User plus `second_factor_required: true` and a setup-only session (see **Auth model**). 401 for SSO users; 403 for a local admin when `admin_password_login=false`. Logout ends the local session only |
+| `POST /api/auth/login` · `POST /api/auth/logout` | none · session | Login `{username, password}`. An admin with a second factor gets `{second_factor: true, methods: [...]}` and the cookie `tr_login`; an admin without one gets the User plus `second_factor_required: true` and a setup-only session. A non-admin user gets the User and a full session after the password alone (see **Auth model**). 401 for SSO users; 403 for a local admin when `admin_password_login=false`. Logout ends the local session only |
 | `POST /api/auth/login/passkey` | `tr_login` cookie | Returns `{publicKey: {...}}`, the WebAuthn assertion options for the pending sign-in |
 | `POST /api/auth/login/second` | `tr_login` cookie | `{totp_code}`, `{passkey: <assertion>}` or `{recovery_code}`. 200 sets `tr_session` and returns the User with `second_factor_required: false`. 401 for a wrong proof (the sign-in stays pending) or an expired sign-in; 429 with `Retry-After` after too many failures |
 | `GET /api/security` | UI session | `{totp: [{id, name, created_at}], passkeys: [{id, name, created_at, last_used_at}], recovery_codes: <unused count>, second_factor: bool}` |
 | `POST /api/security/totp/begin` · `.../totp/confirm` · `DELETE .../totp/{id}` | UI session | `{name}` returns `{setup_id, secret, otpauth_url}` (the secret is shown once; the setup lasts 10 min). `{setup_id, code}` returns 201 `{id, name, created_at}`. Delete is 204 |
 | `POST /api/security/passkeys/begin` · `.../passkeys/finish` · `.../passkeys/assert` · `DELETE .../passkeys/{id}` | UI session | `begin` returns `{publicKey}` creation options. `finish` `{name, credential}` returns 201 `{id, name, created_at, last_used_at}`. `assert` returns `{publicKey}` options for a fresh check before an approval or a manual session. 409 when `base_url` is empty |
 | `POST /api/security/recovery-codes` | UI session | 201 `{codes: [10 x "abcd-efgh-ijkl-mnop"]}`; replaces the old set. Shown once |
-| `GET /api/auth/config` | none | `{password_login: true, oidc, admin_password_login}` |
+| `GET /api/auth/config` | none | `{password_login: true, oidc, admin_password_login, second_factor_optional}`. `second_factor_optional` is true only under `telesphorepo dev` |
 | `GET /api/auth/oidc/login` | none | 404 when SSO is off, 503 when discovery fails. Stores state/nonce/PKCE verifier in memory (10 min, single use, keyed by SHA-256(state)), sets `tr_oidc` (HttpOnly, SameSite=Lax, Path `/api/auth/oidc`, 600 s), 302 to the IdP |
 | `GET /api/auth/oidc/callback` | none | 400 for missing/mismatched/unknown/reused/expired state, state from before an issuer or client change, or missing `code`; 503 on discovery failure. Verifies the ID token (signature, issuer, audience, expiry, nonce) and the admin rule. Success: upsert user, session with `oidc.session_ttl`, 302 `/`. Failure: 302 `/#/login?error=` `not_authorized` \| `username_conflict` \| `invalid_username` \| `account_disabled` \| `sso_failed` |
-| `GET /api/me` | any | Current user. User JSON includes `kind` (`local`/`oidc`), `email` (`""` when unset) and `second_factor_required` (true only for a setup-only UI session) |
-| `GET/POST /api/tokens`, `DELETE /api/tokens/{id}` | any | **Read tokens.** The token is shown once. A token cannot mint tokens. POST is 403 for SSO users |
-| `GET/POST /api/users`, `PATCH /api/users/{username}` | admin (self may change own password) | The user list is paginated |
+| `GET /api/me` | any credential | Current user. User JSON includes `kind` (`local`/`oidc`), `email` (`""` when unset) and `second_factor_required` (true only for a setup-only UI session) |
+| `GET /api/tokens` · `POST /api/tokens`, `DELETE /api/tokens/{id}` | any credential · UI session | **Read tokens.** The token is shown once. A token cannot mint tokens. POST is 403 for SSO users |
+| `GET/POST /api/users`, `PATCH /api/users/{username}` | admin (a UI session may change its own password) | The user list is paginated |
 | `GET /api/formats` | none | `[{name, title, default_config, settings_group?}]` for every registered format |
-| `GET/POST /api/repos`, `GET/PATCH /api/repos/{name}` | any/anon · admin | The list shows only repos the caller can see. `format` must be a registered name. `config` must be a JSON object that the format validates (400 otherwise; an unknown format lists the available ones). An empty config becomes the format default. Repo JSON has `locked_by` (`""` when the repo is not locked). A PATCH with `config` calls the format's `RepoConfigChanged` |
+| `GET /api/repos`, `GET /api/repos/{name}` · `POST /api/repos`, `PATCH /api/repos/{name}` | any/anon · admin | The list shows only repos the caller can see. `format` must be a registered name. `description` (POST and PATCH) has at most 500 characters and no control characters except newline and tab. `config` must be a JSON object that the format validates (400 otherwise; an unknown format lists the available ones). An empty config becomes the format default. Repo JSON has `locked_by` (`""` when the repo is not locked). A PATCH with `config` calls the format's `RepoConfigChanged` |
 | `GET /api/repos/{name}/permissions`, `PUT/DELETE .../permissions/{username}` | admin | `{level: read\|write}` |
+| `DELETE /api/repos/{name}` | admin | 200 `{deleted: n}`. Locks the repo (writes get 409 `RepoDeleting`), deletes the files in batches, then the repo row. See **Files, uploads and deletes** |
 | `GET /api/repos/{name}/assets?prefix=&after=&limit=` | read | Ordered by path; the prefix is a range scan |
+| `GET /api/repos/{name}/tree?path=&after=&limit=` | read | `{items: [{name, type: "dir"\|"file", path, size?, sha256?, updated_at?, uploaded_by?}], next}`. `path` is a folder (`""` or ending in `/`). A folder item's `path` and the `next` cursor end in `/`. `uploaded_by` is a username |
+| `DELETE /api/repos/{name}/files?path=` or `?prefix=` | publish session of the repo, or admin UI session | 200 `{deleted: n}`. 404 for a missing file; an empty folder gives `deleted: 0`. 409 on a locked repo. 401 `publishing needs a publish session` for any other credential |
+| `POST /api/repos/{name}/upload` | publish session of the repo | Multipart. 201 `{files: [{path, status: "created"\|"replaced"\|"unchanged", size, sha256}]}`. 400 or 409 for a client error of the plugin |
+| `GET /api/audit?after=&limit=&action=&repo=` | admin | `{items: [{id, at, actor, actor_user_id\|null, action, repo, target, detail, ip}], next}`, newest first. `repo` is a repo name |
 | `GET /api/search?q=&repo=&after=&limit=` | any/anon | FTS5 trigram, `q` ≥ 3 chars, readable repos only |
 | `GET /api/repos/{name}/status` | read | The format's `Status` result, or `{}`. Debian: `{pending}`, the count of dirty rows |
 | `GET /api/repos/{name}/usage` | read | `{base_url, snippets:[{title, lang, code}]}` from the format's `Usage`. `base_url` is the `base_url` setting, else the request scheme and host |
@@ -261,6 +277,9 @@ reaches only `/api/publish/...`; every other `/api` route answers it with 403. E
 | `POST /api/settings/oidc/test` | admin | Same, for SSO discovery. Returns `{ok:true}`, or 400 `{ok:false, error, fields}` |
 | `GET/POST /api/settings/signing-key` | admin | Returns `{public_key, fingerprint}`. POST `{armored?}`: an empty value generates a new key. 409 when the key comes from `gpg.key_file` |
 
+"admin" in these tables means the UI session of an admin. "UI session" means the `tr_session`
+cookie; an admin session exists only after the second factor (outside dev mode).
+
 ## Client setup
 
 The UI shows these snippets per repo (`/usage`), and `telesphorepo dev` prints them. `HOST` is the server URL. For reads, credentials are a user and password, or any username with a
@@ -279,10 +298,10 @@ read token as the password. Uploads use a publish session token; the Maven and G
 
 | Credential | Storage | Accepted on |
 |---|---|---|
-| Password | argon2id (64 MiB, t=3, p=2), at most 4 hashes at once; successful Basic checks are cached for 10 min under an HMAC key | Basic auth (formats + API), login |
-| Read token `trp_<12hex>_<secret>` | SHA-256(secret), looked up by id, constant-time compare | Basic password (any username), `/api/`. Reads only |
-| Session `tr_session` | SHA-256(id), absolute `session_ttl` | `/api/` only. HttpOnly, SameSite=Strict, Secure per `cookie.secure` |
-| Publish session `trs_<12hex>_<secret>` | SHA-256(secret) in `publish_sessions`, constant-time compare | Basic password (any username) on format routes of its one repo, and `/api/publish/...`. The only credential that writes |
+| Password | argon2id (64 MiB, t=3, p=2), at most 4 hashes at once; successful Basic checks are cached for 10 min under an HMAC key | Sign-in (`POST /api/auth/login`). As Basic auth: format reads, and the `/api/` GET routes that are not admin routes |
+| Read token `trp_<12hex>_<secret>` | SHA-256(secret), looked up by id, constant-time compare | Basic password (any username): format reads, and the `/api/` GET routes that are not admin routes |
+| Session `tr_session` | SHA-256(id), absolute `session_ttl` | `/api/` only, and the only credential for admin routes and for routes that change state. HttpOnly, SameSite=Strict, Secure per `cookie.secure`. An admin session may also delete files (see **Files, uploads and deletes**) |
+| Publish session `trs_<12hex>_<secret>` | SHA-256(secret) in `publish_sessions`, constant-time compare | Basic password (any username) or `Authorization: Bearer` on format routes of its one repo, `/api/publish/...`, and the upload and delete routes of its repo. The only credential that writes to a format route |
 
 - **Account kinds.** `local` users have a password, API tokens and Basic auth; publishers and the
   break-glass admin. `oidc` users are created on their first SSO login, keyed by
@@ -302,14 +321,36 @@ read token as the password. Uploads use a publish session token; the Maven and G
   sign-in. Passkeys need `base_url`; without it the routes answer 409. TOTP secrets are sealed
   with the settings key. Failed checks count against the `u:<username>` rate-limit key. SSO
   users have no second factor.
-- **Sign-in.** A user with a factor sends password, then a second step with the cookie
+- **Sign-in.** An admin with a factor sends password, then a second step with the cookie
   `tr_login` (HttpOnly, SameSite=Strict, Path `/api/auth/login`, 5 min). The state is a row in
-  `auth_challenges`, so it survives a restart. A wrong code keeps the sign-in pending.
-- **Setup-only session.** A UI session of a local user with no factor reaches only `/api/me`,
+  `auth_challenges`, so it survives a restart. A wrong code keeps the sign-in pending. A
+  non-admin user signs in with the password alone, also when the user has a factor.
+- **Where a factor is required.** Admin sign-in, device approval and a manual publish session
+  (the UI session that publishes or deletes) need a fresh factor. A non-admin user sets up a
+  factor when first approving a device or creating a manual session.
+- **Setup-only session.** A UI session of an admin with no factor reaches only `/api/me`,
   `/api/auth/logout` and `/api/security...`. Every other `/api` route answers 403
   `{"error":"second_factor_required"}`. The break-glass `admin` follows the same rule. The
-  `/api/security` routes need a UI session, so Basic auth and tokens get 403. A password alone
+  `/api/security` routes need a UI session, so Basic auth and tokens get 401. A password alone
   cannot add a factor and cannot publish.
+- **Dev mode.** `telesphorepo dev` sets `server.Options.Dev`, which calls `auth.SetDevMode`. It is
+  an in-process flag: not a setting, not an env var, and not reachable from `serve`. In dev mode
+  an admin without a factor gets a full session, and a device approval or manual session without a
+  factor passes. A factor that exists is still checked. `GET /api/auth/config` reports
+  `second_factor_optional: true`, and the dev banner says "2FA not enforced (dev)". The e2e
+  suite runs `serve`, so enforcement stays tested.
+- **Where each credential works on the JSON API.** A route that changes state (POST, PUT, PATCH,
+  DELETE) or an admin route (GET too) needs the UI session. HTTP Basic with a password or a read
+  token reaches only the GET routes that are not admin routes: repo list and repo, tree, assets,
+  search, status, usage, `/api/me`, own tokens, devices and publish sessions. Anything else gets
+  401 `{"error":"sign in through the web UI for this action"}` without a Basic challenge. So a
+  stolen admin password cannot change users, permissions, settings or trust policies: an admin
+  session needs the second factor. `auth.Identify` refuses Basic on routes that change state, and
+  `api.admin` refuses every credential except a UI session. The exceptions are the routes with no
+  credential or their own token: sign-in, `/api/auth/config`, `/api/formats`, device enrollment
+  and poll, the publish challenge, the device and OIDC session mints, closing a session with its
+  token, and the upload and delete routes with a publish session token. Dev mode does not change
+  this rule.
 - **Lost factors.** `telesphorepo user reset-2fa NAME` removes the TOTP factors, passkeys and
   recovery codes of a user.
 - **Roles.** Admins can do everything. Repo permission `write` includes `read`. A disabled user
@@ -342,14 +383,14 @@ Routes (`{items, next}` lists are keyset, `?after=&limit=`):
 | `POST /api/devices/enroll` | none | `{name, kind: "gradle"\|"maven", public_key}` (`public_key` is the raw 32-byte key, base64url, no padding). Returns `{device_code, user_code: "ABCD-EFGH", verification_url: "<base_url>/#/device", expires_in: 600, interval: 5}`. `verification_url` uses the request URL when `base_url` is empty. Each IP gets a burst of 10, then 1 per 30 s (429) |
 | `POST /api/devices/enroll/poll` | none | `{device_code}`. 200 `{device_id}` once approved (single use). 400 `{"error": "authorization_pending" \| "slow_down" \| "expired_token"}`. `slow_down` answers a poll less than 4 s after the last. An unknown or used code gets `expired_token` |
 | `GET /api/devices/enroll?user_code=` | UI session or password | `{user_code, name, kind, expires_at}`; 404 for an unknown or expired code |
-| `POST /api/devices/approve` | UI session or password | `{user_code, totp_code \| passkey}`. 201 Device. 401 for a wrong second factor, 404 unknown or expired code, 409 used code, 403 `second_factor_required` |
-| `GET /api/devices` | session | Own devices; an admin sees all devices, with `username`. Newest first, `{items, next}` |
-| `DELETE /api/devices/{id}` | session | 204. An admin may revoke any device. It ends the device's open sessions |
+| `POST /api/devices/approve` | UI session | `{user_code, totp_code \| passkey}`. 201 Device. 401 for a wrong second factor, 404 unknown or expired code, 409 used code, 403 `second_factor_required` |
+| `GET /api/devices` | password, read token or UI session | Own devices; an admin sees all devices, with `username`. Newest first, `{items, next}` |
+| `DELETE /api/devices/{id}` | UI session | 204. An admin may revoke any device. It ends the device's open sessions |
 | `POST /api/publish/challenge` | none | `{device_id}` returns `{nonce}` (32 random bytes, base64url, single use, 60 s) |
 | `POST /api/publish/sessions` | none | `{device_id, repo, nonce, signature}` returns 201 `{id, token: "trs_...", repo, expires_at}` |
-| `POST /api/publish/sessions/manual` | UI session or password | `{repo, totp_code \| passkey}`; same answer. The proof is a fresh check, not recovery codes. 401 for a wrong proof, 429 with `Retry-After` when limited |
+| `POST /api/publish/sessions/manual` | UI session | `{repo, totp_code \| passkey}`; same answer. The proof is a fresh check, not recovery codes. 401 for a wrong proof, 429 with `Retry-After` when limited |
 | `POST /api/publish/sessions/oidc` | none | `{token, repo}`; same answer |
-| `GET /api/publish/sessions` | session | The caller's own sessions |
+| `GET /api/publish/sessions` | password, read token or UI session | The caller's own sessions |
 | `DELETE /api/publish/sessions/{id}` | the session's own token | 204. The token is the Basic password or a Bearer token. Another token or none gets 401 |
 | `GET /api/publish/log` | admin | Every session, newest first |
 | `GET, POST /api/publish/trusts` · `GET, PATCH, DELETE /api/publish/trusts/{id}` | admin | Trust policies. The list is keyset by name |
@@ -429,11 +470,11 @@ The group and plugin id are `com.telesphorepo`.
 - **CI without a client.** The UI **Publishing** page and the server `README.md` show `curl`
   steps for GitHub Actions and Jenkins.
 
-**UI pages.** Login (second step), **Security** (`#/security`: TOTP with a QR code, passkeys,
-recovery codes), **Devices** (`#/devices`), the approval page (`#/device?code=`), **Publishing**
-(`#/publishing`: new manual session, client setup), **Read tokens** (`#/tokens`), and for
-admins **Trust policies** (`#/trusts`, presets for GitHub Actions and Jenkins) and **Publish log**
-(`#/publish-log`). A setup-only session sees only the Security page.
+**UI pages.** The sign-in page (second step for admins), the approval page (`/#/device?code=`)
+and, under Settings: **Security** (TOTP with a QR code, passkeys, recovery codes), **Devices**,
+**Publish** (new manual session, client setup), **Read tokens**, and for admins **Trust
+policies** (presets for GitHub Actions and Jenkins) and **Publish log**. `/#/publishing`
+redirects to **Publish**. A setup-only session sees only the Security page. See **Web UI**.
 
 ## Debian indexing pipeline
 
@@ -457,7 +498,12 @@ admins **Trust policies** (`#/trusts`, presets for GitHub Actions and Jenkins) a
 8. **Architecture change.** A repo PATCH that changes `architectures` deletes the
    `deb_index_files` rows, `index` assets and blobs of removed architectures, and their pending
    rows. It marks the added architectures for rebuild, so each `Release` is rebuilt. A rebuild
-   skips a pending unit whose architecture is no longer configured. Old `by-hash/` files stay.
+   skips a pending unit whose architecture is no longer configured. The by-hash files of a
+   removed architecture are deleted too.
+9. **By-hash cleanup.** After each `Packages` rebuild, the indexer keeps the current and the
+   previous generation of `by-hash/` files for that index and deletes the rest.
+10. **Delete.** The debian `DeleteObserver` deletes the `deb_packages` rows of each deleted pool
+    file and marks the affected dists dirty. It marks nothing while the whole repo is deleted.
 
 ## Storage move
 
@@ -484,7 +530,7 @@ move (`internal/move`). The source is never modified or deleted.
   requests, the move continues from its cursor. If the settings already point at the target, the
   move is marked `done`. If the target cannot be opened or probed, the move fails with that
   error.
-- **UI.** The Settings page shows a progress bar while a move copies, a Cancel button, and the
+- **UI.** The **Storage** page (`/#/settings/storage`) shows a progress bar while a move copies, a Cancel button, and the
   failure list of a failed move.
 
 ## Nexus sources
@@ -563,7 +609,7 @@ input or refused credentials, 404, 409 (exists, running, not running, cut over, 
   409, and the sync history stays.
 - **Delete.** `DELETE .../sources/{id}` removes the source, its mapping, syncs and failures. The
   repos and their files stay.
-- **UI.** The admin-only **Nexus** page (`#/nexus`, `#/nexus/{id}`) lists the sources with an add
+- **UI.** The admin-only **Nexus** pages (`/#/settings/nexus`, `/#/settings/nexus/{id}`) lists the sources with an add
   form. The source page shows the state, the repos table with a target name and a checkbox per
   repo, "Save mapping", "Sync now", "Cut over" with a confirm card, "Update credentials", the
   sync history with "Load more" and a sync detail (per-repo counters, Cancel, failures). It polls
@@ -572,13 +618,97 @@ input or refused credentials, 404, 409 (exists, running, not running, cut over, 
   list of the cut-over sync. The repo list and the repo page show a "mirrors Nexus" badge when
   `locked_by` is set.
 
+## Files, uploads and deletes
+
+`internal/files` serves the file tree and runs deletes and manual uploads. The core names no
+format; it calls the optional plugin interfaces of `internal/format`.
+
+- **Tree.** `GET /api/repos/{name}/tree` returns the direct children of a folder in path order,
+  folders and files mixed (the UI sorts folders first within a page). Each child is one indexed
+  seek on `(repo_id, path)`. After a folder, the next seek starts just past every path under it,
+  so a page costs `limit` seeks however large the repo is.
+- **Delete credential.** `DELETE /api/repos/{name}/files` takes a publish session of that repo
+  (Basic password or `Authorization: Bearer trs_...`), which goes through the normal write gate:
+  the user's `write` permission, the repo lock, and 401 for a session of another repo. It also
+  takes the UI session cookie of an admin. Outside dev mode an admin session exists only after
+  the second factor. Passwords, read tokens, admin Basic auth and non-admin UI sessions get 401
+  `publishing needs a publish session`. A locked repo gets 409.
+- **Delete steps.** `?prefix=` is always a folder (a trailing `/` is added). The rows go in
+  batches of 500 under the upload locks, then the blobs. `deleted` is the number of files.
+- **Repo delete.** `DELETE /api/repos/{name}` (admin, any admin credential) sets the lock text
+  `RepoDeleting`, so writes get 409. It deletes the files batch by batch, then the repo row.
+  The name can be used again afterwards.
+- **`format.DeleteObserver`.** `AssetsDeleted(ctx, tx, repo, paths)` runs in the delete
+  transaction, before the rows go. Debian uses it (see **Debian indexing pipeline**). Maven
+  regenerates nothing: a deleted version folder stays in `maven-metadata.xml` until the next
+  publish, and the UI says so.
+- **`format.ManualUploader`.** `Upload(ctx, repo, files, fields, userID)` stores the files of a
+  manual upload. `userID` is 0 for a CI session. `UploadFile`, `Uploaded`, `UploadError` and
+  `BadUpload` are the helper types. `Host.Audit` and `Host.RecordUpload` record the event.
+- **Upload limits.** At most 50 files, 16 text fields of up to 1 KiB each, and all files together
+  within `max_upload_bytes`. Fields come before the files in the body.
+  - **Maven.** One pom (`*.pom` or `pom.xml`) plus files named
+    `<artifactId>-<version>[-<classifier>].<ext>`. One file with any other name becomes the main
+    artifact. The fields `groupId`, `artifactId`, `version` and `packaging` fill what the pom
+    lacks. A lone artifact gets a generated pom. Every stored file gets `.md5`, `.sha1` and
+    `.sha256`. `maven-metadata.xml` is created or merged, with the versions in Maven order, plus
+    `latest`, `release` and `lastUpdated`.
+  - **Debian.** `.deb` files with the fields `distribution` and `component` (default `main`),
+    through the normal ingest.
+  - **Raw.** The field `folder`, under the repo's overwrite policy.
+
+## Audit log
+
+`audit_events` records who did what. `GET /api/audit` is admin only and lists newest first.
+Actions:
+
+| Group | Actions |
+|---|---|
+| Sign-in | `signin`, `signin.failed` |
+| Publish sessions | `session.create`, `session.close` |
+| Files | `upload`, `delete` |
+| Repos | `repo.create`, `repo.update`, `repo.delete`, `permission.set`, `permission.delete` |
+| Users and settings | `user.create`, `user.update`, `settings.update` (keys only, never values) |
+
+- Changes made with the `telesphorepo user` commands are recorded with the actor `cli`.
+- The IP address appears only in this table and its API. No other API returns an IP address, and
+  the publish log has none. The access log still records the IP.
+- The setting `audit.retention` (default `8760h`) sets how long an event stays. A job deletes
+  older events every hour.
+
+## Web UI
+
+Svelte 5 + Vite (no SvelteKit), Tailwind CSS v4, shadcn-svelte with the Maia style, TypeScript
+and bun. `bun run build` runs `svelte-check` and `vite build` into `web/dist`, which the binary
+embeds. Routing is hash-based (`/#/...`), so the URLs that the server and the clients print keep
+working. The UI is only a client of the JSON API and has no tests of its own. The route table,
+the folder layout, the design rules and the steps to add a page are in `web/src/README.md`.
+
+- **Browse** (anyone; anonymous visitors see anonymous-read repos). Home lists the repos with
+  format, description and Public or Private. A repo opens as a file tree with breadcrumbs, folders
+  first, and size, modified time and uploader username per file. A file opens a panel with the
+  SHA-256, the checksum links, Download and the client snippet (Maven or Gradle dependency, apt
+  line, curl). Search opens `/#/search?q=&repo=`.
+- **Upload and Delete** appear for users with `write`. Both use a publish session that the page
+  holds in memory only (never in storage): the user creates it with a fresh second factor, which
+  is `POST /api/publish/sessions/manual`. An admin deletes with the UI session. The delete
+  dialog lists what changes. The upload dialog posts the multipart form with `Authorization:
+  Bearer` and shows progress.
+- **Settings** (signed-in users; admin pages only for admins). A sidebar by category: Account
+  (profile, security, devices, read tokens, publish), Repositories (list; per repo the tabs
+  `general`, `permissions`, `config`, `status`, `danger`), Users and access (users, SSO),
+  Publishing (trust policies, publish log), Storage, Migration (Nexus), System and Audit log.
+  Registry settings render by group with one form component.
+- **Auth in the UI.** A 401 outside the sign-in routes signs the user out. A 403
+  `second_factor_required` sets the setup-only state. Signing out returns to Browse.
+
 ## CLI
 
 | Command | Does |
 |---|---|
 | `telesphorepo [serve]` | Runs the server from the boot env and DB settings |
-| `telesphorepo dev` | Zero-config local server. Data goes in `./.telesphorepo-dev`. The first run creates `admin` and one anonymous-read demo repo per registered format, named after the format. The banner prints each format's usage snippets |
-| `telesphorepo user add NAME [--admin]` | Asks for the password twice on a TTY, or reads one line from a pipe |
+| `telesphorepo dev` | Zero-config local server. Data goes in `./.telesphorepo-dev`. The first run creates `admin` and one anonymous-read demo repo per registered format, named after the format. The banner prints each format's usage snippets and "2FA not enforced (dev)". Dev mode makes the second factor optional (see **Auth model**) |
+| `telesphorepo user add NAME [--admin]` | Asks for the password twice on a TTY, or reads one line from a pipe. Every `user` command writes an audit event with the actor `cli` |
 | `telesphorepo user passwd NAME` | Resets the password and signs out the user's sessions. Refused for SSO users |
 | `telesphorepo user reset-2fa NAME` | Removes the TOTP factors, passkeys and recovery codes of a user, so the user sets up a new factor at the next sign-in |
 | `telesphorepo keygen [FILE]` | Writes a new Ed25519 key (default `./signing.asc`; never overwrites) and prints the fingerprint |
@@ -612,7 +742,7 @@ CI runs on GitHub Actions with the built-in `GITHUB_TOKEN` and no repository sec
 
 | Workflow | Runs | Does |
 |---|---|---|
-| `ci.yml` | Push to `main`, pull requests | `build` job: `go tool task build`, `go vet` for the `e2e`, `import`, `scale` and `clients` tags, `telesphorepo dbcheck`. `e2e-core` job: `go tool task test` (uploads the log on failure). A newer push cancels the running pull request jobs |
+| `ci.yml` | Push to `main`, pull requests | `build` job: `go tool task build`, `go vet` for the `e2e`, `import`, `scale` and `clients` tags, `telesphorepo dbcheck`. `e2e-core` job: `go tool task test` (uploads the log on failure). `snapshot-image` job (push to `main` only, after `e2e-core` passes): multi-arch image with tags `main` and `sha-<short>`, version `main-<short sha>`. A newer push cancels the running pull request jobs |
 | `e2e-extended.yml` | Manual (zone `import`, `scale` or `all`), weekly for `import` | `go tool task test <zone>` |
 | `release.yml` | Push of a `v*` tag | `binaries` job: `go tool task release`, then a GitHub Release with the archives and `SHA256SUMS`. `image` job: multi-arch image (`linux/amd64`, `linux/arm64`) pushed to `ghcr.io/telesphorepo/telesphorepo` with tags `X.Y.Z`, `X.Y` and `latest` (no `latest` for pre-releases) |
 
@@ -633,7 +763,7 @@ comes from `internal/containerengine`; `TR_ENGINE=docker|podman` forces one. `Te
 Keycloak container (`E2E_KEYCLOAK_IMAGE`, realm `e2e/testdata/keycloak/realm-e2e.json`) and
 drives the browser flow with a cookie-jar HTTP client. `TestRaw` uses a curl container.
 `TestAPIFormats` covers `/api/formats`, `/status` and `/usage`. `TestQueryPlans` runs `dbcheck`
-inside a server container. `TestStorageMove*` run each server on a named data volume: fs to
+inside a server container. `files_test.go` covers `TestTree`, `TestDelete` (who may delete, file, prefix and Bearer deletes, an admin UI session, blobs gone, repo delete and name reuse), `TestManualUploadMaven` (checksums, metadata order, `mvn` resolves the uploaded and the generated pom), `TestManualUploadRaw` and `TestDebianDeleteAndUpload` (apt sees the package, then not; 4 by-hash files remain). `audit_test.go` covers `TestAudit`: events, filters, paging, no secret values, admin only, and no IP outside the audit log. `TestStorageMove*` run each server on a named data volume: fs to
 SeaweedFS and back with uploads during the move, a forced failure, a restart mid-move
 (`Server.Restart`) and a cancel.
 
@@ -646,6 +776,12 @@ and the client helpers (`harness_test.go`, `main_test.go`, `clients_test.go`) ca
 | scale | `scale` | `go tool task test scale` | `TestScale` |
 | clients | `clients` | `go tool task test clients` | `TestClients` (`e2e/publish_clients_test.go`). It needs `git` unless `E2E_CLIENTS_DIR` points at a checkout of the clients repo |
 | all | all tags | `go tool task test all` | Every zone |
+
+**Admin and user calls.** The API changes state only through a UI session, so the suite signs in
+the way the web UI does. `s.Admin()` is the bootstrap admin's UI session: on first use the
+harness enrolls TOTP factors through the setup-only session and signs in with the password and a
+code. `s.SignIn(t, user, pass)` gives any user's UI session, and `s.AdminBasic()` is the admin
+password for format reads. `TestAPISessionRule` checks where each credential works.
 
 **Publishing tests.** Every publish in the suite uses a publish session. The harness helper
 `PublishToken(t, s, user, repo)` enrolls a device the real way (the test computes the TOTP
@@ -686,5 +822,4 @@ See the milestones in the design doc (§17).
 
 | Item | Milestone |
 |---|---|
-| Full admin UI polish, deleting assets and deb packages, blob/by-hash GC | M4 |
 | Restart-persistence e2e for settings (`Server.Restart` exists) | open |

@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path"
+	"strings"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
@@ -127,7 +129,7 @@ func (f *Format) handle(w http.ResponseWriter, r *http.Request) {
 	if pr != nil {
 		uid = pr.UserID
 	}
-	created, _, err := f.put(r.Context(), repo, c, p, sp, uid)
+	created, unchanged, err := f.put(r.Context(), repo, c, p, sp, uid)
 	switch {
 	case errors.Is(err, errExists):
 		httpx.Error(w, http.StatusConflict, errExists.Error())
@@ -136,10 +138,55 @@ func (f *Format) handle(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		httpx.Error(w, http.StatusInternalServerError, "store failed")
 	case created:
+		f.h.RecordUpload(r, pr, repo, p, sp.Size, sp.SHA256)
 		w.WriteHeader(http.StatusCreated)
 	default:
+		if !unchanged {
+			f.h.RecordUpload(r, pr, repo, p, sp.Size, sp.SHA256)
+		}
 		w.WriteHeader(http.StatusOK)
 	}
+}
+
+// Upload implements format.ManualUploader: every file goes to the folder in the field "folder"
+// ("" or missing: the repo root) under the repo's overwrite policy.
+func (f *Format) Upload(ctx context.Context, repo *repos.Repo, files []format.UploadFile, fields map[string]string, userID int64) ([]format.Uploaded, error) {
+	for k := range fields {
+		if k != "folder" {
+			return nil, format.BadUpload("unknown field %q; raw uploads take folder", k)
+		}
+	}
+	folder := strings.Trim(strings.TrimSpace(fields["folder"]), "/")
+	if folder != "" && !validPath(folder) {
+		return nil, format.BadUpload("invalid folder %q", folder)
+	}
+	c, err := repoConfig(repo)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]format.Uploaded, 0, len(files))
+	for _, file := range files {
+		p := path.Join(folder, file.Name)
+		if !validPath(p) {
+			return out, format.BadUpload("invalid file name %q", file.Name)
+		}
+		created, unchanged, err := f.put(ctx, repo, c, p, file.Spool, userID)
+		if errors.Is(err, errExists) {
+			return out, &format.UploadError{Status: http.StatusConflict, Message: p + ": " + errExists.Error()}
+		}
+		if err != nil {
+			return out, err
+		}
+		st := format.UploadReplaced
+		switch {
+		case created:
+			st = format.UploadCreated
+		case unchanged:
+			st = format.UploadUnchanged
+		}
+		out = append(out, format.Uploaded{Path: p, Status: st, Size: file.Spool.Size, SHA256: file.Spool.SHA256})
+	}
+	return out, nil
 }
 
 var (

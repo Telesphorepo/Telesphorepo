@@ -143,11 +143,12 @@ func TestAuth(t *testing.T) {
 			ID    json.RawMessage `json:"id"`
 			Token string          `json:"token"`
 		}
-		s.MustAPI(t, http.MethodPost, "/api/tokens", map[string]any{"name": "tmp"}, Basic{u, pw}, &tk)
+		sess := s.SignIn(t, u, pw)
+		s.MustAPI(t, http.MethodPost, "/api/tokens", map[string]any{"name": "tmp"}, sess, &tk)
 		resp, body := authGet(t, s, path, Basic{"x", tk.Token})
 		wantStatus(t, resp, body, http.StatusOK)
 		id := strings.Trim(string(tk.ID), `"`)
-		st, b := s.API(t, http.MethodDelete, "/api/tokens/"+id, nil, Basic{u, pw})
+		st, b := s.API(t, http.MethodDelete, "/api/tokens/"+id, nil, sess)
 		if st != http.StatusNoContent {
 			t.Fatalf("revoke: %d %s", st, b)
 		}
@@ -170,7 +171,7 @@ func TestAuth(t *testing.T) {
 		p := "/maven/" + RandName("missing") + "/a/b/1/b-1.jar"
 		resp, body := authGet(t, s, p, nil)
 		wantStatus(t, resp, body, http.StatusUnauthorized)
-		resp, body = authGet(t, s, p, s.Admin())
+		resp, body = authGet(t, s, p, s.AdminBasic())
 		wantStatus(t, resp, body, http.StatusNotFound)
 	})
 

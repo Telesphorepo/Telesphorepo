@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
 )
 
@@ -36,10 +37,12 @@ type LoginResult struct {
 	SecondFactor []string
 }
 
-// Login checks a password for UI sign-in. A user with a second factor gets a pending sign-in
-// (cookie tr_login) that LoginSecondFactor completes; a user without one gets a setup-only
-// session. SSO accounts are refused like a wrong password; local admins get
-// ErrPasswordLoginDisabled when admin_password_login is off.
+// Login checks a password for UI sign-in (spec §13). An admin signs in with a second factor: an
+// admin with one gets a pending sign-in (cookie tr_login) that LoginSecondFactor completes, an
+// admin without one gets a setup-only session. Other users get a session from the password;
+// they need a factor only to approve a device or to create a manual publish session. In dev mode
+// an admin without a factor gets a full session. SSO accounts are refused like a wrong
+// password; local admins get ErrPasswordLoginDisabled when admin_password_login is off.
 func (s *Service) Login(w http.ResponseWriter, r *http.Request, username, password string) (*LoginResult, error) {
 	ctx := r.Context()
 	p, err := s.authenticate(ctx, s.clientIP(r), username, password, false)
@@ -49,20 +52,28 @@ func (s *Service) Login(w http.ResponseWriter, r *http.Request, username, passwo
 			setRetryAfter(w, rl.wait)
 			return nil, ErrRateLimited
 		}
+		if errors.Is(err, ErrBadCredentials) {
+			s.recordSignInFailed(r, username, "password")
+		}
 		return nil, err
 	}
 	if p.IsAdmin && !s.cfg().AdminPasswordLogin {
+		s.recordSignInFailed(r, username, "admin password sign-in is disabled")
 		return nil, ErrPasswordLoginDisabled
 	}
-	kinds, has, err := s.factorKinds(ctx, p.UserID)
-	if err != nil {
-		return nil, err
-	}
-	if has {
-		if err := s.startPendingLogin(w, r, p.UserID); err != nil {
+	setupOnly := false
+	if p.IsAdmin {
+		kinds, has, err := s.factorKinds(ctx, p.UserID)
+		if err != nil {
 			return nil, err
 		}
-		return &LoginResult{SecondFactor: kinds}, nil
+		if has {
+			if err := s.startPendingLogin(w, r, p.UserID); err != nil {
+				return nil, err
+			}
+			return &LoginResult{SecondFactor: kinds}, nil
+		}
+		setupOnly = !s.dev
 	}
 	if err := s.StartSession(w, r, p.UserID, s.cfg().SessionTTL); err != nil {
 		return nil, err
@@ -71,7 +82,62 @@ func (s *Service) Login(w http.ResponseWriter, r *http.Request, username, passwo
 	if err != nil {
 		return nil, err
 	}
-	return &LoginResult{User: u, SetupOnly: true}, nil
+	s.RecordSignIn(r, p.UserID, p.Username, "password")
+	return &LoginResult{User: u, SetupOnly: setupOnly}, nil
+}
+
+// RecordSignIn writes a sign-in to the audit log. method is "password", "totp", "passkey",
+// "recovery" or "sso".
+func (s *Service) RecordSignIn(r *http.Request, userID int64, username, method string) {
+	s.audit.Record(r.Context(), r, audit.Event{
+		Actor: audit.Actor{UserID: userID, Name: username}, Action: audit.SignIn,
+		Target: username, Detail: map[string]any{"method": method},
+	})
+}
+
+// recordSignInFailed writes a failed sign-in to the audit log; username is the name that was
+// tried, reason says which step failed.
+func (s *Service) recordSignInFailed(r *http.Request, username, reason string) {
+	s.audit.Record(r.Context(), r, audit.Event{
+		Actor: audit.Actor{Name: username}, Action: audit.SignInFailed,
+		Target: username, Detail: map[string]any{"reason": reason},
+	})
+}
+
+// RecordCLI writes a user change made with the telesphorepo CLI to the audit log; the actor is
+// "cli" and there is no IP address.
+func (s *Service) RecordCLI(ctx context.Context, action, username string, detail map[string]any) {
+	s.audit.Record(ctx, nil, audit.Event{Actor: audit.Actor{Name: "cli"}, Action: action, Target: username, Detail: detail})
+}
+
+// RecordSignInFailed writes a refused SSO sign-in to the audit log.
+func (s *Service) RecordSignInFailed(r *http.Request, username, reason string) {
+	s.recordSignInFailed(r, username, reason)
+}
+
+// SetupOnly reports whether p is a setup-only UI session: a local admin without a second
+// factor, outside dev mode. Such a session reaches only the setup routes.
+func (s *Service) SetupOnly(ctx context.Context, p *Principal) (bool, error) {
+	if p == nil || !p.Session || p.Kind != KindLocal || !p.IsAdmin || s.dev {
+		return false, nil
+	}
+	has, err := s.rq.HasSecondFactor(ctx, p.UserID)
+	if err != nil {
+		return false, err
+	}
+	return has == 0, nil
+}
+
+// Username returns the name of user id; "" when the user no longer exists.
+func (s *Service) Username(ctx context.Context, id int64) (string, error) {
+	u, err := s.rq.GetPrincipal(ctx, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return u.Username, nil
 }
 
 // StartSession creates a session for userID with an absolute ttl and sets the tr_session cookie.

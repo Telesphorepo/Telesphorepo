@@ -121,6 +121,8 @@ const (
 
 	KeyPublishSessionTTL = "publish.session_ttl"
 	KeyPublishDeviceTTL  = "publish.device_ttl"
+
+	KeyAuditRetention = "audit.retention"
 )
 
 // SSOKeys are the settings whose change re-validates SSO by fetching the issuer's discovery
@@ -247,6 +249,8 @@ var registry = []*Def{
 			}
 			return nil
 		}},
+	{Key: KeyAuditRetention, Type: TypeDuration, Default: "8760h", Group: GroupSecurity, Label: "Audit log retention",
+		Help: "How long the audit log keeps an event, e.g. 8760h (365 days). A job deletes older events every hour."},
 
 	// Publishing (publish sessions and enrolled devices)
 	{Key: KeyPublishSessionTTL, Type: TypeDuration, Default: "15m", Group: GroupPublishing, Label: "Publish session lifetime",

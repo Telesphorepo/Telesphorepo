@@ -186,15 +186,37 @@ func writeAuthError(w http.ResponseWriter, err error) {
 	}
 }
 
+// ErrSessionRequired is the answer to a request that needs a UI session but came with HTTP
+// Basic (a password or a read token) or with no credential.
+var ErrSessionRequired = errors.New("sign in through the web UI for this action")
+
+// SessionRequired answers 401 {"error": ErrSessionRequired}. It sends no Basic challenge, so a
+// browser does not open its password dialog.
+func SessionRequired(w http.ResponseWriter) {
+	httpx.Error(w, http.StatusUnauthorized, ErrSessionRequired.Error())
+}
+
 // Identify authenticates the request: HTTP Basic (password, read token or publish-session
-// token) everywhere, and the session cookie when allowSession (the JSON API). It writes the
-// error response and returns ok=false when the request must stop. On the JSON API:
-//   - a publish-session token reaches only /api/publish/ (403 elsewhere);
-//   - a session of a local user without a second factor reaches only /api/me,
-//     /api/auth/logout and /api/security (403 {"error":"second_factor_required"} elsewhere).
+// token) everywhere, "Authorization: Bearer trs_..." (a publish-session token), and the session
+// cookie when allowSession (the JSON API). It writes the error response and returns ok=false
+// when the request must stop. On the JSON API:
+//   - a password or a read token reaches only GET and HEAD routes (401 ErrSessionRequired
+//     elsewhere). POST /api/repos/{name}/upload and DELETE /api/repos/{name}/files are left to
+//     their gates, which take only a publish session or an admin UI session. The API refuses
+//     admin routes to these credentials too (see api.admin), so every change of state and every
+//     admin route needs a UI session, and an admin UI session exists only after the second
+//     factor (outside dev mode);
+//   - a publish-session token reaches only /api/publish/, POST /api/repos/{name}/upload and
+//     DELETE /api/repos/{name}/files (403 elsewhere);
+//   - a UI session of a local admin without a second factor reaches only /api/me,
+//     /api/auth/logout and /api/security (403 {"error":"second_factor_required"} elsewhere),
+//     except in dev mode.
 func (s *Service) Identify(w http.ResponseWriter, r *http.Request, allowSession bool) (*Principal, bool) {
 	if h := r.Header.Get("Authorization"); h != "" {
 		user, pass, ok := r.BasicAuth()
+		if !ok && len(h) > 7 && strings.EqualFold(h[:7], "bearer ") && strings.HasPrefix(strings.TrimSpace(h[7:]), publishTokenPrefix) {
+			user, pass, ok = "", strings.TrimSpace(h[7:]), true
+		}
 		if !ok {
 			if len(h) >= 6 && strings.EqualFold(h[:6], "basic ") {
 				unauthorized(w, ErrBadCredentials.Error())
@@ -210,8 +232,12 @@ func (s *Service) Identify(w http.ResponseWriter, r *http.Request, allowSession 
 				writeAuthError(w, err)
 				return nil, false
 			}
-			if allowSession && p.Publish != nil && !strings.HasPrefix(r.URL.Path, "/api/publish/") {
+			if allowSession && p.Publish != nil && !publishTokenRoute(r) {
 				httpx.Error(w, http.StatusForbidden, "a publish session token only publishes")
+				return nil, false
+			}
+			if allowSession && p.Publish == nil && !safeMethod(r.Method) && !repoWriteRoute(r) {
+				SessionRequired(w)
 				return nil, false
 			}
 			return p, true
@@ -224,13 +250,13 @@ func (s *Service) Identify(w http.ResponseWriter, r *http.Request, allowSession 
 				httpx.Error(w, http.StatusInternalServerError, "internal error")
 				return nil, false
 			}
-			if p != nil && p.Kind == KindLocal && !setupRoute(r.URL.Path) {
-				has, err := s.rq.HasSecondFactor(r.Context(), p.UserID)
+			if p != nil && !setupRoute(r.URL.Path) {
+				setup, err := s.SetupOnly(r.Context(), p)
 				if err != nil {
 					httpx.Error(w, http.StatusInternalServerError, "internal error")
 					return nil, false
 				}
-				if has == 0 {
+				if setup {
 					httpx.Error(w, http.StatusForbidden, ErrNoSecondFactor.Error())
 					return nil, false
 				}
@@ -241,8 +267,33 @@ func (s *Service) Identify(w http.ResponseWriter, r *http.Request, allowSession 
 	return nil, true
 }
 
-// setupRoute reports whether a session without a second factor may reach path.
+// setupRoute reports whether a setup-only session may reach path.
 func setupRoute(path string) bool {
 	return path == "/api/me" || path == "/api/auth/logout" ||
 		path == "/api/security" || strings.HasPrefix(path, "/api/security/")
+}
+
+// safeMethod reports whether method only reads.
+func safeMethod(method string) bool {
+	return method == http.MethodGet || method == http.MethodHead
+}
+
+// publishTokenRoute reports whether a publish-session token may reach r on the JSON API:
+// /api/publish/..., POST /api/repos/{name}/upload and DELETE /api/repos/{name}/files.
+func publishTokenRoute(r *http.Request) bool {
+	return strings.HasPrefix(r.URL.Path, "/api/publish/") || repoWriteRoute(r)
+}
+
+// repoWriteRoute reports whether r is POST /api/repos/{name}/upload or
+// DELETE /api/repos/{name}/files.
+func repoWriteRoute(r *http.Request) bool {
+	rest, ok := strings.CutPrefix(r.URL.Path, "/api/repos/")
+	if !ok {
+		return false
+	}
+	name, tail, ok := strings.Cut(rest, "/")
+	if !ok || name == "" {
+		return false
+	}
+	return (r.Method == http.MethodPost && tail == "upload") || (r.Method == http.MethodDelete && tail == "files")
 }

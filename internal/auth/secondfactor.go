@@ -275,18 +275,27 @@ func (s *Service) LoginSecondFactor(w http.ResponseWriter, r *http.Request, in S
 		if err != nil {
 			return nil, err
 		}
+		s.recordSignInFailed(r, p.Username, "second factor")
 		return nil, ErrBadSecondFactor
 	}
 	s.clearLoginCookie(w)
 	if err := s.StartSession(w, r, uid, s.cfg().SessionTTL); err != nil {
 		return nil, err
 	}
+	method := "recovery"
+	switch {
+	case in.TOTPCode != "":
+		method = "totp"
+	case len(in.Passkey) > 0 && string(in.Passkey) != "null":
+		method = "passkey"
+	}
+	s.RecordSignIn(r, uid, p.Username, method)
 	return s.GetUser(ctx, p.Username)
 }
 
 // VerifySecondFactor checks a fresh TOTP code or a passkey assertion (JSON from the browser) for
-// userID. The assertion answers options from BeginPasskeyAssertion. Errors: ErrNoSecondFactor
-// (the user has none), ErrInvalid (no proof or both), ErrBadSecondFactor, a rate-limit error
+// userID. The assertion answers options from BeginPasskeyAssertion. In dev mode a user without a
+// factor passes without a proof. Errors: ErrNoSecondFactor (the user has none), ErrInvalid (no proof or both), ErrBadSecondFactor, a rate-limit error
 // (errors.Is ErrRateLimited; RetryAfter gives the wait) or an internal error. Failures count
 // against the username like failed passwords.
 func (s *Service) VerifySecondFactor(ctx context.Context, userID int64, totpCode string, passkeyAssertion json.RawMessage) error {
@@ -299,6 +308,9 @@ func (s *Service) VerifySecondFactor(ctx context.Context, userID int64, totpCode
 		return err
 	}
 	if has == 0 {
+		if s.dev {
+			return nil // dev mode: the factor is optional; one that exists is still checked
+		}
 		return ErrNoSecondFactor
 	}
 	keys := []string{userLimitKey(p.Username)}

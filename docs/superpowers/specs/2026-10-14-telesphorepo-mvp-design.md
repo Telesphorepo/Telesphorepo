@@ -489,7 +489,9 @@ Applied to the raw request before any storage key is built:
 - Package endpoints (`/maven/…`, `/debian/…`): HTTP Basic only. Username + password, or any
   username + token as password (token recognized by the `trp_` prefix; the token's owner is the
   principal regardless of the username sent).
-- JSON API (`/api/…`): session cookie **or** HTTP Basic (so CI/tests can script it).
+- JSON API (`/api/…`): session cookie **or** HTTP Basic. HTTP Basic (password or read token)
+  reaches only GET routes that are not admin routes. Routes that change state and admin routes
+  need the UI session (§7.6).
 - CSRF: all `/api/` routes are wrapped in `http.CrossOriginProtection` (Fetch-metadata / Origin
   based; non-browser clients without those headers pass) in addition to `SameSite=Strict`.
 
@@ -517,7 +519,8 @@ sweep). Client IP = `RemoteAddr`, or the right-most untrusted `X-Forwarded-For` 
 
 **Account kinds** (`users.kind`):
 - `local` — username + password (argon2id) + API tokens. Publishers (Jenkins, developers) and the
-  bootstrap break-glass admin. Basic auth works on package endpoints and the API.
+  bootstrap break-glass admin. Basic auth works on package endpoints and the read routes of the
+  API (§7.2).
 - `oidc` — created on first SSO login, identified by `(oidc_issuer, oidc_subject)`. No password
   (`password_hash` is the unusable sentinel `"!"`), cannot create API tokens, cannot authenticate
   with Basic anywhere. UI session only. SSO is for administrators only: an OIDC login that does not
@@ -618,6 +621,18 @@ publish session. A caller only proves who it is; three proofs are accepted:
   signs in to a session that can only reach `/api/me`, `/api/auth/logout` and the second-factor
   setup routes (403 `{"error":"second_factor_required"}` elsewhere). The break-glass `admin` follows
   the same rule. CLI `user passwd` keeps working.
+- **The second factor cannot be skipped through the API.** Every `/api` route that changes state
+  (POST, PUT, PATCH, DELETE) and every admin route (GET too) needs the UI session cookie. HTTP
+  Basic with a password or a read token reaches only the GET routes that are not admin routes
+  (repo list, tree, assets, search, status, usage, `/api/me`, and the caller's own tokens,
+  devices and sessions), plus format reads. Anything else answers 401
+  `{"error":"sign in through the web UI for this action"}`; a signed-in user without the right
+  gets 403. So a stolen admin password cannot create a trust policy, a user or a permission, or
+  change a setting. The exceptions take no credential or their own token: sign-in,
+  `/api/auth/config`, `/api/formats`, device enrollment and poll, the publish challenge, the device
+  and OIDC session mints, closing a session with its token, and the upload and delete routes with
+  a publish session token. `http.CrossOriginProtection` still guards cookie requests. Dev mode
+  keeps this rule; it only lets an admin session exist without a factor.
 - Tables: `user_totp(id, user_id, secret BLOB /*encrypted, AAD user_totp:<id>*/, name, created_at,
   last_step)`, `user_passkeys(id, user_id, credential_id BLOB UNIQUE, public_key, sign_count, name,
   created_at, last_used_at)`, `user_recovery_codes(user_id, code_hash, used_at)`.
@@ -965,12 +980,116 @@ the repos and syncs, then resolves with real `mvn`/`gradle`, `apt-get install` a
 a new version to Nexus and syncs again (only the new files download; the rest are skipped),
 checks that an upload here is refused while mirroring, cuts over, and checks that uploads here
 work and the source's credentials are gone.
-## 13. Web UI **[M1 shell / M4 full]**
-Static Vite build embedded in the binary, served at `/` with SPA fallback to `index.html` for
-non-`/api`, non-format paths. M1 pages: login, repo list, repo browser (keyset "load more"),
-search, my tokens (create/revoke), and simple admin pages (users, create repo, permissions).
-The UI is purely a client of §10. No tests for the UI.
+## 13. Web UI **[M4]**
 
+**Stack:** Svelte 5 + Vite (no SvelteKit), Tailwind CSS v4, shadcn-svelte with the **Maia** style,
+TypeScript, bun. A static build in `web/dist`, embedded in the binary and served at `/`. Routing
+stays hash-based (`/#/...`), so URLs that clients print (e.g. `/#/device?code=`) keep working. The
+UI is only a client of the JSON API. No UI tests; every API it uses is covered by e2e.
+
+**Two areas:**
+- **Browse** (anyone; anonymous users see anonymous-read repos). Header: logo, global search,
+  sign in / account menu. Home: repositories (name, format, description, visibility). A repo
+  opens as a file tree: breadcrumbs, folders first, then files with size, modified time and
+  uploader **username** (never an IP). A file panel shows checksums, download, and the client
+  snippet for that artifact (Maven/Gradle dependency for a jar or pom, apt line for a `.deb`).
+  Users with write access see **Upload** and **Delete**. Signing out returns to Browse.
+- **Settings** (signed-in users; admin sections only for admins). A left sidebar by category:
+  - **Account**: profile and password, second factor, devices, read tokens, new publish session.
+  - **Repositories**: list and create; per repo: general (description, anonymous read),
+    permissions, format config, danger zone (delete repo).
+  - **Users & access**: users, SSO.
+  - **Publishing**: trust policies, publish log.
+  - **Storage**: backend settings and moves.
+  - **Migration**: Nexus sources.
+  - **System**: general settings (base URL, limits, log level, signing key, sync interval, …).
+  - **Audit log**.
+  Settings that come from the settings registry render generically by group; pages group them
+  under these categories.
+
+**Design rules:** one width scale (content max width; forms in a narrow column; tables full
+width), consistent spacing, inputs sized to their content, empty states, loading and error
+states for every request, confirm dialogs that list what an action changes, keyboard access,
+light and dark theme.
+
+**Server support added in M4:**
+- `repos.description TEXT NOT NULL DEFAULT ''` (core migration), editable in the repo PATCH.
+- `GET /api/repos/{name}/tree?path=&after=&limit=` → the direct children of a folder:
+  `{items: [{name, type: "dir"|"file", size?, updated_at?, uploaded_by?}], next}`. Each child is
+  found with one indexed seek on `(repo_id, path)` (skip to the next sibling), so a folder page
+  costs `limit` seeks however large the repo is.
+- **Deletes** (`write` on the repo, through a publish session created in the UI with a fresh
+  second factor, or an admin UI session): `DELETE /api/repos/{name}/files?path=` (one file) and
+  `?prefix=` (a folder: a version, a package, any subtree; keyset batches). The answer lists the
+  count. Blobs are removed from storage after the rows. A format plugin may implement
+  `format.DeleteObserver{ AssetsDeleted(ctx, tx, repo, paths) }`: Debian removes the matching
+  `deb_packages` rows and marks the dists dirty, so the indexes drop the package; Maven
+  regenerates nothing (clients own `maven-metadata.xml`; deleting a version folder leaves the
+  metadata listing it until the next publish, and the UI says so). Deleting a repo
+  (`DELETE /api/repos/{name}`, admin) removes its rows and blobs.
+- **Manual upload**: `POST /api/repos/{name}/upload` (multipart, publish session) calls the plugin's
+  `format.ManualUploader{ Upload(ctx, repo, files, fields) }`. Maven: a pom plus artifacts (jar,
+  sources, javadoc); coordinates come from the pom (or fields for a lone jar); the server writes
+  `.md5`/`.sha1`/`.sha256` files and creates or updates `maven-metadata.xml`. Debian: `.deb` files
+  with distribution and component. Raw: files under a target folder.
+- **Audit log**: table `audit_events(id, at, actor_user_id NULL, actor TEXT, action, repo_id NULL,
+  target TEXT, detail TEXT /*JSON*/, ip TEXT)` with indexes on `at` and `(repo_id, id)`; written for
+  publish sessions (mint/close), uploads by session, deletes, repo and permission changes, user
+  changes, settings changes (keys only, never values of secrets), sign-ins and failed sign-ins.
+  `GET /api/audit?after=&limit=&action=&repo=` (admin, keyset by id, newest first). IP addresses
+  appear only here. Rows older than `audit.retention` (setting, default `8760h`) are deleted.
+- **Second factor rule** (replaces the sign-in rule of §7.6): a second factor is required to
+  approve a device, to create a manual or UI session that can publish or delete, and to sign in
+  as an admin. Other users sign in with a password and set up a second factor when they first
+  enroll a device. An admin without a second factor gets the setup-only session. Every API
+  route that changes state, and every admin route, needs the UI session (§7.6), so HTTP Basic
+  with an admin password cannot go around the factor.
+- **Dev mode**: `telesphorepo dev` sets an in-process flag (not a setting, not an env var, not
+  reachable from `serve`) that makes the second factor optional everywhere; the dev banner says
+  so. A factor that is enrolled is still checked. e2e runs `serve`, so enforcement stays tested.
+## 13.1 Ease of use and network rules **[M5]**
+
+Owner's direction (2026-10-14): the product must be what Nexus should have been in 2026: easy to
+use, easy to understand, no jargon.
+
+- **Usability pass** over every page: plain words, a clear list of what repositories exist (name,
+  format, who can read and publish, size, last publish), obvious next actions, helpful empty
+  states. Selection and hover highlight the whole element (lighter/darker fill); never a left
+  border accent, in the app and on the website.
+- **Folder upload**: drop a whole folder (a build output, a Maven-layout tree, a folder of
+  `.deb`s). The server scans it for key files only (`*.pom` with the jars/classifiers that match
+  it, `.module` files, `.deb`), validates each strictly (pom coordinates match the path when the
+  tree has a Maven layout, jar names match the pom, `.deb` control parses), ignores everything
+  else, and returns a preview of the artifacts it found. Nothing is stored until the user
+  confirms the preview. It is meant for one-off uploads of libraries that are published
+  nowhere else.
+- **IP rules per repo**: two optional allow-lists, **read** and **publish**, of CIDRs and presets.
+  Empty means unrestricted (the default). Presets: **GitHub Actions** (ranges from
+  `https://api.github.com/meta`, key `actions`), **Blacksmith** (if Blacksmith publishes its egress
+  ranges), and named custom lists. Preset ranges refresh daily in the background and are cached in
+  the database; a failed refresh keeps the last good list. A refused request gets 403 and an audit
+  event. Admin UI sessions are not exempt from read rules on format routes.
+- **Client IP**: the server uses `X-Forwarded-For` only when the TCP peer is a trusted proxy. The
+  `trusted_proxies` setting accepts CIDRs and the presets `private` (loopback + RFC 1918 + ULA,
+  the default, which covers Caddy on the same host or Docker network) and `cloudflare` (Cloudflare's
+  published ranges, refreshed daily). The chain is read right to left, skipping trusted hops; the
+  first untrusted address is the client. Docs recommend Caddy as the reverse proxy and ship a
+  Caddyfile.
+## 13.2 Single sign-on for developers **[M6, direction]**
+
+Owner's direction (2026-10-14): allow developers (not only admins) to use SSO, while local
+accounts keep working. Nothing is in production, so the account and permission model may be
+redesigned freely (one `0001_init.sql`, no migrations). To decide before building:
+- **Two layers, two jobs.** The IdP proves who the person is and whether they are still allowed
+  (sign-in, MFA, offboarding). Telesphorepo still mints a short-lived publish session per publish.
+- **Provisioning**: SSO users are created on first sign-in. Access comes from IdP group →
+  repo/level mappings, or from grants an admin adds after the first sign-in (decide which, or both).
+- **Device enrollment** through an SSO sign-in. IdP MFA counts as the second factor when the ID
+  token's `amr` shows it; otherwise the local TOTP/passkey rule applies.
+- **Offboarding**: the server stores the IdP refresh token (encrypted) per SSO user and refreshes
+  it when a device of that user mints a session (at most every few minutes). A refused refresh
+  disables the user, revokes their devices and ends their sessions.
+- Local accounts (break-glass admin, developers who are not in the IdP) stay.
 ## 14. Docker image
 Multi-stage: `oven/bun` builds `web/` → `golang:1.27-alpine` builds with
 `CGO_ENABLED=0 -trimpath -ldflags="-s -w"` → `gcr.io/distroless/static-debian13:nonroot`.
@@ -1068,4 +1187,7 @@ is tested without a real bucket. `ForEachStorage` runs `fs`, `seaweedfs`, and `r
 - **M3**: storage move from Settings (§11) and Nexus import from the admin UI (§12) + e2e.
 - **M3.5**: publisher credentials (§7.6): publish sessions, second factor, device enrollment, CI
   trust policies, Gradle plugin, Maven extension + e2e zone `clients`.
-- **M4**: full admin UI polish, deletes (assets, deb packages) + blob/by-hash GC.
+- **M5**: usability pass, folder upload, per-repo IP rules, trusted-proxy presets (§13.1).
+- **M6**: SSO for developers (§13.2), after the design points there are decided.
+- **M4**: new UI (Svelte + Tailwind + shadcn-svelte Maia; Browse + Settings), folder tree,
+  deletes, manual upload, audit log, second-factor rule and dev mode (§13); Debian by-hash GC.

@@ -1,4 +1,4 @@
-// Package web embeds the built React UI (web/dist) and serves it with SPA fallback.
+// Package web embeds the built web UI (web/dist) and serves it with SPA fallback.
 package web
 
 import (

@@ -151,7 +151,7 @@ func seedCmd(args []string) error {
 func ensureRepo(ctx context.Context, rs *repos.Service, name, formatName string) (*repos.Repo, error) {
 	r, err := rs.ByName(ctx, name)
 	if errors.Is(err, repos.ErrNotFound) {
-		if r, err = rs.Create(ctx, name, formatName, true, nil); err != nil {
+		if r, err = rs.Create(ctx, name, formatName, true, "", nil); err != nil {
 			return nil, fmt.Errorf("create repo %s: %w", name, err)
 		}
 	} else if err != nil {

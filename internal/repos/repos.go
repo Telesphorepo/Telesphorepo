@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
 	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
@@ -33,6 +35,7 @@ type Repo struct {
 	AnonymousRead bool
 	Config        json.RawMessage // always a JSON object
 	CreatedAt     time.Time
+	Description   string // free text shown in the UI; "" when unset
 	// LockedBy is set while another system owns the repo's content, e.g. a Nexus source that
 	// the repo mirrors. The write gate (auth.RepoGate) answers uploads with 409 and this text.
 	// In-process writers such as importers do not pass the gate. "" means not locked.
@@ -67,6 +70,7 @@ func fromRow(r dbq.Repo, err error) (*Repo, error) {
 		Config:        json.RawMessage(r.Config),
 		CreatedAt:     time.Unix(r.CreatedAt, 0),
 		LockedBy:      r.LockedBy.String,
+		Description:   r.Description,
 	}, nil
 }
 
@@ -132,11 +136,33 @@ func isUnique(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
 }
 
-// Create validates the name, the format and the config (empty: the format's default) and
-// inserts the repo.
-func (s *Service) Create(ctx context.Context, name, format string, anonymousRead bool, config json.RawMessage) (*Repo, error) {
+// maxDescription is the longest repo description in characters.
+const maxDescription = 500
+
+// checkDescription trims d and checks it: at most maxDescription characters, valid UTF-8, no
+// control characters other than newlines and tabs.
+func checkDescription(d string) (string, error) {
+	d = strings.TrimSpace(d)
+	if !utf8.ValidString(d) || utf8.RuneCountInString(d) > maxDescription {
+		return "", fmt.Errorf("%w: description must be at most %d characters", ErrInvalid, maxDescription)
+	}
+	for _, r := range d {
+		if unicode.IsControl(r) && r != '\n' && r != '\t' {
+			return "", fmt.Errorf("%w: description must not contain control characters", ErrInvalid)
+		}
+	}
+	return d, nil
+}
+
+// Create validates the name, the format, the description and the config (empty: the format's
+// default) and inserts the repo.
+func (s *Service) Create(ctx context.Context, name, format string, anonymousRead bool, description string, config json.RawMessage) (*Repo, error) {
 	if !NameRE.MatchString(name) {
 		return nil, fmt.Errorf("%w: bad name", ErrInvalid)
+	}
+	description, err := checkDescription(description)
+	if err != nil {
+		return nil, err
 	}
 	cfg, err := s.normalizeConfig(format, config)
 	if err != nil {
@@ -144,18 +170,18 @@ func (s *Service) Create(ctx context.Context, name, format string, anonymousRead
 	}
 	now := time.Now().Unix()
 	id, err := dbq.New(s.db.W).CreateRepo(ctx, dbq.CreateRepoParams{
-		Name: name, Format: format, AnonymousRead: anonymousRead, Config: string(cfg), CreatedAt: now})
+		Name: name, Format: format, AnonymousRead: anonymousRead, Config: string(cfg), Description: description, CreatedAt: now})
 	if isUnique(err) {
 		return nil, ErrExists
 	}
 	if err != nil {
 		return nil, err
 	}
-	return &Repo{ID: id, Name: name, Format: format, AnonymousRead: anonymousRead, Config: cfg, CreatedAt: time.Unix(now, 0)}, nil
+	return &Repo{ID: id, Name: name, Format: format, AnonymousRead: anonymousRead, Config: cfg, CreatedAt: time.Unix(now, 0), Description: description}, nil
 }
 
 // Update changes only the non-nil fields and returns the repo before and after the change.
-func (s *Service) Update(ctx context.Context, name string, anonymousRead *bool, config json.RawMessage) (old, updated *Repo, err error) {
+func (s *Service) Update(ctx context.Context, name string, anonymousRead *bool, description *string, config json.RawMessage) (old, updated *Repo, err error) {
 	err = s.db.Tx(ctx, func(tx *sql.Tx) error {
 		q := dbq.New(tx)
 		r, err := fromRow(q.GetRepoByName(ctx, name))
@@ -166,13 +192,18 @@ func (s *Service) Update(ctx context.Context, name string, anonymousRead *bool, 
 		if anonymousRead != nil {
 			r.AnonymousRead = *anonymousRead
 		}
+		if description != nil {
+			if r.Description, err = checkDescription(*description); err != nil {
+				return err
+			}
+		}
 		if config != nil {
 			if r.Config, err = s.normalizeConfig(r.Format, config); err != nil {
 				return err
 			}
 		}
 		if err := q.UpdateRepo(ctx, dbq.UpdateRepoParams{
-			AnonymousRead: r.AnonymousRead, Config: string(r.Config), ID: r.ID}); err != nil {
+			AnonymousRead: r.AnonymousRead, Config: string(r.Config), Description: r.Description, ID: r.ID}); err != nil {
 			return err
 		}
 		old, updated = &prev, r
@@ -192,4 +223,17 @@ func (s *Service) SetLockedBy(ctx context.Context, tx *sql.Tx, id int64, by stri
 		q = dbq.New(tx)
 	}
 	return q.SetRepoLockedBy(ctx, dbq.SetRepoLockedByParams{LockedBy: sql.NullString{String: by, Valid: by != ""}, ID: id})
+}
+
+// DeleteRow deletes the repo row of id; the rows that reference it cascade. ErrNotFound when
+// it does not exist.
+func (s *Service) DeleteRow(ctx context.Context, id int64) error {
+	n, err := dbq.New(s.db.W).DeleteRepo(ctx, id)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

@@ -8,11 +8,13 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/debian/dbq"
+	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
@@ -80,6 +82,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		h.internal(w, "debian upload", repo, err)
 	case created:
+		h.host.RecordUpload(r, p, repo, res.Filename, sp.Size, sp.SHA256)
 		httpx.WriteJSON(w, http.StatusCreated, res)
 	default:
 		httpx.WriteJSON(w, http.StatusOK, res)
@@ -165,6 +168,45 @@ func (h *Handler) ingest(ctx context.Context, repo *repos.Repo, dist, comp strin
 	}
 	h.idx.notify(distKey{repo.ID, dist})
 	return res, true, nil
+}
+
+// Upload implements format.ManualUploader: each file is a .deb that goes through the upload
+// pipeline into the fields "distribution" and "component" (default "main").
+func (h *Handler) Upload(ctx context.Context, repo *repos.Repo, files []format.UploadFile, fields map[string]string, userID int64) ([]format.Uploaded, error) {
+	dist, comp := strings.TrimSpace(fields["distribution"]), strings.TrimSpace(fields["component"])
+	if comp == "" {
+		comp = "main"
+	}
+	if !repos.NameRE.MatchString(dist) || !repos.NameRE.MatchString(comp) {
+		return nil, format.BadUpload("give a valid distribution (e.g. trixie) and component (e.g. main)")
+	}
+	for k := range fields {
+		if k != "distribution" && k != "component" {
+			return nil, format.BadUpload("unknown field %q; Debian uploads take distribution and component", k)
+		}
+	}
+	for _, f := range files {
+		if !strings.HasSuffix(f.Name, ".deb") {
+			return nil, format.BadUpload("%s is not a .deb file", f.Name)
+		}
+	}
+	out := make([]format.Uploaded, 0, len(files))
+	for _, f := range files {
+		res, created, err := h.ingest(ctx, repo, dist, comp, f.Spool, userID)
+		var ue *uploadError
+		if errors.As(err, &ue) {
+			return out, &format.UploadError{Status: ue.status, Message: f.Name + ": " + ue.msg}
+		}
+		if err != nil {
+			return out, err
+		}
+		st := format.UploadCreated
+		if !created {
+			st = format.UploadUnchanged
+		}
+		out = append(out, format.Uploaded{Path: res.Filename, Status: st, Size: f.Spool.Size, SHA256: f.Spool.SHA256})
+	}
+	return out, nil
 }
 
 // storePool writes the blob unless the pool key already holds identical content (so one

@@ -86,6 +86,16 @@ ORDER BY repo_id, distribution, path;
 -- name: DeleteIndexFile :exec
 DELETE FROM deb_index_files WHERE repo_id = ? AND distribution = ? AND path = ?;
 
+-- The current hash of one index file: the generation a rebuild replaces.
+-- name: GetIndexFileSHA256 :one
+SELECT sha256 FROM deb_index_files WHERE repo_id = ? AND distribution = ? AND path = ?;
+
+-- Removes the packages of a deleted pool file (one row per dist and component that holds it)
+-- through deb_packages_asset.
+-- name: DeletePackagesOfAsset :many
+DELETE FROM deb_packages WHERE asset_id = ?
+RETURNING distribution, component, architecture;
+
 -- Removes the asset row of an index file, so it is no longer served.
 -- name: DeleteIndexAsset :exec
 DELETE FROM assets WHERE repo_id = ? AND path = ? AND kind = 'index';

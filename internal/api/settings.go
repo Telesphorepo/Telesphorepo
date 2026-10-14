@@ -6,7 +6,11 @@ import (
 	"errors"
 	"net/http"
 	"reflect"
+	"slices"
+	"strings"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/audit"
+	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/move"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
@@ -48,12 +52,14 @@ func (a *API) settingsList(r *http.Request) settingsJSON {
 
 // authConfig tells the UI which sign-in methods exist. password_login is always true (publishers
 // sign in with a password); admin_password_login false means local admins must use SSO.
+// second_factor_optional is true only under "telesphorepo dev".
 func (a *API) authConfig(w http.ResponseWriter, r *http.Request) {
 	c := a.cfg()
 	httpx.WriteJSON(w, http.StatusOK, map[string]bool{
-		"password_login":       true,
-		"oidc":                 c.OIDCEnabled(),
-		"admin_password_login": c.AdminPasswordLogin,
+		"password_login":         true,
+		"oidc":                   c.OIDCEnabled(),
+		"admin_password_login":   c.AdminPasswordLogin,
+		"second_factor_optional": a.auth.DevMode(),
 	})
 }
 
@@ -159,7 +165,7 @@ func (a *API) patchSettings(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		if a.startMove(w, r, patch, items, p.UserID) {
+		if a.startMove(w, r, patch, items, p) {
 			return
 		}
 	}
@@ -167,7 +173,21 @@ func (a *API) patchSettings(w http.ResponseWriter, r *http.Request) {
 		a.settingsError(w, r, err, items)
 		return
 	}
+	a.recordSettings(r, p, patch)
 	httpx.WriteJSON(w, http.StatusOK, a.settingsList(r))
+}
+
+// recordSettings writes the keys of a saved settings patch to the audit log, never the values.
+func (a *API) recordSettings(r *http.Request, p *auth.Principal, patch map[string]json.RawMessage) {
+	keys := make([]string, 0, len(patch))
+	for k := range patch {
+		keys = append(keys, k)
+	}
+	if len(keys) == 0 {
+		return
+	}
+	slices.Sort(keys)
+	a.record(r, p, audit.SettingsUpdate, nil, strings.Join(keys, ","), map[string]any{"keys": keys})
 }
 
 // startMove handles a settings patch that changes the blob store (spec §11). When the new store
@@ -175,7 +195,8 @@ func (a *API) patchSettings(w http.ResponseWriter, r *http.Request) {
 // to the new store and answers 202 {move}; the storage settings change when the move is done.
 // It returns false when the caller should save the whole patch at once (no assets, or the same
 // location with other credentials or options).
-func (a *API) startMove(w http.ResponseWriter, r *http.Request, patch map[string]json.RawMessage, items []settings.Item, userID int64) bool {
+func (a *API) startMove(w http.ResponseWriter, r *http.Request, patch map[string]json.RawMessage, items []settings.Item, p *auth.Principal) bool {
+	userID := p.UserID
 	ctx := r.Context()
 	target, err := a.settings.Preview(patch)
 	if err != nil {
@@ -210,6 +231,7 @@ func (a *API) startMove(w http.ResponseWriter, r *http.Request, patch map[string
 		moveFail(w, r, err)
 		return true
 	}
+	a.recordSettings(r, p, patch)
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"move": m})
 	return true
 }
@@ -290,5 +312,6 @@ func (a *API) setSigningKey(w http.ResponseWriter, r *http.Request) {
 		a.settingsError(w, r, err, a.settings.List(r.Context()))
 		return
 	}
+	a.record(r, p, audit.SettingsUpdate, nil, settings.KeySigningKey, map[string]any{"keys": []string{settings.KeySigningKey}})
 	httpx.WriteJSON(w, http.StatusOK, info)
 }

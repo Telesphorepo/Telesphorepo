@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
 	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
@@ -124,8 +125,37 @@ type Service struct {
 	flightMu sync.Mutex
 	flights  map[[32]byte]*flight // in-progress uncached password checks by cache key
 
-	sealer  Sealer        // seals TOTP secrets; set by the server
-	publish PublishTokens // verifies publish-session tokens; set by the server
+	sealer  Sealer         // seals TOTP secrets; set by the server
+	publish PublishTokens  // verifies publish-session tokens; set by the server
+	audit   *audit.Service // records sign-ins; set by the server (nil: none)
+
+	// dev makes the second factor optional (telesphorepo dev only): an admin without a factor
+	// gets a full session, and an approval or a manual session without a factor passes. A
+	// factor that the user has is still checked.
+	dev bool
+}
+
+// SetAudit sets the audit log that sign-ins are recorded in.
+func (s *Service) SetAudit(a *audit.Service) { s.audit = a }
+
+// SetDevMode makes the second factor optional. Only the dev command calls it.
+func (s *Service) SetDevMode(on bool) { s.dev = on }
+
+// DevMode reports whether the second factor is optional.
+func (s *Service) DevMode() bool { return s.dev }
+
+// ActorOf is the audit actor of p: the user, or the CI identity of a publish session without a
+// user. nil is anonymous.
+func ActorOf(p *Principal) audit.Actor {
+	switch {
+	case p == nil:
+		return audit.Actor{Name: "anonymous"}
+	case p.Username != "":
+		return audit.Actor{UserID: p.UserID, Name: p.Username}
+	case p.Publish != nil:
+		return audit.Actor{Name: p.Publish.Subject}
+	}
+	return audit.Actor{UserID: p.UserID}
 }
 
 // Sealer encrypts secrets at rest, bound to their place by aad. settings.Service implements it.

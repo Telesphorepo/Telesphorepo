@@ -39,6 +39,10 @@ the fallback) and Node 26+ (see `.node-version`). The e2e suite needs Docker or 
   The gate is `auth.RepoGate`. Tests get a session with `PublishToken(t, s, user, repo)` from
   `e2e/harness_test.go`, or `s.PublishAuth(t, user, repo)` for a Basic header. Never add a
   write path that accepts a password or a read token.
+- **API changes and admin routes need a UI session.** HTTP Basic (password or read token) reaches
+  only the GET routes of `/api` that are not admin routes (`auth.Identify`, `api.admin`), so an
+  admin password cannot go around the second factor. Tests use `s.Admin()` (the admin's UI
+  session) or `s.SignIn(t, user, pass)`; `s.AdminBasic()` is for format reads.
 - **Never log second-factor material.** That covers TOTP secrets and codes, recovery codes,
   device keys, publish tokens and OIDC tokens. Compare secrets in constant time.
 - **Storage keys and repo paths use package `path`, never `path/filepath`.** Keys are
@@ -75,6 +79,11 @@ the fallback) and Node 26+ (see `.node-version`). The e2e suite needs Docker or 
 - **Support Windows, macOS and Linux.** Don't depend on bash or make in tooling. Watch path
   separators and process signals (see `tools/task/proc_*.go`).
 - **Use bun for the web app.** The lockfile is `web/bun.lock`. Don't commit a `package-lock.json`.
+  The web stack is Svelte 5 + Vite (no SvelteKit), Tailwind CSS v4, shadcn-svelte (Maia style) and
+  TypeScript. Add a shadcn component with `bunx shadcn-svelte@latest add <name>`. Call the API only
+  through `api.*` in `web/src/lib/api/`. `bun run build` runs `svelte-check` first.
+- **Never show an IP address outside the audit log.** `audit_events` is the only table and
+  `GET /api/audit` the only API that returns one.
 - **Keep the docs current.** Update `SPEC.md` in the same change whenever behaviour, routes,
   tables, settings or commands change. Keep `README.md` short and for humans (run locally, run in
   production, a few commands); details belong in SPEC.md. Don't add a `CLAUDE.md`.
@@ -96,9 +105,12 @@ the fallback) and Node 26+ (see `.node-version`). The e2e suite needs Docker or 
 | Publish sessions, devices, trust policies | `internal/publish`; routes in `internal/api/publish.go` and `internal/api/security.go` |
 | Publisher clients (Gradle plugin, Maven extension) | Separate repo [Telesphorepo/clients](https://github.com/Telesphorepo/clients) (MIT). The clients zone clones it, or reads `E2E_CLIENTS_DIR`; `E2E_CLIENTS_REF` picks the branch or tag (default `main`) |
 | Blob I/O | `internal/assets` (spool, store, serve) on top of `internal/storage` |
-| UI page | `web/src/pages/*.tsx`, routes and nav in `web/src/App.tsx`, fetch helpers in `web/src/api.ts` |
-| Storage move (FS ↔ S3) | `internal/move` (service, copier), `internal/storage/mirror.go`, `internal/api/moves.go`, `web/src/pages/MovePanel.tsx` |
-| Nexus sources, syncs, cut-over | `internal/nexus` (client, service, `sync.go` scheduler and runner), `internal/api/nexus.go`, `web/src/pages/Nexus.tsx`. Per-format import code is the plugin's `Importer`. Repo lock: `repos.locked_by`, checked in `auth.RepoGate` |
+| UI page | `web/src/pages/{browse,settings}/*.svelte`; route in `web/src/routes.ts`; Settings nav in `web/src/lib/nav.ts`; API calls in `web/src/lib/api/`. See `web/src/README.md` |
+| UI format editor | `web/src/lib/formats/` |
+| File tree, deletes, manual upload | `internal/files`, `internal/api/files.go`; UI in `web/src/pages/browse/repo/` and `web/src/lib/browse/` |
+| Audit log | `internal/audit`, `internal/api` (`GET /api/audit`), `web/src/pages/settings/Audit.svelte`. Call `a.record` in a handler, or `Host.Audit` in a plugin |
+| Storage move (FS ↔ S3) | `internal/move` (service, copier), `internal/storage/mirror.go`, `internal/api/moves.go`, `web/src/pages/settings/Storage.svelte` |
+| Nexus sources, syncs, cut-over | `internal/nexus` (client, service, `sync.go` scheduler and runner), `internal/api/nexus.go`, `web/src/pages/settings/Nexus.svelte`. Per-format import code is the plugin's `Importer`. Repo lock: `repos.locked_by`, checked in `auth.RepoGate` |
 | E2E harness | `e2e/harness_test.go` (servers, storage matrix `fs` + SeaweedFS), `e2e/clients_test.go` (Maven, Debian and curl helpers that several zones share), publish helpers at the end of `harness_test.go`, `e2e/keycloak_test.go` (Keycloak fixture), `e2e/publish_clients_test.go` (clients zone) |
 | Dev tooling | `tools/task` |
 
@@ -115,7 +127,9 @@ format, so you edit no core file.
    `repos/{repo}/{path}`), and read limits from `Host.Config`.
 3. Implement the optional interfaces you need: `Migrator` (own tables), `Queryable` (plan guard),
    `Configurable` (settings group), `Starter` (background work), `StatusReporter`,
-   `ConfigObserver` and `Describer` (client snippets that the UI and `dev` show), and `Importer`
+   `ConfigObserver` and `Describer` (client snippets that the UI and `dev` show), `DeleteObserver`
+   (`AssetsDeleted`: drop your own rows when files are deleted), `ManualUploader` (`Upload`: the
+   UI upload dialog calls it), and `Importer`
    (`ImportFormats` and `Import`: the Nexus import offers each source file to the plugin; share
    the code of your upload path with it, and return `imported`, `skipped` or `ignored`).
 4. If the format has tables, add `migrations/NNNN_*.sql`, `queries/*.sql` and a `sqlc.yaml`
@@ -126,6 +140,18 @@ format, so you edit no core file.
 
 `raw` (`internal/raw`) is the smallest example. `debian` shows migrations, settings and a
 background worker.
+
+## Adding a UI page
+
+1. Create `web/src/pages/<area>/<Name>.svelte` with `let { params, query }: PageProps = $props();`.
+2. Add one entry to `web/src/routes.ts`: pattern, lazy `page`, `layout` (`browse`, `settings` or
+   `bare`), `access` (`any`, `user` or `admin`) and `title`.
+3. For a Settings page, add it to its category in `web/src/lib/nav.ts`.
+4. Add the route to the table in `web/src/README.md`.
+5. Call the API only through `api.*`. For a new server route, add a function and its type in
+   `web/src/lib/api/`.
+6. Use `Resource` or `Keyset` (`lib/load.svelte.ts`) for requests, and show loading, error and
+   empty states. Use `ConfirmDialog` for every destructive action.
 
 ## How the maintainer likes to work
 

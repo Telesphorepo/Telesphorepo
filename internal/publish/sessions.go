@@ -31,6 +31,12 @@ type Minted struct {
 	Token     string    `json:"token"`
 	Repo      string    `json:"repo"`
 	ExpiresAt time.Time `json:"expires_at"`
+
+	// For the audit log; not in the JSON answer.
+	RepoID  int64  `json:"-"`
+	UserID  int64  `json:"-"` // 0 for a CI session
+	Subject string `json:"-"` // the username, or the CI token's sub
+	Via     string `json:"-"`
 }
 
 // SessionInfo is a publish session in a user's session list or the admin publish log. State is
@@ -127,7 +133,8 @@ func (s *Service) mint(ctx context.Context, q *dbq.Queries, repo *repos.Repo, vi
 		if err != nil {
 			return nil, err
 		}
-		return &Minted{ID: id, Token: tok, Repo: repo.Name, ExpiresAt: unixTime(exp.Unix())}, nil
+		return &Minted{ID: id, Token: tok, Repo: repo.Name, ExpiresAt: unixTime(exp.Unix()),
+			RepoID: repo.ID, UserID: userID, Subject: subject, Via: via}, nil
 	}
 	return nil, errors.New("publish session id collision")
 }
@@ -230,18 +237,30 @@ func (s *Service) ManualSession(ctx context.Context, p *auth.Principal, repoName
 	return s.mint(ctx, s.wq, repo, ViaManual, p.UserID, 0, 0, p.Username)
 }
 
+// Closed is a session that CloseSession ended, for the audit log.
+type Closed struct {
+	RepoID  int64
+	Repo    string
+	UserID  int64 // 0 for a CI session
+	Subject string
+	Via     string
+}
+
 // CloseSession ends session id. token must be that session's token; a session that already
-// ended stays as it is.
-func (s *Service) CloseSession(ctx context.Context, id int64, token string) error {
+// ended stays as it is (Closed is then nil).
+func (s *Service) CloseSession(ctx context.Context, id int64, token string) (*Closed, error) {
 	row, err := s.lookupToken(ctx, token)
 	if errors.Is(err, auth.ErrBadCredentials) || (err == nil && row.ID != id) {
-		return errorf(ErrDenied, "the token does not belong to this publish session")
+		return nil, errorf(ErrDenied, "the token does not belong to this publish session")
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
-	_, err = s.wq.ClosePublishSession(ctx, dbq.ClosePublishSessionParams{ClosedAt: nullID(time.Now().Unix()), ID: id})
-	return err
+	n, err := s.wq.ClosePublishSession(ctx, dbq.ClosePublishSessionParams{ClosedAt: nullID(time.Now().Unix()), ID: id})
+	if err != nil || n == 0 {
+		return nil, err
+	}
+	return &Closed{RepoID: row.RepoID, Repo: row.Repo, UserID: row.UserID.Int64, Subject: row.Subject, Via: row.Via}, nil
 }
 
 // UserSessions returns a newest-first keyset page of a user's sessions: ids below after (0:

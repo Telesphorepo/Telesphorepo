@@ -240,6 +240,7 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
 			h.log.ErrorContext(ctx, "revoke SSO sessions", "error", err.Error())
 		}
 		h.log.InfoContext(ctx, "SSO login refused: not an admin", "subject", idt.Subject)
+		h.auth.RecordSignInFailed(r, NormalizeUsername(claimString(cl.get("preferred_username"))), "sso: not an admin")
 		toLogin(w, r, errNotAuthorized)
 		return
 	}
@@ -272,6 +273,7 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.log.InfoContext(ctx, "SSO login", "username", u.Username)
+	h.auth.RecordSignIn(r, u.ID, u.Username, "sso")
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 

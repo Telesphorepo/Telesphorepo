@@ -150,6 +150,18 @@ func (h *Handler) buildPackages(ctx context.Context, repo *repos.Repo, dist, com
 	}
 
 	dir := "dists/" + dist + "/" + comp + "/binary-" + arch
+	rel := comp + "/binary-" + arch + "/"
+	// The generation this rebuild replaces: its by-hash files stay for clients mid-update.
+	keep := []string{plainSp.SHA256, gzSp.SHA256}
+	for _, file := range []string{"Packages", "Packages.gz"} {
+		old, err := h.q.GetIndexFileSHA256(ctx, dbq.GetIndexFileSHA256Params{RepoID: repo.ID, Distribution: dist, Path: rel + file})
+		switch {
+		case err == nil:
+			keep = append(keep, old)
+		case !errors.Is(err, sql.ErrNoRows):
+			return err
+		}
+	}
 	if err := h.putByHash(ctx, repo, dir, plainSp); err != nil {
 		return err
 	}
@@ -163,9 +175,8 @@ func (h *Handler) buildPackages(ctx context.Context, repo *repos.Repo, dist, com
 		return err
 	}
 
-	rel := comp + "/binary-" + arch + "/"
 	now := time.Now().Unix()
-	return h.db.Tx(ctx, func(tx *sql.Tx) error {
+	err = h.db.Tx(ctx, func(tx *sql.Tx) error {
 		q := dbq.New(tx)
 		for file, sp := range map[string]*assets.Spooled{"Packages": plainSp, "Packages.gz": gzSp} {
 			if err := q.UpsertIndexFile(ctx, dbq.UpsertIndexFileParams{RepoID: repo.ID, Distribution: dist,
@@ -175,6 +186,10 @@ func (h *Handler) buildPackages(ctx context.Context, repo *repos.Repo, dist, com
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	return h.pruneByHash(ctx, repo, dir, keep)
 }
 
 func (h *Handler) writePackages(ctx context.Context, repoID int64, dist, comp, arch string, plain, gzOut io.Writer) error {

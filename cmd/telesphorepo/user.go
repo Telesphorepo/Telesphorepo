@@ -11,6 +11,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
@@ -58,6 +59,7 @@ func userAdd(args []string) error {
 			}
 			return fmt.Errorf("create user: %w", err)
 		}
+		as.RecordCLI(ctx, audit.UserCreate, name, map[string]any{"is_admin": admin})
 		kind := "user"
 		if admin {
 			kind = "admin user"
@@ -97,6 +99,7 @@ func userPasswd(args []string) error {
 		if _, err := as.UpdateUser(ctx, name, &pw, nil, nil); err != nil {
 			return fmt.Errorf("update password: %w", err)
 		}
+		as.RecordCLI(ctx, audit.UserUpdate, name, map[string]any{"password": "changed"})
 		// Keep the dev banner truthful: "telesphorepo dev" prints the admin password from this file.
 		if name == devAdminUser {
 			pf := config.JoinDataDir(dataDir, config.DevAdminPasswordFile)
@@ -136,6 +139,7 @@ func userReset2FA(args []string) error {
 		} else if err != nil {
 			return fmt.Errorf("reset second factors: %w", err)
 		}
+		as.RecordCLI(ctx, audit.UserUpdate, name, map[string]any{"second_factors": "reset"})
 		fmt.Printf("Removed %d authenticator app(s), %d passkey(s) and the recovery codes of %s.\n", totp, passkeys, name)
 		fmt.Printf("%s signs in with the password and adds a new second factor on the Security page.\n", name)
 		return nil
@@ -160,7 +164,9 @@ func withUsers(fn func(ctx context.Context, as *auth.Service, dataDir string) er
 		return fmt.Errorf("open database %s: %w", cfg.DBFile(), err)
 	}
 	defer d.Close()
-	return fn(ctx, auth.New(d, config.Static(cfg), repos.New(d, nil)), cfg.DataDir)
+	as := auth.New(d, config.Static(cfg), repos.New(d, nil))
+	as.SetAudit(audit.New(d, config.Static(cfg), nil, nil)) // records only; the server runs the cleanup
+	return fn(ctx, as, cfg.DataDir)
 }
 
 // readPassword prompts twice without echo on a terminal, else reads one line from stdin.

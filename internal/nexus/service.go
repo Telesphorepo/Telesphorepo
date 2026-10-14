@@ -501,7 +501,7 @@ func (s *Service) SetRepos(ctx context.Context, id int64, maps []Mapping) (*Sour
 				return nil, fmt.Errorf("target repo %q: %w", p.target.Name, err)
 			}
 			if changed {
-				if _, p.target, err = s.repos.Update(ctx, p.target.Name, nil, cfg); err != nil {
+				if _, p.target, err = s.repos.Update(ctx, p.target.Name, nil, nil, cfg); err != nil {
 					return nil, fmt.Errorf("set the distribution of target repo %q: %w", p.target.Name, err)
 				}
 				s.log.Info("nexus: set target repo distribution", "repo", p.target.Name, "distribution", p.src.Distribution)
@@ -519,7 +519,7 @@ func (s *Service) SetRepos(ctx context.Context, id int64, maps []Mapping) (*Sour
 		if err != nil {
 			return nil, err
 		}
-		t, err := s.repos.Create(ctx, p.m.Target, p.f.Name(), false, cfg)
+		t, err := s.repos.Create(ctx, p.m.Target, p.f.Name(), false, "", cfg)
 		if err != nil {
 			return nil, fmt.Errorf("create target repo %q: %w", p.m.Target, err)
 		}

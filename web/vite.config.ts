@@ -1,6 +1,8 @@
 import { defineConfig, type Plugin } from "vite";
-import react from "@vitejs/plugin-react";
+import { svelte } from "@sveltejs/vite-plugin-svelte";
+import tailwindcss from "@tailwindcss/vite";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 const keep = (): Plugin => ({
   name: "keep-dist",
@@ -11,7 +13,10 @@ const keep = (): Plugin => ({
 });
 
 export default defineConfig({
-  plugins: [react(), keep()],
+  plugins: [tailwindcss(), svelte(), keep()],
+  resolve: {
+    alias: { $lib: fileURLToPath(new URL("./src/lib", import.meta.url)) },
+  },
   build: { outDir: "dist", emptyOutDir: true },
   server: {
     port: 5173,

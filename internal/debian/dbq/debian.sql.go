@@ -89,6 +89,60 @@ func (q *Queries) DeleteIndexFile(ctx context.Context, arg DeleteIndexFileParams
 	return err
 }
 
+const deletePackagesOfAsset = `-- name: DeletePackagesOfAsset :many
+DELETE FROM deb_packages WHERE asset_id = ?
+RETURNING distribution, component, architecture
+`
+
+type DeletePackagesOfAssetRow struct {
+	Distribution string
+	Component    string
+	Architecture string
+}
+
+// Removes the packages of a deleted pool file (one row per dist and component that holds it)
+// through deb_packages_asset.
+func (q *Queries) DeletePackagesOfAsset(ctx context.Context, assetID int64) ([]DeletePackagesOfAssetRow, error) {
+	rows, err := q.db.QueryContext(ctx, deletePackagesOfAsset, assetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []DeletePackagesOfAssetRow
+	for rows.Next() {
+		var i DeletePackagesOfAssetRow
+		if err := rows.Scan(&i.Distribution, &i.Component, &i.Architecture); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getIndexFileSHA256 = `-- name: GetIndexFileSHA256 :one
+SELECT sha256 FROM deb_index_files WHERE repo_id = ? AND distribution = ? AND path = ?
+`
+
+type GetIndexFileSHA256Params struct {
+	RepoID       int64
+	Distribution string
+	Path         string
+}
+
+// The current hash of one index file: the generation a rebuild replaces.
+func (q *Queries) GetIndexFileSHA256(ctx context.Context, arg GetIndexFileSHA256Params) (string, error) {
+	row := q.db.QueryRowContext(ctx, getIndexFileSHA256, arg.RepoID, arg.Distribution, arg.Path)
+	var sha256 string
+	err := row.Scan(&sha256)
+	return sha256, err
+}
+
 const getPackageSHA256 = `-- name: GetPackageSHA256 :one
 
 SELECT sha256 FROM deb_packages

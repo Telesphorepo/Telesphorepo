@@ -39,7 +39,8 @@ func devCmd(args []string) error {
 	ctx, stop := signalContext()
 	defer stop()
 	return server.RunWith(ctx, boot, server.Options{
-		// Dev defaults (shown as defaults in the UI, still changeable there or via TR_* env).
+		// Dev defaults (shown as defaults in the UI, still changeable there or via TR_* env), and
+		// the second factor is optional ("2FA not enforced (dev)" in the banner).
 		Dev:      true,
 		TextLogs: true,
 		Init:     func(ctx context.Context, s *server.Services) error { return devInit(ctx, s, st) },
@@ -87,7 +88,7 @@ func devInit(ctx context.Context, s *server.Services, st *devState) error {
 	if len(list) == 0 {
 		for _, f := range format.All() {
 			// Anonymous read so package clients can resolve without credentials locally.
-			if _, err := s.Repos.Create(ctx, f.Name(), f.Name(), true, nil); err != nil && !errors.Is(err, repos.ErrExists) {
+			if _, err := s.Repos.Create(ctx, f.Name(), f.Name(), true, "Demo "+f.Title()+" repository", nil); err != nil && !errors.Is(err, repos.ErrExists) {
 				return fmt.Errorf("create demo repo %s: %w", f.Name(), err)
 			}
 		}
@@ -142,8 +143,7 @@ func printDevBanner(st *devState, base string) {
 		"  password: "+shownPW,
 		"  data dir: "+st.dataDir,
 		"",
-		"After the first sign-in, add an authenticator app on the",
-		"Security page; until then the sign-in reaches only that page.",
+		"2FA not enforced (dev)",
 		"Start fresh by deleting the data dir.",
 	)
 	b.WriteString("Reads take the username and password above, or a read token.\n")

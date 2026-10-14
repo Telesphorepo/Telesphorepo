@@ -71,13 +71,14 @@ func TestSettingsAccess(t *testing.T) {
 		}
 	}
 	s.CreateUser(t, "plain", "plainpass123", false)
-	if st, b := s.API(t, http.MethodGet, "/api/settings", nil, Basic{"plain", "plainpass123"}); st != http.StatusForbidden {
+	plain := s.SignIn(t, "plain", "plainpass123")
+	if st, b := s.API(t, http.MethodGet, "/api/settings", nil, plain); st != http.StatusForbidden {
 		t.Errorf("non-admin GET /api/settings: status %d, want 403: %s", st, b)
 	}
 	if st, b := s.API(t, http.MethodGet, "/api/settings", nil, nil); st != http.StatusUnauthorized {
 		t.Errorf("anonymous GET /api/settings: status %d, want 401: %s", st, b)
 	}
-	if st, _ := s.API(t, http.MethodPatch, "/api/settings", map[string]any{"max_json_bytes": 4096}, Basic{"plain", "plainpass123"}); st != http.StatusForbidden {
+	if st, _ := s.API(t, http.MethodPatch, "/api/settings", map[string]any{"max_json_bytes": 4096}, plain); st != http.StatusForbidden {
 		t.Errorf("non-admin PATCH: status %d, want 403", st)
 	}
 }
@@ -170,7 +171,7 @@ func TestSettingsSigningKey(t *testing.T) {
 	}
 	// Non-admins cannot generate keys.
 	s.CreateUser(t, "plain", "plainpass123", false)
-	if st, _ := s.API(t, http.MethodPost, "/api/settings/signing-key", map[string]any{}, Basic{"plain", "plainpass123"}); st != http.StatusForbidden {
+	if st, _ := s.API(t, http.MethodPost, "/api/settings/signing-key", map[string]any{}, s.SignIn(t, "plain", "plainpass123")); st != http.StatusForbidden {
 		t.Fatalf("non-admin signing-key: status %d, want 403", st)
 	}
 }
@@ -182,7 +183,7 @@ func putGetMaven(t *testing.T, s *Server, repo, name, content string) {
 	if resp, b := s.Do(t, req, s.PublishAuth(t, s.AdminUser, repo)); resp.StatusCode/100 != 2 {
 		t.Fatalf("PUT %s: status %d: %s", p, resp.StatusCode, b)
 	}
-	resp, b := s.Do(t, s.NewRequest(t, http.MethodGet, p, nil), s.Admin())
+	resp, b := s.Do(t, s.NewRequest(t, http.MethodGet, p, nil), s.AdminBasic())
 	if resp.StatusCode != http.StatusOK || string(b) != content {
 		t.Fatalf("GET %s: status %d body %q, want %q", p, resp.StatusCode, b, content)
 	}

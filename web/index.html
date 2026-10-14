@@ -4,9 +4,19 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Telesphorepo</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%23E9B546' fill-rule='evenodd' d='M5 7h22a2 2 0 0 1 2 2v4a3 3 0 0 0 0 6v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4a3 3 0 0 0 0-6V9a2 2 0 0 1 2-2Zm5 5v3h4.5v8h3v-8H22v-3Z'/%3E%3C/svg%3E" />
+    <script>
+      // Apply the stored theme before the first paint, so the page does not flash. mode-watcher
+      // (src/App.svelte) owns the key and keeps the class in sync afterwards.
+      try {
+        const t = localStorage.getItem("mode-watcher-mode");
+        const dark = t === "dark" || (t !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.classList.toggle("dark", dark);
+      } catch {}
+    </script>
   </head>
   <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

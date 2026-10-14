@@ -11,7 +11,7 @@ import (
 )
 
 const createRepo = `-- name: CreateRepo :one
-INSERT INTO repos (name, format, anonymous_read, config, created_at) VALUES (?, ?, ?, ?, ?)
+INSERT INTO repos (name, format, anonymous_read, config, description, created_at) VALUES (?, ?, ?, ?, ?, ?)
 RETURNING id
 `
 
@@ -20,6 +20,7 @@ type CreateRepoParams struct {
 	Format        string
 	AnonymousRead bool
 	Config        string
+	Description   string
 	CreatedAt     int64
 }
 
@@ -29,6 +30,7 @@ func (q *Queries) CreateRepo(ctx context.Context, arg CreateRepoParams) (int64, 
 		arg.Format,
 		arg.AnonymousRead,
 		arg.Config,
+		arg.Description,
 		arg.CreatedAt,
 	)
 	var id int64
@@ -36,8 +38,21 @@ func (q *Queries) CreateRepo(ctx context.Context, arg CreateRepoParams) (int64, 
 	return id, err
 }
 
+const deleteRepo = `-- name: DeleteRepo :execrows
+DELETE FROM repos WHERE id = ?
+`
+
+// Deletes the repo; its remaining rows cascade.
+func (q *Queries) DeleteRepo(ctx context.Context, id int64) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteRepo, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const getRepoByID = `-- name: GetRepoByID :one
-SELECT id, name, format, anonymous_read, config, created_at, locked_by FROM repos WHERE id = ?
+SELECT id, name, format, anonymous_read, config, created_at, locked_by, description FROM repos WHERE id = ?
 `
 
 func (q *Queries) GetRepoByID(ctx context.Context, id int64) (Repo, error) {
@@ -51,13 +66,14 @@ func (q *Queries) GetRepoByID(ctx context.Context, id int64) (Repo, error) {
 		&i.Config,
 		&i.CreatedAt,
 		&i.LockedBy,
+		&i.Description,
 	)
 	return i, err
 }
 
 const getRepoByName = `-- name: GetRepoByName :one
 
-SELECT id, name, format, anonymous_read, config, created_at, locked_by FROM repos WHERE name = ?
+SELECT id, name, format, anonymous_read, config, created_at, locked_by, description FROM repos WHERE name = ?
 `
 
 // Repository records (internal/repos).
@@ -73,12 +89,13 @@ func (q *Queries) GetRepoByName(ctx context.Context, name string) (Repo, error) 
 		&i.Config,
 		&i.CreatedAt,
 		&i.LockedBy,
+		&i.Description,
 	)
 	return i, err
 }
 
 const listRepos = `-- name: ListRepos :many
-SELECT id, name, format, anonymous_read, config, created_at, locked_by FROM repos
+SELECT id, name, format, anonymous_read, config, created_at, locked_by, description FROM repos
 WHERE name > ?1 ORDER BY name LIMIT ?2
 `
 
@@ -105,6 +122,7 @@ func (q *Queries) ListRepos(ctx context.Context, arg ListReposParams) ([]Repo, e
 			&i.Config,
 			&i.CreatedAt,
 			&i.LockedBy,
+			&i.Description,
 		); err != nil {
 			return nil, err
 		}
@@ -135,16 +153,22 @@ func (q *Queries) SetRepoLockedBy(ctx context.Context, arg SetRepoLockedByParams
 }
 
 const updateRepo = `-- name: UpdateRepo :exec
-UPDATE repos SET anonymous_read = ?, config = ? WHERE id = ?
+UPDATE repos SET anonymous_read = ?, config = ?, description = ? WHERE id = ?
 `
 
 type UpdateRepoParams struct {
 	AnonymousRead bool
 	Config        string
+	Description   string
 	ID            int64
 }
 
 func (q *Queries) UpdateRepo(ctx context.Context, arg UpdateRepoParams) error {
-	_, err := q.db.ExecContext(ctx, updateRepo, arg.AnonymousRead, arg.Config, arg.ID)
+	_, err := q.db.ExecContext(ctx, updateRepo,
+		arg.AnonymousRead,
+		arg.Config,
+		arg.Description,
+		arg.ID,
+	)
 	return err
 }

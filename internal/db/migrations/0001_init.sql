@@ -54,7 +54,8 @@ CREATE TABLE repos (
   anonymous_read INTEGER NOT NULL DEFAULT 0,
   config         TEXT NOT NULL DEFAULT '{}',         -- JSON, format-specific
   created_at     INTEGER NOT NULL,
-  locked_by      TEXT                                -- set: uploads answer 409 with this text
+  locked_by      TEXT,                               -- set: uploads answer 409 with this text
+  description    TEXT NOT NULL DEFAULT ''
 ) STRICT;
 CREATE INDEX repos_anonymous ON repos(id) WHERE anonymous_read = 1;
 
@@ -360,3 +361,23 @@ CREATE TABLE publish_oidc_seen (
   expires_at INTEGER NOT NULL
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX publish_oidc_seen_expires ON publish_oidc_seen(expires_at);
+
+-- Audit log (spec §13). actor is the username, or the CI token's subject for a CI publish
+-- session, or the attempted username of a failed sign-in. detail is a JSON object (never a
+-- secret value). ip is the client address; this table is the only place that shows it. The
+-- admin list is keyset by id, newest first; audit_events_at serves the retention cleanup.
+CREATE TABLE audit_events (
+  id            INTEGER PRIMARY KEY,
+  at            INTEGER NOT NULL,
+  actor_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  actor         TEXT NOT NULL,
+  action        TEXT NOT NULL,
+  repo_id       INTEGER REFERENCES repos(id) ON DELETE SET NULL,
+  target        TEXT NOT NULL DEFAULT '',
+  detail        TEXT NOT NULL DEFAULT '{}',
+  ip            TEXT NOT NULL DEFAULT ''
+) STRICT;
+CREATE INDEX audit_events_at ON audit_events(at);
+CREATE INDEX audit_events_repo ON audit_events(repo_id, id);
+CREATE INDEX audit_events_action ON audit_events(action, id);
+CREATE INDEX audit_events_actor ON audit_events(actor_user_id);

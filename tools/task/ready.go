@@ -203,7 +203,7 @@ wait:
 	}
 	out.line("  username  " + bold(user))
 	out.line("  password  " + bold(pass))
-	out.line("  2fa       " + dim("after the first sign-in, add an authenticator app on the Security page"))
+	out.line("  2fa       " + dim("not enforced (dev); add one under Settings > Account to try it"))
 	out.line("  data      " + data + dim("  (delete it to start fresh)"))
 	out.line("  clients   " + dim("Maven, Gradle, apt and curl setup: README.md"))
 	out.line("")

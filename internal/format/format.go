@@ -18,6 +18,7 @@ import (
 	"sync"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
+	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
@@ -115,6 +116,59 @@ const (
 	ImportIgnored  ImportOutcome = "ignored"  // not a file of this format, e.g. a source index
 )
 
+// DeleteObserver runs inside the transaction that deletes asset rows of repo (spec §13), before
+// the rows are deleted, so it can still read them. It removes the format's own rows that point
+// at the files, e.g. Debian removes the packages and marks their indexes for a rebuild. While a
+// whole repo is deleted, repo.LockedBy is RepoDeleting.
+type DeleteObserver interface {
+	AssetsDeleted(ctx context.Context, tx *sql.Tx, repo *repos.Repo, paths []string) error
+}
+
+// RepoDeleting is the LockedBy text of a repo while it is deleted.
+const RepoDeleting = "the repository is being deleted"
+
+// ManualUploader takes files uploaded through the web UI (POST /api/repos/{name}/upload, spec
+// §13). fields are the form's text fields; userID is the uploader (0 for a CI session). A
+// client mistake is an *UploadError.
+type ManualUploader interface {
+	Upload(ctx context.Context, repo *repos.Repo, files []UploadFile, fields map[string]string, userID int64) ([]Uploaded, error)
+}
+
+// UploadFile is one uploaded file: its base name as the client sent it and its spooled body.
+type UploadFile struct {
+	Name  string
+	Spool *assets.Spooled
+}
+
+// Uploaded is one file a manual upload stored or found unchanged. Generated files (checksums,
+// metadata) are listed too.
+type Uploaded struct {
+	Path   string `json:"path"`
+	Status string `json:"status"` // "created", "replaced" or "unchanged"
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
+}
+
+// Upload statuses.
+const (
+	UploadCreated   = "created"
+	UploadReplaced  = "replaced"
+	UploadUnchanged = "unchanged"
+)
+
+// UploadError is a client mistake in a manual upload: Status is 400 or 409.
+type UploadError struct {
+	Status  int
+	Message string
+}
+
+func (e *UploadError) Error() string { return e.Message }
+
+// BadUpload returns a 400 UploadError.
+func BadUpload(format string, args ...any) error {
+	return &UploadError{http.StatusBadRequest, fmt.Sprintf(format, args...)}
+}
+
 // Snippet is one client setup step.
 type Snippet struct {
 	Title string `json:"title"` // e.g. "~/.m2/settings.xml"
@@ -131,7 +185,16 @@ type Host struct {
 	Config   config.Provider   // live core configuration
 	Settings *settings.Service // live snapshot (Current) with the format's own settings; Subscribe
 	Signer   func() *signing.Signer
-	Log      *slog.Logger // tagged with component=<format name>
+	Log      *slog.Logger   // tagged with component=<format name>
+	Audit    *audit.Service // records uploads on the format routes
+}
+
+// RecordUpload writes an upload through a format route to the audit log.
+func (h Host) RecordUpload(r *http.Request, p *auth.Principal, repo *repos.Repo, path string, size int64, sha256 string) {
+	h.Audit.Record(r.Context(), r, audit.Event{
+		Actor: auth.ActorOf(p), Action: audit.Upload, RepoID: repo.ID, Repo: repo.Name, Target: path,
+		Detail: map[string]any{"size": size, "sha256": sha256},
+	})
 }
 
 var (

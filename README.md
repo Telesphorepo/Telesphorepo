@@ -14,7 +14,7 @@ go tool task dev
 
 Open **http://localhost:5173**. The startup banner prints the admin username and password and
 some client snippets. A demo repo for each format (`maven`, `debian`, `raw`) is already created. Data lives in
-`.telesphorepo-dev/`; delete it to start over. Press Ctrl+C to stop.
+`.telesphorepo-dev/`; delete it to start over. Press Ctrl+C to stop. The dev server does not enforce the second factor.
 
 ## Run it in production
 
@@ -22,7 +22,7 @@ some client snippets. A demo repo for each format (`maven`, `debian`, `raw`) is 
 docker run -d -p 8080:8080 -v telesphorepo-data:/data ghcr.io/telesphorepo/telesphorepo:latest
 ```
 
-The image supports `linux/amd64` and `linux/arm64`. To build the image yourself, run
+The image supports `linux/amd64` and `linux/arm64`. `:latest` is the newest release; `:main` is the newest green build of `main`, and `:sha-<commit>` pins one build. To build the image yourself, run
 `go tool task build image`. It builds `telesphorepo:local`.
 
 You can also download a binary for Linux, macOS or Windows (amd64 or arm64) from the
@@ -70,12 +70,17 @@ server on the **Nexus** page. The server mirrors the repos you pick, and they st
 A password or an API token (a read token) only reads. To publish, a client needs a publish
 session. See **Publishing**.
 
+Anyone can browse the anonymous-read repos in the web UI. A user with write access can upload
+files and delete files or folders there. Both actions use a publish session that the UI asks for
+with a second-factor code. Admins see every event, with its IP address, in **Settings > Audit
+log**. The server keeps events for 365 days (`audit.retention`).
+
 ## Publishing
 
 Every upload needs a publish session. It is a credential for one repo that ends after
 `publish.session_ttl` (15 min by default). To publish from a laptop, add a second factor (an
-authenticator app or a passkey) on the **Security** page. A new user does this at the first
-sign-in. The clients below are in [github.com/Telesphorepo/clients](https://github.com/Telesphorepo/clients). Replace `VERSION` with the latest `v` release there.
+authenticator app or a passkey) under **Settings > Security**. An admin does this at the first
+sign-in. Other users do it when they approve their first device. The clients below are in [github.com/Telesphorepo/clients](https://github.com/Telesphorepo/clients). Replace `VERSION` with the latest `v` release there.
 
 **Gradle.** In `settings.gradle.kts`:
 
@@ -104,9 +109,9 @@ Add `-Dtelesphorepo.url=https://packages.example.com` to `.mvn/maven.config`. Ru
 and then run `mvn deploy`.
 
 **GitHub Actions.** Give the job `permissions: id-token: write`. An admin adds a trust policy
-on the **Trust policies** page (preset "GitHub Actions"): the repo, the branch or tag, and the
+on the **Trust policies** page under Settings (preset "GitHub Actions"): the repo, the branch or tag, and the
 workflow that may publish. The Gradle plugin and the Maven extension then use the GitHub token
-with no secret. Without them, post the token to `/api/publish/sessions/oidc`; the **Publishing**
+with no secret. Without them, post the token to `/api/publish/sessions/oidc`; the **Publish**
 page shows the `curl` steps.
 
 **Jenkins.** Install the OpenID Connect Provider plugin and bind an "OpenID Connect id token"
@@ -114,7 +119,7 @@ credential to an environment variable, for example `OIDC_TOKEN`. An admin adds a
 with the preset "Jenkins" (issuer `<jenkins url>/oidc`). Set `oidcTokenEnv = "OIDC_TOKEN"` in the
 Gradle plugin block, or `-Dtelesphorepo.oidcTokenEnv=OIDC_TOKEN` for Maven.
 
-**By hand.** On the **Publishing** page, choose a repo, enter a second-factor code, and copy the
+**By hand.** On the **Publish** page, choose a repo, enter a second-factor code, and copy the
 token. Use it as the password with any username:
 
 ```sh

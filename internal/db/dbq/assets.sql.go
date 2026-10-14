@@ -10,6 +10,23 @@ import (
 	"database/sql"
 )
 
+const deleteAsset = `-- name: DeleteAsset :execrows
+DELETE FROM assets WHERE repo_id = ? AND path = ?
+`
+
+type DeleteAssetParams struct {
+	RepoID int64
+	Path   string
+}
+
+func (q *Queries) DeleteAsset(ctx context.Context, arg DeleteAssetParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteAsset, arg.RepoID, arg.Path)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const getAsset = `-- name: GetAsset :one
 
 SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at

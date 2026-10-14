@@ -36,6 +36,18 @@ type AssetsFt struct {
 	Path string
 }
 
+type AuditEvent struct {
+	ID          int64
+	At          int64
+	ActorUserID sql.NullInt64
+	Actor       string
+	Action      string
+	RepoID      sql.NullInt64
+	Target      string
+	Detail      string
+	Ip          string
+}
+
 type AuthChallenge struct {
 	IDHash    []byte
 	Kind      string
@@ -170,6 +182,7 @@ type Repo struct {
 	Config        string
 	CreatedAt     int64
 	LockedBy      sql.NullString
+	Description   string
 }
 
 type RepoPermission struct {

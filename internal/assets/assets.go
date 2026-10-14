@@ -3,6 +3,7 @@
 package assets
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
 	"crypto/sha1"
@@ -468,6 +469,71 @@ func (s *Service) Search(ctx context.Context, q string, repoIDs []int64, after i
 	}
 	return out, next, nil
 }
+
+// Seek returns the first asset of repo whose path is >= lower (> lower when !inclusive) and
+// < upper (no upper bound when upper is ""), or nil. It is one indexed seek on (repo_id, path).
+func (s *Service) Seek(ctx context.Context, repoID int64, lower string, inclusive bool, upper string) (*Asset, error) {
+	q := dbq.New(s.db.R)
+	var rows []dbq.Asset
+	var err error
+	switch {
+	case upper != "" && inclusive:
+		rows, err = q.ListAssetsFromRange(ctx, dbq.ListAssetsFromRangeParams{RepoID: repoID, Lower: lower, Upper: upper, Limit: 1})
+	case upper != "":
+		rows, err = q.ListAssetsAfterRange(ctx, dbq.ListAssetsAfterRangeParams{RepoID: repoID, Lower: lower, Upper: upper, Limit: 1})
+	case inclusive:
+		rows, err = q.ListAssetsFrom(ctx, dbq.ListAssetsFromParams{RepoID: repoID, Lower: lower, Limit: 1})
+	default:
+		rows, err = q.ListAssetsAfter(ctx, dbq.ListAssetsAfterParams{RepoID: repoID, Lower: lower, Limit: 1})
+	}
+	if err != nil || len(rows) == 0 {
+		return nil, err
+	}
+	return fromRow(rows[0]), nil
+}
+
+// FirstPaths returns up to limit paths of repo that start with prefix ("" for every path), in
+// path order. Callers that delete what they get call it again for the next batch.
+func (s *Service) FirstPaths(ctx context.Context, repoID int64, prefix string, limit int) ([]string, error) {
+	q := dbq.New(s.db.R)
+	var rows []dbq.Asset
+	var err error
+	if end, ok := PrefixEnd(prefix); ok {
+		rows, err = q.ListAssetsFromRange(ctx, dbq.ListAssetsFromRangeParams{RepoID: repoID, Lower: prefix, Upper: end, Limit: int64(limit)})
+	} else {
+		rows, err = q.ListAssetsFrom(ctx, dbq.ListAssetsFromParams{RepoID: repoID, Lower: prefix, Limit: int64(limit)})
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		out[i] = r.Path
+	}
+	return out, nil
+}
+
+// DeleteTx deletes the asset row (repoID, p) in tx. deleted is false when there was none. The
+// caller removes the blob after the commit (DeleteBlob).
+func DeleteTx(ctx context.Context, tx *sql.Tx, repoID int64, p string) (deleted bool, err error) {
+	n, err := dbq.New(tx).DeleteAsset(ctx, dbq.DeleteAssetParams{RepoID: repoID, Path: p})
+	return n > 0, err
+}
+
+// DeleteBlob removes the blob of p from storage; a missing blob is not an error.
+func (s *Service) DeleteBlob(ctx context.Context, repoName, p string) error {
+	return s.st.Delete(ctx, Key(repoName, p))
+}
+
+// SpoolBytes spools b (a generated file, e.g. a checksum) like an upload.
+func (s *Service) SpoolBytes(b []byte) (*Spooled, error) {
+	return s.Spool(bytes.NewReader(b), int64(len(b)))
+}
+
+// PrefixEnd returns the smallest string greater than every string starting with prefix under
+// byte-wise (SQLite BINARY) ordering; ok=false when there is none (prefix is "" or all 0xFF
+// bytes).
+func PrefixEnd(prefix string) (string, bool) { return prefixEnd(prefix) }
 
 // prefixEnd returns the smallest string greater than every string starting with prefix under
 // byte-wise (SQLite BINARY) ordering; ok=false when there is none (prefix is all 0xFF bytes).

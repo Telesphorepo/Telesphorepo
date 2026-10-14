@@ -117,13 +117,14 @@ func TestAPITokens(t *testing.T) {
 	s.CreateUser(t, "alice", "alice-password-1", false)
 	s.CreateUser(t, "bob", "bob-password-1", false)
 	alice, bob := Basic{"alice", "alice-password-1"}, Basic{"bob", "bob-password-1"}
+	aliceUI, bobUI := s.SignIn(t, "alice", "alice-password-1"), s.SignIn(t, "bob", "bob-password-1")
 
 	var tok struct {
 		ID    any    `json:"id"`
 		Name  string `json:"name"`
 		Token string `json:"token"`
 	}
-	apiJSON(t, s, http.MethodPost, "/api/tokens", map[string]any{"name": "ci"}, alice, http.StatusCreated, &tok)
+	apiJSON(t, s, http.MethodPost, "/api/tokens", map[string]any{"name": "ci"}, aliceUI, http.StatusCreated, &tok)
 	if !strings.HasPrefix(tok.Token, "trp_") || tok.Name != "ci" {
 		t.Fatalf("token: %+v", tok)
 	}
@@ -143,9 +144,87 @@ func TestAPITokens(t *testing.T) {
 	// token works as a password
 	apiWant(t, s, http.MethodGet, "/api/me", nil, Basic{"x", tok.Token}, 200)
 
-	apiWant(t, s, http.MethodDelete, "/api/tokens/"+id, nil, bob, http.StatusNotFound)
-	apiWant(t, s, http.MethodDelete, "/api/tokens/"+id, nil, alice, http.StatusNoContent)
+	// Only a UI session changes tokens.
+	apiWant(t, s, http.MethodDelete, "/api/tokens/"+id, nil, alice, http.StatusUnauthorized)
+	apiWant(t, s, http.MethodDelete, "/api/tokens/"+id, nil, bob, http.StatusUnauthorized)
+	apiWant(t, s, http.MethodDelete, "/api/tokens/"+id, nil, bobUI, http.StatusNotFound)
+	apiWant(t, s, http.MethodDelete, "/api/tokens/"+id, nil, aliceUI, http.StatusNoContent)
 	apiWant(t, s, http.MethodGet, "/api/me", nil, Basic{"x", tok.Token}, http.StatusUnauthorized)
+}
+
+// TestAPISessionRule checks where each credential works on the JSON API (spec "Auth model"):
+// a route that changes state, or an admin route, needs a UI session, so an admin password
+// alone cannot go around the second factor. HTTP Basic keeps working for the read routes.
+func TestAPISessionRule(t *testing.T) {
+	s := StartServer(t, ServerOpts{})
+	repo := RandName("rule")
+	s.CreateRepo(t, repo, "maven", false, nil)
+	s.CreateUser(t, "frank", "frank-password-1", false)
+	s.SetPermission(t, repo, "frank", "read")
+	adminPw, frankPw := s.AdminBasic(), Basic{"frank", "frank-password-1"}
+	readToken := Basic{"x", s.CreateToken(t, "frank", "frank-password-1", "read")}
+
+	wantSessionRequired := func(t *testing.T, method, path string, body any, auth Auth) {
+		t.Helper()
+		st, b := s.API(t, method, path, body, auth)
+		if st != http.StatusUnauthorized || !strings.Contains(string(b), "sign in through the web UI for this action") {
+			t.Fatalf("%s %s: status %d, want 401 \"sign in through the web UI for this action\": %s", method, path, st, b)
+		}
+	}
+	trust := map[string]any{
+		"name": RandName("trust"), "issuer": "https://issuer.example", "audience": "telesphorepo",
+		"claims": map[string][]string{"repository": {"acme/app"}}, "repos": []string{repo},
+	}
+
+	t.Run("admin password on admin routes", func(t *testing.T) {
+		wantSessionRequired(t, http.MethodGet, "/api/users", nil, adminPw)
+		wantSessionRequired(t, http.MethodGet, "/api/settings", nil, adminPw)
+		wantSessionRequired(t, http.MethodGet, "/api/audit", nil, adminPw)
+		wantSessionRequired(t, http.MethodGet, "/api/publish/trusts", nil, adminPw)
+	})
+
+	t.Run("admin password on write routes", func(t *testing.T) {
+		wantSessionRequired(t, http.MethodPost, "/api/publish/trusts", trust, adminPw)
+		wantSessionRequired(t, http.MethodPost, "/api/users", map[string]any{"username": RandName("evil"), "password": "evil-password-1", "is_admin": true}, adminPw)
+		wantSessionRequired(t, http.MethodPut, "/api/repos/"+repo+"/permissions/frank", map[string]string{"level": "write"}, adminPw)
+		wantSessionRequired(t, http.MethodPatch, "/api/settings", map[string]any{"max_json_bytes": 4096}, adminPw)
+		wantSessionRequired(t, http.MethodPost, "/api/repos", map[string]any{"name": RandName("evil"), "format": "maven"}, adminPw)
+		wantSessionRequired(t, http.MethodPost, "/api/tokens", map[string]any{"name": "evil"}, adminPw)
+		wantSessionRequired(t, http.MethodPatch, "/api/users/"+s.AdminUser, map[string]any{"password": "evil-password-1"}, adminPw)
+	})
+
+	t.Run("password and read token of a user on write routes", func(t *testing.T) {
+		wantSessionRequired(t, http.MethodPost, "/api/tokens", map[string]any{"name": "more"}, frankPw)
+		wantSessionRequired(t, http.MethodPatch, "/api/users/frank", map[string]any{"password": "frank-password-2"}, frankPw)
+		wantSessionRequired(t, http.MethodPost, "/api/tokens", map[string]any{"name": "more"}, readToken)
+		wantSessionRequired(t, http.MethodPatch, "/api/users/frank", map[string]any{"password": "frank-password-2"}, readToken)
+		wantSessionRequired(t, http.MethodPost, "/api/devices/approve", map[string]string{"user_code": "BCDF-GHJK", "totp_code": "000000"}, frankPw)
+		wantSessionRequired(t, http.MethodPost, "/api/publish/sessions/manual", map[string]string{"repo": repo, "totp_code": "000000"}, frankPw)
+	})
+
+	t.Run("password and read token on read routes", func(t *testing.T) {
+		for _, a := range []Auth{adminPw, frankPw, readToken} {
+			apiWant(t, s, http.MethodGet, "/api/me", nil, a, http.StatusOK)
+			apiWant(t, s, http.MethodGet, "/api/repos", nil, a, http.StatusOK)
+			apiWant(t, s, http.MethodGet, "/api/repos/"+repo, nil, a, http.StatusOK)
+			apiWant(t, s, http.MethodGet, "/api/repos/"+repo+"/tree", nil, a, http.StatusOK)
+			apiWant(t, s, http.MethodGet, "/api/repos/"+repo+"/assets", nil, a, http.StatusOK)
+			apiWant(t, s, http.MethodGet, "/api/repos/"+repo+"/usage", nil, a, http.StatusOK)
+			apiWant(t, s, http.MethodGet, "/api/search?q=abc", nil, a, http.StatusOK)
+		}
+	})
+
+	t.Run("a UI session with the second factor", func(t *testing.T) {
+		admin := s.Admin()
+		apiWant(t, s, http.MethodGet, "/api/users", nil, admin, http.StatusOK)
+		apiWant(t, s, http.MethodPost, "/api/publish/trusts", trust, admin, http.StatusCreated)
+		apiWant(t, s, http.MethodPut, "/api/repos/"+repo+"/permissions/frank", map[string]string{"level": "write"}, admin, http.StatusNoContent)
+		// A user's own UI session changes the user's own things; admin routes stay 403.
+		frank := s.SignIn(t, "frank", "frank-password-1")
+		apiWant(t, s, http.MethodPost, "/api/tokens", map[string]any{"name": "ui"}, frank, http.StatusCreated)
+		apiWant(t, s, http.MethodGet, "/api/users", nil, frank, http.StatusForbidden)
+		apiWant(t, s, http.MethodPatch, "/api/users/frank", map[string]any{"password": "frank-password-2"}, frank, http.StatusOK)
+	})
 }
 
 func TestAPIUsers(t *testing.T) {
@@ -162,15 +241,17 @@ func TestAPIUsers(t *testing.T) {
 	}
 	apiWant(t, s, http.MethodPost, "/api/users", body, admin, http.StatusConflict)
 
-	carol := Basic{"carol", "carol-password-1"}
+	carol := s.SignIn(t, "carol", "carol-password-1")
 	apiWant(t, s, http.MethodGet, "/api/users", nil, carol, http.StatusForbidden)
+	apiWant(t, s, http.MethodGet, "/api/users", nil, Basic{"carol", "carol-password-1"}, http.StatusUnauthorized)
 	apiWant(t, s, http.MethodGet, "/api/users", nil, admin, 200)
 
 	apiJSON(t, s, http.MethodPatch, "/api/users/carol", map[string]any{"is_admin": true}, admin, 200, &u)
 	if !u.IsAdmin {
 		t.Fatalf("patch: %+v", u)
 	}
-	apiWant(t, s, http.MethodGet, "/api/users", nil, carol, 200)
+	// An admin session needs the second factor: carol signs in again, now with TOTP.
+	apiWant(t, s, http.MethodGet, "/api/users", nil, s.SignIn(t, "carol", "carol-password-1"), 200)
 }
 
 func TestAPIReposAndPermissions(t *testing.T) {
@@ -178,6 +259,7 @@ func TestAPIReposAndPermissions(t *testing.T) {
 	admin := s.Admin()
 	s.CreateUser(t, "dave", "dave-password-1", false)
 	dave := Basic{"dave", "dave-password-1"}
+	daveUI := s.SignIn(t, "dave", "dave-password-1")
 
 	pub, priv, deb, secret := RandName("pub"), RandName("priv"), RandName("deb"), RandName("secret")
 	s.CreateRepo(t, pub, "maven", true, nil)
@@ -187,7 +269,7 @@ func TestAPIReposAndPermissions(t *testing.T) {
 
 	apiWant(t, s, http.MethodPost, "/api/repos", map[string]any{"name": pub, "format": "maven"}, admin, http.StatusConflict)
 	apiWant(t, s, http.MethodPost, "/api/repos", map[string]any{"name": "Bad Name", "format": "maven"}, admin, http.StatusBadRequest)
-	apiWant(t, s, http.MethodPost, "/api/repos", map[string]any{"name": RandName("x"), "format": "maven"}, dave, http.StatusForbidden)
+	apiWant(t, s, http.MethodPost, "/api/repos", map[string]any{"name": RandName("x"), "format": "maven"}, daveUI, http.StatusForbidden)
 
 	type repoRow struct {
 		Name       string `json:"name"`
@@ -233,7 +315,7 @@ func TestAPIReposAndPermissions(t *testing.T) {
 	if len(perms) != 1 || perms[0].Username != "dave" || perms[0].Level != "read" {
 		t.Fatalf("permissions: %+v", perms)
 	}
-	apiWant(t, s, http.MethodGet, "/api/repos/"+priv+"/permissions", nil, dave, http.StatusForbidden)
+	apiWant(t, s, http.MethodGet, "/api/repos/"+priv+"/permissions", nil, daveUI, http.StatusForbidden)
 	apiWant(t, s, http.MethodPut, "/api/repos/"+priv+"/permissions/dave", map[string]string{"level": "bogus"}, admin, http.StatusBadRequest)
 
 	got := list(dave)

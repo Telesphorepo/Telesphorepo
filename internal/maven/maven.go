@@ -23,6 +23,7 @@ type Handler struct {
 	auth   *auth.Service
 	assets *assets.Service
 	cfg    config.Provider
+	host   format.Host
 }
 
 // New returns the Maven format.
@@ -97,7 +98,7 @@ func (h *Handler) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
 
 // Register mounts GET/HEAD/PUT /maven/{repo}/{path...}.
 func (h *Handler) Register(mux *http.ServeMux, host format.Host) {
-	h.auth, h.assets, h.cfg = host.Auth, host.Assets, host.Config
+	h.auth, h.assets, h.cfg, h.host = host.Auth, host.Assets, host.Config, host
 	mux.HandleFunc("GET /maven/{repo}/{path...}", h.handle)
 	mux.HandleFunc("PUT /maven/{repo}/{path...}", h.handle)
 }
@@ -140,7 +141,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 	if pr != nil {
 		uid = pr.UserID
 	}
-	created, _, err := h.put(r.Context(), repo, p, sp, uid)
+	created, unchanged, err := h.put(r.Context(), repo, p, sp, uid)
 	switch {
 	case errors.Is(err, errImmutable):
 		httpx.Error(w, http.StatusConflict, errImmutable.Error())
@@ -149,8 +150,12 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		httpx.Error(w, http.StatusInternalServerError, "store failed")
 	case created:
+		h.host.RecordUpload(r, pr, repo, p, sp.Size, sp.SHA256)
 		w.WriteHeader(http.StatusCreated)
 	default:
+		if !unchanged {
+			h.host.RecordUpload(r, pr, repo, p, sp.Size, sp.SHA256)
+		}
 		w.WriteHeader(http.StatusOK)
 	}
 }

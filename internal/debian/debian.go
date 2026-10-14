@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"path"
 	"slices"
 	"strings"
 	"sync"
@@ -65,6 +66,8 @@ type Handler struct {
 	clock   int64 // last issued deb_dirty timestamp (monotonic, unix nanos)
 
 	idx indexer
+
+	host format.Host // the core services, for the audit log
 }
 
 // New returns the Debian format. Register supplies the core services.
@@ -81,6 +84,7 @@ func (h *Handler) Title() string { return "Debian (apt)" }
 // GET/HEAD /debian/{repo}/{path...} (dists/ and pool/) and GET /keys/debian.asc. Configuration
 // and the signing key are read on every use, so setting changes apply live.
 func (h *Handler) Register(mux *http.ServeMux, host format.Host) {
+	h.host = host
 	h.db, h.q = host.DB, dbq.New(host.DB.R)
 	h.auth, h.assets, h.repos = host.Auth, host.Assets, host.Repos
 	h.cfg, h.settings, h.signer, h.log = host.Config, host.Settings, host.Signer, host.Log
@@ -244,12 +248,22 @@ func (h *Handler) RepoConfigChanged(ctx context.Context, old, new *repos.Repo) e
 	if err != nil {
 		return err
 	}
+	var dirs []string
 	for _, p := range dropped {
 		unlock := h.assets.Lock(new.ID, p)
 		if err := h.assets.Store().Delete(ctx, assets.Key(new.Name, p)); err != nil {
 			h.log.Warn("delete index file of a removed architecture", "repo", new.Name, "path", p, "err", err)
 		}
 		unlock()
+		if d := path.Dir(p); !slices.Contains(dirs, d) {
+			dirs = append(dirs, d)
+		}
+	}
+	// No index of a removed architecture is served any more, so none of its by-hash files is.
+	for _, d := range dirs {
+		if err := h.pruneByHash(ctx, new, d, nil); err != nil {
+			h.log.Warn("delete by-hash files of a removed architecture", "repo", new.Name, "dir", d, "err", err)
+		}
 	}
 	for _, d := range dists {
 		h.idx.notify(distKey{new.ID, d})

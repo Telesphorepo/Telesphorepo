@@ -66,8 +66,9 @@ type Server struct {
 	AdminUser   string
 	AdminPass   string
 
-	mu    sync.Mutex
-	users map[string]*harnessUser // what the harness knows about each user (see publish helpers)
+	mu        sync.Mutex
+	users     map[string]*harnessUser // what the harness knows about each user (see publish helpers)
+	adminSess *Session                // see Admin
 }
 
 // StartServer starts a server container on TestNetwork and waits for /healthz.
@@ -384,13 +385,51 @@ type Basic struct{ User, Pass string }
 
 func (b Basic) apply(r *http.Request) { r.SetBasicAuth(b.User, b.Pass) }
 
-// Session carries a cookie jar holding tr_session (see Server.Login).
-type Session struct{ Jar http.CookieJar }
+// Session carries a cookie jar holding tr_session (see Server.Login). It sends the
+// Sec-Fetch-Site header of a browser on the same origin, so http.CrossOriginProtection treats
+// it like the web UI.
+type Session struct {
+	Jar http.CookieJar
 
-func (s *Session) apply(*http.Request) {}
+	mu     sync.Mutex
+	signIn func(t testing.TB) http.CookieJar // signs in on first use (Server.Admin); nil after
+}
 
-// Admin returns Basic credentials of the bootstrap admin.
-func (s *Server) Admin() Basic { return Basic{s.AdminUser, s.AdminPass} }
+func (s *Session) apply(r *http.Request) {
+	if r.Header.Get("Sec-Fetch-Site") == "" {
+		r.Header.Set("Sec-Fetch-Site", "same-origin")
+	}
+}
+
+// ready signs in a lazy session on its first use.
+func (s *Session) ready(t testing.TB) {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.signIn != nil {
+		s.Jar = s.signIn(t)
+		s.signIn = nil
+	}
+}
+
+// Admin returns the UI session of the bootstrap admin, signed in with the password and a TOTP
+// code. Every API route that changes state, and every admin route, needs a UI session (spec
+// "Auth model"). The first request signs in: the harness enrolls TOTP factors for the admin
+// through the setup-only session, then signs in with both steps. The session is kept per server.
+func (s *Server) Admin() *Session {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.adminSess == nil {
+		s.adminSess = &Session{signIn: func(t testing.TB) http.CookieJar {
+			return s.LoginTOTP(t, s.AdminUser).Jar
+		}}
+	}
+	return s.adminSess
+}
+
+// AdminBasic returns HTTP Basic credentials of the bootstrap admin: for format reads and the
+// GET routes of the API that are not admin routes.
+func (s *Server) AdminBasic() Basic { return Basic{s.AdminUser, s.AdminPass} }
 
 // HTTPClient never follows redirects (S3 presigned redirects point at network-internal hosts).
 func (s *Server) HTTPClient(auth Auth) *http.Client {
@@ -417,6 +456,9 @@ func (s *Server) NewRequest(t testing.TB, method, path string, body io.Reader) *
 // Do sends req with auth and returns the response (body already read and closed) plus body bytes.
 func (s *Server) Do(t testing.TB, req *http.Request, auth Auth) (*http.Response, []byte) {
 	t.Helper()
+	if sess, ok := auth.(*Session); ok && sess != nil {
+		sess.ready(t)
+	}
 	if auth != nil {
 		auth.apply(req)
 	}
@@ -483,6 +525,34 @@ func (s *Server) Login(t testing.TB, user, pass string) *Session {
 	return sess
 }
 
+// SignIn returns a full UI session of user, the way the web UI signs in. A user without a
+// second factor signs in with the password alone; an admin without one gets a setup-only
+// session, so the harness then enrolls TOTP factors and signs in with both steps (LoginTOTP).
+// A user with factors that the harness enrolled signs in with LoginTOTP. pass is remembered
+// for later sign-ins.
+func (s *Server) SignIn(t testing.TB, user, pass string) *Session {
+	t.Helper()
+	u := s.user(user)
+	u.pass = pass
+	if len(u.factors) > 0 {
+		return s.LoginTOTP(t, user)
+	}
+	jar, _ := cookiejar.New(nil)
+	sess := &Session{Jar: jar}
+	var a struct {
+		SecondFactor         bool `json:"second_factor"`
+		SecondFactorRequired bool `json:"second_factor_required"`
+	}
+	s.MustAPI(t, http.MethodPost, "/api/auth/login", map[string]string{"username": user, "password": pass}, sess, &a)
+	switch {
+	case a.SecondFactor:
+		t.Fatalf("harness: %s has a second factor that the harness did not enroll", user)
+	case a.SecondFactorRequired:
+		return s.LoginTOTP(t, user)
+	}
+	return sess
+}
+
 // CreateUser creates a local user. The harness keeps the password, so the publish helpers can
 // sign in as the user.
 func (s *Server) CreateUser(t testing.TB, name, pass string, admin bool) {
@@ -506,13 +576,14 @@ func (s *Server) SetPermission(t testing.TB, repo, user, level string) {
 	s.MustAPI(t, http.MethodPut, "/api/repos/"+repo+"/permissions/"+user, map[string]string{"level": level}, s.Admin(), nil)
 }
 
-// CreateToken creates an API token for user (authenticating with user/pass) and returns the secret.
+// CreateToken creates a read token for user (signed in to the UI with user/pass, see SignIn)
+// and returns the secret.
 func (s *Server) CreateToken(t testing.TB, user, pass, name string) string {
 	t.Helper()
 	var out struct {
 		Token string `json:"token"`
 	}
-	s.MustAPI(t, http.MethodPost, "/api/tokens", map[string]any{"name": name}, Basic{user, pass}, &out)
+	s.MustAPI(t, http.MethodPost, "/api/tokens", map[string]any{"name": name}, s.SignIn(t, user, pass), &out)
 	if out.Token == "" {
 		t.Fatal("CreateToken: empty token in response")
 	}
@@ -527,7 +598,7 @@ func (s *Server) WaitDebianIndexed(t testing.TB, repo string) {
 		var st struct {
 			Pending int64 `json:"pending"`
 		}
-		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/status", nil, s.Admin(), &st)
+		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/status", nil, s.AdminBasic(), &st)
 		if st.Pending == 0 {
 			return
 		}
@@ -886,8 +957,8 @@ func (s *Server) Password(t testing.TB, user string) string {
 }
 
 // EnrollTOTP adds totpFactors TOTP factors to user through the API. It signs in with the
-// password only, so the user must not have a second factor yet; the session reaches the setup
-// routes, and the factors are added one after the other on it.
+// password only, so an admin must not have a second factor yet (the session of an admin
+// without one reaches the setup routes); the factors are added one after the other on it.
 func (s *Server) EnrollTOTP(t testing.TB, user string) {
 	t.Helper()
 	u := s.user(user)
@@ -949,8 +1020,9 @@ func totpCodeOf(t testing.TB, f *totpFactor) string {
 	}
 }
 
-// LoginTOTP signs in as user with the password and then a TOTP code, and returns the full
-// session. It enrolls TOTP factors first when the harness has none for the user.
+// LoginTOTP enrolls TOTP factors for user when the harness has none, signs in and returns the
+// full session. An admin signs in with the password and then a TOTP code; any other user signs
+// in with the password alone (spec §13) and keeps the factors for approvals and manual sessions.
 func (s *Server) LoginTOTP(t testing.TB, user string) *Session {
 	t.Helper()
 	if len(s.user(user).factors) == 0 {
@@ -962,10 +1034,9 @@ func (s *Server) LoginTOTP(t testing.TB, user string) *Session {
 		SecondFactor bool `json:"second_factor"`
 	}
 	s.MustAPI(t, http.MethodPost, "/api/auth/login", map[string]string{"username": user, "password": s.Password(t, user)}, sess, &step)
-	if !step.SecondFactor {
-		t.Fatalf("login as %s with a TOTP factor: the answer does not ask for the second factor", user)
+	if step.SecondFactor {
+		s.MustAPI(t, http.MethodPost, "/api/auth/login/second", map[string]string{"totp_code": s.TOTPCode(t, user)}, sess, nil)
 	}
-	s.MustAPI(t, http.MethodPost, "/api/auth/login/second", map[string]string{"totp_code": s.TOTPCode(t, user)}, sess, nil)
 	return sess
 }
 

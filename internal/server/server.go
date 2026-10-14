@@ -18,9 +18,11 @@ import (
 
 	"github.com/Telesphorepo/Telesphorepo/internal/api"
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
+	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
+	"github.com/Telesphorepo/Telesphorepo/internal/files"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	_ "github.com/Telesphorepo/Telesphorepo/internal/formats" // registers the built-in formats
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
@@ -44,7 +46,8 @@ type Services struct {
 
 // Options customises Run (used by "telesphorepo dev"). The zero value is plain "serve".
 type Options struct {
-	// Dev applies the Dev default of every setting, see settings.Options.Dev.
+	// Dev applies the Dev default of every setting (see settings.Options.Dev) and makes the second
+	// factor optional (auth.Service.SetDevMode). Only "telesphorepo dev" sets it.
 	Dev bool
 	// Init runs after the DB and services are ready and before the default first-run admin
 	// bootstrap (so it may create its own admin) and before listening.
@@ -175,11 +178,15 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 	})
 
 	rs := repos.New(d, format.ValidateRepoConfig)
+	au := audit.New(d, set.Config, func() time.Duration { return set.Current().Duration(settings.KeyAuditRetention) }, log.With("component", "audit"))
 	as := auth.New(d, set.Config, rs)
 	as.SetSealer(set) // TOTP secrets are sealed with the master key
+	as.SetAudit(au)
+	as.SetDevMode(opts.Dev) // only "telesphorepo dev" makes the second factor optional
 	ps := publish.New(d, as, rs, set, log.With("component", "publish"))
 	as.SetPublishTokens(ps) // publish-session tokens authenticate through the publish service
 	ss := assets.New(d, live, set.Config)
+	fs := files.New(d, ss, rs, as, log.With("component", "files"))
 	mv := move.New(d, set, live, ss, rs, log.With("component", "move"))
 	nx := nexus.New(d, set, rs, log.With("component", "nexus"))
 	// The move copier, the Nexus sync runners and scheduler, and the publish cleanup job live until
@@ -191,6 +198,7 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 		mv.Wait()
 		nx.Wait()
 		ps.Wait()
+		au.Wait()
 	}()
 
 	if opts.Init != nil {
@@ -215,7 +223,7 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 		io.WriteString(w, "ok\n")
 	})
 	sso := oidc.New(as, set.Config, log.With("component", "oidc"))
-	mux.Handle("/api/", api.New(as, rs, ss, set, mv, nx, ps, sso).Handler())
+	mux.Handle("/api/", api.New(as, rs, ss, set, mv, nx, ps, fs, au, sso).Handler())
 	for _, f := range format.All() {
 		f.Register(mux, format.Host{
 			DB:       d,
@@ -226,6 +234,7 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 			Settings: set,
 			Signer:   set.Signer,
 			Log:      log.With("component", f.Name()),
+			Audit:    au,
 		})
 	}
 	mux.Handle("/", web.Handler())
@@ -257,6 +266,7 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 	}
 	nx.Start(jobsCtx)
 	ps.Start(jobsCtx)
+	au.Start(jobsCtx)
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()
@@ -313,8 +323,8 @@ func bootstrapAdmin(ctx context.Context, as *auth.Service, boot *config.Boot, lo
 			"  telesphorepo user passwd "+user,
 			"",
 			"Sign in to the web UI and add an authenticator app or a",
-			"passkey on the Security page. Until then the sign-in",
-			"reaches only that page.",
+			"passkey on the Security page. An admin sign-in reaches",
+			"only that page until then.",
 		)
 	}
 	return nil
