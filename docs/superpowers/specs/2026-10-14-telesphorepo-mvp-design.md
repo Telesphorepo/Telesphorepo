@@ -402,21 +402,34 @@ redirects, submit Keycloak's login form), then asserts: admin gets a session and
 repo; non-admin is refused and no user row exists; OIDC admin cannot use Basic or create tokens;
 tampered `state` → 400; reused `state` → 400.
 
-### 7.6 Publisher short-lived tokens **[Future]**
+### 7.6 Publisher device keys, 2FA and short-lived tokens **[Future]**
 
-Goal: a Gradle plugin (later a CLI) obtains a short-lived token for the developer so a leaked
-credential has limited lifetime. Constraint that shapes the design: if the plugin mints tokens
-with username + password alone, a stolen password keeps minting tokens forever, so short-lived
-tokens would add nothing. Minting therefore needs a factor the attacker lacks, and the account's
-password must stop working directly on package endpoints. Planned shape:
-- Per-user flag `password_basic = false`: the password only works for UI login and minting, not
-  for Basic on `/maven`/`/debian`.
-- Device enrollment: the plugin generates an Ed25519 key pair on first use; the user approves it
-  in the UI (password session); afterwards `POST /api/tokens/mint` with a signed challenge returns
-  a `minted` token (`api_tokens.kind = 'minted'`, TTL e.g. 12h, scoped to the user's repos).
-  Revoking the device revokes its future mints. (TOTP-on-mint is the simpler alternative.)
-- CI service accounts keep long-lived `personal` tokens issued by an admin.
-The M1/M2 token model already carries `expires_at` and `kind`, so this needs no restructuring.
+Goal: developers publish from their machines (Gradle plugin, later a CLI) with short-lived tokens
+only, so a leaked password — or a leaked token — is useless long term. CI service accounts keep
+long-lived tokens issued by an admin.
+
+Principle: **a password alone can never produce a token or publish.** Every token is minted with
+proof of a key that lives on an enrolled machine, and enrolling a machine requires a second factor.
+
+- **Second factor per publisher:** passkeys (WebAuthn, via `github.com/go-webauthn/webauthn`) and/or
+  TOTP (via `github.com/pquerna/otp`). Required for any publisher with `password_basic = false`.
+- **Per-user flag `password_basic`** (default `true` for backward compatibility / CI accounts): when
+  `false`, the password works only for UI login (which then also demands the second factor), never
+  for Basic on `/maven` or `/debian`.
+- **Device enrollment:** on first use the plugin generates an Ed25519 key pair on the machine
+  (private key stays local, file mode 0600 or the OS keychain) and starts an enrollment: it gets a
+  short code and a URL; the user opens it, signs in with password + passkey/TOTP, and approves the
+  device by name. The server stores the device's public key (`devices` table: user, name,
+  public key, created_at, last_used_at, revoked_at).
+- **Minting:** `POST /api/tokens/mint` → server returns a nonce; the plugin signs
+  `nonce || device_id || timestamp` with the device key; the server verifies and returns a `minted`
+  token (`api_tokens.kind = 'minted'`, TTL ~12h, bound to the device). The plugin caches it and
+  re-mints when expired. No password or second factor is needed per mint — the device key is the
+  possession factor and enrollment already required 2FA.
+- **Revocation:** revoking a device in the UI invalidates its unexpired minted tokens and blocks
+  future mints. Users and admins can list devices and their last use.
+- The M1/M2 token model already carries `expires_at` and `kind`; this adds `devices`,
+  `user_2fa` tables and the `password_basic` flag, with no restructuring.
 
 ## 8. Maven (also Gradle plugins) **[M1]**
 
