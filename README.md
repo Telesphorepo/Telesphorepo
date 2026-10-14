@@ -14,8 +14,10 @@ That is all. It checks your toolchain, installs web dependencies, then starts:
 - the API/backend on http://localhost:8080 (rebuilds and restarts when Go files change)
 - the web UI with hot reload on **http://localhost:5173** (open this one)
 
-On first run it creates an `admin` user and demo repos `maven` and `debian`. The username and a
-random password are printed in the banner when it starts (data lives in `.telesphorepo-dev/`).
+On first run it creates an `admin` user and demo repos `maven` and `debian` (anonymous read on, so
+local apt/Maven/Gradle need no credentials). The banner printed at startup shows the URL, the
+username, the generated password and ready-to-paste client snippets. The password is also saved in
+`.telesphorepo-dev/admin-password.txt`; delete `.telesphorepo-dev/` to start over.
 Nothing to configure. Ctrl+C stops everything.
 
 Other commands (`npm run <script>` works too):
@@ -24,6 +26,7 @@ Other commands (`npm run <script>` works too):
 bun run build            # UI + bin/telesphorepo (bin\telesphorepo.exe on Windows), UI embedded
 bun run build image      # also build the container image telesphorepo:local
 bun run preview          # build, then run the production binary in dev mode on :8080
+bun run test             # e2e suite (see Tests)
 bun run doctor           # show what was detected (Go, bun/npm, container engine) and what is missing
 ```
 
@@ -31,7 +34,7 @@ bun run doctor           # show what was detected (Go, bun/npm, container engine
 
 - Go (version in `go.mod`)
 - [bun](https://bun.sh) recommended; npm works as a fallback
-- Docker or Podman, only for the tests and for building the image
+- Docker or Podman, only for the tests and for building the image (not needed to run it)
 
 Works on Windows, macOS and Linux. No bash or make needed.
 
@@ -45,7 +48,7 @@ docker run -d -p 8080:8080 -v telesphorepo-data:/data \
   telesphorepo:local
 ```
 
-or the binary: `bin/telesphorepo serve`. Behind plain HTTP (no TLS) also set `TR_COOKIE_SECURE=false`.
+or the binary (`bun run build` first): `bin/telesphorepo` (same as `serve`). Behind plain HTTP (no TLS) also set `TR_COOKIE_SECURE=false`.
 On first start with no users, an `admin` user is created with a random password printed once to
 stderr; set `TR_BOOTSTRAP_ADMIN_USER` and `TR_BOOTSTRAP_ADMIN_PASSWORD` to choose your own.
 The Debian signing key is generated at `$TR_DATA_DIR/signing.asc` on first start; keep the data volume.
@@ -80,14 +83,16 @@ telesphorepo user passwd alice       # reset a password
 echo 's3cret-pass' | telesphorepo user add ci   # piped: reads one line
 ```
 
-In a container: `docker exec -it <container> /telesphorepo user add alice`.
+Run these where the data dir is (`TR_DATA_DIR`, default `./data`; for the local dev instance it
+finds `.telesphorepo-dev` by itself). In a container: `docker exec -it <container> /telesphorepo user add alice`.
+`telesphorepo keygen [FILE]` writes a new Debian signing key (never overwrites).
 
 For CI, create an API token in the web UI (shown once). Use it as the password with any username.
 Package endpoints use HTTP Basic auth only.
 
 ## Client setup
 
-Replace `packages.example.com` with your host (locally `localhost:8080`), `USER`/`TOKEN` with a user and a token.
+Replace `packages.example.com` with your host (locally `localhost:8080`, using `http://`), `USER`/`TOKEN` with a user and a token.
 
 ### Maven
 

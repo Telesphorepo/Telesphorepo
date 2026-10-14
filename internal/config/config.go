@@ -70,8 +70,32 @@ const SigningKeyFileName = "signing.asc"
 // DefaultSigningKeyFile is where the signing key lives when TR_GPG_KEY_FILE is unset.
 func (c *Config) DefaultSigningKeyFile() string { return joinOS(c.DataDir, SigningKeyFileName) }
 
+// DevDataDir is the data directory of "telesphorepo dev" when TR_DATA_DIR is unset.
+const DevDataDir = "./.telesphorepo-dev"
+
+// DevAdminPasswordFile is the file in the dev data dir holding the generated admin password.
+const DevAdminPasswordFile = "admin-password.txt"
+
 // DataDirFromEnv returns TR_DATA_DIR or DefaultDataDir, without loading the rest of the config.
 func DataDirFromEnv() string { return env("TR_DATA_DIR", DefaultDataDir) }
+
+// CLIDataDir is the data dir for offline commands (user add/passwd): TR_DATA_DIR if set;
+// otherwise ./data, unless ./data does not exist and the dev data dir does (so the commands
+// work against "telesphorepo dev" without extra setup). fromDev reports the fallback.
+func CLIDataDir() (dir string, fromDev bool) {
+	if v := os.Getenv("TR_DATA_DIR"); v != "" {
+		return v, false
+	}
+	if _, err := os.Stat(DefaultDataDir); err != nil {
+		if st, err := os.Stat(DevDataDir); err == nil && st.IsDir() {
+			return DevDataDir, true
+		}
+	}
+	return DefaultDataDir, false
+}
+
+// JoinDataDir joins a file name onto a data dir using the OS separator.
+func JoinDataDir(dir, name string) string { return joinOS(dir, name) }
 
 // Load reads the configuration from TR_* environment variables.
 func Load() (*Config, error) { return LoadWithDefaults(nil) }

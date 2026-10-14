@@ -1,4 +1,4 @@
-module telesphorepo
+module github.com/Telesphorepo/Telesphorepo
 
 go 1.26.0
 
@@ -92,3 +92,5 @@ require (
 	modernc.org/memory v1.12.1 // indirect
 	pault.ag/go/topsort v0.1.1 // indirect
 )
+
+tool github.com/Telesphorepo/Telesphorepo/tools/run

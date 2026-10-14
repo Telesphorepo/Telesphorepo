@@ -6,6 +6,9 @@
 Dockerfile
 .dockerignore
 docs
+bin
+.telesphorepo-dev
+node_modules
 web/node_modules
 web/dist
 e2e/testdata/out

@@ -10,7 +10,7 @@ import (
 
 	"golang.org/x/time/rate"
 
-	"telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 )
 
 const (

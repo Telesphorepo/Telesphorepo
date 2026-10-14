@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"telesphorepo/internal/repos"
+	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
 func nowNanos() int64 { return time.Now().UnixNano() }

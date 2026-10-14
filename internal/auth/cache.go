@@ -14,6 +14,7 @@ const (
 
 type cacheEntry struct {
 	userID  int64
+	hash    string // password hash the entry was verified against
 	gen     uint64
 	expires time.Time
 }
@@ -40,18 +41,18 @@ func (s *Service) cacheKey(username, password string) [32]byte {
 	return k
 }
 
-func (c *verifyCache) get(k [32]byte) (int64, bool) {
+func (c *verifyCache) get(k [32]byte) (int64, string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.m[k]
 	if !ok {
-		return 0, false
+		return 0, "", false
 	}
 	if time.Now().After(e.expires) || e.gen != c.gen[e.userID] {
 		delete(c.m, k)
-		return 0, false
+		return 0, "", false
 	}
-	return e.userID, true
+	return e.userID, e.hash, true
 }
 
 // generation returns the user's current generation; capture it before verifying so a
@@ -62,7 +63,7 @@ func (c *verifyCache) generation(userID int64) uint64 {
 	return c.gen[userID]
 }
 
-func (c *verifyCache) put(k [32]byte, userID int64, gen uint64) {
+func (c *verifyCache) put(k [32]byte, userID int64, hash string, gen uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if gen != c.gen[userID] {
@@ -87,7 +88,7 @@ func (c *verifyCache) put(k [32]byte, userID int64, gen uint64) {
 			delete(c.m, oldestK)
 		}
 	}
-	c.m[k] = cacheEntry{userID: userID, gen: gen, expires: time.Now().Add(cacheTTL)}
+	c.m[k] = cacheEntry{userID: userID, hash: hash, gen: gen, expires: time.Now().Add(cacheTTL)}
 }
 
 func (c *verifyCache) invalidate(userID int64) {

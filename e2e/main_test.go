@@ -18,7 +18,7 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/network"
 
-	"telesphorepo/internal/containerengine"
+	"github.com/Telesphorepo/Telesphorepo/internal/containerengine"
 )
 
 const defaultImage = "telesphorepo-e2e:latest"

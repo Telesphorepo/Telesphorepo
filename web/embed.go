@@ -72,12 +72,12 @@ pre{background:var(--code);padding:.75rem 1rem;border-radius:6px;overflow-x:auto
 </style></head>
 <body><main>
 <h1>UI not built</h1>
+<p><strong>UI not built — run <code>bun run dev</code> (hot reload) or <code>bun run build</code>.</strong></p>
 <p>The server is running, but this binary was built without the web UI. The Maven, Debian and JSON API endpoints work normally.</p>
-<p>Build the UI once, then restart the server with <code>go run</code> or rebuild it so the UI is embedded:</p>
-<pre>npm --prefix web install
-npm --prefix web run build</pre>
-<p>Or run the Vite dev server for hot reload (it proxies API calls to this server on :8080):</p>
-<pre>npm --prefix web run dev</pre>
-<p>and open <a href="http://localhost:5173">http://localhost:5173</a>.</p>
+<p>From the repository root, either run everything with hot reload:</p>
+<pre>bun run dev</pre>
+<p>and open <a href="http://localhost:5173">http://localhost:5173</a>, or build the binary with the UI embedded:</p>
+<pre>bun run build</pre>
+<p>(<code>npm run dev</code> / <code>npm run build</code> work too.)</p>
 </main></body></html>
 `

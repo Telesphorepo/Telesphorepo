@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"telesphorepo/internal/config"
-	"telesphorepo/internal/db"
-	"telesphorepo/internal/repos"
+	"github.com/Telesphorepo/Telesphorepo/internal/config"
+	"github.com/Telesphorepo/Telesphorepo/internal/db"
+	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
 var (

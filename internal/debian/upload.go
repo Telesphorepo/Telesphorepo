@@ -9,10 +9,10 @@ import (
 	"slices"
 	"time"
 
-	"telesphorepo/internal/assets"
-	"telesphorepo/internal/auth"
-	"telesphorepo/internal/httpx"
-	"telesphorepo/internal/repos"
+	"github.com/Telesphorepo/Telesphorepo/internal/assets"
+	"github.com/Telesphorepo/Telesphorepo/internal/auth"
+	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
 const debContentType = "application/vnd.debian.binary-package"

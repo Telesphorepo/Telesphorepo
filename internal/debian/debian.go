@@ -10,13 +10,13 @@ import (
 	"strings"
 	"sync"
 
-	"telesphorepo/internal/assets"
-	"telesphorepo/internal/auth"
-	"telesphorepo/internal/config"
-	"telesphorepo/internal/db"
-	"telesphorepo/internal/httpx"
-	"telesphorepo/internal/repos"
-	"telesphorepo/internal/signing"
+	"github.com/Telesphorepo/Telesphorepo/internal/assets"
+	"github.com/Telesphorepo/Telesphorepo/internal/auth"
+	"github.com/Telesphorepo/Telesphorepo/internal/config"
+	"github.com/Telesphorepo/Telesphorepo/internal/db"
+	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/repos"
+	"github.com/Telesphorepo/Telesphorepo/internal/signing"
 )
 
 type Handler struct {

@@ -21,10 +21,10 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"telesphorepo/internal/config"
-	"telesphorepo/internal/db"
-	"telesphorepo/internal/repos"
-	"telesphorepo/internal/storage"
+	"github.com/Telesphorepo/Telesphorepo/internal/config"
+	"github.com/Telesphorepo/Telesphorepo/internal/db"
+	"github.com/Telesphorepo/Telesphorepo/internal/repos"
+	"github.com/Telesphorepo/Telesphorepo/internal/storage"
 )
 
 var (

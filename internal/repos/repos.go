@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"telesphorepo/internal/db"
+	"github.com/Telesphorepo/Telesphorepo/internal/db"
 )
 
 var (

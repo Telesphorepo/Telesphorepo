@@ -14,6 +14,8 @@ export default defineConfig({
   plugins: [react(), keep()],
   build: { outDir: "dist", emptyOutDir: true },
   server: {
+    port: 5173,
+    strictPort: true,
     proxy: Object.fromEntries(
       ["/api", "/maven", "/debian", "/keys", "/healthz"].map((p) => [p, "http://localhost:8080"]),
     ),

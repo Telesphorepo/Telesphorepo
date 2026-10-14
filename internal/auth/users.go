@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"telesphorepo/internal/repos"
+	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
 const minPasswordLen = 8

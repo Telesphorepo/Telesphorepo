@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 )
 
 const challenge = `Basic realm="telesphorepo"`
@@ -56,15 +56,18 @@ func (s *Service) verifyUserPassword(ctx context.Context, keys []string, usernam
 	}
 	key := s.cacheKey(username, password)
 	for {
-		if uid, ok := s.cache.get(key); ok {
-			p, err := s.principalByID(ctx, uid)
-			if err != nil || p.Username != username {
-				if err == nil {
-					err = ErrBadCredentials
-				}
+		if uid, hash, ok := s.cache.get(key); ok {
+			// The DB is the source of truth: a password changed by another process (e.g.
+			// "telesphorepo user passwd") changes the stored hash and voids this entry.
+			p, cur, err := s.principalAndHash(ctx, uid)
+			if err != nil {
 				return nil, err
 			}
-			return p, nil
+			if p.Username == username && cur == hash {
+				return p, nil
+			}
+			s.cache.invalidate(uid)
+			continue
 		}
 		s.flightMu.Lock()
 		if f, ok := s.flights[key]; ok {
@@ -127,12 +130,30 @@ func (s *Service) verifyUncached(ctx context.Context, keys []string, key [32]byt
 	// change bumps the generation after gen was captured and so voids the entry.
 	var cur string
 	if err := s.db.R.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE id = ?`, id).Scan(&cur); err == nil && cur == hash {
-		s.cache.put(key, id, gen)
+		s.cache.put(key, id, hash, gen)
 	}
 	return &Principal{UserID: id, Username: username, IsAdmin: admin}, nil
 }
 
 // principalByID re-reads the user so admin/disabled changes apply immediately.
+// principalAndHash is principalByID plus the stored password hash, in one PK lookup.
+func (s *Service) principalAndHash(ctx context.Context, id int64) (*Principal, string, error) {
+	p := &Principal{UserID: id}
+	var (
+		disabled bool
+		hash     string
+	)
+	err := s.db.R.QueryRowContext(ctx, `SELECT username, is_admin, disabled, password_hash FROM users WHERE id = ?`, id).
+		Scan(&p.Username, &p.IsAdmin, &disabled, &hash)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && disabled) {
+		return nil, "", ErrBadCredentials
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	return p, hash, nil
+}
+
 func (s *Service) principalByID(ctx context.Context, id int64) (*Principal, error) {
 	p := &Principal{UserID: id}
 	var disabled bool

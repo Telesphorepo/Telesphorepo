@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"strings"
 
-	"telesphorepo/internal/httpx"
-	"telesphorepo/internal/repos"
+	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
 func parseLevel(s string) Level {

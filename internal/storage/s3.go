@@ -15,7 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 
-	"telesphorepo/internal/config"
+	"github.com/Telesphorepo/Telesphorepo/internal/config"
 )
 
 type s3Store struct {

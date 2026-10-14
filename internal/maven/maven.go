@@ -7,10 +7,10 @@ import (
 	"path"
 	"strings"
 
-	"telesphorepo/internal/assets"
-	"telesphorepo/internal/auth"
-	"telesphorepo/internal/config"
-	"telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/assets"
+	"github.com/Telesphorepo/Telesphorepo/internal/auth"
+	"github.com/Telesphorepo/Telesphorepo/internal/config"
+	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 )
 
 type Handler struct {

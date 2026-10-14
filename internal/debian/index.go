@@ -19,8 +19,8 @@ import (
 	"strings"
 	"time"
 
-	"telesphorepo/internal/assets"
-	"telesphorepo/internal/repos"
+	"github.com/Telesphorepo/Telesphorepo/internal/assets"
+	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
 // tempOut is a buffered temp file that hashes everything written to it.

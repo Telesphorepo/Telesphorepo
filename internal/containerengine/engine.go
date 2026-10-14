@@ -1,5 +1,5 @@
 // Package containerengine detects a usable Docker or Podman engine on macOS, Linux and
-// Windows (spec §16). Used by tools/stack and the e2e harness; not linked into the server.
+// Windows (spec §16). Used by tools/run and the e2e harness; not linked into the server.
 package containerengine
 
 import (
@@ -35,7 +35,14 @@ func Detect(ctx context.Context) (Engine, error) {
 		if err != nil {
 			return Engine{}, fmt.Errorf("TR_ENGINE=docker but the docker CLI is not on PATH")
 		}
-		return Engine{Name: "docker", CLI: cli, Host: os.Getenv("DOCKER_HOST")}, nil
+		if host := os.Getenv("DOCKER_HOST"); host != "" {
+			return Engine{Name: "docker", CLI: cli, Host: host}, nil
+		}
+		e, why := probeDocker(ctx, cli)
+		if why != "" {
+			return Engine{}, fmt.Errorf("TR_ENGINE=docker: %s", why)
+		}
+		return e, nil
 	case "podman":
 		if host := os.Getenv("DOCKER_HOST"); host != "" {
 			cli, err := exec.LookPath("podman")
@@ -73,17 +80,10 @@ func Detect(ctx context.Context) (Engine, error) {
 	var tried []string
 	if cli, err := exec.LookPath("docker"); err != nil {
 		tried = append(tried, "docker: CLI not found on PATH")
+	} else if e, why := probeDocker(ctx, cli); why == "" {
+		return e, nil
 	} else {
-		out, err := run(ctx, cli, "version", "--format", "{{.Server.Version}}")
-		switch {
-		case err == nil && strings.Contains(strings.ToLower(out), "podman"):
-			// podman-docker shim ("Emulate Docker CLI using podman"): treat it as podman.
-			tried = append(tried, "docker: CLI is the podman-docker shim")
-		case err == nil && strings.TrimSpace(out) != "":
-			return Engine{Name: "docker", CLI: cli}, nil
-		default:
-			tried = append(tried, "docker: daemon not responding ("+firstLine(out, err)+")")
-		}
+		tried = append(tried, "docker: "+why)
 	}
 
 	e, err := detectPodman(ctx)
@@ -93,6 +93,32 @@ func Detect(ctx context.Context) (Engine, error) {
 	tried = append(tried, "podman: "+err.Error())
 	return Engine{}, fmt.Errorf("no container engine found; tried:\n  - %s\ninstall/start Docker or Podman, or set TR_ENGINE / DOCKER_HOST",
 		strings.Join(tried, "\n  - "))
+}
+
+// probeDocker checks that the docker CLI reaches a daemon. It returns a reason when it does not
+// (or when "docker" is really the podman-docker shim, which detectPodman handles better).
+// A docker CLI talking to a Podman API socket (podman-mac-helper, a docker context) is
+// reported as podman so the Ryuk privileged flag is applied.
+func probeDocker(ctx context.Context, cli string) (Engine, string) {
+	if out, err := run(ctx, cli, "--version"); err == nil && strings.Contains(strings.ToLower(out), "podman") {
+		return Engine{}, "CLI is the podman-docker shim"
+	}
+	out, err := run(ctx, cli, "version", "--format", "{{.Server.Version}}|{{range .Server.Components}}{{.Name}};{{end}}")
+	if err != nil || strings.TrimSpace(strings.SplitN(strings.TrimSpace(out), "|", 2)[0]) == "" {
+		return Engine{}, "daemon not responding (" + firstLine(out, err) + "); start Docker Desktop / the docker service"
+	}
+	e := Engine{Name: "docker", CLI: cli}
+	if strings.Contains(strings.ToLower(out), "podman") {
+		e.Name = "podman"
+	}
+	// API clients (testcontainers) do not always follow the CLI's current context
+	// (Docker Desktop, colima, OrbStack); pin the endpoint the CLI actually used.
+	if host, err := run(ctx, cli, "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"); err == nil {
+		if h := strings.TrimSpace(host); h != "" && h != "<no value>" && !strings.Contains(h, "\n") {
+			e.Host = h
+		}
+	}
+	return e, ""
 }
 
 func detectPodman(ctx context.Context) (Engine, error) {
@@ -170,31 +196,6 @@ func (e Engine) ApplyEnv() {
 	if e.Name == "podman" {
 		_ = os.Setenv("TESTCONTAINERS_RYUK_CONTAINER_PRIVILEGED", "true")
 	}
-}
-
-// Compose returns the argv prefix for compose: ["docker","compose"] or ["podman","compose"]
-// (falling back to "podman-compose" / "docker-compose" binaries when the plugin is missing).
-func (e Engine) Compose(ctx context.Context) ([]string, error) {
-	cli := e.CLI
-	if cli == "" {
-		cli = e.Name
-	}
-	if _, err := run(ctx, cli, "compose", "version"); err == nil {
-		return []string{cli, "compose"}, nil
-	}
-	fallbacks := []string{"docker-compose", "podman-compose"}
-	if e.Name == "podman" {
-		fallbacks = []string{"podman-compose", "docker-compose"}
-	}
-	for _, name := range fallbacks {
-		if p, err := exec.LookPath(name); err == nil {
-			return []string{p}, nil
-		}
-	}
-	if e.Name == "podman" {
-		return nil, errors.New("no compose provider found; install podman-compose or docker-compose (podman compose needs one of them)")
-	}
-	return nil, errors.New("no compose found; install the Docker Compose plugin (docker compose) or docker-compose")
 }
 
 // run executes name args... without a shell, bounded by probeTimeout; returns combined output.

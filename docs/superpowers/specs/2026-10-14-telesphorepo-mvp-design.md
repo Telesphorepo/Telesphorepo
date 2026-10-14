@@ -692,7 +692,7 @@ Gotchas for test authors:
 
 Production is the container image (or `bin/telesphorepo serve`); first start prints the admin password and everything else is configured in the UI (§3).
 
-**Repo documentation:** `README.md` is for humans and stays short: what it is, how to run it locally, how to run it in production, and the few commands people use most — not a changelog, wiki or full CLI reference (a website will hold detailed docs later). `SPEC.md` describes the system as currently built (architecture, data model, endpoints, conventions) and is updated whenever behaviour changes. `AGENTS.md` holds agent-oriented working rules (build/test commands, no unit tests, no flag slop, minimal env, package `path` for keys, where things live); `CLAUDE.md` contains only `@AGENTS.md`.
+**Repo documentation:** `README.md` is for humans and stays short: what it is, how to run it locally, how to run it in production, and the few commands people use most — not a changelog, wiki or full CLI reference (a website will hold detailed docs later). `SPEC.md` describes the system as currently built (architecture, data model, endpoints, conventions) and is updated whenever behaviour changes. `AGENTS.md` holds agent-oriented working rules (build/test commands, no unit tests, no flag slop, minimal env, package `path` for keys, where things live). No `CLAUDE.md`: Claude Code reads `AGENTS.md` directly.
 
 **Package manager:** the web app's committed lockfile is `web/bun.lock`; the Dockerfile's UI stage
 uses the official `oven/bun` image with `bun install --frozen-lockfile`. The npm fallback runs
@@ -712,7 +712,7 @@ is tested without a real bucket. `ForEachStorage` runs `fs`, `seaweedfs`, and `r
 ## 17. Milestones
 - **M1 (now)**: everything marked [M1]: config, DB, storage FS+S3, auth, Maven, Debian, JSON API,
   UI shell, CLI `serve`/`user create`/`signing-key generate`, Dockerfile, e2e suite above.
-- **M1.1**: DX (§16). **M1.2**: in-app settings (§3), SPEC.md/AGENTS.md/CLAUDE.md, lean README.
+- **M1.1**: DX (§16). **M1.2**: in-app settings (§3), SPEC.md/AGENTS.md, lean README.
 - **M2**: OIDC admin sign-on (§7.5) + Keycloak e2e.
 - **M3**: `move`, `import nexus` + e2e.
 - **M4**: full admin UI polish, deletes (assets, deb packages) + blob/by-hash GC, scaling test

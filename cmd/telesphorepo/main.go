@@ -1,48 +1,134 @@
-// Command telesphorepo: serve | user create | signing-key generate (spec §4).
+// Command telesphorepo is the single Telesphorepo binary (spec §4): serve (default), dev,
+// user add|passwd, keygen, version, help.
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
-	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"syscall"
 
-	"telesphorepo/internal/auth"
-	"telesphorepo/internal/config"
-	"telesphorepo/internal/db"
-	"telesphorepo/internal/repos"
-	"telesphorepo/internal/server"
-	"telesphorepo/internal/signing"
+	"github.com/Telesphorepo/Telesphorepo/internal/config"
+	"github.com/Telesphorepo/Telesphorepo/internal/server"
 )
 
-const usage = `usage:
-  telesphorepo [serve]
-  telesphorepo user create --username U [--admin] (--password-stdin | --password-env VAR)
-  telesphorepo signing-key generate --name N --email E --out FILE [--public-out FILE]
-`
+// version is stamped at build time: go build -ldflags "-X main.version=v1.2.3".
+var version = "dev"
 
-// errUsage marks errors that should print usage and exit 2.
-type errUsage struct{ msg string }
+// command is one CLI command. Sub-commands (user add) are nested.
+type command struct {
+	name    string
+	summary string // one line for the overview
+	usage   string // example-led help for "<cmd> --help"
+	run     func(args []string) error
+	subs    []*command
+}
 
-func (e errUsage) Error() string { return e.msg }
+// usageError prints the command's usage after the message and exits 2.
+type usageError struct {
+	msg string
+	cmd *command
+}
+
+func (e *usageError) Error() string { return e.msg }
+
+// helpRequest asks main to print a command's usage and exit 0.
+type helpRequest struct{ cmd *command }
+
+func (helpRequest) Error() string { return "help requested" }
+
+var commands []*command
+
+func init() {
+	userCmd := &command{
+		name:    "user",
+		summary: "add a user or reset a password",
+		usage: `Manage users in the local database.
+
+  telesphorepo user add alice            prompt for alice's password, create her
+  telesphorepo user add ops --admin      create an admin
+  telesphorepo user passwd alice         reset alice's password
+
+Passwords are prompted twice (hidden) on a terminal, or read as one line from a pipe:
+  echo 's3cretpass' | telesphorepo user add ci-bot
+`,
+	}
+	userCmd.subs = []*command{
+		{name: "add", summary: "create a user", usage: `Create a user (password: prompted twice on a terminal, else one line from stdin; min 8 chars).
+
+  telesphorepo user add alice
+  telesphorepo user add ops --admin
+  echo 's3cretpass' | telesphorepo user add ci-bot
+`, run: userAdd},
+		{name: "passwd", summary: "reset a user's password", usage: `Reset a user's password and sign out their sessions.
+
+  telesphorepo user passwd alice
+  echo 'n3wpassword' | telesphorepo user passwd alice
+`, run: userPasswd},
+	}
+	userCmd.run = func(args []string) error {
+		if len(args) == 0 {
+			return helpRequest{userCmd}
+		}
+		return &usageError{unknownMsg("user "+args[0], args[0], userCmd.subs), userCmd}
+	}
+
+	commands = []*command{
+		{name: "serve", summary: "run the server (default; configured by TR_* env)", usage: `Run the server. Configuration comes from TR_* environment variables.
+
+  telesphorepo                         same as "telesphorepo serve"
+  TR_DATA_DIR=/srv/tr telesphorepo serve
+  TR_STORAGE=s3 TR_S3_ENDPOINT=... TR_S3_BUCKET=... telesphorepo
+
+Defaults: listen :8080, data in ./data. On first start an "admin" user is created and its
+random password is printed once; a Debian signing key is generated at <data>/signing.asc.
+`, run: serveCmd},
+		{name: "dev", summary: "zero-config local server with demo repos", usage: `Run a zero-config local server for development.
+
+  telesphorepo dev
+
+Data lives in ./.telesphorepo-dev, the server listens on http://localhost:8080, cookies work
+over plain HTTP, and an admin user plus the repos "maven" and "debian" are created on first
+run. The URL, username and password are printed on every start. TR_* env still overrides.
+Start over with a fresh instance by deleting ./.telesphorepo-dev.
+`, run: devCmd},
+		userCmd,
+		{name: "keygen", summary: "write a new Debian signing key", usage: `Write a new Ed25519 OpenPGP signing key and print its fingerprint. Never overwrites.
+
+  telesphorepo keygen                  writes <data dir>/signing.asc
+  telesphorepo keygen release.asc      writes ./release.asc
+
+The server generates this key automatically on first start; use keygen to create one
+ahead of time (then point TR_GPG_KEY_FILE at it).
+`, run: keygenCmd},
+		{name: "version", summary: "print the version", usage: "Print the version.\n\n  telesphorepo version\n", run: versionCmd},
+		{name: "help", summary: "show help for a command", usage: "Show help.\n\n  telesphorepo help\n  telesphorepo help user add\n", run: helpCmd},
+	}
+}
 
 func main() {
 	err := run(os.Args[1:])
 	if err == nil {
 		return
 	}
-	var ue errUsage
-	if errors.As(err, &ue) || errors.Is(err, flag.ErrHelp) {
-		if !errors.Is(err, flag.ErrHelp) {
-			fmt.Fprintln(os.Stderr, "error:", err)
+	var hr helpRequest
+	if errors.As(err, &hr) {
+		printUsage(os.Stdout, hr.cmd)
+		return
+	}
+	var ue *usageError
+	if errors.As(err, &ue) {
+		fmt.Fprintln(os.Stderr, "error:", ue.msg)
+		if ue.cmd == nil {
+			fmt.Fprintln(os.Stderr, `Run "telesphorepo --help" for the list of commands.`)
+		} else {
+			fmt.Fprintln(os.Stderr)
+			printUsage(os.Stderr, ue.cmd)
 		}
-		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
 	}
 	fmt.Fprintln(os.Stderr, "error:", err)
@@ -50,148 +136,179 @@ func main() {
 }
 
 func run(args []string) error {
-	if len(args) == 0 || args[0] == "serve" {
-		if len(args) > 1 {
-			return errUsage{"serve takes no arguments"}
-		}
-		return serve()
+	if len(args) == 0 {
+		return serveCmd(nil)
 	}
-	sub := strings.Join(args[:min(2, len(args))], " ")
-	switch sub {
-	case "user create":
-		return userCreate(args[2:])
-	case "signing-key generate":
-		return keyGenerate(args[2:])
-	case "help", "-h", "--help":
-		return flag.ErrHelp
+	switch args[0] {
+	case "-h", "--help", "-help":
+		return helpRequest{}
+	case "-v", "--version":
+		return versionCmd(nil)
 	}
-	return errUsage{fmt.Sprintf("unknown command %q", sub)}
+	cmd, rest, err := resolve(args)
+	if err != nil {
+		return err
+	}
+	if hasHelpFlag(rest) && cmd.name != "help" {
+		return helpRequest{cmd}
+	}
+	return cmd.run(rest)
 }
 
-func newFlags(name string) *flag.FlagSet {
-	fs := flag.NewFlagSet(name, flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	return fs
+// resolve finds the (sub)command named by args and returns it with the remaining arguments.
+func resolve(args []string) (*command, []string, error) {
+	cmd := find(commands, args[0])
+	if cmd == nil {
+		return nil, nil, &usageError{unknownMsg(args[0], args[0], commands), nil}
+	}
+	args = args[1:]
+	for len(cmd.subs) > 0 && len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		sub := find(cmd.subs, args[0])
+		if sub == nil {
+			break // the parent's run reports it
+		}
+		cmd, args = sub, args[1:]
+	}
+	return cmd, args, nil
 }
 
-func parse(fs *flag.FlagSet, args []string) error {
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return err
+func find(list []*command, name string) *command {
+	for _, c := range list {
+		if c.name == name {
+			return c
 		}
-		return errUsage{err.Error()}
-	}
-	if fs.NArg() > 0 {
-		return errUsage{fmt.Sprintf("unexpected argument %q", fs.Arg(0))}
 	}
 	return nil
 }
 
-func serve() error {
+func hasHelpFlag(args []string) bool {
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "-help" {
+			return true
+		}
+	}
+	return false
+}
+
+// unknownMsg builds `unknown command "x"` plus a "did you mean" hint from the candidates.
+func unknownMsg(full, name string, candidates []*command) string {
+	msg := fmt.Sprintf("unknown command %q", full)
+	best, bestD := "", 3 // suggest only close matches
+	for _, c := range candidates {
+		d := levenshtein(name, c.name)
+		if strings.HasPrefix(c.name, name) && len(name) >= 2 {
+			d = 1
+		}
+		if d < bestD {
+			best, bestD = c.name, d
+		}
+	}
+	if best != "" {
+		prefix := strings.TrimSuffix(full, name)
+		msg += fmt.Sprintf(" - did you mean %q?", strings.TrimSpace(prefix+best))
+	}
+	return msg
+}
+
+func levenshtein(a, b string) int {
+	prev := make([]int, len(b)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		cur := make([]int, len(b)+1)
+		cur[0] = i
+		for j := 1; j <= len(b); j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			cur[j] = min(prev[j]+1, cur[j-1]+1, prev[j-1]+cost)
+		}
+		prev = cur
+	}
+	return prev[len(b)]
+}
+
+const overview = `Telesphorepo - a small Maven and Debian repository server.
+
+Usage:
+  telesphorepo [command]
+
+Commands:
+%s
+Examples:
+  telesphorepo dev                     try it locally (prints URL, user and password)
+  telesphorepo                         run the server (TR_* env, data in ./data)
+  telesphorepo user add alice          create a user (prompts for the password)
+
+Run "telesphorepo <command> --help" for details.
+`
+
+func printUsage(w *os.File, cmd *command) {
+	if cmd == nil {
+		var b strings.Builder
+		for _, c := range commands {
+			fmt.Fprintf(&b, "  %-9s %s\n", c.name, c.summary)
+		}
+		fmt.Fprintf(w, overview, b.String())
+		return
+	}
+	fmt.Fprint(w, cmd.usage)
+}
+
+func helpCmd(args []string) error {
+	if len(args) == 0 {
+		return helpRequest{}
+	}
+	cmd, rest, err := resolve(args)
+	if err != nil {
+		return err
+	}
+	if len(rest) > 0 && len(cmd.subs) > 0 {
+		return &usageError{unknownMsg(cmd.name+" "+rest[0], rest[0], cmd.subs), cmd}
+	}
+	return helpRequest{cmd}
+}
+
+func noArgs(name string, args []string) error {
+	if len(args) > 0 {
+		return &usageError{fmt.Sprintf("%s takes no arguments (got %q)", name, args[0]), find(commands, name)}
+	}
+	return nil
+}
+
+func versionCmd(args []string) error {
+	if err := noArgs("version", args); err != nil {
+		return err
+	}
+	v := version
+	if v == "dev" {
+		if bi, ok := debug.ReadBuildInfo(); ok {
+			for _, s := range bi.Settings {
+				if s.Key == "vcs.revision" && len(s.Value) >= 7 {
+					v += " (" + s.Value[:7] + ")"
+				}
+			}
+		}
+	}
+	fmt.Println("telesphorepo", v)
+	return nil
+}
+
+func signalContext() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+}
+
+func serveCmd(args []string) error {
+	if err := noArgs("serve", args); err != nil {
+		return err
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := signalContext()
 	defer stop()
 	return server.Run(ctx, cfg)
-}
-
-func userCreate(args []string) error {
-	fs := newFlags("user create")
-	username := fs.String("username", "", "")
-	admin := fs.Bool("admin", false, "")
-	pwStdin := fs.Bool("password-stdin", false, "")
-	pwEnv := fs.String("password-env", "", "")
-	if err := parse(fs, args); err != nil {
-		return err
-	}
-	if *username == "" {
-		return errUsage{"--username is required"}
-	}
-	if *pwStdin == (*pwEnv != "") {
-		return errUsage{"exactly one of --password-stdin or --password-env is required"}
-	}
-
-	var password string
-	if *pwStdin {
-		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-		if err != nil && !errors.Is(err, io.EOF) {
-			return fmt.Errorf("read password: %w", err)
-		}
-		password = strings.TrimRight(line, "\r\n")
-	} else {
-		v, ok := os.LookupEnv(*pwEnv)
-		if !ok {
-			return fmt.Errorf("environment variable %s is not set", *pwEnv)
-		}
-		password = v
-	}
-	if password == "" {
-		return errors.New("password is empty")
-	}
-
-	cfg, err := config.Load()
-	if err != nil {
-		return err
-	}
-	ctx := context.Background()
-	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
-		return err
-	}
-	d, err := db.Open(ctx, cfg.DBFile())
-	if err != nil {
-		return fmt.Errorf("open db: %w", err)
-	}
-	defer d.Close()
-	u, err := auth.New(d, cfg, repos.New(d)).CreateUser(ctx, *username, password, *admin)
-	if err != nil {
-		return fmt.Errorf("create user: %w", err)
-	}
-	fmt.Println(u.Username)
-	return nil
-}
-
-func keyGenerate(args []string) error {
-	fs := newFlags("signing-key generate")
-	name := fs.String("name", "", "")
-	email := fs.String("email", "", "")
-	out := fs.String("out", "", "")
-	pubOut := fs.String("public-out", "", "")
-	if err := parse(fs, args); err != nil {
-		return err
-	}
-	if *name == "" || *email == "" || *out == "" {
-		return errUsage{"--name, --email and --out are required"}
-	}
-	priv, pub, err := signing.Generate(*name, *email)
-	if err != nil {
-		return fmt.Errorf("generate key: %w", err)
-	}
-	if err := writeNew(*out, priv, 0o600); err != nil {
-		return err
-	}
-	if *pubOut != "" {
-		if err := writeNew(*pubOut, pub, 0o644); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// writeNew writes data to name with exactly perm (WriteFile keeps an existing file's mode).
-func writeNew(name string, data []byte, perm os.FileMode) error {
-	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
-	if err != nil {
-		return err
-	}
-	if err := f.Chmod(perm); err != nil {
-		f.Close()
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return err
-	}
-	return f.Close()
 }

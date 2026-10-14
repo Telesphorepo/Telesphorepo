@@ -12,11 +12,11 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"telesphorepo/internal/assets"
-	"telesphorepo/internal/auth"
-	"telesphorepo/internal/config"
-	"telesphorepo/internal/httpx"
-	"telesphorepo/internal/repos"
+	"github.com/Telesphorepo/Telesphorepo/internal/assets"
+	"github.com/Telesphorepo/Telesphorepo/internal/auth"
+	"github.com/Telesphorepo/Telesphorepo/internal/config"
+	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
 // DebianStatus is satisfied by *debian.Handler.
