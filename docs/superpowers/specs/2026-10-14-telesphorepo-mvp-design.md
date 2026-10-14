@@ -626,7 +626,7 @@ Gotchas for test authors:
 - Use a shared named Docker volume for `~/.m2`/Gradle caches so Central downloads aren't repeated,
   but delete the test's own group dir before resolving (or use a unique groupId per run).
 
-## 17. Developer experience **[M1.1]**
+## 16. Developer experience **[M1.1]**
 
 Three ways to run, from lightest to fullest; all work on macOS, Linux and Windows:
 1. **Native:** `go run ./cmd/telesphorepo dev` (UI: `npm --prefix web run dev` for hot reload,
@@ -649,7 +649,7 @@ assign/apply, key import, bucket create/allow, region `garage`) both run in e2e 
 `ForEachStorage`; real R2 runs when `TR_E2E_R2_*` is set. Garage is the closest local stand-in for
 R2's strict S3 behaviour (SigV4 region checks, no ACLs).
 
-## 16. Milestones
+## 17. Milestones
 - **M1 (now)**: everything marked [M1]: config, DB, storage FS+S3, auth, Maven, Debian, JSON API,
   UI shell, CLI `serve`/`user create`/`signing-key generate`, Dockerfile, e2e suite above.
 - **M2**: OIDC admin sign-on (§7.5) + Keycloak e2e.
