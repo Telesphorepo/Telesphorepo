@@ -83,7 +83,7 @@ No other runtime dependencies without a written justification in this file.
 | Var | Default | Meaning |
 |---|---|---|
 | `TR_LISTEN` | `:8080` | listen address |
-| `TR_DATA_DIR` | `/data` | holds `telesphorepo.db`, `tmp/` (upload spool), and `blobs/` for FS storage |
+| `TR_DATA_DIR` | `./data` (image: `/data`) | holds `telesphorepo.db`, `tmp/` (upload spool), and `blobs/` for FS storage |
 | `TR_BASE_URL` | — | public base URL (used in UI hints only) |
 | `TR_STORAGE` | `fs` | `fs` or `s3` (`r2` accepted as alias of `s3`) |
 | `TR_FS_ROOT` | `$TR_DATA_DIR/blobs` | FS blob root |
@@ -100,7 +100,7 @@ No other runtime dependencies without a written justification in this file.
 | `TR_COOKIE_SECURE` | `true` | `Secure` flag on session cookie (tests set `false` because they use plain HTTP) |
 | `TR_SESSION_TTL` | `168h` | absolute session lifetime |
 | `TR_TRUSTED_PROXIES` | `""` | comma-separated CIDRs whose `X-Forwarded-For` is trusted for client IP |
-| `TR_GPG_KEY_FILE` | — | armored OpenPGP **private** key used to sign Debian indexes |
+| `TR_GPG_KEY_FILE` | `$TR_DATA_DIR/signing.asc` (auto-generated if absent) | armored OpenPGP **private** key used to sign Debian indexes |
 | `TR_GPG_PASSPHRASE_FILE` | — | optional file containing the key passphrase |
 | `TR_DEB_DEBOUNCE` | `2s` | quiet period before a Debian index rebuild |
 | `TR_DEB_MAX_DELAY` | `30s` | max delay of a rebuild under continuous uploads |
@@ -111,13 +111,30 @@ Secrets are never logged and never stored in the DB.
 
 ## 4. CLI (one binary: `telesphorepo`)
 
-- `serve` — run the server (default when no subcommand is given). **[M1]**
-- `user create --username U [--admin] --password-stdin` — create a user (reads password from stdin;
-  `--password-env VAR` also accepted). Uses `TR_DATA_DIR`. **[M1]**
-- `signing-key generate --name N --email E --out FILE [--public-out FILE]` — write a new
-  armored Ed25519 OpenPGP private key (no passphrase). **[M1]**
-- `move --from fs|s3 --to fs|s3` — copy blobs between backends (§11). **[M3]**
-- `import nexus --url … --repo … --to …` — import from Nexus (§12). **[M3]**
+**DX rule (applies to every command, now and later): no flag slop.** Write the human invocation
+first. Positional arguments for the obvious thing, interactive prompts on a TTY (passwords without
+echo), defaults derived from env/data dir, and flags only for genuinely optional knobs. Complex
+operations get a simple wrapper. `--help` on every command prints a short, example-led usage.
+
+| Command | Behaviour |
+|---|---|
+| `telesphorepo` / `telesphorepo serve` | run the server from `TR_*` env (§3) |
+| `telesphorepo dev` | zero-config local server: data in `./.telesphorepo-dev/`, `http://localhost:8080`, insecure cookies allowed, short Debian debounce, signing key auto-generated, an `admin` user plus demo repos `maven` and `debian` created on first run; prints URL, username and password. `TR_*` env still overrides. |
+| `telesphorepo user add NAME [--admin]` | prompts for the password twice on a TTY; reads one line from stdin when piped |
+| `telesphorepo user passwd NAME` | reset a password (same input rules) |
+| `telesphorepo keygen [FILE]` | write a new Ed25519 signing key (default `$TR_DATA_DIR/signing.asc`, refuses to overwrite) and print its fingerprint |
+| `telesphorepo version` | print version |
+| `move` / `import nexus` | **[M3]**, designed to the same rule (e.g. `telesphorepo move s3` copies from the current backend to the named one using env config) |
+
+**Startup defaults that remove setup steps:**
+- `TR_DATA_DIR` defaults to `./data` for the binary; the Docker image sets `/data`.
+- First start with an empty users table and no `TR_BOOTSTRAP_ADMIN_*`: create `admin` with a random
+  password and print it once to stderr in a clearly marked block (never to the JSON log stream).
+- No `TR_GPG_KEY_FILE`: use `$TR_DATA_DIR/signing.asc`, generating it on first start (logs the
+  fingerprint). The key is on the data volume, never in the DB. An explicit `TR_GPG_KEY_FILE` that
+  does not exist is a startup error (no silent generation over a misconfigured mount).
+- If the embedded UI was not built (only `dist/.keep`), `/` serves a small page explaining how to
+  build it (`npm --prefix web run build`) or run the Vite dev server.
 
 ## 5. Data model
 
@@ -608,6 +625,29 @@ Gotchas for test authors:
 - Gradle needs `isAllowInsecureProtocol = true` for `http://` repos.
 - Use a shared named Docker volume for `~/.m2`/Gradle caches so Central downloads aren't repeated,
   but delete the test's own group dir before resolving (or use a unique groupId per run).
+
+## 17. Developer experience **[M1.1]**
+
+Three ways to run, from lightest to fullest; all work on macOS, Linux and Windows:
+1. **Native:** `go run ./cmd/telesphorepo dev` (UI: `npm --prefix web run dev` for hot reload,
+   proxied to :8080, or `npm --prefix web run build` once to embed it).
+2. **Container stack:** `go run ./tools/stack up` builds the image and starts it with persistent
+   data; `go run ./tools/stack up s3` adds a Garage S3 server and points the app at it;
+   `down`, `logs`, `reset` (deletes stack data after confirmation). Uses `compose.yaml`, which also
+   works directly with `docker compose up` / `podman compose up`.
+3. **E2E:** `go test -tags e2e ./e2e/...`.
+
+**Container engine auto-detection** (`internal/containerengine`, used by `tools/stack` and the e2e
+harness; not linked into the server binary): honour `TR_ENGINE=docker|podman` and an existing
+`DOCKER_HOST`; otherwise use Docker if its daemon responds, else Podman: socket from
+`podman info` (Linux rootless/rootful) or `podman machine inspect` (macOS unix socket, Windows named
+pipe); then set `DOCKER_HOST` and, for Podman, `TESTCONTAINERS_RYUK_CONTAINER_PRIVILEGED=true` for
+testcontainers. Clear error listing what was tried when nothing is found.
+
+**S3 test targets:** SeaweedFS and **Garage** (`dxflrs/garage`, configured via its CLI: layout
+assign/apply, key import, bucket create/allow, region `garage`) both run in e2e via
+`ForEachStorage`; real R2 runs when `TR_E2E_R2_*` is set. Garage is the closest local stand-in for
+R2's strict S3 behaviour (SigV4 region checks, no ACLs).
 
 ## 16. Milestones
 - **M1 (now)**: everything marked [M1]: config, DB, storage FS+S3, auth, Maven, Debian, JSON API,
