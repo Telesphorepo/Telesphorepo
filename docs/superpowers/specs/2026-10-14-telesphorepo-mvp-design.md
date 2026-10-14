@@ -5,7 +5,7 @@ Date: 2026-10-14 · Status: awaiting review
 A lightweight, self-hosted artifact repository for **hosted** Maven and Debian repos, replacing
 Sonatype Nexus OSS. Not a Nexus drop-in: no Nexus API/URL compatibility, no proxy/cache repos.
 
-Status legend: **[M1]** = Milestone 1 (built first), **[M2]**/**[M3]** = later milestones.
+Status legend: **[M1]** = Milestone 1 (built first), **[M2]**…**[M4]** = later milestones, **[Future]** = designed but unscheduled.
 
 ## 0. Intent, scope and key decisions
 
@@ -38,6 +38,9 @@ constantly) and serving straight from storage without DB rows (no fast 404, no s
    redirected.
 6. The `Secure` cookie flag is configurable so e2e tests can run over plain HTTP.
 7. M1 includes Debian (the brief's Phase 2), because Maven + Debian + auth is the usable core.
+8. Two kinds of people use the system (§7.5): **administrators** sign in to the UI through a
+   generic OIDC IdP (Keycloak or any other); **publishers** (CI service accounts, developers) are
+   local accounts with password/API tokens and never use SSO.
 
 ---
 
@@ -67,6 +70,7 @@ constantly) and serving straight from storage without DB rows (no fast 404, no s
 | Debian | `pault.ag/go/debian` (`deb.LoadAr`, `deb.DecompressorFor`, `control`, `version`) |
 | Passwords | argon2id, `golang.org/x/crypto/argon2` |
 | Rate limiting | `golang.org/x/time/rate` |
+| OIDC **[M2]** | `golang.org/x/oauth2` + `github.com/coreos/go-oidc/v3` |
 | Logging | `log/slog` (JSON) |
 | Frontend | React 19 + TypeScript + Vite, embedded with `go:embed`, no UI framework |
 | Tests | `go test` + `testcontainers-go` (behind `//go:build e2e`) |
@@ -112,8 +116,8 @@ Secrets are never logged and never stored in the DB.
   `--password-env VAR` also accepted). Uses `TR_DATA_DIR`. **[M1]**
 - `signing-key generate --name N --email E --out FILE [--public-out FILE]` — write a new
   armored Ed25519 OpenPGP private key (no passphrase). **[M1]**
-- `move --from fs|s3 --to fs|s3` — copy blobs between backends (§11). **[M2]**
-- `import nexus --url … --repo … --to …` — import from Nexus (§12). **[M2]**
+- `move --from fs|s3 --to fs|s3` — copy blobs between backends (§11). **[M3]**
+- `import nexus --url … --repo … --to …` — import from Nexus (§12). **[M3]**
 
 ## 5. Data model
 
@@ -327,6 +331,93 @@ In-memory `rate.Limiter` per client IP and per username for **failed** attempts 
 sweep). Client IP = `RemoteAddr`, or the right-most untrusted `X-Forwarded-For` hop when
 `RemoteAddr` is in `TR_TRUSTED_PROXIES`.
 
+### 7.5 Account kinds and OIDC admin sign-on **[M2]**
+
+**Account kinds** (`users.kind`):
+- `local` — username + password (argon2id) + API tokens. Publishers (Jenkins, developers) and the
+  bootstrap break-glass admin. Basic auth works on package endpoints and the API.
+- `oidc` — created on first SSO login, identified by `(oidc_issuer, oidc_subject)`. No password
+  (`password_hash` is the unusable sentinel `"!"`), cannot create API tokens, cannot authenticate
+  with Basic anywhere. UI session only. SSO is for administrators only: an OIDC login that does not
+  qualify as admin is refused (`403` page), and no user row is created.
+
+**Protocol:** OpenID Connect authorization-code flow with PKCE (S256), via
+`golang.org/x/oauth2` + `github.com/coreos/go-oidc/v3` (discovery from `TR_OIDC_ISSUER`, ID-token
+verification of signature, issuer, audience, expiry and nonce).
+
+**Config** (SSO enabled iff `TR_OIDC_ISSUER` is set):
+
+| Var | Default | Meaning |
+|---|---|---|
+| `TR_OIDC_ISSUER` | — | issuer URL, e.g. `https://kc.example.com/realms/ops` |
+| `TR_OIDC_CLIENT_ID` | — | required |
+| `TR_OIDC_CLIENT_SECRET_FILE` | — | file with the client secret (confidential client; never an env value) |
+| `TR_OIDC_REDIRECT_URL` | `$TR_BASE_URL/api/auth/oidc/callback` | must be registered at the IdP |
+| `TR_OIDC_SCOPES` | `openid profile email` | space-separated |
+| `TR_OIDC_ADMIN_CLAIM` | `groups` | claim checked for admin rights; dotted paths allowed (`realm_access.roles` for Keycloak realm roles) |
+| `TR_OIDC_ADMIN_VALUES` | — | comma-separated values; the claim (string or array) must contain one |
+| `TR_OIDC_ADMIN_EMAILS` | — | alternative/additional allowlist; matched only when `email_verified` is true |
+| `TR_OIDC_SESSION_TTL` | `12h` | session lifetime for OIDC admins (shorter than local sessions) |
+| `TR_ADMIN_PASSWORD_LOGIN` | `true` | `false` disables UI password login for local admins once SSO works (break-glass: flip back via env + restart) |
+
+At least one of `TR_OIDC_ADMIN_VALUES` / `TR_OIDC_ADMIN_EMAILS` is required when SSO is enabled.
+
+**Flow:**
+1. `GET /api/auth/oidc/login` → generate `state`, `nonce`, PKCE verifier; keep them in an in-memory
+   map (TTL 10 min, bounded) keyed by `SHA-256(state)`; set cookie `tr_oidc` = state
+   (`HttpOnly; SameSite=Lax; Path=/api/auth/oidc; Max-Age=600` — **Lax**, because the callback is a
+   cross-site top-level navigation from the IdP); `302` to the IdP.
+2. `GET /api/auth/oidc/callback?code&state` → state must equal the `tr_oidc` cookie and be in the
+   map (single use); exchange the code with the verifier; verify the ID token and nonce; evaluate
+   the admin rule against ID-token claims (falling back to the UserInfo endpoint for missing claims).
+3. Not admin → clear state, `302 /#/login?error=not_authorized`. Admin → upsert the user by
+   `(issuer, subject)`: username = normalized `preferred_username` (lowercased; chars outside
+   `[a-z0-9._-]` → `-`); if that username is taken by a different account the login fails with
+   `error=username_conflict` — accounts are never merged by name. Set `is_admin = 1`, update email,
+   create a session (`TR_OIDC_SESSION_TTL`), `302 /`.
+4. Admin rights are re-evaluated at every SSO login; an OIDC user whose claim no longer qualifies is
+   refused and their sessions deleted. Disabling the user in the UI also works immediately.
+5. `POST /api/auth/logout` ends the local session only (no RP-initiated IdP logout in M2).
+
+The SPA's login page shows "Sign in with SSO" when `GET /api/auth/config` returns
+`{"oidc": true}`, plus the password form for publishers (and local admins unless disabled).
+The `302 /` after the callback is part of a cross-site navigation chain, so the `SameSite=Strict`
+session cookie is not sent on that document load — that is fine because the SPA authenticates via
+same-origin `fetch` calls, which do send it.
+
+**Schema (migration `0002_oidc.sql`):**
+```sql
+ALTER TABLE users ADD COLUMN kind TEXT NOT NULL DEFAULT 'local' CHECK (kind IN ('local','oidc'));
+ALTER TABLE users ADD COLUMN oidc_issuer TEXT;
+ALTER TABLE users ADD COLUMN oidc_subject TEXT;
+ALTER TABLE users ADD COLUMN email TEXT;
+CREATE UNIQUE INDEX users_oidc ON users(oidc_issuer, oidc_subject) WHERE oidc_subject IS NOT NULL;
+ALTER TABLE api_tokens ADD COLUMN kind TEXT NOT NULL DEFAULT 'personal' CHECK (kind IN ('personal','minted'));
+```
+
+**E2E:** a Keycloak container (`quay.io/keycloak/keycloak`, `start-dev`, realm imported from
+JSON with a confidential client, a `repo-admins` group, a groups mapper, one admin and one
+non-admin user). The test drives the browser flow with a Go HTTP client + cookie jar (follow
+redirects, submit Keycloak's login form), then asserts: admin gets a session and can create a
+repo; non-admin is refused and no user row exists; OIDC admin cannot use Basic or create tokens;
+tampered `state` → 400; reused `state` → 400.
+
+### 7.6 Publisher short-lived tokens **[Future]**
+
+Goal: a Gradle plugin (later a CLI) obtains a short-lived token for the developer so a leaked
+credential has limited lifetime. Constraint that shapes the design: if the plugin mints tokens
+with username + password alone, a stolen password keeps minting tokens forever, so short-lived
+tokens would add nothing. Minting therefore needs a factor the attacker lacks, and the account's
+password must stop working directly on package endpoints. Planned shape:
+- Per-user flag `password_basic = false`: the password only works for UI login and minting, not
+  for Basic on `/maven`/`/debian`.
+- Device enrollment: the plugin generates an Ed25519 key pair on first use; the user approves it
+  in the UI (password session); afterwards `POST /api/tokens/mint` with a signed challenge returns
+  a `minted` token (`api_tokens.kind = 'minted'`, TTL e.g. 12h, scoped to the user's repos).
+  Revoking the device revokes its future mints. (TOTP-on-mint is the simpler alternative.)
+- CI service accounts keep long-lived `personal` tokens issued by an admin.
+The M1/M2 token model already carries `expires_at` and `kind`, so this needs no restructuring.
+
 ## 8. Maven (also Gradle plugins) **[M1]**
 
 Routes: `GET`, `HEAD`, `PUT` on `/maven/{repo}/{path...}`.
@@ -401,7 +492,7 @@ Routes: `GET`, `HEAD`, `PUT` on `/maven/{repo}/{path...}`.
 - Repo config: `{"architectures": ["amd64","arm64"]}` (default). Empty dists still return 404.
 - `GET /api/repos/{name}/debian/status` → `{"pending": <count of deb_dirty rows>}` so tests and
   CI can wait for indexes.
-- Old by-hash files are not pruned in M1 **[M3]**.
+- Old by-hash files are not pruned in M1 **[M4]**.
 
 ## 10. JSON API **[M1]**
 
@@ -438,17 +529,17 @@ pagination: `?limit=` (default 50, max 200) and `?after=<cursor>`; responses inc
 Search permission filtering: when the caller is not admin, the query joins against the set of
 readable repo ids (`repo_id IN (...)`, a small set) — the FTS match drives the scan.
 
-## 11. `move` **[M2]**
+## 11. `move` **[M3]**
 Copy all blobs between backends; idempotent and resumable (skip keys present with matching size +
 SHA-256 — expected SHA-256 comes from `assets`), verify hash after each copy, never delete from
 source, print `copied/skipped/mismatched` report. Iterates `assets` by keyset, not storage listings.
 
-## 12. `import nexus` **[M2]**
+## 12. `import nexus` **[M3]**
 Page Nexus components REST API (`continuationToken`), download each asset, push it through this
 server's HTTP upload endpoints (Maven `PUT`, Debian upload) with a token, so all validation and
 indexing runs. Resumable via checksum skip (HEAD + `ETag`). Maven (incl. Gradle plugins) + Debian.
 
-## 13. Web UI **[M1 shell / M3 full]**
+## 13. Web UI **[M1 shell / M4 full]**
 Static Vite build embedded in the binary, served at `/` with SPA fallback to `index.html` for
 non-`/api`, non-format paths. M1 pages: login, repo list, repo browser (keyset "load more"),
 search, my tokens (create/revoke), and simple admin pages (users, create repo, permissions).
@@ -494,6 +585,7 @@ Gotchas for test authors:
 ## 16. Milestones
 - **M1 (now)**: everything marked [M1]: config, DB, storage FS+S3, auth, Maven, Debian, JSON API,
   UI shell, CLI `serve`/`user create`/`signing-key generate`, Dockerfile, e2e suite above.
-- **M2**: `move`, `import nexus` + e2e.
-- **M3**: full admin UI polish, deletes (assets, deb packages) + blob/by-hash GC, scaling test
+- **M2**: OIDC admin sign-on (§7.5) + Keycloak e2e.
+- **M3**: `move`, `import nexus` + e2e.
+- **M4**: full admin UI polish, deletes (assets, deb packages) + blob/by-hash GC, scaling test
   behind `//go:build scale`.
