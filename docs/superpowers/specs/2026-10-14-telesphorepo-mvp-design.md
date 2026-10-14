@@ -102,12 +102,13 @@ CREATE TABLE settings (
   updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL
 ) WITHOUT ROWID;
 ```
-- Encryption: AES-256-GCM (stdlib), key = HKDF-SHA256(master key, info "telesphorepo settings v1"),
+- Encryption: AES-256-GCM (stdlib), key = HKDF-SHA256(master key, info "telesphorepo settings v1") via stdlib `crypto/hkdf`,
   AAD = the setting key (a ciphertext cannot be moved to another key). Random 12-byte nonce.
 - The server holds the effective settings in memory (atomic snapshot), reloaded on every write;
   request paths never query `settings`.
-- **Override:** any setting can be forced with env `TR_<KEY>` (dots → `_`, upper-case, e.g.
-  `TR_STORAGE_S3_BUCKET`). Overridden settings are shown read-only in the UI as "set by
+- **Override:** any setting can be forced with env `TR_<KEY>` (dots → `_`, upper-case). Keys are
+  named so the env names equal the catalogue below (e.g. key `s3.bucket` ↔ `TR_S3_BUCKET`,
+  `deb.debounce` ↔ `TR_DEB_DEBOUNCE`). Overridden settings are shown read-only in the UI as "set by
   environment". This exists for e2e tests and container platforms, not as the primary config path.
 - Secret settings are write-only over the API (`GET` returns `{"set": true}`), never logged.
 - Changes apply live, except: storage backend changes are validated first (`POST
@@ -116,7 +117,7 @@ CREATE TABLE settings (
 - Debian signing key: generated on first start (or uploaded / regenerated in the UI) and stored as
   an encrypted secret setting; the public key stays at `/keys/debian.asc`. This supersedes the
   brief's "key from a mounted file, never in the DB": the key is never stored in plaintext and the
-  master key is not in the DB. A mounted file via `TR_SIGNING_KEY_FILE` remains as an override.
+  master key is not in the DB. A mounted file via `TR_GPG_KEY_FILE` remains as an override.
 - OIDC settings (M2), including the client secret, are configured the same way.
 - First-run admin: random password printed once (§4); `TR_BOOTSTRAP_ADMIN_USER/PASSWORD` stay
   as an override for tests.
