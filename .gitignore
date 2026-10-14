@@ -1,0 +1,6 @@
+/web/dist/
+/web/node_modules/
+/telesphorepo
+*.db
+*.db-wal
+*.db-shm
