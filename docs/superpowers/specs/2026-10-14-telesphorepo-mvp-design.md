@@ -413,7 +413,13 @@ sweep). Client IP = `RemoteAddr`, or the right-most untrusted `X-Forwarded-For` 
 `golang.org/x/oauth2` + `github.com/coreos/go-oidc/v3` (discovery from `TR_OIDC_ISSUER`, ID-token
 verification of signature, issuer, audience, expiry and nonce).
 
-**Config** (SSO enabled iff `TR_OIDC_ISSUER` is set):
+**Config** — per §3 these are DB settings in the Settings page's **SSO** group (keys `oidc.issuer`,
+`oidc.client_id`, `oidc.client_secret` (secret, encrypted), `oidc.redirect_url`, `oidc.scopes`,
+`oidc.admin_claim`, `oidc.admin_values`, `oidc.admin_emails`, `oidc.session_ttl`,
+`admin_password_login`), each overridable by the env name shown. SSO is enabled iff `oidc.issuer`
+is set; saving SSO settings validates them by fetching the issuer's discovery document.
+The client secret is a normal secret setting (`TR_OIDC_CLIENT_SECRET` override), replacing the
+`_FILE` variant below:
 
 | Var | Default | Meaning |
 |---|---|---|
@@ -426,7 +432,7 @@ verification of signature, issuer, audience, expiry and nonce).
 | `TR_OIDC_ADMIN_VALUES` | — | comma-separated values; the claim (string or array) must contain one |
 | `TR_OIDC_ADMIN_EMAILS` | — | alternative/additional allowlist; matched only when `email_verified` is true |
 | `TR_OIDC_SESSION_TTL` | `12h` | session lifetime for OIDC admins (shorter than local sessions) |
-| `TR_ADMIN_PASSWORD_LOGIN` | `true` | `false` disables UI password login for local admins once SSO works (break-glass: flip back via env + restart) |
+| `TR_ADMIN_PASSWORD_LOGIN` | `true` | `false` disables UI password login for local admins once SSO works (break-glass: set `TR_ADMIN_PASSWORD_LOGIN=true` env and restart) |
 
 At least one of `TR_OIDC_ADMIN_VALUES` / `TR_OIDC_ADMIN_EMAILS` is required when SSO is enabled.
 
