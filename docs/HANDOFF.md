@@ -33,10 +33,8 @@ Design spec (source of truth for what's next):
 
 ## Not yet verified (do these early on the PC)
 
-- **Windows itself.** Everything was built and tested on macOS. `tools/task` (process-tree kill,
-  colours), `internal/containerengine` (Podman named pipe) and the e2e harness compile for Windows
-  but have never run there.
-- **Podman.** Detection code exists but only Docker was available here.
+- **`go tool task dev` on Windows.** The e2e suite passes on Windows 11 + Podman 5.8 (rootless
+  machine), but the dev loop (process-tree kill, colours) has not been run there.
 - **Real R2.** Set `TR_E2E_R2_ENDPOINT`, `TR_E2E_R2_BUCKET`, `TR_E2E_R2_ACCESS_KEY_ID`,
   `TR_E2E_R2_SECRET_ACCESS_KEY` and run `go tool task test` to include the `r2` subtests.
 - **The UI in a browser.** It builds and its API calls are covered by e2e, but no human has

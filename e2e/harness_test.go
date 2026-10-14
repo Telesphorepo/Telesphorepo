@@ -469,7 +469,7 @@ func startSharedSeaweed() {
 	ctx := context.Background()
 	img := os.Getenv("E2E_SEAWEEDFS_IMAGE")
 	if img == "" {
-		img = "chrislusf/seaweedfs:latest"
+		img = "chrislusf/seaweedfs:4.48"
 	}
 	s3conf := fmt.Sprintf(`{"identities":[{"name":"e2e","credentials":[{"accessKey":%q,"secretKey":%q}],"actions":["Admin","Read","Write","List","Tagging"]}]}`, seaweedAccess, seaweedSecret)
 	c, err := testcontainers.Run(ctx, img,

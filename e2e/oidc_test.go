@@ -28,7 +28,7 @@ import (
 
 // Keycloak test fixture (see testdata/keycloak/realm-e2e.json).
 const (
-	keycloakImage      = "quay.io/keycloak/keycloak:26.4.0" // E2E_KEYCLOAK_IMAGE overrides
+	keycloakImage      = "quay.io/keycloak/keycloak:26.8.1" // E2E_KEYCLOAK_IMAGE overrides
 	kcRealm            = "e2e"
 	kcClientID         = "telesphorepo"
 	kcClientSecret     = "e2e-telesphorepo-client-secret"

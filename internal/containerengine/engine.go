@@ -98,7 +98,7 @@ func Detect(ctx context.Context) (Engine, error) {
 // probeDocker checks that the docker CLI reaches a daemon. It returns a reason when it does not
 // (or when "docker" is really the podman-docker shim, which detectPodman handles better).
 // A docker CLI talking to a Podman API socket (podman-mac-helper, a docker context) is
-// reported as podman so the Ryuk privileged flag is applied.
+// reported as podman so Ryuk is turned off.
 func probeDocker(ctx context.Context, cli string) (Engine, string) {
 	if out, err := run(ctx, cli, "--version"); err == nil && strings.Contains(strings.ToLower(out), "podman") {
 		return Engine{}, "CLI is the podman-docker shim"
@@ -188,13 +188,16 @@ func npipeURL(p string) string {
 }
 
 // ApplyEnv sets DOCKER_HOST (when Host != "") and, for Podman,
-// TESTCONTAINERS_RYUK_CONTAINER_PRIVILEGED=true in the current process environment.
+// TESTCONTAINERS_RYUK_DISABLED=true in the current process environment. testcontainers starts
+// Ryuk on the Docker network "bridge" with the DOCKER_HOST path bind-mounted, and rootless
+// Podman has neither (no "bridge" network; a Windows named pipe or VM-side socket path).
+// The e2e harness removes its containers and network itself.
 func (e Engine) ApplyEnv() {
 	if e.Host != "" {
 		_ = os.Setenv("DOCKER_HOST", e.Host)
 	}
 	if e.Name == "podman" {
-		_ = os.Setenv("TESTCONTAINERS_RYUK_CONTAINER_PRIVILEGED", "true")
+		_ = os.Setenv("TESTCONTAINERS_RYUK_DISABLED", "true")
 	}
 }
 

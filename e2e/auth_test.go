@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-const authMavenImage = "maven:3.9-eclipse-temurin-21"
+const authMavenImage = "maven:3.9.16-eclipse-temurin-21"
 
 func authPut(t *testing.T, s *Server, path string, body string, auth Auth) (*http.Response, []byte) {
 	t.Helper()

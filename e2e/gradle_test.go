@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const gradleImage = "gradle:8-jdk21"
+const gradleImage = "gradle:9.8.1-jdk21"
 
 // gradleRepoBlock is a Kotlin DSL maven { } repository pointing at the server with credentials.
 func gradleRepoBlock(repoURL, user, pass string) string {

@@ -22,7 +22,7 @@ import (
 	"github.com/ProtonMail/go-crypto/openpgp/clearsign"
 )
 
-const debImage = "debian:trixie"
+const debImage = "debian:trixie-20261005"
 
 // debBuildScript builds the test packages with dpkg-deb into /out.
 const debBuildScript = `#!/bin/sh

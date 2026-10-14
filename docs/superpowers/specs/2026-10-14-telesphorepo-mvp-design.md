@@ -74,7 +74,7 @@ constantly) and serving straight from storage without DB rows (no fast 404, no s
 | Logging | `log/slog` (JSON) |
 | Frontend | React 19 + TypeScript + Vite, embedded with `go:embed`, no UI framework |
 | Tests | `go test` + `testcontainers-go` (behind `//go:build e2e`) |
-| Image | `oven/bun` → `golang` → `gcr.io/distroless/static-debian12:nonroot` |
+| Image | `oven/bun` → `golang` → `gcr.io/distroless/static-debian13:nonroot` |
 
 No other runtime dependencies without a written justification in this file.
 
@@ -708,7 +708,7 @@ The UI is purely a client of §10. No tests for the UI.
 
 ## 14. Docker image
 Multi-stage: `oven/bun` builds `web/` → `golang:1.27-alpine` builds with
-`CGO_ENABLED=0 -trimpath -ldflags="-s -w"` → `gcr.io/distroless/static-debian12:nonroot`.
+`CGO_ENABLED=0 -trimpath -ldflags="-s -w"` → `gcr.io/distroless/static-debian13:nonroot`.
 `VOLUME /data`, `EXPOSE 8080`, `ENTRYPOINT ["/telesphorepo"]`, `CMD ["serve"]`. The nonroot user is
 uid 65532; the data volume must be writable by it.
 
@@ -772,7 +772,7 @@ uses the official `oven/bun` image with `bun install --frozen-lockfile`. The npm
 harness; not linked into the server): honour `TR_ENGINE=docker|podman` and an existing `DOCKER_HOST`;
 otherwise Docker if its daemon responds, else Podman: socket from `podman info` (Linux rootless or
 rootful) or `podman machine inspect` (macOS unix socket, Windows named pipe); then set `DOCKER_HOST`
-and, for Podman, `TESTCONTAINERS_RYUK_CONTAINER_PRIVILEGED=true`. A clear error lists what was tried
+and, for Podman, `TESTCONTAINERS_RYUK_DISABLED=true`. A clear error lists what was tried
 (e.g. "podman machine exists but is stopped: run podman machine start").
 
 **Local S3 for tests:** e2e uses one S3-compatible server, **SeaweedFS**, so the S3 storage adapter

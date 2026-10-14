@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const mavenImage = "maven:3.9-eclipse-temurin-21"
+const mavenImage = "maven:3.9.16-eclipse-temurin-21"
 
 // mavenSettingsXML returns a settings.xml with one server (id "telesphorepo") and the
 // maven-default-http-blocker mirror neutralised so plain-http repos on the test network work.

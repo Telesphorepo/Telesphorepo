@@ -94,8 +94,9 @@ the fallback) and Node 26+ (see `.node-version`). The e2e suite needs Docker or 
   write a separate implementation plan.
 - **Use subagents freely.** Large parallel swarms are welcome. Use Opus or Sonnet subagents, and
   Haiku only for trivial non-coding work. Never use Fable subagents.
-- **Subagents don't run long tests.** They build and vet. The main session runs the e2e suite and
-  sends fix-up agents for failures.
+- **Subagents only implement.** They don't build, vet, lint, test or run the app. After each
+  milestone the main session runs the build, vet and the e2e suite once, and sends fix-up agents
+  for failures.
 - **Make decisions instead of asking a lot of questions.** Flag a real trade-off when there is one,
   then pick a sensible default.
 - **Treat other tools as inspiration, not a requirement.** When the maintainer cites another tool

@@ -49,7 +49,7 @@ func runMain(m *testing.M) int {
 	RunID = randHex(6)
 
 	// Engine detection must precede every testcontainers call: it sets DOCKER_HOST (and the
-	// Ryuk privileged flag for Podman) in this process's environment.
+	// Ryuk switch-off for Podman) in this process's environment.
 	eng, err := containerengine.Detect(ctx)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "e2e: no container engine:", err)
