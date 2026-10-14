@@ -7,8 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Telesphorepo/Telesphorepo/internal/config"
-	"github.com/Telesphorepo/Telesphorepo/internal/server"
+	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 	"github.com/Telesphorepo/Telesphorepo/internal/signing"
 )
 
@@ -26,14 +25,14 @@ func keygenCmd(args []string) error {
 		}
 	}
 	if file == "" {
-		file = config.JoinDataDir(config.DataDirFromEnv(), config.SigningKeyFileName)
+		file = "signing.asc"
 	}
 	if dir := filepath.Dir(file); dir != "." {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return err
 		}
 	}
-	fp, err := signing.GenerateFile(file, server.DefaultKeyName, server.DefaultKeyEmail)
+	fp, err := signing.GenerateFile(file, settings.KeyName, settings.KeyEmail)
 	if errors.Is(err, os.ErrExist) {
 		return fmt.Errorf("%s already exists; refusing to overwrite it (choose another file: telesphorepo keygen new-key.asc)", file)
 	}

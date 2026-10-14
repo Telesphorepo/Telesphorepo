@@ -1,17 +1,61 @@
-// Package config loads server configuration from TR_* environment variables (spec §3).
+// Package config holds the boot environment (TR_DATA_DIR, TR_LISTEN, TR_MASTER_KEY, spec §3) and
+// the effective-configuration struct built by internal/settings from DB settings, TR_* env
+// overrides and defaults. Services read it through a Provider so setting changes apply live.
 package config
 
 import (
-	"fmt"
+	"errors"
 	"log/slog"
 	"net/netip"
 	"os"
-	"path"
-	"strconv"
 	"strings"
 	"time"
 )
 
+// Boot is the bare-minimum boot environment. Everything else is an in-app setting.
+type Boot struct {
+	DataDir   string
+	Listen    string
+	MasterKey string // base64, optional (else <DataDir>/master.key)
+
+	// Test/automation override: create this admin when the users table is empty.
+	BootstrapAdminUser     string
+	BootstrapAdminPassword string
+}
+
+// LoadBoot reads the boot environment. defaults replaces built-in defaults (keyed by env var
+// name, e.g. "TR_DATA_DIR"); non-empty environment values still win.
+func LoadBoot(defaults map[string]string) (*Boot, error) {
+	get := func(k, def string) string {
+		if v := os.Getenv(k); v != "" {
+			return v
+		}
+		if v, ok := defaults[k]; ok {
+			return v
+		}
+		return def
+	}
+	b := &Boot{
+		DataDir:                get("TR_DATA_DIR", DefaultDataDir),
+		Listen:                 get("TR_LISTEN", ":8080"),
+		MasterKey:              get("TR_MASTER_KEY", ""),
+		BootstrapAdminUser:     get("TR_BOOTSTRAP_ADMIN_USER", ""),
+		BootstrapAdminPassword: get("TR_BOOTSTRAP_ADMIN_PASSWORD", ""),
+	}
+	if (b.BootstrapAdminUser == "") != (b.BootstrapAdminPassword == "") {
+		return nil, errors.New("config: TR_BOOTSTRAP_ADMIN_USER and TR_BOOTSTRAP_ADMIN_PASSWORD must be set together")
+	}
+	return b, nil
+}
+
+// DBFile is the SQLite database path.
+func (b *Boot) DBFile() string { return joinOS(b.DataDir, "telesphorepo.db") }
+
+// TmpDir is the upload spool directory (on the data volume, not tmpfs).
+func (b *Boot) TmpDir() string { return joinOS(b.DataDir, "tmp") }
+
+// Config is the effective configuration: boot values plus the current settings snapshot.
+// A *Config is immutable once published; never modify one obtained from a Provider.
 type Config struct {
 	Listen  string
 	DataDir string
@@ -48,6 +92,13 @@ type Config struct {
 	LogLevel slog.Level
 }
 
+// Provider returns the current effective configuration (an atomic snapshot; cheap to call on
+// every request).
+type Provider func() *Config
+
+// Static returns a Provider that always returns c (offline CLI commands).
+func Static(c *Config) Provider { return func() *Config { return c } }
+
 // DBFile is the SQLite database path.
 func (c *Config) DBFile() string { return joinOS(c.DataDir, "telesphorepo.db") }
 
@@ -64,20 +115,18 @@ func joinOS(dir, name string) string {
 // DefaultDataDir is the data directory when TR_DATA_DIR is unset (the image sets /data).
 const DefaultDataDir = "./data"
 
-// SigningKeyFileName is the auto-generated signing key's name inside the data dir.
-const SigningKeyFileName = "signing.asc"
+// LegacySigningKeyFileName is the M1.1 auto-generated signing key inside the data dir. It is
+// imported once into the "debian.signing_key" setting and no longer written.
+const LegacySigningKeyFileName = "signing.asc"
 
-// DefaultSigningKeyFile is where the signing key lives when TR_GPG_KEY_FILE is unset.
-func (c *Config) DefaultSigningKeyFile() string { return joinOS(c.DataDir, SigningKeyFileName) }
+// MasterKeyFileName holds the generated master key when TR_MASTER_KEY is unset.
+const MasterKeyFileName = "master.key"
 
 // DevDataDir is the data directory of "telesphorepo dev" when TR_DATA_DIR is unset.
 const DevDataDir = "./.telesphorepo-dev"
 
 // DevAdminPasswordFile is the file in the dev data dir holding the generated admin password.
 const DevAdminPasswordFile = "admin-password.txt"
-
-// DataDirFromEnv returns TR_DATA_DIR or DefaultDataDir, without loading the rest of the config.
-func DataDirFromEnv() string { return env("TR_DATA_DIR", DefaultDataDir) }
 
 // CLIDataDir is the data dir for offline commands (user add/passwd): TR_DATA_DIR if set;
 // otherwise ./data, unless ./data does not exist and the dev data dir does (so the commands
@@ -96,149 +145,3 @@ func CLIDataDir() (dir string, fromDev bool) {
 
 // JoinDataDir joins a file name onto a data dir using the OS separator.
 func JoinDataDir(dir, name string) string { return joinOS(dir, name) }
-
-// Load reads the configuration from TR_* environment variables.
-func Load() (*Config, error) { return LoadWithDefaults(nil) }
-
-// LoadWithDefaults is Load with overridden built-in defaults (keyed by env var name, e.g.
-// "TR_DATA_DIR"). Values set in the environment still win. Used by "telesphorepo dev".
-func LoadWithDefaults(defaults map[string]string) (*Config, error) {
-	overrides = defaults
-	defer func() { overrides = nil }()
-	var errs []string
-	c := &Config{
-		Listen:            env("TR_LISTEN", ":8080"),
-		DataDir:           env("TR_DATA_DIR", DefaultDataDir),
-		BaseURL:           env("TR_BASE_URL", ""),
-		Storage:           strings.ToLower(env("TR_STORAGE", "fs")),
-		S3Endpoint:        env("TR_S3_ENDPOINT", ""),
-		S3Region:          env("TR_S3_REGION", "auto"),
-		S3Bucket:          env("TR_S3_BUCKET", ""),
-		S3AccessKeyID:     env("TR_S3_ACCESS_KEY_ID", ""),
-		S3SecretAccessKey: env("TR_S3_SECRET_ACCESS_KEY", ""),
-		S3Prefix:          strings.Trim(env("TR_S3_PREFIX", ""), "/"),
-		GPGKeyFile:        env("TR_GPG_KEY_FILE", ""),
-		GPGPassphraseFile: env("TR_GPG_PASSPHRASE_FILE", ""),
-
-		BootstrapAdminUser:     env("TR_BOOTSTRAP_ADMIN_USER", ""),
-		BootstrapAdminPassword: env("TR_BOOTSTRAP_ADMIN_PASSWORD", ""),
-	}
-	if (c.BootstrapAdminUser == "") != (c.BootstrapAdminPassword == "") {
-		errs = append(errs, "TR_BOOTSTRAP_ADMIN_USER and TR_BOOTSTRAP_ADMIN_PASSWORD must be set together")
-	}
-	if c.Storage == "r2" {
-		c.Storage = "s3"
-	}
-	c.FSRoot = env("TR_FS_ROOT", joinOS(c.DataDir, "blobs"))
-	if c.S3Prefix != "" {
-		c.S3Prefix = path.Clean(c.S3Prefix)
-	}
-
-	c.S3PathStyle = boolEnv("TR_S3_PATH_STYLE", false, &errs)
-	c.S3Redirect = boolEnv("TR_S3_REDIRECT", true, &errs)
-	c.CookieSecure = boolEnv("TR_COOKIE_SECURE", true, &errs)
-	c.PresignTTL = durEnv("TR_PRESIGN_TTL", 5*time.Minute, &errs)
-	c.SessionTTL = durEnv("TR_SESSION_TTL", 168*time.Hour, &errs)
-	c.DebDebounce = durEnv("TR_DEB_DEBOUNCE", 2*time.Second, &errs)
-	c.DebMaxDelay = durEnv("TR_DEB_MAX_DELAY", 30*time.Second, &errs)
-	c.MaxUploadBytes = intEnv("TR_MAX_UPLOAD_BYTES", 2<<30, &errs)
-	c.MaxJSONBytes = intEnv("TR_MAX_JSON_BYTES", 1<<20, &errs)
-
-	for _, s := range strings.Split(env("TR_TRUSTED_PROXIES", ""), ",") {
-		s = strings.TrimSpace(s)
-		if s == "" {
-			continue
-		}
-		p, err := netip.ParsePrefix(s)
-		if err != nil {
-			errs = append(errs, "TR_TRUSTED_PROXIES: "+err.Error())
-			continue
-		}
-		c.TrustedProxies = append(c.TrustedProxies, p)
-	}
-
-	switch strings.ToLower(env("TR_LOG_LEVEL", "info")) {
-	case "debug":
-		c.LogLevel = slog.LevelDebug
-	case "info":
-		c.LogLevel = slog.LevelInfo
-	case "warn":
-		c.LogLevel = slog.LevelWarn
-	case "error":
-		c.LogLevel = slog.LevelError
-	default:
-		errs = append(errs, "TR_LOG_LEVEL: must be debug|info|warn|error")
-	}
-
-	switch c.Storage {
-	case "fs":
-	case "s3":
-		for k, v := range map[string]string{
-			"TR_S3_ENDPOINT": c.S3Endpoint, "TR_S3_BUCKET": c.S3Bucket,
-			"TR_S3_ACCESS_KEY_ID": c.S3AccessKeyID, "TR_S3_SECRET_ACCESS_KEY": c.S3SecretAccessKey,
-		} {
-			if v == "" {
-				errs = append(errs, k+" is required when TR_STORAGE=s3")
-			}
-		}
-	default:
-		errs = append(errs, "TR_STORAGE: must be fs or s3")
-	}
-
-	if len(errs) > 0 {
-		return nil, fmt.Errorf("config: %s", strings.Join(errs, "; "))
-	}
-	return c, nil
-}
-
-// overrides holds LoadWithDefaults' replacement defaults for the duration of a load.
-var overrides map[string]string
-
-func env(k, def string) string {
-	if v, ok := os.LookupEnv(k); ok && v != "" {
-		return v
-	}
-	if v, ok := overrides[k]; ok {
-		return v
-	}
-	return def
-}
-
-func boolEnv(k string, def bool, errs *[]string) bool {
-	v := env(k, "")
-	if v == "" {
-		return def
-	}
-	b, err := strconv.ParseBool(v)
-	if err != nil {
-		*errs = append(*errs, k+": "+err.Error())
-		return def
-	}
-	return b
-}
-
-func durEnv(k string, def time.Duration, errs *[]string) time.Duration {
-	v := env(k, "")
-	if v == "" {
-		return def
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil || d <= 0 {
-		*errs = append(*errs, k+": invalid duration")
-		return def
-	}
-	return d
-}
-
-func intEnv(k string, def int64, errs *[]string) int64 {
-	v := env(k, "")
-	if v == "" {
-		return def
-	}
-	n, err := strconv.ParseInt(v, 10, 64)
-	if err != nil || n <= 0 {
-		*errs = append(*errs, k+": invalid positive integer")
-		return def
-	}
-	return n
-}

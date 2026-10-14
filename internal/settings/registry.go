@@ -1,0 +1,335 @@
+package settings
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/netip"
+	"net/url"
+	"path"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Type is a setting's value type. Value representations (in Snapshot.Value, List and JSON):
+// string/duration -> string (durations keep the text form, e.g. "5m"), bool -> bool,
+// int -> int64, list -> []string.
+type Type string
+
+const (
+	TypeString   Type = "string"
+	TypeBool     Type = "bool"
+	TypeInt      Type = "int"
+	TypeDuration Type = "duration"
+	TypeList     Type = "list"
+)
+
+// Groups in display order (UI sections; SSO arrives with M2).
+const (
+	GroupGeneral  = "general"
+	GroupStorage  = "storage"
+	GroupSecurity = "security"
+	GroupDebian   = "debian"
+)
+
+var Groups = []string{GroupGeneral, GroupStorage, GroupSecurity, GroupDebian}
+
+// Def describes one setting. Its env override is TR_<KEY upper-cased, dots -> '_'>.
+type Def struct {
+	Key     string
+	Type    Type
+	Default string // text form, parsed like an env value ("" = empty/none)
+	Secret  bool
+	Group   string
+	Label   string
+	Help    string
+	Options []string // allowed values (lower-case) for enumerated strings
+	// Validate checks a decoded, normalized value (optional).
+	Validate func(v any) error
+	// normalize canonicalises a decoded value (optional).
+	normalize func(v any) any
+	// storage marks settings that select or configure the blob store.
+	storage bool
+	// apiReadOnly settings cannot be changed through Update (they have a dedicated endpoint).
+	apiReadOnly bool
+}
+
+// Env is the environment variable that overrides this setting.
+func (d *Def) Env() string {
+	return "TR_" + strings.ToUpper(strings.ReplaceAll(d.Key, ".", "_"))
+}
+
+// Setting keys used by the code (the registry below is authoritative).
+const (
+	KeyBaseURL           = "base_url"
+	KeyLogLevel          = "log.level"
+	KeyMaxUploadBytes    = "max_upload_bytes"
+	KeyMaxJSONBytes      = "max_json_bytes"
+	KeyStorage           = "storage"
+	KeyFSRoot            = "fs.root"
+	KeyS3Endpoint        = "s3.endpoint"
+	KeyS3Region          = "s3.region"
+	KeyS3Bucket          = "s3.bucket"
+	KeyS3AccessKeyID     = "s3.access_key_id"
+	KeyS3SecretAccessKey = "s3.secret_access_key"
+	KeyS3Prefix          = "s3.prefix"
+	KeyS3PathStyle       = "s3.path_style"
+	KeyS3Redirect        = "s3.redirect"
+	KeyPresignTTL        = "presign_ttl"
+	KeyCookieSecure      = "cookie.secure"
+	KeySessionTTL        = "session_ttl"
+	KeyTrustedProxies    = "trusted_proxies"
+	KeyDebDebounce       = "deb.debounce"
+	KeyDebMaxDelay       = "deb.max_delay"
+	KeyGPGKeyFile        = "gpg.key_file"
+	KeyGPGPassphraseFile = "gpg.passphrase_file"
+	KeySigningKey        = "debian.signing_key"
+)
+
+func lower(v any) any { return strings.ToLower(strings.TrimSpace(v.(string))) }
+
+var registry = []*Def{
+	// General
+	{Key: KeyBaseURL, Type: TypeString, Group: GroupGeneral, Label: "Public base URL",
+		Help:      "URL clients use to reach this server, e.g. https://repo.example.com (used in UI hints).",
+		normalize: func(v any) any { return strings.TrimRight(strings.TrimSpace(v.(string)), "/") },
+		Validate: func(v any) error {
+			s := v.(string)
+			if s == "" {
+				return nil
+			}
+			u, err := url.Parse(s)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				return errors.New("must be an http:// or https:// URL")
+			}
+			return nil
+		}},
+	{Key: KeyLogLevel, Type: TypeString, Default: "info", Group: GroupGeneral, Label: "Log level",
+		Help: "Minimum level of the server log.", Options: []string{"debug", "info", "warn", "error"}, normalize: lower},
+	{Key: KeyMaxUploadBytes, Type: TypeInt, Default: "2147483648", Group: GroupGeneral, Label: "Max upload size (bytes)",
+		Help: "Largest artifact or package upload accepted."},
+	{Key: KeyMaxJSONBytes, Type: TypeInt, Default: "1048576", Group: GroupGeneral, Label: "Max JSON body (bytes)",
+		Help: "Largest JSON API request body accepted."},
+
+	// Storage
+	{Key: KeyStorage, Type: TypeString, Default: "fs", Group: GroupStorage, Label: "Storage backend",
+		Help:    "fs stores blobs on the data volume; s3 uses any S3-compatible store (Cloudflare R2, SeaweedFS, AWS). Existing blobs are not moved when this changes.",
+		Options: []string{"fs", "s3", "r2"}, storage: true,
+		normalize: func(v any) any {
+			if s := lower(v).(string); s != "r2" {
+				return s
+			}
+			return "s3"
+		}},
+	{Key: KeyFSRoot, Type: TypeString, Group: GroupStorage, Label: "Filesystem root",
+		Help: "Directory for blobs when storage is fs (default: blobs/ in the data dir).", storage: true,
+		normalize: func(v any) any { return strings.TrimSpace(v.(string)) }},
+	{Key: KeyS3Endpoint, Type: TypeString, Group: GroupStorage, Label: "S3 endpoint",
+		Help: "e.g. https://<account>.r2.cloudflarestorage.com or http://seaweedfs:8333.", storage: true,
+		normalize: func(v any) any { return strings.TrimSpace(v.(string)) },
+		Validate: func(v any) error {
+			s := v.(string)
+			if s == "" {
+				return nil
+			}
+			u, err := url.Parse(s)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				return errors.New("must be an http:// or https:// URL")
+			}
+			return nil
+		}},
+	{Key: KeyS3Region, Type: TypeString, Default: "auto", Group: GroupStorage, Label: "S3 region",
+		Help: "Region name; R2 uses auto.", storage: true,
+		normalize: func(v any) any { return strings.TrimSpace(v.(string)) }},
+	{Key: KeyS3Bucket, Type: TypeString, Group: GroupStorage, Label: "S3 bucket", storage: true,
+		normalize: func(v any) any { return strings.TrimSpace(v.(string)) }},
+	{Key: KeyS3AccessKeyID, Type: TypeString, Group: GroupStorage, Label: "S3 access key ID", storage: true,
+		normalize: func(v any) any { return strings.TrimSpace(v.(string)) }},
+	{Key: KeyS3SecretAccessKey, Type: TypeString, Secret: true, Group: GroupStorage, Label: "S3 secret access key", storage: true},
+	{Key: KeyS3Prefix, Type: TypeString, Group: GroupStorage, Label: "S3 key prefix",
+		Help: "Optional prefix for every object key, e.g. telesphorepo/.", storage: true,
+		normalize: func(v any) any {
+			s := strings.Trim(strings.TrimSpace(v.(string)), "/")
+			if s != "" {
+				s = path.Clean(s)
+			}
+			return s
+		},
+		Validate: func(v any) error {
+			for _, seg := range strings.Split(v.(string), "/") {
+				if seg == ".." {
+					return errors.New("must not contain ..")
+				}
+			}
+			return nil
+		}},
+	{Key: KeyS3PathStyle, Type: TypeBool, Default: "false", Group: GroupStorage, Label: "S3 path-style addressing",
+		Help: "Needed by SeaweedFS and MinIO; not by R2 or AWS.", storage: true},
+	{Key: KeyS3Redirect, Type: TypeBool, Default: "true", Group: GroupStorage, Label: "Redirect downloads to S3",
+		Help: "GET downloads answer 302 with a presigned URL; off streams through the server.", storage: true},
+	{Key: KeyPresignTTL, Type: TypeDuration, Default: "5m", Group: GroupStorage, Label: "Presigned URL lifetime"},
+
+	// Security
+	{Key: KeyCookieSecure, Type: TypeBool, Default: "true", Group: GroupSecurity, Label: "Secure session cookie",
+		Help: "Send the session cookie only over HTTPS. Turn off only for plain-HTTP setups."},
+	{Key: KeySessionTTL, Type: TypeDuration, Default: "168h", Group: GroupSecurity, Label: "Session lifetime",
+		Help: "Absolute lifetime of a UI sign-in."},
+	{Key: KeyTrustedProxies, Type: TypeList, Group: GroupSecurity, Label: "Trusted proxies",
+		Help: "CIDRs whose X-Forwarded-For header is trusted for the client IP, e.g. 10.0.0.0/8.",
+		Validate: func(v any) error {
+			for _, s := range v.([]string) {
+				if _, err := netip.ParsePrefix(s); err != nil {
+					return fmt.Errorf("%q is not a CIDR (e.g. 10.0.0.0/8)", s)
+				}
+			}
+			return nil
+		}},
+
+	// Debian
+	{Key: KeyDebDebounce, Type: TypeDuration, Default: "2s", Group: GroupDebian, Label: "Index rebuild delay",
+		Help: "Quiet period after an upload before the Debian indexes are rebuilt."},
+	{Key: KeyDebMaxDelay, Type: TypeDuration, Default: "30s", Group: GroupDebian, Label: "Max index rebuild delay",
+		Help: "Longest a rebuild waits under continuous uploads."},
+	{Key: KeySigningKey, Type: TypeString, Secret: true, Group: GroupDebian, Label: "Signing key",
+		Help:        "Armored OpenPGP private key that signs the Debian indexes. Generated on first start; upload or regenerate it here.",
+		apiReadOnly: true},
+	{Key: KeyGPGKeyFile, Type: TypeString, Group: GroupDebian, Label: "Signing key file",
+		Help:      "Path of a mounted armored private key; when set it replaces the stored signing key.",
+		normalize: func(v any) any { return strings.TrimSpace(v.(string)) }},
+	{Key: KeyGPGPassphraseFile, Type: TypeString, Group: GroupDebian, Label: "Signing key passphrase file",
+		Help:      "Path of a file holding the signing key's passphrase (only for encrypted keys).",
+		normalize: func(v any) any { return strings.TrimSpace(v.(string)) }},
+}
+
+var byKey = func() map[string]*Def {
+	m := make(map[string]*Def, len(registry))
+	for _, d := range registry {
+		m[d.Key] = d
+	}
+	return m
+}()
+
+// Definitions returns the setting registry in display order.
+func Definitions() []*Def { return registry }
+
+// Lookup returns the definition of key, or nil.
+func Lookup(key string) *Def { return byKey[key] }
+
+// parseText parses an env or default value.
+func (d *Def) parseText(s string) (any, error) {
+	var v any
+	switch d.Type {
+	case TypeString:
+		v = s
+	case TypeBool:
+		b, err := strconv.ParseBool(strings.TrimSpace(s))
+		if err != nil {
+			return nil, errors.New("must be true or false")
+		}
+		v = b
+	case TypeInt:
+		n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+		if err != nil {
+			return nil, errors.New("must be an integer")
+		}
+		v = n
+	case TypeDuration:
+		v = strings.TrimSpace(s)
+	case TypeList:
+		var out []string
+		for _, p := range strings.Split(s, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				out = append(out, p)
+			}
+		}
+		v = out
+	}
+	return d.check(v)
+}
+
+// decodeJSON parses a value from the API or the database.
+func (d *Def) decodeJSON(raw json.RawMessage) (any, error) {
+	var v any
+	switch d.Type {
+	case TypeString, TypeDuration:
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return nil, errors.New("must be a string")
+		}
+		v = s
+	case TypeBool:
+		var b bool
+		if err := json.Unmarshal(raw, &b); err != nil {
+			var s string
+			if json.Unmarshal(raw, &s) != nil {
+				return nil, errors.New("must be true or false")
+			}
+			return d.parseText(s)
+		}
+		v = b
+	case TypeInt:
+		var n int64
+		if err := json.Unmarshal(raw, &n); err != nil {
+			var s string
+			if json.Unmarshal(raw, &s) != nil {
+				return nil, errors.New("must be an integer")
+			}
+			return d.parseText(s)
+		}
+		v = n
+	case TypeList:
+		var l []string
+		if err := json.Unmarshal(raw, &l); err != nil {
+			var s string
+			if json.Unmarshal(raw, &s) != nil {
+				return nil, errors.New("must be a list of strings")
+			}
+			return d.parseText(s)
+		}
+		var out []string
+		for _, p := range l {
+			if p = strings.TrimSpace(p); p != "" {
+				out = append(out, p)
+			}
+		}
+		v = out
+	}
+	return d.check(v)
+}
+
+// check normalizes and validates a decoded value.
+func (d *Def) check(v any) (any, error) {
+	if d.normalize != nil {
+		v = d.normalize(v)
+	}
+	switch d.Type {
+	case TypeInt:
+		if v.(int64) <= 0 {
+			return nil, errors.New("must be a positive integer")
+		}
+	case TypeDuration:
+		dur, err := time.ParseDuration(v.(string))
+		if err != nil || dur <= 0 {
+			return nil, errors.New(`must be a positive duration such as "300ms", "5m" or "168h"`)
+		}
+	}
+	if len(d.Options) > 0 {
+		s, _ := v.(string)
+		if !slices.Contains(d.Options, s) {
+			return nil, fmt.Errorf("must be one of %s", strings.Join(d.Options, ", "))
+		}
+	}
+	if d.Validate != nil {
+		if err := d.Validate(v); err != nil {
+			return nil, err
+		}
+	}
+	return v, nil
+}
+
+func durationOf(v any) time.Duration {
+	d, _ := time.ParseDuration(v.(string))
+	return d
+}

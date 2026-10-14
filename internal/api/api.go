@@ -17,6 +17,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
+	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 )
 
 // DebianStatus is satisfied by *debian.Handler.
@@ -26,15 +27,16 @@ type DebianStatus interface {
 }
 
 type API struct {
-	auth   *auth.Service
-	repos  *repos.Service
-	assets *assets.Service
-	debian DebianStatus
-	cfg    *config.Config
+	auth     *auth.Service
+	repos    *repos.Service
+	assets   *assets.Service
+	debian   DebianStatus
+	cfg      config.Provider
+	settings *settings.Service
 }
 
-func New(a *auth.Service, rs *repos.Service, as *assets.Service, deb DebianStatus, cfg *config.Config) *API {
-	return &API{auth: a, repos: rs, assets: as, debian: deb, cfg: cfg}
+func New(a *auth.Service, rs *repos.Service, as *assets.Service, deb DebianStatus, st *settings.Service) *API {
+	return &API{auth: a, repos: rs, assets: as, debian: deb, cfg: st.Config, settings: st}
 }
 
 // Handler returns the /api/ handler, already wrapped in http.CrossOriginProtection.
@@ -43,6 +45,7 @@ func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/auth/login", a.login)
 	mux.HandleFunc("POST /api/auth/logout", a.logout)
+	mux.HandleFunc("GET /api/auth/config", a.authConfig)
 	mux.HandleFunc("GET /api/me", a.me)
 
 	mux.HandleFunc("GET /api/tokens", a.listTokens)
@@ -64,6 +67,12 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /api/repos/{name}/debian/status", a.debianStatus)
 
 	mux.HandleFunc("GET /api/search", a.search)
+
+	mux.HandleFunc("GET /api/settings", a.getSettings)
+	mux.HandleFunc("PATCH /api/settings", a.patchSettings)
+	mux.HandleFunc("POST /api/settings/storage/test", a.testStorage)
+	mux.HandleFunc("GET /api/settings/signing-key", a.getSigningKey)
+	mux.HandleFunc("POST /api/settings/signing-key", a.setSigningKey)
 
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusNotFound, "not found")
@@ -155,7 +164,7 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
-	if !httpx.DecodeJSON(w, r, a.cfg.MaxJSONBytes, &in) {
+	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
 		return
 	}
 	u, err := a.auth.Login(w, r, in.Username, in.Password)
@@ -222,7 +231,7 @@ func (a *API) createToken(w http.ResponseWriter, r *http.Request) {
 		Name          string `json:"name"`
 		ExpiresInDays *int   `json:"expires_in_days"`
 	}
-	if !httpx.DecodeJSON(w, r, a.cfg.MaxJSONBytes, &in) {
+	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
 		return
 	}
 	var exp time.Duration
@@ -291,7 +300,7 @@ func (a *API) createUser(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 		IsAdmin  bool   `json:"is_admin"`
 	}
-	if !httpx.DecodeJSON(w, r, a.cfg.MaxJSONBytes, &in) {
+	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
 		return
 	}
 	u, err := a.auth.CreateUser(r.Context(), in.Username, in.Password, in.IsAdmin)
@@ -312,7 +321,7 @@ func (a *API) updateUser(w http.ResponseWriter, r *http.Request) {
 		IsAdmin  *bool   `json:"is_admin"`
 		Disabled *bool   `json:"disabled"`
 	}
-	if !httpx.DecodeJSON(w, r, a.cfg.MaxJSONBytes, &in) {
+	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
 		return
 	}
 	// A token holder must not be able to take over the account by setting its password.
@@ -407,7 +416,7 @@ func (a *API) createRepo(w http.ResponseWriter, r *http.Request) {
 		AnonymousRead bool            `json:"anonymous_read"`
 		Config        json.RawMessage `json:"config"`
 	}
-	if !httpx.DecodeJSON(w, r, a.cfg.MaxJSONBytes, &in) {
+	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
 		return
 	}
 	repo, err := a.repos.Create(r.Context(), in.Name, in.Format, in.AnonymousRead, in.Config)
@@ -439,7 +448,7 @@ func (a *API) updateRepo(w http.ResponseWriter, r *http.Request) {
 		AnonymousRead *bool           `json:"anonymous_read"`
 		Config        json.RawMessage `json:"config"`
 	}
-	if !httpx.DecodeJSON(w, r, a.cfg.MaxJSONBytes, &in) {
+	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
 		return
 	}
 	repo, err := a.repos.Update(r.Context(), r.PathValue("name"), in.AnonymousRead, in.Config)
@@ -482,7 +491,7 @@ func (a *API) setPermission(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Level string `json:"level"`
 	}
-	if !httpx.DecodeJSON(w, r, a.cfg.MaxJSONBytes, &in) {
+	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
 		return
 	}
 	var lvl auth.Level

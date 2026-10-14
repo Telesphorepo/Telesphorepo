@@ -41,7 +41,7 @@ func (s *Service) Login(w http.ResponseWriter, r *http.Request, username, passwo
 	val := base64.RawURLEncoding.EncodeToString(raw)
 	h, _ := hashSession(val)
 	now := time.Now()
-	exp := now.Add(s.cfg.SessionTTL)
+	exp := now.Add(s.cfg().SessionTTL)
 	if _, err := s.db.W.ExecContext(ctx,
 		`INSERT INTO sessions (id_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)`,
 		h, p.UserID, now.Unix(), exp.Unix()); err != nil {
@@ -53,8 +53,8 @@ func (s *Service) Login(w http.ResponseWriter, r *http.Request, username, passwo
 
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: val, Path: "/",
-		MaxAge: int(s.cfg.SessionTTL / time.Second), Expires: exp,
-		HttpOnly: true, Secure: s.cfg.CookieSecure, SameSite: http.SameSiteStrictMode,
+		MaxAge: int(s.cfg().SessionTTL / time.Second), Expires: exp,
+		HttpOnly: true, Secure: s.cfg().CookieSecure, SameSite: http.SameSiteStrictMode,
 	})
 	return s.GetUser(ctx, p.Username)
 }
@@ -69,7 +69,7 @@ func (s *Service) Logout(w http.ResponseWriter, r *http.Request) error {
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: "", Path: "/", MaxAge: -1,
-		HttpOnly: true, Secure: s.cfg.CookieSecure, SameSite: http.SameSiteStrictMode,
+		HttpOnly: true, Secure: s.cfg().CookieSecure, SameSite: http.SameSiteStrictMode,
 	})
 	return nil
 }

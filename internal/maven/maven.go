@@ -16,10 +16,10 @@ import (
 type Handler struct {
 	auth   *auth.Service
 	assets *assets.Service
-	cfg    *config.Config
+	cfg    config.Provider
 }
 
-func New(a *auth.Service, as *assets.Service, cfg *config.Config) *Handler {
+func New(a *auth.Service, as *assets.Service, cfg config.Provider) *Handler {
 	return &Handler{auth: a, assets: as, cfg: cfg}
 }
 
@@ -49,11 +49,11 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 		h.assets.Serve(w, r, repo, p)
 		return
 	}
-	if r.ContentLength > h.cfg.MaxUploadBytes {
+	if r.ContentLength > h.cfg().MaxUploadBytes {
 		httpx.Error(w, http.StatusRequestEntityTooLarge, "upload too large")
 		return
 	}
-	sp, err := h.assets.Spool(http.MaxBytesReader(w, r.Body, h.cfg.MaxUploadBytes), h.cfg.MaxUploadBytes)
+	sp, err := h.assets.Spool(http.MaxBytesReader(w, r.Body, h.cfg().MaxUploadBytes), h.cfg().MaxUploadBytes)
 	if err != nil {
 		var mbe *http.MaxBytesError
 		if errors.Is(err, assets.ErrTooLarge) || errors.As(err, &mbe) {

@@ -114,10 +114,7 @@ func userPasswd(args []string) error {
 // withUsers opens the database in the CLI data dir and runs fn with an auth service.
 func withUsers(fn func(ctx context.Context, as *auth.Service, dataDir string) error) error {
 	dir, fromDev := config.CLIDataDir()
-	cfg, err := config.LoadWithDefaults(map[string]string{"TR_DATA_DIR": dir})
-	if err != nil {
-		return err
-	}
+	cfg := &config.Config{DataDir: dir} // user commands need no settings beyond the data dir
 	if fromDev {
 		fmt.Fprintf(os.Stderr, "Using data dir %s (the \"telesphorepo dev\" instance; set TR_DATA_DIR to choose another)\n", cfg.DataDir)
 	} else {
@@ -132,7 +129,7 @@ func withUsers(fn func(ctx context.Context, as *auth.Service, dataDir string) er
 		return fmt.Errorf("open database %s: %w", cfg.DBFile(), err)
 	}
 	defer d.Close()
-	return fn(ctx, auth.New(d, cfg, repos.New(d)), cfg.DataDir)
+	return fn(ctx, auth.New(d, config.Static(cfg), repos.New(d)), cfg.DataDir)
 }
 
 // readPassword prompts twice without echo on a terminal, else reads one line from stdin.

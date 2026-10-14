@@ -93,4 +93,4 @@ require (
 	pault.ag/go/topsort v0.1.1 // indirect
 )
 
-tool github.com/Telesphorepo/Telesphorepo/tools/run
+tool github.com/Telesphorepo/Telesphorepo/tools/task

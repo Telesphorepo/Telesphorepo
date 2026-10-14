@@ -23,25 +23,38 @@ type Signer struct {
 	pub    []byte
 }
 
-// Load reads an armored private key (first entity with a signing-capable key). If
-// passphraseFile is non-empty, its trimmed contents decrypt the key.
+// Load reads an armored private key file (see Parse). If passphraseFile is non-empty, its
+// trimmed contents decrypt the key.
 func Load(keyFile, passphraseFile string) (*Signer, error) {
-	f, err := os.Open(keyFile)
+	b, err := os.ReadFile(keyFile)
 	if err != nil {
 		return nil, fmt.Errorf("signing key: %w", err)
 	}
-	defer f.Close()
-	ring, err := openpgp.ReadArmoredKeyRing(f)
+	pass, err := ReadPassphrase(passphraseFile)
+	if err != nil {
+		return nil, err
+	}
+	return Parse(b, pass)
+}
+
+// ReadPassphrase returns the trimmed contents of file, or nil when file is empty.
+func ReadPassphrase(file string) ([]byte, error) {
+	if file == "" {
+		return nil, nil
+	}
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return nil, fmt.Errorf("signing passphrase: %w", err)
+	}
+	return []byte(strings.TrimSpace(string(b))), nil
+}
+
+// Parse loads an armored private key block (first entity with a signing-capable key),
+// decrypting it with pass when it is encrypted.
+func Parse(armored, pass []byte) (*Signer, error) {
+	ring, err := openpgp.ReadArmoredKeyRing(bytes.NewReader(armored))
 	if err != nil {
 		return nil, fmt.Errorf("signing key: %w", err)
-	}
-	var pass []byte
-	if passphraseFile != "" {
-		b, err := os.ReadFile(passphraseFile)
-		if err != nil {
-			return nil, fmt.Errorf("signing passphrase: %w", err)
-		}
-		pass = []byte(strings.TrimSpace(string(b)))
 	}
 	now := time.Now()
 	for _, e := range ring {
@@ -60,7 +73,7 @@ func Load(keyFile, passphraseFile string) (*Signer, error) {
 		}
 		return &Signer{entity: e, cfg: &packet.Config{DefaultHash: crypto.SHA512}, pub: pub}, nil
 	}
-	return nil, errors.New("signing key: no entity with a usable signing key")
+	return nil, errors.New("signing key: no private key with a usable signing key (expected an armored PGP PRIVATE KEY block)")
 }
 
 func decrypt(e *openpgp.Entity, pass []byte) error {

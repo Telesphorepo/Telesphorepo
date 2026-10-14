@@ -32,7 +32,7 @@ type tempOut struct {
 }
 
 func (h *Handler) newTemp() (*tempOut, error) {
-	f, err := os.CreateTemp(h.cfg.TmpDir(), "deb-index-*")
+	f, err := os.CreateTemp(h.cfg().TmpDir(), "deb-index-*")
 	if err != nil {
 		return nil, err
 	}
@@ -295,16 +295,17 @@ func (h *Handler) buildRelease(ctx context.Context, repo *repos.Repo, dist strin
 	}); err != nil {
 		return err
 	}
-	if h.signer == nil {
+	signer := h.signer()
+	if signer == nil {
 		return nil
 	}
 	if err := h.putBytes(ctx, repo, base+"/Release.gpg", "application/pgp-signature", func(w io.Writer) error {
-		return h.signer.DetachSign(w, release)
+		return signer.DetachSign(w, release)
 	}); err != nil {
 		return err
 	}
 	return h.putBytes(ctx, repo, base+"/InRelease", "text/plain; charset=utf-8", func(w io.Writer) error {
-		return h.signer.ClearSign(w, release)
+		return signer.ClearSign(w, release)
 	})
 }
 

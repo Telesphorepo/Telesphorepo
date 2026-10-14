@@ -6,6 +6,7 @@ import Browser from "./pages/Browser";
 import Search from "./pages/Search";
 import Tokens from "./pages/Tokens";
 import Admin from "./pages/Admin";
+import Settings from "./pages/Settings";
 
 export default function App() {
   const [me, setMe] = useState<User | null>(null);
@@ -40,6 +41,7 @@ export default function App() {
   else if (section === "search") page = <Search />;
   else if (section === "tokens") page = me ? <Tokens /> : <Anon />;
   else if (section === "admin") page = me?.is_admin ? <Admin /> : <p className="muted">Admin access required.</p>;
+  else if (section === "settings") page = me?.is_admin ? <Settings /> : <p className="muted">Admin access required.</p>;
   else page = <Repos />;
 
   return (
@@ -51,6 +53,7 @@ export default function App() {
           {link("/search", "Search")}
           {me && link("/tokens", "Tokens")}
           {me?.is_admin && link("/admin", "Admin")}
+          {me?.is_admin && link("/settings", "Settings")}
         </nav>
         <span className="spacer" />
         {me ? (

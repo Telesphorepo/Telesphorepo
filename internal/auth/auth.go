@@ -69,7 +69,7 @@ type Permission struct {
 
 type Service struct {
 	db    *db.DB
-	cfg   *config.Config
+	cfg   config.Provider
 	repos *repos.Service
 
 	secret  []byte        // per-process HMAC key for the Basic verification cache
@@ -85,7 +85,7 @@ type Service struct {
 	flights  map[[32]byte]*flight // in-progress uncached password checks by cache key
 }
 
-func New(d *db.DB, cfg *config.Config, rs *repos.Service) *Service {
+func New(d *db.DB, cfg config.Provider, rs *repos.Service) *Service {
 	secret := make([]byte, 32)
 	rand.Read(secret)
 	return &Service{

@@ -37,7 +37,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "invalid distribution or component name")
 		return
 	}
-	max := h.cfg.MaxUploadBytes
+	max := h.cfg().MaxUploadBytes
 	if r.ContentLength > max {
 		httpx.Error(w, http.StatusRequestEntityTooLarge, "upload too large")
 		return

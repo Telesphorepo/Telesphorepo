@@ -120,8 +120,8 @@ func (ix *indexer) scheduleLocked(k distKey, st *distState) {
 	if st.first.IsZero() {
 		st.first = now
 	}
-	d := ix.h.cfg.DebDebounce
-	if limit := st.first.Add(ix.h.cfg.DebMaxDelay).Sub(now); limit < d {
+	d := ix.h.cfg().DebDebounce
+	if limit := st.first.Add(ix.h.cfg().DebMaxDelay).Sub(now); limit < d {
 		d = max(limit, 0)
 	}
 	ix.armLocked(k, st, d)

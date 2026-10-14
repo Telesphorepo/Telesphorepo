@@ -24,10 +24,10 @@ type Handler struct {
 	auth   *auth.Service
 	assets *assets.Service
 	repos  *repos.Service
-	cfg    *config.Config
+	cfg    config.Provider
 	log    *slog.Logger
 
-	signer *signing.Signer // nil = unsigned indexes
+	signer func() *signing.Signer // current key (live; nil = unsigned indexes)
 
 	clockMu sync.Mutex
 	clock   int64 // last issued deb_dirty timestamp (monotonic, unix nanos)
@@ -35,16 +35,10 @@ type Handler struct {
 	idx indexer
 }
 
-// New loads the signing key (cfg.GPGKeyFile, optional passphrase file) if configured.
-func New(d *db.DB, a *auth.Service, as *assets.Service, rs *repos.Service, cfg *config.Config, log *slog.Logger) (*Handler, error) {
-	h := &Handler{db: d, auth: a, assets: as, repos: rs, cfg: cfg, log: log}
-	if cfg.GPGKeyFile != "" {
-		s, err := signing.Load(cfg.GPGKeyFile, cfg.GPGPassphraseFile)
-		if err != nil {
-			return nil, fmt.Errorf("debian: load signing key: %w", err)
-		}
-		h.signer = s
-	}
+// New returns the Debian handler. cfg and signer are read on every use, so setting changes
+// (including a replaced signing key) apply live.
+func New(d *db.DB, a *auth.Service, as *assets.Service, rs *repos.Service, cfg config.Provider, signer func() *signing.Signer, log *slog.Logger) (*Handler, error) {
+	h := &Handler{db: d, auth: a, assets: as, repos: rs, cfg: cfg, signer: signer, log: log}
 	h.idx.init(h)
 	return h, nil
 }
@@ -78,11 +72,12 @@ func (h *Handler) download(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) publicKey(w http.ResponseWriter, r *http.Request) {
-	if h.signer == nil {
+	signer := h.signer()
+	if signer == nil {
 		httpx.Error(w, http.StatusNotFound, "no signing key configured")
 		return
 	}
-	key := h.signer.PublicKeyArmored()
+	key := signer.PublicKeyArmored()
 	w.Header().Set("Content-Type", "application/pgp-keys")
 	w.Header().Set("Content-Length", fmt.Sprint(len(key)))
 	w.WriteHeader(http.StatusOK)
@@ -94,8 +89,8 @@ func (h *Handler) publicKey(w http.ResponseWriter, r *http.Request) {
 // Start launches the background indexer and enqueues all durable deb_dirty rows.
 // It returns immediately; the indexer stops when ctx is cancelled.
 func (h *Handler) Start(ctx context.Context) {
-	if h.signer == nil {
-		h.log.Warn("no TR_GPG_KEY_FILE configured: Debian indexes are unsigned; clients need [trusted=yes]")
+	if h.signer() == nil {
+		h.log.Warn("no usable signing key: Debian indexes are unsigned; clients need [trusted=yes]")
 	}
 	h.idx.start(ctx)
 }

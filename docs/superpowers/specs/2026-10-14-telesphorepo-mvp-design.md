@@ -150,7 +150,7 @@ overridable by env):
 | `TR_COOKIE_SECURE` | `true` | `Secure` flag on session cookie (tests set `false` because they use plain HTTP) |
 | `TR_SESSION_TTL` | `168h` | absolute session lifetime |
 | `TR_TRUSTED_PROXIES` | `""` | comma-separated CIDRs whose `X-Forwarded-For` is trusted for client IP |
-| `TR_GPG_KEY_FILE` | `$TR_DATA_DIR/signing.asc` (auto-generated if absent) | armored OpenPGP **private** key used to sign Debian indexes |
+| `TR_GPG_KEY_FILE` | — (key stored encrypted in the DB, auto-generated if absent) | optional mounted armored OpenPGP **private** key; replaces the stored key |
 | `TR_GPG_PASSPHRASE_FILE` | — | optional file containing the key passphrase |
 | `TR_DEB_DEBOUNCE` | `2s` | quiet period before a Debian index rebuild |
 | `TR_DEB_MAX_DELAY` | `30s` | max delay of a rebuild under continuous uploads |
@@ -172,7 +172,7 @@ operations get a simple wrapper. `--help` on every command prints a short, examp
 | `telesphorepo dev` | zero-config local server: data in `./.telesphorepo-dev/`, `http://localhost:8080`, insecure cookies allowed, short Debian debounce, signing key auto-generated, an `admin` user plus demo repos `maven` and `debian` created on first run; prints URL, username and password. `TR_*` env still overrides. |
 | `telesphorepo user add NAME [--admin]` | prompts for the password twice on a TTY; reads one line from stdin when piped |
 | `telesphorepo user passwd NAME` | reset a password (same input rules) |
-| `telesphorepo keygen [FILE]` | write a new Ed25519 signing key (default `$TR_DATA_DIR/signing.asc`, refuses to overwrite) and print its fingerprint |
+| `telesphorepo keygen [FILE]` | write a new Ed25519 signing key (default `./signing.asc`, refuses to overwrite) and print its fingerprint |
 | `telesphorepo version` | print version |
 | `move` / `import nexus` | **[M3]**, designed to the same rule (e.g. `telesphorepo move s3` copies from the current backend to the named one using env config) |
 
@@ -180,11 +180,12 @@ operations get a simple wrapper. `--help` on every command prints a short, examp
 - `TR_DATA_DIR` defaults to `./data` for the binary; the Docker image sets `/data`.
 - First start with an empty users table and no `TR_BOOTSTRAP_ADMIN_*`: create `admin` with a random
   password and print it once to stderr in a clearly marked block (never to the JSON log stream).
-- No `TR_GPG_KEY_FILE`: use `$TR_DATA_DIR/signing.asc`, generating it on first start (logs the
-  fingerprint). The key is on the data volume, never in the DB. An explicit `TR_GPG_KEY_FILE` that
-  does not exist is a startup error (no silent generation over a misconfigured mount).
+- No `gpg.key_file`: use the stored `debian.signing_key` (encrypted, §3), generating it on first
+  start (logs the fingerprint); a legacy `$TR_DATA_DIR/signing.asc` is imported once. An explicit
+  `TR_GPG_KEY_FILE` that does not exist is a startup error (no silent generation over a
+  misconfigured mount).
 - If the embedded UI was not built (only `dist/.keep`), `/` serves a small page explaining how to
-  build it (`npm --prefix web run build`) or run the Vite dev server.
+  build it (`go tool task build`) or run the Vite dev server.
 
 ## 5. Data model
 
@@ -678,18 +679,20 @@ Gotchas for test authors:
 
 ## 16. Developer experience **[M1.1]**
 
-**One command to run everything locally**, mirroring `bun run dev / build / preview`. The root
-`package.json` holds scripts only (no dependencies); each delegates to a cross-platform Go tool
-(`tools/run`), so behaviour is identical on Windows, macOS and Linux and nothing needs bash or make.
-`npm run <script>` works the same, but bun is the preferred and canonical package manager.
+**One command to run everything locally**, with `dev / build / preview` verbs (inspired by
+`bun run dev/build/preview`, but Go-native): a Go tool registered in `go.mod`
+(`tool …/tools/task`), invoked as `go tool task <verb>`. It needs only Go plus bun (preferred) or
+npm for the web build, and behaves identically on Windows, macOS and Linux — no bash, make or root
+`package.json`. (`go tool` is used rather than `go run` because it passes the real exit code
+through, so Ctrl+C exits cleanly.)
 
 | Command | What it does |
 |---|---|
-| `bun run dev` | Checks the environment (Go version from `go.mod`; bun, else npm, else a clear install hint). Installs web deps when `node_modules` is missing or the lockfile changed. Starts the backend (`telesphorepo dev`, §4) on :8080 and rebuilds/restarts it when `.go`, `go.mod` or migration files change (polling watcher, no extra deps; a failed build keeps the old process running and prints the error). Starts Vite with HMR on :5173, proxying `/api`, `/maven`, `/debian`, `/keys` to :8080. Interleaved, prefixed logs (`api │`, `web │`). Prints one banner: open http://localhost:5173, admin username/password, data dir. Ctrl+C stops both cleanly. |
-| `bun run build` | Same checks/installs, builds the UI, then `bin/telesphorepo` (`.exe` on Windows) with the UI embedded, `CGO_ENABLED=0`, version stamped from git. `bun run build image` also builds the container image `telesphorepo:local` with the detected engine. |
-| `bun run preview` | `build`, then runs `bin/telesphorepo dev` on :8080 — the production binary with the embedded UI, local dev data. |
-| `bun run test` | Runs the e2e suite (`go test -tags e2e ./e2e/... -count=1`); extra args pass through, e.g. `bun run test -run TestMaven`. |
-| `bun run doctor` | Prints what was detected (Go, bun/npm, container engine) and what is missing. |
+| `go tool task dev` | Checks the environment (Go version from `go.mod`; bun, else npm, else a clear install hint). Installs web deps when `node_modules` is missing or the lockfile changed. Starts the backend (`telesphorepo dev`, §4) on :8080 and rebuilds/restarts it when `.go`, `go.mod` or migration files change (polling watcher, no extra deps; a failed build keeps the old process running and prints the error). Starts Vite with HMR on :5173, proxying `/api`, `/maven`, `/debian`, `/keys` to :8080. Interleaved, prefixed logs (`api │`, `web │`). Prints one banner: open http://localhost:5173, admin username/password, data dir. Ctrl+C stops both cleanly. |
+| `go tool task build` | Same checks/installs, builds the UI, then `bin/telesphorepo` (`.exe` on Windows) with the UI embedded, `CGO_ENABLED=0`, version stamped from git. `go tool task build image` also builds the container image `telesphorepo:local` with the detected engine. |
+| `go tool task preview` | `build`, then runs `bin/telesphorepo dev` on :8080 — the production binary with the embedded UI, local dev data. |
+| `go tool task test` | Runs the e2e suite (`go test -tags e2e ./e2e/... -count=1`); extra args pass through, e.g. `go tool task test -run TestMaven`. |
+| `go tool task doctor` | Prints what was detected (Go, bun/npm, container engine) and what is missing. |
 
 Production is the container image (or `bin/telesphorepo serve`); first start prints the admin password and everything else is configured in the UI (§3).
 

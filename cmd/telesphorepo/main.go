@@ -78,14 +78,19 @@ Passwords are prompted twice (hidden) on a terminal, or read as one line from a 
 	}
 
 	commands = []*command{
-		{name: "serve", summary: "run the server (default; configured by TR_* env)", usage: `Run the server. Configuration comes from TR_* environment variables.
+		{name: "serve", summary: "run the server (default)", usage: `Run the server. Settings are managed in the web UI (Admin > Settings) and stored in the
+database; secrets are encrypted with a master key.
 
   telesphorepo                         same as "telesphorepo serve"
   TR_DATA_DIR=/srv/tr telesphorepo serve
-  TR_STORAGE=s3 TR_S3_ENDPOINT=... TR_S3_BUCKET=... telesphorepo
 
-Defaults: listen :8080, data in ./data. On first start an "admin" user is created and its
-random password is printed once; a Debian signing key is generated at <data>/signing.asc.
+Environment (all optional): TR_DATA_DIR (default ./data), TR_LISTEN (default :8080),
+TR_MASTER_KEY (base64 32 bytes; default <data>/master.key, generated on first start).
+Any setting can also be forced with TR_<SETTING>, e.g. TR_STORAGE=s3; it is then read-only
+in the UI.
+
+On first start an "admin" user is created and its random password is printed once, and a
+Debian signing key is generated and stored encrypted in the database.
 `, run: serveCmd},
 		{name: "dev", summary: "zero-config local server with demo repos", usage: `Run a zero-config local server for development.
 
@@ -97,13 +102,14 @@ run. The URL, username and password are printed on every start. TR_* env still o
 Start over with a fresh instance by deleting ./.telesphorepo-dev.
 `, run: devCmd},
 		userCmd,
-		{name: "keygen", summary: "write a new Debian signing key", usage: `Write a new Ed25519 OpenPGP signing key and print its fingerprint. Never overwrites.
+		{name: "keygen", summary: "write a new Debian signing key file", usage: `Write a new Ed25519 OpenPGP signing key and print its fingerprint. Never overwrites.
 
-  telesphorepo keygen                  writes <data dir>/signing.asc
+  telesphorepo keygen                  writes ./signing.asc
   telesphorepo keygen release.asc      writes ./release.asc
 
-The server generates this key automatically on first start; use keygen to create one
-ahead of time (then point TR_GPG_KEY_FILE at it).
+The server generates a key on first start and stores it (encrypted) in its database; use
+keygen to create one ahead of time, then upload it under Admin > Settings or point
+TR_GPG_KEY_FILE at it.
 `, run: keygenCmd},
 		{name: "version", summary: "print the version", usage: "Print the version.\n\n  telesphorepo version\n", run: versionCmd},
 		{name: "help", summary: "show help for a command", usage: "Show help.\n\n  telesphorepo help\n  telesphorepo help user add\n", run: helpCmd},
@@ -239,7 +245,7 @@ Commands:
 %s
 Examples:
   telesphorepo dev                     try it locally (prints URL, user and password)
-  telesphorepo                         run the server (TR_* env, data in ./data)
+  telesphorepo                         run the server (data in ./data)
   telesphorepo user add alice          create a user (prompts for the password)
 
 Run "telesphorepo <command> --help" for details.
@@ -304,11 +310,11 @@ func serveCmd(args []string) error {
 	if err := noArgs("serve", args); err != nil {
 		return err
 	}
-	cfg, err := config.Load()
+	boot, err := config.LoadBoot(nil)
 	if err != nil {
 		return err
 	}
 	ctx, stop := signalContext()
 	defer stop()
-	return server.Run(ctx, cfg)
+	return server.Run(ctx, boot)
 }

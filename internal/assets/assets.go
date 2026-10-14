@@ -93,10 +93,10 @@ type SearchHit struct {
 type Service struct {
 	db  *db.DB
 	st  storage.Store
-	cfg *config.Config
+	cfg config.Provider
 }
 
-func New(d *db.DB, st storage.Store, cfg *config.Config) *Service {
+func New(d *db.DB, st storage.Store, cfg config.Provider) *Service {
 	return &Service{db: d, st: st, cfg: cfg}
 }
 
@@ -132,7 +132,7 @@ func ContentType(p string) string {
 
 // Spool copies r to a temp file, failing with ErrTooLarge beyond max bytes.
 func (s *Service) Spool(r io.Reader, max int64) (*Spooled, error) {
-	dir := s.cfg.TmpDir()
+	dir := s.cfg().TmpDir()
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, err
 	}
@@ -348,7 +348,7 @@ func (s *Service) Serve(w http.ResponseWriter, r *http.Request, repo *repos.Repo
 		return
 	}
 	key := Key(repo.Name, p)
-	if u, ok, err := s.st.PresignGet(ctx, key, s.cfg.PresignTTL); err != nil {
+	if u, ok, err := s.st.PresignGet(ctx, key, s.cfg().PresignTTL); err != nil {
 		slog.Error("presign failed", "repo", repo.Name, "path", p, "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return

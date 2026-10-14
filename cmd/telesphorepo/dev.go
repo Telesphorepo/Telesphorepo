@@ -11,6 +11,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/server"
+	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 )
 
 // devAdminUser is the admin "telesphorepo dev" creates unless TR_BOOTSTRAP_ADMIN_USER is set.
@@ -23,27 +24,29 @@ type devState struct {
 	mavenRepo      string
 	debianRepo     string
 	firstRun       bool
+	settings       *settings.Service
 }
 
 func devCmd(args []string) error {
 	if err := noArgs("dev", args); err != nil {
 		return err
 	}
-	cfg, err := config.LoadWithDefaults(map[string]string{
-		"TR_DATA_DIR":      config.DevDataDir,
-		"TR_COOKIE_SECURE": "false",
-		"TR_DEB_DEBOUNCE":  "300ms",
-	})
+	boot, err := config.LoadBoot(map[string]string{"TR_DATA_DIR": config.DevDataDir})
 	if err != nil {
 		return err
 	}
-	st := &devState{dataDir: cfg.DataDir, mavenRepo: "maven", debianRepo: "debian"}
+	st := &devState{dataDir: boot.DataDir, mavenRepo: "maven", debianRepo: "debian"}
 	ctx, stop := signalContext()
 	defer stop()
-	return server.RunWith(ctx, cfg, server.Options{
+	return server.RunWith(ctx, boot, server.Options{
+		// Dev defaults (shown as defaults in the UI, still changeable there or via TR_* env).
+		Defaults: map[string]string{
+			settings.KeyCookieSecure: "false",
+			settings.KeyDebDebounce:  "300ms",
+		},
 		TextLogs: true,
 		Init:     func(ctx context.Context, s *server.Services) error { return devInit(ctx, s, st) },
-		Ready:    func(addr net.Addr) { printDevBanner(st, baseURL(cfg, addr)) },
+		Ready:    func(addr net.Addr) { printDevBanner(st, baseURL(st.settings.Config(), addr)) },
 	})
 }
 
@@ -51,6 +54,7 @@ func devCmd(args []string) error {
 // on first run, and loads the credentials for the banner on every run.
 func devInit(ctx context.Context, s *server.Services, st *devState) error {
 	cfg := s.Config
+	st.settings = s.Settings
 	pwFile := config.JoinDataDir(cfg.DataDir, config.DevAdminPasswordFile)
 	st.user = devAdminUser
 	if cfg.BootstrapAdminUser != "" {
@@ -128,7 +132,7 @@ func baseURL(cfg *config.Config, addr net.Addr) string {
 // the stable machine-readable "TELESPHOREPO_READY url=... user=... password=..." (the dev tool
 // parses it); password= is empty when the password is unknown.
 //
-// Under the dev runner (bun run dev / preview set TELESPHOREPO_RUNNER=1) only the READY line is
+// Under the dev runner (go tool task dev / preview set TELESPHOREPO_RUNNER=1) only the READY line is
 // printed: the runner shows one combined banner, and a rebuild must not repeat the box.
 func printDevBanner(st *devState, base string) {
 	ready := fmt.Sprintf("TELESPHOREPO_READY url=%s user=%s password=%s data=%q\n", base, st.user, st.password, st.dataDir)

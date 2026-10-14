@@ -144,7 +144,7 @@ func limitKeys(ip netip.Addr, username string) []string {
 }
 
 func (s *Service) clientIP(r *http.Request) netip.Addr {
-	return httpx.ClientIP(r, s.cfg.TrustedProxies)
+	return httpx.ClientIP(r, s.cfg().TrustedProxies)
 }
 
 func setRetryAfter(w http.ResponseWriter, d time.Duration) {

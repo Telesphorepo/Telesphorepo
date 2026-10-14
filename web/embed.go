@@ -72,12 +72,11 @@ pre{background:var(--code);padding:.75rem 1rem;border-radius:6px;overflow-x:auto
 </style></head>
 <body><main>
 <h1>UI not built</h1>
-<p><strong>UI not built — run <code>bun run dev</code> (hot reload) or <code>bun run build</code>.</strong></p>
+<p><strong>UI not built — run <code>go tool task dev</code> (hot reload) or <code>go tool task build</code>.</strong></p>
 <p>The server is running, but this binary was built without the web UI. The Maven, Debian and JSON API endpoints work normally.</p>
 <p>From the repository root, either run everything with hot reload:</p>
-<pre>bun run dev</pre>
+<pre>go tool task dev</pre>
 <p>and open <a href="http://localhost:5173">http://localhost:5173</a>, or build the binary with the UI embedded:</p>
-<pre>bun run build</pre>
-<p>(<code>npm run dev</code> / <code>npm run build</code> work too.)</p>
+<pre>go tool task build</pre>
 </main></body></html>
 `

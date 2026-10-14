@@ -24,20 +24,24 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/maven"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
-	"github.com/Telesphorepo/Telesphorepo/internal/signing"
+	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 	"github.com/Telesphorepo/Telesphorepo/internal/storage"
 	"github.com/Telesphorepo/Telesphorepo/web"
 )
 
 // Services exposes the wired services to Options.Init.
 type Services struct {
-	Config *config.Config
-	Auth   *auth.Service
-	Repos  *repos.Service
+	Config   *config.Config // effective configuration at startup
+	Settings *settings.Service
+	Auth     *auth.Service
+	Repos    *repos.Service
 }
 
 // Options customises Run (used by "telesphorepo dev"). The zero value is plain "serve".
 type Options struct {
+	// Defaults replaces built-in setting defaults (setting key -> text value), see
+	// settings.Options.Defaults.
+	Defaults map[string]string
 	// Init runs after the DB and services are ready and before the default first-run admin
 	// bootstrap (so it may create its own admin) and before listening.
 	Init func(ctx context.Context, s *Services) error
@@ -48,15 +52,17 @@ type Options struct {
 }
 
 // Run starts the HTTP server and blocks until ctx is cancelled (graceful shutdown).
-func Run(ctx context.Context, cfg *config.Config) error { return RunWith(ctx, cfg, Options{}) }
+func Run(ctx context.Context, boot *config.Boot) error { return RunWith(ctx, boot, Options{}) }
 
 // RunWith is Run with Options.
-// Steps: slog JSON logger at cfg.LogLevel; mkdir DataDir/TmpDir; db.Open; storage (fs|s3);
-// repos/auth/assets services; bootstrap admin if no users; debian.New + Start; maven.New;
-// mux: GET /healthz, /api/ -> api.Handler(), formats Register, "/" -> web UI (SPA fallback).
+// Steps: logger; mkdir DataDir/TmpDir; db.Open; settings.Load (master key, DB, env overrides);
+// live storage (hot-swapped on storage setting changes); repos/auth/assets services; bootstrap
+// admin if no users; signing key (setting, generated on first start); debian.New + Start;
+// maven.New; mux: GET /healthz, /api/ -> api.Handler(), formats Register, "/" -> web UI.
 // Access logging must never log Authorization headers, cookies, or query strings.
-func RunWith(ctx context.Context, cfg *config.Config, opts Options) error {
-	hopts := &slog.HandlerOptions{Level: cfg.LogLevel}
+func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
+	level := new(slog.LevelVar)
+	hopts := &slog.HandlerOptions{Level: level}
 	var log *slog.Logger
 	if opts.TextLogs {
 		log = slog.New(slog.NewTextHandler(os.Stderr, hopts))
@@ -65,49 +71,66 @@ func RunWith(ctx context.Context, cfg *config.Config, opts Options) error {
 	}
 	slog.SetDefault(log)
 
-	for _, d := range []string{cfg.DataDir, cfg.TmpDir()} {
+	for _, d := range []string{boot.DataDir, boot.TmpDir()} {
 		if err := os.MkdirAll(d, 0o750); err != nil {
 			return fmt.Errorf("create %s: %w", d, err)
 		}
 	}
 
-	d, err := db.Open(ctx, cfg.DBFile())
+	d, err := db.Open(ctx, boot.DBFile())
 	if err != nil {
 		return fmt.Errorf("open db: %w", err)
 	}
 	defer d.Close()
 
-	var st storage.Store
-	if cfg.Storage == "s3" {
-		st, err = storage.NewS3(ctx, cfg)
-	} else {
-		st, err = storage.NewFS(cfg.FSRoot)
+	set, err := settings.Load(ctx, d, boot, settings.Options{Defaults: opts.Defaults, Log: log.With("component", "settings")})
+	if err != nil {
+		return err
 	}
+	cfg := set.Config()
+	level.Set(cfg.LogLevel)
+
+	st, err := storage.Open(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("storage: %w", err)
 	}
+	live := storage.NewLive(st)
+
+	set.Subscribe(func(old, new *settings.Snapshot) {
+		level.Set(new.Config.LogLevel)
+		if storage.SameBackend(old.Config, new.Config) {
+			return
+		}
+		st, err := storage.Open(context.WithoutCancel(ctx), new.Config)
+		if err != nil {
+			log.Error("storage settings changed but the new store could not be opened; keeping the previous one", "error", err.Error())
+			return
+		}
+		live.Swap(st)
+		log.Info("storage switched; existing blobs were not moved", "storage", new.Config.Storage)
+	})
 
 	rs := repos.New(d)
-	as := auth.New(d, cfg, rs)
-	ss := assets.New(d, st, cfg)
+	as := auth.New(d, set.Config, rs)
+	ss := assets.New(d, live, set.Config)
 
 	if opts.Init != nil {
-		if err := opts.Init(ctx, &Services{Config: cfg, Auth: as, Repos: rs}); err != nil {
+		if err := opts.Init(ctx, &Services{Config: cfg, Settings: set, Auth: as, Repos: rs}); err != nil {
 			return err
 		}
 	}
-	if err := bootstrapAdmin(ctx, as, cfg, log); err != nil {
+	if err := bootstrapAdmin(ctx, as, boot, log); err != nil {
 		return err
 	}
-	if err := ensureSigningKey(cfg, log); err != nil {
+	if err := set.EnsureSigningKey(ctx); err != nil {
 		return err
 	}
 
-	deb, err := debian.New(d, as, ss, rs, cfg, log.With("component", "debian"))
+	deb, err := debian.New(d, as, ss, rs, set.Config, set.Signer, log.With("component", "debian"))
 	if err != nil {
 		return fmt.Errorf("debian: %w", err)
 	}
-	mvn := maven.New(as, ss, cfg)
+	mvn := maven.New(as, ss, set.Config)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -118,21 +141,21 @@ func RunWith(ctx context.Context, cfg *config.Config, opts Options) error {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		io.WriteString(w, "ok\n")
 	})
-	mux.Handle("/api/", api.New(as, rs, ss, deb, cfg).Handler())
+	mux.Handle("/api/", api.New(as, rs, ss, deb, set).Handler())
 	mvn.Register(mux)
 	deb.Register(mux)
 	mux.Handle("/", web.Handler())
 
 	srv := &http.Server{
-		Addr:              cfg.Listen,
-		Handler:           accessLog(log, cfg, mux),
+		Addr:              boot.Listen,
+		Handler:           accessLog(log, set.Config, mux),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    64 << 10,
 		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 		BaseContext:       func(net.Listener) context.Context { return context.WithoutCancel(ctx) },
 	}
-	ln, err := net.Listen("tcp", cfg.Listen)
+	ln, err := net.Listen("tcp", boot.Listen)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
@@ -167,7 +190,7 @@ func RunWith(ctx context.Context, cfg *config.Config, opts Options) error {
 // bootstrapAdmin creates the first admin when the users table is empty: from
 // TR_BOOTSTRAP_ADMIN_* if set, otherwise "admin" with a random password printed once to stderr
 // (outside the log stream).
-func bootstrapAdmin(ctx context.Context, as *auth.Service, cfg *config.Config, log *slog.Logger) error {
+func bootstrapAdmin(ctx context.Context, as *auth.Service, boot *config.Boot, log *slog.Logger) error {
 	has, err := as.HasUsers(ctx)
 	if err != nil {
 		return fmt.Errorf("check users: %w", err)
@@ -175,7 +198,7 @@ func bootstrapAdmin(ctx context.Context, as *auth.Service, cfg *config.Config, l
 	if has {
 		return nil
 	}
-	user, pass, generated := cfg.BootstrapAdminUser, cfg.BootstrapAdminPassword, false
+	user, pass, generated := boot.BootstrapAdminUser, boot.BootstrapAdminPassword, false
 	if user == "" || pass == "" {
 		user, pass, generated = "admin", RandomPassword(), true
 	}
@@ -196,37 +219,6 @@ func bootstrapAdmin(ctx context.Context, as *auth.Service, cfg *config.Config, l
 	}
 	return nil
 }
-
-// ensureSigningKey defaults TR_GPG_KEY_FILE to DataDir/signing.asc, generating it if missing.
-// An explicitly configured key file that does not exist is an error.
-func ensureSigningKey(cfg *config.Config, log *slog.Logger) error {
-	if cfg.GPGKeyFile != "" {
-		if _, err := os.Stat(cfg.GPGKeyFile); err != nil {
-			return fmt.Errorf("TR_GPG_KEY_FILE %s: %w (unset TR_GPG_KEY_FILE to auto-generate one in the data dir)", cfg.GPGKeyFile, err)
-		}
-		return nil
-	}
-	cfg.GPGKeyFile = cfg.DefaultSigningKeyFile()
-	_, err := os.Stat(cfg.GPGKeyFile)
-	if err == nil {
-		return nil
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("signing key %s: %w", cfg.GPGKeyFile, err)
-	}
-	fp, err := signing.GenerateFile(cfg.GPGKeyFile, DefaultKeyName, DefaultKeyEmail)
-	if err != nil {
-		return fmt.Errorf("generate signing key %s: %w", cfg.GPGKeyFile, err)
-	}
-	log.Info("generated signing key", "file", cfg.GPGKeyFile, "fingerprint", fp)
-	return nil
-}
-
-// Identity used for generated signing keys.
-const (
-	DefaultKeyName  = "Telesphorepo"
-	DefaultKeyEmail = "telesphorepo@localhost"
-)
 
 // RandomPassword returns a random 20-character alphanumeric password.
 func RandomPassword() string {
@@ -307,7 +299,7 @@ func (w *recorder) Flush() {
 
 func (w *recorder) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
-func accessLog(log *slog.Logger, cfg *config.Config, next http.Handler) http.Handler {
+func accessLog(log *slog.Logger, cfg config.Provider, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		w := &recorder{ResponseWriter: rw}
@@ -338,7 +330,7 @@ func accessLog(log *slog.Logger, cfg *config.Config, next http.Handler) http.Han
 				"status", status,
 				"bytes", w.bytes,
 				"duration_ms", time.Since(start).Milliseconds(),
-				"ip", httpx.ClientIP(r, cfg.TrustedProxies).String(),
+				"ip", httpx.ClientIP(r, cfg().TrustedProxies).String(),
 			)
 		}()
 		next.ServeHTTP(w, r)

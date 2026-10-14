@@ -175,6 +175,6 @@ func doctor(ctx context.Context) error {
 		fmt.Println("\n" + red("Something required is missing; see above."))
 		return exitError{1}
 	}
-	fmt.Println("\n" + green("Ready.") + " Run " + bold("bun run dev") + " to start.")
+	fmt.Println("\n" + green("Ready.") + " Run " + bold("go tool task dev") + " to start.")
 	return nil
 }

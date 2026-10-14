@@ -1,13 +1,13 @@
-// Command run is the cross-platform developer entry point behind the root package.json
-// scripts (spec §16): "bun run dev | build | preview | test | doctor". It needs only Go and
+// Command task is the cross-platform developer entry point
+// (spec §16): "go tool task dev | build | preview | test | doctor". It needs only Go and
 // bun (or npm); nothing here depends on bash or make, so it behaves the same on Windows,
 // macOS and Linux.
 //
-//	go tool run dev            backend + Vite with live reload
-//	go tool run build [image]  bin/telesphorepo with the UI embedded (+ container image)
-//	go tool run preview        build, then run the production binary locally
-//	go tool run test [args]    e2e suite; args go to "go test"
-//	go tool run doctor         show what was detected
+//	go tool task dev            backend + Vite with live reload
+//	go tool task build [image]  bin/telesphorepo with the UI embedded (+ container image)
+//	go tool task preview        build, then run the production binary locally
+//	go tool task test [args]    e2e suite; args go to "go test"
+//	go tool task doctor         show what was detected
 package main
 
 import (
@@ -20,13 +20,13 @@ import (
 	"syscall"
 )
 
-const usage = `Usage: bun run <command>   (npm run works too)
+const usage = `Usage: go tool task <command>
 
   dev              run everything locally with live reload: API on :8080, UI on http://localhost:5173
   build            build bin/telesphorepo with the UI embedded
   build image      ...and the container image telesphorepo:local (Docker or Podman)
   preview          build, then run the production binary at http://localhost:8080
-  test [args]      run the e2e suite; args pass to go test (e.g. bun run test -run TestMaven)
+  test [args]      run the e2e suite; args pass to go test (e.g. go tool task test -run TestMaven)
   doctor           show detected tools (Go, bun/npm, Docker/Podman) and what is missing
 
 Data for dev/preview lives in ./.telesphorepo-dev (delete it to start over).
@@ -90,7 +90,7 @@ func run(ctx context.Context, args []string) error {
 		case len(rest) == 1 && rest[0] == "image":
 			image = true
 		default:
-			return usageErr("build takes no arguments except \"image\" (bun run build image)")
+			return usageErr("build takes no arguments except \"image\" (go tool task build image)")
 		}
 		_, err := build(ctx, image)
 		return err

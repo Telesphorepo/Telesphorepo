@@ -7,7 +7,7 @@ export type Page<T> = { items: T[]; next: string | null };
 export type Token = { id: string; name: string; created_at: string; expires_at: string | null; last_used_at: string | null; token?: string };
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string) { super(message); }
+  constructor(public status: number, message: string, public fields?: Record<string, string>) { super(message); }
 }
 
 export async function api<T = unknown>(method: string, url: string, body?: unknown): Promise<T> {
@@ -22,8 +22,9 @@ export async function api<T = unknown>(method: string, url: string, body?: unkno
   }
   if (!res.ok) {
     let msg = res.statusText;
-    try { msg = (await res.json()).error ?? msg; } catch { /* not JSON */ }
-    throw new ApiError(res.status, msg);
+    let fields: Record<string, string> | undefined;
+    try { const j = await res.json(); msg = j.error ?? msg; fields = j.fields; } catch { /* not JSON */ }
+    throw new ApiError(res.status, msg, fields);
   }
   return res.status === 204 ? (undefined as T) : res.json();
 }

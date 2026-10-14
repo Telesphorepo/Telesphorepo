@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,6 +28,13 @@ type DB struct {
 
 // Open opens (creating if needed) the database file and runs migrations.
 func Open(ctx context.Context, file string) (*DB, error) {
+	// Create the file owner-only before SQLite does (it would use 0644); WAL/SHM files
+	// inherit these permissions.
+	if f, err := os.OpenFile(file, os.O_RDWR|os.O_CREATE, 0o600); err == nil {
+		f.Close()
+	} else {
+		return nil, err
+	}
 	pragmas := []string{
 		"journal_mode(WAL)",
 		"synchronous(NORMAL)",
