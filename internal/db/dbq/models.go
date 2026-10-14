@@ -38,15 +38,17 @@ type AssetsFt struct {
 }
 
 type NexusSource struct {
-	ID          int64
-	Name        string
-	BaseUrl     string
-	Credentials []byte
-	State       string
-	CreatedBy   sql.NullInt64
-	CreatedAt   int64
-	LastSyncAt  int64
-	LastError   string
+	ID            int64
+	Name          string
+	BaseUrl       string
+	Credentials   []byte
+	State         string
+	CreatedBy     sql.NullInt64
+	CreatedAt     int64
+	LastSyncAt    int64
+	LastError     string
+	CutoverSyncID int64
+	CutoverFailed int64
 }
 
 type NexusSourceRepo struct {

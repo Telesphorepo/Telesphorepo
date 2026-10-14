@@ -68,6 +68,10 @@ type Source struct {
 	CreatedAt time.Time `json:"created_at"`
 	LastError string    `json:"last_error"` // error of the last ended sync; "" when it succeeded
 	LastSync  *Sync     `json:"last_sync"`  // newest sync, running or ended, without repos; nil before the first
+	// CutoverFailed is the number of files the cut-over sync failed to import; CutoverSyncID is
+	// that sync, whose failures GET /api/nexus/syncs/{id}/failures lists. Both are 0 before cut-over.
+	CutoverSyncID int64 `json:"cutover_sync_id"`
+	CutoverFailed int64 `json:"cutover_failed"`
 }
 
 // SourceDetail is a source with its Nexus repos and their mapping.
@@ -304,7 +308,8 @@ func (s *Service) UpdateSource(ctx context.Context, id int64, in SourceUpdate) (
 // toSource converts a row and adds its newest sync.
 func (s *Service) toSource(ctx context.Context, row dbq.NexusSource) (*Source, error) {
 	src := &Source{ID: row.ID, Name: row.Name, BaseURL: row.BaseUrl, State: row.State,
-		CreatedAt: time.Unix(row.CreatedAt, 0).UTC(), LastError: row.LastError}
+		CreatedAt: time.Unix(row.CreatedAt, 0).UTC(), LastError: row.LastError,
+		CutoverSyncID: row.CutoverSyncID, CutoverFailed: row.CutoverFailed}
 	last, err := dbq.New(s.db.R).GetLatestNexusSync(ctx, row.ID)
 	switch {
 	case err == nil:

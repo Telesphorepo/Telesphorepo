@@ -67,12 +67,20 @@ func (q *Queries) CreateNexusSync(ctx context.Context, arg CreateNexusSyncParams
 }
 
 const cutOverNexusSource = `-- name: CutOverNexusSource :execrows
-UPDATE nexus_sources SET state = 'cut_over', credentials = X'' WHERE id = ? AND state = 'mirroring'
+UPDATE nexus_sources SET state = 'cut_over', credentials = X'', cutover_sync_id = ?, cutover_failed = ?
+WHERE id = ? AND state = 'mirroring'
 `
 
-// Ends mirroring and drops the credentials. Returns 0 rows when the source already cut over.
-func (q *Queries) CutOverNexusSource(ctx context.Context, id int64) (int64, error) {
-	result, err := q.db.ExecContext(ctx, cutOverNexusSource, id)
+type CutOverNexusSourceParams struct {
+	CutoverSyncID int64
+	CutoverFailed int64
+	ID            int64
+}
+
+// Ends mirroring, drops the credentials and records the cut-over sync with its failed file
+// count. Returns 0 rows when the source already cut over.
+func (q *Queries) CutOverNexusSource(ctx context.Context, arg CutOverNexusSourceParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, cutOverNexusSource, arg.CutoverSyncID, arg.CutoverFailed, arg.ID)
 	if err != nil {
 		return 0, err
 	}
@@ -145,7 +153,7 @@ func (q *Queries) GetLatestNexusSync(ctx context.Context, sourceID int64) (Nexus
 }
 
 const getNexusSource = `-- name: GetNexusSource :one
-SELECT id, name, base_url, credentials, state, created_by, created_at, last_sync_at, last_error
+SELECT id, name, base_url, credentials, state, created_by, created_at, last_sync_at, last_error, cutover_sync_id, cutover_failed
 FROM nexus_sources WHERE id = ?
 `
 
@@ -162,6 +170,8 @@ func (q *Queries) GetNexusSource(ctx context.Context, id int64) (NexusSource, er
 		&i.CreatedAt,
 		&i.LastSyncAt,
 		&i.LastError,
+		&i.CutoverSyncID,
+		&i.CutoverFailed,
 	)
 	return i, err
 }
@@ -362,7 +372,7 @@ func (q *Queries) ListNexusSourceRepos(ctx context.Context, sourceID int64) ([]N
 }
 
 const listNexusSources = `-- name: ListNexusSources :many
-SELECT id, name, base_url, credentials, state, created_by, created_at, last_sync_at, last_error
+SELECT id, name, base_url, credentials, state, created_by, created_at, last_sync_at, last_error, cutover_sync_id, cutover_failed
 FROM nexus_sources WHERE name > ?1 ORDER BY name LIMIT ?2
 `
 
@@ -391,6 +401,8 @@ func (q *Queries) ListNexusSources(ctx context.Context, arg ListNexusSourcesPara
 			&i.CreatedAt,
 			&i.LastSyncAt,
 			&i.LastError,
+			&i.CutoverSyncID,
+			&i.CutoverFailed,
 		); err != nil {
 			return nil, err
 		}

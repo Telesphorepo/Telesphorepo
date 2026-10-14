@@ -77,6 +77,7 @@ function SourceView({ id }: { id: number }) {
   const [history, setHistory] = useState<NexusSync[]>([]);
   const [next, setNext] = useState<string | null>(null);
   const [confirmCut, setConfirmCut] = useState(false);
+  const [lastFailed, setLastFailed] = useState(0);
 
   const loadHistory = useCallback(async (after?: string) => {
     try {
@@ -98,6 +99,11 @@ function SourceView({ id }: { id: number }) {
     const s = await syncNexusNow(id);
     setShown(s.id);
     await loadHistory();
+  });
+  const openCutOver = () => run(async () => {
+    const p = await nexusSyncs(id);
+    setLastFailed(p.items[0]?.failed ?? 0);
+    setConfirmCut(true);
   });
   const cutOver = () => run(async () => {
     await cutOverNexus(id);
@@ -124,10 +130,14 @@ function SourceView({ id }: { id: number }) {
         <div className="row"><code>{data.base_url}</code><span className="muted">Last sync: {fmtTime(data.last_sync_at)}</span></div>
         {data.last_error && <p className="error">{data.last_error}</p>}
         {err && <p className="error">{err}</p>}
+        {!mirroring && data.cutover_failed > 0 && (
+          <p className="error">{data.cutover_failed} files failed to import in the cut-over sync and are not on this
+            server. <a href="#" onClick={(e) => { e.preventDefault(); setShown(data.cutover_sync_id); }}>Show the failed files</a></p>
+        )}
         {mirroring ? (
           <div className="row">
             <button className="primary" disabled={busy || running} onClick={syncNow}>Sync now</button>
-            <button className="danger" disabled={busy || running} onClick={() => setConfirmCut(true)}>Cut over</button>
+            <button className="danger" disabled={busy || running} onClick={openCutOver}>Cut over</button>
           </div>
         ) : (
           <div className="row">
@@ -138,9 +148,13 @@ function SourceView({ id }: { id: number }) {
         {confirmCut && mirroring && (
           <div className="card notice">
             <strong>Cut over to this server</strong>
-            <p>The server runs a final sync. When it succeeds, the mirrored repositories accept uploads here, the
+            <p>The server runs a final sync. When it reaches the end of every repository, the mirrored repositories accept uploads here, the
               server stops syncing from Nexus and it deletes the stored Nexus credentials. Files deleted in Nexus are not
               deleted here. Make sure that every client uploads to this server before you continue.</p>
+            {lastFailed > 0 && (
+              <p className="error">{lastFailed} files failed to import in the last sync; they will not be on this
+                server after cut-over.</p>
+            )}
             <div className="row">
               <button className="danger" disabled={busy} onClick={cutOver}>Run final sync and cut over</button>
               <button disabled={busy} onClick={() => setConfirmCut(false)}>Cancel</button>

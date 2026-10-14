@@ -178,9 +178,10 @@ func (s *Service) StartSync(ctx context.Context, sourceID, userID int64) (*Sync,
 	return s.Sync(ctx, id)
 }
 
-// CutOver starts the final sync of a source. When it ends without a failure, the source's
-// repos take uploads again, the source becomes cut_over and its credentials are deleted. When
-// it fails or is cancelled, the source stays mirroring and its last_error says why.
+// CutOver starts the final sync of a source. When it walks every repo to the end, the source's
+// repos take uploads again, the source becomes cut_over and its credentials are deleted; files
+// that failed to import are counted in the source's cutover_failed. When a repo fails or the
+// sync is cancelled, the source stays mirroring and its last_error says why.
 func (s *Service) CutOver(ctx context.Context, sourceID, userID int64) (*Sync, error) {
 	id, err := s.startSync(ctx, sourceID, userID, true)
 	if err != nil {
@@ -414,8 +415,8 @@ func endRepos(ctx context.Context, q *dbq.Queries, id int64, state, msg string) 
 
 // cutOver ends cut-over sync id as done and cuts the source over in one transaction: the
 // mapped repos take uploads again, the source becomes cut_over and its credentials are
-// deleted.
-func (s *Service) cutOver(ctx context.Context, id, sourceID int64) error {
+// deleted. The source keeps the sync id and the failed file count as a warning.
+func (s *Service) cutOver(ctx context.Context, id, sourceID, failedFiles int64) error {
 	return s.db.Tx(ctx, func(tx *sql.Tx) error {
 		q := dbq.New(tx)
 		now := time.Now().Unix()
@@ -427,7 +428,7 @@ func (s *Service) cutOver(ctx context.Context, id, sourceID int64) error {
 		if err := endRepos(ctx, q, id, SyncDone, ""); err != nil {
 			return err
 		}
-		if _, err := q.CutOverNexusSource(ctx, sourceID); err != nil {
+		if _, err := q.CutOverNexusSource(ctx, dbq.CutOverNexusSourceParams{CutoverSyncID: id, CutoverFailed: failedFiles, ID: sourceID}); err != nil {
 			return err
 		}
 		mapped, err := q.ListNexusSourceRepos(ctx, sourceID)
@@ -445,7 +446,8 @@ func (s *Service) cutOver(ctx context.Context, id, sourceID int64) error {
 
 // runSync syncs every unfinished repo of the sync, then ends it: done when every repo finished
 // (item failures are listed, not fatal), failed when a repo failed, cancelled on Cancel. A
-// cut-over sync cuts the source over only when no repo and no file failed. When the server
+// cut-over sync cuts the source over when every repo was walked to the end, even when some
+// files failed; the source keeps the failed file count as a warning. When the server
 // context ends first, the sync stays running for the next Start.
 func (s *Service) runSync(ctx context.Context, st *runState) {
 	id := st.id
@@ -533,15 +535,13 @@ func (s *Service) runSync(ctx context.Context, st *runState) {
 		end(SyncFailed, fmt.Sprintf("cut-over stopped: %d of %d repos failed; the source stays mirroring", failedRepos, len(rs)))
 	case failedRepos > 0:
 		end(SyncFailed, fmt.Sprintf("%d of %d repos failed", failedRepos, len(rs)))
-	case sy.Cutover != 0 && failedFiles > 0:
-		end(SyncFailed, fmt.Sprintf("cut-over stopped: %d files failed to import; the source stays mirroring", failedFiles))
 	case sy.Cutover != 0:
-		if err := s.cutOver(context.WithoutCancel(ctx), id, sy.SourceID); err != nil {
+		if err := s.cutOver(context.WithoutCancel(ctx), id, sy.SourceID, failedFiles); err != nil {
 			log.Error("nexus: cannot cut over", "error", err.Error())
 			end(SyncFailed, "cannot cut over: "+err.Error())
 			return
 		}
-		log.Info("nexus: source cut over", "source", src.Name)
+		log.Info("nexus: source cut over", "source", src.Name, "failed_files", failedFiles)
 	default:
 		end(SyncDone, "")
 	}

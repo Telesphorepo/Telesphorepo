@@ -145,7 +145,11 @@ CREATE TABLE nexus_sources (
   created_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
   created_at   INTEGER NOT NULL,
   last_sync_at INTEGER NOT NULL DEFAULT 0,
-  last_error   TEXT NOT NULL DEFAULT ''
+  last_error   TEXT NOT NULL DEFAULT '',
+  -- Set by cut-over: the id of the cut-over sync and how many files it failed to import
+  -- (0 and 0 before cut-over). The failures stay listed under that sync.
+  cutover_sync_id INTEGER NOT NULL DEFAULT 0,
+  cutover_failed  INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 CREATE INDEX nexus_sources_created_by ON nexus_sources(created_by);
 CREATE INDEX nexus_sources_due ON nexus_sources(last_sync_at) WHERE state = 'mirroring';

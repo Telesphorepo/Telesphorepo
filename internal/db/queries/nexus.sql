@@ -12,12 +12,12 @@ RETURNING id;
 UPDATE nexus_sources SET base_url = ?, credentials = ? WHERE id = ?;
 
 -- name: GetNexusSource :one
-SELECT id, name, base_url, credentials, state, created_by, created_at, last_sync_at, last_error
+SELECT id, name, base_url, credentials, state, created_by, created_at, last_sync_at, last_error, cutover_sync_id, cutover_failed
 FROM nexus_sources WHERE id = ?;
 
 -- Keyset page by name (pass "" for the first page).
 -- name: ListNexusSources :many
-SELECT id, name, base_url, credentials, state, created_by, created_at, last_sync_at, last_error
+SELECT id, name, base_url, credentials, state, created_by, created_at, last_sync_at, last_error, cutover_sync_id, cutover_failed
 FROM nexus_sources WHERE name > sqlc.arg(after) ORDER BY name LIMIT sqlc.arg(limit);
 
 -- The mirroring sources whose last sync ended at or before the cutoff, oldest first, through
@@ -30,9 +30,11 @@ ORDER BY last_sync_at LIMIT sqlc.arg(limit);
 -- name: SetNexusSourceSynced :exec
 UPDATE nexus_sources SET last_sync_at = ?, last_error = ? WHERE id = ?;
 
--- Ends mirroring and drops the credentials. Returns 0 rows when the source already cut over.
+-- Ends mirroring, drops the credentials and records the cut-over sync with its failed file
+-- count. Returns 0 rows when the source already cut over.
 -- name: CutOverNexusSource :execrows
-UPDATE nexus_sources SET state = 'cut_over', credentials = X'' WHERE id = ? AND state = 'mirroring';
+UPDATE nexus_sources SET state = 'cut_over', credentials = X'', cutover_sync_id = ?, cutover_failed = ?
+WHERE id = ? AND state = 'mirroring';
 
 -- Deletes the source with its mapping and its syncs (ON DELETE CASCADE).
 -- name: DeleteNexusSource :exec

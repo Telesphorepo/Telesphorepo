@@ -65,7 +65,7 @@ close and every 6 hours.
 | `schema_migrations` | PK `component` (WITHOUT ROWID) | Applied version per migration track |
 | `storage_moves` | PK `id`, UNIQUE partial `storage_moves_copying (state) WHERE state = 'copying'`, idx `started_by` | `target` is the sealed JSON of the target storage settings (AAD `storage_moves:<id>`); `state` `copying`/`done`/`failed`/`cancelled`; `cursor` (last asset id done), `total`, `copied`, `skipped`, `failed`, `error` |
 | `storage_move_failures` | PK `(move_id, asset_id)` (WITHOUT ROWID) | `key` and `reason` of each blob the copier could not copy |
-| `nexus_sources` | PK `id`, UNIQUE `name`, idx `created_by`, partial idx `nexus_sources_due (last_sync_at) WHERE state = 'mirroring'` | `base_url`; `credentials` is the sealed JSON `{username, password}` (AAD `nexus_sources:<id>`), emptied by cut-over; `state` `mirroring`/`cut_over`; `last_sync_at` (unix time when the last sync ended, 0 for never); `last_error` |
+| `nexus_sources` | PK `id`, UNIQUE `name`, idx `created_by`, partial idx `nexus_sources_due (last_sync_at) WHERE state = 'mirroring'` | `base_url`; `credentials` is the sealed JSON `{username, password}` (AAD `nexus_sources:<id>`), emptied by cut-over; `state` `mirroring`/`cut_over`; `last_sync_at` (unix time when the last sync ended, 0 for never); `last_error`; `cutover_sync_id` and `cutover_failed` (the cut-over sync and its failed file count, 0 before cut-over) |
 | `nexus_source_repos` | PK `(source_id, source_repo)` (WITHOUT ROWID), idx `target_repo_id` | The mapping: `source_format` (Nexus format id) and the target repo of each Nexus repo. A target mirrors at most one source |
 | `nexus_syncs` | PK `id`, UNIQUE partial `nexus_syncs_running (source_id) WHERE state = 'running'`, idx `source_id`, idx `started_by` | `state` `running`/`done`/`failed`/`cancelled`; `cutover` (0/1); `started_by` is NULL for the scheduler; `started_at`, `finished_at`, `error` |
 | `nexus_sync_repos` | PK `(sync_id, source_repo)` (WITHOUT ROWID), idx `target_repo_id` | Copy of the mapping at sync start, with `continuation` (token of the next Nexus page), `imported`/`skipped`/`ignored`/`failed` and `state` `pending`/`running`/`done`/`failed`/`cancelled` |
@@ -341,7 +341,8 @@ only through its REST API.
 Shapes in the routes above:
 
 ```
-Source       = {id, name, base_url, state: "mirroring"|"cut_over", created_at, last_error, last_sync: Sync|null}
+Source       = {id, name, base_url, state: "mirroring"|"cut_over", created_at, last_error, last_sync: Sync|null,
+                cutover_sync_id, cutover_failed}   (both 0 before cut-over)
 SourceDetail = Source + {repos: [SourceRepo], nexus_error}
 SourceRepo   = {name, format, type, supported, reason, target_format, target}
 Sync         = {id, source_id, state: "running"|"done"|"failed"|"cancelled", cutover, started_at,
@@ -395,11 +396,13 @@ input or refused credentials, 404, 409 (exists, running, not running, cut over, 
   are in the failure list). It is `failed` when a whole repo failed and `cancelled` after
   `DELETE`. A shutdown leaves the sync `running`; it continues from the last saved page at the
   next start.
-- **Cut-over.** `POST .../cutover` runs one final sync with `cutover: true`. It succeeds only
-  when no repo and no file failed. Then one transaction sets the sync `done`, sets the source
-  `cut_over`, empties its credentials and clears `locked_by` on the mapped targets. Otherwise the
-  sync is `failed`, the source stays `mirroring`, and `last_error` says `cut-over stopped: ...;
-  the source stays mirroring`. A cancelled cut-over leaves the source mirroring. A restart
+- **Cut-over.** `POST .../cutover` runs one final sync with `cutover: true`. It succeeds when
+  no repo failed, also when some files failed. Then one transaction sets the sync `done`, sets the
+  source `cut_over`, empties its credentials, clears `locked_by` on the mapped targets and saves
+  `cutover_sync_id` (the sync) and `cutover_failed` (its failed file count). The failed files stay
+  listed through `GET /api/nexus/syncs/{id}/failures`. If a repo failed (Nexus unreachable, a
+  listing error), the sync is `failed`, the source stays `mirroring`, and `last_error` says
+  `cut-over stopped: ...; the source stays mirroring`. A cancelled cut-over leaves the source mirroring. A restart
   continues an interrupted cut-over. After cut-over, PATCH, PUT repos, sync and cut-over answer
   409, and the sync history stays.
 - **Delete.** `DELETE .../sources/{id}` removes the source, its mapping, syncs and failures. The
@@ -408,7 +411,9 @@ input or refused credentials, 404, 409 (exists, running, not running, cut over, 
   form. The source page shows the state, the repos table with a target name and a checkbox per
   repo, "Save mapping", "Sync now", "Cut over" with a confirm card, "Update credentials", the
   sync history with "Load more" and a sync detail (per-repo counters, Cancel, failures). It polls
-  a running sync every 2 s. The repo list and the repo page show a "mirrors Nexus" badge when
+  a running sync every 2 s. The "Cut over" confirm card shows how many files failed in the latest
+  sync. A cut-over source with `cutover_failed` above 0 shows a warning with a link to the failure
+  list of the cut-over sync. The repo list and the repo page show a "mirrors Nexus" badge when
   `locked_by` is set.
 
 ## CLI

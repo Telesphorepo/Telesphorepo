@@ -590,58 +590,131 @@ redirects, submit Keycloak's login form), then asserts: admin gets a session and
 repo; non-admin is refused and no user row exists; OIDC admin cannot use Basic or create tokens;
 tampered `state` → 400; reused `state` → 400.
 
-### 7.6 Publisher device keys, 2FA and short-lived tokens **[Future]**
+### 7.6 Publisher credentials **[M3.5]**
 
-Goal: developers publish from their machines (Gradle plugin, later a CLI) with short-lived tokens
-only, so a leaked password — or a leaked token — is useless long term. CI service accounts keep
-long-lived tokens issued by an admin.
+**Goal:** a leaked secret cannot publish. Every write on a format route (Maven PUT, Debian
+upload, raw PUT, any future plugin) needs a **publish session**: a random credential the server
+generates just before a publish, for one repo, that ends when the publish is done and never
+lives longer than `publish.session_ttl` (default `15m`, max `1h`). Passwords and long-lived
+tokens keep working for **reads** only; existing API tokens become **read tokens**. In-process
+writers (Nexus sync, storage move) do not pass the HTTP gate and are unaffected.
 
-Principle: **a password alone can never produce a token or publish.** Every token is minted with
-proof of a key that lives on an enrolled machine, and enrolling a machine requires a second factor.
+The server alone generates, stores (SHA-256 of the secret), scopes, expires and revokes every
+publish session. A caller only proves who it is; three proofs are accepted:
 
-- **Second factor per publisher:** passkeys (WebAuthn, via `github.com/go-webauthn/webauthn`) and/or
-  TOTP (via `github.com/pquerna/otp`). Required for any publisher with `password_basic = false`.
-- **Per-user flag `password_basic`** (default `true` for backward compatibility / CI accounts): when
-  `false`, the password works only for UI login (which then also demands the second factor), never
-  for Basic on `/maven` or `/debian`.
-- **Device enrollment:** on first use the plugin generates an Ed25519 key pair on the machine
-  (private key stays local, file mode 0600 or the OS keychain) and starts an enrollment: it gets a
-  short code and a URL; the user opens it, signs in with password + passkey/TOTP, and approves the
-  device by name. The server stores the device's public key (`devices` table: user, name,
-  public key, created_at, last_used_at, revoked_at).
-- **Minting:** `POST /api/tokens/mint` → server returns a nonce; the plugin signs
-  `nonce || device_id || timestamp` with the device key; the server verifies and returns a `minted`
-  token (`api_tokens.kind = 'minted'`, TTL ~12h, bound to the device). The plugin caches it and
-  re-mints when expired. No password or second factor is needed per mint — the device key is the
-  possession factor and enrollment already required 2FA.
-- **Mint at publish time (Databricks-CLI model):** like `databricks auth login` followed by
-  `generate-database-credential` for Lakebase, the one-time enrollment leaves a long-lived
-  credential on the machine (the device key), and a short-lived credential is minted on demand
-  immediately before use. Minted tokens default to a 1h TTL (configurable, max 12h) and are never
-  written to `settings.xml`/`gradle.properties`.
-- **Client integration:**
-  - **Gradle plugin** (`telesphorepo` settings/project plugin): `telesphorepo { url = "…" }`;
-    first run (or `./gradlew telesphorepoLogin`) performs enrollment; the plugin then configures
-    every Maven repository pointing at the server with a lazy credentials provider that mints a
-    token when a publish/resolve task actually executes, caching it in memory (or a 0600 file
-    under `~/.telesphorepo/`) until shortly before expiry.
-  - **CLI** (`telesphorepo login --url …`, `telesphorepo token`): same enrollment; `token` prints a
-    fresh minted token so Maven, apt (`auth.conf.d` via a hook) or scripts can use it.
-  - Both share the on-disk layout `~/.telesphorepo/<host>/{device.key,device.json}`.
-- **Revocation:** revoking a device in the UI invalidates its unexpired minted tokens and blocks
-  future mints. Users and admins can list devices and their last use.
-- **Direction for the milestone that builds this (owner's requirements, 2026-10-14):** short-lived
-  credentials become the **only** way to publish, for people and for CI. Long-lived passwords and
-  tokens stop working on format routes. A credential is minted by the server just before a
-  publish, scoped to one repo, and ends when the client reports the publish done (or after a few
-  minutes). It is one publish session, not one HTTP request, because one `gradle publish` sends
-  dozens of PUTs. CI gets no stored secret: GitHub Actions (and Jenkins through its OIDC provider)
-  presents its OIDC identity token and the server exchanges it for a publish credential under an
-  admin-defined trust rule (repository, branch, workflow), as in PyPI/npm trusted publishing.
-  Gradle, Maven, the CLI, Jenkins and GitHub Actions must all be supported clients.
-- The M1/M2 token model already carries `expires_at` and `kind`; this adds `devices`,
-  `user_2fa` tables and the `password_basic` flag, with no restructuring.
+| Who publishes | Proof | One-time setup | Each publish |
+|---|---|---|---|
+| Developer, Gradle (local) | Enrolled device key (Gradle plugin) | `./gradlew telesphorepoLogin`, approve in a browser with password + second factor | Automatic |
+| Developer, Maven (local) | Enrolled device key (Maven extension) | `mvn telesphorepo:login`, approve the same way | Automatic |
+| GitHub Actions, Jenkins, any OIDC CI | The CI's signed identity token + an admin trust policy | Admin adds a trust policy; workflow gets `id-token: write` (GitHub) or the OIDC Provider plugin (Jenkins) | Automatic with the plugin/extension, or two `curl` lines |
+| Anyone, by hand | Web UI login with password + second factor | none | "New publish session" in the UI, copy the token (15 min) |
 
+**Second factor (local accounts; SSO stays admin-only, §7.5).**
+- TOTP (`github.com/pquerna/otp`: SHA-1, 6 digits, 30 s, ±1 step; a used step is refused again)
+  and passkeys (`github.com/go-webauthn/webauthn`; RP ID and origin from `base_url`). A user may
+  register several of each, plus 10 one-time recovery codes (argon2id-hashed). These are the only
+  new modules; both are the standard Go libraries for their protocol.
+- A local user with a second factor signs in with password, then the factor. A user without one
+  signs in to a session that can only reach `/api/me`, `/api/auth/logout` and the second-factor
+  setup routes (403 `{"error":"second_factor_required"}` elsewhere). The break-glass `admin` follows
+  the same rule. CLI `user passwd` keeps working.
+- Tables: `user_totp(id, user_id, secret BLOB /*encrypted, AAD user_totp:<id>*/, name, created_at,
+  last_step)`, `user_passkeys(id, user_id, credential_id BLOB UNIQUE, public_key, sign_count, name,
+  created_at, last_used_at)`, `user_recovery_codes(user_id, code_hash, used_at)`.
+
+**Device enrollment** (the device flow of RFC 8628, so a terminal never needs a browser of its own):
+1. The plugin generates an Ed25519 key pair, stores the private key in
+   `~/.telesphorepo/<host>/device.json` (owner-only permissions), and calls
+   `POST /api/devices/enroll` `{name, kind: "gradle"|"maven", public_key}` (no auth). Answer:
+   `{device_code, user_code: "ABCD-EFGH", verification_url: "<base_url>/#/device", expires_in: 600,
+   interval: 5}`. The plugin prints the URL and the code.
+2. The developer opens the URL in any browser (phone included), signs in (password + second
+   factor), sees the code, device name and kind, and approves with a fresh second-factor check:
+   `POST /api/devices/approve` `{user_code, totp_code | passkey assertion}`.
+3. The plugin polls `POST /api/devices/enroll/poll` `{device_code}` until it gets `{device_id}`
+   (`{"error":"authorization_pending"}` before; `expired_token` after 10 min). Codes are single
+   use; the poll is rate-limited.
+- A device stays valid for `publish.device_ttl` (default `90d`; then the plugin enrolls again)
+  unless revoked. Users list and revoke their devices in the UI; admins list and revoke anyone's.
+  Revoking a device ends its open sessions at once.
+- Tables: `devices(id, user_id, name, kind, public_key BLOB UNIQUE, created_at, expires_at,
+  last_used_at, revoked_at)`, `device_enrollments(device_code_hash PRIMARY KEY, user_code UNIQUE,
+  name, kind, public_key, created_at, expires_at, approved_by, device_id)`.
+
+**Minting from a device:**
+1. `POST /api/publish/challenge` `{device_id}` → `{nonce}` (32 random bytes, base64url, single use,
+   60 s).
+2. `POST /api/publish/sessions` `{device_id, repo, nonce, signature}`; the signature is Ed25519
+   (base64url) over `"telesphorepo publish v1\n" + nonce + "\n" + device_id + "\n" + repo`.
+3. The server checks the signature, that the device is not revoked or expired, and that its user
+   has `write` on the repo now, then answers `{id, token: "trs_<12hex>_<secret>", repo,
+   expires_at}`. The token is the HTTP Basic password (any username) for the publish; it also
+   reads that repo. `DELETE /api/publish/sessions/{id}` with the same token ends it.
+
+**Manual sessions:** `POST /api/publish/sessions/manual` `{repo, totp_code | passkey assertion}`
+with a UI login session → the same answer. The UI shows the token once with copy-paste snippets.
+
+**CI trust policies (OIDC):**
+- Admins manage `publish_trusts(id, name UNIQUE, issuer, audience, claims TEXT /*JSON*/, jwks TEXT
+  /*optional pasted JWKS*/, created_by, created_at, disabled)` and `publish_trust_repos(trust_id,
+  repo_id)`. `claims` maps a claim name to allowed values, each exact or a `*` glob, e.g.
+  `{"repository": ["acme/app"], "ref": ["refs/tags/v*"], "workflow_ref": ["acme/app/.github/workflows/release.yml@*"]}`.
+  Every listed claim must match. `audience` defaults to `base_url`. When `jwks` is set the server
+  uses it instead of fetching the issuer's keys (a Jenkins the server cannot reach).
+- `POST /api/publish/sessions/oidc` `{token, repo}`: the server verifies the token's signature
+  (issuer discovery + JWKS, cached, or the pasted JWKS), issuer, audience, `exp`, and `iat` at most
+  10 min old; finds an enabled trust whose issuer, audience and claims match and that lists the
+  repo; refuses a token it has seen before (`jti`, else SHA-256 of the token, kept until `exp`);
+  then mints a session with `subject` = the token's `sub`.
+- UI presets: **GitHub Actions** (issuer `https://token.actions.githubusercontent.com`) and
+  **Jenkins** (issuer `<jenkins url>/oidc` from the OIDC Provider plugin). Any issuer works.
+
+**Sessions table:** `publish_sessions(id, public_id UNIQUE, secret_hash, repo_id, user_id NULL,
+device_id NULL, trust_id NULL, via TEXT CHECK IN ('device','oidc','manual'), subject TEXT,
+created_at, expires_at, closed_at)` with indexes on `expires_at`, `device_id` and `trust_id`.
+Ended rows are kept 30 days as an audit trail (admin **Publish log** page, keyset by id), then a
+background job deletes them.
+
+**Write gate.** `auth.RepoGate` with `need >= Write` accepts only an open publish session for
+that repo, and still checks the user's current permission (device and manual sessions) and
+`locked_by`. Anything else gets 401 with `WWW-Authenticate: Basic` and
+`{"error":"publishing needs a publish session: <base_url>/#/publishing"}`.
+
+**Clients** (`clients/`, Java 17, no dependencies beyond the build tool's API and the JDK):
+- **Gradle plugin** `clients/gradle`, settings plugin id `io.github.telesphorepo`:
+  `telesphorepo { url = "https://repo.acme.com" }` in `settings.gradle.kts`. It gives every Maven
+  repository on that host lazy credentials. At the first task that publishes to such a repo it
+  mints a session for that repo (GitHub OIDC when `ACTIONS_ID_TOKEN_REQUEST_URL` is set; an OIDC
+  token from the env var named by `telesphorepo.oidcTokenEnv` for Jenkins; else the device key)
+  and closes it at build end through a `BuildService`. `telesphorepoLogin` enrolls; with no
+  device and no CI token, a publish fails with "run ./gradlew telesphorepoLogin".
+- **Maven extension** `clients/maven`, `io.github.telesphorepo:telesphorepo-maven-extension`,
+  declared in `.mvn/extensions.xml`. It mints a session per target repo before `deploy` uploads
+  (same three proofs) and closes them when the build ends. `mvn telesphorepo:login` enrolls.
+  `settings.xml` needs no password for the server.
+- **CI without the plugin/extension**: documented `curl` snippets for GitHub Actions and Jenkins
+  in the UI's **Publishing** page and in `clients/README.md`.
+- **Releases**: `.github/workflows/release-clients.yml` publishes the Gradle plugin to the Gradle
+  Plugin Portal and the extension to Maven Central on a `clients-v*` tag, with the keys in GitHub
+  secrets (owner creates the accounts).
+
+**UI:** login with second factor; **Security** (TOTP, passkeys, recovery codes); **Devices**;
+device approval page (`#/device`); **Publishing** (new manual session, client setup snippets);
+admin **Trust policies** (with presets) and **Publish log**; **Tokens** renamed **Read tokens**.
+
+**E2E:**
+- Core zone: the harness gets `PublishToken(t, s, user, repo)`, which enrolls a device the real
+  way (the test computes TOTP codes) and mints a session. Every existing publish switches to it.
+  New tests: write refused with a password or read token; revoked and expired device; closed and
+  expired session; session for another repo; second-factor login and the setup-only session;
+  enrollment code expiry and reuse; replayed nonce; manual session; OIDC exchange with Keycloak as
+  the CI issuer (a client whose tokens carry GitHub-shaped claims), wrong claim, wrong audience,
+  replayed token, pasted JWKS.
+- Zone `clients` (`go tool task test clients`): Gradle and Maven containers build the plugin and
+  the extension from `clients/`, publish them to a test server, then (1) enroll (the test reads
+  the code from the container output and approves through the API), publish a library and a
+  Gradle plugin, resolve them; (2) publish as "GitHub Actions" with a fake
+  `ACTIONS_ID_TOKEN_REQUEST_URL` container that serves a Keycloak-minted token.
 ## 8. Maven (also Gradle plugins) **[M1]**
 
 Routes: `GET`, `HEAD`, `PUT` on `/maven/{repo}/{path...}`.
@@ -851,12 +924,17 @@ for it is installed, so repos can be added to a source at any time.
   on "Sync now". One sync runs at a time per source.
 - A repo that mirrors a source is **read-only for uploads** here (writes answer 409 "repo mirrors
   Nexus source X; cut over first"), so the two servers cannot diverge. Reads work normally.
-- **Cut over** runs a final sync; on success it clears the mirror flag on the repos, sets the
-  source to `cut_over`, stops its syncs and deletes its stored credentials.
+- **Cut over** runs a final sync. When the sync walks every mapped repo to the end, it clears the
+  mirror flag on the repos, sets the source to `cut_over`, stops its syncs and deletes its stored
+  credentials. Files that failed to import do not stop the cut-over: they stay in the failure list
+  of the cut-over sync, and the source keeps their count (`cutover_failed`) and the sync id
+  (`cutover_sync_id`) as a warning. When a repo cannot be walked to the end (Nexus unreachable, a
+  listing error), the cut-over stops and the source stays `mirroring`, because the missing files
+  are unknown.
 - Assets deleted in Nexus are not deleted here.
 
 **Tables** (core): `nexus_sources(id, name UNIQUE, base_url, credentials BLOB, state CHECK IN
-('mirroring','cut_over'), created_by, created_at, last_sync_at, last_error) STRICT`;
+('mirroring','cut_over'), created_by, created_at, last_sync_at, last_error, cutover_sync_id, cutover_failed) STRICT`;
 `nexus_source_repos(source_id, source_repo, source_format, target_repo_id, PRIMARY KEY(source_id,
 source_repo)) WITHOUT ROWID` (plus an index on `target_repo_id`, which is how the upload path checks
 "is this repo mirroring"); `nexus_syncs(id, source_id, state CHECK IN ('running','done','failed',
@@ -927,6 +1005,7 @@ harness files carry every tag.
 | core | `e2e` | `go tool task test` | Formats, auth, API, settings, storage move, query plans |
 | import | `import` | `go tool task test import` | Nexus source, sync and cut-over (starts a Nexus container) |
 | scale | `scale` | `go tool task test scale` | 100k vs 1M latency (§5.5) |
+| clients | `clients` | `go tool task test clients` | Gradle plugin and Maven extension built from `clients/` (§7.6) |
 | all | all tags | `go tool task test all` | Every zone, one after the other |
 
 Extra `go test` args still pass through (`go tool task test import -run TestNexus`). A milestone
@@ -984,4 +1063,6 @@ is tested without a real bucket. `ForEachStorage` runs `fs`, `seaweedfs`, and `r
 - **M2.5**: format plugins (§5.4) + `raw` format as the pluggability proof; sqlc data layer, one
   migration per owner, plan guard and scale test (§5.5).
 - **M3**: storage move from Settings (§11) and Nexus import from the admin UI (§12) + e2e.
+- **M3.5**: publisher credentials (§7.6): publish sessions, second factor, device enrollment, CI
+  trust policies, Gradle plugin, Maven extension + e2e zone `clients`.
 - **M4**: full admin UI polish, deletes (assets, deb packages) + blob/by-hash GC.

@@ -91,6 +91,7 @@ export const moveFailures = (id: number, after?: string) =>
 export type NexusSource = {
   id: number; name: string; base_url: string; state: "mirroring" | "cut_over";
   created_at: string; last_sync_at: string | null; last_error: string;
+  cutover_sync_id: number; cutover_failed: number;
 };
 export type NexusSourceRepo = {
   source_repo: string; source_format: string; supported: boolean;
@@ -104,7 +105,7 @@ export type NexusSyncRepo = {
 };
 export type NexusSync = {
   id: number; source_id: number; state: "running" | "done" | "failed" | "cancelled";
-  error: string; started_at: string; finished_at: string | null; repos?: NexusSyncRepo[];
+  error: string; started_at: string; finished_at: string | null; failed: number; repos?: NexusSyncRepo[];
 };
 export type NexusFailure = { source_repo: string; path: string; reason: string };
 
