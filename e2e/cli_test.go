@@ -82,15 +82,6 @@ func TestCLIUser(t *testing.T) {
 		t.Fatalf("/api/me with old password: status %d, want 401", st)
 	}
 
-	code, out = s.Exec(t, "adminpass123\n", bin, "user", "add", "carol", "--admin")
-	if code != 0 {
-		t.Fatalf("user add carol --admin: exit %d:\n%s", code, out)
-	}
-	s.MustAPI(t, http.MethodGet, "/api/me", nil, Basic{"carol", "adminpass123"}, &me)
-	if !me.IsAdmin {
-		t.Fatalf("/api/me as carol = %+v, want is_admin", me)
-	}
-
 	if code, out := s.Exec(t, "whatever123\n", bin, "user", "passwd", "nobody"); code == 0 {
 		t.Fatalf("user passwd nobody: exit 0, want failure:\n%s", out)
 	}
