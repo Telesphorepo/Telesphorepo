@@ -230,7 +230,8 @@ func TestSettingsLiveSwitchToS3(t *testing.T) {
 	s := StartServer(t, ServerOpts{})
 	repo := RandName("mvn")
 	s.CreateRepo(t, repo, "maven", false, nil)
-	putGetMaven(t, s, repo, "lib-1.0.0.pom", "<project>on-fs</project>")
+	// No blob is stored yet, so the PATCH switches at once (with blobs it starts a move, see
+	// TestStorageMove).
 
 	patch := map[string]any{
 		"storage":              "s3",

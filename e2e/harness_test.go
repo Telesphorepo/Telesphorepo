@@ -1,4 +1,4 @@
-//go:build e2e || scale
+//go:build e2e || import || scale
 
 package e2e
 
@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/cookiejar"
+	"net/url"
 	"os"
 	osexec "os/exec"
 	"regexp"
@@ -201,6 +203,161 @@ func containerLogs(c testcontainers.Container) string {
 
 // Logs returns the server container's combined output so far.
 func (s *Server) Logs(t testing.TB) string { t.Helper(); return containerLogs(s.Container) }
+
+// Restart stops the server container gracefully (SIGTERM) and starts it again, then waits for
+// /healthz. The container keeps its /data, env and network alias; URL follows the new host port.
+func (s *Server) Restart(t testing.TB) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	if err := s.Stop(ctx, nil); err != nil {
+		t.Fatalf("stop server %s: %v", s.Alias, err)
+	}
+	if err := s.Start(ctx); err != nil {
+		t.Fatalf("start server %s again: %v\n%s", s.Alias, err, containerLogs(s.Container))
+	}
+	ep, err := s.PortEndpoint(ctx, "8080/tcp", "http")
+	if err != nil {
+		t.Fatalf("server endpoint after restart: %v", err)
+	}
+	s.URL = ep
+}
+
+// ---------------------------------------------------------------- data volumes
+
+// volumeToolImage runs shell tools against a data volume. It is the curl client image, so the
+// run pulls no extra image.
+const volumeToolImage = "curlimages/curl:8.16.0"
+
+// NewDataVolume returns the name of a new named volume for ServerOpts.DataVolume. The volume is
+// removed at test end, after the containers that use it.
+func NewDataVolume(t testing.TB) string {
+	t.Helper()
+	vol := RandName("telesphorepo-data")
+	t.Cleanup(func() {
+		if out, err := osexec.Command(Engine.CLI, "volume", "rm", "-f", vol).CombinedOutput(); err != nil {
+			t.Errorf("remove volume %s: %v\n%s", vol, err, out)
+		}
+	})
+	return vol
+}
+
+// VolumeExec runs script with sh as root in a throwaway container that mounts vol at /data,
+// with files copied in first, and returns its output. A non-zero exit fails the test.
+func VolumeExec(t testing.TB, vol, script string, files ...ContainerFile) string {
+	t.Helper()
+	files = append(files, ContainerFile{Path: "/volume.sh", Content: script})
+	code, out := RunClient(t, volumeToolImage, ClientOpts{
+		Cmd:     []string{"sh /volume.sh"},
+		Files:   files,
+		Mounts:  map[string]string{vol: "/data"},
+		User:    "0",
+		Timeout: 5 * time.Minute,
+	})
+	if code != 0 {
+		t.Fatalf("volume %s: script exited %d:\n%s\n%s", vol, code, script, out)
+	}
+	return out
+}
+
+var sha256sumLineRe = regexp.MustCompile(`(?m)^([0-9a-f]{64})  \./(\S+)$`)
+
+// FSBlobs returns the SHA-256 of every blob of the fs store at /data/blobs on vol (the default
+// fs root), keyed by storage key.
+func FSBlobs(t testing.TB, vol string) map[string]string {
+	t.Helper()
+	out := VolumeExec(t, vol, "set -e\nif [ -d /data/blobs ]; then cd /data/blobs && find . -type f ! -name '.tmp-*' -exec sha256sum {} +; fi\n")
+	blobs := map[string]string{}
+	for _, m := range sha256sumLineRe.FindAllStringSubmatch(out, -1) {
+		blobs[m[2]] = m[1]
+	}
+	return blobs
+}
+
+// ---------------------------------------------------------------- storage moves
+
+// Move is a storage move as the API returns it (spec §11).
+type Move struct {
+	ID      int64          `json:"id"`
+	State   string         `json:"state"`
+	Total   int64          `json:"total"`
+	Copied  int64          `json:"copied"`
+	Skipped int64          `json:"skipped"`
+	Failed  int64          `json:"failed"`
+	Error   string         `json:"error"`
+	Target  map[string]any `json:"target"`
+}
+
+// MoveFailure is one row of GET /api/storage/moves/{id}/failures.
+type MoveFailure struct {
+	AssetID int64  `json:"asset_id"`
+	Key     string `json:"key"`
+	Reason  string `json:"reason"`
+}
+
+// StartMove PATCHes /api/settings with a storage change and requires 202 {move}.
+func (s *Server) StartMove(t testing.TB, patch map[string]any) Move {
+	t.Helper()
+	st, b := s.API(t, http.MethodPatch, "/api/settings", patch, s.Admin())
+	if st != http.StatusAccepted {
+		t.Fatalf("PATCH /api/settings (storage change): status %d, want 202: %s", st, b)
+	}
+	var out struct {
+		Move Move `json:"move"`
+	}
+	if err := json.Unmarshal(b, &out); err != nil || out.Move.ID == 0 {
+		t.Fatalf("PATCH /api/settings: no move in 202 body %s (err %v)", b, err)
+	}
+	return out.Move
+}
+
+// GetMove fetches GET /api/storage/moves/{id}.
+func (s *Server) GetMove(t testing.TB, id int64) Move {
+	t.Helper()
+	var m Move
+	s.MustAPI(t, http.MethodGet, fmt.Sprintf("/api/storage/moves/%d", id), nil, s.Admin(), &m)
+	return m
+}
+
+// WaitMove polls the move until it leaves the copying state and returns it. It fails the test
+// when the move still copies after timeout.
+func (s *Server) WaitMove(t testing.TB, id int64, timeout time.Duration) Move {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		m := s.GetMove(t, id)
+		if m.State != "copying" {
+			return m
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("move %d still copying after %s: %+v", id, timeout, m)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// MoveFailures lists every failure row of the move, following the keyset pages.
+func (s *Server) MoveFailures(t testing.TB, id int64) []MoveFailure {
+	t.Helper()
+	var all []MoveFailure
+	after := ""
+	for {
+		var page struct {
+			Items []MoveFailure `json:"items"`
+			Next  *string       `json:"next"`
+		}
+		p := fmt.Sprintf("/api/storage/moves/%d/failures?limit=100", id)
+		if after != "" {
+			p += "&after=" + url.QueryEscape(after)
+		}
+		s.MustAPI(t, http.MethodGet, p, nil, s.Admin(), &page)
+		all = append(all, page.Items...)
+		if page.Next == nil || *page.Next == "" {
+			return all
+		}
+		after = *page.Next
+	}
+}
 
 // ---------------------------------------------------------------- HTTP / API
 
@@ -433,6 +590,29 @@ func (s *S3Target) listKeys(ctx context.Context) ([]string, error) {
 		}
 	}
 	return keys, nil
+}
+
+// Blobs returns the SHA-256 of every object under the target's Prefix, keyed by storage key
+// (the object key without Prefix).
+func (s *S3Target) Blobs(t testing.TB) map[string]string {
+	t.Helper()
+	ctx := context.Background()
+	c := s.Client()
+	blobs := map[string]string{}
+	for _, k := range s.ListKeys(t) {
+		obj, err := c.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(s.Bucket), Key: aws.String(k)})
+		if err != nil {
+			t.Fatalf("get s3 object %s: %v", k, err)
+		}
+		h := sha256.New()
+		_, err = io.Copy(h, obj.Body)
+		obj.Body.Close()
+		if err != nil {
+			t.Fatalf("read s3 object %s: %v", k, err)
+		}
+		blobs[strings.TrimPrefix(k, s.Prefix+"/")] = hex.EncodeToString(h.Sum(nil))
+	}
+	return blobs
 }
 
 const (

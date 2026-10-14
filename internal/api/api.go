@@ -17,6 +17,8 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/move"
+	"github.com/Telesphorepo/Telesphorepo/internal/nexus"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 )
@@ -27,6 +29,8 @@ type API struct {
 	assets   *assets.Service
 	cfg      config.Provider
 	settings *settings.Service
+	moves    *move.Service
+	nexus    *nexus.Service
 	sso      Routes
 }
 
@@ -37,8 +41,10 @@ type Routes interface {
 
 // New builds the API. sso (may be nil) mounts GET /api/auth/oidc/{login,callback}. The format
 // endpoints read the format registry (internal/format).
-func New(a *auth.Service, rs *repos.Service, as *assets.Service, st *settings.Service, sso Routes) *API {
-	return &API{auth: a, repos: rs, assets: as, cfg: st.Config, settings: st, sso: sso}
+func New(a *auth.Service, rs *repos.Service, as *assets.Service, st *settings.Service, mv *move.Service, nx *nexus.Service, sso Routes) *API {
+	return &API{
+		auth: a, repos: rs, assets: as, cfg: st.Config, settings: st, moves: mv, nexus: nx, sso: sso,
+	}
 }
 
 // Handler returns the /api/ handler, already wrapped in http.CrossOriginProtection.
@@ -82,6 +88,9 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /api/settings/oidc/test", a.testOIDC)
 	mux.HandleFunc("GET /api/settings/signing-key", a.getSigningKey)
 	mux.HandleFunc("POST /api/settings/signing-key", a.setSigningKey)
+
+	a.registerMoves(mux)
+	a.registerNexus(mux)
 
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusNotFound, "not found")
@@ -366,6 +375,7 @@ type repoJSON struct {
 	AnonymousRead bool            `json:"anonymous_read"`
 	Config        json.RawMessage `json:"config"`
 	Permission    string          `json:"permission"`
+	LockedBy      string          `json:"locked_by"` // why uploads answer 409; "" when they do not
 }
 
 func toRepoJSON(r *repos.Repo, perm string) repoJSON {
@@ -373,7 +383,7 @@ func toRepoJSON(r *repos.Repo, perm string) repoJSON {
 	if len(cfg) == 0 {
 		cfg = json.RawMessage("{}")
 	}
-	return repoJSON{r.Name, r.Format, r.AnonymousRead, cfg, perm}
+	return repoJSON{r.Name, r.Format, r.AnonymousRead, cfg, perm, r.LockedBy}
 }
 
 func (a *API) permission(ctx context.Context, p *auth.Principal, repo *repos.Repo) (string, error) {

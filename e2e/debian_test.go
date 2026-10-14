@@ -22,52 +22,6 @@ import (
 	"github.com/ProtonMail/go-crypto/openpgp/clearsign"
 )
 
-const debImage = "debian:trixie-20261005"
-
-// debBuildScript builds the test packages with dpkg-deb into /out.
-const debBuildScript = `#!/bin/sh
-set -e
-mkdir -p /out
-mk() { # package version arch message compression outname
-	d=/build/$6
-	mkdir -p "$d/DEBIAN" "$d/usr/bin"
-	printf 'Package: %s\nVersion: %s\nArchitecture: %s\nMaintainer: E2E <e2e@telesphorepo.test>\nDescription: telesphorepo e2e test package\n' "$1" "$2" "$3" > "$d/DEBIAN/control"
-	printf '#!/bin/sh\necho "%s"\n' "$4" > "$d/usr/bin/$1"
-	chmod 0755 "$d/usr/bin/$1"
-	dpkg-deb --root-owner-group -Z"$5" --build "$d" "/out/$6.deb"
-}
-arch=$(dpkg --print-architecture)
-printf '%s' "$arch" > /out/arch
-mk e2e-hello 1.0 all "hello 1.0" xz hello-1.0
-mk e2e-hello 2.0 all "hello 2.0" xz hello-2.0
-mk e2e-hello 1.0 all "hello 1.0 conflicting" gzip hello-1.0-conflict
-mk e2e-native 1.0 "$arch" "native $arch" gzip native
-ls -l /out
-`
-
-type debPackages struct {
-	arch                                   string
-	hello1, hello2, hello1Conflict, native []byte
-}
-
-func buildDebPackages(t *testing.T) *debPackages {
-	t.Helper()
-	r := RunClientResult(t, debImage, ClientOpts{
-		Cmd:   []string{"sh", "/build.sh"},
-		Files: []ContainerFile{{Content: debBuildScript, Path: "/build.sh", Mode: 0o755}},
-	})
-	if r.ExitCode != 0 {
-		t.Fatalf("building .debs failed (exit %d):\n%s", r.ExitCode, r.Output)
-	}
-	return &debPackages{
-		arch:           strings.TrimSpace(string(r.ReadFile(t, "/out/arch"))),
-		hello1:         r.ReadFile(t, "/out/hello-1.0.deb"),
-		hello2:         r.ReadFile(t, "/out/hello-2.0.deb"),
-		hello1Conflict: r.ReadFile(t, "/out/hello-1.0-conflict.deb"),
-		native:         r.ReadFile(t, "/out/native.deb"),
-	}
-}
-
 func TestDebian(t *testing.T) {
 	pkgs := buildDebPackages(t)
 	archs := []string{"amd64", "arm64"}
@@ -190,14 +144,6 @@ func TestDebianOversizeUpload(t *testing.T) {
 	}
 }
 
-func debUpload(t *testing.T, s *Server, repo string, deb []byte, auth Auth) (int, []byte) {
-	t.Helper()
-	req := s.NewRequest(t, http.MethodPut, "/debian/"+repo+"/upload/trixie/main", bytes.NewReader(deb))
-	req.Header.Set("Content-Type", "application/vnd.debian.binary-package")
-	resp, b := s.Do(t, req, auth)
-	return resp.StatusCode, b
-}
-
 func debMustUpload(t *testing.T, s *Server, repo string, deb []byte, auth Auth, pkg, ver, arch string) {
 	t.Helper()
 	st, b := debUpload(t, s, repo, deb, auth)
@@ -241,47 +187,6 @@ func debGet(t *testing.T, s *Server, tg *S3Target, path string, auth Auth) (int,
 		resp, body = s.Do(t, req, nil)
 	}
 	return resp.StatusCode, body
-}
-
-const debAptScript = `#!/bin/sh
-set -e
-rm -f /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list
-if ! apt-get update >/tmp/update.log 2>&1; then cat /tmp/update.log; exit 1; fi
-cat /tmp/update.log
-echo '=== end of apt-get update ==='
-apt-get install -y --no-install-recommends e2e-hello e2e-native
-echo "RESULT: $(e2e-hello)"
-echo "NATIVE: $(e2e-native)"
-`
-
-// debAptInstall runs apt-get update/install in a fresh container and returns its output.
-func debAptInstall(t *testing.T, s *Server, repo, user, pass, key string) string {
-	t.Helper()
-	sources := fmt.Sprintf("Types: deb\nURIs: %s/debian/%s\nSuites: trixie\nComponents: main\nSigned-By: /etc/apt/keyrings/tr.asc\n", s.InternalURL, repo)
-	// apt only applies auth.conf entries to plain http when the protocol is spelled out.
-	auth := fmt.Sprintf("machine http://%s:8080/debian/%s login %s password %s\n", s.Alias, repo, user, pass)
-	code, out := RunClient(t, debImage, ClientOpts{
-		Cmd: []string{"sh", "/apt.sh"},
-		Files: []ContainerFile{
-			{Content: debAptScript, Path: "/apt.sh", Mode: 0o755},
-			{Content: key, Path: "/etc/apt/keyrings/tr.asc"},
-			{Content: sources, Path: "/etc/apt/sources.list.d/tr.sources"},
-			{Content: auth, Path: "/etc/apt/auth.conf.d/tr.conf", Mode: 0o644},
-		},
-	})
-	if code != 0 {
-		t.Fatalf("apt client exited %d:\n%s", code, out)
-	}
-	update, _, ok := strings.Cut(out, "=== end of apt-get update ===")
-	if !ok {
-		t.Fatalf("apt output missing update marker:\n%s", out)
-	}
-	for _, bad := range []string{"NO_PUBKEY", "not signed", "insecure", "Err:"} {
-		if strings.Contains(update, bad) {
-			t.Fatalf("apt-get update output contains %q:\n%s", bad, update)
-		}
-	}
-	return out
 }
 
 // debCheckIndexes verifies InRelease / Release.gpg signatures and a by-hash reference.

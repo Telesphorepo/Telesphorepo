@@ -137,6 +137,32 @@ func (q *Queries) HasDirty(ctx context.Context, arg HasDirtyParams) (bool, error
 	return exists, err
 }
 
+const hasPackageSHA256 = `-- name: HasPackageSHA256 :one
+SELECT EXISTS (SELECT 1 FROM deb_packages
+  WHERE repo_id = ? AND distribution = ? AND component = ? AND sha256 = ?)
+`
+
+type HasPackageSHA256Params struct {
+	RepoID       int64
+	Distribution string
+	Component    string
+	Sha256       string
+}
+
+// Import duplicate check: a package with the same bytes in the (dist, component), found
+// through deb_packages_sha256 before the file is downloaded.
+func (q *Queries) HasPackageSHA256(ctx context.Context, arg HasPackageSHA256Params) (bool, error) {
+	row := q.db.QueryRowContext(ctx, hasPackageSHA256,
+		arg.RepoID,
+		arg.Distribution,
+		arg.Component,
+		arg.Sha256,
+	)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const insertPackage = `-- name: InsertPackage :exec
 INSERT INTO deb_packages (repo_id, distribution, component, architecture, package, version, asset_id,
   filename, size, md5, sha1, sha256, control, created_at)

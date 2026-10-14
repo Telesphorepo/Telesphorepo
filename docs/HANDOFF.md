@@ -16,9 +16,9 @@ incl. a real Keycloak sign-in and `TestQueryPlans`), and `go tool task test scal
 | M1.2: in-app encrypted settings (env is only `TR_DATA_DIR`, `TR_LISTEN`, `TR_MASTER_KEY`), Settings page, SPEC.md, AGENTS.md, short README | done |
 | M2: OIDC admin sign-on (Keycloak or any OIDC IdP; settings in the Settings page's SSO section), §7.5 | done |
 | M2.5: format plugins (Maven, Debian and `raw` are plugins), per-owner sqlc queries and migrations, plan guard, scale test (§5.4, §5.5) | done |
-| M3: `move` (FS ↔ S3) and `import nexus` | **next** |
+| M3: storage move (FS ↔ S3), Nexus sources with mirroring syncs and cut-over (§12) | built; the build, vet and e2e run (core and import zones) is pending |
 | M4: full admin UI polish, deletes + blob/by-hash GC | designed |
-| Future: publisher device keys + passkey/TOTP + short-lived minted tokens, Gradle plugin/CLI (§7.6) | designed |
+| Publisher credentials: short-lived, per-publish credentials as the only way to publish, OIDC exchange for CI, device keys, Gradle plugin/CLI (§7.6, owner's direction) | designed |
 
 Design spec (source of truth for what's next):
 `docs/superpowers/specs/2026-10-14-telesphorepo-mvp-design.md`. System as built: `SPEC.md`.
@@ -31,7 +31,8 @@ Design spec (source of truth for what's next):
 3. `go tool task doctor` — confirms Go, bun, Node and the container engine.
 4. `go tool task dev` — open http://localhost:5173 with the printed credentials.
 5. `go tool task test` — full e2e suite (first run pulls Maven/Gradle/Debian/SeaweedFS/curl images).
-6. `go tool task test scale` — optional 100k and 1M asset latency test.
+6. `go tool task test import` — Nexus source, sync and cut-over against a real Nexus container (slow).
+7. `go tool task test scale` — optional 100k and 1M asset latency test.
 
 ## Not yet verified (do these early on the PC)
 
@@ -48,6 +49,15 @@ Design spec (source of truth for what's next):
 
 ## Suggested next step
 
-**M3: `move` and `import nexus`** (design §11, §12). `import nexus` reads a Nexus export and
-writes through each format's plugin. Keep Nexus-specific code out of the core. Add any new format
-hook to `internal/format` as an optional interface.
+1. Verify M3. Run `go build ./...`, `go vet ./...`, `go vet -tags e2e ./e2e/...`,
+   `go vet -tags import ./e2e/...`, `go vet -tags scale ./e2e/...`, and `go build ./tools/task`.
+   Then run the core zone (it includes `TestQueryPlans`, which checks the new `nexus_*` queries)
+   and `go tool task test import -run TestNexus`. Fix every failure of the M3 code. Nobody has
+   compiled or run the Nexus sources code, the cut-over, the `locked_by` gate or the UI page.
+2. Decide two M3 points. A cut-over stops on any failed file, so a file that can never import
+   blocks it. Sync history is never pruned (96 syncs per source per day at the 15m default).
+3. Start **M4**: full admin UI polish, deleting assets and deb packages, blob and by-hash GC.
+4. Then build the **publisher credentials** milestone. Design §7.6 holds the owner's direction:
+   short-lived credentials are the only way to publish, scoped to one repo and one publish
+   session, and CI exchanges its OIDC identity token (GitHub Actions, Jenkins) instead of storing
+   a secret.

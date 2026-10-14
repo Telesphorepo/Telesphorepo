@@ -39,6 +39,7 @@ func CoreQueries() QuerySet {
 			"ListSettings":    "loads every stored setting at startup and after a settings write, never on a request path; at most one row per registered setting",
 			"HasUsers":        "EXISTS stops at the first row; startup check for the first admin",
 			"ListPermissions": "admin-only list of one repo's grants sorted by username; at most one row per user",
+			"CountAssets":     "the total of a storage move; runs once when an admin starts a move, never per request",
 		},
 	}
 }

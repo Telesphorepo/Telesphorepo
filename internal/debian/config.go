@@ -18,11 +18,18 @@ func (h *Handler) DefaultConfig() json.RawMessage {
 }
 
 // ValidateConfig checks "architectures": a non-empty list of distinct names matching
-// ^[a-z0-9-]+$, other than "all". A missing list gets the default. Other keys are kept.
+// ^[a-z0-9-]+$, other than "all". A missing list gets the default. The optional
+// "distribution" is a repo name-style string. Other keys are kept.
 func (h *Handler) ValidateConfig(raw json.RawMessage) (json.RawMessage, error) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
 		return nil, errors.New("config must be a JSON object")
+	}
+	if v, ok := obj["distribution"]; ok {
+		var d string
+		if err := json.Unmarshal(v, &d); err != nil || !repos.NameRE.MatchString(d) {
+			return nil, errors.New("distribution must be a valid distribution name")
+		}
 	}
 	archs := defaultArchitectures
 	if v, ok := obj["architectures"]; ok {
@@ -53,4 +60,16 @@ func architectures(repo *repos.Repo) []string {
 		return defaultArchitectures
 	}
 	return c.Architectures
+}
+
+// importDistribution returns the "distribution" of repo's config: the distribution that
+// imported packages go into (spec §12; the import sets it from the source repo).
+func importDistribution(repo *repos.Repo) (string, error) {
+	var c struct {
+		Distribution string `json:"distribution"`
+	}
+	if json.Unmarshal(repo.Config, &c) != nil || c.Distribution == "" {
+		return "", errors.New("the repo config has no distribution for imported packages")
+	}
+	return c.Distribution, nil
 }

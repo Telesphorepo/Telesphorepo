@@ -52,7 +52,8 @@ CREATE TABLE repos (
   format         TEXT NOT NULL,
   anonymous_read INTEGER NOT NULL DEFAULT 0,
   config         TEXT NOT NULL DEFAULT '{}',         -- JSON, format-specific
-  created_at     INTEGER NOT NULL
+  created_at     INTEGER NOT NULL,
+  locked_by      TEXT                                -- set: uploads answer 409 with this text
 ) STRICT;
 CREATE INDEX repos_anonymous ON repos(id) WHERE anonymous_read = 1;
 
@@ -100,3 +101,109 @@ CREATE TABLE settings (
   updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX settings_updated_by ON settings(updated_by);
+
+-- Storage moves (spec §11). target is the sealed JSON of the target storage settings
+-- (settings.Service.Encrypt, AAD "storage_moves:<id>"). The unique partial index allows one
+-- copying move at a time and finds it with one index probe.
+CREATE TABLE storage_moves (
+  id          INTEGER PRIMARY KEY,
+  target      BLOB NOT NULL,
+  state       TEXT NOT NULL CHECK (state IN ('copying','done','failed','cancelled')),
+  cursor      INTEGER NOT NULL DEFAULT 0,            -- id of the last asset the copier finished
+  total       INTEGER NOT NULL,
+  copied      INTEGER NOT NULL DEFAULT 0,
+  skipped     INTEGER NOT NULL DEFAULT 0,
+  failed      INTEGER NOT NULL DEFAULT 0,
+  error       TEXT NOT NULL DEFAULT '',
+  started_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  started_at  INTEGER NOT NULL,
+  finished_at INTEGER
+) STRICT;
+CREATE UNIQUE INDEX storage_moves_copying ON storage_moves(state) WHERE state = 'copying';
+CREATE INDEX storage_moves_started_by ON storage_moves(started_by);
+
+-- One row per asset the copier could not copy. key is the storage key at the time, so the row
+-- stays readable after the asset is deleted.
+CREATE TABLE storage_move_failures (
+  move_id  INTEGER NOT NULL REFERENCES storage_moves(id) ON DELETE CASCADE,
+  asset_id INTEGER NOT NULL,
+  key      TEXT NOT NULL,
+  reason   TEXT NOT NULL,
+  PRIMARY KEY (move_id, asset_id)
+) STRICT, WITHOUT ROWID;
+
+-- Nexus sources (spec §12). credentials is the sealed JSON {username, password}
+-- (settings.Service.Encrypt, AAD "nexus_sources:<id>"); cut-over empties it. last_sync_at is
+-- when the last sync ended (0: never); the scheduler finds the due mirroring sources through
+-- nexus_sources_due.
+CREATE TABLE nexus_sources (
+  id           INTEGER PRIMARY KEY,
+  name         TEXT NOT NULL UNIQUE,
+  base_url     TEXT NOT NULL,
+  credentials  BLOB NOT NULL,
+  state        TEXT NOT NULL DEFAULT 'mirroring' CHECK (state IN ('mirroring','cut_over')),
+  created_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at   INTEGER NOT NULL,
+  last_sync_at INTEGER NOT NULL DEFAULT 0,
+  last_error   TEXT NOT NULL DEFAULT ''
+) STRICT;
+CREATE INDEX nexus_sources_created_by ON nexus_sources(created_by);
+CREATE INDEX nexus_sources_due ON nexus_sources(last_sync_at) WHERE state = 'mirroring';
+
+-- The Nexus repos a source mirrors and the repo each one goes into. A target repo mirrors at
+-- most one source; nexus_source_repos_target finds the source of a target.
+CREATE TABLE nexus_source_repos (
+  source_id      INTEGER NOT NULL REFERENCES nexus_sources(id) ON DELETE CASCADE,
+  source_repo    TEXT NOT NULL,                      -- Nexus repo name
+  source_format  TEXT NOT NULL,                      -- Nexus format id, e.g. "maven2"
+  target_repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+  PRIMARY KEY (source_id, source_repo)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX nexus_source_repos_target ON nexus_source_repos(target_repo_id);
+
+-- One row per sync of a source. cutover marks the final sync of a cut-over. The unique partial
+-- index allows one running sync per source and finds the running syncs at startup.
+CREATE TABLE nexus_syncs (
+  id          INTEGER PRIMARY KEY,
+  source_id   INTEGER NOT NULL REFERENCES nexus_sources(id) ON DELETE CASCADE,
+  state       TEXT NOT NULL CHECK (state IN ('running','done','failed','cancelled')),
+  cutover     INTEGER NOT NULL DEFAULT 0,
+  started_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,  -- NULL: the scheduler
+  started_at  INTEGER NOT NULL,
+  finished_at INTEGER,
+  error       TEXT NOT NULL DEFAULT ''
+) STRICT;
+CREATE UNIQUE INDEX nexus_syncs_running ON nexus_syncs(source_id) WHERE state = 'running';
+CREATE INDEX nexus_syncs_source ON nexus_syncs(source_id);
+CREATE INDEX nexus_syncs_started_by ON nexus_syncs(started_by);
+
+-- One row per mapped repo of a sync, copied from nexus_source_repos when the sync starts.
+-- continuation is the Nexus continuation token of the next page ('' = first page); the runner
+-- saves it with the counters after each page.
+CREATE TABLE nexus_sync_repos (
+  sync_id        INTEGER NOT NULL REFERENCES nexus_syncs(id) ON DELETE CASCADE,
+  source_repo    TEXT NOT NULL,
+  source_format  TEXT NOT NULL,
+  target_repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+  continuation   TEXT NOT NULL DEFAULT '',
+  imported       INTEGER NOT NULL DEFAULT 0,
+  skipped        INTEGER NOT NULL DEFAULT 0,
+  ignored        INTEGER NOT NULL DEFAULT 0,
+  failed         INTEGER NOT NULL DEFAULT 0,
+  state          TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','running','done','failed','cancelled')),
+  error          TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (sync_id, source_repo)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX nexus_sync_repos_target ON nexus_sync_repos(target_repo_id);
+
+-- One row per source file that a sync could not import. A resumed page records the same file
+-- once.
+CREATE TABLE nexus_sync_failures (
+  id          INTEGER PRIMARY KEY,                   -- keyset cursor of the failure list
+  sync_id     INTEGER NOT NULL REFERENCES nexus_syncs(id) ON DELETE CASCADE,
+  source_repo TEXT NOT NULL,
+  path        TEXT NOT NULL,
+  reason      TEXT NOT NULL,
+  UNIQUE (sync_id, source_repo, path)
+) STRICT;
+CREATE INDEX nexus_sync_failures_sync ON nexus_sync_failures(sync_id);

@@ -33,6 +33,10 @@ type Repo struct {
 	AnonymousRead bool
 	Config        json.RawMessage // always a JSON object
 	CreatedAt     time.Time
+	// LockedBy is set while another system owns the repo's content, e.g. a Nexus source that
+	// the repo mirrors. The write gate (auth.RepoGate) answers uploads with 409 and this text.
+	// In-process writers such as importers do not pass the gate. "" means not locked.
+	LockedBy string
 }
 
 // Validator validates the config of a repo of the given format and returns its normalized
@@ -62,6 +66,7 @@ func fromRow(r dbq.Repo, err error) (*Repo, error) {
 		AnonymousRead: r.AnonymousRead,
 		Config:        json.RawMessage(r.Config),
 		CreatedAt:     time.Unix(r.CreatedAt, 0),
+		LockedBy:      r.LockedBy.String,
 	}, nil
 }
 
@@ -177,4 +182,14 @@ func (s *Service) Update(ctx context.Context, name string, anonymousRead *bool, 
 		return nil, nil, err
 	}
 	return old, updated, nil
+}
+
+// SetLockedBy sets the LockedBy text of repo id; "" clears it. With a non-nil tx it writes in
+// that transaction.
+func (s *Service) SetLockedBy(ctx context.Context, tx *sql.Tx, id int64, by string) error {
+	q := dbq.New(s.db.W)
+	if tx != nil {
+		q = dbq.New(tx)
+	}
+	return q.SetRepoLockedBy(ctx, dbq.SetRepoLockedByParams{LockedBy: sql.NullString{String: by, Valid: by != ""}, ID: id})
 }

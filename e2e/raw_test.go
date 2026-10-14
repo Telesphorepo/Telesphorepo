@@ -4,11 +4,9 @@ package e2e
 
 import (
 	"bytes"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -16,8 +14,6 @@ import (
 	"testing"
 	"time"
 )
-
-const curlImage = "curlimages/curl:8.16.0"
 
 // rawCurlScript uploads /work/app.bin with curl -T, downloads it again (following storage
 // redirects) and compares the bytes.
@@ -27,11 +23,6 @@ curl -fsSL -u "$RAW_USER:$RAW_TOKEN" -o /tmp/app.bin "$RAW_URL"
 cmp /work/app.bin /tmp/app.bin
 echo "RAW OK"
 `
-
-func rawPut(t *testing.T, s *Server, path string, body []byte, auth Auth) (*http.Response, []byte) {
-	t.Helper()
-	return s.Do(t, s.NewRequest(t, http.MethodPut, path, bytes.NewReader(body)), auth)
-}
 
 // rawGet GETs path and follows storage redirects. Presigned SeaweedFS URLs point at the
 // network-internal host, so the request goes to the host endpoint with the original Host header.
@@ -77,15 +68,6 @@ func rawWantStatus(t *testing.T, resp *http.Response, body []byte, want int) {
 	if resp.StatusCode != want {
 		t.Fatalf("%s %s: status %d, want %d: %s", resp.Request.Method, resp.Request.URL.Path, resp.StatusCode, want, body)
 	}
-}
-
-func rawRandom(t *testing.T, n int) []byte {
-	t.Helper()
-	b := make([]byte, n)
-	if _, err := io.ReadFull(rand.Reader, b); err != nil {
-		t.Fatal(err)
-	}
-	return b
 }
 
 func TestRaw(t *testing.T) {

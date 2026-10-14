@@ -1,5 +1,6 @@
-import { useState } from "react";
-import { api, ApiError, useAsync } from "../api";
+import { useEffect, useState } from "react";
+import { api, ApiError, getCurrentMove, useAsync, type Move } from "../api";
+import MovePanel from "./MovePanel";
 
 type Val = string | number | boolean | string[] | { set: boolean } | null;
 type Setting = { key: string; label: string; help?: string; type: "string" | "bool" | "int" | "duration" | "list"; options?: string[]; value: Val; secret: boolean; source: "db" | "env" | "default"; locked: boolean; read_only?: boolean };
@@ -44,7 +45,7 @@ function Field({ s, draft, error, replacing, set }: { s: Setting; draft: Val | u
   );
 }
 
-function Section({ g, reload, children }: { g: Group; reload: () => void; children?: (patch: () => Record<string, Val>) => React.ReactNode }) {
+function Section({ g, reload, onMove, children }: { g: Group; reload: () => void; onMove: (m: Move) => void; children?: (patch: () => Record<string, Val>) => React.ReactNode }) {
   const [draft, setDraft] = useState<Record<string, Val>>({});
   const [errs, setErrs] = useState<Record<string, string>>({});
   const [msg, setMsg] = useState("");
@@ -61,8 +62,10 @@ function Section({ g, reload, children }: { g: Group; reload: () => void; childr
   const save = async () => {
     setErrs({}); setErr(""); setMsg("");
     try {
-      await api("PATCH", "/api/settings", patch());
-      setDraft({}); setMsg("Saved."); reload();
+      const res = await api<{ move?: Move } | undefined>("PATCH", "/api/settings", patch());
+      setDraft({});
+      if (res && res.move) { onMove(res.move); setMsg("Storage move started."); }
+      else { setMsg("Saved."); reload(); }
     } catch (e) {
       const f = e instanceof ApiError ? e.fields : undefined;
       setErrs(f ?? {});
@@ -132,7 +135,7 @@ function StorageExtras({ settings, patch }: { settings: Setting[]; patch: () => 
   };
   return (
     <>
-      {switching && <p className="error">Switching the storage backend does not move existing blobs; they stay in the old backend.</p>}
+      {switching && <p className="muted">Existing blobs are copied to the new backend in the background. The old backend stays unchanged.</p>}
       <div className="row">
         <button disabled={busy} onClick={test}>Test connection</button>
         {res && <span className={res.ok ? "muted" : "error"}>{res.text}</span>}
@@ -181,12 +184,15 @@ export default function Settings() {
     const g = groups.find((x) => x.name === i.group) ?? (groups.push({ name: i.group, settings: [] }), groups[groups.length - 1]);
     g.settings.push(i);
   } else if (data) groups.push(...data.groups);
+  const [move, setMove] = useState<Move | null>(null);
+  useEffect(() => { getCurrentMove().then(setMove, () => undefined); }, []);
   return (
     <>
       <h1>Settings</h1>
       {error && <p className="error">{error}</p>}
+      {move && <MovePanel initial={move} onEnd={(m) => { setMove(m); if (m.state === "done") reload(); }} />}
       {groups.map((g) => (
-        <Section key={g.name} g={g} reload={reload}>
+        <Section key={g.name} g={g} reload={reload} onMove={setMove}>
           {g.name.toLowerCase() === "storage" ? (patch) => <StorageExtras settings={g.settings} patch={patch} /> :
             g.name.toLowerCase() === "signing" ? () => <SigningKey /> :
             g.name.toLowerCase() === "sso" ? (patch) => <SSOExtras patch={patch} groups={groups} /> : undefined}

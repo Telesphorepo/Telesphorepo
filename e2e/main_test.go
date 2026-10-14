@@ -1,4 +1,4 @@
-//go:build e2e || scale
+//go:build e2e || import || scale
 
 package e2e
 

@@ -140,12 +140,12 @@ type Options struct {
 
 // Service owns the settings table and the effective snapshot.
 type Service struct {
-	db       *db.DB
-	boot     *config.Boot
-	aead     cipher.AEAD
-	log      *slog.Logger
-	dev      bool
-	env     map[string]string // non-empty TR_* overrides, captured at Load
+	db   *db.DB
+	boot *config.Boot
+	aead cipher.AEAD
+	log  *slog.Logger
+	dev  bool
+	env  map[string]string // non-empty TR_* overrides, captured at Load
 
 	mu   sync.Mutex // serializes writers
 	snap atomic.Pointer[Snapshot]
@@ -670,6 +670,20 @@ func (s *Service) TestStorage(ctx context.Context, patch map[string]json.RawMess
 		return err
 	}
 	return storage.Probe(ctx, st)
+}
+
+// Preview returns the effective configuration that patch would produce, without saving it.
+// An invalid patch returns a *ValidationError.
+func (s *Service) Preview(patch map[string]json.RawMessage) (*config.Config, error) {
+	rows, _, ve := s.candidate(s.Current(), patch)
+	if err := ve.orNil(); err != nil {
+		return nil, err
+	}
+	next, err := s.build(rows, false)
+	if err != nil {
+		return nil, err
+	}
+	return next.Config, nil
 }
 
 // TestOIDC checks the SSO configuration that patch would produce: the whole configuration must

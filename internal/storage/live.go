@@ -37,7 +37,9 @@ func SameBackend(a, b *config.Config) bool {
 }
 
 // Live is a Store that delegates to a hot-swappable active Store (spec §3: storage changes
-// apply without restart). In-flight operations finish on the store they started on.
+// apply without restart). In-flight operations finish on the store they started on. During a
+// storage move the active store is a *Mirror; the move service swaps in Mirror.Dst when the
+// move is done and Mirror.Src when it fails or is cancelled.
 type Live struct {
 	cur atomic.Pointer[holder]
 }

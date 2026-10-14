@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 export type User = { id: number; username: string; is_admin: boolean; disabled: boolean; created_at: string; kind?: "local" | "oidc"; email?: string };
 export type RepoConfig = Record<string, unknown>;
-export type Repo = { name: string; format: string; anonymous_read: boolean; config?: RepoConfig; permission: string };
+export type Repo = { name: string; format: string; anonymous_read: boolean; config?: RepoConfig; permission: string; locked_by?: string | null };
 export type Format = { name: string; title: string; default_config: RepoConfig; settings_group?: string };
 export type Snippet = { title: string; lang: string; code: string };
 export type Usage = { base_url: string; snippets: Snippet[] };
@@ -70,3 +70,58 @@ export const go = (to: string) => { window.location.hash = to; };
 export const fmtSize = (n: number) =>
   n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KiB` : `${(n / 1048576).toFixed(1)} MiB`;
 export const fmtTime = (s: string | null) => (s ? new Date(s).toLocaleString() : "never");
+
+export type Move = {
+  id: number; state: "copying" | "done" | "failed" | "cancelled";
+  total: number; copied: number; skipped: number; failed: number; error: string;
+  started_at: string; finished_at: string | null;
+  target: { storage: string; endpoint?: string; bucket?: string; prefix?: string; fs_root?: string };
+};
+export type MoveFailure = { asset_id: number; key: string; reason: string };
+
+export const getCurrentMove = async (): Promise<Move | null> => {
+  try { return await api<Move>("GET", "/api/storage/moves/current"); }
+  catch (e) { if (e instanceof ApiError && e.status === 404) return null; throw e; }
+};
+export const getMove = (id: number) => api<Move>("GET", `/api/storage/moves/${id}`);
+export const cancelMove = (id: number) => api("DELETE", `/api/storage/moves/${id}`);
+export const moveFailures = (id: number, after?: string) =>
+  api<Page<MoveFailure>>("GET", `/api/storage/moves/${id}/failures${qs({ after, limit: "50" })}`);
+
+export type NexusSource = {
+  id: number; name: string; base_url: string; state: "mirroring" | "cut_over";
+  created_at: string; last_sync_at: string | null; last_error: string;
+};
+export type NexusSourceRepo = {
+  source_repo: string; source_format: string; supported: boolean;
+  target?: string | null; last_sync_at?: string | null;
+};
+export type NexusSourceDetail = NexusSource & { repos: NexusSourceRepo[] };
+export type NexusMapping = { source_repo: string; target: string; create: boolean };
+export type NexusSyncRepo = {
+  source_repo: string; state: "pending" | "running" | "done" | "failed" | "cancelled";
+  imported: number; skipped: number; ignored: number; failed: number;
+};
+export type NexusSync = {
+  id: number; source_id: number; state: "running" | "done" | "failed" | "cancelled";
+  error: string; started_at: string; finished_at: string | null; repos?: NexusSyncRepo[];
+};
+export type NexusFailure = { source_repo: string; path: string; reason: string };
+
+export const listNexusSources = () => api<NexusSource[]>("GET", "/api/nexus/sources");
+export const addNexusSource = (name: string, base_url: string, username: string, password: string) =>
+  api<NexusSource>("POST", "/api/nexus/sources", { name, base_url, username, password });
+export const getNexusSource = (id: number) => api<NexusSourceDetail>("GET", `/api/nexus/sources/${id}`);
+export const saveNexusRepos = (id: number, mappings: NexusMapping[]) =>
+  api("PUT", `/api/nexus/sources/${id}/repos`, mappings);
+export const updateNexusCredentials = (id: number, username: string, password: string) =>
+  api("PATCH", `/api/nexus/sources/${id}`, { username, password });
+export const deleteNexusSource = (id: number) => api("DELETE", `/api/nexus/sources/${id}`);
+export const syncNexusNow = (id: number) => api<NexusSync>("POST", `/api/nexus/sources/${id}/sync`);
+export const cutOverNexus = (id: number) => api("POST", `/api/nexus/sources/${id}/cutover`);
+export const nexusSyncs = (id: number, after?: string) =>
+  api<Page<NexusSync>>("GET", `/api/nexus/sources/${id}/syncs${qs({ after, limit: "10" })}`);
+export const getNexusSync = (id: number) => api<NexusSync>("GET", `/api/nexus/syncs/${id}`);
+export const cancelNexusSync = (id: number) => api("DELETE", `/api/nexus/syncs/${id}`);
+export const nexusSyncFailures = (id: number, after?: string) =>
+  api<Page<NexusFailure>>("GET", `/api/nexus/syncs/${id}/failures${qs({ after, limit: "50" })}`);

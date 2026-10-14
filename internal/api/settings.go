@@ -8,6 +8,7 @@ import (
 	"reflect"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/move"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 )
 
@@ -142,6 +143,10 @@ func (a *API) patchSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if changesAny(items, patch, settings.IsStorageKey) {
+		if a.moves.Running() {
+			httpx.Error(w, http.StatusConflict, "a storage move is running; wait for it to end or cancel it")
+			return
+		}
 		if err := a.settings.TestStorage(r.Context(), patch); err != nil {
 			var ve *settings.ValidationError
 			if errors.As(err, &ve) {
@@ -154,12 +159,59 @@ func (a *API) patchSettings(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		if a.startMove(w, r, patch, items, p.UserID) {
+			return
+		}
 	}
 	if err := a.settings.Update(r.Context(), patch, p.UserID); err != nil {
 		a.settingsError(w, r, err, items)
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, a.settingsList(r))
+}
+
+// startMove handles a settings patch that changes the blob store (spec §11). When the new store
+// is at another location and assets exist, it saves the patch's other settings, starts a move
+// to the new store and answers 202 {move}; the storage settings change when the move is done.
+// It returns false when the caller should save the whole patch at once (no assets, or the same
+// location with other credentials or options).
+func (a *API) startMove(w http.ResponseWriter, r *http.Request, patch map[string]json.RawMessage, items []settings.Item, userID int64) bool {
+	ctx := r.Context()
+	target, err := a.settings.Preview(patch)
+	if err != nil {
+		a.settingsError(w, r, err, items)
+		return true
+	}
+	if move.SameLocation(a.cfg(), target) {
+		return false
+	}
+	has, err := a.moves.HasAssets(ctx)
+	if err != nil {
+		fail(w, r, err)
+		return true
+	}
+	if !has {
+		return false
+	}
+	rest := map[string]json.RawMessage{}
+	for k, v := range patch {
+		if !settings.IsStorageKey(k) {
+			rest[k] = v
+		}
+	}
+	if len(rest) > 0 {
+		if err := a.settings.Update(ctx, rest, userID); err != nil {
+			a.settingsError(w, r, err, items)
+			return true
+		}
+	}
+	m, err := a.moves.Start(ctx, target, userID)
+	if err != nil {
+		moveFail(w, r, err)
+		return true
+	}
+	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"move": m})
+	return true
 }
 
 func (a *API) testStorage(w http.ResponseWriter, r *http.Request) {

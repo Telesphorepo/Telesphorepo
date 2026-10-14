@@ -114,6 +114,8 @@ const (
 	KeyOIDCAdminEmails    = "oidc.admin_emails"
 	KeyOIDCSessionTTL     = "oidc.session_ttl"
 	KeyAdminPasswordLogin = "admin_password_login"
+
+	KeyNexusSyncInterval = "nexus.sync_interval"
 )
 
 // SSOKeys are the settings whose change re-validates SSO by fetching the issuer's discovery
@@ -158,10 +160,18 @@ var registry = []*Def{
 		Help: "Largest artifact or package upload accepted."},
 	{Key: KeyMaxJSONBytes, Type: TypeInt, Default: "1048576", Group: GroupGeneral, Label: "Max JSON body (bytes)",
 		Help: "Largest JSON API request body accepted."},
+	{Key: KeyNexusSyncInterval, Type: TypeDuration, Default: "15m", Group: GroupGeneral, Label: "Nexus sync interval",
+		Help: "Time between two syncs of a mirroring Nexus source, e.g. 15m. The minimum is 1m.",
+		Validate: func(v any) error {
+			if durationOf(v) < time.Minute {
+				return errors.New("must be at least 1m")
+			}
+			return nil
+		}},
 
 	// Storage
 	{Key: KeyStorage, Type: TypeString, Default: "fs", Group: GroupStorage, Label: "Storage backend",
-		Help:    "fs stores blobs on the data volume; s3 uses any S3-compatible store (Cloudflare R2, SeaweedFS, AWS). Existing blobs are not moved when this changes.",
+		Help:    "fs stores blobs on the data volume; s3 uses any S3-compatible store (Cloudflare R2, SeaweedFS, AWS). A change to another location moves the existing blobs to the new store in the background.",
 		Options: []string{"fs", "s3", "r2"}, storage: true,
 		normalize: func(v any) any {
 			if s := lower(v).(string); s != "r2" {

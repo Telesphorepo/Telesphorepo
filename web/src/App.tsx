@@ -7,6 +7,7 @@ import Search from "./pages/Search";
 import Tokens from "./pages/Tokens";
 import Admin from "./pages/Admin";
 import Settings from "./pages/Settings";
+import Nexus from "./pages/Nexus";
 
 export default function App() {
   const [me, setMe] = useState<User | null>(null);
@@ -42,6 +43,7 @@ export default function App() {
   else if (section === "tokens") page = me ? <Tokens /> : <Anon />;
   else if (section === "admin") page = me?.is_admin ? <Admin /> : <p className="muted">Admin access required.</p>;
   else if (section === "settings") page = me?.is_admin ? <Settings /> : <p className="muted">Admin access required.</p>;
+  else if (section === "nexus") page = me?.is_admin ? <Nexus id={arg ? Number(arg) : 0} /> : <p className="muted">Admin access required.</p>;
   else page = <Repos />;
 
   return (
@@ -53,6 +55,7 @@ export default function App() {
           {link("/search", "Search")}
           {me && link("/tokens", "Tokens")}
           {me?.is_admin && link("/admin", "Admin")}
+          {me?.is_admin && link("/nexus", "Nexus")}
           {me?.is_admin && link("/settings", "Settings")}
         </nav>
         <span className="spacer" />

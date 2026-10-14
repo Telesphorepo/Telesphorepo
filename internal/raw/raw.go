@@ -4,6 +4,7 @@ package raw
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -98,8 +99,8 @@ func (f *Format) handle(w http.ResponseWriter, r *http.Request) {
 		f.h.Assets.Serve(w, r, repo, p)
 		return
 	}
-	var c Config
-	if err := json.Unmarshal(repo.Config, &c); err != nil {
+	c, err := repoConfig(repo)
+	if err != nil {
 		f.h.Log.Error("bad repo config", "repo", repo.Name, "err", err)
 		httpx.Error(w, http.StatusInternalServerError, "bad repo config")
 		return
@@ -121,33 +122,55 @@ func (f *Format) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	defer sp.Close()
 
-	unlock := f.h.Assets.Lock(repo.ID, p)
-	defer unlock()
-	existing, err := f.h.Assets.Get(r.Context(), repo.ID, p)
-	if err != nil && !errors.Is(err, assets.ErrNotFound) {
-		httpx.Error(w, http.StatusInternalServerError, "lookup failed")
-		return
-	}
-	if existing != nil && existing.SHA256 == sp.SHA256 {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-	if existing != nil && c.Overwrite != OverwriteAllow {
-		httpx.Error(w, http.StatusConflict, "file exists and the repo does not allow overwrite")
-		return
-	}
 	var uid int64
 	if pr != nil {
 		uid = pr.UserID
 	}
-	_, created, err := f.h.Assets.Put(r.Context(), repo, p, sp, assets.ContentType(p), assets.KindArtifact, uid)
-	if err != nil {
+	created, _, err := f.put(r.Context(), repo, c, p, sp, uid)
+	switch {
+	case errors.Is(err, errExists):
+		httpx.Error(w, http.StatusConflict, errExists.Error())
+	case errors.Is(err, errLookup):
+		httpx.Error(w, http.StatusInternalServerError, "lookup failed")
+	case err != nil:
 		httpx.Error(w, http.StatusInternalServerError, "store failed")
-		return
-	}
-	if created {
+	case created:
 		w.WriteHeader(http.StatusCreated)
-	} else {
+	default:
 		w.WriteHeader(http.StatusOK)
 	}
+}
+
+var (
+	// errExists rejects different bytes at an existing path when the repo denies overwrite.
+	errExists = errors.New("file exists and the repo does not allow overwrite")
+	// errLookup wraps a failed lookup of the asset at the target path.
+	errLookup = errors.New("lookup failed")
+)
+
+// repoConfig decodes the repo config, which was validated when it was stored.
+func repoConfig(repo *repos.Repo) (Config, error) {
+	var c Config
+	err := json.Unmarshal(repo.Config, &c)
+	return c, err
+}
+
+// put stores the spooled file at p and holds the path lock while it does. A file that exists
+// with the same bytes stays as it is (unchanged). Different bytes replace it when c allows
+// overwrite; otherwise put returns errExists. Uploads (PUT) and imports share it.
+func (f *Format) put(ctx context.Context, repo *repos.Repo, c Config, p string, sp *assets.Spooled, uid int64) (created, unchanged bool, err error) {
+	unlock := f.h.Assets.Lock(repo.ID, p)
+	defer unlock()
+	existing, err := f.h.Assets.Get(ctx, repo.ID, p)
+	if err != nil && !errors.Is(err, assets.ErrNotFound) {
+		return false, false, fmt.Errorf("%w: %w", errLookup, err)
+	}
+	if existing != nil && existing.SHA256 == sp.SHA256 {
+		return false, true, nil
+	}
+	if existing != nil && c.Overwrite != OverwriteAllow {
+		return false, false, errExists
+	}
+	_, created, err = f.h.Assets.Put(ctx, repo, p, sp, assets.ContentType(p), assets.KindArtifact, uid)
+	return created, false, err
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"slices"
@@ -27,6 +28,14 @@ type uploadResult struct {
 }
 
 var errConflict = errors.New("conflict")
+
+// uploadError is a client error of an upload: the HTTP status and the message.
+type uploadError struct {
+	status int
+	msg    string
+}
+
+func (e *uploadError) Error() string { return e.msg }
 
 func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 	repo, p, ok := h.auth.RepoGate(w, r, r.PathValue("repo"), name, auth.Write, false)
@@ -59,21 +68,41 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer sp.Close()
 
+	var uploadedBy int64
+	if p != nil {
+		uploadedBy = p.UserID
+	}
+	res, created, err := h.ingest(r.Context(), repo, dist, comp, sp, uploadedBy)
+	var ue *uploadError
+	switch {
+	case errors.As(err, &ue):
+		httpx.Error(w, ue.status, ue.msg)
+	case err != nil:
+		h.internal(w, "debian upload", repo, err)
+	case created:
+		httpx.WriteJSON(w, http.StatusCreated, res)
+	default:
+		httpx.WriteJSON(w, http.StatusOK, res)
+	}
+}
+
+// ingest adds the spooled .deb to dist/comp of repo: it parses and validates the package,
+// stores the pool file, records the asset, the deb_packages row and the dirty units in one
+// transaction, and wakes the indexer. created is false when the same package version is
+// already present with the same bytes. A client error is an *uploadError; any other error is
+// internal. Uploads and imports share it.
+func (h *Handler) ingest(ctx context.Context, repo *repos.Repo, dist, comp string, sp *assets.Spooled, uploadedBy int64) (res uploadResult, created bool, err error) {
 	info, err := parseDeb(sp.File)
 	if err != nil {
 		var bad badDeb
 		if errors.As(err, &bad) {
-			httpx.Error(w, http.StatusBadRequest, bad.Error())
-		} else {
-			h.log.Error("parse debian upload", "repo", repo.Name, "err", err)
-			httpx.Error(w, http.StatusInternalServerError, "internal error")
+			return res, false, &uploadError{http.StatusBadRequest, bad.Error()}
 		}
-		return
+		return res, false, fmt.Errorf("parse package: %w", err)
 	}
 	archs := architectures(repo)
 	if info.Architecture != "all" && !slices.Contains(archs, info.Architecture) {
-		httpx.Error(w, http.StatusBadRequest, "architecture "+info.Architecture+" is not configured for this repository")
-		return
+		return res, false, &uploadError{http.StatusBadRequest, "architecture " + info.Architecture + " is not configured for this repository"}
 	}
 	dirtyArchs := []string{info.Architecture}
 	if info.Architecture == "all" {
@@ -82,16 +111,10 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 
 	pool := info.poolPath(comp)
 	if !validKey(pool) {
-		httpx.Error(w, http.StatusBadRequest, "package name, source or version too long")
-		return
+		return res, false, &uploadError{http.StatusBadRequest, "package name, source or version too long"}
 	}
-	res := uploadResult{info.Package, info.Version, info.Architecture, pool, sp.SHA256}
-	var uploadedBy int64
-	if p != nil {
-		uploadedBy = p.UserID
-	}
+	res = uploadResult{info.Package, info.Version, info.Architecture, pool, sp.SHA256}
 
-	ctx := r.Context()
 	unlockID := h.assets.Lock(repo.ID, "deb:"+dist+"/"+comp+"/"+info.Package+"/"+info.Version+"/"+info.Architecture)
 	defer unlockID()
 	unlockPool := h.assets.Lock(repo.ID, pool)
@@ -101,23 +124,18 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 		Component: comp, Architecture: info.Architecture, Package: info.Package, Version: info.Version})
 	switch {
 	case err == nil && existing == sp.SHA256:
-		httpx.WriteJSON(w, http.StatusOK, res)
-		return
+		return res, false, nil
 	case err == nil:
-		httpx.Error(w, http.StatusConflict, "package version already exists with different content")
-		return
+		return res, false, &uploadError{http.StatusConflict, "package version already exists with different content"}
 	case !errors.Is(err, sql.ErrNoRows):
-		h.internal(w, "look up deb package", repo, err)
-		return
+		return res, false, fmt.Errorf("look up deb package: %w", err)
 	}
 
 	if err := h.storePool(ctx, repo, pool, sp); err != nil {
 		if errors.Is(err, errConflict) {
-			httpx.Error(w, http.StatusConflict, "pool file "+pool+" already exists with different content")
-		} else {
-			h.internal(w, "store deb blob", repo, err)
+			return res, false, &uploadError{http.StatusConflict, "pool file " + pool + " already exists with different content"}
 		}
-		return
+		return res, false, fmt.Errorf("store deb blob: %w", err)
 	}
 
 	err = h.db.Tx(ctx, func(tx *sql.Tx) error {
@@ -143,11 +161,10 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if err != nil {
-		h.internal(w, "record deb package", repo, err)
-		return
+		return res, false, fmt.Errorf("record deb package: %w", err)
 	}
 	h.idx.notify(distKey{repo.ID, dist})
-	httpx.WriteJSON(w, http.StatusCreated, res)
+	return res, true, nil
 }
 
 // storePool writes the blob unless the pool key already holds identical content (so one

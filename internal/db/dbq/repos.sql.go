@@ -7,6 +7,7 @@ package dbq
 
 import (
 	"context"
+	"database/sql"
 )
 
 const createRepo = `-- name: CreateRepo :one
@@ -36,7 +37,7 @@ func (q *Queries) CreateRepo(ctx context.Context, arg CreateRepoParams) (int64, 
 }
 
 const getRepoByID = `-- name: GetRepoByID :one
-SELECT id, name, format, anonymous_read, config, created_at FROM repos WHERE id = ?
+SELECT id, name, format, anonymous_read, config, created_at, locked_by FROM repos WHERE id = ?
 `
 
 func (q *Queries) GetRepoByID(ctx context.Context, id int64) (Repo, error) {
@@ -49,13 +50,14 @@ func (q *Queries) GetRepoByID(ctx context.Context, id int64) (Repo, error) {
 		&i.AnonymousRead,
 		&i.Config,
 		&i.CreatedAt,
+		&i.LockedBy,
 	)
 	return i, err
 }
 
 const getRepoByName = `-- name: GetRepoByName :one
 
-SELECT id, name, format, anonymous_read, config, created_at FROM repos WHERE name = ?
+SELECT id, name, format, anonymous_read, config, created_at, locked_by FROM repos WHERE name = ?
 `
 
 // Repository records (internal/repos).
@@ -70,12 +72,13 @@ func (q *Queries) GetRepoByName(ctx context.Context, name string) (Repo, error) 
 		&i.AnonymousRead,
 		&i.Config,
 		&i.CreatedAt,
+		&i.LockedBy,
 	)
 	return i, err
 }
 
 const listRepos = `-- name: ListRepos :many
-SELECT id, name, format, anonymous_read, config, created_at FROM repos
+SELECT id, name, format, anonymous_read, config, created_at, locked_by FROM repos
 WHERE name > ?1 ORDER BY name LIMIT ?2
 `
 
@@ -101,6 +104,7 @@ func (q *Queries) ListRepos(ctx context.Context, arg ListReposParams) ([]Repo, e
 			&i.AnonymousRead,
 			&i.Config,
 			&i.CreatedAt,
+			&i.LockedBy,
 		); err != nil {
 			return nil, err
 		}
@@ -113,6 +117,21 @@ func (q *Queries) ListRepos(ctx context.Context, arg ListReposParams) ([]Repo, e
 		return nil, err
 	}
 	return items, nil
+}
+
+const setRepoLockedBy = `-- name: SetRepoLockedBy :exec
+UPDATE repos SET locked_by = ? WHERE id = ?
+`
+
+type SetRepoLockedByParams struct {
+	LockedBy sql.NullString
+	ID       int64
+}
+
+// NULL clears the lock.
+func (q *Queries) SetRepoLockedBy(ctx context.Context, arg SetRepoLockedByParams) error {
+	_, err := q.db.ExecContext(ctx, setRepoLockedBy, arg.LockedBy, arg.ID)
+	return err
 }
 
 const updateRepo = `-- name: UpdateRepo :exec

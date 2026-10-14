@@ -47,10 +47,16 @@ volume.
 
 ```sh
 go tool task dev | build | test       # develop, build bin/telesphorepo, run the e2e suite
+go tool task test import | scale | all # other test zones (import needs a Nexus container)
 telesphorepo user add alice [--admin] # prompts for the password
 telesphorepo user passwd alice        # reset a password
 docker exec -it <container> /telesphorepo user add alice
 ```
+
+To move the blobs to another store, change the storage on the **Settings** page. The server
+copies the existing blobs in the background. To move hosted repos from Nexus 3, add the Nexus
+server on the **Nexus** page. The server mirrors the repos you pick, and they stay read only. Click
+**Cut over** when you are ready to publish here.
 
 To use the repo from CI, create an API token in the UI. Use the token as the password, with any
 username.

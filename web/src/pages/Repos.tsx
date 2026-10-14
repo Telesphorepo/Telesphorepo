@@ -15,7 +15,7 @@ export default function Repos() {
               <tr key={r.name} className="click" onClick={() => go("/repo/" + encodeURIComponent(r.name))}>
                 <td><a href={"#/repo/" + encodeURIComponent(r.name)}>{r.name}</a></td>
                 <td>{r.format}</td>
-                <td>{r.anonymous_read && <span className="badge">anonymous</span>}</td>
+                <td>{r.anonymous_read && <span className="badge">anonymous</span>}{r.locked_by && <span className="badge">mirrors Nexus</span>}</td>
                 <td>{r.permission || "none"}</td>
               </tr>
             ))}

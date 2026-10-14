@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -86,6 +87,33 @@ type Queryable interface {
 type Seeder interface {
 	Seed(ctx context.Context, tx *sql.Tx, repo *repos.Repo, start, n int) error
 }
+
+// Importer takes files from another repository manager into a repo of this format (spec §12).
+// The import runner names no format: it offers each source asset to the target repo's plugin.
+type Importer interface {
+	// ImportFormats lists the source format ids the plugin accepts, e.g. "maven2", "apt", "raw".
+	ImportFormats() []string
+	// Import stores one source file in repo. An error fails this item only; the runner records
+	// it and goes on.
+	Import(ctx context.Context, repo *repos.Repo, item ImportItem) (ImportOutcome, error)
+}
+
+// ImportItem is one source file.
+type ImportItem struct {
+	Path   string // source path, forward slashes
+	Size   int64
+	SHA256 string // lowercase hex; "" when the source does not give one
+	Open   func(ctx context.Context) (io.ReadCloser, error)
+}
+
+// ImportOutcome is what Import did with an item.
+type ImportOutcome string
+
+const (
+	ImportImported ImportOutcome = "imported" // stored
+	ImportSkipped  ImportOutcome = "skipped"  // already present with the same bytes
+	ImportIgnored  ImportOutcome = "ignored"  // not a file of this format, e.g. a source index
+)
 
 // Snippet is one client setup step.
 type Snippet struct {

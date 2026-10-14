@@ -37,6 +37,58 @@ type AssetsFt struct {
 	Path string
 }
 
+type NexusSource struct {
+	ID          int64
+	Name        string
+	BaseUrl     string
+	Credentials []byte
+	State       string
+	CreatedBy   sql.NullInt64
+	CreatedAt   int64
+	LastSyncAt  int64
+	LastError   string
+}
+
+type NexusSourceRepo struct {
+	SourceID     int64
+	SourceRepo   string
+	SourceFormat string
+	TargetRepoID int64
+}
+
+type NexusSync struct {
+	ID         int64
+	SourceID   int64
+	State      string
+	Cutover    int64
+	StartedBy  sql.NullInt64
+	StartedAt  int64
+	FinishedAt sql.NullInt64
+	Error      string
+}
+
+type NexusSyncFailure struct {
+	ID         int64
+	SyncID     int64
+	SourceRepo string
+	Path       string
+	Reason     string
+}
+
+type NexusSyncRepo struct {
+	SyncID       int64
+	SourceRepo   string
+	SourceFormat string
+	TargetRepoID int64
+	Continuation string
+	Imported     int64
+	Skipped      int64
+	Ignored      int64
+	Failed       int64
+	State        string
+	Error        string
+}
+
 type Repo struct {
 	ID            int64
 	Name          string
@@ -44,6 +96,7 @@ type Repo struct {
 	AnonymousRead bool
 	Config        string
 	CreatedAt     int64
+	LockedBy      sql.NullString
 }
 
 type RepoPermission struct {
@@ -70,6 +123,28 @@ type Setting struct {
 	Secret    bool
 	UpdatedAt int64
 	UpdatedBy sql.NullInt64
+}
+
+type StorageMove struct {
+	ID         int64
+	Target     []byte
+	State      string
+	Cursor     int64
+	Total      int64
+	Copied     int64
+	Skipped    int64
+	Failed     int64
+	Error      string
+	StartedBy  sql.NullInt64
+	StartedAt  int64
+	FinishedAt sql.NullInt64
+}
+
+type StorageMoveFailure struct {
+	MoveID  int64
+	AssetID int64
+	Key     string
+	Reason  string
 }
 
 type User struct {

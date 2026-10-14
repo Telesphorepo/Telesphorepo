@@ -2,14 +2,14 @@
 
 -- Indexed point lookup, used on every request.
 -- name: GetRepoByName :one
-SELECT id, name, format, anonymous_read, config, created_at FROM repos WHERE name = ?;
+SELECT id, name, format, anonymous_read, config, created_at, locked_by FROM repos WHERE name = ?;
 
 -- name: GetRepoByID :one
-SELECT id, name, format, anonymous_read, config, created_at FROM repos WHERE id = ?;
+SELECT id, name, format, anonymous_read, config, created_at, locked_by FROM repos WHERE id = ?;
 
 -- Keyset page by name (pass "" for the first page).
 -- name: ListRepos :many
-SELECT id, name, format, anonymous_read, config, created_at FROM repos
+SELECT id, name, format, anonymous_read, config, created_at, locked_by FROM repos
 WHERE name > sqlc.arg(after) ORDER BY name LIMIT sqlc.arg(limit);
 
 -- name: CreateRepo :one
@@ -18,3 +18,7 @@ RETURNING id;
 
 -- name: UpdateRepo :exec
 UPDATE repos SET anonymous_read = ?, config = ? WHERE id = ?;
+
+-- NULL clears the lock.
+-- name: SetRepoLockedBy :exec
+UPDATE repos SET locked_by = ? WHERE id = ?;

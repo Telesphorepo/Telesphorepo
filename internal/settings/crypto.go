@@ -86,20 +86,44 @@ func newAEAD(master []byte) (cipher.AEAD, error) {
 
 // seal encrypts plaintext for setting key: base64(nonce || ciphertext), AAD = key.
 func seal(aead cipher.AEAD, key string, plaintext []byte) string {
-	nonce := make([]byte, aead.NonceSize())
-	rand.Read(nonce)
-	return base64.StdEncoding.EncodeToString(aead.Seal(nonce, nonce, plaintext, []byte(key)))
+	return base64.StdEncoding.EncodeToString(sealBytes(aead, key, plaintext))
 }
 
 func open(aead cipher.AEAD, key, sealed string) ([]byte, error) {
 	b, err := base64.StdEncoding.DecodeString(sealed)
-	if err != nil || len(b) < aead.NonceSize() {
+	if err != nil {
 		return nil, errors.New("malformed ciphertext")
 	}
+	return openBytes(aead, key, b)
+}
+
+// sealBytes returns nonce || AES-256-GCM ciphertext of plaintext, authenticated with aad.
+func sealBytes(aead cipher.AEAD, aad string, plaintext []byte) []byte {
+	nonce := make([]byte, aead.NonceSize())
+	rand.Read(nonce)
+	return aead.Seal(nonce, nonce, plaintext, []byte(aad))
+}
+
+func openBytes(aead cipher.AEAD, aad string, sealed []byte) ([]byte, error) {
 	n := aead.NonceSize()
-	pt, err := aead.Open(nil, b[:n], b[n:], []byte(key))
+	if len(sealed) < n {
+		return nil, errors.New("malformed ciphertext")
+	}
+	pt, err := aead.Open(nil, sealed[:n], sealed[n:], []byte(aad))
 	if err != nil {
 		return nil, errors.New("cannot decrypt (was the master key changed?)")
 	}
 	return pt, nil
+}
+
+// Encrypt seals plaintext with the master-key-derived AES-256-GCM key that also protects
+// secret settings. aad binds the ciphertext to its place, e.g. "storage_moves:7"; Decrypt
+// needs the same aad. The result is nonce || ciphertext, for a BLOB column.
+func (s *Service) Encrypt(aad string, plaintext []byte) []byte {
+	return sealBytes(s.aead, aad, plaintext)
+}
+
+// Decrypt opens a blob that Encrypt sealed with the same aad.
+func (s *Service) Decrypt(aad string, sealed []byte) ([]byte, error) {
+	return openBytes(s.aead, aad, sealed)
 }

@@ -630,6 +630,15 @@ proof of a key that lives on an enrolled machine, and enrolling a machine requir
   - Both share the on-disk layout `~/.telesphorepo/<host>/{device.key,device.json}`.
 - **Revocation:** revoking a device in the UI invalidates its unexpired minted tokens and blocks
   future mints. Users and admins can list devices and their last use.
+- **Direction for the milestone that builds this (owner's requirements, 2026-10-14):** short-lived
+  credentials become the **only** way to publish, for people and for CI. Long-lived passwords and
+  tokens stop working on format routes. A credential is minted by the server just before a
+  publish, scoped to one repo, and ends when the client reports the publish done (or after a few
+  minutes). It is one publish session, not one HTTP request, because one `gradle publish` sends
+  dozens of PUTs. CI gets no stored secret: GitHub Actions (and Jenkins through its OIDC provider)
+  presents its OIDC identity token and the server exchanges it for a publish credential under an
+  admin-defined trust rule (repository, branch, workflow), as in PyPI/npm trusted publishing.
+  Gradle, Maven, the CLI, Jenkins and GitHub Actions must all be supported clients.
 - The M1/M2 token model already carries `expires_at` and `kind`; this adds `devices`,
   `user_2fa` tables and the `password_basic` flag, with no restructuring.
 
@@ -744,16 +753,137 @@ pagination: `?limit=` (default 50, max 200) and `?after=<cursor>`; responses inc
 Search permission filtering: when the caller is not admin, the query joins against the set of
 readable repo ids (`repo_id IN (...)`, a small set) — the FTS match drives the scan.
 
-## 11. `move` **[M3]**
-Copy all blobs between backends; idempotent and resumable (skip keys present with matching size +
-SHA-256 — expected SHA-256 comes from `assets`), verify hash after each copy, never delete from
-source, print `copied/skipped/mismatched` report. Iterates `assets` by keyset, not storage listings.
+## 11. Storage move **[M3]**
 
-## 12. `import nexus` **[M3]**
-Page Nexus components REST API (`continuationToken`), download each asset, push it through this
-server's HTTP upload endpoints (Maven `PUT`, Debian upload) with a token, so all validation and
-indexing runs. Resumable via checksum skip (HEAD + `ETag`). Maven (incl. Gradle plugins) + Debian.
+**Goal:** an admin changes the storage backend in Settings and the server moves every blob to
+the new backend with no downtime and no CLI. The source is never modified or deleted.
 
+**Start.** A PATCH of `/api/settings` that changes a backend key (§3) no longer swaps the store
+directly. It probes the target as today, then:
+- If `assets` is empty, it saves the settings and swaps at once (as before).
+- Otherwise it saves nothing to `settings` and starts a move: 202 `{move: Move}`. The target
+  configuration is stored in the move row, encrypted like a secret setting (AES-256-GCM, AAD
+  `storage_moves:<id>`). Only one move runs at a time (409 otherwise). An env-locked storage key
+  stays 409, as today.
+
+**Table** (core migration): `storage_moves(id INTEGER PRIMARY KEY, target BLOB NOT NULL, state TEXT
+NOT NULL CHECK (state IN ('copying','done','failed','cancelled')), cursor INTEGER NOT NULL DEFAULT
+0, total INTEGER NOT NULL, copied INTEGER NOT NULL DEFAULT 0, skipped INTEGER NOT NULL DEFAULT 0,
+failed INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', started_by INTEGER REFERENCES
+users(id) ON DELETE SET NULL, started_at INTEGER NOT NULL, finished_at INTEGER) STRICT`, plus
+`storage_move_failures(move_id, asset_id, reason, PRIMARY KEY(move_id, asset_id)) WITHOUT ROWID`.
+
+**During the move** the `Live` store holds a `Mirror{src, dst}`:
+- Reads (`Get`, `Head`, `PresignGet`) use `src`.
+- `Put` and `Delete` go to `dst` first, then `src`; an error on either fails the call.
+- The copier walks `assets` by `id > cursor` in pages of 500. For each asset it takes the asset
+  lock (`assets.Service.Lock`, the same lock uploads take), then `Head`s `dst`: if the size
+  matches it skips; else it streams `src` → `dst` while hashing. A source blob whose SHA-256 is
+  not `assets.sha256`, or a missing source blob, is a failure row; the copier goes on. It
+  persists `cursor` and the counters after each page.
+- Blobs written by uploads after the move started are already in `dst` (mirror writes), so one
+  pass is enough.
+
+**Finish.** When the walk ends with `failed = 0`, one settings write saves the target as the
+active storage settings, `Live` swaps to `dst`, and the move becomes `done`. With failures the
+move becomes `failed`: `Live` drops the mirror and stays on `src`, and the UI lists the failures
+(keyset over `storage_move_failures`). The admin can fix them and start again; already copied
+blobs are skipped by the size check. Cancel (`DELETE`) stops the copier and drops the mirror.
+
+**Restart.** On startup a move in state `copying` resumes: the server rebuilds the mirror from
+the stored target and continues from `cursor`. If the target can no longer be opened, the move
+fails with the error.
+
+**API** (admin): `GET /api/storage/moves/current` → Move or 404; `GET /api/storage/moves/{id}`;
+`GET /api/storage/moves/{id}/failures?after=&limit=`; `DELETE /api/storage/moves/{id}` (cancel).
+A Move is `{id, state, total, copied, skipped, failed, error, started_at, finished_at, target:
+{storage, endpoint?, bucket?, prefix?, fs_root?}}` — never secrets.
+
+**UI:** the Settings storage section shows a progress bar while a move runs, then the result.
+
+**E2E:** fs → SeaweedFS and SeaweedFS → fs with Maven, Debian and raw content; uploads during the
+move (both stores get them); a forced failure (a blob removed from `src`); restart mid-move (the
+harness restarts the container on its data volume); after `done`, real clients still resolve
+and the source still holds every blob.
+
+## 12. Import from Nexus **[M3]**
+
+**Goal:** an admin moves hosted repos from a Sonatype Nexus 3 server with a warm cut-over: the
+server mirrors the chosen Nexus repos until the admin cuts over. Formats: every format with a
+plugin that implements `Importer` (Maven incl. Gradle plugins, Debian (apt) and raw today).
+Nexus is read only through its REST API.
+
+**Plugin capability** (`internal/format`), not Nexus-specific in the plugin:
+```go
+type Importer interface {
+    ImportFormats() []string // source format ids it accepts, e.g. "maven2", "apt", "raw"
+    Import(ctx context.Context, repo *repos.Repo, item ImportItem) (ImportOutcome, error)
+}
+type ImportItem struct {
+    Path   string                              // source path, forward slashes
+    Size   int64
+    SHA256 string                              // "" when the source does not give one
+    Open   func(ctx context.Context) (io.ReadCloser, error)
+}
+type ImportOutcome string // "imported", "skipped" (already present, same bytes), "ignored" (not this format's file)
+```
+- maven: stores every file at its path through the same rules as PUT (identical bytes → skipped,
+  `maven-metadata.xml*` replaced).
+- debian: takes `*.deb` files under `pool/` through the upload pipeline (parse, validate,
+  `deb_packages`, dirty mark) into the Nexus repo's distribution (from the Nexus repo's
+  `apt.distribution`, passed in the target repo config) and component `main`; ignores `dists/`.
+  The indexer rebuilds the indexes.
+- raw: stores every file at its path.
+
+**Sources, not one-shot jobs.** An admin adds a **Nexus source** once (name, base URL, username,
+password; credentials encrypted with AAD `nexus_sources:<id>`, never returned or logged). The
+source page lists every Nexus repo with its format. A repo whose format no plugin's
+`ImportFormats()` accepts shows "no plugin for format X" and becomes selectable once a plugin
+for it is installed, so repos can be added to a source at any time.
+
+**Mirroring and cut-over.** A source is `mirroring` until it is `cut_over`.
+- A **sync** walks each selected repo with `GET /service/rest/v1/assets?repository=X` (paged by
+  `continuationToken`) and calls the target plugin's `Import` per asset. The plugin skips an
+  asset whose path and SHA-256 already match without downloading it, so a sync downloads only
+  new or changed files. The continuation token is saved after each page, so a restart resumes
+  the sync where it stopped.
+- Syncs run every `nexus.sync_interval` (setting, default `15m`) while a source is mirroring, and
+  on "Sync now". One sync runs at a time per source.
+- A repo that mirrors a source is **read-only for uploads** here (writes answer 409 "repo mirrors
+  Nexus source X; cut over first"), so the two servers cannot diverge. Reads work normally.
+- **Cut over** runs a final sync; on success it clears the mirror flag on the repos, sets the
+  source to `cut_over`, stops its syncs and deletes its stored credentials.
+- Assets deleted in Nexus are not deleted here.
+
+**Tables** (core): `nexus_sources(id, name UNIQUE, base_url, credentials BLOB, state CHECK IN
+('mirroring','cut_over'), created_by, created_at, last_sync_at, last_error) STRICT`;
+`nexus_source_repos(source_id, source_repo, source_format, target_repo_id, PRIMARY KEY(source_id,
+source_repo)) WITHOUT ROWID` (plus an index on `target_repo_id`, which is how the upload path checks
+"is this repo mirroring"); `nexus_syncs(id, source_id, state CHECK IN ('running','done','failed',
+'cancelled'), started_at, finished_at, error)` with per-repo progress `nexus_sync_repos(sync_id,
+source_repo, continuation, imported, skipped, ignored, failed, state)` and
+`nexus_sync_failures(sync_id, source_repo, path, reason)`. `internal/nexus` holds the client, the
+scheduler and the sync runner, and names no format.
+
+**API** (admin): `POST /api/nexus/sources` `{name, base_url, username, password}` (checks the
+connection first); `GET /api/nexus/sources`; `GET /api/nexus/sources/{id}` (repos with format,
+supported flag, mapping, last sync); `PUT /api/nexus/sources/{id}/repos` `[{source_repo, target,
+create}]` (creates missing target repos with the plugin's default config, plus the distribution
+for Debian); `PATCH /api/nexus/sources/{id}` (new credentials); `POST .../sync`; `GET
+.../syncs?after=&limit=`, `GET /api/nexus/syncs/{id}`, `GET /api/nexus/syncs/{id}/failures`,
+`DELETE /api/nexus/syncs/{id}` (cancel); `POST /api/nexus/sources/{id}/cutover`;
+`DELETE /api/nexus/sources/{id}` (only after cut-over or with no mapped repos).
+
+**UI:** an admin **Nexus** page: add a source, pick repos and targets, watch syncs and failures,
+"Sync now", "Cut over".
+
+**E2E** (zone `import`, see §15): a real Nexus container (`sonatype/nexus3`, pinned). The test
+reads the generated admin password, creates maven2, apt (with a test GPG key) and raw hosted repos
+through the Nexus REST API, and uploads content with the components API. It adds the source, maps
+the repos and syncs, then resolves with real `mvn`/`gradle`, `apt-get install` and curl. It uploads
+a new version to Nexus and syncs again (only the new files download; the rest are skipped),
+checks that an upload here is refused while mirroring, cuts over, and checks that uploads here
+work and the source's credentials are gone.
 ## 13. Web UI **[M1 shell / M4 full]**
 Static Vite build embedded in the binary, served at `/` with SPA fallback to `index.html` for
 non-`/api`, non-format paths. M1 pages: login, repo list, repo browser (keyset "load more"),
@@ -784,10 +914,23 @@ M1 coverage:
   attempting deploy, token auth, anonymous read on/off, rate-limit 429.
 - **JSON API** over HTTP: login/session/logout, CSRF rejection (cross-site `Sec-Fetch-Site`),
   tokens, users, repos, permissions, assets listing pagination, search.
-- **Storage**: the Maven + Debian flows also run against S3 (SeaweedFS container; real R2 when
-  `TR_E2E_R2_*` env vars are set, unique prefix per run, cleaned up afterwards).
+- **Storage**: the Maven, Debian and raw flows also run against S3 (a SeaweedFS container with
+  generated keys; no setup).
 - **Security**: path traversal attempts (`..`, `%2e%2e`, `%2f`) → 400; oversize upload → 413;
   decompression-bomb `.deb` → 400.
+
+**Zones.** Tests are grouped by build tag so a run starts only the containers it needs. The
+harness files carry every tag.
+
+| Zone | Tag | Command | Contents |
+|---|---|---|---|
+| core | `e2e` | `go tool task test` | Formats, auth, API, settings, storage move, query plans |
+| import | `import` | `go tool task test import` | Nexus source, sync and cut-over (starts a Nexus container) |
+| scale | `scale` | `go tool task test scale` | 100k vs 1M latency (§5.5) |
+| all | all tags | `go tool task test all` | Every zone, one after the other |
+
+Extra `go test` args still pass through (`go tool task test import -run TestNexus`). A milestone
+runs the core zone plus the zones it touches; `all` runs before a push that touches several.
 
 Gotchas for test authors:
 - Maven ≥ 3.8.1 blocks `http://` repos on non-localhost hosts via the `maven-default-http-blocker`
@@ -840,5 +983,5 @@ is tested without a real bucket. `ForEachStorage` runs `fs`, `seaweedfs`, and `r
 - **M2**: OIDC admin sign-on (§7.5) + Keycloak e2e.
 - **M2.5**: format plugins (§5.4) + `raw` format as the pluggability proof; sqlc data layer, one
   migration per owner, plan guard and scale test (§5.5).
-- **M3**: `move`, `import nexus` + e2e.
+- **M3**: storage move from Settings (§11) and Nexus import from the admin UI (§12) + e2e.
 - **M4**: full admin UI polish, deletes (assets, deb packages) + blob/by-hash GC.

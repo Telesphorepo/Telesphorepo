@@ -63,7 +63,7 @@ export default function Browser({ name }: { name: string }) {
 
   return (
     <>
-      <h1>{name} {repo.data && <span className="badge">{repo.data.format}</span>} {repo.data?.anonymous_read && <span className="badge">anonymous</span>} <Status name={name} /></h1>
+      <h1>{name} {repo.data && <span className="badge">{repo.data.format}</span>} {repo.data?.anonymous_read && <span className="badge">anonymous</span>} {repo.data?.locked_by && <span className="badge" title="Uploads are refused until the Nexus source is cut over">mirrors Nexus</span>} <Status name={name} /></h1>
       {repo.error && <p className="error">{repo.error}</p>}
       {repo.data && <details><summary>Usage</summary><UsagePanel name={name} /></details>}
       <input className="wide" placeholder="Filter by path prefix" value={filter} onChange={(e) => setFilter(e.target.value)} />

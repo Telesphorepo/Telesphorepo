@@ -2,6 +2,7 @@
 package maven
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -137,39 +138,55 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	defer sp.Close()
 
+	var uid int64
+	if pr != nil {
+		uid = pr.UserID
+	}
+	created, _, err := h.put(r.Context(), repo, p, sp, uid)
+	switch {
+	case errors.Is(err, errImmutable):
+		httpx.Error(w, http.StatusConflict, errImmutable.Error())
+	case errors.Is(err, errLookup):
+		httpx.Error(w, http.StatusInternalServerError, "lookup failed")
+	case err != nil:
+		httpx.Error(w, http.StatusInternalServerError, "store failed")
+	case created:
+		w.WriteHeader(http.StatusCreated)
+	default:
+		w.WriteHeader(http.StatusOK)
+	}
+}
+
+var (
+	// errImmutable rejects a release file that exists with different bytes.
+	errImmutable = errors.New("release artifacts are immutable")
+	// errLookup wraps a failed lookup of the asset at the target path.
+	errLookup = errors.New("lookup failed")
+)
+
+// put stores the spooled file at p under the PUT rules and holds the path lock while it does.
+// A release file that exists with the same bytes stays as it is (unchanged); with different
+// bytes put returns errImmutable. maven-metadata.xml* and SNAPSHOT files are replaced.
+// Uploads (PUT) and imports share it.
+func (h *Handler) put(ctx context.Context, repo *repos.Repo, p string, sp *assets.Spooled, uid int64) (created, unchanged bool, err error) {
 	unlock := h.assets.Lock(repo.ID, p)
 	defer unlock()
-	existing, err := h.assets.Get(r.Context(), repo.ID, p)
+	existing, err := h.assets.Get(ctx, repo.ID, p)
 	if err != nil && !errors.Is(err, assets.ErrNotFound) {
-		httpx.Error(w, http.StatusInternalServerError, "lookup failed")
-		return
+		return false, false, fmt.Errorf("%w: %w", errLookup, err)
 	}
 	if existing != nil && !mutable(p) {
 		if existing.SHA256 == sp.SHA256 {
-			w.WriteHeader(http.StatusOK)
-			return
+			return false, true, nil
 		}
-		httpx.Error(w, http.StatusConflict, "release artifacts are immutable")
-		return
+		return false, false, errImmutable
 	}
 	kind := assets.KindArtifact
 	if strings.HasPrefix(path.Base(p), "maven-metadata.xml") {
 		kind = assets.KindMetadata
 	}
-	var uid int64
-	if pr != nil {
-		uid = pr.UserID
-	}
-	_, created, err := h.assets.Put(r.Context(), repo, p, sp, assets.ContentType(p), kind, uid)
-	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "store failed")
-		return
-	}
-	if created {
-		w.WriteHeader(http.StatusCreated)
-	} else {
-		w.WriteHeader(http.StatusOK)
-	}
+	_, created, err = h.assets.Put(ctx, repo, p, sp, assets.ContentType(p), kind, uid)
+	return created, false, err
 }
 
 func mutable(p string) bool {

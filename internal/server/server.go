@@ -24,6 +24,8 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	_ "github.com/Telesphorepo/Telesphorepo/internal/formats" // registers the built-in formats
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/move"
+	"github.com/Telesphorepo/Telesphorepo/internal/nexus"
 	"github.com/Telesphorepo/Telesphorepo/internal/oidc"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
@@ -108,9 +110,11 @@ func registerSettings() error {
 // RunWith is Run with Options.
 // Steps: logger; mkdir DataDir/TmpDir; db.Open (core migrations); format migrations; format
 // settings; settings.Load (master key, DB, env overrides); query optimizer; live storage
-// (hot-swapped on storage setting changes); repos/auth/assets services; bootstrap admin if no
-// users; signing key (setting, generated on first start); mux: GET /healthz, /api/ ->
-// api.Handler(), each format's Register, "/" -> web UI; listen; each format.Starter's Start.
+// (hot-swapped on storage setting changes); repos/auth/assets/move/nexus services; bootstrap
+// admin if no users; signing key (setting, generated on first start); mux: GET /healthz, /api/
+// -> api.Handler(), each format's Register, "/" -> web UI; listen; each format.Starter's Start;
+// resume a running storage move and the running Nexus syncs, start the Nexus sync scheduler;
+// serve.
 // Access logging must never log Authorization headers, cookies, or query strings.
 func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 	level := new(slog.LevelVar)
@@ -166,12 +170,22 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 			return
 		}
 		live.Swap(st)
-		log.Info("storage switched; existing blobs were not moved", "storage", new.Config.Storage)
+		log.Info("storage switched", "storage", new.Config.Storage)
 	})
 
 	rs := repos.New(d, format.ValidateRepoConfig)
 	as := auth.New(d, set.Config, rs)
 	ss := assets.New(d, live, set.Config)
+	mv := move.New(d, set, live, ss, rs, log.With("component", "move"))
+	nx := nexus.New(d, set, rs, log.With("component", "nexus"))
+	// The move copier and the Nexus sync runners and scheduler live until RunWith returns. They stop before the
+	// database closes (this defer runs before d.Close), and stay running in the database.
+	jobsCtx, stopJobs := context.WithCancel(ctx)
+	defer func() {
+		stopJobs()
+		mv.Wait()
+		nx.Wait()
+	}()
 
 	if opts.Init != nil {
 		if err := opts.Init(ctx, &Services{Config: cfg, Settings: set, Auth: as, Repos: rs}); err != nil {
@@ -195,7 +209,7 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 		io.WriteString(w, "ok\n")
 	})
 	sso := oidc.New(as, set.Config, log.With("component", "oidc"))
-	mux.Handle("/api/", api.New(as, rs, ss, set, sso).Handler())
+	mux.Handle("/api/", api.New(as, rs, ss, set, mv, nx, sso).Handler())
 	for _, f := range format.All() {
 		f.Register(mux, format.Host{
 			DB:       d,
@@ -229,6 +243,13 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 			s.Start(ctx)
 		}
 	}
+	// A storage move or Nexus sync left running by the previous process continues from its
+	// last saved position. Both stop with ctx and stay running in the database.
+	if err := mv.Resume(jobsCtx); err != nil {
+		ln.Close()
+		return err
+	}
+	nx.Start(jobsCtx)
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()

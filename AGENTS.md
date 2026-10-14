@@ -9,16 +9,20 @@ milestones are in `docs/superpowers/specs/`, mainly `2026-10-14-telesphorepo-mvp
 go tool task dev            # backend :8080 + Vite UI :5173 with live reload (open :5173)
 go tool task build [image]  # bin/telesphorepo with UI embedded (+ image telesphorepo:local)
 go tool task preview        # build, then run the production binary at :8080
-go tool task test [args]    # e2e suite; args go to go test, e.g. -run TestMaven
-go tool task test scale     # 100k and 1M asset latency test (slow)
+go tool task test [args]    # core zone (tag e2e); args go to go test, e.g. -run TestMaven
+go tool task test import    # import zone (tag import): TestNexus, starts a Nexus container (slow)
+go tool task test scale     # scale zone (tag scale): 100k and 1M asset latency test (slow)
+go tool task test all       # core, import and scale one after the other
 go tool task gen            # run sqlc for every internal/**/sqlc.yaml
 go tool task doctor         # show detected Go / bun / Node / Docker-Podman
 
 go build ./...
 go vet ./...
-go vet -tags e2e ./e2e/...  # e2e files only compile with the tag (`scale` for scale_test.go)
+go vet -tags e2e ./e2e/...  # e2e files only compile with a tag; also vet -tags import and -tags scale
 E2E_SKIP_BUILD=1 go tool task test -run TestX   # reuse the already-built image
 ```
+
+Run the core zone for every change. Run the import zone when you touch internal/nexus, internal/api/nexus.go, an importer, the repo lock or the mirror gate. Run the scale zone when you touch a hot query or an index. Run ll before a push that touches several zones. A subagent builds and vets with the tags; the main session runs the zones.
 
 `go tool task` is registered with `tool` in `go.mod`. There is no root `package.json`, Makefile
 or shell script, so it works the same on Windows, macOS and Linux. The UI build needs bun (npm is
@@ -83,7 +87,9 @@ the fallback) and Node 26+ (see `.node-version`). The e2e suite needs Docker or 
 | Auth / permission checks | `internal/auth` (`Identify`, repo access) |
 | Blob I/O | `internal/assets` (spool, store, serve) on top of `internal/storage` |
 | UI page | `web/src/pages/*.tsx`, routes and nav in `web/src/App.tsx`, fetch helpers in `web/src/api.ts` |
-| E2E harness | `e2e/harness_test.go` (servers, storage matrix `fs` + SeaweedFS, clients) |
+| Storage move (FS ↔ S3) | `internal/move` (service, copier), `internal/storage/mirror.go`, `internal/api/moves.go`, `web/src/pages/MovePanel.tsx` |
+| Nexus sources, syncs, cut-over | `internal/nexus` (client, service, `sync.go` scheduler and runner), `internal/api/nexus.go`, `web/src/pages/Nexus.tsx`. Per-format import code is the plugin's `Importer`. Repo lock: `repos.locked_by`, checked in `auth.RepoGate` |
+| E2E harness | `e2e/harness_test.go` (servers, storage matrix `fs` + SeaweedFS), `e2e/clients_test.go` (Maven, Debian and curl helpers that several zones share) |
 | Dev tooling | `tools/task` |
 
 ## Adding a repo format
@@ -99,7 +105,9 @@ format, so you edit no core file.
    `repos/{repo}/{path}`), and read limits from `Host.Config`.
 3. Implement the optional interfaces you need: `Migrator` (own tables), `Queryable` (plan guard),
    `Configurable` (settings group), `Starter` (background work), `StatusReporter`,
-   `ConfigObserver` and `Describer` (client snippets that the UI and `dev` show).
+   `ConfigObserver` and `Describer` (client snippets that the UI and `dev` show), and `Importer`
+   (`ImportFormats` and `Import`: the Nexus import offers each source file to the plugin; share
+   the code of your upload path with it, and return `imported`, `skipped` or `ignored`).
 4. If the format has tables, add `migrations/NNNN_*.sql`, `queries/*.sql` and a `sqlc.yaml`
    (copy `internal/debian/sqlc.yaml`). Run `go tool task gen`.
 5. Add one line to `internal/formats/all.go`: the import and the `format.Register(...)` argument.

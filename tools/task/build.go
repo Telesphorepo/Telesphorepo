@@ -74,11 +74,28 @@ func preview(ctx context.Context) error {
 	}
 }
 
-// test runs the e2e suite with the detected container engine; args pass to go test.
-// "test scale" runs the scale test (spec §5.5) instead.
+// testZones maps each e2e zone (spec §15) to its go test arguments before the package.
+var testZones = map[string][]string{
+	"core":   {"-tags", "e2e"},
+	"import": {"-tags", "import", "-timeout", "30m"},
+	"scale":  {"-tags", "scale", "-run", "TestScale", "-timeout", "60m"},
+}
+
+// test runs e2e zones with the detected container engine. An optional first argument picks
+// the zone ("import", "scale" or "all"; the default is core); the remaining args pass to
+// go test. "all" runs core, import and scale one after the other and fails if any fails.
 func test(ctx context.Context, args []string) error {
 	if _, err := checkGo(); err != nil {
 		return err
+	}
+	zones := []string{"core"}
+	if len(args) > 0 {
+		switch args[0] {
+		case "import", "scale":
+			zones, args = []string{args[0]}, args[1:]
+		case "all":
+			zones, args = []string{"core", "import", "scale"}, args[1:]
+		}
 	}
 	eng, err := containerengine.Detect(ctx)
 	if err != nil {
@@ -86,16 +103,26 @@ func test(ctx context.Context, args []string) error {
 	}
 	eng.ApplyEnv()
 	step("container engine: %s %s", eng.Name, dim(eng.Host))
-	argv := append([]string{"go", "test", "-tags", "e2e", "./e2e/...", "-count=1", "-v"}, args...)
-	if len(args) == 1 && args[0] == "scale" {
-		argv = []string{"go", "test", "-tags", "scale", "./e2e/...", "-run", "TestScale", "-count=1", "-timeout", "60m", "-v"}
+
+	var failed []string
+	var last error
+	for _, zone := range zones {
+		argv := append([]string{"go", "test"}, testZones[zone]...)
+		argv = append(argv, "./e2e/...", "-count=1", "-v")
+		argv = append(argv, args...)
+		step("zone %s: %s", zone, strings.Join(argv, " "))
+		err := runStep(ctx, ".", nil, argv...)
+		if ctx.Err() != nil {
+			return exitError{130}
+		}
+		if err != nil {
+			failed, last = append(failed, zone), childExit(err)
+		}
 	}
-	step("%s", strings.Join(argv, " "))
-	err = runStep(ctx, ".", nil, argv...)
-	if ctx.Err() != nil {
-		return exitError{130}
+	if len(zones) > 1 && len(failed) > 0 {
+		out.line(red("✗ ") + "failed zones: " + strings.Join(failed, ", "))
 	}
-	return childExit(err)
+	return last
 }
 
 // doctor prints what was detected and fails when a required tool is missing.

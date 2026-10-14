@@ -80,6 +80,12 @@ func (s *Service) RepoGate(w http.ResponseWriter, r *http.Request, name, format 
 	if lvl < need {
 		return denied()
 	}
+	// A locked repo takes no writes through HTTP; its text names the owner, e.g. the Nexus
+	// source that the repo mirrors.
+	if need >= Write && repo.LockedBy != "" {
+		httpx.Error(w, http.StatusConflict, repo.LockedBy)
+		return nil, nil, false
+	}
 	return repo, p, true
 }
 
