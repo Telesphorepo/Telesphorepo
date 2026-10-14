@@ -426,6 +426,20 @@ proof of a key that lives on an enrolled machine, and enrolling a machine requir
   token (`api_tokens.kind = 'minted'`, TTL ~12h, bound to the device). The plugin caches it and
   re-mints when expired. No password or second factor is needed per mint — the device key is the
   possession factor and enrollment already required 2FA.
+- **Mint at publish time (Databricks-CLI model):** like `databricks auth login` followed by
+  `generate-database-credential` for Lakebase, the one-time enrollment leaves a long-lived
+  credential on the machine (the device key), and a short-lived credential is minted on demand
+  immediately before use. Minted tokens default to a 1h TTL (configurable, max 12h) and are never
+  written to `settings.xml`/`gradle.properties`.
+- **Client integration:**
+  - **Gradle plugin** (`telesphorepo` settings/project plugin): `telesphorepo { url = "…" }`;
+    first run (or `./gradlew telesphorepoLogin`) performs enrollment; the plugin then configures
+    every Maven repository pointing at the server with a lazy credentials provider that mints a
+    token when a publish/resolve task actually executes, caching it in memory (or a 0600 file
+    under `~/.telesphorepo/`) until shortly before expiry.
+  - **CLI** (`telesphorepo login --url …`, `telesphorepo token`): same enrollment; `token` prints a
+    fresh minted token so Maven, apt (`auth.conf.d` via a hook) or scripts can use it.
+  - Both share the on-disk layout `~/.telesphorepo/<host>/{device.key,device.json}`.
 - **Revocation:** revoking a device in the UI invalidates its unexpired minted tokens and blocks
   future mints. Users and admins can list devices and their last use.
 - The M1/M2 token model already carries `expires_at` and `kind`; this adds `devices`,
