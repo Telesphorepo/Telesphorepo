@@ -1,0 +1,1 @@
+This commit also deletes the five finished specs in docs/superpowers/specs (bulk actions, Nexus import, group repositories, proxy repositories, Debian versions). Their content is in SPEC.md, web/src/README.md and docs/design/rationale.md.
