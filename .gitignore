@@ -9,3 +9,6 @@
 /.telesphorepo-dev/
 /data/
 /.idea/
+
+# Build outputs (go build in the repo root on Windows)
+*.exe
