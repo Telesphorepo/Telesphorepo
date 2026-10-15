@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -20,6 +21,8 @@ type settingItem struct {
 	Source string          `json:"source"`
 	Locked bool            `json:"locked"`
 	Value  json.RawMessage `json:"value"`
+	// Display is the size or duration in words.
+	Display string `json:"display"`
 }
 
 // listSettings fetches GET /api/settings as the admin ({groups:[{name, settings:[item]}]}) and
@@ -65,7 +68,7 @@ func TestSettingsAccess(t *testing.T) {
 	for _, it := range items {
 		groups[it.Group] = true
 	}
-	for _, g := range []string{"general", "storage", "security", "signing", "debian"} {
+	for _, g := range []string{"general", "storage", "security", "debian"} {
 		if !groups[g] {
 			t.Errorf("group %q missing from settings (have %v)", g, groups)
 		}
@@ -78,7 +81,7 @@ func TestSettingsAccess(t *testing.T) {
 	if st, b := s.API(t, http.MethodGet, "/api/settings", nil, nil); st != http.StatusUnauthorized {
 		t.Errorf("anonymous GET /api/settings: status %d, want 401: %s", st, b)
 	}
-	if st, _ := s.API(t, http.MethodPatch, "/api/settings", map[string]any{"max_json_bytes": 4096}, plain); st != http.StatusForbidden {
+	if st, _ := s.API(t, http.MethodPatch, "/api/settings", map[string]any{"max_json_size": 4096}, plain); st != http.StatusForbidden {
 		t.Errorf("non-admin PATCH: status %d, want 403", st)
 	}
 }
@@ -95,8 +98,8 @@ func TestSettingsLiveUpdateAndEnvLock(t *testing.T) {
 	if st, b := s.API(t, http.MethodPatch, "/api/settings", map[string]any{"cookie.secure": true}, s.Admin()); st != http.StatusConflict {
 		t.Fatalf("PATCH env-locked cookie.secure=true: status %d, want 409: %s", st, b)
 	}
-	if mj := items["max_json_bytes"]; mj.Locked || mj.Source == "env" {
-		t.Fatalf("max_json_bytes unexpectedly env-controlled: %+v", mj)
+	if mj := items["max_json_size"]; mj.Locked || mj.Source == "env" {
+		t.Fatalf("max_json_size unexpectedly env-controlled: %+v", mj)
 	}
 
 	// Lower the JSON body limit; it applies without a restart.
@@ -104,75 +107,96 @@ func TestSettingsLiveUpdateAndEnvLock(t *testing.T) {
 	if st, _ := s.API(t, http.MethodPost, "/api/tokens", big, s.Admin()); st == http.StatusRequestEntityTooLarge {
 		t.Fatalf("8KiB token request already rejected with default limit")
 	}
-	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"max_json_bytes": 2048}, s.Admin(), nil)
+	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"max_json_size": 2048}, s.Admin(), nil)
 	if st, b := s.API(t, http.MethodPost, "/api/tokens", big, s.Admin()); st != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversize JSON after lowering limit: status %d, want 413: %s", st, b)
 	}
 	items, _ = listSettings(t, s)
-	if got := items["max_json_bytes"]; got.Source != "db" || string(got.Value) != "2048" {
-		t.Fatalf("max_json_bytes after patch: %+v", got)
+	if got := items["max_json_size"]; got.Source != "db" || string(got.Value) != "2048" || got.Display != "2 KiB" {
+		t.Fatalf("max_json_size after patch: %+v", got)
 	}
 	// null resets to the default and the large body passes again.
-	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"max_json_bytes": nil}, s.Admin(), nil)
+	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"max_json_size": nil}, s.Admin(), nil)
 	if st, b := s.API(t, http.MethodPost, "/api/tokens", big, s.Admin()); st == http.StatusRequestEntityTooLarge {
 		t.Fatalf("still 413 after reset: %s", b)
 	}
 	// Invalid input is a 400.
-	if st, b := s.API(t, http.MethodPatch, "/api/settings", map[string]any{"max_json_bytes": "lots"}, s.Admin()); st != http.StatusBadRequest {
+	if st, b := s.API(t, http.MethodPatch, "/api/settings", map[string]any{"max_json_size": "lots"}, s.Admin()); st != http.StatusBadRequest {
 		t.Fatalf("invalid value: status %d, want 400: %s", st, b)
 	}
 }
 
-func TestSettingsSigningKey(t *testing.T) {
-	s := StartServer(t, ServerOpts{NoSigningKey: true})
-	pubKey := func() string {
-		req := s.NewRequest(t, http.MethodGet, "/keys/debian.asc", nil)
-		resp, b := s.Do(t, req, nil)
-		if resp.StatusCode != http.StatusOK || !strings.Contains(string(b), "BEGIN PGP PUBLIC KEY BLOCK") {
-			t.Fatalf("GET /keys/debian.asc: status %d: %s", resp.StatusCode, b)
-		}
-		return string(b)
+// TestSettingsSizeAndDuration checks the friendly input and the display text of size and
+// duration settings.
+func TestSettingsSizeAndDuration(t *testing.T) {
+	s := StartServer(t, ServerOpts{})
+	patch := func(key string, v any) {
+		t.Helper()
+		s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{key: v}, s.Admin(), nil)
 	}
-	before := pubKey()
-	_, raw := listSettings(t, s)
-	if strings.Contains(raw, "PRIVATE KEY") {
-		t.Fatal("GET /api/settings leaks private key material")
+	for _, c := range []struct{ in, value, display string }{
+		{"2GiB", "2147483648", "2 GiB"},
+		{"1.5 GiB", "1610612736", "1536 MiB"},
+		{"500MB", "500000000", "476.8 MiB"},
+		{"512 mib", "536870912", "512 MiB"},
+		{"4096", "4096", "4 KiB"},
+	} {
+		patch("max_upload_size", c.in)
+		got := func() settingItem { items, _ := listSettings(t, s); return items["max_upload_size"] }()
+		if string(got.Value) != c.value || got.Display != c.display || got.Source != "db" {
+			t.Errorf("max_upload_size %q: value %s display %q, want %s / %q", c.in, got.Value, got.Display, c.value, c.display)
+		}
+	}
+	for _, bad := range []any{"5 parsecs", "MiB", "-1GiB", "0", "0.5 B"} {
+		st, b := s.API(t, http.MethodPatch, "/api/settings", map[string]any{"max_upload_size": bad}, s.Admin())
+		if st != http.StatusBadRequest || !strings.Contains(string(b), `"max_upload_size"`) {
+			t.Errorf("max_upload_size %v: status %d, want 400 with a field error: %s", bad, st, b)
+		}
 	}
 
-	var out struct {
-		PublicKey   string `json:"public_key"`
-		Fingerprint string `json:"fingerprint"`
+	for _, c := range []struct{ in, value, display string }{
+		{"90 days", "2160h", "90 days"},
+		{"365d", "8760h", "365 days"},
+		{"15 minutes", "15m", "15 minutes"},
+		{"1h30m", "1h30m", "1 hour 30 minutes"},
+		{"12h", "12h", "12 hours"},
+	} {
+		patch("publish.device_ttl", c.in)
+		items, _ := listSettings(t, s)
+		got := items["publish.device_ttl"]
+		if string(got.Value) != `"`+c.value+`"` || got.Display != c.display {
+			t.Errorf("publish.device_ttl %q: value %s display %q, want %q / %q", c.in, got.Value, got.Display, c.value, c.display)
+		}
 	}
-	s.MustAPI(t, http.MethodPost, "/api/settings/signing-key", map[string]any{}, s.Admin(), &out)
-	if out.Fingerprint == "" {
-		t.Fatal("signing-key response has no fingerprint")
+	if st, b := s.API(t, http.MethodPatch, "/api/settings", map[string]any{"publish.device_ttl": "soon"}, s.Admin()); st != http.StatusBadRequest {
+		t.Errorf("bad duration: status %d, want 400: %s", st, b)
 	}
-	after := pubKey()
-	if after == before {
-		t.Fatal("/keys/debian.asc unchanged after generating a new signing key")
+}
+
+// TestSettingsSizeEnv checks that TR_MAX_UPLOAD_SIZE with a unit limits uploads.
+func TestSettingsSizeEnv(t *testing.T) {
+	s := StartServer(t, ServerOpts{Env: map[string]string{"TR_MAX_UPLOAD_SIZE": "1MiB"}})
+	items, _ := listSettings(t, s)
+	if got := items["max_upload_size"]; got.Source != "env" || string(got.Value) != "1048576" || got.Display != "1 MiB" {
+		t.Fatalf("max_upload_size from env: %+v", got)
 	}
-	if out.PublicKey != "" && strings.TrimSpace(out.PublicKey) != strings.TrimSpace(after) {
-		t.Fatal("response public_key differs from /keys/debian.asc")
+	repo := RandName("mvn")
+	s.CreateRepo(t, repo, "maven", false, nil)
+	p := "/maven/" + repo + "/com/example/lib/1.0.0/lib-1.0.0.jar"
+	// Send "Expect: 100-continue", as Maven and curl do for a large PUT: the server refuses
+	// before the body is sent. Without it, the server answers 413 before it reads the body and
+	// closes the connection, and the port forwarder of rootless Podman can drop the answer.
+	req := s.NewRequest(t, http.MethodPut, p, strings.NewReader(strings.Repeat("x", 2<<20)))
+	req.Header.Set("Expect", "100-continue")
+	s.PublishAuth(t, s.AdminUser, repo).apply(req)
+	c := &http.Client{Timeout: time.Minute, Transport: &http.Transport{ExpectContinueTimeout: 30 * time.Second}}
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatalf("2 MiB PUT with a 1 MiB limit: %v", err)
 	}
-	var out2 struct {
-		Fingerprint string `json:"fingerprint"`
-	}
-	s.MustAPI(t, http.MethodPost, "/api/settings/signing-key", map[string]any{}, s.Admin(), &out2)
-	if out2.Fingerprint == out.Fingerprint {
-		t.Fatal("fingerprint did not change on regeneration")
-	}
-	_, raw = listSettings(t, s)
-	if strings.Contains(raw, "PRIVATE KEY") {
-		t.Fatal("GET /api/settings leaks private key material after generation")
-	}
-	// The signing key cannot be written through PATCH.
-	if st, _ := s.API(t, http.MethodPatch, "/api/settings", map[string]any{"signing.key": SigningPrivateKey}, s.Admin()); st != http.StatusBadRequest {
-		t.Fatalf("PATCH signing.key: status %d, want 400", st)
-	}
-	// Non-admins cannot generate keys.
-	s.CreateUser(t, "plain", "plainpass123", false)
-	if st, _ := s.API(t, http.MethodPost, "/api/settings/signing-key", map[string]any{}, s.SignIn(t, "plain", "plainpass123")); st != http.StatusForbidden {
-		t.Fatalf("non-admin signing-key: status %d, want 403", st)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("2 MiB PUT with a 1 MiB limit: status %d, want 413", resp.StatusCode)
 	}
 }
 

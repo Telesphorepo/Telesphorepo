@@ -25,27 +25,42 @@ type devState struct {
 	dataDir        string
 	repos          []*repos.Repo
 	firstRun       bool
+	empty          bool        // --empty: no demo data on the first run
+	demoUsers      []*demoUser // the demo users, from the demo users file
 	settings       *settings.Service
 }
 
 func devCmd(args []string) error {
-	if err := noArgs("dev", args); err != nil {
-		return err
+	empty := false
+	for _, a := range args {
+		if a != "--empty" {
+			return &usageError{fmt.Sprintf("unexpected argument %q", a), find(commands, "dev")}
+		}
+		empty = true
 	}
 	boot, err := config.LoadBoot(map[string]string{"TR_DATA_DIR": config.DevDataDir})
 	if err != nil {
 		return err
 	}
-	st := &devState{dataDir: boot.DataDir}
+	st := &devState{dataDir: boot.DataDir, empty: empty}
 	ctx, stop := signalContext()
 	defer stop()
 	err = runDev(ctx, boot, st)
-	if errors.Is(err, db.ErrSchemaChanged) {
-		// The dev data dir is throwaway: a schema file changed since it was created, so start over.
-		fmt.Fprintf(os.Stderr, "dev: the schema changed since %s was created (%v); starting with a fresh data dir\n", boot.DataDir, err)
+	// The dev data dir is throwaway: start over when a schema file changed since it was created
+	// or when the demo data of the first run was not finished.
+	var why string
+	switch {
+	case errors.Is(err, db.ErrSchemaChanged):
+		why = fmt.Sprintf("the schema changed since %s was created (%v)", boot.DataDir, err)
+	case errors.Is(err, errDemoIncomplete):
+		why = errDemoIncomplete.Error()
+	}
+	if why != "" {
+		fmt.Fprintf(os.Stderr, "dev: %s; starting with a fresh data dir\n", why)
 		if rmErr := os.RemoveAll(boot.DataDir); rmErr != nil {
 			return fmt.Errorf("reset dev data dir: %w", rmErr)
 		}
+		*st = devState{dataDir: boot.DataDir, empty: empty}
 		err = runDev(ctx, boot, st)
 	}
 	return err
@@ -62,11 +77,15 @@ func runDev(ctx context.Context, boot *config.Boot, st *devState) error {
 	})
 }
 
-// devInit creates the admin (password saved to <data>/admin-password.txt) and the demo repos
-// on first run, and loads the credentials for the banner on every run.
+// devInit creates the admin (password saved to <data>/admin-password.txt) on the first run,
+// with the demo data (users, repos and files; see createDemoData) unless --empty, else one
+// empty demo repo per format. It loads the credentials for the banner on every run.
 func devInit(ctx context.Context, s *server.Services, st *devState) error {
 	cfg := s.Config
 	st.settings = s.Settings
+	if _, err := os.Stat(config.JoinDataDir(cfg.DataDir, demoPendingFile)); err == nil {
+		return errDemoIncomplete
+	}
 	pwFile := config.JoinDataDir(cfg.DataDir, config.DevAdminPasswordFile)
 	st.user = devAdminUser
 	if cfg.BootstrapAdminUser != "" {
@@ -78,6 +97,12 @@ func devInit(ctx context.Context, s *server.Services, st *devState) error {
 		return fmt.Errorf("check users: %w", err)
 	}
 	if !has {
+		if !st.empty {
+			// createDemoData removes the marker when the demo data is complete.
+			if err := writePrivate(config.JoinDataDir(cfg.DataDir, demoPendingFile), "the demo data is being written\n"); err != nil {
+				return err
+			}
+		}
 		pw := cfg.BootstrapAdminPassword
 		if pw == "" {
 			pw = server.RandomPassword()
@@ -100,6 +125,11 @@ func devInit(ctx context.Context, s *server.Services, st *devState) error {
 		return fmt.Errorf("list repos: %w", err)
 	}
 	if len(list) == 0 {
+		if st.firstRun && !st.empty {
+			if err := createDemoData(ctx, s, st.user); err != nil {
+				return err
+			}
+		}
 		for _, f := range format.All() {
 			// Anonymous read so package clients can resolve without credentials locally.
 			if _, err := s.Repos.Create(ctx, f.Name(), f.Name(), true, "Demo "+f.Title()+" repository", nil); err != nil && !errors.Is(err, repos.ErrExists) {
@@ -111,6 +141,9 @@ func devInit(ctx context.Context, s *server.Services, st *devState) error {
 		}
 	}
 	st.repos = list
+	if st.demoUsers, err = loadDemoUsers(config.JoinDataDir(cfg.DataDir, demoUsersFile)); err != nil {
+		return fmt.Errorf("read demo users: %w", err)
+	}
 	return nil
 }
 
@@ -134,7 +167,14 @@ func baseURL(cfg *config.Config, addr net.Addr) string {
 // printed: the runner shows one combined banner, and a rebuild must not repeat the box.
 func printDevBanner(st *devState, base string) {
 	ready := fmt.Sprintf("TELESPHOREPO_READY url=%s user=%s password=%s data=%q\n", base, st.user, st.password, st.dataDir)
+	var users []string
+	for _, u := range st.demoUsers {
+		users = append(users, fmt.Sprintf("  %-9s %-28s %s", u.name, u.role, u.password))
+	}
 	if os.Getenv("TELESPHOREPO_RUNNER") != "" {
+		if st.firstRun && len(users) > 0 {
+			fmt.Fprintf(os.Stdout, "Demo users (also in %s):\n%s\n", config.JoinDataDir(st.dataDir, demoUsersFile), strings.Join(users, "\n"))
+		}
 		fmt.Fprint(os.Stdout, ready)
 		return
 	}
@@ -145,23 +185,29 @@ func printDevBanner(st *devState, base string) {
 		pw = "<password>"
 	}
 	title := "Telesphorepo dev server is running"
-	if st.firstRun {
+	switch {
+	case st.firstRun && len(users) > 0:
+		title += " (first run: admin, demo users and demo data created)"
+	case st.firstRun:
 		title += " (first run: admin and demo repos created)"
 	}
-	var b strings.Builder
-	server.PrintBox(&b,
+	lines := []string{
 		title,
 		"",
-		"  url:      "+base,
-		"  username: "+st.user,
-		"  password: "+shownPW,
-		"  data dir: "+st.dataDir,
-		"",
-		"2FA not enforced (dev)",
-		"Start fresh by deleting the data dir.",
-	)
+		"  url:      " + base,
+		"  username: " + st.user,
+		"  password: " + shownPW,
+		"  data dir: " + st.dataDir,
+	}
+	if len(users) > 0 {
+		lines = append(lines, "", "Demo users (user, role, password):")
+		lines = append(lines, users...)
+	}
+	lines = append(lines, "", "2FA not enforced (dev)", "Start fresh by deleting the data dir.")
+	var b strings.Builder
+	server.PrintBox(&b, lines...)
 	b.WriteString("Reads take the username and password above, or a read token.\n")
-	b.WriteString("Uploads take a publish session: create one on the Publishing page.\n")
+	b.WriteString("Uploads take a publish session: see \"Publish to this repository\" on the repo page.\n")
 	for _, f := range format.All() {
 		d, ok := f.(format.Describer)
 		if !ok {
@@ -173,7 +219,10 @@ func printDevBanner(st *devState, base string) {
 		}
 		fmt.Fprintf(&b, "\n%s (repo %q):\n", f.Title(), r.Name)
 		for _, sn := range d.Usage(r, base) {
-			fmt.Fprintf(&b, "  %s\n", sn.Title)
+			if sn.Purpose != format.SnippetUse {
+				continue
+			}
+			fmt.Fprintf(&b, "  %s: %s\n", sn.Client, sn.Title)
 			for _, line := range strings.Split(strings.TrimRight(sn.Code, "\n"), "\n") {
 				fmt.Fprintf(&b, "    %s\n", line)
 			}

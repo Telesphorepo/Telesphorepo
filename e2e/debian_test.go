@@ -76,11 +76,7 @@ func TestDebian(t *testing.T) {
 		}
 
 		s.WaitDebianIndexed(t, repo)
-		st, keyBody := s.API(t, http.MethodGet, "/keys/debian.asc", nil, nil)
-		if st != http.StatusOK || !strings.Contains(string(keyBody), "BEGIN PGP PUBLIC KEY BLOCK") {
-			t.Fatalf("GET /keys/debian.asc: status %d: %s", st, keyBody)
-		}
-		key := string(keyBody)
+		key := s.DebianKey(t, repo, rauth)
 
 		out := debAptInstall(t, s, repo, reader, readerPass, key)
 		if !strings.Contains(out, "RESULT: hello 1.0\n") || !strings.Contains(out, "NATIVE: native "+pkgs.arch) {
@@ -139,9 +135,9 @@ func debCheckArchRemoval(t *testing.T, s *Server, tg *S3Target, repo string, arc
 	}
 }
 
-// TestDebianOversizeUpload checks TR_MAX_UPLOAD_BYTES on a dedicated server.
+// TestDebianOversizeUpload checks TR_MAX_UPLOAD_SIZE on a dedicated server.
 func TestDebianOversizeUpload(t *testing.T) {
-	s := StartServer(t, ServerOpts{Env: map[string]string{"TR_MAX_UPLOAD_BYTES": "4096"}})
+	s := StartServer(t, ServerOpts{Env: map[string]string{"TR_MAX_UPLOAD_SIZE": "4KiB"}})
 	repo := RandName("deb")
 	s.CreateRepo(t, repo, "debian", false, nil)
 	body := bytes.Repeat([]byte("x"), 256<<10)

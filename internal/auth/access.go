@@ -60,14 +60,15 @@ func (s *Service) gateLevel(ctx context.Context, p *Principal, repo *repos.Repo)
 }
 
 // publishRequired answers a write without an open publish session for the repo.
-func (s *Service) publishRequired(w http.ResponseWriter) {
+func (s *Service) publishRequired(w http.ResponseWriter, r *http.Request) {
 	base := strings.TrimSuffix(s.cfg().BaseURL, "/")
-	unauthorized(w, "publishing needs a publish session: "+base+"/#/publishing")
+	unauthorized(w, r, "publishing needs a publish session: "+base+"/#/settings/tokens")
 }
 
 // RepoGate authenticates a format-route request and checks it may do need on repo name. A write
 // (need >= Write) needs an open publish session for that repo; anything else gets 401 with the
-// Basic challenge. A user who lost write permission gets 403, a locked repo 409.
+// Basic challenge (none on the JSON API or for the web UI). A user who lost write permission
+// gets 403, a locked repo 409.
 // The repo's IP rules apply to every caller, admins included: the read rules to a read, the
 // publish rules to a write. A refused address gets 403 and an ip.denied audit event.
 // allowSession is true on the JSON API. A format route (allowSession false) also takes the UI
@@ -152,9 +153,9 @@ func (s *Service) gate(w http.ResponseWriter, r *http.Request, p *Principal, nam
 	denied := func() (*repos.Repo, *Principal, bool) {
 		switch {
 		case need >= Write && (p == nil || p.Publish == nil || (repo != nil && p.Publish.RepoID != repo.ID)):
-			s.publishRequired(w)
+			s.publishRequired(w, r)
 		case p == nil:
-			unauthorized(w, "authentication required")
+			unauthorized(w, r, "authentication required")
 		default:
 			httpx.Error(w, http.StatusForbidden, "forbidden")
 		}

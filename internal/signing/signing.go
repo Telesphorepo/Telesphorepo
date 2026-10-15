@@ -1,4 +1,5 @@
-// Package signing wraps ProtonMail go-crypto for repository index signing (spec §9.3).
+// Package signing holds the repository signing keys (spec §13.3) and wraps ProtonMail go-crypto
+// for repository index signing (spec §9.3).
 package signing
 
 import (
@@ -7,8 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"strings"
 	"time"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
@@ -21,32 +20,6 @@ type Signer struct {
 	entity *openpgp.Entity
 	cfg    *packet.Config
 	pub    []byte
-}
-
-// Load reads an armored private key file (see Parse). If passphraseFile is non-empty, its
-// trimmed contents decrypt the key.
-func Load(keyFile, passphraseFile string) (*Signer, error) {
-	b, err := os.ReadFile(keyFile)
-	if err != nil {
-		return nil, fmt.Errorf("signing key: %w", err)
-	}
-	pass, err := ReadPassphrase(passphraseFile)
-	if err != nil {
-		return nil, err
-	}
-	return Parse(b, pass)
-}
-
-// ReadPassphrase returns the trimmed contents of file, or nil when file is empty.
-func ReadPassphrase(file string) ([]byte, error) {
-	if file == "" {
-		return nil, nil
-	}
-	b, err := os.ReadFile(file)
-	if err != nil {
-		return nil, fmt.Errorf("signing passphrase: %w", err)
-	}
-	return []byte(strings.TrimSpace(string(b))), nil
 }
 
 // Parse loads an armored private key block (first entity with a signing-capable key),
@@ -167,42 +140,19 @@ func Generate(name, email string) (privateArmored, publicArmored []byte, err err
 // Fingerprint returns the signing entity's primary key fingerprint (upper-case hex).
 func (s *Signer) Fingerprint() string { return fmt.Sprintf("%X", s.entity.PrimaryKey.Fingerprint) }
 
-// Fingerprint returns the primary key fingerprint (upper-case hex) of the first entity in an
-// armored key block (public or private).
-func Fingerprint(armored []byte) (string, error) {
-	ring, err := openpgp.ReadArmoredKeyRing(bytes.NewReader(armored))
+// privateArmored returns the armored private key without a passphrase (Parse decrypted it),
+// with the key's own signatures.
+func (s *Signer) privateArmored() ([]byte, error) {
+	var buf bytes.Buffer
+	w, err := armor.Encode(&buf, openpgp.PrivateKeyType, nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	if len(ring) == 0 {
-		return "", errors.New("no key found")
+	if err := s.entity.SerializePrivateWithoutSigning(w, nil); err != nil {
+		return nil, err
 	}
-	return fmt.Sprintf("%X", ring[0].PrimaryKey.Fingerprint), nil
-}
-
-// GenerateFile writes a new Ed25519 signing key (armored private key, mode 0600) to keyFile,
-// refusing to overwrite an existing file, and returns its fingerprint.
-func GenerateFile(keyFile, name, email string) (string, error) {
-	priv, _, err := Generate(name, email)
-	if err != nil {
-		return "", fmt.Errorf("generate signing key: %w", err)
+	if err := w.Close(); err != nil {
+		return nil, err
 	}
-	fp, err := Fingerprint(priv)
-	if err != nil {
-		return "", err
-	}
-	f, err := os.OpenFile(keyFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return "", err
-	}
-	if _, err := f.Write(priv); err != nil {
-		f.Close()
-		os.Remove(keyFile)
-		return "", err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(keyFile)
-		return "", err
-	}
-	return fp, nil
+	return buf.Bytes(), nil
 }

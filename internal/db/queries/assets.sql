@@ -2,7 +2,7 @@
 
 -- Indexed point lookup on (repo_id, path), used by every download.
 -- name: GetAsset :one
-SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at
+SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id
 FROM assets WHERE repo_id = ? AND path = ?;
 
 -- name: GetAssetID :one
@@ -10,10 +10,11 @@ SELECT id FROM assets WHERE repo_id = ? AND path = ?;
 
 -- Path and kind never change on update (the FTS triggers rely on it).
 -- name: UpsertAsset :one
-INSERT INTO assets (repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO assets (repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (repo_id, path) DO UPDATE SET size = excluded.size, sha256 = excluded.sha256,
-  content_type = excluded.content_type, updated_at = excluded.updated_at, uploaded_by = excluded.uploaded_by
+  content_type = excluded.content_type, updated_at = excluded.updated_at, uploaded_by = excluded.uploaded_by,
+  publish_session_id = excluded.publish_session_id
 RETURNING id, kind, created_at, updated_at;
 
 -- name: DeleteAsset :execrows
@@ -24,25 +25,25 @@ DELETE FROM assets WHERE repo_id = ? AND path = ?;
 -- by row, which would make deep pages scan from the start of the repo. The caller passes the
 -- tighter of the prefix and the cursor. The *Range forms add the prefix's upper bound.
 -- name: ListAssetsFrom :many
-SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at
+SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id
 FROM assets
 WHERE repo_id = sqlc.arg(repo_id) AND path >= sqlc.arg(lower)
 ORDER BY path LIMIT sqlc.arg(limit);
 
 -- name: ListAssetsAfter :many
-SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at
+SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id
 FROM assets
 WHERE repo_id = sqlc.arg(repo_id) AND path > sqlc.arg(lower)
 ORDER BY path LIMIT sqlc.arg(limit);
 
 -- name: ListAssetsFromRange :many
-SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at
+SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id
 FROM assets
 WHERE repo_id = sqlc.arg(repo_id) AND path >= sqlc.arg(lower) AND path < sqlc.arg(upper)
 ORDER BY path LIMIT sqlc.arg(limit);
 
 -- name: ListAssetsAfterRange :many
-SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at
+SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id
 FROM assets
 WHERE repo_id = sqlc.arg(repo_id) AND path > sqlc.arg(lower) AND path < sqlc.arg(upper)
 ORDER BY path LIMIT sqlc.arg(limit);

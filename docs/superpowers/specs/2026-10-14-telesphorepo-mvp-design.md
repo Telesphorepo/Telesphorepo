@@ -145,8 +145,8 @@ overridable by env):
 | `TR_S3_PATH_STYLE` | `false` | path-style addressing (needed by SeaweedFS) |
 | `TR_S3_REDIRECT` | `true` | GET downloads 302 to a presigned URL; `false` = stream through server |
 | `TR_PRESIGN_TTL` | `5m` | presigned URL lifetime |
-| `TR_MAX_UPLOAD_BYTES` | `2147483648` | max artifact upload body |
-| `TR_MAX_JSON_BYTES` | `1048576` | max JSON API body |
+| `TR_MAX_UPLOAD_SIZE` | `2GiB` | max artifact upload body |
+| `TR_MAX_JSON_SIZE` | `1MiB` | max JSON API body |
 | `TR_COOKIE_SECURE` | `true` | `Secure` flag on session cookie (tests set `false` because they use plain HTTP) |
 | `TR_SESSION_TTL` | `168h` | absolute session lifetime |
 | `TR_TRUSTED_PROXIES` | `""` | comma-separated CIDRs whose `X-Forwarded-For` is trusted for client IP |
@@ -737,7 +737,7 @@ admin **Trust policies** (with presets) and **Publish log**; **Tokens** renamed 
 
 Routes: `GET`, `HEAD`, `PUT` on `/maven/{repo}/{path...}`.
 
-- **PUT**: requires write. Body capped at `TR_MAX_UPLOAD_BYTES` (`413` beyond). Body is spooled to
+- **PUT**: requires write. Body capped at `TR_MAX_UPLOAD_SIZE` (`413` beyond). Body is spooled to
   `TR_DATA_DIR/tmp` while computing SHA-256 + size, then stored. Responses:
   - new path → `201`
   - overwrite allowed → `200`
@@ -812,7 +812,7 @@ Routes: `GET`, `HEAD`, `PUT` on `/maven/{repo}/{path...}`.
 ## 10. JSON API **[M1]**
 
 All under `/api/`, JSON in/out, errors as `{"error": "message"}` with a proper status code.
-Request bodies capped at `TR_MAX_JSON_BYTES`. Times are RFC 3339 strings. List endpoints use keyset
+Request bodies capped at `TR_MAX_JSON_SIZE`. Times are RFC 3339 strings. List endpoints use keyset
 pagination: `?limit=` (default 50, max 200) and `?after=<cursor>`; responses include
 `"next": "<cursor>"` or `null`.
 
@@ -1098,6 +1098,75 @@ redesigned freely (one `0001_init.sql`, no migrations). To decide before buildin
   it when a device of that user mints a session (at most every few minutes). A refused refresh
   disables the user, revokes their devices and ends their sessions.
 - Local accounts (break-glass admin, developers who are not in the IdP) stay.
+## 13.3 UI organisation and design rules **[M5.5, approved 2026-10-14]**
+
+Replaces the M4/M5 page layout. Every rule here is checked against the built UI.
+
+**Three scopes, three places**
+- **Your account** (Settings, everyone): Profile & password; Sign-in security (TOTP, passkeys,
+  recovery codes); Devices; Read tokens; Publish tokens (manual publish sessions).
+- **A repository** (the repo's own pages): tabs Overview (description, visibility), Access (people
+  and levels), Network (download and publish allow-lists that reference IP lists), Signing (Debian:
+  choose or create a signing key), Format settings, Delete.
+- **The server** (Settings, admins): People; Single sign-on; CI publishing (trust policies); Signing
+  keys; IP lists; Storage; Nexus migration; Reverse proxy; General; Activity (audit log and publish
+  log in one page with filters).
+
+**Signing keys are a resource.** Table `signing_keys(id, name UNIQUE, fingerprint, public_key,
+private_key BLOB /*encrypted, AAD signing_keys:<id>*/, created_at)`. Admins create (Ed25519),
+import (armored, with passphrase) and delete keys (refused while a repo uses one); the list shows
+which repos use each key. A Debian repo's config names its key (`signing_key`), chosen at creation
+(an existing key, or "create a new key for this repo"). apt fetches the repo's public key at
+`GET /debian/{repo}/key.asc`. Changing a repo's key re-signs that repo only. On first start the
+server creates the key `default`. The global `signing.key` setting, `gpg.key_file` and
+`/keys/debian.asc` are removed; `gpg.key_file`'s purpose is served by import.
+
+**IP lists are a resource.** Table `ip_lists(id, name UNIQUE, kind CHECK IN ('preset','custom'),
+title, description, ranges TEXT /*JSON*/, source TEXT, fetched_at, error, created_at)`. Presets:
+`github-actions` and `cloudflare` (refresh daily, read-only ranges). Custom lists are created,
+renamed, edited and deleted by admins (delete refused while in use). There are no list templates.
+**Paste parsing**: `POST /api/ip-ranges/parse {text}` → `{ranges:[...], invalid:[{line, text, reason}],
+duplicates:n}` pulls every IPv4/IPv6 address and CIDR out of pasted text (one per line, commas,
+spaces, tabs, CSV/table columns; `#` comments and labels such as `runner-1: 3.76.89.160` are
+ignored; addresses become /32 or /128; duplicates removed). The IP-list editor, repo network rules
+and trusted proxies use it with a preview before saving. Repo rules and
+`trusted_proxies` reference lists by name (`list:<name>`) or hold CIDRs; the `preset` rule kind is
+replaced by `list`.
+
+**No browser password popup.** The UI's API client sends `X-Telesphorepo-UI: 1`; the server never
+sends `WWW-Authenticate` on a response to such a request, nor on any `/api` response.
+
+**Layout**
+- One app shell. One centered container for every page: `max-width: 1200px`, side padding 24px
+  (16px under 640px). Browse and Settings use the same container.
+- Top bar inside the container: logo + name (→ Browse home) left; search center (max 480px);
+  right: a single **Sign in** button when signed out, or **Settings** + avatar menu (your account,
+  sign out) when signed in. Sign out returns to Browse home.
+- Settings: a 220px sidebar inside the container plus the content column. Sidebar groups (Your
+  account, Repositories, Server) have a heading and a separator; every item has an icon.
+- Content: forms max 720px wide; tables full content width; page title + optional one-line
+  description; no decorative subtitles.
+
+**Interaction rules**
+- Centered dialogs only for confirmations and short forms (≤ 5 fields). Longer flows are full
+  pages: create repository, edit a CI publishing rule, edit an IP list, create/import a signing key.
+- No side sheets, except the navigation menu under 768px.
+- A selected file's details show in a right column inside the page, never an overlay.
+- Hover and selected states fill the whole row or item; no left-border or inset accents.
+
+**Type and visual rules**
+- One sans-serif family for all text. Monospace only inside code blocks and copy-paste snippets
+  (commands, tokens, config). Repo names, paths, checksums, labels and badges use the sans family
+  (checksums with tabular numerals).
+- One spacing scale (4px base) and one radius; consistent section separators.
+- Every page has loading, empty and error states.
+
+**Browse**
+- Home: title "Repositories" (no subtitle); toolbar: filter box, format filter, **New repository**
+  (admins); a table, rows clickable anywhere: name, format, Public/Private, files, size, last publish.
+- Repo page: header (name, format, visibility, description; actions Upload and Settings for
+  permitted users); tabs **Files** (breadcrumbs, table, inline details column) and **Setup** (client
+  snippets).
 ## 14. Docker image
 Multi-stage: `oven/bun` builds `web/` → `golang:1.27-alpine` builds with
 `CGO_ENABLED=0 -trimpath -ldflags="-s -w"` → `gcr.io/distroless/static-debian13:nonroot`.
@@ -1196,6 +1265,8 @@ is tested without a real bucket. `ForEachStorage` runs `fs`, `seaweedfs`, and `r
 - **M3.5**: publisher credentials (§7.6): publish sessions, second factor, device enrollment, CI
   trust policies, Gradle plugin, Maven extension + e2e zone `clients`.
 - **M5**: usability pass, folder upload, per-repo IP rules, trusted-proxy presets (§13.1).
+- **M5.5**: UI organisation and design rules, signing keys and IP lists as resources, no browser
+  password popup (§13.3).
 - **M6**: SSO for developers (§13.2), after the design points there are decided.
 - **M4**: new UI (Svelte + Tailwind + shadcn-svelte Maia; Browse + Settings), folder tree,
   deletes, manual upload, audit log, second-factor rule and dev mode (§13); Debian by-hash GC.

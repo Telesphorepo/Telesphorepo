@@ -46,56 +46,6 @@ func (h *Handler) ValidateConfig(raw json.RawMessage) (json.RawMessage, error) {
 	return h.DefaultConfig(), nil
 }
 
-// Usage returns the Maven and Gradle client setup for a repo. The credentials are for reads; a
-// deploy gets a publish session from the Telesphorepo Maven extension or Gradle plugin
-// (Publishing page).
-func (h *Handler) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
-	url := fmt.Sprintf("%s/maven/%s", baseURL, repo.Name)
-	return []format.Snippet{
-		{Title: "~/.m2/settings.xml (reads)", Lang: "xml", Code: fmt.Sprintf(`<settings>
-  <servers>
-    <server>
-      <id>%[1]s</id>
-      <username>YOUR_USERNAME</username>
-      <password>YOUR_READ_TOKEN</password>
-    </server>
-  </servers>
-</settings>`, repo.Name)},
-		{Title: "pom.xml (deploy credentials come from the Telesphorepo Maven extension)", Lang: "xml", Code: fmt.Sprintf(`<repositories>
-  <repository>
-    <id>%[1]s</id>
-    <url>%[2]s</url>
-  </repository>
-</repositories>
-<distributionManagement>
-  <repository>
-    <id>%[1]s</id>
-    <url>%[2]s</url>
-  </repository>
-</distributionManagement>`, repo.Name, url)},
-		{Title: "build.gradle.kts (publishing; credentials come from the Telesphorepo Gradle plugin)", Lang: "kotlin", Code: fmt.Sprintf(`publishing {
-    repositories {
-        maven {
-            name = "%[1]s"
-            url = uri("%[2]s")
-        }
-    }
-}`, repo.Name, url)},
-		{Title: "settings.gradle.kts (pluginManagement)", Lang: "kotlin", Code: fmt.Sprintf(`pluginManagement {
-    repositories {
-        maven {
-            url = uri("%s")
-            credentials {
-                username = providers.gradleProperty("telesphorepoUser").get()
-                password = providers.gradleProperty("telesphorepoToken").get()
-            }
-        }
-        gradlePluginPortal()
-    }
-}`, url)},
-	}
-}
-
 // Register mounts GET/HEAD/PUT /maven/{repo}/{path...}.
 func (h *Handler) Register(mux *http.ServeMux, host format.Host) {
 	h.auth, h.assets, h.cfg, h.host = host.Auth, host.Assets, host.Config, host
@@ -137,11 +87,7 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	defer sp.Close()
 
-	var uid int64
-	if pr != nil {
-		uid = pr.UserID
-	}
-	created, unchanged, err := h.put(r.Context(), repo, p, sp, uid)
+	created, unchanged, err := h.put(r.Context(), repo, p, sp, format.ByOf(pr))
 	switch {
 	case errors.Is(err, errImmutable):
 		httpx.Error(w, http.StatusConflict, errImmutable.Error())
@@ -171,7 +117,7 @@ var (
 // A release file that exists with the same bytes stays as it is (unchanged); with different
 // bytes put returns errImmutable. maven-metadata.xml* and SNAPSHOT files are replaced.
 // Uploads (PUT) and imports share it.
-func (h *Handler) put(ctx context.Context, repo *repos.Repo, p string, sp *assets.Spooled, uid int64) (created, unchanged bool, err error) {
+func (h *Handler) put(ctx context.Context, repo *repos.Repo, p string, sp *assets.Spooled, by assets.By) (created, unchanged bool, err error) {
 	unlock := h.assets.Lock(repo.ID, p)
 	defer unlock()
 	existing, err := h.assets.Get(ctx, repo.ID, p)
@@ -188,7 +134,7 @@ func (h *Handler) put(ctx context.Context, repo *repos.Repo, p string, sp *asset
 	if strings.HasPrefix(path.Base(p), "maven-metadata.xml") {
 		kind = assets.KindMetadata
 	}
-	_, created, err = h.assets.Put(ctx, repo, p, sp, assets.ContentType(p), kind, uid)
+	_, created, err = h.assets.Put(ctx, repo, p, sp, assets.ContentType(p), kind, by)
 	return created, false, err
 }
 

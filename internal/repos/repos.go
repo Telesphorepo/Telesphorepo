@@ -120,6 +120,25 @@ func (s *Service) List(ctx context.Context) ([]*Repo, error) {
 	}
 }
 
+// Page returns a keyset page of repos by name: names after after ("" for the first page). next
+// is the cursor of the next page, "" at the end.
+func (s *Service) Page(ctx context.Context, after string, limit int) ([]*Repo, string, error) {
+	rows, err := dbq.New(s.db.R).ListRepos(ctx, dbq.ListReposParams{After: after, Limit: int64(limit)})
+	if err != nil {
+		return nil, "", err
+	}
+	out := make([]*Repo, 0, len(rows))
+	for _, row := range rows {
+		r, _ := fromRow(row, nil)
+		out = append(out, r)
+	}
+	next := ""
+	if limit > 0 && len(rows) == limit {
+		next = rows[len(rows)-1].Name
+	}
+	return out, next, nil
+}
+
 // normalizeConfig checks that cfg is empty or a JSON object, then runs the format's validation,
 // which must return a JSON object.
 func (s *Service) normalizeConfig(format string, cfg json.RawMessage) (json.RawMessage, error) {

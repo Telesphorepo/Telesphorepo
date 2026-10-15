@@ -21,6 +21,9 @@ type PublishSession struct {
 	UserID     int64 // 0 for OIDC sessions
 	Via        string
 	Subject    string // the username (device, manual) or the CI token's sub (oidc)
+	// Provenance is true when the session recorded build provenance (internal/provenance): the
+	// files it writes point at it.
+	Provenance bool
 }
 
 // SetPublishTokens sets the verifier of publish-session tokens. Without it a "trs_" password

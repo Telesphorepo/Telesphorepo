@@ -9,15 +9,16 @@ import (
 
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 )
 
-// trustedSet is the compiled trusted_proxies setting for one settings snapshot and one preset
+// trustedSet is the compiled trusted_proxies setting for one settings snapshot and one IP list
 // snapshot.
 type trustedSet struct {
 	cfg        *config.Config
-	presets    *map[string]*presetState
+	lists      *map[string]*listState
 	prefixes   []netip.Prefix
-	cloudflare []netip.Prefix // the cloudflare ranges when the setting names them, else nil
+	cloudflare []netip.Prefix // the ranges of the list "cloudflare" when the setting names it, else nil
 }
 
 func contains(ps []netip.Prefix, a netip.Addr) bool {
@@ -29,28 +30,35 @@ func contains(ps []netip.Prefix, a netip.Addr) bool {
 	return false
 }
 
-// trustedNow returns the trusted set of the current settings and presets, compiling it when
-// either changed.
+// trustedNow returns the trusted set of the current settings and IP lists, compiling it when
+// either changed. An entry that names a list that does not exist trusts nothing.
 func (s *Service) trustedNow() *trustedSet {
-	cfg, presets := s.cfg(), s.presets.Load()
-	if t := s.trusted.Load(); t != nil && t.cfg == cfg && t.presets == presets {
+	cfg, lists := s.cfg(), s.lists.Load()
+	if t := s.trusted.Load(); t != nil && t.cfg == cfg && t.lists == lists {
 		return t
 	}
-	t := &trustedSet{cfg: cfg, presets: presets}
+	t := &trustedSet{cfg: cfg, lists: lists}
 	for _, e := range cfg.TrustedProxies {
-		switch e {
-		case PresetPrivate:
+		if e == Private {
 			t.prefixes = append(t.prefixes, privateRanges...)
-		case PresetCloudflare:
-			t.cloudflare = s.presetRanges(PresetCloudflare)
-			t.prefixes = append(t.prefixes, t.cloudflare...)
-		default:
-			if p, err := netip.ParsePrefix(e); err == nil {
-				t.prefixes = append(t.prefixes, p.Masked())
-			} else if a, err := netip.ParseAddr(e); err == nil {
-				a = a.Unmap()
-				t.prefixes = append(t.prefixes, netip.PrefixFrom(a, a.BitLen()))
+			continue
+		}
+		if name, ok := strings.CutPrefix(e, settings.TrustedProxyList); ok {
+			var ranges []netip.Prefix
+			if st := (*lists)[name]; st != nil {
+				ranges = st.ranges
 			}
+			if name == PresetCloudflare {
+				t.cloudflare = ranges
+			}
+			t.prefixes = append(t.prefixes, ranges...)
+			continue
+		}
+		if p, err := netip.ParsePrefix(e); err == nil {
+			t.prefixes = append(t.prefixes, p.Masked())
+		} else if a, err := netip.ParseAddr(e); err == nil {
+			a = a.Unmap()
+			t.prefixes = append(t.prefixes, netip.PrefixFrom(a, a.BitLen()))
 		}
 	}
 	s.trusted.Store(t)
@@ -72,8 +80,9 @@ func parseHop(h string) (netip.Addr, bool) {
 // ClientIP resolves the client address of r. When the TCP peer is not a trusted proxy, it is
 // the peer. Otherwise X-Forwarded-For is read right to left, skipping trusted addresses; the
 // first untrusted address is the client. When every hop is trusted, the left-most one is. An
-// entry that does not parse stops the walk at the last address read. Without X-Forwarded-For,
-// a trusted Cloudflare peer's CF-Connecting-IP gives the client.
+// entry that does not parse stops the walk at the last address read. When that address is a
+// trusted Cloudflare address, CF-Connecting-IP gives the client. So Cloudflare in front of Caddy
+// needs no setting in Caddy: Caddy passes CF-Connecting-IP on unchanged.
 func (s *Service) ClientIP(r *http.Request) netip.Addr {
 	peer := httpx.PeerIP(r)
 	t := s.trustedNow()
@@ -89,7 +98,6 @@ func (s *Service) ClientIP(r *http.Request) netip.Addr {
 		hops = append(hops, strings.Split(v, ",")...)
 	}
 	client := peer
-	seen := false
 	for i := len(hops) - 1; i >= 0; i-- {
 		if strings.TrimSpace(hops[i]) == "" {
 			continue
@@ -98,12 +106,12 @@ func (s *Service) ClientIP(r *http.Request) netip.Addr {
 		if !ok {
 			break
 		}
-		client, seen = a, true
+		client = a
 		if !contains(t.prefixes, a) {
 			return a
 		}
 	}
-	if !seen && contains(t.cloudflare, peer) {
+	if contains(t.cloudflare, client) {
 		if a, ok := parseHop(r.Header.Get("CF-Connecting-IP")); ok {
 			return a
 		}

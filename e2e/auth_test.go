@@ -223,3 +223,41 @@ func TestAuthRateLimit(t *testing.T) {
 		t.Fatal("429 for correct password without Retry-After")
 	}
 }
+
+// TestNoBrowserPasswordPrompt: no answer on /api and no answer to a request of the web UI
+// (X-Telesphorepo-UI: 1) carries WWW-Authenticate, so a browser never opens its password dialog.
+// Format routes keep the challenge for package clients.
+func TestNoBrowserPasswordPrompt(t *testing.T) {
+	s := StartServer(t, ServerOpts{})
+	repo := RandName("prompt")
+	s.CreateRepo(t, repo, "maven", false, nil)
+	artifact := "/maven/" + repo + "/com/example/p/1.0/p-1.0.txt"
+	ui := map[string]string{"X-Telesphorepo-UI": "1"}
+
+	noChallenge := func(what string, method, path string, auth Auth, hdr map[string]string) {
+		t.Helper()
+		req := s.NewRequest(t, method, path, nil)
+		for k, v := range hdr {
+			req.Header.Set(k, v)
+		}
+		resp, body := s.Do(t, req, auth)
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("%s: status %d, want 401: %s", what, resp.StatusCode, body)
+		}
+		if h := resp.Header.Get("WWW-Authenticate"); h != "" {
+			t.Fatalf("%s: WWW-Authenticate = %q, want none", what, h)
+		}
+	}
+	noChallenge("API with a wrong password", http.MethodGet, "/api/me", Basic{"admin", "not-the-password"}, nil)
+	noChallenge("API anonymous", http.MethodGet, "/api/me", nil, nil)
+	noChallenge("API repo files anonymous", http.MethodGet, "/api/repos/"+repo+"/tree?path=", nil, nil)
+	noChallenge("API upload without a session", http.MethodPost, "/api/repos/"+repo+"/upload", Basic{"admin", "not-the-password"}, nil)
+	noChallenge("UI download of a private file", http.MethodGet, artifact, nil, ui)
+	noChallenge("UI download with a wrong password", http.MethodGet, artifact, Basic{"admin", "not-the-password"}, ui)
+	noChallenge("UI upload without a session", http.MethodPut, artifact, nil, ui)
+
+	// Without the UI header a format route keeps the Basic challenge.
+	resp, body := authGet(t, s, artifact, nil)
+	wantStatus(t, resp, body, http.StatusUnauthorized)
+	wantChallenge(t, resp)
+}

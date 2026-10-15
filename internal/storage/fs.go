@@ -80,6 +80,24 @@ func (s *fsStore) Put(ctx context.Context, key string, r io.Reader, size int64, 
 	return nil
 }
 
+// WriteUnsynced writes data to key directly: no temp file, no fsync, no rename, and the parent
+// folders are created only when the first write finds them missing. It is for throwaway bulk data
+// (the dev demo dataset), never for uploads, which need Put's crash safety.
+func (s *fsStore) WriteUnsynced(key string, data []byte) error {
+	p, err := s.path(key)
+	if err != nil {
+		return err
+	}
+	err = os.WriteFile(p, data, 0o640)
+	if errors.Is(err, fs.ErrNotExist) {
+		if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+			return err
+		}
+		err = os.WriteFile(p, data, 0o640)
+	}
+	return err
+}
+
 func (s *fsStore) Get(ctx context.Context, key string) (io.ReadCloser, ObjectInfo, error) {
 	p, err := s.path(key)
 	if err != nil {

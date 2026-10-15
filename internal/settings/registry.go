@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"net/url"
 	"path"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -15,13 +16,14 @@ import (
 
 // Type is a setting's value type. Value representations (in Snapshot.Value, List and JSON):
 // string/duration -> string (durations keep the text form, e.g. "5m"), bool -> bool,
-// int -> int64, list -> []string.
+// size -> int64 (bytes), list -> []string. Input of a size or a duration accepts friendly forms
+// ("512MiB", "1.5 GiB", "90 days").
 type Type string
 
 const (
 	TypeString   Type = "string"
 	TypeBool     Type = "bool"
-	TypeInt      Type = "int"
+	TypeSize     Type = "size"
 	TypeDuration Type = "duration"
 	TypeList     Type = "list"
 )
@@ -33,12 +35,11 @@ const (
 	GroupSecurity   = "security"
 	GroupPublishing = "publishing"
 	GroupSSO        = "sso"
-	GroupSigning    = "signing"
 )
 
 // Groups lists the groups in display order (UI sections): the core groups, then the plugin
 // groups in registration order.
-var Groups = []string{GroupGeneral, GroupStorage, GroupSecurity, GroupPublishing, GroupSSO, GroupSigning}
+var Groups = []string{GroupGeneral, GroupStorage, GroupSecurity, GroupPublishing, GroupSSO}
 
 // GroupLabels are the display names of the groups.
 var GroupLabels = map[string]string{
@@ -47,7 +48,6 @@ var GroupLabels = map[string]string{
 	GroupSecurity:   "Security",
 	GroupPublishing: "Publishing",
 	GroupSSO:        "Single sign-on",
-	GroupSigning:    "Signing",
 }
 
 // Def describes one setting. Its env override is TR_<KEY upper-cased, dots -> '_'>.
@@ -67,8 +67,6 @@ type Def struct {
 	normalize func(v any) any
 	// storage marks settings that select or configure the blob store.
 	storage bool
-	// apiReadOnly settings cannot be changed through Update (they have a dedicated endpoint).
-	apiReadOnly bool
 }
 
 // IsStorageKey reports whether key selects or configures the blob store.
@@ -86,8 +84,8 @@ func (d *Def) Env() string {
 const (
 	KeyBaseURL           = "base_url"
 	KeyLogLevel          = "log.level"
-	KeyMaxUploadBytes    = "max_upload_bytes"
-	KeyMaxJSONBytes      = "max_json_bytes"
+	KeyMaxUploadSize     = "max_upload_size"
+	KeyMaxJSONSize       = "max_json_size"
 	KeyStorage           = "storage"
 	KeyFSRoot            = "fs.root"
 	KeyS3Endpoint        = "s3.endpoint"
@@ -102,9 +100,6 @@ const (
 	KeyCookieSecure      = "cookie.secure"
 	KeySessionTTL        = "session_ttl"
 	KeyTrustedProxies    = "trusted_proxies"
-	KeyGPGKeyFile        = "gpg.key_file"
-	KeyGPGPassphraseFile = "gpg.passphrase_file"
-	KeySigningKey        = "signing.key"
 
 	KeyOIDCIssuer         = "oidc.issuer"
 	KeyOIDCClientID       = "oidc.client_id"
@@ -148,7 +143,7 @@ func lower(v any) any { return strings.ToLower(strings.TrimSpace(v.(string))) }
 var registry = []*Def{
 	// General
 	{Key: KeyBaseURL, Type: TypeString, Group: GroupGeneral, Label: "Public base URL", Dev: "http://localhost:8080",
-		Help:      "URL clients use to reach this server, e.g. https://repo.example.com (used in UI hints).",
+		Help:      "Clients reach this server at this URL, for example https://repo.example.com. The UI uses it in client snippets.",
 		normalize: func(v any) any { return strings.TrimRight(strings.TrimSpace(v.(string)), "/") },
 		Validate: func(v any) error {
 			s := v.(string)
@@ -162,13 +157,13 @@ var registry = []*Def{
 			return nil
 		}},
 	{Key: KeyLogLevel, Type: TypeString, Default: "info", Group: GroupGeneral, Label: "Log level",
-		Help: "Minimum level of the server log.", Options: []string{"debug", "info", "warn", "error"}, normalize: lower},
-	{Key: KeyMaxUploadBytes, Type: TypeInt, Default: "2147483648", Group: GroupGeneral, Label: "Max upload size (bytes)",
-		Help: "Largest artifact or package upload accepted."},
-	{Key: KeyMaxJSONBytes, Type: TypeInt, Default: "1048576", Group: GroupGeneral, Label: "Max JSON body (bytes)",
-		Help: "Largest JSON API request body accepted."},
+		Help: "The server log keeps messages of this level and more important ones.", Options: []string{"debug", "info", "warn", "error"}, normalize: lower},
+	{Key: KeyMaxUploadSize, Type: TypeSize, Default: "2GiB", Group: GroupGeneral, Label: "Max upload size",
+		Help: "The server refuses a bigger artifact or package upload, for example above 2GiB."},
+	{Key: KeyMaxJSONSize, Type: TypeSize, Default: "1MiB", Group: GroupGeneral, Label: "Max JSON body size",
+		Help: "The server refuses a bigger JSON API request body, for example above 1MiB."},
 	{Key: KeyNexusSyncInterval, Type: TypeDuration, Default: "15m", Group: GroupGeneral, Label: "Nexus sync interval",
-		Help: "Time between two syncs of a mirroring Nexus source, e.g. 15m. The minimum is 1m.",
+		Help: "The server syncs each mirroring Nexus source this often, for example every 15m. The minimum is 1m.",
 		Validate: func(v any) error {
 			if durationOf(v) < time.Minute {
 				return errors.New("must be at least 1m")
@@ -178,7 +173,7 @@ var registry = []*Def{
 
 	// Storage
 	{Key: KeyStorage, Type: TypeString, Default: "fs", Group: GroupStorage, Label: "Storage backend",
-		Help:    "fs stores blobs on the data volume; s3 uses any S3-compatible store (Cloudflare R2, SeaweedFS, AWS). A change to another location moves the existing blobs to the new store in the background.",
+		Help:    "With fs, the server stores blobs on the data volume. With s3, it uses any S3-compatible store (Cloudflare R2, SeaweedFS, AWS). When the location changes, the server moves the existing blobs to the new store in the background.",
 		Options: []string{"fs", "s3", "r2"}, storage: true,
 		normalize: func(v any) any {
 			if s := lower(v).(string); s != "r2" {
@@ -187,10 +182,10 @@ var registry = []*Def{
 			return "s3"
 		}},
 	{Key: KeyFSRoot, Type: TypeString, Group: GroupStorage, Label: "Filesystem root",
-		Help: "Directory for blobs when storage is fs (default: blobs/ in the data dir).", storage: true,
+		Help: "The server keeps blobs in this directory when storage is fs. The default is blobs/ in the data dir.", storage: true,
 		normalize: func(v any) any { return strings.TrimSpace(v.(string)) }},
 	{Key: KeyS3Endpoint, Type: TypeString, Group: GroupStorage, Label: "S3 endpoint",
-		Help: "e.g. https://<account>.r2.cloudflarestorage.com or http://seaweedfs:8333.", storage: true,
+		Help: "The URL of the S3 API, for example https://<account>.r2.cloudflarestorage.com or http://seaweedfs:8333. Leave it empty for AWS.", storage: true,
 		normalize: func(v any) any { return strings.TrimSpace(v.(string)) },
 		Validate: func(v any) error {
 			s := v.(string)
@@ -204,7 +199,7 @@ var registry = []*Def{
 			return nil
 		}},
 	{Key: KeyS3Region, Type: TypeString, Default: "auto", Group: GroupStorage, Label: "S3 region",
-		Help: "Region name; R2 uses auto.", storage: true,
+		Help: "The region of the bucket. R2 uses auto.", storage: true,
 		normalize: func(v any) any { return strings.TrimSpace(v.(string)) }},
 	{Key: KeyS3Bucket, Type: TypeString, Group: GroupStorage, Label: "S3 bucket", storage: true,
 		normalize: func(v any) any { return strings.TrimSpace(v.(string)) }},
@@ -212,7 +207,7 @@ var registry = []*Def{
 		normalize: func(v any) any { return strings.TrimSpace(v.(string)) }},
 	{Key: KeyS3SecretAccessKey, Type: TypeString, Secret: true, Group: GroupStorage, Label: "S3 secret access key", storage: true},
 	{Key: KeyS3Prefix, Type: TypeString, Group: GroupStorage, Label: "S3 key prefix",
-		Help: "Optional prefix for every object key, e.g. telesphorepo/.", storage: true,
+		Help: "Every object key starts with this prefix, for example telesphorepo/. Leave it empty for no prefix.", storage: true,
 		normalize: func(v any) any {
 			s := strings.Trim(strings.TrimSpace(v.(string)), "/")
 			if s != "" {
@@ -229,23 +224,24 @@ var registry = []*Def{
 			return nil
 		}},
 	{Key: KeyS3PathStyle, Type: TypeBool, Default: "false", Group: GroupStorage, Label: "S3 path-style addressing",
-		Help: "Needed by SeaweedFS and MinIO; not by R2 or AWS.", storage: true},
+		Help: "SeaweedFS and MinIO need path-style addresses. R2 and AWS do not.", storage: true},
 	{Key: KeyS3Redirect, Type: TypeBool, Default: "true", Group: GroupStorage, Label: "Redirect downloads to S3",
-		Help: "GET downloads answer 302 with a presigned URL; off streams through the server.", storage: true},
-	{Key: KeyPresignTTL, Type: TypeDuration, Default: "5m", Group: GroupStorage, Label: "Presigned URL lifetime"},
+		Help: "When this is on, a GET download answers 302 with a presigned URL. When it is off, the server streams the file.", storage: true},
+	{Key: KeyPresignTTL, Type: TypeDuration, Default: "5m", Group: GroupStorage, Label: "Presigned URL lifetime",
+		Help: "A presigned download URL works for this time."},
 
 	// Security
 	{Key: KeyCookieSecure, Type: TypeBool, Default: "true", Dev: "false", Group: GroupSecurity, Label: "Secure session cookie",
-		Help: "Send the session cookie only over HTTPS. Turn off only for plain-HTTP setups."},
+		Help: "The browser sends the session cookie only over HTTPS. Turn this off only for a plain-HTTP setup."},
 	{Key: KeySessionTTL, Type: TypeDuration, Default: "168h", Group: GroupSecurity, Label: "Session lifetime",
-		Help: "Absolute lifetime of a UI sign-in."},
+		Help: "After this time, a person signed in to the UI must sign in again."},
 	{Key: KeyTrustedProxies, Type: TypeList, Group: GroupSecurity, Label: "Trusted proxies",
-		Help: "Reverse proxies whose X-Forwarded-For header gives the client address: CIDRs or addresses (e.g. 10.89.0.5), \"private\" (loopback, RFC 1918, ULA and link-local) and \"cloudflare\" (Cloudflare's published ranges, refreshed daily). Empty (the default) trusts no proxy and uses the TCP peer address.",
+		Help: "The server reads the client address from X-Forwarded-For only when the connection comes from one of these proxies. An entry is a CIDR, an address (for example 10.89.0.5), \"private\" (loopback, RFC 1918, ULA and link-local) or an IP list as \"list:<name>\" (for example list:cloudflare, the ranges that Cloudflare publishes, refreshed daily). With an empty list (the default), the server trusts no proxy and uses the TCP peer address.",
 		normalize: func(v any) any {
 			l := v.([]string)
 			out := make([]string, 0, len(l))
 			for _, s := range l {
-				if k := strings.ToLower(s); k == "private" || k == "cloudflare" {
+				if k := strings.ToLower(s); k == "private" || strings.HasPrefix(k, TrustedProxyList) {
 					s = k
 				}
 				out = append(out, s)
@@ -257,7 +253,13 @@ var registry = []*Def{
 		},
 		Validate: func(v any) error {
 			for _, s := range v.([]string) {
-				if s == "private" || s == "cloudflare" {
+				if s == "private" {
+					continue
+				}
+				if name, ok := strings.CutPrefix(s, TrustedProxyList); ok {
+					if !listNameRE.MatchString(name) {
+						return fmt.Errorf("%q does not name an IP list", s)
+					}
 					continue
 				}
 				if _, err := netip.ParsePrefix(s); err == nil {
@@ -266,16 +268,16 @@ var registry = []*Def{
 				if _, err := netip.ParseAddr(s); err == nil {
 					continue
 				}
-				return fmt.Errorf("%q is not a CIDR, an address, \"private\" or \"cloudflare\"", s)
+				return fmt.Errorf("%q is not a CIDR, an address, \"private\" or \"list:<name>\"", s)
 			}
 			return nil
 		}},
 	{Key: KeyAuditRetention, Type: TypeDuration, Default: "8760h", Group: GroupSecurity, Label: "Audit log retention",
-		Help: "How long the audit log keeps an event, e.g. 8760h (365 days). A job deletes older events every hour."},
+		Help: "The audit log keeps an event for this time, for example 8760h (365 days). A job deletes older events every hour."},
 
 	// Publishing (publish sessions and enrolled devices)
 	{Key: KeyPublishSessionTTL, Type: TypeDuration, Default: "15m", Group: GroupPublishing, Label: "Publish session lifetime",
-		Help: "Longest life of a publish session, the credential that every upload needs, e.g. 15m. A client ends its session when the publish is done. The maximum is 1h.",
+		Help: "A publish session, the credential that every upload needs, lasts at most this time, for example 15m. A client ends its session when the publish is done. The maximum is 1h.",
 		Validate: func(v any) error {
 			if durationOf(v) > time.Hour {
 				return errors.New("must be at most 1h")
@@ -283,23 +285,24 @@ var registry = []*Def{
 			return nil
 		}},
 	{Key: KeyPublishDeviceTTL, Type: TypeDuration, Default: "2160h", Group: GroupPublishing, Label: "Device lifetime",
-		Help: "How long an enrolled device key (Gradle plugin, Maven extension) can start publish sessions, e.g. 2160h (90 days). After that the developer enrolls the device again."},
+		Help: "An enrolled device key (Gradle plugin, Maven extension) can start publish sessions for this time, for example 2160h (90 days). After this time, the developer must enroll the device again."},
 
 	// Single sign-on (OIDC, admins only)
 	{Key: KeyOIDCIssuer, Type: TypeString, Group: GroupSSO, Label: "OIDC issuer URL",
-		Help:      "Issuer of your identity provider, e.g. https://kc.example.com/realms/ops. Setting it enables \"Sign in with SSO\" for administrators; saving checks the issuer's discovery document.",
+		Help:      "The issuer URL of your identity provider, for example https://kc.example.com/realms/ops. When it is set, administrators can sign in with SSO. A save checks the discovery document of the issuer.",
 		normalize: trim, Validate: httpURL},
 	{Key: KeyOIDCClientID, Type: TypeString, Group: GroupSSO, Label: "Client ID",
-		Help: "Client ID of the confidential client registered at the identity provider.", normalize: trim},
-	{Key: KeyOIDCClientSecret, Type: TypeString, Secret: true, Group: GroupSSO, Label: "Client secret"},
+		Help: "The identity provider gives this ID to the confidential client that you register there.", normalize: trim},
+	{Key: KeyOIDCClientSecret, Type: TypeString, Secret: true, Group: GroupSSO, Label: "Client secret",
+		Help: "The identity provider gives this secret with the client ID."},
 	{Key: KeyOIDCRedirectURL, Type: TypeString, Group: GroupSSO, Label: "Redirect URL",
-		Help:      "Callback URL registered at the identity provider (default: <public base URL>/api/auth/oidc/callback).",
+		Help:      "Register this callback URL at the identity provider. The default is <public base URL>/api/auth/oidc/callback.",
 		normalize: trim, Validate: httpURL},
 	{Key: KeyOIDCScopes, Type: TypeString, Default: "openid profile email", Group: GroupSSO, Label: "Scopes",
-		Help:      "Space-separated scopes requested at sign-in; openid is always included.",
+		Help:      "The server asks for these space-separated scopes at sign-in. It always adds openid.",
 		normalize: func(v any) any { return strings.Join(strings.Fields(v.(string)), " ") }},
 	{Key: KeyOIDCAdminClaim, Type: TypeString, Default: "groups", Group: GroupSSO, Label: "Admin claim",
-		Help:      "ID token claim checked for admin rights; dotted paths allowed (realm_access.roles for Keycloak realm roles).",
+		Help:      "The server checks this ID token claim for admin rights. A dotted path is allowed, for example realm_access.roles for Keycloak realm roles.",
 		normalize: trim,
 		Validate: func(v any) error {
 			s := v.(string)
@@ -314,9 +317,9 @@ var registry = []*Def{
 			return nil
 		}},
 	{Key: KeyOIDCAdminValues, Type: TypeList, Group: GroupSSO, Label: "Admin claim values",
-		Help: "The admin claim (a string or a list) must contain one of these, e.g. repo-admins."},
+		Help: "The admin claim (a string or a list) must contain one of these values, for example repo-admins."},
 	{Key: KeyOIDCAdminEmails, Type: TypeList, Group: GroupSSO, Label: "Admin emails",
-		Help: "Additional allowlist of admin email addresses; matched only when the provider marks the email verified.",
+		Help: "A person with one of these email addresses is an admin too. The server matches an address only when the provider marks it verified.",
 		normalize: func(v any) any {
 			l := v.([]string)
 			out := make([]string, 0, len(l))
@@ -329,21 +332,17 @@ var registry = []*Def{
 			return out
 		}},
 	{Key: KeyOIDCSessionTTL, Type: TypeDuration, Default: "12h", Group: GroupSSO, Label: "SSO session lifetime",
-		Help: "Absolute lifetime of a UI sign-in through SSO."},
+		Help: "After this time, an admin signed in through SSO must sign in again."},
 	{Key: KeyAdminPasswordLogin, Type: TypeBool, Default: "true", Group: GroupSSO, Label: "Password sign-in for admins",
-		Help: "Off: local admins can no longer sign in to the UI with a password (publishers still can). Requires SSO. Break-glass: set TR_ADMIN_PASSWORD_LOGIN=true and restart."},
-
-	// Signing
-	{Key: KeySigningKey, Type: TypeString, Secret: true, Group: GroupSigning, Label: "Signing key",
-		Help:        "Armored OpenPGP private key that signs repository indexes. Generated on first start; upload or regenerate it here.",
-		apiReadOnly: true},
-	{Key: KeyGPGKeyFile, Type: TypeString, Group: GroupSigning, Label: "Signing key file",
-		Help:      "Path of a mounted armored private key; when set it replaces the stored signing key.",
-		normalize: func(v any) any { return strings.TrimSpace(v.(string)) }},
-	{Key: KeyGPGPassphraseFile, Type: TypeString, Group: GroupSigning, Label: "Signing key passphrase file",
-		Help:      "Path of a file holding the signing key's passphrase (only for encrypted keys).",
-		normalize: func(v any) any { return strings.TrimSpace(v.(string)) }},
+		Help: "When this is off, local admins cannot sign in to the UI with a password, but publishers still can. It needs SSO. To turn it on again without SSO, set TR_ADMIN_PASSWORD_LOGIN=true and restart."},
 }
+
+// TrustedProxyList is the prefix of a trusted_proxies entry that names an IP list, e.g.
+// "list:cloudflare".
+const TrustedProxyList = "list:"
+
+// listNameRE is the form of an IP list name (the repo name form).
+var listNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 
 var byKey = func() map[string]*Def {
 	m := make(map[string]*Def, len(registry))
@@ -395,10 +394,10 @@ func (d *Def) parseText(s string) (any, error) {
 			return nil, errors.New("must be true or false")
 		}
 		v = b
-	case TypeInt:
-		n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	case TypeSize:
+		n, err := parseSize(s)
 		if err != nil {
-			return nil, errors.New("must be an integer")
+			return nil, err
 		}
 		v = n
 	case TypeDuration:
@@ -435,12 +434,12 @@ func (d *Def) decodeJSON(raw json.RawMessage) (any, error) {
 			return d.parseText(s)
 		}
 		v = b
-	case TypeInt:
+	case TypeSize:
 		var n int64
 		if err := json.Unmarshal(raw, &n); err != nil {
 			var s string
 			if json.Unmarshal(raw, &s) != nil {
-				return nil, errors.New("must be an integer")
+				return nil, errors.New(sizeHint)
 			}
 			return d.parseText(s)
 		}
@@ -471,15 +470,16 @@ func (d *Def) check(v any) (any, error) {
 		v = d.normalize(v)
 	}
 	switch d.Type {
-	case TypeInt:
+	case TypeSize:
 		if v.(int64) <= 0 {
-			return nil, errors.New("must be a positive integer")
+			return nil, errors.New("must be a positive size")
 		}
 	case TypeDuration:
-		dur, err := time.ParseDuration(v.(string))
+		dur, err := parseDuration(v.(string))
 		if err != nil || dur <= 0 {
-			return nil, errors.New(`must be a positive duration such as "300ms", "5m" or "168h"`)
+			return nil, errors.New(`must be a positive duration such as "15m", "12h", "90 days" or "1h30m"`)
 		}
+		v = canonicalDuration(dur)
 	}
 	if len(d.Options) > 0 {
 		s, _ := v.(string)

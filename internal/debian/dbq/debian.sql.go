@@ -294,41 +294,6 @@ func (q *Queries) ListAllDirtyDists(ctx context.Context) ([]ListAllDirtyDistsRow
 	return items, nil
 }
 
-const listAllIndexFiles = `-- name: ListAllIndexFiles :many
-SELECT repo_id, distribution, path FROM deb_index_files
-ORDER BY repo_id, distribution, path
-`
-
-type ListAllIndexFilesRow struct {
-	RepoID       int64
-	Distribution string
-	Path         string
-}
-
-// Re-sign after a signing-key change: every published index file.
-func (q *Queries) ListAllIndexFiles(ctx context.Context) ([]ListAllIndexFilesRow, error) {
-	rows, err := q.db.QueryContext(ctx, listAllIndexFiles)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListAllIndexFilesRow
-	for rows.Next() {
-		var i ListAllIndexFilesRow
-		if err := rows.Scan(&i.RepoID, &i.Distribution, &i.Path); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const listDirtyUnits = `-- name: ListDirtyUnits :many
 SELECT component, architecture FROM deb_dirty
 WHERE repo_id = ? AND distribution = ?

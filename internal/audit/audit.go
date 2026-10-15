@@ -36,6 +36,11 @@ const (
 	SettingsUpdate   = "settings.update"
 	IPDenied         = "ip.denied"     // a repo's IP rules refused the client address
 	IPRulesUpdate    = "repo.ip_rules" // a repo's IP rules were replaced
+	IPListCreate     = "ip_list.create"
+	IPListUpdate     = "ip_list.update"
+	IPListDelete     = "ip_list.delete"
+	SigningKeyCreate = "signing_key.create" // created or imported
+	SigningKeyDelete = "signing_key.delete"
 )
 
 // Actor is who did something: a user (UserID set), a CI identity (Name is the token's

@@ -100,18 +100,14 @@ func (a *API) deleteFiles(w http.ResponseWriter, r *http.Request) {
 
 // upload takes a multipart upload of files with a publish session for the repo and hands it to
 // the format's ManualUploader: 201 {files: [Uploaded]}. The files together may not exceed
-// max_upload_bytes.
+// max_upload_size.
 func (a *API) upload(w http.ResponseWriter, r *http.Request) {
 	repo, p, up, ups, fields, ok := a.readUpload(w, r)
 	defer closeUploads(ups)
 	if !ok {
 		return
 	}
-	var uid int64
-	if p != nil {
-		uid = p.UserID
-	}
-	res, err := up.Upload(r.Context(), repo, ups, fields, uid)
+	res, err := up.Upload(r.Context(), repo, ups, fields, format.ByOf(p))
 	a.recordUploads(r, p, repo, res)
 	var ue *format.UploadError
 	if errors.As(err, &ue) {
@@ -174,7 +170,7 @@ func (a *API) scanUpload(w http.ResponseWriter, r *http.Request) {
 // readUpload authorizes a manual upload or scan of repo {name} (a publish session of the repo)
 // and reads its multipart body: text fields first, then files. A file's relative path is its
 // filename as sent (the browser's path inside the dropped folder); every path must be a valid
-// repo path and appear once. The files together may not exceed max_upload_bytes. On failure it
+// repo path and appear once. The files together may not exceed max_upload_size. On failure it
 // has answered and returns ok=false; the caller closes the files either way.
 func (a *API) readUpload(w http.ResponseWriter, r *http.Request) (*repos.Repo, *auth.Principal, format.ManualUploader, []format.UploadFile, map[string]string, bool) {
 	repo, p, ok := a.auth.RepoGate(w, r, r.PathValue("name"), "", auth.Write, true)
@@ -334,4 +330,23 @@ func (a *API) listAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, list[audit.Entry]{items, idNext(next)})
+}
+
+// fileDetails returns one file with its details and build provenance: ?path= -> File.
+func (a *API) fileDetails(w http.ResponseWriter, r *http.Request) {
+	repo, _, ok := a.auth.RepoGate(w, r, r.PathValue("name"), "", auth.Read, true)
+	if !ok {
+		return
+	}
+	f, err := a.files.Details(r.Context(), repo, r.URL.Query().Get("path"))
+	switch {
+	case errors.Is(err, files.ErrInvalid):
+		httpx.Error(w, http.StatusBadRequest, "invalid path")
+	case errors.Is(err, files.ErrNotFound):
+		httpx.Error(w, http.StatusNotFound, "file not found")
+	case err != nil:
+		fail(w, r, err)
+	default:
+		httpx.WriteJSON(w, http.StatusOK, f)
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
@@ -142,6 +143,12 @@ func (a *API) patchSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items := a.settings.List(r.Context())
+	if msg := a.unknownProxyList(patch); msg != "" {
+		httpx.WriteJSON(w, http.StatusBadRequest, map[string]any{
+			"error": msg, "fields": map[string]string{settings.KeyTrustedProxies: msg},
+		})
+		return
+	}
 	if changesAny(items, patch, func(k string) bool { return ssoKeys[k] }) {
 		if err := a.settings.TestOIDC(r.Context(), patch); err != nil {
 			a.settingsError(w, r, err, items)
@@ -175,6 +182,27 @@ func (a *API) patchSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	a.recordSettings(r, p, patch)
 	httpx.WriteJSON(w, http.StatusOK, a.settingsList(r))
+}
+
+// unknownProxyList returns an error message when patch sets trusted_proxies with a "list:<name>"
+// entry whose IP list does not exist, else "". Other mistakes are left to the settings
+// validation.
+func (a *API) unknownProxyList(patch map[string]json.RawMessage) string {
+	raw, ok := patch[settings.KeyTrustedProxies]
+	if !ok {
+		return ""
+	}
+	var entries []string
+	if json.Unmarshal(raw, &entries) != nil {
+		return ""
+	}
+	for _, e := range entries {
+		name, ok := strings.CutPrefix(strings.ToLower(strings.TrimSpace(e)), settings.TrustedProxyList)
+		if ok && !a.rules.Exists(name) {
+			return "trusted_proxies: there is no IP list " + strconv.Quote(name)
+		}
+	}
+	return ""
 }
 
 // recordSettings writes the keys of a saved settings patch to the audit log, never the values.
@@ -277,41 +305,4 @@ func (a *API) testOIDC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
-}
-
-func (a *API) getSigningKey(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
-		return
-	}
-	info := a.settings.SigningKey()
-	if info == nil {
-		httpx.Error(w, http.StatusNotFound, "no signing key configured")
-		return
-	}
-	httpx.WriteJSON(w, http.StatusOK, info)
-}
-
-func (a *API) setSigningKey(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.admin(w, r)
-	if !ok {
-		return
-	}
-	var in struct {
-		Armored string `json:"armored"`
-	}
-	// The body is optional: none (or {}) generates a new key.
-	if r.ContentLength != 0 && !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
-		return
-	}
-	info, err := a.settings.SetSigningKey(r.Context(), in.Armored, p.UserID)
-	if errors.Is(err, settings.ErrSigningKeyFromFile) {
-		httpx.Error(w, http.StatusConflict, err.Error())
-		return
-	}
-	if err != nil {
-		a.settingsError(w, r, err, a.settings.List(r.Context()))
-		return
-	}
-	a.record(r, p, audit.SettingsUpdate, nil, settings.KeySigningKey, map[string]any{"keys": []string{settings.KeySigningKey}})
-	httpx.WriteJSON(w, http.StatusOK, info)
 }

@@ -15,8 +15,9 @@ const (
 )
 
 // Start runs the cleanup job until ctx ends: every minute it deletes expired challenges,
-// enrollments and seen CI tokens, and sessions that ended more than 30 days ago. Wait returns
-// once it has stopped.
+// enrollments and seen CI tokens, and sessions that ended more than 30 days ago, except a CI
+// session with build provenance that wrote files: it stays as the build record of those files.
+// Wait returns once it has stopped.
 func (s *Service) Start(ctx context.Context) {
 	s.wg.Add(1)
 	go func() {
@@ -49,6 +50,9 @@ func (s *Service) cleanup(ctx context.Context) {
 		{"enrollments", s.wq.DeleteExpiredEnrollments, now.Unix()},
 		{"seen CI tokens", s.wq.DeleteExpiredSeenOIDCTokens, now.Unix()},
 		{"publish sessions", s.wq.DeleteOldPublishSessions, now.Add(-logRetention).Unix()},
+		// A CI session with build provenance stays as the build record of the files it wrote.
+		{"kept build records", s.wq.KeepProvenanceSessions, now.Add(-logRetention).Unix()},
+		{"unused build records", s.wq.DeleteUnusedProvenanceSessions, now.Add(-logRetention).Unix()},
 	}
 	for _, j := range jobs {
 		for {

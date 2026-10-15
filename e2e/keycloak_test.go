@@ -46,6 +46,11 @@ const (
 	kcCIRepository  = "acme/app"
 	kcCIRef         = "refs/tags/v1.0.0"
 	kcCIWorkflowRef = "acme/app/.github/workflows/release.yml@refs/tags/v1.0.0"
+	kcCISHA         = "0123456789abcdef0123456789abcdef01234567"
+	kcCIRunID       = "8123456789"
+	kcCIRunAttempt  = "2"
+	kcCIActor       = "octocat"
+	kcCIWorkflow    = "Release"
 )
 
 // Keycloak is a running Keycloak reachable under the same URL from the test process and from
@@ -175,7 +180,7 @@ func (kc *Keycloak) Client(jar http.CookieJar) *http.Client {
 
 // CIToken returns a new identity token of the ci-github client (client-credentials grant). It
 // is a JWT with iss = Issuer, aud containing CIAudience, a jti, and the GitHub-shaped claims
-// repository, ref and workflow_ref.
+// repository, ref, workflow_ref, sha, run_id, run_attempt, actor and workflow.
 func (kc *Keycloak) CIToken(t testing.TB) string {
 	t.Helper()
 	resp, err := kc.Client(nil).PostForm(kc.Issuer+"/protocol/openid-connect/token", url.Values{

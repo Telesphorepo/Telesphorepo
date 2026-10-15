@@ -9,6 +9,41 @@ import (
 	"context"
 )
 
+const createCustomList = `-- name: CreateCustomList :one
+INSERT INTO ip_lists (name, kind, title, description, ranges, created_at) VALUES (?, 'custom', ?, ?, ?, ?)
+RETURNING id
+`
+
+type CreateCustomListParams struct {
+	Name        string
+	Title       string
+	Description string
+	Ranges      string
+	CreatedAt   int64
+}
+
+func (q *Queries) CreateCustomList(ctx context.Context, arg CreateCustomListParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, createCustomList,
+		arg.Name,
+		arg.Title,
+		arg.Description,
+		arg.Ranges,
+		arg.CreatedAt,
+	)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
+const deleteCustomList = `-- name: DeleteCustomList :exec
+DELETE FROM ip_lists WHERE id = ? AND kind = 'custom'
+`
+
+func (q *Queries) DeleteCustomList(ctx context.Context, id int64) error {
+	_, err := q.db.ExecContext(ctx, deleteCustomList, id)
+	return err
+}
+
 const deleteRepoIPRules = `-- name: DeleteRepoIPRules :exec
 DELETE FROM repo_ip_rules WHERE repo_id = ?
 `
@@ -18,23 +53,31 @@ func (q *Queries) DeleteRepoIPRules(ctx context.Context, repoID int64) error {
 	return err
 }
 
-const getPresetRanges = `-- name: GetPresetRanges :one
-
-SELECT name, ranges, fetched_at, error FROM preset_ranges WHERE name = ?
+const ensurePresetList = `-- name: EnsurePresetList :exec
+INSERT INTO ip_lists (name, kind, title, description, source, created_at) VALUES (?, 'preset', ?, ?, ?, ?)
+ON CONFLICT (name) DO UPDATE SET title = excluded.title, description = excluded.description, source = excluded.source
+WHERE ip_lists.kind = 'preset'
 `
 
-// IP range presets and per-repo IP rules (internal/netrules). Request paths read the in-memory
-// copies; these queries run at startup, on a refresh and on an admin change.
-func (q *Queries) GetPresetRanges(ctx context.Context, name string) (PresetRange, error) {
-	row := q.db.QueryRowContext(ctx, getPresetRanges, name)
-	var i PresetRange
-	err := row.Scan(
-		&i.Name,
-		&i.Ranges,
-		&i.FetchedAt,
-		&i.Error,
+type EnsurePresetListParams struct {
+	Name        string
+	Title       string
+	Description string
+	Source      string
+	CreatedAt   int64
+}
+
+// A preset gets its row on the first start; later starts update its title, description and
+// source.
+func (q *Queries) EnsurePresetList(ctx context.Context, arg EnsurePresetListParams) error {
+	_, err := q.db.ExecContext(ctx, ensurePresetList,
+		arg.Name,
+		arg.Title,
+		arg.Description,
+		arg.Source,
+		arg.CreatedAt,
 	)
-	return i, err
+	return err
 }
 
 const insertRepoIPRule = `-- name: InsertRepoIPRule :exec
@@ -58,6 +101,54 @@ func (q *Queries) InsertRepoIPRule(ctx context.Context, arg InsertRepoIPRulePara
 		arg.Note,
 	)
 	return err
+}
+
+const listIPLists = `-- name: ListIPLists :many
+
+SELECT id, name, kind, title, description, ranges, source, fetched_at, error, created_at
+FROM ip_lists WHERE name > ?1 ORDER BY name LIMIT ?2
+`
+
+type ListIPListsParams struct {
+	After string
+	Limit int64
+}
+
+// IP lists and per-repo IP rules (internal/netrules). Request paths read the in-memory copies;
+// these queries run at startup, on a refresh and on an admin change.
+// Keyset page by name (pass "" for the first page).
+func (q *Queries) ListIPLists(ctx context.Context, arg ListIPListsParams) ([]IpList, error) {
+	rows, err := q.db.QueryContext(ctx, listIPLists, arg.After, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []IpList
+	for rows.Next() {
+		var i IpList
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Kind,
+			&i.Title,
+			&i.Description,
+			&i.Ranges,
+			&i.Source,
+			&i.FetchedAt,
+			&i.Error,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listRepoIPRules = `-- name: ListRepoIPRules :many
@@ -99,6 +190,41 @@ func (q *Queries) ListRepoIPRules(ctx context.Context, repoID int64) ([]ListRepo
 	return items, nil
 }
 
+const listRulesOfList = `-- name: ListRulesOfList :many
+SELECT r.name AS repo, x.scope FROM repo_ip_rules x JOIN repos r ON r.id = x.repo_id
+WHERE x.kind = 'list' AND x.value = ?
+ORDER BY x.repo_id, x.scope
+`
+
+type ListRulesOfListRow struct {
+	Repo  string
+	Scope string
+}
+
+// The rules that name a list, with their repos, through repo_ip_rules_list.
+func (q *Queries) ListRulesOfList(ctx context.Context, value string) ([]ListRulesOfListRow, error) {
+	rows, err := q.db.QueryContext(ctx, listRulesOfList, value)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRulesOfListRow
+	for rows.Next() {
+		var i ListRulesOfListRow
+		if err := rows.Scan(&i.Repo, &i.Scope); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const nextIPRuleRepo = `-- name: NextIPRuleRepo :one
 SELECT repo_id FROM repo_ip_rules WHERE repo_id > ? ORDER BY repo_id LIMIT 1
 `
@@ -111,33 +237,69 @@ func (q *Queries) NextIPRuleRepo(ctx context.Context, repoID int64) (int64, erro
 	return repo_id, err
 }
 
+const renameListRules = `-- name: RenameListRules :exec
+UPDATE repo_ip_rules SET value = ?1 WHERE kind = 'list' AND value = ?2
+`
+
+type RenameListRulesParams struct {
+	NewName string
+	OldName string
+}
+
+// A rename carries the rules that name the list along.
+func (q *Queries) RenameListRules(ctx context.Context, arg RenameListRulesParams) error {
+	_, err := q.db.ExecContext(ctx, renameListRules, arg.NewName, arg.OldName)
+	return err
+}
+
 const savePresetRanges = `-- name: SavePresetRanges :exec
-INSERT INTO preset_ranges (name, ranges, fetched_at, error) VALUES (?, ?, ?, '')
-ON CONFLICT (name) DO UPDATE SET ranges = excluded.ranges, fetched_at = excluded.fetched_at, error = ''
+UPDATE ip_lists SET ranges = ?, fetched_at = ?, error = '' WHERE name = ? AND kind = 'preset'
 `
 
 type SavePresetRangesParams struct {
-	Name      string
 	Ranges    string
 	FetchedAt int64
+	Name      string
 }
 
 func (q *Queries) SavePresetRanges(ctx context.Context, arg SavePresetRangesParams) error {
-	_, err := q.db.ExecContext(ctx, savePresetRanges, arg.Name, arg.Ranges, arg.FetchedAt)
+	_, err := q.db.ExecContext(ctx, savePresetRanges, arg.Ranges, arg.FetchedAt, arg.Name)
 	return err
 }
 
 const setPresetError = `-- name: SetPresetError :exec
-INSERT INTO preset_ranges (name, error) VALUES (?, ?)
-ON CONFLICT (name) DO UPDATE SET error = excluded.error
+UPDATE ip_lists SET error = ? WHERE name = ? AND kind = 'preset'
 `
 
 type SetPresetErrorParams struct {
-	Name  string
 	Error string
+	Name  string
 }
 
 func (q *Queries) SetPresetError(ctx context.Context, arg SetPresetErrorParams) error {
-	_, err := q.db.ExecContext(ctx, setPresetError, arg.Name, arg.Error)
+	_, err := q.db.ExecContext(ctx, setPresetError, arg.Error, arg.Name)
+	return err
+}
+
+const updateCustomList = `-- name: UpdateCustomList :exec
+UPDATE ip_lists SET name = ?, title = ?, description = ?, ranges = ? WHERE id = ? AND kind = 'custom'
+`
+
+type UpdateCustomListParams struct {
+	Name        string
+	Title       string
+	Description string
+	Ranges      string
+	ID          int64
+}
+
+func (q *Queries) UpdateCustomList(ctx context.Context, arg UpdateCustomListParams) error {
+	_, err := q.db.ExecContext(ctx, updateCustomList,
+		arg.Name,
+		arg.Title,
+		arg.Description,
+		arg.Ranges,
+		arg.ID,
+	)
 	return err
 }

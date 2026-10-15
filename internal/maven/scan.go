@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
@@ -209,7 +210,7 @@ func (h *Handler) Scan(ctx context.Context, repo *repos.Repo, files []format.Upl
 
 // uploadFolder stores each artifact that Scan finds in a dropped folder, after checking that
 // none has a problem. Files that no pom takes are left out.
-func (h *Handler) uploadFolder(ctx context.Context, repo *repos.Repo, files []format.UploadFile, fields map[string]string, userID int64) ([]format.Uploaded, error) {
+func (h *Handler) uploadFolder(ctx context.Context, repo *repos.Repo, files []format.UploadFile, fields map[string]string, by assets.By) ([]format.Uploaded, error) {
 	for k := range fields {
 		return nil, format.BadUpload("unknown field %q; a folder upload takes no fields", k)
 	}
@@ -231,7 +232,7 @@ func (h *Handler) uploadFolder(ctx context.Context, repo *repos.Repo, files []fo
 		for _, i := range g.others {
 			set = append(set, files[i])
 		}
-		res, err := h.uploadSet(ctx, repo, set, nil, userID)
+		res, err := h.uploadSet(ctx, repo, set, nil, by)
 		out = append(out, res...)
 		if err != nil {
 			return out, err

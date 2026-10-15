@@ -28,11 +28,10 @@ var (
 	ServerImage = defaultImage
 	// TestNetwork is the shared docker network every container of the run joins.
 	TestNetwork *testcontainers.DockerNetwork
-	// SigningPrivateKey / SigningPublicKey are the armored OpenPGP key pair generated for this run.
+	// SigningPrivateKey / SigningPublicKey are an armored OpenPGP key pair generated for this run
+	// (the signing key import test uses it).
 	SigningPrivateKey string
 	SigningPublicKey  string
-	// SigningPublicKeyFile is the host path of the armored public key.
-	SigningPublicKeyFile string
 	// RunID is unique per test-binary run (used in S3 prefixes, group ids, ...).
 	RunID string
 	// Engine is the detected container engine (docker or podman); its CLI is used for
@@ -69,13 +68,7 @@ func runMain(m *testing.M) int {
 		}
 	}
 
-	keyDir, err := os.MkdirTemp("", "telesphorepo-e2e-keys-")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "e2e:", err)
-		return 1
-	}
-	defer os.RemoveAll(keyDir)
-	if err := generateSigningKey(keyDir); err != nil {
+	if err := generateSigningKey(); err != nil {
 		fmt.Fprintln(os.Stderr, "e2e: signing key:", err)
 		return 1
 	}
@@ -113,7 +106,7 @@ func buildImage(ctx context.Context) error {
 }
 
 // generateSigningKey creates a v4 Ed25519 (legacy EdDSA, algo 22, understood by apt's gpgv) key.
-func generateSigningKey(dir string) error {
+func generateSigningKey() error {
 	cfg := &packet.Config{Algorithm: packet.PubKeyAlgoEdDSA, Curve: packet.Curve25519}
 	ent, err := openpgp.NewEntity("Telesphorepo E2E", "", "e2e@telesphorepo.test", cfg)
 	if err != nil {
@@ -141,9 +134,5 @@ func generateSigningKey(dir string) error {
 		return err
 	}
 	SigningPrivateKey, SigningPublicKey = priv.String(), pub.String()
-	SigningPublicKeyFile = filepath.Join(dir, "debian.asc")
-	if err := os.WriteFile(filepath.Join(dir, "signing.asc"), priv.Bytes(), 0o600); err != nil {
-		return err
-	}
-	return os.WriteFile(SigningPublicKeyFile, pub.Bytes(), 0o644)
+	return nil
 }

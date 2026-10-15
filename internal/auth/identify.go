@@ -167,20 +167,32 @@ func (s *Service) principalByID(ctx context.Context, id int64) (*Principal, erro
 	return &Principal{UserID: id, Username: u.Username, IsAdmin: u.IsAdmin, Kind: u.Kind}, nil
 }
 
-func unauthorized(w http.ResponseWriter, msg string) {
-	w.Header().Set("WWW-Authenticate", challenge)
+// UIHeader is the header the web UI's API client sends (value "1").
+const UIHeader = "X-Telesphorepo-UI"
+
+// wantsChallenge reports whether a 401 to r carries the Basic challenge. The JSON API and
+// requests from the web UI never get it, so a browser never opens its password dialog; format
+// routes keep it for package clients.
+func wantsChallenge(r *http.Request) bool {
+	return r.Header.Get(UIHeader) != "1" && r.URL.Path != "/api" && !strings.HasPrefix(r.URL.Path, "/api/")
+}
+
+func unauthorized(w http.ResponseWriter, r *http.Request, msg string) {
+	if wantsChallenge(r) {
+		w.Header().Set("WWW-Authenticate", challenge)
+	}
 	httpx.Error(w, http.StatusUnauthorized, msg)
 }
 
 // writeAuthError maps an authenticate error to a response.
-func writeAuthError(w http.ResponseWriter, err error) {
+func writeAuthError(w http.ResponseWriter, r *http.Request, err error) {
 	var rl *rateLimitedError
 	switch {
 	case errors.As(err, &rl):
 		setRetryAfter(w, rl.wait)
 		httpx.Error(w, http.StatusTooManyRequests, ErrRateLimited.Error())
 	case errors.Is(err, ErrBadCredentials):
-		unauthorized(w, ErrBadCredentials.Error())
+		unauthorized(w, r, ErrBadCredentials.Error())
 	default:
 		httpx.Error(w, http.StatusInternalServerError, "internal error")
 	}
@@ -226,17 +238,17 @@ func (s *Service) identify(w http.ResponseWriter, r *http.Request, api, cookie b
 		}
 		if !ok {
 			if len(h) >= 6 && strings.EqualFold(h[:6], "basic ") {
-				unauthorized(w, ErrBadCredentials.Error())
+				unauthorized(w, r, ErrBadCredentials.Error())
 				return nil, false
 			}
 		} else {
 			p, err := s.authenticate(r.Context(), s.clientIP(r), user, pass, true)
 			if errors.Is(err, errPublishEnded) {
-				s.publishRequired(w)
+				s.publishRequired(w, r)
 				return nil, false
 			}
 			if err != nil {
-				writeAuthError(w, err)
+				writeAuthError(w, r, err)
 				return nil, false
 			}
 			if api && p.Publish != nil && !publishTokenRoute(r) {

@@ -13,7 +13,10 @@ go tool task dev
 ```
 
 Open **http://localhost:5173**. The startup banner prints the admin username and password and
-some client snippets. A demo repo for each format (`maven`, `debian`, `raw`) is already created. Data lives in
+some client snippets. The first run fills the instance with the same demo data each time, before the
+server starts: about 150,000 Maven files, Debian packages and raw files in the public repos `maven`, `debian` and `raw`, a
+private Maven repo `internal`, and five demo users (their passwords are in the banner). To start with
+empty repos, run the binary as `telesphorepo dev --empty` on a fresh data dir. Data lives in
 `.telesphorepo-dev/`; delete it to start over. Press Ctrl+C to stop. The dev server does not enforce the second factor.
 
 ## Run it in production
@@ -31,11 +34,11 @@ download against `SHA256SUMS`, unpack it, and run `./telesphorepo serve`.
 
 - **Admin password:** on first start the server prints a generated `admin` password once to
   the container log (`docker logs <container>`).
-- **Configuration:** sign in, then set up storage (local disk or S3/R2), the public URL, the
-  Debian signing key and the rest on the **Settings** page. Changes apply without a restart, and
+- **Configuration:** sign in, then set up storage (local disk or S3/R2), the public URL, and
+  the rest on the **Settings** page. The server creates a Debian signing key named `default` on the first start. Changes apply without a restart, and
   secrets are stored encrypted.
 - **Single sign-on:** admins can sign in through an OIDC provider (Keycloak, Entra, Google...).
-  Set the issuer, client and admin group under **Settings > Single sign-on**, and register
+  Set the issuer, client and admin group under **Settings > Server > Sign-in options**, and register
   `<public URL>/api/auth/oidc/callback` at the provider. Publishers use local accounts with a
   second factor.
 - **Passkeys:** they need the public URL (`base_url`) in Settings. Authenticator-app codes do not.
@@ -69,7 +72,7 @@ The server uses the client address for rate limits, the audit log and the IP rul
 To trust your proxy:
 
 1. Start Caddy and open the server through it once.
-2. Open **Settings > Server settings > Reverse proxy**. The page shows "Requests from 10.89.0.5
+2. Open **Settings > Server > Network and proxy**. The page shows "Requests from 10.89.0.5
    carry forwarded headers. Is this your reverse proxy?" with the proxy's address.
 3. Click **Trust this address**.
 
@@ -78,14 +81,10 @@ Or set the list yourself, for example `TR_TRUSTED_PROXIES=10.89.0.5`.
 - **Docker and Podman:** with port publishing, every outside connection can arrive from a private
   gateway address. Trust the proxy's own address, not `private`, so that a client cannot forge
   its address.
-- **Cloudflare:** put `cloudflare` in `trusted_proxies`. The server then trusts Cloudflare's
-  published ranges, which it refreshes daily. If Caddy sits between Cloudflare and the server,
-  list Caddy's address and `cloudflare`.
+- **Cloudflare:** put `list:cloudflare` in `trusted_proxies`. On the Network and proxy page, tick the network list Cloudflare. The server then trusts Cloudflare's published ranges, which it refreshes daily. If Caddy sits between Cloudflare and the server, list Caddy's address and `list:cloudflare`.
 - Set `base_url` in Settings to the public URL.
 
-An admin can limit who may download from or publish to each repo by address. Open the repo in
-**Settings > Repositories > Network access**. Ranges can be addresses, CIDRs, or the lists
-**GitHub Actions** and **Private networks**. An empty list means no limit.
+An admin can limit who may download from or publish to each repo by address. Open the repo settings, then the **Access** tab, and set **From where**. Ranges can be addresses, CIDRs, or network lists. The server has the lists **GitHub Actions** and **Cloudflare**. Admins add their own under **Settings > People and CI > Networks** and paste the addresses in any format. An empty rule means no limit.
 
 ## Commands you'll use
 
@@ -109,14 +108,13 @@ session. See **Publishing**.
 Anyone can browse the anonymous-read repos in the web UI. A user with write access can upload
 files or a whole folder, and delete files or folders there. A folder upload shows a preview of
 the artifacts it found, and stores nothing until the user confirms. Both actions use a publish session that the UI asks for
-with a second-factor code. Admins see every event, with its IP address, in **Settings > Audit
-log**. The server keeps events for 365 days (`audit.retention`).
+with a second-factor code. Admins see every event, with its IP address, in **Settings > Server > Activity**. The server keeps events for 365 days (`audit.retention`).
 
 ## Publishing
 
 Every upload needs a publish session. It is a credential for one repo that ends after
 `publish.session_ttl` (15 min by default). To publish from a laptop, add a second factor (an
-authenticator app or a passkey) under **Settings > Security**. An admin does this at the first
+authenticator app or a passkey) under **Settings > Your account > Sign-in and security**. An admin does this at the first
 sign-in. Other users do it when they approve their first device. The clients below are in [github.com/Telesphorepo/clients](https://github.com/Telesphorepo/clients). Replace `VERSION` with the latest `v` release there.
 
 **Gradle.** In `settings.gradle.kts`:
@@ -146,17 +144,17 @@ Add `-Dtelesphorepo.url=https://packages.example.com` to `.mvn/maven.config`. Ru
 and then run `mvn deploy`.
 
 **GitHub Actions.** Give the job `permissions: id-token: write`. An admin adds a trust policy
-on the **Trust policies** page under Settings (preset "GitHub Actions"): the repo, the branch or tag, and the
+under **Settings > People and CI > CI pipelines** (start from "GitHub Actions"): the repo, the branch or tag, and the
 workflow that may publish. The Gradle plugin and the Maven extension then use the GitHub token
-with no secret. Without them, post the token to `/api/publish/sessions/oidc`; the **Publish**
+with no secret. Without them, post the token to `/api/publish/sessions/oidc`; the **Tokens**
 page shows the `curl` steps.
 
 **Jenkins.** Install the OpenID Connect Provider plugin and bind an "OpenID Connect id token"
 credential to an environment variable, for example `OIDC_TOKEN`. An admin adds a trust policy
-with the preset "Jenkins" (issuer `<jenkins url>/oidc`). Set `oidcTokenEnv = "OIDC_TOKEN"` in the
+starting from "Jenkins" (issuer `<jenkins url>/oidc`). Set `oidcTokenEnv = "OIDC_TOKEN"` in the
 Gradle plugin block, or `-Dtelesphorepo.oidcTokenEnv=OIDC_TOKEN` for Maven.
 
-**By hand.** On the **Publish** page, choose a repo, enter a second-factor code, and copy the
+**By hand.** On **Settings > Your account > Tokens**, choose a repo, enter a second-factor code, and copy the
 token. Use it as the password with any username:
 
 ```sh
@@ -179,7 +177,7 @@ repo needs matching credentials (server id `telesphorepo`) in `~/.m2/settings.xm
 apt:
 
 ```sh
-sudo curl -fsSL https://packages.example.com/keys/debian.asc -o /etc/apt/keyrings/telesphorepo.asc
+sudo curl -fsSL https://packages.example.com/debian/debian/key.asc -o /etc/apt/keyrings/telesphorepo.asc
 echo "deb [signed-by=/etc/apt/keyrings/telesphorepo.asc] https://packages.example.com/debian/debian stable main" \
   | sudo tee /etc/apt/sources.list.d/telesphorepo.list
 curl -u publish:trs_TOKEN -T pkg_1.0_amd64.deb https://packages.example.com/debian/debian/upload/stable/main

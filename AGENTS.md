@@ -82,14 +82,18 @@ the fallback) and Node 26+ (see `.node-version`). The e2e suite needs Docker or 
   The web stack is Svelte 5 + Vite (no SvelteKit), Tailwind CSS v4, shadcn-svelte (Maia style) and
   TypeScript. Add a shadcn component with `bunx shadcn-svelte@latest add <name>`. Call the API only
   through `api.*` in `web/src/lib/api/`. `bun run build` runs `svelte-check` first.
+- **Follow the UI rules of `web/src/README.md`** (spec §13.3). Every page sits in the one centered 1200 px
+  container. The API client sends `X-Telesphorepo-UI: 1` on every request, so the server never
+  sends a browser password prompt. Use monospace only in `CodeBlock`, `CodeSnippet` and the JSON
+  editor. A dialog is for a confirmation or a short form only.
 - **Never show an IP address outside the audit log.** `audit_events` is the only table and
   `GET /api/audit` the only API that returns one.
 - **Read the client address with `httpx.ClientIP(r)` only.** The `netrules` middleware resolves it
   once per request. Never read `X-Forwarded-For` or `CF-Connecting-IP` in a handler, because
   the server trusts them only from a trusted proxy. New read and write paths of a repo must call
   the IP rule check (`netrules.Service.Check`) with the scope `read` or `publish`.
-- **Request paths use in-memory snapshots of presets and IP rules.** They never query
-  `preset_ranges` or `repo_ip_rules`. The service refreshes the snapshot when the data changes.
+- **Request paths use in-memory snapshots of IP lists, IP rules and signing keys.** They never query
+  `ip_lists`, `repo_ip_rules` or `signing_keys`. The service refreshes the snapshot when the data changes.
 - **Keep the docs current.** Update `SPEC.md` in the same change whenever behaviour, routes,
   tables, settings or commands change. Keep `README.md` short and for humans (run locally, run in
   production, a few commands); details belong in SPEC.md. Don't add a `CLAUDE.md`.
@@ -111,14 +115,15 @@ the fallback) and Node 26+ (see `.node-version`). The e2e suite needs Docker or 
 | Publish sessions, devices, trust policies | `internal/publish`; routes in `internal/api/publish.go` and `internal/api/security.go` |
 | Publisher clients (Gradle plugin, Maven extension) | Separate repo [Telesphorepo/clients](https://github.com/Telesphorepo/clients) (MIT). The clients zone clones it, or reads `E2E_CLIENTS_DIR`; `E2E_CLIENTS_REF` picks the branch or tag (default `main`) |
 | Blob I/O | `internal/assets` (spool, store, serve) on top of `internal/storage` |
-| UI page | `web/src/pages/{browse,settings}/*.svelte`; route in `web/src/routes.ts`; Settings nav in `web/src/lib/nav.ts`; API calls in `web/src/lib/api/`. See `web/src/README.md` |
+| UI page | `web/src/pages/**/*.svelte` (`repo/`, `account/`, `repositories/`, `server/`); route in `web/src/routes.ts`; Settings nav in `web/src/lib/nav.ts`; API calls in `web/src/lib/api/`. See `web/src/README.md` |
 | UI format editor | `web/src/lib/formats/` |
-| File tree, deletes, manual upload | `internal/files`, `internal/api/files.go`; UI in `web/src/pages/browse/repo/` and `web/src/lib/browse/` |
-| Client IP, IP range presets, repo IP rules | `internal/netrules`, `internal/api/network.go`, `web/src/pages/settings/repos/NetworkTab.svelte`, `web/src/pages/settings/system/` (Reverse proxy and Network lists cards) |
-| Folder scan and upload | `Scan` of the format (`format.ManualUploader`), e.g. `internal/maven/scan.go`; route in `internal/api/files.go`; UI in `web/src/lib/browse/upload/` |
-| Audit log | `internal/audit`, `internal/api` (`GET /api/audit`), `web/src/pages/settings/Audit.svelte`. Call `a.record` in a handler, or `Host.Audit` in a plugin |
-| Storage move (FS ↔ S3) | `internal/move` (service, copier), `internal/storage/mirror.go`, `internal/api/moves.go`, `web/src/pages/settings/Storage.svelte` |
-| Nexus sources, syncs, cut-over | `internal/nexus` (client, service, `sync.go` scheduler and runner), `internal/api/nexus.go`, `web/src/pages/settings/Nexus.svelte`. Per-format import code is the plugin's `Importer`. Repo lock: `repos.locked_by`, checked in `auth.RepoGate` |
+| File tree, deletes, manual upload | `internal/files`, `internal/api/files.go`; UI in `web/src/pages/repo/` (`FilesTab`, `upload/`, `delete/`) |
+| Client IP, IP lists, repo IP rules | `internal/netrules` (`lists.go`, `rules.go`, `clientip.go`), `internal/api/network.go`, `web/src/pages/repo/settings/` (Network tab), `web/src/pages/server/IPLists.svelte`, `IPListPage.svelte`, `ReverseProxy.svelte` |
+| Signing keys | `internal/signing/keys.go`, `internal/api/signing_keys.go`, `GET /debian/{repo}/key.asc` in `internal/debian`; UI in `web/src/pages/server/SigningKeys.svelte` and the Signing tab of the repo settings |
+| Folder scan and upload | `Scan` of the format (`format.ManualUploader`), e.g. `internal/maven/scan.go`; route in `internal/api/files.go`; UI in `web/src/pages/repo/upload/` |
+| Audit log | `internal/audit`, `internal/api` (`GET /api/audit`), `web/src/pages/server/Activity.svelte`. Call `a.record` in a handler, or `Host.Audit` in a plugin |
+| Storage move (FS ↔ S3) | `internal/move` (service, copier), `internal/storage/mirror.go`, `internal/api/moves.go`, `web/src/pages/server/Storage.svelte` |
+| Nexus sources, syncs, cut-over | `internal/nexus` (client, service, `sync.go` scheduler and runner), `internal/api/nexus.go`, `web/src/pages/server/NexusMigration.svelte`, `NexusSource.svelte`. Per-format import code is the plugin's `Importer`. Repo lock: `repos.locked_by`, checked in `auth.RepoGate` |
 | E2E harness | `e2e/harness_test.go` (servers, storage matrix `fs` + SeaweedFS), `e2e/clients_test.go` (Maven, Debian and curl helpers that several zones share), publish helpers at the end of `harness_test.go`, `e2e/keycloak_test.go` (Keycloak fixture), `e2e/publish_clients_test.go` (clients zone) |
 | Dev tooling | `tools/task` |
 
@@ -140,6 +145,8 @@ format, so you edit no core file.
    `Scan`: the UI upload dialogs call them), and `Importer`
    (`ImportFormats` and `Import`: the Nexus import offers each source file to the plugin; share
    the code of your upload path with it, and return `imported`, `skipped` or `ignored`).
+   Implement `Iconic` too: embed an `icon.svg` of one color (`currentColor`, 24x24 view box), so
+   the UI shows the format's mark.
 4. If the format has tables, add `migrations/NNNN_*.sql`, `queries/*.sql` and a `sqlc.yaml`
    (copy `internal/debian/sqlc.yaml`). Run `go tool task gen`.
 5. Add one line to `internal/formats/all.go`: the import and the `format.Register(...)` argument.
@@ -152,8 +159,8 @@ background worker.
 ## Adding a UI page
 
 1. Create `web/src/pages/<area>/<Name>.svelte` with `let { params, query }: PageProps = $props();`.
-2. Add one entry to `web/src/routes.ts`: pattern, lazy `page`, `layout` (`browse`, `settings` or
-   `bare`), `access` (`any`, `user` or `admin`) and `title`.
+2. Add one entry to `web/src/routes.ts`: pattern, lazy `page`, `layout` (`app` or
+   `settings`), `access` (`any`, `user` or `admin`) and `title`.
 3. For a Settings page, add it to its category in `web/src/lib/nav.ts`.
 4. Add the route to the table in `web/src/README.md`.
 5. Call the API only through `api.*`. For a new server route, add a function and its type in

@@ -23,6 +23,8 @@ CREATE TABLE users (
   email               TEXT
 ) STRICT;
 CREATE UNIQUE INDEX users_oidc ON users(oidc_issuer, oidc_subject) WHERE oidc_subject IS NOT NULL;
+-- The enabled admins in username order: everyone who can download and publish every repo.
+CREATE INDEX users_admins ON users(username) WHERE is_admin = 1 AND disabled = 0;
 
 -- Read tokens (spec §7.1): they read repos and call the API, but never publish (§7.6).
 CREATE TABLE api_tokens (
@@ -84,9 +86,13 @@ CREATE TABLE assets (
   uploaded_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
   created_at   INTEGER NOT NULL,
   updated_at   INTEGER NOT NULL,
+  -- The CI publish session that wrote the file, set only when that session recorded build
+  -- provenance (publish_sessions.ci_repository); the session row then stays as the build record.
+  publish_session_id INTEGER REFERENCES publish_sessions(id) ON DELETE SET NULL,
   UNIQUE (repo_id, path)                             -- also the repo_id foreign-key index
 ) STRICT;
 CREATE INDEX assets_uploaded_by ON assets(uploaded_by);
+CREATE INDEX assets_publish_session ON assets(publish_session_id) WHERE publish_session_id IS NOT NULL;
 
 -- Substring search over paths; generated index files are not indexed.
 CREATE VIRTUAL TABLE assets_fts USING fts5(path, content='assets', content_rowid='id', tokenize='trigram');
@@ -337,6 +343,11 @@ CREATE INDEX publish_trust_repos_repo ON publish_trust_repos(repo_id);
 -- "trs_<public_id>_<secret>"; secret_hash is SHA-256(secret). subject is who published: the
 -- username (device, manual) or the CI token's sub (oidc). A session is open while closed_at is
 -- NULL and expires_at is in the future. Ended rows stay 30 days as the publish log, keyset by id.
+-- The ci_* columns are the build provenance of a session minted from a CI token with GitHub
+-- Actions claims ('' for every other session): ci_server is the web URL of the GitHub server
+-- (https://github.com, or the issuer's origin for GitHub Enterprise Server and compatible
+-- servers). A provenance session that wrote files is kept (kept = 1) after the 30 days as the
+-- record of that build; publish_sessions_ci_ended finds the ended ones not settled yet.
 CREATE TABLE publish_sessions (
   id          INTEGER PRIMARY KEY,
   public_id   TEXT NOT NULL UNIQUE,
@@ -349,9 +360,20 @@ CREATE TABLE publish_sessions (
   subject     TEXT NOT NULL,
   created_at  INTEGER NOT NULL,
   expires_at  INTEGER NOT NULL,
-  closed_at   INTEGER
+  closed_at   INTEGER,
+  ci_server       TEXT NOT NULL DEFAULT '',
+  ci_repository   TEXT NOT NULL DEFAULT '',          -- "owner/name"; '' = no provenance
+  ci_sha          TEXT NOT NULL DEFAULT '',
+  ci_ref          TEXT NOT NULL DEFAULT '',
+  ci_run_id       TEXT NOT NULL DEFAULT '',
+  ci_run_attempt  TEXT NOT NULL DEFAULT '',
+  ci_workflow     TEXT NOT NULL DEFAULT '',          -- the workflow's name
+  ci_workflow_ref TEXT NOT NULL DEFAULT '',          -- "owner/name/.github/workflows/x.yml@ref"
+  ci_actor        TEXT NOT NULL DEFAULT '',
+  kept            INTEGER NOT NULL DEFAULT 0
 ) STRICT;
-CREATE INDEX publish_sessions_expires ON publish_sessions(expires_at);
+CREATE INDEX publish_sessions_expires ON publish_sessions(expires_at) WHERE ci_repository = '';
+CREATE INDEX publish_sessions_ci_ended ON publish_sessions(expires_at) WHERE ci_repository <> '' AND kept = 0;
 CREATE INDEX publish_sessions_repo ON publish_sessions(repo_id);
 CREATE INDEX publish_sessions_user ON publish_sessions(user_id);
 CREATE INDEX publish_sessions_device ON publish_sessions(device_id);
@@ -403,24 +425,60 @@ CREATE INDEX audit_events_repo ON audit_events(repo_id, id);
 CREATE INDEX audit_events_action ON audit_events(action, id);
 CREATE INDEX audit_events_actor ON audit_events(actor_user_id);
 
--- Named IP range lists that the server fetches (internal/netrules): cloudflare and
--- github-actions. ranges is a JSON array of CIDRs, the last list that fetched and parsed.
--- fetched_at is the unix time of that fetch (0: never); error is the last refresh error
--- ('' after a good refresh). Request paths read the in-memory snapshot, never this table.
-CREATE TABLE preset_ranges (
-  name       TEXT PRIMARY KEY,
-  ranges     TEXT NOT NULL DEFAULT '[]',
-  fetched_at INTEGER NOT NULL DEFAULT 0,
-  error      TEXT NOT NULL DEFAULT ''
-) STRICT, WITHOUT ROWID;
+-- Named IP lists (internal/netrules). A 'preset' list (cloudflare, github-actions) is fetched
+-- from source and refreshed daily: ranges is the last list that fetched and parsed, fetched_at
+-- the unix time of that fetch (0: never) and error the last refresh error ('' after a good
+-- refresh). A 'custom' list holds the ranges an admin entered. ranges is a JSON array of CIDRs.
+-- Request paths read the in-memory snapshot, never this table.
+CREATE TABLE ip_lists (
+  id          INTEGER PRIMARY KEY,
+  name        TEXT NOT NULL UNIQUE,
+  kind        TEXT NOT NULL CHECK (kind IN ('preset', 'custom')),
+  title       TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  ranges      TEXT NOT NULL DEFAULT '[]',
+  source      TEXT NOT NULL DEFAULT '',
+  fetched_at  INTEGER NOT NULL DEFAULT 0,
+  error       TEXT NOT NULL DEFAULT '',
+  created_at  INTEGER NOT NULL
+) STRICT;
 
 -- Per-repo IP allow-lists (internal/netrules). A scope without rows is unrestricted. kind
--- 'cidr' holds a CIDR, kind 'preset' a preset name. Request paths read the in-memory copy.
+-- 'cidr' holds a CIDR, kind 'list' the name of an IP list. Request paths read the in-memory
+-- copy. repo_ip_rules_list finds the rules that name a list.
 CREATE TABLE repo_ip_rules (
   repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
   scope   TEXT NOT NULL CHECK (scope IN ('read', 'publish')),
-  kind    TEXT NOT NULL CHECK (kind IN ('cidr', 'preset')),
+  kind    TEXT NOT NULL CHECK (kind IN ('cidr', 'list')),
   value   TEXT NOT NULL,
   note    TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (repo_id, scope, kind, value)
 ) STRICT, WITHOUT ROWID;
+CREATE INDEX repo_ip_rules_list ON repo_ip_rules(value, repo_id) WHERE kind = 'list';
+
+-- Repository signing keys (internal/signing). private_key is the sealed armored private key
+-- without a passphrase (settings.Service.Encrypt, AAD "signing_keys:<id>"), so the service
+-- inserts an empty value and sets it in the same transaction. public_key is armored. A repo
+-- names its key in its config ("signing_key"); repos_signing_key finds the repos that use a
+-- key, and the triggers refuse a repo config that names a key that does not exist.
+CREATE TABLE signing_keys (
+  id          INTEGER PRIMARY KEY,
+  name        TEXT NOT NULL UNIQUE,
+  fingerprint TEXT NOT NULL,
+  public_key  TEXT NOT NULL,
+  private_key BLOB NOT NULL,
+  created_at  INTEGER NOT NULL
+) STRICT;
+CREATE INDEX repos_signing_key ON repos(json_extract(config, '$.signing_key'));
+CREATE TRIGGER repos_signing_key_insert BEFORE INSERT ON repos
+WHEN json_extract(new.config, '$.signing_key') IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM signing_keys WHERE name = json_extract(new.config, '$.signing_key'))
+BEGIN
+  SELECT RAISE(ABORT, 'the signing key of the repo config does not exist');
+END;
+CREATE TRIGGER repos_signing_key_update BEFORE UPDATE OF config ON repos
+WHEN json_extract(new.config, '$.signing_key') IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM signing_keys WHERE name = json_extract(new.config, '$.signing_key'))
+BEGIN
+  SELECT RAISE(ABORT, 'the signing key of the repo config does not exist');
+END;

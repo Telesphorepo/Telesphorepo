@@ -10,14 +10,17 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
+	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/provenance"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
@@ -73,6 +76,48 @@ type Node struct {
 	SHA256     string     `json:"sha256,omitempty"`
 	UpdatedAt  *time.Time `json:"updated_at,omitempty"`
 	UploadedBy string     `json:"uploaded_by,omitempty"` // username; "" when unknown or imported
+	// Provenance is the GitHub Actions build that published the file; absent when none.
+	Provenance *provenance.Provenance `json:"provenance,omitempty"`
+}
+
+// File is one file with its details (GET /api/repos/{name}/file).
+type File struct {
+	Name        string                 `json:"name"`
+	Path        string                 `json:"path"`
+	Size        int64                  `json:"size"`
+	SHA256      string                 `json:"sha256"`
+	ContentType string                 `json:"content_type"`
+	Kind        string                 `json:"kind"` // "artifact", "metadata" or "index"
+	CreatedAt   time.Time              `json:"created_at"`
+	UpdatedAt   time.Time              `json:"updated_at"`
+	UploadedBy  string                 `json:"uploaded_by"` // username; "" when unknown or imported
+	Provenance  *provenance.Provenance `json:"provenance"`  // null when none
+}
+
+// Details returns file p of repo. ErrInvalid for an invalid path, ErrNotFound when it does not
+// exist.
+func (s *Service) Details(ctx context.Context, repo *repos.Repo, p string) (*File, error) {
+	if !ValidPath(p) {
+		return nil, ErrInvalid
+	}
+	a, err := s.assets.Get(ctx, repo.ID, p)
+	if errors.Is(err, assets.ErrNotFound) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	f := &File{Name: path.Base(a.Path), Path: a.Path, Size: a.Size, SHA256: a.SHA256, ContentType: a.ContentType,
+		Kind: a.Kind, CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt}
+	if a.UploadedBy != 0 {
+		if f.UploadedBy, err = s.auth.Username(ctx, a.UploadedBy); err != nil {
+			return nil, err
+		}
+	}
+	if f.Provenance, err = provenance.NewLoader(dbq.New(s.db.R)).Get(ctx, a.PublishSessionID); err != nil {
+		return nil, err
+	}
+	return f, nil
 }
 
 // Tree returns up to limit direct children of folder dir ("" or "a/b/") in path order, after
@@ -95,6 +140,7 @@ func (s *Service) Tree(ctx context.Context, repo *repos.Repo, dir, after string,
 		}
 	}
 	users := map[int64]string{}
+	builds := provenance.NewLoader(dbq.New(s.db.R))
 	var out []Node
 	for len(out) <= limit {
 		a, err := s.assets.Seek(ctx, repo.ID, lower, inclusive, upper)
@@ -124,6 +170,9 @@ func (s *Service) Tree(ctx context.Context, repo *repos.Repo, dir, after string,
 				users[a.UploadedBy] = name
 			}
 			n.UploadedBy = name
+		}
+		if n.Provenance, err = builds.Get(ctx, a.PublishSessionID); err != nil {
+			return nil, "", err
 		}
 		out = append(out, n)
 		lower, inclusive = a.Path, false

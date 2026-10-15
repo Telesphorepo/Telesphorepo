@@ -15,6 +15,7 @@ import (
 
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
+	"github.com/Telesphorepo/Telesphorepo/internal/provenance"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
@@ -116,17 +117,23 @@ func (s *Service) writableRepo(ctx context.Context, p *auth.Principal, name stri
 	return repo, nil
 }
 
-// mint creates a session on q (a transaction or the write pool). It retries on the rare
-// collision of the 48-bit public id.
-func (s *Service) mint(ctx context.Context, q *dbq.Queries, repo *repos.Repo, via string, userID, deviceID, trustID int64, subject string) (*Minted, error) {
+// mint creates a session on q (a transaction or the write pool), with the build provenance of
+// a CI token (nil: none). It retries on the rare collision of the 48-bit public id.
+func (s *Service) mint(ctx context.Context, q *dbq.Queries, repo *repos.Repo, via string, userID, deviceID, trustID int64, subject string, prov *provenance.Record) (*Minted, error) {
 	now := time.Now()
 	exp := now.Add(s.sessionTTL())
+	if prov == nil {
+		prov = &provenance.Record{}
+	}
 	for range 3 {
 		pid, secret, tok := newSessionToken()
 		id, err := q.CreatePublishSession(ctx, dbq.CreatePublishSessionParams{
 			PublicID: pid, SecretHash: hashBytes([]byte(secret)), RepoID: repo.ID,
 			UserID: nullID(userID), DeviceID: nullID(deviceID), TrustID: nullID(trustID),
 			Via: via, Subject: subject, CreatedAt: now.Unix(), ExpiresAt: exp.Unix(),
+			CiServer: prov.Server, CiRepository: prov.Repository, CiSha: prov.SHA, CiRef: prov.Ref,
+			CiRunID: prov.RunID, CiRunAttempt: prov.RunAttempt, CiWorkflow: prov.Workflow,
+			CiWorkflowRef: prov.WorkflowRef, CiActor: prov.Actor,
 		})
 		if isUnique(err) {
 			continue
@@ -215,7 +222,7 @@ func (s *Service) DeviceSession(ctx context.Context, ip netip.Addr, deviceID int
 	if err := s.ipAllowed(repo, ip, auth.ActorOf(p)); err != nil {
 		return nil, err
 	}
-	m, err := s.mint(ctx, s.wq, repo, ViaDevice, d.UserID, d.ID, 0, d.Username)
+	m, err := s.mint(ctx, s.wq, repo, ViaDevice, d.UserID, d.ID, 0, d.Username, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -241,7 +248,7 @@ func (s *Service) ManualSession(ctx context.Context, ip netip.Addr, p *auth.Prin
 	if err := s.auth.VerifySecondFactor(ctx, p.UserID, totpCode, passkey); err != nil {
 		return nil, err
 	}
-	return s.mint(ctx, s.wq, repo, ViaManual, p.UserID, 0, 0, p.Username)
+	return s.mint(ctx, s.wq, repo, ViaManual, p.UserID, 0, 0, p.Username, nil)
 }
 
 // Closed is a session that CloseSession ended, for the audit log.

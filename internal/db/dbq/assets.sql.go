@@ -29,7 +29,7 @@ func (q *Queries) DeleteAsset(ctx context.Context, arg DeleteAssetParams) (int64
 
 const getAsset = `-- name: GetAsset :one
 
-SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at
+SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id
 FROM assets WHERE repo_id = ? AND path = ?
 `
 
@@ -54,6 +54,7 @@ func (q *Queries) GetAsset(ctx context.Context, arg GetAssetParams) (Asset, erro
 		&i.UploadedBy,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.PublishSessionID,
 	)
 	return i, err
 }
@@ -75,7 +76,7 @@ func (q *Queries) GetAssetID(ctx context.Context, arg GetAssetIDParams) (int64, 
 }
 
 const listAssetsAfter = `-- name: ListAssetsAfter :many
-SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at
+SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id
 FROM assets
 WHERE repo_id = ?1 AND path > ?2
 ORDER BY path LIMIT ?3
@@ -107,6 +108,7 @@ func (q *Queries) ListAssetsAfter(ctx context.Context, arg ListAssetsAfterParams
 			&i.UploadedBy,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.PublishSessionID,
 		); err != nil {
 			return nil, err
 		}
@@ -122,7 +124,7 @@ func (q *Queries) ListAssetsAfter(ctx context.Context, arg ListAssetsAfterParams
 }
 
 const listAssetsAfterRange = `-- name: ListAssetsAfterRange :many
-SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at
+SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id
 FROM assets
 WHERE repo_id = ?1 AND path > ?2 AND path < ?3
 ORDER BY path LIMIT ?4
@@ -160,6 +162,7 @@ func (q *Queries) ListAssetsAfterRange(ctx context.Context, arg ListAssetsAfterR
 			&i.UploadedBy,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.PublishSessionID,
 		); err != nil {
 			return nil, err
 		}
@@ -175,7 +178,7 @@ func (q *Queries) ListAssetsAfterRange(ctx context.Context, arg ListAssetsAfterR
 }
 
 const listAssetsFrom = `-- name: ListAssetsFrom :many
-SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at
+SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id
 FROM assets
 WHERE repo_id = ?1 AND path >= ?2
 ORDER BY path LIMIT ?3
@@ -211,6 +214,7 @@ func (q *Queries) ListAssetsFrom(ctx context.Context, arg ListAssetsFromParams) 
 			&i.UploadedBy,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.PublishSessionID,
 		); err != nil {
 			return nil, err
 		}
@@ -226,7 +230,7 @@ func (q *Queries) ListAssetsFrom(ctx context.Context, arg ListAssetsFromParams) 
 }
 
 const listAssetsFromRange = `-- name: ListAssetsFromRange :many
-SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at
+SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id
 FROM assets
 WHERE repo_id = ?1 AND path >= ?2 AND path < ?3
 ORDER BY path LIMIT ?4
@@ -264,6 +268,7 @@ func (q *Queries) ListAssetsFromRange(ctx context.Context, arg ListAssetsFromRan
 			&i.UploadedBy,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.PublishSessionID,
 		); err != nil {
 			return nil, err
 		}
@@ -279,23 +284,25 @@ func (q *Queries) ListAssetsFromRange(ctx context.Context, arg ListAssetsFromRan
 }
 
 const upsertAsset = `-- name: UpsertAsset :one
-INSERT INTO assets (repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO assets (repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (repo_id, path) DO UPDATE SET size = excluded.size, sha256 = excluded.sha256,
-  content_type = excluded.content_type, updated_at = excluded.updated_at, uploaded_by = excluded.uploaded_by
+  content_type = excluded.content_type, updated_at = excluded.updated_at, uploaded_by = excluded.uploaded_by,
+  publish_session_id = excluded.publish_session_id
 RETURNING id, kind, created_at, updated_at
 `
 
 type UpsertAssetParams struct {
-	RepoID      int64
-	Path        string
-	Size        int64
-	Sha256      string
-	ContentType string
-	Kind        string
-	UploadedBy  sql.NullInt64
-	CreatedAt   int64
-	UpdatedAt   int64
+	RepoID           int64
+	Path             string
+	Size             int64
+	Sha256           string
+	ContentType      string
+	Kind             string
+	UploadedBy       sql.NullInt64
+	CreatedAt        int64
+	UpdatedAt        int64
+	PublishSessionID sql.NullInt64
 }
 
 type UpsertAssetRow struct {
@@ -317,6 +324,7 @@ func (q *Queries) UpsertAsset(ctx context.Context, arg UpsertAssetParams) (Upser
 		arg.UploadedBy,
 		arg.CreatedAt,
 		arg.UpdatedAt,
+		arg.PublishSessionID,
 	)
 	var i UpsertAssetRow
 	err := row.Scan(

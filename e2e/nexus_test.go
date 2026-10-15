@@ -659,11 +659,7 @@ func TestNexus(t *testing.T) {
 
 		nexusMavenResolve(t, s, targets[rs.maven], group, "1.0.0", message1)
 		s.WaitDebianIndexed(t, targets[rs.apt])
-		st, keyBody := s.API(t, http.MethodGet, "/keys/debian.asc", nil, nil)
-		if st != http.StatusOK {
-			t.Fatalf("GET /keys/debian.asc: status %d", st)
-		}
-		key := string(keyBody)
+		key := s.DebianKey(t, targets[rs.apt], s.AdminBasic())
 		out := debAptInstall(t, s, targets[rs.apt], s.AdminUser, s.AdminPass, key)
 		if !strings.Contains(out, "RESULT: hello 1.0\n") || !strings.Contains(out, "NATIVE: native "+debs.arch) {
 			t.Fatalf("apt install after the first sync did not produce the expected output:\n%s", out)

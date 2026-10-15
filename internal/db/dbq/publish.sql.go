@@ -166,22 +166,32 @@ func (q *Queries) CreateEnrollment(ctx context.Context, arg CreateEnrollmentPara
 }
 
 const createPublishSession = `-- name: CreatePublishSession :one
-INSERT INTO publish_sessions (public_id, secret_hash, repo_id, user_id, device_id, trust_id, via, subject, created_at, expires_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO publish_sessions (public_id, secret_hash, repo_id, user_id, device_id, trust_id, via, subject, created_at, expires_at,
+  ci_server, ci_repository, ci_sha, ci_ref, ci_run_id, ci_run_attempt, ci_workflow, ci_workflow_ref, ci_actor)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id
 `
 
 type CreatePublishSessionParams struct {
-	PublicID   string
-	SecretHash []byte
-	RepoID     int64
-	UserID     sql.NullInt64
-	DeviceID   sql.NullInt64
-	TrustID    sql.NullInt64
-	Via        string
-	Subject    string
-	CreatedAt  int64
-	ExpiresAt  int64
+	PublicID      string
+	SecretHash    []byte
+	RepoID        int64
+	UserID        sql.NullInt64
+	DeviceID      sql.NullInt64
+	TrustID       sql.NullInt64
+	Via           string
+	Subject       string
+	CreatedAt     int64
+	ExpiresAt     int64
+	CiServer      string
+	CiRepository  string
+	CiSha         string
+	CiRef         string
+	CiRunID       string
+	CiRunAttempt  string
+	CiWorkflow    string
+	CiWorkflowRef string
+	CiActor       string
 }
 
 func (q *Queries) CreatePublishSession(ctx context.Context, arg CreatePublishSessionParams) (int64, error) {
@@ -196,6 +206,15 @@ func (q *Queries) CreatePublishSession(ctx context.Context, arg CreatePublishSes
 		arg.Subject,
 		arg.CreatedAt,
 		arg.ExpiresAt,
+		arg.CiServer,
+		arg.CiRepository,
+		arg.CiSha,
+		arg.CiRef,
+		arg.CiRunID,
+		arg.CiRunAttempt,
+		arg.CiWorkflow,
+		arg.CiWorkflowRef,
+		arg.CiActor,
 	)
 	var id int64
 	err := row.Scan(&id)
@@ -265,11 +284,11 @@ func (q *Queries) DeleteExpiredSeenOIDCTokens(ctx context.Context, now int64) (i
 
 const deleteOldPublishSessions = `-- name: DeleteOldPublishSessions :execrows
 DELETE FROM publish_sessions WHERE id IN
-  (SELECT x.id FROM publish_sessions x WHERE x.expires_at <= ?1 LIMIT 100)
+  (SELECT x.id FROM publish_sessions x WHERE x.ci_repository = '' AND x.expires_at <= ?1 LIMIT 100)
 `
 
-// Deletes ended sessions older than the cutoff (expires_at bounds every session's end), in
-// bounded batches through publish_sessions_expires.
+// Deletes ended sessions without provenance older than the cutoff (expires_at bounds every
+// session's end), in bounded batches through publish_sessions_expires.
 func (q *Queries) DeleteOldPublishSessions(ctx context.Context, cutoff int64) (int64, error) {
 	result, err := q.db.ExecContext(ctx, deleteOldPublishSessions, cutoff)
 	if err != nil {
@@ -298,6 +317,23 @@ DELETE FROM publish_trust_repos WHERE trust_id = ?
 func (q *Queries) DeleteTrustRepos(ctx context.Context, trustID int64) error {
 	_, err := q.db.ExecContext(ctx, deleteTrustRepos, trustID)
 	return err
+}
+
+const deleteUnusedProvenanceSessions = `-- name: DeleteUnusedProvenanceSessions :execrows
+DELETE FROM publish_sessions WHERE id IN
+  (SELECT x.id FROM publish_sessions x
+   WHERE x.ci_repository <> '' AND x.kept = 0 AND x.expires_at <= ?1
+     AND NOT EXISTS (SELECT 1 FROM assets a WHERE a.publish_session_id = x.id)
+   LIMIT 100)
+`
+
+// Deletes the ended provenance sessions older than the cutoff that wrote no file.
+func (q *Queries) DeleteUnusedProvenanceSessions(ctx context.Context, cutoff int64) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteUnusedProvenanceSessions, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const getDevice = `-- name: GetDevice :one
@@ -393,7 +429,7 @@ func (q *Queries) GetEnrollmentByUserCode(ctx context.Context, userCode string) 
 
 const getPublishSessionAuth = `-- name: GetPublishSessionAuth :one
 SELECT s.id, s.secret_hash, s.repo_id, s.user_id, s.device_id, s.trust_id, s.via, s.subject,
-       s.created_at, s.expires_at, s.closed_at,
+       s.created_at, s.expires_at, s.closed_at, s.ci_repository,
        r.name AS repo, r.locked_by,
        d.expires_at AS device_expires_at, d.revoked_at AS device_revoked_at,
        t.disabled AS trust_disabled
@@ -416,6 +452,7 @@ type GetPublishSessionAuthRow struct {
 	CreatedAt       int64
 	ExpiresAt       int64
 	ClosedAt        sql.NullInt64
+	CiRepository    string
 	Repo            string
 	LockedBy        sql.NullString
 	DeviceExpiresAt sql.NullInt64
@@ -440,11 +477,47 @@ func (q *Queries) GetPublishSessionAuth(ctx context.Context, publicID string) (G
 		&i.CreatedAt,
 		&i.ExpiresAt,
 		&i.ClosedAt,
+		&i.CiRepository,
 		&i.Repo,
 		&i.LockedBy,
 		&i.DeviceExpiresAt,
 		&i.DeviceRevokedAt,
 		&i.TrustDisabled,
+	)
+	return i, err
+}
+
+const getSessionProvenance = `-- name: GetSessionProvenance :one
+SELECT ci_server, ci_repository, ci_sha, ci_ref, ci_run_id, ci_run_attempt, ci_workflow, ci_workflow_ref, ci_actor
+FROM publish_sessions WHERE id = ?
+`
+
+type GetSessionProvenanceRow struct {
+	CiServer      string
+	CiRepository  string
+	CiSha         string
+	CiRef         string
+	CiRunID       string
+	CiRunAttempt  string
+	CiWorkflow    string
+	CiWorkflowRef string
+	CiActor       string
+}
+
+// The build provenance of a session (” ci_repository: none).
+func (q *Queries) GetSessionProvenance(ctx context.Context, id int64) (GetSessionProvenanceRow, error) {
+	row := q.db.QueryRowContext(ctx, getSessionProvenance, id)
+	var i GetSessionProvenanceRow
+	err := row.Scan(
+		&i.CiServer,
+		&i.CiRepository,
+		&i.CiSha,
+		&i.CiRef,
+		&i.CiRunID,
+		&i.CiRunAttempt,
+		&i.CiWorkflow,
+		&i.CiWorkflowRef,
+		&i.CiActor,
 	)
 	return i, err
 }
@@ -502,6 +575,24 @@ type InsertTrustRepoParams struct {
 func (q *Queries) InsertTrustRepo(ctx context.Context, arg InsertTrustRepoParams) error {
 	_, err := q.db.ExecContext(ctx, insertTrustRepo, arg.TrustID, arg.RepoID)
 	return err
+}
+
+const keepProvenanceSessions = `-- name: KeepProvenanceSessions :execrows
+UPDATE publish_sessions SET kept = 1 WHERE id IN
+  (SELECT x.id FROM publish_sessions x
+   WHERE x.ci_repository <> '' AND x.kept = 0 AND x.expires_at <= ?1
+     AND EXISTS (SELECT 1 FROM assets a WHERE a.publish_session_id = x.id)
+   LIMIT 100)
+`
+
+// Keeps the ended provenance sessions older than the cutoff that wrote files: they are the
+// build records of those files. Bounded batches through publish_sessions_ci_ended.
+func (q *Queries) KeepProvenanceSessions(ctx context.Context, cutoff int64) (int64, error) {
+	result, err := q.db.ExecContext(ctx, keepProvenanceSessions, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const listDevices = `-- name: ListDevices :many

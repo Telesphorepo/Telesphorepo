@@ -51,6 +51,16 @@ type Asset struct {
 	UploadedBy  int64 // 0 = none
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+	// PublishSessionID is the CI publish session with build provenance that wrote the file; 0 =
+	// none (see internal/provenance).
+	PublishSessionID int64
+}
+
+// By is who writes a file: the user (0 = none, e.g. a CI session or an import) and the publish
+// session whose build provenance the file records (0 = none).
+type By struct {
+	User    int64
+	Session int64
 }
 
 // Spooled is an upload buffered to a temp file under cfg.TmpDir() with its hashes
@@ -216,6 +226,8 @@ func fromRow(r dbq.Asset) *Asset {
 		UploadedBy:  r.UploadedBy.Int64,
 		CreatedAt:   time.Unix(r.CreatedAt, 0).UTC(),
 		UpdatedAt:   time.Unix(r.UpdatedAt, 0).UTC(),
+
+		PublishSessionID: r.PublishSessionID.Int64,
 	}
 }
 
@@ -240,7 +252,8 @@ func (s *Service) PutBlob(ctx context.Context, repoName, p string, sp *Spooled, 
 	return s.st.Put(ctx, Key(repoName, p), rd, sp.Size, contentType)
 }
 
-// UpsertTx inserts or updates (size, sha256, content_type, updated_at, uploaded_by) the
+// UpsertTx inserts or updates (size, sha256, content_type, updated_at, uploaded_by,
+// publish_session_id) the
 // asset row keyed by (RepoID, Path) and sets a.ID. Returns created=true on insert.
 // Path and kind are never changed on update (the FTS triggers rely on it).
 func UpsertTx(ctx context.Context, tx *sql.Tx, a *Asset) (created bool, err error) {
@@ -263,6 +276,8 @@ func UpsertTx(ctx context.Context, tx *sql.Tx, a *Asset) (created bool, err erro
 		UploadedBy:  sql.NullInt64{Int64: a.UploadedBy, Valid: a.UploadedBy != 0},
 		CreatedAt:   now,
 		UpdatedAt:   now,
+
+		PublishSessionID: sql.NullInt64{Int64: a.PublishSessionID, Valid: a.PublishSessionID != 0},
 	})
 	if err != nil {
 		return false, err
@@ -275,13 +290,14 @@ func UpsertTx(ctx context.Context, tx *sql.Tx, a *Asset) (created bool, err erro
 // Put = PutBlob + UpsertTx in its own transaction. Caller holds Lock.
 // Once the body is spooled the store and upsert run detached from ctx cancellation (a client
 // disconnect must not leave a replaced blob behind a stale row), and the upsert is retried.
-func (s *Service) Put(ctx context.Context, repo *repos.Repo, p string, sp *Spooled, contentType, kind string, uploadedBy int64) (a *Asset, created bool, err error) {
+func (s *Service) Put(ctx context.Context, repo *repos.Repo, p string, sp *Spooled, contentType, kind string, by By) (a *Asset, created bool, err error) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), putTimeout)
 	defer cancel()
 	if err := s.PutBlob(ctx, repo.Name, p, sp, contentType); err != nil {
 		return nil, false, err
 	}
-	a = &Asset{RepoID: repo.ID, Path: p, Size: sp.Size, SHA256: sp.SHA256, ContentType: contentType, Kind: kind, UploadedBy: uploadedBy}
+	a = &Asset{RepoID: repo.ID, Path: p, Size: sp.Size, SHA256: sp.SHA256, ContentType: contentType, Kind: kind,
+		UploadedBy: by.User, PublishSessionID: by.Session}
 	for attempt := 0; ; attempt++ {
 		err = s.db.Tx(ctx, func(tx *sql.Tx) error {
 			var err error

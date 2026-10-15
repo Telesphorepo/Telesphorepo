@@ -628,8 +628,7 @@ func TestDebianDeleteAndUpload(t *testing.T) {
 	}
 	debMustUpload(t, s, repo, pkgs.hello1, ps.Auth(), "e2e-hello", "1.0", "all")
 	s.WaitDebianIndexed(t, repo)
-	_, keyBody := s.API(t, http.MethodGet, "/keys/debian.asc", nil, nil)
-	key := string(keyBody)
+	key := s.DebianKey(t, repo, rauth)
 	out := debAptInstall(t, s, repo, reader, "reader-pass-1234", key)
 	if !strings.Contains(out, "NATIVE: native "+pkgs.arch) {
 		t.Fatalf("apt install of the uploaded package:\n%s", out)

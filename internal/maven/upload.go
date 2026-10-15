@@ -93,15 +93,15 @@ type artifactFile struct {
 // the main artifact. Coordinates come from the pom; the fields groupId, artifactId, version and
 // packaging give the ones the pom does not (or all of them for a lone artifact, which gets a
 // generated pom).
-func (h *Handler) Upload(ctx context.Context, repo *repos.Repo, files []format.UploadFile, fields map[string]string, userID int64) ([]format.Uploaded, error) {
+func (h *Handler) Upload(ctx context.Context, repo *repos.Repo, files []format.UploadFile, fields map[string]string, by assets.By) ([]format.Uploaded, error) {
 	if format.InFolder(files) || countPOMs(files) > 1 {
-		return h.uploadFolder(ctx, repo, files, fields, userID)
+		return h.uploadFolder(ctx, repo, files, fields, by)
 	}
-	return h.uploadSet(ctx, repo, files, fields, userID)
+	return h.uploadSet(ctx, repo, files, fields, by)
 }
 
 // uploadSet stores one pom with its artifacts, or one lone artifact (see Upload).
-func (h *Handler) uploadSet(ctx context.Context, repo *repos.Repo, files []format.UploadFile, fields map[string]string, userID int64) ([]format.Uploaded, error) {
+func (h *Handler) uploadSet(ctx context.Context, repo *repos.Repo, files []format.UploadFile, fields map[string]string, by assets.By) ([]format.Uploaded, error) {
 	for k := range fields {
 		switch k {
 		case "groupId", "artifactId", "version", "packaging":
@@ -196,7 +196,7 @@ func (h *Handler) uploadSet(ctx context.Context, repo *repos.Repo, files []forma
 
 	var out []format.Uploaded
 	store := func(p string, sp *assets.Spooled) error {
-		created, unchanged, err := h.put(ctx, repo, p, sp, userID)
+		created, unchanged, err := h.put(ctx, repo, p, sp, by)
 		if errors.Is(err, errImmutable) {
 			return &format.UploadError{Status: http.StatusConflict, Message: p + ": " + errImmutable.Error()}
 		}

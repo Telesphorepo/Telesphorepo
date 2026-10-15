@@ -60,7 +60,7 @@ type Handler struct {
 	settings *settings.Service
 	log      *slog.Logger
 
-	signer func() *signing.Signer // current key (live; nil = unsigned indexes)
+	keys *signing.Keys // the signing keys (live snapshot)
 
 	clockMu sync.Mutex
 	clock   int64 // last issued deb_dirty timestamp (monotonic, unix nanos)
@@ -80,19 +80,20 @@ func New() format.Format {
 func (h *Handler) Name() string  { return name }
 func (h *Handler) Title() string { return "Debian (apt)" }
 
-// Register mounts /debian/{repo}/upload/{dist}/{component} (PUT, POST),
-// GET/HEAD /debian/{repo}/{path...} (dists/ and pool/) and GET /keys/debian.asc. Configuration
-// and the signing key are read on every use, so setting changes apply live.
+// Register mounts /debian/{repo}/upload/{dist}/{component} (PUT, POST), GET/HEAD
+// /debian/{repo}/key.asc (the repo's public signing key) and GET/HEAD /debian/{repo}/{path...}
+// (dists/ and pool/). Configuration and the signing keys are read on every use, so changes
+// apply live.
 func (h *Handler) Register(mux *http.ServeMux, host format.Host) {
 	h.host = host
 	h.db, h.q = host.DB, dbq.New(host.DB.R)
 	h.auth, h.assets, h.repos = host.Auth, host.Assets, host.Repos
-	h.cfg, h.settings, h.signer, h.log = host.Config, host.Settings, host.Signer, host.Log
+	h.cfg, h.settings, h.keys, h.log = host.Config, host.Settings, host.Keys, host.Log
 
 	mux.HandleFunc("PUT /debian/{repo}/upload/{dist}/{component}", h.upload)
 	mux.HandleFunc("POST /debian/{repo}/upload/{dist}/{component}", h.upload)
+	mux.HandleFunc("GET /debian/{repo}/key.asc", h.publicKey)
 	mux.HandleFunc("GET /debian/{repo}/{path...}", h.download)
-	mux.HandleFunc("GET /keys/debian.asc", h.publicKey)
 }
 
 // Migrations holds the deb_* tables.
@@ -106,7 +107,6 @@ func (h *Handler) QuerySet() db.QuerySet {
 		Extra:     dbq.Extra,
 		Allow: map[string]string{
 			"ListAllDirtyDists": "startup recovery: enqueues every pending rebuild once per start; deb_dirty holds only units not yet rebuilt",
-			"ListAllIndexFiles": "background re-sign after a signing-key change, an admin action; two rows per (dist, component, architecture)",
 		},
 	}
 }
@@ -115,9 +115,9 @@ func (h *Handler) QuerySet() db.QuerySet {
 func (h *Handler) Settings() []settings.Def {
 	return []settings.Def{
 		{Key: KeyDebounce, Type: settings.TypeDuration, Default: "2s", Dev: "300ms", Label: "Index rebuild delay",
-			Help: "Quiet period after an upload before the Debian indexes are rebuilt."},
+			Help: "After an upload, the server waits this long for more uploads before it rebuilds the Debian indexes."},
 		{Key: KeyMaxDelay, Type: settings.TypeDuration, Default: "30s", Label: "Max index rebuild delay",
-			Help: "Longest a rebuild waits under continuous uploads."},
+			Help: "While uploads continue, the server rebuilds the indexes at least this often."},
 	}
 }
 
@@ -138,13 +138,19 @@ func (h *Handler) download(w http.ResponseWriter, r *http.Request) {
 	h.assets.Serve(w, r, repo, p)
 }
 
+// publicKey serves the armored public key of the repo's signing key. It takes the read gate
+// of the repo, like its indexes.
 func (h *Handler) publicKey(w http.ResponseWriter, r *http.Request) {
-	signer := h.signer()
-	if signer == nil {
-		httpx.Error(w, http.StatusNotFound, "no signing key configured")
+	repo, _, ok := h.auth.RepoGate(w, r, r.PathValue("repo"), name, auth.Read, false)
+	if !ok {
 		return
 	}
-	key := signer.PublicKeyArmored()
+	k, ok := h.keys.Get(signingKey(repo))
+	if !ok {
+		httpx.Error(w, http.StatusNotFound, "the signing key of this repository does not exist")
+		return
+	}
+	key := []byte(k.PublicKey)
 	w.Header().Set("Content-Type", "application/pgp-keys")
 	w.Header().Set("Content-Length", fmt.Sprint(len(key)))
 	w.WriteHeader(http.StatusOK)
@@ -153,14 +159,9 @@ func (h *Handler) publicKey(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Start launches the background indexer, enqueues all durable deb_dirty rows and re-signs the
-// indexes whenever the signing key changes. It returns immediately; the indexer stops when ctx
-// is cancelled.
+// Start launches the background indexer and enqueues all durable deb_dirty rows. It returns
+// immediately; the indexer stops when ctx is cancelled.
 func (h *Handler) Start(ctx context.Context) {
-	if h.signer() == nil {
-		h.log.Warn("no usable signing key: Debian indexes are unsigned; clients need [trusted=yes]")
-	}
-	h.settings.Subscribe(h.signingKeyChanged)
 	h.idx.start(ctx)
 }
 
@@ -176,16 +177,26 @@ func (h *Handler) Status(ctx context.Context, repo *repos.Repo) (any, error) {
 	}{n}, nil
 }
 
-// RepoConfigChanged applies an architecture change. It removes the index files of removed
-// architectures (so they are no longer served or listed in Release) and their pending
-// rebuilds, then marks the added architectures of every (dist, component) with packages for a
-// rebuild, so arch:all packages appear for them. Every dist is rebuilt, so each Release lists
-// the new architectures; without an added architecture the first configured one is marked.
+// RepoConfigChanged applies a change of the architectures (see archsChanged) and of the
+// signing key: a new key re-signs every Release of this repo (see resign).
 func (h *Handler) RepoConfigChanged(ctx context.Context, old, new *repos.Repo) error {
 	oldArchs, newArchs := architectures(old), architectures(new)
-	if slices.Equal(oldArchs, newArchs) {
-		return nil
+	if !slices.Equal(oldArchs, newArchs) {
+		// Every dist with packages is rebuilt, so every Release is signed again too.
+		return h.archsChanged(ctx, new, oldArchs, newArchs)
 	}
+	if signingKey(old) != signingKey(new) {
+		return h.resign(ctx, new)
+	}
+	return nil
+}
+
+// archsChanged removes the index files of removed architectures (so they are no longer served
+// or listed in Release) and their pending rebuilds, then marks the added architectures of every
+// (dist, component) with packages for a rebuild, so arch:all packages appear for them. Every
+// dist is rebuilt, so each Release lists the new architectures; without an added architecture
+// the first configured one is marked.
+func (h *Handler) archsChanged(ctx context.Context, new *repos.Repo, oldArchs, newArchs []string) error {
 	var removed, added []string
 	for _, a := range oldArchs {
 		if !slices.Contains(newArchs, a) {
@@ -304,46 +315,27 @@ func (h *Handler) raiseClock(n int64) {
 	h.clockMu.Unlock()
 }
 
-// signingKeyChanged is a settings subscriber: when the signing key differs between old and new
-// it marks one unit of every dist with index files dirty, so each Release is signed again.
-func (h *Handler) signingKeyChanged(old, new *settings.Snapshot) {
-	if fingerprint(old) == fingerprint(new) {
-		return
-	}
-	// Subscribers run inside the settings writer; do the DB work elsewhere.
-	go func() {
-		if err := h.resignAll(context.Background()); err != nil {
-			h.log.Error("mark indexes dirty after signing key change", "err", err)
-		}
-	}()
-}
-
-func fingerprint(s *settings.Snapshot) string {
-	if s == nil || s.Signer == nil {
-		return ""
-	}
-	return s.Signer.Fingerprint()
-}
-
-func (h *Handler) resignAll(ctx context.Context) error {
+// resign marks one unit of every dist of repo that has index files dirty, so each Release is
+// signed again with the repo's current key.
+func (h *Handler) resign(ctx context.Context, repo *repos.Repo) error {
 	var keys []distKey
 	err := h.db.Tx(ctx, func(tx *sql.Tx) error {
 		q := dbq.New(tx)
-		files, err := q.ListAllIndexFiles(ctx)
+		files, err := q.ListRepoIndexFiles(ctx, repo.ID)
 		if err != nil {
 			return err
 		}
 		ts := h.tick()
 		for _, f := range files {
-			k := distKey{f.RepoID, f.Distribution}
+			k := distKey{repo.ID, f.Distribution}
 			if len(keys) > 0 && keys[len(keys)-1] == k {
-				continue // files are ordered by (repo, dist): one unit per dist is enough
+				continue // files are ordered by dist: one unit per dist is enough
 			}
 			comp, arch, ok := unitOf(f.Path)
 			if !ok {
 				continue
 			}
-			if err := q.MarkDirty(ctx, dbq.MarkDirtyParams{RepoID: f.RepoID, Distribution: f.Distribution,
+			if err := q.MarkDirty(ctx, dbq.MarkDirtyParams{RepoID: repo.ID, Distribution: f.Distribution,
 				Component: comp, Architecture: arch, MarkedAt: ts}); err != nil {
 				return err
 			}

@@ -70,11 +70,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer sp.Close()
 
-	var uploadedBy int64
-	if p != nil {
-		uploadedBy = p.UserID
-	}
-	res, created, err := h.ingest(r.Context(), repo, dist, comp, sp, uploadedBy)
+	res, created, err := h.ingest(r.Context(), repo, dist, comp, sp, format.ByOf(p))
 	var ue *uploadError
 	switch {
 	case errors.As(err, &ue):
@@ -94,7 +90,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 // transaction, and wakes the indexer. created is false when the same package version is
 // already present with the same bytes. A client error is an *uploadError; any other error is
 // internal. Uploads and imports share it.
-func (h *Handler) ingest(ctx context.Context, repo *repos.Repo, dist, comp string, sp *assets.Spooled, uploadedBy int64) (res uploadResult, created bool, err error) {
+func (h *Handler) ingest(ctx context.Context, repo *repos.Repo, dist, comp string, sp *assets.Spooled, by assets.By) (res uploadResult, created bool, err error) {
 	info, err := parseDeb(sp.File)
 	if err != nil {
 		var bad badDeb
@@ -143,7 +139,7 @@ func (h *Handler) ingest(ctx context.Context, repo *repos.Repo, dist, comp strin
 
 	err = h.db.Tx(ctx, func(tx *sql.Tx) error {
 		a := &assets.Asset{RepoID: repo.ID, Path: pool, Size: sp.Size, SHA256: sp.SHA256,
-			ContentType: debContentType, Kind: assets.KindArtifact, UploadedBy: uploadedBy}
+			ContentType: debContentType, Kind: assets.KindArtifact, UploadedBy: by.User, PublishSessionID: by.Session}
 		if _, err := assets.UpsertTx(ctx, tx, a); err != nil {
 			return err
 		}
@@ -172,7 +168,7 @@ func (h *Handler) ingest(ctx context.Context, repo *repos.Repo, dist, comp strin
 
 // Upload implements format.ManualUploader: each file is a .deb that goes through the upload
 // pipeline into the fields "distribution" and "component" (default "main").
-func (h *Handler) Upload(ctx context.Context, repo *repos.Repo, files []format.UploadFile, fields map[string]string, userID int64) ([]format.Uploaded, error) {
+func (h *Handler) Upload(ctx context.Context, repo *repos.Repo, files []format.UploadFile, fields map[string]string, by assets.By) ([]format.Uploaded, error) {
 	dist, comp := strings.TrimSpace(fields["distribution"]), strings.TrimSpace(fields["component"])
 	if comp == "" {
 		comp = "main"
@@ -199,7 +195,7 @@ func (h *Handler) Upload(ctx context.Context, repo *repos.Repo, files []format.U
 	}
 	out := make([]format.Uploaded, 0, len(files))
 	for _, f := range files {
-		res, created, err := h.ingest(ctx, repo, dist, comp, f.Spool, userID)
+		res, created, err := h.ingest(ctx, repo, dist, comp, f.Spool, by)
 		var ue *uploadError
 		if errors.As(err, &ue) {
 			return out, &format.UploadError{Status: ue.status, Message: f.Name + ": " + ue.msg}

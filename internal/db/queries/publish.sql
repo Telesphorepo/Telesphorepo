@@ -122,15 +122,16 @@ DELETE FROM publish_oidc_seen WHERE id_hash IN
   (SELECT x.id_hash FROM publish_oidc_seen x WHERE x.expires_at <= sqlc.arg(now) LIMIT 100);
 
 -- name: CreatePublishSession :one
-INSERT INTO publish_sessions (public_id, secret_hash, repo_id, user_id, device_id, trust_id, via, subject, created_at, expires_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO publish_sessions (public_id, secret_hash, repo_id, user_id, device_id, trust_id, via, subject, created_at, expires_at,
+  ci_server, ci_repository, ci_sha, ci_ref, ci_run_id, ci_run_attempt, ci_workflow, ci_workflow_ref, ci_actor)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id;
 
 -- A session by the public id of its token, with what the write gate checks: the repo, and the
 -- state of the device or trust policy behind it. The gate reads the user through GetPrincipal.
 -- name: GetPublishSessionAuth :one
 SELECT s.id, s.secret_hash, s.repo_id, s.user_id, s.device_id, s.trust_id, s.via, s.subject,
-       s.created_at, s.expires_at, s.closed_at,
+       s.created_at, s.expires_at, s.closed_at, s.ci_repository,
        r.name AS repo, r.locked_by,
        d.expires_at AS device_expires_at, d.revoked_at AS device_revoked_at,
        t.disabled AS trust_disabled
@@ -176,8 +177,30 @@ LEFT JOIN devices d ON d.id = s.device_id
 WHERE s.user_id = sqlc.arg(user_id) AND s.id < sqlc.arg(before)
 ORDER BY s.id DESC LIMIT sqlc.arg(limit);
 
--- Deletes ended sessions older than the cutoff (expires_at bounds every session's end), in
--- bounded batches through publish_sessions_expires.
+-- Deletes ended sessions without provenance older than the cutoff (expires_at bounds every
+-- session's end), in bounded batches through publish_sessions_expires.
 -- name: DeleteOldPublishSessions :execrows
 DELETE FROM publish_sessions WHERE id IN
-  (SELECT x.id FROM publish_sessions x WHERE x.expires_at <= sqlc.arg(cutoff) LIMIT 100);
+  (SELECT x.id FROM publish_sessions x WHERE x.ci_repository = '' AND x.expires_at <= sqlc.arg(cutoff) LIMIT 100);
+
+-- Keeps the ended provenance sessions older than the cutoff that wrote files: they are the
+-- build records of those files. Bounded batches through publish_sessions_ci_ended.
+-- name: KeepProvenanceSessions :execrows
+UPDATE publish_sessions SET kept = 1 WHERE id IN
+  (SELECT x.id FROM publish_sessions x
+   WHERE x.ci_repository <> '' AND x.kept = 0 AND x.expires_at <= sqlc.arg(cutoff)
+     AND EXISTS (SELECT 1 FROM assets a WHERE a.publish_session_id = x.id)
+   LIMIT 100);
+
+-- Deletes the ended provenance sessions older than the cutoff that wrote no file.
+-- name: DeleteUnusedProvenanceSessions :execrows
+DELETE FROM publish_sessions WHERE id IN
+  (SELECT x.id FROM publish_sessions x
+   WHERE x.ci_repository <> '' AND x.kept = 0 AND x.expires_at <= sqlc.arg(cutoff)
+     AND NOT EXISTS (SELECT 1 FROM assets a WHERE a.publish_session_id = x.id)
+   LIMIT 100);
+
+-- The build provenance of a session ('' ci_repository: none).
+-- name: GetSessionProvenance :one
+SELECT ci_server, ci_repository, ci_sha, ci_ref, ci_run_id, ci_run_attempt, ci_workflow, ci_workflow_ref, ci_actor
+FROM publish_sessions WHERE id = ?;

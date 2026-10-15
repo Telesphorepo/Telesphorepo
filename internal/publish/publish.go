@@ -223,5 +223,6 @@ func (s *Service) Verify(ctx context.Context, token string) (*auth.PublishSessio
 	if !sessionOpen(row, time.Now().Unix()) {
 		return nil, auth.ErrBadCredentials
 	}
-	return &auth.PublishSession{ID: row.ID, RepoID: row.RepoID, UserID: row.UserID.Int64, Via: row.Via, Subject: row.Subject}, nil
+	return &auth.PublishSession{ID: row.ID, RepoID: row.RepoID, UserID: row.UserID.Int64, Via: row.Via, Subject: row.Subject,
+		Provenance: row.CiRepository != ""}, nil
 }

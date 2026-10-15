@@ -78,12 +78,9 @@ type Config struct {
 
 	CookieSecure bool
 	SessionTTL   time.Duration
-	// TrustedProxies are CIDRs, IP addresses and the presets "private" and "cloudflare" (see
+	// TrustedProxies are CIDRs, IP addresses, "private" and IP lists as "list:<name>" (see
 	// internal/netrules): the TCP peers whose X-Forwarded-For the server reads.
 	TrustedProxies []string
-
-	GPGKeyFile        string
-	GPGPassphraseFile string
 
 	// OIDC admin sign-on (design doc §7.5). SSO is enabled iff OIDCIssuer is set.
 	OIDCIssuer         string
@@ -132,10 +129,6 @@ func joinOS(dir, name string) string {
 
 // DefaultDataDir is the data directory when TR_DATA_DIR is unset (the image sets /data).
 const DefaultDataDir = "./data"
-
-// LegacySigningKeyFileName is the M1.1 auto-generated signing key inside the data dir. It is
-// imported once into the "signing.key" setting and no longer written.
-const LegacySigningKeyFileName = "signing.asc"
 
 // MasterKeyFileName holds the generated master key when TR_MASTER_KEY is unset.
 const MasterKeyFileName = "master.key"

@@ -45,7 +45,7 @@ func (h *Handler) Import(ctx context.Context, repo *repos.Repo, item format.Impo
 		return "", err
 	}
 	defer sp.Close()
-	_, created, err := h.ingest(ctx, repo, dist, importComponent, sp, 0)
+	_, created, err := h.ingest(ctx, repo, dist, importComponent, sp, assets.By{})
 	if err != nil {
 		return "", err
 	}

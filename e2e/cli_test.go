@@ -11,10 +11,10 @@ import (
 	"github.com/ProtonMail/go-crypto/openpgp"
 )
 
-// TestZeroConfigStartup: no TR_BOOTSTRAP_* and no TR_GPG_KEY_FILE. The server must print a
-// one-time admin password banner and auto-generate its Debian signing key.
+// TestZeroConfigStartup: no TR_BOOTSTRAP_*. The server must print a one-time admin password
+// banner and generate the signing key "default", which a new Debian repo uses.
 func TestZeroConfigStartup(t *testing.T) {
-	s := StartServer(t, ServerOpts{NoBootstrapAdmin: true, NoSigningKey: true})
+	s := StartServer(t, ServerOpts{NoBootstrapAdmin: true})
 
 	logs := s.Logs(t)
 	if !strings.Contains(logs, "password: "+s.AdminPass) {
@@ -31,19 +31,27 @@ func TestZeroConfigStartup(t *testing.T) {
 		t.Fatalf("/api/me = %+v, want admin with is_admin", me)
 	}
 
-	st, body := s.API(t, http.MethodGet, "/keys/debian.asc", nil, nil)
-	if st != http.StatusOK {
-		t.Fatalf("GET /keys/debian.asc: status %d: %s", st, body)
+	var keys []struct {
+		Name        string `json:"name"`
+		Fingerprint string `json:"fingerprint"`
+		PublicKey   string `json:"public_key"`
 	}
-	if !bytes.Contains(body, []byte("-----BEGIN PGP PUBLIC KEY BLOCK-----")) {
-		t.Fatalf("GET /keys/debian.asc: not an armored public key:\n%s", body)
+	s.MustAPI(t, http.MethodGet, "/api/signing-keys", nil, s.Admin(), &keys)
+	if len(keys) != 1 || keys[0].Name != "default" || keys[0].Fingerprint == "" {
+		t.Fatalf("GET /api/signing-keys on the first start: %+v, want the key \"default\"", keys)
 	}
+	repo := RandName("deb")
+	s.CreateRepo(t, repo, "debian", true, nil)
+	body := []byte(s.DebianKey(t, repo, nil))
 	ents, err := openpgp.ReadArmoredKeyRing(bytes.NewReader(body))
 	if err != nil || len(ents) == 0 {
-		t.Fatalf("parse auto-generated public key: %v (entities: %d)", err, len(ents))
+		t.Fatalf("parse generated public key: %v (entities: %d)", err, len(ents))
 	}
 	if ents[0].PrivateKey != nil {
-		t.Fatal("/keys/debian.asc exposes private key material")
+		t.Fatalf("/debian/%s/key.asc exposes private key material", repo)
+	}
+	if strings.TrimSpace(string(body)) != strings.TrimSpace(keys[0].PublicKey) {
+		t.Fatalf("/debian/%s/key.asc is not the public key of \"default\"", repo)
 	}
 }
 

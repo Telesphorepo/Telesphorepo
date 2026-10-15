@@ -46,13 +46,12 @@ const (
 // ---------------------------------------------------------------- server
 
 type ServerOpts struct {
-	Alias        string            // network alias; default "repo-<random>"
-	Env          map[string]string // overrides/extra TR_* vars (applied last)
-	Storage      string            // "fs" (default) | "s3"
-	S3           *S3Target         // required when Storage == "s3"
-	Files        []ContainerFile   // extra files copied into the server container
-	DataVolume   string            // named volume mounted at /data; default: the container's own
-	NoSigningKey bool              // do not configure TR_GPG_KEY_FILE (server auto-generates its key)
+	Alias      string            // network alias; default "repo-<random>"
+	Env        map[string]string // overrides/extra TR_* vars (applied last)
+	Storage    string            // "fs" (default) | "s3"
+	S3         *S3Target         // required when Storage == "s3"
+	Files      []ContainerFile   // extra files copied into the server container
+	DataVolume string            // named volume mounted at /data; default: the container's own
 	// NoBootstrapAdmin omits TR_BOOTSTRAP_ADMIN_*: the server creates "admin" with a random
 	// password and prints it in its startup banner; StartServer reads it from the logs.
 	NoBootstrapAdmin bool
@@ -91,10 +90,6 @@ func StartServer(t testing.TB, opts ServerOpts) *Server {
 		env["TR_BOOTSTRAP_ADMIN_PASSWORD"] = adminPass
 	}
 	var files []testcontainers.ContainerFile
-	if !opts.NoSigningKey {
-		env["TR_GPG_KEY_FILE"] = "/keys/signing.asc"
-		files = append(files, testcontainers.ContainerFile{Reader: strings.NewReader(SigningPrivateKey), ContainerFilePath: "/keys/signing.asc", FileMode: 0o644})
-	}
 	switch opts.Storage {
 	case "", "fs":
 	case "s3":
@@ -399,6 +394,7 @@ func (s *Session) apply(r *http.Request) {
 	if r.Header.Get("Sec-Fetch-Site") == "" {
 		r.Header.Set("Sec-Fetch-Site", "same-origin")
 	}
+	r.Header.Set("X-Telesphorepo-UI", "1") // the web UI's API client sends it
 }
 
 // ready signs in a lazy session on its first use.
@@ -609,6 +605,20 @@ func (s *Server) WaitDebianIndexed(t testing.TB, repo string) {
 	}
 }
 
+// DebianKey returns the armored public signing key of Debian repo at /debian/{repo}/key.asc,
+// read with auth (nil for an anonymous-read repo).
+func (s *Server) DebianKey(t testing.TB, repo string, auth Auth) string {
+	t.Helper()
+	resp, b := s.Do(t, s.NewRequest(t, http.MethodGet, "/debian/"+repo+"/key.asc", nil), auth)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(b), "BEGIN PGP PUBLIC KEY BLOCK") {
+		t.Fatalf("GET /debian/%s/key.asc: status %d: %s", repo, resp.StatusCode, b)
+	}
+	if strings.Contains(string(b), "PRIVATE KEY") {
+		t.Fatalf("GET /debian/%s/key.asc exposes private key material", repo)
+	}
+	return string(b)
+}
+
 // RandName returns prefix-<8 hex>, safe for repo, user and alias names.
 func RandName(prefix string) string { return prefix + "-" + randHex(4) }
 
@@ -806,11 +816,6 @@ func (f ContainerFile) tc() testcontainers.ContainerFile {
 		mode = 0o644
 	}
 	return testcontainers.ContainerFile{Reader: strings.NewReader(f.Content), ContainerFilePath: f.Path, FileMode: mode}
-}
-
-// PublicKeyFile places the run's armored signing public key at path (e.g. "/keys/debian.asc").
-func PublicKeyFile(path string) ContainerFile {
-	return ContainerFile{Content: SigningPublicKey, Path: path}
 }
 
 type ClientOpts struct {

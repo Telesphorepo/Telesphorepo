@@ -78,11 +78,6 @@ SELECT distribution, path FROM deb_index_files
 WHERE repo_id = ?
 ORDER BY distribution, path;
 
--- Re-sign after a signing-key change: every published index file.
--- name: ListAllIndexFiles :many
-SELECT repo_id, distribution, path FROM deb_index_files
-ORDER BY repo_id, distribution, path;
-
 -- name: DeleteIndexFile :exec
 DELETE FROM deb_index_files WHERE repo_id = ? AND distribution = ? AND path = ?;
 

@@ -9,7 +9,6 @@ import (
 	"crypto/cipher"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -27,7 +26,6 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
 	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
-	"github.com/Telesphorepo/Telesphorepo/internal/signing"
 	"github.com/Telesphorepo/Telesphorepo/internal/storage"
 )
 
@@ -38,12 +36,6 @@ const (
 	SourceDB      Source = "db"
 	SourceEnv     Source = "env"
 	SourceDefault Source = "default"
-)
-
-// Identity used for generated signing keys.
-const (
-	KeyName  = "Telesphorepo"
-	KeyEmail = "telesphorepo@localhost"
 )
 
 // ValidationError reports invalid settings, keyed by setting key ("" for general errors).
@@ -82,10 +74,6 @@ func newVE() *ValidationError { return &ValidationError{Fields: map[string]strin
 // Snapshot is an immutable view of the effective settings.
 type Snapshot struct {
 	Config *config.Config
-	// Signer signs repository indexes; nil only if no usable key is configured.
-	Signer *signing.Signer
-	// SignerFromFile is true when Signer was loaded from gpg.key_file.
-	SignerFromFile bool
 
 	values  map[string]any
 	sources map[string]Source
@@ -111,7 +99,8 @@ func (s *Snapshot) Bool(key string) bool {
 	return v
 }
 
-func (s *Snapshot) Int(key string) int64 {
+// Size returns a size setting in bytes.
+func (s *Snapshot) Size(key string) int64 {
 	v, _ := s.values[key].(int64)
 	return v
 }
@@ -222,9 +211,6 @@ func (s *Service) Current() *Snapshot { return s.snap.Load() }
 // Config returns the current effective configuration (usable as a config.Provider).
 func (s *Service) Config() *config.Config { return s.snap.Load().Config }
 
-// Signer returns the current signing key (nil if none).
-func (s *Service) Signer() *signing.Signer { return s.snap.Load().Signer }
-
 // Subscribe registers fn to run after every applied change, with the previous and the new
 // snapshot. fn runs synchronously in the writer; keep it short.
 func (s *Service) Subscribe(fn func(old, new *Snapshot)) {
@@ -277,7 +263,7 @@ func (s *Service) defaultText(def *Def) string {
 
 // build computes the effective snapshot from stored rows, env overrides and defaults, and
 // validates the whole configuration. lenient (startup) downgrades failures caused by stored
-// signing-key settings to warnings.
+// SSO settings to warnings.
 func (s *Service) build(rows map[string]any, lenient bool) (*Snapshot, error) {
 	ve := newVE()
 	snap := &Snapshot{values: map[string]any{}, sources: map[string]Source{}, db: rows}
@@ -326,12 +312,10 @@ func (s *Service) build(rows map[string]any, lenient bool) (*Snapshot, error) {
 		S3PathStyle:            b(KeyS3PathStyle),
 		S3Redirect:             b(KeyS3Redirect),
 		PresignTTL:             durationOf(snap.values[KeyPresignTTL]),
-		MaxUploadBytes:         n(KeyMaxUploadBytes),
-		MaxJSONBytes:           n(KeyMaxJSONBytes),
+		MaxUploadBytes:         n(KeyMaxUploadSize),
+		MaxJSONBytes:           n(KeyMaxJSONSize),
 		CookieSecure:           b(KeyCookieSecure),
 		SessionTTL:             durationOf(snap.values[KeySessionTTL]),
-		GPGKeyFile:             str(KeyGPGKeyFile),
-		GPGPassphraseFile:      str(KeyGPGPassphraseFile),
 	}
 	if c.FSRoot == "" {
 		c.FSRoot = config.JoinDataDir(s.boot.DataDir, "blobs")
@@ -409,41 +393,6 @@ func (s *Service) build(rows map[string]any, lenient bool) (*Snapshot, error) {
 		}
 	}
 
-	// Signing key: gpg.key_file wins over the stored key.
-	pass, err := signing.ReadPassphrase(c.GPGPassphraseFile)
-	if err != nil {
-		if strict(KeyGPGPassphraseFile) {
-			ve.add(KeyGPGPassphraseFile, err.Error())
-		} else {
-			s.log.Error("signing key passphrase file unreadable", "error", err.Error())
-		}
-	}
-	if c.GPGKeyFile != "" {
-		signer, err := signing.Load(c.GPGKeyFile, c.GPGPassphraseFile)
-		switch {
-		case err == nil:
-			snap.Signer, snap.SignerFromFile = signer, true
-		case strict(KeyGPGKeyFile):
-			hint := ""
-			if snap.sources[KeyGPGKeyFile] == SourceEnv {
-				hint = " (unset " + Lookup(KeyGPGKeyFile).Env() + " to use the signing key stored in the app)"
-			}
-			ve.add(KeyGPGKeyFile, err.Error()+hint)
-		default:
-			s.log.Error("signing key file unusable; falling back to the stored signing key", "file", c.GPGKeyFile, "error", err.Error())
-		}
-	}
-	if snap.Signer == nil && str(KeySigningKey) != "" {
-		signer, err := signing.Parse([]byte(str(KeySigningKey)), pass)
-		switch {
-		case err == nil:
-			snap.Signer = signer
-		case strict(KeySigningKey):
-			ve.add(KeySigningKey, err.Error())
-		default:
-			s.log.Error("stored signing key unusable; repository indexes stay unsigned until a new key is set", "error", err.Error())
-		}
-	}
 	if err := ve.orNil(); err != nil {
 		return nil, err
 	}
@@ -461,13 +410,14 @@ type Item struct {
 	Options []string `json:"options,omitempty"`
 	Secret  bool     `json:"secret"`
 	// Value is the effective value; for secrets it is SecretValue (never the secret itself).
-	Value   any    `json:"value"`
-	Default any    `json:"default"` // nil for secrets
-	Source  Source `json:"source"`
+	Value   any `json:"value"`
+	Default any `json:"default"` // nil for secrets
+	// Display and DefaultDisplay put a size or a duration in words ("512 MiB", "90 days").
+	Display        string `json:"display,omitempty"`
+	DefaultDisplay string `json:"default_display,omitempty"`
+	Source         Source `json:"source"`
 	// Locked: forced by the environment variable Env, read-only in the UI.
 	Locked bool `json:"locked"`
-	// ReadOnly: not changeable through Update (the signing key has its own endpoint).
-	ReadOnly bool `json:"read_only,omitempty"`
 }
 
 // SecretValue is what List reports for a secret setting.
@@ -484,7 +434,6 @@ func (s *Service) List(ctx context.Context) []Item {
 			Key: def.Key, Env: def.Env(), Group: def.Group, Label: def.Label, Help: def.Help,
 			Type: def.Type, Options: def.Options, Secret: def.Secret,
 			Source: snap.sources[def.Key], Locked: snap.sources[def.Key] == SourceEnv,
-			ReadOnly: def.apiReadOnly,
 		}
 		if def.Key == KeyStorage {
 			it.Options = []string{"fs", "s3"}
@@ -497,6 +446,7 @@ func (s *Service) List(ctx context.Context) []Item {
 				it.Default = dv
 			}
 		}
+		it.Display, it.DefaultDisplay = display(def.Type, it.Value), display(def.Type, it.Default)
 		if l, ok := it.Value.([]string); ok && l == nil {
 			it.Value = []string{}
 		}
@@ -506,6 +456,21 @@ func (s *Service) List(ctx context.Context) []Item {
 		out = append(out, it)
 	}
 	return out
+}
+
+// display puts a size or a duration value in words; other types give "".
+func display(t Type, v any) string {
+	switch t {
+	case TypeSize:
+		if n, ok := v.(int64); ok {
+			return formatSize(n)
+		}
+	case TypeDuration:
+		if s, ok := v.(string); ok {
+			return formatDuration(durationOf(s))
+		}
+	}
+	return ""
 }
 
 // candidate applies patch (JSON values; null resets to the default) to the stored rows of snap.
@@ -518,10 +483,6 @@ func (s *Service) candidate(snap *Snapshot, patch map[string]json.RawMessage) (m
 		def := Lookup(key)
 		if def == nil {
 			ve.add(key, "unknown setting")
-			continue
-		}
-		if def.apiReadOnly {
-			ve.add(key, "cannot be changed here (use POST /api/settings/signing-key)")
 			continue
 		}
 		if string(raw) == "null" || len(raw) == 0 {
@@ -704,107 +665,6 @@ func (s *Service) TestOIDC(ctx context.Context, patch map[string]json.RawMessage
 	defer cancel()
 	if _, err := gooidc.NewProvider(ctx, next.Config.OIDCIssuer); err != nil {
 		return &ValidationError{Fields: map[string]string{KeyOIDCIssuer: "OIDC discovery failed: " + err.Error()}}
-	}
-	return nil
-}
-
-// SigningKeyInfo describes the active signing key.
-type SigningKeyInfo struct {
-	PublicKey   string `json:"public_key"` // armored
-	Fingerprint string `json:"fingerprint"`
-}
-
-// ErrSigningKeyFromFile means the signing key comes from gpg.key_file and cannot be replaced
-// in the app.
-var ErrSigningKeyFromFile = errors.New("the signing key is loaded from the signing key file setting (TR_GPG_KEY_FILE); clear it to manage the key in the app")
-
-// SetSigningKey stores armored (an armored OpenPGP private key, decrypted with the configured
-// passphrase file if encrypted) as the signing key, or generates a new Ed25519 key when
-// armored is empty. Invalid keys return a *ValidationError.
-func (s *Service) SetSigningKey(ctx context.Context, armored string, userID int64) (*SigningKeyInfo, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	cur := s.Current()
-	if cur.Config.GPGKeyFile != "" {
-		return nil, ErrSigningKeyFromFile
-	}
-	if cur.sources[KeySigningKey] == SourceEnv {
-		return nil, &ValidationError{Fields: map[string]string{KeySigningKey: "set by environment variable " + Lookup(KeySigningKey).Env() + "; change it there"}}
-	}
-	armored = strings.TrimSpace(armored)
-	if armored == "" {
-		priv, _, err := signing.Generate(KeyName, KeyEmail)
-		if err != nil {
-			return nil, fmt.Errorf("generate signing key: %w", err)
-		}
-		armored = string(priv)
-	} else {
-		pass, err := signing.ReadPassphrase(cur.Config.GPGPassphraseFile)
-		if err != nil {
-			return nil, &ValidationError{Fields: map[string]string{KeyGPGPassphraseFile: err.Error()}}
-		}
-		if _, err := signing.Parse([]byte(armored), pass); err != nil {
-			return nil, &ValidationError{Fields: map[string]string{KeySigningKey: err.Error()}}
-		}
-	}
-	armored += "\n"
-	rows := maps.Clone(cur.db)
-	rows[KeySigningKey] = armored
-	if err := s.write(ctx, rows, []string{KeySigningKey}, userID); err != nil {
-		return nil, err
-	}
-	signer := s.Signer()
-	if signer == nil {
-		return nil, errors.New("signing key was saved but could not be loaded")
-	}
-	s.log.Info("signing key replaced", "fingerprint", signer.Fingerprint())
-	return &SigningKeyInfo{PublicKey: string(signer.PublicKeyArmored()), Fingerprint: signer.Fingerprint()}, nil
-}
-
-// SigningKey returns the active signing key's public half, or nil if there is none.
-func (s *Service) SigningKey() *SigningKeyInfo {
-	signer := s.Signer()
-	if signer == nil {
-		return nil
-	}
-	return &SigningKeyInfo{PublicKey: string(signer.PublicKeyArmored()), Fingerprint: signer.Fingerprint()}
-}
-
-// EnsureSigningKey runs at startup: when no signing key is configured (no gpg.key_file and an
-// empty signing.key) it imports <DataDir>/signing.asc left by M1.1 if present, else
-// generates a key; either way the key is stored encrypted as signing.key.
-func (s *Service) EnsureSigningKey(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	cur := s.Current()
-	if cur.Config.GPGKeyFile != "" || cur.values[KeySigningKey].(string) != "" {
-		return nil
-	}
-	legacy := config.JoinDataDir(s.boot.DataDir, config.LegacySigningKeyFileName)
-	var armored string
-	if b, err := os.ReadFile(legacy); err == nil {
-		pass, _ := signing.ReadPassphrase(cur.Config.GPGPassphraseFile)
-		if _, err := signing.Parse(b, pass); err != nil {
-			return fmt.Errorf("import legacy signing key %s: %w", legacy, err)
-		}
-		armored = string(b)
-		s.log.Info("importing legacy signing key into the app settings; the file is no longer used and can be deleted", "file", legacy)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("read legacy signing key %s: %w", legacy, err)
-	} else {
-		priv, _, err := signing.Generate(KeyName, KeyEmail)
-		if err != nil {
-			return fmt.Errorf("generate signing key: %w", err)
-		}
-		armored = string(priv)
-	}
-	rows := maps.Clone(cur.db)
-	rows[KeySigningKey] = armored
-	if err := s.write(ctx, rows, []string{KeySigningKey}, 0); err != nil {
-		return err
-	}
-	if signer := s.Signer(); signer != nil {
-		s.log.Info("stored signing key", "fingerprint", signer.Fingerprint())
 	}
 	return nil
 }

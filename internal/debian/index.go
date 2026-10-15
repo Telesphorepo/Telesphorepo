@@ -75,7 +75,7 @@ func (h *Handler) put(ctx context.Context, repo *repos.Repo, p string, sp *asset
 	if _, err := sp.File.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
-	_, _, err := h.assets.Put(ctx, repo, p, sp, contentType, assets.KindIndex, 0)
+	_, _, err := h.assets.Put(ctx, repo, p, sp, contentType, assets.KindIndex, assets.By{})
 	return err
 }
 
@@ -285,8 +285,10 @@ func (h *Handler) buildRelease(ctx context.Context, repo *repos.Repo, dist strin
 	}); err != nil {
 		return err
 	}
-	signer := h.signer()
+	signer := h.keys.Signer(signingKey(repo))
 	if signer == nil {
+		h.log.Error("the repo's signing key does not exist or is unusable; its Release is unsigned",
+			"repo", repo.Name, "signing_key", signingKey(repo))
 		return nil
 	}
 	if err := h.putBytes(ctx, repo, base+"/Release.gpg", "application/pgp-signature", func(w io.Writer) error {

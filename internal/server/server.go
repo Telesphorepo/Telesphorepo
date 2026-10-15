@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/access"
 	"github.com/Telesphorepo/Telesphorepo/internal/api"
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
@@ -33,6 +34,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/publish"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
+	"github.com/Telesphorepo/Telesphorepo/internal/signing"
 	"github.com/Telesphorepo/Telesphorepo/internal/storage"
 	"github.com/Telesphorepo/Telesphorepo/web"
 )
@@ -43,6 +45,8 @@ type Services struct {
 	Settings *settings.Service
 	Auth     *auth.Service
 	Repos    *repos.Service
+	DB       *db.DB
+	Assets   *assets.Service // its Store is the live blob store
 }
 
 // Options customises Run (used by "telesphorepo dev"). The zero value is plain "serve".
@@ -50,8 +54,9 @@ type Options struct {
 	// Dev applies the Dev default of every setting (see settings.Options.Dev) and makes the second
 	// factor optional (auth.Service.SetDevMode). Only "telesphorepo dev" sets it.
 	Dev bool
-	// Init runs after the DB and services are ready and before the default first-run admin
-	// bootstrap (so it may create its own admin) and before listening.
+	// Init runs after the DB and services are ready and every format has its core services
+	// (format.Format.Register), and before the default first-run admin bootstrap (so it may
+	// create its own admin), the format workers (format.Starter) and listening.
 	Init func(ctx context.Context, s *Services) error
 	// Ready runs once the listener is bound.
 	Ready func(addr net.Addr)
@@ -115,9 +120,10 @@ func registerSettings() error {
 // RunWith is Run with Options.
 // Steps: logger; mkdir DataDir/TmpDir; db.Open (core migrations); format migrations; format
 // settings; settings.Load (master key, DB, env overrides); query optimizer; live storage
-// (hot-swapped on storage setting changes); repos/auth/publish/assets/move/nexus services;
-// bootstrap admin if no users; signing key (setting, generated on first start); mux: GET
-// /healthz, /api/ -> api.Handler(), each format's Register, "/" -> web UI; listen; each
+// (hot-swapped on storage setting changes); repos, audit, IP lists and rules, signing keys (the
+// key "default" is generated on the first start), auth/publish/assets/move/nexus services; mux:
+// GET /healthz, /api/ -> api.Handler(), each format's Register, "/" -> web UI; Options.Init;
+// bootstrap admin if no users; listen; each
 // format.Starter's Start; resume a running storage move and the running Nexus syncs, start the
 // Nexus sync scheduler and the publish cleanup job; serve.
 // Access logging must never log Authorization headers, cookies, or query strings.
@@ -184,6 +190,12 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 	if err := nr.Load(ctx); err != nil {
 		return err
 	}
+	// Repo configs name a signing key, so the keys (and "default" on the first start) exist
+	// before any repo is created.
+	keys := signing.NewKeys(d, set, log.With("component", "signing"))
+	if err := keys.Load(ctx); err != nil {
+		return err
+	}
 	as := auth.New(d, set.Config, rs)
 	as.SetSealer(set) // TOTP secrets are sealed with the master key
 	as.SetAudit(au)
@@ -209,18 +221,6 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 		nr.Wait()
 	}()
 
-	if opts.Init != nil {
-		if err := opts.Init(ctx, &Services{Config: cfg, Settings: set, Auth: as, Repos: rs}); err != nil {
-			return err
-		}
-	}
-	if err := bootstrapAdmin(ctx, as, boot, log); err != nil {
-		return err
-	}
-	if err := set.EnsureSigningKey(ctx); err != nil {
-		return err
-	}
-
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		if err := d.R.PingContext(r.Context()); err != nil {
@@ -231,7 +231,7 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 		io.WriteString(w, "ok\n")
 	})
 	sso := oidc.New(as, set.Config, log.With("component", "oidc"))
-	mux.Handle("/api/", api.New(as, rs, ss, set, mv, nx, ps, fs, au, nr, sso).Handler())
+	mux.Handle("/api/", api.New(as, rs, ss, set, mv, nx, ps, fs, au, nr, access.New(d, rs, as, nr), keys, sso).Handler())
 	for _, f := range format.All() {
 		f.Register(mux, format.Host{
 			DB:       d,
@@ -240,12 +240,21 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 			Repos:    rs,
 			Config:   set.Config,
 			Settings: set,
-			Signer:   set.Signer,
+			Keys:     keys,
 			Log:      log.With("component", f.Name()),
 			Audit:    au,
 		})
 	}
 	mux.Handle("/", web.Handler())
+
+	if opts.Init != nil {
+		if err := opts.Init(ctx, &Services{Config: cfg, Settings: set, Auth: as, Repos: rs, DB: d, Assets: ss}); err != nil {
+			return err
+		}
+	}
+	if err := bootstrapAdmin(ctx, as, boot, log); err != nil {
+		return err
+	}
 
 	srv := &http.Server{
 		Addr:              boot.Listen,

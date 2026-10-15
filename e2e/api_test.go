@@ -187,7 +187,7 @@ func TestAPISessionRule(t *testing.T) {
 		wantSessionRequired(t, http.MethodPost, "/api/publish/trusts", trust, adminPw)
 		wantSessionRequired(t, http.MethodPost, "/api/users", map[string]any{"username": RandName("evil"), "password": "evil-password-1", "is_admin": true}, adminPw)
 		wantSessionRequired(t, http.MethodPut, "/api/repos/"+repo+"/permissions/frank", map[string]string{"level": "write"}, adminPw)
-		wantSessionRequired(t, http.MethodPatch, "/api/settings", map[string]any{"max_json_bytes": 4096}, adminPw)
+		wantSessionRequired(t, http.MethodPatch, "/api/settings", map[string]any{"max_json_size": 4096}, adminPw)
 		wantSessionRequired(t, http.MethodPost, "/api/repos", map[string]any{"name": RandName("evil"), "format": "maven"}, adminPw)
 		wantSessionRequired(t, http.MethodPost, "/api/tokens", map[string]any{"name": "evil"}, adminPw)
 		wantSessionRequired(t, http.MethodPatch, "/api/users/"+s.AdminUser, map[string]any{"password": "evil-password-1"}, adminPw)
@@ -466,7 +466,7 @@ func TestAPISearch(t *testing.T) {
 }
 
 func TestAPIErrors(t *testing.T) {
-	s := StartServer(t, ServerOpts{Env: map[string]string{"TR_MAX_JSON_BYTES": "1024"}})
+	s := StartServer(t, ServerOpts{Env: map[string]string{"TR_MAX_JSON_SIZE": "1KiB"}})
 
 	huge := `{"name":"` + strings.Repeat("a", 4096) + `","format":"maven"}`
 	apiWant(t, s, http.MethodPost, "/api/repos", huge, s.Admin(), http.StatusRequestEntityTooLarge)

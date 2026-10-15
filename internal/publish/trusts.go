@@ -22,6 +22,7 @@ import (
 
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
+	"github.com/Telesphorepo/Telesphorepo/internal/provenance"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
@@ -582,7 +583,7 @@ func (s *Service) OIDCSession(ctx context.Context, ip netip.Addr, raw, repoName 
 		if n == 0 {
 			return errorf(ErrDenied, "this identity token was already used")
 		}
-		m, err = s.mint(ctx, q, repo, ViaOIDC, 0, 0, match.ID, idt.Subject)
+		m, err = s.mint(ctx, q, repo, ViaOIDC, 0, 0, match.ID, idt.Subject, provenance.FromClaims(idt.Issuer, claims))
 		return err
 	})
 	if err != nil {

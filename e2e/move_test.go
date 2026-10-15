@@ -313,11 +313,8 @@ func moveContent(t *testing.T, s *Server, pkgs *debPackages, patch map[string]an
 	if code != 0 || !strings.Contains(out, msg) {
 		t.Fatalf("maven consumer after the move: exit %d, want 0 with %q:\n%s", code, msg, out)
 	}
-	st, key := s.API(t, http.MethodGet, "/keys/debian.asc", nil, nil)
-	if st != http.StatusOK {
-		t.Fatalf("GET /keys/debian.asc: status %d", st)
-	}
-	out = debAptInstall(t, s, debRepo, s.AdminUser, s.AdminPass, string(key))
+	key := s.DebianKey(t, debRepo, s.AdminBasic())
+	out = debAptInstall(t, s, debRepo, s.AdminUser, s.AdminPass, key)
 	if !strings.Contains(out, "RESULT: hello 1.0\n") || !strings.Contains(out, "NATIVE: native "+pkgs.arch) {
 		t.Fatalf("apt install after the move did not produce expected output:\n%s", out)
 	}

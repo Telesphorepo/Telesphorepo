@@ -43,7 +43,7 @@ func (f *Format) Import(ctx context.Context, repo *repos.Repo, item format.Impor
 		return "", err
 	}
 	defer sp.Close()
-	_, unchanged, err := f.put(ctx, repo, c, item.Path, sp, 0)
+	_, unchanged, err := f.put(ctx, repo, c, item.Path, sp, assets.By{})
 	if err != nil {
 		return "", err
 	}

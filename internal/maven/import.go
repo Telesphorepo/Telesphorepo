@@ -43,7 +43,7 @@ func (h *Handler) Import(ctx context.Context, repo *repos.Repo, item format.Impo
 	if existing != nil && existing.SHA256 == sp.SHA256 {
 		return format.ImportSkipped, nil
 	}
-	_, unchanged, err := h.put(ctx, repo, item.Path, sp, 0)
+	_, unchanged, err := h.put(ctx, repo, item.Path, sp, assets.By{})
 	if err != nil {
 		return "", err
 	}

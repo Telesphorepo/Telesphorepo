@@ -70,18 +70,25 @@ func (f *Format) Register(mux *http.ServeMux, h format.Host) {
 	mux.HandleFunc("PUT /raw/{repo}/{path...}", f.handle)
 }
 
-// Usage returns curl commands to upload and download a file. An upload takes a publish session
-// token (Publishing page); a download takes a password or read token.
+// Usage returns curl and wget commands to download a file (a private repo takes a username and a
+// read token), and the publish steps: curl from CI with the job's identity token, and curl with
+// a publish token by hand.
 func (f *Format) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
 	u := baseURL + "/raw/" + repo.Name + "/path/to/file.tar.gz"
-	dl := "curl -fL -u USER:READ_TOKEN -O " + u
-	if repo.AnonymousRead {
-		dl = "curl -fL -O " + u
+	curl, wget := "curl -fLO "+u, "wget "+u
+	note := ""
+	if !repo.AnonymousRead {
+		curl = "curl -fLO -u YOUR_USERNAME:YOUR_READ_TOKEN " + u
+		wget = "wget --user YOUR_USERNAME --password YOUR_READ_TOKEN " + u
+		note = "Create a read token on Settings › Tokens; it works where a password does."
 	}
-	return []format.Snippet{
-		{Title: "Upload (publish session token from the Publishing page)", Lang: "sh", Code: "curl -f -u publish:PUBLISH_TOKEN -T file.tar.gz " + u},
-		{Title: "Download", Lang: "sh", Code: dl},
+	upload := "curl -f -u publish:$TOKEN -T file.tar.gz " + u
+	out := []format.Snippet{
+		{Client: "curl", Purpose: format.SnippetUse, Context: format.SnippetRepo, Title: "Download a file", Lang: "sh", Code: curl + "\n", Note: note},
+		{Client: "wget", Purpose: format.SnippetUse, Context: format.SnippetRepo, Title: "Download a file", Lang: "sh", Code: wget + "\n", Note: note},
 	}
+	out = append(out, format.CurlCISnippets(baseURL, repo.Name, upload)...)
+	return append(out, format.HandSnippet(upload))
 }
 
 func (f *Format) handle(w http.ResponseWriter, r *http.Request) {
@@ -125,11 +132,7 @@ func (f *Format) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	defer sp.Close()
 
-	var uid int64
-	if pr != nil {
-		uid = pr.UserID
-	}
-	created, unchanged, err := f.put(r.Context(), repo, c, p, sp, uid)
+	created, unchanged, err := f.put(r.Context(), repo, c, p, sp, format.ByOf(pr))
 	switch {
 	case errors.Is(err, errExists):
 		httpx.Error(w, http.StatusConflict, errExists.Error())
@@ -150,7 +153,7 @@ func (f *Format) handle(w http.ResponseWriter, r *http.Request) {
 
 // Upload implements format.ManualUploader: every file goes to its relative path (its name, or its
 // path inside a dropped folder) under the folder in the field "folder" ("" or missing: the repo root) under the repo's overwrite policy.
-func (f *Format) Upload(ctx context.Context, repo *repos.Repo, files []format.UploadFile, fields map[string]string, userID int64) ([]format.Uploaded, error) {
+func (f *Format) Upload(ctx context.Context, repo *repos.Repo, files []format.UploadFile, fields map[string]string, by assets.By) ([]format.Uploaded, error) {
 	for k := range fields {
 		if k != "folder" {
 			return nil, format.BadUpload("unknown field %q; raw uploads take folder", k)
@@ -170,7 +173,7 @@ func (f *Format) Upload(ctx context.Context, repo *repos.Repo, files []format.Up
 		if !validPath(p) {
 			return out, format.BadUpload("invalid file name %q", file.Path)
 		}
-		created, unchanged, err := f.put(ctx, repo, c, p, file.Spool, userID)
+		created, unchanged, err := f.put(ctx, repo, c, p, file.Spool, by)
 		if errors.Is(err, errExists) {
 			return out, &format.UploadError{Status: http.StatusConflict, Message: p + ": " + errExists.Error()}
 		}
@@ -216,7 +219,7 @@ func repoConfig(repo *repos.Repo) (Config, error) {
 // put stores the spooled file at p and holds the path lock while it does. A file that exists
 // with the same bytes stays as it is (unchanged). Different bytes replace it when c allows
 // overwrite; otherwise put returns errExists. Uploads (PUT) and imports share it.
-func (f *Format) put(ctx context.Context, repo *repos.Repo, c Config, p string, sp *assets.Spooled, uid int64) (created, unchanged bool, err error) {
+func (f *Format) put(ctx context.Context, repo *repos.Repo, c Config, p string, sp *assets.Spooled, by assets.By) (created, unchanged bool, err error) {
 	unlock := f.h.Assets.Lock(repo.ID, p)
 	defer unlock()
 	existing, err := f.h.Assets.Get(ctx, repo.ID, p)
@@ -229,6 +232,6 @@ func (f *Format) put(ctx context.Context, repo *repos.Repo, c Config, p string, 
 	if existing != nil && c.Overwrite != OverwriteAllow {
 		return false, false, errExists
 	}
-	_, created, err = f.h.Assets.Put(ctx, repo, p, sp, assets.ContentType(p), assets.KindArtifact, uid)
+	_, created, err = f.h.Assets.Put(ctx, repo, p, sp, assets.ContentType(p), assets.KindArtifact, by)
 	return created, false, err
 }

@@ -12,16 +12,20 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
+	"github.com/Telesphorepo/Telesphorepo/internal/demo"
+	"github.com/Telesphorepo/Telesphorepo/internal/provenance"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 	"github.com/Telesphorepo/Telesphorepo/internal/signing"
@@ -70,10 +74,118 @@ type ConfigObserver interface {
 	RepoConfigChanged(ctx context.Context, old, new *repos.Repo) error
 }
 
-// Describer returns the client setup snippets for a repo (UI and "telesphorepo dev").
-// baseURL is the server's public URL without a trailing slash.
+// Iconic supplies the format's icons for the UI: SVGs of one color (currentColor) on a 24x24
+// view box that read at 16 px. GET /api/formats returns them inline. Icon is the format's mark.
+// KindIcons maps an Artifact.Kind to the mark of artifacts that differ from the format, e.g. a
+// Gradle plugin in a Maven repo; nil when there are none.
+type Iconic interface {
+	Icon() []byte
+	KindIcons() map[string][]byte
+}
+
+// Describer returns the repo-level snippets of a repo (UI and "telesphorepo dev"): how to use the
+// repo in a build (Purpose "use") and how to publish to it (Purpose "publish"), each with Context
+// "repo". baseURL is the server's public URL without a trailing slash.
 type Describer interface {
 	Usage(repo *repos.Repo, baseURL string) []Snippet
+}
+
+// ArtifactDescriber returns the snippets that use one artifact of a repo (Context "artifact"):
+// the dependency line with the repository block it needs. path is an artifact folder or a
+// version folder (a file path selects its folder). mode is VersionPinned or VersionLatest. A
+// path that is not an artifact gives a nil *ArtifactUsage.
+type ArtifactDescriber interface {
+	ArtifactUsage(ctx context.Context, repo *repos.Repo, baseURL, path, mode string) (*ArtifactUsage, error)
+}
+
+// Version modes of ArtifactDescriber.
+const (
+	VersionPinned = "pinned" // this version, e.g. 1.4.2
+	VersionLatest = "latest" // always the newest release
+)
+
+// ArtifactUsage is what ArtifactDescriber returns.
+type ArtifactUsage struct {
+	Artifact Artifact  `json:"artifact"`
+	Version  string    `json:"version"`      // the version the pinned snippets name; "" when none
+	Mode     string    `json:"version_mode"` // VersionPinned or VersionLatest
+	Snippets []Snippet `json:"snippets"`
+}
+
+// Artifact names an artifact of a repo: Path is its folder (with a trailing slash), Title its
+// coordinates (e.g. "com.acme:lib"), Kind the format's word for it (e.g. "library", "bom",
+// "gradle-plugin").
+type Artifact struct {
+	Path  string `json:"path"`
+	Title string `json:"title"`
+	Kind  string `json:"kind"`
+}
+
+// Versioned groups the files of an artifact folder into versions, and the files of a version
+// folder into builds (e.g. the timestamped builds of a Maven -SNAPSHOT version). Both return a
+// nil *Artifact when path is not such a folder. Versions are newest first; after is the last
+// version of the previous page ("" for the first). Builds are newest first; after is the last
+// build of the previous page. next is "" at the end.
+type Versioned interface {
+	Versions(ctx context.Context, repo *repos.Repo, path, after string, limit int) (*Artifact, []Version, string, error)
+	Builds(ctx context.Context, repo *repos.Repo, path, after string, limit int) (*Artifact, *Version, []Build, string, error)
+}
+
+// Version kinds.
+const (
+	VersionRelease  = "release"
+	VersionSnapshot = "snapshot"
+)
+
+// Version is one version of an artifact. A release has one build; a snapshot has one or more,
+// and LatestBuild names the newest. PublishedAt is when its newest build was published, and
+// Provenance is that build's (nil: none).
+type Version struct {
+	Version     string                 `json:"version"`
+	Path        string                 `json:"path"` // the version folder, with a trailing slash
+	Kind        string                 `json:"kind"` // VersionRelease or VersionSnapshot
+	LatestBuild string                 `json:"latest_build,omitempty"`
+	BuildsCount int                    `json:"builds_count"`
+	PublishedAt time.Time              `json:"published_at"`
+	Provenance  *provenance.Provenance `json:"provenance"`
+}
+
+// Build is one build of a version: its id (a snapshot's "20261014.103000-3", a release's
+// version), its files without checksum and signature files, when it was published and its
+// provenance (nil: none).
+type Build struct {
+	Build       string                 `json:"build"`
+	Files       []BuildFile            `json:"files"`
+	PublishedAt time.Time              `json:"published_at"`
+	Provenance  *provenance.Provenance `json:"provenance"`
+}
+
+// BuildFile is one file of a build. Classifier and Extension are the format's split of its name
+// (e.g. "sources" and "jar"); Classifier is "" for the main file.
+type BuildFile struct {
+	Name       string `json:"name"`
+	Path       string `json:"path"`
+	Size       int64  `json:"size"`
+	SHA256     string `json:"sha256"`
+	Classifier string `json:"classifier"`
+	Extension  string `json:"extension"`
+}
+
+// DemoData fills the plugin's part of the demo dataset of "telesphorepo dev". DemoRepos lists
+// the repos it fills; the command creates them, gives users access, and calls Demo once for each
+// repo in that order, with a generator seeded by the repo's place in the dataset. Demo stores the
+// files through run (run.Add, or the plugin's own upload pipeline and run.Stored) and announces
+// how many it will store with run.Expect.
+type DemoData interface {
+	DemoRepos() []DemoRepo
+	Demo(ctx context.Context, run *demo.Run, repo *repos.Repo, rng *rand.Rand) error
+}
+
+// DemoRepo is a repo of the demo dataset.
+type DemoRepo struct {
+	Name        string
+	Description string
+	Public      bool // anonymous read
 }
 
 // Queryable lists the format's queries for the plan guard (telesphorepo dbcheck).
@@ -128,14 +240,14 @@ type DeleteObserver interface {
 const RepoDeleting = "the repository is being deleted"
 
 // ManualUploader takes files uploaded through the web UI (POST /api/repos/{name}/upload, spec
-// §13). fields are the form's text fields; userID is the uploader (0 for a CI session). A
+// §13). fields are the form's text fields; by is who uploads (see ByOf). A
 // client mistake is an *UploadError.
 //
 // Scan (POST /api/repos/{name}/upload/scan, spec §13.1) looks at the files of a dropped folder
 // and returns what an Upload of them would store, one Found per artifact or package, with the
 // problems that would refuse it. It stores nothing. Files that no Found lists are ignored.
 type ManualUploader interface {
-	Upload(ctx context.Context, repo *repos.Repo, files []UploadFile, fields map[string]string, userID int64) ([]Uploaded, error)
+	Upload(ctx context.Context, repo *repos.Repo, files []UploadFile, fields map[string]string, by assets.By) ([]Uploaded, error)
 	Scan(ctx context.Context, repo *repos.Repo, files []UploadFile) ([]Found, error)
 }
 
@@ -196,12 +308,36 @@ func BadUpload(format string, args ...any) error {
 	return &UploadError{http.StatusBadRequest, fmt.Sprintf(format, args...)}
 }
 
-// Snippet is one client setup step.
+// Snippet is one copy-paste step. The UI shows one tab per Client and the snippets of a client
+// in order.
 type Snippet struct {
-	Title string `json:"title"` // e.g. "~/.m2/settings.xml"
-	Lang  string `json:"lang"`  // highlighting hint: "xml", "kotlin", "sh", ...
+	// Client is the tool the snippet is for: "gradle-kotlin", "gradle-groovy", "maven", "apt",
+	// "curl", "github-actions" or "jenkins".
+	Client string `json:"client"`
+	// Purpose is SnippetUse (add the repo or artifact to a build) or SnippetPublish.
+	Purpose string `json:"purpose"`
+	// Context is SnippetRepo (repo setup) or SnippetArtifact (one artifact).
+	Context string `json:"context"`
+	// Via says where a publish snippet publishes from: ViaComputer (a client plugin with a
+	// device), ViaCI or ViaHand (the browser, or a publish token with curl). "" for a use snippet.
+	Via   string `json:"via,omitempty"`
+	Title string `json:"title"` // the file or step, e.g. "~/.m2/settings.xml"
+	Lang  string `json:"lang"`  // highlighting hint: "xml", "kotlin", "groovy", "sh", "yaml", ...
 	Code  string `json:"code"`
+	Note  string `json:"note,omitempty"` // one line under the code, e.g. a trade-off
 }
+
+// Snippet purposes, contexts and publish sources.
+const (
+	SnippetUse      = "use"
+	SnippetPublish  = "publish"
+	SnippetRepo     = "repo"
+	SnippetArtifact = "artifact"
+
+	ViaComputer = "computer"
+	ViaCI       = "ci"
+	ViaHand     = "hand"
+)
 
 // Host is the set of core services a format may use. Plugins never import each other.
 type Host struct {
@@ -211,9 +347,22 @@ type Host struct {
 	Repos    *repos.Service
 	Config   config.Provider   // live core configuration
 	Settings *settings.Service // live snapshot (Current) with the format's own settings; Subscribe
-	Signer   func() *signing.Signer
-	Log      *slog.Logger   // tagged with component=<format name>
-	Audit    *audit.Service // records uploads on the format routes
+	Keys     *signing.Keys     // the repository signing keys (live snapshot)
+	Log      *slog.Logger      // tagged with component=<format name>
+	Audit    *audit.Service    // records uploads on the format routes
+}
+
+// ByOf returns who writes the files of an upload by p: the user, and the publish session when it
+// recorded build provenance.
+func ByOf(p *auth.Principal) assets.By {
+	if p == nil {
+		return assets.By{}
+	}
+	by := assets.By{User: p.UserID}
+	if p.Publish != nil && p.Publish.Provenance {
+		by.Session = p.Publish.ID
+	}
+	return by
 }
 
 // RecordUpload writes an upload through a format route to the audit log.

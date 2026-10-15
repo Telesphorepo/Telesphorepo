@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/access"
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
@@ -25,6 +26,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/publish"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
+	"github.com/Telesphorepo/Telesphorepo/internal/signing"
 )
 
 type API struct {
@@ -39,6 +41,8 @@ type API struct {
 	files    *files.Service
 	audit    *audit.Service
 	rules    *netrules.Service
+	access   *access.Service
+	keys     *signing.Keys
 	sso      Routes
 }
 
@@ -49,10 +53,10 @@ type Routes interface {
 
 // New builds the API. sso (may be nil) mounts GET /api/auth/oidc/{login,callback}. The format
 // endpoints read the format registry (internal/format).
-func New(a *auth.Service, rs *repos.Service, as *assets.Service, st *settings.Service, mv *move.Service, nx *nexus.Service, ps *publish.Service, fs *files.Service, au *audit.Service, nr *netrules.Service, sso Routes) *API {
+func New(a *auth.Service, rs *repos.Service, as *assets.Service, st *settings.Service, mv *move.Service, nx *nexus.Service, ps *publish.Service, fs *files.Service, au *audit.Service, nr *netrules.Service, ax *access.Service, keys *signing.Keys, sso Routes) *API {
 	return &API{
 		auth: a, repos: rs, assets: as, cfg: st.Config, settings: st, moves: mv, nexus: nx, publish: ps,
-		files: fs, audit: au, rules: nr, sso: sso,
+		files: fs, audit: au, rules: nr, access: ax, keys: keys, sso: sso,
 	}
 }
 
@@ -74,6 +78,7 @@ func (a *API) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/users", a.listUsers)
 	mux.HandleFunc("POST /api/users", a.createUser)
+	mux.HandleFunc("GET /api/users/{username}", a.getUser)
 	mux.HandleFunc("PATCH /api/users/{username}", a.updateUser)
 
 	mux.HandleFunc("GET /api/formats", a.listFormats)
@@ -89,16 +94,14 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /api/repos/{name}/assets", a.listAssets)
 	mux.HandleFunc("GET /api/repos/{name}/status", a.repoStatus)
 	mux.HandleFunc("GET /api/repos/{name}/usage", a.repoUsage)
+	mux.HandleFunc("GET /api/repos/{name}/snippets", a.artifactSnippets)
 	mux.HandleFunc("GET /api/repos/{name}/tree", a.tree)
+	mux.HandleFunc("GET /api/repos/{name}/file", a.fileDetails)
+	mux.HandleFunc("GET /api/repos/{name}/versions", a.versions)
+	mux.HandleFunc("GET /api/repos/{name}/builds", a.builds)
 	mux.HandleFunc("DELETE /api/repos/{name}/files", a.deleteFiles)
 	mux.HandleFunc("POST /api/repos/{name}/upload", a.upload)
 	mux.HandleFunc("POST /api/repos/{name}/upload/scan", a.scanUpload)
-	mux.HandleFunc("GET /api/repos/{name}/ip-rules", a.getIPRules)
-	mux.HandleFunc("PUT /api/repos/{name}/ip-rules", a.putIPRules)
-
-	mux.HandleFunc("GET /api/network/presets", a.listPresets)
-	mux.HandleFunc("POST /api/network/presets/{name}/refresh", a.refreshPreset)
-	mux.HandleFunc("GET /api/network/proxy-candidates", a.listProxyCandidates)
 
 	mux.HandleFunc("GET /api/audit", a.listAudit)
 
@@ -108,9 +111,10 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/settings", a.patchSettings)
 	mux.HandleFunc("POST /api/settings/storage/test", a.testStorage)
 	mux.HandleFunc("POST /api/settings/oidc/test", a.testOIDC)
-	mux.HandleFunc("GET /api/settings/signing-key", a.getSigningKey)
-	mux.HandleFunc("POST /api/settings/signing-key", a.setSigningKey)
 
+	a.registerAccess(mux)
+	a.registerNetwork(mux)
+	a.registerSigningKeys(mux)
 	a.registerMoves(mux)
 	a.registerNexus(mux)
 	a.registerPublish(mux)
@@ -357,6 +361,19 @@ func (a *API) listUsers(w http.ResponseWriter, r *http.Request) {
 		us = []*auth.User{}
 	}
 	httpx.WriteJSON(w, http.StatusOK, list[*auth.User]{us, cursor(next)})
+}
+
+// getUser returns one account by name (admin): the person page of the UI.
+func (a *API) getUser(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.admin(w, r); !ok {
+		return
+	}
+	u, err := a.auth.GetUser(r.Context(), r.PathValue("username"))
+	if err != nil {
+		fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, u)
 }
 
 func (a *API) createUser(w http.ResponseWriter, r *http.Request) {

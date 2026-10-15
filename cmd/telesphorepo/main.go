@@ -1,5 +1,5 @@
 // Command telesphorepo is the single Telesphorepo binary (spec §4): serve (default), dev,
-// user add|passwd|reset-2fa, keygen, version, help.
+// user add|passwd|reset-2fa, version, help.
 package main
 
 import (
@@ -87,7 +87,7 @@ until then the sign-in reaches only that page. Enrolled devices stay valid.
 	}
 
 	commands = []*command{
-		{name: "serve", summary: "run the server (default)", usage: `Run the server. Settings are managed in the web UI (Admin > Settings) and stored in the
+		{name: "serve", summary: "run the server (default)", usage: `Run the server. Settings are managed in the web UI (Settings) and stored in the
 database; secrets are encrypted with a master key.
 
   telesphorepo                         same as "telesphorepo serve"
@@ -98,28 +98,22 @@ TR_MASTER_KEY (base64 32 bytes; default <data>/master.key, generated on first st
 Any setting can also be forced with TR_<SETTING>, e.g. TR_STORAGE=s3; it is then read-only
 in the UI.
 
-On first start an "admin" user is created and its random password is printed once, and a
-repository signing key is generated and stored encrypted in the database.
+On first start an "admin" user is created and its random password is printed once, and the
+repository signing key "default" is generated and stored encrypted in the database.
 `, run: serveCmd},
-		{name: "dev", summary: "zero-config local server with demo repos", usage: `Run a zero-config local server for development.
+		{name: "dev", summary: "zero-config local server with demo data", usage: `Run a zero-config local server for development.
 
-  telesphorepo dev
+  telesphorepo dev             first run: admin, demo users and about 175,000 demo files
+  telesphorepo dev --empty     first run: admin and one empty repo per format
 
-Data lives in ./.telesphorepo-dev, the server listens on http://localhost:8080, cookies work
-over plain HTTP, and an admin user plus one demo repo per format (named after the format) are
-created on first run, with client setup snippets for each. The URL, username and password are printed on every start. TR_* env still overrides.
-Start over with a fresh instance by deleting ./.telesphorepo-dev.
+Data lives in ./.telesphorepo-dev, the server listens on http://localhost:8080 and cookies work
+over plain HTTP. The first run creates the admin and the demo data before the server starts:
+public repos maven (with Gradle plugin markers), debian and raw, the private Maven repo
+internal, and five demo users with their roles. The data is the same on every fresh run; its
+times spread over the last two years. The URL and the passwords are printed on every start.
+TR_* env still overrides. Start over with a fresh instance by deleting ./.telesphorepo-dev.
 `, run: devCmd},
 		userCmd,
-		{name: "keygen", summary: "write a new repository signing key file", usage: `Write a new Ed25519 OpenPGP signing key and print its fingerprint. Never overwrites.
-
-  telesphorepo keygen                  writes ./signing.asc
-  telesphorepo keygen release.asc      writes ./release.asc
-
-The server generates a key on first start and stores it (encrypted) in its database; use
-keygen to create one ahead of time, then upload it under Admin > Settings or point
-TR_GPG_KEY_FILE at it.
-`, run: keygenCmd},
 		{name: "dbcheck", hidden: true, usage: `Check the query plans of every query against a fresh database.
 
   telesphorepo dbcheck

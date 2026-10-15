@@ -20,16 +20,17 @@ type ApiToken struct {
 }
 
 type Asset struct {
-	ID          int64
-	RepoID      int64
-	Path        string
-	Size        int64
-	Sha256      string
-	ContentType string
-	Kind        string
-	UploadedBy  sql.NullInt64
-	CreatedAt   int64
-	UpdatedAt   int64
+	ID               int64
+	RepoID           int64
+	Path             string
+	Size             int64
+	Sha256           string
+	ContentType      string
+	Kind             string
+	UploadedBy       sql.NullInt64
+	CreatedAt        int64
+	UpdatedAt        int64
+	PublishSessionID sql.NullInt64
 }
 
 type AssetsFt struct {
@@ -81,6 +82,19 @@ type DeviceEnrollment struct {
 	PolledAt       int64
 	ApprovedBy     sql.NullInt64
 	DeviceID       sql.NullInt64
+}
+
+type IpList struct {
+	ID          int64
+	Name        string
+	Kind        string
+	Title       string
+	Description string
+	Ranges      string
+	Source      string
+	FetchedAt   int64
+	Error       string
+	CreatedAt   int64
 }
 
 type NexusSource struct {
@@ -137,31 +151,34 @@ type NexusSyncRepo struct {
 	Error        string
 }
 
-type PresetRange struct {
-	Name      string
-	Ranges    string
-	FetchedAt int64
-	Error     string
-}
-
 type PublishOidcSeen struct {
 	IDHash    []byte
 	ExpiresAt int64
 }
 
 type PublishSession struct {
-	ID         int64
-	PublicID   string
-	SecretHash []byte
-	RepoID     int64
-	UserID     sql.NullInt64
-	DeviceID   sql.NullInt64
-	TrustID    sql.NullInt64
-	Via        string
-	Subject    string
-	CreatedAt  int64
-	ExpiresAt  int64
-	ClosedAt   sql.NullInt64
+	ID            int64
+	PublicID      string
+	SecretHash    []byte
+	RepoID        int64
+	UserID        sql.NullInt64
+	DeviceID      sql.NullInt64
+	TrustID       sql.NullInt64
+	Via           string
+	Subject       string
+	CreatedAt     int64
+	ExpiresAt     int64
+	ClosedAt      sql.NullInt64
+	CiServer      string
+	CiRepository  string
+	CiSha         string
+	CiRef         string
+	CiRunID       string
+	CiRunAttempt  string
+	CiWorkflow    string
+	CiWorkflowRef string
+	CiActor       string
+	Kept          int64
 }
 
 type PublishTrust struct {
@@ -227,6 +244,15 @@ type Setting struct {
 	Secret    bool
 	UpdatedAt int64
 	UpdatedBy sql.NullInt64
+}
+
+type SigningKey struct {
+	ID          int64
+	Name        string
+	Fingerprint string
+	PublicKey   string
+	PrivateKey  []byte
+	CreatedAt   int64
 }
 
 type StorageMove struct {

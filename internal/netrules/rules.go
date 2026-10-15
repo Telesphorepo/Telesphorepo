@@ -25,8 +25,8 @@ const (
 
 // Rule kinds.
 const (
-	KindCIDR   = "cidr"
-	KindPreset = "preset"
+	RuleCIDR = "cidr" // Value is a CIDR
+	RuleList = "list" // Value is the name of an IP list
 )
 
 const (
@@ -37,7 +37,7 @@ const (
 // ErrInvalid is a rule set that does not validate.
 var ErrInvalid = errors.New("invalid IP rules")
 
-// Rule is one entry of an allow-list: a CIDR or a preset name.
+// Rule is one entry of an allow-list: a CIDR or the name of an IP list.
 type Rule struct {
 	Kind  string `json:"kind"`
 	Value string `json:"value"`
@@ -59,7 +59,7 @@ type repoRules struct {
 // matcher is one compiled allow-list.
 type matcher struct {
 	prefixes []netip.Prefix
-	presets  []string
+	lists    []string
 	empty    bool
 }
 
@@ -67,12 +67,12 @@ func compile(list []Rule) matcher {
 	m := matcher{empty: len(list) == 0}
 	for _, r := range list {
 		switch r.Kind {
-		case KindCIDR:
+		case RuleCIDR:
 			if p, err := netip.ParsePrefix(r.Value); err == nil {
 				m.prefixes = append(m.prefixes, p)
 			}
-		case KindPreset:
-			m.presets = append(m.presets, r.Value)
+		case RuleList:
+			m.lists = append(m.lists, r.Value)
 		}
 	}
 	return m
@@ -95,6 +95,13 @@ func (e *DeniedError) Error() string {
 }
 
 func (s *Service) loadRules(ctx context.Context) error {
+	s.rulesMu.Lock()
+	defer s.rulesMu.Unlock()
+	return s.reloadRulesLocked(ctx)
+}
+
+// reloadRulesLocked reads every repo's rules into memory. Caller holds rulesMu.
+func (s *Service) reloadRulesLocked(ctx context.Context) error {
 	m := map[int64]*repoRules{}
 	var after int64
 	for {
@@ -112,9 +119,7 @@ func (s *Service) loadRules(ctx context.Context) error {
 		m[id] = rr
 		after = id
 	}
-	s.rulesMu.Lock()
 	s.rules = m
-	s.rulesMu.Unlock()
 	return nil
 }
 
@@ -147,8 +152,8 @@ func (s *Service) RepoRules(repoID int64) Rules {
 }
 
 // normalize validates one scope's list and returns it in canonical form: a CIDR is masked, an
-// address becomes a /32 or /128, a preset is lower-cased.
-func normalize(scope string, in []Rule) ([]Rule, error) {
+// address becomes a /32 or /128, a list name is lower-cased and must exist.
+func (s *Service) normalize(scope string, in []Rule) ([]Rule, error) {
 	if len(in) > maxRulesPerScope {
 		return nil, fmt.Errorf("%w: at most %d %s rules", ErrInvalid, maxRulesPerScope, scope)
 	}
@@ -157,7 +162,7 @@ func normalize(scope string, in []Rule) ([]Rule, error) {
 	for _, r := range in {
 		v := strings.TrimSpace(r.Value)
 		switch r.Kind {
-		case KindCIDR:
+		case RuleCIDR:
 			if p, err := netip.ParsePrefix(v); err == nil {
 				v = p.Masked().String()
 			} else if a, err := netip.ParseAddr(v); err == nil {
@@ -166,14 +171,13 @@ func normalize(scope string, in []Rule) ([]Rule, error) {
 			} else {
 				return nil, fmt.Errorf("%w: %s rule %q is not a CIDR (e.g. 203.0.113.0/24)", ErrInvalid, scope, clipText(v, 64))
 			}
-		case KindPreset:
+		case RuleList:
 			v = strings.ToLower(v)
-			if !KnownPreset(v) {
-				return nil, fmt.Errorf("%w: %s rule: unknown preset %q (use %s, %s or %s)", ErrInvalid, scope,
-					clipText(v, 64), PresetPrivate, PresetCloudflare, PresetGitHubActions)
+			if !s.Exists(v) {
+				return nil, fmt.Errorf("%w: %s rule: there is no IP list %q", ErrInvalid, scope, clipText(v, 64))
 			}
 		default:
-			return nil, fmt.Errorf("%w: %s rule kind must be %q or %q", ErrInvalid, scope, KindCIDR, KindPreset)
+			return nil, fmt.Errorf("%w: %s rule kind must be %q or %q", ErrInvalid, scope, RuleCIDR, RuleList)
 		}
 		note := strings.TrimSpace(r.Note)
 		if !utf8.ValidString(note) || utf8.RuneCountInString(note) > maxNoteChars {
@@ -197,16 +201,17 @@ func normalize(scope string, in []Rule) ([]Rule, error) {
 // SetRules validates in and replaces every rule of repoID with it. It returns the stored
 // rules. A validation error wraps ErrInvalid.
 func (s *Service) SetRules(ctx context.Context, repoID int64, in Rules) (Rules, error) {
-	read, err := normalize(ScopeRead, in.Read)
-	if err != nil {
-		return Rules{}, err
-	}
-	pub, err := normalize(ScopePublish, in.Publish)
-	if err != nil {
-		return Rules{}, err
-	}
+	// The list names are checked under rulesMu, which a list delete or rename also holds.
 	s.rulesMu.Lock()
 	defer s.rulesMu.Unlock()
+	read, err := s.normalize(ScopeRead, in.Read)
+	if err != nil {
+		return Rules{}, err
+	}
+	pub, err := s.normalize(ScopePublish, in.Publish)
+	if err != nil {
+		return Rules{}, err
+	}
 	err = s.d.Tx(ctx, func(tx *sql.Tx) error {
 		q := dbq.New(tx)
 		if err := q.DeleteRepoIPRules(ctx, repoID); err != nil {
@@ -255,8 +260,8 @@ func (s *Service) allows(m matcher, a netip.Addr) bool {
 	if contains(m.prefixes, a) {
 		return true
 	}
-	for _, p := range m.presets {
-		if contains(s.presetRanges(p), a) {
+	for _, l := range m.lists {
+		if contains(s.listRanges(l), a) {
 			return true
 		}
 	}
