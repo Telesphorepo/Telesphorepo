@@ -1,11 +1,11 @@
 // One column of the Columns view, or one open folder of the Tree view: the children of one folder. A plain folder lists its tree
 // (folders first, checksum and signature files left out, version folders newest first). A version
-// folder lists the files of its latest build and how many earlier builds it has, so a snapshot
-// with many builds stays one short column.
+// folder (its parent is the artifact, its name the version) lists the files of its latest build
+// and how many earlier builds it has, so a snapshot with many builds stays one short column.
 
 import { api, errorMessage, type TreeEntry } from "$lib/api";
 import { Keyset } from "$lib/load.svelte";
-import { baseName, browse, compareVersions, sideOf, type Version } from "../browse";
+import { baseName, browse, compareVersions, parentOf, sideOf, type Version } from "../browse";
 
 export type Entry = { name: string; path: string; type: "dir" | "file"; size?: number };
 
@@ -24,7 +24,7 @@ export class Column {
     if (depth >= 3 && /^\d/.test(baseName(folder))) {
       this.#probing = true;
       browse
-        .builds(repo, folder, { limit: 1 })
+        .builds(repo, parentOf(folder), baseName(folder), { limit: 1 })
         .then((b) => {
           if (b.version && b.items[0]) {
             this.version = b.version;

@@ -241,6 +241,21 @@ No before shot: the Tree is new, and the old Cover Flow was replaced. After:
 [browse-coverflow-1440-dark.png](screenshots/browse-coverflow-1440-dark.png),
 [browse-coverflow-390-dark.png](screenshots/browse-coverflow-390-dark.png).
 
+### Versions and builds for Maven and Debian
+
+Problem: only a Maven artifact had a Versions view and a build timeline. Debian keeps every
+version of a package in one pool folder, so a package with 9 snapshot builds showed 9 files and no
+versions.
+
+Decision: a version is named by its artifact folder and its version string, not by a folder. A
+Debian package folder shows its versions, and `3.0~SNAPSHOT` shows its 9 builds on the same
+timeline as a Maven snapshot, newest first. The builds list shows the architecture of each `.deb`
+in place of the Maven classifier. The snippet of a build installs that exact version; the snippet
+of a snapshot version installs the newest.
+
+Principle: 1. State lives where the thing is (the versions and builds of a package show at the
+package); 8. Say it once, show it instead of describing it (one timeline for both formats).
+
 ### Use and Publish are two tabs
 
 Problem: "Setup" mixed using a repository with publishing to it.

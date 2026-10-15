@@ -1,0 +1,303 @@
+package debian
+
+import (
+	"context"
+	"path"
+	"regexp"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	coredbq "github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
+	"github.com/Telesphorepo/Telesphorepo/internal/debian/dbq"
+	"github.com/Telesphorepo/Telesphorepo/internal/format"
+	"github.com/Telesphorepo/Telesphorepo/internal/provenance"
+	"github.com/Telesphorepo/Telesphorepo/internal/repos"
+)
+
+// Versions and builds (format.Versioned) of a Debian package, read from deb_packages. An
+// artifact folder is pool/<component>/<prefix>/<package>/: the versions are those of the
+// package of that name in that component whose files lie in the folder. A Debian version
+// <base>~SNAPSHOT<sep><stamp> (sep one of . + ~ -, stamp 8 to 14 digits, yyyyMMdd[HHmmss]) is a
+// build of the snapshot version <base>~SNAPSHOT; any other version is a release with one build.
+// The files of a build are its .deb files, one for each architecture. One indexed read
+// (deb_packages_package) loads at most maxPackageRows rows of the package.
+
+const maxPackageRows = 20000
+
+var snapshotRE = regexp.MustCompile(`^(.+~SNAPSHOT)[.+~-]([0-9]{8,14})$`)
+
+// splitSnapshot returns the version that Debian version v is a build of, and the build's stamp
+// ("" for a release).
+func splitSnapshot(v string) (version, stamp string) {
+	if m := snapshotRE.FindStringSubmatch(v); m != nil {
+		return m[1], m[2]
+	}
+	return v, ""
+}
+
+// packageOf splits an artifact folder (pool/main/u/urn/) into the artifact, its component and
+// its package name.
+func packageOf(dir string) (format.Artifact, string, string, bool) {
+	segs := strings.Split(strings.Trim(dir, "/"), "/")
+	if len(segs) != 4 || segs[0] != "pool" || !packageRE.MatchString(segs[3]) {
+		return format.Artifact{}, "", "", false
+	}
+	return format.Artifact{Path: strings.Join(segs, "/") + "/", Title: segs[3], Kind: "package"}, segs[1], segs[3], true
+}
+
+// debBuild is one Debian version of a package: its .deb files.
+type debBuild struct {
+	id      string // the Debian version, e.g. 3.0~SNAPSHOT.20261014211855
+	stamp   string // "" for a release
+	dist    string // a distribution that holds it
+	files   []format.BuildFile
+	at      time.Time
+	session int64
+}
+
+// debVersion is the builds of one version, newest first.
+type debVersion struct {
+	name   string
+	builds []*debBuild
+}
+
+// readPackage groups the .deb files of the package in artifact folder art into versions, newest
+// first.
+func (h *Handler) readPackage(ctx context.Context, repoID int64, art format.Artifact, component, pkg string) ([]*debVersion, error) {
+	rows, err := h.q.ListPackageFiles(ctx, dbq.ListPackageFilesParams{RepoID: repoID, Component: component, Package: pkg, Limit: maxPackageRows})
+	if err != nil {
+		return nil, err
+	}
+	builds := map[string]*debBuild{}
+	seen := map[string]bool{} // a file in several distributions counts once
+	for _, r := range rows {
+		rest, ok := strings.CutPrefix(r.Filename, art.Path)
+		if !ok || strings.Contains(rest, "/") || seen[r.Filename] {
+			continue
+		}
+		seen[r.Filename] = true
+		b := builds[r.Version]
+		if b == nil {
+			_, stamp := splitSnapshot(r.Version)
+			b = &debBuild{id: r.Version, stamp: stamp, dist: r.Distribution}
+			builds[r.Version] = b
+		}
+		b.files = append(b.files, format.BuildFile{Name: rest, Path: r.Filename, Size: r.Size, SHA256: r.Sha256,
+			Classifier: r.Architecture, Extension: strings.TrimPrefix(path.Ext(rest), ".")})
+		if at := time.Unix(r.UpdatedAt, 0).UTC(); at.After(b.at) {
+			b.at = at
+		}
+		if r.PublishSessionID.Valid && b.session == 0 {
+			b.session = r.PublishSessionID.Int64
+		}
+	}
+	byName := map[string]*debVersion{}
+	var out []*debVersion
+	for _, b := range builds {
+		slices.SortFunc(b.files, func(x, y format.BuildFile) int { return strings.Compare(x.Classifier, y.Classifier) })
+		name, _ := splitSnapshot(b.id)
+		v := byName[name]
+		if v == nil {
+			v = &debVersion{name: name}
+			byName[name] = v
+			out = append(out, v)
+		}
+		v.builds = append(v.builds, b)
+	}
+	for _, v := range out {
+		slices.SortFunc(v.builds, func(x, y *debBuild) int { return -compareBuilds(x.id, y.id) })
+	}
+	slices.SortFunc(out, func(x, y *debVersion) int { return -compareVersions(x.name, y.name) })
+	return out, nil
+}
+
+// summary is the format.Version of v.
+func (v *debVersion) summary(ctx context.Context, prov *provenance.Loader) (*format.Version, error) {
+	newest := v.builds[0]
+	out := &format.Version{Version: v.name, Kind: format.VersionRelease, BuildsCount: len(v.builds), PublishedAt: newest.at}
+	if newest.stamp != "" {
+		out.Kind, out.LatestBuild = format.VersionSnapshot, newest.id
+	}
+	var err error
+	out.Provenance, err = prov.Get(ctx, newest.session)
+	return out, err
+}
+
+// Versions implements format.Versioned for a package folder of the pool.
+func (h *Handler) Versions(ctx context.Context, repo *repos.Repo, p, after string, limit int) (*format.Artifact, []format.Version, string, error) {
+	art, component, pkg, ok := packageOf(p)
+	if !ok {
+		return nil, nil, "", nil
+	}
+	versions, err := h.readPackage(ctx, repo.ID, art, component, pkg)
+	if err != nil || len(versions) == 0 {
+		return nil, nil, "", err
+	}
+	prov := provenance.NewLoader(coredbq.New(h.host.DB.R))
+	var out []format.Version
+	for _, v := range versions {
+		if after != "" && compareVersions(v.name, after) >= 0 {
+			continue // on an earlier page
+		}
+		if len(out) == limit {
+			return &art, out, out[len(out)-1].Version, nil
+		}
+		s, err := v.summary(ctx, prov)
+		if err != nil {
+			return nil, nil, "", err
+		}
+		out = append(out, *s)
+	}
+	return &art, out, "", nil
+}
+
+// Builds implements format.Versioned for version name of a package folder of the pool.
+func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, name, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
+	art, component, pkg, ok := packageOf(p)
+	if !ok {
+		return nil, nil, nil, "", nil
+	}
+	versions, err := h.readPackage(ctx, repo.ID, art, component, pkg)
+	if err != nil {
+		return nil, nil, nil, "", err
+	}
+	i := slices.IndexFunc(versions, func(v *debVersion) bool { return v.name == name })
+	if i < 0 {
+		return nil, nil, nil, "", nil
+	}
+	prov := provenance.NewLoader(coredbq.New(h.host.DB.R))
+	ver, err := versions[i].summary(ctx, prov)
+	if err != nil {
+		return nil, nil, nil, "", err
+	}
+	var out []format.Build
+	for _, b := range versions[i].builds {
+		if after != "" && compareBuilds(b.id, after) >= 0 {
+			continue
+		}
+		if len(out) == limit {
+			return &art, ver, out, out[len(out)-1].Build, nil
+		}
+		pv, err := prov.Get(ctx, b.session)
+		if err != nil {
+			return nil, nil, nil, "", err
+		}
+		out = append(out, format.Build{Build: b.id, Files: slices.Clone(b.files), PublishedAt: b.at, Provenance: pv})
+	}
+	return &art, ver, out, "", nil
+}
+
+// compareBuilds orders two builds (Debian versions) of one version: by stamp, a stamp of 8
+// digits read as midnight; Debian version order breaks a tie.
+func compareBuilds(a, b string) int {
+	_, sa := splitSnapshot(a)
+	_, sb := splitSnapshot(b)
+	pad := func(s string) string { return s + strings.Repeat("0", 14-len(s)) }
+	if sa != "" && sb != "" {
+		if c := strings.Compare(pad(sa), pad(sb)); c != 0 {
+			return c
+		}
+	}
+	return compareVersions(a, b)
+}
+
+// compareVersions orders two Debian versions as dpkg --compare-versions does: the epoch as a
+// number, then the upstream version, then the revision, each by verrevcmp.
+func compareVersions(a, b string) int {
+	ea, ua, ra := splitVersion(a)
+	eb, ub, rb := splitVersion(b)
+	if ea != eb {
+		if ea < eb {
+			return -1
+		}
+		return 1
+	}
+	if c := verrevcmp(ua, ub); c != 0 {
+		return c
+	}
+	return verrevcmp(ra, rb)
+}
+
+// splitVersion splits [epoch:]upstream[-revision]. The revision follows the last hyphen.
+func splitVersion(v string) (epoch int, upstream, revision string) {
+	if e, rest, ok := strings.Cut(v, ":"); ok {
+		epoch, _ = strconv.Atoi(e)
+		v = rest
+	}
+	if i := strings.LastIndexByte(v, '-'); i >= 0 {
+		return epoch, v[:i], v[i+1:]
+	}
+	return epoch, v, ""
+}
+
+// order is the weight of a character in a non-digit part: "~" before the end of the part, the
+// end before a letter, a letter before any other character.
+func order(s string, i int) int {
+	if i >= len(s) {
+		return 0
+	}
+	c := s[i]
+	switch {
+	case isDigit(c):
+		return 0
+	case c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z':
+		return int(c)
+	case c == '~':
+		return -1
+	}
+	return int(c) + 256
+}
+
+func isDigit(c byte) bool { return c >= '0' && c <= '9' }
+
+// verrevcmp compares two upstream versions or two revisions: alternate non-digit parts
+// (compared by order) and digit parts (compared as numbers).
+func verrevcmp(a, b string) int {
+	i, j := 0, 0
+	for i < len(a) || j < len(b) {
+		for (i < len(a) && !isDigit(a[i])) || (j < len(b) && !isDigit(b[j])) {
+			ac, bc := order(a, i), order(b, j)
+			if ac != bc {
+				return sign(ac - bc)
+			}
+			i++
+			j++
+		}
+		for i < len(a) && a[i] == '0' {
+			i++
+		}
+		for j < len(b) && b[j] == '0' {
+			j++
+		}
+		first := 0
+		for i < len(a) && j < len(b) && isDigit(a[i]) && isDigit(b[j]) {
+			if first == 0 {
+				first = int(a[i]) - int(b[j])
+			}
+			i++
+			j++
+		}
+		if i < len(a) && isDigit(a[i]) {
+			return 1
+		}
+		if j < len(b) && isDigit(b[j]) {
+			return -1
+		}
+		if first != 0 {
+			return sign(first)
+		}
+	}
+	return 0
+}
+
+func sign(n int) int {
+	switch {
+	case n < 0:
+		return -1
+	case n > 0:
+		return 1
+	}
+	return 0
+}

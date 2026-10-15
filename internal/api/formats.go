@@ -95,8 +95,9 @@ func (a *API) repoUsage(w http.ResponseWriter, r *http.Request) {
 }
 
 // artifactSnippets returns the snippets that use one artifact (format.ArtifactDescriber):
-// ?path=<artifact or version folder>&version_mode=pinned|latest -> {base_url, artifact, version,
-// version_mode, snippets}. artifact is null, and snippets empty, when the path is not an
+// ?path=<artifact folder, version folder or file>&version=<v>&version_mode=pinned|latest ->
+// {base_url, artifact, version, version_mode, snippets}. version names a version of the artifact
+// folder path (optional). artifact is null, and snippets empty, when the path is not an
 // artifact or the format has no artifact snippets.
 func (a *API) artifactSnippets(w http.ResponseWriter, r *http.Request) {
 	repo, _, ok := a.auth.RepoGate(w, r, r.PathValue("name"), "", auth.Read, true)
@@ -128,7 +129,7 @@ func (a *API) artifactSnippets(w http.ResponseWriter, r *http.Request) {
 	}
 	res := out{BaseURL: base, Mode: mode, Snippets: []format.Snippet{}}
 	if d, ok := format.Get(repo.Format).(format.ArtifactDescriber); ok && p != "" {
-		u, err := d.ArtifactUsage(r.Context(), repo, base, p, mode)
+		u, err := d.ArtifactUsage(r.Context(), repo, base, p, q.Get("version"), mode)
 		if err != nil {
 			fail(w, r, err)
 			return
@@ -143,7 +144,7 @@ func (a *API) artifactSnippets(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, res)
 }
 
-// versionedPath reads ?path= for the versions and builds routes and the format's Versioned (nil
+// versionedPath reads ?path= (an artifact folder) for the versions and builds routes and the format's Versioned (nil
 // when the format has none).
 func (a *API) versionedPath(w http.ResponseWriter, r *http.Request) (*repos.Repo, format.Versioned, string, bool) {
 	repo, _, ok := a.auth.RepoGate(w, r, r.PathValue("name"), "", auth.Read, true)
@@ -189,12 +190,17 @@ func (a *API) versions(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, res)
 }
 
-// builds lists the builds of a version folder, newest first (format.Versioned):
-// ?path=<version folder>&after=<build>&limit= -> {artifact, version, items: [Build], next}.
-// artifact and version are null when the folder is not a version.
+// builds lists the builds of one version of an artifact, newest first (format.Versioned):
+// ?path=<artifact folder>&version=<v>&after=<build>&limit= -> {artifact, version, items: [Build],
+// next}. artifact and version are null when the artifact has no such version.
 func (a *API) builds(w http.ResponseWriter, r *http.Request) {
 	repo, v, p, ok := a.versionedPath(w, r)
 	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	if q.Get("version") == "" {
+		httpx.Error(w, http.StatusBadRequest, "give the version")
 		return
 	}
 	type out struct {
@@ -205,7 +211,7 @@ func (a *API) builds(w http.ResponseWriter, r *http.Request) {
 	}
 	res := out{Items: []format.Build{}}
 	if v != nil {
-		art, ver, items, next, err := v.Builds(r.Context(), repo, p, r.URL.Query().Get("after"), httpx.Limit(r))
+		art, ver, items, next, err := v.Builds(r.Context(), repo, p, q.Get("version"), q.Get("after"), httpx.Limit(r))
 		if err != nil {
 			fail(w, r, err)
 			return
