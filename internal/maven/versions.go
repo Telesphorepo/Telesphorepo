@@ -208,7 +208,7 @@ func (h *Handler) version(ctx context.Context, repoID int64, dir, id, v string, 
 		return nil, nil, err
 	}
 	newest := bs.builds[0]
-	out := &format.Version{Version: v, Path: dir, Kind: format.VersionRelease, BuildsCount: len(bs.builds), PublishedAt: newest.at}
+	out := &format.Version{Version: v, Kind: format.VersionRelease, BuildsCount: len(bs.builds), PublishedAt: newest.at}
 	if strings.HasSuffix(v, "-SNAPSHOT") {
 		out.Kind, out.LatestBuild = format.VersionSnapshot, newest.id
 	}
@@ -252,15 +252,11 @@ func (h *Handler) Versions(ctx context.Context, repo *repos.Repo, p, after strin
 	return &art, out, "", nil
 }
 
-// Builds implements format.Versioned for a version folder.
-func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
-	segs := strings.Split(strings.Trim(p, "/"), "/")
-	if len(segs) < 3 {
-		return nil, nil, nil, "", nil
-	}
-	v := segs[len(segs)-1]
-	art, _, id, ok := artifactOf(strings.Join(segs[:len(segs)-1], "/"))
-	if !ok {
+// Builds implements format.Versioned for version v of an artifact folder: the files of the
+// version folder <artifact folder>/<v>/.
+func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, v, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
+	art, _, id, ok := artifactOf(p)
+	if !ok || v == "" || v == "." || v == ".." || strings.Contains(v, "/") {
 		return nil, nil, nil, "", nil
 	}
 	prov := provenance.NewLoader(dbq.New(h.host.DB.R))

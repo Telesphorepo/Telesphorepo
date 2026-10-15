@@ -3,7 +3,8 @@
   the right the details column. The column shows the selected file, else the open folder: the
   repository at the top folder, what a plain folder holds, or the artifact and its snippets at an
   artifact or a version folder. It stays while the reader moves between files and folders, so the
-  view never changes width. `path` is a folder ("" or ending in "/") or a file.
+  view never changes width. `path` is a folder ("" or ending in "/") or a file; ?version= names a
+  version of the artifact folder (a Debian package keeps every version in one folder).
 
   Views (lib/view.svelte.ts, remembered per user): List, Tree and Columns everywhere, and Cover Flow
   where time is the axis: the versions of an artifact and the builds of a snapshot. A plain folder
@@ -19,7 +20,7 @@
 <script lang="ts">
   import { untrack } from "svelte";
   import { toast } from "svelte-sonner";
-  import { api, ApiError, type Proof, type Repo } from "$lib/api";
+  import { api, ApiError, errorMessage, type Proof, type Repo } from "$lib/api";
   import { count, selectedText, someNames } from "$lib/words";
   import FileSize from "$lib/components/FileSize.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
@@ -46,7 +47,7 @@
   import FolderDetails from "./files/FolderDetails.svelte";
   import Loading from "$lib/components/Loading.svelte";
   import DeleteDialog from "./delete/DeleteDialog.svelte";
-  import { flowsHere, placeOf, type Place } from "./files/place";
+  import { flowsHere, placeOf, versionTarget, type Place } from "./files/place";
   import { viewMin } from "./files/area";
   import { dropSession, keepSession, sessionToken } from "./session";
   import { baseName, parentOf } from "./browse";
@@ -68,21 +69,25 @@
   const folder = $derived(isFile ? parentOf(path) : path);
   const file = $derived(isFile ? path : "");
   const build = $derived(query.get("build") ?? "");
+  // A version of the artifact folder (?version=), for a format that keeps every version in one folder.
+  const versionQ = $derived(query.get("version") ?? "");
 
   // The folder path, from the top of the repository.
   const crumbs = $derived.by((): Crumb[] => {
     const segs = folder.split("/").filter(Boolean);
+    const last = versionQ ? segs.length : segs.length - 1;
     return [
       { label: repo.name, href: segs.length ? href(filesPath(repo.name)) : undefined },
       ...segs.map((s, i) => ({
         label: s,
-        href: i < segs.length - 1 ? href(filesPath(repo.name, segs.slice(0, i + 1).join("/") + "/")) : undefined,
+        href: i < last ? href(filesPath(repo.name, segs.slice(0, i + 1).join("/") + "/")) : undefined,
       })),
+      ...(versionQ ? [{ label: versionQ }] : []),
     ];
   });
 
   // What the open folder is: a plain folder, an artifact or a version.
-  const place = $derived(new Resource<Place>(() => placeOf(repo.name, folder)));
+  const place = $derived(new Resource<Place>(() => placeOf(repo.name, folder, versionQ)));
   // The last place that loaded, so the view choice does not jump while the next one loads.
   let known = $state<Place | undefined>(undefined);
   $effect(() => {
@@ -219,17 +224,19 @@
       tk = sessionToken(repo.name);
       if (!tk) throw new Error("Your confirmation has expired. Close this dialog and try again.");
     }
-    const paths = ts.filter((t) => !t.dir).map((t) => t.path);
+    const paths = ts.flatMap((t) => t.files ?? (t.dir ? [] : [t.path]));
     const prefixes = ts.filter((t) => t.dir).map((t) => t.path);
-    let n: number;
+    // The server takes at most 1000 paths and prefixes in one request.
+    const batch = 1000;
+    let n = 0;
     try {
-      n = (
-        await api.repos.deleteFiles(
-          repo.name,
-          { paths: paths.length ? paths : undefined, prefixes: prefixes.length ? prefixes : undefined },
-          tk,
-        )
-      ).deleted;
+      for (let i = 0; i < paths.length + prefixes.length; i += batch) {
+        const ps = paths.slice(i, i + batch);
+        const xs = prefixes.slice(Math.max(0, i - paths.length), Math.max(0, i + batch - paths.length));
+        n += (
+          await api.repos.deleteFiles(repo.name, { paths: ps.length ? ps : undefined, prefixes: xs.length ? xs : undefined }, tk)
+        ).deleted;
+      }
     } catch (e) {
       if (tk && e instanceof ApiError && e.status === 401) dropSession(repo.name);
       throw e;
@@ -240,6 +247,8 @@
     const gone = prefixes.filter((p) => folder.startsWith(p)).sort((a, b) => a.length - b.length)[0];
     if (gone !== undefined) {
       navigate(filesPath(repo.name, parentOf(gone)), { replace: true });
+    } else if (versionQ && ts.some((t) => t.version === versionQ)) {
+      navigate(filesPath(repo.name, folder), { replace: true });
     } else if (file && paths.includes(file)) {
       navigate(filesPath(repo.name, folder), { replace: true });
     } else {
@@ -247,10 +256,24 @@
     }
   }
 
+  async function askDeleteVersion() {
+    const p = place.data;
+    if (p?.kind !== "version") return;
+    try {
+      askDelete(await versionTarget(repo.name, p.artifact, p.version));
+    } catch (e) {
+      toast.error(errorMessage(e));
+    }
+  }
+
   async function runDelete() {
     if (deleting) await deleteTargets([deleting]);
   }
 </script>
+
+{#snippet deleteVersion()}
+  <Button variant="outline" class="hover:text-destructive" onclick={askDeleteVersion}><Trash2Icon />Delete version</Button>
+{/snippet}
 
 {#snippet deleteFolder()}
   <Button variant="outline" class="hover:text-destructive" onclick={() => askDelete({ path: folder, dir: true })}><Trash2Icon />Delete folder</Button>
@@ -283,12 +306,14 @@
       </DataTable>
     {:else}
       {@const p = place.data}
-      {#key folder + "\n" + version}
+      {#key folder + "\n" + versionQ + "\n" + version}
         {#if p.kind === "artifact"}
           <VersionsView {repo} artifact={p.artifact} flow={view.value === "coverflow"} canWrite={canWrite} onDelete={askDelete} />
         {:else if p.kind === "version"}
           <BuildsView
             {repo}
+            artifact={p.artifact}
+            {folder}
             version={p.version}
             {build}
             earlier={query.get("earlier") === "1"}
@@ -340,7 +365,7 @@
       title={baseName(file)}
       onClose={() => {
         closed = true;
-        navigate(filesPath(repo.name, folder), { query: { build: build || undefined } });
+        navigate(filesPath(repo.name, folder), { query: { version: versionQ || undefined, build: build || undefined } });
       }}
     >
       {#key file}<FileDetails {repo} path={file} {base} />{/key}
@@ -358,14 +383,9 @@
         <DetailsColumn
           title={artifactHere.artifact.kind === "gradle-plugin" ? artifactHere.artifact.title : baseName(artifactHere.artifact.path)}
           onClose={() => (closed = true)}
-          actions={canWrite && folder ? deleteFolder : undefined}
+          actions={canWrite && folder ? (artifactHere.kind === "version" ? deleteVersion : deleteFolder) : undefined}
         >
-          <ArtifactDetails
-            {repo}
-            artifact={artifactHere.artifact}
-            version={artifactHere.kind === "version" ? artifactHere.version : null}
-            path={folder}
-          />
+          <ArtifactDetails {repo} artifact={artifactHere.artifact} version={artifactHere.kind === "version" ? artifactHere.version : null} />
         </DetailsColumn>
       {:else}
         <DetailsColumn title={folderTitle} onClose={() => (closed = true)} actions={canWrite && folder ? deleteFolder : undefined}>

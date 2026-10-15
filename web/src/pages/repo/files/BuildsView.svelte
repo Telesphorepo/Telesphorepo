@@ -1,6 +1,7 @@
 <!--
-  One version: the files of one build, without checksum and signature files (pom first, then the
-  main file, the Gradle module metadata and the classified files). A release has one build. A
+  One version: the files of one build, without checksum and signature files (Maven: pom first, then
+  the main file, the Gradle module metadata and the classified files; Debian: one .deb for each
+  architecture). A release has one build. A
   snapshot shows only its latest build; "11 earlier builds" opens the list of the others, and a
   row of that list shows its files (?build= keeps the choice in the address). A file row opens its
   details. With `flow`, Cover Flow shows the builds as felt tickets in place of the files, in the
@@ -22,7 +23,7 @@
   import CoverFlow, { type Ticket } from "./CoverFlow.svelte";
   import ProvenanceInline from "./ProvenanceInline.svelte";
   import type { DeleteTarget } from "./FolderList.svelte";
-  import { browse, buildLabel, shortSha, type Build, type BuildFile, type Version } from "../browse";
+  import { browse, buildInline, buildLabel, parentOf, shortSha, type Artifact, type Build, type BuildFile, type Version } from "../browse";
   import { formatCount, formatDateTime } from "$lib/format";
   import { cn } from "$lib/utils";
   import { viewBox } from "./area";
@@ -35,6 +36,8 @@
 
   let {
     repo,
+    artifact,
+    folder,
     version,
     build,
     earlier: earlierAsked = false,
@@ -46,6 +49,9 @@
     onList,
   }: {
     repo: Repo;
+    artifact: Artifact;
+    /** The open folder: the version folder (Maven), or the artifact folder with ?version= (Debian). */
+    folder: string;
     version: Version;
     /** The build in the address (?build=); "" for the latest. */
     build: string;
@@ -62,7 +68,7 @@
   } = $props();
 
   /* svelte-ignore state_referenced_locally */
-  const builds = new Keyset<Build>((p) => browse.builds(repo.name, version.path, p), 20);
+  const builds = new Keyset<Build>((p) => browse.builds(repo.name, artifact.path, version.version, p), 20);
 
   const snapshot = $derived(version.kind === "snapshot");
   const newest = $derived(builds.items[0]);
@@ -81,10 +87,14 @@
     earlierOpen = !earlier;
   }
 
+  // The address of this version with a build: ?version= names the version when the open folder is
+  // the artifact folder. A file in the artifact folder keeps it too.
+  const at = (dir: string, build: string | undefined) => ({ version: dir === artifact.path ? version.version : undefined, build });
   const choose = (key: string) =>
-    navigate(filesPath(repo.name, version.path), { query: { build: key === newest?.build ? undefined : key }, replace: true });
-  const fileHref = (f: BuildFile) => href(filesPath(repo.name, f.path), { build: shown && shown !== newest ? shown.build : undefined });
-  const buildHref = (b: Build) => href(filesPath(repo.name, version.path), { build: b === newest ? undefined : b.build });
+    navigate(filesPath(repo.name, folder), { query: at(folder, key === newest?.build ? undefined : key), replace: true });
+  const fileHref = (f: BuildFile) =>
+    href(filesPath(repo.name, f.path), at(parentOf(f.path), shown && shown !== newest ? shown.build : undefined));
+  const buildHref = (b: Build) => href(filesPath(repo.name, folder), at(folder, b === newest ? undefined : b.build));
 
   const day = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", year: "numeric" });
   const tickets = $derived<Ticket[]>(
@@ -100,6 +110,7 @@
 
   /** What a file of a build is, in words. */
   function kindOf(f: BuildFile): string {
+    if (f.extension === "deb" || f.extension === "udeb") return f.classifier === "all" ? "Package, all architectures" : `Package, ${f.classifier}`;
     if (!f.classifier) {
       if (f.extension === "pom") return "Project description (POM)";
       if (f.extension === "module") return "Gradle module metadata";
@@ -224,7 +235,7 @@
           {/snippet}
         </DataTable>
       </div>
-      <h3 class="mb-2 text-label">Files of {buildLabel(shown.build).toLowerCase()}</h3>
+      <h3 class="mb-2 text-label">Files of {buildInline(shown.build)}</h3>
     {/if}
   {/if}
 

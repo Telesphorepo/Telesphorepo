@@ -7,8 +7,12 @@
   summary in the details column.
 -->
 <script lang="ts" module>
-  /** A file, or a folder (path ends with "/"), to delete. */
-  export type DeleteTarget = { path: string; dir: boolean };
+  /**
+   * A file, or a folder (path ends with "/"), to delete. A version without a folder of its own
+   * (a Debian package keeps every version in one folder) is its files: `files` lists them, `path`
+   * is the artifact folder and `version` names the version.
+   */
+  export type DeleteTarget = { path: string; dir: boolean; files?: string[]; version?: string };
 </script>
 
 <script lang="ts">

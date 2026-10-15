@@ -89,7 +89,7 @@ func remoteGetCount(t testing.TB, s *Server, prefix string) map[string]int {
 }
 
 // nginxRedirectConf answers every request on redir:8080 with a redirect to the host recorder
-// (port 8081), which logs whether the request carried an Authorization header.
+// (port 8081), which logs the Authorization header of each request ("-" when there is none).
 const nginxRedirectConf = `events {}
 http {
   log_format auth 'RECORDED $request_uri auth=[$http_authorization]';
@@ -208,16 +208,20 @@ func TestProxy(t *testing.T) {
 			}
 			return out
 		}
-		resolve()
+		// The deploys above also read maven-metadata.xml on the remote; count only what comes after.
 		prefix := "/maven/" + up + "/" + groupPath + "/"
+		deployed := remoteGetCount(t, remote, prefix)
+		resolve()
 		first := remoteGetCount(t, remote, prefix)
-		if len(first) == 0 {
-			t.Fatalf("the remote got no request under %s", prefix)
-		}
+		fetched := 0
 		for p, n := range first {
-			if n != 1 {
-				t.Fatalf("the remote got %d GETs of %s, want 1", n, p)
+			if n -= deployed[p]; n > 1 {
+				t.Fatalf("the proxy sent %d GETs of %s to the remote, want at most 1", n, p)
 			}
+			fetched += n
+		}
+		if fetched == 0 {
+			t.Fatalf("the remote got no request under %s from the proxy", prefix)
 		}
 		resolve()
 		if second := remoteGetCount(t, remote, prefix); fmt.Sprint(second) != fmt.Sprint(first) {
@@ -230,6 +234,11 @@ func TestProxy(t *testing.T) {
 		upAuth := remote.PublishAuth(t, uploader, up)
 		mdRel := groupPath + "/hello/maven-metadata.xml"
 		mdURL := "/maven/" + central + "/" + mdRel
+		// The proxy caches the file first (a fixed version needs no maven-metadata.xml, so the
+		// resolves above may not have fetched it), then checks it again after the time.
+		if st, b := rawGet(t, s, opts.S3, mdURL, nil); st != http.StatusOK {
+			t.Fatalf("GET %s: status %d: %s", mdURL, st, b)
+		}
 		time.Sleep(4 * time.Second)
 		st, before := rawGet(t, s, opts.S3, mdURL, nil)
 		if st != http.StatusOK {
@@ -325,7 +334,7 @@ func TestProxy(t *testing.T) {
 		s.CreateProxy(t, redirected, "maven", true, map[string]any{"remote_url": "http://redir:8080/m2/", "username": "someone", "password": "s3cret-e2e"}, false)
 		rawWantGet(t, s, opts.S3, "/maven/"+redirected+"/com/e2e/r/1.0/r-1.0.txt", nil, []byte("redirected file\n"))
 		recorded := containerLogs(nginx)
-		if !strings.Contains(recorded, "RECORDED /m2/com/e2e/r/1.0/r-1.0.txt auth=[]") || strings.Contains(recorded, "Basic") {
+		if !strings.Contains(recorded, "RECORDED /m2/com/e2e/r/1.0/r-1.0.txt auth=[-]") || strings.Contains(recorded, "Basic") {
 			t.Fatalf("the redirected request carried credentials or did not arrive:\n%s", recorded)
 		}
 

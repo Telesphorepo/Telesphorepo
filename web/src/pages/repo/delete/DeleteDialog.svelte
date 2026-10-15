@@ -2,15 +2,18 @@
   Confirms the delete of a file or a folder in Browse (spec §13). For a folder it counts the files
   under it while the dialog is open, and the list and the button say how many go. For a Maven
   version folder it says that maven-metadata.xml keeps listing the version until the next publish;
-  for Debian, that apt drops the packages. onConfirm does the delete (the page holds the session).
+  for Debian, that apt drops the packages. A version without a folder of its own (a Debian package)
+  goes as the list of its files. onConfirm does the delete (the page holds the session).
 
     <DeleteDialog bind:open={deleteOpen} repo={r} target={deleting} onConfirm={runDelete} />
 
-  target.path is a file path, or a folder path ending in "/" with dir: true.
+  target.path is a file path, or a folder path ending in "/" with dir: true; with files, the
+  artifact folder of version target.version.
 -->
 <script lang="ts">
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import { errorMessage, type Repo } from "$lib/api";
+  import type { DeleteTarget } from "../files/FolderList.svelte";
   import { countFolder, type FolderCount } from "./count";
 
   let {
@@ -21,7 +24,7 @@
   }: {
     open?: boolean;
     repo: Repo;
-    target: { path: string; dir: boolean } | null;
+    target: DeleteTarget | null;
     onConfirm: () => Promise<unknown>;
   } = $props();
 
@@ -62,7 +65,11 @@
     const t = target;
     if (!t) return [];
     const out: string[] = [];
-    if (!t.dir) {
+    if (t.files) {
+      out.push(`Deletes ${nFiles(t.files.length)} of version ${t.version} from ${t.path}`);
+      if (repo.format === "debian" && t.files.some((f) => f.endsWith(".deb")))
+        out.push("apt stops offering the version after the indexes of its distributions rebuild");
+    } else if (!t.dir) {
       out.push(`Deletes ${t.path} from ${repo.name}`);
       if (repo.format === "debian" && t.path.endsWith(".deb"))
         out.push("apt stops offering the package after the indexes of its distribution rebuild");
@@ -83,6 +90,7 @@
   });
 
   const confirmLabel = $derived.by(() => {
+    if (target?.files) return `Delete ${nFiles(target.files.length)}`;
     if (!target?.dir) return "Delete file";
     if (count && !count.more && count.count > 0) return `Delete ${nFiles(count.count)}`;
     return "Delete folder";
@@ -91,7 +99,7 @@
 
 <ConfirmDialog
   bind:open
-  title={target?.dir ? "Delete this folder?" : "Delete this file?"}
+  title={target?.files ? `Delete version ${target.version}?` : target?.dir ? "Delete this folder?" : "Delete this file?"}
   description="You cannot undo this."
   {changes}
   {confirmLabel}

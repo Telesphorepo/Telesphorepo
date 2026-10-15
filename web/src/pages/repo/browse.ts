@@ -40,13 +40,13 @@ export type Snippet = {
 
 export type Usage = { base_url: string; snippets: Snippet[] };
 
-export type ArtifactKind = "library" | "bom" | "parent" | "gradle-plugin";
+export type ArtifactKind = "library" | "bom" | "parent" | "gradle-plugin" | "package";
+/** An artifact; path is its folder, with a trailing slash. */
 export type Artifact = { path: string; title: string; kind: ArtifactKind | string };
 
+/** A version of an artifact. The artifact folder and the version string name it. */
 export type Version = {
   version: string;
-  /** The version folder, with a trailing slash. */
-  path: string;
   kind: "release" | "snapshot";
   latest_build?: string;
   builds_count: number;
@@ -94,14 +94,14 @@ export const browse = {
   /** The versions of an artifact folder, newest first; artifact is null for any other folder. */
   versions: (name: string, path: string, p?: PageParams) =>
     request<Versions>("GET", repo(name) + "/versions", { query: { path, ...page(p) } }),
-  /** The builds of a version folder, newest first; version is null for any other folder. */
-  builds: (name: string, path: string, p?: PageParams) =>
-    request<Builds>("GET", repo(name) + "/builds", { query: { path, ...page(p) } }),
+  /** The builds of one version of an artifact folder, newest first; version is null when the artifact has no such version. */
+  builds: (name: string, path: string, version: string, p?: PageParams) =>
+    request<Builds>("GET", repo(name) + "/builds", { query: { path, version, ...page(p) } }),
   /** One file with its details; 404 when it does not exist. */
   file: (name: string, path: string) => request<FileInfo>("GET", repo(name) + "/file", { query: { path } }),
-  /** The snippets that use one artifact (an artifact or version folder, or a file in one). */
-  snippets: (name: string, path: string, mode: VersionMode) =>
-    request<ArtifactSnippets>("GET", repo(name) + "/snippets", { query: { path, version_mode: mode } }),
+  /** The snippets that use one artifact: an artifact folder (with a version, or "" for none), a version folder, or a file. */
+  snippets: (name: string, path: string, version: string, mode: VersionMode) =>
+    request<ArtifactSnippets>("GET", repo(name) + "/snippets", { query: { path, version, version_mode: mode } }),
 };
 
 // --- helpers ---
@@ -168,6 +168,12 @@ export const buildLabel = (id: string) => {
   return n ? `Build ${n}` : id === "SNAPSHOT" ? "Build without a timestamp" : id;
 };
 
+/** The build's name inside a sentence: "build 3", or the id as it is (a Debian version keeps its case). */
+export const buildInline = (id: string) => {
+  const label = buildLabel(id);
+  return label === id ? id : label.toLowerCase();
+};
+
 /** How each snippet client is named on its tab. */
 export const clientLabel: Record<string, string> = {
   "gradle-kotlin": "Gradle (Kotlin)",
@@ -186,4 +192,5 @@ export const artifactKindLabel: Record<string, string> = {
   bom: "Bill of materials",
   parent: "Parent POM",
   "gradle-plugin": "Gradle plugin",
+  package: "Debian package",
 };

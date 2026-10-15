@@ -12,6 +12,21 @@ WHERE repo_id = ? AND distribution = ? AND component = ? AND architecture = ? AN
 SELECT filename FROM deb_packages
 WHERE repo_id = ? AND distribution = ? AND component = ? AND sha256 = ? LIMIT 1;
 
+-- The .deb files of one package in one component, with the time and the publish session of
+-- each file, through deb_packages_package. A file in several distributions has one row for each.
+-- name: ListPackageFiles :many
+SELECT p.distribution, p.architecture, p.version, p.filename, p.size, p.sha256,
+  a.updated_at, a.publish_session_id
+FROM deb_packages p JOIN assets a ON a.id = p.asset_id
+WHERE p.repo_id = ? AND p.component = ? AND p.package = ?
+LIMIT ?;
+
+-- The package of a pool file, through deb_packages_asset.
+-- name: GetPackageOfAsset :one
+SELECT distribution, component, package, version FROM deb_packages
+WHERE asset_id = ?
+LIMIT 1;
+
 -- name: InsertPackage :exec
 INSERT INTO deb_packages (repo_id, distribution, component, architecture, package, version, asset_id,
   filename, size, md5, sha1, sha256, control, created_at)

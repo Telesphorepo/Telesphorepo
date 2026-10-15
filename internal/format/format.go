@@ -150,11 +150,12 @@ type Describer interface {
 }
 
 // ArtifactDescriber returns the snippets that use one artifact of a repo (Context "artifact"):
-// the dependency line with the repository block it needs. path is an artifact folder or a
-// version folder (a file path selects its folder). mode is VersionPinned or VersionLatest. A
-// path that is not an artifact gives a nil *ArtifactUsage.
+// the dependency or install line with the repository setup it needs. path is an artifact folder,
+// a version folder or a file of a version. version names a version of the artifact folder path
+// ("" for none), as Versioned names it. mode is VersionPinned or VersionLatest. A path that is
+// not an artifact gives a nil *ArtifactUsage.
 type ArtifactDescriber interface {
-	ArtifactUsage(ctx context.Context, repo *repos.Repo, baseURL, path, mode string) (*ArtifactUsage, error)
+	ArtifactUsage(ctx context.Context, repo *repos.Repo, baseURL, path, version, mode string) (*ArtifactUsage, error)
 }
 
 // Version modes of ArtifactDescriber.
@@ -180,14 +181,17 @@ type Artifact struct {
 	Kind  string `json:"kind"`
 }
 
-// Versioned groups the files of an artifact folder into versions, and the files of a version
-// folder into builds (e.g. the timestamped builds of a Maven -SNAPSHOT version). Both return a
-// nil *Artifact when path is not such a folder. Versions are newest first; after is the last
-// version of the previous page ("" for the first). Builds are newest first; after is the last
-// build of the previous page. next is "" at the end.
+// Versioned groups the files of an artifact into versions, and the files of a version into
+// builds (e.g. the timestamped builds of a Maven -SNAPSHOT version or of a Debian ~SNAPSHOT
+// version). A version is named by its artifact folder and its version string, so a format that
+// keeps every version in one folder (the Debian pool) fits as well as one with a folder per
+// version (Maven). Versions returns a nil *Artifact when artifactPath is not an artifact folder;
+// Builds returns a nil *Artifact or *Version when the artifact has no such version. Versions are
+// newest first; after is the last version of the previous page ("" for the first). Builds are
+// newest first; after is the last build of the previous page. next is "" at the end.
 type Versioned interface {
-	Versions(ctx context.Context, repo *repos.Repo, path, after string, limit int) (*Artifact, []Version, string, error)
-	Builds(ctx context.Context, repo *repos.Repo, path, after string, limit int) (*Artifact, *Version, []Build, string, error)
+	Versions(ctx context.Context, repo *repos.Repo, artifactPath, after string, limit int) (*Artifact, []Version, string, error)
+	Builds(ctx context.Context, repo *repos.Repo, artifactPath, version, after string, limit int) (*Artifact, *Version, []Build, string, error)
 }
 
 // Version kinds.
@@ -201,7 +205,6 @@ const (
 // Provenance is that build's (nil: none).
 type Version struct {
 	Version     string                 `json:"version"`
-	Path        string                 `json:"path"` // the version folder, with a trailing slash
 	Kind        string                 `json:"kind"` // VersionRelease or VersionSnapshot
 	LatestBuild string                 `json:"latest_build,omitempty"`
 	BuildsCount int                    `json:"builds_count"`

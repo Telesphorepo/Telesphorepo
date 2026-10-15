@@ -55,7 +55,7 @@ server and the clients print keep working: `/#/device?code=ABCD-EFGH`, `/#/setti
 | `/login?next=&error=` | `SignIn` | app | any | The one place to sign in: single sign-on, password, then the second step. |
 | `/device?code=` | `DeviceApprove` | app | user | Look up a device code, check the device, approve it with a fresh second factor. |
 | `/repo/:name` | `repo/RepoPage` | app | any | The repository header and the Files tab at the top folder. A group has no files and no tabs: the Use view and its members, each a link to the member's page. A proxy has Files (its cached files) and Use, and no publish or upload. |
-| `/repo/:name/files/<path>` | `repo/RepoPage` | app | any | Files tab: a folder (`path` ends with `/`) or a selected file. The details column always shows on wide screens: the selected file, or else the open folder (repository, folder or artifact). |
+| `/repo/:name/files/<path>?version=&build=` | `repo/RepoPage` | app | any | Files tab: a folder (`path` ends with `/`) or a selected file. `version` names a version of the artifact folder (a Debian package keeps every version in one folder); `build` a chosen build. The details column always shows on wide screens: the selected file, or else the open folder (repository, folder, artifact or version). |
 | `/repo/:name/use` | `repo/RepoPage` | app | any | Use this repository: the address and the snippets for a build; a private repository adds a read-token step. |
 | `/repo/:name/publish` | `repo/RepoPage` | app | any (publish permission) | Publish to this repository: from your computer, from CI, by hand. |
 | `/repo/:name/upload?folder=` | `repo/RepoPage` | app | any (publish permission) | Upload files or a folder. |
@@ -495,7 +495,10 @@ expires or when the server answers 401.
   folder before the user confirms and says what a Maven or Debian delete leaves behind. In the
   List view, people who can delete pick rows (files and folders mix); the details column then
   shows "3 selected" and the size of the picked files, and Delete removes them all after one
-  confirm. Every delete calls `POST /api/repos/{name}/files/delete` (`api.repos.deleteFiles`).
+  confirm. A version delete (`versionTarget` in `files/place.ts`) removes the version folder, or
+  the files of all its builds when the version has no folder of its own (Debian). Every delete
+  calls `POST /api/repos/{name}/files/delete` (`api.repos.deleteFiles`), at most 1000 paths and
+  prefixes in one request.
 
 ## Words
 

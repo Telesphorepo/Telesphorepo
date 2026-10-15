@@ -1,8 +1,8 @@
 <!--
   The body of the details column for one file: its facts (size, when and by whom it was published,
   the SHA-256 and its checksum files as attributes), the GitHub Actions build that published it,
-  and how to use it: a Maven artifact's snippets from the format plugin, the apt setup of a .deb,
-  or a curl and wget download. The parent keys it by path. A path that turns out to be a folder
+  and how to use it: the format plugin's snippets of a Maven artifact or a .deb (the apt setup and
+  the install pinned to the file's version), and a curl and wget download of any other file and of a .deb. The parent keys it by path. A path that turns out to be a folder
   (typed without its "/") opens the folder instead.
 -->
 <script lang="ts">
@@ -17,7 +17,7 @@
   import ProvenanceFacts from "./ProvenanceFacts.svelte";
   import ArtifactSnippets from "../snippets/ArtifactSnippets.svelte";
   import SnippetTabs from "../snippets/SnippetTabs.svelte";
-  import { aptSnippets, debFile, downloadSnippets } from "../clients";
+  import { downloadSnippets } from "../clients";
   import { browse, sideLabel, type FileInfo } from "../browse";
 
   let { repo, path, base }: { repo: Repo; path: string; base: string } = $props();
@@ -47,19 +47,9 @@
   });
 
   const f = $derived(file.data);
-  const deb = $derived(repo.format === "debian" ? debFile(path) : null);
-  // The distributions of a Debian repo (folders under dists/), for the apt line.
-  const dists = $derived(
-    deb
-      ? new Resource(async () =>
-          (await api.repos.tree(repo.name, "dists/", { limit: 20 })).items.filter((e) => e.type === "dir").map((e) => e.name.replace(/\/$/, "")),
-        )
-      : null,
-  );
+  const deb = $derived(repo.format === "debian" && path.endsWith(".deb"));
   const url = $derived(base + api.repos.fileURL(repo.format, repo.name, path));
-  const download = $derived(
-    deb && dists?.data ? [...aptSnippets(repo, base, deb, dists.data[0] ?? "stable"), ...downloadSnippets(repo, url)] : downloadSnippets(repo, url),
-  );
+  const download = $derived(downloadSnippets(repo, url));
   const by = $derived(f?.provenance ? "GitHub Actions" : f?.uploaded_by || "");
 </script>
 
@@ -109,19 +99,10 @@
   {#if repo.format === "maven"}
     <ArtifactSnippets {repo} {path} />
   {:else}
+    {#if deb}<ArtifactSnippets {repo} {path} />{/if}
     <section class="flex min-w-0 flex-col gap-4" aria-label="Download {f.name}">
-      <h3 class="text-section">{deb ? "Install it" : "Download it"}</h3>
-      {#if dists?.loading}
-        <Loading rows={2} />
-      {:else}
-        {#if dists?.error}<ErrorState inline error="The distributions did not load, so the apt setup is not shown." />{/if}
-        {#if deb && dists?.data && dists.data.length > 1}
-          <p class="text-meta text-muted-foreground">
-            This repository has the distributions {dists.data.join(", ")}. Replace {dists.data[0]} with the one that holds the package.
-          </p>
-        {/if}
-        <SnippetTabs snippets={download} label="Tool" fill />
-      {/if}
+      <h3 class="text-section">Download it</h3>
+      <SnippetTabs snippets={download} label="Tool" fill />
     </section>
   {/if}
 {/if}

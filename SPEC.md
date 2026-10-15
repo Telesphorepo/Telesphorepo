@@ -99,7 +99,7 @@ Tables of the `debian` track:
 
 | Table | Key / indexes | Notes |
 |---|---|---|
-| `deb_packages` | UNIQUE `(repo_id, distribution, component, architecture, package, version)`, idx `asset_id`, idx `deb_packages_sha256 (repo_id, distribution, component, sha256)` | Also the streaming index for `Packages`. The SHA-256 index finds a package an import already holds |
+| `deb_packages` | UNIQUE `(repo_id, distribution, component, architecture, package, version)`, idx `asset_id`, idx `deb_packages_sha256 (repo_id, distribution, component, sha256)`, idx `deb_packages_package (repo_id, component, package)` | Also the streaming index for `Packages`. The SHA-256 index finds a package an import already holds. The package index reads the versions and builds of a package |
 | `deb_dirty` | PK `(repo_id, distribution, component, architecture)` (WITHOUT ROWID) | Durable rebuild queue; `marked_at` in unix ns |
 | `deb_index_files` | PK `(repo_id, distribution, path)` (WITHOUT ROWID) | Sizes and hashes; `Release` is built from these rows |
 
@@ -314,6 +314,9 @@ one transaction (see the route).
 | `GET /api/search?q=&repo=&after=&limit=` | any/anon | FTS5 trigram, `q` ≥ 3 chars, readable repos only |
 | `GET /api/repos/{name}/status` | read | The format's `Status` result, or `{}`. Debian: `{pending}`, the count of dirty rows |
 | `GET /api/repos/{name}/usage` | read | `{base_url, snippets:[{title, lang, code}]}` from the format's `Usage`; a proxy or a group gets no publish snippets. `base_url` is the `base_url` setting, else the request scheme and host |
+| `GET /api/repos/{name}/versions?path=&after=&limit=` | read | The versions of the artifact folder `path`, newest first (`format.Versioned`): `{artifact: {path, title, kind}\|null, items: [{version, kind, latest_build, builds_count, published_at, provenance}], next}`. `artifact` is null for any other folder. See **Versions and builds** |
+| `GET /api/repos/{name}/builds?path=&version=&after=&limit=` | read | The builds of one version of the artifact folder `path`, newest first: `{artifact, version, items: [{build, files: [{name, path, size, sha256, classifier, extension}], published_at, provenance}], next}`. `artifact` and `version` are null when the artifact has no such version. 400 without `version` |
+| `GET /api/repos/{name}/snippets?path=&version=&version_mode=pinned\|latest` | read | The snippets that use one artifact (`format.ArtifactDescriber`): `{base_url, artifact, version, version_mode, snippets}`. `path` is an artifact folder (with an optional `version`), a version folder or a file |
 | `GET /api/settings` | admin | `{groups:[{name, label, settings:[Item]}]}`. An Item has key, env, group, label, help, type, options, secret, value, default, source (`db`/`env`/`default`), locked |
 | `PATCH /api/settings` | admin | `{key: value}`. `null` resets a key; `""` for a secret means unchanged. Returns 400 `{error, fields}`, or 409 when an env-locked key gets a different value. Backend changes must pass the probe; SSO changes must pass discovery. A backend change that starts a storage move saves the other keys of the patch and returns 202 `{move: Move}`; 409 while a move runs |
 | `GET /api/storage/moves/current` | admin | The newest Move, running or ended; 404 when there has been none |
@@ -1102,6 +1105,31 @@ decision is in `docs/design/rationale.md`.
   - *Cover Flow* is a timeline of tickets for the versions of an artifact, or the builds of a
     snapshot. It replaces the list in the same box. The caption of a version has Open and Delete;
     the caption of a build has "Show N files", which switches to the list with that build chosen.
+- **Versions and builds.** A format that implements `format.Versioned` groups the files of an
+  artifact into versions and the files of a version into builds. The artifact folder and the
+  version string name a version: `#/repo/x/files?path=pool/main/u/urn/&version=3.0~SNAPSHOT`.
+  For Maven, the version folder (`com/acme/lib/1.0/`) also opens that version: its parent is the
+  artifact folder and its name the version. `?build=` keeps a chosen build in the address.
+  - *Maven:* an artifact folder is `<group path>/<artifactId>/` with one folder per version. A
+    `-SNAPSHOT` version has timestamped builds (`20261014.103000-3`); a release has one build.
+  - *Debian:* the plugin reads `deb_packages`, through the index `deb_packages_package`. An artifact
+    folder is `pool/<component>/<prefix>/<package>/`; its versions are those of the package of that
+    name in that component whose files lie in the folder. `Artifact.Kind` is `package`. A Debian
+    version `<base>~SNAPSHOT<sep><stamp>` (`<sep>` one of `.`, `+`, `~`, `-`; `<stamp>` 8 to 14
+    digits, `yyyyMMdd[HHmmss]`) is a build of the snapshot version `<base>~SNAPSHOT`; the build id is
+    the whole Debian version. Any other version is a release with one build. The files of a build
+    are its `.deb` files, one per architecture: `classifier` is the architecture, `extension` is
+    `deb`. Versions sort by Debian version order (the `dpkg --compare-versions` rules: epoch,
+    upstream, revision, and `~` before anything), so `3.0~SNAPSHOT` sorts before `3.0`. Builds sort
+    by stamp, newest first. One request reads at most 20,000 rows of a package.
+  - `published_at` is the newest update time of the build's files, and `provenance` comes from the
+    build's publish session.
+  - Snippets of a Debian package: the apt setup for the distribution and component of the package,
+    then the install. A release and a build (a `.deb` file) are pinned
+    (`apt-get install urn=3.0~SNAPSHOT.20261014211855`); a snapshot version and the latest mode
+    install `urn` without a version, so apt takes the newest.
+  - A delete of a version removes its folder when all its files lie in the folder named after the
+    version (Maven). Else (Debian) it removes the files of all its builds.
 - **Settings.** The sidebar is 220 px wide inside the container. Under 768 px it is a menu. All
   paths are under `/#/settings/`.
   - *Your account:* Overview (`account`), Sign-in and security (`security`), Devices (`devices`)

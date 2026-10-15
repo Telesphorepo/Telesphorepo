@@ -33,7 +33,6 @@ type provenanceJSON struct {
 
 type versionJSON struct {
 	Version     string          `json:"version"`
-	Path        string          `json:"path"`
 	Kind        string          `json:"kind"`
 	LatestBuild string          `json:"latest_build"`
 	BuildsCount int             `json:"builds_count"`
@@ -153,7 +152,7 @@ func TestVersionsAndSnippets(t *testing.T) {
 			t.Fatalf("versions = %v", got)
 		}
 		snap := v.Items[0]
-		if snap.BuildsCount != 3 || snap.LatestBuild != "20261003.101010-3" || snap.Path != lib+"1.2.0-SNAPSHOT/" ||
+		if snap.BuildsCount != 3 || snap.LatestBuild != "20261003.101010-3" ||
 			snap.PublishedAt == "" || snap.Provenance != nil {
 			t.Fatalf("snapshot version = %+v", snap)
 		}
@@ -180,7 +179,7 @@ func TestVersionsAndSnippets(t *testing.T) {
 
 	t.Run("builds", func(t *testing.T) {
 		var b buildsJSON
-		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/builds?path=com/acme/lib/1.2.0-SNAPSHOT", nil, read, &b)
+		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/builds?path=com/acme/lib/&version=1.2.0-SNAPSHOT", nil, read, &b)
 		if b.Artifact == nil || b.Version == nil || b.Version.BuildsCount != 3 {
 			t.Fatalf("builds: %+v", b)
 		}
@@ -201,20 +200,28 @@ func TestVersionsAndSnippets(t *testing.T) {
 		}
 
 		var page buildsJSON
-		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/builds?path=com/acme/lib/1.2.0-SNAPSHOT&limit=2", nil, read, &page)
+		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/builds?path=com/acme/lib/&version=1.2.0-SNAPSHOT&limit=2", nil, read, &page)
 		if len(page.Items) != 2 || page.Next == nil || *page.Next != "20261002.101010-2" {
 			t.Fatalf("first page = %+v", page)
 		}
-		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/builds?path=com/acme/lib/1.2.0-SNAPSHOT&limit=2&after="+*page.Next, nil, read, &page)
+		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/builds?path=com/acme/lib/&version=1.2.0-SNAPSHOT&limit=2&after="+*page.Next, nil, read, &page)
 		if len(page.Items) != 1 || page.Items[0].Build != "20261001.101010-1" || page.Next != nil {
 			t.Fatalf("second page = %+v", page)
 		}
 
 		var rel buildsJSON
-		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/builds?path=com/acme/lib/1.1.0", nil, read, &rel)
+		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/builds?path=com/acme/lib/&version=1.1.0", nil, read, &rel)
 		if len(rel.Items) != 1 || rel.Items[0].Build != "1.1.0" || len(rel.Items[0].Files) != 3 {
 			t.Fatalf("release builds = %+v", rel)
 		}
+
+		var missing buildsJSON
+		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/builds?path=com/acme/lib/&version=9.9.9", nil, read, &missing)
+		if missing.Artifact != nil || missing.Version != nil || len(missing.Items) != 0 {
+			t.Fatalf("a version that does not exist: %+v", missing)
+		}
+		st, body := s.API(t, http.MethodGet, "/api/repos/"+repo+"/builds?path=com/acme/lib/", nil, read)
+		wantAPIStatus(t, "builds without a version", st, body, http.StatusBadRequest)
 	})
 
 	snippets := func(t *testing.T, path, mode string) artifactSnippetsJSON {
@@ -265,6 +272,11 @@ func TestVersionsAndSnippets(t *testing.T) {
 			t.Fatalf("latest mode: no snippet notes that builds stop being reproducible")
 		}
 
+		var named artifactSnippetsJSON
+		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/snippets?path=com/acme/lib&version=1.0.0", nil, read, &named)
+		if named.Version != "1.0.0" || !strings.Contains(codeOf(named.Snippets, "maven"), "<version>1.0.0</version>") {
+			t.Fatalf("artifact folder with a version: %+v", named)
+		}
 		if v := snippets(t, "com/acme/lib/1.0.0", "").Version; v != "1.0.0" {
 			t.Fatalf("version folder: version %q, want 1.0.0", v)
 		}
@@ -413,7 +425,7 @@ func TestBuildProvenance(t *testing.T) {
 			t.Fatalf("versions: %+v", v)
 		}
 		var b buildsJSON
-		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/builds?path="+dir+"1.0.0", nil, read, &b)
+		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/builds?path="+dir+"&version=1.0.0", nil, read, &b)
 		if len(b.Items) != 1 || b.Items[0].Provenance == nil || *b.Items[0].Provenance != want {
 			t.Fatalf("builds: %+v", b)
 		}

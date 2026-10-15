@@ -7,6 +7,7 @@ package dbq
 
 import (
 	"context"
+	"database/sql"
 )
 
 const clearDirty = `-- name: ClearDirty :exec
@@ -167,6 +168,32 @@ func (q *Queries) GetPackageFileBySHA256(ctx context.Context, arg GetPackageFile
 	var filename string
 	err := row.Scan(&filename)
 	return filename, err
+}
+
+const getPackageOfAsset = `-- name: GetPackageOfAsset :one
+SELECT distribution, component, package, version FROM deb_packages
+WHERE asset_id = ?
+LIMIT 1
+`
+
+type GetPackageOfAssetRow struct {
+	Distribution string
+	Component    string
+	Package      string
+	Version      string
+}
+
+// The package of a pool file, through deb_packages_asset.
+func (q *Queries) GetPackageOfAsset(ctx context.Context, assetID int64) (GetPackageOfAssetRow, error) {
+	row := q.db.QueryRowContext(ctx, getPackageOfAsset, assetID)
+	var i GetPackageOfAssetRow
+	err := row.Scan(
+		&i.Distribution,
+		&i.Component,
+		&i.Package,
+		&i.Version,
+	)
+	return i, err
 }
 
 const getPackageSHA256 = `-- name: GetPackageSHA256 :one
@@ -402,6 +429,71 @@ func (q *Queries) ListPackageComponents(ctx context.Context, repoID int64) ([]Li
 	for rows.Next() {
 		var i ListPackageComponentsRow
 		if err := rows.Scan(&i.Distribution, &i.Component); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPackageFiles = `-- name: ListPackageFiles :many
+SELECT p.distribution, p.architecture, p.version, p.filename, p.size, p.sha256,
+  a.updated_at, a.publish_session_id
+FROM deb_packages p JOIN assets a ON a.id = p.asset_id
+WHERE p.repo_id = ? AND p.component = ? AND p.package = ?
+LIMIT ?
+`
+
+type ListPackageFilesParams struct {
+	RepoID    int64
+	Component string
+	Package   string
+	Limit     int64
+}
+
+type ListPackageFilesRow struct {
+	Distribution     string
+	Architecture     string
+	Version          string
+	Filename         string
+	Size             int64
+	Sha256           string
+	UpdatedAt        int64
+	PublishSessionID sql.NullInt64
+}
+
+// The .deb files of one package in one component, with the time and the publish session of
+// each file, through deb_packages_package. A file in several distributions has one row for each.
+func (q *Queries) ListPackageFiles(ctx context.Context, arg ListPackageFilesParams) ([]ListPackageFilesRow, error) {
+	rows, err := q.db.QueryContext(ctx, listPackageFiles,
+		arg.RepoID,
+		arg.Component,
+		arg.Package,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPackageFilesRow
+	for rows.Next() {
+		var i ListPackageFilesRow
+		if err := rows.Scan(
+			&i.Distribution,
+			&i.Architecture,
+			&i.Version,
+			&i.Filename,
+			&i.Size,
+			&i.Sha256,
+			&i.UpdatedAt,
+			&i.PublishSessionID,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

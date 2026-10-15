@@ -23,6 +23,8 @@ CREATE TABLE deb_packages (
 CREATE INDEX deb_packages_asset ON deb_packages(asset_id);
 -- Import duplicate check: is a package with these bytes already in the (dist, component)?
 CREATE INDEX deb_packages_sha256 ON deb_packages(repo_id, distribution, component, sha256);
+-- Versions and builds of a package (Browse): every row of one package in one component.
+CREATE INDEX deb_packages_package ON deb_packages(repo_id, component, package);
 
 CREATE TABLE deb_dirty (
   repo_id      INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,

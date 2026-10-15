@@ -5,7 +5,8 @@
   tickets in place of the list, in the same area. A row opens its version.
 -->
 <script lang="ts">
-  import type { Repo } from "$lib/api";
+  import { toast } from "svelte-sonner";
+  import { errorMessage, type Repo } from "$lib/api";
   import { Keyset } from "$lib/load.svelte";
   import { filesPath, go, href } from "$lib/router.svelte";
   import { Button } from "$lib/components/ui/button";
@@ -19,6 +20,7 @@
   import ProvenanceInline from "./ProvenanceInline.svelte";
   import type { DeleteTarget } from "./FolderList.svelte";
   import { browse, shortSha, type Artifact, type Version } from "../browse";
+  import { versionTarget } from "./place";
   import Loading from "$lib/components/Loading.svelte";
   import { formatDateTime } from "$lib/format";
   import { cn } from "$lib/utils";
@@ -59,8 +61,19 @@
   const byVersion = $derived(new Map(versions.items.map((v) => [v.version, v])));
   const open = (key: string) => {
     const v = byVersion.get(key);
-    if (v) go(href(filesPath(repo.name, v.path)));
+    if (v) go(versionHref(v));
   };
+
+  /** A version's place: the artifact folder and ?version=. */
+  const versionHref = (v: Version) => href(filesPath(repo.name, artifact.path), { version: v.version });
+
+  async function deleteVersion(v: Version) {
+    try {
+      onDelete(await versionTarget(repo.name, artifact, v));
+    } catch (e) {
+      toast.error(errorMessage(e));
+    }
+  }
 
   const builds = (v: Version) =>
     v.kind !== "snapshot" ? "" : v.builds_count > 1 ? `latest build · ${v.builds_count - 1} earlier` : "1 build";
@@ -117,12 +130,12 @@
                 class="text-muted-foreground hover:text-destructive"
                 aria-label="Delete version {v.version}"
                 title="Delete the version"
-                onclick={() => onDelete({ path: v.path, dir: true })}
+                onclick={() => deleteVersion(v)}
               >
                 <Trash2Icon />
               </Button>
             {/if}
-            <Button variant="outline" href={href(filesPath(repo.name, v.path))}>Open {v.version}<ArrowRightIcon /></Button>
+            <Button variant="outline" href={versionHref(v)}>Open {v.version}<ArrowRightIcon /></Button>
           </div>
         </div>
       {/if}
@@ -136,14 +149,14 @@
     {columns}
     caption="Versions of {artifact.title}"
     key={(v) => v.version}
-    href={(v) => href(filesPath(repo.name, v.path))}
+    href={versionHref}
   >
     {#snippet row(v)}
       <Cell grow>
         <span class="flex min-w-0 items-center gap-2">
           <TagIcon aria-hidden="true" class="size-4 shrink-0 text-link" />
           <a
-            href={href(filesPath(repo.name, v.path))}
+            href={versionHref(v)}
             class="flex min-w-0 rounded-sm font-medium outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
             ><Truncate text={v.version} /></a
           >
@@ -161,7 +174,7 @@
             class="text-muted-foreground hover:text-destructive"
             aria-label="Delete version {v.version}"
             title="Delete the version"
-            onclick={() => onDelete({ path: v.path, dir: true })}
+            onclick={() => deleteVersion(v)}
           >
             <Trash2Icon />
           </Button>

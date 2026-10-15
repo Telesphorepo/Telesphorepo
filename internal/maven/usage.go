@@ -236,7 +236,7 @@ func (h *Handler) readPackaging(ctx context.Context, repo *repos.Repo, p string)
 // latest.release and Maven's RELEASE (latest.integration and LATEST for a snapshot-only
 // artifact). A Gradle plugin marker gets a plugins { } block; a BOM an import of the platform; a
 // parent pom a <parent> block.
-func (h *Handler) ArtifactUsage(ctx context.Context, repo *repos.Repo, baseURL, p, mode string) (*format.ArtifactUsage, error) {
+func (h *Handler) ArtifactUsage(ctx context.Context, repo *repos.Repo, baseURL, p, v, mode string) (*format.ArtifactUsage, error) {
 	dir := strings.Trim(p, "/")
 	if dir == "" {
 		return nil, nil
@@ -245,6 +245,8 @@ func (h *Handler) ArtifactUsage(ctx context.Context, repo *repos.Repo, baseURL, 
 		dir = path.Dir(dir) // a file: its folder
 	} else if !errors.Is(err, assets.ErrNotFound) {
 		return nil, err
+	} else if v != "" && v != "." && v != ".." && !strings.Contains(v, "/") {
+		dir += "/" + v // a version of the artifact folder: its version folder
 	}
 	dir += "/"
 	version := ""
