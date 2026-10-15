@@ -246,7 +246,8 @@ func TestVersionsAndSnippets(t *testing.T) {
 			}
 		}
 		kts := codeOf(pinned.Snippets, "gradle-kotlin")
-		if !strings.Contains(kts, `implementation("com.acme:lib:1.1.0")`) || !strings.Contains(kts, "dependencyResolutionManagement") ||
+		if !strings.Contains(kts, `implementation("com.acme:lib:1.1.0")`) || !strings.Contains(kts, "repositories {") ||
+			strings.Contains(kts, "dependencyResolutionManagement") ||
 			!strings.Contains(kts, "/maven/"+repo) || !strings.Contains(kts, "credentials(PasswordCredentials::class)") ||
 			!strings.Contains(kts, "Username=YOUR_USERNAME") {
 			t.Fatalf("gradle-kotlin snippets of a private repo:\n%s", kts)

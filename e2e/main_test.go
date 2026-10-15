@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -73,7 +75,9 @@ func runMain(m *testing.M) int {
 		return 1
 	}
 
-	nw, err := network.New(ctx)
+	sweepLeftovers(ctx)
+
+	nw, err := network.New(ctx, network.WithLabels(e2eLabels))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "e2e: network:", err)
 		return 1
@@ -83,6 +87,44 @@ func runMain(m *testing.M) int {
 	defer stopSharedSeaweed()
 
 	return m.Run()
+}
+
+// e2eLabels marks every container and network of a run. Tests remove their own at the end; a run
+// that is killed cannot, and rootless Podman has no Ryuk to do it, so the next run removes them.
+var e2eLabels = map[string]string{"telesphorepo.e2e": "1"}
+
+// leftoverVolume matches the volumes the harness names with RandName (NewDataVolume, the scale
+// test). The bare "telesphorepo-data" volume of a person's own server never matches.
+var leftoverVolume = regexp.MustCompile(`^telesphorepo-(data|scale)-[0-9a-f]{8}$`)
+
+// sweepLeftovers removes the containers, networks and volumes that an earlier killed run left.
+func sweepLeftovers(ctx context.Context) {
+	list := func(args ...string) []string {
+		out, err := exec.CommandContext(ctx, Engine.CLI, args...).Output()
+		if err != nil {
+			return nil
+		}
+		return strings.Fields(string(out))
+	}
+	remove := func(kind string, args []string, names []string) {
+		if len(names) == 0 {
+			return
+		}
+		if out, err := exec.CommandContext(ctx, Engine.CLI, append(args, names...)...).CombinedOutput(); err != nil {
+			fmt.Fprintf(os.Stderr, "e2e: remove leftover %s: %v\n%s", kind, err, out)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "e2e: removed %d leftover %s from an earlier run\n", len(names), kind)
+	}
+	remove("containers", []string{"rm", "-f"}, list("ps", "-aq", "--filter", "label=telesphorepo.e2e"))
+	remove("networks", []string{"network", "rm", "-f"}, list("network", "ls", "-q", "--filter", "label=telesphorepo.e2e"))
+	var vols []string
+	for _, v := range list("volume", "ls", "--format", "{{.Name}}") {
+		if leftoverVolume.MatchString(v) {
+			vols = append(vols, v)
+		}
+	}
+	remove("volumes", []string{"volume", "rm", "-f"}, vols)
 }
 
 // buildImage shells out to "<engine> build" (docker: BuildKit; podman: buildah). Both respect

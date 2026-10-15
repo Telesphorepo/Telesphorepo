@@ -51,7 +51,7 @@ func (a *API) listFormats(w http.ResponseWriter, r *http.Request) {
 
 // repoStatus returns the format's StatusReporter result for the repo, or {}.
 func (a *API) repoStatus(w http.ResponseWriter, r *http.Request) {
-	repo, _, ok := a.auth.RepoGate(w, r, r.PathValue("name"), "", auth.Read, true)
+	repo, _, ok := a.auth.RepoGate(w, r, r.PathValue("name"), "", auth.RepoDownload, true)
 	if !ok {
 		return
 	}
@@ -75,7 +75,7 @@ func (a *API) repoStatus(w http.ResponseWriter, r *http.Request) {
 // base_url is the base_url setting, else the URL the request came in on. A proxy or a group takes
 // no uploads, so it gets no publish snippets.
 func (a *API) repoUsage(w http.ResponseWriter, r *http.Request) {
-	repo, _, ok := a.auth.RepoGate(w, r, r.PathValue("name"), "", auth.Read, true)
+	repo, _, ok := a.auth.RepoGate(w, r, r.PathValue("name"), "", auth.RepoDownload, true)
 	if !ok {
 		return
 	}
@@ -100,7 +100,7 @@ func (a *API) repoUsage(w http.ResponseWriter, r *http.Request) {
 // folder path (optional). artifact is null, and snippets empty, when the path is not an
 // artifact or the format has no artifact snippets.
 func (a *API) artifactSnippets(w http.ResponseWriter, r *http.Request) {
-	repo, _, ok := a.auth.RepoGate(w, r, r.PathValue("name"), "", auth.Read, true)
+	repo, _, ok := a.auth.RepoGate(w, r, r.PathValue("name"), "", auth.RepoDownload, true)
 	if !ok {
 		return
 	}
@@ -147,7 +147,7 @@ func (a *API) artifactSnippets(w http.ResponseWriter, r *http.Request) {
 // versionedPath reads ?path= (an artifact folder) for the versions and builds routes and the format's Versioned (nil
 // when the format has none).
 func (a *API) versionedPath(w http.ResponseWriter, r *http.Request) (*repos.Repo, format.Versioned, string, bool) {
-	repo, _, ok := a.auth.RepoGate(w, r, r.PathValue("name"), "", auth.Read, true)
+	repo, _, ok := a.auth.RepoGate(w, r, r.PathValue("name"), "", auth.RepoDownload, true)
 	if !ok {
 		return nil, nil, "", false
 	}

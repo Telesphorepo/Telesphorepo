@@ -17,10 +17,12 @@ func (a *API) registerAccess(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/me/access", a.myAccess)
 }
 
-// repoAccess returns the effective access of repo {name} (admin): {repo, format, download,
-// publish}. ?admins=1 lists the admins among the people too.
+// repoAccess returns the effective access of repo {name}: {repo, format, people, download,
+// publish}. ?admins=1 lists the holders of All repositories among the people too. It needs
+// access, settings or pipelines on the repo: the Access tab edits the people, the network
+// rules and the CI pipelines.
 func (a *API) repoAccess(w http.ResponseWriter, r *http.Request) {
-	repo, ok := a.adminRepo(w, r)
+	_, repo, _, ok := a.canRepo(w, r, auth.RepoAccess|auth.RepoSettings|auth.RepoPipelines)
 	if !ok {
 		return
 	}
@@ -34,13 +36,13 @@ func (a *API) repoAccess(w http.ResponseWriter, r *http.Request) {
 
 // userAccessJSON is a user's access: the user, and a keyset page of the repos they can use.
 type userAccessJSON struct {
-	Username   string            `json:"username"`
-	IsAdmin    bool              `json:"is_admin"`
-	Disabled   bool              `json:"disabled"`
-	Kind       string            `json:"kind"`
-	CanPublish bool              `json:"can_publish"`
-	Items      []access.UserRepo `json:"items"`
-	Next       *string           `json:"next"`
+	Username    string            `json:"username"`
+	Permissions []string          `json:"permissions"`
+	Disabled    bool              `json:"disabled"`
+	Kind        string            `json:"kind"`
+	CanPublish  bool              `json:"can_publish"`
+	Items       []access.UserRepo `json:"items"`
+	Next        *string           `json:"next"`
 }
 
 func (a *API) writeUserAccess(w http.ResponseWriter, r *http.Request, u *auth.User) {
@@ -49,13 +51,13 @@ func (a *API) writeUserAccess(w http.ResponseWriter, r *http.Request, u *auth.Us
 		fail(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, userAccessJSON{out.Username, out.IsAdmin, out.Disabled, out.Kind, out.CanPublish,
+	httpx.WriteJSON(w, http.StatusOK, userAccessJSON{out.Username, out.Permissions, out.Disabled, out.Kind, out.CanPublish,
 		out.Repos, cursor(next)})
 }
 
-// userAccess returns the repos user {username} can use (admin): ?after=<repo>&limit=.
+// userAccess returns the repos user {username} can use (people): ?after=<repo>&limit=.
 func (a *API) userAccess(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	if _, ok := a.can(w, r, auth.PermPeople); !ok {
 		return
 	}
 	u, err := a.auth.GetUser(r.Context(), r.PathValue("username"))

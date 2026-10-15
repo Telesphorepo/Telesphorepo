@@ -14,11 +14,16 @@ const use = (client: string, title: string, code: string, note?: string): Snippe
   note,
 });
 
-/** A curl and a wget download of one file. */
+/**
+ * A curl and a wget download of one file. For a private repository, both ask for the read token
+ * at a hidden prompt, so the token is not in the shell history or in an argument of a process.
+ */
 export function downloadSnippets(repo: Repo, url: string): Snippet[] {
-  const note = repo.anonymous_read ? undefined : "Create a read token on Settings › Tokens.";
-  const curlAuth = repo.anonymous_read ? "" : "-u YOUR_USERNAME:YOUR_READ_TOKEN ";
-  const wgetAuth = repo.anonymous_read ? "" : "--user YOUR_USERNAME --password YOUR_READ_TOKEN ";
   // The section heading says what they do, so the blocks need no title.
-  return [use("curl", "", `curl -fLO ${curlAuth}${url}`, note), use("wget", "", `wget ${wgetAuth}${url}`, note)];
+  if (repo.anonymous_read) return [use("curl", "", `curl -fLO ${url}`), use("wget", "", `wget ${url}`)];
+  const note = "Create a read token on Settings › Tokens. Enter it at the prompt.";
+  const curl =
+    "printf 'Read token: '; read -rs READ_TOKEN; echo\n" +
+    `printf 'user = "YOUR_USERNAME:%s"\\n' "$READ_TOKEN" | curl -fLO -K - ${url}`;
+  return [use("curl", "", curl, note), use("wget", "", `wget --user YOUR_USERNAME --ask-password ${url}`, note)];
 }

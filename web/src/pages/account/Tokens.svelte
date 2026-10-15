@@ -78,7 +78,7 @@
   const writable = $derived(
     (repos.data ?? [])
       // Publish tokens are for hosted repositories: nobody publishes to a group or a proxy.
-      .filter((r) => r.kind === "hosted" && (auth.isAdmin || r.permission === "write" || r.permission === "admin"))
+      .filter((r) => r.kind === "hosted" && r.permissions?.includes("publish"))
       .sort((a, b) => a.name.localeCompare(b.name)),
   );
 
@@ -107,12 +107,13 @@
   }
 
   const createdRepo = $derived(created ? (repos.data ?? []).find((r) => r.name === created!.repo) : undefined);
+  // The command asks for the token at a hidden prompt and gives it to curl on stdin, so the token
+  // is not in the shell history or in an argument of a process.
   const uploadCmd = $derived.by(() => {
     if (!created || !createdRepo) return "";
     const url = `${location.origin}/${createdRepo.format}/${createdRepo.name}`;
-    return createdRepo.format === "debian"
-      ? `curl -f -u ${USER}:${created.token} -T FILE.deb ${url}/upload/DIST/COMPONENT`
-      : `curl -f -u ${USER}:${created.token} -T FILE ${url}/PATH/FILE`;
+    const target = createdRepo.format === "debian" ? `-T FILE.deb ${url}/upload/DIST/COMPONENT` : `-T FILE ${url}/PATH/FILE`;
+    return `printf 'Publish token: '; read -rs TOKEN; echo; printf 'user = "${USER}:%s"\\n' "$TOKEN" | curl -fsS -K - ${target}`;
   });
 
   // Ending a token punches the ticket; it stays until Done.
@@ -198,7 +199,7 @@
   {#if sso}
     <CompactEmpty
       icon={UploadIcon}
-      text="You sign in with single sign-on, so this account cannot publish. Publish from CI, or with an account with a password."
+      text="You sign in with single sign-on, so this account has no publish tokens. Publish from your computer with the Gradle plugin or the Maven extension, or from CI."
     />
   {:else}
     {#if created}
@@ -267,7 +268,7 @@
         <CompactEmpty
           icon={UploadIcon}
           text={noRepo
-            ? "You cannot publish to a repository yet. Ask an administrator for access."
+            ? "You cannot publish to a repository yet. Ask a person who manages its access for the Publish permission."
             : "A token shows here each time you, your build tool or this site publishes."}
         >
           {#if writable.length}<Button variant="outline" size="sm" onclick={startPublish}><PlusIcon />New publish token</Button>{/if}

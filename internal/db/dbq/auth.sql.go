@@ -10,9 +10,38 @@ import (
 	"database/sql"
 )
 
+const addRepoPerm = `-- name: AddRepoPerm :exec
+INSERT INTO repo_permissions (repo_id, user_id, perm) VALUES (?, ?, ?) ON CONFLICT DO NOTHING
+`
+
+type AddRepoPermParams struct {
+	RepoID int64
+	UserID int64
+	Perm   string
+}
+
+func (q *Queries) AddRepoPerm(ctx context.Context, arg AddRepoPermParams) error {
+	_, err := q.db.ExecContext(ctx, addRepoPerm, arg.RepoID, arg.UserID, arg.Perm)
+	return err
+}
+
+const addUserPerm = `-- name: AddUserPerm :exec
+INSERT INTO user_permissions (user_id, perm) VALUES (?, ?) ON CONFLICT DO NOTHING
+`
+
+type AddUserPermParams struct {
+	UserID int64
+	Perm   string
+}
+
+func (q *Queries) AddUserPerm(ctx context.Context, arg AddUserPermParams) error {
+	_, err := q.db.ExecContext(ctx, addUserPerm, arg.UserID, arg.Perm)
+	return err
+}
+
 const createOIDCUser = `-- name: CreateOIDCUser :one
-INSERT INTO users (username, password_hash, is_admin, disabled, password_changed_at, created_at, kind, oidc_issuer, oidc_subject, email)
-VALUES (?, ?, 1, 0, ?, ?, ?, ?, ?, ?)
+INSERT INTO users (username, password_hash, disabled, password_changed_at, created_at, kind, oidc_issuer, oidc_subject, email)
+VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?)
 RETURNING id
 `
 
@@ -95,25 +124,26 @@ func (q *Queries) CreateToken(ctx context.Context, arg CreateTokenParams) (int64
 
 const createUser = `-- name: CreateUser :one
 
-INSERT INTO users (username, password_hash, is_admin, disabled, password_changed_at, created_at)
-VALUES (?, ?, ?, 0, ?, ?)
+INSERT INTO users (username, password_hash, disabled, password_changed_at, created_at)
+VALUES (?, ?, 0, ?, ?)
 RETURNING id
 `
 
 type CreateUserParams struct {
 	Username          string
 	PasswordHash      string
-	IsAdmin           bool
 	PasswordChangedAt int64
 	CreatedAt         int64
 }
 
-// Users, API tokens, sessions and repo permissions (internal/auth).
+// Users, API tokens, sessions and permissions (internal/auth).
+//
+// A perms column is the user's server permissions joined with commas ("" for none), read through
+// the user_permissions primary key.
 func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (int64, error) {
 	row := q.db.QueryRowContext(ctx, createUser,
 		arg.Username,
 		arg.PasswordHash,
-		arg.IsAdmin,
 		arg.PasswordChangedAt,
 		arg.CreatedAt,
 	)
@@ -148,17 +178,17 @@ func (q *Queries) DeleteOIDCUserSessions(ctx context.Context, arg DeleteOIDCUser
 	return err
 }
 
-const deletePermission = `-- name: DeletePermission :execrows
+const deleteRepoUserPerms = `-- name: DeleteRepoUserPerms :execrows
 DELETE FROM repo_permissions WHERE repo_id = ? AND user_id = ?
 `
 
-type DeletePermissionParams struct {
+type DeleteRepoUserPermsParams struct {
 	RepoID int64
 	UserID int64
 }
 
-func (q *Queries) DeletePermission(ctx context.Context, arg DeletePermissionParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, deletePermission, arg.RepoID, arg.UserID)
+func (q *Queries) DeleteRepoUserPerms(ctx context.Context, arg DeleteRepoUserPermsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteRepoUserPerms, arg.RepoID, arg.UserID)
 	if err != nil {
 		return 0, err
 	}
@@ -184,6 +214,15 @@ func (q *Queries) DeleteToken(ctx context.Context, id int64) (int64, error) {
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const deleteUserPerms = `-- name: DeleteUserPerms :exec
+DELETE FROM user_permissions WHERE user_id = ?
+`
+
+func (q *Queries) DeleteUserPerms(ctx context.Context, userID int64) error {
+	_, err := q.db.ExecContext(ctx, deleteUserPerms, userID)
+	return err
 }
 
 const deleteUserSessions = `-- name: DeleteUserSessions :exec
@@ -234,31 +273,17 @@ func (q *Queries) GetOIDCUser(ctx context.Context, arg GetOIDCUserParams) (GetOI
 	return i, err
 }
 
-const getPermissionLevel = `-- name: GetPermissionLevel :one
-SELECT level FROM repo_permissions WHERE repo_id = ? AND user_id = ?
-`
-
-type GetPermissionLevelParams struct {
-	RepoID int64
-	UserID int64
-}
-
-func (q *Queries) GetPermissionLevel(ctx context.Context, arg GetPermissionLevelParams) (string, error) {
-	row := q.db.QueryRowContext(ctx, getPermissionLevel, arg.RepoID, arg.UserID)
-	var level string
-	err := row.Scan(&level)
-	return level, err
-}
-
 const getPrincipal = `-- name: GetPrincipal :one
-SELECT username, is_admin, disabled, kind FROM users WHERE id = ?
+SELECT username, disabled, kind,
+  CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = users.id), '') AS TEXT) AS perms
+FROM users WHERE id = ?
 `
 
 type GetPrincipalRow struct {
 	Username string
-	IsAdmin  bool
 	Disabled bool
 	Kind     string
+	Perms    string
 }
 
 func (q *Queries) GetPrincipal(ctx context.Context, id int64) (GetPrincipalRow, error) {
@@ -266,23 +291,25 @@ func (q *Queries) GetPrincipal(ctx context.Context, id int64) (GetPrincipalRow, 
 	var i GetPrincipalRow
 	err := row.Scan(
 		&i.Username,
-		&i.IsAdmin,
 		&i.Disabled,
 		&i.Kind,
+		&i.Perms,
 	)
 	return i, err
 }
 
 const getPrincipalAndHash = `-- name: GetPrincipalAndHash :one
-SELECT username, is_admin, disabled, password_hash, kind FROM users WHERE id = ?
+SELECT username, disabled, password_hash, kind,
+  CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = users.id), '') AS TEXT) AS perms
+FROM users WHERE id = ?
 `
 
 type GetPrincipalAndHashRow struct {
 	Username     string
-	IsAdmin      bool
 	Disabled     bool
 	PasswordHash string
 	Kind         string
+	Perms        string
 }
 
 func (q *Queries) GetPrincipalAndHash(ctx context.Context, id int64) (GetPrincipalAndHashRow, error) {
@@ -290,29 +317,33 @@ func (q *Queries) GetPrincipalAndHash(ctx context.Context, id int64) (GetPrincip
 	var i GetPrincipalAndHashRow
 	err := row.Scan(
 		&i.Username,
-		&i.IsAdmin,
 		&i.Disabled,
 		&i.PasswordHash,
 		&i.Kind,
+		&i.Perms,
 	)
 	return i, err
 }
 
 const getSessionPrincipal = `-- name: GetSessionPrincipal :one
-SELECT s.expires_at, u.id AS user_id, u.username, u.is_admin, u.disabled, u.kind
+SELECT s.expires_at, u.id AS user_id, u.username, u.disabled, u.kind,
+  CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = u.id), '') AS TEXT) AS perms,
+  EXISTS (SELECT 1 FROM repo_permissions rp WHERE rp.user_id = u.id AND rp.perm NOT IN ('download','publish')) AS manages_repo
 FROM sessions s JOIN users u ON u.id = s.user_id
 WHERE s.id_hash = ?
 `
 
 type GetSessionPrincipalRow struct {
-	ExpiresAt int64
-	UserID    int64
-	Username  string
-	IsAdmin   bool
-	Disabled  bool
-	Kind      string
+	ExpiresAt   int64
+	UserID      int64
+	Username    string
+	Disabled    bool
+	Kind        string
+	Perms       string
+	ManagesRepo bool
 }
 
+// elevated: the user holds a repository permission other than download and publish.
 func (q *Queries) GetSessionPrincipal(ctx context.Context, idHash []byte) (GetSessionPrincipalRow, error) {
 	row := q.db.QueryRowContext(ctx, getSessionPrincipal, idHash)
 	var i GetSessionPrincipalRow
@@ -320,16 +351,18 @@ func (q *Queries) GetSessionPrincipal(ctx context.Context, idHash []byte) (GetSe
 		&i.ExpiresAt,
 		&i.UserID,
 		&i.Username,
-		&i.IsAdmin,
 		&i.Disabled,
 		&i.Kind,
+		&i.Perms,
+		&i.ManagesRepo,
 	)
 	return i, err
 }
 
 const getTokenAuth = `-- name: GetTokenAuth :one
 SELECT t.id AS token_id, t.secret_hash, t.expires_at, t.last_used_at,
-       u.id AS user_id, u.username, u.is_admin, u.disabled, u.kind
+       u.id AS user_id, u.username, u.disabled, u.kind,
+       CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = u.id), '') AS TEXT) AS perms
 FROM api_tokens t JOIN users u ON u.id = t.user_id
 WHERE t.public_id = ?
 `
@@ -341,9 +374,9 @@ type GetTokenAuthRow struct {
 	LastUsedAt sql.NullInt64
 	UserID     int64
 	Username   string
-	IsAdmin    bool
 	Disabled   bool
 	Kind       string
+	Perms      string
 }
 
 func (q *Queries) GetTokenAuth(ctx context.Context, publicID string) (GetTokenAuthRow, error) {
@@ -356,25 +389,27 @@ func (q *Queries) GetTokenAuth(ctx context.Context, publicID string) (GetTokenAu
 		&i.LastUsedAt,
 		&i.UserID,
 		&i.Username,
-		&i.IsAdmin,
 		&i.Disabled,
 		&i.Kind,
+		&i.Perms,
 	)
 	return i, err
 }
 
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, username, is_admin, disabled, kind, email, created_at FROM users WHERE id = ?
+SELECT id, username, disabled, kind, email, created_at,
+  CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = users.id), '') AS TEXT) AS perms
+FROM users WHERE id = ?
 `
 
 type GetUserByIDRow struct {
 	ID        int64
 	Username  string
-	IsAdmin   bool
 	Disabled  bool
 	Kind      string
 	Email     sql.NullString
 	CreatedAt int64
+	Perms     string
 }
 
 func (q *Queries) GetUserByID(ctx context.Context, id int64) (GetUserByIDRow, error) {
@@ -383,27 +418,29 @@ func (q *Queries) GetUserByID(ctx context.Context, id int64) (GetUserByIDRow, er
 	err := row.Scan(
 		&i.ID,
 		&i.Username,
-		&i.IsAdmin,
 		&i.Disabled,
 		&i.Kind,
 		&i.Email,
 		&i.CreatedAt,
+		&i.Perms,
 	)
 	return i, err
 }
 
 const getUserByUsername = `-- name: GetUserByUsername :one
-SELECT id, username, is_admin, disabled, kind, email, created_at FROM users WHERE username = ?
+SELECT id, username, disabled, kind, email, created_at,
+  CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = users.id), '') AS TEXT) AS perms
+FROM users WHERE username = ?
 `
 
 type GetUserByUsernameRow struct {
 	ID        int64
 	Username  string
-	IsAdmin   bool
 	Disabled  bool
 	Kind      string
 	Email     sql.NullString
 	CreatedAt int64
+	Perms     string
 }
 
 func (q *Queries) GetUserByUsername(ctx context.Context, username string) (GetUserByUsernameRow, error) {
@@ -412,11 +449,11 @@ func (q *Queries) GetUserByUsername(ctx context.Context, username string) (GetUs
 	err := row.Scan(
 		&i.ID,
 		&i.Username,
-		&i.IsAdmin,
 		&i.Disabled,
 		&i.Kind,
 		&i.Email,
 		&i.CreatedAt,
+		&i.Perms,
 	)
 	return i, err
 }
@@ -449,15 +486,17 @@ func (q *Queries) GetUserKind(ctx context.Context, id int64) (string, error) {
 }
 
 const getUserLogin = `-- name: GetUserLogin :one
-SELECT id, password_hash, is_admin, disabled, kind FROM users WHERE username = ?
+SELECT id, password_hash, disabled, kind,
+  CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = users.id), '') AS TEXT) AS perms
+FROM users WHERE username = ?
 `
 
 type GetUserLoginRow struct {
 	ID           int64
 	PasswordHash string
-	IsAdmin      bool
 	Disabled     bool
 	Kind         string
+	Perms        string
 }
 
 func (q *Queries) GetUserLogin(ctx context.Context, username string) (GetUserLoginRow, error) {
@@ -466,9 +505,9 @@ func (q *Queries) GetUserLogin(ctx context.Context, username string) (GetUserLog
 	err := row.Scan(
 		&i.ID,
 		&i.PasswordHash,
-		&i.IsAdmin,
 		&i.Disabled,
 		&i.Kind,
+		&i.Perms,
 	)
 	return i, err
 }
@@ -523,14 +562,85 @@ func (q *Queries) ListAnonymousRepoIDs(ctx context.Context) ([]int64, error) {
 	return items, nil
 }
 
+const listPeople = `-- name: ListPeople :many
+SELECT username FROM users
+WHERE username >= ?1 AND username < ?2 AND disabled = 0
+ORDER BY username LIMIT ?3
+`
+
+type ListPeopleParams struct {
+	Lower string
+	Upper string
+	Limit int64
+}
+
+// The enabled people whose username is in [lower, upper), for a person picker.
+func (q *Queries) ListPeople(ctx context.Context, arg ListPeopleParams) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listPeople, arg.Lower, arg.Upper, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var username string
+		if err := rows.Scan(&username); err != nil {
+			return nil, err
+		}
+		items = append(items, username)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPermHolders = `-- name: ListPermHolders :many
+SELECT u.id, u.username, u.kind FROM user_permissions p JOIN users u ON u.id = p.user_id
+WHERE p.perm = ? AND u.disabled = 0
+`
+
+type ListPermHoldersRow struct {
+	ID       int64
+	Username string
+	Kind     string
+}
+
+// The enabled people who hold perm, through user_permissions_perm.
+func (q *Queries) ListPermHolders(ctx context.Context, perm string) ([]ListPermHoldersRow, error) {
+	rows, err := q.db.QueryContext(ctx, listPermHolders, perm)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPermHoldersRow
+	for rows.Next() {
+		var i ListPermHoldersRow
+		if err := rows.Scan(&i.ID, &i.Username, &i.Kind); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPermissions = `-- name: ListPermissions :many
-SELECT u.username, p.level FROM repo_permissions p JOIN users u ON u.id = p.user_id
-WHERE p.repo_id = ? ORDER BY u.username
+SELECT u.username, p.perm FROM repo_permissions p JOIN users u ON u.id = p.user_id
+WHERE p.repo_id = ?
 `
 
 type ListPermissionsRow struct {
 	Username string
-	Level    string
+	Perm     string
 }
 
 func (q *Queries) ListPermissions(ctx context.Context, repoID int64) ([]ListPermissionsRow, error) {
@@ -542,7 +652,7 @@ func (q *Queries) ListPermissions(ctx context.Context, repoID int64) ([]ListPerm
 	var items []ListPermissionsRow
 	for rows.Next() {
 		var i ListPermissionsRow
-		if err := rows.Scan(&i.Username, &i.Level); err != nil {
+		if err := rows.Scan(&i.Username, &i.Perm); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -560,6 +670,8 @@ const listPermittedRepoIDs = `-- name: ListPermittedRepoIDs :many
 SELECT repo_id FROM repo_permissions WHERE user_id = ?
 `
 
+// The repos where user id holds a permission (a repo once per permission), through
+// repo_permissions_user.
 func (q *Queries) ListPermittedRepoIDs(ctx context.Context, userID int64) ([]int64, error) {
 	rows, err := q.db.QueryContext(ctx, listPermittedRepoIDs, userID)
 	if err != nil {
@@ -573,6 +685,40 @@ func (q *Queries) ListPermittedRepoIDs(ctx context.Context, userID int64) ([]int
 			return nil, err
 		}
 		items = append(items, repo_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRepoUserPerms = `-- name: ListRepoUserPerms :many
+
+SELECT perm FROM repo_permissions WHERE repo_id = ? AND user_id = ?
+`
+
+type ListRepoUserPermsParams struct {
+	RepoID int64
+	UserID int64
+}
+
+// Repository permissions.
+func (q *Queries) ListRepoUserPerms(ctx context.Context, arg ListRepoUserPermsParams) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listRepoUserPerms, arg.RepoID, arg.UserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var perm string
+		if err := rows.Scan(&perm); err != nil {
+			return nil, err
+		}
+		items = append(items, perm)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -624,8 +770,39 @@ func (q *Queries) ListTokens(ctx context.Context, userID int64) ([]ListTokensRow
 	return items, nil
 }
 
+const listUserPerms = `-- name: ListUserPerms :many
+
+SELECT perm FROM user_permissions WHERE user_id = ?
+`
+
+// Server permissions.
+func (q *Queries) ListUserPerms(ctx context.Context, userID int64) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listUserPerms, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var perm string
+		if err := rows.Scan(&perm); err != nil {
+			return nil, err
+		}
+		items = append(items, perm)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listUsers = `-- name: ListUsers :many
-SELECT id, username, is_admin, disabled, kind, email, created_at FROM users
+SELECT id, username, disabled, kind, email, created_at,
+  CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = users.id), '') AS TEXT) AS perms
+FROM users
 WHERE username > ?1 ORDER BY username LIMIT ?2
 `
 
@@ -637,11 +814,11 @@ type ListUsersParams struct {
 type ListUsersRow struct {
 	ID        int64
 	Username  string
-	IsAdmin   bool
 	Disabled  bool
 	Kind      string
 	Email     sql.NullString
 	CreatedAt int64
+	Perms     string
 }
 
 func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]ListUsersRow, error) {
@@ -656,11 +833,11 @@ func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]ListUse
 		if err := rows.Scan(
 			&i.ID,
 			&i.Username,
-			&i.IsAdmin,
 			&i.Disabled,
 			&i.Kind,
 			&i.Email,
 			&i.CreatedAt,
+			&i.Perms,
 		); err != nil {
 			return nil, err
 		}
@@ -673,36 +850,6 @@ func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]ListUse
 		return nil, err
 	}
 	return items, nil
-}
-
-const setPermission = `-- name: SetPermission :exec
-INSERT INTO repo_permissions (repo_id, user_id, level) VALUES (?, ?, ?)
-ON CONFLICT (repo_id, user_id) DO UPDATE SET level = excluded.level
-`
-
-type SetPermissionParams struct {
-	RepoID int64
-	UserID int64
-	Level  string
-}
-
-func (q *Queries) SetPermission(ctx context.Context, arg SetPermissionParams) error {
-	_, err := q.db.ExecContext(ctx, setPermission, arg.RepoID, arg.UserID, arg.Level)
-	return err
-}
-
-const setUserAdmin = `-- name: SetUserAdmin :exec
-UPDATE users SET is_admin = ? WHERE id = ?
-`
-
-type SetUserAdminParams struct {
-	IsAdmin bool
-	ID      int64
-}
-
-func (q *Queries) SetUserAdmin(ctx context.Context, arg SetUserAdminParams) error {
-	_, err := q.db.ExecContext(ctx, setUserAdmin, arg.IsAdmin, arg.ID)
-	return err
 }
 
 const setUserDisabled = `-- name: SetUserDisabled :exec
@@ -749,7 +896,7 @@ func (q *Queries) TouchToken(ctx context.Context, arg TouchTokenParams) error {
 }
 
 const updateOIDCUser = `-- name: UpdateOIDCUser :exec
-UPDATE users SET is_admin = 1, email = ? WHERE id = ?
+UPDATE users SET email = ? WHERE id = ?
 `
 
 type UpdateOIDCUserParams struct {
@@ -760,4 +907,18 @@ type UpdateOIDCUserParams struct {
 func (q *Queries) UpdateOIDCUser(ctx context.Context, arg UpdateOIDCUserParams) error {
 	_, err := q.db.ExecContext(ctx, updateOIDCUser, arg.Email, arg.ID)
 	return err
+}
+
+const userElevated = `-- name: UserElevated :one
+SELECT EXISTS (SELECT 1 FROM user_permissions up WHERE up.user_id = ?1)
+    OR EXISTS (SELECT 1 FROM repo_permissions rp WHERE rp.user_id = ?1 AND rp.perm NOT IN ('download','publish'))
+`
+
+// Whether user id needs the second factor: any server permission, or a repository permission
+// other than download and publish.
+func (q *Queries) UserElevated(ctx context.Context, userID int64) (sql.NullBool, error) {
+	row := q.db.QueryRowContext(ctx, userElevated, userID)
+	var column_1 sql.NullBool
+	err := row.Scan(&column_1)
+	return column_1, err
 }

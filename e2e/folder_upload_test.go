@@ -108,8 +108,8 @@ func TestFolderUploadMaven(t *testing.T) {
 	repo := RandName("mvn")
 	s.CreateRepo(t, repo, "maven", false, nil)
 	w := RandName("writer")
-	s.CreateUser(t, w, "writer-pass-1234", false)
-	s.SetPermission(t, repo, w, "write")
+	s.CreateUser(t, w, "writer-pass-1234")
+	s.SetPerms(t, repo, w, "download", "publish")
 	ps := s.MintSession(t, w, repo)
 
 	// A Maven-layout tree, as the browser sends a dropped "repo" folder.
@@ -218,9 +218,9 @@ func TestFolderUploadDebianAndRaw(t *testing.T) {
 	s.CreateRepo(t, deb, "debian", false, map[string]any{"architectures": archs})
 	s.CreateRepo(t, raw, "raw", false, nil)
 	w := RandName("writer")
-	s.CreateUser(t, w, "writer-pass-1234", false)
-	s.SetPermission(t, deb, w, "write")
-	s.SetPermission(t, raw, w, "write")
+	s.CreateUser(t, w, "writer-pass-1234")
+	s.SetPerms(t, deb, w, "download", "publish")
+	s.SetPerms(t, raw, w, "download", "publish")
 
 	// A folder of .debs, one of them broken.
 	ps := s.MintSession(t, w, deb)

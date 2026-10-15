@@ -51,33 +51,18 @@ const (
 // so verifyPassword never accepts it.
 const noPassword = "!"
 
-type Level int
-
-const (
-	None Level = iota
-	Read
-	Write
-)
-
-func (l Level) String() string {
-	switch l {
-	case Read:
-		return "read"
-	case Write:
-		return "write"
-	}
-	return "none"
-}
-
 // Principal is an authenticated caller. A nil *Principal means anonymous.
 type Principal struct {
 	UserID   int64 // 0 for a publish session minted from a CI identity token
 	Username string
-	IsAdmin  bool
-	TokenID  int64  // non-zero when authenticated with a read token
-	Kind     string // KindLocal or KindOIDC; "" for a publish session without a user
+	Perms    ServerPerm // the user's server permissions
+	TokenID  int64      // non-zero when authenticated with a read token
+	Kind     string     // KindLocal or KindOIDC; "" for a publish session without a user
 	// Session is true when the caller authenticated with the UI session cookie.
 	Session bool
+	// ManagesRepo is true for a UI session of a user who holds a repository permission other
+	// than download and publish.
+	ManagesRepo bool
 	// Publish is non-nil only when the caller authenticated with a publish-session token. The
 	// write gate limits such a principal to the session's repo, and Identify limits it to
 	// /api/publish/ on the JSON API.
@@ -85,13 +70,14 @@ type Principal struct {
 }
 
 type User struct {
-	ID        int64     `json:"id"`
-	Username  string    `json:"username"`
-	IsAdmin   bool      `json:"is_admin"`
-	Disabled  bool      `json:"disabled"`
-	Kind      string    `json:"kind"`  // "local" or "oidc"
-	Email     string    `json:"email"` // "" when unknown (SSO accounts only)
-	CreatedAt time.Time `json:"created_at"`
+	ID          int64      `json:"id"`
+	Username    string     `json:"username"`
+	Permissions []string   `json:"permissions"` // server permissions, in display order
+	Perms       ServerPerm `json:"-"`           // the same set
+	Disabled    bool       `json:"disabled"`
+	Kind        string     `json:"kind"`  // "local" or "oidc"
+	Email       string     `json:"email"` // "" when unknown (SSO accounts only)
+	CreatedAt   time.Time  `json:"created_at"`
 }
 
 type Token struct {
@@ -102,9 +88,10 @@ type Token struct {
 	LastUsedAt *time.Time `json:"last_used_at"`
 }
 
+// Permission is the repository permission set of one person on one repository.
 type Permission struct {
-	Username string `json:"username"`
-	Level    string `json:"level"`
+	Username string   `json:"username"`
+	Perms    []string `json:"perms"`
 }
 
 type Service struct {
@@ -131,7 +118,7 @@ type Service struct {
 	audit   *audit.Service    // records sign-ins; set by the server (nil: none)
 	rules   *netrules.Service // per-repo IP rules; set by the server (nil: none)
 
-	// dev makes the second factor optional (telesphorepo dev only): an admin without a factor
+	// dev makes the second factor optional (telesphorepo dev only): a person without a factor
 	// gets a full session, and an approval or a manual session without a factor passes. A
 	// factor that the user has is still checked.
 	dev bool

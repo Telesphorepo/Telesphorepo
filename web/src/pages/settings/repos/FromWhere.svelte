@@ -12,6 +12,7 @@
   import { formatCount } from "$lib/format";
   import { rangeSize } from "$lib/network";
   import { href } from "$lib/router.svelte";
+  import { auth } from "$lib/auth.svelte";
   import { Button } from "$lib/components/ui/button";
   import DataTable from "$lib/components/DataTable.svelte";
   import Cell from "$lib/components/Cell.svelte";
@@ -65,7 +66,7 @@
           rule: r,
           title: l?.title ?? r.value,
           facts: lists && !l ? "This network list does not exist any more. Remove it." : listFacts(l),
-          link: href(`/settings/networks/list/${encodeURIComponent(r.value)}`),
+          link: auth.can("network") ? href(`/settings/networks/list/${encodeURIComponent(r.value)}`) : undefined,
           missing: !!lists && !l,
           empty: !!l && l.count === 0,
         };
@@ -106,7 +107,7 @@
 
 <AccessPart
   title="From where"
-  help={rules.length ? `${whom} must come from one of these networks, for administrators too.` : undefined}
+  help={rules.length ? `${whom} must come from one of these networks, for everyone.` : undefined}
 >
   {#snippet actions()}
     <Button variant="outline" size="sm" onclick={() => (listOpen = true)}><PlusIcon />Add network list</Button>
@@ -164,7 +165,7 @@
   error={listsError ? `The network lists did not load: ${listsError}` : ""}
   none={lists?.length ? "Every network list is on this repository already." : "No network list exists yet."}
   newLabel="New network list"
-  newHref={href("/settings/networks/new")}
+  newHref={auth.can("network") ? href("/settings/networks/new") : undefined}
   onAdd={addLists}
 />
 

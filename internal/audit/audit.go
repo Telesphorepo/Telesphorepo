@@ -29,8 +29,8 @@ const (
 	RepoCreate       = "repo.create"
 	RepoUpdate       = "repo.update"
 	RepoDelete       = "repo.delete"
-	PermissionSet    = "permission.set"
-	PermissionDelete = "permission.delete"
+	PermissionSet    = "permission.set"   // a repository permission set changed (detail old, new)
+	UserPermissions  = "user.permissions" // a server permission set changed (detail old, new)
 	UserCreate       = "user.create"
 	UserUpdate       = "user.update"
 	SettingsUpdate   = "settings.update"

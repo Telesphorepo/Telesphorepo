@@ -63,7 +63,7 @@ func scaleRun(t *testing.T, n int) map[string]time.Duration {
 
 	first := StartServer(t, ServerOpts{DataVolume: vol})
 	const user, pass = "scale", "scale-password-1"
-	first.CreateUser(t, user, pass, true)
+	first.CreateUser(t, user, pass, AllServerPerms...)
 	auth := Basic{user, first.CreateToken(t, user, pass, "scale")}
 	terminate(t, first)
 
@@ -234,6 +234,7 @@ func runSeed(t *testing.T, vol string, n int) {
 	ctx := context.Background()
 	start := time.Now()
 	c, err := testcontainers.Run(ctx, ServerImage,
+		testcontainers.WithLabels(e2eLabels),
 		testcontainers.WithCmd("seed", strconv.Itoa(n)),
 		testcontainers.WithMounts(testcontainers.VolumeMount(vol, "/data")),
 		testcontainers.WithWaitStrategyAndDeadline(40*time.Minute, wait.ForExit()),

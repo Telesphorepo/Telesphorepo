@@ -16,8 +16,10 @@
   import { Resource } from "$lib/load.svelte";
   import { Draft } from "$lib/unsaved.svelte";
   import { go, href, navigate } from "$lib/router.svelte";
+  import { auth } from "$lib/auth.svelte";
   import { formatLook } from "$lib/formats";
   import * as RadioGroup from "$lib/components/ui/radio-group";
+  import * as Alert from "$lib/components/ui/alert";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import { Textarea } from "$lib/components/ui/textarea";
@@ -63,19 +65,29 @@
   import DatabaseIcon from "@lucide/svelte/icons/database";
   import PlusIcon from "@lucide/svelte/icons/plus";
   import XIcon from "@lucide/svelte/icons/x";
+  import TriangleAlertIcon from "@lucide/svelte/icons/triangle-alert";
 
   let { id, startRepo = null, back = null }: { id: number | null; startRepo?: string | null; back?: string | null } = $props();
 
   const fid = $props.id();
   const isNew = untrack(() => id === null);
   const listPath = "/settings/ci-pipelines";
-  /** Where Create and Cancel return to: a Settings page that opened this one, else the list. */
-  const returnTo = untrack(() => (back && /^\/settings\/[^/]/.test(back) && !back.includes("//") ? back : null));
+  /** Where Create and Cancel return to: a Settings or repository page that opened this one, else the list. */
+  const returnTo = untrack(() => (back && /^\/(settings|repo)\/[^/]/.test(back) && !back.includes("//") ? back : null));
 
   const rule = new Resource<Trust | null>(() => (id === null ? Promise.resolve(null) : api.publish.trusts.get(id)));
   const repos = new Resource(() => api.repos.list());
-  // A CI pipeline publishes, so it names only hosted repositories.
-  const sortedRepos = $derived((repos.data ?? []).filter((r) => r.kind === "hosted").sort((a, b) => a.name.localeCompare(b.name)));
+  // A pipeline without its own audience checks tokens against the public address of the server.
+  // The settings need one of General, Sign-in options, Storage or Network; without them the page skips the check.
+  const readsSettings = (["general", "signin", "storage", "network"] as const).some((p) => auth.can(p));
+  const settings = new Resource(() => (readsSettings ? api.settings.get() : Promise.resolve(null)));
+  const noBaseURL = $derived(
+    !!settings.data && !(settings.data.groups.flatMap((g) => g.settings).find((s) => s.key === "base_url")?.value ?? ""),
+  );
+  // A CI pipeline publishes, so it names only hosted repositories, and only those where the person holds CI pipelines.
+  const sortedRepos = $derived(
+    (repos.data ?? []).filter((r) => r.kind === "hosted" && auth.canRepo(r.name, "pipelines")).sort((a, b) => a.name.localeCompare(b.name)),
+  );
 
   type Value = {
     name: string;
@@ -356,6 +368,23 @@
   {/snippet}
 
   <FormPage>
+    {#if noBaseURL && !accepts(v, hand).audience}
+      <Alert.Root class="mb-6">
+        <TriangleAlertIcon />
+        <Alert.Title>The server has no public address</Alert.Title>
+        <Alert.Description>
+          <p>
+            CI jobs cannot publish until the server checks the audience of their tokens.
+            {#if auth.can("general")}
+              Set the public address on
+              <a href={href("/settings/general")} class="text-link underline-offset-4 hover:underline">General</a>, or edit the token conditions and give the pipeline an audience.
+            {:else}
+              Ask an administrator to set the public address, or edit the token conditions and give the pipeline an audience.
+            {/if}
+          </p>
+        </Alert.Description>
+      </Alert.Root>
+    {/if}
     <form onsubmit={isNew ? create : (e) => e.preventDefault()} autocomplete="off">
       {#if isNew}
         <Area n={1} title="Where the job runs">
@@ -483,9 +512,13 @@
         {:else if repos.error && !repos.data}
           <ErrorState error={repos.error} title="The repositories did not load" onRetry={repos.reload} />
         {:else if sortedRepos.length === 0}
-          <CompactEmpty icon={DatabaseIcon} text="Create a repository first, then come back to choose it.">
-            <Button variant="outline" href={href("/settings/repositories/new")}><PlusIcon />New repository</Button>
-          </CompactEmpty>
+          {#if auth.can("repos")}
+            <CompactEmpty icon={DatabaseIcon} text="Create a repository first, then come back to choose it.">
+              <Button variant="outline" href={href("/settings/repositories/new")}><PlusIcon />New repository</Button>
+            </CompactEmpty>
+          {:else}
+            <CompactEmpty icon={DatabaseIcon} text="You hold CI pipelines on no repository that takes publishes." />
+          {/if}
         {:else}
           <div class="grid gap-1 sm:grid-cols-2">
             {#each sortedRepos as r (r.name)}
@@ -502,7 +535,7 @@
       {#if v.system !== "other"}
         <Area
           n={isNew ? 4 : undefined}
-          title={v.system === "github" ? "Add the publish step to your workflow" : "Add the publish stage to your Jenkinsfile"}
+          title={v.system === "github" ? "Add the workflow to your repository" : "Add the Jenkinsfile to your repository"}
         >
           {#snippet footer()}{#if isNew}{@render createRow()}{/if}{/snippet}
           <WorkflowSetup system={v.system} repos={v.repos} github={v.gh} />

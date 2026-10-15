@@ -23,12 +23,13 @@ func TestZeroConfigStartup(t *testing.T) {
 
 	sess := s.Login(t, "admin", s.AdminPass)
 	var me struct {
-		Username string `json:"username"`
-		IsAdmin  bool   `json:"is_admin"`
+		Username             string   `json:"username"`
+		Permissions          []string `json:"permissions"`
+		SecondFactorRequired bool     `json:"second_factor_required"`
 	}
 	s.MustAPI(t, http.MethodGet, "/api/me", nil, sess, &me)
-	if me.Username != "admin" || !me.IsAdmin {
-		t.Fatalf("/api/me = %+v, want admin with is_admin", me)
+	if me.Username != "admin" || strings.Join(me.Permissions, ",") != strings.Join(AllServerPerms, ",") || !me.SecondFactorRequired {
+		t.Fatalf("/api/me = %+v, want admin with every server permission and second_factor_required", me)
 	}
 
 	var keys []struct {
@@ -66,12 +67,12 @@ func TestCLIUser(t *testing.T) {
 		t.Fatalf("user add bob: exit %d:\n%s", code, out)
 	}
 	var me struct {
-		Username string `json:"username"`
-		IsAdmin  bool   `json:"is_admin"`
+		Username    string   `json:"username"`
+		Permissions []string `json:"permissions"`
 	}
 	s.MustAPI(t, http.MethodGet, "/api/me", nil, Basic{"bob", "s3cretpass1"}, &me)
-	if me.Username != "bob" || me.IsAdmin {
-		t.Fatalf("/api/me as bob = %+v, want non-admin bob", me)
+	if me.Username != "bob" || len(me.Permissions) != 0 {
+		t.Fatalf("/api/me as bob = %+v, want bob without server permissions", me)
 	}
 
 	// Adding an existing user must fail rather than silently reset the password.

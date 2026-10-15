@@ -39,8 +39,9 @@ download against `SHA256SUMS`, unpack it, and run `./telesphorepo serve`.
   secrets are stored encrypted.
 - **Single sign-on:** admins can sign in through an OIDC provider (Keycloak, Entra, Google...).
   Set the issuer, client and admin group under **Settings > Server > Sign-in options**, and register
-  `<public URL>/api/auth/oidc/callback` at the provider. Publishers use local accounts with a
-  second factor.
+  `<public URL>/api/auth/oidc/callback` at the provider. An SSO admin approves a laptop for
+  Gradle or Maven with a new sign-in at the provider; a local account approves it with a second
+  factor.
 - **Passkeys:** they need the public URL (`base_url`) in Settings. Authenticator-app codes do not.
 - **Environment variables:** none are required. Three are optional:
 
@@ -115,17 +116,22 @@ with a second-factor code. Admins see every event, with its IP address, in **Set
 Every upload needs a publish session. It is a credential for one repo that ends after
 `publish.session_ttl` (15 min by default). To publish from a laptop, add a second factor (an
 authenticator app or a passkey) under **Settings > Your account > Sign-in and security**. An admin does this at the first
-sign-in. Other users do it when they approve their first device. The clients below are in [github.com/Telesphorepo/clients](https://github.com/Telesphorepo/clients). Replace `VERSION` with the latest `v` release there.
+sign-in. Other users do it when they approve their first device. The clients are in [github.com/Telesphorepo/clients](https://github.com/Telesphorepo/clients): the Gradle plugin is on the Gradle Plugin Portal and the Maven extension is on Maven Central. The **Publish to this repository** tab of each repo shows every snippet, with the repo's address filled in.
 
-**Gradle.** In `settings.gradle.kts`:
+**Gradle.** In `settings.gradle.kts`, at the top:
 
 ```kotlin
-plugins { id("com.telesphorepo") version "VERSION" }
-telesphorepo { url = "https://packages.example.com" }
+plugins { id("com.telesphorepo.publish") version "0.1.0" }
+telesphorepo {
+    url = "https://packages.example.com"
+    repository = "releases"
+}
 ```
 
-Run `./gradlew telesphorepoLogin` once. Open the printed link, sign in, and enter the second
-factor to approve the device. After that, `./gradlew publish` gets a session by itself.
+The plugin publishes each Java project to `releases`, so the build file needs only a group and a
+version. Run `./gradlew publish`. The first time on a computer, it opens a link in the browser.
+Sign in and enter the second factor to approve the computer. The publish then continues. Later
+publishes get a session by themselves.
 
 **Maven.** In `.mvn/extensions.xml`:
 
@@ -134,31 +140,35 @@ factor to approve the device. After that, `./gradlew publish` gets a session by 
   <extension>
     <groupId>com.telesphorepo</groupId>
     <artifactId>telesphorepo-maven-extension</artifactId>
-    <version>VERSION</version>
+    <version>0.1.0</version>
   </extension>
 </extensions>
 ```
 
-Add `-Dtelesphorepo.url=https://packages.example.com` to `.mvn/maven.config`. Run
-`mvn com.telesphorepo:telesphorepo-maven-plugin:VERSION:login` once, approve the device,
-and then run `mvn deploy`.
+Add `-Dtelesphorepo.url=https://packages.example.com` to `.mvn/maven.config` and the repo to
+`<distributionManagement>`. Run `mvn deploy`. The first time on a computer, approve the computer
+in the browser as for Gradle.
 
 **GitHub Actions.** Give the job `permissions: id-token: write`. An admin adds a trust policy
 under **Settings > People and CI > CI pipelines** (start from "GitHub Actions"): the repo, the branch or tag, and the
 workflow that may publish. The Gradle plugin and the Maven extension then use the GitHub token
-with no secret. Without them, post the token to `/api/publish/sessions/oidc`; the **Tokens**
-page shows the `curl` steps.
+with no secret. For Debian and Raw repos, the Publish tab shows a workflow that posts the token
+to `/api/publish/sessions/oidc` with `curl`.
 
-**Jenkins.** Install the OpenID Connect Provider plugin and bind an "OpenID Connect id token"
-credential to an environment variable, for example `OIDC_TOKEN`. An admin adds a trust policy
-starting from "Jenkins" (issuer `<jenkins url>/oidc`). Set `oidcTokenEnv = "OIDC_TOKEN"` in the
-Gradle plugin block, or `-Dtelesphorepo.oidcTokenEnv=OIDC_TOKEN` for Maven.
+**Jenkins.** Install the OpenID Connect Provider plugin and add an "OpenID Connect id token"
+credential with the ID `telesphorepo-id-token`. An admin adds a trust policy starting from
+"Jenkins" (issuer `<jenkins url>/oidc`). The Jenkinsfile binds the credential to `OIDC_TOKEN`
+only in the publish stage, because the server takes a token for 10 minutes only. Set
+`oidcTokenEnv = "OIDC_TOKEN"` in the Gradle plugin block, or
+`-Dtelesphorepo.oidcTokenEnv=OIDC_TOKEN` for Maven.
 
 **By hand.** On **Settings > Your account > Tokens**, choose a repo, enter a second-factor code, and copy the
-token. Use it as the password with any username:
+token. Use it as the password with any username. Paste it at the hidden prompt, so it stays out
+of the shell history and the process list:
 
 ```sh
-curl -f -u publish:trs_TOKEN -T file.tar.gz https://packages.example.com/raw/raw/path/file.tar.gz
+printf 'Publish token: '; read -rs TOKEN; echo
+printf 'user = "publish:%s"\n' "$TOKEN" | curl -fsS -K - -T file.tar.gz https://packages.example.com/raw/raw/path/file.tar.gz
 ```
 
 A user who loses every factor can be reset with `telesphorepo user reset-2fa NAME`.
@@ -180,13 +190,15 @@ apt:
 sudo curl -fsSL https://packages.example.com/debian/debian/key.asc -o /etc/apt/keyrings/telesphorepo.asc
 echo "deb [signed-by=/etc/apt/keyrings/telesphorepo.asc] https://packages.example.com/debian/debian stable main" \
   | sudo tee /etc/apt/sources.list.d/telesphorepo.list
-curl -u publish:trs_TOKEN -T pkg_1.0_amd64.deb https://packages.example.com/debian/debian/upload/stable/main
+printf 'Publish token: '; read -rs TOKEN; echo
+printf 'user = "publish:%s"\n' "$TOKEN" | curl -fsS -K - -T pkg_1.0_amd64.deb https://packages.example.com/debian/debian/upload/stable/main
 ```
 
 Raw files:
 
 ```sh
-curl -f -u publish:trs_TOKEN -T file.tar.gz https://packages.example.com/raw/raw/path/file.tar.gz
+printf 'Publish token: '; read -rs TOKEN; echo
+printf 'user = "publish:%s"\n' "$TOKEN" | curl -fsS -K - -T file.tar.gz https://packages.example.com/raw/raw/path/file.tar.gz
 ```
 
 The repo page in the UI shows the snippets for each repo. Gradle, private apt repos, the API and

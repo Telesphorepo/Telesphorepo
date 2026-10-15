@@ -11,16 +11,14 @@
   falls back to the last List, Tree or Columns choice. Every view fills the same area (files/area.ts),
   so a switch moves nothing around it.
 
-  People who can publish delete files and folders here; a non-admin first confirms with a fresh
-  second factor, which creates a publish token kept in memory (session.ts). An admin deletes with
-  the UI session. In the List view they pick rows (files and folders mix): while rows are picked,
+  People with Delete files delete files and folders here, with the UI session. In the List view they pick rows (files and folders mix): while rows are picked,
   the details column shows how many and the size of the picked files, and Delete removes them all
   after one confirm.
 -->
 <script lang="ts">
   import { untrack } from "svelte";
   import { toast } from "svelte-sonner";
-  import { api, ApiError, errorMessage, type Proof, type Repo } from "$lib/api";
+  import { api, errorMessage, type Repo } from "$lib/api";
   import { count, selectedText, someNames } from "$lib/words";
   import FileSize from "$lib/components/FileSize.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
@@ -36,7 +34,6 @@
   import DataTable from "$lib/components/DataTable.svelte";
   import DetailsColumn from "$lib/components/DetailsColumn.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
-  import SecondFactorPrompt from "$lib/components/SecondFactorPrompt.svelte";
   import FolderList, { type DeleteTarget } from "./files/FolderList.svelte";
   import VersionsView from "./files/VersionsView.svelte";
   import BuildsView from "./files/BuildsView.svelte";
@@ -49,7 +46,6 @@
   import DeleteDialog from "./delete/DeleteDialog.svelte";
   import { flowsHere, placeOf, versionTarget, type Place } from "./files/place";
   import { viewMin } from "./files/area";
-  import { dropSession, keepSession, sessionToken } from "./session";
   import { baseName, parentOf } from "./browse";
   import DownloadIcon from "@lucide/svelte/icons/download";
   import Trash2Icon from "@lucide/svelte/icons/trash-2";
@@ -62,8 +58,15 @@
     base,
     canWrite,
     canUpload,
-    isAdmin,
-  }: { repo: Repo; path: string; query: URLSearchParams; base: string; canWrite: boolean; canUpload: boolean; isAdmin: boolean } = $props();
+  }: {
+    repo: Repo;
+    path: string;
+    query: URLSearchParams;
+    base: string;
+    /** The person holds Delete files here (and the repository is not paused). */
+    canWrite: boolean;
+    canUpload: boolean;
+  } = $props();
 
   const isFile = $derived(path !== "" && !path.endsWith("/"));
   const folder = $derived(isFile ? parentOf(path) : path);
@@ -159,37 +162,14 @@
     navigate(filesPath(repo.name, versionFolder), { query: { earlier: "1" } });
   }
 
-  // --- the publish token for deletes ---
-
-  let factorOpen = $state(false);
-  let afterSession: (() => void) | null = null;
-
-  function withSession(then: () => void) {
-    if (sessionToken(repo.name)) return then();
-    afterSession = then;
-    factorOpen = true;
-  }
-
-  async function createSession(proof: Proof) {
-    keepSession(repo.name, await api.publish.manualSession(repo.name, proof));
-    const then = afterSession;
-    afterSession = null;
-    // Open the next dialog after this one has closed.
-    if (then) setTimeout(then, 0);
-  }
-
   // --- delete ---
 
   let deleting = $state<DeleteTarget | null>(null);
   let deleteOpen = $state(false);
 
   function askDelete(t: DeleteTarget) {
-    const open = () => {
-      deleting = t;
-      deleteOpen = true;
-    };
-    if (isAdmin) open();
-    else withSession(open);
+    deleting = t;
+    deleteOpen = true;
   }
 
   // Several picked rows of the List view; one picked row uses the dialog of a single delete.
@@ -199,12 +179,8 @@
   function askDeleteMany(ts: DeleteTarget[]) {
     if (ts.length === 0) return;
     if (ts.length === 1) return askDelete(ts[0]);
-    const open = () => {
-      many = ts;
-      manyOpen = true;
-    };
-    if (isAdmin) open();
-    else withSession(open);
+    many = ts;
+    manyOpen = true;
   }
 
   const manyFiles = $derived(many.filter((t) => !t.dir).length);
@@ -219,27 +195,15 @@
 
   async function deleteTargets(ts: DeleteTarget[]) {
     if (ts.length === 0) return;
-    let tk: string | undefined;
-    if (!isAdmin) {
-      tk = sessionToken(repo.name);
-      if (!tk) throw new Error("Your confirmation has expired. Close this dialog and try again.");
-    }
     const paths = ts.flatMap((t) => t.files ?? (t.dir ? [] : [t.path]));
     const prefixes = ts.filter((t) => t.dir).map((t) => t.path);
     // The server takes at most 1000 paths and prefixes in one request.
     const batch = 1000;
     let n = 0;
-    try {
-      for (let i = 0; i < paths.length + prefixes.length; i += batch) {
-        const ps = paths.slice(i, i + batch);
-        const xs = prefixes.slice(Math.max(0, i - paths.length), Math.max(0, i + batch - paths.length));
-        n += (
-          await api.repos.deleteFiles(repo.name, { paths: ps.length ? ps : undefined, prefixes: xs.length ? xs : undefined }, tk)
-        ).deleted;
-      }
-    } catch (e) {
-      if (tk && e instanceof ApiError && e.status === 401) dropSession(repo.name);
-      throw e;
+    for (let i = 0; i < paths.length + prefixes.length; i += batch) {
+      const ps = paths.slice(i, i + batch);
+      const xs = prefixes.slice(Math.max(0, i - paths.length), Math.max(0, i + batch - paths.length));
+      n += (await api.repos.deleteFiles(repo.name, { paths: ps.length ? ps : undefined, prefixes: xs.length ? xs : undefined })).deleted;
     }
     toast.success(`Deleted ${count(n, "file", "files")}.`);
     picked = new Set();
@@ -399,14 +363,6 @@
     </div>
   {/if}
 </div>
-
-<SecondFactorPrompt
-  bind:open={factorOpen}
-  title="Confirm it is you"
-  description="To delete files in {repo.name}, confirm it is you with your authenticator app or a passkey. The confirmation lasts a short time, so you can make several changes in a row."
-  actionLabel="Continue"
-  onProof={createSession}
-/>
 
 <DeleteDialog bind:open={deleteOpen} {repo} target={deleting} onConfirm={runDelete} />
 

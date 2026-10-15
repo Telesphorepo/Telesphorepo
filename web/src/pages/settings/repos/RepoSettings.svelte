@@ -5,12 +5,15 @@
   pages with their own address, so the back button returns to the previous tab. The tab bodies are
   the other files of this folder. The tabs depend on the kind: a hosted repository has Overview,
   Access, Format settings (and Signing for Debian); a proxy has Overview, Access and Remote; a group
-  has Overview and Access.
+  has Overview and Access. They depend on the permissions too: Edit settings opens every tab but
+  Access; Manage access, Edit settings or CI pipelines opens Access. A tab that the person cannot
+  open goes to the first one they can. Delete needs All repositories.
 -->
 <script lang="ts">
   import { api, ApiError, type Repo } from "$lib/api";
   import { Resource } from "$lib/load.svelte";
-  import { filesPath, href, repoSettingsPath, type PageProps, type RepoSettingsTab } from "$lib/router.svelte";
+  import { filesPath, href, navigate, repoSettingsPath, type PageProps, type RepoSettingsTab } from "$lib/router.svelte";
+  import { auth } from "$lib/auth.svelte";
   import { Button } from "$lib/components/ui/button";
   import PageHeader from "$lib/components/PageHeader.svelte";
   import TabNav from "$lib/components/TabNav.svelte";
@@ -58,18 +61,22 @@
 
   // A group and a proxy have no format settings and sign nothing; a proxy has its Remote tab.
   const tabs = $derived.by(() => {
-    const t: { id: RepoSettingsTab; label: string; icon: typeof InfoIcon }[] = [
-      { id: "overview", label: "Overview", icon: InfoIcon },
-      { id: "access", label: "Access", icon: UsersIcon },
-    ];
-    if (r?.kind === "proxy") t.push({ id: "remote", label: "Remote", icon: GlobeIcon });
-    if (r?.kind === "hosted") {
+    const settings = auth.canRepo(params.name, "settings");
+    const t: { id: RepoSettingsTab; label: string; icon: typeof InfoIcon }[] = [];
+    if (settings) t.push({ id: "overview", label: "Overview", icon: InfoIcon });
+    if (auth.managesRepo(params.name)) t.push({ id: "access", label: "Access", icon: UsersIcon });
+    if (settings && r?.kind === "proxy") t.push({ id: "remote", label: "Remote", icon: GlobeIcon });
+    if (settings && r?.kind === "hosted") {
       t.push({ id: "format", label: "Format settings", icon: SlidersIcon });
       if (r.format === "debian") t.push({ id: "signing", label: "Signing", icon: FileKeyIcon });
     }
     return t;
   });
   const open = $derived(tabs.find((t) => t.id === params.tab));
+  // The Overview link of a person without Edit settings opens the Access tab.
+  $effect(() => {
+    if (params.tab === "overview" && !open && tabs.length) navigate(repoSettingsPath(params.name, tabs[0].id), { replace: true });
+  });
   let deleteOpen = $state(false);
 </script>
 
@@ -99,7 +106,9 @@
       {#if r.kind !== "group"}
         <Button variant="outline" href={href(filesPath(r.name))}><FolderOpenIcon />Open files</Button>
       {/if}
-      <Button variant="ghost" class="hover:bg-destructive/10 hover:text-destructive" onclick={() => (deleteOpen = true)}>Delete</Button>
+      {#if auth.can("repos")}
+        <Button variant="ghost" class="hover:bg-destructive/10 hover:text-destructive" onclick={() => (deleteOpen = true)}>Delete</Button>
+      {/if}
     {/snippet}
   </PageHeader>
 

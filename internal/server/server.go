@@ -238,7 +238,7 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		io.WriteString(w, "ok\n")
 	})
-	sso := oidc.New(as, set.Config, log.With("component", "oidc"))
+	sso := oidc.New(as, ps, set.Config, log.With("component", "oidc"))
 	mux.Handle("/api/", api.New(as, rs, ss, set, mv, nx, ps, fs, au, nr, access.New(d, rs, as, nr), keys, sso).Handler())
 	for _, f := range format.All() {
 		f.Register(mux, format.Host{
@@ -326,7 +326,7 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 func bootstrapAdmin(ctx context.Context, as *auth.Service, boot *config.Boot, log *slog.Logger) error {
 	has, err := as.HasUsers(ctx)
 	if err != nil {
-		return fmt.Errorf("check users: %w", err)
+		return err
 	}
 	if has {
 		return nil
@@ -335,7 +335,7 @@ func bootstrapAdmin(ctx context.Context, as *auth.Service, boot *config.Boot, lo
 	if user == "" || pass == "" {
 		user, pass, generated = "admin", RandomPassword(), true
 	}
-	if _, err := as.CreateUser(ctx, user, pass, true); err != nil {
+	if _, err := as.CreateUser(ctx, user, pass, auth.AllServerPerms); err != nil {
 		return fmt.Errorf("bootstrap admin: %w", err)
 	}
 	log.Info("bootstrap admin created", "username", user)

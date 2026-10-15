@@ -137,7 +137,7 @@ func TestSigningKeys(t *testing.T) {
 	}
 
 	// Admins only.
-	s.CreateUser(t, "plain", "plainpass123", false)
+	s.CreateUser(t, "plain", "plainpass123")
 	plain := s.SignIn(t, "plain", "plainpass123")
 	if st, _ := s.API(t, http.MethodGet, "/api/signing-keys", nil, plain); st != http.StatusForbidden {
 		t.Fatalf("non-admin GET /api/signing-keys: status %d, want 403", st)
@@ -159,8 +159,8 @@ func TestSigningKeys(t *testing.T) {
 	}
 	s.CreateRepo(t, repo, "debian", false, map[string]any{"architectures": archs, "signing_key": "team"})
 	reader, readerPass := RandName("reader"), randHex(12)
-	s.CreateUser(t, reader, readerPass, false)
-	s.SetPermission(t, repo, reader, "read")
+	s.CreateUser(t, reader, readerPass)
+	s.SetPerms(t, repo, reader, "download")
 	rauth := Basic{reader, readerPass}
 
 	ps := s.MintSession(t, "admin", repo)

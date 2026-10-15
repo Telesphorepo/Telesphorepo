@@ -1,12 +1,13 @@
 <!--
-  Signing keys (administrators): the keys that sign the package lists of Debian repositories, and
+  Signing keys (Signing keys permission): the keys that sign the package lists of Debian repositories, and
   which repositories use each one (links to their Signing tab). Download a public key; delete a key
   that no repository uses. New signing key opens a page that creates or imports one.
 -->
 <script lang="ts">
   import { toast } from "svelte-sonner";
   import type { PageProps } from "$lib/router.svelte";
-  import { href, repoSettingsPath } from "$lib/router.svelte";
+  import { auth } from "$lib/auth.svelte";
+  import { href, repoPath, repoSettingsPath } from "$lib/router.svelte";
   import { api, type SigningKey } from "$lib/api";
   import { Resource, listOf } from "$lib/load.svelte";
   import { groupFingerprint } from "$lib/format";
@@ -29,7 +30,7 @@
   const keys = new Resource(() => api.signingKeys.list());
   const source = listOf(keys);
   const newKey = href("/settings/signing-keys/new");
-  const signingTab = (r: string) => href(repoSettingsPath(r, "signing"));
+  const signingTab = (r: string) => href(auth.canRepo(r, "settings") ? repoSettingsPath(r, "signing") : repoPath(r));
 
 
   let target = $state<SigningKey | null>(null);

@@ -112,7 +112,11 @@ func createDemoData(ctx context.Context, s *server.Services, adminName string) e
 			}
 		}
 		u.password = server.RandomPassword()
-		nu, err := s.Auth.CreateUser(ctx, u.name, u.password, u.admin)
+		var perms auth.ServerPerm
+		if u.admin {
+			perms = auth.AllServerPerms
+		}
+		nu, err := s.Auth.CreateUser(ctx, u.name, u.password, perms)
 		if err != nil {
 			return fmt.Errorf("create demo user %s: %w", u.name, err)
 		}
@@ -142,18 +146,18 @@ func createDemoData(ctx context.Context, s *server.Services, adminName string) e
 		for _, u := range users {
 			for _, name := range u.write {
 				if name == repo.Name {
-					if _, err := s.Auth.SetPermissions(ctx, []string{u.name}, []string{repo.Name}, auth.Write); err != nil {
+					if _, err := s.Auth.SetPermissions(ctx, nil, []string{u.name}, []string{repo.Name}, auth.RepoDownload|auth.RepoPublish); err != nil {
 						run.Close()
-						return fmt.Errorf("grant %s write on %s: %w", u.name, name, err)
+						return fmt.Errorf("grant %s publish on %s: %w", u.name, name, err)
 					}
 					writers = append(writers, u.id)
 				}
 			}
 			for _, name := range u.read {
 				if name == repo.Name {
-					if _, err := s.Auth.SetPermissions(ctx, []string{u.name}, []string{repo.Name}, auth.Read); err != nil {
+					if _, err := s.Auth.SetPermissions(ctx, nil, []string{u.name}, []string{repo.Name}, auth.RepoDownload); err != nil {
 						run.Close()
-						return fmt.Errorf("grant %s read on %s: %w", u.name, name, err)
+						return fmt.Errorf("grant %s download on %s: %w", u.name, name, err)
 					}
 				}
 			}

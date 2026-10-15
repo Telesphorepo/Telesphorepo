@@ -8,6 +8,7 @@
   import LogOutIcon from "@lucide/svelte/icons/log-out";
   import { auth } from "$lib/auth.svelte";
   import { navigate } from "$lib/router.svelte";
+  import { serverPhrase } from "$lib/permissions";
 </script>
 
 {#if auth.user}
@@ -18,7 +19,7 @@
     <DropdownMenu.Content align="end" class="w-60">
       <DropdownMenu.Label class="flex flex-col gap-1 font-normal">
         <span class="truncate font-medium text-foreground">{auth.user.username}</span>
-        <span class="text-xs text-muted-foreground">{auth.isAdmin ? "Administrator" : "Member"}</span>
+        <span class="truncate text-xs text-muted-foreground">{serverPhrase(auth.user.permissions) || "Member"}</span>
       </DropdownMenu.Label>
       <DropdownMenu.Separator />
       <DropdownMenu.Item onSelect={() => navigate("/settings/account")}><UserIcon />Your account</DropdownMenu.Item>

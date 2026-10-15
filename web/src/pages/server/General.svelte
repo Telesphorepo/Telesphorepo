@@ -1,5 +1,5 @@
 <!--
-  General (administrators): the server settings that no other page holds: the public address,
+  General (General permission): the server settings that no other page holds: the public address,
   upload limits, the server log, sign-in sessions, publishing lifetimes and Activity retention.
   Storage, Sign-in options and the trusted proxies (Network and proxy) have their own pages. One
   form saves them all, with a section per settings group.

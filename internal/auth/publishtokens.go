@@ -54,7 +54,7 @@ func (s *Service) verifyPublishToken(ctx context.Context, tok string) (*Principa
 			}
 			return nil, err
 		}
-		p.Username, p.Kind, p.IsAdmin = u.Username, u.Kind, u.IsAdmin
+		p.Username, p.Kind, p.Perms = u.Username, u.Kind, u.Perms
 	}
 	return p, nil
 }

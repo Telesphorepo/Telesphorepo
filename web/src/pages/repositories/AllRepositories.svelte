@@ -1,12 +1,15 @@
 <!--
-  Repositories (admins): every repository; a row opens its settings. Pick rows to make them public
-  or private at once, or to delete them (after a confirm; more than one asks you to type the count).
+  Repositories: every repository for a holder of All repositories; for anyone else the repositories
+  where they hold more than download. A row opens its settings, or its files when the person can
+  open no settings tab. Pick rows (Edit settings) to make them public or private at once, or (All
+  repositories) to delete them after a confirm; more than one asks you to type the count.
 -->
 <script lang="ts">
   import { toast } from "svelte-sonner";
   import type { PageProps } from "$lib/router.svelte";
-  import { href, repoSettingsPath } from "$lib/router.svelte";
-  import { api, errorMessage } from "$lib/api";
+  import { href, repoPath, repoSettingsPath } from "$lib/router.svelte";
+  import { auth } from "$lib/auth.svelte";
+  import { api, errorMessage, type Repo } from "$lib/api";
   import { Resource, listOf } from "$lib/load.svelte";
   import { count, someNames } from "$lib/words";
   import { Button } from "$lib/components/ui/button";
@@ -23,7 +26,11 @@
   const repos = new Resource(() => api.repos.list());
   const formats = new Resource(() => api.formats.list());
   const titles = $derived(Object.fromEntries((formats.data ?? []).map((f) => [f.name, f.title])));
-  const source = listOf(repos, (items) => [...items].sort((a, b) => a.name.localeCompare(b.name)));
+  // GET /api/repos also lists the public repositories and those with download only.
+  const shown = (r: Repo) => auth.can("repos") || r.name in auth.repoPermissions;
+  const source = listOf(repos, (items) => items.filter(shown).sort((a, b) => a.name.localeCompare(b.name)));
+  const rowHref = (r: Repo) => href(auth.managesRepo(r.name) ? repoSettingsPath(r.name) : repoPath(r.name));
+  const canCreate = $derived(auth.can("repos"));
   const newRepo = href("/settings/repositories/new");
 
   // --- bulk actions ---
@@ -71,21 +78,25 @@
   }
 </script>
 
-<PageHeader title="All repositories">
-  {#snippet actions()}<Button href={newRepo}><PlusIcon />New repository</Button>{/snippet}
+<PageHeader title="Repositories">
+  {#snippet actions()}{#if canCreate}<Button href={newRepo}><PlusIcon />New repository</Button>{/if}{/snippet}
 </PageHeader>
 
 <Section>
-  <RepoTable {source} {titles} href={(r) => href(repoSettingsPath(r.name))} bind:picked>
+  <RepoTable {source} {titles} href={rowHref} bind:picked pickable={(r) => auth.canRepo(r.name, "settings")}>
     {#snippet bulk()}
       <Button variant="outline" size="sm" disabled={busy} onclick={() => setPublic(true)}>Make public</Button>
       <Button variant="outline" size="sm" disabled={busy} onclick={() => setPublic(false)}>Make private</Button>
-      <Button variant="ghost" size="sm" class="hover:bg-destructive/10 hover:text-destructive" disabled={busy} onclick={() => (deleteOpen = true)}>Delete</Button>
+      {#if canCreate}<Button variant="ghost" size="sm" class="hover:bg-destructive/10 hover:text-destructive" disabled={busy} onclick={() => (deleteOpen = true)}>Delete</Button>{/if}
     {/snippet}
     {#snippet empty()}
-      <CompactEmpty icon={DatabaseIcon} text="None yet. Create one, then publish to it from your build or upload files.">
-        <Button variant="outline" href={newRepo}><PlusIcon />New repository</Button>
-      </CompactEmpty>
+      {#if canCreate}
+        <CompactEmpty icon={DatabaseIcon} text="None yet. Create one, then publish to it from your build or upload files.">
+          <Button variant="outline" href={newRepo}><PlusIcon />New repository</Button>
+        </CompactEmpty>
+      {:else}
+        <CompactEmpty icon={DatabaseIcon} text="You manage no repository. Ask an administrator for a permission on one." />
+      {/if}
     {/snippet}
   </RepoTable>
 </Section>

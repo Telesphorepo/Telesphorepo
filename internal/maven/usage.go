@@ -20,7 +20,10 @@ import (
 // (credentials(PasswordCredentials)), where <name> is the repo name as a Gradle identifier; Maven
 // reads them from the server of ~/.m2/settings.xml whose id is the repo name.
 
-const clientsNote = "Replace VERSION with the latest release on github.com/Telesphorepo/clients."
+// clientsVersion is the release of the Telesphorepo clients (github.com/Telesphorepo/clients)
+// that the publish snippets name. The Gradle plugin is on the Gradle Plugin Portal; the Maven
+// extension and the Maven plugin are on Maven Central.
+const clientsVersion = "0.1.0"
 
 // gradleName turns a repo name into the name of a Gradle repository: "my-libs" -> "myLibs".
 func gradleName(repo string) string {
@@ -114,23 +117,36 @@ func (s *snippets) gradleRepo(kts bool, indent string) string {
 	return indentLines(b.String(), indent)
 }
 
-// gradleRepos adds the settings file that resolves dependencies (block "dependencyResolutionManagement")
-// or plugins (block "pluginManagement") from the repo, and the credentials of a private repo.
-func (s *snippets) gradleRepos(block string) {
+// gradleRepos adds the block that resolves dependencies (plugins false: repositories in the build
+// file) or plugins (plugins true: pluginManagement in the settings file) from the repo, and the
+// credentials of a private repo. Dependencies go in the build file because Gradle ignores the
+// repositories of the settings file when the build file declares its own, as a gradle init
+// project does.
+func (s *snippets) gradleRepos(plugins bool) {
 	var portal string
 	switch {
-	case block == "pluginManagement" && !s.serves("https://plugins.gradle.org/m2/"):
-		portal = "        gradlePluginPortal()\n"
-	case block != "pluginManagement" && !s.serves("https://repo1.maven.org/maven2/", "https://repo.maven.apache.org/maven2/"):
-		portal = "        mavenCentral()\n"
+	case plugins && !s.serves("https://plugins.gradle.org/m2/"):
+		portal = "gradlePluginPortal()\n"
+	case !plugins && !s.serves("https://repo1.maven.org/maven2/", "https://repo.maven.apache.org/maven2/"):
+		portal = "mavenCentral()\n"
 	}
 	for _, kts := range []bool{true, false} {
-		client, file := "gradle-groovy", "settings.gradle"
+		client, file := "gradle-groovy", "build.gradle"
 		if kts {
-			client, file = "gradle-kotlin", "settings.gradle.kts"
+			client, file = "gradle-kotlin", "build.gradle.kts"
 		}
-		code := block + " {\n    repositories {\n" + s.gradleRepo(kts, "        ") + "\n" + portal + "    }\n}\n"
-		s.add(client, file, langOf(kts), code, "")
+		code := "repositories {\n" + s.gradleRepo(kts, "    ") + "\n"
+		if portal != "" {
+			code += "    " + portal
+		}
+		code += "}\n"
+		note := "If the build file has a repositories block, put these lines in it."
+		if plugins {
+			file = "settings.gradle" + strings.TrimPrefix(file, "build.gradle")
+			code = "pluginManagement {\n" + indentLines(strings.TrimSuffix(code, "\n"), "    ") + "\n}\n"
+			note = "Put the pluginManagement block at the top of the settings file."
+		}
+		s.add(client, file, langOf(kts), code, note)
 		if s.private() {
 			s.add(client, "~/.gradle/gradle.properties", "properties",
 				s.name+"Username=YOUR_USERNAME\n"+s.name+"Password=YOUR_READ_TOKEN\n",
@@ -168,62 +184,62 @@ func (s *snippets) mavenCredentials() {
 func (h *Handler) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
 	s := h.newSnippets(repo, baseURL)
 	s.purpose, s.context = format.SnippetUse, format.SnippetRepo
-	s.gradleRepos("dependencyResolutionManagement")
+	s.gradleRepos(false)
 	s.mavenRepos()
 
 	s.purpose, s.via = format.SnippetPublish, format.ViaComputer
+	approveNote := "The first publish on a computer opens a link in your browser. Sign in and approve the computer with your second factor. The publish then continues."
 	for _, kts := range []bool{true, false} {
-		client, ext, q := "gradle-groovy", "", "'"
+		client, ext := "gradle-groovy", ""
 		if kts {
-			client, ext, q = "gradle-kotlin", ".kts", "\""
+			client, ext = "gradle-kotlin", ".kts"
 		}
-		plugin := "plugins {\n    id(" + q + "com.telesphorepo" + q + ") version " + q + "VERSION" + q + "\n}\n"
-		if !kts {
-			plugin = "plugins {\n    id 'com.telesphorepo' version 'VERSION'\n}\n"
-		}
-		s.add(client, "settings.gradle"+ext, langOf(kts), plugin+"\ntelesphorepo {\n    url = "+q+baseURL+q+"\n}\n", clientsNote)
-		url := "uri(\"" + s.url + "\")"
-		if !kts {
-			url = "'" + s.url + "'"
-		}
-		s.add(client, "build.gradle"+ext, langOf(kts), "publishing {\n    repositories {\n        maven {\n            name = "+q+s.name+q+
-			"\n            url = "+url+"\n        }\n    }\n}\n", "The plugin gives each publish a session of its own; there is no password to store.")
-		s.add(client, "Once per computer", "sh", "./gradlew telesphorepoLogin\n",
-			"Open the printed link, sign in and approve the device with your second factor. After that, ./gradlew publish publishes.")
+		s.add(client, "settings.gradle"+ext, langOf(kts), gradlePublishSettings(kts, baseURL, repo.Name),
+			"Put this at the top of the file. Only a pluginManagement block can come before it. If the file has a plugins block, add the id line to it. "+
+				"The plugin publishes each Java project to "+repo.Name+", so the build file needs only a group and a version. "+
+				"oidcTokenEnv names the variable with the Jenkins identity token. When the variable is empty, the plugin uses the device key.")
+		s.add(client, "Publish", "sh", "./gradlew publish\n", approveNote)
 	}
 	s.add("maven", ".mvn/extensions.xml", "xml", "<extensions>\n  <extension>\n    <groupId>com.telesphorepo</groupId>\n"+
-		"    <artifactId>telesphorepo-maven-extension</artifactId>\n    <version>VERSION</version>\n  </extension>\n</extensions>\n", clientsNote)
+		"    <artifactId>telesphorepo-maven-extension</artifactId>\n    <version>"+clientsVersion+"</version>\n  </extension>\n</extensions>\n", "")
 	s.add("maven", ".mvn/maven.config", "sh", "-Dtelesphorepo.url="+baseURL+"\n", "")
 	s.add("maven", "pom.xml", "xml", "<distributionManagement>\n  <repository>\n    <id>"+repo.Name+"</id>\n    <url>"+s.url+
-		"</url>\n  </repository>\n</distributionManagement>\n", "")
-	s.add("maven", "Once per computer", "sh", "mvn com.telesphorepo:telesphorepo-maven-plugin:VERSION:login\n",
-		"Open the printed link, sign in and approve the device with your second factor. After that, mvn deploy publishes.")
+		"</url>\n  </repository>\n  <snapshotRepository>\n    <id>"+repo.Name+"</id>\n    <url>"+s.url+
+		"</url>\n  </snapshotRepository>\n</distributionManagement>\n", "Put this block in the project element.")
+	s.add("maven", "Publish", "sh", "mvn deploy\n", approveNote)
 
 	s.via = format.ViaCI
+	setup := " First set up the build with the steps under From your computer on the repository's publish page."
 	s.add("github-actions", ".github/workflows/publish.yml (Gradle)", "yaml", workflow("./gradlew publish"),
-		"The Gradle plugin uses the job's identity token, so the job stores no secret.")
+		"The Gradle plugin uses the job's identity token, so the job stores no secret."+setup)
 	s.add("github-actions", ".github/workflows/publish.yml (Maven)", "yaml", workflow("mvn -B deploy"),
-		"The Maven extension uses the job's identity token, so the job stores no secret.")
-	jenkinsNote := "Bind an \"OpenID Connect id token\" credential with audience " + baseURL +
-		" as telesphorepo-id-token."
-	s.add("jenkins", "Jenkinsfile (Gradle)", "groovy", jenkinsStage(repo.Name, "./gradlew publish"),
-		"Add oidcTokenEnv = \"OIDC_TOKEN\" to the telesphorepo block in settings.gradle(.kts). "+jenkinsNote)
-	s.add("jenkins", "Jenkinsfile (Maven)", "groovy", jenkinsStage(repo.Name, "mvn -B deploy -Dtelesphorepo.oidcTokenEnv=OIDC_TOKEN"), jenkinsNote)
+		"The Maven extension uses the job's identity token, so the job stores no secret."+setup)
+	s.add("jenkins", "Jenkinsfile (Gradle)", "groovy", format.JenkinsPipeline(repo.Name, "./gradlew build", "./gradlew publish"),
+		format.JenkinsNote(baseURL)+setup)
+	s.add("jenkins", "Jenkinsfile (Maven)", "groovy",
+		format.JenkinsPipeline(repo.Name, "mvn -B verify", "mvn -B deploy -DskipTests -Dtelesphorepo.oidcTokenEnv=OIDC_TOKEN"),
+		format.JenkinsNote(baseURL)+setup)
 
 	out := s.out
-	return append(out, format.HandSnippet("curl -f -u publish:$TOKEN -T lib-1.0.0.jar "+s.url+"/com/example/lib/1.0.0/lib-1.0.0.jar"))
+	return append(out, format.HandSnippet(format.TokenCurl+"-T lib-1.0.0.jar "+s.url+"/com/example/lib/1.0.0/lib-1.0.0.jar"))
+}
+
+// gradlePublishSettings is the settings file that applies the Telesphorepo plugin. With
+// repository set, the plugin adds maven-publish, the repository and a publication to each Java
+// project, so the build file needs no publishing block.
+func gradlePublishSettings(kts bool, baseURL, repo string) string {
+	if kts {
+		return "plugins {\n    id(\"com.telesphorepo.publish\") version \"" + clientsVersion + "\"\n}\n\n" +
+			"telesphorepo {\n    url = \"" + baseURL + "\"\n    repository = \"" + repo + "\"\n    oidcTokenEnv = \"OIDC_TOKEN\"\n}\n"
+	}
+	return "plugins {\n    id 'com.telesphorepo.publish' version '" + clientsVersion + "'\n}\n\n" +
+		"telesphorepo {\n    url = '" + baseURL + "'\n    repository = '" + repo + "'\n    oidcTokenEnv = 'OIDC_TOKEN'\n}\n"
 }
 
 func workflow(run string) string {
-	return "permissions:\n  id-token: write\n  contents: read\n\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n" +
+	return format.GitHubTrigger + "permissions:\n  id-token: write\n  contents: read\n\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n" +
 		"      - uses: actions/checkout@v4\n      - uses: actions/setup-java@v4\n        with:\n          distribution: temurin\n" +
 		"          java-version: 21\n      - run: " + run + "\n"
-}
-
-func jenkinsStage(repo, run string) string {
-	return "stage('Publish to " + repo + "') {\n  steps {\n" +
-		"    withCredentials([string(credentialsId: 'telesphorepo-id-token', variable: 'OIDC_TOKEN')]) {\n" +
-		"      sh '" + run + "'\n    }\n  }\n}\n"
 }
 
 func indentLines(s, prefix string) string {
@@ -341,7 +357,7 @@ func (h *Handler) ArtifactUsage(ctx context.Context, repo *repos.Repo, baseURL, 
 		if mode == format.VersionLatest {
 			pluginNote = "The plugins block takes a fixed version: this is the newest, " + version + "."
 		}
-		s.gradleRepos("pluginManagement")
+		s.gradleRepos(true)
 		s.add("gradle-kotlin", "build.gradle.kts", "kotlin", "plugins {\n    id(\""+art.Title+"\") version \""+version+"\"\n}\n", pluginNote)
 		s.add("gradle-groovy", "build.gradle", "groovy", "plugins {\n    id '"+art.Title+"' version '"+version+"'\n}\n", pluginNote)
 		s.out = order(s.out)
@@ -350,7 +366,7 @@ func (h *Handler) ArtifactUsage(ctx context.Context, repo *repos.Repo, baseURL, 
 		s.add("maven", "pom.xml (parent)", "xml", "<parent>\n  <groupId>"+group+"</groupId>\n  <artifactId>"+id+
 			"</artifactId>\n  <version>"+version+"</version>\n</parent>\n", "A parent pom takes a fixed version.")
 	default:
-		s.gradleRepos("dependencyResolutionManagement")
+		s.gradleRepos(false)
 		kt, gr := "implementation(\""+coord+gv+"\")", "implementation '"+coord+gv+"'"
 		mdep := "<dependencies>\n  <dependency>\n    <groupId>" + group + "</groupId>\n    <artifactId>" + id +
 			"</artifactId>\n    <version>" + mv + "</version>\n  </dependency>\n</dependencies>\n"

@@ -2,7 +2,7 @@
 // PageHeader builds them; a page passes `crumbs` only when its place is not "sidebar item › title".
 
 import { href } from "$lib/router.svelte";
-import { navPlace } from "$lib/nav";
+import { navPlace, visibleNav } from "$lib/nav";
 
 /** One step of a breadcrumb trail. The last step is the current page and has no href. */
 export type Crumb = { label: string; href?: string };
@@ -15,7 +15,8 @@ export function settingsTrail(path: string, title: string, tail?: Crumb[]): Crum
   const place = navPlace(path);
   const trail: Crumb[] = [{ label: "Settings", href: href("/settings") }];
   if (!place) return [...trail, ...(tail ?? [{ label: title }])];
-  const first = place.group.items[0].path;
+  // The group links to the first item that the person may open.
+  const first = visibleNav().find((g) => g.label === place.group.label)?.items[0]?.path ?? place.group.items[0].path;
   trail.push({ label: place.group.label, href: first === path ? undefined : href(first) });
   if (tail) return [...trail, ...tail];
   if (path === place.item.path) return [...trail, { label: place.item.label }];

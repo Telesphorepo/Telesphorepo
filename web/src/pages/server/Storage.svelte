@@ -1,5 +1,5 @@
 <!--
-  Storage (administrators): where the server keeps the files of every repository (a folder on
+  Storage (Storage permission): where the server keeps the files of every repository (a folder on
   this server or an S3 bucket), a connection test, and the storage move. While a move copies, its
   card comes first with the progress. Saving a new location while files exist starts a move; the
   setting changes when the move ends.

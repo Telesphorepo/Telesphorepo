@@ -1,6 +1,7 @@
 // Package oidc implements OIDC admin sign-on (design doc §7.5): the authorization-code flow with
 // PKCE (S256), state and nonce, against the issuer configured in the "sso" settings group. Only
-// administrators sign in this way; a login that does not qualify as admin is refused.
+// administrators sign in this way; a login that does not qualify as admin is refused. The same
+// flow, with a forced new sign-in at the provider, lets an SSO user approve a device.
 package oidc
 
 import (
@@ -12,6 +13,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +24,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/publish"
 )
 
 const (
@@ -30,22 +33,32 @@ const (
 	stateTTL         = 10 * time.Minute
 	maxStates        = 10000
 	discoveryTimeout = 10 * time.Second
+	// maxAuthAge is the oldest sign-in (ID token auth_time) that approves a device.
+	maxAuthAge = 5 * time.Minute
 )
 
-// Login-page error codes (/#/login?error=...).
+// Error codes of the sign-in page (/#/login?error=...) and the approval page
+// (/#/device?code=...&error=...).
 const (
 	errNotAuthorized    = "not_authorized"
 	errUsernameConflict = "username_conflict"
 	errInvalidUsername  = "invalid_username"
 	errAccountDisabled  = "account_disabled"
 	errSSOFailed        = "sso_failed"
+	// Approval page only.
+	errNotSSO       = "not_sso"       // the UI session is not an SSO account
+	errWrongAccount = "wrong_account" // the provider signed in another account
+	errNoAuthTime   = "no_auth_time"  // the ID token has no auth_time
+	errStaleSignIn  = "stale_sign_in" // auth_time is older than maxAuthAge: the provider ignored prompt=login
 )
 
-// Handler serves GET /api/auth/oidc/login and GET /api/auth/oidc/callback.
+// Handler serves GET /api/auth/oidc/login, GET /api/auth/oidc/device and
+// GET /api/auth/oidc/callback.
 type Handler struct {
-	auth *auth.Service
-	cfg  config.Provider
-	log  *slog.Logger
+	auth    *auth.Service
+	publish *publish.Service
+	cfg     config.Provider
+	log     *slog.Logger
 
 	provMu sync.Mutex
 	prov   *providerEntry // built lazily, keyed by issuer + client id
@@ -58,17 +71,19 @@ type providerEntry struct {
 	p   *gooidc.Provider
 }
 
-// New returns the SSO handler. Configuration is read live from cfg on every request.
-func New(a *auth.Service, cfg config.Provider, log *slog.Logger) *Handler {
+// New returns the SSO handler. Configuration is read live from cfg on every request. ps stores
+// the approval grants of devices.
+func New(a *auth.Service, ps *publish.Service, cfg config.Provider, log *slog.Logger) *Handler {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Handler{auth: a, cfg: cfg, log: log, states: &stateStore{m: map[[32]byte]pending{}}}
+	return &Handler{auth: a, publish: ps, cfg: cfg, log: log, states: &stateStore{m: map[[32]byte]pending{}}}
 }
 
 // Register mounts the SSO routes.
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/auth/oidc/login", h.login)
+	mux.HandleFunc("GET /api/auth/oidc/device", h.device)
 	mux.HandleFunc("GET /api/auth/oidc/callback", h.callback)
 }
 
@@ -125,13 +140,66 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusServiceUnavailable, "identity provider unavailable")
 		return
 	}
-	state, nonce, verifier := randomString(), randomString(), oauth2.GenerateVerifier()
-	h.states.put(state, pending{nonce: nonce, verifier: verifier, provKey: providerKey(c), expires: time.Now().Add(stateTTL)})
+	h.start(w, r, c, p, pending{})
+}
+
+// device starts a new sign-in at the provider that approves the device of ?code= for the SSO
+// account of the UI session. The request asks the provider to sign the user in again
+// (prompt=login, max_age=0). Every failure goes back to the approval page with an error code.
+func (h *Handler) device(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	ctx := r.Context()
+	c := h.cfg()
+	if !c.OIDCEnabled() {
+		httpx.Error(w, http.StatusNotFound, "single sign-on is not configured")
+		return
+	}
+	code := r.URL.Query().Get("code")
+	p, ok := h.auth.Identify(w, r, true)
+	if !ok {
+		return
+	}
+	if p == nil || !p.Session {
+		toDevice(w, r, code, "") // the approval page sends the visitor to sign in
+		return
+	}
+	if p.Kind != auth.KindOIDC {
+		toDevice(w, r, code, errNotSSO)
+		return
+	}
+	e, err := h.publish.PendingEnrollment(ctx, code)
+	switch {
+	case errors.Is(err, publish.ErrNotFound), errors.Is(err, publish.ErrConflict):
+		toDevice(w, r, code, "") // the approval page looks the code up and says why it cannot be approved
+		return
+	case err != nil:
+		h.log.ErrorContext(ctx, "SSO device approval: look up the code", "error", err.Error())
+		httpx.Error(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	prov, err := h.provider(ctx, c)
+	if err != nil {
+		h.log.WarnContext(ctx, "OIDC discovery failed", "issuer", c.OIDCIssuer, "error", err.Error())
+		toDevice(w, r, e.UserCode, errSSOFailed)
+		return
+	}
+	h.start(w, r, c, prov, pending{userID: p.UserID, userCode: e.UserCode},
+		oauth2.SetAuthURLParam("prompt", "login"), oauth2.SetAuthURLParam("max_age", "0"))
+}
+
+// start stores the pending sign-in pend under a new state, sets the state cookie and sends the
+// browser to the provider. opts are extra parameters of the authorization request.
+func (h *Handler) start(w http.ResponseWriter, r *http.Request, c *config.Config, p *gooidc.Provider, pend pending, opts ...oauth2.AuthCodeOption) {
+	state := randomString()
+	pend.nonce, pend.verifier = randomString(), oauth2.GenerateVerifier()
+	pend.provKey, pend.expires = providerKey(c), time.Now().Add(stateTTL)
+	h.states.put(state, pend)
 	http.SetCookie(w, &http.Cookie{
 		Name: stateCookie, Value: state, Path: stateCookiePath, MaxAge: int(stateTTL / time.Second),
 		HttpOnly: true, Secure: c.CookieSecure, SameSite: http.SameSiteLaxMode,
 	})
-	http.Redirect(w, r, oauthConfig(c, p).AuthCodeURL(state, oauth2.S256ChallengeOption(verifier), gooidc.Nonce(nonce)), http.StatusFound)
+	opts = append([]oauth2.AuthCodeOption{oauth2.S256ChallengeOption(pend.verifier), gooidc.Nonce(pend.nonce)}, opts...)
+	http.Redirect(w, r, oauthConfig(c, p).AuthCodeURL(state, opts...), http.StatusFound)
 }
 
 func (h *Handler) clearCookie(w http.ResponseWriter, c *config.Config) {
@@ -143,6 +211,23 @@ func (h *Handler) clearCookie(w http.ResponseWriter, c *config.Config) {
 
 func toLogin(w http.ResponseWriter, r *http.Request, code string) {
 	http.Redirect(w, r, "/#/login?error="+code, http.StatusFound)
+}
+
+// toDevice sends the browser back to the approval page of userCode, with an error code when
+// errCode is set.
+func toDevice(w http.ResponseWriter, r *http.Request, userCode, errCode string) {
+	q := url.Values{"code": {userCode}}
+	if errCode != "" {
+		q.Set("error", errCode)
+	}
+	http.Redirect(w, r, "/#/device?"+q.Encode(), http.StatusFound)
+}
+
+// signedIn is a verified answer of the provider.
+type signedIn struct {
+	idt    *gooidc.IDToken
+	claims map[string]any // of the ID token
+	cl     *claimSource
 }
 
 func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
@@ -172,9 +257,16 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "single sign-on settings changed; start again")
 		return
 	}
+	fail := func(code string) {
+		if pend.userCode != "" {
+			toDevice(w, r, pend.userCode, code)
+		} else {
+			toLogin(w, r, code)
+		}
+	}
 	if e := q.Get("error"); e != "" {
 		h.log.InfoContext(ctx, "OIDC provider returned an error", "error", e)
-		toLogin(w, r, errSSOFailed)
+		fail(errSSOFailed)
 		return
 	}
 	code := q.Get("code")
@@ -189,68 +281,32 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusServiceUnavailable, "identity provider unavailable")
 		return
 	}
-	tok, err := oauthConfig(c, p).Exchange(ctx, code, oauth2.VerifierOption(pend.verifier))
-	if err != nil {
-		h.log.WarnContext(ctx, "OIDC code exchange failed", "error", err.Error())
-		toLogin(w, r, errSSOFailed)
+	si, ok := h.exchange(ctx, c, p, pend, code)
+	if !ok {
+		fail(errSSOFailed)
 		return
 	}
-	rawID, _ := tok.Extra("id_token").(string)
-	if rawID == "" {
-		h.log.WarnContext(ctx, "OIDC token response has no id_token")
-		toLogin(w, r, errSSOFailed)
-		return
-	}
-	idt, err := p.Verifier(&gooidc.Config{ClientID: c.OIDCClientID}).Verify(ctx, rawID)
-	if err != nil {
-		h.log.WarnContext(ctx, "OIDC ID token verification failed", "error", err.Error())
-		toLogin(w, r, errSSOFailed)
-		return
-	}
-	if subtle.ConstantTimeCompare([]byte(idt.Nonce), []byte(pend.nonce)) != 1 {
-		h.log.WarnContext(ctx, "OIDC ID token nonce mismatch")
-		toLogin(w, r, errSSOFailed)
-		return
-	}
-	var claims map[string]any
-	if err := idt.Claims(&claims); err != nil {
-		h.log.WarnContext(ctx, "OIDC ID token claims unreadable", "error", err.Error())
-		toLogin(w, r, errSSOFailed)
-		return
-	}
-	cl := &claimSource{id: claims, fetch: func() map[string]any {
-		ui, err := p.UserInfo(ctx, oauth2.StaticTokenSource(tok))
-		if err != nil {
-			h.log.InfoContext(ctx, "OIDC UserInfo request failed", "error", err.Error())
-			return nil
-		}
-		if ui.Subject != idt.Subject {
-			h.log.WarnContext(ctx, "OIDC UserInfo subject does not match the ID token; ignoring it")
-			return nil
-		}
-		var m map[string]any
-		if err := ui.Claims(&m); err != nil {
-			return nil
-		}
-		return m
-	}}
 
-	if !isAdmin(c, cl) {
-		if err := h.auth.RevokeOIDCUser(ctx, idt.Issuer, idt.Subject); err != nil {
+	if !isAdmin(c, si.cl) {
+		if err := h.auth.RevokeOIDCUser(ctx, si.idt.Issuer, si.idt.Subject); err != nil {
 			h.log.ErrorContext(ctx, "revoke SSO sessions", "error", err.Error())
 		}
-		h.log.InfoContext(ctx, "SSO login refused: not an admin", "subject", idt.Subject)
-		h.auth.RecordSignInFailed(r, NormalizeUsername(claimString(cl.get("preferred_username"))), "sso: not an admin")
-		toLogin(w, r, errNotAuthorized)
+		h.log.InfoContext(ctx, "SSO login refused: not an admin", "subject", si.idt.Subject)
+		h.auth.RecordSignInFailed(r, NormalizeUsername(claimString(si.cl.get("preferred_username"))), "sso: not an admin")
+		fail(errNotAuthorized)
+		return
+	}
+	if pend.userCode != "" {
+		h.approval(w, r, pend, si)
 		return
 	}
 
-	username := NormalizeUsername(claimString(cl.get("preferred_username")))
+	username := NormalizeUsername(claimString(si.cl.get("preferred_username")))
 	email := ""
-	if v := cl.get("email"); v != nil {
+	if v := si.cl.get("email"); v != nil {
 		email = strings.ToLower(strings.TrimSpace(claimString(v)))
 	}
-	u, err := h.auth.UpsertOIDCUser(ctx, idt.Issuer, idt.Subject, username, email)
+	u, err := h.auth.UpsertOIDCUser(ctx, si.idt.Issuer, si.idt.Subject, username, email)
 	switch {
 	case errors.Is(err, auth.ErrUsernameConflict):
 		h.log.WarnContext(ctx, "SSO login refused: username taken by another account", "username", username)
@@ -275,6 +331,97 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
 	h.log.InfoContext(ctx, "SSO login", "username", u.Username)
 	h.auth.RecordSignIn(r, u.ID, u.Username, "sso")
 	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+// exchange trades the authorization code for tokens and verifies the ID token (signature,
+// issuer, audience, expiry, nonce). ok is false after a failure, which it logs.
+func (h *Handler) exchange(ctx context.Context, c *config.Config, p *gooidc.Provider, pend pending, code string) (*signedIn, bool) {
+	tok, err := oauthConfig(c, p).Exchange(ctx, code, oauth2.VerifierOption(pend.verifier))
+	if err != nil {
+		h.log.WarnContext(ctx, "OIDC code exchange failed", "error", err.Error())
+		return nil, false
+	}
+	rawID, _ := tok.Extra("id_token").(string)
+	if rawID == "" {
+		h.log.WarnContext(ctx, "OIDC token response has no id_token")
+		return nil, false
+	}
+	idt, err := p.Verifier(&gooidc.Config{ClientID: c.OIDCClientID}).Verify(ctx, rawID)
+	if err != nil {
+		h.log.WarnContext(ctx, "OIDC ID token verification failed", "error", err.Error())
+		return nil, false
+	}
+	if subtle.ConstantTimeCompare([]byte(idt.Nonce), []byte(pend.nonce)) != 1 {
+		h.log.WarnContext(ctx, "OIDC ID token nonce mismatch")
+		return nil, false
+	}
+	var claims map[string]any
+	if err := idt.Claims(&claims); err != nil {
+		h.log.WarnContext(ctx, "OIDC ID token claims unreadable", "error", err.Error())
+		return nil, false
+	}
+	cl := &claimSource{id: claims, fetch: func() map[string]any {
+		ui, err := p.UserInfo(ctx, oauth2.StaticTokenSource(tok))
+		if err != nil {
+			h.log.InfoContext(ctx, "OIDC UserInfo request failed", "error", err.Error())
+			return nil
+		}
+		if ui.Subject != idt.Subject {
+			h.log.WarnContext(ctx, "OIDC UserInfo subject does not match the ID token; ignoring it")
+			return nil
+		}
+		var m map[string]any
+		if err := ui.Claims(&m); err != nil {
+			return nil
+		}
+		return m
+	}}
+	return &signedIn{idt: idt, claims: claims, cl: cl}, true
+}
+
+// approval ends the sign-in that device started: the provider must have signed in the same
+// account within maxAuthAge. It then sends the browser back to the approval page with a
+// single-use grant for the code and the account. It starts no session; the UI session stays.
+func (h *Handler) approval(w http.ResponseWriter, r *http.Request, pend pending, si *signedIn) {
+	ctx := r.Context()
+	id, disabled, err := h.auth.OIDCUser(ctx, si.idt.Issuer, si.idt.Subject)
+	switch {
+	case err != nil:
+		h.log.ErrorContext(ctx, "SSO device approval: find the account", "error", err.Error())
+		httpx.Error(w, http.StatusInternalServerError, "internal error")
+		return
+	case id != pend.userID:
+		h.log.WarnContext(ctx, "SSO device approval refused: the provider signed in another account", "subject", si.idt.Subject)
+		toDevice(w, r, pend.userCode, errWrongAccount)
+		return
+	case disabled:
+		toDevice(w, r, pend.userCode, errAccountDisabled)
+		return
+	}
+	at, ok := si.claims["auth_time"].(float64)
+	if !ok {
+		h.log.WarnContext(ctx, "SSO device approval refused: the ID token has no auth_time")
+		toDevice(w, r, pend.userCode, errNoAuthTime)
+		return
+	}
+	if age := time.Since(time.Unix(int64(at), 0)); age > maxAuthAge {
+		h.log.WarnContext(ctx, "SSO device approval refused: the provider did not sign the user in again",
+			"auth_age", age.Round(time.Second).String())
+		toDevice(w, r, pend.userCode, errStaleSignIn)
+		return
+	}
+	grant, err := h.publish.ApprovalGrant(ctx, pend.userID, pend.userCode)
+	switch {
+	case errors.Is(err, publish.ErrNotFound), errors.Is(err, publish.ErrConflict):
+		toDevice(w, r, pend.userCode, "") // the approval page looks the code up and says why it cannot be approved
+		return
+	case err != nil:
+		h.log.ErrorContext(ctx, "SSO device approval: store the grant", "error", err.Error())
+		httpx.Error(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	q := url.Values{"code": {pend.userCode}, "grant": {grant}}
+	http.Redirect(w, r, "/#/device?"+q.Encode(), http.StatusFound)
 }
 
 // --- admin rule ---
@@ -385,9 +532,13 @@ func NormalizeUsername(s string) string {
 
 // --- pending sign-ins ---
 
+// pending is a sign-in that waits for the callback. userCode is set when the sign-in approves
+// the device of that code for the SSO account userID; it is empty for a sign-in to the UI.
 type pending struct {
 	nonce, verifier, provKey string
 	expires                  time.Time
+	userID                   int64
+	userCode                 string
 }
 
 // stateStore holds pending sign-ins keyed by SHA-256(state): single use, 10 min TTL, bounded.

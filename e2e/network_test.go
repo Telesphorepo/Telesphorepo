@@ -241,8 +241,8 @@ func TestIPRules(t *testing.T) {
 	repo := RandName("raw")
 	s.CreateRepo(t, repo, "raw", false, nil)
 	w := RandName("writer")
-	s.CreateUser(t, w, "writer-pass-1234", false)
-	s.SetPermission(t, repo, w, "write")
+	s.CreateUser(t, w, "writer-pass-1234")
+	s.SetPerms(t, repo, w, "download", "publish")
 	body := []byte("ip rules " + randHex(8))
 	if st, b := s.API(t, http.MethodPut, "/raw/"+repo+"/doc/file.txt", body, s.PublishAuth(t, w, repo)); st != http.StatusCreated {
 		t.Fatalf("PUT before any rule: status %d: %s", st, b)
@@ -406,8 +406,8 @@ func TestPresetIPLists(t *testing.T) {
 	ranges := RandName("ranges")
 	stub.CreateRepo(t, ranges, "raw", true, map[string]any{"overwrite": "allow"})
 	pub := RandName("pub")
-	stub.CreateUser(t, pub, "pub-pass-1234", false)
-	stub.SetPermission(t, ranges, pub, "write")
+	stub.CreateUser(t, pub, "pub-pass-1234")
+	stub.SetPerms(t, ranges, pub, "download", "publish")
 	put := func(name, body string) {
 		t.Helper()
 		if st, b := stub.API(t, http.MethodPut, "/raw/"+ranges+"/"+name, body, stub.PublishAuth(t, pub, ranges)); st/100 != 2 {
@@ -567,8 +567,8 @@ func TestCustomIPLists(t *testing.T) {
 	repo := RandName("raw")
 	s.CreateRepo(t, repo, "raw", false, nil)
 	w := RandName("writer")
-	s.CreateUser(t, w, "writer-pass-1234", false)
-	s.SetPermission(t, repo, w, "write")
+	s.CreateUser(t, w, "writer-pass-1234")
+	s.SetPerms(t, repo, w, "download", "publish")
 	got := putIPRules(t, s, repo, ipRules{Publish: []ipRule{{Kind: "list", Value: "runners", Note: "CI"}}})
 	if len(got.Publish) != 1 || got.Publish[0].Kind != "list" || got.Publish[0].Value != "runners" {
 		t.Fatalf("PUT ip-rules with a list: %+v", got)
@@ -619,9 +619,9 @@ func TestCustomIPLists(t *testing.T) {
 		t.Fatalf("a rule naming a deleted list: status %d, want 400: %s", st, b)
 	}
 
-	// Admins only.
+	// Only network, or settings on a repo; a publisher holds neither.
 	if st, _ := s.API(t, http.MethodGet, "/api/ip-lists", nil, s.SignIn(t, w, "writer-pass-1234")); st != http.StatusForbidden {
-		t.Fatalf("non-admin GET /api/ip-lists: status %d, want 403", st)
+		t.Fatalf("publisher GET /api/ip-lists: status %d, want 403", st)
 	}
 	if st, _ := s.API(t, http.MethodGet, "/api/ip-lists", nil, s.AdminBasic()); st != http.StatusUnauthorized {
 		t.Fatalf("GET /api/ip-lists with admin Basic auth: status %d, want 401", st)
@@ -721,7 +721,7 @@ func TestIPRangeParse(t *testing.T) {
 	})
 	t.Run("admins only", func(t *testing.T) {
 		u := RandName("plain")
-		s.CreateUser(t, u, "plain-pass-1234", false)
+		s.CreateUser(t, u, "plain-pass-1234")
 		body := map[string]any{"text": "192.0.2.1"}
 		if st, _ := s.API(t, http.MethodPost, "/api/ip-ranges/parse", body, s.SignIn(t, u, "plain-pass-1234")); st != http.StatusForbidden {
 			t.Fatalf("non-admin parse: status %d, want 403", st)

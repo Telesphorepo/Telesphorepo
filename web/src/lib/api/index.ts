@@ -55,29 +55,43 @@ export const api = {
   },
 
   users: {
+    /** People: every account. */
     list: (p?: T.PageParams) => request<T.Page<T.User>>("GET", "/api/users", { query: page(p) }),
-    /** Admin: one account; 404 when no account has the name. */
+    /** People: one account; 404 when no account has the name. */
     get: (username: string) => request<T.User>("GET", `/api/users/${enc(username)}`),
-    /** Admin: the repositories one person can use, by repository name. */
+    /** People: the repositories one person can use, by repository name. */
     access: (username: string, p?: T.PageParams) =>
       request<T.UserAccess>("GET", `/api/users/${enc(username)}/access`, { query: page(p) }),
+    /** People: a new local account with server permissions that the caller holds. */
     create: (u: T.NewUser) => request<T.User>("POST", "/api/users", { body: u }),
-    /** Users change their own password; admins change anyone's password and is_admin. */
+    /** Changes a password: your own, or with People that of a person whose permissions you all hold. */
     update: (username: string, patch: T.UserPatch) =>
       request<T.User>("PATCH", `/api/users/${enc(username)}`, { body: patch }),
-    /** Admin: disables or enables 1 to 1000 people. A disabled person's sessions end. 400 when the list holds the caller and disabled is true. */
+    /**
+     * People: replaces the server permissions of a person. The caller adds and removes only
+     * permissions they hold (403); 409 when no enabled person would keep People.
+     */
+    setPermissions: (username: string, permissions: T.ServerPermission[]) =>
+      request<T.User>("PUT", `/api/users/${enc(username)}/permissions`, { body: { permissions } }),
+    /** People: disables or enables 1 to 1000 people. A disabled person's sessions end. 400 when the list holds the caller and disabled is true. */
     setDisabled: (usernames: string[], disabled: boolean) =>
       request<T.Changed>("PATCH", "/api/users", { body: { usernames, disabled } }),
   },
 
-  /** Admin: the level of each pair of person and repository. */
+  /** People whose username starts with q, for a person picker (at most 20 a page). Needs People, or Manage access on a repository. */
+  people: {
+    search: (q: string, p?: T.PageParams) => request<T.Page<T.PersonName>>("GET", "/api/people", { query: { q, ...page(p) } }),
+  },
+
+  /** The repository permissions of each pair of person and repository. */
   permissions: {
-    /** Sets the level for every pair of user and repository. */
-    set: (users: string[], repos: string[], level: "read" | "write") =>
-      request<T.Changed>("PUT", "/api/permissions", { body: { users, repos, level } }),
-    /** Removes the level of every pair of user and repository. */
-    delete: (users: string[], repos: string[]) =>
-      request<T.Changed>("POST", "/api/permissions/delete", { body: { users, repos } }),
+    /**
+     * Sets the whole permission set of every pair of user and repository; [] removes the pair.
+     * Needs Manage access on every repository, and the caller adds or removes only permissions
+     * they hold there (403).
+     */
+    set: (users: string[], repos: string[], perms: T.RepoPermission[]) =>
+      request<T.Changed>("PUT", "/api/permissions", { body: { users, repos, perms } }),
   },
 
   formats: {
@@ -90,16 +104,16 @@ export const api = {
     get: (name: string) => request<T.Repo>("GET", repo(name)),
     create: (r: T.NewRepo) => request<T.Repo>("POST", "/api/repos", { body: r }),
     update: (name: string, patch: T.RepoPatch) => request<T.Repo>("PATCH", repo(name), { body: patch }),
-    /** Admin: replaces the members of a group and their order (1 to 50 names). Answers the group. */
+    /** Edit settings: replaces the members of a group and their order (1 to 50 names). Answers the group. */
     setMembers: (name: string, members: string[]) =>
       request<T.Repo>("PUT", repo(name) + "/members", { body: { members } }),
-    /** Admin: checks the remote of a proxy now. A remote that does not answer throws an ApiError with the reason. */
+    /** Edit settings: checks the remote of a proxy now. A remote that does not answer throws an ApiError with the reason. */
     testProxy: (name: string) => request<{ ok: boolean }>("POST", repo(name) + "/proxy/test"),
-    /** Admin: makes 1 to 1000 repositories public (true) or private (false). */
+    /** Edit settings on each: makes 1 to 1000 repositories public (true) or private (false). */
     setPublic: (names: string[], anonymous_read: boolean) =>
       request<T.Changed>("PATCH", "/api/repos", { body: { names, anonymous_read } }),
     /**
-     * Admin: removes 1 to 1000 repositories, their rows and their blobs. 409 when one is locked
+     * All repositories: removes 1 to 1000 repositories, their rows and their blobs. 409 when one is locked
      * (nothing is deleted); a failure part way is an ApiError, and the repositories before it are gone.
      */
     delete: (names: string[]) => request<T.ReposDeleted>("POST", "/api/repos/delete", { body: { names } }),
@@ -113,7 +127,7 @@ export const api = {
       request<T.Page<T.Asset>>("GET", repo(name) + "/assets", { query: { prefix, ...page(p) } }),
     /**
      * Deletes files (`paths`) and folders (`prefixes`, each ending in "/"). Needs a publish
-     * session token for the repo, or an admin UI session (then leave `token` out).
+     * session token for the repo, or a UI session with Delete files (then leave `token` out).
      */
     deleteFiles: (name: string, target: T.FilesDelete, token?: string) =>
       request<T.DeleteResult>("POST", repo(name) + "/files/delete", { body: target, token }),
@@ -143,16 +157,20 @@ export const api = {
         abort: r.abort,
       };
     },
-    /** Admin: the repo's IP allow-lists for downloads (read) and publishing. */
+    /** Edit settings: the repo's IP allow-lists for downloads (read) and publishing. */
     ipRules: {
       get: (name: string) => request<T.IPRules>("GET", repo(name) + "/ip-rules"),
       /** Replaces both lists; answers them as stored (CIDRs masked, addresses as /32 or /128). */
       set: (name: string, rules: T.IPRules) => request<T.IPRules>("PUT", repo(name) + "/ip-rules", { body: rules }),
     },
+    /** Manage access: each person with a grant on the repository, with their whole set. */
     permissions: {
       list: (name: string) => request<T.Permission[]>("GET", repo(name) + "/permissions"),
     },
-    /** Admin: who can download from and publish to the repo, and from where. admins lists the administrators too. */
+    /**
+     * Manage access, Edit settings or CI pipelines: who can download from and publish to the repo,
+     * and from where. admins lists the holders of All repositories too.
+     */
     access: (name: string, opts: { admins?: boolean } = {}) =>
       request<T.RepoAccess>("GET", repo(name) + "/access", { query: { admins: opts.admins ? "1" : undefined } }),
     /** The URL a browser downloads a file from (the format's own route serves it). */
@@ -176,7 +194,7 @@ export const api = {
     testOIDC: (patch: T.SettingsPatch) => request<T.TestResult>("POST", "/api/settings/oidc/test", { body: patch }),
   },
 
-  /** Admin: named address ranges that repo rules and trusted proxies refer to. */
+  /** Network: named address ranges that repo rules and trusted proxies refer to. */
   ipLists: {
     /** Every list without its ranges: presets first, then by name. */
     list: () => request<T.IPList[]>("GET", "/api/ip-lists"),
@@ -191,12 +209,12 @@ export const api = {
     refresh: (name: string) => request<T.IPList>("POST", `/api/ip-lists/${enc(name)}/refresh`),
   },
 
-  /** Admin: pulls the addresses and ranges out of pasted text. Stores nothing. */
+  /** Pulls the addresses and ranges out of pasted text. Stores nothing. */
   ipRanges: {
     parse: (text: string, signal?: AbortSignal) => request<T.ParsedRanges>("POST", "/api/ip-ranges/parse", { body: { text }, signal }),
   },
 
-  /** Admin: keys that sign the package lists of Debian repositories. */
+  /** Signing keys: keys that sign the package lists of Debian repositories. */
   signingKeys: {
     list: () => request<T.SigningKey[]>("GET", "/api/signing-keys"),
     get: (name: string) => request<T.SigningKey>("GET", `/api/signing-keys/${enc(name)}`),
@@ -253,9 +271,12 @@ export const api = {
     /** The enrollment waiting for approval; 404 when the code is unknown or expired. */
     pending: (user_code: string) =>
       request<T.PendingEnrollment>("GET", "/api/devices/enroll", { query: { user_code } }),
-    approve: (user_code: string, proof: T.Proof) =>
+    /** A local account sends a fresh second factor; a single sign-on account sends the grant of ssoApproveURL. */
+    approve: (user_code: string, proof: T.Proof | { grant: string }) =>
       request<T.Device>("POST", "/api/devices/approve", { body: { user_code, ...proof } }),
-    /** The caller's devices, or every device (with username) for an admin; newest first. */
+    /** Full-page navigation: a new single sign-on that returns to /device?code= with a grant, or with an error. */
+    ssoApproveURL: (user_code: string) => `/api/auth/oidc/device?code=${enc(user_code)}`,
+    /** The caller's devices, or every device (with username) for a holder of People; newest first. */
     list: (p?: T.PageParams) => request<T.Page<T.Device>>("GET", "/api/devices", { query: page(p) }),
     revoke: (id: number) => request("DELETE", `/api/devices/${id}`),
   },
@@ -274,7 +295,7 @@ export const api = {
     sessions: (p?: T.PageParams) => request<T.Page<T.SessionInfo>>("GET", "/api/publish/sessions", { query: page(p) }),
     /** Ends a session; authenticates with its own token. */
     closeSession: (id: number, token: string) => request("DELETE", `/api/publish/sessions/${id}`, { token }),
-    /** Admin: every session, newest first. */
+    /** Activity: every session, newest first. */
     log: (p?: T.PageParams) => request<T.Page<T.SessionInfo>>("GET", "/api/publish/log", { query: page(p) }),
     trusts: {
       list: (p?: T.PageParams) => request<T.Page<T.Trust>>("GET", "/api/publish/trusts", { query: page(p) }),
@@ -285,7 +306,7 @@ export const api = {
     },
   },
 
-  /** Admin: the audit log, newest first. */
+  /** Activity: the audit log, newest first. */
   audit: (filter: T.AuditFilter & T.PageParams = {}) =>
     request<T.Page<T.AuditEvent>>("GET", "/api/audit", {
       query: { action: filter.action, repo: filter.repo, ...page(filter) },

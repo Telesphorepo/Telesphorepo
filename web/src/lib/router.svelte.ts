@@ -6,11 +6,17 @@
 // trailing "*rest" segment that takes the rest of the path (slashes included).
 
 import type { Component } from "svelte";
+import type { ServerPermission } from "$lib/api";
 
 /** "app": the page in the container. "settings": the Settings sidebar and the page. */
 export type Layout = "app" | "settings";
-/** Who may open a page: anyone, a signed-in user, or an admin. */
-export type Access = "any" | "user" | "admin";
+/**
+ * Who may open a page: anyone, a signed-in user, or a signed-in user with a server permission.
+ * Three more depend on repository permissions: "repositories" (All repositories, or more than
+ * download on a repository), "repo" (a settings tab of the repository `:name`) and "pipelines"
+ * (All repositories, or CI pipelines on a repository). `auth.allows` checks them.
+ */
+export type Access = "any" | "user" | ServerPermission | "repositories" | "repo" | "pipelines";
 
 export type RouteDef = {
   pattern: string;

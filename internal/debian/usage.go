@@ -31,17 +31,13 @@ func (h *Handler) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
 				"sudo apt update\n", url, repo.Name),
 			"The remote archive signs the files. apt checks them with the key it already trusts for that archive, e.g. debian-archive-keyring.")}
 		if !repo.AnonymousRead {
-			out = append(out, use("/etc/apt/auth.conf.d/"+repo.Name+".conf", fmt.Sprintf(
-				"echo \"machine %s login YOUR_USERNAME password YOUR_READ_TOKEN\" \\\n"+
-					"  | sudo tee /etc/apt/auth.conf.d/%s.conf\n"+
-					"sudo chmod 600 /etc/apt/auth.conf.d/%s.conf\n", url, repo.Name, repo.Name),
-				"Create a read token on Settings › Tokens."))
+			out = append(out, aptAuth(url, repo.Name, format.SnippetRepo))
 		}
 		return out
 	}
 	out := aptSetup(repo, baseURL, format.SnippetRepo, "stable", "main",
 		"stable and main are examples: use the distribution and component the packages were uploaded to.")
-	upload := "curl -fsS -u publish:$TOKEN -T hello_1.0_amd64.deb " + url + "/upload/stable/main"
+	upload := format.TokenCurl + "-T hello_1.0_amd64.deb " + url + "/upload/stable/main"
 	out = append(out, format.CurlCISnippets(baseURL, repo.Name, upload)...)
 	return append(out, format.HandSnippet(upload))
 }
@@ -51,18 +47,17 @@ func (h *Handler) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
 // source.
 func aptSetup(repo *repos.Repo, baseURL, snippetContext, dist, component, note string) []format.Snippet {
 	url := baseURL + "/debian/" + repo.Name
-	creds := ""
+	key := fmt.Sprintf("sudo curl -fsSL %s/key.asc -o /etc/apt/keyrings/%s.asc\n", url, repo.Name)
 	if !repo.AnonymousRead {
-		creds = "-u YOUR_USERNAME:YOUR_READ_TOKEN "
+		key = format.ReadTokenPrompt + "\n" + format.ReadTokenConfig + " \\\n  | " +
+			fmt.Sprintf("sudo curl -fsSL -K - %s/key.asc -o /etc/apt/keyrings/%s.asc\n", url, repo.Name)
 	}
 	use := func(title, code, note string) format.Snippet {
 		return format.Snippet{Client: "apt", Purpose: format.SnippetUse, Context: snippetContext,
 			Title: title, Lang: "sh", Code: code, Note: note}
 	}
 	out := []format.Snippet{
-		use("Signing key", fmt.Sprintf(
-			"sudo install -d -m 0755 /etc/apt/keyrings\n"+
-				"sudo curl -fsSL %s%s/key.asc -o /etc/apt/keyrings/%s.asc\n", creds, url, repo.Name), ""),
+		use("Signing key", "sudo install -d -m 0755 /etc/apt/keyrings\n"+key, ""),
 		use("/etc/apt/sources.list.d/"+repo.Name+".list", fmt.Sprintf(
 			"echo \"deb [signed-by=/etc/apt/keyrings/%s.asc] %s %s %s\" \\\n"+
 				"  | sudo tee /etc/apt/sources.list.d/%s.list\n"+
@@ -71,13 +66,21 @@ func aptSetup(repo *repos.Repo, baseURL, snippetContext, dist, component, note s
 	}
 	if !repo.AnonymousRead {
 		// apt applies an auth.conf entry to plain http only when the scheme is spelled out.
-		out = append(out, use("/etc/apt/auth.conf.d/"+repo.Name+".conf", fmt.Sprintf(
-			"echo \"machine %s login YOUR_USERNAME password YOUR_READ_TOKEN\" \\\n"+
-				"  | sudo tee /etc/apt/auth.conf.d/%s.conf\n"+
-				"sudo chmod 600 /etc/apt/auth.conf.d/%s.conf\n", url, repo.Name, repo.Name),
-			"Create a read token on Settings › Tokens."))
+		out = append(out, aptAuth(url, repo.Name, snippetContext))
 	}
 	return out
+}
+
+// aptAuth returns the apt read credentials of a private repo. The file gets mode 600 before
+// the token is in it, the token comes from a hidden prompt, and tee writes nothing to stdout.
+func aptAuth(url, repo, snippetContext string) format.Snippet {
+	file := "/etc/apt/auth.conf.d/" + repo + ".conf"
+	return format.Snippet{Client: "apt", Purpose: format.SnippetUse, Context: snippetContext,
+		Title: file, Lang: "sh", Code: format.ReadTokenPrompt + "\n" +
+			"sudo install -m 600 /dev/null " + file + "\n" +
+			"printf 'machine %s login YOUR_USERNAME password %s\\n' " + url + " \"$READ_TOKEN\" \\\n" +
+			"  | sudo tee -a " + file + " > /dev/null\n",
+		Note: "Create a read token on Settings › Tokens. Enter it at the prompt."}
 }
 
 // ArtifactUsage implements format.ArtifactDescriber. p is a package folder of the pool (with

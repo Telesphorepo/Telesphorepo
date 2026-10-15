@@ -78,11 +78,11 @@ func (f *Format) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
 	curl, wget := "curl -fLO "+u, "wget "+u
 	note := ""
 	if !repo.AnonymousRead {
-		curl = "curl -fLO -u YOUR_USERNAME:YOUR_READ_TOKEN " + u
-		wget = "wget --user YOUR_USERNAME --password YOUR_READ_TOKEN " + u
-		note = "Create a read token on Settings › Tokens; it works where a password does."
+		curl = format.ReadTokenPrompt + "\n" + format.ReadTokenConfig + " | curl -fLO -K - " + u
+		wget = "wget --user YOUR_USERNAME --ask-password " + u
+		note = "Create a read token on Settings › Tokens; it works where a password does. Enter it at the prompt."
 	}
-	upload := "curl -f -u publish:$TOKEN -T file.tar.gz " + u
+	upload := format.TokenCurl + "-T file.tar.gz " + u
 	out := []format.Snippet{
 		{Client: "curl", Purpose: format.SnippetUse, Context: format.SnippetRepo, Title: "Download a file", Lang: "sh", Code: curl + "\n", Note: note},
 		{Client: "wget", Purpose: format.SnippetUse, Context: format.SnippetRepo, Title: "Download a file", Lang: "sh", Code: wget + "\n", Note: note},
@@ -97,15 +97,15 @@ func (f *Format) handle(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "invalid path")
 		return
 	}
-	need := auth.Read
+	need := auth.RepoDownload
 	if r.Method == http.MethodPut {
-		need = auth.Write
+		need = auth.RepoPublish
 	}
 	repo, pr, ok := f.h.Auth.RepoGate(w, r, r.PathValue("repo"), name, need, false)
 	if !ok {
 		return
 	}
-	if need == auth.Read {
+	if need == auth.RepoDownload {
 		f.h.Assets.Serve(w, r, repo, p)
 		return
 	}

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/move"
 )
@@ -41,7 +42,7 @@ func moveID(w http.ResponseWriter, r *http.Request) (int64, bool) {
 
 // currentMove returns the newest move, running or finished; 404 when there has been none.
 func (a *API) currentMove(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	if _, ok := a.can(w, r, auth.PermStorage); !ok {
 		return
 	}
 	m, err := a.moves.Current(r.Context())
@@ -53,7 +54,7 @@ func (a *API) currentMove(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) getMove(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	if _, ok := a.can(w, r, auth.PermStorage); !ok {
 		return
 	}
 	id, ok := moveID(w, r)
@@ -70,7 +71,7 @@ func (a *API) getMove(w http.ResponseWriter, r *http.Request) {
 
 // moveFailures returns a keyset page of a move's failures: ?after=<asset id>&limit=.
 func (a *API) moveFailures(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	if _, ok := a.can(w, r, auth.PermStorage); !ok {
 		return
 	}
 	id, ok := moveID(w, r)
@@ -99,7 +100,7 @@ func (a *API) moveFailures(w http.ResponseWriter, r *http.Request) {
 
 // cancelMove stops a running move and returns it (state cancelled); 409 when it has ended.
 func (a *API) cancelMove(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	if _, ok := a.can(w, r, auth.PermStorage); !ok {
 		return
 	}
 	id, ok := moveID(w, r)

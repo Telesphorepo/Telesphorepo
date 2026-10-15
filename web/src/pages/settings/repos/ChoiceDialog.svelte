@@ -48,7 +48,8 @@
     /** One sentence for an empty list. */
     none: string;
     newLabel: string;
-    newHref: string;
+    /** The page that creates a new one; undefined when the person cannot create one. */
+    newHref?: string;
     onAdd: (ids: string[]) => void;
   } = $props();
 
@@ -80,8 +81,10 @@
   {:else}
     <p class="text-body text-muted-foreground">{none}</p>
   {/if}
-  <div>
-    <Button variant="outline" size="sm" href={newHref} onclick={() => (open = false)}><PlusIcon />{newLabel}</Button>
-  </div>
+  {#if newHref}
+    <div>
+      <Button variant="outline" size="sm" href={newHref} onclick={() => (open = false)}><PlusIcon />{newLabel}</Button>
+    </div>
+  {/if}
   {#if items.length}<p class="text-meta text-muted-foreground">Save the page to keep the change.</p>{/if}
 </ShortFormDialog>

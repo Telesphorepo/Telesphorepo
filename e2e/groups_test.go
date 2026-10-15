@@ -97,9 +97,9 @@ func TestGroups(t *testing.T) {
 		s.CreateRepo(t, rel, "maven", true, nil)
 		s.CreateRepo(t, snap, "maven", true, nil)
 		writer, writerPass := RandName("writer"), randHex(12)
-		s.CreateUser(t, writer, writerPass, false)
-		s.SetPermission(t, rel, writer, "write")
-		s.SetPermission(t, snap, writer, "write")
+		s.CreateUser(t, writer, writerPass)
+		s.SetPerms(t, rel, writer, "download", "publish")
+		s.SetPerms(t, snap, writer, "download", "publish")
 		token := s.CreateToken(t, writer, writerPass, "groups-e2e")
 
 		grp := RandName("plex")
@@ -194,7 +194,7 @@ func TestGroups(t *testing.T) {
 		a, b := RandName("order-a"), RandName("order-b")
 		for _, r := range []string{a, b} {
 			s.CreateRepo(t, r, "maven", true, nil)
-			s.SetPermission(t, r, writer, "write")
+			s.SetPerms(t, r, writer, "download", "publish")
 		}
 		file := "com/e2e/order/1.0/order-1.0.txt"
 		mavenPut(t, s, writer, a, file, []byte("from a"))
@@ -210,7 +210,7 @@ func TestGroups(t *testing.T) {
 		s.CreateRepo(t, pub, "maven", true, nil)
 		s.CreateRepo(t, priv, "maven", false, nil)
 		for _, r := range []string{pub, priv} {
-			s.SetPermission(t, r, writer, "write")
+			s.SetPerms(t, r, writer, "download", "publish")
 		}
 		mavenPut(t, s, writer, pub, "com/e2e/pub/1.0/pub-1.0.txt", []byte("public file"))
 		mavenPut(t, s, writer, priv, "com/e2e/priv/1.0/priv-1.0.txt", []byte("private file"))
@@ -221,8 +221,8 @@ func TestGroups(t *testing.T) {
 			t.Fatalf("anonymous GET of a private member's file through a public group: status %d, want 404: %s", st, b)
 		}
 		reader, readerPass := RandName("reader"), randHex(12)
-		s.CreateUser(t, reader, readerPass, false)
-		s.SetPermission(t, priv, reader, "read")
+		s.CreateUser(t, reader, readerPass)
+		s.SetPerms(t, priv, reader, "download")
 		readerAuth := Basic{reader, s.CreateToken(t, reader, readerPass, "groups-reader")}
 		rawWantGet(t, s, opts.S3, "/maven/"+mixed+"/com/e2e/priv/1.0/priv-1.0.txt", readerAuth, []byte("private file"))
 		rawWantGet(t, s, opts.S3, "/maven/"+mixed+"/com/e2e/pub/1.0/pub-1.0.txt", readerAuth, []byte("public file"))

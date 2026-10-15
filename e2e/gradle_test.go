@@ -91,8 +91,8 @@ func TestGradlePlugin(t *testing.T) {
 		repo := RandName("gradle")
 		s.CreateRepo(t, repo, "maven", false, nil)
 		writer, writerPass := RandName("writer"), randHex(12)
-		s.CreateUser(t, writer, writerPass, false)
-		s.SetPermission(t, repo, writer, "write")
+		s.CreateUser(t, writer, writerPass)
+		s.SetPerms(t, repo, writer, "download", "publish")
 		token := s.CreateToken(t, writer, writerPass, "gradle-e2e")
 
 		group := "com.example.e2e" + randHex(4)

@@ -72,8 +72,8 @@ owner must do these steps first:
 2. Later, for the Gradle Plugin Portal and Maven Central: create the accounts, verify the
    namespace `com.telesphorepo`, create a GPG key, add the secrets listed in
    `.github/workflows/release.yml` of the clients repo, and enable the commented jobs there.
-3. After the first release, replace the `VERSION` placeholders in the publish-token snippets (`web/src/pages/account/Tokens.svelte`)
-   and `README.md`.
+3. The server snippets and `README.md` name the clients version `0.1.0`. For a new release,
+   change `clientsVersion` in `internal/maven/usage.go` and the version in `README.md`.
 
 ## Known gaps / small follow-ups
 

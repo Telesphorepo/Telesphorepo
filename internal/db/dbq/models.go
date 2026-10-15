@@ -245,7 +245,7 @@ type RepoIpRule struct {
 type RepoPermission struct {
 	RepoID int64
 	UserID int64
-	Level  string
+	Perm   string
 }
 
 type RepoProxy struct {
@@ -314,7 +314,6 @@ type User struct {
 	ID                int64
 	Username          string
 	PasswordHash      string
-	IsAdmin           bool
 	Disabled          bool
 	PasswordChangedAt int64
 	CreatedAt         int64
@@ -334,6 +333,11 @@ type UserPasskey struct {
 	Name         string
 	CreatedAt    int64
 	LastUsedAt   sql.NullInt64
+}
+
+type UserPermission struct {
+	UserID int64
+	Perm   string
 }
 
 type UserRecoveryCode struct {

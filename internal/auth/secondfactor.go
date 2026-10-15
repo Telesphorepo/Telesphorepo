@@ -254,7 +254,7 @@ func (s *Service) LoginSecondFactor(w http.ResponseWriter, r *http.Request, in S
 		}
 		return nil, err
 	}
-	if p.IsAdmin && !s.cfg().AdminPasswordLogin {
+	if p.Perms != 0 && !s.cfg().AdminPasswordLogin {
 		s.clearLoginCookie(w)
 		return nil, ErrPasswordLoginDisabled
 	}

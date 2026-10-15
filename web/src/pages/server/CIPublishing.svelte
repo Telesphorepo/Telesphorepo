@@ -1,6 +1,7 @@
 <!--
-  CI pipelines (administrators): the CI jobs that publish without a stored password (trust
-  policies in the API). A row opens the pipeline; its name is followed by what the pipeline
+  CI pipelines (All repositories, or CI pipelines on a repository): the CI jobs that publish without
+  a stored password (trust policies in the API). A person sees the pipelines whose repositories all
+  hold CI pipelines for them. A row opens the pipeline; its name is followed by what the pipeline
   accepts, without the part that the name already says. New CI pipeline opens an empty one.
 -->
 <script lang="ts">

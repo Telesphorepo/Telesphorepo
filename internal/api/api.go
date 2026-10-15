@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -81,6 +82,8 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/users", a.setUsersDisabled)
 	mux.HandleFunc("GET /api/users/{username}", a.getUser)
 	mux.HandleFunc("PATCH /api/users/{username}", a.updateUser)
+	mux.HandleFunc("PUT /api/users/{username}/permissions", a.setUserPermissions)
+	mux.HandleFunc("GET /api/people", a.listPeople)
 
 	mux.HandleFunc("GET /api/formats", a.listFormats)
 
@@ -92,7 +95,6 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/repos/{name}", a.updateRepo)
 	mux.HandleFunc("GET /api/repos/{name}/permissions", a.listPermissions)
 	mux.HandleFunc("PUT /api/permissions", a.setPermissions)
-	mux.HandleFunc("POST /api/permissions/delete", a.deletePermissions)
 	mux.HandleFunc("GET /api/repos/{name}/assets", a.listAssets)
 	mux.HandleFunc("GET /api/repos/{name}/status", a.repoStatus)
 	mux.HandleFunc("GET /api/repos/{name}/usage", a.repoUsage)
@@ -133,8 +135,12 @@ func (a *API) Handler() http.Handler {
 // fail maps service errors to status codes without leaking internals.
 func fail(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
-	case errors.Is(err, auth.ErrInvalid), errors.Is(err, repos.ErrInvalid):
+	case errors.Is(err, auth.ErrInvalid), errors.Is(err, repos.ErrInvalid), errors.Is(err, auth.ErrPermDeps):
 		httpx.Error(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, auth.ErrNotHeld):
+		httpx.Error(w, http.StatusForbidden, err.Error())
+	case errors.Is(err, auth.ErrLastPeople):
+		httpx.Error(w, http.StatusConflict, err.Error())
 	case errors.As(err, new(*repos.MissingError)):
 		httpx.Error(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, auth.ErrNotFound), errors.Is(err, repos.ErrNotFound), errors.Is(err, assets.ErrNotFound):
@@ -182,10 +188,8 @@ func (a *API) user(w http.ResponseWriter, r *http.Request) (*auth.Principal, boo
 	return p, true
 }
 
-// admin requires the UI session of an admin: 401 without a UI session (anonymous, a password or
-// a read token), 403 for a session of a user who is not an admin. Outside dev mode an admin
-// session exists only after the second factor, so a password alone never reaches an admin route.
-func (a *API) admin(w http.ResponseWriter, r *http.Request) (*auth.Principal, bool) {
+// session requires a UI session: 401 without one (anonymous, a password or a read token).
+func (a *API) session(w http.ResponseWriter, r *http.Request) (*auth.Principal, bool) {
 	p, ok := a.auth.Identify(w, r, true)
 	if !ok {
 		return nil, false
@@ -194,31 +198,49 @@ func (a *API) admin(w http.ResponseWriter, r *http.Request) (*auth.Principal, bo
 		auth.SessionRequired(w)
 		return nil, false
 	}
-	if !p.IsAdmin {
-		httpx.Error(w, http.StatusForbidden, "admin required")
+	return p, true
+}
+
+// can requires the UI session of a person who holds the server permission need (or one of
+// them, when need names several): 401 without a UI session, 403 without the permission. Outside
+// dev mode the session of a person with a server permission exists only after the second
+// factor, so a password alone never reaches a permission route.
+func (a *API) can(w http.ResponseWriter, r *http.Request, need auth.ServerPerm) (*auth.Principal, bool) {
+	p, ok := a.session(w, r)
+	if !ok {
+		return nil, false
+	}
+	if p.Perms&need == 0 {
+		httpx.Error(w, http.StatusForbidden, "permission required: "+strings.Join(need.Names(), " or "))
 		return nil, false
 	}
 	return p, true
 }
 
-// adminRepo requires an admin and loads repo {name} (404 if missing).
-func (a *API) adminRepo(w http.ResponseWriter, r *http.Request) (*repos.Repo, bool) {
-	_, repo, ok := a.adminRepoP(w, r)
-	return repo, ok
-}
-
-// adminRepoP is adminRepo that also returns the admin.
-func (a *API) adminRepoP(w http.ResponseWriter, r *http.Request) (*auth.Principal, *repos.Repo, bool) {
-	p, ok := a.admin(w, r)
+// canRepo requires the UI session of a person who holds the repository permission need (or one
+// of them, when need names several) on repo {name}, and loads the repo (404 if missing). The
+// All repositories permission holds every repository permission. It returns the caller's whole
+// set on the repo.
+func (a *API) canRepo(w http.ResponseWriter, r *http.Request, need auth.RepoPerm) (*auth.Principal, *repos.Repo, auth.RepoPerm, bool) {
+	p, ok := a.session(w, r)
 	if !ok {
-		return nil, nil, false
+		return nil, nil, 0, false
 	}
 	repo, err := a.repos.ByName(r.Context(), r.PathValue("name"))
 	if err != nil {
 		fail(w, r, err)
-		return nil, nil, false
+		return nil, nil, 0, false
 	}
-	return p, repo, true
+	set, err := a.auth.RepoPerms(r.Context(), p, repo)
+	if err != nil {
+		fail(w, r, err)
+		return nil, nil, 0, false
+	}
+	if !set.Any(need) {
+		httpx.Error(w, http.StatusForbidden, "permission required on "+repo.Name+": "+strings.Join(need.Names(), " or "))
+		return nil, nil, 0, false
+	}
+	return p, repo, set, true
 }
 
 // baseURL is the base_url setting, else the URL the request came in on.
@@ -255,25 +277,48 @@ func (a *API) logout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// me returns the caller. second_factor_required is true for a UI session of a local admin
-// without a TOTP factor or a passkey (outside dev mode): that session reaches only the setup
-// routes.
+// me returns the caller with their server permissions (permissions) and, by repo name, their
+// repository permissions on the repos where they hold more than download (repo_permissions; a
+// holder of All repositories holds every one everywhere and gets none listed).
+// second_factor_required is true for a UI session of a local account that needs the second
+// factor and has no TOTP factor or passkey (outside dev mode): that session reaches only the
+// setup routes.
 func (a *API) me(w http.ResponseWriter, r *http.Request) {
 	p, ok := a.user(w, r)
 	if !ok {
 		return
 	}
-	u, err := a.auth.GetUser(r.Context(), p.Username)
+	ctx := r.Context()
+	u, err := a.auth.GetUser(ctx, p.Username)
 	if err != nil {
 		fail(w, r, err)
 		return
 	}
-	setupOnly, err := a.auth.SetupOnly(r.Context(), p)
+	setupOnly, err := a.auth.SetupOnly(ctx, p)
 	if err != nil {
 		fail(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, loginUser{u, setupOnly})
+	sets, err := a.auth.UserRepoPerms(ctx, u.ID)
+	if err != nil {
+		fail(w, r, err)
+		return
+	}
+	held := map[string][]string{}
+	for id, set := range sets {
+		if set&^auth.RepoDownload == 0 {
+			continue
+		}
+		repo, err := a.repos.ByID(ctx, id)
+		if err != nil {
+			continue // deleted after the grants were read
+		}
+		held[repo.Name] = set.Names()
+	}
+	httpx.WriteJSON(w, http.StatusOK, struct {
+		loginUser
+		RepoPermissions map[string][]string `json:"repo_permissions"`
+	}{loginUser{u, setupOnly}, held})
 }
 
 // --- tokens ---
@@ -354,7 +399,7 @@ func (a *API) deleteToken(w http.ResponseWriter, r *http.Request) {
 // --- users ---
 
 func (a *API) listUsers(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	if _, ok := a.can(w, r, auth.PermPeople); !ok {
 		return
 	}
 	us, next, err := a.auth.ListUsers(r.Context(), r.URL.Query().Get("after"), httpx.Limit(r))
@@ -368,9 +413,9 @@ func (a *API) listUsers(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, list[*auth.User]{us, cursor(next)})
 }
 
-// getUser returns one account by name (admin): the person page of the UI.
+// getUser returns one account by name (people): the person page of the UI.
 func (a *API) getUser(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	if _, ok := a.can(w, r, auth.PermPeople); !ok {
 		return
 	}
 	u, err := a.auth.GetUser(r.Context(), r.PathValue("username"))
@@ -381,28 +426,50 @@ func (a *API) getUser(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, u)
 }
 
+// permsIn reads a list of server permission names; an unknown name answers 400.
+func permsIn(w http.ResponseWriter, names []string) (auth.ServerPerm, bool) {
+	set, err := auth.ParseServerPerms(names)
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "unknown permission; the server permissions are "+strings.Join(auth.ServerPermNames, ", "))
+		return 0, false
+	}
+	return set, true
+}
+
+// createUser creates a local account (people): {username, password, permissions} -> 201. The
+// caller gives only server permissions they hold (403 otherwise).
 func (a *API) createUser(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.admin(w, r)
+	p, ok := a.can(w, r, auth.PermPeople)
 	if !ok {
 		return
 	}
 	var in struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-		IsAdmin  bool   `json:"is_admin"`
+		Username    string   `json:"username"`
+		Password    string   `json:"password"`
+		Permissions []string `json:"permissions"`
 	}
 	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
 		return
 	}
-	u, err := a.auth.CreateUser(r.Context(), in.Username, in.Password, in.IsAdmin)
+	perms, ok := permsIn(w, in.Permissions)
+	if !ok {
+		return
+	}
+	if perms&^p.Perms != 0 {
+		httpx.Error(w, http.StatusForbidden, auth.ErrNotHeld.Error())
+		return
+	}
+	u, err := a.auth.CreateUser(r.Context(), in.Username, in.Password, perms)
 	if err != nil {
 		fail(w, r, err)
 		return
 	}
-	a.record(r, p, audit.UserCreate, nil, u.Username, map[string]any{"is_admin": u.IsAdmin})
+	a.record(r, p, audit.UserCreate, nil, u.Username, map[string]any{"permissions": u.Permissions})
 	httpx.WriteJSON(w, http.StatusCreated, u)
 }
 
+// updateUser changes a password: {password}. A person changes their own; with People, the
+// password of a person whose permissions the caller holds all of (403 otherwise).
 func (a *API) updateUser(w http.ResponseWriter, r *http.Request) {
 	p, ok := a.user(w, r)
 	if !ok {
@@ -410,32 +477,116 @@ func (a *API) updateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	var in struct {
 		Password *string `json:"password"`
-		IsAdmin  *bool   `json:"is_admin"`
 	}
 	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
 		return
 	}
 	name := r.PathValue("username")
-	if !p.IsAdmin && (name != p.Username || in.IsAdmin != nil) {
-		httpx.Error(w, http.StatusForbidden, "admin required")
-		return
+	if name != p.Username {
+		if !p.Session || !p.Perms.Has(auth.PermPeople) {
+			httpx.Error(w, http.StatusForbidden, "permission required: people")
+			return
+		}
+		target, err := a.auth.GetUser(r.Context(), name)
+		if err != nil {
+			fail(w, r, err)
+			return
+		}
+		if ok, err := a.auth.Covers(r.Context(), p, target); err != nil || !ok {
+			if err != nil {
+				fail(w, r, err)
+			} else {
+				httpx.Error(w, http.StatusForbidden, "you can change the password only of a person whose permissions you all hold")
+			}
+			return
+		}
 	}
-	u, err := a.auth.UpdateUser(r.Context(), name, in.Password, in.IsAdmin)
+	u, err := a.auth.UpdateUser(r.Context(), name, in.Password)
 	if err != nil {
 		fail(w, r, err)
 		return
 	}
-	detail := map[string]any{}
 	if in.Password != nil {
-		detail["password"] = "changed" // never the value
-	}
-	if in.IsAdmin != nil {
-		detail["is_admin"] = *in.IsAdmin
-	}
-	if len(detail) > 0 {
-		a.record(r, p, audit.UserUpdate, nil, u.Username, detail)
+		a.record(r, p, audit.UserUpdate, nil, u.Username, map[string]any{"password": "changed"}) // never the value
 	}
 	httpx.WriteJSON(w, http.StatusOK, u)
+}
+
+// setUserPermissions replaces the server permissions of {username} (people): {permissions} ->
+// 200 with the user. The caller adds or removes only permissions they hold (403), and the last
+// enabled person with People keeps it (409). One user.permissions event with the old and the
+// new set.
+func (a *API) setUserPermissions(w http.ResponseWriter, r *http.Request) {
+	p, ok := a.can(w, r, auth.PermPeople)
+	if !ok {
+		return
+	}
+	var in struct {
+		Permissions []string `json:"permissions"`
+	}
+	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
+		return
+	}
+	perms, ok := permsIn(w, in.Permissions)
+	if !ok {
+		return
+	}
+	ctx := r.Context()
+	name := r.PathValue("username")
+	cur, err := a.auth.GetUser(ctx, name)
+	if err != nil {
+		fail(w, r, err)
+		return
+	}
+	if (cur.Perms^perms)&^p.Perms != 0 {
+		httpx.Error(w, http.StatusForbidden, auth.ErrNotHeld.Error())
+		return
+	}
+	old, err := a.auth.SetUserPerms(ctx, name, perms)
+	if err != nil {
+		fail(w, r, err)
+		return
+	}
+	if old != perms {
+		a.record(r, p, audit.UserPermissions, nil, name, map[string]any{"old": old.Names(), "new": perms.Names()})
+	}
+	u, err := a.auth.GetUser(ctx, name)
+	if err != nil {
+		fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, u)
+}
+
+// listPeople returns enabled usernames that start with ?q=, for a person picker: a keyset page
+// of at most 20 by username (?after=). It needs people, or access on at least one repository. The avatar of a person is drawn from the username, so only names come back.
+func (a *API) listPeople(w http.ResponseWriter, r *http.Request) {
+	p, ok := a.session(w, r)
+	if !ok {
+		return
+	}
+	if !p.Perms.Has(auth.PermPeople) && !p.Perms.Has(auth.PermRepos) {
+		ids, _, err := a.auth.ManagedRepoIDs(r.Context(), p, auth.RepoAccess)
+		if err != nil {
+			fail(w, r, err)
+			return
+		}
+		if len(ids) == 0 {
+			httpx.Error(w, http.StatusForbidden, "permission required: people, or access on a repository")
+			return
+		}
+	}
+	q := r.URL.Query()
+	names, next, err := a.auth.People(r.Context(), strings.ToLower(strings.TrimSpace(q.Get("q"))), q.Get("after"), min(httpx.Limit(r), 20))
+	if err != nil {
+		fail(w, r, err)
+		return
+	}
+	items := make([]map[string]string, len(names))
+	for i, n := range names {
+		items[i] = map[string]string{"username": n}
+	}
+	httpx.WriteJSON(w, http.StatusOK, list[map[string]string]{items, cursor(next)})
 }
 
 // --- repos ---
@@ -446,8 +597,8 @@ type repoJSON struct {
 	Description   string          `json:"description"`
 	AnonymousRead bool            `json:"anonymous_read"`
 	Config        json.RawMessage `json:"config"`
-	Permission    string          `json:"permission"`
-	LockedBy      string          `json:"locked_by"` // why uploads answer 409; "" when they do not
+	Permissions   []string        `json:"permissions"` // the caller's repository permissions
+	LockedBy      string          `json:"locked_by"`   // why uploads answer 409; "" when they do not
 	// The repo counters: every asset row counts. LastPublishedAt is null before the first publish.
 	FileCount       int64      `json:"file_count"`
 	TotalSize       int64      `json:"total_size"`
@@ -460,14 +611,14 @@ type repoJSON struct {
 	Proxy   *proxyJSON   `json:"proxy,omitempty"`
 }
 
-func toRepoJSON(r *repos.Repo, perm string) repoJSON {
+func toRepoJSON(r *repos.Repo, perms auth.RepoPerm) repoJSON {
 	cfg := r.Config
 	if len(cfg) == 0 {
 		cfg = json.RawMessage("{}")
 	}
 	out := repoJSON{
 		Name: r.Name, Format: r.Format, Description: r.Description, AnonymousRead: r.AnonymousRead, Config: cfg,
-		Permission: perm, LockedBy: r.LockedBy, FileCount: r.FileCount, TotalSize: r.TotalSize, Kind: r.Kind,
+		Permissions: perms.Names(), LockedBy: r.LockedBy, FileCount: r.FileCount, TotalSize: r.TotalSize, Kind: r.Kind,
 	}
 	if r.Kind == repos.KindGroup {
 		n := r.MemberCount
@@ -487,17 +638,6 @@ func (a *API) record(r *http.Request, p *auth.Principal, action string, repo *re
 		e.RepoID, e.Repo = repo.ID, repo.Name
 	}
 	a.audit.Record(r.Context(), r, e)
-}
-
-func (a *API) permission(ctx context.Context, p *auth.Principal, repo *repos.Repo) (string, error) {
-	if p != nil && p.IsAdmin {
-		return "admin", nil
-	}
-	l, err := a.auth.Access(ctx, p, repo)
-	if err != nil {
-		return "", err
-	}
-	return l.String(), nil
 }
 
 func (a *API) listRepos(w http.ResponseWriter, r *http.Request) {
@@ -525,18 +665,21 @@ func (a *API) listRepos(w http.ResponseWriter, r *http.Request) {
 		if !isAll && !readable[repo.ID] && !repo.AnonymousRead {
 			continue
 		}
-		perm, err := a.permission(ctx, p, repo)
+		perms, err := a.auth.RepoPerms(ctx, p, repo)
 		if err != nil {
 			fail(w, r, err)
 			return
 		}
-		out = append(out, toRepoJSON(repo, perm))
+		if perms == 0 {
+			continue
+		}
+		out = append(out, toRepoJSON(repo, perms))
 	}
 	httpx.WriteJSON(w, http.StatusOK, out)
 }
 
 func (a *API) createRepo(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.admin(w, r)
+	p, ok := a.can(w, r, auth.PermRepos)
 	if !ok {
 		return
 	}
@@ -581,7 +724,7 @@ func (a *API) createRepo(w http.ResponseWriter, r *http.Request) {
 	}
 	detail["format"], detail["anonymous_read"], detail["kind"] = repo.Format, repo.AnonymousRead, repo.Kind
 	a.record(r, p, audit.RepoCreate, repo, repo.Name, detail)
-	a.writeRepo(w, r, http.StatusCreated, p, repo, "admin")
+	a.writeRepo(w, r, http.StatusCreated, p, repo, auth.AllRepoPerms)
 }
 
 func (a *API) getRepo(w http.ResponseWriter, r *http.Request) {
@@ -589,16 +732,18 @@ func (a *API) getRepo(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	perm, err := a.permission(r.Context(), p, repo)
+	perms, err := a.auth.RepoPerms(r.Context(), p, repo)
 	if err != nil {
 		fail(w, r, err)
 		return
 	}
-	a.writeRepo(w, r, http.StatusOK, p, repo, perm)
+	a.writeRepo(w, r, http.StatusOK, p, repo, perms)
 }
 
+// updateRepo changes the description, the format settings or the proxy remote of repo {name}
+// (settings).
 func (a *API) updateRepo(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.admin(w, r)
+	p, cur, perms, ok := a.canRepo(w, r, auth.RepoSettings)
 	if !ok {
 		return
 	}
@@ -612,11 +757,7 @@ func (a *API) updateRepo(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.Proxy != nil {
 		// The remote changes first: a refused change leaves the repo as it was.
-		repo, err := a.repos.ByName(r.Context(), r.PathValue("name"))
-		if err != nil {
-			fail(w, r, err)
-			return
-		}
+		repo := cur
 		old, px, err := a.repos.UpdateProxy(r.Context(), repo, *in.Proxy)
 		if err != nil {
 			fail(w, r, err)
@@ -647,13 +788,15 @@ func (a *API) updateRepo(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	a.writeRepo(w, r, http.StatusOK, p, repo, "admin")
+	a.writeRepo(w, r, http.StatusOK, p, repo, perms)
 }
 
 // --- permissions ---
 
+// listPermissions returns the permission set of each person with a grant on repo {name}
+// (access): [{username, perms}] by username.
 func (a *API) listPermissions(w http.ResponseWriter, r *http.Request) {
-	repo, ok := a.adminRepo(w, r)
+	_, repo, _, ok := a.canRepo(w, r, auth.RepoAccess)
 	if !ok {
 		return
 	}
@@ -680,7 +823,7 @@ type assetJSON struct {
 }
 
 func (a *API) listAssets(w http.ResponseWriter, r *http.Request) {
-	repo, _, ok := a.auth.RepoGate(w, r, r.PathValue("name"), "", auth.Read, true)
+	repo, _, ok := a.auth.RepoGate(w, r, r.PathValue("name"), "", auth.RepoDownload, true)
 	if !ok {
 		return
 	}
@@ -727,7 +870,7 @@ func (a *API) search(w http.ResponseWriter, r *http.Request) {
 	}
 	empty := list[hitJSON]{Items: []hitJSON{}}
 
-	ids, isAll, err := a.auth.ReadableRepoIDs(ctx, p)
+	ids, isAll, err := a.auth.DownloadableRepoIDs(ctx, p)
 	if err != nil {
 		fail(w, r, err)
 		return

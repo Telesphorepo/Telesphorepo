@@ -1,21 +1,16 @@
 <!--
   The Settings navigation (src/lib/nav.ts): a heading per group, an icon on every item. Groups are
   separated by space, never by a line, so no line in the sidebar nearly meets a line in the
-  content. The open page (or a page below it) fills its whole item. Admin groups show only to
-  admins; a setup-only session sees only the second-factor page.
+  content. The open page (or a page below it) fills its whole item. Each item shows only to a
+  person with its permission, and a group without items is hidden; a setup-only session sees only
+  the second-factor page.
 -->
 <script lang="ts">
-  import { settingsNav, setupOnlyPaths } from "$lib/nav";
-  import { auth } from "$lib/auth.svelte";
+  import { visibleNav } from "$lib/nav";
   import { href, isActive } from "$lib/router.svelte";
   import { cn } from "$lib/utils";
 
-  const groups = $derived(
-    settingsNav
-      .filter((g) => !g.admin || auth.isAdmin)
-      .map((g) => (auth.setupOnly ? { ...g, items: g.items.filter((i) => setupOnlyPaths.includes(i.path)) } : g))
-      .filter((g) => g.items.length > 0),
-  );
+  const groups = $derived(visibleNav());
 </script>
 
 <nav aria-label="Settings" class="flex flex-col gap-6">

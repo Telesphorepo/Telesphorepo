@@ -1,5 +1,5 @@
 <!--
-  Nexus migration (administrators): Nexus servers whose repositories this server copies and keeps
+  Nexus migration (Nexus migration permission): Nexus servers whose repositories this server copies and keeps
   in sync until you switch over. Add a server here; its page chooses the repositories, shows the
   syncs and switches over.
 -->

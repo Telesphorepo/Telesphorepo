@@ -4,9 +4,6 @@
 
 import type { AccessNetworks, AccessPipeline, IPList, IPRule, RepoAccess, Trust } from "$lib/api";
 
-export type Level = "read" | "write";
-export const levelLabel: Record<Level, string> = { read: "Can download", write: "Can publish" };
-
 /** What the Access tab saves from its save bar. ci: the ids of the CI pipelines that list the repo. */
 export type AccessDraft = {
   public: boolean;
@@ -108,7 +105,7 @@ export function changesOf(repo: string, saved: AccessDraft, d: AccessDraft, pipe
   for (const s of scopes) {
     if (sameRules(saved[s.key], d[s.key])) continue;
     const n = networkNames(d[s.key], lists);
-    out.push(n.length ? `${s.verb} ${repo} must come from ${and(n)}, for administrators too` : `${s.verb} ${repo} can come from any network`);
+    out.push(n.length ? `${s.verb} ${repo} must come from ${and(n)}, for everyone` : `${s.verb} ${repo} can come from any network`);
   }
   return out;
 }

@@ -11,6 +11,7 @@
   import { api, type Repo, type RepoKind } from "$lib/api";
   import { Resource, type TableSource } from "$lib/load.svelte";
   import { href, repoPath } from "$lib/router.svelte";
+  import { auth } from "$lib/auth.svelte";
   import { Button } from "$lib/components/ui/button";
   import Section from "$lib/components/Section.svelte";
   import DataTable from "$lib/components/DataTable.svelte";
@@ -166,6 +167,6 @@
   error={all.error}
   none="Every repository of this format is in the group already."
   newLabel="New repository"
-  newHref={href("/settings/repositories/new")}
+  newHref={auth.can("repos") ? href("/settings/repositories/new") : undefined}
   onAdd={add}
 />

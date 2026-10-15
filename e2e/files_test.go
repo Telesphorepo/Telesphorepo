@@ -178,10 +178,10 @@ func TestTree(t *testing.T) {
 	repo := RandName("tree")
 	s.CreateRepo(t, repo, "maven", false, nil)
 	w, reader := RandName("writer"), RandName("reader")
-	s.CreateUser(t, w, "writer-pass-1234", false)
-	s.CreateUser(t, reader, "reader-pass-1234", false)
-	s.SetPermission(t, repo, w, "write")
-	s.SetPermission(t, repo, reader, "read")
+	s.CreateUser(t, w, "writer-pass-1234")
+	s.CreateUser(t, reader, "reader-pass-1234")
+	s.SetPerms(t, repo, w, "download", "publish")
+	s.SetPerms(t, repo, reader, "download")
 	rauth := Basic{reader, "reader-pass-1234"}
 
 	files := []string{
@@ -254,13 +254,16 @@ func TestDelete(t *testing.T) {
 		s.CreateRepo(t, mvn, "maven", false, nil)
 		s.CreateRepo(t, raw, "raw", false, nil)
 		s.CreateRepo(t, other, "raw", false, nil)
-		w := RandName("writer")
-		s.CreateUser(t, w, "writer-pass-1234", false)
-		for _, r := range []string{mvn, raw, other} {
-			s.SetPermission(t, r, w, "write")
-		}
+		// w deletes files of mvn and raw; pub publishes to mvn but does not delete.
+		w, pub := RandName("writer"), RandName("pub")
+		s.CreateUser(t, w, "writer-pass-1234")
+		s.CreateUser(t, pub, "pub-pass-1234")
+		s.SetPerms(t, mvn, w, "download", "publish", "delete")
+		s.SetPerms(t, raw, w, "download", "publish", "delete")
+		s.SetPerms(t, other, w, "download", "publish")
+		s.SetPerms(t, mvn, pub, "download", "publish")
 
-		mfiles := []string{"g/a/1.0/a-1.0.jar", "g/a/1.0/a-1.0.pom", "g/a/2.0/a-2.0.jar", "g/a/maven-metadata.xml", "g/b/1.0/b-1.0.jar"}
+		mfiles := []string{"g/a/1.0/a-1.0.jar", "g/a/1.0/a-1.0.pom", "g/a/2.0/a-2.0.jar", "g/a/maven-metadata.xml", "g/b/1.0/b-1.0.jar", "g/c/1.0/c-1.0.jar"}
 		ps := s.MintSession(t, w, mvn)
 		for _, f := range mfiles {
 			resp, body := authPut(t, s, "/maven/"+mvn+"/"+f, "x "+f, ps.Auth())
@@ -273,7 +276,8 @@ func TestDelete(t *testing.T) {
 			wantStatus(t, resp, body, http.StatusCreated)
 		}
 
-		// Who may delete: a publish session for the repo, or an admin UI session.
+		// Who may delete: a person who holds delete on the repo, with a publish session for the repo
+		// or a UI session.
 		jar := "g/a/1.0/a-1.0.jar"
 		refused := []struct {
 			what string
@@ -283,7 +287,8 @@ func TestDelete(t *testing.T) {
 			{"the writer's password", Basic{w, "writer-pass-1234"}},
 			{"the admin's password", s.AdminBasic()},
 			{"a session for another repo", s.MintSession(t, w, other).Auth()},
-			{"the writer's UI session", s.LoginTOTP(t, w)},
+			{"a publish session of a person without delete", s.MintSession(t, pub, mvn).Auth()},
+			{"the UI session of a person without delete", s.LoginTOTP(t, pub)},
 		}
 		for _, r := range refused {
 			if st, _ := deleteFiles(t, s, mvn, "path", jar, r.auth); st != http.StatusUnauthorized && st != http.StatusForbidden {
@@ -302,6 +307,8 @@ func TestDelete(t *testing.T) {
 		mustDelete(t, s, mvn, "path", jar, ps.Auth(), 0)
 		// A folder by prefix, with the token as a Bearer token.
 		mustDelete(t, s, mvn, "prefix", "g/a/2.0", Bearer{ps.Token}, 1)
+		// The writer signed in to the UI (delete needs the second factor) deletes too.
+		mustDelete(t, s, mvn, "prefix", "g/c", s.SignIn(t, w, "writer-pass-1234"), 1)
 		// An admin signed in to the UI (with the second factor) deletes too.
 		mustDelete(t, s, mvn, "prefix", "g/a/1.0/", s.LoginTOTP(t, s.AdminUser), 1)
 		if got := nodeNames(treeAll(t, s, mvn, "g/a", 50, s.Admin())); !slices.Equal(got, []string{"file:maven-metadata.xml"}) {
@@ -326,7 +333,8 @@ func TestDelete(t *testing.T) {
 			}
 		}
 
-		// Repo delete: admin only; rows and blobs go, and the name is free again.
+		// Repo delete needs the All repositories permission; rows and blobs go, and the name is free
+		// again.
 		del := map[string][]string{"names": {raw}}
 		if st, b := s.API(t, http.MethodPost, "/api/repos/delete", del, s.SignIn(t, w, "writer-pass-1234")); st != http.StatusForbidden {
 			t.Fatalf("repo delete by a writer: status %d, want 403: %s", st, b)
@@ -390,8 +398,8 @@ func TestRepoCounters(t *testing.T) {
 	repo := RandName("raw")
 	s.CreateRepo(t, repo, "raw", false, map[string]any{"overwrite": "allow"})
 	w := RandName("writer")
-	s.CreateUser(t, w, "writer-pass-1234", false)
-	s.SetPermission(t, repo, w, "write")
+	s.CreateUser(t, w, "writer-pass-1234")
+	s.SetPerms(t, repo, w, "download", "publish", "delete")
 	want := func(what string, n, size int, published bool) {
 		t.Helper()
 		c := countersOf(t, s, repo)
@@ -443,10 +451,10 @@ func TestManualUploadMaven(t *testing.T) {
 	repo := RandName("mvn")
 	s.CreateRepo(t, repo, "maven", false, nil)
 	w, reader := RandName("writer"), RandName("reader")
-	s.CreateUser(t, w, "writer-pass-1234", false)
-	s.CreateUser(t, reader, "reader-pass-1234", false)
-	s.SetPermission(t, repo, w, "write")
-	s.SetPermission(t, repo, reader, "read")
+	s.CreateUser(t, w, "writer-pass-1234")
+	s.CreateUser(t, reader, "reader-pass-1234")
+	s.SetPerms(t, repo, w, "download", "publish")
+	s.SetPerms(t, repo, reader, "download")
 	rauth := Basic{reader, "reader-pass-1234"}
 	ps := s.MintSession(t, w, repo)
 
@@ -566,9 +574,9 @@ func TestManualUploadRaw(t *testing.T) {
 	s.CreateRepo(t, repo, "raw", false, nil)
 	s.CreateRepo(t, other, "raw", false, nil)
 	w := RandName("writer")
-	s.CreateUser(t, w, "writer-pass-1234", false)
-	s.SetPermission(t, repo, w, "write")
-	s.SetPermission(t, other, w, "write")
+	s.CreateUser(t, w, "writer-pass-1234")
+	s.SetPerms(t, repo, w, "download", "publish")
+	s.SetPerms(t, other, w, "download", "publish")
 	ps := s.MintSession(t, w, repo)
 
 	a, b := rawRandom(t, 3000), rawRandom(t, 10)
@@ -617,10 +625,10 @@ func TestDebianDeleteAndUpload(t *testing.T) {
 	repo := RandName("deb")
 	s.CreateRepo(t, repo, "debian", false, map[string]any{"architectures": archs})
 	w, reader := RandName("writer"), RandName("reader")
-	s.CreateUser(t, w, "writer-pass-1234", false)
-	s.CreateUser(t, reader, "reader-pass-1234", false)
-	s.SetPermission(t, repo, w, "write")
-	s.SetPermission(t, repo, reader, "read")
+	s.CreateUser(t, w, "writer-pass-1234")
+	s.CreateUser(t, reader, "reader-pass-1234")
+	s.SetPerms(t, repo, w, "download", "publish", "delete")
+	s.SetPerms(t, repo, reader, "download")
 	rauth := Basic{reader, "reader-pass-1234"}
 
 	ps := s.MintSession(t, w, repo)

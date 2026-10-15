@@ -17,8 +17,8 @@ SECONDARY. Items under "Unverified" must not be used as facts.
    https://community.sonatype.com/t/sonatype-nexus-repository-oss-is-now-community-edition/14324,
    https://help.sonatype.com/en/ce-onboarding.html
 5. **Nexus 3.87.0 (2025-12-02) cut the Community Edition to 40,000 components and 100,000
-   requests/day** (from 100K / 200K). Over a limit, "users are not able to add new components"
-   until usage drops or you buy Pro. Sonatype staff: "to keep the product sustainable".
+   requests/day** (from 100K / 200K). Over a limit, the server goes read-only: "users are not able
+   to add new components" until usage drops or you buy Pro. Sonatype staff: "to keep the product sustainable".
    https://help.sonatype.com/en/sonatype-nexus-repository-3-87-0-release-notes.html,
    https://help.sonatype.com/en/usage-center.html,
    https://community.sonatype.com/t/sonatype-nexus-repository-3-87-0-released/15852
@@ -46,6 +46,13 @@ SECONDARY. Items under "Unverified" must not be used as facts.
     https://help.sonatype.com/en/nexus-repository-feature-matrix.html,
     https://help.sonatype.com/en/branding-capability.html
 
+12. **Maven Central has publishing limits from 2026-10-01**, per organization and per calendar
+    month, set where the top 10% of publishers begin: about 7 releases, 78 MB and 1,167 files.
+    Over a limit, a 30-day grace period starts; after it, new releases that keep the
+    organization over the limit are refused. Artifacts for a commercial product need Publisher
+    Pro at any volume. https://central.sonatype.org/publish/maven-central-publishing-limits/,
+    https://community.sonatype.com/t/maven-central-publishing-limits-are-now-in-effect/16675
+
 ## Alternatives (one line each)
 
 - Reposilite: free, Apache-2.0, JVM (Maven) only. https://github.com/dzikoysk/reposilite
@@ -64,7 +71,6 @@ SECONDARY. Items under "Unverified" must not be used as facts.
 
 ## Unverified — do not use as fact
 
-- That the Community Edition becomes "read-only" or "locked" (docs say only: no new components).
 - The CE grace period (45 vs 30 days) and whether it still applies after 3.87.
 - That welcome/home page customisation was removed from OSS (only branding is documented Pro-only).
 - The OrientDB CVE IDs (CVE-2026-*) — per Sonatype's page, not checked in NVD.

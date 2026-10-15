@@ -1,6 +1,6 @@
 <!--
   Browse home: every repository the visitor can download from, in one table. A filter box and a
-  format filter narrow it in the browser (the list is never paged). Admins create a repository
+  format filter narrow it in the browser (the list is never paged). People with All repositories create a repository
   from the toolbar.
 -->
 <script lang="ts">
@@ -74,7 +74,7 @@
       </Select.Root>
     {/if}
     {#snippet end()}
-      {#if auth.isAdmin}<Button href={newRepo}><PlusIcon />New repository</Button>{/if}
+      {#if auth.can("repos")}<Button href={newRepo}><PlusIcon />New repository</Button>{/if}
     {/snippet}
   </Toolbar>
 {/if}
@@ -85,7 +85,7 @@
       <CompactEmpty icon={SearchXIcon} title="No repository matches" text="Change the filter, or clear it to see every repository.">
         <Button variant="outline" onclick={clear}>Clear the filter</Button>
       </CompactEmpty>
-    {:else if auth.isAdmin}
+    {:else if auth.can("repos")}
       <EmptyState
         icon={DatabaseIcon}
         title="No repositories yet"

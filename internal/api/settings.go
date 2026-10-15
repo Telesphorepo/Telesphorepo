@@ -64,8 +64,30 @@ func (a *API) authConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// settingsPerms are the server permissions that reach the settings: each one edits its own keys
+// (settingPerm).
+const settingsPerms = auth.PermGeneral | auth.PermSignIn | auth.PermStorage | auth.PermNetwork
+
+// settingPerm is the server permission that edits setting key: sign-in options for the SSO
+// group, storage for the blob store, network for the trusted proxies, and general for every
+// other setting (format settings included).
+func settingPerm(key string) auth.ServerPerm {
+	switch {
+	case key == settings.KeyTrustedProxies:
+		return auth.PermNetwork
+	case settings.IsStorageKey(key):
+		return auth.PermStorage
+	}
+	if def := settings.Lookup(key); def != nil && def.Group == settings.GroupSSO {
+		return auth.PermSignIn
+	}
+	return auth.PermGeneral
+}
+
+// getSettings returns every setting (general, signin, storage or network). Secret values stay
+// hidden.
 func (a *API) getSettings(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	if _, ok := a.can(w, r, settingsPerms); !ok {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, a.settingsList(r))
@@ -133,14 +155,22 @@ func (a *API) settingsError(w http.ResponseWriter, r *http.Request, err error, i
 	httpx.WriteJSON(w, status, map[string]any{"error": ve.Error(), "fields": ve.Fields})
 }
 
+// patchSettings saves a settings patch. The caller holds the permission of every key in it
+// (settingPerm; 403 otherwise).
 func (a *API) patchSettings(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.admin(w, r)
+	p, ok := a.can(w, r, settingsPerms)
 	if !ok {
 		return
 	}
 	patch, ok := a.decodePatch(w, r)
 	if !ok {
 		return
+	}
+	for k := range patch {
+		if need := settingPerm(k); !p.Perms.Has(need) {
+			httpx.Error(w, http.StatusForbidden, "permission required for "+k+": "+strings.Join(need.Names(), ""))
+			return
+		}
 	}
 	items := a.settings.List(r.Context())
 	if msg := a.unknownProxyList(patch); msg != "" {
@@ -265,7 +295,7 @@ func (a *API) startMove(w http.ResponseWriter, r *http.Request, patch map[string
 }
 
 func (a *API) testStorage(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	if _, ok := a.can(w, r, auth.PermStorage); !ok {
 		return
 	}
 	patch, ok := a.decodePatch(w, r)
@@ -288,7 +318,7 @@ func (a *API) testStorage(w http.ResponseWriter, r *http.Request) {
 // saved), including fetching the issuer's discovery document. {ok:true} or 400 {ok:false, error,
 // fields}.
 func (a *API) testOIDC(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	if _, ok := a.can(w, r, auth.PermSignIn); !ok {
 		return
 	}
 	patch, ok := a.decodePatch(w, r)

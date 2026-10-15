@@ -1,7 +1,8 @@
 <!--
   Publish to this repository, for the people who can publish: one card per place a publisher
   publishes from, and only the places this format has. From your computer (the Gradle plugin or
-  the Maven extension, with a one-time device approval), from CI (the CI pipeline an administrator
+  the Maven extension, with a one-time device approval: two-step verification for a password
+  account, a new single sign-on for a single sign-on account), from CI (the CI pipeline that a person with CI pipelines
   adds, then the workflow), and by hand (upload in the browser, or a publish token with curl). The
   snippets come from the format plugin. A pause shows once, above the tabs (RepoView).
 -->
@@ -46,7 +47,12 @@
   <ErrorState error={usage.error} title="The instructions did not load" onRetry={usage.reload} />
 {:else}
   {#if computer.length}
-    <Section title="From your computer" description="The Gradle plugin or the Maven extension signs this computer in once, after you approve it.">
+    <Section
+      title="From your computer"
+      description={auth.user?.kind === "oidc"
+        ? "The Gradle plugin or the Maven extension signs this computer in once, after you approve it with a new single sign-on."
+        : "The Gradle plugin or the Maven extension signs this computer in once, after you approve it with two-step verification."}
+    >
       <SnippetTabs snippets={computer} label="Build tool" />
     </Section>
   {/if}
@@ -55,10 +61,10 @@
     <Section title="From CI" description="The job proves who it is with its own identity token, so it stores no secret.">
       <div class="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
         {@render part(1, "Add a CI pipeline", `It names the CI repository and branches that may publish to ${repo.name}.`)}
-        {#if auth.isAdmin}
-          <Button variant="outline" class="shrink-0" href={href("/settings/ci-pipelines/new")}><PlusIcon />New CI pipeline</Button>
+        {#if repo.permissions?.includes("pipelines")}
+          <Button variant="outline" class="shrink-0" href={href("/settings/ci-pipelines/new", { repo: repo.name, back: repoPath(repo.name, "publish") })}><PlusIcon />New CI pipeline</Button>
         {:else}
-          <p class="text-meta text-muted-foreground sm:max-w-64 sm:text-right">Ask an administrator to add one for your CI repository and branch.</p>
+          <p class="text-meta text-muted-foreground sm:max-w-64 sm:text-right">Ask a person who manages the CI pipelines of this repository to add one for your CI repository and branch.</p>
         {/if}
       </div>
       <Separator class="my-6" />
@@ -69,7 +75,8 @@
     </Section>
   {/if}
 
-  {#if hand.length}
+  <!-- A publish token by hand needs a password account. -->
+  {#if hand.length && auth.user?.kind === "local"}
     <Section title="By hand" description="Upload files in the browser, or send them with curl and a publish token.">
       {#snippet actions()}
         {#if canUpload}

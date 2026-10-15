@@ -5,7 +5,7 @@
   repository is for the people who can publish: from a computer, from CI, or by hand. The upload
   page is a level below. The parent keys it by name.
 
-  A proxy has the Files tab (its cached files; administrators delete them) and the Use tab, and no
+  A proxy has the Files tab (its cached files; people with Delete files delete them) and the Use tab, and no
   publish or upload. A group has no files and no tabs: its page is the Use view and its members,
   each a link to the member's page.
 -->
@@ -78,16 +78,18 @@
   const r = $derived(repo.data ?? null);
   const group = $derived(r?.kind === "group");
   const proxy = $derived(r?.kind === "proxy");
-  const isAdmin = $derived(r?.permission === "admin");
+  // The caller's permissions on the repository; a setup-only session uses none of them.
+  const perms = $derived(r && auth.user && !auth.setupOnly ? (r.permissions ?? []) : []);
+  // Settings shows to anyone who can open one of its tabs.
+  const canSettings = $derived(perms.includes("settings") || perms.includes("access") || perms.includes("pipelines"));
   // Nobody publishes to a group or a proxy.
-  const canWrite = $derived(
-    !!r && r.kind === "hosted" && !!auth.user && !auth.setupOnly && (r.permission === "admin" || r.permission === "write"),
-  );
+  const canWrite = $derived(!!r && r.kind === "hosted" && perms.includes("publish"));
   const locked = $derived(r?.locked_by ?? "");
-  const canUpload = $derived(canWrite && !!r && uploadFormats.includes(r.format));
-  // Who deletes files on the Files tab: publishers of a hosted repository; administrators for a
-  // proxy's cached files (with the UI session).
-  const canDelete = $derived(proxy ? isAdmin && !!auth.user && !auth.setupOnly : canWrite && !locked);
+  // An upload needs a manual publish token, which only a password account gets.
+  const canUpload = $derived(canWrite && !!r && uploadFormats.includes(r.format) && auth.user?.kind === "local");
+  // Who deletes files on the Files tab: people with Delete files, with the UI session; a hosted
+  // repository not while it is paused, a proxy its cached files.
+  const canDelete = $derived(!!r && !group && perms.includes("delete") && (proxy || !locked));
 
   // On a phone the tab rail scrolls: keep the open tab in view.
   let tabRail = $state<HTMLDivElement | null>(null);
@@ -135,7 +137,7 @@
       ? "A group only reads its repositories. Publish to one of them."
       : proxy
         ? "A proxy only keeps the files of its remote repository."
-        : "An administrator gives publish access."}
+        : "A person who manages its access gives the Publish permission."}
   >
     <Button variant="outline" href={href(repoPath(r.name))}>{group ? "Open the group" : "Open the files"}</Button>
   </EmptyState>
@@ -157,7 +159,7 @@
       <RepoKindIcon kind={r.kind} iconClass="size-5" />
     {/snippet}
     {#snippet actions()}
-      {#if isAdmin}
+      {#if canSettings}
         <Button variant="outline" href={href(repoSettingsPath(r.name))}><SettingsIcon />Settings</Button>
       {/if}
       {#if canUpload}
@@ -168,7 +170,7 @@
     {/snippet}
   </PageHeader>
 
-  {#if canWrite && locked}
+  {#if (canWrite || perms.includes("delete")) && locked}
     <Alert.Root class="mb-6">
       <PauseIcon />
       <Alert.Title>Uploads and deletes are paused</Alert.Title>
@@ -191,7 +193,7 @@
   {/if}
 
   {#if view.kind === "files"}
-    <FilesTab repo={r} path={view.path} {query} {base} canWrite={canDelete} {canUpload} {isAdmin} />
+    <FilesTab repo={r} path={view.path} {query} {base} canWrite={canDelete} {canUpload} />
   {:else if view.kind === "use"}
     <UseTab repo={r} {usage} {base} />
     {#if group}<GroupMembersList repo={r} />{/if}

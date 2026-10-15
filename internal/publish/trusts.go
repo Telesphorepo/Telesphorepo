@@ -508,7 +508,9 @@ func (s *Service) OIDCSession(ctx context.Context, ip netip.Addr, raw, repoName 
 	if !ok {
 		return nil, errorf(ErrDenied, "token is not a valid identity token")
 	}
-	refused := errorf(ErrDenied, "no trust policy allows this token to publish to "+repoName)
+	const noBaseURL = "the server has no public address to check the token's audience against"
+	fix := ". An administrator adds or changes the CI pipeline on Settings › CI pipelines."
+	refused := errorf(ErrDenied, "no trust policy allows this token to publish to "+repoName+fix)
 	repo, err := s.repos.ByName(ctx, repoName)
 	if errors.Is(err, repos.ErrNotFound) {
 		return nil, refused
@@ -536,6 +538,10 @@ func (s *Service) OIDCSession(ctx context.Context, ip netip.Addr, raw, repoName 
 		if aud == "" {
 			aud = s.baseURL()
 		}
+		if aud == "" {
+			reason = noBaseURL
+			continue
+		}
 		if !slices.Contains(tok.Audience, aud) {
 			reason = "the token's audience is not " + aud
 			continue
@@ -558,8 +564,11 @@ func (s *Service) OIDCSession(ctx context.Context, ip netip.Addr, raw, repoName 
 		break
 	}
 	if match == nil {
+		if reason == noBaseURL {
+			fix = ". An administrator sets the public address on Settings › General, or an audience on the CI pipeline on Settings › CI pipelines."
+		}
 		if reason != "" {
-			return nil, errorf(ErrDenied, "no trust policy allows this token to publish to "+repoName+": "+reason)
+			return nil, errorf(ErrDenied, "no trust policy allows this token to publish to "+repoName+": "+reason+fix)
 		}
 		return nil, refused
 	}

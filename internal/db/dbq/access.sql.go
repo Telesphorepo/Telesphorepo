@@ -9,58 +9,26 @@ import (
 	"context"
 )
 
-const listActiveAdmins = `-- name: ListActiveAdmins :many
-SELECT username, kind FROM users WHERE is_admin = 1 AND disabled = 0 ORDER BY username
-`
-
-type ListActiveAdminsRow struct {
-	Username string
-	Kind     string
-}
-
-// The enabled admins in username order, through users_admins.
-func (q *Queries) ListActiveAdmins(ctx context.Context) ([]ListActiveAdminsRow, error) {
-	rows, err := q.db.QueryContext(ctx, listActiveAdmins)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListActiveAdminsRow
-	for rows.Next() {
-		var i ListActiveAdminsRow
-		if err := rows.Scan(&i.Username, &i.Kind); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const listRepoGrants = `-- name: ListRepoGrants :many
 
-SELECT u.username, u.is_admin, u.disabled, u.kind, p.level
+SELECT u.username, u.disabled, u.kind, p.perm,
+  EXISTS (SELECT 1 FROM user_permissions up WHERE up.user_id = u.id AND up.perm = 'repos') AS all_repos
 FROM repo_permissions p JOIN users u ON u.id = p.user_id
 WHERE p.repo_id = ?
 `
 
 type ListRepoGrantsRow struct {
 	Username string
-	IsAdmin  bool
 	Disabled bool
 	Kind     string
-	Level    string
+	Perm     string
+	AllRepos bool
 }
 
 // Effective access (internal/access): who can download from and publish to a repo, and what a
-// user can do in each repo. Admin pages only; every query is bounded by one repo or one user.
-// The grants of one repo with their users, through the repo_permissions primary key. The caller
-// sorts them.
+// person can do in each repo. Every query is bounded by one repo, one user or one permission.
+// The grants of one repo with their users, one row per permission, through the
+// repo_permissions primary key. The caller groups and sorts them.
 func (q *Queries) ListRepoGrants(ctx context.Context, repoID int64) ([]ListRepoGrantsRow, error) {
 	rows, err := q.db.QueryContext(ctx, listRepoGrants, repoID)
 	if err != nil {
@@ -72,10 +40,10 @@ func (q *Queries) ListRepoGrants(ctx context.Context, repoID int64) ([]ListRepoG
 		var i ListRepoGrantsRow
 		if err := rows.Scan(
 			&i.Username,
-			&i.IsAdmin,
 			&i.Disabled,
 			&i.Kind,
-			&i.Level,
+			&i.Perm,
+			&i.AllRepos,
 		); err != nil {
 			return nil, err
 		}
@@ -136,15 +104,16 @@ func (q *Queries) ListRepoTrusts(ctx context.Context, repoID int64) ([]ListRepoT
 }
 
 const listUserGrants = `-- name: ListUserGrants :many
-SELECT p.repo_id, p.level FROM repo_permissions p WHERE p.user_id = ?
+SELECT p.repo_id, p.perm FROM repo_permissions p WHERE p.user_id = ?
 `
 
 type ListUserGrantsRow struct {
 	RepoID int64
-	Level  string
+	Perm   string
 }
 
-// The grants of one user with their repos, through repo_permissions_user.
+// The grants of one user with their repos, one row per permission, through
+// repo_permissions_user.
 func (q *Queries) ListUserGrants(ctx context.Context, userID int64) ([]ListUserGrantsRow, error) {
 	rows, err := q.db.QueryContext(ctx, listUserGrants, userID)
 	if err != nil {
@@ -154,7 +123,7 @@ func (q *Queries) ListUserGrants(ctx context.Context, userID int64) ([]ListUserG
 	var items []ListUserGrantsRow
 	for rows.Next() {
 		var i ListUserGrantsRow
-		if err := rows.Scan(&i.RepoID, &i.Level); err != nil {
+		if err := rows.Scan(&i.RepoID, &i.Perm); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

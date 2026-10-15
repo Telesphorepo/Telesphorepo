@@ -1,5 +1,5 @@
 <!--
-  Networks (administrators): named address ranges (network lists) that repositories allow
+  Networks (Network permission): named address ranges (network lists) that repositories allow
   downloads and publishes from. Lists the server downloads (GitHub Actions, Cloudflare) refresh
   every day; your own lists hold the addresses you paste. Each row links to the repositories that
   use the list; a row opens the list.

@@ -1,5 +1,5 @@
 <!--
-  A person's page (administrators): /settings/people/:name. The content starts again when the name
+  A person's page (People): /settings/people/:name. The content starts again when the name
   changes, so no edit of one person carries over to another.
 -->
 <script lang="ts">

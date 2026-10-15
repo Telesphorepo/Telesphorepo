@@ -47,15 +47,15 @@ func timeOrNil(t time.Time) *time.Time {
 	return &u
 }
 
-// writeRepo answers the repo JSON of repo for p with the details of its kind: the members of a
-// group and the groups of a member (only those p can read), and the remote of a proxy (only for
-// an admin).
-func (a *API) writeRepo(w http.ResponseWriter, r *http.Request, status int, p *auth.Principal, repo *repos.Repo, perm string) {
+// writeRepo answers the repo JSON of repo for p, who holds perms on it, with the details of its
+// kind: the members of a group and the groups of a member (only those p can download from), and
+// the remote of a proxy (only for a holder of settings).
+func (a *API) writeRepo(w http.ResponseWriter, r *http.Request, status int, p *auth.Principal, repo *repos.Repo, perms auth.RepoPerm) {
 	ctx := r.Context()
-	out := toRepoJSON(repo, perm)
+	out := toRepoJSON(repo, perms)
 	readable := func(x *repos.Repo) (bool, error) {
-		lvl, err := a.auth.Access(ctx, p, x)
-		return lvl >= auth.Read, err
+		set, err := a.auth.RepoPerms(ctx, p, x)
+		return set.Has(auth.RepoDownload), err
 	}
 	switch repo.Kind {
 	case repos.KindGroup:
@@ -76,7 +76,7 @@ func (a *API) writeRepo(w http.ResponseWriter, r *http.Request, status int, p *a
 			}
 		}
 	case repos.KindProxy:
-		if px, ok := a.repos.Proxy(repo.ID); ok && perm == "admin" {
+		if px, ok := a.repos.Proxy(repo.ID); ok && perms.Has(auth.RepoSettings) {
 			out.Proxy = &proxyJSON{
 				RemoteURL: px.RemoteURL, HasCredentials: px.HasCredentials(),
 				MetadataTTL: int64(px.MetadataTTL / time.Second), NotFoundTTL: int64(px.NotFoundTTL / time.Second),
@@ -149,9 +149,10 @@ func proxyChanges(old, new *repos.Proxy) []string {
 	return out
 }
 
-// setMembers replaces the members of a group and their order (admin): {"members": [names]}.
+// setMembers replaces the members of a group and their order (settings): {"members": [names]}.
+// A member serves its files through the group only to those who can download from the member.
 func (a *API) setMembers(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.admin(w, r)
+	p, _, perms, ok := a.canRepo(w, r, auth.RepoSettings)
 	if !ok {
 		return
 	}
@@ -167,13 +168,13 @@ func (a *API) setMembers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.record(r, p, audit.RepoUpdate, repo, repo.Name, map[string]any{"fields": []string{"members"}, "members": in.Members})
-	a.writeRepo(w, r, http.StatusOK, p, repo, "admin")
+	a.writeRepo(w, r, http.StatusOK, p, repo, perms)
 }
 
-// testProxy checks the remote of a proxy now (admin): 200 {ok: true}, or 502 {ok: false, error}.
-// The result is the proxy's last answer or last error.
+// testProxy checks the remote of a proxy now (settings): 200 {ok: true}, or 502 {ok: false,
+// error}. The result is the proxy's last answer or last error.
 func (a *API) testProxy(w http.ResponseWriter, r *http.Request) {
-	_, repo, ok := a.adminRepoP(w, r)
+	_, repo, _, ok := a.canRepo(w, r, auth.RepoSettings)
 	if !ok {
 		return
 	}

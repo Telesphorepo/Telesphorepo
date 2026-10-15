@@ -21,7 +21,8 @@ the checklist below. The sitemap and the Settings navigation come from
 | `app.css` | Design tokens: colors (light and dark), the type scale, fonts, the one radius, the width scale, the control widths, the scrollbars. |
 | `pages/` | One component per route: `Home`, `Search`, `SignIn`, `DeviceApprove`; `repo/` (one page per repository), `settings/repos/` (a repository's settings: the shell, its tabs and the Access tab's parts), `account/`, `repositories/`, `server/` (sub-folders `ci/`, `ip-lists/`, `nexus/`, `people/` hold the parts of those pages). |
 | `lib/api/` | `client.ts` (fetch wrapper, `ApiError`, the `X-Telesphorepo-UI` header), `types.ts` (JSON shapes), `index.ts` (`api.*` for every route). |
-| `lib/auth.svelte.ts` | `auth`: current user, sign in (two steps), sign out (returns to Browse home). |
+| `lib/auth.svelte.ts` | `auth`: current user, sign in (two steps), sign out (returns to Browse home); the permission checks `can(perm)`, `canRepo(repo, perm)`, `managesRepo(repo)`, `allows(access, params)`. |
+| `lib/permissions.ts` | The server and repository permissions in display order with their labels and help, the dependency rules (`REPO_NEEDS`), the picker groups, and the phrases of a set: `repoPhrase` ("Download, publish", "Everything") and `serverPhrase` ("Administrator", "People, storage"). |
 | `lib/router.svelte.ts` | Hash router: `router`, `href()`, `navigate()`, `go()`, `isActive()`, `encodePath()`, `repoPath()`, `filesPath()`, `repoSettingsPath()`; the navigation guard hook. |
 | `lib/current.svelte.ts` | `current`: the matched route and the pending redirect of the current address. |
 | `lib/crumbs.ts` | `Crumb` and `settingsTrail()`: the breadcrumbs of a Settings page. |
@@ -50,43 +51,43 @@ server and the clients print keep working: `/#/device?code=ABCD-EFGH`, `/#/setti
 
 | Path | Page | Layout | Access | What it shows |
 |---|---|---|---|---|
-| `/` | `Home` | app | any | Repositories: a table with name (a lock after a private one, the kind icon after a group or a proxy), format, files (a group: its number of repositories), size, last publish. Filter box, format filter, New repository (admins). |
+| `/` | `Home` | app | any | Repositories: a table with name (a lock after a private one, the kind icon after a group or a proxy), format, files (a group: its number of repositories), size, last publish. Filter box, format filter, New repository (All repositories). |
 | `/search?q=&repo=` | `Search` | app | any | Files whose path contains `q` (3+ characters). The top bar's search field holds `q`. |
 | `/login?next=&error=` | `SignIn` | app | any | The one place to sign in: single sign-on, password, then the second step. |
-| `/device?code=` | `DeviceApprove` | app | user | Look up a device code, check the device, approve it with a fresh second factor. |
+| `/device?code=&grant=&error=` | `DeviceApprove` | app | user | Look up a device code, check the device, approve it with a fresh second factor. A single sign-on account signs in again at its identity provider instead; the server returns with `grant` (the page approves at once) or `error`. |
 | `/repo/:name` | `repo/RepoPage` | app | any | The repository header and the Files tab at the top folder. A group has no files and no tabs: the Use view and its members, each a link to the member's page. A proxy has Files (its cached files) and Use, and no publish or upload. |
 | `/repo/:name/files/<path>?version=&build=` | `repo/RepoPage` | app | any | Files tab: a folder (`path` ends with `/`) or a selected file. `version` names a version of the artifact folder (a Debian package keeps every version in one folder); `build` a chosen build. The details column always shows on wide screens: the selected file, or else the open folder (repository, folder, artifact or version). |
 | `/repo/:name/use` | `repo/RepoPage` | app | any | Use this repository: the address and the snippets for a build; a private repository adds a read-token step. |
-| `/repo/:name/publish` | `repo/RepoPage` | app | any (publish permission) | Publish to this repository: from your computer, from CI, by hand. |
-| `/repo/:name/upload?folder=` | `repo/RepoPage` | app | any (publish permission) | Upload files or a folder. |
+| `/repo/:name/publish` | `repo/RepoPage` | app | any (Publish on the repository) | Publish to this repository: from your computer, from CI, by hand. |
+| `/repo/:name/upload?folder=` | `repo/RepoPage` | app | any (Publish on the repository, a password account) | Upload files or a folder. |
 | **Settings › Your account** | | | | |
 | `/settings/account` | `account/Overview` | settings | user | Overview: one identity card (avatar, name, role), then your repositories, your devices and your recent publishes. |
 | `/settings/security` | `account/Security` | settings | user | Sign-in and security: password, authenticator apps, passkeys, recovery codes. The only page of a setup-only session. |
-| `/settings/devices` | `account/Devices` | settings | user | Devices (admins see every user's). |
+| `/settings/devices` | `account/Devices` | settings | user | Devices (holders of People see every user's). |
 | `/settings/tokens` | `account/Tokens` | settings | user | Tokens: read tokens and publish tokens, one page with two sections. |
 | **Settings › Repositories** | | | | |
-| `/settings/repositories` | `repositories/AllRepositories` | settings | admin | Every repository; a row opens its settings. Picked rows: Make public, Make private, Delete. |
-| `/settings/repositories/new` | `repositories/NewRepository` | settings | admin | First choice: a repository, a proxy of a remote repository, or a group of repositories; each offers the formats that take it (`kinds` of `GET /api/formats`). A repository: name, format, description, visibility; Debian: architectures and the signing key. A proxy: the remote address (well-known remotes as quick choices) and optional credentials; the server checks the remote, and "Create anyway" creates it when the remote does not answer. A group: its members, hosted repositories first, with the order as numbers. A proxy or a group then opens its settings Overview. |
-| `/settings/repositories/:name/:tab` | `settings/repos/RepoSettings` | settings | admin | A repository's settings. Hosted: `overview` (description, contents, its groups), `access`, `format`, `signing` (Debian). Proxy: `overview` (remote with Test the remote, use snippets, cache, its groups), `access` (download only), `remote` (address, credentials, the two times). Group: `overview` (use snippets, members with Move up, Move down, Remove and Add repositories, saved from the save bar), `access` (download only). Delete is a header action; Open files is one too, except for a group. Breadcrumbs: Settings › Repositories › maven › Access. |
+| `/settings/repositories` | `repositories/AllRepositories` | settings | repositories | Repositories: every one for a holder of All repositories, else the ones where the person holds more than download. A row opens its settings (or its files when no tab opens). Picked rows (Edit settings): Make public, Make private; Delete (All repositories). |
+| `/settings/repositories/new` | `repositories/NewRepository` | settings | repos | First choice: a repository, a proxy of a remote repository, or a group of repositories; each offers the formats that take it (`kinds` of `GET /api/formats`). A repository: name, format, description, visibility; Debian: architectures and the signing key. A proxy: the remote address (well-known remotes as quick choices) and optional credentials; the server checks the remote, and "Create anyway" creates it when the remote does not answer. A group: its members, hosted repositories first, with the order as numbers. A proxy or a group then opens its settings Overview. |
+| `/settings/repositories/:name/:tab` | `settings/repos/RepoSettings` | settings | repo | A repository's settings. Each tab shows only with its permission: Overview, Format settings, Signing and Remote need Edit settings; Access needs Manage access, Edit settings or CI pipelines, and shows People (Manage access), Public and From where (Edit settings), CI pipelines (CI pipelines). A tab the person cannot open goes to the first one they can. Hosted: `overview` (description, contents, its groups), `access`, `format`, `signing` (Debian). Proxy: `overview` (remote with Test the remote, use snippets, cache, its groups), `access` (download only), `remote` (address, credentials, the two times). Group: `overview` (use snippets, members with Move up, Move down, Remove and Add repositories, saved from the save bar), `access` (download only). Delete is a header action (All repositories); Open files is one too, except for a group. Breadcrumbs: Settings › Repositories › maven › Access. |
 | **Settings › People and CI** | | | | |
-| `/settings/people` | `server/People` | settings | admin | Every account with its role; New account opens a short form. A row opens the person. Picked rows (not your own): Disable, Enable. |
-| `/settings/people/:name` | `server/people/Person` | settings | admin | One person: the identity card (avatar, role, sign-in) with the account actions, and the person's access to each repository. Give access opens a short form for many repositories; picked rows: Change to Download, Change to Publish, Remove access. Each change applies at once. |
-| `/settings/ci-pipelines` | `server/CIPublishing` | settings | admin | CI pipelines: name, what each accepts, CI system, the repositories it can publish to. A row opens the pipeline. |
-| `/settings/ci-pipelines/new?repo=&back=` | `server/CIPublishingRule` | settings | admin | A new pipeline in four steps: where the job runs; which runs (GitHub repository, branches, tags, workflow file; or Jenkins address and jobs; the token conditions behind a secondary action); repositories; the workflow or Jenkinsfile step. `repo` starts chosen; Create and Cancel return to `back` when it is a `/settings/` path. |
-| `/settings/ci-pipelines/:id` | `server/CIPublishingRule` | settings | admin | Edit, turn off or delete a pipeline. |
-| `/settings/networks` | `server/IPLists` | settings | admin | Networks (IP lists): downloaded lists and your own lists; each shows the repositories that use it. |
-| `/settings/networks/new` | `server/IPListPage` | settings | admin | A new list: name, title, description, addresses pasted with `RangePaste`. |
-| `/settings/networks/list/:name` | `server/IPListPage` | settings | admin | Edit, rename or delete your own list; a downloaded list's ranges and Refresh. |
+| `/settings/people` | `server/People` | settings | people | Every account with its role: Administrator (every server permission), the phrase of its server permissions, or nothing. New account opens a short form (name and password); the person's page then opens. A row opens the person. Picked rows (not your own): Disable, Enable. |
+| `/settings/people/:name` | `server/people/Person` | settings | people | One person: the identity card (avatar, role, sign-in) with the account actions; Server permissions (`PermissionPicker`, saved from the save bar after a confirm); the person's permissions on each repository. Give access opens a short form for many repositories; Change edits one; picked rows: Change permissions, Remove access. Each repository change applies at once. |
+| `/settings/ci-pipelines` | `server/CIPublishing` | settings | pipelines | CI pipelines: name, what each accepts, CI system, the repositories it can publish to. A row opens the pipeline. |
+| `/settings/ci-pipelines/new?repo=&back=` | `server/CIPublishingRule` | settings | pipelines | A new pipeline in four steps: where the job runs; which runs (GitHub repository, branches, tags, workflow file; or Jenkins address and jobs; the token conditions behind a secondary action); repositories; the workflow or Jenkinsfile step. `repo` starts chosen; Create and Cancel return to `back` when it is a `/settings/` path. |
+| `/settings/ci-pipelines/:id` | `server/CIPublishingRule` | settings | pipelines | Edit, turn off or delete a pipeline. |
+| `/settings/networks` | `server/IPLists` | settings | network | Networks (IP lists): downloaded lists and your own lists; each shows the repositories that use it. |
+| `/settings/networks/new` | `server/IPListPage` | settings | network | A new list: name, title, description, addresses pasted with `RangePaste`. |
+| `/settings/networks/list/:name` | `server/IPListPage` | settings | network | Edit, rename or delete your own list; a downloaded list's ranges and Refresh. |
 | **Settings › Server** | | | | |
-| `/settings/sign-in` | `server/SingleSignOn` | settings | admin | Sign-in options: single sign-on, password sign-in for administrators. |
-| `/settings/signing-keys` | `server/SigningKeys` | settings | admin | Signing keys: fingerprint, the repositories that use each key, public key download, delete. |
-| `/settings/signing-keys/new` | `server/NewSigningKey` | settings | admin | Create an Ed25519 key or import an armored key. |
-| `/settings/storage` | `server/Storage` | settings | admin | Storage settings, connection test, and the storage move with its progress. |
-| `/settings/nexus` | `server/NexusMigration` | settings | admin | Nexus servers with status, repositories, last check and next check; Add a Nexus server. |
-| `/settings/nexus/:id?sync=&repo=` | `server/NexusSource` | settings | admin | The status and its line; Sync now or Cancel the sync, Switch over, Delete. Repositories to copy and Groups (pick tables; "Copy N repositories" saves and starts the sync); the running or chosen sync with its progress, its log (`repo` filters it) and its failed files; the syncs (a row opens its details); the connection. |
-| `/settings/proxy` | `server/ReverseProxy` | settings | admin | Network and proxy: trusted proxies only (none, this machine or network, Cloudflare, custom addresses); detected proxies. No IP lists. |
-| `/settings/general` | `server/General` | settings | admin | Public URL, upload limits, logs, retention: one form, a section per group. |
-| `/settings/activity?view=&action=&repo=` | `server/Activity` | settings | admin | Events (the audit log, filtered by what happened and repository) and Publish tokens (the publish log). |
+| `/settings/sign-in` | `server/SingleSignOn` | settings | signin | Sign-in options: single sign-on, password sign-in for administrators. |
+| `/settings/signing-keys` | `server/SigningKeys` | settings | keys | Signing keys: fingerprint, the repositories that use each key, public key download, delete. |
+| `/settings/signing-keys/new` | `server/NewSigningKey` | settings | keys | Create an Ed25519 key or import an armored key. |
+| `/settings/storage` | `server/Storage` | settings | storage | Storage settings, connection test, and the storage move with its progress. |
+| `/settings/nexus` | `server/NexusMigration` | settings | nexus | Nexus servers with status, repositories, last check and next check; Add a Nexus server. |
+| `/settings/nexus/:id?sync=&repo=` | `server/NexusSource` | settings | nexus | The status and its line; Sync now or Cancel the sync, Switch over, Delete. Repositories to copy and Groups (pick tables; "Copy N repositories" saves and starts the sync); the running or chosen sync with its progress, its log (`repo` filters it) and its failed files; the syncs (a row opens its details); the connection. |
+| `/settings/proxy` | `server/ReverseProxy` | settings | network | Network and proxy: trusted proxies only (none, this machine or network, Cloudflare, custom addresses); detected proxies. No IP lists. |
+| `/settings/general` | `server/General` | settings | general | Public URL, upload limits, logs, retention: one form, a section per group. |
+| `/settings/activity?view=&action=&repo=` | `server/Activity` | settings | activity | Events (the audit log, filtered by what happened and repository) and Publish tokens (the publish log). |
 
 A sub-page with a `:name` or `:id` keys its content by the parameter (`{#key}` in the page file),
 so the form starts again when the parameter changes. A network list opens at
@@ -98,11 +99,12 @@ those links with `repoSettingsPath(name, tab)`.
 Redirects (`redirects` in `routes.ts`, patterns like routes; the query is kept): `/settings` →
 `/settings/account`.
 
-Access is checked in `App.svelte`, never in a page: `user` sends a signed-out visitor to
-`/login?next=<path>`, `admin` shows "Administrators only" to other users, and a setup-only
-session (no second factor yet) goes to `/settings/security`. The repository page is the one
-exception: it checks the caller's permission on that repository (`repo.permission`), because
-only the repository knows it.
+Access is checked in `App.svelte` with `auth.allows`, never in a page: `user` sends a signed-out
+visitor to `/login?next=<path>`; a server permission (`people`, `storage`, ...) or `repositories`,
+`repo`, `pipelines` (see `Access` in `lib/router.svelte.ts`) shows "You cannot open this page" to a
+person without it; and a setup-only session (no second factor yet) goes to `/settings/security`.
+The repository page is the one exception: it checks the caller's permissions on that repository
+(`repo.permissions`), because only the repository knows them.
 
 ### Add a page
 
@@ -126,8 +128,9 @@ only the repository knows it.
   the avatar menu (Your account, theme, Sign out) when signed in. Under 640px the search is an icon
   that opens `/search`.
 - **Settings.** A 220px sidebar inside the container, 40px gap, then the content column. Four
-  groups from the sitemap: "Your account", "Repositories", "People and CI", "Server" (the last
-  three for administrators). Each group has a heading; groups are 24px apart with no line; every
+  groups from the sitemap: "Your account", "Repositories", "People and CI", "Server". Each item
+  shows only to a person with the permission of its route, and a group without items is hidden
+  (`visibleNav` in `lib/nav.ts`). Each group has a heading; groups are 24px apart with no line; every
   item has an icon and is 32px tall. The sidebar sticks under the top bar and scrolls on its own
   when the window is short. Under 768px the sidebar is a menu that the top bar's menu button
   opens. Every Settings page keeps this shell, a repository's settings included.
@@ -255,6 +258,7 @@ only the repository knows it.
 | `SecondFactorForm` | The code or passkey form inside the two above and the sign-in page. |
 | `SettingsGroupForm` | Registry settings rendered by type (a size or duration is a `UnitInput`, see `lib/units.ts`), saved from its `SaveBar`. When `effects` lists further effects of a save (a storage move), Save first asks in a confirm that lists every change. `sections` make it `FormSection`s (with `steps`, numbered `Step`s), so it is the whole form of a page (General, Storage, Sign-in options). Every field is a `FormRow` / `SwitchRow`; a list is a `ListInput`, a secret a `SecretInput`. `fields` gives a key a plain label, help, `aka` and placeholder; `errors` marks fields from a connection test; `before` / `extra` get the unsaved edits (`extra` renders under the last section: a connection test). |
 | `OptionRow` | `id`, `label`, `description?`, snippet `control` (a `Checkbox` or a `RadioGroup.Item`), `children?` (a field or a note under the description): one choice in a list. A click anywhere on the control, the title or the description toggles it once; the title stays the one label of the control. `children` sit outside that hit target. The row fills when chosen. |
+| `PermissionPicker` | `id`, `groups` (`{title, items}[]`: `SERVER_PICKER_GROUPS` or `REPO_PICKER_GROUPS`), `bind:value`, `needs?` (`REPO_NEEDS`), `held?` (the permissions the person can change; others are off), `columns?` (2 on a page), `onchange?`. Permissions as checkboxes in groups, each with a title, All and None, and one line of help per checkbox. A check also checks what the permission needs, a clear also clears what needs it, and the help line says why. Always checkboxes, no presets. The grant dialog (`settings/repos/GrantDialog`) and the person page use it. |
 | `VisibilityChoice` | `bind:anonymous`: Private or Public (new repository, repository Overview). |
 | `SigningKeyChoice` | `keys`, `repoName`, `exclude?`, `bind:choice` (`{mode: "existing" \| "new", name}`): the signing key of a Debian repository. |
 | `RangePaste` | `id`, `label?`, `disabled?`, `onAdd?(ranges)`, `onReplace?(ranges)`, `buttons?`, `bind:found?`: paste addresses and ranges in any format. See below. |
@@ -489,8 +493,8 @@ expires or when the server answers 401.
   `ScanPreview` shows what the folder holds; the ticked items then upload, each file with its
   path inside the folder as its multipart filename. The formats that take uploads are in
   `upload/formats.ts`.
-- **Delete** (`pages/repo/FilesTab.svelte`): an admin deletes with the UI session; anyone else
-  confirms in `SecondFactorPrompt` first. In a proxy only administrators delete cached files.
+- **Delete** (`pages/repo/FilesTab.svelte`): a person with Delete files deletes with the UI session,
+  in a repository or in the cached files of a proxy.
   `delete/DeleteDialog.svelte` counts the files of a
   folder before the user confirms and says what a Maven or Debian delete leaves behind. In the
   List view, people who can delete pick rows (files and folders mix); the details column then
@@ -509,8 +513,8 @@ unchanged.
 | Say | Not |
 |---|---|
 | Public / Private | Anonymous read; anyone / people with access |
-| Can download / Can publish (Download / Publish in a choice) | Read / write permission |
-| Make public, Make private, Delete, Disable, Enable, Give access, Remove access, Change to Download / Publish | Other verbs for the same bulk actions (Turn off, Revoke, Grant) |
+| The permission labels of `lib/permissions.ts` (Download files, Publish, Delete files, Edit settings, Manage access, CI pipelines; All repositories, People, ...) and the phrases of a set ("Download, publish", "Everything") | Read / write permission, levels, roles other than Administrator |
+| Make public, Make private, Delete, Disable, Enable, Give access, Remove access, Change permissions | Other verbs for the same bulk actions (Turn off, Revoke, Grant) |
 | 1 selected / 12 selected (`selectedText` in `lib/words.ts`) | 12 rows checked, 12 items chosen |
 | Read token | Download token, API token |
 | Publish token | Publish session, temporary publish password |

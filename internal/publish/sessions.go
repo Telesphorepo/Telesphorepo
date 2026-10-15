@@ -107,11 +107,11 @@ func (s *Service) writableRepo(ctx context.Context, p *auth.Principal, name stri
 	if repo.Kind != repos.KindHosted {
 		return nil, errorf(ErrConflict, auth.ReadOnly(repo))
 	}
-	lvl, err := s.auth.Access(ctx, p, repo)
+	set, err := s.auth.RepoPerms(ctx, p, repo)
 	if err != nil {
 		return nil, err
 	}
-	if lvl < auth.Write {
+	if !set.Has(auth.RepoPublish) {
 		return nil, errorf(ErrForbidden, "you cannot publish to "+repo.Name)
 	}
 	if repo.LockedBy != "" {
@@ -151,7 +151,7 @@ func (s *Service) mint(ctx context.Context, q *dbq.Queries, repo *repos.Repo, vi
 }
 
 // usableDevice loads a device that may mint sessions: not revoked, not expired, and owned by an
-// enabled local account.
+// enabled account.
 func (s *Service) usableDevice(ctx context.Context, id int64, now int64) (dbq.GetDeviceRow, error) {
 	d, err := s.rq.GetDevice(ctx, id)
 	switch {
@@ -163,7 +163,7 @@ func (s *Service) usableDevice(ctx context.Context, id int64, now int64) (dbq.Ge
 		return d, errorf(ErrDenied, "device revoked; enroll again")
 	case d.ExpiresAt <= now:
 		return d, errorf(ErrDenied, "device expired; enroll again")
-	case d.Disabled || d.UserKind != auth.KindLocal:
+	case d.Disabled:
 		return d, errorf(ErrDenied, "account disabled")
 	}
 	return d, nil
@@ -217,7 +217,7 @@ func (s *Service) DeviceSession(ctx context.Context, ip netip.Addr, deviceID int
 		!ed25519.Verify(ed25519.PublicKey(d.PublicKey), SignedMessage(nonce, deviceID, repoName), sig) {
 		return nil, errorf(ErrDenied, "bad device signature")
 	}
-	p := &auth.Principal{UserID: d.UserID, Username: d.Username, IsAdmin: d.IsAdmin, Kind: d.UserKind}
+	p := &auth.Principal{UserID: d.UserID, Username: d.Username, Perms: auth.ServerPermsOf(d.Perms), Kind: d.UserKind}
 	repo, err := s.writableRepo(ctx, p, repoName)
 	if err != nil {
 		return nil, err

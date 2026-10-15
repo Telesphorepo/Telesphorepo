@@ -1,5 +1,5 @@
 <!--
-  New signing key (administrators): create an Ed25519 key, or import an armored private key (with
+  New signing key (Signing keys permission): create an Ed25519 key, or import an armored private key (with
   its passphrase, if it has one). The server stores the key encrypted. Repositories choose their
   key on their Signing tab.
 -->

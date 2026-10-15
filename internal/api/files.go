@@ -31,7 +31,7 @@ const (
 // tree lists the direct children of a folder: ?path=<folder>&after=<cursor>&limit= ->
 // {items: [Node], next}. A folder's name in next ends in "/".
 func (a *API) tree(w http.ResponseWriter, r *http.Request) {
-	repo, _, ok := a.auth.RepoGate(w, r, r.PathValue("name"), "", auth.Read, true)
+	repo, _, ok := a.auth.RepoGate(w, r, r.PathValue("name"), "", auth.RepoDownload, true)
 	if !ok {
 		return
 	}
@@ -56,9 +56,9 @@ func (a *API) tree(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, list[files.Node]{items, cursor(next)})
 }
 
-// deleteFiles deletes files (paths) and folders (prefixes) of the repo with a publish session for
-// the repo or an admin UI session: {paths, prefixes} -> 200 {deleted: <file count>}. The two
-// lists hold 1 to 1000 items together. A bad path or prefix answers 400 and deletes nothing. The
+// deleteFiles deletes files (paths) and folders (prefixes) of the repo for a person who holds
+// delete there, with a UI session or a publish session for the repo: {paths, prefixes} -> 200
+// {deleted: <file count>}. The two lists hold 1 to 1000 items together. A bad path or prefix answers 400 and deletes nothing. The
 // paths go in one transaction, then each folder in batches. A file that is gone already counts
 // as done. One audit event goes to each file and each folder that lost files.
 func (a *API) deleteFiles(w http.ResponseWriter, r *http.Request) {
@@ -195,7 +195,7 @@ func (a *API) scanUpload(w http.ResponseWriter, r *http.Request) {
 // repo path and appear once. The files together may not exceed max_upload_size. On failure it
 // has answered and returns ok=false; the caller closes the files either way.
 func (a *API) readUpload(w http.ResponseWriter, r *http.Request) (*repos.Repo, *auth.Principal, format.ManualUploader, []format.UploadFile, map[string]string, bool) {
-	repo, p, ok := a.auth.RepoGate(w, r, r.PathValue("name"), "", auth.Write, true)
+	repo, p, ok := a.auth.RepoGate(w, r, r.PathValue("name"), "", auth.RepoPublish, true)
 	if !ok {
 		return nil, nil, nil, nil, nil, false
 	}
@@ -323,9 +323,9 @@ func uploadReadFail(w http.ResponseWriter, r *http.Request, err error) {
 	}
 }
 
-// listAudit returns the audit log, newest first (admin): ?after=<id>&limit=&action=&repo=<name>.
+// listAudit returns the audit log, newest first (activity): ?after=<id>&limit=&action=&repo=<name>.
 func (a *API) listAudit(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	if _, ok := a.can(w, r, auth.PermActivity); !ok {
 		return
 	}
 	after, ok := idCursor(w, r)
@@ -356,7 +356,7 @@ func (a *API) listAudit(w http.ResponseWriter, r *http.Request) {
 
 // fileDetails returns one file with its details and build provenance: ?path= -> File.
 func (a *API) fileDetails(w http.ResponseWriter, r *http.Request) {
-	repo, _, ok := a.auth.RepoGate(w, r, r.PathValue("name"), "", auth.Read, true)
+	repo, _, ok := a.auth.RepoGate(w, r, r.PathValue("name"), "", auth.RepoDownload, true)
 	if !ok {
 		return
 	}

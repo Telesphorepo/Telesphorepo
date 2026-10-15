@@ -3,10 +3,14 @@
   whose Change opens a dialog), the second-step methods (authenticator apps and passkeys) as one
   table, then the recovery codes. Without a second step, that section comes first. The second step
   also confirms a publish token and a device approval. A setup-only session sees only this page.
+  With ?back=<UI path> (from a device approval), the page offers a way back once a second step is on.
 -->
 <script lang="ts">
   import { toast } from "svelte-sonner";
-  import type { PageProps } from "$lib/router.svelte";
+  import { href, type PageProps } from "$lib/router.svelte";
+  import * as Alert from "$lib/components/ui/alert";
+  import CircleCheckIcon from "@lucide/svelte/icons/circle-check";
+  import ShieldCheckIcon from "@lucide/svelte/icons/shield-check";
   import { auth } from "$lib/auth.svelte";
   import { api, errorMessage, type Passkey, type TOTPFactor, type TOTPSetup } from "$lib/api";
   import { Resource, type TableSource } from "$lib/load.svelte";
@@ -32,7 +36,14 @@
   import LifeBuoyIcon from "@lucide/svelte/icons/life-buoy";
   import PlusIcon from "@lucide/svelte/icons/plus";
 
-  let {}: PageProps = $props();
+  let { query }: PageProps = $props();
+
+  // The page that sent the user here to set up a second step (?back=, a UI path), such as the
+  // approval of a device. It shows as a way back once the second step is on.
+  const back = $derived.by(() => {
+    const b = query.get("back") ?? "";
+    return /^\/[^/]/.test(b) && !b.includes("//") ? b : "";
+  });
 
   const user = $derived(auth.user);
   const local = $derived(user?.kind === "local");
@@ -185,6 +196,21 @@
 </script>
 
 <PageHeader title="Sign-in and security" />
+
+{#if back}
+  <Alert.Root class="mb-6">
+    {#if count}<CircleCheckIcon />{:else}<ShieldCheckIcon />{/if}
+    <Alert.Title>{count ? "Two-step verification is on" : "Add a second step to go on"}</Alert.Title>
+    <Alert.Description>
+      {#if count}
+        <p>Go back to finish what you started.</p>
+        <div class="mt-2"><Button href={href(back)}>Go back</Button></div>
+      {:else}
+        <p>Add an authenticator app or a passkey below. Then you can go back to finish what you started.</p>
+      {/if}
+    </Alert.Description>
+  </Alert.Root>
+{/if}
 
 {#if needsSecondStep}{@render secondStep()}{/if}
 

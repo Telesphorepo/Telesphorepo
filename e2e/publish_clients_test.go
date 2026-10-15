@@ -33,15 +33,23 @@ const (
 
 	// Coordinates that the clients repo publishes. The Gradle build takes its version from -Pversion.
 	clientsGroup         = "com.telesphorepo"
-	gradleSettingsPlugin = "com.telesphorepo"
+	gradleSettingsPlugin = "com.telesphorepo.publish"
 	mavenExtensionID     = "telesphorepo-maven-extension"
-	mavenPluginID        = "telesphorepo-maven-plugin" // goal prefix "telesphorepo"
+	mavenPluginID        = "telesphorepo-maven-plugin"
 	gradleClientVersion  = "0.0.0-e2e"
 )
 
 // approveCodeRe matches the line both clients print during enrollment:
-// "Open <verification_url> and approve code ABCD-EFGH".
+// "Open <verification_url>?code=ABCD-EFGH and approve code ABCD-EFGH".
 var approveCodeRe = regexp.MustCompile(`Open \S+.*approve code ([A-Z0-9]{4}-[A-Z0-9]{4})`)
+
+// alreadyEnrolled is what telesphorepoLogin and the Maven login goal print when they keep the
+// saved device.
+const alreadyEnrolled = "already enrolled as device"
+
+// noIDTokenEnv is a GitHub Actions job without "permissions: id-token: write": the runner sets
+// no ACTIONS_ID_TOKEN_REQUEST_URL.
+var noIDTokenEnv = map[string]string{"GITHUB_ACTIONS": "true", "CI": "true"}
 
 func TestClients(t *testing.T) {
 	s := StartServer(t, ServerOpts{Env: map[string]string{
@@ -171,9 +179,10 @@ func buildClients(t *testing.T, s *Server, repo string) *builtClients {
 	if cl.ExtVersion == "" {
 		t.Fatalf("no %s pom published; assets under %s:\n%s", mavenExtensionID, groupPath, strings.Join(paths, "\n"))
 	}
+	// The plugin marker has the plugin id as groupId and "<id>.gradle.plugin" as artifactId.
 	marker := gradleSettingsPlugin + ".gradle.plugin"
 	requireAssets(t, s, repo, groupPath+"/",
-		groupPath+"/"+marker+"/"+gradleClientVersion+"/"+marker+"-"+gradleClientVersion+".pom",
+		strings.ReplaceAll(gradleSettingsPlugin, ".", "/")+"/"+marker+"/"+gradleClientVersion+"/"+marker+"-"+gradleClientVersion+".pom",
 		groupPath+"/"+mavenPluginID+"/"+cl.ExtVersion+"/"+mavenPluginID+"-"+cl.ExtVersion+".jar")
 	t.Logf("clients: gradle plugin %s, maven extension and plugin %s", gradleClientVersion, cl.ExtVersion)
 	return cl
@@ -294,18 +303,20 @@ func requireAssets(t testing.TB, s *Server, repo, prefix string, want ...string)
 // ---------------------------------------------------------------- Gradle
 
 // gradlePub describes the Gradle build that applies the settings plugin and publishes a
-// library (subproject lib) and a Gradle plugin (subproject greet) to RepoURL.
+// library (subproject lib) and a Gradle plugin (subproject greet) to Repo at RepoURL.
 type gradlePub struct {
 	Cl          *builtClients
 	ServerURL   string
+	Repo        string
 	RepoURL     string
 	Group       string
 	LibMarker   string
 	GreetMarker string
 }
 
-// files returns the build at /work/pub. The repositories carry no credentials: the settings
-// plugin supplies them.
+// files returns the build at /work/pub. The build files have no publishing block: with
+// telesphorepo.repository, the settings plugin adds maven-publish, the repository with its
+// credentials and the publication of lib; java-gradle-plugin makes the publications of greet.
 func (g gradlePub) files() []ContainerFile {
 	groupPath := strings.ReplaceAll(g.Group, ".", "/")
 	settings := fmt.Sprintf(`pluginManagement {
@@ -322,35 +333,19 @@ plugins {
 }
 telesphorepo {
     url = '%s'
+    repository = '%s'
 }
 rootProject.name = 'pub'
 include 'lib', 'greet'
-`, g.Cl.PluginsURL, gradleSettingsPlugin, gradleClientVersion, g.ServerURL)
-	repoBlock := fmt.Sprintf(`repositories {
-        maven {
-            name = 'telesphorepo'
-            url = '%s'
-            allowInsecureProtocol = true
-        }
-    }`, g.RepoURL)
+`, g.Cl.PluginsURL, gradleSettingsPlugin, gradleClientVersion, g.ServerURL, g.Repo)
 	lib := fmt.Sprintf(`plugins {
     id 'java-library'
-    id 'maven-publish'
 }
 group = '%s'
 version = '1.0'
-publishing {
-    publications {
-        lib(MavenPublication) {
-            from components.java
-        }
-    }
-    %s
-}
-`, g.Group, repoBlock)
+`, g.Group)
 	greet := fmt.Sprintf(`plugins {
     id 'java-gradle-plugin'
-    id 'maven-publish'
 }
 group = '%[1]s'
 version = '1.0'
@@ -362,10 +357,7 @@ gradlePlugin {
         }
     }
 }
-publishing {
-    %[2]s
-}
-`, g.Group, repoBlock)
+`, g.Group)
 	libSrc := fmt.Sprintf(`package %s;
 
 public class Lib {
@@ -453,6 +445,7 @@ func newGradlePub(s *Server, cl *builtClients, repo, label string) gradlePub {
 	return gradlePub{
 		Cl:          cl,
 		ServerURL:   s.InternalURL,
+		Repo:        repo,
 		RepoURL:     s.InternalURL + "/maven/" + repo,
 		Group:       "com.example." + label + randHex(4),
 		LibMarker:   "LIB-MARKER-" + randHex(6),
@@ -502,36 +495,37 @@ func testGradleDevice(t *testing.T, s *Server, cl *builtClients, repo string) {
 	deviceVol := NewDataVolume(t)
 	files := g.files()
 
-	// Without a device and without a CI token the publish fails and names the login task.
-	code, out := RunClient(t, clientsGradleImage, gradleOpts("cd /work/pub && "+gradleCmd+"publish", files, deviceVol, nil))
-	if code == 0 {
-		t.Fatalf("publish without a device succeeded:\n%s", out)
-	}
-	if !strings.Contains(out, "telesphorepoLogin") {
-		t.Fatalf("publish without a device failed without naming telesphorepoLogin:\n%s", out)
-	}
-
-	login := startClient(t, clientsGradleImage, gradleOpts("cd /work/pub && "+gradleCmd+"telesphorepoLogin", files, deviceVol, nil))
-	userCode := login.waitOutput(t, approveCodeRe, 15*time.Minute)[1]
+	// Without a device and without a CI token, the publish enrolls this computer inline: it
+	// prints the approval link, waits for the approval and then publishes.
+	pub := startClient(t, clientsGradleImage, gradleOpts("cd /work/pub && "+gradleCmd+"publish", files, deviceVol, nil))
+	userCode := pub.waitOutput(t, approveCodeRe, 15*time.Minute)[1]
 	approveDevice(t, s, s.AdminUser, userCode)
-	if code, out := login.wait(t, 5*time.Minute); code != 0 {
-		t.Fatalf("telesphorepoLogin: exit %d after approval\n%s", code, out)
-	}
-
-	code, out = RunClient(t, clientsGradleImage, gradleOpts("cd /work/pub && "+gradleCmd+"publish", files, deviceVol, nil))
-	if code != 0 {
-		t.Fatalf("publish with the enrolled device: exit %d\n%s", code, out)
+	if code, out := pub.wait(t, 10*time.Minute); code != 0 {
+		t.Fatalf("publish with inline enrollment: exit %d after approval\n%s", code, out)
 	}
 	prefix, want := g.wantAssets()
 	requireAssets(t, s, repo, prefix, want...)
 	resolveGradle(t, g)
+
+	// telesphorepoLogin keeps the device that the server accepts.
+	code, out := RunClient(t, clientsGradleImage, gradleOpts("cd /work/pub && "+gradleCmd+"telesphorepoLogin", files, deviceVol, nil))
+	if code != 0 || !strings.Contains(out, alreadyEnrolled) {
+		t.Fatalf("telesphorepoLogin with an enrolled device: exit %d, want 0 and %q\n%s", code, alreadyEnrolled, out)
+	}
 }
 
 func testGradleGitHub(t *testing.T, s *Server, cl *builtClients, kc *Keycloak, gh *gitHubTokenServer, repo string) {
 	g := newGradlePub(s, cl, repo, "gci")
+
+	// A job without "id-token: write" fails at once and names the missing permission.
+	code, out := RunClient(t, clientsGradleImage, gradleOpts("cd /work/pub && "+gradleCmd+"publish", g.files(), "", noIDTokenEnv))
+	if code == 0 || !strings.Contains(out, "id-token: write") {
+		t.Fatalf("publish as GitHub Actions without an ID token: exit %d, want a failure that names id-token: write\n%s", code, out)
+	}
+
 	gh.Serve(t, kc.CIToken(t))
 	before := gh.Requests(t)
-	code, out := RunClient(t, clientsGradleImage, gradleOpts("cd /work/pub && "+gradleCmd+"publish", g.files(), "", gh.Env()))
+	code, out = RunClient(t, clientsGradleImage, gradleOpts("cd /work/pub && "+gradleCmd+"publish", g.files(), "", gh.Env()))
 	if code != 0 {
 		t.Fatalf("publish as GitHub Actions: exit %d\n%s", code, out)
 	}
@@ -560,14 +554,10 @@ func newMavenPub(s *Server, cl *builtClients, repo, label string) mavenPub {
 	return mavenPub{Cl: cl, ServerURL: s.InternalURL, RepoURL: s.InternalURL + "/maven/" + repo, Group: group, Message: "hello from " + group}
 }
 
-// settings has no server entry and no password. An active profile adds the clients repo, so
-// Maven resolves the core extension and the plugin from it; the plugin group lets
-// "mvn telesphorepo:login" find the plugin by its prefix.
+// settings has no server entry, no password and no plugin group. An active profile adds the
+// clients repo, so Maven resolves the core extension and the plugin from it.
 func (m mavenPub) settings() ContainerFile {
 	return ContainerFile{Path: "/work/settings.xml", Content: fmt.Sprintf(`<settings>
-  <pluginGroups>
-    <pluginGroup>%[2]s</pluginGroup>
-  </pluginGroups>
   <mirrors>
     <mirror>
       <id>maven-default-http-blocker</id>
@@ -601,7 +591,7 @@ func (m mavenPub) settings() ContainerFile {
     <activeProfile>telesphorepo-clients</activeProfile>
   </activeProfiles>
 </settings>
-`, m.Cl.PluginsURL, clientsGroup)}
+`, m.Cl.PluginsURL)}
 }
 
 func (m mavenPub) files() []ContainerFile {
@@ -643,6 +633,12 @@ func (m mavenPub) deployAndResolve(t *testing.T, s *Server, repo, deviceVol stri
 	if code != 0 {
 		t.Fatalf("mvn deploy: exit %d\n%s", code, out)
 	}
+	m.resolve(t, s, repo)
+}
+
+// resolve checks the deployed jar on the server and runs it from a clean consumer.
+func (m mavenPub) resolve(t *testing.T, s *Server, repo string) {
+	t.Helper()
 	gp := strings.ReplaceAll(m.Group, ".", "/")
 	requireAssets(t, s, repo, gp+"/", gp+"/hello/1.0.0/hello-1.0.0.jar", gp+"/hello/1.0.0/hello-1.0.0.pom")
 
@@ -653,7 +649,7 @@ func (m mavenPub) deployAndResolve(t *testing.T, s *Server, repo, deviceVol stri
 		mvnCmd + "-q -Ddep.version=1.0.0 -Dmdep.outputFile=/tmp/cp.txt org.apache.maven.plugins:maven-dependency-plugin:3.8.1:build-classpath",
 		`java -cp "$(cat /tmp/cp.txt)" ` + m.Group + ".Hello",
 	}, "\n")
-	code, out = RunClient(t, mavenImage, mavenOpts(script, []ContainerFile{m.settings(), mavenConsumerProject(m.Group, m.RepoURL)}, "", nil))
+	code, out := RunClient(t, mavenImage, mavenOpts(script, []ContainerFile{m.settings(), mavenConsumerProject(m.Group, m.RepoURL)}, "", nil))
 	if code != 0 {
 		t.Fatalf("resolve deployed jar: exit %d\n%s", code, out)
 	}
@@ -666,26 +662,41 @@ func testMavenDevice(t *testing.T, s *Server, cl *builtClients, repo string) {
 	m := newMavenPub(s, cl, repo, "mdev")
 	deviceVol := NewDataVolume(t)
 
-	// Without a device and without a CI token the deploy fails and names the login goal.
-	code, out := RunClient(t, mavenImage, mavenOpts("cd /work/lib && "+mvnCmd+"deploy", m.files(), deviceVol, nil))
-	if code == 0 {
-		t.Fatalf("deploy without a device succeeded:\n%s", out)
+	// Without a device and without a CI token, the deploy enrolls this computer inline: it
+	// prints the approval link, waits for the approval and then deploys.
+	dep := startClient(t, mavenImage, mavenOpts("cd /work/lib && "+mvnCmd+"deploy", m.files(), deviceVol, nil))
+	userCode := dep.waitOutput(t, approveCodeRe, 15*time.Minute)[1]
+	approveDevice(t, s, s.AdminUser, userCode)
+	if code, out := dep.wait(t, 10*time.Minute); code != 0 {
+		t.Fatalf("mvn deploy with inline enrollment: exit %d after approval\n%s", code, out)
 	}
-	if !strings.Contains(out, "telesphorepo:login") {
-		t.Fatalf("deploy without a device failed without naming telesphorepo:login:\n%s", out)
+	m.resolve(t, s, repo)
+
+	// The login goal, with its full coordinates and no plugin group, keeps the device.
+	goal := clientsGroup + ":" + mavenPluginID + ":" + m.Cl.ExtVersion + ":login"
+	code, out := RunClient(t, mavenImage, mavenOpts("cd /work/lib && "+mvnCmd+goal, m.files(), deviceVol, nil))
+	if code != 0 || !strings.Contains(out, alreadyEnrolled) {
+		t.Fatalf("%s with an enrolled device: exit %d, want 0 and %q\n%s", goal, code, alreadyEnrolled, out)
 	}
 
-	login := startClient(t, mavenImage, mavenOpts("cd /work/lib && "+mvnCmd+"telesphorepo:login", m.files(), deviceVol, nil))
-	userCode := login.waitOutput(t, approveCodeRe, 15*time.Minute)[1]
-	approveDevice(t, s, s.AdminUser, userCode)
-	if code, out := login.wait(t, 5*time.Minute); code != 0 {
-		t.Fatalf("mvn telesphorepo:login: exit %d after approval\n%s", code, out)
+	// A deploy to a repository that does not exist says so, and does not blame the device.
+	missing := RandName("missing")
+	alt := "-DaltDeploymentRepository=" + missing + "::" + m.ServerURL + "/maven/" + missing + " "
+	code, out = RunClient(t, mavenImage, mavenOpts("cd /work/lib && "+mvnCmd+alt+"deploy", m.files(), deviceVol, nil))
+	if code == 0 || !strings.Contains(out, "does not exist") || strings.Contains(out, "refused device") {
+		t.Fatalf("deploy to the missing repository %s: exit %d, want a failure that says it does not exist\n%s", missing, code, out)
 	}
-	m.deployAndResolve(t, s, repo, deviceVol, nil)
 }
 
 func testMavenGitHub(t *testing.T, s *Server, cl *builtClients, kc *Keycloak, gh *gitHubTokenServer, repo string) {
 	m := newMavenPub(s, cl, repo, "mci")
+
+	// A job without "id-token: write" stops before the build and names the missing permission.
+	code, out := RunClient(t, mavenImage, mavenOpts("cd /work/lib && "+mvnCmd+"deploy", m.files(), "", noIDTokenEnv))
+	if code == 0 || !strings.Contains(out, "id-token: write") {
+		t.Fatalf("deploy as GitHub Actions without an ID token: exit %d, want a failure that names id-token: write\n%s", code, out)
+	}
+
 	gh.Serve(t, kc.CIToken(t))
 	before := gh.Requests(t)
 	m.deployAndResolve(t, s, repo, "", gh.Env())

@@ -12,7 +12,8 @@ import (
 )
 
 // The audit log (spec §13): events of sign-ins, publish sessions, uploads, deletes, repos,
-// permissions, users and settings; admin only; the only place that shows IP addresses.
+// permissions, users and settings; the activity permission only; the only place that shows IP
+// addresses.
 
 type auditEntry struct {
 	ID          int64          `json:"id"`
@@ -68,9 +69,9 @@ func TestAudit(t *testing.T) {
 	s.CreateRepo(t, repo, "maven", false, nil)
 	s.CreateRepo(t, other, "raw", false, nil)
 	w, pw := RandName("writer"), "writer-pass-1234"
-	s.CreateUser(t, w, pw, false)
-	s.SetPermission(t, repo, w, "write")
-	s.SetPermission(t, other, w, "write")
+	s.CreateUser(t, w, pw)
+	s.SetPerms(t, repo, w, "download", "publish", "delete")
+	s.SetPerms(t, other, w, "download", "publish")
 
 	if st, b := s.API(t, http.MethodPost, "/api/auth/login", map[string]string{"username": w, "password": "wrong-password"}, nil); st != http.StatusUnauthorized {
 		t.Fatalf("login with a wrong password: status %d: %s", st, b)
@@ -161,9 +162,9 @@ func TestAudit(t *testing.T) {
 		t.Fatalf("first page of 2: %d items, next %v", len(page.Items), page.Next)
 	}
 
-	// Admin only.
+	// The activity permission only. w holds delete, so w signs in with the second factor.
 	user := Basic{w, "new-writer-pass-99"}
-	sess = s.Login(t, w, "new-writer-pass-99")
+	sess = s.SignIn(t, w, "new-writer-pass-99")
 	if st, b := s.API(t, http.MethodGet, "/api/audit", nil, sess); st != http.StatusForbidden {
 		t.Fatalf("GET /api/audit as a user: status %d, want 403: %s", st, b)
 	}

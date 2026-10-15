@@ -29,7 +29,7 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/move` | Storage move: copies every blob to a new backend in the background behind a `storage.Mirror` |
 | `internal/nexus` | Nexus 3 REST client, sources, mapping, the sync scheduler and runner, and cut-over. Names no format; it calls each plugin's `format.Importer` |
 | `internal/auth` | Users (kinds `local`/`oidc`), argon2id passwords, Basic-auth cache, API tokens, sessions, rate limiting, permission checks |
-| `internal/oidc` | OIDC admin sign-on: `/api/auth/oidc/login` and `/callback` (go-oidc + x/oauth2, PKCE S256) |
+| `internal/oidc` | OIDC admin sign-on and the SSO device approval: `/api/auth/oidc/login`, `/device` and `/callback` (go-oidc + x/oauth2, PKCE S256) |
 | `internal/publish` | Publish sessions: device enrollment, nonces, trust policies, the CI token exchange, `Verify` for `trs_` tokens and the cleanup job |
 | `internal/repos` | Repos, their kind and per-format JSON config. A `Validator` (from `internal/format`) checks the config and a `KindCheck` the kind. Keeps the group members and the proxy remotes in memory (see **Group and proxy repositories**) |
 | `internal/proxy` | Fetches the files of proxy repos from their remotes, caches them as assets and remembers remote 404s |
@@ -61,11 +61,12 @@ close and every 6 hours.
 
 | Table | Key / indexes | Notes |
 |---|---|---|
-| `users` | PK `id`, UNIQUE `username`, UNIQUE `users_oidc (oidc_issuer, oidc_subject)` where `oidc_subject` is set | argon2id PHC hash (`!` for SSO users, never verifies), `is_admin`, `disabled`, `password_changed_at`, `kind` (`local`/`oidc`), `email` |
+| `users` | PK `id`, UNIQUE `username`, UNIQUE `users_oidc (oidc_issuer, oidc_subject)` where `oidc_subject` is set | argon2id PHC hash (`!` for SSO users, never verifies), `disabled`, `password_changed_at`, `kind` (`local`/`oidc`), `email` |
 | `api_tokens` | UNIQUE `public_id`, UNIQUE `(user_id, name)` | `secret_hash` = SHA-256(secret); optional `expires_at`; `last_used_at` written at most once per minute. These are **read tokens**: they never publish |
 | `sessions` | PK `id_hash` (WITHOUT ROWID), idx `expires_at`, idx `user_id` | `id_hash` = SHA-256(cookie value) |
 | `repos` | UNIQUE `name`, partial idx `repos_anonymous (id) WHERE anonymous_read = 1` | `format` is any registered format name (no CHECK); `kind` is `hosted` (default), `proxy` or `group`; `description` (at most 500 characters); `anonymous_read`; `config` JSON; `locked_by` (NULL, or the text that a write answers with 409, set while the repo mirrors a Nexus source); the counters `file_count`, `total_size` and `last_published_at` (unix time, 0 for never) |
-| `repo_permissions` | PK `(repo_id, user_id)`, idx `user_id` | `level` is `read` or `write` |
+| `user_permissions` | PK `(user_id, perm)` (WITHOUT ROWID), idx `user_permissions_perm (perm, user_id)` | The server permissions of a person: `repos`, `people`, `signin`, `storage`, `network`, `keys`, `nexus`, `general`, `activity`. See **Permissions** |
+| `repo_permissions` | PK `(repo_id, user_id, perm)` (WITHOUT ROWID), idx `(user_id, repo_id)` | The repository permissions of a person on a repo: `download`, `publish`, `delete`, `settings`, `access`, `pipelines`. See **Permissions** |
 | `repo_group_members` | PK `(group_id, member_id)` (WITHOUT ROWID), UNIQUE `(group_id, position)`, idx `member_id` | The members of a group repo in read order (`position`). Both ids cascade with their repo, so a deleted member leaves its groups |
 | `repo_proxies` | PK `repo_id` (cascades) | The remote of a proxy repo: `remote_url` (http or https, ends with `/`), `credentials` (sealed JSON `{username, password}`, AAD `repo_proxy:<repo id>`; empty for none), `metadata_ttl` (1800 s), `not_found_ttl` (300 s), `last_ok_at`, `last_error`, `last_error_at` |
 | `assets` | UNIQUE `(repo_id, path)`, idx `uploaded_by` | Every stored file; `kind` is `artifact`, `metadata` or `index`. A cached file of a proxy has `checked_at` (when the remote last confirmed it) and `remote_etag`; a hosted file keeps 0 and `''`. Triggers keep the repo counters in the transaction of each write: an insert adds 1 and its size, a replace adds the size change, a delete subtracts. Every asset row counts (artifacts, metadata, checksums and Debian index files). `last_published_at` is the newest `updated_at` of an insert or replace that is not an `index` row; a delete never lowers it |
@@ -88,7 +89,7 @@ close and every 6 hours.
 | `publish_trusts` | PK `id`, UNIQUE `name`, partial idx `publish_trusts_issuer (issuer) WHERE disabled = 0`, idx `created_by` | `claims` is JSON `{claim: [allowed values]}`; `jwks` is `''` when the server fetches the issuer's keys; `audience` `''` means `base_url` |
 | `publish_trust_repos` | PK `(trust_id, repo_id)` (WITHOUT ROWID), idx `repo_id` | The repos a policy may publish to |
 | `publish_sessions` | PK `id`, UNIQUE `public_id`, idx `expires_at`, `repo_id`, `user_id`, `device_id`, `trust_id` | `secret_hash` = SHA-256(secret); `via` `device`/`oidc`/`manual`; `subject`; `closed_at`. `repo_id` cascades; `user_id`, `device_id` and `trust_id` are SET NULL |
-| `auth_challenges` | PK `id_hash` (WITHOUT ROWID), idx `expires_at`, `user_id`, `device_id` | Short-lived single-use state: `kind` is `login`, `totp_setup`, `webauthn_register`, `webauthn_assert` or `publish_nonce`; `data` holds the payload |
+| `auth_challenges` | PK `id_hash` (WITHOUT ROWID), idx `expires_at`, `user_id`, `device_id` | Short-lived single-use state: `kind` is `login`, `totp_setup`, `webauthn_register`, `webauthn_assert`, `publish_nonce` or `device_grant` (an SSO approval grant: `user_id` set, `data` is the user code, 5 min); `data` holds the payload |
 | `audit_events` | PK `id`, idx `at`, idx `(repo_id, id)`, idx `(action, id)`, idx `actor_user_id` | `at` unix time; `actor` is a username, `cli` or the attempted username of a failed sign-in; `actor_user_id` and `repo_id` are SET NULL; `target`; `detail` is JSON and never holds a secret value; `ip` is the client address. This table is the only place that stores or shows an IP address. See **Audit log** |
 | `publish_oidc_seen` | PK `id_hash` (WITHOUT ROWID), idx `expires_at` | SHA-256 of `<issuer>\n<jti>`, or of the whole token when it has no `jti`. A second insert means a replay |
 | `ip_lists` | PK `id`, UNIQUE `name` | An IP list. `kind` is `preset` (the server fetches it) or `custom` (an admin edits it). `title`, `description`, `ranges` (JSON array of CIDRs), `source` (the fetch URLs of a preset), `fetched_at` (unix time), `error` (the last fetch failure, `''` after a success), `created_at` |
@@ -115,7 +116,7 @@ listed in its `Extra` map.
 (core and each `format.Queryable`) on a fresh database. A SCAN of a table and any TEMP B-TREE
 fail. A SCAN of a partial index or a virtual table passes. A query that must scan goes in the
 set's `Allow` map with a reason. An `Allow` entry for a query that is missing or has a clean plan
-also fails. Core allows `ListSettings`, `HasUsers`, `ListPermissions` and `CountAssets` (the
+also fails. Core allows `ListSettings`, `HasUsers` and `CountAssets` (the
 total of a storage move, once per move). Debian allows
 `ListAllDirtyDists`, `MaxDirtyMark` and `ListAllIndexFiles` (startup and re-sign work).
 `TestQueryPlans` runs the guard through the hidden `dbcheck` command.
@@ -236,19 +237,19 @@ leak). A write to a repo with `locked_by` set gets 409 `{"error": <locked_by>}` 
 permission check. A mirrored repo is read only until cut-over. A write without an open publish
 session for that repo gets 401 with a Basic challenge and
 `{"error":"publishing needs a publish session: <base_url>/#/settings/tokens"}`. A device or manual
-session writes only while its user still has `write` on the repo (else 403).
+session writes only while its user still holds `publish` on the repo (else 403).
 
 A 401 carries `WWW-Authenticate` only on a format route, so package clients get their prompt. It
 never carries it for a path under `/api`, nor for a request with the header `X-Telesphorepo-UI: 1`
 (the web UI sends it on every request). So a browser never opens its password dialog for the UI.
 
 JSON API (`/api/`). Auth is a session cookie or HTTP Basic. Every route that changes state
-(POST, PUT, PATCH, DELETE) and every admin route (GET too) needs the UI session cookie. HTTP
-Basic with a password or a read token reaches only the GET routes that are not admin routes;
+(POST, PUT, PATCH, DELETE) and every permission route (GET too) needs the UI session cookie. HTTP
+Basic with a password or a read token reaches only the GET routes that need no permission;
 elsewhere it gets 401 `{"error":"sign in through the web UI for this action"}`, as does a request
 with no credential. The routes that take no credential or their own token are the exceptions
 (sign-in, `/api/auth/config`, `/api/formats`, and the publish routes marked "none" or "token" in
-**Publishing**). A signed-in user without the right gets 403. A publish session token (`trs_...`,
+**Publishing**). A signed-in user without the permission gets 403. A publish session token (`trs_...`,
 as the Basic password or as `Authorization: Bearer trs_...`) reaches only `/api/publish/...`,
 `POST /api/repos/{name}/upload` and `POST /api/repos/{name}/files/delete`, and only for its own
 repo. Every other `/api` route answers it with 403. Errors are `{"error": "..."}`, plus
@@ -262,13 +263,12 @@ before it changes any: an unknown name gives 404 with the name (`"repository x d
 `"user x does not exist"`), and nothing changes. The changes to rows apply in one transaction, so
 a failure leaves nothing half done. Each changed item gets its own audit event; an item that
 already had the value gets none. The routes are `PATCH /api/repos`, `POST /api/repos/delete`,
-`POST /api/repos/{name}/files/delete`, `PATCH /api/users`, `PUT /api/permissions` and
-`POST /api/permissions/delete`. A repo delete removes blobs, so it is the one route that is not
+`POST /api/repos/{name}/files/delete`, `PATCH /api/users` and `PUT /api/permissions`. A repo delete removes blobs, so it is the one route that is not
 one transaction (see the route).
 
-| Method & path | Auth | Notes |
+| Method & path | Permission | Notes |
 |---|---|---|
-| `POST /api/auth/login` · `POST /api/auth/logout` | none · session | Login `{username, password}`. An admin with a second factor gets `{second_factor: true, methods: [...]}` and the cookie `tr_login`; an admin without one gets the User plus `second_factor_required: true` and a setup-only session. A non-admin user gets the User and a full session after the password alone (see **Auth model**). 401 for SSO users; 403 for a local admin when `admin_password_login=false`. Logout ends the local session only |
+| `POST /api/auth/login` · `POST /api/auth/logout` | none · session | Login `{username, password}`. A person who needs the second factor (see **Permissions**) and has one gets `{second_factor: true, methods: [...]}` and the cookie `tr_login`; one without a factor gets the User plus `second_factor_required: true` and a setup-only session. Anyone else gets the User and a full session after the password alone (see **Auth model**). 401 for SSO users; 403 for a local account with a server permission when `admin_password_login=false`. Logout ends the local session only |
 | `POST /api/auth/login/passkey` | `tr_login` cookie | Returns `{publicKey: {...}}`, the WebAuthn assertion options for the pending sign-in |
 | `POST /api/auth/login/second` | `tr_login` cookie | `{totp_code}`, `{passkey: <assertion>}` or `{recovery_code}`. 200 sets `tr_session` and returns the User with `second_factor_required: false`. 401 for a wrong proof (the sign-in stays pending) or an expired sign-in; 429 with `Retry-After` after too many failures |
 | `GET /api/security` | UI session | `{totp: [{id, name, created_at}], passkeys: [{id, name, created_at, last_used_at}], recovery_codes: <unused count>, second_factor: bool}` |
@@ -277,70 +277,74 @@ one transaction (see the route).
 | `POST /api/security/recovery-codes` | UI session | 201 `{codes: [10 x "abcd-efgh-ijkl-mnop"]}`; replaces the old set. Shown once |
 | `GET /api/auth/config` | none | `{password_login: true, oidc, admin_password_login, second_factor_optional}`. `second_factor_optional` is true only under `telesphorepo dev` |
 | `GET /api/auth/oidc/login` | none | 404 when SSO is off, 503 when discovery fails. Stores state/nonce/PKCE verifier in memory (10 min, single use, keyed by SHA-256(state)), sets `tr_oidc` (HttpOnly, SameSite=Lax, Path `/api/auth/oidc`, 600 s), 302 to the IdP |
-| `GET /api/auth/oidc/callback` | none | 400 for missing/mismatched/unknown/reused/expired state, state from before an issuer or client change, or missing `code`; 503 on discovery failure. Verifies the ID token (signature, issuer, audience, expiry, nonce) and the admin rule. Success: upsert user, session with `oidc.session_ttl`, 302 `/`. Failure: 302 `/#/login?error=` `not_authorized` \| `username_conflict` \| `invalid_username` \| `account_disabled` \| `sso_failed` |
-| `GET /api/me` | any credential | Current user. User JSON includes `kind` (`local`/`oidc`), `email` (`""` when unset) and `second_factor_required` (true only for a setup-only UI session) |
+| `GET /api/auth/oidc/device?code=` | UI session of an SSO account | 404 when SSO is off. Starts a new sign-in that approves the device of `code` (see **Publishing**). It stores the state like `login`, plus the user id and the user code, and sends `prompt=login` and `max_age=0`. 302 `/#/device?code=` without an error when there is no UI session or the code is unknown, expired or used (the page says why), and with `error=not_sso` for a local account or `sso_failed` when discovery fails |
+| `GET /api/auth/oidc/callback` | none | 400 for missing/mismatched/unknown/reused/expired state, state from before an issuer or client change, or missing `code`; 503 on discovery failure. Verifies the ID token (signature, issuer, audience, expiry, nonce) and the admin rule. Success: upsert user, session with `oidc.session_ttl`, 302 `/`. Failure: 302 `/#/login?error=` `not_authorized` \| `username_conflict` \| `invalid_username` \| `account_disabled` \| `sso_failed`. For a sign-in that `device` started, it starts no session and checks the same token and admin rule, then that the token's issuer and `sub` belong to the account that started it, and that `auth_time` is present and at most 5 minutes old. Success: 302 `/#/device?code=<code>&grant=<grant>`. Failure: 302 `/#/device?code=<code>&error=` `wrong_account` \| `no_auth_time` \| `stale_sign_in` (the provider ignored `prompt=login`) \| `not_authorized` \| `account_disabled` \| `sso_failed` |
+| `GET /api/me` | any credential | Current user. User JSON is `{id, username, permissions, disabled, kind, email, created_at}`: `permissions` lists the server permissions, `kind` is `local`/`oidc`, `email` is `""` when unset. `/api/me` adds `second_factor_required` (true only for a setup-only UI session) and `repo_permissions: {repo: [perms]}` for the repos where the person holds more than `download` (empty for a holder of `repos`) |
 | `GET /api/tokens` · `POST /api/tokens`, `DELETE /api/tokens/{id}` | any credential · UI session | **Read tokens.** The token is shown once. A token cannot mint tokens. POST is 403 for SSO users |
-| `GET/POST /api/users`, `GET/PATCH /api/users/{username}` | admin (a UI session may change its own password) | The user list is paginated. `GET /api/users/{username}` returns one account (User JSON), 404 when no account has the name. PATCH takes `{password?, is_admin?}` |
-| `PATCH /api/users` | admin | `{usernames: [...], disabled: bool}`. The one way to disable or enable people. 400 `You cannot disable your own account.` when the list holds the caller and `disabled` is true. A disabled person's sessions end, and their password and read tokens stop working. One `user.update` event per person whose value changed. 200 `{changed: n}` |
+| `GET/POST /api/users`, `GET/PATCH /api/users/{username}` | `people` (a UI session may change its own password) | The user list is paginated. `GET /api/users/{username}` returns one account (User JSON), 404 when no account has the name. POST takes `{username, password, permissions}`; the caller gives only server permissions they hold (403). PATCH takes `{password}`; the caller changes the password of another person only when they hold every permission of that person (403) |
+| `PUT /api/users/{username}/permissions` | `people` | `{permissions: [...]}` replaces the server permissions and returns the User. The caller adds or removes only permissions they hold (403). 409 when no enabled person would keep `people`. One `user.permissions` event with `{old, new}` |
+| `GET /api/people?q=&after=&limit=` | `people`, or `access` on a repo | `{items: [{username}], next}`: the enabled usernames that start with `q`, at most 20 per page. The UI draws the avatar from the username |
+| `PATCH /api/users` | `people` | `{usernames: [...], disabled: bool}`. The one way to disable or enable people. 400 `You cannot disable your own account.` when the list holds the caller and `disabled` is true. 403 for a person whose permissions the caller does not all hold. 409 when no enabled person would keep `people`. A disabled person's sessions end, and their password and read tokens stop working. One `user.update` event per person whose value changed. 200 `{changed: n}` |
 | `GET /api/formats` | none | `[{name, title, default_config, settings_group?, icon?, kind_icons?, kinds}]` for every registered format. `kinds` lists the repo kinds the format takes (`hosted`, plus `proxy` for a `format.Proxied` and `group` for a `format.Grouper`). `icon` is the format's own one-color SVG, inline. `kind_icons` maps an artifact kind to an SVG when it differs from the format (Maven: `gradle-plugin`). A format gets both by implementing `format.Iconic` |
-| `GET /api/repos`, `GET /api/repos/{name}` · `POST /api/repos`, `PATCH /api/repos/{name}` | any/anon · admin | The list shows only repos the caller can see. Repo JSON has `file_count`, `total_size` and `last_published_at` (null before the first publish), read from the repo row (see `assets` in **Data model**). `format` must be a registered name. `description` (POST and PATCH) has at most 500 characters and no control characters except newline and tab. `config` must be a JSON object that the format validates (400 otherwise; an unknown format lists the available ones). An empty config becomes the format default. Repo JSON has `locked_by` (`""` when the repo is not locked). `PATCH /api/repos/{name}` takes `{description?, config?, proxy?}`; a PATCH with `config` calls the format's `RepoConfigChanged`. Repo JSON has `kind`, and a group has `member_count`. POST takes `kind` (`hosted` default, `proxy`, `group`), `members: [names]` for a group, `proxy: {remote_url, username?, password?, metadata_ttl?, not_found_ttl?}` (seconds) for a proxy, and `force`. A new proxy's remote is checked first (see **Group and proxy repositories**): 502 `{error}` when it does not answer, unless `force: true`. PATCH takes `proxy` with the same fields for a proxy; `username` and `password` together replace the credentials, `username: ""` removes them, and the password is never returned. `GET /api/repos/{name}` adds, for a group, `members: [{name, format, kind, public}]` (the members the caller can read, in order); for a hosted or proxy repo, `groups: [names]` (the groups it is in that the caller can read); for a proxy and an admin, `proxy: {remote_url, has_credentials, metadata_ttl, not_found_ttl, last_ok_at\|null, last_error, last_error_at\|null}` |
-| `PUT /api/repos/{name}/members` | admin | `{members: [names]}` replaces the members of a group and their order; returns the repo. 400 for 0 or more than 50 members, a member of another format, a group, a name listed twice, an unknown name, or a repo that is not a group |
-| `POST /api/repos/{name}/proxy/test` | admin | Checks the remote of a proxy now: 200 `{ok: true}` or 502 `{ok: false, error}`. It records the result as the proxy's last answer or last error |
-| `PATCH /api/repos` | admin | `{names: [...], anonymous_read: bool}`. The one way to make repos public or private. One `repo.update` event per repo whose value changed. 200 `{changed: n}` |
-| `POST /api/repos/delete` | admin | `{names: [...]}`. Checks that every repo exists (404) and that none is locked (409 `<name>: <lock text>`); then nothing is deleted. Then it deletes the repos one after another with their files and blobs (see **Files, uploads and deletes**). The first failure stops the rest: 500 `{deleted: [names done], error}`. One `repo.delete` event per repo. 200 `{deleted: [names], files: n}` |
-| `GET /api/repos/{name}/permissions` | admin | `[{username, level: read\|write}]` |
-| `PUT /api/permissions` | admin | `{users: [...], repos: [...], level: "read"\|"write"}`. Sets the level of every pair of user and repo, at most 1000 pairs. One `permission.set` event per pair whose level changed. 200 `{changed: n}` |
-| `POST /api/permissions/delete` | admin | `{users: [...], repos: [...]}`. Removes the level of every pair, at most 1000 pairs. One `permission.delete` event per pair that had one. 200 `{changed: n}` |
-| `GET /api/repos/{name}/assets?prefix=&after=&limit=` | read | Ordered by path; the prefix is a range scan |
-| `GET /api/repos/{name}/tree?path=&after=&limit=` | read | `{items: [{name, type: "dir"\|"file", path, size?, sha256?, updated_at?, uploaded_by?}], next}`. `path` is a folder (`""` or ending in `/`). A folder item's `path` and the `next` cursor end in `/`. `uploaded_by` is a username |
-| `POST /api/repos/{name}/files/delete` | publish session of the repo, or admin UI session | `{paths?: [...], prefixes?: [...]}`: files and folders, 1 to 1000 items together. 400 with the first bad path or prefix; then nothing is deleted. 200 `{deleted: n}`, the number of files. A file that is gone already counts as done; an empty folder adds 0. 409 on a locked repo. 401 `publishing needs a publish session` for any other credential. One `delete` event per file and per folder that lost files |
+| `GET /api/repos`, `GET /api/repos/{name}` · `POST /api/repos` · `PATCH /api/repos/{name}` | any/anon · `repos` · `settings` | The list shows the repos where the caller holds a permission, and the public ones. Repo JSON has `permissions`, the caller's repository permissions on the repo. Repo JSON has `file_count`, `total_size` and `last_published_at` (null before the first publish), read from the repo row (see `assets` in **Data model**). `format` must be a registered name. `description` (POST and PATCH) has at most 500 characters and no control characters except newline and tab. `config` must be a JSON object that the format validates (400 otherwise; an unknown format lists the available ones). An empty config becomes the format default. Repo JSON has `locked_by` (`""` when the repo is not locked). `PATCH /api/repos/{name}` takes `{description?, config?, proxy?}`; a PATCH with `config` calls the format's `RepoConfigChanged`. Repo JSON has `kind`, and a group has `member_count`. POST takes `kind` (`hosted` default, `proxy`, `group`), `members: [names]` for a group, `proxy: {remote_url, username?, password?, metadata_ttl?, not_found_ttl?}` (seconds) for a proxy, and `force`. A new proxy's remote is checked first (see **Group and proxy repositories**): 502 `{error}` when it does not answer, unless `force: true`. PATCH takes `proxy` with the same fields for a proxy; `username` and `password` together replace the credentials, `username: ""` removes them, and the password is never returned. `GET /api/repos/{name}` adds, for a group, `members: [{name, format, kind, public}]` (the members the caller can read, in order); for a hosted or proxy repo, `groups: [names]` (the groups it is in that the caller can read); for a proxy and a holder of `settings`, `proxy: {remote_url, has_credentials, metadata_ttl, not_found_ttl, last_ok_at\|null, last_error, last_error_at\|null}` |
+| `PUT /api/repos/{name}/members` | `settings` | `{members: [names]}` replaces the members of a group and their order; returns the repo. 400 for 0 or more than 50 members, a member of another format, a group, a name listed twice, an unknown name, or a repo that is not a group |
+| `POST /api/repos/{name}/proxy/test` | `settings` | Checks the remote of a proxy now: 200 `{ok: true}` or 502 `{ok: false, error}`. It records the result as the proxy's last answer or last error |
+| `PATCH /api/repos` | `settings` on each repo | `{names: [...], anonymous_read: bool}`. The one way to make repos public or private. One `repo.update` event per repo whose value changed. 200 `{changed: n}` |
+| `POST /api/repos/delete` | `repos` | `{names: [...]}`. Checks that every repo exists (404) and that none is locked (409 `<name>: <lock text>`); then nothing is deleted. Then it deletes the repos one after another with their files and blobs (see **Files, uploads and deletes**). The first failure stops the rest: 500 `{deleted: [names done], error}`. One `repo.delete` event per repo. 200 `{deleted: [names], files: n}` |
+| `GET /api/repos/{name}/permissions` | `access` | `[{username, perms: [...]}]` by username |
+| `PUT /api/permissions` | `access` on each repo | `{users: [...], repos: [...], perms: [...]}`. Sets the repository permission set of every pair of user and repo, at most 1000 pairs; `perms: []` removes the pairs. 400 for an unknown name, for `publish` without `download` or for `pipelines` without `publish`. 403 when the caller adds or removes a permission they do not hold on that repo. One `permission.set` event with `{old, new}` per pair whose set changed. 200 `{changed: n}` |
+| `GET /api/repos/{name}/assets?prefix=&after=&limit=` | `download` | Ordered by path; the prefix is a range scan |
+| `GET /api/repos/{name}/tree?path=&after=&limit=` | `download` | `{items: [{name, type: "dir"\|"file", path, size?, sha256?, updated_at?, uploaded_by?}], next}`. `path` is a folder (`""` or ending in `/`). A folder item's `path` and the `next` cursor end in `/`. `uploaded_by` is a username |
+| `POST /api/repos/{name}/files/delete` | `delete`, with a UI session or a device or manual publish session of the repo | `{paths?: [...], prefixes?: [...]}`: files and folders, 1 to 1000 items together. 400 with the first bad path or prefix; then nothing is deleted. 200 `{deleted: n}`, the number of files. A file that is gone already counts as done; an empty folder adds 0. 409 on a locked repo. 401 for a password or a read token; 403 without `delete` (a CI session never deletes). One `delete` event per file and per folder that lost files |
 | `POST /api/repos/{name}/upload` | publish session of the repo | Multipart. A file part may carry a relative path as its `filename` (folder upload). 201 `{files: [{path, status: "created"\|"replaced"\|"unchanged", size, sha256}]}`. 400 or 409 for a client error of the plugin |
 | `POST /api/repos/{name}/upload/scan` | publish session of the repo | Same multipart body as the upload. Stores nothing. 200 `{found: [{kind: "maven"\|"debian"\|"file", title, files: [paths], problems: [text]}], ignored: [paths]}`. See **Files, uploads and deletes** |
-| `GET, PUT /api/repos/{name}/ip-rules` | admin | `{read: [Rule], publish: [Rule]}` with `Rule` = `{kind: "cidr"\|"list", value, note}`. PUT replaces both lists and returns them in canonical form. 400 for an invalid rule or a `list` that does not exist. See **Network rules** |
-| `GET /api/ip-lists` | admin | `[IPList]` without `ranges`: presets first, then by name. `IPList` = `{name, kind: "preset"\|"custom", title, description, count, ranges?, source, fetched_at\|null, error, created_at, used_by: {repos: [{repo, scope}], trusted_proxies}}` |
-| `GET /api/ip-lists/{name}` | admin | The `IPList` with `ranges`. 404 when unknown |
-| `POST /api/ip-lists` | admin | `{name, title?, description?, ranges?}`. 201 `IPList`. 400 for invalid input, 409 when the name is taken (preset names too) |
-| `PUT /api/ip-lists/{name}` | admin | `{name?, title?, description?, ranges?}`; a missing field keeps its value. 200 `IPList`. 400 for a preset, 404 when unknown, 409 when the new name is taken or the rename would change `trusted_proxies` that the environment sets |
-| `DELETE /api/ip-lists/{name}` | admin | 204. 409 `{error, used_by}` while in use, 400 for a preset |
-| `POST /api/ip-lists/{name}/refresh` | admin | Fetches the preset now and returns the `IPList`. 400 for a custom list, 404 when unknown, 502 `{error}` when the fetch fails (the last good list stays) |
-| `POST /api/ip-ranges/parse` | admin | `{text}` (at most 1 MiB). Stores nothing. 200 `{ranges: [CIDR], invalid: [{line, text, reason}], duplicates: n}`. 400 for longer text or more than 100,000 ranges. See **IP lists** |
-| `GET /api/signing-keys` | admin | `[{name, fingerprint, public_key, created_at, error?, repos: [name]}]` by name |
-| `POST /api/signing-keys` | admin | `{name}` creates an Ed25519 key. `{name, armored, passphrase?}` imports a key. 201 with the key. 400 for a bad name or key, 409 when the name is taken |
-| `GET /api/signing-keys/{name}` | admin | The key with `repos`. 404 when unknown |
-| `DELETE /api/signing-keys/{name}` | admin | 204. 409 `{error, repos}` while repos use the key |
-| `GET /api/signing-keys/{name}/public.asc` | admin | `application/pgp-keys`, saved as `<name>.asc` |
-| `GET /api/network/proxy-candidates` | admin | `[{address, last_seen, count, header}]`, newest first: the untrusted TCP peers that sent a forwarded header. See **Network rules** |
-| `GET /api/audit?after=&limit=&action=&repo=` | admin | `{items: [{id, at, actor, actor_user_id\|null, action, repo, target, detail, ip}], next}`, newest first. `repo` is a repo name |
-| `GET /api/search?q=&repo=&after=&limit=` | any/anon | FTS5 trigram, `q` ≥ 3 chars, readable repos only |
-| `GET /api/repos/{name}/status` | read | The format's `Status` result, or `{}`. Debian: `{pending}`, the count of dirty rows |
-| `GET /api/repos/{name}/usage` | read | `{base_url, snippets:[{title, lang, code}]}` from the format's `Usage`; a proxy or a group gets no publish snippets. `base_url` is the `base_url` setting, else the request scheme and host |
-| `GET /api/repos/{name}/versions?path=&after=&limit=` | read | The versions of the artifact folder `path`, newest first (`format.Versioned`): `{artifact: {path, title, kind}\|null, items: [{version, kind, latest_build, builds_count, published_at, provenance}], next}`. `artifact` is null for any other folder. See **Versions and builds** |
-| `GET /api/repos/{name}/builds?path=&version=&after=&limit=` | read | The builds of one version of the artifact folder `path`, newest first: `{artifact, version, items: [{build, files: [{name, path, size, sha256, classifier, extension}], published_at, provenance}], next}`. `artifact` and `version` are null when the artifact has no such version. 400 without `version` |
-| `GET /api/repos/{name}/snippets?path=&version=&version_mode=pinned\|latest` | read | The snippets that use one artifact (`format.ArtifactDescriber`): `{base_url, artifact, version, version_mode, snippets}`. `path` is an artifact folder (with an optional `version`), a version folder or a file |
-| `GET /api/settings` | admin | `{groups:[{name, label, settings:[Item]}]}`. An Item has key, env, group, label, help, type, options, secret, value, default, source (`db`/`env`/`default`), locked |
-| `PATCH /api/settings` | admin | `{key: value}`. `null` resets a key; `""` for a secret means unchanged. Returns 400 `{error, fields}`, or 409 when an env-locked key gets a different value. Backend changes must pass the probe; SSO changes must pass discovery. A backend change that starts a storage move saves the other keys of the patch and returns 202 `{move: Move}`; 409 while a move runs |
-| `GET /api/storage/moves/current` | admin | The newest Move, running or ended; 404 when there has been none |
-| `GET /api/storage/moves/{id}` | admin | `Move` = `{id, state, total, copied, skipped, failed, error, started_at, finished_at, target: {storage, endpoint?, bucket?, prefix?, fs_root?}}`. Never holds secrets |
-| `GET /api/storage/moves/{id}/failures?after=&limit=` | admin | `{items: [{asset_id, key, reason}], next}` in asset id order |
-| `DELETE /api/storage/moves/{id}` | admin | Cancels the move and returns it; 409 when it has ended |
-| `POST /api/nexus/sources` | admin | `{name, base_url, username, password}`; `name` matches the repo name pattern. Checks the connection. 201 `Source`. 400 for invalid input or refused credentials, 409 when the name exists, 502 when Nexus is unreachable |
-| `GET /api/nexus/sources?after=<name>&limit=` | admin | `{items: [Source], next}` in name order |
-| `GET /api/nexus/sources/{id}` | admin | `SourceDetail`. After cut-over, or when Nexus is unreachable, it lists only the mapped repos and `nexus_error` says why |
-| `PATCH /api/nexus/sources/{id}` | admin | `{base_url?, username?, password?}`. Checks the connection. Returns the `Source`. 409 after cut-over |
-| `PUT /api/nexus/sources/{id}/repos` | admin | `{repos: [Mapping]}` replaces the whole mapping and, when it holds a repo, starts a sync (`trigger: save`). Returns the `SourceDetail` with `running_sync_id`. 400 for an invalid mapping, 409 while a sync runs, after cut-over, or when a target already mirrors another source |
-| `POST /api/nexus/sources/{id}/sync` | admin | 202 `Sync` with `repos` (`trigger: manual`). 400 without mapped repos, 409 while a sync runs or after cut-over |
-| `POST /api/nexus/sources/{id}/cutover` | admin | 202 `Sync` with `trigger: cutover`. 409 while a sync runs or after cut-over |
-| `GET /api/nexus/sources/{id}/syncs?after=<sync id>&limit=` | admin | `{items: [Sync without repos], next}`, newest first |
-| `GET /api/nexus/syncs/{id}` | admin | `Sync` with `repos` |
-| `GET /api/nexus/syncs/{id}/failures?after=&limit=` | admin | `{items: [Failure], next}` in failure order |
-| `GET /api/nexus/syncs/{id}/log?after=<line id>&limit=&repo=` | admin | `{items: [LogLine], next}`, oldest first. `repo` keeps the lines of one Nexus repo |
-| `DELETE /api/nexus/syncs/{id}` | admin | Cancels the sync and returns it (200); 409 when it has ended |
-| `DELETE /api/nexus/sources/{id}` | admin | 204. 409 while a sync runs or while the source mirrors mapped repos (allowed after cut-over, or without a mapping) |
-| `POST /api/settings/storage/test` | admin | Same body as the PATCH, merged over the current values and not saved. Returns `{ok:true}`, or 400 `{ok:false, error}` |
-| `POST /api/settings/oidc/test` | admin | Same, for SSO discovery. Returns `{ok:true}`, or 400 `{ok:false, error, fields}` |
+| `GET, PUT /api/repos/{name}/ip-rules` | `settings` | `{read: [Rule], publish: [Rule]}` with `Rule` = `{kind: "cidr"\|"list", value, note}`. PUT replaces both lists and returns them in canonical form. 400 for an invalid rule or a `list` that does not exist. See **Network rules** |
+| `GET /api/ip-lists` | `network`, or `settings` on a repo | `[IPList]` without `ranges`: presets first, then by name. `IPList` = `{name, kind: "preset"\|"custom", title, description, count, ranges?, source, fetched_at\|null, error, created_at, used_by: {repos: [{repo, scope}], trusted_proxies}}` |
+| `GET /api/ip-lists/{name}` | `network` | The `IPList` with `ranges`. 404 when unknown |
+| `POST /api/ip-lists` | `network` | `{name, title?, description?, ranges?}`. 201 `IPList`. 400 for invalid input, 409 when the name is taken (preset names too) |
+| `PUT /api/ip-lists/{name}` | `network` | `{name?, title?, description?, ranges?}`; a missing field keeps its value. 200 `IPList`. 400 for a preset, 404 when unknown, 409 when the new name is taken or the rename would change `trusted_proxies` that the environment sets |
+| `DELETE /api/ip-lists/{name}` | `network` | 204. 409 `{error, used_by}` while in use, 400 for a preset |
+| `POST /api/ip-lists/{name}/refresh` | `network` | Fetches the preset now and returns the `IPList`. 400 for a custom list, 404 when unknown, 502 `{error}` when the fetch fails (the last good list stays) |
+| `POST /api/ip-ranges/parse` | `network` | `{text}` (at most 1 MiB). Stores nothing. 200 `{ranges: [CIDR], invalid: [{line, text, reason}], duplicates: n}`. 400 for longer text or more than 100,000 ranges. See **IP lists** |
+| `GET /api/signing-keys` | `keys`, or `settings` on a repo | `[{name, fingerprint, public_key, created_at, error?, repos: [name]}]` by name |
+| `POST /api/signing-keys` | `keys` | `{name}` creates an Ed25519 key. `{name, armored, passphrase?}` imports a key. 201 with the key. 400 for a bad name or key, 409 when the name is taken |
+| `GET /api/signing-keys/{name}` | `keys` | The key with `repos`. 404 when unknown |
+| `DELETE /api/signing-keys/{name}` | `keys` | 204. 409 `{error, repos}` while repos use the key |
+| `GET /api/signing-keys/{name}/public.asc` | `keys` | `application/pgp-keys`, saved as `<name>.asc` |
+| `GET /api/network/proxy-candidates` | `network` | `[{address, last_seen, count, header}]`, newest first: the untrusted TCP peers that sent a forwarded header. See **Network rules** |
+| `GET /api/audit?after=&limit=&action=&repo=` | `activity` | `{items: [{id, at, actor, actor_user_id\|null, action, repo, target, detail, ip}], next}`, newest first. `repo` is a repo name |
+| `GET /api/search?q=&repo=&after=&limit=` | any/anon | FTS5 trigram, `q` ≥ 3 chars, only repos where the caller holds `download` |
+| `GET /api/repos/{name}/status` | `download` | The format's `Status` result, or `{}`. Debian: `{pending}`, the count of dirty rows |
+| `GET /api/repos/{name}/usage` | `download` | `{base_url, snippets:[{title, lang, code}]}` from the format's `Usage`; a proxy or a group gets no publish snippets. `base_url` is the `base_url` setting, else the request scheme and host |
+| `GET /api/repos/{name}/versions?path=&after=&limit=` | `download` | The versions of the artifact folder `path`, newest first (`format.Versioned`): `{artifact: {path, title, kind}\|null, items: [{version, kind, latest_build, builds_count, published_at, provenance}], next}`. `artifact` is null for any other folder. See **Versions and builds** |
+| `GET /api/repos/{name}/builds?path=&version=&after=&limit=` | `download` | The builds of one version of the artifact folder `path`, newest first: `{artifact, version, items: [{build, files: [{name, path, size, sha256, classifier, extension}], published_at, provenance}], next}`. `artifact` and `version` are null when the artifact has no such version. 400 without `version` |
+| `GET /api/repos/{name}/snippets?path=&version=&version_mode=pinned\|latest` | `download` | The snippets that use one artifact (`format.ArtifactDescriber`): `{base_url, artifact, version, version_mode, snippets}`. `path` is an artifact folder (with an optional `version`), a version folder or a file |
+| `GET /api/settings` | `general`, `signin`, `storage` or `network` | `{groups:[{name, label, settings:[Item]}]}`. An Item has key, env, group, label, help, type, options, secret, value, default, source (`db`/`env`/`default`), locked |
+| `PATCH /api/settings` | the permission of each key | `{key: value}`. The SSO keys need `signin`, the storage keys `storage`, `trusted_proxies` needs `network`, and every other key `general` (403 otherwise). `null` resets a key; `""` for a secret means unchanged. Returns 400 `{error, fields}`, or 409 when an env-locked key gets a different value. Backend changes must pass the probe; SSO changes must pass discovery. A backend change that starts a storage move saves the other keys of the patch and returns 202 `{move: Move}`; 409 while a move runs |
+| `GET /api/storage/moves/current` | `storage` | The newest Move, running or ended; 404 when there has been none |
+| `GET /api/storage/moves/{id}` | `storage` | `Move` = `{id, state, total, copied, skipped, failed, error, started_at, finished_at, target: {storage, endpoint?, bucket?, prefix?, fs_root?}}`. Never holds secrets |
+| `GET /api/storage/moves/{id}/failures?after=&limit=` | `storage` | `{items: [{asset_id, key, reason}], next}` in asset id order |
+| `DELETE /api/storage/moves/{id}` | `storage` | Cancels the move and returns it; 409 when it has ended |
+| `POST /api/nexus/sources` | `nexus` | `{name, base_url, username, password}`; `name` matches the repo name pattern. Checks the connection. 201 `Source`. 400 for invalid input or refused credentials, 409 when the name exists, 502 when Nexus is unreachable |
+| `GET /api/nexus/sources?after=<name>&limit=` | `nexus` | `{items: [Source], next}` in name order |
+| `GET /api/nexus/sources/{id}` | `nexus` | `SourceDetail`. After cut-over, or when Nexus is unreachable, it lists only the mapped repos and `nexus_error` says why |
+| `PATCH /api/nexus/sources/{id}` | `nexus` | `{base_url?, username?, password?}`. Checks the connection. Returns the `Source`. 409 after cut-over |
+| `PUT /api/nexus/sources/{id}/repos` | `nexus` | `{repos: [Mapping]}` replaces the whole mapping and, when it holds a repo, starts a sync (`trigger: save`). Returns the `SourceDetail` with `running_sync_id`. 400 for an invalid mapping, 409 while a sync runs, after cut-over, or when a target already mirrors another source |
+| `POST /api/nexus/sources/{id}/sync` | `nexus` | 202 `Sync` with `repos` (`trigger: manual`). 400 without mapped repos, 409 while a sync runs or after cut-over |
+| `POST /api/nexus/sources/{id}/cutover` | `nexus` | 202 `Sync` with `trigger: cutover`. 409 while a sync runs or after cut-over |
+| `GET /api/nexus/sources/{id}/syncs?after=<sync id>&limit=` | `nexus` | `{items: [Sync without repos], next}`, newest first |
+| `GET /api/nexus/syncs/{id}` | `nexus` | `Sync` with `repos` |
+| `GET /api/nexus/syncs/{id}/failures?after=&limit=` | `nexus` | `{items: [Failure], next}` in failure order |
+| `GET /api/nexus/syncs/{id}/log?after=<line id>&limit=&repo=` | `nexus` | `{items: [LogLine], next}`, oldest first. `repo` keeps the lines of one Nexus repo |
+| `DELETE /api/nexus/syncs/{id}` | `nexus` | Cancels the sync and returns it (200); 409 when it has ended |
+| `DELETE /api/nexus/sources/{id}` | `nexus` | 204. 409 while a sync runs or while the source mirrors mapped repos (allowed after cut-over, or without a mapping) |
+| `POST /api/settings/storage/test` | `storage` | Same body as the PATCH, merged over the current values and not saved. Returns `{ok:true}`, or 400 `{ok:false, error}` |
+| `POST /api/settings/oidc/test` | `signin` | Same, for SSO discovery. Returns `{ok:true}`, or 400 `{ok:false, error, fields}` |
 
-"admin" in these tables means the UI session of an admin. "UI session" means the `tr_session`
-cookie; an admin session exists only after the second factor (outside dev mode).
+A permission in these tables means the UI session of a person who holds it (see
+**Permissions**); `repos` holds every repository permission. "UI session" means the `tr_session`
+cookie; the session of a person who needs the second factor exists only after it (outside dev
+mode). The publish routes are in **Publishing**.
 
 ## Client setup
 
@@ -348,28 +352,39 @@ The UI shows these snippets per repo (`/usage`), and `telesphorepo dev` prints t
 read token as the password. Uploads use a publish session token; the Maven and Gradle clients
 (see **Publishing**) get it themselves.
 
+No snippet puts a token in a process argument. A curl snippet pipes a curl config
+(`user = "publish:$TOKEN"`, `header = ...`) to `curl -K -` with the shell builtin `printf`, and
+sends a JSON body that holds a token with `--data @-`. A snippet for a person reads a token at a
+hidden prompt (`read -rs TOKEN`), so the token stays out of the shell history; wget uses
+`--ask-password`. The GitHub Actions workflow masks the identity token and the session token
+with `::add-mask::` as soon as it has each one. The Jenkinsfile turns tracing off with `set +x`.
+The apt credentials file gets mode 600 (`sudo install -m 600 /dev/null FILE`) before the token
+is written to it with `sudo tee -a FILE > /dev/null`.
+
 | Client | Setup |
 |---|---|
 | Maven | URL `HOST/maven/{repo}` in `<distributionManagement>` / `<repositories>`. Reads of a private repo need `~/.m2/settings.xml` `<server>` with the same `<id>`. Deploys use the Telesphorepo extension. Maven 3.8.1+ blocks `http://` on non-localhost hosts |
-| Gradle | `maven { url = uri("HOST/maven/{repo}") }` in `publishing.repositories`, and in `pluginManagement.repositories` to consume plugins; add `credentials { ... }` with a read token to read a private repo. The settings plugin adds the publish credentials. `isAllowInsecureProtocol = true` only for plain http |
-| apt | Key: `curl -fsSL HOST/debian/{repo}/key.asc -o /etc/apt/keyrings/telesphorepo.asc`. Source: `deb [signed-by=/etc/apt/keyrings/telesphorepo.asc] HOST/debian/{repo} {dist} {component}`. For a private repo add `-u USER:READ_TOKEN` to the `curl` command, and add `/etc/apt/auth.conf.d/telesphorepo.conf` (`machine host login USER password TOKEN`, mode 600) |
-| Upload `.deb` | `curl -u publish:SESSION_TOKEN -T x.deb HOST/debian/{repo}/upload/{dist}/{component}`. Indexes rebuild after `deb.debounce`; poll `GET /api/repos/{repo}/status` for `pending: 0` |
-| Raw | Upload: `curl -f -u publish:SESSION_TOKEN -T file.tar.gz HOST/raw/{repo}/path/file.tar.gz`. Download: `curl -fL [-u USER:READ_TOKEN] -O HOST/raw/{repo}/path/file.tar.gz` |
+| Gradle | `maven { url = uri("HOST/maven/{repo}") }` in `repositories` of the build file to consume dependencies (Gradle ignores the repositories of the settings file when the build file declares its own), in `pluginManagement.repositories` of the settings file to consume plugins, and in `publishing.repositories` to publish; add `credentials(PasswordCredentials::class)` with a read token in `~/.gradle/gradle.properties` to read a private repo. The settings plugin adds the publish credentials. `isAllowInsecureProtocol = true` only for plain http |
+| apt | Key: `curl -fsSL HOST/debian/{repo}/key.asc -o /etc/apt/keyrings/telesphorepo.asc`. Source: `deb [signed-by=/etc/apt/keyrings/telesphorepo.asc] HOST/debian/{repo} {dist} {component}`. For a private repo, the `curl` command reads `USER:READ_TOKEN` from a config on stdin, and `/etc/apt/auth.conf.d/{repo}.conf` holds `machine HOST/debian/{repo} login USER password TOKEN` (mode 600) |
+| Upload `.deb` | `curl -K - -T x.deb HOST/debian/{repo}/upload/{dist}/{component}` with `user = "publish:SESSION_TOKEN"` on stdin. Indexes rebuild after `deb.debounce`; poll `GET /api/repos/{repo}/status` for `pending: 0` |
+| Raw | Upload: `curl -K - -T file.tar.gz HOST/raw/{repo}/path/file.tar.gz` with `user = "publish:SESSION_TOKEN"` on stdin. Download: `curl -fLO HOST/raw/{repo}/path/file.tar.gz`; a private repo adds `-K -` with `user = "USER:READ_TOKEN"` on stdin |
 
 ## Auth model
 
 | Credential | Storage | Accepted on |
 |---|---|---|
-| Password | argon2id (64 MiB, t=3, p=2), at most 4 hashes at once; successful Basic checks are cached for 10 min under an HMAC key | Sign-in (`POST /api/auth/login`). As Basic auth: format reads, and the `/api/` GET routes that are not admin routes |
-| Read token `trp_<12hex>_<secret>` | SHA-256(secret), looked up by id, constant-time compare | Basic password (any username): format reads, and the `/api/` GET routes that are not admin routes |
-| Session `tr_session` | SHA-256(id), absolute `session_ttl` | `/api/`, and format reads (GET and HEAD) for downloads in the browser. The only credential for admin routes and for routes that change state on `/api/`; it never writes to a format route. HttpOnly, SameSite=Strict, Secure per `cookie.secure`. An admin session may also delete files (see **Files, uploads and deletes**) |
+| Password | argon2id (64 MiB, t=3, p=2), at most 4 hashes at once; successful Basic checks are cached for 10 min under an HMAC key | Sign-in (`POST /api/auth/login`). As Basic auth: format reads, and the `/api/` GET routes that need no permission |
+| Read token `trp_<12hex>_<secret>` | SHA-256(secret), looked up by id, constant-time compare | Basic password (any username): format reads, and the `/api/` GET routes that need no permission |
+| Session `tr_session` | SHA-256(id), absolute `session_ttl` | `/api/`, and format reads (GET and HEAD) for downloads in the browser. The only credential for permission routes and for routes that change state on `/api/`; it never writes to a format route. HttpOnly, SameSite=Strict, Secure per `cookie.secure`. The session of a person who holds `delete` may also delete files (see **Files, uploads and deletes**) |
 | Publish session `trs_<12hex>_<secret>` | SHA-256(secret) in `publish_sessions`, constant-time compare | Basic password (any username) or `Authorization: Bearer` on format routes of its one repo, `/api/publish/...`, and the upload and delete routes of its repo. The only credential that writes to a format route |
 
 - **Account kinds.** `local` users have a password, API tokens and Basic auth; publishers and the
   break-glass admin. `oidc` users are created on their first SSO login, keyed by
-  `(oidc_issuer, oidc_subject)`, and are always admins. They have no usable password, cannot
+  `(oidc_issuer, oidc_subject)`, and get every server permission at each SSO login. They have no usable password, cannot
   create tokens, get 401 on Basic auth and password login, and cannot have their password changed
-  (403, also `user passwd`). Their session only comes from SSO.
+  (403, also `user passwd`). Their session only comes from SSO. They approve a device with a new
+  SSO sign-in (see **Publishing**) and publish through that device or from CI; they have no manual
+  publish session.
 - **SSO admin rule.** The `oidc.admin_claim` (ID token, falling back to UserInfo; string or array)
   must contain one of `oidc.admin_values`, or the email must be verified and in
   `oidc.admin_emails`. It is re-checked at every SSO login: a refused login creates no user and
@@ -383,40 +398,79 @@ read token as the password. Uploads use a publish session token; the Maven and G
   sign-in. Passkeys need `base_url`; without it the routes answer 409. TOTP secrets are sealed
   with the settings key. Failed checks count against the `u:<username>` rate-limit key. SSO
   users have no second factor.
-- **Sign-in.** An admin with a factor sends password, then a second step with the cookie
-  `tr_login` (HttpOnly, SameSite=Strict, Path `/api/auth/login`, 5 min). The state is a row in
-  `auth_challenges`, so it survives a restart. A wrong code keeps the sign-in pending. A
-  non-admin user signs in with the password alone, also when the user has a factor.
-- **Where a factor is required.** Admin sign-in, device approval and a manual publish session
-  (the UI session that publishes or deletes) need a fresh factor. A non-admin user sets up a
-  factor when first approving a device or creating a manual session.
-- **Setup-only session.** A UI session of an admin with no factor reaches only `/api/me`,
+- **Sign-in.** A person who needs the second factor (see **Permissions**) and has one sends the
+  password, then a second step with the cookie `tr_login` (HttpOnly, SameSite=Strict, Path
+  `/api/auth/login`, 5 min). The state is a row in `auth_challenges`, so it survives a restart. A
+  wrong code keeps the sign-in pending. Anyone else signs in with the password alone, also when
+  the user has a factor.
+- **Where a factor is required.** The sign-in of a person who needs it, device approval and a
+  manual publish session (the UI session that publishes) need a fresh factor. Anyone else sets up
+  a factor when first approving a device or creating a manual session. An SSO user approves a
+  device with a new sign-in at the provider instead.
+- **Setup-only session.** A UI session of a local account that needs the second factor and has
+  none reaches only `/api/me`,
   `/api/auth/logout` and `/api/security...`. Every other `/api` route answers 403
   `{"error":"second_factor_required"}`. The break-glass `admin` follows the same rule. The
   `/api/security` routes need a UI session, so Basic auth and tokens get 401. A password alone
   cannot add a factor and cannot publish.
 - **Dev mode.** `telesphorepo dev` sets `server.Options.Dev`, which calls `auth.SetDevMode`. It is
   an in-process flag: not a setting, not an env var, and not reachable from `serve`. In dev mode
-  an admin without a factor gets a full session, and a device approval or manual session without a
+  a person without a factor gets a full session, and a device approval or manual session without a
   factor passes. A factor that exists is still checked. `GET /api/auth/config` reports
   `second_factor_optional: true`, and the dev banner says "2FA not enforced (dev)". The e2e
   suite runs `serve`, so enforcement stays tested.
 - **Where each credential works on the JSON API.** A route that changes state (POST, PUT, PATCH,
-  DELETE) or an admin route (GET too) needs the UI session. HTTP Basic with a password or a read
-  token reaches only the GET routes that are not admin routes: repo list and repo, tree, assets,
+  DELETE) or a permission route (GET too) needs the UI session. HTTP Basic with a password or a
+  read token reaches only the GET routes that need no permission: repo list and repo, tree, assets,
   search, status, usage, `/api/me`, own tokens, devices and publish sessions. Anything else gets
   401 `{"error":"sign in through the web UI for this action"}` without a Basic challenge. So a
-  stolen admin password cannot change users, permissions, settings or trust policies: an admin
-  session needs the second factor. `auth.Identify` refuses Basic on routes that change state, and
-  `api.admin` refuses every credential except a UI session. The exceptions are the routes with no
+  stolen password cannot change users, permissions, settings or trust policies: the session of a
+  person who holds a permission for them needs the second factor. `auth.Identify` refuses Basic
+  on routes that change state, and `api.can` and `api.canRepo` refuse every credential except a
+  UI session. The exceptions are the routes with no
   credential or their own token: sign-in, `/api/auth/config`, `/api/formats`, device enrollment
   and poll, the publish challenge, the device and OIDC session mints, closing a session with its
   token, and the upload and delete routes with a publish session token. Dev mode does not change
   this rule.
 - **Lost factors.** `telesphorepo user reset-2fa NAME` removes the TOTP factors, passkeys and
   recovery codes of a user.
-- **Roles.** Admins can do everything. Repo permission `write` includes `read`. A disabled user
-  fails authentication.
+- **Permissions.** Permissions are named and grouped by area. A person holds server permissions
+  (`user_permissions`) and, per repository, repository permissions (`repo_permissions`). There is
+  no admin flag: an **administrator** is a person who holds every server permission, and the UI
+  shows that word as the role. The first-start `admin`, `user add --admin` and every SSO account
+  hold every server permission. A disabled user fails authentication.
+
+  | Server permission | UI label | The person can |
+  |---|---|---|
+  | `repos` | All repositories | Create and delete repositories, and hold every repository permission on every repository |
+  | `people` | People | Create, edit and disable people, and set their server permissions, only the ones they hold themselves. Reset the password of, or disable, only a person whose permissions they all hold. See every device |
+  | `signin` | Sign-in options | Settings › Sign-in options (the SSO settings) |
+  | `storage` | Storage | Settings › Storage and the storage moves |
+  | `network` | Network | Settings › Network and proxy (`trusted_proxies`) and Networks (IP lists) |
+  | `keys` | Signing keys | Settings › Signing keys |
+  | `nexus` | Nexus migration | Settings › Nexus migration |
+  | `general` | General | Settings › General: every setting that no other permission owns |
+  | `activity` | Activity | Settings › Activity: the audit log and the publish log |
+
+  | Repository permission | UI label | The person can |
+  |---|---|---|
+  | `download` | Download files | Read the files of the repository |
+  | `publish` | Publish | Publish through a publish session. Needs `download` |
+  | `delete` | Delete files | Delete files and folders, with the UI session or a device or manual publish session |
+  | `settings` | Edit settings | Edit the repository settings, the members of a group, the remote of a proxy, the network rules and the public flag |
+  | `access` | Manage access | Give and remove this repository's permissions, only the ones they hold themselves |
+  | `pipelines` | CI pipelines | Add and edit CI pipelines that publish to this repository. Needs `publish` |
+
+  The server answers 400 for a repository set that breaks the two dependency rules. Each route
+  names the one permission it needs (`api.can` for a server permission, `api.canRepo` for a
+  repository permission); a route that serves several pages takes any one of a few. The server
+  refuses a change that leaves no enabled person with `people` (409).
+- **Second factor rule.** A person needs the second factor for a UI session when they hold any
+  server permission, or any repository permission other than `download` and `publish`.
+  `second_factor_required` in `GET /api/me` follows this rule. A grant that makes a person need
+  the second factor ends their UI sessions, so a session that a password alone started never
+  holds it. `admin_password_login=false` refuses the password sign-in of a local account with a
+  server permission.
 - **CSRF.** `http.CrossOriginProtection` plus SameSite=Strict.
 - **Rate limit.** Failed attempts are limited per IP and per username: burst 10, then 1 every
   6 s. Over the limit the response is 429 with `Retry-After`. The client IP is resolved as
@@ -435,7 +489,7 @@ proves who it is. There are four proofs:
 | Who | Proof | Route |
 |---|---|---|
 | Developer with Gradle or Maven | An enrolled device key (Ed25519) | `POST /api/publish/sessions` |
-| CI (GitHub Actions, Jenkins, any OIDC issuer) | The CI identity token and an admin trust policy | `POST /api/publish/sessions/oidc` |
+| CI (GitHub Actions, Jenkins, any OIDC issuer) | The CI identity token and a trust policy (CI pipeline) | `POST /api/publish/sessions/oidc` |
 | Anyone, by hand | UI session plus a fresh second factor | `POST /api/publish/sessions/manual` |
 
 Routes (`{items, next}` lists are keyset, `?after=&limit=`):
@@ -445,17 +499,17 @@ Routes (`{items, next}` lists are keyset, `?after=&limit=`):
 | `POST /api/devices/enroll` | none | `{name, kind: "gradle"\|"maven", public_key}` (`public_key` is the raw 32-byte key, base64url, no padding). Returns `{device_code, user_code: "ABCD-EFGH", verification_url: "<base_url>/#/device", expires_in: 600, interval: 5}`. `verification_url` uses the request URL when `base_url` is empty. Each IP gets a burst of 10, then 1 per 30 s (429) |
 | `POST /api/devices/enroll/poll` | none | `{device_code}`. 200 `{device_id}` once approved (single use). 400 `{"error": "authorization_pending" \| "slow_down" \| "expired_token"}`. `slow_down` answers a poll less than 4 s after the last. An unknown or used code gets `expired_token` |
 | `GET /api/devices/enroll?user_code=` | UI session or password | `{user_code, name, kind, expires_at}`; 404 for an unknown or expired code |
-| `POST /api/devices/approve` | UI session | `{user_code, totp_code \| passkey}`. 201 Device. 401 for a wrong second factor, 404 unknown or expired code, 409 used code, 403 `second_factor_required` |
-| `GET /api/devices` | password, read token or UI session | Own devices; an admin sees all devices, with `username`. Newest first, `{items, next}` |
-| `DELETE /api/devices/{id}` | UI session | 204. An admin may revoke any device. It ends the device's open sessions |
+| `POST /api/devices/approve` | UI session | A local account sends `{user_code, totp_code \| passkey}`, an SSO account `{user_code, grant}`. 201 Device. 401 for a wrong second factor, or for a missing, used, expired or other grant (another user or code), 404 unknown or expired code, 409 used code, 403 `second_factor_required` |
+| `GET /api/devices` | password, read token or UI session | Own devices; a holder of `people` sees all devices, with `username`. Newest first, `{items, next}` |
+| `DELETE /api/devices/{id}` | UI session | 204. A holder of `people` may revoke any device. It ends the device's open sessions |
 | `POST /api/publish/challenge` | none | `{device_id}` returns `{nonce}` (32 random bytes, base64url, single use, 60 s) |
 | `POST /api/publish/sessions` | none | `{device_id, repo, nonce, signature}` returns 201 `{id, token: "trs_...", repo, expires_at}` |
 | `POST /api/publish/sessions/manual` | UI session | `{repo, totp_code \| passkey}`; same answer. The proof is a fresh check, not recovery codes. 401 for a wrong proof, 429 with `Retry-After` when limited |
 | `POST /api/publish/sessions/oidc` | none | `{token, repo}`; same answer |
 | `GET /api/publish/sessions` | password, read token or UI session | The caller's own sessions |
 | `DELETE /api/publish/sessions/{id}` | the session's own token | 204. The token is the Basic password or a Bearer token. Another token or none gets 401 |
-| `GET /api/publish/log` | admin | Every session, newest first |
-| `GET, POST /api/publish/trusts` · `GET, PATCH, DELETE /api/publish/trusts/{id}` | admin | Trust policies. The list is keyset by name |
+| `GET /api/publish/log` | `activity` | Every session, newest first |
+| `GET, POST /api/publish/trusts` · `GET, PATCH, DELETE /api/publish/trusts/{id}` | `pipelines` | Trust policies (CI pipelines). A holder of `repos` sees and changes every one. Anyone else sees and changes only the policies whose repos all hold `pipelines` for them: the list leaves the others out, and a policy outside that scope answers 404. A new or changed `repos` list outside that scope answers 403. 403 when the caller holds `pipelines` on no repo. The list is keyset by name |
 
 Shapes:
 
@@ -475,21 +529,34 @@ also not for an admin user.
 1. The client creates an Ed25519 key pair, stores it in `~/.telesphorepo/<host>[_<port>]/device.json`
    (owner only) and calls `enroll`. It prints `Open <verification_url>?code=<USER-CODE> and
    approve code <USER-CODE>`.
-2. The user opens the page, signs in with the second factor, checks name and kind, and approves
-   with a fresh TOTP code or passkey check.
+2. The user opens the page, signs in, checks name and kind, and approves. A local account
+   approves with a fresh TOTP code or passkey check. An SSO account selects **Sign in again with
+   single sign-on to approve**: `GET /api/auth/oidc/device?code=` asks the provider for a new
+   sign-in (`prompt=login`, `max_age=0`). The callback checks that the provider signed in the same
+   account (issuer and `sub`) and that `auth_time` is at most 5 minutes old; a token without
+   `auth_time` is refused. It stores a grant in `auth_challenges` (kind `device_grant`, SHA-256 of
+   the grant, the user id and the user code, single use, 5 min) and returns to
+   `/#/device?code=<code>&grant=<grant>`. The page removes the grant from the address and sends
+   it to `approve`, which takes it once and requires the same user and code. A provider that
+   ignores `prompt=login` returns an old `auth_time`; the page then shows `stale_sign_in` and names
+   that cause. The approval writes the same rows and audit events as the local path: no audit event
+   for the approval itself, and `session.create` when the device mints a session.
 3. The client polls until it gets `device_id`. An enrollment code expires after 10 min.
 4. A device lives `publish.device_ttl` unless revoked. The client then enrolls again.
 
 **Minting from a device.** `signature` is the Ed25519 signature (base64url, no padding) over the
 UTF-8 text `"telesphorepo publish v1\n" + nonce + "\n" + device_id + "\n" + repo` (`device_id` in
 decimal). The server checks the signature and nonce, that the device is not revoked or expired,
-and that its user has `write` on the repo now. The token is the Basic password for the upload, and
+that its user (local or SSO) is enabled, and that the user holds `publish` on the repo now. The token is the Basic password for the upload, and
 it also reads that repo.
 
 **Trust policies and the CI exchange.**
 - A policy needs at least one claim, and each claim at least one allowed value. A value is exact
   or a `*` glob; `*` matches any text, `/` included. Every listed claim must match.
-- `audience` `""` means the current `base_url`, resolved at exchange time. A pasted `jwks` is
+- `audience` `""` means the current `base_url`, resolved at exchange time. When both are empty,
+  the exchange refuses the token and the error says to set the public address on Settings ›
+  General or an audience on the pipeline. Every refusal of a policy match names Settings › CI
+  pipelines as the place that fixes it. A pasted `jwks` is
   checked when the policy is saved and replaces key discovery (for a Jenkins the server cannot
   reach). Signing algorithms are RS, ES and PS (256, 384, 512) and EdDSA. Issuer keys are cached.
 - The server checks signature, issuer, audience, `exp`, and `iat` (at most 10 min old and 1 min
@@ -498,7 +565,7 @@ it also reads that repo.
   replay row and the session are written in one transaction. `subject` is the token's `sub`.
 - An edit of issuer, audience, claims, jwks or repos, a disable, and a delete end the policy's
   open sessions.
-- A CI session writes outright. A device or manual session needs the user's `write` permission.
+- A CI session writes outright. A device or manual session needs the user's `publish` permission.
 
 **Sessions.** An open session has `closed_at` empty and `expires_at` ahead. A device session also
 needs a device that is not revoked or expired. An OIDC session needs an enabled policy. A bad,
@@ -509,34 +576,53 @@ trail for the **Publish log**).
 
 **Clients** (Java 17, JDK only). They live in their own repository,
 [github.com/Telesphorepo/clients](https://github.com/Telesphorepo/clients), under the MIT license.
-The group and plugin id are `com.telesphorepo`.
-- **Gradle plugin** (`gradle/` in the clients repo): a settings plugin. `telesphorepo { url = "https://repo.acme.com"; oidcTokenEnv = "..." }`
-  in `settings.gradle`. Each `PublishToMavenRepository` task whose repo is under `<url>/maven/<name>`
-  gets credentials (user `telesphorepo`, the token as password) just before it runs. A session
-  is minted once per repo and closed at build end by a build service. Proof order: GitHub
+The group is `com.telesphorepo` and the Gradle plugin id is `com.telesphorepo.publish`. Both
+clients have the same version.
+- **Gradle plugin** (`gradle/` in the clients repo): a settings plugin.
+  `telesphorepo { url = "https://repo.acme.com"; repository = "releases"; oidcTokenEnv = "..." }`
+  in `settings.gradle`. With `repository`, each project with `java` or `java-platform` gets
+  `maven-publish`, the repository `telesphorepo` at `<url>/maven/<repository>` (unless the build
+  file declares a repository on the server) and the publication `maven` of its component (unless
+  it has a publication of its own; `java-gradle-plugin` keeps its own). Each
+  `PublishToMavenRepository` task whose repo is under `<url>/maven/<name>` gets credentials (user
+  `telesphorepo`, the token as password) just before it runs. A session is minted once per repo
+  and closed at build end by a build service. Proof order: GitHub
   (`ACTIONS_ID_TOKEN_REQUEST_URL`, audience = the server URL), the env var named by
-  `oidcTokenEnv`, the device key. Tasks that publish to the server opt out of the configuration
-  cache. Without a proof the build fails and names `./gradlew telesphorepoLogin`, the task that
-  enrolls a device.
+  `oidcTokenEnv`, the device key. The plugin checks a saved device once per build with
+  `POST /api/publish/challenge`. With no device that the server accepts, a build outside CI
+  enrolls one inline: it prints the approval link, opens the browser when it can, polls, saves the
+  key and continues. In CI (`CI` set, `GITHUB_ACTIONS=true`, or `JENKINS_URL`/`JENKINS_HOME`) the
+  build fails with what the job must add (`permissions: id-token: write`, or the Jenkins
+  credential `telesphorepo-id-token` bound to `OIDC_TOKEN`). `./gradlew telesphorepoLogin`
+  enrolls without a publish and keeps a device that the server accepts. A 404 from the session
+  mint says that the repository does not exist. Tasks that publish to the server opt out of the
+  configuration cache.
 - **Maven** (`maven/` in the clients repo, parent `telesphorepo-maven-parent`): `telesphorepo-maven-client`
   (library), `telesphorepo-maven-extension` (declared in `.mvn/extensions.xml`) and
-  `telesphorepo-maven-plugin` (goal `telesphorepo:login`). The server URL is the property
+  `telesphorepo-maven-plugin` (goal `login`, optional). The server URL is the property
   `telesphorepo.url` (or env `TELESPHOREPO_URL`). `telesphorepo.oidcTokenEnv` names the env var
-  with a CI token. `telesphorepo.deviceName` names the device. The extension mints a session when
-  `maven-deploy-plugin` starts and closes it at the end. A `deploy` without proof stops with a
-  message that names `mvn telesphorepo:login`. With `-DdeployAtEnd=true` a session older than
-  `publish.session_ttl` at the last module fails.
+  with a CI token. `telesphorepo.deviceName` names the device. Before a `deploy` to the server, the
+  extension checks the proof the same way as the Gradle plugin: outside CI it enrolls inline and
+  waits, in CI it stops with what the job must add. The extension mints a session when
+  `maven-deploy-plugin` starts and closes it at the end. With `-DdeployAtEnd=true` a session
+  older than `publish.session_ttl` at the last module fails.
 - **Release.** The clients repo releases from its own workflow (`.github/workflows/release.yml`)
   on a `v*` tag. The server repo has no release job for the clients. The clients repo is
   MIT-licensed; the server is AGPL-3.0.
-- **CI without a client.** The UI **Publishing** page and the server `README.md` show `curl`
-  steps for GitHub Actions and Jenkins.
+- **CI without a client.** For a format without a client plugin (Debian, Raw), the repo's
+  **Publish to this repository** tab and the CI pipeline page show a GitHub Actions workflow and a
+  Jenkinsfile that post the identity token to `/api/publish/sessions/oidc` with `curl`, upload,
+  and close the session.
 
 **UI pages.** The sign-in page (second step for admins), the approval page (`/#/device?code=`)
 and, under Settings: **Sign-in and security** (TOTP with a QR code, passkeys, recovery codes),
 **Devices**, **Tokens** (read tokens, and publish tokens with a new manual session), and for
 admins **CI pipelines** (trust policies, started from GitHub Actions, Jenkins or another CI
-system) and **Activity** (the publish log is its second tab). A setup-only session sees only Sign-in and security. See **Web UI**.
+system) and **Activity** (the publish log is its second tab). A setup-only session sees only Sign-in and security. The approval page shows when the code expires (10 minutes after the login command starts). A user with no second factor follows its link to
+`/#/settings/security?back=/device?code=<code>`; once a method is on, that page shows **Go back**,
+and the approval page looks the code up again. An SSO account sees **Sign in again with single
+sign-on to approve** in place of the second-factor form; back from the provider, the page approves
+at once, or shows the error. See **Web UI**.
 
 ## Debian indexing pipeline
 
@@ -832,17 +918,17 @@ format; it calls the optional plugin interfaces of `internal/format`.
   folders and files mixed (the UI sorts folders first within a page). Each child is one indexed
   seek on `(repo_id, path)`. After a folder, the next seek starts just past every path under it,
   so a page costs `limit` seeks however large the repo is.
-- **Delete credential.** `POST /api/repos/{name}/files/delete` takes a publish session of that repo
-  (Basic password or `Authorization: Bearer trs_...`), which goes through the normal write gate:
-  the user's `write` permission, the repo lock, and 401 for a session of another repo. It also
-  takes the UI session cookie of an admin. Outside dev mode an admin session exists only after
-  the second factor. Passwords, read tokens, admin Basic auth and non-admin UI sessions get 401
-  `publishing needs a publish session`. A locked repo gets 409.
+- **Delete credential.** `POST /api/repos/{name}/files/delete` needs the `delete` permission on
+  the repo. It takes the UI session cookie of a person who holds it; that session exists only
+  after the second factor (outside dev mode). It also takes a device or manual publish session of
+  that repo (Basic password or `Authorization: Bearer trs_...`) whose user holds `delete` now,
+  through the normal write gate: the repo lock, and 401 for a session of another repo. A CI
+  session gets 403. Passwords and read tokens get 401. A locked repo gets 409.
 - **Delete steps.** A prefix is always a folder (a trailing `/` is added). The server checks
   every path and prefix first. The rows of the `paths` go in one transaction under the upload
   locks (taken in path order), then their blobs. Each folder then goes in batches of 500 the same
   way. `deleted` is the number of files.
-- **Repo delete.** `POST /api/repos/delete` (admin UI session) deletes one repo after another.
+- **Repo delete.** `POST /api/repos/delete` (`repos`) deletes one repo after another.
   For each repo it sets the lock text `RepoDeleting`, so writes get 409. It deletes the files
   batch by batch, then the repo row. The name can be used again afterwards.
 - **`format.DeleteObserver`.** `AssetsDeleted(ctx, tx, repo, paths)` runs in the delete
@@ -963,9 +1049,9 @@ name of an IP list. An empty list is unrestricted (the default).
   with the counts only.
 - **Read rules** apply to every format read and to the repo read routes (`tree`, `assets`, `usage`,
   `status`), for every caller, admins included. Search leaves out the repos whose read rules
-  refuse the caller. `GET /api/repos/{name}` is exempt (`auth.RepoMeta`), so an admin can still
-  open the repo and change its rules.
-- **Publish rules** apply to format writes, manual upload and scan, deletes (an admin UI session
+  refuse the caller. `GET /api/repos/{name}` is exempt (`auth.RepoMeta`), so a holder of `settings` can
+  still open the repo and change its rules.
+- **Publish rules** apply to format writes, manual upload and scan, deletes (a UI session
   too) and to minting device, manual and OIDC publish sessions.
 - **Refusal.** The answer is 403 `{"error":"your address is not allowed to read|publish this
   repository"}` and the audit event `ip.denied` with `detail.scope` and the client IP. The IP
@@ -997,7 +1083,7 @@ paths and the indexers read that copy. The table is `signing_keys`.
   answers 409 `{error, repos}` while a repo uses the key.
 ## Audit log
 
-`audit_events` records who did what. `GET /api/audit` is admin only and lists newest first.
+`audit_events` records who did what. `GET /api/audit` needs `activity` and lists newest first.
 Actions:
 
 | Group | Actions |
@@ -1005,14 +1091,14 @@ Actions:
 | Sign-in | `signin`, `signin.failed` |
 | Publish sessions | `session.create`, `session.close` |
 | Files | `upload`, `delete` |
-| Repos | `repo.create`, `repo.update`, `repo.delete`, `permission.set`, `permission.delete` |
-| Users and settings | `user.create`, `user.update`, `settings.update` (keys only, never values) |
+| Repos | `repo.create`, `repo.update`, `repo.delete`, `permission.set` (`detail.old` and `detail.new`: the repository permission sets) |
+| Users and settings | `user.create` (`detail.permissions`), `user.update`, `user.permissions` (`detail.old` and `detail.new`: the server permission sets), `settings.update` (keys only, never values) |
 | Network rules | `repo.ip_rules` (counts of read and publish rules only), `ip.denied` (`detail.scope` is `read` or `publish`), `ip_list.create`, `ip_list.update`, `ip_list.delete` |
 | Signing keys | `signing_key.create` (created or imported), `signing_key.delete` |
 
 - Changes made with the `telesphorepo user` commands are recorded with the actor `cli`.
 - Client IP addresses appear only in this table and its API. The only other API with an address
-  is `GET /api/network/proxy-candidates` (admin), which lists the addresses of untrusted proxies,
+  is `GET /api/network/proxy-candidates` (`network`), which lists the addresses of untrusted proxies,
   not of clients. The publish log has none. The access log still records the IP.
 - The setting `audit.retention` (default `8760h`) sets how long an event stays. A job deletes
   older events every hour.
@@ -1069,7 +1155,7 @@ decision is in `docs/design/rationale.md`.
   under `/api`. Plain download links of format routes carry no such header and keep the
   challenge.
 - **Browse** (anyone; visitors see the anonymous-read repos). `/#/` is titled "Repositories", with
-  no subtitle. A toolbar holds a filter box, a format filter and **New repository** (admins). A
+  no subtitle. A toolbar holds a filter box, a format filter and **New repository** (`repos`). A
   table shows the format icon, the name (with a lock when the repo is private, and the mark of a
   proxy or a group), files (a group: its member count), size and last publish (`file_count`, `total_size`, `last_published_at`). On a phone the format icon sits
   before the name. A click anywhere on a row opens the repo. Search is `/#/search?q=&repo=`: the
@@ -1080,14 +1166,26 @@ decision is in `docs/design/rationale.md`.
   member. A proxy shows its cached files and has no Upload and no Publish view. One page loads
   the repo once and switches between these views:
   - `files/<path>`: breadcrumbs and one of the views below, with a details column for the selected
-    file or artifact (SHA-256, checksum links, Download, client snippets). Delete asks for a fresh
-    second factor first, except for admins.
+    file or artifact (SHA-256, checksum links, Download, client snippets). Delete shows to a person who holds
+    `delete` and acts with the UI session.
   - `use`: **Use this repository**. An address card first. A public repo then has one card, "Add it
     to your build". A private repo has two numbered steps: create a read token, then add it to the
     build; the snippets already hold the credentials.
   - `publish`: **Publish to this repository**, for users who can publish (others see a lock and
     "You cannot publish to X"). One card each for From your computer, From CI and By hand. The
-    notice of a paused repo (a Nexus mirror) shows once, above the tabs.
+    notice of a paused repo (a Nexus mirror) shows once, above the tabs. The snippets run in
+    order to a first publish: for Gradle the settings file (the `com.telesphorepo.publish` plugin
+    at the client version, `url`, `repository` and `oidcTokenEnv = "OIDC_TOKEN"`) and
+    `./gradlew publish`; for Maven `.mvn/extensions.xml`, `.mvn/maven.config`, the
+    `<distributionManagement>` (`<repository>` and `<snapshotRepository>`) and `mvn deploy`. The
+    first publish on a computer asks for the device approval in the browser. The client version
+    is one constant, `clientsVersion` in `internal/maven/usage.go`.
+    From CI shows a full GitHub Actions workflow (`on: push` to `main`) and a full declarative
+    Jenkinsfile. The Jenkinsfile builds in one stage and binds the credential
+    `telesphorepo-id-token` to `OIDC_TOKEN` only in the publish stage, because Jenkins makes the
+    token when `withCredentials` starts and the server takes a token for 10 minutes only.
+    **New CI pipeline** (`pipelines`) opens
+    `/#/settings/ci-pipelines/new?repo={name}&back=/repo/{name}/publish`.
   - `upload?folder=`: a full page. It starts with the fresh second-factor check, then one drop
     zone takes files or a folder, followed by the scan, the preview, the fields and the progress.
     The publish session lives in memory only. The limits and the folder filter are as in **Files,
@@ -1135,30 +1233,44 @@ decision is in `docs/design/rationale.md`.
   paths are under `/#/settings/`.
   - *Your account:* Overview (`account`), Sign-in and security (`security`), Devices (`devices`)
     and Tokens (`tokens`: read tokens and publish tokens, two cards on one page).
-  - *Repositories* (admins): All repositories (`repositories`, `repositories/new`,
-    `repositories/{name}/{tab}`).
-  - *People and CI* (admins): People (`people`, `people/{name}`), CI pipelines (`ci-pipelines`, `ci-pipelines/new`,
+  - The navigation shows each page only to a person who holds its permission (see **Auth
+    model**, Permissions). A path the person cannot open shows "You cannot open this page".
+  - *Repositories*: Repositories (`repositories`, `repositories/new`, `repositories/{name}/{tab}`):
+    every repository for a holder of `repos`, else the repositories where the person holds more
+    than `download`. New repository and Delete need `repos`; Make public and Make private need
+    `settings`.
+  - *People and CI*: People (`people`, `people/{name}`), CI pipelines (`ci-pipelines`, `ci-pipelines/new`,
     `ci-pipelines/{id}`) and Networks (`networks`, `networks/new`, `networks/list/{name}`).
-  - *Server* (admins): Sign-in options (`sign-in`), Signing keys (`signing-keys`,
+  - *Server*: Sign-in options (`sign-in`), Signing keys (`signing-keys`,
     `signing-keys/new`), Storage (`storage`), Nexus migration (`nexus`, `nexus/{id}`), Network and
     proxy (`proxy`), General (`general`) and Activity (`activity?view=&action=&repo=`: the audit log
     and the publish log).
   - Breadcrumbs follow the hierarchy: Settings, the group, the page. A sub-page of the first
     item of a group does not repeat that item.
-- **Repository settings** (admins). A page with the tabs Overview, Access, Format settings and
-  Signing (Debian). The header shows the name with a lock for a private repo. **Delete** is an
-  action at the end of the header, on every tab; it opens a dialog that asks for the repo name.
+- **Repository settings.** A page with the tabs Overview, Access, Format settings and Signing
+  (Debian). Overview, Format settings, Signing and Remote need `settings`; Access needs `access`,
+  `settings` or `pipelines`. A person sees only the tabs they can open, and a link to a tab they
+  cannot open goes to their first tab. The header shows the name with a lock for a private repo.
+  **Delete** (`repos`) is an action at the end of the header, on every tab; it opens a dialog that
+  asks for the repo name.
   - *Overview:* description and visibility.
-  - *Access:* a Download card (the Public switch, people who can download and not publish, from where) and a Publish card (people who can publish, CI
-    pipelines, from where), with thin dividers between the parts. **Add CI pipeline**, **Add
-    network list** and **Add addresses** each open a short form in a dialog. **Add people** opens
-    a dialog with a filter, a checkbox list of the people without access, Select all and Select
-    none, and a choice of Download or Publish; it saves at once through `PUT /api/permissions`. The
-    people tables take a pick, with **Remove access** (asks first) and **Change to Download** or
-    **Change to Publish**; these act at once. The Public switch saves through `PATCH /api/repos`.
-    Add CI pipeline adds existing pipelines, or links to
-    `/#/settings/ci-pipelines/new?repo={name}&back=/settings/repositories/{name}/access`.
+  - *Access:* a People part (`access`): each person with a grant once, with the phrase of their
+    set ("Download", "Download, publish", "Everything", or the list such as "Download, delete
+    files"). **Give access** opens the grant dialog: people found through `GET /api/people`, then
+    the permission picker. **Change** opens the picker for one person; the table takes a pick with
+    **Remove access** (asks first). These save at once through `PUT /api/permissions`. A Download
+    part (the Public switch and from where) and a Publish part (CI pipelines and from where)
+    follow: the Public switch and the network rules show to a holder of `settings`, the CI
+    pipelines to a holder of `pipelines`, with thin dividers between the parts. **Add CI
+    pipeline**, **Add network list** and **Add addresses** each open a short form in a dialog. The
+    Public switch saves through `PATCH /api/repos`. Add CI pipeline adds existing pipelines, or
+    links to `/#/settings/ci-pipelines/new?repo={name}&back=/settings/repositories/{name}/access`.
     Each person links to their page, where the same access is also edited.
+  - **Permission picker.** The grant dialog (Access tab, person page, bulk Give access) and the
+    person page use one picker: groups of checkboxes, each with a title, **All** and **None**, and
+    one help line per checkbox. Checking `publish` checks `download`, checking `pipelines` checks
+    `publish`, and clearing one clears what needs it; the help line says why. A permission the
+    caller does not hold is turned off. There are no presets.
   - *Signing:* the current key, the `key.asc` address, change the key or create a new one.
   - A proxy has the tabs Overview (the remote, when it last answered or its last error, **Test
     the remote**, the address for a build, the cache size, the groups it is in), Access and Remote
@@ -1173,19 +1285,22 @@ decision is in `docs/design/rationale.md`.
     description, visibility. Debian adds architectures and the signing key. For a new key, the page
     calls `POST /api/signing-keys` and then `POST /api/repos`. If the second call fails, the page
     deletes the new key. **Create** is in the footer of the last card.
-- **People.** The table shows each account with its avatar and role. The sign-in method column
-  shows only when someone uses single sign-on. A row opens the person's page
-  (`/#/settings/people/{name}`): an identity card (avatar, role, how the person signs in, a
-  Disabled badge) with Make administrator or Remove administrator rights, Reset password and Disable
-  account or Enable account; then the person's access to each repository. **Give access** opens a
-  dialog with a filter, a checkbox list of the repositories the person cannot reach yet, Select all
-  and Select none, and a choice of Download or Publish. The repository table takes a pick, with
-  **Remove access** (asks first) and **Change to Download** or **Change to Publish**. Each action
-  saves at once. An administrator's page says that administrators reach every repository. The
+- **People** (`people`). The table shows each account with its avatar and role: "Administrator"
+  for a person with every server permission, else the phrase of the server permissions held, or
+  nothing. The sign-in method column shows only when someone uses single sign-on. A row opens the
+  person's page (`/#/settings/people/{name}`): an identity card (avatar, role, how the person
+  signs in, a Disabled badge) with Reset password (only for a person whose permissions the caller
+  all holds) and Disable account or Enable account; then the server permissions in the picker,
+  saved from the save bar after a confirm through `PUT /api/users/{name}/permissions`; then the
+  person's permissions on each repository. **Give access** opens the grant dialog with the
+  repositories and the picker. The repository table takes a pick, with **Change permissions** and
+  **Remove access** (asks first). Each repository action saves at once. A holder of `repos`
+  reaches every repository, and the page says so. An SSO account gets every server permission
+  again at each SSO sign-in, and the page says so. The
   People table takes a pick of every row except your own: **Disable** asks first ("Disable 4
   people? They are signed out and cannot sign in."), **Enable** acts at once. **New account**
-  opens a short form; after Create, the new person's page opens.
-- **Bulk actions.** All repositories (**Make public**, **Make private**, **Delete**), the List
+  opens a short form; after Create, the new person's page opens, where the permissions are set.
+- **Bulk actions.** Repositories (**Make public**, **Make private**, **Delete**), the List
   view of the Files tab (**Delete**, files and folders mixed), People, a person's repositories and
   a repository's people take a pick (`DataTable` `bind:picked`). While rows are picked, a bar in
   place of the header row shows "12 selected", the actions, "Select all 50" and "Clear". Every
@@ -1204,9 +1319,12 @@ decision is in `docs/design/rationale.md`.
   `<address>/job/team/job/app/`), with optional pasted keys. **Edit the token conditions** shows
   the claims, the audience and the keys instead; another CI system always uses them. **Use the
   simple form** reads the claims back, and asks first when they say more than the answers can.
-  The publish step comes from `GET /api/repos/{name}/usage` (the CI snippets of the format),
-  with the branches and tags as the workflow trigger. `?repo=<name>` starts with that repository
-  chosen; `?back=<path>` (only a `/settings/` path) is where Create and Cancel return.
+  The workflow or Jenkinsfile comes from `GET /api/repos/{name}/usage` (the CI snippets of the
+  format), with the branches and tags of the pipeline as the workflow trigger in place of the
+  snippet's push to `main`. `?repo=<name>` starts with that repository chosen; `?back=<path>`
+  (only a `/settings/` or `/repo/` path) is where Create and Cancel return. When the `base_url`
+  setting is empty and the pipeline has no audience of its own, the page warns that CI jobs
+  cannot publish and links to General.
 - **Signing keys page.** A table with the fingerprint and the repos that use each key (as links), a
   public key download and delete (turned off while a repo uses the key). The new-key page creates
   an Ed25519 key or imports an armored key with its passphrase.
@@ -1241,7 +1359,7 @@ decision is in `docs/design/rationale.md`.
   details) and the connection. Sync now or Cancel the sync, Switch over and **Delete** are in the
   header; while a sync runs, Delete says "Cancel the sync first".
 - **Your account.**
-  - *Overview:* an Administrator badge by the title for an administrator. Then a card each for
+  - *Overview:* the role ("Administrator" or the phrase of the server permissions) by the title. Then a card each for
     the repositories you can use, your devices and your recent publishes. The "You can" column of
     the repositories shows only when the rows differ.
   - *Sign-in and security:* a Sign-in card with one row, "Password" and **Change**; **Change**
@@ -1287,10 +1405,10 @@ timestamps follow them.
 | `debian` | anonymous read | About 300 binary packages from about 100 sources, 1 to 5 versions each, as real `.deb` files for `amd64` and `arm64` or `all`. They go through the plugin's upload pipeline into `stable/main`, so the indexes and signed `Release` files are valid |
 | `raw` | anonymous read | 20,000 files: `docs/<product>/<version>/` sites, `releases/<yyyy>/<mm>/<product>-<version>/` archives (valid `.tar.gz`/`.zip`) with `SHA256SUMS`, and `build-logs/<project>/<branch>/<build>/` logs and test reports |
 
-The demo users are `priya` (admin), `jonas` (write on `maven` and `internal`), `mei` (write on
-`maven` and `raw`), `tomas` (write on `debian` and `raw`) and `lena` (read on `internal`). Their
-random passwords are in `<data>/demo-users.txt`. Each file's uploader is an admin or a writer of
-its repo. Blobs go to the configured store through a pool of 32 writers, and asset rows go in
+The demo users are `priya` (administrator), `jonas` (download and publish on `maven` and
+`internal`), `mei` (download and publish on `maven` and `raw`), `tomas` (download and publish
+on `debian` and `raw`) and `lena` (download on `internal`). Their random passwords are in
+`<data>/demo-users.txt`. Each file's uploader is an administrator or a publisher of its repo. Blobs go to the configured store through a pool of 32 writers, and asset rows go in
 transactions of 5,000, so the assets triggers keep the repo counters and the search index. The
 command prints its progress to stderr every 3 seconds, then runs `ANALYZE`. While it runs,
 `<data>/demo-data.pending` exists; a dev start that finds that file deletes the data dir and
@@ -1345,12 +1463,15 @@ comes from `internal/containerengine`; `TR_ENGINE=docker|podman` forces one. `Te
 Keycloak container (`E2E_KEYCLOAK_IMAGE`, realm `e2e/testdata/keycloak/realm-e2e.json`) and
 drives the browser flow with a cookie-jar HTTP client. `TestRaw` uses a curl container.
 `TestAPIFormats` covers `/api/formats`, `/status` and `/usage`. `TestQueryPlans` runs `dbcheck`
-inside a server container. `files_test.go` covers `TestTree`, `TestDelete` (who may delete, file, prefix and Bearer deletes, an admin UI session, blobs gone, repo delete and name reuse), `TestManualUploadMaven` (checksums, metadata order, `mvn` resolves the uploaded and the generated pom), `TestManualUploadRaw`, `TestRepoCounters` (`file_count`, `total_size` and `last_published_at` through uploads, a replace, a file delete and a folder delete) and `TestDebianDeleteAndUpload` (apt sees the package, then not; 4 by-hash files remain). `audit_test.go` covers `TestAudit`: events, filters, paging, no secret values, admin only, and no IP outside the audit log. `network_test.go` covers `TestClientIP` (with the default an `X-Forwarded-For` from the harness peer is ignored and the peer becomes a proxy candidate; trusting the candidate makes the header count and removes the candidate; `private`: a chain through a private hop, `CF-Connecting-IP` from a non-Cloudflare peer; an untrusted peer's header, an empty list, invalid entries, reset to the default). `TestIPRules` and `TestPresetIPLists` set `trusted_proxies` to `private` first, so `X-Forwarded-For` sets the client address, `TestIPRules` (validation; allowed and refused reads of the format route, tree, assets, usage and status; the repo record stays readable; search drops the repo; refused device and manual mints, PUT and admin delete, each audited with its IP and scope; empty lists lift the rule) and `TestPresetIPLists` (a second Telesphorepo server is the stub: startup fetch, a preset in read rules, a Cloudflare hop in the chain, a failed refresh that keeps the last good list, recovery, and stored lists after a restart without the stub) and `TestCustomIPLists` (create, edit, rename that carries the references, use in rules and in `trusted_proxies`, delete while in use gives 409) and `TestIPRangeParse` (the paste parser: one per line, comma, space, tab and `|` separated, CSV with a header row, tables, comments, labels, quotes, IPv6 and IPv4-mapped IPv6, an unmasked CIDR, duplicates, invalid lines with their numbers, the 1 MiB limit, admins only). `signing_keys_test.go` covers create, import of plain and encrypted keys, delete while in use gives 409, a per-repo key that `apt` installs from, a key change that signs again, and keys after a restart. `groups_test.go` covers `TestGroups`: a release and a snapshot member resolve through the group with `mvn` and Gradle, the merged `maven-metadata.xml` and its `.sha1`, the member order, a public group with a private member (anonymous and a reader), 405 for a PUT and 409 for a publish session, 400 for a member of another format, a nested group, an unknown name and no member, and a member delete. `proxy_test.go` covers `TestProxy` with a second Telesphorepo server as the remote: `mvn` through the proxy and no remote request on the second resolve, the `metadata_ttl` recheck with a 304 and a changed file, a remembered 404, 405 for a PUT, a group where the hosted member wins over the proxy, remote credentials (with them, 502 without them), an nginx container that redirects to another host and records that the credentials did not follow, `apt-get` through a Debian proxy with the remote's key, and a stopped remote (cached file served, 502, `last_error`). `TestNoBrowserPasswordPrompt` (in `auth_test.go`) checks that a 401 under `/api` or with `X-Telesphorepo-UI` has no `WWW-Authenticate`. `folder_upload_test.go` covers `TestFolderUploadMaven` (a Maven-layout tree with checksum, signature and stray files; a flat folder with two poms; a bad tree that gives 400; scans store nothing; checksums and metadata) and `TestFolderUploadDebianAndRaw`. `TestStorageMove*` run each server on a named data volume: fs to
+inside a server container. `files_test.go` covers `TestTree`, `TestDelete` (who may delete: `delete` with a publish session or a UI session, file, prefix and Bearer deletes, blobs gone, repo delete and name reuse), `TestManualUploadMaven` (checksums, metadata order, `mvn` resolves the uploaded and the generated pom), `TestManualUploadRaw`, `TestRepoCounters` (`file_count`, `total_size` and `last_published_at` through uploads, a replace, a file delete and a folder delete) and `TestDebianDeleteAndUpload` (apt sees the package, then not; 4 by-hash files remain). `audit_test.go` covers `TestAudit`: events, filters, paging, no secret values, `activity` only, and no IP outside the audit log. `network_test.go` covers `TestClientIP` (with the default an `X-Forwarded-For` from the harness peer is ignored and the peer becomes a proxy candidate; trusting the candidate makes the header count and removes the candidate; `private`: a chain through a private hop, `CF-Connecting-IP` from a non-Cloudflare peer; an untrusted peer's header, an empty list, invalid entries, reset to the default). `TestIPRules` and `TestPresetIPLists` set `trusted_proxies` to `private` first, so `X-Forwarded-For` sets the client address, `TestIPRules` (validation; allowed and refused reads of the format route, tree, assets, usage and status; the repo record stays readable; search drops the repo; refused device and manual mints, PUT and admin delete, each audited with its IP and scope; empty lists lift the rule) and `TestPresetIPLists` (a second Telesphorepo server is the stub: startup fetch, a preset in read rules, a Cloudflare hop in the chain, a failed refresh that keeps the last good list, recovery, and stored lists after a restart without the stub) and `TestCustomIPLists` (create, edit, rename that carries the references, use in rules and in `trusted_proxies`, delete while in use gives 409) and `TestIPRangeParse` (the paste parser: one per line, comma, space, tab and `|` separated, CSV with a header row, tables, comments, labels, quotes, IPv6 and IPv4-mapped IPv6, an unmasked CIDR, duplicates, invalid lines with their numbers, the 1 MiB limit, `network` only). `signing_keys_test.go` covers create, import of plain and encrypted keys, delete while in use gives 409, a per-repo key that `apt` installs from, a key change that signs again, and keys after a restart. `groups_test.go` covers `TestGroups`: a release and a snapshot member resolve through the group with `mvn` and Gradle, the merged `maven-metadata.xml` and its `.sha1`, the member order, a public group with a private member (anonymous and a reader), 405 for a PUT and 409 for a publish session, 400 for a member of another format, a nested group, an unknown name and no member, and a member delete. `proxy_test.go` covers `TestProxy` with a second Telesphorepo server as the remote: `mvn` through the proxy and no remote request on the second resolve, the `metadata_ttl` recheck with a 304 and a changed file, a remembered 404, 405 for a PUT, a group where the hosted member wins over the proxy, remote credentials (with them, 502 without them), an nginx container that redirects to another host and records that the credentials did not follow, `apt-get` through a Debian proxy with the remote's key, and a stopped remote (cached file served, 502, `last_error`). `TestNoBrowserPasswordPrompt` (in `auth_test.go`) checks that a 401 under `/api` or with `X-Telesphorepo-UI` has no `WWW-Authenticate`. `folder_upload_test.go` covers `TestFolderUploadMaven` (a Maven-layout tree with checksum, signature and stray files; a flat folder with two poms; a bad tree that gives 400; scans store nothing; checksums and metadata) and `TestFolderUploadDebianAndRaw`. `TestStorageMove*` run each server on a named data volume: fs to
 SeaweedFS and back with uploads during the move, a forced failure, a restart mid-move
 (`Server.Restart`) and a cancel.
 
 **Zones.** A build tag picks the zone, so a run starts only the containers it needs. The harness
 and the client helpers (`harness_test.go`, `main_test.go`, `clients_test.go`) carry every tag.
+Each test removes its containers when it ends. Every container and the run network carry the
+label `telesphorepo.e2e`, and each run first removes what a killed run left: labelled containers
+and networks, and the `telesphorepo-data-*` and `telesphorepo-scale-*` volumes.
 | Zone | Tag | Command | Contents |
 |---|---|---|---|
 | core | `e2e` | `go tool task test` | Formats, auth, API, settings, storage move, query plans |
@@ -1363,7 +1484,20 @@ and the client helpers (`harness_test.go`, `main_test.go`, `clients_test.go`) ca
 the way the web UI does. `s.Admin()` is the bootstrap admin's UI session: on first use the
 harness enrolls TOTP factors through the setup-only session and signs in with the password and a
 code. `s.SignIn(t, user, pass)` gives any user's UI session, and `s.AdminBasic()` is the admin
-password for format reads. `TestAPISessionRule` checks where each credential works, including a UI session that downloads from a private Maven repo and cannot PUT there.
+password for format reads. `s.CreateUser(t, name, pass, perms...)` creates a person with server
+permissions (`AllServerPerms` for an administrator), `s.SetPerms(t, repo, user, perms...)` sets a
+repository permission set, and `s.SetServerPerms` sets server permissions. A person who needs the
+second factor gets a UI session through `EnrollTOTP` and `LoginTOTP`. `TestAPISessionRule` checks where each credential works, including a UI session that downloads from a private Maven repo and cannot PUT there.
+
+**Permission tests.** `access_test.go` covers `TestEffectiveAccess`, `TestRepoSettingsPermission`
+(`settings` on one repo edits it and gets 403 on another), `TestAccessPermission` (`access` gives
+and removes only held permissions; 400 for a set that breaks the dependency rules),
+`TestLastPeople` (409 when the last enabled holder of `people` would lose it; `people` acts only
+on people it covers) and `TestSecondFactorRule` (who signs in with the password alone, the
+setup-only session, the second step, and a grant that ends a password-only session).
+`permissions_test.go` covers `TestServerPermissions` (one subtest per server permission: the
+holder reaches its routes, anyone else gets 403), `TestPipelinesPermission` (the CI pipeline
+scope) and `TestPeoplePicker` (`GET /api/people`).
 
 **Publishing tests.** Every publish in the suite uses a publish session. The harness helper
 `PublishToken(t, s, user, repo)` enrolls a device the real way (the test computes the TOTP
@@ -1376,11 +1510,22 @@ replayed nonce; bad signature; revoked and expired devices; manual sessions),
 (Keycloak as the CI issuer through the client `ci-github` in `realm-e2e.json`, whose tokens carry
 GitHub-shaped claims: wrong claim, wrong audience, replayed token, an unlisted repo, a disabled
 policy, a pasted JWKS). The Keycloak fixture is in `keycloak_test.go` (tags `e2e` and `clients`).
+`oidc_device_test.go` covers `TestOIDCDeviceApproval` (an SSO admin approves a device after a new
+Keycloak sign-in, then publishes with it; the authorization request carries `prompt=login` and
+`max_age=0`; a missing grant, a grant for another code and a used grant get 401) and
+`TestOIDCDeviceApprovalStale`. That test signs in first, then calls `t.Parallel()`, so the wait
+for a sign-in older than 5 minutes runs while the other tests run. The test then removes
+`prompt` and `max_age` from the authorization request, as a provider that ignores them, and
+checks that the callback returns `error=stale_sign_in` and that the code stays pending.
 
 `TestClients` builds the Gradle plugin and the Maven extension in containers, publishes them to
-the test server, and then (1) runs `telesphorepoLogin` and `mvn telesphorepo:login`, approves the
-code through the API, publishes a library and a Gradle plugin, and resolves them; (2) publishes as
-"GitHub Actions" with a `jwebserver` container that serves a Keycloak token at
+the test server, and then (1) runs `gradle publish` and `mvn deploy` with no device, approves the
+code that the inline enrollment prints through the API, and checks that the build continues and
+publishes a library (auto publication, no publishing block) and a Gradle plugin, then resolves
+them; it checks that `telesphorepoLogin` and the Maven `login` goal keep the enrolled device, and
+that a deploy to a missing repository says that the repository does not exist; (2) checks that a
+GitHub Actions build without `id-token: write` fails and names it, and publishes as "GitHub
+Actions" with a `jwebserver` container that serves a Keycloak token at
 `ACTIONS_ID_TOKEN_REQUEST_URL`.
 
 `TestNexus` runs a Nexus container (`sonatype/nexus3`) and starts the server with

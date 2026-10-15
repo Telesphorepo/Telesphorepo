@@ -118,7 +118,7 @@ func (s *Service) DeleteToken(ctx context.Context, p *Principal, id int64) error
 	}
 	var n int64
 	var err error
-	if p.IsAdmin {
+	if p.Perms.Has(PermPeople) {
 		n, err = s.wq.DeleteToken(ctx, id)
 	} else {
 		n, err = s.wq.DeleteUserToken(ctx, dbq.DeleteUserTokenParams{ID: id, UserID: p.UserID})
@@ -162,7 +162,7 @@ func (s *Service) verifyToken(ctx context.Context, tok string) (*Principal, erro
 	if !row.LastUsedAt.Valid || now-row.LastUsedAt.Int64 >= 60 {
 		s.touchToken(row.TokenID, now)
 	}
-	return &Principal{UserID: row.UserID, Username: row.Username, IsAdmin: row.IsAdmin, TokenID: row.TokenID, Kind: row.Kind}, nil
+	return &Principal{UserID: row.UserID, Username: row.Username, Perms: ServerPermsOf(row.Perms), TokenID: row.TokenID, Kind: row.Kind}, nil
 }
 
 // touchToken updates last_used_at in the background, at most once per minute per token.

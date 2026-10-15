@@ -140,10 +140,10 @@ func (s *Service) verifyUncached(ctx context.Context, keys []string, key [32]byt
 	if cur, err := s.rq.GetUserPasswordHash(ctx, id); err == nil && cur == hash {
 		s.cache.put(key, id, hash, gen)
 	}
-	return &Principal{UserID: id, Username: username, IsAdmin: u.IsAdmin, Kind: u.Kind}, nil
+	return &Principal{UserID: id, Username: username, Perms: ServerPermsOf(u.Perms), Kind: u.Kind}, nil
 }
 
-// principalByID re-reads the user so admin/disabled changes apply immediately.
+// principalByID re-reads the user so permission and disabled changes apply immediately.
 // principalAndHash is principalByID plus the stored password hash, in one PK lookup.
 func (s *Service) principalAndHash(ctx context.Context, id int64) (*Principal, string, error) {
 	u, err := s.rq.GetPrincipalAndHash(ctx, id)
@@ -153,7 +153,7 @@ func (s *Service) principalAndHash(ctx context.Context, id int64) (*Principal, s
 	if err != nil {
 		return nil, "", err
 	}
-	return &Principal{UserID: id, Username: u.Username, IsAdmin: u.IsAdmin, Kind: u.Kind}, u.PasswordHash, nil
+	return &Principal{UserID: id, Username: u.Username, Perms: ServerPermsOf(u.Perms), Kind: u.Kind}, u.PasswordHash, nil
 }
 
 func (s *Service) principalByID(ctx context.Context, id int64) (*Principal, error) {
@@ -164,7 +164,7 @@ func (s *Service) principalByID(ctx context.Context, id int64) (*Principal, erro
 	if err != nil {
 		return nil, err
 	}
-	return &Principal{UserID: id, Username: u.Username, IsAdmin: u.IsAdmin, Kind: u.Kind}, nil
+	return &Principal{UserID: id, Username: u.Username, Perms: ServerPermsOf(u.Perms), Kind: u.Kind}, nil
 }
 
 // UIHeader is the header the web UI's API client sends (value "1").
@@ -214,15 +214,15 @@ func SessionRequired(w http.ResponseWriter) {
 // when the request must stop. On the JSON API:
 //   - a password or a read token reaches only GET and HEAD routes (401 ErrSessionRequired
 //     elsewhere). POST /api/repos/{name}/upload and POST /api/repos/{name}/files/delete are left to
-//     their gates, which take only a publish session or an admin UI session. The API refuses
-//     admin routes to these credentials too (see api.admin), so every change of state and every
-//     admin route needs a UI session, and an admin UI session exists only after the second
-//     factor (outside dev mode);
+//     their gates, which take only a publish session or a UI session. The API refuses the
+//     permission routes to these credentials too (see api.can), so every change of state and
+//     every permission route needs a UI session. The UI session of a person who needs the
+//     second factor exists only after it (outside dev mode);
 //   - a publish-session token reaches only /api/publish/, POST /api/repos/{name}/upload and
 //     POST /api/repos/{name}/files/delete (403 elsewhere);
-//   - a UI session of a local admin without a second factor reaches only /api/me,
-//     /api/auth/logout and /api/security (403 {"error":"second_factor_required"} elsewhere),
-//     except in dev mode.
+//   - a UI session of a local account that needs the second factor and has none reaches only
+//     /api/me, /api/auth/logout and /api/security (403 {"error":"second_factor_required"}
+//     elsewhere), except in dev mode.
 func (s *Service) Identify(w http.ResponseWriter, r *http.Request, allowSession bool) (*Principal, bool) {
 	return s.identify(w, r, allowSession, allowSession)
 }

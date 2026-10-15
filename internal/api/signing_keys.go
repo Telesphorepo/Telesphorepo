@@ -6,11 +6,12 @@ import (
 	"net/http"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
+	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/signing"
 )
 
-// Repository signing keys (spec §13.3, admin).
+// Repository signing keys (spec §13.3, keys).
 
 func (a *API) registerSigningKeys(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/signing-keys", a.listSigningKeys)
@@ -49,10 +50,23 @@ func signingKeyFail(w http.ResponseWriter, r *http.Request, err error) {
 }
 
 // listSigningKeys returns every key by name:
-// [{name, fingerprint, public_key, created_at, error?, repos}].
+// [{name, fingerprint, public_key, created_at, error?, repos}]. It needs keys, or settings on a
+// repository (the Signing tab of a Debian repository picks a key from this list).
 func (a *API) listSigningKeys(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	p, ok := a.session(w, r)
+	if !ok {
 		return
+	}
+	if !p.Perms.Has(auth.PermKeys) {
+		ids, all, err := a.auth.ManagedRepoIDs(r.Context(), p, auth.RepoSettings)
+		if err != nil {
+			fail(w, r, err)
+			return
+		}
+		if !all && len(ids) == 0 {
+			httpx.Error(w, http.StatusForbidden, "permission required: keys, or settings on a repository")
+			return
+		}
 	}
 	keys := a.keys.List()
 	out := make([]signingKeyJSON, 0, len(keys))
@@ -71,7 +85,7 @@ func (a *API) listSigningKeys(w http.ResponseWriter, r *http.Request) {
 // passphrase?} imports an armored private key (encrypted ones need the passphrase). 201 with
 // the key; 400 for a bad name or key, 409 for a name that is taken.
 func (a *API) createSigningKey(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.admin(w, r)
+	p, ok := a.can(w, r, auth.PermKeys)
 	if !ok {
 		return
 	}
@@ -101,7 +115,7 @@ func (a *API) createSigningKey(w http.ResponseWriter, r *http.Request) {
 
 // getSigningKey returns key {name} with the repos that use it.
 func (a *API) getSigningKey(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	if _, ok := a.can(w, r, auth.PermKeys); !ok {
 		return
 	}
 	k, ok := a.keys.Get(r.PathValue("name"))
@@ -119,7 +133,7 @@ func (a *API) getSigningKey(w http.ResponseWriter, r *http.Request) {
 
 // deleteSigningKey deletes key {name}: 204, or 409 {error, repos} while repos use it.
 func (a *API) deleteSigningKey(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.admin(w, r)
+	p, ok := a.can(w, r, auth.PermKeys)
 	if !ok {
 		return
 	}
@@ -139,7 +153,7 @@ func (a *API) deleteSigningKey(w http.ResponseWriter, r *http.Request) {
 
 // signingKeyPublic downloads the armored public key of {name} as <name>.asc.
 func (a *API) signingKeyPublic(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	if _, ok := a.can(w, r, auth.PermKeys); !ok {
 		return
 	}
 	k, ok := a.keys.Get(r.PathValue("name"))

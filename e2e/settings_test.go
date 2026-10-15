@@ -73,7 +73,7 @@ func TestSettingsAccess(t *testing.T) {
 			t.Errorf("group %q missing from settings (have %v)", g, groups)
 		}
 	}
-	s.CreateUser(t, "plain", "plainpass123", false)
+	s.CreateUser(t, "plain", "plainpass123")
 	plain := s.SignIn(t, "plain", "plainpass123")
 	if st, b := s.API(t, http.MethodGet, "/api/settings", nil, plain); st != http.StatusForbidden {
 		t.Errorf("non-admin GET /api/settings: status %d, want 403: %s", st, b)

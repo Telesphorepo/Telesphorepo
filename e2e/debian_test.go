@@ -35,10 +35,10 @@ func TestDebian(t *testing.T) {
 		s.CreateRepo(t, repo, "debian", false, map[string]any{"architectures": archs})
 		writer, writerPass := RandName("writer"), randHex(12)
 		reader, readerPass := RandName("reader"), randHex(12)
-		s.CreateUser(t, writer, writerPass, false)
-		s.CreateUser(t, reader, readerPass, false)
-		s.SetPermission(t, repo, writer, "write")
-		s.SetPermission(t, repo, reader, "read")
+		s.CreateUser(t, writer, writerPass)
+		s.CreateUser(t, reader, readerPass)
+		s.SetPerms(t, repo, writer, "download", "publish")
+		s.SetPerms(t, repo, reader, "download")
 		// Each upload phase mints a new publish session, so no session outlives the default TTL
 		// while apt runs.
 		wauth := func() Auth { return Basic{User: "ci", Pass: PublishToken(t, s, writer, repo)} }

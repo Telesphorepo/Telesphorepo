@@ -1,6 +1,6 @@
 <!--
   Your account: devices, the computers that publish with the Gradle plugin or the Maven extension
-  with their own key. Administrators see the devices of every user.
+  with their own key. People with the People permission see the devices of every user.
 -->
 <script lang="ts">
   import { toast } from "svelte-sonner";
@@ -24,7 +24,8 @@
   let {}: PageProps = $props();
 
   const devices = new Keyset((p) => api.devices.list(p));
-  const admin = $derived(auth.isAdmin);
+  // A holder of People gets every person's devices.
+  const admin = $derived(auth.can("people"));
 
   let target = $state<Device | null>(null);
   let open = $state(false);

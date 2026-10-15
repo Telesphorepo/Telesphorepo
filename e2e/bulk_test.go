@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"fmt"
 	"net/http"
 	"slices"
 	"strconv"
@@ -154,11 +155,11 @@ func TestBulkFiles(t *testing.T) {
 		s.CreateRepo(t, repo, "raw", false, nil)
 		s.CreateRepo(t, other, "raw", false, nil)
 		w, reader := RandName("writer"), RandName("reader")
-		s.CreateUser(t, w, "writer-pass-1234", false)
-		s.CreateUser(t, reader, "reader-pass-1234", false)
-		s.SetPermission(t, repo, w, "write")
-		s.SetPermission(t, other, w, "write")
-		s.SetPermission(t, repo, reader, "read")
+		s.CreateUser(t, w, "writer-pass-1234")
+		s.CreateUser(t, reader, "reader-pass-1234")
+		s.SetPerms(t, repo, w, "download", "publish", "delete")
+		s.SetPerms(t, other, w, "download", "publish", "delete")
+		s.SetPerms(t, repo, reader, "download")
 
 		ps := s.MintSession(t, w, repo)
 		for _, f := range []string{"one.bin", "two.bin", "dir/a.bin", "dir/sub/b.bin", "keep.bin"} {
@@ -221,8 +222,8 @@ func TestBulkPeople(t *testing.T) {
 	repo := rawRepoWithFile(t, s, "people")
 	u1, u2, u3 := RandName("dis"), RandName("dis"), RandName("keep")
 	for _, u := range []string{u1, u2, u3} {
-		s.CreateUser(t, u, u+"-password", false)
-		s.SetPermission(t, repo, u, "read")
+		s.CreateUser(t, u, u+"-password")
+		s.SetPerms(t, repo, u, "download")
 	}
 	sess := map[string]*Session{u1: s.SignIn(t, u1, u1+"-password"), u2: s.SignIn(t, u2, u2+"-password")}
 	for u, ui := range sess {
@@ -278,46 +279,66 @@ func TestBulkAccess(t *testing.T) {
 	r1, r2, r3 := rawRepoWithFile(t, s, "acc"), rawRepoWithFile(t, s, "acc"), rawRepoWithFile(t, s, "acc")
 	p1, p2, p3 := RandName("p"), RandName("p"), RandName("p")
 	for _, p := range []string{p1, p2, p3} {
-		s.CreateUser(t, p, p+"-password", false)
+		s.CreateUser(t, p, p+"-password")
 	}
 	basic := func(p string) Basic { return Basic{p, p + "-password"} }
 	var out struct {
 		Changed int `json:"changed"`
 	}
 
-	// One person, read on three repositories.
-	s.MustAPI(t, http.MethodPut, "/api/permissions", map[string]any{"users": []string{p1}, "repos": []string{r1, r2, r3}, "level": "read"}, s.Admin(), &out)
+	// One person, download on three repositories.
+	s.MustAPI(t, http.MethodPut, "/api/permissions", map[string]any{"users": []string{p1}, "repos": []string{r1, r2, r3}, "perms": []string{"download"}}, s.Admin(), &out)
 	if out.Changed != 3 {
-		t.Fatalf("read on 3 repos: changed %d, want 3", out.Changed)
+		t.Fatalf("download on 3 repos: changed %d, want 3", out.Changed)
 	}
 	for _, r := range []string{r1, r2, r3} {
 		wantGet(t, s, r, basic(p1), http.StatusOK)
 	}
+	// The same set again changes nothing.
+	s.MustAPI(t, http.MethodPut, "/api/permissions", map[string]any{"users": []string{p1}, "repos": []string{r1, r2, r3}, "perms": []string{"download"}}, s.Admin(), &out)
+	if out.Changed != 0 {
+		t.Fatalf("the same set again: changed %d, want 0", out.Changed)
+	}
 
-	// Three people, write on one repository.
-	s.MustAPI(t, http.MethodPut, "/api/permissions", map[string]any{"users": []string{p1, p2, p3}, "repos": []string{r1}, "level": "write"}, s.Admin(), &out)
+	// Three people, download and publish on one repository.
+	s.MustAPI(t, http.MethodPut, "/api/permissions", map[string]any{"users": []string{p1, p2, p3}, "repos": []string{r1}, "perms": []string{"download", "publish"}}, s.Admin(), &out)
 	if out.Changed != 3 {
-		t.Fatalf("write for 3 people: changed %d, want 3", out.Changed)
+		t.Fatalf("publish for 3 people: changed %d, want 3", out.Changed)
 	}
 	for _, p := range []string{p1, p2, p3} {
 		resp, body := rawPut(t, s, "/raw/"+r1+"/by-"+p+".txt", []byte(p), s.PublishAuth(t, p, r1))
 		wantStatus(t, resp, body, http.StatusCreated)
 	}
-	if n := len(auditAll(t, s, "action=permission.set&repo="+r1)); n != 4 {
-		t.Fatalf("permission.set events of %s: %d, want 4", r1, n)
+	events := auditAll(t, s, "action=permission.set&repo="+r1)
+	if len(events) != 4 {
+		t.Fatalf("permission.set events of %s: %d, want 4", r1, len(events))
+	}
+	// Each event holds the old and the new set; the newest event of p1 is the change to publish.
+	var p1Event *auditEntry
+	for i := range events {
+		if events[i].Target == p1 {
+			p1Event = &events[i]
+			break
+		}
+	}
+	if p1Event == nil || fmt.Sprint(p1Event.Detail["old"]) != "[download]" || fmt.Sprint(p1Event.Detail["new"]) != "[download publish]" {
+		t.Fatalf("permission.set event of %s: %+v, want old [download] and new [download publish]", p1, p1Event)
 	}
 
 	// One unknown name changes nothing.
 	nobody := RandName("nobody")
-	st, body := s.API(t, http.MethodPut, "/api/permissions", map[string]any{"users": []string{p2, nobody}, "repos": []string{r2}, "level": "read"}, s.Admin())
+	st, body := s.API(t, http.MethodPut, "/api/permissions", map[string]any{"users": []string{p2, nobody}, "repos": []string{r2}, "perms": []string{"download"}}, s.Admin())
 	if st != http.StatusNotFound || !strings.Contains(string(body), nobody) {
 		t.Fatalf("grant with an unknown user: status %d, want 404 that names %s: %s", st, nobody, body)
 	}
-	apiWant(t, s, http.MethodPut, "/api/permissions", map[string]any{"users": []string{p2}, "repos": []string{r2, RandName("gone")}, "level": "read"}, s.Admin(), http.StatusNotFound)
+	apiWant(t, s, http.MethodPut, "/api/permissions", map[string]any{"users": []string{p2}, "repos": []string{r2, RandName("gone")}, "perms": []string{"download"}}, s.Admin(), http.StatusNotFound)
 	wantGet(t, s, r2, basic(p2), http.StatusForbidden)
+	// An unknown permission and a broken dependency get 400.
+	apiWant(t, s, http.MethodPut, "/api/permissions", map[string]any{"users": []string{p2}, "repos": []string{r2}, "perms": []string{"bogus"}}, s.Admin(), http.StatusBadRequest)
+	apiWant(t, s, http.MethodPut, "/api/permissions", map[string]any{"users": []string{p2}, "repos": []string{r2}, "perms": []string{"publish"}}, s.Admin(), http.StatusBadRequest)
 
-	// Remove access: 403 after.
-	s.MustAPI(t, http.MethodPost, "/api/permissions/delete", map[string]any{"users": []string{p1}, "repos": []string{r1, r2, r3}}, s.Admin(), &out)
+	// Remove access with an empty set: 403 after.
+	s.MustAPI(t, http.MethodPut, "/api/permissions", map[string]any{"users": []string{p1}, "repos": []string{r1, r2, r3}, "perms": []string{}}, s.Admin(), &out)
 	if out.Changed != 3 {
 		t.Fatalf("remove p1 from 3 repos: changed %d, want 3", out.Changed)
 	}
@@ -332,7 +353,7 @@ func TestBulkAccess(t *testing.T) {
 func TestBulkSessionRule(t *testing.T) {
 	s := StartServer(t, ServerOpts{})
 	repo := rawRepoWithFile(t, s, "rule")
-	s.CreateUser(t, "erin", "erin-password-1", false)
+	s.CreateUser(t, "erin", "erin-password-1")
 	routes := []struct {
 		method, path string
 		body         map[string]any
@@ -341,8 +362,8 @@ func TestBulkSessionRule(t *testing.T) {
 		{http.MethodPost, "/api/repos/delete", map[string]any{"names": []string{repo}}},
 		{http.MethodPost, "/api/repos/" + repo + "/files/delete", map[string]any{"paths": []string{"f.txt"}}},
 		{http.MethodPatch, "/api/users", map[string]any{"usernames": []string{"erin"}, "disabled": true}},
-		{http.MethodPut, "/api/permissions", map[string]any{"users": []string{"erin"}, "repos": []string{repo}, "level": "write"}},
-		{http.MethodPost, "/api/permissions/delete", map[string]any{"users": []string{"erin"}, "repos": []string{repo}}},
+		{http.MethodPut, "/api/permissions", map[string]any{"users": []string{"erin"}, "repos": []string{repo}, "perms": []string{"download", "publish"}}},
+		{http.MethodPut, "/api/permissions", map[string]any{"users": []string{"erin"}, "repos": []string{repo}, "perms": []string{}}},
 	}
 	for _, r := range routes {
 		apiWant(t, s, r.method, r.path, r.body, s.AdminBasic(), http.StatusUnauthorized)

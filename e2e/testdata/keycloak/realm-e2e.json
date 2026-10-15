@@ -2,6 +2,7 @@
   "realm": "e2e",
   "enabled": true,
   "sslRequired": "none",
+  "ssoSessionIdleTimeout": 7200,
   "registrationAllowed": false,
   "loginWithEmailAllowed": false,
   "groups": [

@@ -23,6 +23,9 @@ const (
 	pollInterval = 5 * time.Second
 	// userCodeAlphabet has no vowels (no words) and no look-alike letters (RFC 8628 §6.1).
 	userCodeAlphabet = "BCDFGHJKLMNPQRSTVWXZ"
+	// grantKind is the auth_challenges kind of an SSO approval grant; data is the user code.
+	grantKind = "device_grant"
+	grantTTL  = 5 * time.Minute
 )
 
 // Enrollment is the answer to a device enrollment request (RFC 8628 §3.2).
@@ -185,17 +188,55 @@ func (s *Service) PendingEnrollment(ctx context.Context, userCode string) (*Pend
 	return &PendingEnrollment{UserCode: e.UserCode, Name: e.Name, Kind: e.Kind, ExpiresAt: unixTime(e.ExpiresAt)}, nil
 }
 
-// Approve creates the device for p after a fresh second-factor check. The second-factor error
-// comes back unchanged (from auth.Service.VerifySecondFactor).
-func (s *Service) Approve(ctx context.Context, p *auth.Principal, userCode, totpCode string, passkey json.RawMessage) (*Device, error) {
-	if p.Kind != auth.KindLocal {
-		return nil, errorf(ErrForbidden, "devices need a local account")
+// ApprovalGrant stores a single-use grant that lets the SSO user userID approve the enrollment
+// of userCode once, within grantTTL. The SSO callback calls it after a fresh sign-in at the
+// identity provider. The code must still wait for approval.
+func (s *Service) ApprovalGrant(ctx context.Context, userID int64, userCode string) (string, error) {
+	e, err := s.pending(ctx, userCode)
+	if err != nil {
+		return "", err
 	}
+	grant := randomString(32)
+	now := time.Now().Unix()
+	err = s.wq.CreateChallenge(ctx, dbq.CreateChallengeParams{
+		IDHash: hashBytes([]byte(grant)), Kind: grantKind, UserID: nullID(userID), Data: []byte(e.UserCode),
+		CreatedAt: now, ExpiresAt: now + int64(grantTTL/time.Second),
+	})
+	if err != nil {
+		return "", err
+	}
+	return grant, nil
+}
+
+// takeGrant uses up grant. It must belong to userID and to the enrollment of userCode.
+func (s *Service) takeGrant(ctx context.Context, userID int64, userCode, grant string) error {
+	if grant == "" {
+		return errorf(ErrDenied, "sign in again with single sign-on to approve this device")
+	}
+	ch, err := s.wq.TakeChallenge(ctx, dbq.TakeChallengeParams{IDHash: hashBytes([]byte(grant)), Kind: grantKind, Now: time.Now().Unix()})
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && (ch.UserID.Int64 != userID || string(ch.Data) != userCode)) {
+		return errorf(ErrDenied, "the single sign-on approval is used, expired or for another code; sign in again")
+	}
+	return err
+}
+
+// Approve creates the device for p after a fresh check of who p is: a second factor for a local
+// account, or the grant of a fresh SSO sign-in (ApprovalGrant) for an SSO account. The
+// second-factor error comes back unchanged (from auth.Service.VerifySecondFactor).
+func (s *Service) Approve(ctx context.Context, p *auth.Principal, userCode, totpCode string, passkey json.RawMessage, grant string) (*Device, error) {
 	e, err := s.pending(ctx, userCode)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.auth.VerifySecondFactor(ctx, p.UserID, totpCode, passkey); err != nil {
+	switch p.Kind {
+	case auth.KindLocal:
+		err = s.auth.VerifySecondFactor(ctx, p.UserID, totpCode, passkey)
+	case auth.KindOIDC:
+		err = s.takeGrant(ctx, p.UserID, e.UserCode, grant)
+	default:
+		err = errorf(ErrForbidden, "sign in to approve a device")
+	}
+	if err != nil {
 		return nil, err
 	}
 	now := time.Now()
@@ -289,7 +330,7 @@ func (s *Service) UserDevices(ctx context.Context, userID, after int64, limit in
 	return out, nextID(len(rows), limit, func() int64 { return rows[len(rows)-1].ID }), nil
 }
 
-// Devices returns a newest-first keyset page of every device with its owner (admin).
+// Devices returns a newest-first keyset page of every device with its owner (people).
 func (s *Service) Devices(ctx context.Context, after int64, limit int) ([]Device, int64, error) {
 	rows, err := s.rq.ListDevices(ctx, dbq.ListDevicesParams{Before: beforeCursor(after), Limit: int64(limit)})
 	if err != nil {
@@ -308,7 +349,7 @@ func (s *Service) Devices(ctx context.Context, after int64, limit int) ([]Device
 	return out, nextID(len(rows), limit, func() int64 { return rows[len(rows)-1].ID }), nil
 }
 
-// RevokeDevice revokes a device of p (any device when p is an admin) and ends its open
+// RevokeDevice revokes a device of p (any device when p holds the People permission) and ends its open
 // sessions. ErrNotFound: unknown, another user's or already revoked.
 func (s *Service) RevokeDevice(ctx context.Context, p *auth.Principal, id int64) error {
 	now := nullID(time.Now().Unix())
@@ -316,7 +357,7 @@ func (s *Service) RevokeDevice(ctx context.Context, p *auth.Principal, id int64)
 		q := dbq.New(tx)
 		var n int64
 		var err error
-		if p.IsAdmin {
+		if p.Perms.Has(auth.PermPeople) {
 			n, err = q.RevokeDevice(ctx, dbq.RevokeDeviceParams{RevokedAt: now, ID: id})
 		} else {
 			n, err = q.RevokeUserDevice(ctx, dbq.RevokeUserDeviceParams{RevokedAt: now, ID: id, UserID: p.UserID})

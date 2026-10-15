@@ -59,15 +59,15 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "invalid path")
 		return
 	}
-	need := auth.Read
+	need := auth.RepoDownload
 	if r.Method == http.MethodPut {
-		need = auth.Write
+		need = auth.RepoPublish
 	}
 	repo, pr, ok := h.auth.RepoGate(w, r, r.PathValue("repo"), "maven", need, false)
 	if !ok {
 		return
 	}
-	if need == auth.Read {
+	if need == auth.RepoDownload {
 		switch repo.Kind {
 		case repos.KindGroup:
 			h.serveGroup(w, r, repo, pr, p)

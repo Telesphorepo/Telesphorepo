@@ -1,7 +1,7 @@
 <!--
-  The shell: loads the user, matches the hash route, checks access, and renders the page inside
-  the app shell. Pages never check the route access themselves (a repository page checks the
-  caller's permission on that repository).
+  The shell: loads the user, matches the hash route, checks access (auth.allows), and renders the
+  page inside the app shell. Pages never check the route access themselves (a repository page
+  checks the caller's permissions on that repository).
 -->
 <script lang="ts">
   import { ModeWatcher } from "mode-watcher";
@@ -47,7 +47,8 @@
     document.title = matched ? `${matched.route.title} · Telesphorepo` : "Telesphorepo";
   });
 
-  const forbidden = $derived(!!matched && matched.route.access === "admin" && !!auth.user && !auth.isAdmin);
+  // A signed-in person without the permission of the route.
+  const forbidden = $derived(!!matched && !!auth.user && !auth.allows(matched.route.access, matched.params));
   // Load the page module only when the route changes, not on every path change within it (a page
   // keeps its state while its params change, e.g. folders of one repo). A page renders only while
   // its own route matches, so the page that is leaving never gets the params of the next route.
@@ -81,7 +82,7 @@
           <Button href="#/">Open repositories</Button>
         </EmptyState>
       {:else if forbidden}
-        <EmptyState icon={ShieldIcon} title="Administrators only" description="Ask an administrator if you need this page." />
+        <EmptyState icon={ShieldIcon} title="You cannot open this page" description="It needs a permission that you do not hold. Ask an administrator if you need it." />
       {:else if matched.route.access === "any" || auth.user}
         {#if loadError}
           <ErrorState error={loadError} title="The page did not load" onRetry={() => location.reload()} />

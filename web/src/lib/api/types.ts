@@ -8,10 +8,16 @@ export type PageParams = { after?: string; limit?: number };
 
 // --- auth and users ---
 
+/** A server permission, in display order in SERVER_PERMISSIONS ($lib/permissions). */
+export type ServerPermission = "repos" | "people" | "signin" | "storage" | "network" | "keys" | "nexus" | "general" | "activity";
+/** A permission on one repository, in display order in REPO_PERMISSIONS ($lib/permissions). */
+export type RepoPermission = "download" | "publish" | "delete" | "settings" | "access" | "pipelines";
+
 export type User = {
   id: number;
   username: string;
-  is_admin: boolean;
+  /** The server permissions of the account. An administrator holds all of them. */
+  permissions: ServerPermission[];
   disabled: boolean;
   kind: "local" | "oidc";
   /** "" when unknown (SSO accounts only). */
@@ -19,28 +25,35 @@ export type User = {
   created_at: string;
 };
 
-/** GET /api/me and a finished sign-in. second_factor_required: the session reaches only the setup routes. */
-export type Me = User & { second_factor_required: boolean };
+/**
+ * GET /api/me and a finished sign-in. second_factor_required: the session reaches only the setup
+ * routes. repo_permissions: the repositories where the caller holds more than download, with the
+ * whole set of each (empty for a holder of "repos", who holds every permission everywhere).
+ */
+export type Me = User & { second_factor_required: boolean; repo_permissions?: Record<string, RepoPermission[]> };
 
-/** One repository a person can use: level "read" (download) or "write" (download and publish), and why. */
+/** One repository a person can use: the repository permissions there, and why. */
 export type UserRepoAccess = {
   repo: string;
   format: string;
   public: boolean;
-  level: "read" | "write";
-  via: "admin" | "permission" | "public";
+  perms: RepoPermission[];
+  via: "all_repos" | "permission" | "public";
 };
 /**
  * GET /api/me/access and GET /api/users/{username}/access: a keyset page of the repositories a
- * person can use. can_publish is false for a single sign-on or disabled account, whatever its level.
+ * person can use. can_publish is false only for a disabled account.
  */
 export type UserAccess = Page<UserRepoAccess> & {
   username: string;
-  is_admin: boolean;
+  permissions: ServerPermission[];
   disabled: boolean;
   kind: "local" | "oidc";
   can_publish: boolean;
 };
+
+/** GET /api/people: one person of a picker. */
+export type PersonName = { username: string };
 
 /** POST /api/auth/login answers this when the account has a second factor. */
 export type SecondFactorStep = { second_factor: true; methods: SecondFactorMethod[] };
@@ -58,10 +71,10 @@ export type AuthConfig = {
 /** A second-factor proof: one of a TOTP code, a passkey assertion (browser JSON) or a recovery code (sign-in only). */
 export type Proof = { totp_code?: string; passkey?: unknown; recovery_code?: string };
 
-export type NewUser = { username: string; password: string; is_admin: boolean };
-export type UserPatch = { password?: string; is_admin?: boolean };
+export type NewUser = { username: string; password: string; permissions: ServerPermission[] };
+export type UserPatch = { password: string };
 
-/** PATCH /api/repos, PATCH /api/users, PUT /api/permissions, POST /api/permissions/delete: how many items changed. */
+/** PATCH /api/repos, PATCH /api/users, PUT /api/permissions: how many items changed. */
 export type Changed = { changed: number };
 
 // --- read tokens ---
@@ -129,16 +142,14 @@ export type RepoProxy = {
   last_error_at: string | null;
 };
 
-/** "admin" for admins; otherwise the caller's level on the repo. */
-export type RepoPermission = "admin" | "write" | "read" | "none";
-
 export type Repo = {
   name: string;
   format: string;
   description: string;
   anonymous_read: boolean;
   config: RepoConfig;
-  permission: RepoPermission;
+  /** The caller's repository permissions on it; [] for a visitor of a public repository. */
+  permissions: RepoPermission[];
   /** Why uploads answer 409 (a storage move, a Nexus mirror); "" when they do not. */
   locked_by: string;
   /** Number of stored files; every file counts (artifacts, metadata, checksums, index files). */
@@ -185,12 +196,16 @@ export type RepoPatch = { description?: string; config?: RepoConfig; proxy?: Pro
 /** POST /api/repos/delete: the deleted repositories and how many files went with them. */
 export type ReposDeleted = { deleted: string[]; files: number };
 
-export type Permission = { username: string; level: "read" | "write" };
+/** GET /api/repos/{name}/permissions: a person's whole permission set on the repository. */
+export type Permission = { username: string; perms: RepoPermission[] };
 
 // --- effective access (GET /api/repos/{name}/access) ---
 
-/** A person with access: a grant on the repo ("permission"), or an administrator ("admin", only with ?admins=1). */
-export type AccessPerson = { username: string; level: "read" | "write"; via: "permission" | "admin" };
+/**
+ * A person with access and their whole permission set: a grant on the repo ("permission"), or a
+ * holder of All repositories ("all_repos", only with ?admins=1).
+ */
+export type AccessPerson = { username: string; perms: RepoPermission[]; via: "permission" | "all_repos" };
 /** Where requests may come from: any network, or only these network lists and address ranges. */
 export type AccessNetworks = { any: boolean; lists: { name: string; title: string }[]; cidrs: { cidr: string; note: string }[] };
 /** A CI pipeline (CI rule) that lists the repo, with what its conditions allow. Disabled ones are listed too. */
@@ -207,13 +222,15 @@ export type AccessPipeline = {
   disabled: boolean;
 };
 /**
- * GET /api/repos/{name}/access (admin). download.people: everyone with a grant (read or write);
- * publish.people: the local accounts with write. admins counts the enabled administrators (for
- * publishing, the local ones). publish.locked_by says why nobody can publish now ("" when not).
+ * GET /api/repos/{name}/access (Manage access, Edit settings or CI pipelines). people: each person
+ * with a grant, once, with the whole set. download.people: the grants with download;
+ * publish.people: the grants with publish. admins counts the enabled holders of All repositories.
+ * publish.locked_by says why nobody can publish now ("" when not).
  */
 export type RepoAccess = {
   repo: string;
   format: string;
+  people: AccessPerson[];
   download: { public: boolean; people: AccessPerson[]; admins: number; networks: AccessNetworks; sentence: string };
   publish: {
     people: AccessPerson[];
@@ -284,7 +301,7 @@ export type IPRules = { read: IPRule[]; publish: IPRule[] };
 export type IPListUsage = { repos: { repo: string; scope: "read" | "publish" }[]; trusted_proxies: boolean };
 /**
  * A named set of address ranges (GET /api/ip-lists). A preset is fetched by the server (source is
- * its address; fetched_at is null before the first good fetch); a custom list is edited by admins.
+ * its address; fetched_at is null before the first good fetch); a custom list is edited by holders of Network.
  * ranges is only in GET /api/ip-lists/{name}.
  */
 export type IPList = {
@@ -531,7 +548,7 @@ export type PendingEnrollment = { user_code: string; name: string; kind: "gradle
 export type Device = {
   id: number;
   user_id: number;
-  /** Set in the admin list (every user's devices). */
+  /** Set in the list of a holder of People (every user's devices). */
   username?: string;
   name: string;
   kind: "gradle" | "maven";

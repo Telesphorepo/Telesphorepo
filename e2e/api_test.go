@@ -52,7 +52,7 @@ func apiMavenPut(t testing.TB, s *Server, repo, path, body string) {
 
 func TestAPISession(t *testing.T) {
 	s := StartServer(t, ServerOpts{})
-	s.CreateUser(t, "alice", "alice-password-1", false)
+	s.CreateUser(t, "alice", "alice-password-1")
 
 	apiWant(t, s, http.MethodPost, "/api/auth/login", map[string]string{"username": "alice", "password": "wrong"}, nil, http.StatusUnauthorized)
 
@@ -75,8 +75,10 @@ func TestAPISession(t *testing.T) {
 		t.Fatalf("bad cookie attributes: %+v", sc)
 	}
 	var u struct {
-		Username string `json:"username"`
-		IsAdmin  bool   `json:"is_admin"`
+		Username             string              `json:"username"`
+		Permissions          []string            `json:"permissions"`
+		SecondFactorRequired bool                `json:"second_factor_required"`
+		RepoPermissions      map[string][]string `json:"repo_permissions"`
 	}
 	if err := json.Unmarshal(b, &u); err != nil || u.Username != "alice" {
 		t.Fatalf("login body: %s", b)
@@ -84,7 +86,7 @@ func TestAPISession(t *testing.T) {
 
 	sess := s.Login(t, "alice", "alice-password-1")
 	apiJSON(t, s, http.MethodGet, "/api/me", nil, sess, 200, &u)
-	if u.Username != "alice" || u.IsAdmin {
+	if u.Username != "alice" || len(u.Permissions) != 0 || u.SecondFactorRequired || len(u.RepoPermissions) != 0 {
 		t.Fatalf("me: %+v", u)
 	}
 	apiWant(t, s, http.MethodGet, "/api/me", nil, nil, http.StatusUnauthorized)
@@ -95,7 +97,7 @@ func TestAPISession(t *testing.T) {
 
 func TestAPICSRF(t *testing.T) {
 	s := StartServer(t, ServerOpts{})
-	s.CreateUser(t, "alice", "alice-password-1", false)
+	s.CreateUser(t, "alice", "alice-password-1")
 	sess := s.LoginTOTP(t, "alice")
 
 	st, b := apiPostTokenWith(t, s, sess, map[string]string{"Sec-Fetch-Site": "cross-site", "Origin": "https://evil.example"})
@@ -114,8 +116,8 @@ func TestAPICSRF(t *testing.T) {
 
 func TestAPITokens(t *testing.T) {
 	s := StartServer(t, ServerOpts{})
-	s.CreateUser(t, "alice", "alice-password-1", false)
-	s.CreateUser(t, "bob", "bob-password-1", false)
+	s.CreateUser(t, "alice", "alice-password-1")
+	s.CreateUser(t, "bob", "bob-password-1")
 	alice, bob := Basic{"alice", "alice-password-1"}, Basic{"bob", "bob-password-1"}
 	aliceUI, bobUI := s.SignIn(t, "alice", "alice-password-1"), s.SignIn(t, "bob", "bob-password-1")
 
@@ -159,8 +161,8 @@ func TestAPISessionRule(t *testing.T) {
 	s := StartServer(t, ServerOpts{})
 	repo := RandName("rule")
 	s.CreateRepo(t, repo, "maven", false, nil)
-	s.CreateUser(t, "frank", "frank-password-1", false)
-	s.SetPermission(t, repo, "frank", "read")
+	s.CreateUser(t, "frank", "frank-password-1")
+	s.SetPerms(t, repo, "frank", "download")
 	adminPw, frankPw := s.AdminBasic(), Basic{"frank", "frank-password-1"}
 	readToken := Basic{"x", s.CreateToken(t, "frank", "frank-password-1", "read")}
 
@@ -185,8 +187,9 @@ func TestAPISessionRule(t *testing.T) {
 
 	t.Run("admin password on write routes", func(t *testing.T) {
 		wantSessionRequired(t, http.MethodPost, "/api/publish/trusts", trust, adminPw)
-		wantSessionRequired(t, http.MethodPost, "/api/users", map[string]any{"username": RandName("evil"), "password": "evil-password-1", "is_admin": true}, adminPw)
-		wantSessionRequired(t, http.MethodPut, "/api/permissions", map[string]any{"users": []string{"frank"}, "repos": []string{repo}, "level": "write"}, adminPw)
+		wantSessionRequired(t, http.MethodPost, "/api/users", map[string]any{"username": RandName("evil"), "password": "evil-password-1", "permissions": AllServerPerms}, adminPw)
+		wantSessionRequired(t, http.MethodPut, "/api/users/frank/permissions", map[string]any{"permissions": AllServerPerms}, adminPw)
+		wantSessionRequired(t, http.MethodPut, "/api/permissions", map[string]any{"users": []string{"frank"}, "repos": []string{repo}, "perms": []string{"download", "publish"}}, adminPw)
 		wantSessionRequired(t, http.MethodPatch, "/api/settings", map[string]any{"max_json_size": 4096}, adminPw)
 		wantSessionRequired(t, http.MethodPost, "/api/repos", map[string]any{"name": RandName("evil"), "format": "maven"}, adminPw)
 		wantSessionRequired(t, http.MethodPost, "/api/tokens", map[string]any{"name": "evil"}, adminPw)
@@ -218,8 +221,8 @@ func TestAPISessionRule(t *testing.T) {
 		admin := s.Admin()
 		apiWant(t, s, http.MethodGet, "/api/users", nil, admin, http.StatusOK)
 		apiWant(t, s, http.MethodPost, "/api/publish/trusts", trust, admin, http.StatusCreated)
-		apiWant(t, s, http.MethodPut, "/api/permissions", map[string]any{"users": []string{"frank"}, "repos": []string{repo}, "level": "write"}, admin, http.StatusOK)
-		// A user's own UI session changes the user's own things; admin routes stay 403.
+		apiWant(t, s, http.MethodPut, "/api/permissions", map[string]any{"users": []string{"frank"}, "repos": []string{repo}, "perms": []string{"download", "publish"}}, admin, http.StatusOK)
+		// A user's own UI session changes the user's own things; permission routes stay 403.
 		frank := s.SignIn(t, "frank", "frank-password-1")
 		apiWant(t, s, http.MethodPost, "/api/tokens", map[string]any{"name": "ui"}, frank, http.StatusCreated)
 		apiWant(t, s, http.MethodGet, "/api/users", nil, frank, http.StatusForbidden)
@@ -229,8 +232,8 @@ func TestAPISessionRule(t *testing.T) {
 	t.Run("a UI session on format routes", func(t *testing.T) {
 		// A signed-in browser downloads from a private repo with its session cookie; writes on
 		// format routes still need a publish session.
-		s.CreateUser(t, "gina", "gina-password-1", false)
-		s.SetPermission(t, repo, "gina", "write")
+		s.CreateUser(t, "gina", "gina-password-1")
+		s.SetPerms(t, repo, "gina", "download", "publish")
 		path := "/maven/" + repo + "/com/example/cookie/1.0/cookie-1.0.jar"
 		body := "cookie download " + randHex(8)
 		apiWant(t, s, http.MethodPut, path, body, s.PublishAuth(t, "gina", repo), http.StatusCreated)
@@ -254,34 +257,39 @@ func TestAPISessionRule(t *testing.T) {
 func TestAPIUsers(t *testing.T) {
 	s := StartServer(t, ServerOpts{})
 	admin := s.Admin()
-	body := map[string]any{"username": "carol", "password": "carol-password-1", "is_admin": false}
+	body := map[string]any{"username": "carol", "password": "carol-password-1", "permissions": []string{}}
 	var u struct {
-		Username string `json:"username"`
-		IsAdmin  bool   `json:"is_admin"`
+		Username    string   `json:"username"`
+		Permissions []string `json:"permissions"`
 	}
 	apiJSON(t, s, http.MethodPost, "/api/users", body, admin, http.StatusCreated, &u)
-	if u.Username != "carol" || u.IsAdmin {
+	if u.Username != "carol" || len(u.Permissions) != 0 {
 		t.Fatalf("created: %+v", u)
 	}
 	apiWant(t, s, http.MethodPost, "/api/users", body, admin, http.StatusConflict)
+	apiWant(t, s, http.MethodPost, "/api/users", map[string]any{"username": "dan", "password": "dan-password-1", "permissions": []string{"bogus"}}, admin, http.StatusBadRequest)
 
 	carol := s.SignIn(t, "carol", "carol-password-1")
 	apiWant(t, s, http.MethodGet, "/api/users", nil, carol, http.StatusForbidden)
 	apiWant(t, s, http.MethodGet, "/api/users", nil, Basic{"carol", "carol-password-1"}, http.StatusUnauthorized)
 	apiWant(t, s, http.MethodGet, "/api/users", nil, admin, 200)
 
-	apiJSON(t, s, http.MethodPatch, "/api/users/carol", map[string]any{"is_admin": true}, admin, 200, &u)
-	if !u.IsAdmin {
-		t.Fatalf("patch: %+v", u)
+	apiJSON(t, s, http.MethodPut, "/api/users/carol/permissions", map[string]any{"permissions": AllServerPerms}, admin, 200, &u)
+	if strings.Join(u.Permissions, ",") != strings.Join(AllServerPerms, ",") {
+		t.Fatalf("set permissions: %+v", u)
 	}
-	// An admin session needs the second factor: carol signs in again, now with TOTP.
+	// The grant ends carol's session, which a password alone started.
+	apiWant(t, s, http.MethodGet, "/api/me", nil, carol, http.StatusUnauthorized)
+	// A session with server permissions needs the second factor: carol signs in again, now with TOTP.
 	apiWant(t, s, http.MethodGet, "/api/users", nil, s.SignIn(t, "carol", "carol-password-1"), 200)
+	// PATCH changes only the password.
+	apiWant(t, s, http.MethodPatch, "/api/users/carol", map[string]any{"password": "carol-password-2"}, admin, 200)
 }
 
 func TestAPIReposAndPermissions(t *testing.T) {
 	s := StartServer(t, ServerOpts{})
 	admin := s.Admin()
-	s.CreateUser(t, "dave", "dave-password-1", false)
+	s.CreateUser(t, "dave", "dave-password-1")
 	dave := Basic{"dave", "dave-password-1"}
 	daveUI := s.SignIn(t, "dave", "dave-password-1")
 
@@ -296,10 +304,11 @@ func TestAPIReposAndPermissions(t *testing.T) {
 	apiWant(t, s, http.MethodPost, "/api/repos", map[string]any{"name": RandName("x"), "format": "maven"}, daveUI, http.StatusForbidden)
 
 	type repoRow struct {
-		Name       string `json:"name"`
-		Format     string `json:"format"`
-		Permission string `json:"permission"`
+		Name        string   `json:"name"`
+		Format      string   `json:"format"`
+		Permissions []string `json:"permissions"`
 	}
+	permsOf := func(r repoRow) string { return strings.Join(r.Permissions, ",") }
 	list := func(auth Auth) map[string]repoRow {
 		t.Helper()
 		st, b := s.API(t, http.MethodGet, "/api/repos", nil, auth)
@@ -329,36 +338,40 @@ func TestAPIReposAndPermissions(t *testing.T) {
 	}
 
 	// permissions
-	s.SetPermission(t, priv, "dave", "read")
-	s.SetPermission(t, deb, "dave", "write")
+	s.SetPerms(t, priv, "dave", "download")
+	s.SetPerms(t, deb, "dave", "download", "publish")
 	var perms []struct {
-		Username string `json:"username"`
-		Level    string `json:"level"`
+		Username string   `json:"username"`
+		Perms    []string `json:"perms"`
 	}
 	apiJSON(t, s, http.MethodGet, "/api/repos/"+priv+"/permissions", nil, admin, 200, &perms)
-	if len(perms) != 1 || perms[0].Username != "dave" || perms[0].Level != "read" {
+	if len(perms) != 1 || perms[0].Username != "dave" || strings.Join(perms[0].Perms, ",") != "download" {
 		t.Fatalf("permissions: %+v", perms)
 	}
 	apiWant(t, s, http.MethodGet, "/api/repos/"+priv+"/permissions", nil, daveUI, http.StatusForbidden)
-	apiWant(t, s, http.MethodPut, "/api/permissions", map[string]any{"users": []string{"dave"}, "repos": []string{priv}, "level": "bogus"}, admin, http.StatusBadRequest)
+	apiWant(t, s, http.MethodPut, "/api/permissions", map[string]any{"users": []string{"dave"}, "repos": []string{priv}, "perms": []string{"bogus"}}, admin, http.StatusBadRequest)
 
 	got := list(dave)
 	if _, ok := got[secret]; ok {
 		t.Fatalf("dave sees unpermitted repo: %+v", got)
 	}
-	if got[priv].Permission != "read" || got[deb].Permission != "write" || got[deb].Format != "debian" {
+	if permsOf(got[priv]) != "download" || permsOf(got[deb]) != "download,publish" || got[deb].Format != "debian" {
 		t.Fatalf("dave list: %+v", got)
 	}
-	if _, ok := got[pub]; !ok {
+	if _, ok := got[pub]; !ok || permsOf(got[pub]) != "download" {
 		t.Fatalf("dave misses anonymous repo: %+v", got)
 	}
-
-	s.SetPermission(t, priv, "dave", "write")
-	if p := list(dave)[priv].Permission; p != "write" {
-		t.Fatalf("after upgrade permission = %q", p)
+	// The All repositories permission holds every repository permission.
+	if p := permsOf(list(admin)[secret]); p != "download,publish,delete,settings,access,pipelines" {
+		t.Fatalf("admin's permissions on %s = %q, want every one", secret, p)
 	}
 
-	apiWant(t, s, http.MethodPost, "/api/permissions/delete", map[string]any{"users": []string{"dave"}, "repos": []string{priv}}, admin, http.StatusOK)
+	s.SetPerms(t, priv, "dave", "download", "publish")
+	if p := permsOf(list(dave)[priv]); p != "download,publish" {
+		t.Fatalf("after upgrade permissions = %q", p)
+	}
+
+	apiWant(t, s, http.MethodPut, "/api/permissions", map[string]any{"users": []string{"dave"}, "repos": []string{priv}, "perms": []string{}}, admin, http.StatusOK)
 	if _, ok := list(dave)[priv]; ok {
 		t.Fatal("repo still visible after permission delete")
 	}
@@ -425,12 +438,12 @@ func TestAPIAssetsPagination(t *testing.T) {
 
 func TestAPISearch(t *testing.T) {
 	s := StartServer(t, ServerOpts{})
-	s.CreateUser(t, "erin", "erin-password-1", false)
+	s.CreateUser(t, "erin", "erin-password-1")
 	erin := Basic{"erin", "erin-password-1"}
 	open, hidden := RandName("open"), RandName("hidden")
 	s.CreateRepo(t, open, "maven", false, nil)
 	s.CreateRepo(t, hidden, "maven", false, nil)
-	s.SetPermission(t, open, "erin", "read")
+	s.SetPerms(t, open, "erin", "download")
 
 	apiMavenPut(t, s, open, "com/acme/zebrafish/1.0/zebrafish-1.0.txt", "a")
 	apiMavenPut(t, s, hidden, "com/acme/zebrafish/2.0/zebrafish-2.0.txt", "b")
@@ -491,7 +504,7 @@ func TestAPIErrors(t *testing.T) {
 // /status and /usage.
 func TestAPIFormats(t *testing.T) {
 	s := StartServer(t, ServerOpts{})
-	s.CreateUser(t, "erin", "erin-password-1", false)
+	s.CreateUser(t, "erin", "erin-password-1")
 	erin := Basic{"erin", "erin-password-1"}
 
 	var formats []struct {

@@ -1,9 +1,9 @@
 <!--
   What the CI job needs, next to the pipeline that lets it publish: the GitHub Actions workflow or
-  the Jenkinsfile stage for one of the chosen repositories. The code comes from the repository's
-  format plugin (GET /api/repos/{name}/usage, the CI publish snippets). A GitHub workflow gets the
-  branches and tags of the pipeline as its trigger and the workflow file as its title, so the
-  workflow and the pipeline agree.
+  the Jenkinsfile for one of the chosen repositories. The code comes from the repository's format
+  plugin (GET /api/repos/{name}/usage, the CI publish snippets). A GitHub workflow gets the
+  branches and tags of the pipeline as its trigger, in place of the plugin's push to main, and the
+  workflow file as its title, so the workflow and the pipeline agree.
 -->
 <script lang="ts">
   import { untrack } from "svelte";
@@ -51,7 +51,8 @@
     return s + "\n";
   }
 
-  const code = $derived(chosen ? (system === "github" ? trigger(github) + chosen.code : chosen.code) : "");
+  // The workflow of the plugin starts with a push to main; the pipeline's own trigger takes its place.
+  const code = $derived(chosen ? (system === "github" ? trigger(github) + chosen.code.replace(/^on:\n(?: .*\n)*\n/, "") : chosen.code) : "");
   const title = $derived.by(() => {
     if (!chosen) return "";
     const t = chosen.title.replace(/\s*\([^)]+\)$/, "");
@@ -91,9 +92,7 @@
     {:else if chosen}
       <div class="flex min-w-0 flex-col gap-2">
         <CodeBlock {title} {code} />
-        {#if system === "jenkins"}
-          <p class="text-meta text-muted-foreground">Jenkins makes the token with the OpenID Connect Provider plugin. {chosen.note ?? ""}</p>
-        {:else if chosen.note}
+        {#if chosen.note}
           <p class="text-meta text-muted-foreground">{chosen.note}</p>
         {/if}
       </div>

@@ -13,7 +13,6 @@ CREATE TABLE users (
   id                  INTEGER PRIMARY KEY,
   username            TEXT NOT NULL UNIQUE,          -- ^[a-z0-9][a-z0-9._-]{0,63}$
   password_hash       TEXT NOT NULL,                 -- argon2id PHC string
-  is_admin            INTEGER NOT NULL DEFAULT 0,
   disabled            INTEGER NOT NULL DEFAULT 0,
   password_changed_at INTEGER NOT NULL,
   created_at          INTEGER NOT NULL,
@@ -23,8 +22,15 @@ CREATE TABLE users (
   email               TEXT
 ) STRICT;
 CREATE UNIQUE INDEX users_oidc ON users(oidc_issuer, oidc_subject) WHERE oidc_subject IS NOT NULL;
--- The enabled admins in username order: everyone who can download and publish every repo.
-CREATE INDEX users_admins ON users(username) WHERE is_admin = 1 AND disabled = 0;
+
+-- Server permissions (spec "Permissions"): one row per person and permission. An administrator
+-- holds every one. user_permissions_perm finds the holders of one permission.
+CREATE TABLE user_permissions (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  perm    TEXT NOT NULL CHECK (perm IN ('repos','people','signin','storage','network','keys','nexus','general','activity')),
+  PRIMARY KEY (user_id, perm)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX user_permissions_perm ON user_permissions(perm, user_id);
 
 -- Read tokens (spec §7.1): they read repos and call the API, but never publish (§7.6).
 CREATE TABLE api_tokens (
@@ -69,13 +75,15 @@ CREATE TABLE repos (
 ) STRICT;
 CREATE INDEX repos_anonymous ON repos(id) WHERE anonymous_read = 1;
 
+-- Repository permissions: one row per repo, person and permission. publish needs download, and
+-- pipelines needs publish (the auth service checks it).
 CREATE TABLE repo_permissions (
   repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  level   TEXT NOT NULL CHECK (level IN ('read','write')),
-  PRIMARY KEY (repo_id, user_id)
+  perm    TEXT NOT NULL CHECK (perm IN ('download','publish','delete','settings','access','pipelines')),
+  PRIMARY KEY (repo_id, user_id, perm)
 ) STRICT, WITHOUT ROWID;
-CREATE INDEX repo_permissions_user ON repo_permissions(user_id);
+CREATE INDEX repo_permissions_user ON repo_permissions(user_id, repo_id);
 
 -- The members of a group repo, in the order a read tries them. A member is a hosted or proxy
 -- repo of the group's format; a repo can be in several groups. Request paths read the in-memory
@@ -434,6 +442,7 @@ CREATE INDEX publish_sessions_device ON publish_sessions(device_id);
 CREATE INDEX publish_sessions_trust ON publish_sessions(trust_id);
 
 -- Short-lived single-use challenges: the publish nonce (kind 'publish_nonce', device_id set),
+-- the grant of an SSO device approval (kind 'device_grant', user_id set, data the user code),
 -- WebAuthn ceremony data, a pending TOTP setup and the second step of a sign-in. id_hash is
 -- SHA-256 of the value the client holds; data is kind-specific (sealed when it holds a secret).
 -- Taking a challenge deletes it.

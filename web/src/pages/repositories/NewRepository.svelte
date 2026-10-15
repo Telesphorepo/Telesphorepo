@@ -1,5 +1,5 @@
 <!--
-  New repository (administrators). The first choice is what to create: a repository, a proxy of a
+  New repository (All repositories). The first choice is what to create: a repository, a proxy of a
   remote repository, or a group of repositories. Each choice offers only the formats that take it
   (GET /api/formats, `kinds`).
 
@@ -19,6 +19,7 @@
 <script lang="ts">
   import { toast } from "svelte-sonner";
   import type { PageProps } from "$lib/router.svelte";
+  import { auth } from "$lib/auth.svelte";
   import { href, navigate, repoPath, repoSettingsPath } from "$lib/router.svelte";
   import { api, ApiError, errorMessage, type NewRepo, type Repo, type RepoConfig, type RepoKind } from "$lib/api";
   import { Resource } from "$lib/load.svelte";
@@ -386,7 +387,7 @@
           {:else if keys.error && !keys.data}
             <ErrorState error={keys.error} title="The signing keys did not load" onRetry={keys.reload} />
           {:else}
-            <SigningKeyChoice keys={keys.data ?? []} repoName={name} bind:choice={keyChoice} />
+            <SigningKeyChoice keys={keys.data ?? []} repoName={name} canCreate={auth.can("keys")} bind:choice={keyChoice} />
           {/if}
         </FormSection>
       {:else if otherOptions && format}

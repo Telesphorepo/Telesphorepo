@@ -4,9 +4,10 @@
 // the enabled admins, the CI rules (publish trust policies) that list the repo, and the repo's IP
 // rules, and says the effective answer in one plain sentence each.
 //
-// Admins can download from and publish to every repo. They are counted (admins), not listed,
-// unless the caller asks for them; the sentences name only the people and pipelines that were
-// given access, and say "only admins" when there are none.
+// The holders of the All repositories permission can download from and publish to every repo.
+// They are counted (admins), not listed, unless the caller asks for them; the sentences name
+// only the people and pipelines that were given access, and say "only admins" when there are
+// none.
 package access
 
 import (
@@ -27,15 +28,15 @@ import (
 // Ways a person has access.
 const (
 	ViaPermission = "permission" // a grant on the repo
-	ViaAdmin      = "admin"      // an admin: every repo
+	ViaAllRepos   = "all_repos"  // the All repositories permission: every repo
 	ViaPublic     = "public"     // anonymous read
 )
 
-// Person is someone with access to a repo. Level is "read" or "write".
+// Person is someone with access to a repo: their repository permissions, in display order.
 type Person struct {
-	Username string `json:"username"`
-	Level    string `json:"level"`
-	Via      string `json:"via"`
+	Username string   `json:"username"`
+	Perms    []string `json:"perms"`
+	Via      string   `json:"via"`
 }
 
 // Pipeline is a CI rule (publish trust policy) that lists the repo, with what its claims allow,
@@ -74,8 +75,8 @@ type NetCIDR struct {
 	Note string `json:"note"`
 }
 
-// Download is who can download from a repo. People are the users with a grant (read or write);
-// Admins counts the enabled admins.
+// Download is who can download from a repo. People are the users with a grant of download;
+// Admins counts the enabled holders of the All repositories permission.
 type Download struct {
 	Public   bool     `json:"public"`
 	People   []Person `json:"people"`
@@ -84,10 +85,9 @@ type Download struct {
 	Sentence string   `json:"sentence"`
 }
 
-// Publish is who can publish to a repo. People are the users with write (they publish from a
-// device or the browser); Admins counts the enabled local admins (an SSO account cannot hold a
-// publish session); CI are the rules that list the repo. LockedBy says why nobody can publish
-// now ("" when anyone above can).
+// Publish is who can publish to a repo. People are the users with a grant of publish (they
+// publish from a device or the browser); Admins counts the enabled holders of the All
+// repositories permission; CI are the rules that list the repo. LockedBy says why nobody can publish now ("" when anyone above can).
 type Publish struct {
 	People   []Person   `json:"people"`
 	Admins   int        `json:"admins"`
@@ -97,10 +97,12 @@ type Publish struct {
 	Sentence string     `json:"sentence"`
 }
 
-// Repo is the effective access of one repo.
+// Repo is the effective access of one repo. People lists each person with a grant once, with
+// their whole permission set.
 type Repo struct {
 	Repo     string   `json:"repo"`
 	Format   string   `json:"format"`
+	People   []Person `json:"people"`
 	Download Download `json:"download"`
 	Publish  Publish  `json:"publish"`
 }
@@ -118,29 +120,27 @@ func New(d *db.DB, rs *repos.Service, a *auth.Service, nr *netrules.Service) *Se
 	return &Service{q: dbq.New(d.R), repos: rs, auth: a, rules: nr}
 }
 
-// admins are the enabled admins.
+// admins are the enabled holders of the All repositories permission, in username order.
 type admins struct {
-	all   []string
-	local []string // the ones that can publish
+	all []string
 }
 
 func (s *Service) admins(ctx context.Context) (admins, error) {
-	rows, err := s.q.ListActiveAdmins(ctx)
+	rows, err := s.q.ListPermHolders(ctx, "repos")
 	if err != nil {
 		return admins{}, err
 	}
+	slices.SortFunc(rows, func(a, b dbq.ListPermHoldersRow) int { return strings.Compare(a.Username, b.Username) })
 	var a admins
 	for _, r := range rows {
 		a.all = append(a.all, r.Username)
-		if r.Kind == auth.KindLocal {
-			a.local = append(a.local, r.Username)
-		}
+
 	}
 	return a, nil
 }
 
-// Repo returns the effective access of repo. With listAdmins the admins appear in People too
-// (via "admin").
+// Repo returns the effective access of repo. With listAdmins the holders of the All
+// repositories permission appear in the people of Download and Publish too (via "all_repos").
 func (s *Service) Repo(ctx context.Context, repo *repos.Repo, listAdmins bool) (*Repo, error) {
 	adm, err := s.admins(ctx)
 	if err != nil {
@@ -164,25 +164,46 @@ func (s *Service) repo(ctx context.Context, repo *repos.Repo, adm admins, titles
 		return nil, err
 	}
 	slices.SortFunc(grants, func(a, b dbq.ListRepoGrantsRow) int { return strings.Compare(a.Username, b.Username) })
-	out := &Repo{Repo: repo.Name, Format: repo.Format}
+	out := &Repo{Repo: repo.Name, Format: repo.Format, People: []Person{}}
 	d, p := &out.Download, &out.Publish
 	d.Public, d.People, p.People, p.CI = repo.AnonymousRead, []Person{}, []Person{}, []Pipeline{}
-	d.Admins, p.Admins = len(adm.all), len(adm.local)
+	d.Admins, p.Admins = len(adm.all), len(adm.all)
+	// The rows come one per permission; group them by person, in username order.
+	type grant struct{ set auth.RepoPerm }
+	byUser := map[string]*grant{}
+	var names []string
 	for _, g := range grants {
-		if g.Disabled || g.IsAdmin {
-			continue // a disabled user has no access; an admin has it anyway
+		if g.Disabled || g.AllRepos {
+			continue // a disabled user has no access; a holder of All repositories has it anyway
 		}
-		d.People = append(d.People, Person{g.Username, g.Level, ViaPermission})
-		if g.Level == "write" && g.Kind == auth.KindLocal {
-			p.People = append(p.People, Person{g.Username, g.Level, ViaPermission})
+		x := byUser[g.Username]
+		if x == nil {
+			x = &grant{}
+			byUser[g.Username] = x
+			names = append(names, g.Username)
+		}
+		set, _ := auth.ParseRepoPerms([]string{g.Perm})
+		x.set |= set
+	}
+	slices.Sort(names)
+	for _, u := range names {
+		x := byUser[u]
+		person := Person{u, x.set.Names(), ViaPermission}
+		out.People = append(out.People, person)
+		if x.set.Has(auth.RepoDownload) {
+			d.People = append(d.People, person)
+		}
+		if x.set.Has(auth.RepoPublish) {
+			p.People = append(p.People, person)
 		}
 	}
 	if listAdmins {
+		all := auth.AllRepoPerms.Names()
 		for _, u := range adm.all {
-			d.People = append(d.People, Person{u, "write", ViaAdmin})
+			d.People = append(d.People, Person{u, all, ViaAllRepos})
 		}
-		for _, u := range adm.local {
-			p.People = append(p.People, Person{u, "write", ViaAdmin})
+		for _, u := range adm.all {
+			p.People = append(p.People, Person{u, all, ViaAllRepos})
 		}
 	}
 
@@ -409,43 +430,42 @@ func first(s []string) string {
 
 // --- a user's access ---
 
-// UserRepo is one repo a user can use: Level "read" or "write", Via how (ViaAdmin,
-// ViaPermission or ViaPublic). A user's grant counts over public read.
+// UserRepo is one repo a user can use: Perms their repository permissions there, Via how
+// (ViaAllRepos, ViaPermission or ViaPublic). A user's grant counts over public read; on a public
+// repo the grant gets download too.
 type UserRepo struct {
-	Repo   string `json:"repo"`
-	Format string `json:"format"`
-	Public bool   `json:"public"`
-	Level  string `json:"level"`
-	Via    string `json:"via"`
+	Repo   string   `json:"repo"`
+	Format string   `json:"format"`
+	Public bool     `json:"public"`
+	Perms  []string `json:"perms"`
+	Via    string   `json:"via"`
 }
 
-// User is a user's access across repos. CanPublish is false for an SSO account and a disabled
-// one: they hold no publish session, whatever their level.
+// User is a user's access across repos. CanPublish is false for a disabled account: it holds no
+// publish session, whatever its permissions. Permissions are the user's server permissions.
 type User struct {
-	Username   string     `json:"username"`
-	IsAdmin    bool       `json:"is_admin"`
-	Disabled   bool       `json:"disabled"`
-	Kind       string     `json:"kind"`
-	CanPublish bool       `json:"can_publish"`
-	Repos      []UserRepo `json:"repos"`
+	Username    string     `json:"username"`
+	Permissions []string   `json:"permissions"`
+	Disabled    bool       `json:"disabled"`
+	Kind        string     `json:"kind"`
+	CanPublish  bool       `json:"can_publish"`
+	Repos       []UserRepo `json:"repos"`
 }
 
 // User returns a keyset page (by repo name, after the name after) of the repos u can use. A
 // disabled user can use none. next is "" at the end.
 func (s *Service) User(ctx context.Context, u *auth.User, after string, limit int) (*User, string, error) {
-	out := &User{Username: u.Username, IsAdmin: u.IsAdmin, Disabled: u.Disabled, Kind: u.Kind,
-		CanPublish: !u.Disabled && u.Kind == auth.KindLocal, Repos: []UserRepo{}}
+	out := &User{Username: u.Username, Permissions: u.Permissions, Disabled: u.Disabled, Kind: u.Kind,
+		CanPublish: !u.Disabled, Repos: []UserRepo{}}
 	if u.Disabled {
 		return out, "", nil
 	}
-	levels := map[int64]string{}
-	if !u.IsAdmin {
-		grants, err := s.q.ListUserGrants(ctx, u.ID)
-		if err != nil {
+	allRepos := u.Perms.Has(auth.PermRepos)
+	sets := map[int64]auth.RepoPerm{}
+	if !allRepos {
+		var err error
+		if sets, err = s.auth.UserRepoPerms(ctx, u.ID); err != nil {
 			return nil, "", err
-		}
-		for _, g := range grants {
-			levels[g.RepoID] = g.Level
 		}
 	}
 	// Walk the repos by name until the page is full; a page of repos the user cannot use is
@@ -458,12 +478,16 @@ func (s *Service) User(ctx context.Context, u *auth.User, after string, limit in
 		for i, r := range page {
 			ur := UserRepo{Repo: r.Name, Format: r.Format, Public: r.AnonymousRead}
 			switch {
-			case u.IsAdmin:
-				ur.Level, ur.Via = "write", ViaAdmin
-			case levels[r.ID] != "":
-				ur.Level, ur.Via = levels[r.ID], ViaPermission
+			case allRepos:
+				ur.Perms, ur.Via = auth.AllRepoPerms.Names(), ViaAllRepos
+			case sets[r.ID] != 0:
+				set := sets[r.ID]
+				if r.AnonymousRead {
+					set |= auth.RepoDownload
+				}
+				ur.Perms, ur.Via = set.Names(), ViaPermission
 			case r.AnonymousRead:
-				ur.Level, ur.Via = "read", ViaPublic
+				ur.Perms, ur.Via = auth.RepoDownload.Names(), ViaPublic
 			default:
 				continue
 			}

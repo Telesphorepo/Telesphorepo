@@ -15,7 +15,7 @@ import (
 )
 
 // registerPublish mounts the publisher-credential API (spec §7.6): device enrollment, publish
-// sessions, CI trust policies (admin) and the publish log (admin).
+// sessions, CI trust policies (pipelines on their repos) and the publish log (activity).
 func (a *API) registerPublish(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/devices/enroll", a.enrollDevice)
 	mux.HandleFunc("POST /api/devices/enroll/poll", a.pollDevice)
@@ -161,8 +161,8 @@ func (a *API) pendingEnrollment(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, e)
 }
 
-// approveDevice approves an enrollment for the caller: {user_code, totp_code | passkey} ->
-// 201 with the device.
+// approveDevice approves an enrollment for the caller: {user_code, totp_code | passkey} for a
+// local account, {user_code, grant} for an SSO account -> 201 with the device.
 func (a *API) approveDevice(w http.ResponseWriter, r *http.Request) {
 	p, ok := a.person(w, r)
 	if !ok {
@@ -170,12 +170,13 @@ func (a *API) approveDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	var in struct {
 		UserCode string `json:"user_code"`
+		Grant    string `json:"grant"`
 		secondFactor
 	}
 	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
 		return
 	}
-	d, err := a.publish.Approve(r.Context(), p, in.UserCode, in.TOTPCode, in.Passkey)
+	d, err := a.publish.Approve(r.Context(), p, in.UserCode, in.TOTPCode, in.Passkey, in.Grant)
 	if err != nil {
 		publishFail(w, r, err)
 		return
@@ -183,8 +184,8 @@ func (a *API) approveDevice(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusCreated, d)
 }
 
-// listDevices returns the caller's devices, or every device with its owner for an admin, newest
-// first: ?after=<id>&limit=.
+// listDevices returns the caller's devices, or every device with its owner for a holder of
+// People, newest first: ?after=<id>&limit=.
 func (a *API) listDevices(w http.ResponseWriter, r *http.Request) {
 	p, ok := a.user(w, r)
 	if !ok {
@@ -197,7 +198,7 @@ func (a *API) listDevices(w http.ResponseWriter, r *http.Request) {
 	var items []publish.Device
 	var next int64
 	var err error
-	if p.IsAdmin {
+	if p.Perms.Has(auth.PermPeople) {
 		items, next, err = a.publish.Devices(r.Context(), after, httpx.Limit(r))
 	} else {
 		items, next, err = a.publish.UserDevices(r.Context(), p.UserID, after, httpx.Limit(r))
@@ -209,7 +210,7 @@ func (a *API) listDevices(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, list[publish.Device]{items, idNext(next)})
 }
 
-// revokeDevice revokes one of the caller's devices (any device for an admin) and ends its open
+// revokeDevice revokes one of the caller's devices (any device for a holder of People) and ends its open
 // sessions: 204.
 func (a *API) revokeDevice(w http.ResponseWriter, r *http.Request) {
 	p, ok := a.user(w, r)
@@ -386,9 +387,9 @@ func (a *API) recordMint(r *http.Request, m *publish.Minted) {
 	})
 }
 
-// publishLog returns every session, newest first (admin): ?after=<id>&limit=.
+// publishLog returns every session, newest first (activity): ?after=<id>&limit=.
 func (a *API) publishLog(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	if _, ok := a.can(w, r, auth.PermActivity); !ok {
 		return
 	}
 	after, ok := idCursor(w, r)
@@ -403,29 +404,127 @@ func (a *API) publishLog(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, list[publish.SessionInfo]{items, idNext(next)})
 }
 
-// --- trust policies (admin) ---
+// --- trust policies (CI pipelines) ---
 
-// listTrusts returns a keyset page of the policies by name: ?after=<name>&limit=.
-func (a *API) listTrusts(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
-		return
+// pipelineScope is what CI pipelines p may see and change: every one for a holder of All
+// repositories (all), else those whose repos are all in names, the repos where p holds the
+// pipelines permission.
+type pipelineScope struct {
+	all   bool
+	names map[string]bool
+}
+
+// covers reports whether the scope holds every repo of a pipeline. A pipeline without repos
+// belongs only to a holder of All repositories.
+func (s pipelineScope) covers(repos []string) bool {
+	if s.all {
+		return true
 	}
-	items, next, err := a.publish.Trusts(r.Context(), r.URL.Query().Get("after"), httpx.Limit(r))
+	if len(repos) == 0 {
+		return false
+	}
+	for _, r := range repos {
+		if !s.names[r] {
+			return false
+		}
+	}
+	return true
+}
+
+// pipelines requires a UI session and returns its pipeline scope. 403 when the caller can see no
+// pipeline at all.
+func (a *API) pipelines(w http.ResponseWriter, r *http.Request) (*auth.Principal, pipelineScope, bool) {
+	p, ok := a.session(w, r)
+	if !ok {
+		return nil, pipelineScope{}, false
+	}
+	ids, all, err := a.auth.ManagedRepoIDs(r.Context(), p, auth.RepoPipelines)
+	if err != nil {
+		fail(w, r, err)
+		return nil, pipelineScope{}, false
+	}
+	s := pipelineScope{all: all, names: map[string]bool{}}
+	for id := range ids {
+		if repo, err := a.repos.ByID(r.Context(), id); err == nil {
+			s.names[repo.Name] = true
+		}
+	}
+	if !all && len(s.names) == 0 {
+		httpx.Error(w, http.StatusForbidden, "permission required: pipelines on a repository")
+		return nil, pipelineScope{}, false
+	}
+	return p, s, true
+}
+
+// trustInScope reads pipeline {id} and answers 404 when it is outside the scope.
+func (a *API) trustInScope(w http.ResponseWriter, r *http.Request, s pipelineScope) (*publish.Trust, bool) {
+	id, ok := nexusID(w, r)
+	if !ok {
+		return nil, false
+	}
+	t, err := a.publish.GetTrust(r.Context(), id)
 	if err != nil {
 		publishFail(w, r, err)
+		return nil, false
+	}
+	if !s.covers(t.Repos) {
+		httpx.Error(w, http.StatusNotFound, "trust policy not found")
+		return nil, false
+	}
+	return t, true
+}
+
+// listTrusts returns a keyset page of the policies by name that the caller may see:
+// ?after=<name>&limit=. It walks the pages of all policies until its page is full.
+func (a *API) listTrusts(w http.ResponseWriter, r *http.Request) {
+	_, scope, ok := a.pipelines(w, r)
+	if !ok {
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, list[*publish.Trust]{items, cursor(next)})
+	limit := httpx.Limit(r)
+	after := r.URL.Query().Get("after")
+	out := []*publish.Trust{}
+	for {
+		items, next, err := a.publish.Trusts(r.Context(), after, limit)
+		if err != nil {
+			publishFail(w, r, err)
+			return
+		}
+		for i, t := range items {
+			if !scope.covers(t.Repos) {
+				continue
+			}
+			out = append(out, t)
+			if len(out) == limit {
+				more := ""
+				if i < len(items)-1 || next != "" {
+					more = t.Name
+				}
+				httpx.WriteJSON(w, http.StatusOK, list[*publish.Trust]{out, cursor(more)})
+				return
+			}
+		}
+		if next == "" {
+			httpx.WriteJSON(w, http.StatusOK, list[*publish.Trust]{out, nil})
+			return
+		}
+		after = next
+	}
 }
 
 // createTrust stores a policy: {name, issuer, audience, claims, jwks, repos, disabled} -> 201.
+// The caller holds pipelines on every repo of it (403).
 func (a *API) createTrust(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.admin(w, r)
+	p, scope, ok := a.pipelines(w, r)
 	if !ok {
 		return
 	}
 	var in publish.TrustInput
 	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
+		return
+	}
+	if !scope.covers(in.Repos) {
+		httpx.Error(w, http.StatusForbidden, "a CI pipeline may list only repositories where you hold the CI pipelines permission")
 		return
 	}
 	t, err := a.publish.CreateTrust(r.Context(), p.UserID, in)
@@ -437,27 +536,25 @@ func (a *API) createTrust(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) getTrust(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
-		return
-	}
-	id, ok := nexusID(w, r)
+	_, scope, ok := a.pipelines(w, r)
 	if !ok {
 		return
 	}
-	t, err := a.publish.GetTrust(r.Context(), id)
-	if err != nil {
-		publishFail(w, r, err)
+	t, ok := a.trustInScope(w, r, scope)
+	if !ok {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, t)
 }
 
-// updateTrust changes the fields that are set.
+// updateTrust changes the fields that are set. The pipeline and its new repos stay in the
+// caller's scope (404 for a pipeline outside it, 403 for new repos outside it).
 func (a *API) updateTrust(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	_, scope, ok := a.pipelines(w, r)
+	if !ok {
 		return
 	}
-	id, ok := nexusID(w, r)
+	cur, ok := a.trustInScope(w, r, scope)
 	if !ok {
 		return
 	}
@@ -465,7 +562,11 @@ func (a *API) updateTrust(w http.ResponseWriter, r *http.Request) {
 	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
 		return
 	}
-	t, err := a.publish.UpdateTrust(r.Context(), id, in)
+	if in.Repos != nil && !scope.covers(in.Repos) {
+		httpx.Error(w, http.StatusForbidden, "a CI pipeline may list only repositories where you hold the CI pipelines permission")
+		return
+	}
+	t, err := a.publish.UpdateTrust(r.Context(), cur.ID, in)
 	if err != nil {
 		publishFail(w, r, err)
 		return
@@ -474,14 +575,15 @@ func (a *API) updateTrust(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) deleteTrust(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
-		return
-	}
-	id, ok := nexusID(w, r)
+	_, scope, ok := a.pipelines(w, r)
 	if !ok {
 		return
 	}
-	if err := a.publish.DeleteTrust(r.Context(), id); err != nil {
+	cur, ok := a.trustInScope(w, r, scope)
+	if !ok {
+		return
+	}
+	if err := a.publish.DeleteTrust(r.Context(), cur.ID); err != nil {
 		publishFail(w, r, err)
 		return
 	}

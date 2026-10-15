@@ -1,5 +1,5 @@
 <!--
-  Network and proxy (administrators): the trusted proxies only (the trusted_proxies setting, in
+  Network and proxy (Network permission): the trusted proxies only (the trusted_proxies setting, in
   plain words). The server takes the visitor's address from X-Forwarded-For only when the
   connection comes from a trusted proxy: none, a proxy on this machine or network ("private"),
   Cloudflare ("list:cloudflare") or custom addresses. Repository network limits live on each

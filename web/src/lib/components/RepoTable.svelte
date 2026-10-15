@@ -27,6 +27,7 @@
     titles = {},
     empty,
     picked = $bindable(new Set<string>()),
+    pickable,
     bulk,
   }: {
     source: TableSource<Repo>;
@@ -36,6 +37,8 @@
     empty?: Snippet;
     /** The names of the repositories picked for a bulk action. */
     picked?: Set<string>;
+    /** Which rows can be picked; undefined: every row. */
+    pickable?: (r: Repo) => boolean;
     /** The bulk actions; with it, every row gets a checkbox. */
     bulk?: Snippet;
   } = $props();
@@ -47,6 +50,7 @@
   {empty}
   {bulk}
   bind:picked
+  {pickable}
   pickLabel={(r) => r.name}
   caption="Repositories"
   key={(r) => r.name}

@@ -53,13 +53,17 @@ func userAdd(args []string) error {
 		if err != nil {
 			return err
 		}
-		if _, err := as.CreateUser(ctx, name, pw, admin); err != nil {
+		var perms auth.ServerPerm
+		if admin {
+			perms = auth.AllServerPerms
+		}
+		if _, err := as.CreateUser(ctx, name, pw, perms); err != nil {
 			if errors.Is(err, auth.ErrExists) {
 				return fmt.Errorf("user %q already exists", name)
 			}
 			return fmt.Errorf("create user: %w", err)
 		}
-		as.RecordCLI(ctx, audit.UserCreate, name, map[string]any{"is_admin": admin})
+		as.RecordCLI(ctx, audit.UserCreate, name, map[string]any{"permissions": perms.Names()})
 		kind := "user"
 		if admin {
 			kind = "admin user"
@@ -96,7 +100,7 @@ func userPasswd(args []string) error {
 		if err != nil {
 			return err
 		}
-		if _, err := as.UpdateUser(ctx, name, &pw, nil); err != nil {
+		if _, err := as.UpdateUser(ctx, name, &pw); err != nil {
 			return fmt.Errorf("update password: %w", err)
 		}
 		as.RecordCLI(ctx, audit.UserUpdate, name, map[string]any{"password": "changed"})

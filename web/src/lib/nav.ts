@@ -1,9 +1,12 @@
 // The Settings sidebar (docs/design/information-architecture.md): four groups in display order,
-// each with a heading and its pages. Every item has an icon. Admin groups are hidden from other
-// users. A page here must also have a route in src/routes.ts; its sub-pages (path + "/...") mark
-// the item as open, and the breadcrumbs (lib/crumbs.ts) start from the group and the item.
+// each with a heading and its pages. Every item has an icon and the access of its route: a person
+// sees only the items they may open (visibleNav), and a group without one is hidden. A page here
+// must also have a route in src/routes.ts; its sub-pages (path + "/...") mark the item as open,
+// and the breadcrumbs (lib/crumbs.ts) start from the group and the item.
 
 import type { Component } from "svelte";
+import type { Access } from "$lib/router.svelte";
+import { auth } from "$lib/auth.svelte";
 import LayoutDashboardIcon from "@lucide/svelte/icons/layout-dashboard";
 import ShieldCheckIcon from "@lucide/svelte/icons/shield-check";
 import LaptopIcon from "@lucide/svelte/icons/laptop";
@@ -20,53 +23,59 @@ import WaypointsIcon from "@lucide/svelte/icons/waypoints";
 import SlidersIcon from "@lucide/svelte/icons/sliders-horizontal";
 import HistoryIcon from "@lucide/svelte/icons/history";
 
-export type NavItem = { label: string; path: string; icon: Component<{ class?: string }> };
-export type NavGroup = { label: string; admin: boolean; items: NavItem[] };
+export type NavItem = { label: string; path: string; icon: Component<{ class?: string }>; access: Access };
+export type NavGroup = { label: string; items: NavItem[] };
 
 export const settingsNav: NavGroup[] = [
   {
     label: "Your account",
-    admin: false,
     items: [
-      { label: "Overview", path: "/settings/account", icon: LayoutDashboardIcon },
-      { label: "Sign-in and security", path: "/settings/security", icon: ShieldCheckIcon },
-      { label: "Devices", path: "/settings/devices", icon: LaptopIcon },
-      { label: "Tokens", path: "/settings/tokens", icon: KeyRoundIcon },
+      { label: "Overview", path: "/settings/account", icon: LayoutDashboardIcon, access: "user" },
+      { label: "Sign-in and security", path: "/settings/security", icon: ShieldCheckIcon, access: "user" },
+      { label: "Devices", path: "/settings/devices", icon: LaptopIcon, access: "user" },
+      { label: "Tokens", path: "/settings/tokens", icon: KeyRoundIcon, access: "user" },
     ],
   },
   {
     label: "Repositories",
-    admin: true,
     items: [
-      { label: "All repositories", path: "/settings/repositories", icon: DatabaseIcon },
+      { label: "Repositories", path: "/settings/repositories", icon: DatabaseIcon, access: "repositories" },
     ],
   },
   {
     label: "People and CI",
-    admin: true,
     items: [
-      { label: "People", path: "/settings/people", icon: UsersIcon },
-      { label: "CI pipelines", path: "/settings/ci-pipelines", icon: WorkflowIcon },
-      { label: "Networks", path: "/settings/networks", icon: NetworkIcon },
+      { label: "People", path: "/settings/people", icon: UsersIcon, access: "people" },
+      { label: "CI pipelines", path: "/settings/ci-pipelines", icon: WorkflowIcon, access: "pipelines" },
+      { label: "Networks", path: "/settings/networks", icon: NetworkIcon, access: "network" },
     ],
   },
   {
     label: "Server",
-    admin: true,
     items: [
-      { label: "Sign-in options", path: "/settings/sign-in", icon: LogInIcon },
-      { label: "Signing keys", path: "/settings/signing-keys", icon: FileKeyIcon },
-      { label: "Storage", path: "/settings/storage", icon: HardDriveIcon },
-      { label: "Nexus migration", path: "/settings/nexus", icon: ArrowRightLeftIcon },
-      { label: "Network and proxy", path: "/settings/proxy", icon: WaypointsIcon },
-      { label: "General", path: "/settings/general", icon: SlidersIcon },
-      { label: "Activity", path: "/settings/activity", icon: HistoryIcon },
+      { label: "Sign-in options", path: "/settings/sign-in", icon: LogInIcon, access: "signin" },
+      { label: "Signing keys", path: "/settings/signing-keys", icon: FileKeyIcon, access: "keys" },
+      { label: "Storage", path: "/settings/storage", icon: HardDriveIcon, access: "storage" },
+      { label: "Nexus migration", path: "/settings/nexus", icon: ArrowRightLeftIcon, access: "nexus" },
+      { label: "Network and proxy", path: "/settings/proxy", icon: WaypointsIcon, access: "network" },
+      { label: "General", path: "/settings/general", icon: SlidersIcon, access: "general" },
+      { label: "Activity", path: "/settings/activity", icon: HistoryIcon, access: "activity" },
     ],
   },
 ];
 
 /** The pages a setup-only session (no second factor yet) can open. */
 export const setupOnlyPaths = ["/settings/security"];
+
+/** The groups and items that the signed-in person may open; a setup-only session sees only its page. */
+export function visibleNav(): NavGroup[] {
+  return settingsNav
+    .map((g) => ({
+      ...g,
+      items: g.items.filter((i) => auth.allows(i.access) && (!auth.setupOnly || setupOnlyPaths.includes(i.path))),
+    }))
+    .filter((g) => g.items.length > 0);
+}
 
 /** The group and the item that a Settings path belongs to (the item is the longest prefix). */
 export function navPlace(path: string): { group: NavGroup; item: NavItem } | null {

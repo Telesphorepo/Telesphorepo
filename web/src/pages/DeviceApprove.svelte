@@ -1,12 +1,15 @@
 <!--
   Device approval. The login command of the Gradle plugin or the Maven extension prints a code and
   this address (/#/device?code=ABCD-EFGH). Two steps: enter the code, then check the device (a felt
-  ticket with the code on its stub) and confirm with a fresh second factor. Approving tears the stub.
+  ticket with the code on its stub) and confirm it is you. A local account confirms with a fresh
+  second factor. A single sign-on account signs in again at its identity provider; the server then
+  returns here with a single-use grant (&grant=) and the page approves at once, or with an error
+  code (&error=). Approving tears the stub.
 -->
 <script lang="ts">
   import { untrack } from "svelte";
   import type { PageProps } from "$lib/router.svelte";
-  import { href } from "$lib/router.svelte";
+  import { href, navigate } from "$lib/router.svelte";
   import { auth } from "$lib/auth.svelte";
   import { api, ApiError, errorMessage, type PendingEnrollment, type Proof } from "$lib/api";
   import { Button } from "$lib/components/ui/button";
@@ -20,6 +23,7 @@
   import FeltTicket from "$lib/components/FeltTicket.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
   import FreshFactor from "$lib/components/FreshFactor.svelte";
+  import ErrorState from "$lib/components/ErrorState.svelte";
   import CircleCheckIcon from "@lucide/svelte/icons/circle-check";
 
   let { query }: PageProps = $props();
@@ -40,12 +44,41 @@
   let pending = $state<PendingEnrollment | null>(null);
   let approved = $state<PendingEnrollment | null>(null);
 
+  // Single sign-on: the server comes back here with a grant or an error code.
+  const sso = $derived(auth.user?.kind === "oidc");
+  const ssoErrors: Record<string, string> = {
+    stale_sign_in:
+      "Your identity provider did not ask you to sign in again: the sign-in it sent is more than 5 minutes old. The provider ignored the request for a new sign-in (prompt=login, max_age=0). Ask an administrator to let the provider force a new sign-in for this app.",
+    no_auth_time:
+      "Your identity provider did not say when you signed in (the ID token has no auth_time), so the server cannot check that the sign-in is new. Ask an administrator to add auth_time to the ID token.",
+    wrong_account: "You signed in to your identity provider with another account. Sign in again with this account.",
+    not_authorized: "Your single sign-on account is not allowed to sign in here.",
+    account_disabled: "This account is disabled.",
+    not_sso: "You sign in with a password. Confirm with two-step verification.",
+    sso_failed: "Single sign-on failed. Try again.",
+  };
+  let ssoError = $state(
+    untrack(() => {
+      const e = query.get("error");
+      return e ? (ssoErrors[e] ?? ssoErrors.sso_failed) : "";
+    }),
+  );
+  let grant = untrack(() => query.get("grant") ?? "");
+  let ssoBusy = $state(false);
+  // Keep the grant and the error out of the address: the grant works once, and a reload must not show the error again.
+  if (untrack(() => query.has("grant") || query.has("error"))) navigate("/device", { query: { code: untrack(() => code) }, replace: true });
+
   async function lookup() {
     looking = true;
     lookupError = "";
     pending = null;
     try {
       pending = await api.devices.pending(code);
+      if (grant) {
+        const g = grant;
+        grant = "";
+        approveSSO(g);
+      }
     } catch (e) {
       lookupError =
         e instanceof ApiError && e.notFound
@@ -64,11 +97,23 @@
     if (complete) lookup();
   }
 
-  async function approve(proof: Proof) {
+  async function approve(proof: Proof | { grant: string }) {
     if (!pending) return;
     await api.devices.approve(pending.user_code, proof);
     approved = pending;
     pending = null;
+  }
+
+  async function approveSSO(g: string) {
+    ssoBusy = true;
+    ssoError = "";
+    try {
+      await approve({ grant: g });
+    } catch (e) {
+      ssoError = errorMessage(e);
+    } finally {
+      ssoBusy = false;
+    }
   }
 
   const clientName = (k: PendingEnrollment["kind"]) => (k === "gradle" ? "Gradle plugin" : "Maven extension");
@@ -149,7 +194,18 @@
           </dl>
         </div>
         <div class="mt-8">
-          <FreshFactor actionLabel="Approve device" onProof={approve} />
+          {#if sso}
+            <div class="flex flex-col items-start gap-3 text-sm">
+              <p>Your identity provider asks you to sign in again. Then this page approves the device.</p>
+              <Button href={api.devices.ssoApproveURL(pending.user_code)} disabled={ssoBusy}>
+                {#if ssoBusy}<Spinner />{/if}
+                Sign in again with single sign-on to approve
+              </Button>
+              {#if ssoError}<ErrorState inline error={ssoError} />{/if}
+            </div>
+          {:else}
+            <FreshFactor actionLabel="Approve device" onProof={approve} back="/device?code={pending.user_code}" />
+          {/if}
         </div>
       </Step>
     {/if}

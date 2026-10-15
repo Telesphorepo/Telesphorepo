@@ -40,7 +40,7 @@ type uploadError struct {
 func (e *uploadError) Error() string { return e.msg }
 
 func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
-	repo, p, ok := h.auth.RepoGate(w, r, r.PathValue("repo"), name, auth.Write, false)
+	repo, p, ok := h.auth.RepoGate(w, r, r.PathValue("repo"), name, auth.RepoPublish, false)
 	if !ok {
 		return
 	}

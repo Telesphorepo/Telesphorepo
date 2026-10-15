@@ -1,11 +1,11 @@
 <!--
   A fresh second-factor check before a sensitive action (approve a device, create a publish token,
   upload, delete), inline in the page. It loads the caller's methods and shows the code field or
-  the passkey button. A user without a second factor gets a link to set one up; under
-  `telesphorepo dev` (second_factor_optional) also a way to go on without one. onProof does the
-  action; when it throws, the form shows the error.
+  the passkey button. A user without a second factor gets a link to set one up, which offers a
+  way back to `back` after the setup; under `telesphorepo dev` (second_factor_optional) also a way
+  to go on without one. onProof does the action; when it throws, the form shows the error.
 
-    <FreshFactor actionLabel="Approve device" onProof={approve} />
+    <FreshFactor actionLabel="Approve device" onProof={approve} back="/device?code=ABCD-EFGH" />
 -->
 <script lang="ts">
   import { Button } from "$lib/components/ui/button";
@@ -20,12 +20,15 @@
     actionLabel,
     onProof,
     onSetup,
+    back,
   }: {
     /** Names the action: "Approve device", "Create token", "Continue". */
     actionLabel: string;
     onProof: (p: Proof) => Promise<unknown>;
     /** Runs when the user follows the link to set up a second factor (a dialog closes itself). */
     onSetup?: () => void;
+    /** The UI path to return to after the setup of a second factor. */
+    back?: string;
   } = $props();
 
   let methods = $state<SecondFactorMethod[] | null>(null);
@@ -73,7 +76,7 @@
 {:else if methods.length === 0}
   <div class="flex flex-col items-start gap-3 text-sm">
     <p>This action needs two-step verification, and you have not set it up yet.</p>
-    <Button href={href("/settings/security")} onclick={onSetup}>Set up two-step verification</Button>
+    <Button href={href("/settings/security", { back })} onclick={onSetup}>Set up two-step verification</Button>
     {#if dev}
       <p class="text-muted-foreground">Dev mode makes two-step verification optional.</p>
       <Button variant="outline" disabled={devBusy} onclick={withoutFactor}>

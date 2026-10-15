@@ -1,5 +1,5 @@
 <!--
-  Sign-in options (administrators): the "sso" settings group as three steps: connect your
+  Sign-in options (Sign-in options permission): the "sso" settings group as three steps: connect your
   provider (with its Test action), choose who becomes an administrator, how administrators sign
   in. Single sign-on is for administrators only. The page tests the saved settings when it opens
   and after a save, and shows that result only when the test fails; Test checks the unsaved edits.

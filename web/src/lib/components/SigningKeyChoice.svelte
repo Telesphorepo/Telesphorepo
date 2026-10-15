@@ -24,12 +24,15 @@
     repoName,
     exclude,
     choice = $bindable({ mode: "existing", name: "" }),
+    canCreate = true,
   }: {
     keys: SigningKey[];
     repoName: string;
     /** A key not to offer (the one the repository uses now). */
     exclude?: string;
     choice?: KeyChoice;
+    /** False when the person does not hold Signing keys, which a new key needs. */
+    canCreate?: boolean;
   } = $props();
 
   const id = $props.id();
@@ -44,7 +47,7 @@
   $effect(() => {
     if (picked && offered.some((k) => k.name === picked)) return;
     picked = offered.find((k) => k.name === "default")?.name ?? offered[0]?.name ?? "";
-    if (!picked) mode = "new";
+    if (!picked && canCreate) mode = "new";
   });
 
   const newName = $derived(typed ?? repoName);
@@ -81,8 +84,12 @@
       {/if}
     </OptionRow>
   {/if}
-  <OptionRow id="{id}-new" label="Create a new key for this repository" description="The server creates an Ed25519 key. Only this repository uses it.">
-    {#snippet control()}<RadioGroup.Item id="{id}-new" value="new" />{/snippet}
+  <OptionRow
+    id="{id}-new"
+    label="Create a new key for this repository"
+    description={canCreate ? "The server creates an Ed25519 key. Only this repository uses it." : "A new key needs the Signing keys permission."}
+  >
+    {#snippet control()}<RadioGroup.Item id="{id}-new" value="new" disabled={!canCreate} />{/snippet}
     {#if mode === "new"}
       <div class="mt-2">
         <FormGrid>

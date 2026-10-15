@@ -61,11 +61,11 @@ func TestPublishGate(t *testing.T) {
 	s.CreateRepo(t, repo, "maven", false, nil)
 	s.CreateRepo(t, other, "raw", false, nil)
 	w, r := RandName("writer"), RandName("reader")
-	s.CreateUser(t, w, "writer-pass-1234", false)
-	s.CreateUser(t, r, "reader-pass-1234", false)
-	s.SetPermission(t, repo, w, "write")
-	s.SetPermission(t, other, w, "write")
-	s.SetPermission(t, repo, r, "read")
+	s.CreateUser(t, w, "writer-pass-1234")
+	s.CreateUser(t, r, "reader-pass-1234")
+	s.SetPerms(t, repo, w, "download", "publish")
+	s.SetPerms(t, other, w, "download", "publish")
+	s.SetPerms(t, repo, r, "download")
 
 	t.Run("password and read token cannot write", func(t *testing.T) {
 		readToken := s.CreateToken(t, w, "writer-pass-1234", "read")
@@ -97,10 +97,10 @@ func TestPublishGate(t *testing.T) {
 
 	t.Run("lost permission", func(t *testing.T) {
 		ps := s.MintSession(t, w, repo)
-		s.SetPermission(t, repo, w, "read")
+		s.SetPerms(t, repo, w, "download")
 		resp, body := pubPut(t, s, repo, ps.Auth())
 		wantStatus(t, resp, body, http.StatusForbidden)
-		s.SetPermission(t, repo, w, "write")
+		s.SetPerms(t, repo, w, "download", "publish")
 		resp, body = pubPut(t, s, repo, ps.Auth())
 		wantStatus(t, resp, body, http.StatusCreated)
 	})
@@ -215,8 +215,8 @@ func TestPublishGate(t *testing.T) {
 
 		// A user without a second factor signs in with the password but cannot mint.
 		u := RandName("nofactor")
-		s.CreateUser(t, u, "nofactor-pass-1234", false)
-		s.SetPermission(t, repo, u, "write")
+		s.CreateUser(t, u, "nofactor-pass-1234")
+		s.SetPerms(t, repo, u, "download", "publish")
 		plain := s.Login(t, u, "nofactor-pass-1234")
 		st, b = s.API(t, http.MethodPost, "/api/publish/sessions/manual", map[string]string{"repo": repo, "totp_code": "000000"}, plain)
 		wantAPIStatus(t, "manual session of a user without a second factor", st, b, http.StatusForbidden)
@@ -226,9 +226,10 @@ func TestPublishGate(t *testing.T) {
 	})
 }
 
-// TestSecondFactorLogin covers the sign-in rule of spec §13: an admin signs in with a second
-// factor (without one the session reaches only the setup routes); other users sign in with the
-// password and need a factor only to approve a device or create a manual publish session.
+// TestSecondFactorLogin covers the sign-in rule of spec §13: a person with server permissions
+// signs in with a second factor (without one the session reaches only the setup routes); a
+// person who only downloads and publishes signs in with the password and needs a factor only to
+// approve a device or create a manual publish session.
 func TestSecondFactorLogin(t *testing.T) {
 	s := StartServer(t, ServerOpts{})
 	wantSetupOnly := func(t *testing.T, sess *Session, method, path string) {
@@ -242,9 +243,9 @@ func TestSecondFactorLogin(t *testing.T) {
 	wantSetupOnly(t, s.Login(t, s.AdminUser, s.AdminPass), http.MethodGet, "/api/settings")
 
 	u, pw := RandName("twofa"), "twofa-pass-1234"
-	s.CreateUser(t, u, pw, true)
+	s.CreateUser(t, u, pw, AllServerPerms...)
 	pub, pubPw := RandName("publisher"), "publisher-pass-1234"
-	s.CreateUser(t, pub, pubPw, false)
+	s.CreateUser(t, pub, pubPw)
 	type me struct {
 		SecondFactorRequired bool `json:"second_factor_required"`
 	}
@@ -352,8 +353,8 @@ func TestDeviceEnrollment(t *testing.T) {
 	repo := RandName("dev")
 	s.CreateRepo(t, repo, "maven", false, nil)
 	u, pw := RandName("dev"), "dev-pass-1234"
-	s.CreateUser(t, u, pw, false)
-	s.SetPermission(t, repo, u, "write")
+	s.CreateUser(t, u, pw)
+	s.SetPerms(t, repo, u, "download", "publish")
 
 	en, key := s.StartEnrollment(t, "laptop", "maven")
 	if !userCodeRe.MatchString(en.UserCode) || en.VerificationURL != s.InternalURL+"/#/device" || en.ExpiresIn != 600 || en.Interval != 5 {
@@ -408,7 +409,7 @@ func TestDeviceEnrollmentExpiry(t *testing.T) {
 	vol := NewDataVolume(t)
 	s := StartServer(t, ServerOpts{DataVolume: vol})
 	u := RandName("dev")
-	s.CreateUser(t, u, "dev-pass-1234", false)
+	s.CreateUser(t, u, "dev-pass-1234")
 	en, _ := s.StartEnrollment(t, "old laptop", "gradle")
 
 	s.RestartAfter(t, func() {

@@ -1,5 +1,5 @@
 <!--
-  Activity (administrators): what happened on the server, newest first, in one page with two
+  Activity (Activity permission): what happened on the server, newest first, in one page with two
   views. Events (the audit log) filter by what happened and by repository (?action=&repo=); this
   is the only page that shows IP addresses. Publish tokens (?view=publishing) lists every publish
   token that a device, a CI job or a person got (the publish log).
@@ -11,6 +11,7 @@
   import { api, type SessionInfo } from "$lib/api";
   import { Keyset, Resource } from "$lib/load.svelte";
   import { formatDateTime } from "$lib/format";
+  import { repoPhrase, serverPhrase } from "$lib/permissions";
   import FunnelXIcon from "@lucide/svelte/icons/funnel-x";
   import * as Select from "$lib/components/ui/select";
   import { Button } from "$lib/components/ui/button";
@@ -41,8 +42,7 @@
         "repo.create": "Created a repository",
         "repo.update": "Changed a repository",
         "repo.delete": "Deleted a repository",
-        "permission.set": "Gave access",
-        "permission.delete": "Removed access",
+        "permission.set": "Changed permissions",
         "repo.ip_rules": "Changed where from",
         "ip.denied": "Refused an address",
       },
@@ -52,6 +52,7 @@
       actions: {
         "user.create": "Created an account",
         "user.update": "Changed an account",
+        "user.permissions": "Changed server permissions",
         "settings.update": "Changed settings",
         "ip_list.create": "Created a network list",
         "ip_list.update": "Changed a network list",
@@ -93,11 +94,23 @@
     navigate(router.path, { query: { action: a || undefined, repo: r || undefined }, replace: true });
   }
 
-  /** The target and the facts of an event on one line: "1 · via manual". */
-  function detailText(target: string, d: Record<string, unknown> | null): string {
+  /** A permission set of a permission event in words: "Download, publish", "Administrator", or "none". */
+  function permsText(action: string, v: unknown): string {
+    const set = Array.isArray(v) ? v : [];
+    const words = action === "user.permissions" ? serverPhrase(set) : repoPhrase(set);
+    return words || "none";
+  }
+
+  /** The target and the facts of an event on one line: "1 · via manual", "alice · old Download · new Everything". */
+  function detailText(action: string, target: string, d: Record<string, unknown> | null): string {
+    const sets = action === "permission.set" || action === "user.permissions";
     const facts = Object.entries(d ?? {})
       .filter(([k]) => k !== "repo")
-      .map(([k, v]) => `${k.replace(/_/g, " ")} ${typeof v === "string" ? v : JSON.stringify(v)}`);
+      .map(([k, v]) =>
+        sets && (k === "old" || k === "new")
+          ? `${k} ${permsText(action, v)}`
+          : `${k.replace(/_/g, " ")} ${typeof v === "string" ? v : JSON.stringify(v)}`,
+      );
     return [target, ...facts].filter(Boolean).join(" · ");
   }
 
@@ -177,7 +190,7 @@
       </Cell>
       <Cell text={e.actor} />
       <Cell hideOnPhone muted={!e.repo} text={e.repo || "–"} />
-      <Cell grow hideOnPhone muted text={detailText(e.target, e.detail)} />
+      <Cell grow hideOnPhone muted text={detailText(e.action, e.target, e.detail)} />
       <Cell hideOnPhone muted text={e.ip} copy={!!e.ip} copyLabel="Copy the address" />
       <Cell num muted><span title={formatDateTime(e.at)}><RelativeTime at={e.at} /></span></Cell>
     {/snippet}

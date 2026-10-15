@@ -48,6 +48,13 @@ func (kc *Keycloak) SignIn(t testing.TB, s *Server, user, pass string) *oidcResu
 	if err != nil {
 		t.Fatalf("GET %s: %v", oidcLoginPath, err)
 	}
+	return kc.submitLogin(t, c, jar, resp, user, pass)
+}
+
+// submitLogin reads Keycloak's login page in resp, submits the form as user, and follows the
+// redirects to the server callback.
+func (kc *Keycloak) submitLogin(t testing.TB, c *http.Client, jar http.CookieJar, resp *http.Response, user, pass string) *oidcResult {
+	t.Helper()
 	page, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK || resp.Request.URL.Hostname() != kc.Alias {
@@ -147,16 +154,16 @@ func TestOIDC(t *testing.T) {
 			t.Fatalf("GET /api/me: status %d: %s", st, b)
 		}
 		var me struct {
-			Username string `json:"username"`
-			IsAdmin  bool   `json:"is_admin"`
-			Kind     string `json:"kind"`
-			Email    string `json:"email"`
+			Username    string   `json:"username"`
+			Permissions []string `json:"permissions"`
+			Kind        string   `json:"kind"`
+			Email       string   `json:"email"`
 		}
 		if err := json.Unmarshal(b, &me); err != nil {
 			t.Fatalf("decode /api/me %s: %v", b, err)
 		}
-		if me.Username != "alice" || !me.IsAdmin || me.Kind != "oidc" || me.Email != "alice@e2e.test" {
-			t.Fatalf("GET /api/me = %+v, want alice, admin, kind oidc, alice@e2e.test", me)
+		if me.Username != "alice" || strings.Join(me.Permissions, ",") != strings.Join(AllServerPerms, ",") || me.Kind != "oidc" || me.Email != "alice@e2e.test" {
+			t.Fatalf("GET /api/me = %+v, want alice, every server permission, kind oidc, alice@e2e.test", me)
 		}
 	})
 

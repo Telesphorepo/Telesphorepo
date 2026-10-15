@@ -338,7 +338,8 @@ func (q *Queries) DeleteUnusedProvenanceSessions(ctx context.Context, cutoff int
 
 const getDevice = `-- name: GetDevice :one
 SELECT d.id, d.user_id, d.name, d.kind, d.public_key, d.created_at, d.expires_at, d.last_used_at, d.revoked_at,
-       u.username, u.is_admin, u.disabled, u.kind AS user_kind
+       u.username, u.disabled, u.kind AS user_kind,
+       CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = u.id), '') AS TEXT) AS perms
 FROM devices d JOIN users u ON u.id = d.user_id
 WHERE d.id = ?
 `
@@ -354,9 +355,9 @@ type GetDeviceRow struct {
 	LastUsedAt sql.NullInt64
 	RevokedAt  sql.NullInt64
 	Username   string
-	IsAdmin    bool
 	Disabled   bool
 	UserKind   string
+	Perms      string
 }
 
 // A device with its owner, for minting a session from it.
@@ -374,9 +375,9 @@ func (q *Queries) GetDevice(ctx context.Context, id int64) (GetDeviceRow, error)
 		&i.LastUsedAt,
 		&i.RevokedAt,
 		&i.Username,
-		&i.IsAdmin,
 		&i.Disabled,
 		&i.UserKind,
+		&i.Perms,
 	)
 	return i, err
 }

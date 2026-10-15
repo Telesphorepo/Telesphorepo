@@ -37,12 +37,14 @@ type LoginResult struct {
 	SecondFactor []string
 }
 
-// Login checks a password for UI sign-in (spec §13). An admin signs in with a second factor: an
-// admin with one gets a pending sign-in (cookie tr_login) that LoginSecondFactor completes, an
-// admin without one gets a setup-only session. Other users get a session from the password;
+// Login checks a password for UI sign-in (spec §13). A person who needs the second factor (any
+// server permission, or a repository permission other than download and publish) signs in with
+// it: with a factor they get a pending sign-in (cookie tr_login) that LoginSecondFactor
+// completes, without one a setup-only session. Other users get a session from the password;
 // they need a factor only to approve a device or to create a manual publish session. In dev mode
-// an admin without a factor gets a full session. SSO accounts are refused like a wrong
-// password; local admins get ErrPasswordLoginDisabled when admin_password_login is off.
+// a person without a factor gets a full session. SSO accounts are refused like a wrong
+// password; a local account with a server permission gets ErrPasswordLoginDisabled when
+// admin_password_login is off.
 func (s *Service) Login(w http.ResponseWriter, r *http.Request, username, password string) (*LoginResult, error) {
 	ctx := r.Context()
 	p, err := s.authenticate(ctx, s.clientIP(r), username, password, false)
@@ -57,12 +59,16 @@ func (s *Service) Login(w http.ResponseWriter, r *http.Request, username, passwo
 		}
 		return nil, err
 	}
-	if p.IsAdmin && !s.cfg().AdminPasswordLogin {
+	if p.Perms != 0 && !s.cfg().AdminPasswordLogin {
 		s.recordSignInFailed(r, username, "admin password sign-in is disabled")
 		return nil, ErrPasswordLoginDisabled
 	}
+	elevated, err := s.rq.UserElevated(ctx, p.UserID)
+	if err != nil {
+		return nil, err
+	}
 	setupOnly := false
-	if p.IsAdmin {
+	if elevated.Bool {
 		kinds, has, err := s.factorKinds(ctx, p.UserID)
 		if err != nil {
 			return nil, err
@@ -115,10 +121,11 @@ func (s *Service) RecordSignInFailed(r *http.Request, username, reason string) {
 	s.recordSignInFailed(r, username, reason)
 }
 
-// SetupOnly reports whether p is a setup-only UI session: a local admin without a second
-// factor, outside dev mode. Such a session reaches only the setup routes.
+// SetupOnly reports whether p is a setup-only UI session: a local account that needs the second
+// factor (any server permission, or a repository permission other than download and publish)
+// and has none, outside dev mode. Such a session reaches only the setup routes.
 func (s *Service) SetupOnly(ctx context.Context, p *Principal) (bool, error) {
-	if p == nil || !p.Session || p.Kind != KindLocal || !p.IsAdmin || s.dev {
+	if p == nil || !p.Session || p.Kind != KindLocal || (p.Perms == 0 && !p.ManagesRepo) || s.dev {
 		return false, nil
 	}
 	has, err := s.rq.HasSecondFactor(ctx, p.UserID)
@@ -202,5 +209,5 @@ func (s *Service) sessionPrincipal(ctx context.Context, val string) (*Principal,
 	if row.Disabled {
 		return nil, nil
 	}
-	return &Principal{UserID: row.UserID, Username: row.Username, IsAdmin: row.IsAdmin, Kind: row.Kind, Session: true}, nil
+	return &Principal{UserID: row.UserID, Username: row.Username, Perms: ServerPermsOf(row.Perms), Kind: row.Kind, Session: true, ManagesRepo: row.ManagesRepo}, nil
 }

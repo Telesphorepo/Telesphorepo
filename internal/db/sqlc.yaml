@@ -11,8 +11,6 @@ sql:
         sql_package: database/sql
         emit_json_tags: false
         overrides:
-          - column: users.is_admin
-            go_type: bool
           - column: users.disabled
             go_type: bool
           - column: repos.anonymous_read

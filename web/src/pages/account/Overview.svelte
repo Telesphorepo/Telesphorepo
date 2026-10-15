@@ -8,6 +8,7 @@
   import type { PageProps } from "$lib/router.svelte";
   import { href, repoPath } from "$lib/router.svelte";
   import { auth } from "$lib/auth.svelte";
+  import { repoPhrase, serverPhrase } from "$lib/permissions";
   import { api, type Device, type SessionInfo, type UserAccess, type UserRepoAccess } from "$lib/api";
   import { Keyset, Resource, listOf } from "$lib/load.svelte";
 
@@ -39,22 +40,24 @@
     return a;
   }, 200);
 
-  const canPublish = $derived(access?.can_publish ?? me?.kind === "local");
-  const publishes = (r: UserRepoAccess) => r.level === "write" && canPublish;
+  const canPublish = $derived(access?.can_publish ?? !me?.disabled);
+  const publishes = (r: UserRepoAccess) => !!r.perms?.includes("publish") && canPublish;
   const publishCount = $derived(repos.items.filter(publishes).length);
 
-  // Your own devices (an administrator's list holds everyone's) and your recent publish tokens.
+  // Your own devices (the list of a holder of People holds everyone's) and your recent publish tokens.
   const devices = new Resource<Device[]>(async () => {
     const page = await api.devices.list({ limit: 200 });
     return page.items.filter((d) => !d.username || d.username === me?.username);
   });
   const recent = new Resource<SessionInfo[]>(async () => (await api.publish.sessions({ limit: 5 })).items);
 
-  const youCan = (r: UserRepoAccess) => (publishes(r) ? "Download and publish" : "Download");
+  // A public repository without a grant: download only.
+  const youCan = (r: UserRepoAccess) => repoPhrase(r.perms?.length ? r.perms : ["download"]);
   // Say it once: the column shows only when the rows differ.
-  const mixed = $derived(new Set(repos.items.map(publishes)).size > 1);
+  const mixed = $derived(new Set(repos.items.map(youCan)).size > 1);
+  const allRepos = $derived(auth.can("repos"));
   const through: Record<UserRepoAccess["via"], string> = {
-    admin: "Administrator",
+    all_repos: "All repositories",
     permission: "Access given to you",
     public: "Public repository",
   };
@@ -70,7 +73,7 @@
       <UserAvatar name={me.username} size="lg" />
       <div class="min-w-0">
         <p class="truncate text-section">{me.username}</p>
-        <p class="mt-1 text-meta text-muted-foreground">{me.is_admin ? "Administrator" : "Member"}</p>
+        <p class="mt-1 truncate text-meta text-muted-foreground">{serverPhrase(me.permissions) || "Member"}</p>
       </div>
     </div>
   </Section>
@@ -86,8 +89,8 @@
       { label: "Repository", grow: true },
       { label: "Format", hideOnPhone: true },
       ...(mixed ? [{ label: "You can" }] : []),
-      // An administrator reaches every repository as one: the identity card says it once.
-      ...(me?.is_admin ? [] : [{ label: "Through", hideOnPhone: true }]),
+      // A holder of All repositories reaches every repository the same way: the identity card says it once.
+      ...(allRepos ? [] : [{ label: "Through", hideOnPhone: true }]),
     ]}
   >
     {#snippet row(r)}
@@ -95,8 +98,8 @@
         <a href={openRepo(r)} class="block truncate rounded-sm font-medium outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50">{r.repo}</a>
       </Table.Cell>
       <Table.Cell class="max-sm:hidden"><FormatBadge format={r.format} /></Table.Cell>
-      {#if mixed}<Cell class={publishes(r) ? "text-success" : "text-muted-foreground"}><span class="sm:hidden">{publishes(r) ? "Publish" : "Download"}</span><span class="max-sm:hidden">{youCan(r)}</span></Cell>{/if}
-      {#if !me?.is_admin}<Cell hideOnPhone muted>{through[r.via]}</Cell>{/if}
+      {#if mixed}<Cell class="max-w-64" muted text={youCan(r)} />{/if}
+      {#if !allRepos}<Cell hideOnPhone muted>{through[r.via]}</Cell>{/if}
     {/snippet}
     {#snippet empty()}
       <CompactEmpty icon={DatabaseIcon} text="No repository is public, and nobody gave you access yet. Ask an administrator." />
@@ -154,7 +157,7 @@
         icon={UploadIcon}
         text={canPublish && publishCount
           ? "Each publish from your computer or from this site shows here."
-          : "You cannot publish to a repository yet. Ask an administrator for access."}
+          : "You cannot publish to a repository yet. Ask a person who manages its access for the Publish permission."}
       />
     {/snippet}
   </DataTable>

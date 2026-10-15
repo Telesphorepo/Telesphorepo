@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
@@ -107,7 +108,7 @@ func devInit(ctx context.Context, s *server.Services, st *devState) error {
 		if pw == "" {
 			pw = server.RandomPassword()
 		}
-		if _, err := s.Auth.CreateUser(ctx, st.user, pw, true); err != nil {
+		if _, err := s.Auth.CreateUser(ctx, st.user, pw, auth.AllServerPerms); err != nil {
 			return fmt.Errorf("create dev admin: %w", err)
 		}
 		if err := writePrivate(pwFile, pw+"\n"); err != nil {

@@ -114,6 +114,7 @@ func StartServer(t testing.TB, opts ServerOpts) *Server {
 	}
 
 	c, err := testcontainers.Run(ctx, ServerImage,
+		testcontainers.WithLabels(e2eLabels),
 		testcontainers.WithEnv(env),
 		testcontainers.WithExposedPorts("8080/tcp"),
 		testcontainers.WithFiles(files...),
@@ -522,8 +523,10 @@ func (s *Server) Login(t testing.TB, user, pass string) *Session {
 }
 
 // SignIn returns a full UI session of user, the way the web UI signs in. A user without a
-// second factor signs in with the password alone; an admin without one gets a setup-only
-// session, so the harness then enrolls TOTP factors and signs in with both steps (LoginTOTP).
+// second factor signs in with the password alone; a person who needs the second factor (a
+// server permission, or a repository permission other than download and publish) and has none
+// gets a setup-only session, so the harness then enrolls TOTP factors and signs in with both
+// steps (LoginTOTP).
 // A user with factors that the harness enrolled signs in with LoginTOTP. pass is remembered
 // for later sign-ins.
 func (s *Server) SignIn(t testing.TB, user, pass string) *Session {
@@ -549,12 +552,29 @@ func (s *Server) SignIn(t testing.TB, user, pass string) *Session {
 	return sess
 }
 
-// CreateUser creates a local user. The harness keeps the password, so the publish helpers can
-// sign in as the user.
-func (s *Server) CreateUser(t testing.TB, name, pass string, admin bool) {
+// AllServerPerms holds every server permission. A person with all of them is an administrator.
+var AllServerPerms = []string{"repos", "people", "signin", "storage", "network", "keys", "nexus", "general", "activity"}
+
+// CreateUser creates a local user with the server permissions perms (none for a plain user).
+// The harness keeps the password, so the publish helpers can sign in as the user.
+func (s *Server) CreateUser(t testing.TB, name, pass string, perms ...string) {
 	t.Helper()
-	s.MustAPI(t, http.MethodPost, "/api/users", map[string]any{"username": name, "password": pass, "is_admin": admin}, s.Admin(), nil)
+	s.MustAPI(t, http.MethodPost, "/api/users", map[string]any{"username": name, "password": pass, "permissions": nonNil(perms)}, s.Admin(), nil)
 	s.user(name).pass = pass
+}
+
+// SetServerPerms replaces the server permissions of user with perms, as the bootstrap admin.
+func (s *Server) SetServerPerms(t testing.TB, user string, perms ...string) {
+	t.Helper()
+	s.MustAPI(t, http.MethodPut, "/api/users/"+user+"/permissions", map[string]any{"permissions": nonNil(perms)}, s.Admin(), nil)
+}
+
+// nonNil returns xs, or an empty list for nil, so that JSON gets [] and not null.
+func nonNil(xs []string) []string {
+	if xs == nil {
+		return []string{}
+	}
+	return xs
 }
 
 func (s *Server) CreateRepo(t testing.TB, name, format string, anon bool, config map[string]any) {
@@ -566,10 +586,11 @@ func (s *Server) CreateRepo(t testing.TB, name, format string, anon bool, config
 	s.MustAPI(t, http.MethodPost, "/api/repos", body, s.Admin(), nil)
 }
 
-// SetPermission grants level ("read" | "write") on repo to user.
-func (s *Server) SetPermission(t testing.TB, repo, user, level string) {
+// SetPerms sets the repository permissions of user on repo to perms (for example "download",
+// "publish"), as the bootstrap admin. No perms removes every permission of user on repo.
+func (s *Server) SetPerms(t testing.TB, repo, user string, perms ...string) {
 	t.Helper()
-	s.MustAPI(t, http.MethodPut, "/api/permissions", map[string]any{"users": []string{user}, "repos": []string{repo}, "level": level}, s.Admin(), nil)
+	s.MustAPI(t, http.MethodPut, "/api/permissions", map[string]any{"users": []string{user}, "repos": []string{repo}, "perms": nonNil(perms)}, s.Admin(), nil)
 }
 
 // CreateToken creates a read token for user (signed in to the UI with user/pass, see SignIn)
@@ -743,6 +764,7 @@ func startSharedSeaweed() {
 	}
 	s3conf := fmt.Sprintf(`{"identities":[{"name":"e2e","credentials":[{"accessKey":%q,"secretKey":%q}],"actions":["Admin","Read","Write","List","Tagging"]}]}`, seaweedAccess, seaweedSecret)
 	c, err := testcontainers.Run(ctx, img,
+		testcontainers.WithLabels(e2eLabels),
 		// Each test bucket is a SeaweedFS collection, and a collection grows 7 volumes on its first
 		// write. The default of 8 volumes (of 30 GB each) runs out after a few buckets, and later
 		// writes answer 500 "no free volumes left". Small volumes and a high limit fit a whole run.
@@ -904,7 +926,7 @@ func RunClientResult(t testing.TB, image string, opts ClientOpts) *ClientResult 
 		}),
 		testcontainers.WithWaitStrategyAndDeadline(opts.Timeout, wait.ForExit()),
 	}
-	c, err := testcontainers.Run(ctx, image, customizers...)
+	c, err := testcontainers.Run(ctx, image, append(customizers, testcontainers.WithLabels(e2eLabels))...)
 	registerCleanup(t, c, "client "+image)
 	if err != nil {
 		out := ""
@@ -977,8 +999,9 @@ func (s *Server) Password(t testing.TB, user string) string {
 }
 
 // EnrollTOTP adds totpFactors TOTP factors to user through the API. It signs in with the
-// password only, so an admin must not have a second factor yet (the session of an admin
-// without one reaches the setup routes); the factors are added one after the other on it.
+// password only, so a person who needs the second factor must not have one yet (the session of
+// such a person without one reaches the setup routes); the factors are added one after the
+// other on it.
 func (s *Server) EnrollTOTP(t testing.TB, user string) {
 	t.Helper()
 	u := s.user(user)
@@ -1041,8 +1064,9 @@ func totpCodeOf(t testing.TB, f *totpFactor) string {
 }
 
 // LoginTOTP enrolls TOTP factors for user when the harness has none, signs in and returns the
-// full session. An admin signs in with the password and then a TOTP code; any other user signs
-// in with the password alone (spec §13) and keeps the factors for approvals and manual sessions.
+// full session. A person who needs the second factor signs in with the password and then a TOTP
+// code; any other user signs in with the password alone (spec §13) and keeps the factors for
+// approvals and manual sessions.
 func (s *Server) LoginTOTP(t testing.TB, user string) *Session {
 	t.Helper()
 	if len(s.user(user).factors) == 0 {

@@ -7,13 +7,14 @@ import (
 	"slices"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
+	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/netrules"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 )
 
-// Network rules (spec §13.1, §13.3): the IP lists, the per-repo IP rules and the reverse proxy
-// candidates (admin).
+// Network rules (spec §13.1, §13.3): the IP lists and the reverse proxy candidates (network),
+// and the per-repo IP rules (settings on the repo).
 
 func (a *API) registerNetwork(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/repos/{name}/ip-rules", a.getIPRules)
@@ -30,19 +31,19 @@ func (a *API) registerNetwork(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/network/proxy-candidates", a.listProxyCandidates)
 }
 
-// getIPRules returns the IP rules of repo {name}: {read: [Rule], publish: [Rule]}.
+// getIPRules returns the IP rules of repo {name} (settings): {read: [Rule], publish: [Rule]}.
 func (a *API) getIPRules(w http.ResponseWriter, r *http.Request) {
-	repo, ok := a.adminRepo(w, r)
+	_, repo, _, ok := a.canRepo(w, r, auth.RepoSettings)
 	if !ok {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, a.rules.RepoRules(repo.ID))
 }
 
-// putIPRules replaces the IP rules of repo {name} and returns them in canonical form. 400 for
-// an invalid CIDR, an IP list that does not exist, a duplicate or a long note.
+// putIPRules replaces the IP rules of repo {name} (settings) and returns them in canonical form.
+// 400 for an invalid CIDR, an IP list that does not exist, a duplicate or a long note.
 func (a *API) putIPRules(w http.ResponseWriter, r *http.Request) {
-	p, repo, ok := a.adminRepoP(w, r)
+	p, repo, _, ok := a.canRepo(w, r, auth.RepoSettings)
 	if !ok {
 		return
 	}
@@ -106,9 +107,23 @@ func (a *API) ipListDetail(w http.ResponseWriter, r *http.Request, status int, n
 
 // listIPLists returns every IP list without its ranges, presets first:
 // [{name, kind, title, description, count, source, fetched_at, error, created_at, used_by}].
+// It needs network, or settings on a repository (the Access tab picks the lists of the
+// repository's network rules from it).
 func (a *API) listIPLists(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	p, ok := a.session(w, r)
+	if !ok {
 		return
+	}
+	if !p.Perms.Has(auth.PermNetwork) {
+		ids, all, err := a.auth.ManagedRepoIDs(r.Context(), p, auth.RepoSettings)
+		if err != nil {
+			fail(w, r, err)
+			return
+		}
+		if !all && len(ids) == 0 {
+			httpx.Error(w, http.StatusForbidden, "permission required: network, or settings on a repository")
+			return
+		}
 	}
 	lists := a.rules.Lists()
 	out := make([]ipListJSON, 0, len(lists))
@@ -127,7 +142,7 @@ func (a *API) listIPLists(w http.ResponseWriter, r *http.Request) {
 // {ranges, invalid: [{line, text, reason}], duplicates}. It stores nothing. 400 for text over
 // 1 MiB or with more than 100000 ranges.
 func (a *API) parseIPRanges(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	if _, ok := a.can(w, r, auth.PermNetwork); !ok {
 		return
 	}
 	var in struct {
@@ -147,7 +162,7 @@ func (a *API) parseIPRanges(w http.ResponseWriter, r *http.Request) {
 
 // getIPList returns list {name} with its ranges and used_by.
 func (a *API) getIPList(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	if _, ok := a.can(w, r, auth.PermNetwork); !ok {
 		return
 	}
 	a.ipListDetail(w, r, http.StatusOK, r.PathValue("name"))
@@ -156,7 +171,7 @@ func (a *API) getIPList(w http.ResponseWriter, r *http.Request) {
 // createIPList creates a custom list from {name, title?, description?, ranges?} and answers 201
 // with it.
 func (a *API) createIPList(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.admin(w, r)
+	p, ok := a.can(w, r, auth.PermNetwork)
 	if !ok {
 		return
 	}
@@ -176,7 +191,7 @@ func (a *API) createIPList(w http.ResponseWriter, r *http.Request) {
 // updateIPList changes custom list {name} from {name?, title?, description?, ranges?}. A rename
 // carries the repo rules and trusted_proxies along. 400 for a preset list.
 func (a *API) updateIPList(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.admin(w, r)
+	p, ok := a.can(w, r, auth.PermNetwork)
 	if !ok {
 		return
 	}
@@ -223,7 +238,7 @@ func (a *API) updateIPList(w http.ResponseWriter, r *http.Request) {
 // deleteIPList deletes custom list {name}: 204, or 409 {error, used_by} while repo rules or
 // trusted_proxies name it, 400 for a preset list.
 func (a *API) deleteIPList(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.admin(w, r)
+	p, ok := a.can(w, r, auth.PermNetwork)
 	if !ok {
 		return
 	}
@@ -239,7 +254,7 @@ func (a *API) deleteIPList(w http.ResponseWriter, r *http.Request) {
 // refreshIPList fetches preset list {name} now and returns it. 404 for an unknown list, 400 for
 // a custom list, 502 {error} when the fetch fails (the last good list stays).
 func (a *API) refreshIPList(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	if _, ok := a.can(w, r, auth.PermNetwork); !ok {
 		return
 	}
 	name := r.PathValue("name")
@@ -258,7 +273,7 @@ func (a *API) refreshIPList(w http.ResponseWriter, r *http.Request) {
 // listProxyCandidates returns the untrusted peers that sent forwarded headers:
 // [{address, last_seen, count, header}], most recent first.
 func (a *API) listProxyCandidates(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	if _, ok := a.can(w, r, auth.PermNetwork); !ok {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, a.rules.ProxyCandidates())

@@ -1,7 +1,7 @@
 <!--
   Repository settings, Signing (Debian): the key that signs the package lists of this repository.
   apt checks the lists with its public key, which it downloads from /debian/{repo}/key.asc. The
-  administrator picks another key or creates a new one for this repository; the server then signs
+  person with Edit settings picks another key, or with Signing keys creates a new one for this repository; the server then signs
   the lists of this repository again. The change form is its own confirmation step: it asks
   before it changes the key.
 -->
@@ -10,6 +10,7 @@
   import { api, type Repo } from "$lib/api";
   import { Resource } from "$lib/load.svelte";
   import { href } from "$lib/router.svelte";
+  import { auth } from "$lib/auth.svelte";
   import { groupFingerprint } from "$lib/format";
   import { Button } from "$lib/components/ui/button";
   import FormSection from "$lib/components/FormSection.svelte";
@@ -80,10 +81,10 @@
     {/snippet}
   </FormSection>
   <FormSection title="Change the key">
-    <SigningKeyChoice keys={keys.data ?? []} repoName={repo.name} exclude={currentName} bind:choice />
+    <SigningKeyChoice keys={keys.data ?? []} repoName={repo.name} exclude={currentName} canCreate={auth.can("keys")} bind:choice />
     {#snippet footer()}
       <Button disabled={!changed} onclick={() => (confirmOpen = true)}>Change the key</Button>
-      <Button variant="ghost" href={href("/settings/signing-keys")}>Open signing keys</Button>
+      {#if auth.can("keys")}<Button variant="ghost" href={href("/settings/signing-keys")}>Open signing keys</Button>{/if}
     {/snippet}
   </FormSection>
 {/if}

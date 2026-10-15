@@ -128,7 +128,7 @@ func (h *Handler) download(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "invalid path")
 		return
 	}
-	repo, _, ok := h.auth.RepoGate(w, r, r.PathValue("repo"), name, auth.Read, false)
+	repo, _, ok := h.auth.RepoGate(w, r, r.PathValue("repo"), name, auth.RepoDownload, false)
 	if !ok {
 		return
 	}
@@ -184,7 +184,7 @@ func (h *Handler) ProxyProbe(config json.RawMessage) string {
 // of the repo, like its indexes. A proxy has no key of its own: clients use the remote
 // archive's key.
 func (h *Handler) publicKey(w http.ResponseWriter, r *http.Request) {
-	repo, _, ok := h.auth.RepoGate(w, r, r.PathValue("repo"), name, auth.Read, false)
+	repo, _, ok := h.auth.RepoGate(w, r, r.PathValue("repo"), name, auth.RepoDownload, false)
 	if !ok {
 		return
 	}

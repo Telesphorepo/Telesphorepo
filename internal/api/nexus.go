@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/nexus"
 )
@@ -73,7 +74,7 @@ func idCursor(w http.ResponseWriter, r *http.Request) (int64, bool) {
 
 // createNexusSource checks the connection and stores the source: 201 with the Source.
 func (a *API) createNexusSource(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.admin(w, r)
+	p, ok := a.can(w, r, auth.PermNexus)
 	if !ok {
 		return
 	}
@@ -91,7 +92,7 @@ func (a *API) createNexusSource(w http.ResponseWriter, r *http.Request) {
 
 // listNexusSources returns a keyset page of the sources by name: ?after=<name>&limit=.
 func (a *API) listNexusSources(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	if _, ok := a.can(w, r, auth.PermNexus); !ok {
 		return
 	}
 	items, next, err := a.nexus.Sources(r.Context(), r.URL.Query().Get("after"), httpx.Limit(r))
@@ -104,7 +105,7 @@ func (a *API) listNexusSources(w http.ResponseWriter, r *http.Request) {
 
 // getNexusSource returns the source with its Nexus repos and their mapping.
 func (a *API) getNexusSource(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	if _, ok := a.can(w, r, auth.PermNexus); !ok {
 		return
 	}
 	id, ok := nexusID(w, r)
@@ -121,7 +122,7 @@ func (a *API) getNexusSource(w http.ResponseWriter, r *http.Request) {
 
 // updateNexusSource replaces the base URL or the credentials after a connection check.
 func (a *API) updateNexusSource(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	if _, ok := a.can(w, r, auth.PermNexus); !ok {
 		return
 	}
 	id, ok := nexusID(w, r)
@@ -142,7 +143,7 @@ func (a *API) updateNexusSource(w http.ResponseWriter, r *http.Request) {
 
 // deleteNexusSource deletes a cut-over source or one without mapped repos: 204.
 func (a *API) deleteNexusSource(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	if _, ok := a.can(w, r, auth.PermNexus); !ok {
 		return
 	}
 	id, ok := nexusID(w, r)
@@ -159,7 +160,7 @@ func (a *API) deleteNexusSource(w http.ResponseWriter, r *http.Request) {
 // setNexusRepos replaces the source's mapping, starts a sync when the mapping holds a repo,
 // and returns the SourceDetail (running_sync_id names that sync).
 func (a *API) setNexusRepos(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.admin(w, r)
+	p, ok := a.can(w, r, auth.PermNexus)
 	if !ok {
 		return
 	}
@@ -181,7 +182,7 @@ func (a *API) setNexusRepos(w http.ResponseWriter, r *http.Request) {
 
 // syncNexusSource starts a sync: 202 with the Sync.
 func (a *API) syncNexusSource(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.admin(w, r)
+	p, ok := a.can(w, r, auth.PermNexus)
 	if !ok {
 		return
 	}
@@ -199,7 +200,7 @@ func (a *API) syncNexusSource(w http.ResponseWriter, r *http.Request) {
 
 // cutOverNexusSource starts the final sync of a cut-over: 202 with the Sync (trigger cutover).
 func (a *API) cutOverNexusSource(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.admin(w, r)
+	p, ok := a.can(w, r, auth.PermNexus)
 	if !ok {
 		return
 	}
@@ -218,7 +219,7 @@ func (a *API) cutOverNexusSource(w http.ResponseWriter, r *http.Request) {
 // listNexusSyncs returns a keyset page of the source's syncs, newest first: ?after=<sync
 // id>&limit=. The items have no repos.
 func (a *API) listNexusSyncs(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	if _, ok := a.can(w, r, auth.PermNexus); !ok {
 		return
 	}
 	id, ok := nexusID(w, r)
@@ -243,7 +244,7 @@ func (a *API) listNexusSyncs(w http.ResponseWriter, r *http.Request) {
 
 // getNexusSync returns a sync with its repos.
 func (a *API) getNexusSync(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	if _, ok := a.can(w, r, auth.PermNexus); !ok {
 		return
 	}
 	id, ok := nexusID(w, r)
@@ -260,7 +261,7 @@ func (a *API) getNexusSync(w http.ResponseWriter, r *http.Request) {
 
 // nexusSyncFailures returns a keyset page of a sync's failures: ?after=<cursor>&limit=.
 func (a *API) nexusSyncFailures(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	if _, ok := a.can(w, r, auth.PermNexus); !ok {
 		return
 	}
 	id, ok := nexusID(w, r)
@@ -286,7 +287,7 @@ func (a *API) nexusSyncFailures(w http.ResponseWriter, r *http.Request) {
 // nexusSyncLog returns a keyset page of a sync's log lines, oldest first:
 // ?after=<line id>&limit=&repo=<Nexus repo>.
 func (a *API) nexusSyncLog(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	if _, ok := a.can(w, r, auth.PermNexus); !ok {
 		return
 	}
 	id, ok := nexusID(w, r)
@@ -311,7 +312,7 @@ func (a *API) nexusSyncLog(w http.ResponseWriter, r *http.Request) {
 
 // cancelNexusSync stops a running sync and returns it (state cancelled); 409 when it has ended.
 func (a *API) cancelNexusSync(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.admin(w, r)
+	p, ok := a.can(w, r, auth.PermNexus)
 	if !ok {
 		return
 	}
