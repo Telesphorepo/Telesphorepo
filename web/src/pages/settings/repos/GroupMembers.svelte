@@ -21,6 +21,7 @@
   import ChoiceDialog from "./ChoiceDialog.svelte";
   import PlusIcon from "@lucide/svelte/icons/plus";
   import ArrowUpIcon from "@lucide/svelte/icons/arrow-up";
+  import XIcon from "@lucide/svelte/icons/x";
   import ArrowDownIcon from "@lucide/svelte/icons/arrow-down";
   import LockIcon from "@lucide/svelte/icons/lock";
   import TriangleAlertIcon from "@lucide/svelte/icons/triangle-alert";
@@ -103,13 +104,13 @@
     key={(r) => r.name}
     href={(r) => href(repoPath(r.name))}
     columns={[
-      { label: "Order", align: "right" },
+      { label: "Order", align: "right", hideOnPhone: true },
       { label: "Repository", grow: true },
       { label: "", srLabel: "Actions" },
     ]}
   >
     {#snippet row(r)}
-      <Cell num>{r.n}</Cell>
+      <Cell num hideOnPhone>{r.n}</Cell>
       <Cell grow>
         <span class="flex min-w-0 items-center gap-1.5">
           <a href={href(repoPath(r.name))} class="shrink-0 rounded-sm font-medium outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50">{r.name}</a>
@@ -118,12 +119,12 @@
           {/if}
           <RepoKindIcon kind={info.get(r.name)?.kind} />
           {#if r.shadows}
-            <span class="flex min-w-0 items-center gap-1.5 pl-1.5 text-warning">
+            <span class="flex min-w-0 items-center gap-1.5 pl-1.5 text-warning" title="This proxy comes before a repository of your own, so the remote can shadow your files. Move it down.">
               <TriangleAlertIcon aria-hidden="true" class="size-3.5 shrink-0" />
-              <Truncate text="This proxy comes before a repository of your own, so the remote can shadow your files. Move it down." />
+              <span class="min-w-0 max-sm:hidden"><Truncate text="This proxy comes before a repository of your own, so the remote can shadow your files. Move it down." /></span>
             </span>
           {:else if r.privateNote}
-            <span class="min-w-0 pl-1.5 text-muted-foreground">
+            <span class="min-w-0 pl-1.5 text-muted-foreground max-sm:hidden">
               <Truncate text="Only people with access to this repository get its files through the group." />
             </span>
           {/if}
@@ -143,7 +144,7 @@
           aria-label="Remove {r.name} from the group"
           title={members.length === 1 ? "A group needs at least one repository. Add another one first." : undefined}
           disabled={members.length === 1}
-          onclick={() => remove(r.name)}>Remove</Button
+          onclick={() => remove(r.name)}><XIcon class="sm:hidden" /><span class="max-sm:hidden">Remove</span></Button
         >
       </Cell>
     {/snippet}

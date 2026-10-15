@@ -8,7 +8,8 @@
   import { Toaster } from "$lib/components/ui/sonner";
   import * as Tooltip from "$lib/components/ui/tooltip";
   import { auth } from "$lib/auth.svelte";
-  import { navigate, router } from "$lib/router.svelte";
+  import type { Component } from "svelte";
+  import { navigate, router, type PageProps, type RouteDef } from "$lib/router.svelte";
   import { current } from "$lib/current.svelte";
   import { setupOnlyPaths } from "$lib/nav";
   import AppShell from "$lib/layouts/AppShell.svelte";
@@ -48,9 +49,22 @@
 
   const forbidden = $derived(!!matched && matched.route.access === "admin" && !!auth.user && !auth.isAdmin);
   // Load the page module only when the route changes, not on every path change within it (a page
-  // keeps its state while its params change, e.g. folders of one repo).
+  // keeps its state while its params change, e.g. folders of one repo). A page renders only while
+  // its own route matches, so the page that is leaving never gets the params of the next route.
   const route = $derived(matched?.route);
-  const page = $derived(route?.page());
+  let loaded = $state.raw<{ route: RouteDef; Page: Component<PageProps> } | null>(null);
+  let loadError = $state("");
+  $effect(() => {
+    const r = route;
+    if (!r) return;
+    let live = true;
+    loadError = "";
+    r.page().then(
+      (mod) => live && (loaded = { route: r, Page: mod.default }),
+      (e) => live && (loadError = e instanceof Error ? e.message : String(e)),
+    );
+    return () => (live = false);
+  });
 </script>
 
 <ModeWatcher />
@@ -69,16 +83,13 @@
       {:else if forbidden}
         <EmptyState icon={ShieldIcon} title="Administrators only" description="Ask an administrator if you need this page." />
       {:else if matched.route.access === "any" || auth.user}
-        {#await page}
+        {#if loadError}
+          <ErrorState error={loadError} title="The page did not load" onRetry={() => location.reload()} />
+        {:else if loaded && loaded.route === matched.route}
+          <loaded.Page params={matched.params} query={router.query} />
+        {:else}
           <Loading rows={4} />
-        {:then mod}
-          {#if mod}
-            {@const Page = mod.default}
-            <Page params={matched.params} query={router.query} />
-          {/if}
-        {:catch e}
-          <ErrorState error={e instanceof Error ? e.message : String(e)} title="The page did not load" onRetry={() => location.reload()} />
-        {/await}
+        {/if}
       {/if}
     </AppShell>
   {/if}

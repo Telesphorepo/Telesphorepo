@@ -14,6 +14,6 @@
   {#if title}<figcaption class="text-sm font-medium">{title}</figcaption>{/if}
   <div class="relative min-w-0 rounded-lg border bg-panel">
     <pre class="max-h-96 overflow-auto px-4 py-3 pr-12 font-mono text-[0.8125rem] leading-relaxed [font-variant-ligatures:none]"><code>{code}</code></pre>
-    <CopyButton value={code} label={title ? `Copy ${title}` : "Copy the code"} class="absolute top-1.5 right-1.5" />
+    <CopyButton value={code} label={title ? `Copy ${title}` : "Copy the code"} class="absolute top-1.5 right-1.5 bg-panel" />
   </div>
 </figure>

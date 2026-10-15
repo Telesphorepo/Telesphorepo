@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"path"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -51,10 +52,41 @@ type snippets struct {
 	context string
 	via     string
 	out     []format.Snippet
+	remotes []string // the remote URLs the repo serves (a proxy, or a group's proxies)
 }
 
-func newSnippets(repo *repos.Repo, baseURL string) *snippets {
-	return &snippets{repo: repo, url: baseURL + "/maven/" + repo.Name, name: gradleName(repo.Name)}
+func (h *Handler) newSnippets(repo *repos.Repo, baseURL string) *snippets {
+	return &snippets{repo: repo, url: baseURL + "/maven/" + repo.Name, name: gradleName(repo.Name), remotes: h.remotes(repo)}
+}
+
+// remotes are the remote URLs that repo serves: its own for a proxy, its proxy members' for a
+// group, none for a hosted repo.
+func (h *Handler) remotes(repo *repos.Repo) []string {
+	if h.host.Repos == nil {
+		return nil
+	}
+	ids := []int64{repo.ID}
+	if repo.Kind == repos.KindGroup {
+		ids = h.host.Repos.Members(repo.ID)
+	}
+	var out []string
+	for _, id := range ids {
+		if p, ok := h.host.Repos.Proxy(id); ok {
+			out = append(out, p.RemoteURL)
+		}
+	}
+	return out
+}
+
+// serves reports whether the repo serves one of the well-known remotes (each with a trailing
+// slash), so a build needs no line of its own for it.
+func (s *snippets) serves(known ...string) bool {
+	for _, r := range s.remotes {
+		if slices.Contains(known, strings.TrimRight(r, "/")+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *snippets) add(client, title, lang, code, note string) {
@@ -86,9 +118,10 @@ func (s *snippets) gradleRepo(kts bool, indent string) string {
 // or plugins (block "pluginManagement") from the repo, and the credentials of a private repo.
 func (s *snippets) gradleRepos(block string) {
 	var portal string
-	if block == "pluginManagement" {
+	switch {
+	case block == "pluginManagement" && !s.serves("https://plugins.gradle.org/m2/"):
 		portal = "        gradlePluginPortal()\n"
-	} else {
+	case block != "pluginManagement" && !s.serves("https://repo1.maven.org/maven2/", "https://repo.maven.apache.org/maven2/"):
 		portal = "        mavenCentral()\n"
 	}
 	for _, kts := range []bool{true, false} {
@@ -133,7 +166,7 @@ func (s *snippets) mavenCredentials() {
 // Maven builds, and how to publish to it from a computer (the Telesphorepo Gradle plugin or
 // Maven extension), from CI (GitHub Actions or Jenkins) and by hand.
 func (h *Handler) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
-	s := newSnippets(repo, baseURL)
+	s := h.newSnippets(repo, baseURL)
 	s.purpose, s.context = format.SnippetUse, format.SnippetRepo
 	s.gradleRepos("dependencyResolutionManagement")
 	s.mavenRepos()
@@ -299,7 +332,7 @@ func (h *Handler) ArtifactUsage(ctx context.Context, repo *repos.Repo, baseURL, 
 		note = "Each build takes the newest version at that moment, so builds are not reproducible. Pin a version for releases."
 	}
 
-	s := newSnippets(repo, baseURL)
+	s := h.newSnippets(repo, baseURL)
 	s.purpose, s.context = format.SnippetUse, format.SnippetArtifact
 	coord := group + ":" + id + ":"
 	switch art.Kind {

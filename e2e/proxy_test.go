@@ -375,3 +375,24 @@ func TestProxy(t *testing.T) {
 		}
 	})
 }
+
+// TestProxySnippets: a proxy of Maven Central and a group that holds it tell the build to use
+// only them, with no mavenCentral() line; a hosted repo keeps the line.
+func TestProxySnippets(t *testing.T) {
+	s := StartServer(t, ServerOpts{})
+	hosted, proxy, group := RandName("hosted"), RandName("central"), RandName("all")
+	s.CreateRepo(t, hosted, "maven", true, nil)
+	s.MustAPI(t, http.MethodPost, "/api/repos", map[string]any{"name": proxy, "format": "maven", "kind": "proxy",
+		"anonymous_read": true, "force": true, "proxy": map[string]any{"remote_url": "https://repo1.maven.org/maven2/"}}, s.Admin(), nil)
+	s.MustAPI(t, http.MethodPost, "/api/repos", map[string]any{"name": group, "format": "maven", "kind": "group",
+		"anonymous_read": true, "members": []string{hosted, proxy}}, s.Admin(), nil)
+	for repo, want := range map[string]bool{hosted: true, proxy: false, group: false} {
+		st, body := s.API(t, http.MethodGet, "/api/repos/"+repo+"/usage", nil, s.Admin())
+		if st != http.StatusOK {
+			t.Fatalf("usage of %s: status %d: %s", repo, st, body)
+		}
+		if got := strings.Contains(string(body), "mavenCentral()"); got != want {
+			t.Fatalf("usage of %s names mavenCentral(): %v, want %v:\n%s", repo, got, want, body)
+		}
+	}
+}

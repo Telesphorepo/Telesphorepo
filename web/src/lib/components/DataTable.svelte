@@ -29,7 +29,8 @@
   clicked. The header checkbox picks every pickable row that is loaded and clears them on the next
   click (a keyset table says "Select the 50 rows shown"). While rows are picked, a bar takes the
   place of the header row, at the same height: "12 selected", the `bulk` actions, "Select all 50"
-  and "Clear". Esc clears the pick when no dialog is open. `pickLabel` names a row for its
+  and "Clear"; on a phone the bar scrolls sideways when the actions do not fit. Esc clears the
+  pick when no dialog is open. `pickLabel` names a row for its
   checkbox ("Select oasis"). `picked` is not `selected`: `selected` is the row that the details
   column shows. After an action, the page reloads the table and empties `picked`. A table
   without `href` can pass `pickOnRow`: a click anywhere on a pickable row (outside its controls)
@@ -226,7 +227,7 @@
               />
             </label>
             {#if barOn}
-              <div role="toolbar" aria-label="Actions for the selected rows" class="absolute inset-y-0 right-0 left-10 flex items-center gap-2 pr-1 text-body font-normal text-foreground">
+              <div role="toolbar" aria-label="Actions for the selected rows" class="absolute inset-y-0 right-0 left-10 flex items-center gap-2 overflow-x-auto pr-1 text-body font-normal text-foreground [scrollbar-width:none] max-sm:[mask-image:linear-gradient(to_right,black_85%,transparent)]">
                 <span class="shrink-0 font-medium tabular-nums">{selectedText(picked.size)}</span>
                 {@render bulk?.()}
                 <span class="ml-auto flex shrink-0 items-center gap-1">
