@@ -14,6 +14,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -561,8 +562,18 @@ func nexusCreateSource(t *testing.T, s *Server, n *Nexus) *nexusSource {
 
 func nexusGetSource(t *testing.T, s *Server, id int64) *nexusSource {
 	t.Helper()
+	st, body := s.API(t, http.MethodGet, nexusSourcePath(id), nil, s.Admin())
+	if st != http.StatusOK {
+		t.Fatalf("GET %s: status %d: %s", nexusSourcePath(id), st, body)
+	}
+	// The UI iterates the lists of each repo, so a list is never null.
+	if regexp.MustCompile(`"(members|target_members|repos)":null`).Match(body) {
+		t.Fatalf("GET %s has a null list: %s", nexusSourcePath(id), body)
+	}
 	var src nexusSource
-	s.MustAPI(t, http.MethodGet, nexusSourcePath(id), nil, s.Admin(), &src)
+	if err := json.Unmarshal(body, &src); err != nil {
+		t.Fatal(err)
+	}
 	return &src
 }
 
@@ -729,6 +740,14 @@ func nexusWantLine(t *testing.T, lines []nexusLogLine, want string) {
 	t.Helper()
 	if !slices.ContainsFunc(lines, func(l nexusLogLine) bool { return strings.Contains(l.Message, want) }) {
 		t.Fatalf("the sync log has no line with %q:\n%+v", want, lines)
+	}
+}
+
+// nexusWantRepoLine fails unless the log has a line of repo that starts with want.
+func nexusWantRepoLine(t *testing.T, lines []nexusLogLine, repo, want string) {
+	t.Helper()
+	if !slices.ContainsFunc(lines, func(l nexusLogLine) bool { return l.SourceRepo == repo && strings.HasPrefix(l.Message, want) }) {
+		t.Fatalf("the sync log has no line of %s that starts with %q:\n%+v", repo, want, lines)
 	}
 }
 
@@ -1031,8 +1050,8 @@ func TestNexus(t *testing.T) {
 		}
 		nexusWantLine(t, log1, "Skipped 1 proxy")
 		for _, repo := range []string{rs.maven, rs.maven2, rs.apt, rs.raw} {
-			nexusWantLine(t, log1, repo+": started.")
-			nexusWantLine(t, log1, repo+": done. Copied ")
+			nexusWantRepoLine(t, log1, repo, "Started.")
+			nexusWantRepoLine(t, log1, repo, "Done. Copied ")
 		}
 		if last := log1[len(log1)-1]; !strings.HasPrefix(last.Message, "Finished in ") {
 			t.Fatalf("first sync log: last line %+v, want the finish line", last)
@@ -1137,7 +1156,7 @@ func TestNexus(t *testing.T) {
 		third := nexusSyncNow(t, s, src.ID)
 		log3 := nexusLog(t, s, third.ID, "")
 		for _, repo := range []string{rs.maven, rs.maven2, rs.apt, rs.raw} {
-			nexusWantLine(t, log3, repo+": no new files.")
+			nexusWantRepoLine(t, log3, repo, "No new files.")
 			if r := third.repo(t, repo); r.Imported != 0 || r.PreviousChecked != second.repo(t, repo).Checked {
 				t.Fatalf("third sync of %s: %+v, want nothing imported and previous_checked %d", repo, r, second.repo(t, repo).Checked)
 			}

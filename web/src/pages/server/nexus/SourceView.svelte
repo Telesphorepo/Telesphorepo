@@ -317,7 +317,7 @@
       case "syncing":
         return s ? progressLine(s) : "Copying.";
       case "up_to_date": {
-        let line = s?.finished_at ? `Checked ${formatRelative(s.finished_at, now)}, ${count(s.imported, "new file", "new files")}.` : "";
+        let line = s?.finished_at ? `Checked ${formatRelative(s.finished_at, Math.max(now, Date.parse(s.finished_at)))}, ${count(s.imported, "new file", "new files")}.` : "";
         if (d.next_sync_at) line += ` Next check ${new Date(d.next_sync_at).getTime() > now ? formatRelative(d.next_sync_at, now) : "soon"}.`;
         return line.trim();
       }

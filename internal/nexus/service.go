@@ -523,7 +523,7 @@ func (s *Service) Detail(ctx context.Context, id int64) (*SourceDetail, error) {
 		tf, reason := support(r)
 		sr := SourceRepo{Name: r.Name, Format: r.Format, Type: r.Type, Supported: reason == "", Reason: reason,
 			Offline: !r.Online, TargetFormat: tf, RemoteURL: r.RemoteURL, RemoteUsername: r.RemoteUsername,
-			Members: r.Members, MembersKnown: r.MembersKnown,
+			Members: r.Members, MembersKnown: r.MembersKnown, TargetMembers: []string{},
 			NexusKey: r.Type == TypeHosted && r.HasKey(), NexusKeyEncrypted: r.Type == TypeHosted && r.KeyEncrypted}
 		if sr.Members == nil {
 			sr.Members = []string{}
@@ -539,7 +539,7 @@ func (s *Service) Detail(ctx context.Context, id int64) (*SourceDetail, error) {
 			reason = "Nexus no longer lists this repository."
 		}
 		d.Repos = append(d.Repos, SourceRepo{Name: m.SourceRepo, Format: m.SourceFormat,
-			Supported: reason == "", Reason: reason, TargetFormat: tf, Members: []string{}})
+			Supported: reason == "", Reason: reason, TargetFormat: tf, Members: []string{}, TargetMembers: []string{}})
 	}
 	for i := range d.Repos {
 		r := &d.Repos[i]

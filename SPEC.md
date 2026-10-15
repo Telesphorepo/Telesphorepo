@@ -718,11 +718,12 @@ is unreachable.
   same bytes is skipped, so a later sync copies only new and changed files.
 - **Log.** The runner writes a line for: the start ("Started after the repositories were
   saved.", "Started by sam.", "Scheduled sync started.", "Final sync before the switch-over
-  started by sam."), the proxies it skips, each repo's start or resume, each page that copied a
-  file ("oasis-releases: checked 100, copied 12 (3.4 MiB)."), each repo's end ("...: done.
-  Copied ..., skipped ..., failed ..." or "...: no new files. ..."), each retry of a page (warn),
-  each failed repo (error), and the end ("Finished in 6 minutes. 34 new files (2.1 MiB).",
-  "Cancelled by sam.", "Failed: ..."). A line names a repo and counts, never a path, a URL, a
+  started by sam."), the proxies it skips, each repo's start or resume ("Started.", "Resumed
+  after a restart."), each page that copied a file ("Checked 100, copied 12 (3.4 MiB)."), each
+  repo's end ("Done. Copied ..., skipped ..., failed ..." or "No new files. ..."), each retry of
+  a page (warn), each failed repo (error), and the end ("Finished in 6 minutes. 34 new files (2.1
+  MiB).", "Cancelled by sam.", "Failed: ..."). A line of one repo carries the repo in
+  `source_repo`, and its message does not repeat it. A line holds counts, never a path, a URL, a
   password or a token. `GET .../log` reads the lines through `nexus_sync_log_sync`; the `repo`
   filter applies in Go.
 - **Retention.** A new sync deletes the syncs of its source after the newest 100, with their

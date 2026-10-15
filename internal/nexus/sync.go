@@ -748,7 +748,7 @@ func (s *Service) runSync(ctx context.Context, st *runState) {
 					State: SyncFailed, Error: msg, SyncID: id, SourceRepo: r.SourceRepo}); err != nil {
 					return err
 				}
-				return writeLog(ctx, q, id, r.SourceRepo, LevelError, r.SourceRepo+": failed. "+msg)
+				return writeLog(ctx, q, id, r.SourceRepo, LevelError, "Failed. "+msg)
 			}); err != nil {
 				log.Error("nexus: cannot save repo state", "source_repo", r.SourceRepo, "error", err.Error())
 			}
@@ -811,9 +811,9 @@ func (s *Service) syncRepo(ctx context.Context, cl *Client, log *slog.Logger, r 
 			}
 			return counts, "cannot save state: " + err.Error()
 		}
-		s.logLine(ctx, r.SyncID, r.SourceRepo, LevelInfo, r.SourceRepo+": started.")
+		s.logLine(ctx, r.SyncID, r.SourceRepo, LevelInfo, "Started.")
 	} else {
-		s.logLine(ctx, r.SyncID, r.SourceRepo, LevelInfo, r.SourceRepo+": resumed after a restart.")
+		s.logLine(ctx, r.SyncID, r.SourceRepo, LevelInfo, "Resumed after a restart.")
 	}
 	log = log.With("source_repo", r.SourceRepo, "target", target.Name)
 	log.Info("nexus: syncing repo", "continuation_saved", r.Continuation != "")
@@ -874,15 +874,15 @@ func (s *Service) syncRepo(ctx context.Context, cl *Client, log *slog.Logger, r 
 				return err
 			}
 			if pageImported > 0 {
-				if err := writeLog(wctx, q, r.SyncID, r.SourceRepo, LevelInfo, fmt.Sprintf("%s: checked %s, copied %s (%s).",
-					r.SourceRepo, count(int64(len(page.Items))), count(pageImported), size(pageBytes))); err != nil {
+				if err := writeLog(wctx, q, r.SyncID, r.SourceRepo, LevelInfo, fmt.Sprintf("Checked %s, copied %s (%s).",
+					count(int64(len(page.Items))), count(pageImported), size(pageBytes))); err != nil {
 					return err
 				}
 			}
 			if !last {
 				return nil
 			}
-			if err := writeLog(wctx, q, r.SyncID, r.SourceRepo, LevelInfo, doneLine(r.SourceRepo, counts)); err != nil {
+			if err := writeLog(wctx, q, r.SyncID, r.SourceRepo, LevelInfo, doneLine(counts)); err != nil {
 				return err
 			}
 			return q.SetNexusSyncRepoState(wctx, dbq.SetNexusSyncRepoStateParams{
@@ -904,11 +904,11 @@ func (s *Service) syncRepo(ctx context.Context, cl *Client, log *slog.Logger, r 
 }
 
 // doneLine is the log line of a repo that was walked to the end.
-func doneLine(repo string, c dbq.NexusSyncRepo) string {
+func doneLine(c dbq.NexusSyncRepo) string {
 	if c.Imported == 0 {
-		return fmt.Sprintf("%s: no new files. Skipped %s, failed %s.", repo, count(c.Skipped), count(c.Failed))
+		return fmt.Sprintf("No new files. Skipped %s, failed %s.", count(c.Skipped), count(c.Failed))
 	}
-	return fmt.Sprintf("%s: done. Copied %s (%s), skipped %s, failed %s.", repo, count(c.Imported), size(c.Bytes),
+	return fmt.Sprintf("Done. Copied %s (%s), skipped %s, failed %s.", count(c.Imported), size(c.Bytes),
 		count(c.Skipped), count(c.Failed))
 }
 
@@ -926,8 +926,8 @@ func (s *Service) page(ctx context.Context, cl *Client, id int64, source, token 
 			return AssetPage{}, err
 		}
 		s.log.Warn("nexus: asset page failed; retrying", "source_repo", source, "error", err.Error())
-		s.logLine(ctx, id, source, LevelWarn, fmt.Sprintf("%s: Nexus did not give a page of files (%s). Try %d of %d in %s.",
-			source, err.Error(), attempt+2, pageRetries+1, duration(delay)))
+		s.logLine(ctx, id, source, LevelWarn, fmt.Sprintf("Nexus did not give a page of files (%s). Try %d of %d in %s.",
+			err.Error(), attempt+2, pageRetries+1, duration(delay)))
 		select {
 		case <-ctx.Done():
 			return AssetPage{}, ctx.Err()
