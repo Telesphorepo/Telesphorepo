@@ -50,7 +50,7 @@ func lockRepo(t *testing.T, s *Server, repo string) {
 		"username": s.AdminUser, "password": s.AdminPass,
 	}, s.Admin(), &src)
 	s.MustAPI(t, http.MethodPut, "/api/nexus/sources/"+strconv.FormatInt(src.ID, 10)+"/repos",
-		[]map[string]any{{"source_repo": "src", "target": repo}}, s.Admin(), nil)
+		map[string]any{"repos": []map[string]any{{"source_repo": "src", "target": repo}}}, s.Admin(), nil)
 	var r struct {
 		LockedBy string `json:"locked_by"`
 	}
