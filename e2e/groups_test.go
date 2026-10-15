@@ -260,7 +260,7 @@ func TestGroups(t *testing.T) {
 		}
 
 		// Deleting a member removes it from the group.
-		s.MustAPI(t, http.MethodDelete, "/api/repos/"+snap, nil, s.Admin(), nil)
+		s.MustAPI(t, http.MethodPost, "/api/repos/delete", map[string]any{"names": []string{snap}}, s.Admin(), nil)
 		if g := s.GetGroupRepo(t, grp); *g.MemberCount != 1 || strings.Join(memberNames(g), ",") != rel {
 			t.Fatalf("group after a member delete: %+v, want only %s", g, rel)
 		}
