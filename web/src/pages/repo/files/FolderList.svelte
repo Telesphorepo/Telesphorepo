@@ -142,7 +142,11 @@
         icon={FolderOpenIcon}
         title="Files"
         state="None yet"
-        text={canUpload ? "Publish with your build tool, or upload files here." : "Files appear here when someone publishes to this repository."}
+        text={repo.kind === "proxy"
+          ? "The proxy keeps a file here after a build asks for it the first time."
+          : canUpload
+            ? "Publish with your build tool, or upload files here."
+            : "Files appear here when someone publishes to this repository."}
       >
         {#if canUpload}<Button variant="outline" href={href(repoPath(repo.name, "upload"))}><UploadIcon />Upload</Button>{/if}
       </CompactEmpty>

@@ -35,7 +35,8 @@ the checklist below. The sitemap and the Settings navigation come from
 | `lib/components/` | The shared components (below). Pages build only from these and `ui/`. |
 | `lib/components/ui/` | shadcn-svelte primitives. Add more with `bunx shadcn-svelte@latest add <name>`. |
 | `lib/formats/` | `registry.svelte.ts` (`formats`: the formats of `GET /api/formats`, loaded once, with their titles and SVG icons), `formatLook` (short title and description of a built-in format), the format-settings editors (`ConfigEditor`, `JsonEditor`, `debian.svelte`). |
-| `lib/units.ts` | `splitSize`, `splitDuration`: the number and unit that the settings form shows for a size or a duration. |
+| `lib/units.ts` | `splitSize`, `splitDuration`, `splitSeconds`: the number and unit that a form shows for a size or a duration; `joinSeconds` turns a number and a unit back into seconds. |
+| `lib/remotes.ts` | `remotePresets` (well-known remotes per format: Maven Central, Gradle Plugin Portal, Debian), `normalizeRemote`, `remoteError`: the remote address of a proxy. |
 | `lib/network.ts` | `checkRange` and `rangeSize`: client-side checks of the addresses and CIDRs that network rules and trusted proxies hold. |
 | `lib/webauthn.ts`, `lib/qr.ts` | Passkey create/get in the browser; QR encoder for authenticator setup. |
 
@@ -48,11 +49,11 @@ server and the clients print keep working: `/#/device?code=ABCD-EFGH`, `/#/setti
 
 | Path | Page | Layout | Access | What it shows |
 |---|---|---|---|---|
-| `/` | `Home` | app | any | Repositories: a table with name (a lock after a private one), format, files, size, last publish. Filter box, format filter, New repository (admins). |
+| `/` | `Home` | app | any | Repositories: a table with name (a lock after a private one, the kind icon after a group or a proxy), format, files (a group: its number of repositories), size, last publish. Filter box, format filter, New repository (admins). |
 | `/search?q=&repo=` | `Search` | app | any | Files whose path contains `q` (3+ characters). The top bar's search field holds `q`. |
 | `/login?next=&error=` | `SignIn` | app | any | The one place to sign in: single sign-on, password, then the second step. |
 | `/device?code=` | `DeviceApprove` | app | user | Look up a device code, check the device, approve it with a fresh second factor. |
-| `/repo/:name` | `repo/RepoPage` | app | any | The repository header and the Files tab at the top folder. |
+| `/repo/:name` | `repo/RepoPage` | app | any | The repository header and the Files tab at the top folder. A group has no files and no tabs: the Use view and its members, each a link to the member's page. A proxy has Files (its cached files) and Use, and no publish or upload. |
 | `/repo/:name/files/<path>` | `repo/RepoPage` | app | any | Files tab: a folder (`path` ends with `/`) or a selected file. The details column always shows on wide screens: the selected file, or else the open folder (repository, folder or artifact). |
 | `/repo/:name/use` | `repo/RepoPage` | app | any | Use this repository: the address and the snippets for a build; a private repository adds a read-token step. |
 | `/repo/:name/publish` | `repo/RepoPage` | app | any (publish permission) | Publish to this repository: from your computer, from CI, by hand. |
@@ -64,8 +65,8 @@ server and the clients print keep working: `/#/device?code=ABCD-EFGH`, `/#/setti
 | `/settings/tokens` | `account/Tokens` | settings | user | Tokens: read tokens and publish tokens, one page with two sections. |
 | **Settings › Repositories** | | | | |
 | `/settings/repositories` | `repositories/AllRepositories` | settings | admin | Every repository; a row opens its settings. |
-| `/settings/repositories/new` | `repositories/NewRepository` | settings | admin | Create a repository: name, format, description, visibility; Debian: architectures and the signing key. |
-| `/settings/repositories/:name/:tab` | `settings/repos/RepoSettings` | settings | admin | A repository's settings: `overview`, `access`, `format`, `signing` (Debian); Delete is a header action. Breadcrumbs: Settings › Repositories › maven › Access. |
+| `/settings/repositories/new` | `repositories/NewRepository` | settings | admin | First choice: a repository, a proxy of a remote repository, or a group of repositories; each offers the formats that take it (`kinds` of `GET /api/formats`). A repository: name, format, description, visibility; Debian: architectures and the signing key. A proxy: the remote address (well-known remotes as quick choices) and optional credentials; the server checks the remote, and "Create anyway" creates it when the remote does not answer. A group: its members, hosted repositories first, with the order as numbers. A proxy or a group then opens its settings Overview. |
+| `/settings/repositories/:name/:tab` | `settings/repos/RepoSettings` | settings | admin | A repository's settings. Hosted: `overview` (description, contents, its groups), `access`, `format`, `signing` (Debian). Proxy: `overview` (remote with Test the remote, use snippets, cache, its groups), `access` (download only), `remote` (address, credentials, the two times). Group: `overview` (use snippets, members with Move up, Move down, Remove and Add repositories, saved from the save bar), `access` (download only). Delete is a header action; Open files is one too, except for a group. Breadcrumbs: Settings › Repositories › maven › Access. |
 | **Settings › People and CI** | | | | |
 | `/settings/people` | `server/People` | settings | admin | Every account with its role; New account opens a short form. A row opens the person. |
 | `/settings/people/:name` | `server/people/Person` | settings | admin | One person: the identity card (avatar, role, sign-in) with the account actions, and the person's access to each repository (add, change the level, remove; saved from the save bar). |
@@ -215,7 +216,8 @@ only the repository knows it.
 | `DataTable` | Every table, at the full content width: `source` (a `Keyset`, or `listOf(resource)`), `columns` (`{label, srLabel?, align?: "right", grow?, hideOnPhone?}`), `caption`, `key`, `href?` (whole-row click), `selected?`, snippets `row(item)` (the cells, as `Cell`s) and `empty?` (a `CompactEmpty`). Zebra stripes, one fixed row height (40px, one line), rounded row ends, a fill on the whole row under the pointer, the selected fill on the `selected` row. Loading (`Loading` in the space of four rows, after 300 ms; a reload keeps the current rows) and error (a row with Try again) show under the headings; an empty table is never drawn: `empty` shows in its place, without column headings. A `Keyset` gets "Load more". |
 | `Cell` | One cell of a `DataTable` row: `text?` (one line that truncates, full value in a tooltip), `copy?` (`true` or the value to copy: a copy button that shows on row hover), `copyLabel?`, `grow?` (the column that takes the free width, at least 10rem), `num?` (numbers, sizes, times: right-aligned, tabular numerals), `actions?` (the row's buttons, right-aligned), `strong?` (the row's name), `muted?`, `hideOnPhone?`. Children for anything else (a badge, a `RelativeTime`). Use `Table.Cell` only for a control that `Cell` does not cover, and keep it one line. |
 | `Truncate` | `text`, `copy?`, `copyLabel?`, `class?`: one line that never wraps; "…" and a tooltip when it is cut (a path breaks after its slashes in the tooltip); an optional copy button. `Cell text` uses it; use it directly for a long value outside a table. |
-| `RepoTable` | The repositories table (Browse home, All repositories): name, a lock after a private one, and the description on one line; format, files, size, last publish. On a phone the format icon, the name and the last publish. |
+| `RepoTable` | The repositories table (Browse home, All repositories): name, a lock after a private one, the kind icon after a group or a proxy, and the description on one line; format, files (a group: its number of repositories), size, last publish. On a phone the format icon, the name and the last publish. |
+| `RepoKindIcon` | `kind`, `iconClass?`, `class?`. The mark of a group (layers) or a proxy (cloud download), with the word "Group" or "Proxy" for screen readers; nothing for a hosted repository. |
 | `Section` | `title?`, `description?` (one sentence), snippets `actions?` (the area's actions at the header's end; on a phone they wrap under the title) and `footer?` (a submit row), `class?`. One logical area of a page on its own surface (a shadcn `Card`): 24px padding, 24px to the next section. A page with a table or a list puts it in a `Section` too. |
 | `FormPage` | The body of a form page. It sets no width: every Settings page uses the full content column. |
 | `FormSection` | `title?`, `description?`, snippets `actions?` and `footer?` (the submit row). A `Section` that holds a form: put one `FormGrid` in it, or two with a `<Separator />` between sub-groups. |
@@ -227,6 +229,7 @@ only the repository knows it.
 | `SwitchRow` | `id`, `label`, `help?`, `bind:checked` or `checked` + `onCheckedChange`, `disabled?`, `onText?` / `offText?`, snippet `badge?`. A yes/no setting: the switch and its state word in the control column. Never a bare checkbox. |
 | `ListInput` | `id`, `values`, `onchange(values)`, `placeholder?`, `normalize?`, `invalid?`, `describedby?`, `label?`. Short values as chips in one box: Enter or a comma adds, a paste adds every line, Backspace removes the last. Never a "one per line" textarea. |
 | `SecretInput` | `id`, `set` (a value is saved), `change` (undefined, a new string, or null to clear), `onchange`, `disabled?`, `canClear?`, `invalid?`, `describedby?`. A box with the look of an input: "Set · hidden" or "Not set", with Replace, Clear or Set. |
+| `CredentialsInput` | `id`, `set`, `change` (undefined, `{username, password}`, or null to remove), `onchange`, `disabled?`, `invalid?`, `describedby?`. A saved username and password for another system (the remote of a proxy), with the look of `SecretInput`: "Set · hidden" or "Not set", with Replace (a username field and a password field), Clear or Set. |
 | `FormField` | `label`, `for`, `hint?`, `error?`; the control is the child. Only inside a dialog (`ShortFormDialog`), where the form grid does not fit; a page uses `FormGrid`. |
 | `ConnectionTest` | `onTest`, `testing?`, `result?` (`{ok, text}`), `label?` ("Test connection"), `disabled?`. The **Test** action of a connection to another system, where the connection is configured (the header or the footer of its `Section` or `Step`). The result shows beside the button, only after a test: a check and what answered, or the error and the next step. |
 | `Step` | `n`, `title`, `description?`, `done?`, snippets `actions?` and `footer?`. One numbered step of a setup, as a `Section` whose title starts with its number; a done step shows a check in place of the number. |
@@ -485,7 +488,7 @@ expires or when the server answers 401.
   path inside the folder as its multipart filename. The formats that take uploads are in
   `upload/formats.ts`.
 - **Delete** (`pages/repo/FilesTab.svelte`): an admin deletes with the UI session; anyone else
-  confirms in `SecondFactorPrompt` first. `delete/DeleteDialog.svelte` counts the files of a
+  confirms in `SecondFactorPrompt` first. In a proxy only administrators delete cached files. `delete/DeleteDialog.svelte` counts the files of a
   folder before the user confirms and says what a Maven or Debian delete leaves behind.
 
 ## Words
@@ -508,3 +511,6 @@ unchanged.
 | Nexus migration; copy; switch over | Nexus sources; mirror; cut over |
 | Network and proxy; trusted proxy | Reverse proxy settings |
 | Administrator | Admin (in sentences) |
+| Repository (hosted, when it needs a kind) | Hosted repository (in the UI) |
+| Proxy; remote (the remote repository that a proxy keeps the files of); Test the remote | Mirror, upstream |
+| Group; members (the repositories a group reads, in order) | Virtual repository, aggregate |

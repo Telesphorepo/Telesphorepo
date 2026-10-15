@@ -30,7 +30,8 @@
   const repo = $derived(query.get("repo") ?? "");
 
   const repos = new Resource(() => api.repos.list());
-  const repoNames = $derived((repos.data ?? []).map((r) => r.name).sort((a, b) => a.localeCompare(b)));
+  // A group has no files of its own, so search does not offer it.
+  const repoNames = $derived((repos.data ?? []).filter((r) => r.kind !== "group").map((r) => r.name).sort((a, b) => a.localeCompare(b)));
 
   let results = $state<Keyset<SearchHit> | null>(null);
   $effect(() => {

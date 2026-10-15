@@ -106,7 +106,7 @@ func seedCmd(args []string) error {
 		seeder format.Seeder
 		repo   *repos.Repo
 	}
-	rs := repos.New(d, format.ValidateRepoConfig)
+	rs := repos.New(d, format.ValidateRepoConfig, format.SupportsKind)
 	var targets []target
 	for _, f := range format.All() {
 		s, ok := f.(format.Seeder)

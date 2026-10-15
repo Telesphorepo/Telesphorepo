@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -131,6 +132,19 @@ func (h *Handler) download(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if repo.Kind == repos.KindProxy {
+		c, ok := h.Classify(p)
+		if !ok {
+			httpx.Error(w, http.StatusNotFound, "not found")
+			return
+		}
+		kind := assets.KindArtifact
+		if strings.HasPrefix(p, "dists/") {
+			kind = assets.KindIndex
+		}
+		h.host.Proxy.Serve(w, r, repo, p, c == format.ProxyChanging, kind)
+		return
+	}
 	if !strings.HasPrefix(p, "dists/") && !strings.HasPrefix(p, "pool/") {
 		httpx.Error(w, http.StatusNotFound, "not found")
 		return
@@ -138,11 +152,44 @@ func (h *Handler) download(w http.ResponseWriter, r *http.Request) {
 	h.assets.Serve(w, r, repo, p)
 }
 
+// Classify implements format.Proxied: pool files and by-hash index files never change (a
+// by-hash file's name is its checksum); the other files under dists/ (InRelease, Release,
+// Packages, ...) change. Other paths are refused.
+func (h *Handler) Classify(p string) (format.ProxyClass, bool) {
+	switch {
+	case strings.HasPrefix(p, "pool/"):
+		return format.ProxyImmutable, true
+	case strings.HasPrefix(p, "dists/") && strings.Contains(p, "/by-hash/"):
+		return format.ProxyImmutable, true
+	case strings.HasPrefix(p, "dists/"):
+		return format.ProxyChanging, true
+	}
+	return 0, false
+}
+
+// ProxyProbe implements format.Proxied: a check of the remote requests the InRelease of the
+// repo config's distribution ("stable" when it names none).
+func (h *Handler) ProxyProbe(config json.RawMessage) string {
+	var c struct {
+		Distribution string `json:"distribution"`
+	}
+	_ = json.Unmarshal(config, &c)
+	if c.Distribution == "" {
+		c.Distribution = "stable"
+	}
+	return "dists/" + c.Distribution + "/InRelease"
+}
+
 // publicKey serves the armored public key of the repo's signing key. It takes the read gate
-// of the repo, like its indexes.
+// of the repo, like its indexes. A proxy has no key of its own: clients use the remote
+// archive's key.
 func (h *Handler) publicKey(w http.ResponseWriter, r *http.Request) {
 	repo, _, ok := h.auth.RepoGate(w, r, r.PathValue("repo"), name, auth.Read, false)
 	if !ok {
+		return
+	}
+	if repo.Kind == repos.KindProxy {
+		httpx.Error(w, http.StatusNotFound, "a proxy repository has no signing key; use the key of the remote archive")
 		return
 	}
 	k, ok := h.keys.Get(signingKey(repo))

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -32,6 +33,7 @@ type Repo struct {
 	ID            int64
 	Name          string
 	Format        string
+	Kind          string // KindHosted, KindProxy or KindGroup
 	AnonymousRead bool
 	Config        json.RawMessage // always a JSON object
 	CreatedAt     time.Time
@@ -46,20 +48,37 @@ type Repo struct {
 	FileCount       int64
 	TotalSize       int64
 	LastPublishedAt time.Time
+	// MemberCount is the number of members of a group (from memory); 0 for another kind.
+	MemberCount int
 }
 
 // Validator validates the config of a repo of the given format and returns its normalized
 // form; an empty config selects the format's default. It rejects unknown formats.
 type Validator func(format string, config json.RawMessage) (json.RawMessage, error)
 
+// KindCheck returns an error when format does not take repos of kind (the format registry
+// knows which formats serve proxies and groups).
+type KindCheck func(format, kind string) error
+
 type Service struct {
 	db       *db.DB
 	validate Validator
+	kinds    KindCheck
+	seal     Sealer
+
+	// The in-memory copy of the group members and the proxy remotes (see kinds.go). Request
+	// paths read it; every change writes the database first and then this copy.
+	mu      sync.RWMutex
+	groups  map[int64][]int64 // group id -> member ids in read order
+	proxies map[int64]*Proxy  // repo id -> remote
 }
 
-// New returns the repo service. validate checks formats and configs in Create and Update; with
-// a nil validate (offline commands that only read repos) both reject every format.
-func New(d *db.DB, validate Validator) *Service { return &Service{db: d, validate: validate} }
+// New returns the repo service. validate checks formats and configs in Create and Update, and
+// kinds the kind of a new proxy or group; with a nil validate (offline commands that only read
+// repos) both reject every format. Load reads the members and remotes into memory.
+func New(d *db.DB, validate Validator, kinds KindCheck) *Service {
+	return &Service{db: d, validate: validate, kinds: kinds, groups: map[int64][]int64{}, proxies: map[int64]*Proxy{}}
+}
 
 func fromRow(r dbq.Repo, err error) (*Repo, error) {
 	if errors.Is(err, sql.ErrNoRows) {
@@ -72,6 +91,7 @@ func fromRow(r dbq.Repo, err error) (*Repo, error) {
 		ID:            r.ID,
 		Name:          r.Name,
 		Format:        r.Format,
+		Kind:          r.Kind,
 		AnonymousRead: r.AnonymousRead,
 		Config:        json.RawMessage(r.Config),
 		CreatedAt:     time.Unix(r.CreatedAt, 0),
@@ -88,11 +108,11 @@ func fromRow(r dbq.Repo, err error) (*Repo, error) {
 
 // ByName is an indexed point lookup (used on every request).
 func (s *Service) ByName(ctx context.Context, name string) (*Repo, error) {
-	return fromRow(dbq.New(s.db.R).GetRepoByName(ctx, name))
+	return s.counted(fromRow(dbq.New(s.db.R).GetRepoByName(ctx, name)))
 }
 
 func (s *Service) ByID(ctx context.Context, id int64) (*Repo, error) {
-	return fromRow(dbq.New(s.db.R).GetRepoByID(ctx, id))
+	return s.counted(fromRow(dbq.New(s.db.R).GetRepoByID(ctx, id)))
 }
 
 // listPage is the page size List reads with.
@@ -110,7 +130,7 @@ func (s *Service) List(ctx context.Context) ([]*Repo, error) {
 			return nil, err
 		}
 		for _, row := range rows {
-			r, _ := fromRow(row, nil)
+			r, _ := s.counted(fromRow(row, nil))
 			out = append(out, r)
 		}
 		if len(rows) < listPage {
@@ -129,7 +149,7 @@ func (s *Service) Page(ctx context.Context, after string, limit int) ([]*Repo, s
 	}
 	out := make([]*Repo, 0, len(rows))
 	for _, row := range rows {
-		r, _ := fromRow(row, nil)
+		r, _ := s.counted(fromRow(row, nil))
 		out = append(out, r)
 	}
 	next := ""
@@ -186,8 +206,19 @@ func checkDescription(d string) (string, error) {
 }
 
 // Create validates the name, the format, the description and the config (empty: the format's
-// default) and inserts the repo.
+// default) and inserts a hosted repo.
 func (s *Service) Create(ctx context.Context, name, format string, anonymousRead bool, description string, config json.RawMessage) (*Repo, error) {
+	var repo *Repo
+	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
+		var err error
+		repo, err = s.insert(ctx, tx, name, format, KindHosted, anonymousRead, description, config)
+		return err
+	})
+	return repo, err
+}
+
+// insert validates and inserts a repo of kind in tx.
+func (s *Service) insert(ctx context.Context, tx *sql.Tx, name, format, kind string, anonymousRead bool, description string, config json.RawMessage) (*Repo, error) {
 	if !NameRE.MatchString(name) {
 		return nil, fmt.Errorf("%w: bad name", ErrInvalid)
 	}
@@ -199,23 +230,31 @@ func (s *Service) Create(ctx context.Context, name, format string, anonymousRead
 	if err != nil {
 		return nil, err
 	}
+	if kind != KindHosted {
+		if s.kinds == nil {
+			return nil, fmt.Errorf("%w: format %q takes no %s repositories", ErrInvalid, format, kind)
+		}
+		if err := s.kinds(format, kind); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
+		}
+	}
 	now := time.Now().Unix()
-	id, err := dbq.New(s.db.W).CreateRepo(ctx, dbq.CreateRepoParams{
-		Name: name, Format: format, AnonymousRead: anonymousRead, Config: string(cfg), Description: description, CreatedAt: now})
+	id, err := dbq.New(tx).CreateRepo(ctx, dbq.CreateRepoParams{
+		Name: name, Format: format, Kind: kind, AnonymousRead: anonymousRead, Config: string(cfg), Description: description, CreatedAt: now})
 	if isUnique(err) {
 		return nil, ErrExists
 	}
 	if err != nil {
 		return nil, err
 	}
-	return &Repo{ID: id, Name: name, Format: format, AnonymousRead: anonymousRead, Config: cfg, CreatedAt: time.Unix(now, 0), Description: description}, nil
+	return &Repo{ID: id, Name: name, Format: format, Kind: kind, AnonymousRead: anonymousRead, Config: cfg, CreatedAt: time.Unix(now, 0), Description: description}, nil
 }
 
 // Update changes only the non-nil fields and returns the repo before and after the change.
 func (s *Service) Update(ctx context.Context, name string, anonymousRead *bool, description *string, config json.RawMessage) (old, updated *Repo, err error) {
 	err = s.db.Tx(ctx, func(tx *sql.Tx) error {
 		q := dbq.New(tx)
-		r, err := fromRow(q.GetRepoByName(ctx, name))
+		r, err := s.counted(fromRow(q.GetRepoByName(ctx, name)))
 		if err != nil {
 			return err
 		}
@@ -256,8 +295,8 @@ func (s *Service) SetLockedBy(ctx context.Context, tx *sql.Tx, id int64, by stri
 	return q.SetRepoLockedBy(ctx, dbq.SetRepoLockedByParams{LockedBy: sql.NullString{String: by, Valid: by != ""}, ID: id})
 }
 
-// DeleteRow deletes the repo row of id; the rows that reference it cascade. ErrNotFound when
-// it does not exist.
+// DeleteRow deletes the repo row of id; the rows that reference it cascade, so a deleted member
+// leaves its groups. ErrNotFound when it does not exist.
 func (s *Service) DeleteRow(ctx context.Context, id int64) error {
 	n, err := dbq.New(s.db.W).DeleteRepo(ctx, id)
 	if err != nil {
@@ -266,5 +305,5 @@ func (s *Service) DeleteRow(ctx context.Context, id int64) error {
 	if n == 0 {
 		return ErrNotFound
 	}
-	return nil
+	return s.forget(ctx, id)
 }

@@ -1,7 +1,8 @@
 <!--
   The table of repositories (Browse home, All repositories): name and description on one line,
   format, files, size and last publish. A private repository has a lock after its name; a public
-  one has no mark. On a phone the format icon sits before the name. A click anywhere on a row
+  one has no mark. A group or a proxy has its kind icon after the name; a group shows its number
+  of repositories in place of the files. On a phone the format icon sits before the name. A click anywhere on a row
   opens `href`.
 -->
 <script lang="ts">
@@ -16,6 +17,7 @@
   import type { Repo } from "$lib/api";
   import type { TableSource } from "$lib/load.svelte";
   import { formatCount } from "$lib/format";
+  import RepoKindIcon from "./RepoKindIcon.svelte";
   import LockIcon from "@lucide/svelte/icons/lock";
 
   let {
@@ -53,13 +55,21 @@
         <span class="flex shrink-0 items-center gap-1.5">
           <a href={href(r)} class="rounded-sm font-medium outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50">{r.name}</a>
           {#if !r.anonymous_read}<span class="flex text-muted-foreground" title="Private: only people with access can download"><LockIcon aria-hidden="true" class="size-3.5" /><span class="sr-only">Private</span></span>{/if}
+          <RepoKindIcon kind={r.kind} />
         </span>
         {#if r.description}<span class="min-w-0 truncate text-muted-foreground">{r.description}</span>{/if}
       </span>
     </Table.Cell>
     <Table.Cell class="max-sm:hidden"><FormatBadge format={r.format} title={titles[r.format]} /></Table.Cell>
-    <Cell num hideOnPhone>{formatCount(r.file_count)}</Cell>
-    <Cell num hideOnPhone><FileSize bytes={r.total_size} /></Cell>
-    <Cell num muted><RelativeTime at={r.last_published_at} empty="Never" /></Cell>
+    {#if r.kind === "group"}
+      <!-- A group holds no files of its own: it shows how many repositories it reads. -->
+      <Cell num hideOnPhone>{formatCount(r.member_count ?? 0)} {r.member_count === 1 ? "repository" : "repositories"}</Cell>
+      <Cell num hideOnPhone />
+      <Cell num muted />
+    {:else}
+      <Cell num hideOnPhone>{formatCount(r.file_count)}</Cell>
+      <Cell num hideOnPhone><FileSize bytes={r.total_size} /></Cell>
+      <Cell num muted><RelativeTime at={r.last_published_at} empty="Never" /></Cell>
+    {/if}
   {/snippet}
 </DataTable>

@@ -1,7 +1,7 @@
 <!--
   Repository settings, Access (docs/design/information-architecture.md, "The repo Access tab"):
   Download (Public, people who can download and not publish, from where) and Publish (people who can publish, CI
-  pipelines, from where). Every edit is in place and goes into one draft, and the save bar saves
+  pipelines, from where; a hosted repository only, because nobody publishes to a group or a proxy). Every edit is in place and goes into one draft, and the save bar saves
   it after a confirm that lists each change. Administrators can always download and publish; the
   tables list the people and pipelines that were given access.
 -->
@@ -227,6 +227,8 @@
     </div>
   </FormSection>
 
+  <!-- Nobody publishes to a group or a proxy. -->
+  {#if repo.kind === "hosted"}
   <FormSection title="Publish" description={a.publish.locked_by ? "Nobody can publish until the copy from Nexus ends. The access below applies after that." : undefined}>
     {#snippet actions()}
       {#if a.publish.locked_by}<Button variant="outline" size="sm" href={href("/settings/nexus")}>Open Nexus migration</Button>{/if}
@@ -309,6 +311,7 @@
       <FromWhere id="{id}-publish" repo={repo.name} verb="publish" lists={lists.data} listsError={lists.error} saved={draft.saved.publish} bind:rules={draft.value.publish} />
     </div>
   </FormSection>
+  {/if}
 
   {#if d.read.length || d.publish.length}
   <p class="mt-6 text-meta text-muted-foreground">

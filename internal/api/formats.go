@@ -19,15 +19,16 @@ type formatJSON struct {
 	SettingsGroup string            `json:"settings_group,omitempty"`
 	Icon          string            `json:"icon,omitempty"`       // inline SVG (format.Iconic)
 	KindIcons     map[string]string `json:"kind_icons,omitempty"` // Artifact.Kind -> inline SVG
+	Kinds         []string          `json:"kinds"`                // repo kinds the format takes: hosted, proxy, group
 }
 
 // listFormats lists the registered formats in registration order. SettingsGroup names the
 // format's group in GET /api/settings when it contributes settings. Icon and KindIcons are the
-// format's SVG icons, inline.
+// format's SVG icons, inline. Kinds are the repo kinds the format takes.
 func (a *API) listFormats(w http.ResponseWriter, r *http.Request) {
 	out := []formatJSON{}
 	for _, f := range format.All() {
-		fj := formatJSON{Name: f.Name(), Title: f.Title(), DefaultConfig: f.DefaultConfig()}
+		fj := formatJSON{Name: f.Name(), Title: f.Title(), DefaultConfig: f.DefaultConfig(), Kinds: format.Kinds(f)}
 		if len(fj.DefaultConfig) == 0 {
 			fj.DefaultConfig = json.RawMessage("{}")
 		}
@@ -71,7 +72,8 @@ func (a *API) repoStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // repoUsage returns the client setup snippets of the repo's format: {base_url, snippets}.
-// base_url is the base_url setting, else the URL the request came in on.
+// base_url is the base_url setting, else the URL the request came in on. A proxy or a group takes
+// no uploads, so it gets no publish snippets.
 func (a *API) repoUsage(w http.ResponseWriter, r *http.Request) {
 	repo, _, ok := a.auth.RepoGate(w, r, r.PathValue("name"), "", auth.Read, true)
 	if !ok {
@@ -80,8 +82,10 @@ func (a *API) repoUsage(w http.ResponseWriter, r *http.Request) {
 	base := a.baseURL(r)
 	snippets := []format.Snippet{}
 	if d, ok := format.Get(repo.Format).(format.Describer); ok {
-		if s := d.Usage(repo, base); s != nil {
-			snippets = s
+		for _, s := range d.Usage(repo, base) {
+			if repo.Kind == repos.KindHosted || s.Purpose != format.SnippetPublish {
+				snippets = append(snippets, s)
+			}
 		}
 	}
 	httpx.WriteJSON(w, http.StatusOK, struct {

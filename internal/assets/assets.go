@@ -54,6 +54,10 @@ type Asset struct {
 	// PublishSessionID is the CI publish session with build provenance that wrote the file; 0 =
 	// none (see internal/provenance).
 	PublishSessionID int64
+	// CheckedAt is when the remote of a proxy repo last confirmed the file, RemoteETag its ETag;
+	// zero for a hosted file.
+	CheckedAt  time.Time
+	RemoteETag string
 }
 
 // By is who writes a file: the user (0 = none, e.g. a CI session or an import) and the publish
@@ -215,7 +219,7 @@ func (s *Service) Lock(repoID int64, key string) (unlock func()) {
 }
 
 func fromRow(r dbq.Asset) *Asset {
-	return &Asset{
+	a := &Asset{
 		ID:          r.ID,
 		RepoID:      r.RepoID,
 		Path:        r.Path,
@@ -228,7 +232,12 @@ func fromRow(r dbq.Asset) *Asset {
 		UpdatedAt:   time.Unix(r.UpdatedAt, 0).UTC(),
 
 		PublishSessionID: r.PublishSessionID.Int64,
+		RemoteETag:       r.RemoteEtag,
 	}
+	if r.CheckedAt > 0 {
+		a.CheckedAt = time.Unix(r.CheckedAt, 0).UTC()
+	}
+	return a
 }
 
 // Get is an indexed point lookup on (repo_id, path).
@@ -254,7 +263,8 @@ func (s *Service) PutBlob(ctx context.Context, repoName, p string, sp *Spooled, 
 
 // UpsertTx inserts or updates (size, sha256, content_type, updated_at, uploaded_by,
 // publish_session_id) the
-// asset row keyed by (RepoID, Path) and sets a.ID. Returns created=true on insert.
+// asset row keyed by (RepoID, Path) and sets a.ID. Returns created=true on insert. The row's
+// times are a.UpdatedAt (a proxy keeps the remote's Last-Modified), or now when it is zero.
 // Path and kind are never changed on update (the FTS triggers rely on it).
 func UpsertTx(ctx context.Context, tx *sql.Tx, a *Asset) (created bool, err error) {
 	q := dbq.New(tx)
@@ -266,6 +276,13 @@ func UpsertTx(ctx context.Context, tx *sql.Tx, a *Asset) (created bool, err erro
 		return false, err
 	}
 	now := time.Now().Unix()
+	if !a.UpdatedAt.IsZero() {
+		now = a.UpdatedAt.Unix()
+	}
+	var checked int64
+	if !a.CheckedAt.IsZero() {
+		checked = a.CheckedAt.Unix()
+	}
 	row, err := q.UpsertAsset(ctx, dbq.UpsertAssetParams{
 		RepoID:      a.RepoID,
 		Path:        a.Path,
@@ -278,6 +295,8 @@ func UpsertTx(ctx context.Context, tx *sql.Tx, a *Asset) (created bool, err erro
 		UpdatedAt:   now,
 
 		PublishSessionID: sql.NullInt64{Int64: a.PublishSessionID, Valid: a.PublishSessionID != 0},
+		CheckedAt:        checked,
+		RemoteEtag:       a.RemoteETag,
 	})
 	if err != nil {
 		return false, err
@@ -527,6 +546,12 @@ func (s *Service) FirstPaths(ctx context.Context, repoID int64, prefix string, l
 		out[i] = r.Path
 	}
 	return out, nil
+}
+
+// SetChecked records that the remote of a proxy repo confirmed the cached file p at at, with
+// its ETag.
+func (s *Service) SetChecked(ctx context.Context, repoID int64, p string, at time.Time, etag string) error {
+	return dbq.New(s.db.W).SetAssetChecked(ctx, dbq.SetAssetCheckedParams{CheckedAt: at.Unix(), RemoteEtag: etag, RepoID: repoID, Path: p})
 }
 
 // DeleteTx deletes the asset row (repoID, p) in tx. deleted is false when there was none. The

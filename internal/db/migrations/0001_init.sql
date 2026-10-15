@@ -48,11 +48,14 @@ CREATE TABLE sessions (
 CREATE INDEX sessions_expires ON sessions(expires_at);
 CREATE INDEX sessions_user ON sessions(user_id);
 
--- format is validated against the format registry, not by a CHECK.
+-- format is validated against the format registry, not by a CHECK. kind: a hosted repo stores
+-- what is published to it, a proxy repo keeps what it fetches from its remote (repo_proxies), a
+-- group repo serves the files of its members (repo_group_members) and has none of its own.
 CREATE TABLE repos (
   id             INTEGER PRIMARY KEY,
   name           TEXT NOT NULL UNIQUE,
   format         TEXT NOT NULL,
+  kind           TEXT NOT NULL DEFAULT 'hosted' CHECK (kind IN ('hosted','proxy','group')),
   anonymous_read INTEGER NOT NULL DEFAULT 0,
   config         TEXT NOT NULL DEFAULT '{}',         -- JSON, format-specific
   created_at     INTEGER NOT NULL,
@@ -74,6 +77,32 @@ CREATE TABLE repo_permissions (
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX repo_permissions_user ON repo_permissions(user_id);
 
+-- The members of a group repo, in the order a read tries them. A member is a hosted or proxy
+-- repo of the group's format; a repo can be in several groups. Request paths read the in-memory
+-- copy of the repos service.
+CREATE TABLE repo_group_members (
+  group_id  INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+  member_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+  position  INTEGER NOT NULL,
+  PRIMARY KEY (group_id, member_id),
+  UNIQUE (group_id, position)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX repo_group_members_member ON repo_group_members(member_id);
+
+-- The remote of a proxy repo. credentials is the sealed JSON {username, password}
+-- (settings.Service.Encrypt, AAD "repo_proxy:<repo id>"); empty when the remote needs none.
+-- Request paths read the in-memory copy of the repos service.
+CREATE TABLE repo_proxies (
+  repo_id        INTEGER PRIMARY KEY REFERENCES repos(id) ON DELETE CASCADE,
+  remote_url     TEXT NOT NULL,                       -- http(s), ends with "/"
+  credentials    BLOB NOT NULL DEFAULT x'',
+  metadata_ttl   INTEGER NOT NULL DEFAULT 1800,       -- seconds a changing file is used before a check
+  not_found_ttl  INTEGER NOT NULL DEFAULT 300,        -- seconds a remote 404 is remembered
+  last_ok_at     INTEGER NOT NULL DEFAULT 0,          -- last successful remote request
+  last_error     TEXT NOT NULL DEFAULT '',
+  last_error_at  INTEGER NOT NULL DEFAULT 0
+) STRICT;
+
 -- id is the rowid that assets_fts points at, so assets keeps its rowid.
 CREATE TABLE assets (
   id           INTEGER PRIMARY KEY,
@@ -89,6 +118,10 @@ CREATE TABLE assets (
   -- The CI publish session that wrote the file, set only when that session recorded build
   -- provenance (publish_sessions.ci_repository); the session row then stays as the build record.
   publish_session_id INTEGER REFERENCES publish_sessions(id) ON DELETE SET NULL,
+  -- The cached files of a proxy repo: when the remote last confirmed the file, and its ETag for
+  -- the next check. A hosted file keeps the defaults.
+  checked_at   INTEGER NOT NULL DEFAULT 0,
+  remote_etag  TEXT NOT NULL DEFAULT '',
   UNIQUE (repo_id, path)                             -- also the repo_id foreign-key index
 ) STRICT;
 CREATE INDEX assets_uploaded_by ON assets(uploaded_by);

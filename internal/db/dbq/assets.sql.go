@@ -29,7 +29,8 @@ func (q *Queries) DeleteAsset(ctx context.Context, arg DeleteAssetParams) (int64
 
 const getAsset = `-- name: GetAsset :one
 
-SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id
+SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id,
+  checked_at, remote_etag
 FROM assets WHERE repo_id = ? AND path = ?
 `
 
@@ -55,6 +56,8 @@ func (q *Queries) GetAsset(ctx context.Context, arg GetAssetParams) (Asset, erro
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.PublishSessionID,
+		&i.CheckedAt,
+		&i.RemoteEtag,
 	)
 	return i, err
 }
@@ -76,7 +79,8 @@ func (q *Queries) GetAssetID(ctx context.Context, arg GetAssetIDParams) (int64, 
 }
 
 const listAssetsAfter = `-- name: ListAssetsAfter :many
-SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id
+SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id,
+  checked_at, remote_etag
 FROM assets
 WHERE repo_id = ?1 AND path > ?2
 ORDER BY path LIMIT ?3
@@ -109,6 +113,8 @@ func (q *Queries) ListAssetsAfter(ctx context.Context, arg ListAssetsAfterParams
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.PublishSessionID,
+			&i.CheckedAt,
+			&i.RemoteEtag,
 		); err != nil {
 			return nil, err
 		}
@@ -124,7 +130,8 @@ func (q *Queries) ListAssetsAfter(ctx context.Context, arg ListAssetsAfterParams
 }
 
 const listAssetsAfterRange = `-- name: ListAssetsAfterRange :many
-SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id
+SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id,
+  checked_at, remote_etag
 FROM assets
 WHERE repo_id = ?1 AND path > ?2 AND path < ?3
 ORDER BY path LIMIT ?4
@@ -163,6 +170,8 @@ func (q *Queries) ListAssetsAfterRange(ctx context.Context, arg ListAssetsAfterR
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.PublishSessionID,
+			&i.CheckedAt,
+			&i.RemoteEtag,
 		); err != nil {
 			return nil, err
 		}
@@ -178,7 +187,8 @@ func (q *Queries) ListAssetsAfterRange(ctx context.Context, arg ListAssetsAfterR
 }
 
 const listAssetsFrom = `-- name: ListAssetsFrom :many
-SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id
+SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id,
+  checked_at, remote_etag
 FROM assets
 WHERE repo_id = ?1 AND path >= ?2
 ORDER BY path LIMIT ?3
@@ -215,6 +225,8 @@ func (q *Queries) ListAssetsFrom(ctx context.Context, arg ListAssetsFromParams) 
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.PublishSessionID,
+			&i.CheckedAt,
+			&i.RemoteEtag,
 		); err != nil {
 			return nil, err
 		}
@@ -230,7 +242,8 @@ func (q *Queries) ListAssetsFrom(ctx context.Context, arg ListAssetsFromParams) 
 }
 
 const listAssetsFromRange = `-- name: ListAssetsFromRange :many
-SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id
+SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id,
+  checked_at, remote_etag
 FROM assets
 WHERE repo_id = ?1 AND path >= ?2 AND path < ?3
 ORDER BY path LIMIT ?4
@@ -269,6 +282,8 @@ func (q *Queries) ListAssetsFromRange(ctx context.Context, arg ListAssetsFromRan
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.PublishSessionID,
+			&i.CheckedAt,
+			&i.RemoteEtag,
 		); err != nil {
 			return nil, err
 		}
@@ -283,12 +298,35 @@ func (q *Queries) ListAssetsFromRange(ctx context.Context, arg ListAssetsFromRan
 	return items, nil
 }
 
+const setAssetChecked = `-- name: SetAssetChecked :exec
+UPDATE assets SET checked_at = ?, remote_etag = ? WHERE repo_id = ? AND path = ?
+`
+
+type SetAssetCheckedParams struct {
+	CheckedAt  int64
+	RemoteEtag string
+	RepoID     int64
+	Path       string
+}
+
+// A proxy's remote confirmed the cached file (a 304, or a 404 while the cached copy stays).
+func (q *Queries) SetAssetChecked(ctx context.Context, arg SetAssetCheckedParams) error {
+	_, err := q.db.ExecContext(ctx, setAssetChecked,
+		arg.CheckedAt,
+		arg.RemoteEtag,
+		arg.RepoID,
+		arg.Path,
+	)
+	return err
+}
+
 const upsertAsset = `-- name: UpsertAsset :one
-INSERT INTO assets (repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO assets (repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id,
+  checked_at, remote_etag)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (repo_id, path) DO UPDATE SET size = excluded.size, sha256 = excluded.sha256,
   content_type = excluded.content_type, updated_at = excluded.updated_at, uploaded_by = excluded.uploaded_by,
-  publish_session_id = excluded.publish_session_id
+  publish_session_id = excluded.publish_session_id, checked_at = excluded.checked_at, remote_etag = excluded.remote_etag
 RETURNING id, kind, created_at, updated_at
 `
 
@@ -303,6 +341,8 @@ type UpsertAssetParams struct {
 	CreatedAt        int64
 	UpdatedAt        int64
 	PublishSessionID sql.NullInt64
+	CheckedAt        int64
+	RemoteEtag       string
 }
 
 type UpsertAssetRow struct {
@@ -325,6 +365,8 @@ func (q *Queries) UpsertAsset(ctx context.Context, arg UpsertAssetParams) (Upser
 		arg.CreatedAt,
 		arg.UpdatedAt,
 		arg.PublishSessionID,
+		arg.CheckedAt,
+		arg.RemoteEtag,
 	)
 	var i UpsertAssetRow
 	err := row.Scan(

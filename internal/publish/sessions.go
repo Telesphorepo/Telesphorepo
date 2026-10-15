@@ -104,6 +104,9 @@ func (s *Service) writableRepo(ctx context.Context, p *auth.Principal, name stri
 	if err != nil {
 		return nil, err
 	}
+	if repo.Kind != repos.KindHosted {
+		return nil, errorf(ErrConflict, auth.ReadOnly(repo))
+	}
 	lvl, err := s.auth.Access(ctx, p, repo)
 	if err != nil {
 		return nil, err

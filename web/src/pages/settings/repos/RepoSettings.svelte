@@ -3,7 +3,9 @@
   the sidebar stays, "All repositories" stays open in it, and the breadcrumbs say where the page
   sits (Settings › Repositories › maven › Access). The header names the repository; the tabs are
   pages with their own address, so the back button returns to the previous tab. The tab bodies are
-  the other files of this folder.
+  the other files of this folder. The tabs depend on the kind: a hosted repository has Overview,
+  Access, Format settings (and Signing for Debian); a proxy has Overview, Access and Remote; a group
+  has Overview and Access.
 -->
 <script lang="ts">
   import { api, ApiError, type Repo } from "$lib/api";
@@ -29,6 +31,9 @@
   import LockIcon from "@lucide/svelte/icons/lock";
   import SearchXIcon from "@lucide/svelte/icons/search-x";
   import CompassIcon from "@lucide/svelte/icons/compass";
+  import GlobeIcon from "@lucide/svelte/icons/globe";
+  import RepoKindIcon from "$lib/components/RepoKindIcon.svelte";
+  import RemoteTab from "./RemoteTab.svelte";
 
   let { params }: PageProps = $props();
 
@@ -51,13 +56,17 @@
 
   const r = $derived(repo.data?.name === params.name ? repo.data : repo.data === null ? null : undefined);
 
+  // A group and a proxy have no format settings and sign nothing; a proxy has its Remote tab.
   const tabs = $derived.by(() => {
     const t: { id: RepoSettingsTab; label: string; icon: typeof InfoIcon }[] = [
       { id: "overview", label: "Overview", icon: InfoIcon },
       { id: "access", label: "Access", icon: UsersIcon },
-      { id: "format", label: "Format settings", icon: SlidersIcon },
     ];
-    if (r?.format === "debian") t.push({ id: "signing", label: "Signing", icon: FileKeyIcon });
+    if (r?.kind === "proxy") t.push({ id: "remote", label: "Remote", icon: GlobeIcon });
+    if (r?.kind === "hosted") {
+      t.push({ id: "format", label: "Format settings", icon: SlidersIcon });
+      if (r.format === "debian") t.push({ id: "signing", label: "Signing", icon: FileKeyIcon });
+    }
     return t;
   });
   const open = $derived(tabs.find((t) => t.id === params.tab));
@@ -83,9 +92,13 @@
     {#snippet meta()}
       {#if !r.anonymous_read}<LockIcon class="size-4 text-muted-foreground" aria-label="Private" />{/if}
       <span class="text-muted-foreground"><FormatBadge format={r.format} /></span>
+      <RepoKindIcon kind={r.kind} iconClass="size-4" />
     {/snippet}
     {#snippet actions()}
-      <Button variant="outline" href={href(filesPath(r.name))}><FolderOpenIcon />Open files</Button>
+      <!-- A group has no files. -->
+      {#if r.kind !== "group"}
+        <Button variant="outline" href={href(filesPath(r.name))}><FolderOpenIcon />Open files</Button>
+      {/if}
       <Button variant="ghost" class="hover:bg-destructive/10 hover:text-destructive" onclick={() => (deleteOpen = true)}>Delete</Button>
     {/snippet}
   </PageHeader>
@@ -106,6 +119,8 @@
       <FormatTab repo={r} onChanged={repo.reload} />
     {:else if open.id === "signing"}
       <SigningTab repo={r} onChanged={repo.reload} />
+    {:else if open.id === "remote"}
+      <RemoteTab repo={r} onChanged={repo.reload} />
     {/if}
     <DeleteRepo repo={r} bind:open={deleteOpen} />
   {/key}

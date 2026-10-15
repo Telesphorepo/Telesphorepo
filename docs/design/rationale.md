@@ -422,3 +422,42 @@ Principle: 1, 2.
 Before: [storage-before-1440-dark.jpg](screenshots/storage-before-1440-dark.jpg),
 [nexus-migration-before-1440-dark.jpg](screenshots/nexus-migration-before-1440-dark.jpg).
 No after shot is saved for these two pages.
+
+### Group repositories
+
+Problem: a build listed one repository for each place its packages came from: releases,
+snapshots, modules and Maven Central. Every new repository meant an edit of every build.
+
+Decision: a group is a repository of its own kind, with one address that serves the files of its
+members in order. New repository starts with a choice: a repository, a proxy of a remote
+repository, or a group of repositories. A group picks its members from the repositories of its
+format, and the order shows as numbers. The group's Overview holds the address for the build and
+the members, with Move up, Move down, Remove and Add repositories, saved from the save bar. A
+proxy that comes before a repository of your own has a warning on its row, because the remote
+can shadow your files. A private member in a public group says on its row that only people with
+access get its files through the group. A repository's Overview lists the groups it is in, as
+links. The repository list shows a group with its mark and its member count in place of the file
+count. A group has no files, so its page shows the address and links to each member.
+
+Principle: 1, 8, 13.
+
+This is a new feature, so it has no before shot.
+
+### Proxy repositories
+
+Problem: builds went to Maven Central, a vendor's repository or a Debian mirror on every run, and
+failed when that remote was down.
+
+Decision: a proxy is a repository that fetches a file from its remote on the first request and
+keeps it. New repository asks for the remote address, with the well-known remotes as one-click
+choices, and optional credentials. Create checks the remote first; when the remote does not
+answer, the error shows beside the button with Create anyway. The proxy's Overview shows the
+remote, when it last answered or its last error, and Test the remote, where the remote is set.
+The Remote tab edits the address, the credentials (shown as set or not set, never the value) and
+the two times, each one number with its unit. The Files tab shows the cached files, and Delete
+removes them, so the next request fetches them again. A Debian proxy says that the remote archive
+signs the files, because clients keep that archive's key.
+
+Principle: 1, 2, 4.
+
+This is a new feature, so it has no before shot.

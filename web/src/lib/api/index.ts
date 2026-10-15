@@ -79,6 +79,11 @@ export const api = {
     update: (name: string, patch: T.RepoPatch) => request<T.Repo>("PATCH", repo(name), { body: patch }),
     /** Admin: removes the repo, its rows and its blobs. */
     delete: (name: string) => request("DELETE", repo(name)),
+    /** Admin: replaces the members of a group and their order (1 to 50 names). Answers the group. */
+    setMembers: (name: string, members: string[]) =>
+      request<T.Repo>("PUT", repo(name) + "/members", { body: { members } }),
+    /** Admin: checks the remote of a proxy now. A remote that does not answer throws an ApiError with the reason. */
+    testProxy: (name: string) => request<{ ok: boolean }>("POST", repo(name) + "/proxy/test"),
     status: (name: string) => request<T.RepoStatus>("GET", repo(name) + "/status"),
     usage: (name: string) => request<T.Usage>("GET", repo(name) + "/usage"),
     /** The direct children of a folder ("" is the root), folders first. */

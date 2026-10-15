@@ -11,13 +11,14 @@ import (
 )
 
 const createRepo = `-- name: CreateRepo :one
-INSERT INTO repos (name, format, anonymous_read, config, description, created_at) VALUES (?, ?, ?, ?, ?, ?)
+INSERT INTO repos (name, format, kind, anonymous_read, config, description, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)
 RETURNING id
 `
 
 type CreateRepoParams struct {
 	Name          string
 	Format        string
+	Kind          string
 	AnonymousRead bool
 	Config        string
 	Description   string
@@ -28,6 +29,7 @@ func (q *Queries) CreateRepo(ctx context.Context, arg CreateRepoParams) (int64, 
 	row := q.db.QueryRowContext(ctx, createRepo,
 		arg.Name,
 		arg.Format,
+		arg.Kind,
 		arg.AnonymousRead,
 		arg.Config,
 		arg.Description,
@@ -36,6 +38,15 @@ func (q *Queries) CreateRepo(ctx context.Context, arg CreateRepoParams) (int64, 
 	var id int64
 	err := row.Scan(&id)
 	return id, err
+}
+
+const deleteGroupMembers = `-- name: DeleteGroupMembers :exec
+DELETE FROM repo_group_members WHERE group_id = ?
+`
+
+func (q *Queries) DeleteGroupMembers(ctx context.Context, groupID int64) error {
+	_, err := q.db.ExecContext(ctx, deleteGroupMembers, groupID)
+	return err
 }
 
 const deleteRepo = `-- name: DeleteRepo :execrows
@@ -52,7 +63,7 @@ func (q *Queries) DeleteRepo(ctx context.Context, id int64) (int64, error) {
 }
 
 const getRepoByID = `-- name: GetRepoByID :one
-SELECT id, name, format, anonymous_read, config, created_at, locked_by, description,
+SELECT id, name, format, kind, anonymous_read, config, created_at, locked_by, description,
   file_count, total_size, last_published_at FROM repos WHERE id = ?
 `
 
@@ -63,6 +74,7 @@ func (q *Queries) GetRepoByID(ctx context.Context, id int64) (Repo, error) {
 		&i.ID,
 		&i.Name,
 		&i.Format,
+		&i.Kind,
 		&i.AnonymousRead,
 		&i.Config,
 		&i.CreatedAt,
@@ -77,7 +89,7 @@ func (q *Queries) GetRepoByID(ctx context.Context, id int64) (Repo, error) {
 
 const getRepoByName = `-- name: GetRepoByName :one
 
-SELECT id, name, format, anonymous_read, config, created_at, locked_by, description,
+SELECT id, name, format, kind, anonymous_read, config, created_at, locked_by, description,
   file_count, total_size, last_published_at FROM repos WHERE name = ?
 `
 
@@ -90,6 +102,7 @@ func (q *Queries) GetRepoByName(ctx context.Context, name string) (Repo, error) 
 		&i.ID,
 		&i.Name,
 		&i.Format,
+		&i.Kind,
 		&i.AnonymousRead,
 		&i.Config,
 		&i.CreatedAt,
@@ -102,8 +115,118 @@ func (q *Queries) GetRepoByName(ctx context.Context, name string) (Repo, error) 
 	return i, err
 }
 
+const insertGroupMember = `-- name: InsertGroupMember :exec
+INSERT INTO repo_group_members (group_id, member_id, position) VALUES (?, ?, ?)
+`
+
+type InsertGroupMemberParams struct {
+	GroupID  int64
+	MemberID int64
+	Position int64
+}
+
+func (q *Queries) InsertGroupMember(ctx context.Context, arg InsertGroupMemberParams) error {
+	_, err := q.db.ExecContext(ctx, insertGroupMember, arg.GroupID, arg.MemberID, arg.Position)
+	return err
+}
+
+const insertProxy = `-- name: InsertProxy :exec
+INSERT INTO repo_proxies (repo_id, remote_url, credentials, metadata_ttl, not_found_ttl) VALUES (?, ?, ?, ?, ?)
+`
+
+type InsertProxyParams struct {
+	RepoID      int64
+	RemoteUrl   string
+	Credentials []byte
+	MetadataTtl int64
+	NotFoundTtl int64
+}
+
+func (q *Queries) InsertProxy(ctx context.Context, arg InsertProxyParams) error {
+	_, err := q.db.ExecContext(ctx, insertProxy,
+		arg.RepoID,
+		arg.RemoteUrl,
+		arg.Credentials,
+		arg.MetadataTtl,
+		arg.NotFoundTtl,
+	)
+	return err
+}
+
+const listGroupMembers = `-- name: ListGroupMembers :many
+SELECT member_id FROM repo_group_members WHERE group_id = ? ORDER BY position
+`
+
+func (q *Queries) ListGroupMembers(ctx context.Context, groupID int64) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, listGroupMembers, groupID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var member_id int64
+		if err := rows.Scan(&member_id); err != nil {
+			return nil, err
+		}
+		items = append(items, member_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listProxies = `-- name: ListProxies :many
+
+SELECT repo_id, remote_url, credentials, metadata_ttl, not_found_ttl, last_ok_at, last_error, last_error_at
+FROM repo_proxies WHERE repo_id > ?1 ORDER BY repo_id LIMIT ?2
+`
+
+type ListProxiesParams struct {
+	After int64
+	Limit int64
+}
+
+// Proxy remotes. The repos service keeps them in memory; it reads them in pages of repo ids at
+// start.
+func (q *Queries) ListProxies(ctx context.Context, arg ListProxiesParams) ([]RepoProxy, error) {
+	rows, err := q.db.QueryContext(ctx, listProxies, arg.After, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RepoProxy
+	for rows.Next() {
+		var i RepoProxy
+		if err := rows.Scan(
+			&i.RepoID,
+			&i.RemoteUrl,
+			&i.Credentials,
+			&i.MetadataTtl,
+			&i.NotFoundTtl,
+			&i.LastOkAt,
+			&i.LastError,
+			&i.LastErrorAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRepos = `-- name: ListRepos :many
-SELECT id, name, format, anonymous_read, config, created_at, locked_by, description,
+SELECT id, name, format, kind, anonymous_read, config, created_at, locked_by, description,
   file_count, total_size, last_published_at FROM repos
 WHERE name > ?1 ORDER BY name LIMIT ?2
 `
@@ -127,6 +250,7 @@ func (q *Queries) ListRepos(ctx context.Context, arg ListReposParams) ([]Repo, e
 			&i.ID,
 			&i.Name,
 			&i.Format,
+			&i.Kind,
 			&i.AnonymousRead,
 			&i.Config,
 			&i.CreatedAt,
@@ -149,6 +273,50 @@ func (q *Queries) ListRepos(ctx context.Context, arg ListReposParams) ([]Repo, e
 	return items, nil
 }
 
+const nextGroupWithMembers = `-- name: NextGroupWithMembers :one
+
+SELECT group_id FROM repo_group_members WHERE group_id > ? ORDER BY group_id LIMIT 1
+`
+
+// Group members. The repos service keeps them in memory: it reads them group by group at start
+// and after a change.
+// The next group with members after group id after (0 for the first).
+func (q *Queries) NextGroupWithMembers(ctx context.Context, groupID int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, nextGroupWithMembers, groupID)
+	var group_id int64
+	err := row.Scan(&group_id)
+	return group_id, err
+}
+
+const setProxyError = `-- name: SetProxyError :exec
+UPDATE repo_proxies SET last_error = ?, last_error_at = ? WHERE repo_id = ?
+`
+
+type SetProxyErrorParams struct {
+	LastError   string
+	LastErrorAt int64
+	RepoID      int64
+}
+
+func (q *Queries) SetProxyError(ctx context.Context, arg SetProxyErrorParams) error {
+	_, err := q.db.ExecContext(ctx, setProxyError, arg.LastError, arg.LastErrorAt, arg.RepoID)
+	return err
+}
+
+const setProxyOK = `-- name: SetProxyOK :exec
+UPDATE repo_proxies SET last_ok_at = ? WHERE repo_id = ?
+`
+
+type SetProxyOKParams struct {
+	LastOkAt int64
+	RepoID   int64
+}
+
+func (q *Queries) SetProxyOK(ctx context.Context, arg SetProxyOKParams) error {
+	_, err := q.db.ExecContext(ctx, setProxyOK, arg.LastOkAt, arg.RepoID)
+	return err
+}
+
 const setRepoLockedBy = `-- name: SetRepoLockedBy :exec
 UPDATE repos SET locked_by = ? WHERE id = ?
 `
@@ -161,6 +329,29 @@ type SetRepoLockedByParams struct {
 // NULL clears the lock.
 func (q *Queries) SetRepoLockedBy(ctx context.Context, arg SetRepoLockedByParams) error {
 	_, err := q.db.ExecContext(ctx, setRepoLockedBy, arg.LockedBy, arg.ID)
+	return err
+}
+
+const updateProxy = `-- name: UpdateProxy :exec
+UPDATE repo_proxies SET remote_url = ?, credentials = ?, metadata_ttl = ?, not_found_ttl = ? WHERE repo_id = ?
+`
+
+type UpdateProxyParams struct {
+	RemoteUrl   string
+	Credentials []byte
+	MetadataTtl int64
+	NotFoundTtl int64
+	RepoID      int64
+}
+
+func (q *Queries) UpdateProxy(ctx context.Context, arg UpdateProxyParams) error {
+	_, err := q.db.ExecContext(ctx, updateProxy,
+		arg.RemoteUrl,
+		arg.Credentials,
+		arg.MetadataTtl,
+		arg.NotFoundTtl,
+		arg.RepoID,
+	)
 	return err
 }
 

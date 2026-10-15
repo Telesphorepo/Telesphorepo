@@ -470,6 +470,9 @@ func (s *Service) SetRepos(ctx context.Context, id int64, maps []Mapping) (*Sour
 		t, err := s.repos.ByName(ctx, m.Target)
 		switch {
 		case err == nil:
+			if t.Kind != repos.KindHosted {
+				return nil, fmt.Errorf("%w: target repo %q is a %s; files go into a hosted repo", ErrInvalid, t.Name, t.Kind)
+			}
 			if _, ok := accepts(t.Format, r.Format); !ok {
 				return nil, fmt.Errorf("%w: target repo %q (%s) cannot import %s content", ErrInvalid, t.Name, t.Format, r.Format)
 			}

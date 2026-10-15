@@ -74,7 +74,8 @@
 
   const rule = new Resource<Trust | null>(() => (id === null ? Promise.resolve(null) : api.publish.trusts.get(id)));
   const repos = new Resource(() => api.repos.list());
-  const sortedRepos = $derived([...(repos.data ?? [])].sort((a, b) => a.name.localeCompare(b.name)));
+  // A CI pipeline publishes, so it names only hosted repositories.
+  const sortedRepos = $derived((repos.data ?? []).filter((r) => r.kind === "hosted").sort((a, b) => a.name.localeCompare(b.name)));
 
   type Value = {
     name: string;

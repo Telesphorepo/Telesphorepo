@@ -31,6 +31,8 @@ type Asset struct {
 	CreatedAt        int64
 	UpdatedAt        int64
 	PublishSessionID sql.NullInt64
+	CheckedAt        int64
+	RemoteEtag       string
 }
 
 type AssetsFt struct {
@@ -202,6 +204,7 @@ type Repo struct {
 	ID              int64
 	Name            string
 	Format          string
+	Kind            string
 	AnonymousRead   bool
 	Config          string
 	CreatedAt       int64
@@ -210,6 +213,12 @@ type Repo struct {
 	FileCount       int64
 	TotalSize       int64
 	LastPublishedAt int64
+}
+
+type RepoGroupMember struct {
+	GroupID  int64
+	MemberID int64
+	Position int64
 }
 
 type RepoIpRule struct {
@@ -224,6 +233,17 @@ type RepoPermission struct {
 	RepoID int64
 	UserID int64
 	Level  string
+}
+
+type RepoProxy struct {
+	RepoID      int64
+	RemoteUrl   string
+	Credentials []byte
+	MetadataTtl int64
+	NotFoundTtl int64
+	LastOkAt    int64
+	LastError   string
+	LastErrorAt int64
 }
 
 type SchemaMigration struct {

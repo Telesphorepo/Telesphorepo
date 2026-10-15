@@ -118,6 +118,7 @@ func (a *API) Handler() http.Handler {
 	a.registerMoves(mux)
 	a.registerNexus(mux)
 	a.registerPublish(mux)
+	a.registerRepoKinds(mux)
 
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusNotFound, "not found")
@@ -451,6 +452,12 @@ type repoJSON struct {
 	FileCount       int64      `json:"file_count"`
 	TotalSize       int64      `json:"total_size"`
 	LastPublishedAt *time.Time `json:"last_published_at"`
+	Kind            string     `json:"kind"`                   // hosted, proxy or group
+	MemberCount     *int       `json:"member_count,omitempty"` // a group: how many members it has
+	// GET of a repo (see repoDetail): a group's members, the groups of a member, a proxy's remote.
+	Members []memberJSON `json:"members,omitempty"`
+	Groups  []string     `json:"groups,omitempty"`
+	Proxy   *proxyJSON   `json:"proxy,omitempty"`
 }
 
 func toRepoJSON(r *repos.Repo, perm string) repoJSON {
@@ -460,7 +467,11 @@ func toRepoJSON(r *repos.Repo, perm string) repoJSON {
 	}
 	out := repoJSON{
 		Name: r.Name, Format: r.Format, Description: r.Description, AnonymousRead: r.AnonymousRead, Config: cfg,
-		Permission: perm, LockedBy: r.LockedBy, FileCount: r.FileCount, TotalSize: r.TotalSize,
+		Permission: perm, LockedBy: r.LockedBy, FileCount: r.FileCount, TotalSize: r.TotalSize, Kind: r.Kind,
+	}
+	if r.Kind == repos.KindGroup {
+		n := r.MemberCount
+		out.MemberCount = &n
 	}
 	if !r.LastPublishedAt.IsZero() {
 		t := r.LastPublishedAt.UTC()
@@ -530,22 +541,47 @@ func (a *API) createRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Name          string          `json:"name"`
-		Format        string          `json:"format"`
-		Description   string          `json:"description"`
-		AnonymousRead bool            `json:"anonymous_read"`
-		Config        json.RawMessage `json:"config"`
+		Name          string            `json:"name"`
+		Format        string            `json:"format"`
+		Description   string            `json:"description"`
+		AnonymousRead bool              `json:"anonymous_read"`
+		Config        json.RawMessage   `json:"config"`
+		Kind          string            `json:"kind"`    // hosted (default), proxy or group
+		Members       []string          `json:"members"` // a group's members in read order
+		Proxy         *repos.ProxyInput `json:"proxy"`   // a proxy's remote
+		Force         bool              `json:"force"`   // a proxy: create also when the remote does not answer
 	}
 	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
 		return
 	}
-	repo, err := a.repos.Create(r.Context(), in.Name, in.Format, in.AnonymousRead, in.Description, in.Config)
+	ctx := r.Context()
+	var repo *repos.Repo
+	var err error
+	detail := map[string]any{}
+	switch in.Kind {
+	case "", repos.KindHosted:
+		repo, err = a.repos.Create(ctx, in.Name, in.Format, in.AnonymousRead, in.Description, in.Config)
+	case repos.KindGroup:
+		repo, err = a.repos.CreateGroup(ctx, in.Name, in.Format, in.AnonymousRead, in.Description, in.Members)
+		detail["members"] = in.Members
+	case repos.KindProxy:
+		px, ok := a.checkNewProxy(w, r, in.Format, in.Config, in.Proxy, in.Force)
+		if !ok {
+			return
+		}
+		repo, err = a.repos.CreateProxy(ctx, in.Name, in.Format, in.AnonymousRead, in.Description, in.Config, px)
+		detail["remote_url"] = px.RemoteURL
+	default:
+		httpx.Error(w, http.StatusBadRequest, `kind must be "hosted", "proxy" or "group"`)
+		return
+	}
 	if err != nil {
 		fail(w, r, err)
 		return
 	}
-	a.record(r, p, audit.RepoCreate, repo, repo.Name, map[string]any{"format": repo.Format, "anonymous_read": repo.AnonymousRead})
-	httpx.WriteJSON(w, http.StatusCreated, toRepoJSON(repo, "admin"))
+	detail["format"], detail["anonymous_read"], detail["kind"] = repo.Format, repo.AnonymousRead, repo.Kind
+	a.record(r, p, audit.RepoCreate, repo, repo.Name, detail)
+	a.writeRepo(w, r, http.StatusCreated, p, repo, "admin")
 }
 
 func (a *API) getRepo(w http.ResponseWriter, r *http.Request) {
@@ -558,7 +594,7 @@ func (a *API) getRepo(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, toRepoJSON(repo, perm))
+	a.writeRepo(w, r, http.StatusOK, p, repo, perm)
 }
 
 func (a *API) updateRepo(w http.ResponseWriter, r *http.Request) {
@@ -567,12 +603,29 @@ func (a *API) updateRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		AnonymousRead *bool           `json:"anonymous_read"`
-		Description   *string         `json:"description"`
-		Config        json.RawMessage `json:"config"`
+		AnonymousRead *bool             `json:"anonymous_read"`
+		Description   *string           `json:"description"`
+		Config        json.RawMessage   `json:"config"`
+		Proxy         *repos.ProxyInput `json:"proxy"` // a proxy's remote; the password is write-only
 	}
 	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
 		return
+	}
+	if in.Proxy != nil {
+		// The remote changes first: a refused change leaves the repo as it was.
+		repo, err := a.repos.ByName(r.Context(), r.PathValue("name"))
+		if err != nil {
+			fail(w, r, err)
+			return
+		}
+		old, px, err := a.repos.UpdateProxy(r.Context(), repo, *in.Proxy)
+		if err != nil {
+			fail(w, r, err)
+			return
+		}
+		if changed := proxyChanges(old, px); len(changed) > 0 {
+			a.record(r, p, audit.RepoUpdate, repo, repo.Name, map[string]any{"proxy": changed})
+		}
 	}
 	old, repo, err := a.repos.Update(r.Context(), r.PathValue("name"), in.AnonymousRead, in.Description, in.Config)
 	if err != nil {
@@ -598,7 +651,7 @@ func (a *API) updateRepo(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	httpx.WriteJSON(w, http.StatusOK, toRepoJSON(repo, "admin"))
+	a.writeRepo(w, r, http.StatusOK, p, repo, "admin")
 }
 
 // deleteRepo deletes a repo with all its files and blobs (admin): 200 {deleted: <file count>}.

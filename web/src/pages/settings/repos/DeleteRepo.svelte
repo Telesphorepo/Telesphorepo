@@ -32,8 +32,11 @@
   confirmLabel="Delete repository"
   destructive
   changes={[
-    `Deletes the ${files} of ${repo.name} from the storage`,
+    repo.kind === "group"
+      ? `Deletes the group; its ${formatCount(repo.member_count ?? 0)} ${repo.member_count === 1 ? "repository keeps its" : "repositories keep their"} files`
+      : `Deletes the ${files} of ${repo.name} from the storage`,
     "Removes the access that people and CI pipelines have to it, and its network rules",
+    ...(repo.groups?.length ? [`Removes it from the groups ${repo.groups.join(", ")}`] : []),
     "Builds that use it can no longer download from it",
   ]}
   onConfirm={remove}

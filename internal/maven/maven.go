@@ -68,7 +68,14 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if need == auth.Read {
-		h.assets.Serve(w, r, repo, p)
+		switch repo.Kind {
+		case repos.KindGroup:
+			h.serveGroup(w, r, repo, pr, p)
+		case repos.KindProxy:
+			h.serveProxy(w, r, repo, p)
+		default:
+			h.assets.Serve(w, r, repo, p)
+		}
 		return
 	}
 	if r.ContentLength > h.cfg().MaxUploadBytes {

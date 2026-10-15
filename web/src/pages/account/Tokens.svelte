@@ -77,7 +77,8 @@
 
   const writable = $derived(
     (repos.data ?? [])
-      .filter((r) => auth.isAdmin || r.permission === "write" || r.permission === "admin")
+      // Publish tokens are for hosted repositories: nobody publishes to a group or a proxy.
+      .filter((r) => r.kind === "hosted" && (auth.isAdmin || r.permission === "write" || r.permission === "admin"))
       .sort((a, b) => a.name.localeCompare(b.name)),
   );
 

@@ -7,10 +7,12 @@ changes. Design rationale and future milestones are in
 
 ## Purpose
 
-A self-hosted repository for **hosted** Maven repos (including Gradle plugins), Debian (apt)
-repos and raw file repos. Each format is a plugin. It ships as one Go binary with the web UI embedded. Metadata is in SQLite and blobs are on
-the local filesystem or in any S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It has no
-proxy or cache repos and is not compatible with the Nexus API.
+A self-hosted repository for Maven repos (including Gradle plugins), Debian (apt) repos and raw
+file repos. Each format is a plugin. A repo is **hosted** (it stores what is published to it), a
+**proxy** (Maven and Debian: it fetches files from a remote repository and keeps them) or a
+**group** (Maven: one address for the files of several repos). It ships as one Go binary with the
+web UI embedded. Metadata is in SQLite and blobs are on the local filesystem or in any
+S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with the Nexus API.
 
 ## Architecture
 
@@ -29,7 +31,8 @@ proxy or cache repos and is not compatible with the Nexus API.
 | `internal/auth` | Users (kinds `local`/`oidc`), argon2id passwords, Basic-auth cache, API tokens, sessions, rate limiting, permission checks |
 | `internal/oidc` | OIDC admin sign-on: `/api/auth/oidc/login` and `/callback` (go-oidc + x/oauth2, PKCE S256) |
 | `internal/publish` | Publish sessions: device enrollment, nonces, trust policies, the CI token exchange, `Verify` for `trs_` tokens and the cleanup job |
-| `internal/repos` | Repos and their per-format JSON config. A `Validator` (from `internal/format`) checks the config |
+| `internal/repos` | Repos, their kind and per-format JSON config. A `Validator` (from `internal/format`) checks the config and a `KindCheck` the kind. Keeps the group members and the proxy remotes in memory (see **Group and proxy repositories**) |
+| `internal/proxy` | Fetches the files of proxy repos from their remotes, caches them as assets and remembers remote 404s |
 | `internal/format` | The plugin contract: `Format` and the optional interfaces, `Host`, and the registry (`Register`, `All`, `Get`, `ValidateRepoConfig`) |
 | `internal/formats` | `all.go`: the one list of built-in formats. The only file that names them |
 | `internal/maven` | Format `maven`: `/maven/{repo}/...` GET/HEAD/PUT and the overwrite rules |
@@ -61,9 +64,11 @@ close and every 6 hours.
 | `users` | PK `id`, UNIQUE `username`, UNIQUE `users_oidc (oidc_issuer, oidc_subject)` where `oidc_subject` is set | argon2id PHC hash (`!` for SSO users, never verifies), `is_admin`, `disabled`, `password_changed_at`, `kind` (`local`/`oidc`), `email` |
 | `api_tokens` | UNIQUE `public_id`, UNIQUE `(user_id, name)` | `secret_hash` = SHA-256(secret); optional `expires_at`; `last_used_at` written at most once per minute. These are **read tokens**: they never publish |
 | `sessions` | PK `id_hash` (WITHOUT ROWID), idx `expires_at`, idx `user_id` | `id_hash` = SHA-256(cookie value) |
-| `repos` | UNIQUE `name`, partial idx `repos_anonymous (id) WHERE anonymous_read = 1` | `format` is any registered format name (no CHECK); `description` (at most 500 characters); `anonymous_read`; `config` JSON; `locked_by` (NULL, or the text that a write answers with 409, set while the repo mirrors a Nexus source); the counters `file_count`, `total_size` and `last_published_at` (unix time, 0 for never) |
+| `repos` | UNIQUE `name`, partial idx `repos_anonymous (id) WHERE anonymous_read = 1` | `format` is any registered format name (no CHECK); `kind` is `hosted` (default), `proxy` or `group`; `description` (at most 500 characters); `anonymous_read`; `config` JSON; `locked_by` (NULL, or the text that a write answers with 409, set while the repo mirrors a Nexus source); the counters `file_count`, `total_size` and `last_published_at` (unix time, 0 for never) |
 | `repo_permissions` | PK `(repo_id, user_id)`, idx `user_id` | `level` is `read` or `write` |
-| `assets` | UNIQUE `(repo_id, path)`, idx `uploaded_by` | Every stored file; `kind` is `artifact`, `metadata` or `index`. Triggers keep the repo counters in the transaction of each write: an insert adds 1 and its size, a replace adds the size change, a delete subtracts. Every asset row counts (artifacts, metadata, checksums and Debian index files). `last_published_at` is the newest `updated_at` of an insert or replace that is not an `index` row; a delete never lowers it |
+| `repo_group_members` | PK `(group_id, member_id)` (WITHOUT ROWID), UNIQUE `(group_id, position)`, idx `member_id` | The members of a group repo in read order (`position`). Both ids cascade with their repo, so a deleted member leaves its groups |
+| `repo_proxies` | PK `repo_id` (cascades) | The remote of a proxy repo: `remote_url` (http or https, ends with `/`), `credentials` (sealed JSON `{username, password}`, AAD `repo_proxy:<repo id>`; empty for none), `metadata_ttl` (1800 s), `not_found_ttl` (300 s), `last_ok_at`, `last_error`, `last_error_at` |
+| `assets` | UNIQUE `(repo_id, path)`, idx `uploaded_by` | Every stored file; `kind` is `artifact`, `metadata` or `index`. A cached file of a proxy has `checked_at` (when the remote last confirmed it) and `remote_etag`; a hosted file keeps 0 and `''`. Triggers keep the repo counters in the transaction of each write: an insert adds 1 and its size, a replace adds the size change, a delete subtracts. Every asset row counts (artifacts, metadata, checksums and Debian index files). `last_published_at` is the newest `updated_at` of an insert or replace that is not an `index` row; a delete never lowers it |
 | `assets_fts` | FTS5 trigram on `path` | Kept in sync by triggers; `index` rows are not indexed |
 | `settings` | PK `key` (WITHOUT ROWID), idx `updated_by` | JSON value, or base64(nonce‖AES-GCM ciphertext) when `secret=1`; `updated_by` |
 | `schema_migrations` | PK `component` (WITHOUT ROWID) | Applied version per migration track |
@@ -217,6 +222,12 @@ signed-in browser downloads from a private repo without a Basic prompt. A **writ
 | `GET, HEAD /debian/{repo}/key.asc` | read | The armored public signing key of the repo (`signing_key` of its config). Same read gate as the repo's other files |
 | `/` | none | Embedded UI, hash-routed |
 
+A read of a proxy or a group repo on a format route follows **Group and proxy repositories**. A
+write (Maven PUT, Debian upload, manual upload, scan) to a proxy or a group answers 405 with
+`Allow: GET, HEAD` and "A proxy is read-only." or "A group is read-only. Publish to one of its
+repositories." to a caller who can read the repo; any other caller gets the usual refusal.
+`GET /debian/{proxy}/key.asc` answers 404: a Debian proxy has no key of its own.
+
 The repo decision table: anonymous read is allowed when `anonymous_read` is on. Otherwise no
 credentials or bad credentials get 401 with a Basic challenge, valid credentials without
 permission get 403, and an unknown repo gets 404 (401 for anonymous callers, so repo names don't
@@ -258,8 +269,10 @@ Every other `/api` route answers it with 403. Errors are `{"error": "..."}`, plu
 | `GET /api/me` | any credential | Current user. User JSON includes `kind` (`local`/`oidc`), `email` (`""` when unset) and `second_factor_required` (true only for a setup-only UI session) |
 | `GET /api/tokens` · `POST /api/tokens`, `DELETE /api/tokens/{id}` | any credential · UI session | **Read tokens.** The token is shown once. A token cannot mint tokens. POST is 403 for SSO users |
 | `GET/POST /api/users`, `GET/PATCH /api/users/{username}` | admin (a UI session may change its own password) | The user list is paginated. `GET /api/users/{username}` returns one account (User JSON), 404 when no account has the name |
-| `GET /api/formats` | none | `[{name, title, default_config, settings_group?, icon?, kind_icons?}]` for every registered format. `icon` is the format's own one-color SVG, inline. `kind_icons` maps an artifact kind to an SVG when it differs from the format (Maven: `gradle-plugin`). A format gets both by implementing `format.Iconic` |
-| `GET /api/repos`, `GET /api/repos/{name}` · `POST /api/repos`, `PATCH /api/repos/{name}` | any/anon · admin | The list shows only repos the caller can see. Repo JSON has `file_count`, `total_size` and `last_published_at` (null before the first publish), read from the repo row (see `assets` in **Data model**). `format` must be a registered name. `description` (POST and PATCH) has at most 500 characters and no control characters except newline and tab. `config` must be a JSON object that the format validates (400 otherwise; an unknown format lists the available ones). An empty config becomes the format default. Repo JSON has `locked_by` (`""` when the repo is not locked). A PATCH with `config` calls the format's `RepoConfigChanged` |
+| `GET /api/formats` | none | `[{name, title, default_config, settings_group?, icon?, kind_icons?, kinds}]` for every registered format. `kinds` lists the repo kinds the format takes (`hosted`, plus `proxy` for a `format.Proxied` and `group` for a `format.Grouper`). `icon` is the format's own one-color SVG, inline. `kind_icons` maps an artifact kind to an SVG when it differs from the format (Maven: `gradle-plugin`). A format gets both by implementing `format.Iconic` |
+| `GET /api/repos`, `GET /api/repos/{name}` · `POST /api/repos`, `PATCH /api/repos/{name}` | any/anon · admin | The list shows only repos the caller can see. Repo JSON has `file_count`, `total_size` and `last_published_at` (null before the first publish), read from the repo row (see `assets` in **Data model**). `format` must be a registered name. `description` (POST and PATCH) has at most 500 characters and no control characters except newline and tab. `config` must be a JSON object that the format validates (400 otherwise; an unknown format lists the available ones). An empty config becomes the format default. Repo JSON has `locked_by` (`""` when the repo is not locked). A PATCH with `config` calls the format's `RepoConfigChanged`. Repo JSON has `kind`, and a group has `member_count`. POST takes `kind` (`hosted` default, `proxy`, `group`), `members: [names]` for a group, `proxy: {remote_url, username?, password?, metadata_ttl?, not_found_ttl?}` (seconds) for a proxy, and `force`. A new proxy's remote is checked first (see **Group and proxy repositories**): 502 `{error}` when it does not answer, unless `force: true`. PATCH takes `proxy` with the same fields for a proxy; `username` and `password` together replace the credentials, `username: ""` removes them, and the password is never returned. `GET /api/repos/{name}` adds, for a group, `members: [{name, format, kind, public}]` (the members the caller can read, in order); for a hosted or proxy repo, `groups: [names]` (the groups it is in that the caller can read); for a proxy and an admin, `proxy: {remote_url, has_credentials, metadata_ttl, not_found_ttl, last_ok_at\|null, last_error, last_error_at\|null}` |
+| `PUT /api/repos/{name}/members` | admin | `{members: [names]}` replaces the members of a group and their order; returns the repo. 400 for 0 or more than 50 members, a member of another format, a group, a name listed twice, an unknown name, or a repo that is not a group |
+| `POST /api/repos/{name}/proxy/test` | admin | Checks the remote of a proxy now: 200 `{ok: true}` or 502 `{ok: false, error}`. It records the result as the proxy's last answer or last error |
 | `GET /api/repos/{name}/permissions`, `PUT/DELETE .../permissions/{username}` | admin | `{level: read\|write}` |
 | `DELETE /api/repos/{name}` | admin | 200 `{deleted: n}`. Locks the repo (writes get 409 `RepoDeleting`), deletes the files in batches, then the repo row. See **Files, uploads and deletes** |
 | `GET /api/repos/{name}/assets?prefix=&after=&limit=` | read | Ordered by path; the prefix is a range scan |
@@ -284,7 +297,7 @@ Every other `/api` route answers it with 403. Errors are `{"error": "..."}`, plu
 | `GET /api/audit?after=&limit=&action=&repo=` | admin | `{items: [{id, at, actor, actor_user_id\|null, action, repo, target, detail, ip}], next}`, newest first. `repo` is a repo name |
 | `GET /api/search?q=&repo=&after=&limit=` | any/anon | FTS5 trigram, `q` ≥ 3 chars, readable repos only |
 | `GET /api/repos/{name}/status` | read | The format's `Status` result, or `{}`. Debian: `{pending}`, the count of dirty rows |
-| `GET /api/repos/{name}/usage` | read | `{base_url, snippets:[{title, lang, code}]}` from the format's `Usage`. `base_url` is the `base_url` setting, else the request scheme and host |
+| `GET /api/repos/{name}/usage` | read | `{base_url, snippets:[{title, lang, code}]}` from the format's `Usage`; a proxy or a group gets no publish snippets. `base_url` is the `base_url` setting, else the request scheme and host |
 | `GET /api/settings` | admin | `{groups:[{name, label, settings:[Item]}]}`. An Item has key, env, group, label, help, type, options, secret, value, default, source (`db`/`env`/`default`), locked |
 | `PATCH /api/settings` | admin | `{key: value}`. `null` resets a key; `""` for a secret means unchanged. Returns 400 `{error, fields}`, or 409 when an env-locked key gets a different value. Backend changes must pass the probe; SSO changes must pass discovery. A backend change that starts a storage move saves the other keys of the patch and returns 202 `{move: Move}`; 409 while a move runs |
 | `GET /api/storage/moves/current` | admin | The newest Move, running or ended; 404 when there has been none |
@@ -648,6 +661,69 @@ input or refused credentials, 404, 409 (exists, running, not running, cut over, 
   list of the cut-over sync. The repo list and the repo page show a "mirrors Nexus" badge when
   `locked_by` is set.
 
+## Group and proxy repositories
+
+A format takes proxy repos when it implements `format.Proxied` (Maven, Debian) and group repos
+when it implements `format.Grouper` (Maven). `repos.Service` refuses another kind for a format
+without the interface (400). Neither kind takes uploads, publish sessions or CI pipelines:
+minting a session for one answers 409 with the read-only text, and a CI pipeline that lists one
+answers 400. A Nexus mapping refuses a target that is not hosted.
+
+**In memory.** `repos.Service` keeps the members of each group and the remote of each proxy
+(credentials decrypted) in memory. It loads them at start (`Load`) and changes them after each
+write: a group create or member change, a proxy create or change, and a repo delete (the member
+leaves its groups through the cascade). Request paths never read `repo_group_members` or
+`repo_proxies`. A proxy's last answer is written to `last_ok_at` at most once a minute; an
+error is written each time. Credentials that do not decrypt at start (a changed master key)
+are dropped from memory, and the server logs the repo ids.
+
+**Groups.**
+
+- A group holds 1 to 50 members, each a hosted or proxy repo of the group's format; groups do
+  not nest. A repo can be in several groups. A group with no member left (its members were
+  deleted) stays and serves nothing.
+- `GET /maven/{group}/{path}` needs read access to the group (the read gate and the group's IP
+  rules). The plugin tries the members in order and skips a member that the reader cannot read
+  (`auth.ReadsThrough`: the reader's access and the member's read rules both count; no audit
+  event). The first member that has the file serves it. A proxy member fetches from its remote
+  only when no member before it has the file. No member: 404, or 502 when a proxy member's remote
+  failed.
+- An artifact-level (or group-level) `maven-metadata.xml` merges over the readable members that
+  have it: the union of the versions in Maven order, the newest `latest`, `release` and
+  `lastUpdated`, and the union of the plugins by prefix. Its `.md5`, `.sha1`, `.sha256` and
+  `.sha512` are computed from the merged bytes. With one such member, that member's own files
+  serve. A version-level file (under a `-SNAPSHOT` folder) comes from the first member that has it.
+
+**Proxies** (`internal/proxy`).
+
+- The remote URL is http or https, has no user, query or fragment, and ends with `/`. A new proxy
+  checks its remote once: a GET of the format's probe (`format.Proxied.ProxyProbe`: the root for
+  Maven, `dists/<distribution>/InRelease` for Debian, with `stable` when the config names no
+  `distribution`). The root passes with any answer except 401, 403, 407 and 5xx; a probe file
+  must exist. `force: true` skips the check.
+- `format.Proxied.Classify` sorts a path: Maven `maven-metadata.xml*` and files under a
+  `-SNAPSHOT` folder change, the rest is immutable; Debian `pool/**` and `dists/**/by-hash/**` are
+  immutable, the rest of `dists/**` changes, other paths are refused (404).
+- A read goes through the usual gate. A cached file that is immutable, or changing and checked
+  within `metadata_ttl`, serves from storage (with the presigned redirect on S3). Otherwise the
+  server fetches `remote_url + path`, with `If-None-Match` (the stored ETag) and
+  `If-Modified-Since` for a cached file; a 304 sets `checked_at`. One fetch per (repo, path) runs
+  at a time (`assets.Lock`); a second request waits and then serves the stored file.
+- A 200 spools through the upload pipeline (`max_upload_size`, hashes), stores the blob and
+  upserts the asset row with no uploader, the remote's `Last-Modified` as `created_at` and
+  `updated_at`, `checked_at` and the ETag. The client waits for the whole file.
+- A remote 404 or 410 answers 404 and is remembered in memory for `not_found_ttl` (an LRU of
+  10,000 paths per server). A cached file that the remote no longer has stays and serves.
+- A remote error, a refusal (for example 401) or no answer headers within 30 s: a cached file
+  serves although stale, with a warning in the log; with nothing cached the answer is 502 "The
+  remote repository did not answer." `last_error` and `last_error_at` record it; a success sets
+  `last_ok_at`. A fetch continues when the client goes away, for at most 30 minutes.
+- The fetch follows at most 5 redirects. The credentials (HTTP Basic) go only to the remote's
+  host: a redirect to another host drops them. No log line holds them.
+- A Debian proxy serves the remote's files unchanged: no indexer, no signature of its own.
+  Clients keep the remote archive's key. Its apt snippet has no key step and no `signed-by`.
+- Deleting files of a proxy (Files tab, admin) works; the next request fetches them again.
+
 ## Files, uploads and deletes
 
 `internal/files` serves the file tree and runs deletes and manual uploads. The core names no
@@ -893,13 +969,15 @@ decision is in `docs/design/rationale.md`.
   challenge.
 - **Browse** (anyone; visitors see the anonymous-read repos). `/#/` is titled "Repositories", with
   no subtitle. A toolbar holds a filter box, a format filter and **New repository** (admins). A
-  table shows the format icon, the name (with a lock when the repo is private), files, size and
-  last publish (`file_count`, `total_size`, `last_published_at`). On a phone the format icon sits
+  table shows the format icon, the name (with a lock when the repo is private, and the mark of a
+  proxy or a group), files (a group: its member count), size and last publish (`file_count`, `total_size`, `last_published_at`). On a phone the format icon sits
   before the name. A click anywhere on a row opens the repo. Search is `/#/search?q=&repo=`: the
   top-bar field holds the query, and a select picks the repo.
 - **Repository page** (`/#/repo/{name}/...`). The header shows the name with a lock for a private
   repo, the format (icon and title) and the description. **Upload** and **Settings** show for users
-  who may use them. One page loads the repo once and switches between these views:
+  who may use them. A group has no Files view: its page shows the Use view and links to each
+  member. A proxy shows its cached files and has no Upload and no Publish view. One page loads
+  the repo once and switches between these views:
   - `files/<path>`: breadcrumbs and one of the views below, with a details column for the selected
     file or artifact (SHA-256, checksum links, Download, client snippets). Delete asks for a fresh
     second factor first, except for admins.
@@ -952,7 +1030,16 @@ decision is in `docs/design/rationale.md`.
     `/#/settings/ci-pipelines/new?repo={name}&back=/settings/repositories/{name}/access`.
     Each person links to their page, where the same access is also edited.
   - *Signing:* the current key, the `key.asc` address, change the key or create a new one.
-  - Create a repository at `/#/settings/repositories/new`: name, format (with the plugin icon),
+  - A proxy has the tabs Overview (the remote, when it last answered or its last error, **Test
+    the remote**, the address for a build, the cache size, the groups it is in), Access and Remote
+    (address, credentials, the two times). A group has Overview (the address for a build and the
+    members in order with Move up, Move down, Remove and Add repositories, saved from the save
+    bar) and Access. A hosted repository's Overview lists the groups it is in.
+  - Create a repository at `/#/settings/repositories/new`. The first choice is a repository, a
+    proxy of a remote repository or a group of repositories; each lists only the formats that take
+    it. A proxy asks for the remote address (with the well-known remotes as choices) and optional
+    credentials, and offers **Create anyway** when the check of the remote fails. A group picks its
+    members, hosted first. A repository asks for name, format (with the plugin icon),
     description, visibility. Debian adds architectures and the signing key. For a new key, the page
     calls `POST /api/signing-keys` and then `POST /api/repos`. If the second call fails, the page
     deletes the new key. **Create** is in the footer of the last card.
@@ -1115,7 +1202,7 @@ comes from `internal/containerengine`; `TR_ENGINE=docker|podman` forces one. `Te
 Keycloak container (`E2E_KEYCLOAK_IMAGE`, realm `e2e/testdata/keycloak/realm-e2e.json`) and
 drives the browser flow with a cookie-jar HTTP client. `TestRaw` uses a curl container.
 `TestAPIFormats` covers `/api/formats`, `/status` and `/usage`. `TestQueryPlans` runs `dbcheck`
-inside a server container. `files_test.go` covers `TestTree`, `TestDelete` (who may delete, file, prefix and Bearer deletes, an admin UI session, blobs gone, repo delete and name reuse), `TestManualUploadMaven` (checksums, metadata order, `mvn` resolves the uploaded and the generated pom), `TestManualUploadRaw`, `TestRepoCounters` (`file_count`, `total_size` and `last_published_at` through uploads, a replace, a file delete and a folder delete) and `TestDebianDeleteAndUpload` (apt sees the package, then not; 4 by-hash files remain). `audit_test.go` covers `TestAudit`: events, filters, paging, no secret values, admin only, and no IP outside the audit log. `network_test.go` covers `TestClientIP` (with the default an `X-Forwarded-For` from the harness peer is ignored and the peer becomes a proxy candidate; trusting the candidate makes the header count and removes the candidate; `private`: a chain through a private hop, `CF-Connecting-IP` from a non-Cloudflare peer; an untrusted peer's header, an empty list, invalid entries, reset to the default). `TestIPRules` and `TestPresetIPLists` set `trusted_proxies` to `private` first, so `X-Forwarded-For` sets the client address, `TestIPRules` (validation; allowed and refused reads of the format route, tree, assets, usage and status; the repo record stays readable; search drops the repo; refused device and manual mints, PUT and admin delete, each audited with its IP and scope; empty lists lift the rule) and `TestPresetIPLists` (a second Telesphorepo server is the stub: startup fetch, a preset in read rules, a Cloudflare hop in the chain, a failed refresh that keeps the last good list, recovery, and stored lists after a restart without the stub) and `TestCustomIPLists` (create, edit, rename that carries the references, use in rules and in `trusted_proxies`, delete while in use gives 409) and `TestIPRangeParse` (the paste parser: one per line, comma, space, tab and `|` separated, CSV with a header row, tables, comments, labels, quotes, IPv6 and IPv4-mapped IPv6, an unmasked CIDR, duplicates, invalid lines with their numbers, the 1 MiB limit, admins only). `signing_keys_test.go` covers create, import of plain and encrypted keys, delete while in use gives 409, a per-repo key that `apt` installs from, a key change that signs again, and keys after a restart. `TestNoBrowserPasswordPrompt` (in `auth_test.go`) checks that a 401 under `/api` or with `X-Telesphorepo-UI` has no `WWW-Authenticate`. `folder_upload_test.go` covers `TestFolderUploadMaven` (a Maven-layout tree with checksum, signature and stray files; a flat folder with two poms; a bad tree that gives 400; scans store nothing; checksums and metadata) and `TestFolderUploadDebianAndRaw`. `TestStorageMove*` run each server on a named data volume: fs to
+inside a server container. `files_test.go` covers `TestTree`, `TestDelete` (who may delete, file, prefix and Bearer deletes, an admin UI session, blobs gone, repo delete and name reuse), `TestManualUploadMaven` (checksums, metadata order, `mvn` resolves the uploaded and the generated pom), `TestManualUploadRaw`, `TestRepoCounters` (`file_count`, `total_size` and `last_published_at` through uploads, a replace, a file delete and a folder delete) and `TestDebianDeleteAndUpload` (apt sees the package, then not; 4 by-hash files remain). `audit_test.go` covers `TestAudit`: events, filters, paging, no secret values, admin only, and no IP outside the audit log. `network_test.go` covers `TestClientIP` (with the default an `X-Forwarded-For` from the harness peer is ignored and the peer becomes a proxy candidate; trusting the candidate makes the header count and removes the candidate; `private`: a chain through a private hop, `CF-Connecting-IP` from a non-Cloudflare peer; an untrusted peer's header, an empty list, invalid entries, reset to the default). `TestIPRules` and `TestPresetIPLists` set `trusted_proxies` to `private` first, so `X-Forwarded-For` sets the client address, `TestIPRules` (validation; allowed and refused reads of the format route, tree, assets, usage and status; the repo record stays readable; search drops the repo; refused device and manual mints, PUT and admin delete, each audited with its IP and scope; empty lists lift the rule) and `TestPresetIPLists` (a second Telesphorepo server is the stub: startup fetch, a preset in read rules, a Cloudflare hop in the chain, a failed refresh that keeps the last good list, recovery, and stored lists after a restart without the stub) and `TestCustomIPLists` (create, edit, rename that carries the references, use in rules and in `trusted_proxies`, delete while in use gives 409) and `TestIPRangeParse` (the paste parser: one per line, comma, space, tab and `|` separated, CSV with a header row, tables, comments, labels, quotes, IPv6 and IPv4-mapped IPv6, an unmasked CIDR, duplicates, invalid lines with their numbers, the 1 MiB limit, admins only). `signing_keys_test.go` covers create, import of plain and encrypted keys, delete while in use gives 409, a per-repo key that `apt` installs from, a key change that signs again, and keys after a restart. `groups_test.go` covers `TestGroups`: a release and a snapshot member resolve through the group with `mvn` and Gradle, the merged `maven-metadata.xml` and its `.sha1`, the member order, a public group with a private member (anonymous and a reader), 405 for a PUT and 409 for a publish session, 400 for a member of another format, a nested group, an unknown name and no member, and a member delete. `proxy_test.go` covers `TestProxy` with a second Telesphorepo server as the remote: `mvn` through the proxy and no remote request on the second resolve, the `metadata_ttl` recheck with a 304 and a changed file, a remembered 404, 405 for a PUT, a group where the hosted member wins over the proxy, remote credentials (with them, 502 without them), an nginx container that redirects to another host and records that the credentials did not follow, `apt-get` through a Debian proxy with the remote's key, and a stopped remote (cached file served, 502, `last_error`). `TestNoBrowserPasswordPrompt` (in `auth_test.go`) checks that a 401 under `/api` or with `X-Telesphorepo-UI` has no `WWW-Authenticate`. `folder_upload_test.go` covers `TestFolderUploadMaven` (a Maven-layout tree with checksum, signature and stray files; a flat folder with two poms; a bad tree that gives 400; scans store nothing; checksums and metadata) and `TestFolderUploadDebianAndRaw`. `TestStorageMove*` run each server on a named data volume: fs to
 SeaweedFS and back with uploads during the move, a forced failure, a restart mid-move
 (`Server.Restart`) and a cancel.
 

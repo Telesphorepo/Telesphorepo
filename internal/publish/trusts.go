@@ -177,6 +177,9 @@ func (s *Service) repoIDs(ctx context.Context, names []string) ([]int64, error) 
 		if err != nil {
 			return nil, err
 		}
+		if r.Kind != repos.KindHosted {
+			return nil, errorf(ErrInvalid, r.Name+" is a "+r.Kind+"; a CI pipeline publishes to a repository that takes uploads")
+		}
 		ids = append(ids, r.ID)
 	}
 	return ids, nil

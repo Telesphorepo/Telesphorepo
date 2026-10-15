@@ -185,6 +185,13 @@ func (s *Service) gate(w http.ResponseWriter, r *http.Request, p *Principal, nam
 		httpx.Error(w, http.StatusNotFound, "repo not found")
 		return nil, nil, false
 	}
+	// A proxy or a group takes no writes. Say so to a caller who can read it; anyone else gets
+	// the usual refusal, so the answer does not tell that the repo exists.
+	if need >= Write && repo.Kind != repos.KindHosted && lvl >= Read {
+		w.Header().Set("Allow", "GET, HEAD")
+		httpx.Error(w, http.StatusMethodNotAllowed, ReadOnly(repo))
+		return nil, nil, false
+	}
 	if lvl < need {
 		return denied()
 	}
@@ -195,6 +202,28 @@ func (s *Service) gate(w http.ResponseWriter, r *http.Request, p *Principal, nam
 		return nil, nil, false
 	}
 	return repo, p, true
+}
+
+// ReadOnly is the answer to a write to a proxy or a group repo.
+func ReadOnly(repo *repos.Repo) string {
+	if repo.Kind == repos.KindGroup {
+		return "A group is read-only. Publish to one of its repositories."
+	}
+	return "A proxy is read-only."
+}
+
+// ReadsThrough reports whether the caller p of r may read repo as a member of a group: p's
+// access to repo (as on its own route) and repo's read rules for the client address both count.
+// It writes no answer and no audit event; the group skips a member that p cannot read.
+func (s *Service) ReadsThrough(ctx context.Context, r *http.Request, p *Principal, repo *repos.Repo) (bool, error) {
+	lvl, err := s.gateLevel(ctx, p, repo)
+	if err != nil || lvl < Read {
+		return false, err
+	}
+	if s.rules != nil && s.rules.CheckRequest(r, repo, netrules.ScopeRead, ActorOf(p)) != nil {
+		return false, nil
+	}
+	return true, nil
 }
 
 // ReadableRepoIDs returns the ids of the repos p can read, or all=true for an admin. It merges

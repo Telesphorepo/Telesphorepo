@@ -26,6 +26,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
 	"github.com/Telesphorepo/Telesphorepo/internal/demo"
 	"github.com/Telesphorepo/Telesphorepo/internal/provenance"
+	"github.com/Telesphorepo/Telesphorepo/internal/proxy"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 	"github.com/Telesphorepo/Telesphorepo/internal/signing"
@@ -72,6 +73,64 @@ type StatusReporter interface {
 // ConfigObserver runs after a repo's config was changed through the API.
 type ConfigObserver interface {
 	RepoConfigChanged(ctx context.Context, old, new *repos.Repo) error
+}
+
+// Grouper marks a format that serves group repos: its read route answers a read of a group from
+// the group's members (Host.Repos.MemberRepos), in order, and skips a member that the reader
+// cannot read (Host.Auth.ReadsThrough). The core refuses a group of a format without it.
+type Grouper interface {
+	ServesGroups()
+}
+
+// Proxied marks a format that serves proxy repos. Classify tells the core how to cache a path;
+// ok=false refuses the path (404). The read route of the format passes a proxy repo's reads to
+// Host.Proxy. ProxyProbe is the path that a check of the remote requests: "" for the remote's
+// root, or a file that the remote of a repo with config must have. The core refuses a proxy of
+// a format without it.
+type Proxied interface {
+	Classify(path string) (c ProxyClass, ok bool)
+	ProxyProbe(config json.RawMessage) string
+}
+
+// ProxyClass is how a proxy caches a path.
+type ProxyClass int
+
+const (
+	ProxyImmutable ProxyClass = iota // fetched once, never checked again (a release jar, a .deb)
+	ProxyChanging                    // checked after metadata_ttl (maven-metadata.xml, InRelease)
+)
+
+// SupportsKind returns an error when format name takes no repos of kind (repos.KindCheck).
+func SupportsKind(name, kind string) error {
+	f := Get(name)
+	if f == nil {
+		return fmt.Errorf("unknown format %q; available formats: %s", name, strings.Join(Names(), ", "))
+	}
+	ok := false
+	switch kind {
+	case repos.KindHosted:
+		ok = true
+	case repos.KindGroup:
+		_, ok = f.(Grouper)
+	case repos.KindProxy:
+		_, ok = f.(Proxied)
+	}
+	if !ok {
+		return fmt.Errorf("%s repositories cannot be a %s", f.Title(), kind)
+	}
+	return nil
+}
+
+// Kinds returns the repo kinds that format f takes.
+func Kinds(f Format) []string {
+	out := []string{repos.KindHosted}
+	if _, ok := f.(Proxied); ok {
+		out = append(out, repos.KindProxy)
+	}
+	if _, ok := f.(Grouper); ok {
+		out = append(out, repos.KindGroup)
+	}
+	return out
 }
 
 // Iconic supplies the format's icons for the UI: SVGs of one color (currentColor) on a 24x24
@@ -342,9 +401,10 @@ const (
 // Host is the set of core services a format may use. Plugins never import each other.
 type Host struct {
 	DB       *db.DB
-	Auth     *auth.Service   // Identify, RepoGate (pass the format's Name), Access
-	Assets   *assets.Service // Spool, Lock, Put, Serve, upserts in a transaction
-	Repos    *repos.Service
+	Auth     *auth.Service     // Identify, RepoGate (pass the format's Name), Access
+	Assets   *assets.Service   // Spool, Lock, Put, Serve, upserts in a transaction
+	Repos    *repos.Service    // repos, group members and proxy remotes (in memory)
+	Proxy    *proxy.Service    // fetches and serves the files of proxy repos
 	Config   config.Provider   // live core configuration
 	Settings *settings.Service // live snapshot (Current) with the format's own settings; Subscribe
 	Keys     *signing.Keys     // the repository signing keys (live snapshot)

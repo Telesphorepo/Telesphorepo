@@ -55,3 +55,16 @@ export function splitDuration(text: string): Parts {
   const seconds = goDurationSeconds(text);
   return seconds === null ? { num: "", unit: "m" } : split(seconds, DURATION_UNITS);
 }
+
+/** Number and unit of a duration in seconds. */
+export function splitSeconds(seconds: number): Parts {
+  return split(seconds, DURATION_UNITS);
+}
+
+/** Seconds of a number and a duration unit, rounded to whole seconds; null when the number is not a positive number. */
+export function joinSeconds(p: Parts): number | null {
+  const n = Number(p.num);
+  const u = DURATION_UNITS.find((x) => x.value === p.unit);
+  if (!p.num.trim() || !Number.isFinite(n) || n <= 0 || !u) return null;
+  return Math.round(n * u.factor);
+}

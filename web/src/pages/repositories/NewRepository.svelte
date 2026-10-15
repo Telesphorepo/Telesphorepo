@@ -1,18 +1,32 @@
 <!--
-  New repository (administrators): name, format, description and who can download. A Debian
-  repository also gets its architectures and its signing key: a key that exists, or a new key that
-  the page creates first (POST /api/signing-keys, then POST /api/repos). Other formats with options
-  show their format editor.
+  New repository (administrators). The first choice is what to create: a repository, a proxy of a
+  remote repository, or a group of repositories. Each choice offers only the formats that take it
+  (GET /api/formats, `kinds`).
+
+  A repository: name, format, description and who can download. A Debian repository also gets its
+  architectures and its signing key: a key that exists, or a new key that the page creates first
+  (POST /api/signing-keys, then POST /api/repos). Other formats with options show their format
+  editor.
+
+  A proxy: the remote address (with well-known remotes as quick choices) and optional credentials.
+  The server checks the remote before it creates the proxy. When the remote does not answer, the
+  page shows the error and "Create anyway" sends the same request with force.
+
+  A group: its members, picked from the hosted repositories and proxies of the format. The page
+  orders them with the hosted repositories first, so a remote cannot shadow your own files. The
+  group's settings change the order later.
 -->
 <script lang="ts">
   import { toast } from "svelte-sonner";
   import type { PageProps } from "$lib/router.svelte";
-  import { href, navigate, repoPath } from "$lib/router.svelte";
-  import { api, errorMessage, type RepoConfig } from "$lib/api";
+  import { href, navigate, repoPath, repoSettingsPath } from "$lib/router.svelte";
+  import { api, ApiError, errorMessage, type NewRepo, type Repo, type RepoConfig, type RepoKind } from "$lib/api";
   import { Resource } from "$lib/load.svelte";
   import { formatLook } from "$lib/formats";
+  import { normalizeRemote, remoteError, remotePresets } from "$lib/remotes";
   import * as RadioGroup from "$lib/components/ui/radio-group";
   import { Button } from "$lib/components/ui/button";
+  import { Checkbox } from "$lib/components/ui/checkbox";
   import { Input } from "$lib/components/ui/input";
   import { Spinner } from "$lib/components/ui/spinner";
   import PageHeader from "$lib/components/PageHeader.svelte";
@@ -23,11 +37,16 @@
   import FormatIcon from "$lib/components/FormatIcon.svelte";
   import ListInput from "$lib/components/ListInput.svelte";
   import OptionRow from "$lib/components/OptionRow.svelte";
+  import RepoKindIcon from "$lib/components/RepoKindIcon.svelte";
+  import CompactEmpty from "$lib/components/CompactEmpty.svelte";
   import VisibilityChoice from "$lib/components/VisibilityChoice.svelte";
   import SigningKeyChoice, { type KeyChoice } from "$lib/components/SigningKeyChoice.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import Loading from "$lib/components/Loading.svelte";
   import ConfigEditor from "$lib/formats/ConfigEditor.svelte";
+  import PackageIcon from "@lucide/svelte/icons/package";
+  import CloudDownloadIcon from "@lucide/svelte/icons/cloud-download";
+  import LayersIcon from "@lucide/svelte/icons/layers";
 
   let {}: PageProps = $props();
 
@@ -36,10 +55,30 @@
   // The server's rule for names (repos.NameRE).
   const nameRE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
   const archRE = /^[a-z0-9-]+$/;
+  const maxMembers = 50;
 
   const formats = new Resource(() => api.formats.list());
   const keys = new Resource(() => api.signingKeys.list());
+  // The repositories a group can read; loaded when the person chooses a group.
+  const repos = new Resource(() => api.repos.list(), { lazy: true });
 
+  const kindChoices: { kind: RepoKind; label: string; description: string; icon: typeof PackageIcon }[] = [
+    { kind: "hosted", label: "A repository", description: "You publish your own packages here.", icon: PackageIcon },
+    {
+      kind: "proxy",
+      label: "A proxy of a remote repository",
+      description: "The server gets packages from a remote repository on first request, keeps them and serves them from here.",
+      icon: CloudDownloadIcon,
+    },
+    {
+      kind: "group",
+      label: "A group of repositories",
+      description: "One address reads several repositories of one format, in the order you choose.",
+      icon: LayersIcon,
+    },
+  ];
+
+  let kind = $state<RepoKind>("hosted");
   let name = $state("");
   let formatName = $state("");
   let description = $state("");
@@ -48,16 +87,46 @@
   let keyChoice = $state<KeyChoice>({ mode: "existing", name: "" });
   // undefined: the format's default config; null: the editor holds an invalid config.
   let config = $state<RepoConfig | null | undefined>(undefined);
+  // A proxy.
+  let remoteURL = $state("");
+  let username = $state("");
+  let password = $state("");
+  // A group: the chosen member names.
+  let chosen = $state<string[]>([]);
   let busy = $state(false);
   let error = $state("");
+  // The remote did not answer: the server created nothing, and "Create anyway" can force it.
+  let remoteFailed = $state(false);
 
+  const kindsOf = (f: { kinds?: RepoKind[] }) => f.kinds ?? ["hosted"];
+  const offered = $derived(kindChoices.filter((c) => (formats.data ?? []).some((f) => kindsOf(f).includes(c.kind))));
+  const kindFormats = $derived((formats.data ?? []).filter((f) => kindsOf(f).includes(kind)));
+
+  // Keep a format that takes the chosen kind.
   $effect(() => {
-    if (!formatName && formats.data?.length) formatName = formats.data[0].name;
+    if (kindFormats.length && !kindFormats.some((f) => f.name === formatName)) {
+      formatName = kindFormats[0].name;
+      config = undefined;
+    }
+  });
+  $effect(() => {
+    if (kind === "group" && !repos.data && !repos.loading && !repos.error) repos.reload();
   });
 
-  const format = $derived(formats.data?.find((f) => f.name === formatName));
-  const debian = $derived(formatName === "debian");
-  const otherOptions = $derived(!!format && !debian && Object.keys(format.default_config ?? {}).length > 0);
+  const format = $derived(kindFormats.find((f) => f.name === formatName));
+  const debian = $derived(kind === "hosted" && formatName === "debian");
+  const otherOptions = $derived(kind === "hosted" && !!format && !debian && Object.keys(format.default_config ?? {}).length > 0);
+  const presets = $derived(remotePresets[formatName] ?? []);
+
+  // The repositories a group of this format can read: hosted ones first, then proxies, each by name.
+  const rank = (r: Repo) => (r.kind === "proxy" ? 1 : 0);
+  const candidates = $derived(
+    (repos.data ?? [])
+      .filter((r) => r.format === formatName && (r.kind ?? "hosted") !== "group")
+      .sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name)),
+  );
+  // The members in read order: the order of the list, so hosted repositories come first.
+  const members = $derived(candidates.filter((r) => chosen.includes(r.name)).map((r) => r.name));
 
   const nameError = $derived(
     name && !nameRE.test(name) ? "Use lowercase letters, digits, dots, dashes and underscores, and start with a letter or a digit." : "",
@@ -67,36 +136,76 @@
     if (archList.length === 0) return "Enter at least one architecture, for example amd64.";
     const bad = archList.find((a) => !archRE.test(a) || a === "all");
     if (bad) return `${bad} is not an architecture name. Use names such as amd64 or arm64.`;
-   return "";
+    return "";
   });
+  const urlError = $derived(kind === "proxy" ? remoteError(remoteURL) : "");
+  const credentialsError = $derived(
+    kind === "proxy" && !!password && !username.trim() ? "Enter the username that goes with the password." : "",
+  );
   const keyMissing = $derived(debian && !keyChoice.name);
-  const canCreate = $derived(!!format && !!name && !nameError && !archError && !keyMissing && config !== null && !busy);
+  const kindReady = $derived(
+    kind === "proxy"
+      ? !!remoteURL.trim() && !urlError && !credentialsError
+      : kind === "group"
+        ? members.length > 0 && members.length <= maxMembers
+        : !archError && !keyMissing && config !== null,
+  );
+  const canCreate = $derived(!!format && !!name && !nameError && kindReady && !busy);
+  const submitLabel = $derived(kind === "proxy" ? "Create proxy" : kind === "group" ? "Create group" : "Create repository");
+
+  function chooseKind(v: string) {
+    kind = v as RepoKind;
+    error = "";
+    remoteFailed = false;
+  }
+
+  function toggleMember(n: string, on: boolean) {
+    chosen = on ? [...chosen, n] : chosen.filter((x) => x !== n);
+  }
 
   async function create(e: SubmitEvent) {
     e.preventDefault();
+    await send(false);
+  }
+
+  async function send(force: boolean) {
     if (!format || !canCreate) return;
     busy = true;
     error = "";
+    remoteFailed = false;
     // The key this attempt created; deleted again when the repository is not created, so a retry
     // can create it again.
     let createdKey = "";
     try {
-      let cfg: RepoConfig = config ?? format.default_config ?? {};
-      if (debian) {
-        if (keyChoice.mode === "new") createdKey = (await api.signingKeys.create({ name: keyChoice.name.trim() })).name;
-        cfg = { ...format.default_config, architectures: archList, signing_key: keyChoice.name.trim() };
+      const body: NewRepo = { name, format: format.name, description: description.trim(), anonymous_read: anonymous, kind };
+      if (kind === "hosted") {
+        let cfg: RepoConfig = config ?? format.default_config ?? {};
+        if (debian) {
+          if (keyChoice.mode === "new") createdKey = (await api.signingKeys.create({ name: keyChoice.name.trim() })).name;
+          cfg = { ...format.default_config, architectures: archList, signing_key: keyChoice.name.trim() };
+        }
+        body.config = cfg;
+      } else if (kind === "proxy") {
+        body.proxy = { remote_url: normalizeRemote(remoteURL) };
+        if (username.trim()) {
+          body.proxy.username = username.trim();
+          body.proxy.password = password;
+        }
+        if (force) body.force = true;
+      } else {
+        body.members = members;
       }
-      const repo = await api.repos.create({
-        name,
-        format: format.name,
-        description: description.trim(),
-        anonymous_read: anonymous,
-        config: cfg,
-      });
-      toast.success(`Created the repository ${repo.name}`);
-      navigate(repoPath(repo.name, "setup"));
+      const repo = await api.repos.create(body);
+      if (kind === "hosted") {
+        toast.success(`Created the repository ${repo.name}`);
+        navigate(repoPath(repo.name, "setup"));
+      } else {
+        toast.success(`Created the ${kind === "proxy" ? "proxy" : "group"} ${repo.name}`);
+        navigate(repoSettingsPath(repo.name, "overview"));
+      }
     } catch (err) {
       error = errorMessage(err);
+      remoteFailed = kind === "proxy" && err instanceof ApiError && err.status === 502;
       if (createdKey) {
         try {
           await api.signingKeys.delete(createdKey);
@@ -104,22 +213,29 @@
           error += ` The new signing key ${createdKey} stays; delete it in Signing keys if you do not need it (${errorMessage(e)}).`;
         }
       }
-      keys.reload();
+      if (kind === "hosted") keys.reload();
     } finally {
       busy = false;
     }
   }
 </script>
 
-<PageHeader title="New repository" description="A repository holds one kind of package. Its name and format stay fixed." />
+<PageHeader title="New repository" description="A repository holds one kind of package. Its name, format and kind stay fixed." />
 
 {#snippet submitRow()}
   <Button type="submit" disabled={!canCreate}>
     {#if busy}<Spinner />{/if}
-    Create repository
+    {submitLabel}
   </Button>
   <Button variant="ghost" href={listHref}>Cancel</Button>
-  {#if error}<div class="w-full"><ErrorState inline {error} /></div>{/if}
+  {#if error}
+    <div class="flex w-full flex-wrap items-center gap-x-3 gap-y-2">
+      <ErrorState inline {error} />
+      {#if remoteFailed}
+        <Button type="button" variant="outline" size="sm" disabled={busy} onclick={() => send(true)}>Create anyway</Button>
+      {/if}
+    </div>
+  {/if}
 {/snippet}
 
 {#if formats.loading && !formats.data}
@@ -129,7 +245,24 @@
 {:else}
   <FormPage>
     <form onsubmit={create} autocomplete="off">
-      <FormSection title="Repository">
+      {#if offered.length > 1}
+        <FormSection title="What to create">
+          <RadioGroup.Root class="gap-1" aria-label="What to create" value={kind} onValueChange={chooseKind}>
+            {#each offered as c (c.kind)}
+              <OptionRow id="{id}-kind-{c.kind}" label={c.label} description={c.description}>
+                {#snippet control()}
+                  <span class="flex items-center gap-3">
+                    <RadioGroup.Item id="{id}-kind-{c.kind}" value={c.kind} />
+                    <c.icon aria-hidden="true" class="size-5 text-muted-foreground" />
+                  </span>
+                {/snippet}
+              </OptionRow>
+            {/each}
+          </RadioGroup.Root>
+        </FormSection>
+      {/if}
+
+      <FormSection title={kind === "proxy" ? "Proxy" : kind === "group" ? "Group" : "Repository"}>
         <FormGrid>
           <FormRow label="Name" for="{id}-name" help="Builds and apt use the name in the address of the repository." error={nameError || undefined}>
             <Input id="{id}-name" spellcheck={false} aria-describedby="{id}-name-help" aria-invalid={nameError ? true : undefined} bind:value={name} />
@@ -148,9 +281,10 @@
           onValueChange={(v) => {
             formatName = v;
             config = undefined;
+            chosen = [];
           }}
         >
-          {#each formats.data ?? [] as f (f.name)}
+          {#each kindFormats as f (f.name)}
             <OptionRow id="{id}-format-{f.name}" label={f.title} description={formatLook(f.name).description}>
               {#snippet control()}
                 <span class="flex items-center gap-3">
@@ -162,6 +296,76 @@
           {/each}
         </RadioGroup.Root>
       </FormSection>
+
+      {#if kind === "proxy"}
+        <FormSection title="Remote">
+          <FormGrid>
+            <FormRow
+              label="Remote address"
+              for="{id}-remote"
+              help="The server gets files from this address the first time a build asks for them."
+              error={urlError || undefined}
+              full
+            >
+              <Input
+                id="{id}-remote"
+                type="url"
+                spellcheck={false}
+                placeholder="https://"
+                aria-describedby="{id}-remote-help"
+                aria-invalid={urlError ? true : undefined}
+                bind:value={remoteURL}
+              />
+              {#if presets.length}
+                <div class="flex flex-wrap gap-2" role="group" aria-label="Well-known remotes">
+                  {#each presets as p (p.url)}
+                    <Button type="button" variant="outline" size="sm" onclick={() => (remoteURL = p.url)}>{p.label}</Button>
+                  {/each}
+                </div>
+              {/if}
+            </FormRow>
+            <FormRow label="Username" for="{id}-user" help="Leave it empty when the remote needs no sign-in." error={credentialsError || undefined}>
+              <Input id="{id}-user" spellcheck={false} autocomplete="off" aria-describedby="{id}-user-help" bind:value={username} />
+            </FormRow>
+            <FormRow label="Password" for="{id}-pass" help="The server keeps it encrypted and never shows it again.">
+              <Input id="{id}-pass" type="password" autocomplete="new-password" aria-describedby="{id}-pass-help" bind:value={password} />
+            </FormRow>
+          </FormGrid>
+        </FormSection>
+      {:else if kind === "group"}
+        <FormSection title="Members" description="The group reads these repositories in this order. You can change the order in the group's settings.">
+          {#if repos.loading && !repos.data}
+            <Loading rows={3} />
+          {:else if repos.error && !repos.data}
+            <ErrorState error={repos.error} title="The repositories did not load" onRetry={repos.reload} />
+          {:else if candidates.length}
+            <div class="flex flex-col gap-1" role="group" aria-label="Members">
+              {#each candidates as r (r.name)}
+                {@const n = members.indexOf(r.name) + 1}
+                <OptionRow id="{id}-member-{r.name}" label={r.name} description={r.description || undefined}>
+                  {#snippet control()}
+                    <span class="flex items-center gap-3">
+                      <Checkbox id="{id}-member-{r.name}" checked={n > 0} onCheckedChange={(v) => toggleMember(r.name, v === true)} />
+                      <span class="w-5 text-right text-label tabular-nums" aria-hidden="true">{n || ""}</span>
+                      <RepoKindIcon kind={r.kind} iconClass="size-4" />
+                    </span>
+                  {/snippet}
+                </OptionRow>
+              {/each}
+            </div>
+            {#if members.length > maxMembers}
+              <p class="mt-4 text-meta text-destructive">A group reads at most {maxMembers} repositories. Remove {members.length - maxMembers}.</p>
+            {/if}
+          {:else}
+            <CompactEmpty
+              icon={LayersIcon}
+              title="{format?.title ?? formatName} repositories"
+              state="None yet"
+              text="A group reads repositories of its format. Create a repository or a proxy first."
+            />
+          {/if}
+        </FormSection>
+      {/if}
 
       <FormSection title="Who can download" footer={debian || otherOptions ? undefined : submitRow}>
         <VisibilityChoice bind:anonymous />

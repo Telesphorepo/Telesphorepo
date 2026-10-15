@@ -119,7 +119,7 @@ export const repoPath = (name: string, rest = "") => "/repo/" + encodeURICompone
 export const filesPath = (name: string, path = "") => repoPath(name, path ? "files/" + encodePath(path) : "");
 
 /** The tabs of a repository's settings, in the Settings shell. */
-export type RepoSettingsTab = "overview" | "access" | "format" | "signing";
+export type RepoSettingsTab = "overview" | "access" | "format" | "signing" | "remote";
 
 /** The UI path of a repository's settings tab: /settings/repositories/<name>/<tab>. */
 export const repoSettingsPath = (name: string, tab: RepoSettingsTab = "overview") =>

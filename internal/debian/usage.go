@@ -20,6 +20,22 @@ func (h *Handler) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
 		return format.Snippet{Client: "apt", Purpose: format.SnippetUse, Context: format.SnippetRepo,
 			Title: title, Lang: "sh", Code: code, Note: note}
 	}
+	if repo.Kind == repos.KindProxy {
+		// A proxy serves the remote archive's files unchanged, signed with the remote's key.
+		out := []format.Snippet{use("/etc/apt/sources.list.d/"+repo.Name+".list", fmt.Sprintf(
+			"echo \"deb %s stable main\" \\\n"+
+				"  | sudo tee /etc/apt/sources.list.d/%s.list\n"+
+				"sudo apt update\n", url, repo.Name),
+			"The remote archive signs the files. apt checks them with the key it already trusts for that archive, e.g. debian-archive-keyring.")}
+		if !repo.AnonymousRead {
+			out = append(out, use("/etc/apt/auth.conf.d/"+repo.Name+".conf", fmt.Sprintf(
+				"echo \"machine %s login YOUR_USERNAME password YOUR_READ_TOKEN\" \\\n"+
+					"  | sudo tee /etc/apt/auth.conf.d/%s.conf\n"+
+					"sudo chmod 600 /etc/apt/auth.conf.d/%s.conf\n", url, repo.Name, repo.Name),
+				"Create a read token on Settings › Tokens."))
+		}
+		return out
+	}
 	out := []format.Snippet{
 		use("Signing key", fmt.Sprintf(
 			"sudo install -d -m 0755 /etc/apt/keyrings\n"+

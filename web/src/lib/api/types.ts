@@ -100,6 +100,30 @@ export type Format = {
   icon?: string;
   /** Icons of artifact kinds that differ from the format (`gradle-plugin` in a Maven repo). */
   kind_icons?: Record<string, string>;
+  /** The kinds of repository the format takes: "hosted", and "proxy" or "group" when it serves them. */
+  kinds: RepoKind[];
+};
+
+/** hosted: files published here; proxy: a cache of a remote repository; group: reads several repositories. */
+export type RepoKind = "hosted" | "proxy" | "group";
+
+/** One member of a group, in read order. */
+export type GroupMember = { name: string; format: string; kind: "hosted" | "proxy"; public: boolean };
+
+/** The remote of a proxy. It never holds the credentials. Times are in seconds. */
+export type RepoProxy = {
+  /** http(s), ends with "/". */
+  remote_url: string;
+  has_credentials: boolean;
+  /** Seconds the server uses a changing file before it asks the remote again. */
+  metadata_ttl: number;
+  /** Seconds the server remembers a file that the remote does not have. */
+  not_found_ttl: number;
+  /** The last successful remote request; null before the first. */
+  last_ok_at: string | null;
+  /** "" when none. */
+  last_error: string;
+  last_error_at: string | null;
 };
 
 /** "admin" for admins; otherwise the caller's level on the repo. */
@@ -120,9 +144,41 @@ export type Repo = {
   total_size: number;
   /** When a file was last published; null before the first publish. */
   last_published_at: string | null;
+  kind: RepoKind;
+  /** A group: how many members it has. */
+  member_count?: number;
+  /** GET of a group: its members in read order. */
+  members?: GroupMember[];
+  /** GET of a hosted or proxy repo: the groups it is in, by name. */
+  groups?: string[];
+  /** A proxy: its remote. */
+  proxy?: RepoProxy;
 };
-export type NewRepo = { name: string; format: string; description?: string; anonymous_read: boolean; config?: RepoConfig };
-export type RepoPatch = { description?: string; anonymous_read?: boolean; config?: RepoConfig };
+
+/** The remote of a new proxy, or the changes to it. Send username and password together; username "" removes them. */
+export type ProxyInput = {
+  remote_url?: string;
+  username?: string;
+  password?: string;
+  metadata_ttl?: number;
+  not_found_ttl?: number;
+};
+export type NewRepo = {
+  name: string;
+  format: string;
+  description?: string;
+  anonymous_read: boolean;
+  config?: RepoConfig;
+  /** Default "hosted". */
+  kind?: RepoKind;
+  /** A group: 1 to 50 repository names, in read order. */
+  members?: string[];
+  /** A proxy: its remote (remote_url is required). */
+  proxy?: ProxyInput & { remote_url: string };
+  /** A proxy: create it even when the remote does not answer. */
+  force?: boolean;
+};
+export type RepoPatch = { description?: string; anonymous_read?: boolean; config?: RepoConfig; proxy?: ProxyInput };
 
 export type Permission = { username: string; level: "read" | "write" };
 

@@ -4,6 +4,10 @@
   browses the repository. Use this repository adds it to a build (every developer). Publish to this
   repository is for the people who can publish: from a computer, from CI, or by hand. The upload
   page is a level below. The parent keys it by name.
+
+  A proxy has the Files tab (its cached files; administrators delete them) and the Use tab, and no
+  publish or upload. A group has no files and no tabs: its page is the Use view and its members,
+  each a link to the member's page.
 -->
 <script lang="ts">
   import { api, ApiError, type Repo } from "$lib/api";
@@ -20,6 +24,8 @@
   import FormatBadge from "$lib/components/FormatBadge.svelte";
   import FilesTab from "./FilesTab.svelte";
   import UseTab from "./UseTab.svelte";
+  import GroupMembersList from "./GroupMembersList.svelte";
+  import RepoKindIcon from "$lib/components/RepoKindIcon.svelte";
   import PublishTab from "./PublishTab.svelte";
   import UploadView from "./UploadView.svelte";
   import { uploadFormats } from "./upload/formats";
@@ -54,6 +60,8 @@
 
   const view = $derived.by((): View => {
     const r = rest.replace(/\/$/, "");
+    // A group has no files: its page is the Use view.
+    if (group && (r === "" || r === "use")) return { kind: "use" };
     if (r === "") return { kind: "files", path: "" };
     if (rest === "files" || rest.startsWith("files/")) return { kind: "files", path: rest.slice("files/".length) };
     if (r === "use") return { kind: "use" };
@@ -68,10 +76,18 @@
   });
 
   const r = $derived(repo.data ?? null);
+  const group = $derived(r?.kind === "group");
+  const proxy = $derived(r?.kind === "proxy");
   const isAdmin = $derived(r?.permission === "admin");
-  const canWrite = $derived(!!r && !!auth.user && !auth.setupOnly && (r.permission === "admin" || r.permission === "write"));
+  // Nobody publishes to a group or a proxy.
+  const canWrite = $derived(
+    !!r && r.kind === "hosted" && !!auth.user && !auth.setupOnly && (r.permission === "admin" || r.permission === "write"),
+  );
   const locked = $derived(r?.locked_by ?? "");
   const canUpload = $derived(canWrite && !!r && uploadFormats.includes(r.format));
+  // Who deletes files on the Files tab: publishers of a hosted repository; administrators for a
+  // proxy's cached files (with the UI session).
+  const canDelete = $derived(proxy ? isAdmin && !!auth.user && !auth.setupOnly : canWrite && !locked);
 
   // On a phone the tab rail scrolls: keep the open tab in view.
   let tabRail = $state<HTMLDivElement | null>(null);
@@ -112,8 +128,20 @@
     </EmptyState>
   {/if}
 {:else if view.kind === "publish" && !canWrite}
-  <EmptyState icon={LockIcon} title="You cannot publish to {r.name}" description="An administrator gives publish access.">
-    <Button variant="outline" href={href(repoPath(r.name))}>Open the files</Button>
+  <EmptyState
+    icon={LockIcon}
+    title="You cannot publish to {r.name}"
+    description={group
+      ? "A group only reads its repositories. Publish to one of them."
+      : proxy
+        ? "A proxy only keeps the files of its remote repository."
+        : "An administrator gives publish access."}
+  >
+    <Button variant="outline" href={href(repoPath(r.name))}>{group ? "Open the group" : "Open the files"}</Button>
+  </EmptyState>
+{:else if view.kind === "files" && group}
+  <EmptyState icon={CompassIcon} title="A group has no files" description="Open one of its repositories to see files.">
+    <Button variant="outline" href={href(repoPath(r.name))}>Open the group</Button>
   </EmptyState>
 {:else if view.kind === "unknown"}
   <EmptyState icon={CompassIcon} title="This page does not exist" description="Check the address, or open the files of {r.name}.">
@@ -126,6 +154,7 @@
         <LockIcon role="img" aria-label="Private" class="size-5 shrink-0 text-muted-foreground" />
       {/if}
       <span class="text-body text-muted-foreground"><FormatBadge format={r.format} /></span>
+      <RepoKindIcon kind={r.kind} iconClass="size-5" />
     {/snippet}
     {#snippet actions()}
       {#if isAdmin}
@@ -147,7 +176,8 @@
     </Alert.Root>
   {/if}
 
-  <!-- On a phone the tabs scroll sideways; the cut-off last tab shows that, without a scrollbar. -->
+  <!-- On a phone the tabs scroll sideways; the cut-off last tab shows that, without a scrollbar. A group has one view and no tabs. -->
+  {#if !group}
   <div bind:this={tabRail} class="[&>nav]:[scrollbar-width:none] [&>nav::-webkit-scrollbar]:hidden">
   <TabNav
     label="Repository"
@@ -158,11 +188,13 @@
     ]}
   />
   </div>
+  {/if}
 
   {#if view.kind === "files"}
-    <FilesTab repo={r} path={view.path} {query} {base} canWrite={canWrite && !locked} {canUpload} {isAdmin} />
+    <FilesTab repo={r} path={view.path} {query} {base} canWrite={canDelete} {canUpload} {isAdmin} />
   {:else if view.kind === "use"}
     <UseTab repo={r} {usage} {base} />
+    {#if group}<GroupMembersList repo={r} />{/if}
   {:else}
     <PublishTab repo={r} {usage} {canUpload} />
   {/if}

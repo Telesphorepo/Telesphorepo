@@ -31,6 +31,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/netrules"
 	"github.com/Telesphorepo/Telesphorepo/internal/nexus"
 	"github.com/Telesphorepo/Telesphorepo/internal/oidc"
+	"github.com/Telesphorepo/Telesphorepo/internal/proxy"
 	"github.com/Telesphorepo/Telesphorepo/internal/publish"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
@@ -184,7 +185,13 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 		log.Info("storage switched", "storage", new.Config.Storage)
 	})
 
-	rs := repos.New(d, format.ValidateRepoConfig)
+	rs := repos.New(d, format.ValidateRepoConfig, format.SupportsKind)
+	rs.SetSealer(set) // proxy credentials are sealed with the master key
+	if bad, err := rs.Load(ctx); err != nil {
+		return err
+	} else if len(bad) > 0 {
+		log.Error("the credentials of proxy repos do not decrypt (was the master key changed?); enter them again", "repo_ids", bad)
+	}
 	au := audit.New(d, func() time.Duration { return set.Current().Duration(settings.KeyAuditRetention) }, log.With("component", "audit"))
 	nr := netrules.New(d, set.Config, au, log.With("component", "netrules"))
 	if err := nr.Load(ctx); err != nil {
@@ -206,6 +213,7 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 	ps.SetNetRules(nr)      // minting a session checks the repo's publish rules
 	ss := assets.New(d, live, set.Config)
 	fs := files.New(d, ss, rs, as, log.With("component", "files"))
+	px := proxy.New(d, rs, ss, set.Config, log.With("component", "proxy"))
 	mv := move.New(d, set, live, ss, rs, log.With("component", "move"))
 	nx := nexus.New(d, set, rs, log.With("component", "nexus"))
 	// The move copier, the Nexus sync runners and scheduler, and the publish cleanup job live until
@@ -238,6 +246,7 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 			Auth:     as,
 			Assets:   ss,
 			Repos:    rs,
+			Proxy:    px,
 			Config:   set.Config,
 			Settings: set,
 			Keys:     keys,
