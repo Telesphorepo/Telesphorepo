@@ -177,6 +177,33 @@ After: [account-security-change-password-1440-dark.png](screenshots/account-secu
 [account-security-change-password-390-light.png](screenshots/account-security-change-password-390-light.png),
 [repo-delete-after-1440-dark.png](screenshots/repo-delete-after-1440-dark.png).
 
+### Bulk actions
+
+Problem: after a Nexus import of 40 private repositories, an administrator made them public one at
+a time: open the repository, open Access, turn on Public, and go back, 40 times. People, access and
+files had the same problem. Each change had a route for one item, so a change of many items was
+many requests, and a failure part way left some items changed and some not.
+
+Decision: the tables of many things take a pick. `DataTable` gives each row a checkbox in a first
+column, and the page names only its actions. The checkbox cell is a 40 px target over the full row
+height, and a click on the rest of the row still opens the row. Shift+click picks a range, and Esc
+clears the pick. While rows are picked, a bar takes the place of the header row, with the same
+height, so nothing below it moves: "12 selected", the actions, "Select all 50" and "Clear". The
+same verbs show everywhere: **Make public**, **Make private**, **Delete**, **Disable**,
+**Enable**, **Give access**, **Remove access**. An action that the other one undoes (Make public,
+Make private, Enable) runs at once. A delete asks first and names the count and the first five
+names; a delete of more than one repository asks for the count. A toast says what changed ("12
+repositories are now public."). On the server, one route takes the list, and one item is a list of
+one. The server checks every item before it changes any, so a bad name changes nothing.
+
+The pick is on All repositories, the Files tab (List view), People, a person's repositories and a
+repository's people. Tokens, devices, network lists, signing keys and CI pipelines stay one at a
+time: a person has few of each, so a pick costs more than it saves.
+
+Principle: 13. Every path a person might think of, 15. Nothing without a reason.
+
+New feature: no "before" shot.
+
 ### Small building blocks
 
 | Problem | Decision | Principle |

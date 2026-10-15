@@ -213,13 +213,13 @@ func SessionRequired(w http.ResponseWriter) {
 // cookie when allowSession (the JSON API). It writes the error response and returns ok=false
 // when the request must stop. On the JSON API:
 //   - a password or a read token reaches only GET and HEAD routes (401 ErrSessionRequired
-//     elsewhere). POST /api/repos/{name}/upload and DELETE /api/repos/{name}/files are left to
+//     elsewhere). POST /api/repos/{name}/upload and POST /api/repos/{name}/files/delete are left to
 //     their gates, which take only a publish session or an admin UI session. The API refuses
 //     admin routes to these credentials too (see api.admin), so every change of state and every
 //     admin route needs a UI session, and an admin UI session exists only after the second
 //     factor (outside dev mode);
 //   - a publish-session token reaches only /api/publish/, POST /api/repos/{name}/upload and
-//     DELETE /api/repos/{name}/files (403 elsewhere);
+//     POST /api/repos/{name}/files/delete (403 elsewhere);
 //   - a UI session of a local admin without a second factor reaches only /api/me,
 //     /api/auth/logout and /api/security (403 {"error":"second_factor_required"} elsewhere),
 //     except in dev mode.
@@ -298,13 +298,13 @@ func safeMethod(method string) bool {
 }
 
 // publishTokenRoute reports whether a publish-session token may reach r on the JSON API:
-// /api/publish/..., POST /api/repos/{name}/upload and DELETE /api/repos/{name}/files.
+// /api/publish/..., POST /api/repos/{name}/upload and POST /api/repos/{name}/files/delete.
 func publishTokenRoute(r *http.Request) bool {
 	return strings.HasPrefix(r.URL.Path, "/api/publish/") || repoWriteRoute(r)
 }
 
 // repoWriteRoute reports whether r is POST /api/repos/{name}/upload, POST
-// /api/repos/{name}/upload/scan or DELETE /api/repos/{name}/files.
+// /api/repos/{name}/upload/scan or POST /api/repos/{name}/files/delete.
 func repoWriteRoute(r *http.Request) bool {
 	rest, ok := strings.CutPrefix(r.URL.Path, "/api/repos/")
 	if !ok {
@@ -314,5 +314,5 @@ func repoWriteRoute(r *http.Request) bool {
 	if !ok || name == "" {
 		return false
 	}
-	return (r.Method == http.MethodPost && (tail == "upload" || tail == "upload/scan")) || (r.Method == http.MethodDelete && tail == "files")
+	return r.Method == http.MethodPost && (tail == "upload" || tail == "upload/scan" || tail == "files/delete")
 }

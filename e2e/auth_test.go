@@ -72,7 +72,7 @@ func TestAuth(t *testing.T) {
 		resp, body = authPut(t, s, p+".x", "nope", nil)
 		wantStatus(t, resp, body, http.StatusUnauthorized)
 
-		s.MustAPI(t, http.MethodPatch, "/api/repos/"+anon, map[string]any{"anonymous_read": false}, s.Admin(), nil)
+		s.MustAPI(t, http.MethodPatch, "/api/repos", map[string]any{"names": []string{anon}, "anonymous_read": false}, s.Admin(), nil)
 		resp, body = authGet(t, s, p, nil)
 		wantStatus(t, resp, body, http.StatusUnauthorized)
 		wantChallenge(t, resp)
@@ -162,7 +162,7 @@ func TestAuth(t *testing.T) {
 		s.SetPermission(t, repo, u, "read")
 		resp, body := authGet(t, s, path, Basic{u, pw})
 		wantStatus(t, resp, body, http.StatusOK)
-		s.MustAPI(t, http.MethodPatch, "/api/users/"+u, map[string]any{"disabled": true}, s.Admin(), nil)
+		s.MustAPI(t, http.MethodPatch, "/api/users", map[string]any{"usernames": []string{u}, "disabled": true}, s.Admin(), nil)
 		resp, body = authGet(t, s, path, Basic{u, pw})
 		wantStatus(t, resp, body, http.StatusUnauthorized)
 	})

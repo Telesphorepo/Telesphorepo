@@ -249,10 +249,21 @@ with no credential. The routes that take no credential or their own token are th
 (sign-in, `/api/auth/config`, `/api/formats`, and the publish routes marked "none" or "token" in
 **Publishing**). A signed-in user without the right gets 403. A publish session token (`trs_...`,
 as the Basic password or as `Authorization: Bearer trs_...`) reaches only `/api/publish/...`,
-`POST /api/repos/{name}/upload` and `DELETE /api/repos/{name}/files`, and only for its own repo.
-Every other `/api` route answers it with 403. Errors are `{"error": "..."}`, plus
+`POST /api/repos/{name}/upload` and `POST /api/repos/{name}/files/delete`, and only for its own
+repo. Every other `/api` route answers it with 403. Errors are `{"error": "..."}`, plus
 `fields` for settings validation. Bodies are capped at `max_json_size`. Lists are
 `{items, next}` with `?after=&limit=`.
+
+**Bulk actions.** A write route that changes a set takes a list, and one item is a list of one.
+So each change has one route. A list holds 1 to 1000 items (400 outside that), and
+`max_json_size` applies too. The server removes repeated items. Each route checks every item
+before it changes any: an unknown name gives 404 with the name (`"repository x does not exist"`,
+`"user x does not exist"`), and nothing changes. The changes to rows apply in one transaction, so
+a failure leaves nothing half done. Each changed item gets its own audit event; an item that
+already had the value gets none. The routes are `PATCH /api/repos`, `POST /api/repos/delete`,
+`POST /api/repos/{name}/files/delete`, `PATCH /api/users`, `PUT /api/permissions` and
+`POST /api/permissions/delete`. A repo delete removes blobs, so it is the one route that is not
+one transaction (see the route).
 
 | Method & path | Auth | Notes |
 |---|---|---|
@@ -268,16 +279,20 @@ Every other `/api` route answers it with 403. Errors are `{"error": "..."}`, plu
 | `GET /api/auth/oidc/callback` | none | 400 for missing/mismatched/unknown/reused/expired state, state from before an issuer or client change, or missing `code`; 503 on discovery failure. Verifies the ID token (signature, issuer, audience, expiry, nonce) and the admin rule. Success: upsert user, session with `oidc.session_ttl`, 302 `/`. Failure: 302 `/#/login?error=` `not_authorized` \| `username_conflict` \| `invalid_username` \| `account_disabled` \| `sso_failed` |
 | `GET /api/me` | any credential | Current user. User JSON includes `kind` (`local`/`oidc`), `email` (`""` when unset) and `second_factor_required` (true only for a setup-only UI session) |
 | `GET /api/tokens` · `POST /api/tokens`, `DELETE /api/tokens/{id}` | any credential · UI session | **Read tokens.** The token is shown once. A token cannot mint tokens. POST is 403 for SSO users |
-| `GET/POST /api/users`, `GET/PATCH /api/users/{username}` | admin (a UI session may change its own password) | The user list is paginated. `GET /api/users/{username}` returns one account (User JSON), 404 when no account has the name |
+| `GET/POST /api/users`, `GET/PATCH /api/users/{username}` | admin (a UI session may change its own password) | The user list is paginated. `GET /api/users/{username}` returns one account (User JSON), 404 when no account has the name. PATCH takes `{password?, is_admin?}` |
+| `PATCH /api/users` | admin | `{usernames: [...], disabled: bool}`. The one way to disable or enable people. 400 `You cannot disable your own account.` when the list holds the caller and `disabled` is true. A disabled person's sessions end, and their password and read tokens stop working. One `user.update` event per person whose value changed. 200 `{changed: n}` |
 | `GET /api/formats` | none | `[{name, title, default_config, settings_group?, icon?, kind_icons?, kinds}]` for every registered format. `kinds` lists the repo kinds the format takes (`hosted`, plus `proxy` for a `format.Proxied` and `group` for a `format.Grouper`). `icon` is the format's own one-color SVG, inline. `kind_icons` maps an artifact kind to an SVG when it differs from the format (Maven: `gradle-plugin`). A format gets both by implementing `format.Iconic` |
-| `GET /api/repos`, `GET /api/repos/{name}` · `POST /api/repos`, `PATCH /api/repos/{name}` | any/anon · admin | The list shows only repos the caller can see. Repo JSON has `file_count`, `total_size` and `last_published_at` (null before the first publish), read from the repo row (see `assets` in **Data model**). `format` must be a registered name. `description` (POST and PATCH) has at most 500 characters and no control characters except newline and tab. `config` must be a JSON object that the format validates (400 otherwise; an unknown format lists the available ones). An empty config becomes the format default. Repo JSON has `locked_by` (`""` when the repo is not locked). A PATCH with `config` calls the format's `RepoConfigChanged`. Repo JSON has `kind`, and a group has `member_count`. POST takes `kind` (`hosted` default, `proxy`, `group`), `members: [names]` for a group, `proxy: {remote_url, username?, password?, metadata_ttl?, not_found_ttl?}` (seconds) for a proxy, and `force`. A new proxy's remote is checked first (see **Group and proxy repositories**): 502 `{error}` when it does not answer, unless `force: true`. PATCH takes `proxy` with the same fields for a proxy; `username` and `password` together replace the credentials, `username: ""` removes them, and the password is never returned. `GET /api/repos/{name}` adds, for a group, `members: [{name, format, kind, public}]` (the members the caller can read, in order); for a hosted or proxy repo, `groups: [names]` (the groups it is in that the caller can read); for a proxy and an admin, `proxy: {remote_url, has_credentials, metadata_ttl, not_found_ttl, last_ok_at\|null, last_error, last_error_at\|null}` |
+| `GET /api/repos`, `GET /api/repos/{name}` · `POST /api/repos`, `PATCH /api/repos/{name}` | any/anon · admin | The list shows only repos the caller can see. Repo JSON has `file_count`, `total_size` and `last_published_at` (null before the first publish), read from the repo row (see `assets` in **Data model**). `format` must be a registered name. `description` (POST and PATCH) has at most 500 characters and no control characters except newline and tab. `config` must be a JSON object that the format validates (400 otherwise; an unknown format lists the available ones). An empty config becomes the format default. Repo JSON has `locked_by` (`""` when the repo is not locked). `PATCH /api/repos/{name}` takes `{description?, config?, proxy?}`; a PATCH with `config` calls the format's `RepoConfigChanged`. Repo JSON has `kind`, and a group has `member_count`. POST takes `kind` (`hosted` default, `proxy`, `group`), `members: [names]` for a group, `proxy: {remote_url, username?, password?, metadata_ttl?, not_found_ttl?}` (seconds) for a proxy, and `force`. A new proxy's remote is checked first (see **Group and proxy repositories**): 502 `{error}` when it does not answer, unless `force: true`. PATCH takes `proxy` with the same fields for a proxy; `username` and `password` together replace the credentials, `username: ""` removes them, and the password is never returned. `GET /api/repos/{name}` adds, for a group, `members: [{name, format, kind, public}]` (the members the caller can read, in order); for a hosted or proxy repo, `groups: [names]` (the groups it is in that the caller can read); for a proxy and an admin, `proxy: {remote_url, has_credentials, metadata_ttl, not_found_ttl, last_ok_at\|null, last_error, last_error_at\|null}` |
 | `PUT /api/repos/{name}/members` | admin | `{members: [names]}` replaces the members of a group and their order; returns the repo. 400 for 0 or more than 50 members, a member of another format, a group, a name listed twice, an unknown name, or a repo that is not a group |
 | `POST /api/repos/{name}/proxy/test` | admin | Checks the remote of a proxy now: 200 `{ok: true}` or 502 `{ok: false, error}`. It records the result as the proxy's last answer or last error |
-| `GET /api/repos/{name}/permissions`, `PUT/DELETE .../permissions/{username}` | admin | `{level: read\|write}` |
-| `DELETE /api/repos/{name}` | admin | 200 `{deleted: n}`. Locks the repo (writes get 409 `RepoDeleting`), deletes the files in batches, then the repo row. See **Files, uploads and deletes** |
+| `PATCH /api/repos` | admin | `{names: [...], anonymous_read: bool}`. The one way to make repos public or private. One `repo.update` event per repo whose value changed. 200 `{changed: n}` |
+| `POST /api/repos/delete` | admin | `{names: [...]}`. Checks that every repo exists (404) and that none is locked (409 `<name>: <lock text>`); then nothing is deleted. Then it deletes the repos one after another with their files and blobs (see **Files, uploads and deletes**). The first failure stops the rest: 500 `{deleted: [names done], error}`. One `repo.delete` event per repo. 200 `{deleted: [names], files: n}` |
+| `GET /api/repos/{name}/permissions` | admin | `[{username, level: read\|write}]` |
+| `PUT /api/permissions` | admin | `{users: [...], repos: [...], level: "read"\|"write"}`. Sets the level of every pair of user and repo, at most 1000 pairs. One `permission.set` event per pair whose level changed. 200 `{changed: n}` |
+| `POST /api/permissions/delete` | admin | `{users: [...], repos: [...]}`. Removes the level of every pair, at most 1000 pairs. One `permission.delete` event per pair that had one. 200 `{changed: n}` |
 | `GET /api/repos/{name}/assets?prefix=&after=&limit=` | read | Ordered by path; the prefix is a range scan |
 | `GET /api/repos/{name}/tree?path=&after=&limit=` | read | `{items: [{name, type: "dir"\|"file", path, size?, sha256?, updated_at?, uploaded_by?}], next}`. `path` is a folder (`""` or ending in `/`). A folder item's `path` and the `next` cursor end in `/`. `uploaded_by` is a username |
-| `DELETE /api/repos/{name}/files?path=` or `?prefix=` | publish session of the repo, or admin UI session | 200 `{deleted: n}`. 404 for a missing file; an empty folder gives `deleted: 0`. 409 on a locked repo. 401 `publishing needs a publish session` for any other credential |
+| `POST /api/repos/{name}/files/delete` | publish session of the repo, or admin UI session | `{paths?: [...], prefixes?: [...]}`: files and folders, 1 to 1000 items together. 400 with the first bad path or prefix; then nothing is deleted. 200 `{deleted: n}`, the number of files. A file that is gone already counts as done; an empty folder adds 0. 409 on a locked repo. 401 `publishing needs a publish session` for any other credential. One `delete` event per file and per folder that lost files |
 | `POST /api/repos/{name}/upload` | publish session of the repo | Multipart. A file part may carry a relative path as its `filename` (folder upload). 201 `{files: [{path, status: "created"\|"replaced"\|"unchanged", size, sha256}]}`. 400 or 409 for a client error of the plugin |
 | `POST /api/repos/{name}/upload/scan` | publish session of the repo | Same multipart body as the upload. Stores nothing. 200 `{found: [{kind: "maven"\|"debian"\|"file", title, files: [paths], problems: [text]}], ignored: [paths]}`. See **Files, uploads and deletes** |
 | `GET, PUT /api/repos/{name}/ip-rules` | admin | `{read: [Rule], publish: [Rule]}` with `Rule` = `{kind: "cidr"\|"list", value, note}`. PUT replaces both lists and returns them in canonical form. 400 for an invalid rule or a `list` that does not exist. See **Network rules** |
@@ -733,17 +748,19 @@ format; it calls the optional plugin interfaces of `internal/format`.
   folders and files mixed (the UI sorts folders first within a page). Each child is one indexed
   seek on `(repo_id, path)`. After a folder, the next seek starts just past every path under it,
   so a page costs `limit` seeks however large the repo is.
-- **Delete credential.** `DELETE /api/repos/{name}/files` takes a publish session of that repo
+- **Delete credential.** `POST /api/repos/{name}/files/delete` takes a publish session of that repo
   (Basic password or `Authorization: Bearer trs_...`), which goes through the normal write gate:
   the user's `write` permission, the repo lock, and 401 for a session of another repo. It also
   takes the UI session cookie of an admin. Outside dev mode an admin session exists only after
   the second factor. Passwords, read tokens, admin Basic auth and non-admin UI sessions get 401
   `publishing needs a publish session`. A locked repo gets 409.
-- **Delete steps.** `?prefix=` is always a folder (a trailing `/` is added). The rows go in
-  batches of 500 under the upload locks, then the blobs. `deleted` is the number of files.
-- **Repo delete.** `DELETE /api/repos/{name}` (admin, any admin credential) sets the lock text
-  `RepoDeleting`, so writes get 409. It deletes the files batch by batch, then the repo row.
-  The name can be used again afterwards.
+- **Delete steps.** A prefix is always a folder (a trailing `/` is added). The server checks
+  every path and prefix first. The rows of the `paths` go in one transaction under the upload
+  locks (taken in path order), then their blobs. Each folder then goes in batches of 500 the same
+  way. `deleted` is the number of files.
+- **Repo delete.** `POST /api/repos/delete` (admin UI session) deletes one repo after another.
+  For each repo it sets the lock text `RepoDeleting`, so writes get 409. It deletes the files
+  batch by batch, then the repo row. The name can be used again afterwards.
 - **`format.DeleteObserver`.** `AssetsDeleted(ctx, tx, repo, paths)` runs in the delete
   transaction, before the rows go. Debian uses it (see **Debian indexing pipeline**). Maven
   regenerates nothing: a deleted version folder stays in `maven-metadata.xml` until the next
@@ -1024,8 +1041,12 @@ decision is in `docs/design/rationale.md`.
   action at the end of the header, on every tab; it opens a dialog that asks for the repo name.
   - *Overview:* description and visibility.
   - *Access:* a Download card (the Public switch, people who can download and not publish, from where) and a Publish card (people who can publish, CI
-    pipelines, from where), with thin dividers between the parts. **Add person**, **Add CI
-    pipeline**, **Add network list** and **Add addresses** each open a short form in a dialog.
+    pipelines, from where), with thin dividers between the parts. **Add CI pipeline**, **Add
+    network list** and **Add addresses** each open a short form in a dialog. **Add people** opens
+    a dialog with a filter, a checkbox list of the people without access, Select all and Select
+    none, and a choice of Download or Publish; it saves at once through `PUT /api/permissions`. The
+    people tables take a pick, with **Remove access** (asks first) and **Change to Download** or
+    **Change to Publish**; these act at once. The Public switch saves through `PATCH /api/repos`.
     Add CI pipeline adds existing pipelines, or links to
     `/#/settings/ci-pipelines/new?repo={name}&back=/settings/repositories/{name}/access`.
     Each person links to their page, where the same access is also edited.
@@ -1046,11 +1067,21 @@ decision is in `docs/design/rationale.md`.
 - **People.** The table shows each account with its avatar and role. The sign-in method column
   shows only when someone uses single sign-on. A row opens the person's page
   (`/#/settings/people/{name}`): an identity card (avatar, role, how the person signs in, a
-  turned-off badge) with Make administrator or Remove administrator rights, Reset password and Turn
-  off or Turn on account; then the person's access to each repository. An administrator adds the
-  person to a repository, changes the level or removes the access in place, and the save bar saves
-  after a confirm that lists each change. An administrator's page says that administrators reach
-  every repository. **New account** opens a short form; after Create, the new person's page opens.
+  Disabled badge) with Make administrator or Remove administrator rights, Reset password and Disable
+  account or Enable account; then the person's access to each repository. **Give access** opens a
+  dialog with a filter, a checkbox list of the repositories the person cannot reach yet, Select all
+  and Select none, and a choice of Download or Publish. The repository table takes a pick, with
+  **Remove access** (asks first) and **Change to Download** or **Change to Publish**. Each action
+  saves at once. An administrator's page says that administrators reach every repository. The
+  People table takes a pick of every row except your own: **Disable** asks first ("Disable 4
+  people? They are signed out and cannot sign in."), **Enable** acts at once. **New account**
+  opens a short form; after Create, the new person's page opens.
+- **Bulk actions.** All repositories (**Make public**, **Make private**, **Delete**), the List
+  view of the Files tab (**Delete**, files and folders mixed), People, a person's repositories and
+  a repository's people take a pick (`DataTable` `bind:picked`). While rows are picked, a bar in
+  place of the header row shows "12 selected", the actions, "Select all 50" and "Clear". Every
+  delete asks first with the count and the first five names; a delete of more than one repository
+  asks for the count. A toast says what changed.
 - **CI pipelines.** A table of the trust policies: the name, what the policy accepts (less what
   the name says), the CI system and the repositories it can publish to. Only a pipeline that is
   off has a badge ("Off"); the switch on its page shows the state.

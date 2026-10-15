@@ -250,8 +250,56 @@ func (s *Service) insert(ctx context.Context, tx *sql.Tx, name, format, kind str
 	return &Repo{ID: id, Name: name, Format: format, Kind: kind, AnonymousRead: anonymousRead, Config: cfg, CreatedAt: time.Unix(now, 0), Description: description}, nil
 }
 
+// MissingError names an item of a list that does not exist: a repo, or a user (Kind). It
+// matches ErrNotFound.
+type MissingError struct {
+	Kind string // "repository" or "user"
+	Name string
+}
+
+func (e *MissingError) Error() string { return e.Kind + " " + e.Name + " does not exist" }
+
+func (e *MissingError) Is(target error) bool { return target == ErrNotFound }
+
+// SetAnonymousRead sets anonymous read on every repo of names in one transaction. It reads every
+// name first: an unknown name returns a *MissingError and changes nothing. It returns the repos
+// whose value changed, after the change.
+func (s *Service) SetAnonymousRead(ctx context.Context, names []string, on bool) ([]*Repo, error) {
+	var changed []*Repo
+	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
+		changed = changed[:0]
+		q := dbq.New(tx)
+		var all []*Repo
+		for _, name := range names {
+			r, err := fromRow(q.GetRepoByName(ctx, name))
+			if errors.Is(err, ErrNotFound) {
+				return &MissingError{Kind: "repository", Name: name}
+			}
+			if err != nil {
+				return err
+			}
+			all = append(all, r)
+		}
+		for _, r := range all {
+			if r.AnonymousRead == on {
+				continue
+			}
+			if err := q.SetRepoAnonymousRead(ctx, dbq.SetRepoAnonymousReadParams{AnonymousRead: on, ID: r.ID}); err != nil {
+				return err
+			}
+			r.AnonymousRead = on
+			changed = append(changed, r)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return changed, nil
+}
+
 // Update changes only the non-nil fields and returns the repo before and after the change.
-func (s *Service) Update(ctx context.Context, name string, anonymousRead *bool, description *string, config json.RawMessage) (old, updated *Repo, err error) {
+func (s *Service) Update(ctx context.Context, name string, description *string, config json.RawMessage) (old, updated *Repo, err error) {
 	err = s.db.Tx(ctx, func(tx *sql.Tx) error {
 		q := dbq.New(tx)
 		r, err := s.counted(fromRow(q.GetRepoByName(ctx, name)))
@@ -259,9 +307,6 @@ func (s *Service) Update(ctx context.Context, name string, anonymousRead *bool, 
 			return err
 		}
 		prev := *r
-		if anonymousRead != nil {
-			r.AnonymousRead = *anonymousRead
-		}
 		if description != nil {
 			if r.Description, err = checkDescription(*description); err != nil {
 				return err
@@ -273,7 +318,7 @@ func (s *Service) Update(ctx context.Context, name string, anonymousRead *bool, 
 			}
 		}
 		if err := q.UpdateRepo(ctx, dbq.UpdateRepoParams{
-			AnonymousRead: r.AnonymousRead, Config: string(r.Config), Description: r.Description, ID: r.ID}); err != nil {
+			Config: string(r.Config), Description: r.Description, ID: r.ID}); err != nil {
 			return err
 		}
 		old, updated = &prev, r

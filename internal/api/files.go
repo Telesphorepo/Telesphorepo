@@ -7,6 +7,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -55,45 +56,66 @@ func (a *API) tree(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, list[files.Node]{items, cursor(next)})
 }
 
-// deleteFiles deletes one file (?path=) or a folder (?prefix=) with a publish session for the
-// repo or an admin UI session: 200 {deleted: <count>}. A missing file is 404; an empty folder
-// deletes 0 files.
+// deleteFiles deletes files (paths) and folders (prefixes) of the repo with a publish session for
+// the repo or an admin UI session: {paths, prefixes} -> 200 {deleted: <file count>}. The two
+// lists hold 1 to 1000 items together. A bad path or prefix answers 400 and deletes nothing. The
+// paths go in one transaction, then each folder in batches. A file that is gone already counts
+// as done. One audit event goes to each file and each folder that lost files.
 func (a *API) deleteFiles(w http.ResponseWriter, r *http.Request) {
 	repo, p, ok := a.auth.DeleteGate(w, r, r.PathValue("name"))
 	if !ok {
 		return
 	}
-	q := r.URL.Query()
-	file, prefix := q.Get("path"), q.Get("prefix")
-	if (file == "") == (prefix == "") {
-		httpx.Error(w, http.StatusBadRequest, "give path (one file) or prefix (a folder)")
+	var in struct {
+		Paths    []string `json:"paths"`
+		Prefixes []string `json:"prefixes"`
+	}
+	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
 		return
 	}
-	var n int
-	var err error
-	target := file
-	if file != "" {
-		if err = a.files.DeletePath(r.Context(), repo, file); err == nil {
-			n = 1
+	if n := len(in.Paths) + len(in.Prefixes); n == 0 || n > maxBulk {
+		httpx.Error(w, http.StatusBadRequest, "paths and prefixes must hold 1 to "+strconv.Itoa(maxBulk)+" items together")
+		return
+	}
+	for _, f := range in.Paths {
+		if !files.ValidPath(f) {
+			httpx.Error(w, http.StatusBadRequest, "invalid path "+strconv.Quote(clipName(f)))
+			return
 		}
-	} else {
-		target = strings.TrimSuffix(prefix, "/") + "/"
-		n, err = a.files.DeletePrefix(r.Context(), repo, prefix)
 	}
-	switch {
-	case errors.Is(err, files.ErrInvalid):
-		httpx.Error(w, http.StatusBadRequest, "invalid path")
-		return
-	case errors.Is(err, files.ErrNotFound):
-		httpx.Error(w, http.StatusNotFound, "file not found")
-		return
+	dirs := make([]string, 0, len(in.Prefixes))
+	for _, prefix := range in.Prefixes {
+		dir, err := files.Folder(prefix)
+		if err != nil || dir == "" {
+			httpx.Error(w, http.StatusBadRequest, "invalid prefix "+strconv.Quote(clipName(prefix)))
+			return
+		}
+		if !slices.Contains(dirs, dir) {
+			dirs = append(dirs, dir)
+		}
 	}
-	if n > 0 {
-		a.record(r, p, audit.Delete, repo, target, map[string]any{"count": n})
+	n := 0
+	if len(in.Paths) > 0 {
+		deleted, err := a.files.DeletePaths(r.Context(), repo, in.Paths)
+		if err != nil {
+			fail(w, r, err)
+			return
+		}
+		for _, f := range deleted {
+			a.record(r, p, audit.Delete, repo, f, map[string]any{"count": 1})
+		}
+		n += len(deleted)
 	}
-	if err != nil {
-		fail(w, r, err)
-		return
+	for _, dir := range dirs {
+		c, err := a.files.DeletePrefix(r.Context(), repo, dir)
+		if c > 0 {
+			a.record(r, p, audit.Delete, repo, dir, map[string]any{"count": c})
+		}
+		n += c
+		if err != nil {
+			fail(w, r, err)
+			return
+		}
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]int{"deleted": n})
 }

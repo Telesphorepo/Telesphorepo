@@ -317,6 +317,20 @@ func (q *Queries) SetProxyOK(ctx context.Context, arg SetProxyOKParams) error {
 	return err
 }
 
+const setRepoAnonymousRead = `-- name: SetRepoAnonymousRead :exec
+UPDATE repos SET anonymous_read = ? WHERE id = ?
+`
+
+type SetRepoAnonymousReadParams struct {
+	AnonymousRead bool
+	ID            int64
+}
+
+func (q *Queries) SetRepoAnonymousRead(ctx context.Context, arg SetRepoAnonymousReadParams) error {
+	_, err := q.db.ExecContext(ctx, setRepoAnonymousRead, arg.AnonymousRead, arg.ID)
+	return err
+}
+
 const setRepoLockedBy = `-- name: SetRepoLockedBy :exec
 UPDATE repos SET locked_by = ? WHERE id = ?
 `
@@ -356,22 +370,16 @@ func (q *Queries) UpdateProxy(ctx context.Context, arg UpdateProxyParams) error 
 }
 
 const updateRepo = `-- name: UpdateRepo :exec
-UPDATE repos SET anonymous_read = ?, config = ?, description = ? WHERE id = ?
+UPDATE repos SET config = ?, description = ? WHERE id = ?
 `
 
 type UpdateRepoParams struct {
-	AnonymousRead bool
-	Config        string
-	Description   string
-	ID            int64
+	Config      string
+	Description string
+	ID          int64
 }
 
 func (q *Queries) UpdateRepo(ctx context.Context, arg UpdateRepoParams) error {
-	_, err := q.db.ExecContext(ctx, updateRepo,
-		arg.AnonymousRead,
-		arg.Config,
-		arg.Description,
-		arg.ID,
-	)
+	_, err := q.db.ExecContext(ctx, updateRepo, arg.Config, arg.Description, arg.ID)
 	return err
 }

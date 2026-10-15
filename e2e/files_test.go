@@ -78,10 +78,15 @@ func nodeNames(nodes []treeNode) []string {
 	return out
 }
 
-// deleteFiles sends DELETE /api/repos/{repo}/files?<key>=<value> (key "path" or "prefix").
+// deleteFiles sends POST /api/repos/{repo}/files/delete with one item: a file (key "path") or a
+// folder (key "prefix").
 func deleteFiles(t *testing.T, s *Server, repo, key, value string, auth Auth) (int, int) {
 	t.Helper()
-	st, b := s.API(t, http.MethodDelete, "/api/repos/"+repo+"/files?"+key+"="+url.QueryEscape(value), nil, auth)
+	body := map[string][]string{"paths": {value}}
+	if key == "prefix" {
+		body = map[string][]string{"prefixes": {value}}
+	}
+	st, b := s.API(t, http.MethodPost, "/api/repos/"+repo+"/files/delete", body, auth)
 	var out struct {
 		Deleted int `json:"deleted"`
 	}
@@ -293,9 +298,8 @@ func TestDelete(t *testing.T) {
 		if resp, _ := authGet(t, s, "/maven/"+mvn+"/"+jar, Basic{w, "writer-pass-1234"}); resp.StatusCode != http.StatusNotFound {
 			t.Fatalf("GET a deleted file: status %d, want 404", resp.StatusCode)
 		}
-		if st, _ := deleteFiles(t, s, mvn, "path", jar, ps.Auth()); st != http.StatusNotFound {
-			t.Fatalf("delete of a deleted file: status %d, want 404", st)
-		}
+		// A file that is gone already counts as done.
+		mustDelete(t, s, mvn, "path", jar, ps.Auth(), 0)
 		// A folder by prefix, with the token as a Bearer token.
 		mustDelete(t, s, mvn, "prefix", "g/a/2.0", Bearer{ps.Token}, 1)
 		// An admin signed in to the UI (with the second factor) deletes too.
@@ -323,18 +327,20 @@ func TestDelete(t *testing.T) {
 		}
 
 		// Repo delete: admin only; rows and blobs go, and the name is free again.
-		if st, b := s.API(t, http.MethodDelete, "/api/repos/"+raw, nil, s.SignIn(t, w, "writer-pass-1234")); st != http.StatusForbidden {
+		del := map[string][]string{"names": {raw}}
+		if st, b := s.API(t, http.MethodPost, "/api/repos/delete", del, s.SignIn(t, w, "writer-pass-1234")); st != http.StatusForbidden {
 			t.Fatalf("repo delete by a writer: status %d, want 403: %s", st, b)
 		}
-		if st, b := s.API(t, http.MethodDelete, "/api/repos/"+raw, nil, s.AdminBasic()); st != http.StatusUnauthorized {
+		if st, b := s.API(t, http.MethodPost, "/api/repos/delete", del, s.AdminBasic()); st != http.StatusUnauthorized {
 			t.Fatalf("repo delete with the admin's password: status %d, want 401: %s", st, b)
 		}
 		var res struct {
-			Deleted int `json:"deleted"`
+			Deleted []string `json:"deleted"`
+			Files   int      `json:"files"`
 		}
-		s.MustAPI(t, http.MethodDelete, "/api/repos/"+raw, nil, s.Admin(), &res)
-		if res.Deleted != 1 {
-			t.Fatalf("repo delete: deleted %d files, want 1", res.Deleted)
+		s.MustAPI(t, http.MethodPost, "/api/repos/delete", del, s.Admin(), &res)
+		if !slices.Equal(res.Deleted, []string{raw}) || res.Files != 1 {
+			t.Fatalf("repo delete: %+v, want deleted [%s] and 1 file", res, raw)
 		}
 		if st, _ := s.API(t, http.MethodGet, "/api/repos/"+raw, nil, s.Admin()); st != http.StatusNotFound {
 			t.Fatalf("GET a deleted repo: status %d, want 404", st)

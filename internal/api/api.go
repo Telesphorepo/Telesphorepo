@@ -78,6 +78,7 @@ func (a *API) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/users", a.listUsers)
 	mux.HandleFunc("POST /api/users", a.createUser)
+	mux.HandleFunc("PATCH /api/users", a.setUsersDisabled)
 	mux.HandleFunc("GET /api/users/{username}", a.getUser)
 	mux.HandleFunc("PATCH /api/users/{username}", a.updateUser)
 
@@ -85,12 +86,13 @@ func (a *API) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/repos", a.listRepos)
 	mux.HandleFunc("POST /api/repos", a.createRepo)
+	mux.HandleFunc("PATCH /api/repos", a.setReposPublic)
+	mux.HandleFunc("POST /api/repos/delete", a.deleteRepos)
 	mux.HandleFunc("GET /api/repos/{name}", a.getRepo)
 	mux.HandleFunc("PATCH /api/repos/{name}", a.updateRepo)
-	mux.HandleFunc("DELETE /api/repos/{name}", a.deleteRepo)
 	mux.HandleFunc("GET /api/repos/{name}/permissions", a.listPermissions)
-	mux.HandleFunc("PUT /api/repos/{name}/permissions/{username}", a.setPermission)
-	mux.HandleFunc("DELETE /api/repos/{name}/permissions/{username}", a.deletePermission)
+	mux.HandleFunc("PUT /api/permissions", a.setPermissions)
+	mux.HandleFunc("POST /api/permissions/delete", a.deletePermissions)
 	mux.HandleFunc("GET /api/repos/{name}/assets", a.listAssets)
 	mux.HandleFunc("GET /api/repos/{name}/status", a.repoStatus)
 	mux.HandleFunc("GET /api/repos/{name}/usage", a.repoUsage)
@@ -99,7 +101,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /api/repos/{name}/file", a.fileDetails)
 	mux.HandleFunc("GET /api/repos/{name}/versions", a.versions)
 	mux.HandleFunc("GET /api/repos/{name}/builds", a.builds)
-	mux.HandleFunc("DELETE /api/repos/{name}/files", a.deleteFiles)
+	mux.HandleFunc("POST /api/repos/{name}/files/delete", a.deleteFiles)
 	mux.HandleFunc("POST /api/repos/{name}/upload", a.upload)
 	mux.HandleFunc("POST /api/repos/{name}/upload/scan", a.scanUpload)
 
@@ -133,6 +135,8 @@ func fail(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, auth.ErrInvalid), errors.Is(err, repos.ErrInvalid):
 		httpx.Error(w, http.StatusBadRequest, err.Error())
+	case errors.As(err, new(*repos.MissingError)):
+		httpx.Error(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, auth.ErrNotFound), errors.Is(err, repos.ErrNotFound), errors.Is(err, assets.ErrNotFound):
 		httpx.Error(w, http.StatusNotFound, "not found")
 	case errors.Is(err, auth.ErrExists), errors.Is(err, repos.ErrExists):
@@ -407,17 +411,16 @@ func (a *API) updateUser(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Password *string `json:"password"`
 		IsAdmin  *bool   `json:"is_admin"`
-		Disabled *bool   `json:"disabled"`
 	}
 	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
 		return
 	}
 	name := r.PathValue("username")
-	if !p.IsAdmin && (name != p.Username || in.IsAdmin != nil || in.Disabled != nil) {
+	if !p.IsAdmin && (name != p.Username || in.IsAdmin != nil) {
 		httpx.Error(w, http.StatusForbidden, "admin required")
 		return
 	}
-	u, err := a.auth.UpdateUser(r.Context(), name, in.Password, in.IsAdmin, in.Disabled)
+	u, err := a.auth.UpdateUser(r.Context(), name, in.Password, in.IsAdmin)
 	if err != nil {
 		fail(w, r, err)
 		return
@@ -428,9 +431,6 @@ func (a *API) updateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.IsAdmin != nil {
 		detail["is_admin"] = *in.IsAdmin
-	}
-	if in.Disabled != nil {
-		detail["disabled"] = *in.Disabled
 	}
 	if len(detail) > 0 {
 		a.record(r, p, audit.UserUpdate, nil, u.Username, detail)
@@ -603,10 +603,9 @@ func (a *API) updateRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		AnonymousRead *bool             `json:"anonymous_read"`
-		Description   *string           `json:"description"`
-		Config        json.RawMessage   `json:"config"`
-		Proxy         *repos.ProxyInput `json:"proxy"` // a proxy's remote; the password is write-only
+		Description *string           `json:"description"`
+		Config      json.RawMessage   `json:"config"`
+		Proxy       *repos.ProxyInput `json:"proxy"` // a proxy's remote; the password is write-only
 	}
 	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
 		return
@@ -627,15 +626,12 @@ func (a *API) updateRepo(w http.ResponseWriter, r *http.Request) {
 			a.record(r, p, audit.RepoUpdate, repo, repo.Name, map[string]any{"proxy": changed})
 		}
 	}
-	old, repo, err := a.repos.Update(r.Context(), r.PathValue("name"), in.AnonymousRead, in.Description, in.Config)
+	old, repo, err := a.repos.Update(r.Context(), r.PathValue("name"), in.Description, in.Config)
 	if err != nil {
 		fail(w, r, err)
 		return
 	}
 	var changed []string
-	if old.AnonymousRead != repo.AnonymousRead {
-		changed = append(changed, "anonymous_read")
-	}
 	if old.Description != repo.Description {
 		changed = append(changed, "description")
 	}
@@ -654,31 +650,6 @@ func (a *API) updateRepo(w http.ResponseWriter, r *http.Request) {
 	a.writeRepo(w, r, http.StatusOK, p, repo, "admin")
 }
 
-// deleteRepo deletes a repo with all its files and blobs (admin): 200 {deleted: <file count>}.
-func (a *API) deleteRepo(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.admin(w, r)
-	if !ok {
-		return
-	}
-	repo, err := a.repos.ByName(r.Context(), r.PathValue("name"))
-	if err != nil {
-		fail(w, r, err)
-		return
-	}
-	n, err := a.files.DeleteRepo(r.Context(), repo)
-	if err == nil {
-		a.rules.Forget(repo.ID) // the rows cascaded with the repo; an id can be used again
-	}
-	if err != nil {
-		fail(w, r, err)
-		return
-	}
-	// The repo row is gone, so the event keeps only its name (in the detail).
-	a.audit.Record(r.Context(), r, audit.Event{Actor: auth.ActorOf(p), Action: audit.RepoDelete,
-		Repo: repo.Name, Target: repo.Name, Detail: map[string]any{"count": n}})
-	httpx.WriteJSON(w, http.StatusOK, map[string]int{"deleted": n})
-}
-
 // --- permissions ---
 
 func (a *API) listPermissions(w http.ResponseWriter, r *http.Request) {
@@ -695,48 +666,6 @@ func (a *API) listPermissions(w http.ResponseWriter, r *http.Request) {
 		ps = []auth.Permission{}
 	}
 	httpx.WriteJSON(w, http.StatusOK, ps)
-}
-
-func (a *API) setPermission(w http.ResponseWriter, r *http.Request) {
-	p, repo, ok := a.adminRepoP(w, r)
-	if !ok {
-		return
-	}
-	var in struct {
-		Level string `json:"level"`
-	}
-	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
-		return
-	}
-	var lvl auth.Level
-	switch in.Level {
-	case "read":
-		lvl = auth.Read
-	case "write":
-		lvl = auth.Write
-	default:
-		httpx.Error(w, http.StatusBadRequest, `level must be "read" or "write"`)
-		return
-	}
-	if err := a.auth.SetPermission(r.Context(), repo.ID, r.PathValue("username"), lvl); err != nil {
-		fail(w, r, err)
-		return
-	}
-	a.record(r, p, audit.PermissionSet, repo, r.PathValue("username"), map[string]any{"level": in.Level})
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (a *API) deletePermission(w http.ResponseWriter, r *http.Request) {
-	p, repo, ok := a.adminRepoP(w, r)
-	if !ok {
-		return
-	}
-	if err := a.auth.DeletePermission(r.Context(), repo.ID, r.PathValue("username")); err != nil {
-		fail(w, r, err)
-		return
-	}
-	a.record(r, p, audit.PermissionDelete, repo, r.PathValue("username"), nil)
-	w.WriteHeader(http.StatusNoContent)
 }
 
 // --- assets & search ---

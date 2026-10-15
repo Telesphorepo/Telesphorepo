@@ -20,7 +20,10 @@ INSERT INTO repos (name, format, kind, anonymous_read, config, description, crea
 RETURNING id;
 
 -- name: UpdateRepo :exec
-UPDATE repos SET anonymous_read = ?, config = ?, description = ? WHERE id = ?;
+UPDATE repos SET config = ?, description = ? WHERE id = ?;
+
+-- name: SetRepoAnonymousRead :exec
+UPDATE repos SET anonymous_read = ? WHERE id = ?;
 
 -- NULL clears the lock.
 -- name: SetRepoLockedBy :exec

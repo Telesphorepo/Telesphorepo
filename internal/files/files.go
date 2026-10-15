@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"slices"
 	"strings"
 	"time"
 
@@ -189,19 +190,13 @@ func (s *Service) Tree(ctx context.Context, repo *repos.Repo, dir, after string,
 	return out, next, nil
 }
 
-// DeletePath deletes one file. ErrNotFound when it does not exist.
-func (s *Service) DeletePath(ctx context.Context, repo *repos.Repo, p string) error {
-	if !ValidPath(p) {
-		return ErrInvalid
-	}
-	n, err := s.deleteBatch(context.WithoutCancel(ctx), repo, []string{p})
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return ErrNotFound
-	}
-	return nil
+// DeletePaths deletes the files of paths in one transaction and returns the paths it deleted. A
+// path that does not exist is skipped. The caller checks each path with ValidPath first. It runs
+// to the end when the client goes away.
+func (s *Service) DeletePaths(ctx context.Context, repo *repos.Repo, paths []string) ([]string, error) {
+	paths = slices.Clone(paths)
+	slices.Sort(paths)
+	return s.deleteBatch(context.WithoutCancel(ctx), repo, slices.Compact(paths))
 }
 
 // DeletePrefix deletes every file under folder prefix (a version, a package, any subtree) in
@@ -238,7 +233,8 @@ func (s *Service) deleteAll(ctx context.Context, repo *repos.Repo, dir string) (
 		if err != nil || len(paths) == 0 {
 			return total, err
 		}
-		n, err := s.deleteBatch(ctx, repo, paths)
+		deleted, err := s.deleteBatch(ctx, repo, paths)
+		n := len(deleted)
 		total += n
 		if err != nil {
 			return total, err
@@ -249,10 +245,11 @@ func (s *Service) deleteAll(ctx context.Context, repo *repos.Repo, dir string) (
 	}
 }
 
-// deleteBatch deletes the rows of paths in one transaction, after the format's DeleteObserver,
-// and then their blobs. It holds the asset lock of each path (the lock uploads take), taken in
-// path order, until the blobs are gone.
-func (s *Service) deleteBatch(ctx context.Context, repo *repos.Repo, paths []string) (int, error) {
+// deleteBatch deletes the rows of paths (sorted, each once) in one transaction, after the
+// format's DeleteObserver, and then their blobs. It returns the paths whose rows it deleted. It
+// holds the asset lock of each path (the lock uploads take), taken in path order, until the
+// blobs are gone.
+func (s *Service) deleteBatch(ctx context.Context, repo *repos.Repo, paths []string) ([]string, error) {
 	for _, p := range paths {
 		unlock := s.assets.Lock(repo.ID, p)
 		defer unlock()
@@ -277,12 +274,12 @@ func (s *Service) deleteBatch(ctx context.Context, repo *repos.Repo, paths []str
 		return nil
 	})
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	for _, p := range deleted {
 		if err := s.assets.DeleteBlob(ctx, repo.Name, p); err != nil {
 			s.log.Warn("delete blob after its row", "repo", repo.Name, "path", p, "err", err.Error())
 		}
 	}
-	return len(deleted), nil
+	return deleted, nil
 }

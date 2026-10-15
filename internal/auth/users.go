@@ -77,7 +77,53 @@ func (s *Service) ListUsers(ctx context.Context, after string, limit int) ([]*Us
 	return out, next, nil
 }
 
-func (s *Service) UpdateUser(ctx context.Context, username string, password *string, admin, disabled *bool) (*User, error) {
+// SetDisabled disables or enables every user of names in one transaction. It reads every name
+// first: an unknown name returns a *repos.MissingError and changes nothing. Disabling ends the
+// sessions of every user in the list. It returns the users whose value changed.
+func (s *Service) SetDisabled(ctx context.Context, names []string, disabled bool) ([]*User, error) {
+	var changed []*User
+	var ids []int64
+	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
+		changed, ids = changed[:0], ids[:0]
+		q := s.wq.WithTx(tx)
+		var all []*User
+		for _, name := range names {
+			r, err := q.GetUserByUsername(ctx, name)
+			if errors.Is(err, sql.ErrNoRows) {
+				return &repos.MissingError{Kind: "user", Name: name}
+			}
+			if err != nil {
+				return err
+			}
+			all = append(all, newUser(r.ID, r.Username, r.IsAdmin, r.Disabled, r.Kind, r.Email, r.CreatedAt))
+		}
+		for _, u := range all {
+			if u.Disabled != disabled {
+				if err := q.SetUserDisabled(ctx, dbq.SetUserDisabledParams{Disabled: disabled, ID: u.ID}); err != nil {
+					return err
+				}
+				u.Disabled = disabled
+				changed = append(changed, u)
+			}
+			if disabled {
+				if err := q.DeleteUserSessions(ctx, u.ID); err != nil {
+					return err
+				}
+				ids = append(ids, u.ID)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range ids {
+		s.cache.invalidate(id)
+	}
+	return changed, nil
+}
+
+func (s *Service) UpdateUser(ctx context.Context, username string, password *string, admin *bool) (*User, error) {
 	var hash string
 	if password != nil {
 		if len(*password) < minPasswordLen {
@@ -88,7 +134,7 @@ func (s *Service) UpdateUser(ctx context.Context, username string, password *str
 			return nil, err
 		}
 	}
-	revoke := password != nil || (disabled != nil && *disabled)
+	revoke := password != nil
 	var id int64
 	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
 		q := s.wq.WithTx(tx)
@@ -111,11 +157,6 @@ func (s *Service) UpdateUser(ctx context.Context, username string, password *str
 		}
 		if admin != nil {
 			if err := q.SetUserAdmin(ctx, dbq.SetUserAdminParams{IsAdmin: *admin, ID: id}); err != nil {
-				return err
-			}
-		}
-		if disabled != nil {
-			if err := q.SetUserDisabled(ctx, dbq.SetUserDisabledParams{Disabled: *disabled, ID: id}); err != nil {
 				return err
 			}
 		}
