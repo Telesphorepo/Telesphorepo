@@ -104,7 +104,7 @@
 
   const moveEffects = (patch: Record<string, unknown>) =>
     Object.keys(patch).some((k) => k === "storage" || k === "fs.root" || k.startsWith("s3."))
-      ? ["When files exist and the location changes, copies every file to the new location in the background", "Refuses uploads to every repository until the copy ends"]
+      ? ["When files exist and the location changes, copies every file to the new location in the background", "Keeps uploads working: each upload goes to both locations until the copy ends"]
       : [];
 
   function saved(result: Settings | SettingsMoveStarted) {
@@ -162,7 +162,7 @@
     <div class="mt-2 h-2 w-full overflow-hidden rounded-full bg-muted" role="progressbar" aria-label="Files moved" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent(move)}>
       <div class="h-full rounded-full bg-primary transition-[width]" style="width: {percent(move)}%"></div>
     </div>
-    <p class="mt-3 text-meta text-muted-foreground">Uploads wait until the move ends. Downloads keep working from the old location.</p>
+    <p class="mt-3 text-meta text-muted-foreground">Uploads keep working and go to both locations. Downloads come from the old location until the move ends.</p>
   </Section>
 {:else if move && (move.state !== "done" || move.failed > 0)}
   <Section title="Last storage move" description={targetText(move)}>
@@ -217,6 +217,6 @@
   title="Cancel the storage move?"
   confirmLabel="Cancel the move"
   destructive
-  changes={["Stops copying files", "Keeps the files already copied in the new location", "Keeps the storage location unchanged", "Allows uploads again"]}
+  changes={["Stops copying files", "Keeps the files already copied in the new location", "Keeps the storage location unchanged", "Sends uploads to the old location only"]}
   onConfirm={cancelMove}
 />

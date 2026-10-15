@@ -46,11 +46,13 @@ func (h *Handler) ValidateConfig(raw json.RawMessage) (json.RawMessage, error) {
 	return h.DefaultConfig(), nil
 }
 
-// Register mounts GET/HEAD/PUT /maven/{repo}/{path...}.
+// Register mounts GET/HEAD/PUT /maven/{repo}/{path...} and the project setup scripts GET /setup.sh
+// and GET /setup.ps1.
 func (h *Handler) Register(mux *http.ServeMux, host format.Host) {
 	h.auth, h.assets, h.cfg, h.host = host.Auth, host.Assets, host.Config, host
 	mux.HandleFunc("GET /maven/{repo}/{path...}", h.handle)
 	mux.HandleFunc("PUT /maven/{repo}/{path...}", h.handle)
+	h.registerSetup(mux)
 }
 
 func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {

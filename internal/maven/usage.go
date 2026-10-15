@@ -210,9 +210,9 @@ func (h *Handler) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
 
 	s.via = format.ViaCI
 	setup := " First set up the build with the steps under From your computer on the repository's publish page."
-	s.add("github-actions", ".github/workflows/publish.yml (Gradle)", "yaml", workflow("./gradlew publish"),
+	s.add("github-actions", ".github/workflows/publish.yml (Gradle)", "yaml", workflow(format.GitHubTrigger, "./gradlew publish"),
 		"The Gradle plugin uses the job's identity token, so the job stores no secret."+setup)
-	s.add("github-actions", ".github/workflows/publish.yml (Maven)", "yaml", workflow("mvn -B deploy"),
+	s.add("github-actions", ".github/workflows/publish.yml (Maven)", "yaml", workflow(format.GitHubTrigger, "mvn -B deploy"),
 		"The Maven extension uses the job's identity token, so the job stores no secret."+setup)
 	s.add("jenkins", "Jenkinsfile (Gradle)", "groovy", format.JenkinsPipeline(repo.Name, "./gradlew build", "./gradlew publish"),
 		format.JenkinsNote(baseURL)+setup)
@@ -236,8 +236,9 @@ func gradlePublishSettings(kts bool, baseURL, repo string) string {
 		"telesphorepo {\n    url = '" + baseURL + "'\n    repository = '" + repo + "'\n    oidcTokenEnv = 'OIDC_TOKEN'\n}\n"
 }
 
-func workflow(run string) string {
-	return format.GitHubTrigger + "permissions:\n  id-token: write\n  contents: read\n\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n" +
+// workflow is the GitHub Actions workflow that publishes with run when trigger fires.
+func workflow(trigger, run string) string {
+	return trigger + "permissions:\n  id-token: write\n  contents: read\n\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n" +
 		"      - uses: actions/checkout@v7\n      - uses: actions/setup-java@v6\n        with:\n          distribution: temurin\n" +
 		"          java-version: 21\n      - run: " + run + "\n"
 }

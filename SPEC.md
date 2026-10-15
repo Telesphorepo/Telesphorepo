@@ -222,6 +222,7 @@ signed-in browser downloads from a private repo without a Basic prompt. A **writ
 | `GET, HEAD /debian/{repo}/{path...}` | read | `dists/...` and `pool/...` served from `assets` |
 | `GET, HEAD, PUT /raw/{repo}/{path...}` | read / write | PUT: 201 new path; 200 identical bytes (any policy) or a replace when `overwrite` is `allow`; 409 different bytes when `overwrite` is `deny` (default); 413 over `max_upload_size`. Repo config: `{"overwrite":"deny"}` or `{"overwrite":"allow"}`. S3 redirect as for Maven |
 | `GET, HEAD /debian/{repo}/key.asc` | read | The armored public signing key of the repo (`signing_key` of its config). Same read gate as the repo's other files |
+| `GET /setup.sh`, `GET /setup.ps1` | none | The project setup script (see **Project setup**), `text/plain`. The Maven format mounts them. 400 when the server address holds a quote, a space, a backslash or a control character |
 | `/` | none | Embedded UI, hash-routed |
 
 A read of a proxy or a group repo on a format route follows **Group and proxy repositories**. A
@@ -368,6 +369,66 @@ is written to it with `sudo tee -a FILE > /dev/null`.
 | apt | Key: `curl -fsSL HOST/debian/{repo}/key.asc -o /etc/apt/keyrings/telesphorepo.asc`. Source: `deb [signed-by=/etc/apt/keyrings/telesphorepo.asc] HOST/debian/{repo} {dist} {component}`. For a private repo, the `curl` command reads `USER:READ_TOKEN` from a config on stdin, and `/etc/apt/auth.conf.d/{repo}.conf` holds `machine HOST/debian/{repo} login USER password TOKEN` (mode 600) |
 | Upload `.deb` | `curl -K - -T x.deb HOST/debian/{repo}/upload/{dist}/{component}` with `user = "publish:SESSION_TOKEN"` on stdin. Indexes rebuild after `deb.debounce`; poll `GET /api/repos/{repo}/status` for `pending: 0` |
 | Raw | Upload: `curl -K - -T file.tar.gz HOST/raw/{repo}/path/file.tar.gz` with `user = "publish:SESSION_TOKEN"` on stdin. Download: `curl -fLO HOST/raw/{repo}/path/file.tar.gz`; a private repo adds `-K -` with `user = "USER:READ_TOKEN"` on stdin |
+
+### Project setup
+
+One command sets up a Gradle or Maven project to publish to a repo. The person runs it once in
+the project folder and commits the files it changes:
+
+```sh
+curl -fsSL HOST/setup.sh | sh -s -- REPO [--ci none|github|jenkins-pipeline|jenkins-freestyle] [--yes]
+```
+
+```powershell
+& ([scriptblock]::Create((irm HOST/setup.ps1))) REPO [-Ci none|github|jenkins-pipeline|jenkins-freestyle] [-Yes]
+```
+
+`setup.sh` is POSIX sh; `setup.ps1` runs on PowerShell 5.1 and later. The sources are
+`internal/maven/setup.sh` and `setup.ps1`. The server fills in `HOST` (the `base_url` setting,
+else the scheme and host of the request), the client version `clientsVersion`, the Jenkins
+credential ID, and the CI files of the publish snippets: the GitHub Actions workflow with the
+trigger `on: push: tags: ["v*"]`, and the Jenkinsfile. The script fills in the repo and the
+commands of the project (`./gradlew` when the project has `gradlew`, else `gradle`).
+
+- **Questions.** When REPO or the CI choice is missing and a terminal is there (`/dev/tty` for
+  sh, because stdin is the pipe; the console for PowerShell), the script asks for the repo and
+  "Where will you publish from?" (1 Your computer only, 2 GitHub Actions, 3 Jenkins with a
+  Jenkinsfile, 4 Jenkins freestyle job). `--ci none` (`-Ci none`) is Your computer only and asks
+  no question. Without a terminal, a missing REPO stops the script and a missing CI choice means
+  the computer only. A repo name must match `[a-z0-9][a-z0-9._-]*`.
+- **Build tool.** `settings.gradle.kts`, else `settings.gradle`, else `pom.xml`. With none, the
+  script stops.
+- **Gradle.** The settings file gets the `com.telesphorepo.publish` plugin. With a top-level
+  `plugins {` block, the script adds the id line to it. Without one, it adds a `plugins` block
+  after the `pluginManagement` and `buildscript` blocks, or at the top after the comments and
+  imports. At the end it adds `telesphorepo { url; repository }`, with
+  `oidcTokenEnv = "OIDC_TOKEN"` for both Jenkins choices.
+- **Maven.** `.mvn/extensions.xml` gets the extension (a new file, or a new `<extension>` before
+  `</extensions>`). `.mvn/maven.config` gets `-Dtelesphorepo.url=HOST` unless it has a
+  `-Dtelesphorepo.url` line. `pom.xml` gets `<distributionManagement>` with `<repository>` and
+  `<snapshotRepository>` before `</project>`, with the indent of `<modelVersion>`, unless it has
+  one.
+- **CI.** `--ci github` writes `.github/workflows/publish.yml`. `--ci jenkins-pipeline` writes
+  `Jenkinsfile`. `--ci jenkins-freestyle` writes no CI file and prints the freestyle job steps:
+  Configure; under Environment tick "Use secret text(s) or file(s)"; under Bindings Add, then
+  "Secret text", with Variable `OIDC_TOKEN` and Credentials `telesphorepo-id-token`; Add build
+  step, then "Execute shell" ("Execute Windows batch command" on Windows agents) with
+  `./gradlew publish` (or `gradle publish`) or
+  `mvn -B deploy -Dtelesphorepo.oidcTokenEnv=OIDC_TOKEN`; Save, then Build Now. A CI file that
+  exists with other content stays as it is.
+- **Safety.** The script finds anchors with plain line matches and brace counts, never a
+  rewrite of the whole file. A block that it cannot place safely (a `plugins` block on one line,
+  braces that do not close, a second `</project>`) it prints to paste by hand, and it then exits
+  1. It shows each change first. A change to a file that exists needs y at the prompt, or
+  `--yes`; without a terminal and without `--yes` it stops and changes nothing. Line ends
+  (LF or CRLF) and a UTF-8 BOM stay as they are. It never touches `~/.m2` or `~/.gradle` and
+  writes no secret. A second run changes nothing.
+- **End.** It prints the changed files, "Commit these files", the publish command with "click
+  Approve in your browser the first time", and for CI "Ask an admin to add a CI pipeline on
+  Settings › CI pipelines": for GitHub Actions the pipeline must allow tags `v*`; for Jenkins it
+  adds the credential note ("OpenID Connect id token", ID `telesphorepo-id-token`, the server
+  address as audience). For Gradle, when neither the root build file nor `gradle.properties`
+  sets `group` and `version`, it asks the person to set them; it never edits the build file.
 
 ## Auth model
 
@@ -1172,7 +1233,13 @@ decision is in `docs/design/rationale.md`.
     to your build". A private repo has two numbered steps: create a read token, then add it to the
     build; the snippets already hold the credentials.
   - `publish`: **Publish to this repository**, for users who can publish (others see a lock and
-    "You cannot publish to X"). One card each for From your computer, From CI and By hand. The
+    "You cannot publish to X"). One card each for From your computer, From CI and By hand. A
+    Maven repo shows one **Set up your project** card in place of From your computer and From CI:
+    numbered steps "Where will you publish from?" (Your computer only, GitHub Actions, Jenkins
+    with a Jenkinsfile, Jenkins freestyle job), the OS (macOS or Linux, or Windows) and the
+    setup command (see **Project setup**) with the repo, the server and the choice (`--ci none`, or `-Ci none`, for Your computer only) filled in and a copy
+    button; for a CI choice, Add a CI pipeline; then Publish. The snippets below stay behind one
+    **Set it up by hand** disclosure, with the CI snippets of the chosen CI system. The
     notice of a paused repo (a Nexus mirror) shows once, above the tabs. The snippets run in
     order to a first publish: for Gradle the settings file (the `com.telesphorepo.publish` plugin
     at the client version, `url`, `repository` and `oidcTokenEnv = "OIDC_TOKEN"`) and
@@ -1477,7 +1544,7 @@ and networks, and the `telesphorepo-data-*` and `telesphorepo-scale-*` volumes.
 | core | `e2e` | `go tool task test` | Formats, auth, API, settings, storage move, query plans |
 | import | `import` | `go tool task test import` | `TestNexus` |
 | scale | `scale` | `go tool task test scale` | `TestScale` |
-| clients | `clients` | `go tool task test clients` | `TestClients` (`e2e/publish_clients_test.go`). It needs `git` unless `E2E_CLIENTS_DIR` points at a checkout of the clients repo |
+| clients | `clients` | `go tool task test clients` | `TestClients` (`e2e/publish_clients_test.go`) and `TestSetupPowerShell` (`e2e/setup_clients_test.go`). It needs `git` unless `E2E_CLIENTS_DIR` points at a checkout of the clients repo |
 | all | all tags | `go tool task test all` | Every zone |
 
 **Admin and user calls.** The API changes state only through a UI session, so the suite signs in
@@ -1526,7 +1593,16 @@ them; it checks that `telesphorepoLogin` and the Maven `login` goal keep the enr
 that a deploy to a missing repository says that the repository does not exist; (2) checks that a
 GitHub Actions build without `id-token: write` fails and names it, and publishes as "GitHub
 Actions" with a `jwebserver` container that serves a Keycloak token at
-`ACTIONS_ID_TOKEN_REQUEST_URL`.
+`ACTIONS_ID_TOKEN_REQUEST_URL`; (3) fetches `/setup.sh`, sets its version to the clients of the
+run, and runs it twice with `--yes` (the second run changes no file): in a Gradle Kotlin build
+with a `pluginManagement` and a `plugins` block, with `--ci github` (the id line lands in the
+`plugins` block, the workflow file), and in a fresh Maven project with `--ci none` (`.mvn/extensions.xml`,
+`.mvn/maven.config`, `<distributionManagement>`); then it publishes each one with the files that
+the script wrote, through the inline enrollment. `TestSetupPowerShell` (`e2e/setup_clients_test.go`)
+runs `setup.ps1` through `irm` in a `mcr.microsoft.com/powershell` container twice, in a Gradle
+Kotlin build with `-Ci jenkins-pipeline` and in a Maven project with `-Ci github`, and checks the
+files. The core zone's `TestSetupScripts` (`e2e/setup_test.go`) checks that both scripts are
+public and carry the server address and `clientsVersion`.
 
 `TestNexus` runs a Nexus container (`sonatype/nexus3`) and starts the server with
 `TR_NEXUS_SYNC_INTERVAL=12h`, so that no scheduled sync changes the counters. The fixture has two

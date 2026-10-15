@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
 
 // Client images and helpers that several zones share: Maven projects, Debian packages and apt,
-// and curl for raw files.
+// curl for raw files, and the project setup scripts.
 
 const (
 	mavenImage = "maven:3.9.16-eclipse-temurin-21"
@@ -214,4 +216,31 @@ func rawRandom(t *testing.T, n int) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// clientsVersionOf reads the clientsVersion constant from internal/maven/usage.go.
+func clientsVersionOf(t testing.TB) string {
+	t.Helper()
+	src, err := os.ReadFile("../internal/maven/usage.go")
+	if err != nil {
+		t.Fatalf("read usage.go: %v", err)
+	}
+	m := regexp.MustCompile(`const clientsVersion = "([^"]+)"`).FindSubmatch(src)
+	if m == nil {
+		t.Fatal("no clientsVersion constant in internal/maven/usage.go")
+	}
+	return string(m[1])
+}
+
+// fetchSetup gets GET /setup.sh or /setup.ps1 without credentials.
+func fetchSetup(t testing.TB, s *Server, name string) string {
+	t.Helper()
+	resp, body := s.Do(t, s.NewRequest(t, http.MethodGet, "/"+name, nil), nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /%s: status %d: %s", name, resp.StatusCode, body)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Fatalf("GET /%s: Content-Type %q, want text/plain", name, ct)
+	}
+	return string(body)
 }

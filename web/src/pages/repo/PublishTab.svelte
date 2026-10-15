@@ -4,7 +4,9 @@
   the Maven extension, with a one-time device approval: two-step verification for a password
   account, a new single sign-on for a single sign-on account), from CI (the CI pipeline that a person with CI pipelines
   adds, then the workflow), and by hand (upload in the browser, or a publish token with curl). The
-  snippets come from the format plugin. A pause shows once, above the tabs (RepoView).
+  snippets come from the format plugin. A Maven repository shows one setup command in place of
+  the computer and CI cards (ProjectSetup), with those snippets behind "Set it up by hand". A
+  pause shows once, above the tabs (RepoView).
 -->
 <script lang="ts">
   import type { Repo } from "$lib/api";
@@ -17,6 +19,7 @@
   import ErrorState from "$lib/components/ErrorState.svelte";
   import Loading from "$lib/components/Loading.svelte";
   import SnippetTabs from "./snippets/SnippetTabs.svelte";
+  import ProjectSetup from "./ProjectSetup.svelte";
   import type { Usage } from "./browse";
   import UploadIcon from "@lucide/svelte/icons/upload";
   import KeyRoundIcon from "@lucide/svelte/icons/key-round";
@@ -29,6 +32,8 @@
   const ci = $derived(publish.filter((s) => s.via === "ci"));
   const hand = $derived(publish.filter((s) => s.via === "hand"));
   const locked = $derived(!!repo.locked_by);
+  // The setup command (GET /setup.sh, /setup.ps1) sets up Gradle and Maven projects.
+  const setup = $derived(repo.format === "maven" && computer.length > 0);
 </script>
 
 {#snippet part(n: number, title: string, text?: string)}
@@ -46,7 +51,9 @@
 {:else if usage.error && !usage.data}
   <ErrorState error={usage.error} title="The instructions did not load" onRetry={usage.reload} />
 {:else}
-  {#if computer.length}
+  {#if setup}
+    <ProjectSetup {repo} baseURL={usage.data?.base_url ?? location.origin} {computer} {ci} />
+  {:else if computer.length}
     <Section
       title="From your computer"
       description={auth.user?.kind === "oidc"
@@ -57,7 +64,7 @@
     </Section>
   {/if}
 
-  {#if ci.length}
+  {#if ci.length && !setup}
     <Section title="From CI" description="The job proves who it is with its own identity token, so it stores no secret.">
       <div class="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
         {@render part(1, "Add a CI pipeline", `It names the CI repository and branches that may publish to ${repo.name}.`)}
