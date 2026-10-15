@@ -1,23 +1,25 @@
 <!--
-  Device approval. The Gradle plugin or the Maven extension prints a code and this address
-  (/#/device?code=ABCD-EFGH). The signed-in user looks up the code, checks the device, and
-  approves it with a fresh second factor.
+  Device approval. The login command of the Gradle plugin or the Maven extension prints a code and
+  this address (/#/device?code=ABCD-EFGH). Two steps: enter the code, then check the device (a felt
+  ticket with the code on its stub) and confirm with a fresh second factor. Approving tears the stub.
 -->
 <script lang="ts">
   import { untrack } from "svelte";
   import type { PageProps } from "$lib/router.svelte";
   import { href } from "$lib/router.svelte";
   import { auth } from "$lib/auth.svelte";
-  import { api, ApiError, errorMessage, type PendingEnrollment, type Proof, type SecondFactorMethod } from "$lib/api";
+  import { api, ApiError, errorMessage, type PendingEnrollment, type Proof } from "$lib/api";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
-  import { Label } from "$lib/components/ui/label";
   import { Spinner } from "$lib/components/ui/spinner";
-  import ErrorState from "$lib/components/ErrorState.svelte";
-  import EmptyState from "$lib/components/EmptyState.svelte";
-  import LoadingRows from "$lib/components/LoadingRows.svelte";
+  import PageHeader from "$lib/components/PageHeader.svelte";
+  import FormPage from "$lib/components/FormPage.svelte";
+  import FormGrid from "$lib/components/FormGrid.svelte";
+  import FormRow from "$lib/components/FormRow.svelte";
+  import Step from "$lib/components/Step.svelte";
+  import FeltTicket from "$lib/components/FeltTicket.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
-  import SecondFactorForm from "$lib/components/SecondFactorForm.svelte";
+  import FreshFactor from "$lib/components/FreshFactor.svelte";
   import CircleCheckIcon from "@lucide/svelte/icons/circle-check";
 
   let { query }: PageProps = $props();
@@ -38,20 +40,12 @@
   let pending = $state<PendingEnrollment | null>(null);
   let approved = $state<PendingEnrollment | null>(null);
 
-  // The caller's factors, for the approval form.
-  let methods = $state<SecondFactorMethod[] | null>(null);
-  let optional = $state(false);
-  let factorError = $state("");
-  let devBusy = $state(false);
-  let devError = $state("");
-
   async function lookup() {
     looking = true;
     lookupError = "";
     pending = null;
     try {
       pending = await api.devices.pending(code);
-      if (methods === null) loadFactors();
     } catch (e) {
       lookupError =
         e instanceof ApiError && e.notFound
@@ -62,28 +56,8 @@
     }
   }
 
-  async function loadFactors() {
-    factorError = "";
-    try {
-      const [f, cfg] = await Promise.all([api.security.get(), api.auth.config()]);
-      const m: SecondFactorMethod[] = [];
-      if (f.totp.length) m.push("totp");
-      if (f.passkeys.length) m.push("passkey");
-      methods = m;
-      optional = cfg.second_factor_optional;
-    } catch (e) {
-      factorError = errorMessage(e);
-    }
-  }
-
-  // A code in the address is looked up once the user is known.
-  let autoLooked = false;
-  $effect(() => {
-    if (auth.user && complete && !autoLooked) {
-      autoLooked = true;
-      untrack(lookup);
-    }
-  });
+  // A code in the address is looked up at once.
+  if (untrack(() => complete)) lookup();
 
   function submit(e: SubmitEvent) {
     e.preventDefault();
@@ -97,115 +71,87 @@
     pending = null;
   }
 
-  async function approveWithoutFactor() {
-    devBusy = true;
-    devError = "";
-    try {
-      await approve({});
-    } catch (e) {
-      devError = errorMessage(e);
-    } finally {
-      devBusy = false;
-    }
-  }
-
   const clientName = (k: PendingEnrollment["kind"]) => (k === "gradle" ? "Gradle plugin" : "Maven extension");
-  const next = $derived("/device" + (code ? "?code=" + code : ""));
 </script>
 
-<div class="flex flex-col gap-6">
+<PageHeader title="Approve a device" description="Approve the device only if the code matches the one in your terminal." />
+
+<FormPage>
   {#if approved}
-    <EmptyState
-      icon={CircleCheckIcon}
-      title="Device approved"
-      description="{approved.name} can now publish with your account. Return to your terminal: the login command finishes by itself."
-    >
-      <Button variant="outline" href={href("/settings/devices")}>Open your devices</Button>
-    </EmptyState>
-  {:else}
-    <div>
-      <h1 class="text-2xl font-semibold tracking-tight">Approve a device</h1>
-      <p class="mt-1.5 text-sm text-muted-foreground">
-        The login command of the Gradle plugin or the Maven extension prints a code. Approve the device only if the
-        code matches the one in your terminal.
-      </p>
-    </div>
-
-    {#if !auth.user}
-      <div class="flex flex-col gap-3">
-        {#if complete}
-          <p class="text-sm">Code <span class="font-mono font-medium tracking-wider">{code}</span></p>
-        {/if}
-        <Button class="self-start" href={href("/login", { next })}>Sign in to approve</Button>
+    <div class="flex flex-col gap-x-14 gap-y-8 sm:flex-row sm:items-center">
+      <!-- 20rem on a phone leaves room for the torn stub to drop to the right. -->
+      <div class="w-full max-w-[20rem] shrink-0 sm:max-w-[24rem]">
+        <FeltTicket
+          top={approved.name}
+          bottom={clientName(approved.kind)}
+          serial={approved.user_code}
+          moment="tear"
+          label="The ticket of {approved.name}, its stub torn off"
+        />
       </div>
-    {:else}
-      <form class="flex flex-col gap-2" onsubmit={submit}>
-        <Label for="device-code">Code from the terminal</Label>
-        <div class="flex flex-wrap gap-2">
-          <Input
-            id="device-code"
-            class="w-44 font-mono tracking-wider uppercase"
-            placeholder="ABCD-EFGH"
-            autocomplete="off"
-            spellcheck={false}
-            value={code}
-            oninput={(e) => {
-              code = normalize(e.currentTarget.value);
-              e.currentTarget.value = code;
-            }}
-            disabled={looking}
-          />
-          <Button type="submit" variant={pending ? "outline" : "default"} disabled={looking || !complete}>
-            {#if looking}<Spinner />{/if}
-            Look up
-          </Button>
-        </div>
-        {#if lookupError}<ErrorState inline error={lookupError} />{/if}
+      <div class="flex min-w-0 flex-col gap-3" aria-live="polite">
+        <p class="flex items-center gap-2 text-section text-success"><CircleCheckIcon class="size-5" />Device approved</p>
+        <p class="text-body text-muted-foreground">
+          {approved.name} can now publish as {auth.user?.username}. Go back to your terminal: the login command finishes by itself.
+        </p>
+        <div><Button variant="outline" href={href("/settings/devices")}>Open your devices</Button></div>
+      </div>
+    </div>
+  {:else}
+    <Step n={1} title="Enter the code from your terminal" done={!!pending} last={!pending}>
+      <form onsubmit={submit}>
+        <FormGrid>
+          <FormRow label="Code" for="device-code" help="The code has eight letters and digits." error={lookupError}>
+            <div class="flex gap-2">
+              <Input
+                id="device-code"
+                class="min-w-0 flex-1 tracking-widest tabular-nums"
+                placeholder="ABCD-EFGH"
+                autocomplete="off"
+                spellcheck={false}
+                value={code}
+                oninput={(e) => {
+                  code = normalize(e.currentTarget.value);
+                  e.currentTarget.value = code;
+                }}
+                disabled={looking}
+                aria-describedby="device-code-help"
+                aria-invalid={lookupError ? true : undefined}
+              />
+              <Button type="submit" variant={pending ? "outline" : "default"} disabled={looking || !complete}>
+                {#if looking}<Spinner />{/if}
+                Look up
+              </Button>
+            </div>
+          </FormRow>
+        </FormGrid>
       </form>
+    </Step>
 
-      {#if pending}
-        <section class="flex flex-col gap-5 rounded-2xl border p-5" aria-label="Device to approve">
-          <dl class="grid grid-cols-[7rem_1fr] gap-x-4 gap-y-2 text-sm">
-            <dt class="text-muted-foreground">Device</dt>
-            <dd class="font-medium break-words">{pending.name}</dd>
-            <dt class="text-muted-foreground">Client</dt>
-            <dd>{clientName(pending.kind)}</dd>
+    {#if pending}
+      <Step n={2} title="Check the device, then confirm it is you" description="The device can publish to the repositories that you can publish to, until you revoke it." last>
+        <div class="flex flex-col gap-x-8 gap-y-6 sm:flex-row sm:items-center">
+          <div class="w-full max-w-[20rem] shrink-0">
+            <FeltTicket
+              top={pending.name}
+              bottom={clientName(pending.kind)}
+              serial={pending.user_code}
+              label="The ticket of {pending.name}, {clientName(pending.kind)}"
+            />
+          </div>
+          <!-- The ticket shows the name and the client. The code on its stub reads sideways, so the
+               code to compare with the terminal shows here once more, level. -->
+          <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-body">
             <dt class="text-muted-foreground">Code</dt>
-            <dd class="font-mono tracking-wider">{pending.user_code}</dd>
+            <dd class="tracking-widest tabular-nums">{pending.user_code}</dd>
             <dt class="text-muted-foreground">Code expires</dt>
             <dd><RelativeTime at={pending.expires_at} /></dd>
           </dl>
-          <p class="text-sm text-muted-foreground">
-            The device can publish to the repositories you can write to, as {auth.user?.username}, until you revoke it.
-          </p>
-
-          {#if factorError}
-            <ErrorState inline error={factorError} />
-          {:else if methods === null}
-            <LoadingRows rows={2} />
-          {:else if methods.length === 0}
-            <div class="flex flex-col gap-3 text-sm">
-              <p>Approving a device needs two-step verification, and you have not set it up yet.</p>
-              <Button class="self-start" href={href("/settings/security")}>Set up two-step verification</Button>
-              {#if optional}
-                <p class="text-muted-foreground">Dev mode makes two-step verification optional.</p>
-                <Button variant="outline" class="self-start" disabled={devBusy} onclick={approveWithoutFactor}>
-                  {#if devBusy}<Spinner />{/if}
-                  Approve without two-step verification
-                </Button>
-                {#if devError}<ErrorState inline error={devError} />{/if}
-              {/if}
-            </div>
-          {:else}
-            <SecondFactorForm
-              {methods}
-              actionLabel="Approve device"
-              passkeyOptions={api.security.assertPasskeyOptions}
-              onProof={approve}
-            />
-          {/if}
-        </section>
-      {/if}
+        </div>
+        <div class="mt-8">
+          <FreshFactor actionLabel="Approve device" onProof={approve} />
+        </div>
+      </Step>
     {/if}
   {/if}
-</div>
+</FormPage>

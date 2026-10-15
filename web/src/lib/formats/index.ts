@@ -3,10 +3,6 @@
 // use the JSON editor.
 
 import type { Component } from "svelte";
-import CoffeeIcon from "@lucide/svelte/icons/coffee";
-import PackageIcon from "@lucide/svelte/icons/package";
-import FilesIcon from "@lucide/svelte/icons/files";
-import BoxIcon from "@lucide/svelte/icons/box";
 import type { RepoConfig } from "$lib/api";
 import Debian from "./debian.svelte";
 
@@ -17,16 +13,19 @@ export const editors: Record<string, Component<EditorProps>> = {
   debian: Debian,
 };
 
-/** How a format looks everywhere in the UI: an icon and a hue for its tint. */
-export type FormatLook = { icon: Component<{ class?: string }>; hue: number };
+/**
+ * The title (the same as the plugin's, shown until /api/formats loads) and a one-line description of a built-in format. The icon of every format comes
+ * from its plugin: render it with FormatIcon (or FormatBadge for the icon and the title).
+ */
+export type FormatLook = { title?: string; description?: string };
 
 const looks: Record<string, FormatLook> = {
-  maven: { icon: CoffeeIcon, hue: 25 },
-  debian: { icon: PackageIcon, hue: 340 },
-  raw: { icon: FilesIcon, hue: 220 },
+  maven: { title: "Maven / Gradle", description: "Java libraries and Gradle plugins, for Maven and Gradle builds." },
+  debian: { title: "Debian (apt)", description: "Packages that apt installs on Debian and Ubuntu." },
+  raw: { title: "Raw files", description: "Any files, downloaded by their path." },
 };
 
-/** The look of a format. A format without an entry gets a box icon and a hue from its name. */
+/** The look of a format. A format without an entry has no title or description of its own. */
 export function formatLook(format: string): FormatLook {
-  return looks[format] ?? { icon: BoxIcon, hue: [...format].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7) };
+  return looks[format] ?? {};
 }

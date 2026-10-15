@@ -7,7 +7,10 @@ import { errorMessage, type Page, type PageParams } from "$lib/api";
  * One request and its state. Create it in a component's script; it loads at once.
  *
  *   const repo = new Resource(() => api.repos.get(params.name));
- *   {#if repo.loading} <LoadingRows /> {:else if repo.error} <ErrorState error={repo.error} onRetry={repo.reload} /> ...
+ *   {#if repo.loading && !repo.data} <Loading /> {:else if repo.error} <ErrorState error={repo.error} onRetry={repo.reload} /> ...
+ *
+ * `loading` is true while any request runs; test `loading && !data` so a reload keeps the current
+ * content on screen (principle 11).
  *
  * To reload when inputs change, call reload() in an $effect that reads them.
  */
@@ -40,8 +43,39 @@ export class Resource<T> {
 }
 
 /**
- * A keyset-paged list. The first page loads at once; more() appends the next page. Use it with
- * <KeysetTable> or <LoadMore>.
+ * What <DataTable> reads: the rows and the request state. A Keyset is one; listOf() makes one
+ * from a Resource of an array.
+ */
+export type TableSource<T> = {
+  readonly items: readonly T[];
+  readonly loading: boolean;
+  readonly error: string;
+  reload?: () => unknown;
+  readonly hasMore?: boolean;
+  readonly loadingMore?: boolean;
+  more?: () => unknown;
+};
+
+/** A table source over a Resource that loads an array (a list that is not paged). */
+export function listOf<T>(r: Resource<T[]>, filter?: (items: T[]) => T[]): TableSource<T> {
+  return {
+    get items() {
+      const items = r.data ?? [];
+      return filter ? filter(items) : items;
+    },
+    get loading() {
+      return r.loading && !r.data;
+    },
+    get error() {
+      return r.error;
+    },
+    reload: r.reload,
+  };
+}
+
+/**
+ * A keyset-paged list. The first page loads at once; more() appends the next page. Pass it to
+ * <DataTable>, which shows "Load more".
  *
  *   const devices = new Keyset((p) => api.devices.list(p));
  */

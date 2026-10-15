@@ -1,18 +1,21 @@
 <!--
-  The format of a repo ("maven", "debian", "raw", or any plugin): its icon and its title. The icon
-  and its color come from formatLook, so a format looks the same on every page.
+  The format of a repository: its icon (from the format plugin) and its title, in the text color
+  of where it sits. No box and no tint: the icon is the mark.
+
+    <FormatBadge format={repo.format} />
 -->
 <script lang="ts">
-  import { Badge } from "$lib/components/ui/badge";
+  import { formats } from "$lib/formats/registry.svelte";
   import { formatLook } from "$lib/formats";
+  import FormatIcon from "./FormatIcon.svelte";
 
-  let { format, title }: { format: string; /** Display title from /api/formats; the name when absent. */ title?: string } =
-    $props();
+  let { format, title }: { format: string; /** Display title; by default the format's own. */ title?: string } = $props();
 
-  const look = $derived(formatLook(format));
+  formats.load();
+  const text = $derived(title ?? formats.get(format)?.title ?? formatLook(format).title ?? format);
 </script>
 
-<Badge variant="outline" class="gap-1.5 font-normal" title={title ?? format}>
-  <span aria-hidden="true" class="flex" style="color: oklch(0.62 0.15 {look.hue})"><look.icon class="size-3.5" /></span>
-  {title ?? format}
-</Badge>
+<span class="inline-flex min-w-0 shrink-0 items-center gap-1.5 align-middle whitespace-nowrap">
+  <FormatIcon {format} />
+  <span class="truncate">{text}</span>
+</span>

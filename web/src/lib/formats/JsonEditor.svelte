@@ -1,9 +1,8 @@
-<!-- The fallback repo-config editor: the config as a JSON object. -->
+<!-- The fallback repo-config editor: the config as a JSON object. One FormRow of the page's FormGrid. -->
 <script lang="ts">
-  import { Textarea } from "$lib/components/ui/textarea";
-  import { Label } from "$lib/components/ui/label";
-  import ErrorState from "$lib/components/ErrorState.svelte";
   import { untrack } from "svelte";
+  import { Textarea } from "$lib/components/ui/textarea";
+  import FormRow from "$lib/components/FormRow.svelte";
   import type { EditorProps } from "./index";
 
   let { value, onChange }: EditorProps = $props();
@@ -26,16 +25,15 @@
   }
 </script>
 
-<div class="flex flex-col gap-2">
-  <Label for="{id}-json">Format options (JSON)</Label>
+<FormRow label="Format options" for="{id}-json" help="The options of this format, as a JSON object." error={error || undefined}>
   <Textarea
     id="{id}-json"
     class="min-h-28 font-mono text-[0.8125rem]"
     rows={Math.min(14, Math.max(4, text.split("\n").length))}
     spellcheck={false}
+    aria-describedby="{id}-json-help"
     bind:value={text}
     oninput={edit}
     aria-invalid={error ? true : undefined}
   />
-  {#if error}<ErrorState inline {error} />{/if}
-</div>
+</FormRow>

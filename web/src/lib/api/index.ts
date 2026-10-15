@@ -28,6 +28,8 @@ export const api = {
 
   /** The caller; 401 when signed out. */
   me: () => request<T.Me>("GET", "/api/me"),
+  /** The repositories the caller can use, by name. */
+  myAccess: (p?: T.PageParams) => request<T.UserAccess>("GET", "/api/me/access", { query: page(p) }),
 
   security: {
     get: () => request<T.Factors>("GET", "/api/security"),
@@ -54,6 +56,11 @@ export const api = {
 
   users: {
     list: (p?: T.PageParams) => request<T.Page<T.User>>("GET", "/api/users", { query: page(p) }),
+    /** Admin: one account; 404 when no account has the name. */
+    get: (username: string) => request<T.User>("GET", `/api/users/${enc(username)}`),
+    /** Admin: the repositories one person can use, by repository name. */
+    access: (username: string, p?: T.PageParams) =>
+      request<T.UserAccess>("GET", `/api/users/${enc(username)}/access`, { query: page(p) }),
     create: (u: T.NewUser) => request<T.User>("POST", "/api/users", { body: u }),
     /** Users change their own password; admins change anyone and is_admin/disabled. */
     update: (username: string, patch: T.UserPatch) =>
@@ -124,10 +131,14 @@ export const api = {
         request("PUT", `${repo(name)}/permissions/${enc(username)}`, { body: { level } }),
       delete: (name: string, username: string) => request("DELETE", `${repo(name)}/permissions/${enc(username)}`),
     },
+    /** Admin: who can download from and publish to the repo, and from where. admins lists the administrators too. */
+    access: (name: string, opts: { admins?: boolean } = {}) =>
+      request<T.RepoAccess>("GET", repo(name) + "/access", { query: { admins: opts.admins ? "1" : undefined } }),
     /** The URL a browser downloads a file from (the format's own route serves it). */
     fileURL: (format: string, name: string, path: string) =>
       `/${enc(format)}/${enc(name)}/${path.split("/").map(enc).join("/")}`,
   },
+
 
   /** Substring search over paths (q needs 3+ characters), optionally in one repo. */
   search: (q: string, opts: { repo?: string } & T.PageParams = {}) =>
@@ -142,18 +153,41 @@ export const api = {
     patch: (patch: T.SettingsPatch) => request<T.Settings | T.SettingsMoveStarted>("PATCH", "/api/settings", { body: patch }),
     testStorage: (patch: T.SettingsPatch) => request<T.TestResult>("POST", "/api/settings/storage/test", { body: patch }),
     testOIDC: (patch: T.SettingsPatch) => request<T.TestResult>("POST", "/api/settings/oidc/test", { body: patch }),
-    /** null when no signing key is configured. */
-    signingKey: () => requestOrNull<T.SigningKey>("GET", "/api/settings/signing-key"),
-    /** No armored key generates a new one. */
-    setSigningKey: (armored?: string) =>
-      request<T.SigningKey>("POST", "/api/settings/signing-key", armored ? { body: { armored } } : {}),
   },
 
-  /** Admin: the IP range presets that the server fetches (Cloudflare, GitHub Actions). */
+  /** Admin: named address ranges that repo rules and trusted proxies refer to. */
+  ipLists: {
+    /** Every list without its ranges: presets first, then by name. */
+    list: () => request<T.IPList[]>("GET", "/api/ip-lists"),
+    /** One list with its ranges. */
+    get: (name: string) => request<T.IPList>("GET", `/api/ip-lists/${enc(name)}`),
+    create: (l: T.NewIPList) => request<T.IPList>("POST", "/api/ip-lists", { body: l }),
+    /** Changes the fields that are set; a new name also changes the rules that refer to the list. */
+    update: (name: string, l: T.IPListPatch) => request<T.IPList>("PUT", `/api/ip-lists/${enc(name)}`, { body: l }),
+    /** 409 while a repo rule or the trusted proxies use the list. */
+    delete: (name: string) => request("DELETE", `/api/ip-lists/${enc(name)}`),
+    /** Fetches a preset now; a failed fetch is an ApiError (502) and the last good ranges stay. */
+    refresh: (name: string) => request<T.IPList>("POST", `/api/ip-lists/${enc(name)}/refresh`),
+  },
+
+  /** Admin: pulls the addresses and ranges out of pasted text. Stores nothing. */
+  ipRanges: {
+    parse: (text: string, signal?: AbortSignal) => request<T.ParsedRanges>("POST", "/api/ip-ranges/parse", { body: { text }, signal }),
+  },
+
+  /** Admin: keys that sign the package lists of Debian repositories. */
+  signingKeys: {
+    list: () => request<T.SigningKey[]>("GET", "/api/signing-keys"),
+    get: (name: string) => request<T.SigningKey>("GET", `/api/signing-keys/${enc(name)}`),
+    /** {name} creates a new key; {name, armored, passphrase?} imports one. */
+    create: (k: T.NewSigningKey) => request<T.SigningKey>("POST", "/api/signing-keys", { body: k }),
+    /** 409 while a repository uses the key. */
+    delete: (name: string) => request("DELETE", `/api/signing-keys/${enc(name)}`),
+    /** The address of the armored public key; the browser downloads it as <name>.asc. */
+    publicURL: (name: string) => `/api/signing-keys/${enc(name)}/public.asc`,
+  },
+
   network: {
-    presets: () => request<T.NetworkPreset[]>("GET", "/api/network/presets"),
-    /** Fetches a preset now; a failed fetch is an ApiError (502) and the last good list stays. */
-    refreshPreset: (name: string) => request<T.NetworkPreset>("POST", `/api/network/presets/${enc(name)}/refresh`),
     /** Untrusted peers that sent forwarded headers: likely reverse proxies, most recent first. */
     proxyCandidates: () => request<T.ProxyCandidate[]>("GET", "/api/network/proxy-candidates"),
   },

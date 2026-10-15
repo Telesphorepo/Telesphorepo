@@ -1,12 +1,12 @@
 <!--
-  Asks before an action that changes or removes something. `changes` lists exactly what the action
-  will do, one line each ("Deletes 14 files under com/acme/app/1.0/"). onConfirm runs while the
-  dialog stays open with a spinner; if it throws, the dialog shows the error and stays open; when
-  it resolves, the dialog closes.
+  A centered dialog that asks before an action that changes or removes something. `changes`
+  lists exactly what the action does, one line each ("Deletes 14 files under com/acme/app/1.0/").
+  onConfirm runs while the dialog stays open with a spinner; if it throws, the dialog shows the
+  error and stays open; when it resolves, the dialog closes.
 
-    <ConfirmDialog bind:open title="Delete repository" confirmLabel="Delete repository" destructive
-      changes={["Removes every file of maven-releases", "Removes its permissions"]}
-      onConfirm={() => api.repos.delete(name)} />
+    <ConfirmDialog bind:open title="Revoke this device?" confirmLabel="Revoke device" destructive
+      changes={["Stops the device at once", "Ends its open publish tokens"]}
+      onConfirm={() => api.devices.revoke(id)} />
 -->
 <script lang="ts">
   import type { Snippet } from "svelte";
@@ -66,10 +66,10 @@
       {#if description}<AlertDialog.Description>{description}</AlertDialog.Description>{/if}
     </AlertDialog.Header>
     {#if changes.length}
-      <ul class="flex flex-col gap-1.5 rounded-xl bg-muted/60 px-4 py-3 text-sm">
+      <ul class="flex flex-col gap-2 rounded-lg bg-panel px-4 py-3 text-sm">
         {#each changes as c, i (i)}
           <li class="flex gap-2">
-            <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full {destructive ? 'bg-destructive' : 'bg-primary'}"></span>
+            <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full {destructive ? 'bg-destructive' : 'bg-foreground/40'}"></span>
             <span class="min-w-0 break-words">{c}</span>
           </li>
         {/each}

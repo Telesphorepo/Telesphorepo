@@ -1,23 +1,27 @@
-<!-- Debian repo config: the architectures the indexes list. -->
+<!-- Debian repo config: the architectures the indexes list. One FormRow of the page's FormGrid. -->
 <script lang="ts">
-  import { Input } from "$lib/components/ui/input";
-  import { Label } from "$lib/components/ui/label";
   import { untrack } from "svelte";
+  import FormRow from "$lib/components/FormRow.svelte";
+  import ListInput from "$lib/components/ListInput.svelte";
   import type { EditorProps } from "./index";
 
   let { value, onChange }: EditorProps = $props();
 
   const id = $props.id();
-  let text = $state(untrack(() => (Array.isArray(value.architectures) ? (value.architectures as string[]).join(", ") : "")));
-
-  function edit() {
-    const architectures = text.split(",").map((s) => s.trim()).filter(Boolean);
-    onChange({ ...value, architectures });
-  }
+  let architectures = $state(untrack(() => (Array.isArray(value.architectures) ? [...(value.architectures as string[])] : [])));
 </script>
 
-<div class="flex flex-col gap-2">
-  <Label for="{id}-arch">Architectures</Label>
-  <Input id="{id}-arch" class="max-w-sm font-mono" placeholder="amd64, arm64" bind:value={text} oninput={edit} />
-  <p class="text-sm text-muted-foreground">The processor types that apt sees in this repository. Separate them with commas.</p>
-</div>
+<FormRow label="Architectures" for="{id}-arch" help="The processor types that apt sees in this repository.">
+  <ListInput
+    id="{id}-arch"
+    values={architectures}
+    placeholder="Add an architecture, e.g. arm64"
+    normalize={(s) => s.trim().toLowerCase()}
+    describedby="{id}-arch-help"
+    label="architecture"
+    onchange={(v) => {
+      architectures = v;
+      onChange({ ...value, architectures: v });
+    }}
+  />
+</FormRow>

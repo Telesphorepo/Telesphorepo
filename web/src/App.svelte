@@ -1,18 +1,19 @@
 <!--
   The shell: loads the user, matches the hash route, checks access, and renders the page inside
-  its layout. Pages never check access themselves.
+  the app shell. Pages never check the route access themselves (a repository page checks the
+  caller's permission on that repository).
 -->
 <script lang="ts">
   import { ModeWatcher } from "mode-watcher";
   import { Toaster } from "$lib/components/ui/sonner";
+  import * as Tooltip from "$lib/components/ui/tooltip";
   import { auth } from "$lib/auth.svelte";
-  import { match, navigate, router } from "$lib/router.svelte";
+  import { navigate, router } from "$lib/router.svelte";
+  import { current } from "$lib/current.svelte";
   import { setupOnlyPaths } from "$lib/nav";
-  import { routes, redirects } from "./routes";
-  import BrowseLayout from "$lib/layouts/BrowseLayout.svelte";
-  import SettingsLayout from "$lib/layouts/SettingsLayout.svelte";
-  import BareLayout from "$lib/layouts/BareLayout.svelte";
-  import LoadingRows from "$lib/components/LoadingRows.svelte";
+  import AppShell from "$lib/layouts/AppShell.svelte";
+  import UnsavedGuard from "$lib/layouts/UnsavedGuard.svelte";
+  import Loading from "$lib/components/Loading.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import { Button } from "$lib/components/ui/button";
@@ -21,13 +22,13 @@
 
   auth.load();
 
-  const matched = $derived(match(routes, router.path));
+  const matched = $derived(current.match);
 
   // Redirects, sign-in for user pages, and the setup-only session.
   $effect(() => {
     if (!auth.ready) return;
-    const to = redirects[router.path];
-    if (to) {
+    const to = current.redirect;
+    if (to && to !== router.path) {
       navigate(to, { query: Object.fromEntries(router.query), replace: true });
       return;
     }
@@ -46,9 +47,6 @@
   });
 
   const forbidden = $derived(!!matched && matched.route.access === "admin" && !!auth.user && !auth.isAdmin);
-  const Layout = $derived(
-    matched?.route.layout === "settings" ? SettingsLayout : matched?.route.layout === "bare" ? BareLayout : BrowseLayout,
-  );
   // Load the page module only when the route changes, not on every path change within it (a page
   // keeps its state while its params change, e.g. folders of one repo).
   const route = $derived(matched?.route);
@@ -57,26 +55,31 @@
 
 <ModeWatcher />
 <Toaster position="bottom-right" />
+<UnsavedGuard />
 
-{#if auth.ready}
-  <Layout>
-    {#if !matched}
-      <EmptyState icon={CompassIcon} title="This page does not exist" description="Check the address, or start from the repositories.">
-        <Button href="#/">Open repositories</Button>
-      </EmptyState>
-    {:else if forbidden}
-      <EmptyState icon={ShieldIcon} title="Admins only" description="Ask an administrator if you need this page." />
-    {:else if matched.route.access === "any" || auth.user}
-      {#await page}
-        <LoadingRows rows={4} />
-      {:then mod}
-        {#if mod}
-          {@const Page = mod.default}
-          <Page params={matched.params} query={router.query} />
-        {/if}
-      {:catch e}
-        <ErrorState error={e instanceof Error ? e.message : String(e)} title="The page did not load" onRetry={() => location.reload()} />
-      {/await}
-    {/if}
-  </Layout>
-{/if}
+<Tooltip.Provider delayDuration={400}>
+  {#if auth.ready}
+    <AppShell settings={matched?.route.layout === "settings"}>
+      {#if current.redirect}
+        <Loading rows={4} />
+      {:else if !matched}
+        <EmptyState icon={CompassIcon} title="This page does not exist" description="Check the address, or start from the repositories.">
+          <Button href="#/">Open repositories</Button>
+        </EmptyState>
+      {:else if forbidden}
+        <EmptyState icon={ShieldIcon} title="Administrators only" description="Ask an administrator if you need this page." />
+      {:else if matched.route.access === "any" || auth.user}
+        {#await page}
+          <Loading rows={4} />
+        {:then mod}
+          {#if mod}
+            {@const Page = mod.default}
+            <Page params={matched.params} query={router.query} />
+          {/if}
+        {:catch e}
+          <ErrorState error={e instanceof Error ? e.message : String(e)} title="The page did not load" onRetry={() => location.reload()} />
+        {/await}
+      {/if}
+    </AppShell>
+  {/if}
+</Tooltip.Provider>

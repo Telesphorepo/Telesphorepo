@@ -22,6 +22,26 @@ export type User = {
 /** GET /api/me and a finished sign-in. second_factor_required: the session reaches only the setup routes. */
 export type Me = User & { second_factor_required: boolean };
 
+/** One repository a person can use: level "read" (download) or "write" (download and publish), and why. */
+export type UserRepoAccess = {
+  repo: string;
+  format: string;
+  public: boolean;
+  level: "read" | "write";
+  via: "admin" | "permission" | "public";
+};
+/**
+ * GET /api/me/access and GET /api/users/{username}/access: a keyset page of the repositories a
+ * person can use. can_publish is false for a single sign-on or disabled account, whatever its level.
+ */
+export type UserAccess = Page<UserRepoAccess> & {
+  username: string;
+  is_admin: boolean;
+  disabled: boolean;
+  kind: "local" | "oidc";
+  can_publish: boolean;
+};
+
 /** POST /api/auth/login answers this when the account has a second factor. */
 export type SecondFactorStep = { second_factor: true; methods: SecondFactorMethod[] };
 export type SecondFactorMethod = "totp" | "passkey" | "recovery";
@@ -71,7 +91,16 @@ export type PasskeyOptions = { publicKey: Record<string, unknown> & { challenge:
 // --- formats and repos ---
 
 export type RepoConfig = Record<string, unknown>;
-export type Format = { name: string; title: string; default_config: RepoConfig; settings_group?: string };
+export type Format = {
+  name: string;
+  title: string;
+  default_config: RepoConfig;
+  settings_group?: string;
+  /** The format's icon: an inline SVG in currentColor. */
+  icon?: string;
+  /** Icons of artifact kinds that differ from the format (`gradle-plugin` in a Maven repo). */
+  kind_icons?: Record<string, string>;
+};
 
 /** "admin" for admins; otherwise the caller's level on the repo. */
 export type RepoPermission = "admin" | "write" | "read" | "none";
@@ -96,6 +125,44 @@ export type NewRepo = { name: string; format: string; description?: string; anon
 export type RepoPatch = { description?: string; anonymous_read?: boolean; config?: RepoConfig };
 
 export type Permission = { username: string; level: "read" | "write" };
+
+// --- effective access (GET /api/repos/{name}/access) ---
+
+/** A person with access: a grant on the repo ("permission"), or an administrator ("admin", only with ?admins=1). */
+export type AccessPerson = { username: string; level: "read" | "write"; via: "permission" | "admin" };
+/** Where requests may come from: any network, or only these network lists and address ranges. */
+export type AccessNetworks = { any: boolean; lists: { name: string; title: string }[]; cidrs: { cidr: string; note: string }[] };
+/** A CI pipeline (CI rule) that lists the repo, with what its conditions allow. Disabled ones are listed too. */
+export type AccessPipeline = {
+  id: number;
+  rule: string;
+  system: "github-actions" | "other";
+  issuer: string;
+  repositories?: string[];
+  branches?: string[];
+  tags?: string[];
+  workflows?: string[];
+  subjects?: string[];
+  disabled: boolean;
+};
+/**
+ * GET /api/repos/{name}/access (admin). download.people: everyone with a grant (read or write);
+ * publish.people: the local accounts with write. admins counts the enabled administrators (for
+ * publishing, the local ones). publish.locked_by says why nobody can publish now ("" when not).
+ */
+export type RepoAccess = {
+  repo: string;
+  format: string;
+  download: { public: boolean; people: AccessPerson[]; admins: number; networks: AccessNetworks; sentence: string };
+  publish: {
+    people: AccessPerson[];
+    admins: number;
+    ci: AccessPipeline[];
+    networks: AccessNetworks;
+    locked_by: string;
+    sentence: string;
+  };
+};
 
 export type Snippet = { title: string; lang: string; code: string };
 export type Usage = { base_url: string; snippets: Snippet[] };
@@ -145,12 +212,56 @@ export type ScanAnswer = { found: ScanFound[]; ignored: string[] };
 
 // --- network rules ---
 
-/** One entry of a repo's IP allow-list: a CIDR ("203.0.113.0/24") or a preset name. */
-export type IPRule = { kind: "cidr" | "preset"; value: string; note: string };
+/** One entry of a repo's IP rule: a CIDR ("203.0.113.0/24") or the name of an IP list. */
+export type IPRule = { kind: "cidr" | "list"; value: string; note: string };
 /** GET/PUT /api/repos/{name}/ip-rules. An empty list leaves its scope open to every address. */
 export type IPRules = { read: IPRule[]; publish: IPRule[] };
-/** A fetched IP range preset (GET /api/network/presets). fetched_at is null before the first good fetch. */
-export type NetworkPreset = { name: string; title: string; count: number; fetched_at: string | null; error: string };
+
+/** What refers to an IP list: repo rules (by scope) and the trusted_proxies setting. */
+export type IPListUsage = { repos: { repo: string; scope: "read" | "publish" }[]; trusted_proxies: boolean };
+/**
+ * A named set of address ranges (GET /api/ip-lists). A preset is fetched by the server (source is
+ * its address; fetched_at is null before the first good fetch); a custom list is edited by admins.
+ * ranges is only in GET /api/ip-lists/{name}.
+ */
+export type IPList = {
+  name: string;
+  kind: "preset" | "custom";
+  title: string;
+  description: string;
+  count: number;
+  ranges?: string[];
+  source: string;
+  fetched_at: string | null;
+  error: string;
+  created_at: string;
+  used_by: IPListUsage;
+};
+export type NewIPList = { name: string; title?: string; description?: string; ranges?: string[] };
+
+/**
+ * POST /api/ip-ranges/parse: the ranges in pasted text (addresses as /32 or /128, CIDRs masked,
+ * duplicates removed), the lines that hold none (1-based), and how many duplicates were dropped.
+ */
+export type ParsedRanges = {
+  ranges: string[];
+  invalid: { line: number; text: string; reason: string }[];
+  duplicates: number;
+};
+export type IPListPatch = { name?: string; title?: string; description?: string; ranges?: string[] };
+
+/** A key that signs Debian package lists. error says why the server cannot use it. */
+export type SigningKey = {
+  name: string;
+  fingerprint: string;
+  public_key: string;
+  created_at: string;
+  error?: string;
+  /** Names of the repositories that sign with this key. */
+  repos: string[];
+};
+/** {name} creates an Ed25519 key; armored (and its passphrase) imports a private key. */
+export type NewSigningKey = { name: string; armored?: string; passphrase?: string };
 /** GET /api/network/proxy-candidates: an untrusted peer that sent a forwarded header (header names which). */
 export type ProxyCandidate = { address: string; last_seen: string; count: number; header: string };
 
@@ -165,7 +276,7 @@ export type SearchHit = {
 
 // --- settings ---
 
-export type SettingType = "string" | "bool" | "int" | "duration" | "list";
+export type SettingType = "string" | "bool" | "size" | "duration" | "list";
 export type SettingSource = "db" | "env" | "default";
 /** A secret's value is never sent: only whether it is set. */
 export type SecretValue = { set: boolean };
@@ -181,11 +292,12 @@ export type Setting = {
   secret: boolean;
   value: unknown;
   default: unknown;
+  /** A size or duration in words ("512 MiB", "90 days"), with the default's. */
+  display?: string;
+  default_display?: string;
   source: SettingSource;
   /** Forced by the environment variable `env`; read-only in the UI. */
   locked: boolean;
-  /** Not changeable through PATCH /api/settings (the signing key has its own route). */
-  read_only?: boolean;
 };
 export type SettingsGroup = { name: string; label: string; settings: Setting[] };
 export type Settings = { groups: SettingsGroup[] };
@@ -194,7 +306,6 @@ export type SettingsPatch = Record<string, unknown>;
 /** 202 answer of a PATCH that changes the storage location while assets exist. */
 export type SettingsMoveStarted = { move: Move };
 export type TestResult = { ok: boolean; error?: string; fields?: Record<string, string> };
-export type SigningKey = { public_key: string; fingerprint: string };
 
 // --- storage moves ---
 

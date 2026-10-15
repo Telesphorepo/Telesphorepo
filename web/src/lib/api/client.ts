@@ -38,6 +38,12 @@ export function onSecondFactorRequired(fn: Listener): () => void {
   return () => setupOnly.delete(fn);
 }
 
+/**
+ * Marks every request as coming from this UI. The server never answers such a request with
+ * WWW-Authenticate, so the browser never opens its own password popup.
+ */
+const uiHeader = "X-Telesphorepo-UI";
+
 // A wrong password or second-factor code answers 401 on these routes. It must not look like an
 // expired session.
 const carriesCredentials = /^\/api\/(auth\/login|devices\/approve|publish\/sessions\/manual|security\/)/;
@@ -64,7 +70,7 @@ export function qs(q: Query = {}): string {
 }
 
 export async function request<T = void>(method: string, url: string, opts: RequestOptions = {}): Promise<T> {
-  const headers: Record<string, string> = { Accept: "application/json" };
+  const headers: Record<string, string> = { Accept: "application/json", [uiHeader]: "1" };
   let body: BodyInit | undefined;
   if (opts.body !== undefined) {
     headers["Content-Type"] = "application/json";
@@ -115,6 +121,7 @@ export function requestWithProgress<T>(
   const done = new Promise<T>((resolve, reject) => {
     xhr.open("POST", url);
     xhr.setRequestHeader("Accept", "application/json");
+    xhr.setRequestHeader(uiHeader, "1");
     xhr.setRequestHeader("Authorization", "Bearer " + token);
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) onProgress(e.loaded, e.total);

@@ -1,7 +1,7 @@
 <!--
   Asks for one second-factor proof: a 6-digit code, a passkey, or (at sign-in) a recovery code.
   onProof sends the proof; while it runs the form is busy, and when it throws the form shows the
-  error and lets the user try again. Used by the sign-in page and by <SecondFactorPrompt>.
+  error and lets the user try again. Used by the sign-in page and by <FreshFactor>.
 -->
 <script lang="ts">
   import { Button } from "$lib/components/ui/button";
@@ -78,7 +78,7 @@
           autocomplete="one-time-code"
           inputmode={recovery ? "text" : "numeric"}
           placeholder={recovery ? "xxxx-xxxx-xxxx" : "123 456"}
-          class="w-44 font-mono tracking-wider"
+          class="w-44 tracking-wider tabular-nums"
           disabled={busy}
         />
         <Button type="submit" disabled={busy || !code.trim()}>

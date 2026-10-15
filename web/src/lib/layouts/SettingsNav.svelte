@@ -1,67 +1,45 @@
-<!-- The Settings sidebar. It must render inside <Sidebar.Provider> (SettingsLayout). -->
+<!--
+  The Settings navigation (src/lib/nav.ts): a heading per group, an icon on every item. Groups are
+  separated by space, never by a line, so no line in the sidebar nearly meets a line in the
+  content. The open page (or a page below it) fills its whole item. Admin groups show only to
+  admins; a setup-only session sees only the second-factor page.
+-->
 <script lang="ts">
-  import * as Sidebar from "$lib/components/ui/sidebar";
-  import { useSidebar } from "$lib/components/ui/sidebar";
-  import { settingsNav, setupOnlyPaths, type NavItem } from "$lib/nav";
+  import { settingsNav, setupOnlyPaths } from "$lib/nav";
   import { auth } from "$lib/auth.svelte";
-  import { href, isActive, router } from "$lib/router.svelte";
-  import type { Component } from "svelte";
+  import { href, isActive } from "$lib/router.svelte";
+  import { cn } from "$lib/utils";
 
-  const sidebar = useSidebar();
-
-  const categories = $derived(
+  const groups = $derived(
     settingsNav
-      .filter((c) => !c.admin || auth.isAdmin)
-      .map((c) => (auth.setupOnly ? { ...c, items: c.items.filter((i) => setupOnlyPaths.includes(i.path)) } : c))
-      .filter((c) => c.items.length > 0),
+      .filter((g) => !g.admin || auth.isAdmin)
+      .map((g) => (auth.setupOnly ? { ...g, items: g.items.filter((i) => setupOnlyPaths.includes(i.path)) } : g))
+      .filter((g) => g.items.length > 0),
   );
-
-  // Close the mobile sheet after a navigation.
-  $effect(() => {
-    void router.path;
-    sidebar.setOpenMobile(false);
-  });
 </script>
 
-<!-- Every link text starts at the same edge: a page under a category heading is indented by the
-     width of the category icon, and a single-page category shows its icon in the link. -->
-{#snippet link(item: NavItem, label: string, Icon: Component<{ class?: string }> | undefined)}
-  <Sidebar.MenuItem>
-    <Sidebar.MenuButton isActive={isActive(item.path)} class={Icon ? "" : "pl-9"}>
-      {#snippet child({ props })}
-        <a href={href(item.path)} {...props} aria-current={isActive(item.path) ? "page" : undefined}>
-          {#if Icon}<Icon />{/if}
-          <span>{label}</span>
-        </a>
-      {/snippet}
-    </Sidebar.MenuButton>
-  </Sidebar.MenuItem>
-{/snippet}
-
-<Sidebar.Root class="top-14 h-[calc(100svh-3.5rem)]" collapsible="offcanvas">
-  <Sidebar.Content class="py-4">
-    <nav aria-label="Settings" class="flex flex-col gap-1">
-      {#each categories as cat (cat.label)}
-        <Sidebar.Group class="py-1">
-          {#if cat.items.length > 1}
-            <Sidebar.GroupLabel class="gap-2 text-sm text-sidebar-foreground/70">
-              <cat.icon />
-              {cat.label}
-            </Sidebar.GroupLabel>
-            <Sidebar.GroupContent>
-              <Sidebar.Menu>
-                {#each cat.items as item (item.path)}
-                  {@render link(item, item.label, undefined)}
-                {/each}
-              </Sidebar.Menu>
-            </Sidebar.GroupContent>
-          {:else}
-            <Sidebar.Menu>
-              {@render link(cat.items[0], cat.label, cat.icon)}
-            </Sidebar.Menu>
-          {/if}
-        </Sidebar.Group>
-      {/each}
-    </nav>
-  </Sidebar.Content>
-</Sidebar.Root>
+<nav aria-label="Settings" class="flex flex-col gap-6">
+  {#each groups as g, gi (g.label)}
+    <section aria-labelledby="settings-nav-{gi}">
+      <h2 id="settings-nav-{gi}" class="px-3 pb-1.5 text-xs font-medium text-muted-foreground">{g.label}</h2>
+      <ul class="flex flex-col gap-0.5">
+        {#each g.items as item (item.path)}
+          {@const active = isActive(item.path)}
+          <li>
+            <a
+              href={href(item.path)}
+              aria-current={active ? "page" : undefined}
+              class={cn(
+                "flex h-8 items-center gap-3 rounded-lg px-3 text-sm outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50 [&_svg]:size-4 [&_svg]:shrink-0",
+                active ? "bg-selected font-medium text-selected-foreground" : "text-foreground/85 hover:bg-hover hover:text-foreground",
+              )}
+            >
+              <item.icon />
+              <span class="truncate">{item.label}</span>
+            </a>
+          </li>
+        {/each}
+      </ul>
+    </section>
+  {/each}
+</nav>

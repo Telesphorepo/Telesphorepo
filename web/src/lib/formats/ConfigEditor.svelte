@@ -1,6 +1,7 @@
 <!--
   The repo-config editor of a format: its custom editor from the registry, else the JSON editor.
-  Wrap it in {#key format + name} so its state resets when the format or the repo changes.
+  Wrap it in {#key format + name} so its state resets when the format or the repo changes. The
+  editor renders FormRows: put it in a FormGrid.
 -->
 <script lang="ts">
   import { editors, type EditorProps } from "./index";

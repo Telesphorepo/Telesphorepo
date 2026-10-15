@@ -41,3 +41,6 @@ export const formatDateTime = (iso: string) => dtf.format(new Date(iso));
 
 /** 12345 → "12,345" in the reader's locale. */
 export const formatCount = (n: number) => n.toLocaleString();
+
+/** A key fingerprint in groups of four, as gpg prints it: "A1B2 C3D4 ...". */
+export const groupFingerprint = (f: string) => f.toUpperCase().replace(/(.{4})(?=.)/g, "$1 ");
