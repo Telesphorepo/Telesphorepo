@@ -202,7 +202,11 @@ time: a person has few of each, so a pick costs more than it saves.
 
 Principle: 13. Every path a person might think of, 15. Nothing without a reason.
 
-New feature: no "before" shot.
+New feature: no "before" shot. After:
+[bulk-repos-picked-1200-light.png](screenshots/bulk-repos-picked-1200-light.png),
+[bulk-repos-picked-390-light.png](screenshots/bulk-repos-picked-390-light.png) (on a phone the
+bar scrolls sideways, and its right edge fades to say so),
+[bulk-person-access-1200-light.png](screenshots/bulk-person-access-1200-light.png).
 
 ### Small building blocks
 
@@ -255,6 +259,11 @@ of a snapshot version installs the newest.
 
 Principle: 1. State lives where the thing is (the versions and builds of a package show at the
 package); 8. Say it once, show it instead of describing it (one timeline for both formats).
+
+No before shot: Debian had no Versions view. After:
+[debian-versions-1200-light.png](screenshots/debian-versions-1200-light.png),
+[debian-build-1200-light.png](screenshots/debian-build-1200-light.png) (a release with one `.deb`
+for each architecture).
 
 ### Use and Publish are two tabs
 
@@ -483,7 +492,11 @@ count. A group has no files, so its page shows the address and links to each mem
 
 Principle: 1, 8, 13.
 
-This is a new feature, so it has no before shot.
+This is a new feature, so it has no before shot. After:
+[new-repository-kinds-1200-light.png](screenshots/new-repository-kinds-1200-light.png),
+[group-overview-1200-light.png](screenshots/group-overview-1200-light.png),
+[group-overview-390-light.png](screenshots/group-overview-390-light.png) (on a phone the order
+numbers and the row notes give way to the move and remove buttons).
 
 ### Proxy repositories
 
@@ -500,9 +513,14 @@ the two times, each one number with its unit. The Files tab shows the cached fil
 removes them, so the next request fetches them again. A Debian proxy says that the remote archive
 signs the files, because clients keep that archive's key.
 
+A proxy of Maven Central, and a group that holds one, give a build snippet without
+`mavenCentral()`, so the build goes through the proxy and not around it.
+
 Principle: 1, 2, 4.
 
-This is a new feature, so it has no before shot.
+This is a new feature, so it has no before shot. After:
+[proxy-overview-1200-light.png](screenshots/proxy-overview-1200-light.png),
+[proxy-remote-1200-light.png](screenshots/proxy-remote-1200-light.png).
 
 ### Nexus import
 
@@ -531,6 +549,14 @@ in a line and follows the newest line, and a click on a repository filters it. T
 how each sync started and what it found, so a run of scheduled syncs with no new files reads as
 a healthy mirror. Imported files keep their Nexus dates.
 
+A log line of one repository does not repeat the repository's name: the row shows it in its
+own column.
+
 Principle: 1, 7, 8, 15.
 
-No screenshot is saved for this entry.
+Before: [nexus-migration-before-1440-dark.jpg](screenshots/nexus-migration-before-1440-dark.jpg).
+After, against a local Nexus 3: [nexus-import-pick-1200-light.png](screenshots/nexus-import-pick-1200-light.png)
+(every supported repository picked with the header checkbox),
+[nexus-import-sync-1200-light.png](screenshots/nexus-import-sync-1200-light.png) (the first sync
+and its log), [nexus-list-1200-light.png](screenshots/nexus-list-1200-light.png),
+[nexus-import-390-light.png](screenshots/nexus-import-390-light.png).
