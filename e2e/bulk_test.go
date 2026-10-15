@@ -26,6 +26,10 @@ func rawRepoWithFile(t *testing.T, s *Server, prefix string) string {
 func wantGet(t *testing.T, s *Server, repo string, auth Auth, want int) {
 	t.Helper()
 	resp, body := authGet(t, s, "/raw/"+repo+"/f.txt", auth)
+	// On S3 storage an allowed read answers 302 to a presigned URL.
+	if want == http.StatusOK && resp.StatusCode == http.StatusFound {
+		return
+	}
 	wantStatus(t, resp, body, want)
 }
 
