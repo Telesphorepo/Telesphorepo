@@ -20,7 +20,7 @@
       <h3 class="text-label">{title}</h3>
       {#if help}<p class="text-meta text-muted-foreground">{help}</p>{/if}
     </div>
-    {#if actions}<div class="flex shrink-0 flex-wrap items-center gap-2">{@render actions()}</div>{/if}
+    {#if actions}<div class="flex min-w-0 flex-wrap items-center gap-2 sm:shrink-0">{@render actions()}</div>{/if}
   </div>
   {@render children()}
 </div>

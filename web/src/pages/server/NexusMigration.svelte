@@ -75,7 +75,7 @@
     { label: "Server", grow: true },
     { label: "Status" },
     { label: "Repositories", align: "right", hideOnPhone: true },
-    { label: "Last check", align: "right" },
+    { label: "Last check", align: "right", hideOnPhone: true },
     { label: "Next check", align: "right", hideOnPhone: true },
   ]}
 >
@@ -91,9 +91,9 @@
     </Cell>
     <Cell num hideOnPhone>{formatCount(s.repo_count)}</Cell>
     {#if s.status === "syncing" && s.last_sync}
-      <Cell num muted text={progressLine(s.last_sync)} />
+      <Cell num muted hideOnPhone text={progressLine(s.last_sync)} />
     {:else}
-      <Cell num muted><RelativeTime at={s.last_sync?.finished_at} empty="Not yet" /></Cell>
+      <Cell num muted hideOnPhone><RelativeTime at={s.last_sync?.finished_at} empty="Not yet" /></Cell>
     {/if}
     <Cell num muted hideOnPhone><RelativeTime at={s.next_sync_at} empty="" /></Cell>
   {/snippet}
