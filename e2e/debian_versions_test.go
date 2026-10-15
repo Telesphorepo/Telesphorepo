@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
 	"slices"
@@ -13,17 +14,20 @@ import (
 // Versions, builds and artifact snippets of a Debian package (spec "Browse" and "Debian"): a
 // ~SNAPSHOT version groups its timestamped builds, like a Maven snapshot.
 
-// debVersionsScript builds the urn packages with dpkg-deb into /out, one file per line of
-// debVersionsBuilds.
+// debVersionsScript builds the urn packages with dpkg-deb into /out/<n>.deb, n counting the
+// lines of debVersionsBuilds from 1. The names are plain because Podman cannot copy a path
+// with "~" out of a container.
 const debVersionsScript = `#!/bin/sh
 set -e
 mkdir -p /out
+n=0
 while read -r version arch; do
+	n=$((n+1))
 	d=/build/$version-$arch
 	mkdir -p "$d/DEBIAN" "$d/usr/share/urn"
 	printf 'Package: urn\nVersion: %s\nArchitecture: %s\nMaintainer: E2E <e2e@telesphorepo.test>\nDescription: telesphorepo e2e versions package\n' "$version" "$arch" > "$d/DEBIAN/control"
 	printf '%s %s\n' "$version" "$arch" > "$d/usr/share/urn/version"
-	dpkg-deb --root-owner-group -Zgzip --build "$d" "/out/$version-$arch.deb"
+	dpkg-deb --root-owner-group -Zgzip --build "$d" "/out/$n.deb"
 done < /builds
 `
 
@@ -53,8 +57,8 @@ func TestDebianVersions(t *testing.T) {
 		t.Fatalf("building the urn packages failed (exit %d):\n%s", r.ExitCode, r.Output)
 	}
 	debs := make([][]byte, len(debVersionsBuilds))
-	for i, b := range debVersionsBuilds {
-		debs[i] = r.ReadFile(t, "/out/"+b[0]+"-"+b[1]+".deb")
+	for i := range debVersionsBuilds {
+		debs[i] = r.ReadFile(t, fmt.Sprintf("/out/%d.deb", i+1))
 	}
 
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
