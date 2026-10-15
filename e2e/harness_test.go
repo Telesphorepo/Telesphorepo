@@ -743,7 +743,11 @@ func startSharedSeaweed() {
 	}
 	s3conf := fmt.Sprintf(`{"identities":[{"name":"e2e","credentials":[{"accessKey":%q,"secretKey":%q}],"actions":["Admin","Read","Write","List","Tagging"]}]}`, seaweedAccess, seaweedSecret)
 	c, err := testcontainers.Run(ctx, img,
-		testcontainers.WithCmd("server", "-s3", "-s3.port=8333", "-s3.config=/etc/seaweedfs/s3.json"),
+		// Each test bucket is a SeaweedFS collection, and a collection grows 7 volumes on its first
+		// write. The default of 8 volumes (of 30 GB each) runs out after a few buckets, and later
+		// writes answer 500 "no free volumes left". Small volumes and a high limit fit a whole run.
+		testcontainers.WithCmd("server", "-s3", "-s3.port=8333", "-s3.config=/etc/seaweedfs/s3.json",
+			"-master.volumeSizeLimitMB=32", "-volume.max=2000"),
 		testcontainers.WithExposedPorts("8333/tcp"),
 		testcontainers.WithFiles(testcontainers.ContainerFile{Reader: strings.NewReader(s3conf), ContainerFilePath: "/etc/seaweedfs/s3.json", FileMode: 0o644}),
 		network.WithNetwork([]string{seaweedAlias}, TestNetwork),
@@ -789,28 +793,6 @@ func StartSeaweedFS(t testing.TB) *S3Target {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("seaweedfs create bucket %s: %v", tg.Bucket, err)
-		}
-		time.Sleep(time.Second)
-	}
-	// A new bucket has no writable volume until SeaweedFS grows one on the first write, and a
-	// write during the growth answers 500. Write and delete one object until a write succeeds,
-	// so that the test's first write does not race the growth.
-	key := tg.Prefix + "/_ready"
-	for attempt := 1; ; attempt++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_, err := tg.Client().PutObject(ctx, &s3.PutObjectInput{Bucket: &tg.Bucket, Key: &key, Body: strings.NewReader("ready")})
-		if err == nil {
-			_, err = tg.Client().DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &tg.Bucket, Key: &key})
-		}
-		cancel()
-		if err == nil {
-			if attempt > 1 {
-				t.Logf("seaweedfs bucket %s took %d writes to become writable", tg.Bucket, attempt)
-			}
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("seaweedfs bucket %s is not writable: %v\n%s", tg.Bucket, err, tail(containerLogs(seaweed.c), 100))
 		}
 		time.Sleep(time.Second)
 	}
