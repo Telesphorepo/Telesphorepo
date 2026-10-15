@@ -59,7 +59,10 @@ export type AuthConfig = {
 export type Proof = { totp_code?: string; passkey?: unknown; recovery_code?: string };
 
 export type NewUser = { username: string; password: string; is_admin: boolean };
-export type UserPatch = { password?: string; is_admin?: boolean; disabled?: boolean };
+export type UserPatch = { password?: string; is_admin?: boolean };
+
+/** PATCH /api/repos, PATCH /api/users, PUT /api/permissions, POST /api/permissions/delete: how many items changed. */
+export type Changed = { changed: number };
 
 // --- read tokens ---
 
@@ -122,7 +125,9 @@ export type Repo = {
   last_published_at: string | null;
 };
 export type NewRepo = { name: string; format: string; description?: string; anonymous_read: boolean; config?: RepoConfig };
-export type RepoPatch = { description?: string; anonymous_read?: boolean; config?: RepoConfig };
+export type RepoPatch = { description?: string; config?: RepoConfig };
+/** POST /api/repos/delete: the deleted repositories and how many files went with them. */
+export type ReposDeleted = { deleted: string[]; files: number };
 
 export type Permission = { username: string; level: "read" | "write" };
 
@@ -191,7 +196,9 @@ export type TreeEntry = {
   uploaded_by?: string;
 };
 
-/** DELETE /api/repos/{name}/files: how many files the server removed. */
+/** POST /api/repos/{name}/files/delete: files by path, and folders by prefix (ending in "/"). */
+export type FilesDelete = { paths?: string[]; prefixes?: string[] };
+/** POST /api/repos/{name}/files/delete: how many files the server removed. */
 export type DeleteResult = { deleted: number };
 
 /** One stored file of a manual upload. Maven answers also list the checksum and metadata files. */

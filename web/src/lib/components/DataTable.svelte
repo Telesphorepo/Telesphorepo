@@ -21,6 +21,22 @@
       {/snippet}
       {#snippet empty()}<CompactEmpty icon={LaptopIcon} title="Devices" state="None yet" text="..." />{/snippet}
     </DataTable>
+
+  Bulk actions: pass `bind:picked` (a Set of row keys), `pickable?` (default: every row) and a
+  `bulk` snippet with the actions. Each row then gets a checkbox in a first column, 40px wide over
+  the full row height; a row that is not pickable has an empty cell there. A click on the rest of
+  the row still opens the row. Shift+click on a checkbox picks the range from the last checkbox
+  clicked. The header checkbox picks every pickable row that is loaded and clears them on the next
+  click (a keyset table says "Select the 50 rows shown"). While rows are picked, a bar takes the
+  place of the header row, at the same height: "12 selected", the `bulk` actions, "Select all 50"
+  and "Clear". Esc clears the pick when no dialog is open. `pickLabel` names a row for its
+  checkbox ("Select oasis"). `picked` is not `selected`: `selected` is the row that the details
+  column shows. After an action, the page reloads the table and empties `picked`.
+
+    let picked = $state(new Set<string>());
+    <DataTable source={src} key={(r) => r.name} pickLabel={(r) => r.name} bind:picked ...>
+      {#snippet bulk()}<Button variant="outline" size="sm" onclick={makePublic}>Make public</Button>{/snippet}
+    </DataTable>
 -->
 <script lang="ts" module>
   export type Column = {
@@ -38,15 +54,18 @@
   };
 </script>
 
-<script lang="ts" generics="T">
+<script lang="ts" generics="T, K extends string | number">
   import type { Snippet } from "svelte";
   import * as Table from "$lib/components/ui/table";
   import { Button } from "$lib/components/ui/button";
+  import { Checkbox } from "$lib/components/ui/checkbox";
   import { Spinner } from "$lib/components/ui/spinner";
   import ErrorState from "./ErrorState.svelte";
   import Loading from "./Loading.svelte";
   import type { TableSource } from "$lib/load.svelte";
   import { go } from "$lib/router.svelte";
+  import { formatCount } from "$lib/format";
+  import { selectedText } from "$lib/words";
   import { cn } from "$lib/utils";
 
   let {
@@ -59,21 +78,90 @@
     row,
     empty,
     emptyText = "Nothing here yet.",
+    picked = $bindable(new Set<K>()),
+    pickable,
+    pickLabel,
+    bulk,
   }: {
     source: TableSource<T>;
     columns: Column[];
     /** Accessible name of the table. */
     caption: string;
-    key: (item: T) => string | number;
+    key: (item: T) => K;
     /** The address a row opens ("#/..."). */
     href?: (item: T) => string | undefined;
+    /** The row that the details column shows (the selected fill). Not the same as `picked`. */
     selected?: (item: T) => boolean;
     /** The row's cells (<Cell>, or <Table.Cell> for custom content). */
     row: Snippet<[T]>;
     /** Shown in place of the table when it has no rows: a CompactEmpty. */
     empty?: Snippet;
     emptyText?: string;
+    /** The keys of the rows picked for a bulk action. Bind it; replace the Set to change it. */
+    picked?: Set<K>;
+    /** Which rows can be picked (default: every row). */
+    pickable?: (item: T) => boolean;
+    /** The name of a row for its checkbox: "Select {name}". Default: the row's key. */
+    pickLabel?: (item: T) => string;
+    /** The bulk actions in the selection bar. With it, every row gets a checkbox. */
+    bulk?: Snippet;
   } = $props();
+
+  // --- the pick ---
+
+  const picking = $derived(bulk !== undefined);
+  const canPick = (item: T) => pickable?.(item) ?? true;
+  const pickableRows = $derived(picking ? source.items.filter(canPick) : []);
+  const allPicked = $derived(pickableRows.length > 0 && pickableRows.every((r) => picked.has(key(r))));
+  const barOn = $derived(picking && picked.size > 0);
+  const span = $derived(columns.length + (picking ? 1 : 0));
+  const allLabel = $derived(
+    source.more
+      ? `Select the ${formatCount(pickableRows.length)} rows shown`
+      : `Select all ${formatCount(pickableRows.length)} rows`,
+  );
+
+  // The last checkbox clicked, and whether Shift was down when the click started.
+  let last: K | null = null;
+  let shift = false;
+
+  function pickAll() {
+    picked = new Set(pickableRows.map(key));
+  }
+  function clearPick() {
+    picked = new Set();
+    last = null;
+  }
+  function toggle(item: T, on: boolean) {
+    const k = key(item);
+    const rows = pickableRows;
+    const next = new Set(picked);
+    const from = shift && last !== null ? rows.findIndex((r) => key(r) === last) : -1;
+    const to = rows.findIndex((r) => key(r) === k);
+    const range = from >= 0 && to >= 0 ? rows.slice(Math.min(from, to), Math.max(from, to) + 1) : [item];
+    for (const r of range) {
+      if (on) next.add(key(r));
+      else next.delete(key(r));
+    }
+    last = k;
+    picked = next;
+  }
+
+  const inPickCell = (t: EventTarget | null) => t instanceof Element && !!t.closest("[data-pick]");
+  function onPointerDown(e: PointerEvent) {
+    if (picking) shift = e.shiftKey;
+  }
+  function onMouseDown(e: MouseEvent) {
+    // Shift+click on a checkbox picks a range; it must not select the text between the rows.
+    if (picking && e.shiftKey && inPickCell(e.target)) e.preventDefault();
+  }
+  function onKeyDown(e: KeyboardEvent) {
+    if (!picking) return;
+    shift = e.shiftKey;
+    if (e.key !== "Escape" || !barOn || e.defaultPrevented) return;
+    if (document.querySelector("[role=dialog], [role=alertdialog]")) return;
+    clearPick();
+  }
 
   function open(e: MouseEvent, item: T) {
     const to = href?.(item);
@@ -92,15 +180,44 @@
     "group/row h-row border-0 even:bg-stripe hover:bg-hover data-[state=selected]:bg-selected [&>td]:py-0 [&>td:first-child]:rounded-l-lg [&>td:last-child]:rounded-r-lg";
 </script>
 
+<svelte:window onpointerdown={onPointerDown} onmousedown={onMouseDown} onkeydown={onKeyDown} />
+
 {#if !source.loading && !source.error && source.items.length === 0}
   <div data-slot="table-empty">{#if empty}{@render empty()}{:else}<p class="py-3 text-body text-muted-foreground">{emptyText}</p>{/if}</div>
 {:else}
   <Table.Root class="text-body">
     <Table.Caption class="sr-only">{caption}</Table.Caption>
     <Table.Header class="[&_tr]:border-b">
-      <Table.Row class="border-b hover:bg-transparent">
+      <!-- The selection bar lies over the column headings, which keep their space, so the columns do not move. -->
+      <Table.Row class="relative border-b hover:bg-transparent">
+        {#if picking}
+          <Table.Head class="h-9 w-10 min-w-10 p-0">
+            <label data-pick class="flex h-9 w-10 cursor-pointer items-center justify-center select-none">
+              <Checkbox
+                checked={allPicked}
+                indeterminate={barOn && !allPicked}
+                disabled={pickableRows.length === 0}
+                aria-label={allLabel}
+                onCheckedChange={(v) => (v ? pickAll() : clearPick())}
+              />
+            </label>
+            {#if barOn}
+              <div role="toolbar" aria-label="Actions for the selected rows" class="absolute inset-y-0 right-0 left-10 flex items-center gap-2 pr-1 text-body font-normal text-foreground">
+                <span class="shrink-0 font-medium tabular-nums">{selectedText(picked.size)}</span>
+                {@render bulk?.()}
+                <span class="ml-auto flex shrink-0 items-center gap-1">
+                  {#if !allPicked}<Button variant="ghost" size="sm" onclick={pickAll}>Select all {formatCount(pickableRows.length)}</Button>{/if}
+                  <Button variant="ghost" size="sm" onclick={clearPick}>Clear</Button>
+                </span>
+              </div>
+            {/if}
+          </Table.Head>
+        {/if}
         {#each columns as c, i (i)}
-          <Table.Head class={cn("h-9 text-xs font-medium text-muted-foreground", c.align === "right" && "text-right", c.grow && "w-full", c.hideOnPhone && "max-sm:hidden", c.class)}>
+          <Table.Head
+            aria-hidden={barOn ? "true" : undefined}
+            class={cn("h-9 text-xs font-medium text-muted-foreground", c.align === "right" && "text-right", c.grow && "w-full", c.hideOnPhone && "max-sm:hidden", barOn && "invisible", c.class)}
+          >
             {#if c.label}{c.label}{:else if c.srLabel}<span class="sr-only">{c.srLabel}</span>{/if}
           </Table.Head>
         {/each}
@@ -109,11 +226,11 @@
     <Table.Body>
       {#if source.loading && source.items.length === 0}
         <Table.Row class="border-0 hover:bg-transparent">
-          <Table.Cell colspan={columns.length} class="p-0"><Loading rows={4} /></Table.Cell>
+          <Table.Cell colspan={span} class="p-0"><Loading rows={4} /></Table.Cell>
         </Table.Row>
       {:else if source.error && source.items.length === 0}
         <Table.Row class="border-0 hover:bg-transparent">
-          <Table.Cell colspan={columns.length} class="py-4 whitespace-normal">
+          <Table.Cell colspan={span} class="py-4 whitespace-normal">
             <div class="flex flex-wrap items-center gap-3">
               <ErrorState inline error={source.error} />
               {#if source.reload}<Button variant="outline" size="sm" onclick={source.reload}>Try again</Button>{/if}
@@ -129,6 +246,20 @@
             class={cn(rowClass, href && "cursor-pointer")}
             onclick={href ? (e: MouseEvent) => open(e, item) : undefined}
           >
+            {#if picking}
+              <Table.Cell class="w-10 min-w-10 p-0">
+                {#if canPick(item)}
+                  {@const k = key(item)}
+                  <label data-pick class="flex h-row w-10 cursor-pointer items-center justify-center select-none">
+                    <Checkbox
+                      checked={picked.has(k)}
+                      aria-label="Select {pickLabel ? pickLabel(item) : String(k)}"
+                      onCheckedChange={(v) => toggle(item, v === true)}
+                    />
+                  </label>
+                {/if}
+              </Table.Cell>
+            {/if}
             {@render row(item)}
           </Table.Row>
         {/each}

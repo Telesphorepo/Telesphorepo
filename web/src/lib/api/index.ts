@@ -62,9 +62,22 @@ export const api = {
     access: (username: string, p?: T.PageParams) =>
       request<T.UserAccess>("GET", `/api/users/${enc(username)}/access`, { query: page(p) }),
     create: (u: T.NewUser) => request<T.User>("POST", "/api/users", { body: u }),
-    /** Users change their own password; admins change anyone and is_admin/disabled. */
+    /** Users change their own password; admins change anyone's password and is_admin. */
     update: (username: string, patch: T.UserPatch) =>
       request<T.User>("PATCH", `/api/users/${enc(username)}`, { body: patch }),
+    /** Admin: disables or enables 1 to 1000 people. A disabled person's sessions end. 400 when the list holds the caller and disabled is true. */
+    setDisabled: (usernames: string[], disabled: boolean) =>
+      request<T.Changed>("PATCH", "/api/users", { body: { usernames, disabled } }),
+  },
+
+  /** Admin: the level of each pair of person and repository. */
+  permissions: {
+    /** Sets the level for every pair of user and repository. */
+    set: (users: string[], repos: string[], level: "read" | "write") =>
+      request<T.Changed>("PUT", "/api/permissions", { body: { users, repos, level } }),
+    /** Removes the level of every pair of user and repository. */
+    delete: (users: string[], repos: string[]) =>
+      request<T.Changed>("POST", "/api/permissions/delete", { body: { users, repos } }),
   },
 
   formats: {
@@ -77,8 +90,14 @@ export const api = {
     get: (name: string) => request<T.Repo>("GET", repo(name)),
     create: (r: T.NewRepo) => request<T.Repo>("POST", "/api/repos", { body: r }),
     update: (name: string, patch: T.RepoPatch) => request<T.Repo>("PATCH", repo(name), { body: patch }),
-    /** Admin: removes the repo, its rows and its blobs. */
-    delete: (name: string) => request("DELETE", repo(name)),
+    /** Admin: makes 1 to 1000 repositories public (true) or private (false). */
+    setPublic: (names: string[], anonymous_read: boolean) =>
+      request<T.Changed>("PATCH", "/api/repos", { body: { names, anonymous_read } }),
+    /**
+     * Admin: removes 1 to 1000 repositories, their rows and their blobs. 409 when one is locked
+     * (nothing is deleted); a failure part way is an ApiError, and the repositories before it are gone.
+     */
+    delete: (names: string[]) => request<T.ReposDeleted>("POST", "/api/repos/delete", { body: { names } }),
     status: (name: string) => request<T.RepoStatus>("GET", repo(name) + "/status"),
     usage: (name: string) => request<T.Usage>("GET", repo(name) + "/usage"),
     /** The direct children of a folder ("" is the root), folders first. */
@@ -88,11 +107,11 @@ export const api = {
     assets: (name: string, prefix = "", p?: T.PageParams) =>
       request<T.Page<T.Asset>>("GET", repo(name) + "/assets", { query: { prefix, ...page(p) } }),
     /**
-     * Deletes one file (`path`) or a folder (`prefix`). Needs a publish session token for the
-     * repo, or an admin UI session (then leave `token` out).
+     * Deletes files (`paths`) and folders (`prefixes`, each ending in "/"). Needs a publish
+     * session token for the repo, or an admin UI session (then leave `token` out).
      */
-    deleteFiles: (name: string, target: { path: string } | { prefix: string }, token?: string) =>
-      request<T.DeleteResult>("DELETE", repo(name) + "/files", { query: target, token }),
+    deleteFiles: (name: string, target: T.FilesDelete, token?: string) =>
+      request<T.DeleteResult>("POST", repo(name) + "/files/delete", { body: target, token }),
     /**
      * Manual upload (multipart: the format's fields first, then `file` parts). Needs a publish
      * session token. Reports the progress of the body; abort() cancels it.
@@ -127,9 +146,6 @@ export const api = {
     },
     permissions: {
       list: (name: string) => request<T.Permission[]>("GET", repo(name) + "/permissions"),
-      set: (name: string, username: string, level: "read" | "write") =>
-        request("PUT", `${repo(name)}/permissions/${enc(username)}`, { body: { level } }),
-      delete: (name: string, username: string) => request("DELETE", `${repo(name)}/permissions/${enc(username)}`),
     },
     /** Admin: who can download from and publish to the repo, and from where. admins lists the administrators too. */
     access: (name: string, opts: { admins?: boolean } = {}) =>

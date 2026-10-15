@@ -1,23 +1,22 @@
 <!--
   One person (administrators). The identity card shows the avatar, the role, how the person signs
-  in and a turned-off account, with the actions that change the account. The Repositories
-  card lists every repository the person can use, with the level of each. An administrator adds
-  the person to a repository, changes the level or removes the access in place, the same way as on
-  a repository's Access tab: the edits go into one draft, and the save bar saves them after a
-  confirm that lists each change. A public repository shows because anyone can download from it;
-  its access cannot be removed, only raised to publish.
+  in and a disabled account, with the actions that change the account. The Repositories card
+  lists every repository the person can use, with the level of each. Give access opens a short
+  form that gives the person access to many repositories at once. Pick rows to change the level
+  or to remove the access (after a confirm); each change applies at once. A public repository
+  shows because anyone can download from it; its access cannot be removed, only raised to
+  publish.
 -->
 <script lang="ts">
   import { untrack } from "svelte";
   import { toast } from "svelte-sonner";
-  import { api, ApiError, type Repo, type User, type UserPatch, type UserRepoAccess } from "$lib/api";
+  import { api, ApiError, errorMessage, type Repo, type User, type UserRepoAccess } from "$lib/api";
   import { Keyset, Resource, type TableSource } from "$lib/load.svelte";
-  import { Draft } from "$lib/unsaved.svelte";
   import { href, repoSettingsPath } from "$lib/router.svelte";
   import { auth } from "$lib/auth.svelte";
+  import { count, someNames } from "$lib/words";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
-  import * as Select from "$lib/components/ui/select";
   import PageHeader from "$lib/components/PageHeader.svelte";
   import Section from "$lib/components/Section.svelte";
   import DataTable from "$lib/components/DataTable.svelte";
@@ -30,12 +29,11 @@
   import StatusBadge from "$lib/components/StatusBadge.svelte";
   import UserAvatar from "$lib/components/UserAvatar.svelte";
   import FormField from "$lib/components/FormField.svelte";
-  import SaveBar from "$lib/components/SaveBar.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import ShortFormDialog from "$lib/components/ShortFormDialog.svelte";
+  import GrantDialog from "../../settings/repos/GrantDialog.svelte";
   import { levelLabel, type Level } from "../../settings/repos/access";
   import PlusIcon from "@lucide/svelte/icons/plus";
-  import XIcon from "@lucide/svelte/icons/x";
   import LockIcon from "@lucide/svelte/icons/lock";
   import DatabaseIcon from "@lucide/svelte/icons/database";
   import ShieldCheckIcon from "@lucide/svelte/icons/shield-check";
@@ -62,44 +60,16 @@
 
   // --- repositories ---
   const access = new Keyset<UserRepoAccess>((p) => api.users.access(person, p));
-  // Every repository, for the add dialog and for the rows that the draft adds.
+  // Every repository, for the Give access dialog.
   const allRepos = new Resource<Repo[]>(() => api.repos.list());
-  const repoOf = (r: string) => allRepos.data?.find((x) => x.name === r);
 
-  type Grants = Record<string, Level>;
-  const draft = new Draft<{ grants: Grants }>({ grants: {} });
-  const d = $derived(draft.value.grants);
-  const saved = $derived(draft.saved.grants);
-  const grantsOf = (items: UserRepoAccess[]): Grants => Object.fromEntries(items.filter((r) => r.via === "permission").map((r) => [r.repo, r.level]));
-
-  // A page that "Load more" adds brings its grants into the draft, saved and edited alike.
-  let seen = new Set<string>();
-  $effect(() => {
-    const fresh = access.items.filter((r) => !seen.has(r.repo));
-    if (!fresh.length) return;
-    untrack(() => {
-      for (const r of fresh) seen.add(r.repo);
-      const g = grantsOf(fresh);
-      draft.saved = { grants: { ...draft.saved.grants, ...g } };
-      draft.value = { grants: { ...draft.value.grants, ...g } };
-    });
-  });
-
+  // level is null for a public repository without a level given to the person.
   type Row = { repo: string; format: string; public: boolean; level: Level | null };
-  const rows = $derived.by(() => {
-    const out: Row[] = [];
-    const listed = new Set<string>();
-    for (const r of access.items) {
-      listed.add(r.repo);
-      if (d[r.repo] || r.public) out.push({ repo: r.repo, format: r.format, public: r.public, level: d[r.repo] ?? null });
-    }
-    for (const [repo, level] of Object.entries(d)) {
-      if (listed.has(repo)) continue;
-      const x = repoOf(repo);
-      out.push({ repo, format: x?.format ?? "", public: x?.anonymous_read ?? false, level });
-    }
-    return out.sort((a, b) => a.repo.localeCompare(b.repo));
-  });
+  const rows = $derived(
+    access.items
+      .filter((r) => r.via === "permission" || r.public)
+      .map((r): Row => ({ repo: r.repo, format: r.format, public: r.public, level: r.via === "permission" ? r.level : null })),
+  );
   const source: TableSource<Row> = {
     get items() {
       return rows;
@@ -120,82 +90,54 @@
     more: () => access.more(),
   };
 
-  const setLevel = (repo: string, level: Level | undefined) => {
-    const g = { ...draft.value.grants };
-    if (level) g[repo] = level;
-    else delete g[repo];
-    draft.value = { grants: g };
-  };
-  function choose(r: Row, level: Level) {
-    // A public repository needs no grant to download.
-    if (level === "read" && r.public && !saved[r.repo]) setLevel(r.repo, undefined);
-    else setLevel(r.repo, level);
-  }
+  const repoCount = (n: number) => count(n, "repository", "repositories");
+  const verbOf = (level: Level) => (level === "write" ? "publish to" : "download from");
 
-  const changed = $derived([...new Set([...Object.keys(saved), ...Object.keys(d)])].filter((r) => saved[r] !== d[r]).sort());
-  const isPublic = (repo: string) => rows.find((r) => r.repo === repo)?.public ?? repoOf(repo)?.anonymous_read ?? false;
-  const changes = $derived(
-    changed.map((repo) => {
-      const was = saved[repo];
-      const now = d[repo];
-      if (!was) {
-        if (now === "read") return `${person} can download from ${repo}`;
-        return isPublic(repo) ? `${person} can publish to ${repo}` : `${person} can download from and publish to ${repo}`;
-      }
-      if (!now) {
-        if (isPublic(repo)) return was === "write" ? `${person} can no longer publish to ${repo}, and can still download because it is public` : `The access given on ${repo} ends; ${person} can still download because it is public`;
-        return `${person} can no longer ${was === "write" ? "download from or publish to" : "download from"} ${repo}; their read tokens lose it too`;
-      }
-      return now === "write" ? `${person} can publish to ${repo}` : `${person} can no longer publish to ${repo}, and can still download`;
-    }),
-  );
-  const narrows = $derived(changed.some((r) => !d[r] || (saved[r] === "write" && d[r] === "read")));
+  let picked = $state(new Set<string>());
+  const pickedNames = $derived([...picked].sort((a, b) => a.localeCompare(b)));
+  let busy = $state(false);
 
-  async function rebuild(keep?: Grants) {
+  async function afterChange() {
+    picked = new Set();
     await access.reload();
-    seen = new Set(access.items.map((r) => r.repo));
-    const g = grantsOf(access.items);
-    draft.commit({ grants: g });
-    if (keep) draft.value = { grants: keep };
   }
 
-  let confirmSave = $state(false);
-  async function save() {
-    const want = $state.snapshot(draft.value.grants) as Grants;
-    const had = $state.snapshot(draft.saved.grants) as Grants;
-    let done = false;
+  async function changeTo(level: Level) {
+    const names = pickedNames;
+    busy = true;
     try {
-      for (const repo of changed) {
-        if (want[repo]) await api.repos.permissions.set(repo, person, want[repo]);
-        else if (had[repo]) await api.repos.permissions.delete(repo, person);
-      }
-      done = true;
+      await api.permissions.set([person], names, level);
+      toast.success(`${person} can now ${verbOf(level)} ${repoCount(names.length)}.`);
+      await afterChange();
+    } catch (e) {
+      toast.error(errorMessage(e));
     } finally {
-      // Whatever was saved is now the saved state; edits that did not save stay unsaved.
-      await rebuild(done ? undefined : want);
+      busy = false;
     }
-    toast.success(`Saved the access of ${person}`);
   }
 
-  // --- add to a repository ---
-  let addOpen = $state(false);
-  let addRepo = $state("");
-  let addLevel = $state<Level>("read");
-  function openAdd() {
-    addRepo = "";
-    addLevel = "read";
-    addOpen = true;
+  let removeOpen = $state(false);
+  async function removeAccess() {
+    const names = pickedNames;
+    await api.permissions.delete([person], names);
+    toast.success(`Removed the access of ${person} to ${repoCount(names.length)}.`);
+    await afterChange();
   }
-  const candidates = $derived((allRepos.data ?? []).filter((r) => !d[r.name]).map((r) => r.name).sort());
-  const addProblem = $derived.by(() => {
-    const r = addRepo.trim();
-    if (!r) return "";
-    const x = repoOf(r);
-    if (!x && allRepos.data) return `No repository named ${r} exists.`;
-    if (d[r]) return `${person} has access to ${r} already. Change the level in the list.`;
-    if (x?.anonymous_read && addLevel === "read") return `${r} is public, so ${person} can download from it already.`;
-    return "";
-  });
+
+  // --- give access ---
+  let giveOpen = $state(false);
+  const granted = $derived(new Set(rows.filter((r) => r.level).map((r) => r.repo)));
+  const choices = $derived(
+    (allRepos.data ?? [])
+      .filter((r) => !granted.has(r.name))
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((r) => ({ id: r.name, label: r.name, detail: r.anonymous_read ? "Public: anyone can download" : undefined })),
+  );
+  async function give(repos: string[], level: Level) {
+    await api.permissions.set([person], repos, level);
+    toast.success(`${person} can now ${verbOf(level)} ${repoCount(repos.length)}.`);
+    await afterChange();
+  }
 
   // --- the account ---
   type Kind = "make-admin" | "remove-admin" | "disable" | "enable";
@@ -211,7 +153,7 @@
           label: "Make administrator",
           destructive: true,
           changes: [`${n} can manage people, repositories and server settings`, `${n} can download from and publish to every repository`],
-          patch: { is_admin: true } as UserPatch,
+          run: () => api.users.update(n, { is_admin: true }),
           done: `Made ${n} an administrator`,
         };
       case "remove-admin":
@@ -220,31 +162,38 @@
           label: "Remove administrator rights",
           destructive: true,
           changes: [`${n} can no longer manage people, repositories or settings`, `${n} keeps only the access given on each repository`],
-          patch: { is_admin: false },
+          run: () => api.users.update(n, { is_admin: false }),
           done: `Removed the administrator rights of ${n}`,
         };
       case "disable":
         return {
-          title: `Turn off ${n}?`,
-          label: "Turn off account",
+          title: `Disable ${n}?`,
+          label: "Disable account",
           destructive: true,
-          changes: [`${n} can no longer sign in`, `The read tokens, devices and publish tokens of ${n} stop working`],
-          patch: { disabled: true },
-          done: `Turned off ${n}`,
+          changes: [`${n} is signed out and cannot sign in`, `The read tokens, devices and publish tokens of ${n} stop working`],
+          run: () => api.users.setDisabled([n], true),
+          done: `${n} is now disabled.`,
         };
       case "enable":
-        return { title: `Turn on ${n}?`, label: "Turn on account", destructive: false, changes: [`${n} can sign in again`], patch: { disabled: false }, done: `Turned on ${n}` };
+        return {
+          title: `Enable ${n}?`,
+          label: "Enable account",
+          destructive: false,
+          changes: [`${n} can sign in again`],
+          run: () => api.users.setDisabled([n], false),
+          done: `${n} can sign in again.`,
+        };
       default:
-        return { title: "", label: "", destructive: false, changes: [] as string[], patch: {}, done: "" };
+        return { title: "", label: "", destructive: false, changes: [] as string[], run: async () => {}, done: "" };
     }
   });
 
   async function applyAccount() {
     const t = accountText;
-    user.data = await api.users.update(person, t.patch);
+    await t.run();
     toast.success(t.done);
     // The role and the state decide which repositories the person can use.
-    await rebuild();
+    await Promise.all([user.reload(), afterChange()]);
   }
 
   let pwOpen = $state(false);
@@ -280,7 +229,7 @@
         <div class="min-w-0">
           <p class="flex flex-wrap items-center gap-2 text-section">
             {u.is_admin ? "Administrator" : "Member"}
-            {#if u.disabled}<StatusBadge tone="warning">Turned off</StatusBadge>{/if}
+            {#if u.disabled}<StatusBadge tone="warning">Disabled</StatusBadge>{/if}
           </p>
           <p class="mt-1 truncate text-meta text-muted-foreground" title={u.email || undefined}>
             {sso ? "Signs in with single sign-on" : "Signs in with a password"}{#if u.email} · {u.email}{/if}
@@ -297,7 +246,7 @@
           <Button variant="outline" size="sm" onclick={() => ((password = ""), (pwOpen = true))}>Reset password</Button>
         {/if}
         {#if u.disabled}
-          <Button variant="outline" size="sm" onclick={() => ask("enable")}>Turn on account</Button>
+          <Button variant="outline" size="sm" onclick={() => ask("enable")}>Enable account</Button>
         {:else}
           <Button
             variant="ghost"
@@ -305,7 +254,7 @@
             class="hover:bg-destructive/10 hover:text-destructive"
             disabled={self}
             title={self ? notYou : undefined}
-            onclick={() => ask("disable")}>Turn off account</Button
+            onclick={() => ask("disable")}>Disable account</Button
           >
         {/if}
       </div>
@@ -315,61 +264,44 @@
 
   <Section title="Repositories" description={sso && !u.is_admin && !u.disabled ? "Single sign-on accounts can download but cannot publish." : undefined}>
     {#snippet actions()}
-      {#if !u.is_admin && !u.disabled}<Button variant="outline" size="sm" onclick={openAdd}><PlusIcon />Add to repository</Button>{/if}
+      {#if !u.is_admin && !u.disabled}<Button variant="outline" size="sm" onclick={() => (giveOpen = true)}><PlusIcon />Give access</Button>{/if}
     {/snippet}
     {#if u.is_admin}
       <CompactEmpty icon={ShieldCheckIcon} text="Administrators can download from and publish to every repository." />
     {:else if u.disabled}
-      <CompactEmpty icon={UserXIcon} text="A turned-off account cannot use any repository. Turn the account on to restore its access." />
+      <CompactEmpty icon={UserXIcon} text="A disabled account cannot use any repository. Enable the account to restore its access." />
     {:else}
       <DataTable
         {source}
         caption="Repositories {person} can use"
         key={(r) => r.repo}
-        columns={[{ label: "Repository", grow: true }, { label: "Access", class: "w-40" }, { label: "", srLabel: "Actions" }]}
+        columns={[{ label: "Repository", grow: true }, { label: "Access", class: "w-40" }]}
+        bind:picked
+        pickLabel={(r) => r.repo}
       >
         {#snippet row(r)}
           <Cell grow strong class="max-sm:min-w-20">
             <span class="flex min-w-0 items-center gap-2">
-              {#if saved[r.repo] !== d[r.repo]}<span aria-hidden="true" class="size-1.5 shrink-0 rounded-full bg-warning" title="Not saved yet"></span><span class="sr-only">Not saved:</span>{/if}
               {#if r.format}<FormatIcon format={r.format} class="shrink-0 text-muted-foreground" />{/if}
               <a class="truncate underline-offset-4 hover:underline" href={href(repoSettingsPath(r.repo, "access"))}>{r.repo}</a>
               {#if !r.public}<LockIcon class="size-3.5 shrink-0 text-muted-foreground" aria-label="Private" />{/if}
               {#if sso && r.level === "write"}<StatusBadge tone="warning" title="Single sign-on accounts hold no publish tokens">Cannot publish: single sign-on</StatusBadge>{/if}
             </span>
           </Cell>
-          <Cell class="py-0">
-            <Select.Root type="single" value={r.level ?? "read"} onValueChange={(v) => choose(r, v as Level)}>
-              <Select.Trigger size="sm" class="w-40 max-sm:w-32" aria-label="Access of {person} to {r.repo}">{levelLabel[r.level ?? "read"]}</Select.Trigger>
-              <Select.Content>
-                <Select.Item value="read" label={levelLabel.read}>{levelLabel.read}</Select.Item>
-                <Select.Item value="write" label={levelLabel.write} disabled={sso}>{levelLabel.write}</Select.Item>
-              </Select.Content>
-            </Select.Root>
-          </Cell>
-          <Cell actions>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              class="hover:text-destructive"
-              disabled={!r.level}
-              title={r.level ? "Remove" : "Anyone can download from a public repository."}
-              aria-label="Remove the access of {person} to {r.repo}"
-              onclick={() => setLevel(r.repo, undefined)}><XIcon /></Button
-            >
-          </Cell>
+          <Cell class="w-40" text={levelLabel[r.level ?? "read"]} />
+        {/snippet}
+        {#snippet bulk()}
+          <Button variant="outline" size="sm" disabled={busy} onclick={() => changeTo("read")}>Change to Download</Button>
+          <Button variant="outline" size="sm" disabled={busy || sso} title={sso ? "Single sign-on accounts cannot publish." : undefined} onclick={() => changeTo("write")}>Change to Publish</Button>
+          <Button variant="ghost" size="sm" class="hover:bg-destructive/10 hover:text-destructive" disabled={busy} onclick={() => (removeOpen = true)}>Remove access</Button>
         {/snippet}
         {#snippet empty()}
-          <CompactEmpty icon={DatabaseIcon} text="No repository is public, and {person} has no access yet. Add {person} to a repository." />
+          <CompactEmpty icon={DatabaseIcon} text="No repository is public, and {person} has no access yet. Give {person} access to a repository." />
         {/snippet}
       </DataTable>
     {/if}
   </Section>
-
-  <SaveBar count={changed.length} onDiscard={draft.reset} onSave={() => (confirmSave = true)} />
 {/if}
-
-<ConfirmDialog bind:open={confirmSave} title="Save the access of {person}?" confirmLabel="Save access" destructive={narrows} {changes} onConfirm={save} />
 
 <ConfirmDialog
   bind:open={confirmAccount}
@@ -380,30 +312,32 @@
   onConfirm={applyAccount}
 />
 
-<ShortFormDialog
-  bind:open={addOpen}
-  title="Add {person} to a repository"
-  submitLabel="Add to repository"
-  canSubmit={!!addRepo.trim() && !addProblem}
-  onSubmit={() => setLevel(addRepo.trim(), addLevel)}
->
-  <FormField label="Repository" for="{id}-add-repo" error={addProblem || undefined}>
-    <Input id="{id}-add-repo" list="{id}-repos" autocomplete="off" spellcheck={false} bind:value={addRepo} />
-  </FormField>
-  <datalist id="{id}-repos">
-    {#each candidates as c (c)}<option value={c}></option>{/each}
-  </datalist>
-  <FormField label="Access" for="{id}-add-level" hint={sso ? "Single sign-on accounts cannot publish." : undefined}>
-    <Select.Root type="single" value={addLevel} onValueChange={(v) => (addLevel = v as Level)}>
-      <Select.Trigger id="{id}-add-level" class="w-full">{levelLabel[addLevel]}</Select.Trigger>
-      <Select.Content>
-        <Select.Item value="read" label={levelLabel.read}>{levelLabel.read}</Select.Item>
-        <Select.Item value="write" label={levelLabel.write} disabled={sso}>{levelLabel.write}</Select.Item>
-      </Select.Content>
-    </Select.Root>
-  </FormField>
-  <p class="text-meta text-muted-foreground">Save the page to keep the change.</p>
-</ShortFormDialog>
+<ConfirmDialog
+  bind:open={removeOpen}
+  title="Remove the access of {person} to {repoCount(pickedNames.length)}?"
+  description="{someNames(pickedNames)}."
+  confirmLabel="Remove access to {repoCount(pickedNames.length)}"
+  destructive
+  changes={[
+    `${person} can no longer download from or publish to ${pickedNames.length === 1 ? "this repository" : "these repositories"}, except for downloads from a public one`,
+    `The read tokens of ${person} lose this access too`,
+  ]}
+  onConfirm={removeAccess}
+/>
+
+<GrantDialog
+  bind:open={giveOpen}
+  title="Give {person} access"
+  noun={["repository", "repositories"]}
+  items={choices}
+  loading={allRepos.loading && !allRepos.data}
+  error={allRepos.error ? `The repositories did not load: ${allRepos.error}` : ""}
+  none="{person} has access to every repository already."
+  canPublish={!sso}
+  publishNote="Single sign-on accounts cannot publish."
+  submitLabel={(n) => (n ? `Give access to ${repoCount(n)}` : "Give access")}
+  onGive={give}
+/>
 
 <ShortFormDialog
   bind:open={pwOpen}

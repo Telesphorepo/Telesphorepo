@@ -226,32 +226,111 @@ func (s *Service) ReadableRepoIDs(ctx context.Context, p *Principal) ([]int64, b
 	return ids, false, nil
 }
 
-func (s *Service) SetPermission(ctx context.Context, repoID int64, username string, level Level) error {
-	if level != Read && level != Write {
-		return ErrInvalid
-	}
-	n, err := s.wq.SetPermission(ctx, dbq.SetPermissionParams{RepoID: repoID, Level: level.String(), Username: username})
-	if err != nil {
-		if strings.Contains(err.Error(), "FOREIGN KEY constraint failed") {
-			return ErrNotFound
-		}
-		return err
-	}
-	if n == 0 {
-		return ErrNotFound
-	}
-	return nil
+// Grant is one pair of a user and a repo that SetPermissions or DeletePermissions changed.
+type Grant struct {
+	Repo     *repos.Repo
+	Username string
 }
 
-func (s *Service) DeletePermission(ctx context.Context, repoID int64, username string) error {
-	n, err := s.wq.DeletePermission(ctx, dbq.DeletePermissionParams{RepoID: repoID, Username: username})
+// pairs reads every user and repo of a list change of permissions. An unknown name returns a
+// *repos.MissingError. The repos come from the read pool; a repo deleted before the write
+// transaction ends fails its foreign key, and the transaction changes nothing.
+func (s *Service) pairs(ctx context.Context, q *dbq.Queries, users, repoNames []string) ([]int64, []*repos.Repo, error) {
+	rs := make([]*repos.Repo, 0, len(repoNames))
+	for _, name := range repoNames {
+		r, err := s.repos.ByName(ctx, name)
+		if errors.Is(err, repos.ErrNotFound) {
+			return nil, nil, &repos.MissingError{Kind: "repository", Name: name}
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		rs = append(rs, r)
+	}
+	ids := make([]int64, 0, len(users))
+	for _, name := range users {
+		row, err := q.GetUserIDKind(ctx, name)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil, &repos.MissingError{Kind: "user", Name: name}
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		ids = append(ids, row.ID)
+	}
+	return ids, rs, nil
+}
+
+// SetPermissions gives level on every repo of repoNames to every user of users, in one
+// transaction. It reads every name first: an unknown name returns a *repos.MissingError and
+// changes nothing. It returns the pairs whose level changed.
+func (s *Service) SetPermissions(ctx context.Context, users, repoNames []string, level Level) ([]Grant, error) {
+	if level != Read && level != Write {
+		return nil, ErrInvalid
+	}
+	var changed []Grant
+	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
+		changed = changed[:0]
+		q := s.wq.WithTx(tx)
+		ids, rs, err := s.pairs(ctx, q, users, repoNames)
+		if err != nil {
+			return err
+		}
+		for i, uid := range ids {
+			for _, r := range rs {
+				old, err := q.GetPermissionLevel(ctx, dbq.GetPermissionLevelParams{RepoID: r.ID, UserID: uid})
+				if err != nil && !errors.Is(err, sql.ErrNoRows) {
+					return err
+				}
+				if old == level.String() {
+					continue
+				}
+				if err := q.SetPermission(ctx, dbq.SetPermissionParams{RepoID: r.ID, UserID: uid, Level: level.String()}); err != nil {
+					if strings.Contains(err.Error(), "FOREIGN KEY constraint failed") {
+						return &repos.MissingError{Kind: "repository", Name: r.Name}
+					}
+					return err
+				}
+				changed = append(changed, Grant{Repo: r, Username: users[i]})
+			}
+		}
+		return nil
+	})
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if n == 0 {
-		return ErrNotFound
+	return changed, nil
+}
+
+// DeletePermissions removes the level of every pair of users and repoNames, in one transaction.
+// It reads every name first: an unknown name returns a *repos.MissingError and changes nothing.
+// It returns the pairs that had a level.
+func (s *Service) DeletePermissions(ctx context.Context, users, repoNames []string) ([]Grant, error) {
+	var changed []Grant
+	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
+		changed = changed[:0]
+		q := s.wq.WithTx(tx)
+		ids, rs, err := s.pairs(ctx, q, users, repoNames)
+		if err != nil {
+			return err
+		}
+		for i, uid := range ids {
+			for _, r := range rs {
+				n, err := q.DeletePermission(ctx, dbq.DeletePermissionParams{RepoID: r.ID, UserID: uid})
+				if err != nil {
+					return err
+				}
+				if n > 0 {
+					changed = append(changed, Grant{Repo: r, Username: users[i]})
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	return changed, nil
 }
 
 func (s *Service) ListPermissions(ctx context.Context, repoID int64) ([]Permission, error) {

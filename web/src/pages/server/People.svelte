@@ -2,15 +2,17 @@
   People (administrators): every account and its role. A row opens the person's page
   (/settings/people/:name), where an administrator changes the account and its access to each
   repository. New account opens a short form; after Create, the new person's page opens. Single
-  sign-on accounts appear after their first sign-in.
+  sign-on accounts appear after their first sign-in. Pick rows (not your own) to disable people
+  (after a confirm) or enable them at once.
 -->
 <script lang="ts">
   import { toast } from "svelte-sonner";
   import type { PageProps } from "$lib/router.svelte";
   import { href, navigate } from "$lib/router.svelte";
   import { auth } from "$lib/auth.svelte";
-  import { api, type User } from "$lib/api";
+  import { api, errorMessage, type User } from "$lib/api";
   import { Keyset } from "$lib/load.svelte";
+  import { count, someNames } from "$lib/words";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import { Switch } from "$lib/components/ui/switch";
@@ -25,6 +27,7 @@
   import UserAvatar from "$lib/components/UserAvatar.svelte";
   import FormField from "$lib/components/FormField.svelte";
   import ShortFormDialog from "$lib/components/ShortFormDialog.svelte";
+  import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import PlusIcon from "@lucide/svelte/icons/plus";
   import UsersIcon from "@lucide/svelte/icons/users-round";
 
@@ -53,6 +56,35 @@
     toast.success(`Created the account ${u.username}`);
     navigate(personPath(u.username));
   }
+
+  // --- bulk actions ---
+  let picked = $state(new Set<number>());
+  const names = $derived(users.items.filter((u) => picked.has(u.id)).map((u) => u.username));
+  const people = (n: number) => count(n, "person", "people");
+  let busy = $state(false);
+  let disableOpen = $state(false);
+
+  async function setDisabled(disabled: boolean) {
+    const list = names;
+    try {
+      await api.users.setDisabled(list, disabled);
+      toast.success(disabled ? `${count(list.length, "person is", "people are")} now disabled.` : `${count(list.length, "person can", "people can")} sign in again.`);
+      picked = new Set();
+    } finally {
+      await users.reload();
+    }
+  }
+
+  async function enable() {
+    busy = true;
+    try {
+      await setDisabled(false);
+    } catch (e) {
+      toast.error(errorMessage(e));
+    } finally {
+      busy = false;
+    }
+  }
 </script>
 
 <PageHeader title="People" description="Everyone who can sign in, and the repositories each person can use.">
@@ -65,6 +97,9 @@
     caption="People"
     key={(u) => u.id}
     href={rowHref}
+    bind:picked
+    pickable={(u) => u.username !== auth.user?.username}
+    pickLabel={(u) => u.username}
     columns={[
       { label: "Name", grow: true },
       { label: "Role" },
@@ -83,13 +118,17 @@
       </Cell>
       <Cell>
         {#if u.disabled}
-          <StatusBadge tone="warning">Turned off</StatusBadge>
+          <StatusBadge tone="warning">Disabled</StatusBadge>
         {:else}
           {u.is_admin ? "Administrator" : "Member"}
         {/if}
       </Cell>
       {#if mixedSignIn}<Cell hideOnPhone muted>{u.kind === "oidc" ? "Single sign-on" : "Password"}</Cell>{/if}
       <Cell num muted hideOnPhone><RelativeTime at={u.created_at} /></Cell>
+    {/snippet}
+    {#snippet bulk()}
+      <Button variant="outline" size="sm" disabled={busy} onclick={enable}>Enable</Button>
+      <Button variant="ghost" size="sm" class="hover:bg-destructive/10 hover:text-destructive" disabled={busy} onclick={() => (disableOpen = true)}>Disable</Button>
     {/snippet}
     {#snippet empty()}
       <CompactEmpty icon={UsersIcon} text="Only you so far. Add an account for each person who publishes or downloads private files.">
@@ -98,6 +137,16 @@
     {/snippet}
   </DataTable>
 </Section>
+
+<ConfirmDialog
+  bind:open={disableOpen}
+  title="Disable {people(names.length)}?"
+  description="They are signed out and cannot sign in."
+  confirmLabel="Disable {people(names.length)}"
+  destructive
+  changes={[`Disables ${someNames(names)}`, "Their read tokens, devices and publish tokens stop working"]}
+  onConfirm={() => setDisabled(true)}
+/>
 
 <ShortFormDialog
   bind:open={createOpen}

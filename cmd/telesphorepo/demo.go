@@ -142,7 +142,7 @@ func createDemoData(ctx context.Context, s *server.Services, adminName string) e
 		for _, u := range users {
 			for _, name := range u.write {
 				if name == repo.Name {
-					if err := s.Auth.SetPermission(ctx, repo.ID, u.name, auth.Write); err != nil {
+					if _, err := s.Auth.SetPermissions(ctx, []string{u.name}, []string{repo.Name}, auth.Write); err != nil {
 						run.Close()
 						return fmt.Errorf("grant %s write on %s: %w", u.name, name, err)
 					}
@@ -151,7 +151,7 @@ func createDemoData(ctx context.Context, s *server.Services, adminName string) e
 			}
 			for _, name := range u.read {
 				if name == repo.Name {
-					if err := s.Auth.SetPermission(ctx, repo.ID, u.name, auth.Read); err != nil {
+					if _, err := s.Auth.SetPermissions(ctx, []string{u.name}, []string{repo.Name}, auth.Read); err != nil {
 						run.Close()
 						return fmt.Errorf("grant %s read on %s: %w", u.name, name, err)
 					}

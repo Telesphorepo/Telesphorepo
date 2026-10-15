@@ -1,15 +1,15 @@
 // The facts of a repository's access, as the Access tab edits them. The Access tab holds an
-// AccessDraft; `changesOf` lists what a save does, one line each.
+// AccessDraft; `changesOf` lists what a save does, one line each. The access of people is not in
+// the draft: the tab changes it at once.
 
 import type { AccessNetworks, AccessPipeline, IPList, IPRule, RepoAccess, Trust } from "$lib/api";
 
 export type Level = "read" | "write";
 export const levelLabel: Record<Level, string> = { read: "Can download", write: "Can publish" };
 
-/** What the Access tab edits. grants: username → level; ci: the ids of the CI pipelines that list the repo. */
+/** What the Access tab saves from its save bar. ci: the ids of the CI pipelines that list the repo. */
 export type AccessDraft = {
   public: boolean;
-  grants: Record<string, Level>;
   ci: number[];
   read: IPRule[];
   publish: IPRule[];
@@ -21,11 +21,8 @@ const rulesOf = (n: AccessNetworks): IPRule[] => [
 ];
 
 export function draftOf(a: RepoAccess): AccessDraft {
-  const grants: Record<string, Level> = {};
-  for (const p of a.download.people) if (p.via === "permission") grants[p.username] = p.level;
   return {
     public: a.download.public,
-    grants,
     ci: a.publish.ci.map((c) => c.id).sort((x, y) => x - y),
     read: rulesOf(a.download.networks),
     publish: rulesOf(a.publish.networks),
@@ -101,16 +98,6 @@ export function changesOf(repo: string, saved: AccessDraft, d: AccessDraft, pipe
         ? `Anyone can download every file of ${repo} without signing in, and search shows its files to visitors`
         : `Visitors who are not signed in can no longer download from ${repo}; builds without a read token stop working`,
     );
-  const names = [...new Set([...Object.keys(saved.grants), ...Object.keys(d.grants)])].sort();
-  for (const u of names) {
-    const was = saved.grants[u];
-    const now = d.grants[u];
-    if (was === now) continue;
-    if (!was) out.push(now === "write" ? `${u} can download from and publish to ${repo}` : `${u} can download from ${repo}`);
-    else if (!now) out.push(`${u} can no longer ${was === "write" ? "download from or publish to" : "download from"} ${repo}; their read tokens lose it too`);
-    else if (now === "write") out.push(`${u} can publish to ${repo}`);
-    else out.push(`${u} can no longer publish to ${repo}, and can still download`);
-  }
   const name = (id: number) => pipelines.get(id)?.rule ?? `CI pipeline ${id}`;
   for (const id of d.ci) if (!saved.ci.includes(id)) out.push(`The CI pipeline ${name(id)} can publish to ${repo}; its open publish tokens end`);
   for (const id of saved.ci) if (!d.ci.includes(id)) out.push(`The CI pipeline ${name(id)} can no longer publish to ${repo}; its open publish tokens end`);
@@ -129,7 +116,6 @@ export function changesOf(repo: string, saved: AccessDraft, d: AccessDraft, pipe
 /** How many separate changes the draft holds (the save bar's count). */
 export function countOf(saved: AccessDraft, d: AccessDraft): number {
   let n = d.public !== saved.public ? 1 : 0;
-  for (const u of new Set([...Object.keys(saved.grants), ...Object.keys(d.grants)])) if (saved.grants[u] !== d.grants[u]) n++;
   n += d.ci.filter((id) => !saved.ci.includes(id)).length + saved.ci.filter((id) => !d.ci.includes(id)).length;
   for (const k of ["read", "publish"] as const) {
     const key = (r: IPRule) => `${r.kind}:${r.value}:${r.note}`;

@@ -149,17 +149,16 @@ func (q *Queries) DeleteOIDCUserSessions(ctx context.Context, arg DeleteOIDCUser
 }
 
 const deletePermission = `-- name: DeletePermission :execrows
-DELETE FROM repo_permissions
-WHERE repo_id = ?1 AND user_id = (SELECT id FROM users WHERE username = ?2)
+DELETE FROM repo_permissions WHERE repo_id = ? AND user_id = ?
 `
 
 type DeletePermissionParams struct {
-	RepoID   int64
-	Username string
+	RepoID int64
+	UserID int64
 }
 
 func (q *Queries) DeletePermission(ctx context.Context, arg DeletePermissionParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, deletePermission, arg.RepoID, arg.Username)
+	result, err := q.db.ExecContext(ctx, deletePermission, arg.RepoID, arg.UserID)
 	if err != nil {
 		return 0, err
 	}
@@ -676,24 +675,20 @@ func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]ListUse
 	return items, nil
 }
 
-const setPermission = `-- name: SetPermission :execrows
-INSERT INTO repo_permissions (repo_id, user_id, level)
-SELECT ?1, id, ?2 FROM users WHERE username = ?3
+const setPermission = `-- name: SetPermission :exec
+INSERT INTO repo_permissions (repo_id, user_id, level) VALUES (?, ?, ?)
 ON CONFLICT (repo_id, user_id) DO UPDATE SET level = excluded.level
 `
 
 type SetPermissionParams struct {
-	RepoID   int64
-	Level    string
-	Username string
+	RepoID int64
+	UserID int64
+	Level  string
 }
 
-func (q *Queries) SetPermission(ctx context.Context, arg SetPermissionParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, setPermission, arg.RepoID, arg.Level, arg.Username)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
+func (q *Queries) SetPermission(ctx context.Context, arg SetPermissionParams) error {
+	_, err := q.db.ExecContext(ctx, setPermission, arg.RepoID, arg.UserID, arg.Level)
+	return err
 }
 
 const setUserAdmin = `-- name: SetUserAdmin :exec

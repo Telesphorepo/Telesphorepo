@@ -96,7 +96,7 @@ func userPasswd(args []string) error {
 		if err != nil {
 			return err
 		}
-		if _, err := as.UpdateUser(ctx, name, &pw, nil, nil); err != nil {
+		if _, err := as.UpdateUser(ctx, name, &pw, nil); err != nil {
 			return fmt.Errorf("update password: %w", err)
 		}
 		as.RecordCLI(ctx, audit.UserUpdate, name, map[string]any{"password": "changed"})

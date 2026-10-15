@@ -113,14 +113,12 @@ SELECT repo_id FROM repo_permissions WHERE user_id = ?;
 -- name: ListAnonymousRepoIDs :many
 SELECT id FROM repos WHERE anonymous_read = 1;
 
--- name: SetPermission :execrows
-INSERT INTO repo_permissions (repo_id, user_id, level)
-SELECT sqlc.arg(repo_id), id, sqlc.arg(level) FROM users WHERE username = sqlc.arg(username)
+-- name: SetPermission :exec
+INSERT INTO repo_permissions (repo_id, user_id, level) VALUES (?, ?, ?)
 ON CONFLICT (repo_id, user_id) DO UPDATE SET level = excluded.level;
 
 -- name: DeletePermission :execrows
-DELETE FROM repo_permissions
-WHERE repo_id = sqlc.arg(repo_id) AND user_id = (SELECT id FROM users WHERE username = sqlc.arg(username));
+DELETE FROM repo_permissions WHERE repo_id = ? AND user_id = ?;
 
 -- name: ListPermissions :many
 SELECT u.username, p.level FROM repo_permissions p JOIN users u ON u.id = p.user_id
