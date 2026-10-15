@@ -19,6 +19,11 @@ ON CONFLICT (repo_id, path) DO UPDATE SET size = excluded.size, sha256 = exclude
   publish_session_id = excluded.publish_session_id, checked_at = excluded.checked_at, remote_etag = excluded.remote_etag
 RETURNING id, kind, created_at, updated_at;
 
+-- An import gives a file the dates of its source (a file that a sync skipped because its bytes
+-- are here already).
+-- name: SetAssetTimes :exec
+UPDATE assets SET created_at = ?, updated_at = ? WHERE repo_id = ? AND path = ?;
+
 -- name: DeleteAsset :execrows
 DELETE FROM assets WHERE repo_id = ? AND path = ?;
 

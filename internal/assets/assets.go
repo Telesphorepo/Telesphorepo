@@ -61,10 +61,13 @@ type Asset struct {
 }
 
 // By is who writes a file: the user (0 = none, e.g. a CI session or an import) and the publish
-// session whose build provenance the file records (0 = none).
+// session whose build provenance the file records (0 = none). An import also gives the source's
+// dates of the file; zero means now.
 type By struct {
 	User    int64
 	Session int64
+	Created time.Time
+	Updated time.Time
 }
 
 // Spooled is an upload buffered to a temp file under cfg.TmpDir() with its hashes
@@ -252,6 +255,23 @@ func (s *Service) Get(ctx context.Context, repoID int64, p string) (*Asset, erro
 	return fromRow(r), nil
 }
 
+// SetTimes gives file a the dates of by when by has them and they differ from a's, to the
+// second. An import calls it for a file that it skips because the bytes are here.
+func (s *Service) SetTimes(ctx context.Context, a *Asset, by By) error {
+	if by.Updated.IsZero() {
+		return nil
+	}
+	created := by.Created
+	if created.IsZero() {
+		created = by.Updated
+	}
+	if a.CreatedAt.Unix() == created.Unix() && a.UpdatedAt.Unix() == by.Updated.Unix() {
+		return nil
+	}
+	return dbq.New(s.db.W).SetAssetTimes(ctx, dbq.SetAssetTimesParams{CreatedAt: created.Unix(),
+		UpdatedAt: by.Updated.Unix(), RepoID: a.RepoID, Path: a.Path})
+}
+
 // PutBlob writes the spooled file to storage at Key(repoName, p).
 func (s *Service) PutBlob(ctx context.Context, repoName, p string, sp *Spooled, contentType string) error {
 	rd, err := sp.Reader()
@@ -263,9 +283,11 @@ func (s *Service) PutBlob(ctx context.Context, repoName, p string, sp *Spooled, 
 
 // UpsertTx inserts or updates (size, sha256, content_type, updated_at, uploaded_by,
 // publish_session_id) the
-// asset row keyed by (RepoID, Path) and sets a.ID. Returns created=true on insert. The row's
-// times are a.UpdatedAt (a proxy keeps the remote's Last-Modified), or now when it is zero.
-// Path and kind are never changed on update (the FTS triggers rely on it).
+// asset row keyed by (RepoID, Path) and sets a.ID. Returns created=true on insert. The input
+// times are the source's dates (an import, or a proxy's remote Last-Modified) and zero means
+// now: an insert writes created_at from a.CreatedAt (else a.UpdatedAt) and updated_at from
+// a.UpdatedAt; an update writes only updated_at. Path and kind are never changed on update (the
+// FTS triggers rely on it).
 func UpsertTx(ctx context.Context, tx *sql.Tx, a *Asset) (created bool, err error) {
 	q := dbq.New(tx)
 	_, err = q.GetAssetID(ctx, dbq.GetAssetIDParams{RepoID: a.RepoID, Path: a.Path})
@@ -279,6 +301,10 @@ func UpsertTx(ctx context.Context, tx *sql.Tx, a *Asset) (created bool, err erro
 	if !a.UpdatedAt.IsZero() {
 		now = a.UpdatedAt.Unix()
 	}
+	createdAt := now
+	if !a.CreatedAt.IsZero() {
+		createdAt = a.CreatedAt.Unix()
+	}
 	var checked int64
 	if !a.CheckedAt.IsZero() {
 		checked = a.CheckedAt.Unix()
@@ -291,7 +317,7 @@ func UpsertTx(ctx context.Context, tx *sql.Tx, a *Asset) (created bool, err erro
 		ContentType: a.ContentType,
 		Kind:        a.Kind,
 		UploadedBy:  sql.NullInt64{Int64: a.UploadedBy, Valid: a.UploadedBy != 0},
-		CreatedAt:   now,
+		CreatedAt:   createdAt,
 		UpdatedAt:   now,
 
 		PublishSessionID: sql.NullInt64{Int64: a.PublishSessionID, Valid: a.PublishSessionID != 0},
@@ -316,7 +342,7 @@ func (s *Service) Put(ctx context.Context, repo *repos.Repo, p string, sp *Spool
 		return nil, false, err
 	}
 	a = &Asset{RepoID: repo.ID, Path: p, Size: sp.Size, SHA256: sp.SHA256, ContentType: contentType, Kind: kind,
-		UploadedBy: by.User, PublishSessionID: by.Session}
+		UploadedBy: by.User, PublishSessionID: by.Session, CreatedAt: by.Created, UpdatedAt: by.Updated}
 	for attempt := 0; ; attempt++ {
 		err = s.db.Tx(ctx, func(tx *sql.Tx) error {
 			var err error

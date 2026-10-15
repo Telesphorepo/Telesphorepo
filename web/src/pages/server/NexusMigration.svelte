@@ -18,6 +18,8 @@
   import StatusBadge from "$lib/components/StatusBadge.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
   import FormField from "$lib/components/FormField.svelte";
+  import { formatCount } from "$lib/format";
+  import { progressLine, sourceStatus } from "./nexus/words";
   import ShortFormDialog from "$lib/components/ShortFormDialog.svelte";
   import ArrowRightLeftIcon from "@lucide/svelte/icons/arrow-right-left";
   import PlusIcon from "@lucide/svelte/icons/plus";
@@ -28,6 +30,13 @@
   const sources = new Keyset((p) => api.nexus.list(p));
   const open = (s: NexusSource) => href(`/settings/nexus/${s.id}`);
 
+  // While a source syncs, its progress line in the table follows the sync.
+  const syncing = $derived(sources.items.some((s) => s.status === "syncing"));
+  $effect(() => {
+    if (!syncing) return;
+    const timer = setInterval(() => sources.reload(), 3000);
+    return () => clearInterval(timer);
+  });
 
   let addOpen = $state(false);
   let name = $state("");
@@ -64,8 +73,10 @@
   href={open}
   columns={[
     { label: "Server", grow: true },
-    { label: "State" },
-    { label: "Last sync", align: "right" },
+    { label: "Status" },
+    { label: "Repositories", align: "right", hideOnPhone: true },
+    { label: "Last check", align: "right" },
+    { label: "Next check", align: "right", hideOnPhone: true },
   ]}
 >
   {#snippet row(s)}
@@ -76,17 +87,15 @@
       </span>
     </Cell>
     <Cell>
-      {#if s.state === "cut_over"}
-        <StatusBadge tone="success">Switched over</StatusBadge>
-      {:else if s.last_error}
-        <StatusBadge tone="danger" title={s.last_error}>Sync failed</StatusBadge>
-      {:else}
-        <StatusBadge tone="info">Copying</StatusBadge>
-      {/if}
+      <StatusBadge tone={sourceStatus[s.status].tone} title={s.status === "failed" ? s.last_error : undefined}>{sourceStatus[s.status].word}</StatusBadge>
     </Cell>
-    <Cell num muted>
-      {#if s.last_sync}<RelativeTime at={s.last_sync.finished_at ?? s.last_sync.started_at} />{:else}Not yet{/if}
-    </Cell>
+    <Cell num hideOnPhone>{formatCount(s.repo_count)}</Cell>
+    {#if s.status === "syncing" && s.last_sync}
+      <Cell num muted text={progressLine(s.last_sync)} />
+    {:else}
+      <Cell num muted><RelativeTime at={s.last_sync?.finished_at} empty="Not yet" /></Cell>
+    {/if}
+    <Cell num muted hideOnPhone><RelativeTime at={s.next_sync_at} empty="" /></Cell>
   {/snippet}
   {#snippet empty()}
     <CompactEmpty

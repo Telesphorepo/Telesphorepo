@@ -270,12 +270,21 @@ type Importer interface {
 	Import(ctx context.Context, repo *repos.Repo, item ImportItem) (ImportOutcome, error)
 }
 
-// ImportItem is one source file.
+// ImportItem is one source file. CreatedAt and UpdatedAt are the source's dates of the file;
+// zero means now. The plugin stores the file with them (assets.By), and gives a file that it
+// skips the same dates (assets.Service.SetTimes). A file the plugin generates keeps now.
 type ImportItem struct {
-	Path   string // source path, forward slashes
-	Size   int64
-	SHA256 string // lowercase hex; "" when the source does not give one
-	Open   func(ctx context.Context) (io.ReadCloser, error)
+	Path      string // source path, forward slashes
+	Size      int64
+	SHA256    string // lowercase hex; "" when the source does not give one
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	Open      func(ctx context.Context) (io.ReadCloser, error)
+}
+
+// By returns who writes the item (nobody: an import) with the item's dates.
+func (it ImportItem) By() assets.By {
+	return assets.By{Created: it.CreatedAt, Updated: it.UpdatedAt}
 }
 
 // ImportOutcome is what Import did with an item.

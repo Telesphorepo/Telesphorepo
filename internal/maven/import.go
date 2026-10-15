@@ -16,9 +16,10 @@ import (
 // ImportFormats accepts Nexus maven2 repos.
 func (h *Handler) ImportFormats() []string { return []string{"maven2"} }
 
-// Import stores the file at its source path under the PUT rules. A file that is present with
-// the same bytes is skipped; when the source gives a checksum, Import compares it with the
-// stored asset before it downloads anything.
+// Import stores the file at its source path under the PUT rules, with the source's dates. A
+// file that is present with the same bytes is skipped and gets the source's dates; when the
+// source gives a checksum, Import compares it with the stored asset before it downloads
+// anything.
 func (h *Handler) Import(ctx context.Context, repo *repos.Repo, item format.ImportItem) (format.ImportOutcome, error) {
 	if !validPath(item.Path) {
 		return "", errors.New("invalid path")
@@ -27,9 +28,17 @@ func (h *Handler) Import(ctx context.Context, repo *repos.Repo, item format.Impo
 	if err != nil && !errors.Is(err, assets.ErrNotFound) {
 		return "", err
 	}
+	skip := func(a *assets.Asset) (format.ImportOutcome, error) {
+		if a == nil {
+			if a, err = h.assets.Get(ctx, repo.ID, item.Path); err != nil {
+				return "", err
+			}
+		}
+		return format.ImportSkipped, h.assets.SetTimes(ctx, a, item.By())
+	}
 	if existing != nil && item.SHA256 != "" {
 		if existing.SHA256 == item.SHA256 {
-			return format.ImportSkipped, nil
+			return skip(existing)
 		}
 		if !mutable(item.Path) {
 			return "", errImmutable
@@ -41,14 +50,14 @@ func (h *Handler) Import(ctx context.Context, repo *repos.Repo, item format.Impo
 	}
 	defer sp.Close()
 	if existing != nil && existing.SHA256 == sp.SHA256 {
-		return format.ImportSkipped, nil
+		return skip(existing)
 	}
-	_, unchanged, err := h.put(ctx, repo, item.Path, sp, assets.By{})
+	_, unchanged, err := h.put(ctx, repo, item.Path, sp, item.By())
 	if err != nil {
 		return "", err
 	}
 	if unchanged {
-		return format.ImportSkipped, nil
+		return skip(nil)
 	}
 	return format.ImportImported, nil
 }

@@ -49,6 +49,26 @@ func Parse(armored, pass []byte) (*Signer, error) {
 	return nil, errors.New("signing key: no private key with a usable signing key (expected an armored PGP PRIVATE KEY block)")
 }
 
+// Encrypted reports whether the armored private key block needs a passphrase. A block that is
+// not a private key reports false.
+func Encrypted(armored []byte) bool {
+	ring, err := openpgp.ReadArmoredKeyRing(bytes.NewReader(armored))
+	if err != nil {
+		return false
+	}
+	for _, e := range ring {
+		if e.PrivateKey != nil && e.PrivateKey.Encrypted {
+			return true
+		}
+		for _, s := range e.Subkeys {
+			if s.PrivateKey != nil && s.PrivateKey.Encrypted {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func decrypt(e *openpgp.Entity, pass []byte) error {
 	unlock := func(k *packet.PrivateKey) error {
 		if k == nil || !k.Encrypted {

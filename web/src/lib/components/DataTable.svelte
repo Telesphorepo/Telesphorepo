@@ -31,7 +31,11 @@
   place of the header row, at the same height: "12 selected", the `bulk` actions, "Select all 50"
   and "Clear". Esc clears the pick when no dialog is open. `pickLabel` names a row for its
   checkbox ("Select oasis"). `picked` is not `selected`: `selected` is the row that the details
-  column shows. After an action, the page reloads the table and empties `picked`.
+  column shows. After an action, the page reloads the table and empties `picked`. A table
+  without `href` can pass `pickOnRow`: a click anywhere on a pickable row (outside its controls)
+  then toggles its checkbox, so the whole row is the hit target. `pickOff` keeps the checkboxes
+  in view but turns them off (the pick cannot change now). `selectAllLabel` replaces the text of
+  the "Select all 50" button ("Select all supported").
 
     let picked = $state(new Set<string>());
     <DataTable source={src} key={(r) => r.name} pickLabel={(r) => r.name} bind:picked ...>
@@ -81,6 +85,9 @@
     picked = $bindable(new Set<K>()),
     pickable,
     pickLabel,
+    pickOnRow = false,
+    pickOff = false,
+    selectAllLabel,
     bulk,
   }: {
     source: TableSource<T>;
@@ -103,6 +110,12 @@
     pickable?: (item: T) => boolean;
     /** The name of a row for its checkbox: "Select {name}". Default: the row's key. */
     pickLabel?: (item: T) => string;
+    /** A click on a pickable row toggles its checkbox (only for a table without `href`). */
+    pickOnRow?: boolean;
+    /** Show the checkboxes, but turned off. */
+    pickOff?: boolean;
+    /** The text of the "Select all" button of the selection bar. */
+    selectAllLabel?: string;
     /** The bulk actions in the selection bar. With it, every row gets a checkbox. */
     bulk?: Snippet;
   } = $props();
@@ -163,11 +176,22 @@
     clearPick();
   }
 
+  const controls = "a, button, input, select, textarea, label, [role=checkbox], [role=switch], [role=menuitem], [role=combobox], [role=radio]";
+  const rowPicks = $derived(picking && pickOnRow && !href && !pickOff);
+
+  function pickRow(e: MouseEvent, item: T) {
+    if (e.defaultPrevented || e.button !== 0 || !canPick(item)) return;
+    if ((e.target as HTMLElement | null)?.closest(controls)) return;
+    if (window.getSelection()?.toString()) return;
+    shift = e.shiftKey;
+    toggle(item, !picked.has(key(item)));
+  }
+
   function open(e: MouseEvent, item: T) {
     const to = href?.(item);
     if (!to || e.defaultPrevented || e.button !== 0) return;
     const t = e.target as HTMLElement | null;
-    if (t?.closest("a, button, input, select, textarea, label, [role=checkbox], [role=switch], [role=menuitem], [role=combobox]")) return;
+    if (t?.closest(controls)) return;
     if (window.getSelection()?.toString()) return;
     if (e.metaKey || e.ctrlKey) window.open(to, "_blank");
     else if (to.startsWith("#/")) go(to);
@@ -196,7 +220,7 @@
               <Checkbox
                 checked={allPicked}
                 indeterminate={barOn && !allPicked}
-                disabled={pickableRows.length === 0}
+                disabled={pickOff || pickableRows.length === 0}
                 aria-label={allLabel}
                 onCheckedChange={(v) => (v ? pickAll() : clearPick())}
               />
@@ -206,8 +230,8 @@
                 <span class="shrink-0 font-medium tabular-nums">{selectedText(picked.size)}</span>
                 {@render bulk?.()}
                 <span class="ml-auto flex shrink-0 items-center gap-1">
-                  {#if !allPicked}<Button variant="ghost" size="sm" onclick={pickAll}>Select all {formatCount(pickableRows.length)}</Button>{/if}
-                  <Button variant="ghost" size="sm" onclick={clearPick}>Clear</Button>
+                  {#if !allPicked && !pickOff}<Button variant="ghost" size="sm" onclick={pickAll}>{selectAllLabel ?? `Select all ${formatCount(pickableRows.length)}`}</Button>{/if}
+                  {#if !pickOff}<Button variant="ghost" size="sm" onclick={clearPick}>Clear</Button>{/if}
                 </span>
               </div>
             {/if}
@@ -243,15 +267,16 @@
           <Table.Row
             data-state={on ? "selected" : undefined}
             aria-selected={selected ? on : undefined}
-            class={cn(rowClass, href && "cursor-pointer")}
-            onclick={href ? (e: MouseEvent) => open(e, item) : undefined}
+            class={cn(rowClass, (href || (rowPicks && canPick(item))) && "cursor-pointer")}
+            onclick={href ? (e: MouseEvent) => open(e, item) : rowPicks ? (e: MouseEvent) => pickRow(e, item) : undefined}
           >
             {#if picking}
               <Table.Cell class="w-10 min-w-10 p-0">
                 {#if canPick(item)}
                   {@const k = key(item)}
-                  <label data-pick class="flex h-row w-10 cursor-pointer items-center justify-center select-none">
+                  <label data-pick class={cn("flex h-row w-10 items-center justify-center select-none", !pickOff && "cursor-pointer")}>
                     <Checkbox
+                      disabled={pickOff}
                       checked={picked.has(k)}
                       aria-label="Select {pickLabel ? pickLabel(item) : String(k)}"
                       onCheckedChange={(v) => toggle(item, v === true)}

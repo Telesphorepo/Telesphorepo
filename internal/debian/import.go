@@ -2,6 +2,8 @@ package debian
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -18,10 +20,11 @@ const importComponent = "main"
 func (h *Handler) ImportFormats() []string { return []string{"apt"} }
 
 // Import takes a pool/**/*.deb file through the upload pipeline into the distribution of the
-// repo config and component main. The package gets this server's pool path. A package that is
-// present with the same bytes is skipped; when the source gives a checksum, Import looks it up
-// before it downloads anything. Every other file (dists/ indexes, keys) is ignored: the
-// indexer builds and signs the indexes.
+// repo config and component main, with the source's dates. The package gets this server's
+// pool path. A package that is present with the same bytes is skipped and gets the source's
+// dates; when the source gives a checksum, Import looks it up before it downloads anything.
+// Every other file (dists/ indexes, keys) is ignored: the indexer builds and signs the indexes,
+// which keep the time they are built.
 func (h *Handler) Import(ctx context.Context, repo *repos.Repo, item format.ImportItem) (format.ImportOutcome, error) {
 	if !strings.HasPrefix(item.Path, "pool/") || !strings.HasSuffix(item.Path, ".deb") {
 		return format.ImportIgnored, nil
@@ -30,14 +33,21 @@ func (h *Handler) Import(ctx context.Context, repo *repos.Repo, item format.Impo
 	if err != nil {
 		return "", err
 	}
-	if item.SHA256 != "" {
-		present, err := h.q.HasPackageSHA256(ctx, dbq.HasPackageSHA256Params{RepoID: repo.ID,
-			Distribution: dist, Component: importComponent, Sha256: item.SHA256})
+	skip := func(pool string) (format.ImportOutcome, error) {
+		a, err := h.assets.Get(ctx, repo.ID, pool)
 		if err != nil {
 			return "", err
 		}
-		if present {
-			return format.ImportSkipped, nil
+		return format.ImportSkipped, h.assets.SetTimes(ctx, a, item.By())
+	}
+	if item.SHA256 != "" {
+		pool, err := h.q.GetPackageFileBySHA256(ctx, dbq.GetPackageFileBySHA256Params{RepoID: repo.ID,
+			Distribution: dist, Component: importComponent, Sha256: item.SHA256})
+		switch {
+		case err == nil:
+			return skip(pool)
+		case !errors.Is(err, sql.ErrNoRows):
+			return "", err
 		}
 	}
 	sp, err := spoolItem(ctx, h.assets, h.cfg().MaxUploadBytes, item)
@@ -45,12 +55,12 @@ func (h *Handler) Import(ctx context.Context, repo *repos.Repo, item format.Impo
 		return "", err
 	}
 	defer sp.Close()
-	_, created, err := h.ingest(ctx, repo, dist, importComponent, sp, assets.By{})
+	res, created, err := h.ingest(ctx, repo, dist, importComponent, sp, item.By())
 	if err != nil {
 		return "", err
 	}
 	if !created {
-		return format.ImportSkipped, nil
+		return skip(res.Filename)
 	}
 	return format.ImportImported, nil
 }

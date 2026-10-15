@@ -320,6 +320,29 @@ func (q *Queries) SetAssetChecked(ctx context.Context, arg SetAssetCheckedParams
 	return err
 }
 
+const setAssetTimes = `-- name: SetAssetTimes :exec
+UPDATE assets SET created_at = ?, updated_at = ? WHERE repo_id = ? AND path = ?
+`
+
+type SetAssetTimesParams struct {
+	CreatedAt int64
+	UpdatedAt int64
+	RepoID    int64
+	Path      string
+}
+
+// An import gives a file the dates of its source (a file that a sync skipped because its bytes
+// are here already).
+func (q *Queries) SetAssetTimes(ctx context.Context, arg SetAssetTimesParams) error {
+	_, err := q.db.ExecContext(ctx, setAssetTimes,
+		arg.CreatedAt,
+		arg.UpdatedAt,
+		arg.RepoID,
+		arg.Path,
+	)
+	return err
+}
+
 const upsertAsset = `-- name: UpsertAsset :one
 INSERT INTO assets (repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id,
   checked_at, remote_etag)

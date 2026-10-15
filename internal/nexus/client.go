@@ -15,10 +15,15 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/Telesphorepo/Telesphorepo/internal/signing"
 )
 
 // maxJSONBytes caps a Nexus JSON response.
 const maxJSONBytes = 64 << 20
+
+// maxProxyTTL caps a proxy time taken from Nexus (the repos service takes at most 30 days).
+const maxProxyTTL = 30 * 24 * time.Hour
 
 // listTimeout bounds one repository list or asset page request.
 const listTimeout = 2 * time.Minute
@@ -93,6 +98,40 @@ type Repository struct {
 	// Distribution is the "distribution" attribute of the repository's format settings, e.g.
 	// the apt distribution; "" when the format has none or the server did not report settings.
 	Distribution string
+	// Online is false when Nexus marks the repository offline: its files do not download.
+	Online bool
+	// RemoteURL is the remote of a proxy (proxy.remoteUrl); RemoteUsername is the username that
+	// Nexus sends to it (httpClient.authentication.username). Nexus never gives the password.
+	RemoteURL      string
+	RemoteUsername string
+	// MetadataTTL is the proxy's metadataMaxAge and NotFoundTTL its negative cache time to
+	// live (0 when the negative cache is off); -1 when Nexus does not report them.
+	MetadataTTL time.Duration
+	NotFoundTTL time.Duration
+	// Members are the member names of a group in Nexus order (group.memberNames). MembersKnown
+	// is false when Nexus did not report them.
+	Members      []string
+	MembersKnown bool
+	// keypair is the armored apt signing key pair (aptSigning.keypair), "" when Nexus does not
+	// give it; Nexus never gives its passphrase. It is never logged or returned by the API.
+	keypair string
+	// KeyEncrypted is true when the key pair needs a passphrase.
+	KeyEncrypted bool
+}
+
+// HasKey reports whether Nexus gave the apt signing key pair.
+func (r Repository) HasKey() bool { return r.keypair != "" }
+
+// nexusMinutes converts a Nexus age in minutes (-1: forever) to a duration, capped at max.
+func nexusMinutes(raw json.RawMessage, max time.Duration) time.Duration {
+	var n int64
+	if json.Unmarshal(raw, &n) != nil {
+		return -1
+	}
+	if n < 0 || time.Duration(n)*time.Minute > max {
+		return max
+	}
+	return time.Duration(n) * time.Minute
 }
 
 // Asset is one file of a Nexus repository.
@@ -101,6 +140,10 @@ type Asset struct {
 	DownloadURL string
 	Size        int64  // -1 when Nexus does not report it
 	SHA256      string // lowercase hex; "" when Nexus does not report it
+	// CreatedAt and UpdatedAt are the blob dates (blobCreated, and blobUpdated or else
+	// lastModified); zero when Nexus does not report them.
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // AssetPage is one page of a repository's assets. Next is the continuation token of the next
@@ -189,11 +232,32 @@ func (c *Client) Repositories(ctx context.Context) ([]Repository, error) {
 	}
 	out := make([]Repository, 0, len(settings))
 	for _, s := range settings {
-		r := Repository{Name: str(s["name"]), Format: str(s["format"]), Type: str(s["type"])}
+		r := Repository{Name: str(s["name"]), Format: str(s["format"]), Type: str(s["type"]), Online: true}
 		if r.Name == "" {
 			continue
 		}
 		r.Distribution = distribution(s)
+		if v, ok := s["online"]; ok && string(v) == "false" {
+			r.Online = false
+		}
+		// The plain list keeps the proxy remote under attributes.
+		attrs := obj(s["attributes"])
+		r.RemoteURL = str(obj(s["proxy"])["remoteUrl"])
+		if r.RemoteURL == "" {
+			r.RemoteURL = str(obj(attrs["proxy"])["remoteUrl"])
+		}
+		r.RemoteUsername = str(obj(obj(s["httpClient"])["authentication"])["username"])
+		r.MetadataTTL = nexusMinutes(obj(s["proxy"])["metadataMaxAge"], maxProxyTTL)
+		neg := obj(s["negativeCache"])
+		r.NotFoundTTL = nexusMinutes(neg["timeToLive"], maxProxyTTL)
+		if string(neg["enabled"]) == "false" {
+			r.NotFoundTTL = 0
+		}
+		if g, ok := obj(s["group"])["memberNames"]; ok {
+			r.MembersKnown = json.Unmarshal(g, &r.Members) == nil
+		}
+		r.keypair = strings.TrimSpace(str(obj(s["aptSigning"])["keypair"]))
+		r.KeyEncrypted = r.keypair != "" && signing.Encrypted([]byte(r.keypair))
 		out = append(out, r)
 	}
 	return out, nil
@@ -205,6 +269,51 @@ func str(raw json.RawMessage) string {
 		return ""
 	}
 	return s
+}
+
+// obj decodes a JSON object; nil when raw is not one.
+func obj(raw json.RawMessage) map[string]json.RawMessage {
+	var m map[string]json.RawMessage
+	if len(raw) == 0 || json.Unmarshal(raw, &m) != nil {
+		return nil
+	}
+	return m
+}
+
+// probeTimeout bounds one anonymous check of a repository.
+const probeTimeout = 15 * time.Second
+
+// Public reports whether anyone can download the files of repo in Nexus. It takes the first
+// asset of the repo (with the source's account) and asks for it without credentials: 200 means
+// public, 401 or 403 private. A repo with no asset asks for a path that does not exist: Nexus
+// answers 404 to a reader who may read the repo and 401 to one who may not.
+func (c *Client) Public(ctx context.Context, repo string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	page, err := c.Assets(ctx, repo, "")
+	if err != nil {
+		return false, err
+	}
+	target, ok := c.base.String()+"/repository/"+url.PathEscape(repo)+"/.telesphorepo-public-check", http.StatusNotFound
+	if len(page.Items) > 0 {
+		target, ok = c.downloadURL(repo, page.Items[0]), http.StatusOK
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, target, nil)
+	if err != nil {
+		return false, &SourceError{Msg: "invalid Nexus URL"}
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return false, &SourceError{Msg: "cannot reach Nexus"}
+	}
+	resp.Body.Close()
+	switch resp.StatusCode {
+	case ok:
+		return true, nil
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return false, nil
+	}
+	return false, statusError("anonymous HEAD", resp.StatusCode)
 }
 
 // distribution returns the "distribution" string of the first nested settings object that has
@@ -230,10 +339,13 @@ func (c *Client) Assets(ctx context.Context, repo, continuation string) (AssetPa
 	}
 	var body struct {
 		Items []struct {
-			Path        string            `json:"path"`
-			DownloadURL string            `json:"downloadUrl"`
-			FileSize    *int64            `json:"fileSize"`
-			Checksum    map[string]string `json:"checksum"`
+			Path         string            `json:"path"`
+			DownloadURL  string            `json:"downloadUrl"`
+			FileSize     *int64            `json:"fileSize"`
+			Checksum     map[string]string `json:"checksum"`
+			BlobCreated  string            `json:"blobCreated"`
+			BlobUpdated  string            `json:"blobUpdated"`
+			LastModified string            `json:"lastModified"`
 		} `json:"items"`
 		ContinuationToken *string `json:"continuationToken"`
 	}
@@ -247,6 +359,11 @@ func (c *Client) Assets(ctx context.Context, repo, continuation string) (AssetPa
 			DownloadURL: it.DownloadURL,
 			Size:        -1,
 			SHA256:      strings.ToLower(it.Checksum["sha256"]),
+			CreatedAt:   nexusTime(it.BlobCreated),
+			UpdatedAt:   nexusTime(it.BlobUpdated),
+		}
+		if a.UpdatedAt.IsZero() {
+			a.UpdatedAt = nexusTime(it.LastModified)
 		}
 		if it.FileSize != nil {
 			a.Size = *it.FileSize
@@ -257,6 +374,16 @@ func (c *Client) Assets(ctx context.Context, repo, continuation string) (AssetPa
 		page.Next = *body.ContinuationToken
 	}
 	return page, nil
+}
+
+// nexusTime parses a Nexus date such as "2023-03-31T19:28:22.647-04:00"; zero when it is
+// missing or not a date.
+func nexusTime(s string) time.Time {
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 // downloadURL returns the URL to fetch asset a of repo from. It uses the asset's downloadUrl

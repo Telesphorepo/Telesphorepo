@@ -6,11 +6,11 @@
 SELECT sha256 FROM deb_packages
 WHERE repo_id = ? AND distribution = ? AND component = ? AND architecture = ? AND package = ? AND version = ?;
 
--- Import duplicate check: a package with the same bytes in the (dist, component), found
--- through deb_packages_sha256 before the file is downloaded.
--- name: HasPackageSHA256 :one
-SELECT EXISTS (SELECT 1 FROM deb_packages
-  WHERE repo_id = ? AND distribution = ? AND component = ? AND sha256 = ?);
+-- Import duplicate check: the pool file of a package with the same bytes in the (dist,
+-- component), found through deb_packages_sha256 before the file is downloaded.
+-- name: GetPackageFileBySHA256 :one
+SELECT filename FROM deb_packages
+WHERE repo_id = ? AND distribution = ? AND component = ? AND sha256 = ? LIMIT 1;
 
 -- name: InsertPackage :exec
 INSERT INTO deb_packages (repo_id, distribution, component, architecture, package, version, asset_id,

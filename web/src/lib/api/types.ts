@@ -393,14 +393,25 @@ export type NexusSync = {
   id: number;
   source_id: number;
   state: "running" | "done" | "failed" | "cancelled";
-  cutover: boolean;
+  trigger: "save" | "manual" | "schedule" | "cutover";
+  /** The user who started it; "" for the scheduler or a deleted user. */
+  started_by: string;
   started_at: string;
   finished_at: string | null;
   error: string;
+  checked: number;
   imported: number;
   skipped: number;
   ignored: number;
   failed: number;
+  /** Bytes copied. */
+  bytes: number;
+  /** Hosted repositories that the sync copies. */
+  repo_count: number;
+  /** Of those, the ended ones. */
+  repos_done: number;
+  /** The repository that copies now; "" when none. */
+  current_repo: string;
   repos?: NexusSyncRepo[];
 };
 export type NexusSyncRepo = {
@@ -409,11 +420,20 @@ export type NexusSyncRepo = {
   target: string;
   state: "pending" | "running" | "done" | "failed" | "cancelled";
   error: string;
+  /** Files read from Nexus: imported + skipped + ignored + failed. */
+  checked: number;
   imported: number;
   skipped: number;
   ignored: number;
   failed: number;
+  /** Bytes copied. */
+  bytes: number;
+  /** When the runner finished the last page. */
+  active_at: string | null;
+  /** `checked` of the newest earlier finished walk of this repository; 0 when none. */
+  previous_checked: number;
 };
+export type NexusStatus = "no_repos" | "syncing" | "up_to_date" | "failed" | "cut_over";
 export type NexusSource = {
   id: number;
   name: string;
@@ -422,29 +442,79 @@ export type NexusSource = {
   created_at: string;
   /** Error of the last ended sync; "" when it succeeded. */
   last_error: string;
+  /** The newest sync (running or ended), without repos. */
   last_sync: NexusSync | null;
   cutover_sync_id: number;
   cutover_failed: number;
+  status: NexusStatus;
+  /** null: none due (no repositories, switched over, or a sync runs now). */
+  next_sync_at: string | null;
+  /** 0 when no sync runs. */
+  running_sync_id: number;
+  /** Mapped repositories (hosted, proxy and group). */
+  repo_count: number;
+  /** Seconds: the live nexus.sync_interval setting. */
+  sync_interval: number;
 };
 export type NexusSourceRepo = {
   name: string;
+  /** Nexus format id: "maven2", "apt", "raw", "npm", ... */
   format: string;
-  /** "" for a mapped repo that Nexus did not list. */
-  type: string;
+  /** "" for a mapped repo that Nexus no longer lists. */
+  type: "hosted" | "proxy" | "group" | "";
   supported: boolean;
+  /** Why it is not supported; "" when supported. */
   reason: string;
+  offline: boolean;
+  /** What Nexus does: anyone can download it. */
+  public: boolean;
+  /** The format here: "maven", "debian", "raw"; "" when none. */
   target_format: string;
+  /** The name of the repository here; "" when not mapped. */
   target: string;
+  /** Proxy only: the remote of the Nexus proxy. */
+  remote_url: string;
+  /** Proxy only: the remote username that Nexus gives (never the password). */
+  remote_username: string;
+  /** Group only: the Nexus member names in Nexus order ([] when unknown). */
+  members: string[];
+  /** Group only: false when the Nexus account cannot read the members. */
+  members_known: boolean;
+  /** Group only, mapped: the members of the group here, as Nexus names, in order. */
+  target_members: string[];
+  /** Apt only: Nexus gives the signing key pair of this repository over its API. */
+  nexus_key: boolean;
+  /** Apt only: the Nexus key has a passphrase, which Nexus does not give. */
+  nexus_key_encrypted: boolean;
 };
 export type NexusSourceDetail = NexusSource & {
+  /** Supported first, then by name. */
   repos: NexusSourceRepo[];
   /** Why the list holds only the mapped repos; "" when Nexus listed its repos. */
   nexus_error: string;
 };
 export type NewNexusSource = { name: string; base_url: string; username: string; password: string };
 export type NexusSourcePatch = { base_url?: string; username?: string; password?: string };
-export type NexusMapping = { source_repo: string; target: string; create: boolean };
+export type NexusMapping = {
+  source_repo: string;
+  /** The name here. */
+  target: string;
+  /** Create the target when it does not exist. */
+  create: boolean;
+  /** Used only when the save creates the target. */
+  anonymous_read: boolean;
+  /** Apt hosted only, when the save creates the target. Default "new". */
+  signing_key?: "new" | "nexus";
+  /** The passphrase of the Nexus key; "" when it has none. */
+  signing_passphrase?: string;
+  /** Proxy only, when the save creates the target. */
+  remote_username?: string;
+  remote_password?: string;
+  /** Group only, when members_known is false: the Nexus member names picked by hand. */
+  members?: string[];
+};
 export type NexusFailure = { source_repo: string; path: string; reason: string };
+export type NexusLogLine = { id: number; at: string; source_repo: string; level: "info" | "warn" | "error"; message: string };
 
 // --- publishing ---
 

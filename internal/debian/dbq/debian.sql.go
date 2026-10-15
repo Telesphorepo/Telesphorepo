@@ -143,6 +143,32 @@ func (q *Queries) GetIndexFileSHA256(ctx context.Context, arg GetIndexFileSHA256
 	return sha256, err
 }
 
+const getPackageFileBySHA256 = `-- name: GetPackageFileBySHA256 :one
+SELECT filename FROM deb_packages
+WHERE repo_id = ? AND distribution = ? AND component = ? AND sha256 = ? LIMIT 1
+`
+
+type GetPackageFileBySHA256Params struct {
+	RepoID       int64
+	Distribution string
+	Component    string
+	Sha256       string
+}
+
+// Import duplicate check: the pool file of a package with the same bytes in the (dist,
+// component), found through deb_packages_sha256 before the file is downloaded.
+func (q *Queries) GetPackageFileBySHA256(ctx context.Context, arg GetPackageFileBySHA256Params) (string, error) {
+	row := q.db.QueryRowContext(ctx, getPackageFileBySHA256,
+		arg.RepoID,
+		arg.Distribution,
+		arg.Component,
+		arg.Sha256,
+	)
+	var filename string
+	err := row.Scan(&filename)
+	return filename, err
+}
+
 const getPackageSHA256 = `-- name: GetPackageSHA256 :one
 
 SELECT sha256 FROM deb_packages
@@ -186,32 +212,6 @@ type HasDirtyParams struct {
 
 func (q *Queries) HasDirty(ctx context.Context, arg HasDirtyParams) (bool, error) {
 	row := q.db.QueryRowContext(ctx, hasDirty, arg.RepoID, arg.Distribution)
-	var exists bool
-	err := row.Scan(&exists)
-	return exists, err
-}
-
-const hasPackageSHA256 = `-- name: HasPackageSHA256 :one
-SELECT EXISTS (SELECT 1 FROM deb_packages
-  WHERE repo_id = ? AND distribution = ? AND component = ? AND sha256 = ?)
-`
-
-type HasPackageSHA256Params struct {
-	RepoID       int64
-	Distribution string
-	Component    string
-	Sha256       string
-}
-
-// Import duplicate check: a package with the same bytes in the (dist, component), found
-// through deb_packages_sha256 before the file is downloaded.
-func (q *Queries) HasPackageSHA256(ctx context.Context, arg HasPackageSHA256Params) (bool, error) {
-	row := q.db.QueryRowContext(ctx, hasPackageSHA256,
-		arg.RepoID,
-		arg.Distribution,
-		arg.Component,
-		arg.Sha256,
-	)
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err

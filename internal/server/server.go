@@ -215,7 +215,7 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 	fs := files.New(d, ss, rs, as, log.With("component", "files"))
 	px := proxy.New(d, rs, ss, set.Config, log.With("component", "proxy"))
 	mv := move.New(d, set, live, ss, rs, log.With("component", "move"))
-	nx := nexus.New(d, set, rs, log.With("component", "nexus"))
+	nx := nexus.New(d, set, rs, keys, log.With("component", "nexus"))
 	// The move copier, the Nexus sync runners and scheduler, and the publish cleanup job live until
 	// RunWith returns. They stop before the database closes (this defer runs before d.Close); a
 	// move or sync stays running in the database.

@@ -139,7 +139,8 @@ func (h *Handler) ingest(ctx context.Context, repo *repos.Repo, dist, comp strin
 
 	err = h.db.Tx(ctx, func(tx *sql.Tx) error {
 		a := &assets.Asset{RepoID: repo.ID, Path: pool, Size: sp.Size, SHA256: sp.SHA256,
-			ContentType: debContentType, Kind: assets.KindArtifact, UploadedBy: by.User, PublishSessionID: by.Session}
+			ContentType: debContentType, Kind: assets.KindArtifact, UploadedBy: by.User, PublishSessionID: by.Session,
+			CreatedAt: by.Created, UpdatedAt: by.Updated}
 		if _, err := assets.UpsertTx(ctx, tx, a); err != nil {
 			return err
 		}

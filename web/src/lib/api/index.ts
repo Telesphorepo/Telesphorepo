@@ -229,8 +229,9 @@ export const api = {
     update: (id: number, patch: T.NexusSourcePatch) =>
       request<T.NexusSource>("PATCH", `/api/nexus/sources/${id}`, { body: patch }),
     delete: (id: number) => request("DELETE", `/api/nexus/sources/${id}`),
-    setRepos: (id: number, mappings: T.NexusMapping[]) =>
-      request<T.NexusSourceDetail>("PUT", `/api/nexus/sources/${id}/repos`, { body: mappings }),
+    /** Saves the repositories to copy and starts a sync of them (`running_sync_id`). 409 while a sync runs. */
+    setRepos: (id: number, repos: T.NexusMapping[]) =>
+      request<T.NexusSourceDetail>("PUT", `/api/nexus/sources/${id}/repos`, { body: { repos } }),
     sync: (id: number) => request<T.NexusSync>("POST", `/api/nexus/sources/${id}/sync`),
     cutOver: (id: number) => request<T.NexusSync>("POST", `/api/nexus/sources/${id}/cutover`),
     syncs: (id: number, p?: T.PageParams) =>
@@ -238,6 +239,9 @@ export const api = {
     getSync: (id: number) => request<T.NexusSync>("GET", `/api/nexus/syncs/${id}`),
     syncFailures: (id: number, p?: T.PageParams) =>
       request<T.Page<T.NexusFailure>>("GET", `/api/nexus/syncs/${id}/failures`, { query: page(p) }),
+    /** The log of a sync, oldest first; `repo` keeps the lines of one Nexus repository. */
+    syncLog: (id: number, p?: T.PageParams, repo?: string) =>
+      request<T.Page<T.NexusLogLine>>("GET", `/api/nexus/syncs/${id}/log`, { query: { ...page(p), repo } }),
     cancelSync: (id: number) => request<T.NexusSync>("DELETE", `/api/nexus/syncs/${id}`),
   },
 

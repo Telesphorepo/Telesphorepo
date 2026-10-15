@@ -75,10 +75,11 @@ close and every 6 hours.
 | `storage_moves` | PK `id`, UNIQUE partial `storage_moves_copying (state) WHERE state = 'copying'`, idx `started_by` | `target` is the sealed JSON of the target storage settings (AAD `storage_moves:<id>`); `state` `copying`/`done`/`failed`/`cancelled`; `cursor` (last asset id done), `total`, `copied`, `skipped`, `failed`, `error` |
 | `storage_move_failures` | PK `(move_id, asset_id)` (WITHOUT ROWID) | `key` and `reason` of each blob the copier could not copy |
 | `nexus_sources` | PK `id`, UNIQUE `name`, idx `created_by`, partial idx `nexus_sources_due (last_sync_at) WHERE state = 'mirroring'` | `base_url`; `credentials` is the sealed JSON `{username, password}` (AAD `nexus_sources:<id>`), emptied by cut-over; `state` `mirroring`/`cut_over`; `last_sync_at` (unix time when the last sync ended, 0 for never); `last_error`; `cutover_sync_id` and `cutover_failed` (the cut-over sync and its failed file count, 0 before cut-over) |
-| `nexus_source_repos` | PK `(source_id, source_repo)` (WITHOUT ROWID), idx `target_repo_id` | The mapping: `source_format` (Nexus format id) and the target repo of each Nexus repo. A target mirrors at most one source |
-| `nexus_syncs` | PK `id`, UNIQUE partial `nexus_syncs_running (source_id) WHERE state = 'running'`, idx `source_id`, idx `started_by` | `state` `running`/`done`/`failed`/`cancelled`; `cutover` (0/1); `started_by` is NULL for the scheduler; `started_at`, `finished_at`, `error` |
-| `nexus_sync_repos` | PK `(sync_id, source_repo)` (WITHOUT ROWID), idx `target_repo_id` | Copy of the mapping at sync start, with `continuation` (token of the next Nexus page), `imported`/`skipped`/`ignored`/`failed` and `state` `pending`/`running`/`done`/`failed`/`cancelled` |
+| `nexus_source_repos` | PK `(source_id, source_repo)` (WITHOUT ROWID), idx `target_repo_id` | The mapping: `source_format` (Nexus format id), `kind` (`hosted`/`proxy`/`group`, the Nexus repo type) and the target repo of each Nexus repo. A target mirrors at most one source |
+| `nexus_syncs` | PK `id`, UNIQUE partial `nexus_syncs_running (source_id) WHERE state = 'running'`, idx `source_id`, idx `started_by` | `state` `running`/`done`/`failed`/`cancelled`; `trigger` `save`/`manual`/`schedule`/`cutover`; `started_by` is NULL for the scheduler; `started_at`, `finished_at`, `error` |
+| `nexus_sync_repos` | PK `(sync_id, source_repo)` (WITHOUT ROWID), idx `target_repo_id` | Copy of the hosted part of the mapping at sync start, with `continuation` (token of the next Nexus page), `checked` (files read from Nexus), `imported`/`skipped`/`ignored`/`failed`, `bytes` (bytes imported), `active_at` (when the runner saved the last page) and `state` `pending`/`running`/`done`/`failed`/`cancelled` |
 | `nexus_sync_failures` | PK `id`, UNIQUE `(sync_id, source_repo, path)`, idx `sync_id` | One row per source file that a sync did not import |
+| `nexus_sync_log` | PK `id`, idx `(sync_id, id)` | The log of a sync for the admin: `at`, `source_repo` (`''` for a line about the whole sync), `level` `info`/`warn`/`error`, `message` |
 | `user_totp` | PK `id`, idx `user_id` | `secret` is sealed (AAD `user_totp:<id>`); `last_step` is the last accepted 30 s step of this factor (0 for none) |
 | `user_passkeys` | PK `id`, UNIQUE `credential_id`, idx `user_id` | `public_key`, `sign_count`, `credential` (JSON of the `webauthn.Credential`: flags, transports, AAGUID), `last_used_at` |
 | `user_recovery_codes` | PK `(user_id, code_hash)` (WITHOUT ROWID) | `code_hash` is argon2id PHC; `used_at` is set when the code is used |
@@ -323,12 +324,13 @@ one transaction (see the route).
 | `GET /api/nexus/sources?after=<name>&limit=` | admin | `{items: [Source], next}` in name order |
 | `GET /api/nexus/sources/{id}` | admin | `SourceDetail`. After cut-over, or when Nexus is unreachable, it lists only the mapped repos and `nexus_error` says why |
 | `PATCH /api/nexus/sources/{id}` | admin | `{base_url?, username?, password?}`. Checks the connection. Returns the `Source`. 409 after cut-over |
-| `PUT /api/nexus/sources/{id}/repos` | admin | `[{source_repo, target, create}]` replaces the whole mapping. Returns the `SourceDetail`. 400 for an invalid mapping, 409 while a sync runs, after cut-over, or when a target already mirrors another source |
-| `POST /api/nexus/sources/{id}/sync` | admin | 202 `Sync` with `repos`. 400 without mapped repos, 409 while a sync runs or after cut-over |
-| `POST /api/nexus/sources/{id}/cutover` | admin | 202 `Sync` with `cutover: true`. 409 while a sync runs or after cut-over |
+| `PUT /api/nexus/sources/{id}/repos` | admin | `{repos: [Mapping]}` replaces the whole mapping and, when it holds a repo, starts a sync (`trigger: save`). Returns the `SourceDetail` with `running_sync_id`. 400 for an invalid mapping, 409 while a sync runs, after cut-over, or when a target already mirrors another source |
+| `POST /api/nexus/sources/{id}/sync` | admin | 202 `Sync` with `repos` (`trigger: manual`). 400 without mapped repos, 409 while a sync runs or after cut-over |
+| `POST /api/nexus/sources/{id}/cutover` | admin | 202 `Sync` with `trigger: cutover`. 409 while a sync runs or after cut-over |
 | `GET /api/nexus/sources/{id}/syncs?after=<sync id>&limit=` | admin | `{items: [Sync without repos], next}`, newest first |
 | `GET /api/nexus/syncs/{id}` | admin | `Sync` with `repos` |
 | `GET /api/nexus/syncs/{id}/failures?after=&limit=` | admin | `{items: [Failure], next}` in failure order |
+| `GET /api/nexus/syncs/{id}/log?after=<line id>&limit=&repo=` | admin | `{items: [LogLine], next}`, oldest first. `repo` keeps the lines of one Nexus repo |
 | `DELETE /api/nexus/syncs/{id}` | admin | Cancels the sync and returns it (200); 409 when it has ended |
 | `DELETE /api/nexus/sources/{id}` | admin | 204. 409 while a sync runs or while the source mirrors mapped repos (allowed after cut-over, or without a mapping) |
 | `POST /api/settings/storage/test` | admin | Same body as the PATCH, merged over the current values and not saved. Returns `{ok:true}`, or 400 `{ok:false, error}` |
@@ -602,21 +604,40 @@ Shapes in the routes above:
 
 ```
 Source       = {id, name, base_url, state: "mirroring"|"cut_over", created_at, last_error, last_sync: Sync|null,
-                cutover_sync_id, cutover_failed}   (both 0 before cut-over)
+                cutover_sync_id, cutover_failed,   (both 0 before cut-over)
+                status: "no_repos"|"syncing"|"up_to_date"|"failed"|"cut_over",
+                next_sync_at|null, running_sync_id (0: none), repo_count, sync_interval (seconds)}
 SourceDetail = Source + {repos: [SourceRepo], nexus_error}
-SourceRepo   = {name, format, type, supported, reason, target_format, target}
-Sync         = {id, source_id, state: "running"|"done"|"failed"|"cancelled", cutover, started_at,
-                finished_at|null, error, imported, skipped, ignored, failed, repos?: [SyncRepo]}
+SourceRepo   = {name, format, type, supported, reason, offline, public, target_format, target,
+                remote_url, remote_username,                 (a proxy)
+                members, members_known, target_members,      (a group)
+                nexus_key, nexus_key_encrypted}              (an apt hosted repo)
+Mapping      = {source_repo, target, create, anonymous_read,
+                signing_key?: "new"|"nexus", signing_passphrase?,   (a new apt hosted target)
+                remote_username?, remote_password?,                 (a new proxy target)
+                members?: [Nexus repo names]}                       (a group whose members Nexus did not give)
+Sync         = {id, source_id, state: "running"|"done"|"failed"|"cancelled",
+                trigger: "save"|"manual"|"schedule"|"cutover", started_by (user name, "" for the scheduler),
+                started_at, finished_at|null, error, checked, imported, skipped, ignored, failed, bytes,
+                repo_count, repos_done, current_repo, repos?: [SyncRepo]}
 SyncRepo     = {source_repo, source_format, target, state: "pending"|"running"|"done"|"failed"|"cancelled",
-                error, imported, skipped, ignored, failed}
+                error, checked, imported, skipped, ignored, failed, bytes, active_at|null, previous_checked}
 Failure      = {source_repo, path, reason}
+LogLine      = {id, at, source_repo, level: "info"|"warn"|"error", message}
 ```
 
 `type` is `""` for a mapped repo that Nexus did not list. `target` is `""` for a repo that is not
-mapped. The `Sync` counters are the sums over its repos. Errors are `{"error"}` with 400 for invalid
-input or refused credentials, 404, 409 (exists, running, not running, cut over, still mapped) and
-502 when Nexus is unreachable.
+mapped. The `Sync` counters are the sums over its repos; `checked` is imported + skipped +
+ignored + failed. `previous_checked` is the `checked` of the newest earlier walk of the same repo
+that reached the end (0 when there is none); the UI divides by it to estimate the progress,
+because Nexus gives no total count. Errors are `{"error"}` with 400 for invalid input or refused
+credentials, 404, 409 (exists, running, not running, cut over, still mapped) and 502 when Nexus
+is unreachable.
 
+- **Status.** The server derives `status`: `cut_over` after cut-over, `syncing` while a sync
+  runs, `no_repos` without a mapping, `failed` when the last sync failed (`last_error`), else
+  `up_to_date`. `next_sync_at` is `last_sync_at` plus `nexus.sync_interval` (now for a source
+  that never synced); it is null without a mapping, after cut-over and while a sync runs.
 - **Plugins.** A format that implements `format.Importer` lists the Nexus format ids it takes
   (`ImportFormats`) and imports one file at a time (`Import`). The outcome is `imported`,
   `skipped` (already present with the same bytes) or `ignored` (not a file of this format).
@@ -628,53 +649,112 @@ input or refused credentials, 404, 409 (exists, running, not running, cut over, 
     each package.
   - A plugin compares `SHA256` from Nexus with what it holds before it downloads. Imported files
     have no uploader. The importers write directly and do not pass the repo lock.
+- **File dates.** `format.ImportItem` carries the Nexus blob dates of each asset: `CreatedAt`
+  from `blobCreated`, `UpdatedAt` from `blobUpdated` (`lastModified` when it is missing). The
+  plugin stores the file with them (`assets.By.Created`/`Updated`); an insert writes
+  `created_at` and `updated_at`, an update writes `updated_at`. A skipped file whose dates differ
+  gets the Nexus dates (`assets.Service.SetTimes`), so a later sync corrects files that an older
+  sync stamped with the import time. Files a plugin generates (Debian indexes) keep the time they
+  are written. `lastDownloaded` and `uploader` are not kept.
 - **Repo list.** The client reads `/service/rest/v1/repositorySettings`, or
-  `/service/rest/v1/repositories` when that is refused. Only hosted repos that a plugin takes are
-  `supported`.
+  `/service/rest/v1/repositories` when that is refused (then group members and the apt key pair
+  are unknown). A repo is `supported` when a plugin takes its format and this server has its
+  kind: hosted for every plugin, proxy for a `format.Proxied` plugin, group for a
+  `format.Grouper` plugin. A repo that Nexus marks `"online": false` is not supported, with the
+  reason "Offline in Nexus. Bring it online in Nexus to copy it." A sync fails a mapped repo that
+  went offline with the same words.
+- **What Nexus gives** (checked against `sonatype/nexus3:3.96.4` with an admin account).
+  `repositorySettings` returns every repo with its settings in one call, so the server makes one
+  call and no call per repo.
+  - apt hosted: `aptSigning.keypair` is the armored private key. Nexus does not give its
+    passphrase. `nexus_key_encrypted` says whether the key needs one.
+  - group: `group.memberNames` in Nexus order.
+  - proxy: `proxy.remoteUrl`, `proxy.metadataMaxAge` and `negativeCache.timeToLive` (minutes,
+    -1 for forever) and `httpClient.authentication.username`. Nexus does not give the password.
+  - asset list: `blobCreated`, `blobUpdated`, `lastModified` per asset.
+  - An offline repo still lists its assets, but each download answers 503.
+- **Who can download.** For each supported repo, the source detail asks Nexus without
+  credentials: it takes the first asset of the repo (with the source's account) and sends a
+  `HEAD` of its download URL; 200 is `public: true`, 401 or 403 `false`. A repo with no asset
+  sends a `HEAD` of a path that does not exist: Nexus answers 404 to an anonymous reader that may
+  read the repo and 401 to one that may not. 8 checks run at a time, and a result is kept in
+  memory for 5 minutes. A failed check counts as private.
 - **Source.** Create and PATCH check the connection first. The credentials are stored encrypted in
   the source row and are never returned or logged. Error messages name the request and the HTTP
-  status only. A new source has `last_sync_at` set to its creation time.
+  status only. A new source has `last_sync_at` 0 and no mapping, so the scheduler skips it.
 - **Mapping.** `PUT .../repos` replaces the whole mapping. Every entry is checked first: the
-  Nexus repo exists, is hosted and is listed once, and the target accepts the format or is created
-  (`create: true`) by the first plugin that takes it. A target mirrors at most one source. A
-  created target gets the plugin's default config plus the Nexus repo's `distribution` (apt); an
-  existing Debian target without `distribution` gets the Nexus repo's. Each mapped target gets
-  `locked_by` = `mirrors Nexus source <name>; cut over first`. A target that leaves the mapping is
-  unlocked. Targets that the request creates stay when its transaction fails.
-- **Sync.** `POST .../sync` and the scheduler start a sync. One sync runs per source (unique
-  partial index). The sync copies the mapping into `nexus_sync_repos`. For each repo the runner
-  pages `GET /service/rest/v1/assets?repository=X` from the saved continuation token and offers
-  each asset to the plugin. A failed page is retried 3 times (2 s, 4 s, 8 s), except on 401/403.
-  Downloads use the asset's `downloadUrl` only when it is on the base URL's host, else
-  `{base}/repository/{repo}/{path}`. One transaction per page saves the failures, counters and
-  next token. A file that is already present with the same bytes is skipped, so a later sync copies
-  only new and changed files.
+  Nexus repo exists, is supported and is listed once, and the target is of the same kind and
+  accepts the format, or is created (`create: true`) by the first plugin that takes it. A target
+  mirrors at most one source. `anonymous_read` applies to a target that the save creates; an
+  existing target keeps its setting. A created target:
+  - hosted: the plugin's default config plus the Nexus repo's `distribution` (apt). With
+    `signing_key: "nexus"`, the server opens the Nexus key pair with `signing_passphrase`, stores
+    it as the signing key `nexus-<target>` (sealed like any signing key; a key of that name with
+    the same fingerprint is used again) and names it in the config. Without the key pair in
+    Nexus, the save answers 400 and the admin imports the key in Signing keys.
+  - proxy: the Nexus remote and times, and the credentials `remote_username` and
+    `remote_password` (sealed) when the mapping gives them.
+  - group: the targets of its picked members in Nexus order (`members` when Nexus did not give
+    them). A group needs one picked member. A save again replaces the members of an existing
+    group.
+
+  An existing Debian target without `distribution` gets the Nexus repo's. Each hosted target
+  gets `locked_by` = `mirrors Nexus source <name>; cut over first`. A hosted target that leaves
+  the mapping is unlocked and keeps its files. Targets that the request creates stay when its
+  transaction fails. After the mapping, the save starts a sync with `trigger: save`.
+- **Sync.** A save, `POST .../sync` (`manual`), the scheduler (`schedule`) and the cut-over
+  (`cutover`) start a sync. One sync runs per source (unique partial index). The sync copies the
+  hosted part of the mapping into `nexus_sync_repos`; proxies and groups have no files to copy.
+  At the start the runner lists the Nexus repos once and fails each mapped repo that is offline.
+  For each other repo it pages `GET /service/rest/v1/assets?repository=X` from the saved
+  continuation token and offers each asset to the plugin. A failed page is retried 3 times (2 s,
+  4 s, 8 s), except on 401/403. Downloads use the asset's `downloadUrl` only when it is on the
+  base URL's host, else `{base}/repository/{repo}/{path}`. One transaction per page saves the
+  failures, the counters (`checked`, `bytes` counts the bytes read for imported files),
+  `active_at`, the next token and the page's log line. A file that is already present with the
+  same bytes is skipped, so a later sync copies only new and changed files.
+- **Log.** The runner writes a line for: the start ("Started after the repositories were
+  saved.", "Started by sam.", "Scheduled sync started.", "Final sync before the switch-over
+  started by sam."), the proxies it skips, each repo's start or resume, each page that copied a
+  file ("oasis-releases: checked 100, copied 12 (3.4 MiB)."), each repo's end ("...: done.
+  Copied ..., skipped ..., failed ..." or "...: no new files. ..."), each retry of a page (warn),
+  each failed repo (error), and the end ("Finished in 6 minutes. 34 new files (2.1 MiB).",
+  "Cancelled by sam.", "Failed: ..."). A line names a repo and counts, never a path, a URL, a
+  password or a token. `GET .../log` reads the lines through `nexus_sync_log_sync`; the `repo`
+  filter applies in Go.
+- **Retention.** A new sync deletes the syncs of its source after the newest 100, with their
+  repos, failures and log lines (cascade). The cut-over sync stays.
 - **Scheduler.** It checks every `min(nexus.sync_interval, 1m)`. It reads the interval from the
   live settings. It starts a sync for each mirroring source whose `last_sync_at` is at or before
-  now minus the interval, up to 100 per check. Every sync that ends sets `last_sync_at`.
+  now minus the interval, up to 100 per check; a source without a mapping does not start. Every
+  sync that ends sets `last_sync_at`.
 - **Sync end.** The sync is `done` when every repo finishes, also when some files failed (they
   are in the failure list). It is `failed` when a whole repo failed and `cancelled` after
   `DELETE`. A shutdown leaves the sync `running`; it continues from the last saved page at the
   next start.
-- **Cut-over.** `POST .../cutover` runs one final sync with `cutover: true`. It succeeds when
+- **Cut-over.** `POST .../cutover` runs one final sync with `trigger: cutover`. It succeeds when
   no repo failed, also when some files failed. Then one transaction sets the sync `done`, sets the
-  source `cut_over`, empties its credentials, clears `locked_by` on the mapped targets and saves
-  `cutover_sync_id` (the sync) and `cutover_failed` (its failed file count). The failed files stay
-  listed through `GET /api/nexus/syncs/{id}/failures`. If a repo failed (Nexus unreachable, a
-  listing error), the sync is `failed`, the source stays `mirroring`, and `last_error` says
-  `cut-over stopped: ...; the source stays mirroring`. A cancelled cut-over leaves the source mirroring. A restart
-  continues an interrupted cut-over. After cut-over, PATCH, PUT repos, sync and cut-over answer
-  409, and the sync history stays.
-- **Delete.** `DELETE .../sources/{id}` removes the source, its mapping, syncs and failures. The
-  repos and their files stay.
-- **UI.** The admin-only **Nexus** pages (`/#/settings/nexus`, `/#/settings/nexus/{id}`) lists the sources with an add
-  form. The source page shows the state, the repos table with a target name and a checkbox per
-  repo, "Save mapping", "Sync now", "Cut over" with a confirm card, "Update credentials", the
-  sync history with "Load more" and a sync detail (per-repo counters, Cancel, failures). It polls
-  a running sync every 2 s. The "Cut over" confirm card shows how many files failed in the latest
-  sync. A cut-over source with `cutover_failed` above 0 shows a warning with a link to the failure
-  list of the cut-over sync. The repo list and the repo page show a "mirrors Nexus" badge when
-  `locked_by` is set.
+  source `cut_over`, empties its credentials, clears `locked_by` on the mapped hosted targets and
+  saves `cutover_sync_id` (the sync) and `cutover_failed` (its failed file count). The failed
+  files stay listed through `GET /api/nexus/syncs/{id}/failures`. If a repo failed (Nexus
+  unreachable, a listing error), the sync is `failed`, the source stays `mirroring`, and
+  `last_error` says `the switch-over stopped: ...; the source stays mirroring`. A cancelled
+  cut-over leaves the source mirroring. A restart continues an interrupted cut-over. After
+  cut-over, PATCH, PUT repos, sync and cut-over answer 409, and the sync history stays. Groups and
+  proxies need nothing more: they serve from this server already.
+- **Delete.** `DELETE .../sources/{id}` removes the source, its mapping, syncs, failures and
+  log. The repos and their files stay.
+- **UI.** The admin-only **Nexus** pages (`/#/settings/nexus`, `/#/settings/nexus/{id}`). The
+  list shows Server, Status, Repositories, Last check and Next check; a syncing source shows its
+  progress line. The source page has, top to bottom: the header (status badge and line, Sync now
+  or Cancel the sync, Switch over, Delete), Repositories to copy (a pick table with a filter
+  above 10 repos, Kind, Name here, Who can download, Signing key; one button "Copy N
+  repositories" or "Save" saves and opens the sync), Groups (their own pick table), the sync
+  detail (per repo "copied (size) of checked", last activity, a bar with "about N%" when an
+  earlier walk exists, "No progress for N minutes" after two minutes; the log, which polls every
+  2 s and filters by a clicked repo; the failed files), the sync history (Started, How, Took, New
+  files, Size, Failed, State) and the connection with the save bar. The repo list and the repo
+  page show a "mirrors Nexus" badge when `locked_by` is set.
 
 ## Group and proxy repositories
 
@@ -682,7 +762,7 @@ A format takes proxy repos when it implements `format.Proxied` (Maven, Debian) a
 when it implements `format.Grouper` (Maven). `repos.Service` refuses another kind for a format
 without the interface (400). Neither kind takes uploads, publish sessions or CI pipelines:
 minting a session for one answers 409 with the read-only text, and a CI pipeline that lists one
-answers 400. A Nexus mapping refuses a target that is not hosted.
+answers 400. A Nexus mapping maps a Nexus hosted, proxy or group repo to a target of the same kind.
 
 **In memory.** `repos.Service` keeps the members of each group and the remote of each proxy
 (credentials decrypted) in memory. It loads them at start (`Load`) and changes them after each
@@ -1125,9 +1205,12 @@ decision is in `docs/design/rationale.md`.
   field also names its term at the provider (Issuer URL, Client ID). The page tests the saved
   settings when it opens and shows the result only when the test fails. **Test** checks the unsaved
   edits and marks the fields that are wrong.
-- **Nexus migration.** A table of Nexus servers. Adding a server opens a dialog. A server's page
-  shows its state as a badge next to its title, the repositories to copy, the syncs (a row opens its
-  details), the connection, the switch over, and **Delete** in the header.
+- **Nexus migration.** A table of Nexus servers with their status, repositories, last check and
+  next check. Adding a server opens a dialog. A server's page shows its status as a badge and a
+  line next to its title, then the repositories to copy and the groups (pick tables; a click on a
+  row picks it), the running or chosen sync with its progress and log, the syncs (a row opens its
+  details) and the connection. Sync now or Cancel the sync, Switch over and **Delete** are in the
+  header; while a sync runs, Delete says "Cancel the sync first".
 - **Your account.**
   - *Overview:* an Administrator badge by the title for an administrator. Then a card each for
     the repositories you can use, your devices and your recent publishes. The "You can" column of
@@ -1272,13 +1355,27 @@ code through the API, publishes a library and a Gradle plugin, and resolves them
 `ACTIONS_ID_TOKEN_REQUEST_URL`.
 
 `TestNexus` runs a Nexus container (`sonatype/nexus3`) and starts the server with
-`TR_NEXUS_SYNC_INTERVAL=12h`, so that no scheduled sync changes the counters. On each storage
-backend it refuses a source with a wrong password, creates the source, maps a maven2, an apt and a
-raw repo with `create: true`, and runs a first sync. It resolves the files with `mvn`,
-`apt-get` and curl. It then adds new files to Nexus and runs a second sync: only the new files
-count as imported, the others as skipped. While the repos mirror, a maven PUT, a raw PUT and a
-Debian upload answer 409. After cut-over the same writes succeed, and sync answers 409. No
-response holds the Nexus password.
+`TR_NEXUS_SYNC_INTERVAL=12h`, so that no scheduled sync changes the counters. The fixture has two
+maven2 hosted repos (anonymous read in Nexus for one of them only), an apt repo with an encrypted
+key pair, a raw repo, an npm repo, an offline raw repo, a maven2 proxy with remote credentials and
+a maven2 group of the two hosted repos and the proxy. On each storage backend the test:
+
+- refuses a source with a wrong password; a new source is `no_repos` with no next sync;
+- checks the repo list: format, type, support, `public`, the offline reason, the Nexus key, the
+  proxy remote and username, the group members;
+- saves the repos (the apt repo with the Nexus key, the proxy with its password) and waits for the
+  sync that the save starts (`trigger: save`); the source is then `up_to_date` with the next sync
+  one interval after the end; the targets have the kind and the public setting of the save, the
+  proxy has the Nexus remote, credentials and times, and the group has the three members in the
+  Nexus order;
+- checks the counters (`checked`, `bytes`), the log lines, the Nexus blob dates of a Maven file
+  and a Debian package, and that `Release.gpg` verifies with the Nexus public key;
+- resolves the files with `mvn`, `apt-get` and curl, adds new files to Nexus and runs a second
+  sync (only the new files count as imported, `previous_checked` is the first sync's `checked`),
+  then a third sync ("no new files" for each repo) and pages and filters its log;
+- checks that the mirrored repos refuse publish sessions, unpicks the raw repo and uploads to it,
+  finds no password in any log line, cuts over and writes to the repos. After cut-over, sync
+  answers 409. No response holds the Nexus password.
 
 `TestScale` (tag `scale`, `go tool task test scale`) seeds 100k and then 1M assets with `seed N`
 on a named volume. It starts a server on the volume and measures the p95 latency over 400 runs of

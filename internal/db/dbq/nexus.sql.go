@@ -41,14 +41,14 @@ func (q *Queries) CreateNexusSource(ctx context.Context, arg CreateNexusSourcePa
 }
 
 const createNexusSync = `-- name: CreateNexusSync :one
-INSERT INTO nexus_syncs (source_id, state, cutover, started_by, started_at)
+INSERT INTO nexus_syncs (source_id, state, trigger, started_by, started_at)
 VALUES (?, 'running', ?, ?, ?)
 RETURNING id
 `
 
 type CreateNexusSyncParams struct {
 	SourceID  int64
-	Cutover   int64
+	Trigger   string
 	StartedBy sql.NullInt64
 	StartedAt int64
 }
@@ -57,7 +57,7 @@ type CreateNexusSyncParams struct {
 func (q *Queries) CreateNexusSync(ctx context.Context, arg CreateNexusSyncParams) (int64, error) {
 	row := q.db.QueryRowContext(ctx, createNexusSync,
 		arg.SourceID,
-		arg.Cutover,
+		arg.Trigger,
 		arg.StartedBy,
 		arg.StartedAt,
 	)
@@ -106,6 +106,26 @@ func (q *Queries) DeleteNexusSourceRepos(ctx context.Context, sourceID int64) er
 	return err
 }
 
+const deleteOldNexusSyncs = `-- name: DeleteOldNexusSyncs :execrows
+DELETE FROM nexus_syncs
+WHERE source_id = ?1 AND id <= ?2 AND state <> 'running' AND trigger <> 'cutover'
+`
+
+type DeleteOldNexusSyncsParams struct {
+	SourceID int64
+	Cutoff   int64
+}
+
+// Retention: deletes a source's ended syncs with ids at or below the cutoff, except the
+// cut-over sync. Their repos, failures and log lines cascade.
+func (q *Queries) DeleteOldNexusSyncs(ctx context.Context, arg DeleteOldNexusSyncsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteOldNexusSyncs, arg.SourceID, arg.Cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const finishNexusSync = `-- name: FinishNexusSync :execrows
 UPDATE nexus_syncs SET state = ?, error = ?, finished_at = ? WHERE id = ? AND state = 'running'
 `
@@ -132,22 +152,37 @@ func (q *Queries) FinishNexusSync(ctx context.Context, arg FinishNexusSyncParams
 }
 
 const getLatestNexusSync = `-- name: GetLatestNexusSync :one
-SELECT id, source_id, state, cutover, started_by, started_at, finished_at, error
-FROM nexus_syncs WHERE source_id = ? ORDER BY id DESC LIMIT 1
+SELECT s.id, s.source_id, s.state, s.trigger, s.started_by, s.started_at, s.finished_at, s.error,
+  CAST(COALESCE(u.username, '') AS TEXT) AS started_by_name
+FROM nexus_syncs s LEFT JOIN users u ON u.id = s.started_by
+WHERE s.source_id = ? ORDER BY s.id DESC LIMIT 1
 `
 
-func (q *Queries) GetLatestNexusSync(ctx context.Context, sourceID int64) (NexusSync, error) {
+type GetLatestNexusSyncRow struct {
+	ID            int64
+	SourceID      int64
+	State         string
+	Trigger       string
+	StartedBy     sql.NullInt64
+	StartedAt     int64
+	FinishedAt    sql.NullInt64
+	Error         string
+	StartedByName string
+}
+
+func (q *Queries) GetLatestNexusSync(ctx context.Context, sourceID int64) (GetLatestNexusSyncRow, error) {
 	row := q.db.QueryRowContext(ctx, getLatestNexusSync, sourceID)
-	var i NexusSync
+	var i GetLatestNexusSyncRow
 	err := row.Scan(
 		&i.ID,
 		&i.SourceID,
 		&i.State,
-		&i.Cutover,
+		&i.Trigger,
 		&i.StartedBy,
 		&i.StartedAt,
 		&i.FinishedAt,
 		&i.Error,
+		&i.StartedByName,
 	)
 	return i, err
 }
@@ -195,28 +230,42 @@ func (q *Queries) GetNexusSourceByTarget(ctx context.Context, targetRepoID int64
 }
 
 const getNexusSync = `-- name: GetNexusSync :one
-SELECT id, source_id, state, cutover, started_by, started_at, finished_at, error
-FROM nexus_syncs WHERE id = ?
+SELECT s.id, s.source_id, s.state, s.trigger, s.started_by, s.started_at, s.finished_at, s.error,
+  CAST(COALESCE(u.username, '') AS TEXT) AS started_by_name
+FROM nexus_syncs s LEFT JOIN users u ON u.id = s.started_by WHERE s.id = ?
 `
 
-func (q *Queries) GetNexusSync(ctx context.Context, id int64) (NexusSync, error) {
+type GetNexusSyncRow struct {
+	ID            int64
+	SourceID      int64
+	State         string
+	Trigger       string
+	StartedBy     sql.NullInt64
+	StartedAt     int64
+	FinishedAt    sql.NullInt64
+	Error         string
+	StartedByName string
+}
+
+func (q *Queries) GetNexusSync(ctx context.Context, id int64) (GetNexusSyncRow, error) {
 	row := q.db.QueryRowContext(ctx, getNexusSync, id)
-	var i NexusSync
+	var i GetNexusSyncRow
 	err := row.Scan(
 		&i.ID,
 		&i.SourceID,
 		&i.State,
-		&i.Cutover,
+		&i.Trigger,
 		&i.StartedBy,
 		&i.StartedAt,
 		&i.FinishedAt,
 		&i.Error,
+		&i.StartedByName,
 	)
 	return i, err
 }
 
 const getRunningNexusSync = `-- name: GetRunningNexusSync :one
-SELECT id, source_id, state, cutover, started_by, started_at, finished_at, error
+SELECT id, source_id, state, trigger, started_by, started_at, finished_at, error
 FROM nexus_syncs WHERE source_id = ? AND state = 'running'
 `
 
@@ -228,7 +277,7 @@ func (q *Queries) GetRunningNexusSync(ctx context.Context, sourceID int64) (Nexu
 		&i.ID,
 		&i.SourceID,
 		&i.State,
-		&i.Cutover,
+		&i.Trigger,
 		&i.StartedBy,
 		&i.StartedAt,
 		&i.FinishedAt,
@@ -238,13 +287,14 @@ func (q *Queries) GetRunningNexusSync(ctx context.Context, sourceID int64) (Nexu
 }
 
 const insertNexusSourceRepo = `-- name: InsertNexusSourceRepo :exec
-INSERT INTO nexus_source_repos (source_id, source_repo, source_format, target_repo_id) VALUES (?, ?, ?, ?)
+INSERT INTO nexus_source_repos (source_id, source_repo, source_format, kind, target_repo_id) VALUES (?, ?, ?, ?, ?)
 `
 
 type InsertNexusSourceRepoParams struct {
 	SourceID     int64
 	SourceRepo   string
 	SourceFormat string
+	Kind         string
 	TargetRepoID int64
 }
 
@@ -253,6 +303,7 @@ func (q *Queries) InsertNexusSourceRepo(ctx context.Context, arg InsertNexusSour
 		arg.SourceID,
 		arg.SourceRepo,
 		arg.SourceFormat,
+		arg.Kind,
 		arg.TargetRepoID,
 	)
 	return err
@@ -281,10 +332,33 @@ func (q *Queries) InsertNexusSyncFailure(ctx context.Context, arg InsertNexusSyn
 	return err
 }
 
+const insertNexusSyncLog = `-- name: InsertNexusSyncLog :exec
+INSERT INTO nexus_sync_log (sync_id, at, source_repo, level, message) VALUES (?, ?, ?, ?, ?)
+`
+
+type InsertNexusSyncLogParams struct {
+	SyncID     int64
+	At         int64
+	SourceRepo string
+	Level      string
+	Message    string
+}
+
+func (q *Queries) InsertNexusSyncLog(ctx context.Context, arg InsertNexusSyncLogParams) error {
+	_, err := q.db.ExecContext(ctx, insertNexusSyncLog,
+		arg.SyncID,
+		arg.At,
+		arg.SourceRepo,
+		arg.Level,
+		arg.Message,
+	)
+	return err
+}
+
 const insertNexusSyncRepos = `-- name: InsertNexusSyncRepos :execrows
 INSERT INTO nexus_sync_repos (sync_id, source_repo, source_format, target_repo_id)
 SELECT ?1, source_repo, source_format, target_repo_id
-FROM nexus_source_repos WHERE source_id = ?2
+FROM nexus_source_repos WHERE source_id = ?2 AND kind = 'hosted'
 `
 
 type InsertNexusSyncReposParams struct {
@@ -292,7 +366,7 @@ type InsertNexusSyncReposParams struct {
 	SourceID int64
 }
 
-// Copies the source's mapping into the sync's repos.
+// Copies the source's mapped hosted repos into the sync's repos.
 func (q *Queries) InsertNexusSyncRepos(ctx context.Context, arg InsertNexusSyncReposParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, insertNexusSyncRepos, arg.SyncID, arg.SourceID)
 	if err != nil {
@@ -313,7 +387,7 @@ type ListDueNexusSourcesParams struct {
 }
 
 // The mirroring sources whose last sync ended at or before the cutoff, oldest first, through
-// the nexus_sources_due partial index.
+// the nexus_sources_due partial index. A source that never synced has last_sync_at 0.
 func (q *Queries) ListDueNexusSources(ctx context.Context, arg ListDueNexusSourcesParams) ([]int64, error) {
 	rows, err := q.db.QueryContext(ctx, listDueNexusSources, arg.Cutoff, arg.Limit)
 	if err != nil {
@@ -338,7 +412,7 @@ func (q *Queries) ListDueNexusSources(ctx context.Context, arg ListDueNexusSourc
 }
 
 const listNexusSourceRepos = `-- name: ListNexusSourceRepos :many
-SELECT source_id, source_repo, source_format, target_repo_id
+SELECT source_id, source_repo, source_format, kind, target_repo_id
 FROM nexus_source_repos WHERE source_id = ? ORDER BY source_repo
 `
 
@@ -356,6 +430,7 @@ func (q *Queries) ListNexusSourceRepos(ctx context.Context, sourceID int64) ([]N
 			&i.SourceID,
 			&i.SourceRepo,
 			&i.SourceFormat,
+			&i.Kind,
 			&i.TargetRepoID,
 		); err != nil {
 			return nil, err
@@ -465,8 +540,93 @@ func (q *Queries) ListNexusSyncFailures(ctx context.Context, arg ListNexusSyncFa
 	return items, nil
 }
 
+const listNexusSyncIDs = `-- name: ListNexusSyncIDs :many
+SELECT id FROM nexus_syncs WHERE source_id = ? ORDER BY id DESC LIMIT ?
+`
+
+type ListNexusSyncIDsParams struct {
+	SourceID int64
+	Limit    int64
+}
+
+// The ids of a source's newest syncs, newest first; retention keeps the first page.
+func (q *Queries) ListNexusSyncIDs(ctx context.Context, arg ListNexusSyncIDsParams) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, listNexusSyncIDs, arg.SourceID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listNexusSyncLog = `-- name: ListNexusSyncLog :many
+SELECT id, at, source_repo, level, message FROM nexus_sync_log
+WHERE sync_id = ?1 AND id > ?2
+ORDER BY id LIMIT ?3
+`
+
+type ListNexusSyncLogParams struct {
+	SyncID  int64
+	AfterID int64
+	Limit   int64
+}
+
+type ListNexusSyncLogRow struct {
+	ID         int64
+	At         int64
+	SourceRepo string
+	Level      string
+	Message    string
+}
+
+// Keyset page of a sync's log lines, oldest first, through nexus_sync_log_sync. The repo
+// filter is applied in Go: a sync has a few thousand lines at most.
+func (q *Queries) ListNexusSyncLog(ctx context.Context, arg ListNexusSyncLogParams) ([]ListNexusSyncLogRow, error) {
+	rows, err := q.db.QueryContext(ctx, listNexusSyncLog, arg.SyncID, arg.AfterID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListNexusSyncLogRow
+	for rows.Next() {
+		var i ListNexusSyncLogRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.At,
+			&i.SourceRepo,
+			&i.Level,
+			&i.Message,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listNexusSyncRepos = `-- name: ListNexusSyncRepos :many
-SELECT sync_id, source_repo, source_format, target_repo_id, continuation, imported, skipped, ignored, failed, state, error
+SELECT sync_id, source_repo, source_format, target_repo_id, continuation, checked, imported, skipped, ignored, failed,
+  bytes, active_at, state, error
 FROM nexus_sync_repos WHERE sync_id = ? ORDER BY source_repo
 `
 
@@ -486,10 +646,13 @@ func (q *Queries) ListNexusSyncRepos(ctx context.Context, syncID int64) ([]Nexus
 			&i.SourceFormat,
 			&i.TargetRepoID,
 			&i.Continuation,
+			&i.Checked,
 			&i.Imported,
 			&i.Skipped,
 			&i.Ignored,
 			&i.Failed,
+			&i.Bytes,
+			&i.ActiveAt,
 			&i.State,
 			&i.Error,
 		); err != nil {
@@ -507,9 +670,11 @@ func (q *Queries) ListNexusSyncRepos(ctx context.Context, syncID int64) ([]Nexus
 }
 
 const listNexusSyncs = `-- name: ListNexusSyncs :many
-SELECT id, source_id, state, cutover, started_by, started_at, finished_at, error
-FROM nexus_syncs WHERE source_id = ?1 AND id < ?2
-ORDER BY id DESC LIMIT ?3
+SELECT s.id, s.source_id, s.state, s.trigger, s.started_by, s.started_at, s.finished_at, s.error,
+  CAST(COALESCE(u.username, '') AS TEXT) AS started_by_name
+FROM nexus_syncs s LEFT JOIN users u ON u.id = s.started_by
+WHERE s.source_id = ?1 AND s.id < ?2
+ORDER BY s.id DESC LIMIT ?3
 `
 
 type ListNexusSyncsParams struct {
@@ -518,25 +683,38 @@ type ListNexusSyncsParams struct {
 	Limit    int64
 }
 
+type ListNexusSyncsRow struct {
+	ID            int64
+	SourceID      int64
+	State         string
+	Trigger       string
+	StartedBy     sql.NullInt64
+	StartedAt     int64
+	FinishedAt    sql.NullInt64
+	Error         string
+	StartedByName string
+}
+
 // Keyset page of a source's syncs, newest first: ids below before.
-func (q *Queries) ListNexusSyncs(ctx context.Context, arg ListNexusSyncsParams) ([]NexusSync, error) {
+func (q *Queries) ListNexusSyncs(ctx context.Context, arg ListNexusSyncsParams) ([]ListNexusSyncsRow, error) {
 	rows, err := q.db.QueryContext(ctx, listNexusSyncs, arg.SourceID, arg.Before, arg.Limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []NexusSync
+	var items []ListNexusSyncsRow
 	for rows.Next() {
-		var i NexusSync
+		var i ListNexusSyncsRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.SourceID,
 			&i.State,
-			&i.Cutover,
+			&i.Trigger,
 			&i.StartedBy,
 			&i.StartedAt,
 			&i.FinishedAt,
 			&i.Error,
+			&i.StartedByName,
 		); err != nil {
 			return nil, err
 		}
@@ -552,7 +730,7 @@ func (q *Queries) ListNexusSyncs(ctx context.Context, arg ListNexusSyncsParams) 
 }
 
 const listRunningNexusSyncs = `-- name: ListRunningNexusSyncs :many
-SELECT id, source_id, state, cutover, started_by, started_at, finished_at, error
+SELECT id, source_id, state, trigger, started_by, started_at, finished_at, error
 FROM nexus_syncs WHERE state = 'running' ORDER BY source_id
 `
 
@@ -570,7 +748,7 @@ func (q *Queries) ListRunningNexusSyncs(ctx context.Context) ([]NexusSync, error
 			&i.ID,
 			&i.SourceID,
 			&i.State,
-			&i.Cutover,
+			&i.Trigger,
 			&i.StartedBy,
 			&i.StartedAt,
 			&i.FinishedAt,
@@ -587,6 +765,29 @@ func (q *Queries) ListRunningNexusSyncs(ctx context.Context) ([]NexusSync, error
 		return nil, err
 	}
 	return items, nil
+}
+
+const previousNexusChecked = `-- name: PreviousNexusChecked :one
+SELECT r.checked FROM nexus_syncs s
+JOIN nexus_sync_repos r ON r.sync_id = s.id AND r.source_repo = ?1
+WHERE s.source_id = ?2 AND s.id < ?3 AND r.state = 'done'
+ORDER BY s.id DESC LIMIT 1
+`
+
+type PreviousNexusCheckedParams struct {
+	SourceRepo string
+	SourceID   int64
+	Before     int64
+}
+
+// The checked count of the newest walk of a source repo that reached the end, in a sync of the
+// source before sync before: newest first through nexus_syncs_source, then the primary key of
+// nexus_sync_repos. Retention bounds the walk to 100 syncs.
+func (q *Queries) PreviousNexusChecked(ctx context.Context, arg PreviousNexusCheckedParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, previousNexusChecked, arg.SourceRepo, arg.SourceID, arg.Before)
+	var checked int64
+	err := row.Scan(&checked)
+	return checked, err
 }
 
 const setNexusSourceCredentials = `-- name: SetNexusSourceCredentials :exec
@@ -641,16 +842,20 @@ func (q *Queries) SetNexusSyncRepoState(ctx context.Context, arg SetNexusSyncRep
 }
 
 const updateNexusSyncRepoProgress = `-- name: UpdateNexusSyncRepoProgress :exec
-UPDATE nexus_sync_repos SET continuation = ?, imported = ?, skipped = ?, ignored = ?, failed = ?
+UPDATE nexus_sync_repos SET continuation = ?, checked = ?, imported = ?, skipped = ?, ignored = ?, failed = ?,
+  bytes = ?, active_at = ?
 WHERE sync_id = ? AND source_repo = ?
 `
 
 type UpdateNexusSyncRepoProgressParams struct {
 	Continuation string
+	Checked      int64
 	Imported     int64
 	Skipped      int64
 	Ignored      int64
 	Failed       int64
+	Bytes        int64
+	ActiveAt     int64
 	SyncID       int64
 	SourceRepo   string
 }
@@ -659,10 +864,13 @@ type UpdateNexusSyncRepoProgressParams struct {
 func (q *Queries) UpdateNexusSyncRepoProgress(ctx context.Context, arg UpdateNexusSyncRepoProgressParams) error {
 	_, err := q.db.ExecContext(ctx, updateNexusSyncRepoProgress,
 		arg.Continuation,
+		arg.Checked,
 		arg.Imported,
 		arg.Skipped,
 		arg.Ignored,
 		arg.Failed,
+		arg.Bytes,
+		arg.ActiveAt,
 		arg.SyncID,
 		arg.SourceRepo,
 	)

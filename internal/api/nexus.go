@@ -22,6 +22,7 @@ func (a *API) registerNexus(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/nexus/sources/{id}/syncs", a.listNexusSyncs)
 	mux.HandleFunc("GET /api/nexus/syncs/{id}", a.getNexusSync)
 	mux.HandleFunc("GET /api/nexus/syncs/{id}/failures", a.nexusSyncFailures)
+	mux.HandleFunc("GET /api/nexus/syncs/{id}/log", a.nexusSyncLog)
 	mux.HandleFunc("DELETE /api/nexus/syncs/{id}", a.cancelNexusSync)
 }
 
@@ -155,20 +156,22 @@ func (a *API) deleteNexusSource(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// setNexusRepos replaces the source's mapping and returns the SourceDetail.
+// setNexusRepos replaces the source's mapping, starts a sync when the mapping holds a repo,
+// and returns the SourceDetail (running_sync_id names that sync).
 func (a *API) setNexusRepos(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.admin(w, r); !ok {
+	p, ok := a.admin(w, r)
+	if !ok {
 		return
 	}
 	id, ok := nexusID(w, r)
 	if !ok {
 		return
 	}
-	var in []nexus.Mapping
+	var in nexus.SetReposInput
 	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
 		return
 	}
-	d, err := a.nexus.SetRepos(r.Context(), id, in)
+	d, err := a.nexus.SetRepos(r.Context(), id, p.UserID, in.Repos)
 	if err != nil {
 		nexusFail(w, r, err)
 		return
@@ -194,7 +197,7 @@ func (a *API) syncNexusSource(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusAccepted, sy)
 }
 
-// cutOverNexusSource starts the final sync of a cut-over: 202 with the Sync (cutover true).
+// cutOverNexusSource starts the final sync of a cut-over: 202 with the Sync (trigger cutover).
 func (a *API) cutOverNexusSource(w http.ResponseWriter, r *http.Request) {
 	p, ok := a.admin(w, r)
 	if !ok {
@@ -280,8 +283,9 @@ func (a *API) nexusSyncFailures(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, out)
 }
 
-// cancelNexusSync stops a running sync and returns it (state cancelled); 409 when it has ended.
-func (a *API) cancelNexusSync(w http.ResponseWriter, r *http.Request) {
+// nexusSyncLog returns a keyset page of a sync's log lines, oldest first:
+// ?after=<line id>&limit=&repo=<Nexus repo>.
+func (a *API) nexusSyncLog(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.admin(w, r); !ok {
 		return
 	}
@@ -289,7 +293,33 @@ func (a *API) cancelNexusSync(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	sy, err := a.nexus.Cancel(r.Context(), id)
+	after, ok := idCursor(w, r)
+	if !ok {
+		return
+	}
+	items, next, err := a.nexus.Log(r.Context(), id, after, r.URL.Query().Get("repo"), httpx.Limit(r))
+	if err != nil {
+		nexusFail(w, r, err)
+		return
+	}
+	out := list[nexus.LogLine]{Items: items}
+	if next > 0 {
+		out.Next = cursor(strconv.FormatInt(next, 10))
+	}
+	httpx.WriteJSON(w, http.StatusOK, out)
+}
+
+// cancelNexusSync stops a running sync and returns it (state cancelled); 409 when it has ended.
+func (a *API) cancelNexusSync(w http.ResponseWriter, r *http.Request) {
+	p, ok := a.admin(w, r)
+	if !ok {
+		return
+	}
+	id, ok := nexusID(w, r)
+	if !ok {
+		return
+	}
+	sy, err := a.nexus.Cancel(r.Context(), id, p.UserID)
 	if err != nil {
 		nexusFail(w, r, err)
 		return

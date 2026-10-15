@@ -16,9 +16,10 @@ import (
 // ImportFormats accepts Nexus raw repos.
 func (f *Format) ImportFormats() []string { return []string{"raw"} }
 
-// Import stores the file at its source path under the PUT rules: identical bytes are skipped,
-// and different bytes replace the file only when the repo allows overwrite. When the source
-// gives a checksum, Import compares it with the stored asset before it downloads anything.
+// Import stores the file at its source path under the PUT rules, with the source's dates:
+// identical bytes are skipped and get the source's dates, and different bytes replace the file
+// only when the repo allows overwrite. When the source gives a checksum, Import compares it
+// with the stored asset before it downloads anything.
 func (f *Format) Import(ctx context.Context, repo *repos.Repo, item format.ImportItem) (format.ImportOutcome, error) {
 	if !validPath(item.Path) {
 		return "", errors.New("invalid path")
@@ -31,7 +32,7 @@ func (f *Format) Import(ctx context.Context, repo *repos.Repo, item format.Impor
 		existing, err := f.h.Assets.Get(ctx, repo.ID, item.Path)
 		switch {
 		case err == nil && existing.SHA256 == item.SHA256:
-			return format.ImportSkipped, nil
+			return format.ImportSkipped, f.h.Assets.SetTimes(ctx, existing, item.By())
 		case err == nil && c.Overwrite != OverwriteAllow:
 			return "", errExists
 		case err != nil && !errors.Is(err, assets.ErrNotFound):
@@ -43,12 +44,16 @@ func (f *Format) Import(ctx context.Context, repo *repos.Repo, item format.Impor
 		return "", err
 	}
 	defer sp.Close()
-	_, unchanged, err := f.put(ctx, repo, c, item.Path, sp, assets.By{})
+	_, unchanged, err := f.put(ctx, repo, c, item.Path, sp, item.By())
 	if err != nil {
 		return "", err
 	}
 	if unchanged {
-		return format.ImportSkipped, nil
+		existing, err := f.h.Assets.Get(ctx, repo.ID, item.Path)
+		if err != nil {
+			return "", err
+		}
+		return format.ImportSkipped, f.h.Assets.SetTimes(ctx, existing, item.By())
 	}
 	return format.ImportImported, nil
 }

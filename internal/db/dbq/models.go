@@ -117,6 +117,7 @@ type NexusSourceRepo struct {
 	SourceID     int64
 	SourceRepo   string
 	SourceFormat string
+	Kind         string
 	TargetRepoID int64
 }
 
@@ -124,7 +125,7 @@ type NexusSync struct {
 	ID         int64
 	SourceID   int64
 	State      string
-	Cutover    int64
+	Trigger    string
 	StartedBy  sql.NullInt64
 	StartedAt  int64
 	FinishedAt sql.NullInt64
@@ -139,16 +140,28 @@ type NexusSyncFailure struct {
 	Reason     string
 }
 
+type NexusSyncLog struct {
+	ID         int64
+	SyncID     int64
+	At         int64
+	SourceRepo string
+	Level      string
+	Message    string
+}
+
 type NexusSyncRepo struct {
 	SyncID       int64
 	SourceRepo   string
 	SourceFormat string
 	TargetRepoID int64
 	Continuation string
+	Checked      int64
 	Imported     int64
 	Skipped      int64
 	Ignored      int64
 	Failed       int64
+	Bytes        int64
+	ActiveAt     int64
 	State        string
 	Error        string
 }
