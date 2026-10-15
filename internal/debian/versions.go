@@ -5,7 +5,6 @@ import (
 	"path"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -14,6 +13,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/provenance"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
+	"pault.ag/go/debian/version"
 )
 
 // Versions and builds (format.Versioned) of a Debian package, read from deb_packages. An
@@ -203,101 +203,13 @@ func compareBuilds(a, b string) int {
 	return compareVersions(a, b)
 }
 
-// compareVersions orders two Debian versions as dpkg --compare-versions does: the epoch as a
-// number, then the upstream version, then the revision, each by verrevcmp.
+// compareVersions orders two Debian versions as dpkg --compare-versions does. A version that
+// does not parse sorts by its bytes.
 func compareVersions(a, b string) int {
-	ea, ua, ra := splitVersion(a)
-	eb, ub, rb := splitVersion(b)
-	if ea != eb {
-		if ea < eb {
-			return -1
-		}
-		return 1
+	va, errA := version.Parse(a)
+	vb, errB := version.Parse(b)
+	if errA != nil || errB != nil {
+		return strings.Compare(a, b)
 	}
-	if c := verrevcmp(ua, ub); c != 0 {
-		return c
-	}
-	return verrevcmp(ra, rb)
-}
-
-// splitVersion splits [epoch:]upstream[-revision]. The revision follows the last hyphen.
-func splitVersion(v string) (epoch int, upstream, revision string) {
-	if e, rest, ok := strings.Cut(v, ":"); ok {
-		epoch, _ = strconv.Atoi(e)
-		v = rest
-	}
-	if i := strings.LastIndexByte(v, '-'); i >= 0 {
-		return epoch, v[:i], v[i+1:]
-	}
-	return epoch, v, ""
-}
-
-// order is the weight of a character in a non-digit part: "~" before the end of the part, the
-// end before a letter, a letter before any other character.
-func order(s string, i int) int {
-	if i >= len(s) {
-		return 0
-	}
-	c := s[i]
-	switch {
-	case isDigit(c):
-		return 0
-	case c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z':
-		return int(c)
-	case c == '~':
-		return -1
-	}
-	return int(c) + 256
-}
-
-func isDigit(c byte) bool { return c >= '0' && c <= '9' }
-
-// verrevcmp compares two upstream versions or two revisions: alternate non-digit parts
-// (compared by order) and digit parts (compared as numbers).
-func verrevcmp(a, b string) int {
-	i, j := 0, 0
-	for i < len(a) || j < len(b) {
-		for (i < len(a) && !isDigit(a[i])) || (j < len(b) && !isDigit(b[j])) {
-			ac, bc := order(a, i), order(b, j)
-			if ac != bc {
-				return sign(ac - bc)
-			}
-			i++
-			j++
-		}
-		for i < len(a) && a[i] == '0' {
-			i++
-		}
-		for j < len(b) && b[j] == '0' {
-			j++
-		}
-		first := 0
-		for i < len(a) && j < len(b) && isDigit(a[i]) && isDigit(b[j]) {
-			if first == 0 {
-				first = int(a[i]) - int(b[j])
-			}
-			i++
-			j++
-		}
-		if i < len(a) && isDigit(a[i]) {
-			return 1
-		}
-		if j < len(b) && isDigit(b[j]) {
-			return -1
-		}
-		if first != 0 {
-			return sign(first)
-		}
-	}
-	return 0
-}
-
-func sign(n int) int {
-	switch {
-	case n < 0:
-		return -1
-	case n > 0:
-		return 1
-	}
-	return 0
+	return version.Compare(va, vb)
 }
