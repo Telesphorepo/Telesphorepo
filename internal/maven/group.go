@@ -154,7 +154,11 @@ type groupMetadata struct {
 	GroupID    string           `xml:"groupId,omitempty"`
 	ArtifactID string           `xml:"artifactId,omitempty"`
 	Versioning *groupVersioning `xml:"versioning"`
-	Plugins    []groupPlugin    `xml:"plugins>plugin"`
+	Plugins    *groupPlugins    `xml:"plugins"` // nil: no plugins element
+}
+
+type groupPlugins struct {
+	Plugin []groupPlugin `xml:"plugin"`
 }
 
 type groupVersioning struct {
@@ -178,8 +182,10 @@ func newer(a, b string) string {
 	return a
 }
 
-// mergeMetadata merges the metadata of the members: the union of the versions in Maven order,
-// the newest latest, release and lastUpdated, and the union of the plugins.
+// mergeMetadata merges the metadata of the members, as a Nexus group does: the union of the
+// versions in Maven order; latest is the highest version and release the highest version that is
+// not a -SNAPSHOT (also when no member names them); the newest lastUpdated; the union of the
+// plugins (no plugins element when there are none).
 func mergeMetadata(all []groupMetadata) groupMetadata {
 	var out groupMetadata
 	var versions []string
@@ -200,18 +206,33 @@ func mergeMetadata(all []groupMetadata) groupMetadata {
 				o.LastUpdated = lu
 			}
 			for _, x := range v.Versions {
-				versions = append(versions, strings.TrimSpace(x))
+				if x = strings.TrimSpace(x); x != "" {
+					versions = append(versions, x)
+				}
 			}
 		}
-		for _, pl := range m.Plugins {
-			if !slices.ContainsFunc(out.Plugins, func(x groupPlugin) bool { return x.Prefix == pl.Prefix }) {
-				out.Plugins = append(out.Plugins, pl)
+		if m.Plugins == nil {
+			continue
+		}
+		for _, pl := range m.Plugins.Plugin {
+			if out.Plugins == nil {
+				out.Plugins = &groupPlugins{}
+			}
+			if !slices.ContainsFunc(out.Plugins.Plugin, func(x groupPlugin) bool { return x.Prefix == pl.Prefix }) {
+				out.Plugins.Plugin = append(out.Plugins.Plugin, pl)
 			}
 		}
 	}
 	if out.Versioning != nil {
 		slices.SortFunc(versions, compareVersions)
-		out.Versioning.Versions = slices.Compact(versions)
+		o := out.Versioning
+		o.Versions = slices.Compact(versions)
+		for _, v := range o.Versions {
+			o.Latest = newer(o.Latest, v)
+			if !strings.HasSuffix(v, "-SNAPSHOT") {
+				o.Release = newer(o.Release, v)
+			}
+		}
 	}
 	return out
 }
