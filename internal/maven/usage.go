@@ -238,7 +238,7 @@ func gradlePublishSettings(kts bool, baseURL, repo string) string {
 
 func workflow(run string) string {
 	return format.GitHubTrigger + "permissions:\n  id-token: write\n  contents: read\n\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n" +
-		"      - uses: actions/checkout@v4\n      - uses: actions/setup-java@v4\n        with:\n          distribution: temurin\n" +
+		"      - uses: actions/checkout@v7\n      - uses: actions/setup-java@v6\n        with:\n          distribution: temurin\n" +
 		"          java-version: 21\n      - run: " + run + "\n"
 }
 

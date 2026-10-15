@@ -68,7 +68,7 @@ func CurlCISnippets(baseURL, repo, upload string) []Snippet {
 		{Client: "github-actions", Purpose: SnippetPublish, Context: SnippetRepo, Via: ViaCI,
 			Title: ".github/workflows/publish.yml", Lang: "yaml",
 			Code: GitHubTrigger + "permissions:\n  id-token: write\n  contents: read\n\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n" +
-				"      - uses: actions/checkout@v4\n      - name: Publish to " + repo + "\n        run: |\n" +
+				"      - uses: actions/checkout@v7\n      - name: Publish to " + repo + "\n        run: |\n" +
 				"          OIDC=$(printf 'header = \"Authorization: Bearer %s\"\\n' \"$ACTIONS_ID_TOKEN_REQUEST_TOKEN\" \\\n" +
 				"            | curl -fsS -K - \"$ACTIONS_ID_TOKEN_REQUEST_URL&audience=" + baseURL + "\" | jq -r .value)\n" +
 				"          echo \"::add-mask::$OIDC\"\n" +
