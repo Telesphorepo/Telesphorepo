@@ -792,7 +792,40 @@ func StartSeaweedFS(t testing.TB) *S3Target {
 		}
 		time.Sleep(time.Second)
 	}
+	// A new bucket has no writable volume until SeaweedFS grows one on the first write, and a
+	// write during the growth answers 500. Write and delete one object until a write succeeds,
+	// so that the test's first write does not race the growth.
+	key := tg.Prefix + "/_ready"
+	for attempt := 1; ; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, err := tg.Client().PutObject(ctx, &s3.PutObjectInput{Bucket: &tg.Bucket, Key: &key, Body: strings.NewReader("ready")})
+		if err == nil {
+			_, err = tg.Client().DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &tg.Bucket, Key: &key})
+		}
+		cancel()
+		if err == nil {
+			if attempt > 1 {
+				t.Logf("seaweedfs bucket %s took %d writes to become writable", tg.Bucket, attempt)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("seaweedfs bucket %s is not writable: %v\n%s", tg.Bucket, err, tail(containerLogs(seaweed.c), 100))
+		}
+		time.Sleep(time.Second)
+	}
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("---- last lines of the SeaweedFS log ----\n%s", tail(containerLogs(seaweed.c), 100))
+		}
+	})
 	return tg
+}
+
+// tail returns the last n lines of s.
+func tail(s string, n int) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	return strings.Join(lines[max(0, len(lines)-n):], "\n")
 }
 
 // ForEachStorage runs fn as subtests "fs" and "seaweedfs".
