@@ -186,7 +186,7 @@ func TestAPISessionRule(t *testing.T) {
 	t.Run("admin password on write routes", func(t *testing.T) {
 		wantSessionRequired(t, http.MethodPost, "/api/publish/trusts", trust, adminPw)
 		wantSessionRequired(t, http.MethodPost, "/api/users", map[string]any{"username": RandName("evil"), "password": "evil-password-1", "is_admin": true}, adminPw)
-		wantSessionRequired(t, http.MethodPut, "/api/repos/"+repo+"/permissions/frank", map[string]string{"level": "write"}, adminPw)
+		wantSessionRequired(t, http.MethodPut, "/api/permissions", map[string]any{"users": []string{"frank"}, "repos": []string{repo}, "level": "write"}, adminPw)
 		wantSessionRequired(t, http.MethodPatch, "/api/settings", map[string]any{"max_json_size": 4096}, adminPw)
 		wantSessionRequired(t, http.MethodPost, "/api/repos", map[string]any{"name": RandName("evil"), "format": "maven"}, adminPw)
 		wantSessionRequired(t, http.MethodPost, "/api/tokens", map[string]any{"name": "evil"}, adminPw)
@@ -218,7 +218,7 @@ func TestAPISessionRule(t *testing.T) {
 		admin := s.Admin()
 		apiWant(t, s, http.MethodGet, "/api/users", nil, admin, http.StatusOK)
 		apiWant(t, s, http.MethodPost, "/api/publish/trusts", trust, admin, http.StatusCreated)
-		apiWant(t, s, http.MethodPut, "/api/repos/"+repo+"/permissions/frank", map[string]string{"level": "write"}, admin, http.StatusNoContent)
+		apiWant(t, s, http.MethodPut, "/api/permissions", map[string]any{"users": []string{"frank"}, "repos": []string{repo}, "level": "write"}, admin, http.StatusOK)
 		// A user's own UI session changes the user's own things; admin routes stay 403.
 		frank := s.SignIn(t, "frank", "frank-password-1")
 		apiWant(t, s, http.MethodPost, "/api/tokens", map[string]any{"name": "ui"}, frank, http.StatusCreated)
@@ -340,7 +340,7 @@ func TestAPIReposAndPermissions(t *testing.T) {
 		t.Fatalf("permissions: %+v", perms)
 	}
 	apiWant(t, s, http.MethodGet, "/api/repos/"+priv+"/permissions", nil, daveUI, http.StatusForbidden)
-	apiWant(t, s, http.MethodPut, "/api/repos/"+priv+"/permissions/dave", map[string]string{"level": "bogus"}, admin, http.StatusBadRequest)
+	apiWant(t, s, http.MethodPut, "/api/permissions", map[string]any{"users": []string{"dave"}, "repos": []string{priv}, "level": "bogus"}, admin, http.StatusBadRequest)
 
 	got := list(dave)
 	if _, ok := got[secret]; ok {
@@ -358,7 +358,7 @@ func TestAPIReposAndPermissions(t *testing.T) {
 		t.Fatalf("after upgrade permission = %q", p)
 	}
 
-	apiWant(t, s, http.MethodDelete, "/api/repos/"+priv+"/permissions/dave", nil, admin, http.StatusNoContent)
+	apiWant(t, s, http.MethodPost, "/api/permissions/delete", map[string]any{"users": []string{"dave"}, "repos": []string{priv}}, admin, http.StatusOK)
 	if _, ok := list(dave)[priv]; ok {
 		t.Fatal("repo still visible after permission delete")
 	}

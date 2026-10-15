@@ -2,7 +2,8 @@
   The table of repositories (Browse home, All repositories): name and description on one line,
   format, files, size and last publish. A private repository has a lock after its name; a public
   one has no mark. On a phone the format icon sits before the name. A click anywhere on a row
-  opens `href`.
+  opens `href`. With `bind:picked` and a `bulk` snippet (All repositories), every row gets a
+  checkbox for bulk actions (DataTable).
 -->
 <script lang="ts">
   import type { Snippet } from "svelte";
@@ -23,12 +24,18 @@
     href,
     titles = {},
     empty,
+    picked = $bindable(new Set<string>()),
+    bulk,
   }: {
     source: TableSource<Repo>;
     href: (r: Repo) => string;
     /** Format titles by name (from /api/formats). */
     titles?: Record<string, string>;
     empty?: Snippet;
+    /** The names of the repositories picked for a bulk action. */
+    picked?: Set<string>;
+    /** The bulk actions; with it, every row gets a checkbox. */
+    bulk?: Snippet;
   } = $props();
 </script>
 
@@ -36,6 +43,9 @@
   {source}
   {href}
   {empty}
+  {bulk}
+  bind:picked
+  pickLabel={(r) => r.name}
   caption="Repositories"
   key={(r) => r.name}
   columns={[

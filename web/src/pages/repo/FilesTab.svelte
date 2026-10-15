@@ -12,11 +12,18 @@
 
   People who can publish delete files and folders here; a non-admin first confirms with a fresh
   second factor, which creates a publish token kept in memory (session.ts). An admin deletes with
-  the UI session.
+  the UI session. In the List view they pick rows (files and folders mix): while rows are picked,
+  the details column shows how many and the size of the picked files, and Delete removes them all
+  after one confirm.
 -->
 <script lang="ts">
+  import { untrack } from "svelte";
   import { toast } from "svelte-sonner";
   import { api, ApiError, type Proof, type Repo } from "$lib/api";
+  import { count, selectedText, someNames } from "$lib/words";
+  import FileSize from "$lib/components/FileSize.svelte";
+  import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
+  import type { TreeNode } from "./browse";
   import { Resource, type TableSource } from "$lib/load.svelte";
   import { filesPath, href, navigate } from "$lib/router.svelte";
   import { ViewChoice, type ViewKind } from "$lib/view.svelte";
@@ -118,6 +125,24 @@
   // Bumped after a delete, so the folder loads again.
   let version = $state(0);
 
+  // --- the pick of the List view ---
+  let picked = $state(new Set<string>());
+  let pickedRows = $state<TreeNode[]>([]);
+  // A new folder, or the same folder after a delete, starts with nothing picked.
+  $effect(() => {
+    void folder;
+    void version;
+    untrack(() => (picked = new Set()));
+  });
+  const pickSummary = $derived.by(() => {
+    const files = pickedRows.filter((e) => e.type === "file");
+    return {
+      files: files.length,
+      folders: pickedRows.length - files.length,
+      size: files.reduce((n, e) => n + (e.size ?? 0), 0),
+    };
+  });
+
   const loadingSource: TableSource<never> = { items: [], loading: true, error: "" };
 
   function showList() {
@@ -162,30 +187,68 @@
     else withSession(open);
   }
 
-  async function runDelete() {
-    const t = deleting;
-    if (!t) return;
+  // Several picked rows of the List view; one picked row uses the dialog of a single delete.
+  let many = $state<DeleteTarget[]>([]);
+  let manyOpen = $state(false);
+
+  function askDeleteMany(ts: DeleteTarget[]) {
+    if (ts.length === 0) return;
+    if (ts.length === 1) return askDelete(ts[0]);
+    const open = () => {
+      many = ts;
+      manyOpen = true;
+    };
+    if (isAdmin) open();
+    else withSession(open);
+  }
+
+  const manyFiles = $derived(many.filter((t) => !t.dir).length);
+  const manyFolders = $derived(many.length - manyFiles);
+  const manyNoun = $derived(
+    [manyFiles && count(manyFiles, "file", "files"), manyFolders && count(manyFolders, "folder", "folders")].filter(Boolean).join(" and "),
+  );
+  const manyChanges = $derived([
+    ...(manyFolders ? [`Deletes every file under the ${manyFolders === 1 ? "folder" : "folders"}`] : []),
+    "Clients that still need these files get “not found”",
+  ]);
+
+  async function deleteTargets(ts: DeleteTarget[]) {
+    if (ts.length === 0) return;
     let tk: string | undefined;
     if (!isAdmin) {
       tk = sessionToken(repo.name);
       if (!tk) throw new Error("Your confirmation has expired. Close this dialog and try again.");
     }
+    const paths = ts.filter((t) => !t.dir).map((t) => t.path);
+    const prefixes = ts.filter((t) => t.dir).map((t) => t.path);
     let n: number;
     try {
-      n = (await api.repos.deleteFiles(repo.name, t.dir ? { prefix: t.path } : { path: t.path }, tk)).deleted;
+      n = (
+        await api.repos.deleteFiles(
+          repo.name,
+          { paths: paths.length ? paths : undefined, prefixes: prefixes.length ? prefixes : undefined },
+          tk,
+        )
+      ).deleted;
     } catch (e) {
       if (tk && e instanceof ApiError && e.status === 401) dropSession(repo.name);
       throw e;
     }
-    toast.success(`Deleted ${n.toLocaleString()} ${n === 1 ? "file" : "files"}`);
+    toast.success(`Deleted ${count(n, "file", "files")}.`);
+    picked = new Set();
     version++;
-    if (t.dir && folder.startsWith(t.path)) {
-      navigate(filesPath(repo.name, parentOf(t.path)), { replace: true });
-    } else if (!t.dir && file === t.path) {
+    const gone = prefixes.filter((p) => folder.startsWith(p)).sort((a, b) => a.length - b.length)[0];
+    if (gone !== undefined) {
+      navigate(filesPath(repo.name, parentOf(gone)), { replace: true });
+    } else if (file && paths.includes(file)) {
       navigate(filesPath(repo.name, folder), { replace: true });
     } else {
       place.reload();
     }
+  }
+
+  async function runDelete() {
+    if (deleting) await deleteTargets([deleting]);
   }
 </script>
 
@@ -237,13 +300,42 @@
             onList={showList}
           />
         {:else}
-          <FolderList {repo} {folder} selected={file} {canWrite} {canUpload} compact={details} onDelete={askDelete} />
+          <FolderList
+            {repo}
+            {folder}
+            selected={file}
+            {canWrite}
+            {canUpload}
+            compact={details || pickedRows.length > 0}
+            bind:picked
+            onPicked={(rows) => (pickedRows = rows)}
+            onDelete={askDeleteMany}
+          />
         {/if}
       {/key}
     {/if}
   </div>
 
-  {#if file}
+  {#if pickedRows.length}
+    {@const s = pickSummary}
+    <DetailsColumn title={selectedText(pickedRows.length)} onClose={() => (picked = new Set())}>
+      <dl class="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-4 gap-y-2 text-body">
+        <dt class="text-muted-foreground">Holds</dt>
+        <dd>{[s.folders && count(s.folders, "folder", "folders"), s.files && count(s.files, "file", "files")].filter(Boolean).join(", ")}</dd>
+        {#if s.files}
+          <dt class="text-muted-foreground">Size of files</dt>
+          <dd class="tabular-nums"><FileSize bytes={s.size} /></dd>
+        {/if}
+      </dl>
+      {#snippet actions()}
+        <Button
+          variant="outline"
+          class="hover:text-destructive"
+          onclick={() => askDeleteMany(pickedRows.map((e) => ({ path: e.path, dir: e.type === "dir" })))}><Trash2Icon />Delete</Button
+        >
+      {/snippet}
+    </DetailsColumn>
+  {:else if file}
     <DetailsColumn
       title={baseName(file)}
       onClose={() => {
@@ -297,3 +389,13 @@
 />
 
 <DeleteDialog bind:open={deleteOpen} {repo} target={deleting} onConfirm={runDelete} />
+
+<ConfirmDialog
+  bind:open={manyOpen}
+  title="Delete {manyNoun}?"
+  description="{someNames(many.map((t) => baseName(t.path)))}. You cannot undo this."
+  changes={manyChanges}
+  confirmLabel="Delete {manyNoun}"
+  destructive
+  onConfirm={() => deleteTargets(many)}
+/>

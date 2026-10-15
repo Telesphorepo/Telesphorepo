@@ -1,23 +1,24 @@
 <!--
   Repository settings, Access (docs/design/information-architecture.md, "The repo Access tab"):
   Download (Public, people who can download and not publish, from where) and Publish (people who can publish, CI
-  pipelines, from where). Every edit is in place and goes into one draft, and the save bar saves
-  it after a confirm that lists each change. Administrators can always download and publish; the
-  tables list the people and pipelines that were given access.
+  pipelines, from where). The access of people changes at once: Add people gives several people
+  access in one short form, and picked rows change their level or lose their access (after a
+  confirm). Every other edit is in place and goes into one draft, and the save bar saves it after
+  a confirm that lists each change. Administrators can always download and publish; the tables
+  list the people and pipelines that were given access.
 -->
 <script lang="ts">
   import { untrack } from "svelte";
   import { toast } from "svelte-sonner";
-  import { api, type AccessPipeline, type Repo, type RepoAccess, type User } from "$lib/api";
+  import { api, errorMessage, type AccessPipeline, type Repo, type RepoAccess, type User } from "$lib/api";
   import { Resource, type TableSource } from "$lib/load.svelte";
   import { Draft } from "$lib/unsaved.svelte";
   import { href, repoSettingsPath } from "$lib/router.svelte";
+  import { count as plural, someNames } from "$lib/words";
   import { Button } from "$lib/components/ui/button";
-  import { Input } from "$lib/components/ui/input";
   import { Separator } from "$lib/components/ui/separator";
   import FormSection from "$lib/components/FormSection.svelte";
   import FormGrid from "$lib/components/FormGrid.svelte";
-  import FormField from "$lib/components/FormField.svelte";
   import SwitchRow from "$lib/components/SwitchRow.svelte";
   import DataTable from "$lib/components/DataTable.svelte";
   import Cell from "$lib/components/Cell.svelte";
@@ -27,10 +28,10 @@
   import Loading from "$lib/components/Loading.svelte";
   import SaveBar from "$lib/components/SaveBar.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
-  import ShortFormDialog from "$lib/components/ShortFormDialog.svelte";
   import AccessPart from "./AccessPart.svelte";
   import FromWhere from "./FromWhere.svelte";
   import ChoiceDialog from "./ChoiceDialog.svelte";
+  import GrantDialog from "./GrantDialog.svelte";
   import { changesOf, countOf, draftOf, pipelineFacts, pipelineOf, type AccessDraft, type Level } from "./access";
   import UsersIcon from "@lucide/svelte/icons/users-round";
   import UploadIcon from "@lucide/svelte/icons/upload";
@@ -47,7 +48,7 @@
   // Usernames for the add dialogs, and who signs in with single sign-on (cannot publish).
   const users = new Resource(() => api.users.list({ limit: 200 }));
 
-  const draft = new Draft<AccessDraft>({ public: false, grants: {}, ci: [], read: [], publish: [] });
+  const draft = new Draft<AccessDraft>({ public: false, ci: [], read: [], publish: [] });
   let ready = $state(false);
   $effect(() => {
     const a = access.data;
@@ -75,7 +76,13 @@
     loading: false,
     error: "",
   });
-  const everyone = $derived(Object.entries(d.grants).map(([username, level]) => ({ username, level })).sort((a, b) => a.username.localeCompare(b.username)));
+  // The people given access, as the server answers them; a publisher can download too, so download.people holds everyone.
+  const everyone = $derived(
+    (access.data?.download.people ?? [])
+      .filter((p) => p.via === "permission")
+      .map((p): PersonRow => ({ username: p.username, level: p.level }))
+      .sort((a, b) => a.username.localeCompare(b.username)),
+  );
   // Each person shows once: a publisher can download too, so the Download list holds only the rest.
   const downloaders = sourceOf<PersonRow>(() => everyone.filter((p) => p.level === "read"));
   const publishers = sourceOf<PersonRow>(() => everyone.filter((p) => p.level === "write"));
@@ -92,36 +99,66 @@
   const newPipeline = $derived(href("/settings/ci-pipelines/new", { repo: repo.name, back: repoSettingsPath(repo.name, "access") }));
 
   const personHref = (name: string) => href(`/settings/people/${encodeURIComponent(name)}`);
-  const setLevel = (name: string, level: Level | undefined) => {
-    const g = { ...draft.value.grants };
-    if (level) g[name] = level;
-    else delete g[name];
-    draft.value.grants = g;
-  };
+  const peopleCount = (n: number) => plural(n, "person", "people");
+  const verbOf = (level: Level) => (level === "write" ? "publish to" : "download from");
 
-  // --- add a person ---
-  let adding = $state<null | "download" | "publish">(null);
+  // --- the access of people: changes apply at once ---
+  let pickedRead = $state(new Set<string>());
+  let pickedWrite = $state(new Set<string>());
+  let busy = $state(false);
+
+  async function afterPeopleChange() {
+    pickedRead = new Set();
+    pickedWrite = new Set();
+    await access.reload();
+    onChanged();
+  }
+
+  async function changeTo(names: string[], level: Level) {
+    busy = true;
+    try {
+      await api.permissions.set(names, [repo.name], level);
+      toast.success(`${peopleCount(names.length)} can now ${verbOf(level)} ${repo.name}.`);
+      await afterPeopleChange();
+    } catch (e) {
+      toast.error(errorMessage(e));
+    } finally {
+      busy = false;
+    }
+  }
+
+  let removing = $state<string[]>([]);
+  let removeOpen = $state(false);
+  function askRemove(names: Set<string>) {
+    removing = [...names].sort((a, b) => a.localeCompare(b));
+    removeOpen = true;
+  }
+  async function removeAccess() {
+    const names = removing;
+    await api.permissions.delete(names, [repo.name]);
+    toast.success(`Removed the access of ${peopleCount(names.length)} to ${repo.name}.`);
+    await afterPeopleChange();
+  }
+
+  // --- add people ---
+  let addLevel = $state<Level>("read");
   let addOpen = $state(false);
-  let addName = $state("");
-  function openAdd(scope: "download" | "publish") {
-    adding = scope;
-    addName = "";
+  function openAdd(level: Level) {
+    addLevel = level;
     addOpen = true;
   }
-  const addProblem = $derived.by(() => {
-    const name = addName.trim();
-    if (!name) return "";
-    const u = userOf(name);
-    if (!u && users.data && users.data.next === null) return `No person named ${name} exists. Add them in People first.`;
-    if (u?.is_admin) return `${name} is an administrator and can always download and publish.`;
-    if (u?.disabled) return `${name} is turned off. Turn the account on in People first.`;
-    const level: Level = adding === "publish" ? "write" : "read";
-    if (d.grants[name] === "write") return level === "read" ? `${name} can publish, so ${name} can download already.` : `${name} is in the list already.`;
-    if (level === "read" && d.grants[name]) return `${name} is in the list already.`;
-    if (level === "write" && u && u.kind !== "local") return `${name} signs in with single sign-on, and such accounts cannot publish. They can download.`;
-    return "";
-  });
-  const candidates = $derived((users.data?.items ?? []).filter((u) => !u.is_admin && !u.disabled && !d.grants[u.username]));
+  const granted = $derived(new Set(everyone.map((p) => p.username)));
+  const candidates = $derived(
+    (users.data?.items ?? [])
+      .filter((u) => !u.is_admin && !u.disabled && !granted.has(u.username))
+      .sort((a, b) => a.username.localeCompare(b.username))
+      .map((u) => ({ id: u.username, label: u.username, detail: u.email || undefined })),
+  );
+  async function give(names: string[], level: Level) {
+    await api.permissions.set(names, [repo.name], level);
+    toast.success(`${peopleCount(names.length)} can now ${verbOf(level)} ${repo.name}.`);
+    await afterPeopleChange();
+  }
 
   // --- save ---
   let confirmOpen = $state(false);
@@ -130,7 +167,6 @@
   const narrows = $derived.by(() => {
     const s = draft.saved;
     if (s.public && !d.public) return true;
-    if (Object.entries(s.grants).some(([u, l]) => !d.grants[u] || (l === "write" && d.grants[u] === "read"))) return true;
     if (s.ci.some((x) => !d.ci.includes(x))) return true;
     // A network rule narrows when it starts, or when it loses an entry and still holds others.
     const key = (r: { kind: string; value: string }) => `${r.kind}:${r.value}`;
@@ -143,12 +179,7 @@
     const saved = draft.saved;
     const v = $state.snapshot(draft.value) as AccessDraft;
     try {
-      if (v.public !== saved.public) await api.repos.update(repo.name, { anonymous_read: v.public });
-      for (const u of new Set([...Object.keys(saved.grants), ...Object.keys(v.grants)])) {
-        if (saved.grants[u] === v.grants[u]) continue;
-        if (v.grants[u]) await api.repos.permissions.set(repo.name, u, v.grants[u]);
-        else await api.repos.permissions.delete(repo.name, u);
-      }
+      if (v.public !== saved.public) await api.repos.setPublic([repo.name], v.public);
       if (JSON.stringify([saved.read, saved.publish]) !== JSON.stringify([v.read, v.publish]))
         await api.repos.ipRules.set(repo.name, { read: v.read, publish: v.publish });
       const touched = [...v.ci.filter((x) => !saved.ci.includes(x)), ...saved.ci.filter((x) => !v.ci.includes(x))];
@@ -188,31 +219,24 @@
       <Separator />
       <AccessPart title="People who can download" help="People who can publish can download too. {adminsHelp(a.download.admins, 'download')}">
         {#snippet actions()}
-          <Button variant="outline" size="sm" onclick={() => openAdd("download")}><PlusIcon />Add person</Button>
+          <Button variant="outline" size="sm" onclick={() => openAdd("read")}><PlusIcon />Add people</Button>
         {/snippet}
         <DataTable
           source={downloaders}
           caption="People who can download from {repo.name}"
           key={(p) => p.username}
-          columns={[{ label: "Person", grow: true }, { label: "", srLabel: "Actions" }]}
+          columns={[{ label: "Person", grow: true }]}
+          bind:picked={pickedRead}
+          pickLabel={(p) => p.username}
         >
           {#snippet row(p)}
             <Cell grow strong class="max-sm:min-w-20">
-              <span class="flex min-w-0 items-center gap-2">
-                {#if !draft.saved.grants[p.username]}<span aria-hidden="true" class="size-1.5 shrink-0 rounded-full bg-warning" title="Not saved yet"></span><span class="sr-only">Not saved:</span>{/if}
-                <a class="truncate underline-offset-4 hover:underline" href={personHref(p.username)}>{p.username}</a>
-              </span>
+              <a class="block truncate underline-offset-4 hover:underline" href={personHref(p.username)}>{p.username}</a>
             </Cell>
-            <Cell actions>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                class="hover:text-destructive"
-                title="Remove"
-                aria-label="Remove the access of {p.username}"
-                onclick={() => setLevel(p.username, undefined)}><XIcon /></Button
-              >
-            </Cell>
+          {/snippet}
+          {#snippet bulk()}
+            <Button variant="outline" size="sm" disabled={busy} onclick={() => changeTo([...pickedRead], "write")}>Change to Publish</Button>
+            <Button variant="ghost" size="sm" class="hover:bg-destructive/10 hover:text-destructive" disabled={busy} onclick={() => askRemove(pickedRead)}>Remove access</Button>
           {/snippet}
           {#snippet empty()}
             <CompactEmpty
@@ -234,35 +258,30 @@
     <div class="flex flex-col gap-6">
       <AccessPart title="People who can publish" help="People in this list publish from a computer or the browser. {adminsHelp(a.publish.admins, 'publish')}">
         {#snippet actions()}
-          <Button variant="outline" size="sm" onclick={() => openAdd("publish")}><PlusIcon />Add person</Button>
+          <Button variant="outline" size="sm" onclick={() => openAdd("write")}><PlusIcon />Add people</Button>
         {/snippet}
         <DataTable
           source={publishers}
           caption="People who can publish to {repo.name}"
           key={(p) => p.username}
-          columns={[{ label: "Person", grow: true }, { label: "", srLabel: "Actions" }]}
+          columns={[{ label: "Person", grow: true }]}
+          bind:picked={pickedWrite}
+          pickLabel={(p) => p.username}
         >
           {#snippet row(p)}
             {@const u = userOf(p.username)}
             <Cell grow strong class="max-sm:min-w-20">
               <span class="flex min-w-0 items-center gap-2">
-                {#if draft.saved.grants[p.username] !== "write"}<span aria-hidden="true" class="size-1.5 shrink-0 rounded-full bg-warning" title="Not saved yet"></span><span class="sr-only">Not saved:</span>{/if}
                 <a class="truncate underline-offset-4 hover:underline" href={personHref(p.username)}>{p.username}</a>
                 {#if u && u.kind !== "local"}
                   <StatusBadge tone="warning" title="Single sign-on accounts hold no publish tokens">Cannot publish: single sign-on</StatusBadge>
                 {/if}
               </span>
             </Cell>
-            <Cell actions>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                class="hover:text-destructive"
-                title="Stop publishing (keeps download)"
-                aria-label="Stop {p.username} from publishing"
-                onclick={() => setLevel(p.username, "read")}><XIcon /></Button
-              >
-            </Cell>
+          {/snippet}
+          {#snippet bulk()}
+            <Button variant="outline" size="sm" disabled={busy} onclick={() => changeTo([...pickedWrite], "read")}>Change to Download</Button>
+            <Button variant="ghost" size="sm" class="hover:bg-destructive/10 hover:text-destructive" disabled={busy} onclick={() => askRemove(pickedWrite)}>Remove access</Button>
           {/snippet}
           {#snippet empty()}
             <CompactEmpty icon={UploadIcon} text="Add the people who release." />
@@ -322,21 +341,31 @@
 
 <ConfirmDialog bind:open={confirmOpen} title="Save the access of {repo.name}?" confirmLabel="Save access" destructive={narrows} {changes} onConfirm={save} />
 
-<ShortFormDialog
+<ConfirmDialog
+  bind:open={removeOpen}
+  title="Remove the access of {peopleCount(removing.length)} to {repo.name}?"
+  description="{someNames(removing)}."
+  confirmLabel="Remove access of {peopleCount(removing.length)}"
+  destructive
+  changes={[
+    `${removing.length === 1 ? "This person" : "These people"} can no longer download from or publish to ${repo.name}${draft.saved.public ? ", except downloads, because it is public" : ""}`,
+    "Their read tokens lose this access too",
+  ]}
+  onConfirm={removeAccess}
+/>
+
+<GrantDialog
   bind:open={addOpen}
-  title={adding === "publish" ? `Let a person publish to ${repo.name}` : `Give a person access to ${repo.name}`}
-  submitLabel="Add person"
-  canSubmit={!!addName.trim() && !addProblem}
-  onSubmit={() => setLevel(addName.trim(), adding === "publish" ? "write" : "read")}
->
-  <FormField label="Username" for="{id}-add-user" error={addProblem || undefined}>
-    <Input id="{id}-add-user" list="{id}-people" autocomplete="off" spellcheck={false} bind:value={addName} />
-  </FormField>
-  <datalist id="{id}-people">
-    {#each candidates as u (u.id)}<option value={u.username}></option>{/each}
-  </datalist>
-  <p class="text-meta text-muted-foreground">Save the page to keep the change.</p>
-</ShortFormDialog>
+  title="Give people access to {repo.name}"
+  noun={["person", "people"]}
+  items={candidates}
+  loading={users.loading && !users.data}
+  error={users.error ? `The people did not load: ${users.error}` : ""}
+  none="Everyone who is not an administrator has access to {repo.name} already."
+  startLevel={addLevel}
+  submitLabel={(n) => (n ? `Give ${peopleCount(n)} access` : "Give access")}
+  onGive={give}
+/>
 
 <ChoiceDialog
   bind:open={ciOpen}

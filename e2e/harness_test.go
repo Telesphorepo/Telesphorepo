@@ -569,7 +569,7 @@ func (s *Server) CreateRepo(t testing.TB, name, format string, anon bool, config
 // SetPermission grants level ("read" | "write") on repo to user.
 func (s *Server) SetPermission(t testing.TB, repo, user, level string) {
 	t.Helper()
-	s.MustAPI(t, http.MethodPut, "/api/repos/"+repo+"/permissions/"+user, map[string]string{"level": level}, s.Admin(), nil)
+	s.MustAPI(t, http.MethodPut, "/api/permissions", map[string]any{"users": []string{user}, "repos": []string{repo}, "level": level}, s.Admin(), nil)
 }
 
 // CreateToken creates a read token for user (signed in to the UI with user/pass, see SignIn)

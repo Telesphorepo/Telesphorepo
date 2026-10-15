@@ -2,7 +2,9 @@
   List view of a plain folder: folders first, then files, one dense line each (name, size, when and
   by whom it was published). Checksum and signature files are not rows: they are attributes of
   their file, shown in its details. A click on a row opens the folder or shows the file's details.
-  Pages load by key ("Load more"). The parent keys it by folder.
+  Pages load by key ("Load more"). The parent keys it by folder. People who can delete pick rows
+  (files and folders mix) and delete them together; the parent holds the pick and shows its
+  summary in the details column.
 -->
 <script lang="ts" module>
   /** A file, or a folder (path ends with "/"), to delete. */
@@ -25,7 +27,6 @@
   import FolderIcon from "@lucide/svelte/icons/folder";
   import FileIcon from "@lucide/svelte/icons/file";
   import FolderOpenIcon from "@lucide/svelte/icons/folder-open";
-  import Trash2Icon from "@lucide/svelte/icons/trash-2";
   import UploadIcon from "@lucide/svelte/icons/upload";
 
   let {
@@ -35,6 +36,8 @@
     canWrite,
     canUpload,
     compact,
+    picked = $bindable(new Set<string>()),
+    onPicked,
     onDelete,
   }: {
     repo: Repo;
@@ -46,7 +49,12 @@
     canUpload: boolean;
     /** The details column is open: fewer columns. */
     compact: boolean;
-    onDelete: (t: DeleteTarget) => void;
+    /** The paths of the rows picked for a bulk delete. */
+    picked?: Set<string>;
+    /** Gets the picked rows that are loaded, whenever the pick or the rows change. */
+    onPicked: (rows: TreeNode[]) => void;
+    /** Deletes the picked files and folders (after a confirm). */
+    onDelete: (targets: DeleteTarget[]) => void;
   } = $props();
 
   /* svelte-ignore state_referenced_locally */
@@ -81,15 +89,29 @@
     more: list.more,
   };
 
+  const pickedRows = $derived(rows.filter((e) => picked.has(e.path)));
+  $effect(() => {
+    onPicked(pickedRows);
+    return () => onPicked([]);
+  });
+
   const label = (e: TreeNode) => e.name.replace(/\/$/, "");
   const columns = $derived<Column[]>([
     { label: "Name", grow: true },
     { label: "Size", align: "right" },
     { label: "Published", align: "right", hideOnPhone: true },
     ...(compact ? [] : [{ label: "Published by", hideOnPhone: true }]),
-    ...(canWrite ? [{ label: "", srLabel: "Actions" }] : []),
   ]);
 </script>
+
+{#snippet bulkActions()}
+  <Button
+    variant="ghost"
+    size="sm"
+    class="hover:bg-destructive/10 hover:text-destructive"
+    onclick={() => onDelete(pickedRows.map((e) => ({ path: e.path, dir: e.type === "dir" })))}>Delete</Button
+  >
+{/snippet}
 
 <DataTable
   {source}
@@ -98,6 +120,9 @@
   key={(e) => e.path}
   href={(e) => href(filesPath(repo.name, e.path))}
   selected={(e) => e.type === "file" && e.path === selected}
+  bind:picked
+  pickLabel={label}
+  bulk={canWrite ? bulkActions : undefined}
 >
   {#snippet row(e)}
     <Cell grow>
@@ -119,20 +144,6 @@
     {#if !compact}
       <Cell hideOnPhone muted class="max-w-56">
         {#if e.provenance}<ProvenanceInline p={e.provenance} />{:else if e.uploaded_by}<Truncate text={e.uploaded_by} />{/if}
-      </Cell>
-    {/if}
-    {#if canWrite}
-      <Cell actions>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          class="text-muted-foreground hover:text-destructive"
-          aria-label={e.type === "dir" ? `Delete the folder ${label(e)}` : `Delete ${label(e)}`}
-          title={e.type === "dir" ? "Delete the folder" : "Delete the file"}
-          onclick={() => onDelete({ path: e.path, dir: e.type === "dir" })}
-        >
-          <Trash2Icon />
-        </Button>
       </Cell>
     {/if}
   {/snippet}

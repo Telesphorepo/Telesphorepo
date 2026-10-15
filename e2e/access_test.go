@@ -86,7 +86,7 @@ func TestEffectiveAccess(t *testing.T) {
 	s.SetPermission(t, repo, writer, "write")
 	s.SetPermission(t, repo, gone, "write")
 	s.SetPermission(t, repo, boss, "read") // an admin's grant changes nothing
-	s.MustAPI(t, http.MethodPatch, "/api/users/"+gone, map[string]any{"disabled": true}, s.Admin(), nil)
+	s.MustAPI(t, http.MethodPatch, "/api/users", map[string]any{"usernames": []string{gone}, "disabled": true}, s.Admin(), nil)
 
 	t.Run("people and admins", func(t *testing.T) {
 		a := getAccess(t, s, repo, "")
@@ -153,7 +153,7 @@ func TestEffectiveAccess(t *testing.T) {
 		wantSentence(t, "download", a.Download.Sentence, "2 people, only from 10.0.0.0/8.")
 		wantSentence(t, "publish", a.Publish.Sentence, "1 person and 1 CI pipeline (acme/app, branch main), only from Office.")
 
-		s.MustAPI(t, http.MethodPatch, "/api/repos/"+repo, map[string]any{"anonymous_read": true}, s.Admin(), nil)
+		s.MustAPI(t, http.MethodPatch, "/api/repos", map[string]any{"names": []string{repo}, "anonymous_read": true}, s.Admin(), nil)
 		a = getAccess(t, s, repo, "")
 		wantSentence(t, "public download", a.Download.Sentence, "anyone, only from 10.0.0.0/8.")
 		s.MustAPI(t, http.MethodPut, "/api/repos/"+repo+"/ip-rules", map[string]any{"read": []any{}, "publish": []any{}}, s.Admin(), nil)

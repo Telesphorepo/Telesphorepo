@@ -336,7 +336,8 @@ func TestIPRules(t *testing.T) {
 	if st, b := apiHeaders(t, s, http.MethodPut, "/raw/"+repo+"/doc/two.txt", []byte("two"), sess.Auth(), xff("198.51.100.4")); st != http.StatusCreated {
 		t.Fatalf("PUT from an allowed address: status %d: %s", st, b)
 	}
-	st, b = apiHeaders(t, s, http.MethodDelete, "/api/repos/"+repo+"/files?path=doc/two.txt", nil, s.Admin(), xff("192.0.2.1"))
+	st, b = apiHeaders(t, s, http.MethodPost, "/api/repos/"+repo+"/files/delete",
+		map[string][]string{"paths": {"doc/two.txt"}}, s.Admin(), xff("192.0.2.1"))
 	wantDenied(t, "admin delete from a refused address", st, b, "publish")
 	st, b = apiHeaders(t, s, http.MethodPost, "/api/publish/sessions/manual",
 		map[string]string{"repo": repo, "totp_code": s.TOTPCode(t, w)}, s.LoginTOTP(t, w), xff("192.0.2.1"))

@@ -29,6 +29,7 @@ the checklist below. The sitemap and the Settings navigation come from
 | `lib/view.svelte.ts` | `ViewChoice` and `viewLook`: List, Tree, Columns, Cover Flow, remembered per user. |
 | `lib/load.svelte.ts` | `Resource` (one request), `Keyset` (a paged list), `listOf()` and `TableSource` (what `DataTable` reads). |
 | `lib/format.ts` | `formatSize`, `formatRelative`, `formatDateTime`, `formatCount`. |
+| `lib/words.ts` | `count` ("12 repositories"), `selectedText` ("12 selected"), `someNames` (the first five names "and 7 more"): the words of bulk actions. |
 | `lib/nav.ts` | The Settings sidebar: four groups and their items; `navPlace()` finds the group and item of a path. |
 | `lib/utils.ts` | `cn()`: joins classes; it knows that `text-title` … `text-meta` are font sizes, not colors. |
 | `lib/layouts/` | `AppShell` (top bar + container + Settings sidebar), `TopBar`, `AccountMenu`, `GlobalSearch`, `SettingsNav`, `UnsavedGuard` (the leave question). |
@@ -63,12 +64,12 @@ server and the clients print keep working: `/#/device?code=ABCD-EFGH`, `/#/setti
 | `/settings/devices` | `account/Devices` | settings | user | Devices (admins see every user's). |
 | `/settings/tokens` | `account/Tokens` | settings | user | Tokens: read tokens and publish tokens, one page with two sections. |
 | **Settings › Repositories** | | | | |
-| `/settings/repositories` | `repositories/AllRepositories` | settings | admin | Every repository; a row opens its settings. |
+| `/settings/repositories` | `repositories/AllRepositories` | settings | admin | Every repository; a row opens its settings. Picked rows: Make public, Make private, Delete. |
 | `/settings/repositories/new` | `repositories/NewRepository` | settings | admin | Create a repository: name, format, description, visibility; Debian: architectures and the signing key. |
 | `/settings/repositories/:name/:tab` | `settings/repos/RepoSettings` | settings | admin | A repository's settings: `overview`, `access`, `format`, `signing` (Debian); Delete is a header action. Breadcrumbs: Settings › Repositories › maven › Access. |
 | **Settings › People and CI** | | | | |
-| `/settings/people` | `server/People` | settings | admin | Every account with its role; New account opens a short form. A row opens the person. |
-| `/settings/people/:name` | `server/people/Person` | settings | admin | One person: the identity card (avatar, role, sign-in) with the account actions, and the person's access to each repository (add, change the level, remove; saved from the save bar). |
+| `/settings/people` | `server/People` | settings | admin | Every account with its role; New account opens a short form. A row opens the person. Picked rows (not your own): Disable, Enable. |
+| `/settings/people/:name` | `server/people/Person` | settings | admin | One person: the identity card (avatar, role, sign-in) with the account actions, and the person's access to each repository. Give access opens a short form for many repositories; picked rows: Change to Download, Change to Publish, Remove access. Each change applies at once. |
 | `/settings/ci-pipelines` | `server/CIPublishing` | settings | admin | CI pipelines: name, what each accepts, CI system, the repositories it can publish to. A row opens the pipeline. |
 | `/settings/ci-pipelines/new?repo=&back=` | `server/CIPublishingRule` | settings | admin | A new pipeline in four steps: where the job runs; which runs (GitHub repository, branches, tags, workflow file; or Jenkins address and jobs; the token conditions behind a secondary action); repositories; the workflow or Jenkinsfile step. `repo` starts chosen; Create and Cancel return to `back` when it is a `/settings/` path. |
 | `/settings/ci-pipelines/:id` | `server/CIPublishingRule` | settings | admin | Edit, turn off or delete a pipeline. |
@@ -212,7 +213,7 @@ only the repository knows it.
 | `PageHeader` | `title`, `description?` (one sentence), `crumbs?`, snippets `meta?` (badges next to the title), `actions?`. The page's only h1, with the breadcrumbs above it. On a Settings page the breadcrumbs come from the sidebar (Settings › group › item › title); `crumbs` replaces the steps after the group when the page sits deeper (`[{label: "maven", href}, {label: "Access"}]`). A Browse page shows breadcrumbs only when it passes `crumbs` (its whole trail). `back` is deprecated: use `crumbs`. |
 | `Breadcrumbs` | `items: Crumb[]` (`{label, href?}`; the last is the current page). `PageHeader` renders it; use it directly only outside a page header (the Files tab's folder path). |
 | `Toolbar` | The row above a table: filters as children, the main action in `end`. |
-| `DataTable` | Every table, at the full content width: `source` (a `Keyset`, or `listOf(resource)`), `columns` (`{label, srLabel?, align?: "right", grow?, hideOnPhone?}`), `caption`, `key`, `href?` (whole-row click), `selected?`, snippets `row(item)` (the cells, as `Cell`s) and `empty?` (a `CompactEmpty`). Zebra stripes, one fixed row height (40px, one line), rounded row ends, a fill on the whole row under the pointer, the selected fill on the `selected` row. Loading (`Loading` in the space of four rows, after 300 ms; a reload keeps the current rows) and error (a row with Try again) show under the headings; an empty table is never drawn: `empty` shows in its place, without column headings. A `Keyset` gets "Load more". |
+| `DataTable` | Every table, at the full content width: `source` (a `Keyset`, or `listOf(resource)`), `columns` (`{label, srLabel?, align?: "right", grow?, hideOnPhone?}`), `caption`, `key`, `href?` (whole-row click), `selected?`, snippets `row(item)` (the cells, as `Cell`s) and `empty?` (a `CompactEmpty`). Zebra stripes, one fixed row height (40px, one line), rounded row ends, a fill on the whole row under the pointer, the selected fill on the `selected` row. Loading (`Loading` in the space of four rows, after 300 ms; a reload keeps the current rows) and error (a row with Try again) show under the headings; an empty table is never drawn: `empty` shows in its place, without column headings. A `Keyset` gets "Load more". Bulk actions: `bind:picked` (a `Set` of row keys), `pickable?(item)`, `pickLabel?(item)` (the checkbox's name) and snippet `bulk` (the actions). Each row then gets a checkbox in a first column, a 40px hit target over the full row height; a row that is not pickable has an empty cell. The header checkbox picks every pickable loaded row and clears them on the next click ("Select the 50 rows shown" for a keyset). While rows are picked, a bar of the header's height lies over the headings: "12 selected", the `bulk` actions, "Select all 50", "Clear". Shift+click picks a range; Esc clears the pick when no dialog is open. `picked` is not `selected`. After an action, reload the table, empty `picked` and say what changed in a toast. |
 | `Cell` | One cell of a `DataTable` row: `text?` (one line that truncates, full value in a tooltip), `copy?` (`true` or the value to copy: a copy button that shows on row hover), `copyLabel?`, `grow?` (the column that takes the free width, at least 10rem), `num?` (numbers, sizes, times: right-aligned, tabular numerals), `actions?` (the row's buttons, right-aligned), `strong?` (the row's name), `muted?`, `hideOnPhone?`. Children for anything else (a badge, a `RelativeTime`). Use `Table.Cell` only for a control that `Cell` does not cover, and keep it one line. |
 | `Truncate` | `text`, `copy?`, `copyLabel?`, `class?`: one line that never wraps; "…" and a tooltip when it is cut (a path breaks after its slashes in the tooltip); an optional copy button. `Cell text` uses it; use it directly for a long value outside a table. |
 | `RepoTable` | The repositories table (Browse home, All repositories): name, a lock after a private one, and the description on one line; format, files, size, last publish. On a phone the format icon, the name and the last publish. |
@@ -232,7 +233,7 @@ only the repository knows it.
 | `Step` | `n`, `title`, `description?`, `done?`, snippets `actions?` and `footer?`. One numbered step of a setup, as a `Section` whose title starts with its number; a done step shows a check in place of the number. |
 | `CompactEmpty` | `icon?`, `title?`, `state?`, `text`; children are the one action. An empty list or a feature that is not set up, as one row: a plain icon, "Passkey · Not set up", one sentence, one action. Pass it as `DataTable` `empty`. Inside a card it is a plain row; outside a card it has a dashed frame. Several rows in one card are parted by thin dividers, never a frame each. |
 | `FeltTicket` | `top`, `bottom`, `serial`, `label`, `moment` (`none`, `print`, `punch`, `tear`). The brand felt ticket with printed lines, for the ticket moments only, at 320px wide or more. |
-| `ConfirmDialog` | `bind:open`, `title` (a question), `changes: string[]`, `confirmLabel`, `destructive?`, `onConfirm` (async; errors stay in the dialog). |
+| `ConfirmDialog` | `bind:open`, `title` (a question), `description?`, `changes: string[]`, `confirmLabel`, `destructive?`, `typeToConfirm?` (a field; the confirm button stays off until it holds this text: a count or a name), `onConfirm` (async; errors stay in the dialog). A bulk delete names the count and the first five names (`someNames` in `lib/words.ts`): "Delete 12 repositories? oasis, plex, scissors, enginehub, worldedit and 7 more." |
 | `ShortFormDialog` | `bind:open`, `title`, `description?`, `submitLabel`, `canSubmit?`, `onSubmit` (async); at most five `FormField`s as children. |
 | `DetailsColumn` | `title`, `onClose`, snippet `actions?`: the details of the selected row in a 360px column right of the table. On the Files tab the column always shows (the selected file, or else the open folder); Close hides it until the person selects a file or clicks "Show details". |
 | `TabNav` | Tabs that are pages (each tab has its own address): `label`, `items: {label, href, active, icon?}[]`. The open tab fills like a sidebar item; no line under the row; 32px to the content. |
@@ -288,8 +289,9 @@ Every text control fills its cell; a size is one `UnitInput`; a long value spans
 <script lang="ts">
   const draft = new Draft({ description: repo.description, max: "2", unit: "GiB", public: repo.anonymous_read });
   async function save() {
-    const saved = await api.repos.update(repo.name, { description: draft.value.description, anonymous_read: draft.value.public });
-    draft.commit({ ...draft.value, description: saved.description, public: saved.anonymous_read });
+    const saved = await api.repos.update(repo.name, { description: draft.value.description });
+    if (draft.value.public !== draft.saved.public) await api.repos.setPublic([repo.name], draft.value.public);
+    draft.commit({ ...draft.value, description: saved.description });
     toast.success(`Saved ${repo.name}`);
   }
 </script>
@@ -486,7 +488,10 @@ expires or when the server answers 401.
   `upload/formats.ts`.
 - **Delete** (`pages/repo/FilesTab.svelte`): an admin deletes with the UI session; anyone else
   confirms in `SecondFactorPrompt` first. `delete/DeleteDialog.svelte` counts the files of a
-  folder before the user confirms and says what a Maven or Debian delete leaves behind.
+  folder before the user confirms and says what a Maven or Debian delete leaves behind. In the
+  List view, people who can delete pick rows (files and folders mix); the details column then
+  shows "3 selected" and the size of the picked files, and Delete removes them all after one
+  confirm. Every delete calls `POST /api/repos/{name}/files/delete` (`api.repos.deleteFiles`).
 
 ## Words
 
@@ -497,7 +502,9 @@ unchanged.
 | Say | Not |
 |---|---|
 | Public / Private | Anonymous read; anyone / people with access |
-| Can download / Can publish | Read / write permission |
+| Can download / Can publish (Download / Publish in a choice) | Read / write permission |
+| Make public, Make private, Delete, Disable, Enable, Give access, Remove access, Change to Download / Publish | Other verbs for the same bulk actions (Turn off, Revoke, Grant) |
+| 1 selected / 12 selected (`selectedText` in `lib/words.ts`) | 12 rows checked, 12 items chosen |
 | Read token | Download token, API token |
 | Publish token | Publish session, temporary publish password |
 | Sign-in and security; two-step verification; second step | Second factor, MFA |

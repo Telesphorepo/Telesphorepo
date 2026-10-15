@@ -7,13 +7,18 @@
     <ConfirmDialog bind:open title="Revoke this device?" confirmLabel="Revoke device" destructive
       changes={["Stops the device at once", "Ends its open publish tokens"]}
       onConfirm={() => api.devices.revoke(id)} />
+
+  With `typeToConfirm`, the dialog shows a field, and the confirm button stays off until the
+  field holds exactly that text: "Type 12 to confirm".
 -->
 <script lang="ts">
   import type { Snippet } from "svelte";
   import * as AlertDialog from "$lib/components/ui/alert-dialog";
   import { Button } from "$lib/components/ui/button";
+  import { Input } from "$lib/components/ui/input";
   import { Spinner } from "$lib/components/ui/spinner";
   import ErrorState from "./ErrorState.svelte";
+  import FormField from "./FormField.svelte";
   import { errorMessage } from "$lib/api";
 
   let {
@@ -23,6 +28,7 @@
     changes = [],
     confirmLabel,
     destructive = false,
+    typeToConfirm,
     onConfirm,
     children,
   }: {
@@ -33,19 +39,28 @@
     /** Names the action, e.g. "Delete 3 files"; never "OK". */
     confirmLabel: string;
     destructive?: boolean;
+    /** The text the user types before the confirm button turns on, e.g. a count or a name. */
+    typeToConfirm?: string;
     onConfirm: () => unknown | Promise<unknown>;
-    /** Extra content, e.g. a field the user types to confirm. */
+    /** Extra content, e.g. a note under the changes. */
     children?: Snippet;
   } = $props();
 
+  const id = $props.id();
   let busy = $state(false);
   let error = $state("");
+  let typed = $state("");
+  const typedOk = $derived(typeToConfirm === undefined || typed.trim() === typeToConfirm);
 
   $effect(() => {
-    if (open) error = "";
+    if (open) {
+      error = "";
+      typed = "";
+    }
   });
 
   async function confirm() {
+    if (!typedOk) return;
     busy = true;
     error = "";
     try {
@@ -76,10 +91,23 @@
       </ul>
     {/if}
     {#if children}{@render children()}{/if}
+    {#if typeToConfirm !== undefined}
+      <FormField label="Type {typeToConfirm} to confirm" for="{id}-type">
+        <Input
+          id="{id}-type"
+          autocomplete="off"
+          spellcheck={false}
+          bind:value={typed}
+          onkeydown={(e: KeyboardEvent) => {
+            if (e.key === "Enter" && typedOk && !busy) confirm();
+          }}
+        />
+      </FormField>
+    {/if}
     {#if error}<ErrorState inline {error} />{/if}
     <AlertDialog.Footer>
       <AlertDialog.Cancel disabled={busy}>Cancel</AlertDialog.Cancel>
-      <Button variant={destructive ? "destructive" : "default"} disabled={busy} onclick={confirm}>
+      <Button variant={destructive ? "destructive" : "default"} disabled={busy || !typedOk} onclick={confirm}>
         {#if busy}<Spinner />{/if}
         {confirmLabel}
       </Button>
