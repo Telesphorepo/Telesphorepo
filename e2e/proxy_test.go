@@ -11,10 +11,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/network"
-	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 // CreateProxy creates a proxy repo of format with the remote settings px (remote_url, username,
@@ -85,9 +81,6 @@ func remoteGetCount(t testing.TB, s *Server, prefix string) map[string]int {
 	return out
 }
 
-// caddyImage is the reverse proxy of the tests: a redirector and a proxy with a body limit.
-const caddyImage = "caddy:2.10.2-alpine"
-
 // caddyRedirectConf answers every request on redir:8080 with a redirect to the host recorder
 // (port 8081). The recorder serves the file only to a request without an Authorization header,
 // and answers 403 to a request with one.
@@ -104,22 +97,6 @@ const caddyRedirectConf = `{
 	respond ` + "`redirected file\n`" + ` 200
 }
 `
-
-// startCaddy starts Caddy on :8080 with the Caddyfile conf and the network aliases aliases.
-func startCaddy(t *testing.T, conf, what string, aliases ...string) {
-	t.Helper()
-	c, err := testcontainers.Run(context.Background(), caddyImage,
-		testcontainers.WithLabels(e2eLabels),
-		testcontainers.WithFiles(testcontainers.ContainerFile{Reader: strings.NewReader(conf), ContainerFilePath: "/etc/caddy/Caddyfile", FileMode: 0o644}),
-		testcontainers.WithExposedPorts("8080/tcp"),
-		network.WithNetwork(aliases, TestNetwork),
-		testcontainers.WithWaitStrategy(wait.ForListeningPort("8080/tcp").WithStartupTimeout(time.Minute)),
-	)
-	registerCleanup(t, c, what)
-	if err != nil {
-		t.Fatalf("start %s: %v", what, err)
-	}
-}
 
 // startRedirector starts Caddy with the network aliases redir and recorder.
 func startRedirector(t *testing.T) {

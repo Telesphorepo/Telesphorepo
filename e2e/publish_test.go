@@ -6,21 +6,16 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/cookiejar"
-	"os"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
 	"testing"
 	"time"
-
-	_ "modernc.org/sqlite"
 )
 
 // Publisher credentials: the write gate, second-factor sign-in, the device flow,
@@ -441,72 +436,6 @@ func TestDeviceEnrollmentExpiry(t *testing.T) {
 	}
 	st, b := s.ApproveEnrollment(t, s.LoginTOTP(t, u), u, en.UserCode)
 	wantAPIStatus(t, "approve an expired code", st, b, http.StatusNotFound)
-}
-
-// editDB runs one statement on the server database in data volume vol, while the server is
-// stopped: it copies the database out, edits it with SQLite in the test process and copies it
-// back with its owner and mode. The statement must change at least one row.
-func editDB(t *testing.T, vol, query string, args ...any) {
-	t.Helper()
-	const export = `set -e
-mkdir -p /out
-cp /data/telesphorepo.db /out/db
-if [ -f /data/telesphorepo.db-wal ]; then cp /data/telesphorepo.db-wal /out/wal; else : > /out/wal; fi
-`
-	r := RunClientResult(t, volumeToolImage, ClientOpts{
-		Cmd:     []string{"sh /export.sh"},
-		Files:   []ContainerFile{{Path: "/export.sh", Content: export}},
-		Mounts:  map[string]string{vol: "/data"},
-		User:    "0",
-		Timeout: 5 * time.Minute,
-	})
-	if r.ExitCode != 0 {
-		t.Fatalf("export database from %s: exit %d:\n%s", vol, r.ExitCode, r.Output)
-	}
-	file := filepath.Join(t.TempDir(), "telesphorepo.db")
-	if err := os.WriteFile(file, r.ReadFile(t, "/out/db"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if wal := r.ReadFile(t, "/out/wal"); len(wal) > 0 {
-		if err := os.WriteFile(file+"-wal", wal, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	d, err := sql.Open("sqlite", file)
-	if err != nil {
-		t.Fatal(err)
-	}
-	res, err := d.Exec(query, args...)
-	if err != nil {
-		d.Close()
-		t.Fatalf("edit database: %s: %v", query, err)
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		d.Close()
-		t.Fatalf("edit database: %s changed no row", query)
-	}
-	// Fold the WAL into the main file, so that one file carries the whole database.
-	for _, pragma := range []string{"PRAGMA wal_checkpoint(TRUNCATE)", "PRAGMA journal_mode=DELETE"} {
-		if _, err := d.Exec(pragma); err != nil {
-			d.Close()
-			t.Fatalf("edit database: %s: %v", pragma, err)
-		}
-	}
-	if err := d.Close(); err != nil {
-		t.Fatal(err)
-	}
-	b, err := os.ReadFile(file)
-	if err != nil {
-		t.Fatal(err)
-	}
-	VolumeExec(t, vol, `set -e
-owner=$(stat -c %u:%g /data/telesphorepo.db)
-cp /new.db /data/telesphorepo.db
-chown "$owner" /data/telesphorepo.db
-chmod 0600 /data/telesphorepo.db
-rm -f /data/telesphorepo.db-wal /data/telesphorepo.db-shm
-`, ContainerFile{Path: "/new.db", Content: string(b)})
 }
 
 // trustPolicy is the body of POST /api/publish/trusts and PATCH /api/publish/trusts/{id}.

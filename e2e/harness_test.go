@@ -8,6 +8,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -19,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	osexec "os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -35,6 +37,7 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/network"
 	"github.com/testcontainers/testcontainers-go/wait"
+	_ "modernc.org/sqlite"
 )
 
 // Shared named volumes for build-tool caches.
@@ -280,6 +283,72 @@ func VolumeExec(t testing.TB, vol, script string, files ...ContainerFile) string
 		t.Fatalf("volume %s: script exited %d:\n%s\n%s", vol, code, script, out)
 	}
 	return out
+}
+
+// editDB runs one statement on the server database in data volume vol, while the server is
+// stopped: it copies the database out, edits it with SQLite in the test process and copies it
+// back with its owner and mode. The statement must change at least one row.
+func editDB(t testing.TB, vol, query string, args ...any) {
+	t.Helper()
+	const export = `set -e
+mkdir -p /out
+cp /data/telesphorepo.db /out/db
+if [ -f /data/telesphorepo.db-wal ]; then cp /data/telesphorepo.db-wal /out/wal; else : > /out/wal; fi
+`
+	r := RunClientResult(t, volumeToolImage, ClientOpts{
+		Cmd:     []string{"sh /export.sh"},
+		Files:   []ContainerFile{{Path: "/export.sh", Content: export}},
+		Mounts:  map[string]string{vol: "/data"},
+		User:    "0",
+		Timeout: 5 * time.Minute,
+	})
+	if r.ExitCode != 0 {
+		t.Fatalf("export database from %s: exit %d:\n%s", vol, r.ExitCode, r.Output)
+	}
+	file := filepath.Join(t.TempDir(), "telesphorepo.db")
+	if err := os.WriteFile(file, r.ReadFile(t, "/out/db"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if wal := r.ReadFile(t, "/out/wal"); len(wal) > 0 {
+		if err := os.WriteFile(file+"-wal", wal, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	d, err := sql.Open("sqlite", file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := d.Exec(query, args...)
+	if err != nil {
+		d.Close()
+		t.Fatalf("edit database: %s: %v", query, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		d.Close()
+		t.Fatalf("edit database: %s changed no row", query)
+	}
+	// Fold the WAL into the main file, so that one file carries the whole database.
+	for _, pragma := range []string{"PRAGMA wal_checkpoint(TRUNCATE)", "PRAGMA journal_mode=DELETE"} {
+		if _, err := d.Exec(pragma); err != nil {
+			d.Close()
+			t.Fatalf("edit database: %s: %v", pragma, err)
+		}
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	VolumeExec(t, vol, `set -e
+owner=$(stat -c %u:%g /data/telesphorepo.db)
+cp /new.db /data/telesphorepo.db
+chown "$owner" /data/telesphorepo.db
+chmod 0600 /data/telesphorepo.db
+rm -f /data/telesphorepo.db-wal /data/telesphorepo.db-shm
+`, ContainerFile{Path: "/new.db", Content: string(b)})
 }
 
 var sha256sumLineRe = regexp.MustCompile(`(?m)^([0-9a-f]{64})  \./(\S+)$`)
@@ -1333,6 +1402,25 @@ func (s *Server) PublishAuth(t testing.TB, user, repo string) Basic {
 func (s *Server) ManualSession(t testing.TB, sess *Session, user, repo string) (int, []byte) {
 	t.Helper()
 	return s.API(t, http.MethodPost, "/api/publish/sessions/manual", map[string]string{"repo": repo}, s.TOTPProof(t, sess, user))
+}
+
+// SetupCode is the answer of POST /api/publish/setup-codes.
+type SetupCode struct {
+	Code      string    `json:"code"`
+	Link      string    `json:"link"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// NewSetupCode makes a setup code of user for repo the way the Publish tab does: a UI session of
+// user and a fresh TOTP code.
+func (s *Server) NewSetupCode(t testing.TB, user, repo string) SetupCode {
+	t.Helper()
+	var c SetupCode
+	s.MustAPI(t, http.MethodPost, "/api/publish/setup-codes", map[string]string{"repo": repo}, s.TOTPProof(t, s.LoginTOTP(t, user), user), &c)
+	if !strings.HasPrefix(c.Code, "trsu_") || c.Link != s.InternalURL+"/#/setup/"+c.Code {
+		t.Fatalf("POST /api/publish/setup-codes for %s: %+v, want a trsu_ code and the link %s/#/setup/<code>", repo, c, s.InternalURL)
+	}
+	return c
 }
 
 // OIDCSession exchanges a CI identity token for a publish session for repo.

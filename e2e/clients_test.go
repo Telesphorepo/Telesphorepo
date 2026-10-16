@@ -9,10 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	osexec "os/exec"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -25,13 +21,38 @@ import (
 )
 
 // Client images and helpers that several zones share: Maven projects, Debian packages and apt,
-// curl for raw files, and the project setup scripts.
+// curl for raw files, Docker in Docker, Helm, ORAS and the Caddy reverse proxy.
 
 const (
-	mavenImage = "maven:3.9.16-eclipse-temurin-21"
-	debImage   = "debian:trixie-20261005"
-	curlImage  = "curlimages/curl:8.16.0"
+	mavenImage  = "maven:3.9.16-eclipse-temurin-21"
+	gradleImage = "gradle:9.8.1-jdk21"
+	debImage    = "debian:trixie-20261005"
+	curlImage   = "curlimages/curl:8.16.0"
+	orasImage   = "ghcr.io/oras-project/oras:v1.3.4"
+	helmImage   = "alpine/helm:4.3.1"
+	// caddyImage is the reverse proxy of the tests: a redirector, a proxy with a body limit and a
+	// stub server.
+	caddyImage = "caddy:2.10.2-alpine"
 )
+
+// registryHost is the registry host of s as Docker names it: its network alias and port.
+func registryHost(s *Server) string { return s.Alias + ":8080" }
+
+// startCaddy starts Caddy on :8080 with the Caddyfile conf and the network aliases aliases.
+func startCaddy(t *testing.T, conf, what string, aliases ...string) {
+	t.Helper()
+	c, err := testcontainers.Run(context.Background(), caddyImage,
+		testcontainers.WithLabels(e2eLabels),
+		testcontainers.WithFiles(testcontainers.ContainerFile{Reader: strings.NewReader(conf), ContainerFilePath: "/etc/caddy/Caddyfile", FileMode: 0o644}),
+		testcontainers.WithExposedPorts("8080/tcp"),
+		network.WithNetwork(aliases, TestNetwork),
+		testcontainers.WithWaitStrategy(wait.ForListeningPort("8080/tcp").WithStartupTimeout(time.Minute)),
+	)
+	registerCleanup(t, c, what)
+	if err != nil {
+		t.Fatalf("start %s: %v", what, err)
+	}
+}
 
 // mavenSettingsXML returns a settings.xml with one server (id "telesphorepo") and the
 // maven-default-http-blocker mirror neutralised so plain-http repos on the test network work.
@@ -300,22 +321,6 @@ func (d *Dind) CopyFile(t testing.TB, src, dst string, mode int64) {
 	if err := d.c.CopyFileToContainer(context.Background(), src, dst, mode); err != nil {
 		t.Fatalf("copy %s into docker in docker: %v", dst, err)
 	}
-}
-
-// BuildHelper builds the Telesphorepo CLI (cmd/telesphorepo) for Linux on the architecture of the
-// test, without cgo, under the name of its Docker credential helper mode, and returns the path of
-// the binary.
-func BuildHelper(t testing.TB) string {
-	t.Helper()
-	out := filepath.Join(t.TempDir(), "docker-credential-telesphorepo")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	cmd := osexec.CommandContext(ctx, "go", "build", "-trimpath", "-o", out, "github.com/Telesphorepo/Telesphorepo/cmd/telesphorepo")
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+runtime.GOARCH)
-	if b, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("build the credential helper: %v\n%s", err, b)
-	}
-	return out
 }
 
 // DockerScratchImage returns shell commands that write a build context in the new folder dir:

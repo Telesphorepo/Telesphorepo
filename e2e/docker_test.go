@@ -18,18 +18,7 @@ import (
 // Docker CLI in Docker in Docker, the OCI conformance suite, crane, skopeo, ORAS and Helm, and
 // the removal of layers that no manifest uses.
 
-const (
-	conformanceImage = "ghcr.io/opencontainers/distribution-spec/conformance:v1.1.1"
-	orasImage        = "ghcr.io/oras-project/oras:v1.3.4"
-	helmImage        = "alpine/helm:4.3.1"
-
-	// ciAudience is the audience of the ci-github tokens of the Keycloak fixture when the test
-	// sets no other (keycloak_test.go).
-	ciAudience = "telesphorepo-e2e"
-)
-
-// registryHost is the host:port of s that containers on TestNetwork push to.
-func registryHost(s *Server) string { return s.Alias + ":8080" }
+const conformanceImage = "ghcr.io/opencontainers/distribution-spec/conformance:v1.1.1"
 
 // ociErrorCode returns the code of the first error of an OCI error body, or "".
 func ociErrorCode(b []byte) string {

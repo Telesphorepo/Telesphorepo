@@ -39,6 +39,9 @@ const (
 	oidcLoginPath      = "/api/auth/oidc/login"
 	kcRedirectSentinel = "__REDIRECT_URI__"
 
+	// ciAudience is the audience of the ci-github tokens when the test sets no other.
+	ciAudience = "telesphorepo-e2e"
+
 	kcCIClientID       = "ci-github"
 	kcCIClientSecret   = "e2e-ci-github-secret"
 	kcAudienceSentinel = "__CI_AUDIENCE__"
@@ -106,7 +109,7 @@ func (kc *Keycloak) Start(t testing.TB, redirectURI string) {
 	}
 	audience := kc.CIAudience
 	if audience == "" {
-		audience = "telesphorepo-e2e"
+		audience = ciAudience
 	}
 	realmJSON := strings.NewReplacer(kcRedirectSentinel, redirectURI, kcAudienceSentinel, audience).Replace(string(realm))
 	img := os.Getenv("E2E_KEYCLOAK_IMAGE")

@@ -84,7 +84,7 @@ var testZones = map[string][]string{
 	"core":    {"-tags", "e2e", "-timeout", "60m"},
 	"import":  {"-tags", "import", "-timeout", "45m"},
 	"scale":   {"-tags", "scale", "-run", "TestScale", "-timeout", "60m"},
-	"clients": {"-tags", "clients", "-timeout", "40m"},
+	"clients": {"-tags", "clients", "-timeout", "120m"},
 }
 
 // test runs e2e zones with the detected container engine. An optional first argument picks

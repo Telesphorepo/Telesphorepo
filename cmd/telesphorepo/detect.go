@@ -269,6 +269,8 @@ allprojects {
         extensions.getByType(PublishingExtension::class.java).repositories.maven {
             name = "telesphorepo"
             setUrl(telesphorepoUrl)
+            // A server on plain HTTP (the project file names http://) serves its Maven repos on it.
+            isAllowInsecureProtocol = telesphorepoUrl.startsWith("http://")
             credentials {
                 username = "telesphorepo"
                 password = System.getenv("TELESPHOREPO_TOKEN")
@@ -339,7 +341,12 @@ func runHelm(j *job) error {
 	}
 	// Helm 4 and ORAS push to the upload host when the server has one.
 	host := hosts[len(hosts)-1]
-	return j.runTool([]string{helm, "push", charts[0], "oci://" + host + "/" + j.p.Repo, "--registry-config", regConfig}, env)
+	argv := []string{helm, "push", charts[0], "oci://" + host + "/" + j.p.Repo, "--registry-config", regConfig}
+	if j.c.id.scheme == "http" {
+		// A server on plain HTTP serves its registry on plain HTTP too.
+		argv = append(argv, "--plain-http")
+	}
+	return j.runTool(argv, env)
 }
 
 // helperOnPath returns the PATH entry of the child env with a folder that holds

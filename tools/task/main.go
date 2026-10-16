@@ -34,7 +34,7 @@ const usage = `Usage: go tool task <command>
   test [args]      run the core e2e zone; args pass to go test (e.g. go tool task test -run TestMaven)
   test import      run the import zone: Nexus sources, sync and cut-over (e.g. go tool task test import -run TestNexus)
   test scale       run the scale zone: 100k and 1M seeded assets, p95 must not double
-  test clients     run the clients zone: the Gradle plugin and Maven extension built from the clients repo (E2E_CLIENTS_DIR or a git clone)
+  test clients     run the clients zone: the CLI of cmd/telesphorepo with the real tools in containers
   test all         run the core, import, scale and clients zones one after the other; fails if any fails
   cli [version]    build the six CLI archives that the server serves at /cli/ into internal/clidist/dist
                    (the version defaults to git describe; skipped while cmd/telesphorepo does not exist)

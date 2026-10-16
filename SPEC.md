@@ -1221,8 +1221,8 @@ file. A row is one entry of a table in `cmd/telesphorepo/detect.go`; a new forma
 | Format | Marker | Tool | `publish` runs | Token |
 |---|---|---|---|---|
 | Maven | `pom.xml` | `mvnw` (`mvnw.cmd` on Windows), else `mvn` | `mvn deploy -gs <tmp>/settings.xml -DaltDeploymentRepository=telesphorepo::<base>/maven/<repo>` | `settings.xml` has one `<server>` `telesphorepo` with `<password>${env.TELESPHOREPO_TOKEN}</password>`; the user's `~/.m2/settings.xml` stays in force |
-| Maven (Gradle) | `settings.gradle(.kts)`, `build.gradle(.kts)` | `gradlew` (`gradlew.bat`), else `gradle` | `gradle publish --init-script <tmp>/telesphorepo.init.gradle.kts` | The init script adds the repository `telesphorepo` (URL from `TELESPHOREPO_MAVEN_URL`, password from `TELESPHOREPO_TOKEN`) to each project that applies `maven-publish`; with none it stops the build with the plugin line |
-| Docker (Helm chart) | `Chart.yaml` | `helm` | `helm package <dir> -d <tmp>/chart`, then `helm push <chart>.tgz oci://<host>/<repo> --registry-config <tmp>/config.json` (the upload host when the server has one) | The registry config names `credHelpers` `telesphorepo` for the Docker hosts; the helper answers `TELESPHOREPO_TOKEN` for the hosts of `TELESPHOREPO_DOCKER_HOSTS` |
+| Maven (Gradle) | `settings.gradle(.kts)`, `build.gradle(.kts)` | `gradlew` (`gradlew.bat`), else `gradle` | `gradle publish --init-script <tmp>/telesphorepo.init.gradle.kts` | The init script adds the repository `telesphorepo` (URL from `TELESPHOREPO_MAVEN_URL`, password from `TELESPHOREPO_TOKEN`) to each project that applies `maven-publish` (with `allowInsecureProtocol` for an `http://` server); with none it stops the build with the plugin line |
+| Docker (Helm chart) | `Chart.yaml` | `helm` | `helm package <dir> -d <tmp>/chart`, then `helm push <chart>.tgz oci://<host>/<repo> --registry-config <tmp>/config.json` (the upload host when the server has one; `--plain-http` for an `http://` server) | The registry config names `credHelpers` `telesphorepo` for the Docker hosts; the helper answers `TELESPHOREPO_TOKEN` for the hosts of `TELESPHOREPO_DOCKER_HOSTS` |
 | raw | none | the CLI | `PUT /raw/<repo>/<path>/<file name>` for each FILE; a file of 64 MiB or more goes through `POST /api/repos/{name}/uploads`, `PATCH` chunks of 16 MiB (a failed chunk is sent again from the `received` of the server), and `PUT ...?path=&sha256=&size=` | Bearer session token |
 | Debian | none | the CLI | `PUT /debian/<repo>/upload/<dist>/<component>` for each FILE | Bearer session token |
 
@@ -2656,7 +2656,7 @@ and raw insert asset rows, debian inserts one package and its asset row per unit
 | `go tool task test [go test args]` | Runs the core zone: `go test -tags e2e ./e2e/... -count=1 -v`, 60 min timeout |
 | `go tool task test import [go test args]` | Runs the import zone: `-tags import`, 45 min timeout. It starts a Nexus container |
 | `go tool task test scale [go test args]` | Runs `TestScale` (`-tags scale`, 60 min timeout) |
-| `go tool task test clients [go test args]` | Runs the clients zone: `-tags clients`, 40 min timeout. It builds the Gradle plugin and the Maven extension from the clients repo (`E2E_CLIENTS_DIR`, or a shallow clone of `E2E_CLIENTS_REF`, default `main`) |
+| `go tool task test clients [go test args]` | Runs the clients zone: `-tags clients`, 120 min timeout. It builds the CLI of this repo on the host and runs it in containers with the real tools |
 | `go tool task test all [go test args]` | Runs core, import, scale and clients one after the other. It runs every zone, lists the failed zones and exits non-zero if any failed |
 | `go tool task release [version]` | Builds the UI and the six CLI archives that the server embeds once. Then it cross-compiles each program whose package exists: the CLI (`./cmd/telesphorepo`, with its own `LICENSE`; the install scripts make its second name `docker-credential-telesphorepo`) and the server (`./cmd/telesphorepo-server`) for linux, darwin and windows on amd64 and arm64 (`CGO_ENABLED=0`, `-trimpath`, `-X main.version`). Each binary goes into `bin/release/<program>_<version>_<os>_<arch>.tar.gz` (`.zip` on Windows) with `LICENSE` and `README.md`. The command writes `SHA256SUMS` of every archive. The version defaults to `git describe`. A version given as the argument must be a release version; the command first writes it into each `dev` entry of `changes.toml` (see **Change log**), so the binaries embed the stamped change log |
 | `go tool task gen` | Runs `go tool sqlc generate` for every `internal/**/sqlc.yaml` |
@@ -2770,19 +2770,7 @@ a tag file and of a chart, and `GET /api/docker/{name}/manifest`. `TestFormatDes
 the install step, the Docker config that names the credential helper, and the push in that order,
 with no `docker login`) and the usage snippets. `TestCIWorkflowRoute` also checks the install step
 and `telesphorepo publish` of the GitHub Actions, Jenkinsfile and Jenkins freestyle files, and
-that a publish session of the repo reads its CI file.
-`TestDockerCredentialHelper` (`docker_helper_test.go`) builds the helper for Linux (`BuildHelper`)
-and copies it into Docker in Docker (`Dind.CopyFile`): `login` prints a user code, the test
-approves it through the API, and the login ends with exit 0; `config.json` names the helper for
-the registry host; the device file has the schema of the Java clients (a PKCS#8 Ed25519 key and
-its public key) with mode 600 in a 700 folder; `GET /api/devices` lists the device with the client
-`docker`. Docker pushes and pulls with no `docker login`, and the publish log has a device session
-of that device; the device pulls a private repo where its user holds only `repo.download`, and a
-push there is denied; `get` for another host answers `credentials not found in native keychain`,
-`get` for the registry host a `trx.` proof, a token exchange challenge with no signature, another
-key's signature or a time 10 minutes ago is 401 and one with the device signature gets a nonce
-(and a kept nonce needs no signature), `list` the host, `store` fails. After a revoke `get`
-answers not found, a push fails, and an anonymous pull of a public repo works. The shared OCI helpers
+that a publish session of the repo reads its CI file. The shared OCI helpers
 (`oci_test.go`, tags `e2e` and `import`): `tarImage` (an image of tar layers that Docker unpacks),
 `ociLayout` and `ociIndexLayout` (OCI image layouts for skopeo) and `registryClient` (a push over
 the registry API to any registry). `protocols_test.go` covers
@@ -2790,8 +2778,12 @@ the registry API to any registry). `protocols_test.go` covers
 `TR_TLS_CERT_FILE` and `TR_TLS_KEY_FILE` (`ServerOpts.TLS`) answers HTTPS with HTTP/2, and a Maven
 GET and HEAD carry `X-Checksum-SHA1`, `-MD5` and `-SHA256` of the file, and a range is 206. The
 harness has `ClientOpts.Privileged` and `NoShell` (the image's own entrypoint),
-`ContainerFile.HostPath`, `ServerOpts.Aliases`, `ServerOpts.TLS`, `BuildHelper` and
-`Dind.CopyFile`.
+`ContainerFile.HostPath`, `ServerOpts.Aliases`, `ServerOpts.TLS` and `Dind.CopyFile`.
+`build_test.go` (tags `e2e` and `clients`) builds programs of this repo on the host for Linux on
+the CPU of the test (`CGO_ENABLED=0`): `BuildCLI` (a version, a change log and extra Go files of
+package main), `BuildServer` (a version, a change log, and the CLI archive of the test platform
+or no CLI archives) and `CLIArchive`. They read their changes through `go build -overlay`, so the
+tree on disk stays as it is. `ServerBinary` puts such a server in place of the image's.
 
 **Zones.** A build tag picks the zone, so a run starts only the containers it needs. The harness
 and the client helpers (`harness_test.go`, `main_test.go`, `clients_test.go`) carry every tag.
@@ -2803,7 +2795,7 @@ and networks, and the `telesphorepo-data-*` and `telesphorepo-scale-*` volumes.
 | core | `e2e` | `go tool task test` | Formats (the Docker registry with Docker in Docker too), auth, API, settings, storage move, query plans, the listener protocols |
 | import | `import` | `go tool task test import` | `TestNexus`, with the import of a Nexus docker hosted repo (`nexus_docker_test.go`: the Docker Bearer Token Realm on and `forceBasicAuth` off, so every download answers a Bearer challenge; skopeo pushes an image and a multi-platform index; the sync imports both tags and ignores the blobs; crane pulls both by tag and by digest; a second sync imports nothing) |
 | scale | `scale` | `go tool task test scale` | `TestScale` |
-| clients | `clients` | `go tool task test clients` | `TestClients` (`e2e/publish_clients_test.go`) and `TestSetupPowerShell` (`e2e/setup_clients_test.go`). It needs `git` unless `E2E_CLIENTS_DIR` points at a checkout of the clients repo |
+| clients | `clients` | `go tool task test clients` | The Telesphorepo CLI with the real tools: `TestCLISetup`, `TestCLILogin`, `TestCLIDocker`, `TestCLIMaven`, `TestCLIGradle`, `TestCLICI`, `TestCLIUpload`, `TestCLICompat` and `TestInstall` (`e2e/cli_*_test.go`). It needs Go on the host to build the CLI and the internet for Maven Central, Gradle and the Maven 4 download |
 | all | all tags | `go tool task test all` | Every zone |
 
 **Admin and user calls.** The API changes state only through a UI session, so the suite signs in
@@ -2854,15 +2846,36 @@ for a sign-in older than 5 minutes runs while the other tests run. The test then
 `prompt` and `max_age` from the authorization request, as a provider that ignores them, and
 checks that the callback returns `error=stale_sign_in` and that the code stays pending.
 
-`TestClients` builds the Gradle plugin and the Maven extension in containers, publishes them to
-the test server, and then (1) runs `gradle publish` and `mvn deploy` with no device, approves the
-code that the inline enrollment prints through the API, and checks that the build continues and
-publishes a library (auto publication, no publishing block) and a Gradle plugin, then resolves
-them; it checks that `telesphorepoLogin` and the Maven `login` goal keep the enrolled device, and
-that a deploy to a missing repository says that the repository does not exist; (2) checks that a
-GitHub Actions build without `id-token: write` fails and names it, and publishes as "GitHub
-Actions" with a `jwebserver` container that serves a Keycloak token at
-`ACTIONS_ID_TOKEN_REQUEST_URL`.
+`cli_server_test.go` covers the server side of the CLI with no external tool:
+`TestSetupCodes` (a setup code needs the fresh second factor and `repo.publish`; it enrolls a new
+key or takes the proof of the person's device and answers the repo with its format and kind; a
+used, unknown or expired code answers the problem `setup-code-used` with its `open_url` link; the
+device of another person gets 409 and leaves the code), `TestDeviceSelfRevoke` (`DELETE
+/api/devices/self` with the device signature, a replayed nonce, the end of the sessions and the
+audit event `by: device`), `TestExchangeSession` (the token exchange nonce needs a recent device
+signature and is kept on request; one session per repo per proof, the same session again; a
+format read takes the `trx.` proof as the Basic password or the Bearer value, a write does not)
+and `TestCLIDownloads` (the six archives, `SHA256SUMS`, the URL and sums in both install scripts;
+a server built without archives answers the problem `no-cli-downloads`).
+
+**Clients zone.** Each test builds the CLI of this repo (`BuildCLI`), copies it into client
+containers at `/usr/local/bin/telesphorepo` with `docker-credential-telesphorepo` next to it, and
+runs on both stores. The harness (`cli_harness_test.go`) passes setup links and CI tokens in the
+env and, after each run, lists each file of the container (and of its volumes other than the
+build caches) that holds `trs_` or `trsu_` with 40 or more characters or the CI token of the test;
+a match fails the test. A terminal comes from `script -qec`, which also types the answers.
+
+| Test | Proves |
+|---|---|
+| `TestCLISetup` | In a git work tree that ignores the file: the setup line writes `telesphorepo.toml` and warns with the `.gitignore` rule; the line again prints `This setup line is already used`; on a terminal the answer `2` writes the GitHub Actions file; a Docker repo gets no project file, `y` adds the `credHelpers` entry and `n` keeps the Docker config file; an expired code (aged with `editDB`) names its repo |
+| `TestCLILogin` | A teammate's `publish` with no device prints the code, which the test approves, and publishes; `status` names the server, the device, the hook and the project; `device.json` is 600 in a 700 folder; `logout` revokes the device, removes only the server's `credHelpers` entry and deletes the server folder |
+| `TestCLIDocker` | Docker in Docker after setup (the printed entry added to `config.json`) pushes and pulls with a device session; `get` answers only the server's hosts, `list` and `store`; `publish` of a Helm chart (`alpine/helm`); ORAS push and pull through the helper; in CI with `OIDC_TOKEN` and no device, a plain `docker push` mints a CI session |
+| `TestCLIMaven` | `publish` with a pom that names another deployment target, with Maven 3.9 and Maven 4 (`maven4Version` from the Apache archive); the mirror of the person's `settings.xml` (a proxy repo of Central) serves the plugins; `mvn` resolves both jars |
+| `TestCLIGradle` | `publish` of a library (Kotlin DSL) and a Gradle plugin (Groovy DSL); the build's own repository on another host (a Caddy that refuses credentials) gets none; a clean build applies the plugin and loads the library; a build with no `maven-publish` gets the message |
+| `TestCLICI` | A fake `mvnw` that uploads with `TELESPHOREPO_TOKEN` and shows that `OIDC_TOKEN` is gone from its env; Jenkins (`OIDC_TOKEN`) and GitHub Actions (a `jwebserver` that serves a Keycloak token at `ACTIONS_ID_TOKEN_REQUEST_URL`) mint CI sessions, the files carry the build record, and each session token is masked; a GitHub job without an ID token names `id-token: write` |
+| `TestCLIUpload` | `publish FILE` into the `path` folder of a raw repo (a 65 MiB file through the resumable routes) and of `.deb` packages to the `dist` of the project file; `apt` installs them |
+| `TestCLICompat` | Programs built at three versions with test entries: the server v0.9.0 (with the CLI archive v0.9.0), the CLI v0.8.0 and the CLI v1.0.0 (with an older path for one entry). The version header; the drift notice once a day; a `needs = "cli"` entry stops the older CLI with the install line, and on a terminal it updates and runs the command again; a `needs = "server"` entry stops the newer CLI with the summary, or takes the older path; an unknown field of an entry and a problem with an unknown remedy action (a Caddy stub) print their text; a proxy's HTML 502 gets the generic message; `update` refuses a wrong hash, makes the helper name again, and changes nothing for a newer CLI |
+| `TestInstall` | `install.sh` with curl (`buildpack-deps`) and with BusyBox wget (Alpine) and `install.ps1` with PowerShell on Linux install a CLI that runs, make the helper name a symbolic link, write `$GITHUB_PATH`, pass the arguments to the CLI, and install nothing with a wrong hash |
 
 `TestNexus` runs a Nexus container (`sonatype/nexus3`) and starts the server with
 `TR_NEXUS_SYNC_INTERVAL=12h`, so that no scheduled sync changes the counters. The fixture has two
