@@ -126,6 +126,11 @@ write gate, the device and OIDC routes or the change log. Run all zones before a
 - **Keep the docs current.** Update `SPEC.md` in the same change whenever behaviour, routes,
   tables, settings or commands change. Keep `README.md` short and for humans (run locally, run in
   production, a few commands); details belong in SPEC.md. Don't add a `CLAUDE.md`.
+- **Add a `changes.toml` entry when an older side would fail.** Add an entry with `version = "dev"`
+  when a change makes an older CLI fail against a newer server (`needs = "cli"`), or a newer CLI
+  fail against an older server (`needs = "server"`) in a command, a format or a helper. Most
+  changes need none. `go tool task release <version>` writes the release version into each `dev`
+  entry. See **Change log** in SPEC.md.
 
 ## Where things live
 

@@ -41,7 +41,7 @@ download against `SHA256SUMS`, unpack it, and run `./telesphorepo-server serve`.
   Set the issuer and the client under **Settings > Server > Sign-in options**, and register
   `<public URL>/api/auth/oidc/callback` at the provider. To give server permissions from the
   provider, set a claim and map each value of it to permissions on the same page. A person who
-  signs in with single sign-on approves a laptop for Gradle or Maven with a new sign-in at the
+  signs in with single sign-on approves a laptop for the CLI with a new sign-in at the
   provider; a local account approves it with a second factor.
 - **Passkeys:** they need the public URL (`base_url`) in Settings. Authenticator-app codes do not.
 - **Environment variables:** none are required. Three are optional:
@@ -97,6 +97,7 @@ telesphorepo-server user add alice [--admin] # prompts for the password
 telesphorepo-server user passwd alice        # reset a password
 telesphorepo-server user reset-2fa alice     # remove the second factors of a user
 docker exec -it <container> /telesphorepo-server user add alice
+telesphorepo publish | status | update       # the CLI: publish a project, show the state, update the CLI
 ```
 
 To move the blobs to another store, change the storage on the **Settings** page. The server
