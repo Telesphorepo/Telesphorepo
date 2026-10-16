@@ -10,10 +10,10 @@ import (
 	"strings"
 )
 
-// identity is the identity of a Telesphorepo server, with the rules of the ServerIdentity of the
-// Gradle and Maven clients: the scheme (http or https), the host in lower case, the effective
-// port (80 or 443 when the URL names none) and the base path without a trailing slash ("" for
-// the root). The helper sends a request only to the canonical URL of the server (base).
+// identity is the identity of a Telesphorepo server: the scheme (http or https), the host in
+// lower case, the effective port (80 or 443 when the URL names none) and the base path without a
+// trailing slash ("" for the root). The CLI sends a request only to the canonical URL of the
+// server (base).
 type identity struct {
 	scheme   string
 	host     string // lower case; an IPv6 address keeps its brackets
@@ -26,7 +26,7 @@ type identity struct {
 func parseIdentity(raw string) (identity, error) {
 	bad := fmt.Errorf("the server URL must be an http or https URL with a host and no user name, query or fragment, for example https://repo.example.com (got %q)", raw)
 	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" {
+	if err != nil || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" || u.Host == "" {
 		return identity{}, bad
 	}
 	id := identity{scheme: strings.ToLower(u.Scheme)}

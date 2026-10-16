@@ -10,19 +10,13 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
-	"runtime"
 	"slices"
 	"time"
 )
 
-// clientID is the publisher client of the helper on the server.
-const clientID = "docker"
-
-// deviceFile is ~/.telesphorepo/<dir>/docker/device.json, with the schema of the device file of
-// the Gradle and Maven clients:
+// deviceFile is ~/.telesphorepo/<server>/device.json, the one secret file of the CLI:
 //
-//	{"server": "https://repo.example.com", "device_id": 7, "client": "docker",
+//	{"server": "https://repo.example.com", "device_id": 7,
 //	 "private_key": "<base64 PKCS#8>", "public_key": "<base64 raw 32 bytes>",
 //	 "created_at": "2026-10-15T10:00:00Z"}
 //
@@ -31,7 +25,6 @@ const clientID = "docker"
 type deviceFile struct {
 	Server     string `json:"server"`
 	DeviceID   int64  `json:"device_id"`
-	Client     string `json:"client"`
 	PrivateKey string `json:"private_key"`
 	PublicKey  string `json:"public_key"`
 	CreatedAt  string `json:"created_at"`
@@ -46,8 +39,6 @@ type hostsFile struct {
 	Hosts []string `json:"hosts"`
 }
 
-var clientIDRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
-
 // rootDir is ~/.telesphorepo.
 func rootDir() (string, error) {
 	home, err := os.UserHomeDir()
@@ -57,23 +48,23 @@ func rootDir() (string, error) {
 	return filepath.Join(home, ".telesphorepo"), nil
 }
 
-// deviceDirOf is ~/.telesphorepo/<dir>/docker for the server id.
-func deviceDirOf(id identity) (string, error) {
+// serverDir is ~/.telesphorepo/<server> for the server id.
+func serverDir(id identity) (string, error) {
 	root, err := rootDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(root, id.deviceDir(), "docker"), nil
+	return filepath.Join(root, id.deviceDir()), nil
 }
 
-// newDevice returns the device file of a key that the server approved as device deviceID.
+// newDevice returns the device file of a key that the server took as device deviceID.
 func newDevice(id identity, deviceID int64, key ed25519.PrivateKey) (*deviceFile, error) {
 	der, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
 		return nil, err
 	}
 	return &deviceFile{
-		Server: id.base(), DeviceID: deviceID, Client: clientID,
+		Server: id.base(), DeviceID: deviceID,
 		PrivateKey: base64.StdEncoding.EncodeToString(der),
 		PublicKey:  base64.StdEncoding.EncodeToString(key.Public().(ed25519.PublicKey)),
 		CreatedAt:  time.Now().UTC().Truncate(time.Second).Format(time.RFC3339),
@@ -82,18 +73,18 @@ func newDevice(id identity, deviceID int64, key ed25519.PrivateKey) (*deviceFile
 }
 
 // loadDevice reads the device file in dir. It returns nil and no error when there is none. A
-// file that its group or other users can read is an error: the helper does not use it.
+// file that its group or other users can read is an error: the CLI does not use it.
 func loadDevice(dir string) (*deviceFile, error) {
 	f := filepath.Join(dir, "device.json")
-	st, err := os.Stat(f)
+	_, err := os.Stat(f)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	if runtime.GOOS != "windows" && st.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("%s must be readable by its owner only. Run: chmod 600 %s", f, f)
+	if err := checkOwnerOnly(f); err != nil {
+		return nil, err
 	}
 	b, err := os.ReadFile(f)
 	if err != nil {
@@ -109,6 +100,23 @@ func loadDevice(dir string) (*deviceFile, error) {
 	return &d, nil
 }
 
+// deviceOf returns the device of server id and its folder. The device is nil when this computer
+// has none.
+func deviceOf(id identity) (*deviceFile, string, error) {
+	dir, err := serverDir(id)
+	if err != nil {
+		return nil, "", err
+	}
+	d, err := loadDevice(dir)
+	if err != nil {
+		return nil, dir, err
+	}
+	if d != nil && d.id.base() != id.base() {
+		return nil, dir, fmt.Errorf("%s holds the device of %s, not of %s", filepath.Join(dir, "device.json"), d.Server, id.base())
+	}
+	return d, dir, nil
+}
+
 // check validates the fields and parses the server and the key.
 func (d *deviceFile) check() error {
 	id, err := parseIdentity(d.Server)
@@ -117,9 +125,6 @@ func (d *deviceFile) check() error {
 	}
 	if d.DeviceID <= 0 {
 		return errors.New(`no valid "device_id"`)
-	}
-	if !clientIDRE.MatchString(d.Client) {
-		return errors.New(`no valid "client"`)
 	}
 	der, err := base64.StdEncoding.DecodeString(d.PrivateKey)
 	if err != nil {
@@ -141,9 +146,9 @@ func (d *deviceFile) check() error {
 	return nil
 }
 
-// save writes the device file and hosts.json in dir at once (a temporary file, then a rename).
-// Only the owner can read them and the folder.
-func (d *deviceFile) save(dir string, hosts []string) (string, error) {
+// save writes the device file in dir (a temporary file, then a rename). Only the owner can read
+// it and the folder.
+func (d *deviceFile) save(dir string) (string, error) {
 	if err := ownerOnlyDir(dir); err != nil {
 		return "", err
 	}
@@ -155,54 +160,61 @@ func (d *deviceFile) save(dir string, hosts []string) (string, error) {
 	if err := writeOwnerOnly(f, append(b, '\n')); err != nil {
 		return "", err
 	}
+	return f, nil
+}
+
+// saveHosts writes hosts.json in dir.
+func saveHosts(dir string, hosts []string) error {
+	if err := ownerOnlyDir(dir); err != nil {
+		return err
+	}
 	h, err := json.MarshalIndent(hostsFile{Hosts: hosts}, "", "  ")
 	if err != nil {
-		return "", err
+		return err
 	}
-	if err := writeOwnerOnly(filepath.Join(dir, "hosts.json"), append(h, '\n')); err != nil {
-		return "", err
+	return writeOwnerOnly(filepath.Join(dir, "hosts.json"), append(h, '\n'))
+}
+
+// loadHosts reads the hosts of hosts.json in dir. A file that is missing or not valid has none.
+func loadHosts(dir string) []string {
+	var h hostsFile
+	if b, err := os.ReadFile(filepath.Join(dir, "hosts.json")); err == nil && json.Unmarshal(b, &h) == nil {
+		return h.Hosts
 	}
-	return f, nil
+	return nil
 }
 
 // hosts returns the Docker hosts of the device: those of hosts.json in dir, and the host of the
 // server, each as "host:port" (registryKey).
 func (d *deviceFile) hosts(dir string) []string {
-	def := d.id.scheme
 	out := []string{d.id.host + ":" + fmt.Sprint(d.id.port)}
-	var h hostsFile
-	if b, err := os.ReadFile(filepath.Join(dir, "hosts.json")); err == nil && json.Unmarshal(b, &h) == nil {
-		for _, s := range h.Hosts {
-			if k, err := registryKey(s, def); err == nil && !slices.Contains(out, k) {
-				out = append(out, k)
-			}
+	for _, s := range loadHosts(dir) {
+		if k, err := registryKey(s, d.id.scheme); err == nil && !slices.Contains(out, k) {
+			out = append(out, k)
 		}
 	}
 	return out
 }
 
-// dockerHosts returns the hosts of the device as Docker names them (host[:port]): the server's,
-// then those of hosts.json.
-func (d *deviceFile) dockerHosts(dir string) []string {
-	out := []string{d.id.hostKey()}
-	var h hostsFile
-	if b, err := os.ReadFile(filepath.Join(dir, "hosts.json")); err == nil && json.Unmarshal(b, &h) == nil {
-		for _, s := range h.Hosts {
-			if s != "" && !slices.Contains(out, s) {
-				out = append(out, s)
-			}
+// dockerHosts returns the Docker hosts of server id as Docker names them (host[:port]): the
+// server's, then those of hosts.json in dir.
+func dockerHosts(id identity, dir string) []string {
+	out := []string{id.hostKey()}
+	for _, s := range loadHosts(dir) {
+		if s != "" && !slices.Contains(out, s) {
+			out = append(out, s)
 		}
 	}
 	return out
 }
 
-// enrolledDirs returns every folder ~/.telesphorepo/*/docker that holds a device file.
+// enrolledDirs returns every folder ~/.telesphorepo/* that holds a device file.
 func enrolledDirs() ([]string, error) {
 	root, err := rootDir()
 	if err != nil {
 		return nil, err
 	}
-	m, err := filepath.Glob(filepath.Join(root, "*", "docker", "device.json"))
+	m, err := filepath.Glob(filepath.Join(root, "*", "device.json"))
 	if err != nil {
 		return nil, err
 	}
@@ -211,6 +223,29 @@ func enrolledDirs() ([]string, error) {
 		out[i] = filepath.Dir(f)
 	}
 	return out, nil
+}
+
+// enrolledDevices returns the valid devices of this computer. A device file that is not valid
+// is skipped; the reason goes to stderr.
+func enrolledDevices() ([]*deviceFile, []string, error) {
+	dirs, err := enrolledDirs()
+	if err != nil {
+		return nil, nil, err
+	}
+	var ds []*deviceFile
+	var out []string
+	for _, dir := range dirs {
+		d, err := loadDevice(dir)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			continue
+		}
+		if d != nil {
+			ds = append(ds, d)
+			out = append(out, dir)
+		}
+	}
+	return ds, out, nil
 }
 
 // ownerOnlyDir creates dir (and its parents) so that only the owner can open dir.

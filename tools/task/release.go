@@ -23,12 +23,12 @@ var releaseTargets = clidist.Targets
 // releaseFiles are packed next to the binary in every archive.
 var releaseFiles = []string{"LICENSE", "README.md"}
 
-// releasePrograms are the programs of a release: the CLI, the server and the Docker credential
-// helper. A release packs each program whose package exists.
+// releasePrograms are the programs of a release: the CLI and the server. The CLI is also the
+// Docker credential helper under a second name, which the install scripts make. A release packs
+// each program whose package exists.
 var releasePrograms = []struct{ name, pkg string }{
 	{"telesphorepo", cliPkg},
 	{"telesphorepo-server", "./cmd/telesphorepo-server"},
-	{"docker-credential-telesphorepo", "./cmd/docker-credential-telesphorepo"},
 }
 
 // release builds the UI once and the CLI archives that the server embeds, cross-compiles each

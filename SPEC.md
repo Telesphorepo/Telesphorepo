@@ -1195,39 +1195,98 @@ device, ends its open sessions and records `device.revoke` as the device's user.
 again on a later call with the same nonce and repo (see **Minting a publish session**). The
 credential helpers of the CLI use it.
 
-**Docker credential helper** (`cmd/docker-credential-telesphorepo`, Go, in this repository and
-under its license). It imports no server package; its only module outside the standard library is
-`golang.org/x/sys/windows` (the owner-only ACL). `go tool task release` builds it with the server
-(see **Tooling**). Docker, buildx, Podman, skopeo, crane, Helm and ORAS run it through
-`credHelpers` in `~/.docker/config.json`. Commands:
+**Telesphorepo CLI** (`cmd/telesphorepo`, Go, in this repository under the MIT license of its own
+`LICENSE`). It imports no server package; outside the standard library it uses only
+`golang.org/x/sys` (the owner-only ACL, the terminal check, the parent process),
+`github.com/BurntSushi/toml` (`telesphorepo.toml`) and the root package `changelog`. Every
+request carries `User-Agent: telesphorepo-cli/<version> (<os>/<arch>)`, goes only to the
+canonical URL of the server and follows no redirect. No command takes a token as an argument, and
+the CLI never prints a CI token, a session token or a setup code; in GitHub Actions it prints
+`::add-mask::` for each token before a child starts. Every command has an example-led `--help`.
+
+| Command | Does |
+|---|---|
+| `setup LINK [--name NAME]` | Reads the server from the link and the code from its fragment (`#/setup/trsu_...`). With a device that the server accepts (`POST /api/publish/challenge`), it sends `POST /api/devices/setup` with `{code, device_id, nonce, signature}`; else with `{code, name, public_key}` of a new Ed25519 key (name: the host name), and saves the device file. It refreshes `hosts.json` (`GET /docker/hosts`) and prints `publishing to <repo> (<format>) as <user>`. A format of the publish category: the folder must hold a marker of the format (else the CLI names the markers and stops); the CLI writes `telesphorepo.toml` there (a file with other values: it shows the change and asks y/N), with `kind` when the folder has several marker kinds (it asks on a terminal, else stops and lists them), `path` for raw (asked on a terminal) and `dist` and `component` for Debian (asked, default `stable` and `main`). Then `git check-ignore -v` warns when git ignores the file and names the matching line. The helper category (Docker): no project file; it shows the `credHelpers` entry of the server's Docker hosts, asks "Add the credential helper to `$DOCKER_CONFIG/config.json`? [y/N]", edits the file on yes (else prints the entry), and prints `docker push <host>/<repo>/app:1.0`. A Docker repo set up in a folder with `Chart.yaml` also gets the project file. On a terminal it then offers a CI file (none, GitHub Actions, Jenkinsfile, Jenkins freestyle): it mints a session, reads `GET /api/repos/{name}/ci?system=&tool=` with it, shows the file, writes it at the top of the git work tree (a file that exists and differs needs y), and closes the session. A freestyle job gets the build step to paste |
+| `publish [FILE...]` | Walks up from the current folder to the nearest `telesphorepo.toml`. With none it stops: on a computer it names the Publish tab, in CI it says to commit the file. It mints one session for the repo: in CI (`CI`, `GITHUB_ACTIONS`, `JENKINS_URL` or `JENKINS_HOME`) with the identity token of the job (GitHub Actions `ACTIONS_ID_TOKEN_REQUEST_URL` and `_TOKEN` with the canonical server URL as the audience, then `OIDC_TOKEN`) through `POST /api/publish/sessions/oidc`; on a computer with the device proof through `POST /api/publish/sessions` (no device that the server accepts: the device flow runs first, inline). It runs the row of the repo's format (the detection table below) and closes the session with `DELETE /api/publish/sessions/{id}` at exit, also on Ctrl-C. A child's exit code passes through; a child that outlives the session gets a line that names `publish.session_ttl`. A repo of the helper category stops with the native command and the hook |
+| `login SERVER [--name NAME]` | The device flow alone: an Ed25519 key, `POST /api/devices/enroll`, `Open <verification_url>?code=<CODE> and approve code <CODE>` (the browser opens on a terminal), the poll at `interval` (`slow_down` adds 5 s). It saves `device.json` and `hosts.json`. A device that the server accepts stays |
+| `logout [SERVER]` | Revokes the device with `DELETE /api/devices/self` (a Challenge nonce, the signature over `"telesphorepo revoke v1\n" + nonce + "\n" + device_id`), removes the `credHelpers` entries `"telesphorepo"` of the server's hosts and keeps every other entry, and deletes `~/.telesphorepo/<server>/`. Without SERVER: the server of the project when this computer has its device, else the one enrolled server |
+| `status` | Each enrolled server: the device, whether the server accepts it, the `credHelpers` entries. The current folder: the project file and the command that `publish` runs. It prints no secret |
+| `update [SERVER]` | Installs the CLI of the server (the server of the project, else SERVER, else the one enrolled server): `GET /cli/SHA256SUMS` and `GET /cli/telesphorepo_<os>_<arch>.<ext>`, the SHA-256 check, a new file next to the running binary, then a rename into place (on Windows the running file first becomes `telesphorepo.exe.old`; every start deletes such a `.old` file). It makes `docker-credential-telesphorepo` again: a symbolic link, a hard link on Windows, a copy when a link fails. A folder that is not writable gets its name and the install line. A CLI that is the same as or newer than the server's changes nothing |
+| `version`, `help [command]` | The version (`-X main.version`); the help |
+| `docker-credential-telesphorepo get\|store\|erase\|list` | The Docker helper protocol (below). The same binary under a second name, which the install script makes |
+
+**Detection.** `publish` looks for the markers of the repo's format in the folder of the project
+file. A row is one entry of a table in `cmd/telesphorepo/detect.go`; a new format adds a row.
+
+| Format | Marker | Tool | `publish` runs | Token |
+|---|---|---|---|---|
+| Maven | `pom.xml` | `mvnw` (`mvnw.cmd` on Windows), else `mvn` | `mvn deploy -gs <tmp>/settings.xml -DaltDeploymentRepository=telesphorepo::<base>/maven/<repo>` | `settings.xml` has one `<server>` `telesphorepo` with `<password>${env.TELESPHOREPO_TOKEN}</password>`; the user's `~/.m2/settings.xml` stays in force |
+| Maven (Gradle) | `settings.gradle(.kts)`, `build.gradle(.kts)` | `gradlew` (`gradlew.bat`), else `gradle` | `gradle publish --init-script <tmp>/telesphorepo.init.gradle.kts` | The init script adds the repository `telesphorepo` (URL from `TELESPHOREPO_MAVEN_URL`, password from `TELESPHOREPO_TOKEN`) to each project that applies `maven-publish`; with none it stops the build with the plugin line |
+| Docker (Helm chart) | `Chart.yaml` | `helm` | `helm package <dir> -d <tmp>/chart`, then `helm push <chart>.tgz oci://<host>/<repo> --registry-config <tmp>/config.json` (the upload host when the server has one) | The registry config names `credHelpers` `telesphorepo` for the Docker hosts; the helper answers `TELESPHOREPO_TOKEN` for the hosts of `TELESPHOREPO_DOCKER_HOSTS` |
+| raw | none | the CLI | `PUT /raw/<repo>/<path>/<file name>` for each FILE; a file of 64 MiB or more goes through `POST /api/repos/{name}/uploads`, `PATCH` chunks of 16 MiB (a failed chunk is sent again from the `received` of the server), and `PUT ...?path=&sha256=&size=` | Bearer session token |
+| Debian | none | the CLI | `PUT /debian/<repo>/upload/<dist>/<component>` for each FILE | Bearer session token |
+
+A wrapper in the project comes before a tool on the `PATH` (`exec.LookPath`); a wrapper without
+the execute bit runs through `sh`. The CLI prints each command before it runs it, without the
+token. The token goes only into the env of the child, as `TELESPHOREPO_TOKEN`; the config files
+in the temp folder (`0700`, an owner-only ACL on Windows, removed at exit) hold `${env}`
+references. The child env has no `OIDC_TOKEN`, so a build step cannot mint for other repos with
+it. Ctrl-C reaches the child from the terminal; a stop of the CLI itself stops the child too.
+
+**Compatibility.** Before a command, the CLI takes the entries of the change log (see **Change
+log**) between its version and the server's whose scope matches the command (`setup`, `login`,
+`publish`, then `publish/<format>` once the mint names the format, `helper/docker`). Server newer:
+it reads `GET /api/changes?since=<CLI version>`; an entry with `needs = "cli"` prints its summary
+and, on a terminal, asks `Update now? [Y/n]`, updates and runs the command again with the new
+binary; without a terminal it prints the install line and exits 1. CLI newer: its embedded
+entries after the server's version; an entry with `needs = "server"` takes the older path when the
+CLI lists one (`olderPaths` in `compat.go`), else prints the summary and `This needs server <v>;
+the server runs <v>. Ask the server admin to update.` and exits 1. A dev CLI or a dev server skips
+the check. `~/.telesphorepo/<server>/changes.json` keeps `{server_version, since, changes,
+drift_notice}`; the CLI fetches again only when the `Telesphorepo-Version` header of an answer
+names another version. When the server is newer, the CLI asks after the command `The server has
+CLI <v>, you have <v>. Update now? [Y/n]` at most once a day per server; without a terminal and in
+the helper mode it prints one line on stderr instead.
+
+**Errors.** A problem document prints its `title` and `detail` as they are, then its remedy:
+`update_cli` names `telesphorepo update` (on a terminal it offers the update), `update_server`
+names the server admin and `version`, `login` runs the device flow on a terminal and then the
+command again, `setup` prints the Publish tab link of `url`, `retry` waits `after` seconds (at most
+60) and sends the request once more, `open_url` prints `url` and opens it on a terminal,
+`fix_project` names `file`. An unknown action prints `detail` and `url`; an unknown field is
+ignored. A format route's `{"error"}` prints as its detail. Any other answer of 300 or more gets
+`the server at <url> answered <status> with <content type>; a proxy in front of it may be down`.
+
+**Docker credential helper mode.** Docker, buildx, Podman, skopeo, crane, Helm and ORAS run it
+through `credHelpers` in `$DOCKER_CONFIG/config.json` (else `~/.docker/config.json`):
 
 | Command | stdin | Answer |
 |---|---|---|
-| `login <server URL> [--name NAME]` | | Enrolls the computer: `GET /docker/hosts` (the registry host, and the upload host when direct uploads are on), then an Ed25519 key and `POST /api/devices/enroll` with the name (default `<hostname> (Docker)`). It prints `Open <verification_url>?code=<CODE> and approve code <CODE>`, opens the browser when stdout is a terminal, and polls at `interval` (`slow_down` adds 5 s). It saves the device file and `hosts.json`, and sets `"credHelpers": {"<host>": "telesphorepo"}` for each host in `$DOCKER_CONFIG/config.json` (else `~/.docker/config.json`) and keeps every other key. A saved device that the server still accepts (`POST /api/publish/challenge`) stays; one that it refuses is enrolled again |
-| `get` | the registry host (`host[:port]`) | `{"ServerURL", "Username": "telesphorepo-device", "Secret": "trx.<device id>.<nonce>.<signature>"}`: a nonce of `POST /api/publish/challenge` with `exchange: true` (the request carries `ts` and the device signature over it), and the device signature over the nonce for the repo `*` (base64url, no padding). No device for the host, or a 4xx from the challenge (a device that is unknown, revoked or expired): `credentials not found in native keychain` and exit 1, so Docker reads anonymously; the reason goes to stderr. Each `get` sends the challenge, so a revoked device stops at once. The process that runs the helper (its id and start time) keeps its nonce in `exchange.json` and sends it as `nonce`, so it gets the same nonce while the nonce is valid: Helm and ORAS run `get` for each token, and all token requests of one push get the same publish session |
-| `store` | Docker's credentials | Exit 1: "docker-credential-telesphorepo keeps no passwords. Run: docker-credential-telesphorepo login <server URL>" |
-| `erase` | the registry host | Deletes the device folder of the host (`docker logout`). The device stays in Settings › Devices until someone revokes it |
+| `get` | the registry host (`host[:port]`) | In this order: `{"ServerURL", "Username": "telesphorepo", "Secret": "<session token>"}` when `TELESPHOREPO_TOKEN` is set and the host is one of `TELESPHOREPO_DOCKER_HOSTS` (a child of `publish`); `{..., "Username": "telesphorepo-device", "Secret": "trx.<device id>.<nonce>.<signature>"}` for a host of an enrolled device: a nonce of `POST /api/publish/challenge` with `exchange: true` (the request carries `ts` and the device signature over it), and the device signature over the nonce for the repo `*` (base64url, no padding); in a CI job with no device, `{..., "Username": "telesphorepo-ci", "Secret": "<identity token of the job>"}`, which `/docker/token` mints from (the GitHub Actions audience is the server of the project file when its host is the registry host, else `https://<host>`). Else, or on a 4xx from the challenge (a device that is unknown, revoked or expired): `credentials not found in native keychain` and exit 1, so Docker reads anonymously; the reason goes to stderr. Each `get` sends the challenge, so a revoked device stops at once. The process that runs the helper (its id and start time) keeps its nonce in `exchange.json` and sends it as `nonce`, so it gets the same nonce while the nonce is valid: Helm and ORAS run `get` for each token, and all token requests of one push get the same publish session |
+| `store` | Docker's credentials | Exit 1: "docker-credential-telesphorepo keeps no passwords. Run: telesphorepo login <server URL>" |
+| `erase` | the registry host | Keeps the device (`docker logout`) and says to run `telesphorepo logout` |
 | `list` | `unused` | `{"<host>": "telesphorepo-device", ...}` for each host of each enrolled device |
-| `version`, `help [command]` | | The version (`-X main.version`); example-led help |
+| `version`, `help [command]` | | The version; the help |
 
-- **Files.** `~/.telesphorepo/<server>/docker/device.json` has the schema of the Java clients:
-  `{"server": "<canonical URL>", "device_id": n, "client": "docker", "private_key": "<base64
-  PKCS#8>", "public_key": "<base64 raw 32 bytes>", "created_at": "<RFC 3339>"}`. `hosts.json` next
+- **Files.** `~/.telesphorepo/<server>/device.json` (one per computer and server) is
+  `{"server": "<canonical URL>", "device_id": n, "private_key": "<base64 PKCS#8>", "public_key":
+  "<base64 raw 32 bytes>", "created_at": "<RFC 3339>"}`, the only secret file. `hosts.json` next
   to it holds `{"hosts": [...]}` of `GET /docker/hosts`. `exchange.json` next to it holds the token
   exchange nonce of each process that ran `get`: `{"nonces": [{"pid": n, "start": "<start time of
   the process>", "nonce": "...", "expires_at": "<RFC 3339>"}]}`; a save drops the expired nonces.
-  A file that is missing or not valid is empty, and a failed write goes to stderr. The helper writes each file through a
-  temporary file and a rename: mode 600 in a 700 folder on Linux and macOS, an ACL with the current
-  user as the only entry on Windows. A device file that its group or other users can read stops
-  the helper. The `docker` folder keeps this device apart from the Gradle and Maven device of the
-  same server, so the approval page names the helper.
-- **Server identity.** The canonical URL follows the rules of the Java clients' `ServerIdentity`
-  (scheme http or https, lower-case ASCII host, the effective port, the base path without a
-  trailing slash; an internationalized host must be in its `xn--` form). `get` answers only when
-  the host and port that Docker passes equal those of the server, or a host of `hosts.json` (a
-  host without a port takes the default port of the server's scheme). Every request goes to the
-  canonical URL of the device file, never to the host that Docker passed, and the helper follows
-  no redirect.
+  `changes.json` is the change log cache. A file that is missing or not valid is empty, and a
+  failed write goes to stderr. The CLI writes each file through a temporary file and a rename: mode
+  600 in a 700 folder on Linux and macOS, an ACL with the current user as the only entry on
+  Windows. A device file that another user can open (a mode bit of group or others, an ACL entry of
+  another user) stops the CLI. `<server>` is the host without IPv6 brackets, `_<port>` when the
+  port is not the default of the scheme, and `_` with the base path (each `/` as `_`); each other
+  character than `A-Z a-z 0-9 . _ -` becomes `_`.
+- **Server identity.** The canonical URL is the scheme (http or https), the lower-case ASCII host,
+  the effective port and the base path without a trailing slash; an internationalized host must be
+  in its `xn--` form. `get` answers a device proof only when the host and port that Docker passes
+  equal those of the server, or a host of `hosts.json` (a host without a port takes the default
+  port of the server's scheme). Every request goes to the canonical URL of the device file or the
+  project file, never to the host that Docker passed.
 - **Token exchange.** Docker sends the secret as the password to `/docker/token`. The token
   endpoint mints one session per repo per nonce (`publish_exchange_sessions`); a pull checks the
   proof (`Minter.Check`) and mints nothing. The bearer carries the device (`auth.CredDevice`), so
@@ -1953,7 +2012,7 @@ IP list among the trusted proxies (`netrules.Service.TrustsList`, an in-memory r
 snippets add "Behind Cloudflare (Free and Pro plans), each image layer must be under 100 MB. Pulls
 have no limit." Use: `docker login HOST` with a read token for a private repo, `docker pull
 HOST/<repo>/IMAGE:TAG`, `helm pull oci://HOST/<repo>/CHART --version X`. Publish (hosted repos):
-from a computer, `docker-credential-telesphorepo login <base_url>` once, then `docker push
+from a computer, the setup line of the Publish tab once, then `docker push
 HOST/<repo>/IMAGE:TAG`, `helm push chart.tgz oci://OCI/<repo>` and `oras push
 OCI/<repo>/ARTIFACT:TAG FILE`, where `OCI` is the host of `docker.upload_url` when direct uploads are
 on (with the note "ORAS and Helm 4 push to the upload address <host>, because they send layers only
@@ -2600,7 +2659,7 @@ and raw insert asset rows, debian inserts one package and its asset row per unit
 | `go tool task test scale [go test args]` | Runs `TestScale` (`-tags scale`, 60 min timeout) |
 | `go tool task test clients [go test args]` | Runs the clients zone: `-tags clients`, 40 min timeout. It builds the Gradle plugin and the Maven extension from the clients repo (`E2E_CLIENTS_DIR`, or a shallow clone of `E2E_CLIENTS_REF`, default `main`) |
 | `go tool task test all [go test args]` | Runs core, import, scale and clients one after the other. It runs every zone, lists the failed zones and exits non-zero if any failed |
-| `go tool task release [version]` | Builds the UI and the six CLI archives that the server embeds once. Then it cross-compiles each program whose package exists: the CLI (`./cmd/telesphorepo`, with its own `LICENSE`), the server (`./cmd/telesphorepo-server`) and the Docker credential helper (`./cmd/docker-credential-telesphorepo`) for linux, darwin and windows on amd64 and arm64 (`CGO_ENABLED=0`, `-trimpath`, `-X main.version`). Each binary goes into `bin/release/<program>_<version>_<os>_<arch>.tar.gz` (`.zip` on Windows) with `LICENSE` and `README.md`. The command writes `SHA256SUMS` of every archive. The version defaults to `git describe`. A version given as the argument must be a release version; the command first writes it into each `dev` entry of `changes.toml` (see **Change log**), so the binaries embed the stamped change log |
+| `go tool task release [version]` | Builds the UI and the six CLI archives that the server embeds once. Then it cross-compiles each program whose package exists: the CLI (`./cmd/telesphorepo`, with its own `LICENSE`; the install scripts make its second name `docker-credential-telesphorepo`) and the server (`./cmd/telesphorepo-server`) for linux, darwin and windows on amd64 and arm64 (`CGO_ENABLED=0`, `-trimpath`, `-X main.version`). Each binary goes into `bin/release/<program>_<version>_<os>_<arch>.tar.gz` (`.zip` on Windows) with `LICENSE` and `README.md`. The command writes `SHA256SUMS` of every archive. The version defaults to `git describe`. A version given as the argument must be a release version; the command first writes it into each `dev` entry of `changes.toml` (see **Change log**), so the binaries embed the stamped change log |
 | `go tool task gen` | Runs `go tool sqlc generate` for every `internal/**/sqlc.yaml` |
 | `go tool task doctor` | Shows the detected toolchain and container engine |
 

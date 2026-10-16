@@ -302,14 +302,15 @@ func (d *Dind) CopyFile(t testing.TB, src, dst string, mode int64) {
 	}
 }
 
-// BuildHelper builds the Docker credential helper (cmd/docker-credential-telesphorepo) for Linux
-// on the architecture of the test, without cgo, and returns the path of the binary.
+// BuildHelper builds the Telesphorepo CLI (cmd/telesphorepo) for Linux on the architecture of the
+// test, without cgo, under the name of its Docker credential helper mode, and returns the path of
+// the binary.
 func BuildHelper(t testing.TB) string {
 	t.Helper()
 	out := filepath.Join(t.TempDir(), "docker-credential-telesphorepo")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	cmd := osexec.CommandContext(ctx, "go", "build", "-trimpath", "-o", out, "github.com/Telesphorepo/Telesphorepo/cmd/docker-credential-telesphorepo")
+	cmd := osexec.CommandContext(ctx, "go", "build", "-trimpath", "-o", out, "github.com/Telesphorepo/Telesphorepo/cmd/telesphorepo")
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+runtime.GOARCH)
 	if b, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build the credential helper: %v\n%s", err, b)
