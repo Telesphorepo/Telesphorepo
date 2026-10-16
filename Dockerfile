@@ -22,9 +22,8 @@ RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY . .
 COPY --from=web /src/web/dist ./web/dist
 # The server embeds the six CLI archives of the same source (internal/clidist), which it serves
-# at /cli/ and its install scripts download. With a release VERSION, "go tool task cli" first
-# writes it into each "dev" entry of changes.toml, so the CLI and the server embed the stamped
-# change log.
+# at /cli/ and its install scripts download. With a release VERSION, "go tool task cli" refuses
+# a changes.toml that still has a "dev" entry: the tagged commit holds the stamped change log.
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go tool task cli "${VERSION}" \

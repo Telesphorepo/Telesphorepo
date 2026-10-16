@@ -740,8 +740,9 @@ before a release), `scope` (a command such as `publish`, a command and a format 
 it), `needs` (`server` or `cli`: the side that must be at least `version`; an unknown value counts
 as `cli`) and `summary` (one sentence for the person). A field that a reader does not know is
 ignored. A `dev` entry counts for nothing. A broken change log stops the server at startup.
-`go tool task release <version>` writes the release version into each `dev` entry before it
-builds. A release version is `MAJOR.MINOR.PATCH` with an optional `v`, pre-release (`-rc.1`) and
+`go tool task tag <version>` writes the release version into each `dev` entry, commits the change
+log and creates the tag; `release` and `cli` refuse a release version while a `dev` entry is left.
+A release version is `MAJOR.MINOR.PATCH` with an optional `v`, pre-release (`-rc.1`) and
 build data (`+x`), compared as semantic versions.
 
 **Server version.** Every answer carries the header `Telesphorepo-Version` with the version that
@@ -2654,14 +2655,15 @@ and raw insert asset rows, debian inserts one package and its asset row per unit
 |---|---|
 | `go tool task dev` | Checks Go, bun/npm and Node (version in `.node-version`). Builds the CLI archive of this computer once (see **Install scripts and CLI downloads**). Runs the backend on :8080 and rebuilds it on Go or `schema.sql` changes. Runs Vite with HMR on **:5173**, proxying every path except the UI's own files to the backend |
 | `go tool task build [image]` | Builds the UI and the six CLI archives (`internal/clidist/dist`), then `bin/telesphorepo-server` with both embedded (`CGO_ENABLED=0`, version from git). `image` also builds the container image `telesphorepo:local` |
-| `go tool task cli [version]` | Builds the six CLI archives of `./cmd/telesphorepo` and `SHA256SUMS` into `internal/clidist/dist` (version from git by default). A given release version goes into each `dev` entry of `changes.toml` first, so the image build embeds the stamped change log in the CLI and the server. Without `cmd/telesphorepo` it writes none and says so |
+| `go tool task cli [version]` | Builds the six CLI archives of `./cmd/telesphorepo` and `SHA256SUMS` into `internal/clidist/dist` (version from git by default). A given release version needs a `changes.toml` with no `dev` entry. Without `cmd/telesphorepo` it writes none and says so |
 | `go tool task preview` | Builds, then runs `bin/telesphorepo-server dev` on :8080 |
 | `go tool task test [go test args]` | Runs the core zone: `go test -tags e2e ./e2e/... -count=1 -v`, 60 min timeout |
 | `go tool task test import [go test args]` | Runs the import zone: `-tags import`, 45 min timeout. It starts a Nexus container |
 | `go tool task test scale [go test args]` | Runs `TestScale` (`-tags scale`, 60 min timeout) |
 | `go tool task test clients [go test args]` | Runs the clients zone: `-tags clients`, 120 min timeout. It builds the CLI of this repo on the host and runs it in containers with the real tools |
 | `go tool task test all [go test args]` | Runs core, import, scale and clients one after the other. It runs every zone, lists the failed zones and exits non-zero if any failed |
-| `go tool task release [version]` | Builds the UI and the six CLI archives that the server embeds once. Then it cross-compiles each program whose package exists: the CLI (`./cmd/telesphorepo`, with its own `LICENSE`; the install scripts make its second name `docker-credential-telesphorepo`) and the server (`./cmd/telesphorepo-server`) for linux, darwin and windows on amd64 and arm64 (`CGO_ENABLED=0`, `-trimpath`, `-X main.version`). Each binary goes into `bin/release/<program>_<version>_<os>_<arch>.tar.gz` (`.zip` on Windows) with `LICENSE` and `README.md`. The command writes `SHA256SUMS` of every archive. The version defaults to `git describe`. A version given as the argument must be a release version; the command first writes it into each `dev` entry of `changes.toml` (see **Change log**), so the binaries embed the stamped change log |
+| `go tool task release [version]` | Builds the UI and the six CLI archives that the server embeds once. Then it cross-compiles each program whose package exists: the CLI (`./cmd/telesphorepo`, with its own `LICENSE`; the install scripts make its second name `docker-credential-telesphorepo`) and the server (`./cmd/telesphorepo-server`) for linux, darwin and windows on amd64 and arm64 (`CGO_ENABLED=0`, `-trimpath`, `-X main.version`). Each binary goes into `bin/release/<program>_<version>_<os>_<arch>.tar.gz` (`.zip` on Windows) with `LICENSE` and `README.md`. The command writes `SHA256SUMS` of every archive. The version defaults to `git describe`. A version given as the argument must be a release version, and `changes.toml` must have no `dev` entry (see **Change log**) |
+| `go tool task tag <version>` | Makes a release. It needs a clean work tree and a new tag. It writes `v<version>` into each `dev` entry of `changes.toml`, commits the file as `Release v<version>`, and creates the annotated tag `v<version>`. It pushes nothing. The tagged commit holds the stamped change log, so `release.yml` and every image build embed the same entries |
 | `go tool task gen` | Runs `go tool sqlc generate` for every `internal/**/sqlc.yaml` |
 | `go tool task doctor` | Shows the detected toolchain and container engine |
 

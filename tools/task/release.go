@@ -34,8 +34,7 @@ var releasePrograms = []struct{ name, pkg string }{
 // release builds the UI once and the CLI archives that the server embeds, cross-compiles each
 // release program for every release target, packs each binary with LICENSE and README.md, and
 // writes SHA256SUMS. Output goes to bin/release. A version given as the argument must be a
-// release version: release first writes it into each "dev" entry of changes.toml, so the programs
-// embed the stamped change log.
+// release version, and changes.toml must have no "dev" entry (go tool task tag stamps them).
 func release(ctx context.Context, version string) error {
 	pm, err := prepare(ctx)
 	if err != nil {
@@ -43,7 +42,7 @@ func release(ctx context.Context, version string) error {
 	}
 	if version == "" {
 		version = gitVersion(ctx)
-	} else if err := stampChanges(version); err != nil {
+	} else if err := checkStamped(version); err != nil {
 		return err
 	}
 	step("building web UI (%s run build)", pm.Name)
@@ -97,24 +96,41 @@ func release(ctx context.Context, version string) error {
 // changesFile is the change log at the repo root.
 const changesFile = "changes.toml"
 
-// stampChanges writes version into each "dev" entry of the change log.
-func stampChanges(version string) error {
+// stampChanges writes version into each "dev" entry of the change log and returns the number of
+// entries it changed.
+func stampChanges(version string) (int, error) {
+	data, err := os.ReadFile(changesFile)
+	if err != nil {
+		return 0, err
+	}
+	out, n, err := changelog.Stamp(data, version)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", changesFile, err)
+	}
+	if n == 0 {
+		return 0, nil
+	}
+	if err := os.WriteFile(changesFile, out, 0o644); err != nil {
+		return 0, err
+	}
+	step("%s: wrote version %s into %d dev entries", changesFile, version, n)
+	return n, nil
+}
+
+// checkStamped refuses a build for the release version when the change log still has a "dev"
+// entry: the tagged commit must hold the stamped log, so every later build embeds the same one.
+func checkStamped(version string) error {
 	data, err := os.ReadFile(changesFile)
 	if err != nil {
 		return err
 	}
-	out, n, err := changelog.Stamp(data, version)
+	_, n, err := changelog.Stamp(data, version)
 	if err != nil {
 		return fmt.Errorf("%s: %w", changesFile, err)
 	}
-	if n == 0 {
-		step("%s has no dev entries", changesFile)
-		return nil
+	if n > 0 {
+		return fmt.Errorf("%s has %d dev entries; make the release with go tool task tag %s", changesFile, n, version)
 	}
-	if err := os.WriteFile(changesFile, out, 0o644); err != nil {
-		return err
-	}
-	step("%s: wrote version %s into %d dev entries", changesFile, version, n)
 	return nil
 }
 

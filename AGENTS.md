@@ -14,6 +14,7 @@ go tool task test import    # import zone (tag import): TestNexus, starts a Nexu
 go tool task test scale     # scale zone (tag scale): 100k and 1M asset latency test (slow)
 go tool task test clients   # clients zone (tag clients): the CLI of cmd/telesphorepo with the real tools in containers (slow)
 go tool task test all       # core, import, scale and clients one after the other
+go tool task tag <ver>      # stamp the dev entries of changes.toml, commit, tag v<ver> (push it yourself)
 go tool task release [ver]  # cross-compiled archives + SHA256SUMS in bin/release
 go tool task gen            # run sqlc for every internal/**/sqlc.yaml
 go tool task doctor         # show detected Go / bun / Node / Docker-Podman
@@ -129,8 +130,8 @@ write gate, the device and OIDC routes or the change log. Run all zones before a
 - **Add a `changes.toml` entry when an older side would fail.** Add an entry with `version = "dev"`
   when a change makes an older CLI fail against a newer server (`needs = "cli"`), or a newer CLI
   fail against an older server (`needs = "server"`) in a command, a format or a helper. Most
-  changes need none. `go tool task release <version>` writes the release version into each `dev`
-  entry. See **Change log** in SPEC.md.
+  changes need none. `go tool task tag <version>` writes the release version into each `dev`
+  entry, commits it and tags the release. See **Change log** in SPEC.md.
 
 ## Where things live
 
@@ -166,7 +167,7 @@ write gate, the device and OIDC routes or the change log. Run all zones before a
 | Nexus sources, syncs, cut-over | `internal/nexus` (module `nexus`: client, service, `sync.go` scheduler and runner, `api.go`), `web/src/pages/server/NexusMigration.svelte`, `NexusSource.svelte`. Per-format import code is the `Importer` of the format (`Plan` for the target repo, `Target`/`Store` per file). Repo lock: the repo operation `mirror` (`repo_ops`), checked in `access.Engine.Decide` |
 | Demo data and seed | `internal/demo`, and `Demo` and `Seed` of each module; `cmd/telesphorepo-server/demo.go` |
 | E2E harness | `e2e/harness_test.go` (servers, storage matrix `fs` + SeaweedFS), `e2e/clients_test.go` (Maven, Debian and curl helpers that several zones share), publish helpers at the end of `harness_test.go`, `e2e/keycloak_test.go` (Keycloak fixture), `e2e/build_test.go` (`BuildCLI`, `BuildServer`: programs of this repo built on the host with `go build -overlay`), `e2e/cli_server_test.go` (the CLI routes of the server, core zone), `e2e/cli_harness_test.go` and `e2e/cli_*_test.go` (clients zone: the CLI in containers, the secret scan) |
-| Change log and server version | `changes.toml` at the repo root (embedded by `changes.go`, package `telesphorepo`), the parser in `changelog/` (stdlib and toml only, shared with the CLI), `GET /api/changes` in `internal/api/changes.go`, the `Telesphorepo-Version` header in `internal/server/server.go`; `go tool task release <version>` stamps the `dev` entries |
+| Change log and server version | `changes.toml` at the repo root (embedded by `changes.go`, package `telesphorepo`), the parser in `changelog/` (stdlib and toml only, shared with the CLI), `GET /api/changes` in `internal/api/changes.go`, the `Telesphorepo-Version` header in `internal/server/server.go`; `go tool task tag <version>` stamps the `dev` entries |
 | Dev tooling | `tools/task` |
 
 ## Adding a module

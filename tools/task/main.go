@@ -39,11 +39,13 @@ const usage = `Usage: go tool task <command>
   test all         run the core, import, scale and clients zones one after the other; fails if any fails
   cli [version]    build the six CLI archives that the server serves at /cli/ into internal/clidist/dist
                    (the version defaults to git describe; skipped while cmd/telesphorepo does not exist).
-                   A given release version is written into each "dev" entry of changes.toml first
+                   A given release version needs a changes.toml with no "dev" entry
+  tag <version>    make a release: write the version into each "dev" entry of changes.toml, commit
+                   it, and create the tag v<version> (e.g. go tool task tag 1.2.3); push it yourself
   release [version]  build the UI once, then bin/release/<program>_<version>_<os>_<arch> archives
                    (.tar.gz, .zip on Windows) for linux, darwin and windows on amd64 and arm64,
                    plus SHA256SUMS; the version defaults to git describe (e.g. go tool task release 1.2.3).
-                   A given version is written into each "dev" entry of changes.toml first
+                   A given version needs a changes.toml with no "dev" entry
   gen              regenerate the sqlc query code for every internal/**/sqlc.yaml
   doctor          show detected tools (Go, bun/npm, Docker/Podman) and what is missing
 
@@ -133,15 +135,18 @@ func run(ctx context.Context, args []string) error {
 		version := gitVersion(ctx)
 		if len(rest) == 1 {
 			version = rest[0]
-			// A release version goes into the change log first, so the archives and a server
-			// that a later step builds from the same tree (the Dockerfile) embed the stamped log.
 			if _, err := changelog.ParseVersion(version); err == nil {
-				if err := stampChanges(version); err != nil {
+				if err := checkStamped(version); err != nil {
 					return err
 				}
 			}
 		}
 		return cliArchives(ctx, version, clidist.Targets)
+	case "tag":
+		if len(rest) != 1 {
+			return usageErr("tag takes one argument, the release version (go tool task tag 1.2.3)")
+		}
+		return tag(ctx, rest[0])
 	case "gen":
 		if err := noArgs(verb, rest); err != nil {
 			return err
