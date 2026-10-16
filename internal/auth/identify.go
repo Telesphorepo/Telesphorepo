@@ -182,7 +182,10 @@ func (s *Service) Identify(r *http.Request, rd Read) (*Principal, error) {
 	ctx := r.Context()
 	if h := r.Header.Get("Authorization"); h != "" {
 		if user, pass, ok := r.BasicAuth(); ok {
-			if rd.Device && strings.HasPrefix(pass, DeviceProofPrefix) {
+			if strings.HasPrefix(pass, DeviceProofPrefix) {
+				if !rd.Device {
+					return nil, ErrDeviceProofRefused
+				}
 				return s.deviceProof(ctx, s.clientIP(r), pass)
 			}
 			return s.authenticate(ctx, s.clientIP(r), user, pass, true)
@@ -195,7 +198,10 @@ func (s *Service) Identify(r *http.Request, rd Read) (*Principal, error) {
 			if rd.Bearer && strings.HasPrefix(tok, bearerPrefix) {
 				return s.verifyBearer(ctx, tok, "")
 			}
-			if rd.Device && strings.HasPrefix(tok, DeviceProofPrefix) {
+			if strings.HasPrefix(tok, DeviceProofPrefix) {
+				if !rd.Device {
+					return nil, ErrDeviceProofRefused
+				}
 				return s.deviceProof(ctx, s.clientIP(r), tok)
 			}
 			if s.isToken(tok) {

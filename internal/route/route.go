@@ -182,7 +182,7 @@ func (m *Mux) enforce(p Policy, h Handler) http.HandlerFunc {
 					return
 				}
 				switch {
-				case errors.Is(err, auth.ErrPublishEnded):
+				case errors.Is(err, auth.ErrPublishEnded), errors.Is(err, auth.ErrDeviceProofRefused) && op == access.Write:
 					fail(m.access.PublishRequired())
 				case errors.Is(err, auth.ErrBadCredentials):
 					fail(access.Refuse(http.StatusUnauthorized, "credentials", auth.ErrBadCredentials.Error()))

@@ -267,6 +267,10 @@ func (s *Service) tokenKind(tok string) (v Verifier, publicID, secret string, ok
 // expired, or its device or trust policy ended. The answer is the same for all of them.
 var ErrPublishEnded = fmt.Errorf("%w: publish session ended", ErrBadCredentials)
 
+// ErrDeviceProofRefused is a device proof (DeviceProofPrefix) on a route that reads no device
+// proof. Identify does not check it as a password, so it counts as no failed sign-in.
+var ErrDeviceProofRefused = fmt.Errorf("%w: a device proof only reads", ErrBadCredentials)
+
 // PublishPrincipal returns the principal of the open publish session ps. A session with a user
 // (userID not 0) carries that user's current name, kind and permissions, so the access engine checks
 // the user's permission now; a session from a CI identity token has no user. A user who is gone
