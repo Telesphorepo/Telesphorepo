@@ -12,32 +12,30 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"sort"
-	"strings"
 
 	"github.com/Telesphorepo/Telesphorepo/changelog"
+	"github.com/Telesphorepo/Telesphorepo/internal/clidist"
 )
 
-// releaseTargets are the platforms that "go tool task release" builds.
-var releaseTargets = []struct{ goos, goarch string }{
-	{"linux", "amd64"}, {"linux", "arm64"},
-	{"darwin", "amd64"}, {"darwin", "arm64"},
-	{"windows", "amd64"}, {"windows", "arm64"},
-}
+// releaseTargets are the platforms that "go tool task release" builds: those of the CLI archives.
+var releaseTargets = clidist.Targets
 
 // releaseFiles are packed next to the binary in every archive.
 var releaseFiles = []string{"LICENSE", "README.md"}
 
-// releasePrograms are the programs of a release: the server and the Docker credential helper.
+// releasePrograms are the programs of a release: the CLI, the server and the Docker credential
+// helper. A release packs each program whose package exists.
 var releasePrograms = []struct{ name, pkg string }{
+	{"telesphorepo", cliPkg},
 	{"telesphorepo-server", "./cmd/telesphorepo-server"},
 	{"docker-credential-telesphorepo", "./cmd/docker-credential-telesphorepo"},
 }
 
-// release builds the UI once, cross-compiles each release program for every release target,
-// packs each binary with LICENSE and README.md, and writes SHA256SUMS. Output goes to bin/release.
-// A version given as the argument must be a release version: release first writes it into each
-// "dev" entry of changes.toml, so the programs embed the stamped change log.
+// release builds the UI once and the CLI archives that the server embeds, cross-compiles each
+// release program for every release target, packs each binary with LICENSE and README.md, and
+// writes SHA256SUMS. Output goes to bin/release. A version given as the argument must be a
+// release version: release first writes it into each "dev" entry of changes.toml, so the programs
+// embed the stamped change log.
 func release(ctx context.Context, version string) error {
 	pm, err := prepare(ctx)
 	if err != nil {
@@ -52,6 +50,9 @@ func release(ctx context.Context, version string) error {
 	if err := runStep(ctx, webDir, nil, append([]string{pm.Path}, pm.runArgs("build")...)...); err != nil {
 		return fmt.Errorf("web build failed: %w", err)
 	}
+	if err := cliArchives(ctx, version, clidist.Targets); err != nil {
+		return err
+	}
 
 	dir := filepath.Join("bin", "release")
 	if err := os.RemoveAll(dir); err != nil {
@@ -63,8 +64,19 @@ func release(ctx context.Context, version string) error {
 
 	sums := map[string]string{}
 	for _, p := range releasePrograms {
+		if st, err := os.Stat(filepath.FromSlash(p.pkg)); err != nil || !st.IsDir() {
+			note("skipping %s: %s does not exist", p.name, p.pkg)
+			continue
+		}
+		files := releaseFiles
+		if p.pkg == cliPkg {
+			files = nil
+			if _, err := os.Stat(cliLicense); err == nil {
+				files = []string{cliLicense}
+			}
+		}
 		for _, t := range releaseTargets {
-			archive, err := releaseArchive(ctx, dir, version, p.name, p.pkg, t.goos, t.goarch)
+			archive, err := releaseArchive(ctx, dir, version, p.name, p.pkg, t.OS, t.Arch, files)
 			if err != nil {
 				return err
 			}
@@ -75,19 +87,10 @@ func release(ctx context.Context, version string) error {
 			sums[archive] = sum
 		}
 	}
-	names := make([]string, 0, len(sums))
-	for n := range sums {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	var sb strings.Builder
-	for _, n := range names {
-		fmt.Fprintf(&sb, "%s  %s\n", sums[n], n)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS"), []byte(sb.String()), 0o644); err != nil {
+	if err := writeSums(filepath.Join(dir, "SHA256SUMS"), sums); err != nil {
 		return err
 	}
-	out.line(green("✓ ") + fmt.Sprintf("released %d archives and SHA256SUMS to %s (version %s)", len(names), bold(filepath.ToSlash(dir)), version))
+	out.line(green("✓ ") + fmt.Sprintf("released %d archives and SHA256SUMS to %s (version %s)", len(sums), bold(filepath.ToSlash(dir)), version))
 	return nil
 }
 
@@ -115,9 +118,10 @@ func stampChanges(version string) error {
 	return nil
 }
 
-// releaseArchive cross-compiles the program of package pkg for goos/goarch and packs it into
-// <name>_<version>_<goos>_<goarch>.tar.gz (.zip on Windows) in dir. It returns the archive name.
-func releaseArchive(ctx context.Context, dir, version, name, pkg, goos, goarch string) (string, error) {
+// releaseArchive cross-compiles the program of package pkg for goos/goarch and packs it with
+// files into <name>_<version>_<goos>_<goarch>.tar.gz (.zip on Windows) in dir. It returns the
+// archive name.
+func releaseArchive(ctx context.Context, dir, version, name, pkg, goos, goarch string, files []string) (string, error) {
 	base := fmt.Sprintf("%s_%s_%s_%s", name, version, goos, goarch)
 	if goos == "windows" {
 		name += ".exe"
@@ -133,10 +137,10 @@ func releaseArchive(ctx context.Context, dir, version, name, pkg, goos, goarch s
 	var err error
 	if goos == "windows" {
 		archive = base + ".zip"
-		err = packZip(filepath.Join(dir, archive), bin, name)
+		err = packZipFiles(filepath.Join(dir, archive), bin, name, files)
 	} else {
 		archive = base + ".tar.gz"
-		err = packTarGz(filepath.Join(dir, archive), bin, name)
+		err = packTarGzFiles(filepath.Join(dir, archive), bin, name, files)
 	}
 	if rmErr := os.Remove(bin); err == nil {
 		err = rmErr
@@ -147,8 +151,9 @@ func releaseArchive(ctx context.Context, dir, version, name, pkg, goos, goarch s
 	return archive, nil
 }
 
-// packTarGz writes a .tar.gz with the binary (mode 0755) and the release files.
-func packTarGz(archive, bin, binName string) (err error) {
+// packTarGzFiles writes a .tar.gz with the binary (mode 0755) and files, each under its base
+// name.
+func packTarGzFiles(archive, bin, binName string, files []string) (err error) {
 	f, err := os.Create(archive)
 	if err != nil {
 		return err
@@ -163,8 +168,8 @@ func packTarGz(archive, bin, binName string) (err error) {
 	if err := tarAdd(tw, bin, binName, 0o755); err != nil {
 		return err
 	}
-	for _, rf := range releaseFiles {
-		if err := tarAdd(tw, rf, rf, 0o644); err != nil {
+	for _, rf := range files {
+		if err := tarAdd(tw, rf, filepath.Base(rf), 0o644); err != nil {
 			return err
 		}
 	}
@@ -191,8 +196,8 @@ func tarAdd(tw *tar.Writer, src, name string, mode int64) error {
 	return err
 }
 
-// packZip writes a .zip with the binary and the release files.
-func packZip(archive, bin, binName string) (err error) {
+// packZipFiles writes a .zip with the binary and files, each under its base name.
+func packZipFiles(archive, bin, binName string, files []string) (err error) {
 	f, err := os.Create(archive)
 	if err != nil {
 		return err
@@ -206,8 +211,8 @@ func packZip(archive, bin, binName string) (err error) {
 	if err := zipAdd(zw, bin, binName); err != nil {
 		return err
 	}
-	for _, rf := range releaseFiles {
-		if err := zipAdd(zw, rf, rf); err != nil {
+	for _, rf := range files {
+		if err := zipAdd(zw, rf, filepath.Base(rf)); err != nil {
 			return err
 		}
 	}

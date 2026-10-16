@@ -111,8 +111,12 @@ type Spec struct {
 	// baseURL is the server's public URL without a trailing slash.
 	Usage func(repo *repos.Repo, baseURL string) []Snippet
 	// Tools are the build tools that publish to the format's repos: the core builds their CI
-	// files (GitHub Actions and Jenkins) and the project setup scripts from them.
+	// files (GitHub Actions and Jenkins) from them.
 	Tools []Tool
+	// Publish is how a person publishes to the format's repos: PublishCLI ("telesphorepo
+	// publish" in the project folder) or PublishHelper (the native command of the tool, through
+	// a credential helper of the CLI). "" is PublishCLI.
+	Publish string
 	// ArtifactUsage returns the snippets that use one artifact of a repo (Context "artifact"):
 	// the dependency or install line with the repository setup it needs. path is an artifact
 	// folder, a version folder or a file of a version. version names a version of the artifact
@@ -142,6 +146,21 @@ type ConfigSpec struct {
 	Fields []Field
 	// Validate validates a config and returns its normalized form.
 	Validate func(raw json.RawMessage) (json.RawMessage, error)
+}
+
+// Publish categories (Spec.Publish).
+const (
+	PublishCLI    = "cli"
+	PublishHelper = "helper"
+)
+
+// PublishCategory returns the publish category of the format: Publish, or PublishCLI when it is
+// "".
+func (s *Spec) PublishCategory() string {
+	if s.Publish == "" {
+		return PublishCLI
+	}
+	return s.Publish
 }
 
 // Takes reports whether the format takes repos of kind.
@@ -241,10 +260,7 @@ type Registry struct {
 	hooks  map[string]*assets.Hooks
 }
 
-var (
-	nameRE    = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
-	setupIDRE = regexp.MustCompile(`^[a-z][a-z0-9]{0,31}$`)
-)
+var nameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
 // reserved names collide with paths of the server or with the kernel's schema component.
 var reserved = map[string]bool{"api": true, "core": true, "healthz": true, "assets": true, "setup": true}
@@ -252,8 +268,8 @@ var reserved = map[string]bool{"api": true, "core": true, "healthz": true, "asse
 // NewRegistry checks the specs and returns their registry. A spec breaks the contract when its
 // name is not valid or is taken, when it has no Config.Validate, when its Kinds lack "hosted"
 // or name another kind, when it takes proxies without Classify and ProxyProbe, when its Merge
-// lacks Match or Merge, when it sets one of Versions and Builds without the other, or when its
-// Upload, Importer or Rebuild is incomplete.
+// lacks Match or Merge, when it sets one of Versions and Builds without the other, when its
+// Upload, Importer or Rebuild is incomplete, or when its Publish category is unknown.
 func NewRegistry(specs []Spec) (*Registry, error) {
 	r := &Registry{byName: map[string]*Spec{}, hooks: map[string]*assets.Hooks{}}
 	for i := range specs {
@@ -291,6 +307,8 @@ func check(s *Spec) error {
 		return fmt.Errorf("Importer needs Sources and Target")
 	case s.Rebuild != nil && s.Rebuild.Run == nil:
 		return fmt.Errorf("Rebuild needs Run")
+	case s.Publish != "" && s.Publish != PublishCLI && s.Publish != PublishHelper:
+		return fmt.Errorf("Publish must be %q or %q", PublishCLI, PublishHelper)
 	}
 	for _, k := range s.Kinds {
 		if k != repos.KindHosted && k != repos.KindProxy && k != repos.KindGroup {
@@ -301,8 +319,7 @@ func check(s *Spec) error {
 		switch {
 		case !nameRE.MatchString(t.ID) || t.Label == "" || t.Publish == nil:
 			return fmt.Errorf("tool %q needs an ID, a Label and Publish", t.ID)
-		case t.Setup != nil && !setupIDRE.MatchString(t.ID):
-			return fmt.Errorf("tool %q: a tool with Setup has an ID of lower-case letters and digits", t.ID)
+
 		case slices.ContainsFunc(s.Tools[:i], func(o Tool) bool { return o.ID == t.ID }):
 			return fmt.Errorf("tool %q registered twice", t.ID)
 		}

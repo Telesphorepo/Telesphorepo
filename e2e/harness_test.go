@@ -1171,16 +1171,15 @@ type Enrollment struct {
 // b64 is the encoding of device keys, nonces and signatures on the wire.
 func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 
-// StartEnrollment generates an Ed25519 key and starts the device flow for it from publisher
-// client client ("gradle" or "maven"), without auth.
-func (s *Server) StartEnrollment(t testing.TB, name, client string) (Enrollment, ed25519.PrivateKey) {
+// StartEnrollment generates an Ed25519 key and starts the device flow for it, without auth.
+func (s *Server) StartEnrollment(t testing.TB, name string) (Enrollment, ed25519.PrivateKey) {
 	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var en Enrollment
-	s.MustAPI(t, http.MethodPost, "/api/devices/enroll", map[string]string{"name": name, "client": client, "public_key": b64(pub)}, nil, &en)
+	s.MustAPI(t, http.MethodPost, "/api/devices/enroll", map[string]string{"name": name, "public_key": b64(pub)}, nil, &en)
 	if en.DeviceCode == "" || en.UserCode == "" {
 		t.Fatalf("POST /api/devices/enroll: incomplete answer %+v", en)
 	}
@@ -1215,7 +1214,7 @@ func (s *Server) ApproveEnrollment(t testing.TB, sess *Session, user, userCode s
 // both factors, approve with a fresh code, poll for the device id.
 func (s *Server) EnrollDevice(t testing.TB, user string) *Device {
 	t.Helper()
-	en, key := s.StartEnrollment(t, "e2e "+user, "gradle")
+	en, key := s.StartEnrollment(t, "e2e "+user)
 	sess := s.LoginTOTP(t, user)
 	if st, b := s.ApproveEnrollment(t, sess, user, en.UserCode); st/100 != 2 {
 		t.Fatalf("approve device of %s: status %d: %s", user, st, b)

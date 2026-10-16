@@ -107,15 +107,14 @@ func (q *Queries) CloseUserPublishSessions(ctx context.Context, arg CloseUserPub
 
 const createDevice = `-- name: CreateDevice :one
 
-INSERT INTO devices (user_id, name, client, public_key, created_at, expires_at)
-VALUES (?, ?, ?, ?, ?, ?)
+INSERT INTO devices (user_id, name, public_key, created_at, expires_at)
+VALUES (?, ?, ?, ?, ?)
 RETURNING id
 `
 
 type CreateDeviceParams struct {
 	UserID    int64
 	Name      string
-	Client    string
 	PublicKey []byte
 	CreatedAt int64
 	ExpiresAt int64
@@ -126,7 +125,6 @@ func (q *Queries) CreateDevice(ctx context.Context, arg CreateDeviceParams) (int
 	row := q.db.QueryRowContext(ctx, createDevice,
 		arg.UserID,
 		arg.Name,
-		arg.Client,
 		arg.PublicKey,
 		arg.CreatedAt,
 		arg.ExpiresAt,
@@ -137,15 +135,14 @@ func (q *Queries) CreateDevice(ctx context.Context, arg CreateDeviceParams) (int
 }
 
 const createEnrollment = `-- name: CreateEnrollment :exec
-INSERT INTO device_enrollments (device_code_hash, user_code, name, client, public_key, created_at, expires_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)
+INSERT INTO device_enrollments (device_code_hash, user_code, name, public_key, created_at, expires_at)
+VALUES (?, ?, ?, ?, ?, ?)
 `
 
 type CreateEnrollmentParams struct {
 	DeviceCodeHash []byte
 	UserCode       string
 	Name           string
-	Client         string
 	PublicKey      []byte
 	CreatedAt      int64
 	ExpiresAt      int64
@@ -157,7 +154,6 @@ func (q *Queries) CreateEnrollment(ctx context.Context, arg CreateEnrollmentPara
 		arg.DeviceCodeHash,
 		arg.UserCode,
 		arg.Name,
-		arg.Client,
 		arg.PublicKey,
 		arg.CreatedAt,
 		arg.ExpiresAt,
@@ -338,7 +334,7 @@ func (q *Queries) DeleteTrustRepos(ctx context.Context, trustID int64) error {
 }
 
 const getDevice = `-- name: GetDevice :one
-SELECT d.id, d.user_id, d.name, d.client, d.public_key, d.created_at, d.expires_at, d.last_used_at, d.revoked_at,
+SELECT d.id, d.user_id, d.name, d.public_key, d.created_at, d.expires_at, d.last_used_at, d.revoked_at,
        u.username, u.disabled, u.kind AS user_kind,
        CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = u.id), '') AS TEXT) AS perms
 FROM devices d JOIN users u ON u.id = d.user_id
@@ -349,7 +345,6 @@ type GetDeviceRow struct {
 	ID         int64
 	UserID     int64
 	Name       string
-	Client     string
 	PublicKey  []byte
 	CreatedAt  int64
 	ExpiresAt  int64
@@ -369,7 +364,6 @@ func (q *Queries) GetDevice(ctx context.Context, id int64) (GetDeviceRow, error)
 		&i.ID,
 		&i.UserID,
 		&i.Name,
-		&i.Client,
 		&i.PublicKey,
 		&i.CreatedAt,
 		&i.ExpiresAt,
@@ -403,7 +397,7 @@ func (q *Queries) GetDeviceExchangeNonce(ctx context.Context, arg GetDeviceExcha
 }
 
 const getEnrollmentByDeviceCode = `-- name: GetEnrollmentByDeviceCode :one
-SELECT device_code_hash, user_code, name, client, public_key, created_at, expires_at, polled_at, approved_by, device_id
+SELECT device_code_hash, user_code, name, public_key, created_at, expires_at, polled_at, approved_by, device_id
 FROM device_enrollments WHERE device_code_hash = ?
 `
 
@@ -414,7 +408,6 @@ func (q *Queries) GetEnrollmentByDeviceCode(ctx context.Context, deviceCodeHash 
 		&i.DeviceCodeHash,
 		&i.UserCode,
 		&i.Name,
-		&i.Client,
 		&i.PublicKey,
 		&i.CreatedAt,
 		&i.ExpiresAt,
@@ -426,7 +419,7 @@ func (q *Queries) GetEnrollmentByDeviceCode(ctx context.Context, deviceCodeHash 
 }
 
 const getEnrollmentByUserCode = `-- name: GetEnrollmentByUserCode :one
-SELECT device_code_hash, user_code, name, client, public_key, created_at, expires_at, polled_at, approved_by, device_id
+SELECT device_code_hash, user_code, name, public_key, created_at, expires_at, polled_at, approved_by, device_id
 FROM device_enrollments WHERE user_code = ?
 `
 
@@ -437,7 +430,6 @@ func (q *Queries) GetEnrollmentByUserCode(ctx context.Context, userCode string) 
 		&i.DeviceCodeHash,
 		&i.UserCode,
 		&i.Name,
-		&i.Client,
 		&i.PublicKey,
 		&i.CreatedAt,
 		&i.ExpiresAt,
@@ -467,7 +459,9 @@ func (q *Queries) GetExchangeNonce(ctx context.Context, arg GetExchangeNoncePara
 }
 
 const getExchangeSession = `-- name: GetExchangeSession :one
-SELECT session_id FROM publish_exchange_sessions WHERE nonce_hash = ? AND repo_id = ?
+SELECT e.session_id, s.public_id FROM publish_exchange_sessions e
+JOIN publish_sessions s ON s.id = e.session_id
+WHERE e.nonce_hash = ? AND e.repo_id = ?
 `
 
 type GetExchangeSessionParams struct {
@@ -475,12 +469,17 @@ type GetExchangeSessionParams struct {
 	RepoID    int64
 }
 
+type GetExchangeSessionRow struct {
+	SessionID int64
+	PublicID  string
+}
+
 // The session that a token exchange nonce minted for a repo.
-func (q *Queries) GetExchangeSession(ctx context.Context, arg GetExchangeSessionParams) (int64, error) {
+func (q *Queries) GetExchangeSession(ctx context.Context, arg GetExchangeSessionParams) (GetExchangeSessionRow, error) {
 	row := q.db.QueryRowContext(ctx, getExchangeSession, arg.NonceHash, arg.RepoID)
-	var session_id int64
-	err := row.Scan(&session_id)
-	return session_id, err
+	var i GetExchangeSessionRow
+	err := row.Scan(&i.SessionID, &i.PublicID)
+	return i, err
 }
 
 const getPublishSessionAuth = `-- name: GetPublishSessionAuth :one
@@ -685,7 +684,7 @@ func (q *Queries) InsertTrustRepo(ctx context.Context, arg InsertTrustRepoParams
 }
 
 const listDevices = `-- name: ListDevices :many
-SELECT d.id, d.user_id, u.username, d.name, d.client, d.created_at, d.expires_at, d.last_used_at, d.revoked_at
+SELECT d.id, d.user_id, u.username, d.name, d.created_at, d.expires_at, d.last_used_at, d.revoked_at
 FROM devices d JOIN users u ON u.id = d.user_id
 WHERE d.id < ?1
 ORDER BY d.id DESC LIMIT ?2
@@ -701,7 +700,6 @@ type ListDevicesRow struct {
 	UserID     int64
 	Username   string
 	Name       string
-	Client     string
 	CreatedAt  int64
 	ExpiresAt  int64
 	LastUsedAt sql.NullInt64
@@ -723,7 +721,6 @@ func (q *Queries) ListDevices(ctx context.Context, arg ListDevicesParams) ([]Lis
 			&i.UserID,
 			&i.Username,
 			&i.Name,
-			&i.Client,
 			&i.CreatedAt,
 			&i.ExpiresAt,
 			&i.LastUsedAt,
@@ -1039,7 +1036,7 @@ func (q *Queries) ListTrusts(ctx context.Context, arg ListTrustsParams) ([]Publi
 }
 
 const listUserDevices = `-- name: ListUserDevices :many
-SELECT id, user_id, name, client, created_at, expires_at, last_used_at, revoked_at
+SELECT id, user_id, name, created_at, expires_at, last_used_at, revoked_at
 FROM devices WHERE user_id = ?1 AND id < ?2
 ORDER BY id DESC LIMIT ?3
 `
@@ -1054,7 +1051,6 @@ type ListUserDevicesRow struct {
 	ID         int64
 	UserID     int64
 	Name       string
-	Client     string
 	CreatedAt  int64
 	ExpiresAt  int64
 	LastUsedAt sql.NullInt64
@@ -1075,7 +1071,6 @@ func (q *Queries) ListUserDevices(ctx context.Context, arg ListUserDevicesParams
 			&i.ID,
 			&i.UserID,
 			&i.Name,
-			&i.Client,
 			&i.CreatedAt,
 			&i.ExpiresAt,
 			&i.LastUsedAt,

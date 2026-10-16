@@ -16,8 +16,9 @@ const (
 	viteURL   = "http://localhost:5173"
 )
 
-// dev runs the backend ("telesphorepo-server dev") and Vite side by side, rebuilding and
-// restarting the backend when Go sources, go.mod/go.sum or a schema.sql change.
+// dev builds the CLI archive of this computer once, then runs the backend ("telesphorepo-server
+// dev") and Vite side by side, rebuilding and restarting the backend when Go sources,
+// go.mod/go.sum or a schema.sql change.
 func dev(ctx context.Context) error {
 	pm, err := prepare(ctx)
 	if err != nil {
@@ -29,6 +30,9 @@ func dev(ctx context.Context) error {
 	bin := exe(filepath.Join(devBinDir, "telesphorepo-server"))
 	next := exe(filepath.Join(devBinDir, "telesphorepo.next"))
 
+	if err := cliArchives(ctx, gitVersion(ctx), hostTarget()); err != nil {
+		return err
+	}
 	step("building backend")
 	if err := goBuildDev(ctx, next); err != nil {
 		if ctx.Err() != nil {

@@ -37,31 +37,26 @@ type Enrollment struct {
 	Interval        int    `json:"interval"`
 }
 
-// PendingEnrollment is what the approval page shows for a user code: the device name and the
-// publisher client it enrolls from.
+// PendingEnrollment is what the approval page shows for a user code: the name of the device that
+// the Telesphorepo CLI enrolls.
 type PendingEnrollment struct {
-	UserCode    string    `json:"user_code"`
-	Name        string    `json:"name"`
-	Client      string    `json:"client"`
-	ClientTitle string    `json:"client_title"`
-	ClientHelp  string    `json:"client_help"`
-	ExpiresAt   time.Time `json:"expires_at"`
+	UserCode  string    `json:"user_code"`
+	Name      string    `json:"name"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 // Device is an enrolled device key. State is "active", "expired" or "revoked". Username is set
 // in the admin list.
 type Device struct {
-	ID          int64      `json:"id"`
-	UserID      int64      `json:"user_id"`
-	Username    string     `json:"username,omitempty"`
-	Name        string     `json:"name"`
-	Client      string     `json:"client"`       // a publisher client ID, e.g. "gradle"
-	ClientTitle string     `json:"client_title"` // e.g. "Gradle plugin"
-	CreatedAt   time.Time  `json:"created_at"`
-	ExpiresAt   time.Time  `json:"expires_at"`
-	LastUsedAt  *time.Time `json:"last_used_at"`
-	RevokedAt   *time.Time `json:"revoked_at"`
-	State       string     `json:"state"`
+	ID         int64      `json:"id"`
+	UserID     int64      `json:"user_id"`
+	Username   string     `json:"username,omitempty"`
+	Name       string     `json:"name"`
+	CreatedAt  time.Time  `json:"created_at"`
+	ExpiresAt  time.Time  `json:"expires_at"`
+	LastUsedAt *time.Time `json:"last_used_at"`
+	RevokedAt  *time.Time `json:"revoked_at"`
+	State      string     `json:"state"`
 }
 
 func deviceState(revoked sql.NullInt64, expires, now int64) string {
@@ -84,6 +79,20 @@ func validName(name string) bool {
 		}
 	}
 	return true
+}
+
+// deviceInput checks the name and the public key of a new device and returns the trimmed name and
+// the raw key.
+func deviceInput(name, publicKey string) (string, []byte, error) {
+	name = strings.TrimSpace(name)
+	if !validName(name) {
+		return "", nil, errorf(ErrInvalid, "name must be 1 to 100 characters")
+	}
+	key, err := decodeB64URL(publicKey)
+	if err != nil || len(key) != ed25519.PublicKeySize {
+		return "", nil, errorf(ErrInvalid, "public_key must be a base64url Ed25519 public key (32 bytes)")
+	}
+	return name, key, nil
 }
 
 // newUserCode returns a random code "ABCD-EFGH" from userCodeAlphabet.
@@ -121,17 +130,10 @@ func normalizeUserCode(in string) (string, bool) {
 
 // Enroll starts the device flow for a new device key. ip is the caller's address; each address
 // gets a small budget of enrollments.
-func (s *Service) Enroll(ctx context.Context, ip netip.Addr, name, client, publicKey string) (*Enrollment, error) {
-	name = strings.TrimSpace(name)
-	if !validName(name) {
-		return nil, errorf(ErrInvalid, "name must be 1 to 100 characters")
-	}
-	if _, ok := s.clients.Get(client); !ok {
-		return nil, errorf(ErrInvalid, "client must be one of "+s.clients.IDs())
-	}
-	key, err := decodeB64URL(publicKey)
-	if err != nil || len(key) != ed25519.PublicKeySize {
-		return nil, errorf(ErrInvalid, "public_key must be a base64url Ed25519 public key (32 bytes)")
+func (s *Service) Enroll(ctx context.Context, ip netip.Addr, name, publicKey string) (*Enrollment, error) {
+	name, key, err := deviceInput(name, publicKey)
+	if err != nil {
+		return nil, err
 	}
 	if !s.enrollLimits.allow(ip) {
 		return nil, errorf(ErrLimited, "too many enrollments; try again later")
@@ -141,7 +143,7 @@ func (s *Service) Enroll(ctx context.Context, ip netip.Addr, name, client, publi
 	for range 5 {
 		code := newUserCode()
 		err := s.wq.CreateEnrollment(ctx, dbq.CreateEnrollmentParams{
-			DeviceCodeHash: hashBytes([]byte(deviceCode)), UserCode: code, Name: name, Client: client,
+			DeviceCodeHash: hashBytes([]byte(deviceCode)), UserCode: code, Name: name,
 			PublicKey: key, CreatedAt: now.Unix(), ExpiresAt: now.Add(enrollTTL).Unix(),
 		})
 		if isUnique(err) {
@@ -181,15 +183,13 @@ func (s *Service) pending(ctx context.Context, userCode string) (dbq.DeviceEnrol
 	return e, nil
 }
 
-// PendingEnrollment returns the device name and client behind a user code for the approval page.
+// PendingEnrollment returns the device name behind a user code for the approval page.
 func (s *Service) PendingEnrollment(ctx context.Context, userCode string) (*PendingEnrollment, error) {
 	e, err := s.pending(ctx, userCode)
 	if err != nil {
 		return nil, err
 	}
-	cl, _ := s.clients.Get(e.Client)
-	return &PendingEnrollment{UserCode: e.UserCode, Name: e.Name, Client: e.Client, ClientTitle: s.clients.Title(e.Client),
-		ClientHelp: cl.Help, ExpiresAt: unixTime(e.ExpiresAt)}, nil
+	return &PendingEnrollment{UserCode: e.UserCode, Name: e.Name, ExpiresAt: unixTime(e.ExpiresAt)}, nil
 }
 
 // ApprovalGrant stores a single-use grant (auth.Service.IssueGrant) that lets the SSO user userID
@@ -221,7 +221,7 @@ func (s *Service) Approve(ctx context.Context, r *http.Request, p *auth.Principa
 		q := dbq.New(tx)
 		var err error
 		id, err = q.CreateDevice(ctx, dbq.CreateDeviceParams{
-			UserID: p.UserID, Name: e.Name, Client: e.Client, PublicKey: e.PublicKey,
+			UserID: p.UserID, Name: e.Name, PublicKey: e.PublicKey,
 			CreatedAt: now.Unix(), ExpiresAt: exp.Unix(),
 		})
 		if isUnique(err) {
@@ -240,13 +240,13 @@ func (s *Service) Approve(ctx context.Context, r *http.Request, p *auth.Principa
 			return errorf(ErrConflict, "this code was already used or has expired")
 		}
 		return s.audit.RecordTx(ctx, tx, audit.Event{Action: ActionDeviceApprove, Target: e.Name,
-			Detail: map[string]any{"device_id": id, "client": e.Client, "owner": p.Username}})
+			Detail: map[string]any{"device_id": id, "owner": p.Username}})
 	})
 	if err != nil {
 		return nil, err
 	}
 	return &Device{
-		ID: id, UserID: p.UserID, Name: e.Name, Client: e.Client, ClientTitle: s.clients.Title(e.Client),
+		ID: id, UserID: p.UserID, Name: e.Name,
 		CreatedAt: unixTime(now.Unix()), ExpiresAt: unixTime(exp.Unix()), State: "active",
 	}, nil
 }
@@ -297,7 +297,7 @@ func (s *Service) UserDevices(ctx context.Context, userID, after int64, limit in
 	out := make([]Device, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, Device{
-			ID: r.ID, UserID: r.UserID, Name: r.Name, Client: r.Client, ClientTitle: s.clients.Title(r.Client),
+			ID: r.ID, UserID: r.UserID, Name: r.Name,
 			CreatedAt: unixTime(r.CreatedAt), ExpiresAt: unixTime(r.ExpiresAt),
 			LastUsedAt: unixPtr(r.LastUsedAt), RevokedAt: unixPtr(r.RevokedAt),
 			State: deviceState(r.RevokedAt, r.ExpiresAt, now),
@@ -316,7 +316,7 @@ func (s *Service) Devices(ctx context.Context, after int64, limit int) ([]Device
 	out := make([]Device, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, Device{
-			ID: r.ID, UserID: r.UserID, Username: r.Username, Name: r.Name, Client: r.Client, ClientTitle: s.clients.Title(r.Client),
+			ID: r.ID, UserID: r.UserID, Username: r.Username, Name: r.Name,
 			CreatedAt: unixTime(r.CreatedAt), ExpiresAt: unixTime(r.ExpiresAt),
 			LastUsedAt: unixPtr(r.LastUsedAt), RevokedAt: unixPtr(r.RevokedAt),
 			State: deviceState(r.RevokedAt, r.ExpiresAt, now),

@@ -25,7 +25,6 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/blobs"
 	"github.com/Telesphorepo/Telesphorepo/internal/ci"
-	"github.com/Telesphorepo/Telesphorepo/internal/clients"
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
@@ -78,8 +77,7 @@ type Options struct {
 const VersionHeader = "Telesphorepo-Version"
 
 // Built is what the module list declares: the manifests in start order, the formats, the
-// permission registry, the audit actions, the settings groups, the CI providers and the
-// publisher clients.
+// permission registry, the audit actions, the settings groups and the CI providers.
 type Built struct {
 	Manifests []*module.Manifest
 	Formats   *format.Registry
@@ -87,7 +85,6 @@ type Built struct {
 	Actions   *audit.Actions
 	Groups    []*settings.Group
 	CI        *ci.Registry
-	Clients   *clients.Registry
 }
 
 var (
@@ -97,8 +94,8 @@ var (
 )
 
 // Build runs every module's Register once per process: it builds the manifests, the permission
-// registry (then fixed), the audit actions, the settings groups, the format registry, the CI
-// provider registry and the publisher client registry. Later calls return the same result.
+// registry (then fixed), the audit actions, the settings groups, the format registry and the CI
+// provider registry. Later calls return the same result.
 func Build() (*Built, error) {
 	buildOnce.Do(func() {
 		mfs := module.Build(modules.All())
@@ -114,7 +111,6 @@ func Build() (*Built, error) {
 		perms.Fix()
 		actions := audit.NewActions()
 		providers := ci.NewRegistry()
-		publishers := clients.NewRegistry()
 		var specs []format.Spec
 		var groups []*settings.Group
 		for _, m := range mfs {
@@ -128,12 +124,6 @@ func Build() (*Built, error) {
 					return
 				}
 			}
-			for _, cl := range m.Clients {
-				if err := publishers.Add(cl); err != nil {
-					buildErr = fmt.Errorf("module %s: %w", m.Module.ID, err)
-					return
-				}
-			}
 			groups = append(groups, m.Settings...)
 			specs = append(specs, m.Formats...)
 		}
@@ -142,7 +132,7 @@ func Build() (*Built, error) {
 			buildErr = err
 			return
 		}
-		built = &Built{Manifests: mfs, Formats: reg, Perms: perms, Actions: actions, Groups: groups, CI: providers, Clients: publishers}
+		built = &Built{Manifests: mfs, Formats: reg, Perms: perms, Actions: actions, Groups: groups, CI: providers}
 	})
 	return built, buildErr
 }
@@ -441,7 +431,7 @@ func kernel(base context.Context, d *db.DB, boot *config.Boot, set *settings.Ser
 		Boot: boot, Dev: dev, Version: version, DB: d, Settings: set, Perms: b.Perms, Audit: au,
 		Jobs: runner, Storage: live, Blobs: bs, Assets: pipe, Reader: reader, Uploads: assets.NewUploads(d, set.Current),
 		Rebuilds: rq, Repos: rs, Ops: opsSvc, Auth: as, Formats: b.Formats, Access: engine,
-		CI: b.CI, Builds: ci.NewBuilds(d, b.CI), Clients: b.Clients,
+		CI: b.CI, Builds: ci.NewBuilds(d, b.CI),
 		API: &route.API{Settings: set.Current},
 	}, nil
 }

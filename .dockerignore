@@ -11,6 +11,8 @@ bin
 node_modules
 web/node_modules
 web/dist
+internal/clidist/dist/*
+!internal/clidist/dist/.keep
 e2e/testdata/out
 e2e/**/*.log
 **/*.test

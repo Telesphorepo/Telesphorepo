@@ -71,16 +71,6 @@ func TestClients(t *testing.T) {
 		s.CreateRepo(t, repo, "maven", true, nil)
 		testMavenDevice(t, s, cl, repo)
 	})
-	t.Run("setup gradle", func(t *testing.T) {
-		repo := RandName("setup-gradle")
-		s.CreateRepo(t, repo, "maven", true, nil)
-		testSetupGradle(t, s, cl, repo)
-	})
-	t.Run("setup maven", func(t *testing.T) {
-		repo := RandName("setup-maven")
-		s.CreateRepo(t, repo, "maven", true, nil)
-		testSetupMaven(t, s, cl, repo)
-	})
 	t.Run("github actions", func(t *testing.T) {
 		repo := RandName("ci")
 		s.CreateRepo(t, repo, "maven", true, nil)

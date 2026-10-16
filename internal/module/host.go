@@ -13,7 +13,6 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/blobs"
 	"github.com/Telesphorepo/Telesphorepo/internal/ci"
-	"github.com/Telesphorepo/Telesphorepo/internal/clients"
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
@@ -49,10 +48,9 @@ type Kernel struct {
 	Auth     *auth.Service
 	Access   *access.Engine // repo access decisions and the access report
 	Formats  *format.Registry
-	CI       *ci.Registry      // the CI providers
-	Builds   *ci.Builds        // the build records
-	Clients  *clients.Registry // the publisher clients
-	API      *route.API        // the shared helpers of JSON API handlers
+	CI       *ci.Registry // the CI providers
+	Builds   *ci.Builds   // the build records
+	API      *route.API   // the shared helpers of JSON API handlers
 }
 
 // Host is what a module may use at runtime: the kernel services, a log tagged with the module

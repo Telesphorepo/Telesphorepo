@@ -15,7 +15,7 @@ import (
 )
 
 // Usage returns the apt setup (key, source, read credentials for a private repo) and the publish
-// step by hand, curl with a publish token. The core adds the CI files of the tool curl. The dist
+// command of the Telesphorepo CLI. The core adds the CI files of the tool telesphorepo. The dist
 // "stable" and the component "main" are examples: any valid names work.
 func (h *Handler) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
 	url := baseURL + "/debian/" + repo.Name
@@ -35,12 +35,8 @@ func (h *Handler) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
 	}
 	out := aptSetup(repo, baseURL, format.SnippetRepo, "stable", "main",
 		"stable and main are examples: use the distribution and component the packages were uploaded to.")
-	return append(out, format.HandSnippet(curlUpload(repo, baseURL)))
-}
-
-// curlUpload is the curl command that uploads a package to the repo (format.TokenCurl).
-func curlUpload(repo *repos.Repo, baseURL string) string {
-	return format.TokenCurl + "-T hello_1.0_amd64.deb " + baseURL + "/debian/" + repo.Name + "/upload/stable/main"
+	return append(out, format.CLISnippet("telesphorepo", format.CLIPublish+" hello_1.0_amd64.deb",
+		"The CLI uploads each package to the distribution and component that dist and component name in telesphorepo.toml."))
 }
 
 // aptSetup returns the apt setup of a hosted repo for one distribution and component: the

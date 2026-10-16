@@ -17,7 +17,6 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/ci"
-	"github.com/Telesphorepo/Telesphorepo/internal/clients"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
 	"github.com/Telesphorepo/Telesphorepo/internal/demo"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
@@ -86,7 +85,6 @@ type Manifest struct {
 	RepoFields    []repos.Field
 	Guards        []access.Guard
 	CIProviders   []ci.Provider
-	Clients       []clients.Client
 	ResolveClient func(r *http.Request) httpx.Client
 	TokenKinds    []TokenKind
 	Demo          *DemoData
@@ -171,7 +169,7 @@ func (x *Extender) Init(fn func(ctx context.Context, h *Host) error) {
 // registers, and its RootPrefix claims.
 func (x *Extender) Routes(fn func(r *route.Router)) { x.m.Routes = append(x.m.Routes, fn) }
 
-// RootPrefix claims a path outside /api/ and the format segments, e.g. "/v2/" or "/setup.sh".
+// RootPrefix claims a path outside /api/ and the format segments, e.g. "/v2/" or "/install.sh".
 func (x *Extender) RootPrefix(prefix string) { x.m.RootPrefixes = append(x.m.RootPrefixes, prefix) }
 
 // Job adds a background job (see jobs.Job). Its name starts with "<module ID>.".
@@ -192,9 +190,6 @@ func (x *Extender) RepoField(f repos.Field) { x.m.RepoFields = append(x.m.RepoFi
 // CIProvider adds a CI system whose tokens make build records and whose trust policies the
 // access report describes (see ci.Provider).
 func (x *Extender) CIProvider(p ci.Provider) { x.m.CIProviders = append(x.m.CIProviders, p) }
-
-// PublisherClient adds a publisher client that enrolls devices (see clients.Client).
-func (x *Extender) PublisherClient(c clients.Client) { x.m.Clients = append(x.m.Clients, c) }
 
 // RepoGuard adds an extra rule to repo access (access.Guard), e.g. the IP rules of the network
 // module. The access engine calls g only after the module's Init ran.

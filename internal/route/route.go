@@ -36,7 +36,7 @@ func NewMux(a *auth.Service, e *access.Engine, rs *repos.Service) *Mux {
 	return &Mux{root: http.NewServeMux(), claims: map[string]string{}, auth: a, access: e, repos: rs}
 }
 
-// Claim gives prefix (a path that starts with "/", e.g. "/maven/" or "/setup.sh") to module. It
+// Claim gives prefix (a path that starts with "/", e.g. "/maven/" or "/install.sh") to module. It
 // panics when another module claimed it, when it lies under /api/, or when one claim holds the
 // other.
 func (m *Mux) Claim(module, prefix string) {
@@ -173,7 +173,7 @@ func (m *Mux) enforce(p Policy, h Handler) http.HandlerFunc {
 		if p.Accept != 0 || p.Bearer || p.TokenHeader != "" {
 			pr, err := m.auth.Identify(r, auth.Read{
 				Cookie: p.Accept&(auth.CredSession|auth.CredSetupSession) != 0, Bearer: p.Bearer, TokenHeader: p.TokenHeader,
-				URLToken: p.URLToken,
+				Device: p.Accept&auth.CredDevice != 0, URLToken: p.URLToken,
 			})
 			if err != nil {
 				if d, ok := auth.RetryAfter(err); ok {

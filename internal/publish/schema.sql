@@ -1,14 +1,12 @@
 -- Publish module schema: devices, device enrollments, CI trust policies, publish nonces and
 -- publish sessions. References users, repos and builds of the kernel schema.
 
--- Enrolled device keys of the publisher clients. client is the ID of a registered publisher
--- client (clients.Registry). public_key is the raw 32-byte Ed25519 key. A revoked or expired
--- device cannot mint publish sessions.
+-- Enrolled device keys of the Telesphorepo CLI, one per computer and server. public_key is the
+-- raw 32-byte Ed25519 key. A revoked or expired device cannot mint publish sessions.
 CREATE TABLE devices (
   id           INTEGER PRIMARY KEY,
   user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   name         TEXT NOT NULL,
-  client       TEXT NOT NULL,
   public_key   BLOB NOT NULL UNIQUE,
   created_at   INTEGER NOT NULL,
   expires_at   INTEGER NOT NULL,
@@ -24,7 +22,6 @@ CREATE TABLE device_enrollments (
   device_code_hash BLOB PRIMARY KEY,
   user_code        TEXT NOT NULL UNIQUE,             -- "ABCD-EFGH"
   name             TEXT NOT NULL,
-  client           TEXT NOT NULL,
   public_key       BLOB NOT NULL,
   created_at       INTEGER NOT NULL,
   expires_at       INTEGER NOT NULL,
@@ -61,8 +58,9 @@ CREATE TABLE publish_trust_repos (
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX publish_trust_repos_repo ON publish_trust_repos(repo_id);
 
--- Nonces that a device signs to mint a publish session. id_hash is SHA-256 of the nonce. A nonce
--- with exchange = 0 is for one repo: it lives 60 s, and the mint that takes it deletes it. A
+-- Nonces that a device signs. id_hash is SHA-256 of the nonce. A nonce with exchange = 0 is for
+-- one request: a mint for one repo, a project setup or the revoke of the device. It lives 60 s,
+-- and the request that takes it deletes it. A
 -- nonce with exchange = 1 is for a format's token exchange: the device signs it over the repo
 -- "*", and it mints for any repo until it expires (publish.session_ttl), one session per repo
 -- (publish_exchange_sessions).

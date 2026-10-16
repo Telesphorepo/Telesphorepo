@@ -753,6 +753,6 @@ func (s *Service) reused(ctx context.Context, seen [32]byte, repo *repos.Repo) (
 	if err != nil {
 		return nil, err
 	}
-	return &Minted{ID: p.Publish.ID, Repo: repo.Name, RepoID: repo.ID, Subject: p.Publish.Subject, Via: ViaOIDC,
-		Session: p.Publish}, nil
+	return &Minted{ID: p.Publish.ID, Repo: repo.Name, Format: repo.Format, Kind: repo.Kind, RepoID: repo.ID,
+		Subject: p.Publish.Subject, Via: ViaOIDC, Reused: true, Session: p.Publish}, nil
 }

@@ -21,11 +21,6 @@ import (
 // (credentials(PasswordCredentials)), where <name> is the repo name as a Gradle identifier; Maven
 // reads them from the server of ~/.m2/settings.xml whose id is the repo name.
 
-// clientsVersion is the release of the Telesphorepo clients (github.com/Telesphorepo/clients)
-// that the publish snippets name. The Gradle plugin is on the Gradle Plugin Portal; the Maven
-// extension and the Maven plugin are on Maven Central.
-const clientsVersion = "0.1.0"
-
 // gradleName turns a repo name into the name of a Gradle repository: "my-libs" -> "myLibs".
 func gradleName(repo string) string {
 	var b strings.Builder
@@ -180,75 +175,40 @@ func (s *snippets) mavenCredentials() {
 }
 
 // Usage returns the repo snippets: how to use the repo in Gradle (Kotlin and Groovy) and
-// Maven builds, and how to publish to it from a computer (the Telesphorepo Gradle plugin or
-// Maven extension) and by hand. The core adds the CI files of the tools gradle and maven.
+// Maven builds, and how to publish to it from a computer with the Telesphorepo CLI. The core
+// adds the CI files of the tools gradle and maven.
 func (h *Handler) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
 	s := h.newSnippets(repo, baseURL)
 	s.purpose, s.context = format.SnippetUse, format.SnippetRepo
 	s.gradleRepos(false)
 	s.mavenRepos()
-
-	s.purpose, s.via = format.SnippetPublish, format.ViaComputer
-	approveNote := "The first publish on a computer opens a link in your browser. Sign in and approve the computer with your second factor. The publish then continues."
-	for _, kts := range []bool{true, false} {
-		client, ext := "gradle-groovy", ""
-		if kts {
-			client, ext = "gradle-kotlin", ".kts"
-		}
-		s.add(client, "settings", "settings.gradle"+ext, "settings.gradle"+ext, langOf(kts), gradlePublishSettings(kts, baseURL, repo.Name),
-			"Put this at the top of the file. Only a pluginManagement block can come before it. If the file has a plugins block, add the id line to it. "+
-				"The plugin publishes each Java project to "+repo.Name+", so the build file needs only a group and a version. "+
-				"oidcTokenEnv names the variable with the Jenkins identity token. When the variable is empty, the plugin uses the device key.")
-		s.add(client, "publish", "", "Publish", "sh", "./gradlew publish\n", approveNote)
-	}
-	s.add("maven", "extensions", ".mvn/extensions.xml", ".mvn/extensions.xml", "xml", "<extensions>\n  <extension>\n    <groupId>com.telesphorepo</groupId>\n"+
-		"    <artifactId>telesphorepo-maven-extension</artifactId>\n    <version>"+clientsVersion+"</version>\n  </extension>\n</extensions>\n", "")
-	s.add("maven", "config", ".mvn/maven.config", ".mvn/maven.config", "sh", "-Dtelesphorepo.url="+baseURL+"\n", "")
-	s.add("maven", "distribution", "pom.xml", "pom.xml", "xml", "<distributionManagement>\n  <repository>\n    <id>"+repo.Name+"</id>\n    <url>"+s.url+
-		"</url>\n  </repository>\n  <snapshotRepository>\n    <id>"+repo.Name+"</id>\n    <url>"+s.url+
-		"</url>\n  </snapshotRepository>\n</distributionManagement>\n", "Put this block in the project element.")
-	s.add("maven", "publish", "", "Publish", "sh", "mvn deploy\n", approveNote)
-
-	out := s.out
-	return append(out, format.HandSnippet(format.TokenCurl+"-T lib-1.0.0.jar "+s.url+"/com/example/lib/1.0.0/lib-1.0.0.jar"))
+	return append(s.out, format.CLISnippet("telesphorepo", format.CLIPublish,
+		"In a Maven project the CLI runs mvn deploy; in a Gradle project, gradle publish of each project that applies maven-publish. The build files stay as they are."))
 }
 
 // ciNote goes under the CI files of the Gradle and Maven tools.
-const ciNote = "The build uses the job's identity token, so the job stores no secret. First set up the build with the steps under From your computer on the repository's publish page."
+const ciNote = "The CLI uses the job's identity token, so the job stores no secret. Commit telesphorepo.toml first: Set up a project on this tab writes it."
 
-// tools are the build tools that publish to Maven repos. Their CI jobs need Java. The Gradle
-// plugin and the Maven extension request the GitHub Actions identity token themselves; on Jenkins
-// they read the one in OIDC_TOKEN.
+// tools are the build tools that publish to Maven repos. Their CI jobs need Java. The CLI
+// requests the GitHub Actions identity token itself; on Jenkins it reads the one in OIDC_TOKEN.
 func tools() []format.Tool {
 	java := []ci.WorkflowStep{{Uses: "actions/setup-java@v6", With: [][2]string{{"distribution", "temurin"}, {"java-version", "21"}}}}
 	return []format.Tool{
-		{ID: "gradle", Label: "Gradle", CINote: ciNote, Setup: gradleSetup(),
+		{ID: "gradle", Label: "Gradle", CINote: ciNote,
 			Publish: func(_ *repos.Repo, _, system string) ci.PublishSteps {
 				if system == ci.Jenkins {
-					return ci.PublishSteps{Build: "./gradlew build", Publish: "./gradlew publish"}
+					return ci.PublishSteps{Build: "./gradlew build", Publish: format.CLIPublish}
 				}
-				return ci.PublishSteps{Toolchain: java, Publish: "./gradlew publish"}
+				return ci.PublishSteps{Toolchain: java, Publish: format.CLIPublish}
 			}},
-		{ID: "maven", Label: "Maven", CINote: ciNote, Setup: mavenSetup(),
+		{ID: "maven", Label: "Maven", CINote: ciNote,
 			Publish: func(_ *repos.Repo, _, system string) ci.PublishSteps {
 				if system == ci.Jenkins {
-					return ci.PublishSteps{Build: "mvn -B verify", Publish: "mvn -B deploy -DskipTests -Dtelesphorepo.oidcTokenEnv=OIDC_TOKEN"}
+					return ci.PublishSteps{Build: "mvn -B verify", Publish: format.CLIPublish}
 				}
-				return ci.PublishSteps{Toolchain: java, Publish: "mvn -B deploy"}
+				return ci.PublishSteps{Toolchain: java, Publish: format.CLIPublish}
 			}},
 	}
-}
-
-// gradlePublishSettings is the settings file that applies the Telesphorepo plugin. With
-// repository set, the plugin adds maven-publish, the repository and a publication to each Java
-// project, so the build file needs no publishing block.
-func gradlePublishSettings(kts bool, baseURL, repo string) string {
-	if kts {
-		return "plugins {\n    id(\"com.telesphorepo.publish\") version \"" + clientsVersion + "\"\n}\n\n" +
-			"telesphorepo {\n    url = \"" + baseURL + "\"\n    repository = \"" + repo + "\"\n    oidcTokenEnv = \"OIDC_TOKEN\"\n}\n"
-	}
-	return "plugins {\n    id 'com.telesphorepo.publish' version '" + clientsVersion + "'\n}\n\n" +
-		"telesphorepo {\n    url = '" + baseURL + "'\n    repository = '" + repo + "'\n    oidcTokenEnv = 'OIDC_TOKEN'\n}\n"
 }
 
 // readPackaging returns the packaging of the pom at p ("jar" when it has none) and whether it

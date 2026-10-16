@@ -3,6 +3,8 @@ package publish
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/hmac"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"errors"
@@ -28,11 +30,14 @@ const (
 )
 
 // Minted is a new publish session. Token is shown once; it is the HTTP Basic password (any
-// username) for the publish, and it also reads the repo.
+// username) for the publish, and it also reads the repo. Format and Kind are those of the repo,
+// so a client picks the publish command of the format.
 type Minted struct {
 	ID        int64     `json:"id"`
 	Token     string    `json:"token"`
 	Repo      string    `json:"repo"`
+	Format    string    `json:"format"`
+	Kind      string    `json:"kind"`
 	ExpiresAt time.Time `json:"expires_at"`
 
 	// For the audit log; not in the JSON answer.
@@ -40,6 +45,8 @@ type Minted struct {
 	UserID  int64  `json:"-"` // 0 for a CI session
 	Subject string `json:"-"` // the username, or the CI token's sub
 	Via     string `json:"-"`
+	// Reused is a session that an earlier mint with the same credential opened.
+	Reused bool `json:"-"`
 
 	Session *auth.PublishSession `json:"-"` // the open session, as the access engine sees it
 }
@@ -101,10 +108,20 @@ func beforeCursor(after int64) int64 {
 // mint creates a session on q (a transaction or the write pool), with the build record of a CI
 // token (0: none). It retries on the rare collision of the 48-bit public id.
 func (s *Service) mint(ctx context.Context, q *dbq.Queries, repo *repos.Repo, via string, userID, deviceID, trustID, buildID int64, subject string) (*Minted, error) {
+	return s.mintKeyed(ctx, q, repo, via, userID, deviceID, trustID, buildID, subject, "")
+}
+
+// mintKeyed is mint. With a token exchange nonce, the secret of the token is exchangeSecret of
+// the nonce and the public id, so a later exchange with the same nonce gives the same token.
+func (s *Service) mintKeyed(ctx context.Context, q *dbq.Queries, repo *repos.Repo, via string, userID, deviceID, trustID, buildID int64, subject, nonce string) (*Minted, error) {
 	now := time.Now()
 	exp := now.Add(s.sessionTTL())
 	for range 3 {
 		pid, secret, tok := token.Mint(TokenPrefix)
+		if nonce != "" {
+			secret = exchangeSecret(nonce, pid)
+			tok = string(TokenPrefix) + "_" + pid + "_" + secret
+		}
 		id, err := q.CreatePublishSession(ctx, dbq.CreatePublishSessionParams{
 			PublicID: pid, SecretHash: token.Hash(secret), RepoID: repo.ID,
 			UserID: nullID(userID), DeviceID: nullID(deviceID), TrustID: nullID(trustID), BuildID: nullID(buildID),
@@ -116,7 +133,7 @@ func (s *Service) mint(ctx context.Context, q *dbq.Queries, repo *repos.Repo, vi
 		if err != nil {
 			return nil, err
 		}
-		return &Minted{ID: id, Token: tok, Repo: repo.Name, ExpiresAt: unixTime(exp.Unix()),
+		return &Minted{ID: id, Token: tok, Repo: repo.Name, Format: repo.Format, Kind: repo.Kind, ExpiresAt: unixTime(exp.Unix()),
 			RepoID: repo.ID, UserID: userID, Subject: subject, Via: via,
 			Session: &auth.PublishSession{ID: id, RepoID: repo.ID, Via: via, Subject: subject, BuildID: buildID, DeviceID: deviceID,
 				Expires: unixTime(exp.Unix())}}, nil
@@ -237,6 +254,15 @@ func (s *Service) challenge(ctx context.Context, deviceID int64, exchange bool, 
 // SignedMessage is what a device signs with Ed25519 to mint a session for repo.
 func SignedMessage(nonce string, deviceID int64, repo string) []byte {
 	return []byte(signedPrefix + nonce + "\n" + strconv.FormatInt(deviceID, 10) + "\n" + repo)
+}
+
+// exchangeSecret is the secret of the session token that a token exchange nonce minted with the
+// public id pid: HMAC-SHA256 keyed with the nonce. Only the holder of the nonce (the device, or a
+// client it gave its proof to) derives it, and a proof with the nonce mints sessions already.
+func exchangeSecret(nonce, pid string) string {
+	m := hmac.New(sha256.New, []byte(nonce))
+	m.Write([]byte("telesphorepo exchange session v1\n" + pid))
+	return base64.RawURLEncoding.EncodeToString(m.Sum(nil))
 }
 
 func decodeB64URL(s string) ([]byte, error) {

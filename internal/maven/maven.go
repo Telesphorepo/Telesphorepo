@@ -14,7 +14,6 @@ import (
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
-	"github.com/Telesphorepo/Telesphorepo/internal/clients"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/module"
 	"github.com/Telesphorepo/Telesphorepo/internal/repopath"
@@ -29,7 +28,7 @@ type Handler struct {
 }
 
 // Module returns the Maven module: the Maven format with proxies, groups, uploads, imports,
-// demo data and seeds, and the project setup scripts GET /setup.sh and GET /setup.ps1.
+// demo data and seeds. The Telesphorepo CLI publishes to it ("telesphorepo publish").
 func Module() module.Module {
 	h := &Handler{}
 	return module.Module{
@@ -39,10 +38,6 @@ func Module() module.Module {
 				h.auth, h.assets, h.host = host.Auth, host.Assets, host
 				return nil
 			})
-			x.PublisherClient(clients.Client{ID: "gradle", Title: "Gradle plugin",
-				Help: "The Telesphorepo Gradle plugin publishes from this computer with the device key."})
-			x.PublisherClient(clients.Client{ID: "maven", Title: "Maven extension",
-				Help: "The Telesphorepo Maven extension deploys from this computer with the device key."})
 			x.Format(format.Spec{
 				Name: "maven", Title: "Maven / Gradle",
 				Description: "Java libraries and Gradle plugins, for Maven and Gradle builds.",
@@ -60,6 +55,7 @@ func Module() module.Module {
 				Usage:         h.Usage,
 				ArtifactUsage: h.ArtifactUsage,
 				Tools:         tools(),
+				Publish:       format.PublishCLI,
 				Upload:        h.uploadSpec(),
 				Importer:      &format.Importer{Sources: []string{"maven2"}, Target: format.SourcePath},
 				UI:            ui,
@@ -136,7 +132,7 @@ var ui = format.UIDescriptor{
 	},
 	ArtifactKinds: map[string]string{"library": "Library", "bom": "Bill of materials", "parent": "Parent POM", "gradle-plugin": "Gradle plugin"},
 	ArtifactName:  map[string]string{"library": "Coordinates", "bom": "Coordinates", "parent": "Coordinates", "gradle-plugin": "Plugin ID"},
-	SnippetTools:  map[string]string{"gradle-kotlin": "Gradle (Kotlin)", "gradle-groovy": "Gradle (Groovy)", "maven": "Maven", "curl": "curl"},
+	SnippetTools:  map[string]string{"gradle-kotlin": "Gradle (Kotlin)", "gradle-groovy": "Gradle (Groovy)", "maven": "Maven", "telesphorepo": "Telesphorepo CLI"},
 	BuildFiles: []format.BuildFileLabel{
 		{Extension: "pom", Label: "Project description (POM)"},
 		{Extension: "module", Label: "Gradle module metadata"},

@@ -35,9 +35,6 @@ const (
 	credAccount // a password, a read token or a publish session token
 )
 
-// devicePrefix starts the password of a device proof: "trx.<device id>.<nonce>.<signature>".
-const devicePrefix = "trx."
-
 // tokenRequest is what a token request asks for.
 type tokenRequest struct {
 	user, pass string
@@ -91,9 +88,9 @@ func readTokenRequest(w http.ResponseWriter, r *http.Request) (*tokenRequest, *o
 	switch {
 	case tr.pass == "":
 		tr.kind = credAnonymous
-	case strings.HasPrefix(tr.pass, devicePrefix):
+	case strings.HasPrefix(tr.pass, auth.DeviceProofPrefix):
 		tr.kind = credDevice
-		tr.device = parseDeviceProof(tr.pass)
+		tr.device = publish.ParseDeviceProof(tr.pass)
 	case isJWT(tr.pass):
 		tr.kind = credCIToken
 	default:
@@ -101,20 +98,6 @@ func readTokenRequest(w http.ResponseWriter, r *http.Request) (*tokenRequest, *o
 	}
 	tr.scopes = parseScopes(scopes)
 	return tr, nil
-}
-
-// parseDeviceProof reads "trx.<device id>.<nonce>.<signature>": the signature of the device over
-// a token exchange nonce and the repo "*" (publish.SignedMessage). nil: it does not parse.
-func parseDeviceProof(s string) *publish.DeviceProof {
-	parts := strings.Split(strings.TrimPrefix(s, devicePrefix), ".")
-	if len(parts) != 3 || parts[1] == "" || parts[2] == "" {
-		return nil
-	}
-	id, err := strconv.ParseInt(parts[0], 10, 64)
-	if err != nil || id <= 0 {
-		return nil
-	}
-	return &publish.DeviceProof{DeviceID: id, Nonce: parts[1], Signature: parts[2], Repo: "*"}
 }
 
 // isJWT reports whether s has the form of a JWT: three base64url parts, the first a JSON object.

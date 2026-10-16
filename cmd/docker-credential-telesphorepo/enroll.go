@@ -77,13 +77,21 @@ func (c *client) do(ctx context.Context, method, path string, in, out any) error
 		return fmt.Errorf("cannot read the answer of %s: %w", c.id.base(), err)
 	}
 	if resp.StatusCode >= 300 {
+		// The server answers a problem document (RFC 9457): the device flow code (RFC 8628) is in
+		// detail.
 		var e struct {
-			Error string `json:"error"`
+			Title  string `json:"title"`
+			Detail string `json:"detail"`
 		}
-		if json.Unmarshal(b, &e) != nil || e.Error == "" {
-			e.Error = http.StatusText(resp.StatusCode)
+		_ = json.Unmarshal(b, &e)
+		msg := e.Detail
+		if msg == "" {
+			msg = e.Title
 		}
-		return &apiError{status: resp.StatusCode, msg: e.Error}
+		if msg == "" {
+			msg = http.StatusText(resp.StatusCode)
+		}
+		return &apiError{status: resp.StatusCode, msg: msg}
 	}
 	if out == nil {
 		return nil
@@ -113,7 +121,7 @@ func (c *client) enroll(ctx context.Context, name string) (*deviceFile, error) {
 	}
 	var e enrollment
 	err = c.do(ctx, http.MethodPost, "/api/devices/enroll", map[string]string{
-		"name": name, "client": clientID, "public_key": base64.RawURLEncoding.EncodeToString(pub),
+		"name": name, "public_key": base64.RawURLEncoding.EncodeToString(pub),
 	}, &e)
 	if err != nil {
 		return nil, err

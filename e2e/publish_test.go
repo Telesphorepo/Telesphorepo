@@ -277,7 +277,7 @@ func TestSecondFactorLogin(t *testing.T) {
 		s.MustAPI(t, http.MethodGet, "/api/tokens", nil, sess, nil)
 
 		// A device approval still needs a second factor.
-		en, _ := s.StartEnrollment(t, "laptop", "gradle")
+		en, _ := s.StartEnrollment(t, "laptop")
 		st, b := s.API(t, http.MethodPost, "/api/devices/approve", map[string]string{"user_code": en.UserCode}, Proof{sess, "totp 000000"})
 		wantAPIStatus(t, "approve without a second factor", st, b, http.StatusForbidden)
 		if !strings.Contains(string(b), "second_factor_required") {
@@ -359,14 +359,11 @@ func TestDeviceEnrollment(t *testing.T) {
 	s.CreateUser(t, u, pw)
 	s.SetPerms(t, repo, u, "repo.download", "repo.publish")
 
-	// The client is a registered publisher client; an unknown one gets 400 with the list.
+	// The enrollment takes the name and the public key only.
 	st0, b0 := s.API(t, http.MethodPost, "/api/devices/enroll", map[string]string{"name": "x", "client": "ant", "public_key": b64(make([]byte, 32))}, nil)
-	wantAPIStatus(t, "enroll from an unknown client", st0, b0, http.StatusBadRequest)
-	if !strings.Contains(string(b0), `\"gradle\", \"maven\"`) {
-		t.Fatalf("enroll from an unknown client: %s, want the list of clients", b0)
-	}
+	wantAPIStatus(t, "enroll with an unknown field", st0, b0, http.StatusBadRequest)
 
-	en, key := s.StartEnrollment(t, "laptop", "maven")
+	en, key := s.StartEnrollment(t, "laptop")
 	if !userCodeRe.MatchString(en.UserCode) || en.VerificationURL != s.InternalURL+"/#/device" || en.ExpiresIn != 600 || en.Interval != 5 {
 		t.Fatalf("enrollment %+v: want user code ABCD-EFGH, verification_url %s/#/device, expires_in 600, interval 5", en, s.InternalURL)
 	}
@@ -407,17 +404,16 @@ func TestDeviceEnrollment(t *testing.T) {
 		t.Fatalf("poll after the device id was taken: status %d, answer %+v, want 400 expired_token", st, a2)
 	}
 
-	// The device names its publisher client.
+	// The device has the name it enrolled with.
 	var devices struct {
 		Items []struct {
-			ID          int64  `json:"id"`
-			Client      string `json:"client"`
-			ClientTitle string `json:"client_title"`
+			ID   int64  `json:"id"`
+			Name string `json:"name"`
 		} `json:"items"`
 	}
 	s.MustAPI(t, http.MethodGet, "/api/devices", nil, sess, &devices)
-	if len(devices.Items) != 1 || devices.Items[0].ID != a.DeviceID || devices.Items[0].Client != "maven" || devices.Items[0].ClientTitle != "Maven extension" {
-		t.Fatalf("devices: %+v, want the maven device", devices.Items)
+	if len(devices.Items) != 1 || devices.Items[0].ID != a.DeviceID || devices.Items[0].Name != "laptop" {
+		t.Fatalf("devices: %+v, want the laptop device", devices.Items)
 	}
 
 	d := &Device{ID: a.DeviceID, User: u, Key: key}
@@ -433,7 +429,7 @@ func TestDeviceEnrollmentExpiry(t *testing.T) {
 	s := StartServer(t, ServerOpts{DataVolume: vol})
 	u := RandName("dev")
 	s.CreateUser(t, u, "dev-pass-1234")
-	en, _ := s.StartEnrollment(t, "old laptop", "gradle")
+	en, _ := s.StartEnrollment(t, "old laptop")
 
 	s.RestartAfter(t, func() {
 		editDB(t, vol, "UPDATE device_enrollments SET expires_at = 1 WHERE user_code = ?", en.UserCode)

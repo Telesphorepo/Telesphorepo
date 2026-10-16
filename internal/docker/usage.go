@@ -14,9 +14,6 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
-// helperName is the Docker credential helper of Telesphorepo.
-const helperName = "docker-credential-telesphorepo"
-
 // notes are the sentences that the snippets of a server add: an http base_url needs an insecure
 // registry entry, and a base_url with a path needs the registry at the root of a host.
 func notes(baseURL, registry string) string {
@@ -34,7 +31,7 @@ func notes(baseURL, registry string) string {
 
 // usage returns the snippets of a docker repo: log in for a private repo, pull an image, pull a
 // Helm chart; and for a hosted repo the publish snippets: from a computer with the credential
-// helper (Docker, Helm and ORAS), and by hand with a publish token. Pulls and Docker pushes name the
+// helper of the Telesphorepo CLI (Docker, Helm and ORAS), and by hand with a publish token. Pulls and Docker pushes name the
 // registry host; ORAS and Helm 4 name the upload host when direct uploads are on.
 func (f *Format) usage(repo *repos.Repo, baseURL string) []format.Snippet {
 	host := registryHost(baseURL)
@@ -65,16 +62,15 @@ func (f *Format) usage(repo *repos.Repo, baseURL string) []format.Snippet {
 	}
 	out = append(out,
 		format.Snippet{ID: "docker.helper", Tool: "docker", Purpose: format.SnippetPublish, Context: format.SnippetRepo, Via: format.ViaComputer,
-			Title: "Push with the credential helper", Lang: "sh", Code: helperName + " login " + baseURL + "   # once per computer\n" +
-				"docker tag IMAGE " + host + "/" + repo.Name + "/IMAGE:TAG\n" +
+			Title: "Push with the credential helper", Lang: "sh", Code: "docker tag IMAGE " + host + "/" + repo.Name + "/IMAGE:TAG\n" +
 				"docker push " + host + "/" + repo.Name + "/IMAGE:TAG\n",
-			Note: joinNotes("The helper enrolls this computer once; approve it in the browser. Then docker, buildx, podman, helm and oras push without a password.", pushNote)},
+			Note: joinNotes(setupNote+" Then docker, buildx, podman, helm and oras push without a password.", pushNote)},
 		format.Snippet{ID: "helm.push", Tool: "helm", Purpose: format.SnippetPublish, Context: format.SnippetRepo, Via: format.ViaComputer,
 			Title: "Push a Helm chart", Lang: "sh", Code: "helm push mychart-0.1.0.tgz oci://" + ociHost + "/" + repo.Name + "\n",
-			Note: joinNotes("Run "+helperName+" login "+baseURL+" once first.", ociNote)},
+			Note: joinNotes(setupNote, ociNote)},
 		format.Snippet{ID: "oras.push", Tool: "oras", Purpose: format.SnippetPublish, Context: format.SnippetRepo, Via: format.ViaComputer,
 			Title: "Push an OCI artifact", Lang: "sh", Code: "oras push " + ociHost + "/" + repo.Name + "/ARTIFACT:TAG FILE\n",
-			Note: joinNotes("Run "+helperName+" login "+baseURL+" once first.", ociNote)},
+			Note: joinNotes(setupNote, ociNote)},
 		format.Snippet{ID: "docker.publish", Tool: "docker", Purpose: format.SnippetPublish, Context: format.SnippetRepo, Via: format.ViaHand,
 			Title: "Push with a publish token", Lang: "sh", Code: format.TokenPrompt + "   # Settings › Tokens › New publish token\n" +
 				"printf '%s' \"$TOKEN\" | docker login " + host + " -u publish --password-stdin\n" +
@@ -84,6 +80,9 @@ func (f *Format) usage(repo *repos.Repo, baseURL string) []format.Snippet {
 	)
 	return out
 }
+
+// setupNote says how a computer gets the credential helper.
+const setupNote = "Set up this computer once with Set up a project on this tab: the line adds the credential helper of the Telesphorepo CLI to the Docker config."
 
 func joinNotes(a, b string) string {
 	if a == "" || b == "" {

@@ -53,10 +53,9 @@ type descriptorJSON struct {
 	} `json:"labels"`
 	ImportSources []string `json:"import_sources"`
 	Tools         []struct {
-		ID    string `json:"id"`
-		Setup bool   `json:"setup"`
+		ID string `json:"id"`
 	} `json:"tools"`
-	Setup bool `json:"setup"`
+	Publish string `json:"publish"`
 }
 
 func TestFormatDescriptors(t *testing.T) {
@@ -69,17 +68,17 @@ func TestFormatDescriptors(t *testing.T) {
 	}
 	mvn, deb, raw := by["maven"], by["debian"], by["raw"]
 	if mvn.Upload == nil || !mvn.Upload.Folder || !mvn.Upload.Single || mvn.Upload.One != "artifact" || len(mvn.Upload.Reads) == 0 ||
-		!mvn.Setup || len(mvn.Tools) != 2 || !mvn.Tools[0].Setup || !mvn.Browse.Versions || !mvn.Browse.ArtifactSnippets ||
+		mvn.Publish != "cli" || len(mvn.Tools) != 2 || mvn.Tools[0].ID != "gradle" || !mvn.Browse.Versions || !mvn.Browse.ArtifactSnippets ||
 		len(mvn.RemotePresets) == 0 || mvn.Labels.Tools["github-actions"] != "GitHub Actions" || mvn.Labels.Tools["gradle-kotlin"] == "" ||
 		!slices.Contains(mvn.ImportSources, "maven2") || len(mvn.DeleteNotes) == 0 {
 		t.Fatalf("maven descriptor: %+v", mvn)
 	}
 	if deb.Upload == nil || deb.Upload.Reads[0].Glob != "**/*.deb" || !slices.Contains(deb.RepoTabs, "signing") || deb.PublicKey != "key.asc" ||
-		deb.Setup || len(deb.Tools) != 1 || deb.Tools[0].ID != "curl" || len(deb.FileDetails) != 1 || deb.FileDetails[0].Part != "deb-package" ||
+		deb.Publish != "cli" || len(deb.Tools) != 1 || deb.Tools[0].ID != "telesphorepo" || len(deb.FileDetails) != 1 || deb.FileDetails[0].Part != "deb-package" ||
 		len(deb.Config.Fields) == 0 || deb.Config.Fields[0].Key != "architectures" || deb.Config.Fields[0].ChangeNote == "" {
 		t.Fatalf("debian descriptor: %+v", deb)
 	}
-	if raw.Upload == nil || len(raw.Upload.Reads) != 0 || len(raw.Config.Fields) != 1 || raw.Config.Fields[0].Type != "enum" || raw.Browse.Versions {
+	if raw.Upload == nil || raw.Publish != "cli" || len(raw.Upload.Reads) != 0 || len(raw.Config.Fields) != 1 || raw.Config.Fields[0].Type != "enum" || raw.Browse.Versions {
 		t.Fatalf("raw descriptor: %+v", raw)
 	}
 	dk := by["docker"]
@@ -96,7 +95,7 @@ func TestFormatDescriptors(t *testing.T) {
 		!notes["**/_tags/*"] || !notes["**/_manifests/sha256/*"] || !notes["**/_blobs/sha256/*"] ||
 		parts["**/_tags/*"] != "manifest" || parts["**/_manifests/sha256/*"] != "manifest" ||
 		dk.Labels.Tools["docker"] != "Docker" || dk.Labels.Tools["helm"] != "Helm" || dk.Labels.Tools["oras"] != "ORAS" ||
-		!slices.Contains(dk.ImportSources, "docker") || len(dk.Tools) != 1 || dk.Tools[0].ID != "docker" || dk.Tools[0].Setup ||
+		!slices.Contains(dk.ImportSources, "docker") || len(dk.Tools) != 1 || dk.Tools[0].ID != "docker" || dk.Publish != "helper" ||
 		!dk.Browse.Versions || !dk.Browse.ArtifactSnippets {
 		t.Fatalf("docker descriptor: %+v", dk)
 	}
@@ -127,25 +126,36 @@ func TestCIWorkflowRoute(t *testing.T) {
 	gh := get(t, mvn, "system=github-actions&tool=maven&branches=main,release/*&tags=v*", rauth)
 	if gh.Tool != "github-actions" || gh.Purpose != "publish" || gh.Via != "ci" || gh.File != ".github/workflows/publish.yml" ||
 		!strings.Contains(gh.Code, `branches: ["main", "release/*"]`) || !strings.Contains(gh.Code, `tags: ["v*"]`) ||
-		!strings.Contains(gh.Code, "mvn -B deploy") || !strings.Contains(gh.Code, "actions/setup-java@v6") {
+		!strings.Contains(gh.Code, "curl -fsSL "+s.InternalURL+"/install.sh | sh") || !strings.Contains(gh.Code, "telesphorepo publish") ||
+		!strings.Contains(gh.Code, "id-token: write") || !strings.Contains(gh.Code, "actions/setup-java@v6") {
 		t.Fatalf("GitHub Actions workflow for Maven: %+v", gh)
 	}
 	def := get(t, mvn, "system=github-actions", rauth)
-	if !strings.Contains(def.Code, `branches: ["main"]`) || strings.Contains(def.Code, "tags:") || !strings.Contains(def.Code, "./gradlew publish") {
+	if !strings.Contains(def.Code, `branches: ["main"]`) || strings.Contains(def.Code, "tags:") || !strings.Contains(def.Code, "telesphorepo publish") {
 		t.Fatalf("default workflow (first tool, push to main): %+v", def)
 	}
 	jk := get(t, mvn, "system=jenkins&tool=gradle&tags=v*", rauth)
 	if jk.File != "Jenkinsfile" || !strings.Contains(jk.Code, "tag 'v*'") || !strings.Contains(jk.Code, "./gradlew build") ||
-		!strings.Contains(jk.Code, "telesphorepo-id-token") {
+		!strings.Contains(jk.Code, "telesphorepo-id-token") || !strings.Contains(jk.Code, "isUnix()") ||
+		!strings.Contains(jk.Code, s.InternalURL+"/install.ps1") || !strings.Contains(jk.Code, "telesphorepo publish") {
 		t.Fatalf("Jenkinsfile for Gradle: %+v", jk)
+	}
+	fs := get(t, mvn, "system=jenkins-freestyle&tool=maven", rauth)
+	if fs.Tool != "jenkins" || !strings.Contains(fs.Code, "mvn -B verify") || !strings.Contains(fs.Code, "/install.sh | sh") ||
+		!strings.Contains(fs.Code, "telesphorepo publish") || !strings.Contains(fs.Note, "OIDC_TOKEN") {
+		t.Fatalf("Jenkins freestyle step for Maven: %+v", fs)
 	}
 	if plain := get(t, mvn, "system=jenkins", rauth); strings.Contains(plain.Code, "when {") {
 		t.Fatalf("Jenkinsfile without a trigger has a when block: %s", plain.Code)
 	}
-	curl := get(t, raw, "system=github-actions", s.AdminBasic())
-	if !strings.Contains(curl.Code, "ACTIONS_ID_TOKEN_REQUEST_URL") || !strings.Contains(curl.Code, "/api/publish/sessions/oidc") ||
-		!strings.Contains(curl.Code, "/raw/"+raw+"/") || !strings.Contains(curl.Code, "trap close_session EXIT") {
-		t.Fatalf("curl workflow of a raw repo: %+v", curl)
+	cli := get(t, raw, "system=github-actions", s.AdminBasic())
+	if !strings.Contains(cli.Code, "/install.sh | sh") || !strings.Contains(cli.Code, "telesphorepo publish file.tar.gz") ||
+		strings.Contains(cli.Code, "OIDC_TOKEN") {
+		t.Fatalf("CLI workflow of a raw repo: %+v", cli)
+	}
+	// A publish session of the repo reads its CI file (telesphorepo setup).
+	if st, b := s.API(t, http.MethodGet, "/api/repos/"+raw+"/ci?system=github-actions", nil, s.MintSession(t, s.AdminUser, raw).Auth()); st != http.StatusOK {
+		t.Fatalf("ci with a publish session of the repo: status %d, want 200: %s", st, b)
 	}
 
 	for _, q := range []string{"system=travis", "system=github-actions&tool=ant", "system=github-actions&branches=a%20b", "system=jenkins&tags=it's"} {
@@ -160,18 +170,19 @@ func TestCIWorkflowRoute(t *testing.T) {
 		t.Fatalf("ci of a repo without download: status %d, want 403: %s", st, b)
 	}
 
-	// Docker: build, then log in with the job's identity token right before the push.
+	// Docker: build, install the CLI, name its credential helper for the registry host, push.
 	dk := RandName("dk")
 	s.CreateRepo(t, dk, "docker", false, nil)
 	host := s.Alias + ":8080"
 	for _, c := range []struct{ system, tag string }{{"github-actions", "$GITHUB_SHA"}, {"jenkins", "${GIT_COMMIT:-$BUILD_NUMBER}"}} {
 		f := get(t, dk, "system="+c.system+"&tool=docker", s.AdminBasic())
 		build := strings.Index(f.Code, `docker build -t "`+host+"/"+dk+"/app:"+c.tag+`" .`)
-		login := strings.Index(f.Code, `printf '%s' "$OIDC_TOKEN" | docker login `+host+" -u oidc --password-stdin")
+		install := strings.Index(f.Code, "/install.sh | sh")
+		helper := strings.Index(f.Code, `{"credHelpers":{"`+host+`":"telesphorepo"}}`)
 		push := strings.Index(f.Code, `docker push "`+host+"/"+dk+"/app:"+c.tag+`"`)
-		logout := strings.Index(f.Code, "docker logout "+host)
-		if build < 0 || login < build || push < login || logout < push || !strings.Contains(f.Note, "Change app to the name of your image") {
-			t.Fatalf("%s file for Docker: build, login, push and logout out of order or missing:\n%s\nnote: %s", c.system, f.Code, f.Note)
+		if build < 0 || install < build || helper < install || push < helper || strings.Contains(f.Code, "docker login") ||
+			!strings.Contains(f.Note, "Change app to the name of your image") {
+			t.Fatalf("%s file for Docker: build, install, helper and push out of order or missing:\n%s\nnote: %s", c.system, f.Code, f.Note)
 		}
 	}
 	var u struct {
@@ -184,7 +195,7 @@ func TestCIWorkflowRoute(t *testing.T) {
 	}
 	if !strings.Contains(seen["docker.login"], "docker login "+host) || !strings.Contains(seen["docker.pull"], "docker pull "+host+"/"+dk+"/IMAGE:TAG") ||
 		!strings.Contains(seen["helm.pull"], "helm pull oci://"+host+"/"+dk+"/") ||
-		!strings.Contains(seen["docker.helper"], "docker-credential-telesphorepo login "+s.InternalURL) ||
+		!strings.Contains(seen["docker.helper"], "docker push "+host+"/"+dk+"/IMAGE:TAG") || !strings.Contains(seen["docker.helper"], "Set up a project") ||
 		!strings.Contains(seen["docker.publish"], "docker login "+host+" -u publish --password-stdin") ||
 		!strings.Contains(seen["docker.pull"], "insecure-registries") || !strings.Contains(seen["helm.push"], "helm push") {
 		t.Fatalf("docker usage snippets: %v", seen)

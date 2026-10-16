@@ -204,9 +204,11 @@ func TestRaw(t *testing.T) {
 			var u struct {
 				BaseURL  string `json:"base_url"`
 				Snippets []struct {
-					Title string `json:"title"`
-					Lang  string `json:"lang"`
-					Code  string `json:"code"`
+					Title   string `json:"title"`
+					Purpose string `json:"purpose"`
+					Via     string `json:"via"`
+					Lang    string `json:"lang"`
+					Code    string `json:"code"`
 				} `json:"snippets"`
 			}
 			s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/usage", nil, readerAuth, &u)
@@ -214,17 +216,18 @@ func TestRaw(t *testing.T) {
 				t.Fatalf("usage base_url = %q, want %q", u.BaseURL, s.InternalURL)
 			}
 			want := s.InternalURL + "/raw/" + repo + "/"
-			var upload, download bool
+			var upload, download, ci bool
 			for _, sn := range u.Snippets {
-				if !strings.Contains(sn.Code, want) {
+				if sn.Purpose == "use" && !strings.Contains(sn.Code, want) {
 					t.Fatalf("snippet %q does not reference %s: %s", sn.Title, want, sn.Code)
 				}
-				upload = upload || strings.Contains(sn.Code, "curl") && strings.Contains(sn.Code, " -T ")
-				download = download || strings.Contains(sn.Code, "curl") && !strings.Contains(sn.Code, " -T ")
+				upload = upload || sn.Via == "computer" && strings.Contains(sn.Code, "telesphorepo publish ")
+				ci = ci || sn.Via == "ci" && strings.Contains(sn.Code, s.InternalURL+"/install.sh") && strings.Contains(sn.Code, "telesphorepo publish ")
+				download = download || strings.Contains(sn.Code, "curl") && sn.Purpose == "use"
 			}
-			if !upload || !download {
+			if !upload || !download || !ci {
 				b, _ := json.Marshal(u)
-				t.Fatalf("usage: want curl upload and download snippets, got %s", b)
+				t.Fatalf("usage: want a curl download, a CLI publish and a CI file with the install step, got %s", b)
 			}
 		})
 	})

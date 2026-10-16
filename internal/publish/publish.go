@@ -23,7 +23,6 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/ci"
-	"github.com/Telesphorepo/Telesphorepo/internal/clients"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
 	"github.com/Telesphorepo/Telesphorepo/internal/publish/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
@@ -81,9 +80,8 @@ type Service struct {
 	log      *slog.Logger
 	access   *access.Engine // decides every mint (access.Mint)
 	audit    *audit.Log
-	ci       *ci.Registry      // reads CI tokens and trust policies
-	builds   *ci.Builds        // the build records of CI sessions
-	clients  *clients.Registry // the publisher clients that enroll devices
+	ci       *ci.Registry // reads CI tokens and trust policies
+	builds   *ci.Builds   // the build records of CI sessions
 
 	enrollLimits *ipLimiter
 
@@ -101,7 +99,6 @@ type Deps struct {
 	Audit    *audit.Log
 	CI       *ci.Registry
 	Builds   *ci.Builds
-	Clients  *clients.Registry
 	Log      *slog.Logger
 }
 
@@ -109,7 +106,7 @@ type Deps struct {
 func New(d Deps) *Service {
 	return &Service{
 		db: d.DB, rq: dbq.New(d.DB.R), wq: dbq.New(d.DB.W), auth: d.Auth, access: d.Access, audit: d.Audit,
-		repos: d.Repos, settings: d.Settings, log: d.Log, ci: d.CI, builds: d.Builds, clients: d.Clients,
+		repos: d.Repos, settings: d.Settings, log: d.Log, ci: d.CI, builds: d.Builds,
 		enrollLimits: newIPLimiter(),
 		provs:        map[string]*gooidc.Provider{},
 	}

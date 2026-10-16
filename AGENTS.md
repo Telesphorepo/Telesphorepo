@@ -62,8 +62,8 @@ device and OIDC routes. Run all zones before a push that touches several zones.
 - **Change a repo through `repos.Service`.** `Create` and `Update` check the whole new state and
   save it in one transaction. A module that keeps a value for a repo registers a `repos.Field`.
 - **Register what you add.** A permission (`x.Permissions`), an audit action (`x.AuditActions`),
-  a settings group (`x.Settings`), a repo operation type (`x.OpType`), a CI provider and a
-  publisher client are all registered in the module's `Register`. The kernel refuses to record
+  a settings group (`x.Settings`), a repo operation type (`x.OpType`) and a CI provider are all
+  registered in the module's `Register`. The kernel refuses to record
   an unregistered audit action and to save an unregistered permission ID.
 - **Never log second-factor material.** That covers TOTP secrets and codes, recovery codes,
   device keys, publish tokens and OIDC tokens. Compare secrets in constant time.
@@ -142,7 +142,7 @@ device and OIDC routes. Run all zones before a push that touches several zones.
 | Format contract | `internal/format/format.go` (`format.Spec`), `kit.go` (the standard routes) |
 | JSON API route | `x.Routes` of the owning module (core: `internal/api/api.go`) + handler; shared helpers in `route.API` (`h.API`); errors via `httpx.Error` or `route.Fail` (RFC 9457 problem documents under `/api/` and `/cli/`); declare a named problem type once with `httpx.DeclareProblem` (`internal/httpx/problem.go`) |
 | Credentials, permission checks | `internal/auth` (`Identify`, sessions, tokens, second factor, bearer tokens), `internal/route/policy.go` (the policy), `internal/access/engine.go` (`Decide`, the access report) |
-| Publish sessions, devices, trust policies, CI providers | `internal/publish` (module `publish`, routes in `api.go`, `mint.go`, `providers.go`); `internal/ci` (provider registry, build records); `internal/clients` (publisher clients); sign-in and second factor routes in `internal/api/security.go` |
+| Publish sessions, devices, trust policies, CI providers | `internal/publish` (module `publish`, routes in `api.go`, `mint.go`, `providers.go`); `internal/ci` (provider registry, build records); setup codes, `/api/devices/setup`, `/api/devices/self` and `/api/publish/sessions/exchange` in `setup.go`; the install scripts and CLI downloads in `install.go`, `install.sh`, `install.ps1` with the archives of `internal/clidist` (built by `tools/task/cli.go`); sign-in and second factor routes in `internal/api/security.go` |
 | Publisher clients (Gradle plugin, Maven extension) | Separate repo [Telesphorepo/clients](https://github.com/Telesphorepo/clients) (MIT). The clients zone clones it, or reads `E2E_CLIENTS_DIR`; `E2E_CLIENTS_REF` picks the branch or tag (default `main`) |
 | Byte pipeline | `internal/assets` (`Commit`, `Remove`, `Reader`, `Uploads`), `internal/blobs` (content-addressed blobs, GC), `internal/repopath`, `internal/ops` (repo operations), `internal/rebuild` (index rebuild queue), on top of `internal/storage` |
 | UI page | `web/src/pages/**/*.svelte` (`repo/`, `account/`, `repositories/`, `server/`, `settings/repos/`); its `PageDef` (path, access, Settings nav) in the owning module's `web/src/modules/<id>/module.ts`; API calls in `web/src/lib/api/`. See `web/src/README.md` |
@@ -153,7 +153,7 @@ device and OIDC routes. Run all zones before a push that touches several zones.
 | Docker credential helper | `cmd/docker-credential-telesphorepo` (stdlib and `golang.org/x/sys/windows` only; imports no server package): `main.go` the commands, `identity.go` the server identity, `device.go` the device file, `enroll.go` the device flow and the exchange proof, `dockerconfig.go` the `credHelpers`, `acl_*.go` the owner-only files; released by `tools/task/release.go`; the server side is the publisher client `docker`, `POST /api/publish/challenge` with `exchange` and the device proof of `internal/docker/token.go` |
 | Signing keys | `internal/signing/keys.go`, `internal/signing/module.go` (the repo field `signing_key`), `GET /debian/{repo}/key.asc` in `internal/debian`; UI in `web/src/pages/server/SigningKeys.svelte` and `web/src/modules/signing/` |
 | Upload plan and upload | `Plan` and `Store` of the format (`format.Spec.Upload`), e.g. `internal/maven/plan.go`; routes in `internal/api/files.go`; UI in `web/src/pages/repo/UploadView.svelte` and `upload/` |
-| Snippets, CI files, project setup | `Usage` and `Tools` of the format; `internal/ci/workflow.go` (the GitHub Actions and Jenkinsfile builders); `internal/publish/setup.go`, `setup.sh`, `setup.ps1` (the frame) with each tool's `SetupFragment` (e.g. `internal/maven/setup_gradle.sh`) |
+| Snippets, CI files | `Usage` and `Tools` of the format (`format.CLITool`, `format.CLISnippet`); `internal/ci/workflow.go` (the GitHub Actions, Jenkinsfile and Jenkins freestyle builders, each with the install step of the CLI) |
 | Audit log | `internal/audit` (registry, `Record`), `internal/activity` (module `audit`: `GET /api/audit`), `web/src/pages/server/Activity.svelte` |
 | Storage move (FS ↔ S3) | `internal/move` (module `storage`: service, copier, `module.go`), `internal/storage/mirror.go`, `web/src/pages/server/Storage.svelte` |
 | Single sign-on | `internal/oidc` (module `sso`: sign-in, the permission map, device approval), `web/src/pages/server/SingleSignOn.svelte` |
@@ -169,7 +169,7 @@ Every format and every core feature with routes is a module (`internal/module`).
 `module.Module{ID, Title, Requires, Register}`. `Register` runs once, before the database opens.
 It calls the `x.*` methods of the `Extender` to declare what the module adds: `Schema`,
 `Settings`, `Permissions`, `AuditActions`, `OpType`, `Init`, `Routes`, `RootPrefix`, `Job`,
-`Format`, `RepoField`, `RepoGuard`, `CIProvider`, `PublisherClient`, `ResolveClient`,
+`Format`, `RepoField`, `RepoGuard`, `CIProvider`, `ResolveClient`,
 `TokenKind`, `Demo` and `Seed`. A module edits no core file.
 
 1. Create `internal/<module>` with `func Module() module.Module`. The module ID is also the
@@ -177,7 +177,7 @@ It calls the `x.*` methods of the `Extender` to declare what the module adds: `S
 2. Add one line to `internal/modules/modules.go`, in start order.
 3. In `x.Init`, keep the `*module.Host`. It holds the kernel services (`DB`, `Settings`,
    `Audit`, `Assets`, `Reader`, `Uploads`, `Rebuilds`, `Repos`, `Ops`, `Auth`, `Access`,
-   `Formats`, `CI`, `Builds`, `Clients`, `API`) and a log tagged with the module ID. Give a
+   `Formats`, `CI`, `Builds`, `API`) and a log tagged with the module ID. Give a
    service to other modules with `h.Provide` or `module.ProvideAs[T]`, and get one from a
    required module with `module.Use[T](h)`. Run background work as `x.Job` or `h.Go`.
 4. Register each route with a policy in `x.Routes`. A module registers only under `/api/`, under
@@ -206,7 +206,7 @@ the format lacks.
 - **Proxy and group:** `Kinds` with `proxy` needs `Classify` and `ProxyProbe`; `RemoteAuth`
   answers a remote's token challenge. `Kinds` with `group` can set `Merge`.
 - **Web UI:** `Description`, `Config.Fields`, `UI` (the descriptor), `Versions` and `Builds`,
-  `Usage`, `ArtifactUsage` and `Tools` (snippets, CI steps, project setup), `Upload` (`Plan` and
+  `Usage`, `ArtifactUsage` and `Tools` (snippets and CI steps), `Publish` (`cli` or `helper`), `Upload` (`Plan` and
   `Store`), `SigningKey` and `RepoTabs`. The web UI reads the descriptor and names no format.
 - **Import:** `Importer` (`Sources`, `Target`, `Store`, `Plan`): the Nexus import offers each
   source file to the format.

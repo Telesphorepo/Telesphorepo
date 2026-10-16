@@ -117,6 +117,7 @@ func Module() module.Module {
 			x.Routes(func(r *route.Router) {
 				r.Handle("GET /api/auth/oidc/login", route.Public, h.login)
 				r.Handle("GET /api/auth/oidc/device", route.Policy{Accept: auth.CredSession, Anonymous: true}, h.device)
+				r.Handle("GET /api/auth/oidc/setup", route.Policy{Accept: auth.CredSession, Anonymous: true}, h.setup)
 				r.Handle("GET /api/auth/oidc/callback", route.Public, h.callback)
 			})
 		},
@@ -220,6 +221,59 @@ func (h *Handler) device(w http.ResponseWriter, r *http.Request, call *route.Cal
 		oauth2.SetAuthURLParam("prompt", "login"), oauth2.SetAuthURLParam("max_age", "0"))
 }
 
+// setup starts a new sign-in at the provider that confirms a setup code of the repo ?repo= for
+// the SSO account of the UI session (POST /api/publish/setup-codes with the grant). The request
+// asks the provider to sign the user in again (prompt=login, max_age=0). Every failure goes back
+// to the page of the repo with an error code.
+func (h *Handler) setup(w http.ResponseWriter, r *http.Request, call *route.Call) {
+	w.Header().Set("Cache-Control", "no-store")
+	ctx := r.Context()
+	c := h.cfg()
+	if !c.OIDCEnabled() {
+		httpx.Error(w, r, http.StatusNotFound, "single sign-on is not configured")
+		return
+	}
+	repo := r.URL.Query().Get("repo")
+	if repo == "" {
+		httpx.Error(w, r, http.StatusBadRequest, "give the repository: ?repo=")
+		return
+	}
+	p := call.P
+	if p == nil {
+		toSetup(w, r, repo, "", "") // the page sends the visitor to sign in
+		return
+	}
+	if p.Kind != auth.KindOIDC {
+		toSetup(w, r, repo, "", errNotSSO)
+		return
+	}
+	prov, err := h.provider(ctx, c)
+	if err != nil {
+		h.log.WarnContext(ctx, "OIDC discovery failed", "issuer", c.OIDCIssuer, "error", err.Error())
+		toSetup(w, r, repo, "", errSSOFailed)
+		return
+	}
+	h.start(w, r, c, prov, pending{userID: p.UserID, setupRepo: repo},
+		oauth2.SetAuthURLParam("prompt", "login"), oauth2.SetAuthURLParam("max_age", "0"))
+}
+
+// toSetup sends the browser back to the page of repo, with the grant of a fresh sign-in, or with
+// an error code when errCode is set.
+func toSetup(w http.ResponseWriter, r *http.Request, repo, grant, errCode string) {
+	q := url.Values{}
+	if grant != "" {
+		q.Set("setup_grant", grant)
+	}
+	if errCode != "" {
+		q.Set("error", errCode)
+	}
+	target := "/#/repo/" + url.PathEscape(repo)
+	if len(q) > 0 {
+		target += "?" + q.Encode()
+	}
+	http.Redirect(w, r, target, http.StatusFound)
+}
+
 // start stores the pending sign-in pend under a new state, sets the state cookie and sends the
 // browser to the provider. opts are extra parameters of the authorization request.
 func (h *Handler) start(w http.ResponseWriter, r *http.Request, c *Config, p *gooidc.Provider, pend pending, opts ...oauth2.AuthCodeOption) {
@@ -291,9 +345,12 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request, _ *route.Call
 		return
 	}
 	fail := func(code string) {
-		if pend.userCode != "" {
+		switch {
+		case pend.setupRepo != "":
+			toSetup(w, r, pend.setupRepo, "", code)
+		case pend.userCode != "":
 			toDevice(w, r, pend.userCode, code)
-		} else {
+		default:
 			toLogin(w, r, code)
 		}
 	}
@@ -320,7 +377,7 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request, _ *route.Call
 		return
 	}
 
-	if pend.userCode != "" {
+	if pend.userCode != "" || pend.setupRepo != "" {
 		h.approval(w, r, pend, si)
 		return
 	}
@@ -419,11 +476,19 @@ func (h *Handler) exchange(ctx context.Context, c *Config, p *gooidc.Provider, p
 	return &signedIn{idt: idt, claims: claims, cl: cl}, true
 }
 
-// approval ends the sign-in that device started: the provider must have signed in the same
-// account within maxAuthAge. It then sends the browser back to the approval page with a
-// single-use grant for the code and the account. It starts no session; the UI session stays.
+// approval ends the sign-in that device or setup started: the provider must have signed in the
+// same account within maxAuthAge. It then sends the browser back to the approval page with a
+// single-use grant for the code and the account, or to the page of the repo with a single-use
+// grant that makes one setup code of the repo. It starts no session; the UI session stays.
 func (h *Handler) approval(w http.ResponseWriter, r *http.Request, pend pending, si *signedIn) {
 	ctx := r.Context()
+	back := func(code string) {
+		if pend.setupRepo != "" {
+			toSetup(w, r, pend.setupRepo, "", code)
+			return
+		}
+		toDevice(w, r, pend.userCode, code)
+	}
 	id, disabled, err := h.auth.OIDCUser(ctx, si.idt.Issuer, si.idt.Subject)
 	switch {
 	case err != nil:
@@ -432,22 +497,32 @@ func (h *Handler) approval(w http.ResponseWriter, r *http.Request, pend pending,
 		return
 	case id != pend.userID:
 		h.log.WarnContext(ctx, "SSO device approval refused: the provider signed in another account", "subject", si.idt.Subject)
-		toDevice(w, r, pend.userCode, errWrongAccount)
+		back(errWrongAccount)
 		return
 	case disabled:
-		toDevice(w, r, pend.userCode, errAccountDisabled)
+		back(errAccountDisabled)
 		return
 	}
 	at, ok := si.claims["auth_time"].(float64)
 	if !ok {
 		h.log.WarnContext(ctx, "SSO device approval refused: the ID token has no auth_time")
-		toDevice(w, r, pend.userCode, errNoAuthTime)
+		back(errNoAuthTime)
 		return
 	}
 	if age := time.Since(time.Unix(int64(at), 0)); age > maxAuthAge {
 		h.log.WarnContext(ctx, "SSO device approval refused: the provider did not sign the user in again",
 			"auth_age", age.Round(time.Second).String())
-		toDevice(w, r, pend.userCode, errStaleSignIn)
+		back(errStaleSignIn)
+		return
+	}
+	if pend.setupRepo != "" {
+		grant, err := h.auth.IssueGrant(ctx, pend.userID, publish.SetupGrant(pend.setupRepo))
+		if err != nil {
+			h.log.ErrorContext(ctx, "SSO setup confirmation: store the grant", "error", err.Error())
+			httpx.Error(w, r, http.StatusInternalServerError, "internal error")
+			return
+		}
+		toSetup(w, r, pend.setupRepo, grant, "")
 		return
 	}
 	grant, err := h.publish.ApprovalGrant(ctx, pend.userID, pend.userCode)
@@ -562,12 +637,14 @@ func NormalizeUsername(s string) string {
 // --- pending sign-ins ---
 
 // pending is a sign-in that waits for the callback. userCode is set when the sign-in approves
-// the device of that code for the SSO account userID; it is empty for a sign-in to the UI.
+// the device of that code for the SSO account userID, and setupRepo when it confirms a setup
+// code of that repo; both are empty for a sign-in to the UI.
 type pending struct {
 	nonce, verifier, provKey string
 	expires                  time.Time
 	userID                   int64
 	userCode                 string
+	setupRepo                string
 }
 
 // stateStore holds pending sign-ins keyed by SHA-256(state): single use, 10 min TTL, bounded.

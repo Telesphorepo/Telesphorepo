@@ -395,6 +395,38 @@ func (q *Queries) TakeChallenge(ctx context.Context, arg TakeChallengeParams) (T
 	return i, err
 }
 
+const takeChallengeAnyAge = `-- name: TakeChallengeAnyAge :one
+DELETE FROM auth_challenges
+WHERE id_hash = ?1 AND kind = ?2
+RETURNING user_id, data, created_at, expires_at
+`
+
+type TakeChallengeAnyAgeParams struct {
+	IDHash []byte
+	Kind   string
+}
+
+type TakeChallengeAnyAgeRow struct {
+	UserID    sql.NullInt64
+	Data      []byte
+	CreatedAt int64
+	ExpiresAt int64
+}
+
+// Takes a challenge of the kind once, expired or not: deletes it and returns it. The caller
+// checks expires_at. No row: unknown, already taken or another kind.
+func (q *Queries) TakeChallengeAnyAge(ctx context.Context, arg TakeChallengeAnyAgeParams) (TakeChallengeAnyAgeRow, error) {
+	row := q.db.QueryRowContext(ctx, takeChallengeAnyAge, arg.IDHash, arg.Kind)
+	var i TakeChallengeAnyAgeRow
+	err := row.Scan(
+		&i.UserID,
+		&i.Data,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+	)
+	return i, err
+}
+
 const updatePasskeyUse = `-- name: UpdatePasskeyUse :exec
 UPDATE user_passkeys SET credential = ?, last_used_at = ? WHERE id = ?
 `

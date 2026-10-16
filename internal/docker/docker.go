@@ -17,7 +17,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Telesphorepo/Telesphorepo/internal/clients"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
 	"github.com/Telesphorepo/Telesphorepo/internal/docker/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
@@ -98,8 +97,8 @@ type Format struct {
 
 // Module returns the Docker module: the format docker (hosted, proxy and group repos), its routes
 // at /v2/, /docker/ and /api/docker/, the settings docker.direct_uploads, docker.upload_url and docker.link_grace, the
-// job docker.links, the publisher client docker (the credential helper), the Nexus importer,
-// the demo data and the seed.
+// job docker.links, the Nexus importer, the demo data and the seed. The native tools push
+// through the credential helper of the Telesphorepo CLI (format.PublishHelper).
 func Module() module.Module {
 	f := &Format{}
 	return module.Module{
@@ -115,8 +114,6 @@ func Module() module.Module {
 				f.network = module.Use[*netrules.Service](h)
 				return nil
 			})
-			x.PublisherClient(clients.Client{ID: "docker", Title: "Docker credential helper",
-				Help: "The Telesphorepo credential helper signs pushes of docker, buildx, podman, helm and oras on this computer with the device key."})
 			x.RootPrefix("/v2/")
 			x.Routes(f.apiRoutes)
 			x.Format(format.Spec{
@@ -139,6 +136,7 @@ func Module() module.Module {
 				Usage:         f.usage,
 				ArtifactUsage: f.artifactUsage,
 				Tools:         []format.Tool{f.dockerTool()},
+				Publish:       format.PublishHelper,
 				Importer:      f.importer(),
 				UI:            ui,
 			})

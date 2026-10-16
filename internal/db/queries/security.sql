@@ -83,6 +83,13 @@ DELETE FROM auth_challenges
 WHERE id_hash = sqlc.arg(id_hash) AND kind = sqlc.arg(kind) AND expires_at > sqlc.arg(now)
 RETURNING user_id, data, created_at, expires_at;
 
+-- Takes a challenge of the kind once, expired or not: deletes it and returns it. The caller
+-- checks expires_at. No row: unknown, already taken or another kind.
+-- name: TakeChallengeAnyAge :one
+DELETE FROM auth_challenges
+WHERE id_hash = sqlc.arg(id_hash) AND kind = sqlc.arg(kind)
+RETURNING user_id, data, created_at, expires_at;
+
 -- Bounded cleanup, served by auth_challenges_expires.
 -- name: DeleteExpiredChallenges :execrows
 DELETE FROM auth_challenges WHERE id_hash IN

@@ -57,10 +57,11 @@ func Module() module.Module {
 				Describe: describe,
 				Admit:    admit,
 				Usage:    f.Usage,
-				Tools:    []format.Tool{format.CurlTool(curlUpload)},
+				Tools:    []format.Tool{format.CLITool("file.tar.gz")},
+				Publish:  format.PublishCLI,
 				Upload:   f.uploadSpec(),
 				Importer: &format.Importer{Sources: []string{"raw"}, Target: format.SourcePath},
-				UI:       format.UIDescriptor{SnippetTools: map[string]string{"curl": "curl", "wget": "wget"}},
+				UI:       format.UIDescriptor{SnippetTools: map[string]string{"curl": "curl", "wget": "wget", "telesphorepo": "Telesphorepo CLI"}},
 			})
 			x.Demo(module.DemoData{
 				Repos: []module.DemoRepo{{Name: "raw", Description: "Documentation sites, release archives and build logs", Public: true}},
@@ -129,8 +130,8 @@ func admit(_ context.Context, w *assets.Write, existing *assets.Asset) (assets.D
 }
 
 // Usage returns curl and wget commands to download a file (a private repo takes a username and a
-// read token), and the publish step by hand, curl with a publish token. The core adds the CI
-// files of the tool curl.
+// read token), and the publish command of the Telesphorepo CLI. The core adds the CI files of the
+// tool telesphorepo.
 func (f *Format) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
 	u := baseURL + "/raw/" + repo.Name + "/path/to/file.tar.gz"
 	curl, wget := "curl -fLO "+u, "wget "+u
@@ -143,13 +144,9 @@ func (f *Format) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
 	return []format.Snippet{
 		{ID: "curl.download", Tool: "curl", Purpose: format.SnippetUse, Context: format.SnippetRepo, Title: "Download a file", Lang: "sh", Code: curl + "\n", Note: note},
 		{ID: "wget.download", Tool: "wget", Purpose: format.SnippetUse, Context: format.SnippetRepo, Title: "Download a file", Lang: "sh", Code: wget + "\n", Note: note},
-		format.HandSnippet(curlUpload(repo, baseURL)),
+		format.CLISnippet("telesphorepo", format.CLIPublish+" file.tar.gz",
+			"The CLI uploads each file into the folder that path names in telesphorepo.toml. Or drop the files on the Files view in the browser."),
 	}
-}
-
-// curlUpload is the curl command that uploads a file to the repo (format.TokenCurl).
-func curlUpload(repo *repos.Repo, baseURL string) string {
-	return format.TokenCurl + "-T file.tar.gz " + baseURL + "/raw/" + repo.Name + "/path/to/file.tar.gz"
 }
 
 // uploadFields are the fields of a web UI upload: the folder the files go into.

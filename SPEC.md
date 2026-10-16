@@ -49,7 +49,6 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/settings` | The settings store: the groups that modules own (`settings.Group`), one immutable snapshot read through typed `Key`s and `View`s, AES-256-GCM secrets, master key, env overrides, subscribers. Declares the keys of the `general` group. See **Settings model** |
 | `internal/db` | SQLite (modernc, no cgo), WAL, separate writer/reader pools, one schema per component with a fingerprint (`Init`), `PRAGMA optimize`, the plan guard (`CheckPlans`) |
 | `internal/ci` | The CI provider registry (`Registry`: `Build`, `Describe`) and the build records (`Builds`: `Record`, `Upsert`, `Loader`, `Cleanup`). See **CI providers and build records** |
-| `internal/clients` | The publisher client registry (`Registry`): the build tool plugins that enroll devices. See **Publisher clients** |
 | `internal/db/dbq` | sqlc-generated core queries (`internal/db/queries/*.sql`) plus hand-written FTS queries in `extra.go` |
 | `internal/storage` | `Store` interface; `fs`, `s3`, and `Live`, a hot-swappable wrapper with `Open`, `SameBackend` and `Probe`. Declares the storage setting keys and `ConfigView` (the store of a snapshot) |
 | `internal/repopath` | The pure repo-path parser: `Parse` (a file path) and `Folder` (`""` or a folder ending in `/`). Routes, file operations, imports and uploads check every path with it |
@@ -60,8 +59,9 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/move` | Module `storage`: the storage move copies every blob to a new backend in the background behind a `storage.Mirror`; owner hooks of the `storage` settings group |
 | `internal/nexus` | Module `nexus`: Nexus 3 REST client, sources, mapping, the sync scheduler and runner, and cut-over. Names no format; it calls the `Importer` of the target format (its `Plan` for the target repo, its `Run` for each file) |
 | `internal/auth` | Users (kinds `local`/`oidc`), argon2id passwords, Basic-auth cache, read tokens, sessions, rate limiting, permission checks. A caller is a `Principal` with one credential kind (`Cred`: password, read token, session, setup session, publish session, device). `Identify` reads the credentials a route policy names. Token kinds are verifiers by prefix (`AddTokenKind`). Also core bearer tokens (`IssueBearer`), fresh second-factor proofs (`CheckProof`, `IssueGrant`) and the session view (`View`) |
-| `internal/oidc` | Module `sso`: OIDC sign-in for any person at the provider, the server permissions from a claim (`oidc.permission_claim`, `oidc.permission_map`), and the SSO device approval: `/api/auth/oidc/login`, `/device` and `/callback` (go-oidc + x/oauth2, PKCE S256); owner hooks of the `sso` settings group |
-| `internal/publish` | Module `publish`: device enrollment, nonces, trust policies, the CI token exchange, the CI providers `github-actions` and `jenkins`, the token kind `trs` of publish sessions, the publish API and the cleanup job |
+| `internal/oidc` | Module `sso`: OIDC sign-in for any person at the provider, the server permissions from a claim (`oidc.permission_claim`, `oidc.permission_map`), and the SSO confirmations of a device approval and of a setup code: `/api/auth/oidc/login`, `/device`, `/setup` and `/callback` (go-oidc + x/oauth2, PKCE S256); owner hooks of the `sso` settings group |
+| `internal/publish` | Module `publish`: device enrollment, setup codes, nonces, trust policies, the CI token exchange, the CI providers `github-actions` and `jenkins`, the token kind `trs` of publish sessions, the device proof of format reads, the publish API, the cleanup job, and the install scripts and downloads of the Telesphorepo CLI |
+| `internal/clidist` | The CLI archives that the server embeds (`go:embed all:dist`) and serves at `/cli/`: `Targets`, `Archive`, `FS`, `Sums`. `go tool task build`, `dev`, `cli` and `release` write them |
 | `internal/repos` | Repos, their kind, their active operation (`Repo.Op`) and per-format JSON config. `Create` and `Update` (a `Patch`) are the only changes of a repo record: each checks the whole new state first, then saves it in one transaction with the format's `OnRepoChange` and one audit event. A `Validator` (the format registry) checks the config and a `KindCheck` the kind. Modules drop what they keep about a deleted repo with `OnDelete`. A module adds repo values that it keeps in its own tables as fields (`repos.Field`, `AddField`): `Create` and `Update` validate and save them in the same transaction, and `Repo.Fields` holds them. Keeps the group members and the proxy remotes in memory (see **Group and proxy repositories**) |
 | `internal/proxy` | Fetches the files of proxy repos from their remotes (the `assets.Fetcher` of the read path), stores them through `Commit` with source `proxy`, answers a remote's 401 challenge through the format's `RemoteAuth`, and remembers remote 404s; `proxy.Answer` is the answer of the registry token protocol (also for the Nexus client), `proxy.Send` a request to a remote as a fetch sends it (e.g. a remote tags list) |
 | `internal/format` | The format contract: `Spec` (every optional capability is a field that is nil when the format lacks it), the `Registry` (`All`, `Get`, `Hooks`, `RebuildRun`, `OnRepoChange`, `ValidateConfig`, `SupportsKind`, `Importer`), `Kit` and `Standard` (the default routes), and `Importer.Run` (the shared import of one source file) |
@@ -78,7 +78,7 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/demo` | The dev demo data (`telesphorepo-server dev`): it writes repos, users and files through the byte pipeline, with the demo data of each module (`Extender.Demo`). See **Demo data** |
 | `internal/containerengine` | Docker/Podman detection for tooling and e2e; not linked into the server |
 | `web/` | Svelte 5 + Vite UI (Tailwind CSS v4, shadcn-svelte Maia style), embedded via `web/embed.go` (`go:embed all:dist`). See **Web UI** |
-| `tools/task` | `go tool task`: dev, build, preview, test, gen and doctor |
+| `tools/task` | `go tool task`: dev, build, preview, test, cli, release, gen and doctor |
 | `e2e/` | End-to-end suite in four zones (tags `e2e`, `import`, `scale`, `clients`) using testcontainers |
 
 ## Modules
@@ -98,21 +98,19 @@ type assertion.
 | `OpType(ops.Type)` | A type of repo operation that the module begins: its message, and `Resume` and `Clear` when it has them (see **Repo operations**) |
 | `Init(fn)` | Startup code with the `Host`; an error stops startup |
 | `Routes(fn)` | Routes on the module's `route.Router` |
-| `RootPrefix(prefix)` | A path outside `/api/` and the format segments that the module owns, e.g. `/setup.sh` |
+| `RootPrefix(prefix)` | A path outside `/api/` and the format segments that the module owns, e.g. `/install.sh` |
 | `Job(jobs.Job)` | A job named `<module>.<name>` with `Start`, `Run` and `Tick` |
 | `Format(format.Spec)` | A repository format; the module owns `/<name>/`. A nil `Routes` mounts `format.Standard` (see **Byte pipeline**) |
 | `RepoField(repos.Field)` | A repo value that the module keeps in its own table, e.g. `signing_key`: `Applies` (by format and repo kind), `Validate`, `Default`, `Save` (in the repo transaction), `Committed`, `Load` (from memory). It serves once the module's `Init` ran |
 | `RepoGuard(access.Guard)` | An extra rule of the access engine (the IP rules): `Name`, `Check`, `Describe` (the access report), `Refused` (search) |
 | `CIProvider(ci.Provider)` | A CI system whose tokens make build records and whose trust policies the access report describes |
-| `PublisherClient(clients.Client)` | A publisher client that enrolls devices (`gradle`, `maven`) |
 | `ResolveClient(fn)` | The client address and scheme of every request; at most one module |
 | `TokenKind(prefix, verifier)` | A token kind (`trp`, `trs`) |
 | `Demo(module.DemoData)`, `Seed(module.SeedFunc)` | The dev demo data and the rows of `telesphorepo-server seed` of the module's one format |
 
 `module.Host` holds the kernel services (DB, settings, the permission registry, live storage,
 audit, jobs, `Blobs`, `Assets` (the pipeline), `Reader`, `Uploads`, `Rebuilds`, repos, `Ops`, auth,
-access, the format registry, `CI` (the CI providers), `Builds` (the build records), `Clients` (the
-publisher clients), `route.API`) and a log tagged with the module ID. An `Init` and every job of a module record audit events as the system actor of
+access, the format registry, `CI` (the CI providers), `Builds` (the build records), `route.API`) and a log tagged with the module ID. An `Init` and every job of a module record audit events as the system actor of
 the module (`audit.System`). A
 module gives a service to the modules that require it with `Host.Provide` (as its own type) or
 `module.ProvideAs[T]` (as an interface, e.g. `publish.Minter`), and a module gets it with
@@ -149,13 +147,13 @@ it needs and leaves the others nil. The kernel gives it these parts:
 | `storage` | `internal/move` | | `/api/storage/moves/...`, the subsystem `storage`, the settings group `storage` (its `Validate`: the S3 rules; `Test`: the probe; `Apply`: refuse a change while a move runs, probe the new store, start the move), the `storage.move.*` actions, job `storage.resume` |
 | `network` | `internal/netrules` | | The client address, IP lists, repo IP rules (a repo guard and the networks of the access report), the IP lists of the trusted proxies (`/api/network/trusted-proxies`), the subsystem `network`, the settings group `network` (`trusted_proxies`; its `Validate` refuses a `list:` entry in a change), the `network.*` actions, job `network.presets` (every hour) |
 | `signing` | `internal/signing` | | Signing keys and `/api/signing-keys/...`, the repo field `signing_key` (for the hosted repos of the formats with `SigningKey`), the subsystem `signing`, the `signing.key.*` actions; provides `*signing.Keys` |
-| `publish` | `internal/publish` | `audit` | Devices, publish sessions (`trs`), CI trust policies, the CI providers `github-actions` and `jenkins`, `/api/devices/...` and `/api/publish/...`, the subsystem `ci`, the settings group `publishing`, the `publish.session.*`, `device.*` and `ci.pipeline.*` actions, job `publish.cleanup` (every minute), `/setup.sh` and `/setup.ps1` (the frame of the project setup; see **Project setup**); provides `*publish.Service` and `publish.Minter`; loads the publish sessions and devices of core bearer tokens and gives the access report its CI pipelines |
+| `publish` | `internal/publish` | `audit` | Devices, publish sessions (`trs`), CI trust policies, the CI providers `github-actions` and `jenkins`, `/api/devices/...` and `/api/publish/...`, the subsystem `ci`, the settings group `publishing`, the `publish.session.*`, `device.*`, `setup_code.create` and `ci.pipeline.*` actions, job `publish.cleanup` (every minute), `/install.sh`, `/install.ps1` and `/cli/` (see **Install scripts and CLI downloads**); provides `*publish.Service` and `publish.Minter`; loads the publish sessions and devices of core bearer tokens and gives the access report its CI pipelines |
 | `sso` | `internal/oidc` | `publish` | `/api/auth/oidc/...`, the subsystem `signin`, the settings group `sso` (its `Validate` with the startup guard and the claim map check, `Test` and `Apply`: the discovery check), the `sso.*` actions; tells auth when single sign-on manages permissions |
 | `nexus` | `internal/nexus` | | `/api/nexus/...`, the subsystem `nexus`, the settings group `nexus`, the `nexus.*` actions, the operation type `mirror`, job `nexus.scheduler` (resumes running syncs, then the schedule loop) |
-| `maven` | `internal/maven` | | Format `maven` with the tools `gradle` and `maven` (their CI steps and project setup fragments), the publisher clients `gradle` and `maven` |
-| `debian` | `internal/debian` | `signing` | Format `debian` with its schema and `Rebuild` |
-| `raw` | `internal/raw` | | Format `raw` |
-| `docker` | `internal/docker` | `network`, `publish` | Format `docker` (an OCI registry: hosted, proxy and group repos) with its schema; the root prefix `/v2/`, `/docker/` (the token endpoint) and `GET /api/docker/{name}/manifest`; the settings group `docker`; job `docker.links`; the publisher client `docker` (the credential helper `cmd/docker-credential-telesphorepo`, see **Publishing**); the Nexus importer of `docker`; demo data and seed (see **Docker registry**) |
+| `maven` | `internal/maven` | | Format `maven` (publish category `cli`) with the tools `gradle` and `maven` (their CI steps) |
+| `debian` | `internal/debian` | `signing` | Format `debian` (publish category `cli`) with its schema, `Rebuild` and the tool `telesphorepo` |
+| `raw` | `internal/raw` | | Format `raw` (publish category `cli`) with the tool `telesphorepo` |
+| `docker` | `internal/docker` | `network`, `publish` | Format `docker` (an OCI registry: hosted, proxy and group repos) with its schema; the root prefix `/v2/`, `/docker/` (the token endpoint) and `GET /api/docker/{name}/manifest`; the settings group `docker`; job `docker.links`; the publish category `helper` (the native tools push through the credential helper of the CLI, see **Publishing**); the Nexus importer of `docker`; demo data and seed (see **Docker registry**) |
 
 **Routes.** The route table (`internal/route`) gives each module a `Router`. A module registers
 under `/api/`, under `/<name>/` of each format it registers, and under its root prefixes. Any
@@ -276,8 +274,8 @@ now" is always `Decide(..., Write)` or `Decide(..., Mint)`.
 of the master key with the info `telesphorepo bearer v1`. The payload holds the credential kind
 (none for anonymous), the user, the read token, the scopes (`{repo, ops, session}`) and the
 expiry. The credential is a password, a read token, a publish session or a device
-(`auth.CredDevice` with `Principal.DeviceID`: the device of a format's token exchange); a UI
-session gets no bearer. A scope holds `Read`, `Write` and `Delete` only. `Write` and `Delete` stay
+(`auth.CredDevice` with `Principal.DeviceID`: the device of a format's token exchange or of a
+device proof); a UI session gets no bearer. A scope holds `Read`, `Write` and `Delete` only. `Write` and `Delete` stay
 only with a scope session of the credential: the publish session of a publish session credential,
 or for a device an open session that the device minted for the scope's repo
 (`auth.PublishSession.DeviceID`). So a bearer from a password, a read token or the anonymous
@@ -297,6 +295,16 @@ username)` counts a failed attempt of a credential that the auth service does no
 CI token: the client address only), and `auth.Service.Blocked(r)` says how long the address
 waits. `auth.PublishSession.Expires` is when a session ends at the latest.
 
+**Device proof on format reads.** A route whose policy accepts `auth.CredDevice` (every
+`route.FormatRead`, and `GET /v2/_catalog`) also reads a device proof
+`trx.<device id>.<nonce>.<signature>` (`auth.DeviceProofPrefix`) as the Basic password or as the
+Bearer value. The publish module checks it (`auth.Service.SetDeviceProofVerifier`,
+`publish.Service.VerifyDeviceProof`): the nonce is a token exchange nonce of the device that has
+not expired, the device is usable, and the signature over `SignedMessage(nonce, device id, "*")`
+verifies. The caller is then the `CredDevice` principal with the grants of the device's user. The
+router allows `CredDevice` only on GET and HEAD routes without a server permission, so a device
+proof never writes. A proof that does not verify counts as a failed attempt of the client address.
+
 **Minting a publish session.** The publish module provides `publish.Minter` (`module.Use`):
 `Mint(ctx, r, MintCred, repo)` checks the credential, runs `Decide(..., Mint)` with `repo.publish`,
 writes the session row and the `publish.session.create` event, and returns the open session without a
@@ -306,7 +314,12 @@ route with `exchange: true`) signed for the repo `*`), `CIToken` (a CI identity 
 a trust policy of the repo allows; a token that minted a session for the repo before gets that
 session back while it is open) or `Fresh` (a UI session whose request carried a fresh second
 factor). The three mint routes use the same code and answer the token; there a CI token mints
-once, and an exchange nonce does not mint. An exchange nonce lives as long as a publish session
+once, and an exchange nonce does not mint. `POST /api/publish/sessions/exchange` mints with an
+exchange nonce (`publish.Service.Exchange`), as the `Minter` does, and answers the token. The
+secret of a session that an exchange nonce mints is HMAC-SHA256 of the public id, keyed with the
+nonce, so a later exchange with the same nonce and repo answers the same token. Every mint answer
+(`POST /api/publish/sessions`, `/manual`, `/oidc` and `/exchange`) is `{id, token, repo, format,
+kind, expires_at}`. An exchange nonce lives as long as a publish session
 (`publish.session_ttl`) and is not used up: a token exchange sends the same proof on each token
 request of one push. It mints one session per repo (`publish_exchange_sessions`), and a later
 mint for the same repo gets that session back while it is open, so upload sessions continue
@@ -327,7 +340,9 @@ a field with a `change_note` asks first and lists the note); `RepoTabs` and the 
 `Upload` (`single`, `folder`, `accept`, `hint`, `keep` (the globs of the files of a folder that the
 browser sends), `one` and `many` (the words for an item), `note`, `ignored`, `empty`, `fields`,
 `reads` (the globs and `max_bytes` of the files whose first bytes a plan reads)); `Tools` (the
-build tools: `{id, label, setup, project?}`, and `setup` when a tool has a project setup);
+build tools of the CI files: `{id, label}`); `Publish` (`publish`: `cli`, the format publishes
+with `telesphorepo publish` in the project folder, or `helper`, the native command of the tool
+through a credential helper of the CLI; `format.PublishCategory`);
 `Importer.Sources` (`import_sources`, the Nexus formats it imports); `Versions` and
 `ArtifactUsage` (`browse`); and `UI` (`format.UIDescriptor`): `delete_notes` (`{match, one, many,
 text}`: the delete plan counts the files of a delete that the glob matches), `file_details`
@@ -342,15 +357,22 @@ one character except `/`, `**/` any number of folders; matching is case-sensitiv
 
 **Snippets and CI files.** A `format.Snippet` is `{id, tool, purpose, context, via, file, title,
 lang, code, note}`. A format's `Usage` gives the use snippets and the publish snippets for a
-computer and by hand; the core adds the CI files. `internal/ci/workflow.go` holds the one GitHub
-Actions builder (`GitHubWorkflow`), the one Jenkinsfile builder (`Jenkinsfile`) and `Indent`. A
-`format.Tool` gives `Publish(repo, baseURL, system) ci.PublishSteps` (`Toolchain` steps of GitHub
-Actions, `Build`, `Publish`, `Token` (the job needs its identity token in `OIDC_TOKEN`), `Env`)
-and an optional `CINote` and `Setup` fragment. `format.CISnippet` builds the file of a tool for a
-system and a `ci.Trigger{Branches, Tags}`. A format without a client (Debian, Raw) has the tool
-`curl` (`format.CurlTool`): its publish script exchanges `$OIDC_TOKEN` for a publish session at
-`/api/publish/sessions/oidc`, uploads with the session token on curl's stdin and closes the
-session in an exit trap.
+computer (the Telesphorepo CLI, `format.CLISnippet`) and by hand; the core adds the CI files.
+`internal/ci/workflow.go` holds the one GitHub Actions builder (`GitHubWorkflow`), the one
+Jenkinsfile builder (`Jenkinsfile`), the Jenkins freestyle builder (`JenkinsFreestyle`) and
+`Indent`. A `format.Tool` gives `Publish(repo, baseURL, system) ci.PublishSteps` (`Toolchain`
+steps of GitHub Actions, `Build`, `Publish`, `PublishPS` (the PowerShell form of `Publish` for a
+Windows Jenkins agent; empty: `Publish`), `Env`) and an optional `CINote`. Every CI file installs
+the CLI before the publish: GitHub Actions in a step of its own (`curl -fsSL <base>/install.sh |
+sh`, which adds the CLI to `$GITHUB_PATH`) and keeps `permissions: id-token: write`; a Jenkinsfile
+inside `withCredentials` of `OIDC_TOKEN`, with `install.sh` on a Unix agent and `install.ps1` on
+a Windows agent (`isUnix()`); a freestyle step with `install.sh`. The CLI reads the identity token
+of the job itself, so no CI file fetches or prints a token. The publish of the Maven tools and of
+the tool `telesphorepo` (`format.CLITool`, Debian and Raw) is `telesphorepo publish`; Docker
+pushes with `docker push` through a Docker config of its own that names the credential helper of
+the CLI for the registry host. `format.CISnippet` builds the file of a tool for a system
+(`github-actions`, `jenkins` or `jenkins-freestyle`, `ci.JenkinsFreestyleSystem`) and a
+`ci.Trigger{Branches, Tags}`.
 
 **Lifecycle.** `server.RunWith` starts in this order: logger and data dirs; `db.Open`; every
 `Register` once per process (then the permission registry is fixed, and the audit actions, the
@@ -407,7 +429,7 @@ Kernel tables (`internal/db/schema.sql`):
 | `user_totp` | PK `id`, idx `user_id` | `secret` is sealed (AAD `user_totp:<id>`); `last_step` is the last accepted 30 s step of this factor (0 for none) |
 | `user_passkeys` | PK `id`, UNIQUE `credential_id`, idx `user_id` | `credential` is the JSON of the `webauthn.Credential` (the public key, the sign count, the flags, the transports, the AAGUID); `credential_id` is its lookup key; `name`, `created_at`, `last_used_at` |
 | `user_recovery_codes` | PK `(user_id, code_hash)` (WITHOUT ROWID) | `code_hash` is argon2id PHC; `used_at` is set when the code is used |
-| `auth_challenges` | PK `id_hash` (WITHOUT ROWID), idx `expires_at`, `user_id` | Short-lived single-use state: `kind` is `login`, `totp_setup`, `webauthn_register`, `webauthn_assert` or `device_grant` (an SSO approval grant: `user_id` set, `data` is the user code, 5 min); `data` holds the payload. A new challenge deletes up to 100 expired ones |
+| `auth_challenges` | PK `id_hash` (WITHOUT ROWID), idx `expires_at`, `user_id` | Short-lived single-use state: `kind` is `login`, `totp_setup`, `webauthn_register`, `webauthn_assert` `device_grant` (an SSO grant: `user_id` set, `data` is the user code of a device approval or `setup:<repo>` for a setup code, 5 min) or `setup_code` (a setup code: `id_hash` is SHA-256 of `trsu_<32 random bytes, base64url>`, `user_id` the person who made it, `data` the repo id, 10 min; the first use deletes it); `data` holds the payload. A new challenge deletes up to 100 expired ones |
 | `audit_events` | PK `id`, idx `at`, idx `(repo_id, id)`, idx `(action, id)`, idx `actor_user_id` | `at` unix time; `action` is a registered action ID; `actor` is a username, a CI subject, `cli`, the module ID of a job, `anonymous`, or the attempted username of a failed sign-in; `actor_user_id` and `repo_id` are SET NULL; `target`; `detail` is JSON and never holds a secret value; `ip` is the client address. This table is the only place that stores or shows an IP address. See **Audit log** |
 
 Tables of the `storage` component (`internal/move/schema.sql`):
@@ -436,11 +458,11 @@ Tables of the `publish` component (`internal/publish/schema.sql`):
 
 | Table | Key / indexes | Notes |
 |---|---|---|
-| `devices` | PK `id`, UNIQUE `public_key`, idx `user_id` | `client` is a registered publisher client ID (no CHECK; see **Publisher clients**); `public_key` is the raw Ed25519 key; `expires_at`, `last_used_at`, `revoked_at` |
-| `device_enrollments` | PK `device_code_hash` (WITHOUT ROWID), UNIQUE `user_code`, idx `expires_at`, idx `approved_by`, idx `device_id` | `client`; `polled_at` rate-limits the poll; `approved_by` and `device_id` are set on approval; a row is taken once by the poll |
+| `devices` | PK `id`, UNIQUE `public_key`, idx `user_id` | A device key of the Telesphorepo CLI, one per computer and server: `name`; `public_key` is the raw Ed25519 key; `expires_at`, `last_used_at`, `revoked_at` |
+| `device_enrollments` | PK `device_code_hash` (WITHOUT ROWID), UNIQUE `user_code`, idx `expires_at`, idx `approved_by`, idx `device_id` | `name`, `public_key`; `polled_at` rate-limits the poll; `approved_by` and `device_id` are set on approval; a row is taken once by the poll |
 | `publish_trusts` | PK `id`, UNIQUE `name`, partial idx `publish_trusts_issuer (issuer) WHERE disabled = 0`, idx `created_by` | `claims` is JSON `{claim: [allowed values]}`; `jwks` is `''` when the server fetches the issuer's keys; `audience` `''` means `base_url` |
 | `publish_trust_repos` | PK `(trust_id, repo_id)` (WITHOUT ROWID), idx `repo_id` | The repos a policy may publish to |
-| `publish_nonces` | PK `id_hash` (WITHOUT ROWID), idx `device_id`, idx `expires_at` | A nonce that a device signs: `id_hash` = SHA-256(nonce), `device_id` (cascades), `exchange`. With `exchange` 0 it is for one repo, lives 60 s and the mint deletes it. With `exchange` 1 it is for a format's token exchange, signed over the repo `*`, and mints until it expires (`publish.session_ttl`) |
+| `publish_nonces` | PK `id_hash` (WITHOUT ROWID), idx `device_id`, idx `expires_at` | A nonce that a device signs: `id_hash` = SHA-256(nonce), `device_id` (cascades), `exchange`. With `exchange` 0 it is for one request (a mint for one repo, a project setup, or the revoke of the device), lives 60 s and that request deletes it. With `exchange` 1 it is for a format's token exchange, signed over the repo `*`, and mints until it expires (`publish.session_ttl`) |
 | `publish_exchange_sessions` | PK `(nonce_hash, repo_id)` (WITHOUT ROWID), idx `repo_id`, `session_id` | The session that a token exchange nonce minted for each repo. Each column cascades |
 | `publish_sessions` | PK `id`, UNIQUE `public_id`, idx `expires_at`, `repo_id`, `user_id`, `device_id`, `trust_id`, `build_id` | `secret_hash` = SHA-256(secret); `via` `device`/`oidc`/`manual`; `subject`; `build_id` (the CI build record of a CI session whose token a provider read); `closed_at`. `repo_id` cascades; `user_id`, `device_id`, `trust_id` and `build_id` are SET NULL |
 | `publish_oidc_seen` | PK `(id_hash, repo_id)` (WITHOUT ROWID), idx `expires_at`, `session_id`, `repo_id` | One row per CI token and repo, with the session the token minted there. `id_hash` is SHA-256 of `<issuer>\n<jti>`, or of the whole token when it has no `jti`. A second insert for the repo means a replay |
@@ -634,7 +656,8 @@ signed-in browser downloads from a private repo without a Basic prompt. A **writ
 | `GET, HEAD /debian/{repo}/key.asc` | read | The armored public signing key of the repo (its repo field `signing_key`). Same read gate as the repo's other files |
 | `/v2/...`, `GET, POST /docker/token`, `GET /docker/hosts` | see **Docker registry** | The OCI registry of the docker format |
 | `GET /api/docker/{name}/manifest?path=` | `repo.download` (password, read token, UI session, anonymous on a public repo) | The details of the manifest at a tag or manifest path of a docker repo (a group: of the first readable member that stores it): `{digest, media_type, artifact_type, size, total_size, config: {digest, media_type, size}\|null, layers: [{digest, media_type, size}], platforms: [{digest, os, architecture, variant}], subject\|null, tags: [first 100], referrers: n}`. A link path or another path is 400; a file that does not parse is 422 |
-| `GET /setup.sh`, `GET /setup.ps1` | none | The project setup script (see **Project setup**), `text/plain`. The publish module mounts them. 400 when the server address holds a quote, a space, a backslash or a control character |
+| `GET /install.sh`, `GET /install.ps1` | none | The install script of the Telesphorepo CLI (see **Install scripts and CLI downloads**), `text/plain`. The publish module mounts them. 404 problem `no-cli-downloads` on a build without CLI archives; 400 when the server address holds a quote, a space, a backslash or a control character |
+| `GET /cli/telesphorepo_<os>_<arch>.<ext>`, `GET /cli/SHA256SUMS` | none | A CLI archive of the server's build (`.tar.gz`, `.zip` on Windows) and the SHA-256 of each, `Cache-Control: no-cache`. 404 problem `no-cli-downloads` on a build without CLI archives; another name is 404 |
 | `/` | none | Embedded UI, hash-routed |
 
 A read of a proxy or a group repo on a format route follows **Group and proxy repositories**. A
@@ -701,6 +724,8 @@ startup. `remedy` is `{action, url?, after?, file?, version?}`; `action` is one 
 | Type | Status | Title | Remedy |
 |---|---|---|---|
 | `rate-limited` | 429 | Too many attempts | `retry`, `after` from `Retry-After`. Every 429 under `/api/` is this type |
+| `setup-code-used` | 401 | This setup line is already used | `open_url` to the Publish tab of the repo of the code (`<base>/#/repo/<repo>`), or the server root when the code is unknown or used. `POST /api/devices/setup` answers it for a wrong, used or expired code |
+| `no-cli-downloads` | 404 | This build has no CLI downloads | none. `/cli/`, `/install.sh` and `/install.ps1` of a build without CLI archives |
 
 Format routes keep the error form of their protocol: `{"error": "..."}` with the same extension
 members, or the OCI errors of Docker (`Policy.Errors`). The web client (`web/src/lib/api/client.ts`) shows `detail`, else `title`.
@@ -826,99 +851,57 @@ mode). The publish routes are in **Publishing**.
 ## Client setup
 
 The UI shows these snippets per repo (`/usage`), and `telesphorepo-server dev` prints them. `HOST` is the server URL. For reads, credentials are a user and password, or any username with a
-read token as the password. Uploads use a publish session token; the Maven and Gradle clients
-(see **Publishing**) get it themselves.
+read token as the password. Uploads use a publish session token; the Telesphorepo CLI (see
+**Publishing**) gets it itself.
 
 No snippet puts a token in a process argument. A curl snippet pipes a curl config
 (`user = "publish:$TOKEN"`, `header = ...`) to `curl -K -` with the shell builtin `printf`, and
 sends a JSON body that holds a token with `--data @-`. A snippet for a person reads a token at a
 hidden prompt (`read -rs TOKEN`), so the token stays out of the shell history; wget uses
-`--ask-password`. A GitHub Actions workflow that needs the identity token in `OIDC_TOKEN` masks
-it with `::add-mask::` as soon as it has it. The curl publish script of a format without a client
-turns tracing off with `set +x` before it holds the session token, never prints it, and closes
-the session in an exit trap.
+`--ask-password`. No CI file fetches, prints or passes a token: the CLI and its credential helper
+read the identity token of the job themselves.
 The apt credentials file gets mode 600 (`sudo install -m 600 /dev/null FILE`) before the token
 is written to it with `sudo tee -a FILE > /dev/null`.
 
 | Client | Setup |
 |---|---|
-| Maven | URL `HOST/maven/{repo}` in `<distributionManagement>` / `<repositories>`. Reads of a private repo need `~/.m2/settings.xml` `<server>` with the same `<id>`. Deploys use the Telesphorepo extension. Maven 3.8.1+ blocks `http://` on non-localhost hosts |
-| Gradle | `maven { url = uri("HOST/maven/{repo}") }` in `repositories` of the build file to consume dependencies (Gradle ignores the repositories of the settings file when the build file declares its own), in `pluginManagement.repositories` of the settings file to consume plugins, and in `publishing.repositories` to publish; add `credentials(PasswordCredentials::class)` with a read token in `~/.gradle/gradle.properties` to read a private repo. The settings plugin adds the publish credentials. `isAllowInsecureProtocol = true` only for plain http |
+| Maven | URL `HOST/maven/{repo}` in `<repositories>`. Reads of a private repo need `~/.m2/settings.xml` `<server>` with the same `<id>`. Deploys: `telesphorepo publish`. Maven 3.8.1+ blocks `http://` on non-localhost hosts |
+| Gradle | `maven { url = uri("HOST/maven/{repo}") }` in `repositories` of the build file to consume dependencies (Gradle ignores the repositories of the settings file when the build file declares its own), and in `pluginManagement.repositories` of the settings file to consume plugins; add `credentials(PasswordCredentials::class)` with a read token in `~/.gradle/gradle.properties` to read a private repo. Publishes: `telesphorepo publish` (a project that applies `maven-publish`). `isAllowInsecureProtocol = true` only for plain http |
 | apt | Key: `curl -fsSL HOST/debian/{repo}/key.asc -o /etc/apt/keyrings/telesphorepo.asc`. Source: `deb [signed-by=/etc/apt/keyrings/telesphorepo.asc] HOST/debian/{repo} {dist} {component}`. For a private repo, the `curl` command reads `USER:READ_TOKEN` from a config on stdin, and `/etc/apt/auth.conf.d/{repo}.conf` holds `machine HOST/debian/{repo} login USER password TOKEN` (mode 600) |
-| Upload `.deb` | `curl -K - -T x.deb HOST/debian/{repo}/upload/{dist}/{component}` with `user = "publish:SESSION_TOKEN"` on stdin. Indexes rebuild after `index.debounce`; poll `GET /api/repos/{repo}/status` for `pending: 0` |
-| Docker | Pull: `docker pull <host>/{repo}/IMAGE:TAG`; a private repo needs `docker login <host>` with a read token. Push: `docker-credential-telesphorepo login HOST` once (a person approves the device), then `docker push <host>/{repo}/IMAGE:TAG` with no `docker login`. Helm and ORAS use the same login (see **Docker registry** and **Publishing**) |
-| Raw | Upload: `curl -K - -T file.tar.gz HOST/raw/{repo}/path/file.tar.gz` with `user = "publish:SESSION_TOKEN"` on stdin. Download: `curl -fLO HOST/raw/{repo}/path/file.tar.gz`; a private repo adds `-K -` with `user = "USER:READ_TOKEN"` on stdin |
+| Upload `.deb` | `telesphorepo publish x.deb` (with `dist` and `component` in `telesphorepo.toml`). Indexes rebuild after `index.debounce`; poll `GET /api/repos/{repo}/status` for `pending: 0` |
+| Docker | Pull: `docker pull <host>/{repo}/IMAGE:TAG`; a private repo needs `docker login <host>` with a read token. Push: the setup line of the Publish tab adds the credential helper of the CLI to the Docker config once, then `docker push <host>/{repo}/IMAGE:TAG` with no `docker login`. Helm and ORAS use the same helper (see **Docker registry** and **Publishing**) |
+| Raw | Upload: `telesphorepo publish file.tar.gz` (with `path` in `telesphorepo.toml`). Download: `curl -fLO HOST/raw/{repo}/path/file.tar.gz`; a private repo adds `-K -` with `user = "USER:READ_TOKEN"` on stdin |
 
-### Project setup
+### Install scripts and CLI downloads
 
-One command sets up a project to publish to a repo. The build tools of the formats with a
-`format.SetupFragment` (Gradle and Maven) take part. The person runs it once in the project
-folder and commits the files it changes:
+The server serves the Telesphorepo CLI of its own build. `go tool task build` (six targets),
+`go tool task dev` (the target of the computer), `go tool task cli` and `go tool task release`
+compile `./cmd/telesphorepo` into `internal/clidist/dist` before they compile the server, as
+`telesphorepo_<os>_<arch>.tar.gz` (`.zip` on Windows) for linux, darwin and windows on amd64 and
+arm64, with `SHA256SUMS`. The image build runs `go tool task cli` too. Without `cmd/telesphorepo`
+the task writes no archives and says so; that server answers `/cli/`, `/install.sh` and
+`/install.ps1` with the problem `no-cli-downloads` (404).
 
 ```sh
-curl -fsSL HOST/setup.sh | sh -s -- REPO [--ci none|github|jenkins-pipeline|jenkins-freestyle] [--yes]
+curl -fsSL HOST/install.sh | sh [-s -- CLI ARGS...]
 ```
 
 ```powershell
-& ([scriptblock]::Create((irm HOST/setup.ps1))) REPO [-Ci none|github|jenkins-pipeline|jenkins-freestyle] [-Yes]
+& ([scriptblock]::Create((irm HOST/install.ps1))) [CLI ARGS...]
 ```
 
-`setup.sh` is POSIX sh; `setup.ps1` runs on PowerShell 5.1 and later. The publish module holds
-the frame (`internal/publish/setup.sh` and `setup.ps1`): the arguments, the questions, the staged
-changes with the confirmation, the CI files and the next steps. Each tool with a setup fragment
-adds its part (`internal/maven/setup_gradle.sh`, `setup_maven.sh` and their `.ps1`): the sh
-functions `detect_<tool>`, `apply_<tool>`, `publish_cmd_<tool>`, `ci_edit_<tool>` and
-`next_<tool>` (PowerShell: `Test-<Tool>`, `Set-<Tool>`, `Get-<Tool>PublishCommand`,
-`Edit-<Tool>Ci`, `Write-<Tool>Next`), with the frame's helpers (`stage_file`, `stage_path`,
-`stage_insert_after`, `stage_append`, `block_start`, `block_end`, `plan`, `manual`, `note`). The
-server fills in `HOST` (the `base_url` setting, else the scheme and host of the request), the
-tools in module order, the fragments (with the client version `clientsVersion`), the Jenkins
-credential ID, and the CI files of each tool from `internal/ci/workflow.go` for the repo
-placeholder `%REPO%`: the GitHub Actions workflow with the trigger `on: push: tags: ["v*"]`, the
-Jenkinsfile, and the freestyle shell command (the Jenkins build and publish). The script fills in
-the repo and runs each CI file through the tool's `ci_edit` (Gradle: `gradle` when the project
-has no `gradlew`).
-
-- **Questions.** When REPO or the CI choice is missing and a terminal is there (`/dev/tty` for
-  sh, because stdin is the pipe; the console for PowerShell), the script asks for the repo and
-  "Where will you publish from?" (1 Your computer only, 2 GitHub Actions, 3 Jenkins with a
-  Jenkinsfile, 4 Jenkins freestyle job). `--ci none` (`-Ci none`) is Your computer only and asks
-  no question. Without a terminal, a missing REPO stops the script and a missing CI choice means
-  the computer only. A repo name must match `[a-z0-9][a-z0-9._-]*`.
-- **Build tool.** The first tool whose detection finds its project: Gradle (`settings.gradle.kts`,
-  else `settings.gradle`), then Maven (`pom.xml`). With none, the script stops.
-- **Gradle.** The settings file gets the `com.telesphorepo.publish` plugin. With a top-level
-  `plugins {` block, the script adds the id line to it. Without one, it adds a `plugins` block
-  after the `pluginManagement` and `buildscript` blocks, or at the top after the comments and
-  imports. At the end it adds `telesphorepo { url; repository }`, with
-  `oidcTokenEnv = "OIDC_TOKEN"` for both Jenkins choices.
-- **Maven.** `.mvn/extensions.xml` gets the extension (a new file, or a new `<extension>` before
-  `</extensions>`). `.mvn/maven.config` gets `-Dtelesphorepo.url=HOST` unless it has a
-  `-Dtelesphorepo.url` line. `pom.xml` gets `<distributionManagement>` with `<repository>` and
-  `<snapshotRepository>` before `</project>`, with the indent of `<modelVersion>`, unless it has
-  one.
-- **CI.** `--ci github` writes `.github/workflows/publish.yml`. `--ci jenkins-pipeline` writes
-  `Jenkinsfile`. `--ci jenkins-freestyle` writes no CI file and prints the freestyle job steps:
-  Configure; under Environment tick "Use secret text(s) or file(s)"; under Bindings Add, then
-  "Secret text", with Variable `OIDC_TOKEN` and Credentials `telesphorepo-id-token`; Add build
-  step, then "Execute shell" ("Execute Windows batch command" on Windows agents) with
-  `./gradlew build && ./gradlew publish` (or `gradle`) or
-  `mvn -B verify && mvn -B deploy -DskipTests -Dtelesphorepo.oidcTokenEnv=OIDC_TOKEN`; Save, then
-  Build Now. A CI file that
-  exists with other content stays as it is.
-- **Safety.** The script finds anchors with plain line matches and brace counts, never a
-  rewrite of the whole file. A block that it cannot place safely (a `plugins` block on one line,
-  braces that do not close, a second `</project>`) it prints to paste by hand, and it then exits
-  1. It shows each change first. A change to a file that exists needs y at the prompt, or
-  `--yes`; without a terminal and without `--yes` it stops and changes nothing. Line ends
-  (LF or CRLF) and a UTF-8 BOM stay as they are. It never touches `~/.m2` or `~/.gradle` and
-  writes no secret. A second run changes nothing.
-- **End.** It prints the changed files, "Commit these files", the publish command with "click
-  Approve in your browser the first time", and for CI "Ask an admin to add a CI pipeline on
-  Settings › CI pipelines": for GitHub Actions the pipeline must allow tags `v*`; for Jenkins it
-  adds the credential note ("OpenID Connect id token", ID `telesphorepo-id-token`, the server
-  address as audience). For Gradle, when neither the root build file nor `gradle.properties`
-  sets `group` and `version`, it asks the person to set them; it never edits the build file.
+The server writes `HOST` (the `base_url` setting, else the scheme and host of the request) and the
+SHA-256 of each archive into the script (`internal/publish/install.sh`, `install.ps1`). The script
+picks the archive for the OS and the CPU, downloads it from `HOST/cli/`, and refuses it, with no
+change, when its SHA-256 differs. `install.sh` (POSIX sh, Linux and macOS) installs into
+`~/.local/bin`; `install.ps1` (PowerShell 5.1 and later, and PowerShell on Linux and macOS)
+installs into `%LOCALAPPDATA%\Programs\telesphorepo` and adds that folder to the user `PATH`
+(`~/.local/bin` on Linux and macOS). Next to the CLI, the script makes
+`docker-credential-telesphorepo`: a symbolic link on Linux and macOS, a hard link on Windows, a
+copy when a link fails. On Windows a running `telesphorepo.exe` is renamed to
+`telesphorepo.exe.old` first. In GitHub Actions the script appends the folder to `$GITHUB_PATH`.
+Arguments after the script go to the CLI, which runs once the install is done; `install.sh` gives
+it the terminal (`/dev/tty`) when there is one, because the script itself came on stdin.
 
 ## Auth model
 
@@ -928,7 +911,7 @@ has no `gradlew`).
 | Read token `trp_<12hex>_<secret>` | SHA-256(secret), looked up by id, constant-time compare | Basic password (any username) or `Authorization: Bearer`: format reads, and the `/api/` GET routes that need no permission |
 | Session `tr_session` | SHA-256(id), absolute `session_ttl` | `/api/`, and format reads (GET and HEAD) for downloads in the browser. The only credential for permission routes and for routes that change state on `/api/`; it never writes to a format route. HttpOnly, SameSite=Strict, Secure per `cookie.secure`. The session of a person who holds `delete` may also delete files (see **Files, uploads and deletes**) |
 | Publish session `trs_<12hex>_<secret>` | SHA-256(secret) in `publish_sessions`, constant-time compare | Basic password (any username) or `Authorization: Bearer` on format routes of its one repo, `/api/publish/...`, and the upload and delete routes of its repo. The only credential that writes to a format route |
-| Device (`auth.CredDevice`) | The enrolled device key; only inside a core bearer token of a format's token exchange (the Docker credential helper's proof) | Format reads (GET and HEAD) with the grants of the device's user, and writes through the publish session that the device minted for the repo (the bearer scope) |
+| Device (`auth.CredDevice`) | The enrolled device key; a device proof `trx.<device id>.<nonce>.<signature>` over a token exchange nonce, as the Basic password or the Bearer value of a format read, or inside a core bearer token of a format's token exchange (the Docker credential helper) | Format reads (GET and HEAD) with the grants of the device's user, and writes through the publish session that the device minted for the repo (the bearer scope) |
 
 - **Account kinds.** `local` users have a password, API tokens and Basic auth; publishers and the
   break-glass admin. `oidc` users are created on their first SSO login, keyed by
@@ -1053,8 +1036,8 @@ proves who it is. There are three proofs:
 
 | Who | Proof | Route |
 |---|---|---|
-| Developer with Gradle or Maven | An enrolled device key (Ed25519) | `POST /api/publish/sessions` |
-| Developer with Docker, Helm or ORAS | An enrolled device key of the credential helper, over a token exchange nonce | `GET, POST /docker/token` (see **Docker registry**) |
+| Developer with the Telesphorepo CLI | An enrolled device key (Ed25519) | `POST /api/publish/sessions` |
+| Developer with Docker, Helm or ORAS | An enrolled device key of the CLI's credential helper, over a token exchange nonce | `GET, POST /docker/token` (see **Docker registry**), `POST /api/publish/sessions/exchange` |
 | CI (GitHub Actions, Jenkins, any OIDC issuer) | The CI identity token and a trust policy (CI pipeline) | `POST /api/publish/sessions/oidc` |
 | Anyone, by hand | UI session plus a fresh second factor | `POST /api/publish/sessions/manual` |
 
@@ -1062,17 +1045,21 @@ Routes (`{items, next}` lists are keyset, `?after=&limit=`):
 
 | Method & path | Auth | Notes |
 |---|---|---|
-| `POST /api/devices/enroll` | none | `{name, client, public_key}` (`client` is a registered publisher client ID, `gradle`, `maven` or `docker`; another is 400 with the list) (`public_key` is the raw 32-byte key, base64url, no padding). Returns `{device_code, user_code: "ABCD-EFGH", verification_url: "<base_url>/#/device", expires_in: 600, interval: 5}`. `verification_url` uses the request URL when `base_url` is empty. Each IP gets a burst of 10, then 1 per 30 s (429) |
+| `POST /api/devices/enroll` | none | `{name, public_key}` (`public_key` is the raw 32-byte key, base64url, no padding). Returns `{device_code, user_code: "ABCD-EFGH", verification_url: "<base_url>/#/device", expires_in: 600, interval: 5}`. `verification_url` uses the request URL when `base_url` is empty. Each IP gets a burst of 10, then 1 per 30 s (429) |
 | `POST /api/devices/enroll/poll` | none | `{device_code}`. 200 `{device_id}` once approved (single use). 400, a problem document with the detail `authorization_pending`, `slow_down` or `expired_token`. `slow_down` answers a poll less than 4 s after the last. An unknown or used code gets `expired_token` |
-| `GET /api/devices/enroll?user_code=` | UI session or password | `{user_code, name, client, client_title, client_help, expires_at}`; 404 for an unknown or expired code |
+| `GET /api/devices/enroll?user_code=` | UI session or password | `{user_code, name, expires_at}`; 404 for an unknown or expired code |
 | `POST /api/devices/approve` | UI session and a fresh factor (`X-Telesphorepo-Proof`) | `{user_code}`. A local account proves with `totp <code>` or `passkey <assertion>`, an SSO account with `grant <grant>` of a fresh SSO sign-in for this code. 201 Device. 401 for a wrong second factor, or for a missing, used, expired or other grant (another user or code), 404 unknown or expired code, 409 used code, 403 `second_factor_required` |
-| `GET /api/devices` | password, read token or UI session | Own devices; a holder of `people.manage` sees all devices, with `username`. Newest first, `{items, next}`. A device is `{id, user_id, username?, name, client, client_title, created_at, expires_at, last_used_at, revoked_at, state}` |
+| `GET /api/devices` | password, read token or UI session | Own devices; a holder of `people.manage` sees all devices, with `username`. Newest first, `{items, next}`. A device is `{id, user_id, username?, name, created_at, expires_at, last_used_at, revoked_at, state}` |
 | `GET /api/network/trusted-proxies` · `PUT /api/network/trusted-proxies` | `network.manage` | GET answers `{lists: [{id, name}], env_lists: [name]}`: the IP lists that the trusted proxies include (rows of `trusted_proxy_lists`), and those that `TR_TRUSTED_PROXIES` names. PUT takes `{lists: [id]}`, replaces the rows in one transaction, records `network.trusted.update` and answers like GET. 400 for an unknown id |
 | `DELETE /api/devices/{id}` | UI session | 204. A holder of `people.manage` may revoke any device. It ends the device's open sessions |
-| `POST /api/publish/challenge` | none | `{device_id, exchange, nonce, ts, signature}` returns `{nonce, expires_at}` (32 random bytes, base64url, and the expiry). Without `exchange`: single use, 60 s, for `POST /api/publish/sessions`. With `exchange: true`: a token exchange nonce that lives `publish.session_ttl`, signed for the repo `*` and sent to a format's token endpoint (the Docker credential helper). With `exchange: true` and a `nonce` that is a token exchange nonce of the device that has not expired, the answer is that nonce and its expiry, and the server writes no row. Else a new token exchange nonce needs `ts` (Unix seconds, at most 5 minutes from the server time) and `signature`: the device's Ed25519 signature over `"telesphorepo challenge v1\n<device id>\n<ts>"` (base64url, no padding), so only the holder of the device key makes the server write a row that lives that long; a missing or bad signature or time is 401. A device that is unknown, revoked or expired, or whose user is disabled, gets 401 |
-| `POST /api/publish/sessions` | none | `{device_id, repo, nonce, signature}` returns 201 `{id, token: "trs_...", repo, expires_at}` |
+| `DELETE /api/devices/self` | none (the device signature) | `{device_id, nonce, signature}`; 204. See **Device logout**. 401 for a bad nonce or signature, or a device that is not usable |
+| `POST /api/devices/setup` | none (the setup code) | `{code, name, public_key}` or `{code, device_id, nonce, signature}`; 200 `{device_id, user, repo, format, kind}`. See **Project setup**. 401 `setup-code-used`; 401 for a bad device proof; 409 for a device of another user or a key that is enrolled already; the refusal of `Decide(..., Mint)` |
+| `POST /api/publish/setup-codes` | UI session, a fresh factor and `repo.publish` on the repo | `{repo}`; 201 `{code, link, expires_at}`. See **Project setup** |
+| `POST /api/publish/challenge` | none | `{device_id, exchange, nonce, ts, signature}` returns `{nonce, expires_at}` (32 random bytes, base64url, and the expiry). Without `exchange`: single use, 60 s, for `POST /api/publish/sessions`, `POST /api/devices/setup` or `DELETE /api/devices/self`. With `exchange: true`: a token exchange nonce that lives `publish.session_ttl`, signed for the repo `*` and sent to a format's token endpoint (the Docker credential helper). With `exchange: true` and a `nonce` that is a token exchange nonce of the device that has not expired, the answer is that nonce and its expiry, and the server writes no row. Else a new token exchange nonce needs `ts` (Unix seconds, at most 5 minutes from the server time) and `signature`: the device's Ed25519 signature over `"telesphorepo challenge v1\n<device id>\n<ts>"` (base64url, no padding), so only the holder of the device key makes the server write a row that lives that long; a missing or bad signature or time is 401. A device that is unknown, revoked or expired, or whose user is disabled, gets 401 |
+| `POST /api/publish/sessions` | none | `{device_id, repo, nonce, signature}` returns 201 `{id, token: "trs_...", repo, format, kind, expires_at}` (`format` and `kind` of the repo) |
 | `POST /api/publish/sessions/manual` | UI session and a fresh factor (`X-Telesphorepo-Proof`) | `{repo}`; same answer. The proof is `totp <code>` or `passkey <assertion>`, not a recovery code. 401 for a wrong proof, 403 `second_factor_required` without a factor, 429 with `Retry-After` when limited. `access.Engine.Decide` with `Mint` decides (405 for a proxy or a group, 409 for a locked repo, 403 for the network rules) |
 | `POST /api/publish/sessions/oidc` | none | `{token, repo}`; same answer |
+| `POST /api/publish/sessions/exchange` | none (the device proof) | `{proof: "trx.<device id>.<nonce>.<signature>", repo}`; same answer, and the same session and token again for the same nonce and repo while the session is open. 401 for a bad or ended proof |
 | `GET /api/publish/sessions` | password, read token or UI session | The caller's own sessions |
 | `DELETE /api/publish/sessions/{id}` | the session's own token | 204. The token is the Basic password or a Bearer token. Another token, an ended session or none gets 401 |
 | `GET /api/publish/log` | `activity.read` | Every session, newest first |
@@ -1081,7 +1068,7 @@ Routes (`{items, next}` lists are keyset, `?after=&limit=`):
 Shapes:
 
 ```
-Device       = {id, user_id, username?, name, client, client_title, created_at, expires_at, last_used_at, revoked_at, state}
+Device       = {id, user_id, username?, name, created_at, expires_at, last_used_at, revoked_at, state}
 SessionItem  = {id, repo, via, subject, username?, device_id, device_name?, trust_id, trust_name?,
                 created_at, expires_at, closed_at, state}
 Trust input  = {name, issuer, audience, claims: {claim: [value...]}, jwks, repos: [name...], disabled}
@@ -1093,11 +1080,11 @@ refuse read tokens and publish session tokens. A `trs_` token never reaches the 
 also not for an admin user.
 
 **Device flow** (RFC 8628 style):
-1. The client creates an Ed25519 key pair, stores it in `~/.telesphorepo/<server>/device.json` (`<server>` is the host, with `_<port>` when the port is not the default, and `_<base path>` when the server has one; the Docker credential helper uses `~/.telesphorepo/<server>/docker/device.json`)
+1. The CLI creates an Ed25519 key pair, stores it in `~/.telesphorepo/<server>/device.json` (`<server>` is the host, with `_<port>` when the port is not the default, and `_<base path>` when the server has one)
    (owner only) and calls `enroll`. It prints `Open <verification_url>?code=<USER-CODE> and
    approve code <USER-CODE>`.
-2. The user opens the page, signs in, checks the name and the client (its title and one line of
-   help from the publisher client registry), and approves. A local account
+2. The user opens the page, signs in, checks the name of the device of the Telesphorepo CLI, and
+   approves. A local account
    approves with a fresh TOTP code or passkey check. An SSO account selects **Sign in again with
    single sign-on to approve**: `GET /api/auth/oidc/device?code=` asks the provider for a new
    sign-in (`prompt=login`, `max_age=0`). The callback checks that the provider signed in the same
@@ -1178,52 +1165,35 @@ links: [{rel, label, url}]}` on tree entries, file details, versions and builds;
 The dev demo data writes its builds through the same provider (GitHub Actions claims), not as
 sessions.
 
-**Publisher clients.** A publisher client (`clients.Client`, `Extender.PublisherClient`) is a build
-tool plugin that enrolls a device: `{id, title, help}`. The maven module registers `gradle`
-(Gradle plugin) and `maven` (Maven extension); the docker module registers `docker` (Docker
-credential helper: "The Telesphorepo credential helper signs pushes of docker, buildx, podman, helm
-and oras on this computer with the device key."). `POST /api/devices/enroll` refuses another `client`
-with 400 that lists the IDs; a device and an enrollment keep the ID in `client`.
+**Project setup.** One client, the Telesphorepo CLI (`cmd/telesphorepo`), enrolls devices and
+publishes to every format; the approval page names it "Telesphorepo CLI". The Publish tab of a repo
+makes a setup line: `POST /api/publish/setup-codes` with `{repo}` (a UI session, a fresh second
+factor, and `Decide(..., Mint)` with `repo.publish` on the repo, the same bar as a device approval)
+stores a setup code `trsu_<32 random bytes, base64url>` as an `auth_challenges` row of kind
+`setup_code` (its SHA-256, the user, the repo id, 10 minutes), records `setup_code.create` and
+answers `{code, link: "<base>/#/setup/<code>", expires_at}`. The code is in the fragment of the
+link, so a browser that opens the link never sends it. An SSO account confirms with the grant of a
+fresh SSO sign-in: `GET /api/auth/oidc/setup?repo=` asks the provider for a new sign-in, and the
+callback stores a grant with the data `setup:<repo>` and returns to
+`/#/repo/<repo>?setup_grant=<grant>`; the route refuses a grant of another repo. The CLI then calls
+`POST /api/devices/setup` with the code and a new device key, or with the proof of the device it
+has. The server first checks a device proof (a Challenge nonce, the signature over
+`"telesphorepo setup v1\n" + nonce + "\n" + device_id`, a usable device), then takes the code (the
+first use deletes it). It checks that the user of the code is enabled and may mint for the repo,
+and that an existing device belongs to that user (409 otherwise). It creates the device (the
+device lifetime is `publish.device_ttl`) or records its use, and records `device.setup` as that
+user. A failure after the code was taken puts the code back, unless the code expired. A wrong,
+used or expired code answers 401, the problem `setup-code-used`.
 
-**Clients** (Java 17, JDK only). They live in their own repository,
-[github.com/Telesphorepo/clients](https://github.com/Telesphorepo/clients), under the MIT license.
-The group is `com.telesphorepo` and the Gradle plugin id is `com.telesphorepo.publish`. Both
-clients have the same version.
-- **Gradle plugin** (`gradle/` in the clients repo): a settings plugin.
-  `telesphorepo { url = "https://repo.acme.com"; repository = "releases"; oidcTokenEnv = "..." }`
-  in `settings.gradle`. With `repository`, each project with `java` or `java-platform` gets
-  `maven-publish`, the repository `telesphorepo` at `<url>/maven/<repository>` (unless the build
-  file declares a repository on the server) and the publication `maven` of its component (unless
-  it has a publication of its own; `java-gradle-plugin` keeps its own). Each
-  `PublishToMavenRepository` task whose repo is under `<url>/maven/<name>` gets credentials (user
-  `telesphorepo`, the token as password) just before it runs. A session is minted once per repo
-  and closed at build end by a build service. Proof order: GitHub
-  (`ACTIONS_ID_TOKEN_REQUEST_URL`, audience = the server URL), the env var named by
-  `oidcTokenEnv`, the device key. The plugin checks a saved device once per build with
-  `POST /api/publish/challenge`. With no device that the server accepts, a build outside CI
-  enrolls one inline: it prints the approval link, opens the browser when it can, polls, saves the
-  key and continues. In CI (`CI` set, `GITHUB_ACTIONS=true`, or `JENKINS_URL`/`JENKINS_HOME`) the
-  build fails with what the job must add (`permissions: id-token: write`, or the Jenkins
-  credential `telesphorepo-id-token` bound to `OIDC_TOKEN`). `./gradlew telesphorepoLogin`
-  enrolls without a publish and keeps a device that the server accepts. A 404 from the session
-  mint says that the repository does not exist. Tasks that publish to the server opt out of the
-  configuration cache.
-- **Maven** (`maven/` in the clients repo, parent `telesphorepo-maven-parent`): `telesphorepo-maven-client`
-  (library), `telesphorepo-maven-extension` (declared in `.mvn/extensions.xml`) and
-  `telesphorepo-maven-plugin` (goal `login`, optional). The server URL is the property
-  `telesphorepo.url` (or env `TELESPHOREPO_URL`). `telesphorepo.oidcTokenEnv` names the env var
-  with a CI token. `telesphorepo.deviceName` names the device. Before a `deploy` to the server, the
-  extension checks the proof the same way as the Gradle plugin: outside CI it enrolls inline and
-  waits, in CI it stops with what the job must add. The extension mints a session when
-  `maven-deploy-plugin` starts and closes it at the end. With `-DdeployAtEnd=true` a session
-  older than `publish.session_ttl` at the last module fails.
-- **Release.** The clients repo releases from its own workflow (`.github/workflows/release.yml`)
-  on a `v*` tag. The server repo has no release job for the clients. The clients repo is
-  MIT-licensed; the server is AGPL-3.0.
-- **CI without a client.** For a format without a client plugin (Debian, Raw), the tool `curl`
-  builds the CI files (see **Snippets and CI files**): a GitHub Actions workflow and a Jenkinsfile
-  that post the identity token to `/api/publish/sessions/oidc` with `curl`, upload, and close the
-  session. The repo's **Publish to this repository** tab and the CI pipeline page show them.
+**Device logout.** `DELETE /api/devices/self` with `{device_id, nonce, signature}`, the signature
+over `"telesphorepo revoke v1\n" + nonce + "\n" + device_id` and a Challenge nonce, revokes the
+device, ends its open sessions and records `device.revoke` as the device's user.
+
+**Token exchange for the helpers.** `POST /api/publish/sessions/exchange` with `{proof:
+"trx.<device id>.<nonce>.<signature>", repo}` mints through the same code as the `Minter` of
+`/docker/token`: one session per repo per token exchange nonce, and the open session and its token
+again on a later call with the same nonce and repo (see **Minting a publish session**). The
+credential helpers of the CLI use it.
 
 **Docker credential helper** (`cmd/docker-credential-telesphorepo`, Go, in this repository and
 under its license). It imports no server package; its only module outside the standard library is
@@ -1233,7 +1203,7 @@ under its license). It imports no server package; its only module outside the st
 
 | Command | stdin | Answer |
 |---|---|---|
-| `login <server URL> [--name NAME]` | | Enrolls the computer: `GET /docker/hosts` (the registry host, and the upload host when direct uploads are on), then an Ed25519 key and `POST /api/devices/enroll` with the client `docker` and the name (default `<hostname> (Docker)`). It prints `Open <verification_url>?code=<CODE> and approve code <CODE>`, opens the browser when stdout is a terminal, and polls at `interval` (`slow_down` adds 5 s). It saves the device file and `hosts.json`, and sets `"credHelpers": {"<host>": "telesphorepo"}` for each host in `$DOCKER_CONFIG/config.json` (else `~/.docker/config.json`) and keeps every other key. A saved device that the server still accepts (`POST /api/publish/challenge`) stays; one that it refuses is enrolled again |
+| `login <server URL> [--name NAME]` | | Enrolls the computer: `GET /docker/hosts` (the registry host, and the upload host when direct uploads are on), then an Ed25519 key and `POST /api/devices/enroll` with the name (default `<hostname> (Docker)`). It prints `Open <verification_url>?code=<CODE> and approve code <CODE>`, opens the browser when stdout is a terminal, and polls at `interval` (`slow_down` adds 5 s). It saves the device file and `hosts.json`, and sets `"credHelpers": {"<host>": "telesphorepo"}` for each host in `$DOCKER_CONFIG/config.json` (else `~/.docker/config.json`) and keeps every other key. A saved device that the server still accepts (`POST /api/publish/challenge`) stays; one that it refuses is enrolled again |
 | `get` | the registry host (`host[:port]`) | `{"ServerURL", "Username": "telesphorepo-device", "Secret": "trx.<device id>.<nonce>.<signature>"}`: a nonce of `POST /api/publish/challenge` with `exchange: true` (the request carries `ts` and the device signature over it), and the device signature over the nonce for the repo `*` (base64url, no padding). No device for the host, or a 4xx from the challenge (a device that is unknown, revoked or expired): `credentials not found in native keychain` and exit 1, so Docker reads anonymously; the reason goes to stderr. Each `get` sends the challenge, so a revoked device stops at once. The process that runs the helper (its id and start time) keeps its nonce in `exchange.json` and sends it as `nonce`, so it gets the same nonce while the nonce is valid: Helm and ORAS run `get` for each token, and all token requests of one push get the same publish session |
 | `store` | Docker's credentials | Exit 1: "docker-credential-telesphorepo keeps no passwords. Run: docker-credential-telesphorepo login <server URL>" |
 | `erase` | the registry host | Deletes the device folder of the host (`docker logout`). The device stays in Settings › Devices until someone revokes it |
@@ -2104,7 +2074,7 @@ rules.
 context. `httpx.ClientIP(r)` reads the address. The rate limits, the audit log, the IP rules,
 device enrollment and the access log all use it. `httpx.ClientScheme(r)` reads the scheme.
 The URLs that the server builds from the request when `base_url` is empty use it: the realm of
-the registry challenge, the base URL of the snippets and of `/setup.sh`, and the device
+the registry challenge, the base URL of the snippets and of `/install.sh`, and the device
 verification URL. Without the network module, the address is the TCP peer and the scheme is that
 of the connection.
 
@@ -2255,8 +2225,8 @@ module (`audit.System`), the `telesphorepo-server user` commands as `cli` (`audi
 | storage | `storage` | `storage.move.start` (`detail.target` without secrets), `storage.move.cancel`, `storage.move.done`, `storage.move.failed` (`detail.error`) |
 | network | `network` | `network.denied` (`detail.scope` is `read` or `publish`), `network.rules.update` (counts of read and publish rules only), `network.list.create`, `network.list.update` (`detail.renamed_from` after a rename), `network.list.delete`, `network.trusted.update` (`detail.lists`: the IP lists of the trusted proxies after a change) |
 | signing | `signing` | `signing.key.create` (`detail.imported`), `signing.key.delete`, `signing.key.bind` (a repo got its key: the repo, `target` the key name) |
-| publish | `repo` | `publish.session.create` (`detail.via`; the actor is the person or the CI subject of the session), `publish.session.close` |
-| publish | `people` | `device.approve`, `device.revoke` |
+| publish | `repo` | `publish.session.create` (`detail.via`; the actor is the person or the CI subject of the session), `publish.session.close`, `setup_code.create` (a setup line of the repo), `device.setup` (a project setup with a setup code; the actor is the person of the code, `detail.device_id` and `detail.new`) |
+| publish | `people` | `device.approve`, `device.revoke` (by a person in the UI, or by the device itself with `detail.by` `device`) |
 | publish | `ci` | `ci.pipeline.create`, `ci.pipeline.update`, `ci.pipeline.delete` |
 | sso | `signin` | `sso.signin`, `sso.signin.failed` (`detail.reason`) |
 | nexus | `nexus` | `nexus.source.create`, `nexus.source.update`, `nexus.source.delete`, `nexus.mapping.save`, `nexus.sync.start` (a manual sync, or the sync after a mapping save), `nexus.sync.cancel`, `nexus.cutover` |
@@ -2621,15 +2591,16 @@ and raw insert asset rows, debian inserts one package and its asset row per unit
 
 | Command | Does |
 |---|---|
-| `go tool task dev` | Checks Go, bun/npm and Node (version in `.node-version`). Runs the backend on :8080 and rebuilds it on Go or `schema.sql` changes. Runs Vite with HMR on **:5173**, proxying every path except the UI's own files to the backend |
-| `go tool task build [image]` | Builds the UI, then `bin/telesphorepo-server` (`CGO_ENABLED=0`, version from git). `image` also builds the container image `telesphorepo:local` |
+| `go tool task dev` | Checks Go, bun/npm and Node (version in `.node-version`). Builds the CLI archive of this computer once (see **Install scripts and CLI downloads**). Runs the backend on :8080 and rebuilds it on Go or `schema.sql` changes. Runs Vite with HMR on **:5173**, proxying every path except the UI's own files to the backend |
+| `go tool task build [image]` | Builds the UI and the six CLI archives (`internal/clidist/dist`), then `bin/telesphorepo-server` with both embedded (`CGO_ENABLED=0`, version from git). `image` also builds the container image `telesphorepo:local` |
+| `go tool task cli [version]` | Builds the six CLI archives of `./cmd/telesphorepo` and `SHA256SUMS` into `internal/clidist/dist` (version from git by default). Without `cmd/telesphorepo` it writes none and says so |
 | `go tool task preview` | Builds, then runs `bin/telesphorepo-server dev` on :8080 |
 | `go tool task test [go test args]` | Runs the core zone: `go test -tags e2e ./e2e/... -count=1 -v`, 60 min timeout |
 | `go tool task test import [go test args]` | Runs the import zone: `-tags import`, 45 min timeout. It starts a Nexus container |
 | `go tool task test scale [go test args]` | Runs `TestScale` (`-tags scale`, 60 min timeout) |
 | `go tool task test clients [go test args]` | Runs the clients zone: `-tags clients`, 40 min timeout. It builds the Gradle plugin and the Maven extension from the clients repo (`E2E_CLIENTS_DIR`, or a shallow clone of `E2E_CLIENTS_REF`, default `main`) |
 | `go tool task test all [go test args]` | Runs core, import, scale and clients one after the other. It runs every zone, lists the failed zones and exits non-zero if any failed |
-| `go tool task release [version]` | Builds the UI once. Then it cross-compiles the server (`./cmd/telesphorepo-server`) and the Docker credential helper (`./cmd/docker-credential-telesphorepo`) for linux, darwin and windows on amd64 and arm64 (`CGO_ENABLED=0`, `-trimpath`, `-X main.version`). Each binary goes into `bin/release/<program>_<version>_<os>_<arch>.tar.gz` (`.zip` on Windows) with `LICENSE` and `README.md`. The command writes `SHA256SUMS` of every archive. The version defaults to `git describe`. A version given as the argument must be a release version; the command first writes it into each `dev` entry of `changes.toml` (see **Change log**), so the binaries embed the stamped change log |
+| `go tool task release [version]` | Builds the UI and the six CLI archives that the server embeds once. Then it cross-compiles each program whose package exists: the CLI (`./cmd/telesphorepo`, with its own `LICENSE`), the server (`./cmd/telesphorepo-server`) and the Docker credential helper (`./cmd/docker-credential-telesphorepo`) for linux, darwin and windows on amd64 and arm64 (`CGO_ENABLED=0`, `-trimpath`, `-X main.version`). Each binary goes into `bin/release/<program>_<version>_<os>_<arch>.tar.gz` (`.zip` on Windows) with `LICENSE` and `README.md`. The command writes `SHA256SUMS` of every archive. The version defaults to `git describe`. A version given as the argument must be a release version; the command first writes it into each `dev` entry of `changes.toml` (see **Change log**), so the binaries embed the stamped change log |
 | `go tool task gen` | Runs `go tool sqlc generate` for every `internal/**/sqlc.yaml` |
 | `go tool task doctor` | Shows the detected toolchain and container engine |
 
@@ -2641,7 +2612,7 @@ CI runs on GitHub Actions with the built-in `GITHUB_TOKEN` and no repository sec
 | `e2e-extended.yml` | Manual (zone `import`, `scale` or `all`), weekly for `import` | `go tool task test <zone>` |
 | `release.yml` | Push of a `v*` tag | `binaries` job: `go tool task release`, then a GitHub Release with the archives and `SHA256SUMS`. `image` job: multi-arch image (`linux/amd64`, `linux/arm64`) pushed to `ghcr.io/telesphorepo/telesphorepo` with tags `X.Y.Z`, `X.Y` and `latest` (no `latest` for pre-releases) |
 
-The Dockerfile builds the UI and the Go binary on the build platform and cross-compiles with
+The Dockerfile builds the UI, the six CLI archives (`go tool task cli`) and the Go binary on the build platform and cross-compiles with
 `TARGETOS` and `TARGETARCH`. It takes `VERSION` as a build argument. A plain `docker build` or
 `podman build` builds for the host.
 
@@ -2737,8 +2708,11 @@ name and pull through the proxy hostname. `TestDockerVersions` (`versions_test.g
 the kinds image, helm-chart, the builds of an image and of an index (platform classifiers), the
 CI build of a tag that a CI token pushed, the pinned and latest artifact snippets, the snippets of
 a tag file and of a chart, and `GET /api/docker/{name}/manifest`. `TestFormatDescriptors` and
-`TestCIWorkflowRoute` check the docker descriptor, the CI files (build, login with
-`$OIDC_TOKEN`, push and logout in that order) and the usage snippets.
+`TestCIWorkflowRoute` check the docker descriptor (publish category `helper`), the CI files (build,
+the install step, the Docker config that names the credential helper, and the push in that order,
+with no `docker login`) and the usage snippets. `TestCIWorkflowRoute` also checks the install step
+and `telesphorepo publish` of the GitHub Actions, Jenkinsfile and Jenkins freestyle files, and
+that a publish session of the repo reads its CI file.
 `TestDockerCredentialHelper` (`docker_helper_test.go`) builds the helper for Linux (`BuildHelper`)
 and copies it into Docker in Docker (`Dind.CopyFile`): `login` prints a user code, the test
 approves it through the API, and the login ends with exit 0; `config.json` names the helper for
@@ -2809,7 +2783,7 @@ never wait 30 s for a new step. `publish_test.go` covers: `TestPublishGate` (a p
 token is refused; a session for another repo; lost permission; closed and expired sessions;
 replayed nonce; bad signature; revoked and expired devices; manual sessions),
 `TestSecondFactorLogin` (including the setup-only session), `TestDeviceEnrollment` (an unknown
-publisher client is 400; the device names its client),
+field is 400; the device has its name),
 `TestDeviceEnrollmentExpiry` (ages the row with `editDB` on a data volume) and `TestPublishOIDC`
 (Keycloak as the CI issuer through the client `ci-github` in `realm-e2e.json`, whose tokens carry
 GitHub-shaped claims: wrong claim, wrong audience, replayed token, an unlisted repo, a disabled
@@ -2830,16 +2804,7 @@ them; it checks that `telesphorepoLogin` and the Maven `login` goal keep the enr
 that a deploy to a missing repository says that the repository does not exist; (2) checks that a
 GitHub Actions build without `id-token: write` fails and names it, and publishes as "GitHub
 Actions" with a `jwebserver` container that serves a Keycloak token at
-`ACTIONS_ID_TOKEN_REQUEST_URL`; (3) fetches `/setup.sh`, sets its version to the clients of the
-run, and runs it twice with `--yes` (the second run changes no file): in a Gradle Kotlin build
-with a `pluginManagement` and a `plugins` block, with `--ci github` (the id line lands in the
-`plugins` block, the workflow file), and in a fresh Maven project with `--ci none` (`.mvn/extensions.xml`,
-`.mvn/maven.config`, `<distributionManagement>`); then it publishes each one with the files that
-the script wrote, through the inline enrollment. `TestSetupPowerShell` (`e2e/setup_clients_test.go`)
-runs `setup.ps1` through `irm` in a `mcr.microsoft.com/powershell` container twice, in a Gradle
-Kotlin build with `-Ci jenkins-pipeline` and in a Maven project with `-Ci github`, and checks the
-files. The core zone's `TestSetupScripts` (`e2e/setup_test.go`) checks that both scripts are
-public and carry the server address and `clientsVersion`.
+`ACTIONS_ID_TOKEN_REQUEST_URL`.
 
 `TestNexus` runs a Nexus container (`sonatype/nexus3`) and starts the server with
 `TR_NEXUS_SYNC_INTERVAL=12h`, so that no scheduled sync changes the counters. The fixture has two

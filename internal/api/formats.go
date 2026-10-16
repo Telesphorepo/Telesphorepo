@@ -37,7 +37,9 @@ type formatJSON struct {
 	Labels        labelsJSON            `json:"labels"`
 	ImportSources []string              `json:"import_sources"`
 	Tools         []toolJSON            `json:"tools"`
-	Setup         bool                  `json:"setup"` // a tool of the format has a part in /setup.sh and /setup.ps1
+	// Publish is the publish category: "cli" (telesphorepo publish in the project folder) or
+	// "helper" (the native command of the tool, through a credential helper of the CLI).
+	Publish string `json:"publish"`
 }
 
 type configJSON struct {
@@ -73,13 +75,10 @@ type labelsJSON struct {
 	BuildFiles     []format.BuildFileLabel `json:"build_files"`
 }
 
-// toolJSON is a build tool of a format. Setup is true and Project names its project files when
-// the tool has a part in the setup scripts.
+// toolJSON is a build tool of a format that the CI files name.
 type toolJSON struct {
-	ID      string `json:"id"`
-	Label   string `json:"label"`
-	Setup   bool   `json:"setup"`
-	Project string `json:"project,omitempty"`
+	ID    string `json:"id"`
+	Label string `json:"label"`
 }
 
 // toolLabel is the label of a snippet tool.
@@ -113,7 +112,7 @@ func (a *API) formatOf(f *format.Spec) formatJSON {
 		Browse: browseJSON{Versions: f.Versions != nil, ArtifactSnippets: f.ArtifactUsage != nil},
 		Labels: labelsJSON{ArtifactKinds: f.UI.ArtifactKinds, ArtifactName: f.UI.ArtifactName, Tools: a.toolLabels(f),
 			InstallHeading: f.UI.InstallHeading, BuildFiles: f.UI.BuildFiles},
-		ImportSources: []string{}, Tools: []toolJSON{},
+		ImportSources: []string{}, Tools: []toolJSON{}, Publish: f.PublishCategory(),
 	}
 	if len(fj.Config.Default) == 0 {
 		fj.Config.Default = json.RawMessage("{}")
@@ -162,12 +161,7 @@ func (a *API) formatOf(f *format.Spec) formatJSON {
 		fj.ImportSources = f.Importer.Sources
 	}
 	for _, t := range f.Tools {
-		tj := toolJSON{ID: t.ID, Label: t.Label, Setup: t.Setup != nil}
-		if t.Setup != nil {
-			tj.Project = t.Setup.Project
-			fj.Setup = true
-		}
-		fj.Tools = append(fj.Tools, tj)
+		fj.Tools = append(fj.Tools, toolJSON{ID: t.ID, Label: t.Label})
 	}
 	return fj
 }
@@ -252,9 +246,11 @@ func (a *API) repoUsage(w http.ResponseWriter, r *http.Request, c *route.Call) {
 const maxPatterns = 20
 
 // repoCI returns the CI file that publishes to a hosted repo:
-// ?system=github-actions|jenkins&tool=<id>&branches=a,b&tags=v* -> Snippet. tool is a tool of
-// the format (default: the first); branches and tags are comma-separated names or globs (none:
-// a push to main on GitHub Actions, every run of a Jenkins job).
+// ?system=github-actions|jenkins|jenkins-freestyle&tool=<id>&branches=a,b&tags=v* -> Snippet.
+// tool is a tool of the format (default: the first); branches and tags are comma-separated names
+// or globs (none: a push to main on GitHub Actions, every run of a Jenkins job). A Jenkins
+// freestyle job gets the shell build step and takes no branches or tags. The publish session of
+// the repo reads it too, so "telesphorepo setup" writes the CI file.
 func (a *API) repoCI(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	repo := c.Repo
 	q := r.URL.Query()
@@ -264,8 +260,8 @@ func (a *API) repoCI(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		return
 	}
 	system := q.Get("system")
-	if !slices.Contains(ci.Systems, system) {
-		httpx.Error(w, r, http.StatusBadRequest, "system must be one of "+strings.Join(ci.Systems, ", "))
+	if !slices.Contains(ci.Systems, system) && system != ci.JenkinsFreestyleSystem {
+		httpx.Error(w, r, http.StatusBadRequest, "system must be one of "+strings.Join(ci.Systems, ", ")+", "+ci.JenkinsFreestyleSystem)
 		return
 	}
 	tool := f.Tools[0]

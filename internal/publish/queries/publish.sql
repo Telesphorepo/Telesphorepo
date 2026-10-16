@@ -1,13 +1,13 @@
 -- Devices, device enrollment, publish nonces, CI trust policies and publish sessions.
 
 -- name: CreateDevice :one
-INSERT INTO devices (user_id, name, client, public_key, created_at, expires_at)
-VALUES (?, ?, ?, ?, ?, ?)
+INSERT INTO devices (user_id, name, public_key, created_at, expires_at)
+VALUES (?, ?, ?, ?, ?)
 RETURNING id;
 
 -- A device with its owner, for minting a session from it.
 -- name: GetDevice :one
-SELECT d.id, d.user_id, d.name, d.client, d.public_key, d.created_at, d.expires_at, d.last_used_at, d.revoked_at,
+SELECT d.id, d.user_id, d.name, d.public_key, d.created_at, d.expires_at, d.last_used_at, d.revoked_at,
        u.username, u.disabled, u.kind AS user_kind,
        CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = u.id), '') AS TEXT) AS perms
 FROM devices d JOIN users u ON u.id = d.user_id
@@ -18,13 +18,13 @@ UPDATE devices SET last_used_at = ? WHERE id = ?;
 
 -- Keyset page of a user's devices, newest first: ids below before.
 -- name: ListUserDevices :many
-SELECT id, user_id, name, client, created_at, expires_at, last_used_at, revoked_at
+SELECT id, user_id, name, created_at, expires_at, last_used_at, revoked_at
 FROM devices WHERE user_id = sqlc.arg(user_id) AND id < sqlc.arg(before)
 ORDER BY id DESC LIMIT sqlc.arg(limit);
 
 -- Keyset page of every device with its owner, newest first: ids below before.
 -- name: ListDevices :many
-SELECT d.id, d.user_id, u.username, d.name, d.client, d.created_at, d.expires_at, d.last_used_at, d.revoked_at
+SELECT d.id, d.user_id, u.username, d.name, d.created_at, d.expires_at, d.last_used_at, d.revoked_at
 FROM devices d JOIN users u ON u.id = d.user_id
 WHERE d.id < sqlc.arg(before)
 ORDER BY d.id DESC LIMIT sqlc.arg(limit);
@@ -39,15 +39,15 @@ UPDATE devices SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS
 
 -- A user_code collision violates the UNIQUE constraint; the service retries with a new code.
 -- name: CreateEnrollment :exec
-INSERT INTO device_enrollments (device_code_hash, user_code, name, client, public_key, created_at, expires_at)
-VALUES (?, ?, ?, ?, ?, ?, ?);
+INSERT INTO device_enrollments (device_code_hash, user_code, name, public_key, created_at, expires_at)
+VALUES (?, ?, ?, ?, ?, ?);
 
 -- name: GetEnrollmentByUserCode :one
-SELECT device_code_hash, user_code, name, client, public_key, created_at, expires_at, polled_at, approved_by, device_id
+SELECT device_code_hash, user_code, name, public_key, created_at, expires_at, polled_at, approved_by, device_id
 FROM device_enrollments WHERE user_code = ?;
 
 -- name: GetEnrollmentByDeviceCode :one
-SELECT device_code_hash, user_code, name, client, public_key, created_at, expires_at, polled_at, approved_by, device_id
+SELECT device_code_hash, user_code, name, public_key, created_at, expires_at, polled_at, approved_by, device_id
 FROM device_enrollments WHERE device_code_hash = ?;
 
 -- Records the approval. 0 rows: unknown, already approved or expired.
@@ -140,7 +140,9 @@ WHERE id_hash = sqlc.arg(id_hash) AND device_id = sqlc.arg(device_id) AND exchan
 
 -- The session that a token exchange nonce minted for a repo.
 -- name: GetExchangeSession :one
-SELECT session_id FROM publish_exchange_sessions WHERE nonce_hash = ? AND repo_id = ?;
+SELECT e.session_id, s.public_id FROM publish_exchange_sessions e
+JOIN publish_sessions s ON s.id = e.session_id
+WHERE e.nonce_hash = ? AND e.repo_id = ?;
 
 -- name: InsertExchangeSession :exec
 INSERT INTO publish_exchange_sessions (nonce_hash, repo_id, session_id) VALUES (?, ?, ?);

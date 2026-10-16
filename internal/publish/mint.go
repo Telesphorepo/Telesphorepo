@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/access"
@@ -110,6 +112,47 @@ func (s *Service) MintRoute(ctx context.Context, r *http.Request, cred MintCred,
 	return s.mintWith(ctx, r, cred, repoName, func(ctx context.Context) (*repos.Repo, error) { return s.repos.ByName(ctx, repoName) }, false)
 }
 
+// Exchange is the mint of POST /api/publish/sessions/exchange: a device proof of a token exchange
+// nonce mints one session per repo, and a later call with the same nonce and repo gets that
+// session and its token again while it is open.
+func (s *Service) Exchange(ctx context.Context, r *http.Request, proof *DeviceProof, repoName string) (*Minted, error) {
+	return s.mintWith(ctx, r, MintCred{Device: proof}, repoName, func(ctx context.Context) (*repos.Repo, error) { return s.repos.ByName(ctx, repoName) }, true)
+}
+
+// ParseDeviceProof reads a device proof "trx.<device id>.<nonce>.<signature>"
+// (auth.DeviceProofPrefix): the signature of the device over a token exchange nonce and the repo
+// "*" (SignedMessage). nil: it does not parse.
+func ParseDeviceProof(s string) *DeviceProof {
+	if !strings.HasPrefix(s, auth.DeviceProofPrefix) {
+		return nil
+	}
+	parts := strings.Split(strings.TrimPrefix(s, auth.DeviceProofPrefix), ".")
+	if len(parts) != 3 || parts[1] == "" || parts[2] == "" {
+		return nil
+	}
+	id, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || id <= 0 {
+		return nil
+	}
+	return &DeviceProof{DeviceID: id, Nonce: parts[1], Signature: parts[2], Repo: "*"}
+}
+
+// VerifyDeviceProof is the auth.DeviceProofVerifier of format reads: the CredDevice principal of
+// a device proof that verifies (checkExchangeProof), or auth.ErrBadCredentials.
+func (s *Service) VerifyDeviceProof(ctx context.Context, proof string) (*auth.Principal, error) {
+	dp := ParseDeviceProof(proof)
+	if dp == nil {
+		return nil, auth.ErrBadCredentials
+	}
+	if _, err := s.checkExchangeProof(ctx, dp); err != nil {
+		if errors.Is(err, ErrDenied) {
+			return nil, auth.ErrBadCredentials
+		}
+		return nil, err
+	}
+	return s.DevicePrincipal(ctx, dp.DeviceID)
+}
+
 // mintWith checks cred first, then resolves the repo, so a caller without a valid credential
 // learns nothing about which repos exist. reuse (Minter.Mint) gives a CI token its earlier
 // session back and accepts a token exchange nonce; the mint routes take neither.
@@ -129,7 +172,7 @@ func (s *Service) mintWith(ctx context.Context, r *http.Request, cred MintCred, 
 	if err != nil {
 		return nil, err
 	}
-	if m.Token != "" {
+	if !m.Reused {
 		s.recordMint(ctx, m)
 	}
 	return m, nil
@@ -190,7 +233,7 @@ func (s *Service) deviceSession(ctx context.Context, r *http.Request, proof *Dev
 	}
 	var m *Minted
 	if proof.Repo == "*" {
-		m, err = s.exchangeSession(ctx, key, repo, d)
+		m, err = s.exchangeSession(ctx, proof.Nonce, repo, d)
 	} else {
 		m, err = s.mint(ctx, s.wq, repo, ViaDevice, d.UserID, d.ID, 0, 0, d.Username)
 	}
@@ -203,23 +246,24 @@ func (s *Service) deviceSession(ctx context.Context, r *http.Request, proof *Dev
 	return m, nil
 }
 
-// exchangeSession returns the session of repo that the token exchange nonce with hash key
-// minted, or mints one and binds it to the nonce. A bound session that ended is not replaced:
-// the device asks for a new nonce.
-func (s *Service) exchangeSession(ctx context.Context, key []byte, repo *repos.Repo, d dbq.GetDeviceRow) (*Minted, error) {
+// exchangeSession returns the session of repo that the token exchange nonce minted, with its
+// token (exchangeSecret), or mints one and binds it to the nonce. A bound session that ended is
+// not replaced: the device asks for a new nonce.
+func (s *Service) exchangeSession(ctx context.Context, nonce string, repo *repos.Repo, d dbq.GetDeviceRow) (*Minted, error) {
+	key := hashBytes([]byte(nonce))
 	var out *Minted
-	var bound int64
+	var bound dbq.GetExchangeSessionRow
 	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
 		q := dbq.New(tx)
-		id, err := q.GetExchangeSession(ctx, dbq.GetExchangeSessionParams{NonceHash: key, RepoID: repo.ID})
+		row, err := q.GetExchangeSession(ctx, dbq.GetExchangeSessionParams{NonceHash: key, RepoID: repo.ID})
 		if err == nil {
-			bound = id
+			bound = row
 			return nil
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		if out, err = s.mint(ctx, q, repo, ViaDevice, d.UserID, d.ID, 0, 0, d.Username); err != nil {
+		if out, err = s.mintKeyed(ctx, q, repo, ViaDevice, d.UserID, d.ID, 0, 0, d.Username, nonce); err != nil {
 			return err
 		}
 		return q.InsertExchangeSession(ctx, dbq.InsertExchangeSessionParams{NonceHash: key, RepoID: repo.ID, SessionID: out.ID})
@@ -227,15 +271,16 @@ func (s *Service) exchangeSession(ctx context.Context, key []byte, repo *repos.R
 	if err != nil || out != nil {
 		return out, err
 	}
-	p, err := s.LoadSession(ctx, bound)
+	p, err := s.LoadSession(ctx, bound.SessionID)
 	if errors.Is(err, auth.ErrBadCredentials) {
-		return nil, errorf(ErrDenied, "the publish session of this device credential ended; sign in to the registry again")
+		return nil, errorf(ErrDenied, "the publish session of this device credential ended; ask for a new nonce")
 	}
 	if err != nil {
 		return nil, err
 	}
-	return &Minted{ID: p.Publish.ID, Repo: repo.Name, RepoID: repo.ID, UserID: d.UserID, Subject: p.Publish.Subject,
-		Via: ViaDevice, Session: p.Publish}, nil
+	return &Minted{ID: p.Publish.ID, Token: string(TokenPrefix) + "_" + bound.PublicID + "_" + exchangeSecret(nonce, bound.PublicID),
+		Repo: repo.Name, Format: repo.Format, Kind: repo.Kind, ExpiresAt: p.Publish.Expires,
+		RepoID: repo.ID, UserID: d.UserID, Subject: p.Publish.Subject, Via: ViaDevice, Reused: true, Session: p.Publish}, nil
 }
 
 // manualSession mints for a signed-in user whose request carried a fresh second factor.

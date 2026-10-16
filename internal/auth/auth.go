@@ -67,9 +67,10 @@ const (
 	CredSession                       // tr_session cookie of a full UI session
 	CredSetupSession                  // tr_session cookie of a person who needs a second factor and has none
 	CredPublish                       // publish session token (Basic password or Bearer)
-	// CredDevice is an enrolled device key of a user, behind a core bearer token only (a format's
-	// token exchange, e.g. the Docker credential helper). It reads what its user reads; it writes
-	// only through the publish session of a bearer scope that the device minted.
+	// CredDevice is an enrolled device key of a user: a device proof (DeviceProofPrefix) on a
+	// format read, or a core bearer token of a format's token exchange (e.g. the Docker credential
+	// helper). It reads what its user reads; it writes only through the publish session of a
+	// bearer scope that the device minted.
 	CredDevice
 )
 
@@ -162,13 +163,14 @@ type Service struct {
 	sealer Sealer     // seals TOTP secrets; set by the server
 	audit  *audit.Log // records sign-ins, tokens and permission changes; set by the server
 
-	tokens     map[token.Prefix]Verifier // the token kinds, by prefix (AddTokenKind)
-	background sync.WaitGroup            // the last_used_at writes of read tokens (Wait)
-	bearerKey  []byte                    // signs core bearer tokens (SetBearerKey)
-	sessions   SessionLoader             // loads the publish sessions of bearer tokens
-	devices    DeviceLoader              // loads the devices of bearer tokens
-	sso        func() bool               // reports whether single sign-on is on (SetSSO)
-	managed    func() bool               // reports whether single sign-on manages the permissions of SSO accounts (SetManaged)
+	tokens       map[token.Prefix]Verifier // the token kinds, by prefix (AddTokenKind)
+	background   sync.WaitGroup            // the last_used_at writes of read tokens (Wait)
+	bearerKey    []byte                    // signs core bearer tokens (SetBearerKey)
+	sessions     SessionLoader             // loads the publish sessions of bearer tokens
+	devices      DeviceLoader              // loads the devices of bearer tokens
+	deviceProofs DeviceProofVerifier       // checks device proofs on format reads
+	sso          func() bool               // reports whether single sign-on is on (SetSSO)
+	managed      func() bool               // reports whether single sign-on manages the permissions of SSO accounts (SetManaged)
 
 	// dev makes the second factor optional (telesphorepo-server dev only): a person without a factor
 	// gets a full session, and an approval or a manual session without a factor passes. A

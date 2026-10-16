@@ -1,4 +1,4 @@
-# The server embeds setup.sh and serves it to sh, so it must keep LF endings on a Windows checkout.
+# The server embeds install.sh and serves it to sh, so it must keep LF endings on a Windows checkout.
 *.sh text eol=lf
 
 # The schema fingerprint and the generated queries must not depend on the checkout's line ends.

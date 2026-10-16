@@ -166,6 +166,7 @@ var ErrSessionRequired = errors.New("sign in through the web UI for this action"
 type Read struct {
 	Cookie      bool   // the tr_session cookie of a UI session
 	Bearer      bool   // core bearer tokens (IssueBearer) in "Authorization: Bearer"
+	Device      bool   // a device read proof (DeviceProofPrefix) as the Basic password or as a Bearer token
 	TokenHeader string // a header that carries a token of a registered kind, e.g. X-NuGet-ApiKey
 	// URLToken returns the upload token (IssueUploadToken) that the URL of r carries, and the
 	// upload of that URL. Identify reads it when the Authorization header gives no credential.
@@ -181,6 +182,9 @@ func (s *Service) Identify(r *http.Request, rd Read) (*Principal, error) {
 	ctx := r.Context()
 	if h := r.Header.Get("Authorization"); h != "" {
 		if user, pass, ok := r.BasicAuth(); ok {
+			if rd.Device && strings.HasPrefix(pass, DeviceProofPrefix) {
+				return s.deviceProof(ctx, s.clientIP(r), pass)
+			}
 			return s.authenticate(ctx, s.clientIP(r), user, pass, true)
 		}
 		if len(h) >= 6 && strings.EqualFold(h[:6], "basic ") {
@@ -190,6 +194,9 @@ func (s *Service) Identify(r *http.Request, rd Read) (*Principal, error) {
 			tok := strings.TrimSpace(h[7:])
 			if rd.Bearer && strings.HasPrefix(tok, bearerPrefix) {
 				return s.verifyBearer(ctx, tok, "")
+			}
+			if rd.Device && strings.HasPrefix(tok, DeviceProofPrefix) {
+				return s.deviceProof(ctx, s.clientIP(r), tok)
 			}
 			if s.isToken(tok) {
 				return s.authenticate(ctx, s.clientIP(r), "", tok, true)
@@ -221,6 +228,34 @@ func (s *Service) Identify(r *http.Request, rd Read) (*Principal, error) {
 		}
 	}
 	return nil, nil
+}
+
+// DeviceProofPrefix starts a device proof: "trx.<device id>.<nonce>.<signature>", the signature
+// of an enrolled device over a token exchange nonce.
+const DeviceProofPrefix = "trx."
+
+// DeviceProofVerifier checks a device proof and returns the CredDevice principal of the device,
+// with the current grants of its user. A proof that does not verify returns ErrBadCredentials.
+// The publish module sets it.
+type DeviceProofVerifier func(ctx context.Context, proof string) (*Principal, error)
+
+// SetDeviceProofVerifier sets the verifier of device proofs (Read.Device).
+func (s *Service) SetDeviceProofVerifier(fn DeviceProofVerifier) { s.deviceProofs = fn }
+
+// deviceProof verifies a device proof under the failed-attempt limits of the client address.
+func (s *Service) deviceProof(ctx context.Context, ip netip.Addr, proof string) (*Principal, error) {
+	keys := limitKeys(ip, "")[:1]
+	if d := s.limits.blocked(keys...); d > 0 {
+		return nil, &rateLimitedError{d}
+	}
+	if s.deviceProofs == nil {
+		return nil, ErrBadCredentials
+	}
+	p, err := s.deviceProofs(ctx, proof)
+	if errors.Is(err, ErrBadCredentials) {
+		s.limits.fail(keys...)
+	}
+	return p, err
 }
 
 // Authenticate verifies username and password of a request that carries them outside the

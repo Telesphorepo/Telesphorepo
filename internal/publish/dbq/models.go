@@ -12,7 +12,6 @@ type DeviceEnrollment struct {
 	DeviceCodeHash []byte
 	UserCode       string
 	Name           string
-	Client         string
 	PublicKey      []byte
 	CreatedAt      int64
 	ExpiresAt      int64

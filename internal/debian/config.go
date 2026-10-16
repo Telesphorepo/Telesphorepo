@@ -114,7 +114,7 @@ var ui = format.UIDescriptor{
 	PublicKey:      "key.asc",
 	ArtifactKinds:  map[string]string{"package": "Debian package"},
 	ArtifactName:   map[string]string{"package": "Package"},
-	SnippetTools:   map[string]string{"apt": "apt", "curl": "curl"},
+	SnippetTools:   map[string]string{"apt": "apt", "curl": "curl", "telesphorepo": "Telesphorepo CLI"},
 	InstallHeading: "Install it",
 	BuildFiles: []format.BuildFileLabel{
 		{Extension: "*", Classifier: "all", Label: "Package, all architectures"},

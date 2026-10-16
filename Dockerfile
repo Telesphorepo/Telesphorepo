@@ -21,9 +21,12 @@ COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY . .
 COPY --from=web /src/web/dist ./web/dist
+# The server embeds the six CLI archives of the same source (internal/clidist), which it serves
+# at /cli/ and its install scripts download.
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/telesphorepo-server ./cmd/telesphorepo-server \
+    go tool task cli "${VERSION}" \
+ && CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/telesphorepo-server ./cmd/telesphorepo-server \
  && mkdir -p /out/data
 
 FROM gcr.io/distroless/static-debian13:nonroot

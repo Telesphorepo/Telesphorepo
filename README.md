@@ -117,64 +117,47 @@ keeps events for 365 days (`audit.retention`).
 ## Publishing
 
 Every upload needs a publish session. It is a credential for one repo that ends after
-`publish.session_ttl` (15 min by default). To publish from a laptop, add a second factor (an
-authenticator app or a passkey) under **Settings > Your account > Sign-in and security**. An admin does this at the first
-sign-in. Other users do it when they approve their first device. The clients are in [github.com/Telesphorepo/clients](https://github.com/Telesphorepo/clients): the Gradle plugin is on the Gradle Plugin Portal and the Maven extension is on Maven Central. The **Publish to this repository** tab of each repo shows every snippet, with the repo's address filled in.
+`publish.session_ttl` (15 min by default). The Telesphorepo CLI gets the sessions. To publish from a
+laptop, add a second factor (an authenticator app or a passkey) under **Settings > Your account >
+Sign-in and security**. An admin does this at the first sign-in.
 
-**One command.** In a Gradle or Maven project, run the setup script. It adds the plugin or the
-extension and the repository to the build files, and it can write the CI file. It shows each
-change first and asks before it edits a file:
+**Set up a project once.** On the **Publish** tab of a repo, click **Set up a project**, enter the
+second factor, and run the line in the project folder:
 
 ```sh
-curl -fsSL https://packages.example.com/setup.sh | sh -s -- releases
+curl -fsSL https://packages.example.com/install.sh | sh -s -- setup 'https://packages.example.com/#/setup/trsu_...'
 ```
 
-On Windows, use `setup.ps1` with `irm` in PowerShell. The **Publish to this repository** tab shows the
-command for your repository. The sections below show the same change by hand.
+On Windows, the tab shows the PowerShell line. The line installs the CLI from the server, enrolls
+the computer and writes `telesphorepo.toml` (the server and the repo). Commit that file. The line
+works once, for 10 minutes.
 
-**Gradle.** In `settings.gradle.kts`, at the top:
+**Publish.** In the project folder, run:
 
-```kotlin
-plugins { id("com.telesphorepo.publish") version "0.1.0" }
-telesphorepo {
-    url = "https://packages.example.com"
-    repository = "releases"
-}
+```sh
+telesphorepo publish
 ```
 
-The plugin publishes each Java project to `releases`, so the build file needs only a group and a
-version. Run `./gradlew publish`. The first time on a computer, it opens a link in the browser.
-Sign in and enter the second factor to approve the computer. The publish then continues. Later
-publishes get a session by themselves.
+The CLI runs the standard publish command of the project (`mvn deploy`, `gradle publish`) with the
+session token in its environment. The build files stay as they are. Raw and Debian repos take files:
+`telesphorepo publish build/app.zip`. A teammate who clones the project runs `telesphorepo publish`
+and approves the computer in the browser once.
 
-**Maven.** In `.mvn/extensions.xml`:
+**Docker.** The setup line adds the credential helper of the CLI to `~/.docker/config.json`. Then
+Docker, buildx, Podman, Helm and ORAS push with no `docker login`:
 
-```xml
-<extensions>
-  <extension>
-    <groupId>com.telesphorepo</groupId>
-    <artifactId>telesphorepo-maven-extension</artifactId>
-    <version>0.1.0</version>
-  </extension>
-</extensions>
+```sh
+docker push packages.example.com/docker/team/app:1.0
+helm push mychart-0.1.0.tgz oci://packages.example.com/docker
 ```
 
-Add `-Dtelesphorepo.url=https://packages.example.com` to `.mvn/maven.config` and the repo to
-`<distributionManagement>`. Run `mvn deploy`. The first time on a computer, approve the computer
-in the browser as for Gradle.
-
-**GitHub Actions.** Give the job `permissions: id-token: write`. An admin adds a trust policy
-under **Settings > People and CI > CI pipelines** (start from "GitHub Actions"): the repo, the branch or tag, and the
-workflow that may publish. The Gradle plugin and the Maven extension then use the GitHub token
-with no secret. For Debian and Raw repos, the Publish tab shows a workflow that posts the token
-to `/api/publish/sessions/oidc` with `curl`.
-
-**Jenkins.** Install the OpenID Connect Provider plugin and add an "OpenID Connect id token"
-credential with the ID `telesphorepo-id-token`. An admin adds a trust policy starting from
-"Jenkins" (issuer `<jenkins url>/oidc`). The Jenkinsfile binds the credential to `OIDC_TOKEN`
-only in the publish stage, because the server takes a token for 10 minutes only. Set
-`oidcTokenEnv = "OIDC_TOKEN"` in the Gradle plugin block, or
-`-Dtelesphorepo.oidcTokenEnv=OIDC_TOKEN` for Maven.
+**CI.** An admin adds a trust policy under **Settings > People and CI > CI pipelines** (start from
+"GitHub Actions" or "Jenkins"). The CI job installs the CLI with
+`curl -fsSL https://packages.example.com/install.sh | sh` and runs `telesphorepo publish` (Docker:
+`docker push`). The CLI uses the job's identity token, so the job stores no secret. GitHub Actions
+needs `permissions: id-token: write`. Jenkins needs the OpenID Connect Provider plugin and an "OpenID
+Connect id token" credential with the ID `telesphorepo-id-token`, which the Jenkinsfile binds to
+`OIDC_TOKEN` in the publish stage. The Publish tab shows the CI file of each repo.
 
 **By hand.** On **Settings > Your account > Tokens**, choose a repo, enter a second-factor code, and copy the
 token. Use it as the password with any username. Paste it at the hidden prompt, so it stays out
@@ -204,38 +187,13 @@ apt:
 sudo curl -fsSL https://packages.example.com/debian/debian/key.asc -o /etc/apt/keyrings/telesphorepo.asc
 echo "deb [signed-by=/etc/apt/keyrings/telesphorepo.asc] https://packages.example.com/debian/debian stable main" \
   | sudo tee /etc/apt/sources.list.d/telesphorepo.list
-printf 'Publish token: '; read -rs TOKEN; echo
-printf 'user = "publish:%s"\n' "$TOKEN" | curl -fsS -K - -T pkg_1.0_amd64.deb https://packages.example.com/debian/debian/upload/stable/main
-```
-
-Raw files:
-
-```sh
-printf 'Publish token: '; read -rs TOKEN; echo
-printf 'user = "publish:%s"\n' "$TOKEN" | curl -fsS -K - -T file.tar.gz https://packages.example.com/raw/raw/path/file.tar.gz
 ```
 
 Docker, Helm and ORAS use the repo as the first part of the image name. The registry must be at
-the root of a host. To push from a computer, get `docker-credential-telesphorepo` for your system
-from the [GitHub Releases](https://github.com/Telesphorepo/Telesphorepo/releases) page, put it on
-your `PATH`, and enroll the computer once. Approve the code in the browser, as for Gradle. After
-that, Docker, buildx, Podman, Helm and ORAS push with no `docker login`:
+the root of a host:
 
 ```sh
-docker-credential-telesphorepo login https://packages.example.com
-docker push packages.example.com/docker/team/app:1.0
-helm push mychart-0.1.0.tgz oci://packages.example.com/docker
 docker pull packages.example.com/docker/team/app:1.0
-```
-
-The helper keeps the device key in `~/.telesphorepo/<server>/docker/device.json` and adds itself
-to `credHelpers` in `~/.docker/config.json`. `docker logout` deletes the key from the computer;
-revoke the device under **Settings > Your account > Devices**. Without the helper, paste a publish
-token at a hidden prompt:
-
-```sh
-printf 'Publish token: '; read -rs TOKEN; echo
-printf '%s' "$TOKEN" | docker login packages.example.com -u publish --password-stdin
 ```
 
 Behind Cloudflare (Free and Pro plans), each image layer must be under 100 MB. Pulls have no
@@ -251,4 +209,5 @@ everything else: [SPEC.md](SPEC.md).
 
 ## License
 
-The server and the Docker credential helper are licensed under AGPL-3.0 (see [LICENSE](LICENSE)). The [clients](https://github.com/Telesphorepo/clients) (Gradle plugin and Maven extension) are in their own repository under the MIT license.
+The server is licensed under AGPL-3.0 (see [LICENSE](LICENSE)). The Telesphorepo CLI
+(`cmd/telesphorepo`) is licensed under the MIT license, in its own LICENSE file.

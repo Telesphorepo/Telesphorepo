@@ -358,8 +358,11 @@ func TestVersionsAndSnippets(t *testing.T) {
 		if labels["github-actions"] != "GitHub Actions" || labels["gradle-kotlin"] != "Gradle (Kotlin)" {
 			t.Fatalf("usage tools: %v", u.Tools)
 		}
-		for _, want := range []string{"use//gradle-kotlin", "use//gradle-groovy", "use//maven", "publish/computer/gradle-kotlin",
-			"publish/computer/maven", "publish/ci/github-actions", "publish/ci/jenkins", "publish/hand/curl"} {
+		if labels["telesphorepo"] != "Telesphorepo CLI" {
+			t.Fatalf("usage tools: %v", u.Tools)
+		}
+		for _, want := range []string{"use//gradle-kotlin", "use//gradle-groovy", "use//maven", "publish/computer/telesphorepo",
+			"publish/ci/github-actions", "publish/ci/jenkins"} {
 			if !seen[want] {
 				t.Fatalf("usage: no %s snippet; got %v", want, seen)
 			}

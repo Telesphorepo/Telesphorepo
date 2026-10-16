@@ -25,13 +25,15 @@ const PermPipelines perm.ID = "ci.pipelines"
 
 // The audit actions of the publish module.
 const (
-	ActionSessionCreate  = "publish.session.create"
-	ActionSessionClose   = "publish.session.close"
-	ActionDeviceApprove  = "device.approve"
-	ActionDeviceRevoke   = "device.revoke"
-	ActionPipelineCreate = "ci.pipeline.create"
-	ActionPipelineUpdate = "ci.pipeline.update"
-	ActionPipelineDelete = "ci.pipeline.delete"
+	ActionSessionCreate   = "publish.session.create"
+	ActionSessionClose    = "publish.session.close"
+	ActionDeviceApprove   = "device.approve"
+	ActionDeviceRevoke    = "device.revoke"
+	ActionDeviceSetup     = "device.setup"
+	ActionSetupCodeCreate = "setup_code.create"
+	ActionPipelineCreate  = "ci.pipeline.create"
+	ActionPipelineUpdate  = "ci.pipeline.update"
+	ActionPipelineDelete  = "ci.pipeline.delete"
 )
 
 // The settings of the group "publishing".
@@ -45,12 +47,13 @@ var (
 			return nil
 		}})
 	DeviceTTL = settings.Duration(&settings.Def{Key: "publish.device_ttl", Default: "2160h", Label: "Device lifetime",
-		Help: "An enrolled device key (Gradle plugin, Maven extension) can start publish sessions for this time, for example 2160h (90 days). After this time, the developer must enroll the device again."})
+		Help: "An enrolled device key of the Telesphorepo CLI can start publish sessions for this time, for example 2160h (90 days). After this time, the developer must enroll the device again."})
 )
 
-// Module returns the publish module: devices, publish sessions (the token kind TokenPrefix), the
-// Minter, CI trust policies, the publish log and the cleanup job. It provides *Service and
-// Minter to the modules that require it.
+// Module returns the publish module: devices, setup codes, publish sessions (the token kind
+// TokenPrefix), the Minter, CI trust policies, the publish log, the cleanup job, and the install
+// scripts and downloads of the Telesphorepo CLI (/install.sh, /install.ps1, /cli/). It provides
+// *Service and Minter to the modules that require it.
 func Module() module.Module {
 	m := &mod{}
 	return module.Module{
@@ -66,6 +69,8 @@ func Module() module.Module {
 				audit.ActionDef{ID: ActionSessionClose, Label: "Publish session closed", Subsystem: "repo"},
 				audit.ActionDef{ID: ActionDeviceApprove, Label: "Device approved", Subsystem: "people"},
 				audit.ActionDef{ID: ActionDeviceRevoke, Label: "Device revoked", Subsystem: "people"},
+				audit.ActionDef{ID: ActionDeviceSetup, Label: "Project set up", Subsystem: "repo"},
+				audit.ActionDef{ID: ActionSetupCodeCreate, Label: "Setup line created", Subsystem: "repo"},
 				audit.ActionDef{ID: ActionPipelineCreate, Label: "CI pipeline created", Subsystem: "ci"},
 				audit.ActionDef{ID: ActionPipelineUpdate, Label: "CI pipeline changed", Subsystem: "ci"},
 				audit.ActionDef{ID: ActionPipelineDelete, Label: "CI pipeline deleted", Subsystem: "ci"},
@@ -77,9 +82,10 @@ func Module() module.Module {
 			x.Init(func(ctx context.Context, h *module.Host) error {
 				m.h = h
 				m.svc = New(Deps{DB: h.DB, Auth: h.Auth, Access: h.Access, Repos: h.Repos, Settings: h.Settings,
-					Audit: h.Audit, CI: h.CI, Builds: h.Builds, Clients: h.Clients, Log: h.Log})
+					Audit: h.Audit, CI: h.CI, Builds: h.Builds, Log: h.Log})
 				h.Auth.SetSessionLoader(m.svc.LoadSession)
 				h.Auth.SetDeviceLoader(m.svc.DevicePrincipal)
+				h.Auth.SetDeviceProofVerifier(m.svc.VerifyDeviceProof)
 				h.Access.SetPipelines(m.svc.RepoPipelines)
 				h.Provide(m.svc)
 				module.ProvideAs[Minter](h, m.svc)
@@ -91,10 +97,11 @@ func Module() module.Module {
 			x.Job(jobs.Job{Name: "publish.cleanup", Every: cleanupEvery, Tick: func(ctx context.Context) error {
 				return m.svc.Cleanup(ctx)
 			}})
-			x.RootPrefix("/setup.sh")
-			x.RootPrefix("/setup.ps1")
+			x.RootPrefix("/install.sh")
+			x.RootPrefix("/install.ps1")
+			x.RootPrefix("/cli/")
 			x.Routes(m.routes)
-			x.Routes(m.registerSetup)
+			x.Routes(m.installRoutes)
 		},
 	}
 }
@@ -104,8 +111,8 @@ type mod struct {
 	svc *Service
 }
 
-// routes mounts the publisher-credential API: device enrollment, publish sessions,
-// CI trust policies (pipelines on their repos) and the publish log (activity).
+// routes mounts the publisher-credential API: device enrollment, project setup, publish
+// sessions, CI trust policies (pipelines on their repos) and the publish log (activity).
 func (m *mod) routes(r *route.Router) {
 	fresh := route.Policy{Accept: auth.CredSession, FreshFactor: true}
 	r.Handle("POST /api/devices/enroll", route.Public, m.enrollDevice)
@@ -114,11 +121,16 @@ func (m *mod) routes(r *route.Router) {
 	r.Handle("POST /api/devices/approve", fresh, m.approveDevice)
 	r.Handle("GET /api/devices", route.AnyUser, m.listDevices)
 	r.Handle("DELETE /api/devices/{id}", route.UI, m.revokeDevice)
+	r.Handle("DELETE /api/devices/self", route.Public, m.revokeSelf)
+	r.Handle("POST /api/devices/setup", route.Public, m.setupDevice)
+	r.Handle("POST /api/publish/setup-codes", route.Policy{Accept: auth.CredSession, FreshFactor: true,
+		Repo: &route.RepoRule{Name: bodyRepo, Op: access.Mint, Perm: perm.RepoPublish}}, m.createSetupCode)
 
 	r.Handle("POST /api/publish/challenge", route.Public, m.publishChallenge)
 	r.Handle("POST /api/publish/sessions", route.Public, m.deviceSession)
 	r.Handle("POST /api/publish/sessions/manual", fresh, m.manualSession)
 	r.Handle("POST /api/publish/sessions/oidc", route.Public, m.oidcSession)
+	r.Handle("POST /api/publish/sessions/exchange", route.Public, m.exchangeSession)
 	r.Handle("GET /api/publish/sessions", route.AnyUser, m.listMySessions)
 	r.Handle("DELETE /api/publish/sessions/{id}", route.Policy{Accept: auth.CredPublish}, m.closeSession)
 
@@ -156,19 +168,18 @@ func publishFail(w http.ResponseWriter, r *http.Request, err error) {
 
 // --- devices ---
 
-// enrollDevice starts the device flow (no auth): {name, client, public_key} ->
+// enrollDevice starts the device flow (no auth): {name, public_key} ->
 // {device_code, user_code, verification_url, expires_in, interval}. Without the base_url
 // setting, verification_url starts with the URL the device used.
 func (m *mod) enrollDevice(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	var in struct {
 		Name      string `json:"name"`
-		Client    string `json:"client"`
 		PublicKey string `json:"public_key"`
 	}
 	if !m.h.API.Decode(w, r, &in) {
 		return
 	}
-	e, err := m.svc.Enroll(r.Context(), httpx.ClientIP(r), in.Name, in.Client, in.PublicKey)
+	e, err := m.svc.Enroll(r.Context(), httpx.ClientIP(r), in.Name, in.PublicKey)
 	if err != nil {
 		publishFail(w, r, err)
 		return
@@ -198,7 +209,7 @@ func (m *mod) pollDevice(w http.ResponseWriter, r *http.Request, c *route.Call) 
 	}{id})
 }
 
-// pendingEnrollment returns {user_code, name, client, client_title, client_help, expires_at} for the approval page:
+// pendingEnrollment returns {user_code, name, expires_at} for the approval page:
 // ?user_code=ABCD-EFGH.
 func (m *mod) pendingEnrollment(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	e, err := m.svc.PendingEnrollment(r.Context(), r.URL.Query().Get("user_code"))
@@ -268,8 +279,9 @@ func (m *mod) revokeDevice(w http.ResponseWriter, r *http.Request, c *route.Call
 // --- sessions ---
 
 // publishChallenge returns a nonce for a device (no auth): {device_id, exchange, nonce, ts,
-// signature} -> {nonce, expires_at}. Without exchange the nonce mints one session for one repo
-// within 60 s (POST /api/publish/sessions). With exchange it is a token exchange nonce
+// signature} -> {nonce, expires_at}. Without exchange the nonce serves one request within 60 s:
+// a session for one repo (POST /api/publish/sessions), a project setup (POST /api/devices/setup)
+// or the revoke of the device (DELETE /api/devices/self). With exchange it is a token exchange nonce
 // (ExchangeChallenge): the device signs it over the repo "*" and a format's token endpoint takes
 // the proof until it expires after publish.session_ttl. With exchange, a nonce in the request is
 // one to keep: the answer is that nonce while it is a token exchange nonce of the device that has
@@ -305,7 +317,7 @@ func (m *mod) publishChallenge(w http.ResponseWriter, r *http.Request, c *route.
 }
 
 // deviceSession mints a session from a device signature (no auth):
-// {device_id, repo, nonce, signature} -> 201 {id, token, repo, expires_at}.
+// {device_id, repo, nonce, signature} -> 201 {id, token, repo, format, kind, expires_at}.
 func (m *mod) deviceSession(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	var in struct {
 		DeviceID  int64  `json:"device_id"`
@@ -320,7 +332,7 @@ func (m *mod) deviceSession(w http.ResponseWriter, r *http.Request, c *route.Cal
 }
 
 // manualSession mints a session for the signed-in caller, whose request carries a fresh second
-// factor (auth.ProofHeader): {repo} -> 201 {id, token, repo, expires_at}.
+// factor (auth.ProofHeader): {repo} -> 201 {id, token, repo, format, kind, expires_at}.
 func (m *mod) manualSession(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	var in struct {
 		Repo string `json:"repo"`
@@ -332,7 +344,7 @@ func (m *mod) manualSession(w http.ResponseWriter, r *http.Request, c *route.Cal
 }
 
 // oidcSession exchanges a CI identity token for a session (no auth): {token, repo} ->
-// 201 {id, token, repo, expires_at}.
+// 201 {id, token, repo, format, kind, expires_at}.
 func (m *mod) oidcSession(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	var in struct {
 		Token string `json:"token"`

@@ -322,8 +322,9 @@ CREATE TABLE user_recovery_codes (
 ) STRICT, WITHOUT ROWID;
 
 -- Short-lived single-use challenges: the second step of a sign-in, a pending TOTP setup, WebAuthn
--- ceremony data and the grant of an SSO device approval (kind 'device_grant', data the user
--- code). id_hash is SHA-256 of the value the client holds; data is kind-specific (sealed when it
+-- ceremony data, the grant of an SSO device approval (kind 'device_grant', data the user
+-- code) and the setup code of a project (kind 'setup_code', data the repo id as decimal text,
+-- 10 minutes). id_hash is SHA-256 of the value the client holds; data is kind-specific (sealed when it
 -- holds a secret). Taking a challenge deletes it; a new challenge deletes expired ones.
 CREATE TABLE auth_challenges (
   id_hash    BLOB PRIMARY KEY,

@@ -111,7 +111,7 @@ func TestOIDCDeviceApproval(t *testing.T) {
 	repo := RandName("sso-dev")
 	s.CreateRepo(t, repo, "raw", false, nil)
 
-	en, key := s.StartEnrollment(t, "e2e alice laptop", "gradle")
+	en, key := s.StartEnrollment(t, "e2e alice laptop")
 
 	t.Run("no grant", func(t *testing.T) {
 		for _, proof := range []string{"", "totp 000000", "grant not-a-grant"} {
@@ -156,11 +156,11 @@ func TestOIDCDeviceApproval(t *testing.T) {
 	})
 
 	t.Run("grant works once and for one code", func(t *testing.T) {
-		en2, _ := s.StartEnrollment(t, "e2e alice second laptop", "maven")
+		en2, _ := s.StartEnrollment(t, "e2e alice second laptop")
 		if st, b := approveWith(t, s, alice.Jar, en2.UserCode, "grant "+grant); st != http.StatusUnauthorized {
 			t.Fatalf("approve another code with a used grant: status %d, want 401: %s", st, b)
 		}
-		en3, _ := s.StartEnrollment(t, "e2e alice third laptop", "maven")
+		en3, _ := s.StartEnrollment(t, "e2e alice third laptop")
 		a := kc.approveSSO(t, s, alice.Jar, en2.UserCode, "alice", kcAlicePassword)
 		if a.Grant == "" {
 			t.Fatalf("callback for %s: error %q, want a grant", en2.UserCode, a.Error)
@@ -183,7 +183,7 @@ func TestOIDCDeviceApprovalStale(t *testing.T) {
 	t.Parallel()
 	time.Sleep(time.Until(signedIn.Add(5*time.Minute + 15*time.Second)))
 
-	en, _ := s.StartEnrollment(t, "e2e alice stale laptop", "gradle")
+	en, _ := s.StartEnrollment(t, "e2e alice stale laptop")
 	auth := kc.startDeviceSignIn(t, s, alice.Jar, en.UserCode)
 	q := auth.Query()
 	q.Del("prompt")

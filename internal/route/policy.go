@@ -19,7 +19,9 @@ import (
 // middleware enforces it on every request (see Mux.enforce).
 type Policy struct {
 	// Accept are the credential kinds that pass. 0 with Anonymous is a public route: the
-	// middleware reads no credential, and the handler may read one itself.
+	// middleware reads no credential, and the handler may read one itself. With CredDevice the
+	// middleware also reads a device proof (auth.DeviceProofPrefix) as the Basic password or as
+	// a Bearer token; the router allows CredDevice on GET and HEAD routes only.
 	Accept auth.Cred
 	// Anonymous lets a request without a credential through to the repo step or the handler.
 	Anonymous bool
@@ -248,7 +250,7 @@ func RepoRead() Policy {
 }
 
 // FormatRead is a download from a repo of format: anonymous, a password, a read token, a UI
-// session, a publish session or a device (behind a core bearer token).
+// session, a publish session or a device (a device proof, or a core bearer token).
 func FormatRead(format string) Policy {
 	return Policy{Accept: auth.CredPassword | auth.CredReadToken | auth.CredSession | auth.CredPublish | auth.CredDevice, Anonymous: true,
 		Repo: &RepoRule{Format: format, Op: access.Read, Perm: perm.RepoDownload}}
