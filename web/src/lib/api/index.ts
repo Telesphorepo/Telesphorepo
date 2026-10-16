@@ -321,10 +321,6 @@ export const api = {
   },
 
   devices: {
-    /** Device flow, client side (the Gradle plugin and Maven extension call it; no auth). */
-    enroll: (req: T.EnrollmentRequest) => request<T.Enrollment>("POST", "/api/devices/enroll", { body: req }),
-    poll: (device_code: string) =>
-      request<{ device_id: number }>("POST", "/api/devices/enroll/poll", { body: { device_code } }),
     /** The enrollment waiting for approval; 404 when the code is unknown or expired. */
     pending: (user_code: string) =>
       request<T.PendingEnrollment>("GET", "/api/devices/enroll", { query: { user_code } }),

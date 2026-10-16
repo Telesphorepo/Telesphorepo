@@ -107,7 +107,7 @@ by the task:
   the repo is private (settings.xml / gradle.properties / environment variables). Debian: apt
   source line and key. Raw: curl/wget.
 - **Publish to this repository** (publishers): three short paths, each its own section, chosen by
-  where you publish from: **From your computer** (Gradle plugin or Maven extension, one-time
+  where you publish from: **From your computer** (the setup line of the Telesphorepo CLI, one-time
   device approval), **From CI** (GitHub Actions or Jenkins: the CI pipeline rule to create, and the
   workflow snippet), **By hand** (upload in the browser, or a publish token with curl).
 

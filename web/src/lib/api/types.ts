@@ -796,14 +796,6 @@ export type NexusLogLine = { id: number; at: string; source_repo: string; level:
 
 // --- publishing ---
 
-export type EnrollmentRequest = { name: string; public_key: string };
-export type Enrollment = {
-  device_code: string;
-  user_code: string;
-  verification_url: string;
-  expires_in: number;
-  interval: number;
-};
 export type PendingEnrollment = {
   user_code: string;
   name: string;

@@ -67,7 +67,7 @@
   const grant = untrack(() => query.get("setup_grant") ?? "");
   if (grant || untrack(() => query.has("error"))) {
     // Keep the grant and the error out of the address: the grant works once.
-    navigate(repoPath(repo.name, "publish"), { replace: true });
+    navigate(untrack(() => repoPath(repo.name, "publish")), { replace: true });
   }
   if (grant) {
     busy = true;

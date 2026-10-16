@@ -21,8 +21,8 @@ Owner's ideas (2026-10-14) with an assessment, and the owner's decision.
     carries `repository`, `sha`, `ref`, `run_id`, `workflow_ref`; the server verifies the token, so
     it can record them and link to the commit and the run. Jenkins' OIDC token carries the job and
     build URL.
-  - **Laptop:** the Gradle plugin and the Maven extension send the local commit and a dirty flag
-    when they open a publish session.
+  - **Laptop:** the Telesphorepo CLI could send the local commit and a dirty flag when it opens a
+    publish session.
   - **Storage:** per publish session; every file uploaded in that session inherits it.
 - **Decision (owner):** GitHub Actions builds only. Local builds are not attributed: a local commit may be unpushed or the tree dirty, so the SHA may not exist anywhere, and a wrong link is worse than none.
 - **Why it matters:** this is provenance (npm and PyPI show it); no self-hosted artifact repository
