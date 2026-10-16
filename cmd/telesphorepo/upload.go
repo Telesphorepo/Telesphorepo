@@ -74,7 +74,12 @@ func uploadRaw(j *job) error {
 			return err
 		}
 		if st.Size() >= resumableFrom {
-			err = j.resumable(f, st.Size(), dest)
+			err = j.resumable(f, st.Size(), func(id string, q url.Values) error {
+				q.Set("path", dest)
+				_, err := j.c.call(j.ctx, request{method: http.MethodPut, path: "/api/repos/" + url.PathEscape(j.p.Repo) + "/uploads/" + url.PathEscape(id) + "?" + q.Encode(),
+					token: j.s.Token, timeout: -1})
+				return err
+			})
 		} else {
 			err = j.putFile(f, st.Size(), "/raw/"+url.PathEscape(j.p.Repo)+"/"+escapePath(dest), nil)
 		}
@@ -87,7 +92,8 @@ func uploadRaw(j *job) error {
 }
 
 // uploadDebian uploads each FILE (a .deb) to the distribution and the component of the project
-// file.
+// file: a PUT of the file, or for a large file the resumable upload routes, which the upload
+// route of the distribution then finishes.
 func uploadDebian(j *job) error {
 	if j.p.Dist == "" || j.p.Component == "" {
 		return fmt.Errorf(`%s needs dist and component for a Debian repo, for example dist = "stable" and component = "main"`, j.p.file)
@@ -107,7 +113,16 @@ func uploadDebian(j *job) error {
 			Filename     string `json:"filename"`
 		}
 		p := "/debian/" + url.PathEscape(j.p.Repo) + "/upload/" + url.PathEscape(j.p.Dist) + "/" + url.PathEscape(j.p.Component)
-		if err := j.putFile(f, st.Size(), p, &out); err != nil {
+		if st.Size() >= resumableFrom {
+			err = j.resumable(f, st.Size(), func(id string, q url.Values) error {
+				q.Set("upload", id)
+				_, err := j.c.call(j.ctx, request{method: http.MethodPut, path: p + "?" + q.Encode(), token: j.s.Token, out: &out, timeout: -1})
+				return err
+			})
+		} else {
+			err = j.putFile(f, st.Size(), p, &out)
+		}
+		if err != nil {
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "Uploaded %s %s (%s) to %s/%s of %s\n", out.Package, out.Version, out.Architecture, j.p.Dist, j.p.Component, j.p.Repo)
@@ -128,11 +143,11 @@ func (j *job) putFile(f string, size int64, p string, out any) error {
 	return err
 }
 
-// resumable uploads the file f of size bytes to dest of the repo through the resumable upload
-// routes: it starts an upload, appends the file in chunks, and finishes it with the SHA-256 of
-// the file. A chunk that fails is sent again from the offset that the server holds. A failure
-// deletes the upload.
-func (j *job) resumable(f string, size int64, dest string) error {
+// resumable uploads the file f of size bytes through the resumable upload routes of the repo: it
+// starts an upload, appends the file in chunks, and calls finish with the upload ID and the query
+// sha256 and size of the file. A chunk that fails is sent again from the offset that the server
+// holds. A failure deletes the upload.
+func (j *job) resumable(f string, size int64, finish func(id string, q url.Values) error) error {
 	sum, err := fileSum(f)
 	if err != nil {
 		return err
@@ -187,8 +202,7 @@ func (j *job) resumable(f string, size int64, dest string) error {
 		}
 		fmt.Fprintf(os.Stderr, "The chunk at byte %d failed (%v); sending it again.\n", offset, err)
 	}
-	q := url.Values{"path": {dest}, "sha256": {sum}, "size": {strconv.FormatInt(size, 10)}}
-	if _, err := j.c.call(j.ctx, request{method: http.MethodPut, path: at + "?" + q.Encode(), token: j.s.Token, timeout: -1}); err != nil {
+	if err := finish(up.ID, url.Values{"sha256": {sum}, "size": {strconv.FormatInt(size, 10)}}); err != nil {
 		return err
 	}
 	done = true

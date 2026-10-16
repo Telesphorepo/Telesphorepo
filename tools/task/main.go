@@ -22,6 +22,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/Telesphorepo/Telesphorepo/changelog"
 	"github.com/Telesphorepo/Telesphorepo/internal/clidist"
 )
 
@@ -37,7 +38,8 @@ const usage = `Usage: go tool task <command>
   test clients     run the clients zone: the CLI of cmd/telesphorepo with the real tools in containers
   test all         run the core, import, scale and clients zones one after the other; fails if any fails
   cli [version]    build the six CLI archives that the server serves at /cli/ into internal/clidist/dist
-                   (the version defaults to git describe; skipped while cmd/telesphorepo does not exist)
+                   (the version defaults to git describe; skipped while cmd/telesphorepo does not exist).
+                   A given release version is written into each "dev" entry of changes.toml first
   release [version]  build the UI once, then bin/release/<program>_<version>_<os>_<arch> archives
                    (.tar.gz, .zip on Windows) for linux, darwin and windows on amd64 and arm64,
                    plus SHA256SUMS; the version defaults to git describe (e.g. go tool task release 1.2.3).
@@ -131,6 +133,13 @@ func run(ctx context.Context, args []string) error {
 		version := gitVersion(ctx)
 		if len(rest) == 1 {
 			version = rest[0]
+			// A release version goes into the change log first, so the archives and a server
+			// that a later step builds from the same tree (the Dockerfile) embed the stamped log.
+			if _, err := changelog.ParseVersion(version); err == nil {
+				if err := stampChanges(version); err != nil {
+					return err
+				}
+			}
 		}
 		return cliArchives(ctx, version, clidist.Targets)
 	case "gen":

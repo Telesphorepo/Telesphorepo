@@ -290,10 +290,22 @@ func debCheckSecurity(t *testing.T, s *Server, tg *S3Target, repo string, wauth,
 // debBomb returns a .deb whose control.tar.gz decompresses to well over 16 MiB.
 func debBomb(t *testing.T) []byte {
 	t.Helper()
-	targz := func(files ...struct {
-		name string
-		data []byte
-	}) []byte {
+	return goDeb(t,
+		debMember{"./zeros", make([]byte, 17<<20)},
+		debMember{"./control", []byte("Package: e2e-bomb\nVersion: 1.0\nArchitecture: all\nMaintainer: E2E <e2e@telesphorepo.test>\nDescription: bomb\n")},
+	)
+}
+
+// debMember is a file of a .deb or of one of its tar members.
+type debMember = struct {
+	name string
+	data []byte
+}
+
+// goDeb returns a .deb with the files control of control.tar.gz and an empty data.tar.gz.
+func goDeb(t *testing.T, control ...debMember) []byte {
+	t.Helper()
+	targz := func(files ...debMember) []byte {
 		var buf bytes.Buffer
 		gz := gzip.NewWriter(&buf)
 		tw := tar.NewWriter(gz)
@@ -313,19 +325,9 @@ func debBomb(t *testing.T) []byte {
 		}
 		return buf.Bytes()
 	}
-	type file = struct {
-		name string
-		data []byte
-	}
-	control := targz(
-		file{"./zeros", make([]byte, 17<<20)},
-		file{"./control", []byte("Package: e2e-bomb\nVersion: 1.0\nArchitecture: all\nMaintainer: E2E <e2e@telesphorepo.test>\nDescription: bomb\n")},
-	)
-	data := targz()
-
 	var ar bytes.Buffer
 	ar.WriteString("!<arch>\n")
-	for _, m := range []file{{"debian-binary", []byte("2.0\n")}, {"control.tar.gz", control}, {"data.tar.gz", data}} {
+	for _, m := range []debMember{{"debian-binary", []byte("2.0\n")}, {"control.tar.gz", targz(control...)}, {"data.tar.gz", targz()}} {
 		fmt.Fprintf(&ar, "%-16s%-12d%-6d%-6d%-8s%-10d`\n", m.name, 0, 0, 0, "100644", len(m.data))
 		ar.Write(m.data)
 		if len(m.data)%2 == 1 {

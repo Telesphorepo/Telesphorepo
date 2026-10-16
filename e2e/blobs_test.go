@@ -139,7 +139,8 @@ func uploadSession(t *testing.T, s *Server, method, path string, body []byte, au
 // TestUploadSessions uploads a file in chunks through a resumable upload: a wrong offset answers
 // 416 with the bytes received, the upload survives a restart, a wrong digest deletes the upload,
 // and a finished upload is a file of a raw and of a Maven repo. Only the publish session that
-// started an upload continues it. A Debian repo refuses a finished upload (400).
+// started an upload continues it. A Debian repo refuses a finished upload at a path (400); its
+// upload route of a distribution finishes the upload of a .deb.
 func TestUploadSessions(t *testing.T) {
 	s := StartServer(t, ServerOpts{DataVolume: NewDataVolume(t)})
 	raw, mvn := RandName("chunks"), RandName("chunks-mvn")
@@ -263,6 +264,31 @@ func TestUploadSessions(t *testing.T) {
 		if st, b := rawGet(t, s, nil, "/debian/"+deb+"/"+p, s.AdminBasic()); st == http.StatusOK && bytes.Equal(b, other) {
 			t.Fatalf("GET %s serves the bytes of the refused upload", p)
 		}
+	}
+	// The upload route of a distribution finishes a resumable upload of a .deb (telesphorepo
+	// publish of a large package): ?upload=<id>&sha256=<hex>&size=<n> and no body.
+	pkg := goDeb(t, debMember{"./control", []byte("Package: e2e-chunked\nVersion: 1.0\nArchitecture: all\nMaintainer: E2E <e2e@telesphorepo.test>\nDescription: chunked\n")})
+	up := "/debian/" + deb + "/upload/stable/main?upload="
+	id = start(dbase, dauth)
+	half := len(pkg) / 2
+	for _, c := range []struct {
+		from int
+		b    []byte
+	}{{0, pkg[:half]}, {half, pkg[half:]}} {
+		if st, b := uploadSession(t, s, http.MethodPatch, dbase+"/"+id, c.b, dauth, chunk(c.from, c.b)); st != http.StatusAccepted {
+			t.Fatalf("append a .deb at %d: status %d: %s", c.from, st, b)
+		}
+	}
+	if st, b := uploadSession(t, s, http.MethodPut, up+id+"&sha256="+sha256Hex(pkg)+"&size="+strconv.Itoa(len(pkg)), nil, s.PublishAuth(t, s.AdminUser, deb), nil); st != http.StatusNotFound {
+		t.Fatalf("finish a .deb upload with another publish session: status %d, want 404: %s", st, b)
+	}
+	if st, b := uploadSession(t, s, http.MethodPut, up+id+"&sha256="+sha256Hex(pkg)+"&size="+strconv.Itoa(len(pkg)), nil, dauth, nil); st != http.StatusCreated ||
+		!strings.Contains(string(b), `"package":"e2e-chunked"`) {
+		t.Fatalf("finish a .deb upload through the upload route: status %d, want 201 with the package: %s", st, b)
+	}
+	rawWantGet(t, s, nil, "/debian/"+deb+"/pool/main/e/e2e-chunked/e2e-chunked_1.0_all.deb", s.AdminBasic(), pkg)
+	if st, b := uploadSession(t, s, http.MethodPut, up+id+"&sha256="+sha256Hex(pkg), nil, dauth, nil); st != http.StatusNotFound {
+		t.Fatalf("finish a finished .deb upload again: status %d, want 404: %s", st, b)
 	}
 }
 

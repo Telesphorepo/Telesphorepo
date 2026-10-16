@@ -23,8 +23,9 @@ func dindScan(t *testing.T, d *Dind, what, secret string) {
 func TestCLIDocker(t *testing.T) {
 	c := newCLI(t)
 	kc := newKeycloak(t)
-	kc.Start(t, "http://callback.invalid"+oidcCallbackPath)
+	alias := ciAlias(t, kc)
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
+		opts.Alias = alias
 		s := StartServer(t, opts)
 		host := registryHost(s)
 		own, ci := RandName("own"), RandName("ci")
@@ -78,16 +79,21 @@ func TestCLIDocker(t *testing.T) {
 			}
 			dindScan(t, d, "push and pull", "")
 
-			// A CI job: no device (another HOME), the identity token in OIDC_TOKEN, and a temp
-			// Docker config that names the helper.
+			// A CI job: no device (another HOME), the identity token in OIDC_TOKEN, a temp Docker
+			// config that names the helper, and TELESPHOREPO_SERVER, as the Docker CI files set it.
+			// The helper refuses the token for a host of another server.
 			tok := kc.CIToken(t)
+			code, out = d.Exec(t, fmt.Sprintf("echo other.example:5000 | HOME=/ci CI=true TELESPHOREPO_SERVER='%s' OIDC_TOKEN='%s' docker-credential-telesphorepo get 2>&1", s.InternalURL, tok))
+			if code != 1 || !strings.Contains(out, "other.example:5000 is not a registry host of "+s.InternalURL) || strings.Contains(out, tok) {
+				t.Fatalf("get in CI for a host of another server: exit %d: %s", code, out)
+			}
 			ciImg := host + "/" + ci + "/app:ci"
 			d.MustExec(t, "docker push in CI", fmt.Sprintf(`set -e
 mkdir -p /ci/docker
 printf '%%s\n' '{"credHelpers": {"%[1]s": "telesphorepo"}}' > /ci/docker/config.json
 docker tag %[2]s:v1 %[3]s
-HOME=/ci DOCKER_CONFIG=/ci/docker CI=true OIDC_TOKEN='%[4]s' docker push %[3]s
-`, host, img, ciImg, tok))
+HOME=/ci DOCKER_CONFIG=/ci/docker CI=true TELESPHOREPO_SERVER='%[5]s' OIDC_TOKEN='%[4]s' docker push %[3]s
+`, host, img, ciImg, tok, s.InternalURL))
 			found = false
 			for _, it := range publishLog(t, s, ci) {
 				found = found || (it.Via == "oidc" && it.DeviceID == nil)

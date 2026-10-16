@@ -56,7 +56,9 @@ var dockerHelps = map[string]string{
 With a device of the server, the answer is a proof signed by the device key, which the registry
 turns into a publish session. A process that runs "get" again gets the same proof while it is
 valid (exchange.json next to the device file), so all token requests of one push use one
-session. In a CI job with no device, the answer is the identity token of the job. A host of no
+session. In a CI job with no device, the answer is the identity token of the job, for the server
+in TELESPHOREPO_SERVER (the Docker CI files of the server set it). The token must name that
+server as its audience. A host of no
 server of this computer answers "` + notFound + `", so Docker reads anonymously.
 `,
 	"store": `The helper keeps no passwords, so "store" fails. Set up the computer instead:
@@ -176,7 +178,12 @@ func dockerGet(in io.Reader, out io.Writer) error {
 		return answer(deviceUser, secret)
 	}
 	if inCI() {
-		tok, err := ciToken(ctx, registryServer(serverURL))
+		srv, err := registryServer(ctx, serverURL)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return errNotFound
+		}
+		tok, err := ciToken(ctx, srv)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return errNotFound
@@ -203,19 +210,47 @@ func sessionHost(serverURL string) bool {
 	return false
 }
 
-// registryServer is the canonical URL of the server of a registry host in a CI job: the server
-// of the project file of the current folder when its host is that host, else https://<host>.
-// GitHub Actions takes it as the audience of the identity token.
-func registryServer(serverURL string) string {
+// envServer names the server of a CI job that pushes with Docker. The Docker CI files of the
+// server set it to the server's base URL.
+const envServer = "TELESPHOREPO_SERVER"
+
+// registryServer is the canonical URL of the server of a registry host in a CI job. The identity
+// token must have it as its audience: GitHub Actions gets it as the audience, and the helper
+// refuses an OIDC_TOKEN with another one. In this order:
+//   - TELESPHOREPO_SERVER, when the host is the host of that server or one of its Docker hosts
+//     (GET /docker/hosts); another host is an error;
+//   - the server of the project file of the current folder, when its host is the host;
+//   - https://<host>.
+func registryServer(ctx context.Context, serverURL string) (string, error) {
 	host := serverURL
 	if i := strings.Index(host, "://"); i >= 0 {
 		host = host[i+3:]
 	}
 	host, _, _ = strings.Cut(host, "/")
-	if p, err := findProject("."); err == nil && p != nil && p.id.hostKey() == strings.ToLower(host) {
-		return p.id.base()
+	host = strings.ToLower(host)
+	if raw := os.Getenv(envServer); raw != "" {
+		id, err := parseIdentity(raw)
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", envServer, err)
+		}
+		if id.hostKey() == host {
+			return id.base(), nil
+		}
+		hosts, err := newClient(id).registryHosts(ctx)
+		if err != nil {
+			return "", err
+		}
+		for _, h := range hosts {
+			if strings.ToLower(h) == host {
+				return id.base(), nil
+			}
+		}
+		return "", fmt.Errorf("%s is not a registry host of %s (%s), so %s gives it no identity token", host, id.base(), envServer, dockerHelperName)
 	}
-	return "https://" + strings.ToLower(host)
+	if p, err := findProject("."); err == nil && p != nil && p.id.hostKey() == host {
+		return p.id.base(), nil
+	}
+	return "https://" + host, nil
 }
 
 // deviceSecret returns the token exchange proof of device d. The process that runs the helper

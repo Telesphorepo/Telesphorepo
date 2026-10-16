@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -67,7 +69,55 @@ func ciToken(ctx context.Context, aud string) (string, error) {
 		}
 		return out.Value, nil
 	}
-	return strings.TrimSpace(os.Getenv("OIDC_TOKEN")), nil
+	tok := strings.TrimSpace(os.Getenv("OIDC_TOKEN"))
+	if tok == "" {
+		return "", nil
+	}
+	if err := checkAudience(tok, aud); err != nil {
+		return "", err
+	}
+	return tok, nil
+}
+
+// checkAudience refuses the identity token tok unless its audience (the "aud" claim) holds the
+// server URL aud, with or without a trailing slash. The CI fixes the audience of OIDC_TOKEN, and
+// the server of telesphorepo.toml may come from a branch that nobody checked. So the CLI never
+// sends the token to a server that the token is not for. The CLI reads the claim without a check
+// of the signature; the server checks the signature.
+func checkAudience(tok, aud string) error {
+	var claims struct {
+		Aud json.RawMessage `json:"aud"`
+	}
+	parts := strings.Split(tok, ".")
+	if len(parts) != 3 {
+		return errors.New("OIDC_TOKEN is not a JWT identity token")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
+	if err != nil || json.Unmarshal(payload, &claims) != nil {
+		return errors.New("OIDC_TOKEN is not a JWT identity token")
+	}
+	var auds []string
+	var one string
+	if json.Unmarshal(claims.Aud, &one) == nil {
+		auds = []string{one}
+	} else if json.Unmarshal(claims.Aud, &auds) != nil {
+		auds = nil
+	}
+	for _, a := range auds {
+		if a == aud || a == aud+"/" {
+			return nil
+		}
+	}
+	return fmt.Errorf("the identity token in OIDC_TOKEN is for %s, not for %s. The CLI sends it only to the server that it is for: "+
+		"set the audience of the identity token credential to %s, or correct the server URL",
+		orNone(strings.Join(auds, ", ")), aud, aud)
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "no server"
+	}
+	return s
 }
 
 // childEnv is the environment of a child process: the CLI's own without OIDC_TOKEN, so a build

@@ -137,7 +137,8 @@ func TestCIWorkflowRoute(t *testing.T) {
 	jk := get(t, mvn, "system=jenkins&tool=gradle&tags=v*", rauth)
 	if jk.File != "Jenkinsfile" || !strings.Contains(jk.Code, "tag 'v*'") || !strings.Contains(jk.Code, "./gradlew build") ||
 		!strings.Contains(jk.Code, "telesphorepo-id-token") || !strings.Contains(jk.Code, "isUnix()") ||
-		!strings.Contains(jk.Code, s.InternalURL+"/install.ps1") || !strings.Contains(jk.Code, "telesphorepo publish") {
+		!strings.Contains(jk.Code, s.InternalURL+"/install.ps1") || !strings.Contains(jk.Code, "telesphorepo publish") ||
+		!strings.Contains(jk.Code, `powershell '.\\gradlew.bat build'`) {
 		t.Fatalf("Jenkinsfile for Gradle: %+v", jk)
 	}
 	fs := get(t, mvn, "system=jenkins-freestyle&tool=maven", rauth)
@@ -181,7 +182,8 @@ func TestCIWorkflowRoute(t *testing.T) {
 		helper := strings.Index(f.Code, `{"credHelpers":{"`+host+`":"telesphorepo"}}`)
 		push := strings.Index(f.Code, `docker push "`+host+"/"+dk+"/app:"+c.tag+`"`)
 		if build < 0 || install < build || helper < install || push < helper || strings.Contains(f.Code, "docker login") ||
-			!strings.Contains(f.Note, "Change app to the name of your image") {
+			!strings.Contains(f.Note, "Change app to the name of your image") || !strings.Contains(f.Code, "TELESPHOREPO_SERVER") ||
+			(c.system == "jenkins" && !strings.Contains(f.Code, `powershell 'docker build -t "`+host+"/"+dk+"/app:$(if ($env:GIT_COMMIT)")) {
 			t.Fatalf("%s file for Docker: build, install, helper and push out of order or missing:\n%s\nnote: %s", c.system, f.Code, f.Note)
 		}
 	}

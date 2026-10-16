@@ -9,7 +9,8 @@ import (
 // dockerTool is the CI tool docker: the job builds the image of the repository's Dockerfile and
 // pushes it with docker push. A Docker config of its own names the credential helper of the
 // Telesphorepo CLI for the registry host; the helper mints the publish session from the job's
-// identity token, so the job runs no docker login.
+// identity token, so the job runs no docker login. TELESPHOREPO_SERVER names the server of the
+// token to the helper.
 func (f *Format) dockerTool() format.Tool {
 	return format.Tool{ID: "docker", Label: "Docker",
 		CINote: "Change app to the name of your image. The job needs Docker. The OIDC token pulls public images only: to build from a private image, log in with a read token before the build.",
@@ -22,7 +23,11 @@ func (f *Format) dockerTool() format.Tool {
 			}
 			helpers := `{"credHelpers":{"` + host + `":"telesphorepo"}}`
 			return ci.PublishSteps{
-				Build: `docker build -t "` + image + ":" + tag + `" .`,
+				Build:   `docker build -t "` + image + ":" + tag + `" .`,
+				BuildPS: `docker build -t "` + image + ":" + psTag + `" .`,
+				// The helper asks for an identity token for this server and checks the audience of
+				// OIDC_TOKEN against it.
+				Env: map[string]string{"TELESPHOREPO_SERVER": baseURL},
 				Publish: `export DOCKER_CONFIG="$(mktemp -d)"` + "\n" +
 					"printf '%s\\n' '" + helpers + `' > "$DOCKER_CONFIG/config.json"` + "\n" +
 					`docker push "` + image + ":" + tag + "\"\n",

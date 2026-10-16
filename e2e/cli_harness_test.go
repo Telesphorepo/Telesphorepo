@@ -346,13 +346,15 @@ func publishLog(t testing.TB, s *Server, repo string) []publishLogItem {
 // ---------------------------------------------------------------- CI identity
 
 // createCITrust adds an enabled trust policy for the Keycloak issuer on repos, shaped like a
-// GitHub Actions release policy, for tokens with the audience ciAudience.
+// GitHub Actions release policy, for tokens with the audience base_url (the policy's audience
+// is empty). The CLI sends a CI token only to the server of its audience, so a test starts each
+// server with the alias of ciAlias.
 func createCITrust(t testing.TB, s *Server, issuer string, repos ...string) {
 	t.Helper()
 	s.MustAPI(t, http.MethodPost, "/api/publish/trusts", map[string]any{
 		"name":     RandName("github"),
 		"issuer":   issuer,
-		"audience": ciAudience,
+		"audience": "",
 		"claims": map[string][]string{
 			"repository":   {kcCIRepository},
 			"ref":          {"refs/tags/v*"},
@@ -361,6 +363,17 @@ func createCITrust(t testing.TB, s *Server, issuer string, repos ...string) {
 		"jwks":  "",
 		"repos": repos,
 	}, s.Admin(), nil)
+}
+
+// ciAlias starts a Keycloak whose CI tokens have the audience of a server with a new alias, and
+// returns the alias. Each server of the test starts with it (ForEachStorage runs the servers one
+// after the other), so its base_url is the audience of the tokens.
+func ciAlias(t testing.TB, kc *Keycloak) string {
+	t.Helper()
+	alias := RandName("repo")
+	kc.CIAudience = "http://" + alias + ":8080"
+	kc.Start(t, "http://callback.invalid"+oidcCallbackPath)
+	return alias
 }
 
 // gitHubTokenServer plays the GitHub Actions ID-token endpoint: a JDK jwebserver serving

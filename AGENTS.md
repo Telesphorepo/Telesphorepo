@@ -20,7 +20,7 @@ go tool task doctor         # show detected Go / bun / Node / Docker-Podman
 
 go build ./...
 go vet ./...
-go vet -tags e2e ./e2e/...  # e2e files only compile with a tag; also vet -tags import, scale and clients
+go vet -tags e2e ./e2e/...  # e2e files only compile with a tag; also vet -tags import, scale, clients and macos
 E2E_SKIP_BUILD=1 go tool task test -run TestX   # reuse the already-built image
 ```
 
@@ -29,8 +29,10 @@ or shell script, so it works the same on Windows, macOS and Linux. The UI build 
 the fallback) and Node 26+ (see `.node-version`). The e2e suite needs Docker or Podman.
 
 **Who runs what.** A subagent builds and vets: `go build ./...`, `go vet ./...`, `go vet` with
-each of the four tags, `go tool task gen` and `bun run build` in `web/`. A subagent never runs a
-test, a dev server or a preview. The main session runs the zones.
+each of the five tags, `go vet` of `./cmd/telesphorepo` with `GOOS=darwin` and `GOOS=windows`,
+`go tool task gen` and `bun run build` in `web/`. A subagent never runs a test, a dev server or a
+preview. The main session runs the zones. Only the `macos` job of `release.yml` runs the macOS
+zone (tag `macos`).
 
 **Which zone.** Run the core zone for every change. Run the import zone when you touch
 `internal/nexus`, an importer or the `mirror` operation. Run the scale zone when you touch a hot

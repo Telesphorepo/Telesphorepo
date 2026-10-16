@@ -34,9 +34,10 @@ curl -fsS -u "telesphorepo:$TELESPHOREPO_TOKEN" -T /tmp/ci.txt "$url/com/acme/ci
 func TestCLICI(t *testing.T) {
 	c := newCLI(t)
 	kc := newKeycloak(t)
-	kc.Start(t, "http://callback.invalid"+oidcCallbackPath)
+	alias := ciAlias(t, kc)
 	gh := startGitHubTokenServer(t)
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
+		opts.Alias = alias
 		s := StartServer(t, opts)
 		repo := RandName("ci")
 		s.CreateRepo(t, repo, "maven", false, nil)
@@ -59,6 +60,16 @@ func TestCLICI(t *testing.T) {
 		out = c.mustRun(t, curlImage, "Jenkins", "cd /work/app && telesphorepo publish", ClientOpts{Files: files, Env: map[string]string{
 			"JENKINS_URL": "http://jenkins.example/", "OIDC_TOKEN": tok, "E2E_VERSION": "1.0", "E2E_SECRET": tok}})
 		wantText(t, "publish in Jenkins", out, "Publishing to "+repo+" (maven)", "child: OIDC_TOKEN=unset", "child: TELESPHOREPO_TOKEN set")
+
+		// A project file that names another server gets no CI token: its audience is this server.
+		other := []ContainerFile{{Path: "/work/app/telesphorepo.toml", Content: "server = \"http://other.invalid:8080\"\nrepo = \"" + repo + "\"\n"},
+			files[1], files[2]}
+		code, out = c.run(t, curlImage, "Jenkins with another server", "cd /work/app && telesphorepo publish", ClientOpts{Files: other, Env: map[string]string{
+			"JENKINS_URL": "http://jenkins.example/", "OIDC_TOKEN": tok, "E2E_SECRET": tok}})
+		if code != 1 {
+			t.Fatalf("publish in Jenkins to another server: exit %d, want 1:\n%s", code, out)
+		}
+		wantText(t, "publish in Jenkins to another server", out, "the identity token in OIDC_TOKEN is for "+s.InternalURL+", not for http://other.invalid:8080")
 
 		tok = kc.CIToken(t)
 		gh.Serve(t, tok)
@@ -107,7 +118,8 @@ func TestCLICI(t *testing.T) {
 
 // TestCLIUpload: publish FILE uploads files into the folder "path" of a raw repo (a file of
 // 64 MiB or more through the resumable upload routes) and .deb packages to the distribution and
-// component of a Debian repo, which apt then installs.
+// component of a Debian repo (a package of 64 MiB or more through the resumable upload routes as
+// well), which apt then installs.
 func TestCLIUpload(t *testing.T) {
 	c := newCLI(t)
 	debs := buildDebPackages(t)
@@ -141,6 +153,14 @@ sed -i 's/^dist = .*/dist = "trixie"/' telesphorepo.toml
 cat telesphorepo.toml
 echo '=== deb publish ==='
 telesphorepo publish /work/pkgs/hello-1.0.deb /work/pkgs/native.deb
+mkdir -p /tmp/big/DEBIAN /tmp/big/usr/share/e2e-big
+printf 'Package: e2e-big\nVersion: 1.0\nArchitecture: all\nMaintainer: E2E <e2e@telesphorepo.test>\nDescription: big\n' > /tmp/big/DEBIAN/control
+head -c 68157440 /dev/urandom > /tmp/big/usr/share/e2e-big/blob
+dpkg-deb --root-owner-group -Zgzip --build /tmp/big /tmp/e2e-big.deb >/dev/null
+rm -rf /tmp/big
+echo '=== big deb publish ==='
+telesphorepo publish /tmp/e2e-big.deb
+rm /tmp/e2e-big.deb
 `, ClientOpts{
 			Files: []ContainerFile{{Path: "/work/pkgs/hello-1.0.deb", Content: string(debs.hello1)}, {Path: "/work/pkgs/native.deb", Content: string(debs.native)}},
 			Env:   map[string]string{"RAW_LINK": s.NewSetupCode(t, dev, raw).Link, "DEB_LINK": s.NewSetupCode(t, dev, deb).Link},
@@ -165,6 +185,8 @@ telesphorepo publish /work/pkgs/hello-1.0.deb /work/pkgs/native.deb
 		wantText(t, "set up a Debian repo", section(out, "deb setup"), "Packages go to distribution stable, component main.", `dist = "trixie"`)
 		wantText(t, "publish .deb packages", section(out, "deb publish"), "Uploaded e2e-hello 1.0 (all) to trixie/main of "+deb,
 			"Uploaded e2e-native 1.0 ("+debs.arch+") to trixie/main of "+deb)
+		wantText(t, "publish a large .deb package", section(out, "big deb publish"), "Uploading /tmp/e2e-big.deb (", "in chunks of 16 MiB",
+			"Uploaded e2e-big 1.0 (all) to trixie/main of "+deb)
 		s.WaitDebianIndexed(t, deb)
 		apt := debAptInstall(t, s, deb, s.AdminUser, s.AdminPass, s.DebianKey(t, deb, nil))
 		wantText(t, "apt install", apt, "RESULT: hello 1.0", "NATIVE: native "+debs.arch)

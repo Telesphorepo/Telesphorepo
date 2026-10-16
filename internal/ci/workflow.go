@@ -51,6 +51,9 @@ type PublishSteps struct {
 	// Build builds and tests before the publish ("" for none). Jenkins runs it in a stage of its
 	// own; GitHub Actions in a step of its own.
 	Build string
+	// BuildPS is the PowerShell command of Build for a Jenkins agent on Windows. "": Build, which
+	// then must also run in PowerShell.
+	BuildPS string
 	// Publish are the shell commands that publish after the install step, e.g. "telesphorepo
 	// publish".
 	Publish string
@@ -164,7 +167,8 @@ func yamlList(xs []string) string {
 }
 
 // Jenkinsfile returns a declarative Jenkinsfile that publishes to repo of the server at baseURL
-// with s. Build runs in a stage of its own. The publish stage binds the identity token to
+// with s. Build runs in a stage of its own: with sh on a Unix agent, with PowerShell on a Windows
+// agent. The publish stage binds the identity token to
 // OIDC_TOKEN: Jenkins makes the token when withCredentials starts, and the server takes a token for
 // 10 minutes only. Inside it, the stage installs the CLI and publishes: with sh on a Unix agent,
 // with PowerShell on a Windows agent. A Trigger that is not the zero Trigger limits the publish
@@ -178,7 +182,6 @@ func Jenkinsfile(repo, baseURL string, s PublishSteps, t Trigger) string {
 		}
 		return prefix + kind + " '''\n" + Indent(script, prefix+"  ") + prefix + "'''\n"
 	}
-	sh := func(script, prefix string) string { return step("sh", script, prefix) }
 	ps := s.PublishPS
 	if ps == "" {
 		ps = s.Publish
@@ -186,7 +189,13 @@ func Jenkinsfile(repo, baseURL string, s PublishSteps, t Trigger) string {
 	var b strings.Builder
 	b.WriteString("pipeline {\n  agent any\n  stages {\n")
 	if s.Build != "" {
-		b.WriteString("    stage('Build') {\n      steps {\n" + sh(s.Build, "        ") + "      }\n    }\n")
+		buildPS := s.BuildPS
+		if buildPS == "" {
+			buildPS = s.Build
+		}
+		b.WriteString("    stage('Build') {\n      steps {\n        script {\n          if (isUnix()) {\n" +
+			step("sh", s.Build, "            ") + "          } else {\n" +
+			step("powershell", buildPS, "            ") + "          }\n        }\n      }\n    }\n")
 	}
 	b.WriteString("    stage('Publish to " + repo + "') {\n")
 	if !t.zero() {

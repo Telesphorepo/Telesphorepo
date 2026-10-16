@@ -34,6 +34,13 @@ jobs:
           go vet -tags import ./e2e/...
           go vet -tags scale ./e2e/...
           go vet -tags clients ./e2e/...
+          go vet -tags macos ./e2e/...
+      - name: Vet and build the CLI for macOS and Windows
+        run: |
+          for os in darwin windows; do
+            GOOS=$os go vet ./cmd/telesphorepo
+            GOOS=$os go build -o /dev/null ./cmd/telesphorepo
+          done
       - name: Check the database
         run: bin/telesphorepo-server dbcheck
 

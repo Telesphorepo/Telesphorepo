@@ -197,7 +197,7 @@ func tools() []format.Tool {
 		{ID: "gradle", Label: "Gradle", CINote: ciNote,
 			Publish: func(_ *repos.Repo, _, system string) ci.PublishSteps {
 				if system == ci.Jenkins {
-					return ci.PublishSteps{Build: "./gradlew build", Publish: format.CLIPublish}
+					return ci.PublishSteps{Build: "./gradlew build", BuildPS: `.\gradlew.bat build`, Publish: format.CLIPublish}
 				}
 				return ci.PublishSteps{Toolchain: java, Publish: format.CLIPublish}
 			}},

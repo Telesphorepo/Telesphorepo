@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,6 +40,9 @@ type debMeta struct {
 	sp         *assets.Spooled
 }
 
+// upload adds the .deb of the request to dist/comp: the body, or with ?upload=<id>&sha256=<hex>
+// [&size=<n>] and no body the file of a resumable upload of the same publish session
+// (/api/repos/{name}/uploads), which this request finishes.
 func (h *Handler) upload(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	repo := c.Repo
 	dist, comp := r.PathValue("dist"), r.PathValue("component")
@@ -46,9 +50,16 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, c *route.Call) 
 		httpx.Error(w, r, http.StatusBadRequest, "invalid distribution or component name")
 		return
 	}
-	sp, ok := format.Kit{Assets: h.assets}.SpoolBody(w, r)
-	if !ok {
-		return
+	var sp *assets.Spooled
+	if id := r.URL.Query().Get("upload"); id != "" {
+		if sp = h.finishUpload(w, r, c, id); sp == nil {
+			return
+		}
+	} else {
+		var ok bool
+		if sp, ok = (format.Kit{Assets: h.assets}).SpoolBody(w, r); !ok {
+			return
+		}
 	}
 	defer sp.Close()
 	res, out, err := h.ingest(r.Context(), repo, dist, comp, sp, format.OriginOf(c.P, assets.SourcePut))
@@ -60,6 +71,39 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, c *route.Call) 
 	default:
 		httpx.WriteJSON(w, http.StatusOK, out)
 	}
+}
+
+// finishUpload ends the resumable upload id of the caller's publish session with the sha256 and
+// size of the query, and returns its file. It answers the error itself and returns nil: 404 for
+// an unknown upload, 400 for a bad query or bytes that do not match (the upload is deleted).
+func (h *Handler) finishUpload(w http.ResponseWriter, r *http.Request, c *route.Call, id string) *assets.Spooled {
+	q := r.URL.Query()
+	digest := strings.ToLower(q.Get("sha256"))
+	if len(digest) != 64 || strings.Trim(digest, "0123456789abcdef") != "" {
+		httpx.Error(w, r, http.StatusBadRequest, "give sha256, the 64 hex digits of the SHA-256 of the whole file")
+		return nil
+	}
+	size := int64(-1)
+	if s := q.Get("size"); s != "" {
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil || n < 0 {
+			httpx.Error(w, r, http.StatusBadRequest, "invalid size")
+			return nil
+		}
+		size = n
+	}
+	sp, err := h.host.Uploads.Finish(r.Context(), id, c.P, c.Repo, digest, size)
+	switch {
+	case errors.Is(err, assets.ErrUploadUnknown):
+		httpx.Error(w, r, http.StatusNotFound, err.Error())
+	case errors.Is(err, assets.ErrDigest):
+		httpx.Error(w, r, http.StatusBadRequest, err.Error())
+	case err != nil:
+		route.Fail(w, r, err)
+	default:
+		return sp
+	}
+	return nil
 }
 
 // readerAt returns the content of sp for the .deb parser.

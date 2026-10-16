@@ -32,6 +32,35 @@ jobs:
           gh release create "$GITHUB_REF_NAME" bin/release/* \
             --title "$GITHUB_REF_NAME" --generate-notes --verify-tag $prerelease
 
+  # The darwin server and CLI on a real Mac: install.sh installs the CLI, which sets up and
+  # publishes a Maven and a raw project (e2e/macos_test.go).
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Install Maven
+        run: command -v mvn || brew install maven
+      - name: Build the server
+        run: go tool task build
+      - name: Set up and publish with the CLI
+        run: go test -tags macos -count=1 -timeout 30m -v -run TestMacOS ./e2e/
+        env:
+          E2E_SERVER_BIN: ${{ github.workspace }}/bin/telesphorepo-server
+
   image:
     runs-on: ubuntu-latest # one runner label per job; change it here to switch runner provider
     timeout-minutes: 60
