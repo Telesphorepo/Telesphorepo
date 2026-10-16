@@ -34,6 +34,7 @@ away.
 | License of the CLI | **MIT** for `cmd/telesphorepo` and its packages, in their own LICENSE file. The server stays AGPL-3.0 | Every developer and CI job installs the CLI; companies install MIT code without review |
 | Where the CLI downloads come from | **The server embeds the CLI archives** of its own build (section 8) | Version lockstep with the server and installs with no internet |
 | Which CLI version is current | **The server of the current project.** The CLI syncs to it, as an NTP client syncs to its stratum (section 9) | The server serves the CLI of its own build, so its version is the right version |
+| How an older and a newer side work together | **A change log that both sides read, and RFC 9457 problem documents with a remedy.** No protocol number (section 9) | The newer side always holds the entries of the gap. A protocol number would change with every break during development and fail every older side as a whole |
 
 New Go module for the client: `github.com/BurntSushi/toml` (read `telesphorepo.toml` and the
 Cargo config).
@@ -190,9 +191,18 @@ Every command has an example-led `--help`. No command takes a token as an argume
   factor and `repo.publish` on the repo (`route.RepoRule`). It answers `{code, link, expires_at}`
   and records `setup_code.create`. `POST /api/devices/setup` (public) takes `{code, name,
   public_key}` or `{code, device_id, nonce, signature}`. It deletes the code, enrolls or checks
-  the device, and records `device.setup`. A wrong, used or expired code answers 401
-  `this setup line is used or expired: copy a new one from <base_url>/#/repo/<name>`, without the
-  repo name when the code is unknown. `auth_challenges.kind` gets the value `setup_code`.
+  the device, and records `device.setup`. A wrong, used or expired code answers 401, the problem
+  `setup-code-used` with the remedy `open_url` to the Publish tab of the repo (the server root
+  when the code is unknown). `auth_challenges.kind` gets the value `setup_code`.
+- **Problem documents.** `httpx.Error` and `route.Fail` write RFC 9457 problem documents
+  (`application/problem+json`: `type`, `title`, `detail`, `status`, and `remedy` where one
+  applies) for every route under `/api/`, `/cli/` and the install scripts. A problem type is
+  declared once with its title and remedy. The web client (`web/src/lib/api/`) reads `title` and
+  `detail`. Format routes keep the error form of their protocol (the OCI errors of Docker, the
+  plain text of Maven), because their own clients read it.
+- **Change log.** `changes.toml` at the repo root, embedded in the server and in the CLI.
+  `GET /api/changes?since=<version>` (public) answers the entries newer than `since`. Every
+  response carries `Telesphorepo-Version`.
 - **Mint answer.** `POST /api/publish/sessions` and `/oidc` also answer `format` and `kind`.
 - **Session from a token exchange nonce.** `POST /api/publish/sessions/exchange` with `{proof:
   "trx.<device id>.<nonce>.<signature>", repo}` calls the `Minter` that `/docker/token` uses: one
@@ -281,29 +291,106 @@ Changes in `internal/ci/workflow.go` and the tools:
   Maven and a raw project. Both repos are public, so the standard runner is free. Agents never
   start that job.
 
-## 9. Version check and update
+## 9. Compatibility: the change log and self-describing errors
 
-**Two numbers.** `version` is the release (`main.version`, stamped by `go tool task build` and
-`release`). `protocol` is an integer that changes only when the CLI–server API breaks. The CLI
-imports no server package, so each side keeps its own `protocol` constant. `TestCLIVersion` checks
-that the two are equal.
+The CLI and the server have no protocol number. Two things that are fixed on day one keep a newer
+and an older side working together: a change log that both sides read, and errors that describe
+themselves.
 
-**The exchange.** Every request of the CLI and of its helper modes sends
-`User-Agent: telesphorepo-cli/<version> (<os>/<arch>)`. Every response of the server to such a
-request carries `Telesphorepo-CLI: <version>; protocol=<n>`, the CLI of its own build. The CLI makes
-no request for the check.
+### The change log
 
-| State | On a TTY | Without a TTY (CI, a hook) |
-|---|---|---|
-| Same version | Nothing | Nothing |
-| Other version, same protocol | After the command ends: `the server has CLI v0.4.0, you have v0.3.1. Update now? [Y/n]`, at most once a day per server (`~/.telesphorepo/<server>/update.json`) | One notice line on stderr, at most once a day per server |
-| The CLI protocol is older | The server answers 426 `update the CLI: telesphorepo update`. The CLI asks Y/n, updates and runs the command again | The 426 message with the install line; exit 1 |
-| The CLI protocol is newer | The CLI stops: `this server is older than your CLI; run telesphorepo update to install the server's version` | The same message; exit 1 |
+**One file.** `changes.toml` at the repo root is embedded in the server and in the CLI. Both come
+from the same repo, so each side holds every entry up to its own version. The newer side always
+holds the entries of the gap:
 
-The Docker and Cargo helpers never ask. They print the notice on stderr only. A CLI with version
-`dev` and a server with version `dev` skip the check.
+- Older CLI, newer server: the CLI reads the server's entries from `GET /api/changes?since=<cli
+  version>` (public).
+- Newer CLI, older server: the CLI reads its own embedded entries back to the server's version.
 
-**`telesphorepo update`:**
+**The entry.** The fields and their meaning are fixed on day one:
+
+```toml
+[[change]]
+version = "v0.6.0"
+scope   = "publish/npm"
+needs   = "server"
+summary = "npm publish uses the new upload route"
+```
+
+| Field | Meaning |
+|---|---|
+| `version` | The release that made the change, or `dev` before a release |
+| `scope` | What the change affects: a command (`setup`, `publish`, `login`, `update`), a command and a format (`publish/npm`), or a helper (`helper/docker`, `helper/cargo`). A scope matches itself and every scope under it: `publish` matches `publish/npm` |
+| `needs` | The side that must be at least `version` for the scope to work: `server` or `cli` |
+| `summary` | One sentence for the person. The CLI prints it as it is |
+
+A field that the CLI does not know is ignored. An unknown `needs` value counts as `cli`.
+
+**Who writes an entry.** An entry is needed only when an older CLI or an older server would fail in
+a scope. Most changes need none. Entries of unreleased work have `version = "dev"` and count for
+nothing. `go tool task release <version>` writes the release version into each `dev` entry before
+it builds.
+
+**What the CLI does before a command.** It takes the entries between its own version and the
+server's version whose scope matches the command:
+
+| Entry | The CLI |
+|---|---|
+| None | Runs the command |
+| `needs = "cli"`, newer than the CLI | Prints the summary and asks `Update now? [Y/n]`. It updates and runs the command again. Without a TTY: the summary, the install line, exit 1 |
+| `needs = "server"`, newer than the server, and the CLI keeps the older path of the scope | Takes the older path. The CLI that wrote the entry also wrote the older path |
+| `needs = "server"`, newer than the server, no older path | Prints the summary and `this needs server v0.6.0; the server runs v0.5.2. Ask the server admin to update.`, exit 1 |
+
+**The server version.** Every response carries `Telesphorepo-Version: <version>`. Every request of
+the CLI and of its helper modes sends `User-Agent: telesphorepo-cli/<version> (<os>/<arch>)`. The
+CLI keeps the server's version and entries in `~/.telesphorepo/<server>/changes.json`, and fetches
+the entries again only when the header shows another version. A `dev` CLI or a `dev` server skips
+the check.
+
+**Drift without a break.** When the server's version is newer than the CLI's, the CLI asks after
+the command ends: `the server has CLI v0.4.0, you have v0.3.1. Update now? [Y/n]`, at most once a
+day per server. Without a TTY, and in the helper modes, it prints one line on stderr instead. A
+newer CLI never offers to go back.
+
+### Self-describing errors
+
+Every error of `/api/` and of the CLI routes is an RFC 9457 problem document
+(`application/problem+json`):
+
+```json
+{
+  "type": "urn:telesphorepo:problem:setup-code-used",
+  "title": "This setup line is already used",
+  "detail": "A setup line works once. Copy a new one from the Publish tab of releases.",
+  "status": 401,
+  "remedy": { "action": "open_url", "url": "https://repo.example.com/#/repo/releases" }
+}
+```
+
+- **The message is the server's.** The CLI prints `title` and `detail` as they are. It adds no
+  chain of its own (`publish: mint: post: ...`), so a new error of a newer server reads the same in
+  an older CLI.
+- **`remedy.action`** is one of a list that the CLI implements on day one:
+
+  | Action | The CLI |
+  |---|---|
+  | `update_cli` | Offers `telesphorepo update` |
+  | `update_server` | Names the server admin and the server version that `version` gives |
+  | `login` | Runs the device flow, then the command again |
+  | `setup` | Prints the Publish tab link of `url` |
+  | `retry` | Waits `after` seconds and tries once more |
+  | `open_url` | Prints `url`, and opens it on a TTY |
+  | `fix_project` | Names `file` and prints `detail` |
+
+  An unknown action prints `detail` and `url`. An unknown field is ignored.
+- **`type`** is a stable name for the problem. The CLI uses it only to choose an older path (the
+  change log table); it never needs to know a type to show the problem.
+- **A response that is not a problem document,** such as an HTML 502 of a proxy, gets one message:
+  `the server at <url> answered 502 with text/html; a proxy in front of it may be down`.
+- **A child process error** (`mvn`, `npm`) is the tool's own. The CLI passes its output through and
+  adds one line with the exit code.
+
+### `telesphorepo update`
 
 1. It downloads `GET /cli/telesphorepo_<os>_<arch>.<ext>` and `GET /cli/SHA256SUMS` from the server
    and checks the hash.
@@ -314,11 +401,11 @@ The Docker and Cargo helpers never ask. They print the notice on stderr only. A 
    old file.
 4. When the folder is not writable, it names the folder and prints the install line of the server.
 
-The update can install an older version: the target is the server's CLI, not the newest one.
+When the CLI is newer than the server, `update` says so and changes nothing: a newer CLI works with
+an older server.
 
-**Several servers.** One binary follows the server of the current project. Another enrolled server
-on another version still works while the protocols are equal, and gives the message of the table
-when they are not.
+**Several servers.** One binary works with every enrolled server. The change log of each server
+decides for that server.
 
 ## 10. E2E tests (clients zone, tag `clients`)
 
@@ -335,7 +422,7 @@ system (outside `/proc`) for `trs_`, `trsu_` and the CI token, and fails on a ma
 | `TestCLIGradle` | `gradle`, Kotlin and Groovy builds | `publish` of a library and of a Gradle plugin; a repository of another host gets no credentials; a build with no `maven-publish` gets the message |
 | `TestCLICI` | CLI with `jwebserver` serving a Keycloak token at `ACTIONS_ID_TOKEN_REQUEST_URL`; CLI with `OIDC_TOKEN` | GitHub and Jenkins paths mint OIDC sessions with build records; the child env has no `OIDC_TOKEN` |
 | `TestCLIUpload` | CLI, curl, apt | Raw and Debian `publish FILE`; apt installs the package |
-| `TestCLIVersion` | CLI built with two versions and two protocols | The header on each answer; the notice and the daily limit; 426 for an old protocol; the stop for a new protocol; `update` replaces the binary and the helper name and checks the hash; the protocol constants of CLI and server are equal |
+| `TestCLICompat` | CLI and server built at two versions, with test entries in `changes.toml` | The version header; the drift notice and its daily limit; a `needs = "cli"` entry makes the older CLI offer the update; a `needs = "server"` entry makes the newer CLI take the older path, or stop with the summary; an unknown field and an unknown remedy action are ignored; a proxy's HTML 502 gets the generic message; `update` replaces the binary and the helper name, checks the hash, and changes nothing for a newer CLI |
 | `TestInstall` | `debian`, `alpine`, `mcr.microsoft.com/powershell` | `install.sh` and `install.ps1` install a binary that runs, make the helper name, pass arguments to the CLI, and refuse a wrong hash |
 
 Each new format adds its row when its server side lands: npm with each of npm, pnpm, yarn and bun;
