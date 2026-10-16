@@ -234,10 +234,10 @@ export type Format = {
   };
   /** The Nexus formats whose files this format imports, e.g. "maven2". */
   import_sources: string[];
-  /** The build tools that publish to the format; project names the files of a tool with a project setup. */
-  tools: { id: string; label: string; setup: boolean; project?: string }[];
-  /** A tool of the format has a part in /setup.sh and /setup.ps1. */
-  setup: boolean;
+  /** The build tools that publish to the format. */
+  tools: { id: string; label: string }[];
+  /** The publish category: "cli" (telesphorepo publish in the project folder) or "helper" (the native command of the tool). */
+  publish: "cli" | "helper";
 };
 /** hosted: files published here; proxy: a cache of a remote repository; group: reads several repositories. */
 export type RepoKind = "hosted" | "proxy" | "group";
@@ -796,8 +796,7 @@ export type NexusLogLine = { id: number; at: string; source_repo: string; level:
 
 // --- publishing ---
 
-/** client is a publisher client ID that a module registers, e.g. "gradle". */
-export type EnrollmentRequest = { name: string; client: string; public_key: string };
+export type EnrollmentRequest = { name: string; public_key: string };
 export type Enrollment = {
   device_code: string;
   user_code: string;
@@ -808,9 +807,6 @@ export type Enrollment = {
 export type PendingEnrollment = {
   user_code: string;
   name: string;
-  client: string;
-  client_title: string;
-  client_help: string;
   expires_at: string;
 };
 
@@ -820,15 +816,15 @@ export type Device = {
   /** Set in the list of a holder of People (every user's devices). */
   username?: string;
   name: string;
-  /** The publisher client it was enrolled from, e.g. "gradle", and its title. */
-  client: string;
-  client_title: string;
   created_at: string;
   expires_at: string;
   last_used_at: string | null;
   revoked_at: string | null;
   state: string;
 };
+
+/** A setup code for one repo: link is the address to give to "telesphorepo setup". It is valid until expires_at and works once. */
+export type SetupCode = { code: string; link: string; expires_at: string };
 
 /** A minted publish session. `token` is shown once. */
 export type PublishSession = { id: number; token: string; repo: string; expires_at: string };

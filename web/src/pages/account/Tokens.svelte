@@ -204,7 +204,7 @@
   {#if sso}
     <CompactEmpty
       icon={UploadIcon}
-      text="You sign in with single sign-on, so this account has no publish tokens. Publish from your computer with the publisher client of your build tool, or from CI."
+      text="You sign in with single sign-on, so this account has no publish tokens. Publish from your computer with the Telesphorepo CLI, or from CI."
     />
   {:else}
     {#if created}
@@ -274,7 +274,7 @@
           icon={UploadIcon}
           text={noRepo
             ? "You cannot publish to a repository yet. Ask a person who manages its access for the Publish permission."
-            : "A token shows here each time you, your build tool or this site publishes."}
+            : "A token shows here each time you, the Telesphorepo CLI or this site publishes."}
         >
           {#if writable.length}<Button variant="outline" size="sm" onclick={startPublish}><PlusIcon />New publish token</Button>{/if}
         </CompactEmpty>

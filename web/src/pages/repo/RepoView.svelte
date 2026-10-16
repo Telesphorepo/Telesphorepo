@@ -76,6 +76,13 @@
     if (rest.replace(/\/$/, "") === "setup") navigate(repoPath(name, "use"), { replace: true });
   });
 
+  // A single sign-on account returns from its identity provider to the repo page, with a setup grant or an error code.
+  $effect(() => {
+    if (rest === "" && (query.has("setup_grant") || query.has("error"))) {
+      navigate(repoPath(name, "publish"), { query: { setup_grant: query.get("setup_grant") ?? undefined, error: query.get("error") ?? undefined }, replace: true });
+    }
+  });
+
   const r = $derived(repo.data ?? null);
   const group = $derived(r?.kind === "group");
   const proxy = $derived(r?.kind === "proxy");
@@ -229,6 +236,6 @@
     <UseTab repo={r} {usage} {base} />
     {#if group}<GroupMembersList repo={r} />{/if}
   {:else}
-    <PublishTab repo={r} {usage} {canUpload} />
+    <PublishTab repo={r} {usage} {canUpload} {query} />
   {/if}
 {/if}

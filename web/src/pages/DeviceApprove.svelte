@@ -1,5 +1,5 @@
 <!--
-  Device approval. The login command of the publisher client of your build tool prints a code and
+  Device approval. The login command of the Telesphorepo CLI prints a code and
   this address (/#/device?code=ABCD-EFGH). Two steps: enter the code, then check the device (a felt
   ticket with the code on its stub) and confirm it is you. A local account confirms with a fresh
   second factor. A single sign-on account signs in again at its identity provider; the server then
@@ -24,6 +24,7 @@
   import RelativeTime from "$lib/components/RelativeTime.svelte";
   import FreshFactor from "$lib/components/FreshFactor.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
+  import { cliName, ssoErrors } from "./account/words";
   import CircleCheckIcon from "@lucide/svelte/icons/circle-check";
 
   let { query }: PageProps = $props();
@@ -46,16 +47,6 @@
 
   // Single sign-on: the server comes back here with a grant or an error code.
   const sso = $derived(auth.user?.kind === "oidc");
-  const ssoErrors: Record<string, string> = {
-    stale_sign_in:
-      "Your identity provider did not ask you to sign in again: the sign-in it sent is more than 5 minutes old. The provider ignored the request for a new sign-in (prompt=login, max_age=0). Ask an administrator to let the provider force a new sign-in for this app.",
-    no_auth_time:
-      "Your identity provider did not say when you signed in (the ID token has no auth_time), so the server cannot check that the sign-in is new. Ask an administrator to add auth_time to the ID token.",
-    wrong_account: "You signed in to your identity provider with another account. Sign in again with this account.",
-    account_disabled: "This account is disabled.",
-    not_sso: "You sign in with a password. Confirm with two-step verification.",
-    sso_failed: "Single sign-on failed. Try again.",
-  };
   let ssoError = $state(
     untrack(() => {
       const e = query.get("error");
@@ -81,7 +72,7 @@
     } catch (e) {
       lookupError =
         e instanceof ApiError && e.notFound
-          ? "This code is unknown or has expired. Run the login command again to get a new code."
+          ? "This code is unknown or has expired. Run telesphorepo login again to get a new code."
           : errorMessage(e);
     } finally {
       looking = false;
@@ -126,7 +117,7 @@
       <div class="w-full max-w-[20rem] shrink-0 sm:max-w-[24rem]">
         <FeltTicket
           top={approved.name}
-          bottom={approved.client_title}
+          bottom={cliName}
           serial={approved.user_code}
           moment="tear"
           label="The ticket of {approved.name}, its stub torn off"
@@ -135,7 +126,7 @@
       <div class="flex min-w-0 flex-col gap-3" aria-live="polite">
         <p class="flex items-center gap-2 text-section text-success"><CircleCheckIcon class="size-5" />Device approved</p>
         <p class="text-body text-muted-foreground">
-          {approved.name} can now publish as {auth.user?.username}. Go back to your terminal: the login command finishes by itself.
+          {approved.name} can now publish as {auth.user?.username}. Go back to your terminal: telesphorepo login finishes by itself.
         </p>
         <div><Button variant="outline" href={href("/settings/devices")}>Open your devices</Button></div>
       </div>
@@ -177,9 +168,9 @@
           <div class="w-full max-w-[20rem] shrink-0">
             <FeltTicket
               top={pending.name}
-              bottom={pending.client_title}
+              bottom={cliName}
               serial={pending.user_code}
-              label="The ticket of {pending.name}, {pending.client_title}"
+              label="The ticket of {pending.name}, {cliName}"
             />
           </div>
           <!-- The ticket shows the name and the client. The code on its stub reads sideways, so the

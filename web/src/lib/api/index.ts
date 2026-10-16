@@ -348,6 +348,11 @@ export const api = {
     /** A manual publish session for one repo after a fresh second factor. */
     manualSession: (repo: string, proof: T.FreshProof) =>
       request<T.PublishSession>("POST", "/api/publish/sessions/manual", { body: { repo }, proof: proofHeader(proof) }),
+    /** A setup code for one repo after a fresh second factor. */
+    setupCode: (repo: string, proof: T.FreshProof) =>
+      request<T.SetupCode>("POST", "/api/publish/setup-codes", { body: { repo }, proof: proofHeader(proof) }),
+    /** Full-page navigation target of an SSO account: a new sign-in that returns to the repo page with ?setup_grant=. */
+    ssoSetupURL: (repo: string) => `/api/auth/oidc/setup?repo=${enc(repo)}`,
     /** The caller's sessions, newest first. */
     sessions: (p?: T.PageParams) => request<T.Page<T.SessionInfo>>("GET", "/api/publish/sessions", { query: page(p) }),
     /** Ends a session; authenticates with its own token. */

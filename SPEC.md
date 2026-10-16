@@ -2376,27 +2376,26 @@ page are in `web/src/README.md`.
     to your build". A private repo has two numbered steps: create a read token, then add it to the
     build; the snippets already hold the credentials.
   - `publish`: **Publish to this repository**, for users who can publish (others see a lock and
-    "You cannot publish to X"). One card each for From your computer, From CI and By hand; the tabs
-    are the tools of the snippets, with the labels of the `/usage` answer. A repo whose format has
-    a project setup (`setup` of its descriptor: Maven) shows one **Set up your project** card in
-    place of From your computer and From CI:
-    numbered steps "Where will you publish from?" (Your computer only, GitHub Actions, Jenkins
-    with a Jenkinsfile, Jenkins freestyle job), the OS (macOS or Linux, or Windows) and the
-    setup command (see **Project setup**) with the repo, the server and the choice (`--ci none`, or `-Ci none`, for Your computer only) filled in and a copy
-    button; for a CI choice, Add a CI pipeline; then Publish. The snippets below stay behind one
-    **Set it up by hand** disclosure, with the CI snippets of the chosen CI system. The
-    notice of a paused repo (a Nexus mirror) shows once, above the tabs. The snippets run in
-    order to a first publish: for Gradle the settings file (the `com.telesphorepo.publish` plugin
-    at the client version, `url`, `repository` and `oidcTokenEnv = "OIDC_TOKEN"`) and
-    `./gradlew publish`; for Maven `.mvn/extensions.xml`, `.mvn/maven.config`, the
-    `<distributionManagement>` (`<repository>` and `<snapshotRepository>`) and `mvn deploy`. The
-    first publish on a computer asks for the device approval in the browser. The client version
-    is one constant, `clientsVersion` in `internal/maven/usage.go`.
-    From CI shows a full GitHub Actions workflow (`on: push` to `main`) and a full declarative
-    Jenkinsfile. The Jenkinsfile builds in one stage and binds the credential
-    `telesphorepo-id-token` to `OIDC_TOKEN` only in the publish stage, because Jenkins makes the
-    token when `withCredentials` starts and the server takes a token for 10 minutes only.
-    **New CI pipeline** (`ci.pipelines`) opens
+    "You cannot publish to X"). The **Set up a project** card comes first. Its button asks for a
+    fresh second factor (a single sign-on account signs in again at its identity provider through
+    `GET /api/auth/oidc/setup?repo=` and returns to the repo page with `?setup_grant=`, which the
+    page uses at once and removes from the address). Then `POST /api/publish/setup-codes` gives the
+    setup line for the OS of the browser (macOS or Linux, or Windows, on a toggle) with the time at
+    which it ends (10 minutes). The line is `curl -fsSL <base>/install.sh | sh -s -- setup '<link>'`
+    or `& ([scriptblock]::Create((irm <base>/install.ps1))) setup '<link>'`, and the link is
+    `<base>/#/setup/<code>`. Below the line, a format of the `cli` publish category (`publish` of
+    its descriptor) shows `telesphorepo publish`; a format of the `helper` category shows its
+    native commands. The snippets of the format stay behind one **Set it up by hand** disclosure.
+    Then From CI (a full GitHub Actions workflow, `on: push` to `main`, and a full declarative
+    Jenkinsfile that binds the credential `telesphorepo-id-token` to `OIDC_TOKEN` only in the
+    publish stage, because Jenkins makes the token when `withCredentials` starts and the server
+    takes a token for 10 minutes only) and By hand. The tabs are the tools of the snippets, with
+    the labels of the `/usage` answer. The notice of a paused repo (a Nexus mirror) shows once,
+    above the tabs.
+  - `/#/setup/<code>`: the page of a setup link. It says to run the line in a terminal in the
+    project folder and shows the line for the OS of the browser. It makes no API call, and the
+    code stays in the fragment.
+  - The devices lists and the approval page name no client. They show "Telesphorepo CLI".    **New CI pipeline** (`ci.pipelines`) opens
     `/#/settings/ci-pipelines/new?repo={name}&back=/repo/{name}/publish`.
   - `upload?folder=`: a full page. It starts with the fresh second-factor check, then one drop
     zone takes files or a folder (as the format's `upload` allows), followed by the upload plan of

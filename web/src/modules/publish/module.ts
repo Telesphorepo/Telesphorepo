@@ -7,6 +7,7 @@ import WorkflowIcon from "@lucide/svelte/icons/workflow";
 export const publish: ModuleUI = {
   id: "publish",
   pages: [
+    { path: "/setup/:code", layout: "app", access: "any", title: "Set up a project", page: () => import("../../pages/Setup.svelte") },
     { path: "/device", layout: "app", access: "user", title: "Approve a device", page: () => import("../../pages/DeviceApprove.svelte") },
     {
       path: "/settings/devices", layout: "settings", access: "user", title: "Devices",

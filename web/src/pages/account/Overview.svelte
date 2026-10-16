@@ -26,7 +26,7 @@
   import DatabaseIcon from "@lucide/svelte/icons/database";
   import LaptopIcon from "@lucide/svelte/icons/laptop";
   import UploadIcon from "@lucide/svelte/icons/upload";
-  import { clientName, deviceState, noDevices, tokenSource, tokenState } from "./words";
+  import { cliName, deviceState, noDevices, tokenSource, tokenState } from "./words";
 
   let {}: PageProps = $props();
 
@@ -107,7 +107,7 @@
   </DataTable>
 </Section>
 
-<Section title="Your devices" description="Computers that publish as you with the publisher client of your build tool.">
+<Section title="Your devices" description="Computers that publish as you with the Telesphorepo CLI.">
   {#snippet actions()}
     {#if devices.data?.length}<Button variant="outline" size="sm" href={href("/settings/devices")}>All devices</Button>{/if}
   {/snippet}
@@ -121,7 +121,7 @@
     {#snippet row(d)}
       {@const state = deviceState(d)}
       <Cell grow strong text={d.name} />
-      <Cell hideOnPhone muted>{clientName(d)}</Cell>
+      <Cell hideOnPhone muted>{cliName}</Cell>
       <Cell num muted><RelativeTime at={d.last_used_at} empty="Never" /></Cell>
       <Cell><StatusBadge tone={state.tone}>{state.word}</StatusBadge></Cell>
     {/snippet}
@@ -133,7 +133,7 @@
   </DataTable>
 </Section>
 
-<Section title="Recent publishes" description="The publish tokens that you and your build tools used last.">
+<Section title="Recent publishes" description="The publish tokens that you and the Telesphorepo CLI used last.">
   {#snippet actions()}
     {#if recent.data?.length}<Button variant="outline" size="sm" href={href("/settings/tokens")}>All publish tokens</Button>{/if}
   {/snippet}

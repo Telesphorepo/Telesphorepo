@@ -1,5 +1,5 @@
 <!--
-  Your account: devices, the computers that publish with the publisher client of their build tool
+  Your account: devices, the computers that publish with the Telesphorepo CLI
   with their own key. People with the People permission see the devices of every user.
 -->
 <script lang="ts">
@@ -19,7 +19,7 @@
   import RelativeTime from "$lib/components/RelativeTime.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import LaptopIcon from "@lucide/svelte/icons/laptop";
-  import { clientName, deviceState, noDevices } from "./words";
+  import { cliName, deviceState, noDevices } from "./words";
 
   let {}: PageProps = $props();
 
@@ -51,8 +51,8 @@
 <PageHeader
   title="Devices"
   description={admin
-    ? "Computers that publish with the publisher client of their build tool, for every person."
-    : "Computers that publish as you with the publisher client of your build tool."}
+    ? "Computers that publish with the Telesphorepo CLI, for every person."
+    : "Computers that publish as you with the Telesphorepo CLI."}
 >
   {#snippet actions()}
     {#if devices.items.length}<Button variant="outline" href={href("/device")}>Approve a device</Button>{/if}
@@ -65,7 +65,7 @@
       {@const state = deviceState(d)}
       <Cell grow strong text={d.name} />
       {#if admin}<Cell hideOnPhone text={d.username ?? ""} />{/if}
-      <Cell hideOnPhone muted>{clientName(d)}</Cell>
+      <Cell hideOnPhone muted>{cliName}</Cell>
       <Cell num muted><RelativeTime at={d.last_used_at} empty="Never" /></Cell>
       <Cell num muted hideOnPhone>{#if d.revoked_at}<span>—</span>{:else}<RelativeTime at={d.expires_at} />{/if}</Cell>
       <Cell><StatusBadge tone={state.tone}>{state.word}</StatusBadge></Cell>
