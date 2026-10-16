@@ -31,6 +31,9 @@ away.
 | Where the client code lives | This repo: `cmd/telesphorepo` and packages under it. It imports no server package | One release, one e2e suite, one version for server and client |
 | Gradle plugin, Maven extension, clients repo | **Retire all.** Stop releases, mark the published artifacts as deprecated in their README, archive `Telesphorepo/clients` | Maven Central does not delete artifacts |
 | Publisher client registry | **Delete it.** One client enrolls devices | The approval page names "Telesphorepo CLI" |
+| License of the CLI | **MIT** for `cmd/telesphorepo` and its packages, in their own LICENSE file. The server stays AGPL-3.0 | Every developer and CI job installs the CLI; companies install MIT code without review |
+| Where the CLI downloads come from | **The server embeds the CLI archives** of its own build (section 8) | Version lockstep with the server and installs with no internet |
+| Which CLI version is current | **The server of the current project.** The CLI syncs to it, as an NTP client syncs to its stratum (section 9) | The server serves the CLI of its own build, so its version is the right version |
 
 New Go module for the client: `github.com/BurntSushi/toml` (read `telesphorepo.toml` and the
 Cargo config).
@@ -172,6 +175,7 @@ picks one.
 | `telesphorepo login SERVER` | The device flow alone, for a computer that only reads, or for a person who wants to enroll first. Saves `~/.telesphorepo/<server>/device.json` and `hosts.json` |
 | `telesphorepo logout [SERVER]` | Revokes the device on the server, removes the hook entries of that server, and deletes `~/.telesphorepo/<server>/` |
 | `telesphorepo status` | Each enrolled server: the device, whether the server accepts it, the hooks. The current folder: the project file, the format, the tool that `publish` would run. Prints no secret |
+| `telesphorepo update [SERVER]` | Installs the CLI of the server: the server of the current project, else SERVER, else the one enrolled server. Section 9 |
 | `telesphorepo version`, `help [command]` | |
 | `docker-credential-telesphorepo get\|store\|erase\|list` | The Docker helper protocol. Docker runs it |
 | `telesphorepo cargo-credential --cargo-plugin` | The Cargo provider protocol. Cargo runs it. Not in the overview |
@@ -277,7 +281,46 @@ Changes in `internal/ci/workflow.go` and the tools:
   Maven and a raw project. Both repos are public, so the standard runner is free. Agents never
   start that job.
 
-## 9. E2E tests (clients zone, tag `clients`)
+## 9. Version check and update
+
+**Two numbers.** `version` is the release (`main.version`, stamped by `go tool task build` and
+`release`). `protocol` is an integer that changes only when the CLI–server API breaks. The CLI
+imports no server package, so each side keeps its own `protocol` constant. `TestCLIVersion` checks
+that the two are equal.
+
+**The exchange.** Every request of the CLI and of its helper modes sends
+`User-Agent: telesphorepo-cli/<version> (<os>/<arch>)`. Every response of the server to such a
+request carries `Telesphorepo-CLI: <version>; protocol=<n>`, the CLI of its own build. The CLI makes
+no request for the check.
+
+| State | On a TTY | Without a TTY (CI, a hook) |
+|---|---|---|
+| Same version | Nothing | Nothing |
+| Other version, same protocol | After the command ends: `the server has CLI v0.4.0, you have v0.3.1. Update now? [Y/n]`, at most once a day per server (`~/.telesphorepo/<server>/update.json`) | One notice line on stderr, at most once a day per server |
+| The CLI protocol is older | The server answers 426 `update the CLI: telesphorepo update`. The CLI asks Y/n, updates and runs the command again | The 426 message with the install line; exit 1 |
+| The CLI protocol is newer | The CLI stops: `this server is older than your CLI; run telesphorepo update to install the server's version` | The same message; exit 1 |
+
+The Docker and Cargo helpers never ask. They print the notice on stderr only. A CLI with version
+`dev` and a server with version `dev` skip the check.
+
+**`telesphorepo update`:**
+
+1. It downloads `GET /cli/telesphorepo_<os>_<arch>.<ext>` and `GET /cli/SHA256SUMS` from the server
+   and checks the hash.
+2. It writes the new binary in the folder of the running binary, then renames it into place. On
+   Windows it first renames the running file to `telesphorepo.exe.old`; every start deletes a
+   `.old` file that is left.
+3. It makes the `docker-credential-telesphorepo` name again, because a Windows hard link keeps the
+   old file.
+4. When the folder is not writable, it names the folder and prints the install line of the server.
+
+The update can install an older version: the target is the server's CLI, not the newest one.
+
+**Several servers.** One binary follows the server of the current project. Another enrolled server
+on another version still works while the protocols are equal, and gives the message of the table
+when they are not.
+
+## 10. E2E tests (clients zone, tag `clients`)
 
 The clients zone builds the CLI from this repo. Each test runs the real tool in a container
 against the real server, on both stores. After each publish, a test greps the container file
@@ -292,12 +335,13 @@ system (outside `/proc`) for `trs_`, `trsu_` and the CI token, and fails on a ma
 | `TestCLIGradle` | `gradle`, Kotlin and Groovy builds | `publish` of a library and of a Gradle plugin; a repository of another host gets no credentials; a build with no `maven-publish` gets the message |
 | `TestCLICI` | CLI with `jwebserver` serving a Keycloak token at `ACTIONS_ID_TOKEN_REQUEST_URL`; CLI with `OIDC_TOKEN` | GitHub and Jenkins paths mint OIDC sessions with build records; the child env has no `OIDC_TOKEN` |
 | `TestCLIUpload` | CLI, curl, apt | Raw and Debian `publish FILE`; apt installs the package |
+| `TestCLIVersion` | CLI built with two versions and two protocols | The header on each answer; the notice and the daily limit; 426 for an old protocol; the stop for a new protocol; `update` replaces the binary and the helper name and checks the hash; the protocol constants of CLI and server are equal |
 | `TestInstall` | `debian`, `alpine`, `mcr.microsoft.com/powershell` | `install.sh` and `install.ps1` install a binary that runs, make the helper name, pass arguments to the CLI, and refuse a wrong hash |
 
 Each new format adds its row when its server side lands: npm with each of npm, pnpm, yarn and bun;
 PyPI with uv, poetry, pdm and twine; RubyGems; Cargo through the provider.
 
-## 10. Deleted
+## 11. Deleted
 
 - `cmd/docker-credential-telesphorepo` as a separate command (its code moves into the CLI) and its
   release archive.
@@ -312,15 +356,6 @@ PyPI with uv, poetry, pdm and twine; RubyGems; Cargo through the provider.
   `TestDockerCredentialHelper`, `BuildHelper`, and the env vars `E2E_CLIENTS_DIR` and
   `E2E_CLIENTS_REF`.
 - In AGENTS.md and SPEC.md: the clients repo rows and sections, replaced by the CLI.
-
-## Open questions
-
-1. **License of the CLI.** The helper is AGPL-3.0 with the server. The Java clients were MIT, so
-   that companies install them without review. MIT for `cmd/telesphorepo` (its own LICENSE file),
-   or AGPL with the rest?
-2. **CLI downloads in the server.** Embedding the six archives adds about 20 MB (estimate) to the
-   server binary and image. It gives version lockstep and air-gapped installs. The other choice
-   is install scripts that fetch from GitHub Releases.
 
 ## Sources
 
