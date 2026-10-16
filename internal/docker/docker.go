@@ -23,6 +23,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/jobs"
 	"github.com/Telesphorepo/Telesphorepo/internal/module"
+	"github.com/Telesphorepo/Telesphorepo/internal/netrules"
 	"github.com/Telesphorepo/Telesphorepo/internal/perm"
 	"github.com/Telesphorepo/Telesphorepo/internal/publish"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
@@ -49,14 +50,29 @@ var LinkGrace = settings.Duration(&settings.Def{Key: "docker.link_grace", Defaul
 		return nil
 	}})
 
-// PushURL is the setting docker.push_url.
-var PushURL = settings.String(&settings.Def{Key: "docker.push_url", Label: "Docker push address",
-	Help:      "The address that Docker pushes to, e.g. https://push.repo.example.com. Set it when the main address goes through a proxy that limits request bodies (Cloudflare: 100 MB on Free and Pro). Docker sends each layer in one request, so a larger layer fails there. Point a DNS-only name at the server and enter it here. Snippets and CI files push to it; pulls keep the main address.",
-	Normalize: func(v any) any { return strings.TrimRight(strings.TrimSpace(v.(string)), "/") },
-	Validate:  validPushURL})
+// cloudflareNote is the 100 MB warning of the settings and of the push snippets.
+const cloudflareNote = "Behind Cloudflare (Free and Pro plans), each image layer must be under 100 MB. Pulls have no limit."
 
-// validPushURL accepts "" or an http(s) URL with a host and no path, user, query or fragment.
-func validPushURL(v any) error {
+// DirectUploads is the setting docker.direct_uploads.
+var DirectUploads = settings.Bool(&settings.Def{Key: "docker.direct_uploads", Default: "false", Label: "Expose the origin IP for Docker uploads",
+	Help: cloudflareNote + " A larger layer fails, unless this is on. When it is on, a push still starts on the main address, and the server tells the client to send the layer bytes to the Docker upload address. Clients need no setup. This makes the IP address of the server public. Open the port of the upload address in the firewall of the server for the clients that push. Not behind Cloudflare: leave it off."})
+
+// UploadURL is the setting docker.upload_url.
+var UploadURL = settings.String(&settings.Def{Key: "docker.upload_url", Label: "Docker upload address",
+	Help:      "The address of the server that takes the layer bytes when Expose the origin IP for Docker uploads is on, e.g. https://upload.repo.example.com: a DNS-only name (in Cloudflare, DNS only) or the address of the server. ORAS and Helm 4 push to this address.",
+	Normalize: func(v any) any { return strings.TrimRight(strings.TrimSpace(v.(string)), "/") },
+	Validate:  validUploadURL})
+
+// validate is the Validate of the docker settings group: direct uploads need an upload address.
+func validate(d *settings.Draft, _ settings.Mode) error {
+	if DirectUploads.Get(d.Next) && UploadURL.Get(d.Next) == "" {
+		d.Fail(UploadURL.Name(), "set the upload address to expose the origin IP for Docker uploads")
+	}
+	return nil
+}
+
+// validUploadURL accepts "" or an http(s) URL with a host and no path, user, query or fragment.
+func validUploadURL(v any) error {
 	s := v.(string)
 	if s == "" {
 		return nil
@@ -66,35 +82,37 @@ func validPushURL(v any) error {
 		return errors.New("must be an http:// or https:// URL")
 	}
 	if u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
-		return errors.New("must be a scheme and a host only, e.g. https://push.repo.example.com: Docker reaches the registry at the root of a host")
+		return errors.New("must be a scheme and a host only, e.g. https://upload.repo.example.com")
 	}
 	return nil
 }
 
 // Format is the docker format of the module.
 type Format struct {
-	h      *module.Host
-	q      *dbq.Queries // on the reader pool
-	minter publish.Minter
-	tokens tokenCache // the bearer tokens of proxy remotes
+	h       *module.Host
+	q       *dbq.Queries // on the reader pool
+	minter  publish.Minter
+	network *netrules.Service // reads whether the server is behind Cloudflare
+	tokens  tokenCache        // the bearer tokens of proxy remotes
 }
 
 // Module returns the Docker module: the format docker (hosted, proxy and group repos), its routes
-// at /v2/, /docker/ and /api/docker/, the settings docker.link_grace and docker.push_url, the
+// at /v2/, /docker/ and /api/docker/, the settings docker.direct_uploads, docker.upload_url and docker.link_grace, the
 // job docker.links, the publisher client docker (the credential helper), the Nexus importer,
 // the demo data and the seed.
 func Module() module.Module {
 	f := &Format{}
 	return module.Module{
-		ID: name, Title: "Docker", Requires: []string{"publish"},
+		ID: name, Title: "Docker", Requires: []string{"network", "publish"},
 		Register: func(x *module.Extender) {
 			x.Schema(db.Component{Schema: schema, Queries: db.Sub(queriesFS, "queries")})
 			x.Settings(&settings.Group{ID: "docker", Label: "Docker", Perm: perm.SettingsGeneral,
-				Defs: []*settings.Def{PushURL.Def(), LinkGrace.Def()}})
+				Defs: []*settings.Def{DirectUploads.Def(), UploadURL.Def(), LinkGrace.Def()}, Validate: validate})
 			x.Init(func(ctx context.Context, h *module.Host) error {
 				f.h = h
 				f.q = dbq.New(h.DB.R)
 				f.minter = module.Use[publish.Minter](h)
+				f.network = module.Use[*netrules.Service](h)
 				return nil
 			})
 			x.PublisherClient(clients.Client{ID: "docker", Title: "Docker credential helper",

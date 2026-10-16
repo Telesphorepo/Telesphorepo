@@ -107,6 +107,13 @@ func (s *Service) trusts(id int64) bool {
 	return slices.Contains(*s.trustedLists.Load(), id) || slices.Contains(s.envLists, id)
 }
 
+// TrustsList reports whether the trusted proxies include the IP list name, e.g. PresetCloudflare.
+// It reads the in-memory snapshots only.
+func (s *Service) TrustsList(name string) bool {
+	st := (*s.lists.Load())[name]
+	return st != nil && s.trusts(st.id)
+}
+
 // TrustedList is an IP list that the trusted proxies include.
 type TrustedList struct {
 	ID   int64  `json:"id"`

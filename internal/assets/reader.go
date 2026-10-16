@@ -22,7 +22,6 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/blobs"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
-	"github.com/Telesphorepo/Telesphorepo/internal/perm"
 	"github.com/Telesphorepo/Telesphorepo/internal/repopath"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/route"
@@ -77,7 +76,7 @@ func (rd *Reader) Serve(w http.ResponseWriter, r *http.Request, c *route.Call, p
 	if repo.Kind == repos.KindGroup {
 		if mg := rd.p.Hooks(repo.Format).Merge; mg != nil {
 			if base, checksum, ok := mg.Match(path); ok {
-				members, err := rd.readable(r.Context(), r, c.P, repo)
+				members, err := rd.access.GroupMembers(r.Context(), r, c.P, repo)
 				if err != nil {
 					httpx.Error(w, http.StatusInternalServerError, "internal error")
 					return
@@ -110,7 +109,7 @@ func (rd *Reader) Resolve(ctx context.Context, r *http.Request, p *auth.Principa
 	if repo.Kind != repos.KindGroup {
 		return rd.has(ctx, repo, path)
 	}
-	members, err := rd.readable(ctx, r, p, repo)
+	members, err := rd.access.GroupMembers(ctx, r, p, repo)
 	if err != nil {
 		return nil, err
 	}
@@ -139,7 +138,7 @@ func (rd *Reader) Stored(ctx context.Context, r *http.Request, p *auth.Principal
 	list := []*repos.Repo{repo}
 	if repo.Kind == repos.KindGroup {
 		var err error
-		if list, err = rd.readable(ctx, r, p, repo); err != nil {
+		if list, err = rd.access.GroupMembers(ctx, r, p, repo); err != nil {
 			return nil, err
 		}
 	}
@@ -175,25 +174,6 @@ func (rd *Reader) has(ctx context.Context, repo *repos.Repo, path repopath.Path)
 		return nil, nil
 	}
 	return a, err
-}
-
-// readable returns the members of group that p may read through r, in read order.
-func (rd *Reader) readable(ctx context.Context, r *http.Request, p *auth.Principal, group *repos.Repo) ([]*repos.Repo, error) {
-	members, err := rd.repos.MemberRepos(ctx, group)
-	if err != nil {
-		return nil, err
-	}
-	out := members[:0]
-	for _, m := range members {
-		ok, err := rd.access.Allows(ctx, r, p, m, access.Read, perm.RepoDownload)
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			out = append(out, m)
-		}
-	}
-	return out, nil
 }
 
 func notInGroup(w http.ResponseWriter, remoteFailed bool) {

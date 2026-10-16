@@ -69,6 +69,23 @@ func (p *Principal) For(repo string) *Principal {
 	return &q
 }
 
+// InGroup returns the principal that reads the members of group: for a core bearer token whose
+// scope of group holds Read, a copy without scopes, so each member is checked against the rights
+// of the credential behind the token (the same as that credential over HTTP Basic); else p. The
+// copy only reads members of a group that the token reads: the engine never sees it for any
+// other request.
+func (p *Principal) InGroup(group string) *Principal {
+	if p == nil || p.Scopes == nil {
+		return p
+	}
+	if sc := p.ScopeOf(group); sc == nil || !sc.Allows(OpRead) {
+		return p
+	}
+	q := *p
+	q.Scopes = nil
+	return &q
+}
+
 // bearerPrefix starts a core bearer token: "trb.<base64url payload>.<base64url HMAC-SHA256>".
 const bearerPrefix = "trb."
 
@@ -120,6 +137,7 @@ type bearerPayload struct {
 	Device  int64         `json:"d,omitempty"` // CredDevice
 	Scopes  []bearerScope `json:"s"`
 	Expires int64         `json:"e"`
+	Upload  string        `json:"up,omitempty"` // an upload token: the upload it is bound to
 }
 
 // IssueBearer returns a token for p, limited to scopes, for ttl (at most 15 minutes), and its
@@ -129,6 +147,20 @@ type bearerPayload struct {
 // the device minted for the scope's repo. So a password, a read token or the anonymous caller gets
 // Read only. Each request with the token loads the credential behind it again.
 func (s *Service) IssueBearer(p *Principal, scopes []Scope, ttl time.Duration) (string, time.Time, error) {
+	return s.issueBearer(p, scopes, ttl, "")
+}
+
+// IssueUploadToken is IssueBearer for a token bound to one upload: it verifies only from the URL
+// of that upload (Read.URLToken), never from an Authorization header. A registry puts it in the
+// upload URL that it sends to another host, so the client needs no credential there.
+func (s *Service) IssueUploadToken(p *Principal, scopes []Scope, upload string, ttl time.Duration) (string, time.Time, error) {
+	if upload == "" {
+		return "", time.Time{}, errors.New("auth: an upload token needs an upload")
+	}
+	return s.issueBearer(p, scopes, ttl, upload)
+}
+
+func (s *Service) issueBearer(p *Principal, scopes []Scope, ttl time.Duration, upload string) (string, time.Time, error) {
 	if len(s.bearerKey) == 0 {
 		return "", time.Time{}, errors.New("auth: no bearer key")
 	}
@@ -137,7 +169,7 @@ func (s *Service) IssueBearer(p *Principal, scopes []Scope, ttl time.Duration) (
 	}
 	ttl = min(ttl, maxBearerTTL)
 	exp := time.Now().Add(ttl).Truncate(time.Second)
-	pl := bearerPayload{Expires: exp.Unix(), Scopes: []bearerScope{}}
+	pl := bearerPayload{Expires: exp.Unix(), Scopes: []bearerScope{}, Upload: upload}
 	if p != nil {
 		pl.Cred, pl.User, pl.Token, pl.Device = p.Cred, p.UserID, p.TokenID, p.DeviceID
 		if p.Is(CredPublish) {
@@ -182,8 +214,9 @@ func (s *Service) bearerMAC(payload string) []byte {
 // enabled, the read token exists, the publish session is open, the device is usable. A scope
 // session must be the publish session of the credential, or for a device an open session that the
 // device minted, on the repo that the scope names. A token that fails any check is
-// ErrBadCredentials, or ErrPublishEnded for an ended publish session.
-func (s *Service) verifyBearer(ctx context.Context, tok string) (*Principal, error) {
+// ErrBadCredentials, or ErrPublishEnded for an ended publish session. upload is the upload of the
+// URL that carried tok ("" for an Authorization header): the token must be bound to it.
+func (s *Service) verifyBearer(ctx context.Context, tok, upload string) (*Principal, error) {
 	enc, sig, ok := strings.Cut(strings.TrimPrefix(tok, bearerPrefix), ".")
 	if !ok || len(s.bearerKey) == 0 {
 		return nil, ErrBadCredentials
@@ -197,7 +230,7 @@ func (s *Service) verifyBearer(ctx context.Context, tok string) (*Principal, err
 		return nil, ErrBadCredentials
 	}
 	var pl bearerPayload
-	if json.Unmarshal(body, &pl) != nil || time.Now().Unix() >= pl.Expires {
+	if json.Unmarshal(body, &pl) != nil || time.Now().Unix() >= pl.Expires || pl.Upload != upload {
 		return nil, ErrBadCredentials
 	}
 	p, err := s.bearerPrincipal(ctx, pl)

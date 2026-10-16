@@ -196,24 +196,22 @@ func exchangeSecret(d *deviceFile, nonce string) string {
 	return "trx." + strconv.FormatInt(d.DeviceID, 10) + "." + nonce + "." + base64.RawURLEncoding.EncodeToString(sig)
 }
 
-// registryHosts asks the server for its Docker hosts (GET /docker/hosts): the registry host and
-// the push host.
+// registryHosts asks the server for its Docker hosts (GET /docker/hosts): the registry host, then
+// the upload host when the server has one (ORAS and Helm 4 push there).
 func (c *client) registryHosts(ctx context.Context) ([]string, error) {
 	var out struct {
 		Registry string `json:"registry"`
-		Push     string `json:"push"`
+		Upload   string `json:"upload"`
 	}
 	if err := c.do(ctx, http.MethodGet, "/docker/hosts", nil, &out); err != nil {
 		return nil, err
 	}
-	var hosts []string
-	for _, h := range []string{out.Registry, out.Push} {
-		if h != "" && (len(hosts) == 0 || hosts[0] != h) {
-			hosts = append(hosts, h)
-		}
-	}
-	if len(hosts) == 0 {
+	hosts := []string{out.Registry}
+	if out.Registry == "" {
 		hosts = []string{c.id.hostKey()}
+	}
+	if out.Upload != "" && out.Upload != hosts[0] {
+		hosts = append(hosts, out.Upload)
 	}
 	return hosts, nil
 }

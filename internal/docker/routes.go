@@ -2,6 +2,7 @@ package docker
 
 import (
 	"errors"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -22,9 +23,9 @@ const (
 )
 
 // registry adds what every /v2/ route of a repo has: bearer tokens, the OCI errors, the Bearer
-// challenge and the repo from the first name segment.
+// challenge, the upload token of an upload URL and the repo from the first name segment.
 func (f *Format) registry(p route.Policy) route.Policy {
-	p.Bearer, p.Errors, p.Challenge = true, refuse, f.challenge
+	p.Bearer, p.Errors, p.Challenge, p.URLToken = true, refuse, f.challenge, uploadToken
 	p.Repo.Name = repoOf
 	return p
 }
@@ -55,18 +56,53 @@ func pickDelete(r *http.Request) int {
 	return 1
 }
 
-// hostOf returns the scheme and the host that clients reach the registry at: those of
-// docker.push_url when the request came to its host, else those of base_url, else the scheme that
-// the client used (httpx.ClientScheme, which follows a trusted proxy) and the host of the request.
+// hostOf returns the scheme and the host that the request reached the registry at: those of
+// docker.upload_url when the request came to the upload host (uploadHostOf), else mainHostOf.
 func (f *Format) hostOf(r *http.Request) (scheme, host string) {
-	set := f.h.Settings.Current()
-	if u, ok := urlOf(PushURL.Get(set)); ok && strings.EqualFold(u.Host, r.Host) {
+	if u, ok := f.uploadHostOf(r); ok {
 		return u.Scheme, u.Host
 	}
-	if u, ok := urlOf(settings.BaseURL.Get(set)); ok {
+	return f.mainHostOf(r)
+}
+
+// mainHostOf returns the scheme and the host of the main address of the registry: those of
+// base_url, else the scheme that the client used (httpx.ClientScheme, which follows a trusted
+// proxy) and the host of the request.
+func (f *Format) mainHostOf(r *http.Request) (scheme, host string) {
+	if u, ok := urlOf(settings.BaseURL.Get(f.h.Settings.Current())); ok {
 		return u.Scheme, u.Host
 	}
 	return httpx.ClientScheme(r), r.Host
+}
+
+// uploadHostOf returns docker.upload_url when direct uploads are on and the Host of r is its host.
+// A default port (:443 for https, :80 for http) counts as none.
+func (f *Format) uploadHostOf(r *http.Request) (*url.URL, bool) {
+	u, ok := f.directUploads()
+	if !ok {
+		return nil, false
+	}
+	return u, strings.EqualFold(withoutDefaultPort(u.Scheme, u.Host), withoutDefaultPort(u.Scheme, r.Host))
+}
+
+// directUploads returns docker.upload_url when docker.direct_uploads is on.
+func (f *Format) directUploads() (*url.URL, bool) {
+	set := f.h.Settings.Current()
+	if !DirectUploads.Get(set) {
+		return nil, false
+	}
+	return urlOf(UploadURL.Get(set))
+}
+
+// withoutDefaultPort returns host without the default port of scheme.
+func withoutDefaultPort(scheme, host string) string {
+	if h, port, err := net.SplitHostPort(host); err == nil && (scheme == "https" && port == "443" || scheme == "http" && port == "80") {
+		if strings.Contains(h, ":") {
+			return "[" + h + "]"
+		}
+		return h
+	}
+	return host
 }
 
 // urlOf parses an http(s) URL setting; ok is false when it is empty or has no host.
@@ -81,17 +117,12 @@ func urlOf(s string) (*url.URL, bool) {
 	return u, true
 }
 
-// hostsOf returns the registry host (of baseURL) and the push host (of docker.push_url, else the
-// registry host).
-func (f *Format) hostsOf(baseURL string) (registry, push string) {
+// registryHost returns the host of baseURL ("" without one).
+func registryHost(baseURL string) string {
 	if u, ok := urlOf(baseURL); ok {
-		registry = u.Host
+		return u.Host
 	}
-	push = registry
-	if u, ok := urlOf(PushURL.Get(f.h.Settings.Current())); ok {
-		push = u.Host
-	}
-	return registry, push
+	return ""
 }
 
 // challengeFor is the WWW-Authenticate header of a /v2/ request: the realm of the token endpoint,
@@ -149,16 +180,15 @@ func (f *Format) ping(w http.ResponseWriter, r *http.Request, _ *route.Call) {
 	httpx.WriteJSON(w, http.StatusOK, struct{}{})
 }
 
-// hosts answers GET /docker/hosts: the host of the registry and the host that pushes go to.
+// hosts answers GET /docker/hosts: the host of the registry, and the upload host of
+// docker.upload_url when it is set (ORAS and Helm 4 push there).
 func (f *Format) hosts(w http.ResponseWriter, r *http.Request, _ *route.Call) {
-	registry, push := f.hostsOf(settings.BaseURL.Get(f.h.Settings.Current()))
-	if registry == "" {
-		_, registry = f.hostOf(r)
-		if push == "" {
-			push = registry
-		}
+	_, registry := f.mainHostOf(r)
+	out := map[string]string{"registry": registry}
+	if u, ok := f.directUploads(); ok {
+		out["upload"] = u.Host
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]string{"registry": registry, "push": push})
+	httpx.WriteJSON(w, http.StatusOK, out)
 }
 
 // location is the path of an object of name for the Location header.

@@ -47,12 +47,8 @@ replication, so a Worker copies the blobs:
 
 Cloudflare limits a proxied request body to 100 MB on the Free and Pro plans, with or without a
 Worker. The core has resumable chunked upload sessions, so a client that uploads in chunks
-keeps each chunk under the limit. A client that sends a large file in one request needs a push
-hostname: a DNS-only record that points straight at the origin. Every common OCI client sends a
-layer in one request, so the `docker.push_url` setting names that host. Downloads stay on the
-proxied hostname.
-
-## Server work before edge delivery
-
-- HTTP/3, so clients download in parallel over QUIC. The server has checksum headers
-  (`X-Checksum-SHA1` and the others) and HTTP/2 already.
+keeps each chunk under the limit. Every common OCI client sends a layer in one request, so each
+layer must be under 100 MB. The `docker.direct_uploads` setting lifts the limit: a push starts on
+the proxied hostname, and the server answers the upload start with an upload URL on
+`docker.upload_url`, a DNS-only record of the origin. This makes the origin IP public. Downloads
+stay on the proxied hostname.

@@ -72,6 +72,12 @@ type Guard interface {
 	Refused(r *http.Request) map[int64]bool
 }
 
+// ReadRestricter is a Guard that can say cheaply, from memory, whether it limits who reads repo:
+// a read of such a repo is not the same for everyone, so a shared cache must not keep it.
+type ReadRestricter interface {
+	RestrictsRead(repo *repos.Repo) bool
+}
+
 // GuardReport is what a guard says about one operation of a repo in the access report.
 type GuardReport struct {
 	Restricted bool           `json:"restricted"`
@@ -174,6 +180,65 @@ func (e *Engine) Allows(ctx context.Context, r *http.Request, p *auth.Principal,
 		return false, errInternal
 	}
 	return d.Allowed, nil
+}
+
+// GroupMembers returns the members of group that p reads through r, in read order: a group read
+// skips a member that p may not read. p read the group already. A core bearer token reads each
+// member with the rights of its credential (auth.Principal.InGroup), since its scopes name the
+// group only.
+func (e *Engine) GroupMembers(ctx context.Context, r *http.Request, p *auth.Principal, group *repos.Repo) ([]*repos.Repo, error) {
+	members, err := e.repos.MemberRepos(ctx, group)
+	if err != nil {
+		return nil, err
+	}
+	q := p.InGroup(group.Name)
+	out := members[:0]
+	for _, m := range members {
+		ok, err := e.Allows(ctx, r, q, m, Read, perm.RepoDownload)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
+// Private reports whether a read of repo can serve a file that not everyone reads: repo has no
+// anonymous read or a guard limits its reads (a read IP rule), or it is a group with such a
+// member. A format read of such a repo answers with Cache-Control: private, so a shared cache (a
+// CDN) does not keep it.
+func (e *Engine) Private(ctx context.Context, repo *repos.Repo) (bool, error) {
+	if e.restricted(repo) {
+		return true, nil
+	}
+	if repo.Kind != repos.KindGroup {
+		return false, nil
+	}
+	members, err := e.repos.MemberRepos(ctx, repo)
+	if err != nil {
+		return false, err
+	}
+	for _, m := range members {
+		if e.restricted(m) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// restricted reports whether repo has no anonymous read or a guard limits its reads.
+func (e *Engine) restricted(repo *repos.Repo) bool {
+	if !repo.AnonymousRead {
+		return true
+	}
+	for _, g := range e.guards {
+		if rr, ok := g.(ReadRestricter); ok && rr.RestrictsRead(repo) {
+			return true
+		}
+	}
+	return false
 }
 
 type internalError struct{}

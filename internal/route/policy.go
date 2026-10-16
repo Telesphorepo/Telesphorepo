@@ -28,6 +28,9 @@ type Policy struct {
 	// holds that credential, or on a repo route that accepts CredPublish when its scope of the
 	// repo has an open publish session.
 	Bearer bool
+	// URLToken reads an upload token (auth.Service.IssueUploadToken) from the URL of an upload on
+	// this route: it returns the token and the upload of the URL. It needs Bearer.
+	URLToken func(r *http.Request) (token, upload string)
 	// TokenHeader reads a token of a registered kind from this header too, e.g. "X-NuGet-ApiKey",
 	// or "Authorization" for a raw token without a scheme.
 	TokenHeader string

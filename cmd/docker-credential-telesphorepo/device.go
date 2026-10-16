@@ -41,7 +41,7 @@ type deviceFile struct {
 }
 
 // hostsFile is hosts.json next to the device file: the Docker hosts of the server (GET
-// /docker/hosts), e.g. {"hosts": ["repo.example.com", "push.repo.example.com"]}.
+// /docker/hosts), e.g. {"hosts": ["repo.example.com"]}.
 type hostsFile struct {
 	Hosts []string `json:"hosts"`
 }

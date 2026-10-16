@@ -167,6 +167,9 @@ type Read struct {
 	Cookie      bool   // the tr_session cookie of a UI session
 	Bearer      bool   // core bearer tokens (IssueBearer) in "Authorization: Bearer"
 	TokenHeader string // a header that carries a token of a registered kind, e.g. X-NuGet-ApiKey
+	// URLToken returns the upload token (IssueUploadToken) that the URL of r carries, and the
+	// upload of that URL. Identify reads it when the Authorization header gives no credential.
+	URLToken func(r *http.Request) (token, upload string)
 }
 
 // Identify authenticates r with the credentials that rd names and returns the caller, or nil for
@@ -186,7 +189,7 @@ func (s *Service) Identify(r *http.Request, rd Read) (*Principal, error) {
 		if len(h) > 7 && strings.EqualFold(h[:7], "bearer ") {
 			tok := strings.TrimSpace(h[7:])
 			if rd.Bearer && strings.HasPrefix(tok, bearerPrefix) {
-				return s.verifyBearer(ctx, tok)
+				return s.verifyBearer(ctx, tok, "")
 			}
 			if s.isToken(tok) {
 				return s.authenticate(ctx, s.clientIP(r), "", tok, true)
@@ -194,6 +197,14 @@ func (s *Service) Identify(r *http.Request, rd Read) (*Principal, error) {
 		}
 		if tok := strings.TrimSpace(h); rd.TokenHeader == "Authorization" && s.isToken(tok) {
 			return s.authenticate(ctx, s.clientIP(r), "", tok, true)
+		}
+	}
+	if rd.URLToken != nil {
+		if tok, upload := rd.URLToken(r); tok != "" {
+			if upload == "" || !strings.HasPrefix(tok, bearerPrefix) {
+				return nil, ErrBadCredentials
+			}
+			return s.verifyBearer(ctx, tok, upload)
 		}
 	}
 	if rd.TokenHeader != "" && rd.TokenHeader != "Authorization" {

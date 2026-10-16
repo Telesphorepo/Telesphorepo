@@ -4,11 +4,14 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/access"
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
+	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/perm"
 	"github.com/Telesphorepo/Telesphorepo/internal/repopath"
@@ -38,14 +41,74 @@ func (f *Format) getBlob(w http.ResponseWriter, r *http.Request, c *route.Call, 
 	f.h.Reader.ServeAsset(w, r, a, assets.ServeOptions{})
 }
 
-// uploadHeaders sets the headers of an upload answer: Location, Docker-Upload-UUID and Range
-// (0-<last byte>, "0-0" for an empty upload).
-func uploadHeaders(w http.ResponseWriter, t target, id string, received int64) {
+// stateParam is the query parameter of an upload URL that carries its upload token.
+const stateParam = "_state"
+
+// uploadToken is the route.Policy URLToken of the /v2/ routes: the upload token of the URL of an
+// upload (the _state parameter) and the id of that upload. Other paths carry none.
+func uploadToken(r *http.Request) (string, string) {
+	tok := r.URL.Query().Get(stateParam)
+	if tok == "" {
+		return "", ""
+	}
+	t, ok, err := parseTarget(r)
+	if !ok || err != nil || t.action != actUploads || !uploadRE.MatchString(t.ref) {
+		return "", ""
+	}
+	return tok, t.ref
+}
+
+// uploadLocation is the Location of upload id of t. Without direct uploads, it is the path on the
+// host of the request. Else it is the URL of the upload on the upload host, with an upload token
+// of the caller's publish session for this upload, so a client sends the bytes there with no
+// credential of its own. A request on the upload host gets a path on that host: with a new upload
+// token when the request came with one, else with none.
+func (f *Format) uploadLocation(r *http.Request, c *route.Call, t target, id string) (string, error) {
+	path := location(t.name, "blobs/uploads", id)
+	u, ok := f.directUploads()
+	if !ok {
+		return path, nil
+	}
+	// On the upload host, a client that sends its own credential (ORAS, Helm 4) gets a path on the
+	// same host. A client that came with the upload token gets a new one, or its next request
+	// carries no credential.
+	_, here := f.uploadHostOf(r)
+	if here && r.URL.Query().Get(stateParam) == "" {
+		return path, nil
+	}
+	p := c.P.For(c.Repo.Name)
+	if !p.Is(auth.CredPublish) || p.Publish == nil {
+		return path, nil
+	}
+	ttl := tokenTTL
+	if !p.Publish.Expires.IsZero() {
+		ttl = min(ttl, time.Until(p.Publish.Expires))
+	}
+	tok, _, err := f.h.Auth.IssueUploadToken(p, []auth.Scope{{Repo: c.Repo.Name, Ops: []auth.Op{access.Read, access.Write},
+		Session: p.Publish.ID, Open: p.Publish}}, id, max(ttl, minTokenTTL))
+	if err != nil {
+		return "", err
+	}
+	q := "?" + url.Values{stateParam: {tok}}.Encode()
+	if here {
+		return path + q, nil
+	}
+	return u.Scheme + "://" + u.Host + path + q, nil
+}
+
+// uploadHeaders sets the headers of an upload answer: Location (uploadLocation),
+// Docker-Upload-UUID and Range (0-<last byte>, "0-0" for an empty upload).
+func (f *Format) uploadHeaders(w http.ResponseWriter, r *http.Request, c *route.Call, t target, id string, received int64) error {
+	loc, err := f.uploadLocation(r, c, t, id)
+	if err != nil {
+		return err
+	}
 	h := w.Header()
-	h.Set("Location", location(t.name, "blobs/uploads", id))
+	h.Set("Location", loc)
 	h.Set("Docker-Upload-UUID", id)
 	h.Set("Range", "0-"+strconv.FormatInt(max(received-1, 0), 10))
 	h.Set("Content-Length", "0")
+	return nil
 }
 
 // blobCreated answers a stored blob: 201 with its Location and digest.
@@ -107,7 +170,10 @@ func (f *Format) startUpload(w http.ResponseWriter, r *http.Request, c *route.Ca
 		fail(w, r, err)
 		return
 	}
-	uploadHeaders(w, t, s.ID, 0)
+	if err := f.uploadHeaders(w, r, c, t, s.ID, 0); err != nil {
+		fail(w, r, err)
+		return
+	}
 	w.WriteHeader(http.StatusAccepted)
 }
 
@@ -198,19 +264,22 @@ func (f *Format) appendChunk(w http.ResponseWriter, r *http.Request, c *route.Ca
 	}
 	n, err := f.h.Uploads.Append(r.Context(), id, c.P, c.Repo, offset, body)
 	if err != nil {
-		f.uploadFailed(w, r, t, id, err)
+		f.uploadFailed(w, r, c, t, id, err)
 		return 0, false
 	}
 	return n, true
 }
 
 // uploadFailed answers an error of an upload session.
-func (f *Format) uploadFailed(w http.ResponseWriter, r *http.Request, t target, id string, err error) {
+func (f *Format) uploadFailed(w http.ResponseWriter, r *http.Request, c *route.Call, t target, id string, err error) {
 	var re *assets.RangeError
 	var mbe *http.MaxBytesError
 	switch {
 	case errors.As(err, &re):
-		uploadHeaders(w, t, id, re.Received)
+		if err := f.uploadHeaders(w, r, c, t, id, re.Received); err != nil {
+			fail(w, r, err)
+			return
+		}
 		w.Header().Del("Content-Length")
 		writeOCI(w, ociErr(http.StatusRequestedRangeNotSatisfiable, codeBlobUploadInvalid, err.Error()))
 	case errors.Is(err, assets.ErrUploadUnknown):
@@ -245,7 +314,10 @@ func (f *Format) patchUpload(w http.ResponseWriter, r *http.Request, c *route.Ca
 	if !ok {
 		return
 	}
-	uploadHeaders(w, t, id, n)
+	if err := f.uploadHeaders(w, r, c, t, id, n); err != nil {
+		fail(w, r, err)
+		return
+	}
 	w.WriteHeader(http.StatusAccepted)
 }
 
@@ -257,10 +329,13 @@ func (f *Format) uploadStatus(w http.ResponseWriter, r *http.Request, c *route.C
 	}
 	s, err := f.h.Uploads.Status(r.Context(), id, c.P, c.Repo)
 	if err != nil {
-		f.uploadFailed(w, r, t, id, err)
+		f.uploadFailed(w, r, c, t, id, err)
 		return
 	}
-	uploadHeaders(w, t, id, s.Received)
+	if err := f.uploadHeaders(w, r, c, t, id, s.Received); err != nil {
+		fail(w, r, err)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -288,7 +363,7 @@ func (f *Format) finishUpload(w http.ResponseWriter, r *http.Request, c *route.C
 	}
 	sp, err := f.h.Uploads.Finish(r.Context(), id, c.P, c.Repo, hex, -1)
 	if err != nil {
-		f.uploadFailed(w, r, t, id, err)
+		f.uploadFailed(w, r, c, t, id, err)
 		return
 	}
 	defer sp.Close()
@@ -306,7 +381,7 @@ func (f *Format) cancelUpload(w http.ResponseWriter, r *http.Request, c *route.C
 		return
 	}
 	if err := f.h.Uploads.Cancel(r.Context(), id, c.P, c.Repo); err != nil {
-		f.uploadFailed(w, r, t, id, err)
+		f.uploadFailed(w, r, c, t, id, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

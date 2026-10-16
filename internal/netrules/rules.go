@@ -313,6 +313,14 @@ func (s *Service) allowed(repoID int64, scope string, ip netip.Addr) bool {
 	return s.allows(rr.readM, ip)
 }
 
+// RestrictsRead reports whether repo id has read rules (from the in-memory snapshot).
+func (s *Service) RestrictsRead(repoID int64) bool {
+	s.rulesMu.RLock()
+	rr := s.rules[repoID]
+	s.rulesMu.RUnlock()
+	return rr != nil && !rr.readM.empty
+}
+
 // Check returns a *DeniedError when the rules of repo do not allow ip for scope, else nil. It
 // applies to every caller, admins included.
 func (s *Service) Check(repo *repos.Repo, scope string, ip netip.Addr) *DeniedError {

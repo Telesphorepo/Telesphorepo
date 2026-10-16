@@ -238,9 +238,12 @@ printf 'Publish token: '; read -rs TOKEN; echo
 printf '%s' "$TOKEN" | docker login packages.example.com -u publish --password-stdin
 ```
 
-Docker sends each layer in one request. Behind Cloudflare (100 MB per request on Free and Pro) a
-larger layer fails, so point a DNS-only name at the server and set it as `docker.push_url`. The
-snippets and CI files then push there. A docker repo can also be a proxy of another registry
+Behind Cloudflare (Free and Pro plans), each image layer must be under 100 MB. Pulls have no
+limit. For larger layers, turn on `docker.direct_uploads` and set `docker.upload_url` to a
+DNS-only name of the server. This makes the IP address of the server public; open that port in
+its firewall for the clients that push. Docker, Podman, skopeo and crane keep the main host: the
+server sends their layer uploads to the upload address. ORAS and Helm 4 push to the upload
+address by name. A docker repo can also be a proxy of another registry
 (Docker Hub, GHCR, Quay) or a group.
 
 The repo page in the UI shows the snippets for each repo. Gradle, private apt repos, the API and

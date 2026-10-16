@@ -331,6 +331,9 @@ func login(args []string) error {
 		return err
 	}
 	fmt.Printf("Docker now asks the helper for %s (%s).\n", strings.Join(hosts, " and "), cfg)
-	fmt.Printf("Push with: docker push %s/<repository>/<image>:<tag>\n", hosts[len(hosts)-1])
+	fmt.Printf("Push with: docker push %s/<repository>/<image>:<tag>\n", hosts[0])
+	if len(hosts) > 1 {
+		fmt.Printf("Push with ORAS and Helm 4 to the upload host: helm push <chart> oci://%s/<repository>\n", hosts[1])
+	}
 	return nil
 }

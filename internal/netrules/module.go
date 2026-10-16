@@ -109,6 +109,9 @@ func (m *mod) Check(r *http.Request, p *auth.Principal, repo *repos.Repo, op acc
 		Detail: map[string]any{"scope": d.Scope}, Audit: &e}
 }
 
+// RestrictsRead reports whether repo has read rules (access.ReadRestricter).
+func (m *mod) RestrictsRead(repo *repos.Repo) bool { return m.rules.RestrictsRead(repo.ID) }
+
 // Refused returns the repos whose read rules refuse the client address of r.
 func (m *mod) Refused(r *http.Request) map[int64]bool { return m.rules.DeniedRepos(httpx.ClientIP(r)) }
 

@@ -271,11 +271,18 @@ type Dind struct {
 // HTTP, and waits until "docker info" answers.
 func StartDind(t testing.TB, insecure ...string) *Dind {
 	t.Helper()
-	alias := RandName("dind")
 	var args []string
 	for _, h := range insecure {
 		args = append(args, "--insecure-registry="+h)
 	}
+	return StartDindArgs(t, args...)
+}
+
+// StartDindArgs starts a Docker engine with the dockerd flags args and waits until "docker info"
+// answers.
+func StartDindArgs(t testing.TB, args ...string) *Dind {
+	t.Helper()
+	alias := RandName("dind")
 	c, err := testcontainers.Run(context.Background(), dindImage,
 		testcontainers.WithLabels(e2eLabels),
 		testcontainers.WithEnv(map[string]string{"DOCKER_TLS_CERTDIR": ""}),

@@ -5,12 +5,10 @@ import (
 	"net/url"
 	"strconv"
 
-	"github.com/Telesphorepo/Telesphorepo/internal/access"
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/docker/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
-	"github.com/Telesphorepo/Telesphorepo/internal/perm"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/route"
 )
@@ -74,21 +72,7 @@ func writeTags(w http.ResponseWriter, name string, tags []string) {
 
 // readableMembers returns the members of the group c.Repo that the caller reads, in read order.
 func (f *Format) readableMembers(r *http.Request, c *route.Call) ([]*repos.Repo, error) {
-	members, err := f.h.Repos.MemberRepos(r.Context(), c.Repo)
-	if err != nil {
-		return nil, err
-	}
-	var out []*repos.Repo
-	for _, m := range members {
-		ok, err := f.h.Access.Allows(r.Context(), r, c.P, m, access.Read, perm.RepoDownload)
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			out = append(out, m)
-		}
-	}
-	return out, nil
+	return f.h.Access.GroupMembers(r.Context(), r, c.P, c.Repo)
 }
 
 // catalog answers GET /v2/_catalog?n=&last=: the images of the repos that the credential behind

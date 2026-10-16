@@ -19,7 +19,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// Docker proxy and group repos, and the push host (docker.push_url): a proxy of a second server
+// Docker proxy and group repos: a proxy of a second server
 // (whose Bearer challenge the proxy answers at its token endpoint) and of the distribution
 // registry with htpasswd (a Basic challenge), Docker pulls through them, the cache, the
 // revalidation of a moved tag, a stopped remote, the read-only answers, and a group of a hosted
@@ -349,69 +349,5 @@ func dockerProxyCase(t *testing.T, s *Server, d *Dind, rm *proxyRemote) {
 		}
 		resp, body = ociDo(t, s, http.MethodGet, "/v2/"+prx+"/app/manifests/never-cached", nil, nil, nil)
 		wantOCI(t, "an uncached tag while the remote is down", resp, body, http.StatusBadGateway, "UNKNOWN")
-	})
-}
-
-// TestDockerPushHost serves the registry at two names: base_url (repo) and docker.push_url
-// (push). The challenge on the push host names the push host, Docker pushes there and pulls from
-// the main host, and the snippets and CI files push to the push host.
-func TestDockerPushHost(t *testing.T) {
-	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
-		repoAlias, pushAlias := RandName("repo"), RandName("push")
-		opts.Alias, opts.Aliases = repoAlias, []string{pushAlias}
-		env := map[string]string{"TR_DOCKER_PUSH_URL": "http://" + pushAlias + ":8080"}
-		for k, v := range opts.Env {
-			env[k] = v
-		}
-		opts.Env = env
-		s := StartServer(t, opts)
-		repoHost, pushHost := repoAlias+":8080", pushAlias+":8080"
-		r := RandName("r")
-		s.CreateRepo(t, r, "docker", true, nil)
-
-		for _, h := range []string{repoHost, pushHost} {
-			req := s.NewRequest(t, http.MethodGet, "/v2/", nil)
-			req.Host = h
-			resp, b := s.Do(t, req, nil)
-			wantOCI(t, "GET /v2/ at "+h, resp, b, http.StatusUnauthorized, "UNAUTHORIZED")
-			if ch := resp.Header.Get("WWW-Authenticate"); !strings.Contains(ch, `realm="http://`+h+`/docker/token"`) {
-				t.Fatalf("the challenge at %s names another realm: %q", h, ch)
-			}
-		}
-		var hosts map[string]string
-		s.MustAPI(t, http.MethodGet, "/docker/hosts", nil, nil, &hosts)
-		if hosts["registry"] != repoHost || hosts["push"] != pushHost {
-			t.Fatalf("GET /docker/hosts: %v", hosts)
-		}
-
-		d := StartDind(t, repoHost, pushHost)
-		tok := PublishToken(t, s, s.AdminUser, r)
-		d.MustExec(t, "push to the push host, pull from the main host", "set -e\n"+DockerScratchImage("/ctx", 4096)+fmt.Sprintf(`printf '%%s' '%[1]s' | docker login %[2]s -u publish --password-stdin
-docker build -q -t %[2]s/%[4]s/app:v1 /ctx
-docker push %[2]s/%[4]s/app:v1
-docker logout %[2]s
-docker rmi %[2]s/%[4]s/app:v1
-docker pull %[3]s/%[4]s/app:v1
-`, tok, pushHost, repoHost, r))
-
-		var u struct {
-			Snippets []snippetJSON `json:"snippets"`
-		}
-		s.MustAPI(t, http.MethodGet, "/api/repos/"+r+"/usage", nil, s.AdminBasic(), &u)
-		for _, sn := range u.Snippets {
-			switch {
-			case sn.Purpose == "publish" && strings.Contains(sn.Code, "docker push") && !strings.Contains(sn.Code, pushHost+"/"+r+"/"):
-				t.Fatalf("publish snippet %s pushes elsewhere than %s:\n%s", sn.ID, pushHost, sn.Code)
-			case sn.Purpose == "use" && strings.Contains(sn.Code, "docker pull") && !strings.Contains(sn.Code, repoHost+"/"+r+"/"):
-				t.Fatalf("use snippet %s pulls elsewhere than %s:\n%s", sn.ID, repoHost, sn.Code)
-			}
-		}
-		var ci snippetJSON
-		s.MustAPI(t, http.MethodGet, "/api/repos/"+r+"/ci?system=github-actions&tool=docker", nil, s.AdminBasic(), &ci)
-		login := strings.Index(ci.Code, `printf '%s' "$OIDC_TOKEN" | docker login `+pushHost+" -u oidc --password-stdin")
-		push := strings.Index(ci.Code, `docker push "`+pushHost+"/"+r+"/app:$GITHUB_SHA")
-		if login < 0 || push < login {
-			t.Fatalf("the GitHub Actions file does not log in to %s right before the push:\n%s", pushHost, ci.Code)
-		}
 	})
 }

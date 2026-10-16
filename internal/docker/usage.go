@@ -10,6 +10,7 @@ import (
 
 	"github.com/Telesphorepo/Telesphorepo/internal/docker/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
+	"github.com/Telesphorepo/Telesphorepo/internal/netrules"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
@@ -25,7 +26,7 @@ func notes(baseURL, registry string) string {
 			out = append(out, "Add "+registry+" to insecure-registries in /etc/docker/daemon.json.")
 		}
 		if p := strings.Trim(u.Path, "/"); p != "" {
-			out = append(out, "Docker reaches a registry at the root of a host: set docker.push_url, or let a reverse proxy send /v2/ and /docker/ of a host to the server.")
+			out = append(out, "Docker reaches a registry at the root of a host: let a reverse proxy send /v2/ and /docker/ of a host to the server.")
 		}
 	}
 	return strings.Join(out, " ")
@@ -33,9 +34,10 @@ func notes(baseURL, registry string) string {
 
 // usage returns the snippets of a docker repo: log in for a private repo, pull an image, pull a
 // Helm chart; and for a hosted repo the publish snippets: from a computer with the credential
-// helper, and by hand with a publish token. Pushes go to the push host (docker.push_url).
+// helper (Docker, Helm and ORAS), and by hand with a publish token. Pulls and Docker pushes name the
+// registry host; ORAS and Helm 4 name the upload host when direct uploads are on.
 func (f *Format) usage(repo *repos.Repo, baseURL string) []format.Snippet {
-	host, push := f.hostsOf(baseURL)
+	host := registryHost(baseURL)
 	note := notes(baseURL, host)
 	var out []format.Snippet
 	if !repo.AnonymousRead {
@@ -52,25 +54,33 @@ func (f *Format) usage(repo *repos.Repo, baseURL string) []format.Snippet {
 	if repo.Kind != repos.KindHosted {
 		return out
 	}
-	pushNote := "Pushes go to " + push + "."
-	if push == host {
-		pushNote = ""
+	// With direct uploads, ORAS and Helm 4 name the upload host: they refuse an upload Location on
+	// another host, and the upload host answers them on its own host. Without direct uploads,
+	// behind Cloudflare, the docker pushes say that a layer must be under 100 MB.
+	ociHost, ociNote, pushNote := host, "", ""
+	if u, ok := f.directUploads(); ok {
+		ociHost, ociNote = u.Host, "ORAS and Helm 4 push to the upload address "+u.Host+", because they send layers only to the host of the push."
+	} else if f.network.TrustsList(netrules.PresetCloudflare) {
+		pushNote = cloudflareNote
 	}
 	out = append(out,
 		format.Snippet{ID: "docker.helper", Tool: "docker", Purpose: format.SnippetPublish, Context: format.SnippetRepo, Via: format.ViaComputer,
 			Title: "Push with the credential helper", Lang: "sh", Code: helperName + " login " + baseURL + "   # once per computer\n" +
-				"docker tag IMAGE " + push + "/" + repo.Name + "/IMAGE:TAG\n" +
-				"docker push " + push + "/" + repo.Name + "/IMAGE:TAG\n",
+				"docker tag IMAGE " + host + "/" + repo.Name + "/IMAGE:TAG\n" +
+				"docker push " + host + "/" + repo.Name + "/IMAGE:TAG\n",
 			Note: joinNotes("The helper enrolls this computer once; approve it in the browser. Then docker, buildx, podman, helm and oras push without a password.", pushNote)},
 		format.Snippet{ID: "helm.push", Tool: "helm", Purpose: format.SnippetPublish, Context: format.SnippetRepo, Via: format.ViaComputer,
-			Title: "Push a Helm chart", Lang: "sh", Code: "helm push mychart-0.1.0.tgz oci://" + push + "/" + repo.Name + "\n",
-			Note: "Run " + helperName + " login " + baseURL + " once first."},
+			Title: "Push a Helm chart", Lang: "sh", Code: "helm push mychart-0.1.0.tgz oci://" + ociHost + "/" + repo.Name + "\n",
+			Note: joinNotes("Run "+helperName+" login "+baseURL+" once first.", ociNote)},
+		format.Snippet{ID: "oras.push", Tool: "oras", Purpose: format.SnippetPublish, Context: format.SnippetRepo, Via: format.ViaComputer,
+			Title: "Push an OCI artifact", Lang: "sh", Code: "oras push " + ociHost + "/" + repo.Name + "/ARTIFACT:TAG FILE\n",
+			Note: joinNotes("Run "+helperName+" login "+baseURL+" once first.", ociNote)},
 		format.Snippet{ID: "docker.publish", Tool: "docker", Purpose: format.SnippetPublish, Context: format.SnippetRepo, Via: format.ViaHand,
 			Title: "Push with a publish token", Lang: "sh", Code: format.TokenPrompt + "   # Settings › Tokens › New publish token\n" +
-				"printf '%s' \"$TOKEN\" | docker login " + push + " -u publish --password-stdin\n" +
-				"docker push " + push + "/" + repo.Name + "/IMAGE:TAG\n" +
-				"docker logout " + push + "\n",
-			Note: joinNotes("A publish token lasts as long as its publish session: the push must end within it.", note)},
+				"printf '%s' \"$TOKEN\" | docker login " + host + " -u publish --password-stdin\n" +
+				"docker push " + host + "/" + repo.Name + "/IMAGE:TAG\n" +
+				"docker logout " + host + "\n",
+			Note: joinNotes(joinNotes("A publish token lasts as long as its publish session: the push must end within it.", pushNote), note)},
 	)
 	return out
 }
@@ -134,7 +144,7 @@ func (f *Format) artifactUsage(ctx context.Context, repo *repos.Repo, baseURL, p
 	if mode != format.VersionLatest || tag == "" {
 		mode = format.VersionPinned // a manifest without a tag pulls by digest only
 	}
-	host, _ := f.hostsOf(baseURL)
+	host := registryHost(baseURL)
 	ref := host + "/" + repo.Name + "/" + image
 	comment := ""
 	if tag != "" {

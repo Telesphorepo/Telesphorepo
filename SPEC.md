@@ -153,7 +153,7 @@ it needs and leaves the others nil. The kernel gives it these parts:
 | `maven` | `internal/maven` | | Format `maven` with the tools `gradle` and `maven` (their CI steps and project setup fragments), the publisher clients `gradle` and `maven` |
 | `debian` | `internal/debian` | `signing` | Format `debian` with its schema and `Rebuild` |
 | `raw` | `internal/raw` | | Format `raw` |
-| `docker` | `internal/docker` | `publish` | Format `docker` (an OCI registry: hosted, proxy and group repos) with its schema; the root prefix `/v2/`, `/docker/` (the token endpoint) and `GET /api/docker/{name}/manifest`; the settings group `docker`; job `docker.links`; the publisher client `docker` (the credential helper `cmd/docker-credential-telesphorepo`, see **Publishing**); the Nexus importer of `docker`; demo data and seed (see **Docker registry**) |
+| `docker` | `internal/docker` | `network`, `publish` | Format `docker` (an OCI registry: hosted, proxy and group repos) with its schema; the root prefix `/v2/`, `/docker/` (the token endpoint) and `GET /api/docker/{name}/manifest`; the settings group `docker`; job `docker.links`; the publisher client `docker` (the credential helper `cmd/docker-credential-telesphorepo`, see **Publishing**); the Nexus importer of `docker`; demo data and seed (see **Docker registry**) |
 
 **Routes.** The route table (`internal/route`) gives each module a `Router`. A module registers
 under `/api/`, under `/<name>/` of each format it registers, and under its root prefixes. Any
@@ -216,7 +216,14 @@ The middleware runs in this order and writes the first refusal:
 4. The server permission, or `SomeRepo` on at least one repo: 403 `permission required: <label>`
    (e.g. `permission required: Manage signing keys, or Edit settings on a repository`).
 5. The repo: an unknown repo, or one of another format, is 404 (401 for anonymous on a private
-   repo); then `access.Engine.Decide` (see **Access engine**).
+   repo); then `access.Engine.Decide` (see **Access engine**). A format read (a `RepoRule` with
+   `Format` and `Read`: every route of `FormatRead`) of a repo that not everyone reads
+   (`access.Engine.Private`) sets `Cache-Control: private` before the handler runs. Such a repo
+   has no anonymous read or has read IP rules, or it is a group with such a member. The IP rule
+   check is `access.ReadRestricter`, an optional guard method that the network guard answers
+   from its in-memory rules. So every answer of the read (file bytes, HEAD, 304, registry
+   manifests, blobs and lists) tells a shared cache, such as a CDN, not to keep it. A public repo
+   without read IP rules gets no `Cache-Control` from this step.
 
 From step 1 on, the request context holds the audit actor of the caller with the client address
 (`audit.WithActor`), so the handler, the services it calls and a guard refusal record events with
@@ -252,8 +259,15 @@ use it. In order:
 
 Guards never see `Meta` or `Manage`, so a holder of `repo.settings` or `repo.access` can open the repo and
 fix the rules that refuse them. `Engine.Allows` is `Decide` without the audit event of a guard (a
-group skips a member that the reader may not read). "May this caller write to this repo now" is
-always `Decide(..., Write)` or `Decide(..., Mint)`.
+group skips a member that the reader may not read). `Engine.GroupMembers(ctx, r, p, group)` is the
+one list of the members that a group read uses (the read path, the registry tags list and
+referrers): each member in read order that `Allows` with `Read` and `repo.download`. A core bearer
+token names the group in its scopes, not the members. So when its scope of the group holds `Read`,
+the members are checked with `auth.Principal.InGroup(group)`: the credential behind the token
+without its scopes, the same as that credential over HTTP Basic. Each member still needs the
+credential's own `repo.download` and passes the guards. The copy exists only inside a group read
+that the token passed, so the token reads no member directly. "May this caller write to this repo
+now" is always `Decide(..., Write)` or `Decide(..., Mint)`.
 
 **Core bearer tokens.** `auth.Service.IssueBearer(p, scopes, ttl)` returns
 `trb.<base64url payload>.<base64url HMAC-SHA256>` for at most 15 minutes. The key is HKDF-SHA256
@@ -543,7 +557,7 @@ The `settings` package holds no feature rules and declares only the keys of the 
 | Group (owner) | Permission · page | Keys |
 |---|---|---|
 | general (core) | `settings.general` · General | `base_url`, `log.level`, `max_upload_size` (`2GiB`), `max_json_size` (`1MiB`), `cookie.secure`, `session_ttl` (`168h`), `index.debounce` (`2s`), `index.max_delay` (`30s`), `blobs.gc_grace` (`1h`), `upload.session_ttl` (`24h`), `tls.cert_file`, `tls.key_file` (its `Validate`: both or neither, and the pair loads) |
-| docker (docker) | `settings.general` · General | `docker.push_url` (`""`; empty or an http(s) URL of a scheme and a host only: the host that snippets and CI files push to), `docker.link_grace` (`24h`, minimum `1s`) |
+| docker (docker) | `settings.general` · General | `docker.direct_uploads` (`false`; "Expose the origin IP for Docker uploads", see **Upload host**), `docker.upload_url` (`""`; empty or an http(s) URL of a scheme and a host only: the DNS-only name or address of the server that takes the upload bytes; required when `docker.direct_uploads` is on), `docker.link_grace` (`24h`, minimum `1s`) |
 | activity (audit) | `settings.general` · General | `audit.retention` (`8760h`, which is 365 days) |
 | storage (storage) | `storage.manage` · `/settings/storage` | `storage` (`fs`/`s3`), `fs.root` (default `blobs/` in the data dir), `s3.endpoint`, `s3.region`, `s3.bucket`, `s3.access_key_id`, `s3.secret_access_key`*, `s3.prefix`, `s3.path_style`, `s3.redirect`, `presign_ttl` |
 | network (network) | `network.manage` · `/settings/proxy` | `trusted_proxies` (literal entries; the IP lists of the trusted proxies are rows, see **Network rules**) |
@@ -796,7 +810,7 @@ is written to it with `sudo tee -a FILE > /dev/null`.
 | Gradle | `maven { url = uri("HOST/maven/{repo}") }` in `repositories` of the build file to consume dependencies (Gradle ignores the repositories of the settings file when the build file declares its own), in `pluginManagement.repositories` of the settings file to consume plugins, and in `publishing.repositories` to publish; add `credentials(PasswordCredentials::class)` with a read token in `~/.gradle/gradle.properties` to read a private repo. The settings plugin adds the publish credentials. `isAllowInsecureProtocol = true` only for plain http |
 | apt | Key: `curl -fsSL HOST/debian/{repo}/key.asc -o /etc/apt/keyrings/telesphorepo.asc`. Source: `deb [signed-by=/etc/apt/keyrings/telesphorepo.asc] HOST/debian/{repo} {dist} {component}`. For a private repo, the `curl` command reads `USER:READ_TOKEN` from a config on stdin, and `/etc/apt/auth.conf.d/{repo}.conf` holds `machine HOST/debian/{repo} login USER password TOKEN` (mode 600) |
 | Upload `.deb` | `curl -K - -T x.deb HOST/debian/{repo}/upload/{dist}/{component}` with `user = "publish:SESSION_TOKEN"` on stdin. Indexes rebuild after `index.debounce`; poll `GET /api/repos/{repo}/status` for `pending: 0` |
-| Docker | Pull: `docker pull <host>/{repo}/IMAGE:TAG`; a private repo needs `docker login <host>` with a read token. Push: `docker-credential-telesphorepo login HOST` once (a person approves the device), then `docker push <push host>/{repo}/IMAGE:TAG` with no `docker login`. Helm and ORAS use the same login (see **Docker registry** and **Publishing**) |
+| Docker | Pull: `docker pull <host>/{repo}/IMAGE:TAG`; a private repo needs `docker login <host>` with a read token. Push: `docker-credential-telesphorepo login HOST` once (a person approves the device), then `docker push <host>/{repo}/IMAGE:TAG` with no `docker login`. Helm and ORAS use the same login (see **Docker registry** and **Publishing**) |
 | Raw | Upload: `curl -K - -T file.tar.gz HOST/raw/{repo}/path/file.tar.gz` with `user = "publish:SESSION_TOKEN"` on stdin. Download: `curl -fLO HOST/raw/{repo}/path/file.tar.gz`; a private repo adds `-K -` with `user = "USER:READ_TOKEN"` on stdin |
 
 ### Project setup
@@ -1183,7 +1197,7 @@ under its license). It imports no server package; its only module outside the st
 
 | Command | stdin | Answer |
 |---|---|---|
-| `login <server URL> [--name NAME]` | | Enrolls the computer: `GET /docker/hosts` (the registry and the push host), then an Ed25519 key and `POST /api/devices/enroll` with the client `docker` and the name (default `<hostname> (Docker)`). It prints `Open <verification_url>?code=<CODE> and approve code <CODE>`, opens the browser when stdout is a terminal, and polls at `interval` (`slow_down` adds 5 s). It saves the device file and `hosts.json`, and sets `"credHelpers": {"<host>": "telesphorepo"}` for each host in `$DOCKER_CONFIG/config.json` (else `~/.docker/config.json`) and keeps every other key. A saved device that the server still accepts (`POST /api/publish/challenge`) stays; one that it refuses is enrolled again |
+| `login <server URL> [--name NAME]` | | Enrolls the computer: `GET /docker/hosts` (the registry host, and the upload host when direct uploads are on), then an Ed25519 key and `POST /api/devices/enroll` with the client `docker` and the name (default `<hostname> (Docker)`). It prints `Open <verification_url>?code=<CODE> and approve code <CODE>`, opens the browser when stdout is a terminal, and polls at `interval` (`slow_down` adds 5 s). It saves the device file and `hosts.json`, and sets `"credHelpers": {"<host>": "telesphorepo"}` for each host in `$DOCKER_CONFIG/config.json` (else `~/.docker/config.json`) and keeps every other key. A saved device that the server still accepts (`POST /api/publish/challenge`) stays; one that it refuses is enrolled again |
 | `get` | the registry host (`host[:port]`) | `{"ServerURL", "Username": "telesphorepo-device", "Secret": "trx.<device id>.<nonce>.<signature>"}`: a nonce of `POST /api/publish/challenge` with `exchange: true` (the request carries `ts` and the device signature over it), and the device signature over the nonce for the repo `*` (base64url, no padding). No device for the host, or a 4xx from the challenge (a device that is unknown, revoked or expired): `credentials not found in native keychain` and exit 1, so Docker reads anonymously; the reason goes to stderr. Each `get` sends the challenge, so a revoked device stops at once. The process that runs the helper (its id and start time) keeps its nonce in `exchange.json` and sends it as `nonce`, so it gets the same nonce while the nonce is valid: Helm and ORAS run `get` for each token, and all token requests of one push get the same publish session |
 | `store` | Docker's credentials | Exit 1: "docker-credential-telesphorepo keeps no passwords. Run: docker-credential-telesphorepo login <server URL>" |
 | `erase` | the registry host | Deletes the device folder of the host (`docker logout`). The device stays in Settings › Devices until someone revokes it |
@@ -1310,7 +1324,9 @@ sandbox`, `Content-Disposition: attachment` except for `text/plain`; it answers 
 proxy file answers 302 to a presigned URL that signs `response-content-type` and
 `response-content-disposition` from the asset row, so each path of a shared blob keeps its own
 content type; the 302 carries `ETag` and `Cache-Control: no-store`. HEAD, merged files and every
-request without `s3.redirect` stream.
+request without `s3.redirect` stream. The route step sets `Cache-Control: private` on every format
+read of a repo that not everyone reads (see **Route policy**); a public repo's
+answers carry no `Cache-Control`.
 
 **Resumable uploads (`Uploads`).** A publish session starts an upload in a repo, appends chunks at
 increasing offsets (`Append` needs the offset to equal the bytes received, else 416 with the bytes
@@ -1787,7 +1803,7 @@ catch-alls and parses the raw path (an encoded `/`, `\` or NUL is 400). Every `/
 | `DELETE /v2/<name>/blobs/uploads/<id>` | publish session + bearer; `Write` with `repo.publish` | Cancels the upload: 204 |
 | `DELETE /v2/<name>/blobs/<digest>` | as a manifest delete | 405 `UNSUPPORTED` "delete the manifests; the server removes layers that no manifest uses" |
 | `GET, POST /docker/token` | none (the handler reads the credential) | The token endpoint (below) |
-| `GET /docker/hosts` | none | `{"registry": "<host>", "push": "<host>"}`: the host of `base_url` (else of the request) and the host of `docker.push_url` (else the registry host) |
+| `GET /docker/hosts` | none | `{"registry": "<host>", "upload": "<host>"}`: the host of `base_url` (else of the request), and the host of `docker.upload_url` when `docker.direct_uploads` is on (else no `upload`) |
 
 A name of one segment (no image) is 404 `NAME_UNKNOWN` "name an image inside the repository:
 <host>/<repo>/<image>". The refusals map to OCI codes: an engine `anonymous`, `credentials`,
@@ -1804,9 +1820,10 @@ error is 500 `UNKNOWN` "internal error".
 **Challenge.** A 401 carries `WWW-Authenticate: Bearer realm="<scheme>://<host>/docker/token",
 service="<host>",scope="repository:<name>:<actions>"` with `pull` on GET and HEAD, `pull,push`
 on PUT, POST and PATCH and `delete` on DELETE (`registry:catalog:*` on the catalog, none on
-`/v2/`). The scheme and the host are those of `docker.push_url` when the request came to its host,
-else those of `base_url`, else the scheme of the client (`httpx.ClientScheme`, see **Client IP and
-scheme**) and the host of the request.
+`/v2/`). The scheme and the host are those of `docker.upload_url` when direct uploads are on and
+the request came to its host (the `Host` header; a default port counts as none), else those of
+`base_url`, else the scheme of the client (`httpx.ClientScheme`, see **Client IP and scheme**) and
+the host of the request.
 A refusal with the code `scope` adds `error="insufficient_scope"`.
 
 **Token endpoint.** `GET /docker/token?service=&scope=...` with Basic credentials, or `POST` with
@@ -1892,29 +1909,58 @@ The catalog lists the images that a proxy has cached. A group reads its members 
 group is 405 `UNSUPPORTED` with the read-only text ("A proxy is read-only.", "A group is
 read-only. Publish to one of its repositories.").
 
-**Push host (the 100 MB request limit).** Docker 29, containerd 2 (nerdctl, BuildKit and buildx),
-Podman, skopeo, crane and ORAS send each layer in one request body: one PUT, or one PATCH and an
-empty PUT. No client reads a maximum chunk size, and none splits a layer after a 413. Behind a
-proxy that limits request bodies (Cloudflare: 100 MB on Free and Pro), a larger layer fails with
-every common client. `docker.push_url` names a host that reaches the server without that proxy
-(a DNS-only record): the snippets and the CI files push there, pulls keep the main host, and the
-challenge of a request to that host names that host's token endpoint. The registry supports the
-full chunked protocol for clients that use it (oras-go v3 with a chunk size).
+**Upload host (the 100 MB request limit).** Behind Cloudflare (Free and Pro plans), each image
+layer must be under 100 MB; pulls have no limit. Docker 29, containerd 2 (nerdctl, BuildKit and
+buildx), Podman, skopeo, crane and ORAS send each layer in one request body: one PUT, or one PATCH
+and an empty PUT. No client reads a maximum chunk size, and none splits a layer after a 413.
+`docker.direct_uploads` ("Expose the origin IP for Docker uploads", off by default) lifts the
+limit: the layer bytes go to `docker.upload_url`, the DNS-only name or address of the server. This
+makes the IP address of the server public, and the admin opens that port in the firewall of the
+server for the clients that push. The group's `Validate` refuses the toggle without an address.
+Not behind Cloudflare, nothing is needed. Clients name only the main host. With the toggle on,
+every answer that names an upload session (the 202 of `POST .../blobs/uploads/`, of a PATCH and of
+a mount that falls back to an upload, the 204 of a status GET and the 416 of a wrong offset) has
+an absolute `Location`: `<docker.upload_url>/v2/<name>/blobs/uploads/<id>?_state=<upload token>`.
+A request that came to the upload host gets the relative path, as with the toggle off. The upload
+token is a core bearer token of the caller's publish session for the repo (read and write) that
+`auth.Service.IssueUploadToken` binds to the upload id. It lives 15 minutes, or the rest of the
+session when that is shorter, at least 60 s, and each answer carries a new one. The `/v2/` routes
+read it (`route.Policy.URLToken`, `auth.Read.URLToken`) only from the `_state` parameter of the
+URL of that upload, and only when the `Authorization` header gives no credential. It never
+verifies from a header, on another path or for another upload; a changed or expired token is 401.
+The access log never writes query strings. The mount answer 201 and the monolithic
+`POST ...?digest=` keep their relative `Location`. The clients follow the `Location` this way:
 
-**Snippets and CI.** `HOST` is the host of `base_url`, `PUSH` the host of `docker.push_url` (else
-`HOST`). Use: `docker login HOST` with a read token for a private repo, `docker pull
+| Client | Credential on the upload host | Bytes |
+|---|---|---|
+| containerd 2 pusher (Docker 29 with the containerd image store, BuildKit, buildx, nerdctl) | none: it drops its authorizer on a host change | one PUT |
+| Docker 29 with a graph driver (the distribution client) | none: it has no challenge of that host | one PATCH, then an empty PUT |
+| containers/image (Podman, skopeo) | the bearer token of the main host | one PATCH, then an empty PUT |
+| go-containerregistry (crane, ko) | none; it refuses a private or loopback IP literal as the host | one PATCH, then an empty PUT |
+| oras-go v2.6.1 and later (ORAS 1.3, Helm 4) | it refuses a `Location` on another host (GHSA-jxpm-75mh-9fp7); it pushes to the upload host by name, where the `Location` stays on that host and the challenge names the token endpoint of that host | one PUT |
+
+The registry supports the full chunked protocol for clients that use it (oras-go v3 with a chunk
+size).
+
+**Snippets and CI.** `HOST` is the host of `base_url`. With direct uploads off and the Cloudflare
+IP list among the trusted proxies (`netrules.Service.TrustsList`, an in-memory read), the Docker push
+snippets add "Behind Cloudflare (Free and Pro plans), each image layer must be under 100 MB. Pulls
+have no limit." Use: `docker login HOST` with a read token for a private repo, `docker pull
 HOST/<repo>/IMAGE:TAG`, `helm pull oci://HOST/<repo>/CHART --version X`. Publish (hosted repos):
 from a computer, `docker-credential-telesphorepo login <base_url>` once, then `docker push
-PUSH/<repo>/IMAGE:TAG` and `helm push chart.tgz oci://PUSH/<repo>`; by hand, a publish token at
-a hidden prompt, `docker login PUSH -u publish --password-stdin`, the push and `docker logout`.
+HOST/<repo>/IMAGE:TAG`, `helm push chart.tgz oci://OCI/<repo>` and `oras push
+OCI/<repo>/ARTIFACT:TAG FILE`, where `OCI` is the host of `docker.upload_url` when direct uploads are
+on (with the note "ORAS and Helm 4 push to the upload address <host>, because they send layers only
+to the host of the push."), else `HOST`; by hand, a publish token at
+a hidden prompt, `docker login HOST -u publish --password-stdin`, the push and `docker logout`.
 An http `base_url` adds "Add HOST to insecure-registries in /etc/docker/daemon.json."; a
 `base_url` with a path adds that Docker reaches a registry at the root of a host. The artifact
 snippets of an image (a folder, a tag or a manifest file) pull the digest that the tag names
 (pinned) or the tag (latest); a manifest without a tag pulls by digest; a Helm chart pulls with
 `helm pull --version`, another OCI artifact with `oras pull`; a private repo adds the login. The
-CI tool `docker` builds `PUSH/<repo>/app` with the commit as the tag (`$GITHUB_SHA`, Jenkins
+CI tool `docker` builds `HOST/<repo>/app` with the commit as the tag (`$GITHUB_SHA`, Jenkins
 `${GIT_COMMIT:-$BUILD_NUMBER}`), then logs in with the job's identity token
-(`printf '%s' "$OIDC_TOKEN" | docker login PUSH -u oidc --password-stdin`) right before the push,
+(`printf '%s' "$OIDC_TOKEN" | docker login HOST -u oidc --password-stdin`) right before the push,
 pushes and logs out, so the token is fresh when the token endpoint mints the session. Its note:
 "Change app to the name of your image. The job needs Docker. The OIDC token pulls public images
 only: to build from a private image, log in with a read token before the build."
@@ -2579,7 +2625,11 @@ permissions (409 on a change of them), a person outside the map signs in without
 map change replaces them at the next sign-in, and without a claim a sign-in changes nothing; a map
 without a claim or with an unknown or repository permission is 400. `TestRaw` uses a curl container.
 `TestAPIFormats` covers `/api/formats`, `/status` and `/usage`; `descriptor_test.go` covers the format descriptors (`TestFormatDescriptors`), the CI file route with branches and tags (`TestCIWorkflowRoute`) and the delete plan (`TestDeletePlan`). `TestQueryPlans` runs `dbcheck`
-inside a server container. `files_test.go` covers `TestTree`, `TestDelete` (who may delete: `repo.delete` with a publish session or a UI session, file, prefix and Bearer deletes, blobs kept for the blob GC, repo delete and name reuse), `TestManualUploadMaven` (checksums, metadata order, `mvn` resolves the uploaded and the generated pom), `TestManualUploadRaw`, `TestRepoCounters` (`file_count`, `total_size` and `last_published_at` through uploads, a replace, a file delete and a folder delete) and `TestDebianDeleteAndUpload` (apt sees the package, then not; 4 by-hash files remain). `audit_test.go` covers `TestAudit`: events, filters, paging, no secret values, `activity.read` only, and no IP outside the audit log. `network_test.go` covers `TestClientIP` (with the default an `X-Forwarded-For` from the harness peer is ignored and the peer becomes a proxy candidate; trusting the candidate makes the header count and removes the candidate; `private`: a chain through a private hop, `CF-Connecting-IP` from a non-Cloudflare peer; an untrusted peer's header, an empty list, invalid entries, reset to the default). `TestIPRules` and `TestPresetIPLists` set `trusted_proxies` to `private` first, so `X-Forwarded-For` sets the client address, `TestIPRules` (validation; allowed and refused reads of the format route, tree, assets, usage and status; the repo record stays readable; search drops the repo; refused device and manual mints, PUT and admin delete, each audited with its IP and scope; empty lists lift the rule) and `TestPresetIPLists` (a second Telesphorepo server is the stub: startup fetch, a preset in read rules, a Cloudflare hop in the chain, a failed refresh that keeps the last good list, recovery, and stored lists after a restart without the stub) and `TestCustomIPLists` (create, edit, a rename that keeps the rules and the trusted proxies (by list id), use in rules and in the trusted proxies, delete while in use gives 409, an unknown list id gives 400) and `TestTrustedProxyEnvList` (`TR_TRUSTED_PROXIES` with `list:cloudflare` shows as `env_lists`) and `TestIPRangeParse` (the paste parser: one per line, comma, space, tab and `|` separated, CSV with a header row, tables, comments, labels, quotes, IPv6 and IPv4-mapped IPv6, an unmasked CIDR, duplicates, invalid lines with their numbers, the 1 MiB limit, `network.manage` only). `signing_keys_test.go` covers create, import of plain and encrypted keys, delete while in use gives 409, a per-repo key (the repo field `signing_key`; an unknown key, a key in the config and a key of a raw repo give 400) that `apt` installs from, a key change that signs again, and keys and bindings after a restart. `groups_test.go` covers `TestGroups`: a release and a snapshot member resolve through the group with `mvn` and Gradle, the merged `maven-metadata.xml` and its `.sha1`, the member order, a public group with a private member (anonymous and a reader), 405 for a PUT and 409 for a publish session, 400 for a member of another format, a nested group, an unknown name and no member, and a member delete. `proxy_test.go` covers `TestProxy` with a second Telesphorepo server as the remote: `mvn` through the proxy and no remote request on the second resolve, the `metadata_ttl` recheck with a 304 and a changed file, a remembered 404, 405 for a PUT, a group where the hosted member wins over the proxy, remote credentials (with them, 502 without them), an nginx container that redirects to another host and records that the credentials did not follow, `apt-get` through a Debian proxy with the remote's key, and a stopped remote (cached file served, 502, `last_error`). `TestNoBrowserPasswordPrompt` (in `auth_test.go`) checks that a 401 under `/api` or with `X-Telesphorepo-UI` has no `WWW-Authenticate`. `folder_upload_test.go` covers `TestFolderUploadMaven` (a Maven-layout tree with checksum, signature and stray files; a flat folder with two poms; a bad tree that gives 400; plans store nothing; checksums and metadata) and `TestFolderUploadDebianAndRaw`. `TestStorageMove*` run each server on a named data volume: fs to
+inside a server container. `files_test.go` covers `TestTree`, `TestDelete` (who may delete: `repo.delete` with a publish session or a UI session, file, prefix and Bearer deletes, blobs kept for the blob GC, repo delete and name reuse), `TestManualUploadMaven` (checksums, metadata order, `mvn` resolves the uploaded and the generated pom), `TestManualUploadRaw`, `TestRepoCounters` (`file_count`, `total_size` and `last_published_at` through uploads, a replace, a file delete and a folder delete) and `TestDebianDeleteAndUpload` (apt sees the package, then not; 4 by-hash files remain). `audit_test.go` covers `TestAudit`: events, filters, paging, no secret values, `activity.read` only, and no IP outside the audit log. `network_test.go` covers `TestClientIP` (with the default an `X-Forwarded-For` from the harness peer is ignored and the peer becomes a proxy candidate; trusting the candidate makes the header count and removes the candidate; `private`: a chain through a private hop, `CF-Connecting-IP` from a non-Cloudflare peer; an untrusted peer's header, an empty list, invalid entries, reset to the default). `TestIPRules` and `TestPresetIPLists` set `trusted_proxies` to `private` first, so `X-Forwarded-For` sets the client address, `TestIPRules` (validation; allowed and refused reads of the format route, tree, assets, usage and status; the repo record stays readable; search drops the repo; refused device and manual mints, PUT and admin delete, each audited with its IP and scope; empty lists lift the rule) and `TestPresetIPLists` (a second Telesphorepo server is the stub: startup fetch, a preset in read rules, a Cloudflare hop in the chain, a failed refresh that keeps the last good list, recovery, and stored lists after a restart without the stub) and `TestCustomIPLists` (create, edit, a rename that keeps the rules and the trusted proxies (by list id), use in rules and in the trusted proxies, delete while in use gives 409, an unknown list id gives 400) and `TestTrustedProxyEnvList` (`TR_TRUSTED_PROXIES` with `list:cloudflare` shows as `env_lists`) and `TestIPRangeParse` (the paste parser: one per line, comma, space, tab and `|` separated, CSV with a header row, tables, comments, labels, quotes, IPv6 and IPv4-mapped IPv6, an unmasked CIDR, duplicates, invalid lines with their numbers, the 1 MiB limit, `network.manage` only). `signing_keys_test.go` covers create, import of plain and encrypted keys, delete while in use gives 409, a per-repo key (the repo field `signing_key`; an unknown key, a key in the config and a key of a raw repo give 400) that `apt` installs from, a key change that signs again, and keys and bindings after a restart. `groups_test.go` covers `TestGroups`: a release and a snapshot member resolve through the group with `mvn` and Gradle, the merged `maven-metadata.xml` and its `.sha1`, the member order, a public group with a private member (anonymous and a reader), 405 for a PUT and 409 for a publish session, 400 for a member of another format, a nested group, an unknown name and no member, and a member delete. `cache_control_test.go` covers
+`TestCacheControl`: HEAD, a 304 and a GET of a private Maven repo, of a public group with a
+private member (also for the public member's file) carry `Cache-Control: private`; a public repo
+and a group of public members carry none (an S3 redirect carries `no-store`); after a read IP rule
+that allows every address, the public repo and the group of it carry `private`. `proxy_test.go` covers `TestProxy` with a second Telesphorepo server as the remote: `mvn` through the proxy and no remote request on the second resolve, the `metadata_ttl` recheck with a 304 and a changed file, a remembered 404, 405 for a PUT, a group where the hosted member wins over the proxy, remote credentials (with them, 502 without them), a Caddy container that redirects to another host and refuses a request that carries credentials, `apt-get` through a Debian proxy with the remote's key, and a stopped remote (cached file served, 502, `last_error`). `TestNoBrowserPasswordPrompt` (in `auth_test.go`) checks that a 401 under `/api` or with `X-Telesphorepo-UI` has no `WWW-Authenticate`. `folder_upload_test.go` covers `TestFolderUploadMaven` (a Maven-layout tree with checksum, signature and stray files; a flat folder with two poms; a bad tree that gives 400; plans store nothing; checksums and metadata) and `TestFolderUploadDebianAndRaw`. `TestStorageMove*` run each server on a named data volume: fs to
 SeaweedFS and back with uploads during the move, a forced failure, a restart mid-move
 (`Server.Restart`) and a cancel. `blobs_test.go` covers `TestBlobDedupeAndGC` (the same bytes in two raw repos
 and a Maven repo are one stored blob, each path keeps its own content type, also in an S3 redirect;
@@ -2630,11 +2680,24 @@ tag with `MANIFEST_UNKNOWN` (the second GET sends nothing to the remote) and the
 to the remote; a push is 405 "A proxy is read-only."; a group of a hosted repo and the proxy
 serves the hosted tag on a shared tag and the proxy's tag otherwise, merges the tags list, and a
 push is 405 with the group's text; the proxy's tags list is the remote's; a stopped remote serves
-a cached tag and answers 502 `UNKNOWN` for an uncached one. `TestDockerPushHost`: aliases `repo`
-and `push` with `TR_DOCKER_PUSH_URL`; the challenge at each host names its own realm,
-`/docker/hosts` names both, Docker pushes to the push host and pulls from the main host, the
-publish snippets push to the push host and the GitHub Actions file logs in there right before the
-push. `TestDockerVersions` (`versions_test.go`): the versions (tags, newest first, keyset pages),
+a cached tag and answers 502 `UNKNOWN` for an uncached one. `TestDockerGroupBearer`
+(`docker_group_test.go`): a private group of two private hosted repos, where the user holds
+`repo.download` on the group and on the second member only; the Docker CLI after `docker login`,
+crane and a bearer token of the token endpoint pull through the group and get the second
+member's image; the first member's tags are 404 and absent from the tags list, while the admin
+gets them; the group's token on a member is 401 `insufficient_scope`; manifests and blobs carry
+`Cache-Control: private`; an anonymous bearer reads a public group of a public repo.
+`TestDockerUploadHost`
+(`docker_upload_test.go`): Caddy with `request_body max_size 1MB` in front of the main host
+(`base_url`); `docker.direct_uploads` without an address is 400; with the address set and the toggle
+off, `/docker/hosts` names the main host only and a crane push of a 5 MB layer through the proxy is
+413; with the toggle on, POST answers an absolute `Location` on the upload host (the server's own
+alias) with `_state`, the token writes to its own upload only (no token, a changed token, the token
+of another upload and the token on another path are 401), and Docker (the containerd image store and
+the `vfs` graph driver), crane and skopeo push the 5 MB layer through the proxy hostname and pull it
+back; `/docker/hosts` names the upload host, a POST on the upload host gets a relative `Location`
+and the challenge there names its own realm, and ORAS (5 MB) and Helm 4 push to the upload host by
+name and pull through the proxy hostname. `TestDockerVersions` (`versions_test.go`): the versions (tags, newest first, keyset pages),
 the kinds image, helm-chart, the builds of an image and of an index (platform classifiers), the
 CI build of a tag that a CI token pushed, the pinned and latest artifact snippets, the snippets of
 a tag file and of a chart, and `GET /api/docker/{name}/manifest`. `TestFormatDescriptors` and

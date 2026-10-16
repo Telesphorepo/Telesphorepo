@@ -17,9 +17,6 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// nginxImage serves the redirect check of the proxy credentials.
-const nginxImage = "nginx:1.27.5-alpine"
-
 // CreateProxy creates a proxy repo of format with the remote settings px (remote_url, username,
 // password, metadata_ttl, not_found_ttl). force skips the check of the remote.
 func (s *Server) CreateProxy(t testing.TB, name, format string, anon bool, px map[string]any, force bool) {
@@ -88,37 +85,46 @@ func remoteGetCount(t testing.TB, s *Server, prefix string) map[string]int {
 	return out
 }
 
-// nginxRedirectConf answers every request on redir:8080 with a redirect to the host recorder
-// (port 8081), which logs the Authorization header of each request ("-" when there is none).
-const nginxRedirectConf = `events {}
-http {
-  log_format auth 'RECORDED $request_uri auth=[$http_authorization]';
-  server {
-    listen 8080;
-    location / { return 302 http://recorder:8081$request_uri; }
-  }
-  server {
-    listen 8081;
-    access_log /dev/stdout auth;
-    location / { default_type text/plain; return 200 "redirected file\n"; }
-  }
+// caddyImage is the reverse proxy of the tests: a redirector and a proxy with a body limit.
+const caddyImage = "caddy:2.10.2-alpine"
+
+// caddyRedirectConf answers every request on redir:8080 with a redirect to the host recorder
+// (port 8081). The recorder serves the file only to a request without an Authorization header,
+// and answers 403 to a request with one.
+const caddyRedirectConf = `{
+	admin off
+	auto_https off
+}
+:8080 {
+	redir http://recorder:8081{uri} 302
+}
+:8081 {
+	@auth header Authorization *
+	respond @auth "credentials arrived" 403
+	respond ` + "`redirected file\n`" + ` 200
 }
 `
 
-// startRedirector starts nginx with the network aliases redir and recorder.
-func startRedirector(t *testing.T) testcontainers.Container {
+// startCaddy starts Caddy on :8080 with the Caddyfile conf and the network aliases aliases.
+func startCaddy(t *testing.T, conf, what string, aliases ...string) {
 	t.Helper()
-	c, err := testcontainers.Run(context.Background(), nginxImage,
-		testcontainers.WithFiles(testcontainers.ContainerFile{Reader: strings.NewReader(nginxRedirectConf), ContainerFilePath: "/etc/nginx/nginx.conf", FileMode: 0o644}),
+	c, err := testcontainers.Run(context.Background(), caddyImage,
+		testcontainers.WithLabels(e2eLabels),
+		testcontainers.WithFiles(testcontainers.ContainerFile{Reader: strings.NewReader(conf), ContainerFilePath: "/etc/caddy/Caddyfile", FileMode: 0o644}),
 		testcontainers.WithExposedPorts("8080/tcp"),
-		network.WithNetwork([]string{"redir", "recorder"}, TestNetwork),
+		network.WithNetwork(aliases, TestNetwork),
 		testcontainers.WithWaitStrategy(wait.ForListeningPort("8080/tcp").WithStartupTimeout(time.Minute)),
 	)
-	registerCleanup(t, c, "nginx redirector")
+	registerCleanup(t, c, what)
 	if err != nil {
-		t.Fatalf("start nginx: %v", err)
+		t.Fatalf("start %s: %v", what, err)
 	}
-	return c
+}
+
+// startRedirector starts Caddy with the network aliases redir and recorder.
+func startRedirector(t *testing.T) {
+	t.Helper()
+	startCaddy(t, caddyRedirectConf, "Caddy redirector", "redir", "recorder")
 }
 
 // debProxyAptScript installs the test packages through a Debian proxy.
@@ -328,15 +334,12 @@ func TestProxy(t *testing.T) {
 			t.Fatalf("test the remote of %s: status %d, want 200: %s", withCreds, st, b)
 		}
 
-		// A redirect to another host does not carry the credentials.
-		nginx := startRedirector(t)
+		// A redirect to another host does not carry the credentials: the recorder answers 403 to a
+		// request with an Authorization header.
+		startRedirector(t)
 		redirected := RandName("redirected")
 		s.CreateProxy(t, redirected, "maven", true, map[string]any{"remote_url": "http://redir:8080/m2/", "username": "someone", "password": "s3cret-e2e"}, false)
 		rawWantGet(t, s, opts.S3, "/maven/"+redirected+"/com/e2e/r/1.0/r-1.0.txt", nil, []byte("redirected file\n"))
-		recorded := containerLogs(nginx)
-		if !strings.Contains(recorded, "RECORDED /m2/com/e2e/r/1.0/r-1.0.txt auth=[-]") || strings.Contains(recorded, "Basic") {
-			t.Fatalf("the redirected request carried credentials or did not arrive:\n%s", recorded)
-		}
 
 		// Debian: apt installs through the proxy, with the remote archive's key.
 		upDeb := RandName("upstream-deb")
