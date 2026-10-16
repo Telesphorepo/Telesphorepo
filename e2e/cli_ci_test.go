@@ -173,13 +173,12 @@ rm /tmp/e2e-big.deb
 		if m == nil {
 			t.Fatalf("no SHA-256 of big.bin in the output:\n%s", out)
 		}
-		resp, b := s.Do(t, s.NewRequest(t, http.MethodGet, "/raw/"+raw+"/dist/small.txt", nil), s.AdminBasic())
-		if resp.StatusCode != http.StatusOK || string(b) != "small file\n" {
-			t.Fatalf("GET small.txt: status %d: %q", resp.StatusCode, b)
+		if b := getFollowS3(t, s, opts.S3, "/raw/"+raw+"/dist/small.txt"); string(b) != "small file\n" {
+			t.Fatalf("GET small.txt: %q", b)
 		}
-		resp, b = s.Do(t, s.NewRequest(t, http.MethodGet, "/raw/"+raw+"/dist/big.bin", nil), s.AdminBasic())
-		if sum := sha256.Sum256(b); resp.StatusCode != http.StatusOK || hex.EncodeToString(sum[:]) != m[1] {
-			t.Fatalf("GET big.bin: status %d, %d bytes, want the file of SHA-256 %s", resp.StatusCode, len(b), m[1])
+		b := getFollowS3(t, s, opts.S3, "/raw/"+raw+"/dist/big.bin")
+		if sum := sha256.Sum256(b); hex.EncodeToString(sum[:]) != m[1] {
+			t.Fatalf("GET big.bin: %d bytes, want the file of SHA-256 %s", len(b), m[1])
 		}
 
 		wantText(t, "set up a Debian repo", section(out, "deb setup"), "Packages go to distribution stable, component main.", `dist = "trixie"`)

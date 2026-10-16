@@ -155,9 +155,8 @@ func TestCLILogin(t *testing.T) {
 		}
 		wantText(t, "publish with the device flow", out, "This computer has no device of "+s.InternalURL+" yet.",
 			"Uploaded hello.txt to "+s.InternalURL+"/raw/"+repo+"/hello.txt")
-		resp, b := s.Do(t, s.NewRequest(t, http.MethodGet, "/raw/"+repo+"/hello.txt", nil), s.AdminBasic())
-		if resp.StatusCode != http.StatusOK || string(b) != "hello from a teammate\n" {
-			t.Fatalf("GET the published file: status %d: %q", resp.StatusCode, b)
+		if b := getFollowS3(t, s, opts.S3, "/raw/"+repo+"/hello.txt"); string(b) != "hello from a teammate\n" {
+			t.Fatalf("GET the published file: %q", b)
 		}
 		var devices struct {
 			Items []struct {

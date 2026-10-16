@@ -144,7 +144,7 @@ func section(out, name string) string {
 		return ""
 	}
 	if i := strings.Index(rest, "\n=== "); i >= 0 {
-		rest = rest[:i]
+		rest = rest[:i+1]
 	}
 	return rest
 }

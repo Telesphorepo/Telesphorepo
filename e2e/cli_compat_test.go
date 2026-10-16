@@ -169,9 +169,8 @@ func TestCLICompat(t *testing.T) {
 			"E2E: publishing to a raw repository needs CLI v0.9.0.", "Update now? [Y/n]",
 			"Installed the CLI of "+s.InternalURL+" (v0.9.0) in /usr/local/bin/telesphorepo.",
 			"Uploaded a.txt to "+s.InternalURL+"/raw/"+repo+"/a.txt", "rc=0", "telesphorepo v0.9.0\n", "telesphorepo\n")
-		resp, b = s.Do(t, s.NewRequest(t, http.MethodGet, "/raw/"+repo+"/a.txt", nil), s.AdminBasic())
-		if resp.StatusCode != http.StatusOK || string(b) != "compat\n" {
-			t.Fatalf("GET a.txt after the update: status %d: %q", resp.StatusCode, b)
+		if b := getFollowS3(t, s, opts.S3, "/raw/"+repo+"/a.txt"); string(b) != "compat\n" {
+			t.Fatalf("GET a.txt after the update: %q", b)
 		}
 	})
 }

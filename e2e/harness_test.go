@@ -1435,3 +1435,35 @@ func (s *Server) CloseSession(t testing.TB, p PublishSession) int {
 	st, _ := s.API(t, http.MethodDelete, "/api/publish/sessions/"+p.ID, nil, p.Auth())
 	return st
 }
+
+// getFollowS3 GETs p as the admin and returns the body. On S3 storage the server answers 302 to
+// a presigned URL on the SeaweedFS network alias; the test reads it through the host endpoint.
+func getFollowS3(t *testing.T, s *Server, tg *S3Target, p string) []byte {
+	t.Helper()
+	resp, body := s.Do(t, s.NewRequest(t, http.MethodGet, p, nil), s.AdminBasic())
+	if resp.StatusCode == http.StatusFound && tg != nil {
+		// The signature covers the Host header, so the request keeps the signed host.
+		signed, err := url.Parse(resp.Header.Get("Location"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req, err := http.NewRequest(http.MethodGet, strings.Replace(signed.String(), tg.Endpoint, tg.HostEndpoint, 1), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Host = signed.Host
+		r, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET %s (presigned): %v", p, err)
+		}
+		defer r.Body.Close()
+		if body, err = io.ReadAll(r.Body); err != nil {
+			t.Fatal(err)
+		}
+		resp = r
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s: status %d: %s", p, resp.StatusCode, body)
+	}
+	return body
+}
