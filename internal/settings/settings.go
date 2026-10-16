@@ -1,7 +1,8 @@
-// Package settings implements the in-app settings store (spec §3): typed settings in the
-// settings table (secrets AES-256-GCM encrypted), forced by TR_<KEY> env overrides, falling
-// back to defaults. The effective values live in an immutable atomic snapshot that is rebuilt on
-// every write; request paths read the snapshot, never the table.
+// Package settings is the settings store: typed settings in the settings table (secrets
+// AES-256-GCM encrypted), forced by TR_<KEY> environment overrides, falling back to defaults.
+// Each module owns its groups of settings (Group): the definitions, the permission that edits
+// them and the owner hooks. The effective values live in an immutable snapshot that is rebuilt
+// on every write; request paths read the snapshot (Key.Get, View.Get), never the table.
 package settings
 
 import (
@@ -9,11 +10,12 @@ import (
 	"crypto/cipher"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
 	"os"
-	"reflect"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -21,31 +23,35 @@ import (
 	"sync/atomic"
 	"time"
 
-	gooidc "github.com/coreos/go-oidc/v3/oidc"
-
+	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
 	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
-	"github.com/Telesphorepo/Telesphorepo/internal/storage"
 )
+
+var keyRE = regexp.MustCompile(`^[a-z][a-z0-9_.-]{0,63}$`)
 
 // Source says where a setting's effective value comes from.
 type Source string
 
 const (
-	SourceDB      Source = "db"
+	SourceStored  Source = "stored"
 	SourceEnv     Source = "env"
 	SourceDefault Source = "default"
 )
 
 // ValidationError reports invalid settings, keyed by setting key ("" for general errors).
 type ValidationError struct {
-	Fields map[string]string
+	Message string
+	Fields  map[string]string
 }
 
 func (e *ValidationError) Error() string {
 	keys := slices.Sorted(maps.Keys(e.Fields))
-	parts := make([]string, 0, len(keys))
+	parts := make([]string, 0, len(keys)+1)
+	if e.Message != "" {
+		parts = append(parts, e.Message)
+	}
 	for _, k := range keys {
 		if k == "" {
 			parts = append(parts, e.Fields[k])
@@ -63,7 +69,7 @@ func (e *ValidationError) add(key, msg string) {
 }
 
 func (e *ValidationError) orNil() error {
-	if len(e.Fields) == 0 {
+	if len(e.Fields) == 0 && e.Message == "" {
 		return nil
 	}
 	return e
@@ -71,51 +77,44 @@ func (e *ValidationError) orNil() error {
 
 func newVE() *ValidationError { return &ValidationError{Fields: map[string]string{}} }
 
-// Snapshot is an immutable view of the effective settings.
+// Snapshot is an immutable set of the effective settings. Read it with a Key or a View.
 type Snapshot struct {
-	Config *config.Config
-
-	values  map[string]any
-	sources map[string]Source
-	db      map[string]any // decoded rows of the settings table
+	reg     *registry
+	values  []any // by Def index
+	sources []Source
+	stored  map[string]any    // decoded rows of the settings table
+	broken  map[string]string // stored values that could not be read, with the reason
+	dataDir string
+	views   sync.Map // *View -> its value
 }
 
-// Value returns the effective value of key (see Type for representations).
-func (s *Snapshot) Value(key string) any { return s.values[key] }
-
-// Source returns where key's effective value comes from.
-func (s *Snapshot) Source(key string) Source { return s.sources[key] }
-
-// Typed reads of a setting's effective value (the zero value for an unknown key or another
-// type). Format plugins read their own settings with these.
-
-func (s *Snapshot) String(key string) string {
-	v, _ := s.values[key].(string)
-	return v
-}
-
-func (s *Snapshot) Bool(key string) bool {
-	v, _ := s.values[key].(bool)
-	return v
-}
-
-// Size returns a size setting in bytes.
-func (s *Snapshot) Size(key string) int64 {
-	v, _ := s.values[key].(int64)
-	return v
-}
-
-func (s *Snapshot) List(key string) []string {
-	v, _ := s.values[key].([]string)
-	return v
-}
-
-func (s *Snapshot) Duration(key string) time.Duration {
-	v, ok := s.values[key].(string)
-	if !ok {
-		return 0
+// Source returns where the effective value of key comes from ("" for an unknown key).
+func (s *Snapshot) Source(key string) Source {
+	if d := s.reg.byKey[key]; d != nil {
+		return s.sources[d.idx]
 	}
-	return durationOf(v)
+	return ""
+}
+
+// DataDir returns the data directory of the server.
+func (s *Snapshot) DataDir() string { return s.dataDir }
+
+// Provider returns the current snapshot.
+type Provider func() *Snapshot
+
+// View is an owner's typed view of the settings, computed once per snapshot.
+type View[T any] struct{ build func(*Snapshot) T }
+
+// NewView returns a view that build computes.
+func NewView[T any](build func(*Snapshot) T) *View[T] { return &View[T]{build: build} }
+
+// Get returns the view of s.
+func (v *View[T]) Get(s *Snapshot) T {
+	if x, ok := s.views.Load(v); ok {
+		return x.(T)
+	}
+	x, _ := s.views.LoadOrStore(v, v.build(s))
+	return x.(T)
 }
 
 // Options configures Load.
@@ -128,27 +127,37 @@ type Options struct {
 
 // Service owns the settings table and the effective snapshot.
 type Service struct {
-	db   *db.DB
-	boot *config.Boot
-	aead cipher.AEAD
-	log  *slog.Logger
-	dev  bool
-	env  map[string]string // non-empty TR_* overrides, captured at Load
+	db     *db.DB
+	boot   *config.Boot
+	reg    *registry
+	aead   cipher.AEAD
+	master []byte // the master key; DeriveKey derives keys from it
+	log    *slog.Logger
+	dev    bool
+	env    map[string]string // non-empty TR_* overrides, captured at Load
+	audit  *audit.Log        // records settings.update for each Patch that saves
 
-	mu   sync.Mutex // serializes writers
-	snap atomic.Pointer[Snapshot]
+	mu       sync.Mutex             // serializes writers
+	degraded map[string]map[int]any // group ID -> the overrides it started with
+	snap     atomic.Pointer[Snapshot]
 
 	subsMu sync.Mutex
 	subs   []func(old, new *Snapshot)
 }
 
-// Load reads the master key, the settings table and the env overrides and builds the first
-// snapshot. Invalid env values and invalid combinations are errors; invalid or undecryptable
-// stored values are logged and ignored (so the server can start and they can be fixed in the UI).
-func Load(ctx context.Context, d *db.DB, boot *config.Boot, opts Options) (*Service, error) {
+// Load reads the master key, the settings table and the environment overrides, builds the first
+// snapshot and runs the Validate of every group (ModeStartup). An invalid environment value or a
+// refusal of a Validate stops the server; a Validate that returns ErrDegraded starts it with its
+// overrides. A stored value that is not valid is logged and ignored, so the server starts and the
+// value can be fixed in the UI.
+func Load(ctx context.Context, d *db.DB, boot *config.Boot, groups []*Group, opts Options) (*Service, error) {
 	log := opts.Log
 	if log == nil {
 		log = slog.Default()
+	}
+	reg, err := newRegistry(groups)
+	if err != nil {
+		return nil, err
 	}
 	master, err := loadMasterKey(boot, log)
 	if err != nil {
@@ -158,26 +167,45 @@ func Load(ctx context.Context, d *db.DB, boot *config.Boot, opts Options) (*Serv
 	if err != nil {
 		return nil, err
 	}
-	s := &Service{db: d, boot: boot, aead: aead, log: log, dev: opts.Dev, env: map[string]string{}}
-	for _, def := range registry {
+	s := &Service{db: d, boot: boot, reg: reg, aead: aead, master: master, log: log, dev: opts.Dev,
+		env: map[string]string{}, degraded: map[string]map[int]any{}}
+	for _, def := range reg.defs {
 		if v := os.Getenv(def.Env()); v != "" {
 			s.env[def.Key] = v
 		}
 	}
-	warnUnknownEnv(log)
-	rows, err := s.readDB(ctx)
+	s.warnUnknownEnv()
+	rows, broken, err := s.readDB(ctx)
 	if err != nil {
 		return nil, err
 	}
-	snap, err := s.build(rows, true)
-	if err != nil {
-		return nil, fmt.Errorf("config: %w", err)
+	snap, ve := s.compose(rows, broken)
+	if err := ve.orNil(); err != nil {
+		return nil, fmt.Errorf("settings: %w", err)
+	}
+	for _, g := range reg.groups {
+		if g.Validate == nil {
+			continue
+		}
+		dr := newDraft(snap, nil)
+		err := g.Validate(dr, ModeStartup)
+		if errors.Is(err, ErrDegraded) {
+			log.Error("settings of group "+g.ID+" fail; the server starts without them until they are fixed", "error", err.Error())
+			s.degraded[g.ID] = dr.overrides
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("settings: %s: %w", g.ID, err)
+		}
+		if dr.Failed() {
+			return nil, fmt.Errorf("settings: %w", &ValidationError{Fields: dr.fields})
+		}
 	}
 	s.snap.Store(snap)
 	return s, nil
 }
 
-// bootEnv are TR_* variables read outside the settings registry (boot config, tooling).
+// bootEnv are TR_* variables read outside the settings (boot environment, tooling).
 var bootEnv = map[string]bool{
 	"TR_DATA_DIR": true, "TR_LISTEN": true, "TR_MASTER_KEY": true,
 	"TR_BOOTSTRAP_ADMIN_USER": true, "TR_BOOTSTRAP_ADMIN_PASSWORD": true,
@@ -185,31 +213,35 @@ var bootEnv = map[string]bool{
 }
 
 // warnUnknownEnv logs TR_* variables that match no setting or boot variable (typos, removed
-// or not-yet-supported settings), naming only the variable, never its value.
-func warnUnknownEnv(log *slog.Logger) {
+// settings), naming only the variable, never its value.
+func (s *Service) warnUnknownEnv() {
+	known := map[string]bool{}
+	for _, def := range s.reg.defs {
+		known[def.Env()] = true
+	}
 	for _, kv := range os.Environ() {
 		name, _, _ := strings.Cut(kv, "=")
-		if !strings.HasPrefix(name, "TR_") || bootEnv[name] || strings.HasPrefix(name, "TR_E2E_") {
+		if !strings.HasPrefix(name, "TR_") || bootEnv[name] || known[name] || strings.HasPrefix(name, "TR_E2E_") {
 			continue
 		}
-		known := false
-		for _, def := range registry {
-			if def.Env() == name {
-				known = true
-				break
-			}
-		}
-		if !known {
-			log.Warn("ignoring unknown environment variable; it matches no setting (see Admin > Settings)", "var", name)
-		}
+		s.log.Warn("ignoring unknown environment variable; it matches no setting", "var", name)
 	}
 }
+
+// SetAudit sets the audit log that Patch records settings.update in.
+func (s *Service) SetAudit(a *audit.Log) { s.audit = a }
 
 // Current returns the current snapshot.
 func (s *Service) Current() *Snapshot { return s.snap.Load() }
 
-// Config returns the current effective configuration (usable as a config.Provider).
-func (s *Service) Config() *config.Config { return s.snap.Load().Config }
+// Groups returns every group, in module start order.
+func (s *Service) Groups() []*Group { return s.reg.groups }
+
+// Group returns the group id, or nil.
+func (s *Service) Group(id string) *Group { return s.reg.byID[id] }
+
+// Def returns the definition of key, or nil.
+func (s *Service) Def(key string) *Def { return s.reg.byKey[key] }
 
 // Subscribe registers fn to run after every applied change, with the previous and the new
 // snapshot. fn runs synchronously in the writer; keep it short.
@@ -219,66 +251,67 @@ func (s *Service) Subscribe(fn func(old, new *Snapshot)) {
 	s.subsMu.Unlock()
 }
 
-// readDB returns the decoded settings rows, skipping (and logging) unknown, undecryptable or
-// invalid ones.
-func (s *Service) readDB(ctx context.Context) (map[string]any, error) {
+// readDB returns the decoded settings rows, skipping (and logging) unknown and invalid ones. A
+// secret that does not decrypt is left out and named in broken.
+func (s *Service) readDB(ctx context.Context) (map[string]any, map[string]string, error) {
 	rows, err := dbq.New(s.db.R).ListSettings(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("read settings: %w", err)
+		return nil, nil, fmt.Errorf("read settings: %w", err)
 	}
-	out := map[string]any{}
+	out, broken := map[string]any{}, map[string]string{}
 	for _, row := range rows {
-		key := row.Key
-		def := Lookup(key)
+		def := s.reg.byKey[row.Key]
 		if def == nil {
-			s.log.Warn("ignoring unknown stored setting", "key", key)
+			s.log.Warn("ignoring unknown stored setting", "key", row.Key)
 			continue
 		}
 		raw := []byte(row.Value)
-		if row.Secret {
-			if raw, err = open(s.aead, key, row.Value); err != nil {
-				s.log.Warn("ignoring stored secret setting: "+err.Error()+"; set it again", "key", key)
+		if def.Secret {
+			if raw, err = open(s.aead, row.Key, row.Value); err != nil {
+				s.log.Warn("ignoring stored secret setting: "+err.Error()+"; set it again", "key", row.Key)
+				broken[row.Key] = err.Error()
 				continue
 			}
 		}
 		v, err := def.decodeJSON(raw)
 		if err != nil {
-			s.log.Warn("ignoring invalid stored setting", "key", key, "error", err.Error())
+			s.log.Warn("ignoring invalid stored setting", "key", row.Key, "error", err.Error())
 			continue
 		}
-		out[key] = v
+		out[row.Key] = v
 	}
-	return out, nil
+	return out, broken, nil
 }
 
 func (s *Service) defaultText(def *Def) string {
 	if s.dev && def.Dev != "" {
 		return def.Dev
 	}
-	if def.Key == KeyFSRoot {
-		return config.JoinDataDir(s.boot.DataDir, "blobs")
+	if def.DataDefault != "" {
+		return config.JoinDataDir(s.boot.DataDir, def.DataDefault)
 	}
 	return def.Default
 }
 
-// build computes the effective snapshot from stored rows, env overrides and defaults, and
-// validates the whole configuration. lenient (startup) downgrades failures caused by stored
-// SSO settings to warnings.
-func (s *Service) build(rows map[string]any, lenient bool) (*Snapshot, error) {
+// compose builds a snapshot from stored rows, the environment and the defaults. An environment
+// or default value that does not parse is a field error.
+func (s *Service) compose(rows map[string]any, broken map[string]string) (*Snapshot, *ValidationError) {
 	ve := newVE()
-	snap := &Snapshot{values: map[string]any{}, sources: map[string]Source{}, db: rows}
-	for _, def := range registry {
+	n := len(s.reg.defs)
+	snap := &Snapshot{reg: s.reg, values: make([]any, n), sources: make([]Source, n), stored: rows,
+		broken: broken, dataDir: s.boot.DataDir}
+	for i, def := range s.reg.defs {
 		if text, ok := s.env[def.Key]; ok {
 			v, err := def.parseText(text)
 			if err != nil {
 				ve.add(def.Key, def.Env()+": "+err.Error())
 				continue
 			}
-			snap.values[def.Key], snap.sources[def.Key] = v, SourceEnv
+			snap.values[i], snap.sources[i] = v, SourceEnv
 			continue
 		}
 		if v, ok := rows[def.Key]; ok {
-			snap.values[def.Key], snap.sources[def.Key] = v, SourceDB
+			snap.values[i], snap.sources[i] = v, SourceStored
 			continue
 		}
 		v, err := def.parseText(s.defaultText(def))
@@ -286,117 +319,21 @@ func (s *Service) build(rows map[string]any, lenient bool) (*Snapshot, error) {
 			ve.add(def.Key, "invalid default: "+err.Error())
 			continue
 		}
-		snap.values[def.Key], snap.sources[def.Key] = v, SourceDefault
+		snap.values[i], snap.sources[i] = v, SourceDefault
 	}
-	if err := ve.orNil(); err != nil {
-		return nil, err
-	}
-	str := func(k string) string { return snap.values[k].(string) }
-	b := func(k string) bool { return snap.values[k].(bool) }
-	n := func(k string) int64 { return snap.values[k].(int64) }
+	return snap, ve
+}
 
-	c := &config.Config{
-		Listen:                 s.boot.Listen,
-		DataDir:                s.boot.DataDir,
-		BootstrapAdminUser:     s.boot.BootstrapAdminUser,
-		BootstrapAdminPassword: s.boot.BootstrapAdminPassword,
-		BaseURL:                str(KeyBaseURL),
-		Storage:                str(KeyStorage),
-		FSRoot:                 str(KeyFSRoot),
-		S3Endpoint:             str(KeyS3Endpoint),
-		S3Region:               str(KeyS3Region),
-		S3Bucket:               str(KeyS3Bucket),
-		S3AccessKeyID:          str(KeyS3AccessKeyID),
-		S3SecretAccessKey:      str(KeyS3SecretAccessKey),
-		S3Prefix:               str(KeyS3Prefix),
-		S3PathStyle:            b(KeyS3PathStyle),
-		S3Redirect:             b(KeyS3Redirect),
-		PresignTTL:             durationOf(snap.values[KeyPresignTTL]),
-		MaxUploadBytes:         n(KeyMaxUploadSize),
-		MaxJSONBytes:           n(KeyMaxJSONSize),
-		CookieSecure:           b(KeyCookieSecure),
-		SessionTTL:             durationOf(snap.values[KeySessionTTL]),
-	}
-	if c.FSRoot == "" {
-		c.FSRoot = config.JoinDataDir(s.boot.DataDir, "blobs")
-	}
-	c.TrustedProxies = snap.values[KeyTrustedProxies].([]string) // validated
-	switch str(KeyLogLevel) {
-	case "debug":
-		c.LogLevel = slog.LevelDebug
-	case "warn":
-		c.LogLevel = slog.LevelWarn
-	case "error":
-		c.LogLevel = slog.LevelError
-	default:
-		c.LogLevel = slog.LevelInfo
-	}
-	if c.Storage == "s3" {
-		for _, k := range []string{KeyS3Endpoint, KeyS3Bucket, KeyS3AccessKeyID, KeyS3SecretAccessKey} {
-			if str(k) == "" {
-				ve.add(k, "required when storage is s3")
-			}
+// withDegraded applies the overrides of the groups that started degraded, except skip.
+func (s *Service) withDegraded(snap *Snapshot, skip map[string]bool) {
+	for g, ov := range s.degraded {
+		if skip[g] {
+			continue
+		}
+		for i, v := range ov {
+			snap.values[i] = v
 		}
 	}
-	snap.Config = c
-	strict := func(k string) bool { return !lenient || snap.sources[k] == SourceEnv }
-
-	// SSO (design doc §7.5).
-	c.OIDCIssuer = str(KeyOIDCIssuer)
-	c.OIDCClientID = str(KeyOIDCClientID)
-	c.OIDCClientSecret = str(KeyOIDCClientSecret)
-	c.OIDCRedirectURL = str(KeyOIDCRedirectURL)
-	if c.OIDCRedirectURL == "" && c.BaseURL != "" {
-		c.OIDCRedirectURL = c.BaseURL + config.OIDCCallbackPath
-	}
-	c.OIDCScopes = strings.Fields(str(KeyOIDCScopes))
-	if !slices.Contains(c.OIDCScopes, "openid") {
-		c.OIDCScopes = append([]string{"openid"}, c.OIDCScopes...)
-	}
-	c.OIDCAdminClaim = str(KeyOIDCAdminClaim)
-	c.OIDCAdminValues = snap.values[KeyOIDCAdminValues].([]string)
-	c.OIDCAdminEmails = snap.values[KeyOIDCAdminEmails].([]string)
-	c.OIDCSessionTTL = durationOf(snap.values[KeyOIDCSessionTTL])
-	c.AdminPasswordLogin = b(KeyAdminPasswordLogin)
-	if c.OIDCIssuer != "" {
-		sso := newVE()
-		if c.OIDCClientID == "" {
-			sso.add(KeyOIDCClientID, "required when SSO is enabled")
-		}
-		if c.OIDCClientSecret == "" {
-			sso.add(KeyOIDCClientSecret, "required when SSO is enabled")
-		}
-		if len(c.OIDCAdminValues) == 0 && len(c.OIDCAdminEmails) == 0 {
-			sso.add(KeyOIDCAdminValues, "set admin claim values or admin emails (at least one) when SSO is enabled")
-		}
-		if c.OIDCRedirectURL == "" {
-			sso.add(KeyOIDCRedirectURL, "required when SSO is enabled and the public base URL is empty")
-		}
-		if len(sso.Fields) > 0 {
-			if strict(KeyOIDCIssuer) {
-				for k, m := range sso.Fields {
-					ve.add(k, m)
-				}
-			} else {
-				// e.g. the client secret could not be decrypted: start without SSO.
-				s.log.Error("SSO settings incomplete; SSO is disabled until they are fixed", "error", sso.Error())
-				c.OIDCIssuer = ""
-			}
-		}
-	}
-	if !c.AdminPasswordLogin && c.OIDCIssuer == "" {
-		if strict(KeyAdminPasswordLogin) {
-			ve.add(KeyAdminPasswordLogin, "can be turned off only while SSO is enabled (set the OIDC issuer)")
-		} else {
-			s.log.Error("admin password sign-in is off but SSO is not enabled; allowing admin password sign-in")
-			c.AdminPasswordLogin = true
-		}
-	}
-
-	if err := ve.orNil(); err != nil {
-		return nil, err
-	}
-	return snap, nil
 }
 
 // Item is one setting as shown by the API (GET /api/settings).
@@ -420,67 +357,60 @@ type Item struct {
 	Locked bool `json:"locked"`
 }
 
-// SecretValue is what List reports for a secret setting.
+// SecretValue is what Items reports for a secret setting.
 type SecretValue struct {
 	Set bool `json:"set"`
 }
 
-// List returns every setting in registry order (grouped by Group, see Groups).
-func (s *Service) List(ctx context.Context) []Item {
+// Items returns the settings of group g, in definition order.
+func (s *Service) Items(g *Group) []Item {
 	snap := s.Current()
-	out := make([]Item, 0, len(registry))
-	for _, def := range registry {
+	out := make([]Item, 0, len(g.Defs))
+	for _, def := range g.Defs {
 		it := Item{
-			Key: def.Key, Env: def.Env(), Group: def.Group, Label: def.Label, Help: def.Help,
+			Key: def.Key, Env: def.Env(), Group: g.ID, Label: def.Label, Help: def.Help,
 			Type: def.Type, Options: def.Options, Secret: def.Secret,
-			Source: snap.sources[def.Key], Locked: snap.sources[def.Key] == SourceEnv,
-		}
-		if def.Key == KeyStorage {
-			it.Options = []string{"fs", "s3"}
+			Source: snap.sources[def.idx], Locked: snap.sources[def.idx] == SourceEnv,
 		}
 		if def.Secret {
-			it.Value = SecretValue{Set: snap.values[def.Key].(string) != ""}
+			it.Value = SecretValue{Set: snap.values[def.idx] != ""}
 		} else {
-			it.Value = snap.values[def.Key]
+			it.Value = def.jsonValue(snap.values[def.idx])
 			if dv, err := def.parseText(s.defaultText(def)); err == nil {
-				it.Default = dv
+				it.Default = def.jsonValue(dv)
 			}
 		}
-		it.Display, it.DefaultDisplay = display(def.Type, it.Value), display(def.Type, it.Default)
-		if l, ok := it.Value.([]string); ok && l == nil {
-			it.Value = []string{}
-		}
-		if l, ok := it.Default.([]string); ok && l == nil {
-			it.Default = []string{}
+		it.Display, it.DefaultDisplay = display(snap.values[def.idx]), ""
+		if def.Secret {
+			it.Display = ""
+		} else if dv, err := def.parseText(s.defaultText(def)); err == nil {
+			it.DefaultDisplay = display(dv)
 		}
 		out = append(out, it)
 	}
 	return out
 }
 
-// display puts a size or a duration value in words; other types give "".
-func display(t Type, v any) string {
-	switch t {
-	case TypeSize:
-		if n, ok := v.(int64); ok {
-			return formatSize(n)
-		}
-	case TypeDuration:
-		if s, ok := v.(string); ok {
-			return formatDuration(durationOf(s))
-		}
+// display puts a size or a duration value in words; other values give "".
+func display(v any) string {
+	switch x := v.(type) {
+	case int64:
+		return formatSize(x)
+	case time.Duration:
+		return formatDuration(x)
 	}
 	return ""
 }
 
 // candidate applies patch (JSON values; null resets to the default) to the stored rows of snap.
-// It returns the new rows and the keys whose stored row changes.
+// It returns the new rows and the keys whose stored row changes. An empty string for a secret
+// resets it.
 func (s *Service) candidate(snap *Snapshot, patch map[string]json.RawMessage) (map[string]any, []string, *ValidationError) {
 	ve := newVE()
-	rows := maps.Clone(snap.db)
+	rows := maps.Clone(snap.stored)
 	var changed []string
 	for key, raw := range patch {
-		def := Lookup(key)
+		def := s.reg.byKey[key]
 		if def == nil {
 			ve.add(key, "unknown setting")
 			continue
@@ -497,21 +427,21 @@ func (s *Service) candidate(snap *Snapshot, patch map[string]json.RawMessage) (m
 			ve.add(key, err.Error())
 			continue
 		}
-		if def.Secret && v == "" { // clearing a secret = reset
+		if def.Secret && v == "" {
 			if _, ok := rows[key]; ok {
 				delete(rows, key)
 				changed = append(changed, key)
 			}
 			continue
 		}
-		if snap.sources[key] == SourceEnv {
-			if !def.Secret && reflect.DeepEqual(v, snap.values[key]) {
+		if snap.sources[def.idx] == SourceEnv {
+			if !def.Secret && equal(v, snap.values[def.idx]) {
 				continue // the UI echoing a locked value back is fine
 			}
 			ve.add(key, "set by environment variable "+def.Env()+"; change it there")
 			continue
 		}
-		if old, ok := rows[key]; ok && reflect.DeepEqual(old, v) {
+		if old, ok := rows[key]; ok && equal(old, v) {
 			continue
 		}
 		rows[key] = v
@@ -521,36 +451,137 @@ func (s *Service) candidate(snap *Snapshot, patch map[string]json.RawMessage) (m
 	return rows, changed, ve
 }
 
-// Update applies a partial update (setting key -> JSON value; null resets to the default),
-// validating the whole resulting configuration first. Invalid input returns a
-// *ValidationError. Storage changes must be checked with TestStorage first by the caller; Update
-// only verifies the new store can be constructed. userID 0 records no author.
-func (s *Service) Update(ctx context.Context, patch map[string]json.RawMessage, userID int64) error {
+// touched returns the groups that patch names a key of, in group order.
+func (s *Service) touched(patch map[string]json.RawMessage) []*Group {
+	var out []*Group
+	for _, g := range s.reg.groups {
+		for _, d := range g.Defs {
+			if _, ok := patch[d.Key]; ok {
+				out = append(out, g)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// draft builds the snapshot that patch would make and runs the Validate (ModeChange) of every
+// group in groups on it.
+func (s *Service) draft(patch map[string]json.RawMessage, groups []*Group) (*Draft, map[string]any, []string, error) {
+	cur := s.Current()
+	rows, changedKeys, ve := s.candidate(cur, patch)
+	if err := ve.orNil(); err != nil {
+		return nil, nil, nil, err
+	}
+	next, ve := s.compose(rows, cur.broken)
+	if err := ve.orNil(); err != nil {
+		return nil, nil, nil, err
+	}
+	skip := map[string]bool{}
+	for _, g := range groups {
+		skip[g.ID] = true
+	}
+	s.withDegraded(next, skip)
+	d := newDraft(next, cur)
+	for _, g := range groups {
+		if g.Validate == nil {
+			continue
+		}
+		if err := g.Validate(d, ModeChange); err != nil {
+			return nil, nil, nil, &ValidationError{Message: err.Error(), Fields: d.fields}
+		}
+	}
+	if d.Failed() {
+		return nil, nil, nil, &ValidationError{Fields: d.fields}
+	}
+	return d, rows, changedKeys, nil
+}
+
+// Patch applies a partial update (setting key -> JSON value; null resets to the default). It
+// builds the whole new state and runs the Validate of every group the patch touches
+// (ModeChange), then their Apply hooks in group order: the first Apply that takes the change over
+// holds its keys back and answers. It saves the other keys with one settings.update event that
+// names them, and returns the Applied answer, or nil. A patch that saves no key records no event. Invalid input returns a *ValidationError, a refused Apply a *HookError. userID 0 records
+// no author.
+func (s *Service) Patch(ctx context.Context, patch map[string]json.RawMessage, userID int64) (*Applied, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	cur := s.Current()
-	rows, changed, ve := s.candidate(cur, patch)
-	if err := ve.orNil(); err != nil {
-		return err
+	groups := s.touched(patch)
+	d, rows, changedKeys, err := s.draft(patch, groups)
+	if err != nil {
+		return nil, err
 	}
-	if len(changed) == 0 {
-		return nil
+	var applied *Applied
+	for _, g := range groups {
+		if g.Apply == nil {
+			continue
+		}
+		ap, err := g.Apply(ctx, &ApplyCall{Prev: d.Prev, Next: d.Next, Patch: patch, UserID: userID})
+		if err != nil {
+			return nil, err
+		}
+		if ap != nil {
+			applied = ap
+			break
+		}
 	}
-	next, err := s.build(rows, false)
+	if applied != nil {
+		for _, k := range applied.Hold {
+			if v, ok := d.Prev.stored[k]; ok {
+				rows[k] = v
+			} else {
+				delete(rows, k)
+			}
+			changedKeys = slices.DeleteFunc(changedKeys, func(c string) bool { return c == k })
+		}
+	}
+	for _, g := range groups {
+		delete(s.degraded, g.ID)
+	}
+	if len(changedKeys) == 0 {
+		return applied, nil
+	}
+	return applied, s.write(ctx, rows, changedKeys, userID, true)
+}
+
+// Save applies patch like Patch, without the Apply hooks. An owner calls it to finish a change
+// that its Apply took over (e.g. the storage keys when a storage move is done).
+func (s *Service) Save(ctx context.Context, patch map[string]json.RawMessage, userID int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	groups := s.touched(patch)
+	_, rows, changedKeys, err := s.draft(patch, groups)
 	if err != nil {
 		return err
 	}
-	if !storage.SameBackend(cur.Config, next.Config) {
-		if _, err := storage.Open(ctx, next.Config); err != nil {
-			return &ValidationError{Fields: map[string]string{KeyStorage: err.Error()}}
-		}
+	for _, g := range groups {
+		delete(s.degraded, g.ID)
 	}
-	return s.write(ctx, rows, changed, userID)
+	if len(changedKeys) == 0 {
+		return nil
+	}
+	return s.write(ctx, rows, changedKeys, userID, false)
 }
 
-// write persists the changed keys of rows, reloads the snapshot and notifies subscribers.
-// Caller holds s.mu.
-func (s *Service) write(ctx context.Context, rows map[string]any, changed []string, userID int64) error {
+// Test merges patch over the current values, runs the Validate (ModeChange) of group g and
+// then its Test. It saves nothing.
+func (s *Service) Test(ctx context.Context, g *Group, patch map[string]json.RawMessage) error {
+	s.mu.Lock()
+	d, _, _, err := s.draft(patch, []*Group{g})
+	s.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if g.Test == nil {
+		return nil
+	}
+	return g.Test(ctx, d)
+}
+
+// write persists the changed keys of rows, reloads the snapshot and notifies subscribers. With
+// record, it writes one settings.update event that names the keys (never the values) in the same
+// transaction. Caller holds s.mu.
+func (s *Service) write(ctx context.Context, rows map[string]any, changedKeys []string, userID int64, record bool) error {
 	var by sql.NullInt64
 	if userID > 0 {
 		by = sql.NullInt64{Int64: userID, Valid: true}
@@ -558,7 +589,7 @@ func (s *Service) write(ctx context.Context, rows map[string]any, changed []stri
 	now := time.Now().Unix()
 	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
 		q := dbq.New(s.db.R).WithTx(tx)
-		for _, key := range changed {
+		for _, key := range changedKeys {
 			v, ok := rows[key]
 			if !ok {
 				if err := q.DeleteSetting(ctx, key); err != nil {
@@ -566,8 +597,8 @@ func (s *Service) write(ctx context.Context, rows map[string]any, changed []stri
 				}
 				continue
 			}
-			def := Lookup(key)
-			raw, err := json.Marshal(v)
+			def := s.reg.byKey[key]
+			raw, err := json.Marshal(def.jsonValue(v))
 			if err != nil {
 				return err
 			}
@@ -575,96 +606,35 @@ func (s *Service) write(ctx context.Context, rows map[string]any, changed []stri
 			if def.Secret {
 				value = seal(s.aead, key, raw)
 			}
-			if err := q.UpsertSetting(ctx, dbq.UpsertSettingParams{
-				Key: key, Value: value, Secret: def.Secret, UpdatedAt: now, UpdatedBy: by,
-			}); err != nil {
+			if err := q.UpsertSetting(ctx, dbq.UpsertSettingParams{Key: key, Value: value, UpdatedAt: now, UpdatedBy: by}); err != nil {
 				return err
 			}
 		}
-		return nil
+		if !record || s.audit == nil {
+			return nil
+		}
+		return s.audit.RecordTx(ctx, tx, audit.Event{Action: audit.SettingsUpdate, Target: strings.Join(changedKeys, ","),
+			Detail: map[string]any{"keys": changedKeys}})
 	})
 	if err != nil {
 		return fmt.Errorf("save settings: %w", err)
 	}
-	return s.reload(ctx, changed)
-}
-
-func (s *Service) reload(ctx context.Context, changed []string) error {
-	rows, err := s.readDB(ctx)
+	rows, broken, err := s.readDB(ctx)
 	if err != nil {
 		return err
 	}
-	next, err := s.build(rows, true)
-	if err != nil {
+	next, ve := s.compose(rows, broken)
+	if err := ve.orNil(); err != nil {
 		return err
 	}
+	s.withDegraded(next, nil)
 	old := s.snap.Swap(next)
-	s.log.Info("settings changed", "keys", strings.Join(changed, ","))
+	s.log.Info("settings changed", "keys", strings.Join(changedKeys, ","))
 	s.subsMu.Lock()
 	subs := slices.Clone(s.subs)
 	s.subsMu.Unlock()
 	for _, fn := range subs {
 		fn(old, next)
-	}
-	return nil
-}
-
-// TestStorage checks the storage configuration that patch would produce (current settings when
-// patch is empty) by writing, reading and deleting a probe object. An invalid patch returns a
-// *ValidationError; a failed probe returns an error whose message is meant for the
-// administrator. Nothing is saved.
-func (s *Service) TestStorage(ctx context.Context, patch map[string]json.RawMessage) error {
-	cur := s.Current()
-	rows, _, ve := s.candidate(cur, patch)
-	if err := ve.orNil(); err != nil {
-		return err
-	}
-	next, err := s.build(rows, true)
-	if err != nil {
-		return err
-	}
-	st, err := storage.Open(ctx, next.Config)
-	if err != nil {
-		return err
-	}
-	return storage.Probe(ctx, st)
-}
-
-// Preview returns the effective configuration that patch would produce, without saving it.
-// An invalid patch returns a *ValidationError.
-func (s *Service) Preview(patch map[string]json.RawMessage) (*config.Config, error) {
-	rows, _, ve := s.candidate(s.Current(), patch)
-	if err := ve.orNil(); err != nil {
-		return nil, err
-	}
-	next, err := s.build(rows, false)
-	if err != nil {
-		return nil, err
-	}
-	return next.Config, nil
-}
-
-// TestOIDC checks the SSO configuration that patch would produce: the whole configuration must
-// validate, and when SSO is enabled the issuer's discovery document must be fetchable (10 s
-// timeout). Failures are *ValidationError; discovery errors are reported under oidc.issuer.
-// Nothing is saved.
-func (s *Service) TestOIDC(ctx context.Context, patch map[string]json.RawMessage) error {
-	cur := s.Current()
-	rows, _, ve := s.candidate(cur, patch)
-	if err := ve.orNil(); err != nil {
-		return err
-	}
-	next, err := s.build(rows, false)
-	if err != nil {
-		return err
-	}
-	if next.Config.OIDCIssuer == "" {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	if _, err := gooidc.NewProvider(ctx, next.Config.OIDCIssuer); err != nil {
-		return &ValidationError{Fields: map[string]string{KeyOIDCIssuer: "OIDC discovery failed: " + err.Error()}}
 	}
 	return nil
 }

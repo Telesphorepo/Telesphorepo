@@ -11,11 +11,12 @@ import (
 	"unicode"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
+	"github.com/Telesphorepo/Telesphorepo/internal/ci"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
-// Snippets of the Maven format (format.Describer, format.ArtifactDescriber). Gradle reads a
+// Snippets of the Maven format (format.Spec Usage and ArtifactUsage). Gradle reads a
 // private repo's credentials from the Gradle properties <name>Username and <name>Password
 // (credentials(PasswordCredentials)), where <name> is the repo name as a Gradle identifier; Maven
 // reads them from the server of ~/.m2/settings.xml whose id is the repo name.
@@ -65,9 +66,6 @@ func (h *Handler) newSnippets(repo *repos.Repo, baseURL string) *snippets {
 // remotes are the remote URLs that repo serves: its own for a proxy, its proxy members' for a
 // group, none for a hosted repo.
 func (h *Handler) remotes(repo *repos.Repo) []string {
-	if h.host.Repos == nil {
-		return nil
-	}
 	ids := []int64{repo.ID}
 	if repo.Kind == repos.KindGroup {
 		ids = h.host.Repos.Members(repo.ID)
@@ -92,9 +90,11 @@ func (s *snippets) serves(known ...string) bool {
 	return false
 }
 
-func (s *snippets) add(client, title, lang, code, note string) {
-	s.out = append(s.out, format.Snippet{Client: client, Purpose: s.purpose, Context: s.context, Via: s.via,
-		Title: title, Lang: lang, Code: code, Note: note})
+// add adds a snippet of tool with the ID <tool>.<key>. file is the file it belongs in ("" for a
+// command), title what the block is.
+func (s *snippets) add(tool, key, file, title, lang, code, note string) {
+	s.out = append(s.out, format.Snippet{ID: tool + "." + key, Tool: tool, Purpose: s.purpose, Context: s.context, Via: s.via,
+		File: file, Title: title, Lang: lang, Code: code, Note: note})
 }
 
 func (s *snippets) private() bool { return !s.repo.AnonymousRead }
@@ -114,7 +114,7 @@ func (s *snippets) gradleRepo(kts bool, indent string) string {
 		}
 	}
 	b.WriteString("}")
-	return indentLines(b.String(), indent)
+	return strings.TrimSuffix(ci.Indent(b.String(), indent), "\n")
 }
 
 // gradleRepos adds the block that resolves dependencies (plugins false: repositories in the build
@@ -140,15 +140,16 @@ func (s *snippets) gradleRepos(plugins bool) {
 			code += "    " + portal
 		}
 		code += "}\n"
-		note := "If the build file has a repositories block, put these lines in it."
+		note, key := "If the build file has a repositories block, put these lines in it.", "repositories"
 		if plugins {
 			file = "settings.gradle" + strings.TrimPrefix(file, "build.gradle")
-			code = "pluginManagement {\n" + indentLines(strings.TrimSuffix(code, "\n"), "    ") + "\n}\n"
-			note = "Put the pluginManagement block at the top of the settings file."
+			code = "pluginManagement {\n" + ci.Indent(code, "    ") + "}\n"
+			note, key = "Put the pluginManagement block at the top of the settings file.", "plugin-repositories"
 		}
-		s.add(client, file, langOf(kts), code, note)
+		s.add(client, key, file, file, langOf(kts), code, note)
 		if s.private() {
-			s.add(client, "~/.gradle/gradle.properties", "properties",
+			gp := "~/.gradle/gradle.properties"
+			s.add(client, "credentials", gp, gp, "properties",
 				s.name+"Username=YOUR_USERNAME\n"+s.name+"Password=YOUR_READ_TOKEN\n",
 				"Create a read token on Settings › Tokens. In CI, set ORG_GRADLE_PROJECT_"+s.name+"Username and ORG_GRADLE_PROJECT_"+s.name+"Password instead.")
 		}
@@ -164,7 +165,7 @@ func langOf(kts bool) string {
 
 // mavenRepos adds the pom.xml repository block and the credentials of a private repo.
 func (s *snippets) mavenRepos() {
-	s.add("maven", "pom.xml", "xml", "<repositories>\n  <repository>\n    <id>"+s.repo.Name+"</id>\n    <url>"+s.url+
+	s.add("maven", "repositories", "pom.xml", "pom.xml", "xml", "<repositories>\n  <repository>\n    <id>"+s.repo.Name+"</id>\n    <url>"+s.url+
 		"</url>\n  </repository>\n</repositories>\n", "")
 	s.mavenCredentials()
 }
@@ -173,14 +174,14 @@ func (s *snippets) mavenCredentials() {
 	if !s.private() {
 		return
 	}
-	s.add("maven", "~/.m2/settings.xml", "xml", "<settings>\n  <servers>\n    <server>\n      <id>"+s.repo.Name+
+	s.add("maven", "credentials", "~/.m2/settings.xml", "~/.m2/settings.xml", "xml", "<settings>\n  <servers>\n    <server>\n      <id>"+s.repo.Name+
 		"</id>\n      <username>YOUR_USERNAME</username>\n      <password>YOUR_READ_TOKEN</password>\n    </server>\n  </servers>\n</settings>\n",
 		"Create a read token on Settings › Tokens. In CI, write ${env.REPO_USERNAME} and ${env.REPO_TOKEN} instead and set those variables.")
 }
 
-// Usage implements format.Describer: how to use the repo in Gradle (Kotlin and Groovy) and
+// Usage returns the repo snippets: how to use the repo in Gradle (Kotlin and Groovy) and
 // Maven builds, and how to publish to it from a computer (the Telesphorepo Gradle plugin or
-// Maven extension), from CI (GitHub Actions or Jenkins) and by hand.
+// Maven extension) and by hand. The core adds the CI files of the tools gradle and maven.
 func (h *Handler) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
 	s := h.newSnippets(repo, baseURL)
 	s.purpose, s.context = format.SnippetUse, format.SnippetRepo
@@ -194,34 +195,48 @@ func (h *Handler) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
 		if kts {
 			client, ext = "gradle-kotlin", ".kts"
 		}
-		s.add(client, "settings.gradle"+ext, langOf(kts), gradlePublishSettings(kts, baseURL, repo.Name),
+		s.add(client, "settings", "settings.gradle"+ext, "settings.gradle"+ext, langOf(kts), gradlePublishSettings(kts, baseURL, repo.Name),
 			"Put this at the top of the file. Only a pluginManagement block can come before it. If the file has a plugins block, add the id line to it. "+
 				"The plugin publishes each Java project to "+repo.Name+", so the build file needs only a group and a version. "+
 				"oidcTokenEnv names the variable with the Jenkins identity token. When the variable is empty, the plugin uses the device key.")
-		s.add(client, "Publish", "sh", "./gradlew publish\n", approveNote)
+		s.add(client, "publish", "", "Publish", "sh", "./gradlew publish\n", approveNote)
 	}
-	s.add("maven", ".mvn/extensions.xml", "xml", "<extensions>\n  <extension>\n    <groupId>com.telesphorepo</groupId>\n"+
+	s.add("maven", "extensions", ".mvn/extensions.xml", ".mvn/extensions.xml", "xml", "<extensions>\n  <extension>\n    <groupId>com.telesphorepo</groupId>\n"+
 		"    <artifactId>telesphorepo-maven-extension</artifactId>\n    <version>"+clientsVersion+"</version>\n  </extension>\n</extensions>\n", "")
-	s.add("maven", ".mvn/maven.config", "sh", "-Dtelesphorepo.url="+baseURL+"\n", "")
-	s.add("maven", "pom.xml", "xml", "<distributionManagement>\n  <repository>\n    <id>"+repo.Name+"</id>\n    <url>"+s.url+
+	s.add("maven", "config", ".mvn/maven.config", ".mvn/maven.config", "sh", "-Dtelesphorepo.url="+baseURL+"\n", "")
+	s.add("maven", "distribution", "pom.xml", "pom.xml", "xml", "<distributionManagement>\n  <repository>\n    <id>"+repo.Name+"</id>\n    <url>"+s.url+
 		"</url>\n  </repository>\n  <snapshotRepository>\n    <id>"+repo.Name+"</id>\n    <url>"+s.url+
 		"</url>\n  </snapshotRepository>\n</distributionManagement>\n", "Put this block in the project element.")
-	s.add("maven", "Publish", "sh", "mvn deploy\n", approveNote)
-
-	s.via = format.ViaCI
-	setup := " First set up the build with the steps under From your computer on the repository's publish page."
-	s.add("github-actions", ".github/workflows/publish.yml (Gradle)", "yaml", workflow(format.GitHubTrigger, "./gradlew publish"),
-		"The Gradle plugin uses the job's identity token, so the job stores no secret."+setup)
-	s.add("github-actions", ".github/workflows/publish.yml (Maven)", "yaml", workflow(format.GitHubTrigger, "mvn -B deploy"),
-		"The Maven extension uses the job's identity token, so the job stores no secret."+setup)
-	s.add("jenkins", "Jenkinsfile (Gradle)", "groovy", format.JenkinsPipeline(repo.Name, "./gradlew build", "./gradlew publish"),
-		format.JenkinsNote(baseURL)+setup)
-	s.add("jenkins", "Jenkinsfile (Maven)", "groovy",
-		format.JenkinsPipeline(repo.Name, "mvn -B verify", "mvn -B deploy -DskipTests -Dtelesphorepo.oidcTokenEnv=OIDC_TOKEN"),
-		format.JenkinsNote(baseURL)+setup)
+	s.add("maven", "publish", "", "Publish", "sh", "mvn deploy\n", approveNote)
 
 	out := s.out
 	return append(out, format.HandSnippet(format.TokenCurl+"-T lib-1.0.0.jar "+s.url+"/com/example/lib/1.0.0/lib-1.0.0.jar"))
+}
+
+// ciNote goes under the CI files of the Gradle and Maven tools.
+const ciNote = "The build uses the job's identity token, so the job stores no secret. First set up the build with the steps under From your computer on the repository's publish page."
+
+// tools are the build tools that publish to Maven repos. Their CI jobs need Java. The Gradle
+// plugin and the Maven extension request the GitHub Actions identity token themselves; on Jenkins
+// they read the one in OIDC_TOKEN.
+func tools() []format.Tool {
+	java := []ci.WorkflowStep{{Uses: "actions/setup-java@v6", With: [][2]string{{"distribution", "temurin"}, {"java-version", "21"}}}}
+	return []format.Tool{
+		{ID: "gradle", Label: "Gradle", CINote: ciNote, Setup: gradleSetup(),
+			Publish: func(_ *repos.Repo, _, system string) ci.PublishSteps {
+				if system == ci.Jenkins {
+					return ci.PublishSteps{Build: "./gradlew build", Publish: "./gradlew publish"}
+				}
+				return ci.PublishSteps{Toolchain: java, Publish: "./gradlew publish"}
+			}},
+		{ID: "maven", Label: "Maven", CINote: ciNote, Setup: mavenSetup(),
+			Publish: func(_ *repos.Repo, _, system string) ci.PublishSteps {
+				if system == ci.Jenkins {
+					return ci.PublishSteps{Build: "mvn -B verify", Publish: "mvn -B deploy -DskipTests -Dtelesphorepo.oidcTokenEnv=OIDC_TOKEN"}
+				}
+				return ci.PublishSteps{Toolchain: java, Publish: "mvn -B deploy"}
+			}},
+	}
 }
 
 // gradlePublishSettings is the settings file that applies the Telesphorepo plugin. With
@@ -236,21 +251,6 @@ func gradlePublishSettings(kts bool, baseURL, repo string) string {
 		"telesphorepo {\n    url = '" + baseURL + "'\n    repository = '" + repo + "'\n    oidcTokenEnv = 'OIDC_TOKEN'\n}\n"
 }
 
-// workflow is the GitHub Actions workflow that publishes with run when trigger fires.
-func workflow(trigger, run string) string {
-	return trigger + "permissions:\n  id-token: write\n  contents: read\n\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n" +
-		"      - uses: actions/checkout@v7\n      - uses: actions/setup-java@v6\n        with:\n          distribution: temurin\n" +
-		"          java-version: 21\n      - run: " + run + "\n"
-}
-
-func indentLines(s, prefix string) string {
-	lines := strings.Split(s, "\n")
-	for i := range lines {
-		lines[i] = prefix + lines[i]
-	}
-	return strings.Join(lines, "\n")
-}
-
 // readPackaging returns the packaging of the pom at p ("jar" when it has none) and whether it
 // has a dependencyManagement section. A missing or unreadable pom gives "jar".
 func (h *Handler) readPackaging(ctx context.Context, repo *repos.Repo, p string) (string, bool, error) {
@@ -261,7 +261,7 @@ func (h *Handler) readPackaging(ctx context.Context, repo *repos.Repo, p string)
 	if err != nil {
 		return "", false, err
 	}
-	body, _, err := h.assets.Store().Get(ctx, assets.Key(repo.Name, p))
+	body, err := h.assets.Open(ctx, a)
 	if err != nil {
 		return "jar", false, nil
 	}
@@ -280,7 +280,7 @@ func (h *Handler) readPackaging(ctx context.Context, repo *repos.Repo, p string)
 	return pk, pom.DM != nil, nil
 }
 
-// ArtifactUsage implements format.ArtifactDescriber. p is an artifact folder, a version folder
+// ArtifactUsage returns the snippets of one artifact. p is an artifact folder, a version folder
 // or a file in one. The pinned mode names the version of a version folder, else the newest
 // release (the newest snapshot when there is none); the latest mode names Gradle's
 // latest.release and Maven's RELEASE (latest.integration and LATEST for a snapshot-only
@@ -359,12 +359,12 @@ func (h *Handler) ArtifactUsage(ctx context.Context, repo *repos.Repo, baseURL, 
 			pluginNote = "The plugins block takes a fixed version: this is the newest, " + version + "."
 		}
 		s.gradleRepos(true)
-		s.add("gradle-kotlin", "build.gradle.kts", "kotlin", "plugins {\n    id(\""+art.Title+"\") version \""+version+"\"\n}\n", pluginNote)
-		s.add("gradle-groovy", "build.gradle", "groovy", "plugins {\n    id '"+art.Title+"' version '"+version+"'\n}\n", pluginNote)
+		s.add("gradle-kotlin", "plugin", "build.gradle.kts", "build.gradle.kts", "kotlin", "plugins {\n    id(\""+art.Title+"\") version \""+version+"\"\n}\n", pluginNote)
+		s.add("gradle-groovy", "plugin", "build.gradle", "build.gradle", "groovy", "plugins {\n    id '"+art.Title+"' version '"+version+"'\n}\n", pluginNote)
 		s.out = order(s.out)
 	case "parent":
 		s.mavenRepos()
-		s.add("maven", "pom.xml (parent)", "xml", "<parent>\n  <groupId>"+group+"</groupId>\n  <artifactId>"+id+
+		s.add("maven", "parent", "pom.xml", "pom.xml (parent)", "xml", "<parent>\n  <groupId>"+group+"</groupId>\n  <artifactId>"+id+
 			"</artifactId>\n  <version>"+version+"</version>\n</parent>\n", "A parent pom takes a fixed version.")
 	default:
 		s.gradleRepos(false)
@@ -376,27 +376,27 @@ func (h *Handler) ArtifactUsage(ctx context.Context, repo *repos.Repo, baseURL, 
 			mdep = "<dependencyManagement>\n  <dependencies>\n    <dependency>\n      <groupId>" + group + "</groupId>\n      <artifactId>" + id +
 				"</artifactId>\n      <version>" + mv + "</version>\n      <type>pom</type>\n      <scope>import</scope>\n    </dependency>\n  </dependencies>\n</dependencyManagement>\n"
 		}
-		s.add("gradle-kotlin", "build.gradle.kts", "kotlin", "dependencies {\n    "+kt+"\n}\n", note)
-		s.add("gradle-groovy", "build.gradle", "groovy", "dependencies {\n    "+gr+"\n}\n", note)
+		s.add("gradle-kotlin", "dependency", "build.gradle.kts", "build.gradle.kts", "kotlin", "dependencies {\n    "+kt+"\n}\n", note)
+		s.add("gradle-groovy", "dependency", "build.gradle", "build.gradle", "groovy", "dependencies {\n    "+gr+"\n}\n", note)
 		s.out = order(s.out)
 		s.mavenRepos()
-		s.add("maven", "pom.xml (dependency)", "xml", mdep, note)
+		s.add("maven", "dependency", "pom.xml", "pom.xml (dependency)", "xml", mdep, note)
 	}
 	return &format.ArtifactUsage{Artifact: art, Version: version, Mode: mode, Snippets: s.out}, nil
 }
 
-// order puts the snippets of each client together, in the order the clients first appear.
+// order puts the snippets of each tool together, in the order the tools first appear.
 func order(in []format.Snippet) []format.Snippet {
-	var clients []string
+	var tools []string
 	by := map[string][]format.Snippet{}
 	for _, s := range in {
-		if _, ok := by[s.Client]; !ok {
-			clients = append(clients, s.Client)
+		if _, ok := by[s.Tool]; !ok {
+			tools = append(tools, s.Tool)
 		}
-		by[s.Client] = append(by[s.Client], s)
+		by[s.Tool] = append(by[s.Tool], s)
 	}
 	out := make([]format.Snippet, 0, len(in))
-	for _, c := range clients {
+	for _, c := range tools {
 		out = append(out, by[c]...)
 	}
 	return out

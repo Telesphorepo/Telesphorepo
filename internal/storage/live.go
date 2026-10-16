@@ -11,32 +11,26 @@ import (
 	"slices"
 	"sync/atomic"
 	"time"
-
-	"github.com/Telesphorepo/Telesphorepo/internal/config"
 )
 
-// Open builds the Store selected by cfg (fs or s3). It performs no network I/O.
-func Open(ctx context.Context, cfg *config.Config) (Store, error) {
-	if cfg.Storage == "s3" {
+// Open builds the Store that cfg selects (fs or s3). It performs no network I/O.
+func Open(ctx context.Context, cfg Config) (Store, error) {
+	if cfg.Backend == "s3" {
 		return NewS3(ctx, cfg)
 	}
 	return NewFS(cfg.FSRoot)
 }
 
 // SameBackend reports whether a and b select the identical store (no swap needed).
-func SameBackend(a, b *config.Config) bool {
-	if a.Storage != b.Storage {
-		return false
-	}
-	if a.Storage != "s3" {
+func SameBackend(a, b Config) bool {
+	a.PresignTTL, b.PresignTTL = 0, 0
+	if a.Backend != "s3" && b.Backend != "s3" {
 		return a.FSRoot == b.FSRoot
 	}
-	return a.S3Endpoint == b.S3Endpoint && a.S3Region == b.S3Region && a.S3Bucket == b.S3Bucket &&
-		a.S3AccessKeyID == b.S3AccessKeyID && a.S3SecretAccessKey == b.S3SecretAccessKey &&
-		a.S3Prefix == b.S3Prefix && a.S3PathStyle == b.S3PathStyle && a.S3Redirect == b.S3Redirect
+	return a == b
 }
 
-// Live is a Store that delegates to a hot-swappable active Store (spec §3: storage changes
+// Live is a Store that delegates to a hot-swappable active Store (storage changes
 // apply without restart). In-flight operations finish on the store they started on. During a
 // storage move the active store is a *Mirror; the move service swaps in Mirror.Dst when the
 // move is done and Mirror.Src when it fails or is cancelled.
@@ -77,8 +71,8 @@ func (l *Live) List(ctx context.Context, prefix, after string, limit int) ([]Obj
 	return l.Active().List(ctx, prefix, after, limit)
 }
 
-func (l *Live) PresignGet(ctx context.Context, key string, ttl time.Duration) (string, bool, error) {
-	return l.Active().PresignGet(ctx, key, ttl)
+func (l *Live) PresignGet(ctx context.Context, key string, ttl time.Duration, resp Response) (string, bool, error) {
+	return l.Active().PresignGet(ctx, key, ttl, resp)
 }
 
 // ProbePrefix is the key prefix of storage probe objects.

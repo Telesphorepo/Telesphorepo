@@ -21,7 +21,6 @@
   let { query }: PageProps = $props();
 
   const ssoErrors: Record<string, string> = {
-    not_authorized: "Your single sign-on account is not allowed to sign in here.",
     username_conflict: "A local account has the same username, so this single sign-on account cannot sign in.",
     invalid_username: "Your single sign-on account has a username that is not valid here.",
     account_disabled: "This account is disabled.",

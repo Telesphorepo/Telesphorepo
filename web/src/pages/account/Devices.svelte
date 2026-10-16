@@ -1,5 +1,5 @@
 <!--
-  Your account: devices, the computers that publish with the Gradle plugin or the Maven extension
+  Your account: devices, the computers that publish with the publisher client of their build tool
   with their own key. People with the People permission see the devices of every user.
 -->
 <script lang="ts">
@@ -25,7 +25,7 @@
 
   const devices = new Keyset((p) => api.devices.list(p));
   // A holder of People gets every person's devices.
-  const admin = $derived(auth.can("people"));
+  const admin = $derived(auth.can("people.manage"));
 
   let target = $state<Device | null>(null);
   let open = $state(false);
@@ -51,8 +51,8 @@
 <PageHeader
   title="Devices"
   description={admin
-    ? "Computers that publish with the Gradle plugin or the Maven extension, for every person."
-    : "Computers that publish as you with the Gradle plugin or the Maven extension."}
+    ? "Computers that publish with the publisher client of their build tool, for every person."
+    : "Computers that publish as you with the publisher client of your build tool."}
 >
   {#snippet actions()}
     {#if devices.items.length}<Button variant="outline" href={href("/device")}>Approve a device</Button>{/if}

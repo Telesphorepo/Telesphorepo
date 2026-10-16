@@ -24,9 +24,10 @@ import (
 	"github.com/pquerna/otp/totp"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
+	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 )
 
-// Second factors (spec §7.6): TOTP, passkeys and one-time recovery codes. All short-lived state
+// Second factors: TOTP, passkeys and one-time recovery codes. All short-lived state
 // (a pending sign-in, a TOTP setup, a WebAuthn ceremony) is an auth_challenges row that is taken
 // once; a failed attempt puts the row back unchanged so the user can try again within its
 // lifetime, under the same rate limits as passwords.
@@ -123,6 +124,10 @@ func (s *Service) putChallenge(ctx context.Context, kind string, id []byte, user
 	if data == nil {
 		data = []byte{}
 	}
+	// Bounded cleanup of expired challenges (served by auth_challenges_expires).
+	if _, err := s.wq.DeleteExpiredChallenges(ctx, now); err != nil {
+		return err
+	}
 	return s.wq.CreateChallenge(ctx, dbq.CreateChallengeParams{
 		IDHash: id, Kind: kind, UserID: sql.NullInt64{Int64: userID, Valid: true},
 		Data: data, CreatedAt: now, ExpiresAt: now + int64(ttl/time.Second)})
@@ -139,7 +144,7 @@ func (s *Service) restoreChallenge(ctx context.Context, kind string, id []byte, 
 		data = []byte{}
 	}
 	return s.wq.CreateChallenge(context.WithoutCancel(ctx), dbq.CreateChallengeParams{
-		IDHash: id, Kind: kind, UserID: row.UserID, DeviceID: row.DeviceID,
+		IDHash: id, Kind: kind, UserID: row.UserID,
 		Data: data, CreatedAt: row.CreatedAt, ExpiresAt: row.ExpiresAt})
 }
 
@@ -188,7 +193,7 @@ func (s *Service) startPendingLogin(w http.ResponseWriter, r *http.Request, user
 	http.SetCookie(w, &http.Cookie{
 		Name: loginCookie, Value: v, Path: loginCookiePath,
 		MaxAge: int(loginTTL / time.Second), Expires: time.Now().Add(loginTTL),
-		HttpOnly: true, Secure: s.cfg().CookieSecure, SameSite: http.SameSiteStrictMode,
+		HttpOnly: true, Secure: settings.CookieSecure.Get(s.set()), SameSite: http.SameSiteStrictMode,
 	})
 	return nil
 }
@@ -196,7 +201,7 @@ func (s *Service) startPendingLogin(w http.ResponseWriter, r *http.Request, user
 func (s *Service) clearLoginCookie(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{
 		Name: loginCookie, Value: "", Path: loginCookiePath, MaxAge: -1,
-		HttpOnly: true, Secure: s.cfg().CookieSecure, SameSite: http.SameSiteStrictMode,
+		HttpOnly: true, Secure: settings.CookieSecure.Get(s.set()), SameSite: http.SameSiteStrictMode,
 	})
 }
 
@@ -236,7 +241,7 @@ func (s *Service) LoginPasskeyOptions(r *http.Request) (*protocol.CredentialAsse
 // LoginSecondFactor completes the pending sign-in (cookie tr_login) with one proof and starts
 // the session. A wrong proof keeps the sign-in pending and counts as a failed attempt for the
 // client IP and the username, like a wrong password.
-func (s *Service) LoginSecondFactor(w http.ResponseWriter, r *http.Request, in SecondFactorInput) (*User, error) {
+func (s *Service) LoginSecondFactor(w http.ResponseWriter, r *http.Request, in SecondFactorInput) (*SessionView, error) {
 	ctx := r.Context()
 	row, h, err := s.takePendingLogin(r)
 	if err != nil {
@@ -254,9 +259,15 @@ func (s *Service) LoginSecondFactor(w http.ResponseWriter, r *http.Request, in S
 		}
 		return nil, err
 	}
-	if p.Perms != 0 && !s.cfg().AdminPasswordLogin {
-		s.clearLoginCookie(w)
-		return nil, ErrPasswordLoginDisabled
+	if PasswordLogin.Get(s.set()) == PasswordLoginPublishers {
+		needs, err := userNeedsFactor(ctx, s.rq, p.UserID)
+		if err != nil {
+			return nil, err
+		}
+		if needs {
+			s.clearLoginCookie(w)
+			return nil, ErrPasswordLoginDisabled
+		}
 	}
 	keys := limitKeys(s.clientIP(r), p.Username)
 	if d := s.limits.begin(keys...); d > 0 {
@@ -266,7 +277,7 @@ func (s *Service) LoginSecondFactor(w http.ResponseWriter, r *http.Request, in S
 		setRetryAfter(w, d)
 		return nil, ErrRateLimited
 	}
-	ok, err := s.checkFactor(ctx, uid, in, true)
+	ok, err := s.checkFactor(ctx, uid, in)
 	s.limits.end(err == nil && !ok, keys...)
 	if err != nil || !ok {
 		if rerr := s.restoreChallenge(ctx, chLogin, h, row); rerr != nil {
@@ -279,7 +290,7 @@ func (s *Service) LoginSecondFactor(w http.ResponseWriter, r *http.Request, in S
 		return nil, ErrBadSecondFactor
 	}
 	s.clearLoginCookie(w)
-	if err := s.StartSession(w, r, uid, s.cfg().SessionTTL); err != nil {
+	if err := s.StartSession(w, r, uid, settings.SessionTTL.Get(s.set())); err != nil {
 		return nil, err
 	}
 	method := "recovery"
@@ -290,46 +301,11 @@ func (s *Service) LoginSecondFactor(w http.ResponseWriter, r *http.Request, in S
 		method = "passkey"
 	}
 	s.RecordSignIn(r, uid, p.Username, method)
-	return s.GetUser(ctx, p.Username)
-}
-
-// VerifySecondFactor checks a fresh TOTP code or a passkey assertion (JSON from the browser) for
-// userID. The assertion answers options from BeginPasskeyAssertion. In dev mode a user without a
-// factor passes without a proof. Errors: ErrNoSecondFactor (the user has none), ErrInvalid (no proof or both), ErrBadSecondFactor, a rate-limit error
-// (errors.Is ErrRateLimited; RetryAfter gives the wait) or an internal error. Failures count
-// against the username like failed passwords.
-func (s *Service) VerifySecondFactor(ctx context.Context, userID int64, totpCode string, passkeyAssertion json.RawMessage) error {
-	p, err := s.principalByID(ctx, userID)
-	if err != nil {
-		return err
-	}
-	has, err := s.rq.HasSecondFactor(ctx, userID)
-	if err != nil {
-		return err
-	}
-	if has == 0 {
-		if s.dev {
-			return nil // dev mode: the factor is optional; one that exists is still checked
-		}
-		return ErrNoSecondFactor
-	}
-	keys := []string{userLimitKey(p.Username)}
-	if d := s.limits.begin(keys...); d > 0 {
-		return &rateLimitedError{d}
-	}
-	ok, err := s.checkFactor(ctx, userID, SecondFactorInput{TOTPCode: totpCode, Passkey: passkeyAssertion}, false)
-	s.limits.end(err == nil && !ok, keys...)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return ErrBadSecondFactor
-	}
-	return nil
+	return s.View(ctx, uid, false)
 }
 
 // checkFactor verifies exactly one proof. ok=false with a nil error means it did not verify.
-func (s *Service) checkFactor(ctx context.Context, userID int64, in SecondFactorInput, allowRecovery bool) (bool, error) {
+func (s *Service) checkFactor(ctx context.Context, userID int64, in SecondFactorInput) (bool, error) {
 	hasPasskey := len(in.Passkey) > 0 && string(in.Passkey) != "null"
 	n := 0
 	for _, set := range []bool{in.TOTPCode != "", hasPasskey, in.RecoveryCode != ""} {
@@ -337,11 +313,8 @@ func (s *Service) checkFactor(ctx context.Context, userID int64, in SecondFactor
 			n++
 		}
 	}
-	if n != 1 || (in.RecoveryCode != "" && !allowRecovery) {
-		if allowRecovery {
-			return false, fmt.Errorf("%w: give one of totp_code, passkey or recovery_code", ErrInvalid)
-		}
-		return false, fmt.Errorf("%w: give one of totp_code or passkey", ErrInvalid)
+	if n != 1 {
+		return false, fmt.Errorf("%w: give one of totp_code, passkey or recovery_code", ErrInvalid)
 	}
 	switch {
 	case in.TOTPCode != "":
@@ -594,7 +567,7 @@ func (s *Service) webAuthnUser(ctx context.Context, userID int64) (*webUser, err
 // the accepted origin is its scheme and host. For localhost, the dev ports (Vite :5173 and the
 // server :8080) are accepted too; no other machine can serve a page from this machine's localhost.
 func (s *Service) webAuthn() (*webauthn.WebAuthn, error) {
-	base := strings.TrimSpace(s.cfg().BaseURL)
+	base := strings.TrimSpace(settings.BaseURL.Get(s.set()))
 	u, err := url.Parse(base)
 	if base == "" || err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
 		return nil, ErrPasskeysUnavailable
@@ -686,8 +659,7 @@ func (s *Service) FinishPasskeyRegistration(ctx context.Context, userID int64, n
 	}
 	now := time.Now().Unix()
 	id, err := s.wq.CreatePasskey(ctx, dbq.CreatePasskeyParams{
-		UserID: userID, CredentialID: cred.ID, PublicKey: cred.PublicKey,
-		SignCount: int64(cred.Authenticator.SignCount), Credential: js, Name: name, CreatedAt: now})
+		UserID: userID, CredentialID: cred.ID, Credential: js, Name: name, CreatedAt: now})
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return nil, ErrExists
@@ -771,7 +743,7 @@ func (s *Service) checkPasskey(ctx context.Context, userID int64, assertion json
 		return false, err
 	}
 	if err := s.wq.UpdatePasskeyUse(ctx, dbq.UpdatePasskeyUseParams{
-		SignCount: int64(cred.Authenticator.SignCount), Credential: js,
+		Credential: js,
 		LastUsedAt: sql.NullInt64{Int64: time.Now().Unix(), Valid: true}, ID: pk.ID}); err != nil {
 		return false, err
 	}

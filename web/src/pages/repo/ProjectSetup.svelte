@@ -1,12 +1,13 @@
 <!--
-  Set up a Gradle or Maven project with one command (GET /setup.sh or /setup.ps1 of the server).
+  Set up a project with one command (GET /setup.sh or /setup.ps1 of the server), for the tools of the format with a project setup.
   The person picks where they publish from and their OS, and copies the command with the
   repository and the server filled in. The command edits the build files in the project folder.
   The manual snippets of the format stay behind one "Set it up by hand" disclosure.
 -->
 <script lang="ts">
   import type { Repo } from "$lib/api";
-  import type { Snippet } from "./browse";
+  import type { Snippet, ToolLabel } from "$lib/api";
+  import { formats } from "$lib/formats/registry.svelte";
   import { href, repoPath } from "$lib/router.svelte";
   import * as RadioGroup from "$lib/components/ui/radio-group";
   import { Button } from "$lib/components/ui/button";
@@ -19,7 +20,15 @@
   import SnippetTabs from "./snippets/SnippetTabs.svelte";
   import PlusIcon from "@lucide/svelte/icons/plus";
 
-  let { repo, baseURL, computer, ci }: { repo: Repo; baseURL: string; computer: Snippet[]; ci: Snippet[] } = $props();
+  let { repo, baseURL, computer, ci, tools }: { repo: Repo; baseURL: string; computer: Snippet[]; ci: Snippet[]; tools: ToolLabel[] } = $props();
+
+  // The project files of the tools with a project setup, e.g. "settings.gradle.kts, settings.gradle or pom.xml".
+  const projects = $derived.by(() => {
+    const ps = (formats.get(repo.format)?.tools ?? []).filter((t) => t.setup && t.project).map((t) => t.project!);
+    return ps.length < 2 ? ps.join("") : `${ps.slice(0, -1).join(", ")} or ${ps[ps.length - 1]}`;
+  });
+  // The commands that publish from a computer, e.g. "./gradlew publish" and "mvn deploy".
+  const runs = $derived([...new Set(computer.filter((s) => !s.file && s.lang === "sh").map((s) => s.code.trim()))]);
 
   type Where = "computer" | "github" | "jenkins-pipeline" | "jenkins-freestyle";
   const places: { value: Where; label: string; description: string }[] = [
@@ -38,7 +47,7 @@
       ? `& ([scriptblock]::Create((irm ${base}/setup.ps1))) ${repo.name} -Ci ${where === "computer" ? "none" : where}`
       : `curl -fsSL ${base}/setup.sh | sh -s -- ${repo.name} --ci ${where === "computer" ? "none" : where}`,
   );
-  const handCI = $derived(ci.filter((s) => (where === "github" ? s.client === "github-actions" : where !== "computer" && s.client === "jenkins")));
+  const handCI = $derived(ci.filter((s) => (where === "github" ? s.tool === "github-actions" : where !== "computer" && s.tool === "jenkins")));
   const uid = $props.id();
 </script>
 
@@ -65,7 +74,7 @@
   </div>
   <Separator class="my-6" />
   <div class="flex flex-col gap-4">
-    {@render part(2, "Run this in the project folder", "Copy the command to a terminal in the folder with settings.gradle.kts, settings.gradle or pom.xml. Then commit the files it changes.")}
+    {@render part(2, "Run this in the project folder", `Copy the command to a terminal in the folder with ${projects}. Then commit the files it changes.`)}
     <Segmented
       bind:value={os}
       label="Operating system"
@@ -80,7 +89,7 @@
     <Separator class="my-6" />
     <div class="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
       {@render part(3, "Add a CI pipeline", `It names the CI repository and branches that may publish to ${repo.name}.`)}
-      {#if repo.permissions?.includes("pipelines")}
+      {#if repo.permissions?.includes("ci.pipelines")}
         <Button variant="outline" class="shrink-0" href={href("/settings/ci-pipelines/new", { repo: repo.name, back: repoPath(repo.name, "publish") })}><PlusIcon />New CI pipeline</Button>
       {:else}
         <p class="text-meta text-muted-foreground sm:max-w-64 sm:text-right">Ask a person who manages the CI pipelines of this repository to add one for your CI repository and branch.</p>
@@ -92,14 +101,14 @@
     {@render part(
       where === "computer" ? 3 : 4,
       "Publish",
-      "Run ./gradlew publish or mvn deploy. The first time, the build opens your browser: click Approve. Each person approves their computer once.",
+      `Run ${runs.join(" or ") || "the publish command of your build"}. The first time, the build opens your browser: click Approve. Each person approves their computer once.`,
     )}
     <div class="flex flex-col">
       <LearnMore bind:open={byHand} label="Set it up by hand" toggleOnly controls="{uid}-hand" />
       {#if byHand}
         <div id="{uid}-hand" class="mt-4 flex flex-col gap-6">
-          <SnippetTabs snippets={computer} label="Build tool" />
-          {#if handCI.length}<SnippetTabs snippets={handCI} label="CI system" />{/if}
+          <SnippetTabs snippets={computer} {tools} label="Build tool" />
+          {#if handCI.length}<SnippetTabs snippets={handCI} {tools} label="CI system" />{/if}
         </div>
       {/if}
     </div>

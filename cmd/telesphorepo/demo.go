@@ -12,17 +12,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Telesphorepo/Telesphorepo/internal/auth"
+	"github.com/Telesphorepo/Telesphorepo/internal/module"
+	"github.com/Telesphorepo/Telesphorepo/internal/perm"
+
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/demo"
-	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/server"
 )
 
 // The demo dataset of "telesphorepo dev". This file creates the demo users and the repos that
-// the format plugins declare (format.DemoData), gives the users access, and has each plugin fill
-// its repos (internal/demo). It names no format.
+// the modules declare (module.DemoData), gives the users access, and has each module fill its
+// repos (internal/demo). It names no format.
 
 const (
 	// demoPendingFile exists in the dev data dir while the demo data is written. A dev start
@@ -65,11 +66,11 @@ func (u *demoUser) roleText() string {
 	return "no access"
 }
 
-// demoTarget is one demo repo and the plugin that fills it.
+// demoTarget is one demo repo and the module data that fills it.
 type demoTarget struct {
-	plugin format.DemoData
+	data   *module.DemoData
 	format string
-	def    format.DemoRepo
+	def    module.DemoRepo
 	repo   *repos.Repo
 }
 
@@ -78,11 +79,12 @@ type demoTarget struct {
 func createDemoData(ctx context.Context, s *server.Services, adminName string) error {
 	began := time.Now()
 	var targets []*demoTarget
-	for _, f := range format.All() {
-		if d, ok := f.(format.DemoData); ok {
-			for _, def := range d.DemoRepos() {
-				targets = append(targets, &demoTarget{plugin: d, format: f.Name(), def: def})
-			}
+	for _, m := range s.Manifests {
+		if m.Demo == nil {
+			continue
+		}
+		for _, def := range m.Demo.Repos {
+			targets = append(targets, &demoTarget{data: m.Demo, format: m.FormatName(), def: def})
 		}
 	}
 	if len(targets) == 0 {
@@ -112,9 +114,9 @@ func createDemoData(ctx context.Context, s *server.Services, adminName string) e
 			}
 		}
 		u.password = server.RandomPassword()
-		var perms auth.ServerPerm
+		var perms perm.Set
 		if u.admin {
-			perms = auth.AllServerPerms
+			perms = perm.Current().AllServer()
 		}
 		nu, err := s.Auth.CreateUser(ctx, u.name, u.password, perms)
 		if err != nil {
@@ -122,16 +124,13 @@ func createDemoData(ctx context.Context, s *server.Services, adminName string) e
 		}
 		u.id, u.role = nu.ID, u.roleText()
 	}
-	if err := saveDemoUsers(config.JoinDataDir(s.Config.DataDir, demoUsersFile), users); err != nil {
+	if err := saveDemoUsers(config.JoinDataDir(s.Boot.DataDir, demoUsersFile), users); err != nil {
 		return err
 	}
 
-	run, err := demo.NewRun(ctx, s.DB, s.Assets, began)
-	if err != nil {
-		return err
-	}
+	run := demo.NewRun(ctx, s.DB, s.Assets, s.Builds, began)
 	for _, t := range targets {
-		repo, err := s.Repos.Create(ctx, t.def.Name, t.format, t.def.Public, t.def.Description, nil)
+		repo, err := s.Repos.Create(ctx, repos.Create{Name: t.def.Name, Format: t.format, AnonymousRead: t.def.Public, Description: t.def.Description})
 		if err != nil {
 			run.Close()
 			return fmt.Errorf("create demo repo %s: %w", t.def.Name, err)
@@ -146,7 +145,7 @@ func createDemoData(ctx context.Context, s *server.Services, adminName string) e
 		for _, u := range users {
 			for _, name := range u.write {
 				if name == repo.Name {
-					if _, err := s.Auth.SetPermissions(ctx, nil, []string{u.name}, []string{repo.Name}, auth.RepoDownload|auth.RepoPublish); err != nil {
+					if _, err := s.Auth.SetPermissions(ctx, nil, []string{u.name}, []string{repo.Name}, []string{string(perm.RepoDownload), string(perm.RepoPublish)}); err != nil {
 						run.Close()
 						return fmt.Errorf("grant %s publish on %s: %w", u.name, name, err)
 					}
@@ -155,7 +154,7 @@ func createDemoData(ctx context.Context, s *server.Services, adminName string) e
 			}
 			for _, name := range u.read {
 				if name == repo.Name {
-					if _, err := s.Auth.SetPermissions(ctx, nil, []string{u.name}, []string{repo.Name}, auth.RepoDownload); err != nil {
+					if _, err := s.Auth.SetPermissions(ctx, nil, []string{u.name}, []string{repo.Name}, []string{string(perm.RepoDownload)}); err != nil {
 						run.Close()
 						return fmt.Errorf("grant %s download on %s: %w", u.name, name, err)
 					}
@@ -174,7 +173,7 @@ func createDemoData(ctx context.Context, s *server.Services, adminName string) e
 		reportDemo(run, stop)
 	}()
 	for i, t := range targets {
-		if err = t.plugin.Demo(ctx, run, t.repo, demo.Rand(uint64(i+1), 0)); err != nil {
+		if err = t.data.Fill(ctx, run, t.repo, demo.Rand(uint64(i+1), 0)); err != nil {
 			err = fmt.Errorf("demo repo %s: %w", t.def.Name, err)
 			break
 		}
@@ -190,7 +189,7 @@ func createDemoData(ctx context.Context, s *server.Services, adminName string) e
 	if _, err := s.DB.W.ExecContext(ctx, `ANALYZE`); err != nil {
 		return fmt.Errorf("demo data: analyze: %w", err)
 	}
-	if err := os.Remove(config.JoinDataDir(s.Config.DataDir, demoPendingFile)); err != nil {
+	if err := os.Remove(config.JoinDataDir(s.Boot.DataDir, demoPendingFile)); err != nil {
 		return err
 	}
 	done, _ := run.Progress()

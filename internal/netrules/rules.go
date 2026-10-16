@@ -12,8 +12,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
-	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/netrules/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
@@ -26,7 +26,7 @@ const (
 // Rule kinds.
 const (
 	RuleCIDR = "cidr" // Value is a CIDR
-	RuleList = "list" // Value is the name of an IP list
+	RuleList = "list" // Value is the name of an IP list; the rule keeps the list's id
 )
 
 const (
@@ -50,36 +50,40 @@ type Rules struct {
 	Publish []Rule `json:"publish"`
 }
 
+// rule is one stored rule: a CIDR, or the id of an IP list.
+type rule struct {
+	cidr   string
+	listID int64
+	note   string
+}
+
 // repoRules is the in-memory copy of a repo's rules with the CIDRs parsed.
 type repoRules struct {
-	rules         Rules
-	read, publish matcher
+	read, publish []rule
+	readM, pubM   matcher
 }
 
 // matcher is one compiled allow-list.
 type matcher struct {
 	prefixes []netip.Prefix
-	lists    []string
+	lists    []int64
 	empty    bool
 }
 
-func compile(list []Rule) matcher {
+func compile(list []rule) matcher {
 	m := matcher{empty: len(list) == 0}
 	for _, r := range list {
-		switch r.Kind {
-		case RuleCIDR:
-			if p, err := netip.ParsePrefix(r.Value); err == nil {
-				m.prefixes = append(m.prefixes, p)
-			}
-		case RuleList:
-			m.lists = append(m.lists, r.Value)
+		if r.listID != 0 {
+			m.lists = append(m.lists, r.listID)
+		} else if p, err := netip.ParsePrefix(r.cidr); err == nil {
+			m.prefixes = append(m.prefixes, p)
 		}
 	}
 	return m
 }
 
-func newRepoRules(r Rules) *repoRules {
-	return &repoRules{rules: r, read: compile(r.Read), publish: compile(r.Publish)}
+func newRepoRules(read, publish []rule) *repoRules {
+	return &repoRules{read: read, publish: publish, readM: compile(read), pubM: compile(publish)}
 }
 
 // DeniedError is a request from an address that a repo's rules do not allow.
@@ -87,7 +91,6 @@ type DeniedError struct {
 	Scope string
 	Repo  *repos.Repo
 	IP    netip.Addr
-	Actor audit.Actor
 }
 
 func (e *DeniedError) Error() string {
@@ -128,16 +131,33 @@ func (s *Service) readRules(ctx context.Context, q *dbq.Queries, repoID int64) (
 	if err != nil {
 		return nil, fmt.Errorf("load IP rules of repo %d: %w", repoID, err)
 	}
-	rules := Rules{Read: []Rule{}, Publish: []Rule{}}
+	var read, publish []rule
 	for _, r := range rows {
-		x := Rule{Kind: r.Kind, Value: r.Value, Note: r.Note}
+		x := rule{cidr: r.Cidr.String, listID: r.ListID.Int64, note: r.Note}
 		if r.Scope == ScopeRead {
-			rules.Read = append(rules.Read, x)
+			read = append(read, x)
 		} else {
-			rules.Publish = append(rules.Publish, x)
+			publish = append(publish, x)
 		}
 	}
-	return newRepoRules(rules), nil
+	return newRepoRules(read, publish), nil
+}
+
+// view returns rules as the API shows them: a list rule names its list.
+func (s *Service) view(list []rule) []Rule {
+	out := make([]Rule, 0, len(list))
+	for _, r := range list {
+		if r.listID != 0 {
+			name := ""
+			if st := s.listByID(r.listID); st != nil {
+				name = st.name
+			}
+			out = append(out, Rule{Kind: RuleList, Value: name, Note: r.note})
+		} else {
+			out = append(out, Rule{Kind: RuleCIDR, Value: r.cidr, Note: r.note})
+		}
+	}
+	return out
 }
 
 // RepoRules returns the rules of a repo (empty lists when it has none).
@@ -148,19 +168,20 @@ func (s *Service) RepoRules(repoID int64) Rules {
 	if rr == nil {
 		return Rules{Read: []Rule{}, Publish: []Rule{}}
 	}
-	return rr.rules
+	return Rules{Read: s.view(rr.read), Publish: s.view(rr.publish)}
 }
 
-// normalize validates one scope's list and returns it in canonical form: a CIDR is masked, an
-// address becomes a /32 or /128, a list name is lower-cased and must exist.
-func (s *Service) normalize(scope string, in []Rule) ([]Rule, error) {
+// normalize validates one scope's list and returns it in stored form: a CIDR is masked, an
+// address becomes a /32 or /128, a list name is lower-cased, must exist and becomes its id.
+func (s *Service) normalize(scope string, in []Rule) ([]rule, error) {
 	if len(in) > maxRulesPerScope {
 		return nil, fmt.Errorf("%w: at most %d %s rules", ErrInvalid, maxRulesPerScope, scope)
 	}
-	out := make([]Rule, 0, len(in))
+	out := make([]rule, 0, len(in))
 	seen := map[string]bool{}
 	for _, r := range in {
 		v := strings.TrimSpace(r.Value)
+		var listID int64
 		switch r.Kind {
 		case RuleCIDR:
 			if p, err := netip.ParsePrefix(v); err == nil {
@@ -173,9 +194,11 @@ func (s *Service) normalize(scope string, in []Rule) ([]Rule, error) {
 			}
 		case RuleList:
 			v = strings.ToLower(v)
-			if !s.Exists(v) {
+			st := (*s.lists.Load())[v]
+			if st == nil {
 				return nil, fmt.Errorf("%w: %s rule: there is no IP list %q", ErrInvalid, scope, clipText(v, 64))
 			}
+			listID = st.id
 		default:
 			return nil, fmt.Errorf("%w: %s rule kind must be %q or %q", ErrInvalid, scope, RuleCIDR, RuleList)
 		}
@@ -193,14 +216,19 @@ func (s *Service) normalize(scope string, in []Rule) ([]Rule, error) {
 			return nil, fmt.Errorf("%w: %s rule %s is listed twice", ErrInvalid, scope, v)
 		}
 		seen[key] = true
-		out = append(out, Rule{Kind: r.Kind, Value: v, Note: note})
+		if listID != 0 {
+			out = append(out, rule{listID: listID, note: note})
+		} else {
+			out = append(out, rule{cidr: v, note: note})
+		}
 	}
 	return out, nil
 }
 
-// SetRules validates in and replaces every rule of repoID with it. It returns the stored
-// rules. A validation error wraps ErrInvalid.
-func (s *Service) SetRules(ctx context.Context, repoID int64, in Rules) (Rules, error) {
+// SetRules validates in and replaces every rule of repo with it, and records
+// network.rules.update. It returns the stored rules. A validation error wraps ErrInvalid.
+func (s *Service) SetRules(ctx context.Context, repo *repos.Repo, in Rules) (Rules, error) {
+	repoID := repo.ID
 	// The list names are checked under rulesMu, which a list delete or rename also holds.
 	s.rulesMu.Lock()
 	defer s.rulesMu.Unlock()
@@ -219,26 +247,29 @@ func (s *Service) SetRules(ctx context.Context, repoID int64, in Rules) (Rules, 
 		}
 		for _, l := range []struct {
 			scope string
-			rules []Rule
+			rules []rule
 		}{{ScopeRead, read}, {ScopePublish, pub}} {
 			for _, r := range l.rules {
-				if err := q.InsertRepoIPRule(ctx, dbq.InsertRepoIPRuleParams{RepoID: repoID, Scope: l.scope, Kind: r.Kind, Value: r.Value, Note: r.Note}); err != nil {
+				if err := q.InsertRepoIPRule(ctx, dbq.InsertRepoIPRuleParams{RepoID: repoID, Scope: l.scope,
+					Cidr: sql.NullString{String: r.cidr, Valid: r.listID == 0}, ListID: sql.NullInt64{Int64: r.listID, Valid: r.listID != 0},
+					Note: r.note}); err != nil {
 					return err
 				}
 			}
 		}
-		return nil
+		return s.audit.RecordTx(ctx, tx, audit.Event{Action: ActionRulesUpdate, RepoID: repo.ID, Repo: repo.Name,
+			Target: repo.Name, Detail: map[string]any{"read": len(read), "publish": len(pub)}})
 	})
 	if err != nil {
 		return Rules{}, err
 	}
-	out := Rules{Read: read, Publish: pub}
+	rr := newRepoRules(read, pub)
 	if len(read) == 0 && len(pub) == 0 {
 		delete(s.rules, repoID)
 	} else {
-		s.rules[repoID] = newRepoRules(out)
+		s.rules[repoID] = rr
 	}
-	return out, nil
+	return Rules{Read: s.view(rr.read), Publish: s.view(rr.publish)}, nil
 }
 
 // Forget drops the in-memory rules of a deleted repo (its rows cascade with the repo).
@@ -277,38 +308,32 @@ func (s *Service) allowed(repoID int64, scope string, ip netip.Addr) bool {
 		return true
 	}
 	if scope == ScopePublish {
-		return s.allows(rr.publish, ip)
+		return s.allows(rr.pubM, ip)
 	}
-	return s.allows(rr.read, ip)
+	return s.allows(rr.readM, ip)
 }
 
 // Check returns a *DeniedError when the rules of repo do not allow ip for scope, else nil. It
 // applies to every caller, admins included.
-func (s *Service) Check(repo *repos.Repo, scope string, ip netip.Addr, actor audit.Actor) *DeniedError {
+func (s *Service) Check(repo *repos.Repo, scope string, ip netip.Addr) *DeniedError {
 	if s.allowed(repo.ID, scope, ip) {
 		return nil
 	}
-	return &DeniedError{Scope: scope, Repo: repo, IP: ip, Actor: actor}
+	return &DeniedError{Scope: scope, Repo: repo, IP: ip}
 }
 
 // CheckRequest is Check for the client address of r.
-func (s *Service) CheckRequest(r *http.Request, repo *repos.Repo, scope string, actor audit.Actor) *DeniedError {
-	return s.Check(repo, scope, httpx.ClientIP(r), actor)
+func (s *Service) CheckRequest(r *http.Request, repo *repos.Repo, scope string) *DeniedError {
+	return s.Check(repo, scope, httpx.ClientIP(r))
 }
 
-// Refuse answers 403 {"error": "your address is not allowed to <scope> this repository"} and
-// records the audit event ip.denied with the client address.
-func (s *Service) Refuse(w http.ResponseWriter, r *http.Request, e *DeniedError) {
-	s.RecordDenied(r, e)
-	httpx.Error(w, http.StatusForbidden, e.Error())
-}
-
-// RecordDenied records the audit event ip.denied for e.
-func (s *Service) RecordDenied(r *http.Request, e *DeniedError) {
-	s.audit.Record(r.Context(), r, audit.Event{
-		Actor: e.Actor, Action: audit.IPDenied, RepoID: e.Repo.ID, Repo: e.Repo.Name,
+// deniedEvent is the audit event network.denied of e; the audit log adds the actor and the
+// client address.
+func deniedEvent(e *DeniedError) audit.Event {
+	return audit.Event{
+		Action: ActionDenied, RepoID: e.Repo.ID, Repo: e.Repo.Name,
 		Target: e.Repo.Name, Detail: map[string]any{"scope": e.Scope},
-	})
+	}
 }
 
 // DeniedRepos returns the repos whose read rules do not allow ip (search leaves them out).
@@ -317,7 +342,7 @@ func (s *Service) DeniedRepos(ip netip.Addr) map[int64]bool {
 	defer s.rulesMu.RUnlock()
 	var out map[int64]bool
 	for id, rr := range s.rules {
-		if !s.allows(rr.read, ip) {
+		if !s.allows(rr.readM, ip) {
 			if out == nil {
 				out = map[int64]bool{}
 			}

@@ -17,7 +17,7 @@
   import { Draft } from "$lib/unsaved.svelte";
   import { go, href, navigate } from "$lib/router.svelte";
   import { auth } from "$lib/auth.svelte";
-  import { formatLook } from "$lib/formats";
+  import { formats } from "$lib/formats/registry.svelte";
   import * as RadioGroup from "$lib/components/ui/radio-group";
   import * as Alert from "$lib/components/ui/alert";
   import { Button } from "$lib/components/ui/button";
@@ -86,7 +86,7 @@
   );
   // A CI pipeline publishes, so it names only hosted repositories, and only those where the person holds CI pipelines.
   const sortedRepos = $derived(
-    (repos.data ?? []).filter((r) => r.kind === "hosted" && auth.canRepo(r.name, "pipelines")).sort((a, b) => a.name.localeCompare(b.name)),
+    (repos.data ?? []).filter((r) => r.kind === "hosted" && auth.canRepo(r.name, "ci.pipelines")).sort((a, b) => a.name.localeCompare(b.name)),
   );
 
   type Value = {
@@ -375,7 +375,7 @@
         <Alert.Description>
           <p>
             CI jobs cannot publish until the server checks the audience of their tokens.
-            {#if auth.can("general")}
+            {#if auth.can("settings.general")}
               Set the public address on
               <a href={href("/settings/general")} class="text-link underline-offset-4 hover:underline">General</a>, or edit the token conditions and give the pipeline an audience.
             {:else}
@@ -512,7 +512,7 @@
         {:else if repos.error && !repos.data}
           <ErrorState error={repos.error} title="The repositories did not load" onRetry={repos.reload} />
         {:else if sortedRepos.length === 0}
-          {#if auth.can("repos")}
+          {#if auth.can("repositories.all")}
             <CompactEmpty icon={DatabaseIcon} text="Create a repository first, then come back to choose it.">
               <Button variant="outline" href={href("/settings/repositories/new")}><PlusIcon />New repository</Button>
             </CompactEmpty>
@@ -522,7 +522,7 @@
         {:else}
           <div class="grid gap-1 sm:grid-cols-2">
             {#each sortedRepos as r (r.name)}
-              <OptionRow id="{fid}-repo-{r.name}" label={r.name} description={formatLook(r.format).title ?? r.format}>
+              <OptionRow id="{fid}-repo-{r.name}" label={r.name} description={formats.title(r.format)}>
                 {#snippet control()}
                   <Checkbox id="{fid}-repo-{r.name}" checked={v.repos.includes(r.name)} onCheckedChange={(on) => setRepo(r.name, on === true)} />
                 {/snippet}

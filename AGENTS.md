@@ -1,7 +1,7 @@
 # Working in this repo (for coding agents)
 
-Read [SPEC.md](SPEC.md) first. It describes the system as currently built. Design docs and
-milestones are in `docs/superpowers/specs/`, mainly `2026-10-14-telesphorepo-mvp-design.md`.
+Read [SPEC.md](SPEC.md) first. It describes the system as built now: the modules, the route
+policy, the registries, the byte pipeline, the schema, the routes and the settings.
 
 ## Commands
 
@@ -24,40 +24,66 @@ go vet -tags e2e ./e2e/...  # e2e files only compile with a tag; also vet -tags 
 E2E_SKIP_BUILD=1 go tool task test -run TestX   # reuse the already-built image
 ```
 
-Run the core zone for every change. Run the import zone when you touch internal/nexus, internal/api/nexus.go, an importer, the repo lock or the mirror gate. Run the scale zone when you touch a hot query or an index. Run the clients zone when you touch `internal/publish`, the write gate or the device and OIDC routes. Run all before a push that touches several zones. A subagent builds and vets with the tags; the main session runs the zones.
-
 `go tool task` is registered with `tool` in `go.mod`. There is no root `package.json`, Makefile
 or shell script, so it works the same on Windows, macOS and Linux. The UI build needs bun (npm is
 the fallback) and Node 26+ (see `.node-version`). The e2e suite needs Docker or Podman.
 
+**Who runs what.** A subagent builds and vets: `go build ./...`, `go vet ./...`, `go vet` with
+each of the four tags, `go tool task gen` and `bun run build` in `web/`. A subagent never runs a
+test, a dev server or a preview. The main session runs the zones.
+
+**Which zone.** Run the core zone for every change. Run the import zone when you touch
+`internal/nexus`, an importer or the `mirror` operation. Run the scale zone when you touch a hot
+query or an index. Run the clients zone when you touch `internal/publish`, the write gate or the
+device and OIDC routes. Run all zones before a push that touches several zones.
+
 ## Hard rules
 
 - **E2E tests only.** Don't write unit tests or mocks. Test behaviour through the real image and
-  real clients (`mvn`, `gradle`, `apt`, curl) in `e2e/` (`//go:build e2e`). Each test should
-  start its own server via the harness.
+  real clients (`mvn`, `gradle`, `apt`, curl) in `e2e/` (`//go:build e2e`). Each test starts its
+  own server through the harness.
+- **Every route has a policy.** Register a route with `Router.Handle(pattern, route.Policy,
+  handler)`. One middleware checks the credential, the second factor, the permission and the
+  repo access. A handler never checks credentials itself. The router panics at startup on a
+  policy that lets a password or a read token change state. See **Route policy** in SPEC.md.
 - **Writes need a publish session.** A password or read token never writes to a format route.
-  The gate is `auth.RepoGate`. Tests get a session with `PublishToken(t, s, user, repo)` from
+  The one "may write now" decision is `access.Engine.Decide(..., Write)` (or `Mint`), reached
+  through `route.FormatWrite`. Tests get a session with `PublishToken(t, s, user, repo)` from
   `e2e/harness_test.go`, or `s.PublishAuth(t, user, repo)` for a Basic header. Never add a
   write path that accepts a password or a read token.
-- **API changes and admin routes need a UI session.** HTTP Basic (password or read token) reaches
-  only the GET routes of `/api` that are not admin routes (`auth.Identify`, `api.admin`), so an
-  admin password cannot go around the second factor. Tests use `s.Admin()` (the admin's UI
-  session) or `s.SignIn(t, user, pass)`; `s.AdminBasic()` is for format reads.
+- **API changes and permission routes need a UI session.** HTTP Basic (a password or a read
+  token) reaches only the GET routes of `/api` that need no permission. So an admin password
+  cannot go around the second factor. Tests use `s.Admin()` (the admin's UI session) or
+  `s.SignIn(t, user, pass)`; `s.AdminBasic()` is for format reads.
+- **Only the byte pipeline writes files.** `assets.Pipeline.Commit`, `CommitAll` and `Remove` are
+  the only code that writes the `assets` and `blobs` tables. A format takes part through the
+  hooks of its `format.Spec`. The plan guard fails a query that writes a table outside the schema
+  of its own component.
+- **Change a repo through `repos.Service`.** `Create` and `Update` check the whole new state and
+  save it in one transaction. A module that keeps a value for a repo registers a `repos.Field`.
+- **Register what you add.** A permission (`x.Permissions`), an audit action (`x.AuditActions`),
+  a settings group (`x.Settings`), a repo operation type (`x.OpType`), a CI provider and a
+  publisher client are all registered in the module's `Register`. The kernel refuses to record
+  an unregistered audit action and to save an unregistered permission ID.
 - **Never log second-factor material.** That covers TOTP secrets and codes, recovery codes,
   device keys, publish tokens and OIDC tokens. Compare secrets in constant time.
 - **Storage keys and repo paths use package `path`, never `path/filepath`.** Keys are
-  forward-slash on every OS. Use `filepath` only for local OS paths, such as the data dir.
+  forward-slash on every OS. Use `filepath` only for local OS paths, such as the data dir. Check
+  a repo path with `repopath.Parse`.
 - **Every query on a request path uses an index.** Lists use keyset pagination
   (`?after=&limit=`, `httpx.Limit`) with one lower bound per key column: pick the tighter of prefix and cursor in Go, because SQLite checks a second bound row by row. Never use `OFFSET` or `LIKE '%x%'`; substring search goes
   through `assets_fts` (trigram). Request paths read settings from the in-memory snapshot,
   never from the `settings` table.
-- **Write queries in `queries/*.sql`.** Core and each format keep their SQL in `queries/*.sql`
-  next to a `sqlc.yaml`. Run `go tool task gen` after you change a query or a migration, and
-  commit the generated `dbq/` package. Write a query by hand (`dbq/extra.go`) only when sqlc
-  cannot express it, such as FTS5 `MATCH` or a streaming `iter.Seq2` read. Register each
-  hand-written query in the package `Extra` map so the plan guard (`db.CheckPlans`, run by
-  `TestQueryPlans`) checks it. A query that must scan goes in the `Allow` map with a reason.
-  Do not write inline SQL in services.
+- **Write queries in `queries/*.sql`.** The kernel and each module with a schema keep their SQL
+  in `queries/*.sql` next to a `sqlc.yaml`. Run `go tool task gen` after you change a query or a
+  `schema.sql`, and commit the generated `dbq/` package. Write a query by hand (`dbq/extra.go`)
+  only when sqlc cannot express it, such as FTS5 `MATCH` or a streaming `iter.Seq2` read.
+  Register each hand-written query in the package `Extra` map so the plan guard
+  (`db.CheckPlans`, run by `TestQueryPlans`) checks it. A query that must scan goes in the
+  `Allow` map with a reason. Do not write inline SQL in services.
+- **Edit a schema in place.** Each component has one `schema.sql`. Change it in place and never
+  add a migration file. A changed schema text makes `dev` recreate its data dir and `serve`
+  refuse the old database.
 - **Keep dependencies few and mature.** Use the stdlib first: `crypto/*`, `crypto/hkdf`,
   `net/http` routing, `http.CrossOriginProtection` and `log/slog`. Explain any new module in the
   change, and don't run `go mod tidy` unless an import needs it.
@@ -67,31 +93,32 @@ the fallback) and Node 26+ (see `.node-version`). The e2e suite needs Docker or 
 - **Keep CLIs free of flag slop.** Write the human invocation first. Use positional args for the
   obvious thing, TTY prompts for passwords and derived defaults. Add flags only for genuinely
   optional knobs, and give every command an example-led `--help`.
-- **Keep the env minimal.** Put a new tunable in the settings registry
-  (`internal/settings/registry.go`: key, type, default, group, label, help, validation, and
-  `Secret` if sensitive) rather than in a new env var. It then gets a `TR_<KEY>` override, the UI
-  and the API for free. The only env vars outside the registry are the boot env (`TR_DATA_DIR`,
-  `TR_LISTEN`, `TR_MASTER_KEY`), the bootstrap admin, and test/tooling vars (`TR_ENGINE`,
-  `E2E_*`, `TR_E2E_PRESET_BASE_URL`).
-- **Read configuration live.** Services take a `config.Provider` (`set.Config`) and call it per
-  request. Don't keep a `*config.Config` around. To react to changes, use
-  `settings.Service.Subscribe`.
+- **Keep the env minimal.** Put a new tunable in a settings group of its module (`x.Settings`):
+  key, type, default, label, help, validation, and `Secret` if sensitive. The `general` keys are
+  in `internal/settings/general.go`. A setting gets a `TR_<KEY>` override, the UI and the API
+  for free. The only env vars outside the settings are the boot env (`TR_DATA_DIR`, `TR_LISTEN`,
+  `TR_MASTER_KEY`), the bootstrap admin, and test and tooling vars (`TR_ENGINE`, `E2E_*`,
+  `TR_E2E_PRESET_BASE_URL`).
+- **Read configuration live.** A service takes `settings.Provider` (`set.Current`) and reads a
+  typed `settings.Key` or `settings.View` per request. Don't keep a copy of a setting. To react
+  to changes, use `settings.Service.Subscribe`, or the `Apply` hook of the settings group.
 - **Support Windows, macOS and Linux.** Don't depend on bash or make in tooling. Watch path
   separators and process signals (see `tools/task/proc_*.go`).
 - **Use bun for the web app.** The lockfile is `web/bun.lock`. Don't commit a `package-lock.json`.
   The web stack is Svelte 5 + Vite (no SvelteKit), Tailwind CSS v4, shadcn-svelte (Maia style) and
   TypeScript. Add a shadcn component with `bunx shadcn-svelte@latest add <name>`. Call the API only
   through `api.*` in `web/src/lib/api/`. `bun run build` runs `svelte-check` first.
-- **Follow the UI rules of `web/src/README.md`** (spec §13.3). Every page sits in the one centered 1200 px
+- **Follow the UI rules of `web/src/README.md`.** Every page sits in the one centered 1200 px
   container. The API client sends `X-Telesphorepo-UI: 1` on every request, so the server never
   sends a browser password prompt. Use monospace only in `CodeBlock`, `CodeSnippet` and the JSON
-  editor. A dialog is for a confirmation or a short form only.
+  editor. A dialog is for a confirmation or a short form only. No shared UI code names a format:
+  read the format descriptor (`GET /api/formats`).
 - **Never show an IP address outside the audit log.** `audit_events` is the only table and
   `GET /api/audit` the only API that returns one.
-- **Read the client address with `httpx.ClientIP(r)` only.** The `netrules` middleware resolves it
+- **Read the client address with `httpx.ClientIP(r)` only.** The network module resolves it
   once per request. Never read `X-Forwarded-For` or `CF-Connecting-IP` in a handler, because
-  the server trusts them only from a trusted proxy. New read and write paths of a repo must call
-  the IP rule check (`netrules.Service.Check`) with the scope `read` or `publish`.
+  the server trusts them only from a trusted proxy. A route that acts on a repo names the repo in
+  its policy (`route.RepoRule`), so the access engine runs the IP rule guard.
 - **Request paths use in-memory snapshots of IP lists, IP rules and signing keys.** They never query
   `ip_lists`, `repo_ip_rules` or `signing_keys`. The service refreshes the snapshot when the data changes.
 - **Keep the docs current.** Update `SPEC.md` in the same change whenever behaviour, routes,
@@ -102,66 +129,95 @@ the fallback) and Node 26+ (see `.node-version`). The e2e suite needs Docker or 
 
 | Need | Place |
 |---|---|
-| Wiring and startup order | `internal/server/server.go` |
-| New core setting | `internal/settings/registry.go` (+ a field in `config.Config` if code reads it) |
-| New format setting | `Settings()` of the format (`format.Configurable`) |
-| Core schema change | New `internal/db/migrations/000N_name.sql` (never edit applied migrations) |
-| Format schema change | New `internal/<format>/migrations/000N_name.sql` |
-| Query | `queries/*.sql` of the owner (`internal/db` or the format), then `go tool task gen` |
-| New repo format | `internal/<format>` + one line in `internal/formats/all.go` (see below) |
-| Plugin contract | `internal/format/format.go` |
-| JSON API route | `internal/api/api.go` (register) + handler file; errors via `httpx.Error` |
-| Auth / permission checks | `internal/auth` (`Identify`, repo access and the write gate, second factor) |
-| Publish sessions, devices, trust policies | `internal/publish`; routes in `internal/api/publish.go` and `internal/api/security.go` |
+| Wiring and startup order | `internal/server/server.go` (kernel, module lifecycle); the module list in `internal/modules/modules.go` |
+| Module contract | `internal/module` (`Module`, `Extender`, `Host`, `Use`); jobs in `internal/jobs`; routes and policies in `internal/route` |
+| Core setting | `internal/settings/general.go` (the `general` group) |
+| Module setting | `x.Settings(&settings.Group{...})` in the module's `Register`; the group owns its keys, its permission, its page and its `Validate`, `Test` and `Apply` hooks |
+| Permission | `x.Permissions(perm.Subsystem{...}, perm.Def{...})` in the module's `Register`; the registry is `internal/perm` |
+| Audit action | `x.AuditActions(...)`; record with `h.Audit.Record(ctx, ...)` or `RecordTx`; the actor comes from the context (`internal/audit`) |
+| Core schema change | Edit `internal/db/schema.sql` in place |
+| Module schema change | Edit `internal/<module>/schema.sql` in place |
+| Query | `queries/*.sql` of the owner (`internal/db` or the module), then `go tool task gen` |
+| New module | `internal/<module>` + one line in `internal/modules/modules.go` (see below) |
+| Format contract | `internal/format/format.go` (`format.Spec`), `kit.go` (the standard routes) |
+| JSON API route | `x.Routes` of the owning module (core: `internal/api/api.go`) + handler; shared helpers in `route.API` (`h.API`); errors via `httpx.Error` or `route.Fail` |
+| Credentials, permission checks | `internal/auth` (`Identify`, sessions, tokens, second factor, bearer tokens), `internal/route/policy.go` (the policy), `internal/access/engine.go` (`Decide`, the access report) |
+| Publish sessions, devices, trust policies, CI providers | `internal/publish` (module `publish`, routes in `api.go`, `mint.go`, `providers.go`); `internal/ci` (provider registry, build records); `internal/clients` (publisher clients); sign-in and second factor routes in `internal/api/security.go` |
 | Publisher clients (Gradle plugin, Maven extension) | Separate repo [Telesphorepo/clients](https://github.com/Telesphorepo/clients) (MIT). The clients zone clones it, or reads `E2E_CLIENTS_DIR`; `E2E_CLIENTS_REF` picks the branch or tag (default `main`) |
-| Blob I/O | `internal/assets` (spool, store, serve) on top of `internal/storage` |
-| UI page | `web/src/pages/**/*.svelte` (`repo/`, `account/`, `repositories/`, `server/`); route in `web/src/routes.ts`; Settings nav in `web/src/lib/nav.ts`; API calls in `web/src/lib/api/`. See `web/src/README.md` |
-| UI format editor | `web/src/lib/formats/` |
-| File tree, deletes, manual upload | `internal/files`, `internal/api/files.go`; UI in `web/src/pages/repo/` (`FilesTab`, `upload/`, `delete/`) |
-| Client IP, IP lists, repo IP rules | `internal/netrules` (`lists.go`, `rules.go`, `clientip.go`), `internal/api/network.go`, `web/src/pages/repo/settings/` (Network tab), `web/src/pages/server/IPLists.svelte`, `IPListPage.svelte`, `ReverseProxy.svelte` |
-| Signing keys | `internal/signing/keys.go`, `internal/api/signing_keys.go`, `GET /debian/{repo}/key.asc` in `internal/debian`; UI in `web/src/pages/server/SigningKeys.svelte` and the Signing tab of the repo settings |
-| Folder scan and upload | `Scan` of the format (`format.ManualUploader`), e.g. `internal/maven/scan.go`; route in `internal/api/files.go`; UI in `web/src/pages/repo/upload/` |
-| Audit log | `internal/audit`, `internal/api` (`GET /api/audit`), `web/src/pages/server/Activity.svelte`. Call `a.record` in a handler, or `Host.Audit` in a plugin |
-| Storage move (FS ↔ S3) | `internal/move` (service, copier), `internal/storage/mirror.go`, `internal/api/moves.go`, `web/src/pages/server/Storage.svelte` |
-| Nexus sources, syncs, cut-over | `internal/nexus` (client, service, `sync.go` scheduler and runner), `internal/api/nexus.go`, `web/src/pages/server/NexusMigration.svelte`, `NexusSource.svelte`. Per-format import code is the plugin's `Importer`. Repo lock: `repos.locked_by`, checked in `auth.RepoGate` |
+| Byte pipeline | `internal/assets` (`Commit`, `Remove`, `Reader`, `Uploads`), `internal/blobs` (content-addressed blobs, GC), `internal/repopath`, `internal/ops` (repo operations), `internal/rebuild` (index rebuild queue), on top of `internal/storage` |
+| UI page | `web/src/pages/**/*.svelte` (`repo/`, `account/`, `repositories/`, `server/`, `settings/repos/`); its `PageDef` (path, access, Settings nav) in the owning module's `web/src/modules/<id>/module.ts`; API calls in `web/src/lib/api/`. See `web/src/README.md` |
+| UI of a format | The descriptor (`format.Spec` fields and `UI`, `GET /api/formats`; `web/src/lib/formats/registry.svelte.ts`); a format-specific component only as a named `formatParts` slot in `web/src/modules/<format>/module.ts` |
+| File tree, deletes, manual upload | `internal/files` (tree), `internal/api/files.go`, `internal/api/pipeline.go` (repo delete, resumable uploads), `format.Spec.Upload`; UI in `web/src/pages/repo/` (`FilesTab`, `upload/`, `delete/`) |
+| Client IP, IP lists, repo IP rules | `internal/netrules` (module `network`: `lists.go`, `rules.go`, `clientip.go`, `module.go`), `web/src/pages/settings/repos/` (Access tab), `web/src/pages/server/IPLists.svelte`, `IPListPage.svelte`, `ReverseProxy.svelte` |
+| Signing keys | `internal/signing/keys.go`, `internal/signing/module.go` (the repo field `signing_key`), `GET /debian/{repo}/key.asc` in `internal/debian`; UI in `web/src/pages/server/SigningKeys.svelte` and `web/src/modules/signing/` |
+| Upload plan and upload | `Plan` and `Store` of the format (`format.Spec.Upload`), e.g. `internal/maven/plan.go`; routes in `internal/api/files.go`; UI in `web/src/pages/repo/UploadView.svelte` and `upload/` |
+| Snippets, CI files, project setup | `Usage` and `Tools` of the format; `internal/ci/workflow.go` (the GitHub Actions and Jenkinsfile builders); `internal/publish/setup.go`, `setup.sh`, `setup.ps1` (the frame) with each tool's `SetupFragment` (e.g. `internal/maven/setup_gradle.sh`) |
+| Audit log | `internal/audit` (registry, `Record`), `internal/activity` (module `audit`: `GET /api/audit`), `web/src/pages/server/Activity.svelte` |
+| Storage move (FS ↔ S3) | `internal/move` (module `storage`: service, copier, `module.go`), `internal/storage/mirror.go`, `web/src/pages/server/Storage.svelte` |
+| Single sign-on | `internal/oidc` (module `sso`: sign-in, the permission map, device approval), `web/src/pages/server/SingleSignOn.svelte` |
+| Nexus sources, syncs, cut-over | `internal/nexus` (module `nexus`: client, service, `sync.go` scheduler and runner, `api.go`), `web/src/pages/server/NexusMigration.svelte`, `NexusSource.svelte`. Per-format import code is the `Importer` of the format (`Plan` for the target repo, `Target`/`Store` per file). Repo lock: the repo operation `mirror` (`repo_ops`), checked in `access.Engine.Decide` |
+| Demo data and seed | `internal/demo`, and `Demo` and `Seed` of each module; `cmd/telesphorepo/demo.go` |
 | E2E harness | `e2e/harness_test.go` (servers, storage matrix `fs` + SeaweedFS), `e2e/clients_test.go` (Maven, Debian and curl helpers that several zones share), publish helpers at the end of `harness_test.go`, `e2e/keycloak_test.go` (Keycloak fixture), `e2e/publish_clients_test.go` (clients zone) |
 | Dev tooling | `tools/task` |
 
-## Adding a repo format
+## Adding a module
 
-A format is one package that implements `format.Format` (`internal/format`). The core names no
-format, so you edit no core file.
+Every format and every core feature with routes is a module (`internal/module`). A module is
+`module.Module{ID, Title, Requires, Register}`. `Register` runs once, before the database opens.
+It calls the `x.*` methods of the `Extender` to declare what the module adds: `Schema`,
+`Settings`, `Permissions`, `AuditActions`, `OpType`, `Init`, `Routes`, `RootPrefix`, `Job`,
+`Format`, `RepoField`, `RepoGuard`, `CIProvider`, `PublisherClient`, `ClientAddress`,
+`TokenKind`, `Demo` and `Seed`. A module edits no core file.
 
-1. Create `internal/<format>` with `func New() format.Format`. The type implements `Name`,
-   `Title`, `DefaultConfig`, `ValidateConfig` and `Register(mux, format.Host)`. The name is the URL
-   segment, the `repos.format` value and the migration component.
-2. In `Register`, keep the fields you need from `format.Host` (`Auth`, `Assets`, `Config`, ...).
-   Authorize through `Host.Auth.RepoGate`, store and serve through `Host.Assets` (key
-   `repos/{repo}/{path}`), and read limits from `Host.Config`.
-3. Implement the optional interfaces you need: `Migrator` (own tables), `Queryable` (plan guard),
-   `Configurable` (settings group), `Starter` (background work), `StatusReporter`,
-   `ConfigObserver` and `Describer` (client snippets that the UI and `dev` show), `DeleteObserver`
-   (`AssetsDeleted`: drop your own rows when files are deleted), `ManualUploader` (`Upload` and
-   `Scan`: the UI upload dialogs call them), and `Importer`
-   (`ImportFormats` and `Import`: the Nexus import offers each source file to the plugin; share
-   the code of your upload path with it, and return `imported`, `skipped` or `ignored`).
-   Implement `Iconic` too: embed an `icon.svg` of one color (`currentColor`, 24x24 view box), so
-   the UI shows the format's mark.
-4. If the format has tables, add `migrations/NNNN_*.sql`, `queries/*.sql` and a `sqlc.yaml`
-   (copy `internal/debian/sqlc.yaml`). Run `go tool task gen`.
-5. Add one line to `internal/formats/all.go`: the import and the `format.Register(...)` argument.
-6. Add `e2e/<format>_test.go` that uses the format's real client and runs on every storage backend.
-7. Document the routes and tables in `SPEC.md`.
+1. Create `internal/<module>` with `func Module() module.Module`. The module ID is also the
+   schema component. List the modules you use in `Requires`; each must be earlier in the list.
+2. Add one line to `internal/modules/modules.go`, in start order.
+3. In `x.Init`, keep the `*module.Host`. It holds the kernel services (`DB`, `Settings`,
+   `Audit`, `Assets`, `Reader`, `Uploads`, `Rebuilds`, `Repos`, `Ops`, `Auth`, `Access`,
+   `Formats`, `CI`, `Builds`, `Clients`, `API`) and a log tagged with the module ID. Give a
+   service to other modules with `h.Provide` or `module.ProvideAs[T]`, and get one from a
+   required module with `module.Use[T](h)`. Run background work as `x.Job` or `h.Go`.
+4. Register each route with a policy in `x.Routes`. A module registers only under `/api/`, under
+   `/<format>/` of its formats and under its `RootPrefix`es.
+5. If the module has tables, add `schema.sql`, `queries/*.sql` and a `sqlc.yaml` (copy
+   `internal/debian/sqlc.yaml`), and declare them with `x.Schema`. Run `go tool task gen`.
+6. Add `e2e/<module>_test.go` that uses a real client and runs on every storage backend.
+7. Document the routes, tables and settings in `SPEC.md`.
 
-`raw` (`internal/raw`) is the smallest example. `debian` shows migrations, settings and a
-background worker.
+### Adding a repo format
+
+A format is a module that passes a `format.Spec` to `x.Format`. A nil field is a capability that
+the format lacks.
+
+- **Required:** `Name` (the URL segment and the `repos.format` value), `Config.Validate` and
+  `Kinds` (it holds `hosted`). Set `Title`, `Description`, `Config.Default` and `Config.Fields`
+  for the web UI. Set `Icon` too: embed an `icon.svg` of one color (`currentColor`, 24x24 view
+  box).
+- **Routes:** a nil `Routes` mounts `format.Standard` (GET and HEAD through the read path, PUT
+  through `Commit`). Set `Routes` for a protocol of its own, and register each route with
+  `route.FormatRead` or `route.FormatWrite`.
+- **Bytes:** `Describe` (content type and kind of a path), `Admit` (store, keep or refuse a
+  write), `OnCommitted` and `OnRemoved` (your own rows, in the same transaction),
+  `AfterCommit`, `AfterRemove`, `OnRepoChange`, and `Rebuild` for an index that a background
+  job builds.
+- **Proxy and group:** `Kinds` with `proxy` needs `Classify` and `ProxyProbe`; `RemoteAuth`
+  answers a remote's token challenge. `Kinds` with `group` can set `Merge`.
+- **Web UI:** `Description`, `Config.Fields`, `UI` (the descriptor), `Versions` and `Builds`,
+  `Usage`, `ArtifactUsage` and `Tools` (snippets, CI steps, project setup), `Upload` (`Plan` and
+  `Store`), `SigningKey` and `RepoTabs`. The web UI reads the descriptor and names no format.
+- **Import:** `Importer` (`Sources`, `Target`, `Store`, `Plan`): the Nexus import offers each
+  source file to the format.
+
+`raw` (`internal/raw`) is the smallest example. `debian` shows a schema, a repo field, `Rebuild`
+and an importer plan. `maven` shows proxy, group, `Merge`, `Upload` and `Tools`.
 
 ## Adding a UI page
 
 1. Create `web/src/pages/<area>/<Name>.svelte` with `let { params, query }: PageProps = $props();`.
-2. Add one entry to `web/src/routes.ts`: pattern, lazy `page`, `layout` (`app` or
-   `settings`), `access` (`any`, `user` or `admin`) and `title`.
-3. For a Settings page, add it to its category in `web/src/lib/nav.ts`.
+2. Add one `PageDef` to the owning module's `web/src/modules/<id>/module.ts`: `path`, lazy
+   `page`, `layout` (`app` or `settings`), `access` (`any`, `user`, `repositories`, `repo` or a
+   permission ID), `title`, and `setup` for a page of a setup-only session.
+3. For a Settings page, give it `nav` (group, label, icon, order).
 4. Add the route to the table in `web/src/README.md`.
 5. Call the API only through `api.*`. For a new server route, add a function and its type in
    `web/src/lib/api/`.
@@ -170,15 +226,14 @@ background worker.
 
 ## How the maintainer likes to work
 
-- **Design first, then build. No plan documents.** New features get a design spec in
-  `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md`, written with the superpowers brainstorming
-  skill and approved by the maintainer. After approval, implement straight from the spec; don't
-  write a separate implementation plan.
+- **Design first, then build. No plan documents.** For architectural work, write a design spec in
+  `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` and get the maintainer to approve it.
+  After approval, implement straight from the spec. When the work is done, delete the spec and
+  move what stays true into `SPEC.md`.
 - **Use subagents freely.** Large parallel swarms are welcome. Use Opus or Sonnet subagents, and
-  Haiku only for trivial non-coding work. Never use Fable subagents.
-- **Subagents only implement.** They don't build, vet, lint, test or run the app. After each
-  milestone the main session runs the build, vet and the e2e suite once, and sends fix-up agents
-  for failures.
+  Haiku only for read-only work. Never use Fable subagents.
+- **Subagents build and vet, but never test.** They do not run tests, dev servers or the app.
+  After each milestone the main session runs the zones once and sends fix-up agents for failures.
 - **Make decisions instead of asking a lot of questions.** Flag a real trade-off when there is one,
   then pick a sensible default.
 - **Treat other tools as inspiration, not a requirement.** When the maintainer cites another tool

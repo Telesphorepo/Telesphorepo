@@ -1,5 +1,5 @@
 // Package containerengine detects a usable Docker or Podman engine on macOS, Linux and
-// Windows (spec §16). Used by tools/task and the e2e harness; not linked into the server.
+// Windows. Used by tools/task and the e2e harness; not linked into the server.
 package containerengine
 
 import (

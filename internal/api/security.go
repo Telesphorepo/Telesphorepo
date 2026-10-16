@@ -7,11 +7,13 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/route"
+
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 )
 
-// registerSecurity mounts the two-step sign-in and the second-factor routes (spec §7.6):
+// registerSecurity mounts the two-step sign-in and the second-factor routes:
 //
 //	POST   /api/auth/login                   {username, password}
 //	POST   /api/auth/login/passkey           → passkey options for the pending sign-in
@@ -22,26 +24,31 @@ import (
 //	DELETE /api/security/totp/{id}
 //	POST   /api/security/passkeys/begin      → passkey creation options
 //	POST   /api/security/passkeys/finish     {name, credential}
-//	POST   /api/security/passkeys/assert     → passkey options for a fresh check
+//	POST   /api/security/passkeys/assert     → passkey options for a fresh check (auth.ProofHeader)
 //	DELETE /api/security/passkeys/{id}
 //	POST   /api/security/recovery-codes      → {codes}
 //
-// The /api/security routes need a UI session of a local account; a session without a second
-// factor reaches them (auth.Identify lets it through).
-func (a *API) registerSecurity(mux *http.ServeMux) {
-	mux.HandleFunc("POST /api/auth/login", a.loginPassword)
-	mux.HandleFunc("POST /api/auth/login/passkey", a.loginPasskey)
-	mux.HandleFunc("POST /api/auth/login/second", a.loginSecondFactor)
+// The /api/security routes need a UI session of a local account (route.Setup): a session
+// without the second factor it needs reaches them, to set the factor up.
+func (a *API) registerSecurity(mux *route.Router) {
+	mux.Handle("POST /api/auth/login", route.Public, a.loginPassword)
+	mux.Handle("POST /api/auth/login/passkey", route.Public, a.loginPasskey)
+	mux.Handle("POST /api/auth/login/second", route.Public, a.loginSecondFactor)
 
-	mux.HandleFunc("GET /api/security", a.getSecurity)
-	mux.HandleFunc("POST /api/security/totp/begin", a.beginTOTP)
-	mux.HandleFunc("POST /api/security/totp/confirm", a.confirmTOTP)
-	mux.HandleFunc("DELETE /api/security/totp/{id}", a.deleteTOTP)
-	mux.HandleFunc("POST /api/security/passkeys/begin", a.beginPasskeyRegistration)
-	mux.HandleFunc("POST /api/security/passkeys/finish", a.finishPasskeyRegistration)
-	mux.HandleFunc("POST /api/security/passkeys/assert", a.beginPasskeyAssertion)
-	mux.HandleFunc("DELETE /api/security/passkeys/{id}", a.deletePasskey)
-	mux.HandleFunc("POST /api/security/recovery-codes", a.generateRecoveryCodes)
+	mux.Handle("GET /api/security", route.Setup, a.getSecurity)
+	mux.Handle("POST /api/security/totp/begin", route.Setup, a.beginTOTP)
+	mux.Handle("POST /api/security/totp/confirm", route.Setup, a.confirmTOTP)
+	mux.Handle("DELETE /api/security/totp/{id}", route.Setup, a.deleteTOTP)
+	mux.Handle("POST /api/security/passkeys/begin", route.Setup, a.beginPasskeyRegistration)
+	mux.Handle("POST /api/security/passkeys/finish", route.Setup, a.finishPasskeyRegistration)
+	mux.Handle("POST /api/security/passkeys/assert", route.Setup, a.beginPasskeyAssertion)
+	mux.Handle("DELETE /api/security/passkeys/{id}", route.Setup, a.deletePasskey)
+	mux.Handle("POST /api/security/recovery-codes", route.Setup, a.generateRecoveryCodes)
+}
+
+// sessionAnswer is the answer of a finished sign-in step: {session: SessionView}.
+type sessionAnswer struct {
+	Session *auth.SessionView `json:"session"`
 }
 
 // failSecondFactor maps second-factor errors, then falls back to fail.
@@ -59,25 +66,19 @@ func failSecondFactor(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, auth.ErrPasskeysUnavailable):
 		httpx.Error(w, http.StatusConflict, auth.ErrPasskeysUnavailable.Error())
 	default:
-		fail(w, r, err)
+		route.Fail(w, r, err)
 	}
-}
-
-// loginUser is a signed-in user. SecondFactorRequired is true for a setup-only session.
-type loginUser struct {
-	*auth.User
-	SecondFactorRequired bool `json:"second_factor_required"`
 }
 
 // loginPassword is the password step. A user with a second factor gets
 // {"second_factor": true, "methods": ["totp","passkey","recovery"]} (the kinds the user has) and
-// the pending sign-in cookie; anyone else gets the user and a session.
-func (a *API) loginPassword(w http.ResponseWriter, r *http.Request) {
+// the pending sign-in cookie; anyone else gets {session: SessionView} and a session.
+func (a *API) loginPassword(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	var in struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
-	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
+	if !a.kit.Decode(w, r, &in) {
 		return
 	}
 	res, err := a.auth.Login(w, r, in.Username, in.Password)
@@ -85,20 +86,20 @@ func (a *API) loginPassword(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, auth.ErrNotFound) || errors.Is(err, auth.ErrInvalid) {
 			err = auth.ErrBadCredentials
 		}
-		fail(w, r, err)
+		route.Fail(w, r, err)
 		return
 	}
-	if res.User == nil {
+	if res.Session == nil {
 		httpx.WriteJSON(w, http.StatusOK, struct {
 			SecondFactor bool     `json:"second_factor"`
 			Methods      []string `json:"methods"`
 		}{true, res.SecondFactor})
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, loginUser{res.User, res.SetupOnly})
+	httpx.WriteJSON(w, http.StatusOK, sessionAnswer{res.Session})
 }
 
-func (a *API) loginPasskey(w http.ResponseWriter, r *http.Request) {
+func (a *API) loginPasskey(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	opts, err := a.auth.LoginPasskeyOptions(r)
 	if err != nil {
 		failSecondFactor(w, r, err)
@@ -107,30 +108,23 @@ func (a *API) loginPasskey(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, opts)
 }
 
-func (a *API) loginSecondFactor(w http.ResponseWriter, r *http.Request) {
+func (a *API) loginSecondFactor(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	var in auth.SecondFactorInput
-	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
+	if !a.kit.Decode(w, r, &in) {
 		return
 	}
-	u, err := a.auth.LoginSecondFactor(w, r, in)
+	v, err := a.auth.LoginSecondFactor(w, r, in)
 	if err != nil {
 		failSecondFactor(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, loginUser{u, false})
+	httpx.WriteJSON(w, http.StatusOK, sessionAnswer{v})
 }
 
-// securityUser requires a UI session of a local account: a password or token alone must not
-// add or remove second factors.
-func (a *API) securityUser(w http.ResponseWriter, r *http.Request) (*auth.Principal, bool) {
-	p, ok := a.user(w, r)
-	if !ok {
-		return nil, false
-	}
-	if !p.Session {
-		auth.SessionRequired(w)
-		return nil, false
-	}
+// localAccount requires the UI session (route.Setup) of a local account: an SSO account has no
+// second factors of its own.
+func localAccount(w http.ResponseWriter, c *route.Call) (*auth.Principal, bool) {
+	p := c.P
 	if p.Kind != auth.KindLocal {
 		httpx.Error(w, http.StatusForbidden, auth.ErrSSOAccount.Error())
 		return nil, false
@@ -138,8 +132,8 @@ func (a *API) securityUser(w http.ResponseWriter, r *http.Request) (*auth.Princi
 	return p, true
 }
 
-func (a *API) getSecurity(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.securityUser(w, r)
+func (a *API) getSecurity(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	p, ok := localAccount(w, c)
 	if !ok {
 		return
 	}
@@ -151,15 +145,15 @@ func (a *API) getSecurity(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, f)
 }
 
-func (a *API) beginTOTP(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.securityUser(w, r)
+func (a *API) beginTOTP(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	p, ok := localAccount(w, c)
 	if !ok {
 		return
 	}
 	var in struct {
 		Name string `json:"name"`
 	}
-	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
+	if !a.kit.Decode(w, r, &in) {
 		return
 	}
 	setup, err := a.auth.BeginTOTP(r.Context(), p.UserID, in.Name)
@@ -170,8 +164,8 @@ func (a *API) beginTOTP(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, setup)
 }
 
-func (a *API) confirmTOTP(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.securityUser(w, r)
+func (a *API) confirmTOTP(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	p, ok := localAccount(w, c)
 	if !ok {
 		return
 	}
@@ -179,7 +173,7 @@ func (a *API) confirmTOTP(w http.ResponseWriter, r *http.Request) {
 		SetupID string `json:"setup_id"`
 		Code    string `json:"code"`
 	}
-	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
+	if !a.kit.Decode(w, r, &in) {
 		return
 	}
 	f, err := a.auth.ConfirmTOTP(r.Context(), p.UserID, in.SetupID, in.Code)
@@ -190,8 +184,8 @@ func (a *API) confirmTOTP(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusCreated, f)
 }
 
-func (a *API) deleteTOTP(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.securityUser(w, r)
+func (a *API) deleteTOTP(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	p, ok := localAccount(w, c)
 	if !ok {
 		return
 	}
@@ -207,8 +201,8 @@ func (a *API) deleteTOTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (a *API) beginPasskeyRegistration(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.securityUser(w, r)
+func (a *API) beginPasskeyRegistration(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	p, ok := localAccount(w, c)
 	if !ok {
 		return
 	}
@@ -220,8 +214,8 @@ func (a *API) beginPasskeyRegistration(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, opts)
 }
 
-func (a *API) finishPasskeyRegistration(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.securityUser(w, r)
+func (a *API) finishPasskeyRegistration(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	p, ok := localAccount(w, c)
 	if !ok {
 		return
 	}
@@ -229,7 +223,7 @@ func (a *API) finishPasskeyRegistration(w http.ResponseWriter, r *http.Request) 
 		Name       string          `json:"name"`
 		Credential json.RawMessage `json:"credential"`
 	}
-	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
+	if !a.kit.Decode(w, r, &in) {
 		return
 	}
 	pk, err := a.auth.FinishPasskeyRegistration(r.Context(), p.UserID, in.Name, in.Credential)
@@ -242,8 +236,8 @@ func (a *API) finishPasskeyRegistration(w http.ResponseWriter, r *http.Request) 
 
 // beginPasskeyAssertion starts a fresh passkey check, for a device approval or a manual
 // publish session.
-func (a *API) beginPasskeyAssertion(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.securityUser(w, r)
+func (a *API) beginPasskeyAssertion(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	p, ok := localAccount(w, c)
 	if !ok {
 		return
 	}
@@ -255,8 +249,8 @@ func (a *API) beginPasskeyAssertion(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, opts)
 }
 
-func (a *API) deletePasskey(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.securityUser(w, r)
+func (a *API) deletePasskey(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	p, ok := localAccount(w, c)
 	if !ok {
 		return
 	}
@@ -272,8 +266,8 @@ func (a *API) deletePasskey(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (a *API) generateRecoveryCodes(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.securityUser(w, r)
+func (a *API) generateRecoveryCodes(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	p, ok := localAccount(w, c)
 	if !ok {
 		return
 	}

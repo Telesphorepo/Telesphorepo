@@ -1,83 +1,126 @@
 package format
 
-import "strings"
+import (
+	"github.com/Telesphorepo/Telesphorepo/internal/ci"
+	"github.com/Telesphorepo/Telesphorepo/internal/repos"
+)
 
-// Snippet helpers that formats share: publishing from CI and with plain curl by hand.
-
-// JenkinsCredential is the ID of the Jenkins "OpenID Connect id token" credential that every
-// Jenkinsfile snippet binds to the variable OIDC_TOKEN.
-const JenkinsCredential = "telesphorepo-id-token"
-
-// JenkinsNote tells how to make the credential that a Jenkinsfile snippet binds.
-func JenkinsNote(baseURL string) string {
-	return "Install the OpenID Connect Provider plugin in Jenkins. Then add an \"OpenID Connect id token\" credential with the ID " +
-		JenkinsCredential + " and the audience " + baseURL + "."
+// Snippet is one copy-paste step. The UI shows one tab per Tool and the snippets of a tool in
+// order.
+type Snippet struct {
+	// ID is stable and unique among the snippets of one answer, e.g. "gradle-kotlin.settings".
+	ID string `json:"id"`
+	// Tool is the tool the snippet is for, e.g. "gradle-kotlin", "maven", "apt", "curl",
+	// "github-actions" or "jenkins". The answer names its label.
+	Tool string `json:"tool"`
+	// Purpose is SnippetUse (add the repo or artifact to a build) or SnippetPublish.
+	Purpose string `json:"purpose"`
+	// Context is SnippetRepo (repo setup) or SnippetArtifact (one artifact).
+	Context string `json:"context"`
+	// Via says where a publish snippet publishes from: ViaComputer (a client plugin with a
+	// device), ViaCI or ViaHand (the browser, or a publish token with curl). "" for a use snippet.
+	Via string `json:"via,omitempty"`
+	// File is the file the snippet belongs in, e.g. ".github/workflows/publish.yml"; "" for a
+	// command.
+	File  string `json:"file,omitempty"`
+	Title string `json:"title"` // what the block is, e.g. "~/.m2/settings.xml" or "Publish"
+	Lang  string `json:"lang"`  // highlighting hint: "xml", "kotlin", "groovy", "sh", "yaml", ...
+	Code  string `json:"code"`
+	Note  string `json:"note,omitempty"` // one line under the code, e.g. a trade-off
 }
 
-// GitHubTrigger is the trigger of the workflow snippets: a push to main. The CI pipeline page
-// puts the branches and tags of the pipeline in its place.
-const GitHubTrigger = "on:\n  push:\n    branches: [\"main\"]\n\n"
+// Snippet purposes, contexts and publish sources.
+const (
+	SnippetUse      = "use"
+	SnippetPublish  = "publish"
+	SnippetRepo     = "repo"
+	SnippetArtifact = "artifact"
 
-// JenkinsPipeline returns a declarative Jenkinsfile. When build is not empty, it runs in a stage
-// of its own. publish runs in the last stage, with the identity token in OIDC_TOKEN. Jenkins
-// makes the token when withCredentials starts, and the server takes a token for 10 minutes
-// only, so only the publish stage binds it. A Groovy string in single quotes reads a backslash
-// as an escape, so each backslash of a script is doubled.
-func JenkinsPipeline(repo, build, publish string) string {
-	sh := func(script, prefix string) string {
-		script = strings.ReplaceAll(strings.TrimRight(script, "\n"), `\`, `\\`)
-		if !strings.ContainsAny(script, "\n'") {
-			return prefix + "sh '" + script + "'\n"
-		}
-		return prefix + "sh '''\n" + indent(script, prefix+"  ") + prefix + "'''\n"
+	ViaComputer = "computer"
+	ViaCI       = "ci"
+	ViaHand     = "hand"
+)
+
+// Tool is a build tool that publishes to repos of a format (Spec.Tools).
+type Tool struct {
+	// ID names the tool, e.g. "gradle", "maven", "curl". A tool with Setup has an ID of lower-case
+	// letters and digits only: the setup scripts name their functions after it.
+	ID    string
+	Label string
+	// Publish returns how the tool publishes to repo from the CI system (ci.GitHubActions or
+	// ci.Jenkins). baseURL is the server's public URL without a trailing slash.
+	Publish func(repo *repos.Repo, baseURL, system string) ci.PublishSteps
+	// CINote goes under the CI files of the tool, e.g. what the project needs first ("" for none).
+	CINote string
+	// Setup is the tool's part of the project setup scripts; nil: no project setup.
+	Setup *SetupFragment
+}
+
+// SetupFragment is a build tool's part of the project setup scripts GET /setup.sh and
+// GET /setup.ps1 (the publish module). The scripts run the fragment of the first tool whose
+// detection finds a project in the current folder.
+//
+// Sh defines the sh functions detect_<id> (true when the folder holds a project of the tool),
+// apply_<id> (stages the changes of the project files), publish_cmd_<id> (prints the command
+// that publishes from a computer), ci_edit_<id> (a filter of a CI file, e.g. for the wrapper of
+// the project) and next_<id> (prints extra next steps with step and more). PS1 defines the
+// PowerShell functions Test-<Id>, Set-<Id>, Get-<Id>PublishCommand, Edit-<Id>Ci and
+// Write-<Id>Next, with <Id> the ID with a capital first letter. Both use the frame's variables
+// (REPO, URL, CI) and helpers (stage_file, stage_path, stage_insert_after, stage_append,
+// block_start, block_end, plan, manual, note; PowerShell: Get-Work, Add-Lines, Find-Block,
+// Test-Line, Find-OnlyLine, Add-Plan, Add-Manual, $Notes).
+type SetupFragment struct {
+	// Project names the files that mark a project of the tool, e.g. "settings.gradle.kts or
+	// settings.gradle".
+	Project string
+	Sh      string
+	PS1     string
+}
+
+// CISnippet returns the CI file that publishes to repo with tool from system (ci.GitHubActions or
+// ci.Jenkins) when t fires.
+func CISnippet(repo *repos.Repo, baseURL string, tool Tool, system string, t ci.Trigger) Snippet {
+	steps := tool.Publish(repo, baseURL, system)
+	s := Snippet{Tool: system, Purpose: SnippetPublish, Context: SnippetRepo, Via: ViaCI, Title: tool.Label, Note: tool.CINote}
+	switch system {
+	case ci.Jenkins:
+		s.ID, s.File, s.Lang = "jenkins.pipeline."+tool.ID, "Jenkinsfile", "groovy"
+		s.Code = ci.Jenkinsfile(repo.Name, steps, t)
+		s.Note = joinNote(ci.JenkinsNote(baseURL), tool.CINote)
+	default:
+		s.ID, s.File, s.Lang = "github-actions.workflow."+tool.ID, ".github/workflows/publish.yml", "yaml"
+		s.Code = ci.GitHubWorkflow(repo.Name, baseURL, steps, t)
 	}
-	var b strings.Builder
-	b.WriteString("pipeline {\n  agent any\n  stages {\n")
-	if build != "" {
-		b.WriteString("    stage('Build') {\n      steps {\n" + sh(build, "        ") + "      }\n    }\n")
+	return s
+}
+
+func joinNote(a, b string) string {
+	if a == "" || b == "" {
+		return a + b
 	}
-	b.WriteString("    stage('Publish to " + repo + "') {\n      steps {\n" +
-		"        // The token is good for 10 minutes, so only this stage gets it.\n" +
-		"        withCredentials([string(credentialsId: '" + JenkinsCredential + "', variable: 'OIDC_TOKEN')]) {\n" +
-		sh(publish, "          ") + "        }\n      }\n    }\n  }\n}\n")
-	return b.String()
+	return a + " " + b
 }
 
 // TokenCurl starts a curl command that reads the publish token in $TOKEN from a curl config on
 // stdin. printf is a shell builtin, so the token is never an argument of a process.
 const TokenCurl = `printf 'user = "publish:%s"\n' "$TOKEN" | curl -fsS -K - `
 
-// CurlCISnippets returns the publish snippets for CI without a client plugin: a GitHub Actions
-// workflow and a Jenkinsfile that exchange the job's identity token for a publish session of
-// repo, run upload (a TokenCurl command) and close the session. Every token goes to curl on
-// stdin, never in an argument. The workflow masks each token in the job log as soon as it has
-// it. Jenkins runs sh with tracing on, so the Jenkins script turns tracing off before it gets
-// the session token, and closes the session in an exit trap, also when the upload fails.
-func CurlCISnippets(baseURL, repo, upload string) []Snippet {
-	exchange := func(oidc, mask string) string {
-		return "SESSION=$(printf '{\"token\":\"%s\",\"repo\":\"" + repo + "\"}' \"" + oidc + "\" \\\n" +
+// CurlTool is the tool of a format without a client plugin: curl publishes with a publish session
+// that the CI job's identity token ($OIDC_TOKEN) mints, and closes the session at the end, also
+// when the upload fails. upload is a TokenCurl command for repo. The token goes to curl on stdin,
+// never in an argument, and the script turns shell tracing off before it holds the session
+// token.
+func CurlTool(upload func(repo *repos.Repo, baseURL string) string) Tool {
+	return Tool{ID: "curl", Label: "curl", Publish: func(repo *repos.Repo, baseURL, _ string) ci.PublishSteps {
+		closeCmd := TokenCurl + "-X DELETE " + baseURL + "/api/publish/sessions/$ID"
+		return ci.PublishSteps{Token: true, Publish: "set +x\n" +
+			"SESSION=$(printf '{\"token\":\"%s\",\"repo\":\"" + repo.Name + "\"}' \"$OIDC_TOKEN\" \\\n" +
 			"  | curl -fsS -H 'Content-Type: application/json' --data @- " + baseURL + "/api/publish/sessions/oidc)\n" +
-			"TOKEN=$(echo \"$SESSION\" | jq -r .token)\n" + mask +
-			"ID=$(echo \"$SESSION\" | jq -r .id)\n"
-	}
-	closeCmd := TokenCurl + "-X DELETE " + baseURL + "/api/publish/sessions/$ID"
-	github := exchange("$OIDC", "echo \"::add-mask::$TOKEN\"\n") + upload + "\n" + closeCmd + "\n"
-	jenkins := "set +x\n" + exchange("$OIDC_TOKEN", "") +
-		"close_session() { " + closeCmd + "; }\ntrap close_session EXIT\n" + upload + "\n"
-	return []Snippet{
-		{Client: "github-actions", Purpose: SnippetPublish, Context: SnippetRepo, Via: ViaCI,
-			Title: ".github/workflows/publish.yml", Lang: "yaml",
-			Code: GitHubTrigger + "permissions:\n  id-token: write\n  contents: read\n\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n" +
-				"      - uses: actions/checkout@v7\n      - name: Publish to " + repo + "\n        run: |\n" +
-				"          OIDC=$(printf 'header = \"Authorization: Bearer %s\"\\n' \"$ACTIONS_ID_TOKEN_REQUEST_TOKEN\" \\\n" +
-				"            | curl -fsS -K - \"$ACTIONS_ID_TOKEN_REQUEST_URL&audience=" + baseURL + "\" | jq -r .value)\n" +
-				"          echo \"::add-mask::$OIDC\"\n" +
-				indent(github, "          ")},
-		{Client: "jenkins", Purpose: SnippetPublish, Context: SnippetRepo, Via: ViaCI,
-			Title: "Jenkinsfile", Lang: "groovy",
-			Code: JenkinsPipeline(repo, "", jenkins),
-			Note: JenkinsNote(baseURL)},
-	}
+			"TOKEN=$(echo \"$SESSION\" | jq -r .token)\n" +
+			"ID=$(echo \"$SESSION\" | jq -r .id)\n" +
+			"close_session() { " + closeCmd + "; }\ntrap close_session EXIT\n" +
+			upload(repo, baseURL) + "\n"}
+	}}
 }
 
 // TokenPrompt reads a publish token into $TOKEN at a hidden prompt (bash and zsh), so the token
@@ -94,17 +137,7 @@ const ReadTokenConfig = `printf 'user = "YOUR_USERNAME:%s"\n' "$READ_TOKEN"`
 // HandSnippet returns the publish snippet for a person with a publish token: upload is a
 // TokenCurl command.
 func HandSnippet(upload string) Snippet {
-	return Snippet{Client: "curl", Purpose: SnippetPublish, Context: SnippetRepo, Via: ViaHand,
+	return Snippet{ID: "curl.publish", Tool: "curl", Purpose: SnippetPublish, Context: SnippetRepo, Via: ViaHand,
 		Title: "Upload with a publish token", Lang: "sh", Code: TokenPrompt + "   # Settings › Tokens › New publish token\n" + upload + "\n",
 		Note: "Or drop the files on the repository's Files view in the browser."}
-}
-
-func indent(s, prefix string) string {
-	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
-	for i, l := range lines {
-		if l != "" {
-			lines[i] = prefix + l
-		}
-	}
-	return strings.Join(lines, "\n") + "\n"
 }

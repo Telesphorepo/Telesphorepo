@@ -1,8 +1,10 @@
 package debian
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,11 +14,12 @@ import (
 	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
-	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/debian/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/repopath"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
+	"github.com/Telesphorepo/Telesphorepo/internal/route"
 )
 
 const debContentType = "application/vnd.debian.binary-package"
@@ -29,235 +32,261 @@ type uploadResult struct {
 	SHA256       string `json:"sha256"`
 }
 
-var errConflict = errors.New("conflict")
-
-// uploadError is a client error of an upload: the HTTP status and the message.
-type uploadError struct {
-	status int
-	msg    string
+// debMeta is the Meta of the write of a .deb: where it goes and its parsed control data.
+type debMeta struct {
+	dist, comp string
+	info       *debInfo
+	sp         *assets.Spooled
 }
 
-func (e *uploadError) Error() string { return e.msg }
-
-func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
-	repo, p, ok := h.auth.RepoGate(w, r, r.PathValue("repo"), name, auth.RepoPublish, false)
-	if !ok {
-		return
-	}
+func (h *Handler) upload(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	repo := c.Repo
 	dist, comp := r.PathValue("dist"), r.PathValue("component")
 	if !repos.NameRE.MatchString(dist) || !repos.NameRE.MatchString(comp) {
 		httpx.Error(w, http.StatusBadRequest, "invalid distribution or component name")
 		return
 	}
-	max := h.cfg().MaxUploadBytes
-	if r.ContentLength > max {
-		httpx.Error(w, http.StatusRequestEntityTooLarge, "upload too large")
-		return
-	}
-	sp, err := h.assets.Spool(http.MaxBytesReader(w, r.Body, max), max)
-	if err != nil {
-		var mbe *http.MaxBytesError
-		switch {
-		case errors.Is(err, assets.ErrTooLarge) || errors.As(err, &mbe):
-			httpx.Error(w, http.StatusRequestEntityTooLarge, "upload too large")
-		case errors.Is(err, io.ErrUnexpectedEOF):
-			httpx.Error(w, http.StatusBadRequest, "incomplete request body")
-		default:
-			h.log.Error("spool debian upload", "repo", repo.Name, "err", err)
-			httpx.Error(w, http.StatusInternalServerError, "internal error")
-		}
+	sp, ok := format.Kit{Assets: h.assets}.SpoolBody(w, r)
+	if !ok {
 		return
 	}
 	defer sp.Close()
-
-	res, created, err := h.ingest(r.Context(), repo, dist, comp, sp, format.ByOf(p))
-	var ue *uploadError
+	res, out, err := h.ingest(r.Context(), repo, dist, comp, sp, format.OriginOf(c.P, assets.SourcePut))
 	switch {
-	case errors.As(err, &ue):
-		httpx.Error(w, ue.status, ue.msg)
 	case err != nil:
-		h.internal(w, "debian upload", repo, err)
-	case created:
-		h.host.RecordUpload(r, p, repo, res.Filename, sp.Size, sp.SHA256)
-		httpx.WriteJSON(w, http.StatusCreated, res)
+		route.Fail(w, r, err)
+	case res.Status != assets.Unchanged:
+		httpx.WriteJSON(w, http.StatusCreated, out)
 	default:
-		httpx.WriteJSON(w, http.StatusOK, res)
+		httpx.WriteJSON(w, http.StatusOK, out)
 	}
 }
 
-// ingest adds the spooled .deb to dist/comp of repo: it parses and validates the package,
-// stores the pool file, records the asset, the deb_packages row and the dirty units in one
-// transaction, and wakes the indexer. created is false when the same package version is
-// already present with the same bytes. A client error is an *uploadError; any other error is
-// internal. Uploads and imports share it.
-func (h *Handler) ingest(ctx context.Context, repo *repos.Repo, dist, comp string, sp *assets.Spooled, by assets.By) (res uploadResult, created bool, err error) {
-	info, err := parseDeb(sp.File)
+// readerAt returns the content of sp for the .deb parser.
+func readerAt(sp *assets.Spooled) io.ReaderAt {
+	if sp.File != nil {
+		return sp.File
+	}
+	return bytes.NewReader(sp.Data)
+}
+
+// ingest adds the .deb of sp to dist/comp of repo: it parses and checks the package, then
+// commits its pool file with the package identity as an extra lock. Under the locks, admit
+// refuses a package version that exists with other bytes and a pool file that holds other
+// bytes; onCommitted writes the deb_packages row and marks the units for a rebuild in the
+// commit's transaction. The result is unchanged when the same package version is present with
+// the same bytes. A client error is an *assets.Refusal. Uploads, imports and the demo data share
+// it.
+func (h *Handler) ingest(ctx context.Context, repo *repos.Repo, dist, comp string, sp *assets.Spooled, o assets.Origin) (*assets.Result, uploadResult, error) {
+	var out uploadResult
+	info, err := parseDeb(readerAt(sp))
 	if err != nil {
 		var bad badDeb
 		if errors.As(err, &bad) {
-			return res, false, &uploadError{http.StatusBadRequest, bad.Error()}
+			return nil, out, assets.Refuse(http.StatusBadRequest, "%s", bad.Error())
 		}
-		return res, false, fmt.Errorf("parse package: %w", err)
+		return nil, out, fmt.Errorf("parse package: %w", err)
 	}
-	archs := architectures(repo)
-	if info.Architecture != "all" && !slices.Contains(archs, info.Architecture) {
-		return res, false, &uploadError{http.StatusBadRequest, "architecture " + info.Architecture + " is not configured for this repository"}
+	if info.Architecture != "all" && !slices.Contains(architectures(repo), info.Architecture) {
+		return nil, out, assets.Refuse(http.StatusBadRequest, "architecture %s is not configured for this repository", info.Architecture)
 	}
-	dirtyArchs := []string{info.Architecture}
-	if info.Architecture == "all" {
-		dirtyArchs = archs
-	}
-
 	pool := info.poolPath(comp)
-	if !validKey(pool) {
-		return res, false, &uploadError{http.StatusBadRequest, "package name, source or version too long"}
+	p, err := repopath.Parse(pool)
+	if err != nil || !validKey(pool) {
+		return nil, out, assets.Refuse(http.StatusBadRequest, "package name, source or version too long")
 	}
-	res = uploadResult{info.Package, info.Version, info.Architecture, pool, sp.SHA256}
+	out = uploadResult{info.Package, info.Version, info.Architecture, pool, sp.SHA256}
+	id := "deb:" + dist + "/" + comp + "/" + info.Package + "/" + info.Version + "/" + info.Architecture
+	res, err := h.assets.Commit(ctx, assets.Write{Repo: repo, Path: p, Body: assets.Body{Spool: sp},
+		ContentType: debContentType, Kind: assets.KindArtifact, Origin: o, Locks: []string{id},
+		Meta: &debMeta{dist: dist, comp: comp, info: info, sp: sp}})
+	return res, out, err
+}
 
-	unlockID := h.assets.Lock(repo.ID, "deb:"+dist+"/"+comp+"/"+info.Package+"/"+info.Version+"/"+info.Architecture)
-	defer unlockID()
-	unlockPool := h.assets.Lock(repo.ID, pool)
-	defer unlockPool()
-
-	existing, err := h.q.GetPackageSHA256(ctx, dbq.GetPackageSHA256Params{RepoID: repo.ID, Distribution: dist,
-		Component: comp, Architecture: info.Architecture, Package: info.Package, Version: info.Version})
+// admit decides the write of a pool file (format.Spec Admit). A .deb of an upload keeps a
+// package version that exists with the same bytes (unchanged), and refuses one with other bytes
+// or a pool file that holds other bytes (409). A pool file that holds the same bytes is stored
+// again, so the package goes into another distribution. A write without a parsed .deb comes only
+// from the rebuild or a proxy fetch: it keeps the same bytes and replaces other ones. Every other
+// write without a parsed .deb, such as a core upload session, is refused (400).
+func (h *Handler) admit(ctx context.Context, w *assets.Write, existing *assets.Asset) (assets.Decision, error) {
+	m, ok := w.Meta.(*debMeta)
+	if !ok {
+		if w.Origin.Source != assets.SourceGenerated && w.Origin.Source != assets.SourceProxy {
+			return 0, assets.Refuse(http.StatusBadRequest, "Debian files are uploaded through /debian/{repo}/upload/{dist}/{component}")
+		}
+		if existing != nil && existing.SHA256 == w.Body.Digest() {
+			return assets.Keep, nil
+		}
+		return assets.Store, nil
+	}
+	sum, err := h.q.GetPackageSHA256(ctx, dbq.GetPackageSHA256Params{RepoID: w.Repo.ID, Distribution: m.dist,
+		Component: m.comp, Architecture: m.info.Architecture, Package: m.info.Package, Version: m.info.Version})
 	switch {
-	case err == nil && existing == sp.SHA256:
-		return res, false, nil
+	case err == nil && sum == w.Body.Digest():
+		return assets.Keep, nil
 	case err == nil:
-		return res, false, &uploadError{http.StatusConflict, "package version already exists with different content"}
+		return 0, assets.Refuse(http.StatusConflict, "package version already exists with different content")
 	case !errors.Is(err, sql.ErrNoRows):
-		return res, false, fmt.Errorf("look up deb package: %w", err)
+		return 0, fmt.Errorf("look up deb package: %w", err)
 	}
-
-	if err := h.storePool(ctx, repo, pool, sp); err != nil {
-		if errors.Is(err, errConflict) {
-			return res, false, &uploadError{http.StatusConflict, "pool file " + pool + " already exists with different content"}
-		}
-		return res, false, fmt.Errorf("store deb blob: %w", err)
+	if existing != nil && existing.SHA256 != w.Body.Digest() {
+		return 0, assets.Refuse(http.StatusConflict, "pool file %s already exists with different content", w.Path)
 	}
+	return assets.Store, nil
+}
 
-	err = h.db.Tx(ctx, func(tx *sql.Tx) error {
-		a := &assets.Asset{RepoID: repo.ID, Path: pool, Size: sp.Size, SHA256: sp.SHA256,
-			ContentType: debContentType, Kind: assets.KindArtifact, UploadedBy: by.User, PublishSessionID: by.Session,
-			CreatedAt: by.Created, UpdatedAt: by.Updated}
-		if _, err := assets.UpsertTx(ctx, tx, a); err != nil {
-			return err
-		}
-		q := dbq.New(tx)
-		if err := q.InsertPackage(ctx, dbq.InsertPackageParams{RepoID: repo.ID, Distribution: dist, Component: comp,
-			Architecture: info.Architecture, Package: info.Package, Version: info.Version, AssetID: a.ID,
-			Filename: pool, Size: sp.Size, Md5: sp.MD5, Sha1: sp.SHA1, Sha256: sp.SHA256,
-			Control: info.Control, CreatedAt: time.Now().Unix()}); err != nil {
-			return err
-		}
-		mark := h.tick()
-		for _, arch := range dirtyArchs {
-			if err := q.MarkDirty(ctx, dbq.MarkDirtyParams{RepoID: repo.ID, Distribution: dist, Component: comp,
-				Architecture: arch, MarkedAt: mark}); err != nil {
-				return err
-			}
-		}
+// onCommitted writes the package of a stored .deb and marks its units for a rebuild, in the
+// transaction of the write (format.Spec OnCommitted). An arch:all package marks every
+// configured architecture.
+func (h *Handler) onCommitted(ctx context.Context, tx *sql.Tx, w *assets.Write, a *assets.Asset, _ *assets.Asset) error {
+	m, ok := w.Meta.(*debMeta)
+	if !ok {
 		return nil
-	})
-	if err != nil {
-		return res, false, fmt.Errorf("record deb package: %w", err)
 	}
-	h.idx.notify(distKey{repo.ID, dist})
-	return res, true, nil
+	info, sp := m.info, m.sp
+	if err := dbq.New(tx).InsertPackage(ctx, dbq.InsertPackageParams{RepoID: w.Repo.ID, Distribution: m.dist, Component: m.comp,
+		Architecture: info.Architecture, Package: info.Package, Version: info.Version, AssetID: a.ID,
+		Filename: a.Path, Size: sp.Size, Md5: sp.MD5, Sha1: sp.SHA1, Sha256: sp.SHA256,
+		Control: info.Control, CreatedAt: time.Now().Unix()}); err != nil {
+		return err
+	}
+	archs := []string{info.Architecture}
+	if info.Architecture == "all" {
+		archs = architectures(w.Repo)
+	}
+	for _, arch := range archs {
+		if err := h.rebuilds.MarkTx(ctx, tx, w.Repo.ID, m.dist, unit(m.comp, arch)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// Upload implements format.ManualUploader: each file is a .deb that goes through the upload
-// pipeline into the fields "distribution" and "component" (default "main").
-func (h *Handler) Upload(ctx context.Context, repo *repos.Repo, files []format.UploadFile, fields map[string]string, by assets.By) ([]format.Uploaded, error) {
-	dist, comp := strings.TrimSpace(fields["distribution"]), strings.TrimSpace(fields["component"])
-	if comp == "" {
+// headBytes is how much of a .deb a plan reads. The control member comes right after the ar
+// header; a package whose control member lies past these bytes is checked when the whole file
+// arrives.
+const headBytes = 1 << 20
+
+// uploadFields are the fields of a web UI upload: the distribution and the component that the
+// packages go into.
+var uploadFields = []format.Field{
+	{Key: "distribution", Label: "Distribution", Type: format.FieldString, Required: true, Placeholder: "trixie",
+		Help: "The distribution that apt names, e.g. trixie."},
+	{Key: "component", Label: "Component", Type: format.FieldString, Required: true, Placeholder: "main",
+		Default: json.RawMessage(`"main"`)},
+}
+
+func (h *Handler) uploadSpec() *format.UploadSpec {
+	return &format.UploadSpec{
+		Single: true, Folder: true,
+		Accept:  []string{".deb"},
+		Hint:    "One or more .deb packages, or a folder of them.",
+		Keep:    []string{"**/*.deb"},
+		One:     "package",
+		Many:    "packages",
+		Note:    "The server reads each package's name, version and architecture, stores it under pool/, and rebuilds the apt indexes of the distribution.",
+		Ignored: "Only .deb packages are uploaded.",
+		Empty:   "The upload has no .deb package.",
+		Fields:  uploadFields,
+		Reads:   []format.ReadRule{{Glob: "**/*.deb", MaxBytes: headBytes}},
+		Plan:    h.Plan,
+		Store:   h.Store,
+	}
+}
+
+// Plan plans a web UI upload: one item per .deb file, titled "<package> <version>
+// (<architecture>)", that goes to its pool path in the fields "distribution" and "component". The
+// open folder (dists/<distribution>/ or pool/<component>/) or the repo config gives their first
+// values. A control file that does not parse, or an architecture the repo does not configure, is
+// a problem. A package whose control member lies past the bytes the plan reads is checked at the
+// upload. Other files are left out.
+func (h *Handler) Plan(ctx context.Context, repo *repos.Repo, in format.PlanInput) (*format.Plan, error) {
+	if err := format.CheckFields(in.Fields, uploadFields); err != nil {
+		return nil, err
+	}
+	seg := strings.Split(in.Folder, "/")
+	dist, okDist := in.Fields["distribution"]
+	if !okDist {
+		dist = importDistributionOf(repo)
+		if seg[0] == "dists" && len(seg) > 1 && seg[1] != "" {
+			dist = seg[1]
+		}
+	}
+	comp, okComp := in.Fields["component"]
+	if !okComp {
 		comp = "main"
-	}
-	if !repos.NameRE.MatchString(dist) || !repos.NameRE.MatchString(comp) {
-		return nil, format.BadUpload("give a valid distribution (e.g. trixie) and component (e.g. main)")
-	}
-	for k := range fields {
-		if k != "distribution" && k != "component" {
-			return nil, format.BadUpload("unknown field %q; Debian uploads take distribution and component", k)
+		if seg[0] == "pool" && len(seg) > 1 && seg[1] != "" {
+			comp = seg[1]
 		}
 	}
-	if format.InFolder(files) {
-		// A dropped folder: the .deb files in it, as Scan lists them.
-		files = slices.DeleteFunc(slices.Clone(files), func(f format.UploadFile) bool { return !strings.HasSuffix(f.Name, ".deb") })
-		if len(files) == 0 {
-			return nil, format.BadUpload("the folder has no .deb file")
-		}
+	dist, comp = strings.TrimSpace(dist), strings.TrimSpace(comp)
+	plan := &format.Plan{Fields: []format.PlanField{{Field: uploadFields[0], Value: dist}, {Field: uploadFields[1], Value: comp}}}
+	if !repos.NameRE.MatchString(dist) {
+		plan.Fields[0].Problem = "Enter a distribution, e.g. trixie."
 	}
-	for _, f := range files {
-		if !strings.HasSuffix(f.Name, ".deb") {
-			return nil, format.BadUpload("%s is not a .deb file", f.Name)
-		}
+	if !repos.NameRE.MatchString(comp) {
+		plan.Fields[1].Problem = "Enter a component, e.g. main."
 	}
-	out := make([]format.Uploaded, 0, len(files))
-	for _, f := range files {
-		res, created, err := h.ingest(ctx, repo, dist, comp, f.Spool, by)
-		var ue *uploadError
-		if errors.As(err, &ue) {
-			return out, &format.UploadError{Status: ue.status, Message: f.Name + ": " + ue.msg}
-		}
-		if err != nil {
-			return out, err
-		}
-		st := format.UploadCreated
-		if !created {
-			st = format.UploadUnchanged
-		}
-		out = append(out, format.Uploaded{Path: res.Filename, Status: st, Size: f.Spool.Size, SHA256: f.Spool.SHA256})
-	}
-	return out, nil
-}
-
-// Scan implements format.ManualUploader: one Found of kind "debian" per .deb file, titled
-// "<package> <version> (<architecture>)". A control file that does not parse, or an
-// architecture the repo does not configure, is a problem. Other files are ignored.
-func (h *Handler) Scan(ctx context.Context, repo *repos.Repo, files []format.UploadFile) ([]format.Found, error) {
 	archs := architectures(repo)
-	var out []format.Found
-	for _, f := range files {
-		if !strings.HasSuffix(f.Name, ".deb") {
+	for _, f := range in.Files {
+		if !strings.HasSuffix(f.Name(), ".deb") {
+			plan.Ignored = append(plan.Ignored, f.Path)
 			continue
 		}
-		fd := format.Found{Kind: "debian", Title: f.Path, Files: []string{f.Path}}
-		info, err := parseDeb(f.Spool.File)
+		item := format.PlanItem{Title: f.Path, Files: []format.PlanTarget{{Path: f.Path}}}
+		info, err := parseDeb(bytes.NewReader(f.Head))
 		var bad badDeb
 		switch {
+		case errors.As(err, &bad) && f.Truncated():
+			// The control member is past the bytes read: the upload parses the whole file.
 		case errors.As(err, &bad):
-			fd.Problems = append(fd.Problems, bad.Error())
+			item.Problems = append(item.Problems, bad.Error())
 		case err != nil:
 			return nil, fmt.Errorf("parse %s: %w", f.Path, err)
 		default:
-			fd.Title = info.Package + " " + info.Version + " (" + info.Architecture + ")"
+			item.Title = info.Package + " " + info.Version + " (" + info.Architecture + ")"
+			item.Facts = map[string]string{"package": info.Package, "version": info.Version, "architecture": info.Architecture}
 			if info.Architecture != "all" && !slices.Contains(archs, info.Architecture) {
-				fd.Problems = append(fd.Problems, "architecture "+info.Architecture+" is not configured for this repository")
+				item.Problems = append(item.Problems, "architecture "+info.Architecture+" is not configured for this repository")
+			}
+			if repos.NameRE.MatchString(comp) {
+				item.Files[0].Target = info.poolPath(comp)
 			}
 		}
-		out = append(out, fd)
+		plan.Items = append(plan.Items, item)
+	}
+	return plan, nil
+}
+
+// Store adds each package of a plan to the distribution and component of its fields (ingest).
+func (h *Handler) Store(ctx context.Context, repo *repos.Repo, plan *format.Plan, files map[string]*assets.Spooled, o assets.Origin) ([]*assets.Result, error) {
+	var dist, comp string
+	for _, f := range plan.Fields {
+		switch f.Key {
+		case "distribution":
+			dist = f.Value
+		case "component":
+			comp = f.Value
+		}
+	}
+	var out []*assets.Result
+	for _, it := range plan.Items {
+		for _, t := range it.Files {
+			sp := files[t.Path]
+			if sp == nil {
+				return out, format.BadUpload("the upload has no file %s", t.Path)
+			}
+			res, _, err := h.ingest(ctx, repo, dist, comp, sp, o)
+			var ref *assets.Refusal
+			if errors.As(err, &ref) {
+				return out, assets.Refuse(ref.Status, "%s: %s", t.Path, ref.Message)
+			}
+			if err != nil {
+				return out, err
+			}
+			out = append(out, res)
+		}
 	}
 	return out, nil
-}
-
-// storePool writes the blob unless the pool key already holds identical content (so one
-// .deb can be published in several dists); different content is errConflict.
-func (h *Handler) storePool(ctx context.Context, repo *repos.Repo, pool string, sp *assets.Spooled) error {
-	a, err := h.assets.Get(ctx, repo.ID, pool)
-	switch {
-	case err == nil && a.SHA256 == sp.SHA256:
-		return nil
-	case err == nil:
-		return errConflict
-	case !errors.Is(err, assets.ErrNotFound):
-		return err
-	}
-	return h.assets.PutBlob(ctx, repo.Name, pool, sp, debContentType)
-}
-
-func (h *Handler) internal(w http.ResponseWriter, msg string, repo *repos.Repo, err error) {
-	h.log.Error(msg, "repo", repo.Name, "err", err)
-	httpx.Error(w, http.StatusInternalServerError, "internal error")
 }

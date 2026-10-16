@@ -157,7 +157,7 @@ func TestProxy(t *testing.T) {
 		remote.CreateRepo(t, up, "maven", true, nil)
 		uploader, uploaderPass := RandName("uploader"), randHex(12)
 		remote.CreateUser(t, uploader, uploaderPass)
-		remote.SetPerms(t, up, uploader, "download", "publish")
+		remote.SetPerms(t, up, uploader, "repo.download", "repo.publish")
 
 		group := "com.example.proxy" + randHex(4)
 		groupPath := strings.ReplaceAll(group, ".", "/")
@@ -308,7 +308,7 @@ func TestProxy(t *testing.T) {
 		// Remote credentials: a private remote resolves with them and answers 502 without them.
 		secret := RandName("secret")
 		remote.CreateRepo(t, secret, "maven", false, nil)
-		remote.SetPerms(t, secret, uploader, "download", "publish")
+		remote.SetPerms(t, secret, uploader, "repo.download", "repo.publish")
 		file := "com/e2e/secret/1.0/secret-1.0.txt"
 		if resp, b := rawPut(t, remote, "/maven/"+secret+"/"+file, []byte("secret file"), remote.PublishAuth(t, uploader, secret)); resp.StatusCode/100 != 2 {
 			t.Fatalf("PUT %s on the remote: status %d: %s", file, resp.StatusCode, b)
@@ -341,7 +341,7 @@ func TestProxy(t *testing.T) {
 		// Debian: apt installs through the proxy, with the remote archive's key.
 		upDeb := RandName("upstream-deb")
 		remote.CreateRepo(t, upDeb, "debian", true, nil)
-		remote.SetPerms(t, upDeb, uploader, "download", "publish")
+		remote.SetPerms(t, upDeb, uploader, "repo.download", "repo.publish")
 		debAuth := remote.PublishAuth(t, uploader, upDeb)
 		for _, deb := range [][]byte{debs.hello1, debs.native} {
 			req := remote.NewRequest(t, http.MethodPut, "/debian/"+upDeb+"/upload/stable/main", strings.NewReader(string(deb)))

@@ -1,26 +1,27 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"mime"
 	"mime/multipart"
 	"net/http"
-	"path"
 	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
-	"github.com/Telesphorepo/Telesphorepo/internal/audit"
-	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/files"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/repopath"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
+	"github.com/Telesphorepo/Telesphorepo/internal/route"
+	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 )
 
-// Browse, delete and upload repo files, and the audit log (spec §13).
+// Browse, delete and upload repo files.
 
 const (
 	maxUploadFiles  = 500  // files per manual upload or scan
@@ -30,189 +31,406 @@ const (
 
 // tree lists the direct children of a folder: ?path=<folder>&after=<cursor>&limit= ->
 // {items: [Node], next}. A folder's name in next ends in "/".
-func (a *API) tree(w http.ResponseWriter, r *http.Request) {
-	repo, _, ok := a.auth.RepoGate(w, r, r.PathValue("name"), "", auth.RepoDownload, true)
-	if !ok {
-		return
-	}
+func (a *API) tree(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	repo := c.Repo
 	q := r.URL.Query()
-	dir, err := files.Folder(q.Get("path"))
+	dir, err := repopath.Folder(q.Get("path"))
 	if err != nil {
 		httpx.Error(w, http.StatusBadRequest, "invalid path")
 		return
 	}
-	items, next, err := a.files.Tree(r.Context(), repo, dir, q.Get("after"), httpx.Limit(r))
+	items, next, err := a.files.Tree(r.Context(), repo, string(dir), q.Get("after"), httpx.Limit(r))
 	if errors.Is(err, files.ErrInvalid) {
 		httpx.Error(w, http.StatusBadRequest, "invalid cursor")
 		return
 	}
 	if err != nil {
-		fail(w, r, err)
+		route.Fail(w, r, err)
 		return
 	}
 	if items == nil {
 		items = []files.Node{}
 	}
-	httpx.WriteJSON(w, http.StatusOK, list[files.Node]{items, cursor(next)})
+	httpx.WriteJSON(w, http.StatusOK, route.Page[files.Node]{Items: items, Next: route.Cursor(next)})
 }
 
-// deleteFiles deletes files (paths) and folders (prefixes) of the repo for a person who holds
-// delete there, with a UI session or a publish session for the repo: {paths, prefixes} -> 200
-// {deleted: <file count>}. The two lists hold 1 to 1000 items together. A bad path or prefix answers 400 and deletes nothing. The
-// paths go in one transaction, then each folder in batches. A file that is gone already counts
-// as done. One audit event goes to each file and each folder that lost files.
-func (a *API) deleteFiles(w http.ResponseWriter, r *http.Request) {
-	repo, p, ok := a.auth.DeleteGate(w, r, r.PathValue("name"))
-	if !ok {
-		return
-	}
+// deleteFiles deletes files (paths) and folders (prefixes) of the repo through the delete
+// pipeline, for a person who holds delete there, with a UI session or a publish session for the
+// repo: {paths, prefixes} -> 200 {deleted: <file count>}. The two lists hold 1 to 1000 items
+// together. A bad path or prefix answers 400 and deletes nothing. A file that is gone already
+// counts as done. One audit event goes to each file and each folder that lost files.
+func (a *API) deleteFiles(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	repo := c.Repo
 	var in struct {
 		Paths    []string `json:"paths"`
 		Prefixes []string `json:"prefixes"`
 	}
-	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
+	if !a.kit.Decode(w, r, &in) {
 		return
 	}
 	if n := len(in.Paths) + len(in.Prefixes); n == 0 || n > maxBulk {
 		httpx.Error(w, http.StatusBadRequest, "paths and prefixes must hold 1 to "+strconv.Itoa(maxBulk)+" items together")
 		return
 	}
+	rm := assets.Removal{Repo: repo, Origin: format.OriginOf(c.P, assets.SourceUI)}
 	for _, f := range in.Paths {
-		if !files.ValidPath(f) {
+		p, err := repopath.Parse(f)
+		if err != nil {
 			httpx.Error(w, http.StatusBadRequest, "invalid path "+strconv.Quote(clipName(f)))
 			return
 		}
+		rm.Paths = append(rm.Paths, p)
 	}
-	dirs := make([]string, 0, len(in.Prefixes))
 	for _, prefix := range in.Prefixes {
-		dir, err := files.Folder(prefix)
+		dir, err := repopath.Folder(prefix)
 		if err != nil || dir == "" {
 			httpx.Error(w, http.StatusBadRequest, "invalid prefix "+strconv.Quote(clipName(prefix)))
 			return
 		}
-		if !slices.Contains(dirs, dir) {
-			dirs = append(dirs, dir)
+		if !slices.Contains(rm.Prefixes, dir) {
+			rm.Prefixes = append(rm.Prefixes, dir)
 		}
 	}
-	n := 0
-	if len(in.Paths) > 0 {
-		deleted, err := a.files.DeletePaths(r.Context(), repo, in.Paths)
-		if err != nil {
-			fail(w, r, err)
-			return
-		}
-		for _, f := range deleted {
-			a.record(r, p, audit.Delete, repo, f, map[string]any{"count": 1})
-		}
-		n += len(deleted)
-	}
-	for _, dir := range dirs {
-		c, err := a.files.DeletePrefix(r.Context(), repo, dir)
-		if c > 0 {
-			a.record(r, p, audit.Delete, repo, dir, map[string]any{"count": c})
-		}
-		n += c
-		if err != nil {
-			fail(w, r, err)
-			return
-		}
+	n, err := a.assets.Remove(r.Context(), rm)
+	if err != nil {
+		route.Fail(w, r, err)
+		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]int{"deleted": n})
 }
 
-// upload takes a multipart upload of files with a publish session for the repo and hands it to
-// the format's ManualUploader: 201 {files: [Uploaded]}. The files together may not exceed
-// max_upload_size.
-func (a *API) upload(w http.ResponseWriter, r *http.Request) {
-	repo, p, up, ups, fields, ok := a.readUpload(w, r)
-	defer closeUploads(ups)
-	if !ok {
-		return
-	}
-	res, err := up.Upload(r.Context(), repo, ups, fields, format.ByOf(p))
-	a.recordUploads(r, p, repo, res)
-	var ue *format.UploadError
-	if errors.As(err, &ue) {
-		httpx.Error(w, ue.Status, ue.Message)
-		return
-	}
-	if err != nil {
-		fail(w, r, err)
-		return
-	}
-	httpx.WriteJSON(w, http.StatusCreated, map[string][]format.Uploaded{"files": res})
+// maxDeleteScan is the most files a delete plan walks under the folders of a delete.
+const maxDeleteScan = 100_000
+
+// deleteNote is one note of a delete plan: a DeleteNote of the format with the count of the files
+// of the delete that its glob matches.
+type deleteNote struct {
+	Text  string `json:"text"`
+	Count int    `json:"count"`
+	One   string `json:"one"`
+	Many  string `json:"many"`
 }
 
-// scanUpload looks at the files of a dropped folder with the format's ManualUploader and stores
-// nothing: 200 {found: [Found], ignored: [path]}. It takes the same credential and body as
-// upload, so the client sends the confirmed files to upload afterwards.
-func (a *API) scanUpload(w http.ResponseWriter, r *http.Request) {
-	repo, _, up, ups, _, ok := a.readUpload(w, r)
-	defer closeUploads(ups)
-	if !ok {
+// deletePlan says what a delete of files (paths) and folders (prefixes) removes, and deletes
+// nothing: {paths, prefixes} -> 200 {files, more, notes: [{text, count, one, many}]}. files counts
+// the files that exist; more is true when the folders hold more files than the walk reads. Each
+// note is a DeleteNote of the format with the count of the files its glob matches (notes with no
+// match are left out). It walks the assets of each folder by the (repo_id, path) index.
+func (a *API) deletePlan(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	repo := c.Repo
+	var in struct {
+		Paths    []string `json:"paths"`
+		Prefixes []string `json:"prefixes"`
+	}
+	if !a.kit.Decode(w, r, &in) {
 		return
 	}
-	found, err := up.Scan(r.Context(), repo, ups)
-	var ue *format.UploadError
-	if errors.As(err, &ue) {
-		httpx.Error(w, ue.Status, ue.Message)
+	if n := len(in.Paths) + len(in.Prefixes); n == 0 || n > maxBulk {
+		httpx.Error(w, http.StatusBadRequest, "paths and prefixes must hold 1 to "+strconv.Itoa(maxBulk)+" items together")
 		return
 	}
-	if err != nil {
-		fail(w, r, err)
-		return
+	var notes []format.DeleteNote
+	if f := a.formats.Get(repo.Format); f != nil {
+		notes = f.UI.DeleteNotes
 	}
-	taken := map[string]bool{}
-	if found == nil {
-		found = []format.Found{}
+	counts := make([]int, len(notes))
+	files, scanned, more := 0, 0, false
+	seen := map[string]bool{}
+	count := func(p string) {
+		if seen[p] {
+			return
+		}
+		seen[p] = true
+		files++
+		for i, n := range notes {
+			if format.Glob(n.Match, p) {
+				counts[i]++
+			}
+		}
 	}
-	for i := range found {
-		if found[i].Files == nil {
-			found[i].Files = []string{}
+	for _, raw := range in.Paths {
+		p, err := repopath.Parse(raw)
+		if err != nil {
+			httpx.Error(w, http.StatusBadRequest, "invalid path "+strconv.Quote(clipName(raw)))
+			return
 		}
-		if found[i].Problems == nil {
-			found[i].Problems = []string{}
+		if _, err := a.assets.Get(r.Context(), repo.ID, string(p)); errors.Is(err, assets.ErrNotFound) {
+			continue
+		} else if err != nil {
+			route.Fail(w, r, err)
+			return
 		}
-		for _, f := range found[i].Files {
-			taken[f] = true
+		count(string(p))
+	}
+	for _, raw := range in.Prefixes {
+		dir, err := repopath.Folder(raw)
+		if err != nil || dir == "" {
+			httpx.Error(w, http.StatusBadRequest, "invalid prefix "+strconv.Quote(clipName(raw)))
+			return
+		}
+		after := ""
+		for !more {
+			items, next, err := a.assets.List(r.Context(), repo.ID, string(dir), after, 1000)
+			if err != nil {
+				route.Fail(w, r, err)
+				return
+			}
+			for _, it := range items {
+				count(it.Path)
+			}
+			scanned += len(items)
+			if next == "" {
+				break
+			}
+			if scanned >= maxDeleteScan {
+				more = true
+			}
+			after = next
 		}
 	}
-	ignored := []string{}
-	for _, f := range ups {
-		if !taken[f.Path] {
-			ignored = append(ignored, f.Path)
+	out := []deleteNote{}
+	for i, n := range notes {
+		if counts[i] > 0 {
+			out = append(out, deleteNote{Text: n.Text, Count: counts[i], One: n.One, Many: n.Many})
 		}
 	}
 	httpx.WriteJSON(w, http.StatusOK, struct {
-		Found   []format.Found `json:"found"`
-		Ignored []string       `json:"ignored"`
-	}{found, ignored})
+		Files int          `json:"files"`
+		More  bool         `json:"more"`
+		Notes []deleteNote `json:"notes"`
+	}{files, more, out})
 }
 
-// readUpload authorizes a manual upload or scan of repo {name} (a publish session of the repo)
-// and reads its multipart body: text fields first, then files. A file's relative path is its
-// filename as sent (the browser's path inside the dropped folder); every path must be a valid
-// repo path and appear once. The files together may not exceed max_upload_size. On failure it
-// has answered and returns ok=false; the caller closes the files either way.
-func (a *API) readUpload(w http.ResponseWriter, r *http.Request) (*repos.Repo, *auth.Principal, format.ManualUploader, []format.UploadFile, map[string]string, bool) {
-	repo, p, ok := a.auth.RepoGate(w, r, r.PathValue("name"), "", auth.RepoPublish, true)
-	if !ok {
-		return nil, nil, nil, nil, nil, false
-	}
-	up, ok := format.Get(repo.Format).(format.ManualUploader)
-	if !ok {
+// uploadSpec returns the upload spec of the repo's format, or answers 400.
+func (a *API) uploadSpec(w http.ResponseWriter, repo *repos.Repo) (*format.UploadSpec, bool) {
+	f := a.formats.Get(repo.Format)
+	if f == nil || f.Upload == nil {
 		httpx.Error(w, http.StatusBadRequest, "repos of format "+repo.Format+" take no uploads from the web UI")
-		return nil, nil, nil, nil, nil, false
+		return nil, false
 	}
-	limit := a.cfg().MaxUploadBytes
+	return f.Upload, true
+}
+
+// readRule returns the read rule of up whose glob matches path, or nil.
+func readRule(up *format.UploadSpec, path string) *format.ReadRule {
+	for i := range up.Reads {
+		if format.Glob(up.Reads[i].Glob, path) {
+			return &up.Reads[i]
+		}
+	}
+	return nil
+}
+
+// planOut is the answer of a plan: the plan, its JSON lists never null.
+func planOut(p *format.Plan) *format.Plan {
+	p.Normalize()
+	return p
+}
+
+// uploadPlan works out what an upload of files would store, with the format's Upload.Plan, and
+// stores nothing: 200 Plan. The multipart body holds the part "plan" first, a JSON object
+// {fields, folder, files: [{path, size}]} (paths relative to the drop, at most 500), then one part
+// per file whose path matches a read rule of the format (filename: its path), holding at most
+// the rule's max_bytes from the start of the file. It takes the credential of the upload.
+func (a *API) uploadPlan(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	repo := c.Repo
+	up, ok := a.uploadSpec(w, repo)
+	if !ok {
+		return
+	}
+	limit := settings.MaxUploadSize.Get(a.settings.Current())
+	r.Body = http.MaxBytesReader(w, r.Body, limit+2<<20+int64(maxUploadFiles)*1024)
+	mr, err := r.MultipartReader()
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "send multipart/form-data")
+		return
+	}
+	part, err := mr.NextPart()
+	if err != nil || part.FormName() != "plan" {
+		httpx.Error(w, http.StatusBadRequest, `the first part must be "plan"`)
+		return
+	}
+	var req struct {
+		Fields map[string]string `json:"fields"`
+		Folder string            `json:"folder"`
+		Files  []struct {
+			Path string `json:"path"`
+			Size int64  `json:"size"`
+		} `json:"files"`
+	}
+	if err := json.NewDecoder(io.LimitReader(part, 2<<20)).Decode(&req); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "the plan part is not valid JSON: "+err.Error())
+		return
+	}
+	if len(req.Files) == 0 || len(req.Files) > maxUploadFiles {
+		httpx.Error(w, http.StatusBadRequest, "a plan takes 1 to "+strconv.Itoa(maxUploadFiles)+" files")
+		return
+	}
+	if len(req.Fields) > maxUploadFields {
+		httpx.Error(w, http.StatusBadRequest, "too many form fields")
+		return
+	}
+	for k, v := range req.Fields {
+		if len(v) > maxFieldBytes {
+			httpx.Error(w, http.StatusBadRequest, "form field "+k+" is too long")
+			return
+		}
+	}
+	folder, err := repopath.Folder(req.Folder)
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid folder")
+		return
+	}
+	in := format.PlanInput{Fields: req.Fields, Folder: string(folder)}
+	if in.Fields == nil {
+		in.Fields = map[string]string{}
+	}
+	index := map[string]int{}
+	for _, f := range req.Files {
+		p := strings.TrimLeft(strings.ReplaceAll(f.Path, `\`, "/"), "/")
+		if _, err := repopath.Parse(p); err != nil {
+			httpx.Error(w, http.StatusBadRequest, "invalid file name "+strconv.Quote(clipName(f.Path)))
+			return
+		}
+		if _, dup := index[p]; dup {
+			httpx.Error(w, http.StatusBadRequest, p+" is in the upload twice")
+			return
+		}
+		if f.Size < 0 {
+			httpx.Error(w, http.StatusBadRequest, "invalid size of "+p)
+			return
+		}
+		index[p] = len(in.Files)
+		in.Files = append(in.Files, format.PlanFile{Path: p, Size: f.Size})
+	}
+	var total int64
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			uploadReadFail(w, r, err)
+			return
+		}
+		rel, isFile := partPath(part)
+		i, known := index[rel]
+		rule := readRule(up, rel)
+		if !isFile || !known || rule == nil {
+			httpx.Error(w, http.StatusBadRequest, "a plan takes only the first bytes of the listed files that the format reads")
+			return
+		}
+		b, err := io.ReadAll(io.LimitReader(part, rule.MaxBytes+1))
+		if err != nil {
+			uploadReadFail(w, r, err)
+			return
+		}
+		if int64(len(b)) > rule.MaxBytes || int64(len(b)) > in.Files[i].Size {
+			httpx.Error(w, http.StatusBadRequest, "the part of "+rel+" is longer than the plan reads")
+			return
+		}
+		if total += int64(len(b)); total > limit {
+			httpx.Error(w, http.StatusRequestEntityTooLarge, "upload too large")
+			return
+		}
+		in.Files[i].Head = b
+	}
+	plan, err := up.Plan(r.Context(), repo, in)
+	if err != nil {
+		route.Fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, planOut(plan))
+}
+
+// upload takes a multipart upload of files with a publish session for the repo: the format's
+// fields first, then the files, each with its path relative to the drop as its filename. It runs
+// the format's Upload.Plan on the files (the first bytes of each file that a read rule matches),
+// refuses 400 when a field or an item has a problem or no item takes a file, then hands the
+// files of the items to Upload.Store, which commits them through the asset pipeline (source
+// "ui"): 201 {files: [Uploaded]}. The files together may not exceed max_upload_size.
+func (a *API) upload(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	repo := c.Repo
+	up, ok := a.uploadSpec(w, repo)
+	if !ok {
+		return
+	}
+	ups, fields, ok := a.readUpload(w, r)
+	defer closeUploads(ups)
+	if !ok {
+		return
+	}
+	in := format.PlanInput{Fields: fields}
+	for _, f := range ups {
+		pf := format.PlanFile{Path: f.path, Size: f.sp.Size}
+		if rule := readRule(up, f.path); rule != nil {
+			head, err := headOf(f.sp, rule.MaxBytes)
+			if err != nil {
+				route.Fail(w, r, err)
+				return
+			}
+			pf.Head = head
+		}
+		in.Files = append(in.Files, pf)
+	}
+	plan, err := up.Plan(r.Context(), repo, in)
+	if err != nil {
+		route.Fail(w, r, err)
+		return
+	}
+	if msg := plan.Blocked(); msg != "" {
+		httpx.Error(w, http.StatusBadRequest, msg)
+		return
+	}
+	if len(plan.Items) == 0 {
+		msg := up.Empty
+		if msg == "" {
+			msg = "the upload has no file to store"
+		}
+		httpx.Error(w, http.StatusBadRequest, msg)
+		return
+	}
+	files := map[string]*assets.Spooled{}
+	for _, f := range ups {
+		files[f.path] = f.sp
+	}
+	rs, err := up.Store(r.Context(), repo, plan, files, format.OriginOf(c.P, assets.SourceUI))
+	if err != nil {
+		route.Fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusCreated, map[string][]format.Uploaded{"files": format.UploadedOf(rs)})
+}
+
+// headOf returns the first max bytes of sp.
+func headOf(sp *assets.Spooled, max int64) ([]byte, error) {
+	rd, err := sp.Reader()
+	if err != nil {
+		return nil, err
+	}
+	return io.ReadAll(io.LimitReader(rd, max))
+}
+
+// uploadFile is one spooled file of an upload with its path relative to the drop.
+type uploadFile struct {
+	path string
+	sp   *assets.Spooled
+}
+
+// readUpload reads the multipart body of an upload: text fields first, then files. A file's
+// path is its filename as sent (the browser's path inside the dropped folder); every path must
+// be a valid repo path and appear once. The files together may not exceed max_upload_size. On
+// failure it has answered and returns ok=false; the caller closes the files either way.
+func (a *API) readUpload(w http.ResponseWriter, r *http.Request) ([]uploadFile, map[string]string, bool) {
+	limit := settings.MaxUploadSize.Get(a.settings.Current())
 	// The files plus the multipart framing.
 	r.Body = http.MaxBytesReader(w, r.Body, limit+1<<20+int64(maxUploadFiles)*1024)
 	mr, err := r.MultipartReader()
 	if err != nil {
 		httpx.Error(w, http.StatusBadRequest, "send multipart/form-data")
-		return nil, nil, nil, nil, nil, false
+		return nil, nil, false
 	}
-	var ups []format.UploadFile
+	var ups []uploadFile
 	fields := map[string]string{}
 	seen := map[string]bool{}
 	var total int64
@@ -223,52 +441,52 @@ func (a *API) readUpload(w http.ResponseWriter, r *http.Request) (*repos.Repo, *
 		}
 		if err != nil {
 			uploadReadFail(w, r, err)
-			return nil, nil, nil, ups, nil, false
+			return ups, nil, false
 		}
 		rel, isFile := partPath(part)
 		if !isFile {
 			if len(fields) >= maxUploadFields {
 				httpx.Error(w, http.StatusBadRequest, "too many form fields")
-				return nil, nil, nil, ups, nil, false
+				return ups, nil, false
 			}
 			b, err := io.ReadAll(io.LimitReader(part, maxFieldBytes+1))
 			if err != nil {
 				uploadReadFail(w, r, err)
-				return nil, nil, nil, ups, nil, false
+				return ups, nil, false
 			}
 			if len(b) > maxFieldBytes {
 				httpx.Error(w, http.StatusBadRequest, "form field "+part.FormName()+" is too long")
-				return nil, nil, nil, ups, nil, false
+				return ups, nil, false
 			}
 			fields[part.FormName()] = string(b)
 			continue
 		}
 		if len(ups) >= maxUploadFiles {
 			httpx.Error(w, http.StatusBadRequest, "upload at most "+strconv.Itoa(maxUploadFiles)+" files at a time")
-			return nil, nil, nil, ups, nil, false
+			return ups, nil, false
 		}
-		if !files.ValidPath(rel) {
+		if _, err := repopath.Parse(rel); err != nil {
 			httpx.Error(w, http.StatusBadRequest, "invalid file name "+strconv.Quote(clipName(rel)))
-			return nil, nil, nil, ups, nil, false
+			return ups, nil, false
 		}
 		if seen[rel] {
 			httpx.Error(w, http.StatusBadRequest, rel+" is in the upload twice")
-			return nil, nil, nil, ups, nil, false
+			return ups, nil, false
 		}
 		seen[rel] = true
 		sp, err := a.assets.Spool(part, limit-total)
 		if err != nil {
 			uploadReadFail(w, r, err)
-			return nil, nil, nil, ups, nil, false
+			return ups, nil, false
 		}
 		total += sp.Size
-		ups = append(ups, format.UploadFile{Name: path.Base(rel), Path: rel, Spool: sp})
+		ups = append(ups, uploadFile{path: rel, sp: sp})
 	}
 	if len(ups) == 0 {
 		httpx.Error(w, http.StatusBadRequest, "no files in the upload")
-		return nil, nil, nil, nil, nil, false
+		return nil, nil, false
 	}
-	return repo, p, up, ups, fields, true
+	return ups, fields, true
 }
 
 // partPath returns the relative path of a file part: the filename parameter as sent, with
@@ -294,19 +512,9 @@ func clipName(s string) string {
 	return s
 }
 
-func closeUploads(ups []format.UploadFile) {
+func closeUploads(ups []uploadFile) {
 	for _, f := range ups {
-		f.Spool.Close()
-	}
-}
-
-// recordUploads writes each file a manual upload stored to the audit log.
-func (a *API) recordUploads(r *http.Request, p *auth.Principal, repo *repos.Repo, res []format.Uploaded) {
-	for _, u := range res {
-		if u.Status == format.UploadUnchanged {
-			continue
-		}
-		a.record(r, p, audit.Upload, repo, u.Path, map[string]any{"size": u.Size, "sha256": u.SHA256, "manual": true})
+		f.sp.Close()
 	}
 }
 
@@ -319,47 +527,13 @@ func uploadReadFail(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, io.ErrUnexpectedEOF) || strings.Contains(err.Error(), "multipart"):
 		httpx.Error(w, http.StatusBadRequest, "incomplete or malformed multipart body")
 	default:
-		fail(w, r, err)
+		route.Fail(w, r, err)
 	}
 }
 
-// listAudit returns the audit log, newest first (activity): ?after=<id>&limit=&action=&repo=<name>.
-func (a *API) listAudit(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.can(w, r, auth.PermActivity); !ok {
-		return
-	}
-	after, ok := idCursor(w, r)
-	if !ok {
-		return
-	}
-	q := r.URL.Query()
-	f := audit.Filter{Action: q.Get("action")}
-	if name := q.Get("repo"); name != "" {
-		repo, err := a.repos.ByName(r.Context(), name)
-		if errors.Is(err, repos.ErrNotFound) {
-			httpx.WriteJSON(w, http.StatusOK, list[audit.Entry]{Items: []audit.Entry{}})
-			return
-		}
-		if err != nil {
-			fail(w, r, err)
-			return
-		}
-		f.RepoID = repo.ID
-	}
-	items, next, err := a.audit.List(r.Context(), f, after, httpx.Limit(r))
-	if err != nil {
-		fail(w, r, err)
-		return
-	}
-	httpx.WriteJSON(w, http.StatusOK, list[audit.Entry]{items, idNext(next)})
-}
-
-// fileDetails returns one file with its details and build provenance: ?path= -> File.
-func (a *API) fileDetails(w http.ResponseWriter, r *http.Request) {
-	repo, _, ok := a.auth.RepoGate(w, r, r.PathValue("name"), "", auth.RepoDownload, true)
-	if !ok {
-		return
-	}
+// fileDetails returns one file with its details and its CI build record: ?path= -> File.
+func (a *API) fileDetails(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	repo := c.Repo
 	f, err := a.files.Details(r.Context(), repo, r.URL.Query().Get("path"))
 	switch {
 	case errors.Is(err, files.ErrInvalid):
@@ -367,7 +541,7 @@ func (a *API) fileDetails(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, files.ErrNotFound):
 		httpx.Error(w, http.StatusNotFound, "file not found")
 	case err != nil:
-		fail(w, r, err)
+		route.Fail(w, r, err)
 	default:
 		httpx.WriteJSON(w, http.StatusOK, f)
 	}

@@ -3,7 +3,7 @@
   version, or "" for none), a version folder or a file, with the client tabs and a version choice.
   "This version" pins the version (the default); "Always the newest" names Gradle's
   latest.release or Maven's RELEASE, or installs the newest Debian package, with the plugin's note.
-  The heading says "Install it" when every snippet is for apt. Each snippet includes the
+  The heading is the format's install_heading ("Install it" for Debian), else "Use it in a build". Each snippet includes the
   repository block it needs, so it works when pasted. Renders nothing for a path that is not an
   artifact.
 -->
@@ -14,13 +14,14 @@
   import Loading from "$lib/components/Loading.svelte";
   import SnippetTabs from "./SnippetTabs.svelte";
   import Segmented from "./Segmented.svelte";
-  import { browse, type VersionMode } from "../browse";
+  import { api, type VersionMode } from "$lib/api";
+  import { formats } from "$lib/formats/registry.svelte";
 
   let { repo, path, version = "" }: { repo: Repo; path: string; version?: string } = $props();
 
   let mode = $state<VersionMode>("pinned");
   /* svelte-ignore state_referenced_locally */
-  const snippets = new Resource(() => browse.snippets(repo.name, path, version, mode));
+  const snippets = new Resource(() => api.repos.snippets(repo.name, path, version, mode));
 
   let first = true;
   $effect(() => {
@@ -48,7 +49,7 @@
   <ErrorState inline error={snippets.error} />
 {:else if data?.artifact && data.snippets.length}
   <section class="flex min-w-0 flex-col gap-4" aria-label="Use {data.artifact.title} in a build">
-    <h3 class="text-section">{data.snippets.every((s) => s.client === "apt") ? "Install it" : "Use it in a build"}</h3>
+    <h3 class="text-section">{formats.get(repo.format)?.labels.install_heading || "Use it in a build"}</h3>
     {#if choice}
       <Segmented
         bind:value={mode}
@@ -60,7 +61,7 @@
       />
     {/if}
     <div class={snippets.loading ? "opacity-60 transition-opacity" : "transition-opacity"}>
-      <SnippetTabs snippets={data.snippets} label="Build tool" fill />
+      <SnippetTabs snippets={data.snippets} tools={data.tools} label="Build tool" fill />
     </div>
     {#if snippets.error}<ErrorState inline error={snippets.error} />{/if}
   </section>

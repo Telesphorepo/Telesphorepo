@@ -22,7 +22,7 @@
   import { count, selectedText, someNames } from "$lib/words";
   import FileSize from "$lib/components/FileSize.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
-  import type { TreeNode } from "./browse";
+  import type { TreeEntry } from "$lib/api";
   import { Resource, type TableSource } from "$lib/load.svelte";
   import { filesPath, href, navigate } from "$lib/router.svelte";
   import { ViewChoice, type ViewKind } from "$lib/view.svelte";
@@ -135,7 +135,7 @@
 
   // --- the pick of the List view ---
   let picked = $state(new Set<string>());
-  let pickedRows = $state<TreeNode[]>([]);
+  let pickedRows = $state<TreeEntry[]>([]);
   // A new folder, or the same folder after a delete, starts with nothing picked.
   $effect(() => {
     void folder;
@@ -345,7 +345,7 @@
     <div class="order-last lg:contents">
       {#if artifactHere}
         <DetailsColumn
-          title={artifactHere.artifact.kind === "gradle-plugin" ? artifactHere.artifact.title : baseName(artifactHere.artifact.path)}
+          title={artifactHere.artifact.name || baseName(artifactHere.artifact.path)}
           onClose={() => (closed = true)}
           actions={canWrite && folder ? (artifactHere.kind === "version" ? deleteVersion : deleteFolder) : undefined}
         >

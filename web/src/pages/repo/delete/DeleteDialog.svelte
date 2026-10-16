@@ -1,9 +1,10 @@
 <!--
-  Confirms the delete of a file or a folder in Browse (spec §13). For a folder it counts the files
-  under it while the dialog is open, and the list and the button say how many go. For a Maven
-  version folder it says that maven-metadata.xml keeps listing the version until the next publish;
-  for Debian, that apt drops the packages. A version without a folder of its own (a Debian package)
-  goes as the list of its files. onConfirm does the delete (the page holds the session).
+  Confirms the delete of a file, a folder or a version in Browse. While the dialog is open the
+  server plans the delete (POST /api/repos/{name}/files/delete/plan, which deletes nothing): the
+  number of files that go, and the delete notes of the format with the files each one counts, such
+  as the versions that maven-metadata.xml stops listing or the packages that apt stops offering. A
+  version without a folder of its own (a Debian package) goes as the list of its files. onConfirm
+  does the delete (the page holds the session).
 
     <DeleteDialog bind:open={deleteOpen} repo={r} target={deleting} onConfirm={runDelete} />
 
@@ -12,9 +13,8 @@
 -->
 <script lang="ts">
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
-  import { errorMessage, type Repo } from "$lib/api";
+  import { api, errorMessage, type DeletePlan, type FilesDelete, type Repo } from "$lib/api";
   import type { DeleteTarget } from "../files/FolderList.svelte";
-  import { countFolder, type FolderCount } from "./count";
 
   let {
     open = $bindable(false),
@@ -30,61 +30,47 @@
 
   const nFiles = (n: number) => `${n.toLocaleString()} ${n === 1 ? "file" : "files"}`;
 
-  let count = $state<FolderCount | null>(null);
-  let counting = $state(false);
-  let countError = $state("");
+  let plan = $state<DeletePlan | null>(null);
+  let planning = $state(false);
+  let planError = $state("");
   let seq = 0;
+
+  const request = (t: DeleteTarget): FilesDelete => (t.files ? { paths: t.files } : t.dir ? { prefixes: [t.path] } : { paths: [t.path] });
 
   $effect(() => {
     const t = target;
     const mine = ++seq;
-    count = null;
-    countError = "";
-    counting = false;
-    if (!open || !t?.dir) return;
-    counting = true;
-    countFolder(repo.name, t.path).then(
-      (c) => {
-        if (mine === seq) count = c;
-      },
-      (e) => {
-        if (mine === seq) countError = errorMessage(e);
-      },
-    ).finally(() => {
-      if (mine === seq) counting = false;
-    });
-  });
-
-  // <artifactId>/<version>/ of a Maven version folder.
-  const version = $derived.by(() => {
-    const seg = (target?.path ?? "").replace(/\/$/, "").split("/");
-    return seg.length >= 3 ? { artifact: seg[seg.length - 2], version: seg[seg.length - 1] } : null;
+    plan = null;
+    planError = "";
+    planning = false;
+    if (!open || !t) return;
+    planning = true;
+    api.repos
+      .deletePlan(repo.name, request(t))
+      .then(
+        (p) => {
+          if (mine === seq) plan = p;
+        },
+        (e) => {
+          if (mine === seq) planError = errorMessage(e);
+        },
+      )
+      .finally(() => {
+        if (mine === seq) planning = false;
+      });
   });
 
   const changes = $derived.by(() => {
     const t = target;
     if (!t) return [];
     const out: string[] = [];
-    if (t.files) {
-      out.push(`Deletes ${nFiles(t.files.length)} of version ${t.version} from ${t.path}`);
-      if (repo.format === "debian" && t.files.some((f) => f.endsWith(".deb")))
-        out.push("apt stops offering the version after the indexes of its distributions rebuild");
-    } else if (!t.dir) {
-      out.push(`Deletes ${t.path} from ${repo.name}`);
-      if (repo.format === "debian" && t.path.endsWith(".deb"))
-        out.push("apt stops offering the package after the indexes of its distribution rebuild");
-    } else {
-      if (counting) out.push(`Deletes every file under ${t.path} (counting the files…)`);
-      else if (countError) out.push(`Deletes every file under ${t.path} (the files could not be counted: ${countError})`);
-      else if (count?.more) out.push(`Deletes more than ${nFiles(count.count)} under ${t.path}`);
-      else if (count) out.push(`Deletes ${nFiles(count.count)} under ${t.path}`);
-      if (repo.format === "maven" && count?.versionFolder && version)
-        out.push(
-          `maven-metadata.xml of ${version.artifact} keeps listing version ${version.version} until the next publish of ${version.artifact}`,
-        );
-      if (repo.format === "debian" && (count?.debs ?? true))
-        out.push("apt stops offering the deleted packages after the indexes rebuild");
-    }
+    if (t.files) out.push(`Deletes ${nFiles(t.files.length)} of version ${t.version} from ${t.path}`);
+    else if (!t.dir) out.push(`Deletes ${t.path} from ${repo.name}`);
+    else if (planning) out.push(`Deletes every file under ${t.path} (counting the files…)`);
+    else if (planError) out.push(`Deletes every file under ${t.path} (the files could not be counted: ${planError})`);
+    else if (plan?.more) out.push(`Deletes more than ${nFiles(plan.files)} under ${t.path}`);
+    else if (plan) out.push(`Deletes ${nFiles(plan.files)} under ${t.path}`);
+    for (const n of plan?.notes ?? []) out.push(`${n.count.toLocaleString()} ${n.count === 1 ? n.one : n.many}: ${n.text}`);
     out.push("Clients that still need these files get “not found”");
     return out;
   });
@@ -92,7 +78,7 @@
   const confirmLabel = $derived.by(() => {
     if (target?.files) return `Delete ${nFiles(target.files.length)}`;
     if (!target?.dir) return "Delete file";
-    if (count && !count.more && count.count > 0) return `Delete ${nFiles(count.count)}`;
+    if (plan && !plan.more && plan.files > 0) return `Delete ${nFiles(plan.files)}`;
     return "Delete folder";
   });
 </script>

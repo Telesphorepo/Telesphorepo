@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// Mirror is the store during a storage move (spec §11). Reads and listings come from Src,
+// Mirror is the store during a storage move. Reads and listings come from Src,
 // which holds every blob until the move is done. Writes and deletes go to Dst first, then to
 // Src, so both stores see every change made while the copier runs; an error on either fails
 // the call.
@@ -59,6 +59,6 @@ func (m *Mirror) List(ctx context.Context, prefix, after string, limit int) ([]O
 	return m.Src.List(ctx, prefix, after, limit)
 }
 
-func (m *Mirror) PresignGet(ctx context.Context, key string, ttl time.Duration) (string, bool, error) {
-	return m.Src.PresignGet(ctx, key, ttl)
+func (m *Mirror) PresignGet(ctx context.Context, key string, ttl time.Duration, resp Response) (string, bool, error) {
+	return m.Src.PresignGet(ctx, key, ttl, resp)
 }

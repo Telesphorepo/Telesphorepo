@@ -1,23 +1,24 @@
 package settings
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/netip"
-	"net/url"
-	"path"
-	"regexp"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Telesphorepo/Telesphorepo/internal/perm"
 )
 
-// Type is a setting's value type. Value representations (in Snapshot.Value, List and JSON):
-// string/duration -> string (durations keep the text form, e.g. "5m"), bool -> bool,
-// size -> int64 (bytes), list -> []string. Input of a size or a duration accepts friendly forms
-// ("512MiB", "1.5 GiB", "90 days").
+// Type is a setting's value type. The value a Key returns: string -> string, bool -> bool,
+// size -> int64 (bytes), duration -> time.Duration, list -> []string, map -> map[string][]string.
+// The JSON form of a duration is its text ("15m"). Input of a size or a duration accepts
+// friendly forms ("512MiB", "1.5 GiB", "90 days"). A map is a JSON object of string to a list of
+// strings, in the environment too.
 type Type string
 
 const (
@@ -26,53 +27,30 @@ const (
 	TypeSize     Type = "size"
 	TypeDuration Type = "duration"
 	TypeList     Type = "list"
+	TypeMap      Type = "map"
 )
 
-// Core groups. Format plugins add one group each (see Register).
-const (
-	GroupGeneral    = "general"
-	GroupStorage    = "storage"
-	GroupSecurity   = "security"
-	GroupPublishing = "publishing"
-	GroupSSO        = "sso"
-)
-
-// Groups lists the groups in display order (UI sections): the core groups, then the plugin
-// groups in registration order.
-var Groups = []string{GroupGeneral, GroupStorage, GroupSecurity, GroupPublishing, GroupSSO}
-
-// GroupLabels are the display names of the groups.
-var GroupLabels = map[string]string{
-	GroupGeneral:    "General",
-	GroupStorage:    "Storage",
-	GroupSecurity:   "Security",
-	GroupPublishing: "Publishing",
-	GroupSSO:        "Single sign-on",
-}
-
-// Def describes one setting. Its env override is TR_<KEY upper-cased, dots -> '_'>.
+// Def describes one setting. Its environment override is TR_<KEY upper-cased, dots -> '_'>.
 type Def struct {
-	Key     string
-	Type    Type
-	Default string // text form, parsed like an env value ("" = empty/none)
-	Dev     string // default of "telesphorepo dev" instead of Default ("" = same as Default)
-	Secret  bool
-	Group   string
-	Label   string
-	Help    string
-	Options []string // allowed values (lower-case) for enumerated strings
+	Key   string
+	Label string
+	Help  string
+	Type  Type
+	// Default is the text form of the default, parsed like an environment value ("" = empty).
+	Default string
+	// Dev replaces Default under "telesphorepo dev" ("" = same as Default).
+	Dev string
+	// DataDefault, when set, makes the default the path DataDefault in the data directory.
+	DataDefault string
+	Secret      bool
+	Options     []string // allowed values (lower case) of an enumerated string
+	// Normalize puts a decoded value in its canonical form (optional).
+	Normalize func(v any) any
 	// Validate checks a decoded, normalized value (optional).
 	Validate func(v any) error
-	// normalize canonicalises a decoded value (optional).
-	normalize func(v any) any
-	// storage marks settings that select or configure the blob store.
-	storage bool
-}
 
-// IsStorageKey reports whether key selects or configures the blob store.
-func IsStorageKey(key string) bool {
-	d := byKey[key]
-	return d != nil && d.storage
+	idx   int    // index in the registry, set by Load
+	group *Group // set by Load
 }
 
 // Env is the environment variable that overrides this setting.
@@ -80,309 +58,210 @@ func (d *Def) Env() string {
 	return "TR_" + strings.ToUpper(strings.ReplaceAll(d.Key, ".", "_"))
 }
 
-// Setting keys used by the code (the registry below is authoritative).
+// Group returns the group of d (nil before Load).
+func (d *Def) Group() *Group { return d.group }
+
+// Key is a typed handle of a setting. The owner of a setting declares it next to its Def.
+type Key[T any] struct{ def *Def }
+
+// Def returns the definition of k.
+func (k Key[T]) Def() *Def { return k.def }
+
+// Name returns the setting key, e.g. "base_url".
+func (k Key[T]) Name() string { return k.def.Key }
+
+// Get returns the effective value of k in s.
+func (k Key[T]) Get(s *Snapshot) T {
+	v, _ := s.values[k.def.idx].(T)
+	return v
+}
+
+// String declares a string setting.
+func String(d *Def) Key[string] { d.Type = TypeString; return Key[string]{d} }
+
+// Bool declares a bool setting.
+func Bool(d *Def) Key[bool] { d.Type = TypeBool; return Key[bool]{d} }
+
+// Size declares a size setting, in bytes.
+func Size(d *Def) Key[int64] { d.Type = TypeSize; return Key[int64]{d} }
+
+// Duration declares a duration setting.
+func Duration(d *Def) Key[time.Duration] { d.Type = TypeDuration; return Key[time.Duration]{d} }
+
+// List declares a list setting.
+func List(d *Def) Key[[]string] { d.Type = TypeList; return Key[[]string]{d} }
+
+// Map declares a map setting: string keys to lists of strings.
+func Map(d *Def) Key[map[string][]string] { d.Type = TypeMap; return Key[map[string][]string]{d} }
+
+// Mode is when a group's Validate runs.
+type Mode int
+
 const (
-	KeyBaseURL           = "base_url"
-	KeyLogLevel          = "log.level"
-	KeyMaxUploadSize     = "max_upload_size"
-	KeyMaxJSONSize       = "max_json_size"
-	KeyStorage           = "storage"
-	KeyFSRoot            = "fs.root"
-	KeyS3Endpoint        = "s3.endpoint"
-	KeyS3Region          = "s3.region"
-	KeyS3Bucket          = "s3.bucket"
-	KeyS3AccessKeyID     = "s3.access_key_id"
-	KeyS3SecretAccessKey = "s3.secret_access_key"
-	KeyS3Prefix          = "s3.prefix"
-	KeyS3PathStyle       = "s3.path_style"
-	KeyS3Redirect        = "s3.redirect"
-	KeyPresignTTL        = "presign_ttl"
-	KeyCookieSecure      = "cookie.secure"
-	KeySessionTTL        = "session_ttl"
-	KeyTrustedProxies    = "trusted_proxies"
-
-	KeyOIDCIssuer         = "oidc.issuer"
-	KeyOIDCClientID       = "oidc.client_id"
-	KeyOIDCClientSecret   = "oidc.client_secret"
-	KeyOIDCRedirectURL    = "oidc.redirect_url"
-	KeyOIDCScopes         = "oidc.scopes"
-	KeyOIDCAdminClaim     = "oidc.admin_claim"
-	KeyOIDCAdminValues    = "oidc.admin_values"
-	KeyOIDCAdminEmails    = "oidc.admin_emails"
-	KeyOIDCSessionTTL     = "oidc.session_ttl"
-	KeyAdminPasswordLogin = "admin_password_login"
-
-	KeyNexusSyncInterval = "nexus.sync_interval"
-
-	KeyPublishSessionTTL = "publish.session_ttl"
-	KeyPublishDeviceTTL  = "publish.device_ttl"
-
-	KeyAuditRetention = "audit.retention"
+	// ModeStartup checks the stored rows and the environment when the server starts.
+	ModeStartup Mode = iota
+	// ModeChange checks a PATCH or a test of the settings.
+	ModeChange
 )
 
-// SSOKeys are the settings whose change re-validates SSO by fetching the issuer's discovery
-// document (see Service.TestOIDC).
-var SSOKeys = []string{KeyOIDCIssuer, KeyOIDCClientID, KeyOIDCClientSecret, KeyOIDCRedirectURL, KeyOIDCScopes}
+// ErrDegraded is the error a group's Validate wraps at startup when the server starts with
+// overrides (Draft.Override) instead of the values that failed. The loader logs it and keeps the
+// overrides until a PATCH of the group passes Validate. In ModeChange it is a 400 like any error.
+var ErrDegraded = errors.New("settings: degraded")
 
-func trim(v any) any { return strings.TrimSpace(v.(string)) }
+// Group is a group of settings that a module owns: the permission that reads and edits them,
+// the UI page that edits them, and the owner hooks.
+type Group struct {
+	ID    string // e.g. "general", "storage", "sso"
+	Label string
+	// Perm is the server permission that reads and edits every setting of the group.
+	Perm perm.ID
+	// Page is the UI path that edits the group; "" shows it on Settings > General.
+	Page string
+	Defs []*Def
+	// Module is the ID of the owner module (set when the module registers the group).
+	Module string
 
-func httpURL(v any) error {
-	s := v.(string)
-	if s == "" {
-		return nil
-	}
-	u, err := url.Parse(s)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return errors.New("must be an http:// or https:// URL")
-	}
-	return nil
+	// Validate checks the group as a whole: cross-field rules, field errors through d.Fail.
+	Validate func(d *Draft, mode Mode) error
+	// Test checks the values against the outside world, e.g. a probe of a blob store
+	// (POST /api/settings/{group}/test). It runs after Validate and saves nothing.
+	Test func(ctx context.Context, d *Draft) error
+	// Apply runs before a PATCH of the group saves. It may take the change over (Applied).
+	Apply func(ctx context.Context, c *ApplyCall) (*Applied, error)
 }
 
-func lower(v any) any { return strings.ToLower(strings.TrimSpace(v.(string))) }
+// Draft is a set of values that a group's Validate or Test checks.
+type Draft struct {
+	// Next are the values that the change or the startup would make effective.
+	Next *Snapshot
+	// Prev are the values before the change; nil at startup.
+	Prev *Snapshot
 
-var registry = []*Def{
-	// General
-	{Key: KeyBaseURL, Type: TypeString, Group: GroupGeneral, Label: "Public base URL", Dev: "http://localhost:8080",
-		Help:      "Clients reach this server at this URL, for example https://repo.example.com. The UI uses it in client snippets.",
-		normalize: func(v any) any { return strings.TrimRight(strings.TrimSpace(v.(string)), "/") },
-		Validate: func(v any) error {
-			s := v.(string)
-			if s == "" {
-				return nil
-			}
-			u, err := url.Parse(s)
-			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-				return errors.New("must be an http:// or https:// URL")
-			}
-			return nil
-		}},
-	{Key: KeyLogLevel, Type: TypeString, Default: "info", Group: GroupGeneral, Label: "Log level",
-		Help: "The server log keeps messages of this level and more important ones.", Options: []string{"debug", "info", "warn", "error"}, normalize: lower},
-	{Key: KeyMaxUploadSize, Type: TypeSize, Default: "2GiB", Group: GroupGeneral, Label: "Max upload size",
-		Help: "The server refuses a bigger artifact or package upload, for example above 2GiB."},
-	{Key: KeyMaxJSONSize, Type: TypeSize, Default: "1MiB", Group: GroupGeneral, Label: "Max JSON body size",
-		Help: "The server refuses a bigger JSON API request body, for example above 1MiB."},
-	{Key: KeyNexusSyncInterval, Type: TypeDuration, Default: "15m", Group: GroupGeneral, Label: "Nexus sync interval",
-		Help: "The server syncs each mirroring Nexus source this often, for example every 15m. The minimum is 1m.",
-		Validate: func(v any) error {
-			if durationOf(v) < time.Minute {
-				return errors.New("must be at least 1m")
-			}
-			return nil
-		}},
-
-	// Storage
-	{Key: KeyStorage, Type: TypeString, Default: "fs", Group: GroupStorage, Label: "Storage backend",
-		Help:    "With fs, the server stores blobs on the data volume. With s3, it uses any S3-compatible store (Cloudflare R2, SeaweedFS, AWS). When the location changes, the server moves the existing blobs to the new store in the background.",
-		Options: []string{"fs", "s3", "r2"}, storage: true,
-		normalize: func(v any) any {
-			if s := lower(v).(string); s != "r2" {
-				return s
-			}
-			return "s3"
-		}},
-	{Key: KeyFSRoot, Type: TypeString, Group: GroupStorage, Label: "Filesystem root",
-		Help: "The server keeps blobs in this directory when storage is fs. The default is blobs/ in the data dir.", storage: true,
-		normalize: func(v any) any { return strings.TrimSpace(v.(string)) }},
-	{Key: KeyS3Endpoint, Type: TypeString, Group: GroupStorage, Label: "S3 endpoint",
-		Help: "The URL of the S3 API, for example https://<account>.r2.cloudflarestorage.com or http://seaweedfs:8333. Leave it empty for AWS.", storage: true,
-		normalize: func(v any) any { return strings.TrimSpace(v.(string)) },
-		Validate: func(v any) error {
-			s := v.(string)
-			if s == "" {
-				return nil
-			}
-			u, err := url.Parse(s)
-			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-				return errors.New("must be an http:// or https:// URL")
-			}
-			return nil
-		}},
-	{Key: KeyS3Region, Type: TypeString, Default: "auto", Group: GroupStorage, Label: "S3 region",
-		Help: "The region of the bucket. R2 uses auto.", storage: true,
-		normalize: func(v any) any { return strings.TrimSpace(v.(string)) }},
-	{Key: KeyS3Bucket, Type: TypeString, Group: GroupStorage, Label: "S3 bucket", storage: true,
-		normalize: func(v any) any { return strings.TrimSpace(v.(string)) }},
-	{Key: KeyS3AccessKeyID, Type: TypeString, Group: GroupStorage, Label: "S3 access key ID", storage: true,
-		normalize: func(v any) any { return strings.TrimSpace(v.(string)) }},
-	{Key: KeyS3SecretAccessKey, Type: TypeString, Secret: true, Group: GroupStorage, Label: "S3 secret access key", storage: true},
-	{Key: KeyS3Prefix, Type: TypeString, Group: GroupStorage, Label: "S3 key prefix",
-		Help: "Every object key starts with this prefix, for example telesphorepo/. Leave it empty for no prefix.", storage: true,
-		normalize: func(v any) any {
-			s := strings.Trim(strings.TrimSpace(v.(string)), "/")
-			if s != "" {
-				s = path.Clean(s)
-			}
-			return s
-		},
-		Validate: func(v any) error {
-			for _, seg := range strings.Split(v.(string), "/") {
-				if seg == ".." {
-					return errors.New("must not contain ..")
-				}
-			}
-			return nil
-		}},
-	{Key: KeyS3PathStyle, Type: TypeBool, Default: "false", Group: GroupStorage, Label: "S3 path-style addressing",
-		Help: "SeaweedFS and MinIO need path-style addresses. R2 and AWS do not.", storage: true},
-	{Key: KeyS3Redirect, Type: TypeBool, Default: "true", Group: GroupStorage, Label: "Redirect downloads to S3",
-		Help: "When this is on, a GET download answers 302 with a presigned URL. When it is off, the server streams the file.", storage: true},
-	{Key: KeyPresignTTL, Type: TypeDuration, Default: "5m", Group: GroupStorage, Label: "Presigned URL lifetime",
-		Help: "A presigned download URL works for this time."},
-
-	// Security
-	{Key: KeyCookieSecure, Type: TypeBool, Default: "true", Dev: "false", Group: GroupSecurity, Label: "Secure session cookie",
-		Help: "The browser sends the session cookie only over HTTPS. Turn this off only for a plain-HTTP setup."},
-	{Key: KeySessionTTL, Type: TypeDuration, Default: "168h", Group: GroupSecurity, Label: "Session lifetime",
-		Help: "After this time, a person signed in to the UI must sign in again."},
-	{Key: KeyTrustedProxies, Type: TypeList, Group: GroupSecurity, Label: "Trusted proxies",
-		Help: "The server reads the client address from X-Forwarded-For only when the connection comes from one of these proxies. An entry is a CIDR, an address (for example 10.89.0.5), \"private\" (loopback, RFC 1918, ULA and link-local) or an IP list as \"list:<name>\" (for example list:cloudflare, the ranges that Cloudflare publishes, refreshed daily). With an empty list (the default), the server trusts no proxy and uses the TCP peer address.",
-		normalize: func(v any) any {
-			l := v.([]string)
-			out := make([]string, 0, len(l))
-			for _, s := range l {
-				if k := strings.ToLower(s); k == "private" || strings.HasPrefix(k, TrustedProxyList) {
-					s = k
-				}
-				out = append(out, s)
-			}
-			if len(out) == 0 {
-				return []string(nil)
-			}
-			return out
-		},
-		Validate: func(v any) error {
-			for _, s := range v.([]string) {
-				if s == "private" {
-					continue
-				}
-				if name, ok := strings.CutPrefix(s, TrustedProxyList); ok {
-					if !listNameRE.MatchString(name) {
-						return fmt.Errorf("%q does not name an IP list", s)
-					}
-					continue
-				}
-				if _, err := netip.ParsePrefix(s); err == nil {
-					continue
-				}
-				if _, err := netip.ParseAddr(s); err == nil {
-					continue
-				}
-				return fmt.Errorf("%q is not a CIDR, an address, \"private\" or \"list:<name>\"", s)
-			}
-			return nil
-		}},
-	{Key: KeyAuditRetention, Type: TypeDuration, Default: "8760h", Group: GroupSecurity, Label: "Audit log retention",
-		Help: "The audit log keeps an event for this time, for example 8760h (365 days). A job deletes older events every hour."},
-
-	// Publishing (publish sessions and enrolled devices)
-	{Key: KeyPublishSessionTTL, Type: TypeDuration, Default: "15m", Group: GroupPublishing, Label: "Publish session lifetime",
-		Help: "A publish session, the credential that every upload needs, lasts at most this time, for example 15m. A client ends its session when the publish is done. The maximum is 1h.",
-		Validate: func(v any) error {
-			if durationOf(v) > time.Hour {
-				return errors.New("must be at most 1h")
-			}
-			return nil
-		}},
-	{Key: KeyPublishDeviceTTL, Type: TypeDuration, Default: "2160h", Group: GroupPublishing, Label: "Device lifetime",
-		Help: "An enrolled device key (Gradle plugin, Maven extension) can start publish sessions for this time, for example 2160h (90 days). After this time, the developer must enroll the device again."},
-
-	// Single sign-on (OIDC, admins only)
-	{Key: KeyOIDCIssuer, Type: TypeString, Group: GroupSSO, Label: "OIDC issuer URL",
-		Help:      "The issuer URL of your identity provider, for example https://kc.example.com/realms/ops. When it is set, administrators can sign in with SSO. A save checks the discovery document of the issuer.",
-		normalize: trim, Validate: httpURL},
-	{Key: KeyOIDCClientID, Type: TypeString, Group: GroupSSO, Label: "Client ID",
-		Help: "The identity provider gives this ID to the confidential client that you register there.", normalize: trim},
-	{Key: KeyOIDCClientSecret, Type: TypeString, Secret: true, Group: GroupSSO, Label: "Client secret",
-		Help: "The identity provider gives this secret with the client ID."},
-	{Key: KeyOIDCRedirectURL, Type: TypeString, Group: GroupSSO, Label: "Redirect URL",
-		Help:      "Register this callback URL at the identity provider. The default is <public base URL>/api/auth/oidc/callback.",
-		normalize: trim, Validate: httpURL},
-	{Key: KeyOIDCScopes, Type: TypeString, Default: "openid profile email", Group: GroupSSO, Label: "Scopes",
-		Help:      "The server asks for these space-separated scopes at sign-in. It always adds openid.",
-		normalize: func(v any) any { return strings.Join(strings.Fields(v.(string)), " ") }},
-	{Key: KeyOIDCAdminClaim, Type: TypeString, Default: "groups", Group: GroupSSO, Label: "Admin claim",
-		Help:      "The server checks this ID token claim for admin rights. A dotted path is allowed, for example realm_access.roles for Keycloak realm roles.",
-		normalize: trim,
-		Validate: func(v any) error {
-			s := v.(string)
-			if s == "" {
-				return errors.New("must not be empty")
-			}
-			for _, seg := range strings.Split(s, ".") {
-				if seg == "" {
-					return errors.New("must be a claim name or a dotted path such as realm_access.roles")
-				}
-			}
-			return nil
-		}},
-	{Key: KeyOIDCAdminValues, Type: TypeList, Group: GroupSSO, Label: "Admin claim values",
-		Help: "The admin claim (a string or a list) must contain one of these values, for example repo-admins."},
-	{Key: KeyOIDCAdminEmails, Type: TypeList, Group: GroupSSO, Label: "Admin emails",
-		Help: "A person with one of these email addresses is an admin too. The server matches an address only when the provider marks it verified.",
-		normalize: func(v any) any {
-			l := v.([]string)
-			out := make([]string, 0, len(l))
-			for _, e := range l {
-				out = append(out, strings.ToLower(e))
-			}
-			if len(out) == 0 {
-				return []string(nil)
-			}
-			return out
-		}},
-	{Key: KeyOIDCSessionTTL, Type: TypeDuration, Default: "12h", Group: GroupSSO, Label: "SSO session lifetime",
-		Help: "After this time, an admin signed in through SSO must sign in again."},
-	{Key: KeyAdminPasswordLogin, Type: TypeBool, Default: "true", Group: GroupSSO, Label: "Password sign-in for admins",
-		Help: "When this is off, local admins cannot sign in to the UI with a password, but publishers still can. It needs SSO. To turn it on again without SSO, set TR_ADMIN_PASSWORD_LOGIN=true and restart."},
+	fields    map[string]string
+	overrides map[int]any
 }
 
-// TrustedProxyList is the prefix of a trusted_proxies entry that names an IP list, e.g.
-// "list:cloudflare".
-const TrustedProxyList = "list:"
+func newDraft(next, prev *Snapshot) *Draft {
+	return &Draft{Next: next, Prev: prev, fields: map[string]string{}, overrides: map[int]any{}}
+}
 
-// listNameRE is the form of an IP list name (the repo name form).
-var listNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
-
-var byKey = func() map[string]*Def {
-	m := make(map[string]*Def, len(registry))
-	for _, d := range registry {
-		m[d.Key] = d
+// Fail records a field error of key.
+func (d *Draft) Fail(key, msg string) {
+	if _, ok := d.fields[key]; !ok {
+		d.fields[key] = msg
 	}
-	return m
-}()
+}
 
-// Register adds a settings group contributed by a format plugin: group is the format name and
-// label its title. Every Def gets Group = group. It must run before Load, once per process;
-// a key or group that already exists is an error.
-func Register(group, label string, defs []Def) error {
-	if _, ok := GroupLabels[group]; ok {
-		return fmt.Errorf("settings: group %q already registered", group)
+// Failed reports whether a field error was recorded.
+func (d *Draft) Failed() bool { return len(d.fields) > 0 }
+
+// Source returns where the value of key in Next comes from.
+func (d *Draft) Source(key string) Source { return d.Next.Source(key) }
+
+// Broken returns why the stored value of key could not be read (a secret that does not
+// decrypt), or "". Next holds the default of such a key.
+func (d *Draft) Broken(key string) string { return d.Next.broken[key] }
+
+// Override sets the effective value of key in Next, in the form its Key returns, and saves
+// nothing. A Validate that overrides returns an error that wraps ErrDegraded. It drops the views
+// of Next, so a View built before the override gives the overridden value.
+func (d *Draft) Override(key string, v any) {
+	def := d.Next.reg.byKey[key]
+	if def == nil {
+		panic("settings: override of unknown key " + key)
 	}
-	seen := map[string]bool{}
-	for _, d := range defs {
-		if byKey[d.Key] != nil || seen[d.Key] {
-			return fmt.Errorf("settings: key %q already registered", d.Key)
+	d.Next.values[def.idx] = v
+	d.Next.views.Clear()
+	d.overrides[def.idx] = v
+}
+
+// Changed reports whether one of keys has another value in Next than in Prev. At startup
+// nothing changes.
+func (d *Draft) Changed(keys ...string) bool { return changed(d.Prev, d.Next, keys) }
+
+func changed(prev, next *Snapshot, keys []string) bool {
+	if prev == nil {
+		return false
+	}
+	for _, k := range keys {
+		def := next.reg.byKey[k]
+		if def != nil && !equal(prev.values[def.idx], next.values[def.idx]) {
+			return true
 		}
-		seen[d.Key] = true
 	}
-	for _, d := range defs {
-		d.Group = group
-		registry = append(registry, &d)
-		byKey[d.Key] = &d
-	}
-	Groups = append(Groups, group)
-	GroupLabels[group] = label
-	return nil
+	return false
 }
 
-// Definitions returns the setting registry in display order.
-func Definitions() []*Def { return registry }
+// ApplyCall is a PATCH that an owner's Apply looks at before it is saved.
+type ApplyCall struct {
+	Prev, Next *Snapshot
+	Patch      map[string]json.RawMessage
+	UserID     int64
+}
 
-// Lookup returns the definition of key, or nil.
-func Lookup(key string) *Def { return byKey[key] }
+// Changed reports whether one of keys has another value in Next than in Prev.
+func (c *ApplyCall) Changed(keys ...string) bool { return changed(c.Prev, c.Next, keys) }
 
-// parseText parses an env or default value.
+// Applied lets an owner take over a change: Hold keys are not saved now; Status and Body answer
+// the PATCH (e.g. 202 {"move": Move}).
+type Applied struct {
+	Hold   []string
+	Status int
+	Body   any
+}
+
+// HookError is a refusal of an Apply or Test hook with its HTTP status and the message per
+// setting (Fields may be nil).
+type HookError struct {
+	Status  int
+	Message string
+	Fields  map[string]string
+}
+
+func (e *HookError) Error() string { return e.Message }
+
+// registry holds the groups and definitions that Load got, in order.
+type registry struct {
+	groups []*Group
+	defs   []*Def
+	byKey  map[string]*Def
+	byID   map[string]*Group
+}
+
+var groupRE = keyRE
+
+// newRegistry checks the groups and numbers their definitions.
+func newRegistry(groups []*Group) (*registry, error) {
+	r := &registry{byKey: map[string]*Def{}, byID: map[string]*Group{}}
+	for _, g := range groups {
+		if !groupRE.MatchString(g.ID) || g.Label == "" || g.Perm == "" {
+			return nil, fmt.Errorf("settings: group %q needs an ID, a label and a permission", g.ID)
+		}
+		if r.byID[g.ID] != nil {
+			return nil, fmt.Errorf("settings: group %q is registered twice", g.ID)
+		}
+		if perm.Current().ScopeOf(g.Perm) != perm.ScopeServer {
+			return nil, fmt.Errorf("settings: group %q: %q is not a server permission", g.ID, g.Perm)
+		}
+		r.byID[g.ID] = g
+		r.groups = append(r.groups, g)
+		for _, d := range g.Defs {
+			if !keyRE.MatchString(d.Key) || d.Type == "" {
+				return nil, fmt.Errorf("settings: key %q needs a name and a type", d.Key)
+			}
+			if r.byKey[d.Key] != nil {
+				return nil, fmt.Errorf("settings: key %q is registered twice", d.Key)
+			}
+			d.idx, d.group = len(r.defs), g
+			r.defs = append(r.defs, d)
+			r.byKey[d.Key] = d
+		}
+	}
+	return r, nil
+}
+
+// parseText parses an environment or default value.
 func (d *Def) parseText(s string) (any, error) {
 	var v any
 	switch d.Type {
@@ -401,7 +280,11 @@ func (d *Def) parseText(s string) (any, error) {
 		}
 		v = n
 	case TypeDuration:
-		v = strings.TrimSpace(s)
+		dur, err := parseDuration(s)
+		if err != nil {
+			return nil, errors.New(durationHint)
+		}
+		v = dur
 	case TypeList:
 		var out []string
 		for _, p := range strings.Split(s, ",") {
@@ -410,20 +293,33 @@ func (d *Def) parseText(s string) (any, error) {
 			}
 		}
 		v = out
+	case TypeMap:
+		if strings.TrimSpace(s) == "" {
+			return d.check(map[string][]string(nil))
+		}
+		return d.decodeJSON(json.RawMessage(s))
 	}
 	return d.check(v)
 }
+
+const durationHint = `must be a positive duration such as "15m", "12h", "90 days" or "1h30m"`
 
 // decodeJSON parses a value from the API or the database.
 func (d *Def) decodeJSON(raw json.RawMessage) (any, error) {
 	var v any
 	switch d.Type {
-	case TypeString, TypeDuration:
+	case TypeString:
 		var s string
 		if err := json.Unmarshal(raw, &s); err != nil {
 			return nil, errors.New("must be a string")
 		}
 		v = s
+	case TypeDuration:
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return nil, errors.New("must be a string")
+		}
+		return d.parseText(s)
 	case TypeBool:
 		var b bool
 		if err := json.Unmarshal(raw, &b); err != nil {
@@ -460,14 +356,23 @@ func (d *Def) decodeJSON(raw json.RawMessage) (any, error) {
 			}
 		}
 		v = out
+	case TypeMap:
+		var m map[string][]string
+		if err := json.Unmarshal(raw, &m); err != nil {
+			return nil, errors.New("must be an object of lists of strings")
+		}
+		if len(m) == 0 {
+			m = nil
+		}
+		v = m
 	}
 	return d.check(v)
 }
 
 // check normalizes and validates a decoded value.
 func (d *Def) check(v any) (any, error) {
-	if d.normalize != nil {
-		v = d.normalize(v)
+	if d.Normalize != nil {
+		v = d.Normalize(v)
 	}
 	switch d.Type {
 	case TypeSize:
@@ -475,11 +380,13 @@ func (d *Def) check(v any) (any, error) {
 			return nil, errors.New("must be a positive size")
 		}
 	case TypeDuration:
-		dur, err := parseDuration(v.(string))
-		if err != nil || dur <= 0 {
-			return nil, errors.New(`must be a positive duration such as "15m", "12h", "90 days" or "1h30m"`)
+		if v.(time.Duration) <= 0 {
+			return nil, errors.New(durationHint)
 		}
-		v = canonicalDuration(dur)
+	case TypeList:
+		if l := v.([]string); len(l) == 0 {
+			v = []string(nil)
+		}
 	}
 	if len(d.Options) > 0 {
 		s, _ := v.(string)
@@ -495,7 +402,32 @@ func (d *Def) check(v any) (any, error) {
 	return v, nil
 }
 
-func durationOf(v any) time.Duration {
-	d, _ := time.ParseDuration(v.(string))
-	return d
+// jsonValue is the JSON form of a value: a duration as its text, an empty list as [], an empty
+// map as {}.
+func (d *Def) jsonValue(v any) any {
+	switch x := v.(type) {
+	case time.Duration:
+		return canonicalDuration(x)
+	case []string:
+		if x == nil {
+			return []string{}
+		}
+	case map[string][]string:
+		if x == nil {
+			return map[string][]string{}
+		}
+	}
+	return v
+}
+
+func equal(a, b any) bool {
+	switch x := a.(type) {
+	case []string:
+		y, _ := b.([]string)
+		return slices.Equal(x, y)
+	case map[string][]string:
+		y, _ := b.(map[string][]string)
+		return maps.EqualFunc(x, y, slices.Equal[[]string])
+	}
+	return a == b
 }

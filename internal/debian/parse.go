@@ -45,7 +45,7 @@ type debInfo struct {
 	Control                        string // re-serialized stanza, each line ending in "\n"
 }
 
-// poolPath implements spec §5.1.
+// poolPath builds the pool path of a package.
 func (d *debInfo) poolPath(component string) string {
 	prefix := d.Source[:1]
 	if strings.HasPrefix(d.Source, "lib") && len(d.Source) > 3 {
@@ -56,7 +56,7 @@ func (d *debInfo) poolPath(component string) string {
 }
 
 // validKey reports whether a storage key derived from untrusted fields satisfies the
-// spec §6 limits (non-empty segments of at most 255 bytes, whole key at most 1024).
+// The limits of repopath: (non-empty segments of at most 255 bytes, whole key at most 1024).
 func validKey(k string) bool {
 	if k == "" || len(k) > 1024 {
 		return false

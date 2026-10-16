@@ -7,14 +7,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"strings"
+	"strconv"
 	"time"
 	"unicode/utf8"
 
-	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
+	"github.com/Telesphorepo/Telesphorepo/internal/nexus/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
-	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 )
 
 // Sync states (nexus_syncs.state) and sync repo states (nexus_sync_repos.state).
@@ -142,33 +141,28 @@ func (s *Service) logLine(ctx context.Context, id int64, repo, level, msg string
 	}
 }
 
-// Start resumes the syncs left running by the previous process, starts the scheduler, and lets
-// StartSync run syncs until ctx ends. It returns at once. A sync stopped by the end of ctx
-// stays running in the database and resumes at its last saved page on the next Start.
-func (s *Service) Start(ctx context.Context) {
-	s.mu.Lock()
-	s.root = ctx
-	s.mu.Unlock()
+// Resume resumes the syncs left running by the previous process and lets StartSync run syncs.
+// A sync stopped by the end of the module's context stays running in the database and resumes
+// at its last saved page on the next start.
+func (s *Service) Resume(ctx context.Context) error {
 	running, err := dbq.New(s.db.R).ListRunningNexusSyncs(ctx)
 	if err != nil {
-		s.log.Error("nexus: cannot look up running syncs", "error", err.Error())
+		return fmt.Errorf("nexus: look up running syncs: %w", err)
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.started = true
 	for _, sy := range running {
 		s.log.Info("nexus: resuming sync", "sync", sy.ID, "source_id", sy.SourceID)
 		s.launch(sy.ID)
 	}
-	s.mu.Unlock()
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		s.schedule(ctx)
-	}()
+	return nil
 }
 
-// schedule starts a sync of every mirroring source whose last sync ended more than
-// nexus.sync_interval ago. It reads the interval from the live settings at each check.
-func (s *Service) schedule(ctx context.Context) {
+// Schedule starts a sync of every mirroring source whose last sync ended more than
+// nexus.sync_interval ago, until ctx ends. It reads the interval from the live settings at each
+// check.
+func (s *Service) Schedule(ctx context.Context) {
 	for {
 		t := time.NewTimer(min(s.interval(), schedulerTick))
 		select {
@@ -182,7 +176,7 @@ func (s *Service) schedule(ctx context.Context) {
 }
 
 func (s *Service) interval() time.Duration {
-	return s.settings.Current().Duration(settings.KeyNexusSyncInterval)
+	return SyncInterval.Get(s.settings.Current())
 }
 
 func (s *Service) startDue(ctx context.Context) {
@@ -208,12 +202,10 @@ func (s *Service) startDue(ctx context.Context) {
 
 // launch starts the runner of sync id. The caller holds s.mu.
 func (s *Service) launch(id int64) {
-	ctx, cancel := context.WithCancel(s.root)
+	ctx, cancel := context.WithCancel(s.base)
 	st := &runState{id: id, cancel: cancel, done: make(chan struct{})}
 	s.runs[id] = st
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
+	s.spawn("sync", func(context.Context) {
 		defer close(st.done)
 		defer cancel()
 		s.runSync(ctx, st)
@@ -222,7 +214,7 @@ func (s *Service) launch(id int64) {
 			delete(s.runs, id)
 		}
 		s.mu.Unlock()
-	}()
+	})
 }
 
 // StartSync starts a sync of a mirroring source that has mapped repos ("Sync now"). userID 0
@@ -232,6 +224,7 @@ func (s *Service) StartSync(ctx context.Context, sourceID, userID int64) (*Sync,
 	if err != nil {
 		return nil, err
 	}
+	s.record(ctx, ActionSyncStart, strconv.FormatInt(sourceID, 10), map[string]any{"source_id": sourceID, "sync_id": id})
 	return s.Sync(ctx, id)
 }
 
@@ -244,6 +237,7 @@ func (s *Service) CutOver(ctx context.Context, sourceID, userID int64) (*Sync, e
 	if err != nil {
 		return nil, err
 	}
+	s.record(ctx, ActionCutover, strconv.FormatInt(sourceID, 10), map[string]any{"source_id": sourceID, "sync_id": id})
 	return s.Sync(ctx, id)
 }
 
@@ -265,7 +259,7 @@ func startLine(trigger, by string) string {
 
 func (s *Service) startSync(ctx context.Context, sourceID, userID int64, trigger string) (int64, error) {
 	s.mu.Lock()
-	started := s.root != nil
+	started := s.started
 	s.mu.Unlock()
 	if !started {
 		return 0, errors.New("nexus service not started")
@@ -519,8 +513,8 @@ func (s *Service) Cancel(ctx context.Context, id, userID int64) (*Sync, error) {
 	}
 	by := ""
 	if userID != 0 {
-		if u, err := dbq.New(s.db.R).GetUserByID(ctx, userID); err == nil {
-			by = u.Username
+		if name, err := s.username(ctx, userID); err == nil {
+			by = name
 		}
 	}
 	s.mu.Lock()
@@ -541,6 +535,7 @@ func (s *Service) Cancel(ctx context.Context, id, userID int64) (*Sync, error) {
 	if err := s.finish(context.WithoutCancel(ctx), id, row.SourceID, SyncCancelled, "", cancelLine(by)); err != nil {
 		return nil, err
 	}
+	s.record(ctx, ActionSyncCancel, strconv.FormatInt(row.SourceID, 10), map[string]any{"source_id": row.SourceID, "sync_id": id})
 	return s.Sync(ctx, id)
 }
 
@@ -623,7 +618,7 @@ func (s *Service) cutOver(ctx context.Context, id, sourceID, failedFiles int64, 
 			if m.Kind != TypeHosted {
 				continue
 			}
-			if err := s.repos.SetLockedBy(ctx, tx, m.TargetRepoID, ""); err != nil {
+			if err := s.release(ctx, tx, m.TargetRepoID, sourceID); err != nil {
 				return err
 			}
 		}
@@ -798,7 +793,7 @@ func (s *Service) syncRepo(ctx context.Context, cl *Client, log *slog.Logger, r 
 		}
 		return counts, "cannot load the target repo: " + err.Error()
 	}
-	im, ok := accepts(target.Format, r.SourceFormat)
+	im, ok := s.accepts(target.Format, r.SourceFormat)
 	if !ok {
 		return counts, fmt.Sprintf("target repo %q (%s) cannot import %s content", target.Name, target.Format, r.SourceFormat)
 	}
@@ -834,7 +829,7 @@ func (s *Service) syncRepo(ctx context.Context, cl *Client, log *slog.Logger, r 
 				return counts, "" // the page is redone on resume
 			}
 			var read int64
-			out, err := importAsset(ctx, cl, im, target, r.SourceRepo, a, &read)
+			out, err := s.importAsset(ctx, cl, im, target, r.SourceRepo, a, &read)
 			if err != nil {
 				if ctx.Err() != nil {
 					return counts, ""
@@ -937,12 +932,10 @@ func (s *Service) page(ctx context.Context, cl *Client, id int64, source, token 
 	}
 }
 
-// importAsset offers one Nexus asset to the target plugin and adds the bytes the plugin read to
-// read. The plugin skips an asset whose path and SHA-256 already match without downloading it.
-func importAsset(ctx context.Context, cl *Client, im format.Importer, target *repos.Repo, source string, a Asset, read *int64) (format.ImportOutcome, error) {
-	if !validPath(a.Path) {
-		return "", errors.New("invalid path")
-	}
+// importAsset offers one Nexus asset to the target format through its importer (format.Importer
+// Run) and adds the bytes the download read to read. An asset whose target path already has its
+// SHA-256 is skipped without a download.
+func (s *Service) importAsset(ctx context.Context, cl *Client, im *format.Importer, target *repos.Repo, source string, a Asset, read *int64) (format.ImportOutcome, error) {
 	item := format.ImportItem{
 		Path:      a.Path,
 		Size:      a.Size,
@@ -957,27 +950,7 @@ func importAsset(ctx context.Context, cl *Client, im format.Importer, target *re
 			return countingReader{rc, read}, nil
 		},
 	}
-	return im.Import(ctx, target, item)
-}
-
-// validPath applies the path rules of spec §6 to a source path: non-empty segments other than
-// "." and "..", at most 255 bytes each and 1024 in all, valid UTF-8, no control characters or
-// backslashes.
-func validPath(p string) bool {
-	if p == "" || len(p) > 1024 || !utf8.ValidString(p) {
-		return false
-	}
-	for _, seg := range strings.Split(p, "/") {
-		if seg == "" || seg == "." || seg == ".." || len(seg) > 255 {
-			return false
-		}
-		for i := 0; i < len(seg); i++ {
-			if c := seg[i]; c < 0x20 || c == 0x7F || c == '\\' {
-				return false
-			}
-		}
-	}
-	return true
+	return im.Run(ctx, s.assets, target, item)
 }
 
 func truncate(s string, n int) string {

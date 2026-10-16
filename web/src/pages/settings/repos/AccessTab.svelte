@@ -15,11 +15,11 @@
 <script lang="ts">
   import { untrack } from "svelte";
   import { toast } from "svelte-sonner";
-  import { api, type AccessPerson, type AccessPipeline, type Page, type Repo, type RepoAccess, type RepoPermission, type Trust } from "$lib/api";
+  import { api, type AccessPerson, type AccessPipeline, type Page, type Repo, type RepoAccess, type PermId, type Trust } from "$lib/api";
   import { Resource, type TableSource } from "$lib/load.svelte";
   import { Draft } from "$lib/unsaved.svelte";
   import { auth } from "$lib/auth.svelte";
-  import { REPO_PERMISSIONS, repoPhrase } from "$lib/permissions";
+  import { repoPermissions, repoPhrase } from "$lib/permissions";
   import { href, repoSettingsPath } from "$lib/router.svelte";
   import { count as plural, someNames } from "$lib/words";
   import { Button } from "$lib/components/ui/button";
@@ -49,11 +49,11 @@
 
   const id = $props.id();
   // What the person can see and change here.
-  const canAccess = $derived(auth.canRepo(repo.name, "access"));
-  const canSettings = $derived(auth.canRepo(repo.name, "settings"));
-  const canPipelines = $derived(auth.canRepo(repo.name, "pipelines"));
+  const canAccess = $derived(auth.canRepo(repo.name, "repo.access"));
+  const canSettings = $derived(auth.canRepo(repo.name, "repo.settings"));
+  const canPipelines = $derived(auth.canRepo(repo.name, "ci.pipelines"));
   // The permissions the person can give and remove here.
-  const held = $derived(auth.can("repos") ? REPO_PERMISSIONS.map((p) => p.name) : repo.permissions ?? []);
+  const held = $derived(auth.allRepos() ? repoPermissions().map((p) => p.name) : repo.permissions ?? []);
 
   const access = new Resource(() => api.repos.access(repo.name));
   // CI pipelines answer 403 to a person who holds CI pipelines nowhere.
@@ -62,7 +62,7 @@
   );
   // Network lists need the Network permission; without it the rules show by name.
   // A holder of settings on the repo reads every network list, to pick the lists of its rules.
-  const lists = new Resource(() => (auth.canRepo(repo.name, "settings") ? api.ipLists.list() : Promise.resolve(undefined)));
+  const lists = new Resource(() => (auth.canRepo(repo.name, "repo.settings") ? api.ipLists.list() : Promise.resolve(undefined)));
   const listsError = $derived(lists.error);
 
   const draft = new Draft<AccessDraft>({ public: false, ci: [], read: [], publish: [] });
@@ -104,7 +104,7 @@
   let ciOpen = $state(false);
   const newPipeline = $derived(href("/settings/ci-pipelines/new", { repo: repo.name, back: repoSettingsPath(repo.name, "access") }));
 
-  const personHref = (name: string) => (auth.can("people") ? href(`/settings/people/${encodeURIComponent(name)}`) : undefined);
+  const personHref = (name: string) => (auth.can("people.manage") ? href(`/settings/people/${encodeURIComponent(name)}`) : undefined);
   const peopleCount = (n: number) => plural(n, "person", "people");
 
   // --- the permissions of people: changes apply at once ---
@@ -126,7 +126,7 @@
   }
   async function removeAccess() {
     const names = removing;
-    await api.permissions.set(names, [repo.name], []);
+    await api.grants.set(names, [repo.name], []);
     toast.success(`Removed the access of ${peopleCount(names.length)} to ${repo.name}.`);
     await afterPeopleChange(names);
   }
@@ -135,8 +135,8 @@
   let addOpen = $state(false);
   const granted = $derived((access.data?.people ?? []).map((p) => p.username));
   const findPeople = async (q: string) => (await api.people.search(q, { limit: 20 })).items.map((p) => ({ id: p.username, label: p.username }));
-  async function give(names: string[], perms: RepoPermission[]) {
-    await api.permissions.set(names, [repo.name], perms);
+  async function give(names: string[], perms: PermId[]) {
+    await api.grants.set(names, [repo.name], perms);
     toast.success(`Gave ${peopleCount(names.length)} access to ${repo.name}: ${repoPhrase(perms)}.`);
     await afterPeopleChange(names);
   }
@@ -144,8 +144,8 @@
   let editing = $state<AccessPerson | null>(null);
   let editOpen = $state(false);
   const edit = (p: AccessPerson) => ((editing = p), (editOpen = true));
-  async function change(names: string[], perms: RepoPermission[]) {
-    await api.permissions.set(names, [repo.name], perms);
+  async function change(names: string[], perms: PermId[]) {
+    await api.grants.set(names, [repo.name], perms);
     toast.success(perms.length ? `Changed the permissions of ${names[0]} on ${repo.name}.` : `Removed the access of ${names[0]} to ${repo.name}.`);
     await afterPeopleChange(names);
   }
@@ -252,9 +252,9 @@
 
   <!-- Nobody publishes to a group or a proxy. -->
   {#if repo.kind === "hosted" && (canSettings || canPipelines)}
-    <FormSection title="Publish" description={a.publish.locked_by ? "Nobody can publish until the copy from Nexus ends. The access below applies after that." : undefined}>
+    <FormSection title="Publish" description={a.publish.blocked?.code === "operation" ? "Nobody can publish until the copy from Nexus ends. The access below applies after that." : a.publish.blocked?.message}>
       {#snippet actions()}
-        {#if a.publish.locked_by && auth.can("nexus")}<Button variant="outline" size="sm" href={href("/settings/nexus")}>Open Nexus migration</Button>{/if}
+        {#if a.publish.blocked?.code === "operation" && auth.can("nexus.manage")}<Button variant="outline" size="sm" href={href("/settings/nexus")}>Open Nexus migration</Button>{/if}
       {/snippet}
       <div class="flex flex-col gap-6">
         {#if canPipelines}
@@ -305,7 +305,7 @@
   {#if canSettings && (d.read.length || d.publish.length)}
     <p class="mt-6 text-meta text-muted-foreground">
       The server sees each visitor's own address only when it trusts the proxy in front of it.
-      {#if auth.can("network")}
+      {#if auth.can("network.manage")}
         Check <a class="text-link underline-offset-4 hover:underline" href={href("/settings/proxy")}>Network and proxy</a>.
       {/if}
     </p>

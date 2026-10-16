@@ -6,7 +6,6 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/md5"
-	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"math"
@@ -16,9 +15,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Telesphorepo/Telesphorepo/internal/assets"
+	"github.com/Telesphorepo/Telesphorepo/internal/blobs"
 	"github.com/Telesphorepo/Telesphorepo/internal/demo"
-	"github.com/Telesphorepo/Telesphorepo/internal/format"
+	"github.com/Telesphorepo/Telesphorepo/internal/module"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
@@ -69,13 +68,11 @@ type debFlavor struct {
 	kind, name, arch, section string
 }
 
-// DemoRepos implements format.DemoData.
-func (h *Handler) DemoRepos() []format.DemoRepo {
-	return []format.DemoRepo{{Name: "debian", Description: "Debian packages for stable/main", Public: true}}
-}
+// demoRepos are the Debian repos of the demo dataset.
+var demoRepos = []module.DemoRepo{{Name: "debian", Description: "Debian packages for stable/main", Public: true}}
 
-// Demo implements format.DemoData: it ingests the packages through the upload pipeline (the
-// indexes are built once the indexer starts), then dates each pool file to its demo time.
+// Demo fills a Debian demo repo: it ingests the packages through the asset pipeline, each with
+// its demo time (the rebuild queue builds the indexes once the server serves).
 func (h *Handler) Demo(ctx context.Context, run *demo.Run, repo *repos.Repo, rng *rand.Rand) error {
 	debs := planDebian(run, repo, rng)
 	run.Expect(len(debs))
@@ -288,12 +285,11 @@ func tarGz(files []debData) []byte {
 	return buf.Bytes()
 }
 
-// uploadDebs ingests the packages through the upload pipeline, then dates each pool file to its
-// demo time.
+// uploadDebs ingests the packages through the asset pipeline, each with its demo time and
+// uploader.
 func (h *Handler) uploadDebs(ctx context.Context, run *demo.Run, repo *repos.Repo, debs []demoDeb) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
-	paths := make([]string, len(debs))
 	idx := make(chan int)
 	var wg sync.WaitGroup
 	for range demoDebWorkers {
@@ -304,12 +300,10 @@ func (h *Handler) uploadDebs(ctx context.Context, run *demo.Run, repo *repos.Rep
 				if ctx.Err() != nil {
 					continue
 				}
-				p, err := h.uploadDeb(ctx, repo, debs[i])
-				if err != nil {
+				if err := h.uploadDeb(ctx, repo, debs[i]); err != nil {
 					cancel(err)
 					continue
 				}
-				paths[i] = p
 				run.Stored(1)
 			}
 		}()
@@ -327,34 +321,12 @@ feed:
 	if ctx.Err() != nil {
 		return context.Cause(ctx)
 	}
-
-	return run.DB().Tx(ctx, func(tx *sql.Tx) error {
-		st, err := tx.PrepareContext(ctx, `UPDATE assets SET created_at = ?, updated_at = ? WHERE repo_id = ? AND path = ?`)
-		if err != nil {
-			return err
-		}
-		defer st.Close()
-		for i, d := range debs {
-			if _, err := st.ExecContext(ctx, d.at, d.at, repo.ID, paths[i]); err != nil {
-				return err
-			}
-		}
-		// The upload set last_published_at to now; the newest demo time replaces it.
-		_, err = tx.ExecContext(ctx, `UPDATE repos SET last_published_at =
-			(SELECT coalesce(max(updated_at), 0) FROM assets WHERE repo_id = ? AND kind <> 'index') WHERE id = ?`, repo.ID, repo.ID)
-		return err
-	})
+	return nil
 }
 
-func (h *Handler) uploadDeb(ctx context.Context, repo *repos.Repo, d demoDeb) (string, error) {
-	sp, err := h.assets.SpoolBytes(d.data)
-	if err != nil {
-		return "", err
+func (h *Handler) uploadDeb(ctx context.Context, repo *repos.Repo, d demoDeb) error {
+	if _, _, err := h.ingest(ctx, repo, demoDebDist, demoDebComp, blobs.Bytes(d.data), demo.Origin(d.by, 0, d.at)); err != nil {
+		return fmt.Errorf("upload %s: %w", d.name, err)
 	}
-	defer sp.Close()
-	res, _, err := h.ingest(ctx, repo, demoDebDist, demoDebComp, sp, assets.By{User: d.by})
-	if err != nil {
-		return "", fmt.Errorf("upload %s: %w", d.name, err)
-	}
-	return res.Filename, nil
+	return nil
 }

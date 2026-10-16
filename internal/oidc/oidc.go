@@ -1,6 +1,8 @@
-// Package oidc implements OIDC admin sign-on (design doc §7.5): the authorization-code flow with
-// PKCE (S256), state and nonce, against the issuer configured in the "sso" settings group. Only
-// administrators sign in this way; a login that does not qualify as admin is refused. The same
+// Package oidc is the sso module: sign-in with an OIDC identity provider through the
+// authorization-code flow with PKCE (S256), state and nonce, against the issuer of the "sso"
+// settings group. Any person at the provider can sign in; a first sign-in creates an SSO account.
+// When the permission claim is set, each sign-in sets the server permissions of the account
+// from the claim's values (oidc.permission_map); else a sign-in never changes them. The same
 // flow, with a forced new sign-in at the provider, lets an SSO user approve a device.
 package oidc
 
@@ -14,6 +16,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -21,10 +24,14 @@ import (
 	gooidc "github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
-	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/module"
+	"github.com/Telesphorepo/Telesphorepo/internal/perm"
 	"github.com/Telesphorepo/Telesphorepo/internal/publish"
+	"github.com/Telesphorepo/Telesphorepo/internal/route"
+	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 )
 
 const (
@@ -40,7 +47,6 @@ const (
 // Error codes of the sign-in page (/#/login?error=...) and the approval page
 // (/#/device?code=...&error=...).
 const (
-	errNotAuthorized    = "not_authorized"
 	errUsernameConflict = "username_conflict"
 	errInvalidUsername  = "invalid_username"
 	errAccountDisabled  = "account_disabled"
@@ -55,10 +61,11 @@ const (
 // Handler serves GET /api/auth/oidc/login, GET /api/auth/oidc/device and
 // GET /api/auth/oidc/callback.
 type Handler struct {
-	auth    *auth.Service
-	publish *publish.Service
-	cfg     config.Provider
-	log     *slog.Logger
+	auth     *auth.Service
+	publish  *publish.Service
+	log      *slog.Logger
+	settings *settings.Service
+	audit    *audit.Log
 
 	provMu sync.Mutex
 	prov   *providerEntry // built lazily, keyed by issuer + client id
@@ -71,27 +78,56 @@ type providerEntry struct {
 	p   *gooidc.Provider
 }
 
-// New returns the SSO handler. Configuration is read live from cfg on every request. ps stores
-// the approval grants of devices.
-func New(a *auth.Service, ps *publish.Service, cfg config.Provider, log *slog.Logger) *Handler {
-	if log == nil {
-		log = slog.Default()
+// cfg returns the current SSO configuration.
+func (h *Handler) cfg() *Config {
+	c := ConfigView.Get(h.settings.Current())
+	return &c
+}
+
+// PermManage edits the sign-in options (the settings group "sso").
+const PermManage perm.ID = "signin.manage"
+
+// The audit actions of the sso module.
+const (
+	ActionSignIn       = "sso.signin"
+	ActionSignInFailed = "sso.signin.failed"
+)
+
+// Module returns the sso module: the SSO sign-in, the SSO device approval, and the settings
+// group "sso" (a change must pass the discovery check of the issuer).
+func Module() module.Module {
+	h := &Handler{states: &stateStore{m: map[[32]byte]pending{}}}
+	return module.Module{
+		ID: "sso", Title: "Single sign-on", Requires: []string{"publish"},
+		Register: func(x *module.Extender) {
+			x.Permissions(perm.Subsystem{ID: "signin", Scope: perm.ScopeServer, Label: "Sign-in options",
+				Help: "How people sign in: single sign-on with an identity provider, and password sign-in."},
+				perm.Def{ID: PermManage, Label: "Manage sign-in options", Help: "Connect the identity provider, map its groups to permissions, and choose who may sign in with a password.", SecondFactor: true})
+			x.AuditActions(
+				audit.ActionDef{ID: ActionSignIn, Label: "Signed in with single sign-on", Subsystem: "signin"},
+				audit.ActionDef{ID: ActionSignInFailed, Label: "Single sign-on refused", Subsystem: "signin"},
+			)
+			x.Settings(h.group())
+			x.Init(func(_ context.Context, host *module.Host) error {
+				h.auth, h.publish, h.settings, h.audit, h.log = host.Auth, module.Use[*publish.Service](host), host.Settings, host.Audit, host.Log
+				host.Auth.SetSSO(func() bool { return h.cfg().OIDCEnabled() })
+				host.Auth.SetManaged(func() bool { return h.cfg().Managed() })
+				return nil
+			})
+			x.Routes(func(r *route.Router) {
+				r.Handle("GET /api/auth/oidc/login", route.Public, h.login)
+				r.Handle("GET /api/auth/oidc/device", route.Policy{Accept: auth.CredSession, Anonymous: true}, h.device)
+				r.Handle("GET /api/auth/oidc/callback", route.Public, h.callback)
+			})
+		},
 	}
-	return &Handler{auth: a, publish: ps, cfg: cfg, log: log, states: &stateStore{m: map[[32]byte]pending{}}}
 }
 
-// Register mounts the SSO routes.
-func (h *Handler) Register(mux *http.ServeMux) {
-	mux.HandleFunc("GET /api/auth/oidc/login", h.login)
-	mux.HandleFunc("GET /api/auth/oidc/device", h.device)
-	mux.HandleFunc("GET /api/auth/oidc/callback", h.callback)
-}
-
-func providerKey(c *config.Config) string { return c.OIDCIssuer + "\x00" + c.OIDCClientID }
+func providerKey(c *Config) string { return c.OIDCIssuer + "\x00" + c.OIDCClientID }
 
 // provider returns the discovered provider for the current settings, fetching the discovery
 // document when the issuer or client changed. Failures are not cached.
-func (h *Handler) provider(ctx context.Context, c *config.Config) (*gooidc.Provider, error) {
+func (h *Handler) provider(ctx context.Context, c *Config) (*gooidc.Provider, error) {
 	key := providerKey(c)
 	h.provMu.Lock()
 	if e := h.prov; e != nil && e.key == key {
@@ -111,7 +147,7 @@ func (h *Handler) provider(ctx context.Context, c *config.Config) (*gooidc.Provi
 	return p, nil
 }
 
-func oauthConfig(c *config.Config, p *gooidc.Provider) *oauth2.Config {
+func oauthConfig(c *Config, p *gooidc.Provider) *oauth2.Config {
 	return &oauth2.Config{
 		ClientID:     c.OIDCClientID,
 		ClientSecret: c.OIDCClientSecret,
@@ -127,7 +163,7 @@ func randomString() string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) login(w http.ResponseWriter, r *http.Request, _ *route.Call) {
 	w.Header().Set("Cache-Control", "no-store")
 	c := h.cfg()
 	if !c.OIDCEnabled() {
@@ -146,7 +182,7 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 // device starts a new sign-in at the provider that approves the device of ?code= for the SSO
 // account of the UI session. The request asks the provider to sign the user in again
 // (prompt=login, max_age=0). Every failure goes back to the approval page with an error code.
-func (h *Handler) device(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) device(w http.ResponseWriter, r *http.Request, call *route.Call) {
 	w.Header().Set("Cache-Control", "no-store")
 	ctx := r.Context()
 	c := h.cfg()
@@ -155,11 +191,8 @@ func (h *Handler) device(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	code := r.URL.Query().Get("code")
-	p, ok := h.auth.Identify(w, r, true)
-	if !ok {
-		return
-	}
-	if p == nil || !p.Session {
+	p := call.P
+	if p == nil {
 		toDevice(w, r, code, "") // the approval page sends the visitor to sign in
 		return
 	}
@@ -189,7 +222,7 @@ func (h *Handler) device(w http.ResponseWriter, r *http.Request) {
 
 // start stores the pending sign-in pend under a new state, sets the state cookie and sends the
 // browser to the provider. opts are extra parameters of the authorization request.
-func (h *Handler) start(w http.ResponseWriter, r *http.Request, c *config.Config, p *gooidc.Provider, pend pending, opts ...oauth2.AuthCodeOption) {
+func (h *Handler) start(w http.ResponseWriter, r *http.Request, c *Config, p *gooidc.Provider, pend pending, opts ...oauth2.AuthCodeOption) {
 	state := randomString()
 	pend.nonce, pend.verifier = randomString(), oauth2.GenerateVerifier()
 	pend.provKey, pend.expires = providerKey(c), time.Now().Add(stateTTL)
@@ -202,7 +235,7 @@ func (h *Handler) start(w http.ResponseWriter, r *http.Request, c *config.Config
 	http.Redirect(w, r, oauthConfig(c, p).AuthCodeURL(state, opts...), http.StatusFound)
 }
 
-func (h *Handler) clearCookie(w http.ResponseWriter, c *config.Config) {
+func (h *Handler) clearCookie(w http.ResponseWriter, c *Config) {
 	http.SetCookie(w, &http.Cookie{
 		Name: stateCookie, Value: "", Path: stateCookiePath, MaxAge: -1,
 		HttpOnly: true, Secure: c.CookieSecure, SameSite: http.SameSiteLaxMode,
@@ -230,7 +263,7 @@ type signedIn struct {
 	cl     *claimSource
 }
 
-func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) callback(w http.ResponseWriter, r *http.Request, _ *route.Call) {
 	w.Header().Set("Cache-Control", "no-store")
 	ctx := r.Context()
 	c := h.cfg()
@@ -287,15 +320,6 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !isAdmin(c, si.cl) {
-		if err := h.auth.RevokeOIDCUser(ctx, si.idt.Issuer, si.idt.Subject); err != nil {
-			h.log.ErrorContext(ctx, "revoke SSO sessions", "error", err.Error())
-		}
-		h.log.InfoContext(ctx, "SSO login refused: not an admin", "subject", si.idt.Subject)
-		h.auth.RecordSignInFailed(r, NormalizeUsername(claimString(si.cl.get("preferred_username"))), "sso: not an admin")
-		fail(errNotAuthorized)
-		return
-	}
 	if pend.userCode != "" {
 		h.approval(w, r, pend, si)
 		return
@@ -306,16 +330,25 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
 	if v := si.cl.get("email"); v != nil {
 		email = strings.ToLower(strings.TrimSpace(claimString(v)))
 	}
-	u, err := h.auth.UpsertOIDCUser(ctx, si.idt.Issuer, si.idt.Subject, username, email)
+	var managed *perm.Set
+	if c.Managed() {
+		set := h.permsOf(ctx, c, si.cl)
+		managed = &set
+	}
+	ctx = audit.WithActor(ctx, audit.Actor{Kind: audit.ActorSSO, Name: username, IP: httpx.ClientIP(r)})
+	u, err := h.auth.UpsertOIDCUser(ctx, si.idt.Issuer, si.idt.Subject, username, email, managed)
 	switch {
 	case errors.Is(err, auth.ErrUsernameConflict):
 		h.log.WarnContext(ctx, "SSO login refused: username taken by another account", "username", username)
+		h.recordFailed(r, username, "username belongs to another account")
 		toLogin(w, r, errUsernameConflict)
 		return
 	case errors.Is(err, auth.ErrInvalid):
+		h.recordFailed(r, username, "invalid username")
 		toLogin(w, r, errInvalidUsername)
 		return
 	case errors.Is(err, auth.ErrDisabled):
+		h.recordFailed(r, username, "account disabled")
 		toLogin(w, r, errAccountDisabled)
 		return
 	case err != nil:
@@ -329,13 +362,20 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.log.InfoContext(ctx, "SSO login", "username", u.Username)
-	h.auth.RecordSignIn(r, u.ID, u.Username, "sso")
+	ctx = audit.WithActor(ctx, audit.Actor{Kind: audit.ActorUser, UserID: u.ID, Name: u.Username, IP: httpx.ClientIP(r)})
+	_ = h.audit.Record(ctx, audit.Event{Action: ActionSignIn, Target: u.Username})
 	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+// recordFailed writes sso.signin.failed; username is the name the provider gave.
+func (h *Handler) recordFailed(r *http.Request, username, reason string) {
+	ctx := audit.WithActor(r.Context(), audit.Actor{Kind: audit.ActorAnonymous, Name: username, IP: httpx.ClientIP(r)})
+	_ = h.audit.Record(ctx, audit.Event{Action: ActionSignInFailed, Target: username, Detail: map[string]any{"reason": reason}})
 }
 
 // exchange trades the authorization code for tokens and verifies the ID token (signature,
 // issuer, audience, expiry, nonce). ok is false after a failure, which it logs.
-func (h *Handler) exchange(ctx context.Context, c *config.Config, p *gooidc.Provider, pend pending, code string) (*signedIn, bool) {
+func (h *Handler) exchange(ctx context.Context, c *Config, p *gooidc.Provider, pend pending, code string) (*signedIn, bool) {
 	tok, err := oauthConfig(c, p).Exchange(ctx, code, oauth2.VerifierOption(pend.verifier))
 	if err != nil {
 		h.log.WarnContext(ctx, "OIDC code exchange failed", "error", err.Error())
@@ -424,7 +464,7 @@ func (h *Handler) approval(w http.ResponseWriter, r *http.Request, pend pending,
 	http.Redirect(w, r, "/#/device?"+q.Encode(), http.StatusFound)
 }
 
-// --- admin rule ---
+// --- claims ---
 
 // claimSource looks claims up in the ID token, falling back to the UserInfo endpoint (fetched
 // at most once) for claims the ID token does not carry.
@@ -467,47 +507,36 @@ func claimString(v any) string {
 	return s
 }
 
-// isAdmin applies the admin rule: the admin claim (string or list) contains one of
-// oidc.admin_values, or the email is verified and listed in oidc.admin_emails.
-func isAdmin(c *config.Config, cl *claimSource) bool {
-	if len(c.OIDCAdminValues) > 0 {
-		var have []string
-		switch v := cl.get(c.OIDCAdminClaim).(type) {
-		case string:
-			have = []string{v}
-		case []any:
-			for _, x := range v {
-				if s, ok := x.(string); ok {
-					have = append(have, s)
-				}
-			}
-		}
-		for _, want := range c.OIDCAdminValues {
-			for _, got := range have {
-				if got == want {
-					return true
-				}
+// permsOf returns the server permissions that the permission claim gives: the union of the
+// permissions that oidc.permission_map lists for each value of the claim (a string or a list).
+// Each value's list is parsed as one unit, the unit that the settings check validates. A list
+// that does not parse gives nothing and is logged.
+func (h *Handler) permsOf(ctx context.Context, c *Config, cl *claimSource) perm.Set {
+	var values []string
+	switch v := cl.get(c.PermissionClaim).(type) {
+	case string:
+		values = []string{v}
+	case []any:
+		for _, x := range v {
+			if s, ok := x.(string); ok {
+				values = append(values, s)
 			}
 		}
 	}
-	if len(c.OIDCAdminEmails) > 0 {
-		email := strings.ToLower(strings.TrimSpace(claimString(cl.get("email"))))
-		verified := false
-		switch v := cl.get("email_verified").(type) {
-		case bool:
-			verified = v
-		case string: // some providers send "true"
-			verified = strings.EqualFold(v, "true")
+	var out perm.Set
+	for _, v := range slices.Compact(slices.Sorted(slices.Values(values))) {
+		ids, ok := c.PermissionMap[v]
+		if !ok {
+			continue
 		}
-		if email != "" && verified {
-			for _, want := range c.OIDCAdminEmails {
-				if strings.EqualFold(want, email) {
-					return true
-				}
-			}
+		set, err := perm.Current().Parse(perm.ScopeServer, ids)
+		if err != nil {
+			h.log.WarnContext(ctx, "OIDC permission map value does not parse", "value", v, "error", err.Error())
+			continue
 		}
+		out = out.Union(set)
 	}
-	return false
+	return out
 }
 
 // NormalizeUsername maps preferred_username to a valid username: lower-cased, characters

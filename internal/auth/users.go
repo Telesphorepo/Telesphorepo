@@ -4,25 +4,31 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
+	"github.com/Telesphorepo/Telesphorepo/internal/perm"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
 const minPasswordLen = 8
 
 func newUser(id int64, username, perms string, disabled bool, kind string, email sql.NullString, created int64) *User {
-	p := ServerPermsOf(perms)
+	p := perm.Joined(perms).Of(perm.ScopeServer)
 	return &User{
-		ID: id, Username: username, Permissions: p.Names(), Perms: p, Disabled: disabled, Kind: kind,
+		ID: id, Username: username, Permissions: p.Strings(), Perms: p, Disabled: disabled, Kind: kind,
 		Email: email.String, CreatedAt: time.Unix(created, 0),
 	}
 }
 
-// CreateUser creates a local account with the server permissions perms.
-func (s *Service) CreateUser(ctx context.Context, username, password string, perms ServerPerm) (*User, error) {
+// CreateUser creates a local account with the server permissions perms and records user.create.
+func (s *Service) CreateUser(ctx context.Context, username, password string, perms perm.Set) (*User, error) {
+	if err := perm.Current().CheckNeeds(perms); err != nil {
+		return nil, err
+	}
 	if !repos.NameRE.MatchString(username) || len(password) < minPasswordLen {
 		return nil, ErrInvalid
 	}
@@ -43,16 +49,19 @@ func (s *Service) CreateUser(ctx context.Context, username, password string, per
 			}
 			return err
 		}
-		return addUserPerms(ctx, q, id, perms)
+		if err := addUserPerms(ctx, q, id, perms); err != nil {
+			return err
+		}
+		return s.audit.RecordTx(ctx, tx, audit.Event{Action: audit.UserCreate, Target: username, Detail: map[string]any{"permissions": perms.Strings()}})
 	})
 	if err != nil {
 		return nil, err
 	}
-	return &User{ID: id, Username: username, Permissions: perms.Names(), Perms: perms, Kind: KindLocal, CreatedAt: time.Unix(now, 0)}, nil
+	return &User{ID: id, Username: username, Permissions: perms.Strings(), Perms: perms, Kind: KindLocal, CreatedAt: time.Unix(now, 0)}, nil
 }
 
-func addUserPerms(ctx context.Context, q *dbq.Queries, id int64, perms ServerPerm) error {
-	for _, n := range perms.Names() {
+func addUserPerms(ctx context.Context, q *dbq.Queries, id int64, perms perm.Set) error {
+	for _, n := range perms.Strings() {
 		if err := q.AddUserPerm(ctx, dbq.AddUserPermParams{UserID: id, Perm: n}); err != nil {
 			return err
 		}
@@ -60,12 +69,12 @@ func addUserPerms(ctx context.Context, q *dbq.Queries, id int64, perms ServerPer
 	return nil
 }
 
-// ErrLastPeople refuses a change that leaves no enabled person with the People permission.
+// ErrLastPeople refuses a change that leaves no enabled person with people.manage.
 var ErrLastPeople = errors.New("at least one enabled person must keep the People permission")
 
-// checkPeopleHolder returns ErrLastPeople when no enabled person holds PermPeople.
+// checkPeopleHolder returns ErrLastPeople when no enabled person holds people.manage.
 func checkPeopleHolder(ctx context.Context, q *dbq.Queries) error {
-	rows, err := q.ListPermHolders(ctx, "people")
+	rows, err := q.ListPermHolders(ctx, string(perm.PeopleManage))
 	if err != nil {
 		return err
 	}
@@ -75,13 +84,16 @@ func checkPeopleHolder(ctx context.Context, q *dbq.Queries) error {
 	return nil
 }
 
-// SetUserPerms replaces the server permissions of username and returns the old set. A user who
-// needed no second factor before and needs one now loses their sessions, so a session that a
-// password alone started never holds the new permissions. It returns ErrLastPeople when the
-// change leaves no enabled person with PermPeople.
-func (s *Service) SetUserPerms(ctx context.Context, username string, perms ServerPerm) (ServerPerm, error) {
-	var old ServerPerm
-	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
+// SetUserPerms replaces the server permissions of username with ids and returns the old set. It
+// checks ids against the permission registry (an unknown ID or a broken need is an error). A
+// user who needed no second factor before and needs one now loses their sessions, so a session
+// that a password alone started never holds the new permissions. It returns ErrLastPeople when
+// the change leaves no enabled person with people.manage, and records user.permissions.
+func (s *Service) SetUserPerms(ctx context.Context, username string, ids []string) (old, perms perm.Set, err error) {
+	if perms, err = perm.Current().Parse(perm.ScopeServer, ids); err != nil {
+		return perm.Set{}, perm.Set{}, err
+	}
+	err = s.db.Tx(ctx, func(tx *sql.Tx) error {
 		q := s.wq.WithTx(tx)
 		r, err := q.GetUserByUsername(ctx, username)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -90,11 +102,14 @@ func (s *Service) SetUserPerms(ctx context.Context, username string, perms Serve
 		if err != nil {
 			return err
 		}
-		old = ServerPermsOf(r.Perms)
+		if s.Managed(r.Kind) {
+			return ErrManaged
+		}
+		old = perm.Joined(r.Perms).Of(perm.ScopeServer)
 		if old == perms {
 			return nil
 		}
-		before, err := q.UserElevated(ctx, r.ID)
+		before, err := userNeedsFactor(ctx, q, r.ID)
 		if err != nil {
 			return err
 		}
@@ -107,12 +122,20 @@ func (s *Service) SetUserPerms(ctx context.Context, username string, perms Serve
 		if err := checkPeopleHolder(ctx, q); err != nil {
 			return err
 		}
-		if !before.Bool && perms != 0 {
+		if err := s.audit.RecordTx(ctx, tx, audit.Event{Action: audit.UserPermissions, Target: username,
+			Detail: map[string]any{"old": old.Strings(), "new": perms.Strings()}}); err != nil {
+			return err
+		}
+		after, err := userNeedsFactor(ctx, q, r.ID)
+		if err != nil {
+			return err
+		}
+		if !before && after {
 			return q.DeleteUserSessions(ctx, r.ID)
 		}
 		return nil
 	})
-	return old, err
+	return old, perms, err
 }
 
 func (s *Service) GetUser(ctx context.Context, username string) (*User, error) {
@@ -123,7 +146,13 @@ func (s *Service) GetUser(ctx context.Context, username string) (*User, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newUser(r.ID, r.Username, r.Perms, r.Disabled, r.Kind, r.Email, r.CreatedAt), nil
+	return s.mark(newUser(r.ID, r.Username, r.Perms, r.Disabled, r.Kind, r.Email, r.CreatedAt)), nil
+}
+
+// mark sets PermissionsManaged of u.
+func (s *Service) mark(u *User) *User {
+	u.PermissionsManaged = s.Managed(u.Kind)
+	return u
 }
 
 func getUserByID(ctx context.Context, q *dbq.Queries, id int64) (*User, error) {
@@ -142,7 +171,7 @@ func (s *Service) ListUsers(ctx context.Context, after string, limit int) ([]*Us
 	}
 	out := make([]*User, len(rows))
 	for i, r := range rows {
-		out[i] = newUser(r.ID, r.Username, r.Perms, r.Disabled, r.Kind, r.Email, r.CreatedAt)
+		out[i] = s.mark(newUser(r.ID, r.Username, r.Perms, r.Disabled, r.Kind, r.Email, r.CreatedAt))
 	}
 	next := ""
 	if len(out) > limit {
@@ -154,7 +183,8 @@ func (s *Service) ListUsers(ctx context.Context, after string, limit int) ([]*Us
 
 // SetDisabled disables or enables every user of names in one transaction. It reads every name
 // first: an unknown name returns a *repos.MissingError and changes nothing. Disabling ends the
-// sessions of every user in the list. It returns the users whose value changed.
+// sessions of every user in the list. It records user.update for each user whose value changed,
+// and returns them.
 func (s *Service) SetDisabled(ctx context.Context, names []string, disabled bool) ([]*User, error) {
 	var changed []*User
 	var ids []int64
@@ -170,7 +200,7 @@ func (s *Service) SetDisabled(ctx context.Context, names []string, disabled bool
 			if err != nil {
 				return err
 			}
-			all = append(all, newUser(r.ID, r.Username, r.Perms, r.Disabled, r.Kind, r.Email, r.CreatedAt))
+			all = append(all, s.mark(newUser(r.ID, r.Username, r.Perms, r.Disabled, r.Kind, r.Email, r.CreatedAt)))
 		}
 		for _, u := range all {
 			if u.Disabled != disabled {
@@ -179,6 +209,9 @@ func (s *Service) SetDisabled(ctx context.Context, names []string, disabled bool
 				}
 				u.Disabled = disabled
 				changed = append(changed, u)
+				if err := s.audit.RecordTx(ctx, tx, audit.Event{Action: audit.UserUpdate, Target: u.Username, Detail: map[string]any{"disabled": disabled}}); err != nil {
+					return err
+				}
 			}
 			if disabled {
 				if err := q.DeleteUserSessions(ctx, u.ID); err != nil {
@@ -201,7 +234,8 @@ func (s *Service) SetDisabled(ctx context.Context, names []string, disabled bool
 	return changed, nil
 }
 
-// UpdateUser changes the password of username when password is set; the user's sessions end.
+// UpdateUser changes the password of username when password is set; the user's sessions end and
+// user.update is recorded (never the value).
 func (s *Service) UpdateUser(ctx context.Context, username string, password *string) (*User, error) {
 	var hash string
 	if password != nil {
@@ -233,6 +267,9 @@ func (s *Service) UpdateUser(ctx context.Context, username string, password *str
 				PasswordHash: hash, PasswordChangedAt: time.Now().Unix(), ID: id}); err != nil {
 				return err
 			}
+			if err := s.audit.RecordTx(ctx, tx, audit.Event{Action: audit.UserUpdate, Target: username, Detail: map[string]any{"password": "changed"}}); err != nil {
+				return err
+			}
 		}
 
 		if revoke {
@@ -255,11 +292,14 @@ func (s *Service) HasUsers(ctx context.Context) (bool, error) {
 	return s.rq.HasUsers(ctx)
 }
 
-// UpsertOIDCUser creates or updates the SSO administrator identified by (issuer, subject): it
-// holds every server permission and the email is updated. A new account gets username (already normalized); if that name
-// belongs to another account the result is ErrUsernameConflict (accounts are never merged by
-// name). A disabled account returns ErrDisabled.
-func (s *Service) UpsertOIDCUser(ctx context.Context, issuer, subject, username, email string) (*User, error) {
+// UpsertOIDCUser creates or updates the SSO account identified by (issuer, subject) and sets its
+// email. A new account gets username (already normalized); if that name belongs to another
+// account the result is ErrUsernameConflict (accounts are never merged by name). A disabled
+// account returns ErrDisabled. With managed set, single sign-on manages the server permissions:
+// they become exactly *managed, and a change records user.permissions with the actor kind sso.
+// A change that would leave no enabled person with people.manage keeps the old permissions and
+// is logged. With managed nil the permissions stay as they are; a new account has none.
+func (s *Service) UpsertOIDCUser(ctx context.Context, issuer, subject, username, email string, managed *perm.Set) (*User, error) {
 	mail := sql.NullString{String: email, Valid: email != ""}
 	oidcID := dbq.GetOIDCUserParams{
 		OidcIssuer:  sql.NullString{String: issuer, Valid: true},
@@ -278,29 +318,73 @@ func (s *Service) UpsertOIDCUser(ctx context.Context, issuer, subject, username,
 			if err := q.UpdateOIDCUser(ctx, dbq.UpdateOIDCUserParams{Email: mail, ID: id}); err != nil {
 				return err
 			}
-			return addUserPerms(ctx, q, id, AllServerPerms)
 		case !errors.Is(err, sql.ErrNoRows):
 			return err
-		}
-		if !repos.NameRE.MatchString(username) {
-			return ErrInvalid
-		}
-		now := time.Now().Unix()
-		id, err = q.CreateOIDCUser(ctx, dbq.CreateOIDCUserParams{
-			Username: username, PasswordHash: noPassword, PasswordChangedAt: now, CreatedAt: now,
-			Kind: KindOIDC, OidcIssuer: oidcID.OidcIssuer, OidcSubject: oidcID.OidcSubject, Email: mail})
-		if err != nil {
-			if strings.Contains(err.Error(), "users.username") {
-				return ErrUsernameConflict
+		default:
+			if !repos.NameRE.MatchString(username) {
+				return ErrInvalid
 			}
-			return err
+			now := time.Now().Unix()
+			id, err = q.CreateOIDCUser(ctx, dbq.CreateOIDCUserParams{
+				Username: username, PasswordHash: noPassword, PasswordChangedAt: now, CreatedAt: now,
+				Kind: KindOIDC, OidcIssuer: oidcID.OidcIssuer, OidcSubject: oidcID.OidcSubject, Email: mail})
+			if err != nil {
+				if strings.Contains(err.Error(), "users.username") {
+					return ErrUsernameConflict
+				}
+				return err
+			}
 		}
-		return addUserPerms(ctx, q, id, AllServerPerms)
+		if managed == nil {
+			return nil
+		}
+		return s.syncManaged(ctx, tx, q, id, *managed)
 	})
 	if err != nil {
 		return nil, err
 	}
-	return getUserByID(ctx, s.wq, id)
+	u, err := getUserByID(ctx, s.wq, id)
+	if err != nil {
+		return nil, err
+	}
+	return s.mark(u), nil
+}
+
+// syncManaged sets the server permissions of SSO account id to perms in tx, through a savepoint,
+// and records user.permissions as the actor sso when they change. A change that leaves no enabled
+// person with people.manage is rolled back to the savepoint and logged.
+func (s *Service) syncManaged(ctx context.Context, tx *sql.Tx, q *dbq.Queries, id int64, perms perm.Set) error {
+	u, err := getUserByID(ctx, q, id)
+	if err != nil {
+		return err
+	}
+	old := u.Perms.Of(perm.ScopeServer)
+	if old == perms {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, "SAVEPOINT sso_permissions"); err != nil {
+		return err
+	}
+	if err := q.DeleteUserPerms(ctx, id); err != nil {
+		return err
+	}
+	if err := addUserPerms(ctx, q, id, perms); err != nil {
+		return err
+	}
+	if err := checkPeopleHolder(ctx, q); errors.Is(err, ErrLastPeople) {
+		slog.WarnContext(ctx, "single sign-on: the permissions from the provider would leave nobody with people.manage; the old permissions stay",
+			"username", u.Username)
+		_, err := tx.ExecContext(ctx, "ROLLBACK TO sso_permissions")
+		return err
+	} else if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "RELEASE sso_permissions"); err != nil {
+		return err
+	}
+	actx := audit.WithActor(ctx, audit.Actor{Kind: audit.ActorSSO, UserID: id, Name: u.Username, IP: audit.ActorOf(ctx).IP})
+	return s.audit.RecordTx(actx, tx, audit.Event{Action: audit.UserPermissions, Target: u.Username,
+		Detail: map[string]any{"old": old.Strings(), "new": perms.Strings()}})
 }
 
 // OIDCUser returns the id of the SSO account (issuer, subject) and whether it is disabled. The id
@@ -319,24 +403,15 @@ func (s *Service) OIDCUser(ctx context.Context, issuer, subject string) (id int6
 	return row.ID, row.Disabled, nil
 }
 
-// RevokeOIDCUser deletes the sessions of the SSO account (issuer, subject), if it exists. Used
-// when a login no longer qualifies as admin.
-func (s *Service) RevokeOIDCUser(ctx context.Context, issuer, subject string) error {
-	return s.wq.DeleteOIDCUserSessions(ctx, dbq.DeleteOIDCUserSessionsParams{
-		OidcIssuer:  sql.NullString{String: issuer, Valid: true},
-		OidcSubject: sql.NullString{String: subject, Valid: true},
-	})
-}
-
 // Covers reports whether by holds every permission that target holds: each server permission,
 // and on each repository each repository permission (All repositories covers them all). A
 // person may reset the password of, or disable, only a person they cover, so neither action
 // gives them more than they hold.
 func (s *Service) Covers(ctx context.Context, by *Principal, target *User) (bool, error) {
-	if target.Perms&^by.Perms != 0 {
+	if !by.Perms.Contains(target.Perms) {
 		return false, nil
 	}
-	if by.Perms.Has(PermRepos) {
+	if perm.Current().AllRepos(by.Perms) {
 		return true, nil
 	}
 	theirs, err := s.UserRepoPerms(ctx, target.ID)
@@ -351,7 +426,7 @@ func (s *Service) Covers(ctx context.Context, by *Principal, target *User) (bool
 		return false, err
 	}
 	for id, set := range theirs {
-		if set&^mine[id] != 0 {
+		if !mine[id].Contains(set) {
 			return false, nil
 		}
 	}

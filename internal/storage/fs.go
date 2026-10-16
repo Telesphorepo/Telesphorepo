@@ -16,7 +16,7 @@ import (
 
 type fsStore struct{ root string }
 
-// NewFS returns a filesystem Store rooted at root (spec §5.1: temp file + rename).
+// NewFS returns a filesystem Store rooted at root (a temp file, then a rename).
 func NewFS(root string) (Store, error) {
 	if err := os.MkdirAll(root, 0o750); err != nil {
 		return nil, err
@@ -192,7 +192,7 @@ func (s *fsStore) List(ctx context.Context, prefix, after string, limit int) ([]
 	return out, nil
 }
 
-func (s *fsStore) PresignGet(ctx context.Context, key string, ttl time.Duration) (string, bool, error) {
+func (s *fsStore) PresignGet(ctx context.Context, key string, ttl time.Duration, resp Response) (string, bool, error) {
 	return "", false, nil
 }
 

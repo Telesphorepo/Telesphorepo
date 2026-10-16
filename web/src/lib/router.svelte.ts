@@ -2,39 +2,16 @@
 // UI paths and links that clients print (/#/device?code=, /#/settings/tokens) keep working. Every view
 // has its own address, so the browser's back button returns to the previous view.
 //
-// The route table is in src/routes.ts. A pattern is a path with ":name" segments and an optional
-// trailing "*rest" segment that takes the rest of the path (slashes included).
+// The pages are the PageDefs of the UI modules (web/src/modules). A path is a pattern with ":name"
+// segments and an optional trailing "*rest" segment that takes the rest of the path (slashes
+// included).
 
-import type { Component } from "svelte";
-import type { ServerPermission } from "$lib/api";
-
-/** "app": the page in the container. "settings": the Settings sidebar and the page. */
-export type Layout = "app" | "settings";
-/**
- * Who may open a page: anyone, a signed-in user, or a signed-in user with a server permission.
- * Three more depend on repository permissions: "repositories" (All repositories, or more than
- * download on a repository), "repo" (a settings tab of the repository `:name`) and "pipelines"
- * (All repositories, or CI pipelines on a repository). `auth.allows` checks them.
- */
-export type Access = "any" | "user" | ServerPermission | "repositories" | "repo" | "pipelines";
-
-export type RouteDef = {
-  pattern: string;
-  /** Lazy import of the page component. Pages receive `params` and `query` as props. */
-  page: () => Promise<{ default: Component<PageProps> }>;
-  layout: Layout;
-  access: Access;
-  /** Title in the browser tab ("<title> · Telesphorepo") and the last breadcrumb. */
-  title: string;
-};
-
-/** A path that opens another path: `to` gets the pattern's params. The query is kept. */
-export type RedirectDef = { pattern: string; to: (p: Params) => string };
+import type { PageDef, RedirectDef } from "../modules/types";
 
 export type Params = Record<string, string>;
 export type PageProps = { params: Params; query: URLSearchParams };
 
-export type Match = { route: RouteDef; params: Params };
+export type Match = { route: PageDef; params: Params };
 
 const read = () => {
   const h = window.location.hash.replace(/^#/, "") || "/";
@@ -124,11 +101,8 @@ export const repoPath = (name: string, rest = "") => "/repo/" + encodeURICompone
 /** The UI path of a folder ("" is the top, else ends with "/") or a file in the Files tab. */
 export const filesPath = (name: string, path = "") => repoPath(name, path ? "files/" + encodePath(path) : "");
 
-/** The tabs of a repository's settings, in the Settings shell. */
-export type RepoSettingsTab = "overview" | "access" | "format" | "signing" | "remote";
-
-/** The UI path of a repository's settings tab: /settings/repositories/<name>/<tab>. */
-export const repoSettingsPath = (name: string, tab: RepoSettingsTab = "overview") =>
+/** The UI path of a repository's settings tab: /settings/repositories/<name>/<tab> (overview, access, format, remote, or a module's tab). */
+export const repoSettingsPath = (name: string, tab = "overview") =>
   "/settings/repositories/" + encodeURIComponent(name) + "/" + tab;
 
 /** True when `path` is `prefix` or below it; for "active" states in navigation. */
@@ -165,9 +139,9 @@ const safeDecode = (s: string) => {
 const decodeSegments = (s: string) => s.split("/").map(safeDecode).join("/");
 
 /** The first route whose pattern matches the path. */
-export function match(routes: RouteDef[], path: string): Match | null {
-  for (const route of routes) {
-    const params = matchPattern(route.pattern, path);
+export function match(pages: PageDef[], path: string): Match | null {
+  for (const route of pages) {
+    const params = matchPattern(route.path, path);
     if (params) return { route, params };
   }
   return null;
@@ -176,7 +150,7 @@ export function match(routes: RouteDef[], path: string): Match | null {
 /** The path that a redirect sends `path` to, or null. */
 export function redirectOf(redirects: RedirectDef[], path: string): string | null {
   for (const r of redirects) {
-    const params = matchPattern(r.pattern, path);
+    const params = matchPattern(r.path, path);
     if (params) return r.to(params);
   }
   return null;

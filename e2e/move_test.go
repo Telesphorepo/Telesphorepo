@@ -11,7 +11,6 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
-	"path"
 	"slices"
 	"strings"
 	"sync"
@@ -44,6 +43,9 @@ func sha256Hex(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
+
+// blobKey is the storage key of the blob with SHA-256 sum: blobs/sha256/<first 2 hex>/<hex>.
+func blobKey(sum string) string { return "blobs/sha256/" + sum[:2] + "/" + sum }
 
 // movePut uploads body to path with the publish-session token and requires 201. It does not
 // take t, so worker goroutines can call it.
@@ -101,8 +103,8 @@ func moveRawSeed(t *testing.T, s *Server, repo, dir string, n, size int) map[str
 	return files
 }
 
-// moveAssets returns the SHA-256 of every asset of the repos, keyed by storage key, from the
-// asset API.
+// moveAssets returns the SHA-256 of the blob of every asset of the repos, keyed by its storage
+// key, from the asset API. Assets with the same bytes share one blob.
 func moveAssets(t *testing.T, s *Server, repos ...string) map[string]string {
 	t.Helper()
 	out := map[string]string{}
@@ -122,7 +124,7 @@ func moveAssets(t *testing.T, s *Server, repos ...string) map[string]string {
 			}
 			s.MustAPI(t, http.MethodGet, q, nil, s.Admin(), &page)
 			for _, it := range page.Items {
-				out[path.Join("repos", repo, strings.TrimPrefix(it.Path, "/"))] = it.SHA256
+				out[blobKey(it.SHA256)] = it.SHA256
 			}
 			if page.Next == nil || *page.Next == "" {
 				break
@@ -247,8 +249,9 @@ func moveContent(t *testing.T, s *Server, pkgs *debPackages, patch map[string]an
 	moveWantBlobs(t, "source (before the move)", src(t), before)
 
 	m := s.StartMove(t, patch)
-	if m.State != "copying" || m.Total != int64(len(before)) {
-		t.Fatalf("new move %+v, want copying with total %d", m, len(before))
+	// The total counts every blob row, also blobs that no asset uses any more and that wait for the GC.
+	if m.State != "copying" || m.Total < int64(len(before)) {
+		t.Fatalf("new move %+v, want copying with total >= %d", m, len(before))
 	}
 
 	// Uploads while the move copies go to both stores. An upload counts only when the move
@@ -289,8 +292,8 @@ func moveContent(t *testing.T, s *Server, pkgs *debPackages, patch map[string]an
 	after := moveAssets(t, s, mvnRepo, debRepo, rawRepo)
 	moveWantBlobs(t, "target", dst(t), after)
 	srcWant := maps.Clone(before)
-	for p, body := range during {
-		srcWant[path.Join("repos", rawRepo, p)] = sha256Hex(body)
+	for _, body := range during {
+		srcWant[blobKey(sha256Hex(body))] = sha256Hex(body)
 	}
 	moveWantBlobs(t, "source", src(t), srcWant)
 
@@ -325,10 +328,10 @@ func moveContent(t *testing.T, s *Server, pkgs *debPackages, patch map[string]an
 		t.Fatal(err)
 	}
 	moveWantBlobs(t, "target (upload after the move)", dst(t),
-		map[string]string{path.Join("repos", rawRepo, "after/new.bin"): sha256Hex(body)})
+		map[string]string{blobKey(sha256Hex(body)): sha256Hex(body)})
 }
 
-// TestStorageMoveFailure removes one blob from the source: the move fails with that asset in
+// TestStorageMoveFailure removes one blob from the source: the move fails with that blob in
 // its failures and storage stays on the source. After the blob is restored, a second move
 // skips what the first one copied and finishes.
 func TestStorageMoveFailure(t *testing.T) {
@@ -340,7 +343,7 @@ func TestStorageMoveFailure(t *testing.T) {
 	files := moveRawSeed(t, s, repo, "seed", 20, 4096)
 
 	lost := "seed/f00007.bin"
-	lostKey := path.Join("repos", repo, lost)
+	lostKey := blobKey(sha256Hex(files[lost]))
 	VolumeExec(t, vol, "set -e\nrm /data/blobs/"+lostKey+"\n")
 
 	m := s.StartMove(t, moveS3Patch(tg))
@@ -366,7 +369,7 @@ func TestStorageMoveFailure(t *testing.T) {
 	if err := movePut(s, "/raw/"+repo+"/after/new.bin", body, PublishToken(t, s, s.AdminUser, repo)); err != nil {
 		t.Fatal(err)
 	}
-	newKey := path.Join("repos", repo, "after/new.bin")
+	newKey := blobKey(sha256Hex(body))
 	moveWantBlobs(t, "source (upload after the failed move)", FSBlobs(t, vol), map[string]string{newKey: sha256Hex(body)})
 
 	// Restore the blob and start again.
@@ -446,7 +449,7 @@ func TestStorageMoveCancel(t *testing.T) {
 	}
 	files["after/new.bin"] = body
 	srcWant := maps.Clone(before)
-	srcWant[path.Join("repos", repo, "after/new.bin")] = sha256Hex(body)
+	srcWant[blobKey(sha256Hex(body))] = sha256Hex(body)
 	moveWantBlobs(t, "source", FSBlobs(t, vol), srcWant)
 
 	m2 := s.StartMove(t, moveS3Patch(tg))

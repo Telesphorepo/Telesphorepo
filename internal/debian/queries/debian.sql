@@ -16,7 +16,7 @@ WHERE repo_id = ? AND distribution = ? AND component = ? AND sha256 = ? LIMIT 1;
 -- each file, through deb_packages_package. A file in several distributions has one row for each.
 -- name: ListPackageFiles :many
 SELECT p.distribution, p.architecture, p.version, p.filename, p.size, p.sha256,
-  a.updated_at, a.publish_session_id
+  a.updated_at, a.build_id
 FROM deb_packages p JOIN assets a ON a.id = p.asset_id
 WHERE p.repo_id = ? AND p.component = ? AND p.package = ?
 LIMIT ?;
@@ -37,44 +37,6 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 SELECT DISTINCT distribution, component FROM deb_packages
 WHERE repo_id = ?
 ORDER BY distribution, component;
-
--- name: MarkDirty :exec
-INSERT INTO deb_dirty (repo_id, distribution, component, architecture, marked_at)
-VALUES (?, ?, ?, ?, ?)
-ON CONFLICT (repo_id, distribution, component, architecture) DO UPDATE SET marked_at = excluded.marked_at;
-
--- name: CountDirty :one
-SELECT COUNT(*) FROM deb_dirty WHERE repo_id = ?;
-
--- name: ListDirtyUnits :many
-SELECT component, architecture FROM deb_dirty
-WHERE repo_id = ? AND distribution = ?
-ORDER BY component, architecture;
-
--- name: ListRepoDirtyDists :many
-SELECT DISTINCT distribution FROM deb_dirty
-WHERE repo_id = ?
-ORDER BY distribution;
-
--- Deletes a dirty unit unless it was marked again after the rebuild started.
--- name: ClearDirty :exec
-DELETE FROM deb_dirty
-WHERE repo_id = ? AND distribution = ? AND component = ? AND architecture = ? AND marked_at <= ?;
-
--- name: HasDirty :one
-SELECT EXISTS (SELECT 1 FROM deb_dirty WHERE repo_id = ? AND distribution = ?);
-
--- name: DeleteDirtyArch :exec
-DELETE FROM deb_dirty WHERE repo_id = ? AND architecture = ?;
-
--- Startup recovery: every (repo, dist) with a pending rebuild.
--- name: ListAllDirtyDists :many
-SELECT DISTINCT repo_id, distribution FROM deb_dirty
-ORDER BY repo_id, distribution;
-
--- Startup recovery: the newest mark, so the rebuild clock never goes back.
--- name: MaxDirtyMark :one
-SELECT CAST(COALESCE(MAX(marked_at), 0) AS INTEGER) AS max_mark FROM deb_dirty;
 
 -- name: UpsertIndexFile :exec
 INSERT INTO deb_index_files (repo_id, distribution, path, size, md5, sha256, updated_at)
@@ -106,6 +68,3 @@ SELECT sha256 FROM deb_index_files WHERE repo_id = ? AND distribution = ? AND pa
 DELETE FROM deb_packages WHERE asset_id = ?
 RETURNING distribution, component, architecture;
 
--- Removes the asset row of an index file, so it is no longer served.
--- name: DeleteIndexAsset :exec
-DELETE FROM assets WHERE repo_id = ? AND path = ? AND kind = 'index';

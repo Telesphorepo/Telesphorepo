@@ -16,29 +16,28 @@ import (
 //go:embed queries/*.sql
 var queriesFS embed.FS
 
-// QuerySet is every query one owner (core or a format plugin) runs, for the plan guard.
-type QuerySet struct {
-	Component string
-	Files     fs.FS             // *.sql files with sqlc "-- name: X :kind" blocks at the root
-	Extra     map[string]string // hand-written query name -> SQL
-	Allow     map[string]string // query name -> why a scan or temp B-tree is acceptable
+// Component is the schema and the queries of one owner: the kernel ("core") or a module (named
+// after its module ID). Init runs its schema once; the plan guard checks its queries.
+type Component struct {
+	Name    string
+	Schema  string            // the whole schema of the component (its embedded schema.sql)
+	Queries fs.FS             // *.sql files with sqlc "-- name: X :kind" blocks at the root
+	Extra   map[string]string // hand-written query name -> SQL
+	Allow   map[string]string // query name -> why a scan or temp B-tree is acceptable
 }
 
-// CoreQueries is the core QuerySet: the sqlc queries in queries/ and the hand-written ones
-// in dbq/extra.go.
-func CoreQueries() QuerySet {
-	files, err := fs.Sub(queriesFS, "queries")
-	if err != nil {
-		panic(err) // the embedded directory always exists
-	}
-	return QuerySet{
-		Component: CoreComponent,
-		Files:     files,
-		Extra:     dbq.Extra,
+// Core is the kernel component: schema.sql, the sqlc queries in queries/ and the hand-written
+// ones in dbq/extra.go.
+func Core() Component {
+	return Component{
+		Name:    CoreComponent,
+		Schema:  coreSchema,
+		Queries: Sub(queriesFS, "queries"),
+		Extra:   dbq.Extra,
 		Allow: map[string]string{
-			"ListSettings": "loads every stored setting at startup and after a settings write, never on a request path; at most one row per registered setting",
-			"HasUsers":     "EXISTS stops at the first row; startup check for the first admin",
-			"CountAssets":  "the total of a storage move; runs once when an admin starts a move, never per request",
+			"ListSettings":      "loads every stored setting at startup and after a settings write, never on a request path; at most one row per registered setting",
+			"HasUsers":          "EXISTS stops at the first row; startup check for the first admin",
+			"ListRebuildGroups": "startup: picks up every pending rebuild once per start; the rebuilds table holds only units not built yet",
 		},
 	}
 }
@@ -47,7 +46,33 @@ var (
 	nameRE  = regexp.MustCompile(`^--\s*name:\s*(\w+)\s+:\w+`)
 	sqlcRE  = regexp.MustCompile(`sqlc\.(arg|narg|slice)\s*\([^)]*\)`)
 	indexRE = regexp.MustCompile(`\bINDEX (\S+)`)
+	// tableRE finds the tables that a schema creates.
+	tableRE = regexp.MustCompile(`(?i)\bCREATE\s+(?:VIRTUAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_]\w*)`)
+	// writeRE finds the tables that a query writes.
+	writeRE = regexp.MustCompile(`(?i)\b(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|DELETE\s+FROM|UPDATE(?:\s+OR\s+\w+)?)\s+([A-Za-z_]\w*)`)
 )
+
+// tablesOf returns the names of the tables that schema creates, in lower case.
+func tablesOf(schema string) map[string]bool {
+	out := map[string]bool{}
+	for _, m := range tableRE.FindAllStringSubmatch(schema, -1) {
+		out[strings.ToLower(m[1])] = true
+	}
+	return out
+}
+
+// foreignWrites returns the tables outside own that query writes.
+func foreignWrites(query string, own map[string]bool) []string {
+	var out []string
+	for _, m := range writeRE.FindAllStringSubmatch(query, -1) {
+		t := strings.ToLower(m[1])
+		if t == "set" || own[t] { // "ON CONFLICT ... DO UPDATE SET" names no table
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
+}
 
 type namedQuery struct {
 	name, origin, sql string
@@ -93,11 +118,23 @@ func parseQueries(fsys fs.FS) ([]namedQuery, error) {
 	return out, nil
 }
 
-// CheckPlans runs EXPLAIN QUERY PLAN on every query of sets against d, which must be a
-// freshly migrated database (core and every plugin track). It fails on a SCAN of a real table
-// (a partial index or a virtual table is fine) or a temp B-tree, unless the query is in its
-// set's Allow list. The error lists every offending query with its plan.
-func CheckPlans(ctx context.Context, d *DB, sets []QuerySet) error {
+// Sub returns the directory dir of an embedded file system. It panics when dir is missing: an
+// embedded directory always exists.
+func Sub(f embed.FS, dir string) fs.FS {
+	s, err := fs.Sub(f, dir)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
+// CheckPlans runs EXPLAIN QUERY PLAN on every query of sets against d, which must hold the
+// schema of every component. It fails on a SCAN of a real table (a partial index or a virtual
+// table is fine) or a temp B-tree, unless the query is in its component's Allow list. It also
+// fails on a query that writes a table outside its component's schema: a module writes only its
+// own tables, and the kernel tables change only through kernel services. The error lists every
+// offending query.
+func CheckPlans(ctx context.Context, d *DB, sets []Component) error {
 	partial, err := partialIndexes(ctx, d)
 	if err != nil {
 		return err
@@ -106,9 +143,9 @@ func CheckPlans(ctx context.Context, d *DB, sets []QuerySet) error {
 	seen := map[string]string{}
 	for _, set := range sets {
 		var qs []namedQuery
-		if set.Files != nil {
-			if qs, err = parseQueries(set.Files); err != nil {
-				return fmt.Errorf("%s: %w", set.Component, err)
+		if set.Queries != nil {
+			if qs, err = parseQueries(set.Queries); err != nil {
+				return fmt.Errorf("%s: %w", set.Name, err)
 			}
 		}
 		for name, q := range set.Extra {
@@ -117,14 +154,18 @@ func CheckPlans(ctx context.Context, d *DB, sets []QuerySet) error {
 		sort.Slice(qs, func(i, j int) bool { return qs[i].name < qs[j].name })
 
 		names := map[string]bool{}
+		own := tablesOf(set.Schema)
 		for _, q := range qs {
-			label := set.Component + "." + q.name + " (" + q.origin + ")"
-			if prev, ok := seen[set.Component+"."+q.name]; ok {
+			label := set.Name + "." + q.name + " (" + q.origin + ")"
+			if prev, ok := seen[set.Name+"."+q.name]; ok {
 				problems = append(problems, fmt.Sprintf("%s: name already used by %s", label, prev))
 				continue
 			}
-			seen[set.Component+"."+q.name] = label
+			seen[set.Name+"."+q.name] = label
 			names[q.name] = true
+			if bad := foreignWrites(q.sql, own); len(bad) > 0 {
+				problems = append(problems, fmt.Sprintf("%s: writes %s, outside the tables of %s", label, strings.Join(bad, ", "), set.Name))
+			}
 
 			plan, err := explain(ctx, d, q.sql)
 			if err != nil {
@@ -148,7 +189,7 @@ func CheckPlans(ctx context.Context, d *DB, sets []QuerySet) error {
 		}
 		for name := range set.Allow {
 			if !names[name] {
-				problems = append(problems, fmt.Sprintf("%s.%s: allow-list entry for an unknown query", set.Component, name))
+				problems = append(problems, fmt.Sprintf("%s.%s: allow-list entry for an unknown query", set.Name, name))
 			}
 		}
 	}

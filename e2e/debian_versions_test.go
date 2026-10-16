@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-// Versions, builds and artifact snippets of a Debian package (spec "Browse" and "Debian"): a
+// Versions, builds and artifact snippets of a Debian package: a
 // ~SNAPSHOT version groups its timestamped builds, like a Maven snapshot.
 
 // debVersionsScript builds the urn packages with dpkg-deb into /out/<n>.deb, n counting the
@@ -178,7 +178,7 @@ func TestDebianVersions(t *testing.T) {
 			}
 			install := func(u artifactSnippetsJSON) string {
 				for _, sn := range u.Snippets {
-					if sn.Context != "artifact" || sn.Client != "apt" {
+					if sn.Context != "artifact" || sn.Tool != "apt" {
 						t.Fatalf("snippet %+v", sn)
 					}
 				}

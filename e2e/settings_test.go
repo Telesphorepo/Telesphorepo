@@ -25,7 +25,7 @@ type settingItem struct {
 	Display string `json:"display"`
 }
 
-// listSettings fetches GET /api/settings as the admin ({groups:[{name, settings:[item]}]}) and
+// listSettings fetches GET /api/settings as the admin ({groups:[{id, settings:[item]}]}) and
 // returns the items by key plus the raw body.
 func listSettings(t *testing.T, s *Server) (map[string]settingItem, string) {
 	t.Helper()
@@ -35,7 +35,7 @@ func listSettings(t *testing.T, s *Server) (map[string]settingItem, string) {
 	}
 	var resp struct {
 		Groups []struct {
-			Name     string        `json:"name"`
+			ID       string        `json:"id"`
 			Settings []settingItem `json:"settings"`
 		} `json:"groups"`
 	}
@@ -45,8 +45,8 @@ func listSettings(t *testing.T, s *Server) (map[string]settingItem, string) {
 	var items []settingItem
 	for _, g := range resp.Groups {
 		for _, it := range g.Settings {
-			if it.Group != g.Name {
-				t.Errorf("setting %s has group %q but is listed under %q", it.Key, it.Group, g.Name)
+			if it.Group != g.ID {
+				t.Errorf("setting %s has group %q but is listed under %q", it.Key, it.Group, g.ID)
 			}
 			items = append(items, it)
 		}
@@ -68,7 +68,7 @@ func TestSettingsAccess(t *testing.T) {
 	for _, it := range items {
 		groups[it.Group] = true
 	}
-	for _, g := range []string{"general", "storage", "security", "debian"} {
+	for _, g := range []string{"general", "activity", "storage", "network", "publishing", "sso", "nexus"} {
 		if !groups[g] {
 			t.Errorf("group %q missing from settings (have %v)", g, groups)
 		}
@@ -112,7 +112,7 @@ func TestSettingsLiveUpdateAndEnvLock(t *testing.T) {
 		t.Fatalf("oversize JSON after lowering limit: status %d, want 413: %s", st, b)
 	}
 	items, _ = listSettings(t, s)
-	if got := items["max_json_size"]; got.Source != "db" || string(got.Value) != "2048" || got.Display != "2 KiB" {
+	if got := items["max_json_size"]; got.Source != "stored" || string(got.Value) != "2048" || got.Display != "2 KiB" {
 		t.Fatalf("max_json_size after patch: %+v", got)
 	}
 	// null resets to the default and the large body passes again.
@@ -123,6 +123,42 @@ func TestSettingsLiveUpdateAndEnvLock(t *testing.T) {
 	// Invalid input is a 400.
 	if st, b := s.API(t, http.MethodPatch, "/api/settings", map[string]any{"max_json_size": "lots"}, s.Admin()); st != http.StatusBadRequest {
 		t.Fatalf("invalid value: status %d, want 400: %s", st, b)
+	}
+}
+
+// TestSettingsSurviveRestart checks that stored settings, a secret among them, come back from the
+// database after a restart, and that the secret stays hidden.
+func TestSettingsSurviveRestart(t *testing.T) {
+	s := StartServer(t, ServerOpts{})
+	const secret = "restart-client-secret"
+	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{
+		"max_json_size":       2048,
+		"publish.session_ttl": "30m",
+		"oidc.client_secret":  secret,
+	}, s.Admin(), nil)
+	s.Restart(t)
+
+	items, raw := listSettings(t, s)
+	if got := items["max_json_size"]; got.Source != "stored" || string(got.Value) != "2048" {
+		t.Errorf("max_json_size after a restart: %+v", got)
+	}
+	if got := items["publish.session_ttl"]; got.Source != "stored" || got.Display != "30 minutes" {
+		t.Errorf("publish.session_ttl after a restart: %+v", got)
+	}
+	var sv struct {
+		Set bool `json:"set"`
+	}
+	got := items["oidc.client_secret"]
+	if err := json.Unmarshal(got.Value, &sv); err != nil || got.Source != "stored" || !sv.Set {
+		t.Errorf("oidc.client_secret after a restart: %+v (decode: %v)", got, err)
+	}
+	if strings.Contains(raw, secret) {
+		t.Fatal("GET /api/settings shows the client secret after a restart")
+	}
+	// The stored limit applies after the restart.
+	big := map[string]any{"name": strings.Repeat("x", 8192)}
+	if st, b := s.API(t, http.MethodPost, "/api/tokens", big, s.Admin()); st != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize JSON after a restart: status %d, want 413: %s", st, b)
 	}
 }
 
@@ -143,7 +179,7 @@ func TestSettingsSizeAndDuration(t *testing.T) {
 	} {
 		patch("max_upload_size", c.in)
 		got := func() settingItem { items, _ := listSettings(t, s); return items["max_upload_size"] }()
-		if string(got.Value) != c.value || got.Display != c.display || got.Source != "db" {
+		if string(got.Value) != c.value || got.Display != c.display || got.Source != "stored" {
 			t.Errorf("max_upload_size %q: value %s display %q, want %s / %q", c.in, got.Value, got.Display, c.value, c.display)
 		}
 	}
@@ -292,7 +328,7 @@ func TestSettingsLiveSwitchToS3(t *testing.T) {
 	keys := tg.ListKeys(t)
 	var found bool
 	for _, k := range keys {
-		if !strings.HasSuffix(k, "lib-1.0.0.jar") {
+		if !strings.HasSuffix(k, blobKey(sha256Hex([]byte(content)))) {
 			continue
 		}
 		found = true
@@ -308,6 +344,6 @@ func TestSettingsLiveSwitchToS3(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("no lib-1.0.0.jar object in bucket under %s: %v", tg.Prefix, keys)
+		t.Fatalf("no blob of lib-1.0.0.jar in bucket under %s: %v", tg.Prefix, keys)
 	}
 }

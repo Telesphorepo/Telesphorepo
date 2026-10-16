@@ -94,7 +94,7 @@ func TestAuth(t *testing.T) {
 	t.Run("read-only user", func(t *testing.T) {
 		u, pw := RandName("reader"), "pw-"+randHex(8)
 		s.CreateUser(t, u, pw)
-		s.SetPerms(t, repo, u, "download")
+		s.SetPerms(t, repo, u, "repo.download")
 		resp, body := authGet(t, s, path, Basic{u, pw})
 		wantStatus(t, resp, body, http.StatusOK)
 		resp, body = authPut(t, s, path+".z", "x", Basic{u, pw})
@@ -127,7 +127,7 @@ func TestAuth(t *testing.T) {
 	t.Run("token auth", func(t *testing.T) {
 		u, pw := RandName("tok"), "pw-"+randHex(8)
 		s.CreateUser(t, u, pw)
-		s.SetPerms(t, repo, u, "download")
+		s.SetPerms(t, repo, u, "repo.download")
 		tok := s.CreateToken(t, u, pw, "ci")
 		for _, name := range []string{"x", "anything", u} {
 			resp, body := authGet(t, s, path, Basic{name, tok})
@@ -138,7 +138,7 @@ func TestAuth(t *testing.T) {
 	t.Run("revoked token", func(t *testing.T) {
 		u, pw := RandName("revoke"), "pw-"+randHex(8)
 		s.CreateUser(t, u, pw)
-		s.SetPerms(t, repo, u, "download")
+		s.SetPerms(t, repo, u, "repo.download")
 		var tk struct {
 			ID    json.RawMessage `json:"id"`
 			Token string          `json:"token"`
@@ -159,7 +159,7 @@ func TestAuth(t *testing.T) {
 	t.Run("disabled user", func(t *testing.T) {
 		u, pw := RandName("disabled"), "pw-"+randHex(8)
 		s.CreateUser(t, u, pw)
-		s.SetPerms(t, repo, u, "download")
+		s.SetPerms(t, repo, u, "repo.download")
 		resp, body := authGet(t, s, path, Basic{u, pw})
 		wantStatus(t, resp, body, http.StatusOK)
 		s.MustAPI(t, http.MethodPatch, "/api/users", map[string]any{"usernames": []string{u}, "disabled": true}, s.Admin(), nil)
@@ -178,7 +178,7 @@ func TestAuth(t *testing.T) {
 	t.Run("password change invalidates old password", func(t *testing.T) {
 		u, oldPw, newPw := RandName("chpw"), "old-"+randHex(8), "new-"+randHex(8)
 		s.CreateUser(t, u, oldPw)
-		s.SetPerms(t, repo, u, "download")
+		s.SetPerms(t, repo, u, "repo.download")
 		for range 2 { // second request is served from the verification cache
 			resp, body := authGet(t, s, path, Basic{u, oldPw})
 			wantStatus(t, resp, body, http.StatusOK)
@@ -197,7 +197,7 @@ func TestAuthRateLimit(t *testing.T) {
 	s.CreateRepo(t, repo, "maven", false, nil)
 	u, pw := RandName("victim"), "pw-"+randHex(8)
 	s.CreateUser(t, u, pw)
-	s.SetPerms(t, repo, u, "download")
+	s.SetPerms(t, repo, u, "repo.download")
 	path := "/maven/" + repo + "/a/b/1/b-1.txt"
 
 	var limited *http.Response

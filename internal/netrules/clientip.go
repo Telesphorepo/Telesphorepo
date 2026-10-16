@@ -7,18 +7,18 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 )
 
-// trustedSet is the compiled trusted_proxies setting for one settings snapshot and one IP list
-// snapshot.
+// trustedSet is the compiled set of trusted proxies for one settings snapshot, one IP list
+// snapshot and one set of trusted list rows.
 type trustedSet struct {
-	cfg        *config.Config
-	lists      *map[string]*listState
+	snap       *settings.Snapshot
+	lists      *map[int64]*listState
+	rows       *[]int64
 	prefixes   []netip.Prefix
-	cloudflare []netip.Prefix // the ranges of the list "cloudflare" when the setting names it, else nil
+	cloudflare []netip.Prefix // the ranges of the list "cloudflare" when the trusted proxies include it, else nil
 }
 
 func contains(ps []netip.Prefix, a netip.Addr) bool {
@@ -30,29 +30,32 @@ func contains(ps []netip.Prefix, a netip.Addr) bool {
 	return false
 }
 
-// trustedNow returns the trusted set of the current settings and IP lists, compiling it when
-// either changed. An entry that names a list that does not exist trusts nothing.
+// trustedNow returns the trusted set: the literal entries of trusted_proxies, and the ranges of
+// the lists that the rows of trusted_proxy_lists and TR_TRUSTED_PROXIES include. It compiles the
+// set again when the settings, the IP lists or the rows changed.
 func (s *Service) trustedNow() *trustedSet {
-	cfg, lists := s.cfg(), s.lists.Load()
-	if t := s.trusted.Load(); t != nil && t.cfg == cfg && t.lists == lists {
+	snap, lists, rows := s.set(), s.ids.Load(), s.trustedLists.Load()
+	if t := s.trusted.Load(); t != nil && t.snap == snap && t.lists == lists && t.rows == rows {
 		return t
 	}
-	t := &trustedSet{cfg: cfg, lists: lists}
-	for _, e := range cfg.TrustedProxies {
+	t := &trustedSet{snap: snap, lists: lists, rows: rows}
+	for _, id := range slices.Concat(*rows, s.envLists) {
+		st := (*lists)[id]
+		if st == nil {
+			continue
+		}
+		if st.name == PresetCloudflare {
+			t.cloudflare = st.ranges
+		}
+		t.prefixes = append(t.prefixes, st.ranges...)
+	}
+	for _, e := range TrustedProxies.Get(snap) {
 		if e == Private {
 			t.prefixes = append(t.prefixes, privateRanges...)
 			continue
 		}
-		if name, ok := strings.CutPrefix(e, settings.TrustedProxyList); ok {
-			var ranges []netip.Prefix
-			if st := (*lists)[name]; st != nil {
-				ranges = st.ranges
-			}
-			if name == PresetCloudflare {
-				t.cloudflare = ranges
-			}
-			t.prefixes = append(t.prefixes, ranges...)
-			continue
+		if strings.HasPrefix(e, TrustedProxyList) {
+			continue // resolved once at startup (envLists)
 		}
 		if p, err := netip.ParsePrefix(e); err == nil {
 			t.prefixes = append(t.prefixes, p.Masked())
@@ -186,12 +189,4 @@ func (s *Service) ProxyCandidates() []Candidate {
 	s.candMu.Unlock()
 	slices.SortFunc(out, func(a, b Candidate) int { return b.LastSeen.Compare(a.LastSeen) })
 	return out
-}
-
-// Middleware resolves the client address once per request and attaches it to the request
-// (httpx.ClientIP reads it).
-func (s *Service) Middleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, httpx.WithClientIP(r, s.ClientIP(r)))
-	})
 }

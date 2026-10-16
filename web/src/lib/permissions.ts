@@ -1,92 +1,71 @@
-// The permission names, their words, and the rules between them (docs/superpowers/specs, granular
-// permissions). Server permissions belong to a person; repository permissions belong to a person
-// on one repository. PermissionPicker shows them; tables show a set as one short phrase.
+// The permission registry of the server (GET /api/permissions): every subsystem with its
+// permissions, their labels, help and needs. Server permissions belong to a person; repository
+// permissions belong to a person on one repository. auth.load() reads the registry before the
+// first page renders. PermissionPicker shows one group of checkboxes per subsystem; tables show a
+// set as one short phrase.
 
-import type { RepoPermission, ServerPermission } from "$lib/api";
+import { api, type PermId, type PermissionSubsystem } from "$lib/api";
 
-export type PermissionInfo<P extends string> = { name: P; label: string; help: string };
+export type PermissionInfo<P extends string = PermId> = { name: P; label: string; help: string };
+export type PermissionGroup = { title: string; help: string; items: PermissionInfo[] };
 
-/** The server permissions in display order. */
-export const SERVER_PERMISSIONS: PermissionInfo<ServerPermission>[] = [
-  { name: "repos", label: "All repositories", help: "Create and delete repositories, and use every repository with every permission." },
-  { name: "people", label: "People", help: "Add, change and disable people, and give them the permissions you hold." },
-  { name: "signin", label: "Sign-in options", help: "Change single sign-on and password sign-in." },
-  { name: "storage", label: "Storage", help: "Change where the server keeps files, and move them." },
-  { name: "network", label: "Network", help: "Change network lists and trusted proxies." },
-  { name: "keys", label: "Signing keys", help: "Create, import and delete the keys that sign Debian repositories." },
-  { name: "nexus", label: "Nexus migration", help: "Copy repositories from Nexus and switch over." },
-  { name: "general", label: "General", help: "Change the public address, upload limits, logs and retention." },
-  { name: "activity", label: "Activity", help: "Read the activity of the server and the publish tokens." },
-];
+let subsystems_: PermissionSubsystem[] = [];
 
-/** The repository permissions in display order. */
-export const REPO_PERMISSIONS: PermissionInfo<RepoPermission>[] = [
-  { name: "download", label: "Download files", help: "Read the files of the repository." },
-  { name: "publish", label: "Publish", help: "Publish from a computer or the browser." },
-  { name: "delete", label: "Delete files", help: "Delete files and folders." },
-  { name: "settings", label: "Edit settings", help: "Change the settings and the network rules." },
-  { name: "access", label: "Manage access", help: "Give and remove the permissions of this repository that you hold." },
-  { name: "pipelines", label: "CI pipelines", help: "Add and change the CI pipelines that publish here." },
-];
+/** Reads the registry from the server. */
+export async function loadPermissions(): Promise<void> {
+  subsystems_ = (await api.permissions()).subsystems;
+}
 
-/** A permission and the permission it needs: checking the first checks the second. */
-export const REPO_NEEDS: Partial<Record<RepoPermission, RepoPermission>> = { publish: "download", pipelines: "publish" };
+const of = (scope: "server" | "repo") => subsystems_.filter((s) => s.scope === scope).flatMap((s) => s.permissions);
 
-/** Puts a set in display order. */
-export const sortRepoPermissions = (set: readonly RepoPermission[]): RepoPermission[] =>
-  REPO_PERMISSIONS.map((x) => x.name).filter((x) => set.includes(x));
-export const sortServerPermissions = (set: readonly ServerPermission[]): ServerPermission[] =>
-  SERVER_PERMISSIONS.map((x) => x.name).filter((x) => set.includes(x));
+/** Every subsystem, in module start order. */
+export const subsystems = (): PermissionSubsystem[] => subsystems_;
 
-/** Lower-case words of a repository permission inside a phrase. */
-const repoWord: Record<RepoPermission, string> = {
-  download: "download",
-  publish: "publish",
-  delete: "delete files",
-  settings: "edit settings",
-  access: "manage access",
-  pipelines: "CI pipelines",
-};
+/** The server permissions in registry order. */
+export const serverPermissions = (): PermissionInfo[] => of("server").map((p) => ({ name: p.id, label: p.label, help: p.help }));
+
+/** The repository permissions in registry order. */
+export const repoPermissions = (): PermissionInfo[] => of("repo").map((p) => ({ name: p.id, label: p.label, help: p.help }));
+
+/** The permissions that each permission of scope needs. */
+export const needsOf = (scope: "server" | "repo"): Record<PermId, PermId[]> =>
+  Object.fromEntries(of(scope).map((p) => [p.id, p.needs]));
+
+/** The groups of PermissionPicker: one per subsystem of scope, with its label and help. */
+export const pickerGroups = (scope: "server" | "repo"): PermissionGroup[] =>
+  subsystems_
+    .filter((s) => s.scope === scope && s.permissions.length > 0)
+    .map((s) => ({ title: s.label, help: s.help, items: s.permissions.map((p) => ({ name: p.id, label: p.label, help: p.help })) }));
+
+/** The repository permissions whose holder manages the repository (they need a second factor). */
+export const managingRepoPermissions = (): PermId[] => of("repo").filter((p) => p.second_factor).map((p) => p.id);
+
+/** The server permissions that give every repository permission on every repository. */
+export const allReposPermissions = (): PermId[] => of("server").filter((p) => p.all_repos).map((p) => p.id);
+
+/** The label of a permission; the ID when the registry does not know it. */
+export const labelOf = (id: PermId): string => [...of("server"), ...of("repo")].find((p) => p.id === id)?.label ?? id;
+
+/** Puts a set in registry order. */
+export const sortRepoPermissions = (set: readonly PermId[]): PermId[] => of("repo").map((p) => p.id).filter((x) => set.includes(x));
+export const sortServerPermissions = (set: readonly PermId[]): PermId[] => of("server").map((p) => p.id).filter((x) => set.includes(x));
 
 const capital = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+const phrase = (labels: string[]) => capital(labels.map((l, i) => (i === 0 ? l : l.toLowerCase())).join(", "));
 
 /** A repository permission set as a short phrase: "Download", "Download, publish", "Everything". "" for none. */
-export function repoPhrase(set: readonly RepoPermission[] | null | undefined): string {
+export function repoPhrase(set: readonly PermId[] | null | undefined): string {
   const s = sortRepoPermissions(set ?? []);
-  if (s.length === REPO_PERMISSIONS.length) return "Everything";
-  return capital(s.map((p) => repoWord[p]).join(", "));
+  if (s.length > 0 && s.length === of("repo").length) return "Everything";
+  return phrase(s.map(labelOf));
 }
 
 /** True when the set holds every server permission. */
-export const isAdministrator = (set: readonly ServerPermission[] | null | undefined): boolean =>
-  SERVER_PERMISSIONS.every((p) => (set ?? []).includes(p.name));
+export const isAdministrator = (set: readonly PermId[] | null | undefined): boolean =>
+  of("server").length > 0 && of("server").every((p) => (set ?? []).includes(p.id));
 
-/** A person's role from their server permissions: "Administrator", the list ("People, storage"), or "". */
-export function serverPhrase(set: readonly ServerPermission[] | null | undefined): string {
+/** A person's role from their server permissions: "Administrator", the list ("Manage people, manage storage"), or "". */
+export function serverPhrase(set: readonly PermId[] | null | undefined): string {
   if (isAdministrator(set)) return "Administrator";
-  return capital(sortServerPermissions(set ?? []).map((p) => serverWord[p]).join(", "));
+  return phrase(sortServerPermissions(set ?? []).map(labelOf));
 }
-
-/** Lower-case words of a server permission inside a phrase. */
-const serverWord: Record<ServerPermission, string> = {
-  repos: "all repositories",
-  people: "people",
-  signin: "sign-in options",
-  storage: "storage",
-  network: "network",
-  keys: "signing keys",
-  nexus: "Nexus migration",
-  general: "general",
-  activity: "activity",
-};
-
-const pick = <P extends string>(all: PermissionInfo<P>[], names: P[]) => all.filter((x) => names.includes(x.name));
-
-/** The groups of PermissionPicker for server permissions. */
-export const SERVER_PICKER_GROUPS = [
-  { title: "People and repositories", items: pick(SERVER_PERMISSIONS, ["repos", "people"]) },
-  { title: "Server settings", items: pick(SERVER_PERMISSIONS, ["signin", "storage", "network", "keys", "nexus", "general", "activity"]) },
-];
-
-/** The group of PermissionPicker for repository permissions. */
-export const REPO_PICKER_GROUPS = [{ title: "Permissions on the repository", items: REPO_PERMISSIONS }];

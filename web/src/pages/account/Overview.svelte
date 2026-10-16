@@ -41,7 +41,7 @@
   }, 200);
 
   const canPublish = $derived(access?.can_publish ?? !me?.disabled);
-  const publishes = (r: UserRepoAccess) => !!r.perms?.includes("publish") && canPublish;
+  const publishes = (r: UserRepoAccess) => !!r.perms?.includes("repo.publish") && canPublish;
   const publishCount = $derived(repos.items.filter(publishes).length);
 
   // Your own devices (the list of a holder of People holds everyone's) and your recent publish tokens.
@@ -52,10 +52,10 @@
   const recent = new Resource<SessionInfo[]>(async () => (await api.publish.sessions({ limit: 5 })).items);
 
   // A public repository without a grant: download only.
-  const youCan = (r: UserRepoAccess) => repoPhrase(r.perms?.length ? r.perms : ["download"]);
+  const youCan = (r: UserRepoAccess) => repoPhrase(r.perms?.length ? r.perms : ["repo.download"]);
   // Say it once: the column shows only when the rows differ.
   const mixed = $derived(new Set(repos.items.map(youCan)).size > 1);
-  const allRepos = $derived(auth.can("repos"));
+  const allRepos = $derived(auth.can("repositories.all"));
   const through: Record<UserRepoAccess["via"], string> = {
     all_repos: "All repositories",
     permission: "Access given to you",
@@ -107,7 +107,7 @@
   </DataTable>
 </Section>
 
-<Section title="Your devices" description="Computers that publish as you with the Gradle plugin or the Maven extension.">
+<Section title="Your devices" description="Computers that publish as you with the publisher client of your build tool.">
   {#snippet actions()}
     {#if devices.data?.length}<Button variant="outline" size="sm" href={href("/settings/devices")}>All devices</Button>{/if}
   {/snippet}

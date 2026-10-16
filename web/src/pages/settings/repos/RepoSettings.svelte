@@ -3,16 +3,20 @@
   the sidebar stays, "All repositories" stays open in it, and the breadcrumbs say where the page
   sits (Settings › Repositories › maven › Access). The header names the repository; the tabs are
   pages with their own address, so the back button returns to the previous tab. The tab bodies are
-  the other files of this folder. The tabs depend on the kind: a hosted repository has Overview,
-  Access, Format settings (and Signing for Debian); a proxy has Overview, Access and Remote; a group
-  has Overview and Access. They depend on the permissions too: Edit settings opens every tab but
+  the other files of this folder, and the repository tabs of the UI modules (web/src/modules) that
+  the format names in repo_tabs (the Signing tab of the signing module). The tabs depend on the
+  kind: a hosted repository has Overview, Access, Format settings and the module tabs; a proxy has
+  Overview, Access and Remote; a group has Overview and Access. They depend on the permissions too: Edit settings opens every tab but
   Access; Manage access, Edit settings or CI pipelines opens Access. A tab that the person cannot
   open goes to the first one they can. Delete needs All repositories.
 -->
 <script lang="ts">
   import { api, ApiError, type Repo } from "$lib/api";
   import { Resource } from "$lib/load.svelte";
-  import { filesPath, href, navigate, repoSettingsPath, type PageProps, type RepoSettingsTab } from "$lib/router.svelte";
+  import { filesPath, href, navigate, repoSettingsPath, type PageProps } from "$lib/router.svelte";
+  import { formats } from "$lib/formats/registry.svelte";
+  import { repoTab } from "../../../modules";
+  import type { RepoTabDef } from "../../../modules/types";
   import { auth } from "$lib/auth.svelte";
   import { Button } from "$lib/components/ui/button";
   import PageHeader from "$lib/components/PageHeader.svelte";
@@ -23,12 +27,10 @@
   import FormatBadge from "$lib/components/FormatBadge.svelte";
   import OverviewTab from "./OverviewTab.svelte";
   import AccessTab from "./AccessTab.svelte";
-  import SigningTab from "./SigningTab.svelte";
   import FormatTab from "./FormatTab.svelte";
   import DeleteRepo from "./DeleteRepo.svelte";
   import InfoIcon from "@lucide/svelte/icons/info";
   import UsersIcon from "@lucide/svelte/icons/users-round";
-  import FileKeyIcon from "@lucide/svelte/icons/file-key";
   import SlidersIcon from "@lucide/svelte/icons/sliders-horizontal";
   import FolderOpenIcon from "@lucide/svelte/icons/folder-open";
   import LockIcon from "@lucide/svelte/icons/lock";
@@ -59,16 +61,19 @@
 
   const r = $derived(repo.data?.name === params.name ? repo.data : repo.data === null ? null : undefined);
 
-  // A group and a proxy have no format settings and sign nothing; a proxy has its Remote tab.
+  // A group and a proxy have no format settings and no module tabs; a proxy has its Remote tab.
   const tabs = $derived.by(() => {
-    const settings = auth.canRepo(params.name, "settings");
-    const t: { id: RepoSettingsTab; label: string; icon: typeof InfoIcon }[] = [];
+    const settings = auth.canRepo(params.name, "repo.settings");
+    const t: { id: string; label: string; icon: typeof InfoIcon; module?: RepoTabDef }[] = [];
     if (settings) t.push({ id: "overview", label: "Overview", icon: InfoIcon });
     if (auth.managesRepo(params.name)) t.push({ id: "access", label: "Access", icon: UsersIcon });
     if (settings && r?.kind === "proxy") t.push({ id: "remote", label: "Remote", icon: GlobeIcon });
-    if (settings && r?.kind === "hosted") {
-      t.push({ id: "format", label: "Format settings", icon: SlidersIcon });
-      if (r.format === "debian") t.push({ id: "signing", label: "Signing", icon: FileKeyIcon });
+    if (r?.kind === "hosted") {
+      if (settings) t.push({ id: "format", label: "Format settings", icon: SlidersIcon });
+      for (const id of formats.get(r.format)?.repo_tabs ?? []) {
+        const def = repoTab(id);
+        if (def && auth.canRepo(params.name, def.access)) t.push({ id, label: def.label, icon: def.icon, module: def });
+      }
     }
     return t;
   });
@@ -106,7 +111,7 @@
       {#if r.kind !== "group"}
         <Button variant="outline" href={href(filesPath(r.name))}><FolderOpenIcon />Open files</Button>
       {/if}
-      {#if auth.can("repos")}
+      {#if auth.can("repositories.all")}
         <Button variant="ghost" class="hover:bg-destructive/10 hover:text-destructive" onclick={() => (deleteOpen = true)}>Delete</Button>
       {/if}
     {/snippet}
@@ -126,10 +131,12 @@
       <AccessTab repo={r} onChanged={repo.reload} />
     {:else if open.id === "format"}
       <FormatTab repo={r} onChanged={repo.reload} />
-    {:else if open.id === "signing"}
-      <SigningTab repo={r} onChanged={repo.reload} />
     {:else if open.id === "remote"}
       <RemoteTab repo={r} onChanged={repo.reload} />
+    {:else if open.module}
+      {#await open.module.component() then mod}
+        <mod.default repo={r} onChanged={repo.reload} />
+      {/await}
     {/if}
     <DeleteRepo repo={r} bind:open={deleteOpen} />
   {/key}

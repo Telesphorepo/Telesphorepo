@@ -23,7 +23,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// Publisher credentials (spec §7.6): the write gate, second-factor sign-in, the device flow,
+// Publisher credentials: the write gate, second-factor sign-in, the device flow,
 // manual sessions and the OIDC exchange for CI.
 
 // pubPut uploads a new file to the Maven repo with auth.
@@ -63,9 +63,9 @@ func TestPublishGate(t *testing.T) {
 	w, r := RandName("writer"), RandName("reader")
 	s.CreateUser(t, w, "writer-pass-1234")
 	s.CreateUser(t, r, "reader-pass-1234")
-	s.SetPerms(t, repo, w, "download", "publish")
-	s.SetPerms(t, other, w, "download", "publish")
-	s.SetPerms(t, repo, r, "download")
+	s.SetPerms(t, repo, w, "repo.download", "repo.publish")
+	s.SetPerms(t, other, w, "repo.download", "repo.publish")
+	s.SetPerms(t, repo, r, "repo.download")
 
 	t.Run("password and read token cannot write", func(t *testing.T) {
 		readToken := s.CreateToken(t, w, "writer-pass-1234", "read")
@@ -97,10 +97,10 @@ func TestPublishGate(t *testing.T) {
 
 	t.Run("lost permission", func(t *testing.T) {
 		ps := s.MintSession(t, w, repo)
-		s.SetPerms(t, repo, w, "download")
+		s.SetPerms(t, repo, w, "repo.download")
 		resp, body := pubPut(t, s, repo, ps.Auth())
 		wantStatus(t, resp, body, http.StatusForbidden)
-		s.SetPerms(t, repo, w, "download", "publish")
+		s.SetPerms(t, repo, w, "repo.download", "repo.publish")
 		resp, body = pubPut(t, s, repo, ps.Auth())
 		wantStatus(t, resp, body, http.StatusCreated)
 	})
@@ -207,8 +207,11 @@ func TestPublishGate(t *testing.T) {
 
 	t.Run("manual session", func(t *testing.T) {
 		sess := s.LoginTOTP(t, w)
-		st, b := s.API(t, http.MethodPost, "/api/publish/sessions/manual", map[string]string{"repo": repo, "totp_code": "000000"}, sess)
+		st, b := s.API(t, http.MethodPost, "/api/publish/sessions/manual", map[string]string{"repo": repo}, Proof{sess, "totp 000000"})
 		wantAPIStatus(t, "manual session with a wrong code", st, b, http.StatusUnauthorized)
+		// The fresh factor comes in the header X-Telesphorepo-Proof; a body field is not a proof.
+		st, b = s.API(t, http.MethodPost, "/api/publish/sessions/manual", map[string]string{"repo": repo, "totp_code": s.TOTPCode(t, w)}, sess)
+		wantAPIStatus(t, "manual session without the proof header", st, b, http.StatusBadRequest)
 		ps := mustSession(t, "manual session")(s.ManualSession(t, sess, w, repo))
 		resp, body := pubPut(t, s, repo, ps.Auth())
 		wantStatus(t, resp, body, http.StatusCreated)
@@ -216,9 +219,9 @@ func TestPublishGate(t *testing.T) {
 		// A user without a second factor signs in with the password but cannot mint.
 		u := RandName("nofactor")
 		s.CreateUser(t, u, "nofactor-pass-1234")
-		s.SetPerms(t, repo, u, "download", "publish")
+		s.SetPerms(t, repo, u, "repo.download", "repo.publish")
 		plain := s.Login(t, u, "nofactor-pass-1234")
-		st, b = s.API(t, http.MethodPost, "/api/publish/sessions/manual", map[string]string{"repo": repo, "totp_code": "000000"}, plain)
+		st, b = s.API(t, http.MethodPost, "/api/publish/sessions/manual", map[string]string{"repo": repo}, Proof{plain, "totp 000000"})
 		wantAPIStatus(t, "manual session of a user without a second factor", st, b, http.StatusForbidden)
 		if !strings.Contains(string(b), "second_factor_required") {
 			t.Fatalf("manual session of a user without a second factor: body %s, want second_factor_required", b)
@@ -226,7 +229,7 @@ func TestPublishGate(t *testing.T) {
 	})
 }
 
-// TestSecondFactorLogin covers the sign-in rule of spec §13: a person with server permissions
+// TestSecondFactorLogin covers the sign-in rule: a person with server permissions
 // signs in with a second factor (without one the session reaches only the setup routes); a
 // person who only downloads and publishes signs in with the password and needs a factor only to
 // approve a device or create a manual publish session.
@@ -275,7 +278,7 @@ func TestSecondFactorLogin(t *testing.T) {
 
 		// A device approval still needs a second factor.
 		en, _ := s.StartEnrollment(t, "laptop", "gradle")
-		st, b := s.API(t, http.MethodPost, "/api/devices/approve", map[string]string{"user_code": en.UserCode, "totp_code": "000000"}, sess)
+		st, b := s.API(t, http.MethodPost, "/api/devices/approve", map[string]string{"user_code": en.UserCode}, Proof{sess, "totp 000000"})
 		wantAPIStatus(t, "approve without a second factor", st, b, http.StatusForbidden)
 		if !strings.Contains(string(b), "second_factor_required") {
 			t.Fatalf("approve without a second factor: body %s, want second_factor_required", b)
@@ -354,7 +357,14 @@ func TestDeviceEnrollment(t *testing.T) {
 	s.CreateRepo(t, repo, "maven", false, nil)
 	u, pw := RandName("dev"), "dev-pass-1234"
 	s.CreateUser(t, u, pw)
-	s.SetPerms(t, repo, u, "download", "publish")
+	s.SetPerms(t, repo, u, "repo.download", "repo.publish")
+
+	// The client is a registered publisher client; an unknown one gets 400 with the list.
+	st0, b0 := s.API(t, http.MethodPost, "/api/devices/enroll", map[string]string{"name": "x", "client": "ant", "public_key": b64(make([]byte, 32))}, nil)
+	wantAPIStatus(t, "enroll from an unknown client", st0, b0, http.StatusBadRequest)
+	if !strings.Contains(string(b0), `\"gradle\", \"maven\"`) {
+		t.Fatalf("enroll from an unknown client: %s, want the list of clients", b0)
+	}
 
 	en, key := s.StartEnrollment(t, "laptop", "maven")
 	if !userCodeRe.MatchString(en.UserCode) || en.VerificationURL != s.InternalURL+"/#/device" || en.ExpiresIn != 600 || en.Interval != 5 {
@@ -372,13 +382,13 @@ func TestDeviceEnrollment(t *testing.T) {
 
 	// A sign-in without a second factor cannot approve.
 	setup := s.Login(t, u, pw)
-	st2, b := s.API(t, http.MethodPost, "/api/devices/approve", map[string]string{"user_code": en.UserCode, "totp_code": "000000"}, setup)
+	st2, b := s.API(t, http.MethodPost, "/api/devices/approve", map[string]string{"user_code": en.UserCode}, Proof{setup, "totp 000000"})
 	wantAPIStatus(t, "approve from a setup-only sign-in", st2, b, http.StatusForbidden)
 
 	sess := s.LoginTOTP(t, u)
-	st2, b = s.API(t, http.MethodPost, "/api/devices/approve", map[string]string{"user_code": en.UserCode, "totp_code": "000000"}, sess)
+	st2, b = s.API(t, http.MethodPost, "/api/devices/approve", map[string]string{"user_code": en.UserCode}, Proof{sess, "totp 000000"})
 	wantAPIStatus(t, "approve with a wrong code", st2, b, http.StatusUnauthorized)
-	st2, b = s.API(t, http.MethodPost, "/api/devices/approve", map[string]string{"user_code": "BCDF-GHJK", "totp_code": s.TOTPCode(t, u)}, sess)
+	st2, b = s.API(t, http.MethodPost, "/api/devices/approve", map[string]string{"user_code": "BCDF-GHJK"}, s.TOTPProof(t, sess, u))
 	wantAPIStatus(t, "approve an unknown code", st2, b, http.StatusNotFound)
 	st2, b = s.ApproveEnrollment(t, sess, u, en.UserCode)
 	wantAPIStatus(t, "approve", st2, b, http.StatusOK, http.StatusCreated)
@@ -395,6 +405,19 @@ func TestDeviceEnrollment(t *testing.T) {
 	st, a2 := s.PollEnrollment(t, en.DeviceCode)
 	if st != http.StatusBadRequest || a2.Error != "expired_token" {
 		t.Fatalf("poll after the device id was taken: status %d, answer %+v, want 400 expired_token", st, a2)
+	}
+
+	// The device names its publisher client.
+	var devices struct {
+		Items []struct {
+			ID          int64  `json:"id"`
+			Client      string `json:"client"`
+			ClientTitle string `json:"client_title"`
+		} `json:"items"`
+	}
+	s.MustAPI(t, http.MethodGet, "/api/devices", nil, sess, &devices)
+	if len(devices.Items) != 1 || devices.Items[0].ID != a.DeviceID || devices.Items[0].Client != "maven" || devices.Items[0].ClientTitle != "Maven extension" {
+		t.Fatalf("devices: %+v, want the maven device", devices.Items)
 	}
 
 	d := &Device{ID: a.DeviceID, User: u, Key: key}

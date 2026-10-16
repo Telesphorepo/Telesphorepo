@@ -2,6 +2,7 @@ import type { NexusStatus, NexusSync } from "$lib/api";
 import type { Tone } from "$lib/components/StatusBadge.svelte";
 import { formatCount, formatSize } from "$lib/format";
 import { count } from "$lib/words";
+import { formats } from "$lib/formats/registry.svelte";
 
 /** The word and the badge tone of a sync state, or of the state of one repository in a sync. */
 export const syncState: Record<string, { word: string; tone: Tone }> = {
@@ -21,33 +22,11 @@ export const sourceStatus: Record<NexusStatus, { word: string; tone: Tone }> = {
   cut_over: { word: "Switched over", tone: "success" },
 };
 
-// Nexus format ids and the words for them. An id that is not here shows with a capital letter.
-const formatWords: Record<string, string> = {
-  maven2: "Maven",
-  apt: "Debian",
-  raw: "Raw",
-  npm: "npm",
-  docker: "Docker",
-  pypi: "PyPI",
-  nuget: "NuGet",
-  rubygems: "RubyGems",
-  helm: "Helm",
-  go: "Go",
-  yum: "Yum",
-  conda: "Conda",
-  conan: "Conan",
-  cocoapods: "CocoaPods",
-  gitlfs: "Git LFS",
-  bower: "Bower",
-  p2: "P2",
-  r: "R",
-  cargo: "Cargo",
-  composer: "Composer",
-  huggingface: "Hugging Face",
-};
-
-/** "maven2" → "Maven". */
-export const formatWord = (id: string) => formatWords[id] ?? (id ? id[0].toUpperCase() + id.slice(1) : "Unknown format");
+/**
+ * A Nexus format id in words: the title of the format here that imports it (import_sources of its
+ * descriptor), e.g. "maven2" → "Maven / Gradle"; another id with a capital letter ("Npm").
+ */
+export const formatWord = (id: string) => formats.importer(id)?.title ?? (id ? id[0].toUpperCase() + id.slice(1) : "Unknown format");
 
 /** "Maven, hosted"; "Debian, proxy"; "Maven, group". */
 export const kindText = (format: string, type: string) => (type ? `${formatWord(format)}, ${type}` : formatWord(format));

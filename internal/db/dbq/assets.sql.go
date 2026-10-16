@@ -27,10 +27,32 @@ func (q *Queries) DeleteAsset(ctx context.Context, arg DeleteAssetParams) (int64
 	return result.RowsAffected()
 }
 
+const deleteUnreferencedBlob = `-- name: DeleteUnreferencedBlob :execrows
+DELETE FROM blobs WHERE id = ? AND refs = 0
+`
+
+// Deletes a blob row only while no asset points to it.
+func (q *Queries) DeleteUnreferencedBlob(ctx context.Context, id int64) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteUnreferencedBlob, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const deleteUploadSession = `-- name: DeleteUploadSession :exec
+DELETE FROM upload_sessions WHERE id = ?
+`
+
+func (q *Queries) DeleteUploadSession(ctx context.Context, id string) error {
+	_, err := q.db.ExecContext(ctx, deleteUploadSession, id)
+	return err
+}
+
 const getAsset = `-- name: GetAsset :one
 
-SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id,
-  checked_at, remote_etag
+SELECT id, repo_id, path, blob_id, size, sha256, content_type, kind, uploaded_by, created_at, updated_at,
+  build_id, checked_at, remote_etag
 FROM assets WHERE repo_id = ? AND path = ?
 `
 
@@ -39,7 +61,8 @@ type GetAssetParams struct {
 	Path   string
 }
 
-// The assets table (internal/assets). The FTS5 search is hand-written in dbq/extra.go.
+// The assets table (internal/assets). Only the asset pipeline writes it. The FTS5 search is
+// hand-written in dbq/extra.go.
 // Indexed point lookup on (repo_id, path), used by every download.
 func (q *Queries) GetAsset(ctx context.Context, arg GetAssetParams) (Asset, error) {
 	row := q.db.QueryRowContext(ctx, getAsset, arg.RepoID, arg.Path)
@@ -48,6 +71,7 @@ func (q *Queries) GetAsset(ctx context.Context, arg GetAssetParams) (Asset, erro
 		&i.ID,
 		&i.RepoID,
 		&i.Path,
+		&i.BlobID,
 		&i.Size,
 		&i.Sha256,
 		&i.ContentType,
@@ -55,32 +79,135 @@ func (q *Queries) GetAsset(ctx context.Context, arg GetAssetParams) (Asset, erro
 		&i.UploadedBy,
 		&i.CreatedAt,
 		&i.UpdatedAt,
-		&i.PublishSessionID,
+		&i.BuildID,
 		&i.CheckedAt,
 		&i.RemoteEtag,
 	)
 	return i, err
 }
 
-const getAssetID = `-- name: GetAssetID :one
-SELECT id FROM assets WHERE repo_id = ? AND path = ?
+const getBlob = `-- name: GetBlob :one
+
+SELECT id, sha256, size, refs FROM blobs WHERE sha256 = ?
 `
 
-type GetAssetIDParams struct {
-	RepoID int64
-	Path   string
+type GetBlobRow struct {
+	ID     int64
+	Sha256 string
+	Size   int64
+	Refs   int64
 }
 
-func (q *Queries) GetAssetID(ctx context.Context, arg GetAssetIDParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, getAssetID, arg.RepoID, arg.Path)
+// Content-addressed blobs (internal/blobs).
+func (q *Queries) GetBlob(ctx context.Context, sha256 string) (GetBlobRow, error) {
+	row := q.db.QueryRowContext(ctx, getBlob, sha256)
+	var i GetBlobRow
+	err := row.Scan(
+		&i.ID,
+		&i.Sha256,
+		&i.Size,
+		&i.Refs,
+	)
+	return i, err
+}
+
+const getUploadSession = `-- name: GetUploadSession :one
+SELECT id, repo_id, user_id, publish_session_id, received, created_at, updated_at, expires_at
+FROM upload_sessions WHERE id = ?
+`
+
+func (q *Queries) GetUploadSession(ctx context.Context, id string) (UploadSession, error) {
+	row := q.db.QueryRowContext(ctx, getUploadSession, id)
+	var i UploadSession
+	err := row.Scan(
+		&i.ID,
+		&i.RepoID,
+		&i.UserID,
+		&i.PublishSessionID,
+		&i.Received,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ExpiresAt,
+	)
+	return i, err
+}
+
+const insertBlob = `-- name: InsertBlob :one
+INSERT INTO blobs (sha256, size, refs, unreferenced_at, created_at) VALUES (?, ?, 0, ?, ?)
+RETURNING id
+`
+
+type InsertBlobParams struct {
+	Sha256         string
+	Size           int64
+	UnreferencedAt int64
+	CreatedAt      int64
+}
+
+// A new blob has no reference yet: it counts as unreferenced since it was created, so a blob
+// whose commit failed reaches the GC after the grace.
+func (q *Queries) InsertBlob(ctx context.Context, arg InsertBlobParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, insertBlob,
+		arg.Sha256,
+		arg.Size,
+		arg.UnreferencedAt,
+		arg.CreatedAt,
+	)
 	var id int64
 	err := row.Scan(&id)
 	return id, err
 }
 
+const insertUploadSession = `-- name: InsertUploadSession :exec
+
+INSERT INTO upload_sessions (id, repo_id, user_id, publish_session_id, received, created_at, updated_at, expires_at)
+VALUES (?, ?, ?, ?, 0, ?, ?, ?)
+`
+
+type InsertUploadSessionParams struct {
+	ID               string
+	RepoID           int64
+	UserID           sql.NullInt64
+	PublishSessionID sql.NullInt64
+	CreatedAt        int64
+	UpdatedAt        int64
+	ExpiresAt        int64
+}
+
+// Resumable uploads (assets.Uploads).
+func (q *Queries) InsertUploadSession(ctx context.Context, arg InsertUploadSessionParams) error {
+	_, err := q.db.ExecContext(ctx, insertUploadSession,
+		arg.ID,
+		arg.RepoID,
+		arg.UserID,
+		arg.PublishSessionID,
+		arg.CreatedAt,
+		arg.UpdatedAt,
+		arg.ExpiresAt,
+	)
+	return err
+}
+
+const isBlobCollectable = `-- name: IsBlobCollectable :one
+SELECT count(*) FROM blobs WHERE id = ?1 AND refs = 0 AND unreferenced_at < ?2
+`
+
+type IsBlobCollectableParams struct {
+	ID     int64
+	Cutoff int64
+}
+
+// One blob, when no asset referenced it since before cutoff (the GC checks it under the digest lock).
+func (q *Queries) IsBlobCollectable(ctx context.Context, arg IsBlobCollectableParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, isBlobCollectable, arg.ID, arg.Cutoff)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const listAssetsAfter = `-- name: ListAssetsAfter :many
-SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id,
-  checked_at, remote_etag
+SELECT id, repo_id, path, blob_id, size, sha256, content_type, kind, uploaded_by, created_at, updated_at,
+  build_id, checked_at, remote_etag
 FROM assets
 WHERE repo_id = ?1 AND path > ?2
 ORDER BY path LIMIT ?3
@@ -105,6 +232,7 @@ func (q *Queries) ListAssetsAfter(ctx context.Context, arg ListAssetsAfterParams
 			&i.ID,
 			&i.RepoID,
 			&i.Path,
+			&i.BlobID,
 			&i.Size,
 			&i.Sha256,
 			&i.ContentType,
@@ -112,7 +240,7 @@ func (q *Queries) ListAssetsAfter(ctx context.Context, arg ListAssetsAfterParams
 			&i.UploadedBy,
 			&i.CreatedAt,
 			&i.UpdatedAt,
-			&i.PublishSessionID,
+			&i.BuildID,
 			&i.CheckedAt,
 			&i.RemoteEtag,
 		); err != nil {
@@ -130,8 +258,8 @@ func (q *Queries) ListAssetsAfter(ctx context.Context, arg ListAssetsAfterParams
 }
 
 const listAssetsAfterRange = `-- name: ListAssetsAfterRange :many
-SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id,
-  checked_at, remote_etag
+SELECT id, repo_id, path, blob_id, size, sha256, content_type, kind, uploaded_by, created_at, updated_at,
+  build_id, checked_at, remote_etag
 FROM assets
 WHERE repo_id = ?1 AND path > ?2 AND path < ?3
 ORDER BY path LIMIT ?4
@@ -162,6 +290,7 @@ func (q *Queries) ListAssetsAfterRange(ctx context.Context, arg ListAssetsAfterR
 			&i.ID,
 			&i.RepoID,
 			&i.Path,
+			&i.BlobID,
 			&i.Size,
 			&i.Sha256,
 			&i.ContentType,
@@ -169,7 +298,61 @@ func (q *Queries) ListAssetsAfterRange(ctx context.Context, arg ListAssetsAfterR
 			&i.UploadedBy,
 			&i.CreatedAt,
 			&i.UpdatedAt,
-			&i.PublishSessionID,
+			&i.BuildID,
+			&i.CheckedAt,
+			&i.RemoteEtag,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAssetsByBlob = `-- name: ListAssetsByBlob :many
+SELECT id, repo_id, path, blob_id, size, sha256, content_type, kind, uploaded_by, created_at, updated_at,
+  build_id, checked_at, remote_etag
+FROM assets
+WHERE blob_id = ? AND repo_id = ?
+LIMIT ?
+`
+
+type ListAssetsByBlobParams struct {
+	BlobID int64
+	RepoID int64
+	Limit  int64
+}
+
+// The assets of one repo that point to one blob, through assets_blob: e.g. the tags of a
+// manifest digest.
+func (q *Queries) ListAssetsByBlob(ctx context.Context, arg ListAssetsByBlobParams) ([]Asset, error) {
+	rows, err := q.db.QueryContext(ctx, listAssetsByBlob, arg.BlobID, arg.RepoID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Asset
+	for rows.Next() {
+		var i Asset
+		if err := rows.Scan(
+			&i.ID,
+			&i.RepoID,
+			&i.Path,
+			&i.BlobID,
+			&i.Size,
+			&i.Sha256,
+			&i.ContentType,
+			&i.Kind,
+			&i.UploadedBy,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.BuildID,
 			&i.CheckedAt,
 			&i.RemoteEtag,
 		); err != nil {
@@ -187,8 +370,8 @@ func (q *Queries) ListAssetsAfterRange(ctx context.Context, arg ListAssetsAfterR
 }
 
 const listAssetsFrom = `-- name: ListAssetsFrom :many
-SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id,
-  checked_at, remote_etag
+SELECT id, repo_id, path, blob_id, size, sha256, content_type, kind, uploaded_by, created_at, updated_at,
+  build_id, checked_at, remote_etag
 FROM assets
 WHERE repo_id = ?1 AND path >= ?2
 ORDER BY path LIMIT ?3
@@ -217,6 +400,7 @@ func (q *Queries) ListAssetsFrom(ctx context.Context, arg ListAssetsFromParams) 
 			&i.ID,
 			&i.RepoID,
 			&i.Path,
+			&i.BlobID,
 			&i.Size,
 			&i.Sha256,
 			&i.ContentType,
@@ -224,7 +408,7 @@ func (q *Queries) ListAssetsFrom(ctx context.Context, arg ListAssetsFromParams) 
 			&i.UploadedBy,
 			&i.CreatedAt,
 			&i.UpdatedAt,
-			&i.PublishSessionID,
+			&i.BuildID,
 			&i.CheckedAt,
 			&i.RemoteEtag,
 		); err != nil {
@@ -242,8 +426,8 @@ func (q *Queries) ListAssetsFrom(ctx context.Context, arg ListAssetsFromParams) 
 }
 
 const listAssetsFromRange = `-- name: ListAssetsFromRange :many
-SELECT id, repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id,
-  checked_at, remote_etag
+SELECT id, repo_id, path, blob_id, size, sha256, content_type, kind, uploaded_by, created_at, updated_at,
+  build_id, checked_at, remote_etag
 FROM assets
 WHERE repo_id = ?1 AND path >= ?2 AND path < ?3
 ORDER BY path LIMIT ?4
@@ -274,6 +458,7 @@ func (q *Queries) ListAssetsFromRange(ctx context.Context, arg ListAssetsFromRan
 			&i.ID,
 			&i.RepoID,
 			&i.Path,
+			&i.BlobID,
 			&i.Size,
 			&i.Sha256,
 			&i.ContentType,
@@ -281,10 +466,84 @@ func (q *Queries) ListAssetsFromRange(ctx context.Context, arg ListAssetsFromRan
 			&i.UploadedBy,
 			&i.CreatedAt,
 			&i.UpdatedAt,
-			&i.PublishSessionID,
+			&i.BuildID,
 			&i.CheckedAt,
 			&i.RemoteEtag,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listExpiredUploads = `-- name: ListExpiredUploads :many
+SELECT id FROM upload_sessions WHERE expires_at < ?1 ORDER BY expires_at LIMIT ?2
+`
+
+type ListExpiredUploadsParams struct {
+	Now   int64
+	Limit int64
+}
+
+// The uploads idle past their expiry, through upload_sessions_expires.
+func (q *Queries) ListExpiredUploads(ctx context.Context, arg ListExpiredUploadsParams) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listExpiredUploads, arg.Now, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUnreferencedBlobs = `-- name: ListUnreferencedBlobs :many
+SELECT id, sha256 FROM blobs
+WHERE refs = 0 AND unreferenced_at < ?1
+ORDER BY unreferenced_at LIMIT ?2
+`
+
+type ListUnreferencedBlobsParams struct {
+	Cutoff int64
+	Limit  int64
+}
+
+type ListUnreferencedBlobsRow struct {
+	ID     int64
+	Sha256 string
+}
+
+// The blobs that no asset referenced since before cutoff, oldest first, through
+// blobs_unreferenced.
+func (q *Queries) ListUnreferencedBlobs(ctx context.Context, arg ListUnreferencedBlobsParams) ([]ListUnreferencedBlobsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listUnreferencedBlobs, arg.Cutoff, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUnreferencedBlobsRow
+	for rows.Next() {
+		var i ListUnreferencedBlobsRow
+		if err := rows.Scan(&i.ID, &i.Sha256); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -343,29 +602,51 @@ func (q *Queries) SetAssetTimes(ctx context.Context, arg SetAssetTimesParams) er
 	return err
 }
 
+const setUploadReceived = `-- name: SetUploadReceived :exec
+UPDATE upload_sessions SET received = ?, updated_at = ?, expires_at = ? WHERE id = ?
+`
+
+type SetUploadReceivedParams struct {
+	Received  int64
+	UpdatedAt int64
+	ExpiresAt int64
+	ID        string
+}
+
+func (q *Queries) SetUploadReceived(ctx context.Context, arg SetUploadReceivedParams) error {
+	_, err := q.db.ExecContext(ctx, setUploadReceived,
+		arg.Received,
+		arg.UpdatedAt,
+		arg.ExpiresAt,
+		arg.ID,
+	)
+	return err
+}
+
 const upsertAsset = `-- name: UpsertAsset :one
-INSERT INTO assets (repo_id, path, size, sha256, content_type, kind, uploaded_by, created_at, updated_at, publish_session_id,
-  checked_at, remote_etag)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (repo_id, path) DO UPDATE SET size = excluded.size, sha256 = excluded.sha256,
+INSERT INTO assets (repo_id, path, blob_id, size, sha256, content_type, kind, uploaded_by, created_at, updated_at,
+  build_id, checked_at, remote_etag)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (repo_id, path) DO UPDATE SET blob_id = excluded.blob_id, size = excluded.size, sha256 = excluded.sha256,
   content_type = excluded.content_type, updated_at = excluded.updated_at, uploaded_by = excluded.uploaded_by,
-  publish_session_id = excluded.publish_session_id, checked_at = excluded.checked_at, remote_etag = excluded.remote_etag
+  build_id = excluded.build_id, checked_at = excluded.checked_at, remote_etag = excluded.remote_etag
 RETURNING id, kind, created_at, updated_at
 `
 
 type UpsertAssetParams struct {
-	RepoID           int64
-	Path             string
-	Size             int64
-	Sha256           string
-	ContentType      string
-	Kind             string
-	UploadedBy       sql.NullInt64
-	CreatedAt        int64
-	UpdatedAt        int64
-	PublishSessionID sql.NullInt64
-	CheckedAt        int64
-	RemoteEtag       string
+	RepoID      int64
+	Path        string
+	BlobID      int64
+	Size        int64
+	Sha256      string
+	ContentType string
+	Kind        string
+	UploadedBy  sql.NullInt64
+	CreatedAt   int64
+	UpdatedAt   int64
+	BuildID     sql.NullInt64
+	CheckedAt   int64
+	RemoteEtag  string
 }
 
 type UpsertAssetRow struct {
@@ -375,11 +656,13 @@ type UpsertAssetRow struct {
 	UpdatedAt int64
 }
 
-// Path and kind never change on update (the FTS triggers rely on it).
+// Path and kind never change on update (the FTS triggers rely on it). created_at changes only on
+// insert.
 func (q *Queries) UpsertAsset(ctx context.Context, arg UpsertAssetParams) (UpsertAssetRow, error) {
 	row := q.db.QueryRowContext(ctx, upsertAsset,
 		arg.RepoID,
 		arg.Path,
+		arg.BlobID,
 		arg.Size,
 		arg.Sha256,
 		arg.ContentType,
@@ -387,7 +670,7 @@ func (q *Queries) UpsertAsset(ctx context.Context, arg UpsertAssetParams) (Upser
 		arg.UploadedBy,
 		arg.CreatedAt,
 		arg.UpdatedAt,
-		arg.PublishSessionID,
+		arg.BuildID,
 		arg.CheckedAt,
 		arg.RemoteEtag,
 	)

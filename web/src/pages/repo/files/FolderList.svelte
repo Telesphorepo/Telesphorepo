@@ -16,7 +16,7 @@
 </script>
 
 <script lang="ts">
-  import type { Repo } from "$lib/api";
+  import { api, type Repo } from "$lib/api";
   import { Keyset, type TableSource } from "$lib/load.svelte";
   import { filesPath, href, repoPath } from "$lib/router.svelte";
   import { Button } from "$lib/components/ui/button";
@@ -26,8 +26,9 @@
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
   import FileSize from "$lib/components/FileSize.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
-  import ProvenanceInline from "./ProvenanceInline.svelte";
-  import { browse, sideOf, type TreeNode } from "../browse";
+  import BuildInline from "./BuildInline.svelte";
+  import type { TreeEntry as TreeNode } from "$lib/api";
+  import { sideOf } from "../browse";
   import FolderIcon from "@lucide/svelte/icons/folder";
   import FileIcon from "@lucide/svelte/icons/file";
   import FolderOpenIcon from "@lucide/svelte/icons/folder-open";
@@ -62,7 +63,7 @@
   } = $props();
 
   /* svelte-ignore state_referenced_locally */
-  const list = new Keyset<TreeNode>((p) => browse.tree(repo.name, folder, p), 100);
+  const list = new Keyset<TreeNode>((p) => api.repos.tree(repo.name, folder, p), 100);
 
   // Folders first; a checksum or signature whose file is listed is not a row of its own.
   const rows = $derived.by(() => {
@@ -147,7 +148,7 @@
     <Cell num muted hideOnPhone>{#if e.type === "file"}<RelativeTime at={e.updated_at} empty="" />{/if}</Cell>
     {#if !compact}
       <Cell hideOnPhone muted class="max-w-56">
-        {#if e.provenance}<ProvenanceInline p={e.provenance} />{:else if e.uploaded_by}<Truncate text={e.uploaded_by} />{/if}
+        {#if e.build}<BuildInline p={e.build} />{:else if e.uploaded_by}<Truncate text={e.uploaded_by} />{/if}
       </Cell>
     {/if}
   {/snippet}

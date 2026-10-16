@@ -6,9 +6,3 @@ import _ "embed"
 //
 //go:embed icon.svg
 var icon []byte
-
-// Icon implements format.Iconic.
-func (h *Handler) Icon() []byte { return icon }
-
-// KindIcons implements format.Iconic.
-func (h *Handler) KindIcons() map[string][]byte { return nil }

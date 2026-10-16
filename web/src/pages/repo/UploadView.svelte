@@ -1,56 +1,51 @@
 <!--
   Upload to a repository (a page: the flow is longer than a short form). First a fresh second
   factor, which creates a publish token for the repo kept in memory (session.ts); then one drop
-  zone for files or a folder.
-  - Files: the format's fields (Maven coordinates, Debian distribution and component, raw folder),
-    then the upload with progress, then what the server stored.
-  - A folder: the server checks it first (POST /upload/scan stores nothing), the user unticks what
-    should not go and fills the fields, then the ticked files upload. Each file goes with its path
-    inside the folder as its multipart filename.
-  `folder` is the open folder of the Files tab ("" or ending in "/"); Debian and raw use it for
-  their first field values.
+  zone for files or a folder, as the format's descriptor (upload) allows. The server plans every
+  upload (POST /upload/plan stores nothing): the browser sends the list of files and the first
+  bytes of the files the format reads, and shows what the plan stores, where each file goes, the
+  problems, the files it leaves out and the fields of the format (values it read from the files
+  show fixed). An edit of a field plans again. The ticked items then upload with progress; each
+  file goes with its path in the upload as its multipart filename, and the server plans them once
+  more before it stores them. `folder` is the open folder of the Files tab ("" or ending in "/");
+  the plan takes the first values of fields from it.
 -->
 <script lang="ts">
   import { toast } from "svelte-sonner";
-  import { api, ApiError, errorMessage, type Proof, type Repo, type ScanAnswer, type Uploaded, type UploadProgress } from "$lib/api";
+  import { api, ApiError, errorMessage, type Proof, type Repo, type UploadPlan, type Uploaded, type UploadProgress } from "$lib/api";
+  import { formats } from "$lib/formats/registry.svelte";
   import { filesPath, href, navigate } from "$lib/router.svelte";
   import { formatSize } from "$lib/format";
   import { Button } from "$lib/components/ui/button";
+  import { Badge } from "$lib/components/ui/badge";
+  import { Input } from "$lib/components/ui/input";
+  import * as Select from "$lib/components/ui/select";
   import { Spinner } from "$lib/components/ui/spinner";
   import PageHeader from "$lib/components/PageHeader.svelte";
   import FormPage from "$lib/components/FormPage.svelte";
   import FormSection from "$lib/components/FormSection.svelte";
+  import FormGrid from "$lib/components/FormGrid.svelte";
+  import FormRow from "$lib/components/FormRow.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
+  import EmptyState from "$lib/components/EmptyState.svelte";
   import FreshFactor from "$lib/components/FreshFactor.svelte";
   import DropZone from "./upload/DropZone.svelte";
-  import FileListView from "./upload/FileList.svelte";
-  import MavenFields from "./upload/MavenFields.svelte";
-  import DebianFields from "./upload/DebianFields.svelte";
-  import RawFields from "./upload/RawFields.svelte";
-  import ScanPreview from "./upload/ScanPreview.svelte";
+  import PlanView from "./upload/PlanView.svelte";
   import UploadResults from "./upload/UploadResults.svelte";
-  import { filesFromEntries, filesFromInput, folderKeep, type FolderDrop, type FolderFile, type FolderRead } from "./upload/folder";
-  import type { UploadPlan } from "./upload/types";
+  import { filesFromEntries, filesFromInput, keepOf, type FolderDrop, type FolderFile, type FolderRead } from "./upload/folder";
   import { dropSession, keepSession, sessionToken } from "./session";
   import PlusIcon from "@lucide/svelte/icons/plus";
+  import UploadIcon from "@lucide/svelte/icons/upload";
 
   let { repo, folder = "" }: { repo: Repo; folder?: string } = $props();
 
-  // The server takes at most this many files per scan or upload (internal/api/files.go).
+  // The server takes at most this many files per plan or upload (internal/api/files.go).
   const maxFiles = 500;
   const nFiles = (n: number) => `${n.toLocaleString()} ${n === 1 ? "file" : "files"}`;
 
-  const texts: Record<string, { hint: string; accept?: string; unit: [string, string] }> = {
-    maven: {
-      hint: "A pom and its jars (sources, javadoc), a lone jar, or a Maven repository folder.",
-      unit: ["artifact", "artifacts"],
-    },
-    debian: { hint: "One or more .deb packages, or a folder of them.", accept: ".deb", unit: ["package", "packages"] },
-    raw: { hint: "Any files, or a folder with its subfolders.", unit: ["file", "files"] },
-  };
-  const text = $derived(texts[repo.format] ?? texts.raw);
-  const unit = (n: number) => text.unit[n === 1 ? 0 : 1];
-  const keep = $derived(folderKeep(repo.format));
+  const up = $derived(formats.get(repo.format)?.upload ?? null);
+  const word = (n: number) => (n === 1 ? (up?.one ?? "file") : (up?.many ?? "files"));
+  const keep = $derived(keepOf(up?.keep ?? []));
 
   // --- the publish token (a fresh second factor) ---
 
@@ -90,56 +85,51 @@
 
   // --- the flow ---
 
-  type Phase = "pick" | "files" | "reading" | "scanning" | "preview" | "sending" | "done";
+  type Phase = "pick" | "reading" | "planning" | "plan" | "sending" | "done";
   let phase = $state<Phase>("pick");
-  let mode = $state<"files" | "folder">("files");
+  // The files of the upload with their paths: a chosen file by its name, a folder's by its path in it.
+  let files = $state<FolderFile[]>([]);
+  // A dropped folder: no files can be added to it.
+  let fromFolder = $state(false);
+  let skipped = $state(0);
+  let plan = $state<UploadPlan | null>(null);
+  let selected = $state<boolean[]>([]);
+  // The values the person typed, by field key; the plan gives the others.
+  let typed = $state<Record<string, string>>({});
   let error = $state("");
+  let planError = $state("");
   let progress = $state<UploadProgress | null>(null);
   let results = $state<Uploaded[]>([]);
   let abort: (() => void) | null = null;
 
-  // Files
-  let picked = $state<File[]>([]);
-  let plan = $state<UploadPlan>();
-  // Folder
-  let folderFiles = $state<FolderFile[]>([]);
-  let skipped = $state(0);
-  let answer = $state<ScanAnswer>({ found: [], ignored: [] });
-  let selected = $state<boolean[]>([]);
-
   function reset() {
     phase = "pick";
+    files = [];
+    fromFolder = false;
+    skipped = 0;
+    plan = null;
+    selected = [];
+    typed = {};
     error = "";
+    planError = "";
     progress = null;
     results = [];
-    picked = [];
-    plan = undefined;
-    folderFiles = [];
-    skipped = 0;
-    answer = { found: [], ignored: [] };
-    selected = [];
   }
 
   const cancelled = (e: unknown) => e instanceof DOMException && e.name === "AbortError";
 
   function addFiles(list: File[]) {
     error = "";
-    mode = "files";
-    const byName = new Map(picked.map((f) => [f.name, f]));
-    for (const f of list) byName.set(f.name, f);
+    const byName = new Map(files.map((f) => [f.path, f]));
+    for (const file of list) byName.set(file.name, { file, path: file.name });
     let all = [...byName.values()];
     if (all.length > maxFiles) {
       all = all.slice(0, maxFiles);
       error = `Upload at most ${maxFiles} files at a time. The rest were left out.`;
     }
-    picked = all;
-    phase = "files";
-  }
-
-  function removeFile(f: File) {
-    picked = picked.filter((x) => x !== f);
-    error = "";
-    if (picked.length === 0) phase = "pick";
+    files = all;
+    fromFolder = false;
+    runPlan(true);
   }
 
   let moreInput = $state<HTMLInputElement>();
@@ -151,7 +141,7 @@
     error = "";
     phase = "reading";
     try {
-      await scan(await filesFromEntries(d, maxFiles, keep));
+      useFolder(await filesFromEntries(d, maxFiles, keep));
     } catch {
       phase = "pick";
       error = "The browser could not read the folder. Choose it with the button instead.";
@@ -160,19 +150,10 @@
 
   function readInput(list: FileList) {
     error = "";
-    scan(filesFromInput(list, maxFiles, keep));
+    useFolder(filesFromInput(list, maxFiles, keep));
   }
 
-  /** A multipart body: the fields first (the server reads parts in order), then each file. */
-  function body(list: { file: File; path: string }[], fields: Record<string, string> = {}): FormData {
-    const form = new FormData();
-    for (const [k, v] of Object.entries(fields)) if (v) form.append(k, v);
-    for (const f of list) form.append("file", f.file, f.path);
-    return form;
-  }
-
-  async function scan(read: FolderRead) {
-    mode = "folder";
+  function useFolder(read: FolderRead) {
     if (!read.files.length) {
       phase = "pick";
       error = emptyText(read);
@@ -183,74 +164,119 @@
       error = `The folder has more than ${maxFiles} files to upload. Choose a smaller folder, such as the one that holds only the packages.`;
       return;
     }
-    folderFiles = read.files;
+    files = read.files;
     skipped = read.skipped;
+    fromFolder = true;
+    runPlan(true);
+  }
+
+  // --- the plan ---
+
+  let planSeq = 0;
+  let planTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** Plans the files now (first: the plan of new files, with a progress bar), or 400 ms after the last edit of a field. */
+  function runPlan(first: boolean) {
+    clearTimeout(planTimer);
+    if (!up || !files.length) return;
+    if (first) {
+      void plannow(true);
+      return;
+    }
+    planTimer = setTimeout(() => void plannow(false), 400);
+  }
+
+  async function plannow(first: boolean) {
+    if (!up) return;
+    const mine = ++planSeq;
+    planError = "";
+    let t: string;
     try {
-      const t = token();
-      phase = "scanning";
-      progress = { sent: 0, total: folderFiles.reduce((n, f) => n + f.file.size, 0) };
-      const s = api.repos.scanUpload(repo.name, body(folderFiles), t, (p) => (progress = p));
-      abort = s.abort;
-      answer = await s.done;
-      selected = answer.found.map((f) => f.problems.length === 0);
-      phase = "preview";
+      t = token();
     } catch (e) {
       phase = "pick";
-      if (cancelled(e)) error = "You cancelled the check.";
-      else {
-        error = errorMessage(e);
-        checkSession(e);
-      }
+      error = errorMessage(e);
+      return;
+    }
+    if (first) {
+      phase = "planning";
+      progress = { sent: 0, total: 0 };
+    }
+    try {
+      const r = api.repos.uploadPlan(repo.name, { fields: { ...typed }, folder, files }, up.reads, t, (p) => {
+        if (first && mine === planSeq) progress = p;
+      });
+      if (first) abort = r.abort;
+      const p = await r.done;
+      if (mine !== planSeq) return;
+      const before = plan;
+      plan = p;
+      // Keep the choice of the items that stay; a new item is ticked when it can go.
+      selected = p.items.map((it, i) => {
+        if (it.problems.length) return false;
+        const old = before?.items.findIndex((b) => b.title === it.title) ?? -1;
+        return old >= 0 && !first ? selected[old] !== false : true;
+      });
+      phase = "plan";
+    } catch (e) {
+      if (mine !== planSeq) return;
+      checkSession(e);
+      if (first) {
+        phase = files.length && plan ? "plan" : "pick";
+        error = cancelled(e) ? "You cancelled the check." : errorMessage(e);
+      } else planError = errorMessage(e);
     } finally {
-      abort = null;
-      progress = null;
+      if (first && mine === planSeq) {
+        abort = null;
+        progress = null;
+      }
     }
   }
 
-  // The folder files of the ticked items, in folder order.
+  function setField(key: string, v: string) {
+    typed = { ...typed, [key]: v };
+    runPlan(false);
+  }
+
+  const valueOf = (key: string) => typed[key] ?? plan?.fields.find((f) => f.key === key)?.value ?? "";
+
+  // The files of the ticked items, in upload order.
   const chosen = $derived.by(() => {
-    const paths = new Set(answer.found.flatMap((f, i) => (selected[i] && f.problems.length === 0 ? f.files : [])));
-    return folderFiles.filter((f) => paths.has(f.path));
+    if (!plan) return [];
+    const paths = new Set(plan.items.flatMap((it, i) => (selected[i] && it.problems.length === 0 ? it.files.map((f) => f.path) : [])));
+    return files.filter((f) => paths.has(f.path));
   });
-  const nItems = $derived(answer.found.filter((f, i) => selected[i] && f.problems.length === 0).length);
-  // Maven takes no fields for a folder; Debian and raw report theirs through plan.
-  const folderNeedsFields = $derived(repo.format === "debian" || repo.format === "raw");
+  const nItems = $derived(plan ? plan.items.filter((it, i) => selected[i] && it.problems.length === 0).length : 0);
 
   const problem = $derived.by(() => {
-    if (mode === "files") return !picked.length ? "Add files to upload." : (plan?.problem ?? "");
-    if (chosen.length === 0) return `Tick at least one ${text.unit[0]} to upload.`;
-    return folderNeedsFields ? (plan?.problem ?? "") : "";
-  });
-
-  // Raw folder: where the first file lands, so the user sees that paths inside the folder stay.
-  const rawExample = $derived.by(() => {
-    if (repo.format !== "raw" || mode !== "folder" || !chosen.length) return "";
-    const target = plan?.fields.folder ?? "";
-    return target ? `${target}/${chosen[0].path}` : chosen[0].path;
+    if (!plan) return "";
+    const field = plan.fields.find((f) => f.problem);
+    if (field) return `${field.label}: ${field.problem}`;
+    if (plan.items.length === 1 && plan.items[0].problems.length) return plan.items[0].problems[0];
+    if (!plan.items.length) return up?.empty || "The upload has no file that this repository takes.";
+    if (nItems === 0) return `Tick at least one ${word(1)} to upload.`;
+    return "";
   });
 
   async function upload() {
-    if (problem) return;
+    if (problem || !plan) return;
     error = "";
-    const back: Phase = mode === "files" ? "files" : "preview";
-    const list = mode === "files" ? picked.map((file) => ({ file, path: file.name })) : chosen;
-    const fields = mode === "files" || folderNeedsFields ? (plan?.fields ?? {}) : {};
     try {
       const t = token();
+      const form = new FormData();
+      // The fields first (the server reads parts in order), then each file.
+      for (const f of plan.fields) if (!f.read) form.append(f.key, valueOf(f.key));
+      for (const f of chosen) form.append("file", f.file, f.path);
       phase = "sending";
-      progress = { sent: 0, total: list.reduce((n, f) => n + f.file.size, 0) };
-      const s = api.repos.upload(repo.name, body(list, fields), t, (p) => (progress = p));
+      progress = { sent: 0, total: chosen.reduce((n, f) => n + f.file.size, 0) };
+      const s = api.repos.upload(repo.name, form, t, (p) => (progress = p));
       abort = s.abort;
       const a = await s.done;
       results = a.files;
       phase = "done";
-      toast.success(
-        mode === "files"
-          ? `Uploaded ${nFiles(picked.length)} to ${repo.name}`
-          : `Uploaded ${nItems.toLocaleString()} ${unit(nItems)} to ${repo.name}`,
-      );
+      toast.success(`Uploaded ${nItems.toLocaleString()} ${word(nItems)} to ${repo.name}`);
     } catch (e) {
-      phase = back;
+      phase = "plan";
       if (cancelled(e)) error = "You cancelled the upload. Nothing was stored.";
       else {
         error = errorMessage(e);
@@ -264,7 +290,7 @@
 
   // The folder that holds the first stored file, to open after the upload.
   const resultFolder = $derived.by(() => {
-    const first = results.find((f) => !/\.(md5|sha1|sha256)$/.test(f.path));
+    const first = results.find((f) => !f.generated);
     if (!first) return "";
     const i = first.path.lastIndexOf("/");
     return i < 0 ? "" : first.path.slice(0, i + 1);
@@ -272,11 +298,7 @@
 
   const percent = $derived(progress && progress.total ? Math.min(100, Math.round((progress.sent / progress.total) * 100)) : 0);
   const storing = $derived(!!progress && progress.total > 0 && progress.sent >= progress.total);
-  const uploadLabel = $derived(
-    mode === "files"
-      ? picked.length ? `Upload ${nFiles(picked.length)}` : "Upload"
-      : nItems ? `Upload ${nItems.toLocaleString()} ${unit(nItems)}` : "Upload",
-  );
+  const uploadLabel = $derived(nItems ? `Upload ${nItems.toLocaleString()} ${word(nItems)}` : "Upload");
 </script>
 
 {#snippet progressBar(label: string, sendingText: string, waitingText: string)}
@@ -284,25 +306,12 @@
     <div class="h-2 overflow-hidden rounded-full bg-muted" role="progressbar" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}>
       <div class="h-full rounded-full bg-primary transition-[width]" style="width: {percent}%"></div>
     </div>
-    {#if storing}
+    {#if storing || !progress?.total}
       <p class="flex items-center gap-2 text-sm text-muted-foreground"><Spinner /> {waitingText}</p>
-    {:else if progress}
+    {:else}
       <p class="text-sm text-muted-foreground tabular-nums">{sendingText}: {formatSize(progress.sent)} of {formatSize(progress.total)} ({percent}%)</p>
     {/if}
   </div>
-{/snippet}
-
-{#snippet fields()}
-  {#if repo.format === "maven" && mode === "files"}
-    <MavenFields files={picked} bind:plan />
-  {:else if repo.format === "debian"}
-    <DebianFields {repo} {folder} files={mode === "files" ? picked : chosen.map((f) => f.file)} bind:plan />
-  {:else if repo.format === "raw"}
-    <RawFields {folder} files={mode === "files" ? picked : chosen.map((f) => f.file)} bind:plan />
-    {#if rawExample}
-      <p class="text-sm text-muted-foreground">Files keep their paths inside the folder, e.g. <span class="break-all">{rawExample}</span>.</p>
-    {/if}
-  {/if}
 {/snippet}
 
 <PageHeader
@@ -315,7 +324,9 @@
 />
 
 <FormPage>
-  {#if !confirmed}
+  {#if !up}
+    <EmptyState icon={UploadIcon} title="This format takes no uploads" description="Publish to {repo.name} with the tools on its publish page." />
+  {:else if !confirmed}
     <FormSection
       title="Confirm it is you"
       description="Uploads need a fresh check with your authenticator app or a passkey. It lasts a short time, so you can upload several times in a row."
@@ -328,21 +339,41 @@
       {#if phase === "reading"}
         <p class="flex items-center gap-2 py-12 text-sm text-muted-foreground"><Spinner /> Reading the folder…</p>
       {:else}
-        <DropZone onFiles={addFiles} onFolderDrop={readDrop} onFolderInput={readInput} hint={text.hint} accept={text.accept} />
+        <DropZone
+          onFiles={addFiles}
+          onFolderDrop={readDrop}
+          onFolderInput={readInput}
+          hint={up.hint}
+          accept={up.accept.join(",") || undefined}
+          files={up.single}
+          folders={up.folder}
+        />
       {/if}
       {#if error}<div class="mt-4"><ErrorState inline {error} /></div>{/if}
     </FormSection>
-  {:else if phase === "files"}
-    <FormSection title="Files">
-      {#snippet actions()}
-        <Button variant="outline" size="sm" onclick={() => moreInput?.click()}><PlusIcon />Add files</Button>
+  {:else if phase === "planning"}
+    <FormSection title="Checking the files" description="Nothing is stored yet.">
+      {@render progressBar("Check progress", `Sending ${nFiles(files.length)} for a check`, "Checking the files…")}
+      {#snippet footer()}
+        <Button variant="outline" disabled={storing} onclick={() => abort?.()}>Cancel the check</Button>
       {/snippet}
-      <FileListView rows={picked.map((file) => plan?.rows.find((r) => r.file === file) ?? { file })} onRemove={removeFile} />
+    </FormSection>
+  {:else if phase === "plan" && plan}
+    <FormSection title="What the upload holds" description="Nothing is stored until you upload.">
+      {#snippet actions()}
+        {#if !fromFolder && up.single}
+          <Button variant="outline" size="sm" onclick={() => moreInput?.click()}><PlusIcon />Add files</Button>
+        {/if}
+      {/snippet}
+      <div class="flex flex-col gap-4">
+        <PlanView {plan} upload={up} {skipped} bind:selected />
+        {#if up.note && plan.items.length}<p class="text-sm text-muted-foreground">{up.note}</p>{/if}
+      </div>
       <input
         bind:this={moreInput}
         type="file"
         multiple
-        accept={text.accept}
+        accept={up.accept.join(",") || undefined}
         class="sr-only"
         tabindex="-1"
         aria-hidden="true"
@@ -353,41 +384,50 @@
         }}
       />
     </FormSection>
-    <FormSection title={repo.format === "maven" ? "Coordinates" : "Where they go"}>
-      {@render fields()}
-      {#snippet footer()}
-        <Button disabled={!!problem} onclick={upload}>{uploadLabel}</Button>
-        <Button variant="ghost" onclick={reset}>Start over</Button>
-        {#if error}
-          <ErrorState inline {error} />
-        {:else if problem}
-          <p class="text-sm text-muted-foreground">{problem}</p>
-        {/if}
-      {/snippet}
-    </FormSection>
-  {:else if phase === "scanning"}
-    <FormSection title="Checking the folder" description="Nothing is stored yet.">
-      {@render progressBar("Check progress", `Sending ${nFiles(folderFiles.length)} for a check`, "Checking the files…")}
-      {#snippet footer()}
-        <Button variant="outline" disabled={storing} onclick={() => abort?.()}>Cancel the check</Button>
-      {/snippet}
-    </FormSection>
-  {:else if phase === "preview"}
-    <FormSection title="What the folder holds" description="Nothing is stored until you upload.">
-      <div class="flex flex-col gap-4">
-        <ScanPreview {answer} {skipped} bind:selected format={repo.format} />
-      </div>
-    </FormSection>
-    {#if folderNeedsFields && chosen.length}
-      <FormSection title="Where they go">{@render fields()}</FormSection>
+    {#if plan.fields.length && plan.items.length}
+      <FormSection title="Where they go">
+        <FormGrid>
+          {#each plan.fields as f (f.key)}
+            {@const fid = `upload-${f.key}`}
+            <FormRow label={f.label} for={fid} help={f.help} error={f.problem}>
+              {#if f.read}
+                <div id={fid} class="flex min-h-9 items-center gap-2">
+                  <span class="text-body break-all">{f.value}</span>
+                  <Badge variant="secondary">from the files</Badge>
+                </div>
+              {:else if f.type === "enum"}
+                <Select.Root type="single" value={valueOf(f.key)} onValueChange={(v) => setField(f.key, v)}>
+                  <Select.Trigger id={fid} class="w-full"><span class="truncate">{valueOf(f.key) || "Choose"}</span></Select.Trigger>
+                  <Select.Content>
+                    {#each f.options ?? [] as o (o)}<Select.Item value={o} label={o}>{o}</Select.Item>{/each}
+                  </Select.Content>
+                </Select.Root>
+              {:else}
+                <Input
+                  id={fid}
+                  placeholder={f.placeholder}
+                  autocomplete="off"
+                  spellcheck={false}
+                  aria-describedby={f.help ? `${fid}-help` : undefined}
+                  aria-invalid={f.problem ? true : undefined}
+                  value={valueOf(f.key)}
+                  oninput={(e) => setField(f.key, e.currentTarget.value)}
+                />
+              {/if}
+            </FormRow>
+          {/each}
+        </FormGrid>
+      </FormSection>
     {/if}
     <FormSection>
       <div class="flex flex-wrap items-center gap-2">
-        <Button disabled={!!problem} onclick={upload}>{uploadLabel}</Button>
-        <Button variant="ghost" onclick={reset}>Choose another folder</Button>
+        <Button disabled={!!problem || !!planError} onclick={upload}>{uploadLabel}</Button>
+        <Button variant="ghost" onclick={reset}>Start over</Button>
         {#if error}
           <ErrorState inline {error} />
-        {:else if answer.found.length && problem}
+        {:else if planError}
+          <ErrorState inline error={planError} />
+        {:else if problem}
           <p class="text-sm text-muted-foreground">{problem}</p>
         {/if}
       </div>

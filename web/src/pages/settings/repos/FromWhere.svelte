@@ -66,7 +66,7 @@
           rule: r,
           title: l?.title ?? r.value,
           facts: lists && !l ? "This network list does not exist any more. Remove it." : listFacts(l),
-          link: auth.can("network") ? href(`/settings/networks/list/${encodeURIComponent(r.value)}`) : undefined,
+          link: auth.can("network.manage") ? href(`/settings/networks/list/${encodeURIComponent(r.value)}`) : undefined,
           missing: !!lists && !l,
           empty: !!l && l.count === 0,
         };
@@ -165,7 +165,7 @@
   error={listsError ? `The network lists did not load: ${listsError}` : ""}
   none={lists?.length ? "Every network list is on this repository already." : "No network list exists yet."}
   newLabel="New network list"
-  newHref={auth.can("network") ? href("/settings/networks/new") : undefined}
+  newHref={auth.can("network.manage") ? href("/settings/networks/new") : undefined}
   onAdd={addLists}
 />
 

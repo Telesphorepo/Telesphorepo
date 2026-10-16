@@ -1,6 +1,7 @@
 // The signed-in user. App.svelte calls auth.load() once; pages read auth.user, auth.setupOnly and
-// the permission checks: auth.can(perm) for a server permission, auth.canRepo(repo, perm) for a
-// repository permission (All repositories holds every one), auth.allows(access) for a route.
+// the permission checks with permission IDs (GET /api/permissions): auth.can(id) for a server
+// permission, auth.canRepo(repo, id) for a repository permission (repositories.all holds every
+// one), auth.allows(access) for a route.
 // Sign-in has two steps for an account with a second factor: signIn() answers {step: "second",
 // methods}, then finish with signInSecond().
 
@@ -10,11 +11,12 @@ import {
   onSessionLost,
   type Me,
   type Proof,
-  type RepoPermission,
+  type PermId,
   type SecondFactorMethod,
-  type ServerPermission,
 } from "$lib/api";
-import { navigate, type Access, type Params } from "$lib/router.svelte";
+import { navigate, type Params } from "$lib/router.svelte";
+import type { Access } from "../modules/types";
+import { allReposPermissions, loadPermissions, managingRepoPermissions, repoPermissions } from "$lib/permissions";
 
 export type SignInResult = { step: "done"; user: Me } | { step: "second"; methods: SecondFactorMethod[] };
 
@@ -27,43 +29,51 @@ class Auth {
   /** A local account without a second factor: its session reaches only the setup routes. */
   setupOnly = $derived(!!this.user?.second_factor_required);
 
-  /** The repositories where the user holds more than download, by name, with the whole set of each. */
-  repoPermissions = $derived<Record<string, RepoPermission[]>>(this.user?.repo_permissions ?? {});
+  /** Every repository where the user has a grant, by name, with the whole set of each ({} with All repositories). */
+  repoPermissions = $derived<Record<string, PermId[]>>(this.user?.repo_permissions ?? {});
 
   /** True when the user holds the server permission. */
-  can(perm: ServerPermission): boolean {
+  can(perm: PermId): boolean {
     return !!this.user?.permissions?.includes(perm);
   }
 
-  /**
-   * True when the user holds the repository permission on repo. It knows only the repositories of
-   * repo_permissions (more than download): for download and publish read `repo.permissions`.
-   */
-  canRepo(repo: string, perm: RepoPermission): boolean {
-    return this.can("repos") || !!this.repoPermissions[repo]?.includes(perm);
+  /** True when the user holds a server permission that gives every repository (repositories.all). */
+  allRepos(): boolean {
+    return allReposPermissions().some((p) => this.can(p));
   }
 
-  /** True when the user can open a settings tab of repo (Edit settings, Manage access or CI pipelines). */
+  /** True when the user holds the repository permission on repo through a grant or repositories.all. */
+  canRepo(repo: string, perm: PermId): boolean {
+    return this.allRepos() || !!this.repoPermissions[repo]?.includes(perm);
+  }
+
+  /** True when the user can open a settings tab of repo: a permission that manages it (repo.settings, repo.access, ci.pipelines, ...). */
   managesRepo(repo: string): boolean {
-    return this.canRepo(repo, "settings") || this.canRepo(repo, "access") || this.canRepo(repo, "pipelines");
+    return managingRepoPermissions().some((p) => this.canRepo(repo, p));
   }
 
   /**
    * The repository permissions the user holds on every one of repos: what they can give and
-   * remove there. undefined for no repos. Like canRepo it knows only the repo_permissions.
+   * remove there. undefined for no repos. Like canRepo it reads the grants of repo_permissions.
    */
-  heldOnAll(repos: string[]): RepoPermission[] | undefined {
+  heldOnAll(repos: string[]): PermId[] | undefined {
     if (!repos.length) return undefined;
-    const all: RepoPermission[] = ["download", "publish", "delete", "settings", "access", "pipelines"];
-    return all.filter((p) => repos.every((r) => this.canRepo(r, p)));
+    return repoPermissions()
+      .map((p) => p.name)
+      .filter((p) => repos.every((r) => this.canRepo(r, p)));
+  }
+
+  /** True when the Repositories page lists repo: repositories.all, or a grant there that manages it. */
+  listsRepo(repo: string): boolean {
+    return this.allRepos() || (this.repoPermissions[repo] ?? []).some((p) => managingRepoPermissions().includes(p));
   }
 
   /** True when the user holds the repository permission on at least one repository. */
-  canSomeRepo(perm: RepoPermission): boolean {
-    return this.can("repos") || Object.values(this.repoPermissions).some((s) => s.includes(perm));
+  canSomeRepo(perm: PermId): boolean {
+    return this.allRepos() || Object.values(this.repoPermissions).some((s) => s.includes(perm));
   }
 
-  /** True when the user may open a page with this access (see Access in router.svelte.ts). */
+  /** True when the user may open a page with this access (see Access in modules/types.ts). */
   allows(access: Access, params: Params = {}): boolean {
     if (access === "any") return true;
     if (!this.user) return false;
@@ -71,13 +81,11 @@ class Auth {
       case "user":
         return true;
       case "repositories":
-        return this.can("repos") || Object.keys(this.repoPermissions).length > 0;
+        return this.allRepos() || Object.keys(this.repoPermissions).some((r) => this.listsRepo(r));
       case "repo":
         return this.managesRepo(params.name ?? "");
-      case "pipelines":
-        return this.canSomeRepo("pipelines");
       default:
-        return this.can(access);
+        return this.can(access) || this.canSomeRepo(access);
     }
   }
 
@@ -90,32 +98,29 @@ class Auth {
     });
   }
 
-  /** Reads the current user; signed out on any error. */
+  /** Reads the permission registry and the current user; signed out on any error of /api/me. */
   async load() {
+    const registry = loadPermissions();
     try {
       this.user = await api.me();
     } catch {
       this.user = null;
     }
+    await registry;
     this.ready = true;
   }
 
   async signIn(username: string, password: string): Promise<SignInResult> {
     const a = await api.auth.login(username, password);
     if ("second_factor" in a) return { step: "second", methods: a.methods };
-    const u = await this.withRepoPermissions(a);
-    return { step: "done", user: u };
+    this.user = a.session;
+    return { step: "done", user: a.session };
   }
 
   async signInSecond(proof: Proof): Promise<Me> {
-    return this.withRepoPermissions(await api.auth.loginSecond(proof));
-  }
-
-  /** The sign-in answer leaves out repo_permissions; /api/me holds them. */
-  private async withRepoPermissions(u: Me): Promise<Me> {
-    const me = await api.me().catch(() => u);
-    this.user = me;
-    return me;
+    const { session } = await api.auth.loginSecond(proof);
+    this.user = session;
+    return session;
   }
 
   /** Signs out and returns to Browse. */

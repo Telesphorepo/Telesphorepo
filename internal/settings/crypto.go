@@ -123,6 +123,16 @@ func (s *Service) Encrypt(aad string, plaintext []byte) []byte {
 	return sealBytes(s.aead, aad, plaintext)
 }
 
+// DeriveKey returns a 32-byte key derived from the master key with HKDF-SHA256 and info, e.g.
+// the key that signs core bearer tokens. Each use has its own info.
+func (s *Service) DeriveKey(info string) []byte {
+	k, err := hkdf.Key(sha256.New, s.master, nil, info, 32)
+	if err != nil {
+		panic(err) // a 32-byte key from SHA-256 never fails
+	}
+	return k
+}
+
 // Decrypt opens a blob that Encrypt sealed with the same aad.
 func (s *Service) Decrypt(aad string, sealed []byte) ([]byte, error) {
 	return openBytes(s.aead, aad, sealed)

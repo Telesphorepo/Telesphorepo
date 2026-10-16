@@ -316,8 +316,11 @@ func (s *Service) reloadGroup(ctx context.Context, id int64) error {
 	return nil
 }
 
-// counted sets the MemberCount of a group repo from memory.
+// counted sets the field values of a repo and the MemberCount of a group repo from memory.
 func (s *Service) counted(r *Repo, err error) (*Repo, error) {
+	if err == nil {
+		s.loadFields(r)
+	}
 	if err == nil && r.Kind == KindGroup {
 		s.mu.RLock()
 		r.MemberCount = len(s.groups[r.ID])
@@ -373,7 +376,7 @@ func resolveMembers(ctx context.Context, q *dbq.Queries, format string, names []
 	}
 	ids := make([]int64, 0, len(names))
 	for _, n := range names {
-		r, err := fromRow(q.GetRepoByName(ctx, n))
+		r, err := byName(ctx, q, n)
 		if errors.Is(err, ErrNotFound) {
 			return nil, invalid("there is no repository %q", clip(n))
 		}
@@ -412,82 +415,6 @@ func writeMembers(ctx context.Context, q *dbq.Queries, group int64, ids []int64)
 	return nil
 }
 
-// CreateGroup creates a group repo of format with the members names, in read order.
-func (s *Service) CreateGroup(ctx context.Context, name, format string, anonymousRead bool, description string, members []string) (*Repo, error) {
-	var repo *Repo
-	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
-		var err error
-		if repo, err = s.insert(ctx, tx, name, format, KindGroup, anonymousRead, description, nil); err != nil {
-			return err
-		}
-		q := dbq.New(tx)
-		ids, err := resolveMembers(ctx, q, format, members)
-		if err != nil {
-			return err
-		}
-		return writeMembers(ctx, q, repo.ID, ids)
-	})
-	if err != nil {
-		return nil, err
-	}
-	if err := s.reloadGroup(ctx, repo.ID); err != nil {
-		return nil, err
-	}
-	return s.counted(repo, nil)
-}
-
-// SetMembers replaces the members of group name and their order.
-func (s *Service) SetMembers(ctx context.Context, name string, members []string) (*Repo, error) {
-	var repo *Repo
-	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
-		q := dbq.New(tx)
-		var err error
-		if repo, err = fromRow(q.GetRepoByName(ctx, name)); err != nil {
-			return err
-		}
-		if repo.Kind != KindGroup {
-			return invalid("%s is not a group", repo.Name)
-		}
-		ids, err := resolveMembers(ctx, q, repo.Format, members)
-		if err != nil {
-			return err
-		}
-		return writeMembers(ctx, q, repo.ID, ids)
-	})
-	if err != nil {
-		return nil, err
-	}
-	if err := s.reloadGroup(ctx, repo.ID); err != nil {
-		return nil, err
-	}
-	return s.counted(repo, nil)
-}
-
-// CreateProxy creates a proxy repo of format with the remote p (see ProxyInput.Apply).
-func (s *Service) CreateProxy(ctx context.Context, name, format string, anonymousRead bool, description string, config json.RawMessage, p *Proxy) (*Repo, error) {
-	var repo *Repo
-	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
-		var err error
-		if repo, err = s.insert(ctx, tx, name, format, KindProxy, anonymousRead, description, config); err != nil {
-			return err
-		}
-		creds, err := s.sealCredentials(repo.ID, p)
-		if err != nil {
-			return err
-		}
-		return dbq.New(tx).InsertProxy(ctx, dbq.InsertProxyParams{RepoID: repo.ID, RemoteUrl: p.RemoteURL, Credentials: creds,
-			MetadataTtl: int64(p.MetadataTTL / time.Second), NotFoundTtl: int64(p.NotFoundTTL / time.Second)})
-	})
-	if err != nil {
-		return nil, err
-	}
-	s.mu.Lock()
-	s.proxies[repo.ID] = &Proxy{RemoteURL: p.RemoteURL, Username: p.Username, Password: p.Password,
-		MetadataTTL: p.MetadataTTL, NotFoundTTL: p.NotFoundTTL}
-	s.mu.Unlock()
-	return repo, nil
-}
-
 // Proxy returns the remote of proxy repo id (in memory).
 func (s *Service) Proxy(id int64) (*Proxy, bool) {
 	s.mu.RLock()
@@ -496,31 +423,33 @@ func (s *Service) Proxy(id int64) (*Proxy, bool) {
 	return p, ok
 }
 
-// UpdateProxy applies in to the remote of proxy repo and returns the remote before and after.
-func (s *Service) UpdateProxy(ctx context.Context, repo *Repo, in ProxyInput) (old, updated *Proxy, err error) {
-	old, ok := s.Proxy(repo.ID)
-	if repo.Kind != KindProxy || !ok {
-		return nil, nil, invalid("%s is not a proxy", repo.Name)
-	}
-	p, err := in.Apply(old)
+// insertProxy writes the remote p of new proxy repo id.
+func (s *Service) insertProxy(ctx context.Context, q *dbq.Queries, id int64, p *Proxy) error {
+	creds, err := s.sealCredentials(id, p)
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
-	creds, err := s.sealCredentials(repo.ID, p)
-	if err != nil {
-		return nil, nil, err
+	return q.InsertProxy(ctx, dbq.InsertProxyParams{RepoID: id, RemoteUrl: p.RemoteURL, Credentials: creds,
+		MetadataTtl: int64(p.MetadataTTL / time.Second), NotFoundTtl: int64(p.NotFoundTTL / time.Second)})
+}
+
+// ProxyChanges names the fields of a proxy remote that changed, for the audit log (never a
+// credential value).
+func ProxyChanges(old, new *Proxy) []string {
+	var out []string
+	if old.RemoteURL != new.RemoteURL {
+		out = append(out, "remote_url")
 	}
-	if err := dbq.New(s.db.W).UpdateProxy(ctx, dbq.UpdateProxyParams{RemoteUrl: p.RemoteURL, Credentials: creds,
-		MetadataTtl: int64(p.MetadataTTL / time.Second), NotFoundTtl: int64(p.NotFoundTTL / time.Second), RepoID: repo.ID}); err != nil {
-		return nil, nil, err
+	if old.Username != new.Username || old.Password != new.Password {
+		out = append(out, "credentials")
 	}
-	s.mu.Lock()
-	if cur, ok := s.proxies[repo.ID]; ok {
-		p.LastOK, p.LastError, p.LastErrorAt = cur.LastOK, cur.LastError, cur.LastErrorAt
+	if old.MetadataTTL != new.MetadataTTL {
+		out = append(out, "metadata_ttl")
 	}
-	s.proxies[repo.ID] = p
-	s.mu.Unlock()
-	return old, p, nil
+	if old.NotFoundTTL != new.NotFoundTTL {
+		out = append(out, "not_found_ttl")
+	}
+	return out
 }
 
 // okWriteEvery is how often a stream of successful remote requests writes last_ok_at.

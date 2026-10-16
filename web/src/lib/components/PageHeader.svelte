@@ -8,7 +8,7 @@
   follows the group when the page sits deeper (Settings › Repositories › maven › Access). A Browse
   page shows breadcrumbs only when it passes `crumbs` (its whole trail).
 
-    <PageHeader title="Devices" description="Computers that publish with the Gradle plugin or the Maven extension.">
+    <PageHeader title="Devices" description="Computers that publish with the publisher client of their build tool.">
       {#snippet actions()}<Button href={href("/device")}>Approve a device</Button>{/snippet}
     </PageHeader>
 -->

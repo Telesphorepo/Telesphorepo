@@ -11,7 +11,7 @@
   import Loading from "$lib/components/Loading.svelte";
   import FileSize from "$lib/components/FileSize.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
-  import { browse, sideOf } from "../browse";
+  import { sideOf } from "../browse";
   import { formatCount } from "$lib/format";
 
   let { repo, folder }: { repo: Repo; folder: string } = $props();
@@ -24,7 +24,7 @@
 
   // Any other folder: the first page of its children.
   /* svelte-ignore state_referenced_locally */
-  const kids = folder === "" ? null : new Resource(() => browse.tree(repo.name, folder, { limit: LIMIT }));
+  const kids = folder === "" ? null : new Resource(() => api.repos.tree(repo.name, folder, { limit: LIMIT }));
   const held = $derived.by(() => {
     const page = kids?.data;
     if (!page) return null;

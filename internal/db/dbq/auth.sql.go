@@ -8,6 +8,7 @@ package dbq
 import (
 	"context"
 	"database/sql"
+	"strings"
 )
 
 const addRepoPerm = `-- name: AddRepoPerm :exec
@@ -163,21 +164,6 @@ func (q *Queries) DeleteExpiredSessions(ctx context.Context, now int64) error {
 	return err
 }
 
-const deleteOIDCUserSessions = `-- name: DeleteOIDCUserSessions :exec
-DELETE FROM sessions WHERE user_id IN
-  (SELECT id FROM users WHERE oidc_issuer = ? AND oidc_subject = ? AND oidc_subject IS NOT NULL)
-`
-
-type DeleteOIDCUserSessionsParams struct {
-	OidcIssuer  sql.NullString
-	OidcSubject sql.NullString
-}
-
-func (q *Queries) DeleteOIDCUserSessions(ctx context.Context, arg DeleteOIDCUserSessionsParams) error {
-	_, err := q.db.ExecContext(ctx, deleteOIDCUserSessions, arg.OidcIssuer, arg.OidcSubject)
-	return err
-}
-
 const deleteRepoUserPerms = `-- name: DeleteRepoUserPerms :execrows
 DELETE FROM repo_permissions WHERE repo_id = ? AND user_id = ?
 `
@@ -327,23 +313,20 @@ func (q *Queries) GetPrincipalAndHash(ctx context.Context, id int64) (GetPrincip
 
 const getSessionPrincipal = `-- name: GetSessionPrincipal :one
 SELECT s.expires_at, u.id AS user_id, u.username, u.disabled, u.kind,
-  CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = u.id), '') AS TEXT) AS perms,
-  EXISTS (SELECT 1 FROM repo_permissions rp WHERE rp.user_id = u.id AND rp.perm NOT IN ('download','publish')) AS manages_repo
+  CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = u.id), '') AS TEXT) AS perms
 FROM sessions s JOIN users u ON u.id = s.user_id
 WHERE s.id_hash = ?
 `
 
 type GetSessionPrincipalRow struct {
-	ExpiresAt   int64
-	UserID      int64
-	Username    string
-	Disabled    bool
-	Kind        string
-	Perms       string
-	ManagesRepo bool
+	ExpiresAt int64
+	UserID    int64
+	Username  string
+	Disabled  bool
+	Kind      string
+	Perms     string
 }
 
-// elevated: the user holds a repository permission other than download and publish.
 func (q *Queries) GetSessionPrincipal(ctx context.Context, idHash []byte) (GetSessionPrincipalRow, error) {
 	row := q.db.QueryRowContext(ctx, getSessionPrincipal, idHash)
 	var i GetSessionPrincipalRow
@@ -354,7 +337,6 @@ func (q *Queries) GetSessionPrincipal(ctx context.Context, idHash []byte) (GetSe
 		&i.Disabled,
 		&i.Kind,
 		&i.Perms,
-		&i.ManagesRepo,
 	)
 	return i, err
 }
@@ -387,6 +369,40 @@ func (q *Queries) GetTokenAuth(ctx context.Context, publicID string) (GetTokenAu
 		&i.SecretHash,
 		&i.ExpiresAt,
 		&i.LastUsedAt,
+		&i.UserID,
+		&i.Username,
+		&i.Disabled,
+		&i.Kind,
+		&i.Perms,
+	)
+	return i, err
+}
+
+const getTokenAuthByID = `-- name: GetTokenAuthByID :one
+SELECT t.id AS token_id, t.expires_at,
+       u.id AS user_id, u.username, u.disabled, u.kind,
+       CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = u.id), '') AS TEXT) AS perms
+FROM api_tokens t JOIN users u ON u.id = t.user_id
+WHERE t.id = ?
+`
+
+type GetTokenAuthByIDRow struct {
+	TokenID   int64
+	ExpiresAt sql.NullInt64
+	UserID    int64
+	Username  string
+	Disabled  bool
+	Kind      string
+	Perms     string
+}
+
+// The read token behind a core bearer token, by its primary key.
+func (q *Queries) GetTokenAuthByID(ctx context.Context, id int64) (GetTokenAuthByIDRow, error) {
+	row := q.db.QueryRowContext(ctx, getTokenAuthByID, id)
+	var i GetTokenAuthByIDRow
+	err := row.Scan(
+		&i.TokenID,
+		&i.ExpiresAt,
 		&i.UserID,
 		&i.Username,
 		&i.Disabled,
@@ -521,6 +537,35 @@ func (q *Queries) GetUserPasswordHash(ctx context.Context, id int64) (string, er
 	var password_hash string
 	err := row.Scan(&password_hash)
 	return password_hash, err
+}
+
+const hasRepoPermIn = `-- name: HasRepoPermIn :one
+SELECT EXISTS (SELECT 1 FROM repo_permissions WHERE user_id = ?1 AND perm IN (/*SLICE:perms*/?))
+`
+
+type HasRepoPermInParams struct {
+	UserID int64
+	Perms  []string
+}
+
+// Whether user id holds one of perms on some repo, through repo_permissions_user (a seek per
+// permission).
+func (q *Queries) HasRepoPermIn(ctx context.Context, arg HasRepoPermInParams) (bool, error) {
+	query := hasRepoPermIn
+	var queryParams []interface{}
+	queryParams = append(queryParams, arg.UserID)
+	if len(arg.Perms) > 0 {
+		for _, v := range arg.Perms {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:perms*/?", strings.Repeat(",?", len(arg.Perms))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:perms*/?", "NULL", 1)
+	}
+	row := q.db.QueryRowContext(ctx, query, queryParams...)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const hasUsers = `-- name: HasUsers :one
@@ -907,18 +952,4 @@ type UpdateOIDCUserParams struct {
 func (q *Queries) UpdateOIDCUser(ctx context.Context, arg UpdateOIDCUserParams) error {
 	_, err := q.db.ExecContext(ctx, updateOIDCUser, arg.Email, arg.ID)
 	return err
-}
-
-const userElevated = `-- name: UserElevated :one
-SELECT EXISTS (SELECT 1 FROM user_permissions up WHERE up.user_id = ?1)
-    OR EXISTS (SELECT 1 FROM repo_permissions rp WHERE rp.user_id = ?1 AND rp.perm NOT IN ('download','publish'))
-`
-
-// Whether user id needs the second factor: any server permission, or a repository permission
-// other than download and publish.
-func (q *Queries) UserElevated(ctx context.Context, userID int64) (sql.NullBool, error) {
-	row := q.db.QueryRowContext(ctx, userElevated, userID)
-	var column_1 sql.NullBool
-	err := row.Scan(&column_1)
-	return column_1, err
 }

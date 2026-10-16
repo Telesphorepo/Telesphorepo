@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-// Bulk actions: the write routes that take a list (spec "Bulk actions" in SPEC.md §10).
+// Bulk actions: the write routes that take a list (see Bulk actions in SPEC.md).
 
 // rawRepoWithFile creates a private raw repo that holds the file f.txt (body "<repo> file").
 func rawRepoWithFile(t *testing.T, s *Server, prefix string) string {
@@ -34,7 +34,7 @@ func wantGet(t *testing.T, s *Server, repo string, auth Auth, want int) {
 	wantStatus(t, resp, body, want)
 }
 
-// lockRepo makes repo a mirror of a Nexus source, so its lock text is set. The Nexus source is
+// lockRepo makes repo a mirror of a Nexus source, so it gets the operation "mirror". The Nexus source is
 // a raw repo of the same server that serves the repository list that Nexus would serve.
 func lockRepo(t *testing.T, s *Server, repo string) {
 	t.Helper()
@@ -53,11 +53,15 @@ func lockRepo(t *testing.T, s *Server, repo string) {
 	s.MustAPI(t, http.MethodPut, "/api/nexus/sources/"+strconv.FormatInt(src.ID, 10)+"/repos",
 		map[string]any{"repos": []map[string]any{{"source_repo": "src", "target": repo}}}, s.Admin(), nil)
 	var r struct {
-		LockedBy string `json:"locked_by"`
+		Operation *struct {
+			Type    string `json:"type"`
+			State   string `json:"state"`
+			Message string `json:"message"`
+		} `json:"operation"`
 	}
 	s.MustAPI(t, http.MethodGet, "/api/repos/"+repo, nil, s.Admin(), &r)
-	if r.LockedBy == "" {
-		t.Fatalf("repo %s has no lock after the Nexus mapping", repo)
+	if r.Operation == nil || r.Operation.Type != "mirror" || r.Operation.State != "held" || !strings.Contains(r.Operation.Message, "cut over first") {
+		t.Fatalf("repo %s after the Nexus mapping: operation %+v, want a held mirror", repo, r.Operation)
 	}
 }
 
@@ -104,7 +108,7 @@ func TestBulkRepos(t *testing.T) {
 		apiWant(t, s, http.MethodPost, "/api/repos/delete", map[string]any{"names": []string{a, missing}}, s.Admin(), http.StatusNotFound)
 		wantGet(t, s, a, nil, http.StatusOK)
 
-		// Delete two: both answer 404 and their blobs are gone.
+		// Delete two: both answer 404. Their blobs stay until the blob GC.
 		var del struct {
 			Deleted []string `json:"deleted"`
 			Files   int      `json:"files"`
@@ -126,9 +130,10 @@ func TestBulkRepos(t *testing.T) {
 		if !slices.Equal(gone, want) {
 			t.Fatalf("repo.delete events: %v, want one each for %v", gone, want)
 		}
-		for _, k := range storedKeys(t, opts) {
-			if strings.HasPrefix(k, "repos/"+a+"/") || strings.HasPrefix(k, "repos/"+b+"/") {
-				t.Fatalf("blob %s is still stored after its repo delete", k)
+		keys := storedKeys(t, opts)
+		for _, r := range []string{a, b} {
+			if k := blobKey(sha256Hex([]byte(r + " file"))); !slices.Contains(keys, k) {
+				t.Fatalf("blob %s of a deleted repo is gone before the blob GC", k)
 			}
 		}
 
@@ -142,6 +147,11 @@ func TestBulkRepos(t *testing.T) {
 		for _, r := range []string{c, d} {
 			apiWant(t, s, http.MethodGet, "/api/repos/"+r, nil, s.Admin(), http.StatusOK)
 		}
+		// The mirror operation ends at the cut-over only: it cannot be resumed or cleared here, and
+		// a repo without an operation has none to end.
+		apiWant(t, s, http.MethodPost, "/api/repos/"+c+"/operation/resume", nil, s.Admin(), http.StatusConflict)
+		apiWant(t, s, http.MethodDelete, "/api/repos/"+c+"/operation", nil, s.Admin(), http.StatusConflict)
+		apiWant(t, s, http.MethodDelete, "/api/repos/"+d+"/operation", nil, s.Admin(), http.StatusConflict)
 	})
 }
 
@@ -157,9 +167,9 @@ func TestBulkFiles(t *testing.T) {
 		w, reader := RandName("writer"), RandName("reader")
 		s.CreateUser(t, w, "writer-pass-1234")
 		s.CreateUser(t, reader, "reader-pass-1234")
-		s.SetPerms(t, repo, w, "download", "publish", "delete")
-		s.SetPerms(t, other, w, "download", "publish", "delete")
-		s.SetPerms(t, repo, reader, "download")
+		s.SetPerms(t, repo, w, "repo.download", "repo.publish", "repo.delete")
+		s.SetPerms(t, other, w, "repo.download", "repo.publish", "repo.delete")
+		s.SetPerms(t, repo, reader, "repo.download")
 
 		ps := s.MintSession(t, w, repo)
 		for _, f := range []string{"one.bin", "two.bin", "dir/a.bin", "dir/sub/b.bin", "keep.bin"} {
@@ -196,18 +206,16 @@ func TestBulkFiles(t *testing.T) {
 		if got := nodeNames(treeAll(t, s, repo, "", 50, s.Admin())); !slices.Equal(got, []string{"file:keep.bin"}) {
 			t.Fatalf("root after the delete: %v", got)
 		}
+		// Deleted files leave their blobs to the blob GC; every blob is still stored.
 		keys := storedKeys(t, opts)
-		for _, gone := range []string{"one.bin", "two.bin", "dir/a.bin", "dir/sub/b.bin"} {
-			if slices.Contains(keys, "repos/"+repo+"/"+gone) {
-				t.Fatalf("blob of %s is still stored after its delete", gone)
+		for _, f := range []string{"one.bin", "two.bin", "dir/a.bin", "dir/sub/b.bin", "keep.bin"} {
+			if !slices.Contains(keys, blobKey(sha256Hex([]byte("raw "+f)))) {
+				t.Fatalf("blob of %s is gone before the blob GC", f)
 			}
-		}
-		if !slices.Contains(keys, "repos/"+repo+"/keep.bin") {
-			t.Fatal("blob of keep.bin is gone, but it was not deleted")
 		}
 		// One event per file and one per folder.
 		var targets []string
-		for _, e := range auditAll(t, s, "action=delete&repo="+repo) {
+		for _, e := range auditAll(t, s, "action=file.delete&repo="+repo) {
 			targets = append(targets, e.Target)
 		}
 		slices.Sort(targets)
@@ -223,7 +231,7 @@ func TestBulkPeople(t *testing.T) {
 	u1, u2, u3 := RandName("dis"), RandName("dis"), RandName("keep")
 	for _, u := range []string{u1, u2, u3} {
 		s.CreateUser(t, u, u+"-password")
-		s.SetPerms(t, repo, u, "download")
+		s.SetPerms(t, repo, u, "repo.download")
 	}
 	sess := map[string]*Session{u1: s.SignIn(t, u1, u1+"-password"), u2: s.SignIn(t, u2, u2+"-password")}
 	for u, ui := range sess {
@@ -287,7 +295,7 @@ func TestBulkAccess(t *testing.T) {
 	}
 
 	// One person, download on three repositories.
-	s.MustAPI(t, http.MethodPut, "/api/permissions", map[string]any{"users": []string{p1}, "repos": []string{r1, r2, r3}, "perms": []string{"download"}}, s.Admin(), &out)
+	s.MustAPI(t, http.MethodPut, "/api/grants", map[string]any{"users": []string{p1}, "repos": []string{r1, r2, r3}, "perms": []string{"repo.download"}}, s.Admin(), &out)
 	if out.Changed != 3 {
 		t.Fatalf("download on 3 repos: changed %d, want 3", out.Changed)
 	}
@@ -295,13 +303,13 @@ func TestBulkAccess(t *testing.T) {
 		wantGet(t, s, r, basic(p1), http.StatusOK)
 	}
 	// The same set again changes nothing.
-	s.MustAPI(t, http.MethodPut, "/api/permissions", map[string]any{"users": []string{p1}, "repos": []string{r1, r2, r3}, "perms": []string{"download"}}, s.Admin(), &out)
+	s.MustAPI(t, http.MethodPut, "/api/grants", map[string]any{"users": []string{p1}, "repos": []string{r1, r2, r3}, "perms": []string{"repo.download"}}, s.Admin(), &out)
 	if out.Changed != 0 {
 		t.Fatalf("the same set again: changed %d, want 0", out.Changed)
 	}
 
 	// Three people, download and publish on one repository.
-	s.MustAPI(t, http.MethodPut, "/api/permissions", map[string]any{"users": []string{p1, p2, p3}, "repos": []string{r1}, "perms": []string{"download", "publish"}}, s.Admin(), &out)
+	s.MustAPI(t, http.MethodPut, "/api/grants", map[string]any{"users": []string{p1, p2, p3}, "repos": []string{r1}, "perms": []string{"repo.download", "repo.publish"}}, s.Admin(), &out)
 	if out.Changed != 3 {
 		t.Fatalf("publish for 3 people: changed %d, want 3", out.Changed)
 	}
@@ -309,9 +317,9 @@ func TestBulkAccess(t *testing.T) {
 		resp, body := rawPut(t, s, "/raw/"+r1+"/by-"+p+".txt", []byte(p), s.PublishAuth(t, p, r1))
 		wantStatus(t, resp, body, http.StatusCreated)
 	}
-	events := auditAll(t, s, "action=permission.set&repo="+r1)
+	events := auditAll(t, s, "action=grant.set&repo="+r1)
 	if len(events) != 4 {
-		t.Fatalf("permission.set events of %s: %d, want 4", r1, len(events))
+		t.Fatalf("grant.set events of %s: %d, want 4", r1, len(events))
 	}
 	// Each event holds the old and the new set; the newest event of p1 is the change to publish.
 	var p1Event *auditEntry
@@ -321,24 +329,24 @@ func TestBulkAccess(t *testing.T) {
 			break
 		}
 	}
-	if p1Event == nil || fmt.Sprint(p1Event.Detail["old"]) != "[download]" || fmt.Sprint(p1Event.Detail["new"]) != "[download publish]" {
-		t.Fatalf("permission.set event of %s: %+v, want old [download] and new [download publish]", p1, p1Event)
+	if p1Event == nil || fmt.Sprint(p1Event.Detail["old"]) != "[repo.download]" || fmt.Sprint(p1Event.Detail["new"]) != "[repo.download repo.publish]" {
+		t.Fatalf("grant.set event of %s: %+v, want old [repo.download] and new [repo.download repo.publish]", p1, p1Event)
 	}
 
 	// One unknown name changes nothing.
 	nobody := RandName("nobody")
-	st, body := s.API(t, http.MethodPut, "/api/permissions", map[string]any{"users": []string{p2, nobody}, "repos": []string{r2}, "perms": []string{"download"}}, s.Admin())
+	st, body := s.API(t, http.MethodPut, "/api/grants", map[string]any{"users": []string{p2, nobody}, "repos": []string{r2}, "perms": []string{"repo.download"}}, s.Admin())
 	if st != http.StatusNotFound || !strings.Contains(string(body), nobody) {
 		t.Fatalf("grant with an unknown user: status %d, want 404 that names %s: %s", st, nobody, body)
 	}
-	apiWant(t, s, http.MethodPut, "/api/permissions", map[string]any{"users": []string{p2}, "repos": []string{r2, RandName("gone")}, "perms": []string{"download"}}, s.Admin(), http.StatusNotFound)
+	apiWant(t, s, http.MethodPut, "/api/grants", map[string]any{"users": []string{p2}, "repos": []string{r2, RandName("gone")}, "perms": []string{"repo.download"}}, s.Admin(), http.StatusNotFound)
 	wantGet(t, s, r2, basic(p2), http.StatusForbidden)
 	// An unknown permission and a broken dependency get 400.
-	apiWant(t, s, http.MethodPut, "/api/permissions", map[string]any{"users": []string{p2}, "repos": []string{r2}, "perms": []string{"bogus"}}, s.Admin(), http.StatusBadRequest)
-	apiWant(t, s, http.MethodPut, "/api/permissions", map[string]any{"users": []string{p2}, "repos": []string{r2}, "perms": []string{"publish"}}, s.Admin(), http.StatusBadRequest)
+	apiWant(t, s, http.MethodPut, "/api/grants", map[string]any{"users": []string{p2}, "repos": []string{r2}, "perms": []string{"bogus"}}, s.Admin(), http.StatusBadRequest)
+	apiWant(t, s, http.MethodPut, "/api/grants", map[string]any{"users": []string{p2}, "repos": []string{r2}, "perms": []string{"repo.publish"}}, s.Admin(), http.StatusBadRequest)
 
 	// Remove access with an empty set: 403 after.
-	s.MustAPI(t, http.MethodPut, "/api/permissions", map[string]any{"users": []string{p1}, "repos": []string{r1, r2, r3}, "perms": []string{}}, s.Admin(), &out)
+	s.MustAPI(t, http.MethodPut, "/api/grants", map[string]any{"users": []string{p1}, "repos": []string{r1, r2, r3}, "perms": []string{}}, s.Admin(), &out)
 	if out.Changed != 3 {
 		t.Fatalf("remove p1 from 3 repos: changed %d, want 3", out.Changed)
 	}
@@ -362,8 +370,8 @@ func TestBulkSessionRule(t *testing.T) {
 		{http.MethodPost, "/api/repos/delete", map[string]any{"names": []string{repo}}},
 		{http.MethodPost, "/api/repos/" + repo + "/files/delete", map[string]any{"paths": []string{"f.txt"}}},
 		{http.MethodPatch, "/api/users", map[string]any{"usernames": []string{"erin"}, "disabled": true}},
-		{http.MethodPut, "/api/permissions", map[string]any{"users": []string{"erin"}, "repos": []string{repo}, "perms": []string{"download", "publish"}}},
-		{http.MethodPut, "/api/permissions", map[string]any{"users": []string{"erin"}, "repos": []string{repo}, "perms": []string{}}},
+		{http.MethodPut, "/api/grants", map[string]any{"users": []string{"erin"}, "repos": []string{repo}, "perms": []string{"repo.download", "repo.publish"}}},
+		{http.MethodPut, "/api/grants", map[string]any{"users": []string{"erin"}, "repos": []string{repo}, "perms": []string{}}},
 	}
 	for _, r := range routes {
 		apiWant(t, s, r.method, r.path, r.body, s.AdminBasic(), http.StatusUnauthorized)

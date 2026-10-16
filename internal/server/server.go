@@ -1,4 +1,5 @@
-// Package server wires config, DB, storage, auth, formats, API and UI together.
+// Package server builds the kernel, runs the lifecycle of every module (internal/modules) and
+// serves HTTP.
 package server
 
 import (
@@ -11,43 +12,49 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/access"
-	"github.com/Telesphorepo/Telesphorepo/internal/api"
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
+	"github.com/Telesphorepo/Telesphorepo/internal/blobs"
+	"github.com/Telesphorepo/Telesphorepo/internal/ci"
+	"github.com/Telesphorepo/Telesphorepo/internal/clients"
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
-	"github.com/Telesphorepo/Telesphorepo/internal/files"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
-	_ "github.com/Telesphorepo/Telesphorepo/internal/formats" // registers the built-in formats
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
-	"github.com/Telesphorepo/Telesphorepo/internal/move"
-	"github.com/Telesphorepo/Telesphorepo/internal/netrules"
-	"github.com/Telesphorepo/Telesphorepo/internal/nexus"
-	"github.com/Telesphorepo/Telesphorepo/internal/oidc"
+	"github.com/Telesphorepo/Telesphorepo/internal/jobs"
+	"github.com/Telesphorepo/Telesphorepo/internal/module"
+	"github.com/Telesphorepo/Telesphorepo/internal/modules"
+	"github.com/Telesphorepo/Telesphorepo/internal/ops"
+	"github.com/Telesphorepo/Telesphorepo/internal/perm"
 	"github.com/Telesphorepo/Telesphorepo/internal/proxy"
-	"github.com/Telesphorepo/Telesphorepo/internal/publish"
+	"github.com/Telesphorepo/Telesphorepo/internal/rebuild"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
+	"github.com/Telesphorepo/Telesphorepo/internal/route"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
-	"github.com/Telesphorepo/Telesphorepo/internal/signing"
 	"github.com/Telesphorepo/Telesphorepo/internal/storage"
 	"github.com/Telesphorepo/Telesphorepo/web"
 )
 
-// Services exposes the wired services to Options.Init.
+// Services exposes the kernel and the module manifests to Options.Init and to the offline
+// commands.
 type Services struct {
-	Config   *config.Config // effective configuration at startup
-	Settings *settings.Service
-	Auth     *auth.Service
-	Repos    *repos.Service
-	DB       *db.DB
-	Assets   *assets.Service // its Store is the live blob store
+	Boot      *config.Boot
+	Settings  *settings.Service
+	Auth      *auth.Service
+	Repos     *repos.Service
+	DB        *db.DB
+	Assets    *assets.Pipeline
+	Builds    *ci.Builds
+	Formats   *format.Registry
+	Manifests []*module.Manifest
 }
 
 // Options customises Run (used by "telesphorepo dev"). The zero value is plain "serve".
@@ -55,9 +62,8 @@ type Options struct {
 	// Dev applies the Dev default of every setting (see settings.Options.Dev) and makes the second
 	// factor optional (auth.Service.SetDevMode). Only "telesphorepo dev" sets it.
 	Dev bool
-	// Init runs after the DB and services are ready and every format has its core services
-	// (format.Format.Register), and before the default first-run admin bootstrap (so it may
-	// create its own admin), the format workers (format.Starter) and listening.
+	// Init runs after every module's Init and routes, and before the default first-run admin
+	// bootstrap (so it may create its own admin), the start of the jobs and listening.
 	Init func(ctx context.Context, s *Services) error
 	// Ready runs once the listener is bound.
 	Ready func(addr net.Addr)
@@ -68,66 +74,120 @@ type Options struct {
 // Run starts the HTTP server and blocks until ctx is cancelled (graceful shutdown).
 func Run(ctx context.Context, boot *config.Boot) error { return RunWith(ctx, boot, Options{}) }
 
-// Migrate applies the migration track of every format that owns tables (format.Migrator).
-// db.Open has already applied the core track.
-func Migrate(ctx context.Context, d *db.DB) error {
-	for _, f := range format.All() {
-		if m, ok := f.(format.Migrator); ok {
-			if err := d.Migrate(ctx, f.Name(), m.Migrations()); err != nil {
-				return fmt.Errorf("migrate %s: %w", f.Name(), err)
-			}
-		}
-	}
-	return nil
-}
-
-// QuerySets returns the queries the plan guard checks: core first, then every
-// format.Queryable.
-func QuerySets() []db.QuerySet {
-	sets := []db.QuerySet{db.CoreQueries()}
-	for _, f := range format.All() {
-		if q, ok := f.(format.Queryable); ok {
-			sets = append(sets, q.QuerySet())
-		}
-	}
-	return sets
+// Built is what the module list declares: the manifests in start order, the formats, the
+// permission registry, the audit actions, the settings groups, the CI providers and the
+// publisher clients.
+type Built struct {
+	Manifests []*module.Manifest
+	Formats   *format.Registry
+	Perms     *perm.Registry
+	Actions   *audit.Actions
+	Groups    []*settings.Group
+	CI        *ci.Registry
+	Clients   *clients.Registry
 }
 
 var (
-	settingsOnce sync.Once
-	settingsErr  error
+	buildOnce sync.Once
+	built     *Built
+	buildErr  error
 )
 
-// registerSettings adds each format.Configurable's settings to the settings registry as a
-// group named after the format. It runs once per process, before settings.Load.
-func registerSettings() error {
-	settingsOnce.Do(func() {
-		for _, f := range format.All() {
-			c, ok := f.(format.Configurable)
-			if !ok {
-				continue
-			}
-			if defs := c.Settings(); len(defs) > 0 {
-				if err := settings.Register(f.Name(), f.Title(), defs); err != nil {
-					settingsErr = fmt.Errorf("format %s: %w", f.Name(), err)
+// Build runs every module's Register once per process: it builds the manifests, the permission
+// registry (then fixed), the audit actions, the settings groups, the format registry, the CI
+// provider registry and the publisher client registry. Later calls return the same result.
+func Build() (*Built, error) {
+	buildOnce.Do(func() {
+		mfs := module.Build(modules.All())
+		perms := perm.NewRegistry()
+		for _, m := range mfs {
+			for _, p := range m.Permissions {
+				if err := perms.Add(m.Module.ID, p.Subsystem, p.Defs...); err != nil {
+					buildErr = fmt.Errorf("module %s: %w", m.Module.ID, err)
 					return
 				}
 			}
 		}
+		perms.Fix()
+		actions := audit.NewActions()
+		providers := ci.NewRegistry()
+		publishers := clients.NewRegistry()
+		var specs []format.Spec
+		var groups []*settings.Group
+		for _, m := range mfs {
+			if err := actions.Add(m.AuditActions, perms.HasSubsystem); err != nil {
+				buildErr = fmt.Errorf("module %s: %w", m.Module.ID, err)
+				return
+			}
+			for _, p := range m.CIProviders {
+				if err := providers.Add(p); err != nil {
+					buildErr = fmt.Errorf("module %s: %w", m.Module.ID, err)
+					return
+				}
+			}
+			for _, cl := range m.Clients {
+				if err := publishers.Add(cl); err != nil {
+					buildErr = fmt.Errorf("module %s: %w", m.Module.ID, err)
+					return
+				}
+			}
+			groups = append(groups, m.Settings...)
+			specs = append(specs, m.Formats...)
+		}
+		reg, err := format.NewRegistry(specs)
+		if err != nil {
+			buildErr = err
+			return
+		}
+		built = &Built{Manifests: mfs, Formats: reg, Perms: perms, Actions: actions, Groups: groups, CI: providers, Clients: publishers}
 	})
-	return settingsErr
+	return built, buildErr
 }
 
-// RunWith is Run with Options.
-// Steps: logger; mkdir DataDir/TmpDir; db.Open (core migrations); format migrations; format
-// settings; settings.Load (master key, DB, env overrides); query optimizer; live storage
-// (hot-swapped on storage setting changes); repos, audit, IP lists and rules, signing keys (the
-// key "default" is generated on the first start), auth/publish/assets/move/nexus services; mux:
-// GET /healthz, /api/ -> api.Handler(), each format's Register, "/" -> web UI; Options.Init;
-// bootstrap admin if no users; listen; each
-// format.Starter's Start; resume a running storage move and the running Nexus syncs, start the
-// Nexus sync scheduler and the publish cleanup job; serve.
-// Access logging must never log Authorization headers, cookies, or query strings.
+// InitSchema creates the schema of the kernel and of every module with a schema, in start order
+// (db.DB.Init). A component whose schema text changed is a *db.ErrSchemaChanged.
+func InitSchema(ctx context.Context, d *db.DB) error {
+	comps, err := Components()
+	if err != nil {
+		return err
+	}
+	return d.Init(ctx, comps)
+}
+
+// Components returns the schema components: the kernel first, then every module with a schema,
+// in start order.
+func Components() ([]db.Component, error) {
+	b, err := Build()
+	if err != nil {
+		return nil, err
+	}
+	out := []db.Component{db.Core()}
+	for _, m := range b.Manifests {
+		if m.Schema != nil {
+			out = append(out, *m.Schema)
+		}
+	}
+	return out, nil
+}
+
+// RunWith is Run with Options. The startup order:
+//
+//  1. Logger, data dirs, db.Open.
+//  2. Build: every module's Register, the settings groups, the format registry.
+//  3. The schema of the kernel and of each module, in start order (InitSchema).
+//  4. settings.Load (master key, stored settings, env overrides).
+//  5. The kernel services: live storage (swapped when the storage settings change), repos,
+//     audit, auth, assets, proxy, access, the job runner.
+//  6. Each module's Init, in start order; an error stops startup. Then the token kinds, the
+//     guards of the access engine and the jobs of every module.
+//  7. The routes of every module on one route table, plus GET /healthz and the web UI.
+//  8. Options.Init, then the bootstrap admin when there are no users.
+//  9. The Start of every job, in start order; an error stops startup.
+//  10. Listen; then the Run and Tick loops of every job.
+//
+// Shutdown: http.Server.Shutdown (30 s), then the runner stops each module in reverse start
+// order and waits for its work, then the database closes. Access logging never logs
+// Authorization headers, cookies or query strings.
 func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 	level := new(slog.LevelVar)
 	hopts := &slog.HandlerOptions{Level: level}
@@ -150,124 +210,130 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 		return fmt.Errorf("open db: %w", err)
 	}
 	defer d.Close()
-	if err := Migrate(ctx, d); err != nil {
-		return err
-	}
-	if err := registerSettings(); err != nil {
-		return err
-	}
-
-	set, err := settings.Load(ctx, d, boot, settings.Options{Dev: opts.Dev, Log: log.With("component", "settings")})
+	b, err := Build()
 	if err != nil {
 		return err
 	}
-	cfg := set.Config()
-	level.Set(cfg.LogLevel)
-	d.StartOptimizer(ctx)
+	if err := InitSchema(ctx, d); err != nil {
+		return err
+	}
 
-	st, err := storage.Open(ctx, cfg)
+	set, err := settings.Load(ctx, d, boot, b.Groups, settings.Options{Dev: opts.Dev, Log: log.With("component", "settings")})
+	if err != nil {
+		return err
+	}
+	level.Set(settings.Level(set.Current()))
+
+	st, err := storage.Open(ctx, storage.ConfigView.Get(set.Current()))
 	if err != nil {
 		return fmt.Errorf("storage: %w", err)
 	}
 	live := storage.NewLive(st)
-
 	set.Subscribe(func(old, new *settings.Snapshot) {
-		level.Set(new.Config.LogLevel)
-		if storage.SameBackend(old.Config, new.Config) {
+		level.Set(settings.Level(new))
+		cfg := storage.ConfigView.Get(new)
+		if storage.SameBackend(storage.ConfigView.Get(old), cfg) {
 			return
 		}
-		st, err := storage.Open(context.WithoutCancel(ctx), new.Config)
+		st, err := storage.Open(context.WithoutCancel(ctx), cfg)
 		if err != nil {
 			log.Error("storage settings changed but the new store could not be opened; keeping the previous one", "error", err.Error())
 			return
 		}
 		live.Swap(st)
-		log.Info("storage switched", "storage", new.Config.Storage)
+		log.Info("storage switched", "storage", cfg.Backend)
 	})
 
-	rs := repos.New(d, format.ValidateRepoConfig, format.SupportsKind)
-	rs.SetSealer(set) // proxy credentials are sealed with the master key
-	if bad, err := rs.Load(ctx); err != nil {
-		return err
-	} else if len(bad) > 0 {
-		log.Error("the credentials of proxy repos do not decrypt (was the master key changed?); enter them again", "repo_ids", bad)
-	}
-	au := audit.New(d, func() time.Duration { return set.Current().Duration(settings.KeyAuditRetention) }, log.With("component", "audit"))
-	nr := netrules.New(d, set.Config, au, log.With("component", "netrules"))
-	if err := nr.Load(ctx); err != nil {
+	// base ends after the HTTP server shut down: a write that runs detached from its request (the
+	// asset pipeline) finishes unless the shutdown timed out.
+	base, endBase := context.WithCancel(context.WithoutCancel(ctx))
+	defer endBase()
+	k, err := kernel(base, d, boot, set, live, b, opts.Dev, log)
+	if err != nil {
 		return err
 	}
-	// Repo configs name a signing key, so the keys (and "default" on the first start) exist
-	// before any repo is created.
-	keys := signing.NewKeys(d, set, log.With("component", "signing"))
-	if err := keys.Load(ctx); err != nil {
-		return err
+	// Stop and Wait run before d.Close (defers run in reverse): no module work and no kernel
+	// write outlives the database.
+	defer k.Auth.Wait()
+	defer k.Jobs.Stop()
+	shared := module.NewShared()
+	hosts := make([]*module.Host, len(b.Manifests))
+	for i, m := range b.Manifests {
+		hosts[i] = module.NewHost(k, m.Module, log, shared)
+		for _, fn := range m.Inits {
+			// An Init records audit events as the system actor of its module.
+			if err := fn(audit.System(ctx, m.Module.ID), hosts[i]); err != nil {
+				return fmt.Errorf("module %s: %w", m.Module.ID, err)
+			}
+		}
+		// A module's repo fields serve once its Init ran.
+		for _, f := range m.RepoFields {
+			k.Repos.AddField(f)
+		}
 	}
-	as := auth.New(d, set.Config, rs)
-	as.SetSealer(set) // TOTP secrets are sealed with the master key
-	as.SetAudit(au)
-	as.SetNetRules(nr)      // per-repo IP rules on the repo gates
-	as.SetDevMode(opts.Dev) // only "telesphorepo dev" makes the second factor optional
-	ps := publish.New(d, as, rs, set, log.With("component", "publish"))
-	as.SetPublishTokens(ps) // publish-session tokens authenticate through the publish service
-	ps.SetNetRules(nr)      // minting a session checks the repo's publish rules
-	ss := assets.New(d, live, set.Config)
-	fs := files.New(d, ss, rs, as, log.With("component", "files"))
-	px := proxy.New(d, rs, ss, set.Config, log.With("component", "proxy"))
-	mv := move.New(d, set, live, ss, rs, log.With("component", "move"))
-	nx := nexus.New(d, set, rs, keys, log.With("component", "nexus"))
-	// The move copier, the Nexus sync runners and scheduler, and the publish cleanup job live until
-	// RunWith returns. They stop before the database closes (this defer runs before d.Close); a
-	// move or sync stays running in the database.
-	jobsCtx, stopJobs := context.WithCancel(ctx)
-	defer func() {
-		stopJobs()
-		mv.Wait()
-		nx.Wait()
-		ps.Wait()
-		au.Wait()
-		nr.Wait()
-	}()
+	var address func(*http.Request) netip.Addr
+	for _, m := range b.Manifests {
+		for _, t := range m.TokenKinds {
+			k.Auth.AddTokenKind(t.Prefix, t.Verify)
+		}
+		for _, g := range m.Guards {
+			k.Access.AddGuard(g)
+		}
+		for _, j := range m.Jobs {
+			k.Jobs.Add(m.Module.ID, j)
+		}
+		if m.ClientAddress != nil {
+			address = m.ClientAddress
+		}
+	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+	mux := route.NewMux(k.Auth, k.Access, k.Repos)
+	for _, m := range b.Manifests {
+		for _, p := range m.Prefixes() {
+			mux.Claim(m.Module.ID, p)
+		}
+	}
+	for _, m := range b.Manifests {
+		r := mux.Router(m.Module.ID)
+		kit := format.Kit{Reader: k.Reader, Assets: k.Assets}
+		for _, f := range m.Formats {
+			if f.Routes == nil {
+				format.Standard(f.Name, r, kit)
+			} else {
+				f.Routes(r, kit)
+			}
+		}
+		for _, fn := range m.Routes {
+			fn(r)
+		}
+	}
+	mux.Kernel("GET /healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := d.R.PingContext(r.Context()); err != nil {
 			http.Error(w, "db unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		io.WriteString(w, "ok\n")
-	})
-	sso := oidc.New(as, ps, set.Config, log.With("component", "oidc"))
-	mux.Handle("/api/", api.New(as, rs, ss, set, mv, nx, ps, fs, au, nr, access.New(d, rs, as, nr), keys, sso).Handler())
-	for _, f := range format.All() {
-		f.Register(mux, format.Host{
-			DB:       d,
-			Auth:     as,
-			Assets:   ss,
-			Repos:    rs,
-			Proxy:    px,
-			Config:   set.Config,
-			Settings: set,
-			Keys:     keys,
-			Log:      log.With("component", f.Name()),
-			Audit:    au,
-		})
-	}
-	mux.Handle("/", web.Handler())
+	}))
+	mux.Kernel("/", web.Handler())
 
 	if opts.Init != nil {
-		if err := opts.Init(ctx, &Services{Config: cfg, Settings: set, Auth: as, Repos: rs, DB: d, Assets: ss}); err != nil {
+		s := &Services{Boot: boot, Settings: set, Auth: k.Auth, Repos: k.Repos, DB: d, Assets: k.Assets,
+			Builds: k.Builds, Formats: b.Formats, Manifests: b.Manifests}
+		if err := opts.Init(audit.System(ctx, "core"), s); err != nil {
 			return err
 		}
 	}
-	if err := bootstrapAdmin(ctx, as, boot, log); err != nil {
+	if err := bootstrapAdmin(ctx, k.Auth, boot, log); err != nil {
 		return err
 	}
 
+	if err := k.Jobs.Start(); err != nil {
+		return err
+	}
 	srv := &http.Server{
 		Addr:              boot.Listen,
-		Handler:           nr.Middleware(accessLog(log, mux)), // client address first, then the log
+		Handler:           clientAddress(address, accessLog(log, mux.Handler())), // client address first, then the log
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    64 << 10,
@@ -278,26 +344,11 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
-
-	for _, f := range format.All() {
-		if s, ok := f.(format.Starter); ok {
-			s.Start(ctx)
-		}
-	}
-	// A storage move or Nexus sync left running by the previous process continues from its
-	// last saved position. Both stop with ctx and stay running in the database.
-	if err := mv.Resume(jobsCtx); err != nil {
-		ln.Close()
-		return err
-	}
-	nx.Start(jobsCtx)
-	ps.Start(jobsCtx)
-	au.Start(jobsCtx)
-	nr.Start(jobsCtx)
+	k.Jobs.Loop()
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()
-	log.Info("listening", "addr", ln.Addr().String(), "storage", cfg.Storage)
+	log.Info("listening", "addr", ln.Addr().String(), "storage", storage.ConfigView.Get(set.Current()).Backend)
 	if opts.Ready != nil {
 		opts.Ready(ln.Addr())
 	}
@@ -311,6 +362,7 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 	sctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(sctx); err != nil {
+		endBase()
 		srv.Close()
 		return fmt.Errorf("shutdown: %w", err)
 	}
@@ -318,6 +370,65 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 		return err
 	}
 	return nil
+}
+
+// kernel builds the kernel services that every module gets. base ends after the HTTP server shut
+// down.
+func kernel(base context.Context, d *db.DB, boot *config.Boot, set *settings.Service, live *storage.Live, b *Built, dev bool, log *slog.Logger) (*module.Kernel, error) {
+	opsSvc := ops.New(d)
+	for _, m := range b.Manifests {
+		for _, t := range m.OpTypes {
+			opsSvc.Register(t)
+		}
+	}
+	au := audit.New(d, b.Actions, log.With("component", "audit"))
+	set.SetAudit(au)
+	rs := repos.New(d, b.Formats.ValidateConfig, b.Formats.SupportsKind)
+	rs.SetSealer(set) // proxy credentials are sealed with the master key
+	rs.SetAudit(au)
+	rs.SetChangeHook(b.Formats.OnRepoChange)
+	if bad, err := rs.Load(base); err != nil {
+		return nil, err
+	} else if len(bad) > 0 {
+		log.Error("the credentials of proxy repos do not decrypt (was the master key changed?); enter them again", "repo_ids", bad)
+	}
+	as := auth.New(d, set.Current, rs)
+	as.SetSealer(set) // TOTP secrets are sealed with the master key
+	as.SetAudit(au)
+	as.SetDevMode(dev) // only "telesphorepo dev" makes the second factor optional
+	as.SetBearerKey(set.DeriveKey(auth.BearerKeyInfo))
+	bs := blobs.New(d, live)
+	pipe := assets.New(base, d, bs, set.Current, au)
+	pipe.SetHooks(b.Formats.Hooks)
+	engine := access.New(d, rs, as, au, set.Current, opsSvc)
+	reader := assets.NewReader(pipe, rs, engine, func() time.Duration { return storage.PresignTTL.Get(set.Current()) },
+		log.With("component", "assets"))
+	reader.SetFetcher(proxy.New(rs, pipe, log.With("component", "proxy")))
+	ids := make([]string, len(b.Manifests))
+	for i, m := range b.Manifests {
+		ids[i] = m.Module.ID
+	}
+	runner := jobs.NewRunner(log.With("component", "jobs"), ids)
+	rq := rebuild.New(d, rs, set, log.With("component", "rebuild"),
+		func(name string, fn func(context.Context)) { runner.Go("core", name, fn) }, b.Formats.RebuildRun)
+	return &module.Kernel{
+		Boot: boot, Dev: dev, DB: d, Settings: set, Perms: b.Perms, Audit: au,
+		Jobs: runner, Storage: live, Blobs: bs, Assets: pipe, Reader: reader, Uploads: assets.NewUploads(d, set.Current),
+		Rebuilds: rq, Repos: rs, Ops: opsSvc, Auth: as, Formats: b.Formats, Access: engine,
+		CI: b.CI, Builds: ci.NewBuilds(d, b.CI), Clients: b.Clients,
+		API: &route.API{Settings: set.Current},
+	}, nil
+}
+
+// clientAddress resolves the client address of every request once with fn (the network module)
+// and attaches it (httpx.ClientIP reads it). Without fn the address is the TCP peer.
+func clientAddress(fn func(*http.Request) netip.Addr, next http.Handler) http.Handler {
+	if fn == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, httpx.WithClientIP(r, fn(r)))
+	})
 }
 
 // bootstrapAdmin creates the first admin when the users table is empty: from
@@ -335,7 +446,7 @@ func bootstrapAdmin(ctx context.Context, as *auth.Service, boot *config.Boot, lo
 	if user == "" || pass == "" {
 		user, pass, generated = "admin", RandomPassword(), true
 	}
-	if _, err := as.CreateUser(ctx, user, pass, auth.AllServerPerms); err != nil {
+	if _, err := as.CreateUser(audit.System(ctx, "core"), user, pass, perm.Current().AllServer()); err != nil {
 		return fmt.Errorf("bootstrap admin: %w", err)
 	}
 	log.Info("bootstrap admin created", "username", user)

@@ -6,7 +6,6 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -18,7 +17,7 @@ const (
 )
 
 // dev runs the backend ("telesphorepo dev") and Vite side by side, rebuilding and
-// restarting the backend when Go sources, go.mod/go.sum or migrations change.
+// restarting the backend when Go sources, go.mod/go.sum or a schema.sql change.
 func dev(ctx context.Context) error {
 	pm, err := prepare(ctx)
 	if err != nil {
@@ -152,7 +151,7 @@ var skipDirs = map[string]bool{
 	".idea": true, ".vscode": true, "data": true, "testdata": true, "tools": true, "e2e": true,
 }
 
-// snapshot records *.go, go.mod, go.sum and internal/db/migrations/*.sql under the repo.
+// snapshot records *.go, go.mod, go.sum and every internal/**/schema.sql under the repo.
 func snapshot() map[string]fileStamp {
 	m := map[string]fileStamp{}
 	_ = filepath.WalkDir(".", func(p string, d fs.DirEntry, err error) error {
@@ -168,7 +167,7 @@ func snapshot() map[string]fileStamp {
 		}
 		slash := filepath.ToSlash(p)
 		watched := strings.HasSuffix(name, ".go") || slash == "go.mod" || slash == "go.sum" ||
-			(path.Dir(slash) == "internal/db/migrations" && strings.HasSuffix(name, ".sql"))
+			(strings.HasPrefix(slash, "internal/") && name == "schema.sql")
 		if !watched {
 			return nil
 		}

@@ -3,9 +3,9 @@
 // folder (its parent is the artifact, its name the version) lists the files of its latest build
 // and how many earlier builds it has, so a snapshot with many builds stays one short column.
 
-import { api, errorMessage, type TreeEntry } from "$lib/api";
+import { api, errorMessage, type TreeEntry, type Version } from "$lib/api";
 import { Keyset } from "$lib/load.svelte";
-import { baseName, browse, compareVersions, parentOf, sideOf, type Version } from "../browse";
+import { baseName, compareVersions, parentOf, sideOf } from "../browse";
 
 export type Entry = { name: string; path: string; type: "dir" | "file"; size?: number };
 
@@ -23,7 +23,7 @@ export class Column {
     const depth = folder.split("/").filter(Boolean).length;
     if (depth >= 3 && /^\d/.test(baseName(folder))) {
       this.#probing = true;
-      browse
+      api.repos
         .builds(repo, parentOf(folder), baseName(folder), { limit: 1 })
         .then((b) => {
           if (b.version && b.items[0]) {

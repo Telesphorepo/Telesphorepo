@@ -1,41 +1,77 @@
-// Package maven serves hosted Maven repos at /maven/{repo}/{path...} (spec §8).
+// Package maven serves Maven repos at /maven/{repo}/{path...}: hosted repos that Gradle and
+// Maven publish to, proxies of remote Maven repositories and groups of both. It mounts the
+// standard format routes; its hooks describe the Maven files, keep releases immutable, merge
+// maven-metadata.xml in a group and write it again after a delete.
 package maven
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"path"
 	"strings"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
-	"github.com/Telesphorepo/Telesphorepo/internal/config"
+	"github.com/Telesphorepo/Telesphorepo/internal/clients"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
-	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/module"
+	"github.com/Telesphorepo/Telesphorepo/internal/repopath"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
-// Handler is the Maven format plugin.
+// Handler serves the Maven format.
 type Handler struct {
 	auth   *auth.Service
-	assets *assets.Service
-	cfg    config.Provider
-	host   format.Host
+	assets *assets.Pipeline
+	host   *module.Host
 }
 
-// New returns the Maven format.
-func New() format.Format { return &Handler{} }
+// Module returns the Maven module: the Maven format with proxies, groups, uploads, imports,
+// demo data and seeds, and the project setup scripts GET /setup.sh and GET /setup.ps1.
+func Module() module.Module {
+	h := &Handler{}
+	return module.Module{
+		ID: "maven", Title: "Maven / Gradle",
+		Register: func(x *module.Extender) {
+			x.Init(func(ctx context.Context, host *module.Host) error {
+				h.auth, h.assets, h.host = host.Auth, host.Assets, host
+				return nil
+			})
+			x.PublisherClient(clients.Client{ID: "gradle", Title: "Gradle plugin",
+				Help: "The Telesphorepo Gradle plugin publishes from this computer with the device key."})
+			x.PublisherClient(clients.Client{ID: "maven", Title: "Maven extension",
+				Help: "The Telesphorepo Maven extension deploys from this computer with the device key."})
+			x.Format(format.Spec{
+				Name: "maven", Title: "Maven / Gradle",
+				Description: "Java libraries and Gradle plugins, for Maven and Gradle builds.",
+				Icon:        icon, KindIcons: map[string][]byte{"gradle-plugin": gradleIcon},
+				Kinds:         []string{repos.KindHosted, repos.KindProxy, repos.KindGroup},
+				Config:        format.ConfigSpec{Default: json.RawMessage(`{}`), Validate: validateConfig},
+				Describe:      describe,
+				Admit:         admit,
+				AfterRemove:   h.afterRemove,
+				Classify:      classify,
+				ProxyProbe:    func(json.RawMessage) string { return "" },
+				Merge:         &assets.Merger{Match: matchMerged, Merge: mergeParts},
+				Versions:      h.Versions,
+				Builds:        h.Builds,
+				Usage:         h.Usage,
+				ArtifactUsage: h.ArtifactUsage,
+				Tools:         tools(),
+				Upload:        h.uploadSpec(),
+				Importer:      &format.Importer{Sources: []string{"maven2"}, Target: format.SourcePath},
+				UI:            ui,
+			})
+			x.Demo(module.DemoData{Repos: demoRepos, Fill: h.Demo})
+			x.Seed(seed)
+		},
+	}
+}
 
-func (h *Handler) Name() string  { return "maven" }
-func (h *Handler) Title() string { return "Maven / Gradle" }
-
-func (h *Handler) DefaultConfig() json.RawMessage { return json.RawMessage(`{}`) }
-
-// ValidateConfig accepts only an empty JSON object: Maven repos have no options.
-func (h *Handler) ValidateConfig(raw json.RawMessage) (json.RawMessage, error) {
+// validateConfig accepts only an empty JSON object: Maven repos have no options.
+func validateConfig(raw json.RawMessage) (json.RawMessage, error) {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &m); err != nil || m == nil {
 		return nil, errors.New("maven config must be a JSON object")
@@ -43,110 +79,76 @@ func (h *Handler) ValidateConfig(raw json.RawMessage) (json.RawMessage, error) {
 	if len(m) > 0 {
 		return nil, errors.New("maven repos take no config options")
 	}
-	return h.DefaultConfig(), nil
+	return json.RawMessage(`{}`), nil
 }
 
-// Register mounts GET/HEAD/PUT /maven/{repo}/{path...} and the project setup scripts GET /setup.sh
-// and GET /setup.ps1.
-func (h *Handler) Register(mux *http.ServeMux, host format.Host) {
-	h.auth, h.assets, h.cfg, h.host = host.Auth, host.Assets, host.Config, host
-	mux.HandleFunc("GET /maven/{repo}/{path...}", h.handle)
-	mux.HandleFunc("PUT /maven/{repo}/{path...}", h.handle)
-	h.registerSetup(mux)
+// contentTypes are the content types of Maven files by extension.
+var contentTypes = map[string]string{
+	".pom": "application/xml", ".xml": "application/xml",
+	".jar": "application/java-archive", ".war": "application/java-archive", ".ear": "application/java-archive",
+	".module": "application/json",
+	".md5":    "text/plain", ".sha1": "text/plain", ".sha256": "text/plain", ".sha512": "text/plain",
+	".asc": "application/pgp-signature",
 }
 
-func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
-	p := r.PathValue("path")
-	if !httpx.ValidRepoPath(r, p) {
-		httpx.Error(w, http.StatusBadRequest, "invalid path")
-		return
+// describe gives a Maven path its content type by extension, and the kind metadata to
+// maven-metadata.xml and its checksums.
+func describe(p repopath.Path) (assets.Describe, bool) {
+	d := assets.Describe{ContentType: contentTypes[strings.ToLower(path.Ext(string(p)))], Kind: assets.KindArtifact}
+	if d.ContentType == "" {
+		d.ContentType = assets.FallbackContentType
 	}
-	need := auth.RepoDownload
-	if r.Method == http.MethodPut {
-		need = auth.RepoPublish
+	if strings.HasPrefix(p.Base(), "maven-metadata.xml") {
+		d.Kind = assets.KindMetadata
 	}
-	repo, pr, ok := h.auth.RepoGate(w, r, r.PathValue("repo"), "maven", need, false)
-	if !ok {
-		return
-	}
-	if need == auth.RepoDownload {
-		switch repo.Kind {
-		case repos.KindGroup:
-			h.serveGroup(w, r, repo, pr, p)
-		case repos.KindProxy:
-			h.serveProxy(w, r, repo, p)
-		default:
-			h.assets.Serve(w, r, repo, p)
-		}
-		return
-	}
-	if r.ContentLength > h.cfg().MaxUploadBytes {
-		httpx.Error(w, http.StatusRequestEntityTooLarge, "upload too large")
-		return
-	}
-	sp, err := h.assets.Spool(http.MaxBytesReader(w, r.Body, h.cfg().MaxUploadBytes), h.cfg().MaxUploadBytes)
-	if err != nil {
-		var mbe *http.MaxBytesError
-		if errors.Is(err, assets.ErrTooLarge) || errors.As(err, &mbe) {
-			httpx.Error(w, http.StatusRequestEntityTooLarge, "upload too large")
-		} else {
-			httpx.Error(w, http.StatusInternalServerError, "upload failed")
-		}
-		return
-	}
-	defer sp.Close()
+	return d, true
+}
 
-	created, unchanged, err := h.put(r.Context(), repo, p, sp, format.ByOf(pr))
+// errImmutable is the refusal of different bytes at a release path.
+const errImmutable = "release artifacts are immutable"
+
+// admit keeps a release file immutable: the same bytes are kept, different bytes are refused
+// with 409. maven-metadata.xml* and the files of a -SNAPSHOT version are replaced.
+func admit(_ context.Context, w *assets.Write, existing *assets.Asset) (assets.Decision, error) {
 	switch {
-	case errors.Is(err, errImmutable):
-		httpx.Error(w, http.StatusConflict, errImmutable.Error())
-	case errors.Is(err, errLookup):
-		httpx.Error(w, http.StatusInternalServerError, "lookup failed")
-	case err != nil:
-		httpx.Error(w, http.StatusInternalServerError, "store failed")
-	case created:
-		h.host.RecordUpload(r, pr, repo, p, sp.Size, sp.SHA256)
-		w.WriteHeader(http.StatusCreated)
-	default:
-		if !unchanged {
-			h.host.RecordUpload(r, pr, repo, p, sp.Size, sp.SHA256)
-		}
-		w.WriteHeader(http.StatusOK)
+	case existing == nil:
+		return assets.Store, nil
+	case existing.SHA256 == w.Body.Digest():
+		return assets.Keep, nil
+	case mutable(string(w.Path)):
+		return assets.Store, nil
 	}
-}
-
-var (
-	// errImmutable rejects a release file that exists with different bytes.
-	errImmutable = errors.New("release artifacts are immutable")
-	// errLookup wraps a failed lookup of the asset at the target path.
-	errLookup = errors.New("lookup failed")
-)
-
-// put stores the spooled file at p under the PUT rules and holds the path lock while it does.
-// A release file that exists with the same bytes stays as it is (unchanged); with different
-// bytes put returns errImmutable. maven-metadata.xml* and SNAPSHOT files are replaced.
-// Uploads (PUT) and imports share it.
-func (h *Handler) put(ctx context.Context, repo *repos.Repo, p string, sp *assets.Spooled, by assets.By) (created, unchanged bool, err error) {
-	unlock := h.assets.Lock(repo.ID, p)
-	defer unlock()
-	existing, err := h.assets.Get(ctx, repo.ID, p)
-	if err != nil && !errors.Is(err, assets.ErrNotFound) {
-		return false, false, fmt.Errorf("%w: %w", errLookup, err)
-	}
-	if existing != nil && !mutable(p) {
-		if existing.SHA256 == sp.SHA256 {
-			return false, true, nil
-		}
-		return false, false, errImmutable
-	}
-	kind := assets.KindArtifact
-	if strings.HasPrefix(path.Base(p), "maven-metadata.xml") {
-		kind = assets.KindMetadata
-	}
-	_, created, err = h.assets.Put(ctx, repo, p, sp, assets.ContentType(p), kind, by)
-	return created, false, err
+	return 0, assets.Refuse(http.StatusConflict, "%s: %s", w.Path, errImmutable)
 }
 
 func mutable(p string) bool {
 	return strings.HasPrefix(path.Base(p), "maven-metadata.xml") || strings.HasSuffix(path.Base(path.Dir(p)), "-SNAPSHOT")
+}
+
+// ui is what the web UI shows of Maven repos.
+var ui = format.UIDescriptor{
+	DeleteNotes: []format.DeleteNote{{Match: "**/*.pom", One: "version", Many: "versions",
+		Text: "maven-metadata.xml stops listing the deleted versions."}},
+	FileDetails: []format.FileDetail{{Match: "**/*.pom", Part: "maven-artifact"}, {Match: "**/*.jar", Part: "maven-artifact"}},
+	RemotePresets: []format.RemotePreset{
+		{Label: "Maven Central", URL: "https://repo1.maven.org/maven2/"},
+		{Label: "Gradle Plugin Portal", URL: "https://plugins.gradle.org/m2/"},
+	},
+	ArtifactKinds: map[string]string{"library": "Library", "bom": "Bill of materials", "parent": "Parent POM", "gradle-plugin": "Gradle plugin"},
+	ArtifactName:  map[string]string{"library": "Coordinates", "bom": "Coordinates", "parent": "Coordinates", "gradle-plugin": "Plugin ID"},
+	SnippetTools:  map[string]string{"gradle-kotlin": "Gradle (Kotlin)", "gradle-groovy": "Gradle (Groovy)", "maven": "Maven", "curl": "curl"},
+	BuildFiles: []format.BuildFileLabel{
+		{Extension: "pom", Label: "Project description (POM)"},
+		{Extension: "module", Label: "Gradle module metadata"},
+		{Extension: "jar", Label: "Library (JAR)"},
+		{Extension: "*", Classifier: "sources", Label: "Sources"},
+		{Extension: "*", Classifier: "javadoc", Label: "Javadoc"},
+	},
+}
+
+// uploadSpec is the web UI upload of Maven repos (plan.go).
+func (h *Handler) uploadSpec() *format.UploadSpec {
+	u := *uploadSpec
+	u.Plan, u.Store = h.Plan, h.Store
+	return &u
 }

@@ -37,8 +37,8 @@ func TestDebian(t *testing.T) {
 		reader, readerPass := RandName("reader"), randHex(12)
 		s.CreateUser(t, writer, writerPass)
 		s.CreateUser(t, reader, readerPass)
-		s.SetPerms(t, repo, writer, "download", "publish")
-		s.SetPerms(t, repo, reader, "download")
+		s.SetPerms(t, repo, writer, "repo.download", "repo.publish")
+		s.SetPerms(t, repo, reader, "repo.download")
 		// Each upload phase mints a new publish session, so no session outlives the default TTL
 		// while apt runs.
 		wauth := func() Auth { return Basic{User: "ci", Pass: PublishToken(t, s, writer, repo)} }
@@ -69,7 +69,7 @@ func TestDebian(t *testing.T) {
 			t.Fatalf("GET pool file: status %d, %d bytes (want %d identical bytes)", st, len(b), len(pkgs.hello1))
 		}
 		if opts.S3 != nil {
-			want := "repos/" + repo + "/" + poolPath
+			want := blobKey(sha256Hex(pkgs.hello1))
 			if !slices.ContainsFunc(opts.S3.ListKeys(t), func(k string) bool { return strings.HasSuffix(k, want) }) {
 				t.Fatalf("S3 bucket has no key ending in %s", want)
 			}

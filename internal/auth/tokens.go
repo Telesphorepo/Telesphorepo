@@ -2,26 +2,18 @@ package auth
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
 	"database/sql"
-	"encoding/base64"
-	"encoding/hex"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
-)
-
-const (
-	tokenPrefix    = "trp_"
-	tokenIDHexLen  = 12
-	tokenSecretLen = 43 // base64url(32 bytes)
-	tokenLen       = len(tokenPrefix) + tokenIDHexLen + 1 + tokenSecretLen
+	"github.com/Telesphorepo/Telesphorepo/internal/perm"
+	"github.com/Telesphorepo/Telesphorepo/internal/token"
 )
 
 func validTokenName(name string) bool {
@@ -59,19 +51,9 @@ func (s *Service) CreateToken(ctx context.Context, userID int64, name string, ex
 		exp = sql.NullInt64{Int64: e.Unix(), Valid: true}
 	}
 	for attempt := 0; ; attempt++ {
-		idb := make([]byte, tokenIDHexLen/2)
-		secret := make([]byte, 32)
-		if _, err := rand.Read(idb); err != nil {
-			return nil, "", err
-		}
-		if _, err := rand.Read(secret); err != nil {
-			return nil, "", err
-		}
-		pub := hex.EncodeToString(idb)
-		sec := base64.RawURLEncoding.EncodeToString(secret)
-		sum := sha256.Sum256([]byte(sec))
+		pub, sec, tok := token.Mint(token.ReadToken)
 		id, err := s.wq.CreateToken(ctx, dbq.CreateTokenParams{
-			UserID: userID, PublicID: pub, SecretHash: sum[:], Name: name, CreatedAt: now.Unix(), ExpiresAt: exp})
+			UserID: userID, PublicID: pub, SecretHash: token.Hash(sec), Name: name, CreatedAt: now.Unix(), ExpiresAt: exp})
 		if err != nil {
 			msg := err.Error()
 			switch {
@@ -85,7 +67,8 @@ func (s *Service) CreateToken(ctx context.Context, userID int64, name string, ex
 			return nil, "", err
 		}
 		t.ID = id
-		return t, tokenPrefix + pub + "_" + sec, nil
+		_ = s.audit.Record(ctx, audit.Event{Action: audit.TokenCreate, Target: name, Detail: map[string]any{"token_id": id}})
+		return t, tok, nil
 	}
 }
 
@@ -118,7 +101,7 @@ func (s *Service) DeleteToken(ctx context.Context, p *Principal, id int64) error
 	}
 	var n int64
 	var err error
-	if p.Perms.Has(PermPeople) {
+	if p.Perms.Has(perm.PeopleManage) {
 		n, err = s.wq.DeleteToken(ctx, id)
 	} else {
 		n, err = s.wq.DeleteUserToken(ctx, dbq.DeleteUserTokenParams{ID: id, UserID: p.UserID})
@@ -129,43 +112,36 @@ func (s *Service) DeleteToken(ctx context.Context, p *Principal, id int64) error
 	if n == 0 {
 		return ErrNotFound
 	}
+	_ = s.audit.Record(ctx, audit.Event{Action: audit.TokenDelete, Target: strconv.FormatInt(id, 10), Detail: map[string]any{"token_id": id}})
 	return nil
 }
 
-// verifyToken authenticates a "trp_<id>_<secret>" read token; the owner is the principal. A
-// read token never writes: the write gate accepts only publish sessions.
-func (s *Service) verifyToken(ctx context.Context, tok string) (*Principal, error) {
-	if len(tok) != tokenLen || tok[len(tokenPrefix)+tokenIDHexLen] != '_' {
+// VerifyReadToken is the Verifier of read tokens (token.ReadToken); the owner is the principal.
+// A read token never writes: a write route accepts only publish sessions (route policy).
+func (s *Service) VerifyReadToken(ctx context.Context, publicID, secret string) (*Principal, error) {
+	if publicID == "" {
 		return nil, ErrBadCredentials
 	}
-	pub := tok[len(tokenPrefix) : len(tokenPrefix)+tokenIDHexLen]
-	sec := tok[len(tokenPrefix)+tokenIDHexLen+1:]
-	if _, err := hex.DecodeString(pub); err != nil || strings.ToLower(pub) != pub {
-		return nil, ErrBadCredentials
-	}
-	if b, err := base64.RawURLEncoding.DecodeString(sec); err != nil || len(b) != 32 {
-		return nil, ErrBadCredentials
-	}
-	row, err := s.rq.GetTokenAuth(ctx, pub)
+	row, err := s.rq.GetTokenAuth(ctx, publicID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrBadCredentials
 	}
 	if err != nil {
 		return nil, err
 	}
-	sum := sha256.Sum256([]byte(sec))
 	now := time.Now().Unix()
-	if subtle.ConstantTimeCompare(sum[:], row.SecretHash) != 1 || row.Disabled || row.Kind != KindLocal ||
+	if !token.Check(row.SecretHash, secret) || row.Disabled || row.Kind != KindLocal ||
 		(row.ExpiresAt.Valid && now >= row.ExpiresAt.Int64) {
 		return nil, ErrBadCredentials
 	}
 	if !row.LastUsedAt.Valid || now-row.LastUsedAt.Int64 >= 60 {
 		s.touchToken(row.TokenID, now)
 	}
-	return &Principal{UserID: row.UserID, Username: row.Username, Perms: ServerPermsOf(row.Perms), TokenID: row.TokenID, Kind: row.Kind}, nil
+	return &Principal{Cred: CredReadToken, UserID: row.UserID, Username: row.Username, Perms: perm.Joined(row.Perms), TokenID: row.TokenID, Kind: row.Kind}, nil
 }
 
-// touchToken updates last_used_at in the background, at most once per minute per token.
+// touchToken updates last_used_at in the background, at most once per minute per token. Wait
+// waits for these writes.
 func (s *Service) touchToken(id, now int64) {
 	s.touchMu.Lock()
 	if last, ok := s.touched[id]; ok && now-last < 60 {
@@ -181,7 +157,9 @@ func (s *Service) touchToken(id, now int64) {
 		}
 	}
 	s.touchMu.Unlock()
+	s.background.Add(1)
 	go func() {
+		defer s.background.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		s.wq.TouchToken(ctx, dbq.TouchTokenParams{LastUsedAt: sql.NullInt64{Int64: now, Valid: true}, ID: id})

@@ -16,8 +16,6 @@ import (
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/demo"
-	"github.com/Telesphorepo/Telesphorepo/internal/format"
-	"github.com/Telesphorepo/Telesphorepo/internal/provenance"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
@@ -46,14 +44,12 @@ var (
 // demoRawFiles is the size of the raw demo repo.
 const demoRawFiles = 20_000
 
-// DemoRepos implements format.DemoData.
-func (f *Format) DemoRepos() []format.DemoRepo {
-	return []format.DemoRepo{{Name: "raw", Description: "Documentation sites, release archives and build logs", Public: true}}
-}
-
-// Demo implements format.DemoData.
+// Demo fills the raw demo repo (module.DemoData).
 func (f *Format) Demo(ctx context.Context, run *demo.Run, repo *repos.Repo, rng *rand.Rand) error {
-	files := planRaw(run, repo, rng)
+	files, err := planRaw(run, repo, rng)
+	if err != nil {
+		return err
+	}
 	run.Expect(len(files))
 	for _, file := range files {
 		if err := run.Add(repo, file); err != nil {
@@ -66,11 +62,11 @@ func (f *Format) Demo(ctx context.Context, run *demo.Run, repo *repos.Repo, rng 
 // planRaw returns the files of the raw repo: documentation sites per product and version,
 // release archives by year and month, and build logs per project, branch and build, about
 // demoRawFiles in all.
-func planRaw(run *demo.Run, repo *repos.Repo, rng *rand.Rand) []demo.File {
+func planRaw(run *demo.Run, repo *repos.Repo, rng *rand.Rand) ([]demo.File, error) {
 	var out []demo.File
-	var session int64 // the build record of the files being added; 0 = none
+	var build int64 // the CI build record of the files being added; 0 = none
 	add := func(p string, data []byte, by, at int64) {
-		out = append(out, demo.File{Path: p, Data: data, Kind: assets.KindArtifact, By: by, At: at, Session: session})
+		out = append(out, demo.File{Path: p, Data: data, Kind: assets.KindArtifact, By: by, At: at, Build: build})
 	}
 
 	// Documentation sites: docs/<product>/<version>/...
@@ -167,11 +163,15 @@ func planRaw(run *demo.Run, repo *repos.Repo, rng *rand.Rand) []demo.File {
 		at := run.Anchor - 60 - (729*demo.Day)*max(builds-1-i, 0)/builds - rng.Int64N(3600)
 		// The logs come from the project's GitHub Actions run, which has no user of this server.
 		ghRepo, ref := "harborlabs/"+b.project, "refs/heads/"+b.name
-		session = run.Build(repo, provenance.Record{
-			Server: "https://github.com", Repository: ghRepo, SHA: demo.Hex(rng, 40), Ref: ref,
-			RunID: fmt.Sprint(5_000_000_000 + int64(b.build)*7919 + rng.Int64N(7919)), RunAttempt: "1",
-			Workflow: "Build", WorkflowRef: ghRepo + "/.github/workflows/build.yml@" + ref, Actor: demo.Pick(rng, rawActors),
+		var err error
+		build, err = run.Build(map[string]any{
+			"repository": ghRepo, "sha": demo.Hex(rng, 40), "ref": ref,
+			"run_id": fmt.Sprint(5_000_000_000 + int64(b.build)*7919 + rng.Int64N(7919)), "run_attempt": "1",
+			"workflow": "Build", "workflow_ref": ghRepo + "/.github/workflows/build.yml@" + ref, "actor": demo.Pick(rng, rawActors),
 		}, at)
+		if err != nil {
+			return nil, err
+		}
 		var by int64
 		dir := fmt.Sprintf("build-logs/%s/%s/%d/", b.project, b.name, b.build)
 		ok := rng.IntN(10) > 0
@@ -186,7 +186,7 @@ func planRaw(run *demo.Run, repo *repos.Repo, rng *rand.Rand) []demo.File {
 			add(dir+"coverage/summary.txt", []byte(fmt.Sprintf("lines: %d.%d%%\nbranches: %d.%d%%\n", 60+rng.IntN(35), rng.IntN(10), 50+rng.IntN(40), rng.IntN(10))), by, at)
 		}
 	}
-	return out[:min(len(out), demoRawFiles)]
+	return out[:min(len(out), demoRawFiles)], nil
 }
 
 func htmlPage(title, body string) []byte {

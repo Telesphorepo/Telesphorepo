@@ -1,7 +1,7 @@
 // Package nexus mirrors hosted repositories of a Sonatype Nexus Repository 3 server until an
-// admin cuts over (spec §12). It holds the Nexus REST client, the sources, the sync scheduler
-// and the sync runner. It names no format: it offers each Nexus asset to the format plugin of
-// the target repo through format.Importer.
+// admin cuts over. It holds the Nexus REST client, the sources, the sync scheduler
+// and the sync runner. It names no format: it offers each Nexus asset to the format of the
+// target repo through its format.Importer.
 package nexus
 
 import (
@@ -15,8 +15,6 @@ import (
 	"net/url"
 	"strings"
 	"time"
-
-	"github.com/Telesphorepo/Telesphorepo/internal/signing"
 )
 
 // maxJSONBytes caps a Nexus JSON response.
@@ -95,9 +93,10 @@ type Repository struct {
 	Name   string
 	Format string // Nexus format id, e.g. "maven2", "apt", "raw"
 	Type   string // "hosted", "proxy" or "group"
-	// Distribution is the "distribution" attribute of the repository's format settings, e.g.
-	// the apt distribution; "" when the format has none or the server did not report settings.
-	Distribution string
+	// Attributes is the repository's settings object as Nexus gives it (a repositorySettings
+	// item). The importer of the target format reads it (format.Importer Plan). It can hold the
+	// apt signing key pair: it is never logged or returned by the API.
+	Attributes json.RawMessage
 	// Online is false when Nexus marks the repository offline: its files do not download.
 	Online bool
 	// RemoteURL is the remote of a proxy (proxy.remoteUrl); RemoteUsername is the username that
@@ -112,15 +111,7 @@ type Repository struct {
 	// is false when Nexus did not report them.
 	Members      []string
 	MembersKnown bool
-	// keypair is the armored apt signing key pair (aptSigning.keypair), "" when Nexus does not
-	// give it; Nexus never gives its passphrase. It is never logged or returned by the API.
-	keypair string
-	// KeyEncrypted is true when the key pair needs a passphrase.
-	KeyEncrypted bool
 }
-
-// HasKey reports whether Nexus gave the apt signing key pair.
-func (r Repository) HasKey() bool { return r.keypair != "" }
 
 // nexusMinutes converts a Nexus age in minutes (-1: forever) to a duration, capped at max.
 func nexusMinutes(raw json.RawMessage, max time.Duration) time.Duration {
@@ -236,7 +227,7 @@ func (c *Client) Repositories(ctx context.Context) ([]Repository, error) {
 		if r.Name == "" {
 			continue
 		}
-		r.Distribution = distribution(s)
+		r.Attributes, _ = json.Marshal(s)
 		if v, ok := s["online"]; ok && string(v) == "false" {
 			r.Online = false
 		}
@@ -256,8 +247,7 @@ func (c *Client) Repositories(ctx context.Context) ([]Repository, error) {
 		if g, ok := obj(s["group"])["memberNames"]; ok {
 			r.MembersKnown = json.Unmarshal(g, &r.Members) == nil
 		}
-		r.keypair = strings.TrimSpace(str(obj(s["aptSigning"])["keypair"]))
-		r.KeyEncrypted = r.keypair != "" && signing.Encrypted([]byte(r.keypair))
+
 		out = append(out, r)
 	}
 	return out, nil
@@ -314,21 +304,6 @@ func (c *Client) Public(ctx context.Context, repo string) (bool, error) {
 		return false, nil
 	}
 	return false, statusError("anonymous HEAD", resp.StatusCode)
-}
-
-// distribution returns the "distribution" string of the first nested settings object that has
-// one (Nexus keeps format settings in an object named after the format).
-func distribution(s map[string]json.RawMessage) string {
-	for _, v := range s {
-		var obj map[string]json.RawMessage
-		if json.Unmarshal(v, &obj) != nil {
-			continue
-		}
-		if d := str(obj["distribution"]); d != "" {
-			return d
-		}
-	}
-	return ""
 }
 
 // Assets returns the page of repo's assets that continuation names ("" for the first page).

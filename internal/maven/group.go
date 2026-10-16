@@ -1,150 +1,44 @@
 package maven
 
 import (
-	"bytes"
 	"context"
-	"crypto/md5"
-	"crypto/sha1"
-	"crypto/sha256"
-	"crypto/sha512"
-	"encoding/hex"
-	"encoding/json"
 	"encoding/xml"
 	"errors"
-	"hash"
-	"io"
-	"net/http"
 	"path"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
-	"github.com/Telesphorepo/Telesphorepo/internal/auth"
-	"github.com/Telesphorepo/Telesphorepo/internal/format"
-	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
-	"github.com/Telesphorepo/Telesphorepo/internal/proxy"
-	"github.com/Telesphorepo/Telesphorepo/internal/repos"
+	"github.com/Telesphorepo/Telesphorepo/internal/repopath"
 )
 
-// Proxy and group repos (spec "Proxy repositories", "Group repositories").
+// Proxy and group repos (SPEC.md "Group and proxy repositories"). The core read path
+// serves them; this file classifies the paths of a proxy and merges maven-metadata.xml in a
+// group.
 
-// Classify implements format.Proxied: maven-metadata.xml and its checksums, and the files of a
-// -SNAPSHOT version, change at the remote; every other file is fetched once.
-func (h *Handler) Classify(p string) (format.ProxyClass, bool) {
-	if mutable(p) {
-		return format.ProxyChanging, true
-	}
-	return format.ProxyImmutable, true
+// classify tells the proxy how to cache a path: maven-metadata.xml and its checksums, and the
+// files of a -SNAPSHOT version, change at the remote; every other file is fetched once.
+func classify(p repopath.Path) (assets.Class, bool) {
+	return assets.Class{Changing: mutable(string(p))}, true
 }
 
-// ProxyProbe implements format.Proxied: a check of the remote requests its root.
-func (h *Handler) ProxyProbe(json.RawMessage) string { return "" }
+// checksumNames maps the extension of a checksum of maven-metadata.xml to its algorithm name.
+var checksumNames = map[string]string{".md5": "md5", ".sha1": "sha1", ".sha256": "sha256", ".sha512": "sha512"}
 
-// ServesGroups implements format.Grouper.
-func (h *Handler) ServesGroups() {}
-
-// assetKind is the assets kind of a Maven path.
-func assetKind(p string) string {
-	if strings.HasPrefix(path.Base(p), "maven-metadata.xml") {
-		return assets.KindMetadata
-	}
-	return assets.KindArtifact
-}
-
-// serveProxy answers a read of a proxy repo.
-func (h *Handler) serveProxy(w http.ResponseWriter, r *http.Request, repo *repos.Repo, p string) {
-	c, _ := h.Classify(p)
-	h.host.Proxy.Serve(w, r, repo, p, c == format.ProxyChanging, assetKind(p))
-}
-
-// has reports whether member repo m holds p, after a fetch for a proxy. A proxy whose remote
-// fails with nothing cached gives proxy.ErrRemote.
-func (h *Handler) has(ctx context.Context, m *repos.Repo, p string) (*assets.Asset, error) {
-	var a *assets.Asset
-	var err error
-	if m.Kind == repos.KindProxy {
-		c, _ := h.Classify(p)
-		a, err = h.host.Proxy.Ensure(ctx, m, p, c == format.ProxyChanging, assetKind(p))
-		if errors.Is(err, proxy.ErrNotFound) {
-			return nil, nil
-		}
-	} else {
-		a, err = h.assets.Get(ctx, m.ID, p)
-		if errors.Is(err, assets.ErrNotFound) {
-			return nil, nil
-		}
-	}
-	return a, err
-}
-
-// checksumExts are the checksum files that a merged maven-metadata.xml has.
-var checksumExts = map[string]func() hash.Hash{".md5": md5.New, ".sha1": sha1.New, ".sha256": sha256.New, ".sha512": sha512.New}
-
-// mergedPath reports whether p is an artifact-level (or group-level) maven-metadata.xml or one
-// of its checksums, which a group merges, and returns the metadata path and the checksum
-// extension ("" for the file itself). A version-level file (under a -SNAPSHOT folder) is not
-// merged: it comes from the first member that has it.
-func mergedPath(p string) (md, ext string, ok bool) {
-	base := path.Base(p)
+// matchMerged reports whether p is an artifact-level (or group-level) maven-metadata.xml or one of
+// its checksums, which a group merges, and returns the metadata path and the checksum ("" for the
+// file itself). A version-level file (under a -SNAPSHOT folder) is not merged: it comes from the
+// first member that has it.
+func matchMerged(p repopath.Path) (repopath.Path, string, bool) {
+	base := p.Base()
 	rest, found := strings.CutPrefix(base, "maven-metadata.xml")
-	if !found || (rest != "" && checksumExts[rest] == nil) {
+	if !found || (rest != "" && checksumNames[rest] == "") {
 		return "", "", false
 	}
-	if strings.HasSuffix(path.Base(path.Dir(p)), "-SNAPSHOT") {
+	if strings.HasSuffix(path.Base(path.Dir(string(p))), "-SNAPSHOT") {
 		return "", "", false
 	}
-	return strings.TrimSuffix(p, rest), rest, true
-}
-
-// serveGroup answers a read of group repo: the first member that the reader can read and that
-// has p serves it; an artifact-level maven-metadata.xml merges over those members.
-func (h *Handler) serveGroup(w http.ResponseWriter, r *http.Request, group *repos.Repo, pr *auth.Principal, p string) {
-	ctx := r.Context()
-	members, err := h.host.Repos.MemberRepos(ctx, group)
-	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "internal error")
-		return
-	}
-	readable := members[:0]
-	for _, m := range members {
-		ok, err := h.auth.ReadsThrough(ctx, r, pr, m)
-		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "internal error")
-			return
-		}
-		if ok {
-			readable = append(readable, m)
-		}
-	}
-	if md, ext, ok := mergedPath(p); ok {
-		h.serveMerged(w, r, readable, p, md, ext)
-		return
-	}
-	remoteFailed := false
-	for _, m := range readable {
-		a, err := h.has(ctx, m, p)
-		switch {
-		case errors.Is(err, proxy.ErrRemote):
-			remoteFailed = true
-		case err != nil:
-			h.host.Log.Error("group read failed", "group", group.Name, "member", m.Name, "path", p, "err", err)
-			httpx.Error(w, http.StatusInternalServerError, "internal error")
-			return
-		case a != nil:
-			h.assets.Serve(w, r, m, p)
-			return
-		}
-	}
-	notInGroup(w, remoteFailed)
-}
-
-func notInGroup(w http.ResponseWriter, remoteFailed bool) {
-	if remoteFailed {
-		httpx.Error(w, http.StatusBadGateway, "The remote repository did not answer.")
-		return
-	}
-	httpx.Error(w, http.StatusNotFound, "not found")
+	return repopath.Path(strings.TrimSuffix(string(p), rest)), checksumNames[rest], true
 }
 
 // groupMetadata is the part of a maven-metadata.xml that a group merges: the versions of an
@@ -237,91 +131,22 @@ func mergeMetadata(all []groupMetadata) groupMetadata {
 	return out
 }
 
-// serveMerged answers maven-metadata.xml path md (or its checksum ext) of a group. With one
-// member that has it, that member serves its own files; with more, the server merges them and
-// computes the checksums from the merged bytes.
-func (h *Handler) serveMerged(w http.ResponseWriter, r *http.Request, members []*repos.Repo, p, md, ext string) {
-	ctx := r.Context()
-	type source struct {
-		repo *repos.Repo
-		a    *assets.Asset
-	}
-	var srcs []source
-	remoteFailed := false
-	for _, m := range members {
-		a, err := h.has(ctx, m, md)
-		switch {
-		case errors.Is(err, proxy.ErrRemote):
-			remoteFailed = true
-		case err != nil:
-			httpx.Error(w, http.StatusInternalServerError, "internal error")
-			return
-		case a != nil:
-			srcs = append(srcs, source{m, a})
-		}
-	}
-	switch len(srcs) {
-	case 0:
-		notInGroup(w, remoteFailed)
-		return
-	case 1:
-		if ext == "" {
-			h.assets.Serve(w, r, srcs[0].repo, md)
-			return
-		}
-		if a, err := h.has(ctx, srcs[0].repo, p); err == nil && a != nil {
-			h.assets.Serve(w, r, srcs[0].repo, p)
-			return
-		}
-	}
+// mergeParts merges the maven-metadata.xml files of the members of a group (assets.Merger). A
+// part that is not valid XML is left out.
+func mergeParts(_ context.Context, _ repopath.Path, parts [][]byte) ([]byte, error) {
 	var all []groupMetadata
-	var modified time.Time
-	for _, s := range srcs {
-		if s.a.Size > maxMetadataBytes {
-			continue
-		}
-		body, _, err := h.assets.Store().Get(ctx, assets.Key(s.repo.Name, md))
-		if err != nil {
-			h.host.Log.Warn("group: read member metadata", "member", s.repo.Name, "path", md, "err", err)
-			continue
-		}
+	for _, b := range parts {
 		var m groupMetadata
-		err = xml.NewDecoder(io.LimitReader(body, maxMetadataBytes)).Decode(&m)
-		body.Close()
-		if err != nil {
-			h.host.Log.Warn("group: member metadata is not valid XML", "member", s.repo.Name, "path", md)
-			continue
-		}
-		all = append(all, m)
-		if s.a.UpdatedAt.After(modified) {
-			modified = s.a.UpdatedAt
+		if xml.Unmarshal(b, &m) == nil {
+			all = append(all, m)
 		}
 	}
 	if len(all) == 0 {
-		httpx.Error(w, http.StatusNotFound, "not found")
-		return
+		return nil, errors.New("no member has a valid maven-metadata.xml")
 	}
-	merged := mergeMetadata(all)
-	x, err := xml.MarshalIndent(merged, "", "  ")
+	x, err := xml.MarshalIndent(mergeMetadata(all), "", "  ")
 	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "internal error")
-		return
+		return nil, err
 	}
-	data := append([]byte(xml.Header), append(x, '\n')...)
-	ct := assets.ContentType(md)
-	if ext != "" {
-		sum := checksumExts[ext]()
-		sum.Write(data)
-		data, ct = []byte(hex.EncodeToString(sum.Sum(nil))), "text/plain"
-	}
-	etag := sha256.Sum256(data)
-	hd := w.Header()
-	hd.Set("X-Content-Type-Options", "nosniff")
-	hd.Set("Content-Security-Policy", "default-src 'none'; sandbox")
-	if ct != "text/plain" {
-		hd.Set("Content-Disposition", "attachment")
-	}
-	hd.Set("Content-Type", ct)
-	hd.Set("ETag", `"`+hex.EncodeToString(etag[:])+`"`)
-	http.ServeContent(w, r, "", modified, bytes.NewReader(data))
+	return append([]byte(xml.Header), append(x, '\n')...), nil
 }

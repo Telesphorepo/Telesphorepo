@@ -16,14 +16,69 @@ import (
 	"io"
 	"iter"
 	"os"
-	"path"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
+	"github.com/Telesphorepo/Telesphorepo/internal/blobs"
 	"github.com/Telesphorepo/Telesphorepo/internal/debian/dbq"
+	"github.com/Telesphorepo/Telesphorepo/internal/repopath"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
+
+// generated is the origin of the index files: the server builds them.
+var generated = assets.Origin{Source: assets.SourceGenerated}
+
+// rebuild builds the units of distribution dist of repo (format.Spec Rebuild): the Packages
+// files of each configured architecture, the removal of the index files of an architecture the
+// config no longer lists, then the Release files of the distribution.
+func (h *Handler) rebuild(ctx context.Context, repo *repos.Repo, dist string, units []string) error {
+	archs := architectures(repo)
+	for _, u := range units {
+		comp, arch, ok := splitUnit(u)
+		if !ok {
+			continue
+		}
+		if !slices.Contains(archs, arch) {
+			if err := h.dropUnit(ctx, repo, dist, comp, arch); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := h.buildPackages(ctx, repo, dist, comp, arch); err != nil {
+			return err
+		}
+	}
+	return h.buildRelease(ctx, repo, dist)
+}
+
+// dropUnit removes the index files of (dist, comp, arch) and their rows in deb_index_files, so
+// they are no longer served or listed in Release.
+func (h *Handler) dropUnit(ctx context.Context, repo *repos.Repo, dist, comp, arch string) error {
+	dir := indexDir(dist, comp, arch)
+	rel := strings.TrimPrefix(dir, "dists/"+dist+"/")
+	err := h.db.Tx(ctx, func(tx *sql.Tx) error {
+		q := dbq.New(tx)
+		files, err := q.ListIndexFiles(ctx, dbq.ListIndexFilesParams{RepoID: repo.ID, Distribution: dist})
+		if err != nil {
+			return err
+		}
+		for _, f := range files {
+			if strings.HasPrefix(f.Path, rel) {
+				if err := q.DeleteIndexFile(ctx, dbq.DeleteIndexFileParams{RepoID: repo.ID, Distribution: dist, Path: f.Path}); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	_, err = h.assets.Remove(ctx, assets.Removal{Repo: repo, Prefixes: []repopath.Path{repopath.Path(dir)}, Origin: generated})
+	return err
+}
 
 // tempOut is a buffered temp file that hashes everything written to it.
 type tempOut struct {
@@ -34,7 +89,11 @@ type tempOut struct {
 }
 
 func (h *Handler) newTemp() (*tempOut, error) {
-	f, err := os.CreateTemp(h.cfg().TmpDir(), "deb-index-*")
+	dir := h.settings.Current().TmpDir()
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return nil, err
+	}
+	f, err := os.CreateTemp(dir, "deb-index-*")
 	if err != nil {
 		return nil, err
 	}
@@ -50,6 +109,7 @@ func (t *tempOut) Write(p []byte) (int, error) {
 	return n, err
 }
 
+// spooled returns the file as the body of a write; closing the body removes the file.
 func (t *tempOut) spooled() (*assets.Spooled, error) {
 	if err := t.bw.Flush(); err != nil {
 		return nil, err
@@ -66,28 +126,6 @@ func (t *tempOut) spooled() (*assets.Spooled, error) {
 func (t *tempOut) remove() {
 	t.f.Close()
 	os.Remove(t.f.Name())
-}
-
-// put stores an index file (kind "index") under the per-path asset lock.
-func (h *Handler) put(ctx context.Context, repo *repos.Repo, p string, sp *assets.Spooled, contentType string) error {
-	unlock := h.assets.Lock(repo.ID, p)
-	defer unlock()
-	if _, err := sp.File.Seek(0, io.SeekStart); err != nil {
-		return err
-	}
-	_, _, err := h.assets.Put(ctx, repo, p, sp, contentType, assets.KindIndex, assets.By{})
-	return err
-}
-
-// putByHash stores an immutable by-hash copy unless it already exists.
-func (h *Handler) putByHash(ctx context.Context, repo *repos.Repo, dir string, sp *assets.Spooled) error {
-	p := dir + "/by-hash/SHA256/" + sp.SHA256
-	if a, err := h.assets.Get(ctx, repo.ID, p); err == nil && a.SHA256 == sp.SHA256 {
-		return nil
-	} else if err != nil && !errors.Is(err, assets.ErrNotFound) {
-		return err
-	}
-	return h.put(ctx, repo, p, sp, "application/octet-stream")
 }
 
 // pkgCursor pulls one architecture's rows in (package, version) order from
@@ -123,8 +161,9 @@ func lessRow(a, b *dbq.StreamPackagesRow) bool {
 	return a.Version < b.Version
 }
 
-// buildPackages writes Packages and Packages.gz for (dist, comp, arch) — rows of arch
-// plus "all", merged in (package, version) order — and stores them by-hash first.
+// buildPackages writes Packages and Packages.gz for (dist, comp, arch) — rows of arch plus
+// "all", merged in (package, version) order — in one commit with their by-hash copies, records
+// them in deb_index_files, then deletes the by-hash files of older generations.
 func (h *Handler) buildPackages(ctx context.Context, repo *repos.Repo, dist, comp, arch string) error {
 	plain, err := h.newTemp()
 	if err != nil {
@@ -149,7 +188,7 @@ func (h *Handler) buildPackages(ctx context.Context, repo *repos.Repo, dist, com
 		return err
 	}
 
-	dir := "dists/" + dist + "/" + comp + "/binary-" + arch
+	dir := indexDir(dist, comp, arch)
 	rel := comp + "/binary-" + arch + "/"
 	// The generation this rebuild replaces: its by-hash files stay for clients mid-update.
 	keep := []string{plainSp.SHA256, gzSp.SHA256}
@@ -162,16 +201,14 @@ func (h *Handler) buildPackages(ctx context.Context, repo *repos.Repo, dist, com
 			return err
 		}
 	}
-	if err := h.putByHash(ctx, repo, dir, plainSp); err != nil {
-		return err
+	write := func(p string, sp *assets.Spooled) assets.Write {
+		return assets.Write{Repo: repo, Path: repopath.Path(p), Body: assets.Body{Spool: sp}, Origin: generated}
 	}
-	if err := h.putByHash(ctx, repo, dir, gzSp); err != nil {
-		return err
-	}
-	if err := h.put(ctx, repo, dir+"/Packages", plainSp, "text/plain; charset=utf-8"); err != nil {
-		return err
-	}
-	if err := h.put(ctx, repo, dir+"/Packages.gz", gzSp, "application/gzip"); err != nil {
+	byHash := dir + "by-hash/SHA256/"
+	if _, err := h.assets.CommitAll(ctx, []assets.Write{
+		write(byHash+plainSp.SHA256, plainSp), write(byHash+gzSp.SHA256, gzSp),
+		write(dir+"Packages", plainSp), write(dir+"Packages.gz", gzSp),
+	}); err != nil {
 		return err
 	}
 
@@ -189,7 +226,7 @@ func (h *Handler) buildPackages(ctx context.Context, repo *repos.Repo, dist, com
 	if err != nil {
 		return err
 	}
-	return h.pruneByHash(ctx, repo, dir, keep)
+	return h.pruneByHash(ctx, repo, byHash, keep)
 }
 
 func (h *Handler) writePackages(ctx context.Context, repoID int64, dist, comp, arch string, plain, gzOut io.Writer) error {
@@ -250,8 +287,8 @@ func (h *Handler) writePackages(ctx context.Context, repoID int64, dist, comp, a
 	return zw.Close()
 }
 
-// buildRelease regenerates Release (and, when signing, Release.gpg and InRelease last)
-// from deb_index_files only.
+// buildRelease writes Release (and, when signing, Release.gpg and InRelease) from
+// deb_index_files only, in one commit.
 func (h *Handler) buildRelease(ctx context.Context, repo *repos.Repo, dist string) error {
 	files, err := h.q.ListIndexFiles(ctx, dbq.ListIndexFilesParams{RepoID: repo.ID, Distribution: dist})
 	if err != nil {
@@ -278,41 +315,24 @@ func (h *Handler) buildRelease(ctx context.Context, repo *repos.Repo, dist strin
 	}
 	release := b.Bytes()
 
-	base := path.Join("dists", dist)
-	if err := h.putBytes(ctx, repo, base+"/Release", "text/plain; charset=utf-8", func(w io.Writer) error {
-		_, err := w.Write(release)
-		return err
-	}); err != nil {
-		return err
-	}
+	base := "dists/" + dist + "/"
+	ws := []assets.Write{{Repo: repo, Path: repopath.Path(base + "Release"), Body: assets.Body{Spool: blobs.Bytes(release)}, Origin: generated}}
 	signer := h.keys.Signer(signingKey(repo))
 	if signer == nil {
 		h.log.Error("the repo's signing key does not exist or is unusable; its Release is unsigned",
 			"repo", repo.Name, "signing_key", signingKey(repo))
-		return nil
+	} else {
+		var detached, clear bytes.Buffer
+		if err := signer.DetachSign(&detached, release); err != nil {
+			return err
+		}
+		if err := signer.ClearSign(&clear, release); err != nil {
+			return err
+		}
+		ws = append(ws,
+			assets.Write{Repo: repo, Path: repopath.Path(base + "Release.gpg"), Body: assets.Body{Spool: blobs.Bytes(detached.Bytes())}, Origin: generated},
+			assets.Write{Repo: repo, Path: repopath.Path(base + "InRelease"), Body: assets.Body{Spool: blobs.Bytes(clear.Bytes())}, Origin: generated})
 	}
-	if err := h.putBytes(ctx, repo, base+"/Release.gpg", "application/pgp-signature", func(w io.Writer) error {
-		return signer.DetachSign(w, release)
-	}); err != nil {
-		return err
-	}
-	return h.putBytes(ctx, repo, base+"/InRelease", "text/plain; charset=utf-8", func(w io.Writer) error {
-		return signer.ClearSign(w, release)
-	})
-}
-
-func (h *Handler) putBytes(ctx context.Context, repo *repos.Repo, p, contentType string, write func(io.Writer) error) error {
-	t, err := h.newTemp()
-	if err != nil {
-		return err
-	}
-	defer t.remove()
-	if err := write(t); err != nil {
-		return err
-	}
-	sp, err := t.spooled()
-	if err != nil {
-		return err
-	}
-	return h.put(ctx, repo, p, sp, contentType)
+	_, err = h.assets.CommitAll(ctx, ws)
+	return err
 }

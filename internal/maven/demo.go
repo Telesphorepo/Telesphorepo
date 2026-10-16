@@ -19,29 +19,26 @@ import (
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/demo"
-	"github.com/Telesphorepo/Telesphorepo/internal/format"
-	"github.com/Telesphorepo/Telesphorepo/internal/provenance"
+	"github.com/Telesphorepo/Telesphorepo/internal/module"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
-// The Maven part of the demo dataset (format.DemoData): a large public repo with Gradle plugins
-// and a small private one. Most artifacts are built on GitHub Actions, so their builds carry
-// provenance; a -SNAPSHOT version holds several timestamped builds.
+// The Maven part of the demo dataset (module.DemoData): a large public repo with Gradle plugins
+// and a small private one. Most artifacts are built on GitHub Actions, so their builds have
+// CI build records; a -SNAPSHOT version holds several timestamped builds.
 
 const (
 	demoPublicFiles   = 150_000 // public Maven repo, Gradle plugin markers included
 	demoInternalFiles = 2_000   // private Maven repo
 )
 
-// DemoRepos implements format.DemoData.
-func (h *Handler) DemoRepos() []format.DemoRepo {
-	return []format.DemoRepo{
-		{Name: "maven", Description: "Public Maven and Gradle artifacts", Public: true},
-		{Name: "internal", Description: "Internal libraries; sign-in required"},
-	}
+// demoRepos are the Maven repos of the demo dataset.
+var demoRepos = []module.DemoRepo{
+	{Name: "maven", Description: "Public Maven and Gradle artifacts", Public: true},
+	{Name: "internal", Description: "Internal libraries; sign-in required"},
 }
 
-// Demo implements format.DemoData.
+// Demo fills a Maven demo repo.
 func (h *Handler) Demo(ctx context.Context, run *demo.Run, repo *repos.Repo, rng *rand.Rand) error {
 	plan := mavenPlan{groups: 400, maxArtifacts: 60, plugins: 30, target: demoPublicFiles, orgs: publicOrgs}
 	if !repo.AnonymousRead {
@@ -113,7 +110,7 @@ type mvnArtifact struct {
 	javadoc, module bool
 	snapshot        bool // the newest version is a -SNAPSHOT
 	builds          int  // the snapshot's timestamped builds
-	ci              bool // built on GitHub Actions: its builds carry provenance
+	ci              bool // built on GitHub Actions: its builds have CI build records
 	ghRepo          string
 	plugin          string
 	deps            []*mvnArtifact // earlier artifacts of the same group
@@ -314,7 +311,11 @@ func mvnVersions(rng *rand.Rand, n int, snapshot bool) []string {
 func (l *mavenLayout) emit(run *demo.Run, repo *repos.Repo) error {
 	for i, a := range l.arts {
 		rng := demo.Rand(l.seed, uint64(i)+1_000_000)
-		for _, f := range a.build(run, rng, repo) {
+		files, err := a.build(run, rng, repo)
+		if err != nil {
+			return err
+		}
+		for _, f := range files {
 			if err := run.Add(repo, f); err != nil {
 				return err
 			}
@@ -341,33 +342,41 @@ func withSums(f demo.File) []demo.File {
 
 // ciBuild records a GitHub Actions run of the artifact at time at that published ref, and
 // returns its build record (0 when the artifact is not built on CI).
-func (a *mvnArtifact) ciBuild(run *demo.Run, rng *rand.Rand, repo *repos.Repo, ref, workflow, file string, at int64) int64 {
+func (a *mvnArtifact) ciBuild(run *demo.Run, rng *rand.Rand, ref, workflow, file string, at int64) (int64, error) {
 	if !a.ci {
-		return 0
+		return 0, nil
 	}
 	attempt := "1"
 	if rng.IntN(12) == 0 {
 		attempt = "2"
 	}
-	return run.Build(repo, provenance.Record{
-		Server: "https://github.com", Repository: a.ghRepo, SHA: demo.Hex(rng, 40), Ref: ref,
-		RunID: fmt.Sprint(4_000_000_000 + rng.Int64N(6_000_000_000)), RunAttempt: attempt, Workflow: workflow,
-		WorkflowRef: a.ghRepo + "/.github/workflows/" + file + "@" + ref, Actor: demo.Pick(rng, ciActors),
+	return run.Build(map[string]any{
+		"repository": a.ghRepo, "sha": demo.Hex(rng, 40), "ref": ref,
+		"run_id": fmt.Sprint(4_000_000_000 + rng.Int64N(6_000_000_000)), "run_attempt": attempt, "workflow": workflow,
+		"workflow_ref": a.ghRepo + "/.github/workflows/" + file + "@" + ref, "actor": demo.Pick(rng, ciActors),
 	}, at)
 }
 
-// uploader is by, or none for a file a CI build (session) published: a CI session has no user.
-func uploader(by, session int64) int64 {
-	if session != 0 {
+// uploader is by, or none for a file a CI build published: a CI session has no user.
+func uploader(by, build int64) int64 {
+	if build != 0 {
 		return 0
 	}
 	return by
 }
 
 // build returns every file of the artifact.
-func (a *mvnArtifact) build(run *demo.Run, rng *rand.Rand, repo *repos.Repo) []demo.File {
+func (a *mvnArtifact) build(run *demo.Run, rng *rand.Rand, repo *repos.Repo) ([]demo.File, error) {
 	dir := strings.ReplaceAll(a.group, ".", "/") + "/" + a.id
 	var out []demo.File
+	var berr error
+	ciBuild := func(ref, workflow, file string, at int64) int64 {
+		id, err := a.ciBuild(run, rng, ref, workflow, file, at)
+		if berr == nil {
+			berr = err
+		}
+		return id
+	}
 	add := func(f demo.File) { out = append(out, withSums(f)...) }
 	var lastBy, lastAt int64
 	sessions := map[string]int64{} // release version -> its build record
@@ -387,7 +396,7 @@ func (a *mvnArtifact) build(run *demo.Run, rng *rand.Rand, repo *repos.Repo) []d
 		files := func(fileVersion string, at, session int64) {
 			base := vdir + "/" + a.id + "-" + fileVersion
 			file := func(p string, data []byte) demo.File {
-				return demo.File{Path: p, Data: data, Kind: assets.KindArtifact, By: uploader(by, session), At: at, Session: session}
+				return demo.File{Path: p, Data: data, Kind: assets.KindArtifact, By: uploader(by, session), At: at, Build: session}
 			}
 			jar, sources, javadoc := jar, sources, javadoc
 			if fileVersion != v {
@@ -408,7 +417,7 @@ func (a *mvnArtifact) build(run *demo.Run, rng *rand.Rand, repo *repos.Repo) []d
 			}
 		}
 		if !snap {
-			s := a.ciBuild(run, rng, repo, "refs/tags/v"+v, "Release", "release.yml", at)
+			s := ciBuild("refs/tags/v"+v, "Release", "release.yml", at)
 			sessions[v] = s
 			files(v, at, s)
 			continue
@@ -424,11 +433,11 @@ func (a *mvnArtifact) build(run *demo.Run, rng *rand.Rand, repo *repos.Repo) []d
 				bat = at
 			}
 			stamp = time.Unix(bat, 0).UTC().Format("20060102.150405")
-			session = a.ciBuild(run, rng, repo, "refs/heads/main", "Snapshot", "snapshot.yml", bat)
+			session = ciBuild("refs/heads/main", "Snapshot", "snapshot.yml", bat)
 			files(base+"-"+stamp+"-"+fmt.Sprint(b+1), bat, session)
 		}
 		add(demo.File{Path: vdir + "/maven-metadata.xml", Data: a.snapshotMetadata(v, base+"-"+stamp+"-"+fmt.Sprint(a.builds), stamp, a.builds, at),
-			Kind: assets.KindMetadata, By: uploader(by, session), At: at, Session: session})
+			Kind: assets.KindMetadata, By: uploader(by, session), At: at, Build: session})
 	}
 	add(demo.File{Path: dir + "/maven-metadata.xml", Data: mavenMetadata(a.group, a.id, a.versions, lastAt),
 		Kind: assets.KindMetadata, By: lastBy, At: lastAt})
@@ -444,13 +453,13 @@ func (a *mvnArtifact) build(run *demo.Run, rng *rand.Rand, repo *repos.Repo) []d
 			rel = append(rel, v)
 			at := run.Anchor - a.times[vi]
 			add(demo.File{Path: mdir + "/" + v + "/" + mid + "-" + v + ".pom", Data: a.markerPom(v),
-				Kind: assets.KindArtifact, By: uploader(lastBy, sessions[v]), At: at, Session: sessions[v]})
+				Kind: assets.KindArtifact, By: uploader(lastBy, sessions[v]), At: at, Build: sessions[v]})
 			lastAt = at
 		}
 		add(demo.File{Path: mdir + "/maven-metadata.xml", Data: mavenMetadata(a.plugin, mid, rel, lastAt),
 			Kind: assets.KindMetadata, By: lastBy, At: lastAt})
 	}
-	return out
+	return out, berr
 }
 
 // latestRelease is the newest non-snapshot version.

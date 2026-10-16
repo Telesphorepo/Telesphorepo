@@ -8,10 +8,11 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Telesphorepo/Telesphorepo/internal/auth"
+	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
+	"github.com/Telesphorepo/Telesphorepo/internal/perm"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/server"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
@@ -29,6 +30,7 @@ type devState struct {
 	empty          bool        // --empty: no demo data on the first run
 	demoUsers      []*demoUser // the demo users, from the demo users file
 	settings       *settings.Service
+	formats        *format.Registry
 }
 
 func devCmd(args []string) error {
@@ -51,7 +53,7 @@ func devCmd(args []string) error {
 	// or when the demo data of the first run was not finished.
 	var why string
 	switch {
-	case errors.Is(err, db.ErrSchemaChanged):
+	case db.IsSchemaChanged(err):
 		why = fmt.Sprintf("the schema changed since %s was created (%v)", boot.DataDir, err)
 	case errors.Is(err, errDemoIncomplete):
 		why = errDemoIncomplete.Error()
@@ -74,7 +76,7 @@ func runDev(ctx context.Context, boot *config.Boot, st *devState) error {
 		Dev:      true,
 		TextLogs: true,
 		Init:     func(ctx context.Context, s *server.Services) error { return devInit(ctx, s, st) },
-		Ready:    func(addr net.Addr) { printDevBanner(st, baseURL(st.settings.Config(), addr)) },
+		Ready:    func(addr net.Addr) { printDevBanner(st, baseURL(st.settings.Current(), addr)) },
 	})
 }
 
@@ -82,8 +84,8 @@ func runDev(ctx context.Context, boot *config.Boot, st *devState) error {
 // with the demo data (users, repos and files; see createDemoData) unless --empty, else one
 // empty demo repo per format. It loads the credentials for the banner on every run.
 func devInit(ctx context.Context, s *server.Services, st *devState) error {
-	cfg := s.Config
-	st.settings = s.Settings
+	cfg := s.Boot
+	st.settings, st.formats = s.Settings, s.Formats
 	if _, err := os.Stat(config.JoinDataDir(cfg.DataDir, demoPendingFile)); err == nil {
 		return errDemoIncomplete
 	}
@@ -108,7 +110,7 @@ func devInit(ctx context.Context, s *server.Services, st *devState) error {
 		if pw == "" {
 			pw = server.RandomPassword()
 		}
-		if _, err := s.Auth.CreateUser(ctx, st.user, pw, auth.AllServerPerms); err != nil {
+		if _, err := s.Auth.CreateUser(audit.CLI(ctx), st.user, pw, perm.Current().AllServer()); err != nil {
 			return fmt.Errorf("create dev admin: %w", err)
 		}
 		if err := writePrivate(pwFile, pw+"\n"); err != nil {
@@ -131,10 +133,10 @@ func devInit(ctx context.Context, s *server.Services, st *devState) error {
 				return err
 			}
 		}
-		for _, f := range format.All() {
+		for _, f := range s.Formats.All() {
 			// Anonymous read so package clients can resolve without credentials locally.
-			if _, err := s.Repos.Create(ctx, f.Name(), f.Name(), true, "Demo "+f.Title()+" repository", nil); err != nil && !errors.Is(err, repos.ErrExists) {
-				return fmt.Errorf("create demo repo %s: %w", f.Name(), err)
+			if _, err := s.Repos.Create(ctx, repos.Create{Name: f.Name, Format: f.Name, AnonymousRead: true, Description: "Demo " + f.Title + " repository"}); err != nil && !errors.Is(err, repos.ErrExists) {
+				return fmt.Errorf("create demo repo %s: %w", f.Name, err)
 			}
 		}
 		if list, err = s.Repos.List(ctx); err != nil {
@@ -149,9 +151,9 @@ func devInit(ctx context.Context, s *server.Services, st *devState) error {
 }
 
 // baseURL is TR_BASE_URL, or http://localhost:<port> of the bound listener.
-func baseURL(cfg *config.Config, addr net.Addr) string {
-	if cfg.BaseURL != "" {
-		return strings.TrimRight(cfg.BaseURL, "/")
+func baseURL(snap *settings.Snapshot, addr net.Addr) string {
+	if base := settings.BaseURL.Get(snap); base != "" {
+		return strings.TrimRight(base, "/")
 	}
 	port := "8080"
 	if ta, ok := addr.(*net.TCPAddr); ok {
@@ -209,21 +211,20 @@ func printDevBanner(st *devState, base string) {
 	server.PrintBox(&b, lines...)
 	b.WriteString("Reads take the username and password above, or a read token.\n")
 	b.WriteString("Uploads take a publish session: see \"Publish to this repository\" on the repo page.\n")
-	for _, f := range format.All() {
-		d, ok := f.(format.Describer)
-		if !ok {
+	for _, f := range st.formats.All() {
+		if f.Usage == nil {
 			continue
 		}
-		r := demoRepo(st.repos, f.Name())
+		r := demoRepo(st.repos, f.Name)
 		if r == nil {
 			continue
 		}
-		fmt.Fprintf(&b, "\n%s (repo %q):\n", f.Title(), r.Name)
-		for _, sn := range d.Usage(r, base) {
+		fmt.Fprintf(&b, "\n%s (repo %q):\n", f.Title, r.Name)
+		for _, sn := range f.Usage(r, base) {
 			if sn.Purpose != format.SnippetUse {
 				continue
 			}
-			fmt.Fprintf(&b, "  %s: %s\n", sn.Client, sn.Title)
+			fmt.Fprintf(&b, "  %s: %s\n", sn.Tool, sn.Title)
 			for _, line := range strings.Split(strings.TrimRight(sn.Code, "\n"), "\n") {
 				fmt.Fprintf(&b, "    %s\n", line)
 			}

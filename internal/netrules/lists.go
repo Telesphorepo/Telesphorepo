@@ -1,4 +1,4 @@
-// Package netrules holds the network rules of the server (spec §13.1, §13.3): named IP lists
+// Package netrules holds the network rules of the server: named IP lists
 // (presets that the server fetches and refreshes daily, and custom lists that admins edit), the
 // client address behind trusted proxies, and the per-repo IP allow-lists for read and publish.
 // Request paths read in-memory snapshots; the database keeps the lists and the rules.
@@ -6,6 +6,7 @@ package netrules
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -26,9 +27,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
-	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
-	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
+	"github.com/Telesphorepo/Telesphorepo/internal/netrules/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 )
@@ -104,6 +104,7 @@ type listState struct {
 
 // List is an IP list as the admin API shows it. Ranges is left out of the list view.
 type List struct {
+	ID          int64      `json:"id"`
 	Name        string     `json:"name"`
 	Kind        string     `json:"kind"`
 	Title       string     `json:"title"`
@@ -122,7 +123,8 @@ type Use struct {
 	Scope string `json:"scope"`
 }
 
-// Usage says what names a list: repo rules and the trusted_proxies setting.
+// Usage says what names a list: repo rules and the trusted proxies (a row of
+// trusted_proxy_lists, or an entry of TR_TRUSTED_PROXIES).
 type Usage struct {
 	Repos          []Use `json:"repos"`
 	TrustedProxies bool  `json:"trusted_proxies"`
@@ -139,6 +141,8 @@ var (
 	ErrReadOnly = errors.New("a preset list is fetched from its source and cannot be changed")
 	// ErrNotPreset is a refresh of a custom list.
 	ErrNotPreset = errors.New("only a preset list can be refreshed")
+	// ErrEnvNamed is a rename of a list that TR_TRUSTED_PROXIES names.
+	ErrEnvNamed = errors.New("the trusted proxies name this list in " + TrustedProxies.Def().Env() + "; change it there before the rename")
 )
 
 // InUseError refuses to delete a list that repo rules or trusted_proxies name.
@@ -161,35 +165,40 @@ func (e *InUseError) Error() string {
 type Service struct {
 	rq, wq *dbq.Queries
 	d      *db.DB
-	cfg    config.Provider
-	audit  *audit.Service
+	set    settings.Provider
+	audit  *audit.Log
 	log    *slog.Logger
 	client *http.Client
 	base   string // BaseURLEnv; "" for the real sources
 
-	lists     atomic.Pointer[map[string]*listState] // copy on write under listsMu
+	lists     atomic.Pointer[map[string]*listState] // by name; copy on write under listsMu
+	ids       atomic.Pointer[map[int64]*listState]  // the same lists by id
 	listsMu   sync.Mutex
 	refreshMu sync.Mutex // one fetch at a time
 	trusted   atomic.Pointer[trustedSet]
 
+	// trustedLists are the ids of the lists that trusted proxies include: the rows of
+	// trusted_proxy_lists. envLists are the lists that TR_TRUSTED_PROXIES names, resolved once
+	// at startup. A writer of trustedLists holds rulesMu.
+	trustedLists atomic.Pointer[[]int64]
+	envLists     []int64
+
 	candMu sync.Mutex
 	cands  map[netip.Addr]*Candidate // untrusted peers that sent forwarded headers
 
-	// rulesMu guards rules. A writer of rules, and a rename or delete of a list, holds it, so a
-	// rule never names a list that is gone. Lock order: rulesMu, then listsMu.
+	// rulesMu guards rules. A writer of rules or of the trusted lists, and a rename or delete of a
+	// list, holds it, so nothing names a list that is gone. Lock order: rulesMu, then listsMu.
 	rulesMu sync.RWMutex
 	rules   map[int64]*repoRules
-
-	wg sync.WaitGroup
 }
 
 // New returns the service. Load must run before it serves requests.
-func New(d *db.DB, cfg config.Provider, au *audit.Service, log *slog.Logger) *Service {
+func New(d *db.DB, set settings.Provider, au *audit.Log, log *slog.Logger) *Service {
 	if log == nil {
 		log = slog.Default()
 	}
 	s := &Service{
-		d: d, rq: dbq.New(d.R), wq: dbq.New(d.W), cfg: cfg, audit: au, log: log,
+		d: d, rq: dbq.New(d.R), wq: dbq.New(d.W), set: set, audit: au, log: log,
 		client: &http.Client{
 			Timeout: fetchTimeout,
 			Transport: &http.Transport{
@@ -207,6 +216,10 @@ func New(d *db.DB, cfg config.Provider, au *audit.Service, log *slog.Logger) *Se
 	}
 	empty := map[string]*listState{}
 	s.lists.Store(&empty)
+	noIDs := map[int64]*listState{}
+	s.ids.Store(&noIDs)
+	var none []int64
+	s.trustedLists.Store(&none)
 	return s
 }
 
@@ -239,7 +252,16 @@ func (s *Service) Load(ctx context.Context) error {
 		}
 		after = rows[len(rows)-1].Name
 	}
-	s.lists.Store(&m)
+	s.listsMu.Lock()
+	s.storeList(func(all map[string]*listState) {
+		for k, v := range m {
+			all[k] = v
+		}
+	})
+	s.listsMu.Unlock()
+	if err := s.loadTrusted(ctx); err != nil {
+		return err
+	}
 	return s.loadRules(ctx)
 }
 
@@ -258,39 +280,24 @@ func stateOf(r dbq.IpList) (*listState, error) {
 	return st, nil
 }
 
-// Start refreshes stale presets now and then checks every hour, until ctx ends. A preset is
-// stale when it was never fetched or its last good fetch is a day old.
-func (s *Service) Start(ctx context.Context) {
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		t := time.NewTicker(checkEvery)
-		defer t.Stop()
-		for {
-			now := time.Now().Unix()
-			for _, p := range presets {
-				st := (*s.lists.Load())[p.name]
-				if st != nil && st.fetchedAt != 0 && now-st.fetchedAt < int64(refreshEvery/time.Second) {
-					continue
-				}
-				if err := s.Refresh(ctx, p.name); err != nil && ctx.Err() == nil {
-					s.log.Warn("refresh IP list; keeping the last good list", "list", p.name, "err", err.Error())
-				}
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-			}
+// RefreshStale refreshes the stale presets. A preset is stale when it was never fetched or its
+// last good fetch is a day old. A failed fetch keeps the last good list and is logged.
+func (s *Service) RefreshStale(ctx context.Context) error {
+	now := time.Now().Unix()
+	for _, p := range presets {
+		st := (*s.lists.Load())[p.name]
+		if st != nil && st.fetchedAt != 0 && now-st.fetchedAt < int64(refreshEvery/time.Second) {
+			continue
 		}
-	}()
+		if err := s.Refresh(ctx, p.name); err != nil && ctx.Err() == nil {
+			s.log.Warn("refresh IP list; keeping the last good list", "list", p.name, "err", err.Error())
+		}
+	}
+	return nil
 }
 
-// Wait waits for the refresh job to stop.
-func (s *Service) Wait() { s.wg.Wait() }
-
 func (st *listState) view(withRanges bool) List {
-	l := List{Name: st.name, Kind: st.kind, Title: st.title, Description: st.desc, Count: len(st.ranges),
+	l := List{ID: st.id, Name: st.name, Kind: st.kind, Title: st.title, Description: st.desc, Count: len(st.ranges),
 		Source: st.source, Error: st.err, CreatedAt: time.Unix(st.createdAt, 0).UTC()}
 	if st.fetchedAt != 0 {
 		t := time.Unix(st.fetchedAt, 0).UTC()
@@ -342,15 +349,19 @@ func (s *Service) Get(name string) (List, bool) {
 // Exists reports whether list name exists.
 func (s *Service) Exists(name string) bool { return (*s.lists.Load())[name] != nil }
 
-// listRanges returns the current ranges of list name (nil when it does not exist).
-func (s *Service) listRanges(name string) []netip.Prefix {
-	if st := (*s.lists.Load())[name]; st != nil {
+// listByID returns list id (nil when it does not exist).
+func (s *Service) listByID(id int64) *listState { return (*s.ids.Load())[id] }
+
+// listRanges returns the current ranges of list id (nil when it does not exist).
+func (s *Service) listRanges(id int64) []netip.Prefix {
+	if st := s.listByID(id); st != nil {
 		return st.ranges
 	}
 	return nil
 }
 
-// storeList applies change to a copy of the snapshot and publishes it. Caller holds listsMu.
+// storeList applies change to a copy of the snapshot and publishes it with its id index. Caller
+// holds listsMu.
 func (s *Service) storeList(change func(m map[string]*listState)) {
 	old := *s.lists.Load()
 	m := make(map[string]*listState, len(old)+1)
@@ -358,24 +369,34 @@ func (s *Service) storeList(change func(m map[string]*listState)) {
 		m[k] = v
 	}
 	change(m)
+	ids := make(map[int64]*listState, len(m))
+	for _, v := range m {
+		ids[v.id] = v
+	}
 	s.lists.Store(&m)
+	s.ids.Store(&ids)
 }
 
-// Usage returns what names list name: repo rules (through repo_ip_rules_list) and
-// trusted_proxies.
+// Usage returns what names list name: repo rules (through repo_ip_rules_list_id) and the
+// trusted proxies.
 func (s *Service) Usage(ctx context.Context, name string) (Usage, error) {
-	return s.usage(ctx, s.rq, name)
+	st := (*s.lists.Load())[name]
+	if st == nil {
+		return Usage{Repos: []Use{}}, nil
+	}
+	return s.usage(ctx, s.rq, st.id)
 }
 
-func (s *Service) usage(ctx context.Context, q *dbq.Queries, name string) (Usage, error) {
-	rows, err := q.ListRulesOfList(ctx, name)
+func (s *Service) usage(ctx context.Context, q *dbq.Queries, id int64) (Usage, error) {
+	rows, err := q.ListRulesOfList(ctx, sql.NullInt64{Int64: id, Valid: true})
 	if err != nil {
 		return Usage{}, err
 	}
-	u := Usage{Repos: make([]Use, 0, len(rows)), TrustedProxies: slices.Contains(s.cfg().TrustedProxies, settings.TrustedProxyList+name)}
+	u := Usage{Repos: make([]Use, 0, len(rows)), TrustedProxies: s.trusts(id)}
 	for _, r := range rows {
 		u.Repos = append(u.Repos, Use{Repo: r.Repo, Scope: r.Scope})
 	}
+	slices.SortFunc(u.Repos, func(a, b Use) int { return cmp.Or(strings.Compare(a.Repo, b.Repo), strings.Compare(a.Scope, b.Scope)) })
 	return u, nil
 }
 
@@ -443,7 +464,7 @@ func checkListName(name string) error {
 	return nil
 }
 
-// Create adds a custom list.
+// Create adds a custom list and records network.list.create.
 func (s *Service) Create(ctx context.Context, in ListInput) (List, error) {
 	var name, title, desc string
 	var ranges []string
@@ -494,6 +515,7 @@ func (s *Service) Create(ctx context.Context, in ListInput) (List, error) {
 	}
 	st := &listState{id: id, name: name, kind: KindCustom, title: title, desc: desc, ranges: prefixes, createdAt: now}
 	s.storeList(func(m map[string]*listState) { m[name] = st })
+	_ = s.audit.Record(ctx, audit.Event{Action: ActionListCreate, Target: name, Detail: map[string]any{"ranges": len(prefixes)}})
 	return st.view(true), nil
 }
 
@@ -501,35 +523,38 @@ func isUnique(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
 }
 
-// Update changes custom list name: its name (the repo rules that name it follow), title,
-// description and ranges. It returns the list and the old name when it was renamed (""
-// otherwise); the caller updates trusted_proxies for a rename.
-func (s *Service) Update(ctx context.Context, name string, in ListInput) (List, string, error) {
+// Update changes custom list name: its name, title, description and ranges, and records
+// network.list.update. Repo rules and trusted proxies name the list by its id, so a rename
+// changes one row. A list that TR_TRUSTED_PROXIES names keeps its name (ErrEnvNamed).
+func (s *Service) Update(ctx context.Context, name string, in ListInput) (List, error) {
 	s.rulesMu.Lock()
 	defer s.rulesMu.Unlock()
 	s.listsMu.Lock()
 	defer s.listsMu.Unlock()
 	cur := (*s.lists.Load())[name]
 	if cur == nil {
-		return List{}, "", ErrNotFound
+		return List{}, ErrNotFound
 	}
 	if cur.kind != KindCustom {
-		return List{}, "", ErrReadOnly
+		return List{}, ErrReadOnly
 	}
 	next := *cur
 	var err error
 	if in.Name != nil {
 		next.name = strings.TrimSpace(*in.Name)
 		if err := checkListName(next.name); err != nil {
-			return List{}, "", err
+			return List{}, err
 		}
 		if next.name != name && s.Exists(next.name) {
-			return List{}, "", ErrExists
+			return List{}, ErrExists
+		}
+		if next.name != name && slices.Contains(s.envLists, cur.id) {
+			return List{}, ErrEnvNamed
 		}
 	}
 	if in.Title != nil {
 		if next.title, err = checkText("title", *in.Title, maxTitleChars); err != nil {
-			return List{}, "", err
+			return List{}, err
 		}
 		if next.title == "" {
 			next.title = next.name
@@ -537,49 +562,41 @@ func (s *Service) Update(ctx context.Context, name string, in ListInput) (List, 
 	}
 	if in.Description != nil {
 		if next.desc, err = checkText("description", *in.Description, maxDescChars); err != nil {
-			return List{}, "", err
+			return List{}, err
 		}
 	}
 	if in.Ranges != nil {
 		if next.ranges, err = parseCustomRanges(*in.Ranges); err != nil {
-			return List{}, "", err
+			return List{}, err
 		}
 	}
 	js, _ := json.Marshal(rangeStrings(next.ranges))
-	renamed := next.name != name
 	err = s.d.Tx(ctx, func(tx *sql.Tx) error {
-		q := dbq.New(tx)
-		if err := q.UpdateCustomList(ctx, dbq.UpdateCustomListParams{Name: next.name, Title: next.title,
+		if err := dbq.New(tx).UpdateCustomList(ctx, dbq.UpdateCustomListParams{Name: next.name, Title: next.title,
 			Description: next.desc, Ranges: string(js), ID: cur.id}); err != nil {
 			return err
 		}
-		if renamed {
-			return q.RenameListRules(ctx, dbq.RenameListRulesParams{NewName: next.name, OldName: name})
+		detail := map[string]any{"ranges": len(next.ranges)}
+		if next.name != name {
+			detail["renamed_from"] = name
 		}
-		return nil
+		return s.audit.RecordTx(ctx, tx, audit.Event{Action: ActionListUpdate, Target: next.name, Detail: detail})
 	})
 	if isUnique(err) {
-		return List{}, "", ErrExists
+		return List{}, ErrExists
 	}
 	if err != nil {
-		return List{}, "", err
+		return List{}, err
 	}
 	s.storeList(func(m map[string]*listState) {
 		delete(m, name)
 		m[next.name] = &next
 	})
-	old := ""
-	if renamed {
-		old = name
-		if err := s.reloadRulesLocked(ctx); err != nil {
-			return List{}, "", err
-		}
-	}
-	return next.view(true), old, nil
+	return next.view(true), nil
 }
 
-// Delete removes custom list name. A list that repo rules or trusted_proxies name is refused
-// with an *InUseError.
+// Delete removes custom list name. A list that repo rules or the trusted proxies name is
+// refused with an *InUseError. It records network.list.delete.
 func (s *Service) Delete(ctx context.Context, name string) error {
 	s.rulesMu.Lock()
 	defer s.rulesMu.Unlock()
@@ -594,14 +611,17 @@ func (s *Service) Delete(ctx context.Context, name string) error {
 	}
 	err := s.d.Tx(ctx, func(tx *sql.Tx) error {
 		q := dbq.New(tx)
-		u, err := s.usage(ctx, q, name)
+		u, err := s.usage(ctx, q, cur.id)
 		if err != nil {
 			return err
 		}
 		if u.inUse() {
 			return &InUseError{Usage: u}
 		}
-		return q.DeleteCustomList(ctx, cur.id)
+		if err := q.DeleteCustomList(ctx, cur.id); err != nil {
+			return err
+		}
+		return s.audit.RecordTx(ctx, tx, audit.Event{Action: ActionListDelete, Target: name})
 	})
 	if err != nil {
 		return err

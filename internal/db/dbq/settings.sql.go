@@ -21,13 +21,12 @@ func (q *Queries) DeleteSetting(ctx context.Context, key string) error {
 
 const listSettings = `-- name: ListSettings :many
 
-SELECT key, value, secret FROM settings
+SELECT key, value FROM settings
 `
 
 type ListSettingsRow struct {
-	Key    string
-	Value  string
-	Secret bool
+	Key   string
+	Value string
 }
 
 // In-app settings (internal/settings). Request paths read the in-memory snapshot, never this table.
@@ -41,7 +40,7 @@ func (q *Queries) ListSettings(ctx context.Context) ([]ListSettingsRow, error) {
 	var items []ListSettingsRow
 	for rows.Next() {
 		var i ListSettingsRow
-		if err := rows.Scan(&i.Key, &i.Value, &i.Secret); err != nil {
+		if err := rows.Scan(&i.Key, &i.Value); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -56,15 +55,14 @@ func (q *Queries) ListSettings(ctx context.Context) ([]ListSettingsRow, error) {
 }
 
 const upsertSetting = `-- name: UpsertSetting :exec
-INSERT INTO settings (key, value, secret, updated_at, updated_by) VALUES (?, ?, ?, ?, ?)
-ON CONFLICT (key) DO UPDATE SET value = excluded.value, secret = excluded.secret,
+INSERT INTO settings (key, value, updated_at, updated_by) VALUES (?, ?, ?, ?)
+ON CONFLICT (key) DO UPDATE SET value = excluded.value,
   updated_at = excluded.updated_at, updated_by = excluded.updated_by
 `
 
 type UpsertSettingParams struct {
 	Key       string
 	Value     string
-	Secret    bool
 	UpdatedAt int64
 	UpdatedBy sql.NullInt64
 }
@@ -73,7 +71,6 @@ func (q *Queries) UpsertSetting(ctx context.Context, arg UpsertSettingParams) er
 	_, err := q.db.ExecContext(ctx, upsertSetting,
 		arg.Key,
 		arg.Value,
-		arg.Secret,
 		arg.UpdatedAt,
 		arg.UpdatedBy,
 	)

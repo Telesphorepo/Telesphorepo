@@ -18,9 +18,9 @@ import (
 	"time"
 )
 
-// Browse, delete and upload repo files through the JSON API (spec §13).
+// Browse, delete and upload repo files through the JSON API.
 
-// Bearer sends a publish session token as "Authorization: Bearer".
+// Bearer sends a token (a publish session token or a read token) as "Authorization: Bearer".
 type Bearer struct{ Token string }
 
 func (b Bearer) apply(r *http.Request) { r.Header.Set("Authorization", "Bearer "+b.Token) }
@@ -180,8 +180,8 @@ func TestTree(t *testing.T) {
 	w, reader := RandName("writer"), RandName("reader")
 	s.CreateUser(t, w, "writer-pass-1234")
 	s.CreateUser(t, reader, "reader-pass-1234")
-	s.SetPerms(t, repo, w, "download", "publish")
-	s.SetPerms(t, repo, reader, "download")
+	s.SetPerms(t, repo, w, "repo.download", "repo.publish")
+	s.SetPerms(t, repo, reader, "repo.download")
 	rauth := Basic{reader, "reader-pass-1234"}
 
 	files := []string{
@@ -258,10 +258,10 @@ func TestDelete(t *testing.T) {
 		w, pub := RandName("writer"), RandName("pub")
 		s.CreateUser(t, w, "writer-pass-1234")
 		s.CreateUser(t, pub, "pub-pass-1234")
-		s.SetPerms(t, mvn, w, "download", "publish", "delete")
-		s.SetPerms(t, raw, w, "download", "publish", "delete")
-		s.SetPerms(t, other, w, "download", "publish")
-		s.SetPerms(t, mvn, pub, "download", "publish")
+		s.SetPerms(t, mvn, w, "repo.download", "repo.publish", "repo.delete")
+		s.SetPerms(t, raw, w, "repo.download", "repo.publish", "repo.delete")
+		s.SetPerms(t, other, w, "repo.download", "repo.publish")
+		s.SetPerms(t, mvn, pub, "repo.download", "repo.publish")
 
 		mfiles := []string{"g/a/1.0/a-1.0.jar", "g/a/1.0/a-1.0.pom", "g/a/2.0/a-2.0.jar", "g/a/maven-metadata.xml", "g/b/1.0/b-1.0.jar", "g/c/1.0/c-1.0.jar"}
 		ps := s.MintSession(t, w, mvn)
@@ -321,20 +321,15 @@ func TestDelete(t *testing.T) {
 			t.Fatalf("raw root after deleting dir/: %v", got)
 		}
 
+		// A delete leaves the blobs to the blob GC (its grace is an hour by default).
 		keys := storedKeys(t, opts)
-		for _, gone := range []string{mvn + "/g/a/1.0/a-1.0.jar", mvn + "/g/a/2.0/a-2.0.jar", raw + "/dir/one.bin", raw + "/dir/sub/two.bin"} {
-			if slices.Contains(keys, "repos/"+gone) {
-				t.Fatalf("blob repos/%s is still stored after its delete", gone)
-			}
-		}
-		for _, kept := range []string{mvn + "/g/b/1.0/b-1.0.jar", raw + "/keep.bin"} {
-			if !slices.Contains(keys, "repos/"+kept) {
-				t.Fatalf("blob repos/%s is gone, but it was not deleted (keys %v)", kept, keys)
+		for _, content := range []string{"x g/a/1.0/a-1.0.jar", "x g/b/1.0/b-1.0.jar", "raw dir/one.bin", "raw keep.bin"} {
+			if k := blobKey(sha256Hex([]byte(content))); !slices.Contains(keys, k) {
+				t.Fatalf("blob %s (%q) is gone before the blob GC (keys %v)", k, content, keys)
 			}
 		}
 
-		// Repo delete needs the All repositories permission; rows and blobs go, and the name is free
-		// again.
+		// Repo delete needs the All repositories permission; the rows go, and the name is free again.
 		del := map[string][]string{"names": {raw}}
 		if st, b := s.API(t, http.MethodPost, "/api/repos/delete", del, s.SignIn(t, w, "writer-pass-1234")); st != http.StatusForbidden {
 			t.Fatalf("repo delete by a writer: status %d, want 403: %s", st, b)
@@ -355,11 +350,6 @@ func TestDelete(t *testing.T) {
 		}
 		if resp, body := rawPut(t, s, "/raw/"+raw+"/after.bin", []byte("x"), rps.Auth()); resp.StatusCode/100 == 2 {
 			t.Fatalf("upload with a session of a deleted repo: status %d: %s", resp.StatusCode, body)
-		}
-		for _, k := range storedKeys(t, opts) {
-			if strings.HasPrefix(k, "repos/"+raw+"/") {
-				t.Fatalf("blob %s of the deleted repo is still stored", k)
-			}
 		}
 		s.CreateRepo(t, raw, "raw", false, nil)
 		if items, _ := treePage(t, s, raw, "", "", 10, s.Admin()); len(items) != 0 {
@@ -399,7 +389,7 @@ func TestRepoCounters(t *testing.T) {
 	s.CreateRepo(t, repo, "raw", false, map[string]any{"overwrite": "allow"})
 	w := RandName("writer")
 	s.CreateUser(t, w, "writer-pass-1234")
-	s.SetPerms(t, repo, w, "download", "publish", "delete")
+	s.SetPerms(t, repo, w, "repo.download", "repo.publish", "repo.delete")
 	want := func(what string, n, size int, published bool) {
 		t.Helper()
 		c := countersOf(t, s, repo)
@@ -453,8 +443,8 @@ func TestManualUploadMaven(t *testing.T) {
 	w, reader := RandName("writer"), RandName("reader")
 	s.CreateUser(t, w, "writer-pass-1234")
 	s.CreateUser(t, reader, "reader-pass-1234")
-	s.SetPerms(t, repo, w, "download", "publish")
-	s.SetPerms(t, repo, reader, "download")
+	s.SetPerms(t, repo, w, "repo.download", "repo.publish")
+	s.SetPerms(t, repo, reader, "repo.download")
 	rauth := Basic{reader, "reader-pass-1234"}
 	ps := s.MintSession(t, w, repo)
 
@@ -575,8 +565,8 @@ func TestManualUploadRaw(t *testing.T) {
 	s.CreateRepo(t, other, "raw", false, nil)
 	w := RandName("writer")
 	s.CreateUser(t, w, "writer-pass-1234")
-	s.SetPerms(t, repo, w, "download", "publish")
-	s.SetPerms(t, other, w, "download", "publish")
+	s.SetPerms(t, repo, w, "repo.download", "repo.publish")
+	s.SetPerms(t, other, w, "repo.download", "repo.publish")
 	ps := s.MintSession(t, w, repo)
 
 	a, b := rawRandom(t, 3000), rawRandom(t, 10)
@@ -627,8 +617,8 @@ func TestDebianDeleteAndUpload(t *testing.T) {
 	w, reader := RandName("writer"), RandName("reader")
 	s.CreateUser(t, w, "writer-pass-1234")
 	s.CreateUser(t, reader, "reader-pass-1234")
-	s.SetPerms(t, repo, w, "download", "publish", "delete")
-	s.SetPerms(t, repo, reader, "download")
+	s.SetPerms(t, repo, w, "repo.download", "repo.publish", "repo.delete")
+	s.SetPerms(t, repo, reader, "repo.download")
 	rauth := Basic{reader, "reader-pass-1234"}
 
 	ps := s.MintSession(t, w, repo)

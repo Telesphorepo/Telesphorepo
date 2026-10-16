@@ -1,4 +1,4 @@
-// Package httpx holds small shared HTTP helpers: path validation, JSON I/O, client IP.
+// Package httpx holds small shared HTTP helpers: the repo path of a URL, JSON I/O, client IP.
 package httpx
 
 import (
@@ -11,38 +11,27 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
-	"unicode/utf8"
+
+	"github.com/Telesphorepo/Telesphorepo/internal/repopath"
 )
 
-// ValidRepoPath implements spec §6 for the repo-relative path p (already decoded,
-// e.g. r.PathValue("path")). It also inspects r.URL.EscapedPath() for encoded
-// separators/NUL. Returns false if the path must be rejected with 400.
-func ValidRepoPath(r *http.Request, p string) bool {
-	if p == "" || len(p) > 1024 || !utf8.ValidString(p) {
-		return false
-	}
+// RepoPath returns the repo path in the path value name of r (already decoded, e.g. the
+// {path...} of a format route), checked with repopath.Parse. It refuses a raw URL path with an
+// encoded separator, backslash or NUL, or an encoded "." or ".." segment, which decode into a
+// path that the router did not match.
+func RepoPath(r *http.Request, name string) (repopath.Path, error) {
 	esc := strings.ToLower(r.URL.EscapedPath())
 	for _, bad := range []string{"%2f", "%5c", "%00"} {
 		if strings.Contains(esc, bad) {
-			return false
+			return "", repopath.ErrInvalid
 		}
 	}
 	for _, seg := range strings.Split(esc, "/") {
 		if seg == "%2e%2e" || seg == "%2e." || seg == ".%2e" {
-			return false
+			return "", repopath.ErrInvalid
 		}
 	}
-	for _, seg := range strings.Split(p, "/") {
-		if seg == "" || seg == "." || seg == ".." || len(seg) > 255 {
-			return false
-		}
-		for i := 0; i < len(seg); i++ {
-			if c := seg[i]; c < 0x20 || c == 0x7F || c == '\\' {
-				return false
-			}
-		}
-	}
-	return true
+	return repopath.Parse(r.PathValue(name))
 }
 
 // WriteJSON writes v as JSON with the given status.
@@ -51,6 +40,12 @@ func WriteJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// StatusError is an error that carries the HTTP status of its answer, e.g. a refused write.
+type StatusError interface {
+	error
+	HTTPStatus() int
 }
 
 // Error writes {"error": msg} with status.

@@ -2,7 +2,7 @@
 // AccessDraft; `changesOf` lists what a save does, one line each. The access of people is not in
 // the draft: the tab changes it at once.
 
-import type { AccessNetworks, AccessPipeline, IPList, IPRule, RepoAccess, Trust } from "$lib/api";
+import type { AccessGuards, AccessNetworks, AccessPipeline, IPList, IPRule, RepoAccess, Trust } from "$lib/api";
 
 /** What the Access tab saves from its save bar. ci: the ids of the CI pipelines that list the repo. */
 export type AccessDraft = {
@@ -12,17 +12,22 @@ export type AccessDraft = {
   publish: IPRule[];
 };
 
-const rulesOf = (n: AccessNetworks): IPRule[] => [
-  ...n.lists.map((l) => ({ kind: "list" as const, value: l.name, note: "" })),
-  ...n.cidrs.map((c) => ({ kind: "cidr" as const, value: c.cidr, note: c.note })),
-];
+/** The IP rules of one operation, from the report of the network guard (none without one). */
+const rulesOf = (g: AccessGuards): IPRule[] => {
+  const n = g.network?.detail as AccessNetworks | undefined;
+  if (!n) return [];
+  return [
+    ...n.lists.map((l) => ({ kind: "list" as const, value: l.name, note: "" })),
+    ...n.cidrs.map((c) => ({ kind: "cidr" as const, value: c.cidr, note: c.note })),
+  ];
+};
 
 export function draftOf(a: RepoAccess): AccessDraft {
   return {
     public: a.download.public,
     ci: a.publish.ci.map((c) => c.id).sort((x, y) => x - y),
-    read: rulesOf(a.download.networks),
-    publish: rulesOf(a.publish.networks),
+    read: rulesOf(a.download.guards),
+    publish: rulesOf(a.publish.guards),
   };
 }
 
@@ -52,7 +57,7 @@ export function pipelineOf(t: Trust): AccessPipeline {
 
 /** What a pipeline's conditions allow, for its row: "acme/app · branch main · release.yml". */
 export function pipelineFacts(p: AccessPipeline): string {
-  const parts: string[] = [p.system === "github-actions" ? "GitHub Actions" : hostOf(p.issuer)];
+  const parts: string[] = [p.system === "github-actions" ? "GitHub Actions" : p.system === "jenkins" ? "Jenkins" : hostOf(p.issuer)];
   if (p.repositories?.length) parts.push(and(p.repositories));
   if (p.branches?.length) parts.push(`${p.branches.length === 1 ? "branch" : "branches"} ${and(p.branches)}`);
   if (p.tags?.length) parts.push(`${p.tags.length === 1 ? "tag" : "tags"} ${and(p.tags)}`);

@@ -116,21 +116,60 @@ func hasCookie(jar http.CookieJar, rawURL, name string) bool {
 	return false
 }
 
+// ssoMe is the part of GET /api/me that the SSO tests read.
+type ssoMe struct {
+	Username           string   `json:"username"`
+	Permissions        []string `json:"permissions"`
+	PermissionsManaged bool     `json:"permissions_managed"`
+	Kind               string   `json:"kind"`
+	Email              string   `json:"email"`
+}
+
+// ssoMeOf reads GET /api/me with the SSO session in jar.
+func ssoMeOf(t *testing.T, s *Server, jar http.CookieJar) ssoMe {
+	t.Helper()
+	st, b := browserAPI(t, s, http.MethodGet, "/api/me", nil, jar)
+	if st != http.StatusOK {
+		t.Fatalf("GET /api/me: status %d: %s", st, b)
+	}
+	var me ssoMe
+	if err := json.Unmarshal(b, &me); err != nil {
+		t.Fatalf("decode /api/me %s: %v", b, err)
+	}
+	return me
+}
+
+// TestOIDC signs people in with Keycloak. With the permission claim groups, a sign-in sets the
+// server permissions from the claim map (members of kcAdminGroup get every one), and nobody can
+// change them on the server (409). Any person at the provider signs in; bob, outside the group,
+// gets none. A change of the map takes effect at the next sign-in. Without a claim, a sign-in
+// changes nothing.
 func TestOIDC(t *testing.T) {
 	kc := newKeycloak(t)
 	s := StartServer(t, ServerOpts{Env: map[string]string{
 		"TR_OIDC_ISSUER":        kc.Issuer,
 		"TR_OIDC_CLIENT_ID":     kcClientID,
 		"TR_OIDC_CLIENT_SECRET": kcClientSecret,
-		"TR_OIDC_ADMIN_CLAIM":   "groups",
-		"TR_OIDC_ADMIN_VALUES":  kcAdminGroup,
 	}})
 	// The redirect URL must point at the host-mapped server URL, known only after start, so
 	// Keycloak starts second with exactly that redirect URI registered.
 	redirect := s.URL + oidcCallbackPath
 	kc.Start(t, redirect)
 	// Saving oidc.redirect_url also proves the server reaches Keycloak's discovery document.
-	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"oidc.redirect_url": redirect}, s.Admin(), nil)
+	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"oidc.redirect_url": redirect,
+		"oidc.permission_claim": "groups", "oidc.permission_map": map[string][]string{kcAdminGroup: AllServerPerms}}, s.Admin(), nil)
+
+	t.Run("a map without a claim or with an unknown permission", func(t *testing.T) {
+		for _, bad := range []map[string]any{
+			{"oidc.permission_claim": "", "oidc.permission_map": map[string][]string{"x": {"activity.read"}}},
+			{"oidc.permission_map": map[string][]string{"x": {"nowhere.manage"}}},
+			{"oidc.permission_map": map[string][]string{"x": {"repo.publish"}}},
+		} {
+			if st, b := s.API(t, http.MethodPatch, "/api/settings", bad, s.Admin()); st != http.StatusBadRequest {
+				t.Fatalf("PATCH %v: status %d, want 400: %s", bad, st, b)
+			}
+		}
+	})
 
 	var cfg struct {
 		OIDC bool `json:"oidc"`
@@ -142,29 +181,20 @@ func TestOIDC(t *testing.T) {
 
 	alice := kc.SignIn(t, s, "alice", kcAlicePassword)
 
-	t.Run("admin signs in", func(t *testing.T) {
+	t.Run("the claim map gives the permissions", func(t *testing.T) {
 		if alice.Resp.StatusCode != http.StatusFound || alice.Resp.Header.Get("Location") != "/" {
 			t.Fatalf("callback: status %d Location %q, want 302 /: %s", alice.Resp.StatusCode, alice.Resp.Header.Get("Location"), alice.Body)
 		}
 		if !hasCookie(alice.Jar, s.URL, "tr_session") {
 			t.Fatal("no tr_session cookie after SSO login")
 		}
-		st, b := browserAPI(t, s, http.MethodGet, "/api/me", nil, alice.Jar)
-		if st != http.StatusOK {
-			t.Fatalf("GET /api/me: status %d: %s", st, b)
+		me := ssoMeOf(t, s, alice.Jar)
+		if me.Username != "alice" || strings.Join(me.Permissions, ",") != strings.Join(AllServerPerms, ",") || !me.PermissionsManaged ||
+			me.Kind != "oidc" || me.Email != "alice@e2e.test" {
+			t.Fatalf("GET /api/me = %+v, want alice, every server permission, managed, kind oidc, alice@e2e.test", me)
 		}
-		var me struct {
-			Username    string   `json:"username"`
-			Permissions []string `json:"permissions"`
-			Kind        string   `json:"kind"`
-			Email       string   `json:"email"`
-		}
-		if err := json.Unmarshal(b, &me); err != nil {
-			t.Fatalf("decode /api/me %s: %v", b, err)
-		}
-		if me.Username != "alice" || strings.Join(me.Permissions, ",") != strings.Join(AllServerPerms, ",") || me.Kind != "oidc" || me.Email != "alice@e2e.test" {
-			t.Fatalf("GET /api/me = %+v, want alice, every server permission, kind oidc, alice@e2e.test", me)
-		}
+		st, b := s.API(t, http.MethodPut, "/api/users/alice/permissions", map[string]any{"permissions": []string{"activity.read"}}, s.Admin())
+		wantAPIStatus(t, "change the managed permissions of alice", st, b, http.StatusConflict)
 	})
 
 	t.Run("admin creates a repo", func(t *testing.T) {
@@ -228,32 +258,39 @@ func TestOIDC(t *testing.T) {
 		}
 	})
 
-	t.Run("non-admin is refused", func(t *testing.T) {
+	t.Run("a person outside the map signs in without permissions", func(t *testing.T) {
 		bob := kc.SignIn(t, s, "bob", kcBobPassword)
-		if loc := bob.Resp.Header.Get("Location"); bob.Resp.StatusCode != http.StatusFound || !strings.HasSuffix(loc, "error=not_authorized") {
-			t.Fatalf("bob callback: status %d Location %q, want 302 /#/login?error=not_authorized: %s", bob.Resp.StatusCode, loc, bob.Body)
+		if bob.Resp.StatusCode != http.StatusFound || bob.Resp.Header.Get("Location") != "/" || !hasCookie(bob.Jar, s.URL, "tr_session") {
+			t.Fatalf("bob callback: status %d Location %q, want 302 / with a session: %s", bob.Resp.StatusCode, bob.Resp.Header.Get("Location"), bob.Body)
 		}
-		if hasCookie(bob.Jar, s.URL, "tr_session") {
-			t.Fatal("bob got a tr_session cookie")
+		if me := ssoMeOf(t, s, bob.Jar); me.Username != "bob" || len(me.Permissions) != 0 || !me.PermissionsManaged {
+			t.Fatalf("GET /api/me = %+v, want bob without server permissions, managed", me)
 		}
-		after := ""
-		for {
-			var page struct {
-				Items []struct {
-					Username string `json:"username"`
-				} `json:"items"`
-				Next *string `json:"next"`
-			}
-			s.MustAPI(t, http.MethodGet, "/api/users?after="+url.QueryEscape(after), nil, s.Admin(), &page)
-			for _, u := range page.Items {
-				if u.Username == "bob" {
-					t.Fatal("GET /api/users lists bob; a refused SSO login must not create a user")
-				}
-			}
-			if page.Next == nil || *page.Next == "" {
-				break
-			}
-			after = *page.Next
+	})
+
+	t.Run("a sign-in replaces the permissions from the map", func(t *testing.T) {
+		s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{
+			"oidc.permission_map": map[string][]string{kcAdminGroup: {"activity.read"}}}, s.Admin(), nil)
+		again := kc.SignIn(t, s, "alice", kcAlicePassword)
+		if me := ssoMeOf(t, s, again.Jar); strings.Join(me.Permissions, ",") != "activity.read" {
+			t.Fatalf("alice after the map change: %+v, want activity.read", me)
+		}
+	})
+
+	t.Run("without a claim a sign-in changes nothing", func(t *testing.T) {
+		s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"oidc.permission_claim": "", "oidc.permission_map": map[string][]string{}},
+			s.Admin(), nil)
+		var u struct {
+			Permissions        []string `json:"permissions"`
+			PermissionsManaged bool     `json:"permissions_managed"`
+		}
+		s.MustAPI(t, http.MethodPut, "/api/users/alice/permissions", map[string]any{"permissions": []string{"signing.manage"}}, s.Admin(), &u)
+		if strings.Join(u.Permissions, ",") != "signing.manage" || u.PermissionsManaged {
+			t.Fatalf("PUT the permissions of alice: %+v, want signing.manage, not managed", u)
+		}
+		again := kc.SignIn(t, s, "alice", kcAlicePassword)
+		if me := ssoMeOf(t, s, again.Jar); strings.Join(me.Permissions, ",") != "signing.manage" || me.PermissionsManaged {
+			t.Fatalf("alice after a sign-in without a claim: %+v, want signing.manage, not managed", me)
 		}
 	})
 }

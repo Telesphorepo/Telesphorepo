@@ -9,14 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/perm"
 )
-
-const challenge = `Basic realm="telesphorepo"`
-
-// errPublishEnded is a failed publish-session token: unknown, malformed, closed, expired, or its
-// device or trust policy ended. The response is the same for all of them.
-var errPublishEnded = errors.New("publish session ended")
 
 // rateLimitedError carries the Retry-After duration.
 type rateLimitedError struct{ wait time.Duration }
@@ -24,32 +18,24 @@ type rateLimitedError struct{ wait time.Duration }
 func (e *rateLimitedError) Error() string { return ErrRateLimited.Error() }
 func (e *rateLimitedError) Unwrap() error { return ErrRateLimited }
 
-// authenticate verifies username/password (or a read token or publish-session token as
-// password when allowToken), applying the failed-attempt rate limits. Errors:
-// ErrBadCredentials, *rateLimitedError, or an internal error.
+// authenticate verifies username/password (or, when allowToken, a token of a registered kind as
+// the password), applying the failed-attempt rate limits. Errors: ErrBadCredentials (or an
+// error that wraps it, such as ErrPublishEnded), *rateLimitedError, or an internal error.
 func (s *Service) authenticate(ctx context.Context, ip netip.Addr, username, password string, allowToken bool) (*Principal, error) {
 	keys := limitKeys(ip, username)
 	if d := s.limits.blocked(keys...); d > 0 {
 		return nil, &rateLimitedError{d}
 	}
-	if allowToken && (strings.HasPrefix(password, tokenPrefix) || strings.HasPrefix(password, publishTokenPrefix)) {
-		// Tokens carry 256 random bits and are checked with one SHA-256, so a plain
-		// check-then-record is enough here; reserving would throttle parallel CI clients.
-		var p *Principal
-		var err error
-		if strings.HasPrefix(password, publishTokenPrefix) {
-			p, err = s.verifyPublishToken(ctx, password)
-		} else {
-			p, err = s.verifyToken(ctx, password)
-		}
-		if errors.Is(err, ErrBadCredentials) {
-			s.limits.fail(keys...)
-			if strings.HasPrefix(password, publishTokenPrefix) {
-				return nil, errPublishEnded
+	if allowToken {
+		if v, pub, sec, ok := s.tokenKind(password); ok {
+			// Tokens carry 256 random bits and are checked with one SHA-256, so a plain
+			// check-then-record is enough here; reserving would throttle parallel CI clients.
+			p, err := v(ctx, pub, sec)
+			if errors.Is(err, ErrBadCredentials) {
+				s.limits.fail(keys...)
 			}
-			return nil, ErrBadCredentials
+			return p, err
 		}
-		return p, err
 	}
 	return s.verifyUserPassword(ctx, keys, username, password)
 }
@@ -140,7 +126,7 @@ func (s *Service) verifyUncached(ctx context.Context, keys []string, key [32]byt
 	if cur, err := s.rq.GetUserPasswordHash(ctx, id); err == nil && cur == hash {
 		s.cache.put(key, id, hash, gen)
 	}
-	return &Principal{UserID: id, Username: username, Perms: ServerPermsOf(u.Perms), Kind: u.Kind}, nil
+	return &Principal{Cred: CredPassword, UserID: id, Username: username, Perms: perm.Joined(u.Perms), Kind: u.Kind}, nil
 }
 
 // principalByID re-reads the user so permission and disabled changes apply immediately.
@@ -153,7 +139,7 @@ func (s *Service) principalAndHash(ctx context.Context, id int64) (*Principal, s
 	if err != nil {
 		return nil, "", err
 	}
-	return &Principal{UserID: id, Username: u.Username, Perms: ServerPermsOf(u.Perms), Kind: u.Kind}, u.PasswordHash, nil
+	return &Principal{Cred: CredPassword, UserID: id, Username: u.Username, Perms: perm.Joined(u.Perms), Kind: u.Kind}, u.PasswordHash, nil
 }
 
 func (s *Service) principalByID(ctx context.Context, id int64) (*Principal, error) {
@@ -164,155 +150,70 @@ func (s *Service) principalByID(ctx context.Context, id int64) (*Principal, erro
 	if err != nil {
 		return nil, err
 	}
-	return &Principal{UserID: id, Username: u.Username, Perms: ServerPermsOf(u.Perms), Kind: u.Kind}, nil
+	return &Principal{UserID: id, Username: u.Username, Perms: perm.Joined(u.Perms), Kind: u.Kind}, nil
 }
 
-// UIHeader is the header the web UI's API client sends (value "1").
+// UIHeader is the header the web UI's API client sends (value "1"). A 401 to a request with it
+// carries no WWW-Authenticate challenge, so a browser never opens its password dialog.
 const UIHeader = "X-Telesphorepo-UI"
-
-// wantsChallenge reports whether a 401 to r carries the Basic challenge. The JSON API and
-// requests from the web UI never get it, so a browser never opens its password dialog; format
-// routes keep it for package clients.
-func wantsChallenge(r *http.Request) bool {
-	return r.Header.Get(UIHeader) != "1" && r.URL.Path != "/api" && !strings.HasPrefix(r.URL.Path, "/api/")
-}
-
-func unauthorized(w http.ResponseWriter, r *http.Request, msg string) {
-	if wantsChallenge(r) {
-		w.Header().Set("WWW-Authenticate", challenge)
-	}
-	httpx.Error(w, http.StatusUnauthorized, msg)
-}
-
-// writeAuthError maps an authenticate error to a response.
-func writeAuthError(w http.ResponseWriter, r *http.Request, err error) {
-	var rl *rateLimitedError
-	switch {
-	case errors.As(err, &rl):
-		setRetryAfter(w, rl.wait)
-		httpx.Error(w, http.StatusTooManyRequests, ErrRateLimited.Error())
-	case errors.Is(err, ErrBadCredentials):
-		unauthorized(w, r, ErrBadCredentials.Error())
-	default:
-		httpx.Error(w, http.StatusInternalServerError, "internal error")
-	}
-}
 
 // ErrSessionRequired is the answer to a request that needs a UI session but came with HTTP
 // Basic (a password or a read token) or with no credential.
 var ErrSessionRequired = errors.New("sign in through the web UI for this action")
 
-// SessionRequired answers 401 {"error": ErrSessionRequired}. It sends no Basic challenge, so a
-// browser does not open its password dialog.
-func SessionRequired(w http.ResponseWriter) {
-	httpx.Error(w, http.StatusUnauthorized, ErrSessionRequired.Error())
+// Read says which credentials Identify reads besides the Authorization header (a Basic
+// password, or a token of a registered kind as the Basic password or as a Bearer token).
+type Read struct {
+	Cookie      bool   // the tr_session cookie of a UI session
+	Bearer      bool   // core bearer tokens (IssueBearer) in "Authorization: Bearer"
+	TokenHeader string // a header that carries a token of a registered kind, e.g. X-NuGet-ApiKey
 }
 
-// Identify authenticates the request: HTTP Basic (password, read token or publish-session
-// token) everywhere, "Authorization: Bearer trs_..." (a publish-session token), and the session
-// cookie when allowSession (the JSON API). It writes the error response and returns ok=false
-// when the request must stop. On the JSON API:
-//   - a password or a read token reaches only GET and HEAD routes (401 ErrSessionRequired
-//     elsewhere). POST /api/repos/{name}/upload and POST /api/repos/{name}/files/delete are left to
-//     their gates, which take only a publish session or a UI session. The API refuses the
-//     permission routes to these credentials too (see api.can), so every change of state and
-//     every permission route needs a UI session. The UI session of a person who needs the
-//     second factor exists only after it (outside dev mode);
-//   - a publish-session token reaches only /api/publish/, POST /api/repos/{name}/upload and
-//     POST /api/repos/{name}/files/delete (403 elsewhere);
-//   - a UI session of a local account that needs the second factor and has none reaches only
-//     /api/me, /api/auth/logout and /api/security (403 {"error":"second_factor_required"}
-//     elsewhere), except in dev mode.
-func (s *Service) Identify(w http.ResponseWriter, r *http.Request, allowSession bool) (*Principal, bool) {
-	return s.identify(w, r, allowSession, allowSession)
-}
-
-// identify is Identify with the JSON API rules (api) and the session cookie (cookie) chosen
-// apart. A format route reads with the cookie (cookie) but keeps the format-route rules for the
-// other credentials (api false).
-func (s *Service) identify(w http.ResponseWriter, r *http.Request, api, cookie bool) (*Principal, bool) {
+// Identify authenticates r with the credentials that rd names and returns the caller, or nil for
+// a request without a credential. It decides nothing about the route: the route policy
+// (internal/route) checks the kind of the credential. Errors: ErrBadCredentials (or
+// ErrPublishEnded, which wraps it), a rate-limit error (RetryAfter gives the wait) or an
+// internal error.
+func (s *Service) Identify(r *http.Request, rd Read) (*Principal, error) {
+	ctx := r.Context()
 	if h := r.Header.Get("Authorization"); h != "" {
-		user, pass, ok := r.BasicAuth()
-		if !ok && len(h) > 7 && strings.EqualFold(h[:7], "bearer ") && strings.HasPrefix(strings.TrimSpace(h[7:]), publishTokenPrefix) {
-			user, pass, ok = "", strings.TrimSpace(h[7:]), true
+		if user, pass, ok := r.BasicAuth(); ok {
+			return s.authenticate(ctx, s.clientIP(r), user, pass, true)
 		}
-		if !ok {
-			if len(h) >= 6 && strings.EqualFold(h[:6], "basic ") {
-				unauthorized(w, r, ErrBadCredentials.Error())
-				return nil, false
+		if len(h) >= 6 && strings.EqualFold(h[:6], "basic ") {
+			return nil, ErrBadCredentials
+		}
+		if len(h) > 7 && strings.EqualFold(h[:7], "bearer ") {
+			tok := strings.TrimSpace(h[7:])
+			if rd.Bearer && strings.HasPrefix(tok, bearerPrefix) {
+				return s.verifyBearer(ctx, tok)
 			}
-		} else {
-			p, err := s.authenticate(r.Context(), s.clientIP(r), user, pass, true)
-			if errors.Is(err, errPublishEnded) {
-				s.publishRequired(w, r)
-				return nil, false
+			if s.isToken(tok) {
+				return s.authenticate(ctx, s.clientIP(r), "", tok, true)
 			}
-			if err != nil {
-				writeAuthError(w, r, err)
-				return nil, false
-			}
-			if api && p.Publish != nil && !publishTokenRoute(r) {
-				httpx.Error(w, http.StatusForbidden, "a publish session token only publishes")
-				return nil, false
-			}
-			if api && p.Publish == nil && !safeMethod(r.Method) && !repoWriteRoute(r) {
-				SessionRequired(w)
-				return nil, false
-			}
-			return p, true
+		}
+		if tok := strings.TrimSpace(h); rd.TokenHeader == "Authorization" && s.isToken(tok) {
+			return s.authenticate(ctx, s.clientIP(r), "", tok, true)
 		}
 	}
-	if cookie {
+	if rd.TokenHeader != "" && rd.TokenHeader != "Authorization" {
+		if tok := strings.TrimSpace(r.Header.Get(rd.TokenHeader)); tok != "" {
+			if !s.isToken(tok) {
+				return nil, ErrBadCredentials
+			}
+			return s.authenticate(ctx, s.clientIP(r), "", tok, true)
+		}
+	}
+	if rd.Cookie {
 		if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" {
-			p, err := s.sessionPrincipal(r.Context(), c.Value)
-			if err != nil {
-				httpx.Error(w, http.StatusInternalServerError, "internal error")
-				return nil, false
-			}
-			if p != nil && !setupRoute(r.URL.Path) {
-				setup, err := s.SetupOnly(r.Context(), p)
-				if err != nil {
-					httpx.Error(w, http.StatusInternalServerError, "internal error")
-					return nil, false
-				}
-				if setup {
-					httpx.Error(w, http.StatusForbidden, ErrNoSecondFactor.Error())
-					return nil, false
-				}
-			}
-			return p, true
+			return s.sessionPrincipal(ctx, c.Value)
 		}
 	}
-	return nil, true
+	return nil, nil
 }
 
-// setupRoute reports whether a setup-only session may reach path.
-func setupRoute(path string) bool {
-	return path == "/api/me" || path == "/api/auth/logout" ||
-		path == "/api/security" || strings.HasPrefix(path, "/api/security/")
-}
-
-// safeMethod reports whether method only reads.
-func safeMethod(method string) bool {
-	return method == http.MethodGet || method == http.MethodHead
-}
-
-// publishTokenRoute reports whether a publish-session token may reach r on the JSON API:
-// /api/publish/..., POST /api/repos/{name}/upload and POST /api/repos/{name}/files/delete.
-func publishTokenRoute(r *http.Request) bool {
-	return strings.HasPrefix(r.URL.Path, "/api/publish/") || repoWriteRoute(r)
-}
-
-// repoWriteRoute reports whether r is POST /api/repos/{name}/upload, POST
-// /api/repos/{name}/upload/scan or POST /api/repos/{name}/files/delete.
-func repoWriteRoute(r *http.Request) bool {
-	rest, ok := strings.CutPrefix(r.URL.Path, "/api/repos/")
-	if !ok {
-		return false
-	}
-	name, tail, ok := strings.Cut(rest, "/")
-	if !ok || name == "" {
-		return false
-	}
-	return r.Method == http.MethodPost && (tail == "upload" || tail == "upload/scan" || tail == "files/delete")
+// isToken reports whether tok starts with the prefix of a registered token kind.
+func (s *Service) isToken(tok string) bool {
+	_, _, _, ok := s.tokenKind(tok)
+	return ok
 }

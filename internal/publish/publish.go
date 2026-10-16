@@ -1,33 +1,34 @@
-// Package publish implements publisher credentials (spec §7.6): enrolled device keys, publish
-// sessions, CI trust policies with the OIDC token exchange, the publish log and the job that
-// deletes ended rows. A publish session is the only credential that writes on a format route;
-// the Service verifies its token for auth.Service through auth.PublishTokens.
+// Package publish is the publish module: publisher credentials: enrolled device
+// keys, publish sessions, CI trust policies with the OIDC token exchange, the publish log and the
+// job that deletes ended rows. A publish session is the only credential that writes on a format
+// route; the module registers the token kind of its sessions (TokenPrefix) with the kernel.
 package publish
 
 import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"log/slog"
-	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	gooidc "github.com/coreos/go-oidc/v3/oidc"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/access"
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
+	"github.com/Telesphorepo/Telesphorepo/internal/ci"
+	"github.com/Telesphorepo/Telesphorepo/internal/clients"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
-	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
-	"github.com/Telesphorepo/Telesphorepo/internal/netrules"
+	"github.com/Telesphorepo/Telesphorepo/internal/publish/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
+	"github.com/Telesphorepo/Telesphorepo/internal/token"
 )
 
 // Error kinds. Every error the Service returns for a caller mistake wraps one of these; its
@@ -64,11 +65,11 @@ const (
 	ViaManual = "manual"
 )
 
-const (
-	tokenPrefix = "trs_"
-	// logRetention is how long ended sessions stay in the publish log.
-	logRetention = 30 * 24 * time.Hour
-)
+// TokenPrefix is the prefix of a publish session token.
+const TokenPrefix token.Prefix = "trs"
+
+// logRetention is how long ended sessions stay in the publish log.
+const logRetention = 30 * 24 * time.Hour
 
 // Service owns devices, enrollments, publish nonces, publish sessions and trust policies.
 type Service struct {
@@ -78,54 +79,51 @@ type Service struct {
 	repos    *repos.Service
 	settings *settings.Service
 	log      *slog.Logger
-	rules    *netrules.Service // per-repo IP rules; set by the server (nil: none)
+	access   *access.Engine // decides every mint (access.Mint)
+	audit    *audit.Log
+	ci       *ci.Registry      // reads CI tokens and trust policies
+	builds   *ci.Builds        // the build records of CI sessions
+	clients  *clients.Registry // the publisher clients that enroll devices
 
 	enrollLimits *ipLimiter
 
 	provMu sync.Mutex
 	provs  map[string]*gooidc.Provider // discovered CI issuers; failures are not cached
-
-	wg sync.WaitGroup
 }
 
-var _ auth.PublishTokens = (*Service)(nil)
+// Deps are the kernel services of the publish service.
+type Deps struct {
+	DB       *db.DB
+	Auth     *auth.Service
+	Access   *access.Engine // decides each mint
+	Repos    *repos.Service
+	Settings *settings.Service
+	Audit    *audit.Log
+	CI       *ci.Registry
+	Builds   *ci.Builds
+	Clients  *clients.Registry
+	Log      *slog.Logger
+}
 
-// New returns the publish service. Register it with auth.Service.SetPublishTokens so that the
-// write gate accepts its sessions, and call Start to run the cleanup job.
-func New(d *db.DB, a *auth.Service, rs *repos.Service, st *settings.Service, log *slog.Logger) *Service {
-	if log == nil {
-		log = slog.Default()
-	}
+// New returns the publish service.
+func New(d Deps) *Service {
 	return &Service{
-		db: d, rq: dbq.New(d.R), wq: dbq.New(d.W), auth: a, repos: rs, settings: st, log: log,
+		db: d.DB, rq: dbq.New(d.DB.R), wq: dbq.New(d.DB.W), auth: d.Auth, access: d.Access, audit: d.Audit,
+		repos: d.Repos, settings: d.Settings, log: d.Log, ci: d.CI, builds: d.Builds, clients: d.Clients,
 		enrollLimits: newIPLimiter(),
 		provs:        map[string]*gooidc.Provider{},
 	}
 }
 
-// SetNetRules sets the per-repo IP rules that minting a session checks (publish scope).
-func (s *Service) SetNetRules(n *netrules.Service) { s.rules = n }
-
-// ipAllowed returns a *netrules.DeniedError when the publish rules of repo refuse ip.
-func (s *Service) ipAllowed(repo *repos.Repo, ip netip.Addr, actor audit.Actor) error {
-	if s.rules == nil {
-		return nil
-	}
-	if d := s.rules.Check(repo, netrules.ScopePublish, ip, actor); d != nil {
-		return d
-	}
-	return nil
-}
-
 func (s *Service) sessionTTL() time.Duration {
-	return s.settings.Current().Duration(settings.KeyPublishSessionTTL)
+	return SessionTTL.Get(s.settings.Current())
 }
 
 func (s *Service) deviceTTL() time.Duration {
-	return s.settings.Current().Duration(settings.KeyPublishDeviceTTL)
+	return DeviceTTL.Get(s.settings.Current())
 }
 
-func (s *Service) baseURL() string { return s.settings.Config().BaseURL }
+func (s *Service) baseURL() string { return settings.BaseURL.Get(s.settings.Current()) }
 
 func hashBytes(b []byte) []byte {
 	h := sha256.Sum256(b)
@@ -146,37 +144,22 @@ func isUnique(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
 }
 
-// newSessionToken returns a token "trs_<12 hex>_<43 char base64url>" and its parts.
-func newSessionToken() (publicID, secret, token string) {
-	publicID = hex.EncodeToString(randomBytes(6))
-	secret = randomString(32)
-	return publicID, secret, tokenPrefix + publicID + "_" + secret
-}
-
-// parseSessionToken splits a session token into its public id and secret.
-func parseSessionToken(tok string) (publicID, secret string, ok bool) {
-	rest, ok := strings.CutPrefix(tok, tokenPrefix)
-	if !ok || len(rest) != 12+1+43 || rest[12] != '_' {
-		return "", "", false
-	}
-	publicID, secret = rest[:12], rest[13:]
-	for i := 0; i < len(publicID); i++ {
-		if c := publicID[i]; !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
-			return "", "", false
-		}
-	}
-	return publicID, secret, true
-}
-
-// IsSessionToken reports whether tok has the shape of a publish session token.
-func IsSessionToken(tok string) bool {
-	_, _, ok := parseSessionToken(tok)
-	return ok
+// open is what sessionOpen reads of a session row.
+type open struct {
+	ClosedAt        sql.NullInt64
+	ExpiresAt       int64
+	Via             string
+	UserID          sql.NullInt64
+	DeviceID        sql.NullInt64
+	DeviceRevokedAt sql.NullInt64
+	DeviceExpiresAt sql.NullInt64
+	TrustID         sql.NullInt64
+	TrustDisabled   sql.NullInt64
 }
 
 // sessionOpen applies the rules of an open session: not closed, not expired, and the device or
 // trust policy behind it still valid.
-func sessionOpen(row dbq.GetPublishSessionAuthRow, now int64) bool {
+func sessionOpen(row open, now int64) bool {
 	if row.ClosedAt.Valid || row.ExpiresAt <= now {
 		return false
 	}
@@ -192,37 +175,72 @@ func sessionOpen(row dbq.GetPublishSessionAuthRow, now int64) bool {
 	return false
 }
 
-// lookupToken finds the session of a token and checks its secret in constant time. It does
+// lookup finds the session of a token's parts and checks its secret in constant time. It does
 // not check that the session is open.
-func (s *Service) lookupToken(ctx context.Context, token string) (dbq.GetPublishSessionAuthRow, error) {
-	pid, secret, ok := parseSessionToken(token)
-	if !ok {
+func (s *Service) lookup(ctx context.Context, publicID, secret string) (dbq.GetPublishSessionAuthRow, error) {
+	if publicID == "" {
 		return dbq.GetPublishSessionAuthRow{}, auth.ErrBadCredentials
 	}
-	row, err := s.rq.GetPublishSessionAuth(ctx, pid)
+	row, err := s.rq.GetPublishSessionAuth(ctx, publicID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return row, auth.ErrBadCredentials
 	}
 	if err != nil {
 		return row, err
 	}
-	if subtle.ConstantTimeCompare(hashBytes([]byte(secret)), row.SecretHash) != 1 {
+	if !token.Check(row.SecretHash, secret) {
 		return row, auth.ErrBadCredentials
 	}
 	return row, nil
 }
 
-// Verify implements auth.PublishTokens: it returns the open session of token, or
-// auth.ErrBadCredentials when the token is unknown, closed or expired, or its device or trust
-// policy is no longer valid.
-func (s *Service) Verify(ctx context.Context, token string) (*auth.PublishSession, error) {
-	row, err := s.lookupToken(ctx, token)
+// Verify is the auth.Verifier of publish session tokens: it returns the principal of the open
+// session, or auth.ErrPublishEnded when the token is unknown, closed or expired, or its device,
+// trust policy or user is no longer valid.
+func (s *Service) Verify(ctx context.Context, publicID, secret string) (*auth.Principal, error) {
+	row, err := s.lookup(ctx, publicID, secret)
+	if errors.Is(err, auth.ErrBadCredentials) {
+		return nil, auth.ErrPublishEnded
+	}
 	if err != nil {
 		return nil, err
 	}
-	if !sessionOpen(row, time.Now().Unix()) {
-		return nil, auth.ErrBadCredentials
+	if !sessionOpen(open{row.ClosedAt, row.ExpiresAt, row.Via, row.UserID, row.DeviceID, row.DeviceRevokedAt,
+		row.DeviceExpiresAt, row.TrustID, row.TrustDisabled}, time.Now().Unix()) {
+		return nil, auth.ErrPublishEnded
 	}
-	return &auth.PublishSession{ID: row.ID, RepoID: row.RepoID, UserID: row.UserID.Int64, Via: row.Via, Subject: row.Subject,
-		Provenance: row.CiRepository != ""}, nil
+	ps := &auth.PublishSession{ID: row.ID, RepoID: row.RepoID, Via: row.Via, Subject: row.Subject, BuildID: row.BuildID.Int64}
+	return s.auth.PublishPrincipal(ctx, ps, row.UserID.Int64)
+}
+
+// LoadSession is the auth.SessionLoader of core bearer tokens: the principal of open session id,
+// or auth.ErrPublishEnded.
+func (s *Service) LoadSession(ctx context.Context, id int64) (*auth.Principal, error) {
+	row, err := s.rq.GetPublishSessionAuthByID(ctx, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, auth.ErrPublishEnded
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !sessionOpen(open{row.ClosedAt, row.ExpiresAt, row.Via, row.UserID, row.DeviceID, row.DeviceRevokedAt,
+		row.DeviceExpiresAt, row.TrustID, row.TrustDisabled}, time.Now().Unix()) {
+		return nil, auth.ErrPublishEnded
+	}
+	ps := &auth.PublishSession{ID: row.ID, RepoID: row.RepoID, Via: row.Via, Subject: row.Subject, BuildID: row.BuildID.Int64}
+	return s.auth.PublishPrincipal(ctx, ps, row.UserID.Int64)
+}
+
+// recordMint writes publish.session.create of a new session. The actor is the person of the
+// session, or its CI identity, from the client address of ctx.
+func (s *Service) recordMint(ctx context.Context, mt *Minted) {
+	kind := audit.ActorUser
+	if mt.UserID == 0 {
+		kind = audit.ActorCI
+	}
+	ctx = audit.WithActor(ctx, audit.Actor{Kind: kind, UserID: mt.UserID, Name: mt.Subject, IP: audit.ActorOf(ctx).IP})
+	_ = s.audit.Record(ctx, audit.Event{
+		Action: ActionSessionCreate,
+		RepoID: mt.RepoID, Repo: mt.Repo, Target: strconv.FormatInt(mt.ID, 10), Detail: map[string]any{"via": mt.Via},
+	})
 }

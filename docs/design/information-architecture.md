@@ -1,7 +1,7 @@
 # Information architecture
 
 Status: built (2026-10-14). The sitemap, the access model and the navigation rules below are the UI
-as it ships. Replaces the page organisation of design doc §13.3 where they differ. The section
+as it ships. The section
 "As built: deviations" at the end lists what differs from the proposal. The reason for each page's
 design is in [rationale.md](rationale.md).
 

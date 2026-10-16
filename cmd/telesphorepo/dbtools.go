@@ -11,17 +11,18 @@ import (
 	"regexp"
 	"strconv"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/module"
+
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
-	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/server"
 )
 
 var queryNameRE = regexp.MustCompile(`(?m)^--\s*name:\s*\w+\s+:\w+`)
 
-// dbcheckCmd applies every migration track to a temporary database and runs the plan guard
-// on the queries of core and of every format.
+// dbcheckCmd creates the schema of every component on a temporary database and runs the plan guard
+// on the queries of the kernel and of every module.
 func dbcheckCmd(args []string) error {
 	if err := noArgs("dbcheck", args); err != nil {
 		return err
@@ -38,25 +39,28 @@ func dbcheckCmd(args []string) error {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer d.Close()
-	if err := server.Migrate(ctx, d); err != nil {
+	if err := server.InitSchema(ctx, d); err != nil {
 		return err
 	}
-	sets := server.QuerySets()
+	sets, err := server.Components()
+	if err != nil {
+		return err
+	}
 	if err := db.CheckPlans(ctx, d, sets); err != nil {
 		return err
 	}
 	n := 0
 	for _, set := range sets {
 		n += len(set.Extra)
-		if set.Files == nil {
+		if set.Queries == nil {
 			continue
 		}
-		files, err := fs.Glob(set.Files, "*.sql")
+		files, err := fs.Glob(set.Queries, "*.sql")
 		if err != nil {
 			return err
 		}
 		for _, f := range files {
-			body, err := fs.ReadFile(set.Files, f)
+			body, err := fs.ReadFile(set.Queries, f)
 			if err != nil {
 				return err
 			}
@@ -72,8 +76,8 @@ const (
 	seedBatch          = 10000
 )
 
-// seedCmd bulk-inserts synthetic rows straight into the database. Every format that
-// implements format.Seeder gets seed-<format>-NN repos and an equal share of the N rows.
+// seedCmd bulk-inserts synthetic rows straight into the database. The format of every module
+// with a seed (module.SeedFunc) gets seed-<format>-NN repos and an equal share of the N rows.
 func seedCmd(args []string) error {
 	cmd := find(commands, "seed")
 	if len(args) == 0 {
@@ -92,37 +96,41 @@ func seedCmd(args []string) error {
 		return err
 	}
 	ctx := context.Background()
-	cfg := &config.Config{DataDir: dir}
-	d, err := db.Open(ctx, cfg.DBFile())
+	boot := &config.Boot{DataDir: dir}
+	d, err := db.Open(ctx, boot.DBFile())
 	if err != nil {
-		return fmt.Errorf("open database %s: %w", cfg.DBFile(), err)
+		return fmt.Errorf("open database %s: %w", boot.DBFile(), err)
 	}
 	defer d.Close()
-	if err := server.Migrate(ctx, d); err != nil {
+	if err := server.InitSchema(ctx, d); err != nil {
 		return err
 	}
 
-	type target struct {
-		seeder format.Seeder
-		repo   *repos.Repo
+	b, err := server.Build()
+	if err != nil {
+		return err
 	}
-	rs := repos.New(d, format.ValidateRepoConfig, format.SupportsKind)
+	type target struct {
+		seed module.SeedFunc
+		repo *repos.Repo
+	}
+	rs := repos.New(d, b.Formats.ValidateConfig, b.Formats.SupportsKind)
 	var targets []target
-	for _, f := range format.All() {
-		s, ok := f.(format.Seeder)
-		if !ok {
+	for _, m := range b.Manifests {
+		if m.Seed == nil {
 			continue
 		}
+		name := m.FormatName()
 		for i := 0; i < seedReposPerFormat; i++ {
-			r, err := ensureRepo(ctx, rs, fmt.Sprintf("seed-%s-%02d", f.Name(), i), f.Name())
+			r, err := ensureRepo(ctx, rs, fmt.Sprintf("seed-%s-%02d", name, i), name)
 			if err != nil {
 				return err
 			}
-			targets = append(targets, target{s, r})
+			targets = append(targets, target{m.Seed, r})
 		}
 	}
 	if len(targets) == 0 {
-		return errors.New("no registered format supports seeding")
+		return errors.New("no module has a seed")
 	}
 
 	for i, t := range targets {
@@ -132,7 +140,7 @@ func seedCmd(args []string) error {
 		}
 		for start := 0; start < share; start += seedBatch {
 			cnt := min(seedBatch, share-start)
-			err := d.Tx(ctx, func(tx *sql.Tx) error { return t.seeder.Seed(ctx, tx, t.repo, start, cnt) })
+			err := d.Tx(ctx, func(tx *sql.Tx) error { return t.seed(ctx, tx, t.repo, start, cnt) })
 			if err != nil {
 				return fmt.Errorf("seed repo %s: %w", t.repo.Name, err)
 			}
@@ -151,7 +159,7 @@ func seedCmd(args []string) error {
 func ensureRepo(ctx context.Context, rs *repos.Service, name, formatName string) (*repos.Repo, error) {
 	r, err := rs.ByName(ctx, name)
 	if errors.Is(err, repos.ErrNotFound) {
-		if r, err = rs.Create(ctx, name, formatName, true, "", nil); err != nil {
+		if r, err = rs.Create(ctx, repos.Create{Name: name, Format: formatName, AnonymousRead: true}); err != nil {
 			return nil, fmt.Errorf("create repo %s: %w", name, err)
 		}
 	} else if err != nil {

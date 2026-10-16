@@ -15,7 +15,9 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
+	"github.com/Telesphorepo/Telesphorepo/internal/perm"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
+	"github.com/Telesphorepo/Telesphorepo/internal/server"
 )
 
 const minPasswordLen = 8
@@ -53,9 +55,9 @@ func userAdd(args []string) error {
 		if err != nil {
 			return err
 		}
-		var perms auth.ServerPerm
+		var perms perm.Set
 		if admin {
-			perms = auth.AllServerPerms
+			perms = perm.Current().AllServer()
 		}
 		if _, err := as.CreateUser(ctx, name, pw, perms); err != nil {
 			if errors.Is(err, auth.ErrExists) {
@@ -63,7 +65,6 @@ func userAdd(args []string) error {
 			}
 			return fmt.Errorf("create user: %w", err)
 		}
-		as.RecordCLI(ctx, audit.UserCreate, name, map[string]any{"permissions": perms.Names()})
 		kind := "user"
 		if admin {
 			kind = "admin user"
@@ -103,7 +104,6 @@ func userPasswd(args []string) error {
 		if _, err := as.UpdateUser(ctx, name, &pw); err != nil {
 			return fmt.Errorf("update password: %w", err)
 		}
-		as.RecordCLI(ctx, audit.UserUpdate, name, map[string]any{"password": "changed"})
 		// Keep the dev banner truthful: "telesphorepo dev" prints the admin password from this file.
 		if name == devAdminUser {
 			pf := config.JoinDataDir(dataDir, config.DevAdminPasswordFile)
@@ -143,34 +143,42 @@ func userReset2FA(args []string) error {
 		} else if err != nil {
 			return fmt.Errorf("reset second factors: %w", err)
 		}
-		as.RecordCLI(ctx, audit.UserUpdate, name, map[string]any{"second_factors": "reset"})
 		fmt.Printf("Removed %d authenticator app(s), %d passkey(s) and the recovery codes of %s.\n", totp, passkeys, name)
 		fmt.Printf("%s signs in with the password and adds a new second factor on the Security page.\n", name)
 		return nil
 	})
 }
 
-// withUsers opens the database in the CLI data dir and runs fn with an auth service.
+// withUsers opens the database in the CLI data dir and runs fn with an auth service. The changes
+// of fn go to the audit log with the actor "cli".
 func withUsers(fn func(ctx context.Context, as *auth.Service, dataDir string) error) error {
 	dir, fromDev := config.CLIDataDir()
-	cfg := &config.Config{DataDir: dir} // user commands need no settings beyond the data dir
+	boot := &config.Boot{DataDir: dir}
 	if fromDev {
-		fmt.Fprintf(os.Stderr, "Using data dir %s (the \"telesphorepo dev\" instance; set TR_DATA_DIR to choose another)\n", cfg.DataDir)
+		fmt.Fprintf(os.Stderr, "Using data dir %s (the \"telesphorepo dev\" instance; set TR_DATA_DIR to choose another)\n", dir)
 	} else {
-		fmt.Fprintf(os.Stderr, "Using data dir %s\n", cfg.DataDir)
+		fmt.Fprintf(os.Stderr, "Using data dir %s\n", dir)
 	}
-	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
-	ctx := context.Background()
-	d, err := db.Open(ctx, cfg.DBFile())
+	b, err := server.Build() // the permission registry and the audit actions
 	if err != nil {
-		return fmt.Errorf("open database %s: %w", cfg.DBFile(), err)
+		return err
+	}
+	ctx := audit.CLI(context.Background())
+	d, err := db.Open(ctx, boot.DBFile())
+	if err != nil {
+		return fmt.Errorf("open database %s: %w", boot.DBFile(), err)
 	}
 	defer d.Close()
-	as := auth.New(d, config.Static(cfg), repos.New(d, nil, nil))
-	as.SetAudit(audit.New(d, nil, nil)) // records only; the server runs the cleanup
-	return fn(ctx, as, cfg.DataDir)
+	if err := server.InitSchema(ctx, d); err != nil {
+		return err
+	}
+	// The user commands read no setting: they hash passwords and write rows only.
+	as := auth.New(d, nil, repos.New(d, nil, nil))
+	as.SetAudit(audit.New(d, b.Actions, nil))
+	return fn(ctx, as, dir)
 }
 
 // readPassword prompts twice without echo on a terminal, else reads one line from stdin.

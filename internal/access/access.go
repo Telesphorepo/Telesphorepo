@@ -1,8 +1,7 @@
-// Package access answers the two questions every repository has (docs/design/
-// information-architecture.md): who can download from it, and who can publish to it, each with
-// the networks it may come from and, for publishing, what blocks it. It reads the repo's grants,
-// the enabled admins, the CI rules (publish trust policies) that list the repo, and the repo's IP
-// rules, and says the effective answer in one plain sentence each.
+// Package access is the policy engine of repo access (engine.go) and the access report built from
+// the same parts: who can download from a repo and who can publish to it, what blocks publishing
+// (the repo kind, an operation on the repo), and what each guard limits (e.g. the networks of the
+// network module), each said in one plain sentence (docs/design/information-architecture.md).
 //
 // The holders of the All repositories permission can download from and publish to every repo.
 // They are counted (admins), not listed, unless the caller asks for them; the sentences name
@@ -13,15 +12,14 @@ package access
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
-	"github.com/Telesphorepo/Telesphorepo/internal/db"
+	"github.com/Telesphorepo/Telesphorepo/internal/ci"
 	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
-	"github.com/Telesphorepo/Telesphorepo/internal/netrules"
+	"github.com/Telesphorepo/Telesphorepo/internal/perm"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
@@ -39,62 +37,53 @@ type Person struct {
 	Via      string   `json:"via"`
 }
 
-// Pipeline is a CI rule (publish trust policy) that lists the repo, with what its claims allow,
-// read from GitHub Actions claims (repository, ref, workflow_ref, job_workflow_ref, workflow) and
-// the subject. Disabled rules are listed; the sentence leaves them out.
+// Pipeline is a CI rule (publish trust policy) that lists the repo, with what its claims allow
+// in the words of its CI provider (ci.Registry.Describe). Disabled rules are listed; the sentence
+// leaves them out.
 type Pipeline struct {
-	ID           int64    `json:"id"`
-	Rule         string   `json:"rule"`   // the rule's name
-	System       string   `json:"system"` // "github-actions" or "other"
-	Issuer       string   `json:"issuer"`
-	Repositories []string `json:"repositories,omitempty"` // e.g. "acme/app"
-	Branches     []string `json:"branches,omitempty"`     // e.g. "main", "release/*"
-	Tags         []string `json:"tags,omitempty"`         // e.g. "v*"
-	Workflows    []string `json:"workflows,omitempty"`    // e.g. ".github/workflows/release.yml"
-	Subjects     []string `json:"subjects,omitempty"`     // the sub claim, e.g. a Jenkins job URL
-	Disabled     bool     `json:"disabled"`
+	ID       int64  `json:"id"`
+	Rule     string `json:"rule"` // the rule's name
+	Issuer   string `json:"issuer"`
+	Disabled bool   `json:"disabled"`
+	ci.Pipeline
 }
 
-// Networks is where requests may come from: Any, or only the listed IP lists and address
-// ranges.
-type Networks struct {
-	Any   bool      `json:"any"`
-	Lists []NetList `json:"lists"`
-	CIDRs []NetCIDR `json:"cidrs"`
-}
+// Pipelines returns the CI rules that list a repo (the publish module).
+type Pipelines func(ctx context.Context, repoID int64) ([]Pipeline, error)
 
-// NetList is an IP list a repo rule names.
-type NetList struct {
-	Name  string `json:"name"`
-	Title string `json:"title"`
-}
+// SetPipelines sets the source of the CI rules of the report. Without one, a report lists none.
+func (e *Engine) SetPipelines(fn Pipelines) { e.pipelines = fn }
 
-// NetCIDR is an address range a repo rule names.
-type NetCIDR struct {
-	CIDR string `json:"cidr"`
-	Note string `json:"note"`
+// Blocked says why nobody can publish to a repo now: code CodeReadOnlyKind (a proxy or a group)
+// or CodeOperation (an operation on the repo, e.g. a Nexus mirror).
+type Blocked struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 // Download is who can download from a repo. People are the users with a grant of download;
-// Admins counts the enabled holders of the All repositories permission.
+// Admins counts the enabled holders of the All repositories permission. Guards are the reports
+// of the guards, by guard name.
 type Download struct {
-	Public   bool     `json:"public"`
-	People   []Person `json:"people"`
-	Admins   int      `json:"admins"`
-	Networks Networks `json:"networks"`
-	Sentence string   `json:"sentence"`
+	Public   bool                   `json:"public"`
+	People   []Person               `json:"people"`
+	Admins   int                    `json:"admins"`
+	Guards   map[string]GuardReport `json:"guards"`
+	Sentence string                 `json:"sentence"`
 }
 
 // Publish is who can publish to a repo. People are the users with a grant of publish (they
 // publish from a device or the browser); Admins counts the enabled holders of the All
-// repositories permission; CI are the rules that list the repo. LockedBy says why nobody can publish now ("" when anyone above can).
+// repositories permission; CI are the rules that list the repo. Blocked says why nobody can
+// publish now (null when the people and pipelines above can); a proxy or a group lists no
+// publisher.
 type Publish struct {
-	People   []Person   `json:"people"`
-	Admins   int        `json:"admins"`
-	CI       []Pipeline `json:"ci"`
-	Networks Networks   `json:"networks"`
-	LockedBy string     `json:"locked_by"`
-	Sentence string     `json:"sentence"`
+	People   []Person               `json:"people"`
+	Admins   int                    `json:"admins"`
+	CI       []Pipeline             `json:"ci"`
+	Guards   map[string]GuardReport `json:"guards"`
+	Blocked  *Blocked               `json:"blocked"`
+	Sentence string                 `json:"sentence"`
 }
 
 // Repo is the effective access of one repo. People lists each person with a grant once, with
@@ -102,183 +91,102 @@ type Publish struct {
 type Repo struct {
 	Repo     string   `json:"repo"`
 	Format   string   `json:"format"`
+	Kind     string   `json:"kind"`
 	People   []Person `json:"people"`
 	Download Download `json:"download"`
 	Publish  Publish  `json:"publish"`
 }
 
-// Service computes effective access.
-type Service struct {
-	q     *dbq.Queries
-	repos *repos.Service
-	auth  *auth.Service
-	rules *netrules.Service
-}
-
-// New returns the access service.
-func New(d *db.DB, rs *repos.Service, a *auth.Service, nr *netrules.Service) *Service {
-	return &Service{q: dbq.New(d.R), repos: rs, auth: a, rules: nr}
-}
-
-// admins are the enabled holders of the All repositories permission, in username order.
-type admins struct {
-	all []string
-}
-
-func (s *Service) admins(ctx context.Context) (admins, error) {
-	rows, err := s.q.ListPermHolders(ctx, "repos")
-	if err != nil {
-		return admins{}, err
+// admins are the enabled holders of a permission that gives all repositories, in username order.
+func (e *Engine) admins(ctx context.Context) ([]string, error) {
+	var out []string
+	for _, id := range perm.Current().AllReposIDs() {
+		rows, err := e.q.ListPermHolders(ctx, string(id))
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range rows {
+			out = append(out, r.Username)
+		}
 	}
-	slices.SortFunc(rows, func(a, b dbq.ListPermHoldersRow) int { return strings.Compare(a.Username, b.Username) })
-	var a admins
-	for _, r := range rows {
-		a.all = append(a.all, r.Username)
-
-	}
-	return a, nil
+	slices.Sort(out)
+	return slices.Compact(out), nil
 }
 
-// Repo returns the effective access of repo. With listAdmins the holders of the All
+// Report returns the effective access of repo. With listAdmins the holders of the All
 // repositories permission appear in the people of Download and Publish too (via "all_repos").
-func (s *Service) Repo(ctx context.Context, repo *repos.Repo, listAdmins bool) (*Repo, error) {
-	adm, err := s.admins(ctx)
+func (e *Engine) Report(ctx context.Context, repo *repos.Repo, listAdmins bool) (*Repo, error) {
+	adm, err := e.admins(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return s.repo(ctx, repo, adm, s.listTitles(), listAdmins)
-}
-
-// listTitles maps each IP list name to its title.
-func (s *Service) listTitles() map[string]string {
-	m := map[string]string{}
-	for _, l := range s.rules.Lists() {
-		m[l.Name] = l.Title
-	}
-	return m
-}
-
-func (s *Service) repo(ctx context.Context, repo *repos.Repo, adm admins, titles map[string]string, listAdmins bool) (*Repo, error) {
-	grants, err := s.q.ListRepoGrants(ctx, repo.ID)
+	grants, err := e.q.ListRepoGrants(ctx, repo.ID)
 	if err != nil {
 		return nil, err
 	}
 	slices.SortFunc(grants, func(a, b dbq.ListRepoGrantsRow) int { return strings.Compare(a.Username, b.Username) })
-	out := &Repo{Repo: repo.Name, Format: repo.Format, People: []Person{}}
+	out := &Repo{Repo: repo.Name, Format: repo.Format, Kind: repo.Kind, People: []Person{}}
 	d, p := &out.Download, &out.Publish
 	d.Public, d.People, p.People, p.CI = repo.AnonymousRead, []Person{}, []Person{}, []Pipeline{}
-	d.Admins, p.Admins = len(adm.all), len(adm.all)
+	d.Admins, p.Admins = len(adm), len(adm)
+	switch {
+	case readOnly(repo, Write):
+		p.Blocked = &Blocked{Code: CodeReadOnlyKind, Message: ReadOnly(repo)}
+	case repo.Op != nil:
+		p.Blocked = &Blocked{Code: CodeOperation, Message: e.ops.Message(repo.Op)}
+	}
 	// The rows come one per permission; group them by person, in username order.
-	type grant struct{ set auth.RepoPerm }
-	byUser := map[string]*grant{}
+	g := perm.Current()
+	byUser := map[string]perm.Set{}
 	var names []string
-	for _, g := range grants {
-		if g.Disabled || g.AllRepos {
+	for _, gr := range grants {
+		if gr.Disabled || g.AllRepos(perm.Joined(gr.ServerPerms)) {
 			continue // a disabled user has no access; a holder of All repositories has it anyway
 		}
-		x := byUser[g.Username]
-		if x == nil {
-			x = &grant{}
-			byUser[g.Username] = x
-			names = append(names, g.Username)
+		if _, ok := byUser[gr.Username]; !ok {
+			names = append(names, gr.Username)
 		}
-		set, _ := auth.ParseRepoPerms([]string{g.Perm})
-		x.set |= set
+		byUser[gr.Username] = byUser[gr.Username].Union(perm.SetOf(perm.ID(gr.Perm)).Of(perm.ScopeRepo))
 	}
-	slices.Sort(names)
+	writable := p.Blocked == nil || p.Blocked.Code != CodeReadOnlyKind
 	for _, u := range names {
-		x := byUser[u]
-		person := Person{u, x.set.Names(), ViaPermission}
+		set := byUser[u]
+		if set.Empty() {
+			continue
+		}
+		person := Person{u, set.Strings(), ViaPermission}
 		out.People = append(out.People, person)
-		if x.set.Has(auth.RepoDownload) {
+		if set.Has(perm.RepoDownload) {
 			d.People = append(d.People, person)
 		}
-		if x.set.Has(auth.RepoPublish) {
+		if writable && set.Has(perm.RepoPublish) {
 			p.People = append(p.People, person)
 		}
 	}
 	if listAdmins {
-		all := auth.AllRepoPerms.Names()
-		for _, u := range adm.all {
+		all := g.AllRepo().Strings()
+		for _, u := range adm {
 			d.People = append(d.People, Person{u, all, ViaAllRepos})
-		}
-		for _, u := range adm.all {
-			p.People = append(p.People, Person{u, all, ViaAllRepos})
-		}
-	}
-
-	trusts, err := s.q.ListRepoTrusts(ctx, repo.ID)
-	if err != nil {
-		return nil, err
-	}
-	for _, t := range trusts {
-		p.CI = append(p.CI, pipelineOf(t))
-	}
-	slices.SortFunc(p.CI, func(a, b Pipeline) int { return strings.Compare(a.Rule, b.Rule) })
-
-	rules := s.rules.RepoRules(repo.ID)
-	d.Networks, p.Networks = networks(rules.Read, titles), networks(rules.Publish, titles)
-	p.LockedBy = repo.LockedBy
-	d.Sentence, p.Sentence = downloadSentence(d), publishSentence(p)
-	return out, nil
-}
-
-func networks(rules []netrules.Rule, titles map[string]string) Networks {
-	n := Networks{Any: len(rules) == 0, Lists: []NetList{}, CIDRs: []NetCIDR{}}
-	for _, r := range rules {
-		switch r.Kind {
-		case netrules.RuleList:
-			n.Lists = append(n.Lists, NetList{r.Value, cmp.Or(titles[r.Value], r.Value)})
-		case netrules.RuleCIDR:
-			n.CIDRs = append(n.CIDRs, NetCIDR{r.Value, r.Note})
-		}
-	}
-	return n
-}
-
-const githubIssuer = "https://token.actions.githubusercontent.com"
-
-// pipelineOf reads what a rule's claims allow.
-func pipelineOf(t dbq.ListRepoTrustsRow) Pipeline {
-	p := Pipeline{ID: t.ID, Rule: t.Name, System: "other", Issuer: t.Issuer, Disabled: t.Disabled != 0}
-	if t.Issuer == githubIssuer || strings.HasPrefix(t.Issuer, githubIssuer+"/") {
-		p.System = "github-actions"
-	}
-	var claims map[string][]string
-	if json.Unmarshal([]byte(t.Claims), &claims) != nil {
-		return p
-	}
-	for _, name := range sortedKeys(claims) {
-		for _, v := range claims[name] {
-			switch name {
-			case "repository":
-				p.Repositories = append(p.Repositories, v)
-			case "ref":
-				if b, ok := strings.CutPrefix(v, "refs/heads/"); ok {
-					p.Branches = append(p.Branches, b)
-				} else if tag, ok := strings.CutPrefix(v, "refs/tags/"); ok {
-					p.Tags = append(p.Tags, tag)
-				}
-			case "workflow_ref", "job_workflow_ref":
-				p.Workflows = append(p.Workflows, workflowPath(v))
-			case "workflow":
-				p.Workflows = append(p.Workflows, v)
-			case "sub":
-				p.Subjects = append(p.Subjects, v)
+			if writable {
+				p.People = append(p.People, Person{u, all, ViaAllRepos})
 			}
 		}
 	}
-	p.Workflows = slices.Compact(slices.Sorted(slices.Values(p.Workflows)))
-	return p
-}
-
-// workflowPath is the file of a workflow_ref "owner/name/.github/workflows/x.yml@ref".
-func workflowPath(ref string) string {
-	ref, _, _ = strings.Cut(ref, "@")
-	if i := strings.Index(ref, ".github/workflows/"); i >= 0 {
-		return ref[i:]
+	if writable && e.pipelines != nil {
+		ps, err := e.pipelines(ctx, repo.ID)
+		if err != nil {
+			return nil, err
+		}
+		p.CI = append(p.CI, ps...)
+		slices.SortFunc(p.CI, func(a, b Pipeline) int { return strings.Compare(a.Rule, b.Rule) })
 	}
-	return ref
+	d.Guards, p.Guards = map[string]GuardReport{}, map[string]GuardReport{}
+	for _, gd := range e.guards {
+		d.Guards[gd.Name()] = gd.Describe(repo, Read)
+		p.Guards[gd.Name()] = gd.Describe(repo, Write)
+	}
+	d.Sentence, p.Sentence = downloadSentence(d), publishSentence(p)
+	return out, nil
 }
 
 func sortedKeys[V any](m map[string]V) []string {
@@ -311,23 +219,25 @@ func and(items []string) string {
 	return strings.Join(items[:len(items)-1], ", ") + " and " + items[len(items)-1]
 }
 
-// from is ", only from <lists and ranges>", or "" for any network.
-func from(n Networks) string {
-	if n.Any {
-		return ""
+// limits is ", <summary>" for each guard that restricts, in guard name order, or "".
+func limits(guards map[string]GuardReport) string {
+	out := ""
+	for _, name := range sortedKeys(guards) {
+		if g := guards[name]; g.Restricted && g.Summary != "" {
+			out += ", " + g.Summary
+		}
 	}
-	var parts []string
-	for _, l := range n.Lists {
-		parts = append(parts, l.Title)
+	return out
+}
+
+// restricted reports whether any guard restricts.
+func restricted(guards map[string]GuardReport) bool {
+	for _, g := range guards {
+		if g.Restricted {
+			return true
+		}
 	}
-	switch len(n.CIDRs) {
-	case 0:
-	case 1:
-		parts = append(parts, n.CIDRs[0].CIDR)
-	default:
-		parts = append(parts, count(len(n.CIDRs), "address range", "address ranges"))
-	}
-	return ", only from " + and(parts)
+	return false
 }
 
 // downloadSentence: "anyone on the internet.", "anyone, only from GitHub Actions.",
@@ -341,7 +251,7 @@ func downloadSentence(d *Download) string {
 		}
 	}
 	switch {
-	case d.Public && d.Networks.Any:
+	case d.Public && !restricted(d.Guards):
 		return "anyone on the internet."
 	case d.Public:
 		who = "anyone"
@@ -350,14 +260,14 @@ func downloadSentence(d *Download) string {
 	default:
 		who = "only admins"
 	}
-	return who + from(d.Networks) + "."
+	return who + limits(d.Guards) + "."
 }
 
 // publishSentence: "3 people and 1 CI pipeline (acme/app, branch main), only from GitHub
 // Actions.", "only admins.", "nobody: mirrors Nexus source acme; cut over first."
 func publishSentence(p *Publish) string {
-	if p.LockedBy != "" {
-		return "nobody: " + strings.TrimSuffix(p.LockedBy, ".") + "."
+	if p.Blocked != nil {
+		return "nobody: " + strings.TrimSuffix(p.Blocked.Message, ".") + "."
 	}
 	var parts []string
 	people := 0
@@ -394,7 +304,7 @@ func publishSentence(p *Publish) string {
 	if who == "" {
 		who = "only admins"
 	}
-	return who + from(p.Networks) + "."
+	return who + limits(p.Guards) + "."
 }
 
 // describe is "acme/app, branch main", "acme/app, tags v*", or the rule name.
@@ -453,44 +363,50 @@ type User struct {
 }
 
 // User returns a keyset page (by repo name, after the name after) of the repos u can use. A
-// disabled user can use none. next is "" at the end.
-func (s *Service) User(ctx context.Context, u *auth.User, after string, limit int) (*User, string, error) {
+// disabled user can use none. On a proxy or a group a user holds no publish. next is "" at the
+// end.
+func (e *Engine) User(ctx context.Context, u *auth.User, after string, limit int) (*User, string, error) {
 	out := &User{Username: u.Username, Permissions: u.Permissions, Disabled: u.Disabled, Kind: u.Kind,
 		CanPublish: !u.Disabled, Repos: []UserRepo{}}
 	if u.Disabled {
 		return out, "", nil
 	}
-	allRepos := u.Perms.Has(auth.PermRepos)
-	sets := map[int64]auth.RepoPerm{}
+	g := perm.Current()
+	allRepos := g.AllRepos(u.Perms)
+	sets := map[int64]perm.Set{}
 	if !allRepos {
 		var err error
-		if sets, err = s.auth.UserRepoPerms(ctx, u.ID); err != nil {
+		if sets, err = e.auth.UserRepoPerms(ctx, u.ID); err != nil {
 			return nil, "", err
 		}
 	}
 	// Walk the repos by name until the page is full; a page of repos the user cannot use is
 	// skipped, so the walk is bounded by the number of repos.
 	for {
-		page, next, err := s.repos.Page(ctx, after, limit)
+		page, next, err := e.repos.Page(ctx, after, limit)
 		if err != nil {
 			return nil, "", err
 		}
 		for i, r := range page {
 			ur := UserRepo{Repo: r.Name, Format: r.Format, Public: r.AnonymousRead}
+			var set perm.Set
 			switch {
 			case allRepos:
-				ur.Perms, ur.Via = auth.AllRepoPerms.Names(), ViaAllRepos
-			case sets[r.ID] != 0:
-				set := sets[r.ID]
+				set, ur.Via = g.AllRepo(), ViaAllRepos
+			case !sets[r.ID].Empty():
+				set, ur.Via = sets[r.ID], ViaPermission
 				if r.AnonymousRead {
-					set |= auth.RepoDownload
+					set = set.Union(perm.SetOf(perm.RepoDownload))
 				}
-				ur.Perms, ur.Via = set.Names(), ViaPermission
 			case r.AnonymousRead:
-				ur.Perms, ur.Via = auth.RepoDownload.Names(), ViaPublic
+				set, ur.Via = perm.SetOf(perm.RepoDownload), ViaPublic
 			default:
 				continue
 			}
+			if readOnly(r, Write) {
+				set = set.Minus(g.Dependents(perm.RepoPublish))
+			}
+			ur.Perms = set.Strings()
 			out.Repos = append(out.Repos, ur)
 			if len(out.Repos) == limit {
 				if i == len(page)-1 && next == "" {

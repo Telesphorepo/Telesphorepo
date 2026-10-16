@@ -9,13 +9,12 @@ import (
 	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
-	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
+	"github.com/Telesphorepo/Telesphorepo/internal/ci"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
-	"github.com/Telesphorepo/Telesphorepo/internal/provenance"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
-// Versions and builds (format.Versioned). An artifact folder is <group path>/<artifactId>/ and
+// Versions and builds (format.Spec Versions and Builds). An artifact folder is <group path>/<artifactId>/ and
 // holds one folder per version. A release version folder holds one build: the files named
 // <artifactId>-<version>[-<classifier>].<ext>. A -SNAPSHOT version folder holds timestamped
 // builds, <artifactId>-<base>-<yyyyMMdd.HHmmss>-<n>[-<classifier>].<ext>, and maybe a
@@ -49,9 +48,9 @@ func artifactOf(dir string) (format.Artifact, string, string, bool) {
 	}
 	id := segs[len(segs)-1]
 	group := strings.Join(segs[:len(segs)-1], ".")
-	a := format.Artifact{Path: strings.Join(segs, "/") + "/", Title: group + ":" + id, Kind: "library"}
+	a := format.Artifact{Path: strings.Join(segs, "/") + "/", Title: group + ":" + id, Name: id, Kind: "library"}
 	if plugin, ok := strings.CutSuffix(id, pluginSuffix); ok && plugin == group {
-		a.Title, a.Kind = plugin, "gradle-plugin"
+		a.Title, a.Name, a.Kind = plugin, plugin, "gradle-plugin"
 	}
 	return a, group, id, true
 }
@@ -110,7 +109,7 @@ type buildFiles struct {
 	files   []*assets.Asset
 	classes []format.BuildFile
 	at      time.Time
-	session int64 // the session of the build's main file, else of any file
+	build   int64 // the CI build record of the build's main file, else of any file
 }
 
 // hasFiles reports whether version folder dir holds a file of version v of artifact id: one
@@ -173,14 +172,27 @@ func (h *Handler) readBuilds(ctx context.Context, repoID int64, dir, id, v strin
 		if a.UpdatedAt.After(b.at) {
 			b.at = a.UpdatedAt
 		}
-		if a.PublishSessionID != 0 && (b.session == 0 || (classifier == "" && ext == "pom")) {
-			b.session = a.PublishSessionID
+		if a.BuildID != 0 && (b.build == 0 || (classifier == "" && ext == "pom")) {
+			b.build = a.BuildID
 		}
 	}
 	// Newest first: a timestamp sorts by time, and its build number breaks a tie; the non-unique
 	// build goes last.
 	slices.SortFunc(order, func(x, y *buildFiles) int { return -compareBuilds(x.id, y.id) })
 	return &buildSet{builds: order}, nil
+}
+
+// buildLabel is the name of snapshot build id for people: "Build 3" for "20261003.101010-3",
+// "Build without a timestamp" for the non-unique build, and "" for a release build.
+func buildLabel(id string) string {
+	if id == nonUniqueName {
+		return "Build without a timestamp"
+	}
+	if m := buildRE.FindStringSubmatch(id); m != nil && m[2] == "" {
+		_, n, _ := strings.Cut(id, "-")
+		return "Build " + n
+	}
+	return ""
 }
 
 // compareBuilds orders snapshot build ids: "SNAPSHOT" first, then by timestamp and number.
@@ -202,7 +214,7 @@ func compareBuilds(a, b string) int {
 }
 
 // version summarises the builds of version v in folder dir. ok is false when it has none.
-func (h *Handler) version(ctx context.Context, repoID int64, dir, id, v string, prov *provenance.Loader) (*format.Version, *buildSet, error) {
+func (h *Handler) version(ctx context.Context, repoID int64, dir, id, v string, prov *ci.Loader) (*format.Version, *buildSet, error) {
 	bs, err := h.readBuilds(ctx, repoID, dir, id, v)
 	if err != nil || len(bs.builds) == 0 {
 		return nil, nil, err
@@ -210,15 +222,15 @@ func (h *Handler) version(ctx context.Context, repoID int64, dir, id, v string, 
 	newest := bs.builds[0]
 	out := &format.Version{Version: v, Kind: format.VersionRelease, BuildsCount: len(bs.builds), PublishedAt: newest.at}
 	if strings.HasSuffix(v, "-SNAPSHOT") {
-		out.Kind, out.LatestBuild = format.VersionSnapshot, newest.id
+		out.Kind, out.LatestBuild, out.LatestLabel = format.VersionSnapshot, newest.id, buildLabel(newest.id)
 	}
-	if out.Provenance, err = prov.Get(ctx, newest.session); err != nil {
+	if out.CI, err = prov.Get(ctx, newest.build); err != nil {
 		return nil, nil, err
 	}
 	return out, bs, nil
 }
 
-// Versions implements format.Versioned for an artifact folder.
+// Versions lists the versions of an artifact folder.
 func (h *Handler) Versions(ctx context.Context, repo *repos.Repo, p, after string, limit int) (*format.Artifact, []format.Version, string, error) {
 	art, _, id, ok := artifactOf(p)
 	if !ok {
@@ -229,7 +241,7 @@ func (h *Handler) Versions(ctx context.Context, repo *repos.Repo, p, after strin
 		return nil, nil, "", err
 	}
 	slices.SortFunc(names, func(a, b string) int { return -compareVersions(a, b) })
-	prov := provenance.NewLoader(dbq.New(h.host.DB.R))
+	prov := h.host.Builds.Loader()
 	var out []format.Version
 	for _, v := range names {
 		if after != "" && compareVersions(v, after) >= 0 {
@@ -252,14 +264,14 @@ func (h *Handler) Versions(ctx context.Context, repo *repos.Repo, p, after strin
 	return &art, out, "", nil
 }
 
-// Builds implements format.Versioned for version v of an artifact folder: the files of the
+// Builds lists the builds of version v of an artifact folder: the files of the
 // version folder <artifact folder>/<v>/.
 func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, v, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
 	art, _, id, ok := artifactOf(p)
 	if !ok || v == "" || v == "." || v == ".." || strings.Contains(v, "/") {
 		return nil, nil, nil, "", nil
 	}
-	prov := provenance.NewLoader(dbq.New(h.host.DB.R))
+	prov := h.host.Builds.Loader()
 	ver, bs, err := h.version(ctx, repo.ID, art.Path+v+"/", id, v, prov)
 	if err != nil || ver == nil {
 		return nil, nil, nil, "", err
@@ -272,13 +284,13 @@ func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, v, after stri
 		if len(out) == limit {
 			return &art, ver, out, out[len(out)-1].Build, nil
 		}
-		pv, err := prov.Get(ctx, b.session)
+		pv, err := prov.Get(ctx, b.build)
 		if err != nil {
 			return nil, nil, nil, "", err
 		}
 		files := slices.Clone(b.classes)
 		slices.SortFunc(files, func(x, y format.BuildFile) int { return fileRank(x) - fileRank(y) })
-		out = append(out, format.Build{Build: b.id, Files: files, PublishedAt: b.at, Provenance: pv})
+		out = append(out, format.Build{Build: b.id, Label: buildLabel(b.id), Files: files, PublishedAt: b.at, CI: pv})
 	}
 	return &art, ver, out, "", nil
 }

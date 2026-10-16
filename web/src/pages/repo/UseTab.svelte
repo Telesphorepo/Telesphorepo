@@ -17,7 +17,7 @@
   import Loading from "$lib/components/Loading.svelte";
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
   import SnippetTabs from "./snippets/SnippetTabs.svelte";
-  import type { Usage } from "./browse";
+  import type { Usage } from "$lib/api";
   import KeyRoundIcon from "@lucide/svelte/icons/key-round";
   import TerminalIcon from "@lucide/svelte/icons/square-terminal";
 
@@ -33,7 +33,7 @@
   {:else if usage.error && !usage.data}
     <ErrorState error={usage.error} title="The instructions did not load" onRetry={usage.reload} />
   {:else if use.length}
-    <SnippetTabs snippets={use} label="Build tool" />
+    <SnippetTabs snippets={use} tools={usage.data?.tools} label="Build tool" />
   {:else}
     <CompactEmpty icon={TerminalIcon} title="Instructions" state="None for this format" text="Download files from the repository address." />
   {/if}

@@ -1,110 +1,10 @@
-// The Browse routes of a repository that $lib/api does not have yet: versions, builds, one file's
-// details, per-artifact snippets, and the structured snippets of /usage. JSON shapes follow
-// internal/format and internal/provenance. Plus the small helpers the Files views share.
+// Path and name helpers that the Files views share. The requests and their JSON shapes are in
+// $lib/api (api.repos.tree, versions, builds, file, snippets, usage).
 
-import { api, request, type Page, type PageParams, type TreeEntry } from "$lib/api";
+import type { BuildRecord } from "$lib/api";
 
-const repo = (name: string) => `/api/repos/${encodeURIComponent(name)}`;
-
-/** The GitHub Actions build that published a file (null or absent: none). */
-export type Provenance = {
-  repository: string;
-  repository_url: string;
-  sha: string;
-  commit_url: string;
-  ref: string;
-  ref_name: string;
-  ref_type: "branch" | "tag" | "";
-  run_id: string;
-  run_attempt: string;
-  run_url: string;
-  workflow: string;
-  workflow_path: string;
-  workflow_ref: string;
-  actor: string;
-};
-
-export type SnippetClient = "gradle-kotlin" | "gradle-groovy" | "maven" | "apt" | "curl" | "wget" | "github-actions" | "jenkins";
-
-/** A structured snippet from the format plugin. Snippets of one client come in display order. */
-export type Snippet = {
-  client: SnippetClient | string;
-  purpose: "use" | "publish";
-  context: "repo" | "artifact";
-  via?: "computer" | "ci" | "hand";
-  title: string;
-  lang: string;
-  code: string;
-  note?: string;
-};
-
-export type Usage = { base_url: string; snippets: Snippet[] };
-
-export type ArtifactKind = "library" | "bom" | "parent" | "gradle-plugin" | "package";
-/** An artifact; path is its folder, with a trailing slash. */
-export type Artifact = { path: string; title: string; kind: ArtifactKind | string };
-
-/** A version of an artifact. The artifact folder and the version string name it. */
-export type Version = {
-  version: string;
-  kind: "release" | "snapshot";
-  latest_build?: string;
-  builds_count: number;
-  published_at: string;
-  provenance: Provenance | null;
-};
-
-export type BuildFile = { name: string; path: string; size: number; sha256: string; classifier: string; extension: string };
-export type Build = { build: string; files: BuildFile[]; published_at: string; provenance: Provenance | null };
-
-export type Versions = Page<Version> & { artifact: Artifact | null };
-export type Builds = Page<Build> & { artifact: Artifact | null; version: Version | null };
-
-export type FileInfo = {
-  name: string;
-  path: string;
-  size: number;
-  sha256: string;
-  content_type: string;
-  kind: string;
-  created_at: string;
-  updated_at: string;
-  uploaded_by: string;
-  provenance: Provenance | null;
-};
-
-export type VersionMode = "pinned" | "latest";
-export type ArtifactSnippets = {
-  base_url: string;
-  artifact: Artifact | null;
-  version: string;
-  version_mode: VersionMode;
-  snippets: Snippet[];
-};
-
-const page = (p: PageParams = {}) => ({ after: p.after, limit: p.limit });
-
-/** A child of a folder (GET /tree), with the build that published it. */
-export type TreeNode = TreeEntry & { provenance?: Provenance };
-
-export const browse = {
-  /** The direct children of a folder ("" is the top). */
-  tree: (name: string, path: string, p?: PageParams) => api.repos.tree(name, path, p) as Promise<Page<TreeNode>>,
-  usage: (name: string) => request<Usage>("GET", repo(name) + "/usage"),
-  /** The versions of an artifact folder, newest first; artifact is null for any other folder. */
-  versions: (name: string, path: string, p?: PageParams) =>
-    request<Versions>("GET", repo(name) + "/versions", { query: { path, ...page(p) } }),
-  /** The builds of one version of an artifact folder, newest first; version is null when the artifact has no such version. */
-  builds: (name: string, path: string, version: string, p?: PageParams) =>
-    request<Builds>("GET", repo(name) + "/builds", { query: { path, version, ...page(p) } }),
-  /** One file with its details; 404 when it does not exist. */
-  file: (name: string, path: string) => request<FileInfo>("GET", repo(name) + "/file", { query: { path } }),
-  /** The snippets that use one artifact: an artifact folder (with a version, or "" for none), a version folder, or a file. */
-  snippets: (name: string, path: string, version: string, mode: VersionMode) =>
-    request<ArtifactSnippets>("GET", repo(name) + "/snippets", { query: { path, version, version_mode: mode } }),
-};
-
-// --- helpers ---
+/** The link of b with rel, if the provider made one. */
+export const buildLink = (b: BuildRecord, rel: string) => b.links.find((l) => l.rel === rel);
 
 const sideExt = /\.(md5|sha1|sha256|sha512|asc|sig)$/;
 
@@ -155,42 +55,8 @@ export const baseName = (path: string) => {
   return p.slice(p.lastIndexOf("/") + 1);
 };
 
-/** "20261003.101010-3" → "#3, 3 Oct 2026 10:10" parts: the build number and its UTC time. */
-export function buildParts(id: string): { n: string; at: Date | null } {
-  const m = id.match(/^(\d{4})(\d{2})(\d{2})\.(\d{2})(\d{2})(\d{2})-(\d+)$/);
-  if (!m) return { n: "", at: null };
-  return { n: m[7], at: new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6])) };
-}
+/** A build's name for people: the format's label ("Build 3"), else its id. */
+export const buildLabel = (id: string, label?: string) => label || id;
 
-/** A build's name for people: "Build 3" for a timestamped snapshot build, else its id. */
-export const buildLabel = (id: string) => {
-  const { n } = buildParts(id);
-  return n ? `Build ${n}` : id === "SNAPSHOT" ? "Build without a timestamp" : id;
-};
-
-/** The build's name inside a sentence: "build 3", or the id as it is (a Debian version keeps its case). */
-export const buildInline = (id: string) => {
-  const label = buildLabel(id);
-  return label === id ? id : label.toLowerCase();
-};
-
-/** How each snippet client is named on its tab. */
-export const clientLabel: Record<string, string> = {
-  "gradle-kotlin": "Gradle (Kotlin)",
-  "gradle-groovy": "Gradle (Groovy)",
-  maven: "Maven",
-  apt: "apt",
-  curl: "curl",
-  wget: "wget",
-  "github-actions": "GitHub Actions",
-  jenkins: "Jenkins",
-};
-
-/** The words for an artifact kind. */
-export const artifactKindLabel: Record<string, string> = {
-  library: "Library",
-  bom: "Bill of materials",
-  parent: "Parent POM",
-  "gradle-plugin": "Gradle plugin",
-  package: "Debian package",
-};
+/** The build's name inside a sentence: the label with a lower-case first letter ("build 3"), or the id as it is. */
+export const buildInline = (id: string, label?: string) => (label ? label[0].toLowerCase() + label.slice(1) : id);

@@ -1,15 +1,5 @@
-// Well-known remote repositories that a proxy can keep, per format: the quick choices beside the
-// remote address on the New repository page and the Remote tab of a proxy.
-
-export type RemotePreset = { label: string; url: string };
-
-export const remotePresets: Record<string, RemotePreset[]> = {
-  maven: [
-    { label: "Maven Central", url: "https://repo1.maven.org/maven2/" },
-    { label: "Gradle Plugin Portal", url: "https://plugins.gradle.org/m2/" },
-  ],
-  debian: [{ label: "Debian", url: "https://deb.debian.org/debian/" }],
-};
+// The remote address of a proxy. The well-known remotes of each format are `remote_presets` of its
+// descriptor (GET /api/formats).
 
 /** The address as the server stores it: trimmed, with a "/" at the end. */
 export const normalizeRemote = (url: string) => {

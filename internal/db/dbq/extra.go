@@ -1,6 +1,6 @@
 package dbq
 
-// Hand-written queries that sqlc cannot express (spec §5.5). Each one is a named constant in
+// Hand-written queries that sqlc cannot express. Each one is a named constant in
 // Extra, so the plan guard (db.CheckPlans) checks it like a generated query.
 
 import (
@@ -18,8 +18,8 @@ var Extra = map[string]string{
 // The FTS5 trigram search walks assets_fts in rowid order, which is the keyset order, so no
 // sort is needed: sqlc cannot reference rowid or "assets_fts MATCH", and its fallback sorts
 // with a temp B-tree.
-const searchSelect = `SELECT a.id, a.repo_id, a.path, a.size, a.sha256, a.content_type, a.kind,
-  a.uploaded_by, a.created_at, a.updated_at, a.publish_session_id, r.name
+const searchSelect = `SELECT a.id, a.repo_id, a.path, a.blob_id, a.size, a.sha256, a.content_type, a.kind,
+  a.uploaded_by, a.created_at, a.updated_at, a.build_id, r.name
 FROM assets_fts f JOIN assets a ON a.id = f.rowid JOIN repos r ON r.id = a.repo_id
 WHERE assets_fts MATCH ? AND f.rowid > ?`
 
@@ -79,8 +79,8 @@ func (q *Queries) searchArgs(ctx context.Context, query string, args ...any) ([]
 	for rows.Next() {
 		var i SearchAssetsRow
 		a := &i.Asset
-		if err := rows.Scan(&a.ID, &a.RepoID, &a.Path, &a.Size, &a.Sha256, &a.ContentType, &a.Kind,
-			&a.UploadedBy, &a.CreatedAt, &a.UpdatedAt, &a.PublishSessionID, &i.RepoName); err != nil {
+		if err := rows.Scan(&a.ID, &a.RepoID, &a.Path, &a.BlobID, &a.Size, &a.Sha256, &a.ContentType, &a.Kind,
+			&a.UploadedBy, &a.CreatedAt, &a.UpdatedAt, &a.BuildID, &i.RepoName); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

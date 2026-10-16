@@ -23,14 +23,14 @@
   import ErrorState from "$lib/components/ErrorState.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
-  import SettingsGroupForm from "$lib/components/SettingsGroupForm.svelte";
+  import SettingsGroupForm, { type Draft } from "$lib/components/SettingsGroupForm.svelte";
   import { cn } from "$lib/utils";
 
   let {}: PageProps = $props();
 
   const settings = new Resource(() => api.settings.get());
   const current = new Resource(() => api.moves.current());
-  const group = $derived(settings.data?.groups.find((g) => g.name === "storage"));
+  const group = $derived(settings.data?.groups.find((g) => g.id === "storage"));
   const value = (key: string) => group?.settings.find((s) => s.key === key)?.value;
 
   let move = $state<Move | null>(null);
@@ -84,8 +84,8 @@
   const fields = {
     storage: { label: "Storage type", help: "When you change it, the server moves the existing files in the background." },
     "fs.root": { label: "Folder", help: "A relative path starts in the data folder." },
-    "s3.endpoint": { label: "Address", help: "Leave it empty for AWS." },
-    "s3.region": { label: "Region" },
+    "s3.endpoint": { label: "Address", help: "Leave it empty for AWS: the server then uses the AWS address of the region." },
+    "s3.region": { label: "Region", help: "Required for AWS, for example us-east-1. With an address and no region, the server uses auto." },
     "s3.bucket": { label: "Bucket" },
     "s3.access_key_id": { label: "Access key ID" },
     "s3.secret_access_key": { label: "Secret access key" },
@@ -95,8 +95,8 @@
     presign_ttl: { label: "Download link lifetime", help: "A signed link to a file in the bucket works for this time." },
   };
 
-  const kind = (draft: Record<string, string | boolean | null>) => String(draft["storage"] ?? kindNow);
-  const visible = (s: Setting, draft: Record<string, string | boolean | null>) => {
+  const kind = (draft: Record<string, Draft>) => String(draft["storage"] ?? kindNow);
+  const visible = (s: Setting, draft: Record<string, Draft>) => {
     if (s.key === "storage") return true;
     if (s.key === "fs.root") return kind(draft) === "fs";
     return kind(draft) !== "fs";
@@ -121,7 +121,7 @@
     testing = true;
     testResult = null;
     try {
-      const r = await api.settings.testStorage(patch);
+      const r = await api.settings.test("storage", patch);
       testResult = r.ok
         ? { ok: true, text: kind(patch as Record<string, string>) === "fs" ? "The server can write to the folder." : "The server can read and write the bucket." }
         : { ok: false, text: r.error ?? "The connection test failed." };
@@ -183,7 +183,7 @@
     {#if move.state !== "done"}<p class="mt-4 text-meta text-muted-foreground">The location did not change. Save the settings again to start a new move.</p>{/if}
     {#if failures}
       <div class="mt-6">
-        <DataTable source={failures} caption="Files that failed to copy" key={(f) => f.asset_id} columns={[{ label: "File", grow: true }, { label: "Reason" }]}>
+        <DataTable source={failures} caption="Files that failed to copy" key={(f) => f.blob_id} columns={[{ label: "File", grow: true }, { label: "Reason" }]}>
           {#snippet row(f)}
             <Cell grow text={f.key} copy copyLabel="Copy the path" />
             <Cell muted text={f.reason} />

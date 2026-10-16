@@ -1,4 +1,4 @@
-// Command telesphorepo is the single Telesphorepo binary (spec §4): serve (default), dev,
+// Command telesphorepo is the single Telesphorepo binary: serve (default), dev,
 // user add|passwd|reset-2fa, version, help.
 package main
 
@@ -118,8 +118,9 @@ TR_* env still overrides. Start over with a fresh instance by deleting ./.telesp
 
   telesphorepo dbcheck
 
-Applies all migrations to a temporary database, runs EXPLAIN QUERY PLAN on every query and
-exits 1 when one scans a table or uses a temp B-tree. Prints "ok: N queries" otherwise.
+Creates the schema of every component on a temporary database, runs EXPLAIN QUERY PLAN on every
+query and exits 1 when one scans a table, uses a temp B-tree or writes a table outside its
+component. Prints "ok: N queries" otherwise.
 `, run: dbcheckCmd},
 		{name: "seed", hidden: true, usage: `Bulk-insert synthetic data for the scale test.
 

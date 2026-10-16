@@ -22,15 +22,14 @@ func (q *Queries) CountUnusedRecoveryCodes(ctx context.Context, userID int64) (i
 }
 
 const createChallenge = `-- name: CreateChallenge :exec
-INSERT INTO auth_challenges (id_hash, kind, user_id, device_id, data, created_at, expires_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)
+INSERT INTO auth_challenges (id_hash, kind, user_id, data, created_at, expires_at)
+VALUES (?, ?, ?, ?, ?, ?)
 `
 
 type CreateChallengeParams struct {
 	IDHash    []byte
 	Kind      string
 	UserID    sql.NullInt64
-	DeviceID  sql.NullInt64
 	Data      []byte
 	CreatedAt int64
 	ExpiresAt int64
@@ -41,7 +40,6 @@ func (q *Queries) CreateChallenge(ctx context.Context, arg CreateChallengeParams
 		arg.IDHash,
 		arg.Kind,
 		arg.UserID,
-		arg.DeviceID,
 		arg.Data,
 		arg.CreatedAt,
 		arg.ExpiresAt,
@@ -50,16 +48,14 @@ func (q *Queries) CreateChallenge(ctx context.Context, arg CreateChallengeParams
 }
 
 const createPasskey = `-- name: CreatePasskey :one
-INSERT INTO user_passkeys (user_id, credential_id, public_key, sign_count, credential, name, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)
+INSERT INTO user_passkeys (user_id, credential_id, credential, name, created_at)
+VALUES (?, ?, ?, ?, ?)
 RETURNING id
 `
 
 type CreatePasskeyParams struct {
 	UserID       int64
 	CredentialID []byte
-	PublicKey    []byte
-	SignCount    int64
 	Credential   []byte
 	Name         string
 	CreatedAt    int64
@@ -69,8 +65,6 @@ func (q *Queries) CreatePasskey(ctx context.Context, arg CreatePasskeyParams) (i
 	row := q.db.QueryRowContext(ctx, createPasskey,
 		arg.UserID,
 		arg.CredentialID,
-		arg.PublicKey,
-		arg.SignCount,
 		arg.Credential,
 		arg.Name,
 		arg.CreatedAt,
@@ -94,7 +88,7 @@ type CreateTOTPParams struct {
 	LastStep  int64
 }
 
-// Second factors (TOTP, passkeys, recovery codes) and one-time challenges (spec section 7.6).
+// Second factors (TOTP, passkeys, recovery codes) and one-time challenges (SPEC.md "Auth model").
 // The secret is sealed with the row id as AAD, so the service inserts an empty secret and
 // sets it with SetTOTPSecret in the same transaction.
 func (q *Queries) CreateTOTP(ctx context.Context, arg CreateTOTPParams) (int64, error) {
@@ -193,7 +187,7 @@ func (q *Queries) DeleteUserTOTP(ctx context.Context, arg DeleteUserTOTPParams) 
 }
 
 const getPasskeyByCredentialID = `-- name: GetPasskeyByCredentialID :one
-SELECT id, user_id, credential_id, public_key, sign_count, credential, name, created_at, last_used_at
+SELECT id, user_id, credential_id, credential, name, created_at, last_used_at
 FROM user_passkeys WHERE credential_id = ?
 `
 
@@ -204,8 +198,6 @@ func (q *Queries) GetPasskeyByCredentialID(ctx context.Context, credentialID []b
 		&i.ID,
 		&i.UserID,
 		&i.CredentialID,
-		&i.PublicKey,
-		&i.SignCount,
 		&i.Credential,
 		&i.Name,
 		&i.CreatedAt,
@@ -270,15 +262,13 @@ func (q *Queries) ListUnusedRecoveryCodes(ctx context.Context, userID int64) ([]
 }
 
 const listUserPasskeys = `-- name: ListUserPasskeys :many
-SELECT id, credential_id, public_key, sign_count, credential, name, created_at, last_used_at
+SELECT id, credential_id, credential, name, created_at, last_used_at
 FROM user_passkeys WHERE user_id = ? ORDER BY id
 `
 
 type ListUserPasskeysRow struct {
 	ID           int64
 	CredentialID []byte
-	PublicKey    []byte
-	SignCount    int64
 	Credential   []byte
 	Name         string
 	CreatedAt    int64
@@ -298,8 +288,6 @@ func (q *Queries) ListUserPasskeys(ctx context.Context, userID int64) ([]ListUse
 		if err := rows.Scan(
 			&i.ID,
 			&i.CredentialID,
-			&i.PublicKey,
-			&i.SignCount,
 			&i.Credential,
 			&i.Name,
 			&i.CreatedAt,
@@ -377,7 +365,7 @@ func (q *Queries) SetTOTPSecret(ctx context.Context, arg SetTOTPSecretParams) er
 const takeChallenge = `-- name: TakeChallenge :one
 DELETE FROM auth_challenges
 WHERE id_hash = ?1 AND kind = ?2 AND expires_at > ?3
-RETURNING user_id, device_id, data, created_at, expires_at
+RETURNING user_id, data, created_at, expires_at
 `
 
 type TakeChallengeParams struct {
@@ -388,7 +376,6 @@ type TakeChallengeParams struct {
 
 type TakeChallengeRow struct {
 	UserID    sql.NullInt64
-	DeviceID  sql.NullInt64
 	Data      []byte
 	CreatedAt int64
 	ExpiresAt int64
@@ -401,7 +388,6 @@ func (q *Queries) TakeChallenge(ctx context.Context, arg TakeChallengeParams) (T
 	var i TakeChallengeRow
 	err := row.Scan(
 		&i.UserID,
-		&i.DeviceID,
 		&i.Data,
 		&i.CreatedAt,
 		&i.ExpiresAt,
@@ -410,24 +396,18 @@ func (q *Queries) TakeChallenge(ctx context.Context, arg TakeChallengeParams) (T
 }
 
 const updatePasskeyUse = `-- name: UpdatePasskeyUse :exec
-UPDATE user_passkeys SET sign_count = ?, credential = ?, last_used_at = ? WHERE id = ?
+UPDATE user_passkeys SET credential = ?, last_used_at = ? WHERE id = ?
 `
 
 type UpdatePasskeyUseParams struct {
-	SignCount  int64
 	Credential []byte
 	LastUsedAt sql.NullInt64
 	ID         int64
 }
 
-// Saves the sign count and flags of a successful assertion.
+// Saves the credential (sign count and flags) of a successful assertion.
 func (q *Queries) UpdatePasskeyUse(ctx context.Context, arg UpdatePasskeyUseParams) error {
-	_, err := q.db.ExecContext(ctx, updatePasskeyUse,
-		arg.SignCount,
-		arg.Credential,
-		arg.LastUsedAt,
-		arg.ID,
-	)
+	_, err := q.db.ExecContext(ctx, updatePasskeyUse, arg.Credential, arg.LastUsedAt, arg.ID)
 	return err
 }
 

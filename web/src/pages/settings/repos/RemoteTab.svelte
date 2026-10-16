@@ -9,7 +9,8 @@
   import { api, errorMessage, type ProxyInput, type Repo, type RepoProxy } from "$lib/api";
   import { Draft } from "$lib/unsaved.svelte";
   import { DURATION_UNITS, joinSeconds, splitSeconds, type Parts } from "$lib/units";
-  import { normalizeRemote, remoteError, remotePresets } from "$lib/remotes";
+  import { normalizeRemote, remoteError } from "$lib/remotes";
+  import { formats } from "$lib/formats/registry.svelte";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import { Separator } from "$lib/components/ui/separator";
@@ -33,7 +34,7 @@
     missing: splitSeconds(p?.not_found_ttl ?? 300),
   });
   const draft = new Draft<Form>(untrack(() => formOf(repo.proxy)));
-  const presets = $derived(remotePresets[repo.format] ?? []);
+  const presets = $derived(formats.get(repo.format)?.remote_presets ?? []);
 
   const urlError = $derived(draft.value.url.trim() ? remoteError(draft.value.url) : "Enter the address of the remote repository.");
   const credsError = $derived(

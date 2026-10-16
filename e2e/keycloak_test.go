@@ -25,8 +25,8 @@ import (
 )
 
 // Keycloak test fixture (see testdata/keycloak/realm-e2e.json). The realm has two clients:
-// "telesphorepo" for SSO sign-in (§7.5), and "ci-github", a CI issuer for publish sessions
-// (§7.6) whose client-credentials tokens carry GitHub-shaped claims.
+// "telesphorepo" for SSO sign-in, and "ci-github", a CI issuer for publish sessions
+// whose client-credentials tokens carry GitHub-shaped claims.
 const (
 	keycloakImage      = "quay.io/keycloak/keycloak:26.8.1" // E2E_KEYCLOAK_IMAGE overrides
 	kcRealm            = "e2e"

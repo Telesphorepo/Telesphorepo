@@ -20,19 +20,20 @@ type ApiToken struct {
 }
 
 type Asset struct {
-	ID               int64
-	RepoID           int64
-	Path             string
-	Size             int64
-	Sha256           string
-	ContentType      string
-	Kind             string
-	UploadedBy       sql.NullInt64
-	CreatedAt        int64
-	UpdatedAt        int64
-	PublishSessionID sql.NullInt64
-	CheckedAt        int64
-	RemoteEtag       string
+	ID          int64
+	RepoID      int64
+	Path        string
+	BlobID      int64
+	Size        int64
+	Sha256      string
+	ContentType string
+	Kind        string
+	UploadedBy  sql.NullInt64
+	CreatedAt   int64
+	UpdatedAt   int64
+	BuildID     sql.NullInt64
+	CheckedAt   int64
+	RemoteEtag  string
 }
 
 type AssetsFt struct {
@@ -55,162 +56,41 @@ type AuthChallenge struct {
 	IDHash    []byte
 	Kind      string
 	UserID    sql.NullInt64
-	DeviceID  sql.NullInt64
 	Data      []byte
 	CreatedAt int64
 	ExpiresAt int64
 }
 
-type Device struct {
-	ID         int64
-	UserID     int64
-	Name       string
-	Kind       string
-	PublicKey  []byte
-	CreatedAt  int64
-	ExpiresAt  int64
-	LastUsedAt sql.NullInt64
-	RevokedAt  sql.NullInt64
-}
-
-type DeviceEnrollment struct {
-	DeviceCodeHash []byte
-	UserCode       string
-	Name           string
-	Kind           string
-	PublicKey      []byte
+type Blob struct {
+	ID             int64
+	Sha256         string
+	Size           int64
+	Refs           int64
+	UnreferencedAt int64
 	CreatedAt      int64
-	ExpiresAt      int64
-	PolledAt       int64
-	ApprovedBy     sql.NullInt64
-	DeviceID       sql.NullInt64
 }
 
-type IpList struct {
-	ID          int64
-	Name        string
-	Kind        string
-	Title       string
-	Description string
-	Ranges      string
-	Source      string
-	FetchedAt   int64
-	Error       string
-	CreatedAt   int64
-}
-
-type NexusSource struct {
-	ID            int64
-	Name          string
-	BaseUrl       string
-	Credentials   []byte
-	State         string
-	CreatedBy     sql.NullInt64
-	CreatedAt     int64
-	LastSyncAt    int64
-	LastError     string
-	CutoverSyncID int64
-	CutoverFailed int64
-}
-
-type NexusSourceRepo struct {
-	SourceID     int64
-	SourceRepo   string
-	SourceFormat string
-	Kind         string
-	TargetRepoID int64
-}
-
-type NexusSync struct {
+type Build struct {
 	ID         int64
-	SourceID   int64
-	State      string
-	Trigger    string
-	StartedBy  sql.NullInt64
-	StartedAt  int64
-	FinishedAt sql.NullInt64
-	Error      string
+	Provider   string
+	Key        string
+	Repository string
+	Revision   string
+	Ref        string
+	RefName    string
+	RefType    string
+	Run        string
+	Workflow   string
+	Actor      string
+	Links      string
+	CreatedAt  int64
 }
 
-type NexusSyncFailure struct {
-	ID         int64
-	SyncID     int64
-	SourceRepo string
-	Path       string
-	Reason     string
-}
-
-type NexusSyncLog struct {
-	ID         int64
-	SyncID     int64
-	At         int64
-	SourceRepo string
-	Level      string
-	Message    string
-}
-
-type NexusSyncRepo struct {
-	SyncID       int64
-	SourceRepo   string
-	SourceFormat string
-	TargetRepoID int64
-	Continuation string
-	Checked      int64
-	Imported     int64
-	Skipped      int64
-	Ignored      int64
-	Failed       int64
-	Bytes        int64
-	ActiveAt     int64
-	State        string
-	Error        string
-}
-
-type PublishOidcSeen struct {
-	IDHash    []byte
-	ExpiresAt int64
-}
-
-type PublishSession struct {
-	ID            int64
-	PublicID      string
-	SecretHash    []byte
-	RepoID        int64
-	UserID        sql.NullInt64
-	DeviceID      sql.NullInt64
-	TrustID       sql.NullInt64
-	Via           string
-	Subject       string
-	CreatedAt     int64
-	ExpiresAt     int64
-	ClosedAt      sql.NullInt64
-	CiServer      string
-	CiRepository  string
-	CiSha         string
-	CiRef         string
-	CiRunID       string
-	CiRunAttempt  string
-	CiWorkflow    string
-	CiWorkflowRef string
-	CiActor       string
-	Kept          int64
-}
-
-type PublishTrust struct {
-	ID        int64
-	Name      string
-	Issuer    string
-	Audience  string
-	Claims    string
-	Jwks      string
-	CreatedBy sql.NullInt64
-	CreatedAt int64
-	Disabled  int64
-}
-
-type PublishTrustRepo struct {
-	TrustID int64
-	RepoID  int64
+type Rebuild struct {
+	RepoID   int64
+	Grp      string
+	Unit     string
+	MarkedAt int64
 }
 
 type Repo struct {
@@ -221,7 +101,6 @@ type Repo struct {
 	AnonymousRead   bool
 	Config          string
 	CreatedAt       int64
-	LockedBy        sql.NullString
 	Description     string
 	FileCount       int64
 	TotalSize       int64
@@ -234,12 +113,19 @@ type RepoGroupMember struct {
 	Position int64
 }
 
-type RepoIpRule struct {
-	RepoID int64
-	Scope  string
-	Kind   string
-	Value  string
-	Note   string
+type RepoOp struct {
+	ID        int64
+	RepoID    int64
+	Type      string
+	Owner     string
+	Ref       string
+	State     string
+	Done      int64
+	Total     int64
+	Error     string
+	StartedBy sql.NullInt64
+	StartedAt int64
+	UpdatedAt int64
 }
 
 type RepoPermission struct {
@@ -259,11 +145,6 @@ type RepoProxy struct {
 	LastErrorAt int64
 }
 
-type SchemaMigration struct {
-	Component string
-	Version   int64
-}
-
 type Session struct {
 	IDHash    []byte
 	UserID    int64
@@ -274,40 +155,19 @@ type Session struct {
 type Setting struct {
 	Key       string
 	Value     string
-	Secret    bool
 	UpdatedAt int64
 	UpdatedBy sql.NullInt64
 }
 
-type SigningKey struct {
-	ID          int64
-	Name        string
-	Fingerprint string
-	PublicKey   string
-	PrivateKey  []byte
-	CreatedAt   int64
-}
-
-type StorageMove struct {
-	ID         int64
-	Target     []byte
-	State      string
-	Cursor     int64
-	Total      int64
-	Copied     int64
-	Skipped    int64
-	Failed     int64
-	Error      string
-	StartedBy  sql.NullInt64
-	StartedAt  int64
-	FinishedAt sql.NullInt64
-}
-
-type StorageMoveFailure struct {
-	MoveID  int64
-	AssetID int64
-	Key     string
-	Reason  string
+type UploadSession struct {
+	ID               string
+	RepoID           int64
+	UserID           sql.NullInt64
+	PublishSessionID sql.NullInt64
+	Received         int64
+	CreatedAt        int64
+	UpdatedAt        int64
+	ExpiresAt        int64
 }
 
 type User struct {
@@ -327,8 +187,6 @@ type UserPasskey struct {
 	ID           int64
 	UserID       int64
 	CredentialID []byte
-	PublicKey    []byte
-	SignCount    int64
 	Credential   []byte
 	Name         string
 	CreatedAt    int64

@@ -1,49 +1,58 @@
-// Package assets is the format-agnostic file layer: spooling uploads, writing blobs,
-// the assets table, and serving downloads (spec §5, §8 GET/HEAD).
+// Package assets is the format-agnostic file layer of the kernel: the one write pipeline
+// (Commit), the one delete pipeline (Remove), the read path of hosted, proxy and group repos
+// (Reader) and resumable uploads (Uploads). An asset is a path in a repo that points to a
+// content-addressed blob (internal/blobs). Every writer goes through the pipeline: format
+// writes, the web UI upload, imports, proxy fetches, generated index files and the demo data.
+// A format takes part through its Hooks.
 package assets
 
 import (
 	"bytes"
 	"context"
-	"crypto/md5"
-	"crypto/sha1"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"io"
-	"log/slog"
 	"net/http"
-	"os"
-	"path"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
 
-	"github.com/Telesphorepo/Telesphorepo/internal/config"
+	"github.com/Telesphorepo/Telesphorepo/internal/audit"
+	"github.com/Telesphorepo/Telesphorepo/internal/blobs"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
 	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
-	"github.com/Telesphorepo/Telesphorepo/internal/repos"
-	"github.com/Telesphorepo/Telesphorepo/internal/storage"
+	"github.com/Telesphorepo/Telesphorepo/internal/ops"
+	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 )
 
 var (
-	ErrNotFound = errors.New("asset not found")
-	ErrTooLarge = errors.New("upload too large")
+	ErrNotFound error = &Refusal{Status: http.StatusNotFound, Message: "not found"}
+	ErrTooLarge       = blobs.ErrTooLarge
+	// ErrBlobUnknown is a write of a digest that no blob has (a mount of an unknown blob).
+	ErrBlobUnknown = blobs.ErrUnknown
 )
 
+// Asset kinds.
 const (
 	KindArtifact = "artifact"
 	KindMetadata = "metadata"
 	KindIndex    = "index"
 )
 
+// FallbackContentType is the content type of a path that the format does not describe.
+const FallbackContentType = "application/octet-stream"
+
+// Spooled is a body with its size and hashes (see blobs.Spooled).
+type Spooled = blobs.Spooled
+
+// Asset is a file of a repo.
 type Asset struct {
 	ID          int64
 	RepoID      int64
 	Path        string
+	BlobID      int64
 	Size        int64
 	SHA256      string
 	ContentType string
@@ -51,138 +60,70 @@ type Asset struct {
 	UploadedBy  int64 // 0 = none
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
-	// PublishSessionID is the CI publish session with build provenance that wrote the file; 0 =
-	// none (see internal/provenance).
-	PublishSessionID int64
+	// BuildID is the CI build record (internal/ci) that wrote the file; 0 = none.
+	BuildID int64
 	// CheckedAt is when the remote of a proxy repo last confirmed the file, RemoteETag its ETag;
 	// zero for a hosted file.
 	CheckedAt  time.Time
 	RemoteETag string
 }
 
-// By is who writes a file: the user (0 = none, e.g. a CI session or an import) and the publish
-// session whose build provenance the file records (0 = none). An import also gives the source's
-// dates of the file; zero means now.
-type By struct {
-	User    int64
-	Session int64
-	Created time.Time
-	Updated time.Time
-}
-
-// Spooled is an upload buffered to a temp file under cfg.TmpDir() with its hashes
-// (lowercase hex) computed in one pass. Close removes the temp file.
-type Spooled struct {
-	File   *os.File
-	Size   int64
-	SHA256 string
-	SHA1   string
-	MD5    string
-}
-
-func (s *Spooled) Close() error {
-	if s.File == nil {
-		return nil
-	}
-	name := s.File.Name()
-	s.File.Close()
-	s.File = nil
-	if err := os.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return nil
-}
-
-// Reader returns a fresh reader positioned at offset 0.
-func (s *Spooled) Reader() (io.ReadSeeker, error) {
-	if s.File == nil {
-		return nil, os.ErrClosed
-	}
-	if _, err := s.File.Seek(0, io.SeekStart); err != nil {
-		return nil, err
-	}
-	return s.File, nil
-}
-
+// SearchHit is one search result.
 type SearchHit struct {
 	Asset    *Asset
 	RepoName string
 }
 
-type Service struct {
-	db  *db.DB
-	st  storage.Store
-	cfg config.Provider
+// Pipeline writes, removes and reads assets.
+type Pipeline struct {
+	db    *db.DB
+	blobs *blobs.Store
+	set   settings.Provider
+	audit *audit.Log
+	hooks func(format string) *Hooks
+	base  context.Context // ends when the server shuts down
+
+	mu    sync.Mutex
+	locks map[string]*lockEntry
 }
 
-func New(d *db.DB, st storage.Store, cfg config.Provider) *Service {
-	return &Service{db: d, st: st, cfg: cfg}
+// New returns the pipeline. base is the server's context: a write that runs detached from its
+// request ends when base ends.
+func New(base context.Context, d *db.DB, bs *blobs.Store, set settings.Provider, au *audit.Log) *Pipeline {
+	return &Pipeline{base: base, db: d, blobs: bs, set: set, audit: au, locks: map[string]*lockEntry{},
+		hooks: func(string) *Hooks { return nil }}
 }
 
-func (s *Service) Store() storage.Store { return s.st }
+// SetHooks gives the pipeline the hooks of each format (the format registry). It runs before
+// the server serves.
+func (p *Pipeline) SetHooks(fn func(format string) *Hooks) { p.hooks = fn }
 
-// Key is the storage key for a repo-relative path.
-func Key(repoName, p string) string { return path.Join("repos", repoName, p) }
-
-// ContentType picks a Content-Type by extension (spec §8).
-func ContentType(p string) string {
-	switch base := path.Base(p); base {
-	case "Release", "InRelease", "Packages":
-		return "text/plain"
+// Hooks returns the hooks of format, never nil.
+func (p *Pipeline) Hooks(format string) *Hooks {
+	if h := p.hooks(format); h != nil {
+		return h
 	}
-	switch strings.ToLower(path.Ext(p)) {
-	case ".pom", ".xml":
-		return "application/xml"
-	case ".jar":
-		return "application/java-archive"
-	case ".module":
-		return "application/json"
-	case ".sha1", ".sha256", ".sha512", ".md5":
-		return "text/plain"
-	case ".deb":
-		return "application/vnd.debian.binary-package"
-	case ".gz":
-		return "application/gzip"
-	case ".asc", ".gpg":
-		return "application/pgp-signature"
-	}
-	return "application/octet-stream"
+	return &Hooks{}
 }
 
-// Spool copies r to a temp file, failing with ErrTooLarge beyond max bytes.
-func (s *Service) Spool(r io.Reader, max int64) (*Spooled, error) {
-	dir := s.cfg().TmpDir()
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return nil, err
-	}
-	f, err := os.CreateTemp(dir, "upload-*")
-	if err != nil {
-		return nil, err
-	}
-	sp := &Spooled{File: f}
-	h256, h1, h5 := sha256.New(), sha1.New(), md5.New()
-	n, err := io.Copy(io.MultiWriter(f, h256, h1, h5), io.LimitReader(r, max+1))
-	if err != nil {
-		sp.Close()
-		var mbe *http.MaxBytesError
-		if errors.As(err, &mbe) {
-			return nil, ErrTooLarge
-		}
-		return nil, err
-	}
-	if n > max {
-		sp.Close()
-		return nil, ErrTooLarge
-	}
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		sp.Close()
-		return nil, err
-	}
-	sp.Size = n
-	sp.SHA256 = hex.EncodeToString(h256.Sum(nil))
-	sp.SHA1 = hex.EncodeToString(h1.Sum(nil))
-	sp.MD5 = hex.EncodeToString(h5.Sum(nil))
-	return sp, nil
+// Blobs returns the blob store.
+func (p *Pipeline) Blobs() *blobs.Store { return p.blobs }
+
+// Spool copies r to a temp file on the data volume with its hashes, at most max bytes
+// (ErrTooLarge above).
+func (p *Pipeline) Spool(r io.Reader, max int64) (*Spooled, error) {
+	return blobs.Spool(p.set().TmpDir(), r, max)
+}
+
+// MaxUploadSize is the max_upload_size setting.
+func (p *Pipeline) MaxUploadSize() int64 { return settings.MaxUploadSize.Get(p.set()) }
+
+// detached returns a context of ctx's values that a client disconnect does not end, but the end
+// of the server does: a write that started finishes, or stops at shutdown.
+func (p *Pipeline) detached(ctx context.Context) (context.Context, context.CancelFunc) {
+	d, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stop := context.AfterFunc(p.base, cancel)
+	return d, func() { stop(); cancel() }
 }
 
 type lockEntry struct {
@@ -190,35 +131,44 @@ type lockEntry struct {
 	refs int
 }
 
-var (
-	locksMu sync.Mutex
-	locks   = map[string]*lockEntry{}
-)
+// lockKey is the key of a path lock or an extra lock of a write in repo repoID.
+func lockKey(repoID int64, k string) string { return strconv.FormatInt(repoID, 10) + "\x00" + k }
 
-// Lock takes an in-process lock for (repoID, key) — key is any string, e.g. a path or a
-// deb identity. Returns the unlock func.
-func (s *Service) Lock(repoID int64, key string) (unlock func()) {
-	k := strconv.FormatInt(repoID, 10) + "\x00" + key
-	locksMu.Lock()
-	e := locks[k]
-	if e == nil {
-		e = &lockEntry{}
-		locks[k] = e
+// lock takes the locks of keys (sorted, each once) and returns the release.
+func (p *Pipeline) lock(keys []string) func() {
+	ks := sortedUnique(keys)
+	entries := make([]*lockEntry, len(ks))
+	for i, k := range ks {
+		p.mu.Lock()
+		e := p.locks[k]
+		if e == nil {
+			e = &lockEntry{}
+			p.locks[k] = e
+		}
+		e.refs++
+		p.mu.Unlock()
+		e.mu.Lock()
+		entries[i] = e
 	}
-	e.refs++
-	locksMu.Unlock()
-	e.mu.Lock()
 	var once sync.Once
 	return func() {
 		once.Do(func() {
-			e.mu.Unlock()
-			locksMu.Lock()
-			if e.refs--; e.refs == 0 {
-				delete(locks, k)
+			for i := len(ks) - 1; i >= 0; i-- {
+				entries[i].mu.Unlock()
+				p.mu.Lock()
+				if entries[i].refs--; entries[i].refs == 0 {
+					delete(p.locks, ks[i])
+				}
+				p.mu.Unlock()
 			}
-			locksMu.Unlock()
 		})
 	}
+}
+
+// Lock takes the lock of key in repo repoID: a path, or a name that a format serializes on (e.g.
+// "maven-metadata-merge:" + a path). Commit and Remove take the lock of every path they touch.
+func (p *Pipeline) Lock(repoID int64, key string) (unlock func()) {
+	return p.lock([]string{lockKey(repoID, key)})
 }
 
 func fromRow(r dbq.Asset) *Asset {
@@ -226,6 +176,7 @@ func fromRow(r dbq.Asset) *Asset {
 		ID:          r.ID,
 		RepoID:      r.RepoID,
 		Path:        r.Path,
+		BlobID:      r.BlobID,
 		Size:        r.Size,
 		SHA256:      r.Sha256,
 		ContentType: r.ContentType,
@@ -234,8 +185,8 @@ func fromRow(r dbq.Asset) *Asset {
 		CreatedAt:   time.Unix(r.CreatedAt, 0).UTC(),
 		UpdatedAt:   time.Unix(r.UpdatedAt, 0).UTC(),
 
-		PublishSessionID: r.PublishSessionID.Int64,
-		RemoteETag:       r.RemoteEtag,
+		BuildID:    r.BuildID.Int64,
+		RemoteETag: r.RemoteEtag,
 	}
 	if r.CheckedAt > 0 {
 		a.CheckedAt = time.Unix(r.CheckedAt, 0).UTC()
@@ -243,9 +194,8 @@ func fromRow(r dbq.Asset) *Asset {
 	return a
 }
 
-// Get is an indexed point lookup on (repo_id, path).
-func (s *Service) Get(ctx context.Context, repoID int64, p string) (*Asset, error) {
-	r, err := dbq.New(s.db.R).GetAsset(ctx, dbq.GetAssetParams{RepoID: repoID, Path: p})
+func get(ctx context.Context, q *dbq.Queries, repoID int64, p string) (*Asset, error) {
+	r, err := q.GetAsset(ctx, dbq.GetAssetParams{RepoID: repoID, Path: p})
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -255,214 +205,81 @@ func (s *Service) Get(ctx context.Context, repoID int64, p string) (*Asset, erro
 	return fromRow(r), nil
 }
 
-// SetTimes gives file a the dates of by when by has them and they differ from a's, to the
-// second. An import calls it for a file that it skips because the bytes are here.
-func (s *Service) SetTimes(ctx context.Context, a *Asset, by By) error {
-	if by.Updated.IsZero() {
+// Get is an indexed point lookup on (repo_id, path).
+func (p *Pipeline) Get(ctx context.Context, repoID int64, path string) (*Asset, error) {
+	return get(ctx, dbq.New(p.db.R), repoID, path)
+}
+
+// Open opens the content of a.
+func (p *Pipeline) Open(ctx context.Context, a *Asset) (io.ReadCloser, error) {
+	rc, _, err := p.blobs.Open(ctx, a.SHA256)
+	return rc, err
+}
+
+// ReadAll reads the content of a, at most max bytes (ErrTooLarge above).
+func (p *Pipeline) ReadAll(ctx context.Context, a *Asset, max int64) ([]byte, error) {
+	if a.Size > max {
+		return nil, ErrTooLarge
+	}
+	rc, err := p.Open(ctx, a)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	var b bytes.Buffer
+	if _, err := io.Copy(&b, io.LimitReader(rc, max+1)); err != nil {
+		return nil, err
+	}
+	if int64(b.Len()) > max {
+		return nil, ErrTooLarge
+	}
+	return b.Bytes(), nil
+}
+
+// ByBlob returns up to limit assets of repo that point to the blob blobID, e.g. the tags that
+// point to a manifest digest.
+func (p *Pipeline) ByBlob(ctx context.Context, repoID, blobID int64, limit int) ([]*Asset, error) {
+	rows, err := dbq.New(p.db.R).ListAssetsByBlob(ctx, dbq.ListAssetsByBlobParams{BlobID: blobID, RepoID: repoID, Limit: int64(limit)})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*Asset, len(rows))
+	for i, r := range rows {
+		out[i] = fromRow(r)
+	}
+	return out, nil
+}
+
+// SetTimes gives file a the dates created and updated when they differ from a's, to the second.
+// Zero updated changes nothing; zero created is updated. An import calls it for a file that it
+// skips because the bytes are here.
+func (p *Pipeline) SetTimes(ctx context.Context, a *Asset, created, updated time.Time) error {
+	if updated.IsZero() {
 		return nil
 	}
-	created := by.Created
 	if created.IsZero() {
-		created = by.Updated
+		created = updated
 	}
-	if a.CreatedAt.Unix() == created.Unix() && a.UpdatedAt.Unix() == by.Updated.Unix() {
+	if a.CreatedAt.Unix() == created.Unix() && a.UpdatedAt.Unix() == updated.Unix() {
 		return nil
 	}
-	return dbq.New(s.db.W).SetAssetTimes(ctx, dbq.SetAssetTimesParams{CreatedAt: created.Unix(),
-		UpdatedAt: by.Updated.Unix(), RepoID: a.RepoID, Path: a.Path})
+	return dbq.New(p.db.W).SetAssetTimes(ctx, dbq.SetAssetTimesParams{CreatedAt: created.Unix(),
+		UpdatedAt: updated.Unix(), RepoID: a.RepoID, Path: a.Path})
 }
 
-// PutBlob writes the spooled file to storage at Key(repoName, p).
-func (s *Service) PutBlob(ctx context.Context, repoName, p string, sp *Spooled, contentType string) error {
-	rd, err := sp.Reader()
-	if err != nil {
-		return err
-	}
-	return s.st.Put(ctx, Key(repoName, p), rd, sp.Size, contentType)
+// SetChecked records that the remote of a proxy repo confirmed the cached file at at, with its
+// ETag (a 304, or a 404 while the cached copy stays).
+func (p *Pipeline) SetChecked(ctx context.Context, repoID int64, path string, at time.Time, etag string) error {
+	return dbq.New(p.db.W).SetAssetChecked(ctx, dbq.SetAssetCheckedParams{CheckedAt: at.Unix(), RemoteEtag: etag, RepoID: repoID, Path: path})
 }
 
-// UpsertTx inserts or updates (size, sha256, content_type, updated_at, uploaded_by,
-// publish_session_id) the
-// asset row keyed by (RepoID, Path) and sets a.ID. Returns created=true on insert. The input
-// times are the source's dates (an import, or a proxy's remote Last-Modified) and zero means
-// now: an insert writes created_at from a.CreatedAt (else a.UpdatedAt) and updated_at from
-// a.UpdatedAt; an update writes only updated_at. Path and kind are never changed on update (the
-// FTS triggers rely on it).
-func UpsertTx(ctx context.Context, tx *sql.Tx, a *Asset) (created bool, err error) {
-	q := dbq.New(tx)
-	_, err = q.GetAssetID(ctx, dbq.GetAssetIDParams{RepoID: a.RepoID, Path: a.Path})
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		created = true
-	case err != nil:
-		return false, err
-	}
-	now := time.Now().Unix()
-	if !a.UpdatedAt.IsZero() {
-		now = a.UpdatedAt.Unix()
-	}
-	createdAt := now
-	if !a.CreatedAt.IsZero() {
-		createdAt = a.CreatedAt.Unix()
-	}
-	var checked int64
-	if !a.CheckedAt.IsZero() {
-		checked = a.CheckedAt.Unix()
-	}
-	row, err := q.UpsertAsset(ctx, dbq.UpsertAssetParams{
-		RepoID:      a.RepoID,
-		Path:        a.Path,
-		Size:        a.Size,
-		Sha256:      a.SHA256,
-		ContentType: a.ContentType,
-		Kind:        a.Kind,
-		UploadedBy:  sql.NullInt64{Int64: a.UploadedBy, Valid: a.UploadedBy != 0},
-		CreatedAt:   createdAt,
-		UpdatedAt:   now,
-
-		PublishSessionID: sql.NullInt64{Int64: a.PublishSessionID, Valid: a.PublishSessionID != 0},
-		CheckedAt:        checked,
-		RemoteEtag:       a.RemoteETag,
-	})
-	if err != nil {
-		return false, err
-	}
-	a.ID, a.Kind = row.ID, row.Kind
-	a.CreatedAt, a.UpdatedAt = time.Unix(row.CreatedAt, 0).UTC(), time.Unix(row.UpdatedAt, 0).UTC()
-	return created, nil
-}
-
-// Put = PutBlob + UpsertTx in its own transaction. Caller holds Lock.
-// Once the body is spooled the store and upsert run detached from ctx cancellation (a client
-// disconnect must not leave a replaced blob behind a stale row), and the upsert is retried.
-func (s *Service) Put(ctx context.Context, repo *repos.Repo, p string, sp *Spooled, contentType, kind string, by By) (a *Asset, created bool, err error) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), putTimeout)
-	defer cancel()
-	if err := s.PutBlob(ctx, repo.Name, p, sp, contentType); err != nil {
-		return nil, false, err
-	}
-	a = &Asset{RepoID: repo.ID, Path: p, Size: sp.Size, SHA256: sp.SHA256, ContentType: contentType, Kind: kind,
-		UploadedBy: by.User, PublishSessionID: by.Session, CreatedAt: by.Created, UpdatedAt: by.Updated}
-	for attempt := 0; ; attempt++ {
-		err = s.db.Tx(ctx, func(tx *sql.Tx) error {
-			var err error
-			created, err = UpsertTx(ctx, tx, a)
-			return err
-		})
-		if err == nil {
-			return a, created, nil
-		}
-		if attempt >= 2 || ctx.Err() != nil {
-			slog.Error("asset upsert failed after blob write", "repo", repo.Name, "path", p, "err", err)
-			return nil, false, err
-		}
-		time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)
-	}
-}
-
-// putTimeout bounds a detached store+upsert in Put.
-const putTimeout = 5 * time.Minute
-
-func etagMatch(header, etag string) bool {
-	for _, t := range strings.Split(header, ",") {
-		t = strings.TrimPrefix(strings.TrimSpace(t), "W/")
-		if t == "*" || t == etag {
-			return true
-		}
-	}
-	return false
-}
-
-// Serve answers GET/HEAD for an already-authorized request: 404 if no row; HEAD from the
-// row (Content-Length, Content-Type, ETag "\"<sha256>\"", Last-Modified); GET via 302 to
-// PresignGet when available, otherwise stream with http.ServeContent (range support) when
-// the body is seekable, else io.Copy.
-func (s *Service) Serve(w http.ResponseWriter, r *http.Request, repo *repos.Repo, p string) {
-	ctx := r.Context()
-	a, err := s.Get(ctx, repo.ID, p)
-	if errors.Is(err, ErrNotFound) {
-		http.NotFound(w, r)
-		return
-	}
-	if err != nil {
-		slog.Error("asset lookup failed", "repo", repo.Name, "path", p, "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	etag := `"` + a.SHA256 + `"`
-	h := w.Header()
-	// Repo content is publisher-controlled and served from the UI/API origin: never let a
-	// browser sniff or render it as active content (e.g. XHTML-namespace .xml/.pom).
-	h.Set("X-Content-Type-Options", "nosniff")
-	h.Set("Content-Security-Policy", "default-src 'none'; sandbox")
-	if a.ContentType != "text/plain" {
-		h.Set("Content-Disposition", "attachment")
-	}
-	h.Set("ETag", etag)
-	h.Set("Last-Modified", a.UpdatedAt.Format(http.TimeFormat))
-	if inm := r.Header.Get("If-None-Match"); inm != "" && etagMatch(inm, etag) {
-		w.WriteHeader(http.StatusNotModified)
-		return
-	}
-	if r.Method == http.MethodHead {
-		h.Set("Content-Type", a.ContentType)
-		h.Set("Content-Length", strconv.FormatInt(a.Size, 10))
-		h.Set("Accept-Ranges", "bytes")
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-	key := Key(repo.Name, p)
-	if u, ok, err := s.st.PresignGet(ctx, key, s.cfg().PresignTTL); err != nil {
-		slog.Error("presign failed", "repo", repo.Name, "path", p, "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	} else if ok {
-		h.Del("ETag")
-		h.Del("Last-Modified")
-		h.Set("Cache-Control", "no-store")
-		h.Set("Location", u)
-		w.WriteHeader(http.StatusFound)
-		return
-	}
-	body, info, err := s.st.Get(ctx, key)
-	if errors.Is(err, storage.ErrNotFound) {
-		slog.Warn("asset row without blob", "repo", repo.Name, "path", p)
-		h.Del("ETag")
-		h.Del("Last-Modified")
-		http.NotFound(w, r)
-		return
-	}
-	if err != nil {
-		slog.Error("storage get failed", "repo", repo.Name, "path", p, "err", err)
-		h.Del("ETag")
-		h.Del("Last-Modified")
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	defer body.Close()
-	h.Set("Content-Type", a.ContentType)
-	if rs, ok := body.(io.ReadSeeker); ok {
-		http.ServeContent(w, r, "", a.UpdatedAt, rs)
-		return
-	}
-	size := a.Size
-	if info.Size > 0 || a.Size == 0 {
-		size = info.Size // the blob's real length, in case it diverged from the row
-	}
-	h.Set("Content-Length", strconv.FormatInt(size, 10))
-	w.WriteHeader(http.StatusOK)
-	if _, err := io.Copy(w, body); err != nil {
-		slog.Debug("asset stream aborted", "repo", repo.Name, "path", p, "err", err)
-	}
-}
-
-// List: keyset by path within prefix range (path >= prefix AND path < prefixEnd(prefix)),
+// List: keyset by path within prefix range (path >= prefix AND path < PrefixEnd(prefix)),
 // path > after. Returns next = last path when the page is full, else "".
-func (s *Service) List(ctx context.Context, repoID int64, prefix, after string, limit int) ([]*Asset, string, error) {
+func (p *Pipeline) List(ctx context.Context, repoID int64, prefix, after string, limit int) ([]*Asset, string, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	q := dbq.New(s.db.R)
+	q := dbq.New(p.db.R)
 	var rows []dbq.Asset
 	var err error
 	// One lower bound per query (see queries/assets.sql): the cursor when it is past the prefix.
@@ -471,7 +288,7 @@ func (s *Service) List(ctx context.Context, repoID int64, prefix, after string, 
 	if cursor {
 		lower = after
 	}
-	end, bounded := prefixEnd(prefix)
+	end, bounded := PrefixEnd(prefix)
 	switch {
 	case bounded && cursor:
 		rows, err = q.ListAssetsAfterRange(ctx, dbq.ListAssetsAfterRangeParams{RepoID: repoID, Lower: lower, Upper: end, Limit: n})
@@ -498,9 +315,8 @@ func (s *Service) List(ctx context.Context, repoID int64, prefix, after string, 
 }
 
 // Search: FTS5 trigram MATCH on assets_fts (q quoted as a phrase, len(q) >= 3), restricted to
-// repoIDs when non-nil, keyset on asset id > after.
-// A non-nil empty repoIDs matches nothing.
-func (s *Service) Search(ctx context.Context, q string, repoIDs []int64, after int64, limit int) ([]SearchHit, int64, error) {
+// repoIDs when non-nil, keyset on asset id > after. A non-nil empty repoIDs matches nothing.
+func (p *Pipeline) Search(ctx context.Context, q string, repoIDs []int64, after int64, limit int) ([]SearchHit, int64, error) {
 	if utf8.RuneCountInString(q) < 3 || (repoIDs != nil && len(repoIDs) == 0) {
 		return nil, 0, nil
 	}
@@ -508,7 +324,7 @@ func (s *Service) Search(ctx context.Context, q string, repoIDs []int64, after i
 		limit = 50
 	}
 	match := `"` + strings.ReplaceAll(q, `"`, `""`) + `"`
-	dq := dbq.New(s.db.R)
+	dq := dbq.New(p.db.R)
 	var rows []dbq.SearchAssetsRow
 	var err error
 	if repoIDs == nil {
@@ -533,8 +349,8 @@ func (s *Service) Search(ctx context.Context, q string, repoIDs []int64, after i
 
 // Seek returns the first asset of repo whose path is >= lower (> lower when !inclusive) and
 // < upper (no upper bound when upper is ""), or nil. It is one indexed seek on (repo_id, path).
-func (s *Service) Seek(ctx context.Context, repoID int64, lower string, inclusive bool, upper string) (*Asset, error) {
-	q := dbq.New(s.db.R)
+func (p *Pipeline) Seek(ctx context.Context, repoID int64, lower string, inclusive bool, upper string) (*Asset, error) {
+	q := dbq.New(p.db.R)
 	var rows []dbq.Asset
 	var err error
 	switch {
@@ -553,10 +369,35 @@ func (s *Service) Seek(ctx context.Context, repoID int64, lower string, inclusiv
 	return fromRow(rows[0]), nil
 }
 
-// FirstPaths returns up to limit paths of repo that start with prefix ("" for every path), in
-// path order. Callers that delete what they get call it again for the next batch.
-func (s *Service) FirstPaths(ctx context.Context, repoID int64, prefix string, limit int) ([]string, error) {
-	q := dbq.New(s.db.R)
+// Children returns up to limit direct sub-folders of folder dir ("" or ending in "/") of repo, in
+// path order, each with a trailing "/". Each costs one indexed seek.
+func (p *Pipeline) Children(ctx context.Context, repoID int64, dir string, limit int) ([]string, error) {
+	upper, _ := PrefixEnd(dir)
+	lower, inclusive := dir, true
+	var out []string
+	for len(out) < limit {
+		a, err := p.Seek(ctx, repoID, lower, inclusive, upper)
+		if err != nil || a == nil {
+			return out, err
+		}
+		rest := a.Path[len(dir):]
+		i := strings.IndexByte(rest, '/')
+		if i < 0 {
+			lower, inclusive = a.Path, false
+			continue
+		}
+		sub := dir + rest[:i+1]
+		out = append(out, sub)
+		lower, _ = PrefixEnd(sub)
+		inclusive = true
+	}
+	return out, nil
+}
+
+// firstPaths returns up to limit paths of repo that start with prefix ("" for every path), in
+// path order.
+func (p *Pipeline) firstPaths(ctx context.Context, repoID int64, prefix string, limit int) ([]string, error) {
+	q := dbq.New(p.db.R)
 	var rows []dbq.Asset
 	var err error
 	if end, ok := PrefixEnd(prefix); ok {
@@ -574,37 +415,10 @@ func (s *Service) FirstPaths(ctx context.Context, repoID int64, prefix string, l
 	return out, nil
 }
 
-// SetChecked records that the remote of a proxy repo confirmed the cached file p at at, with
-// its ETag.
-func (s *Service) SetChecked(ctx context.Context, repoID int64, p string, at time.Time, etag string) error {
-	return dbq.New(s.db.W).SetAssetChecked(ctx, dbq.SetAssetCheckedParams{CheckedAt: at.Unix(), RemoteEtag: etag, RepoID: repoID, Path: p})
-}
-
-// DeleteTx deletes the asset row (repoID, p) in tx. deleted is false when there was none. The
-// caller removes the blob after the commit (DeleteBlob).
-func DeleteTx(ctx context.Context, tx *sql.Tx, repoID int64, p string) (deleted bool, err error) {
-	n, err := dbq.New(tx).DeleteAsset(ctx, dbq.DeleteAssetParams{RepoID: repoID, Path: p})
-	return n > 0, err
-}
-
-// DeleteBlob removes the blob of p from storage; a missing blob is not an error.
-func (s *Service) DeleteBlob(ctx context.Context, repoName, p string) error {
-	return s.st.Delete(ctx, Key(repoName, p))
-}
-
-// SpoolBytes spools b (a generated file, e.g. a checksum) like an upload.
-func (s *Service) SpoolBytes(b []byte) (*Spooled, error) {
-	return s.Spool(bytes.NewReader(b), int64(len(b)))
-}
-
 // PrefixEnd returns the smallest string greater than every string starting with prefix under
 // byte-wise (SQLite BINARY) ordering; ok=false when there is none (prefix is "" or all 0xFF
 // bytes).
-func PrefixEnd(prefix string) (string, bool) { return prefixEnd(prefix) }
-
-// prefixEnd returns the smallest string greater than every string starting with prefix under
-// byte-wise (SQLite BINARY) ordering; ok=false when there is none (prefix is all 0xFF bytes).
-func prefixEnd(prefix string) (string, bool) {
+func PrefixEnd(prefix string) (string, bool) {
 	b := []byte(prefix)
 	for i := len(b) - 1; i >= 0; i-- {
 		if b[i] != 0xFF {
@@ -613,4 +427,52 @@ func prefixEnd(prefix string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// deleting reports whether repo repoID has an active delete operation, reading in q.
+func deleting(ctx context.Context, q *dbq.Queries, repoID int64) (bool, error) {
+	op, err := q.GetRepoOp(ctx, repoID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil && op.Type == ops.TypeDelete, err
+}
+
+// SeedRow is a synthetic file of "telesphorepo seed": no content is stored, only the rows.
+type SeedRow struct {
+	Path        string
+	Size        int64
+	SHA256      string
+	ContentType string
+	Kind        string
+}
+
+// SeedTx inserts blob and asset rows for "telesphorepo seed" in tx: a blob row per digest that has
+// none, and the asset row of each path. It writes no content, so it is for the scale test only.
+func SeedTx(ctx context.Context, tx *sql.Tx, repoID int64, rows []SeedRow) ([]*Asset, error) {
+	q := dbq.New(tx)
+	now := time.Now().Unix()
+	out := make([]*Asset, 0, len(rows))
+	for _, r := range rows {
+		b, err := q.GetBlob(ctx, r.SHA256)
+		var id int64
+		switch {
+		case err == nil:
+			id = b.ID
+		case errors.Is(err, sql.ErrNoRows):
+			if id, err = q.InsertBlob(ctx, dbq.InsertBlobParams{Sha256: r.SHA256, Size: r.Size, UnreferencedAt: now, CreatedAt: now}); err != nil {
+				return nil, err
+			}
+		default:
+			return nil, err
+		}
+		a, err := q.UpsertAsset(ctx, dbq.UpsertAssetParams{RepoID: repoID, Path: r.Path, BlobID: id, Size: r.Size, Sha256: r.SHA256,
+			ContentType: r.ContentType, Kind: r.Kind, CreatedAt: now, UpdatedAt: now})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, &Asset{ID: a.ID, RepoID: repoID, Path: r.Path, BlobID: id, Size: r.Size, SHA256: r.SHA256,
+			ContentType: r.ContentType, Kind: r.Kind})
+	}
+	return out, nil
 }

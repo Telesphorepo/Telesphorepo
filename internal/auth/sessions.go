@@ -12,6 +12,9 @@ import (
 
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
+	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/perm"
+	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 )
 
 const sessionCookie = "tr_session"
@@ -25,26 +28,25 @@ func hashSession(v string) ([]byte, bool) {
 	return sum[:], true
 }
 
-// LoginResult is the outcome of the password step of a UI sign-in. Exactly one of User and
+// LoginResult is the outcome of the password step of a UI sign-in. Exactly one of Session and
 // SecondFactor is set.
 type LoginResult struct {
-	// User is set when a session started. SetupOnly is true when the user has no second factor
-	// yet, so the session reaches only the setup routes.
-	User      *User
-	SetupOnly bool
+	// Session is set when a session started. Its SecondFactorRequired is true when the user has
+	// no second factor yet, so the session reaches only the setup routes.
+	Session *SessionView
 	// SecondFactor lists the factor kinds the user can finish the sign-in with ("totp",
 	// "passkey", "recovery"). The pending sign-in lives in the tr_login cookie.
 	SecondFactor []string
 }
 
-// Login checks a password for UI sign-in (spec §13). A person who needs the second factor (any
-// server permission, or a repository permission other than download and publish) signs in with
-// it: with a factor they get a pending sign-in (cookie tr_login) that LoginSecondFactor
+// Login checks a password for UI sign-in. A person who needs the second factor (they hold a
+// permission with SecondFactor) signs in with it: with a factor they get a pending sign-in
+// (cookie tr_login) that LoginSecondFactor
 // completes, without one a setup-only session. Other users get a session from the password;
 // they need a factor only to approve a device or to create a manual publish session. In dev mode
 // a person without a factor gets a full session. SSO accounts are refused like a wrong
-// password; a local account with a server permission gets ErrPasswordLoginDisabled when
-// admin_password_login is off.
+// password; a person who needs the second factor gets ErrPasswordLoginDisabled when
+// signin.password_login is "publishers".
 func (s *Service) Login(w http.ResponseWriter, r *http.Request, username, password string) (*LoginResult, error) {
 	ctx := r.Context()
 	p, err := s.authenticate(ctx, s.clientIP(r), username, password, false)
@@ -59,16 +61,16 @@ func (s *Service) Login(w http.ResponseWriter, r *http.Request, username, passwo
 		}
 		return nil, err
 	}
-	if p.Perms != 0 && !s.cfg().AdminPasswordLogin {
-		s.recordSignInFailed(r, username, "admin password sign-in is disabled")
-		return nil, ErrPasswordLoginDisabled
-	}
-	elevated, err := s.rq.UserElevated(ctx, p.UserID)
+	needs, err := userNeedsFactor(ctx, s.rq, p.UserID)
 	if err != nil {
 		return nil, err
 	}
+	if needs && PasswordLogin.Get(s.set()) == PasswordLoginPublishers {
+		s.recordSignInFailed(r, username, "password sign-in is off for people who manage")
+		return nil, ErrPasswordLoginDisabled
+	}
 	setupOnly := false
-	if elevated.Bool {
+	if needs {
 		kinds, has, err := s.factorKinds(ctx, p.UserID)
 		if err != nil {
 			return nil, err
@@ -81,54 +83,46 @@ func (s *Service) Login(w http.ResponseWriter, r *http.Request, username, passwo
 		}
 		setupOnly = !s.dev
 	}
-	if err := s.StartSession(w, r, p.UserID, s.cfg().SessionTTL); err != nil {
+	if err := s.StartSession(w, r, p.UserID, settings.SessionTTL.Get(s.set())); err != nil {
 		return nil, err
 	}
-	u, err := s.GetUser(ctx, p.Username)
+	v, err := s.View(ctx, p.UserID, setupOnly)
 	if err != nil {
 		return nil, err
 	}
 	s.RecordSignIn(r, p.UserID, p.Username, "password")
-	return &LoginResult{User: u, SetupOnly: setupOnly}, nil
+	return &LoginResult{Session: v}, nil
 }
 
-// RecordSignIn writes a sign-in to the audit log. method is "password", "totp", "passkey",
-// "recovery" or "sso".
+// RecordSignIn writes a sign-in of user to the audit log. method is "password", "totp",
+// "passkey" or "recovery".
 func (s *Service) RecordSignIn(r *http.Request, userID int64, username, method string) {
-	s.audit.Record(r.Context(), r, audit.Event{
-		Actor: audit.Actor{UserID: userID, Name: username}, Action: audit.SignIn,
-		Target: username, Detail: map[string]any{"method": method},
-	})
+	ctx := audit.WithActor(r.Context(), audit.Actor{Kind: audit.ActorUser, UserID: userID, Name: username, IP: httpx.ClientIP(r)})
+	_ = s.audit.Record(ctx, audit.Event{Action: audit.SignInSuccess, Target: username, Detail: map[string]any{"method": method}})
 }
 
 // recordSignInFailed writes a failed sign-in to the audit log; username is the name that was
 // tried, reason says which step failed.
 func (s *Service) recordSignInFailed(r *http.Request, username, reason string) {
-	s.audit.Record(r.Context(), r, audit.Event{
-		Actor: audit.Actor{Name: username}, Action: audit.SignInFailed,
-		Target: username, Detail: map[string]any{"reason": reason},
-	})
+	ctx := audit.WithActor(r.Context(), audit.Actor{Kind: audit.ActorAnonymous, Name: username, IP: httpx.ClientIP(r)})
+	_ = s.audit.Record(ctx, audit.Event{Action: audit.SignInFailed, Target: username, Detail: map[string]any{"reason": reason}})
 }
 
-// RecordCLI writes a user change made with the telesphorepo CLI to the audit log; the actor is
-// "cli" and there is no IP address.
-func (s *Service) RecordCLI(ctx context.Context, action, username string, detail map[string]any) {
-	s.audit.Record(ctx, nil, audit.Event{Actor: audit.Actor{Name: "cli"}, Action: action, Target: username, Detail: detail})
-}
-
-// RecordSignInFailed writes a refused SSO sign-in to the audit log.
-func (s *Service) RecordSignInFailed(r *http.Request, username, reason string) {
-	s.recordSignInFailed(r, username, reason)
-}
-
-// SetupOnly reports whether p is a setup-only UI session: a local account that needs the second
-// factor (any server permission, or a repository permission other than download and publish)
-// and has none, outside dev mode. Such a session reaches only the setup routes.
-func (s *Service) SetupOnly(ctx context.Context, p *Principal) (bool, error) {
-	if p == nil || !p.Session || p.Kind != KindLocal || (p.Perms == 0 && !p.ManagesRepo) || s.dev {
+// setupOnly reports whether a UI session of user is setup-only: a local account that needs the
+// second factor (it holds a server permission with SecondFactor, or such a repository permission
+// on some repo) and has none, outside dev mode. Such a session (CredSetupSession) reaches only
+// the setup routes.
+func (s *Service) setupOnly(ctx context.Context, userID int64, kind string, server perm.Set) (bool, error) {
+	if kind != KindLocal || s.dev {
 		return false, nil
 	}
-	has, err := s.rq.HasSecondFactor(ctx, p.UserID)
+	if !needsFactor(server, false) {
+		repoManaging, err := s.rq.HasRepoPermIn(ctx, dbq.HasRepoPermInParams{UserID: userID, Perms: managingRepoPerms()})
+		if err != nil || !repoManaging {
+			return false, err
+		}
+	}
+	has, err := s.rq.HasSecondFactor(ctx, userID)
 	if err != nil {
 		return false, err
 	}
@@ -168,7 +162,7 @@ func (s *Service) StartSession(w http.ResponseWriter, r *http.Request, userID in
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: val, Path: "/",
 		MaxAge: int(ttl / time.Second), Expires: exp,
-		HttpOnly: true, Secure: s.cfg().CookieSecure, SameSite: http.SameSiteStrictMode,
+		HttpOnly: true, Secure: settings.CookieSecure.Get(s.set()), SameSite: http.SameSiteStrictMode,
 	})
 	return nil
 }
@@ -183,7 +177,7 @@ func (s *Service) Logout(w http.ResponseWriter, r *http.Request) error {
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: "", Path: "/", MaxAge: -1,
-		HttpOnly: true, Secure: s.cfg().CookieSecure, SameSite: http.SameSiteStrictMode,
+		HttpOnly: true, Secure: settings.CookieSecure.Get(s.set()), SameSite: http.SameSiteStrictMode,
 	})
 	return nil
 }
@@ -209,5 +203,14 @@ func (s *Service) sessionPrincipal(ctx context.Context, val string) (*Principal,
 	if row.Disabled {
 		return nil, nil
 	}
-	return &Principal{UserID: row.UserID, Username: row.Username, Perms: ServerPermsOf(row.Perms), Kind: row.Kind, Session: true, ManagesRepo: row.ManagesRepo}, nil
+	perms := perm.Joined(row.Perms)
+	setup, err := s.setupOnly(ctx, row.UserID, row.Kind, perms)
+	if err != nil {
+		return nil, err
+	}
+	cred := CredSession
+	if setup {
+		cred = CredSetupSession
+	}
+	return &Principal{Cred: cred, UserID: row.UserID, Username: row.Username, Perms: perms, Kind: row.Kind}, nil
 }

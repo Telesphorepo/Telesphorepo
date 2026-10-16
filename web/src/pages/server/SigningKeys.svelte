@@ -30,7 +30,7 @@
   const keys = new Resource(() => api.signingKeys.list());
   const source = listOf(keys);
   const newKey = href("/settings/signing-keys/new");
-  const signingTab = (r: string) => href(auth.canRepo(r, "settings") ? repoSettingsPath(r, "signing") : repoPath(r));
+  const signingTab = (r: string) => href(auth.canRepo(r, "repo.settings") ? repoSettingsPath(r, "signing") : repoPath(r));
 
 
   let target = $state<SigningKey | null>(null);

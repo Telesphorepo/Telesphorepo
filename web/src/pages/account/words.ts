@@ -13,9 +13,9 @@ export function deviceState(d: Device): { word: string; tone: Tone } {
 
 /** The empty list of devices, on Overview and on Devices. */
 export const noDevices =
-  "None yet. Run the login command of the Gradle plugin or the Maven extension, then approve the code that it prints.";
+  "None yet. Run the login command of the publisher client of your build tool, then approve the code that it prints.";
 
-export const clientName =(d: Device) => (d.kind === "gradle" ? "Gradle plugin" : "Maven extension");
+export const clientName = (d: Device) => d.client_title;
 
 /** A publish token's state: Active (open), Ended (closed) or Expired. */
 export function tokenState(s: SessionInfo): { word: string; tone: Tone } {

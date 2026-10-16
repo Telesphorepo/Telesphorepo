@@ -79,11 +79,11 @@ func StartServer(t testing.TB, opts ServerOpts) *Server {
 	}
 	adminPass := randHex(16)
 	env := map[string]string{
-		"TR_COOKIE_SECURE": "false",
-		"TR_DEB_DEBOUNCE":  "300ms",
-		"TR_DEB_MAX_DELAY": "3s",
-		"TR_LOG_LEVEL":     "debug",
-		"TR_BASE_URL":      "http://" + opts.Alias + ":8080",
+		"TR_COOKIE_SECURE":   "false",
+		"TR_INDEX_DEBOUNCE":  "300ms",
+		"TR_INDEX_MAX_DELAY": "3s",
+		"TR_LOG_LEVEL":       "debug",
+		"TR_BASE_URL":        "http://" + opts.Alias + ":8080",
 	}
 	if !opts.NoBootstrapAdmin {
 		env["TR_BOOTSTRAP_ADMIN_USER"] = "admin"
@@ -288,7 +288,7 @@ func FSBlobs(t testing.TB, vol string) map[string]string {
 
 // ---------------------------------------------------------------- storage moves
 
-// Move is a storage move as the API returns it (spec §11).
+// Move is a storage move as the API returns it.
 type Move struct {
 	ID      int64          `json:"id"`
 	State   string         `json:"state"`
@@ -302,9 +302,9 @@ type Move struct {
 
 // MoveFailure is one row of GET /api/storage/moves/{id}/failures.
 type MoveFailure struct {
-	AssetID int64  `json:"asset_id"`
-	Key     string `json:"key"`
-	Reason  string `json:"reason"`
+	BlobID int64  `json:"blob_id"`
+	Key    string `json:"key"`
+	Reason string `json:"reason"`
 }
 
 // StartMove PATCHes /api/settings with a storage change and requires 202 {move}.
@@ -398,6 +398,36 @@ func (s *Session) apply(r *http.Request) {
 	r.Header.Set("X-Telesphorepo-UI", "1") // the web UI's API client sends it
 }
 
+// Proof is the UI session Sess with a fresh second factor in the header X-Telesphorepo-Proof:
+// "totp <code>", "passkey <base64url assertion>" or "grant <grant>" (the routes with the
+// FreshFactor policy: device approval, manual publish sessions).
+type Proof struct {
+	Sess  *Session
+	Value string
+}
+
+func (p Proof) apply(r *http.Request) {
+	p.Sess.apply(r)
+	r.Header.Set("X-Telesphorepo-Proof", p.Value)
+}
+
+// TOTPProof is sess with a fresh TOTP code of user as the proof.
+func (s *Server) TOTPProof(t testing.TB, sess *Session, user string) Proof {
+	t.Helper()
+	return Proof{sess, "totp " + s.TOTPCode(t, user)}
+}
+
+// sessionOf returns the UI session that auth carries, or nil.
+func sessionOf(auth Auth) *Session {
+	switch a := auth.(type) {
+	case *Session:
+		return a
+	case Proof:
+		return a.Sess
+	}
+	return nil
+}
+
 // ready signs in a lazy session on its first use.
 func (s *Session) ready(t testing.TB) {
 	t.Helper()
@@ -434,7 +464,7 @@ func (s *Server) HTTPClient(auth Auth) *http.Client {
 		Timeout:       2 * time.Minute,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	if sess, ok := auth.(*Session); ok && sess != nil {
+	if sess := sessionOf(auth); sess != nil {
 		c.Jar = sess.Jar
 	}
 	return c
@@ -453,7 +483,7 @@ func (s *Server) NewRequest(t testing.TB, method, path string, body io.Reader) *
 // Do sends req with auth and returns the response (body already read and closed) plus body bytes.
 func (s *Server) Do(t testing.TB, req *http.Request, auth Auth) (*http.Response, []byte) {
 	t.Helper()
-	if sess, ok := auth.(*Session); ok && sess != nil {
+	if sess := sessionOf(auth); sess != nil {
 		sess.ready(t)
 	}
 	if auth != nil {
@@ -539,21 +569,24 @@ func (s *Server) SignIn(t testing.TB, user, pass string) *Session {
 	jar, _ := cookiejar.New(nil)
 	sess := &Session{Jar: jar}
 	var a struct {
-		SecondFactor         bool `json:"second_factor"`
-		SecondFactorRequired bool `json:"second_factor_required"`
+		SecondFactor bool `json:"second_factor"`
+		Session      *struct {
+			SecondFactorRequired bool `json:"second_factor_required"`
+		} `json:"session"`
 	}
 	s.MustAPI(t, http.MethodPost, "/api/auth/login", map[string]string{"username": user, "password": pass}, sess, &a)
 	switch {
 	case a.SecondFactor:
 		t.Fatalf("harness: %s has a second factor that the harness did not enroll", user)
-	case a.SecondFactorRequired:
+	case a.Session != nil && a.Session.SecondFactorRequired:
 		return s.LoginTOTP(t, user)
 	}
 	return sess
 }
 
-// AllServerPerms holds every server permission. A person with all of them is an administrator.
-var AllServerPerms = []string{"repos", "people", "signin", "storage", "network", "keys", "nexus", "general", "activity"}
+// AllServerPerms holds every server permission, in registry order (module start order). A person
+// with all of them is an administrator.
+var AllServerPerms = []string{"repositories.all", "people.manage", "settings.general", "activity.read", "storage.manage", "network.manage", "signing.manage", "signin.manage", "nexus.manage"}
 
 // CreateUser creates a local user with the server permissions perms (none for a plain user).
 // The harness keeps the password, so the publish helpers can sign in as the user.
@@ -586,11 +619,11 @@ func (s *Server) CreateRepo(t testing.TB, name, format string, anon bool, config
 	s.MustAPI(t, http.MethodPost, "/api/repos", body, s.Admin(), nil)
 }
 
-// SetPerms sets the repository permissions of user on repo to perms (for example "download",
-// "publish"), as the bootstrap admin. No perms removes every permission of user on repo.
+// SetPerms sets the repository permissions of user on repo to perms (for example "repo.download",
+// "repo.publish"), as the bootstrap admin. No perms removes every permission of user on repo.
 func (s *Server) SetPerms(t testing.TB, repo, user string, perms ...string) {
 	t.Helper()
-	s.MustAPI(t, http.MethodPut, "/api/permissions", map[string]any{"users": []string{user}, "repos": []string{repo}, "perms": nonNil(perms)}, s.Admin(), nil)
+	s.MustAPI(t, http.MethodPut, "/api/grants", map[string]any{"users": []string{user}, "repos": []string{repo}, "perms": nonNil(perms)}, s.Admin(), nil)
 }
 
 // CreateToken creates a read token for user (signed in to the UI with user/pass, see SignIn)
@@ -942,7 +975,7 @@ func RunClientResult(t testing.TB, image string, opts ClientOpts) *ClientResult 
 	return &ClientResult{ExitCode: st.ExitCode, Output: containerLogs(c), container: c}
 }
 
-// ---------------------------------------------------------------- publisher credentials (spec §7.6)
+// ---------------------------------------------------------------- publisher credentials
 
 // Every write on a format route needs a publish session. The harness gets one the way a
 // developer does: it enrolls a TOTP factor for the user (it computes the codes itself), signs in
@@ -1065,7 +1098,7 @@ func totpCodeOf(t testing.TB, f *totpFactor) string {
 
 // LoginTOTP enrolls TOTP factors for user when the harness has none, signs in and returns the
 // full session. A person who needs the second factor signs in with the password and then a TOTP
-// code; any other user signs in with the password alone (spec §13) and keeps the factors for
+// code; any other user signs in with the password alone and keeps the factors for
 // approvals and manual sessions.
 func (s *Server) LoginTOTP(t testing.TB, user string) *Session {
 	t.Helper()
@@ -1103,15 +1136,16 @@ type Enrollment struct {
 // b64 is the encoding of device keys, nonces and signatures on the wire.
 func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 
-// StartEnrollment generates an Ed25519 key and starts the device flow for it, without auth.
-func (s *Server) StartEnrollment(t testing.TB, name, kind string) (Enrollment, ed25519.PrivateKey) {
+// StartEnrollment generates an Ed25519 key and starts the device flow for it from publisher
+// client client ("gradle" or "maven"), without auth.
+func (s *Server) StartEnrollment(t testing.TB, name, client string) (Enrollment, ed25519.PrivateKey) {
 	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var en Enrollment
-	s.MustAPI(t, http.MethodPost, "/api/devices/enroll", map[string]string{"name": name, "kind": kind, "public_key": b64(pub)}, nil, &en)
+	s.MustAPI(t, http.MethodPost, "/api/devices/enroll", map[string]string{"name": name, "client": client, "public_key": b64(pub)}, nil, &en)
 	if en.DeviceCode == "" || en.UserCode == "" {
 		t.Fatalf("POST /api/devices/enroll: incomplete answer %+v", en)
 	}
@@ -1138,7 +1172,7 @@ func (s *Server) PollEnrollment(t testing.TB, deviceCode string) (int, PollAnswe
 // ApproveEnrollment approves userCode as user with a fresh TOTP code.
 func (s *Server) ApproveEnrollment(t testing.TB, sess *Session, user, userCode string) (int, []byte) {
 	t.Helper()
-	return s.API(t, http.MethodPost, "/api/devices/approve", map[string]string{"user_code": userCode, "totp_code": s.TOTPCode(t, user)}, sess)
+	return s.API(t, http.MethodPost, "/api/devices/approve", map[string]string{"user_code": userCode}, s.TOTPProof(t, sess, user))
 }
 
 // EnrollDevice enrolls a new device key for user the real way: start the flow, sign in with
@@ -1263,7 +1297,7 @@ func (s *Server) PublishAuth(t testing.TB, user, repo string) Basic {
 // fresh TOTP code.
 func (s *Server) ManualSession(t testing.TB, sess *Session, user, repo string) (int, []byte) {
 	t.Helper()
-	return s.API(t, http.MethodPost, "/api/publish/sessions/manual", map[string]string{"repo": repo, "totp_code": s.TOTPCode(t, user)}, sess)
+	return s.API(t, http.MethodPost, "/api/publish/sessions/manual", map[string]string{"repo": repo}, s.TOTPProof(t, sess, user))
 }
 
 // OIDCSession exchanges a CI identity token for a publish session for repo.

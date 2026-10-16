@@ -1,16 +1,17 @@
 <!--
-  Network and proxy (Network permission): the trusted proxies only (the trusted_proxies setting, in
-  plain words). The server takes the visitor's address from X-Forwarded-For only when the
-  connection comes from a trusted proxy: none, a proxy on this machine or network ("private"),
-  Cloudflare ("list:cloudflare") or custom addresses. Repository network limits live on each
-  repository's Access tab and in Networks, not here. Proxies that sent forwarded headers without
-  being trusted show as detected proxies, each with Trust. The Caddyfile is the recommended setup.
+  Network and proxy (Network permission): the trusted proxies only, in plain words. The server
+  takes the visitor's address from X-Forwarded-For only when the connection comes from a trusted
+  proxy: none, a proxy on this machine or network ("private" in the setting trusted_proxies),
+  Cloudflare (the IP list cloudflare, through /api/network/trusted-proxies) or custom addresses.
+  Repository network limits live on each repository's Access tab and in Networks, not here.
+  Proxies that sent forwarded headers without being trusted show as detected proxies, each with
+  Trust. The Caddyfile is the recommended setup.
 -->
 <script lang="ts">
   import { untrack } from "svelte";
   import { toast } from "svelte-sonner";
   import type { PageProps } from "$lib/router.svelte";
-  import { api, ApiError, errorMessage, type ProxyCandidate, type Setting } from "$lib/api";
+  import { api, ApiError, errorMessage, type ProxyCandidate, type Setting, type TrustedProxyLists } from "$lib/api";
   import { Resource, listOf } from "$lib/load.svelte";
   import { Draft } from "$lib/unsaved.svelte";
   import { formatCount } from "$lib/format";
@@ -40,36 +41,42 @@
   const id = $props.id();
   const settings = new Resource(() => api.settings.get());
   const candidates = new Resource(() => api.network.proxyCandidates());
+  const trusted = new Resource(() => api.trustedProxies.get());
+  const ipLists = new Resource(() => api.ipLists.list());
+  const cloudflareID = $derived(ipLists.data?.find((l) => l.name === "cloudflare")?.id ?? 0);
+  // Cloudflare named by TR_TRUSTED_PROXIES: it changes only with the environment.
+  const envCloudflare = $derived(!!trusted.data?.env_lists.includes("cloudflare"));
 
   const all = $derived((settings.data?.groups ?? []).flatMap((g) => g.settings));
   const setting = $derived<Setting | undefined>(all.find((s) => s.key === "trusted_proxies"));
   const baseURL = $derived(String(all.find((s) => s.key === "base_url")?.value ?? ""));
   const locked = $derived(!!setting?.locked);
 
-  // The setting's entries, split by what they mean on this page. `lists` keeps the names of other
-  // network lists that an older value may hold, so a save never drops them.
-  type Value = { local: boolean; cloudflare: boolean; custom: string[]; lists: string[] };
-  const split = (v: unknown): Value => {
+  // What the page edits: the literal entries of the setting (private and addresses), and the IP
+  // lists that the trusted proxies include, by id. `lists` keeps the lists other than cloudflare,
+  // so a save never drops them.
+  type Value = { local: boolean; cloudflare: boolean; custom: string[]; lists: number[] };
+  const split = (v: unknown, t: TrustedProxyLists): Value => {
     const xs = Array.isArray(v) ? v.map(String) : [];
-    const named = xs.filter((x) => x.startsWith("list:")).map((x) => x.slice(5));
+    const ids = t.lists.map((l) => l.id);
     return {
       local: xs.includes("private"),
-      cloudflare: named.includes("cloudflare"),
+      cloudflare: ids.includes(cloudflareID),
       custom: xs.filter((x) => x !== "private" && !x.startsWith("list:")),
-      lists: named.filter((n) => n !== "cloudflare"),
+      lists: ids.filter((id) => id !== cloudflareID),
     };
   };
-  const join = (v: Value): string[] => [
-    ...(v.local ? ["private"] : []),
-    ...(v.cloudflare ? ["list:cloudflare"] : []),
-    ...v.lists.map((n) => "list:" + n),
-    ...v.custom,
-  ];
+  const literals = (v: Value): string[] => [...(v.local ? ["private"] : []), ...v.custom];
+  const listIDs = (v: Value): number[] => [...(v.cloudflare && cloudflareID ? [cloudflareID] : []), ...v.lists];
+  const listName = (id: number) => trusted.data?.lists.find((l) => l.id === id)?.name ?? ipLists.data?.find((l) => l.id === id)?.name ?? String(id);
+  const same = <T,>(a: T[], b: T[]) => a.length === b.length && a.every((x, i) => x === b[i]);
 
   let draft = $state<Draft<Value> | null>(null);
   $effect(() => {
     const v = setting?.value;
-    if (setting) untrack(() => (draft = new Draft(split(v))));
+    const t = trusted.data;
+    const loaded = !!ipLists.data;
+    if (setting && t && loaded) untrack(() => (draft = new Draft(split(v, t))));
   });
 
   // "Other addresses" opens when it holds addresses, or when the user ticks it.
@@ -93,14 +100,19 @@
   }
 
   // The custom entries as table rows: addresses, then other network lists.
-  type Entry = { value: string; label: string; list: boolean };
+  type Entry = { value: string; label: string; list: number };
   const entries = $derived<Entry[]>(
-    draft ? [...draft.value.custom.map((a) => ({ value: a, label: a, list: false })), ...draft.value.lists.map((n) => ({ value: n, label: `Network list ${n}`, list: true }))] : [],
+    draft
+      ? [
+          ...draft.value.custom.map((a) => ({ value: a, label: a, list: 0 })),
+          ...draft.value.lists.map((id) => ({ value: "list:" + id, label: `Network list ${listName(id)}`, list: id })),
+        ]
+      : [],
   );
   const entrySource = { get items() { return entries; }, loading: false, error: "" };
   function removeEntry(e: Entry) {
     if (!draft) return;
-    if (e.list) draft.value.lists = draft.value.lists.filter((n) => n !== e.value);
+    if (e.list) draft.value.lists = draft.value.lists.filter((id) => id !== e.list);
     else draft.value.custom = draft.value.custom.filter((a) => a !== e.value);
   }
 
@@ -116,24 +128,28 @@
     if (v.local !== was.local) out.push(v.local ? "Trusts a proxy on this machine or network" : "Stops trusting proxies on this machine or network");
     if (v.cloudflare !== was.cloudflare) out.push(v.cloudflare ? "Trusts Cloudflare" : "Stops trusting Cloudflare");
     const added = v.custom.filter((a) => !was.custom.includes(a));
-    const removed = [...was.custom.filter((a) => !v.custom.includes(a)), ...was.lists.filter((n) => !v.lists.includes(n))];
+    const removed = [...was.custom.filter((a) => !v.custom.includes(a)), ...was.lists.filter((id) => !v.lists.includes(id)).map(listName)];
     if (added.length) out.push(`Trusts ${added.join(", ")}`);
     if (removed.length) out.push(`Stops trusting ${removed.join(", ")}`);
-    if (join(v).length === 0) out.push("Trusts no proxy: the server uses the address of the direct connection");
+    if (literals(v).length === 0 && listIDs(v).length === 0 && !trusted.data?.env_lists.length)
+      out.push("Trusts no proxy: the server uses the address of the direct connection");
     out.push("Changes the visitor address that repository network limits, sign-in limits and Activity use");
     return out;
   });
 
   async function save() {
     if (!draft) return;
+    const v = draft.value;
     try {
-      await api.settings.patch({ trusted_proxies: join(draft.value) });
+      if (!same(literals(v), literals(draft.saved))) await api.settings.patch({ trusted_proxies: literals(v) });
+      if (!same(listIDs(v), listIDs(draft.saved))) await api.trustedProxies.set(listIDs(v));
     } catch (e) {
       throw new Error(e instanceof ApiError && e.fields?.trusted_proxies ? e.fields.trusted_proxies : errorMessage(e));
     }
     draft.commit();
     customOpen = false;
     toast.success("Saved the trusted proxies");
+    trusted.reload();
     candidates.reload();
   }
 
@@ -150,10 +166,14 @@
 
 <PageHeader title="Network and proxy" description="How the server finds each visitor's address when a proxy sits in front of it." />
 
-{#if settings.loading && !settings.data}
+{#if (settings.loading && !settings.data) || (trusted.loading && !trusted.data) || (ipLists.loading && !ipLists.data)}
   <Loading rows={6} />
 {:else if settings.error && !settings.data}
   <ErrorState error={settings.error} onRetry={settings.reload} />
+{:else if trusted.error && !trusted.data}
+  <ErrorState error={trusted.error} onRetry={trusted.reload} />
+{:else if ipLists.error && !ipLists.data}
+  <ErrorState error={ipLists.error} onRetry={ipLists.reload} />
 {:else if !setting || !draft}
   <ErrorState error="The server sent no trusted proxies setting." onRetry={settings.reload} />
 {:else}
@@ -215,7 +235,13 @@
           label="Cloudflare"
           description="The server trusts the addresses that Cloudflare publishes, and gets them again every day. It reads the visitor's address from the header that Cloudflare adds, also when a trusted proxy sits behind Cloudflare."
         >
-          {#snippet control()}<Checkbox id="{id}-cf" checked={v.cloudflare} disabled={locked} onCheckedChange={(c) => (v.cloudflare = c === true)} />{/snippet}
+          {#snippet control()}<Checkbox
+              id="{id}-cf"
+              checked={v.cloudflare || envCloudflare}
+              disabled={envCloudflare || !cloudflareID}
+              onCheckedChange={(c) => (v.cloudflare = c === true)}
+            />{/snippet}
+          {#if envCloudflare}<p class="text-meta text-muted-foreground">Set by TR_TRUSTED_PROXIES.</p>{/if}
         </OptionRow>
         <OptionRow id="{id}-custom" label="Other addresses" description="Choose this for a proxy at another address, such as a load balancer.">
           {#snippet control()}<Checkbox id="{id}-custom" checked={showCustom} disabled={locked} onCheckedChange={(c) => setCustom(c === true)} />{/snippet}

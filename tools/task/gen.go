@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 )
 
-// gen runs sqlc for every internal/**/sqlc.yaml (spec §5.5): core and each format plugin own
-// their own config, queries and generated dbq package.
+// gen runs sqlc for every internal/**/sqlc.yaml: the kernel and each module with a
+// schema own their own config, queries and generated dbq package.
 func gen(ctx context.Context) error {
 	var configs []string
 	err := filepath.WalkDir("internal", func(p string, d fs.DirEntry, err error) error {

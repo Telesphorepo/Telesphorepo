@@ -1,6 +1,6 @@
 <!--
   Repositories: every repository for a holder of All repositories; for anyone else the repositories
-  where they hold more than download. A row opens its settings, or its files when the person can
+  where they hold more than download and publish (auth.listsRepo). A row opens its settings, or its files when the person can
   open no settings tab. Pick rows (Edit settings) to make them public or private at once, or (All
   repositories) to delete them after a confirm; more than one asks you to type the count.
 -->
@@ -26,11 +26,10 @@
   const repos = new Resource(() => api.repos.list());
   const formats = new Resource(() => api.formats.list());
   const titles = $derived(Object.fromEntries((formats.data ?? []).map((f) => [f.name, f.title])));
-  // GET /api/repos also lists the public repositories and those with download only.
-  const shown = (r: Repo) => auth.can("repos") || r.name in auth.repoPermissions;
-  const source = listOf(repos, (items) => items.filter(shown).sort((a, b) => a.name.localeCompare(b.name)));
+  // GET /api/repos also lists the public repositories and those with download or publish only.
+  const source = listOf(repos, (items) => items.filter((r) => auth.listsRepo(r.name)).sort((a, b) => a.name.localeCompare(b.name)));
   const rowHref = (r: Repo) => href(auth.managesRepo(r.name) ? repoSettingsPath(r.name) : repoPath(r.name));
-  const canCreate = $derived(auth.can("repos"));
+  const canCreate = $derived(auth.can("repositories.all"));
   const newRepo = href("/settings/repositories/new");
 
   // --- bulk actions ---
@@ -83,7 +82,7 @@
 </PageHeader>
 
 <Section>
-  <RepoTable {source} {titles} href={rowHref} bind:picked pickable={(r) => auth.canRepo(r.name, "settings")}>
+  <RepoTable {source} {titles} href={rowHref} bind:picked pickable={(r) => auth.canRepo(r.name, "repo.settings")}>
     {#snippet bulk()}
       <Button variant="outline" size="sm" disabled={busy} onclick={() => setPublic(true)}>Make public</Button>
       <Button variant="outline" size="sm" disabled={busy} onclick={() => setPublic(false)}>Make private</Button>

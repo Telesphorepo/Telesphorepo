@@ -11,33 +11,49 @@ import (
 	"testing"
 )
 
-// Versions, builds, artifact snippets and build provenance of Maven artifacts (spec "Browse":
-// GET /api/repos/{name}/versions, /builds, /snippets, /file and the provenance on /tree).
+// Versions, builds, artifact snippets and CI build records of Maven artifacts (SPEC.md "HTTP surface":
+// GET /api/repos/{name}/versions, /builds, /snippets, /file and the build on /tree).
 
-type provenanceJSON struct {
-	Repository    string `json:"repository"`
-	RepositoryURL string `json:"repository_url"`
-	SHA           string `json:"sha"`
-	CommitURL     string `json:"commit_url"`
-	Ref           string `json:"ref"`
-	RefName       string `json:"ref_name"`
-	RefType       string `json:"ref_type"`
-	RunID         string `json:"run_id"`
-	RunAttempt    string `json:"run_attempt"`
-	RunURL        string `json:"run_url"`
-	Workflow      string `json:"workflow"`
-	WorkflowPath  string `json:"workflow_path"`
-	WorkflowRef   string `json:"workflow_ref"`
-	Actor         string `json:"actor"`
+type buildLinkJSON struct {
+	Rel   string `json:"rel"`
+	Label string `json:"label"`
+	URL   string `json:"url"`
+}
+
+// buildRecordJSON is a CI build record (the "build" of a file, a version or a build).
+type buildRecordJSON struct {
+	ID            int64           `json:"id"`
+	Provider      string          `json:"provider"`
+	ProviderTitle string          `json:"provider_title"`
+	Repository    string          `json:"repository"`
+	Revision      string          `json:"revision"`
+	Ref           string          `json:"ref"`
+	RefName       string          `json:"ref_name"`
+	RefType       string          `json:"ref_type"`
+	Run           string          `json:"run"`
+	Workflow      string          `json:"workflow"`
+	Actor         string          `json:"actor"`
+	Links         []buildLinkJSON `json:"links"`
+}
+
+// sameBuild reports whether got is want, the id aside.
+func sameBuild(got *buildRecordJSON, want buildRecordJSON) bool {
+	if got == nil || got.ID == 0 {
+		return false
+	}
+	g := *got
+	g.ID = 0
+	return slices.Equal(g.Links, want.Links) && fmt.Sprint(g) == fmt.Sprint(want)
 }
 
 type versionJSON struct {
-	Version     string          `json:"version"`
-	Kind        string          `json:"kind"`
-	LatestBuild string          `json:"latest_build"`
-	BuildsCount int             `json:"builds_count"`
-	PublishedAt string          `json:"published_at"`
-	Provenance  *provenanceJSON `json:"provenance"`
+	Version     string           `json:"version"`
+	Kind        string           `json:"kind"`
+	LatestBuild string           `json:"latest_build"`
+	LatestLabel string           `json:"latest_label"`
+	BuildsCount int              `json:"builds_count"`
+	PublishedAt string           `json:"published_at"`
+	Build       *buildRecordJSON `json:"build"`
 }
 
 type artifactJSON struct {
@@ -56,21 +72,23 @@ type buildsJSON struct {
 	Artifact *artifactJSON `json:"artifact"`
 	Version  *versionJSON  `json:"version"`
 	Items    []struct {
-		Build string `json:"build"`
+		Build string `json:"id"`
+		Label string `json:"label"`
 		Files []struct {
 			Name       string `json:"name"`
 			Path       string `json:"path"`
 			Classifier string `json:"classifier"`
 			Extension  string `json:"extension"`
 		} `json:"files"`
-		PublishedAt string          `json:"published_at"`
-		Provenance  *provenanceJSON `json:"provenance"`
+		PublishedAt string           `json:"published_at"`
+		CI          *buildRecordJSON `json:"build"`
 	} `json:"items"`
 	Next *string `json:"next"`
 }
 
 type snippetJSON struct {
-	Client  string `json:"client"`
+	ID      string `json:"id"`
+	Tool    string `json:"tool"`
 	Purpose string `json:"purpose"`
 	Context string `json:"context"`
 	Via     string `json:"via"`
@@ -92,7 +110,7 @@ type artifactSnippetsJSON struct {
 func codeOf(snips []snippetJSON, client string) string {
 	var b strings.Builder
 	for _, s := range snips {
-		if s.Client == client {
+		if s.Tool == client {
 			b.WriteString(s.Code)
 		}
 	}
@@ -152,11 +170,11 @@ func TestVersionsAndSnippets(t *testing.T) {
 			t.Fatalf("versions = %v", got)
 		}
 		snap := v.Items[0]
-		if snap.BuildsCount != 3 || snap.LatestBuild != "20261003.101010-3" ||
-			snap.PublishedAt == "" || snap.Provenance != nil {
+		if snap.BuildsCount != 3 || snap.LatestBuild != "20261003.101010-3" || snap.LatestLabel != "Build 3" ||
+			snap.PublishedAt == "" || snap.Build != nil {
 			t.Fatalf("snapshot version = %+v", snap)
 		}
-		if v.Items[1].BuildsCount != 1 || v.Items[1].LatestBuild != "" {
+		if v.Items[1].BuildsCount != 1 || v.Items[1].LatestBuild != "" || v.Items[1].LatestLabel != "" {
 			t.Fatalf("release version = %+v", v.Items[1])
 		}
 
@@ -183,12 +201,16 @@ func TestVersionsAndSnippets(t *testing.T) {
 		if b.Artifact == nil || b.Version == nil || b.Version.BuildsCount != 3 {
 			t.Fatalf("builds: %+v", b)
 		}
-		var ids []string
+		var ids, labels []string
 		for _, it := range b.Items {
 			ids = append(ids, it.Build)
+			labels = append(labels, it.Label)
 		}
 		if !slices.Equal(ids, []string{"20261003.101010-3", "20261002.101010-2", "20261001.101010-1"}) {
 			t.Fatalf("builds = %v", ids)
+		}
+		if !slices.Equal(labels, []string{"Build 3", "Build 2", "Build 1"}) {
+			t.Fatalf("build labels = %v", labels)
 		}
 		var files []string
 		for _, f := range b.Items[0].Files {
@@ -211,7 +233,7 @@ func TestVersionsAndSnippets(t *testing.T) {
 
 		var rel buildsJSON
 		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/builds?path=com/acme/lib/&version=1.1.0", nil, read, &rel)
-		if len(rel.Items) != 1 || rel.Items[0].Build != "1.1.0" || len(rel.Items[0].Files) != 3 {
+		if len(rel.Items) != 1 || rel.Items[0].Build != "1.1.0" || rel.Items[0].Label != "" || len(rel.Items[0].Files) != 3 {
 			t.Fatalf("release builds = %+v", rel)
 		}
 
@@ -313,16 +335,27 @@ func TestVersionsAndSnippets(t *testing.T) {
 
 	t.Run("repo snippets", func(t *testing.T) {
 		var u struct {
-			BaseURL  string        `json:"base_url"`
+			BaseURL string `json:"base_url"`
+			Tools   []struct {
+				ID    string `json:"id"`
+				Label string `json:"label"`
+			} `json:"tools"`
 			Snippets []snippetJSON `json:"snippets"`
 		}
 		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/usage", nil, read, &u)
 		seen := map[string]bool{}
 		for _, sn := range u.Snippets {
-			if sn.Context != "repo" || sn.Client == "" || sn.Code == "" {
+			if sn.Context != "repo" || sn.Tool == "" || sn.ID == "" || sn.Code == "" {
 				t.Fatalf("snippet %+v", sn)
 			}
-			seen[sn.Purpose+"/"+sn.Via+"/"+sn.Client] = true
+			seen[sn.Purpose+"/"+sn.Via+"/"+sn.Tool] = true
+		}
+		labels := map[string]string{}
+		for _, tl := range u.Tools {
+			labels[tl.ID] = tl.Label
+		}
+		if labels["github-actions"] != "GitHub Actions" || labels["gradle-kotlin"] != "Gradle (Kotlin)" {
+			t.Fatalf("usage tools: %v", u.Tools)
 		}
 		for _, want := range []string{"use//gradle-kotlin", "use//gradle-groovy", "use//maven", "publish/computer/gradle-kotlin",
 			"publish/computer/maven", "publish/ci/github-actions", "publish/ci/jenkins", "publish/hand/curl"} {
@@ -334,8 +367,8 @@ func TestVersionsAndSnippets(t *testing.T) {
 }
 
 // TestBuildProvenance publishes from a CI token with GitHub Actions claims (Keycloak plays
-// GitHub, see keycloak_test.go) and from a device, and checks the provenance on the tree, the
-// file details and the versions.
+// GitHub, see keycloak_test.go) and from a device, and checks the CI build record on the tree,
+// the file details, the versions and the builds.
 func TestBuildProvenance(t *testing.T) {
 	kc := newKeycloak(t)
 	s := StartServer(t, ServerOpts{})
@@ -364,21 +397,26 @@ func TestBuildProvenance(t *testing.T) {
 	put(dir+"0.9.0/app-0.9.0.pom", mavenPOM("com.acme", "app", "0.9.0", "jar", ""), device)
 
 	origin := fmt.Sprintf("http://%s:%d", kc.Alias, kc.Port)
-	want := provenanceJSON{
-		Repository: kcCIRepository, RepositoryURL: origin + "/" + kcCIRepository, SHA: kcCISHA,
-		CommitURL: origin + "/" + kcCIRepository + "/commit/" + kcCISHA, Ref: kcCIRef, RefName: "v1.0.0", RefType: "tag",
-		RunID: kcCIRunID, RunAttempt: kcCIRunAttempt,
-		RunURL:   origin + "/" + kcCIRepository + "/actions/runs/" + kcCIRunID + "/attempts/" + kcCIRunAttempt,
-		Workflow: kcCIWorkflow, WorkflowPath: ".github/workflows/release.yml", WorkflowRef: kcCIWorkflowRef, Actor: kcCIActor,
+	repoURL := origin + "/" + kcCIRepository
+	want := buildRecordJSON{
+		Provider: "github-actions", ProviderTitle: "GitHub Actions",
+		Repository: kcCIRepository, Revision: kcCISHA, Ref: kcCIRef, RefName: "v1.0.0", RefType: "tag",
+		Run: kcCIRunID, Workflow: kcCIWorkflow, Actor: kcCIActor,
+		Links: []buildLinkJSON{
+			{Rel: "repository", Label: kcCIRepository, URL: repoURL},
+			{Rel: "commit", Label: kcCISHA[:7], URL: repoURL + "/commit/" + kcCISHA},
+			{Rel: "run", Label: "Run " + kcCIRunID, URL: repoURL + "/actions/runs/" + kcCIRunID + "/attempts/" + kcCIRunAttempt},
+			{Rel: "workflow", Label: ".github/workflows/release.yml", URL: repoURL + "/blob/" + kcCISHA + "/.github/workflows/release.yml"},
+		},
 	}
 	read := Auth(nil)
 
 	t.Run("tree", func(t *testing.T) {
 		var tree struct {
 			Items []struct {
-				Name       string          `json:"name"`
-				UploadedBy string          `json:"uploaded_by"`
-				Provenance *provenanceJSON `json:"provenance"`
+				Name       string           `json:"name"`
+				UploadedBy string           `json:"uploaded_by"`
+				Build      *buildRecordJSON `json:"build"`
 			} `json:"items"`
 		}
 		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/tree?path="+dir+"1.0.0", nil, read, &tree)
@@ -386,33 +424,33 @@ func TestBuildProvenance(t *testing.T) {
 			t.Fatalf("tree: %+v", tree)
 		}
 		for _, it := range tree.Items {
-			if it.Provenance == nil || *it.Provenance != want || it.UploadedBy != "" {
-				t.Fatalf("%s: provenance %+v uploaded_by %q, want %+v and no user", it.Name, it.Provenance, it.UploadedBy, want)
+			if !sameBuild(it.Build, want) || it.UploadedBy != "" {
+				t.Fatalf("%s: build %+v uploaded_by %q, want %+v and no user", it.Name, it.Build, it.UploadedBy, want)
 			}
 		}
 		// Decode into a fresh value: json keeps a field that the reply omits, so a reused
-		// item would keep the provenance of the first reply.
+		// item would keep the build of the first reply.
 		tree.Items = nil
 		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/tree?path="+dir+"0.9.0", nil, read, &tree)
-		if len(tree.Items) != 1 || tree.Items[0].Provenance != nil || tree.Items[0].UploadedBy != s.AdminUser {
-			t.Fatalf("a device upload records no provenance: %+v", tree)
+		if len(tree.Items) != 1 || tree.Items[0].Build != nil || tree.Items[0].UploadedBy != s.AdminUser {
+			t.Fatalf("a device upload has no build record: %+v", tree)
 		}
 	})
 
 	t.Run("file details", func(t *testing.T) {
 		var f struct {
-			Path       string          `json:"path"`
-			Size       int64           `json:"size"`
-			Kind       string          `json:"kind"`
-			Provenance *provenanceJSON `json:"provenance"`
+			Path  string           `json:"path"`
+			Size  int64            `json:"size"`
+			Kind  string           `json:"kind"`
+			Build *buildRecordJSON `json:"build"`
 		}
 		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/file?path="+dir+"1.0.0/app-1.0.0.jar", nil, read, &f)
-		if f.Path != dir+"1.0.0/app-1.0.0.jar" || f.Size != 3 || f.Kind != "artifact" || f.Provenance == nil || *f.Provenance != want {
+		if f.Path != dir+"1.0.0/app-1.0.0.jar" || f.Size != 3 || f.Kind != "artifact" || !sameBuild(f.Build, want) {
 			t.Fatalf("file details: %+v", f)
 		}
 		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/file?path="+dir+"0.9.0/app-0.9.0.pom", nil, read, &f)
-		if f.Provenance != nil {
-			t.Fatalf("device upload: provenance %+v", f.Provenance)
+		if f.Build != nil {
+			t.Fatalf("device upload: build %+v", f.Build)
 		}
 		st, b := s.API(t, http.MethodGet, "/api/repos/"+repo+"/file?path="+dir+"nope.jar", nil, read)
 		wantAPIStatus(t, "details of a missing file", st, b, http.StatusNotFound)
@@ -421,13 +459,12 @@ func TestBuildProvenance(t *testing.T) {
 	t.Run("versions", func(t *testing.T) {
 		var v versionsJSON
 		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/versions?path="+dir, nil, read, &v)
-		if len(v.Items) != 2 || v.Items[0].Version != "1.0.0" || v.Items[0].Provenance == nil || *v.Items[0].Provenance != want ||
-			v.Items[1].Provenance != nil {
+		if len(v.Items) != 2 || v.Items[0].Version != "1.0.0" || !sameBuild(v.Items[0].Build, want) || v.Items[1].Build != nil {
 			t.Fatalf("versions: %+v", v)
 		}
 		var b buildsJSON
 		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/builds?path="+dir+"&version=1.0.0", nil, read, &b)
-		if len(b.Items) != 1 || b.Items[0].Provenance == nil || *b.Items[0].Provenance != want {
+		if len(b.Items) != 1 || !sameBuild(b.Items[0].CI, want) {
 			t.Fatalf("builds: %+v", b)
 		}
 	})

@@ -56,6 +56,8 @@ export type RequestOptions = {
   query?: Query;
   /** A publish session token, sent as a Bearer credential instead of the session cookie. */
   token?: string;
+  /** A fresh second factor, sent in the header X-Telesphorepo-Proof (see proofHeader). */
+  proof?: string;
   signal?: AbortSignal;
 };
 
@@ -77,6 +79,7 @@ export async function request<T = void>(method: string, url: string, opts: Reque
     body = JSON.stringify(opts.body);
   }
   if (opts.token) headers.Authorization = "Bearer " + opts.token;
+  if (opts.proof) headers["X-Telesphorepo-Proof"] = opts.proof;
 
   let res: Response;
   try {

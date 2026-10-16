@@ -2,19 +2,20 @@ package api
 
 import (
 	"errors"
-	"log/slog"
 	"net/http"
 	"slices"
 	"strconv"
-	"strings"
 
-	"github.com/Telesphorepo/Telesphorepo/internal/audit"
+	"github.com/Telesphorepo/Telesphorepo/internal/perm"
+	"github.com/Telesphorepo/Telesphorepo/internal/route"
+
+	"github.com/Telesphorepo/Telesphorepo/internal/access"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
-// Write routes that change a set take a list (spec §10, bulk actions). Each route checks every
+// Write routes that change a set take a list (bulk actions). Each route checks every
 // item before it changes any, and records one audit event per changed item.
 
 // maxBulk is the most items one list may hold.
@@ -38,46 +39,35 @@ func listOf(w http.ResponseWriter, field string, xs []string) ([]string, bool) {
 	return out, true
 }
 
-// canEach checks that p holds need (or one of them) on every repo of names: 404 for an unknown
-// name, 403 for a repo without the permission.
-func (a *API) canEach(w http.ResponseWriter, r *http.Request, p *auth.Principal, names []string, need auth.RepoPerm) bool {
-	if p.Perms.Has(auth.PermRepos) {
-		return true
-	}
+// canEach checks with the access engine that p may manage every repo of names with need (or one
+// of them): 404 for an unknown name, else the refusal of the engine.
+func (a *API) canEach(w http.ResponseWriter, r *http.Request, p *auth.Principal, names []string, need perm.ID) bool {
 	for _, name := range names {
 		repo, err := a.repos.ByName(r.Context(), name)
 		if errors.Is(err, repos.ErrNotFound) {
 			err = &repos.MissingError{Kind: "repository", Name: name}
 		}
 		if err != nil {
-			fail(w, r, err)
+			route.Fail(w, r, err)
 			return false
 		}
-		set, err := a.auth.RepoPerms(r.Context(), p, repo)
-		if err != nil {
-			fail(w, r, err)
-			return false
-		}
-		if !set.Any(need) {
-			httpx.Error(w, http.StatusForbidden, "permission required on "+repo.Name+": "+strings.Join(need.Names(), " or "))
+		if d := a.access.Decide(r.Context(), r, p, repo, access.Manage, need); !d.Allowed {
+			httpx.Error(w, d.Status, d.Message)
 			return false
 		}
 	}
 	return true
 }
 
-// setReposPublic makes the repos of names public or private (settings on each):
+// setReposPublic makes the repos of names public or private (settings on each) in one repo update:
 // {names, anonymous_read} -> 200 {changed: n}. An unknown name answers 404 and changes nothing.
-func (a *API) setReposPublic(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.session(w, r)
-	if !ok {
-		return
-	}
+func (a *API) setReposPublic(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	p := c.P
 	var in struct {
 		Names         []string `json:"names"`
 		AnonymousRead *bool    `json:"anonymous_read"`
 	}
-	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
+	if !a.kit.Decode(w, r, &in) {
 		return
 	}
 	names, ok := listOf(w, "names", in.Names)
@@ -88,91 +78,29 @@ func (a *API) setReposPublic(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "give anonymous_read")
 		return
 	}
-	if !a.canEach(w, r, p, names, auth.RepoSettings) {
+	if !a.canEach(w, r, p, names, perm.RepoSettings) {
 		return
 	}
-	changed, err := a.repos.SetAnonymousRead(r.Context(), names, *in.AnonymousRead)
+	_, changed, err := a.repos.UpdateAll(r.Context(), names, repos.Patch{AnonymousRead: in.AnonymousRead})
 	if err != nil {
-		fail(w, r, err)
+		route.Fail(w, r, err)
 		return
 	}
-	for _, repo := range changed {
-		a.record(r, p, audit.RepoUpdate, repo, repo.Name, map[string]any{"fields": []string{"anonymous_read"}, "anonymous_read": repo.AnonymousRead})
-	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]int{"changed": len(changed)})
-}
-
-// deleteRepos deletes the repos of names with all their files and blobs (repos): {names} ->
-// 200 {deleted: [names], files: n}. It first checks that every repo exists (404) and that none
-// is locked (409); then nothing is deleted. A delete removes blobs, so the set is not one
-// transaction: the repos go one after another, and the first failure stops the rest with 500
-// {deleted: [names done], error}.
-func (a *API) deleteRepos(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.can(w, r, auth.PermRepos)
-	if !ok {
-		return
-	}
-	var in struct {
-		Names []string `json:"names"`
-	}
-	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
-		return
-	}
-	names, ok := listOf(w, "names", in.Names)
-	if !ok {
-		return
-	}
-	ctx := r.Context()
-	all := make([]*repos.Repo, 0, len(names))
-	for _, name := range names {
-		repo, err := a.repos.ByName(ctx, name)
-		if errors.Is(err, repos.ErrNotFound) {
-			err = &repos.MissingError{Kind: "repository", Name: name}
-		}
-		if err != nil {
-			fail(w, r, err)
-			return
-		}
-		if repo.LockedBy != "" {
-			httpx.Error(w, http.StatusConflict, repo.Name+": "+repo.LockedBy)
-			return
-		}
-		all = append(all, repo)
-	}
-	deleted := make([]string, 0, len(all))
-	files := 0
-	for _, repo := range all {
-		n, err := a.files.DeleteRepo(ctx, repo)
-		files += n
-		if err != nil {
-			slog.ErrorContext(ctx, "delete repo", "repo", repo.Name, "err", err)
-			httpx.WriteJSON(w, http.StatusInternalServerError, map[string]any{
-				"deleted": deleted, "error": "The server could not delete " + repo.Name + ". The server log shows the cause."})
-			return
-		}
-		a.rules.Forget(repo.ID) // the rows cascaded with the repo; an id can be used again
-		// The repo row is gone, so the event keeps only its name (in the detail).
-		a.audit.Record(ctx, r, audit.Event{Actor: auth.ActorOf(p), Action: audit.RepoDelete,
-			Repo: repo.Name, Target: repo.Name, Detail: map[string]any{"count": n}})
-		deleted = append(deleted, repo.Name)
-	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"deleted": deleted, "files": files})
+	httpx.WriteJSON(w, http.StatusOK, map[string]int{"changed": changed})
 }
 
 // setUsersDisabled disables or enables the users of usernames (people): {usernames, disabled} ->
 // 200 {changed: n}. An unknown name answers 404 and changes nothing. The caller cannot disable
 // their own account, and changes only people whose permissions they all hold (403). A disabled
-// user's sessions end. The last enabled person with People stays enabled (409).
-func (a *API) setUsersDisabled(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.can(w, r, auth.PermPeople)
-	if !ok {
-		return
-	}
+// user's sessions end. The last enabled person with people.manage stays enabled (409). The auth
+// service records user.update for each changed person.
+func (a *API) setUsersDisabled(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	p := c.P
 	var in struct {
 		Usernames []string `json:"usernames"`
 		Disabled  *bool    `json:"disabled"`
 	}
-	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
+	if !a.kit.Decode(w, r, &in) {
 		return
 	}
 	names, ok := listOf(w, "usernames", in.Usernames)
@@ -193,12 +121,12 @@ func (a *API) setUsersDisabled(w http.ResponseWriter, r *http.Request) {
 			err = &repos.MissingError{Kind: "user", Name: name}
 		}
 		if err != nil {
-			fail(w, r, err)
+			route.Fail(w, r, err)
 			return
 		}
 		if ok, err := a.auth.Covers(r.Context(), p, u); err != nil || !ok {
 			if err != nil {
-				fail(w, r, err)
+				route.Fail(w, r, err)
 			} else {
 				httpx.Error(w, http.StatusForbidden, "you can change only people whose permissions you all hold: "+name)
 			}
@@ -207,11 +135,8 @@ func (a *API) setUsersDisabled(w http.ResponseWriter, r *http.Request) {
 	}
 	changed, err := a.auth.SetDisabled(r.Context(), names, *in.Disabled)
 	if err != nil {
-		fail(w, r, err)
+		route.Fail(w, r, err)
 		return
-	}
-	for _, u := range changed {
-		a.record(r, p, audit.UserUpdate, nil, u.Username, map[string]any{"disabled": u.Disabled})
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]int{"changed": len(changed)})
 }
@@ -236,50 +161,39 @@ func pairsIn(w http.ResponseWriter, users, repoNames []string) ([]string, []stri
 
 // setPermissions sets the repository permission set of every pair of users and repos:
 // {users, repos, perms} -> 200 {changed: n}. perms [] removes the pairs. The caller holds
-// access on every repo (403) and adds or removes only permissions they hold there (403).
-// publish without download, or pipelines without publish, answers 400. An unknown user or repo
-// answers 404 and changes nothing. One permission.set event per pair whose set changed, with the
-// old and the new set.
-func (a *API) setPermissions(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.session(w, r)
-	if !ok {
-		return
-	}
+// repo.access on every repo (403) and adds or removes only permissions they hold there (403).
+// An unknown permission ID or a permission without one it needs answers 400. An unknown user or
+// repo answers 404 and changes nothing. The auth service records one grant.set event per pair
+// whose set changed, with the old and the new set.
+func (a *API) setPermissions(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	p := c.P
 	var in struct {
 		Users []string `json:"users"`
 		Repos []string `json:"repos"`
 		Perms []string `json:"perms"`
 	}
-	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
+	if !a.kit.Decode(w, r, &in) {
 		return
 	}
 	users, names, ok := pairsIn(w, in.Users, in.Repos)
 	if !ok {
 		return
 	}
-	perms, err := auth.ParseRepoPerms(in.Perms)
-	if err != nil {
-		httpx.Error(w, http.StatusBadRequest, "unknown permission; the repository permissions are "+strings.Join(auth.RepoPermNames, ", "))
+	if _, err := perm.Current().Parse(perm.ScopeRepo, in.Perms); err != nil {
+		httpx.Error(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !perms.Valid() {
-		httpx.Error(w, http.StatusBadRequest, auth.ErrPermDeps.Error())
+	if !a.canEach(w, r, p, names, perm.RepoAccess) {
 		return
 	}
-	if !a.canEach(w, r, p, names, auth.RepoAccess) {
-		return
-	}
-	changed, err := a.auth.SetPermissions(r.Context(), p, users, names, perms)
+	changed, err := a.auth.SetPermissions(r.Context(), p, users, names, in.Perms)
 	if errors.Is(err, auth.ErrNotHeld) {
 		httpx.Error(w, http.StatusForbidden, err.Error())
 		return
 	}
 	if err != nil {
-		fail(w, r, err)
+		route.Fail(w, r, err)
 		return
-	}
-	for _, g := range changed {
-		a.record(r, p, audit.PermissionSet, g.Repo, g.Username, map[string]any{"old": g.Old.Names(), "new": g.New.Names()})
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]int{"changed": len(changed)})
 }

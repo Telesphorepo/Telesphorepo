@@ -1,14 +1,11 @@
-// Package config holds the boot environment (TR_DATA_DIR, TR_LISTEN, TR_MASTER_KEY, spec §3) and
-// the effective-configuration struct built by internal/settings from DB settings, TR_* env
-// overrides and defaults. Services read it through a Provider so setting changes apply live.
+// Package config holds the boot environment (TR_DATA_DIR, TR_LISTEN, TR_MASTER_KEY and the
+// bootstrap admin). Everything else is a setting (internal/settings).
 package config
 
 import (
 	"errors"
-	"log/slog"
 	"os"
 	"strings"
-	"time"
 )
 
 // Boot is the bare-minimum boot environment. Everything else is an in-app setting.
@@ -52,73 +49,6 @@ func (b *Boot) DBFile() string { return joinOS(b.DataDir, "telesphorepo.db") }
 
 // TmpDir is the upload spool directory (on the data volume, not tmpfs).
 func (b *Boot) TmpDir() string { return joinOS(b.DataDir, "tmp") }
-
-// Config is the effective configuration: boot values plus the current settings snapshot.
-// A *Config is immutable once published; never modify one obtained from a Provider.
-type Config struct {
-	Listen  string
-	DataDir string
-	BaseURL string
-
-	Storage string // "fs" or "s3"
-	FSRoot  string
-
-	S3Endpoint        string
-	S3Region          string
-	S3Bucket          string
-	S3AccessKeyID     string
-	S3SecretAccessKey string
-	S3Prefix          string
-	S3PathStyle       bool
-	S3Redirect        bool
-	PresignTTL        time.Duration
-
-	MaxUploadBytes int64
-	MaxJSONBytes   int64
-
-	CookieSecure bool
-	SessionTTL   time.Duration
-	// TrustedProxies are CIDRs, IP addresses, "private" and IP lists as "list:<name>" (see
-	// internal/netrules): the TCP peers whose X-Forwarded-For the server reads.
-	TrustedProxies []string
-
-	// OIDC admin sign-on (design doc §7.5). SSO is enabled iff OIDCIssuer is set.
-	OIDCIssuer         string
-	OIDCClientID       string
-	OIDCClientSecret   string
-	OIDCRedirectURL    string   // effective: oidc.redirect_url, else BaseURL + OIDCCallbackPath
-	OIDCScopes         []string // split on whitespace
-	OIDCAdminClaim     string   // dotted claim path, e.g. "groups" or "realm_access.roles"
-	OIDCAdminValues    []string
-	OIDCAdminEmails    []string
-	OIDCSessionTTL     time.Duration
-	AdminPasswordLogin bool // false: local admins cannot use UI password login
-
-	BootstrapAdminUser     string
-	BootstrapAdminPassword string
-
-	LogLevel slog.Level
-}
-
-// OIDCCallbackPath is the OIDC redirect endpoint, appended to BaseURL when oidc.redirect_url is
-// empty.
-const OIDCCallbackPath = "/api/auth/oidc/callback"
-
-// OIDCEnabled reports whether SSO is configured.
-func (c *Config) OIDCEnabled() bool { return c.OIDCIssuer != "" }
-
-// Provider returns the current effective configuration (an atomic snapshot; cheap to call on
-// every request).
-type Provider func() *Config
-
-// Static returns a Provider that always returns c (offline CLI commands).
-func Static(c *Config) Provider { return func() *Config { return c } }
-
-// DBFile is the SQLite database path.
-func (c *Config) DBFile() string { return joinOS(c.DataDir, "telesphorepo.db") }
-
-// TmpDir is the upload spool directory (on the data volume, not tmpfs).
-func (c *Config) TmpDir() string { return joinOS(c.DataDir, "tmp") }
 
 func joinOS(dir, name string) string {
 	if strings.HasSuffix(dir, "/") || strings.HasSuffix(dir, `\`) {

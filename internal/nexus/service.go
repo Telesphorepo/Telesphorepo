@@ -13,12 +13,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/assets"
+	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
-	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
+	"github.com/Telesphorepo/Telesphorepo/internal/nexus/dbq"
+	"github.com/Telesphorepo/Telesphorepo/internal/ops"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
-	"github.com/Telesphorepo/Telesphorepo/internal/signing"
 )
 
 var (
@@ -53,12 +55,6 @@ const (
 	TypeGroup  = "group"
 )
 
-// Signing key choices of a new apt target (Mapping.SigningKey).
-const (
-	KeyNew   = "new"
-	KeyNexus = "nexus"
-)
-
 // offlineReason is the reason a repo that Nexus marks offline cannot be copied.
 const offlineReason = "Offline in Nexus. Bring it online in Nexus to copy it."
 
@@ -74,13 +70,21 @@ type Service struct {
 	db       *db.DB
 	settings *settings.Service
 	repos    *repos.Service
-	keys     *signing.Keys
+	assets   *assets.Pipeline
+	ops      *ops.Service
+	formats  *format.Registry
+	audit    *audit.Log
 	log      *slog.Logger
+	username func(ctx context.Context, id int64) (string, error) // set before the API serves
 
-	mu   sync.Mutex
-	root context.Context     // the server context, set by Start
-	runs map[int64]*runState // the syncs this process runs, by sync id
-	wg   sync.WaitGroup      // the runner and scheduler goroutines of this process
+	// spawn runs a sync as a task of the nexus module, so the server waits for it before the
+	// database closes; base is the module's context.
+	spawn func(name string, fn func(ctx context.Context))
+	base  context.Context
+
+	mu      sync.Mutex
+	started bool                // Resume ran: syncs may start
+	runs    map[int64]*runState // the syncs this process runs, by sync id
 
 	pubMu  sync.Mutex
 	public map[string]publicCheck // "<source id>/<repo>" -> the last anonymous check
@@ -91,15 +95,13 @@ type publicCheck struct {
 	at     time.Time
 }
 
-// New returns the Nexus service. Call Start before the API serves requests.
-func New(d *db.DB, set *settings.Service, rs *repos.Service, keys *signing.Keys, log *slog.Logger) *Service {
-	return &Service{db: d, settings: set, repos: rs, keys: keys, log: log, runs: map[int64]*runState{},
-		public: map[string]publicCheck{}}
+// New returns the Nexus service. spawn runs a sync under base, the context of the nexus module.
+// Resume runs before the API serves requests.
+func New(d *db.DB, set *settings.Service, rs *repos.Service, as *assets.Pipeline, os *ops.Service, formats *format.Registry,
+	au *audit.Log, log *slog.Logger, base context.Context, spawn func(name string, fn func(ctx context.Context))) *Service {
+	return &Service{db: d, settings: set, repos: rs, assets: as, ops: os, formats: formats, audit: au, log: log, base: base, spawn: spawn,
+		runs: map[int64]*runState{}, public: map[string]publicCheck{}}
 }
-
-// Wait blocks until every runner and the scheduler of this process have returned. The server
-// calls it after the Start context ends and before it closes the database.
-func (s *Service) Wait() { s.wg.Wait() }
 
 // Source is a Nexus source as the API returns it. It never holds the credentials.
 type Source struct {
@@ -136,7 +138,7 @@ type SourceDetail struct {
 	NexusError string `json:"nexus_error"`
 }
 
-// SourceRepo is one repo of the Nexus server. TargetFormat is the plugin that imports its
+// SourceRepo is one repo of the Nexus server. TargetFormat is the format that imports its
 // format ("" when none does). Supported is true for a repo that can be copied; otherwise Reason
 // says why not. Target is the repo it is mapped to ("" when not mapped).
 type SourceRepo struct {
@@ -157,25 +159,23 @@ type SourceRepo struct {
 	Members       []string `json:"members"`
 	MembersKnown  bool     `json:"members_known"`
 	TargetMembers []string `json:"target_members"`
-	// NexusKey is true when Nexus gives the signing key pair of this apt repo;
-	// NexusKeyEncrypted when that key pair needs a passphrase, which Nexus never gives.
-	NexusKey          bool `json:"nexus_key"`
-	NexusKeyEncrypted bool `json:"nexus_key_encrypted"`
+	// Questions are what the target format asks before it creates a target of this repo, and
+	// Facts what it read from the repo's settings (format.Importer Plan).
+	Questions []format.Question `json:"questions"`
+	Facts     map[string]any    `json:"facts"`
 }
 
 // Mapping maps one Nexus repo to a target repo. With Create, a missing target is created: a
-// hosted repo with the plugin's default config plus the Nexus repo's distribution, a proxy
-// with the Nexus remote, or a group of the picked members. AnonymousRead, the signing key and
-// the remote credentials apply only to a target that the save creates.
+// hosted repo with the config that the target format plans, a proxy with the Nexus remote, or a
+// group of the picked members. AnonymousRead, the answers and the remote credentials apply only
+// to a target that the save creates.
 type Mapping struct {
 	SourceRepo    string `json:"source_repo"`
 	Target        string `json:"target"`
 	Create        bool   `json:"create"`
 	AnonymousRead bool   `json:"anonymous_read"`
-	// SigningKey of a new apt hosted target: KeyNew (the default key here; also "") or KeyNexus
-	// (the Nexus key pair, opened with SigningPassphrase).
-	SigningKey        string `json:"signing_key"`
-	SigningPassphrase string `json:"signing_passphrase"`
+	// Answers answer the questions of the target format (SourceRepo.Questions), by key.
+	Answers map[string]string `json:"answers"`
 	// The remote credentials of a new proxy target.
 	RemoteUsername string `json:"remote_username"`
 	RemotePassword string `json:"remote_password"`
@@ -209,55 +209,46 @@ func isUnique(err error) bool {
 
 func aad(id int64) string { return "nexus_sources:" + strconv.FormatInt(id, 10) }
 
-// lockText is the repos.locked_by text of a repo that mirrors source name.
-func lockText(name string) string {
-	return "mirrors Nexus source " + name + "; cut over first"
-}
+// OpMirror is the repo operation of a hosted repo that a Nexus source mirrors: writes answer 409
+// until the cut-over. Its ref is the source ID.
+const OpMirror = "mirror"
 
-// importerFor returns the first registered plugin, in registration order, that imports the
-// Nexus format id sourceFormat.
-func importerFor(sourceFormat string) (format.Format, format.Importer) {
-	for _, f := range format.All() {
-		if im, ok := f.(format.Importer); ok && slices.Contains(im.ImportFormats(), sourceFormat) {
-			return f, im
-		}
-	}
-	return nil, nil
-}
+// mirrorRef is the ref of the mirror operation of source id.
+func mirrorRef(id int64) string { return strconv.FormatInt(id, 10) }
 
-// accepts reports whether the plugin of target format name imports sourceFormat.
-func accepts(name, sourceFormat string) (format.Importer, bool) {
-	im, ok := format.Get(name).(format.Importer)
-	if !ok || !slices.Contains(im.ImportFormats(), sourceFormat) {
+// accepts returns the importer of target format name when it imports sourceFormat.
+func (s *Service) accepts(name, sourceFormat string) (*format.Importer, bool) {
+	f := s.formats.Get(name)
+	if f == nil || f.Importer == nil || !slices.Contains(f.Importer.Sources, sourceFormat) {
 		return nil, false
 	}
-	return im, true
+	return f.Importer, true
 }
 
-// support returns the plugin name that takes Nexus repo r, and why r cannot be copied ("" when
-// it can).
-func support(r Repository) (targetFormat, reason string) {
-	f, _ := importerFor(r.Format)
+// support returns the format that takes Nexus repo r, and why r cannot be copied ("" when it
+// can).
+func (s *Service) support(r Repository) (targetFormat, reason string) {
+	f := s.formats.Importer(r.Format)
 	if f == nil {
 		return "", "This server does not take " + r.Format + " repositories."
 	}
 	switch r.Type {
 	case TypeHosted:
 	case TypeProxy:
-		if format.SupportsKind(f.Name(), repos.KindProxy) != nil {
-			return f.Name(), "This server has no " + f.Title() + " proxies."
+		if !f.Takes(repos.KindProxy) {
+			return f.Name, "This server has no " + f.Title + " proxies."
 		}
 	case TypeGroup:
-		if format.SupportsKind(f.Name(), repos.KindGroup) != nil {
-			return f.Name(), "This server has no " + f.Title() + " groups."
+		if !f.Takes(repos.KindGroup) {
+			return f.Name, "This server has no " + f.Title + " groups."
 		}
 	default:
-		return f.Name(), "This server cannot copy a Nexus " + r.Type + " repository."
+		return f.Name, "This server cannot copy a Nexus " + r.Type + " repository."
 	}
 	if !r.Online {
-		return f.Name(), offlineReason
+		return f.Name, offlineReason
 	}
-	return f.Name(), ""
+	return f.Name, ""
 }
 
 func sourceRow(row dbq.NexusSource, err error) (dbq.NexusSource, error) {
@@ -337,6 +328,7 @@ func (s *Service) CreateSource(ctx context.Context, userID int64, in NewSource) 
 		return nil, err
 	}
 	s.log.Info("nexus: source created", "source", in.Name, "base_url", baseURL)
+	s.record(ctx, ActionSourceCreate, in.Name, map[string]any{"id": id, "base_url": baseURL})
 	return s.Source(ctx, id)
 }
 
@@ -393,6 +385,7 @@ func (s *Service) UpdateSource(ctx context.Context, id int64, in SourceUpdate) (
 		return nil, err
 	}
 	s.log.Info("nexus: source connection changed", "source", row.Name, "base_url", baseURL)
+	s.record(ctx, ActionSourceUpdate, row.Name, map[string]any{"id": id, "base_url": baseURL})
 	return s.Source(ctx, id)
 }
 
@@ -520,13 +513,25 @@ func (s *Service) Detail(ctx context.Context, id int64) (*SourceDetail, error) {
 	seen := make(map[string]bool, len(listed))
 	for _, r := range listed {
 		seen[r.Name] = true
-		tf, reason := support(r)
+		tf, reason := s.support(r)
 		sr := SourceRepo{Name: r.Name, Format: r.Format, Type: r.Type, Supported: reason == "", Reason: reason,
 			Offline: !r.Online, TargetFormat: tf, RemoteURL: r.RemoteURL, RemoteUsername: r.RemoteUsername,
 			Members: r.Members, MembersKnown: r.MembersKnown, TargetMembers: []string{},
-			NexusKey: r.Type == TypeHosted && r.HasKey(), NexusKeyEncrypted: r.Type == TypeHosted && r.KeyEncrypted}
+			Questions: []format.Question{}, Facts: map[string]any{}}
 		if sr.Members == nil {
 			sr.Members = []string{}
+		}
+		if f := s.formats.Get(tf); reason == "" && f != nil && f.Importer != nil && f.Importer.Plan != nil {
+			tp, err := f.Importer.Plan(ctx, sourceRepo(r), targets[r.Name], nil)
+			if err != nil {
+				return nil, fmt.Errorf("plan %s: %w", r.Name, err)
+			}
+			if tp.Questions != nil {
+				sr.Questions = tp.Questions
+			}
+			if tp.Facts != nil {
+				sr.Facts = tp.Facts
+			}
 		}
 		d.Repos = append(d.Repos, sr)
 	}
@@ -534,12 +539,13 @@ func (s *Service) Detail(ctx context.Context, id int64) (*SourceDetail, error) {
 		if seen[m.SourceRepo] {
 			continue
 		}
-		tf, reason := support(Repository{Format: m.SourceFormat, Type: m.Kind, Online: true})
+		tf, reason := s.support(Repository{Format: m.SourceFormat, Type: m.Kind, Online: true})
 		if d.NexusError == "" {
 			reason = "Nexus no longer lists this repository."
 		}
 		d.Repos = append(d.Repos, SourceRepo{Name: m.SourceRepo, Format: m.SourceFormat,
-			Supported: reason == "", Reason: reason, TargetFormat: tf, Members: []string{}, TargetMembers: []string{}})
+			Supported: reason == "", Reason: reason, TargetFormat: tf, Members: []string{}, TargetMembers: []string{},
+			Questions: []format.Question{}, Facts: map[string]any{}})
 	}
 	for i := range d.Repos {
 		r := &d.Repos[i]
@@ -623,8 +629,52 @@ func (s *Service) checkPublic(ctx context.Context, sourceID int64, cl *Client, r
 type plan struct {
 	m      Mapping
 	src    Repository
-	f      format.Format // the plugin of the target
-	target *repos.Repo   // nil until created
+	f      *format.Spec       // the format of the target
+	target *repos.Repo        // nil until created
+	tp     *format.TargetPlan // what the target format plans; nil when it has no Plan
+}
+
+// sourceRepo is r as the importer of a target format sees it.
+func sourceRepo(r Repository) format.SourceRepo {
+	return format.SourceRepo{Name: r.Name, Format: r.Format, Kind: r.Type, Attributes: r.Attributes}
+}
+
+// planTarget asks the target format of p to plan the target with the mapping's answers.
+func (p *plan) planTarget(ctx context.Context) error {
+	im := p.f.Importer
+	if im == nil || im.Plan == nil {
+		return nil
+	}
+	t := p.target
+	if t == nil {
+		t = &repos.Repo{Name: p.m.Target, Format: p.f.Name, Kind: p.src.Type}
+	}
+	answers := p.m.Answers
+	if answers == nil {
+		answers = map[string]string{}
+	}
+	tp, err := im.Plan(ctx, sourceRepo(p.src), t, answers)
+	if err != nil {
+		return fmt.Errorf("%w: %s: %v", ErrInvalid, p.src.Name, err)
+	}
+	p.tp = tp
+	return nil
+}
+
+// config is the config of a new target: the planned one, or the format's default.
+func (p *plan) config() json.RawMessage {
+	if p.tp != nil && p.tp.Config != nil {
+		return p.tp.Config
+	}
+	return p.f.Config.Default
+}
+
+// fields are the planned field values of the target.
+func (p *plan) fields() map[string]json.RawMessage {
+	if p.tp == nil {
+		return nil
+	}
+	return p.tp.Fields
 }
 
 // SetRepos replaces the mapping of a mirroring source and starts a sync of it (trigger save)
@@ -644,9 +694,6 @@ func (s *Service) SetRepos(ctx context.Context, id, userID int64, maps []Mapping
 		seen[m.SourceRepo] = true
 		if !repos.NameRE.MatchString(m.Target) {
 			return nil, fmt.Errorf("%w: invalid target repo name %q", ErrInvalid, m.Target)
-		}
-		if m.SigningKey != "" && m.SigningKey != KeyNew && m.SigningKey != KeyNexus {
-			return nil, fmt.Errorf("%w: signing_key must be %q or %q", ErrInvalid, KeyNew, KeyNexus)
 		}
 	}
 	q := dbq.New(s.db.R)
@@ -679,18 +726,18 @@ func (s *Service) SetRepos(ctx context.Context, id, userID int64, maps []Mapping
 		if !ok {
 			return nil, fmt.Errorf("%w: Nexus has no repo %q", ErrInvalid, m.SourceRepo)
 		}
-		if _, reason := support(r); reason != "" {
+		if _, reason := s.support(r); reason != "" {
 			return nil, fmt.Errorf("%w: %s: %s", ErrInvalid, r.Name, reason)
 		}
 		p := plan{m: m, src: r}
-		p.f, _ = importerFor(r.Format)
+		p.f = s.formats.Importer(r.Format)
 		t, err := s.repos.ByName(ctx, m.Target)
 		switch {
 		case err == nil:
 			if t.Kind != r.Type {
 				return nil, fmt.Errorf("%w: %s is a %s repository here; the Nexus repository %s is a %s", ErrInvalid, t.Name, t.Kind, r.Name, r.Type)
 			}
-			if _, ok := accepts(t.Format, r.Format); !ok {
+			if _, ok := s.accepts(t.Format, r.Format); !ok {
 				return nil, fmt.Errorf("%w: target repo %q (%s) cannot import %s content", ErrInvalid, t.Name, t.Format, r.Format)
 			}
 			if other, err := q.GetNexusSourceByTarget(ctx, t.ID); err == nil && other.ID != id {
@@ -699,11 +746,15 @@ func (s *Service) SetRepos(ctx context.Context, id, userID int64, maps []Mapping
 				return nil, err
 			}
 			p.target = t
+			p.f = s.formats.Get(t.Format)
 		case errors.Is(err, repos.ErrNotFound):
 			if !m.Create {
 				return nil, fmt.Errorf("%w: target repo %q does not exist", ErrInvalid, m.Target)
 			}
 		default:
+			return nil, err
+		}
+		if err := p.planTarget(ctx); err != nil {
 			return nil, err
 		}
 		plans = append(plans, p)
@@ -753,18 +804,18 @@ func (s *Service) SetRepos(ctx context.Context, id, userID int64, maps []Mapping
 			members = append(members, targetOf[n])
 		}
 		if p.target != nil {
-			if p.target, err = s.repos.SetMembers(ctx, p.target.Name, members); err != nil {
+			if p.target, err = s.repos.Update(ctx, p.target.Name, repos.Patch{Members: members}); err != nil {
 				return nil, fmt.Errorf("set the members of group %q: %w", p.m.Target, err)
 			}
 			continue
 		}
-		if p.target, err = s.repos.CreateGroup(ctx, p.m.Target, p.f.Name(), p.m.AnonymousRead, "", members); err != nil {
+		if p.target, err = s.repos.Create(ctx, repos.Create{Name: p.m.Target, Format: p.f.Name, Kind: repos.KindGroup,
+			AnonymousRead: p.m.AnonymousRead, Members: members}); err != nil {
 			return nil, fmt.Errorf("create group %q: %w", p.m.Target, err)
 		}
 		s.log.Info("nexus: created group", "repo", p.target.Name, "format", p.target.Format, "members", len(members))
 	}
 
-	lock := lockText(row.Name)
 	err = s.db.Tx(ctx, func(tx *sql.Tx) error {
 		q := dbq.New(tx)
 		cur, err := sourceRow(q.GetNexusSource(ctx, id))
@@ -801,14 +852,14 @@ func (s *Service) SetRepos(ctx context.Context, id, userID int64, maps []Mapping
 				return err
 			}
 			if p.src.Type == TypeHosted {
-				if err := s.repos.SetLockedBy(ctx, tx, p.target.ID, lock); err != nil {
+				if err := s.hold(ctx, tx, p.target, id, userID); err != nil {
 					return err
 				}
 			}
 		}
 		for _, o := range old {
 			if !keep[o.TargetRepoID] && o.Kind == TypeHosted {
-				if err := s.repos.SetLockedBy(ctx, tx, o.TargetRepoID, ""); err != nil {
+				if err := s.release(ctx, tx, o.TargetRepoID, id); err != nil {
 					return err
 				}
 			}
@@ -819,45 +870,48 @@ func (s *Service) SetRepos(ctx context.Context, id, userID int64, maps []Mapping
 		return nil, err
 	}
 	s.log.Info("nexus: source repos set", "source", row.Name, "repos", len(plans))
+	targets := make([]string, len(plans))
+	for i, p := range plans {
+		targets[i] = p.m.SourceRepo + " -> " + p.m.Target
+	}
+	s.record(ctx, ActionMappingSave, row.Name, map[string]any{"id": id, "repos": targets})
 	if len(plans) > 0 {
-		if _, err := s.startSync(ctx, id, userID, TriggerSave); err != nil {
+		syncID, err := s.startSync(ctx, id, userID, TriggerSave)
+		if err != nil {
 			return nil, err
 		}
+		s.record(ctx, ActionSyncStart, row.Name, map[string]any{"source_id": id, "sync_id": syncID, "trigger": TriggerSave})
 	}
 	return s.Detail(ctx, id)
 }
 
 // prepare finds or creates the target of a hosted or proxy plan. Two Nexus repos may share a
-// new hosted target only when its format imports both.
+// new hosted target only when its format imports both. An existing target gets the config and
+// the field values that its format planned (e.g. a missing distribution).
 func (s *Service) prepare(ctx context.Context, p *plan, created map[string]*repos.Repo) error {
 	if p.target != nil {
-		if p.src.Type != TypeHosted {
+		if p.tp == nil || (p.tp.Config == nil && p.tp.Fields == nil) {
 			return nil
 		}
-		// An existing target without a distribution takes the source's, so that the plugin
-		// knows where imported packages go. A distribution it has stays.
-		cfg, changed, err := withDistribution(p.target.Config, p.src.Distribution, false)
+		t, err := s.repos.Update(ctx, p.target.Name, repos.Patch{Config: p.tp.Config, Fields: p.tp.Fields})
 		if err != nil {
-			return fmt.Errorf("target repo %q: %w", p.target.Name, err)
+			return fmt.Errorf("update target repo %q: %w", p.target.Name, err)
 		}
-		if changed {
-			if _, p.target, err = s.repos.Update(ctx, p.target.Name, nil, cfg); err != nil {
-				return fmt.Errorf("set the distribution of target repo %q: %w", p.target.Name, err)
-			}
-			s.log.Info("nexus: set target repo distribution", "repo", p.target.Name, "distribution", p.src.Distribution)
-		}
+		p.target = t
+		s.log.Info("nexus: updated target repo", "repo", t.Name)
 		return nil
 	}
 	if t := created[p.m.Target]; t != nil {
-		if _, ok := accepts(t.Format, p.src.Format); !ok || t.Kind != p.src.Type {
+		if _, ok := s.accepts(t.Format, p.src.Format); !ok || t.Kind != p.src.Type {
 			return fmt.Errorf("%w: target repo %q (%s) cannot take the Nexus repository %s", ErrInvalid, t.Name, t.Format, p.src.Name)
 		}
 		p.target = t
 		return nil
 	}
-	cfg, err := targetConfig(p.f, p.src)
-	if err != nil {
-		return err
+	if p.tp != nil && p.tp.Prepare != nil {
+		if err := p.tp.Prepare(ctx); err != nil {
+			return fmt.Errorf("%s: %w", p.src.Name, err)
+		}
 	}
 	if p.src.Type == TypeProxy {
 		in := repos.ProxyInput{RemoteURL: &p.src.RemoteURL}
@@ -876,7 +930,8 @@ func (s *Service) prepare(ctx context.Context, p *plan, created map[string]*repo
 		if err != nil {
 			return fmt.Errorf("proxy %q: %w", p.m.Target, err)
 		}
-		t, err := s.repos.CreateProxy(ctx, p.m.Target, p.f.Name(), p.m.AnonymousRead, "", cfg, px)
+		t, err := s.repos.Create(ctx, repos.Create{Name: p.m.Target, Format: p.f.Name, Kind: repos.KindProxy,
+			AnonymousRead: p.m.AnonymousRead, Config: p.config(), Proxy: px, Fields: p.fields()})
 		if err != nil {
 			return fmt.Errorf("create proxy %q: %w", p.m.Target, err)
 		}
@@ -884,99 +939,14 @@ func (s *Service) prepare(ctx context.Context, p *plan, created map[string]*repo
 		created[t.Name], p.target = t, t
 		return nil
 	}
-	if p.m.SigningKey == KeyNexus {
-		key, err := s.nexusKey(ctx, p)
-		if err != nil {
-			return err
-		}
-		if cfg, err = withKey(cfg, key); err != nil {
-			return err
-		}
-	}
-	t, err := s.repos.Create(ctx, p.m.Target, p.f.Name(), p.m.AnonymousRead, "", cfg)
+	t, err := s.repos.Create(ctx, repos.Create{Name: p.m.Target, Format: p.f.Name, AnonymousRead: p.m.AnonymousRead,
+		Config: p.config(), Fields: p.fields()})
 	if err != nil {
 		return fmt.Errorf("create target repo %q: %w", p.m.Target, err)
 	}
 	s.log.Info("nexus: created target repo", "repo", t.Name, "format", t.Format)
 	created[t.Name], p.target = t, t
 	return nil
-}
-
-// nexusKey stores the signing key pair that Nexus gives for the apt repo of p as the signing
-// key "nexus-<target>", opened with the mapping's passphrase, and returns its name. A key of
-// that name with the same fingerprint is used again.
-func (s *Service) nexusKey(ctx context.Context, p *plan) (string, error) {
-	armored := p.src.keypair
-	if armored == "" {
-		return "", fmt.Errorf("%w: %s: Nexus does not give the signing key pair of this repository. Import it in Signing keys, then pick it in the repository settings", ErrInvalid, p.src.Name)
-	}
-	signer, err := signing.Parse([]byte(armored), []byte(p.m.SigningPassphrase))
-	if err != nil {
-		return "", fmt.Errorf("%w: %s: the passphrase does not open the Nexus signing key", ErrInvalid, p.src.Name)
-	}
-	name := "nexus-" + p.m.Target
-	if len(name) > 64 {
-		name = name[:64]
-	}
-	if k, ok := s.keys.Get(name); ok {
-		if k.Fingerprint == signer.Fingerprint() {
-			return name, nil
-		}
-		return "", fmt.Errorf("%w: a different signing key named %s exists; delete it or rename the repository", ErrInvalid, name)
-	}
-	if _, err := s.keys.Import(ctx, name, armored, p.m.SigningPassphrase); err != nil {
-		return "", fmt.Errorf("import the Nexus signing key of %s: %w", p.src.Name, err)
-	}
-	s.log.Info("nexus: imported signing key", "key", name, "source_repo", p.src.Name)
-	return name, nil
-}
-
-// withKey returns cfg with "signing_key" set to name.
-func withKey(cfg json.RawMessage, name string) (json.RawMessage, error) {
-	obj := map[string]json.RawMessage{}
-	if len(cfg) > 0 {
-		if err := json.Unmarshal(cfg, &obj); err != nil {
-			return nil, err
-		}
-	}
-	if obj == nil {
-		obj = map[string]json.RawMessage{}
-	}
-	obj["signing_key"], _ = json.Marshal(name)
-	return json.Marshal(obj)
-}
-
-// targetConfig is the config of a new target repo: the plugin's default config, plus
-// "distribution" when the source repo has one.
-func targetConfig(f format.Format, src Repository) (json.RawMessage, error) {
-	cfg, _, err := withDistribution(f.DefaultConfig(), src.Distribution, true)
-	if err != nil {
-		return nil, fmt.Errorf("format %s: default config: %w", f.Name(), err)
-	}
-	return cfg, nil
-}
-
-// withDistribution returns cfg with "distribution" set to dist, and whether it changed. An
-// empty dist changes nothing; without replace, a distribution cfg already has stays.
-func withDistribution(cfg json.RawMessage, dist string, replace bool) (json.RawMessage, bool, error) {
-	if dist == "" {
-		return cfg, false, nil
-	}
-	obj := map[string]json.RawMessage{}
-	if len(cfg) > 0 {
-		if err := json.Unmarshal(cfg, &obj); err != nil {
-			return nil, false, err
-		}
-	}
-	if obj == nil { // cfg was JSON null
-		obj = map[string]json.RawMessage{}
-	}
-	if _, ok := obj["distribution"]; ok && !replace {
-		return cfg, false, nil
-	}
-	obj["distribution"], _ = json.Marshal(dist)
-	out, err := json.Marshal(obj)
-	return out, err == nil, err
 }
 
 // DeleteSource deletes a source with its mapping and its sync history. A mirroring source
@@ -1010,5 +980,49 @@ func (s *Service) DeleteSource(ctx context.Context, id int64) error {
 		return err
 	}
 	s.log.Info("nexus: source deleted", "source", name)
+	s.record(ctx, ActionSourceDelete, name, map[string]any{"id": id})
 	return nil
+}
+
+// hold begins the mirror operation of source on hosted repo target in tx (state held), so
+// writes, deletes and mints of the repo answer 409 until the cut-over. A repo that this source
+// holds already stays held; a repo with another operation cannot be mapped.
+func (s *Service) hold(ctx context.Context, tx *sql.Tx, target *repos.Repo, source, userID int64) error {
+	op, err := s.ops.Get(ctx, tx, target.ID)
+	switch {
+	case err == nil && op.Type == OpMirror && op.Ref == mirrorRef(source):
+		return nil
+	case err == nil:
+		return fmt.Errorf("%w: target repo %q is busy: %s", ErrInvalid, target.Name, s.ops.Message(op))
+	case !errors.Is(err, ops.ErrNone):
+		return err
+	}
+	_, err = s.ops.Begin(ctx, tx, target.ID, OpMirror, "nexus", mirrorRef(source), ops.Held, userID)
+	return err
+}
+
+// release ends the mirror operation of source on repo repoID in tx, when it has one.
+func (s *Service) release(ctx context.Context, tx *sql.Tx, repoID, source int64) error {
+	op, err := s.ops.Get(ctx, tx, repoID)
+	if errors.Is(err, ops.ErrNone) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if op.Type != OpMirror || op.Ref != mirrorRef(source) {
+		return nil
+	}
+	return s.ops.End(ctx, tx, op.ID, "nexus")
+}
+
+// mirrorMessage is the text of a mirror operation: the 409 answer of a write and the UI line.
+func (s *Service) mirrorMessage(op *ops.Op) string {
+	name := "a Nexus source"
+	if id, err := strconv.ParseInt(op.Ref, 10, 64); err == nil {
+		if row, err := dbq.New(s.db.R).GetNexusSource(context.Background(), id); err == nil {
+			name = "Nexus source " + row.Name
+		}
+	}
+	return "mirrors " + name + "; cut over first"
 }

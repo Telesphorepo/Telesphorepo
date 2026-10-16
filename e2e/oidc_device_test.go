@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/url"
@@ -14,16 +15,18 @@ import (
 // oidcDevicePath starts the new SSO sign-in that approves a device.
 const oidcDevicePath = "/api/auth/oidc/device"
 
-// startSSOServer starts a server with SSO through a new Keycloak, as TestOIDC does.
+// startSSOServer starts a server with SSO through a new Keycloak. The members of the Keycloak
+// group kcAdminGroup get every server permission at sign-in (the permission claim groups).
 func startSSOServer(t *testing.T) (*Keycloak, *Server) {
 	t.Helper()
 	kc := newKeycloak(t)
+	permMap, _ := json.Marshal(map[string][]string{kcAdminGroup: AllServerPerms})
 	s := StartServer(t, ServerOpts{Env: map[string]string{
-		"TR_OIDC_ISSUER":        kc.Issuer,
-		"TR_OIDC_CLIENT_ID":     kcClientID,
-		"TR_OIDC_CLIENT_SECRET": kcClientSecret,
-		"TR_OIDC_ADMIN_CLAIM":   "groups",
-		"TR_OIDC_ADMIN_VALUES":  kcAdminGroup,
+		"TR_OIDC_ISSUER":           kc.Issuer,
+		"TR_OIDC_CLIENT_ID":        kcClientID,
+		"TR_OIDC_CLIENT_SECRET":    kcClientSecret,
+		"TR_OIDC_PERMISSION_CLAIM": "groups",
+		"TR_OIDC_PERMISSION_MAP":   string(permMap),
 	}})
 	redirect := s.URL + oidcCallbackPath
 	kc.Start(t, redirect)
@@ -89,10 +92,15 @@ func (kc *Keycloak) approveSSO(t testing.TB, s *Server, jar http.CookieJar, user
 	return a
 }
 
-// approveWith sends POST /api/devices/approve with body as the SPA does, with the UI session in jar.
-func approveWith(t testing.TB, s *Server, jar http.CookieJar, body map[string]string) (int, []byte) {
+// approveWith sends POST /api/devices/approve for userCode as the SPA does, with the UI session in
+// jar and proof in the header X-Telesphorepo-Proof ("" for none).
+func approveWith(t testing.TB, s *Server, jar http.CookieJar, userCode, proof string) (int, []byte) {
 	t.Helper()
-	return browserAPI(t, s, http.MethodPost, "/api/devices/approve", body, jar)
+	var auth Auth = &Session{Jar: jar}
+	if proof != "" {
+		auth = Proof{&Session{Jar: jar}, proof}
+	}
+	return s.API(t, http.MethodPost, "/api/devices/approve", map[string]string{"user_code": userCode}, auth)
 }
 
 // TestOIDCDeviceApproval: an SSO admin approves a device after a new sign-in at Keycloak, then
@@ -106,13 +114,9 @@ func TestOIDCDeviceApproval(t *testing.T) {
 	en, key := s.StartEnrollment(t, "e2e alice laptop", "gradle")
 
 	t.Run("no grant", func(t *testing.T) {
-		for _, body := range []map[string]string{
-			{"user_code": en.UserCode},
-			{"user_code": en.UserCode, "totp_code": "000000"},
-			{"user_code": en.UserCode, "grant": "not-a-grant"},
-		} {
-			if st, b := approveWith(t, s, alice.Jar, body); st != http.StatusUnauthorized {
-				t.Fatalf("approve with %v: status %d, want 401: %s", body, st, b)
+		for _, proof := range []string{"", "totp 000000", "grant not-a-grant"} {
+			if st, b := approveWith(t, s, alice.Jar, en.UserCode, proof); st != http.StatusUnauthorized {
+				t.Fatalf("approve with the proof %q: status %d, want 401: %s", proof, st, b)
 			}
 		}
 	})
@@ -131,7 +135,7 @@ func TestOIDCDeviceApproval(t *testing.T) {
 	})
 
 	t.Run("approve and publish", func(t *testing.T) {
-		if st, b := approveWith(t, s, alice.Jar, map[string]string{"user_code": en.UserCode, "grant": grant}); st != http.StatusCreated {
+		if st, b := approveWith(t, s, alice.Jar, en.UserCode, "grant "+grant); st != http.StatusCreated {
 			t.Fatalf("approve with the grant: status %d, want 201: %s", st, b)
 		}
 		st, poll := s.PollEnrollment(t, en.DeviceCode)
@@ -153,7 +157,7 @@ func TestOIDCDeviceApproval(t *testing.T) {
 
 	t.Run("grant works once and for one code", func(t *testing.T) {
 		en2, _ := s.StartEnrollment(t, "e2e alice second laptop", "maven")
-		if st, b := approveWith(t, s, alice.Jar, map[string]string{"user_code": en2.UserCode, "grant": grant}); st != http.StatusUnauthorized {
+		if st, b := approveWith(t, s, alice.Jar, en2.UserCode, "grant "+grant); st != http.StatusUnauthorized {
 			t.Fatalf("approve another code with a used grant: status %d, want 401: %s", st, b)
 		}
 		en3, _ := s.StartEnrollment(t, "e2e alice third laptop", "maven")
@@ -161,7 +165,7 @@ func TestOIDCDeviceApproval(t *testing.T) {
 		if a.Grant == "" {
 			t.Fatalf("callback for %s: error %q, want a grant", en2.UserCode, a.Error)
 		}
-		if st, b := approveWith(t, s, alice.Jar, map[string]string{"user_code": en3.UserCode, "grant": a.Grant}); st != http.StatusUnauthorized {
+		if st, b := approveWith(t, s, alice.Jar, en3.UserCode, "grant "+a.Grant); st != http.StatusUnauthorized {
 			t.Fatalf("approve %s with the grant of %s: status %d, want 401: %s", en3.UserCode, en2.UserCode, st, b)
 		}
 	})

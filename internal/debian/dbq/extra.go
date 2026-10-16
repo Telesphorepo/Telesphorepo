@@ -1,6 +1,6 @@
 package dbq
 
-// Hand-written queries that sqlc cannot express (spec §5.5). Each one is a named constant in
+// Hand-written queries that sqlc cannot express. Each one is a named constant in
 // Extra, so the plan guard (db.CheckPlans) checks it like a generated query.
 
 import (

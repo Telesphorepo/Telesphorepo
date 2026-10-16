@@ -11,7 +11,8 @@
   the first one), so the form is the whole body of a page: put it in a FormPage and nothing
   between sections. Without `sections` the form is one card.
   With `steps`, the sections are numbered Steps of a setup. `fields` gives a setting a plain label,
-  one line of help, `aka` (its technical name, after `akaLabel`) or a placeholder;
+  one line of help, `aka` (its technical name, after `akaLabel`), a placeholder, or `permissionMap`
+  (a map of permission IDs edits as groups with a PermissionPicker);
   without it the registry's label and help show. `errors` marks fields from outside the form (a
   connection test). `effects` lists the consequences of a pending PATCH body beyond the settings
   themselves (a storage move); when it returns lines, Save first asks in a confirm dialog that
@@ -22,11 +23,18 @@
 <script lang="ts" module>
   import type { ControlWidth } from "./FormRow.svelte";
 
+  /** A map setting's value: the values of one key by key ("admins" → ["repo.read", ...]). */
+  export type GroupMap = Record<string, string[]>;
+  /** An unsaved edit: text for most types, a bool, null to clear a secret, or a map of a permission map. */
+  export type Draft = string | boolean | null | GroupMap;
+
   export type FieldLook = {
     label?: string;
     help?: string;
     aka?: string;
     placeholder?: string;
+    /** A map setting of permission IDs: edit it as groups with a PermissionPicker (PermissionMapInput). */
+    permissionMap?: boolean;
     /** @deprecated Every text control has the full control width; leave it out. */
     width?: ControlWidth;
   };
@@ -37,6 +45,7 @@
   import { toast } from "svelte-sonner";
   import { api, ApiError, errorMessage, type Setting, type Settings, type SettingsMoveStarted } from "$lib/api";
   import { Input } from "$lib/components/ui/input";
+  import { Textarea } from "$lib/components/ui/textarea";
   import * as Select from "$lib/components/ui/select";
   import SaveBar from "./SaveBar.svelte";
   import UnitInput from "./UnitInput.svelte";
@@ -47,6 +56,7 @@
   import SwitchRow from "./SwitchRow.svelte";
   import ListInput from "./ListInput.svelte";
   import SecretInput from "./SecretInput.svelte";
+  import PermissionMapInput from "./PermissionMapInput.svelte";
   import Step from "./Step.svelte";
   import StatusBadge from "./StatusBadge.svelte";
   import { DURATION_UNITS, SIZE_UNITS, splitDuration, splitSize, type Parts, type Unit } from "$lib/units";
@@ -73,7 +83,7 @@
     /** Names the settings in the dialog and the toast ("Saved storage settings"). */
     label: string;
     /** Hides a setting for the current edits (Storage hides the S3 fields for a folder). */
-    visible?: (s: Setting, draft: Record<string, string | boolean | null>) => boolean;
+    visible?: (s: Setting, draft: Record<string, Draft>) => boolean;
     sections?: Section[];
     /** Render the sections as numbered Steps. */
     steps?: boolean;
@@ -93,8 +103,9 @@
 
   const extraIn = (i: number) => !!extra && i === Math.min(extraAt ?? groups.length - 1, groups.length - 1);
 
-  // Edits by key: text for every type except bool; null clears a secret.
-  let draft = $state<Record<string, string | boolean | null>>({});
+  // Edits by key: text for most types, a bool, null to clear a secret, and the map itself for a
+  // permission map, so a group with "=" or "," in its name (an LDAP DN) stays whole.
+  let draft = $state<Record<string, Draft>>({});
   let fieldErrors = $state<Record<string, string>>({});
   let confirming = $state(false);
 
@@ -119,7 +130,39 @@
   });
 
   const labelOf = (s: Setting) => fields[s.key]?.label ?? s.label;
+  // A map setting edits as one line per key: "key = a, b".
+  const mapText = (v: unknown): string =>
+    v && typeof v === "object" && !Array.isArray(v)
+      ? Object.entries(v as Record<string, unknown>)
+          .map(([k, xs]) => `${k} = ${Array.isArray(xs) ? xs.join(", ") : ""}`)
+          .join("\n")
+      : "";
+  const isMap = (v: unknown): v is GroupMap => !!v && typeof v === "object" && !Array.isArray(v);
+  // The value of a permission map setting with its unsaved edit.
+  const mapOf = (s: Setting): GroupMap => {
+    const d = draft[s.key];
+    if (isMap(d)) return d;
+    return isMap(s.value) ? s.value : {};
+  };
+  const sameMap = (a: GroupMap, b: GroupMap) => {
+    const ka = Object.keys(a);
+    return (
+      ka.length === Object.keys(b).length &&
+      ka.every((k) => k in b && a[k].length === b[k].length && a[k].every((x, i) => x === b[k][i]))
+    );
+  };
+  const parseMap = (t: string): GroupMap => {
+    const out: Record<string, string[]> = {};
+    for (const line of t.split("\n")) {
+      const i = line.indexOf("=");
+      const key = (i < 0 ? line : line.slice(0, i)).trim();
+      if (!key) continue;
+      out[key] = i < 0 ? [] : line.slice(i + 1).split(",").map((x) => x.trim()).filter(Boolean);
+    }
+    return out;
+  };
   const asText = (s: Setting): string => {
+    if (s.type === "map") return mapText(s.value);
     if (Array.isArray(s.value)) return s.value.join("\n");
     return s.value === null || s.value === undefined ? "" : String(s.value);
   };
@@ -130,7 +173,8 @@
   const listOf = (s: Setting) => String(current(s)).split("\n").filter(Boolean);
   // Plain words for the option values of select settings; a value without an entry shows as is.
   const optionWords: Record<string, Record<string, string>> = {
-    storage: { fs: "A folder on this server", s3: "An S3 bucket", r2: "A Cloudflare R2 bucket" },
+    storage: { fs: "A folder on this server", s3: "An S3 bucket" },
+    "signin.password_login": { all: "Everyone", publishers: "Only people who publish; people who manage use single sign-on" },
     "log.level": { debug: "Debug", info: "Info", warn: "Warnings", error: "Errors" },
   };
   const optionText = (s: Setting, o: string) => optionWords[s.key]?.[o] ?? o;
@@ -175,6 +219,11 @@
     else draft = { ...draft, [s.key]: v };
   }
 
+  function editMap(s: Setting, v: GroupMap) {
+    if (sameMap(v, isMap(s.value) ? s.value : {})) drop(s.key);
+    else draft = { ...draft, [s.key]: v };
+  }
+
   function editSecret(s: Setting, v: string | null | undefined) {
     if (v === undefined) drop(s.key);
     else draft = { ...draft, [s.key]: v };
@@ -191,13 +240,14 @@
     for (const s of settings) {
       if (!(s.key in draft) || s.locked) continue;
       const v = draft[s.key];
-      if (s.type === "bool") body[s.key] = v;
+      if (s.type === "bool" || isMap(v)) body[s.key] = v;
       else if (s.secret) {
         if (v === null) body[s.key] = null;
         else if (v !== "") body[s.key] = v;
       } else {
         const t = String(v).trim();
         if (s.type === "list") body[s.key] = t.split(/[,\n]/).map((x) => x.trim()).filter(Boolean);
+        else if (s.type === "map") body[s.key] = parseMap(t);
         else if (t === "") body[s.key] = null;
         else body[s.key] = t;
       }
@@ -217,6 +267,7 @@
       else if (v === null) out.push(`Resets ${name} to its default${defaultText(s) ? ` (${defaultText(s)})` : ""}`);
       else if (s.type === "bool") out.push(`${v ? "Turns on" : "Turns off"} ${name}`);
       else if (s.type === "list") out.push(`Sets ${name} to ${(v as string[]).join(", ") || "an empty list"}`);
+      else if (s.type === "map") out.push(`Sets ${name} to ${mapText(v).split("\n").join("; ") || "nothing"}`);
       else out.push(`Sets ${name} to ${optionText(s, String(v))}`);
     }
     return [...out, ...(effects ? effects(body) : [])];
@@ -278,7 +329,7 @@
   {#if s.type === "bool"}
     <SwitchRow {id} label={labelOf(s)} {help} checked={current(s) === true} disabled={ro} onCheckedChange={(v) => edit(s, v)} badge={lock} />
   {:else}
-    <FormRow label={labelOf(s)} for={id} {help} aka={look.aka} {akaLabel} error={err} badge={lock}>
+    <FormRow label={labelOf(s)} for={id} {help} aka={look.aka} {akaLabel} error={err} badge={lock} full={s.type === "map"}>
       {#if s.secret}
         <SecretInput
           {id}
@@ -310,6 +361,26 @@
           invalid={!!err}
           describedby={described}
           label={labelOf(s)}
+        />
+      {:else if s.type === "map" && look.permissionMap}
+        <PermissionMapInput
+          {id}
+          value={mapOf(s)}
+          onchange={(v) => editMap(s, v)}
+          disabled={ro}
+          describedby={described}
+        />
+      {:else if s.type === "map"}
+        <Textarea
+          {id}
+          rows={4}
+          disabled={ro}
+          spellcheck={false}
+          placeholder={look.placeholder ?? "One line per value: value = a, b"}
+          value={String(current(s))}
+          oninput={(e) => edit(s, e.currentTarget.value)}
+          aria-invalid={err ? true : undefined}
+          aria-describedby={described}
         />
       {:else if isAmount(s)}
         {@const p = partsOf(s)}

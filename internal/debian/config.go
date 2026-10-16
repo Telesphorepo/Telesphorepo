@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/signing"
 )
@@ -13,31 +14,21 @@ import (
 // defaultArchitectures is the architecture list of a repo whose config has none.
 var defaultArchitectures = []string{"amd64", "arm64"}
 
-// DefaultConfig is {"architectures":["amd64","arm64"],"signing_key":"default"}.
-func (h *Handler) DefaultConfig() json.RawMessage {
-	return json.RawMessage(`{"architectures":["amd64","arm64"],"signing_key":"` + signing.DefaultKey + `"}`)
-}
+// defaultConfig is {"architectures":["amd64","arm64"]}.
+var defaultConfig = json.RawMessage(`{"architectures":["amd64","arm64"]}`)
 
 // ValidateConfig checks "architectures": a non-empty list of distinct names matching
-// ^[a-z0-9-]+$, other than "all". A missing list gets the default. "signing_key" names the
-// signing key of the repo's indexes; it must exist (a missing one is "default"). The optional
-// "distribution" is a repo name-style string. Other keys are kept.
+// ^[a-z0-9-]+$, other than "all". A missing list gets the default. The optional "distribution"
+// is a repo name-style string. Other keys are kept. The signing key of a repo is the repo field
+// signing_key, not a config key.
 func (h *Handler) ValidateConfig(raw json.RawMessage) (json.RawMessage, error) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
 		return nil, errors.New("config must be a JSON object")
 	}
-	key := signing.DefaultKey
-	if v, ok := obj["signing_key"]; ok {
-		if err := json.Unmarshal(v, &key); err != nil {
-			return nil, errors.New("signing_key must be the name of a signing key")
-		}
+	if _, ok := obj[signing.Field]; ok {
+		return nil, errors.New("the signing key is the repository field signing_key, not a config key")
 	}
-	// Offline commands (seed) have no key service; the repos triggers still check the name.
-	if h.keys != nil && !h.keys.Exists(key) {
-		return nil, fmt.Errorf("signing key %q does not exist", key)
-	}
-	obj["signing_key"], _ = json.Marshal(key)
 	if v, ok := obj["distribution"]; ok {
 		var d string
 		if err := json.Unmarshal(v, &d); err != nil || !repos.NameRE.MatchString(d) {
@@ -75,25 +66,58 @@ func architectures(repo *repos.Repo) []string {
 	return c.Architectures
 }
 
-// signingKey returns the name of the signing key of repo's indexes.
+// signingKey returns the name of the signing key of repo's indexes: the repo field signing_key;
+// "" when the repo has none.
 func signingKey(repo *repos.Repo) string {
-	var c struct {
-		SigningKey string `json:"signing_key"`
+	var name string
+	if json.Unmarshal(repo.Fields[signing.Field], &name) != nil {
+		return ""
 	}
-	if json.Unmarshal(repo.Config, &c) != nil || c.SigningKey == "" {
-		return signing.DefaultKey
-	}
-	return c.SigningKey
+	return name
 }
 
 // importDistribution returns the "distribution" of repo's config: the distribution that
-// imported packages go into (spec §12; the import sets it from the source repo).
+// imported packages go into (the import plan sets it from the source repo).
 func importDistribution(repo *repos.Repo) (string, error) {
+	if d := importDistributionOf(repo); d != "" {
+		return d, nil
+	}
+	return "", errors.New("the repo config has no distribution for imported packages")
+}
+
+// importDistributionOf is the "distribution" of repo's config, "" when it has none.
+func importDistributionOf(repo *repos.Repo) string {
 	var c struct {
 		Distribution string `json:"distribution"`
 	}
-	if json.Unmarshal(repo.Config, &c) != nil || c.Distribution == "" {
-		return "", errors.New("the repo config has no distribution for imported packages")
-	}
-	return c.Distribution, nil
+	_ = json.Unmarshal(repo.Config, &c)
+	return c.Distribution
+}
+
+// configFields are the repo config options that the web UI edits.
+var configFields = []format.Field{
+	{Key: "architectures", Label: "Architectures", Type: format.FieldList, Required: true, Placeholder: "arm64",
+		Help:       "The processor types that apt sees in this repository.",
+		Default:    json.RawMessage(`["amd64","arm64"]`),
+		ChangeNote: "The package lists of an added architecture appear, those of a removed one go, and every list is signed again. apt on a machine of a removed architecture stops seeing updates."},
+	{Key: "distribution", Label: "Distribution of imports", Type: format.FieldString, Placeholder: "stable",
+		Help: "The distribution that packages copied from Nexus go into, and that the check of a proxy's remote reads."},
+}
+
+// ui is what the web UI shows of Debian repos.
+var ui = format.UIDescriptor{
+	DeleteNotes: []format.DeleteNote{{Match: "pool/**/*.deb", One: "package", Many: "packages",
+		Text: "apt stops offering them after the indexes of their distributions rebuild."}},
+	FileDetails:    []format.FileDetail{{Match: "pool/**/*.deb", Part: "deb-package"}},
+	RemotePresets:  []format.RemotePreset{{Label: "Debian", URL: "https://deb.debian.org/debian/"}},
+	ProxyNote:      "Signed by the remote archive. Clients use its key.",
+	PublicKey:      "key.asc",
+	ArtifactKinds:  map[string]string{"package": "Debian package"},
+	ArtifactName:   map[string]string{"package": "Package"},
+	SnippetTools:   map[string]string{"apt": "apt", "curl": "curl"},
+	InstallHeading: "Install it",
+	BuildFiles: []format.BuildFileLabel{
+		{Extension: "*", Classifier: "all", Label: "Package, all architectures"},
+		{Extension: "*", Classifier: "*", Label: "Package, {classifier}"},
+	},
 }

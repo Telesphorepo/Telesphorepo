@@ -1,7 +1,8 @@
 <!--
   Where the user drops files or a folder, or chooses them. Dropped or chosen files go to onFiles;
   a dropped folder goes to onFolderDrop (read its entries with filesFromEntries), a chosen folder
-  to onFolderInput (read it with filesFromInput).
+  to onFolderInput (read it with filesFromInput). `files` and `folders` say what the format takes
+  (the upload of its descriptor).
 -->
 <script lang="ts">
   import { Button } from "$lib/components/ui/button";
@@ -16,6 +17,8 @@
     onFolderInput,
     accept,
     hint,
+    files = true,
+    folders = true,
     disabled = false,
   }: {
     onFiles: (files: File[]) => void;
@@ -25,6 +28,10 @@
     accept?: string;
     /** What to drop, e.g. "A pom and its jars, or a Maven repository folder". */
     hint: string;
+    /** The zone takes chosen and dropped files. */
+    files?: boolean;
+    /** The zone takes a chosen or dropped folder. */
+    folders?: boolean;
     disabled?: boolean;
   } = $props();
 
@@ -38,11 +45,11 @@
     if (disabled || !e.dataTransfer) return;
     // Take the entries now: the browser empties the DataTransfer after this handler.
     if (dropHasFolder(e.dataTransfer)) {
-      onFolderDrop(dropEntries(e.dataTransfer));
+      if (folders) onFolderDrop(dropEntries(e.dataTransfer));
       return;
     }
     const list = [...e.dataTransfer.files];
-    if (list.length) onFiles(list);
+    if (list.length && files) onFiles(list);
   }
 
   function pickedFiles() {
@@ -74,12 +81,12 @@
 >
   <UploadIcon aria-hidden="true" class="size-6 text-muted-foreground" />
   <div class="text-sm">
-    <p class="font-medium">Drop files or a folder here</p>
+    <p class="font-medium">{files && folders ? "Drop files or a folder here" : folders ? "Drop a folder here" : "Drop files here"}</p>
     <p class="mt-1 text-muted-foreground">{hint}</p>
   </div>
   <div class="flex flex-wrap justify-center gap-2">
-    <Button variant="outline" {disabled} onclick={() => fileInput?.click()}><FileUpIcon />Choose files</Button>
-    <Button variant="outline" {disabled} onclick={() => folderInput?.click()}><FolderUpIcon />Choose a folder</Button>
+    {#if files}<Button variant="outline" {disabled} onclick={() => fileInput?.click()}><FileUpIcon />Choose files</Button>{/if}
+    {#if folders}<Button variant="outline" {disabled} onclick={() => folderInput?.click()}><FolderUpIcon />Choose a folder</Button>{/if}
   </div>
   <input bind:this={fileInput} type="file" multiple {accept} class="sr-only" tabindex="-1" aria-hidden="true" onchange={pickedFiles} />
   <input bind:this={folderInput} type="file" webkitdirectory multiple class="sr-only" tabindex="-1" aria-hidden="true" onchange={pickedFolder} />

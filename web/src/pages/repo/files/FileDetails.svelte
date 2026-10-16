@@ -1,12 +1,13 @@
 <!--
   The body of the details column for one file: its facts (size, when and by whom it was published,
-  the SHA-256 and its checksum files as attributes), the GitHub Actions build that published it,
-  and how to use it: the format plugin's snippets of a Maven artifact or a .deb (the apt setup and
-  the install pinned to the file's version), and a curl and wget download of any other file and of a .deb. The parent keys it by path. A path that turns out to be a folder
-  (typed without its "/") opens the folder instead.
+  the SHA-256 and its checksum files as attributes), the CI build that published it, a curl and
+  wget download, and the format's part for the file: the part of the format's UI module that the
+  first file_details entry of its descriptor names whose glob matches the path (a Maven artifact
+  or a .deb shows how to use it). The parent keys it by path. A path that turns out to be a
+  folder (typed without its "/") opens the folder instead.
 -->
 <script lang="ts">
-  import { api, ApiError, type Repo } from "$lib/api";
+  import { api, ApiError, type FileInfo, type Repo } from "$lib/api";
   import { Resource } from "$lib/load.svelte";
   import { filesPath, navigate } from "$lib/router.svelte";
   import CopyValue from "$lib/components/CopyValue.svelte";
@@ -14,11 +15,13 @@
   import Loading from "$lib/components/Loading.svelte";
   import FileSize from "$lib/components/FileSize.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
-  import ProvenanceFacts from "./ProvenanceFacts.svelte";
-  import ArtifactSnippets from "../snippets/ArtifactSnippets.svelte";
+  import BuildFacts from "./BuildFacts.svelte";
   import SnippetTabs from "../snippets/SnippetTabs.svelte";
-  import { downloadSnippets } from "../clients";
-  import { browse, sideLabel, type FileInfo } from "../browse";
+  import { downloadSnippets, downloadTools } from "../clients";
+  import { formats } from "$lib/formats/registry.svelte";
+  import { globMatch } from "$lib/glob";
+  import { formatPart } from "../../../modules";
+  import { sideLabel } from "../browse";
 
   let { repo, path, base }: { repo: Repo; path: string; base: string } = $props();
 
@@ -26,7 +29,7 @@
   /* svelte-ignore state_referenced_locally */
   const file = new Resource<FileInfo | null>(async () => {
     try {
-      return await browse.file(repo.name, path);
+      return await api.repos.file(repo.name, path);
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) return null;
       throw e;
@@ -47,10 +50,12 @@
   });
 
   const f = $derived(file.data);
-  const deb = $derived(repo.format === "debian" && path.endsWith(".deb"));
+  // The format's part for this file: the first file_details entry whose glob matches the path.
+  const partName = $derived(formats.get(repo.format)?.file_details.find((d) => globMatch(d.match, path))?.part);
+  const partLoader = $derived(partName ? formatPart(repo.format, partName) : undefined);
   const url = $derived(base + api.repos.fileURL(repo.format, repo.name, path));
   const download = $derived(downloadSnippets(repo, url));
-  const by = $derived(f?.provenance ? "GitHub Actions" : f?.uploaded_by || "");
+  const by = $derived(f?.build ? f.build.provider_title : f?.uploaded_by || "");
 </script>
 
 {#if file.loading && file.data === undefined}
@@ -89,20 +94,20 @@
     {/if}
   </dl>
 
-  {#if f.provenance}
+  {#if f.build}
     <section class="flex flex-col gap-3" aria-label="Build">
       <h3 class="text-section">Build</h3>
-      <ProvenanceFacts p={f.provenance} />
+      <BuildFacts p={f.build} />
     </section>
   {/if}
 
-  {#if repo.format === "maven"}
-    <ArtifactSnippets {repo} {path} />
-  {:else}
-    {#if deb}<ArtifactSnippets {repo} {path} />{/if}
-    <section class="flex min-w-0 flex-col gap-4" aria-label="Download {f.name}">
-      <h3 class="text-section">Download it</h3>
-      <SnippetTabs snippets={download} label="Tool" fill />
-    </section>
+  {#if partLoader}
+    {#await partLoader() then mod}
+      <mod.default {repo} file={f} />
+    {/await}
   {/if}
+  <section class="flex min-w-0 flex-col gap-4" aria-label="Download {f.name}">
+    <h3 class="text-section">Download it</h3>
+    <SnippetTabs snippets={download} tools={downloadTools} label="Tool" fill />
+  </section>
 {/if}

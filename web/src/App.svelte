@@ -1,6 +1,6 @@
 <!--
-  The shell: loads the user, matches the hash route, checks access (auth.allows), and renders the
-  page inside the app shell. Pages never check the route access themselves (a repository page
+  The shell: loads the user and the formats, matches the hash route against the pages of the UI
+  modules, checks access (auth.allows), and renders the page inside the app shell. Pages never check the route access themselves (a repository page
   checks the caller's permissions on that repository).
 -->
 <script lang="ts">
@@ -9,9 +9,11 @@
   import * as Tooltip from "$lib/components/ui/tooltip";
   import { auth } from "$lib/auth.svelte";
   import type { Component } from "svelte";
-  import { navigate, router, type PageProps, type RouteDef } from "$lib/router.svelte";
+  import { navigate, router, type PageProps } from "$lib/router.svelte";
+  import type { PageDef } from "./modules/types";
+  import { formats } from "$lib/formats/registry.svelte";
   import { current } from "$lib/current.svelte";
-  import { setupOnlyPaths } from "$lib/nav";
+  import { setupPaths } from "./modules";
   import AppShell from "$lib/layouts/AppShell.svelte";
   import UnsavedGuard from "$lib/layouts/UnsavedGuard.svelte";
   import Loading from "$lib/components/Loading.svelte";
@@ -22,6 +24,7 @@
   import CompassIcon from "@lucide/svelte/icons/compass";
 
   auth.load();
+  formats.load();
 
   const matched = $derived(current.match);
 
@@ -38,8 +41,8 @@
       navigate("/login", { query: { next: router.path + (router.search ? "?" + router.search : "") }, replace: true });
       return;
     }
-    if (auth.setupOnly && r && r.access !== "any" && !setupOnlyPaths.includes(router.path)) {
-      navigate(setupOnlyPaths[0], { replace: true });
+    if (auth.setupOnly && r && r.access !== "any" && !setupPaths.includes(router.path)) {
+      navigate(setupPaths[0], { replace: true });
     }
   });
 
@@ -53,7 +56,7 @@
   // keeps its state while its params change, e.g. folders of one repo). A page renders only while
   // its own route matches, so the page that is leaving never gets the params of the next route.
   const route = $derived(matched?.route);
-  let loaded = $state.raw<{ route: RouteDef; Page: Component<PageProps> } | null>(null);
+  let loaded = $state.raw<{ route: PageDef; Page: Component<PageProps> } | null>(null);
   let loadError = $state("");
   $effect(() => {
     const r = route;

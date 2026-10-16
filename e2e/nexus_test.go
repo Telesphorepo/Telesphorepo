@@ -476,20 +476,47 @@ type nexusSource struct {
 
 // nexusSourceRepo is one Nexus repo of a source with its mapping.
 type nexusSourceRepo struct {
-	SourceRepo        string   `json:"name"`
-	SourceFormat      string   `json:"format"`
-	Type              string   `json:"type"`
-	Supported         bool     `json:"supported"`
-	Reason            string   `json:"reason"`
-	Offline           bool     `json:"offline"`
-	Public            bool     `json:"public"`
-	Target            string   `json:"target"` // target repo name; "" when not mapped
-	RemoteURL         string   `json:"remote_url"`
-	RemoteUsername    string   `json:"remote_username"`
-	Members           []string `json:"members"`
-	MembersKnown      bool     `json:"members_known"`
-	NexusKey          bool     `json:"nexus_key"`
-	NexusKeyEncrypted bool     `json:"nexus_key_encrypted"`
+	SourceRepo     string   `json:"name"`
+	SourceFormat   string   `json:"format"`
+	Type           string   `json:"type"`
+	Supported      bool     `json:"supported"`
+	Reason         string   `json:"reason"`
+	Offline        bool     `json:"offline"`
+	Public         bool     `json:"public"`
+	Target         string   `json:"target"` // target repo name; "" when not mapped
+	RemoteURL      string   `json:"remote_url"`
+	RemoteUsername string   `json:"remote_username"`
+	Members        []string `json:"members"`
+	MembersKnown   bool     `json:"members_known"`
+	// Questions and Facts come from the planning hook of the target format.
+	Questions []struct {
+		Key     string `json:"key"`
+		Type    string `json:"type"`
+		Options []struct {
+			Value string `json:"value"`
+		} `json:"options"`
+	} `json:"questions"`
+	Facts map[string]any `json:"facts"`
+}
+
+// hasQuestion reports whether r asks question key of type typ with every option of options.
+func (r nexusSourceRepo) hasQuestion(key, typ string, options ...string) bool {
+	for _, q := range r.Questions {
+		if q.Key != key || q.Type != typ {
+			continue
+		}
+		for _, o := range options {
+			if !slices.ContainsFunc(q.Options, func(x struct {
+				Value string `json:"value"`
+			}) bool {
+				return x.Value == o
+			}) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func (src *nexusSource) repo(t *testing.T, name string) nexusSourceRepo {
@@ -782,8 +809,11 @@ type nexusRepoInfo struct {
 	Kind          string `json:"kind"`
 	AnonymousRead bool   `json:"anonymous_read"`
 	Config        struct {
-		SigningKey string `json:"signing_key"`
+		Distribution string `json:"distribution"`
 	} `json:"config"`
+	Fields struct {
+		SigningKey string `json:"signing_key"`
+	} `json:"fields"`
 	Members []struct {
 		Name string `json:"name"`
 	} `json:"members"`
@@ -955,8 +985,12 @@ func TestNexus(t *testing.T) {
 		if r := got.repo(t, rs.offline); !r.Offline || !strings.Contains(r.Reason, "Offline in Nexus") {
 			t.Fatalf("offline source repo: %+v, want offline with the reason", r)
 		}
-		if r := got.repo(t, rs.apt); !r.NexusKey || !r.NexusKeyEncrypted {
-			t.Fatalf("apt source repo: %+v, want the Nexus key pair with a passphrase", r)
+		if r := got.repo(t, rs.apt); r.Facts["key_in_source"] != true || r.Facts["key_encrypted"] != true || r.Facts["distribution"] != nexusAptDist ||
+			!r.hasQuestion("signing_key", "choice", "default", "new", "source") || !r.hasQuestion("signing_passphrase", "secret") {
+			t.Fatalf("apt source repo: %+v, want the facts of the Nexus key pair with a passphrase and the key questions", r)
+		}
+		if r := got.repo(t, rs.maven); len(r.Questions) != 0 {
+			t.Fatalf("maven source repo: questions %+v, want none", r.Questions)
 		}
 		if r := got.repo(t, rs.proxy); r.RemoteURL != nexusRemoteURL || r.RemoteUsername != nexusRemoteUser {
 			t.Fatalf("proxy source repo: %+v, want remote %s with username %s", r, nexusRemoteURL, nexusRemoteUser)
@@ -973,7 +1007,7 @@ func TestNexus(t *testing.T) {
 			{"source_repo": rs.maven, "target": targets[rs.maven], "create": true, "anonymous_read": true},
 			{"source_repo": rs.maven2, "target": targets[rs.maven2], "create": true, "anonymous_read": false},
 			{"source_repo": rs.apt, "target": targets[rs.apt], "create": true, "anonymous_read": false,
-				"signing_key": "nexus", "signing_passphrase": rs.aptPass},
+				"answers": map[string]string{"signing_key": "source", "signing_passphrase": rs.aptPass}},
 			{"source_repo": rs.raw, "target": targets[rs.raw], "create": true, "anonymous_read": true},
 			{"source_repo": rs.proxy, "target": targets[rs.proxy], "create": true, "anonymous_read": false,
 				"remote_username": nexusRemoteUser, "remote_password": nexusRemotePass},
@@ -1064,8 +1098,8 @@ func TestNexus(t *testing.T) {
 
 		// The apt repo signs with the Nexus key: Release.gpg verifies with the Nexus public key.
 		s.WaitDebianIndexed(t, targets[rs.apt])
-		if info := nexusRepoInfoOf(t, s, targets[rs.apt]); info.Config.SigningKey != "nexus-"+targets[rs.apt] {
-			t.Fatalf("apt target: signing key %q, want nexus-%s", info.Config.SigningKey, targets[rs.apt])
+		if info := nexusRepoInfoOf(t, s, targets[rs.apt]); info.Fields.SigningKey != "nexus-"+targets[rs.apt] || info.Config.Distribution != nexusAptDist {
+			t.Fatalf("apt target: signing key %q, distribution %q, want nexus-%s and %s", info.Fields.SigningKey, info.Config.Distribution, targets[rs.apt], nexusAptDist)
 		}
 		dists := "/debian/" + targets[rs.apt] + "/dists/" + nexusAptDist + "/"
 		release := getFollowS3(t, s, opts.S3, dists+"Release")

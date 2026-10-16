@@ -20,6 +20,7 @@
   import TabNav from "$lib/components/TabNav.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
+  import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import Loading from "$lib/components/Loading.svelte";
   import FormatBadge from "$lib/components/FormatBadge.svelte";
   import FilesTab from "./FilesTab.svelte";
@@ -28,8 +29,8 @@
   import RepoKindIcon from "$lib/components/RepoKindIcon.svelte";
   import PublishTab from "./PublishTab.svelte";
   import UploadView from "./UploadView.svelte";
-  import { uploadFormats } from "./upload/formats";
-  import { browse, parentOf } from "./browse";
+  import { formats } from "$lib/formats/registry.svelte";
+  import { parentOf } from "./browse";
   import LockIcon from "@lucide/svelte/icons/lock";
   import UploadIcon from "@lucide/svelte/icons/upload";
   import SettingsIcon from "@lucide/svelte/icons/settings";
@@ -53,7 +54,7 @@
   });
   // The format plugin's snippets for both setup tabs, and the public base URL for addresses.
   /* svelte-ignore state_referenced_locally */
-  const usage = new Resource(() => browse.usage(name));
+  const usage = new Resource(() => api.repos.usage(name));
   const base = $derived((usage.data?.base_url || location.origin).replace(/\/+$/, ""));
 
   type View = { kind: "files"; path: string } | { kind: "use" } | { kind: "publish" } | { kind: "upload" } | { kind: "unknown" };
@@ -81,15 +82,27 @@
   // The caller's permissions on the repository; a setup-only session uses none of them.
   const perms = $derived(r && auth.user && !auth.setupOnly ? (r.permissions ?? []) : []);
   // Settings shows to anyone who can open one of its tabs.
-  const canSettings = $derived(perms.includes("settings") || perms.includes("access") || perms.includes("pipelines"));
+  const canSettings = $derived(perms.includes("repo.settings") || perms.includes("repo.access") || perms.includes("ci.pipelines"));
   // Nobody publishes to a group or a proxy.
-  const canWrite = $derived(!!r && r.kind === "hosted" && perms.includes("publish"));
-  const locked = $derived(r?.locked_by ?? "");
+  const canWrite = $derived(!!r && r.kind === "hosted" && perms.includes("repo.publish"));
+  const locked = $derived(r?.operation?.message ?? "");
+  let resumeOpen = $state(false);
+  let clearOpen = $state(false);
+  async function resumeOperation() {
+    const deleting = r?.operation?.type === "delete";
+    await api.repos.resumeOperation(name);
+    if (deleting) navigate("/");
+    else await repo.reload();
+  }
+  async function clearOperation() {
+    await api.repos.clearOperation(name);
+    await repo.reload();
+  }
   // An upload needs a manual publish token, which only a password account gets.
-  const canUpload = $derived(canWrite && !!r && uploadFormats.includes(r.format) && auth.user?.kind === "local");
+  const canUpload = $derived(canWrite && !!r && !!formats.get(r.format)?.upload && auth.user?.kind === "local");
   // Who deletes files on the Files tab: people with Delete files, with the UI session; a hosted
   // repository not while it is paused, a proxy its cached files.
-  const canDelete = $derived(!!r && !group && perms.includes("delete") && (proxy || !locked));
+  const canDelete = $derived(!!r && !group && perms.includes("repo.delete") && (proxy || !locked));
 
   // On a phone the tab rail scrolls: keep the open tab in view.
   let tabRail = $state<HTMLDivElement | null>(null);
@@ -170,7 +183,25 @@
     {/snippet}
   </PageHeader>
 
-  {#if (canWrite || perms.includes("delete")) && locked}
+  {#if r.operation?.state === "failed" && auth.allRepos()}
+    <Alert.Root variant="destructive" class="mb-6">
+      <PauseIcon />
+      <Alert.Title>An operation on this repository failed</Alert.Title>
+      <Alert.Description>
+        <p>{r.operation.message}</p>
+        <div class="mt-3 flex flex-wrap gap-2">
+          <Button size="sm" variant="outline" onclick={() => (resumeOpen = true)}>Resume</Button>
+          <Button size="sm" variant="outline" onclick={() => (clearOpen = true)}>Stop and keep the files</Button>
+        </div>
+      </Alert.Description>
+    </Alert.Root>
+    <ConfirmDialog bind:open={resumeOpen} title="Resume the {r.operation.type}?" confirmLabel="Resume" destructive
+      changes={r.operation.type === "delete" ? ["Deletes the files that are left", "Deletes the repository"] : ["Runs the operation again"]}
+      onConfirm={resumeOperation} />
+    <ConfirmDialog bind:open={clearOpen} title="Stop the {r.operation.type}?" confirmLabel="Stop the operation"
+      changes={["Ends the operation", "Keeps the repository with the files that are left"]}
+      onConfirm={clearOperation} />
+  {:else if (canWrite || perms.includes("repo.delete")) && locked}
     <Alert.Root class="mb-6">
       <PauseIcon />
       <Alert.Title>Uploads and deletes are paused</Alert.Title>

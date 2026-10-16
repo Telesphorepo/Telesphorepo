@@ -14,31 +14,10 @@ const (
 	cleanupBatch = 100 // the LIMIT of each cleanup query
 )
 
-// Start runs the cleanup job until ctx ends: every minute it deletes expired challenges,
-// enrollments and seen CI tokens, and sessions that ended more than 30 days ago, except a CI
-// session with build provenance that wrote files: it stays as the build record of those files.
-// Wait returns once it has stopped.
-func (s *Service) Start(ctx context.Context) {
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		t := time.NewTicker(cleanupEvery)
-		defer t.Stop()
-		for {
-			s.cleanup(ctx)
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-			}
-		}
-	}()
-}
-
-// Wait blocks until the cleanup job started by Start has stopped.
-func (s *Service) Wait() { s.wg.Wait() }
-
-func (s *Service) cleanup(ctx context.Context) {
+// Cleanup deletes expired nonces, enrollments and seen CI tokens, the sessions that ended more
+// than 30 days ago, and the build records older than 30 days that no file references. The
+// publish.cleanup job runs it every minute; a failed delete is logged and the next table goes on.
+func (s *Service) Cleanup(ctx context.Context) error {
 	now := time.Now()
 	s.enrollLimits.sweep(now)
 	jobs := []struct {
@@ -46,13 +25,10 @@ func (s *Service) cleanup(ctx context.Context) {
 		del  func(context.Context, int64) (int64, error)
 		arg  int64
 	}{
-		{"challenges", s.wq.DeleteExpiredChallenges, now.Unix()},
+		{"nonces", s.wq.DeleteExpiredNonces, now.Unix()},
 		{"enrollments", s.wq.DeleteExpiredEnrollments, now.Unix()},
 		{"seen CI tokens", s.wq.DeleteExpiredSeenOIDCTokens, now.Unix()},
 		{"publish sessions", s.wq.DeleteOldPublishSessions, now.Add(-logRetention).Unix()},
-		// A CI session with build provenance stays as the build record of the files it wrote.
-		{"kept build records", s.wq.KeepProvenanceSessions, now.Add(-logRetention).Unix()},
-		{"unused build records", s.wq.DeleteUnusedProvenanceSessions, now.Add(-logRetention).Unix()},
 	}
 	for _, j := range jobs {
 		for {
@@ -68,6 +44,12 @@ func (s *Service) cleanup(ctx context.Context) {
 			}
 		}
 	}
+	// The build records take one batch per run: builds that files still reference stay, so a walk
+	// over all old builds spreads over many runs.
+	if err := s.builds.Cleanup(ctx, now.Add(-logRetention)); err != nil && ctx.Err() == nil {
+		s.log.ErrorContext(ctx, "publish cleanup", "table", "build records", "error", err.Error())
+	}
+	return nil
 }
 
 // ipLimiter gives each client address a budget of unauthenticated enrollments: a burst of 10,

@@ -3,6 +3,7 @@
 
 import { request, requestOrNull, requestWithProgress } from "./client";
 import type * as T from "./types";
+import { globMatch } from "$lib/glob";
 
 export * from "./client";
 export type * from "./types";
@@ -10,6 +11,17 @@ export type * from "./types";
 const enc = encodeURIComponent;
 const repo = (name: string) => `/api/repos/${enc(name)}`;
 const page = (p: T.PageParams = {}) => ({ after: p.after, limit: p.limit });
+
+/** The X-Telesphorepo-Proof header of a fresh second factor: "totp <code>", "passkey <base64url JSON>" or "grant <grant>". */
+function proofHeader(p: T.FreshProof): string {
+  if ("grant" in p) return "grant " + p.grant;
+  if (p.totp_code) return "totp " + p.totp_code.replace(/\s/g, "");
+  if (p.passkey === undefined) return "";
+  const bytes = new TextEncoder().encode(JSON.stringify(p.passkey));
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return "passkey " + btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
 
 export const api = {
   auth: {
@@ -20,7 +32,7 @@ export const api = {
     /** Passkey options for the pending sign-in (step 2). */
     loginPasskeyOptions: () => request<T.PasskeyOptions>("POST", "/api/auth/login/passkey"),
     /** Step 2: a TOTP code, a passkey assertion or a recovery code. */
-    loginSecond: (proof: T.Proof) => request<T.Me>("POST", "/api/auth/login/second", { body: proof }),
+    loginSecond: (proof: T.Proof) => request<T.SessionAnswer>("POST", "/api/auth/login/second", { body: proof }),
     logout: () => request("POST", "/api/auth/logout"),
     /** Full-page navigation target of "Sign in with SSO". */
     oidcLoginURL: "/api/auth/oidc/login",
@@ -62,16 +74,16 @@ export const api = {
     /** People: the repositories one person can use, by repository name. */
     access: (username: string, p?: T.PageParams) =>
       request<T.UserAccess>("GET", `/api/users/${enc(username)}/access`, { query: page(p) }),
-    /** People: a new local account with server permissions that the caller holds. */
+    /** people.manage: a new local account with server permissions that the caller holds. */
     create: (u: T.NewUser) => request<T.User>("POST", "/api/users", { body: u }),
     /** Changes a password: your own, or with People that of a person whose permissions you all hold. */
     update: (username: string, patch: T.UserPatch) =>
       request<T.User>("PATCH", `/api/users/${enc(username)}`, { body: patch }),
     /**
-     * People: replaces the server permissions of a person. The caller adds and removes only
-     * permissions they hold (403); 409 when no enabled person would keep People.
+     * people.manage: replaces the server permissions of a person. The caller adds and removes only
+     * permissions they hold (403); 409 when no enabled person would keep people.manage.
      */
-    setPermissions: (username: string, permissions: T.ServerPermission[]) =>
+    setPermissions: (username: string, permissions: T.PermId[]) =>
       request<T.User>("PUT", `/api/users/${enc(username)}/permissions`, { body: { permissions } }),
     /** People: disables or enables 1 to 1000 people. A disabled person's sessions end. 400 when the list holds the caller and disabled is true. */
     setDisabled: (usernames: string[], disabled: boolean) =>
@@ -83,15 +95,18 @@ export const api = {
     search: (q: string, p?: T.PageParams) => request<T.Page<T.PersonName>>("GET", "/api/people", { query: { q, ...page(p) } }),
   },
 
+  /** The permission registry: every subsystem with its permissions (no credential needed). */
+  permissions: () => request<T.PermissionRegistry>("GET", "/api/permissions"),
+
   /** The repository permissions of each pair of person and repository. */
-  permissions: {
+  grants: {
     /**
      * Sets the whole permission set of every pair of user and repository; [] removes the pair.
-     * Needs Manage access on every repository, and the caller adds or removes only permissions
+     * Needs repo.access on every repository, and the caller adds or removes only permissions
      * they hold there (403).
      */
-    set: (users: string[], repos: string[], perms: T.RepoPermission[]) =>
-      request<T.Changed>("PUT", "/api/permissions", { body: { users, repos, perms } }),
+    set: (users: string[], repos: string[], perms: T.PermId[]) =>
+      request<T.Changed>("PUT", "/api/grants", { body: { users, repos, perms } }),
   },
 
   formats: {
@@ -113,15 +128,37 @@ export const api = {
     setPublic: (names: string[], anonymous_read: boolean) =>
       request<T.Changed>("PATCH", "/api/repos", { body: { names, anonymous_read } }),
     /**
-     * All repositories: removes 1 to 1000 repositories, their rows and their blobs. 409 when one is locked
-     * (nothing is deleted); a failure part way is an ApiError, and the repositories before it are gone.
+     * All repositories: removes 1 to 1000 repositories and their files. 409 when one has an operation
+     * (nothing is deleted); a failure part way is an ApiError, the repositories before it are gone, and the
+     * failed one keeps a failed delete operation that can be resumed or cleared.
      */
     delete: (names: string[]) => request<T.ReposDeleted>("POST", "/api/repos/delete", { body: { names } }),
+    /** All repositories: runs the failed operation of the repository again (a failed delete deletes the repository). */
+    resumeOperation: (name: string) => request<{ ok: boolean }>("POST", repo(name) + "/operation/resume"),
+    /** All repositories: ends the failed operation of the repository; the repository keeps the files that are left. */
+    clearOperation: (name: string) => request<void>("DELETE", repo(name) + "/operation"),
     status: (name: string) => request<T.RepoStatus>("GET", repo(name) + "/status"),
+    /** The snippets of the repository: how to use it in a build and how to publish to it, with the labels of their tools. */
     usage: (name: string) => request<T.Usage>("GET", repo(name) + "/usage"),
-    /** The direct children of a folder ("" is the root), folders first. */
+    /** The CI file that publishes to a hosted repository from system, with the tool and the trigger. */
+    ci: (name: string, o: T.CIOptions) =>
+      request<T.Snippet>("GET", repo(name) + "/ci", {
+        query: { system: o.system, tool: o.tool, branches: o.branches?.join(","), tags: o.tags?.join(",") },
+      }),
+    /** The direct children of a folder ("" is the root), folders first, each file with the build that published it. */
     tree: (name: string, path = "", p?: T.PageParams) =>
       request<T.Page<T.TreeEntry>>("GET", repo(name) + "/tree", { query: { path, ...page(p) } }),
+    /** The versions of an artifact folder, newest first; artifact is null for any other folder. */
+    versions: (name: string, path: string, p?: T.PageParams) =>
+      request<T.Versions>("GET", repo(name) + "/versions", { query: { path, ...page(p) } }),
+    /** The builds of one version of an artifact folder, newest first; version is null when the artifact has no such version. */
+    builds: (name: string, path: string, version: string, p?: T.PageParams) =>
+      request<T.Builds>("GET", repo(name) + "/builds", { query: { path, version, ...page(p) } }),
+    /** One file with its details; 404 when it does not exist. */
+    file: (name: string, path: string) => request<T.FileInfo>("GET", repo(name) + "/file", { query: { path } }),
+    /** The snippets that use one artifact: an artifact folder (with a version, or "" for none), a version folder, or a file. */
+    snippets: (name: string, path: string, version: string, mode: T.VersionMode) =>
+      request<T.ArtifactSnippets>("GET", repo(name) + "/snippets", { query: { path, version, version_mode: mode } }),
     /** Assets under a path prefix, by path. */
     assets: (name: string, prefix = "", p?: T.PageParams) =>
       request<T.Page<T.Asset>>("GET", repo(name) + "/assets", { query: { prefix, ...page(p) } }),
@@ -131,9 +168,34 @@ export const api = {
      */
     deleteFiles: (name: string, target: T.FilesDelete, token?: string) =>
       request<T.DeleteResult>("POST", repo(name) + "/files/delete", { body: target, token }),
+    /** What a delete of files and folders removes, with the delete notes of the format. Deletes nothing. */
+    deletePlan: (name: string, target: T.FilesDelete) => request<T.DeletePlan>("POST", repo(name) + "/files/delete/plan", { body: target }),
     /**
-     * Manual upload (multipart: the format's fields first, then `file` parts). Needs a publish
-     * session token. Reports the progress of the body; abort() cancels it.
+     * What an upload of files would store (the format's plan), and stores nothing. The body holds the
+     * list of files and the first bytes of each file that a read rule of the format matches. Needs
+     * a publish session token. Reports the progress of the body; abort() cancels it.
+     */
+    uploadPlan: (
+      name: string,
+      req: T.PlanRequest,
+      reads: T.FormatUpload["reads"],
+      token: string,
+      onProgress: (p: T.UploadProgress) => void,
+    ) => {
+      const form = new FormData();
+      const list = req.files.map((f) => ({ path: f.path, size: f.file.size }));
+      form.append("plan", new Blob([JSON.stringify({ fields: req.fields, folder: req.folder, files: list })], { type: "application/json" }));
+      for (const f of req.files) {
+        const rule = reads.find((r) => globMatch(r.glob, f.path));
+        if (rule) form.append("head", f.file.slice(0, rule.max_bytes), f.path);
+      }
+      const r = requestWithProgress<T.UploadPlan>(repo(name) + "/upload/plan", form, token, (sent, total) => onProgress({ sent, total }));
+      return { done: r.done, abort: r.abort };
+    },
+    /**
+     * Manual upload (multipart: the format's fields first, then `file` parts, each with its path in
+     * the upload as its filename). Needs a publish session token. Reports the progress of the body;
+     * abort() cancels it.
      */
     upload: (name: string, form: FormData, token: string, onProgress: (p: T.UploadProgress) => void) => {
       const r = requestWithProgress<T.UploadAnswer | undefined>(repo(name) + "/upload", form, token, (sent, total) =>
@@ -141,32 +203,14 @@ export const api = {
       );
       return { done: r.done.then((a) => ({ files: Array.isArray(a?.files) ? a.files : [] })), abort: r.abort };
     },
-    /**
-     * Checks the files of a dropped folder and stores nothing. The body is like upload's: each
-     * `file` part's filename is its path inside the folder. Needs a publish session token.
-     */
-    scanUpload: (name: string, form: FormData, token: string, onProgress: (p: T.UploadProgress) => void) => {
-      const r = requestWithProgress<T.ScanAnswer | undefined>(repo(name) + "/upload/scan", form, token, (sent, total) =>
-        onProgress({ sent, total }),
-      );
-      return {
-        done: r.done.then((a) => ({
-          found: Array.isArray(a?.found) ? a.found : [],
-          ignored: Array.isArray(a?.ignored) ? a.ignored : [],
-        })),
-        abort: r.abort,
-      };
-    },
     /** Edit settings: the repo's IP allow-lists for downloads (read) and publishing. */
     ipRules: {
       get: (name: string) => request<T.IPRules>("GET", repo(name) + "/ip-rules"),
       /** Replaces both lists; answers them as stored (CIDRs masked, addresses as /32 or /128). */
       set: (name: string, rules: T.IPRules) => request<T.IPRules>("PUT", repo(name) + "/ip-rules", { body: rules }),
     },
-    /** Manage access: each person with a grant on the repository, with their whole set. */
-    permissions: {
-      list: (name: string) => request<T.Permission[]>("GET", repo(name) + "/permissions"),
-    },
+    /** repo.access: each person with a grant on the repository, with their whole set. */
+    grants: (name: string) => request<T.Permission[]>("GET", repo(name) + "/grants"),
     /**
      * Manage access, Edit settings or CI pipelines: who can download from and publish to the repo,
      * and from where. admins lists the holders of All repositories too.
@@ -190,8 +234,8 @@ export const api = {
      * move. A validation error is an ApiError with `fields`.
      */
     patch: (patch: T.SettingsPatch) => request<T.Settings | T.SettingsMoveStarted>("PATCH", "/api/settings", { body: patch }),
-    testStorage: (patch: T.SettingsPatch) => request<T.TestResult>("POST", "/api/settings/storage/test", { body: patch }),
-    testOIDC: (patch: T.SettingsPatch) => request<T.TestResult>("POST", "/api/settings/oidc/test", { body: patch }),
+    /** Checks the values of group (merged over the current ones, not saved), e.g. the probe of a store. */
+    test: (group: string, patch: T.SettingsPatch) => request<T.TestResult>("POST", `/api/settings/${enc(group)}/test`, { body: patch }),
   },
 
   /** Network: named address ranges that repo rules and trusted proxies refer to. */
@@ -201,12 +245,19 @@ export const api = {
     /** One list with its ranges. */
     get: (name: string) => request<T.IPList>("GET", `/api/ip-lists/${enc(name)}`),
     create: (l: T.NewIPList) => request<T.IPList>("POST", "/api/ip-lists", { body: l }),
-    /** Changes the fields that are set; a new name also changes the rules that refer to the list. */
+    /** Changes the fields that are set. Rules and trusted proxies refer to the list by its id, so a new name keeps them. */
     update: (name: string, l: T.IPListPatch) => request<T.IPList>("PUT", `/api/ip-lists/${enc(name)}`, { body: l }),
     /** 409 while a repo rule or the trusted proxies use the list. */
     delete: (name: string) => request("DELETE", `/api/ip-lists/${enc(name)}`),
     /** Fetches a preset now; a failed fetch is an ApiError (502) and the last good ranges stay. */
     refresh: (name: string) => request<T.IPList>("POST", `/api/ip-lists/${enc(name)}/refresh`),
+  },
+
+  /** The IP lists that the trusted proxies include (the literal entries are the setting trusted_proxies). */
+  trustedProxies: {
+    get: () => request<T.TrustedProxyLists>("GET", "/api/network/trusted-proxies"),
+    /** Replaces the lists, by id. */
+    set: (lists: number[]) => request<T.TrustedProxyLists>("PUT", "/api/network/trusted-proxies", { body: { lists } }),
   },
 
   /** Pulls the addresses and ranges out of pasted text. Stores nothing. */
@@ -272,8 +323,8 @@ export const api = {
     pending: (user_code: string) =>
       request<T.PendingEnrollment>("GET", "/api/devices/enroll", { query: { user_code } }),
     /** A local account sends a fresh second factor; a single sign-on account sends the grant of ssoApproveURL. */
-    approve: (user_code: string, proof: T.Proof | { grant: string }) =>
-      request<T.Device>("POST", "/api/devices/approve", { body: { user_code, ...proof } }),
+    approve: (user_code: string, proof: T.FreshProof) =>
+      request<T.Device>("POST", "/api/devices/approve", { body: { user_code }, proof: proofHeader(proof) }),
     /** Full-page navigation: a new single sign-on that returns to /device?code= with a grant, or with an error. */
     ssoApproveURL: (user_code: string) => `/api/auth/oidc/device?code=${enc(user_code)}`,
     /** The caller's devices, or every device (with username) for a holder of People; newest first. */
@@ -289,8 +340,8 @@ export const api = {
     oidcSession: (token: string, repo: string) =>
       request<T.PublishSession>("POST", "/api/publish/sessions/oidc", { body: { token, repo } }),
     /** A manual publish session for one repo after a fresh second factor. */
-    manualSession: (repo: string, proof: T.Proof) =>
-      request<T.PublishSession>("POST", "/api/publish/sessions/manual", { body: { repo, ...proof } }),
+    manualSession: (repo: string, proof: T.FreshProof) =>
+      request<T.PublishSession>("POST", "/api/publish/sessions/manual", { body: { repo }, proof: proofHeader(proof) }),
     /** The caller's sessions, newest first. */
     sessions: (p?: T.PageParams) => request<T.Page<T.SessionInfo>>("GET", "/api/publish/sessions", { query: page(p) }),
     /** Ends a session; authenticates with its own token. */
@@ -306,7 +357,10 @@ export const api = {
     },
   },
 
-  /** Activity: the audit log, newest first. */
+  /** activity.read: the actions of the audit log with their labels. */
+  auditActions: () => request<T.AuditAction[]>("GET", "/api/audit/actions"),
+
+  /** activity.read: the audit log, newest first. */
   audit: (filter: T.AuditFilter & T.PageParams = {}) =>
     request<T.Page<T.AuditEvent>>("GET", "/api/audit", {
       query: { action: filter.action, repo: filter.repo, ...page(filter) },

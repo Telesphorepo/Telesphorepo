@@ -8,15 +8,14 @@ import (
 	"strings"
 	"time"
 
-	coredbq "github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
+	"github.com/Telesphorepo/Telesphorepo/internal/ci"
 	"github.com/Telesphorepo/Telesphorepo/internal/debian/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
-	"github.com/Telesphorepo/Telesphorepo/internal/provenance"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"pault.ag/go/debian/version"
 )
 
-// Versions and builds (format.Versioned) of a Debian package, read from deb_packages. An
+// Versions and builds (format.Spec Versions and Builds) of a Debian package, read from deb_packages. An
 // artifact folder is pool/<component>/<prefix>/<package>/: the versions are those of the
 // package of that name in that component whose files lie in the folder. A Debian version
 // <base>~SNAPSHOT<sep><stamp> (sep one of . + ~ -, stamp 8 to 14 digits, yyyyMMdd[HHmmss]) is a
@@ -44,17 +43,17 @@ func packageOf(dir string) (format.Artifact, string, string, bool) {
 	if len(segs) != 4 || segs[0] != "pool" || !packageRE.MatchString(segs[3]) {
 		return format.Artifact{}, "", "", false
 	}
-	return format.Artifact{Path: strings.Join(segs, "/") + "/", Title: segs[3], Kind: "package"}, segs[1], segs[3], true
+	return format.Artifact{Path: strings.Join(segs, "/") + "/", Title: segs[3], Name: segs[3], Kind: "package"}, segs[1], segs[3], true
 }
 
 // debBuild is one Debian version of a package: its .deb files.
 type debBuild struct {
-	id      string // the Debian version, e.g. 3.0~SNAPSHOT.20261014211855
-	stamp   string // "" for a release
-	dist    string // a distribution that holds it
-	files   []format.BuildFile
-	at      time.Time
-	session int64
+	id    string // the Debian version, e.g. 3.0~SNAPSHOT.20261014211855
+	stamp string // "" for a release
+	dist  string // a distribution that holds it
+	files []format.BuildFile
+	at    time.Time
+	build int64 // the CI build record; 0 = none
 }
 
 // debVersion is the builds of one version, newest first.
@@ -89,8 +88,8 @@ func (h *Handler) readPackage(ctx context.Context, repoID int64, art format.Arti
 		if at := time.Unix(r.UpdatedAt, 0).UTC(); at.After(b.at) {
 			b.at = at
 		}
-		if r.PublishSessionID.Valid && b.session == 0 {
-			b.session = r.PublishSessionID.Int64
+		if r.BuildID.Valid && b.build == 0 {
+			b.build = r.BuildID.Int64
 		}
 	}
 	byName := map[string]*debVersion{}
@@ -114,18 +113,18 @@ func (h *Handler) readPackage(ctx context.Context, repoID int64, art format.Arti
 }
 
 // summary is the format.Version of v.
-func (v *debVersion) summary(ctx context.Context, prov *provenance.Loader) (*format.Version, error) {
+func (v *debVersion) summary(ctx context.Context, builds *ci.Loader) (*format.Version, error) {
 	newest := v.builds[0]
 	out := &format.Version{Version: v.name, Kind: format.VersionRelease, BuildsCount: len(v.builds), PublishedAt: newest.at}
 	if newest.stamp != "" {
 		out.Kind, out.LatestBuild = format.VersionSnapshot, newest.id
 	}
 	var err error
-	out.Provenance, err = prov.Get(ctx, newest.session)
+	out.CI, err = builds.Get(ctx, newest.build)
 	return out, err
 }
 
-// Versions implements format.Versioned for a package folder of the pool.
+// Versions lists the versions of a package folder of the pool.
 func (h *Handler) Versions(ctx context.Context, repo *repos.Repo, p, after string, limit int) (*format.Artifact, []format.Version, string, error) {
 	art, component, pkg, ok := packageOf(p)
 	if !ok {
@@ -135,7 +134,7 @@ func (h *Handler) Versions(ctx context.Context, repo *repos.Repo, p, after strin
 	if err != nil || len(versions) == 0 {
 		return nil, nil, "", err
 	}
-	prov := provenance.NewLoader(coredbq.New(h.host.DB.R))
+	prov := h.host.Builds.Loader()
 	var out []format.Version
 	for _, v := range versions {
 		if after != "" && compareVersions(v.name, after) >= 0 {
@@ -153,7 +152,7 @@ func (h *Handler) Versions(ctx context.Context, repo *repos.Repo, p, after strin
 	return &art, out, "", nil
 }
 
-// Builds implements format.Versioned for version name of a package folder of the pool.
+// Builds lists the builds of version name of a package folder of the pool.
 func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, name, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
 	art, component, pkg, ok := packageOf(p)
 	if !ok {
@@ -167,7 +166,7 @@ func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, name, after s
 	if i < 0 {
 		return nil, nil, nil, "", nil
 	}
-	prov := provenance.NewLoader(coredbq.New(h.host.DB.R))
+	prov := h.host.Builds.Loader()
 	ver, err := versions[i].summary(ctx, prov)
 	if err != nil {
 		return nil, nil, nil, "", err
@@ -180,11 +179,11 @@ func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, name, after s
 		if len(out) == limit {
 			return &art, ver, out, out[len(out)-1].Build, nil
 		}
-		pv, err := prov.Get(ctx, b.session)
+		pv, err := prov.Get(ctx, b.build)
 		if err != nil {
 			return nil, nil, nil, "", err
 		}
-		out = append(out, format.Build{Build: b.id, Files: slices.Clone(b.files), PublishedAt: b.at, Provenance: pv})
+		out = append(out, format.Build{Build: b.id, Files: slices.Clone(b.files), PublishedAt: b.at, CI: pv})
 	}
 	return &art, ver, out, "", nil
 }

@@ -21,9 +21,11 @@
   import Loading from "$lib/components/Loading.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
   import CoverFlow, { type Ticket } from "./CoverFlow.svelte";
-  import ProvenanceInline from "./ProvenanceInline.svelte";
+  import BuildInline from "./BuildInline.svelte";
   import type { DeleteTarget } from "./FolderList.svelte";
-  import { browse, buildInline, buildLabel, parentOf, shortSha, type Artifact, type Build, type BuildFile, type Version } from "../browse";
+  import { api, type Artifact, type Build, type BuildFile, type Version } from "$lib/api";
+  import { formats } from "$lib/formats/registry.svelte";
+  import { buildInline, buildLabel, parentOf, shortSha } from "../browse";
   import { formatCount, formatDateTime } from "$lib/format";
   import { cn } from "$lib/utils";
   import { viewBox } from "./area";
@@ -68,22 +70,22 @@
   } = $props();
 
   /* svelte-ignore state_referenced_locally */
-  const builds = new Keyset<Build>((p) => browse.builds(repo.name, artifact.path, version.version, p), 20);
+  const builds = new Keyset<Build>((p) => api.repos.builds(repo.name, artifact.path, version.version, p), 20);
 
   const snapshot = $derived(version.kind === "snapshot");
   const newest = $derived(builds.items[0]);
-  const shown = $derived(builds.items.find((b) => b.build === build) ?? newest);
+  const shown = $derived(builds.items.find((b) => b.id === build) ?? newest);
   // A build named in the address may sit on a later page: load pages until it shows.
   $effect(() => {
-    if (build && !builds.items.some((b) => b.build === build) && builds.hasMore && !builds.loadingMore && !builds.loading) builds.more();
+    if (build && !builds.items.some((b) => b.id === build) && builds.hasMore && !builds.loadingMore && !builds.loading) builds.more();
   });
 
   /* svelte-ignore state_referenced_locally */
   let earlierOpen = $state(earlierAsked);
-  const earlier = $derived(earlierOpen || (!!build && build !== newest?.build));
+  const earlier = $derived(earlierOpen || (!!build && build !== newest?.id));
   // Closing the list goes back to the latest build.
   function toggleEarlier() {
-    if (earlier && newest && shown !== newest) choose(newest.build);
+    if (earlier && newest && shown !== newest) choose(newest.id);
     earlierOpen = !earlier;
   }
 
@@ -91,35 +93,32 @@
   // the artifact folder. A file in the artifact folder keeps it too.
   const at = (dir: string, build: string | undefined) => ({ version: dir === artifact.path ? version.version : undefined, build });
   const choose = (key: string) =>
-    navigate(filesPath(repo.name, folder), { query: at(folder, key === newest?.build ? undefined : key), replace: true });
+    navigate(filesPath(repo.name, folder), { query: at(folder, key === newest?.id ? undefined : key), replace: true });
   const fileHref = (f: BuildFile) =>
-    href(filesPath(repo.name, f.path), at(parentOf(f.path), shown && shown !== newest ? shown.build : undefined));
-  const buildHref = (b: Build) => href(filesPath(repo.name, folder), at(folder, b === newest ? undefined : b.build));
+    href(filesPath(repo.name, f.path), at(parentOf(f.path), shown && shown !== newest ? shown.id : undefined));
+  const buildHref = (b: Build) => href(filesPath(repo.name, folder), at(folder, b === newest ? undefined : b.id));
 
   const day = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", year: "numeric" });
   const tickets = $derived<Ticket[]>(
     builds.items.map((b) => ({
-      key: b.build,
-      top: buildLabel(b.build),
+      key: b.id,
+      top: buildLabel(b.id, b.label),
       bottom: day.format(new Date(b.published_at)),
-      serial: b.provenance ? shortSha(b.provenance.sha) : version.version,
-      label: `${buildLabel(b.build)} of ${version.version}, published ${formatDateTime(b.published_at)}`,
+      serial: b.build?.revision ? shortSha(b.build.revision) : version.version,
+      label: `${buildLabel(b.id, b.label)} of ${version.version}, published ${formatDateTime(b.published_at)}`,
     })),
   );
-  const byKey = $derived(new Map(builds.items.map((b) => [b.build, b])));
+  const byKey = $derived(new Map(builds.items.map((b) => [b.id, b])));
 
-  /** What a file of a build is, in words. */
+  /** What a file of a build is, in words: the first build_files label of the format that matches it. */
   function kindOf(f: BuildFile): string {
-    if (f.extension === "deb" || f.extension === "udeb") return f.classifier === "all" ? "Package, all architectures" : `Package, ${f.classifier}`;
-    if (!f.classifier) {
-      if (f.extension === "pom") return "Project description (POM)";
-      if (f.extension === "module") return "Gradle module metadata";
-      if (f.extension === "jar") return "Library (JAR)";
-      return f.extension.toUpperCase();
-    }
-    if (f.classifier === "sources") return "Sources";
-    if (f.classifier === "javadoc") return "Javadoc";
-    return `${f.classifier} (${f.extension})`;
+    const l = formats
+      .get(repo.format)
+      ?.labels.build_files.find(
+        (b) => (b.extension === "*" || b.extension === f.extension) && (b.classifier === "*" || b.classifier === f.classifier),
+      );
+    if (l) return l.label.replaceAll("{classifier}", f.classifier).replaceAll("{extension}", f.extension);
+    return f.classifier ? `${f.classifier} (${f.extension})` : f.extension.toUpperCase();
   }
 
   // The files of the shown build, as a table source with the builds' request state.
@@ -158,11 +157,11 @@
 
 {#snippet head(b: Build)}
   <p class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-    <span class="text-label">{buildLabel(b.build)}</span>
+    <span class="text-label">{buildLabel(b.id, b.label)}</span>
     {#if b === newest}<StatusBadge tone="success" title="The build a snapshot dependency resolves to">Latest</StatusBadge>{/if}
     <span class="flex flex-wrap items-center gap-x-3 gap-y-1 text-meta text-muted-foreground">
       <span>Published <RelativeTime at={b.published_at} /></span>
-      <ProvenanceInline p={b.provenance} />
+      <BuildInline p={b.build} />
     </span>
   </p>
 {/snippet}
@@ -170,7 +169,7 @@
 {#if snapshot && flow && builds.items.length}
   <CoverFlow
     {tickets}
-    selected={shown?.build ?? ""}
+    selected={shown?.id ?? ""}
     onSelect={choose}
     onOpen={onList}
     label="Builds of {version.version}"
@@ -208,7 +207,7 @@
         <DataTable
           source={others}
           caption="Builds of {version.version}"
-          key={(b) => b.build}
+          key={(b) => b.id}
           href={buildHref}
           selected={(b) => b === shown}
           columns={[
@@ -223,25 +222,25 @@
               <span class="flex min-w-0 items-center gap-2">
                 <PackageIcon aria-hidden="true" class="size-4 shrink-0 text-muted-foreground" />
                 <a href={buildHref(b)} class="flex min-w-0 rounded-sm font-medium outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
-                  ><Truncate text={buildLabel(b.build)} /></a
+                  ><Truncate text={buildLabel(b.id, b.label)} /></a
                 >
-                <span class="min-w-0 truncate text-muted-foreground max-sm:hidden">{b.build}</span>
+                {#if b.label}<span class="min-w-0 truncate text-muted-foreground max-sm:hidden">{b.id}</span>{/if}
                 {#if b === newest}<StatusBadge tone="success">Latest</StatusBadge>{/if}
               </span>
             </Cell>
-            <Cell hideOnPhone muted><ProvenanceInline p={b.provenance} /></Cell>
+            <Cell hideOnPhone muted><BuildInline p={b.build} /></Cell>
             <Cell num muted hideOnPhone>{b.files.length}</Cell>
             <Cell num muted><RelativeTime at={b.published_at} /></Cell>
           {/snippet}
         </DataTable>
       </div>
-      <h3 class="mb-2 text-label">Files of {buildInline(shown.build)}</h3>
+      <h3 class="mb-2 text-label">Files of {buildInline(shown.id, shown.label)}</h3>
     {/if}
   {/if}
 
   <DataTable
     source={files}
-    caption="Files of {version.version}{snapshot && shown ? `, ${buildLabel(shown.build)}` : ''}"
+    caption="Files of {version.version}{snapshot && shown ? `, ${buildLabel(shown.id, shown.label)}` : ''}"
     key={(f) => f.path}
     href={fileHref}
     selected={(f) => f.path === selected}

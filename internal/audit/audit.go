@@ -1,58 +1,141 @@
-// Package audit writes and lists the audit log (spec §13): who did what, to which repo, from
-// which address. The audit log is the only place that shows client IP addresses.
+// Package audit writes and lists the audit log: who did what, to which repo, from which
+// address. The audit log is the only place that shows client IP addresses.
+//
+// Every action has a registered ID (ActionDef): each module registers the actions it records,
+// and Record refuses an action that no module registered. The actor travels in the context: the
+// route middleware puts the caller there (WithActor), a job uses System and the command line
+// CLI, so a service records its own events without a request.
 package audit
 
 import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"math"
-	"net/http"
-	"sync"
+	"net/netip"
+	"regexp"
 	"time"
 	"unicode/utf8"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
 	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
-	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 )
 
-// Actions.
+// The actions that the kernel records. The core module registers them.
 const (
-	SignIn           = "signin"
+	SignInSuccess    = "signin.success"
 	SignInFailed     = "signin.failed"
-	SessionCreate    = "session.create" // a publish session was minted
-	SessionClose     = "session.close"
-	Upload           = "upload"
-	Delete           = "delete"
+	TokenCreate      = "token.create"
+	TokenDelete      = "token.delete"
+	UserCreate       = "user.create"
+	UserUpdate       = "user.update"
+	UserPermissions  = "user.permissions" // a server permission set changed (detail old, new)
+	FileUpload       = "file.upload"
+	FileDelete       = "file.delete"
+	GrantSet         = "grant.set" // a repository permission set changed (detail old, new)
 	RepoCreate       = "repo.create"
 	RepoUpdate       = "repo.update"
 	RepoDelete       = "repo.delete"
-	PermissionSet    = "permission.set"   // a repository permission set changed (detail old, new)
-	UserPermissions  = "user.permissions" // a server permission set changed (detail old, new)
-	UserCreate       = "user.create"
-	UserUpdate       = "user.update"
+	RepoDeleteResume = "repo.delete.resume" // a failed repo delete started again
+	RepoDeleteClear  = "repo.delete.clear"  // a failed repo delete ended; the repo stays
 	SettingsUpdate   = "settings.update"
-	IPDenied         = "ip.denied"     // a repo's IP rules refused the client address
-	IPRulesUpdate    = "repo.ip_rules" // a repo's IP rules were replaced
-	IPListCreate     = "ip_list.create"
-	IPListUpdate     = "ip_list.update"
-	IPListDelete     = "ip_list.delete"
-	SigningKeyCreate = "signing_key.create" // created or imported
-	SigningKeyDelete = "signing_key.delete"
 )
 
-// Actor is who did something: a user (UserID set), a CI identity (Name is the token's
-// subject) or the attempted username of a failed sign-in.
+// ActionDef is one action of the audit log.
+type ActionDef struct {
+	ID        string `json:"id"`        // a dotted name, unique across modules, e.g. "ci.pipeline.create"
+	Label     string `json:"label"`     // "CI pipeline created"
+	Subsystem string `json:"subsystem"` // a registered permission subsystem, for grouping in the Activity filter
+}
+
+var actionRE = regexp.MustCompile(`^[a-z][a-z0-9_-]*(\.[a-z][a-z0-9_-]*)+$`)
+
+// Actions is the registry of actions. It is filled while the modules register and then fixed.
+type Actions struct {
+	defs  []ActionDef
+	index map[string]int
+}
+
+// NewActions returns an empty action registry.
+func NewActions() *Actions { return &Actions{index: map[string]int{}} }
+
+// Add registers defs. subsystem reports whether a permission subsystem is registered. It refuses
+// a malformed or repeated ID, an empty label and an unknown subsystem.
+func (a *Actions) Add(defs []ActionDef, subsystem func(id string) bool) error {
+	for _, d := range defs {
+		if !actionRE.MatchString(d.ID) || d.Label == "" {
+			return fmt.Errorf("audit: action %q needs a dotted ID and a label", d.ID)
+		}
+		if _, taken := a.index[d.ID]; taken {
+			return fmt.Errorf("audit: action %q is registered twice", d.ID)
+		}
+		if !subsystem(d.Subsystem) {
+			return fmt.Errorf("audit: action %q: subsystem %q is not registered", d.ID, d.Subsystem)
+		}
+		a.index[d.ID] = len(a.defs)
+		a.defs = append(a.defs, d)
+	}
+	return nil
+}
+
+// List returns every action in registration order.
+func (a *Actions) List() []ActionDef { return a.defs }
+
+// Known reports whether id is registered.
+func (a *Actions) Known(id string) bool {
+	_, ok := a.index[id]
+	return ok
+}
+
+// ActorKind is the kind of actor of an event.
+type ActorKind string
+
+const (
+	ActorUser      ActorKind = "user"      // a signed-in person
+	ActorCI        ActorKind = "ci"        // a CI identity without a user (publish session from a CI token)
+	ActorCLI       ActorKind = "cli"       // the telesphorepo command line
+	ActorSystem    ActorKind = "system"    // a job of a module
+	ActorSSO       ActorKind = "sso"       // single sign-on, at a person's sign-in
+	ActorAnonymous ActorKind = "anonymous" // no credential, or the tried name of a failed sign-in
+)
+
+// Actor is who did something.
 type Actor struct {
-	UserID int64
-	Name   string
+	Kind   ActorKind
+	UserID int64      // 0: none
+	Name   string     // the username, the CI subject, "cli", the module ID of a job
+	IP     netip.Addr // the client address; the zero value for none
+}
+
+type actorKey struct{}
+
+// WithActor returns ctx with the actor a.
+func WithActor(ctx context.Context, a Actor) context.Context {
+	return context.WithValue(ctx, actorKey{}, a)
+}
+
+// ActorOf returns the actor of ctx: anonymous when ctx has none.
+func ActorOf(ctx context.Context) Actor {
+	if a, ok := ctx.Value(actorKey{}).(Actor); ok {
+		return a
+	}
+	return Actor{Kind: ActorAnonymous, Name: "anonymous"}
+}
+
+// System returns ctx with the job actor of module.
+func System(ctx context.Context, module string) context.Context {
+	return WithActor(ctx, Actor{Kind: ActorSystem, Name: module})
+}
+
+// CLI returns ctx with the command-line actor.
+func CLI(ctx context.Context) context.Context {
+	return WithActor(ctx, Actor{Kind: ActorCLI, Name: "cli"})
 }
 
 // Event is one audit row. Detail must never hold a secret value.
 type Event struct {
-	Actor  Actor
 	Action string
 	RepoID int64  // 0: no repo
 	Repo   string // the repo name, kept in the detail so it survives a repo delete
@@ -73,22 +156,24 @@ type Entry struct {
 	IP          string         `json:"ip"`
 }
 
-// Service writes audit rows and deletes them after the retention.
-type Service struct {
-	db        *db.DB
-	rq, wq    *dbq.Queries
-	retention func() time.Duration
-	log       *slog.Logger
-	wg        sync.WaitGroup
+// Log writes audit rows and deletes the old ones.
+type Log struct {
+	db      *db.DB
+	rq, wq  *dbq.Queries
+	actions *Actions
+	log     *slog.Logger
 }
 
-// New returns the audit service. retention returns the current audit.retention.
-func New(d *db.DB, retention func() time.Duration, log *slog.Logger) *Service {
+// New returns the audit log. actions are the registered actions.
+func New(d *db.DB, actions *Actions, log *slog.Logger) *Log {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Service{db: d, rq: dbq.New(d.R), wq: dbq.New(d.W), retention: retention, log: log}
+	return &Log{db: d, rq: dbq.New(d.R), wq: dbq.New(d.W), actions: actions, log: log}
 }
+
+// Actions returns the registered actions.
+func (l *Log) Actions() []ActionDef { return l.actions.List() }
 
 // clip shortens s to at most n bytes on a rune boundary.
 func clip(s string, n int) string {
@@ -101,18 +186,15 @@ func clip(s string, n int) string {
 	return s[:n]
 }
 
-// Record writes e. r (may be nil) gives the client IP. A failed write is logged and does not
-// fail the caller's action. Record runs detached from the request's cancellation.
-func (s *Service) Record(ctx context.Context, r *http.Request, e Event) {
-	if s == nil {
-		return
+// row builds the row of e with the actor of ctx. An action that no module registered is an
+// error.
+func (l *Log) row(ctx context.Context, e Event) (dbq.InsertAuditEventParams, error) {
+	if !l.actions.Known(e.Action) {
+		err := fmt.Errorf("audit: action %q is not registered", e.Action)
+		l.log.ErrorContext(ctx, "write audit event", "action", e.Action, "err", err.Error())
+		return dbq.InsertAuditEventParams{}, err
 	}
-	ip := ""
-	if r != nil {
-		if a := httpx.ClientIP(r); a.IsValid() {
-			ip = a.String()
-		}
-	}
+	a := ActorOf(ctx)
 	detail := map[string]any{}
 	for k, v := range e.Detail {
 		detail[k] = v
@@ -124,19 +206,43 @@ func (s *Service) Record(ctx context.Context, r *http.Request, e Event) {
 	if err != nil {
 		js = []byte("{}")
 	}
-	err = s.wq.InsertAuditEvent(context.WithoutCancel(ctx), dbq.InsertAuditEventParams{
+	ip := ""
+	if a.IP.IsValid() {
+		ip = a.IP.String()
+	}
+	return dbq.InsertAuditEventParams{
 		At:          time.Now().Unix(),
-		ActorUserID: sql.NullInt64{Int64: e.Actor.UserID, Valid: e.Actor.UserID != 0},
-		Actor:       clip(e.Actor.Name, 200),
+		ActorUserID: sql.NullInt64{Int64: a.UserID, Valid: a.UserID != 0},
+		Actor:       clip(a.Name, 200),
 		Action:      e.Action,
 		RepoID:      sql.NullInt64{Int64: e.RepoID, Valid: e.RepoID != 0},
 		Target:      clip(e.Target, 1100),
 		Detail:      string(js),
 		Ip:          ip,
-	})
+	}, nil
+}
+
+// Record writes e with the actor of ctx, detached from the cancellation of ctx. A failed write
+// is logged and returned; the caller's action stands.
+func (l *Log) Record(ctx context.Context, e Event) error {
+	p, err := l.row(ctx, e)
 	if err != nil {
-		s.log.ErrorContext(ctx, "write audit event", "action", e.Action, "err", err.Error())
+		return err
 	}
+	if err := l.wq.InsertAuditEvent(context.WithoutCancel(ctx), p); err != nil {
+		l.log.ErrorContext(ctx, "write audit event", "action", e.Action, "err", err.Error())
+		return err
+	}
+	return nil
+}
+
+// RecordTx writes e with the actor of ctx in tx, the transaction of the change it records.
+func (l *Log) RecordTx(ctx context.Context, tx *sql.Tx, e Event) error {
+	p, err := l.row(ctx, e)
+	if err != nil {
+		return err
+	}
+	return l.wq.WithTx(tx).InsertAuditEvent(ctx, p)
 }
 
 // Filter narrows List. RepoID 0 and Action "" match everything.
@@ -147,7 +253,7 @@ type Filter struct {
 
 // List returns a newest-first keyset page: ids below after (0: first page). next is the cursor
 // of the next page, 0 at the end.
-func (s *Service) List(ctx context.Context, f Filter, after int64, limit int) ([]Entry, int64, error) {
+func (l *Log) List(ctx context.Context, f Filter, after int64, limit int) ([]Entry, int64, error) {
 	before := after
 	if before <= 0 {
 		before = math.MaxInt64
@@ -158,13 +264,13 @@ func (s *Service) List(ctx context.Context, f Filter, after int64, limit int) ([
 	var err error
 	switch {
 	case f.RepoID != 0 && f.Action != "":
-		rows, err = s.rq.ListAuditByRepoAction(ctx, dbq.ListAuditByRepoActionParams{RepoID: repo, Before: before, Action: f.Action, Limit: n})
+		rows, err = l.rq.ListAuditByRepoAction(ctx, dbq.ListAuditByRepoActionParams{RepoID: repo, Before: before, Action: f.Action, Limit: n})
 	case f.RepoID != 0:
-		rows, err = s.rq.ListAuditByRepo(ctx, dbq.ListAuditByRepoParams{RepoID: repo, Before: before, Limit: n})
+		rows, err = l.rq.ListAuditByRepo(ctx, dbq.ListAuditByRepoParams{RepoID: repo, Before: before, Limit: n})
 	case f.Action != "":
-		rows, err = s.rq.ListAuditByAction(ctx, dbq.ListAuditByActionParams{Action: f.Action, Before: before, Limit: n})
+		rows, err = l.rq.ListAuditByAction(ctx, dbq.ListAuditByActionParams{Action: f.Action, Before: before, Limit: n})
 	default:
-		rows, err = s.rq.ListAudit(ctx, dbq.ListAuditParams{Before: before, Limit: n})
+		rows, err = l.rq.ListAudit(ctx, dbq.ListAuditParams{Before: before, Limit: n})
 	}
 	if err != nil {
 		return nil, 0, err
@@ -194,39 +300,14 @@ func (s *Service) List(ctx context.Context, f Filter, after int64, limit int) ([
 	return out, next, nil
 }
 
-const (
-	cleanupEvery = time.Hour
-	cleanupBatch = 1000
-)
+// cleanupBatch is how many events one delete of Cleanup removes.
+const cleanupBatch = 1000
 
-// Start runs the retention cleanup at once and then every hour, until ctx ends.
-func (s *Service) Start(ctx context.Context) {
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		t := time.NewTicker(cleanupEvery)
-		defer t.Stop()
-		for {
-			if err := s.cleanup(ctx); err != nil && ctx.Err() == nil {
-				s.log.Error("audit log cleanup", "err", err.Error())
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-			}
-		}
-	}()
-}
-
-// Wait waits for the cleanup job to stop.
-func (s *Service) Wait() { s.wg.Wait() }
-
-// cleanup deletes the events older than the retention in batches.
-func (s *Service) cleanup(ctx context.Context) error {
-	cut := time.Now().Add(-s.retention()).Unix()
+// Cleanup deletes the events older than retention in batches.
+func (l *Log) Cleanup(ctx context.Context, retention time.Duration) error {
+	cut := time.Now().Add(-retention).Unix()
 	for ctx.Err() == nil {
-		n, err := s.wq.DeleteOldAudit(ctx, dbq.DeleteOldAuditParams{Before: cut, Limit: cleanupBatch})
+		n, err := l.wq.DeleteOldAudit(ctx, dbq.DeleteOldAuditParams{Before: cut, Limit: cleanupBatch})
 		if err != nil {
 			return err
 		}

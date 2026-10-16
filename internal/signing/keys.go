@@ -13,13 +13,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
-	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
+	"github.com/Telesphorepo/Telesphorepo/internal/signing/dbq"
 )
 
-// DefaultKey is the key the server creates on first start. A repo config without a
-// "signing_key" names it.
+// DefaultKey is the key the server creates on first start. A new repo of a format that binds a
+// signing key gets it unless it names another key.
 const DefaultKey = "default"
 
 // Identity of the keys the server creates.
@@ -65,26 +66,30 @@ type entry struct {
 	signer *Signer // nil when Error is set
 }
 
-// Keys holds the signing keys: the table signing_keys and an in-memory snapshot that request
-// paths and the indexers read.
+// Keys holds the signing keys and the key of each repo: the tables signing_keys and
+// repo_signing_keys, and in-memory snapshots that request paths and the indexers read.
 type Keys struct {
 	d      *db.DB
 	rq, wq *dbq.Queries
 	seal   Sealer
+	audit  *audit.Log
 	log    *slog.Logger
 
-	mu   sync.Mutex // serializes writers
-	snap atomic.Pointer[map[string]*entry]
+	mu    sync.Mutex // serializes writers
+	snap  atomic.Pointer[map[string]*entry]
+	bound atomic.Pointer[map[int64]int64] // repo id -> key id
 }
 
 // NewKeys returns the key service. Load must run before it is used.
-func NewKeys(d *db.DB, seal Sealer, log *slog.Logger) *Keys {
+func NewKeys(d *db.DB, seal Sealer, au *audit.Log, log *slog.Logger) *Keys {
 	if log == nil {
 		log = slog.Default()
 	}
-	k := &Keys{d: d, rq: dbq.New(d.R), wq: dbq.New(d.W), seal: seal, log: log}
+	k := &Keys{d: d, rq: dbq.New(d.R), wq: dbq.New(d.W), seal: seal, audit: au, log: log}
 	empty := map[string]*entry{}
 	k.snap.Store(&empty)
+	none := map[int64]int64{}
+	k.bound.Store(&none)
 	return k
 }
 
@@ -92,11 +97,27 @@ func aad(id int64) string { return "signing_keys:" + strconv.FormatInt(id, 10) }
 
 const loadPage = 500
 
-// Load reads every key into memory and creates the key "default" when there is no key at all
-// (the first start).
+// Load reads every key and every repo binding into memory, and creates the key "default" when
+// there is no key at all (the first start).
 func (k *Keys) Load(ctx context.Context) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	bound := map[int64]int64{}
+	var afterRepo int64
+	for {
+		rows, err := k.rq.ListRepoSigningKeys(ctx, dbq.ListRepoSigningKeysParams{After: afterRepo, Limit: loadPage})
+		if err != nil {
+			return fmt.Errorf("load repo signing keys: %w", err)
+		}
+		for _, r := range rows {
+			bound[r.RepoID] = r.KeyID
+		}
+		if len(rows) < loadPage {
+			break
+		}
+		afterRepo = rows[len(rows)-1].RepoID
+	}
+	k.bound.Store(&bound)
 	m := map[string]*entry{}
 	after := ""
 	for {
@@ -217,8 +238,8 @@ func (k *Keys) Import(ctx context.Context, name, armored, passphrase string) (Ke
 	return e.key, nil
 }
 
-// insertLocked parses armored (opened with pass), stores it and adds it to the snapshot.
-// Caller holds k.mu.
+// insertLocked parses armored (opened with pass), stores it, records signing.key.create and adds
+// it to the snapshot. Caller holds k.mu.
 func (k *Keys) insertLocked(ctx context.Context, name string, armored, pass []byte) (*entry, error) {
 	if k.Exists(name) {
 		return nil, ErrExists
@@ -242,7 +263,11 @@ func (k *Keys) insertLocked(ctx context.Context, name string, armored, pass []by
 			return err
 		}
 		e.id = id
-		return q.SetSigningKeyPrivate(ctx, dbq.SetSigningKeyPrivateParams{PrivateKey: k.seal.Encrypt(aad(id), plain), ID: id})
+		if err := q.SetSigningKeyPrivate(ctx, dbq.SetSigningKeyPrivateParams{PrivateKey: k.seal.Encrypt(aad(id), plain), ID: id}); err != nil {
+			return err
+		}
+		return k.audit.RecordTx(ctx, tx, audit.Event{Action: ActionKeyCreate, Target: name,
+			Detail: map[string]any{"fingerprint": e.key.Fingerprint, "imported": pass != nil}})
 	})
 	if err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed") {
 		return nil, ErrExists
@@ -265,16 +290,20 @@ func (k *Keys) store(change func(m map[string]*entry)) {
 	k.snap.Store(&m)
 }
 
-// UsedBy returns the names of the repos whose config names key, in id order.
+// UsedBy returns the names of the repos bound to key name, in id order.
 func (k *Keys) UsedBy(ctx context.Context, name string) ([]string, error) {
-	return usedBy(ctx, k.rq, name)
+	e := (*k.snap.Load())[name]
+	if e == nil {
+		return []string{}, nil
+	}
+	return usedBy(ctx, k.rq, e.id)
 }
 
-func usedBy(ctx context.Context, q *dbq.Queries, name string) ([]string, error) {
+func usedBy(ctx context.Context, q *dbq.Queries, keyID int64) ([]string, error) {
 	out := []string{}
 	var after int64
 	for {
-		rows, err := q.ListReposUsingSigningKey(ctx, dbq.ListReposUsingSigningKeyParams{Key: name, After: after, Limit: loadPage})
+		rows, err := q.ListReposOfSigningKey(ctx, dbq.ListReposOfSigningKeyParams{KeyID: keyID, After: after, Limit: loadPage})
 		if err != nil {
 			return nil, err
 		}
@@ -288,7 +317,8 @@ func usedBy(ctx context.Context, q *dbq.Queries, name string) ([]string, error) 
 	}
 }
 
-// Delete removes key name. A key that a repo uses is refused with an *InUseError.
+// Delete removes key name and records signing.key.delete. A key that a repo uses is refused with
+// an *InUseError.
 func (k *Keys) Delete(ctx context.Context, name string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -297,21 +327,99 @@ func (k *Keys) Delete(ctx context.Context, name string) error {
 		return ErrNotFound
 	}
 	// The check and the delete share the write transaction, so no repo can start to use the key
-	// in between (the repos triggers refuse a config that names a missing key).
+	// in between (the foreign key of repo_signing_keys refuses the delete of a bound key).
 	err := k.d.Tx(ctx, func(tx *sql.Tx) error {
 		q := dbq.New(tx)
-		used, err := usedBy(ctx, q, name)
+		used, err := usedBy(ctx, q, e.id)
 		if err != nil {
 			return err
 		}
 		if len(used) > 0 {
 			return &InUseError{Repos: used}
 		}
-		return q.DeleteSigningKey(ctx, e.id)
+		if err := q.DeleteSigningKey(ctx, e.id); err != nil {
+			return err
+		}
+		return k.audit.RecordTx(ctx, tx, audit.Event{Action: ActionKeyDelete, Target: name, Detail: map[string]any{"fingerprint": e.key.Fingerprint}})
 	})
 	if err != nil {
 		return err
 	}
 	k.store(func(m map[string]*entry) { delete(m, name) })
 	return nil
+}
+
+// nameOf returns the name of key id ("" when it does not exist).
+func (k *Keys) nameOf(id int64) string {
+	for name, e := range *k.snap.Load() {
+		if e.id == id {
+			return name
+		}
+	}
+	return ""
+}
+
+// RepoKey returns the name of the key bound to repo id; "" when the repo has none.
+func (k *Keys) RepoKey(repoID int64) string {
+	id, ok := (*k.bound.Load())[repoID]
+	if !ok {
+		return ""
+	}
+	return k.nameOf(id)
+}
+
+// RepoSigner returns the signer of the key bound to repo id, or nil when the repo has no key or
+// its key is unusable.
+func (k *Keys) RepoSigner(repoID int64) *Signer {
+	if name := k.RepoKey(repoID); name != "" {
+		return k.Signer(name)
+	}
+	return nil
+}
+
+// bind binds repo to key name in tx and records signing.key.bind.
+func (k *Keys) bind(ctx context.Context, tx *sql.Tx, repoID int64, repoName, name string) error {
+	e := (*k.snap.Load())[name]
+	if e == nil {
+		return ErrNotFound
+	}
+	if err := dbq.New(tx).SetRepoSigningKey(ctx, dbq.SetRepoSigningKeyParams{RepoID: repoID, KeyID: e.id}); err != nil {
+		return err
+	}
+	return k.audit.RecordTx(ctx, tx, audit.Event{Action: ActionKeyBind, RepoID: repoID, Repo: repoName, Target: name,
+		Detail: map[string]any{"fingerprint": e.key.Fingerprint}})
+}
+
+// setBound sets the in-memory binding of repo after the commit of a bind.
+func (k *Keys) setBound(repoID int64, name string) {
+	e := (*k.snap.Load())[name]
+	if e == nil {
+		return
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	old := *k.bound.Load()
+	m := make(map[int64]int64, len(old)+1)
+	for r, id := range old {
+		m[r] = id
+	}
+	m[repoID] = e.id
+	k.bound.Store(&m)
+}
+
+// forget drops the in-memory binding of a deleted repo (its row cascades with the repo).
+func (k *Keys) forget(repoID int64) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	old := *k.bound.Load()
+	if _, ok := old[repoID]; !ok {
+		return
+	}
+	m := make(map[int64]int64, len(old))
+	for r, id := range old {
+		if r != repoID {
+			m[r] = id
+		}
+	}
+	k.bound.Store(&m)
 }

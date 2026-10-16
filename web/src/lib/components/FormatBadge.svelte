@@ -6,13 +6,12 @@
 -->
 <script lang="ts">
   import { formats } from "$lib/formats/registry.svelte";
-  import { formatLook } from "$lib/formats";
   import FormatIcon from "./FormatIcon.svelte";
 
   let { format, title }: { format: string; /** Display title; by default the format's own. */ title?: string } = $props();
 
   formats.load();
-  const text = $derived(title ?? formats.get(format)?.title ?? formatLook(format).title ?? format);
+  const text = $derived(title ?? formats.title(format));
 </script>
 
 <span class="inline-flex min-w-0 shrink-0 items-center gap-1.5 align-middle whitespace-nowrap">

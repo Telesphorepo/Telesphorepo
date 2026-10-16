@@ -37,11 +37,12 @@ download against `SHA256SUMS`, unpack it, and run `./telesphorepo serve`.
 - **Configuration:** sign in, then set up storage (local disk or S3/R2), the public URL, and
   the rest on the **Settings** page. The server creates a Debian signing key named `default` on the first start. Changes apply without a restart, and
   secrets are stored encrypted.
-- **Single sign-on:** admins can sign in through an OIDC provider (Keycloak, Entra, Google...).
-  Set the issuer, client and admin group under **Settings > Server > Sign-in options**, and register
-  `<public URL>/api/auth/oidc/callback` at the provider. An SSO admin approves a laptop for
-  Gradle or Maven with a new sign-in at the provider; a local account approves it with a second
-  factor.
+- **Single sign-on:** people can sign in through an OIDC provider (Keycloak, Entra, Google...).
+  Set the issuer and the client under **Settings > Server > Sign-in options**, and register
+  `<public URL>/api/auth/oidc/callback` at the provider. To give server permissions from the
+  provider, set a claim and map each value of it to permissions on the same page. A person who
+  signs in with single sign-on approves a laptop for Gradle or Maven with a new sign-in at the
+  provider; a local account approves it with a second factor.
 - **Passkeys:** they need the public URL (`base_url`) in Settings. Authenticator-app codes do not.
 - **Environment variables:** none are required. Three are optional:
 
@@ -106,10 +107,12 @@ server on the **Nexus** page. The server mirrors the repos you pick, and they st
 A password or an API token (a read token) only reads. To publish, a client needs a publish
 session. See **Publishing**.
 
-Anyone can browse the anonymous-read repos in the web UI. A user with write access can upload
-files or a whole folder, and delete files or folders there. A folder upload shows a preview of
-the artifacts it found, and stores nothing until the user confirms. Both actions use a publish session that the UI asks for
-with a second-factor code. Admins see every event, with its IP address, in **Settings > Server > Activity**. The server keeps events for 365 days (`audit.retention`).
+Anyone can browse the anonymous-read repos in the web UI. A user who may publish can upload
+files or a whole folder, and a user who may delete can delete files or folders there. An upload
+shows a plan of what it stores, and stores nothing until the user confirms. Both actions use a
+publish session that the UI asks for with a second-factor code. A person with the Activity
+permission sees every event, with its IP address, in **Settings > Server > Activity**. The server
+keeps events for 365 days (`audit.retention`).
 
 ## Publishing
 
@@ -117,6 +120,17 @@ Every upload needs a publish session. It is a credential for one repo that ends 
 `publish.session_ttl` (15 min by default). To publish from a laptop, add a second factor (an
 authenticator app or a passkey) under **Settings > Your account > Sign-in and security**. An admin does this at the first
 sign-in. Other users do it when they approve their first device. The clients are in [github.com/Telesphorepo/clients](https://github.com/Telesphorepo/clients): the Gradle plugin is on the Gradle Plugin Portal and the Maven extension is on Maven Central. The **Publish to this repository** tab of each repo shows every snippet, with the repo's address filled in.
+
+**One command.** In a Gradle or Maven project, run the setup script. It adds the plugin or the
+extension and the repository to the build files, and it can write the CI file. It shows each
+change first and asks before it edits a file:
+
+```sh
+curl -fsSL https://packages.example.com/setup.sh | sh -s -- releases
+```
+
+On Windows, use `setup.ps1` with `irm` in PowerShell. The **Publish to this repository** tab shows the
+command for your repository. The sections below show the same change by hand.
 
 **Gradle.** In `settings.gradle.kts`, at the top:
 

@@ -1,6 +1,7 @@
 <!--
-  Activity (Activity permission): what happened on the server, newest first, in one page with two
-  views. Events (the audit log) filter by what happened and by repository (?action=&repo=); this
+  Activity (activity.read): what happened on the server, newest first, in one page with two
+  views. Events (the audit log) filter by what happened, from the actions that the modules
+  register, grouped by subsystem, and by repository (?action=&repo=); this
   is the only page that shows IP addresses. Publish tokens (?view=publishing) lists every publish
   token that a device, a CI job or a person got (the publish log).
 -->
@@ -11,7 +12,7 @@
   import { api, type SessionInfo } from "$lib/api";
   import { Keyset, Resource } from "$lib/load.svelte";
   import { formatDateTime } from "$lib/format";
-  import { repoPhrase, serverPhrase } from "$lib/permissions";
+  import { repoPhrase, serverPhrase, subsystems } from "$lib/permissions";
   import FunnelXIcon from "@lucide/svelte/icons/funnel-x";
   import * as Select from "$lib/components/ui/select";
   import { Button } from "$lib/components/ui/button";
@@ -29,41 +30,20 @@
 
   let { query }: PageProps = $props();
 
-  /** The actions the server records, grouped, with the words this page shows. */
-  const actionGroups: { label: string; actions: Record<string, string> }[] = [
-    { label: "Signing in", actions: { signin: "Signed in", "signin.failed": "Sign-in failed" } },
-    {
-      label: "Publishing",
-      actions: { "session.create": "Got a publish token", "session.close": "Ended a publish token", upload: "Uploaded files", delete: "Deleted files" },
-    },
-    {
-      label: "Repositories",
-      actions: {
-        "repo.create": "Created a repository",
-        "repo.update": "Changed a repository",
-        "repo.delete": "Deleted a repository",
-        "permission.set": "Changed permissions",
-        "repo.ip_rules": "Changed where from",
-        "ip.denied": "Refused an address",
-      },
-    },
-    {
-      label: "Server",
-      actions: {
-        "user.create": "Created an account",
-        "user.update": "Changed an account",
-        "user.permissions": "Changed server permissions",
-        "settings.update": "Changed settings",
-        "ip_list.create": "Created a network list",
-        "ip_list.update": "Changed a network list",
-        "ip_list.delete": "Deleted a network list",
-        "signing_key.create": "Added a signing key",
-        "signing_key.delete": "Deleted a signing key",
-      },
-    },
-  ];
-  const actionWords: Record<string, string> = Object.assign({}, ...actionGroups.map((g) => g.actions));
-  const actionText = (a: string) => actionWords[a] ?? a;
+  // The actions that the modules register (GET /api/audit/actions), grouped by the permission
+  // subsystem they belong to, in registry order.
+  const actions = new Resource(() => api.auditActions());
+  const actionGroups = $derived.by(() => {
+    const groups: { label: string; actions: { id: string; label: string }[] }[] = [];
+    for (const sub of subsystems()) {
+      const list = (actions.data ?? []).filter((a) => a.subsystem === sub.id);
+      if (list.length) groups.push({ label: sub.label, actions: list });
+    }
+    return groups;
+  });
+  const actionText = (a: string) => actions.data?.find((x) => x.id === a)?.label ?? a;
+  // Refusals show in red.
+  const refusals = new Set(["signin.failed", "sso.signin.failed", "network.denied"]);
 
   const view = $derived(query.get("view") === "publishing" ? "publishing" : "events");
   const action = $derived(query.get("action") ?? "");
@@ -103,7 +83,7 @@
 
   /** The target and the facts of an event on one line: "1 · via manual", "alice · old Download · new Everything". */
   function detailText(action: string, target: string, d: Record<string, unknown> | null): string {
-    const sets = action === "permission.set" || action === "user.permissions";
+    const sets = action === "grant.set" || action === "user.permissions";
     const facts = Object.entries(d ?? {})
       .filter(([k]) => k !== "repo")
       .map(([k, v]) =>
@@ -144,8 +124,8 @@
         {#each actionGroups as g (g.label)}
           <Select.Group>
             <Select.GroupHeading>{g.label}</Select.GroupHeading>
-            {#each Object.entries(g.actions) as [a, w] (a)}
-              <Select.Item value={a} label={w}>{w}</Select.Item>
+            {#each g.actions as a (a.id)}
+              <Select.Item value={a.id} label={a.label}>{a.label}</Select.Item>
             {/each}
           </Select.Group>
         {/each}
@@ -182,7 +162,7 @@
   >
     {#snippet row(e)}
       <Cell>
-        {#if e.action === "signin.failed" || e.action === "ip.denied"}
+        {#if refusals.has(e.action)}
           <StatusBadge tone="danger">{actionText(e.action)}</StatusBadge>
         {:else}
           <span title={e.action}>{actionText(e.action)}</span>

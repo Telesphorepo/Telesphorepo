@@ -17,7 +17,6 @@
   import RepoTable from "$lib/components/RepoTable.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
-  import { formatLook } from "$lib/formats";
   import DatabaseIcon from "@lucide/svelte/icons/database";
   import SearchIcon from "@lucide/svelte/icons/search";
   import SearchXIcon from "@lucide/svelte/icons/search-x";
@@ -26,10 +25,10 @@
   let {}: PageProps = $props();
 
   const repos = new Resource(() => api.repos.list());
-  // Format titles; the built-in title or the name stands in until they load or if they fail.
+  // Format titles; the name stands in until they load or if they fail.
   const formats = new Resource(() => api.formats.list());
   const titles = $derived(Object.fromEntries((formats.data ?? []).map((f) => [f.name, f.title])));
-  const titleOf = (format: string) => titles[format] ?? formatLook(format).title ?? format;
+  const titleOf = (format: string) => titles[format] ?? format;
 
   let filter = $state("");
   let format = $state("");
@@ -74,7 +73,7 @@
       </Select.Root>
     {/if}
     {#snippet end()}
-      {#if auth.can("repos")}<Button href={newRepo}><PlusIcon />New repository</Button>{/if}
+      {#if auth.can("repositories.all")}<Button href={newRepo}><PlusIcon />New repository</Button>{/if}
     {/snippet}
   </Toolbar>
 {/if}
@@ -85,11 +84,11 @@
       <CompactEmpty icon={SearchXIcon} title="No repository matches" text="Change the filter, or clear it to see every repository.">
         <Button variant="outline" onclick={clear}>Clear the filter</Button>
       </CompactEmpty>
-    {:else if auth.can("repos")}
+    {:else if auth.can("repositories.all")}
       <EmptyState
         icon={DatabaseIcon}
         title="No repositories yet"
-        description="A repository holds one kind of package: Maven and Gradle libraries, Debian packages, or plain files."
+        description="A repository holds the packages of one format."
       >
         <Button href={newRepo}><PlusIcon />New repository</Button>
       </EmptyState>

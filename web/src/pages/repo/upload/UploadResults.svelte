@@ -1,6 +1,6 @@
 <!--
-  What an upload stored: each file with created / replaced / unchanged. The checksum and
-  maven-metadata.xml files that the server writes for Maven are counted in one line.
+  What an upload stored: each file with created / replaced / unchanged. The files that the server
+  wrote besides them (generated: checksums, metadata) are counted in one line.
 -->
 <script lang="ts">
   import { Badge } from "$lib/components/ui/badge";
@@ -10,8 +10,7 @@
 
   let { files }: { files: Uploaded[] } = $props();
 
-  const extra = (p: string) => /\.(md5|sha1|sha256)$/.test(p) || /(^|\/)maven-metadata\.xml$/.test(p);
-  const main = $derived(files.filter((f) => !extra(f.path)));
+  const main = $derived(files.filter((f) => !f.generated));
   const added = $derived(files.length - main.length);
 
   const label: Record<Uploaded["status"], string> = { created: "New", replaced: "Replaced", unchanged: "Unchanged" };

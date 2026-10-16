@@ -24,7 +24,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// Zone clients (spec §7.6, §15): the Gradle plugin and the Maven extension are built from
+// Zone clients: the Gradle plugin and the Maven extension are built from
 // the clients repo (E2E_CLIENTS_DIR or a clone) and published to a test server, then real Gradle and Maven projects use them to
 // enroll a device and publish, and to publish as GitHub Actions with a Keycloak-minted token.
 
@@ -127,13 +127,15 @@ const publishInitScript = `allprojects {
 `
 
 // buildClients builds gradle/ and maven/ of the clients repo in parallel containers and publishes
-// both to repo with publish sessions from the harness.
+// both to repo with publish sessions from the harness. Both builds compile the shared sources of
+// core/, so each container gets core/ at /src/core next to its own folder.
 func buildClients(t *testing.T, s *Server, repo string) *builtClients {
 	t.Helper()
 	repoURL := s.InternalURL + "/maven/" + repo
 	clientsDir := clientsSourceDir(t)
 	gradleSrc := hostDirFiles(t, filepath.Join(clientsDir, "gradle"), "/src/gradle")
 	mavenSrc := hostDirFiles(t, filepath.Join(clientsDir, "maven"), "/src/maven")
+	coreSrc := hostDirFiles(t, filepath.Join(clientsDir, "core"), "/src/core")
 	// Mint both sessions before the builds start: each one needs a fresh second-factor step.
 	gradleToken := PublishToken(t, s, s.AdminUser, repo)
 	mavenToken := PublishToken(t, s, s.AdminUser, repo)
@@ -143,7 +145,7 @@ func buildClients(t *testing.T, s *Server, repo string) *builtClients {
 			t.Parallel()
 			code, out := RunClient(t, clientsGradleImage, ClientOpts{
 				Cmd:   []string{"cd /src/gradle && gradle --no-daemon --console=plain --stacktrace -I /e2e/publish.init.gradle -Pversion=" + gradleClientVersion + " publishAllPublicationsToE2eRepository"},
-				Files: append(gradleSrc, ContainerFile{Path: "/e2e/publish.init.gradle", Content: publishInitScript}),
+				Files: append(append(gradleSrc, coreSrc...), ContainerFile{Path: "/e2e/publish.init.gradle", Content: publishInitScript}),
 				Env: map[string]string{
 					"GRADLE_USER_HOME":  "/home/gradle/.gradle",
 					"E2E_REPO_URL":      repoURL,
@@ -161,7 +163,7 @@ func buildClients(t *testing.T, s *Server, repo string) *builtClients {
 			t.Parallel()
 			code, out := RunClient(t, mavenImage, ClientOpts{
 				Cmd: []string{"cd /src/maven && mvn -B -ntp -s /e2e/settings.xml -DskipTests -DaltDeploymentRepository=telesphorepo::" + repoURL + " deploy"},
-				Files: append(mavenSrc, ContainerFile{
+				Files: append(append(mavenSrc, coreSrc...), ContainerFile{
 					Path: "/e2e/settings.xml", Content: mavenSettingsXML("e2e", mavenToken),
 				}),
 				Mounts:  map[string]string{M2Volume: "/root/.m2/repository"},
@@ -201,7 +203,7 @@ func buildClients(t *testing.T, s *Server, repo string) *builtClients {
 // clientsRepoURL is the repository that holds the client sources.
 const clientsRepoURL = "https://github.com/Telesphorepo/clients"
 
-// clientsSourceDir returns the directory with the client sources (gradle/ and maven/). It is
+// clientsSourceDir returns the directory with the client sources (core/, gradle/ and maven/). It is
 // E2E_CLIENTS_DIR when set. Otherwise it shallow-clones clientsRepoURL at E2E_CLIENTS_REF
 // (default main) into a temp dir, which the test removes at the end.
 func clientsSourceDir(t *testing.T) string {
@@ -557,6 +559,9 @@ type mavenPub struct {
 	RepoURL   string
 	Group     string
 	Message   string
+	// SettingsServer, when set, is the id of a <server> entry with a username and a password in
+	// settings.xml. The extension must never send these credentials to a repository of the server.
+	SettingsServer string
 }
 
 func newMavenPub(s *Server, cl *builtClients, repo, label string) mavenPub {
@@ -564,10 +569,21 @@ func newMavenPub(s *Server, cl *builtClients, repo, label string) mavenPub {
 	return mavenPub{Cl: cl, ServerURL: s.InternalURL, RepoURL: s.InternalURL + "/maven/" + repo, Group: group, Message: "hello from " + group}
 }
 
-// settings has no server entry, no password and no plugin group. An active profile adds the
-// clients repo, so Maven resolves the core extension and the plugin from it.
+// settings has no plugin group, and no server entry unless SettingsServer is set. An active
+// profile adds the clients repo, so Maven resolves the core extension and the plugin from it.
 func (m mavenPub) settings() ContainerFile {
-	return ContainerFile{Path: "/work/settings.xml", Content: fmt.Sprintf(`<settings>
+	servers := ""
+	if m.SettingsServer != "" {
+		servers = fmt.Sprintf(`
+  <servers>
+    <server>
+      <id>%s</id>
+      <username>e2e</username>
+      <password>e2e-settings-password</password>
+    </server>
+  </servers>`, m.SettingsServer)
+	}
+	return ContainerFile{Path: "/work/settings.xml", Content: fmt.Sprintf(`<settings>%[2]s
   <mirrors>
     <mirror>
       <id>maven-default-http-blocker</id>
@@ -601,7 +617,7 @@ func (m mavenPub) settings() ContainerFile {
     <activeProfile>telesphorepo-clients</activeProfile>
   </activeProfiles>
 </settings>
-`, m.Cl.PluginsURL)}
+`, m.Cl.PluginsURL, servers)}
 }
 
 func (m mavenPub) files() []ContainerFile {
@@ -689,12 +705,30 @@ func testMavenDevice(t *testing.T, s *Server, cl *builtClients, repo string) {
 		t.Fatalf("%s with an enrolled device: exit %d, want 0 and %q\n%s", goal, code, alreadyEnrolled, out)
 	}
 
-	// A deploy to a repository that does not exist says so, and does not blame the device.
+	// A failed session mint stops the deploy: a deploy to a repository that does not exist says
+	// so, does not blame the device, and uploads nothing. settings.xml has credentials for that
+	// repository id; the extension never falls back to them.
 	missing := RandName("missing")
 	alt := "-DaltDeploymentRepository=" + missing + "::" + m.ServerURL + "/maven/" + missing + " "
-	code, out = RunClient(t, mavenImage, mavenOpts("cd /work/lib && "+mvnCmd+alt+"deploy", m.files(), deviceVol, nil))
-	if code == 0 || !strings.Contains(out, "does not exist") || strings.Contains(out, "refused device") {
-		t.Fatalf("deploy to the missing repository %s: exit %d, want a failure that says it does not exist\n%s", missing, code, out)
+	withServer := m
+	withServer.SettingsServer = missing
+	code, out = RunClient(t, mavenImage, mavenOpts("cd /work/lib && "+mvnCmd+alt+"deploy", withServer.files(), deviceVol, nil))
+	if code == 0 || !strings.Contains(out, "cannot start a publish session for repository "+missing) ||
+		!strings.Contains(out, "does not exist") || strings.Contains(out, "refused device") {
+		t.Fatalf("deploy to the missing repository %s: exit %d, want a failed session mint that says it does not exist\n%s", missing, code, out)
+	}
+	if strings.Contains(out, "Uploading to "+missing) {
+		t.Fatalf("deploy to the missing repository %s uploaded after the failed session mint:\n%s", missing, out)
+	}
+
+	// A repository URL with another scheme than telesphorepo.url belongs to another server: the
+	// extension sends no credential, although a device is enrolled, and the server refuses the
+	// anonymous upload.
+	other := m
+	other.ServerURL = "https" + strings.TrimPrefix(m.ServerURL, "http")
+	code, out = RunClient(t, mavenImage, mavenOpts("cd /work/lib && "+mvnCmd+"deploy", other.files(), deviceVol, nil))
+	if code == 0 || !strings.Contains(out, "401") || strings.Contains(out, "Telesphorepo:") || approveCodeRe.MatchString(out) {
+		t.Fatalf("deploy with telesphorepo.url %s to %s: exit %d, want an anonymous upload that gets 401 and no Telesphorepo output\n%s", other.ServerURL, m.RepoURL, code, out)
 	}
 }
 

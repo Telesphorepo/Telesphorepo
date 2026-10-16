@@ -5,19 +5,21 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/Telesphorepo/Telesphorepo/internal/audit"
+	"github.com/Telesphorepo/Telesphorepo/internal/access"
+	"github.com/Telesphorepo/Telesphorepo/internal/perm"
+	"github.com/Telesphorepo/Telesphorepo/internal/route"
+
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
-	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/proxy"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
-// Group and proxy repos (spec "Group repositories", "Proxy repositories").
+// Group and proxy repos (SPEC.md "Group and proxy repositories").
 
-func (a *API) registerRepoKinds(mux *http.ServeMux) {
-	mux.HandleFunc("PUT /api/repos/{name}/members", a.setMembers)
-	mux.HandleFunc("POST /api/repos/{name}/proxy/test", a.testProxy)
+func (a *API) registerRepoKinds(mux *route.Router) {
+	mux.Handle("PUT /api/repos/{name}/members", route.UIRepo(access.Manage, perm.RepoSettings), a.setMembers)
+	mux.Handle("POST /api/repos/{name}/proxy/test", route.UIRepo(access.Manage, perm.RepoSettings), a.testProxy)
 }
 
 // memberJSON is one member of a group.
@@ -50,25 +52,25 @@ func timeOrNil(t time.Time) *time.Time {
 // writeRepo answers the repo JSON of repo for p, who holds perms on it, with the details of its
 // kind: the members of a group and the groups of a member (only those p can download from), and
 // the remote of a proxy (only for a holder of settings).
-func (a *API) writeRepo(w http.ResponseWriter, r *http.Request, status int, p *auth.Principal, repo *repos.Repo, perms auth.RepoPerm) {
+func (a *API) writeRepo(w http.ResponseWriter, r *http.Request, status int, p *auth.Principal, repo *repos.Repo, perms perm.Set) {
 	ctx := r.Context()
-	out := toRepoJSON(repo, perms)
+	out := a.toRepoJSON(repo, perms)
 	readable := func(x *repos.Repo) (bool, error) {
 		set, err := a.auth.RepoPerms(ctx, p, x)
-		return set.Has(auth.RepoDownload), err
+		return set.Has(perm.RepoDownload), err
 	}
 	switch repo.Kind {
 	case repos.KindGroup:
 		members, err := a.repos.MemberRepos(ctx, repo)
 		if err != nil {
-			fail(w, r, err)
+			route.Fail(w, r, err)
 			return
 		}
 		out.Members = []memberJSON{}
 		for _, m := range members {
 			ok, err := readable(m)
 			if err != nil {
-				fail(w, r, err)
+				route.Fail(w, r, err)
 				return
 			}
 			if ok {
@@ -76,7 +78,7 @@ func (a *API) writeRepo(w http.ResponseWriter, r *http.Request, status int, p *a
 			}
 		}
 	case repos.KindProxy:
-		if px, ok := a.repos.Proxy(repo.ID); ok && perms.Has(auth.RepoSettings) {
+		if px, ok := a.repos.Proxy(repo.ID); ok && perms.Has(perm.RepoSettings) {
 			out.Proxy = &proxyJSON{
 				RemoteURL: px.RemoteURL, HasCredentials: px.HasCredentials(),
 				MetadataTTL: int64(px.MetadataTTL / time.Second), NotFoundTTL: int64(px.NotFoundTTL / time.Second),
@@ -92,7 +94,7 @@ func (a *API) writeRepo(w http.ResponseWriter, r *http.Request, status int, p *a
 			}
 			ok, err := readable(g)
 			if err != nil {
-				fail(w, r, err)
+				route.Fail(w, r, err)
 				return
 			}
 			if ok {
@@ -111,17 +113,17 @@ func (a *API) checkNewProxy(w http.ResponseWriter, r *http.Request, formatName s
 		httpx.Error(w, http.StatusBadRequest, "a proxy needs proxy: {remote_url}")
 		return nil, false
 	}
-	if err := format.SupportsKind(formatName, repos.KindProxy); err != nil {
+	if err := a.formats.SupportsKind(formatName, repos.KindProxy); err != nil {
 		httpx.Error(w, http.StatusBadRequest, err.Error())
 		return nil, false
 	}
 	px, err := in.Apply(nil)
 	if err != nil {
-		fail(w, r, err)
+		route.Fail(w, r, err)
 		return nil, false
 	}
 	if !force {
-		probe := format.Get(formatName).(format.Proxied).ProxyProbe(config)
+		probe := a.formats.Get(formatName).ProxyProbe(config)
 		if err := proxy.Check(r.Context(), px, probe); err != nil {
 			httpx.Error(w, http.StatusBadGateway, "The remote repository did not answer the check: "+err.Error()+".")
 			return nil, false
@@ -130,61 +132,35 @@ func (a *API) checkNewProxy(w http.ResponseWriter, r *http.Request, formatName s
 	return px, true
 }
 
-// proxyChanges names the fields of a proxy remote that changed, for the audit log (never a
-// credential value).
-func proxyChanges(old, new *repos.Proxy) []string {
-	var out []string
-	if old.RemoteURL != new.RemoteURL {
-		out = append(out, "remote_url")
-	}
-	if old.Username != new.Username || old.Password != new.Password {
-		out = append(out, "credentials")
-	}
-	if old.MetadataTTL != new.MetadataTTL {
-		out = append(out, "metadata_ttl")
-	}
-	if old.NotFoundTTL != new.NotFoundTTL {
-		out = append(out, "not_found_ttl")
-	}
-	return out
-}
-
 // setMembers replaces the members of a group and their order (settings): {"members": [names]}.
 // A member serves its files through the group only to those who can download from the member.
-func (a *API) setMembers(w http.ResponseWriter, r *http.Request) {
-	p, _, perms, ok := a.canRepo(w, r, auth.RepoSettings)
-	if !ok {
-		return
-	}
+func (a *API) setMembers(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	p, perms := c.P, c.RepoPerms
 	var in struct {
 		Members []string `json:"members"`
 	}
-	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &in) {
+	if !a.kit.Decode(w, r, &in) {
 		return
 	}
-	repo, err := a.repos.SetMembers(r.Context(), r.PathValue("name"), in.Members)
+	repo, err := a.repos.Update(r.Context(), c.Repo.Name, repos.Patch{Members: in.Members})
 	if err != nil {
-		fail(w, r, err)
+		route.Fail(w, r, err)
 		return
 	}
-	a.record(r, p, audit.RepoUpdate, repo, repo.Name, map[string]any{"fields": []string{"members"}, "members": in.Members})
 	a.writeRepo(w, r, http.StatusOK, p, repo, perms)
 }
 
 // testProxy checks the remote of a proxy now (settings): 200 {ok: true}, or 502 {ok: false,
 // error}. The result is the proxy's last answer or last error.
-func (a *API) testProxy(w http.ResponseWriter, r *http.Request) {
-	_, repo, _, ok := a.canRepo(w, r, auth.RepoSettings)
-	if !ok {
-		return
-	}
+func (a *API) testProxy(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	repo := c.Repo
 	px, isProxy := a.repos.Proxy(repo.ID)
 	if repo.Kind != repos.KindProxy || !isProxy {
 		httpx.Error(w, http.StatusBadRequest, repo.Name+" is not a proxy")
 		return
 	}
 	probe := ""
-	if f, ok := format.Get(repo.Format).(format.Proxied); ok {
+	if f := a.formats.Get(repo.Format); f != nil && f.ProxyProbe != nil {
 		probe = f.ProxyProbe(repo.Config)
 	}
 	if err := proxy.Check(r.Context(), px, probe); err != nil {

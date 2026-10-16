@@ -3,10 +3,11 @@
   remote repository, or a group of repositories. Each choice offers only the formats that take it
   (GET /api/formats, `kinds`).
 
-  A repository: name, format, description and who can download. A Debian repository also gets its
-  architectures and its signing key: a key that exists, or a new key that the page creates first
-  (POST /api/signing-keys, then POST /api/repos). Other formats with options show their format
-  editor.
+  A repository: name, format, description and who can download, the format's options (the
+  fields of config in its descriptor), and a section for each repository field of the format
+  (repo_fields), with the control that a UI module registers for it: the signing key of the
+  signing module is a key that exists, or a new key that the page creates first (POST
+  /api/signing-keys, then POST /api/repos).
 
   A proxy: the remote address (with well-known remotes as quick choices) and optional credentials.
   The server checks the remote before it creates the proxy. When the remote does not answer, the
@@ -23,8 +24,9 @@
   import { href, navigate, repoPath, repoSettingsPath } from "$lib/router.svelte";
   import { api, ApiError, errorMessage, type NewRepo, type Repo, type RepoConfig, type RepoKind } from "$lib/api";
   import { Resource } from "$lib/load.svelte";
-  import { formatLook } from "$lib/formats";
-  import { normalizeRemote, remoteError, remotePresets } from "$lib/remotes";
+  import { normalizeRemote, remoteError } from "$lib/remotes";
+  import { repoField } from "../../modules";
+  import type { RepoFieldState } from "../../modules/types";
   import * as RadioGroup from "$lib/components/ui/radio-group";
   import { Button } from "$lib/components/ui/button";
   import { Checkbox } from "$lib/components/ui/checkbox";
@@ -36,12 +38,10 @@
   import FormGrid from "$lib/components/FormGrid.svelte";
   import FormRow from "$lib/components/FormRow.svelte";
   import FormatIcon from "$lib/components/FormatIcon.svelte";
-  import ListInput from "$lib/components/ListInput.svelte";
   import OptionRow from "$lib/components/OptionRow.svelte";
   import RepoKindIcon from "$lib/components/RepoKindIcon.svelte";
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
   import VisibilityChoice from "$lib/components/VisibilityChoice.svelte";
-  import SigningKeyChoice, { type KeyChoice } from "$lib/components/SigningKeyChoice.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import Loading from "$lib/components/Loading.svelte";
   import ConfigEditor from "$lib/formats/ConfigEditor.svelte";
@@ -55,11 +55,9 @@
   const listHref = href("/settings/repositories");
   // The server's rule for names (repos.NameRE).
   const nameRE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
-  const archRE = /^[a-z0-9-]+$/;
   const maxMembers = 50;
 
   const formats = new Resource(() => api.formats.list());
-  const keys = new Resource(() => api.signingKeys.list());
   // The repositories a group can read; loaded when the person chooses a group.
   const repos = new Resource(() => api.repos.list(), { lazy: true });
 
@@ -84,8 +82,8 @@
   let formatName = $state("");
   let description = $state("");
   let anonymous = $state(false);
-  let archList = $state(["amd64", "arm64"]);
-  let keyChoice = $state<KeyChoice>({ mode: "existing", name: "" });
+  // The state of each repository field control, by field name.
+  let fieldStates = $state<Record<string, RepoFieldState>>({});
   // undefined: the format's default config; null: the editor holds an invalid config.
   let config = $state<RepoConfig | null | undefined>(undefined);
   // A proxy.
@@ -115,9 +113,13 @@
   });
 
   const format = $derived(kindFormats.find((f) => f.name === formatName));
-  const debian = $derived(kind === "hosted" && formatName === "debian");
-  const otherOptions = $derived(kind === "hosted" && !!format && !debian && Object.keys(format.default_config ?? {}).length > 0);
-  const presets = $derived(remotePresets[formatName] ?? []);
+  const options = $derived(kind === "hosted" && !!format && format.config.fields.length > 0);
+  const presets = $derived(format?.remote_presets ?? []);
+  // The repository fields of the format and kind that a UI module has a control for.
+  const fieldDefs = $derived((format?.repo_fields[kind] ?? []).map(repoField).filter((d) => !!d));
+  const fieldsReady = $derived(fieldDefs.every((d) => fieldStates[d.field]?.ready === true));
+  // The last section holds the submit row.
+  const lastSection = $derived(fieldDefs.length ? "field" : options ? "options" : "visibility");
 
   // The repositories a group of this format can read: hosted ones first, then proxies, each by name.
   const rank = (r: Repo) => (r.kind === "proxy" ? 1 : 0);
@@ -132,24 +134,16 @@
   const nameError = $derived(
     name && !nameRE.test(name) ? "Use lowercase letters, digits, dots, dashes and underscores, and start with a letter or a digit." : "",
   );
-  const archError = $derived.by(() => {
-    if (!debian) return "";
-    if (archList.length === 0) return "Enter at least one architecture, for example amd64.";
-    const bad = archList.find((a) => !archRE.test(a) || a === "all");
-    if (bad) return `${bad} is not an architecture name. Use names such as amd64 or arm64.`;
-    return "";
-  });
   const urlError = $derived(kind === "proxy" ? remoteError(remoteURL) : "");
   const credentialsError = $derived(
     kind === "proxy" && !!password && !username.trim() ? "Enter the username that goes with the password." : "",
   );
-  const keyMissing = $derived(debian && !keyChoice.name);
   const kindReady = $derived(
     kind === "proxy"
       ? !!remoteURL.trim() && !urlError && !credentialsError
       : kind === "group"
         ? members.length > 0 && members.length <= maxMembers
-        : !archError && !keyMissing && config !== null,
+        : fieldsReady && config !== null,
   );
   const canCreate = $derived(!!format && !!name && !nameError && kindReady && !busy);
   const submitLabel = $derived(kind === "proxy" ? "Create proxy" : kind === "group" ? "Create group" : "Create repository");
@@ -174,18 +168,24 @@
     busy = true;
     error = "";
     remoteFailed = false;
-    // The key this attempt created; deleted again when the repository is not created, so a retry
-    // can create it again.
-    let createdKey = "";
+    // The field controls whose prepare ran; each undoes it when the repository is not created, so a
+    // retry can do it again.
+    const prepared: RepoFieldState[] = [];
     try {
       const body: NewRepo = { name, format: format.name, description: description.trim(), anonymous_read: anonymous, kind };
       if (kind === "hosted") {
-        let cfg: RepoConfig = config ?? format.default_config ?? {};
-        if (debian) {
-          if (keyChoice.mode === "new") createdKey = (await api.signingKeys.create({ name: keyChoice.name.trim() })).name;
-          cfg = { ...format.default_config, architectures: archList, signing_key: keyChoice.name.trim() };
+        body.config = config ?? format.config.default ?? {};
+        const values: Record<string, unknown> = {};
+        for (const d of fieldDefs) {
+          const s = fieldStates[d.field];
+          if (!s) continue;
+          if (s.prepare) {
+            await s.prepare();
+            prepared.push(s);
+          }
+          if (s.value !== undefined) values[d.field] = s.value;
         }
-        body.config = cfg;
+        if (Object.keys(values).length) body.fields = values;
       } else if (kind === "proxy") {
         body.proxy = { remote_url: normalizeRemote(remoteURL) };
         if (username.trim()) {
@@ -207,14 +207,10 @@
     } catch (err) {
       error = errorMessage(err);
       remoteFailed = kind === "proxy" && err instanceof ApiError && err.status === 502;
-      if (createdKey) {
-        try {
-          await api.signingKeys.delete(createdKey);
-        } catch (e) {
-          error += ` The new signing key ${createdKey} stays; delete it in Signing keys if you do not need it (${errorMessage(e)}).`;
-        }
+      for (const s of prepared) {
+        const note = s.undo ? await s.undo() : "";
+        if (note) error += ` ${note}`;
       }
-      if (kind === "hosted") keys.reload();
     } finally {
       busy = false;
     }
@@ -286,7 +282,7 @@
           }}
         >
           {#each kindFormats as f (f.name)}
-            <OptionRow id="{id}-format-{f.name}" label={f.title} description={formatLook(f.name).description}>
+            <OptionRow id="{id}-format-{f.name}" label={f.title} description={f.description}>
               {#snippet control()}
                 <span class="flex items-center gap-3">
                   <RadioGroup.Item id="{id}-format-{f.name}" value={f.name} />
@@ -368,36 +364,32 @@
         </FormSection>
       {/if}
 
-      <FormSection title="Who can download" footer={debian || otherOptions ? undefined : submitRow}>
+      <FormSection title="Who can download" footer={lastSection === "visibility" ? submitRow : undefined}>
         <VisibilityChoice bind:anonymous />
       </FormSection>
 
-      {#if debian}
-        <FormSection title="Debian packages">
-          <FormGrid>
-            <FormRow label="Architectures" for="{id}-arch" help="Machines with apt get packages for these processor types." error={archError || undefined}>
-              <ListInput id="{id}-arch" values={archList} onchange={(v) => (archList = v)} normalize={(s) => s.toLowerCase()} placeholder="Type an architecture, then Enter" invalid={!!archError} describedby="{id}-arch-help" label="architecture" />
-            </FormRow>
-          </FormGrid>
-        </FormSection>
-
-        <FormSection title="Signing key" footer={submitRow}>
-          {#if keys.loading && !keys.data}
-            <Loading rows={2} />
-          {:else if keys.error && !keys.data}
-            <ErrorState error={keys.error} title="The signing keys did not load" onRetry={keys.reload} />
-          {:else}
-            <SigningKeyChoice keys={keys.data ?? []} repoName={name} canCreate={auth.can("keys")} bind:choice={keyChoice} />
-          {/if}
-        </FormSection>
-      {:else if otherOptions && format}
-        <FormSection title="{format.title} options" footer={submitRow}>
+      {#if options && format}
+        <FormSection title="{format.title} options" footer={lastSection === "options" ? submitRow : undefined}>
           <FormGrid>
             {#key format.name}
-              <ConfigEditor format={format.name} value={format.default_config} onChange={(v) => (config = v)} />
+              <ConfigEditor fields={format.config.fields} value={format.config.default} onChange={(v) => (config = v)} />
             {/key}
           </FormGrid>
         </FormSection>
+      {/if}
+      {#if format}
+        {#each fieldDefs as d, i (format.name + d.field)}
+          <FormSection title={d.label} footer={i === fieldDefs.length - 1 ? submitRow : undefined}>
+            {#await d.component() then mod}
+              <mod.default
+                id="{id}-field-{d.field}"
+                repoName={name}
+                {format}
+                onchange={(s) => (fieldStates = { ...fieldStates, [d.field]: s })}
+              />
+            {/await}
+          </FormSection>
+        {/each}
       {/if}
     </form>
   </FormPage>

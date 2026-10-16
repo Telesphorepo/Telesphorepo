@@ -1,5 +1,5 @@
-// Package move implements the storage move (spec §11): when an admin points the server at a
-// new blob store while assets exist, the server copies every blob to the new store in the
+// Package move implements the storage move: when an admin points the server at a
+// new blob store while blobs exist, the server copies every blob to the new store in the
 // background, with no downtime. While the copier runs, the live store is a storage.Mirror that
 // reads from the source and writes to both stores. The source is never modified or deleted.
 package move
@@ -17,11 +17,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Telesphorepo/Telesphorepo/internal/assets"
-	"github.com/Telesphorepo/Telesphorepo/internal/config"
+	"github.com/Telesphorepo/Telesphorepo/internal/audit"
+	"github.com/Telesphorepo/Telesphorepo/internal/blobs"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
-	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
-	"github.com/Telesphorepo/Telesphorepo/internal/repos"
+	"github.com/Telesphorepo/Telesphorepo/internal/move/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 	"github.com/Telesphorepo/Telesphorepo/internal/storage"
 )
@@ -66,62 +65,29 @@ type Target struct {
 	FSRoot   string `json:"fs_root,omitempty"`
 }
 
-// Failure is one asset the copier could not copy.
+// Failure is one blob the copier could not copy.
 type Failure struct {
-	AssetID int64  `json:"asset_id"`
-	Key     string `json:"key"`
-	Reason  string `json:"reason"`
+	BlobID int64  `json:"blob_id"`
+	Key    string `json:"key"`
+	Reason string `json:"reason"`
 }
 
-// stored is the target storage configuration sealed in storage_moves.target. It holds the S3
-// secret, so it is only ever stored encrypted and never logged.
-type stored struct {
-	Storage           string `json:"storage"`
-	FSRoot            string `json:"fs_root"`
-	S3Endpoint        string `json:"s3_endpoint"`
-	S3Region          string `json:"s3_region"`
-	S3Bucket          string `json:"s3_bucket"`
-	S3AccessKeyID     string `json:"s3_access_key_id"`
-	S3SecretAccessKey string `json:"s3_secret_access_key"`
-	S3Prefix          string `json:"s3_prefix"`
-	S3PathStyle       bool   `json:"s3_path_style"`
-	S3Redirect        bool   `json:"s3_redirect"`
-}
-
-func toStored(c *config.Config) stored {
-	return stored{
-		Storage: c.Storage, FSRoot: c.FSRoot,
-		S3Endpoint: c.S3Endpoint, S3Region: c.S3Region, S3Bucket: c.S3Bucket,
-		S3AccessKeyID: c.S3AccessKeyID, S3SecretAccessKey: c.S3SecretAccessKey, S3Prefix: c.S3Prefix,
-		S3PathStyle: c.S3PathStyle, S3Redirect: c.S3Redirect,
+// target describes where cfg puts the blobs, without credentials.
+func target(cfg storage.Config) Target {
+	if cfg.Backend == "s3" {
+		return Target{Storage: cfg.Backend, Endpoint: cfg.S3Endpoint, Bucket: cfg.S3Bucket, Prefix: cfg.S3Prefix}
 	}
-}
-
-// apply returns a copy of base with the storage fields of st.
-func (st stored) apply(base *config.Config) *config.Config {
-	c := *base
-	c.Storage, c.FSRoot = st.Storage, st.FSRoot
-	c.S3Endpoint, c.S3Region, c.S3Bucket = st.S3Endpoint, st.S3Region, st.S3Bucket
-	c.S3AccessKeyID, c.S3SecretAccessKey, c.S3Prefix = st.S3AccessKeyID, st.S3SecretAccessKey, st.S3Prefix
-	c.S3PathStyle, c.S3Redirect = st.S3PathStyle, st.S3Redirect
-	return &c
-}
-
-func (st stored) target() Target {
-	if st.Storage == "s3" {
-		return Target{Storage: st.Storage, Endpoint: st.S3Endpoint, Bucket: st.S3Bucket, Prefix: st.S3Prefix}
-	}
-	return Target{Storage: st.Storage, FSRoot: st.FSRoot}
+	return Target{Storage: cfg.Backend, FSRoot: cfg.FSRoot}
 }
 
 // SameLocation reports whether a and b address the same blobs: the same directory, or the same
 // bucket and prefix at the same endpoint. Credentials, region, path style and redirects do not
 // change where blobs live, so a change of only those needs no move.
-func SameLocation(a, b *config.Config) bool {
-	if a.Storage != b.Storage {
+func SameLocation(a, b storage.Config) bool {
+	if a.Backend != b.Backend {
 		return false
 	}
-	if a.Storage != "s3" {
+	if a.Backend != "s3" {
 		return filepath.Clean(a.FSRoot) == filepath.Clean(b.FSRoot)
 	}
 	return a.S3Endpoint == b.S3Endpoint && a.S3Bucket == b.S3Bucket && a.S3Prefix == b.S3Prefix
@@ -129,39 +95,36 @@ func SameLocation(a, b *config.Config) bool {
 
 // Service starts, runs, resumes and cancels storage moves.
 type Service struct {
-	db     *db.DB
-	set    *settings.Service
-	live   *storage.Live
-	assets *assets.Service
-	repos  *repos.Service
-	log    *slog.Logger
+	db    *db.DB
+	set   *settings.Service
+	live  *storage.Live
+	blobs *blobs.Store
+	audit *audit.Log
+	log   *slog.Logger
 
-	mu   sync.Mutex // serializes start, finish, cancel and resume
-	base context.Context
-	run  *run           // the copying move of this process, nil when none
-	wg   sync.WaitGroup // the copier goroutines of this process
+	// spawn runs the copier as a task of the storage module, so the server waits for it before
+	// the database closes; base is the module's context.
+	spawn func(name string, fn func(ctx context.Context))
+	base  context.Context
+
+	mu  sync.Mutex // serializes start, finish, cancel and resume
+	run *run       // the copying move of this process, nil when none
 }
-
-// Wait blocks until every copier of this process has returned. The server calls it after the
-// Resume context ends and before it closes the database.
-func (s *Service) Wait() { s.wg.Wait() }
 
 // run is a move whose copier runs in this process.
 type run struct {
 	id        int64
 	startedBy int64
-	target    *config.Config
+	target    storage.Config
 	mirror    *storage.Mirror
 	cancel    context.CancelFunc
 }
 
 // New returns the move service. live is the server's store; the service swaps a Mirror into it
-// while a move runs.
-func New(d *db.DB, set *settings.Service, live *storage.Live, as *assets.Service, rs *repos.Service, log *slog.Logger) *Service {
-	if log == nil {
-		log = slog.Default()
-	}
-	return &Service{db: d, set: set, live: live, assets: as, repos: rs, log: log, base: context.Background()}
+// while a move runs. spawn runs a copier under base, the context of the storage module.
+func New(d *db.DB, set *settings.Service, live *storage.Live, bs *blobs.Store, au *audit.Log, log *slog.Logger,
+	base context.Context, spawn func(name string, fn func(ctx context.Context))) *Service {
+	return &Service{db: d, set: set, live: live, blobs: bs, audit: au, log: log, base: base, spawn: spawn}
 }
 
 // Running reports whether a move is copying in this process.
@@ -171,35 +134,35 @@ func (s *Service) Running() bool {
 	return s.run != nil
 }
 
-// HasAssets reports whether any asset exists (one index probe). Without assets a storage
-// change needs no move.
-func (s *Service) HasAssets(ctx context.Context) (bool, error) {
-	_, err := dbq.New(s.db.R).AnyAsset(ctx)
+// HasBlobs reports whether any blob exists (one index probe). Without blobs a storage change
+// needs no move.
+func (s *Service) HasBlobs(ctx context.Context) (bool, error) {
+	_, err := dbq.New(s.db.R).AnyBlob(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	return err == nil, err
 }
 
-// Start begins a move of every blob to target, the full effective configuration the storage
-// settings change would produce (the caller has probed it). It saves no settings: the target
-// is sealed in the move row, and the settings change when the copy is done. ErrBusy when a move
-// is already copying.
-func (s *Service) Start(ctx context.Context, target *config.Config, startedBy int64) (*Move, error) {
+// Start begins a move of every blob to dst, the store configuration that the storage settings
+// change would produce (the caller has probed it). It saves no settings: dst is sealed in the
+// move row, and the settings change when the copy is done. It records storage.move.start.
+// ErrBusy when a move is already copying.
+func (s *Service) Start(ctx context.Context, dstCfg storage.Config, startedBy int64) (*Move, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.run != nil {
 		return nil, ErrBusy
 	}
-	dst, err := storage.Open(ctx, target)
+	dst, err := storage.Open(ctx, dstCfg)
 	if err != nil {
 		return nil, fmt.Errorf("open target storage: %w", err)
 	}
-	total, err := dbq.New(s.db.R).CountAssets(ctx)
+	total, err := dbq.New(s.db.R).CountBlobs(ctx)
 	if err != nil {
 		return nil, err
 	}
-	plain, err := json.Marshal(toStored(target))
+	plain, err := json.Marshal(dstCfg)
 	if err != nil {
 		return nil, err
 	}
@@ -223,20 +186,20 @@ func (s *Service) Start(ctx context.Context, target *config.Config, startedBy in
 		}
 		return nil, fmt.Errorf("create storage move: %w", err)
 	}
-	r := &run{id: id, startedBy: startedBy, target: target, mirror: storage.NewMirror(s.live.Active(), dst)}
+	r := &run{id: id, startedBy: startedBy, target: dstCfg, mirror: storage.NewMirror(s.live.Active(), dst)}
 	s.live.Swap(r.mirror)
 	s.launch(r, 0, 0, 0, 0)
-	s.log.Info("storage move started", "move", id, "storage", target.Storage, "assets", total)
+	s.log.Info("storage move started", "move", id, "storage", dstCfg.Backend, "blobs", total)
+	_ = s.audit.Record(ctx, audit.Event{Action: ActionStart, Target: strconv.FormatInt(id, 10),
+		Detail: map[string]any{"target": target(dstCfg), "blobs": total}})
 	return s.Get(ctx, id)
 }
 
-// Resume runs at startup, before the server accepts requests. ctx bounds every copier of this
-// process. A move left copying continues from its cursor; if its target cannot be opened, the
-// move fails with that error.
+// Resume runs at startup, before the server accepts requests. A move left copying continues
+// from its cursor; if its target cannot be opened, the move fails with that error.
 func (s *Service) Resume(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.base = ctx
 	row, err := dbq.New(s.db.R).GetCopyingMove(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
@@ -244,19 +207,19 @@ func (s *Service) Resume(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("find running storage move: %w", err)
 	}
-	st, err := s.open(row)
+	dstCfg, err := s.open(row)
 	if err != nil {
 		return s.endRow(ctx, row.ID, StateFailed, "read move target: "+err.Error())
 	}
-	cur := s.set.Config()
-	target := st.apply(cur)
-	if SameLocation(cur, target) {
+	cur := storage.ConfigView.Get(s.set.Current())
+	dstCfg.PresignTTL = cur.PresignTTL
+	if SameLocation(cur, dstCfg) {
 		// The process stopped after the settings were saved and before the move was marked
 		// done: the server already runs on the target.
 		s.log.Info("storage move finished before the restart", "move", row.ID)
 		return s.endRow(ctx, row.ID, StateDone, "")
 	}
-	dst, err := storage.Open(ctx, target)
+	dst, err := storage.Open(ctx, dstCfg)
 	if err == nil {
 		err = storage.Probe(ctx, dst)
 	}
@@ -268,10 +231,10 @@ func (s *Service) Resume(ctx context.Context) error {
 	if row.StartedBy.Valid {
 		by = row.StartedBy.Int64
 	}
-	r := &run{id: row.ID, startedBy: by, target: target, mirror: storage.NewMirror(s.live.Active(), dst)}
+	r := &run{id: row.ID, startedBy: by, target: dstCfg, mirror: storage.NewMirror(s.live.Active(), dst)}
 	s.live.Swap(r.mirror)
 	s.launch(r, row.Cursor, row.Copied, row.Skipped, row.Failed)
-	s.log.Info("storage move resumed", "move", row.ID, "storage", target.Storage, "cursor", row.Cursor)
+	s.log.Info("storage move resumed", "move", row.ID, "storage", dstCfg.Backend, "cursor", row.Cursor)
 	return nil
 }
 
@@ -280,11 +243,10 @@ func (s *Service) launch(r *run, cursor, copied, skipped, failed int64) {
 	ctx, cancel := context.WithCancel(s.base)
 	r.cancel = cancel
 	s.run = r
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
+	s.spawn("copy", func(context.Context) {
+		defer cancel()
 		s.copy(ctx, r, counters{cursor: cursor, copied: copied, skipped: skipped, failed: failed})
-	}()
+	})
 }
 
 // Current returns the newest move, running or finished, or ErrNotFound when there is none.
@@ -311,7 +273,7 @@ func (s *Service) Get(ctx context.Context, id int64) (*Move, error) {
 	return s.toMove(row), nil
 }
 
-// Failures returns a keyset page of move id's failures in asset id order, after the asset id
+// Failures returns a keyset page of move id's failures in blob id order, after the blob id
 // after. next is the cursor of the following page, 0 when this page is the last.
 func (s *Service) Failures(ctx context.Context, id, after int64, limit int) ([]Failure, int64, error) {
 	if _, err := s.Get(ctx, id); err != nil {
@@ -323,17 +285,18 @@ func (s *Service) Failures(ctx context.Context, id, after int64, limit int) ([]F
 	}
 	out := make([]Failure, len(rows))
 	for i, r := range rows {
-		out[i] = Failure{AssetID: r.AssetID, Key: r.Key, Reason: r.Reason}
+		out[i] = Failure{BlobID: r.BlobID, Key: r.Key, Reason: r.Reason}
 	}
 	var next int64
 	if len(out) == limit && limit > 0 {
-		next = out[len(out)-1].AssetID
+		next = out[len(out)-1].BlobID
 	}
 	return out, next, nil
 }
 
 // Cancel stops move id: the copier stops, the live store drops the mirror and stays on the
-// source, and the move becomes cancelled. ErrNotRunning when the move has already ended.
+// source, and the move becomes cancelled. It records storage.move.cancel. ErrNotRunning when the
+// move has already ended.
 func (s *Service) Cancel(ctx context.Context, id int64) (*Move, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -360,14 +323,15 @@ func (s *Service) Cancel(ctx context.Context, id int64) (*Move, error) {
 		s.live.Swap(r.mirror.Src)
 	}
 	s.log.Info("storage move cancelled", "move", id)
+	_ = s.audit.Record(ctx, audit.Event{Action: ActionCancel, Target: strconv.FormatInt(id, 10)})
 	return s.Get(ctx, id)
 }
 
 func aad(id int64) string { return "storage_moves:" + strconv.FormatInt(id, 10) }
 
 // open decrypts the sealed target of row.
-func (s *Service) open(row dbq.StorageMove) (stored, error) {
-	var st stored
+func (s *Service) open(row dbq.StorageMove) (storage.Config, error) {
+	var st storage.Config
 	plain, err := s.set.Decrypt(aad(row.ID), row.Target)
 	if err != nil {
 		return st, err
@@ -388,7 +352,7 @@ func (s *Service) toMove(row dbq.StorageMove) *Move {
 		m.FinishedAt = &t
 	}
 	if st, err := s.open(row); err == nil {
-		m.Target = st.target()
+		m.Target = target(st)
 	}
 	return m
 }
@@ -401,17 +365,27 @@ func (s *Service) finishRow(ctx context.Context, id int64, state, msg string) (i
 	})
 }
 
-// endRow is finishRow for a move without a copier in this process.
+// endRow is finishRow for a move without a copier in this process. It records the end.
 func (s *Service) endRow(ctx context.Context, id int64, state, msg string) error {
 	if _, err := s.finishRow(ctx, id, state, msg); err != nil {
 		return fmt.Errorf("end storage move %d: %w", id, err)
 	}
+	s.recordEnd(ctx, id, state, msg)
 	return nil
 }
 
-// storagePatch returns the settings write that makes t the active storage: every storage
+// recordEnd records the end of move id: storage.move.done, or storage.move.failed with msg.
+func (s *Service) recordEnd(ctx context.Context, id int64, state, msg string) {
+	action, detail := ActionDone, map[string]any{}
+	if state == StateFailed {
+		action, detail["error"] = ActionFailed, msg
+	}
+	_ = s.audit.Record(ctx, audit.Event{Action: action, Target: strconv.FormatInt(id, 10), Detail: detail})
+}
+
+// storagePatch returns the settings write that makes t the active storage: every location
 // setting whose effective value differs between cur and t.
-func storagePatch(cur, t *config.Config) map[string]json.RawMessage {
+func storagePatch(cur, t storage.Config) map[string]json.RawMessage {
 	p := map[string]json.RawMessage{}
 	add := func(key string, old, new any) {
 		if old != new {
@@ -419,15 +393,15 @@ func storagePatch(cur, t *config.Config) map[string]json.RawMessage {
 			p[key] = b
 		}
 	}
-	add(settings.KeyStorage, cur.Storage, t.Storage)
-	add(settings.KeyFSRoot, cur.FSRoot, t.FSRoot)
-	add(settings.KeyS3Endpoint, cur.S3Endpoint, t.S3Endpoint)
-	add(settings.KeyS3Region, cur.S3Region, t.S3Region)
-	add(settings.KeyS3Bucket, cur.S3Bucket, t.S3Bucket)
-	add(settings.KeyS3AccessKeyID, cur.S3AccessKeyID, t.S3AccessKeyID)
-	add(settings.KeyS3SecretAccessKey, cur.S3SecretAccessKey, t.S3SecretAccessKey)
-	add(settings.KeyS3Prefix, cur.S3Prefix, t.S3Prefix)
-	add(settings.KeyS3PathStyle, cur.S3PathStyle, t.S3PathStyle)
-	add(settings.KeyS3Redirect, cur.S3Redirect, t.S3Redirect)
+	add(storage.Backend.Name(), cur.Backend, t.Backend)
+	add(storage.FSRoot.Name(), cur.FSRoot, t.FSRoot)
+	add(storage.S3Endpoint.Name(), cur.S3Endpoint, t.S3Endpoint)
+	add(storage.S3Region.Name(), cur.S3Region, t.S3Region)
+	add(storage.S3Bucket.Name(), cur.S3Bucket, t.S3Bucket)
+	add(storage.S3AccessKeyID.Name(), cur.S3AccessKeyID, t.S3AccessKeyID)
+	add(storage.S3SecretAccessKey.Name(), cur.S3SecretAccessKey, t.S3SecretAccessKey)
+	add(storage.S3Prefix.Name(), cur.S3Prefix, t.S3Prefix)
+	add(storage.S3PathStyle.Name(), cur.S3PathStyle, t.S3PathStyle)
+	add(storage.S3Redirect.Name(), cur.S3Redirect, t.S3Redirect)
 	return p
 }

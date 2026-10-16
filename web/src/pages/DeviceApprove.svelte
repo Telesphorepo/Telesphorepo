@@ -1,5 +1,5 @@
 <!--
-  Device approval. The login command of the Gradle plugin or the Maven extension prints a code and
+  Device approval. The login command of the publisher client of your build tool prints a code and
   this address (/#/device?code=ABCD-EFGH). Two steps: enter the code, then check the device (a felt
   ticket with the code on its stub) and confirm it is you. A local account confirms with a fresh
   second factor. A single sign-on account signs in again at its identity provider; the server then
@@ -11,7 +11,7 @@
   import type { PageProps } from "$lib/router.svelte";
   import { href, navigate } from "$lib/router.svelte";
   import { auth } from "$lib/auth.svelte";
-  import { api, ApiError, errorMessage, type PendingEnrollment, type Proof } from "$lib/api";
+  import { api, ApiError, errorMessage, type FreshProof, type PendingEnrollment } from "$lib/api";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import { Spinner } from "$lib/components/ui/spinner";
@@ -52,7 +52,6 @@
     no_auth_time:
       "Your identity provider did not say when you signed in (the ID token has no auth_time), so the server cannot check that the sign-in is new. Ask an administrator to add auth_time to the ID token.",
     wrong_account: "You signed in to your identity provider with another account. Sign in again with this account.",
-    not_authorized: "Your single sign-on account is not allowed to sign in here.",
     account_disabled: "This account is disabled.",
     not_sso: "You sign in with a password. Confirm with two-step verification.",
     sso_failed: "Single sign-on failed. Try again.",
@@ -97,7 +96,7 @@
     if (complete) lookup();
   }
 
-  async function approve(proof: Proof | { grant: string }) {
+  async function approve(proof: FreshProof) {
     if (!pending) return;
     await api.devices.approve(pending.user_code, proof);
     approved = pending;
@@ -116,7 +115,6 @@
     }
   }
 
-  const clientName = (k: PendingEnrollment["kind"]) => (k === "gradle" ? "Gradle plugin" : "Maven extension");
 </script>
 
 <PageHeader title="Approve a device" description="Approve the device only if the code matches the one in your terminal." />
@@ -128,7 +126,7 @@
       <div class="w-full max-w-[20rem] shrink-0 sm:max-w-[24rem]">
         <FeltTicket
           top={approved.name}
-          bottom={clientName(approved.kind)}
+          bottom={approved.client_title}
           serial={approved.user_code}
           moment="tear"
           label="The ticket of {approved.name}, its stub torn off"
@@ -179,9 +177,9 @@
           <div class="w-full max-w-[20rem] shrink-0">
             <FeltTicket
               top={pending.name}
-              bottom={clientName(pending.kind)}
+              bottom={pending.client_title}
               serial={pending.user_code}
-              label="The ticket of {pending.name}, {clientName(pending.kind)}"
+              label="The ticket of {pending.name}, {pending.client_title}"
             />
           </div>
           <!-- The ticket shows the name and the client. The code on its stub reads sideways, so the

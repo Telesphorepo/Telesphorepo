@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/netip"
 	"net/url"
 	"slices"
 	"strconv"
@@ -20,9 +19,11 @@ import (
 	gooidc "github.com/coreos/go-oidc/v3/oidc"
 	jose "github.com/go-jose/go-jose/v4"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/access"
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
-	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
-	"github.com/Telesphorepo/Telesphorepo/internal/provenance"
+	"github.com/Telesphorepo/Telesphorepo/internal/auth"
+	"github.com/Telesphorepo/Telesphorepo/internal/perm"
+	"github.com/Telesphorepo/Telesphorepo/internal/publish/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
@@ -204,7 +205,7 @@ func boolInt(b bool) int64 {
 	return 0
 }
 
-// CreateTrust stores a new policy created by user by.
+// CreateTrust stores a new policy created by user by and records ci.pipeline.create.
 func (s *Service) CreateTrust(ctx context.Context, by int64, in TrustInput) (*Trust, error) {
 	f := trustFields{claims: "{}"}
 	if err := in.apply(&f); err != nil {
@@ -228,7 +229,11 @@ func (s *Service) CreateTrust(ctx context.Context, by int64, in TrustInput) (*Tr
 		if err != nil {
 			return err
 		}
-		return setTrustRepos(ctx, q, id, ids)
+		if err := setTrustRepos(ctx, q, id, ids); err != nil {
+			return err
+		}
+		return s.audit.RecordTx(ctx, tx, audit.Event{Action: ActionPipelineCreate, Target: f.name,
+			Detail: map[string]any{"id": id, "issuer": f.issuer, "repos": in.Repos}})
 	})
 	if err != nil {
 		return nil, err
@@ -237,7 +242,7 @@ func (s *Service) CreateTrust(ctx context.Context, by int64, in TrustInput) (*Tr
 }
 
 // UpdateTrust changes a policy. A change to what the policy accepts (issuer, audience, claims,
-// keys, repos, or disabling it) ends the open sessions it minted.
+// keys, repos, or disabling it) ends the open sessions it minted. It records ci.pipeline.update.
 func (s *Service) UpdateTrust(ctx context.Context, id int64, in TrustInput) (*Trust, error) {
 	cur, err := s.rq.GetTrust(ctx, id)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -280,11 +285,14 @@ func (s *Service) UpdateTrust(ctx context.Context, id int64, in TrustInput) (*Tr
 			}
 		}
 		if narrowed {
-			_, err = q.CloseTrustPublishSessions(ctx, dbq.CloseTrustPublishSessionsParams{
+			if _, err := q.CloseTrustPublishSessions(ctx, dbq.CloseTrustPublishSessionsParams{
 				ClosedAt: nullID(time.Now().Unix()), TrustID: nullID(id),
-			})
+			}); err != nil {
+				return err
+			}
 		}
-		return err
+		return s.audit.RecordTx(ctx, tx, audit.Event{Action: ActionPipelineUpdate, Target: f.name,
+			Detail: map[string]any{"id": id, "sessions_closed": narrowed}})
 	})
 	if err != nil {
 		return nil, err
@@ -292,7 +300,7 @@ func (s *Service) UpdateTrust(ctx context.Context, id int64, in TrustInput) (*Tr
 	return s.GetTrust(ctx, id)
 }
 
-// DeleteTrust ends the policy's open sessions and deletes it.
+// DeleteTrust ends the policy's open sessions, deletes it and records ci.pipeline.delete.
 func (s *Service) DeleteTrust(ctx context.Context, id int64) error {
 	return s.db.Tx(ctx, func(tx *sql.Tx) error {
 		q := dbq.New(tx)
@@ -308,7 +316,7 @@ func (s *Service) DeleteTrust(ctx context.Context, id int64) error {
 		if n == 0 {
 			return errorf(ErrNotFound, "trust policy not found")
 		}
-		return nil
+		return s.audit.RecordTx(ctx, tx, audit.Event{Action: ActionPipelineDelete, Target: strconv.FormatInt(id, 10), Detail: map[string]any{"id": id}})
 	})
 }
 
@@ -364,6 +372,25 @@ func (s *Service) Trusts(ctx context.Context, after string, limit int) ([]*Trust
 		next = rows[len(rows)-1].Name
 	}
 	return out, next, nil
+}
+
+// RepoPipelines returns the trust policies that list repo, each with what its claims allow in
+// the words of its CI provider (the CI pipelines of the access report).
+func (s *Service) RepoPipelines(ctx context.Context, repoID int64) ([]access.Pipeline, error) {
+	rows, err := s.rq.ListRepoTrusts(ctx, repoID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]access.Pipeline, 0, len(rows))
+	for _, t := range rows {
+		claims, err := decodeClaims(t.Claims)
+		if err != nil {
+			claims = nil
+		}
+		out = append(out, access.Pipeline{ID: t.ID, Rule: t.Name, Issuer: t.Issuer, Disabled: t.Disabled != 0,
+			Pipeline: s.ci.Describe(t.Issuer, claims)})
+	}
+	return out, nil
 }
 
 // --- token exchange ---
@@ -496,37 +523,42 @@ func claimsMatch(policy map[string][]string, claims map[string]any) bool {
 	return true
 }
 
-// OIDCSession exchanges a CI identity token for a publish session for repo. The token must
-// verify against an enabled policy of its issuer that lists the repo (signature, issuer,
-// audience, exp, iat at most 10 min old, claims), and must not have been used before.
-func (s *Service) OIDCSession(ctx context.Context, ip netip.Addr, raw, repoName string) (*Minted, error) {
+// ciMatch is a CI identity token that a trust policy allows for a repo.
+type ciMatch struct {
+	trust  int64
+	idt    *gooidc.IDToken
+	claims map[string]any
+	seen   [32]byte // the replay key: issuer and jti, or the whole token
+}
+
+// verifyCI checks raw against the enabled policies of its issuer that list the repo that resolve
+// returns: signature, issuer, audience, exp, iat at most 10 min old, claims. An unknown repo is
+// refused like a repo that no policy lists.
+func (s *Service) verifyCI(ctx context.Context, raw string, repoName string, resolve func(context.Context) (*repos.Repo, error)) (*repos.Repo, *ciMatch, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" || len(raw) > maxCITokenBytes {
-		return nil, errorf(ErrInvalid, "token must be a CI identity token (JWT)")
+		return nil, nil, errorf(ErrInvalid, "token must be a CI identity token (JWT)")
 	}
 	issuer, ok := unverifiedIssuer(raw)
 	if !ok {
-		return nil, errorf(ErrDenied, "token is not a valid identity token")
+		return nil, nil, errorf(ErrDenied, "token is not a valid identity token")
 	}
 	const noBaseURL = "the server has no public address to check the token's audience against"
 	fix := ". An administrator adds or changes the CI pipeline on Settings › CI pipelines."
 	refused := errorf(ErrDenied, "no trust policy allows this token to publish to "+repoName+fix)
-	repo, err := s.repos.ByName(ctx, repoName)
+	repo, err := resolve(ctx)
 	if errors.Is(err, repos.ErrNotFound) {
-		return nil, refused
+		return nil, nil, refused
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	trusts, err := s.rq.ListMatchingTrusts(ctx, dbq.ListMatchingTrustsParams{Issuer: issuer, RepoID: repo.ID})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	now := time.Now()
 	reason := ""
-	var match *dbq.ListMatchingTrustsRow
-	var idt *gooidc.IDToken
-	var claims map[string]any
 	for i := range trusts {
 		t := trusts[i]
 		tok, err := s.verifyCIToken(ctx, t, raw)
@@ -560,46 +592,100 @@ func (s *Service) OIDCSession(ctx context.Context, ip netip.Addr, raw, repoName 
 			reason = "the token's claims do not match a trust policy"
 			continue
 		}
-		match, idt, claims = &t, tok, all
-		break
-	}
-	if match == nil {
-		if reason == noBaseURL {
-			fix = ". An administrator sets the public address on Settings › General, or an audience on the CI pipeline on Settings › CI pipelines."
+		m := &ciMatch{trust: t.ID, idt: tok, claims: all}
+		if jti, _ := all["jti"].(string); jti != "" {
+			m.seen = sha256.Sum256([]byte(tok.Issuer + "\n" + jti))
+		} else {
+			m.seen = sha256.Sum256([]byte(raw))
 		}
-		if reason != "" {
-			return nil, errorf(ErrDenied, "no trust policy allows this token to publish to "+repoName+": "+reason+fix)
-		}
-		return nil, refused
+		return repo, m, nil
 	}
-	if repo.LockedBy != "" {
-		return nil, errorf(ErrConflict, repo.LockedBy)
+	if reason == noBaseURL {
+		fix = ". An administrator sets the public address on Settings › General, or an audience on the CI pipeline on Settings › CI pipelines."
 	}
-	if err := s.ipAllowed(repo, ip, audit.Actor{Name: idt.Subject}); err != nil {
+	if reason != "" {
+		return nil, nil, errorf(ErrDenied, "no trust policy allows this token to publish to "+repoName+": "+reason+fix)
+	}
+	return nil, nil, refused
+}
+
+// ciSession mints the session of a CI identity token for repo: the token must pass a trust
+// policy (verifyCI) and access.Engine.Decide with Mint. Without reuse (the mint route) a token
+// mints once, for one repo. With reuse (the Minter) a token mints once for each repo, and a token
+// that minted a session for the repo before gets that session back while it is open
+// (Minted.Token is then "").
+func (s *Service) ciSession(ctx context.Context, r *http.Request, raw, repoName string, resolve func(context.Context) (*repos.Repo, error), reuse bool) (*Minted, error) {
+	repo, m, err := s.verifyCI(ctx, raw, repoName, resolve)
+	if err != nil {
 		return nil, err
 	}
-
-	var seen [32]byte
-	if jti, _ := claims["jti"].(string); jti != "" {
-		seen = sha256.Sum256([]byte(idt.Issuer + "\n" + jti))
-	} else {
-		seen = sha256.Sum256([]byte(raw))
+	p := &auth.Principal{Cred: auth.CredPublish, Publish: &auth.PublishSession{RepoID: repo.ID, Via: ViaOIDC, Subject: m.idt.Subject}}
+	if d := s.access.Decide(ctx, r, p, repo, access.Mint, perm.RepoPublish); !d.Allowed {
+		return nil, &RefusedError{d}
 	}
-	var m *Minted
+	if reuse {
+		if old, err := s.reused(ctx, m.seen, repo); old != nil || err != nil {
+			return old, err
+		}
+	}
+	var out *Minted
 	err = s.db.Tx(ctx, func(tx *sql.Tx) error {
 		q := dbq.New(tx)
-		n, err := q.InsertSeenOIDCToken(ctx, dbq.InsertSeenOIDCTokenParams{IDHash: seen[:], ExpiresAt: idt.Expiry.Unix()})
+		if !reuse {
+			seen, err := q.SeenOIDCToken(ctx, m.seen[:])
+			if err != nil {
+				return err
+			}
+			if seen {
+				return errorf(ErrDenied, "this identity token was already used")
+			}
+		}
+		// The build record and the session share the transaction.
+		build, _, err := s.builds.Record(ctx, tx, m.idt.Issuer, m.claims, time.Now())
+		if err != nil {
+			return err
+		}
+		out, err = s.mint(ctx, q, repo, ViaOIDC, 0, 0, m.trust, build, m.idt.Subject)
+		if err != nil {
+			return err
+		}
+		n, err := q.InsertSeenOIDCToken(ctx, dbq.InsertSeenOIDCTokenParams{IDHash: m.seen[:], RepoID: repo.ID,
+			ExpiresAt: m.idt.Expiry.Unix(), SessionID: sql.NullInt64{Int64: out.ID, Valid: true}})
 		if err != nil {
 			return err
 		}
 		if n == 0 {
 			return errorf(ErrDenied, "this identity token was already used")
 		}
-		m, err = s.mint(ctx, q, repo, ViaOIDC, 0, 0, match.ID, idt.Subject, provenance.FromClaims(idt.Issuer, claims))
-		return err
+		return nil
 	})
+	if err != nil {
+		if reuse && errors.Is(err, ErrDenied) {
+			if old, rerr := s.reused(ctx, m.seen, repo); old != nil || rerr != nil {
+				return old, rerr
+			}
+		}
+		return nil, err
+	}
+	return out, nil
+}
+
+// reused returns the open session of repo that the CI token with replay key seen minted, or nil.
+func (s *Service) reused(ctx context.Context, seen [32]byte, repo *repos.Repo) (*Minted, error) {
+	id, err := s.rq.GetSeenOIDCSession(ctx, dbq.GetSeenOIDCSessionParams{IDHash: seen[:], RepoID: repo.ID})
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && !id.Valid) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
-	return m, nil
+	p, err := s.LoadSession(ctx, id.Int64)
+	if errors.Is(err, auth.ErrBadCredentials) {
+		return nil, errorf(ErrDenied, "the publish session of this identity token ended; request a new token")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &Minted{ID: p.Publish.ID, Repo: repo.Name, RepoID: repo.ID, Subject: p.Publish.Subject, Via: ViaOIDC,
+		Session: p.Publish}, nil
 }

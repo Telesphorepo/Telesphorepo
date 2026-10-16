@@ -10,6 +10,39 @@ import (
 	"database/sql"
 )
 
+const clearRebuild = `-- name: ClearRebuild :exec
+DELETE FROM rebuilds WHERE repo_id = ? AND grp = ? AND unit = ? AND marked_at <= ?
+`
+
+type ClearRebuildParams struct {
+	RepoID   int64
+	Grp      string
+	Unit     string
+	MarkedAt int64
+}
+
+// Deletes a unit unless it was marked again after the rebuild started.
+func (q *Queries) ClearRebuild(ctx context.Context, arg ClearRebuildParams) error {
+	_, err := q.db.ExecContext(ctx, clearRebuild,
+		arg.RepoID,
+		arg.Grp,
+		arg.Unit,
+		arg.MarkedAt,
+	)
+	return err
+}
+
+const countRebuilds = `-- name: CountRebuilds :one
+SELECT count(*) FROM rebuilds WHERE repo_id = ?
+`
+
+func (q *Queries) CountRebuilds(ctx context.Context, repoID int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countRebuilds, repoID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createRepo = `-- name: CreateRepo :one
 INSERT INTO repos (name, format, kind, anonymous_read, config, description, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)
 RETURNING id
@@ -62,14 +95,61 @@ func (q *Queries) DeleteRepo(ctx context.Context, id int64) (int64, error) {
 	return result.RowsAffected()
 }
 
-const getRepoByID = `-- name: GetRepoByID :one
-SELECT id, name, format, kind, anonymous_read, config, created_at, locked_by, description,
-  file_count, total_size, last_published_at FROM repos WHERE id = ?
+const deleteRepoOp = `-- name: DeleteRepoOp :execrows
+DELETE FROM repo_ops WHERE id = ? AND owner = ?
 `
 
-func (q *Queries) GetRepoByID(ctx context.Context, id int64) (Repo, error) {
+type DeleteRepoOpParams struct {
+	ID    int64
+	Owner string
+}
+
+func (q *Queries) DeleteRepoOp(ctx context.Context, arg DeleteRepoOpParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteRepoOp, arg.ID, arg.Owner)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const getRepoByID = `-- name: GetRepoByID :one
+SELECT r.id, r.name, r.format, r.kind, r.anonymous_read, r.config, r.created_at, r.description,
+  r.file_count, r.total_size, r.last_published_at,
+  o.id AS op_id, o.type AS op_type, o.owner AS op_owner, o.ref AS op_ref, o.state AS op_state, o.done AS op_done,
+  o.total AS op_total, o.error AS op_error, o.started_by AS op_started_by, o.started_at AS op_started_at,
+  o.updated_at AS op_updated_at
+FROM repos r LEFT JOIN repo_ops o ON o.repo_id = r.id
+WHERE r.id = ?
+`
+
+type GetRepoByIDRow struct {
+	ID              int64
+	Name            string
+	Format          string
+	Kind            string
+	AnonymousRead   bool
+	Config          string
+	CreatedAt       int64
+	Description     string
+	FileCount       int64
+	TotalSize       int64
+	LastPublishedAt int64
+	OpID            sql.NullInt64
+	OpType          sql.NullString
+	OpOwner         sql.NullString
+	OpRef           sql.NullString
+	OpState         sql.NullString
+	OpDone          sql.NullInt64
+	OpTotal         sql.NullInt64
+	OpError         sql.NullString
+	OpStartedBy     sql.NullInt64
+	OpStartedAt     sql.NullInt64
+	OpUpdatedAt     sql.NullInt64
+}
+
+func (q *Queries) GetRepoByID(ctx context.Context, id int64) (GetRepoByIDRow, error) {
 	row := q.db.QueryRowContext(ctx, getRepoByID, id)
-	var i Repo
+	var i GetRepoByIDRow
 	err := row.Scan(
 		&i.ID,
 		&i.Name,
@@ -78,26 +158,66 @@ func (q *Queries) GetRepoByID(ctx context.Context, id int64) (Repo, error) {
 		&i.AnonymousRead,
 		&i.Config,
 		&i.CreatedAt,
-		&i.LockedBy,
 		&i.Description,
 		&i.FileCount,
 		&i.TotalSize,
 		&i.LastPublishedAt,
+		&i.OpID,
+		&i.OpType,
+		&i.OpOwner,
+		&i.OpRef,
+		&i.OpState,
+		&i.OpDone,
+		&i.OpTotal,
+		&i.OpError,
+		&i.OpStartedBy,
+		&i.OpStartedAt,
+		&i.OpUpdatedAt,
 	)
 	return i, err
 }
 
 const getRepoByName = `-- name: GetRepoByName :one
 
-SELECT id, name, format, kind, anonymous_read, config, created_at, locked_by, description,
-  file_count, total_size, last_published_at FROM repos WHERE name = ?
+SELECT r.id, r.name, r.format, r.kind, r.anonymous_read, r.config, r.created_at, r.description,
+  r.file_count, r.total_size, r.last_published_at,
+  o.id AS op_id, o.type AS op_type, o.owner AS op_owner, o.ref AS op_ref, o.state AS op_state, o.done AS op_done,
+  o.total AS op_total, o.error AS op_error, o.started_by AS op_started_by, o.started_at AS op_started_at,
+  o.updated_at AS op_updated_at
+FROM repos r LEFT JOIN repo_ops o ON o.repo_id = r.id
+WHERE r.name = ?
 `
 
+type GetRepoByNameRow struct {
+	ID              int64
+	Name            string
+	Format          string
+	Kind            string
+	AnonymousRead   bool
+	Config          string
+	CreatedAt       int64
+	Description     string
+	FileCount       int64
+	TotalSize       int64
+	LastPublishedAt int64
+	OpID            sql.NullInt64
+	OpType          sql.NullString
+	OpOwner         sql.NullString
+	OpRef           sql.NullString
+	OpState         sql.NullString
+	OpDone          sql.NullInt64
+	OpTotal         sql.NullInt64
+	OpError         sql.NullString
+	OpStartedBy     sql.NullInt64
+	OpStartedAt     sql.NullInt64
+	OpUpdatedAt     sql.NullInt64
+}
+
 // Repository records (internal/repos).
-// Indexed point lookup, used on every request.
-func (q *Queries) GetRepoByName(ctx context.Context, name string) (Repo, error) {
+// A repo with its active operation (repo_ops), if any. Indexed point lookup, used on every request.
+func (q *Queries) GetRepoByName(ctx context.Context, name string) (GetRepoByNameRow, error) {
 	row := q.db.QueryRowContext(ctx, getRepoByName, name)
-	var i Repo
+	var i GetRepoByNameRow
 	err := row.Scan(
 		&i.ID,
 		&i.Name,
@@ -106,13 +226,64 @@ func (q *Queries) GetRepoByName(ctx context.Context, name string) (Repo, error) 
 		&i.AnonymousRead,
 		&i.Config,
 		&i.CreatedAt,
-		&i.LockedBy,
 		&i.Description,
 		&i.FileCount,
 		&i.TotalSize,
 		&i.LastPublishedAt,
+		&i.OpID,
+		&i.OpType,
+		&i.OpOwner,
+		&i.OpRef,
+		&i.OpState,
+		&i.OpDone,
+		&i.OpTotal,
+		&i.OpError,
+		&i.OpStartedBy,
+		&i.OpStartedAt,
+		&i.OpUpdatedAt,
 	)
 	return i, err
+}
+
+const getRepoOp = `-- name: GetRepoOp :one
+SELECT id, repo_id, type, owner, ref, state, done, total, error, started_by, started_at, updated_at
+FROM repo_ops WHERE repo_id = ?
+`
+
+func (q *Queries) GetRepoOp(ctx context.Context, repoID int64) (RepoOp, error) {
+	row := q.db.QueryRowContext(ctx, getRepoOp, repoID)
+	var i RepoOp
+	err := row.Scan(
+		&i.ID,
+		&i.RepoID,
+		&i.Type,
+		&i.Owner,
+		&i.Ref,
+		&i.State,
+		&i.Done,
+		&i.Total,
+		&i.Error,
+		&i.StartedBy,
+		&i.StartedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const hasRebuild = `-- name: HasRebuild :one
+SELECT EXISTS (SELECT 1 FROM rebuilds WHERE repo_id = ? AND grp = ?)
+`
+
+type HasRebuildParams struct {
+	RepoID int64
+	Grp    string
+}
+
+func (q *Queries) HasRebuild(ctx context.Context, arg HasRebuildParams) (bool, error) {
+	row := q.db.QueryRowContext(ctx, hasRebuild, arg.RepoID, arg.Grp)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const insertGroupMember = `-- name: InsertGroupMember :exec
@@ -151,6 +322,41 @@ func (q *Queries) InsertProxy(ctx context.Context, arg InsertProxyParams) error 
 		arg.NotFoundTtl,
 	)
 	return err
+}
+
+const insertRepoOp = `-- name: InsertRepoOp :one
+
+INSERT INTO repo_ops (repo_id, type, owner, ref, state, started_by, started_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+RETURNING id
+`
+
+type InsertRepoOpParams struct {
+	RepoID    int64
+	Type      string
+	Owner     string
+	Ref       string
+	State     string
+	StartedBy sql.NullInt64
+	StartedAt int64
+	UpdatedAt int64
+}
+
+// Repo operations (internal/ops).
+func (q *Queries) InsertRepoOp(ctx context.Context, arg InsertRepoOpParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, insertRepoOp,
+		arg.RepoID,
+		arg.Type,
+		arg.Owner,
+		arg.Ref,
+		arg.State,
+		arg.StartedBy,
+		arg.StartedAt,
+		arg.UpdatedAt,
+	)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
 }
 
 const listGroupMembers = `-- name: ListGroupMembers :many
@@ -225,10 +431,79 @@ func (q *Queries) ListProxies(ctx context.Context, arg ListProxiesParams) ([]Rep
 	return items, nil
 }
 
+const listRebuildGroups = `-- name: ListRebuildGroups :many
+SELECT DISTINCT repo_id, grp FROM rebuilds ORDER BY repo_id, grp
+`
+
+type ListRebuildGroupsRow struct {
+	RepoID int64
+	Grp    string
+}
+
+// Startup: every (repo, grp) with pending units.
+func (q *Queries) ListRebuildGroups(ctx context.Context) ([]ListRebuildGroupsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listRebuildGroups)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRebuildGroupsRow
+	for rows.Next() {
+		var i ListRebuildGroupsRow
+		if err := rows.Scan(&i.RepoID, &i.Grp); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRebuildUnits = `-- name: ListRebuildUnits :many
+SELECT unit FROM rebuilds WHERE repo_id = ? AND grp = ? ORDER BY unit
+`
+
+type ListRebuildUnitsParams struct {
+	RepoID int64
+	Grp    string
+}
+
+func (q *Queries) ListRebuildUnits(ctx context.Context, arg ListRebuildUnitsParams) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listRebuildUnits, arg.RepoID, arg.Grp)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var unit string
+		if err := rows.Scan(&unit); err != nil {
+			return nil, err
+		}
+		items = append(items, unit)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRepos = `-- name: ListRepos :many
-SELECT id, name, format, kind, anonymous_read, config, created_at, locked_by, description,
-  file_count, total_size, last_published_at FROM repos
-WHERE name > ?1 ORDER BY name LIMIT ?2
+SELECT r.id, r.name, r.format, r.kind, r.anonymous_read, r.config, r.created_at, r.description,
+  r.file_count, r.total_size, r.last_published_at,
+  o.id AS op_id, o.type AS op_type, o.owner AS op_owner, o.ref AS op_ref, o.state AS op_state, o.done AS op_done,
+  o.total AS op_total, o.error AS op_error, o.started_by AS op_started_by, o.started_at AS op_started_at,
+  o.updated_at AS op_updated_at
+FROM repos r LEFT JOIN repo_ops o ON o.repo_id = r.id
+WHERE r.name > ?1 ORDER BY r.name LIMIT ?2
 `
 
 type ListReposParams struct {
@@ -236,16 +511,41 @@ type ListReposParams struct {
 	Limit int64
 }
 
+type ListReposRow struct {
+	ID              int64
+	Name            string
+	Format          string
+	Kind            string
+	AnonymousRead   bool
+	Config          string
+	CreatedAt       int64
+	Description     string
+	FileCount       int64
+	TotalSize       int64
+	LastPublishedAt int64
+	OpID            sql.NullInt64
+	OpType          sql.NullString
+	OpOwner         sql.NullString
+	OpRef           sql.NullString
+	OpState         sql.NullString
+	OpDone          sql.NullInt64
+	OpTotal         sql.NullInt64
+	OpError         sql.NullString
+	OpStartedBy     sql.NullInt64
+	OpStartedAt     sql.NullInt64
+	OpUpdatedAt     sql.NullInt64
+}
+
 // Keyset page by name (pass "" for the first page).
-func (q *Queries) ListRepos(ctx context.Context, arg ListReposParams) ([]Repo, error) {
+func (q *Queries) ListRepos(ctx context.Context, arg ListReposParams) ([]ListReposRow, error) {
 	rows, err := q.db.QueryContext(ctx, listRepos, arg.After, arg.Limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []Repo
+	var items []ListReposRow
 	for rows.Next() {
-		var i Repo
+		var i ListReposRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.Name,
@@ -254,11 +554,21 @@ func (q *Queries) ListRepos(ctx context.Context, arg ListReposParams) ([]Repo, e
 			&i.AnonymousRead,
 			&i.Config,
 			&i.CreatedAt,
-			&i.LockedBy,
 			&i.Description,
 			&i.FileCount,
 			&i.TotalSize,
 			&i.LastPublishedAt,
+			&i.OpID,
+			&i.OpType,
+			&i.OpOwner,
+			&i.OpRef,
+			&i.OpState,
+			&i.OpDone,
+			&i.OpTotal,
+			&i.OpError,
+			&i.OpStartedBy,
+			&i.OpStartedAt,
+			&i.OpUpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -271,6 +581,89 @@ func (q *Queries) ListRepos(ctx context.Context, arg ListReposParams) ([]Repo, e
 		return nil, err
 	}
 	return items, nil
+}
+
+const listRunningRepoOps = `-- name: ListRunningRepoOps :many
+SELECT id, repo_id, type, owner, ref, state, done, total, error, started_by, started_at, updated_at
+FROM repo_ops WHERE type = ? AND state = 'running' LIMIT ?
+`
+
+type ListRunningRepoOpsParams struct {
+	Type  string
+	Limit int64
+}
+
+// The running operations of one type, through repo_ops_running (resumed at startup).
+func (q *Queries) ListRunningRepoOps(ctx context.Context, arg ListRunningRepoOpsParams) ([]RepoOp, error) {
+	rows, err := q.db.QueryContext(ctx, listRunningRepoOps, arg.Type, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RepoOp
+	for rows.Next() {
+		var i RepoOp
+		if err := rows.Scan(
+			&i.ID,
+			&i.RepoID,
+			&i.Type,
+			&i.Owner,
+			&i.Ref,
+			&i.State,
+			&i.Done,
+			&i.Total,
+			&i.Error,
+			&i.StartedBy,
+			&i.StartedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const markRebuild = `-- name: MarkRebuild :exec
+
+INSERT INTO rebuilds (repo_id, grp, unit, marked_at) VALUES (?, ?, ?, ?)
+ON CONFLICT (repo_id, grp, unit) DO UPDATE SET marked_at = excluded.marked_at
+`
+
+type MarkRebuildParams struct {
+	RepoID   int64
+	Grp      string
+	Unit     string
+	MarkedAt int64
+}
+
+// The rebuild queue (internal/rebuild).
+func (q *Queries) MarkRebuild(ctx context.Context, arg MarkRebuildParams) error {
+	_, err := q.db.ExecContext(ctx, markRebuild,
+		arg.RepoID,
+		arg.Grp,
+		arg.Unit,
+		arg.MarkedAt,
+	)
+	return err
+}
+
+const maxRebuildMark = `-- name: MaxRebuildMark :one
+SELECT CAST(COALESCE(MAX(marked_at), 0) AS INTEGER) AS max_mark FROM rebuilds
+`
+
+// Startup: the newest mark, so the rebuild clock never goes back.
+func (q *Queries) MaxRebuildMark(ctx context.Context) (int64, error) {
+	row := q.db.QueryRowContext(ctx, maxRebuildMark)
+	var max_mark int64
+	err := row.Scan(&max_mark)
+	return max_mark, err
 }
 
 const nextGroupWithMembers = `-- name: NextGroupWithMembers :one
@@ -317,32 +710,45 @@ func (q *Queries) SetProxyOK(ctx context.Context, arg SetProxyOKParams) error {
 	return err
 }
 
-const setRepoAnonymousRead = `-- name: SetRepoAnonymousRead :exec
-UPDATE repos SET anonymous_read = ? WHERE id = ?
+const setRepoOpProgress = `-- name: SetRepoOpProgress :exec
+UPDATE repo_ops SET done = ?, total = ?, updated_at = ? WHERE id = ?
 `
 
-type SetRepoAnonymousReadParams struct {
-	AnonymousRead bool
-	ID            int64
+type SetRepoOpProgressParams struct {
+	Done      int64
+	Total     int64
+	UpdatedAt int64
+	ID        int64
 }
 
-func (q *Queries) SetRepoAnonymousRead(ctx context.Context, arg SetRepoAnonymousReadParams) error {
-	_, err := q.db.ExecContext(ctx, setRepoAnonymousRead, arg.AnonymousRead, arg.ID)
+func (q *Queries) SetRepoOpProgress(ctx context.Context, arg SetRepoOpProgressParams) error {
+	_, err := q.db.ExecContext(ctx, setRepoOpProgress,
+		arg.Done,
+		arg.Total,
+		arg.UpdatedAt,
+		arg.ID,
+	)
 	return err
 }
 
-const setRepoLockedBy = `-- name: SetRepoLockedBy :exec
-UPDATE repos SET locked_by = ? WHERE id = ?
+const setRepoOpState = `-- name: SetRepoOpState :exec
+UPDATE repo_ops SET state = ?, error = ?, updated_at = ? WHERE id = ?
 `
 
-type SetRepoLockedByParams struct {
-	LockedBy sql.NullString
-	ID       int64
+type SetRepoOpStateParams struct {
+	State     string
+	Error     string
+	UpdatedAt int64
+	ID        int64
 }
 
-// NULL clears the lock.
-func (q *Queries) SetRepoLockedBy(ctx context.Context, arg SetRepoLockedByParams) error {
-	_, err := q.db.ExecContext(ctx, setRepoLockedBy, arg.LockedBy, arg.ID)
+func (q *Queries) SetRepoOpState(ctx context.Context, arg SetRepoOpStateParams) error {
+	_, err := q.db.ExecContext(ctx, setRepoOpState,
+		arg.State,
+		arg.Error,
+		arg.UpdatedAt,
+		arg.ID,
+	)
 	return err
 }
 
@@ -370,16 +776,22 @@ func (q *Queries) UpdateProxy(ctx context.Context, arg UpdateProxyParams) error 
 }
 
 const updateRepo = `-- name: UpdateRepo :exec
-UPDATE repos SET config = ?, description = ? WHERE id = ?
+UPDATE repos SET config = ?, description = ?, anonymous_read = ? WHERE id = ?
 `
 
 type UpdateRepoParams struct {
-	Config      string
-	Description string
-	ID          int64
+	Config        string
+	Description   string
+	AnonymousRead bool
+	ID            int64
 }
 
 func (q *Queries) UpdateRepo(ctx context.Context, arg UpdateRepoParams) error {
-	_, err := q.db.ExecContext(ctx, updateRepo, arg.Config, arg.Description, arg.ID)
+	_, err := q.db.ExecContext(ctx, updateRepo,
+		arg.Config,
+		arg.Description,
+		arg.AnonymousRead,
+		arg.ID,
+	)
 	return err
 }

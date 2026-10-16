@@ -1,5 +1,5 @@
-// Package signing holds the repository signing keys (spec §13.3) and wraps ProtonMail go-crypto
-// for repository index signing (spec §9.3).
+// Package signing holds the repository signing keys and wraps ProtonMail go-crypto
+// for repository index signing.
 package signing
 
 import (

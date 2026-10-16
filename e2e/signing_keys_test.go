@@ -68,7 +68,7 @@ func encryptedSigningKey(t *testing.T) (armored, passphrase string) {
 	return buf.String(), passphrase
 }
 
-// TestSigningKeys covers the signing keys as a resource (spec §13.3): create, import, the
+// TestSigningKeys covers the signing keys as a resource: create, import, the
 // usage list, delete refused while a repo uses a key, and a Debian repo signed with its own key
 // that apt installs from, before and after the repo changes its key.
 func TestSigningKeys(t *testing.T) {
@@ -154,13 +154,28 @@ func TestSigningKeys(t *testing.T) {
 	}
 	repo := RandName("deb")
 	if st, b := s.API(t, http.MethodPost, "/api/repos", map[string]any{"name": repo, "format": "debian",
-		"config": map[string]any{"architectures": archs, "signing_key": "nowhere"}}, s.Admin()); st != http.StatusBadRequest {
+		"config": map[string]any{"architectures": archs}, "fields": map[string]any{"signing_key": "nowhere"}}, s.Admin()); st != http.StatusBadRequest {
 		t.Fatalf("create a repo with an unknown signing key: status %d, want 400: %s", st, b)
 	}
-	s.CreateRepo(t, repo, "debian", false, map[string]any{"architectures": archs, "signing_key": "team"})
+	if st, b := s.API(t, http.MethodPost, "/api/repos", map[string]any{"name": repo, "format": "debian",
+		"config": map[string]any{"architectures": archs, "signing_key": "team"}}, s.Admin()); st != http.StatusBadRequest {
+		t.Fatalf("create a repo with the signing key in its config: status %d, want 400: %s", st, b)
+	}
+	if st, b := s.API(t, http.MethodPost, "/api/repos", map[string]any{"name": RandName("raw"), "format": "raw",
+		"fields": map[string]any{"signing_key": "team"}}, s.Admin()); st != http.StatusBadRequest {
+		t.Fatalf("create a raw repo with a signing key: status %d, want 400: %s", st, b)
+	}
+	var created struct {
+		Fields map[string]string `json:"fields"`
+	}
+	s.MustAPI(t, http.MethodPost, "/api/repos", map[string]any{"name": repo, "format": "debian",
+		"config": map[string]any{"architectures": archs}, "fields": map[string]any{"signing_key": "team"}}, s.Admin(), &created)
+	if created.Fields["signing_key"] != "team" {
+		t.Fatalf("new repo fields: %v, want signing_key team", created.Fields)
+	}
 	reader, readerPass := RandName("reader"), randHex(12)
 	s.CreateUser(t, reader, readerPass)
-	s.SetPerms(t, repo, reader, "download")
+	s.SetPerms(t, repo, reader, "repo.download")
 	rauth := Basic{reader, readerPass}
 
 	ps := s.MintSession(t, "admin", repo)
@@ -191,7 +206,7 @@ func TestSigningKeys(t *testing.T) {
 	}
 
 	// Changing the repo's key re-signs that repo.
-	s.MustAPI(t, http.MethodPatch, "/api/repos/"+repo, map[string]any{"config": map[string]any{"architectures": archs, "signing_key": "imported"}}, s.Admin(), nil)
+	s.MustAPI(t, http.MethodPatch, "/api/repos/"+repo, map[string]any{"fields": map[string]any{"signing_key": "imported"}}, s.Admin(), nil)
 	s.WaitDebianIndexed(t, repo)
 	key = s.DebianKey(t, repo, rauth)
 	if fingerprintOf(t, key) != imported.Fingerprint {
@@ -213,7 +228,7 @@ func TestSigningKeys(t *testing.T) {
 	if st, _ := s.API(t, http.MethodGet, "/api/signing-keys/team", nil, s.Admin()); st != http.StatusNotFound {
 		t.Fatalf("GET a deleted key: status %d, want 404", st)
 	}
-	if st, b := s.API(t, http.MethodPatch, "/api/repos/"+repo, map[string]any{"config": map[string]any{"architectures": archs, "signing_key": "team"}}, s.Admin()); st != http.StatusBadRequest {
+	if st, b := s.API(t, http.MethodPatch, "/api/repos/"+repo, map[string]any{"fields": map[string]any{"signing_key": "team"}}, s.Admin()); st != http.StatusBadRequest {
 		t.Fatalf("PATCH a repo to a deleted key: status %d, want 400: %s", st, b)
 	}
 
@@ -221,5 +236,12 @@ func TestSigningKeys(t *testing.T) {
 	s.Restart(t)
 	if k := getSigningKey(t, s, "imported"); k.Fingerprint != imported.Fingerprint || k.Error != "" || !slices.Equal(k.Repos, []string{repo}) {
 		t.Fatalf("key imported after a restart: %+v", k)
+	}
+	var got struct {
+		Fields map[string]string `json:"fields"`
+	}
+	s.MustAPI(t, http.MethodGet, "/api/repos/"+repo, nil, s.Admin(), &got)
+	if got.Fields["signing_key"] != "imported" {
+		t.Fatalf("repo fields after a restart: %v, want signing_key imported", got.Fields)
 	}
 }

@@ -1,13 +1,13 @@
 <!--
-  Repository settings, Format settings: the options that only this format has, in the format's
-  own editor (Debian: architectures) or as JSON, saved from the save bar. A Debian change of
-  architectures asks first, because it rewrites the package lists. The Debian signing key has its
-  own tab.
+  Repository settings, Format settings: the config options of the repository's format, one field
+  per entry of config.fields of its descriptor (ConfigEditor), saved from the save bar. A change of
+  a field with a change_note asks first and lists the note, e.g. the Debian architectures, whose
+  change rewrites the package lists.
 -->
 <script lang="ts">
   import { toast } from "svelte-sonner";
   import { api, type Repo, type RepoConfig } from "$lib/api";
-  import { editors, formatLook } from "$lib/formats";
+  import { formats } from "$lib/formats/registry.svelte";
   import FormSection from "$lib/components/FormSection.svelte";
   import FormGrid from "$lib/components/FormGrid.svelte";
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
@@ -18,11 +18,11 @@
 
   let { repo, onChanged }: { repo: Repo; onChanged: () => void } = $props();
 
-  const formatTitle = $derived(formatLook(repo.format).title ?? repo.format);
+  const format = $derived(formats.get(repo.format));
+  const fields = $derived(format?.config.fields ?? []);
   const current = $derived(repo.config ?? {});
-  const hasOptions = $derived(repo.format in editors || Object.keys(current).length > 0);
 
-  // undefined: no edit; null: the editor holds an invalid config. `round` restarts the editor.
+  // undefined: no edit; null: a required field is empty. `round` restarts the editor.
   let config = $state<RepoConfig | null | undefined>(undefined);
   let round = $state(0);
   let confirming = $state(false);
@@ -34,21 +34,26 @@
   });
   // An invalid config counts as one change, so the page asks before it is left.
   const count = $derived(config === null ? 1 : changedKeys.length);
+  const noted = $derived(fields.filter((f) => f.change_note && changedKeys.includes(f.key)));
 
   const list = (v: unknown) => (Array.isArray(v) ? (v as string[]) : []);
   const changes = $derived.by(() => {
-    if (repo.format === "debian" && config && changedKeys.includes("architectures")) {
-      const had = list(current.architectures);
-      const has = list(config.architectures);
-      const out: string[] = [];
-      const added = has.filter((a) => !had.includes(a));
-      const removed = had.filter((a) => !has.includes(a));
-      if (added.length) out.push(`Adds ${added.join(", ")} to the package lists of ${repo.name}`);
-      if (removed.length) out.push(`Removes ${removed.join(", ")} from the package lists; apt on those machines stops seeing updates`);
-      out.push("Signs the package lists again");
-      return out;
+    if (!config) return [];
+    const out: string[] = [];
+    for (const k of changedKeys) {
+      const f = fields.find((x) => x.key === k);
+      const name = f?.label ?? k;
+      if (f?.type === "list") {
+        const had = list(current[k]);
+        const has = list(config[k]);
+        const added = has.filter((a) => !had.includes(a));
+        const removed = had.filter((a) => !has.includes(a));
+        if (added.length) out.push(`Adds ${added.join(", ")} to ${name}`);
+        if (removed.length) out.push(`Removes ${removed.join(", ")} from ${name}`);
+      } else out.push(`Changes ${name}`);
+      if (f?.change_note) out.push(f.change_note);
     }
-    return changedKeys.map((k) => `Changes the option ${k}`);
+    return out;
   });
 
   function discard() {
@@ -57,8 +62,8 @@
   }
 
   async function save() {
-    if (config === null) throw new Error("Correct the format options first.");
-    if (repo.format === "debian" && changedKeys.includes("architectures")) {
+    if (config === null) throw new Error("Fill in the options that need a value first.");
+    if (noted.length) {
       confirming = true;
       return;
     }
@@ -75,13 +80,13 @@
   }
 </script>
 
-{#if !hasOptions}
-  <CompactEmpty icon={SlidersIcon} text="{formatTitle} repositories have no options of their own." />
+{#if !fields.length}
+  <CompactEmpty icon={SlidersIcon} text="{formats.title(repo.format)} repositories have no options of their own." />
 {:else}
-  <FormSection title="{formatTitle} options">
+  <FormSection title="{formats.title(repo.format)} options">
     <FormGrid>
       {#key `${repo.format}/${repo.name}/${round}`}
-        <ConfigEditor format={repo.format} value={current} onChange={(v) => (config = v)} />
+        <ConfigEditor {fields} value={current} onChange={(v) => (config = v)} />
       {/key}
     </FormGrid>
   </FormSection>

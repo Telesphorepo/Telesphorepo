@@ -19,7 +19,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// The scale test (spec §5.5) seeds 100k and then 1M synthetic assets with "telesphorepo seed N"
+// The scale test seeds 100k and then 1M synthetic assets with "telesphorepo seed N"
 // and measures request-path operations over HTTP at both sizes. An operation fails when its
 // p95 at 1M is more than 2x its p95 at 100k. scaleFloor keeps sub-millisecond noise from
 // failing the comparison: the 1M p95 must also exceed the 100k p95 by more than scaleFloor.

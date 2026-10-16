@@ -10,71 +10,6 @@ import (
 	"database/sql"
 )
 
-const clearDirty = `-- name: ClearDirty :exec
-DELETE FROM deb_dirty
-WHERE repo_id = ? AND distribution = ? AND component = ? AND architecture = ? AND marked_at <= ?
-`
-
-type ClearDirtyParams struct {
-	RepoID       int64
-	Distribution string
-	Component    string
-	Architecture string
-	MarkedAt     int64
-}
-
-// Deletes a dirty unit unless it was marked again after the rebuild started.
-func (q *Queries) ClearDirty(ctx context.Context, arg ClearDirtyParams) error {
-	_, err := q.db.ExecContext(ctx, clearDirty,
-		arg.RepoID,
-		arg.Distribution,
-		arg.Component,
-		arg.Architecture,
-		arg.MarkedAt,
-	)
-	return err
-}
-
-const countDirty = `-- name: CountDirty :one
-SELECT COUNT(*) FROM deb_dirty WHERE repo_id = ?
-`
-
-func (q *Queries) CountDirty(ctx context.Context, repoID int64) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countDirty, repoID)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
-}
-
-const deleteDirtyArch = `-- name: DeleteDirtyArch :exec
-DELETE FROM deb_dirty WHERE repo_id = ? AND architecture = ?
-`
-
-type DeleteDirtyArchParams struct {
-	RepoID       int64
-	Architecture string
-}
-
-func (q *Queries) DeleteDirtyArch(ctx context.Context, arg DeleteDirtyArchParams) error {
-	_, err := q.db.ExecContext(ctx, deleteDirtyArch, arg.RepoID, arg.Architecture)
-	return err
-}
-
-const deleteIndexAsset = `-- name: DeleteIndexAsset :exec
-DELETE FROM assets WHERE repo_id = ? AND path = ? AND kind = 'index'
-`
-
-type DeleteIndexAssetParams struct {
-	RepoID int64
-	Path   string
-}
-
-// Removes the asset row of an index file, so it is no longer served.
-func (q *Queries) DeleteIndexAsset(ctx context.Context, arg DeleteIndexAssetParams) error {
-	_, err := q.db.ExecContext(ctx, deleteIndexAsset, arg.RepoID, arg.Path)
-	return err
-}
-
 const deleteIndexFile = `-- name: DeleteIndexFile :exec
 DELETE FROM deb_index_files WHERE repo_id = ? AND distribution = ? AND path = ?
 `
@@ -228,22 +163,6 @@ func (q *Queries) GetPackageSHA256(ctx context.Context, arg GetPackageSHA256Para
 	return sha256, err
 }
 
-const hasDirty = `-- name: HasDirty :one
-SELECT EXISTS (SELECT 1 FROM deb_dirty WHERE repo_id = ? AND distribution = ?)
-`
-
-type HasDirtyParams struct {
-	RepoID       int64
-	Distribution string
-}
-
-func (q *Queries) HasDirty(ctx context.Context, arg HasDirtyParams) (bool, error) {
-	row := q.db.QueryRowContext(ctx, hasDirty, arg.RepoID, arg.Distribution)
-	var exists bool
-	err := row.Scan(&exists)
-	return exists, err
-}
-
 const insertPackage = `-- name: InsertPackage :exec
 INSERT INTO deb_packages (repo_id, distribution, component, architecture, package, version, asset_id,
   filename, size, md5, sha1, sha256, control, created_at)
@@ -285,79 +204,6 @@ func (q *Queries) InsertPackage(ctx context.Context, arg InsertPackageParams) er
 		arg.CreatedAt,
 	)
 	return err
-}
-
-const listAllDirtyDists = `-- name: ListAllDirtyDists :many
-SELECT DISTINCT repo_id, distribution FROM deb_dirty
-ORDER BY repo_id, distribution
-`
-
-type ListAllDirtyDistsRow struct {
-	RepoID       int64
-	Distribution string
-}
-
-// Startup recovery: every (repo, dist) with a pending rebuild.
-func (q *Queries) ListAllDirtyDists(ctx context.Context) ([]ListAllDirtyDistsRow, error) {
-	rows, err := q.db.QueryContext(ctx, listAllDirtyDists)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListAllDirtyDistsRow
-	for rows.Next() {
-		var i ListAllDirtyDistsRow
-		if err := rows.Scan(&i.RepoID, &i.Distribution); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listDirtyUnits = `-- name: ListDirtyUnits :many
-SELECT component, architecture FROM deb_dirty
-WHERE repo_id = ? AND distribution = ?
-ORDER BY component, architecture
-`
-
-type ListDirtyUnitsParams struct {
-	RepoID       int64
-	Distribution string
-}
-
-type ListDirtyUnitsRow struct {
-	Component    string
-	Architecture string
-}
-
-func (q *Queries) ListDirtyUnits(ctx context.Context, arg ListDirtyUnitsParams) ([]ListDirtyUnitsRow, error) {
-	rows, err := q.db.QueryContext(ctx, listDirtyUnits, arg.RepoID, arg.Distribution)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListDirtyUnitsRow
-	for rows.Next() {
-		var i ListDirtyUnitsRow
-		if err := rows.Scan(&i.Component, &i.Architecture); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
 }
 
 const listIndexFiles = `-- name: ListIndexFiles :many
@@ -444,7 +290,7 @@ func (q *Queries) ListPackageComponents(ctx context.Context, repoID int64) ([]Li
 
 const listPackageFiles = `-- name: ListPackageFiles :many
 SELECT p.distribution, p.architecture, p.version, p.filename, p.size, p.sha256,
-  a.updated_at, a.publish_session_id
+  a.updated_at, a.build_id
 FROM deb_packages p JOIN assets a ON a.id = p.asset_id
 WHERE p.repo_id = ? AND p.component = ? AND p.package = ?
 LIMIT ?
@@ -458,14 +304,14 @@ type ListPackageFilesParams struct {
 }
 
 type ListPackageFilesRow struct {
-	Distribution     string
-	Architecture     string
-	Version          string
-	Filename         string
-	Size             int64
-	Sha256           string
-	UpdatedAt        int64
-	PublishSessionID sql.NullInt64
+	Distribution string
+	Architecture string
+	Version      string
+	Filename     string
+	Size         int64
+	Sha256       string
+	UpdatedAt    int64
+	BuildID      sql.NullInt64
 }
 
 // The .deb files of one package in one component, with the time and the publish session of
@@ -492,40 +338,11 @@ func (q *Queries) ListPackageFiles(ctx context.Context, arg ListPackageFilesPara
 			&i.Size,
 			&i.Sha256,
 			&i.UpdatedAt,
-			&i.PublishSessionID,
+			&i.BuildID,
 		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listRepoDirtyDists = `-- name: ListRepoDirtyDists :many
-SELECT DISTINCT distribution FROM deb_dirty
-WHERE repo_id = ?
-ORDER BY distribution
-`
-
-func (q *Queries) ListRepoDirtyDists(ctx context.Context, repoID int64) ([]string, error) {
-	rows, err := q.db.QueryContext(ctx, listRepoDirtyDists, repoID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []string
-	for rows.Next() {
-		var distribution string
-		if err := rows.Scan(&distribution); err != nil {
-			return nil, err
-		}
-		items = append(items, distribution)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -568,43 +385,6 @@ func (q *Queries) ListRepoIndexFiles(ctx context.Context, repoID int64) ([]ListR
 		return nil, err
 	}
 	return items, nil
-}
-
-const markDirty = `-- name: MarkDirty :exec
-INSERT INTO deb_dirty (repo_id, distribution, component, architecture, marked_at)
-VALUES (?, ?, ?, ?, ?)
-ON CONFLICT (repo_id, distribution, component, architecture) DO UPDATE SET marked_at = excluded.marked_at
-`
-
-type MarkDirtyParams struct {
-	RepoID       int64
-	Distribution string
-	Component    string
-	Architecture string
-	MarkedAt     int64
-}
-
-func (q *Queries) MarkDirty(ctx context.Context, arg MarkDirtyParams) error {
-	_, err := q.db.ExecContext(ctx, markDirty,
-		arg.RepoID,
-		arg.Distribution,
-		arg.Component,
-		arg.Architecture,
-		arg.MarkedAt,
-	)
-	return err
-}
-
-const maxDirtyMark = `-- name: MaxDirtyMark :one
-SELECT CAST(COALESCE(MAX(marked_at), 0) AS INTEGER) AS max_mark FROM deb_dirty
-`
-
-// Startup recovery: the newest mark, so the rebuild clock never goes back.
-func (q *Queries) MaxDirtyMark(ctx context.Context) (int64, error) {
-	row := q.db.QueryRowContext(ctx, maxDirtyMark)
-	var max_mark int64
-	err := row.Scan(&max_mark)
-	return max_mark, err
 }
 
 const upsertIndexFile = `-- name: UpsertIndexFile :exec

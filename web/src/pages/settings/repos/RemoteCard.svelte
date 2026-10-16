@@ -1,10 +1,11 @@
 <!--
   The Remote card of a proxy's Overview: the remote address, when the remote last answered (or
-  its last error), and "Test the remote" (POST /api/repos/{name}/proxy/test). A Debian proxy also
-  says that clients keep the remote archive's key. The Remote tab edits the remote.
+  its last error), and "Test the remote" (POST /api/repos/{name}/proxy/test). It also shows the
+  proxy_note of the format (e.g. who signs the files). The Remote tab edits the remote.
 -->
 <script lang="ts">
   import { api, errorMessage, type Repo } from "$lib/api";
+  import { formats } from "$lib/formats/registry.svelte";
   import Section from "$lib/components/Section.svelte";
   import CopyValue from "$lib/components/CopyValue.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
@@ -51,8 +52,8 @@
       {:else}
         <p class="text-body text-muted-foreground">The server has not asked the remote for a file yet.</p>
       {/if}
-      {#if repo.format === "debian"}
-        <p class="text-body text-muted-foreground">Signed by the remote archive. Clients use its key.</p>
+      {#if formats.get(repo.format)?.proxy_note}
+        <p class="text-body text-muted-foreground">{formats.get(repo.format)?.proxy_note}</p>
       {/if}
     </div>
   </Section>

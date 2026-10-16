@@ -167,6 +167,6 @@
   error={all.error}
   none="Every repository of this format is in the group already."
   newLabel="New repository"
-  newHref={auth.can("repos") ? href("/settings/repositories/new") : undefined}
+  newHref={auth.can("repositories.all") ? href("/settings/repositories/new") : undefined}
   onAdd={add}
 />

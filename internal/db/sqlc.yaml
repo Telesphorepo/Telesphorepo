@@ -1,8 +1,8 @@
-# Core data layer (spec §5.5). Run "go tool task gen" after editing queries/ or migrations/.
+# Kernel data layer. Run "go tool task gen" after editing queries/ or schema.sql.
 version: "2"
 sql:
   - engine: sqlite
-    schema: migrations
+    schema: schema.sql
     queries: queries
     gen:
       go:
@@ -15,5 +15,4 @@ sql:
             go_type: bool
           - column: repos.anonymous_read
             go_type: bool
-          - column: settings.secret
-            go_type: bool
+

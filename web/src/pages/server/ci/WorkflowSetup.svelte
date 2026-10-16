@@ -1,13 +1,15 @@
 <!--
   What the CI job needs, next to the pipeline that lets it publish: the GitHub Actions workflow or
-  the Jenkinsfile for one of the chosen repositories. The code comes from the repository's format
-  plugin (GET /api/repos/{name}/usage, the CI publish snippets). A GitHub workflow gets the
-  branches and tags of the pipeline as its trigger, in place of the plugin's push to main, and the
-  workflow file as its title, so the workflow and the pipeline agree.
+  the Jenkinsfile for one of the chosen repositories (GET /api/repos/{name}/ci). The server builds
+  the file for the build tool of the repository's format and the branches and tags of the
+  pipeline, so the file and the pipeline agree. A GitHub workflow gets the workflow file of the
+  pipeline as its name.
 -->
 <script lang="ts">
   import { untrack } from "svelte";
+  import { api, type Repo, type Snippet } from "$lib/api";
   import { Resource } from "$lib/load.svelte";
+  import { formats } from "$lib/formats/registry.svelte";
   import * as Select from "$lib/components/ui/select";
   import FormGrid from "$lib/components/FormGrid.svelte";
   import FormRow from "$lib/components/FormRow.svelte";
@@ -15,49 +17,52 @@
   import ErrorState from "$lib/components/ErrorState.svelte";
   import Loading from "$lib/components/Loading.svelte";
   import Segmented from "../../repo/snippets/Segmented.svelte";
-  import { browse } from "../../repo/browse";
   import { workflowFile, type GitHubJobs } from "./presets";
 
   let { system, repos, github }: { system: "github" | "jenkins"; repos: string[]; github: GitHubJobs } = $props();
 
   const fid = $props.id();
-  const client = $derived(system === "github" ? "github-actions" : "jenkins");
 
   let picked = $state("");
   const repo = $derived(repos.includes(picked) ? picked : (repos[0] ?? ""));
-  const usage = new Resource(() => (repo ? browse.usage(repo) : Promise.resolve(null)), { lazy: true });
+  let tool = $state("");
+
+  // The repository and its CI file, loaded together when the repository, the tool or the trigger changes.
+  const file = new Resource<{ repo: Repo; snippet: Snippet } | null>(
+    async () => {
+      if (!repo) return null;
+      const r = await api.repos.get(repo);
+      const tools = formats.get(r.format)?.tools ?? [];
+      const t = tools.some((x) => x.id === tool) ? tool : tools[0]?.id;
+      const snippet = await api.repos.ci(repo, {
+        system: system === "github" ? "github-actions" : "jenkins",
+        tool: t,
+        branches: system === "github" ? github.branches : [],
+        tags: system === "github" ? github.tags : [],
+      });
+      return { repo: r, snippet };
+    },
+    { lazy: true },
+  );
+  const key = $derived(JSON.stringify([repo, tool, system, github.branches, github.tags]));
   let loaded = $state("");
   $effect(() => {
-    const r = repo;
-    if (r && r !== loaded) {
-      loaded = r;
-      untrack(() => usage.reload());
+    const k = key;
+    if (k !== loaded) {
+      loaded = k;
+      untrack(() => file.reload());
     }
   });
-  const waiting = $derived(!!repo && repo !== loaded);
 
-  const snippets = $derived((usage.data?.snippets ?? []).filter((s) => s.purpose === "publish" && s.via === "ci" && s.client === client));
-  /** "Gradle" from "Jenkinsfile (Gradle)"; one snippet has no tool name. */
-  const toolOf = (title: string) => /\(([^)]+)\)$/.exec(title)?.[1] ?? "";
-  let tool = $state("");
-  const chosen = $derived(snippets.find((s) => toolOf(s.title) === tool) ?? snippets[0]);
-  const tools = $derived(snippets.map((s) => ({ value: toolOf(s.title), label: toolOf(s.title) })));
-
-  const quote = (xs: string[]) => `[${xs.map((x) => JSON.stringify(x)).join(", ")}]`;
-  function trigger(g: GitHubJobs): string {
-    let s = "on:\n  push:\n";
-    if (g.branches.length) s += `    branches: ${quote(g.branches)}\n`;
-    if (g.tags.length) s += `    tags: ${quote(g.tags)}\n`;
-    return s + "\n";
-  }
-
-  // The workflow of the plugin starts with a push to main; the pipeline's own trigger takes its place.
-  const code = $derived(chosen ? (system === "github" ? trigger(github) + chosen.code.replace(/^on:\n(?: .*\n)*\n/, "") : chosen.code) : "");
+  const data = $derived(file.data);
+  const toolChoices = $derived((data ? (formats.get(data.repo.format)?.tools ?? []) : []).map((t) => ({ value: t.id, label: t.label })));
+  const chosenTool = $derived(toolChoices.some((t) => t.value === tool) ? tool : (toolChoices[0]?.value ?? ""));
   const title = $derived.by(() => {
-    if (!chosen) return "";
-    const t = chosen.title.replace(/\s*\([^)]+\)$/, "");
-    const file = workflowFile(github.workflow);
-    return system === "github" && file ? t.replace(/[^/]+$/, file) : t;
+    const s = data?.snippet;
+    if (!s) return "";
+    const name = s.file ?? s.title;
+    const wf = workflowFile(github.workflow);
+    return system === "github" && wf ? name.replace(/[^/]+$/, wf) : name;
   });
 </script>
 
@@ -65,7 +70,7 @@
   <p class="text-meta text-muted-foreground">Choose a repository above. The steps depend on its format.</p>
 {:else}
   <div class="flex flex-col gap-6">
-    {#if repos.length > 1 || snippets.length > 1}
+    {#if repos.length > 1 || toolChoices.length > 1}
       <FormGrid>
         {#if repos.length > 1}
           <FormRow label="Repository" for="{fid}-repo" help="Each repository needs its own publish step.">
@@ -77,27 +82,25 @@
             </Select.Root>
           </FormRow>
         {/if}
-        {#if snippets.length > 1}
+        {#if toolChoices.length > 1}
           <FormRow label="Build tool" help="The job publishes with the tool that builds the project.">
-            <Segmented bind:value={() => toolOf(chosen?.title ?? ""), (v) => (tool = v)} options={tools} label="Build tool" />
+            <Segmented bind:value={() => chosenTool, (v) => (tool = v)} options={toolChoices} label="Build tool" />
           </FormRow>
         {/if}
       </FormGrid>
     {/if}
 
-    {#if (usage.loading || waiting) && !usage.data}
+    {#if file.loading && !data}
       <Loading rows={6} />
-    {:else if usage.error && !usage.data}
-      <ErrorState error={usage.error} title="The steps did not load" onRetry={usage.reload} />
-    {:else if chosen}
+    {:else if file.error && !data}
+      <ErrorState error={file.error} title="The steps did not load" onRetry={file.reload} />
+    {:else if data}
       <div class="flex min-w-0 flex-col gap-2">
-        <CodeBlock {title} {code} />
-        {#if chosen.note}
-          <p class="text-meta text-muted-foreground">{chosen.note}</p>
+        <CodeBlock {title} code={data.snippet.code} />
+        {#if data.snippet.note}
+          <p class="text-meta text-muted-foreground">{data.snippet.note}</p>
         {/if}
       </div>
-    {:else}
-      <p class="text-meta text-muted-foreground">The format of {repo} has no {system === "github" ? "GitHub Actions" : "Jenkins"} steps.</p>
     {/if}
   </div>
 {/if}

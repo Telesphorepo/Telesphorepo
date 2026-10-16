@@ -1,21 +1,21 @@
 // Package raw serves generic hosted files at /raw/{repo}/{path...}: any client that speaks
-// HTTP PUT and GET (curl, wget, CI scripts) can publish and fetch files by path.
+// HTTP PUT and GET (curl, wget, CI scripts) can publish and fetch files by path. It mounts the
+// standard format routes; the asset pipeline stores every file as a content-addressed blob.
 package raw
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"path"
 	"strings"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
-	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
-	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/module"
+	"github.com/Telesphorepo/Telesphorepo/internal/repopath"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
@@ -32,21 +32,47 @@ type Config struct {
 	Overwrite string `json:"overwrite"`
 }
 
+// Format is the raw format of the module.
 type Format struct {
-	h format.Host
+	h *module.Host
 }
 
-func New() format.Format { return &Format{} }
-
-func (f *Format) Name() string  { return name }
-func (f *Format) Title() string { return "Raw files" }
-
-func (f *Format) DefaultConfig() json.RawMessage {
-	return json.RawMessage(`{"overwrite":"deny"}`)
+// Module returns the raw module: one format with uploads, imports, demo data and seeds.
+func Module() module.Module {
+	f := &Format{}
+	return module.Module{
+		ID: name, Title: "Raw files",
+		Register: func(x *module.Extender) {
+			x.Init(func(ctx context.Context, h *module.Host) error {
+				f.h = h
+				return nil
+			})
+			x.Format(format.Spec{
+				Name: name, Title: "Raw files", Icon: icon, Kinds: []string{repos.KindHosted},
+				Description: "Any files, downloaded by their path.",
+				Config: format.ConfigSpec{Default: json.RawMessage(`{"overwrite":"deny"}`), Validate: validateConfig,
+					Fields: []format.Field{{Key: "overwrite", Label: "Replace files", Type: format.FieldEnum,
+						Options: []string{OverwriteDeny, OverwriteAllow}, Default: json.RawMessage(`"deny"`),
+						Help: "deny keeps a stored file: an upload of other bytes to its path fails. allow replaces it."}}},
+				Describe: describe,
+				Admit:    admit,
+				Usage:    f.Usage,
+				Tools:    []format.Tool{format.CurlTool(curlUpload)},
+				Upload:   f.uploadSpec(),
+				Importer: &format.Importer{Sources: []string{"raw"}, Target: format.SourcePath},
+				UI:       format.UIDescriptor{SnippetTools: map[string]string{"curl": "curl", "wget": "wget"}},
+			})
+			x.Demo(module.DemoData{
+				Repos: []module.DemoRepo{{Name: "raw", Description: "Documentation sites, release archives and build logs", Public: true}},
+				Fill:  f.Demo,
+			})
+			x.Seed(seed)
+		},
+	}
 }
 
-// ValidateConfig accepts {"overwrite": "allow"|"deny"}; a missing overwrite is "deny".
-func (f *Format) ValidateConfig(raw json.RawMessage) (json.RawMessage, error) {
+// validateConfig accepts {"overwrite": "allow"|"deny"}; a missing overwrite is "deny".
+func validateConfig(raw json.RawMessage) (json.RawMessage, error) {
 	var c Config
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -63,16 +89,48 @@ func (f *Format) ValidateConfig(raw json.RawMessage) (json.RawMessage, error) {
 	return json.Marshal(c)
 }
 
-// Register mounts GET/HEAD/PUT /raw/{repo}/{path...}. The GET pattern also matches HEAD.
-func (f *Format) Register(mux *http.ServeMux, h format.Host) {
-	f.h = h
-	mux.HandleFunc("GET /raw/{repo}/{path...}", f.handle)
-	mux.HandleFunc("PUT /raw/{repo}/{path...}", f.handle)
+// contentTypes are the content types of raw files by extension; any other file is
+// application/octet-stream.
+var contentTypes = map[string]string{
+	".txt": "text/plain", ".log": "text/plain", ".md": "text/plain",
+	".md5": "text/plain", ".sha1": "text/plain", ".sha256": "text/plain", ".sha512": "text/plain",
+	".xml": "application/xml", ".pom": "application/xml", ".json": "application/json",
+	".jar": "application/java-archive", ".gz": "application/gzip", ".tgz": "application/gzip",
+	".zip": "application/zip", ".asc": "application/pgp-signature", ".sig": "application/pgp-signature",
+	".deb": "application/vnd.debian.binary-package",
+}
+
+// describe gives every raw file the kind artifact and the content type of its extension.
+func describe(p repopath.Path) (assets.Describe, bool) {
+	ct := contentTypes[strings.ToLower(path.Ext(string(p)))]
+	if ct == "" {
+		ct = assets.FallbackContentType
+	}
+	return assets.Describe{ContentType: ct, Kind: assets.KindArtifact}, true
+}
+
+// admit applies the repo's overwrite policy: identical bytes are kept, different bytes replace
+// the file only when the repo allows overwrite (409 otherwise).
+func admit(_ context.Context, w *assets.Write, existing *assets.Asset) (assets.Decision, error) {
+	if existing == nil {
+		return assets.Store, nil
+	}
+	if existing.SHA256 == w.Body.Digest() {
+		return assets.Keep, nil
+	}
+	c, err := repoConfig(w.Repo)
+	if err != nil {
+		return 0, fmt.Errorf("bad repo config: %w", err)
+	}
+	if c.Overwrite != OverwriteAllow {
+		return 0, assets.Refuse(http.StatusConflict, "%s: file exists and the repo does not allow overwrite", w.Path)
+	}
+	return assets.Store, nil
 }
 
 // Usage returns curl and wget commands to download a file (a private repo takes a username and a
-// read token), and the publish steps: curl from CI with the job's identity token, and curl with
-// a publish token by hand.
+// read token), and the publish step by hand, curl with a publish token. The core adds the CI
+// files of the tool curl.
 func (f *Format) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
 	u := baseURL + "/raw/" + repo.Name + "/path/to/file.tar.gz"
 	curl, wget := "curl -fLO "+u, "wget "+u
@@ -82,156 +140,86 @@ func (f *Format) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
 		wget = "wget --user YOUR_USERNAME --ask-password " + u
 		note = "Create a read token on Settings › Tokens; it works where a password does. Enter it at the prompt."
 	}
-	upload := format.TokenCurl + "-T file.tar.gz " + u
-	out := []format.Snippet{
-		{Client: "curl", Purpose: format.SnippetUse, Context: format.SnippetRepo, Title: "Download a file", Lang: "sh", Code: curl + "\n", Note: note},
-		{Client: "wget", Purpose: format.SnippetUse, Context: format.SnippetRepo, Title: "Download a file", Lang: "sh", Code: wget + "\n", Note: note},
-	}
-	out = append(out, format.CurlCISnippets(baseURL, repo.Name, upload)...)
-	return append(out, format.HandSnippet(upload))
-}
-
-func (f *Format) handle(w http.ResponseWriter, r *http.Request) {
-	p := r.PathValue("path")
-	if !httpx.ValidRepoPath(r, p) {
-		httpx.Error(w, http.StatusBadRequest, "invalid path")
-		return
-	}
-	need := auth.RepoDownload
-	if r.Method == http.MethodPut {
-		need = auth.RepoPublish
-	}
-	repo, pr, ok := f.h.Auth.RepoGate(w, r, r.PathValue("repo"), name, need, false)
-	if !ok {
-		return
-	}
-	if need == auth.RepoDownload {
-		f.h.Assets.Serve(w, r, repo, p)
-		return
-	}
-	c, err := repoConfig(repo)
-	if err != nil {
-		f.h.Log.Error("bad repo config", "repo", repo.Name, "err", err)
-		httpx.Error(w, http.StatusInternalServerError, "bad repo config")
-		return
-	}
-	limit := f.h.Config().MaxUploadBytes
-	if r.ContentLength > limit {
-		httpx.Error(w, http.StatusRequestEntityTooLarge, "upload too large")
-		return
-	}
-	sp, err := f.h.Assets.Spool(http.MaxBytesReader(w, r.Body, limit), limit)
-	if err != nil {
-		var mbe *http.MaxBytesError
-		if errors.Is(err, assets.ErrTooLarge) || errors.As(err, &mbe) {
-			httpx.Error(w, http.StatusRequestEntityTooLarge, "upload too large")
-		} else {
-			httpx.Error(w, http.StatusInternalServerError, "upload failed")
-		}
-		return
-	}
-	defer sp.Close()
-
-	created, unchanged, err := f.put(r.Context(), repo, c, p, sp, format.ByOf(pr))
-	switch {
-	case errors.Is(err, errExists):
-		httpx.Error(w, http.StatusConflict, errExists.Error())
-	case errors.Is(err, errLookup):
-		httpx.Error(w, http.StatusInternalServerError, "lookup failed")
-	case err != nil:
-		httpx.Error(w, http.StatusInternalServerError, "store failed")
-	case created:
-		f.h.RecordUpload(r, pr, repo, p, sp.Size, sp.SHA256)
-		w.WriteHeader(http.StatusCreated)
-	default:
-		if !unchanged {
-			f.h.RecordUpload(r, pr, repo, p, sp.Size, sp.SHA256)
-		}
-		w.WriteHeader(http.StatusOK)
+	return []format.Snippet{
+		{ID: "curl.download", Tool: "curl", Purpose: format.SnippetUse, Context: format.SnippetRepo, Title: "Download a file", Lang: "sh", Code: curl + "\n", Note: note},
+		{ID: "wget.download", Tool: "wget", Purpose: format.SnippetUse, Context: format.SnippetRepo, Title: "Download a file", Lang: "sh", Code: wget + "\n", Note: note},
+		format.HandSnippet(curlUpload(repo, baseURL)),
 	}
 }
 
-// Upload implements format.ManualUploader: every file goes to its relative path (its name, or its
-// path inside a dropped folder) under the folder in the field "folder" ("" or missing: the repo root) under the repo's overwrite policy.
-func (f *Format) Upload(ctx context.Context, repo *repos.Repo, files []format.UploadFile, fields map[string]string, by assets.By) ([]format.Uploaded, error) {
-	for k := range fields {
-		if k != "folder" {
-			return nil, format.BadUpload("unknown field %q; raw uploads take folder", k)
-		}
+// curlUpload is the curl command that uploads a file to the repo (format.TokenCurl).
+func curlUpload(repo *repos.Repo, baseURL string) string {
+	return format.TokenCurl + "-T file.tar.gz " + baseURL + "/raw/" + repo.Name + "/path/to/file.tar.gz"
+}
+
+// uploadFields are the fields of a web UI upload: the folder the files go into.
+var uploadFields = []format.Field{{Key: "folder", Label: "Folder", Type: format.FieldString, Placeholder: "Empty for the repository root",
+	Help: "Files keep their paths inside a dropped folder, under this folder."}}
+
+func (f *Format) uploadSpec() *format.UploadSpec {
+	return &format.UploadSpec{
+		Single: true, Folder: true,
+		Hint:   "Any files, or a folder with its subfolders.",
+		One:    "file",
+		Many:   "files",
+		Note:   "A file with the same name is replaced when the repository allows it.",
+		Empty:  "The folder has no files.",
+		Fields: uploadFields,
+		Plan:   f.Plan,
+		Store:  f.Store,
 	}
-	folder := strings.Trim(strings.TrimSpace(fields["folder"]), "/")
-	if folder != "" && !validPath(folder) {
-		return nil, format.BadUpload("invalid folder %q", folder)
-	}
-	c, err := repoConfig(repo)
-	if err != nil {
+}
+
+// Plan plans a web UI upload: every file is one item that goes to its relative path (its name, or
+// its path inside a dropped folder) under the folder in the field "folder" (first value: the open
+// folder of the Files view; "": the repo root).
+func (f *Format) Plan(ctx context.Context, repo *repos.Repo, in format.PlanInput) (*format.Plan, error) {
+	if err := format.CheckFields(in.Fields, uploadFields); err != nil {
 		return nil, err
 	}
-	out := make([]format.Uploaded, 0, len(files))
-	for _, file := range files {
-		p := path.Join(folder, file.Path)
-		if !validPath(p) {
-			return out, format.BadUpload("invalid file name %q", file.Path)
-		}
-		created, unchanged, err := f.put(ctx, repo, c, p, file.Spool, by)
-		if errors.Is(err, errExists) {
-			return out, &format.UploadError{Status: http.StatusConflict, Message: p + ": " + errExists.Error()}
-		}
-		if err != nil {
-			return out, err
-		}
-		st := format.UploadReplaced
-		switch {
-		case created:
-			st = format.UploadCreated
-		case unchanged:
-			st = format.UploadUnchanged
-		}
-		out = append(out, format.Uploaded{Path: p, Status: st, Size: file.Spool.Size, SHA256: file.Spool.SHA256})
+	folder, ok := in.Fields["folder"]
+	if !ok {
+		folder = in.Folder
 	}
-	return out, nil
+	folder = strings.Trim(strings.TrimSpace(folder), "/")
+	plan := &format.Plan{Fields: []format.PlanField{{Field: uploadFields[0], Value: folder}}}
+	dir, err := repopath.Folder(folder)
+	if err != nil {
+		plan.Fields[0].Problem = "Enter a folder such as releases/1.0, without empty, . or .. parts."
+	}
+	for _, file := range in.Files {
+		item := format.PlanItem{Title: file.Path, Files: []format.PlanTarget{{Path: file.Path}}}
+		if err == nil {
+			if p, perr := repopath.Join(dir, file.Path); perr != nil {
+				item.Problems = append(item.Problems, "the path is not valid in the folder")
+			} else {
+				item.Files[0].Target = string(p)
+			}
+		}
+		plan.Items = append(plan.Items, item)
+	}
+	return plan, nil
 }
 
-// Scan implements format.ManualUploader: every file is one Found of kind "file", titled with its
-// relative path.
-func (f *Format) Scan(ctx context.Context, repo *repos.Repo, files []format.UploadFile) ([]format.Found, error) {
-	out := make([]format.Found, 0, len(files))
-	for _, file := range files {
-		out = append(out, format.Found{Kind: "file", Title: file.Path, Files: []string{file.Path}})
+// Store stores the files of a plan in one commit, at their targets, under the repo's overwrite
+// policy.
+func (f *Format) Store(ctx context.Context, repo *repos.Repo, plan *format.Plan, files map[string]*assets.Spooled, o assets.Origin) ([]*assets.Result, error) {
+	var ws []assets.Write
+	for _, it := range plan.Items {
+		for _, t := range it.Files {
+			p, err := repopath.Parse(t.Target)
+			if err != nil || files[t.Path] == nil {
+				return nil, format.BadUpload("the upload has no file for %s", t.Path)
+			}
+			ws = append(ws, assets.Write{Repo: repo, Path: p, Body: assets.Body{Spool: files[t.Path]}, Origin: o})
+		}
 	}
-	return out, nil
+	return f.h.Assets.CommitAll(ctx, ws)
 }
-
-var (
-	// errExists rejects different bytes at an existing path when the repo denies overwrite.
-	errExists = errors.New("file exists and the repo does not allow overwrite")
-	// errLookup wraps a failed lookup of the asset at the target path.
-	errLookup = errors.New("lookup failed")
-)
 
 // repoConfig decodes the repo config, which was validated when it was stored.
 func repoConfig(repo *repos.Repo) (Config, error) {
 	var c Config
 	err := json.Unmarshal(repo.Config, &c)
 	return c, err
-}
-
-// put stores the spooled file at p and holds the path lock while it does. A file that exists
-// with the same bytes stays as it is (unchanged). Different bytes replace it when c allows
-// overwrite; otherwise put returns errExists. Uploads (PUT) and imports share it.
-func (f *Format) put(ctx context.Context, repo *repos.Repo, c Config, p string, sp *assets.Spooled, by assets.By) (created, unchanged bool, err error) {
-	unlock := f.h.Assets.Lock(repo.ID, p)
-	defer unlock()
-	existing, err := f.h.Assets.Get(ctx, repo.ID, p)
-	if err != nil && !errors.Is(err, assets.ErrNotFound) {
-		return false, false, fmt.Errorf("%w: %w", errLookup, err)
-	}
-	if existing != nil && existing.SHA256 == sp.SHA256 {
-		return false, true, nil
-	}
-	if existing != nil && c.Overwrite != OverwriteAllow {
-		return false, false, errExists
-	}
-	_, created, err = f.h.Assets.Put(ctx, repo, p, sp, assets.ContentType(p), assets.KindArtifact, by)
-	return created, false, err
 }

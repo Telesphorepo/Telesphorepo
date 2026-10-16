@@ -1,4 +1,4 @@
--- Second factors (TOTP, passkeys, recovery codes) and one-time challenges (spec section 7.6).
+-- Second factors (TOTP, passkeys, recovery codes) and one-time challenges (SPEC.md "Auth model").
 
 -- The secret is sealed with the row id as AAD, so the service inserts an empty secret and
 -- sets it with SetTOTPSecret in the same transaction.
@@ -22,22 +22,22 @@ UPDATE user_totp SET last_step = sqlc.arg(step) WHERE id = sqlc.arg(id) AND last
 DELETE FROM user_totp WHERE id = ? AND user_id = ?;
 
 -- name: CreatePasskey :one
-INSERT INTO user_passkeys (user_id, credential_id, public_key, sign_count, credential, name, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)
+INSERT INTO user_passkeys (user_id, credential_id, credential, name, created_at)
+VALUES (?, ?, ?, ?, ?)
 RETURNING id;
 
 -- A user's passkeys in creation order.
 -- name: ListUserPasskeys :many
-SELECT id, credential_id, public_key, sign_count, credential, name, created_at, last_used_at
+SELECT id, credential_id, credential, name, created_at, last_used_at
 FROM user_passkeys WHERE user_id = ? ORDER BY id;
 
 -- name: GetPasskeyByCredentialID :one
-SELECT id, user_id, credential_id, public_key, sign_count, credential, name, created_at, last_used_at
+SELECT id, user_id, credential_id, credential, name, created_at, last_used_at
 FROM user_passkeys WHERE credential_id = ?;
 
--- Saves the sign count and flags of a successful assertion.
+-- Saves the credential (sign count and flags) of a successful assertion.
 -- name: UpdatePasskeyUse :exec
-UPDATE user_passkeys SET sign_count = ?, credential = ?, last_used_at = ? WHERE id = ?;
+UPDATE user_passkeys SET credential = ?, last_used_at = ? WHERE id = ?;
 
 -- name: DeleteUserPasskey :execrows
 DELETE FROM user_passkeys WHERE id = ? AND user_id = ?;
@@ -73,15 +73,15 @@ UPDATE user_recovery_codes SET used_at = ? WHERE user_id = ? AND code_hash = ? A
 SELECT COUNT(*) FROM user_recovery_codes WHERE user_id = ? AND used_at IS NULL;
 
 -- name: CreateChallenge :exec
-INSERT INTO auth_challenges (id_hash, kind, user_id, device_id, data, created_at, expires_at)
-VALUES (?, ?, ?, ?, ?, ?, ?);
+INSERT INTO auth_challenges (id_hash, kind, user_id, data, created_at, expires_at)
+VALUES (?, ?, ?, ?, ?, ?);
 
 -- Takes a challenge once: deletes it and returns it when it has the kind and has not expired.
 -- No row: unknown, already taken, another kind or expired.
 -- name: TakeChallenge :one
 DELETE FROM auth_challenges
 WHERE id_hash = sqlc.arg(id_hash) AND kind = sqlc.arg(kind) AND expires_at > sqlc.arg(now)
-RETURNING user_id, device_id, data, created_at, expires_at;
+RETURNING user_id, data, created_at, expires_at;
 
 -- Bounded cleanup, served by auth_challenges_expires.
 -- name: DeleteExpiredChallenges :execrows

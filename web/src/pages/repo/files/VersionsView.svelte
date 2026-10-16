@@ -17,9 +17,10 @@
   import StatusBadge from "$lib/components/StatusBadge.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
   import CoverFlow, { type Ticket } from "./CoverFlow.svelte";
-  import ProvenanceInline from "./ProvenanceInline.svelte";
+  import BuildInline from "./BuildInline.svelte";
   import type { DeleteTarget } from "./FolderList.svelte";
-  import { browse, shortSha, type Artifact, type Version } from "../browse";
+  import { api, type Artifact, type Version } from "$lib/api";
+  import { shortSha } from "../browse";
   import { versionTarget } from "./place";
   import Loading from "$lib/components/Loading.svelte";
   import { formatDateTime } from "$lib/format";
@@ -39,7 +40,7 @@
   }: { repo: Repo; artifact: Artifact; flow: boolean; canWrite: boolean; onDelete: (t: DeleteTarget) => void } = $props();
 
   /* svelte-ignore state_referenced_locally */
-  const versions = new Keyset<Version>((p) => browse.versions(repo.name, artifact.path, p), 50);
+  const versions = new Keyset<Version>((p) => api.repos.versions(repo.name, artifact.path, p), 50);
 
   // The newest release: the version most builds should use.
   const latest = $derived(versions.items.find((v) => v.kind === "release")?.version ?? "");
@@ -54,7 +55,7 @@
       key: v.version,
       top: v.version,
       bottom: day.format(new Date(v.published_at)),
-      serial: v.provenance ? shortSha(v.provenance.sha) : v.kind === "snapshot" ? "Snapshot" : "Release",
+      serial: v.build?.revision ? shortSha(v.build.revision) : v.kind === "snapshot" ? "Snapshot" : "Release",
       label: `${v.version}, ${v.kind}, published ${formatDateTime(v.published_at)}`,
     })),
   );
@@ -119,7 +120,7 @@
             <p class="flex flex-wrap items-center gap-x-3 gap-y-1 text-meta text-muted-foreground">
               <span>Published <RelativeTime at={v.published_at} /></span>
               {#if builds(v)}<span>{builds(v)}</span>{/if}
-              <ProvenanceInline p={v.provenance} />
+              <BuildInline p={v.build} />
             </p>
           </div>
           <div class="flex shrink-0 items-center gap-2">
@@ -164,7 +165,7 @@
         </span>
       </Cell>
       {#if anySnapshot}<Cell hideOnPhone muted class="whitespace-nowrap">{builds(v)}</Cell>{/if}
-      <Cell hideOnPhone muted><ProvenanceInline p={v.provenance} /></Cell>
+      <Cell hideOnPhone muted><BuildInline p={v.build} /></Cell>
       <Cell num muted><RelativeTime at={v.published_at} /></Cell>
       {#if canWrite}
         <Cell actions>

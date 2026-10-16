@@ -7,7 +7,8 @@
 // match: such a version folder's name starts with a digit, and an artifact sits at least two
 // folders deep.
 
-import { browse, baseName, parentOf, type Artifact, type Version } from "../browse";
+import { api, type Artifact, type Version } from "$lib/api";
+import { baseName, parentOf } from "../browse";
 import type { DeleteTarget } from "./FolderList.svelte";
 
 export type Place =
@@ -19,20 +20,20 @@ export type Place =
 export async function placeOf(repo: string, folder: string, version: string): Promise<Place> {
   if (folder === "") return { kind: "folder" };
   if (version) {
-    const b = await browse.builds(repo, folder, version, { limit: 1 });
+    const b = await api.repos.builds(repo, folder, version, { limit: 1 });
     if (b.artifact && b.version) return { kind: "version", artifact: b.artifact, version: b.version };
   }
   const depth = folder.split("/").filter(Boolean).length;
   const maybeVersion = depth >= 3 && /^\d/.test(baseName(folder));
   const [b, v] = await Promise.all([
-    maybeVersion ? browse.builds(repo, parentOf(folder), baseName(folder), { limit: 1 }) : null,
-    depth >= 2 && !maybeVersion ? browse.versions(repo, folder, { limit: 1 }) : null,
+    maybeVersion ? api.repos.builds(repo, parentOf(folder), baseName(folder), { limit: 1 }) : null,
+    depth >= 2 && !maybeVersion ? api.repos.versions(repo, folder, { limit: 1 }) : null,
   ]);
   if (b?.artifact && b.version) return { kind: "version", artifact: b.artifact, version: b.version };
   if (v?.artifact) return { kind: "artifact", artifact: v.artifact };
   // An artifact whose name starts with a digit ("3d-engine").
   if (maybeVersion) {
-    const a = (await browse.versions(repo, folder, { limit: 1 })).artifact;
+    const a = (await api.repos.versions(repo, folder, { limit: 1 })).artifact;
     if (a) return { kind: "artifact", artifact: a };
   }
   return { kind: "folder" };
@@ -51,7 +52,7 @@ export async function versionTarget(repo: string, artifact: Artifact, v: Version
   const files: string[] = [];
   let after: string | undefined;
   do {
-    const p = await browse.builds(repo, artifact.path, v.version, { after, limit: 100 });
+    const p = await api.repos.builds(repo, artifact.path, v.version, { after, limit: 100 });
     for (const b of p.items) files.push(...b.files.map((f) => f.path));
     after = p.next ?? undefined;
   } while (after);

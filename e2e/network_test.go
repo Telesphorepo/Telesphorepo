@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-// Network rules (spec §13.1): the client address behind trusted proxies, per-repo IP rules for
+// Network rules: the client address behind trusted proxies, per-repo IP rules for
 // read and publish, and the IP range presets.
 //
 // The test process reaches a server through the engine's port mapping, so the server's TCP peer
@@ -95,6 +95,32 @@ func signInIP(t *testing.T, s *Server, hdr map[string]string) string {
 func setTrustedProxies(t *testing.T, s *Server, v any) {
 	t.Helper()
 	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"trusted_proxies": v}, s.Admin(), nil)
+}
+
+// trustedLists is the answer of GET and PUT /api/network/trusted-proxies.
+type trustedLists struct {
+	Lists []struct {
+		ID   int64  `json:"id"`
+		Name string `json:"name"`
+	} `json:"lists"`
+	EnvLists []string `json:"env_lists"`
+}
+
+// setTrustedLists makes the trusted proxies include the IP lists names (by their ids).
+func setTrustedLists(t *testing.T, s *Server, names ...string) trustedLists {
+	t.Helper()
+	ids := []int64{}
+	all := ipListsOf(t, s)
+	for _, n := range names {
+		l, ok := all[n]
+		if !ok {
+			t.Fatalf("no IP list %s", n)
+		}
+		ids = append(ids, l.ID)
+	}
+	var out trustedLists
+	s.MustAPI(t, http.MethodPut, "/api/network/trusted-proxies", map[string]any{"lists": ids}, s.Admin(), &out)
+	return out
 }
 
 type proxyCandidate struct {
@@ -187,7 +213,7 @@ func TestClientIP(t *testing.T) {
 		t.Fatalf("X-Forwarded-For without trusted proxies: audit ip %q, want the peer %s", ip, peer)
 	}
 	// Invalid entries are refused.
-	for _, bad := range []string{"10.0.0.0/33", "intranet", "cloudflare", "list:nowhere", "list:Bad Name"} {
+	for _, bad := range []string{"10.0.0.0/33", "intranet", "cloudflare", "list:nowhere", "list:Bad Name", "list:cloudflare"} {
 		st, b := s.API(t, http.MethodPatch, "/api/settings", map[string]any{"trusted_proxies": []string{bad}}, s.Admin())
 		if st != http.StatusBadRequest {
 			t.Fatalf("trusted_proxies %q: status %d, want 400: %s", bad, st, b)
@@ -242,7 +268,7 @@ func TestIPRules(t *testing.T) {
 	s.CreateRepo(t, repo, "raw", false, nil)
 	w := RandName("writer")
 	s.CreateUser(t, w, "writer-pass-1234")
-	s.SetPerms(t, repo, w, "download", "publish")
+	s.SetPerms(t, repo, w, "repo.download", "repo.publish")
 	body := []byte("ip rules " + randHex(8))
 	if st, b := s.API(t, http.MethodPut, "/raw/"+repo+"/doc/file.txt", body, s.PublishAuth(t, w, repo)); st != http.StatusCreated {
 		t.Fatalf("PUT before any rule: status %d: %s", st, b)
@@ -340,11 +366,11 @@ func TestIPRules(t *testing.T) {
 		map[string][]string{"paths": {"doc/two.txt"}}, s.Admin(), xff("192.0.2.1"))
 	wantDenied(t, "admin delete from a refused address", st, b, "publish")
 	st, b = apiHeaders(t, s, http.MethodPost, "/api/publish/sessions/manual",
-		map[string]string{"repo": repo, "totp_code": s.TOTPCode(t, w)}, s.LoginTOTP(t, w), xff("192.0.2.1"))
+		map[string]string{"repo": repo}, s.TOTPProof(t, s.LoginTOTP(t, w), w), xff("192.0.2.1"))
 	wantDenied(t, "manual session from a refused address", st, b, "publish")
 
 	// Every refusal is in the audit log with the address and the scope.
-	events := auditEvents(t, s, "ip.denied", repo)
+	events := auditEvents(t, s, "network.denied", repo)
 	scopes := map[string]bool{}
 	for _, e := range events {
 		if e.IP == "192.0.2.1" {
@@ -352,7 +378,7 @@ func TestIPRules(t *testing.T) {
 		}
 	}
 	if !scopes["read"] || !scopes["publish"] {
-		t.Fatalf("ip.denied events of %s: %+v, want read and publish refusals from 192.0.2.1", repo, events)
+		t.Fatalf("network.denied events of %s: %+v, want read and publish refusals from 192.0.2.1", repo, events)
 	}
 
 	// Empty lists lift the restriction.
@@ -364,6 +390,7 @@ func TestIPRules(t *testing.T) {
 
 // ipListJSON is an IP list as the admin API returns it.
 type ipListJSON struct {
+	ID          int64      `json:"id"`
 	Name        string     `json:"name"`
 	Kind        string     `json:"kind"`
 	Title       string     `json:"title"`
@@ -407,7 +434,7 @@ func TestPresetIPLists(t *testing.T) {
 	stub.CreateRepo(t, ranges, "raw", true, map[string]any{"overwrite": "allow"})
 	pub := RandName("pub")
 	stub.CreateUser(t, pub, "pub-pass-1234")
-	stub.SetPerms(t, ranges, pub, "download", "publish")
+	stub.SetPerms(t, ranges, pub, "repo.download", "repo.publish")
 	put := func(name, body string) {
 		t.Helper()
 		if st, b := stub.API(t, http.MethodPut, "/raw/"+ranges+"/"+name, body, stub.PublishAuth(t, pub, ranges)); st/100 != 2 {
@@ -458,8 +485,11 @@ func TestPresetIPLists(t *testing.T) {
 	st, b := apiHeaders(t, s, http.MethodGet, "/raw/"+repo+"/missing", nil, nil, xff("203.0.113.7"))
 	wantDenied(t, "anonymous GET from outside the list", st, b, "read")
 
-	// trusted_proxies "list:cloudflare": a Cloudflare hop in the chain is skipped.
-	setTrustedProxies(t, s, []string{"private", "list:cloudflare"})
+	// The trusted proxies include the list cloudflare: a Cloudflare hop in the chain is skipped.
+	setTrustedProxies(t, s, []string{"private"})
+	if got := setTrustedLists(t, s, "cloudflare"); len(got.Lists) != 1 || got.Lists[0].Name != "cloudflare" {
+		t.Fatalf("PUT trusted-proxies: %+v, want the list cloudflare", got)
+	}
 	if ip := signInIP(t, s, xff("192.0.2.50, 203.0.113.9")); ip != "192.0.2.50" {
 		t.Fatalf("chain through a Cloudflare hop: audit ip %q, want 192.0.2.50", ip)
 	}
@@ -475,7 +505,7 @@ func TestPresetIPLists(t *testing.T) {
 	if l := getIPList(t, s, "cloudflare"); !l.UsedBy.TrustedProxies {
 		t.Fatalf("cloudflare used_by: %+v, want trusted_proxies", l.UsedBy)
 	}
-	setTrustedProxies(t, s, []string{"private"})
+	setTrustedLists(t, s)
 	if ip := signInIP(t, s, xff("192.0.2.50, 203.0.113.9")); ip != "203.0.113.9" {
 		t.Fatalf("chain without trusting Cloudflare: audit ip %q, want 203.0.113.9", ip)
 	}
@@ -512,8 +542,9 @@ func TestPresetIPLists(t *testing.T) {
 	}
 }
 
-// TestCustomIPLists covers the custom lists: create, edit, reference from repo rules and
-// trusted_proxies, rename with the references, and delete refused while in use.
+// TestCustomIPLists covers the custom lists: create, edit, reference from repo rules and the
+// trusted proxies (by list id), a rename that keeps every reference, and delete refused while in
+// use.
 func TestCustomIPLists(t *testing.T) {
 	s := StartServer(t, ServerOpts{})
 	setTrustedProxies(t, s, []string{"private"})
@@ -568,7 +599,7 @@ func TestCustomIPLists(t *testing.T) {
 	s.CreateRepo(t, repo, "raw", false, nil)
 	w := RandName("writer")
 	s.CreateUser(t, w, "writer-pass-1234")
-	s.SetPerms(t, repo, w, "download", "publish")
+	s.SetPerms(t, repo, w, "repo.download", "repo.publish")
 	got := putIPRules(t, s, repo, ipRules{Publish: []ipRule{{Kind: "list", Value: "runners", Note: "CI"}}})
 	if len(got.Publish) != 1 || got.Publish[0].Kind != "list" || got.Publish[0].Value != "runners" {
 		t.Fatalf("PUT ip-rules with a list: %+v", got)
@@ -577,8 +608,8 @@ func TestCustomIPLists(t *testing.T) {
 	wantDenied(t, "mint from outside the list", st, b, "publish")
 	mustSession(t, "mint from a runner address")(mintFrom(t, s, w, repo, "192.0.2.11"))
 
-	// Reference it from trusted_proxies too.
-	setTrustedProxies(t, s, []string{"private", "list:runners"})
+	// Reference it from the trusted proxies too.
+	setTrustedLists(t, s, "runners")
 	l := getIPList(t, s, "runners")
 	if len(l.UsedBy.Repos) != 1 || l.UsedBy.Repos[0].Repo != repo || l.UsedBy.Repos[0].Scope != "publish" || !l.UsedBy.TrustedProxies {
 		t.Fatalf("runners used_by: %+v", l.UsedBy)
@@ -590,7 +621,7 @@ func TestCustomIPLists(t *testing.T) {
 		t.Fatalf("delete a list in use: status %d, want 409 naming %s: %s", st, repo, b)
 	}
 
-	// A rename carries the repo rules and trusted_proxies along.
+	// A rename keeps the repo rules and the trusted proxies: they name the list by its id.
 	s.MustAPI(t, http.MethodPut, "/api/ip-lists/runners", map[string]any{"name": "ci-runners"}, s.Admin(), nil)
 	if st, _ := s.API(t, http.MethodGet, "/api/ip-lists/runners", nil, s.Admin()); st != http.StatusNotFound {
 		t.Fatalf("GET the old name after a rename: status %d, want 404", st)
@@ -600,15 +631,25 @@ func TestCustomIPLists(t *testing.T) {
 	if len(rules.Publish) != 1 || rules.Publish[0].Value != "ci-runners" || rules.Publish[0].Note != "CI" {
 		t.Fatalf("ip-rules after the rename: %+v", rules)
 	}
-	items, _ := listSettings(t, s)
-	if v := string(items["trusted_proxies"].Value); !strings.Contains(v, `"list:ci-runners"`) || strings.Contains(v, `"list:runners"`) {
-		t.Fatalf("trusted_proxies after the rename: %s", v)
+	var trusted trustedLists
+	s.MustAPI(t, http.MethodGet, "/api/network/trusted-proxies", nil, s.Admin(), &trusted)
+	if len(trusted.Lists) != 1 || trusted.Lists[0].Name != "ci-runners" || len(trusted.EnvLists) != 0 {
+		t.Fatalf("trusted proxies after the rename: %+v, want the list ci-runners", trusted)
 	}
 	mustSession(t, "mint from a runner address after the rename")(mintFrom(t, s, w, repo, "192.0.2.10"))
 
-	// Unused: delete works.
+	// Without the repo rules, the trusted proxies still use it.
 	putIPRules(t, s, repo, ipRules{Read: []ipRule{}, Publish: []ipRule{}})
-	setTrustedProxies(t, s, []string{"private"})
+	st, b = s.API(t, http.MethodDelete, "/api/ip-lists/ci-runners", nil, s.Admin())
+	if st != http.StatusConflict || !strings.Contains(string(b), "trusted proxies") {
+		t.Fatalf("delete a list of the trusted proxies: status %d, want 409 naming the trusted proxies: %s", st, b)
+	}
+	if st, b := s.API(t, http.MethodPut, "/api/network/trusted-proxies", map[string]any{"lists": []int64{999999}}, s.Admin()); st != http.StatusBadRequest {
+		t.Fatalf("trust an unknown list: status %d, want 400: %s", st, b)
+	}
+
+	// Unused: delete works.
+	setTrustedLists(t, s)
 	if st, b := s.API(t, http.MethodDelete, "/api/ip-lists/ci-runners", nil, s.Admin()); st != http.StatusNoContent {
 		t.Fatalf("delete an unused list: status %d, want 204: %s", st, b)
 	}
@@ -639,7 +680,7 @@ type parsedRanges struct {
 	Duplicates int `json:"duplicates"`
 }
 
-// TestIPRangeParse covers POST /api/ip-ranges/parse (spec §13.3): addresses and CIDRs pulled out
+// TestIPRangeParse covers POST /api/ip-ranges/parse: addresses and CIDRs pulled out
 // of pasted text in any common layout, invalid lines with their numbers, duplicates, limits and
 // admin-only access.
 func TestIPRangeParse(t *testing.T) {
@@ -733,4 +774,18 @@ func TestIPRangeParse(t *testing.T) {
 			t.Fatalf("anonymous parse: status %d, want 401", st)
 		}
 	})
+}
+
+// TestTrustedProxyEnvList: TR_TRUSTED_PROXIES may name IP lists as "list:<name>"; the server
+// resolves them at startup and reports them as env_lists.
+func TestTrustedProxyEnvList(t *testing.T) {
+	s := StartServer(t, ServerOpts{Env: map[string]string{"TR_TRUSTED_PROXIES": "private,list:cloudflare"}})
+	var trusted trustedLists
+	s.MustAPI(t, http.MethodGet, "/api/network/trusted-proxies", nil, s.Admin(), &trusted)
+	if len(trusted.Lists) != 0 || !slices.Equal(trusted.EnvLists, []string{"cloudflare"}) {
+		t.Fatalf("trusted proxies: %+v, want the env list cloudflare", trusted)
+	}
+	if l := getIPList(t, s, "cloudflare"); !l.UsedBy.TrustedProxies {
+		t.Fatalf("cloudflare used_by: %+v, want trusted_proxies", l.UsedBy)
+	}
 }

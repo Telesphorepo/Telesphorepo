@@ -34,40 +34,41 @@ func TestServerPermissions(t *testing.T) {
 		routes   []permRoute
 		settings bool // GET /api/settings answers 200
 	}{
-		{"repos", []permRoute{
+		{"repositories.all", []permRoute{
 			{http.MethodPost, "/api/repos", func() any { return map[string]any{"name": RandName("new"), "format": "raw"} }, []int{http.StatusCreated}},
-			{http.MethodGet, "/api/repos/" + repo + "/permissions", none, []int{http.StatusOK}},
+			{http.MethodGet, "/api/repos/" + repo + "/grants", none, []int{http.StatusOK}},
 		}, false},
-		{"people", []permRoute{
+		{"people.manage", []permRoute{
 			{http.MethodGet, "/api/users", none, []int{http.StatusOK}},
 			{http.MethodGet, "/api/users/" + s.AdminUser + "/access", none, []int{http.StatusOK}},
 			{http.MethodPost, "/api/users", func() any {
-				return map[string]any{"username": RandName("new"), "password": "new-password-1", "permissions": []string{"people"}}
+				return map[string]any{"username": RandName("new"), "password": "new-password-1", "permissions": []string{"people.manage"}}
 			}, []int{http.StatusCreated}},
 		}, false},
-		{"signin", []permRoute{
+		{"signin.manage", []permRoute{
 			{http.MethodPatch, "/api/settings", func() any { return map[string]any{"oidc.session_ttl": "11h"} }, []int{http.StatusOK}},
 		}, true},
-		{"storage", []permRoute{
+		{"storage.manage", []permRoute{
 			{http.MethodGet, "/api/storage/moves/current", none, []int{http.StatusOK, http.StatusNotFound}},
 		}, true},
-		{"network", []permRoute{
-			// The list route also serves settings on a repo (which repos holds); one list needs network.
+		{"network.manage", []permRoute{
+			// The list route also serves repo.settings on a repo (which repositories.all holds); one list needs network.manage.
 			{http.MethodGet, "/api/ip-lists/github-actions", none, []int{http.StatusOK}},
 			{http.MethodGet, "/api/network/proxy-candidates", none, []int{http.StatusOK}},
 			{http.MethodPatch, "/api/settings", func() any { return map[string]any{"trusted_proxies": []string{"192.0.2.1"}} }, []int{http.StatusOK}},
 		}, true},
-		{"keys", []permRoute{
+		{"signing.manage", []permRoute{
 			{http.MethodGet, "/api/signing-keys/default", none, []int{http.StatusOK}},
 			{http.MethodPost, "/api/signing-keys", func() any { return map[string]any{"name": RandName("key")} }, []int{http.StatusCreated}},
 		}, false},
-		{"nexus", []permRoute{
+		{"nexus.manage", []permRoute{
 			{http.MethodGet, "/api/nexus/sources", none, []int{http.StatusOK}},
-		}, false},
-		{"general", []permRoute{
+			{http.MethodPatch, "/api/settings", func() any { return map[string]any{"nexus.sync_interval": "20m"} }, []int{http.StatusOK}},
+		}, true},
+		{"settings.general", []permRoute{
 			{http.MethodPatch, "/api/settings", func() any { return map[string]any{"session_ttl": "100h"} }, []int{http.StatusOK}},
 		}, true},
-		{"activity", []permRoute{
+		{"activity.read", []permRoute{
 			{http.MethodGet, "/api/audit", none, []int{http.StatusOK}},
 			{http.MethodGet, "/api/publish/log", none, []int{http.StatusOK}},
 		}, false},
@@ -120,9 +121,9 @@ func TestPipelinesPermission(t *testing.T) {
 	ci, pub := RandName("ci"), RandName("pub")
 	s.CreateUser(t, ci, "ci-password-1")
 	s.CreateUser(t, pub, "pub-password-1")
-	s.SetPerms(t, mine, ci, "download", "publish", "pipelines")
-	s.SetPerms(t, other, ci, "download", "publish")
-	s.SetPerms(t, mine, pub, "download", "publish")
+	s.SetPerms(t, mine, ci, "repo.download", "repo.publish", "ci.pipelines")
+	s.SetPerms(t, other, ci, "repo.download", "repo.publish")
+	s.SetPerms(t, mine, pub, "repo.download", "repo.publish")
 	sess := s.SignIn(t, ci, "ci-password-1")
 
 	policy := func(repos ...string) map[string]any {
@@ -230,8 +231,8 @@ func TestPeoplePicker(t *testing.T) {
 	mgr, plain := RandName("mgr"), RandName("plain")
 	s.CreateUser(t, mgr, "mgr-password-1")
 	s.CreateUser(t, plain, "plain-password-1")
-	s.SetPerms(t, repo, mgr, "download", "access")
-	s.SetPerms(t, repo, plain, "download", "publish")
+	s.SetPerms(t, repo, mgr, "repo.download", "repo.access")
+	s.SetPerms(t, repo, plain, "repo.download", "repo.publish")
 
 	type page struct {
 		Items []struct {
@@ -250,7 +251,7 @@ func TestPeoplePicker(t *testing.T) {
 	for _, who := range []struct {
 		what string
 		sess *Session
-	}{{"people", s.Admin()}, {"access on a repository", s.SignIn(t, mgr, "mgr-password-1")}} {
+	}{{"people.manage", s.Admin()}, {"access on a repository", s.SignIn(t, mgr, "mgr-password-1")}} {
 		var p page
 		s.MustAPI(t, http.MethodGet, "/api/people?q="+base+"-an", nil, who.sess, &p)
 		if got := names(p); !slices.Equal(got, []string{anna, anton}) || p.Next != nil {

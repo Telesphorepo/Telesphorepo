@@ -1,5 +1,5 @@
-// Command task is the cross-platform developer entry point
-// (spec §16): "go tool task dev | build | preview | test | gen | doctor". It needs only Go and
+// Command task is the cross-platform developer entry point:
+// "go tool task dev | build | preview | test | gen | doctor". It needs only Go and
 // bun (or npm); nothing here depends on bash or make, so it behaves the same on Windows,
 // macOS and Linux.
 //

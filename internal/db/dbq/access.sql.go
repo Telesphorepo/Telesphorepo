@@ -12,23 +12,23 @@ import (
 const listRepoGrants = `-- name: ListRepoGrants :many
 
 SELECT u.username, u.disabled, u.kind, p.perm,
-  EXISTS (SELECT 1 FROM user_permissions up WHERE up.user_id = u.id AND up.perm = 'repos') AS all_repos
+  CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = u.id), '') AS TEXT) AS server_perms
 FROM repo_permissions p JOIN users u ON u.id = p.user_id
 WHERE p.repo_id = ?
 `
 
 type ListRepoGrantsRow struct {
-	Username string
-	Disabled bool
-	Kind     string
-	Perm     string
-	AllRepos bool
+	Username    string
+	Disabled    bool
+	Kind        string
+	Perm        string
+	ServerPerms string
 }
 
 // Effective access (internal/access): who can download from and publish to a repo, and what a
 // person can do in each repo. Every query is bounded by one repo, one user or one permission.
-// The grants of one repo with their users, one row per permission, through the
-// repo_permissions primary key. The caller groups and sorts them.
+// The grants of one repo with their users and their server permissions, one row per permission,
+// through the repo_permissions primary key. The caller groups and sorts them.
 func (q *Queries) ListRepoGrants(ctx context.Context, repoID int64) ([]ListRepoGrantsRow, error) {
 	rows, err := q.db.QueryContext(ctx, listRepoGrants, repoID)
 	if err != nil {
@@ -43,52 +43,7 @@ func (q *Queries) ListRepoGrants(ctx context.Context, repoID int64) ([]ListRepoG
 			&i.Disabled,
 			&i.Kind,
 			&i.Perm,
-			&i.AllRepos,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listRepoTrusts = `-- name: ListRepoTrusts :many
-SELECT t.id, t.name, t.issuer, t.claims, t.disabled
-FROM publish_trust_repos tr JOIN publish_trusts t ON t.id = tr.trust_id
-WHERE tr.repo_id = ?
-`
-
-type ListRepoTrustsRow struct {
-	ID       int64
-	Name     string
-	Issuer   string
-	Claims   string
-	Disabled int64
-}
-
-// The CI rules (trust policies) that list one repo, through publish_trust_repos_repo. The caller
-// sorts them.
-func (q *Queries) ListRepoTrusts(ctx context.Context, repoID int64) ([]ListRepoTrustsRow, error) {
-	rows, err := q.db.QueryContext(ctx, listRepoTrusts, repoID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListRepoTrustsRow
-	for rows.Next() {
-		var i ListRepoTrustsRow
-		if err := rows.Scan(
-			&i.ID,
-			&i.Name,
-			&i.Issuer,
-			&i.Claims,
-			&i.Disabled,
+			&i.ServerPerms,
 		); err != nil {
 			return nil, err
 		}

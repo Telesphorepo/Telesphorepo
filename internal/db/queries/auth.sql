@@ -91,11 +91,10 @@ DELETE FROM user_permissions WHERE user_id = ?;
 SELECT u.id, u.username, u.kind FROM user_permissions p JOIN users u ON u.id = p.user_id
 WHERE p.perm = ? AND u.disabled = 0;
 
--- Whether user id needs the second factor: any server permission, or a repository permission
--- other than download and publish.
--- name: UserElevated :one
-SELECT EXISTS (SELECT 1 FROM user_permissions up WHERE up.user_id = sqlc.arg(user_id))
-    OR EXISTS (SELECT 1 FROM repo_permissions rp WHERE rp.user_id = sqlc.arg(user_id) AND rp.perm NOT IN ('download','publish'));
+-- Whether user id holds one of perms on some repo, through repo_permissions_user (a seek per
+-- permission).
+-- name: HasRepoPermIn :one
+SELECT EXISTS (SELECT 1 FROM repo_permissions WHERE user_id = sqlc.arg(user_id) AND perm IN (sqlc.slice(perms)));
 
 -- name: CreateToken :one
 INSERT INTO api_tokens (user_id, public_id, secret_hash, name, created_at, expires_at)
@@ -118,6 +117,14 @@ SELECT t.id AS token_id, t.secret_hash, t.expires_at, t.last_used_at,
 FROM api_tokens t JOIN users u ON u.id = t.user_id
 WHERE t.public_id = ?;
 
+-- The read token behind a core bearer token, by its primary key.
+-- name: GetTokenAuthByID :one
+SELECT t.id AS token_id, t.expires_at,
+       u.id AS user_id, u.username, u.disabled, u.kind,
+       CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = u.id), '') AS TEXT) AS perms
+FROM api_tokens t JOIN users u ON u.id = t.user_id
+WHERE t.id = ?;
+
 -- name: TouchToken :exec
 UPDATE api_tokens SET last_used_at = ? WHERE id = ?;
 
@@ -135,15 +142,10 @@ DELETE FROM sessions WHERE id_hash = ?;
 -- name: DeleteUserSessions :exec
 DELETE FROM sessions WHERE user_id = ?;
 
--- name: DeleteOIDCUserSessions :exec
-DELETE FROM sessions WHERE user_id IN
-  (SELECT id FROM users WHERE oidc_issuer = ? AND oidc_subject = ? AND oidc_subject IS NOT NULL);
 
--- elevated: the user holds a repository permission other than download and publish.
 -- name: GetSessionPrincipal :one
 SELECT s.expires_at, u.id AS user_id, u.username, u.disabled, u.kind,
-  CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = u.id), '') AS TEXT) AS perms,
-  EXISTS (SELECT 1 FROM repo_permissions rp WHERE rp.user_id = u.id AND rp.perm NOT IN ('download','publish')) AS manages_repo
+  CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = u.id), '') AS TEXT) AS perms
 FROM sessions s JOIN users u ON u.id = s.user_id
 WHERE s.id_hash = ?;
 

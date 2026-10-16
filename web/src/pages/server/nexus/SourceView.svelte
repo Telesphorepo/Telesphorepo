@@ -91,7 +91,7 @@
   });
 
   // --- the repositories to copy ---
-  type Opt = { target: string; anon: boolean; key: "new" | "nexus"; pass: string; user: string; pw: string; members: string[] };
+  type Opt = { target: string; anon: boolean; answers: Record<string, string>; user: string; pw: string; members: string[] };
   let picked = $state(new Set<string>());
   let groupPicked = $state(new Set<string>());
   let opts = $state<Record<string, Opt>>({});
@@ -111,14 +111,24 @@
     opts = Object.fromEntries(
       s.repos.map((r): [string, Opt] => [
         r.name,
-        { target: r.target || r.name, anon: r.public, key: "new", pass: "", user: r.remote_username, pw: "", members: r.members_known ? [] : [...r.target_members] },
+        {
+          target: r.target || r.name,
+          anon: r.public,
+          answers: Object.fromEntries(r.questions.filter((q) => q.default).map((q) => [q.key, q.default!])),
+          user: r.remote_username,
+          pw: "",
+          members: r.members_known ? [] : [...r.target_members],
+        },
       ]),
     );
   }
 
   const isNew = (r: NexusSourceRepo) => !r.target && (r.type === "group" ? groupPicked : picked).has(r.name);
-  const aptHosted = (r: NexusSourceRepo) => r.format === "apt" && r.type === "hosted";
-  const hasApt = $derived(repoRows.some((r) => aptHosted(r) && r.supported && !r.target));
+  // The questions of the target format (format.Importer Plan): a choice shows in its own column,
+  // a secret as a field below the table.
+  const choiceOf = (r: NexusSourceRepo) => r.questions.find((q) => q.type === "choice");
+  const choiceLabel = $derived(repoRows.map(choiceOf).find((q) => q)?.label ?? "");
+  const hasChoice = $derived(repoRows.some((r) => r.supported && !r.target && choiceOf(r)));
 
   /** The repositories here that a group gets: its picked Nexus members (or those picked by hand), in order. */
   function groupMembers(g: NexusSourceRepo): string[] {
@@ -169,10 +179,7 @@
     const o = opts[r.name];
     const create = !r.target;
     const m: NexusMapping = { source_repo: r.name, target: r.target || o.target.trim(), create, anonymous_read: o.anon };
-    if (create && aptHosted(r)) {
-      m.signing_key = r.nexus_key && o.key === "nexus" ? "nexus" : "new";
-      if (m.signing_key === "nexus") m.signing_passphrase = r.nexus_key_encrypted ? o.pass : "";
-    }
+    if (create && r.questions.length) m.answers = { ...o.answers };
     if (create && r.type === "proxy" && r.remote_username && o.pw) {
       m.remote_username = o.user.trim();
       m.remote_password = o.pw;
@@ -355,7 +362,7 @@
     { label: "Kind", hideOnPhone: true },
     { label: "Name here" },
     { label: "Who can download", hideOnPhone: true },
-    ...(hasApt ? [{ label: "Signing key", hideOnPhone: true }] : []),
+    ...(hasChoice ? [{ label: choiceLabel, hideOnPhone: true }] : []),
   ]);
 </script>
 
@@ -484,22 +491,21 @@
         {@render nameCell(r, !r.supported ? r.reason || "Not supported" : r.type === "proxy" ? r.remote_url : "")}
         <Cell hideOnPhone muted text={kindText(r.format, r.type)} />
         {@render targetCell(r)}
-        {#if hasApt}
+        {#if hasChoice}
+          {@const q = choiceOf(r)}
           <Cell hideOnPhone>
-            {#if editable && o && isNew(r) && aptHosted(r)}
-              {#if r.nexus_key}
-                <Select.Root type="single" value={o.key} onValueChange={(k) => (o.key = k === "nexus" ? "nexus" : "new")}>
-                  <Select.Trigger size="sm" class="w-40" aria-label="Signing key of {r.name}">
-                    <span class="truncate">{o.key === "nexus" ? "The Nexus key" : "A new key"}</span>
-                  </Select.Trigger>
-                  <Select.Content>
-                    <Select.Item value="new" label="A new key" />
-                    <Select.Item value="nexus" label="The Nexus key" />
-                  </Select.Content>
-                </Select.Root>
-              {:else}
-                <span class="text-muted-foreground">A new key</span>
-              {/if}
+            {#if editable && o && isNew(r) && q}
+              {@const chosen = q.options?.find((x) => x.value === o.answers[q.key])}
+              <Select.Root type="single" value={o.answers[q.key] ?? ""} onValueChange={(v) => (o.answers[q.key] = v)}>
+                <Select.Trigger size="sm" class="w-48" aria-label="{q.label} of {r.name}">
+                  <span class="truncate">{chosen?.label ?? "Choose"}</span>
+                </Select.Trigger>
+                <Select.Content>
+                  {#each q.options ?? [] as x (x.value)}
+                    <Select.Item value={x.value} label={x.label} />
+                  {/each}
+                </Select.Content>
+              </Select.Root>
             {/if}
           </Cell>
         {/if}
@@ -510,16 +516,23 @@
     </DataTable>
 
     {#if editable}
-      {@const keyPass = repoRows.filter((r) => isNew(r) && aptHosted(r) && r.nexus_key && r.nexus_key_encrypted && opts[r.name]?.key === "nexus")}
-      {@const noKey = repoRows.filter((r) => isNew(r) && aptHosted(r) && !r.nexus_key)}
+      {@const secrets = repoRows.filter((r) => isNew(r)).flatMap((r) => r.questions.filter((q) => q.type === "secret").map((q) => ({ r, q })))}
+      {@const notes = repoRows.filter((r) => isNew(r) && typeof r.facts.note === "string")}
       {@const remotes = repoRows.filter((r) => isNew(r) && r.type === "proxy" && r.remote_username)}
-      {#if keyPass.length || remotes.length}
+      {#if secrets.length || remotes.length}
         <div class="mt-6">
           <FormGrid>
-            {#each keyPass as r (r.name)}
+            {#each secrets as { r, q } (r.name + "/" + q.key)}
               {@const o = opts[r.name]}
-              <FormRow label="Passphrase of the Nexus key of {r.name}" for="{fid}-pass-{r.name}" help="Nexus does not give the passphrase of its key. Enter the passphrase of the key.">
-                <Input id="{fid}-pass-{r.name}" type="password" autocomplete="new-password" aria-describedby="{fid}-pass-{r.name}-help" bind:value={o.pass} />
+              <FormRow label="{q.label} of {r.name}" for="{fid}-q-{r.name}-{q.key}" help={q.help}>
+                <Input
+                  id="{fid}-q-{r.name}-{q.key}"
+                  type="password"
+                  autocomplete="new-password"
+                  aria-describedby="{fid}-q-{r.name}-{q.key}-help"
+                  value={o.answers[q.key] ?? ""}
+                  oninput={(e) => (o.answers[q.key] = e.currentTarget.value)}
+                />
               </FormRow>
             {/each}
             {#each remotes as r (r.name)}
@@ -534,13 +547,9 @@
           </FormGrid>
         </div>
       {/if}
-      {#if noKey.length}
-        <p class="mt-6 text-meta text-muted-foreground">
-          Nexus does not give the signing key of {someNames(noKey.map((r) => r.name))} over its API, so this server signs {noKey.length === 1 ? "it" : "them"} with a new key.
-          To keep the Nexus key, export the key pair in Nexus at Repository > Repositories > (the apt repository) > APT Settings > Signing Key.
-          Then import it in <a class={link} href={href("/settings/signing-keys")}>Signing keys</a> and choose it on the Signing tab of the new repository.
-        </p>
-      {/if}
+      {#each notes as r (r.name)}
+        <p class="mt-6 text-meta text-muted-foreground">{r.name}: {String(r.facts.note)}</p>
+      {/each}
     {/if}
 
     {#if groupRows.length}

@@ -11,7 +11,7 @@
 
     <GrantDialog bind:open title="Give alice access" noun={["repository", "repositories"]}
       items={[{ id: "maven", label: "maven", detail: "Private" }]} none="alice can use every repository."
-      submitLabel={(n) => `Give access to ${n} repositories`} onGive={(ids, perms) => api.permissions.set(["alice"], ids, perms)} />
+      submitLabel={(n) => `Give access to ${n} repositories`} onGive={(ids, perms) => api.grants.set(["alice"], ids, perms)} />
 -->
 <script lang="ts" module>
   export type GrantChoice = { id: string; label: string; detail?: string };
@@ -19,9 +19,9 @@
 
 <script lang="ts">
   import { untrack } from "svelte";
-  import type { RepoPermission } from "$lib/api";
+  import type { PermId } from "$lib/api";
   import { errorMessage } from "$lib/api";
-  import { REPO_NEEDS, REPO_PICKER_GROUPS } from "$lib/permissions";
+  import { needsOf, pickerGroups } from "$lib/permissions";
   import { Button } from "$lib/components/ui/button";
   import { Checkbox } from "$lib/components/ui/checkbox";
   import { Input } from "$lib/components/ui/input";
@@ -44,7 +44,7 @@
     loading = false,
     error = "",
     none = "",
-    start = ["download"],
+    start = ["repo.download"],
     held,
     submitLabel,
     onGive,
@@ -67,18 +67,18 @@
     /** One sentence for an empty `items` list. */
     none?: string;
     /** The permissions that the dialog starts with. */
-    start?: RepoPermission[];
+    start?: PermId[];
     /** The permissions the person can give and remove on the chosen things; undefined: every one. */
-    held?: RepoPermission[] | ((ids: string[]) => RepoPermission[] | undefined);
+    held?: PermId[] | ((ids: string[]) => PermId[] | undefined);
     /** Names the action for the count of chosen things and the permissions. */
-    submitLabel: (n: number, perms: RepoPermission[]) => string;
-    onGive: (ids: string[], perms: RepoPermission[]) => unknown | Promise<unknown>;
+    submitLabel: (n: number, perms: PermId[]) => string;
+    onGive: (ids: string[], perms: PermId[]) => unknown | Promise<unknown>;
   } = $props();
 
   const id = $props.id();
   let filter = $state("");
   let chosen = $state<string[]>([]);
-  let perms = $state<RepoPermission[]>([]);
+  let perms = $state<PermId[]>([]);
   // Results of `search`; chosen people stay in the list while the query changes.
   let found = $state<GrantChoice[]>([]);
   let searching = $state(false);
@@ -191,5 +191,5 @@
       </div>
     {/if}
   {/if}
-  <PermissionPicker id="{id}-perms" groups={REPO_PICKER_GROUPS} needs={REPO_NEEDS} held={heldNow} bind:value={perms} />
+  <PermissionPicker id="{id}-perms" groups={pickerGroups("repo")} needs={needsOf("repo")} held={heldNow} bind:value={perms} />
 </ShortFormDialog>

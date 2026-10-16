@@ -90,8 +90,8 @@ func TestRaw(t *testing.T) {
 		writer, reader := RandName("w"), RandName("r")
 		s.CreateUser(t, writer, "writer-pass-1234")
 		s.CreateUser(t, reader, "reader-pass-1234")
-		s.SetPerms(t, repo, writer, "download", "publish")
-		s.SetPerms(t, repo, reader, "download")
+		s.SetPerms(t, repo, writer, "repo.download", "repo.publish")
+		s.SetPerms(t, repo, reader, "repo.download")
 		writerAuth := s.PublishAuth(t, writer, repo)
 		readerAuth := Basic{reader, s.CreateToken(t, reader, "reader-pass-1234", "ci")}
 

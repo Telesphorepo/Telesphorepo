@@ -2,26 +2,23 @@ package publish
 
 import (
 	"context"
-	"crypto/ed25519"
 	"database/sql"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"math"
-	"net/netip"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
-	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
-	"github.com/Telesphorepo/Telesphorepo/internal/provenance"
+	"github.com/Telesphorepo/Telesphorepo/internal/publish/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
+	"github.com/Telesphorepo/Telesphorepo/internal/token"
 )
 
 const (
-	nonceKind = "publish_nonce"
-	nonceTTL  = 60 * time.Second
+	nonceTTL = 60 * time.Second // a one-repo nonce
 	// signedPrefix starts the message a device signs to mint a session.
 	signedPrefix = "telesphorepo publish v1\n"
 )
@@ -39,6 +36,8 @@ type Minted struct {
 	UserID  int64  `json:"-"` // 0 for a CI session
 	Subject string `json:"-"` // the username, or the CI token's sub
 	Via     string `json:"-"`
+
+	Session *auth.PublishSession `json:"-"` // the open session, as the access engine sees it
 }
 
 // SessionInfo is a publish session in a user's session list or the admin publish log. State is
@@ -95,48 +94,17 @@ func beforeCursor(after int64) int64 {
 	return after
 }
 
-// writableRepo loads the repo and checks that p may write to it now and that it takes uploads.
-func (s *Service) writableRepo(ctx context.Context, p *auth.Principal, name string) (*repos.Repo, error) {
-	repo, err := s.repos.ByName(ctx, name)
-	if errors.Is(err, repos.ErrNotFound) {
-		return nil, errorf(ErrNotFound, "repo not found")
-	}
-	if err != nil {
-		return nil, err
-	}
-	if repo.Kind != repos.KindHosted {
-		return nil, errorf(ErrConflict, auth.ReadOnly(repo))
-	}
-	set, err := s.auth.RepoPerms(ctx, p, repo)
-	if err != nil {
-		return nil, err
-	}
-	if !set.Has(auth.RepoPublish) {
-		return nil, errorf(ErrForbidden, "you cannot publish to "+repo.Name)
-	}
-	if repo.LockedBy != "" {
-		return nil, errorf(ErrConflict, repo.LockedBy)
-	}
-	return repo, nil
-}
-
-// mint creates a session on q (a transaction or the write pool), with the build provenance of
-// a CI token (nil: none). It retries on the rare collision of the 48-bit public id.
-func (s *Service) mint(ctx context.Context, q *dbq.Queries, repo *repos.Repo, via string, userID, deviceID, trustID int64, subject string, prov *provenance.Record) (*Minted, error) {
+// mint creates a session on q (a transaction or the write pool), with the build record of a CI
+// token (0: none). It retries on the rare collision of the 48-bit public id.
+func (s *Service) mint(ctx context.Context, q *dbq.Queries, repo *repos.Repo, via string, userID, deviceID, trustID, buildID int64, subject string) (*Minted, error) {
 	now := time.Now()
 	exp := now.Add(s.sessionTTL())
-	if prov == nil {
-		prov = &provenance.Record{}
-	}
 	for range 3 {
-		pid, secret, tok := newSessionToken()
+		pid, secret, tok := token.Mint(TokenPrefix)
 		id, err := q.CreatePublishSession(ctx, dbq.CreatePublishSessionParams{
-			PublicID: pid, SecretHash: hashBytes([]byte(secret)), RepoID: repo.ID,
-			UserID: nullID(userID), DeviceID: nullID(deviceID), TrustID: nullID(trustID),
+			PublicID: pid, SecretHash: token.Hash(secret), RepoID: repo.ID,
+			UserID: nullID(userID), DeviceID: nullID(deviceID), TrustID: nullID(trustID), BuildID: nullID(buildID),
 			Via: via, Subject: subject, CreatedAt: now.Unix(), ExpiresAt: exp.Unix(),
-			CiServer: prov.Server, CiRepository: prov.Repository, CiSha: prov.SHA, CiRef: prov.Ref,
-			CiRunID: prov.RunID, CiRunAttempt: prov.RunAttempt, CiWorkflow: prov.Workflow,
-			CiWorkflowRef: prov.WorkflowRef, CiActor: prov.Actor,
 		})
 		if isUnique(err) {
 			continue
@@ -145,7 +113,8 @@ func (s *Service) mint(ctx context.Context, q *dbq.Queries, repo *repos.Repo, vi
 			return nil, err
 		}
 		return &Minted{ID: id, Token: tok, Repo: repo.Name, ExpiresAt: unixTime(exp.Unix()),
-			RepoID: repo.ID, UserID: userID, Subject: subject, Via: via}, nil
+			RepoID: repo.ID, UserID: userID, Subject: subject, Via: via,
+			Session: &auth.PublishSession{ID: id, RepoID: repo.ID, Via: via, Subject: subject, BuildID: buildID}}, nil
 	}
 	return nil, errors.New("publish session id collision")
 }
@@ -169,16 +138,34 @@ func (s *Service) usableDevice(ctx context.Context, id int64, now int64) (dbq.Ge
 	return d, nil
 }
 
-// Challenge returns a single-use nonce (60 s) that the device signs to mint a session.
+// Challenge returns a single-use nonce (60 s) that the device signs to mint a session for one
+// repo.
 func (s *Service) Challenge(ctx context.Context, deviceID int64) (string, error) {
+	return s.challenge(ctx, deviceID, false)
+}
+
+// ExchangeChallenge returns a nonce for a token exchange of a format: the device signs it over
+// the repo "*". The proof lives as long as a publish session (publish.session_ttl), so a client
+// such as a Docker credential helper sends it on each token request of one push. Minter.Mint
+// with the proof mints one session per repo and gives that session back on each later request
+// while it is open (DeviceProof).
+func (s *Service) ExchangeChallenge(ctx context.Context, deviceID int64) (string, error) {
+	return s.challenge(ctx, deviceID, true)
+}
+
+func (s *Service) challenge(ctx context.Context, deviceID int64, exchange bool) (string, error) {
 	now := time.Now().Unix()
 	if _, err := s.usableDevice(ctx, deviceID, now); err != nil {
 		return "", err
 	}
+	ttl := nonceTTL
+	if exchange {
+		ttl = s.sessionTTL()
+	}
 	nonce := randomString(32)
-	err := s.wq.CreateChallenge(ctx, dbq.CreateChallengeParams{
-		IDHash: hashBytes([]byte(nonce)), Kind: nonceKind, DeviceID: nullID(deviceID), Data: []byte{},
-		CreatedAt: now, ExpiresAt: now + int64(nonceTTL/time.Second),
+	err := s.wq.CreateNonce(ctx, dbq.CreateNonceParams{
+		IDHash: hashBytes([]byte(nonce)), DeviceID: deviceID, Exchange: boolInt(exchange),
+		ExpiresAt: now + int64(ttl/time.Second),
 	})
 	if err != nil {
 		return "", err
@@ -196,88 +183,24 @@ func decodeB64URL(s string) ([]byte, error) {
 	return base64.RawURLEncoding.DecodeString(s)
 }
 
-// DeviceSession mints a session from a device: the nonce must be one the device asked for, the
-// signature must verify with the device key, and the device's user must have write on the repo
-// now. The nonce is used up by the call whatever its outcome.
-func (s *Service) DeviceSession(ctx context.Context, ip netip.Addr, deviceID int64, repoName, nonce, signature string) (*Minted, error) {
-	now := time.Now().Unix()
-	ch, err := s.wq.TakeChallenge(ctx, dbq.TakeChallengeParams{IDHash: hashBytes([]byte(nonce)), Kind: nonceKind, Now: now})
-	if errors.Is(err, sql.ErrNoRows) || (err == nil && ch.DeviceID.Int64 != deviceID) {
-		return nil, errorf(ErrDenied, "invalid or expired nonce")
-	}
-	if err != nil {
-		return nil, err
-	}
-	d, err := s.usableDevice(ctx, deviceID, now)
-	if err != nil {
-		return nil, err
-	}
-	sig, err := decodeB64URL(signature)
-	if err != nil || len(d.PublicKey) != ed25519.PublicKeySize ||
-		!ed25519.Verify(ed25519.PublicKey(d.PublicKey), SignedMessage(nonce, deviceID, repoName), sig) {
-		return nil, errorf(ErrDenied, "bad device signature")
-	}
-	p := &auth.Principal{UserID: d.UserID, Username: d.Username, Perms: auth.ServerPermsOf(d.Perms), Kind: d.UserKind}
-	repo, err := s.writableRepo(ctx, p, repoName)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.ipAllowed(repo, ip, auth.ActorOf(p)); err != nil {
-		return nil, err
-	}
-	m, err := s.mint(ctx, s.wq, repo, ViaDevice, d.UserID, d.ID, 0, d.Username, nil)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.wq.TouchDevice(ctx, dbq.TouchDeviceParams{LastUsedAt: nullID(now), ID: d.ID}); err != nil {
-		s.log.WarnContext(ctx, "record device use", "device", d.ID, "error", err.Error())
-	}
-	return m, nil
-}
-
-// ManualSession mints a session for a signed-in user after a fresh second-factor check. The
-// second-factor error comes back unchanged (from auth.Service.VerifySecondFactor).
-func (s *Service) ManualSession(ctx context.Context, ip netip.Addr, p *auth.Principal, repoName, totpCode string, passkey json.RawMessage) (*Minted, error) {
-	if p.Kind != auth.KindLocal {
-		return nil, errorf(ErrForbidden, "publish sessions need a local account")
-	}
-	repo, err := s.writableRepo(ctx, p, repoName)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.ipAllowed(repo, ip, auth.ActorOf(p)); err != nil {
-		return nil, err
-	}
-	if err := s.auth.VerifySecondFactor(ctx, p.UserID, totpCode, passkey); err != nil {
-		return nil, err
-	}
-	return s.mint(ctx, s.wq, repo, ViaManual, p.UserID, 0, 0, p.Username, nil)
-}
-
-// Closed is a session that CloseSession ended, for the audit log.
-type Closed struct {
-	RepoID  int64
-	Repo    string
-	UserID  int64 // 0 for a CI session
-	Subject string
-	Via     string
-}
-
-// CloseSession ends session id. token must be that session's token; a session that already
-// ended stays as it is (Closed is then nil).
-func (s *Service) CloseSession(ctx context.Context, id int64, token string) (*Closed, error) {
-	row, err := s.lookupToken(ctx, token)
-	if errors.Is(err, auth.ErrBadCredentials) || (err == nil && row.ID != id) {
-		return nil, errorf(ErrDenied, "the token does not belong to this publish session")
-	}
-	if err != nil {
-		return nil, err
+// CloseSession ends session id for p, the principal of that session's token (a token of another
+// session is refused), and records publish.session.close. A session that ended meanwhile stays
+// as it is.
+func (s *Service) CloseSession(ctx context.Context, p *auth.Principal, id int64) error {
+	if !p.Is(auth.CredPublish) || p.Publish.ID != id {
+		return errorf(ErrDenied, "the token does not belong to this publish session")
 	}
 	n, err := s.wq.ClosePublishSession(ctx, dbq.ClosePublishSessionParams{ClosedAt: nullID(time.Now().Unix()), ID: id})
 	if err != nil || n == 0 {
-		return nil, err
+		return err
 	}
-	return &Closed{RepoID: row.RepoID, Repo: row.Repo, UserID: row.UserID.Int64, Subject: row.Subject, Via: row.Via}, nil
+	name := ""
+	if repo, err := s.repos.ByID(ctx, p.Publish.RepoID); err == nil {
+		name = repo.Name
+	}
+	_ = s.audit.Record(ctx, audit.Event{Action: ActionSessionClose, RepoID: p.Publish.RepoID, Repo: name,
+		Target: strconv.FormatInt(id, 10), Detail: map[string]any{"via": p.Publish.Via}})
+	return nil
 }
 
 // UserSessions returns a newest-first keyset page of a user's sessions: ids below after (0:

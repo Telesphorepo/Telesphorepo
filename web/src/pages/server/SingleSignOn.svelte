@@ -1,8 +1,11 @@
 <!--
   Sign-in options (Sign-in options permission): the "sso" settings group as three steps: connect your
-  provider (with its Test action), choose who becomes an administrator, how administrators sign
-  in. Single sign-on is for administrators only. The page tests the saved settings when it opens
-  and after a save, and shows that result only when the test fails; Test checks the unsaved edits.
+  provider (with its Test action), permissions from the provider (a claim and its values, each
+  with server permissions), and password sign-in. Anyone at the provider can sign in with single
+  sign-on. With a claim, the provider sets the server permissions of every SSO account at each
+  sign-in; without one, people set them on this server. The page tests the saved settings when it
+  opens and after a save, and shows that result only when the test fails; Test checks the unsaved
+  edits.
 -->
 <script lang="ts">
   import type { PageProps } from "$lib/router.svelte";
@@ -18,15 +21,13 @@
   let {}: PageProps = $props();
 
   const settings = new Resource(() => api.settings.get());
-  const group = $derived(settings.data?.groups.find((g) => g.name === "sso"));
+  const group = $derived(settings.data?.groups.find((g) => g.id === "sso"));
   const value = (key: string) => group?.settings.find((s: Setting) => s.key === key)?.value;
 
   const issuer = $derived(String(value("oidc.issuer") ?? ""));
   const clientID = $derived(String(value("oidc.client_id") ?? ""));
   const secretSet = $derived((value("oidc.client_secret") as { set?: boolean } | null)?.set === true);
-  const admins = $derived(
-    ((value("oidc.admin_values") as string[] | null) ?? []).length + ((value("oidc.admin_emails") as string[] | null) ?? []).length,
-  );
+  const claim = $derived(String(value("oidc.permission_claim") ?? ""));
 
   // --- the connection test ---
   let testing = $state(false);
@@ -34,7 +35,7 @@
 
   // The server's field messages, in the words of this page.
   function plain(key: string, msg: string) {
-    if (key === "oidc.admin_values" || key === "oidc.admin_emails") return "Add a group or an administrator email.";
+    if (key === "oidc.permission_map" && /claim/.test(msg)) return "Set the claim first, or leave this empty.";
     if (/required/.test(msg)) return "Single sign-on needs this.";
     const discovery = msg.match(/OIDC discovery failed: (.*)$/);
     if (discovery) return `The provider did not answer at this address: ${discovery[1]}`;
@@ -45,7 +46,7 @@
   async function test(patch: Record<string, unknown> = {}, quiet = false) {
     testing = !quiet;
     try {
-      await api.settings.testOIDC(patch);
+      await api.settings.test("sso", patch);
       tested = { ok: true, fields: {}, quiet };
     } catch (e) {
       // A failed test is a 400 with the fields that are wrong.
@@ -101,25 +102,21 @@
       placeholder: `${origin}/api/auth/oidc/callback`,
     },
     "oidc.scopes": { label: "Requested details", help: "Telesphorepo always asks for openid, also when the list leaves it out.", aka: "Scopes" },
-    "oidc.admin_values": {
-      label: "Administrator groups",
-      help: "Members of one of these groups can sign in as administrators.",
-      aka: "Admin claim values",
-      placeholder: "Type a group, then press Enter",
-    },
-    "oidc.admin_claim": {
+    "oidc.permission_claim": {
       label: "Group field",
-      help: "The sign-in token lists the groups in this field. For Keycloak realm roles, enter realm_access.roles.",
-      aka: "Admin claim",
+      help: "The sign-in token lists the groups in this field, for example groups. For Keycloak realm roles, enter realm_access.roles. Leave it empty to set permissions on this server.",
+      aka: "Claim",
     },
-    "oidc.admin_emails": {
-      label: "Administrator emails",
-      help: "People with one of these email addresses can sign in as administrators, when the provider verified the address.",
-      aka: "Admin emails",
-      placeholder: "Type an address, then press Enter",
+    "oidc.permission_map": {
+      label: "Permissions by group",
+      help: "Each group gives its server permissions. A person gets the permissions of each of their groups.",
+      permissionMap: true,
     },
-    "oidc.session_ttl": { label: "Sign-in lifetime", help: "After this time, an administrator must sign in with single sign-on again." },
-    admin_password_login: { label: "Password sign-in for administrators", help: "When this is off, administrators sign in with single sign-on only." },
+    "oidc.session_ttl": { label: "Sign-in lifetime", help: "After this time, a person must sign in with single sign-on again." },
+    "signin.password_login": {
+      label: "Password sign-in",
+      help: "With people who publish only, a person who manages (who holds a permission that needs a second factor) signs in with single sign-on.",
+    },
   };
 
   const sections = $derived([
@@ -130,21 +127,26 @@
       done: tested?.ok === true && !missing,
     },
     {
-      title: "Choose who becomes an administrator",
-      description: "Single sign-on is for administrators. Only the people that match here can sign in with it.",
-      keys: ["oidc.admin_values", "oidc.admin_claim", "oidc.admin_emails"],
-      done: admins > 0,
+      title: "Permissions from the provider",
+      description:
+        "Anyone at your provider can sign in. With a group field, the provider sets the server permissions of each such person at every sign-in, and nobody changes them here. Without one, you give permissions on the People page.",
+      keys: ["oidc.permission_claim", "oidc.permission_map"],
+      done: claim !== "",
     },
-    { title: "How administrators sign in", keys: ["oidc.session_ttl", "admin_password_login"] },
+    { title: "How people sign in", keys: ["oidc.session_ttl", "signin.password_login"] },
   ]);
 
-  const effects = (patch: Record<string, unknown>) =>
-    patch["admin_password_login"] === false
+  const effects = (patch: Record<string, unknown>) => [
+    ...(patch["signin.password_login"] === "publishers"
       ? [
-          "Administrators with a password can no longer sign in to this site",
-          "To turn password sign-in back on without single sign-on, set TR_ADMIN_PASSWORD_LOGIN=true and restart the server",
+          "People who manage can no longer sign in with a password",
+          "To allow password sign-in for everyone again without single sign-on, set TR_SIGNIN_PASSWORD_LOGIN=all and restart the server",
         ]
-      : [];
+      : []),
+    ...("oidc.permission_claim" in patch || "oidc.permission_map" in patch
+      ? ["The server permissions of single sign-on accounts change at their next sign-in"]
+      : []),
+  ];
 
   function saved(result: Settings | SettingsMoveStarted) {
     if ("groups" in result) settings.data = result;
@@ -154,7 +156,7 @@
   }
 </script>
 
-<PageHeader title="Sign-in options" description="How administrators sign in: with single sign-on, a password, or both." />
+<PageHeader title="Sign-in options" description="How people sign in: with single sign-on, a password, or both." />
 
 {#if settings.loading && !settings.data}
   <Loading rows={6} />

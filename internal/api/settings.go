@@ -5,331 +5,166 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"reflect"
 	"slices"
-	"strconv"
-	"strings"
 
-	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
-	"github.com/Telesphorepo/Telesphorepo/internal/move"
+	"github.com/Telesphorepo/Telesphorepo/internal/perm"
+	"github.com/Telesphorepo/Telesphorepo/internal/route"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 )
 
-// ssoKeys are the settings whose change must pass the OIDC discovery check before it is saved.
-var ssoKeys = func() map[string]bool {
-	m := map[string]bool{}
-	for _, k := range settings.SSOKeys {
-		m[k] = true
-	}
-	return m
-}()
-
-type settingsGroup struct {
-	Name     string          `json:"name"`
+// groupJSON is a settings group as GET /api/settings shows it.
+type groupJSON struct {
+	ID       string          `json:"id"`
 	Label    string          `json:"label"`
+	Module   string          `json:"module"`
+	Perm     perm.ID         `json:"perm"`
+	Page     string          `json:"page"`
 	Settings []settings.Item `json:"settings"`
 }
 
-type settingsJSON struct {
-	Groups []settingsGroup `json:"groups"`
-}
-
-func (a *API) settingsList(r *http.Request) settingsJSON {
-	items := a.settings.List(r.Context())
-	byGroup := map[string][]settings.Item{}
-	for _, it := range items {
-		byGroup[it.Group] = append(byGroup[it.Group], it)
-	}
-	out := settingsJSON{Groups: []settingsGroup{}}
-	for _, g := range settings.Groups {
-		if s := byGroup[g]; len(s) > 0 {
-			out.Groups = append(out.Groups, settingsGroup{g, settings.GroupLabels[g], s})
+// settingsPerms returns the permissions of the settings groups: a holder of one of them reaches
+// the settings API.
+func (a *API) settingsPerms() []perm.ID {
+	var out []perm.ID
+	for _, g := range a.h.Settings.Groups() {
+		if !slices.Contains(out, g.Perm) {
+			out = append(out, g.Perm)
 		}
 	}
 	return out
 }
 
-// authConfig tells the UI which sign-in methods exist. password_login is always true (publishers
-// sign in with a password); admin_password_login false means local admins must use SSO.
-// second_factor_optional is true only under "telesphorepo dev".
-func (a *API) authConfig(w http.ResponseWriter, r *http.Request) {
-	c := a.cfg()
-	httpx.WriteJSON(w, http.StatusOK, map[string]bool{
-		"password_login":         true,
-		"oidc":                   c.OIDCEnabled(),
-		"admin_password_login":   c.AdminPasswordLogin,
-		"second_factor_optional": a.auth.DevMode(),
-	})
+// settingsList returns the groups whose permission p holds, in module start order.
+func (a *API) settingsList(p *auth.Principal) map[string][]groupJSON {
+	out := []groupJSON{}
+	for _, g := range a.settings.Groups() {
+		if p.Perms.Has(g.Perm) {
+			out = append(out, groupJSON{g.ID, g.Label, g.Module, g.Perm, g.Page, a.settings.Items(g)})
+		}
+	}
+	return map[string][]groupJSON{"groups": out}
 }
 
-// settingsPerms are the server permissions that reach the settings: each one edits its own keys
-// (settingPerm).
-const settingsPerms = auth.PermGeneral | auth.PermSignIn | auth.PermStorage | auth.PermNetwork
-
-// settingPerm is the server permission that edits setting key: sign-in options for the SSO
-// group, storage for the blob store, network for the trusted proxies, and general for every
-// other setting (format settings included).
-func settingPerm(key string) auth.ServerPerm {
-	switch {
-	case key == settings.KeyTrustedProxies:
-		return auth.PermNetwork
-	case settings.IsStorageKey(key):
-		return auth.PermStorage
-	}
-	if def := settings.Lookup(key); def != nil && def.Group == settings.GroupSSO {
-		return auth.PermSignIn
-	}
-	return auth.PermGeneral
+// authConfig tells the UI which sign-in methods exist: {oidc, password_login,
+// second_factor_optional}. password_login is "all", or "publishers" when people who manage sign
+// in with single sign-on only. second_factor_optional is true only under "telesphorepo dev".
+func (a *API) authConfig(w http.ResponseWriter, r *http.Request, _ *route.Call) {
+	httpx.WriteJSON(w, http.StatusOK, struct {
+		OIDC                 bool   `json:"oidc"`
+		PasswordLogin        string `json:"password_login"`
+		SecondFactorOptional bool   `json:"second_factor_optional"`
+	}{a.auth.SSOEnabled(), auth.PasswordLogin.Get(a.settings.Current()), a.auth.DevMode()})
 }
 
-// getSettings returns every setting (general, signin, storage or network). Secret values stay
-// hidden.
-func (a *API) getSettings(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.can(w, r, settingsPerms); !ok {
-		return
-	}
-	httpx.WriteJSON(w, http.StatusOK, a.settingsList(r))
+// getSettings returns the settings groups whose permission the caller holds:
+// {groups: [{id, label, module, perm, page, settings: [Item]}]}. Secret values stay hidden.
+func (a *API) getSettings(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	httpx.WriteJSON(w, http.StatusOK, a.settingsList(c.P))
 }
 
 // decodePatch reads a {key: value} body. An empty string for a secret means "leave unchanged"
 // and is dropped (the UI sends it for untouched password fields); null clears a setting.
 func (a *API) decodePatch(w http.ResponseWriter, r *http.Request) (map[string]json.RawMessage, bool) {
 	var patch map[string]json.RawMessage
-	if !httpx.DecodeJSON(w, r, a.cfg().MaxJSONBytes, &patch) {
+	if !a.kit.Decode(w, r, &patch) {
 		return nil, false
 	}
 	for k, raw := range patch {
-		if def := settings.Lookup(k); def != nil && def.Secret && string(bytes.TrimSpace(raw)) == `""` {
+		if def := a.settings.Def(k); def != nil && def.Secret && string(bytes.TrimSpace(raw)) == `""` {
 			delete(patch, k)
 		}
 	}
 	return patch, true
 }
 
-// changesAny reports whether patch would change the effective value of one of the keys isKey accepts.
-func changesAny(items []settings.Item, patch map[string]json.RawMessage, isKey func(string) bool) bool {
-	for _, it := range items {
-		raw, ok := patch[it.Key]
-		if !ok || !isKey(it.Key) || it.Locked {
-			continue
+// settingsError writes a refusal of a settings change. A *settings.HookError answers its status
+// with {error, fields?}. A *settings.ValidationError answers 409 when it concerns a setting that
+// the environment sets, else 400, with {error, fields: {key: msg}}.
+func (a *API) settingsError(w http.ResponseWriter, r *http.Request, err error) {
+	var he *settings.HookError
+	if errors.As(err, &he) {
+		body := map[string]any{"error": he.Message}
+		if he.Fields != nil {
+			body["fields"] = he.Fields
 		}
-		if string(bytes.TrimSpace(raw)) == "null" {
-			if it.Source == settings.SourceDB {
-				return true
-			}
-			continue
-		}
-		if it.Secret {
-			return true // a new secret value; we cannot compare it
-		}
-		var v any
-		if json.Unmarshal(raw, &v) != nil {
-			return true // let validation report it
-		}
-		cur, _ := json.Marshal(it.Value)
-		var c any
-		_ = json.Unmarshal(cur, &c)
-		if !reflect.DeepEqual(v, c) {
-			return true
-		}
+		httpx.WriteJSON(w, he.Status, body)
+		return
 	}
-	return false
-}
-
-// settingsError writes a settings validation error: 409 if it concerns a setting forced by the
-// environment, else 400. Body: {error, fields:{key: msg}}.
-func (a *API) settingsError(w http.ResponseWriter, r *http.Request, err error, items []settings.Item) {
 	var ve *settings.ValidationError
 	if !errors.As(err, &ve) {
-		fail(w, r, err)
+		route.Fail(w, r, err)
 		return
 	}
 	status := http.StatusBadRequest
-	for _, it := range items {
-		if _, bad := ve.Fields[it.Key]; bad && it.Locked {
+	snap := a.settings.Current()
+	for k := range ve.Fields {
+		if snap.Source(k) == settings.SourceEnv {
 			status = http.StatusConflict
 		}
 	}
 	httpx.WriteJSON(w, status, map[string]any{"error": ve.Error(), "fields": ve.Fields})
 }
 
-// patchSettings saves a settings patch. The caller holds the permission of every key in it
-// (settingPerm; 403 otherwise).
-func (a *API) patchSettings(w http.ResponseWriter, r *http.Request) {
-	p, ok := a.can(w, r, settingsPerms)
-	if !ok {
-		return
-	}
+// patchSettings saves a settings patch. Each key needs the permission of its group (403). The
+// settings service runs the Validate of every touched group, then their Apply hooks (an Apply
+// may hold keys back and answer itself, e.g. 202 {move} while a storage move copies the blobs),
+// then saves. The service records one settings.update event that names the saved keys.
+func (a *API) patchSettings(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	p := c.P
 	patch, ok := a.decodePatch(w, r)
 	if !ok {
 		return
 	}
 	for k := range patch {
-		if need := settingPerm(k); !p.Perms.Has(need) {
-			httpx.Error(w, http.StatusForbidden, "permission required for "+k+": "+strings.Join(need.Names(), ""))
+		def := a.settings.Def(k)
+		if def == nil {
+			continue // the service answers 400 for an unknown key
+		}
+		if g := def.Group(); !p.Perms.Has(g.Perm) {
+			httpx.Error(w, http.StatusForbidden, "permission required for "+k+": "+perm.Current().Label(g.Perm))
 			return
 		}
 	}
-	items := a.settings.List(r.Context())
-	if msg := a.unknownProxyList(patch); msg != "" {
-		httpx.WriteJSON(w, http.StatusBadRequest, map[string]any{
-			"error": msg, "fields": map[string]string{settings.KeyTrustedProxies: msg},
-		})
+	applied, err := a.settings.Patch(r.Context(), patch, p.UserID)
+	if err != nil {
+		a.settingsError(w, r, err)
 		return
 	}
-	if changesAny(items, patch, func(k string) bool { return ssoKeys[k] }) {
-		if err := a.settings.TestOIDC(r.Context(), patch); err != nil {
-			a.settingsError(w, r, err, items)
-			return
-		}
-	}
-	if changesAny(items, patch, settings.IsStorageKey) {
-		if a.moves.Running() {
-			httpx.Error(w, http.StatusConflict, "a storage move is running; wait for it to end or cancel it")
-			return
-		}
-		if err := a.settings.TestStorage(r.Context(), patch); err != nil {
-			var ve *settings.ValidationError
-			if errors.As(err, &ve) {
-				a.settingsError(w, r, err, items)
-				return
-			}
-			msg := "storage test failed: " + err.Error()
-			httpx.WriteJSON(w, http.StatusBadRequest, map[string]any{
-				"error": msg, "fields": map[string]string{settings.KeyStorage: msg},
-			})
-			return
-		}
-		if a.startMove(w, r, patch, items, p) {
-			return
-		}
-	}
-	if err := a.settings.Update(r.Context(), patch, p.UserID); err != nil {
-		a.settingsError(w, r, err, items)
+	if applied != nil {
+		httpx.WriteJSON(w, applied.Status, applied.Body)
 		return
 	}
-	a.recordSettings(r, p, patch)
-	httpx.WriteJSON(w, http.StatusOK, a.settingsList(r))
+	httpx.WriteJSON(w, http.StatusOK, a.settingsList(p))
 }
 
-// unknownProxyList returns an error message when patch sets trusted_proxies with a "list:<name>"
-// entry whose IP list does not exist, else "". Other mistakes are left to the settings
-// validation.
-func (a *API) unknownProxyList(patch map[string]json.RawMessage) string {
-	raw, ok := patch[settings.KeyTrustedProxies]
-	if !ok {
-		return ""
-	}
-	var entries []string
-	if json.Unmarshal(raw, &entries) != nil {
-		return ""
-	}
-	for _, e := range entries {
-		name, ok := strings.CutPrefix(strings.ToLower(strings.TrimSpace(e)), settings.TrustedProxyList)
-		if ok && !a.rules.Exists(name) {
-			return "trusted_proxies: there is no IP list " + strconv.Quote(name)
-		}
-	}
-	return ""
-}
-
-// recordSettings writes the keys of a saved settings patch to the audit log, never the values.
-func (a *API) recordSettings(r *http.Request, p *auth.Principal, patch map[string]json.RawMessage) {
-	keys := make([]string, 0, len(patch))
-	for k := range patch {
-		keys = append(keys, k)
-	}
-	if len(keys) == 0 {
+// testSettings checks the values of group {group}: the body is merged over the current values
+// and not saved. The group's Validate runs, then its Test (e.g. the probe of a blob store, the
+// discovery check of an identity provider). {ok: true}, or 400 {ok: false, error, fields?}.
+func (a *API) testSettings(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	g := a.settings.Group(r.PathValue("group"))
+	if g == nil {
+		httpx.Error(w, http.StatusNotFound, "no such settings group")
 		return
 	}
-	slices.Sort(keys)
-	a.record(r, p, audit.SettingsUpdate, nil, strings.Join(keys, ","), map[string]any{"keys": keys})
-}
-
-// startMove handles a settings patch that changes the blob store (spec §11). When the new store
-// is at another location and assets exist, it saves the patch's other settings, starts a move
-// to the new store and answers 202 {move}; the storage settings change when the move is done.
-// It returns false when the caller should save the whole patch at once (no assets, or the same
-// location with other credentials or options).
-func (a *API) startMove(w http.ResponseWriter, r *http.Request, patch map[string]json.RawMessage, items []settings.Item, p *auth.Principal) bool {
-	userID := p.UserID
-	ctx := r.Context()
-	target, err := a.settings.Preview(patch)
-	if err != nil {
-		a.settingsError(w, r, err, items)
-		return true
-	}
-	if move.SameLocation(a.cfg(), target) {
-		return false
-	}
-	has, err := a.moves.HasAssets(ctx)
-	if err != nil {
-		fail(w, r, err)
-		return true
-	}
-	if !has {
-		return false
-	}
-	rest := map[string]json.RawMessage{}
-	for k, v := range patch {
-		if !settings.IsStorageKey(k) {
-			rest[k] = v
-		}
-	}
-	if len(rest) > 0 {
-		if err := a.settings.Update(ctx, rest, userID); err != nil {
-			a.settingsError(w, r, err, items)
-			return true
-		}
-	}
-	m, err := a.moves.Start(ctx, target, userID)
-	if err != nil {
-		moveFail(w, r, err)
-		return true
-	}
-	a.recordSettings(r, p, patch)
-	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"move": m})
-	return true
-}
-
-func (a *API) testStorage(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.can(w, r, auth.PermStorage); !ok {
+	if !c.P.Perms.Has(g.Perm) {
+		httpx.Error(w, http.StatusForbidden, "permission required: "+perm.Current().Label(g.Perm))
 		return
 	}
 	patch, ok := a.decodePatch(w, r)
 	if !ok {
 		return
 	}
-	if err := a.settings.TestStorage(r.Context(), patch); err != nil {
+	if err := a.settings.Test(r.Context(), g, patch); err != nil {
 		body := map[string]any{"ok": false, "error": err.Error()}
 		var ve *settings.ValidationError
-		if errors.As(err, &ve) {
+		var he *settings.HookError
+		switch {
+		case errors.As(err, &ve):
 			body["fields"] = ve.Fields
-		}
-		httpx.WriteJSON(w, http.StatusBadRequest, body)
-		return
-	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
-}
-
-// testOIDC validates the SSO settings patch would produce (merged over the current values, not
-// saved), including fetching the issuer's discovery document. {ok:true} or 400 {ok:false, error,
-// fields}.
-func (a *API) testOIDC(w http.ResponseWriter, r *http.Request) {
-	if _, ok := a.can(w, r, auth.PermSignIn); !ok {
-		return
-	}
-	patch, ok := a.decodePatch(w, r)
-	if !ok {
-		return
-	}
-	if err := a.settings.TestOIDC(r.Context(), patch); err != nil {
-		body := map[string]any{"ok": false, "error": err.Error()}
-		var ve *settings.ValidationError
-		if errors.As(err, &ve) {
-			body["fields"] = ve.Fields
+		case errors.As(err, &he) && he.Fields != nil:
+			body["fields"] = he.Fields
 		}
 		httpx.WriteJSON(w, http.StatusBadRequest, body)
 		return

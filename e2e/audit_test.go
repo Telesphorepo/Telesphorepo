@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-// The audit log (spec §13): events of sign-ins, publish sessions, uploads, deletes, repos,
+// The audit log: events of sign-ins, publish sessions, uploads, deletes, repos,
 // permissions, users and settings; the activity permission only; the only place that shows IP
 // addresses.
 
@@ -26,7 +26,7 @@ type auditEntry struct {
 	IP          string         `json:"ip"`
 }
 
-// auditAll lists the audit log with the query q (e.g. "action=upload"), following the pages.
+// auditAll lists the audit log with the query q (e.g. "action=file.upload"), following the pages.
 func auditAll(t *testing.T, s *Server, q string) []auditEntry {
 	t.Helper()
 	var all []auditEntry
@@ -70,8 +70,8 @@ func TestAudit(t *testing.T) {
 	s.CreateRepo(t, other, "raw", false, nil)
 	w, pw := RandName("writer"), "writer-pass-1234"
 	s.CreateUser(t, w, pw)
-	s.SetPerms(t, repo, w, "download", "publish", "delete")
-	s.SetPerms(t, other, w, "download", "publish")
+	s.SetPerms(t, repo, w, "repo.download", "repo.publish", "repo.delete")
+	s.SetPerms(t, other, w, "repo.download", "repo.publish")
 
 	if st, b := s.API(t, http.MethodPost, "/api/auth/login", map[string]string{"username": w, "password": "wrong-password"}, nil); st != http.StatusUnauthorized {
 		t.Fatalf("login with a wrong password: status %d: %s", st, b)
@@ -92,10 +92,10 @@ func TestAudit(t *testing.T) {
 
 	all := auditAll(t, s, "")
 	for _, c := range []struct{ action, actor string }{
-		{"signin.failed", w}, {"signin", w}, {"session.create", w}, {"upload", w}, {"delete", w},
-		{"session.close", w}, {"settings.update", s.AdminUser}, {"user.create", s.AdminUser},
+		{"signin.failed", w}, {"signin.success", w}, {"publish.session.create", w}, {"file.upload", w}, {"file.delete", w},
+		{"publish.session.close", w}, {"settings.update", s.AdminUser}, {"user.create", s.AdminUser},
 		{"user.update", s.AdminUser}, {"repo.create", s.AdminUser}, {"repo.update", s.AdminUser},
-		{"permission.set", s.AdminUser},
+		{"grant.set", s.AdminUser},
 	} {
 		if findAudit(all, c.action, c.actor) == nil {
 			t.Fatalf("audit log has no %s event by %s", c.action, c.actor)
@@ -114,14 +114,14 @@ func TestAudit(t *testing.T) {
 	ip := failed.IP
 	var up *auditEntry
 	for i := range all {
-		if all[i].Action == "upload" && all[i].Repo == repo {
+		if all[i].Action == "file.upload" && all[i].Repo == repo {
 			up = &all[i]
 		}
 	}
 	if up == nil || up.Actor != w || up.Target != "g/a/1.0/a-1.0.jar" || up.ActorUserID == nil {
 		t.Fatalf("upload event %+v: want actor %s, target g/a/1.0/a-1.0.jar and the user id", up, w)
 	}
-	if del := findAudit(all, "delete", w); del.Detail["count"] != float64(1) {
+	if del := findAudit(all, "file.delete", w); del.Detail["count"] != float64(1) {
 		t.Fatalf("delete event %+v: want count 1", del)
 	}
 	// Settings and user changes name the keys and fields, never the values.
@@ -136,9 +136,9 @@ func TestAudit(t *testing.T) {
 	}
 
 	// Filters and pages.
-	for _, e := range auditAll(t, s, "action=upload") {
-		if e.Action != "upload" {
-			t.Fatalf("?action=upload returned %s", e.Action)
+	for _, e := range auditAll(t, s, "action=file.upload") {
+		if e.Action != "file.upload" {
+			t.Fatalf("?action=file.upload returned %s", e.Action)
 		}
 	}
 	byRepo := auditAll(t, s, "repo="+repo)
@@ -150,8 +150,8 @@ func TestAudit(t *testing.T) {
 			t.Fatalf("?repo=%s returned an event of %q: %+v", repo, e.Repo, e)
 		}
 	}
-	if got := auditAll(t, s, "repo="+repo+"&action=delete"); len(got) != 1 || got[0].Action != "delete" {
-		t.Fatalf("?repo=&action=delete: %+v", got)
+	if got := auditAll(t, s, "repo="+repo+"&action=file.delete"); len(got) != 1 || got[0].Action != "file.delete" {
+		t.Fatalf("?repo=&action=file.delete: %+v", got)
 	}
 	var page struct {
 		Items []auditEntry `json:"items"`

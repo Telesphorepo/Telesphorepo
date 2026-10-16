@@ -30,6 +30,7 @@ func peopleOf(ps []accessPerson) []string {
 	return out
 }
 
+// accessNetworks is the detail of the network guard in the access report.
 type accessNetworks struct {
 	Any   bool `json:"any"`
 	Lists []struct {
@@ -42,15 +43,26 @@ type accessNetworks struct {
 	} `json:"cidrs"`
 }
 
+// accessGuards are the guard reports of the access report; the network module's guard is
+// "network".
+type accessGuards struct {
+	Network struct {
+		Restricted bool           `json:"restricted"`
+		Summary    string         `json:"summary"`
+		Detail     accessNetworks `json:"detail"`
+	} `json:"network"`
+}
+
 type repoAccess struct {
 	Repo     string         `json:"repo"`
 	Format   string         `json:"format"`
+	Kind     string         `json:"kind"`
 	People   []accessPerson `json:"people"`
 	Download struct {
 		Public   bool           `json:"public"`
 		People   []accessPerson `json:"people"`
 		Admins   int            `json:"admins"`
-		Networks accessNetworks `json:"networks"`
+		Guards   accessGuards   `json:"guards"`
 		Sentence string         `json:"sentence"`
 	} `json:"download"`
 	Publish struct {
@@ -64,11 +76,15 @@ type repoAccess struct {
 			Branches     []string `json:"branches"`
 			Tags         []string `json:"tags"`
 			Workflows    []string `json:"workflows"`
+			Subjects     []string `json:"subjects"`
 			Disabled     bool     `json:"disabled"`
 		} `json:"ci"`
-		Networks accessNetworks `json:"networks"`
-		LockedBy string         `json:"locked_by"`
-		Sentence string         `json:"sentence"`
+		Guards  accessGuards `json:"guards"`
+		Blocked *struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"blocked"`
+		Sentence string `json:"sentence"`
 	} `json:"publish"`
 }
 
@@ -87,7 +103,7 @@ func wantSentence(t *testing.T, what, got, want string) {
 }
 
 // everyRepoPerm is the set of the All repositories permission, in display order.
-const everyRepoPerm = "download,publish,delete,settings,access,pipelines"
+const everyRepoPerm = "repo.download,repo.publish,repo.delete,repo.settings,repo.access,ci.pipelines"
 
 func TestEffectiveAccess(t *testing.T) {
 	s := StartServer(t, ServerOpts{})
@@ -98,10 +114,10 @@ func TestEffectiveAccess(t *testing.T) {
 		s.CreateUser(t, u, u+"-password-1")
 	}
 	s.CreateUser(t, boss, boss+"-password-1", AllServerPerms...)
-	s.SetPerms(t, repo, reader, "download")
-	s.SetPerms(t, repo, writer, "download", "publish")
-	s.SetPerms(t, repo, gone, "download", "publish")
-	s.SetPerms(t, repo, boss, "download") // a grant of a holder of All repositories changes nothing
+	s.SetPerms(t, repo, reader, "repo.download")
+	s.SetPerms(t, repo, writer, "repo.download", "repo.publish")
+	s.SetPerms(t, repo, gone, "repo.download", "repo.publish")
+	s.SetPerms(t, repo, boss, "repo.download") // a grant of a holder of All repositories changes nothing
 	s.MustAPI(t, http.MethodPatch, "/api/users", map[string]any{"usernames": []string{gone}, "disabled": true}, s.Admin(), nil)
 
 	t.Run("people and admins", func(t *testing.T) {
@@ -109,7 +125,7 @@ func TestEffectiveAccess(t *testing.T) {
 		if a.Repo != repo || a.Format != "maven" || a.Download.Public {
 			t.Fatalf("access: %+v", a)
 		}
-		want := []string{reader + ":download/permission", writer + ":download,publish/permission"}
+		want := []string{reader + ":repo.download/permission", writer + ":repo.download,repo.publish/permission"}
 		slices.Sort(want)
 		if got := peopleOf(a.Download.People); !slices.Equal(got, want) {
 			t.Fatalf("download people = %v, want %v (no disabled user, no admin)", got, want)
@@ -117,15 +133,15 @@ func TestEffectiveAccess(t *testing.T) {
 		if got := peopleOf(a.People); !slices.Equal(got, want) {
 			t.Fatalf("people = %v, want %v", got, want)
 		}
-		if got := peopleOf(a.Publish.People); !slices.Equal(got, []string{writer + ":download,publish/permission"}) {
+		if got := peopleOf(a.Publish.People); !slices.Equal(got, []string{writer + ":repo.download,repo.publish/permission"}) {
 			t.Fatalf("publish people = %v, want only %s", got, writer)
 		}
 		// At least the bootstrap admin and boss; every admin here is a local account.
 		if a.Download.Admins < 2 || a.Publish.Admins != a.Download.Admins {
 			t.Fatalf("admins = %d / %d, want the same count, at least 2", a.Download.Admins, a.Publish.Admins)
 		}
-		if !a.Download.Networks.Any || !a.Publish.Networks.Any || len(a.Publish.CI) != 0 {
-			t.Fatalf("networks or CI: %+v", a)
+		if !a.Download.Guards.Network.Detail.Any || !a.Publish.Guards.Network.Detail.Any || len(a.Publish.CI) != 0 || a.Publish.Blocked != nil {
+			t.Fatalf("networks, CI or blocked: %+v", a)
 		}
 		wantSentence(t, "download", a.Download.Sentence, "2 people.")
 		wantSentence(t, "publish", a.Publish.Sentence, "1 person.")
@@ -166,11 +182,11 @@ func TestEffectiveAccess(t *testing.T) {
 			!slices.Equal(ci.Branches, []string{"main"}) || !slices.Equal(ci.Workflows, []string{".github/workflows/release.yml"}) {
 			t.Fatalf("pipeline = %+v", ci)
 		}
-		if a.Download.Networks.Any || len(a.Download.Networks.CIDRs) != 1 || a.Download.Networks.CIDRs[0].Note != "VPN" {
-			t.Fatalf("download networks = %+v", a.Download.Networks)
+		if dn := a.Download.Guards.Network; !dn.Restricted || dn.Detail.Any || len(dn.Detail.CIDRs) != 1 || dn.Detail.CIDRs[0].Note != "VPN" {
+			t.Fatalf("download networks = %+v", a.Download.Guards.Network)
 		}
-		if a.Publish.Networks.Any || len(a.Publish.Networks.Lists) != 1 || a.Publish.Networks.Lists[0].Title != "Office" {
-			t.Fatalf("publish networks = %+v", a.Publish.Networks)
+		if pn := a.Publish.Guards.Network; !pn.Restricted || pn.Detail.Any || len(pn.Detail.Lists) != 1 || pn.Detail.Lists[0].Title != "Office" {
+			t.Fatalf("publish networks = %+v", a.Publish.Guards.Network)
 		}
 		wantSentence(t, "download", a.Download.Sentence, "2 people, only from 10.0.0.0/8.")
 		wantSentence(t, "publish", a.Publish.Sentence, "1 person and 1 CI pipeline (acme/app, branch main), only from Office.")
@@ -235,12 +251,12 @@ func TestEffectiveAccess(t *testing.T) {
 
 		var w userAccess
 		s.MustAPI(t, http.MethodGet, "/api/users/"+writer+"/access?limit=500", nil, s.Admin(), &w)
-		if !w.CanPublish || len(w.Permissions) != 0 || permsOf(w, repo) != "download,publish/permission" || permsOf(w, private) != "" {
+		if !w.CanPublish || len(w.Permissions) != 0 || permsOf(w, repo) != "repo.download,repo.publish/permission" || permsOf(w, private) != "" {
 			t.Fatalf("writer's access: %+v", w)
 		}
 		var r userAccess
 		s.MustAPI(t, http.MethodGet, "/api/users/"+reader+"/access?limit=500", nil, s.Admin(), &r)
-		if permsOf(r, repo) != "download/permission" {
+		if permsOf(r, repo) != "repo.download/permission" {
 			t.Fatalf("reader's access: %+v", r)
 		}
 		var b userAccess
@@ -257,14 +273,14 @@ func TestEffectiveAccess(t *testing.T) {
 
 		var me userAccess
 		s.MustAPI(t, http.MethodGet, "/api/me/access?limit=500", nil, Basic{writer, writer + "-password-1"}, &me)
-		if me.Username != writer || permsOf(me, repo) != "download,publish/permission" {
+		if me.Username != writer || permsOf(me, repo) != "repo.download,repo.publish/permission" {
 			t.Fatalf("/api/me/access: %+v", me)
 		}
-		// A public repo without a grant is "download/public".
+		// A public repo without a grant is "repo.download/public".
 		pub := RandName("pub")
 		s.CreateRepo(t, pub, "raw", true, nil)
 		s.MustAPI(t, http.MethodGet, "/api/me/access?limit=500", nil, Basic{reader, reader + "-password-1"}, &me)
-		if permsOf(me, pub) != "download/public" {
+		if permsOf(me, pub) != "repo.download/public" {
 			t.Fatalf("reader's access to a public repo: %+v", me)
 		}
 		// Paging walks every repo once.
@@ -306,14 +322,14 @@ func TestRepoSettingsPermission(t *testing.T) {
 	s.CreateRepo(t, other, "raw", false, nil)
 	ed := RandName("ed")
 	s.CreateUser(t, ed, "ed-password-1")
-	s.SetPerms(t, mine, ed, "settings")
+	s.SetPerms(t, mine, ed, "repo.settings")
 	sess := s.SignIn(t, ed, "ed-password-1")
 
 	var me struct {
 		RepoPermissions map[string][]string `json:"repo_permissions"`
 	}
 	s.MustAPI(t, http.MethodGet, "/api/me", nil, sess, &me)
-	if got := me.RepoPermissions[mine]; !slices.Equal(got, []string{"settings"}) || len(me.RepoPermissions) != 1 {
+	if got := me.RepoPermissions[mine]; !slices.Equal(got, []string{"repo.settings"}) || len(me.RepoPermissions) != 1 {
 		t.Fatalf("GET /api/me: repo_permissions %v, want only %s: [settings]", me.RepoPermissions, mine)
 	}
 
@@ -345,8 +361,8 @@ func TestRepoSettingsPermission(t *testing.T) {
 		method, path string
 		body         any
 	}{
-		{http.MethodGet, "/api/repos/" + mine + "/permissions", nil},
-		{http.MethodPut, "/api/permissions", map[string]any{"users": []string{ed}, "repos": []string{mine}, "perms": []string{"settings", "delete"}}},
+		{http.MethodGet, "/api/repos/" + mine + "/grants", nil},
+		{http.MethodPut, "/api/grants", map[string]any{"users": []string{ed}, "repos": []string{mine}, "perms": []string{"repo.settings", "repo.delete"}}},
 		{http.MethodPost, "/api/repos/delete", map[string]any{"names": []string{mine}}},
 		{http.MethodGet, "/api/users", nil},
 		{http.MethodGet, "/api/settings", nil},
@@ -375,29 +391,29 @@ func TestAccessPermission(t *testing.T) {
 	for _, u := range []string{mgr, p, q} {
 		s.CreateUser(t, u, u+"-password-1")
 	}
-	s.SetPerms(t, repo, mgr, "download", "publish", "access")
-	s.SetPerms(t, repo, q, "download", "delete")
+	s.SetPerms(t, repo, mgr, "repo.download", "repo.publish", "repo.access")
+	s.SetPerms(t, repo, q, "repo.download", "repo.delete")
 	sess := s.SignIn(t, mgr, mgr+"-password-1")
 	set := func(users []string, repos []string, perms ...string) (int, []byte) {
 		t.Helper()
-		return s.API(t, http.MethodPut, "/api/permissions", map[string]any{"users": users, "repos": repos, "perms": nonNil(perms)}, sess)
+		return s.API(t, http.MethodPut, "/api/grants", map[string]any{"users": users, "repos": repos, "perms": nonNil(perms)}, sess)
 	}
 
-	st, b := set([]string{p}, []string{repo}, "download")
+	st, b := set([]string{p}, []string{repo}, "repo.download")
 	wantAPIStatus(t, "give download", st, b, http.StatusOK)
-	st, b = set([]string{p}, []string{repo}, "download", "publish", "access")
+	st, b = set([]string{p}, []string{repo}, "repo.download", "repo.publish", "repo.access")
 	wantAPIStatus(t, "give download, publish and access", st, b, http.StatusOK)
-	st, b = set([]string{p}, []string{repo}, "download", "delete")
+	st, b = set([]string{p}, []string{repo}, "repo.download", "repo.delete")
 	wantAPIStatus(t, "give delete, which mgr does not hold", st, b, http.StatusForbidden)
-	st, b = set([]string{p}, []string{repo}, "download", "publish", "settings")
+	st, b = set([]string{p}, []string{repo}, "repo.download", "repo.publish", "repo.settings")
 	wantAPIStatus(t, "give settings, which mgr does not hold", st, b, http.StatusForbidden)
 	// q holds delete, which mgr does not hold: mgr cannot take it away.
-	st, b = set([]string{q}, []string{repo}, "download")
+	st, b = set([]string{q}, []string{repo}, "repo.download")
 	wantAPIStatus(t, "remove delete, which mgr does not hold", st, b, http.StatusForbidden)
 	st, b = set([]string{q}, []string{repo})
 	wantAPIStatus(t, "remove every permission of q", st, b, http.StatusForbidden)
 	// No access on other: 403 for other alone and for a list with it.
-	st, b = set([]string{p}, []string{other}, "download")
+	st, b = set([]string{p}, []string{other}, "repo.download")
 	wantAPIStatus(t, "give on a repository without access", st, b, http.StatusForbidden)
 	st, b = set([]string{p}, []string{repo, other})
 	wantAPIStatus(t, "a list with a repository without access", st, b, http.StatusForbidden)
@@ -406,44 +422,45 @@ func TestAccessPermission(t *testing.T) {
 		Username string   `json:"username"`
 		Perms    []string `json:"perms"`
 	}
-	s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/permissions", nil, sess, &perms)
+	s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/grants", nil, sess, &perms)
 	have := map[string]string{}
 	for _, x := range perms {
 		have[x.Username] = strings.Join(x.Perms, ",")
 	}
-	if have[p] != "download,publish,access" || have[q] != "download,delete" || have[mgr] != "download,publish,access" {
+	if have[p] != "repo.download,repo.publish,repo.access" || have[q] != "repo.download,repo.delete" || have[mgr] != "repo.download,repo.publish,repo.access" {
 		t.Fatalf("GET /api/repos/%s/permissions: %v", repo, have)
 	}
-	st, b = s.API(t, http.MethodGet, "/api/repos/"+other+"/permissions", nil, sess)
+	st, b = s.API(t, http.MethodGet, "/api/repos/"+other+"/grants", nil, sess)
 	wantAPIStatus(t, "GET the permissions of a repository without access", st, b, http.StatusForbidden)
 
 	// Remove with an empty set.
 	st, b = set([]string{p}, []string{repo})
 	wantAPIStatus(t, "remove every permission of p", st, b, http.StatusOK)
 	perms = nil
-	s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/permissions", nil, sess, &perms)
+	s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/grants", nil, sess, &perms)
 	for _, x := range perms {
 		if x.Username == p {
 			t.Fatalf("p still holds %v after the removal", x.Perms)
 		}
 	}
 
-	// The dependency rules: publish needs download, and pipelines needs publish.
-	for _, bad := range [][]string{{"publish"}, {"download", "pipelines"}, {"pipelines"}, {"bogus"}} {
-		st, b := s.API(t, http.MethodPut, "/api/permissions", map[string]any{"users": []string{p}, "repos": []string{repo}, "perms": bad}, s.Admin())
+	// The registry rules: repo.publish needs repo.download and ci.pipelines needs repo.publish;
+	// an unknown ID and a server permission are refused.
+	for _, bad := range [][]string{{"repo.publish"}, {"repo.download", "ci.pipelines"}, {"ci.pipelines"}, {"bogus"}, {"people.manage"}} {
+		st, b := s.API(t, http.MethodPut, "/api/grants", map[string]any{"users": []string{p}, "repos": []string{repo}, "perms": bad}, s.Admin())
 		wantAPIStatus(t, fmt.Sprintf("perms %v", bad), st, b, http.StatusBadRequest)
 	}
-	s.SetPerms(t, repo, p, "download", "publish", "pipelines")
+	s.SetPerms(t, repo, p, "repo.download", "repo.publish", "ci.pipelines")
 
-	// One permission.set event per change, with the old and the new set.
+	// One grant.set event per change, with the old and the new set.
 	var found bool
-	for _, e := range auditAll(t, s, "action=permission.set&repo="+repo) {
-		if e.Actor == mgr && e.Target == p && fmt.Sprint(e.Detail["old"]) == "[download]" && fmt.Sprint(e.Detail["new"]) == "[download publish access]" {
+	for _, e := range auditAll(t, s, "action=grant.set&repo="+repo) {
+		if e.Actor == mgr && e.Target == p && fmt.Sprint(e.Detail["old"]) == "[repo.download]" && fmt.Sprint(e.Detail["new"]) == "[repo.download repo.publish repo.access]" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatal("no permission.set event by mgr for p with old [download] and new [download publish access]")
+		t.Fatal("no grant.set event by mgr for p with old [repo.download] and new [repo.download repo.publish repo.access]")
 	}
 }
 
@@ -455,28 +472,28 @@ func TestLastPeople(t *testing.T) {
 		return slices.DeleteFunc(slices.Clone(AllServerPerms), func(p string) bool { return p == drop })
 	}
 	// The bootstrap admin is the only holder: removing people from themselves is refused.
-	st, b := s.API(t, http.MethodPut, "/api/users/"+s.AdminUser+"/permissions", map[string]any{"permissions": allBut("people")}, s.Admin())
+	st, b := s.API(t, http.MethodPut, "/api/users/"+s.AdminUser+"/permissions", map[string]any{"permissions": allBut("people.manage")}, s.Admin())
 	wantAPIStatus(t, "remove people from the last holder", st, b, http.StatusConflict)
 
 	// A second holder: one of the two can give it up.
 	boss := RandName("boss")
-	s.CreateUser(t, boss, "boss-password-1", "people")
+	s.CreateUser(t, boss, "boss-password-1", "people.manage")
 	st, b = s.API(t, http.MethodPut, "/api/users/"+boss+"/permissions", map[string]any{"permissions": []string{}}, s.Admin())
 	wantAPIStatus(t, "remove people from one of two holders", st, b, http.StatusOK)
-	st, b = s.API(t, http.MethodPut, "/api/users/"+s.AdminUser+"/permissions", map[string]any{"permissions": allBut("people")}, s.Admin())
+	st, b = s.API(t, http.MethodPut, "/api/users/"+s.AdminUser+"/permissions", map[string]any{"permissions": allBut("people.manage")}, s.Admin())
 	wantAPIStatus(t, "remove people from the last holder again", st, b, http.StatusConflict)
 
 	// A person with people changes only the permissions they hold.
-	s.SetServerPerms(t, boss, "people")
+	s.SetServerPerms(t, boss, "people.manage")
 	bossUI := s.SignIn(t, boss, "boss-password-1")
-	st, b = s.API(t, http.MethodPost, "/api/users", map[string]any{"username": RandName("x"), "password": "x-password-1", "permissions": []string{"storage"}}, bossUI)
+	st, b = s.API(t, http.MethodPost, "/api/users", map[string]any{"username": RandName("x"), "password": "x-password-1", "permissions": []string{"storage.manage"}}, bossUI)
 	wantAPIStatus(t, "create a person with a permission that boss does not hold", st, b, http.StatusForbidden)
 	helper := RandName("helper")
-	st, b = s.API(t, http.MethodPost, "/api/users", map[string]any{"username": helper, "password": "helper-password-1", "permissions": []string{"people"}}, bossUI)
+	st, b = s.API(t, http.MethodPost, "/api/users", map[string]any{"username": helper, "password": "helper-password-1", "permissions": []string{"people.manage"}}, bossUI)
 	wantAPIStatus(t, "create a person with people", st, b, http.StatusCreated)
-	st, b = s.API(t, http.MethodPut, "/api/users/"+helper+"/permissions", map[string]any{"permissions": []string{"people", "general"}}, bossUI)
+	st, b = s.API(t, http.MethodPut, "/api/users/"+helper+"/permissions", map[string]any{"permissions": []string{"people.manage", "settings.general"}}, bossUI)
 	wantAPIStatus(t, "give general, which boss does not hold", st, b, http.StatusForbidden)
-	st, b = s.API(t, http.MethodPut, "/api/users/"+s.AdminUser+"/permissions", map[string]any{"permissions": []string{"people"}}, bossUI)
+	st, b = s.API(t, http.MethodPut, "/api/users/"+s.AdminUser+"/permissions", map[string]any{"permissions": []string{"people.manage"}}, bossUI)
 	wantAPIStatus(t, "take from the admin permissions that boss does not hold", st, b, http.StatusForbidden)
 	// Boss does not cover the admin: no disable, no password change.
 	st, b = s.API(t, http.MethodPatch, "/api/users", map[string]any{"usernames": []string{s.AdminUser}, "disabled": true}, bossUI)
@@ -487,18 +504,18 @@ func TestLastPeople(t *testing.T) {
 	// boss; the admin is then the last enabled holder.
 	s.MustAPI(t, http.MethodPatch, "/api/users", map[string]any{"usernames": []string{helper}, "disabled": true}, bossUI, nil)
 	s.MustAPI(t, http.MethodPut, "/api/users/"+boss+"/permissions", map[string]any{"permissions": []string{}}, s.Admin(), nil)
-	st, b = s.API(t, http.MethodPut, "/api/users/"+s.AdminUser+"/permissions", map[string]any{"permissions": allBut("people")}, s.Admin())
+	st, b = s.API(t, http.MethodPut, "/api/users/"+s.AdminUser+"/permissions", map[string]any{"permissions": allBut("people.manage")}, s.Admin())
 	wantAPIStatus(t, "remove people while the other holder is disabled", st, b, http.StatusConflict)
 
 	// One user.permissions event per change, with the old and the new set.
 	var found bool
 	for _, e := range auditAll(t, s, "action=user.permissions") {
-		if e.Target == boss && fmt.Sprint(e.Detail["old"]) == "[people]" && fmt.Sprint(e.Detail["new"]) == "[]" {
+		if e.Target == boss && fmt.Sprint(e.Detail["old"]) == "[people.manage]" && fmt.Sprint(e.Detail["new"]) == "[]" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("no user.permissions event for %s with old [people] and new []", boss)
+		t.Fatalf("no user.permissions event for %s with old [people.manage] and new []", boss)
 	}
 }
 
@@ -511,20 +528,28 @@ func TestSecondFactorRule(t *testing.T) {
 	dl, ed := RandName("dl"), RandName("ed")
 	s.CreateUser(t, dl, "dl-password-1")
 	s.CreateUser(t, ed, "ed-password-1")
-	s.SetPerms(t, repo, dl, "download", "publish")
-	s.SetPerms(t, repo, ed, "download", "settings")
+	s.SetPerms(t, repo, dl, "repo.download", "repo.publish")
+	s.SetPerms(t, repo, ed, "repo.download", "repo.settings")
 
 	type loginAnswer struct {
 		SecondFactor         bool `json:"second_factor"`
 		SecondFactorRequired bool `json:"second_factor_required"`
 	}
+	// login answers {second_factor, methods} or {session: SessionView}; it flattens both.
 	login := func(user, pass string) (*Session, loginAnswer) {
 		t.Helper()
 		jar, _ := cookiejar.New(nil)
 		sess := &Session{Jar: jar}
-		var a loginAnswer
+		var a struct {
+			SecondFactor bool         `json:"second_factor"`
+			Session      *loginAnswer `json:"session"`
+		}
 		s.MustAPI(t, http.MethodPost, "/api/auth/login", map[string]string{"username": user, "password": pass}, sess, &a)
-		return sess, a
+		out := loginAnswer{SecondFactor: a.SecondFactor}
+		if a.Session != nil {
+			out.SecondFactorRequired = a.Session.SecondFactorRequired
+		}
+		return sess, out
 	}
 
 	t.Run("download and publish: the password alone", func(t *testing.T) {
@@ -579,7 +604,7 @@ func TestSecondFactorRule(t *testing.T) {
 	t.Run("a grant of settings ends the sessions of a password sign-in", func(t *testing.T) {
 		sess := s.SignIn(t, dl, "dl-password-1")
 		s.MustAPI(t, http.MethodGet, "/api/me", nil, sess, nil)
-		s.SetPerms(t, repo, dl, "download", "publish", "settings")
+		s.SetPerms(t, repo, dl, "repo.download", "repo.publish", "repo.settings")
 		st, b := s.API(t, http.MethodGet, "/api/me", nil, sess)
 		wantAPIStatus(t, "GET /api/me after the grant of settings", st, b, http.StatusUnauthorized)
 		// The next sign-in asks for a factor.
@@ -593,9 +618,30 @@ func TestSecondFactorRule(t *testing.T) {
 		s.CreateUser(t, pub, "pub-password-1")
 		sess := s.SignIn(t, pub, "pub-password-1")
 		s.MustAPI(t, http.MethodGet, "/api/me", nil, sess, nil)
-		s.SetServerPerms(t, pub, "activity")
+		s.SetServerPerms(t, pub, "activity.read")
 		st, b := s.API(t, http.MethodGet, "/api/me", nil, sess)
 		wantAPIStatus(t, "GET /api/me after the grant of activity", st, b, http.StatusUnauthorized)
 		s.MustAPI(t, http.MethodGet, "/api/audit", nil, s.SignIn(t, pub, "pub-password-1"), nil)
 	})
+}
+
+// TestCIProviderPipelines: the access report reads a trust policy through the CI provider of its
+// issuer. A Jenkins policy (issuer <jenkins>/oidc) lists the job paths of its sub claims; a policy
+// of an issuer that no provider matches is "other" with its subjects.
+func TestCIProviderPipelines(t *testing.T) {
+	s := StartServer(t, ServerOpts{})
+	repo := RandName("ci")
+	s.CreateRepo(t, repo, "raw", false, nil)
+	createTrust(t, s, trustPolicy{Name: "jenkins-" + randHex(2), Issuer: "https://jenkins.example.com/oidc",
+		Claims: map[string][]string{"sub": {"https://jenkins.example.com/job/app/job/build/"}}, Repos: []string{repo}})
+	createTrust(t, s, trustPolicy{Name: "other-" + randHex(2), Issuer: "https://ci.example.com",
+		Claims: map[string][]string{"sub": {"pipeline:42"}}, Repos: []string{repo}})
+	a := getAccess(t, s, repo, "")
+	bySystem := map[string][]string{}
+	for _, p := range a.Publish.CI {
+		bySystem[p.System] = append(p.Repositories, p.Subjects...)
+	}
+	if !slices.Equal(bySystem["jenkins"], []string{"app/build"}) || !slices.Equal(bySystem["other"], []string{"pipeline:42"}) || len(bySystem) != 2 {
+		t.Fatalf("pipelines by system: %v, want jenkins app/build and other pipeline:42", bySystem)
+	}
 }

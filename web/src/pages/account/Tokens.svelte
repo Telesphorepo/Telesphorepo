@@ -1,11 +1,12 @@
 <!--
   Your account: Tokens. Two sections on one page. Read tokens: a build or a script downloads with
   your username and a read token; the secret shows once. Publish tokens: every publish needs one.
-  The Gradle plugin, the Maven extension and CI get theirs by themselves; for a script, create one
+  Publisher clients and CI get theirs by themselves; for a script, create one
   here for one repository after a fresh second step. Creating one prints a felt ticket; ending it
   punches the ticket. A single sign-on account has neither: it shows why, once per section.
 -->
 <script lang="ts">
+  import { untrack } from "svelte";
   import { toast } from "svelte-sonner";
   import type { PageProps } from "$lib/router.svelte";
   import { href, repoPath } from "$lib/router.svelte";
@@ -25,6 +26,7 @@
   import StatusBadge from "$lib/components/StatusBadge.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
   import CodeSnippet from "$lib/components/CodeSnippet.svelte";
+  import CodeBlock from "$lib/components/CodeBlock.svelte";
   import FormField from "$lib/components/FormField.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import ShortFormDialog from "$lib/components/ShortFormDialog.svelte";
@@ -71,14 +73,13 @@
   }
 
   // --- publish tokens: choose the repository, then confirm with the second step ---
-  const USER = "publish";
   const repos = new Resource(() => api.repos.list());
   const sessions = new Keyset((p) => api.publish.sessions(p));
 
   const writable = $derived(
     (repos.data ?? [])
       // Publish tokens are for hosted repositories: nobody publishes to a group or a proxy.
-      .filter((r) => r.kind === "hosted" && r.permissions?.includes("publish"))
+      .filter((r) => r.kind === "hosted" && r.permissions?.includes("repo.publish"))
       .sort((a, b) => a.name.localeCompare(b.name)),
   );
 
@@ -106,15 +107,19 @@
     await sessions.reload();
   }
 
-  const createdRepo = $derived(created ? (repos.data ?? []).find((r) => r.name === created!.repo) : undefined);
-  // The command asks for the token at a hidden prompt and gives it to curl on stdin, so the token
-  // is not in the shell history or in an argument of a process.
-  const uploadCmd = $derived.by(() => {
-    if (!created || !createdRepo) return "";
-    const url = `${location.origin}/${createdRepo.format}/${createdRepo.name}`;
-    const target = createdRepo.format === "debian" ? `-T FILE.deb ${url}/upload/DIST/COMPONENT` : `-T FILE ${url}/PATH/FILE`;
-    return `printf 'Publish token: '; read -rs TOKEN; echo; printf 'user = "${USER}:%s"\\n' "$TOKEN" | curl -fsS -K - ${target}`;
+  // The curl upload of the repository that the token is for: the "by hand" publish snippet of its
+  // format (GET /api/repos/{name}/usage). It asks for the token at a hidden prompt and gives it to
+  // curl on stdin, so the token is not in the shell history or in an argument of a process.
+  const usage = new Resource(() => (created ? api.repos.usage(created.repo) : Promise.resolve(null)), { lazy: true });
+  let usageFor = "";
+  $effect(() => {
+    const r = created?.repo ?? "";
+    if (r && r !== usageFor) {
+      usageFor = r;
+      untrack(() => usage.reload());
+    }
   });
+  const hand = $derived(created && usageFor === created.repo ? usage.data?.snippets.find((s) => s.via === "hand") : undefined);
 
   // Ending a token punches the ticket; it stays until Done.
   async function end() {
@@ -199,7 +204,7 @@
   {#if sso}
     <CompactEmpty
       icon={UploadIcon}
-      text="You sign in with single sign-on, so this account has no publish tokens. Publish from your computer with the Gradle plugin or the Maven extension, or from CI."
+      text="You sign in with single sign-on, so this account has no publish tokens. Publish from your computer with the publisher client of your build tool, or from CI."
     />
   {:else}
     {#if created}
@@ -228,7 +233,7 @@
               </p>
             </div>
             <CodeSnippet value={created.token} label="Token" secret />
-            {#if uploadCmd}<CodeSnippet value={uploadCmd} label="Upload one file" />{/if}
+            {#if hand}<CodeBlock title={hand.title} code={hand.code} />{/if}
             <p class="text-meta text-muted-foreground">
               To publish from a build or from CI, see
               <a href={href(repoPath(created.repo, "publish"))} class="text-link underline-offset-4 hover:underline">how to publish to {created.repo}</a>.

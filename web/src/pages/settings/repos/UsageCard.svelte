@@ -11,12 +11,12 @@
   import ErrorState from "$lib/components/ErrorState.svelte";
   import Loading from "$lib/components/Loading.svelte";
   import SnippetTabs from "../../repo/snippets/SnippetTabs.svelte";
-  import { browse } from "../../repo/browse";
+  import { api } from "$lib/api";
 
   let { repo, title }: { repo: Repo; title: string } = $props();
 
   /* svelte-ignore state_referenced_locally */
-  const usage = new Resource(() => browse.usage(repo.name));
+  const usage = new Resource(() => api.repos.usage(repo.name));
   const base = $derived((usage.data?.base_url || location.origin).replace(/\/+$/, ""));
   const address = $derived(`${base}/${repo.format}/${repo.name}`);
   const use = $derived((usage.data?.snippets ?? []).filter((s) => s.purpose === "use"));
@@ -30,7 +30,7 @@
     {:else if usage.error && !usage.data}
       <ErrorState error={usage.error} title="The instructions did not load" onRetry={usage.reload} />
     {:else if use.length}
-      <SnippetTabs snippets={use} label="Build tool" />
+      <SnippetTabs snippets={use} tools={usage.data?.tools} label="Build tool" />
     {/if}
   </div>
 </Section>

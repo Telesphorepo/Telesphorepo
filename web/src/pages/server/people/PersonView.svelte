@@ -11,11 +11,11 @@
 <script lang="ts">
   import { untrack } from "svelte";
   import { toast } from "svelte-sonner";
-  import { api, ApiError, type Repo, type RepoPermission, type ServerPermission, type User, type UserRepoAccess } from "$lib/api";
+  import { api, ApiError, type Repo, type PermId, type User, type UserRepoAccess } from "$lib/api";
   import { Keyset, Resource, type TableSource } from "$lib/load.svelte";
   import { href, repoPath, repoSettingsPath } from "$lib/router.svelte";
   import { auth } from "$lib/auth.svelte";
-  import { SERVER_PERMISSIONS, SERVER_PICKER_GROUPS, repoPhrase, serverPhrase, sortServerPermissions } from "$lib/permissions";
+  import { allReposPermissions, labelOf, pickerGroups, repoPhrase, serverPhrase, sortServerPermissions } from "$lib/permissions";
   import { count, someNames } from "$lib/words";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
@@ -61,22 +61,21 @@
   const u = $derived(user.data);
   const self = $derived(person === auth.user?.username);
   const sso = $derived(u?.kind === "oidc");
-  const allRepos = $derived(!!u?.permissions?.includes("repos"));
+  const allRepos = $derived(allReposPermissions().some((p) => !!u?.permissions?.includes(p)));
   // The server permissions of the caller: they give and remove only these.
-  const mine = $derived((auth.user?.permissions ?? []) as ServerPermission[]);
+  const mine = $derived((auth.user?.permissions ?? []) as PermId[]);
   // People changes the password of a person only when it holds every permission of that person.
   const covers = $derived(!!u && (u.permissions ?? []).every((p) => mine.includes(p)));
 
   // --- server permissions ---
-  let serverSaved = $state<ServerPermission[]>([]);
-  let serverValue = $state<ServerPermission[]>([]);
+  let serverSaved = $state<PermId[]>([]);
+  let serverValue = $state<PermId[]>([]);
   $effect(() => {
     const p = u?.permissions;
     if (p) untrack(() => ((serverSaved = sortServerPermissions(p)), (serverValue = sortServerPermissions(p))));
   });
   const added = $derived(serverValue.filter((p) => !serverSaved.includes(p)));
   const removed = $derived(serverSaved.filter((p) => !serverValue.includes(p)));
-  const labelOf = (p: ServerPermission) => SERVER_PERMISSIONS.find((x) => x.name === p)?.label ?? p;
   let serverConfirm = $state(false);
   async function saveServer() {
     const next = await api.users.setPermissions(person, serverValue);
@@ -92,7 +91,7 @@
   const repos = new Resource<Repo[]>(() => api.repos.list());
 
   // A public repository without a grant shows with no permissions of its own.
-  type Row = { repo: string; format: string; public: boolean; perms: RepoPermission[]; granted: boolean };
+  type Row = { repo: string; format: string; public: boolean; perms: PermId[]; granted: boolean };
   const rows = $derived(
     access.items
       .filter((r) => r.via === "permission" || r.public)
@@ -135,7 +134,7 @@
   let removeOpen = $state(false);
   async function removeAccess() {
     const names = pickedNames;
-    await api.permissions.set([person], names, []);
+    await api.grants.set([person], names, []);
     toast.success(`Removed the access of ${person} to ${repoCount(names.length)}.`);
     await afterChange();
   }
@@ -145,26 +144,26 @@
   const granted = $derived(new Set(rows.filter((r) => r.granted).map((r) => r.repo)));
   const choices = $derived(
     (repos.data ?? [])
-      .filter((r) => !granted.has(r.name) && auth.canRepo(r.name, "access"))
+      .filter((r) => !granted.has(r.name) && auth.canRepo(r.name, "repo.access"))
       .sort((a, b) => a.name.localeCompare(b.name))
       .map((r) => ({ id: r.name, label: r.name, detail: r.anonymous_read ? "Public: anyone can download" : undefined })),
   );
-  async function give(names: string[], perms: RepoPermission[]) {
-    await api.permissions.set([person], names, perms);
+  async function give(names: string[], perms: PermId[]) {
+    await api.grants.set([person], names, perms);
     toast.success(`Gave ${person} access to ${repoCount(names.length)}: ${repoPhrase(perms)}.`);
     await afterChange();
   }
 
   let changeTargets = $state<string[]>([]);
-  let changeStart = $state<RepoPermission[]>([]);
+  let changeStart = $state<PermId[]>([]);
   let changeOpen = $state(false);
-  function openChange(names: string[], start: RepoPermission[]) {
+  function openChange(names: string[], start: PermId[]) {
     changeTargets = names;
     changeStart = start;
     changeOpen = true;
   }
-  async function change(names: string[], perms: RepoPermission[]) {
-    await api.permissions.set([person], names, perms);
+  async function change(names: string[], perms: PermId[]) {
+    await api.grants.set([person], names, perms);
     toast.success(
       perms.length
         ? `Changed the permissions of ${person} on ${repoCount(names.length)}: ${repoPhrase(perms)}.`
@@ -281,11 +280,11 @@
 
   <FormSection
     title="Server permissions"
-    description={sso
-      ? "Each sign-in with single sign-on gives the account every server permission again."
+    description={u.permissions_managed
+      ? "Single sign-on manages these permissions."
       : "Check the parts of the server that this person manages. Every one together makes an administrator."}
   >
-    <PermissionPicker id="{id}-server" groups={SERVER_PICKER_GROUPS} held={mine} columns={2} bind:value={serverValue} />
+    <PermissionPicker id="{id}-server" groups={pickerGroups("server")} held={u.permissions_managed ? [] : mine} columns={2} bind:value={serverValue} />
   </FormSection>
 
   <Section title="Repositories">
@@ -303,7 +302,7 @@
         key={(r) => r.repo}
         columns={[{ label: "Repository", class: "w-64 min-w-64 max-sm:min-w-0" }, { label: "Permissions", grow: true }, { label: "", srLabel: "Actions" }]}
         bind:picked
-        pickable={(r) => auth.canRepo(r.repo, "access")}
+        pickable={(r) => auth.canRepo(r.repo, "repo.access")}
         pickLabel={(r) => r.repo}
       >
         {#snippet row(r)}
@@ -316,15 +315,15 @@
           </Cell>
           <Cell grow muted text={r.granted ? repoPhrase(r.perms) : "Download, because it is public"} />
           <Cell actions>
-            {#if auth.canRepo(r.repo, "access")}
-              <Button variant="ghost" size="sm" aria-label="Change the permissions of {person} on {r.repo}" onclick={() => openChange([r.repo], r.granted ? r.perms : ["download"])}
+            {#if auth.canRepo(r.repo, "repo.access")}
+              <Button variant="ghost" size="sm" aria-label="Change the permissions of {person} on {r.repo}" onclick={() => openChange([r.repo], r.granted ? r.perms : ["repo.download"])}
                 >Change</Button
               >
             {/if}
           </Cell>
         {/snippet}
         {#snippet bulk()}
-          <Button variant="outline" size="sm" onclick={() => openChange(pickedNames, ["download"])}>Change permissions</Button>
+          <Button variant="outline" size="sm" onclick={() => openChange(pickedNames, ["repo.download"])}>Change permissions</Button>
           <Button variant="ghost" size="sm" class="hover:bg-destructive/10 hover:text-destructive" onclick={() => (removeOpen = true)}>Remove access</Button>
         {/snippet}
         {#snippet empty()}

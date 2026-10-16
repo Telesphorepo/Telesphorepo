@@ -1,6 +1,8 @@
 // Reads the files of a dropped or chosen folder with their paths inside it. A folder upload
 // sends each file with its path as the multipart filename (internal/api/files.go).
 
+import { anyGlob } from "$lib/glob";
+
 /** One file of a folder and its path, e.g. "build/libs/app-1.0.jar" (forward slashes). */
 export type FolderFile = { file: File; path: string };
 
@@ -13,18 +15,9 @@ export type FolderRead = { files: FolderFile[]; more: boolean; skipped: number }
 /** Chooses the files of a folder to send by their path; undefined sends every file. */
 export type Keep = ((path: string) => boolean) | undefined;
 
-const mavenCandidate = /(\.pom|\/pom\.xml|^pom\.xml|\.jar|\.war|\.aar|\.module|\.zip|\.tar\.gz)$/i;
-
-/**
- * The files of a folder upload worth sending to the scan for a repo format. Maven takes poms,
- * jars (with -sources and -javadoc), wars, aars, Gradle module files and zip or tar.gz
- * archives; Debian takes .deb packages; raw takes every file. The server still checks every
- * file it gets.
- */
-export function folderKeep(format: string): Keep {
-  if (format === "maven") return (p) => mavenCandidate.test(p);
-  if (format === "debian") return (p) => /\.deb$/i.test(p);
-  return undefined;
+/** The files of a folder that the globs take (the upload's keep of the format descriptor); no globs keeps every file. */
+export function keepOf(globs: readonly string[]): Keep {
+  return globs.length ? (p) => anyGlob(globs, p) : undefined;
 }
 
 const clean = (p: string) => p.replace(/\\/g, "/").replace(/^\/+/, "");
@@ -63,7 +56,7 @@ export function dropHasFolder(dt: DataTransfer): boolean {
   return false;
 }
 
-const fileOf =(e: FileSystemFileEntry) => new Promise<File>((resolve, reject) => e.file(resolve, reject));
+const fileOf = (e: FileSystemFileEntry) => new Promise<File>((resolve, reject) => e.file(resolve, reject));
 
 /** All children of a folder: readEntries gives them in batches until an empty one. */
 async function children(dir: FileSystemDirectoryEntry): Promise<FileSystemEntry[]> {

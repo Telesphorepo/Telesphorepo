@@ -14,8 +14,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
-
-	"github.com/Telesphorepo/Telesphorepo/internal/config"
 )
 
 type s3Store struct {
@@ -26,11 +24,17 @@ type s3Store struct {
 	redirect bool
 }
 
-// NewS3 returns an S3-compatible Store (R2, SeaweedFS) from cfg.S3*; keys are prefixed with
-// cfg.S3Prefix. PresignGet returns ok=false when !cfg.S3Redirect.
-func NewS3(ctx context.Context, cfg *config.Config) (Store, error) {
+// NewS3 returns an S3 Store (AWS, or an S3-compatible store such as R2 or SeaweedFS at
+// cfg.S3Endpoint) from cfg.S3*; keys are prefixed with cfg.S3Prefix. Without an endpoint the
+// client uses the AWS endpoint of cfg.S3Region; with an endpoint and no region it signs for the
+// region "auto". PresignGet returns ok=false when !cfg.S3Redirect.
+func NewS3(ctx context.Context, cfg Config) (Store, error) {
+	region := cfg.S3Region
+	if region == "" && cfg.S3Endpoint != "" {
+		region = "auto"
+	}
 	ac, err := awsconfig.LoadDefaultConfig(ctx,
-		awsconfig.WithRegion(cfg.S3Region),
+		awsconfig.WithRegion(region),
 		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(cfg.S3AccessKeyID, cfg.S3SecretAccessKey, "")),
 		awsconfig.WithRequestChecksumCalculation(aws.RequestChecksumCalculationWhenRequired),
 		awsconfig.WithResponseChecksumValidation(aws.ResponseChecksumValidationWhenRequired),
@@ -143,11 +147,18 @@ func (s *s3Store) List(ctx context.Context, prefix, after string, limit int) ([]
 	return out, nil
 }
 
-func (s *s3Store) PresignGet(ctx context.Context, key string, ttl time.Duration) (string, bool, error) {
+func (s *s3Store) PresignGet(ctx context.Context, key string, ttl time.Duration, resp Response) (string, bool, error) {
 	if !s.redirect {
 		return "", false, nil
 	}
-	r, err := s.ps.PresignGetObject(ctx, &s3.GetObjectInput{Bucket: &s.bucket, Key: s.key(key)}, s3.WithPresignExpires(ttl))
+	in := &s3.GetObjectInput{Bucket: &s.bucket, Key: s.key(key)}
+	if resp.ContentType != "" {
+		in.ResponseContentType = aws.String(resp.ContentType)
+	}
+	if resp.ContentDisposition != "" {
+		in.ResponseContentDisposition = aws.String(resp.ContentDisposition)
+	}
+	r, err := s.ps.PresignGetObject(ctx, in, s3.WithPresignExpires(ttl))
 	if err != nil {
 		return "", false, err
 	}
