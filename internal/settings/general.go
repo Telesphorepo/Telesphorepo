@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"crypto/tls"
 	"errors"
 	"log/slog"
 	"net/url"
@@ -40,7 +41,7 @@ var (
 		Help:    "The server log keeps messages of this level and more important ones.",
 		Options: []string{"debug", "info", "warn", "error"}, Normalize: Lower})
 	MaxUploadSize = Size(&Def{Key: "max_upload_size", Default: "2GiB", Label: "Max upload size",
-		Help: "The server refuses a bigger artifact or package upload, for example above 2GiB."})
+		Help: "The server refuses a bigger artifact or package upload, for example above 2GiB. It also caps one image layer."})
 	MaxJSONSize = Size(&Def{Key: "max_json_size", Default: "1MiB", Label: "Max JSON body size",
 		Help: "The server refuses a bigger JSON API request body, for example above 1MiB."})
 	CookieSecure = Bool(&Def{Key: "cookie.secure", Default: "true", Dev: "false", Label: "Secure session cookie",
@@ -55,15 +56,37 @@ var (
 		Help: "The server deletes stored content that no file uses after this time. Content that a new upload needs within this time is not stored again."})
 	UploadSessionTTL = Duration(&Def{Key: "upload.session_ttl", Default: "24h", Label: "Resumable upload lifetime",
 		Help: "The server deletes a resumable upload that received no data for this time."})
+	TLSCertFile = String(&Def{Key: "tls.cert_file", Label: "TLS certificate file", Normalize: Trim,
+		Help: "The path of a PEM file with the certificate chain of the server. With a key file too, the server serves HTTPS with HTTP/2 itself. A renewed file applies at the next connection. Turning TLS on or off applies at the next start."})
+	TLSKeyFile = String(&Def{Key: "tls.key_file", Label: "TLS key file", Normalize: Trim,
+		Help: "The path of the PEM file with the private key of the TLS certificate. Turning TLS on or off applies at the next start."})
 )
+
+// validateGeneral checks the TLS files: both or neither, readable, and a pair that parses.
+func validateGeneral(d *Draft, _ Mode) error {
+	cert, key := TLSCertFile.Get(d.Next), TLSKeyFile.Get(d.Next)
+	switch {
+	case cert == "" && key == "":
+		return nil
+	case cert == "":
+		d.Fail(TLSCertFile.Name(), "required when a TLS key file is set")
+	case key == "":
+		d.Fail(TLSKeyFile.Name(), "required when a TLS certificate file is set")
+	default:
+		if _, err := tls.LoadX509KeyPair(cert, key); err != nil {
+			d.Fail(TLSCertFile.Name(), "the certificate and the key do not load: "+err.Error())
+		}
+	}
+	return nil
+}
 
 // General returns the group "general": the settings of the kernel, edited with the permission
 // settings.general on Settings > General.
 func General() *Group {
 	return &Group{ID: "general", Label: "General", Perm: perm.SettingsGeneral, Defs: []*Def{
 		BaseURL.Def(), LogLevel.Def(), MaxUploadSize.Def(), MaxJSONSize.Def(), CookieSecure.Def(), SessionTTL.Def(),
-		IndexDebounce.Def(), IndexMaxDelay.Def(), BlobsGCGrace.Def(), UploadSessionTTL.Def(),
-	}}
+		IndexDebounce.Def(), IndexMaxDelay.Def(), BlobsGCGrace.Def(), UploadSessionTTL.Def(), TLSCertFile.Def(), TLSKeyFile.Def(),
+	}, Validate: validateGeneral}
 }
 
 // Level returns the log level of log.level.

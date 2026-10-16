@@ -61,6 +61,10 @@ func (l *Live) Get(ctx context.Context, key string) (io.ReadCloser, ObjectInfo, 
 	return l.Active().Get(ctx, key)
 }
 
+func (l *Live) GetRange(ctx context.Context, key string, off, n int64) (io.ReadCloser, ObjectInfo, error) {
+	return l.Active().GetRange(ctx, key, off, n)
+}
+
 func (l *Live) Head(ctx context.Context, key string) (ObjectInfo, error) {
 	return l.Active().Head(ctx, key)
 }

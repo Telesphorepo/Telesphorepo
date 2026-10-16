@@ -19,11 +19,11 @@ import (
 // "list:cloudflare".
 const TrustedProxyList = "list:"
 
-// TrustedProxies is the setting trusted_proxies: the TCP peers whose X-Forwarded-For the server
-// reads, as literal entries. The IP lists that trusted proxies include are rows of
+// TrustedProxies is the setting trusted_proxies: the TCP peers whose X-Forwarded-For and forwarded
+// proto the server reads, as literal entries. The IP lists that trusted proxies include are rows of
 // trusted_proxy_lists (SetTrustedLists).
 var TrustedProxies = settings.List(&settings.Def{Key: "trusted_proxies", Label: "Trusted proxies",
-	Help: "The server reads the client address from X-Forwarded-For only when the connection comes from one of these proxies. An entry is a CIDR, an address (for example 10.89.0.5) or \"private\" (loopback, RFC 1918, ULA and link-local). Add an IP list, for example the ranges that Cloudflare publishes, on the Reverse proxy page. With no entry and no list (the default), the server trusts no proxy and uses the TCP peer address.",
+	Help: "The server reads the client address from X-Forwarded-For, and the scheme from X-Forwarded-Proto or Forwarded, only when the connection comes from one of these proxies. An entry is a CIDR, an address (for example 10.89.0.5) or \"private\" (loopback, RFC 1918, ULA and link-local). Add an IP list, for example the ranges that Cloudflare publishes, on the Reverse proxy page. With no entry and no list (the default), the server trusts no proxy and uses the TCP peer address.",
 	Normalize: func(v any) any {
 		l := v.([]string)
 		out := make([]string, 0, len(l))

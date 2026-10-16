@@ -55,6 +55,11 @@ type ServerOpts struct {
 	// NoBootstrapAdmin omits TR_BOOTSTRAP_ADMIN_*: the server creates "admin" with a random
 	// password and prints it in its startup banner; StartServer reads it from the logs.
 	NoBootstrapAdmin bool
+	// Aliases are extra network aliases of the server on TestNetwork.
+	Aliases []string
+	// TLS makes the harness reach the server over HTTPS (the server needs TR_TLS_CERT_FILE and
+	// TR_TLS_KEY_FILE in Env and the files in Files); it accepts any certificate.
+	TLS bool
 }
 
 type Server struct {
@@ -78,12 +83,16 @@ func StartServer(t testing.TB, opts ServerOpts) *Server {
 		opts.Alias = RandName("repo")
 	}
 	adminPass := randHex(16)
+	scheme := "http"
+	if opts.TLS {
+		scheme = "https"
+	}
 	env := map[string]string{
 		"TR_COOKIE_SECURE":   "false",
 		"TR_INDEX_DEBOUNCE":  "300ms",
 		"TR_INDEX_MAX_DELAY": "3s",
 		"TR_LOG_LEVEL":       "debug",
-		"TR_BASE_URL":        "http://" + opts.Alias + ":8080",
+		"TR_BASE_URL":        scheme + "://" + opts.Alias + ":8080",
 	}
 	if !opts.NoBootstrapAdmin {
 		env["TR_BOOTSTRAP_ADMIN_USER"] = "admin"
@@ -119,18 +128,19 @@ func StartServer(t testing.TB, opts ServerOpts) *Server {
 		testcontainers.WithExposedPorts("8080/tcp"),
 		testcontainers.WithFiles(files...),
 		testcontainers.WithMounts(mounts...),
-		network.WithNetwork([]string{opts.Alias}, TestNetwork),
-		testcontainers.WithWaitStrategy(wait.ForHTTP("/healthz").WithPort("8080/tcp").WithStartupTimeout(90*time.Second)),
+		network.WithNetwork(append([]string{opts.Alias}, opts.Aliases...), TestNetwork),
+		testcontainers.WithWaitStrategy(wait.ForHTTP("/healthz").WithPort("8080/tcp").WithTLS(opts.TLS).WithAllowInsecure(opts.TLS).
+			WithStartupTimeout(90*time.Second)),
 	)
 	registerCleanup(t, c, "server "+opts.Alias)
 	if err != nil {
 		t.Fatalf("start server: %v", err)
 	}
-	ep, err := c.PortEndpoint(ctx, "8080/tcp", "http")
+	ep, err := c.PortEndpoint(ctx, "8080/tcp", scheme)
 	if err != nil {
 		t.Fatalf("server endpoint: %v", err)
 	}
-	srv := &Server{Container: c, URL: ep, InternalURL: "http://" + opts.Alias + ":8080", Alias: opts.Alias, AdminUser: "admin", AdminPass: adminPass}
+	srv := &Server{Container: c, URL: ep, InternalURL: scheme + "://" + opts.Alias + ":8080", Alias: opts.Alias, AdminUser: "admin", AdminPass: adminPass}
 	if opts.NoBootstrapAdmin {
 		srv.AdminPass = srv.BannerPassword(t)
 	}
@@ -875,15 +885,19 @@ func ForEachStorage(t *testing.T, fn func(t *testing.T, opts ServerOpts)) {
 
 // ContainerFile is a file copied into a container before it starts.
 type ContainerFile struct {
-	Content string
-	Path    string
-	Mode    int64 // default 0644
+	Content  string
+	Path     string
+	Mode     int64  // default 0644
+	HostPath string // a file of the host to copy, in place of Content
 }
 
 func (f ContainerFile) tc() testcontainers.ContainerFile {
 	mode := f.Mode
 	if mode == 0 {
 		mode = 0o644
+	}
+	if f.HostPath != "" {
+		return testcontainers.ContainerFile{HostFilePath: f.HostPath, ContainerFilePath: f.Path, FileMode: mode}
 	}
 	return testcontainers.ContainerFile{Reader: strings.NewReader(f.Content), ContainerFilePath: f.Path, FileMode: mode}
 }
@@ -896,6 +910,9 @@ type ClientOpts struct {
 	WorkingDir string
 	User       string
 	Timeout    time.Duration // default 10m
+	Privileged bool          // run the container privileged (e.g. Docker in Docker)
+	// NoShell runs the image's own entrypoint and command; Cmd is ignored.
+	NoShell bool
 }
 
 // ClientResult is a finished client container; it is removed at test end.
@@ -942,9 +959,14 @@ func RunClientResult(t testing.TB, image string, opts ClientOpts) *ClientResult 
 	for vol, target := range opts.Mounts {
 		mounts = append(mounts, testcontainers.VolumeMount(vol, testcontainers.ContainerMountTarget(target)))
 	}
-	customizers := []testcontainers.ContainerCustomizer{
-		testcontainers.WithEntrypoint("sh", "-c"),
-		testcontainers.WithCmd(strings.Join(opts.Cmd, " ")),
+	var customizers []testcontainers.ContainerCustomizer
+	if !opts.NoShell {
+		customizers = append(customizers, testcontainers.WithEntrypoint("sh", "-c"), testcontainers.WithCmd(strings.Join(opts.Cmd, " ")))
+	}
+	if opts.Privileged {
+		customizers = append(customizers, testcontainers.WithHostConfigModifier(func(hc *container.HostConfig) { hc.Privileged = true }))
+	}
+	customizers = append(customizers,
 		testcontainers.WithEnv(opts.Env),
 		testcontainers.WithFiles(files...),
 		testcontainers.WithMounts(mounts...),
@@ -958,7 +980,7 @@ func RunClientResult(t testing.TB, image string, opts ClientOpts) *ClientResult 
 			}
 		}),
 		testcontainers.WithWaitStrategyAndDeadline(opts.Timeout, wait.ForExit()),
-	}
+	)
 	c, err := testcontainers.Run(ctx, image, append(customizers, testcontainers.WithLabels(e2eLabels))...)
 	registerCleanup(t, c, "client "+image)
 	if err != nil {

@@ -23,6 +23,9 @@ type Store interface {
 	Put(ctx context.Context, key string, r io.Reader, size int64, contentType string) error
 	// Get opens key for reading. FS returns an *os.File (implements io.ReadSeeker).
 	Get(ctx context.Context, key string) (io.ReadCloser, ObjectInfo, error)
+	// GetRange opens n bytes of key from offset off (off and n inside the object). The info has
+	// the size of the whole object.
+	GetRange(ctx context.Context, key string, off, n int64) (io.ReadCloser, ObjectInfo, error)
 	Head(ctx context.Context, key string) (ObjectInfo, error)
 	// Delete removes key; deleting a missing key is not an error.
 	Delete(ctx context.Context, key string) error

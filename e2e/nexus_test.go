@@ -1266,6 +1266,9 @@ func TestNexus(t *testing.T) {
 				t.Fatalf("GET %s returns the Nexus password", p)
 			}
 		}
+
+		// A docker repo, through a source of its own (this one is cut over).
+		t.Run("docker", func(t *testing.T) { nexusDocker(t, n, s) })
 	})
 }
 

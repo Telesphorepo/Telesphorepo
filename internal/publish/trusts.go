@@ -439,9 +439,16 @@ func (s *Service) provider(ctx context.Context, issuer string) (*gooidc.Provider
 	return p, nil
 }
 
-// verifyCIToken checks the token's signature, issuer and expiry against one policy's keys.
-func (s *Service) verifyCIToken(ctx context.Context, t dbq.ListMatchingTrustsRow, raw string) (*gooidc.IDToken, error) {
-	cfg := &gooidc.Config{SkipClientIDCheck: true, SupportedSigningAlgs: signingAlgs}
+// trustKeys is what a check of a CI token reads of a trust policy.
+type trustKeys struct {
+	ID                             int64
+	Issuer, Audience, Claims, Jwks string
+}
+
+// verifyCIToken checks the token's signature and issuer against one policy's keys, and its
+// expiry unless anyAge.
+func (s *Service) verifyCIToken(ctx context.Context, t trustKeys, raw string, anyAge bool) (*gooidc.IDToken, error) {
+	cfg := &gooidc.Config{SkipClientIDCheck: true, SupportedSigningAlgs: signingAlgs, SkipExpiryCheck: anyAge}
 	var v *gooidc.IDTokenVerifier
 	if t.Jwks != "" {
 		keys, err := parseJWKS(t.Jwks)
@@ -531,19 +538,81 @@ type ciMatch struct {
 	seen   [32]byte // the replay key: issuer and jti, or the whole token
 }
 
-// verifyCI checks raw against the enabled policies of its issuer that list the repo that resolve
-// returns: signature, issuer, audience, exp, iat at most 10 min old, claims. An unknown repo is
-// refused like a repo that no policy lists.
-func (s *Service) verifyCI(ctx context.Context, raw string, repoName string, resolve func(context.Context) (*repos.Repo, error)) (*repos.Repo, *ciMatch, error) {
+// matchTrust checks raw against one policy t: signature, issuer, audience and claims, and with
+// fresh also exp and an iat at most 10 min old. It returns the match, or why t refuses the token.
+func (s *Service) matchTrust(ctx context.Context, t trustKeys, raw string, fresh bool) (*ciMatch, string) {
+	tok, err := s.verifyCIToken(ctx, t, raw, !fresh)
+	if err != nil {
+		return nil, err.Error()
+	}
+	aud := t.Audience
+	if aud == "" {
+		aud = s.baseURL()
+	}
+	if aud == "" {
+		return nil, noBaseURL
+	}
+	if !slices.Contains(tok.Audience, aud) {
+		return nil, "the token's audience is not " + aud
+	}
+	if fresh {
+		if why := staleReason(tok, time.Now()); why != "" {
+			return nil, why
+		}
+	}
+	var all map[string]any
+	if err := tok.Claims(&all); err != nil {
+		return nil, "the token's claims are unreadable"
+	}
+	policy, err := decodeClaims(t.Claims)
+	if err != nil || len(policy) == 0 || !claimsMatch(policy, all) {
+		return nil, "the token's claims do not match a trust policy"
+	}
+	m := &ciMatch{trust: t.ID, idt: tok, claims: all}
+	if jti, _ := all["jti"].(string); jti != "" {
+		m.seen = sha256.Sum256([]byte(tok.Issuer + "\n" + jti))
+	} else {
+		m.seen = sha256.Sum256([]byte(raw))
+	}
+	return m, ""
+}
+
+// staleReason returns why a verified token is too old to mint a new session ("" when it is
+// fresh): its iat must be at most 10 min old and its exp ahead.
+func staleReason(tok *gooidc.IDToken, now time.Time) string {
+	if tok.IssuedAt.IsZero() || now.Sub(tok.IssuedAt) > maxTokenAge || tok.IssuedAt.After(now.Add(clockSkew)) {
+		return "the token was not issued in the last 10 minutes"
+	}
+	if !tok.Expiry.IsZero() && !now.Before(tok.Expiry) {
+		return "the token has expired"
+	}
+	return ""
+}
+
+// noBaseURL is the refusal reason of a policy without an audience while base_url is empty.
+const noBaseURL = "the server has no public address to check the token's audience against"
+
+// ciToken trims raw and checks its form; it returns the token and its unverified issuer.
+func ciToken(raw string) (string, string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" || len(raw) > maxCITokenBytes {
-		return nil, nil, errorf(ErrInvalid, "token must be a CI identity token (JWT)")
+		return "", "", errorf(ErrInvalid, "token must be a CI identity token (JWT)")
 	}
 	issuer, ok := unverifiedIssuer(raw)
 	if !ok {
-		return nil, nil, errorf(ErrDenied, "token is not a valid identity token")
+		return "", "", errorf(ErrDenied, "token is not a valid identity token")
 	}
-	const noBaseURL = "the server has no public address to check the token's audience against"
+	return raw, issuer, nil
+}
+
+// verifyCI checks raw against the enabled policies of its issuer that list the repo that resolve
+// returns (matchTrust; fresh also checks exp and the age of iat). An unknown repo is refused like
+// a repo that no policy lists.
+func (s *Service) verifyCI(ctx context.Context, raw string, repoName string, resolve func(context.Context) (*repos.Repo, error), fresh bool) (*repos.Repo, *ciMatch, error) {
+	raw, issuer, err := ciToken(raw)
+	if err != nil {
+		return nil, nil, err
+	}
 	fix := ". An administrator adds or changes the CI pipeline on Settings › CI pipelines."
 	refused := errorf(ErrDenied, "no trust policy allows this token to publish to "+repoName+fix)
 	repo, err := resolve(ctx)
@@ -553,69 +622,64 @@ func (s *Service) verifyCI(ctx context.Context, raw string, repoName string, res
 	if err != nil {
 		return nil, nil, err
 	}
-	trusts, err := s.rq.ListMatchingTrusts(ctx, dbq.ListMatchingTrustsParams{Issuer: issuer, RepoID: repo.ID})
+	rows, err := s.rq.ListMatchingTrusts(ctx, dbq.ListMatchingTrustsParams{Issuer: issuer, RepoID: repo.ID})
 	if err != nil {
 		return nil, nil, err
 	}
-	now := time.Now()
 	reason := ""
-	for i := range trusts {
-		t := trusts[i]
-		tok, err := s.verifyCIToken(ctx, t, raw)
-		if err != nil {
-			reason = err.Error()
-			continue
+	for _, t := range rows {
+		m, why := s.matchTrust(ctx, trustKeys{t.ID, t.Issuer, t.Audience, t.Claims, t.Jwks}, raw, fresh)
+		if m != nil {
+			return repo, m, nil
 		}
-		aud := t.Audience
-		if aud == "" {
-			aud = s.baseURL()
-		}
-		if aud == "" {
-			reason = noBaseURL
-			continue
-		}
-		if !slices.Contains(tok.Audience, aud) {
-			reason = "the token's audience is not " + aud
-			continue
-		}
-		if tok.IssuedAt.IsZero() || now.Sub(tok.IssuedAt) > maxTokenAge || tok.IssuedAt.After(now.Add(clockSkew)) {
-			reason = "the token was not issued in the last 10 minutes"
-			continue
-		}
-		var all map[string]any
-		if err := tok.Claims(&all); err != nil {
-			reason = "the token's claims are unreadable"
-			continue
-		}
-		policy, err := decodeClaims(t.Claims)
-		if err != nil || len(policy) == 0 || !claimsMatch(policy, all) {
-			reason = "the token's claims do not match a trust policy"
-			continue
-		}
-		m := &ciMatch{trust: t.ID, idt: tok, claims: all}
-		if jti, _ := all["jti"].(string); jti != "" {
-			m.seen = sha256.Sum256([]byte(tok.Issuer + "\n" + jti))
-		} else {
-			m.seen = sha256.Sum256([]byte(raw))
-		}
-		return repo, m, nil
+		reason = why
 	}
+	return nil, nil, ciRefusal("no trust policy allows this token to publish to "+repoName, reason, refused)
+}
+
+// ciRefusal is the refusal of a CI token with the reason of the last policy that refused it.
+func ciRefusal(msg, reason string, none error) error {
+	fix := ". An administrator adds or changes the CI pipeline on Settings › CI pipelines."
 	if reason == noBaseURL {
 		fix = ". An administrator sets the public address on Settings › General, or an audience on the CI pipeline on Settings › CI pipelines."
 	}
-	if reason != "" {
-		return nil, nil, errorf(ErrDenied, "no trust policy allows this token to publish to "+repoName+": "+reason+fix)
+	if reason == "" {
+		return none
 	}
-	return nil, nil, refused
+	return errorf(ErrDenied, msg+": "+reason+fix)
+}
+
+// checkCI verifies a CI token without a repo (Minter.Check): an enabled policy of its issuer
+// allows it (signature, issuer, audience, claims, exp, the age of iat). It records no use.
+func (s *Service) checkCI(ctx context.Context, raw string) error {
+	raw, issuer, err := ciToken(raw)
+	if err != nil {
+		return err
+	}
+	rows, err := s.rq.ListIssuerTrusts(ctx, issuer)
+	if err != nil {
+		return err
+	}
+	reason := ""
+	for _, t := range rows {
+		m, why := s.matchTrust(ctx, trustKeys{t.ID, t.Issuer, t.Audience, t.Claims, t.Jwks}, raw, true)
+		if m != nil {
+			return nil
+		}
+		reason = why
+	}
+	return ciRefusal("no trust policy allows this token", reason,
+		errorf(ErrDenied, "no trust policy allows this token. An administrator adds the CI pipeline on Settings › CI pipelines."))
 }
 
 // ciSession mints the session of a CI identity token for repo: the token must pass a trust
 // policy (verifyCI) and access.Engine.Decide with Mint. Without reuse (the mint route) a token
 // mints once, for one repo. With reuse (the Minter) a token mints once for each repo, and a token
 // that minted a session for the repo before gets that session back while it is open
-// (Minted.Token is then "").
+// (Minted.Token is then ""): that check skips exp and the age of iat, because the open session
+// bounds the time. A first mint needs a fresh token.
 func (s *Service) ciSession(ctx context.Context, r *http.Request, raw, repoName string, resolve func(context.Context) (*repos.Repo, error), reuse bool) (*Minted, error) {
-	repo, m, err := s.verifyCI(ctx, raw, repoName, resolve)
+	repo, m, err := s.verifyCI(ctx, raw, repoName, resolve, !reuse)
 	if err != nil {
 		return nil, err
 	}
@@ -626,6 +690,9 @@ func (s *Service) ciSession(ctx context.Context, r *http.Request, raw, repoName 
 	if reuse {
 		if old, err := s.reused(ctx, m.seen, repo); old != nil || err != nil {
 			return old, err
+		}
+		if why := staleReason(m.idt, time.Now()); why != "" {
+			return nil, errorf(ErrDenied, "no trust policy allows this token to publish to "+repoName+": "+why)
 		}
 	}
 	var out *Minted

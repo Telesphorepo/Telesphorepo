@@ -52,7 +52,7 @@ func (q *Queries) DeleteUploadSession(ctx context.Context, id string) error {
 const getAsset = `-- name: GetAsset :one
 
 SELECT id, repo_id, path, blob_id, size, sha256, content_type, kind, uploaded_by, created_at, updated_at,
-  build_id, checked_at, remote_etag
+  build_id, checked_at, remote_etag, md5, sha1
 FROM assets WHERE repo_id = ? AND path = ?
 `
 
@@ -82,13 +82,15 @@ func (q *Queries) GetAsset(ctx context.Context, arg GetAssetParams) (Asset, erro
 		&i.BuildID,
 		&i.CheckedAt,
 		&i.RemoteEtag,
+		&i.Md5,
+		&i.Sha1,
 	)
 	return i, err
 }
 
 const getBlob = `-- name: GetBlob :one
 
-SELECT id, sha256, size, refs FROM blobs WHERE sha256 = ?
+SELECT id, sha256, size, refs, md5, sha1 FROM blobs WHERE sha256 = ?
 `
 
 type GetBlobRow struct {
@@ -96,6 +98,8 @@ type GetBlobRow struct {
 	Sha256 string
 	Size   int64
 	Refs   int64
+	Md5    string
+	Sha1   string
 }
 
 // Content-addressed blobs (internal/blobs).
@@ -107,6 +111,8 @@ func (q *Queries) GetBlob(ctx context.Context, sha256 string) (GetBlobRow, error
 		&i.Sha256,
 		&i.Size,
 		&i.Refs,
+		&i.Md5,
+		&i.Sha1,
 	)
 	return i, err
 }
@@ -133,7 +139,7 @@ func (q *Queries) GetUploadSession(ctx context.Context, id string) (UploadSessio
 }
 
 const insertBlob = `-- name: InsertBlob :one
-INSERT INTO blobs (sha256, size, refs, unreferenced_at, created_at) VALUES (?, ?, 0, ?, ?)
+INSERT INTO blobs (sha256, size, refs, unreferenced_at, created_at, md5, sha1) VALUES (?, ?, 0, ?, ?, ?, ?)
 RETURNING id
 `
 
@@ -142,6 +148,8 @@ type InsertBlobParams struct {
 	Size           int64
 	UnreferencedAt int64
 	CreatedAt      int64
+	Md5            string
+	Sha1           string
 }
 
 // A new blob has no reference yet: it counts as unreferenced since it was created, so a blob
@@ -152,6 +160,8 @@ func (q *Queries) InsertBlob(ctx context.Context, arg InsertBlobParams) (int64, 
 		arg.Size,
 		arg.UnreferencedAt,
 		arg.CreatedAt,
+		arg.Md5,
+		arg.Sha1,
 	)
 	var id int64
 	err := row.Scan(&id)
@@ -207,7 +217,7 @@ func (q *Queries) IsBlobCollectable(ctx context.Context, arg IsBlobCollectablePa
 
 const listAssetsAfter = `-- name: ListAssetsAfter :many
 SELECT id, repo_id, path, blob_id, size, sha256, content_type, kind, uploaded_by, created_at, updated_at,
-  build_id, checked_at, remote_etag
+  build_id, checked_at, remote_etag, md5, sha1
 FROM assets
 WHERE repo_id = ?1 AND path > ?2
 ORDER BY path LIMIT ?3
@@ -243,6 +253,8 @@ func (q *Queries) ListAssetsAfter(ctx context.Context, arg ListAssetsAfterParams
 			&i.BuildID,
 			&i.CheckedAt,
 			&i.RemoteEtag,
+			&i.Md5,
+			&i.Sha1,
 		); err != nil {
 			return nil, err
 		}
@@ -259,7 +271,7 @@ func (q *Queries) ListAssetsAfter(ctx context.Context, arg ListAssetsAfterParams
 
 const listAssetsAfterRange = `-- name: ListAssetsAfterRange :many
 SELECT id, repo_id, path, blob_id, size, sha256, content_type, kind, uploaded_by, created_at, updated_at,
-  build_id, checked_at, remote_etag
+  build_id, checked_at, remote_etag, md5, sha1
 FROM assets
 WHERE repo_id = ?1 AND path > ?2 AND path < ?3
 ORDER BY path LIMIT ?4
@@ -301,6 +313,8 @@ func (q *Queries) ListAssetsAfterRange(ctx context.Context, arg ListAssetsAfterR
 			&i.BuildID,
 			&i.CheckedAt,
 			&i.RemoteEtag,
+			&i.Md5,
+			&i.Sha1,
 		); err != nil {
 			return nil, err
 		}
@@ -317,7 +331,7 @@ func (q *Queries) ListAssetsAfterRange(ctx context.Context, arg ListAssetsAfterR
 
 const listAssetsByBlob = `-- name: ListAssetsByBlob :many
 SELECT id, repo_id, path, blob_id, size, sha256, content_type, kind, uploaded_by, created_at, updated_at,
-  build_id, checked_at, remote_etag
+  build_id, checked_at, remote_etag, md5, sha1
 FROM assets
 WHERE blob_id = ? AND repo_id = ?
 LIMIT ?
@@ -355,6 +369,8 @@ func (q *Queries) ListAssetsByBlob(ctx context.Context, arg ListAssetsByBlobPara
 			&i.BuildID,
 			&i.CheckedAt,
 			&i.RemoteEtag,
+			&i.Md5,
+			&i.Sha1,
 		); err != nil {
 			return nil, err
 		}
@@ -371,7 +387,7 @@ func (q *Queries) ListAssetsByBlob(ctx context.Context, arg ListAssetsByBlobPara
 
 const listAssetsFrom = `-- name: ListAssetsFrom :many
 SELECT id, repo_id, path, blob_id, size, sha256, content_type, kind, uploaded_by, created_at, updated_at,
-  build_id, checked_at, remote_etag
+  build_id, checked_at, remote_etag, md5, sha1
 FROM assets
 WHERE repo_id = ?1 AND path >= ?2
 ORDER BY path LIMIT ?3
@@ -411,6 +427,8 @@ func (q *Queries) ListAssetsFrom(ctx context.Context, arg ListAssetsFromParams) 
 			&i.BuildID,
 			&i.CheckedAt,
 			&i.RemoteEtag,
+			&i.Md5,
+			&i.Sha1,
 		); err != nil {
 			return nil, err
 		}
@@ -427,7 +445,7 @@ func (q *Queries) ListAssetsFrom(ctx context.Context, arg ListAssetsFromParams) 
 
 const listAssetsFromRange = `-- name: ListAssetsFromRange :many
 SELECT id, repo_id, path, blob_id, size, sha256, content_type, kind, uploaded_by, created_at, updated_at,
-  build_id, checked_at, remote_etag
+  build_id, checked_at, remote_etag, md5, sha1
 FROM assets
 WHERE repo_id = ?1 AND path >= ?2 AND path < ?3
 ORDER BY path LIMIT ?4
@@ -469,6 +487,8 @@ func (q *Queries) ListAssetsFromRange(ctx context.Context, arg ListAssetsFromRan
 			&i.BuildID,
 			&i.CheckedAt,
 			&i.RemoteEtag,
+			&i.Md5,
+			&i.Sha1,
 		); err != nil {
 			return nil, err
 		}
@@ -625,11 +645,12 @@ func (q *Queries) SetUploadReceived(ctx context.Context, arg SetUploadReceivedPa
 
 const upsertAsset = `-- name: UpsertAsset :one
 INSERT INTO assets (repo_id, path, blob_id, size, sha256, content_type, kind, uploaded_by, created_at, updated_at,
-  build_id, checked_at, remote_etag)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  build_id, checked_at, remote_etag, md5, sha1)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (repo_id, path) DO UPDATE SET blob_id = excluded.blob_id, size = excluded.size, sha256 = excluded.sha256,
   content_type = excluded.content_type, updated_at = excluded.updated_at, uploaded_by = excluded.uploaded_by,
-  build_id = excluded.build_id, checked_at = excluded.checked_at, remote_etag = excluded.remote_etag
+  build_id = excluded.build_id, checked_at = excluded.checked_at, remote_etag = excluded.remote_etag,
+  md5 = excluded.md5, sha1 = excluded.sha1
 RETURNING id, kind, created_at, updated_at
 `
 
@@ -647,6 +668,8 @@ type UpsertAssetParams struct {
 	BuildID     sql.NullInt64
 	CheckedAt   int64
 	RemoteEtag  string
+	Md5         string
+	Sha1        string
 }
 
 type UpsertAssetRow struct {
@@ -673,6 +696,8 @@ func (q *Queries) UpsertAsset(ctx context.Context, arg UpsertAssetParams) (Upser
 		arg.BuildID,
 		arg.CheckedAt,
 		arg.RemoteEtag,
+		arg.Md5,
+		arg.Sha1,
 	)
 	var i UpsertAssetRow
 	err := row.Scan(

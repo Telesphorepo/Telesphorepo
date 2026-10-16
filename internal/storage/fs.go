@@ -118,6 +118,27 @@ func (s *fsStore) Get(ctx context.Context, key string) (io.ReadCloser, ObjectInf
 	return f, ObjectInfo{Key: key, Size: st.Size(), ModTime: st.ModTime()}, nil
 }
 
+// rangeReader reads n bytes of a file from its current offset and closes the file.
+type rangeReader struct {
+	io.Reader
+	f *os.File
+}
+
+func (r rangeReader) Close() error { return r.f.Close() }
+
+func (s *fsStore) GetRange(ctx context.Context, key string, off, n int64) (io.ReadCloser, ObjectInfo, error) {
+	rc, info, err := s.Get(ctx, key)
+	if err != nil {
+		return nil, info, err
+	}
+	f := rc.(*os.File)
+	if _, err := f.Seek(off, io.SeekStart); err != nil {
+		f.Close()
+		return nil, info, err
+	}
+	return rangeReader{io.LimitReader(f, n), f}, info, nil
+}
+
 func (s *fsStore) Head(ctx context.Context, key string) (ObjectInfo, error) {
 	p, err := s.path(key)
 	if err != nil {

@@ -4,14 +4,25 @@ package e2e
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	osexec "os/exec"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/moby/moby/api/types/container"
+	"github.com/testcontainers/testcontainers-go"
+	tcexec "github.com/testcontainers/testcontainers-go/exec"
+	"github.com/testcontainers/testcontainers-go/network"
+	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 // Client images and helpers that several zones share: Maven projects, Debian packages and apt,
@@ -243,4 +254,99 @@ func fetchSetup(t testing.TB, s *Server, name string) string {
 		t.Fatalf("GET /%s: Content-Type %q, want text/plain", name, ct)
 	}
 	return string(body)
+}
+
+// ---------------------------------------------------------------- Docker in Docker
+
+// dindImage is the Docker engine that the registry tests drive (privileged, on TestNetwork).
+const dindImage = "docker:29.9.0-dind"
+
+// Dind is a running Docker engine with its CLI, on TestNetwork.
+type Dind struct {
+	c     testcontainers.Container
+	Alias string
+}
+
+// StartDind starts a Docker engine that reaches the registries insecure ("host:port") over plain
+// HTTP, and waits until "docker info" answers.
+func StartDind(t testing.TB, insecure ...string) *Dind {
+	t.Helper()
+	alias := RandName("dind")
+	var args []string
+	for _, h := range insecure {
+		args = append(args, "--insecure-registry="+h)
+	}
+	c, err := testcontainers.Run(context.Background(), dindImage,
+		testcontainers.WithLabels(e2eLabels),
+		testcontainers.WithEnv(map[string]string{"DOCKER_TLS_CERTDIR": ""}),
+		testcontainers.WithCmd(args...),
+		testcontainers.WithHostConfigModifier(func(hc *container.HostConfig) { hc.Privileged = true }),
+		network.WithNetwork([]string{alias}, TestNetwork),
+		testcontainers.WithWaitStrategy(wait.ForExec([]string{"docker", "info"}).WithStartupTimeout(3*time.Minute)),
+	)
+	registerCleanup(t, c, "dind "+alias)
+	if err != nil {
+		t.Fatalf("start docker in docker: %v", err)
+	}
+	return &Dind{c: c, Alias: alias}
+}
+
+// Exec runs script with sh in the Docker engine's container and returns the exit code and the
+// combined output.
+func (d *Dind) Exec(t testing.TB, script string) (int, string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	code, rd, err := d.c.Exec(ctx, []string{"sh", "-c", script}, tcexec.Multiplexed())
+	if err != nil {
+		t.Fatalf("docker in docker exec: %v", err)
+	}
+	out, _ := io.ReadAll(rd)
+	return code, string(out)
+}
+
+// MustExec is Exec that fails the test on a non-zero exit.
+func (d *Dind) MustExec(t testing.TB, what, script string) string {
+	t.Helper()
+	code, out := d.Exec(t, script)
+	if code != 0 {
+		t.Fatalf("%s: exit %d:\n%s", what, code, out)
+	}
+	return out
+}
+
+// CopyFile copies the local file src into the Docker engine's container at dst with mode.
+func (d *Dind) CopyFile(t testing.TB, src, dst string, mode int64) {
+	t.Helper()
+	if err := d.c.CopyFileToContainer(context.Background(), src, dst, mode); err != nil {
+		t.Fatalf("copy %s into docker in docker: %v", dst, err)
+	}
+}
+
+// BuildHelper builds the Docker credential helper (cmd/docker-credential-telesphorepo) for Linux
+// on the architecture of the test, without cgo, and returns the path of the binary.
+func BuildHelper(t testing.TB) string {
+	t.Helper()
+	out := filepath.Join(t.TempDir(), "docker-credential-telesphorepo")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	cmd := osexec.CommandContext(ctx, "go", "build", "-trimpath", "-o", out, "github.com/Telesphorepo/Telesphorepo/cmd/docker-credential-telesphorepo")
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+runtime.GOARCH)
+	if b, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build the credential helper: %v\n%s", err, b)
+	}
+	return out
+}
+
+// DockerScratchImage returns shell commands that write a build context in the new folder dir:
+// one file f<i> of sizes[i] random bytes per layer, and a Dockerfile FROM scratch that copies each
+// file in its own layer. No image comes from a registry.
+func DockerScratchImage(dir string, sizes ...int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "mkdir -p %[1]s && cd %[1]s\nprintf 'FROM scratch\\n' > Dockerfile\n", dir)
+	for i, n := range sizes {
+		fmt.Fprintf(&b, "head -c %d /dev/urandom > f%d\nprintf 'COPY f%d /f%d\\n' >> Dockerfile\n", n, i, i, i)
+	}
+	b.WriteString("cd /\n")
+	return b.String()
 }

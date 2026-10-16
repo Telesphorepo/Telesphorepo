@@ -82,6 +82,24 @@ func TestFormatDescriptors(t *testing.T) {
 	if raw.Upload == nil || len(raw.Upload.Reads) != 0 || len(raw.Config.Fields) != 1 || raw.Config.Fields[0].Type != "enum" || raw.Browse.Versions {
 		t.Fatalf("raw descriptor: %+v", raw)
 	}
+	dk := by["docker"]
+	parts := map[string]string{}
+	for _, d := range dk.FileDetails {
+		parts[d.Match] = d.Part
+	}
+	notes := map[string]bool{}
+	for _, n := range dk.DeleteNotes {
+		notes[n.Match] = true
+	}
+	if !slices.Equal(dk.Kinds, []string{"hosted", "proxy", "group"}) || dk.Upload != nil || len(dk.Config.Fields) != 0 || len(dk.RepoTabs) != 0 ||
+		len(dk.RemotePresets) != 3 || dk.RemotePresets[0].URL != "https://registry-1.docker.io/" ||
+		!notes["**/_tags/*"] || !notes["**/_manifests/sha256/*"] || !notes["**/_blobs/sha256/*"] ||
+		parts["**/_tags/*"] != "manifest" || parts["**/_manifests/sha256/*"] != "manifest" ||
+		dk.Labels.Tools["docker"] != "Docker" || dk.Labels.Tools["helm"] != "Helm" || dk.Labels.Tools["oras"] != "ORAS" ||
+		!slices.Contains(dk.ImportSources, "docker") || len(dk.Tools) != 1 || dk.Tools[0].ID != "docker" || dk.Tools[0].Setup ||
+		!dk.Browse.Versions || !dk.Browse.ArtifactSnippets {
+		t.Fatalf("docker descriptor: %+v", dk)
+	}
 }
 
 func TestCIWorkflowRoute(t *testing.T) {
@@ -96,7 +114,7 @@ func TestCIWorkflowRoute(t *testing.T) {
 	s.SetPerms(t, mvn, reader, "repo.download")
 
 	type snippet struct {
-		ID, Tool, Purpose, Via, File, Title, Code string
+		ID, Tool, Purpose, Via, File, Title, Code, Note string
 	}
 	get := func(t *testing.T, repo, query string, auth Auth) snippet {
 		t.Helper()
@@ -140,6 +158,36 @@ func TestCIWorkflowRoute(t *testing.T) {
 	}
 	if st, b := s.API(t, http.MethodGet, "/api/repos/"+raw+"/ci?system=github-actions", nil, rauth); st != http.StatusForbidden {
 		t.Fatalf("ci of a repo without download: status %d, want 403: %s", st, b)
+	}
+
+	// Docker: build, then log in with the job's identity token right before the push.
+	dk := RandName("dk")
+	s.CreateRepo(t, dk, "docker", false, nil)
+	host := s.Alias + ":8080"
+	for _, c := range []struct{ system, tag string }{{"github-actions", "$GITHUB_SHA"}, {"jenkins", "${GIT_COMMIT:-$BUILD_NUMBER}"}} {
+		f := get(t, dk, "system="+c.system+"&tool=docker", s.AdminBasic())
+		build := strings.Index(f.Code, `docker build -t "`+host+"/"+dk+"/app:"+c.tag+`" .`)
+		login := strings.Index(f.Code, `printf '%s' "$OIDC_TOKEN" | docker login `+host+" -u oidc --password-stdin")
+		push := strings.Index(f.Code, `docker push "`+host+"/"+dk+"/app:"+c.tag+`"`)
+		logout := strings.Index(f.Code, "docker logout "+host)
+		if build < 0 || login < build || push < login || logout < push || !strings.Contains(f.Note, "Change app to the name of your image") {
+			t.Fatalf("%s file for Docker: build, login, push and logout out of order or missing:\n%s\nnote: %s", c.system, f.Code, f.Note)
+		}
+	}
+	var u struct {
+		Snippets []snippetJSON `json:"snippets"`
+	}
+	s.MustAPI(t, http.MethodGet, "/api/repos/"+dk+"/usage", nil, s.AdminBasic(), &u)
+	seen := map[string]string{}
+	for _, sn := range u.Snippets {
+		seen[sn.ID] = sn.Code + sn.Note
+	}
+	if !strings.Contains(seen["docker.login"], "docker login "+host) || !strings.Contains(seen["docker.pull"], "docker pull "+host+"/"+dk+"/IMAGE:TAG") ||
+		!strings.Contains(seen["helm.pull"], "helm pull oci://"+host+"/"+dk+"/") ||
+		!strings.Contains(seen["docker.helper"], "docker-credential-telesphorepo login "+s.InternalURL) ||
+		!strings.Contains(seen["docker.publish"], "docker login "+host+" -u publish --password-stdin") ||
+		!strings.Contains(seen["docker.pull"], "insecure-registries") || !strings.Contains(seen["helm.push"], "helm push") {
+		t.Fatalf("docker usage snippets: %v", seen)
 	}
 }
 

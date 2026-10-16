@@ -64,6 +64,18 @@ type RepoRule struct {
 	Perm perm.ID
 	// AnyPerm needs one of these repository permissions.
 	AnyPerm []perm.ID
+	// Ops and Pick decide the operation per request: the middleware uses the entry of Ops at the
+	// index that Pick returns (an index outside Ops is a 500), and Op, Perm and AnyPerm stay
+	// unused. The router checks every entry of Ops at registration.
+	Ops  []RepoOp
+	Pick func(r *http.Request) int
+}
+
+// RepoOp is one operation of a RepoRule with Ops: the operation and the repository permission
+// it needs.
+type RepoOp struct {
+	Op   access.Op
+	Perm perm.ID
 }
 
 // needs returns the repository permissions of the rule: Perm, or one of AnyPerm.
@@ -72,6 +84,35 @@ func (rr *RepoRule) needs() []perm.ID {
 		return append([]perm.ID{rr.Perm}, rr.AnyPerm...)
 	}
 	return rr.AnyPerm
+}
+
+// ops returns every operation the rule can take: Op, or each entry of Ops.
+func (rr *RepoRule) ops() []access.Op {
+	if rr.Pick == nil {
+		return []access.Op{rr.Op}
+	}
+	out := make([]access.Op, len(rr.Ops))
+	for i, o := range rr.Ops {
+		out[i] = o.Op
+	}
+	return out
+}
+
+// pick returns the operation of request r and the repository permissions it needs; ok is false
+// for an index of Pick outside Ops.
+func (rr *RepoRule) pick(r *http.Request) (access.Op, []perm.ID, bool) {
+	if rr.Pick == nil {
+		return rr.Op, rr.needs(), true
+	}
+	i := rr.Pick(r)
+	if i < 0 || i >= len(rr.Ops) {
+		return 0, nil, false
+	}
+	o := rr.Ops[i]
+	if o.Perm == "" {
+		return o.Op, nil, true
+	}
+	return o.Op, []perm.ID{o.Perm}, true
 }
 
 func (rr *RepoRule) name(r *http.Request) (string, error) {
@@ -113,11 +154,11 @@ type Handler func(w http.ResponseWriter, r *http.Request, c *Call)
 // ErrorWriter writes the refusal d of a request. d.Status and d.Message are set.
 type ErrorWriter func(w http.ResponseWriter, r *http.Request, d access.Decision)
 
-// Challenger sets the WWW-Authenticate header of a 401 answer.
-type Challenger func(w http.ResponseWriter, r *http.Request)
+// Challenger sets the WWW-Authenticate header of the 401 answer d.
+type Challenger func(w http.ResponseWriter, r *http.Request, d access.Decision)
 
 // BasicChallenge is the challenge of the format routes.
-func BasicChallenge(w http.ResponseWriter, _ *http.Request) {
+func BasicChallenge(w http.ResponseWriter, _ *http.Request, _ access.Decision) {
 	w.Header().Set("WWW-Authenticate", `Basic realm="telesphorepo"`)
 }
 
@@ -127,9 +168,9 @@ func (p Policy) refuse(w http.ResponseWriter, r *http.Request, d access.Decision
 	if d.Status == http.StatusUnauthorized && r.Header.Get(auth.UIHeader) != "1" {
 		switch {
 		case p.Challenge != nil:
-			p.Challenge(w, r)
+			p.Challenge(w, r, d)
 		case !strings.HasPrefix(r.URL.Path, "/api/"):
-			BasicChallenge(w, r)
+			BasicChallenge(w, r, d)
 		}
 	}
 	if d.Code == access.CodeReadOnlyKind {
@@ -203,9 +244,9 @@ func RepoRead() Policy {
 }
 
 // FormatRead is a download from a repo of format: anonymous, a password, a read token, a UI
-// session or a publish session.
+// session, a publish session or a device (behind a core bearer token).
 func FormatRead(format string) Policy {
-	return Policy{Accept: auth.CredPassword | auth.CredReadToken | auth.CredSession | auth.CredPublish, Anonymous: true,
+	return Policy{Accept: auth.CredPassword | auth.CredReadToken | auth.CredSession | auth.CredPublish | auth.CredDevice, Anonymous: true,
 		Repo: &RepoRule{Format: format, Op: access.Read, Perm: perm.RepoDownload}}
 }
 

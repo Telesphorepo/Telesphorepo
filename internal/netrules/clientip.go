@@ -80,21 +80,66 @@ func parseHop(h string) (netip.Addr, bool) {
 	return netip.Addr{}, false
 }
 
-// ClientIP resolves the client address of r. When the TCP peer is not a trusted proxy, it is
-// the peer. Otherwise X-Forwarded-For is read right to left, skipping trusted addresses; the
-// first untrusted address is the client. When every hop is trusted, the left-most one is. An
-// entry that does not parse stops the walk at the last address read. When that address is a
-// trusted Cloudflare address, CF-Connecting-IP gives the client. So Cloudflare in front of Caddy
-// needs no setting in Caddy: Caddy passes CF-Connecting-IP on unchanged.
-func (s *Service) ClientIP(r *http.Request) netip.Addr {
+// Client resolves the client of r: its address (see clientIP) and its scheme. The scheme is
+// https when the connection is TLS. When the TCP peer is a trusted proxy, the forwarded proto
+// (X-Forwarded-Proto, else the proto of Forwarded) gives the scheme. From any other peer a
+// forwarded proto of https makes the scheme https too: the scheme only shapes the URLs that the
+// server sends back to the same client, so such a peer can only make its own client use https.
+func (s *Service) Client(r *http.Request) httpx.Client {
+	ip, trusted := s.clientIP(r)
+	proto, ok := forwardedProto(r.Header)
+	https := r.TLS != nil || proto == "https"
+	if trusted && ok {
+		https = proto == "https"
+	}
+	return httpx.Client{IP: ip, HTTPS: https}
+}
+
+// forwardedProto returns the scheme that the first proxy saw: the first entry of
+// X-Forwarded-Proto, else the proto of the first element of Forwarded (RFC 7239). It is "http"
+// or "https", and ok is false when neither header gives one of them.
+func forwardedProto(h http.Header) (proto string, ok bool) {
+	if v := h.Get("X-Forwarded-Proto"); v != "" {
+		first, _, _ := strings.Cut(v, ",")
+		return schemeOf(first)
+	}
+	if v := h.Get("Forwarded"); v != "" {
+		first, _, _ := strings.Cut(v, ",")
+		for pair := range strings.SplitSeq(first, ";") {
+			k, val, _ := strings.Cut(pair, "=")
+			if strings.EqualFold(strings.TrimSpace(k), "proto") {
+				return schemeOf(strings.Trim(strings.TrimSpace(val), "\""))
+			}
+		}
+	}
+	return "", false
+}
+
+// schemeOf returns s as "http" or "https", and false for any other value.
+func schemeOf(s string) (string, bool) {
+	switch s = strings.ToLower(strings.TrimSpace(s)); s {
+	case "http", "https":
+		return s, true
+	}
+	return "", false
+}
+
+// clientIP resolves the client address of r, and whether the TCP peer is a trusted proxy. When
+// the peer is not a trusted proxy, the address is the peer. Otherwise X-Forwarded-For is read
+// right to left, skipping trusted addresses; the first untrusted address is the client. When
+// every hop is trusted, the left-most one is. An entry that does not parse stops the walk at the
+// last address read. When that address is a trusted Cloudflare address, CF-Connecting-IP gives
+// the client. So Cloudflare in front of Caddy needs no setting in Caddy: Caddy passes
+// CF-Connecting-IP on unchanged.
+func (s *Service) clientIP(r *http.Request) (netip.Addr, bool) {
 	peer := httpx.PeerIP(r)
 	t := s.trustedNow()
 	if !peer.IsValid() {
-		return peer
+		return peer, false
 	}
 	if !contains(t.prefixes, peer) {
 		s.noteCandidate(peer, r.Header)
-		return peer
+		return peer, false
 	}
 	var hops []string
 	for _, v := range r.Header.Values("X-Forwarded-For") {
@@ -111,15 +156,15 @@ func (s *Service) ClientIP(r *http.Request) netip.Addr {
 		}
 		client = a
 		if !contains(t.prefixes, a) {
-			return a
+			return a, true
 		}
 	}
 	if contains(t.cloudflare, client) {
 		if a, ok := parseHop(r.Header.Get("CF-Connecting-IP")); ok {
-			return a
+			return a, true
 		}
 	}
-	return client
+	return client, true
 }
 
 // maxCandidates caps the proxy candidates kept in memory. A new peer over the cap replaces the

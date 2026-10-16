@@ -144,7 +144,7 @@ func describe(p repopath.Path) (assets.Describe, bool) {
 // classify tells the proxy how to cache a path: pool files and by-hash index files never change
 // (a by-hash file's name is its checksum); the other files under dists/ (InRelease, Release,
 // Packages, ...) change. Other paths are refused.
-func classify(p repopath.Path) (assets.Class, bool) {
+func classify(_ *repos.Proxy, p repopath.Path) (assets.Class, bool) {
 	s := string(p)
 	switch {
 	case strings.HasPrefix(s, "pool/"):

@@ -123,8 +123,8 @@ func (a *API) checkNewProxy(w http.ResponseWriter, r *http.Request, formatName s
 		return nil, false
 	}
 	if !force {
-		probe := a.formats.Get(formatName).ProxyProbe(config)
-		if err := proxy.Check(r.Context(), px, probe); err != nil {
+		f := a.formats.Get(formatName)
+		if err := proxy.Check(r.Context(), px, f.ProxyProbe(config), f.RemoteAuth); err != nil {
 			httpx.Error(w, http.StatusBadGateway, "The remote repository did not answer the check: "+err.Error()+".")
 			return nil, false
 		}
@@ -160,10 +160,11 @@ func (a *API) testProxy(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		return
 	}
 	probe := ""
+	var auth proxy.RemoteAuth
 	if f := a.formats.Get(repo.Format); f != nil && f.ProxyProbe != nil {
-		probe = f.ProxyProbe(repo.Config)
+		probe, auth = f.ProxyProbe(repo.Config), f.RemoteAuth
 	}
-	if err := proxy.Check(r.Context(), px, probe); err != nil {
+	if err := proxy.Check(r.Context(), px, probe, auth); err != nil {
 		a.repos.ProxyFailed(r.Context(), repo.ID, err.Error())
 		httpx.WriteJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": "The remote repository did not answer the check: " + err.Error() + "."})
 		return

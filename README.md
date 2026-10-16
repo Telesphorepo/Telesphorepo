@@ -1,6 +1,6 @@
 # Telesphorepo
 
-A small self-hosted package repository for Maven/Gradle artifacts, Debian packages and raw files. It is a
+A small self-hosted package repository for Maven/Gradle artifacts, Debian packages, container images and Helm charts (OCI), and raw files. It is a
 single Go binary with a web UI, and stores files on local disk or in any S3-compatible bucket.
 
 ## Run it locally
@@ -14,7 +14,7 @@ go tool task dev
 
 Open **http://localhost:5173**. The startup banner prints the admin username and password and
 some client snippets. The first run fills the instance with the same demo data each time, before the
-server starts: about 150,000 Maven files, Debian packages and raw files in the public repos `maven`, `debian` and `raw`, a
+server starts: about 150,000 Maven files, Debian packages, raw files and container images in the public repos `maven`, `debian`, `raw` and `docker`, a
 private Maven repo `internal`, and five demo users (their passwords are in the banner). To start with
 empty repos, run the binary as `telesphorepo dev --empty` on a fresh data dir. Data lives in
 `.telesphorepo-dev/`; delete it to start over. Press Ctrl+C to stop. The dev server does not enforce the second factor.
@@ -215,9 +215,37 @@ printf 'Publish token: '; read -rs TOKEN; echo
 printf 'user = "publish:%s"\n' "$TOKEN" | curl -fsS -K - -T file.tar.gz https://packages.example.com/raw/raw/path/file.tar.gz
 ```
 
+Docker, Helm and ORAS use the repo as the first part of the image name. The registry must be at
+the root of a host. To push from a computer, get `docker-credential-telesphorepo` for your system
+from the [GitHub Releases](https://github.com/Telesphorepo/Telesphorepo/releases) page, put it on
+your `PATH`, and enroll the computer once. Approve the code in the browser, as for Gradle. After
+that, Docker, buildx, Podman, Helm and ORAS push with no `docker login`:
+
+```sh
+docker-credential-telesphorepo login https://packages.example.com
+docker push packages.example.com/docker/team/app:1.0
+helm push mychart-0.1.0.tgz oci://packages.example.com/docker
+docker pull packages.example.com/docker/team/app:1.0
+```
+
+The helper keeps the device key in `~/.telesphorepo/<server>/docker/device.json` and adds itself
+to `credHelpers` in `~/.docker/config.json`. `docker logout` deletes the key from the computer;
+revoke the device under **Settings > Your account > Devices**. Without the helper, paste a publish
+token at a hidden prompt:
+
+```sh
+printf 'Publish token: '; read -rs TOKEN; echo
+printf '%s' "$TOKEN" | docker login packages.example.com -u publish --password-stdin
+```
+
+Docker sends each layer in one request. Behind Cloudflare (100 MB per request on Free and Pro) a
+larger layer fails, so point a DNS-only name at the server and set it as `docker.push_url`. The
+snippets and CI files then push there. A docker repo can also be a proxy of another registry
+(Docker Hub, GHCR, Quay) or a group.
+
 The repo page in the UI shows the snippets for each repo. Gradle, private apt repos, the API and
 everything else: [SPEC.md](SPEC.md).
 
 ## License
 
-The server is licensed under AGPL-3.0 (see [LICENSE](LICENSE)). The [clients](https://github.com/Telesphorepo/clients) (Gradle plugin and Maven extension) are in their own repository under the MIT license.
+The server and the Docker credential helper are licensed under AGPL-3.0 (see [LICENSE](LICENSE)). The [clients](https://github.com/Telesphorepo/clients) (Gradle plugin and Maven extension) are in their own repository under the MIT license.

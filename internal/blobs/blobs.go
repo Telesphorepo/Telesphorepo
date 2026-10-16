@@ -32,6 +32,8 @@ type Blob struct {
 	ID     int64
 	SHA256 string
 	Size   int64
+	MD5    string // lowercase hex; "" for a synthetic row of the scale test
+	SHA1   string
 }
 
 // Store stores and finds blobs.
@@ -106,7 +108,7 @@ func (s *Store) Get(ctx context.Context, sha256 string) (*Blob, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Blob{ID: r.ID, SHA256: r.Sha256, Size: r.Size}, nil
+	return &Blob{ID: r.ID, SHA256: r.Sha256, Size: r.Size, MD5: r.Md5, SHA1: r.Sha1}, nil
 }
 
 // Open opens the content of the blob with digest sha256.
@@ -159,11 +161,12 @@ func (s *Store) EnsureAll(ctx context.Context, sps []*Spooled, fast bool) (map[s
 	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
 		q := dbq.New(tx)
 		for _, sp := range missing {
-			id, err := q.InsertBlob(ctx, dbq.InsertBlobParams{Sha256: sp.SHA256, Size: sp.Size, UnreferencedAt: now, CreatedAt: now})
+			id, err := q.InsertBlob(ctx, dbq.InsertBlobParams{Sha256: sp.SHA256, Size: sp.Size, UnreferencedAt: now, CreatedAt: now,
+				Md5: sp.MD5, Sha1: sp.SHA1})
 			if err != nil {
 				return fmt.Errorf("insert blob %s: %w", sp.SHA256, err)
 			}
-			out[sp.SHA256] = &Blob{ID: id, SHA256: sp.SHA256, Size: sp.Size}
+			out[sp.SHA256] = &Blob{ID: id, SHA256: sp.SHA256, Size: sp.Size, MD5: sp.MD5, SHA1: sp.SHA1}
 		}
 		return nil
 	})

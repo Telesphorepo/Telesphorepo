@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net/http"
-	"net/netip"
 	"regexp"
 	"slices"
 
@@ -22,6 +21,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
 	"github.com/Telesphorepo/Telesphorepo/internal/demo"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
+	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/jobs"
 	"github.com/Telesphorepo/Telesphorepo/internal/ops"
 	"github.com/Telesphorepo/Telesphorepo/internal/perm"
@@ -87,7 +87,7 @@ type Manifest struct {
 	Guards        []access.Guard
 	CIProviders   []ci.Provider
 	Clients       []clients.Client
-	ClientAddress func(r *http.Request) netip.Addr
+	ResolveClient func(r *http.Request) httpx.Client
 	TokenKinds    []TokenKind
 	Demo          *DemoData
 	Seed          SeedFunc
@@ -200,13 +200,14 @@ func (x *Extender) PublisherClient(c clients.Client) { x.m.Clients = append(x.m.
 // module. The access engine calls g only after the module's Init ran.
 func (x *Extender) RepoGuard(g access.Guard) { x.m.Guards = append(x.m.Guards, g) }
 
-// ClientAddress resolves the client address of every request once, before any handler runs.
-// Exactly one module may set it; without one the address is the TCP peer.
-func (x *Extender) ClientAddress(fn func(r *http.Request) netip.Addr) {
-	if x.m.ClientAddress != nil {
-		panic(fmt.Sprintf("module %s: ClientAddress twice", x.m.Module.ID))
+// ResolveClient resolves the client of every request once, before any handler runs: its address
+// and its scheme. Exactly one module may set it; without one the client is the TCP peer and the
+// scheme is that of the connection.
+func (x *Extender) ResolveClient(fn func(r *http.Request) httpx.Client) {
+	if x.m.ResolveClient != nil {
+		panic(fmt.Sprintf("module %s: ResolveClient twice", x.m.Module.ID))
 	}
-	x.m.ClientAddress = fn
+	x.m.ResolveClient = fn
 }
 
 // TokenKind registers the verifier of the tokens with prefix p (see auth.Verifier).
@@ -221,8 +222,8 @@ func (x *Extender) Demo(d DemoData) { x.m.Demo = &d }
 func (x *Extender) Seed(fn SeedFunc) { x.m.Seed = fn }
 
 // Build checks mods and runs every Register, in order. It panics on a manifest that breaks the
-// contract: demo data or a seed without exactly one format, or two modules that claim one
-// client address.
+// contract: demo data or a seed without exactly one format, or two modules that resolve
+// the client.
 func Build(mods []Module) []*Manifest {
 	Check(mods)
 	out := make([]*Manifest, 0, len(mods))
@@ -238,9 +239,9 @@ func Build(mods []Module) []*Manifest {
 				panic(fmt.Sprintf("module %s: format %s binds signing keys, so the module requires signing", m.ID, f.Name))
 			}
 		}
-		if mf.ClientAddress != nil {
+		if mf.ResolveClient != nil {
 			if address != "" {
-				panic(fmt.Sprintf("module %s: module %s resolves the client address already", m.ID, address))
+				panic(fmt.Sprintf("module %s: module %s resolves the client already", m.ID, address))
 			}
 			address = m.ID
 		}

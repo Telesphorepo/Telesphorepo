@@ -90,6 +90,7 @@ type Result struct {
 	Write  *Write
 	Asset  *Asset
 	Status Status
+	Prev   *Asset // the asset that a Replaced write replaced
 }
 
 // commitRetries is how often a failed commit transaction is tried again.
@@ -180,6 +181,9 @@ func (p *Pipeline) CommitAll(ctx context.Context, ws []Write) ([]*Result, error)
 	}
 	for i, a := range written {
 		if a != nil {
+			if results[i].Status == Replaced {
+				results[i].Prev = results[i].Asset
+			}
 			results[i].Asset = a
 		}
 	}
@@ -348,6 +352,8 @@ func upsert(ctx context.Context, q *dbq.Queries, w *Write, b *blobs.Blob) (*Asse
 		BlobID:      b.ID,
 		Size:        b.Size,
 		Sha256:      b.SHA256,
+		Md5:         b.MD5,
+		Sha1:        b.SHA1,
 		ContentType: w.ContentType,
 		Kind:        w.Kind,
 		UploadedBy:  sql.NullInt64{Int64: o.UserID, Valid: o.UserID != 0},
@@ -361,7 +367,7 @@ func upsert(ctx context.Context, q *dbq.Queries, w *Write, b *blobs.Blob) (*Asse
 	if err != nil {
 		return nil, err
 	}
-	a := &Asset{ID: row.ID, RepoID: w.Repo.ID, Path: string(w.Path), BlobID: b.ID, Size: b.Size, SHA256: b.SHA256,
+	a := &Asset{ID: row.ID, RepoID: w.Repo.ID, Path: string(w.Path), BlobID: b.ID, Size: b.Size, SHA256: b.SHA256, MD5: b.MD5, SHA1: b.SHA1,
 		ContentType: w.ContentType, Kind: row.Kind, UploadedBy: o.UserID, BuildID: o.BuildID,
 		CreatedAt: time.Unix(row.CreatedAt, 0).UTC(), UpdatedAt: time.Unix(row.UpdatedAt, 0).UTC(), RemoteETag: etag}
 	if checked > 0 {

@@ -18,6 +18,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/perm"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
@@ -70,12 +71,12 @@ func (r *Router) Module() string { return r.module }
 
 // Handle registers pattern (net/http ServeMux syntax) with policy p. It panics at startup when
 // the path lies outside what the module owns, or when the policy breaks a rule of the server: a
-// password or a read token reaches only GET and HEAD routes without a server permission (Perm or
-// SomeRepo), so
-// every change of state and every permission route needs a UI session (and its second factor)
-// or a publish session. A core bearer token can carry a password or a read token, so a route
-// that reads bearers has no server permission, and on a method other than GET or HEAD it writes
-// or deletes in one repo, where only the open publish session of a bearer scope passes.
+// password, a read token or a device reaches only GET and HEAD routes without a server permission
+// (Perm or SomeRepo), so every change of state and every permission route needs a UI session (and
+// its second factor) or a publish session. A core bearer token can carry a password, a read token
+// or a device, so a route that reads bearers has no server permission, and on a method other than
+// GET or HEAD it writes or deletes in one repo, where only the open publish session of a bearer
+// scope passes.
 func (r *Router) Handle(pattern string, p Policy, h Handler) {
 	method, path, ok := strings.Cut(pattern, " ")
 	if !ok {
@@ -83,24 +84,38 @@ func (r *Router) Handle(pattern string, p Policy, h Handler) {
 	}
 	path = strings.TrimSpace(path)
 	read := method == http.MethodGet || method == http.MethodHead
-	if p.Accept&(auth.CredPassword|auth.CredReadToken) != 0 {
+	if p.Accept&(auth.CredPassword|auth.CredReadToken|auth.CredDevice) != 0 {
 		if !read {
-			panic(fmt.Sprintf("route: %s accepts a password or a read token on a method other than GET or HEAD", pattern))
+			panic(fmt.Sprintf("route: %s accepts a password, a read token or a device on a method other than GET or HEAD", pattern))
 		}
 		if len(p.needs()) > 0 || p.SomeRepo != "" {
-			panic(fmt.Sprintf("route: %s accepts a password or a read token on a server permission route", pattern))
+			panic(fmt.Sprintf("route: %s accepts a password, a read token or a device on a server permission route", pattern))
 		}
+	}
+	if p.Repo != nil && p.Repo.Pick != nil && len(p.Repo.Ops) == 0 {
+		panic(fmt.Sprintf("route: %s has Pick without Ops", pattern))
 	}
 	if p.Bearer {
 		if len(p.needs()) > 0 || p.SomeRepo != "" {
 			panic(fmt.Sprintf("route: %s reads bearer tokens on a server permission route", pattern))
 		}
-		if !read && (p.Repo == nil || (p.Repo.Op != access.Write && p.Repo.Op != access.Delete)) {
+		if !read && p.Repo == nil {
 			panic(fmt.Sprintf("route: %s reads bearer tokens on a method other than GET or HEAD without a repo write or delete", pattern))
 		}
+		if !read {
+			for _, op := range p.Repo.ops() {
+				if op != access.Write && op != access.Delete {
+					panic(fmt.Sprintf("route: %s reads bearer tokens on a method other than GET or HEAD without a repo write or delete", pattern))
+				}
+			}
+		}
 	}
-	if p.Repo != nil && p.Repo.Op == access.Write && p.Accept&^auth.CredPublish != 0 {
-		panic(fmt.Sprintf("route: %s writes and accepts a credential other than a publish session", pattern))
+	if p.Repo != nil {
+		for _, op := range p.Repo.ops() {
+			if op == access.Write && p.Accept&^auth.CredPublish != 0 {
+				panic(fmt.Sprintf("route: %s writes and accepts a credential other than a publish session", pattern))
+			}
+		}
 	}
 	var hh http.Handler = r.mux.enforce(p, h)
 	api := strings.HasPrefix(path, "/api/")
@@ -141,6 +156,15 @@ func (m *Mux) enforce(p Policy, h Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		c := &Call{}
 		fail := func(d access.Decision) { p.refuse(w, r, d) }
+		var op access.Op
+		var needs []perm.ID
+		if p.Repo != nil {
+			var ok bool
+			if op, needs, ok = p.Repo.pick(r); !ok {
+				fail(access.Refuse(http.StatusInternalServerError, "internal", "internal error"))
+				return
+			}
+		}
 		if p.Accept != 0 || p.Bearer || p.TokenHeader != "" {
 			pr, err := m.auth.Identify(r, auth.Read{
 				Cookie: p.Accept&(auth.CredSession|auth.CredSetupSession) != 0, Bearer: p.Bearer, TokenHeader: p.TokenHeader,
@@ -170,7 +194,7 @@ func (m *Mux) enforce(p Policy, h Handler) http.HandlerFunc {
 		kindAtRepo := false
 		if pr := c.P; pr != nil && !pr.Anonymous() && !pr.Is(p.Accept) {
 			switch {
-			case p.Repo != nil && p.Repo.Op == access.Write && !pr.Is(auth.CredSetupSession):
+			case p.Repo != nil && op == access.Write && !pr.Is(auth.CredSetupSession):
 				kindAtRepo = true
 			case pr.Scopes != nil && p.Repo != nil && p.Accept&auth.CredPublish != 0:
 				kindAtRepo = true
@@ -230,13 +254,15 @@ func (m *Mux) enforce(p Policy, h Handler) http.HandlerFunc {
 				fail(m.access.Missing(c.P, repo))
 				return
 			}
-			if kindAtRepo && rule.Op != access.Write {
+			// A bearer token of another credential kind reads or reads metadata only with the open
+			// publish session of its scope; on a write or a delete, the engine answers from its scope.
+			if kindAtRepo && op != access.Write && op != access.Delete {
 				if sc := c.P.ScopeOf(repo.Name); sc == nil || sc.Open == nil {
 					fail(kindRefusal(c.P))
 					return
 				}
 			}
-			d := m.access.Decide(r.Context(), r, c.P, repo, rule.Op, rule.needs()...)
+			d := m.access.Decide(r.Context(), r, c.P, repo, op, needs...)
 			if !d.Allowed {
 				fail(d)
 				return

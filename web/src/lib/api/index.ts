@@ -291,6 +291,12 @@ export const api = {
     cancel: (id: number) => request<T.Move>("DELETE", `/api/storage/moves/${id}`),
   },
 
+  docker: {
+    /** The details of the manifest at a tag or manifest path of a docker repo. */
+    manifest: (name: string, path: string) =>
+      request<T.DockerManifest>("GET", `/api/docker/${enc(name)}/manifest`, { query: { path } }),
+  },
+
   nexus: {
     list: (p?: T.PageParams) => request<T.Page<T.NexusSource>>("GET", "/api/nexus/sources", { query: page(p) }),
     create: (s: T.NewNexusSource) => request<T.NexusSource>("POST", "/api/nexus/sources", { body: s }),
@@ -334,7 +340,7 @@ export const api = {
 
   publish: {
     /** Minting from a device or a CI token (client side; no auth). */
-    challenge: (device_id: number) => request<{ nonce: string }>("POST", "/api/publish/challenge", { body: { device_id } }),
+    challenge: (device_id: number) => request<{ nonce: string; expires_at: string }>("POST", "/api/publish/challenge", { body: { device_id } }),
     deviceSession: (b: { device_id: number; repo: string; nonce: string; signature: string }) =>
       request<T.PublishSession>("POST", "/api/publish/sessions", { body: b }),
     oidcSession: (token: string, repo: string) =>

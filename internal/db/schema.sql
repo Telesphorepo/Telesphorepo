@@ -118,7 +118,9 @@ CREATE TABLE blobs (
   size            INTEGER NOT NULL,
   refs            INTEGER NOT NULL DEFAULT 0,
   unreferenced_at INTEGER NOT NULL,
-  created_at      INTEGER NOT NULL
+  created_at      INTEGER NOT NULL,
+  md5             TEXT NOT NULL DEFAULT '',           -- lowercase hex; '' for a synthetic row of the scale test
+  sha1            TEXT NOT NULL DEFAULT ''
 ) STRICT;
 CREATE INDEX blobs_unreferenced ON blobs(unreferenced_at) WHERE refs = 0;
 
@@ -146,8 +148,8 @@ CREATE TABLE builds (
 ) STRICT;
 CREATE INDEX builds_created ON builds(created_at);
 
--- id is the rowid that assets_fts points at, so assets keeps its rowid. size and sha256 are the
--- blob's, copied (a blob never changes). Only the asset pipeline (internal/assets) writes rows.
+-- id is the rowid that assets_fts points at, so assets keeps its rowid. size, sha256, md5 and sha1
+-- are the blob's, copied (a blob never changes), so a download reads no other row. Only the asset pipeline (internal/assets) writes rows.
 CREATE TABLE assets (
   id           INTEGER PRIMARY KEY,
   repo_id      INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
@@ -165,6 +167,8 @@ CREATE TABLE assets (
   -- the next check. A hosted file keeps the defaults.
   checked_at   INTEGER NOT NULL DEFAULT 0,
   remote_etag  TEXT NOT NULL DEFAULT '',
+  md5          TEXT NOT NULL DEFAULT '',             -- lowercase hex, '' when the blob has none
+  sha1         TEXT NOT NULL DEFAULT '',
   UNIQUE (repo_id, path)                             -- also the repo_id foreign-key index
 ) STRICT;
 CREATE INDEX assets_uploaded_by ON assets(uploaded_by);

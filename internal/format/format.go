@@ -43,6 +43,9 @@ type Spec struct {
 	// ProxyProbe) and "group" (any format: the core read path serves it).
 	Kinds []string
 
+	// ValidName checks the name of a new repo of the format beyond the rules of every repo name,
+	// e.g. one segment of an OCI repository name. nil: no extra rule.
+	ValidName func(name string) error
 	// Config is the repo config of the format.
 	Config ConfigSpec
 	// SigningKey makes each hosted repo of the format bind a signing key (the repo field signing_key of
@@ -67,21 +70,23 @@ type Spec struct {
 	Admit       func(ctx context.Context, w *assets.Write, existing *assets.Asset) (assets.Decision, error)
 	OnCommitted func(ctx context.Context, tx *sql.Tx, w *assets.Write, a *assets.Asset, prev *assets.Asset) error
 	AfterCommit func(ctx context.Context, repo *repos.Repo, rs []*assets.Result)
-	OnRemoved   func(ctx context.Context, tx *sql.Tx, repo *repos.Repo, removed []*assets.Asset) ([]repopath.Path, error)
+	OnRemoved   func(ctx context.Context, tx *sql.Tx, repo *repos.Repo, removed []*assets.Asset, prefixes []repopath.Path) ([]repopath.Path, error)
 	AfterRemove func(ctx context.Context, repo *repos.Repo, removed []*assets.Asset)
 	// OnRepoChange runs in the transaction of every repo update (API and Nexus mapping), after the
 	// rows changed, with the repo before and after.
 	OnRepoChange func(ctx context.Context, tx *sql.Tx, old, new *repos.Repo) error
 
-	// Classify tells the proxy how to cache a path; ok=false refuses the path (404).
-	Classify func(path repopath.Path) (assets.Class, bool)
+	// Classify tells the proxy how to cache a path of a proxy with the remote remote; ok=false
+	// refuses the path (404).
+	Classify func(remote *repos.Proxy, path repopath.Path) (assets.Class, bool)
 	// ProxyProbe is the path that a check of a proxy's remote requests: "" for the remote's root,
 	// or a file that the remote of a repo with config must have.
 	ProxyProbe func(config json.RawMessage) string
 	// Merge merges a file that several members of a group have (e.g. maven-metadata.xml).
 	Merge *assets.Merger
 	// RemoteAuth answers a remote's 401 challenge with the headers of a retry (e.g. the Docker
-	// Hub token exchange). The proxy calls it once per fetch. nil: Basic credentials only.
+	// Hub token exchange). The proxy calls it once per fetch. nil: the proxy sends the remote's
+	// credentials as HTTP Basic on every request.
 	RemoteAuth func(ctx context.Context, remote *repos.Proxy, challenge http.Header) (http.Header, error)
 
 	// Rebuild builds the units of a group that the format marked with rebuild.Queue.MarkTx (e.g.
@@ -355,12 +360,17 @@ func (r *Registry) SupportsKind(name, kind string) error {
 	return nil
 }
 
-// ValidateConfig validates the repo config raw for format name (repos.Validator). An empty raw
-// or null selects the format's default config.
-func (r *Registry) ValidateConfig(name string, raw json.RawMessage) (json.RawMessage, error) {
+// ValidateConfig validates the name repoName and the config raw of a repo of format name
+// (repos.Validator). An empty raw or null selects the format's default config.
+func (r *Registry) ValidateConfig(name, repoName string, raw json.RawMessage) (json.RawMessage, error) {
 	s := r.Get(name)
 	if s == nil {
 		return nil, r.unknown(name)
+	}
+	if s.ValidName != nil {
+		if err := s.ValidName(repoName); err != nil {
+			return nil, err
+		}
 	}
 	if t := bytes.TrimSpace(raw); len(t) == 0 || string(t) == "null" {
 		raw = s.Config.Default

@@ -26,16 +26,13 @@ func (a *API) Decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	return httpx.DecodeJSON(w, r, settings.MaxJSONSize.Get(a.Settings()), v)
 }
 
-// BaseURL is the base_url setting, else the URL the request came in on.
+// BaseURL is the base_url setting, else the URL the client reached the server at (the scheme of
+// httpx.ClientScheme and the host of the request).
 func (a *API) BaseURL(r *http.Request) string {
 	if base := settings.BaseURL.Get(a.Settings()); base != "" {
 		return base
 	}
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	return scheme + "://" + r.Host
+	return httpx.ClientScheme(r) + "://" + r.Host
 }
 
 // Fail maps a kernel error to its status code without leaking internals.

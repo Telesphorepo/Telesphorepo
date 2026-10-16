@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/netip"
 	"strings"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/access"
@@ -34,7 +33,7 @@ const (
 	ActionTrustedUpdate = "network.trusted.update"
 )
 
-// Module returns the network module: the client address of every request, the IP lists and
+// Module returns the network module: the client address and scheme of every request, the IP lists and
 // their refresh job, the IP rules of each repo (a guard of the access engine and the networks of
 // the access report), and their API. It provides *Service to the modules
 // that require it.
@@ -70,7 +69,7 @@ func Module() module.Module {
 				h.Provide(m.rules)
 				return nil
 			})
-			x.ClientAddress(func(r *http.Request) netip.Addr { return m.rules.ClientIP(r) })
+			x.ResolveClient(func(r *http.Request) httpx.Client { return m.rules.Client(r) }) // m.rules is set in Init
 			x.RepoGuard(m)
 			x.Job(jobs.Job{Name: "network.presets", Every: checkEvery, Tick: func(ctx context.Context) error {
 				return m.rules.RefreshStale(ctx)

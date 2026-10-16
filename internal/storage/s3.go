@@ -3,8 +3,10 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -96,6 +98,23 @@ func (s *s3Store) Get(ctx context.Context, key string) (io.ReadCloser, ObjectInf
 		return nil, ObjectInfo{}, mapS3(err)
 	}
 	return o.Body, ObjectInfo{Key: key, Size: aws.ToInt64(o.ContentLength), ModTime: aws.ToTime(o.LastModified)}, nil
+}
+
+func (s *s3Store) GetRange(ctx context.Context, key string, off, n int64) (io.ReadCloser, ObjectInfo, error) {
+	o, err := s.c.GetObject(ctx, &s3.GetObjectInput{Bucket: &s.bucket, Key: s.key(key),
+		Range: aws.String(fmt.Sprintf("bytes=%d-%d", off, off+n-1))})
+	if err != nil {
+		return nil, ObjectInfo{}, mapS3(err)
+	}
+	size := aws.ToInt64(o.ContentLength)
+	if cr := aws.ToString(o.ContentRange); cr != "" {
+		if i := strings.LastIndexByte(cr, '/'); i >= 0 {
+			if total, err := strconv.ParseInt(cr[i+1:], 10, 64); err == nil {
+				size = total
+			}
+		}
+	}
+	return o.Body, ObjectInfo{Key: key, Size: size, ModTime: aws.ToTime(o.LastModified)}, nil
 }
 
 func (s *s3Store) Head(ctx context.Context, key string) (ObjectInfo, error) {

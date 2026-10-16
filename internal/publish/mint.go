@@ -23,6 +23,49 @@ type Minter interface {
 	// row and the publish.session.create event, and returns the open session. It returns no
 	// token: the caller of a token exchange carries the session in its own token.
 	Mint(ctx context.Context, r *http.Request, cred MintCred, repo *repos.Repo) (*auth.PublishSession, error)
+	// Check verifies cred without a repo and mints nothing: a CI token that an enabled trust
+	// policy of its issuer allows (audience, claims, iat, exp), or a device proof of a token
+	// exchange nonce (nonce, signature, device usable, user enabled). It counts no replay.
+	Check(ctx context.Context, r *http.Request, cred MintCred) error
+}
+
+// Check implements Minter.
+func (s *Service) Check(ctx context.Context, r *http.Request, cred MintCred) error {
+	switch {
+	case cred.CIToken != "":
+		return s.checkCI(ctx, cred.CIToken)
+	case cred.Device != nil:
+		_, err := s.checkExchangeProof(ctx, cred.Device)
+		return err
+	}
+	return errorf(ErrInvalid, "no credential to check")
+}
+
+// checkExchangeProof verifies a device proof over a token exchange nonce (repo "*") and returns
+// the device: the nonce is one the device asked for and has not expired, the device is usable,
+// and the signature verifies with its key. The nonce stays.
+func (s *Service) checkExchangeProof(ctx context.Context, proof *DeviceProof) (dbq.GetDeviceRow, error) {
+	now := time.Now().Unix()
+	if proof.Repo != "*" {
+		return dbq.GetDeviceRow{}, errorf(ErrDenied, "invalid or expired nonce")
+	}
+	deviceID, err := s.rq.GetExchangeNonce(ctx, dbq.GetExchangeNonceParams{IDHash: hashBytes([]byte(proof.Nonce)), Now: now})
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && deviceID != proof.DeviceID) {
+		return dbq.GetDeviceRow{}, errorf(ErrDenied, "invalid or expired nonce")
+	}
+	if err != nil {
+		return dbq.GetDeviceRow{}, err
+	}
+	d, err := s.usableDevice(ctx, proof.DeviceID, now)
+	if err != nil {
+		return d, err
+	}
+	sig, err := decodeB64URL(proof.Signature)
+	if err != nil || len(d.PublicKey) != ed25519.PublicKeySize ||
+		!ed25519.Verify(ed25519.PublicKey(d.PublicKey), SignedMessage(proof.Nonce, proof.DeviceID, proof.Repo), sig) {
+		return d, errorf(ErrDenied, "bad device signature")
+	}
+	return d, nil
 }
 
 // MintCred is the credential of a mint; exactly one field is set.

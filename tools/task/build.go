@@ -76,8 +76,8 @@ func preview(ctx context.Context) error {
 
 // testZones maps each e2e zone to its go test arguments before the package.
 var testZones = map[string][]string{
-	"core":    {"-tags", "e2e", "-timeout", "30m"},
-	"import":  {"-tags", "import", "-timeout", "30m"},
+	"core":    {"-tags", "e2e", "-timeout", "60m"},
+	"import":  {"-tags", "import", "-timeout", "45m"},
 	"scale":   {"-tags", "scale", "-run", "TestScale", "-timeout", "60m"},
 	"clients": {"-tags", "clients", "-timeout", "40m"},
 }

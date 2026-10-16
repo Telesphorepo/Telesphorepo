@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"time"
 	"unicode/utf8"
@@ -937,17 +938,32 @@ func (s *Service) page(ctx context.Context, cl *Client, id int64, source, token 
 // SHA-256 is skipped without a download.
 func (s *Service) importAsset(ctx context.Context, cl *Client, im *format.Importer, target *repos.Repo, source string, a Asset, read *int64) (format.ImportOutcome, error) {
 	item := format.ImportItem{
-		Path:      a.Path,
-		Size:      a.Size,
-		SHA256:    a.SHA256,
-		CreatedAt: a.CreatedAt,
-		UpdatedAt: a.UpdatedAt,
+		Path:        a.Path,
+		Size:        a.Size,
+		SHA256:      a.SHA256,
+		ContentType: a.ContentType,
+		CreatedAt:   a.CreatedAt,
+		UpdatedAt:   a.UpdatedAt,
 		Open: func(ctx context.Context) (io.ReadCloser, error) {
-			rc, err := cl.Open(ctx, source, a)
+			rc, err := cl.Open(ctx, source, a, im.Header)
 			if err != nil {
 				return nil, err
 			}
 			return countingReader{rc, read}, nil
+		},
+		Fetch: func(ctx context.Context, p string, header http.Header) (io.ReadCloser, string, error) {
+			h := im.Header.Clone()
+			if h == nil {
+				h = http.Header{}
+			}
+			for k, vs := range header {
+				h[k] = vs
+			}
+			rc, ct, err := cl.Fetch(ctx, source, p, h)
+			if err != nil {
+				return nil, "", err
+			}
+			return countingReader{rc, read}, ct, nil
 		},
 	}
 	return im.Run(ctx, s.assets, target, item)

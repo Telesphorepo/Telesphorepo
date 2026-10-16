@@ -209,7 +209,8 @@ func (s *Service) Verify(ctx context.Context, publicID, secret string) (*auth.Pr
 		row.DeviceExpiresAt, row.TrustID, row.TrustDisabled}, time.Now().Unix()) {
 		return nil, auth.ErrPublishEnded
 	}
-	ps := &auth.PublishSession{ID: row.ID, RepoID: row.RepoID, Via: row.Via, Subject: row.Subject, BuildID: row.BuildID.Int64}
+	ps := &auth.PublishSession{ID: row.ID, RepoID: row.RepoID, Via: row.Via, Subject: row.Subject, BuildID: row.BuildID.Int64, DeviceID: row.DeviceID.Int64,
+		Expires: unixTime(row.ExpiresAt)}
 	return s.auth.PublishPrincipal(ctx, ps, row.UserID.Int64)
 }
 
@@ -227,7 +228,8 @@ func (s *Service) LoadSession(ctx context.Context, id int64) (*auth.Principal, e
 		row.DeviceExpiresAt, row.TrustID, row.TrustDisabled}, time.Now().Unix()) {
 		return nil, auth.ErrPublishEnded
 	}
-	ps := &auth.PublishSession{ID: row.ID, RepoID: row.RepoID, Via: row.Via, Subject: row.Subject, BuildID: row.BuildID.Int64}
+	ps := &auth.PublishSession{ID: row.ID, RepoID: row.RepoID, Via: row.Via, Subject: row.Subject, BuildID: row.BuildID.Int64, DeviceID: row.DeviceID.Int64,
+		Expires: unixTime(row.ExpiresAt)}
 	return s.auth.PublishPrincipal(ctx, ps, row.UserID.Int64)
 }
 

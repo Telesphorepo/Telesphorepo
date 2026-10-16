@@ -34,6 +34,8 @@ type Asset struct {
 	BuildID     sql.NullInt64
 	CheckedAt   int64
 	RemoteEtag  string
+	Md5         string
+	Sha1        string
 }
 
 type AssetsFt struct {
@@ -68,6 +70,8 @@ type Blob struct {
 	Refs           int64
 	UnreferencedAt int64
 	CreatedAt      int64
+	Md5            string
+	Sha1           string
 }
 
 type Build struct {

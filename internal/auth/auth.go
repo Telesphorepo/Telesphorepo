@@ -67,6 +67,10 @@ const (
 	CredSession                       // tr_session cookie of a full UI session
 	CredSetupSession                  // tr_session cookie of a person who needs a second factor and has none
 	CredPublish                       // publish session token (Basic password or Bearer)
+	// CredDevice is an enrolled device key of a user, behind a core bearer token only (a format's
+	// token exchange, e.g. the Docker credential helper). It reads what its user reads; it writes
+	// only through the publish session of a bearer scope that the device minted.
+	CredDevice
 )
 
 // Principal is an authenticated caller. A nil *Principal means anonymous. A principal from an
@@ -78,6 +82,7 @@ type Principal struct {
 	Kind     string   // KindLocal or KindOIDC; "" for a publish session without a user
 	Perms    perm.Set // the user's server permissions
 	TokenID  int64    // CredReadToken only
+	DeviceID int64    // CredDevice only
 	// Publish is the open session of a CredPublish principal. The access engine limits such a
 	// principal to the session's repo, and the route policies to the publish routes.
 	Publish *PublishSession
@@ -101,6 +106,10 @@ type PublishSession struct {
 	// BuildID is the CI build record of the session (internal/ci); the files it writes point at
 	// it. 0: none.
 	BuildID int64
+	// DeviceID is the device that minted the session (0: none).
+	DeviceID int64
+	// Expires is when the session ends at the latest.
+	Expires time.Time
 }
 
 type User struct {
@@ -157,6 +166,7 @@ type Service struct {
 	background sync.WaitGroup            // the last_used_at writes of read tokens (Wait)
 	bearerKey  []byte                    // signs core bearer tokens (SetBearerKey)
 	sessions   SessionLoader             // loads the publish sessions of bearer tokens
+	devices    DeviceLoader              // loads the devices of bearer tokens
 	sso        func() bool               // reports whether single sign-on is on (SetSSO)
 	managed    func() bool               // reports whether single sign-on manages the permissions of SSO accounts (SetManaged)
 

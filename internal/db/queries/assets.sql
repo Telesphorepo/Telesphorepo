@@ -4,18 +4,19 @@
 -- Indexed point lookup on (repo_id, path), used by every download.
 -- name: GetAsset :one
 SELECT id, repo_id, path, blob_id, size, sha256, content_type, kind, uploaded_by, created_at, updated_at,
-  build_id, checked_at, remote_etag
+  build_id, checked_at, remote_etag, md5, sha1
 FROM assets WHERE repo_id = ? AND path = ?;
 
 -- Path and kind never change on update (the FTS triggers rely on it). created_at changes only on
 -- insert.
 -- name: UpsertAsset :one
 INSERT INTO assets (repo_id, path, blob_id, size, sha256, content_type, kind, uploaded_by, created_at, updated_at,
-  build_id, checked_at, remote_etag)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  build_id, checked_at, remote_etag, md5, sha1)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (repo_id, path) DO UPDATE SET blob_id = excluded.blob_id, size = excluded.size, sha256 = excluded.sha256,
   content_type = excluded.content_type, updated_at = excluded.updated_at, uploaded_by = excluded.uploaded_by,
-  build_id = excluded.build_id, checked_at = excluded.checked_at, remote_etag = excluded.remote_etag
+  build_id = excluded.build_id, checked_at = excluded.checked_at, remote_etag = excluded.remote_etag,
+  md5 = excluded.md5, sha1 = excluded.sha1
 RETURNING id, kind, created_at, updated_at;
 
 -- An import gives a file the dates of its source (a file that a sync skipped because its bytes
@@ -32,28 +33,28 @@ DELETE FROM assets WHERE repo_id = ? AND path = ?;
 -- tighter of the prefix and the cursor. The *Range forms add the prefix's upper bound.
 -- name: ListAssetsFrom :many
 SELECT id, repo_id, path, blob_id, size, sha256, content_type, kind, uploaded_by, created_at, updated_at,
-  build_id, checked_at, remote_etag
+  build_id, checked_at, remote_etag, md5, sha1
 FROM assets
 WHERE repo_id = sqlc.arg(repo_id) AND path >= sqlc.arg(lower)
 ORDER BY path LIMIT sqlc.arg(limit);
 
 -- name: ListAssetsAfter :many
 SELECT id, repo_id, path, blob_id, size, sha256, content_type, kind, uploaded_by, created_at, updated_at,
-  build_id, checked_at, remote_etag
+  build_id, checked_at, remote_etag, md5, sha1
 FROM assets
 WHERE repo_id = sqlc.arg(repo_id) AND path > sqlc.arg(lower)
 ORDER BY path LIMIT sqlc.arg(limit);
 
 -- name: ListAssetsFromRange :many
 SELECT id, repo_id, path, blob_id, size, sha256, content_type, kind, uploaded_by, created_at, updated_at,
-  build_id, checked_at, remote_etag
+  build_id, checked_at, remote_etag, md5, sha1
 FROM assets
 WHERE repo_id = sqlc.arg(repo_id) AND path >= sqlc.arg(lower) AND path < sqlc.arg(upper)
 ORDER BY path LIMIT sqlc.arg(limit);
 
 -- name: ListAssetsAfterRange :many
 SELECT id, repo_id, path, blob_id, size, sha256, content_type, kind, uploaded_by, created_at, updated_at,
-  build_id, checked_at, remote_etag
+  build_id, checked_at, remote_etag, md5, sha1
 FROM assets
 WHERE repo_id = sqlc.arg(repo_id) AND path > sqlc.arg(lower) AND path < sqlc.arg(upper)
 ORDER BY path LIMIT sqlc.arg(limit);
@@ -62,7 +63,7 @@ ORDER BY path LIMIT sqlc.arg(limit);
 -- manifest digest.
 -- name: ListAssetsByBlob :many
 SELECT id, repo_id, path, blob_id, size, sha256, content_type, kind, uploaded_by, created_at, updated_at,
-  build_id, checked_at, remote_etag
+  build_id, checked_at, remote_etag, md5, sha1
 FROM assets
 WHERE blob_id = ? AND repo_id = ?
 LIMIT ?;
@@ -74,12 +75,12 @@ UPDATE assets SET checked_at = ?, remote_etag = ? WHERE repo_id = ? AND path = ?
 -- Content-addressed blobs (internal/blobs).
 
 -- name: GetBlob :one
-SELECT id, sha256, size, refs FROM blobs WHERE sha256 = ?;
+SELECT id, sha256, size, refs, md5, sha1 FROM blobs WHERE sha256 = ?;
 
 -- A new blob has no reference yet: it counts as unreferenced since it was created, so a blob
 -- whose commit failed reaches the GC after the grace.
 -- name: InsertBlob :one
-INSERT INTO blobs (sha256, size, refs, unreferenced_at, created_at) VALUES (?, ?, 0, ?, ?)
+INSERT INTO blobs (sha256, size, refs, unreferenced_at, created_at, md5, sha1) VALUES (?, ?, 0, ?, ?, ?, ?)
 RETURNING id;
 
 -- The blobs that no asset referenced since before cutoff, oldest first, through

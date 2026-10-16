@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
@@ -33,6 +34,9 @@ type Importer struct {
 	// and has ID 0 for a target that the save creates. answers are the answers to the questions;
 	// nil for the source detail. nil Plan: the target gets the format's default config.
 	Plan func(ctx context.Context, src SourceRepo, target *repos.Repo, answers map[string]string) (*TargetPlan, error)
+	// Header holds extra headers of every download from the source, e.g. the Accept of the OCI
+	// manifest types, so the source sends a file as it stores it.
+	Header http.Header
 }
 
 // SourceRepo is a repository of the source server.
@@ -82,12 +86,17 @@ type Option struct {
 // ImportItem is one source file. CreatedAt and UpdatedAt are the source's dates of the file;
 // zero means now. The stored file gets them, and a skipped file gets them too.
 type ImportItem struct {
-	Path      string // source path, forward slashes
-	Size      int64
-	SHA256    string // lowercase hex; "" when the source does not give one
-	CreatedAt time.Time
-	UpdatedAt time.Time
-	Open      func(ctx context.Context) (io.ReadCloser, error)
+	Path        string // source path, forward slashes
+	Size        int64
+	SHA256      string // lowercase hex; "" when the source does not give one
+	ContentType string // the source's content type of the file; "" when it gives none
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	Open        func(ctx context.Context) (io.ReadCloser, error)
+	// Fetch downloads another path of the same source repo (e.g. a layer that a manifest names)
+	// with the Importer's Header and the extra header, and returns its body and content type. It
+	// answers the source's authentication challenges (e.g. a registry's token exchange).
+	Fetch func(ctx context.Context, sourcePath string, header http.Header) (io.ReadCloser, string, error)
 }
 
 // Origin is the origin of the item's file: an import with the source's dates.

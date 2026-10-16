@@ -55,6 +55,8 @@ type Asset struct {
 	BlobID      int64
 	Size        int64
 	SHA256      string
+	MD5         string // lowercase hex; "" when the blob has none (a synthetic row)
+	SHA1        string
 	ContentType string
 	Kind        string
 	UploadedBy  int64 // 0 = none
@@ -179,6 +181,8 @@ func fromRow(r dbq.Asset) *Asset {
 		BlobID:      r.BlobID,
 		Size:        r.Size,
 		SHA256:      r.Sha256,
+		MD5:         r.Md5,
+		SHA1:        r.Sha1,
 		ContentType: r.ContentType,
 		Kind:        r.Kind,
 		UploadedBy:  r.UploadedBy.Int64,
@@ -448,7 +452,8 @@ type SeedRow struct {
 }
 
 // SeedTx inserts blob and asset rows for "telesphorepo seed" in tx: a blob row per digest that has
-// none, and the asset row of each path. It writes no content, so it is for the scale test only.
+// none, and the asset row of each path. It writes no content and no MD5 or SHA-1, so it is for
+// the scale test only.
 func SeedTx(ctx context.Context, tx *sql.Tx, repoID int64, rows []SeedRow) ([]*Asset, error) {
 	q := dbq.New(tx)
 	now := time.Now().Unix()

@@ -212,6 +212,30 @@ func (s *Service) Identify(r *http.Request, rd Read) (*Principal, error) {
 	return nil, nil
 }
 
+// Authenticate verifies username and password of a request that carries them outside the
+// Authorization header (e.g. the form of a registry token endpoint): a password, or a token of a
+// registered kind as the password. It applies the failed-attempt rate limits of the client
+// address. Errors: those of Identify.
+func (s *Service) Authenticate(r *http.Request, username, password string) (*Principal, error) {
+	return s.authenticate(r.Context(), s.clientIP(r), username, password, true)
+}
+
+// Failed counts a failed attempt of the client address of r with a credential that the service
+// does not verify itself (e.g. a CI identity token), and of username when it is not "".
+func (s *Service) Failed(r *http.Request, username string) {
+	keys := []string{limitKeys(s.clientIP(r), "")[0]}
+	if username != "" {
+		keys = append(keys, userLimitKey(username))
+	}
+	s.limits.fail(keys...)
+}
+
+// Blocked returns how long the client address of r must wait after too many failed attempts (0:
+// not blocked).
+func (s *Service) Blocked(r *http.Request) time.Duration {
+	return s.limits.blocked(limitKeys(s.clientIP(r), "")[0])
+}
+
 // isToken reports whether tok starts with the prefix of a registered token kind.
 func (s *Service) isToken(tok string) bool {
 	_, _, _, ok := s.tokenKind(tok)

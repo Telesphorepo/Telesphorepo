@@ -133,16 +133,12 @@ func orList(names []string) string {
 	return strings.Join(names[:len(names)-1], ", ") + " or " + names[len(names)-1]
 }
 
-// setupBaseURL is the base_url setting, else the URL the request came in on. The scripts quote
+// setupBaseURL is the base_url setting, else the URL the client reached the server at. The scripts quote
 // it in single quotes, so it must be a plain URL: no quote, space, backslash or control character.
 func (m *mod) setupBaseURL(r *http.Request) (string, bool) {
 	base := strings.TrimRight(settings.BaseURL.Get(m.h.Settings.Current()), "/")
 	if base == "" {
-		scheme := "http"
-		if r.TLS != nil {
-			scheme = "https"
-		}
-		base = scheme + "://" + r.Host
+		base = httpx.ClientScheme(r) + "://" + r.Host
 	}
 	for _, c := range base {
 		if c <= ' ' || c == 0x7f || strings.ContainsRune("'\"`$\\", c) {

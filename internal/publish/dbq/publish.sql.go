@@ -383,6 +383,25 @@ func (q *Queries) GetDevice(ctx context.Context, id int64) (GetDeviceRow, error)
 	return i, err
 }
 
+const getDeviceExchangeNonce = `-- name: GetDeviceExchangeNonce :one
+SELECT expires_at FROM publish_nonces
+WHERE id_hash = ?1 AND device_id = ?2 AND exchange = 1 AND expires_at > ?3
+`
+
+type GetDeviceExchangeNonceParams struct {
+	IDHash   []byte
+	DeviceID int64
+	Now      int64
+}
+
+// The expiry of a token exchange nonce of a device that has not expired.
+func (q *Queries) GetDeviceExchangeNonce(ctx context.Context, arg GetDeviceExchangeNonceParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, getDeviceExchangeNonce, arg.IDHash, arg.DeviceID, arg.Now)
+	var expires_at int64
+	err := row.Scan(&expires_at)
+	return expires_at, err
+}
+
 const getEnrollmentByDeviceCode = `-- name: GetEnrollmentByDeviceCode :one
 SELECT device_code_hash, user_code, name, client, public_key, created_at, expires_at, polled_at, approved_by, device_id
 FROM device_enrollments WHERE device_code_hash = ?
@@ -709,6 +728,52 @@ func (q *Queries) ListDevices(ctx context.Context, arg ListDevicesParams) ([]Lis
 			&i.ExpiresAt,
 			&i.LastUsedAt,
 			&i.RevokedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listIssuerTrusts = `-- name: ListIssuerTrusts :many
+SELECT id, name, issuer, audience, claims, jwks
+FROM publish_trusts WHERE issuer = ? AND disabled = 0
+`
+
+type ListIssuerTrustsRow struct {
+	ID       int64
+	Name     string
+	Issuer   string
+	Audience string
+	Claims   string
+	Jwks     string
+}
+
+// The enabled policies of an issuer, through publish_trusts_issuer (a check of a CI token without
+// a repo, e.g. a registry login).
+func (q *Queries) ListIssuerTrusts(ctx context.Context, issuer string) ([]ListIssuerTrustsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listIssuerTrusts, issuer)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListIssuerTrustsRow
+	for rows.Next() {
+		var i ListIssuerTrustsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Issuer,
+			&i.Audience,
+			&i.Claims,
+			&i.Jwks,
 		); err != nil {
 			return nil, err
 		}

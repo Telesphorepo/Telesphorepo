@@ -1,4 +1,4 @@
-// Package httpx holds small shared HTTP helpers: the repo path of a URL, JSON I/O, client IP.
+// Package httpx holds small shared HTTP helpers: the repo path of a URL, JSON I/O, the client.
 package httpx
 
 import (
@@ -75,12 +75,19 @@ func DecodeJSON(w http.ResponseWriter, r *http.Request, max int64, v any) bool {
 	return false
 }
 
-type clientIPKey struct{}
+type clientKey struct{}
 
-// WithClientIP returns r with the resolved client address attached (see internal/netrules,
-// which resolves it once per request from the TCP peer and the trusted proxies).
-func WithClientIP(r *http.Request, a netip.Addr) *http.Request {
-	return r.WithContext(context.WithValue(r.Context(), clientIPKey{}, a))
+// Client is what the server knows of the client of a request: its address, and whether it
+// reached the server over HTTPS (directly, or through a TLS-terminating proxy).
+type Client struct {
+	IP    netip.Addr
+	HTTPS bool
+}
+
+// WithClient returns r with the resolved client attached (see internal/netrules, which resolves
+// it once per request from the TCP peer and the trusted proxies).
+func WithClient(r *http.Request, c Client) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), clientKey{}, c))
 }
 
 // PeerIP returns the address of the TCP peer of r.
@@ -93,12 +100,22 @@ func PeerIP(r *http.Request) netip.Addr {
 	return a.Unmap()
 }
 
-// ClientIP returns the client address that WithClientIP attached to r, else the TCP peer.
+// ClientIP returns the client address that WithClient attached to r, else the TCP peer.
 func ClientIP(r *http.Request) netip.Addr {
-	if a, ok := r.Context().Value(clientIPKey{}).(netip.Addr); ok {
-		return a
+	if c, ok := r.Context().Value(clientKey{}).(Client); ok {
+		return c.IP
 	}
 	return PeerIP(r)
+}
+
+// ClientScheme returns the scheme that the client used to reach the server: "https" or "http".
+// It is the one that WithClient attached to r, else that of the connection.
+func ClientScheme(r *http.Request) string {
+	c, ok := r.Context().Value(clientKey{}).(Client)
+	if ok && c.HTTPS || !ok && r.TLS != nil {
+		return "https"
+	}
+	return "http"
 }
 
 // Limit parses ?limit= (default 50, clamp 1..200).

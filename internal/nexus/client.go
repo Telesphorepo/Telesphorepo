@@ -14,7 +14,10 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/Telesphorepo/Telesphorepo/internal/proxy"
 )
 
 // maxJSONBytes caps a Nexus JSON response.
@@ -42,11 +45,21 @@ type Credentials struct {
 	Password string `json:"password"`
 }
 
-// Client calls the Nexus REST API with HTTP Basic authentication.
+// Client calls the Nexus REST API with HTTP Basic authentication. A download that Nexus answers
+// with a Bearer challenge (a Docker repository with the Docker Bearer Token Realm) gets a token
+// through proxy.Answer; the client keeps the newest token of each repository while it lives.
 type Client struct {
 	base  *url.URL // scheme and host, with the path of the Nexus root (no trailing slash)
 	creds Credentials
 	http  *http.Client
+	mu    sync.Mutex
+	auth  map[string]repoAuth // the newest challenge answer of each repository
+}
+
+// repoAuth is the answer to a challenge of a repository and when it stops being good.
+type repoAuth struct {
+	header http.Header
+	until  time.Time // zero: as long as the credentials
 }
 
 // NormalizeBaseURL checks that raw is an absolute http(s) URL without user info, query or
@@ -71,7 +84,7 @@ func NewClient(baseURL string, creds Credentials) (*Client, error) {
 		return nil, err
 	}
 	u, _ := url.Parse(norm)
-	return &Client{base: u, creds: creds, http: &http.Client{Transport: transport}}, nil
+	return &Client{base: u, creds: creds, http: &http.Client{Transport: transport}, auth: map[string]repoAuth{}}, nil
 }
 
 // SourceError is a failed call to the Nexus server. Its message names the request and the
@@ -131,6 +144,8 @@ type Asset struct {
 	DownloadURL string
 	Size        int64  // -1 when Nexus does not report it
 	SHA256      string // lowercase hex; "" when Nexus does not report it
+	// ContentType is the content type that Nexus keeps for the asset; "" when it reports none.
+	ContentType string
 	// CreatedAt and UpdatedAt are the blob dates (blobCreated, and blobUpdated or else
 	// lastModified); zero when Nexus does not report them.
 	CreatedAt time.Time
@@ -317,6 +332,7 @@ func (c *Client) Assets(ctx context.Context, repo, continuation string) (AssetPa
 			Path         string            `json:"path"`
 			DownloadURL  string            `json:"downloadUrl"`
 			FileSize     *int64            `json:"fileSize"`
+			ContentType  string            `json:"contentType"`
 			Checksum     map[string]string `json:"checksum"`
 			BlobCreated  string            `json:"blobCreated"`
 			BlobUpdated  string            `json:"blobUpdated"`
@@ -334,6 +350,7 @@ func (c *Client) Assets(ctx context.Context, repo, continuation string) (AssetPa
 			DownloadURL: it.DownloadURL,
 			Size:        -1,
 			SHA256:      strings.ToLower(it.Checksum["sha256"]),
+			ContentType: it.ContentType,
 			CreatedAt:   nexusTime(it.BlobCreated),
 			UpdatedAt:   nexusTime(it.BlobUpdated),
 		}
@@ -377,16 +394,96 @@ func (c *Client) downloadURL(repo string, a Asset) string {
 	return u.String() + "/repository/" + url.PathEscape(repo) + "/" + strings.Join(segs, "/")
 }
 
-// Open downloads asset a of repo. The caller closes the body.
-func (c *Client) Open(ctx context.Context, repo string, a Asset) (io.ReadCloser, error) {
-	resp, err := c.do(ctx, c.downloadURL(repo, a))
+// Open downloads asset a of repo with the extra headers. The caller closes the body.
+func (c *Client) Open(ctx context.Context, repo string, a Asset, header http.Header) (io.ReadCloser, error) {
+	rc, _, err := c.download(ctx, repo, c.downloadURL(repo, a), header)
+	return rc, err
+}
+
+// Fetch downloads path p of repo (a path under {base}/repository/{repo}/) with the extra headers
+// and returns its body and content type. The caller closes the body.
+func (c *Client) Fetch(ctx context.Context, repo, p string, header http.Header) (io.ReadCloser, string, error) {
+	segs := strings.Split(strings.TrimLeft(p, "/"), "/")
+	for i, s := range segs {
+		segs[i] = url.PathEscape(s)
+	}
+	u := *c.base
+	u.RawQuery = ""
+	return c.download(ctx, repo, u.String()+"/repository/"+url.PathEscape(repo)+"/"+strings.Join(segs, "/"), header)
+}
+
+// download GETs rawURL, a file of repo. It sends the newest challenge answer of repo while it
+// lives, else the credentials as HTTP Basic. A 401 with a challenge gets a new answer through
+// proxy.Answer, and the request goes again with it.
+func (c *Client) download(ctx context.Context, repo, rawURL string, header http.Header) (io.ReadCloser, string, error) {
+	c.mu.Lock()
+	ra, ok := c.auth[repo]
+	c.mu.Unlock()
+	if ok && !ra.until.IsZero() && time.Now().After(ra.until) {
+		ok = false
+	}
+	resp, err := c.get(ctx, rawURL, header, ra.header, ok)
 	if err != nil {
-		return nil, err
+		return nil, "", err
+	}
+	if resp.StatusCode == http.StatusUnauthorized && len(resp.Header.Values("WWW-Authenticate")) > 0 {
+		challenge := resp.Header.Clone()
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		resp.Body.Close()
+		h, life, err := proxy.Answer(ctx, c.http, challenge, c.creds.Username, c.creds.Password)
+		if errors.Is(err, proxy.ErrRefused) || errors.Is(err, proxy.ErrNeedsCredentials) {
+			return nil, "", statusError("download", http.StatusUnauthorized)
+		}
+		if err != nil {
+			return nil, "", &SourceError{Msg: "download: " + err.Error()}
+		}
+		ra = repoAuth{header: h}
+		if life > 0 {
+			ra.until = time.Now().Add(life - min(life/2, 30*time.Second))
+		}
+		c.mu.Lock()
+		c.auth[repo] = ra
+		c.mu.Unlock()
+		if resp, err = c.get(ctx, rawURL, header, h, true); err != nil {
+			return nil, "", err
+		}
 	}
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 		resp.Body.Close()
-		return nil, statusError("download", resp.StatusCode)
+		return nil, "", statusError("download", resp.StatusCode)
 	}
-	return resp.Body, nil
+	return resp.Body, resp.Header.Get("Content-Type"), nil
+}
+
+// get sends one GET of rawURL with the extra headers, and with the headers auth when useAuth,
+// else with the credentials as HTTP Basic.
+func (c *Client) get(ctx context.Context, rawURL string, header, auth http.Header, useAuth bool) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, &SourceError{Msg: "invalid Nexus URL"}
+	}
+	req.Header.Set("Accept", "*/*")
+	for k, vs := range header {
+		req.Header[k] = vs
+	}
+	if useAuth {
+		for k, vs := range auth {
+			req.Header[k] = vs
+		}
+	} else {
+		req.SetBasicAuth(c.creds.Username, c.creds.Password)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
+		return nil, &SourceError{Msg: fmt.Sprintf("cannot reach Nexus: %v", err)}
+	}
+	return resp, nil
 }

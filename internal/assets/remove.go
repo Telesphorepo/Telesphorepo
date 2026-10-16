@@ -47,7 +47,7 @@ func (p *Pipeline) Remove(ctx context.Context, rm Removal) (int, error) {
 	total := 0
 	var follow []string
 	batch := func(paths []string, each bool) (int, error) {
-		n, more, err := p.removeBatch(ctx, repo, hooks, del, paths, each && record)
+		n, more, err := p.removeBatch(ctx, repo, hooks, del, paths, rm.Prefixes, each && record)
 		total += n
 		follow = append(follow, more...)
 		if rm.Progress != nil && n > 0 {
@@ -109,9 +109,9 @@ func (p *Pipeline) Remove(ctx context.Context, rm Removal) (int, error) {
 }
 
 // removeBatch deletes the rows of paths (sorted, each once) under their path locks in one
-// transaction, and returns how many it deleted and the follow-up paths of OnRemoved. each
-// records a file.delete event per deleted file.
-func (p *Pipeline) removeBatch(ctx context.Context, repo *repos.Repo, hooks *Hooks, del bool, paths []string, each bool) (int, []string, error) {
+// transaction, and returns how many it deleted and the follow-up paths of OnRemoved. prefixes are
+// the folders of the removal, for OnRemoved. each records a file.delete event per deleted file.
+func (p *Pipeline) removeBatch(ctx context.Context, repo *repos.Repo, hooks *Hooks, del bool, paths []string, prefixes []repopath.Path, each bool) (int, []string, error) {
 	keys := make([]string, len(paths))
 	for i, x := range paths {
 		keys[i] = lockKey(repo.ID, x)
@@ -136,7 +136,7 @@ func (p *Pipeline) removeBatch(ctx context.Context, repo *repos.Repo, hooks *Hoo
 			return nil
 		}
 		if !del && hooks.OnRemoved != nil {
-			more, err := hooks.OnRemoved(ctx, tx, repo, removed)
+			more, err := hooks.OnRemoved(ctx, tx, repo, removed, prefixes)
 			if err != nil {
 				return err
 			}

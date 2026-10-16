@@ -58,9 +58,9 @@ type Repo struct {
 	Fields map[string]json.RawMessage
 }
 
-// Validator validates the config of a repo of the given format and returns its normalized
-// form; an empty config selects the format's default. It rejects unknown formats.
-type Validator func(format string, config json.RawMessage) (json.RawMessage, error)
+// Validator validates the name and the config of a repo of the given format and returns the
+// normalized config; an empty config selects the format's default. It rejects unknown formats.
+type Validator func(format, name string, config json.RawMessage) (json.RawMessage, error)
 
 // KindCheck returns an error when format does not take repos of kind (the format registry
 // knows which formats serve proxies and groups).
@@ -197,14 +197,14 @@ func (s *Service) Page(ctx context.Context, after string, limit int) ([]*Repo, s
 
 // normalizeConfig checks that cfg is empty or a JSON object, then runs the format's validation,
 // which must return a JSON object.
-func (s *Service) normalizeConfig(format string, cfg json.RawMessage) (json.RawMessage, error) {
+func (s *Service) normalizeConfig(format, name string, cfg json.RawMessage) (json.RawMessage, error) {
 	if t := bytes.TrimSpace(cfg); len(t) > 0 && string(t) != "null" && !isObject(t) {
 		return nil, fmt.Errorf("%w: config must be a JSON object", ErrInvalid)
 	}
 	if s.validate == nil {
 		return nil, fmt.Errorf("%w: unknown format %q", ErrInvalid, format)
 	}
-	out, err := s.validate(format, cfg)
+	out, err := s.validate(format, name, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
@@ -287,7 +287,7 @@ func (s *Service) Create(ctx context.Context, in Create) (*Repo, error) {
 	if in.Kind == KindGroup {
 		cfg = nil // a group keeps no files: the format's default config
 	}
-	if cfg, err = s.normalizeConfig(in.Format, cfg); err != nil {
+	if cfg, err = s.normalizeConfig(in.Format, in.Name, cfg); err != nil {
 		return nil, err
 	}
 	planned := &Repo{Name: in.Name, Format: in.Format, Kind: in.Kind, AnonymousRead: in.AnonymousRead, Config: cfg, Description: description}
@@ -407,7 +407,7 @@ func (s *Service) plan(ctx context.Context, q *dbq.Queries, cur *Repo, p Patch) 
 		c.detail["anonymous_read"] = next.AnonymousRead
 	}
 	if p.Config != nil {
-		if next.Config, err = s.normalizeConfig(cur.Format, p.Config); err != nil {
+		if next.Config, err = s.normalizeConfig(cur.Format, cur.Name, p.Config); err != nil {
 			return nil, err
 		}
 		if string(next.Config) != string(cur.Config) {

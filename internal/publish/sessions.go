@@ -2,6 +2,7 @@ package publish
 
 import (
 	"context"
+	"crypto/ed25519"
 	"database/sql"
 	"encoding/base64"
 	"errors"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
+	"github.com/Telesphorepo/Telesphorepo/internal/perm"
 	"github.com/Telesphorepo/Telesphorepo/internal/publish/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/token"
@@ -21,6 +23,8 @@ const (
 	nonceTTL = 60 * time.Second // a one-repo nonce
 	// signedPrefix starts the message a device signs to mint a session.
 	signedPrefix = "telesphorepo publish v1\n"
+	// challengePrefix starts the message a device signs to ask for a token exchange nonce.
+	challengePrefix = "telesphorepo challenge v1\n"
 )
 
 // Minted is a new publish session. Token is shown once; it is the HTTP Basic password (any
@@ -114,7 +118,8 @@ func (s *Service) mint(ctx context.Context, q *dbq.Queries, repo *repos.Repo, vi
 		}
 		return &Minted{ID: id, Token: tok, Repo: repo.Name, ExpiresAt: unixTime(exp.Unix()),
 			RepoID: repo.ID, UserID: userID, Subject: subject, Via: via,
-			Session: &auth.PublishSession{ID: id, RepoID: repo.ID, Via: via, Subject: subject, BuildID: buildID}}, nil
+			Session: &auth.PublishSession{ID: id, RepoID: repo.ID, Via: via, Subject: subject, BuildID: buildID, DeviceID: deviceID,
+				Expires: unixTime(exp.Unix())}}, nil
 	}
 	return nil, errors.New("publish session id collision")
 }
@@ -138,39 +143,95 @@ func (s *Service) usableDevice(ctx context.Context, id int64, now int64) (dbq.Ge
 	return d, nil
 }
 
+// DevicePrincipal is the auth.DeviceLoader of core bearer tokens: the CredDevice principal of
+// device id with its user's current name, kind and permissions, or auth.ErrBadCredentials when
+// the device is unknown, revoked or expired, or its user is disabled.
+func (s *Service) DevicePrincipal(ctx context.Context, id int64) (*auth.Principal, error) {
+	d, err := s.usableDevice(ctx, id, time.Now().Unix())
+	if errors.Is(err, ErrDenied) {
+		return nil, auth.ErrBadCredentials
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &auth.Principal{Cred: auth.CredDevice, UserID: d.UserID, Username: d.Username, Kind: d.UserKind,
+		Perms: perm.Joined(d.Perms), DeviceID: d.ID}, nil
+}
+
 // Challenge returns a single-use nonce (60 s) that the device signs to mint a session for one
-// repo.
-func (s *Service) Challenge(ctx context.Context, deviceID int64) (string, error) {
-	return s.challenge(ctx, deviceID, false)
+// repo, and its expiry.
+func (s *Service) Challenge(ctx context.Context, deviceID int64) (string, time.Time, error) {
+	return s.challenge(ctx, deviceID, false, "", ChallengeProof{})
 }
 
-// ExchangeChallenge returns a nonce for a token exchange of a format: the device signs it over
-// the repo "*". The proof lives as long as a publish session (publish.session_ttl), so a client
-// such as a Docker credential helper sends it on each token request of one push. Minter.Mint
-// with the proof mints one session per repo and gives that session back on each later request
-// while it is open (DeviceProof).
-func (s *Service) ExchangeChallenge(ctx context.Context, deviceID int64) (string, error) {
-	return s.challenge(ctx, deviceID, true)
+// ExchangeChallenge returns a nonce for a token exchange of a format, and its expiry: the device
+// signs it over the repo "*". The proof lives as long as a publish session (publish.session_ttl),
+// so a client such as a Docker credential helper sends it on each token request of one push.
+// Minter.Mint with the proof mints one session per repo and gives that session back on each later
+// request while it is open (DeviceProof). keep is a nonce that the client holds: when it is a
+// token exchange nonce of the device that has not expired, the answer is keep, so all token
+// requests of one push get the same session. Else the answer is a new nonce, and proof must show
+// that the caller holds the device key: a nonce lives up to publish.session_ttl, so the server
+// writes one only for the device.
+func (s *Service) ExchangeChallenge(ctx context.Context, deviceID int64, keep string, proof ChallengeProof) (string, time.Time, error) {
+	return s.challenge(ctx, deviceID, true, keep, proof)
 }
 
-func (s *Service) challenge(ctx context.Context, deviceID int64, exchange bool) (string, error) {
+// ChallengeProof is the device signature of a request for a new token exchange nonce: Signature
+// signs ChallengeMessage(device id, TS), and TS is the Unix time of the request.
+type ChallengeProof struct {
+	TS        int64
+	Signature string
+}
+
+// challengeSkew is how far the time of a ChallengeProof may be from the server's time.
+const challengeSkew = 5 * time.Minute
+
+// ChallengeMessage is what a device signs with Ed25519 to ask for a new token exchange nonce.
+func ChallengeMessage(deviceID, ts int64) []byte {
+	return []byte(challengePrefix + strconv.FormatInt(deviceID, 10) + "\n" + strconv.FormatInt(ts, 10))
+}
+
+func (s *Service) challenge(ctx context.Context, deviceID int64, exchange bool, keep string, proof ChallengeProof) (string, time.Time, error) {
 	now := time.Now().Unix()
-	if _, err := s.usableDevice(ctx, deviceID, now); err != nil {
-		return "", err
+	d, err := s.usableDevice(ctx, deviceID, now)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	if exchange && keep != "" {
+		exp, err := s.rq.GetDeviceExchangeNonce(ctx, dbq.GetDeviceExchangeNonceParams{
+			IDHash: hashBytes([]byte(keep)), DeviceID: deviceID, Now: now,
+		})
+		if err == nil {
+			return keep, unixTime(exp), nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return "", time.Time{}, err
+		}
+	}
+	if exchange {
+		skew := now - proof.TS
+		sig, err := decodeB64URL(proof.Signature)
+		if skew > int64(challengeSkew/time.Second) || -skew > int64(challengeSkew/time.Second) {
+			return "", time.Time{}, errorf(ErrDenied, "the time of the device signature differs from the server time by more than 5 minutes")
+		}
+		if err != nil || len(d.PublicKey) != ed25519.PublicKeySize ||
+			!ed25519.Verify(ed25519.PublicKey(d.PublicKey), ChallengeMessage(deviceID, proof.TS), sig) {
+			return "", time.Time{}, errorf(ErrDenied, "bad device signature")
+		}
 	}
 	ttl := nonceTTL
 	if exchange {
 		ttl = s.sessionTTL()
 	}
 	nonce := randomString(32)
-	err := s.wq.CreateNonce(ctx, dbq.CreateNonceParams{
-		IDHash: hashBytes([]byte(nonce)), DeviceID: deviceID, Exchange: boolInt(exchange),
-		ExpiresAt: now + int64(ttl/time.Second),
-	})
-	if err != nil {
-		return "", err
+	exp := now + int64(ttl/time.Second)
+	if err := s.wq.CreateNonce(ctx, dbq.CreateNonceParams{
+		IDHash: hashBytes([]byte(nonce)), DeviceID: deviceID, Exchange: boolInt(exchange), ExpiresAt: exp,
+	}); err != nil {
+		return "", time.Time{}, err
 	}
-	return nonce, nil
+	return nonce, unixTime(exp), nil
 }
 
 // SignedMessage is what a device signs with Ed25519 to mint a session for repo.

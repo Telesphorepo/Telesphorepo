@@ -57,11 +57,11 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/rebuild` | The durable rebuild queue of format indexes (`rebuilds`): `MarkTx`, `Pending`, and the debounced worker of the job `core.rebuild` |
 | `internal/move` | Module `storage`: the storage move copies every blob to a new backend in the background behind a `storage.Mirror`; owner hooks of the `storage` settings group |
 | `internal/nexus` | Module `nexus`: Nexus 3 REST client, sources, mapping, the sync scheduler and runner, and cut-over. Names no format; it calls the `Importer` of the target format (its `Plan` for the target repo, its `Run` for each file) |
-| `internal/auth` | Users (kinds `local`/`oidc`), argon2id passwords, Basic-auth cache, read tokens, sessions, rate limiting, permission checks. A caller is a `Principal` with one credential kind (`Cred`: password, read token, session, setup session, publish session). `Identify` reads the credentials a route policy names. Token kinds are verifiers by prefix (`AddTokenKind`). Also core bearer tokens (`IssueBearer`), fresh second-factor proofs (`CheckProof`, `IssueGrant`) and the session view (`View`) |
+| `internal/auth` | Users (kinds `local`/`oidc`), argon2id passwords, Basic-auth cache, read tokens, sessions, rate limiting, permission checks. A caller is a `Principal` with one credential kind (`Cred`: password, read token, session, setup session, publish session, device). `Identify` reads the credentials a route policy names. Token kinds are verifiers by prefix (`AddTokenKind`). Also core bearer tokens (`IssueBearer`), fresh second-factor proofs (`CheckProof`, `IssueGrant`) and the session view (`View`) |
 | `internal/oidc` | Module `sso`: OIDC sign-in for any person at the provider, the server permissions from a claim (`oidc.permission_claim`, `oidc.permission_map`), and the SSO device approval: `/api/auth/oidc/login`, `/device` and `/callback` (go-oidc + x/oauth2, PKCE S256); owner hooks of the `sso` settings group |
 | `internal/publish` | Module `publish`: device enrollment, nonces, trust policies, the CI token exchange, the CI providers `github-actions` and `jenkins`, the token kind `trs` of publish sessions, the publish API and the cleanup job |
 | `internal/repos` | Repos, their kind, their active operation (`Repo.Op`) and per-format JSON config. `Create` and `Update` (a `Patch`) are the only changes of a repo record: each checks the whole new state first, then saves it in one transaction with the format's `OnRepoChange` and one audit event. A `Validator` (the format registry) checks the config and a `KindCheck` the kind. Modules drop what they keep about a deleted repo with `OnDelete`. A module adds repo values that it keeps in its own tables as fields (`repos.Field`, `AddField`): `Create` and `Update` validate and save them in the same transaction, and `Repo.Fields` holds them. Keeps the group members and the proxy remotes in memory (see **Group and proxy repositories**) |
-| `internal/proxy` | Fetches the files of proxy repos from their remotes (the `assets.Fetcher` of the read path), stores them through `Commit` with source `proxy`, answers a remote's 401 challenge through the format's `RemoteAuth`, and remembers remote 404s |
+| `internal/proxy` | Fetches the files of proxy repos from their remotes (the `assets.Fetcher` of the read path), stores them through `Commit` with source `proxy`, answers a remote's 401 challenge through the format's `RemoteAuth`, and remembers remote 404s; `proxy.Answer` is the answer of the registry token protocol (also for the Nexus client), `proxy.Send` a request to a remote as a fetch sends it (e.g. a remote tags list) |
 | `internal/format` | The format contract: `Spec` (every optional capability is a field that is nil when the format lacks it), the `Registry` (`All`, `Get`, `Hooks`, `RebuildRun`, `OnRepoChange`, `ValidateConfig`, `SupportsKind`, `Importer`), `Kit` and `Standard` (the default routes), and `Importer.Run` (the shared import of one source file) |
 | `internal/maven` | Module and format `maven`: the standard routes, release immutability (`Admit`), the content types, the merge of `maven-metadata.xml` in a group, the metadata after a delete (`AfterRemove`), web UI uploads with checksums and metadata |
 | `internal/debian` | Module and format `debian`: `.deb` upload/parse through `Commit`, the package rows (`OnCommitted`, `OnRemoved`), the index rebuild (`Rebuild`), `/debian/{repo}/key.asc`, the plan of a Nexus apt import (distribution and signing key). Owns its tables, queries (`queries/`, `dbq/`) and architecture config; binds a signing key per repo (`SigningKey`) |
@@ -103,7 +103,7 @@ type assertion.
 | `RepoGuard(access.Guard)` | An extra rule of the access engine (the IP rules): `Name`, `Check`, `Describe` (the access report), `Refused` (search) |
 | `CIProvider(ci.Provider)` | A CI system whose tokens make build records and whose trust policies the access report describes |
 | `PublisherClient(clients.Client)` | A publisher client that enrolls devices (`gradle`, `maven`) |
-| `ClientAddress(fn)` | The client address of every request; at most one module |
+| `ResolveClient(fn)` | The client address and scheme of every request; at most one module |
 | `TokenKind(prefix, verifier)` | A token kind (`trp`, `trs`) |
 | `Demo(module.DemoData)`, `Seed(module.SeedFunc)` | The dev demo data and the rows of `telesphorepo seed` of the module's one format |
 
@@ -126,6 +126,8 @@ it needs and leaves the others nil. The kernel gives it these parts:
 - The routes: `format.Standard` (GET and HEAD through the read path, PUT through `Commit`), or its
   own `Routes`. A path outside `/<name>/` (for example `/v2/`) is a `RootPrefix`. A route policy
   can set `Errors` (the format's own error JSON), `Challenge` and `TokenHeader`.
+- Repo names: `ValidName` adds a rule for the names of the format's repos (`repos.Validator`
+  gets the format, the name and the config; e.g. a docker repo name is one OCI name segment).
 - The bytes: `Commit` and `CommitAll` with the hooks `Describe`, `Admit`, `OnCommitted`,
   `AfterCommit`, `OnRemoved` and `AfterRemove`; `Remove`; the read path with `Classify`, `Merge`
   and `RemoteAuth`; resumable uploads; blob mounts (`Body.Blob`); the rebuild queue with
@@ -145,12 +147,13 @@ it needs and leaves the others nil. The kernel gives it these parts:
 | `storage` | `internal/move` | | `/api/storage/moves/...`, the subsystem `storage`, the settings group `storage` (its `Validate`: the S3 rules; `Test`: the probe; `Apply`: refuse a change while a move runs, probe the new store, start the move), the `storage.move.*` actions, job `storage.resume` |
 | `network` | `internal/netrules` | | The client address, IP lists, repo IP rules (a repo guard and the networks of the access report), the IP lists of the trusted proxies (`/api/network/trusted-proxies`), the subsystem `network`, the settings group `network` (`trusted_proxies`; its `Validate` refuses a `list:` entry in a change), the `network.*` actions, job `network.presets` (every hour) |
 | `signing` | `internal/signing` | | Signing keys and `/api/signing-keys/...`, the repo field `signing_key` (for the hosted repos of the formats with `SigningKey`), the subsystem `signing`, the `signing.key.*` actions; provides `*signing.Keys` |
-| `publish` | `internal/publish` | `audit` | Devices, publish sessions (`trs`), CI trust policies, the CI providers `github-actions` and `jenkins`, `/api/devices/...` and `/api/publish/...`, the subsystem `ci`, the settings group `publishing`, the `publish.session.*`, `device.*` and `ci.pipeline.*` actions, job `publish.cleanup` (every minute), `/setup.sh` and `/setup.ps1` (the frame of the project setup; see **Project setup**); provides `*publish.Service` and `publish.Minter`; loads the publish sessions of core bearer tokens and gives the access report its CI pipelines |
+| `publish` | `internal/publish` | `audit` | Devices, publish sessions (`trs`), CI trust policies, the CI providers `github-actions` and `jenkins`, `/api/devices/...` and `/api/publish/...`, the subsystem `ci`, the settings group `publishing`, the `publish.session.*`, `device.*` and `ci.pipeline.*` actions, job `publish.cleanup` (every minute), `/setup.sh` and `/setup.ps1` (the frame of the project setup; see **Project setup**); provides `*publish.Service` and `publish.Minter`; loads the publish sessions and devices of core bearer tokens and gives the access report its CI pipelines |
 | `sso` | `internal/oidc` | `publish` | `/api/auth/oidc/...`, the subsystem `signin`, the settings group `sso` (its `Validate` with the startup guard and the claim map check, `Test` and `Apply`: the discovery check), the `sso.*` actions; tells auth when single sign-on manages permissions |
 | `nexus` | `internal/nexus` | | `/api/nexus/...`, the subsystem `nexus`, the settings group `nexus`, the `nexus.*` actions, the operation type `mirror`, job `nexus.scheduler` (resumes running syncs, then the schedule loop) |
 | `maven` | `internal/maven` | | Format `maven` with the tools `gradle` and `maven` (their CI steps and project setup fragments), the publisher clients `gradle` and `maven` |
 | `debian` | `internal/debian` | `signing` | Format `debian` with its schema and `Rebuild` |
 | `raw` | `internal/raw` | | Format `raw` |
+| `docker` | `internal/docker` | `publish` | Format `docker` (an OCI registry: hosted, proxy and group repos) with its schema; the root prefix `/v2/`, `/docker/` (the token endpoint) and `GET /api/docker/{name}/manifest`; the settings group `docker`; job `docker.links`; the publisher client `docker` (the credential helper `cmd/docker-credential-telesphorepo`, see **Publishing**); the Nexus importer of `docker`; demo data and seed (see **Docker registry**) |
 
 **Routes.** The route table (`internal/route`) gives each module a `Router`. A module registers
 under `/api/`, under `/<name>/` of each format it registers, and under its root prefixes. Any
@@ -171,20 +174,20 @@ the fresh second factor (`Proof`), and the repos of `SomeRepo` (`Managed`). No h
 | `FreshFactor` | The request carries a fresh second factor in `X-Telesphorepo-Proof` |
 | `Perm`, `AnyPerm` | A server permission ID the caller holds, or one of several |
 | `SomeRepo` | A repository permission ID that passes in place of `Perm` when the caller holds it on at least one repo. The handler gets those repos in `Call.Managed` (`All`, or the repo IDs) |
-| `Repo` | `route.RepoRule{Name, Format, Op, Perm, AnyPerm}`: the repo the route acts on (default: the path value `{repo}`, else `{name}`), the format it must be of (another format is 404), the operation (`access.Meta`, `Read`, `Write`, `Delete`, `Manage`, `Mint`) and the repository permission it needs (or one of `AnyPerm`; none with `Meta` is any) |
+| `Repo` | `route.RepoRule{Name, Format, Op, Perm, AnyPerm, Ops, Pick}`: the repo the route acts on (default: the path value `{repo}`, else `{name}`), the format it must be of (another format is 404), the operation (`access.Meta`, `Read`, `Write`, `Delete`, `Manage`, `Mint`) and the repository permission it needs (or one of `AnyPerm`; none with `Meta` is any). With `Pick`, the operation and its permission are the entry of `Ops` (`route.RepoOp{Op, Perm}`) at the index `Pick(r)` returns, per request (an index outside `Ops` is 500); the router checks every entry at startup. The docker `DELETE /v2/...` route is the one user: an upload cancel is a `Write`, everything else a `Delete` |
 | `Errors` | The writer of a refusal; nil is `{"error": "..."}`. A format with its own error JSON sets it |
-| `Challenge` | The `WWW-Authenticate` of a 401; nil is a Basic challenge outside `/api/` and none for a request with `X-Telesphorepo-UI: 1` |
+| `Challenge` | The `WWW-Authenticate` of a 401, from the refusal (`route.Challenger(w, r, decision)`); nil is a Basic challenge outside `/api/` and none for a request with `X-Telesphorepo-UI: 1` |
 
 Presets: `route.Public`, `route.UI` (a full UI session), `route.Setup` (a UI session, setup-only
 too), `route.AnyUser` (password, read token, UI session), `route.UIPerm(id)`,
 `route.UIRepo(op, ids...)`, `route.RepoRead()` (a JSON read of a repo with `repo.download`),
-`route.FormatRead(format)` (anonymous, password, read token, UI session, publish session; `Read`
-with `repo.download`) and `route.FormatWrite(format)` (a publish session; `Write` with
+`route.FormatRead(format)` (anonymous, password, read token, UI session, publish session, device;
+`Read` with `repo.download`) and `route.FormatWrite(format)` (a publish session; `Write` with
 `repo.publish`).
 
-The router panics at startup when a policy that accepts a password or a read token has a method
-other than GET or HEAD, or a server permission (`Perm` or `SomeRepo`), and when a `Write` route
-accepts a credential other than a publish session. A route with `Bearer` has no server permission,
+The router panics at startup when a policy that accepts a password, a read token or a device
+(`auth.CredDevice`) has a method other than GET or HEAD, or a server permission (`Perm` or
+`SomeRepo`), and when a `Write` route accepts a credential other than a publish session. A route with `Bearer` has no server permission,
 and on a method other than GET or HEAD its repo rule is a `Write` or a `Delete`. So a password
 never changes state and never reaches a permission route, also inside a bearer token.
 
@@ -199,7 +202,8 @@ The middleware runs in this order and writes the first refusal:
    read token. On a `Write` route a password or a read token goes on to the repo step, which
    answers that publishing needs a publish session. A core bearer token is checked by the kind
    of its credential; on a repo route that accepts a publish session, a bearer of another kind
-   passes at the repo step only with the open publish session of its scope for the repo.
+   goes on to the repo step: a read passes only with the open publish session of its scope for
+   the repo, and a write or a delete gets the answer of the access engine for its scope.
 2. A request without a credential passes only when the policy is `Anonymous` or names a repo; else
    401 (`authentication required` where a password is accepted, else `sign in through the web UI
    for this action`).
@@ -227,7 +231,13 @@ use it. In order:
    anonymous read. A publish session holds, on its own repo, `repo.download` and `repo.publish` (a
    CI session) or the user's current `repo.download`, `repo.publish` and `repo.delete` (a device or
    manual session); on another repo what anonymous holds. A core bearer token is limited to its
-   scopes (403 for a repo or an operation outside them).
+   scopes. When its scope of the repo lacks the operation (or it has none), a guard that refuses
+   the caller answers first (403, recorded); then a token that reads the repo gets the answer of
+   its credential: a `Write` or `Delete` on a proxy or a group is the read-only 405, a `Write`
+   elsewhere is 401 `publishing needs a publish session: ...`; anything else is 401 with the code
+   `scope` (the challenge of an OCI route adds `error="insufficient_scope"`). With an open publish
+   session in its scope of the repo, the token acts as that session (`auth.Principal.For(repo)`;
+   upload ownership and `format.OriginOf` use the same principal).
 2. The repo kind: `Write` and `Mint` on a proxy or a group, and `Delete` on a group, answer 405
    with `Allow: GET, HEAD` and the read-only text to a caller who can download; anyone else gets
    the refusal of step 3. The cached files of a proxy can be deleted.
@@ -249,23 +259,34 @@ always `Decide(..., Write)` or `Decide(..., Mint)`.
 `trb.<base64url payload>.<base64url HMAC-SHA256>` for at most 15 minutes. The key is HKDF-SHA256
 of the master key with the info `telesphorepo bearer v1`. The payload holds the credential kind
 (none for anonymous), the user, the read token, the scopes (`{repo, ops, session}`) and the
-expiry. The credential is a password, a read token or a publish session; a UI session gets no
-bearer. A scope holds `Read`, `Write` and `Delete` only. `Write` and `Delete` stay only when the
-credential is a publish session and the scope names that session, so a bearer from a password, a
-read token or the anonymous caller carries `Read` only, and a bearer writes to one repo at most.
-On each request the kernel loads the credential again (the user enabled, the read token present,
-the publish session open; the publish module loads the session). It refuses the token when a
-scope session is not the session of the credential, or when the scope names another repo than
-the repo of that session. A route
-reads bearer tokens only with `Policy.Bearer`; a format with its own token exchange (e.g. an OCI
-registry, `GET /v2/token`) issues them.
+expiry. The credential is a password, a read token, a publish session or a device
+(`auth.CredDevice` with `Principal.DeviceID`: the device of a format's token exchange); a UI
+session gets no bearer. A scope holds `Read`, `Write` and `Delete` only. `Write` and `Delete` stay
+only with a scope session of the credential: the publish session of a publish session credential,
+or for a device an open session that the device minted for the scope's repo
+(`auth.PublishSession.DeviceID`). So a bearer from a password, a read token or the anonymous
+caller carries `Read` only, and a bearer writes to one repo at most. On each request the kernel
+loads the credential again (the user enabled, the read token present, the publish session open,
+the device not revoked or expired and its user enabled, with the user's current permissions; the
+publish module loads sessions and devices through `SetSessionLoader` and `SetDeviceLoader`). It
+refuses the token when a scope session is not a session of the credential (for a device: an open
+session that the device minted), or when the scope names another repo than the repo of that
+session. A device reads what its user reads: the access engine gives it the grants of its user,
+and the router treats it like a password (GET and HEAD routes without a server permission only). A route
+reads bearer tokens only with `Policy.Bearer`; a format with its own token exchange (the docker
+format, `GET /docker/token`) issues them. `auth.Service.Authenticate(r, username, password)` checks
+a password or a token of a registered kind that came outside the Authorization header (a token
+endpoint form), with the failed-attempt limits of the client address. `auth.Service.Failed(r,
+username)` counts a failed attempt of a credential that the auth service does not check itself (a
+CI token: the client address only), and `auth.Service.Blocked(r)` says how long the address
+waits. `auth.PublishSession.Expires` is when a session ends at the latest.
 
 **Minting a publish session.** The publish module provides `publish.Minter` (`module.Use`):
 `Mint(ctx, r, MintCred, repo)` checks the credential, runs `Decide(..., Mint)` with `repo.publish`,
 writes the session row and the `publish.session.create` event, and returns the open session without a
 token. `MintCred` is one of: `Device` (a device signature over a nonce of
-`POST /api/publish/challenge` for one repo, or over a nonce of `ExchangeChallenge` signed for the
-repo `*`), `CIToken` (a CI identity token that
+`POST /api/publish/challenge` for one repo, or over a nonce of `ExchangeChallenge` (the same
+route with `exchange: true`) signed for the repo `*`), `CIToken` (a CI identity token that
 a trust policy of the repo allows; a token that minted a session for the repo before gets that
 session back while it is open) or `Fresh` (a UI session whose request carried a fresh second
 factor). The three mint routes use the same code and answer the token; there a CI token mints
@@ -273,7 +294,14 @@ once, and an exchange nonce does not mint. An exchange nonce lives as long as a 
 (`publish.session_ttl`) and is not used up: a token exchange sends the same proof on each token
 request of one push. It mints one session per repo (`publish_exchange_sessions`), and a later
 mint for the same repo gets that session back while it is open, so upload sessions continue
-across token requests. When that session ended, the proof mints no new one.
+across token requests. When that session ended, the proof mints no new one. Through the
+`Minter` a CI token that minted a session for the repo gets it back after a check of the
+signature, the issuer, the audience and the trust policy only, without the age of `iat` and
+without `exp`: the open session bounds the time, so a token request in the middle of a long push
+works. A first mint needs `iat` at most 10 minutes old and `exp` ahead. `Minter.Check(ctx, r,
+MintCred)` verifies a credential without a repo and mints nothing: a CI token that an enabled
+trust policy of its issuer allows (audience, claims, `iat`, `exp`), or a device proof over an
+exchange nonce (nonce, signature, a usable device). It records no use of the token.
 
 **Format UI descriptors.** `GET /api/formats` answers, for each format, everything the web UI
 shows or chooses per format, so no shared UI code names a format. It comes from the
@@ -329,7 +357,7 @@ and the database closes. No worker runs after the database closes.
 Each schema component has exactly one schema file: `internal/db/schema.sql` for the kernel
 (component `core`), and `internal/<module>/schema.sql` for each module with tables
 (`Extender.Schema`; the component is named after the module: `storage`, `network`, `signing`,
-`publish`, `nexus`, `debian`). A module schema may reference the kernel tables and the tables of
+`publish`, `nexus`, `debian`, `docker`). A module schema may reference the kernel tables and the tables of
 the modules it requires; the kernel schema references no module table. `db.Init` runs the
 components in start order (the kernel first). The table `schema_components` (`component`,
 `fingerprint`, `applied_at`) holds one row per component with the SHA-256 of its schema text, with CRLF line ends read as LF
@@ -352,9 +380,9 @@ Kernel tables (`internal/db/schema.sql`):
 | `repo_permissions` | PK `(repo_id, user_id, perm)` (WITHOUT ROWID), idx `(user_id, perm)` | The repository permissions of a person on a repo, as permission IDs (e.g. `repo.publish`). No CHECK, as above. See **Permissions** |
 | `repo_group_members` | PK `(group_id, member_id)` (WITHOUT ROWID), UNIQUE `(group_id, position)`, idx `member_id` | The members of a group repo in read order (`position`). Both ids cascade with their repo, so a deleted member leaves its groups |
 | `repo_proxies` | PK `repo_id` (cascades) | The remote of a proxy repo: `remote_url` (http or https, ends with `/`), `credentials` (sealed JSON `{username, password}`, AAD `repo_proxy:<repo id>`; empty for none), `metadata_ttl` (1800 s), `not_found_ttl` (300 s), `last_ok_at`, `last_error`, `last_error_at` |
-| `blobs` | PK `id`, UNIQUE `sha256`, partial idx `blobs_unreferenced (unreferenced_at) WHERE refs = 0` | Content-addressed blobs, storage key `blobs/sha256/<first 2 hex>/<hex>`. `size`; `refs` (the asset rows that point here; the assets triggers keep it); `unreferenced_at` (`created_at` for a new row, the time `refs` reached 0, 0 while referenced); `created_at`. One blob backs any number of assets in any repos |
+| `blobs` | PK `id`, UNIQUE `sha256`, partial idx `blobs_unreferenced (unreferenced_at) WHERE refs = 0` | Content-addressed blobs, storage key `blobs/sha256/<first 2 hex>/<hex>`. `size`; `md5` and `sha1` (hex, from the spool of the first write; `''` for a synthetic row of the scale test); `refs` (the asset rows that point here; the assets triggers keep it); `unreferenced_at` (`created_at` for a new row, the time `refs` reached 0, 0 while referenced); `created_at`. One blob backs any number of assets in any repos |
 | `builds` | PK `id`, UNIQUE `(provider, key)`, idx `created_at` | A CI build record (see **CI providers and build records**): `provider` (a CI provider ID, e.g. `github-actions`), `key` (the provider's unique key of the run), `repository`, `revision`, `ref`, `ref_name`, `ref_type` (`branch`, `tag` or `''`), `run`, `workflow`, `actor`, `links` (JSON `[{rel, label, url}]` that only the provider makes), `created_at` (the time of the last mint for the run) |
-| `assets` | UNIQUE `(repo_id, path)`, idx `uploaded_by`, idx `assets_blob (blob_id, repo_id)`, partial idx `assets_build (build_id) WHERE build_id IS NOT NULL` | Every stored file: a path that points to a blob (`blob_id`; `size` and `sha256` are the blob's, copied); `content_type` from the format's `Describe`; `kind` is `artifact`, `metadata` or `index`; `build_id` is the CI build record that wrote the file (SET NULL). Only the byte pipeline writes rows; triggers keep `blobs.refs` on every insert, delete and change of `blob_id`. A cached file of a proxy has `checked_at` (when the remote last confirmed it) and `remote_etag`; a hosted file keeps 0 and `''`. Triggers keep the repo counters in the transaction of each write: an insert adds 1 and its size, a replace adds the size change, a delete subtracts. Every asset row counts (artifacts, metadata, checksums and Debian index files). `last_published_at` is the newest `updated_at` of an insert or replace that is not an `index` row; a delete never lowers it |
+| `assets` | UNIQUE `(repo_id, path)`, idx `uploaded_by`, idx `assets_blob (blob_id, repo_id)`, partial idx `assets_build (build_id) WHERE build_id IS NOT NULL` | Every stored file: a path that points to a blob (`blob_id`; `size`, `sha256`, `md5` and `sha1` are the blob's, copied, so a download reads no other row); `content_type` from the format's `Describe`; `kind` is `artifact`, `metadata` or `index`; `build_id` is the CI build record that wrote the file (SET NULL). Only the byte pipeline writes rows; triggers keep `blobs.refs` on every insert, delete and change of `blob_id`. A cached file of a proxy has `checked_at` (when the remote last confirmed it) and `remote_etag`; a hosted file keeps 0 and `''`. Triggers keep the repo counters in the transaction of each write: an insert adds 1 and its size, a replace adds the size change, a delete subtracts. Every asset row counts (artifacts, metadata, checksums and Debian index files). `last_published_at` is the newest `updated_at` of an insert or replace that is not an `index` row; a delete never lowers it |
 | `assets_fts` | FTS5 trigram on `path` | Kept in sync by triggers; `index` rows are not indexed |
 | `repo_ops` | PK `id`, UNIQUE `repo_id` (cascades), idx `started_by`, partial idx `repo_ops_running (type) WHERE state = 'running'` | At most one operation per repo; an ended operation's row is deleted. `type` (a registered type: `delete`, `mirror`), `owner` (the module), `ref` (the owner's reference, e.g. the Nexus source ID), `state` `running`/`held`/`failed`, `done`, `total`, `error`, `started_by`, `started_at`, `updated_at` |
 | `upload_sessions` | PK `id` (WITHOUT ROWID), idx `repo_id`, `user_id`, `expires_at` | A resumable upload: `id` (32 lowercase hex), `repo_id` and `user_id` cascade, `publish_session_id` (the session that started it; no foreign key: the table belongs to the publish module), `received`, `created_at`, `updated_at`, `expires_at`. The bytes are in `$TR_DATA_DIR/tmp/uploads/<id>` |
@@ -418,6 +446,18 @@ Tables of the `debian` component (`internal/debian/schema.sql`):
 |---|---|---|
 | `deb_packages` | UNIQUE `(repo_id, distribution, component, architecture, package, version)`, idx `asset_id`, idx `deb_packages_sha256 (repo_id, distribution, component, sha256)`, idx `deb_packages_package (repo_id, component, package)` | Also the streaming index for `Packages`. The SHA-256 index finds a package an import already holds. The package index reads the versions and builds of a package. `asset_id` cascades with the pool file |
 | `deb_index_files` | PK `(repo_id, distribution, path)` (WITHOUT ROWID) | Sizes and hashes; `Release` is built from these rows |
+
+Tables of the `docker` component (`internal/docker/schema.sql`). Every column `repo_id` cascades;
+digests are the hex of a SHA-256. Only the hooks of the format write them, in the transaction of
+the asset change (see **Docker registry**):
+
+| Table | Key / indexes | Notes |
+|---|---|---|
+| `docker_images` | PK `(repo_id, image)` (WITHOUT ROWID), UNIQUE `docker_images_full (full_name)` | `full_name` is `<repo>/<image>` (the catalog); `manifests` counts the manifest rows of the image; the row goes with its last manifest |
+| `docker_manifests` | PK `(repo_id, image, digest)` (WITHOUT ROWID), idx `docker_manifests_subject (repo_id, image, subject, digest)` | `media_type`, `artifact_type` (`artifactType`, else the config media type unless it is the OCI empty config), `config_type`, `subject` (`''` for none), `size`, `total_size` (with the config and the layers; an index: its own size), `platforms` (JSON of an index), `annotations` (JSON), `created_at` |
+| `docker_refs` | PK `(repo_id, image, manifest, child)` (WITHOUT ROWID), idx `docker_refs_child (repo_id, image, child, kind)` | What a manifest references, each distinct child once: `kind` `blob` (config, layer) or `manifest` (a child of an index) |
+| `docker_links` | PK `(repo_id, image, digest)` (WITHOUT ROWID), idx `docker_links_digest (repo_id, digest)`, partial idx `docker_links_unreferenced (unreferenced_at) WHERE refs = 0` | One row per blob link of an image: `size`, `refs` (the manifests of the image that use it), `unreferenced_at` (when `refs` reached 0, the insert time of a new row; 0 while used) |
+| `docker_tags` | PK `(repo_id, image, tag)` (WITHOUT ROWID), idx `docker_tags_recent (repo_id, image, updated_at, tag)`, idx `docker_tags_digest (repo_id, image, digest)` | A tag and the manifest digest it names, `updated_at` |
 
 Every query on a request path uses an index. Lists use keyset pagination (`?after=` and
 `?limit=`), never `OFFSET` or `LIKE '%x%'`.
@@ -502,7 +542,8 @@ The `settings` package holds no feature rules and declares only the keys of the 
 
 | Group (owner) | Permission · page | Keys |
 |---|---|---|
-| general (core) | `settings.general` · General | `base_url`, `log.level`, `max_upload_size` (`2GiB`), `max_json_size` (`1MiB`), `cookie.secure`, `session_ttl` (`168h`), `index.debounce` (`2s`), `index.max_delay` (`30s`), `blobs.gc_grace` (`1h`), `upload.session_ttl` (`24h`) |
+| general (core) | `settings.general` · General | `base_url`, `log.level`, `max_upload_size` (`2GiB`), `max_json_size` (`1MiB`), `cookie.secure`, `session_ttl` (`168h`), `index.debounce` (`2s`), `index.max_delay` (`30s`), `blobs.gc_grace` (`1h`), `upload.session_ttl` (`24h`), `tls.cert_file`, `tls.key_file` (its `Validate`: both or neither, and the pair loads) |
+| docker (docker) | `settings.general` · General | `docker.push_url` (`""`; empty or an http(s) URL of a scheme and a host only: the host that snippets and CI files push to), `docker.link_grace` (`24h`, minimum `1s`) |
 | activity (audit) | `settings.general` · General | `audit.retention` (`8760h`, which is 365 days) |
 | storage (storage) | `storage.manage` · `/settings/storage` | `storage` (`fs`/`s3`), `fs.root` (default `blobs/` in the data dir), `s3.endpoint`, `s3.region`, `s3.bucket`, `s3.access_key_id`, `s3.secret_access_key`*, `s3.prefix`, `s3.path_style`, `s3.redirect`, `presign_ttl` |
 | network (network) | `network.manage` · `/settings/proxy` | `trusted_proxies` (literal entries; the IP lists of the trusted proxies are rows, see **Network rules**) |
@@ -575,6 +616,8 @@ signed-in browser downloads from a private repo without a Basic prompt. A **writ
 | `GET, HEAD /debian/{repo}/{path...}` | read | `dists/...` and `pool/...` through the read path |
 | `GET, HEAD, PUT /raw/{repo}/{path...}` | read / write | PUT: 201 new path; 200 identical bytes (any policy) or a replace when `overwrite` is `allow`; 409 different bytes when `overwrite` is `deny` (default); 413 over `max_upload_size`. Repo config: `{"overwrite":"deny"}` or `{"overwrite":"allow"}`. S3 redirect as for Maven |
 | `GET, HEAD /debian/{repo}/key.asc` | read | The armored public signing key of the repo (its repo field `signing_key`). Same read gate as the repo's other files |
+| `/v2/...`, `GET, POST /docker/token`, `GET /docker/hosts` | see **Docker registry** | The OCI registry of the docker format |
+| `GET /api/docker/{name}/manifest?path=` | `repo.download` (password, read token, UI session, anonymous on a public repo) | The details of the manifest at a tag or manifest path of a docker repo (a group: of the first readable member that stores it): `{digest, media_type, artifact_type, size, total_size, config: {digest, media_type, size}\|null, layers: [{digest, media_type, size}], platforms: [{digest, os, architecture, variant}], subject\|null, tags: [first 100], referrers: n}`. A link path or another path is 400; a file that does not parse is 422 |
 | `GET /setup.sh`, `GET /setup.ps1` | none | The project setup script (see **Project setup**), `text/plain`. The publish module mounts them. 400 when the server address holds a quote, a space, a backslash or a control character |
 | `/` | none | Embedded UI, hash-routed |
 
@@ -593,6 +636,20 @@ after the permission check. A mirrored repo is read only until cut-over. A write
 session for that repo gets 401 with a Basic challenge and
 `{"error":"publishing needs a publish session: <base_url>/#/settings/tokens"}`. A device or manual
 session writes only while its user still holds `repo.publish` on the repo (else 403).
+
+Every download (`assets.Reader.ServeAsset`, on every format route) carries `X-Checksum-SHA256`,
+and `X-Checksum-SHA1` and `X-Checksum-MD5` when the asset row has them (a synthetic row of the
+scale test has none); a merged group file carries all three of the merged bytes. Nothing hashes
+on a request. A request for one byte range (`Range: bytes=a-b`, `a-` or `-n`, with a matching
+`If-Range`) answers 206 with `Content-Range` on every store (`storage.Store.GetRange`: a seek on
+fs, a `Range` request on S3); a range outside the file is 416; several ranges get the whole file.
+
+The listener speaks HTTP/1.1 and HTTP/2: over TLS by ALPN, and on a plain listener with prior
+knowledge (h2c, for a reverse proxy that speaks it; stdlib `http.Server.Protocols`). When
+`tls.cert_file` and `tls.key_file` are set at startup, the listener serves TLS (1.2 or later); the
+server loads the PEM pair for a handshake and keeps it until a path or the modification time of a
+file changes, so a renewed certificate applies without a restart. Turning TLS on or off applies at
+the next start. There is no HTTP/3.
 
 A 401 carries `WWW-Authenticate` only on a format route, so package clients get their prompt. It
 never carries it for a path under `/api`, nor for a request with the header `X-Telesphorepo-UI: 1`
@@ -739,6 +796,7 @@ is written to it with `sudo tee -a FILE > /dev/null`.
 | Gradle | `maven { url = uri("HOST/maven/{repo}") }` in `repositories` of the build file to consume dependencies (Gradle ignores the repositories of the settings file when the build file declares its own), in `pluginManagement.repositories` of the settings file to consume plugins, and in `publishing.repositories` to publish; add `credentials(PasswordCredentials::class)` with a read token in `~/.gradle/gradle.properties` to read a private repo. The settings plugin adds the publish credentials. `isAllowInsecureProtocol = true` only for plain http |
 | apt | Key: `curl -fsSL HOST/debian/{repo}/key.asc -o /etc/apt/keyrings/telesphorepo.asc`. Source: `deb [signed-by=/etc/apt/keyrings/telesphorepo.asc] HOST/debian/{repo} {dist} {component}`. For a private repo, the `curl` command reads `USER:READ_TOKEN` from a config on stdin, and `/etc/apt/auth.conf.d/{repo}.conf` holds `machine HOST/debian/{repo} login USER password TOKEN` (mode 600) |
 | Upload `.deb` | `curl -K - -T x.deb HOST/debian/{repo}/upload/{dist}/{component}` with `user = "publish:SESSION_TOKEN"` on stdin. Indexes rebuild after `index.debounce`; poll `GET /api/repos/{repo}/status` for `pending: 0` |
+| Docker | Pull: `docker pull <host>/{repo}/IMAGE:TAG`; a private repo needs `docker login <host>` with a read token. Push: `docker-credential-telesphorepo login HOST` once (a person approves the device), then `docker push <push host>/{repo}/IMAGE:TAG` with no `docker login`. Helm and ORAS use the same login (see **Docker registry** and **Publishing**) |
 | Raw | Upload: `curl -K - -T file.tar.gz HOST/raw/{repo}/path/file.tar.gz` with `user = "publish:SESSION_TOKEN"` on stdin. Download: `curl -fLO HOST/raw/{repo}/path/file.tar.gz`; a private repo adds `-K -` with `user = "USER:READ_TOKEN"` on stdin |
 
 ### Project setup
@@ -820,6 +878,7 @@ has no `gradlew`).
 | Read token `trp_<12hex>_<secret>` | SHA-256(secret), looked up by id, constant-time compare | Basic password (any username) or `Authorization: Bearer`: format reads, and the `/api/` GET routes that need no permission |
 | Session `tr_session` | SHA-256(id), absolute `session_ttl` | `/api/`, and format reads (GET and HEAD) for downloads in the browser. The only credential for permission routes and for routes that change state on `/api/`; it never writes to a format route. HttpOnly, SameSite=Strict, Secure per `cookie.secure`. The session of a person who holds `delete` may also delete files (see **Files, uploads and deletes**) |
 | Publish session `trs_<12hex>_<secret>` | SHA-256(secret) in `publish_sessions`, constant-time compare | Basic password (any username) or `Authorization: Bearer` on format routes of its one repo, `/api/publish/...`, and the upload and delete routes of its repo. The only credential that writes to a format route |
+| Device (`auth.CredDevice`) | The enrolled device key; only inside a core bearer token of a format's token exchange (the Docker credential helper's proof) | Format reads (GET and HEAD) with the grants of the device's user, and writes through the publish session that the device minted for the repo (the bearer scope) |
 
 - **Account kinds.** `local` users have a password, API tokens and Basic auth; publishers and the
   break-glass admin. `oidc` users are created on their first SSO login, keyed by
@@ -945,6 +1004,7 @@ proves who it is. There are three proofs:
 | Who | Proof | Route |
 |---|---|---|
 | Developer with Gradle or Maven | An enrolled device key (Ed25519) | `POST /api/publish/sessions` |
+| Developer with Docker, Helm or ORAS | An enrolled device key of the credential helper, over a token exchange nonce | `GET, POST /docker/token` (see **Docker registry**) |
 | CI (GitHub Actions, Jenkins, any OIDC issuer) | The CI identity token and a trust policy (CI pipeline) | `POST /api/publish/sessions/oidc` |
 | Anyone, by hand | UI session plus a fresh second factor | `POST /api/publish/sessions/manual` |
 
@@ -952,14 +1012,14 @@ Routes (`{items, next}` lists are keyset, `?after=&limit=`):
 
 | Method & path | Auth | Notes |
 |---|---|---|
-| `POST /api/devices/enroll` | none | `{name, client, public_key}` (`client` is a registered publisher client ID, `gradle` or `maven`; another is 400 with the list) (`public_key` is the raw 32-byte key, base64url, no padding). Returns `{device_code, user_code: "ABCD-EFGH", verification_url: "<base_url>/#/device", expires_in: 600, interval: 5}`. `verification_url` uses the request URL when `base_url` is empty. Each IP gets a burst of 10, then 1 per 30 s (429) |
+| `POST /api/devices/enroll` | none | `{name, client, public_key}` (`client` is a registered publisher client ID, `gradle`, `maven` or `docker`; another is 400 with the list) (`public_key` is the raw 32-byte key, base64url, no padding). Returns `{device_code, user_code: "ABCD-EFGH", verification_url: "<base_url>/#/device", expires_in: 600, interval: 5}`. `verification_url` uses the request URL when `base_url` is empty. Each IP gets a burst of 10, then 1 per 30 s (429) |
 | `POST /api/devices/enroll/poll` | none | `{device_code}`. 200 `{device_id}` once approved (single use). 400 `{"error": "authorization_pending" \| "slow_down" \| "expired_token"}`. `slow_down` answers a poll less than 4 s after the last. An unknown or used code gets `expired_token` |
 | `GET /api/devices/enroll?user_code=` | UI session or password | `{user_code, name, client, client_title, client_help, expires_at}`; 404 for an unknown or expired code |
 | `POST /api/devices/approve` | UI session and a fresh factor (`X-Telesphorepo-Proof`) | `{user_code}`. A local account proves with `totp <code>` or `passkey <assertion>`, an SSO account with `grant <grant>` of a fresh SSO sign-in for this code. 201 Device. 401 for a wrong second factor, or for a missing, used, expired or other grant (another user or code), 404 unknown or expired code, 409 used code, 403 `second_factor_required` |
 | `GET /api/devices` | password, read token or UI session | Own devices; a holder of `people.manage` sees all devices, with `username`. Newest first, `{items, next}`. A device is `{id, user_id, username?, name, client, client_title, created_at, expires_at, last_used_at, revoked_at, state}` |
 | `GET /api/network/trusted-proxies` · `PUT /api/network/trusted-proxies` | `network.manage` | GET answers `{lists: [{id, name}], env_lists: [name]}`: the IP lists that the trusted proxies include (rows of `trusted_proxy_lists`), and those that `TR_TRUSTED_PROXIES` names. PUT takes `{lists: [id]}`, replaces the rows in one transaction, records `network.trusted.update` and answers like GET. 400 for an unknown id |
 | `DELETE /api/devices/{id}` | UI session | 204. A holder of `people.manage` may revoke any device. It ends the device's open sessions |
-| `POST /api/publish/challenge` | none | `{device_id}` returns `{nonce}` (32 random bytes, base64url, single use, 60 s) |
+| `POST /api/publish/challenge` | none | `{device_id, exchange, nonce, ts, signature}` returns `{nonce, expires_at}` (32 random bytes, base64url, and the expiry). Without `exchange`: single use, 60 s, for `POST /api/publish/sessions`. With `exchange: true`: a token exchange nonce that lives `publish.session_ttl`, signed for the repo `*` and sent to a format's token endpoint (the Docker credential helper). With `exchange: true` and a `nonce` that is a token exchange nonce of the device that has not expired, the answer is that nonce and its expiry, and the server writes no row. Else a new token exchange nonce needs `ts` (Unix seconds, at most 5 minutes from the server time) and `signature`: the device's Ed25519 signature over `"telesphorepo challenge v1\n<device id>\n<ts>"` (base64url, no padding), so only the holder of the device key makes the server write a row that lives that long; a missing or bad signature or time is 401. A device that is unknown, revoked or expired, or whose user is disabled, gets 401 |
 | `POST /api/publish/sessions` | none | `{device_id, repo, nonce, signature}` returns 201 `{id, token: "trs_...", repo, expires_at}` |
 | `POST /api/publish/sessions/manual` | UI session and a fresh factor (`X-Telesphorepo-Proof`) | `{repo}`; same answer. The proof is `totp <code>` or `passkey <assertion>`, not a recovery code. 401 for a wrong proof, 403 `second_factor_required` without a factor, 429 with `Retry-After` when limited. `access.Engine.Decide` with `Mint` decides (405 for a proxy or a group, 409 for a locked repo, 403 for the network rules) |
 | `POST /api/publish/sessions/oidc` | none | `{token, repo}`; same answer |
@@ -983,7 +1043,7 @@ refuse read tokens and publish session tokens. A `trs_` token never reaches the 
 also not for an admin user.
 
 **Device flow** (RFC 8628 style):
-1. The client creates an Ed25519 key pair, stores it in `~/.telesphorepo/<server>/device.json` (`<server>` is the host, with `_<port>` when the port is not the default, and `_<base path>` when the server has one)
+1. The client creates an Ed25519 key pair, stores it in `~/.telesphorepo/<server>/device.json` (`<server>` is the host, with `_<port>` when the port is not the default, and `_<base path>` when the server has one; the Docker credential helper uses `~/.telesphorepo/<server>/docker/device.json`)
    (owner only) and calls `enroll`. It prints `Open <verification_url>?code=<USER-CODE> and
    approve code <USER-CODE>`.
 2. The user opens the page, signs in, checks the name and the client (its title and one line of
@@ -1070,7 +1130,9 @@ sessions.
 
 **Publisher clients.** A publisher client (`clients.Client`, `Extender.PublisherClient`) is a build
 tool plugin that enrolls a device: `{id, title, help}`. The maven module registers `gradle`
-(Gradle plugin) and `maven` (Maven extension). `POST /api/devices/enroll` refuses another `client`
+(Gradle plugin) and `maven` (Maven extension); the docker module registers `docker` (Docker
+credential helper: "The Telesphorepo credential helper signs pushes of docker, buildx, podman, helm
+and oras on this computer with the device key."). `POST /api/devices/enroll` refuses another `client`
 with 400 that lists the IDs; a device and an enrollment keep the ID in `client`.
 
 **Clients** (Java 17, JDK only). They live in their own repository,
@@ -1112,6 +1174,45 @@ clients have the same version.
   builds the CI files (see **Snippets and CI files**): a GitHub Actions workflow and a Jenkinsfile
   that post the identity token to `/api/publish/sessions/oidc` with `curl`, upload, and close the
   session. The repo's **Publish to this repository** tab and the CI pipeline page show them.
+
+**Docker credential helper** (`cmd/docker-credential-telesphorepo`, Go, in this repository and
+under its license). It imports no server package; its only module outside the standard library is
+`golang.org/x/sys/windows` (the owner-only ACL). `go tool task release` builds it with the server
+(see **Tooling**). Docker, buildx, Podman, skopeo, crane, Helm and ORAS run it through
+`credHelpers` in `~/.docker/config.json`. Commands:
+
+| Command | stdin | Answer |
+|---|---|---|
+| `login <server URL> [--name NAME]` | | Enrolls the computer: `GET /docker/hosts` (the registry and the push host), then an Ed25519 key and `POST /api/devices/enroll` with the client `docker` and the name (default `<hostname> (Docker)`). It prints `Open <verification_url>?code=<CODE> and approve code <CODE>`, opens the browser when stdout is a terminal, and polls at `interval` (`slow_down` adds 5 s). It saves the device file and `hosts.json`, and sets `"credHelpers": {"<host>": "telesphorepo"}` for each host in `$DOCKER_CONFIG/config.json` (else `~/.docker/config.json`) and keeps every other key. A saved device that the server still accepts (`POST /api/publish/challenge`) stays; one that it refuses is enrolled again |
+| `get` | the registry host (`host[:port]`) | `{"ServerURL", "Username": "telesphorepo-device", "Secret": "trx.<device id>.<nonce>.<signature>"}`: a nonce of `POST /api/publish/challenge` with `exchange: true` (the request carries `ts` and the device signature over it), and the device signature over the nonce for the repo `*` (base64url, no padding). No device for the host, or a 4xx from the challenge (a device that is unknown, revoked or expired): `credentials not found in native keychain` and exit 1, so Docker reads anonymously; the reason goes to stderr. Each `get` sends the challenge, so a revoked device stops at once. The process that runs the helper (its id and start time) keeps its nonce in `exchange.json` and sends it as `nonce`, so it gets the same nonce while the nonce is valid: Helm and ORAS run `get` for each token, and all token requests of one push get the same publish session |
+| `store` | Docker's credentials | Exit 1: "docker-credential-telesphorepo keeps no passwords. Run: docker-credential-telesphorepo login <server URL>" |
+| `erase` | the registry host | Deletes the device folder of the host (`docker logout`). The device stays in Settings › Devices until someone revokes it |
+| `list` | `unused` | `{"<host>": "telesphorepo-device", ...}` for each host of each enrolled device |
+| `version`, `help [command]` | | The version (`-X main.version`); example-led help |
+
+- **Files.** `~/.telesphorepo/<server>/docker/device.json` has the schema of the Java clients:
+  `{"server": "<canonical URL>", "device_id": n, "client": "docker", "private_key": "<base64
+  PKCS#8>", "public_key": "<base64 raw 32 bytes>", "created_at": "<RFC 3339>"}`. `hosts.json` next
+  to it holds `{"hosts": [...]}` of `GET /docker/hosts`. `exchange.json` next to it holds the token
+  exchange nonce of each process that ran `get`: `{"nonces": [{"pid": n, "start": "<start time of
+  the process>", "nonce": "...", "expires_at": "<RFC 3339>"}]}`; a save drops the expired nonces.
+  A file that is missing or not valid is empty, and a failed write goes to stderr. The helper writes each file through a
+  temporary file and a rename: mode 600 in a 700 folder on Linux and macOS, an ACL with the current
+  user as the only entry on Windows. A device file that its group or other users can read stops
+  the helper. The `docker` folder keeps this device apart from the Gradle and Maven device of the
+  same server, so the approval page names the helper.
+- **Server identity.** The canonical URL follows the rules of the Java clients' `ServerIdentity`
+  (scheme http or https, lower-case ASCII host, the effective port, the base path without a
+  trailing slash; an internationalized host must be in its `xn--` form). `get` answers only when
+  the host and port that Docker passes equal those of the server, or a host of `hosts.json` (a
+  host without a port takes the default port of the server's scheme). Every request goes to the
+  canonical URL of the device file, never to the host that Docker passed, and the helper follows
+  no redirect.
+- **Token exchange.** Docker sends the secret as the password to `/docker/token`. The token
+  endpoint mints one session per repo per nonce (`publish_exchange_sessions`); a pull checks the
+  proof (`Minter.Check`) and mints nothing. The bearer carries the device (`auth.CredDevice`), so
+  it reads what the device's user reads (a private base image too) and pushes through the session
+  of its scope.
 
 **UI pages.** The sign-in page (second step for a person who needs it), the approval page (`/#/device?code=`)
 and, under Settings: **Sign-in and security** (TOTP with a QR code, passkeys, recovery codes),
@@ -1158,7 +1259,8 @@ and check time. `CommitAll` writes files of one repo in one transaction:
 5. One transaction: the asset rows, the format's `OnCommitted` (its own rows, rebuild marks), and
    one `file.upload` event per stored file whose source is `put`, `ui` or `import`. A failed
    transaction is tried again up to 3 times.
-6. The digest locks, then the path locks are released; then `AfterCommit` runs.
+6. The digest locks, then the path locks are released; then `AfterCommit` runs with a result per
+   write (`Write`, `Asset`, `Status`, and `Prev`, the asset that a replaced write replaced).
 
 A repo that is being deleted refuses every write with 409. The write runs detached from its
 request (a client that goes away does not leave a blob without its row) and stops only when the
@@ -1171,8 +1273,9 @@ filesystem). `telesphorepo seed` inserts rows only (`assets.SeedTx`).
 
 **Delete (`Remove`).** A removal is `{repo, paths, prefixes (folders ending in "/"; "" is every
 file), origin}`. It works in batches of 500 rows: the path locks in path order, then one
-transaction with the format's `OnRemoved` (the rows are still readable; it may return follow-up
-paths, removed as the next batches), the row deletes and one `file.delete` event per file of
+transaction with the format's `OnRemoved` (the rows are still readable; it gets the folders of
+the removal, whose other files go in this or a later batch, and it may return follow-up paths,
+removed as the next batches), the row deletes and one `file.delete` event per file of
 `paths`; one event per folder of `prefixes` after its last batch. Then `AfterRemove`. A path that
 does not exist is skipped. Blob objects are never deleted here: the blob GC removes a blob that no
 file uses. While the repo has an active `delete` operation, `Remove` calls no `OnRemoved` and no
@@ -1193,7 +1296,12 @@ group tries its members in read order that the caller may read (`access.Engine.A
 before it has the file. With a format `Merger` that matches the path and two or more members that
 have its base file, the server merges the members' files and serves the merged bytes; a checksum
 path (`md5`, `sha1`, `sha256`, `sha512`) of a merged file is the checksum of the merged bytes. No
-member: 404, or 502 when a proxy member's remote failed.
+member: 404, or 502 when a proxy member's remote failed. A format with its own answers uses the
+parts: `Reader.Resolve(ctx, r, p, repo, path)` (the asset by the rules above, nil when none,
+`ErrRemoteFailed` when a proxy failed and nothing else has it), `Reader.Stored(ctx, r, p, repo,
+path)` (a stored asset only: hosted, a proxy's cache, or the first readable group member that
+stores it; it never contacts a remote) and `Reader.ServeAsset(w, r, asset, ServeOptions{NoRedirect})`
+(the download of one asset; `NoRedirect` streams it even when the store presigns).
 
 One function sets the content headers from the asset row: `Content-Type`, `ETag` (`"<sha256>"`),
 `Last-Modified`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none';
@@ -1210,7 +1318,8 @@ received), and finishes it with the SHA-256 (and optionally the size) of the who
 are in `$TR_DATA_DIR/tmp/uploads/<id>`; the row saves the count after each append, so an upload
 continues after a restart; no hash state is kept. `Finish` reads the file once for its MD5, SHA-1 and
 SHA-256, deletes the upload on a mismatch (400), and returns the body for a `Commit` with source
-`put`. Only the publish session that started an upload continues it. `max_upload_size` caps it, and
+`put`. Only the publish session that started an upload continues it (a core bearer token counts
+with the publish session of its scope of the repo); `Status` returns the bytes received. `max_upload_size` caps it, and
 the job `core.upload-sessions` deletes uploads idle past `upload.session_ttl` (`24h`) with their files.
 A repo delete or a user delete removes the rows of their uploads (`ON DELETE CASCADE`), so the job
 also deletes each file in `tmp/uploads` that has no row and was not written for `upload.session_ttl`.
@@ -1238,10 +1347,14 @@ minutes. At most two groups rebuild at a time. At startup it picks up every pend
 is being deleted is skipped. `GET /api/repos/{name}/status` answers the pending count.
 
 **Importers.** A format's `Importer` has `Sources` (source format IDs), `Target` (the target path of
-a source file, or ignored) and an optional `Store`. `Importer.Run` does the shared work once: the
-target path, the skip of a file whose target holds the source's SHA-256 (it gets the source's
-dates), the download under `max_upload_size` with the source checksum checked, then `Store` or a
-`Commit` with source `import`. An `unchanged` result counts as skipped.
+a source file, or ignored), an optional `Store` and an optional `Header` (extra headers of every
+download from the source, e.g. the `Accept` of the OCI manifest types). `Importer.Run` does the
+shared work once: the target path, the skip of a file whose target holds the source's SHA-256 (it
+gets the source's dates), the download under `max_upload_size` with the source checksum checked,
+then `Store` or a `Commit` with source `import`. An `unchanged` result counts as skipped. An
+`ImportItem` carries the source's `ContentType` of the file and `Fetch(ctx, sourcePath, header)`,
+which downloads another path of the same source repo (e.g. a layer that a manifest names) and
+answers the source's authentication challenges.
 
 ## Repo operations
 
@@ -1405,6 +1518,20 @@ is unreachable.
     config's `distribution`; the target of a package that the distribution holds already is its
     pool file, so it is skipped without a download. Other files are ignored. A target without
     `distribution` fails each package.
+  - docker (`docker`): `v2/<image>/manifests/<tag>` to the tag path and
+    `v2/<image>/manifests/sha256:<hex>` to the manifest path; the blobs (`v2/-/blobs/...`) are
+    ignored, because each manifest brings what it names. `Store` parses the manifest (the media
+    type of `ContentType`, else the JSON `mediaType`), fetches through `Fetch` each blob
+    (`v2/<image>/blobs/sha256:<hex>`, spooled under `max_upload_size`; a blob that another image of
+    the repo links is linked without a download) and each child manifest of an index
+    (`v2/<image>/manifests/sha256:<hex>`, recursively) that the image lacks, checks each digest, and
+    commits the links, the child manifests, the manifest and the tag in one `CommitAll` with source
+    `import`. So the page order of Nexus does not matter. Every download asks for the four manifest
+    types (`Importer.Header`), so Nexus sends a manifest as it stores it. A Nexus Docker repo with
+    the Docker Bearer Token Realm answers each download with a Bearer challenge; the client
+    answers it with `proxy.Answer` and the source's credentials and keeps the newest token of each
+    Nexus repo while it lives. A Nexus docker proxy becomes a docker proxy with the Nexus remote
+    URL.
   - Imported files have no uploader. The import is the owner of the repo's `mirror` operation, so
     it writes while uploads answer 409; each imported file records `file.upload` with the actor
     `nexus`.
@@ -1517,8 +1644,8 @@ is unreachable.
 
 ## Group and proxy repositories
 
-A format takes proxy repos when its `format.Spec.Kinds` lists `proxy` (Maven, Debian; it then
-sets `Classify` and `ProxyProbe`) and group repos when it lists `group` (Maven). `repos.Service` refuses a kind that the format's
+A format takes proxy repos when its `format.Spec.Kinds` lists `proxy` (Maven, Debian, Docker; it
+then sets `Classify` and `ProxyProbe`) and group repos when it lists `group` (Maven, Docker). `repos.Service` refuses a kind that the format's
 `format.Spec.Kinds` does not list (400). Neither kind takes uploads, publish sessions or CI pipelines:
 minting a session for one answers 409 with the read-only text, and a CI pipeline that lists one
 answers 400. A Nexus mapping maps a Nexus hosted, proxy or group repo to a target of the same kind.
@@ -1555,33 +1682,260 @@ are dropped from memory, and the server logs the repo ids.
 - The remote URL is http or https, has no user, query or fragment, and ends with `/`. A new proxy
   checks its remote once: a GET of the format's probe (`format.Spec.ProxyProbe`: the root for
   Maven, `dists/<distribution>/InRelease` for Debian, with `stable` when the config names no
-  `distribution`). The root passes with any answer except 401, 403, 407 and 5xx; a probe file
-  must exist. `force: true` skips the check.
-- `format.Spec.Classify` sorts a path: Maven `maven-metadata.xml*` and files under a
-  `-SNAPSHOT` folder change, the rest is immutable; Debian `pool/**` and `dists/**/by-hash/**` are
-  immutable, the rest of `dists/**` changes, other paths are refused (404).
+  `distribution`, `/v2/` for Docker). The root passes with any answer except 401, 403, 407 and 5xx;
+  a probe file must exist. A format with `RemoteAuth` answers a 401 challenge of the check too; a
+  token realm that refuses the credentials fails the check ("the remote refused the username and
+  password"). `force: true` skips the check (`proxy.Check`).
+- `format.Spec.Classify(remote, path)` sorts a path into an `assets.Class`: `Changing` (checked
+  again after `metadata_ttl`), `Remote` (the path at the remote: relative to `remote_url`, or from
+  the root of its host when it starts with `/`; `""` is the local path), `Header` (extra request
+  headers, e.g. `Accept`), `KeepType` (the remote's `Content-Type` becomes the file's content type)
+  and `Revalidate` (`""`: a conditional GET; `head-digest`: a HEAD with the same headers, and a
+  `Docker-Content-Digest` equal to the cached SHA-256 only sets `checked_at`, else a GET). Maven
+  `maven-metadata.xml*` and files under a `-SNAPSHOT` folder change, the rest is immutable;
+  Debian `pool/**` and `dists/**/by-hash/**` are immutable, the rest of `dists/**` changes, other
+  paths are refused (404). Docker: see **Docker registry**.
 - A read goes through the usual gate. A cached file that is immutable, or changing and checked
   within `metadata_ttl`, serves from storage (with the presigned redirect on S3). Otherwise the
-  server fetches `remote_url + path`, with `If-None-Match` (the stored ETag) and
-  `If-Modified-Since` for a cached file; a 304 sets `checked_at`. A 401 with a challenge goes to the
-  format's `RemoteAuth` once, when it has one, and the request is sent again with the headers it
-  returns. One fetch per (repo, path) runs at a time (a fetch lock of its own); a second request
-  waits and then serves the stored file.
+  server fetches the remote path, with `If-None-Match` (the stored ETag) and
+  `If-Modified-Since` for a cached file; a 304 sets `checked_at`. A format without `RemoteAuth`
+  sends the remote's credentials as HTTP Basic on every request. A format with `RemoteAuth`
+  sends them only in the answer to a challenge: a 401 goes to `RemoteAuth` once, and the request
+  is sent again with the headers it returns. `proxy.Answer(ctx, client, challenge, user, pass)`
+  is the answer of the registry token protocol: for `Bearer realm,service,scope` it GETs
+  `realm?service=&scope=` with the credentials as Basic and returns `Authorization: Bearer
+  <token>` with its life (`expires_in`, 60 s without it); for `Basic` it returns the Basic header.
+  One fetch per (repo, path) runs at a time (a fetch lock of its own); a second request waits and
+  then serves the stored file.
 - A 200 is spooled (`max_upload_size`, hashes) and committed through the byte pipeline with
   source `proxy`: no uploader, the remote's `Last-Modified` as `created_at` and `updated_at`,
   `checked_at` and the ETag; the bytes of a blob that exists already are not stored again. The
-  client waits for the whole file.
+  client waits for the whole file, also for the first pull of a large image layer. A file that the
+  format refuses (a `*assets.Refusal`, e.g. bytes that do not have the digest of their path) is a
+  remote failure: "the remote sent a file that the format refuses: <message>".
 - A remote 404 or 410 answers 404 and is remembered in memory for `not_found_ttl` (an LRU of
-  10,000 paths per server). A cached file that the remote no longer has stays and serves.
+  10,000 paths per server). A cached file that the remote no longer has stays and serves. A 401
+  or 403 to the request with the token of a Bearer challenge counts as a 404 (`proxy.ErrDenied`):
+  Docker Hub, GHCR and Quay answer so for a name that does not exist or that the credentials
+  cannot read. A refusal at the token realm stays a refusal of the credentials.
 - A remote error, a refusal (for example 401) or no answer headers within 30 s: a cached file
   serves although stale, with a warning in the log; with nothing cached the answer is 502 "The
   remote repository did not answer." `last_error` and `last_error_at` record it; a success sets
   `last_ok_at`. A fetch continues when the client goes away, for at most 30 minutes.
-- The fetch follows at most 5 redirects. The credentials (HTTP Basic) go only to the remote's
-  host: a redirect to another host drops them. No log line holds them.
+- The fetch follows at most 5 redirects. The credentials (HTTP Basic or a token) go only to the
+  remote's host: a redirect to another host drops them. No log line holds them.
 - A Debian proxy serves the remote's files unchanged: no indexer, no signature of its own.
   Clients keep the remote archive's key. Its apt snippet has no key step and no `signed-by`.
 - Deleting files of a proxy (Files tab, admin) works; the next request fetches them again.
+
+## Docker registry
+
+The module `docker` (`internal/docker`) is the format `docker`: an OCI registry that serves the
+OCI Distribution Spec 1.1 for hosted repos, proxies of other registries and groups. It holds container images, Helm charts and any other
+OCI artifact (ORAS). The repo is the first segment of an OCI repository name: an image is
+`<host>/<repo>/<image>[:tag|@digest]`, and the image has one or more segments (`team/api`). A
+docker repo name is one OCI name segment (`[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*`; `a..b` and `a-` are
+400). Its config is `{}`. Digests are `sha256` only (another algorithm is 400 `DIGEST_INVALID`). A
+name is at most 255 bytes; a tag is `[A-Za-z0-9_][A-Za-z0-9._-]{0,127}`. The registry serves at
+the root of an origin (`/v2/`, `/docker/`); a `base_url` with a path does not move it.
+
+**Objects.** Every OCI object is an asset of the repo, and its blob is a core blob shared across
+repos:
+
+| Path | Body | Kind |
+|---|---|---|
+| `<image>/_blobs/sha256/<hex>` (a link) | the blob | `index` (not searched) |
+| `<image>/_manifests/sha256/<hex>` | the manifest bytes, with its media type | `metadata` |
+| `<image>/_tags/<tag>` | the blob of its manifest, with its media type | `artifact` |
+
+`Describe` refuses every other path. `Admit` refuses a write of the generic upload and file routes
+("push with an OCI client (docker push, helm push, oras push)"), a link or a manifest whose bytes do
+not have the digest of its path, a pushed manifest that references a blob or a child manifest
+that is not in the image or in the same commit (400 `MANIFEST_BLOB_UNKNOWN` with the digest;
+foreign and non-distributable layers excepted), and a tag whose manifest is not in the image. The
+same bytes at a path are kept. `OnCommitted` writes the rows of **Data model** (a link counts the
+manifests of the image that use it; a manifest adds one use of each blob it references, each
+distinct blob once; a tag records its digest). `OnRemoved`: a tag drops its row; a manifest that
+an index outside the removal lists is 409 "an index uses this manifest; delete the index first",
+else it gives back one use of each blob and its tags follow; a link that a manifest outside the
+removal uses is 409 "a manifest uses this layer". The removal is the files of the batch and, when
+a folder of the delete (`Removal.Prefixes`) holds `<image>/_manifests/sha256/`, every manifest of
+the image: `Remove` reads a folder in path order, 500 files per batch, so the links (`_blobs/`
+sorts first) go in an earlier batch than the manifests that use them, and a child manifest can go
+in an earlier batch than its index. A manifest of a later batch gives back no use of a link that
+is gone already. In one batch the tags go first, then the manifests, then the links.
+
+**Routes.** ServeMux cannot match a name in the middle of a path, so the format registers method
+catch-alls and parses the raw path (an encoded `/`, `\` or NUL is 400). Every `/v2/` answer has
+`Docker-Distribution-API-Version: registry/2.0`; every refusal is the OCI error JSON
+`{"errors":[{"code","message","detail"}]}`.
+
+| Route | Policy | Serves |
+|---|---|---|
+| `GET /v2/` | none (the handler reads the credential) | No `Authorization`: 401 with the challenge. A credential that `Identify` accepts (a core bearer too): 200 `{}`; a bad one: 401 |
+| `GET /v2/_catalog?n=&last=` | password, read token, publish session, device, bearer, anonymous | The images (`{"repositories": [...]}`, by full name) of the repos that the credential behind the request downloads, without the repos a guard refuses. Bearer scopes do not limit it: anonymous and a bearer without a credential see the public repos, a publish session also its own repo, a password, a read token or a device the grants of its user. A full page adds `Link: </v2/_catalog?n=&last=>; rel="next"` |
+| `GET, HEAD /v2/<name>/manifests/<tag\|digest>` | `FormatRead` + bearer | The stored bytes and media type (`Accept` is ignored), `Docker-Content-Digest`, `Content-Length`, `ETag`; never redirected. 404 `MANIFEST_UNKNOWN`, also for a reference that is neither a digest nor a valid tag |
+| `GET, HEAD /v2/<name>/blobs/<digest>` | `FormatRead` + bearer | The link of the image, with ranges; a GET may redirect to S3. 404 `BLOB_UNKNOWN` |
+| `GET /v2/<name>/tags/list?n=&last=` | `FormatRead` + bearer | `{"name","tags"}` in tag order after `last`; `n` absent is 1000, above 10000 is 10000, 0 is an empty list; a bad `n` is 400 `PAGINATION_NUMBER_INVALID`. A full page adds `Link`. An image without rows is 404 `NAME_UNKNOWN`. A proxy lists the remote's tags; a group merges the tags of its readable members (see **Proxies and groups**) |
+| `GET /v2/<name>/referrers/<digest>?artifactType=` | `FormatRead` + bearer | Always 200 `application/vnd.oci.image.index.v1+json` with one descriptor per manifest of the image whose subject is the digest, in digest order, 500 per page (`?last=<hex>` and a `Link`). The filter sets `OCI-Filters-Applied: artifactType`. A proxy lists the manifests it has cached; a group merges its readable members by digest |
+| `GET /v2/<name>/blobs/uploads/<id>` | `FormatRead` + bearer | The upload: 204, `Location`, `Range`, `Docker-Upload-UUID` |
+| `POST /v2/<name>/blobs/uploads/` | `FormatWrite` + bearer | `?mount=<digest>&from=<name>`: 201 when the caller reads the source repo and the source stores the link (a mount never contacts a remote); any miss starts an upload (202), never 401 or 403. `?digest=` with the body: a monolithic upload, 201. Else a new upload session: 202 with `Location: /v2/<name>/blobs/uploads/<id>`, `Docker-Upload-UUID`, `Range: 0-0` |
+| `PATCH /v2/<name>/blobs/uploads/<id>` | `FormatWrite` + bearer | A chunk: with `Content-Range: <from>-<to>` (and a `Content-Length` of that size) at `from`, else streamed at the end; 202 with `Range: 0-<last byte>`. `from` other than the bytes received: 416 `BLOB_UPLOAD_INVALID` with `Range` and `Location` |
+| `PUT /v2/<name>/blobs/uploads/<id>?digest=` | `FormatWrite` + bearer | An optional last chunk, then the end: 201 with `Location: /v2/<name>/blobs/sha256:<hex>` and `Docker-Content-Digest`; a mismatch is 400 `DIGEST_INVALID` and the upload is gone |
+| `PUT /v2/<name>/manifests/<tag\|digest>` | `FormatWrite` + bearer | At most 4 MiB (413 `SIZE_INVALID`). The OCI image manifest and index and the Docker schema 2 manifest and manifest list; a JSON `mediaType` that differs from the `Content-Type` is 400, schema 1 is 400 `MANIFEST_INVALID`. A digest reference must be the body's digest; a reference that is neither a digest nor a valid tag is 400 `TAG_INVALID`. A blob that the image lacks and that another image of the repo links gets a link in the same commit. One commit: those links, the manifest and the tag (`Locks`: the links and child manifests it references). 201 with `Location`, `Docker-Content-Digest`, and `OCI-Subject` when the manifest has a subject (the subject need not exist). A push of a tag to another digest moves the tag; the old manifest stays, untagged, until deleted |
+| `DELETE /v2/<name>/manifests/<digest\|tag>` | publish session + bearer; `Delete` with `repo.delete` | By digest the manifest and its tags; by tag the tag only. 202; 404 `MANIFEST_UNKNOWN` (also for a reference that is neither a digest nor a valid tag) |
+| `DELETE /v2/<name>/blobs/uploads/<id>` | publish session + bearer; `Write` with `repo.publish` | Cancels the upload: 204 |
+| `DELETE /v2/<name>/blobs/<digest>` | as a manifest delete | 405 `UNSUPPORTED` "delete the manifests; the server removes layers that no manifest uses" |
+| `GET, POST /docker/token` | none (the handler reads the credential) | The token endpoint (below) |
+| `GET /docker/hosts` | none | `{"registry": "<host>", "push": "<host>"}`: the host of `base_url` (else of the request) and the host of `docker.push_url` (else the registry host) |
+
+A name of one segment (no image) is 404 `NAME_UNKNOWN` "name an image inside the repository:
+<host>/<repo>/<image>". The refusals map to OCI codes: an engine `anonymous`, `credentials`,
+`publish_session` or `scope` refusal is 401 `UNAUTHORIZED`; `permission` and `network` are 403
+`DENIED`; an unknown repo (or one of another format) is 404 `NAME_UNKNOWN`; a write to a proxy or
+group is 405 `UNSUPPORTED`; a repo operation is 409 `DENIED`; a rate limit is 429 `TOOMANYREQUESTS`.
+The handlers add: a bad name or path is 400 `NAME_INVALID`; a malformed upload body or
+`Content-Range` is 400 `BLOB_UPLOAD_INVALID`; an upload that does not exist, expired, or belongs to
+another repo or credential is 404 `BLOB_UPLOAD_UNKNOWN`; a blob over `max_upload_size` is 413
+`SIZE_INVALID`; a 409 refusal of a hook (a used layer, a manifest that an index uses) is
+`DENIED`; a failed proxy remote is 502 `UNKNOWN` "The remote repository did not answer."; any other
+error is 500 `UNKNOWN` "internal error".
+
+**Challenge.** A 401 carries `WWW-Authenticate: Bearer realm="<scheme>://<host>/docker/token",
+service="<host>",scope="repository:<name>:<actions>"` with `pull` on GET and HEAD, `pull,push`
+on PUT, POST and PATCH and `delete` on DELETE (`registry:catalog:*` on the catalog, none on
+`/v2/`). The scheme and the host are those of `docker.push_url` when the request came to its host,
+else those of `base_url`, else the scheme of the client (`httpx.ClientScheme`, see **Client IP and
+scheme**) and the host of the request.
+A refusal with the code `scope` adds `error="insufficient_scope"`.
+
+**Token endpoint.** `GET /docker/token?service=&scope=...` with Basic credentials, or `POST` with
+a form (`grant_type=password` with `username` and `password`; `grant_type=refresh_token` with
+`refresh_token`, read as a password; `scope` space-separated). The answer is 200 `{token,
+access_token, expires_in, issued_at}` with one core bearer token in both fields; it never returns
+a refresh token. A blocked client address gets 429 first. The password is a device proof of the
+credential helper when it is `trx.<device id>.<nonce>.<signature>` (see **Publishing**), a CI
+identity token when it is a JWT (three parts, `eyJ...`), else a password or a token of a
+registered kind (`trp_`, `trs_`) checked with `auth.Service.Authenticate` (a bad one is 401). Scopes are
+`repository:<name>:<actions>` (`pull`, `push`, `delete`, `*`); each maps to its repo, and an
+unknown repo or a repo of another format is dropped. The answer grants a subset:
+
+- Pull: `access.Engine.Allows(Read, repo.download)` for the credential (the guards apply). A
+  publish session reads what anonymous reads outside its repo; a CI token reads what anonymous
+  reads; a device proof reads what the device's user reads (`Minter.Check`, then the
+  `auth.CredDevice` principal of the device; no session for a pull).
+- Push and delete: one repo per token, the first in request order that asks. A publish session
+  token (`trs_`) gets them on its own repo, with its session. A CI token mints a session for the
+  repo through `publish.Minter.Mint` (the bearer then carries that session; push only). A device
+  proof mints a session through `Minter.Mint` too (one per repo per nonce; push and delete, the
+  engine checks `repo.delete`); the bearer carries the device with that session in its scope. A
+  refused mint is 403 `DENIED` with the minter's message. A mint on a proxy or a group does not happen; the
+  pull stays. A password or a read token gets no push; its write answers that publishing needs a
+  publish session.
+- Without scopes (`docker login`): a password or token that verifies gets 200; a CI token or a
+  device proof passes `Minter.Check` (a failed check, or a proof that does not parse, is 401 and
+  counts as a failed attempt of the address).
+
+`expires_in` is 15 minutes, or the rest of the session when it is shorter, at least 60 s. A push
+ends within `publish.session_ttl`. A mount from a private repo with a CI or `trs_` credential
+falls back to an upload, because a publish session reads only what anonymous reads outside its
+repo; with a device proof the device's user reads the source, so the mount works.
+
+**Unused layers.** A manifest delete gives back one use of each blob it references; a link at 0
+uses gets `unreferenced_at`. The job `docker.links` runs every `min(docker.link_grace, 1 min)` and
+at once after a settings change: it removes each link unused for `docker.link_grace` (`24h`,
+minimum `1s`) with `Remove` (source `generated`, no audit event); a link that a manifest took
+meanwhile is refused and stays. Then the core blob GC deletes the blob after `blobs.gc_grace` when
+no asset uses it. The grace also keeps a layer that a client pushed before its manifest, so it
+must outlast the slowest push. Untagged manifests of a hosted repo stay until deleted; a proxy
+drops the manifest of a tag that moved (see **Proxy**).
+
+**Uploads.** Uploads are core upload sessions (`assets.Uploads`): the bytes stream to
+`tmp/uploads/<id>`, nothing holds a blob in memory, `max_upload_size` caps one blob, and
+`upload.session_ttl` expires them. The registry sets no body limit of its own and sends no
+`OCI-Chunk-Min-Length`.
+
+**Proxies and groups.** A docker proxy caches any OCI registry; the UI offers Docker Hub
+(`https://registry-1.docker.io/`), the GitHub Container Registry and Quay as presets, and says
+"Images keep the digests of the remote registry." A path in the remote URL is a name prefix:
+`https://ghcr.io/acme/` proxies the images of `acme`, and `http://other:8080/team/` the images of
+the repo `team` of another server. On `registry-1.docker.io` without a prefix, a one-segment image
+is `library/<image>`. `Classify`:
+
+| Local path | Remote path | Class |
+|---|---|---|
+| `<image>/_tags/<tag>` | `/v2/<remote image>/manifests/<tag>` | changing, `Accept` of the four manifest types, `KeepType`, `head-digest` |
+| `<image>/_manifests/sha256/<hex>` | `/v2/<remote image>/manifests/sha256:<hex>` | immutable, `Accept`, `KeepType` |
+| `<image>/_blobs/sha256/<hex>` | `/v2/<remote image>/blobs/sha256:<hex>` | immutable |
+
+`ProxyProbe` is `/v2/`. The proxy sends the remote's credentials only through `RemoteAuth`: a
+Bearer challenge gets a token from the remote's realm (`proxy.Answer` with the credentials), a
+Basic challenge the Basic header. The module keeps each token by remote, credentials and scope
+until 30 s (at most half its life) before it expires, and a Basic answer for an hour, and sends
+it with the next request of that image, so a fetch costs no token request while a token lives. A
+check of a stale tag sends a HEAD (Docker Hub counts only GETs against its pull limit): the same
+digest only sets `checked_at`; another digest fetches the tag. `Admit` refuses a fetched tag or
+manifest that does not parse and a fetched file without the digest of its path (a remote
+failure); a fetched tag needs no manifest in the image, and `AfterCommit` stores the manifest of a
+fetched tag at its digest path. When the fetched tag replaced another digest, `AfterCommit` then
+removes the old manifest (`Remove`, source `generated`) when no tag names it and no index lists
+it, and each manifest of its index that no tag names and no other index lists. Their links lose
+those uses, so the job `docker.links` and the blob GC reclaim the layers that only the old version
+used; a client that asks for the old digest gets it from the remote again. The children of a
+fetched manifest come when a client asks for them. A mount never contacts a remote. The first pull of an uncached layer waits until the proxy
+holds the whole layer. The tags list of a proxy is the remote's tags list (with `n` and `last`;
+the `Link` of the next page names the local name); a remote that denies the name (404, or
+`proxy.ErrDenied`) gives 404 `NAME_UNKNOWN`; a remote that fails gives the cached tags.
+The catalog lists the images that a proxy has cached. A group reads its members in order
+(manifests, blobs, a mount source); its tags list merges the tags of the readable members by tag
+(a proxy member gives its cached tags) and its referrers merge by digest. A push to a proxy or a
+group is 405 `UNSUPPORTED` with the read-only text ("A proxy is read-only.", "A group is
+read-only. Publish to one of its repositories.").
+
+**Push host (the 100 MB request limit).** Docker 29, containerd 2 (nerdctl, BuildKit and buildx),
+Podman, skopeo, crane and ORAS send each layer in one request body: one PUT, or one PATCH and an
+empty PUT. No client reads a maximum chunk size, and none splits a layer after a 413. Behind a
+proxy that limits request bodies (Cloudflare: 100 MB on Free and Pro), a larger layer fails with
+every common client. `docker.push_url` names a host that reaches the server without that proxy
+(a DNS-only record): the snippets and the CI files push there, pulls keep the main host, and the
+challenge of a request to that host names that host's token endpoint. The registry supports the
+full chunked protocol for clients that use it (oras-go v3 with a chunk size).
+
+**Snippets and CI.** `HOST` is the host of `base_url`, `PUSH` the host of `docker.push_url` (else
+`HOST`). Use: `docker login HOST` with a read token for a private repo, `docker pull
+HOST/<repo>/IMAGE:TAG`, `helm pull oci://HOST/<repo>/CHART --version X`. Publish (hosted repos):
+from a computer, `docker-credential-telesphorepo login <base_url>` once, then `docker push
+PUSH/<repo>/IMAGE:TAG` and `helm push chart.tgz oci://PUSH/<repo>`; by hand, a publish token at
+a hidden prompt, `docker login PUSH -u publish --password-stdin`, the push and `docker logout`.
+An http `base_url` adds "Add HOST to insecure-registries in /etc/docker/daemon.json."; a
+`base_url` with a path adds that Docker reaches a registry at the root of a host. The artifact
+snippets of an image (a folder, a tag or a manifest file) pull the digest that the tag names
+(pinned) or the tag (latest); a manifest without a tag pulls by digest; a Helm chart pulls with
+`helm pull --version`, another OCI artifact with `oras pull`; a private repo adds the login. The
+CI tool `docker` builds `PUSH/<repo>/app` with the commit as the tag (`$GITHUB_SHA`, Jenkins
+`${GIT_COMMIT:-$BUILD_NUMBER}`), then logs in with the job's identity token
+(`printf '%s' "$OIDC_TOKEN" | docker login PUSH -u oidc --password-stdin`) right before the push,
+pushes and logs out, so the token is fresh when the token endpoint mints the session. Its note:
+"Change app to the name of your image. The job needs Docker. The OIDC token pulls public images
+only: to build from a private image, log in with a read token before the build."
+
+**Versions and builds.** An artifact is an image folder `<image>/` with a `docker_images` row.
+Its kind is `helm-chart` when the newest tag's config is `application/vnd.cncf.helm.config.v1+json`,
+`image` for an image config or an index, else `artifact`. Versions are the tags, newest first
+(`docker_tags_recent`; `after` is a tag), each a release with one build: the short digest, and
+the CI build of the tag asset. The files of the build are the manifest (`manifest`), the config
+(`config`) and the layers (`layer`), or for an index its platform manifests with the classifier
+`<os>/<arch>[/<variant>]`.
+
+**Web UI.** The descriptor has the kinds Container image, Helm chart and OCI artifact, the
+snippet tools Docker, Helm and ORAS, "Pull it", the delete notes of tags, manifests and layers,
+and the file part `manifest` for tags and manifests: `web/src/modules/docker/ManifestPart.svelte`
+shows `GET /api/docker/{name}/manifest` (digest, kind, size, tags, subject, referrers, the
+platforms or the layers) and the artifact snippets. No repo tab and no config fields.
+
+**Demo and seed.** The demo repo `docker` (public) holds 20 images with 1 to 8 tags each: two
+multi-platform indexes, one Helm chart, the rest image manifests of small random layers. The seed
+inserts per number a link, a manifest and a tag with their rows, 100 tags per image.
 
 ## Files, uploads and deletes
 
@@ -1607,8 +1961,9 @@ the capabilities of the repo's `format.Spec` that are set.
 - **Repo delete.** `POST /api/repos/delete` (`repositories.all`) deletes one repo after another,
   each under a `delete` operation (see **Repo operations**), so writes get 409. It removes the
   files batch by batch, then the repo row. The name can be used again afterwards.
-- **`format.Spec.OnRemoved` and `AfterRemove`.** `OnRemoved(ctx, tx, repo, removed)` runs in the
-  transaction of each batch, before the rows go; Debian uses it (see **Debian indexing
+- **`format.Spec.OnRemoved` and `AfterRemove`.** `OnRemoved(ctx, tx, repo, removed, prefixes)` runs in
+  the transaction of each batch, before the rows go, with the folders of the removal; Debian and
+  Docker use it (see **Debian indexing
   pipeline**). Maven's `AfterRemove` writes the artifact's `maven-metadata.xml` again (and the
   checksum files it has), with the version folders that still hold files, so a deleted version
   leaves the metadata. An artifact without a `maven-metadata.xml` stays without one.
@@ -1662,9 +2017,14 @@ the capabilities of the repo's `format.Spec` that are set.
 each repo. Request paths read in-memory snapshots only. The database holds the lists and the
 rules.
 
-**Client IP.** The network module resolves the client address once per request
-(`Extender.ClientAddress`), and the server attaches it to the request context. `httpx.ClientIP(r)` reads it. The rate limits, the audit log, the IP rules,
-device enrollment and the access log all use it.
+**Client IP and scheme.** The network module resolves the client once per request
+(`Extender.ResolveClient`): its address and its scheme. The server attaches them to the request
+context. `httpx.ClientIP(r)` reads the address. The rate limits, the audit log, the IP rules,
+device enrollment and the access log all use it. `httpx.ClientScheme(r)` reads the scheme.
+The URLs that the server builds from the request when `base_url` is empty use it: the realm of
+the registry challenge, the base URL of the snippets and of `/setup.sh`, and the device
+verification URL. Without the network module, the address is the TCP peer and the scheme is that
+of the connection.
 
 - The trusted proxies are the union of the literal entries of the setting `trusted_proxies`, the
   ranges of the IP lists of `trusted_proxy_lists` and the ranges of the lists that
@@ -1689,6 +2049,13 @@ device enrollment and the access log all use it.
 - The default trusts nothing because Docker's userland proxy and rootless Podman make every outside
   connection arrive from a private gateway address. With `private` trusted there, anyone who
   reaches the port directly could forge `X-Forwarded-For` and get around the IP rules.
+- **Scheme.** The scheme is `https` when the connection is TLS. If the peer is trusted, the
+  forwarded proto gives the scheme: the first entry of `X-Forwarded-Proto`, else the `proto` of
+  the first element of `Forwarded`. A value other than `http` or `https` does not count. From a
+  peer that is not trusted, a forwarded proto of `https` also makes the scheme `https`. The
+  scheme only shapes the URLs that the server sends back to the same client, so such a peer can
+  only make its own client use https. A TLS-terminating proxy that is not trusted yet so never
+  makes the registry send credentials to an `http` token realm.
 - **Proxy candidates.** When a peer that is not trusted sends `X-Forwarded-For`, `Forwarded` or
   `CF-Connecting-IP`, the server remembers the peer in memory: the last time, the count and the
   header of the last request. It keeps at most 20 peers and drops the one seen longest ago. A
@@ -2175,12 +2542,12 @@ and raw insert asset rows, debian inserts one package and its asset row per unit
 | `go tool task dev` | Checks Go, bun/npm and Node (version in `.node-version`). Runs the backend on :8080 and rebuilds it on Go or `schema.sql` changes. Runs Vite with HMR on **:5173**, proxying every path except the UI's own files to the backend |
 | `go tool task build [image]` | Builds the UI, then `bin/telesphorepo` (`CGO_ENABLED=0`, version from git). `image` also builds the container image `telesphorepo:local` |
 | `go tool task preview` | Builds, then runs `bin/telesphorepo dev` on :8080 |
-| `go tool task test [go test args]` | Runs the core zone: `go test -tags e2e ./e2e/... -count=1 -v` |
-| `go tool task test import [go test args]` | Runs the import zone: `-tags import`, 30 min timeout. It starts a Nexus container |
+| `go tool task test [go test args]` | Runs the core zone: `go test -tags e2e ./e2e/... -count=1 -v`, 60 min timeout |
+| `go tool task test import [go test args]` | Runs the import zone: `-tags import`, 45 min timeout. It starts a Nexus container |
 | `go tool task test scale [go test args]` | Runs `TestScale` (`-tags scale`, 60 min timeout) |
 | `go tool task test clients [go test args]` | Runs the clients zone: `-tags clients`, 40 min timeout. It builds the Gradle plugin and the Maven extension from the clients repo (`E2E_CLIENTS_DIR`, or a shallow clone of `E2E_CLIENTS_REF`, default `main`) |
 | `go tool task test all [go test args]` | Runs core, import, scale and clients one after the other. It runs every zone, lists the failed zones and exits non-zero if any failed |
-| `go tool task release [version]` | Builds the UI once. Then it cross-compiles `bin/release/telesphorepo_<version>_<os>_<arch>` for linux, darwin and windows on amd64 and arm64 (`CGO_ENABLED=0`, `-trimpath`). Each binary goes into a `.tar.gz` (`.zip` on Windows) with `LICENSE` and `README.md`. The command writes `SHA256SUMS`. The version defaults to `git describe` |
+| `go tool task release [version]` | Builds the UI once. Then it cross-compiles the server (`./cmd/telesphorepo`) and the Docker credential helper (`./cmd/docker-credential-telesphorepo`) for linux, darwin and windows on amd64 and arm64 (`CGO_ENABLED=0`, `-trimpath`, `-X main.version`). Each binary goes into `bin/release/<program>_<version>_<os>_<arch>.tar.gz` (`.zip` on Windows) with `LICENSE` and `README.md`. The command writes `SHA256SUMS` of every archive. The version defaults to `git describe` |
 | `go tool task gen` | Runs `go tool sqlc generate` for every `internal/**/sqlc.yaml` |
 | `go tool task doctor` | Shows the detected toolchain and container engine |
 
@@ -2222,6 +2589,79 @@ wrong digest, another publish session, finish into a raw and a Maven repo, an im
 cancel) and `TestMavenMetadataAfterDelete`. `bulk_test.go` checks the `mirror` operation of a mapped repo and
 the 409 of resume and clear.
 
+`docker_test.go` covers the registry, each test on both stores. `TestDockerChallengeScheme`: with
+no `base_url`, the realm is http over plain HTTP; `X-Forwarded-Proto` or `Forwarded` of https
+from an untrusted peer makes it https, http does not; through a trusted proxy (`private`) the
+first forwarded proto gives the scheme, and no forwarded proto leaves http. `TestDockerRegistry`: docker repo
+names that are not one OCI segment are 400; `GET /v2/` answers the challenge and the API version;
+a token grants the subset (an anonymous bearer reads the public repo and gets 401 with
+`error="insufficient_scope"` and the scope on the private one); a bad password is 401
+`UNAUTHORIZED`; a CI token with pull scopes reads what anonymous reads, a bad one is 401; a
+one-segment name is `NAME_UNKNOWN`. Then the Docker CLI in Docker in Docker (`docker:29.9.0-dind`,
+privileged, `StartDind`, `DockerScratchImage`: images FROM scratch, no registry pull): a push of
+three layers (one of 20 MiB) with a device publish session, `rmi`, pull and a compare of the file
+hashes; a password and a read token pull but cannot push ("publishing needs a publish session");
+an anonymous pull of a public repo; a tag move (the old digest still pulls); a multi-platform
+index (`docker build` of two platforms and `docker push`; two platforms in the index, a pull of
+one); a push with a CI token of
+the Keycloak fixture (the tag file's `build` is the CI build record); a read IP rule that refuses
+the pull with "not allowed to read" and records `network.denied`. `TestDockerConformance` runs the
+OCI conformance suite (`conformance:v1.1.1`: pull, push, content discovery, content management).
+`TestDockerClients`: `crane copy` mounts a layer from a public repo (201), a mount from a repo
+that the token does not read starts an upload (202); `skopeo copy` of an OCI layout; ORAS push,
+attach, discover (also with `--artifact-type`) and pull, the referrers filter header, an empty
+referrers index, `OCI-Subject` on a manifest PUT; Helm 4 package, push and pull of an OCI chart;
+the catalog of a reader, of a publish session bearer and of anonymous, its `Link` and a bad `n`.
+`TestDockerGC`: a used layer cannot be deleted (409); after a delete by digest the tags go, and
+after `docker.link_grace=1s` and `TR_BLOBS_GC_GRACE=1s` the blobs of the deleted image leave the
+store while the shared layer and the other image stay; a folder delete (`prefixes`) of an image of
+522 files (499 links, a two-platform index with its children, 20 tags), where the first batch holds
+the links and a child of the index, deletes every file and the image. `docker_proxy_test.go`: `TestDockerProxy`
+proxies two remotes, a second server with a private docker repo (its Bearer challenge runs through
+`RemoteAuth`; the remote's log shows the token request) and `registry:2.8.3` with htpasswd Basic
+auth. For each: the check passes, and wrong credentials fail it with 502; Docker in Docker pulls an
+image of real tar layers (one of 30 MiB) through the proxy and the layer assets exist; a second
+pull sends no blob GET to the remote; after `metadata_ttl` (1 s) a HEAD of the tag finds the moved
+tag and the proxy serves the new digest, the old manifest leaves the cache and, after
+`docker.link_grace=1s`, its config and layers too (the old digest still serves from the remote); a missing tag is
+`MANIFEST_UNKNOWN`; on the second server, a proxy of a repo that the user may not read answers a
+tag with `MANIFEST_UNKNOWN` (the second GET sends nothing to the remote) and the tags list with
+`NAME_UNKNOWN`, and the proxy keeps no `last_error`; a mount from the proxy of a layer it has not cached is 202 and sends nothing
+to the remote; a push is 405 "A proxy is read-only."; a group of a hosted repo and the proxy
+serves the hosted tag on a shared tag and the proxy's tag otherwise, merges the tags list, and a
+push is 405 with the group's text; the proxy's tags list is the remote's; a stopped remote serves
+a cached tag and answers 502 `UNKNOWN` for an uncached one. `TestDockerPushHost`: aliases `repo`
+and `push` with `TR_DOCKER_PUSH_URL`; the challenge at each host names its own realm,
+`/docker/hosts` names both, Docker pushes to the push host and pulls from the main host, the
+publish snippets push to the push host and the GitHub Actions file logs in there right before the
+push. `TestDockerVersions` (`versions_test.go`): the versions (tags, newest first, keyset pages),
+the kinds image, helm-chart, the builds of an image and of an index (platform classifiers), the
+CI build of a tag that a CI token pushed, the pinned and latest artifact snippets, the snippets of
+a tag file and of a chart, and `GET /api/docker/{name}/manifest`. `TestFormatDescriptors` and
+`TestCIWorkflowRoute` check the docker descriptor, the CI files (build, login with
+`$OIDC_TOKEN`, push and logout in that order) and the usage snippets.
+`TestDockerCredentialHelper` (`docker_helper_test.go`) builds the helper for Linux (`BuildHelper`)
+and copies it into Docker in Docker (`Dind.CopyFile`): `login` prints a user code, the test
+approves it through the API, and the login ends with exit 0; `config.json` names the helper for
+the registry host; the device file has the schema of the Java clients (a PKCS#8 Ed25519 key and
+its public key) with mode 600 in a 700 folder; `GET /api/devices` lists the device with the client
+`docker`. Docker pushes and pulls with no `docker login`, and the publish log has a device session
+of that device; the device pulls a private repo where its user holds only `repo.download`, and a
+push there is denied; `get` for another host answers `credentials not found in native keychain`,
+`get` for the registry host a `trx.` proof, a token exchange challenge with no signature, another
+key's signature or a time 10 minutes ago is 401 and one with the device signature gets a nonce
+(and a kept nonce needs no signature), `list` the host, `store` fails. After a revoke `get`
+answers not found, a push fails, and an anonymous pull of a public repo works. The shared OCI helpers
+(`oci_test.go`, tags `e2e` and `import`): `tarImage` (an image of tar layers that Docker unpacks),
+`ociLayout` and `ociIndexLayout` (OCI image layouts for skopeo) and `registryClient` (a push over
+the registry API to any registry). `protocols_test.go` covers
+`TestServerProtocols` (fs): curl gets HTTP/2 with prior knowledge and HTTP/1.1, a server with
+`TR_TLS_CERT_FILE` and `TR_TLS_KEY_FILE` (`ServerOpts.TLS`) answers HTTPS with HTTP/2, and a Maven
+GET and HEAD carry `X-Checksum-SHA1`, `-MD5` and `-SHA256` of the file, and a range is 206. The
+harness has `ClientOpts.Privileged` and `NoShell` (the image's own entrypoint),
+`ContainerFile.HostPath`, `ServerOpts.Aliases`, `ServerOpts.TLS`, `BuildHelper` and
+`Dind.CopyFile`.
+
 **Zones.** A build tag picks the zone, so a run starts only the containers it needs. The harness
 and the client helpers (`harness_test.go`, `main_test.go`, `clients_test.go`) carry every tag.
 Each test removes its containers when it ends. Every container and the run network carry the
@@ -2229,8 +2669,8 @@ label `telesphorepo.e2e`, and each run first removes what a killed run left: lab
 and networks, and the `telesphorepo-data-*` and `telesphorepo-scale-*` volumes.
 | Zone | Tag | Command | Contents |
 |---|---|---|---|
-| core | `e2e` | `go tool task test` | Formats, auth, API, settings, storage move, query plans |
-| import | `import` | `go tool task test import` | `TestNexus` |
+| core | `e2e` | `go tool task test` | Formats (the Docker registry with Docker in Docker too), auth, API, settings, storage move, query plans, the listener protocols |
+| import | `import` | `go tool task test import` | `TestNexus`, with the import of a Nexus docker hosted repo (`nexus_docker_test.go`: the Docker Bearer Token Realm on and `forceBasicAuth` off, so every download answers a Bearer challenge; skopeo pushes an image and a multi-platform index; the sync imports both tags and ignores the blobs; crane pulls both by tag and by digest; a second sync imports nothing) |
 | scale | `scale` | `go tool task test scale` | `TestScale` |
 | clients | `clients` | `go tool task test clients` | `TestClients` (`e2e/publish_clients_test.go`) and `TestSetupPowerShell` (`e2e/setup_clients_test.go`). It needs `git` unless `E2E_CLIENTS_DIR` points at a checkout of the clients repo |
 | all | all tags | `go tool task test all` | Every zone |

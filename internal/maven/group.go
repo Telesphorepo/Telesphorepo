@@ -10,6 +10,7 @@ import (
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/repopath"
+	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
 // Proxy and group repos (SPEC.md "Group and proxy repositories"). The core read path
@@ -18,7 +19,7 @@ import (
 
 // classify tells the proxy how to cache a path: maven-metadata.xml and its checksums, and the
 // files of a -SNAPSHOT version, change at the remote; every other file is fetched once.
-func classify(p repopath.Path) (assets.Class, bool) {
+func classify(_ *repos.Proxy, p repopath.Path) (assets.Class, bool) {
 	return assets.Class{Changing: mutable(string(p))}, true
 }
 

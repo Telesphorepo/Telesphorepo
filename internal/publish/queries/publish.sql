@@ -112,6 +112,12 @@ SELECT t.id, t.name, t.issuer, t.audience, t.claims, t.jwks
 FROM publish_trusts t JOIN publish_trust_repos tr ON tr.trust_id = t.id
 WHERE t.issuer = sqlc.arg(issuer) AND t.disabled = 0 AND tr.repo_id = sqlc.arg(repo_id);
 
+-- The enabled policies of an issuer, through publish_trusts_issuer (a check of a CI token without
+-- a repo, e.g. a registry login).
+-- name: ListIssuerTrusts :many
+SELECT id, name, issuer, audience, claims, jwks
+FROM publish_trusts WHERE issuer = ? AND disabled = 0;
+
 -- name: CreateNonce :exec
 INSERT INTO publish_nonces (id_hash, device_id, exchange, expires_at) VALUES (?, ?, ?, ?);
 
@@ -126,6 +132,11 @@ RETURNING device_id;
 -- name: GetExchangeNonce :one
 SELECT device_id FROM publish_nonces
 WHERE id_hash = sqlc.arg(id_hash) AND exchange = 1 AND expires_at > sqlc.arg(now);
+
+-- The expiry of a token exchange nonce of a device that has not expired.
+-- name: GetDeviceExchangeNonce :one
+SELECT expires_at FROM publish_nonces
+WHERE id_hash = sqlc.arg(id_hash) AND device_id = sqlc.arg(device_id) AND exchange = 1 AND expires_at > sqlc.arg(now);
 
 -- The session that a token exchange nonce minted for a repo.
 -- name: GetExchangeSession :one

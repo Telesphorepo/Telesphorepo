@@ -17,7 +17,7 @@ import (
 // their (dist, component, architecture) units for a rebuild, so the indexes drop the packages. An
 // arch:all package marks every configured architecture. The pipeline does not call it while the
 // whole repo is deleted.
-func (h *Handler) onRemoved(ctx context.Context, tx *sql.Tx, repo *repos.Repo, removed []*assets.Asset) ([]repopath.Path, error) {
+func (h *Handler) onRemoved(ctx context.Context, tx *sql.Tx, repo *repos.Repo, removed []*assets.Asset, _ []repopath.Path) ([]repopath.Path, error) {
 	q := dbq.New(tx)
 	type mark struct{ dist, unit string }
 	var marks []mark

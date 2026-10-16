@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -54,6 +55,10 @@ var client = &http.Client{
 	},
 }
 
+// RemoteAuth answers a remote's 401 challenge with the headers of a retry (format.Spec
+// RemoteAuth).
+type RemoteAuth func(ctx context.Context, remote *repos.Proxy, challenge http.Header) (http.Header, error)
+
 // Service fetches and caches the files of proxy repos. It is the assets.Fetcher of the read
 // path.
 type Service struct {
@@ -68,22 +73,36 @@ func New(rs *repos.Service, as *assets.Pipeline, log *slog.Logger) *Service {
 	return &Service{repos: rs, assets: as, log: log, missing: newMissingCache(missingEntries)}
 }
 
-// remoteURL is the address of p at the remote base (which ends with "/").
+// remoteURL is the address of p at the remote base (which ends with "/"). A p that starts with
+// "/" is a path from the root of the base's host. A query of p (after "?") is a query only for a
+// path from the root: a file path may hold "?".
 func remoteURL(base, p string) string {
+	query := ""
+	if strings.HasPrefix(p, "/") {
+		if i := strings.IndexByte(p, '?'); i >= 0 {
+			p, query = p[:i], p[i:]
+		}
+		if u, err := url.Parse(base); err == nil {
+			base = u.Scheme + "://" + u.Host + "/"
+		}
+		p = strings.TrimPrefix(p, "/")
+	}
 	segs := strings.Split(p, "/")
 	for i, s := range segs {
 		segs[i] = url.PathEscape(s)
 	}
-	return base + strings.Join(segs, "/")
+	return base + strings.Join(segs, "/") + query
 }
 
-func newRequest(ctx context.Context, px *repos.Proxy, p string, extra http.Header) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, remoteURL(px.RemoteURL, p), nil)
+// newRequest builds a request of p at the remote of px with the extra headers. basic sends the
+// remote's credentials as HTTP Basic.
+func newRequest(ctx context.Context, method string, px *repos.Proxy, p string, extra http.Header, basic bool) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, remoteURL(px.RemoteURL, p), nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "Telesphorepo proxy")
-	if px.HasCredentials() {
+	if basic && px.HasCredentials() {
 		req.SetBasicAuth(px.Username, px.Password)
 	}
 	for k, vs := range extra {
@@ -106,35 +125,44 @@ func reason(err error) string {
 	if errors.As(err, &ne) && ne.Timeout() {
 		return "the remote did not answer in time"
 	}
+	if errors.Is(err, ErrRefused) || errors.Is(err, ErrNeedsCredentials) {
+		return err.Error()
+	}
 	return "the remote did not answer: " + err.Error()
 }
 
 // Check requests probe (a path; "" for the remote's root) from the remote of px once and returns
-// why the remote does not answer, or nil. Any answer of the root counts, except a refusal of the
+// why the remote does not answer, or nil. A 401 with a challenge goes to auth once (nil: the
+// credentials go as HTTP Basic). Any answer of the root counts, except a refusal of the
 // credentials or a server error; a probe path must exist.
-func Check(ctx context.Context, px *repos.Proxy, probe string) error {
+func Check(ctx context.Context, px *repos.Proxy, probe string, auth RemoteAuth) error {
 	ctx, cancel := context.WithTimeout(ctx, firstByteTimeout+5*time.Second)
 	defer cancel()
-	req, err := newRequest(ctx, px, probe, nil)
-	if err != nil {
+	resp, err := send(ctx, http.MethodGet, px, probe, nil, auth)
+	if errors.Is(err, ErrRefused) || errors.Is(err, ErrNeedsCredentials) {
 		return err
 	}
-	resp, err := client.Do(req)
-	if err != nil {
+	st, status := 0, ""
+	switch {
+	case errors.Is(err, ErrDenied):
+		st, status = http.StatusUnauthorized, "401 Unauthorized"
+	case err != nil:
 		return errors.New(reason(err))
+	default:
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		resp.Body.Close()
+		st, status = resp.StatusCode, resp.Status
 	}
-	io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
-	resp.Body.Close()
-	switch st := resp.StatusCode; {
+	switch {
 	case st == http.StatusUnauthorized || st == http.StatusForbidden || st == http.StatusProxyAuthRequired:
 		if px.HasCredentials() {
-			return fmt.Errorf("the remote refused the username and password (%s)", resp.Status)
+			return fmt.Errorf("the remote refused the username and password (%s)", status)
 		}
-		return fmt.Errorf("the remote needs a username and password (%s)", resp.Status)
+		return fmt.Errorf("the remote needs a username and password (%s)", status)
 	case st >= 500:
-		return fmt.Errorf("the remote answered %s", resp.Status)
+		return fmt.Errorf("the remote answered %s", status)
 	case probe != "" && st >= 400:
-		return fmt.Errorf("the remote has no %s (%s)", probe, resp.Status)
+		return fmt.Errorf("the remote has no %s (%s)", probe, status)
 	}
 	return nil
 }
@@ -177,27 +205,70 @@ func (s *Service) Ensure(ctx context.Context, repo *repos.Repo, p repopath.Path,
 	if a == nil && s.missing.has(key) {
 		return nil, assets.ErrRemoteMissing
 	}
-	return s.fetch(ctx, repo, px, p, a, key)
+	return s.fetch(ctx, repo, px, p, class, a, key)
 }
 
-// fetch requests p from the remote (conditionally when cached is set) and stores the answer.
-func (s *Service) fetch(ctx context.Context, repo *repos.Repo, px *repos.Proxy, p repopath.Path, cached *assets.Asset, key string) (*assets.Asset, error) {
+// fetch requests p from the remote (revalidated as class says when cached is set) and stores the
+// answer.
+func (s *Service) fetch(ctx context.Context, repo *repos.Repo, px *repos.Proxy, p repopath.Path, class assets.Class, cached *assets.Asset, key string) (*assets.Asset, error) {
 	// A client that goes away does not stop a fetch: the next request uses the stored file.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), fetchTimeout)
 	defer cancel()
-	cond := http.Header{}
-	if cached != nil {
-		if cached.RemoteETag != "" {
-			cond.Set("If-None-Match", cached.RemoteETag)
-		}
-		cond.Set("If-Modified-Since", cached.UpdatedAt.Format(http.TimeFormat))
+	remote := class.Remote
+	if remote == "" {
+		remote = string(p)
 	}
-	resp, err := s.do(ctx, repo, px, string(p), cond)
+	auth := s.assets.Hooks(repo.Format).RemoteAuth
+	now := time.Now()
+	// missing answers a remote that does not have p: a 404 or 410, or a registry that denies the
+	// name (ErrDenied). The remote works, so the proxy is OK.
+	missing := func() (*assets.Asset, error) {
+		s.repos.ProxyOK(ctx, repo.ID)
+		if cached != nil {
+			// The remote removed a changing file: the cached copy keeps builds working.
+			s.log.Warn("the remote no longer has a cached file; the cached copy stays", "repo", repo.Name, "path", p)
+			return cached, s.assets.SetChecked(ctx, repo.ID, string(p), now, cached.RemoteETag)
+		}
+		if px.NotFoundTTL > 0 {
+			s.missing.add(key, now.Add(px.NotFoundTTL))
+		}
+		return nil, assets.ErrRemoteMissing
+	}
+	if cached != nil && class.Revalidate == assets.RevalidateHeadDigest {
+		resp, err := send(ctx, http.MethodHead, px, remote, class.Header, auth)
+		if errors.Is(err, ErrDenied) {
+			return missing()
+		}
+		if err != nil {
+			return s.failed(ctx, repo, p, cached, reason(err))
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK && resp.Header.Get("Docker-Content-Digest") == "sha256:"+cached.SHA256 {
+			if err := s.assets.SetChecked(ctx, repo.ID, string(p), now, cached.RemoteETag); err != nil {
+				return nil, err
+			}
+			s.repos.ProxyOK(ctx, repo.ID)
+			return cached, nil
+		}
+	}
+	hdr := class.Header.Clone()
+	if hdr == nil {
+		hdr = http.Header{}
+	}
+	if cached != nil && class.Revalidate == "" {
+		if cached.RemoteETag != "" {
+			hdr.Set("If-None-Match", cached.RemoteETag)
+		}
+		hdr.Set("If-Modified-Since", cached.UpdatedAt.Format(http.TimeFormat))
+	}
+	resp, err := send(ctx, http.MethodGet, px, remote, hdr, auth)
+	if errors.Is(err, ErrDenied) {
+		return missing()
+	}
 	if err != nil {
 		return s.failed(ctx, repo, p, cached, reason(err))
 	}
 	defer resp.Body.Close()
-	now := time.Now()
 	switch st := resp.StatusCode; {
 	case st == http.StatusNotModified && cached != nil:
 		etag := resp.Header.Get("ETag")
@@ -210,46 +281,47 @@ func (s *Service) fetch(ctx context.Context, repo *repos.Repo, px *repos.Proxy, 
 		s.repos.ProxyOK(ctx, repo.ID)
 		return cached, nil
 	case st == http.StatusOK:
-		a, err := s.store(ctx, repo, p, resp, now)
-		if errors.Is(err, assets.ErrTooLarge) {
+		a, err := s.store(ctx, repo, p, class, resp, now)
+		var ref *assets.Refusal
+		switch {
+		case errors.Is(err, assets.ErrTooLarge):
 			return s.failed(ctx, repo, p, cached, fmt.Sprintf("the remote file %s is larger than the upload limit (max_upload_size)", p))
-		}
-		if err != nil {
+		case errors.As(err, &ref):
+			return s.failed(ctx, repo, p, cached, "the remote sent a file that the format refuses: "+ref.Message)
+		case err != nil:
 			return nil, err
 		}
 		s.missing.drop(key)
 		s.repos.ProxyOK(ctx, repo.ID)
 		return a, nil
 	case st == http.StatusNotFound || st == http.StatusGone:
-		s.repos.ProxyOK(ctx, repo.ID)
-		if cached != nil {
-			// The remote removed a changing file: the cached copy keeps builds working.
-			s.log.Warn("the remote no longer has a cached file; the cached copy stays", "repo", repo.Name, "path", p)
-			return cached, s.assets.SetChecked(ctx, repo.ID, string(p), now, cached.RemoteETag)
-		}
-		if px.NotFoundTTL > 0 {
-			s.missing.add(key, now.Add(px.NotFoundTTL))
-		}
-		return nil, assets.ErrRemoteMissing
+		return missing()
 	default:
 		return s.failed(ctx, repo, p, cached, fmt.Sprintf("the remote answered %s for %s", resp.Status, p))
 	}
 }
 
-// do sends the request of p. A 401 with a challenge goes to the format's RemoteAuth once (e.g.
-// a registry's token exchange), and the request is sent again with the headers it returns.
-func (s *Service) do(ctx context.Context, repo *repos.Repo, px *repos.Proxy, p string, extra http.Header) (*http.Response, error) {
-	req, err := newRequest(ctx, px, p, extra)
+// Send sends a request of p (a path as Class.Remote takes it) to the remote of px the way a fetch
+// does, e.g. a list that a format reads from the remote. The caller closes the body.
+func Send(ctx context.Context, method string, px *repos.Proxy, p string, query url.Values, header http.Header, auth RemoteAuth) (*http.Response, error) {
+	if len(query) > 0 {
+		p += "?" + query.Encode()
+	}
+	return send(ctx, method, px, p, header, auth)
+}
+
+// send sends a request of p to the remote of px. Without auth, the remote's credentials go as
+// HTTP Basic. With auth, the request goes without them; a 401 with a challenge goes to auth once
+// (e.g. a registry's token exchange), and the request is sent again with the headers it returns.
+// ErrDenied: the remote refused that second request after a Bearer challenge.
+func send(ctx context.Context, method string, px *repos.Proxy, p string, extra http.Header, auth RemoteAuth) (*http.Response, error) {
+	req, err := newRequest(ctx, method, px, p, extra, auth == nil)
 	if err != nil {
 		return nil, err
 	}
 	resp, err := client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusUnauthorized {
+	if err != nil || resp.StatusCode != http.StatusUnauthorized || auth == nil {
 		return resp, err
-	}
-	auth := s.assets.Hooks(repo.Format).RemoteAuth
-	if auth == nil {
-		return resp, nil
 	}
 	challenge := resp.Header.Clone()
 	io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
@@ -259,16 +331,36 @@ func (s *Service) do(ctx context.Context, repo *repos.Repo, px *repos.Proxy, p s
 		return nil, err
 	}
 	retry := extra.Clone()
+	if retry == nil {
+		retry = http.Header{}
+	}
 	for k, vs := range h {
 		retry[k] = vs
 	}
-	if req, err = newRequest(ctx, px, p, retry); err != nil {
+	if req, err = newRequest(ctx, method, px, p, retry, false); err != nil {
 		return nil, err
 	}
-	if h.Get("Authorization") != "" {
-		req.Header.Set("Authorization", h.Get("Authorization"))
+	if resp, err = client.Do(req); err != nil {
+		return nil, err
 	}
-	return client.Do(req)
+	if (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) && bearerChallenge(challenge) {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		resp.Body.Close()
+		return nil, ErrDenied
+	}
+	return resp, nil
+}
+
+// bearerChallenge reports whether h holds a Bearer challenge. A retry with the token of a Bearer
+// challenge that still gets 401 or 403 is a denied name; a retry with Basic credentials that gets
+// 401 is a refusal of the credentials.
+func bearerChallenge(h http.Header) bool {
+	for _, c := range ParseChallenges(h) {
+		if c.Scheme == "bearer" {
+			return true
+		}
+	}
+	return false
 }
 
 // failed records a remote failure. A cached file serves although it is stale.
@@ -283,8 +375,8 @@ func (s *Service) failed(ctx context.Context, repo *repos.Repo, p repopath.Path,
 }
 
 // store spools the body of resp under the upload size limit and commits it through the asset
-// pipeline with the remote's Last-Modified and ETag.
-func (s *Service) store(ctx context.Context, repo *repos.Repo, p repopath.Path, resp *http.Response, now time.Time) (*assets.Asset, error) {
+// pipeline with the remote's Last-Modified and ETag, and its Content-Type when class keeps it.
+func (s *Service) store(ctx context.Context, repo *repos.Repo, p repopath.Path, class assets.Class, resp *http.Response, now time.Time) (*assets.Asset, error) {
 	max := s.assets.MaxUploadSize()
 	if resp.ContentLength > max {
 		return nil, assets.ErrTooLarge
@@ -298,7 +390,13 @@ func (s *Service) store(ctx context.Context, repo *repos.Repo, p repopath.Path, 
 	if t, err := http.ParseTime(resp.Header.Get("Last-Modified")); err == nil && !t.After(now) {
 		mod = t
 	}
-	r, err := s.assets.Commit(ctx, assets.Write{Repo: repo, Path: p, Body: assets.Body{Spool: sp},
+	ct := ""
+	if class.KeepType {
+		if mt, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type")); err == nil {
+			ct = mt
+		}
+	}
+	r, err := s.assets.Commit(ctx, assets.Write{Repo: repo, Path: p, Body: assets.Body{Spool: sp}, ContentType: ct,
 		Origin: assets.Origin{Source: assets.SourceProxy, Updated: mod,
 			Remote: &assets.Remote{ETag: resp.Header.Get("ETag"), CheckedAt: now}}})
 	if err != nil {

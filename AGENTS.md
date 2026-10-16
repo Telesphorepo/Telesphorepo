@@ -149,6 +149,8 @@ device and OIDC routes. Run all zones before a push that touches several zones.
 | UI of a format | The descriptor (`format.Spec` fields and `UI`, `GET /api/formats`; `web/src/lib/formats/registry.svelte.ts`); a format-specific component only as a named `formatParts` slot in `web/src/modules/<format>/module.ts` |
 | File tree, deletes, manual upload | `internal/files` (tree), `internal/api/files.go`, `internal/api/pipeline.go` (repo delete, resumable uploads), `format.Spec.Upload`; UI in `web/src/pages/repo/` (`FilesTab`, `upload/`, `delete/`) |
 | Client IP, IP lists, repo IP rules | `internal/netrules` (module `network`: `lists.go`, `rules.go`, `clientip.go`, `module.go`), `web/src/pages/settings/repos/` (Access tab), `web/src/pages/server/IPLists.svelte`, `IPListPage.svelte`, `ReverseProxy.svelte` |
+| Docker / OCI registry | `internal/docker` (module `docker`: `routes.go` at `/v2/`, `token.go` the token endpoint `/docker/token`, `manifests.go`, `blobs.go`, `lists.go`, `referrers.go`, `hooks.go` (the rows of `schema.sql`), `links.go` the job `docker.links`, `proxy.go` the proxy (`Classify`, `RemoteAuth`, tags list) and group tags, `usage.go` and `tools.go` the snippets and the CI tool, `versions.go`, `api.go` `/api/docker/{name}/manifest`, `importer.go` the Nexus import, `demo.go`, `seed.go`); UI part `web/src/modules/docker/`; e2e in `e2e/docker_test.go`, `e2e/docker_proxy_test.go`, `e2e/nexus_docker_test.go`, `e2e/docker_helper_test.go` with `StartDind`, `Dind.CopyFile` and `BuildHelper` in `e2e/clients_test.go` and the OCI helpers in `e2e/oci_test.go` |
+| Docker credential helper | `cmd/docker-credential-telesphorepo` (stdlib and `golang.org/x/sys/windows` only; imports no server package): `main.go` the commands, `identity.go` the server identity, `device.go` the device file, `enroll.go` the device flow and the exchange proof, `dockerconfig.go` the `credHelpers`, `acl_*.go` the owner-only files; released by `tools/task/release.go`; the server side is the publisher client `docker`, `POST /api/publish/challenge` with `exchange` and the device proof of `internal/docker/token.go` |
 | Signing keys | `internal/signing/keys.go`, `internal/signing/module.go` (the repo field `signing_key`), `GET /debian/{repo}/key.asc` in `internal/debian`; UI in `web/src/pages/server/SigningKeys.svelte` and `web/src/modules/signing/` |
 | Upload plan and upload | `Plan` and `Store` of the format (`format.Spec.Upload`), e.g. `internal/maven/plan.go`; routes in `internal/api/files.go`; UI in `web/src/pages/repo/UploadView.svelte` and `upload/` |
 | Snippets, CI files, project setup | `Usage` and `Tools` of the format; `internal/ci/workflow.go` (the GitHub Actions and Jenkinsfile builders); `internal/publish/setup.go`, `setup.sh`, `setup.ps1` (the frame) with each tool's `SetupFragment` (e.g. `internal/maven/setup_gradle.sh`) |
@@ -166,7 +168,7 @@ Every format and every core feature with routes is a module (`internal/module`).
 `module.Module{ID, Title, Requires, Register}`. `Register` runs once, before the database opens.
 It calls the `x.*` methods of the `Extender` to declare what the module adds: `Schema`,
 `Settings`, `Permissions`, `AuditActions`, `OpType`, `Init`, `Routes`, `RootPrefix`, `Job`,
-`Format`, `RepoField`, `RepoGuard`, `CIProvider`, `PublisherClient`, `ClientAddress`,
+`Format`, `RepoField`, `RepoGuard`, `CIProvider`, `PublisherClient`, `ResolveClient`,
 `TokenKind`, `Demo` and `Seed`. A module edits no core file.
 
 1. Create `internal/<module>` with `func Module() module.Module`. The module ID is also the

@@ -104,8 +104,8 @@ func (e *Engine) AddGuard(g Guard) { e.guards = append(e.guards, g) }
 // RepoPerms returns what p may do on repo. A publish session holds, on its own repo, download
 // and publish (a CI session) or the user's current download, publish and delete (a device or
 // manual session); on another repo it holds what anonymous holds. Every other credential holds
-// its grants (every permission with All repositories), and anyone holds download on a repo with
-// anonymous read.
+// its grants (every permission with All repositories; a device holds the grants of its user), and
+// anyone holds download on a repo with anonymous read.
 func (e *Engine) RepoPerms(ctx context.Context, p *auth.Principal, repo *repos.Repo) (perm.Set, error) {
 	if p.Is(auth.CredPublish) {
 		if p.Publish.RepoID != repo.ID {
@@ -190,13 +190,9 @@ func (e *Engine) decide(ctx context.Context, r *http.Request, p *auth.Principal,
 			check = Read
 		}
 		if sc == nil || !sc.Allows(check) {
-			return Refuse(http.StatusForbidden, CodeScope, "the token does not cover "+repo.Name)
+			return e.scopeRefusal(ctx, r, p, sc, repo, op)
 		}
-		if sc.Open != nil {
-			q := *p
-			q.Cred, q.Publish = auth.CredPublish, sc.Open
-			p = &q
-		}
+		p = p.For(repo.Name)
 	}
 	set, err := e.RepoPerms(ctx, p, repo)
 	if err != nil {
@@ -239,6 +235,30 @@ func (e *Engine) decide(ctx context.Context, r *http.Request, p *auth.Principal,
 		}
 	}
 	return Decision{Allowed: true, Perms: set}
+}
+
+// scopeRefusal is the answer to a core bearer token p whose scope sc of repo (nil: none) lacks
+// op. A guard that refuses p is the answer first (403, recorded), so the caller learns the real
+// reason. A token that reads the repo gets the answer of its credential: a write or delete on a
+// proxy or a group is the read-only 405, and a write elsewhere needs a publish session (401).
+// Any other case is the code CodeScope (401): the token does not hold the operation.
+func (e *Engine) scopeRefusal(ctx context.Context, r *http.Request, p *auth.Principal, sc *auth.Scope, repo *repos.Repo, op Op) Decision {
+	if op == Read || op == Write || op == Delete || op == Mint {
+		for _, g := range e.guards {
+			if d := g.Check(r, p, repo, op); d != nil {
+				return *d
+			}
+		}
+	}
+	if sc != nil && sc.Allows(Read) {
+		switch {
+		case (op == Write || op == Delete) && repo.Kind != repos.KindHosted:
+			return Refuse(http.StatusMethodNotAllowed, CodeReadOnlyKind, ReadOnly(repo))
+		case op == Write:
+			return e.PublishRequired()
+		}
+	}
+	return Refuse(http.StatusUnauthorized, CodeScope, "the token does not allow this operation on "+repo.Name)
 }
 
 // refusal is the answer to p without the permission for op on repo.

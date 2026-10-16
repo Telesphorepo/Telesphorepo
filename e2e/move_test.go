@@ -4,8 +4,6 @@ package e2e
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"maps"
@@ -38,11 +36,6 @@ func moveS3Patch(tg *S3Target) map[string]any {
 
 // moveFSPatch is the settings PATCH that moves storage to the default fs root.
 func moveFSPatch() map[string]any { return map[string]any{"storage": "fs"} }
-
-func sha256Hex(b []byte) string {
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
-}
 
 // blobKey is the storage key of the blob with SHA-256 sum: blobs/sha256/<first 2 hex>/<hex>.
 func blobKey(sum string) string { return "blobs/sha256/" + sum[:2] + "/" + sum }

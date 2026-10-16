@@ -73,14 +73,21 @@ func (rd *Reader) SetFetcher(f Fetcher) { rd.remote = f }
 //     merges the members' files and serves the merged bytes. No member: 404, or 502 when a
 //     proxy member's remote failed.
 func (rd *Reader) Serve(w http.ResponseWriter, r *http.Request, c *route.Call, path repopath.Path) {
-	ctx := r.Context()
 	repo := c.Repo
-	switch repo.Kind {
-	case repos.KindGroup:
-		rd.serveGroup(w, r, c.P, repo, path)
-		return
+	if repo.Kind == repos.KindGroup {
+		if mg := rd.p.Hooks(repo.Format).Merge; mg != nil {
+			if base, checksum, ok := mg.Match(path); ok {
+				members, err := rd.readable(r.Context(), r, c.P, repo)
+				if err != nil {
+					httpx.Error(w, http.StatusInternalServerError, "internal error")
+					return
+				}
+				rd.serveMerged(w, r, repo, members, mg, path, base, checksum)
+				return
+			}
+		}
 	}
-	a, err := rd.has(ctx, repo, path)
+	a, err := rd.Resolve(r.Context(), r, c.P, repo, path)
 	switch {
 	case errors.Is(err, ErrRemoteFailed):
 		httpx.Error(w, http.StatusBadGateway, "The remote repository did not answer.")
@@ -90,23 +97,70 @@ func (rd *Reader) Serve(w http.ResponseWriter, r *http.Request, c *route.Call, p
 	case a == nil:
 		httpx.Error(w, http.StatusNotFound, "not found")
 	default:
-		rd.serveAsset(w, r, a)
+		rd.ServeAsset(w, r, a, ServeOptions{})
 	}
 }
 
-// Find returns the asset of path in a hosted or proxy repo: nil when there is none. A proxy
-// fetches it from its remote (ErrRemoteFailed when the remote fails with nothing cached).
-func (rd *Reader) Find(ctx context.Context, repo *repos.Repo, path repopath.Path) (*Asset, error) {
-	return rd.has(ctx, repo, path)
+// Resolve returns the asset of path in repo for p, who reads through r: in a hosted repo the
+// stored asset; in a proxy the cached file, or the one its remote sends now; in a group the
+// first member in read order that p may read and that has the file (a proxy member fetches only
+// when no member before it has the file). nil when there is none. ErrRemoteFailed: a proxy's
+// remote failed and nothing else has the file.
+func (rd *Reader) Resolve(ctx context.Context, r *http.Request, p *auth.Principal, repo *repos.Repo, path repopath.Path) (*Asset, error) {
+	if repo.Kind != repos.KindGroup {
+		return rd.has(ctx, repo, path)
+	}
+	members, err := rd.readable(ctx, r, p, repo)
+	if err != nil {
+		return nil, err
+	}
+	remoteFailed := false
+	for _, m := range members {
+		a, err := rd.has(ctx, m, path)
+		switch {
+		case errors.Is(err, ErrRemoteFailed):
+			remoteFailed = true
+		case err != nil:
+			return nil, err
+		case a != nil:
+			return a, nil
+		}
+	}
+	if remoteFailed {
+		return nil, ErrRemoteFailed
+	}
+	return nil, nil
+}
+
+// Stored returns the stored asset of path in repo for p, who reads through r, and never
+// contacts a remote: a hosted file, a proxy's cached file, or in a group the first member in read
+// order that p may read and that stores the file. nil when there is none.
+func (rd *Reader) Stored(ctx context.Context, r *http.Request, p *auth.Principal, repo *repos.Repo, path repopath.Path) (*Asset, error) {
+	list := []*repos.Repo{repo}
+	if repo.Kind == repos.KindGroup {
+		var err error
+		if list, err = rd.readable(ctx, r, p, repo); err != nil {
+			return nil, err
+		}
+	}
+	for _, m := range list {
+		a, err := rd.p.Get(ctx, m.ID, string(path))
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
+		return a, err
+	}
+	return nil, nil
 }
 
 func (rd *Reader) has(ctx context.Context, repo *repos.Repo, path repopath.Path) (*Asset, error) {
 	if repo.Kind == repos.KindProxy {
 		hooks := rd.p.Hooks(repo.Format)
-		if hooks.Classify == nil || rd.remote == nil {
+		px, isProxy := rd.repos.Proxy(repo.ID)
+		if hooks.Classify == nil || rd.remote == nil || !isProxy {
 			return nil, nil
 		}
-		class, ok := hooks.Classify(path)
+		class, ok := hooks.Classify(px, path)
 		if !ok {
 			return nil, nil
 		}
@@ -123,46 +177,23 @@ func (rd *Reader) has(ctx context.Context, repo *repos.Repo, path repopath.Path)
 	return a, err
 }
 
-func (rd *Reader) serveGroup(w http.ResponseWriter, r *http.Request, p *auth.Principal, group *repos.Repo, path repopath.Path) {
-	ctx := r.Context()
+// readable returns the members of group that p may read through r, in read order.
+func (rd *Reader) readable(ctx context.Context, r *http.Request, p *auth.Principal, group *repos.Repo) ([]*repos.Repo, error) {
 	members, err := rd.repos.MemberRepos(ctx, group)
 	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "internal error")
-		return
+		return nil, err
 	}
-	readable := members[:0]
+	out := members[:0]
 	for _, m := range members {
 		ok, err := rd.access.Allows(ctx, r, p, m, access.Read, perm.RepoDownload)
 		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "internal error")
-			return
+			return nil, err
 		}
 		if ok {
-			readable = append(readable, m)
+			out = append(out, m)
 		}
 	}
-	if mg := rd.p.Hooks(group.Format).Merge; mg != nil {
-		if base, checksum, ok := mg.Match(path); ok {
-			rd.serveMerged(w, r, group, readable, mg, path, base, checksum)
-			return
-		}
-	}
-	remoteFailed := false
-	for _, m := range readable {
-		a, err := rd.has(ctx, m, path)
-		switch {
-		case errors.Is(err, ErrRemoteFailed):
-			remoteFailed = true
-		case err != nil:
-			rd.log.Error("group read failed", "group", group.Name, "member", m.Name, "path", path, "err", err)
-			httpx.Error(w, http.StatusInternalServerError, "internal error")
-			return
-		case a != nil:
-			rd.serveAsset(w, r, a)
-			return
-		}
-	}
-	notInGroup(w, remoteFailed)
+	return out, nil
 }
 
 func notInGroup(w http.ResponseWriter, remoteFailed bool) {
@@ -206,11 +237,11 @@ func (rd *Reader) serveMerged(w http.ResponseWriter, r *http.Request, group *rep
 	}
 	if len(srcs) == 1 {
 		if checksum == "" {
-			rd.serveAsset(w, r, srcs[0].a)
+			rd.ServeAsset(w, r, srcs[0].a, ServeOptions{})
 			return
 		}
 		if a, err := rd.has(ctx, srcs[0].repo, path); err == nil && a != nil {
-			rd.serveAsset(w, r, a)
+			rd.ServeAsset(w, r, a, ServeOptions{})
 			return
 		}
 	}
@@ -257,6 +288,8 @@ func (rd *Reader) serveMerged(w http.ResponseWriter, r *http.Request, group *rep
 		data, ct = []byte(hex.EncodeToString(sum.Sum(nil))), "text/plain"
 	}
 	etag := sha256.Sum256(data)
+	s1, s5 := sha1.Sum(data), md5.Sum(data)
+	checksumHeaders(w, hex.EncodeToString(etag[:]), hex.EncodeToString(s1[:]), hex.EncodeToString(s5[:]))
 	if contentHeaders(w, r, ct, `"`+hex.EncodeToString(etag[:])+`"`, modified) {
 		return
 	}
@@ -303,53 +336,91 @@ func etagMatch(header, etag string) bool {
 	return false
 }
 
-// serveAsset answers a GET or HEAD of a. A GET redirects to a presigned URL of the blob when the
-// store has one (s3.redirect): the URL signs the response content type and disposition of a, so
-// each path of a shared blob gets its own. Otherwise it streams the blob (with ranges).
-func (rd *Reader) serveAsset(w http.ResponseWriter, r *http.Request, a *Asset) {
+// ServeOptions changes how ServeAsset answers.
+type ServeOptions struct {
+	// NoRedirect streams the blob even when the store presigns downloads, e.g. for a file that
+	// clients read with their own headers (a registry manifest).
+	NoRedirect bool
+}
+
+// checksumHeaders sets X-Checksum-SHA256, and X-Checksum-SHA1 and X-Checksum-MD5 when known.
+func checksumHeaders(w http.ResponseWriter, sha256, sha1, md5 string) {
+	h := w.Header()
+	h.Set("X-Checksum-SHA256", sha256)
+	if sha1 != "" {
+		h.Set("X-Checksum-SHA1", sha1)
+	}
+	if md5 != "" {
+		h.Set("X-Checksum-MD5", md5)
+	}
+}
+
+// ServeAsset answers a GET or HEAD of a with its checksum headers. A GET redirects to a presigned
+// URL of the blob when the store has one (s3.redirect) and opts allows it: the URL signs the
+// response content type and disposition of a, so each path of a shared blob gets its own.
+// Otherwise it streams the blob. A request for one byte range answers 206 with that range on
+// every store.
+func (rd *Reader) ServeAsset(w http.ResponseWriter, r *http.Request, a *Asset, opts ServeOptions) {
 	ctx := r.Context()
-	if contentHeaders(w, r, a.ContentType, `"`+a.SHA256+`"`, a.UpdatedAt) {
+	checksumHeaders(w, a.SHA256, a.SHA1, a.MD5)
+	etag := `"` + a.SHA256 + `"`
+	if contentHeaders(w, r, a.ContentType, etag, a.UpdatedAt) {
 		return
 	}
 	h := w.Header()
+	h.Set("Accept-Ranges", "bytes")
 	if r.Method == http.MethodHead {
 		h.Set("Content-Length", strconv.FormatInt(a.Size, 10))
-		h.Set("Accept-Ranges", "bytes")
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 	key := blobs.Key(a.SHA256)
-	disposition := ""
-	if !inline(a.ContentType) {
-		disposition = "attachment"
-	}
 	st := rd.p.blobs.Storage()
-	if u, ok, err := st.PresignGet(ctx, key, rd.ttl(), storage.Response{ContentType: a.ContentType, ContentDisposition: disposition}); err != nil {
-		rd.log.Error("presign failed", "key", key, "err", err)
-		httpx.Error(w, http.StatusInternalServerError, "internal error")
-		return
-	} else if ok {
-		h.Del("Last-Modified")
-		h.Set("Cache-Control", "no-store")
-		h.Set("Location", u)
-		w.WriteHeader(http.StatusFound)
+	if !opts.NoRedirect {
+		disposition := ""
+		if !inline(a.ContentType) {
+			disposition = "attachment"
+		}
+		if u, ok, err := st.PresignGet(ctx, key, rd.ttl(), storage.Response{ContentType: a.ContentType, ContentDisposition: disposition}); err != nil {
+			rd.log.Error("presign failed", "key", key, "err", err)
+			httpx.Error(w, http.StatusInternalServerError, "internal error")
+			return
+		} else if ok {
+			h.Del("Last-Modified")
+			h.Set("Cache-Control", "no-store")
+			h.Set("Location", u)
+			w.WriteHeader(http.StatusFound)
+			return
+		}
+	}
+	if off, n, ok := byteRange(r, a.Size, etag); ok {
+		if n == 0 {
+			h.Set("Content-Range", "bytes */"+strconv.FormatInt(a.Size, 10))
+			httpx.Error(w, http.StatusRequestedRangeNotSatisfiable, "the range is outside the file")
+			return
+		}
+		body, _, err := st.GetRange(ctx, key, off, n)
+		if err != nil {
+			rd.storageFailed(w, a, err)
+			return
+		}
+		defer body.Close()
+		h.Set("Content-Range", "bytes "+strconv.FormatInt(off, 10)+"-"+strconv.FormatInt(off+n-1, 10)+"/"+strconv.FormatInt(a.Size, 10))
+		h.Set("Content-Length", strconv.FormatInt(n, 10))
+		w.WriteHeader(http.StatusPartialContent)
+		if _, err := io.Copy(w, body); err != nil {
+			rd.log.Debug("asset stream aborted", "repo_id", a.RepoID, "path", a.Path, "err", err)
+		}
 		return
 	}
 	body, info, err := st.Get(ctx, key)
 	if err != nil {
-		h.Del("ETag")
-		h.Del("Last-Modified")
-		if errors.Is(err, storage.ErrNotFound) {
-			rd.log.Warn("asset row without blob", "repo_id", a.RepoID, "path", a.Path)
-			httpx.Error(w, http.StatusNotFound, "not found")
-			return
-		}
-		rd.log.Error("storage get failed", "repo_id", a.RepoID, "path", a.Path, "err", err)
-		httpx.Error(w, http.StatusInternalServerError, "internal error")
+		rd.storageFailed(w, a, err)
 		return
 	}
 	defer body.Close()
 	if rs, ok := body.(io.ReadSeeker); ok {
+		r.Header.Del("Range") // several ranges: the whole file serves
 		http.ServeContent(w, r, "", a.UpdatedAt, rs)
 		return
 	}
@@ -362,4 +433,63 @@ func (rd *Reader) serveAsset(w http.ResponseWriter, r *http.Request, a *Asset) {
 	if _, err := io.Copy(w, body); err != nil {
 		rd.log.Debug("asset stream aborted", "repo_id", a.RepoID, "path", a.Path, "err", err)
 	}
+}
+
+// storageFailed answers a blob of a that the store could not open.
+func (rd *Reader) storageFailed(w http.ResponseWriter, a *Asset, err error) {
+	h := w.Header()
+	for _, k := range []string{"ETag", "Last-Modified", "Content-Range", "X-Checksum-SHA256", "X-Checksum-SHA1", "X-Checksum-MD5"} {
+		h.Del(k)
+	}
+	if errors.Is(err, storage.ErrNotFound) {
+		rd.log.Warn("asset row without blob", "repo_id", a.RepoID, "path", a.Path)
+		httpx.Error(w, http.StatusNotFound, "not found")
+		return
+	}
+	rd.log.Error("storage get failed", "repo_id", a.RepoID, "path", a.Path, "err", err)
+	httpx.Error(w, http.StatusInternalServerError, "internal error")
+}
+
+// byteRange reads the Range header of r for a file of size bytes with ETag etag: one range
+// "bytes=a-b", "bytes=a-" or "bytes=-n". ok is false without a Range header, for several ranges,
+// for a header that does not parse, or when If-Range names another version (the whole file
+// serves). n is 0 for a range outside the file (416).
+func byteRange(r *http.Request, size int64, etag string) (off, n int64, ok bool) {
+	spec, found := strings.CutPrefix(r.Header.Get("Range"), "bytes=")
+	if !found || strings.Contains(spec, ",") {
+		return 0, 0, false
+	}
+	if ir := r.Header.Get("If-Range"); ir != "" && ir != etag {
+		return 0, 0, false
+	}
+	from, to, found := strings.Cut(strings.TrimSpace(spec), "-")
+	if !found {
+		return 0, 0, false
+	}
+	if from == "" {
+		last, err := strconv.ParseInt(to, 10, 64)
+		if err != nil || last < 0 {
+			return 0, 0, false
+		}
+		if last == 0 || size == 0 {
+			return 0, 0, true
+		}
+		last = min(last, size)
+		return size - last, last, true
+	}
+	start, err := strconv.ParseInt(from, 10, 64)
+	if err != nil || start < 0 {
+		return 0, 0, false
+	}
+	end := size - 1
+	if to != "" {
+		if end, err = strconv.ParseInt(to, 10, 64); err != nil || end < start {
+			return 0, 0, false
+		}
+		end = min(end, size-1)
+	}
+	if start >= size {
+		return 0, 0, true
+	}
+	return start, end - start + 1, true
 }

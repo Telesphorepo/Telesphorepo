@@ -1,0 +1,42 @@
+//go:build windows
+
+package main
+
+import (
+	"fmt"
+
+	"golang.org/x/sys/windows"
+)
+
+// restrictDir replaces the ACL of dir with one entry that gives the current user full control,
+// and stops the inheritance of other entries.
+func restrictDir(dir string) error { return ownerOnly(dir) }
+
+// restrictFile replaces the ACL of f with one entry that gives the current user full control.
+func restrictFile(f string) error { return ownerOnly(f) }
+
+func ownerOnly(path string) error {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return fmt.Errorf("cannot read the current user: %w", err)
+	}
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessPermissions: windows.GENERIC_ALL,
+		AccessMode:        windows.GRANT_ACCESS,
+		Inheritance:       windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_USER,
+			TrusteeValue: windows.TrusteeValueFromSID(user.User.Sid),
+		},
+	}}, nil)
+	if err != nil {
+		return fmt.Errorf("cannot make the ACL of %s: %w", path, err)
+	}
+	err = windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
+	if err != nil {
+		return fmt.Errorf("cannot make %s readable by its owner only: %w", path, err)
+	}
+	return nil
+}

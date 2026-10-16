@@ -43,6 +43,10 @@ func (m *Mirror) Get(ctx context.Context, key string) (io.ReadCloser, ObjectInfo
 	return m.Src.Get(ctx, key)
 }
 
+func (m *Mirror) GetRange(ctx context.Context, key string, off, n int64) (io.ReadCloser, ObjectInfo, error) {
+	return m.Src.GetRange(ctx, key, off, n)
+}
+
 func (m *Mirror) Head(ctx context.Context, key string) (ObjectInfo, error) {
 	return m.Src.Head(ctx, key)
 }

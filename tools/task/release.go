@@ -26,8 +26,14 @@ var releaseTargets = []struct{ goos, goarch string }{
 // releaseFiles are packed next to the binary in every archive.
 var releaseFiles = []string{"LICENSE", "README.md"}
 
-// release builds the UI once, cross-compiles the binary for every release target, packs each
-// binary with LICENSE and README.md, and writes SHA256SUMS. Output goes to bin/release.
+// releasePrograms are the programs of a release: the server and the Docker credential helper.
+var releasePrograms = []struct{ name, pkg string }{
+	{"telesphorepo", "./cmd/telesphorepo"},
+	{"docker-credential-telesphorepo", "./cmd/docker-credential-telesphorepo"},
+}
+
+// release builds the UI once, cross-compiles each release program for every release target,
+// packs each binary with LICENSE and README.md, and writes SHA256SUMS. Output goes to bin/release.
 func release(ctx context.Context, version string) error {
 	pm, err := prepare(ctx)
 	if err != nil {
@@ -50,40 +56,19 @@ func release(ctx context.Context, version string) error {
 	}
 
 	sums := map[string]string{}
-	for _, t := range releaseTargets {
-		base := fmt.Sprintf("telesphorepo_%s_%s_%s", version, t.goos, t.goarch)
-		name := "telesphorepo"
-		if t.goos == "windows" {
-			name += ".exe"
+	for _, p := range releasePrograms {
+		for _, t := range releaseTargets {
+			archive, err := releaseArchive(ctx, dir, version, p.name, p.pkg, t.goos, t.goarch)
+			if err != nil {
+				return err
+			}
+			sum, err := fileSHA256(filepath.Join(dir, archive))
+			if err != nil {
+				return err
+			}
+			sums[archive] = sum
 		}
-		bin := filepath.Join(dir, base+filepath.Ext(name))
-		step("building %s/%s", t.goos, t.goarch)
-		env := []string{"CGO_ENABLED=0", "GOOS=" + t.goos, "GOARCH=" + t.goarch}
-		if err := runStep(ctx, ".", env, "go", "build", "-trimpath",
-			"-ldflags", "-s -w -X main.version="+version, "-o", bin, "./cmd/telesphorepo"); err != nil {
-			return fmt.Errorf("go build %s/%s failed: %w", t.goos, t.goarch, err)
-		}
-		var archive string
-		if t.goos == "windows" {
-			archive = base + ".zip"
-			err = packZip(filepath.Join(dir, archive), bin, name)
-		} else {
-			archive = base + ".tar.gz"
-			err = packTarGz(filepath.Join(dir, archive), bin, name)
-		}
-		if rmErr := os.Remove(bin); err == nil {
-			err = rmErr
-		}
-		if err != nil {
-			return fmt.Errorf("pack %s: %w", archive, err)
-		}
-		sum, err := fileSHA256(filepath.Join(dir, archive))
-		if err != nil {
-			return err
-		}
-		sums[archive] = sum
 	}
-
 	names := make([]string, 0, len(sums))
 	for n := range sums {
 		names = append(names, n)
@@ -98,6 +83,38 @@ func release(ctx context.Context, version string) error {
 	}
 	out.line(green("✓ ") + fmt.Sprintf("released %d archives and SHA256SUMS to %s (version %s)", len(names), bold(filepath.ToSlash(dir)), version))
 	return nil
+}
+
+// releaseArchive cross-compiles the program of package pkg for goos/goarch and packs it into
+// <name>_<version>_<goos>_<goarch>.tar.gz (.zip on Windows) in dir. It returns the archive name.
+func releaseArchive(ctx context.Context, dir, version, name, pkg, goos, goarch string) (string, error) {
+	base := fmt.Sprintf("%s_%s_%s_%s", name, version, goos, goarch)
+	if goos == "windows" {
+		name += ".exe"
+	}
+	bin := filepath.Join(dir, base+filepath.Ext(name))
+	step("building %s for %s/%s", pkg, goos, goarch)
+	env := []string{"CGO_ENABLED=0", "GOOS=" + goos, "GOARCH=" + goarch}
+	if err := runStep(ctx, ".", env, "go", "build", "-trimpath",
+		"-ldflags", "-s -w -X main.version="+version, "-o", bin, pkg); err != nil {
+		return "", fmt.Errorf("go build %s %s/%s failed: %w", pkg, goos, goarch, err)
+	}
+	var archive string
+	var err error
+	if goos == "windows" {
+		archive = base + ".zip"
+		err = packZip(filepath.Join(dir, archive), bin, name)
+	} else {
+		archive = base + ".tar.gz"
+		err = packTarGz(filepath.Join(dir, archive), bin, name)
+	}
+	if rmErr := os.Remove(bin); err == nil {
+		err = rmErr
+	}
+	if err != nil {
+		return "", fmt.Errorf("pack %s: %w", archive, err)
+	}
+	return archive, nil
 }
 
 // packTarGz writes a .tar.gz with the binary (mode 0755) and the release files.

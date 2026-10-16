@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -467,5 +468,151 @@ func TestBuildProvenance(t *testing.T) {
 		if len(b.Items) != 1 || !sameBuild(b.Items[0].CI, want) {
 			t.Fatalf("builds: %+v", b)
 		}
+	})
+}
+
+// TestDockerVersions checks the versions (tags), builds (the manifest with its config and layers,
+// or the platforms of an index), artifact kinds, artifact snippets and manifest details of a
+// docker repo, and the CI build of a tag that a CI identity token pushed.
+func TestDockerVersions(t *testing.T) {
+	kc := newKeycloak(t)
+	kc.Start(t, "http://callback.invalid"+oidcCallbackPath)
+	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
+		s := StartServer(t, opts)
+		repo := RandName("dkv")
+		s.CreateRepo(t, repo, "docker", false, nil)
+		reader := RandName("reader")
+		s.CreateUser(t, reader, "reader-pass-1234")
+		s.SetPerms(t, repo, reader, "repo.download")
+		read := Basic{reader, "reader-pass-1234"}
+		reg := registryClient{base: s.URL, auth: s.PublishAuth(t, s.AdminUser, repo).apply}
+
+		v1 := tarImage(t, "amd64", rawRandom(t, 2048))
+		reg.pushImage(t, repo+"/app", "1.0", v1)
+		v2 := tarImage(t, "amd64", rawRandom(t, 2048), rawRandom(t, 1024))
+		reg.pushImage(t, repo+"/app", "2.0", v2)
+
+		var children []map[string]any
+		for _, arch := range []string{"amd64", "arm64"} {
+			img := tarImage(t, arch, rawRandom(t, 1024))
+			reg.pushImage(t, repo+"/multi", "sha256:"+img.Hex, img)
+			children = append(children, map[string]any{"mediaType": "application/vnd.oci.image.manifest.v1+json", "digest": "sha256:" + img.Hex,
+				"size": len(img.Manifest), "platform": map[string]string{"os": "linux", "architecture": arch}})
+		}
+		idx, _ := json.Marshal(map[string]any{"schemaVersion": 2, "mediaType": "application/vnd.oci.image.index.v1+json", "manifests": children})
+		reg.pushManifest(t, repo+"/multi", "latest", "application/vnd.oci.image.index.v1+json", idx)
+
+		chartCfg := []byte(`{"name":"demo","version":"0.1.0","apiVersion":"v2"}`)
+		chart := rawRandom(t, 3000)
+		reg.pushBlob(t, repo+"/charts/demo", chartCfg)
+		reg.pushBlob(t, repo+"/charts/demo", chart)
+		cm, _ := json.Marshal(map[string]any{"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
+			"config": map[string]any{"mediaType": "application/vnd.cncf.helm.config.v1+json", "digest": "sha256:" + sha256Hex(chartCfg), "size": len(chartCfg)},
+			"layers": []map[string]any{{"mediaType": "application/vnd.cncf.helm.chart.content.v1.tar+gzip", "digest": "sha256:" + sha256Hex(chart), "size": len(chart)}}})
+		reg.pushManifest(t, repo+"/charts/demo", "0.1.0", "application/vnd.oci.image.manifest.v1+json", cm)
+
+		createTrust(t, s, trustPolicy{Name: "docker-versions", Issuer: kc.Issuer, Audience: ciAudience,
+			Claims: map[string][]string{"repository": {kcCIRepository}}, Repos: []string{repo}})
+		st, bearer, b := registryToken(t, s, Basic{"oidc", kc.CIToken(t)}, "repository:"+repo+"/ci:pull,push")
+		wantAPIStatus(t, "CI token for a push", st, b, http.StatusOK)
+		ciReg := registryClient{base: s.URL, auth: bearer.apply}
+		ciReg.pushImage(t, repo+"/ci", "v1", tarImage(t, "amd64", rawRandom(t, 1024)))
+
+		t.Run("versions", func(t *testing.T) {
+			var v versionsJSON
+			s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/versions?path=app", nil, read, &v)
+			if v.Artifact == nil || v.Artifact.Kind != "image" || v.Artifact.Path != "app/" || len(v.Items) != 2 ||
+				v.Items[0].Version != "2.0" || v.Items[1].Version != "1.0" || v.Items[0].Kind != "release" || v.Items[0].BuildsCount != 1 ||
+				v.Items[0].LatestBuild != v2.Hex[:12] {
+				t.Fatalf("versions of app: %+v", v)
+			}
+			var page versionsJSON
+			s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/versions?path=app&limit=1", nil, read, &page)
+			if len(page.Items) != 1 || page.Next == nil || *page.Next != "2.0" {
+				t.Fatalf("first page of the versions of app: %+v", page)
+			}
+			s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/versions?path=app&limit=1&after=2.0", nil, read, &page)
+			if len(page.Items) != 1 || page.Items[0].Version != "1.0" {
+				t.Fatalf("second page of the versions of app: %+v", page)
+			}
+			s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/versions?path=charts/demo", nil, read, &v)
+			if v.Artifact == nil || v.Artifact.Kind != "helm-chart" || len(v.Items) != 1 || v.Items[0].Version != "0.1.0" {
+				t.Fatalf("versions of the chart: %+v", v)
+			}
+			s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/versions?path=ci", nil, read, &v)
+			if len(v.Items) != 1 || v.Items[0].Build == nil || v.Items[0].Build.Provider != "github-actions" || v.Items[0].Build.Repository != kcCIRepository {
+				t.Fatalf("the CI build of the tag ci:v1: %+v", v)
+			}
+			var none versionsJSON
+			s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/versions?path=charts", nil, read, &none)
+			if none.Artifact != nil {
+				t.Fatalf("a folder that is no image has versions: %+v", none)
+			}
+		})
+
+		t.Run("builds", func(t *testing.T) {
+			var b buildsJSON
+			s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/builds?path=app/&version=2.0", nil, read, &b)
+			if len(b.Items) != 1 || b.Items[0].Build != v2.Hex[:12] {
+				t.Fatalf("builds of app 2.0: %+v", b)
+			}
+			var exts []string
+			for _, f := range b.Items[0].Files {
+				exts = append(exts, f.Extension)
+			}
+			if !slices.Equal(exts, []string{"manifest", "config", "layer", "layer"}) || b.Items[0].Files[0].Path != "app/_manifests/sha256/"+v2.Hex {
+				t.Fatalf("files of app 2.0: %+v", b.Items[0].Files)
+			}
+			s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/builds?path=multi/&version=latest", nil, read, &b)
+			var platforms []string
+			for _, f := range b.Items[0].Files[1:] {
+				platforms = append(platforms, f.Classifier)
+			}
+			if !slices.Equal(platforms, []string{"linux/amd64", "linux/arm64"}) {
+				t.Fatalf("files of the index: %+v", b.Items[0].Files)
+			}
+		})
+
+		t.Run("snippets and details", func(t *testing.T) {
+			var a artifactSnippetsJSON
+			s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/snippets?path=app", nil, read, &a)
+			if a.Version != "2.0" || a.Mode != "pinned" || !strings.Contains(codeOf(a.Snippets, "docker"), "@sha256:"+v2.Hex) {
+				t.Fatalf("pinned snippets of app: %+v", a)
+			}
+			s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/snippets?path=app&version_mode=latest", nil, read, &a)
+			if !strings.Contains(codeOf(a.Snippets, "docker"), "/"+repo+"/app:2.0") {
+				t.Fatalf("latest snippets of app: %+v", a)
+			}
+			s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/snippets?path="+url.QueryEscape("app/_tags/1.0"), nil, read, &a)
+			if a.Version != "1.0" || !strings.Contains(codeOf(a.Snippets, "docker"), "@sha256:"+v1.Hex) {
+				t.Fatalf("snippets of the tag 1.0: %+v", a)
+			}
+			s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/snippets?path=charts/demo", nil, read, &a)
+			if !strings.Contains(codeOf(a.Snippets, "helm"), "helm pull oci://") || !strings.Contains(codeOf(a.Snippets, "helm"), "--version 0.1.0") {
+				t.Fatalf("snippets of the chart: %+v", a)
+			}
+
+			var m struct {
+				Digest    string   `json:"digest"`
+				MediaType string   `json:"media_type"`
+				Layers    []any    `json:"layers"`
+				Platforms []any    `json:"platforms"`
+				Tags      []string `json:"tags"`
+				Config    *struct {
+					Digest string `json:"digest"`
+				} `json:"config"`
+			}
+			s.MustAPI(t, http.MethodGet, "/api/docker/"+repo+"/manifest?path="+url.QueryEscape("app/_tags/2.0"), nil, read, &m)
+			if m.Digest != "sha256:"+v2.Hex || len(m.Layers) != 2 || len(m.Platforms) != 0 || !slices.Equal(m.Tags, []string{"2.0"}) || m.Config == nil {
+				t.Fatalf("details of app 2.0: %+v", m)
+			}
+			s.MustAPI(t, http.MethodGet, "/api/docker/"+repo+"/manifest?path="+url.QueryEscape("multi/_tags/latest"), nil, read, &m)
+			if len(m.Platforms) != 2 || m.Config != nil || !strings.Contains(m.MediaType, "index") {
+				t.Fatalf("details of the index: %+v", m)
+			}
+			if st, b := s.API(t, http.MethodGet, "/api/docker/"+repo+"/manifest?path=app/_blobs/sha256/"+v1.Layers[0], nil, read); st != http.StatusBadRequest {
+				t.Fatalf("details of a layer: status %d, want 400: %s", st, b)
+			}
+		})
 	})
 }

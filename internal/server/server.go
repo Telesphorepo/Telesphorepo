@@ -5,6 +5,7 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -12,7 +13,6 @@ import (
 	"math/big"
 	"net"
 	"net/http"
-	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -271,7 +271,7 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 			k.Repos.AddField(f)
 		}
 	}
-	var address func(*http.Request) netip.Addr
+	var resolve func(*http.Request) httpx.Client
 	for _, m := range b.Manifests {
 		for _, t := range m.TokenKinds {
 			k.Auth.AddTokenKind(t.Prefix, t.Verify)
@@ -282,8 +282,8 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 		for _, j := range m.Jobs {
 			k.Jobs.Add(m.Module.ID, j)
 		}
-		if m.ClientAddress != nil {
-			address = m.ClientAddress
+		if m.ResolveClient != nil {
+			resolve = m.ResolveClient
 		}
 	}
 
@@ -333,12 +333,24 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 	}
 	srv := &http.Server{
 		Addr:              boot.Listen,
-		Handler:           clientAddress(address, accessLog(log, mux.Handler())), // client address first, then the log
+		Handler:           resolveClient(resolve, accessLog(log, mux.Handler())), // the client first, then the log
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    64 << 10,
 		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 		BaseContext:       func(net.Listener) context.Context { return context.WithoutCancel(ctx) },
+	}
+	// HTTP/1.1 and HTTP/2: by ALPN over TLS, and with prior knowledge (h2c) on a plain listener,
+	// for a reverse proxy that speaks h2c.
+	srv.Protocols = new(http.Protocols)
+	srv.Protocols.SetHTTP1(true)
+	srv.Protocols.SetHTTP2(true)
+	srv.Protocols.SetUnencryptedHTTP2(true)
+	snap := set.Current()
+	tlsOn := settings.TLSCertFile.Get(snap) != "" && settings.TLSKeyFile.Get(snap) != ""
+	if tlsOn {
+		certs := &certLoader{set: set.Current}
+		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: certs.get}
 	}
 	ln, err := net.Listen("tcp", boot.Listen)
 	if err != nil {
@@ -347,8 +359,14 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 	k.Jobs.Loop()
 
 	errc := make(chan error, 1)
-	go func() { errc <- srv.Serve(ln) }()
-	log.Info("listening", "addr", ln.Addr().String(), "storage", storage.ConfigView.Get(set.Current()).Backend)
+	go func() {
+		if tlsOn {
+			errc <- srv.ServeTLS(ln, "", "")
+			return
+		}
+		errc <- srv.Serve(ln)
+	}()
+	log.Info("listening", "addr", ln.Addr().String(), "tls", tlsOn, "storage", storage.ConfigView.Get(set.Current()).Backend)
 	if opts.Ready != nil {
 		opts.Ready(ln.Addr())
 	}
@@ -420,14 +438,15 @@ func kernel(base context.Context, d *db.DB, boot *config.Boot, set *settings.Ser
 	}, nil
 }
 
-// clientAddress resolves the client address of every request once with fn (the network module)
-// and attaches it (httpx.ClientIP reads it). Without fn the address is the TCP peer.
-func clientAddress(fn func(*http.Request) netip.Addr, next http.Handler) http.Handler {
+// resolveClient resolves the client of every request once with fn (the network module) and
+// attaches it (httpx.ClientIP and httpx.ClientScheme read it). Without fn the client is the TCP
+// peer and the scheme is that of the connection.
+func resolveClient(fn func(*http.Request) httpx.Client, next http.Handler) http.Handler {
 	if fn == nil {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, httpx.WithClientIP(r, fn(r)))
+		next.ServeHTTP(w, httpx.WithClient(r, fn(r)))
 	})
 }
 

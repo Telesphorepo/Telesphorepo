@@ -6,6 +6,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/activity"
 	"github.com/Telesphorepo/Telesphorepo/internal/api"
 	"github.com/Telesphorepo/Telesphorepo/internal/debian"
+	"github.com/Telesphorepo/Telesphorepo/internal/docker"
 	"github.com/Telesphorepo/Telesphorepo/internal/maven"
 	"github.com/Telesphorepo/Telesphorepo/internal/module"
 	"github.com/Telesphorepo/Telesphorepo/internal/move"
@@ -32,5 +33,6 @@ func All() []module.Module {
 		maven.Module(),
 		debian.Module(),
 		raw.Module(),
+		docker.Module(),
 	}
 }

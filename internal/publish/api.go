@@ -37,7 +37,7 @@ const (
 // The settings of the group "publishing".
 var (
 	SessionTTL = settings.Duration(&settings.Def{Key: "publish.session_ttl", Default: "15m", Label: "Publish session lifetime",
-		Help: "A publish session, the credential that every upload needs, lasts at most this time, for example 15m. A client ends its session when the publish is done. The maximum is 1h.",
+		Help: "A publish session, the credential that every upload needs, lasts at most this time, for example 15m. A client ends its session when the publish is done. The maximum is 1h. A Docker push must end within it.",
 		Validate: func(v any) error {
 			if v.(time.Duration) > time.Hour {
 				return errors.New("must be at most 1h")
@@ -79,6 +79,7 @@ func Module() module.Module {
 				m.svc = New(Deps{DB: h.DB, Auth: h.Auth, Access: h.Access, Repos: h.Repos, Settings: h.Settings,
 					Audit: h.Audit, CI: h.CI, Builds: h.Builds, Clients: h.Clients, Log: h.Log})
 				h.Auth.SetSessionLoader(m.svc.LoadSession)
+				h.Auth.SetDeviceLoader(m.svc.DevicePrincipal)
 				h.Access.SetPipelines(m.svc.RepoPipelines)
 				h.Provide(m.svc)
 				module.ProvideAs[Minter](h, m.svc)
@@ -266,22 +267,41 @@ func (m *mod) revokeDevice(w http.ResponseWriter, r *http.Request, c *route.Call
 
 // --- sessions ---
 
-// publishChallenge returns a single-use nonce for a device (no auth): {device_id} -> {nonce}.
+// publishChallenge returns a nonce for a device (no auth): {device_id, exchange, nonce, ts,
+// signature} -> {nonce, expires_at}. Without exchange the nonce mints one session for one repo
+// within 60 s (POST /api/publish/sessions). With exchange it is a token exchange nonce
+// (ExchangeChallenge): the device signs it over the repo "*" and a format's token endpoint takes
+// the proof until it expires after publish.session_ttl. With exchange, a nonce in the request is
+// one to keep: the answer is that nonce while it is a token exchange nonce of the device that has
+// not expired. A new token exchange nonce needs ts and the device signature over it
+// (ChallengeProof).
 func (m *mod) publishChallenge(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	var in struct {
-		DeviceID int64 `json:"device_id"`
+		DeviceID  int64  `json:"device_id"`
+		Exchange  bool   `json:"exchange"`
+		Nonce     string `json:"nonce"`
+		TS        int64  `json:"ts"`
+		Signature string `json:"signature"`
 	}
 	if !m.h.API.Decode(w, r, &in) {
 		return
 	}
-	nonce, err := m.svc.Challenge(r.Context(), in.DeviceID)
+	var nonce string
+	var exp time.Time
+	var err error
+	if in.Exchange {
+		nonce, exp, err = m.svc.ExchangeChallenge(r.Context(), in.DeviceID, in.Nonce, ChallengeProof{TS: in.TS, Signature: in.Signature})
+	} else {
+		nonce, exp, err = m.svc.Challenge(r.Context(), in.DeviceID)
+	}
 	if err != nil {
 		publishFail(w, r, err)
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, struct {
-		Nonce string `json:"nonce"`
-	}{nonce})
+		Nonce     string    `json:"nonce"`
+		ExpiresAt time.Time `json:"expires_at"`
+	}{nonce, exp})
 }
 
 // deviceSession mints a session from a device signature (no auth):

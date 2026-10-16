@@ -1,7 +1,7 @@
 # Edge delivery
 
 This note records the design for fast downloads far from the server. It is not built yet. The
-order of work is: the core, then more formats (OCI first), then edge delivery.
+order of work is: more formats, then edge delivery.
 
 ## Decisions
 
@@ -10,7 +10,7 @@ order of work is: the core, then more formats (OCI first), then edge delivery.
 - **Cloudflare only.** Edge delivery uses Cloudflare R2, Queues and Workers (the Workers Paid
   plan). Other vendors can come later as contributions. The bucket layout below is the contract.
 - **Client URLs never change.** The Worker runs on path routes of the main hostname, for example
-  `repo.example.com/maven/*` and `/debian/*`, and later `/v2/*`. The server builds the routes
+  `repo.example.com/maven/*`, `/debian/*` and `/v2/*`. The server builds the routes
   from the URL prefixes of its formats. The admin UI and `/api` have no route.
 - **No client-side part.** Clients use plain HTTP. There is no bundle or manifest download.
 
@@ -48,11 +48,11 @@ replication, so a Worker copies the blobs:
 Cloudflare limits a proxied request body to 100 MB on the Free and Pro plans, with or without a
 Worker. The core has resumable chunked upload sessions, so a client that uploads in chunks
 keeps each chunk under the limit. A client that sends a large file in one request needs a push
-hostname: a DNS-only record that points straight at the origin. Downloads stay on the proxied
-hostname.
+hostname: a DNS-only record that points straight at the origin. Every common OCI client sends a
+layer in one request, so the `docker.push_url` setting names that host. Downloads stay on the
+proxied hostname.
 
 ## Server work before edge delivery
 
-- Checksum headers (`X-Checksum-SHA1` and the others), so Maven Resolver skips the separate
-  `.sha1` requests.
-- HTTP/2 and HTTP/3, so clients download in parallel.
+- HTTP/3, so clients download in parallel over QUIC. The server has checksum headers
+  (`X-Checksum-SHA1` and the others) and HTTP/2 already.
