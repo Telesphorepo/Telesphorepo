@@ -1,0 +1,23 @@
+# The change log of Telesphorepo. The server and the CLI embed this file, and both read it to
+# find out whether an older side fails in a scope (GET /api/changes?since=<version>).
+#
+# Add an entry only when an older CLI or an older server would fail in a scope. Most changes need
+# none. Each entry has four fields:
+#
+#   version  The release that made the change, or "dev" before a release. A "dev" entry counts
+#            for nothing. "go tool task release <version>" writes the release version into each
+#            "dev" entry before it builds.
+#   scope    What the change affects: a command (setup, publish, login, update), a command and a
+#            format (publish/npm), or a helper (helper/docker, helper/cargo). A scope matches
+#            itself and every scope under it: publish matches publish/npm.
+#   needs    The side that must be at least version for the scope to work: "server" or "cli".
+#            An unknown value counts as "cli".
+#   summary  One sentence for the person. The CLI prints it as it is.
+#
+# Example:
+#
+#   [[change]]
+#   version = "dev"
+#   scope   = "publish/npm"
+#   needs   = "server"
+#   summary = "npm publish uses the new upload route"

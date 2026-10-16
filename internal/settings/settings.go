@@ -119,7 +119,7 @@ func (v *View[T]) Get(s *Snapshot) T {
 
 // Options configures Load.
 type Options struct {
-	// Dev makes the Dev value of every Def replace its Default. Used by "telesphorepo dev";
+	// Dev makes the Dev value of every Def replace its Default. Used by "telesphorepo-server dev";
 	// env still wins and the UI shows these as defaults, not as locked.
 	Dev bool
 	Log *slog.Logger

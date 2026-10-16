@@ -7,7 +7,7 @@ policy, the registries, the byte pipeline, the schema, the routes and the settin
 
 ```sh
 go tool task dev            # backend :8080 + Vite UI :5173 with live reload (open :5173)
-go tool task build [image]  # bin/telesphorepo with UI embedded (+ image telesphorepo:local)
+go tool task build [image]  # bin/telesphorepo-server with UI embedded (+ image telesphorepo:local)
 go tool task preview        # build, then run the production binary at :8080
 go tool task test [args]    # core zone (tag e2e); args go to go test, e.g. -run TestMaven
 go tool task test import    # import zone (tag import): TestNexus, starts a Nexus container (slow)
@@ -140,7 +140,7 @@ device and OIDC routes. Run all zones before a push that touches several zones.
 | Query | `queries/*.sql` of the owner (`internal/db` or the module), then `go tool task gen` |
 | New module | `internal/<module>` + one line in `internal/modules/modules.go` (see below) |
 | Format contract | `internal/format/format.go` (`format.Spec`), `kit.go` (the standard routes) |
-| JSON API route | `x.Routes` of the owning module (core: `internal/api/api.go`) + handler; shared helpers in `route.API` (`h.API`); errors via `httpx.Error` or `route.Fail` |
+| JSON API route | `x.Routes` of the owning module (core: `internal/api/api.go`) + handler; shared helpers in `route.API` (`h.API`); errors via `httpx.Error` or `route.Fail` (RFC 9457 problem documents under `/api/` and `/cli/`); declare a named problem type once with `httpx.DeclareProblem` (`internal/httpx/problem.go`) |
 | Credentials, permission checks | `internal/auth` (`Identify`, sessions, tokens, second factor, bearer tokens), `internal/route/policy.go` (the policy), `internal/access/engine.go` (`Decide`, the access report) |
 | Publish sessions, devices, trust policies, CI providers | `internal/publish` (module `publish`, routes in `api.go`, `mint.go`, `providers.go`); `internal/ci` (provider registry, build records); `internal/clients` (publisher clients); sign-in and second factor routes in `internal/api/security.go` |
 | Publisher clients (Gradle plugin, Maven extension) | Separate repo [Telesphorepo/clients](https://github.com/Telesphorepo/clients) (MIT). The clients zone clones it, or reads `E2E_CLIENTS_DIR`; `E2E_CLIENTS_REF` picks the branch or tag (default `main`) |
@@ -158,8 +158,9 @@ device and OIDC routes. Run all zones before a push that touches several zones.
 | Storage move (FS ↔ S3) | `internal/move` (module `storage`: service, copier, `module.go`), `internal/storage/mirror.go`, `web/src/pages/server/Storage.svelte` |
 | Single sign-on | `internal/oidc` (module `sso`: sign-in, the permission map, device approval), `web/src/pages/server/SingleSignOn.svelte` |
 | Nexus sources, syncs, cut-over | `internal/nexus` (module `nexus`: client, service, `sync.go` scheduler and runner, `api.go`), `web/src/pages/server/NexusMigration.svelte`, `NexusSource.svelte`. Per-format import code is the `Importer` of the format (`Plan` for the target repo, `Target`/`Store` per file). Repo lock: the repo operation `mirror` (`repo_ops`), checked in `access.Engine.Decide` |
-| Demo data and seed | `internal/demo`, and `Demo` and `Seed` of each module; `cmd/telesphorepo/demo.go` |
+| Demo data and seed | `internal/demo`, and `Demo` and `Seed` of each module; `cmd/telesphorepo-server/demo.go` |
 | E2E harness | `e2e/harness_test.go` (servers, storage matrix `fs` + SeaweedFS), `e2e/clients_test.go` (Maven, Debian and curl helpers that several zones share), publish helpers at the end of `harness_test.go`, `e2e/keycloak_test.go` (Keycloak fixture), `e2e/publish_clients_test.go` (clients zone) |
+| Change log and server version | `changes.toml` at the repo root (embedded by `changes.go`, package `telesphorepo`), the parser in `changelog/` (stdlib and toml only, shared with the CLI), `GET /api/changes` in `internal/api/changes.go`, the `Telesphorepo-Version` header in `internal/server/server.go`; `go tool task release <version>` stamps the `dev` entries |
 | Dev tooling | `tools/task` |
 
 ## Adding a module

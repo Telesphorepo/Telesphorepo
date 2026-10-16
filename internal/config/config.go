@@ -63,7 +63,7 @@ const DefaultDataDir = "./data"
 // MasterKeyFileName holds the generated master key when TR_MASTER_KEY is unset.
 const MasterKeyFileName = "master.key"
 
-// DevDataDir is the data directory of "telesphorepo dev" when TR_DATA_DIR is unset.
+// DevDataDir is the data directory of "telesphorepo-server dev" when TR_DATA_DIR is unset.
 const DevDataDir = "./.telesphorepo-dev"
 
 // DevAdminPasswordFile is the file in the dev data dir holding the generated admin password.
@@ -71,7 +71,7 @@ const DevAdminPasswordFile = "admin-password.txt"
 
 // CLIDataDir is the data dir for offline commands (user add/passwd): TR_DATA_DIR if set;
 // otherwise ./data, unless ./data does not exist and the dev data dir does (so the commands
-// work against "telesphorepo dev" without extra setup). fromDev reports the fallback.
+// work against "telesphorepo-server dev" without extra setup). fromDev reports the fallback.
 func CLIDataDir() (dir string, fromDev bool) {
 	if v := os.Getenv("TR_DATA_DIR"); v != "" {
 		return v, false

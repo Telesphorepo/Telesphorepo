@@ -90,7 +90,7 @@ func (a *API) deleteRepos(w http.ResponseWriter, r *http.Request, c *route.Call)
 	if !a.kit.Decode(w, r, &in) {
 		return
 	}
-	names, ok := listOf(w, "names", in.Names)
+	names, ok := listOf(w, r, "names", in.Names)
 	if !ok {
 		return
 	}
@@ -106,7 +106,7 @@ func (a *API) deleteRepos(w http.ResponseWriter, r *http.Request, c *route.Call)
 			return
 		}
 		if repo.Op != nil {
-			httpx.Error(w, http.StatusConflict, repo.Name+": "+a.ops.Message(repo.Op))
+			httpx.Error(w, r, http.StatusConflict, repo.Name+": "+a.ops.Message(repo.Op))
 			return
 		}
 		all = append(all, repo)
@@ -121,7 +121,7 @@ func (a *API) deleteRepos(w http.ResponseWriter, r *http.Request, c *route.Call)
 			return err
 		})
 		if errors.Is(err, ops.ErrBusy) {
-			httpx.WriteJSON(w, http.StatusConflict, map[string]any{"deleted": deleted, "error": repo.Name + ": " + err.Error()})
+			httpx.WriteProblem(w, r, httpx.Blank(http.StatusConflict, repo.Name+": "+err.Error()).With(map[string]any{"deleted": deleted}))
 			return
 		}
 		if err != nil {
@@ -131,8 +131,7 @@ func (a *API) deleteRepos(w http.ResponseWriter, r *http.Request, c *route.Call)
 		n, err := a.runDelete(ctx, repo, op)
 		files += n
 		if err != nil {
-			httpx.WriteJSON(w, http.StatusInternalServerError, map[string]any{
-				"deleted": deleted, "error": "The server could not delete " + repo.Name + ": " + err.Error()})
+			httpx.WriteProblem(w, r, httpx.Blank(http.StatusInternalServerError, "The server could not delete "+repo.Name+": "+err.Error()).With(map[string]any{"deleted": deleted}))
 			return
 		}
 		deleted = append(deleted, repo.Name)
@@ -218,12 +217,12 @@ func (a *API) operationOf(w http.ResponseWriter, r *http.Request) (*ops.Op, *ops
 		return nil, nil, false
 	}
 	if repo.Op == nil {
-		httpx.Error(w, http.StatusConflict, ops.ErrNone.Error())
+		httpx.Error(w, r, http.StatusConflict, ops.ErrNone.Error())
 		return nil, nil, false
 	}
 	t := a.ops.Type(repo.Op.Type)
 	if t == nil {
-		httpx.Error(w, http.StatusConflict, "the repository has an operation of an unknown type")
+		httpx.Error(w, r, http.StatusConflict, "the repository has an operation of an unknown type")
 		return nil, nil, false
 	}
 	return repo.Op, t, true
@@ -238,10 +237,10 @@ func (a *API) resumeOperation(w http.ResponseWriter, r *http.Request, _ *route.C
 	}
 	switch {
 	case t.Resume == nil:
-		httpx.Error(w, http.StatusConflict, "this operation cannot be resumed here")
+		httpx.Error(w, r, http.StatusConflict, "this operation cannot be resumed here")
 		return
 	case op.State != ops.Failed:
-		httpx.Error(w, http.StatusConflict, "the operation has not failed")
+		httpx.Error(w, r, http.StatusConflict, "the operation has not failed")
 		return
 	}
 	if err := t.Resume(r.Context(), op); err != nil {
@@ -261,10 +260,10 @@ func (a *API) clearOperation(w http.ResponseWriter, r *http.Request, _ *route.Ca
 	}
 	switch {
 	case t.Clear == nil:
-		httpx.Error(w, http.StatusConflict, "this operation is ended by the "+op.Owner+" module, not here")
+		httpx.Error(w, r, http.StatusConflict, "this operation is ended by the "+op.Owner+" module, not here")
 		return
 	case op.State != ops.Failed:
-		httpx.Error(w, http.StatusConflict, "the operation has not failed")
+		httpx.Error(w, r, http.StatusConflict, "the operation has not failed")
 		return
 	}
 	if err := t.Clear(r.Context(), op); err != nil {
@@ -294,13 +293,13 @@ func uploadFail(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.As(err, &re):
 		w.Header().Set("Range", "bytes=0-"+strconv.FormatInt(max(re.Received-1, 0), 10))
-		httpx.WriteJSON(w, http.StatusRequestedRangeNotSatisfiable, map[string]any{"error": err.Error(), "received": re.Received})
+		httpx.WriteProblem(w, r, httpx.Blank(http.StatusRequestedRangeNotSatisfiable, err.Error()).With(map[string]any{"received": re.Received}))
 	case errors.Is(err, assets.ErrUploadUnknown):
-		httpx.Error(w, http.StatusNotFound, err.Error())
+		httpx.Error(w, r, http.StatusNotFound, err.Error())
 	case errors.Is(err, assets.ErrDigest):
-		httpx.Error(w, http.StatusBadRequest, err.Error())
+		httpx.Error(w, r, http.StatusBadRequest, err.Error())
 	case errors.Is(err, assets.ErrTooLarge), errors.As(err, &mbe):
-		httpx.Error(w, http.StatusRequestEntityTooLarge, "upload too large")
+		httpx.Error(w, r, http.StatusRequestEntityTooLarge, "upload too large")
 	default:
 		route.Fail(w, r, err)
 	}
@@ -316,7 +315,7 @@ func (a *API) appendUpload(w http.ResponseWriter, r *http.Request, c *route.Call
 	if cr := r.Header.Get("Content-Range"); cr != "" {
 		m := contentRangeRE.FindStringSubmatch(strings.TrimSpace(cr))
 		if m == nil {
-			httpx.Error(w, http.StatusBadRequest, `Content-Range must be "bytes <from>-<to>/*"`)
+			httpx.Error(w, r, http.StatusBadRequest, `Content-Range must be "bytes <from>-<to>/*"`)
 			return
 		}
 		offset, _ = strconv.ParseInt(m[1], 10, 64)
@@ -337,18 +336,18 @@ func (a *API) finishUpload(w http.ResponseWriter, r *http.Request, c *route.Call
 	q := r.URL.Query()
 	p, err := repopath.Parse(q.Get("path"))
 	if err != nil {
-		httpx.Error(w, http.StatusBadRequest, "invalid path")
+		httpx.Error(w, r, http.StatusBadRequest, "invalid path")
 		return
 	}
 	digest := strings.ToLower(q.Get("sha256"))
 	if len(digest) != digestHexchars || strings.Trim(digest, "0123456789abcdef") != "" {
-		httpx.Error(w, http.StatusBadRequest, "give sha256, the 64 hex digits of the SHA-256 of the whole file")
+		httpx.Error(w, r, http.StatusBadRequest, "give sha256, the 64 hex digits of the SHA-256 of the whole file")
 		return
 	}
 	size := int64(-1)
 	if s := q.Get("size"); s != "" {
 		if size, err = strconv.ParseInt(s, 10, 64); err != nil || size < 0 {
-			httpx.Error(w, http.StatusBadRequest, "invalid size")
+			httpx.Error(w, r, http.StatusBadRequest, "invalid size")
 			return
 		}
 	}

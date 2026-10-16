@@ -42,11 +42,11 @@ UPDATE user_passkeys SET credential = ?, last_used_at = ? WHERE id = ?;
 -- name: DeleteUserPasskey :execrows
 DELETE FROM user_passkeys WHERE id = ? AND user_id = ?;
 
--- Removes every TOTP factor of a user ("telesphorepo user reset-2fa").
+-- Removes every TOTP factor of a user ("telesphorepo-server user reset-2fa").
 -- name: DeleteAllUserTOTP :execrows
 DELETE FROM user_totp WHERE user_id = ?;
 
--- Removes every passkey of a user ("telesphorepo user reset-2fa").
+-- Removes every passkey of a user ("telesphorepo-server user reset-2fa").
 -- name: DeleteAllUserPasskeys :execrows
 DELETE FROM user_passkeys WHERE user_id = ?;
 

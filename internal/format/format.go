@@ -105,7 +105,7 @@ type Spec struct {
 	Versions func(ctx context.Context, repo *repos.Repo, artifactPath, after string, limit int) (*Artifact, []Version, string, error)
 	Builds   func(ctx context.Context, repo *repos.Repo, artifactPath, version, after string, limit int) (*Artifact, *Version, []Build, string, error)
 
-	// Usage returns the repo-level snippets of a repo (UI and "telesphorepo dev"): how to use the
+	// Usage returns the repo-level snippets of a repo (UI and "telesphorepo-server dev"): how to use the
 	// repo in a build (Purpose "use") and how to publish to it from a computer and by hand
 	// (Purpose "publish"), each with Context "repo". The core adds the CI files of Tools.
 	// baseURL is the server's public URL without a trailing slash.

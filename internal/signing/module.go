@@ -136,18 +136,18 @@ func (m *mod) out(r *http.Request, k Key) (keyJSON, error) {
 	return keyJSON{k, used}, err
 }
 
-// fail maps a key error to a response. A key in use answers 409 {error, repos}.
+// fail maps a key error to a response. A key in use answers 409 with the extension member repos.
 func fail(w http.ResponseWriter, r *http.Request, err error) {
 	var used *InUseError
 	switch {
 	case errors.As(err, &used):
-		httpx.WriteJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "repos": used.Repos})
+		httpx.WriteProblem(w, r, httpx.Blank(http.StatusConflict, err.Error()).With(map[string]any{"repos": used.Repos}))
 	case errors.Is(err, ErrInvalid):
-		httpx.Error(w, http.StatusBadRequest, err.Error())
+		httpx.Error(w, r, http.StatusBadRequest, err.Error())
 	case errors.Is(err, ErrExists):
-		httpx.Error(w, http.StatusConflict, err.Error())
+		httpx.Error(w, r, http.StatusConflict, err.Error())
 	case errors.Is(err, ErrNotFound):
-		httpx.Error(w, http.StatusNotFound, err.Error())
+		httpx.Error(w, r, http.StatusNotFound, err.Error())
 	default:
 		route.Fail(w, r, err)
 	}

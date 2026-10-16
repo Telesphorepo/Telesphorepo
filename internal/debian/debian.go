@@ -176,12 +176,12 @@ func (h *Handler) ProxyProbe(config json.RawMessage) string {
 func (h *Handler) publicKey(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	repo := c.Repo
 	if repo.Kind == repos.KindProxy {
-		httpx.Error(w, http.StatusNotFound, "a proxy repository has no signing key; use the key of the remote archive")
+		httpx.Error(w, r, http.StatusNotFound, "a proxy repository has no signing key; use the key of the remote archive")
 		return
 	}
 	k, ok := h.keys.Get(signingKey(repo))
 	if !ok {
-		httpx.Error(w, http.StatusNotFound, "the signing key of this repository does not exist")
+		httpx.Error(w, r, http.StatusNotFound, "the signing key of this repository does not exist")
 		return
 	}
 	key := []byte(k.PublicKey)

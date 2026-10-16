@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// readyToken marks the machine-readable line "telesphorepo dev" prints once it listens,
+// readyToken marks the machine-readable line "telesphorepo-server dev" prints once it listens,
 // e.g. `TELESPHOREPO_READY url=http://localhost:8080 user=admin password=... data="./.telesphorepo-dev"`
 // (a JSON object after the token is accepted too). tools/task swallows the line and prints
 // one combined banner instead.

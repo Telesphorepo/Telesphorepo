@@ -78,7 +78,7 @@ func (rd *Reader) Serve(w http.ResponseWriter, r *http.Request, c *route.Call, p
 			if base, checksum, ok := mg.Match(path); ok {
 				members, err := rd.access.GroupMembers(r.Context(), r, c.P, repo)
 				if err != nil {
-					httpx.Error(w, http.StatusInternalServerError, "internal error")
+					httpx.Error(w, r, http.StatusInternalServerError, "internal error")
 					return
 				}
 				rd.serveMerged(w, r, repo, members, mg, path, base, checksum)
@@ -89,12 +89,12 @@ func (rd *Reader) Serve(w http.ResponseWriter, r *http.Request, c *route.Call, p
 	a, err := rd.Resolve(r.Context(), r, c.P, repo, path)
 	switch {
 	case errors.Is(err, ErrRemoteFailed):
-		httpx.Error(w, http.StatusBadGateway, "The remote repository did not answer.")
+		httpx.Error(w, r, http.StatusBadGateway, "The remote repository did not answer.")
 	case err != nil:
 		rd.log.Error("asset read failed", "repo", repo.Name, "path", path, "err", err)
-		httpx.Error(w, http.StatusInternalServerError, "internal error")
+		httpx.Error(w, r, http.StatusInternalServerError, "internal error")
 	case a == nil:
-		httpx.Error(w, http.StatusNotFound, "not found")
+		httpx.Error(w, r, http.StatusNotFound, "not found")
 	default:
 		rd.ServeAsset(w, r, a, ServeOptions{})
 	}
@@ -176,12 +176,12 @@ func (rd *Reader) has(ctx context.Context, repo *repos.Repo, path repopath.Path)
 	return a, err
 }
 
-func notInGroup(w http.ResponseWriter, remoteFailed bool) {
+func notInGroup(w http.ResponseWriter, r *http.Request, remoteFailed bool) {
 	if remoteFailed {
-		httpx.Error(w, http.StatusBadGateway, "The remote repository did not answer.")
+		httpx.Error(w, r, http.StatusBadGateway, "The remote repository did not answer.")
 		return
 	}
-	httpx.Error(w, http.StatusNotFound, "not found")
+	httpx.Error(w, r, http.StatusNotFound, "not found")
 }
 
 // checksums are the checksum names of Merger.Match.
@@ -205,14 +205,14 @@ func (rd *Reader) serveMerged(w http.ResponseWriter, r *http.Request, group *rep
 		case errors.Is(err, ErrRemoteFailed):
 			remoteFailed = true
 		case err != nil:
-			httpx.Error(w, http.StatusInternalServerError, "internal error")
+			httpx.Error(w, r, http.StatusInternalServerError, "internal error")
 			return
 		case a != nil:
 			srcs = append(srcs, source{m, a})
 		}
 	}
 	if len(srcs) == 0 {
-		notInGroup(w, remoteFailed)
+		notInGroup(w, r, remoteFailed)
 		return
 	}
 	if len(srcs) == 1 {
@@ -239,7 +239,7 @@ func (rd *Reader) serveMerged(w http.ResponseWriter, r *http.Request, group *rep
 		}
 	}
 	if len(parts) == 0 {
-		httpx.Error(w, http.StatusNotFound, "not found")
+		httpx.Error(w, r, http.StatusNotFound, "not found")
 		return
 	}
 	data := parts[0]
@@ -247,7 +247,7 @@ func (rd *Reader) serveMerged(w http.ResponseWriter, r *http.Request, group *rep
 		var err error
 		if data, err = mg.Merge(ctx, base, parts); err != nil {
 			rd.log.Warn("group: merge", "group", group.Name, "path", base, "err", err)
-			httpx.Error(w, http.StatusNotFound, "not found")
+			httpx.Error(w, r, http.StatusNotFound, "not found")
 			return
 		}
 	}
@@ -260,7 +260,7 @@ func (rd *Reader) serveMerged(w http.ResponseWriter, r *http.Request, group *rep
 	if checksum != "" {
 		h := checksums[checksum]
 		if h == nil {
-			httpx.Error(w, http.StatusNotFound, "not found")
+			httpx.Error(w, r, http.StatusNotFound, "not found")
 			return
 		}
 		sum := h()
@@ -363,7 +363,7 @@ func (rd *Reader) ServeAsset(w http.ResponseWriter, r *http.Request, a *Asset, o
 		}
 		if u, ok, err := st.PresignGet(ctx, key, rd.ttl(), storage.Response{ContentType: a.ContentType, ContentDisposition: disposition}); err != nil {
 			rd.log.Error("presign failed", "key", key, "err", err)
-			httpx.Error(w, http.StatusInternalServerError, "internal error")
+			httpx.Error(w, r, http.StatusInternalServerError, "internal error")
 			return
 		} else if ok {
 			h.Del("Last-Modified")
@@ -376,12 +376,12 @@ func (rd *Reader) ServeAsset(w http.ResponseWriter, r *http.Request, a *Asset, o
 	if off, n, ok := byteRange(r, a.Size, etag); ok {
 		if n == 0 {
 			h.Set("Content-Range", "bytes */"+strconv.FormatInt(a.Size, 10))
-			httpx.Error(w, http.StatusRequestedRangeNotSatisfiable, "the range is outside the file")
+			httpx.Error(w, r, http.StatusRequestedRangeNotSatisfiable, "the range is outside the file")
 			return
 		}
 		body, _, err := st.GetRange(ctx, key, off, n)
 		if err != nil {
-			rd.storageFailed(w, a, err)
+			rd.storageFailed(w, r, a, err)
 			return
 		}
 		defer body.Close()
@@ -395,7 +395,7 @@ func (rd *Reader) ServeAsset(w http.ResponseWriter, r *http.Request, a *Asset, o
 	}
 	body, info, err := st.Get(ctx, key)
 	if err != nil {
-		rd.storageFailed(w, a, err)
+		rd.storageFailed(w, r, a, err)
 		return
 	}
 	defer body.Close()
@@ -416,18 +416,18 @@ func (rd *Reader) ServeAsset(w http.ResponseWriter, r *http.Request, a *Asset, o
 }
 
 // storageFailed answers a blob of a that the store could not open.
-func (rd *Reader) storageFailed(w http.ResponseWriter, a *Asset, err error) {
+func (rd *Reader) storageFailed(w http.ResponseWriter, r *http.Request, a *Asset, err error) {
 	h := w.Header()
 	for _, k := range []string{"ETag", "Last-Modified", "Content-Range", "X-Checksum-SHA256", "X-Checksum-SHA1", "X-Checksum-MD5"} {
 		h.Del(k)
 	}
 	if errors.Is(err, storage.ErrNotFound) {
 		rd.log.Warn("asset row without blob", "repo_id", a.RepoID, "path", a.Path)
-		httpx.Error(w, http.StatusNotFound, "not found")
+		httpx.Error(w, r, http.StatusNotFound, "not found")
 		return
 	}
 	rd.log.Error("storage get failed", "repo_id", a.RepoID, "path", a.Path, "err", err)
-	httpx.Error(w, http.StatusInternalServerError, "internal error")
+	httpx.Error(w, r, http.StatusInternalServerError, "internal error")
 }
 
 // byteRange reads the Range header of r for a file of size bytes with ETag etag: one range

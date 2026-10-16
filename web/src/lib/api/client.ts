@@ -1,6 +1,6 @@
 // The one fetch wrapper of the UI. Every /api call goes through request(), which turns a non-2xx
-// answer into an ApiError and tells the auth store when the session is gone (401) or can only set
-// up a second factor (403 second_factor_required).
+// answer (an RFC 9457 problem document) into an ApiError and tells the auth store when the session
+// is gone (401) or can only set up a second factor (403 second_factor_required).
 
 export class ApiError extends Error {
   constructor(
@@ -16,6 +16,21 @@ export class ApiError extends Error {
   get notFound() {
     return this.status === 404;
   }
+}
+
+/** The problem document of an error answer (RFC 9457), with the extension member fields. */
+type Problem = { type?: unknown; title?: unknown; detail?: unknown; fields?: unknown };
+
+/** The message of a problem document: its detail, else its title, else fallback. */
+function problemMessage(p: Problem | undefined, fallback: string): string {
+  if (typeof p?.detail === "string" && p.detail) return p.detail;
+  if (typeof p?.title === "string" && p.title) return p.title;
+  return fallback;
+}
+
+/** The per-field messages of a problem document, if it has them. */
+function problemFields(p: Problem | undefined): Record<string, string> | undefined {
+  return p?.fields && typeof p.fields === "object" ? (p.fields as Record<string, string>) : undefined;
 }
 
 /** The message to show for any thrown value. */
@@ -93,9 +108,9 @@ export async function request<T = void>(method: string, url: string, opts: Reque
     let message = res.statusText || `Request failed (${res.status})`;
     let fields: Record<string, string> | undefined;
     try {
-      const j = await res.json();
-      if (typeof j?.error === "string") message = j.error;
-      if (j?.fields && typeof j.fields === "object") fields = j.fields;
+      const p = (await res.json()) as Problem;
+      message = problemMessage(p, message);
+      fields = problemFields(p);
     } catch {
       /* not JSON */
     }
@@ -142,10 +157,10 @@ export function requestWithProgress<T>(
         resolve(body as T);
         return;
       }
-      const j = body as { error?: unknown; fields?: unknown } | undefined;
-      let message = typeof j?.error === "string" ? j.error : xhr.statusText || `Request failed (${xhr.status})`;
+      const p = body as Problem | undefined;
+      let message = problemMessage(p, xhr.statusText || `Request failed (${xhr.status})`);
       if (xhr.status === 413) message = "The files are larger than the upload limit of this server. Upload fewer or smaller files.";
-      const fields = j?.fields && typeof j.fields === "object" ? (j.fields as Record<string, string>) : undefined;
+      const fields = problemFields(p);
       reject(new ApiError(xhr.status, message, fields));
     };
     xhr.send(form);

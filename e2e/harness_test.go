@@ -383,6 +383,19 @@ func (s *Server) MoveFailures(t testing.TB, id int64) []MoveFailure {
 
 // ---------------------------------------------------------------- HTTP / API
 
+// Problem is the RFC 9457 problem document of an error answer under /api/ and /cli/.
+type Problem struct {
+	Type   string `json:"type"`
+	Title  string `json:"title"`
+	Detail string `json:"detail"`
+	Status int    `json:"status"`
+	Remedy *struct {
+		Action string `json:"action"`
+		URL    string `json:"url"`
+		After  int    `json:"after"`
+	} `json:"remedy"`
+}
+
 // Auth decorates a request with credentials. nil means anonymous.
 type Auth interface{ apply(*http.Request) }
 
@@ -1174,10 +1187,11 @@ func (s *Server) StartEnrollment(t testing.TB, name, client string) (Enrollment,
 	return en, priv
 }
 
-// PollAnswer is the answer of POST /api/devices/enroll/poll: a device id, or an RFC 8628 error.
+// PollAnswer is the answer of POST /api/devices/enroll/poll: a device id, or a problem document
+// whose detail is an RFC 8628 error code.
 type PollAnswer struct {
 	DeviceID int64  `json:"device_id"`
-	Error    string `json:"error"`
+	Error    string `json:"detail"`
 }
 
 // PollEnrollment polls the device flow once.

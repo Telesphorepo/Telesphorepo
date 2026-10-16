@@ -56,11 +56,11 @@ func TestZeroConfigStartup(t *testing.T) {
 	}
 }
 
-// TestCLIUser drives "telesphorepo user add/passwd" inside the running container with the
+// TestCLIUser drives "telesphorepo-server user add/passwd" inside the running container with the
 // password piped on stdin, exactly as an operator would: "<engine> exec -i <ctr> ...".
 func TestCLIUser(t *testing.T) {
 	s := StartServer(t, ServerOpts{})
-	const bin = "/telesphorepo"
+	const bin = "/telesphorepo-server"
 
 	code, out := s.Exec(t, "s3cretpass1\n", bin, "user", "add", "bob")
 	if code != 0 {
@@ -98,7 +98,7 @@ func TestCLIUser(t *testing.T) {
 
 func TestCLIVersion(t *testing.T) {
 	s := StartServer(t, ServerOpts{})
-	code, out := s.Exec(t, "", "/telesphorepo", "version")
+	code, out := s.Exec(t, "", "/telesphorepo-server", "version")
 	if code != 0 || strings.TrimSpace(out) == "" {
 		t.Fatalf("version: exit %d, output %q", code, out)
 	}

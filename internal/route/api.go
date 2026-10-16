@@ -39,35 +39,35 @@ func (a *API) BaseURL(r *http.Request) string {
 func Fail(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, auth.ErrInvalid), errors.Is(err, repos.ErrInvalid), errors.Is(err, perm.ErrUnknown), errors.As(err, new(*perm.NeedsError)):
-		httpx.Error(w, http.StatusBadRequest, err.Error())
+		httpx.Error(w, r, http.StatusBadRequest, err.Error())
 	case errors.Is(err, auth.ErrNotHeld):
-		httpx.Error(w, http.StatusForbidden, err.Error())
+		httpx.Error(w, r, http.StatusForbidden, err.Error())
 	case errors.Is(err, auth.ErrLastPeople), errors.Is(err, auth.ErrManaged):
-		httpx.Error(w, http.StatusConflict, err.Error())
+		httpx.Error(w, r, http.StatusConflict, err.Error())
 	case errors.As(err, new(*repos.MissingError)):
-		httpx.Error(w, http.StatusNotFound, err.Error())
+		httpx.Error(w, r, http.StatusNotFound, err.Error())
 	case errors.As(err, new(httpx.StatusError)):
 		var se httpx.StatusError
 		errors.As(err, &se)
-		httpx.Error(w, se.HTTPStatus(), se.Error())
+		httpx.Error(w, r, se.HTTPStatus(), se.Error())
 	case errors.Is(err, auth.ErrNotFound), errors.Is(err, repos.ErrNotFound):
-		httpx.Error(w, http.StatusNotFound, "not found")
+		httpx.Error(w, r, http.StatusNotFound, "not found")
 	case errors.Is(err, auth.ErrExists), errors.Is(err, repos.ErrExists):
-		httpx.Error(w, http.StatusConflict, "already exists")
+		httpx.Error(w, r, http.StatusConflict, "already exists")
 	case errors.Is(err, auth.ErrSSOAccount), errors.Is(err, auth.ErrPasswordLoginDisabled):
-		httpx.Error(w, http.StatusForbidden, err.Error())
+		httpx.Error(w, r, http.StatusForbidden, err.Error())
 	case errors.Is(err, auth.ErrBadCredentials):
-		httpx.Error(w, http.StatusUnauthorized, "invalid credentials")
+		httpx.Error(w, r, http.StatusUnauthorized, "invalid credentials")
 	case errors.Is(err, auth.ErrRateLimited):
 		if w.Header().Get("Retry-After") == "" {
 			w.Header().Set("Retry-After", "6")
 		}
-		httpx.Error(w, http.StatusTooManyRequests, "too many failed attempts")
+		httpx.Error(w, r, http.StatusTooManyRequests, "too many failed attempts")
 	case errors.Is(err, context.Canceled):
-		httpx.Error(w, http.StatusServiceUnavailable, "request canceled")
+		httpx.Error(w, r, http.StatusServiceUnavailable, "request canceled")
 	default:
 		slog.ErrorContext(r.Context(), "api error", "method", r.Method, "path", r.URL.Path, "err", err)
-		httpx.Error(w, http.StatusInternalServerError, "internal error")
+		httpx.Error(w, r, http.StatusInternalServerError, "internal error")
 	}
 }
 
@@ -99,7 +99,7 @@ func IDNext(n int64) *string {
 func PathID(w http.ResponseWriter, r *http.Request, msg string) (int64, bool) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil || id <= 0 {
-		httpx.Error(w, http.StatusBadRequest, msg)
+		httpx.Error(w, r, http.StatusBadRequest, msg)
 		return 0, false
 	}
 	return id, true
@@ -114,7 +114,7 @@ func IDCursor(w http.ResponseWriter, r *http.Request) (int64, bool) {
 	}
 	n, err := strconv.ParseInt(s, 10, 64)
 	if err != nil || n < 0 {
-		httpx.Error(w, http.StatusBadRequest, "invalid cursor")
+		httpx.Error(w, r, http.StatusBadRequest, "invalid cursor")
 		return 0, false
 	}
 	return n, true

@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Telesphorepo/Telesphorepo/changelog"
 	"github.com/Telesphorepo/Telesphorepo/internal/access"
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
@@ -57,10 +58,10 @@ type Services struct {
 	Manifests []*module.Manifest
 }
 
-// Options customises Run (used by "telesphorepo dev"). The zero value is plain "serve".
+// Options customises RunWith. "telesphorepo-server serve" sets Version only.
 type Options struct {
 	// Dev applies the Dev default of every setting (see settings.Options.Dev) and makes the second
-	// factor optional (auth.Service.SetDevMode). Only "telesphorepo dev" sets it.
+	// factor optional (auth.Service.SetDevMode). Only "telesphorepo-server dev" sets it.
 	Dev bool
 	// Init runs after every module's Init and routes, and before the default first-run admin
 	// bootstrap (so it may create its own admin), the start of the jobs and listening.
@@ -69,10 +70,12 @@ type Options struct {
 	Ready func(addr net.Addr)
 	// TextLogs uses human-readable text logs instead of JSON.
 	TextLogs bool
+	// Version is the stamped version of the server binary. "" is changelog.Dev.
+	Version string
 }
 
-// Run starts the HTTP server and blocks until ctx is cancelled (graceful shutdown).
-func Run(ctx context.Context, boot *config.Boot) error { return RunWith(ctx, boot, Options{}) }
+// VersionHeader is the response header that carries the version of the server on every answer.
+const VersionHeader = "Telesphorepo-Version"
 
 // Built is what the module list declares: the manifests in start order, the formats, the
 // permission registry, the audit actions, the settings groups, the CI providers and the
@@ -170,7 +173,8 @@ func Components() ([]db.Component, error) {
 	return out, nil
 }
 
-// RunWith is Run with Options. The startup order:
+// RunWith starts the HTTP server and blocks until ctx is cancelled (graceful shutdown). Every
+// answer carries VersionHeader with Options.Version. The startup order:
 //
 //  1. Logger, data dirs, db.Open.
 //  2. Build: every module's Register, the settings groups, the format registry.
@@ -248,7 +252,11 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 	// asset pipeline) finishes unless the shutdown timed out.
 	base, endBase := context.WithCancel(context.WithoutCancel(ctx))
 	defer endBase()
-	k, err := kernel(base, d, boot, set, live, b, opts.Dev, log)
+	version := opts.Version
+	if version == "" {
+		version = changelog.Dev
+	}
+	k, err := kernel(base, d, boot, set, live, b, opts.Dev, version, log)
 	if err != nil {
 		return err
 	}
@@ -333,7 +341,7 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 	}
 	srv := &http.Server{
 		Addr:              boot.Listen,
-		Handler:           resolveClient(resolve, accessLog(log, mux.Handler())), // the client first, then the log
+		Handler:           versionHeader(version, resolveClient(resolve, accessLog(log, mux.Handler()))), // the client first, then the log
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    64 << 10,
@@ -392,7 +400,7 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 
 // kernel builds the kernel services that every module gets. base ends after the HTTP server shut
 // down.
-func kernel(base context.Context, d *db.DB, boot *config.Boot, set *settings.Service, live *storage.Live, b *Built, dev bool, log *slog.Logger) (*module.Kernel, error) {
+func kernel(base context.Context, d *db.DB, boot *config.Boot, set *settings.Service, live *storage.Live, b *Built, dev bool, version string, log *slog.Logger) (*module.Kernel, error) {
 	opsSvc := ops.New(d)
 	for _, m := range b.Manifests {
 		for _, t := range m.OpTypes {
@@ -413,7 +421,7 @@ func kernel(base context.Context, d *db.DB, boot *config.Boot, set *settings.Ser
 	as := auth.New(d, set.Current, rs)
 	as.SetSealer(set) // TOTP secrets are sealed with the master key
 	as.SetAudit(au)
-	as.SetDevMode(dev) // only "telesphorepo dev" makes the second factor optional
+	as.SetDevMode(dev) // only "telesphorepo-server dev" makes the second factor optional
 	as.SetBearerKey(set.DeriveKey(auth.BearerKeyInfo))
 	bs := blobs.New(d, live)
 	pipe := assets.New(base, d, bs, set.Current, au)
@@ -430,12 +438,20 @@ func kernel(base context.Context, d *db.DB, boot *config.Boot, set *settings.Ser
 	rq := rebuild.New(d, rs, set, log.With("component", "rebuild"),
 		func(name string, fn func(context.Context)) { runner.Go("core", name, fn) }, b.Formats.RebuildRun)
 	return &module.Kernel{
-		Boot: boot, Dev: dev, DB: d, Settings: set, Perms: b.Perms, Audit: au,
+		Boot: boot, Dev: dev, Version: version, DB: d, Settings: set, Perms: b.Perms, Audit: au,
 		Jobs: runner, Storage: live, Blobs: bs, Assets: pipe, Reader: reader, Uploads: assets.NewUploads(d, set.Current),
 		Rebuilds: rq, Repos: rs, Ops: opsSvc, Auth: as, Formats: b.Formats, Access: engine,
 		CI: b.CI, Builds: ci.NewBuilds(d, b.CI), Clients: b.Clients,
 		API: &route.API{Settings: set.Current},
 	}, nil
+}
+
+// versionHeader sets VersionHeader to version on every answer.
+func versionHeader(version string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(VersionHeader, version)
+		next.ServeHTTP(w, r)
+	})
 }
 
 // resolveClient resolves the client of every request once with fn (the network module) and
@@ -477,7 +493,7 @@ func bootstrapAdmin(ctx context.Context, as *auth.Service, boot *config.Boot, lo
 			"  password: "+pass,
 			"",
 			"This password is shown only once. Change it with:",
-			"  telesphorepo user passwd "+user,
+			"  telesphorepo-server user passwd "+user,
 			"",
 			"Sign in to the web UI and add an authenticator app or a",
 			"passkey on the Security page. An admin sign-in reaches",
@@ -579,7 +595,7 @@ func accessLog(log *slog.Logger, next http.Handler) http.Handler {
 				if p == http.ErrAbortHandler || w.status != 0 {
 					abort = true // headers already sent: abort the connection
 				} else {
-					httpx.Error(w, http.StatusInternalServerError, "internal error")
+					httpx.Error(w, r, http.StatusInternalServerError, "internal error")
 				}
 			}
 			defer func() {

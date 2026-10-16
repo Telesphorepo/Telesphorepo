@@ -47,7 +47,7 @@ func userAdd(args []string) error {
 
 	return withUsers(func(ctx context.Context, as *auth.Service, _ string) error {
 		if _, err := as.GetUser(ctx, name); err == nil {
-			return fmt.Errorf("user %q already exists (to reset the password: telesphorepo user passwd %s)", name, name)
+			return fmt.Errorf("user %q already exists (to reset the password: telesphorepo-server user passwd %s)", name, name)
 		} else if !errors.Is(err, auth.ErrNotFound) {
 			return err
 		}
@@ -93,7 +93,7 @@ func userPasswd(args []string) error {
 
 	return withUsers(func(ctx context.Context, as *auth.Service, dataDir string) error {
 		if _, err := as.GetUser(ctx, name); errors.Is(err, auth.ErrNotFound) {
-			return fmt.Errorf("no user %q (create it with: telesphorepo user add %s)", name, name)
+			return fmt.Errorf("no user %q (create it with: telesphorepo-server user add %s)", name, name)
 		} else if err != nil {
 			return err
 		}
@@ -104,7 +104,7 @@ func userPasswd(args []string) error {
 		if _, err := as.UpdateUser(ctx, name, &pw); err != nil {
 			return fmt.Errorf("update password: %w", err)
 		}
-		// Keep the dev banner truthful: "telesphorepo dev" prints the admin password from this file.
+		// Keep the dev banner truthful: "telesphorepo-server dev" prints the admin password from this file.
 		if name == devAdminUser {
 			pf := config.JoinDataDir(dataDir, config.DevAdminPasswordFile)
 			if _, err := os.Stat(pf); err == nil {
@@ -155,7 +155,7 @@ func withUsers(fn func(ctx context.Context, as *auth.Service, dataDir string) er
 	dir, fromDev := config.CLIDataDir()
 	boot := &config.Boot{DataDir: dir}
 	if fromDev {
-		fmt.Fprintf(os.Stderr, "Using data dir %s (the \"telesphorepo dev\" instance; set TR_DATA_DIR to choose another)\n", dir)
+		fmt.Fprintf(os.Stderr, "Using data dir %s (the \"telesphorepo-server dev\" instance; set TR_DATA_DIR to choose another)\n", dir)
 	} else {
 		fmt.Fprintf(os.Stderr, "Using data dir %s\n", dir)
 	}
@@ -191,7 +191,7 @@ func readPassword(prompt string) (string, error) {
 		}
 		pw := strings.TrimRight(line, "\r\n")
 		if pw == "" {
-			return "", errors.New("no password on stdin (pipe one line, e.g. echo 's3cretpass' | telesphorepo user add NAME)")
+			return "", errors.New("no password on stdin (pipe one line, e.g. echo 's3cretpass' | telesphorepo-server user add NAME)")
 		}
 		return pw, checkPassword(pw)
 	}

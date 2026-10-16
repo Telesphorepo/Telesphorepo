@@ -58,7 +58,7 @@ func (s *Service) verifyUserPassword(ctx context.Context, keys []string, usernam
 	for {
 		if uid, hash, ok := s.cache.get(key); ok {
 			// The DB is the source of truth: a password changed by another process (e.g.
-			// "telesphorepo user passwd") changes the stored hash and voids this entry.
+			// "telesphorepo-server user passwd") changes the stored hash and voids this entry.
 			p, cur, err := s.principalAndHash(ctx, uid)
 			if err != nil {
 				return nil, err

@@ -262,8 +262,7 @@ func TestSettingsStorageBogusS3Refused(t *testing.T) {
 		"s3.path_style":        true,
 	}
 	var res struct {
-		OK    bool   `json:"ok"`
-		Error string `json:"error"`
+		OK bool `json:"ok"`
 	}
 	st, b := s.API(t, http.MethodPost, "/api/settings/storage/test", bogus, s.Admin())
 	if st != http.StatusBadRequest {

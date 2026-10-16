@@ -49,7 +49,7 @@ func (a *API) settingsList(p *auth.Principal) map[string][]groupJSON {
 
 // authConfig tells the UI which sign-in methods exist: {oidc, password_login,
 // second_factor_optional}. password_login is "all", or "publishers" when people who manage sign
-// in with single sign-on only. second_factor_optional is true only under "telesphorepo dev".
+// in with single sign-on only. second_factor_optional is true only under "telesphorepo-server dev".
 func (a *API) authConfig(w http.ResponseWriter, r *http.Request, _ *route.Call) {
 	httpx.WriteJSON(w, http.StatusOK, struct {
 		OIDC                 bool   `json:"oidc"`
@@ -79,17 +79,18 @@ func (a *API) decodePatch(w http.ResponseWriter, r *http.Request) (map[string]js
 	return patch, true
 }
 
-// settingsError writes a refusal of a settings change. A *settings.HookError answers its status
-// with {error, fields?}. A *settings.ValidationError answers 409 when it concerns a setting that
-// the environment sets, else 400, with {error, fields: {key: msg}}.
+// settingsError writes a refusal of a settings change as a problem document. A
+// *settings.HookError answers its status, with the extension member fields when it has fields.
+// A *settings.ValidationError answers 409 when it concerns a setting that the environment sets,
+// else 400, with fields: {key: msg}.
 func (a *API) settingsError(w http.ResponseWriter, r *http.Request, err error) {
 	var he *settings.HookError
 	if errors.As(err, &he) {
-		body := map[string]any{"error": he.Message}
+		d := httpx.Blank(he.Status, he.Message)
 		if he.Fields != nil {
-			body["fields"] = he.Fields
+			d = d.With(map[string]any{"fields": he.Fields})
 		}
-		httpx.WriteJSON(w, he.Status, body)
+		httpx.WriteProblem(w, r, d)
 		return
 	}
 	var ve *settings.ValidationError
@@ -104,7 +105,7 @@ func (a *API) settingsError(w http.ResponseWriter, r *http.Request, err error) {
 			status = http.StatusConflict
 		}
 	}
-	httpx.WriteJSON(w, status, map[string]any{"error": ve.Error(), "fields": ve.Fields})
+	httpx.WriteProblem(w, r, httpx.Blank(status, ve.Error()).With(map[string]any{"fields": ve.Fields}))
 }
 
 // patchSettings saves a settings patch. Each key needs the permission of its group (403). The
@@ -123,7 +124,7 @@ func (a *API) patchSettings(w http.ResponseWriter, r *http.Request, c *route.Cal
 			continue // the service answers 400 for an unknown key
 		}
 		if g := def.Group(); !p.Perms.Has(g.Perm) {
-			httpx.Error(w, http.StatusForbidden, "permission required for "+k+": "+perm.Current().Label(g.Perm))
+			httpx.Error(w, r, http.StatusForbidden, "permission required for "+k+": "+perm.Current().Label(g.Perm))
 			return
 		}
 	}
@@ -141,15 +142,16 @@ func (a *API) patchSettings(w http.ResponseWriter, r *http.Request, c *route.Cal
 
 // testSettings checks the values of group {group}: the body is merged over the current values
 // and not saved. The group's Validate runs, then its Test (e.g. the probe of a blob store, the
-// discovery check of an identity provider). {ok: true}, or 400 {ok: false, error, fields?}.
+// discovery check of an identity provider). {ok: true}, or a 400 problem document with the
+// extension members ok (false) and fields (when the check names fields).
 func (a *API) testSettings(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	g := a.settings.Group(r.PathValue("group"))
 	if g == nil {
-		httpx.Error(w, http.StatusNotFound, "no such settings group")
+		httpx.Error(w, r, http.StatusNotFound, "no such settings group")
 		return
 	}
 	if !c.P.Perms.Has(g.Perm) {
-		httpx.Error(w, http.StatusForbidden, "permission required: "+perm.Current().Label(g.Perm))
+		httpx.Error(w, r, http.StatusForbidden, "permission required: "+perm.Current().Label(g.Perm))
 		return
 	}
 	patch, ok := a.decodePatch(w, r)
@@ -157,16 +159,16 @@ func (a *API) testSettings(w http.ResponseWriter, r *http.Request, c *route.Call
 		return
 	}
 	if err := a.settings.Test(r.Context(), g, patch); err != nil {
-		body := map[string]any{"ok": false, "error": err.Error()}
+		ext := map[string]any{"ok": false}
 		var ve *settings.ValidationError
 		var he *settings.HookError
 		switch {
 		case errors.As(err, &ve):
-			body["fields"] = ve.Fields
+			ext["fields"] = ve.Fields
 		case errors.As(err, &he) && he.Fields != nil:
-			body["fields"] = he.Fields
+			ext["fields"] = he.Fields
 		}
-		httpx.WriteJSON(w, http.StatusBadRequest, body)
+		httpx.WriteProblem(w, r, httpx.Blank(http.StatusBadRequest, err.Error()).With(ext))
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})

@@ -260,12 +260,12 @@ func (a *API) repoCI(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	q := r.URL.Query()
 	f := a.formats.Get(repo.Format)
 	if f == nil || repo.Kind != repos.KindHosted || len(f.Tools) == 0 {
-		httpx.Error(w, http.StatusBadRequest, "this repository takes no publishes from CI")
+		httpx.Error(w, r, http.StatusBadRequest, "this repository takes no publishes from CI")
 		return
 	}
 	system := q.Get("system")
 	if !slices.Contains(ci.Systems, system) {
-		httpx.Error(w, http.StatusBadRequest, "system must be one of "+strings.Join(ci.Systems, ", "))
+		httpx.Error(w, r, http.StatusBadRequest, "system must be one of "+strings.Join(ci.Systems, ", "))
 		return
 	}
 	tool := f.Tools[0]
@@ -276,7 +276,7 @@ func (a *API) repoCI(w http.ResponseWriter, r *http.Request, c *route.Call) {
 			for i, t := range f.Tools {
 				ids[i] = t.ID
 			}
-			httpx.Error(w, http.StatusBadRequest, "tool must be one of "+strings.Join(ids, ", "))
+			httpx.Error(w, r, http.StatusBadRequest, "tool must be one of "+strings.Join(ids, ", "))
 			return
 		}
 		tool = f.Tools[i]
@@ -291,7 +291,7 @@ func (a *API) repoCI(w http.ResponseWriter, r *http.Request, c *route.Call) {
 				continue
 			}
 			if !ci.ValidPattern(v) {
-				httpx.Error(w, http.StatusBadRequest, "invalid "+p.key+" pattern "+strconv.Quote(v)+"; use letters, digits and . _ / * -")
+				httpx.Error(w, r, http.StatusBadRequest, "invalid "+p.key+" pattern "+strconv.Quote(v)+"; use letters, digits and . _ / * -")
 				return
 			}
 			if !slices.Contains(*p.out, v) {
@@ -299,7 +299,7 @@ func (a *API) repoCI(w http.ResponseWriter, r *http.Request, c *route.Call) {
 			}
 		}
 		if len(*p.out) > maxPatterns {
-			httpx.Error(w, http.StatusBadRequest, "name at most 20 "+p.key)
+			httpx.Error(w, r, http.StatusBadRequest, "name at most 20 "+p.key)
 			return
 		}
 	}
@@ -320,12 +320,12 @@ func (a *API) artifactSnippets(w http.ResponseWriter, r *http.Request, c *route.
 		mode = format.VersionPinned
 	case format.VersionPinned, format.VersionLatest:
 	default:
-		httpx.Error(w, http.StatusBadRequest, `version_mode must be "pinned" or "latest"`)
+		httpx.Error(w, r, http.StatusBadRequest, `version_mode must be "pinned" or "latest"`)
 		return
 	}
 	p := strings.Trim(q.Get("path"), "/")
 	if _, err := repopath.Parse(p); p != "" && err != nil {
-		httpx.Error(w, http.StatusBadRequest, "invalid path")
+		httpx.Error(w, r, http.StatusBadRequest, "invalid path")
 		return
 	}
 	base := a.kit.BaseURL(r)
@@ -362,7 +362,7 @@ func (a *API) versionedPath(w http.ResponseWriter, r *http.Request, c *route.Cal
 	repo := c.Repo
 	p := strings.Trim(r.URL.Query().Get("path"), "/")
 	if _, err := repopath.Parse(p); err != nil {
-		httpx.Error(w, http.StatusBadRequest, "give the path of a folder")
+		httpx.Error(w, r, http.StatusBadRequest, "give the path of a folder")
 		return nil, nil, "", false
 	}
 	return repo, a.formats.Get(repo.Format), p + "/", true
@@ -408,7 +408,7 @@ func (a *API) builds(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	}
 	q := r.URL.Query()
 	if q.Get("version") == "" {
-		httpx.Error(w, http.StatusBadRequest, "give the version")
+		httpx.Error(w, r, http.StatusBadRequest, "give the version")
 		return
 	}
 	type out struct {

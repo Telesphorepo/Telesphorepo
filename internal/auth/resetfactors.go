@@ -8,7 +8,7 @@ import (
 )
 
 // ResetSecondFactors removes every TOTP factor, passkey and recovery code of a user, for a user
-// who lost all of them (CLI "telesphorepo user reset-2fa"). The user's next sign-in, and every
+// who lost all of them (CLI "telesphorepo-server user reset-2fa"). The user's next sign-in, and every
 // session the user still has, reaches only the setup routes until a new factor is added.
 // It returns how many TOTP factors and passkeys it removed; ErrNotFound when there is no such
 // user. It records user.update.

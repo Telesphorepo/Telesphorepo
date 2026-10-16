@@ -107,7 +107,7 @@ const deleteAllUserPasskeys = `-- name: DeleteAllUserPasskeys :execrows
 DELETE FROM user_passkeys WHERE user_id = ?
 `
 
-// Removes every passkey of a user ("telesphorepo user reset-2fa").
+// Removes every passkey of a user ("telesphorepo-server user reset-2fa").
 func (q *Queries) DeleteAllUserPasskeys(ctx context.Context, userID int64) (int64, error) {
 	result, err := q.db.ExecContext(ctx, deleteAllUserPasskeys, userID)
 	if err != nil {
@@ -120,7 +120,7 @@ const deleteAllUserTOTP = `-- name: DeleteAllUserTOTP :execrows
 DELETE FROM user_totp WHERE user_id = ?
 `
 
-// Removes every TOTP factor of a user ("telesphorepo user reset-2fa").
+// Removes every TOTP factor of a user ("telesphorepo-server user reset-2fa").
 func (q *Queries) DeleteAllUserTOTP(ctx context.Context, userID int64) (int64, error) {
 	result, err := q.db.ExecContext(ctx, deleteAllUserTOTP, userID)
 	if err != nil {

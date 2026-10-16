@@ -43,7 +43,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, c *route.Call) 
 	repo := c.Repo
 	dist, comp := r.PathValue("dist"), r.PathValue("component")
 	if !repos.NameRE.MatchString(dist) || !repos.NameRE.MatchString(comp) {
-		httpx.Error(w, http.StatusBadRequest, "invalid distribution or component name")
+		httpx.Error(w, r, http.StatusBadRequest, "invalid distribution or component name")
 		return
 	}
 	sp, ok := format.Kit{Assets: h.assets}.SpoolBody(w, r)

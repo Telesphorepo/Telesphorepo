@@ -23,15 +23,15 @@ COPY . .
 COPY --from=web /src/web/dist ./web/dist
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/telesphorepo ./cmd/telesphorepo \
+    CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/telesphorepo-server ./cmd/telesphorepo-server \
  && mkdir -p /out/data
 
 FROM gcr.io/distroless/static-debian13:nonroot
-COPY --from=build /out/telesphorepo /telesphorepo
+COPY --from=build /out/telesphorepo-server /telesphorepo-server
 COPY --from=build --chown=65532:65532 /out/data /data
 ENV TR_DATA_DIR=/data
 VOLUME /data
 EXPOSE 8080
 USER nonroot:nonroot
-ENTRYPOINT ["/telesphorepo"]
+ENTRYPOINT ["/telesphorepo-server"]
 CMD ["serve"]

@@ -519,14 +519,41 @@ func TestAPIErrors(t *testing.T) {
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("/api/nope: %d %s", resp.StatusCode, b)
 	}
-	if !strings.Contains(resp.Header.Get("Content-Type"), "application/json") {
-		t.Fatalf("content-type %q", resp.Header.Get("Content-Type"))
+	if ct := resp.Header.Get("Content-Type"); ct != "application/problem+json" {
+		t.Fatalf("content-type %q, want application/problem+json", ct)
 	}
-	var e struct {
-		Error string `json:"error"`
+	var e Problem
+	if err := json.Unmarshal(b, &e); err != nil || e.Type == "" || e.Title == "" || e.Detail == "" || e.Status != http.StatusNotFound {
+		t.Fatalf("problem document: %s", b)
 	}
-	if err := json.Unmarshal(b, &e); err != nil || e.Error == "" {
-		t.Fatalf("error body: %s", b)
+	if v := resp.Header.Get("Telesphorepo-Version"); v == "" {
+		t.Fatal("/api/nope: no Telesphorepo-Version header")
+	}
+}
+
+// TestAPIChanges covers the public change log route GET /api/changes and the version header.
+func TestAPIChanges(t *testing.T) {
+	s := StartServer(t, ServerOpts{})
+	for _, since := range []string{"", "?since=v0.0.0", "?since=0.0.1-rc.1"} {
+		resp, b := s.Do(t, s.NewRequest(t, http.MethodGet, "/api/changes"+since, nil), nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET /api/changes%s: status %d: %s", since, resp.StatusCode, b)
+		}
+		var out struct {
+			Version string            `json:"version"`
+			Changes []json.RawMessage `json:"changes"`
+		}
+		if err := json.Unmarshal(b, &out); err != nil || out.Changes == nil || out.Version == "" {
+			t.Fatalf("GET /api/changes%s: %s, want {version, changes: [...]}", since, b)
+		}
+		if v := resp.Header.Get("Telesphorepo-Version"); v != out.Version {
+			t.Fatalf("GET /api/changes%s: Telesphorepo-Version %q, body version %q", since, v, out.Version)
+		}
+	}
+	resp, b := s.Do(t, s.NewRequest(t, http.MethodGet, "/api/changes?since=latest", nil), nil)
+	var p Problem
+	if resp.StatusCode != http.StatusBadRequest || json.Unmarshal(b, &p) != nil || p.Status != http.StatusBadRequest || p.Detail == "" {
+		t.Fatalf("GET /api/changes?since=latest: status %d %s, want a 400 problem document", resp.StatusCode, b)
 	}
 }
 

@@ -167,13 +167,13 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request, _ *route.Call) {
 	w.Header().Set("Cache-Control", "no-store")
 	c := h.cfg()
 	if !c.OIDCEnabled() {
-		httpx.Error(w, http.StatusNotFound, "single sign-on is not configured")
+		httpx.Error(w, r, http.StatusNotFound, "single sign-on is not configured")
 		return
 	}
 	p, err := h.provider(r.Context(), c)
 	if err != nil {
 		h.log.WarnContext(r.Context(), "OIDC discovery failed", "issuer", c.OIDCIssuer, "error", err.Error())
-		httpx.Error(w, http.StatusServiceUnavailable, "identity provider unavailable")
+		httpx.Error(w, r, http.StatusServiceUnavailable, "identity provider unavailable")
 		return
 	}
 	h.start(w, r, c, p, pending{})
@@ -187,7 +187,7 @@ func (h *Handler) device(w http.ResponseWriter, r *http.Request, call *route.Cal
 	ctx := r.Context()
 	c := h.cfg()
 	if !c.OIDCEnabled() {
-		httpx.Error(w, http.StatusNotFound, "single sign-on is not configured")
+		httpx.Error(w, r, http.StatusNotFound, "single sign-on is not configured")
 		return
 	}
 	code := r.URL.Query().Get("code")
@@ -207,7 +207,7 @@ func (h *Handler) device(w http.ResponseWriter, r *http.Request, call *route.Cal
 		return
 	case err != nil:
 		h.log.ErrorContext(ctx, "SSO device approval: look up the code", "error", err.Error())
-		httpx.Error(w, http.StatusInternalServerError, "internal error")
+		httpx.Error(w, r, http.StatusInternalServerError, "internal error")
 		return
 	}
 	prov, err := h.provider(ctx, c)
@@ -268,7 +268,7 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request, _ *route.Call
 	ctx := r.Context()
 	c := h.cfg()
 	if !c.OIDCEnabled() {
-		httpx.Error(w, http.StatusNotFound, "single sign-on is not configured")
+		httpx.Error(w, r, http.StatusNotFound, "single sign-on is not configured")
 		return
 	}
 	h.clearCookie(w, c)
@@ -278,16 +278,16 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request, _ *route.Call
 	state := q.Get("state")
 	ck, err := r.Cookie(stateCookie)
 	if state == "" || err != nil || subtle.ConstantTimeCompare([]byte(ck.Value), []byte(state)) != 1 {
-		httpx.Error(w, http.StatusBadRequest, "invalid sign-in state; start again")
+		httpx.Error(w, r, http.StatusBadRequest, "invalid sign-in state; start again")
 		return
 	}
 	pend, ok := h.states.take(state)
 	if !ok {
-		httpx.Error(w, http.StatusBadRequest, "invalid or expired sign-in state; start again")
+		httpx.Error(w, r, http.StatusBadRequest, "invalid or expired sign-in state; start again")
 		return
 	}
 	if pend.provKey != providerKey(c) {
-		httpx.Error(w, http.StatusBadRequest, "single sign-on settings changed; start again")
+		httpx.Error(w, r, http.StatusBadRequest, "single sign-on settings changed; start again")
 		return
 	}
 	fail := func(code string) {
@@ -304,14 +304,14 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request, _ *route.Call
 	}
 	code := q.Get("code")
 	if code == "" {
-		httpx.Error(w, http.StatusBadRequest, "missing authorization code")
+		httpx.Error(w, r, http.StatusBadRequest, "missing authorization code")
 		return
 	}
 
 	p, err := h.provider(ctx, c)
 	if err != nil {
 		h.log.WarnContext(ctx, "OIDC discovery failed", "issuer", c.OIDCIssuer, "error", err.Error())
-		httpx.Error(w, http.StatusServiceUnavailable, "identity provider unavailable")
+		httpx.Error(w, r, http.StatusServiceUnavailable, "identity provider unavailable")
 		return
 	}
 	si, ok := h.exchange(ctx, c, p, pend, code)
@@ -353,12 +353,12 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request, _ *route.Call
 		return
 	case err != nil:
 		h.log.ErrorContext(ctx, "SSO user upsert", "error", err.Error())
-		httpx.Error(w, http.StatusInternalServerError, "internal error")
+		httpx.Error(w, r, http.StatusInternalServerError, "internal error")
 		return
 	}
 	if err := h.auth.StartSession(w, r, u.ID, c.OIDCSessionTTL); err != nil {
 		h.log.ErrorContext(ctx, "SSO session", "error", err.Error())
-		httpx.Error(w, http.StatusInternalServerError, "internal error")
+		httpx.Error(w, r, http.StatusInternalServerError, "internal error")
 		return
 	}
 	h.log.InfoContext(ctx, "SSO login", "username", u.Username)
@@ -428,7 +428,7 @@ func (h *Handler) approval(w http.ResponseWriter, r *http.Request, pend pending,
 	switch {
 	case err != nil:
 		h.log.ErrorContext(ctx, "SSO device approval: find the account", "error", err.Error())
-		httpx.Error(w, http.StatusInternalServerError, "internal error")
+		httpx.Error(w, r, http.StatusInternalServerError, "internal error")
 		return
 	case id != pend.userID:
 		h.log.WarnContext(ctx, "SSO device approval refused: the provider signed in another account", "subject", si.idt.Subject)
@@ -457,7 +457,7 @@ func (h *Handler) approval(w http.ResponseWriter, r *http.Request, pend pending,
 		return
 	case err != nil:
 		h.log.ErrorContext(ctx, "SSO device approval: store the grant", "error", err.Error())
-		httpx.Error(w, http.StatusInternalServerError, "internal error")
+		httpx.Error(w, r, http.StatusInternalServerError, "internal error")
 		return
 	}
 	q := url.Values{"code": {pend.userCode}, "grant": {grant}}

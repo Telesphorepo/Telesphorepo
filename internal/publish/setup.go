@@ -63,12 +63,12 @@ func (m *mod) setupScript(ps1 bool) route.Handler {
 	return func(w http.ResponseWriter, r *http.Request, _ *route.Call) {
 		base, ok := m.setupBaseURL(r)
 		if !ok {
-			httpx.Error(w, http.StatusBadRequest, "the server address cannot go in a script; set the public base URL (base_url)")
+			httpx.Error(w, r, http.StatusBadRequest, "the server address cannot go in a script; set the public base URL (base_url)")
 			return
 		}
 		tools := m.setupTools()
 		if len(tools) == 0 {
-			httpx.Error(w, http.StatusNotFound, "no build tool of this server has a project setup")
+			httpx.Error(w, r, http.StatusNotFound, "no build tool of this server has a project setup")
 			return
 		}
 		var ids, projects, fragments []string

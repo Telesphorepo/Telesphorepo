@@ -225,7 +225,7 @@ func (m *mod) putRules(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	}
 	out, err := m.rules.SetRules(r.Context(), repo, in)
 	if errors.Is(err, ErrInvalid) {
-		httpx.Error(w, http.StatusBadRequest, err.Error())
+		httpx.Error(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err != nil {
@@ -241,21 +241,21 @@ type listJSON struct {
 	UsedBy Usage `json:"used_by"`
 }
 
-// listFail maps an IP list error to a response. An in-use list answers 409 {error, used_by}.
+// listFail maps an IP list error to a response. An in-use list answers 409 with the extension member used_by.
 func listFail(w http.ResponseWriter, r *http.Request, err error) {
 	var inv *InvalidError
 	var used *InUseError
 	switch {
 	case errors.As(err, &inv):
-		httpx.Error(w, http.StatusBadRequest, err.Error())
+		httpx.Error(w, r, http.StatusBadRequest, err.Error())
 	case errors.As(err, &used):
-		httpx.WriteJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "used_by": used.Usage})
+		httpx.WriteProblem(w, r, httpx.Blank(http.StatusConflict, err.Error()).With(map[string]any{"used_by": used.Usage}))
 	case errors.Is(err, ErrNotFound):
-		httpx.Error(w, http.StatusNotFound, err.Error())
+		httpx.Error(w, r, http.StatusNotFound, err.Error())
 	case errors.Is(err, ErrExists), errors.Is(err, ErrEnvNamed):
-		httpx.Error(w, http.StatusConflict, err.Error())
+		httpx.Error(w, r, http.StatusConflict, err.Error())
 	case errors.Is(err, ErrReadOnly), errors.Is(err, ErrNotPreset):
-		httpx.Error(w, http.StatusBadRequest, err.Error())
+		httpx.Error(w, r, http.StatusBadRequest, err.Error())
 	default:
 		route.Fail(w, r, err)
 	}
@@ -265,7 +265,7 @@ func listFail(w http.ResponseWriter, r *http.Request, err error) {
 func (m *mod) listDetail(w http.ResponseWriter, r *http.Request, status int, name string) {
 	l, ok := m.rules.Get(name)
 	if !ok {
-		httpx.Error(w, http.StatusNotFound, ErrNotFound.Error())
+		httpx.Error(w, r, http.StatusNotFound, ErrNotFound.Error())
 		return
 	}
 	u, err := m.rules.Usage(r.Context(), name)
@@ -370,7 +370,7 @@ func (m *mod) refreshList(w http.ResponseWriter, r *http.Request, c *route.Call)
 		return
 	}
 	if err != nil {
-		httpx.Error(w, http.StatusBadGateway, err.Error())
+		httpx.Error(w, r, http.StatusBadGateway, err.Error())
 		return
 	}
 	m.listDetail(w, r, http.StatusOK, name)

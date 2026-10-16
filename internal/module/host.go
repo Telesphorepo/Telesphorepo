@@ -31,7 +31,8 @@ import (
 // gets the same Kernel.
 type Kernel struct {
 	Boot     *config.Boot
-	Dev      bool // "telesphorepo dev"
+	Dev      bool   // "telesphorepo-server dev"
+	Version  string // the stamped version of the server binary, changelog.Dev without a stamp
 	DB       *db.DB
 	Settings *settings.Service // the live settings: Current(), then a settings.Key or View
 	Perms    *perm.Registry

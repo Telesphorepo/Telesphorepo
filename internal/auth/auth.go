@@ -170,7 +170,7 @@ type Service struct {
 	sso        func() bool               // reports whether single sign-on is on (SetSSO)
 	managed    func() bool               // reports whether single sign-on manages the permissions of SSO accounts (SetManaged)
 
-	// dev makes the second factor optional (telesphorepo dev only): a person without a factor
+	// dev makes the second factor optional (telesphorepo-server dev only): a person without a factor
 	// gets a full session, and an approval or a manual session without a factor passes. A
 	// factor that the user has is still checked.
 	dev bool

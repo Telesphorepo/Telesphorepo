@@ -58,13 +58,13 @@ func failSecondFactor(w http.ResponseWriter, r *http.Request, err error) {
 	}
 	switch {
 	case errors.Is(err, auth.ErrLoginExpired):
-		httpx.Error(w, http.StatusUnauthorized, "sign-in expired; enter your password again")
+		httpx.Error(w, r, http.StatusUnauthorized, "sign-in expired; enter your password again")
 	case errors.Is(err, auth.ErrBadSecondFactor):
-		httpx.Error(w, http.StatusUnauthorized, "second factor did not verify")
+		httpx.Error(w, r, http.StatusUnauthorized, "second factor did not verify")
 	case errors.Is(err, auth.ErrNoSecondFactor):
-		httpx.Error(w, http.StatusForbidden, auth.ErrNoSecondFactor.Error())
+		httpx.Error(w, r, http.StatusForbidden, auth.ErrNoSecondFactor.Error())
 	case errors.Is(err, auth.ErrPasskeysUnavailable):
-		httpx.Error(w, http.StatusConflict, auth.ErrPasskeysUnavailable.Error())
+		httpx.Error(w, r, http.StatusConflict, auth.ErrPasskeysUnavailable.Error())
 	default:
 		route.Fail(w, r, err)
 	}
@@ -123,17 +123,17 @@ func (a *API) loginSecondFactor(w http.ResponseWriter, r *http.Request, c *route
 
 // localAccount requires the UI session (route.Setup) of a local account: an SSO account has no
 // second factors of its own.
-func localAccount(w http.ResponseWriter, c *route.Call) (*auth.Principal, bool) {
+func localAccount(w http.ResponseWriter, r *http.Request, c *route.Call) (*auth.Principal, bool) {
 	p := c.P
 	if p.Kind != auth.KindLocal {
-		httpx.Error(w, http.StatusForbidden, auth.ErrSSOAccount.Error())
+		httpx.Error(w, r, http.StatusForbidden, auth.ErrSSOAccount.Error())
 		return nil, false
 	}
 	return p, true
 }
 
 func (a *API) getSecurity(w http.ResponseWriter, r *http.Request, c *route.Call) {
-	p, ok := localAccount(w, c)
+	p, ok := localAccount(w, r, c)
 	if !ok {
 		return
 	}
@@ -146,7 +146,7 @@ func (a *API) getSecurity(w http.ResponseWriter, r *http.Request, c *route.Call)
 }
 
 func (a *API) beginTOTP(w http.ResponseWriter, r *http.Request, c *route.Call) {
-	p, ok := localAccount(w, c)
+	p, ok := localAccount(w, r, c)
 	if !ok {
 		return
 	}
@@ -165,7 +165,7 @@ func (a *API) beginTOTP(w http.ResponseWriter, r *http.Request, c *route.Call) {
 }
 
 func (a *API) confirmTOTP(w http.ResponseWriter, r *http.Request, c *route.Call) {
-	p, ok := localAccount(w, c)
+	p, ok := localAccount(w, r, c)
 	if !ok {
 		return
 	}
@@ -185,13 +185,13 @@ func (a *API) confirmTOTP(w http.ResponseWriter, r *http.Request, c *route.Call)
 }
 
 func (a *API) deleteTOTP(w http.ResponseWriter, r *http.Request, c *route.Call) {
-	p, ok := localAccount(w, c)
+	p, ok := localAccount(w, r, c)
 	if !ok {
 		return
 	}
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		httpx.Error(w, http.StatusBadRequest, "invalid id")
+		httpx.Error(w, r, http.StatusBadRequest, "invalid id")
 		return
 	}
 	if err := a.auth.DeleteTOTP(r.Context(), p.UserID, id); err != nil {
@@ -202,7 +202,7 @@ func (a *API) deleteTOTP(w http.ResponseWriter, r *http.Request, c *route.Call) 
 }
 
 func (a *API) beginPasskeyRegistration(w http.ResponseWriter, r *http.Request, c *route.Call) {
-	p, ok := localAccount(w, c)
+	p, ok := localAccount(w, r, c)
 	if !ok {
 		return
 	}
@@ -215,7 +215,7 @@ func (a *API) beginPasskeyRegistration(w http.ResponseWriter, r *http.Request, c
 }
 
 func (a *API) finishPasskeyRegistration(w http.ResponseWriter, r *http.Request, c *route.Call) {
-	p, ok := localAccount(w, c)
+	p, ok := localAccount(w, r, c)
 	if !ok {
 		return
 	}
@@ -237,7 +237,7 @@ func (a *API) finishPasskeyRegistration(w http.ResponseWriter, r *http.Request, 
 // beginPasskeyAssertion starts a fresh passkey check, for a device approval or a manual
 // publish session.
 func (a *API) beginPasskeyAssertion(w http.ResponseWriter, r *http.Request, c *route.Call) {
-	p, ok := localAccount(w, c)
+	p, ok := localAccount(w, r, c)
 	if !ok {
 		return
 	}
@@ -250,13 +250,13 @@ func (a *API) beginPasskeyAssertion(w http.ResponseWriter, r *http.Request, c *r
 }
 
 func (a *API) deletePasskey(w http.ResponseWriter, r *http.Request, c *route.Call) {
-	p, ok := localAccount(w, c)
+	p, ok := localAccount(w, r, c)
 	if !ok {
 		return
 	}
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		httpx.Error(w, http.StatusBadRequest, "invalid id")
+		httpx.Error(w, r, http.StatusBadRequest, "invalid id")
 		return
 	}
 	if err := a.auth.DeletePasskey(r.Context(), p.UserID, id); err != nil {
@@ -267,7 +267,7 @@ func (a *API) deletePasskey(w http.ResponseWriter, r *http.Request, c *route.Cal
 }
 
 func (a *API) generateRecoveryCodes(w http.ResponseWriter, r *http.Request, c *route.Call) {
-	p, ok := localAccount(w, c)
+	p, ok := localAccount(w, r, c)
 	if !ok {
 		return
 	}

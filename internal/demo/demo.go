@@ -1,4 +1,4 @@
-// Package demo writes the demo dataset of "telesphorepo dev". The command creates the users and
+// Package demo writes the demo dataset of "telesphorepo-server dev". The command creates the users and
 // the repos that the modules declare (module.DemoData) and hands each repo to its module with a
 // Run. A module generates its files and stores them through the Run (the asset pipeline with the
 // source "demo"), or through its own upload step. The same repos, users, paths and file contents

@@ -110,11 +110,11 @@ func (a *API) writeRepo(w http.ResponseWriter, r *http.Request, status int, p *a
 // otherwise.
 func (a *API) checkNewProxy(w http.ResponseWriter, r *http.Request, formatName string, config json.RawMessage, in *repos.ProxyInput, force bool) (*repos.Proxy, bool) {
 	if in == nil {
-		httpx.Error(w, http.StatusBadRequest, "a proxy needs proxy: {remote_url}")
+		httpx.Error(w, r, http.StatusBadRequest, "a proxy needs proxy: {remote_url}")
 		return nil, false
 	}
 	if err := a.formats.SupportsKind(formatName, repos.KindProxy); err != nil {
-		httpx.Error(w, http.StatusBadRequest, err.Error())
+		httpx.Error(w, r, http.StatusBadRequest, err.Error())
 		return nil, false
 	}
 	px, err := in.Apply(nil)
@@ -125,7 +125,7 @@ func (a *API) checkNewProxy(w http.ResponseWriter, r *http.Request, formatName s
 	if !force {
 		f := a.formats.Get(formatName)
 		if err := proxy.Check(r.Context(), px, f.ProxyProbe(config), f.RemoteAuth); err != nil {
-			httpx.Error(w, http.StatusBadGateway, "The remote repository did not answer the check: "+err.Error()+".")
+			httpx.Error(w, r, http.StatusBadGateway, "The remote repository did not answer the check: "+err.Error()+".")
 			return nil, false
 		}
 	}
@@ -156,7 +156,7 @@ func (a *API) testProxy(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	repo := c.Repo
 	px, isProxy := a.repos.Proxy(repo.ID)
 	if repo.Kind != repos.KindProxy || !isProxy {
-		httpx.Error(w, http.StatusBadRequest, repo.Name+" is not a proxy")
+		httpx.Error(w, r, http.StatusBadRequest, repo.Name+" is not a proxy")
 		return
 	}
 	probe := ""
@@ -166,7 +166,7 @@ func (a *API) testProxy(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	}
 	if err := proxy.Check(r.Context(), px, probe, auth); err != nil {
 		a.repos.ProxyFailed(r.Context(), repo.ID, err.Error())
-		httpx.WriteJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": "The remote repository did not answer the check: " + err.Error() + "."})
+		httpx.WriteProblem(w, r, httpx.Blank(http.StatusBadGateway, "The remote repository did not answer the check: "+err.Error()+".").With(map[string]any{"ok": false}))
 		return
 	}
 	a.repos.ProxyOK(r.Context(), repo.ID)

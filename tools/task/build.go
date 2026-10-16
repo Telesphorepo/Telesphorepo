@@ -13,7 +13,7 @@ import (
 
 const imageTag = "telesphorepo:local"
 
-// build builds the UI, then bin/telesphorepo with it embedded; with image it also builds
+// build builds the UI, then bin/telesphorepo-server with it embedded; with image it also builds
 // the container image with the detected engine. It returns the binary path.
 func build(ctx context.Context, image bool) (string, error) {
 	pm, err := prepare(ctx)
@@ -25,10 +25,10 @@ func build(ctx context.Context, image bool) (string, error) {
 		return "", fmt.Errorf("web build failed: %w", err)
 	}
 	version := gitVersion(ctx)
-	bin := exe(filepath.Join("bin", "telesphorepo"))
+	bin := exe(filepath.Join("bin", "telesphorepo-server"))
 	step("building %s (version %s)", filepath.ToSlash(bin), version)
 	if err := runStep(ctx, ".", []string{"CGO_ENABLED=0"}, "go", "build", "-trimpath",
-		"-ldflags", "-s -w -X main.version="+version, "-o", bin, "./cmd/telesphorepo"); err != nil {
+		"-ldflags", "-s -w -X main.version="+version, "-o", bin, "./cmd/telesphorepo-server"); err != nil {
 		return "", fmt.Errorf("go build failed: %w", err)
 	}
 	out.line(green("✓ ") + "built " + bold(filepath.ToSlash(bin)))

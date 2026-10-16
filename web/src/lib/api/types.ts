@@ -94,7 +94,7 @@ export type AuthConfig = {
   oidc: boolean;
   /** "all": every local account signs in with a password; "publishers": people who manage sign in with single sign-on only. */
   password_login: "all" | "publishers";
-  /** True under `telesphorepo dev`: the second factor is optional (an enrolled one is still checked). */
+  /** True under `telesphorepo-server dev`: the second factor is optional (an enrolled one is still checked). */
   second_factor_optional: boolean;
 };
 

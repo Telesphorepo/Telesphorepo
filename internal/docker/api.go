@@ -55,17 +55,17 @@ const maxDetailTags = 100
 // first 100 tags that name it and how many manifests name it as their subject.
 func (f *Format) manifestDetails(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	if c.Repo.Format != name {
-		httpx.Error(w, http.StatusNotFound, "not a docker repository")
+		httpx.Error(w, r, http.StatusNotFound, "not a docker repository")
 		return
 	}
 	p, err := repopath.Parse(strings.TrimPrefix(r.URL.Query().Get("path"), "/"))
 	if err != nil {
-		httpx.Error(w, http.StatusBadRequest, "path must be a tag or manifest path of the repository")
+		httpx.Error(w, r, http.StatusBadRequest, "path must be a tag or manifest path of the repository")
 		return
 	}
 	op, ok := parsePath(string(p))
 	if !ok || op.kind == kindLink {
-		httpx.Error(w, http.StatusBadRequest, "path must be a tag or manifest path of the repository")
+		httpx.Error(w, r, http.StatusBadRequest, "path must be a tag or manifest path of the repository")
 		return
 	}
 	ctx := r.Context()
@@ -75,13 +75,13 @@ func (f *Format) manifestDetails(w http.ResponseWriter, r *http.Request, c *rout
 		return
 	}
 	if a == nil {
-		httpx.Error(w, http.StatusNotFound, "not found")
+		httpx.Error(w, r, http.StatusNotFound, "not found")
 		return
 	}
 	m, err := f.readManifest(ctx, a)
 	var oe *ociError
 	if errors.As(err, &oe) {
-		httpx.Error(w, http.StatusUnprocessableEntity, "the file is not a manifest that the registry reads: "+oe.message)
+		httpx.Error(w, r, http.StatusUnprocessableEntity, "the file is not a manifest that the registry reads: "+oe.message)
 		return
 	}
 	if err != nil {

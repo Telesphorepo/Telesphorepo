@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/Telesphorepo/Telesphorepo/changelog"
 )
 
 // releaseTargets are the platforms that "go tool task release" builds.
@@ -28,12 +30,14 @@ var releaseFiles = []string{"LICENSE", "README.md"}
 
 // releasePrograms are the programs of a release: the server and the Docker credential helper.
 var releasePrograms = []struct{ name, pkg string }{
-	{"telesphorepo", "./cmd/telesphorepo"},
+	{"telesphorepo-server", "./cmd/telesphorepo-server"},
 	{"docker-credential-telesphorepo", "./cmd/docker-credential-telesphorepo"},
 }
 
 // release builds the UI once, cross-compiles each release program for every release target,
 // packs each binary with LICENSE and README.md, and writes SHA256SUMS. Output goes to bin/release.
+// A version given as the argument must be a release version: release first writes it into each
+// "dev" entry of changes.toml, so the programs embed the stamped change log.
 func release(ctx context.Context, version string) error {
 	pm, err := prepare(ctx)
 	if err != nil {
@@ -41,6 +45,8 @@ func release(ctx context.Context, version string) error {
 	}
 	if version == "" {
 		version = gitVersion(ctx)
+	} else if err := stampChanges(version); err != nil {
+		return err
 	}
 	step("building web UI (%s run build)", pm.Name)
 	if err := runStep(ctx, webDir, nil, append([]string{pm.Path}, pm.runArgs("build")...)...); err != nil {
@@ -82,6 +88,30 @@ func release(ctx context.Context, version string) error {
 		return err
 	}
 	out.line(green("✓ ") + fmt.Sprintf("released %d archives and SHA256SUMS to %s (version %s)", len(names), bold(filepath.ToSlash(dir)), version))
+	return nil
+}
+
+// changesFile is the change log at the repo root.
+const changesFile = "changes.toml"
+
+// stampChanges writes version into each "dev" entry of the change log.
+func stampChanges(version string) error {
+	data, err := os.ReadFile(changesFile)
+	if err != nil {
+		return err
+	}
+	out, n, err := changelog.Stamp(data, version)
+	if err != nil {
+		return fmt.Errorf("%s: %w", changesFile, err)
+	}
+	if n == 0 {
+		step("%s has no dev entries", changesFile)
+		return nil
+	}
+	if err := os.WriteFile(changesFile, out, 0o644); err != nil {
+		return err
+	}
+	step("%s: wrote version %s into %d dev entries", changesFile, version, n)
 	return nil
 }
 

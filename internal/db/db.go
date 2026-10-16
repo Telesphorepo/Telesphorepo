@@ -109,7 +109,7 @@ func (d *DB) Tx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 
 // ErrSchemaChanged means the database holds a component whose schema text differs from the
 // schema of this binary. The schema files are edited in place, so the database must be created
-// again: "telesphorepo dev" deletes and recreates its own data dir; serve refuses to start.
+// again: "telesphorepo-server dev" deletes and recreates its own data dir; serve refuses to start.
 type ErrSchemaChanged struct {
 	Component string
 }

@@ -222,6 +222,22 @@ func TestAuthRateLimit(t *testing.T) {
 	if resp.Header.Get("Retry-After") == "" {
 		t.Fatal("429 for correct password without Retry-After")
 	}
+	// A format route keeps its {"error"} body; the API answers the problem rate-limited with a
+	// retry remedy.
+	var fe struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &fe); err != nil || fe.Error == "" {
+		t.Fatalf("429 of a format route: body %s, want {\"error\": ...}", body)
+	}
+	req := s.NewRequest(t, http.MethodGet, "/api/me", nil)
+	resp, body = s.Do(t, req, Basic{u, pw})
+	wantStatus(t, resp, body, http.StatusTooManyRequests)
+	var p Problem
+	if err := json.Unmarshal(body, &p); err != nil || p.Type != "urn:telesphorepo:problem:rate-limited" ||
+		p.Status != http.StatusTooManyRequests || p.Remedy == nil || p.Remedy.Action != "retry" || p.Remedy.After <= 0 {
+		t.Fatalf("429 of /api/me: %s, want the problem rate-limited with a retry remedy", body)
+	}
 }
 
 // TestNoBrowserPasswordPrompt: no answer on /api and no answer to a request of the web UI

@@ -38,7 +38,7 @@ type Def struct {
 	Type  Type
 	// Default is the text form of the default, parsed like an environment value ("" = empty).
 	Default string
-	// Dev replaces Default under "telesphorepo dev" ("" = same as Default).
+	// Dev replaces Default under "telesphorepo-server dev" ("" = same as Default).
 	Dev string
 	// DataDefault, when set, makes the default the path DataDefault in the data directory.
 	DataDefault string

@@ -137,18 +137,18 @@ func publishFail(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, ErrAuthorizationPending), errors.Is(err, ErrSlowDown),
 		errors.Is(err, ErrExpiredToken), errors.Is(err, ErrInvalid):
-		httpx.Error(w, http.StatusBadRequest, err.Error())
+		httpx.Error(w, r, http.StatusBadRequest, err.Error())
 	case errors.Is(err, ErrNotFound):
-		httpx.Error(w, http.StatusNotFound, err.Error())
+		httpx.Error(w, r, http.StatusNotFound, err.Error())
 	case errors.Is(err, ErrConflict):
-		httpx.Error(w, http.StatusConflict, err.Error())
+		httpx.Error(w, r, http.StatusConflict, err.Error())
 	case errors.Is(err, ErrDenied):
-		httpx.Error(w, http.StatusUnauthorized, err.Error())
+		httpx.Error(w, r, http.StatusUnauthorized, err.Error())
 	case errors.Is(err, ErrForbidden):
-		httpx.Error(w, http.StatusForbidden, err.Error())
+		httpx.Error(w, r, http.StatusForbidden, err.Error())
 	case errors.Is(err, ErrLimited):
 		w.Header().Set("Retry-After", "30")
-		httpx.Error(w, http.StatusTooManyRequests, err.Error())
+		httpx.Error(w, r, http.StatusTooManyRequests, err.Error())
 	default:
 		route.Fail(w, r, err)
 	}
@@ -388,7 +388,7 @@ func (m *mod) mintRoute(w http.ResponseWriter, r *http.Request, cred MintCred, n
 		if refused.D.Code == access.CodeReadOnlyKind {
 			w.Header().Set("Allow", "GET, HEAD")
 		}
-		httpx.Error(w, refused.D.Status, refused.D.Message)
+		httpx.Error(w, r, refused.D.Status, refused.D.Message)
 	case err != nil:
 		publishFail(w, r, err)
 	default:
@@ -467,7 +467,7 @@ func (m *mod) trustInScope(w http.ResponseWriter, r *http.Request, s pipelineSco
 		return nil, false
 	}
 	if !s.covers(t.Repos) {
-		httpx.Error(w, http.StatusNotFound, "trust policy not found")
+		httpx.Error(w, r, http.StatusNotFound, "trust policy not found")
 		return nil, false
 	}
 	return t, true
@@ -523,7 +523,7 @@ func (m *mod) createTrust(w http.ResponseWriter, r *http.Request, c *route.Call)
 		return
 	}
 	if !scope.covers(in.Repos) {
-		httpx.Error(w, http.StatusForbidden, "a CI pipeline may list only repositories where you hold the CI pipelines permission")
+		httpx.Error(w, r, http.StatusForbidden, "a CI pipeline may list only repositories where you hold the CI pipelines permission")
 		return
 	}
 	t, err := m.svc.CreateTrust(r.Context(), p.UserID, in)
@@ -562,7 +562,7 @@ func (m *mod) updateTrust(w http.ResponseWriter, r *http.Request, c *route.Call)
 		return
 	}
 	if in.Repos != nil && !scope.covers(in.Repos) {
-		httpx.Error(w, http.StatusForbidden, "a CI pipeline may list only repositories where you hold the CI pipelines permission")
+		httpx.Error(w, r, http.StatusForbidden, "a CI pipeline may list only repositories where you hold the CI pipelines permission")
 		return
 	}
 	t, err := m.svc.UpdateTrust(r.Context(), cur.ID, in)

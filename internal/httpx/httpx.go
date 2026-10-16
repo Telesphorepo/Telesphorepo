@@ -1,4 +1,5 @@
-// Package httpx holds small shared HTTP helpers: the repo path of a URL, JSON I/O, the client.
+// Package httpx holds small shared HTTP helpers: the repo path of a URL, JSON I/O, the error
+// answers (problem documents), the client.
 package httpx
 
 import (
@@ -48,9 +49,11 @@ type StatusError interface {
 	HTTPStatus() int
 }
 
-// Error writes {"error": msg} with status.
-func Error(w http.ResponseWriter, status int, msg string) {
-	WriteJSON(w, status, map[string]string{"error": msg})
+// Error writes the error msg with status in the form of the route of r (see WriteProblem): a
+// problem document of type "about:blank" with the status text as its title and msg as its
+// detail. A 429 is the problem rate-limited.
+func Error(w http.ResponseWriter, r *http.Request, status int, msg string) {
+	WriteProblem(w, r, Blank(status, msg))
 }
 
 // DecodeJSON decodes the body (capped at max bytes, unknown fields rejected) into v.
@@ -68,9 +71,9 @@ func DecodeJSON(w http.ResponseWriter, r *http.Request, max int64, v any) bool {
 	}
 	var mbe *http.MaxBytesError
 	if errors.As(err, &mbe) {
-		Error(w, http.StatusRequestEntityTooLarge, "request body too large")
+		Error(w, r, http.StatusRequestEntityTooLarge, "request body too large")
 	} else {
-		Error(w, http.StatusBadRequest, "invalid JSON body")
+		Error(w, r, http.StatusBadRequest, "invalid JSON body")
 	}
 	return false
 }

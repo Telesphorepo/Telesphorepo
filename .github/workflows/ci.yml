@@ -35,7 +35,7 @@ jobs:
           go vet -tags scale ./e2e/...
           go vet -tags clients ./e2e/...
       - name: Check the database
-        run: bin/telesphorepo dbcheck
+        run: bin/telesphorepo-server dbcheck
 
   e2e-core:
     needs: build

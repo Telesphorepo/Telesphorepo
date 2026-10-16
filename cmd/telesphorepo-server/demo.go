@@ -21,7 +21,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/server"
 )
 
-// The demo dataset of "telesphorepo dev". This file creates the demo users and the repos that
+// The demo dataset of "telesphorepo-server dev". This file creates the demo users and the repos that
 // the modules declare (module.DemoData), gives the users access, and has each module fill its
 // repos (internal/demo). It names no format.
 
@@ -164,7 +164,7 @@ func createDemoData(ctx context.Context, s *server.Services, adminName string) e
 		run.SetWriters(repo.ID, writers)
 	}
 
-	fmt.Fprintln(os.Stderr, "demo data: writing the demo repos (first run only; telesphorepo dev --empty skips it)")
+	fmt.Fprintln(os.Stderr, "demo data: writing the demo repos (first run only; telesphorepo-server dev --empty skips it)")
 	stop := make(chan struct{})
 	var progress sync.WaitGroup
 	progress.Add(1)

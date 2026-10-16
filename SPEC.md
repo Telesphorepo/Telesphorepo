@@ -34,7 +34,9 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 
 | Package | Role |
 |---|---|
-| `cmd/telesphorepo` | CLI: `serve` (default), `dev`, `user add/passwd/reset-2fa`, `version`, `help`; hidden `dbcheck` and `seed` |
+| `cmd/telesphorepo-server` | The server binary `telesphorepo-server`: `serve` (default), `dev`, `user add/passwd/reset-2fa`, `version`, `help`; hidden `dbcheck` and `seed`. `cmd/telesphorepo` is the name of the publishing client |
+| `changes.go` (package `telesphorepo` at the repo root) | Embeds `changes.toml`, the change log (`ChangesTOML`). It imports nothing |
+| `changelog` | Reads the change log (`Parse`, `Embedded`, `Since`, `Stamp`) and compares release versions (`ParseVersion`, `Version.Compare`). It imports only the stdlib, `github.com/BurntSushi/toml` and the root package, so the server and the CLI both use it. See **Change log** |
 | `internal/server` | Builds the kernel and runs the module lifecycle (see **Modules**): logger, DB, schemas, settings, live storage, kernel services, module `Init`, routes, bootstrap admin, jobs, client address, access log |
 | `internal/module` | The module contract: `Module`, `Extender` (the manifest calls), `Manifest`, `Host` with `Provide` and `Use` |
 | `internal/modules` | `modules.go`: the one list of modules in start order. The only file that names them |
@@ -72,8 +74,8 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/activity` | Module `audit`: `GET /api/audit`, `GET /api/audit/actions`, the permission `activity.read`, the settings group `activity` and the job `audit.retention` |
 | `internal/netrules` | Module `network`: client IP resolution behind trusted proxies (the client address of every request), the IP lists (presets and custom lists) and the per-repo IP rules. See **Network rules** |
 | `internal/api` | Module `core`: sign-in, the account, people, read tokens (token kind `trp`), repos, grants, files, uploads, search, the settings API and `/api/formats`. The JSON API of every module is under `/api/`, wrapped in `http.CrossOriginProtection` |
-| `internal/httpx` | JSON helpers, error shape, `StatusError` (an error with its HTTP status), `RepoPath` (the URL check of a `{path...}`, then `repopath.Parse`), `Limit` (default 50, max 200) |
-| `internal/demo` | The dev demo data (`telesphorepo dev`): it writes repos, users and files through the byte pipeline, with the demo data of each module (`Extender.Demo`). See **Demo data** |
+| `internal/httpx` | JSON helpers, the error answers (`Error`, the problem types of `DeclareProblem`, `WriteProblem`; see **Problem documents**), `StatusError` (an error with its HTTP status), `RepoPath` (the URL check of a `{path...}`, then `repopath.Parse`), `Limit` (default 50, max 200) |
+| `internal/demo` | The dev demo data (`telesphorepo-server dev`): it writes repos, users and files through the byte pipeline, with the demo data of each module (`Extender.Demo`). See **Demo data** |
 | `internal/containerengine` | Docker/Podman detection for tooling and e2e; not linked into the server |
 | `web/` | Svelte 5 + Vite UI (Tailwind CSS v4, shadcn-svelte Maia style), embedded via `web/embed.go` (`go:embed all:dist`). See **Web UI** |
 | `tools/task` | `go tool task`: dev, build, preview, test, gen and doctor |
@@ -105,7 +107,7 @@ type assertion.
 | `PublisherClient(clients.Client)` | A publisher client that enrolls devices (`gradle`, `maven`) |
 | `ResolveClient(fn)` | The client address and scheme of every request; at most one module |
 | `TokenKind(prefix, verifier)` | A token kind (`trp`, `trs`) |
-| `Demo(module.DemoData)`, `Seed(module.SeedFunc)` | The dev demo data and the rows of `telesphorepo seed` of the module's one format |
+| `Demo(module.DemoData)`, `Seed(module.SeedFunc)` | The dev demo data and the rows of `telesphorepo-server seed` of the module's one format |
 
 `module.Host` holds the kernel services (DB, settings, the permission registry, live storage,
 audit, jobs, `Blobs`, `Assets` (the pipeline), `Reader`, `Uploads`, `Rebuilds`, repos, `Ops`, auth,
@@ -175,7 +177,7 @@ the fresh second factor (`Proof`), and the repos of `SomeRepo` (`Managed`). No h
 | `Perm`, `AnyPerm` | A server permission ID the caller holds, or one of several |
 | `SomeRepo` | A repository permission ID that passes in place of `Perm` when the caller holds it on at least one repo. The handler gets those repos in `Call.Managed` (`All`, or the repo IDs) |
 | `Repo` | `route.RepoRule{Name, Format, Op, Perm, AnyPerm, Ops, Pick}`: the repo the route acts on (default: the path value `{repo}`, else `{name}`), the format it must be of (another format is 404), the operation (`access.Meta`, `Read`, `Write`, `Delete`, `Manage`, `Mint`) and the repository permission it needs (or one of `AnyPerm`; none with `Meta` is any). With `Pick`, the operation and its permission are the entry of `Ops` (`route.RepoOp{Op, Perm}`) at the index `Pick(r)` returns, per request (an index outside `Ops` is 500); the router checks every entry at startup. The docker `DELETE /v2/...` route is the one user: an upload cancel is a `Write`, everything else a `Delete` |
-| `Errors` | The writer of a refusal; nil is `{"error": "..."}`. A format with its own error JSON sets it |
+| `Errors` | The writer of a refusal; nil is `httpx.Error`: a problem document under `/api/` (see **Problem documents**), `{"error": "..."}` on a format route. A format with its own error JSON sets it |
 | `Challenge` | The `WWW-Authenticate` of a 401, from the refusal (`route.Challenger(w, r, decision)`); nil is a Basic challenge outside `/api/` and none for a request with `X-Telesphorepo-UI: 1` |
 
 Presets: `route.Public`, `route.UI` (a full UI session), `route.Setup` (a UI session, setup-only
@@ -377,7 +379,7 @@ components in start order (the kernel first). The table `schema_components` (`co
 `fingerprint`, `applied_at`) holds one row per component with the SHA-256 of its schema text, with CRLF line ends read as LF
 (`.gitattributes` also checks out every `*.sql` with LF). A component without a row gets its schema and its row in one transaction. A row with another
 fingerprint is `db.ErrSchemaChanged{Component}`: the schema files change in place, so
-`telesphorepo dev` deletes and recreates its own data dir, and `serve` refuses to start and names
+`telesphorepo-server dev` deletes and recreates its own data dir, and `serve` refuses to start and names
 the component. All tables are `STRICT`. Tables with a natural key are also `WITHOUT ROWID`. Every
 foreign-key child column has an index. SQLite runs `PRAGMA optimize` at close and every 6 hours
 (job `core.optimize`).
@@ -522,7 +524,7 @@ sources.
 | Env override | `TR_<KEY>`: dots become `_`, upper-cased (e.g. `s3.bucket` → `TR_S3_BUCKET`) | Wins over the stored value and shows as read-only "set by environment" in the UI |
 
 Precedence is env override, then stored value, then default. A setting can carry a `Dev` value
-(`settings.Def.Dev`). `telesphorepo dev` uses it instead of `Default`: `cookie.secure=false` and
+(`settings.Def.Dev`). `telesphorepo-server dev` uses it instead of `Default`: `cookie.secure=false` and
 `index.debounce=300ms` in the core.
 
 Setting types are `string`, `bool`, `size`, `duration`, `list` and `map`. A `size` is stored as an
@@ -673,7 +675,7 @@ JSON API (`/api/`). Auth is a session cookie or HTTP Basic; each route's policy 
 **Route policy**). Every route that changes state (POST, PUT, PATCH, DELETE) and every permission
 route (GET too) needs the UI session cookie, and the router enforces it at startup. HTTP
 Basic with a password or a read token reaches only the GET routes that need no permission;
-elsewhere it gets 401 `{"error":"sign in through the web UI for this action"}`, as does a request
+elsewhere it gets 401 with the detail `sign in through the web UI for this action`, as does a request
 with no credential. The routes that take no credential or their own token are the exceptions
 (sign-in, `/api/auth/config`, `/api/formats`, and the publish routes marked "none" or "token" in
 **Publishing**). A signed-in user without the permission gets 403. A token of a registered kind (a read token
@@ -681,9 +683,42 @@ with no credential. The routes that take no credential or their own token are th
 `Authorization: Bearer <token>`. A publish session token reaches only the routes whose policy
 accepts it: `DELETE /api/publish/sessions/{id}`, `POST /api/repos/{name}/upload`,
 `POST /api/repos/{name}/upload/plan`, the resumable upload routes `/api/repos/{name}/uploads...` and
-`POST /api/repos/{name}/files/delete` and `.../files/delete/plan`, and only for its own repo. Every other `/api` route answers it with 403. Errors are `{"error": "..."}`, plus
-`fields` for settings validation. Bodies are capped at `max_json_size`. Lists are
-`{items, next}` with `?after=&limit=`.
+`POST /api/repos/{name}/files/delete` and `.../files/delete/plan`, and only for its own repo. Every other `/api` route answers it with 403. Errors are problem documents (see **Problem
+documents**), with the extension member `fields` for settings validation. Bodies are capped at
+`max_json_size`. Lists are `{items, next}` with `?after=&limit=`.
+
+**Problem documents.** Every error answer under `/api/` and `/cli/`, and of `/install.sh` and
+`/install.ps1`, is an RFC 9457 problem document (`Content-Type: application/problem+json`,
+`Cache-Control: no-store`): `{type, title, detail, status, remedy?}` and the extension members of
+the answer (for example `fields`, `deleted`, `received`, `used_by`, `repos` or `ok`). A member of an
+extension never replaces a standard member. `httpx.Error` and `route.Fail` write a document of type
+`about:blank` with the status text as its title and the message as its detail. A problem type that
+has a stable name is declared once with `httpx.DeclareProblem` (`Name`, `Status`, `Title`,
+`Remedy`); its type is `urn:telesphorepo:problem:<name>`, and a name declared twice panics at
+startup. `remedy` is `{action, url?, after?, file?, version?}`; `action` is one of `update_cli`,
+`update_server`, `login`, `setup`, `retry`, `open_url` and `fix_project`. The declared types:
+
+| Type | Status | Title | Remedy |
+|---|---|---|---|
+| `rate-limited` | 429 | Too many attempts | `retry`, `after` from `Retry-After`. Every 429 under `/api/` is this type |
+
+Format routes keep the error form of their protocol: `{"error": "..."}` with the same extension
+members, or the OCI errors of Docker (`Policy.Errors`). The web client (`web/src/lib/api/client.ts`) shows `detail`, else `title`.
+
+**Change log.** `changes.toml` at the repo root is the change log that the server and the CLI
+both embed. Each `[[change]]` entry has `version` (a release version such as `v0.6.0`, or `dev`
+before a release), `scope` (a command such as `publish`, a command and a format such as
+`publish/npm`, or a helper such as `helper/docker`; a scope matches itself and every scope under
+it), `needs` (`server` or `cli`: the side that must be at least `version`; an unknown value counts
+as `cli`) and `summary` (one sentence for the person). A field that a reader does not know is
+ignored. A `dev` entry counts for nothing. A broken change log stops the server at startup.
+`go tool task release <version>` writes the release version into each `dev` entry before it
+builds. A release version is `MAJOR.MINOR.PATCH` with an optional `v`, pre-release (`-rc.1`) and
+build data (`+x`), compared as semantic versions.
+
+**Server version.** Every answer carries the header `Telesphorepo-Version` with the version that
+the build stamped into the server binary (`-X main.version`, `server.Options.Version`), or `dev`
+for a build without a stamp.
 
 **Bulk actions.** A write route that changes a set takes a list, and one item is a list of one.
 So each change has one route. A list holds 1 to 1000 items (400 outside that), and
@@ -705,7 +740,7 @@ transaction.
 | `POST /api/security/totp/begin` · `.../totp/confirm` · `DELETE .../totp/{id}` | UI session | `{name}` returns `{setup_id, secret, otpauth_url}` (the secret is shown once; the setup lasts 10 min). `{setup_id, code}` returns 201 `{id, name, created_at}`. Delete is 204 |
 | `POST /api/security/passkeys/begin` · `.../passkeys/finish` · `.../passkeys/assert` · `DELETE .../passkeys/{id}` | UI session | `begin` returns `{publicKey}` creation options. `finish` `{name, credential}` returns 201 `{id, name, created_at, last_used_at}`. `assert` returns `{publicKey}` options for a fresh check before an approval or a manual session. 409 when `base_url` is empty |
 | `POST /api/security/recovery-codes` | UI session | 201 `{codes: [10 x "abcd-efgh-ijkl-mnop"]}`; replaces the old set. Shown once |
-| `GET /api/auth/config` | none | `{oidc, password_login: "all"\|"publishers", second_factor_optional}`. `second_factor_optional` is true only under `telesphorepo dev` |
+| `GET /api/auth/config` | none | `{oidc, password_login: "all"\|"publishers", second_factor_optional}`. `second_factor_optional` is true only under `telesphorepo-server dev` |
 | `GET /api/auth/oidc/login` | none | 404 when SSO is off, 503 when discovery fails. Stores state/nonce/PKCE verifier in memory (10 min, single use, keyed by SHA-256(state)), sets `tr_oidc` (HttpOnly, SameSite=Lax, Path `/api/auth/oidc`, 600 s), 302 to the IdP |
 | `GET /api/auth/oidc/device?code=` | UI session of an SSO account | 404 when SSO is off. Starts a new sign-in that approves the device of `code` (see **Publishing**). It stores the state like `login`, plus the user id and the user code, and sends `prompt=login` and `max_age=0`. 302 `/#/device?code=` without an error when there is no UI session or the code is unknown, expired or used (the page says why), and with `error=not_sso` for a local account or `sso_failed` when discovery fails |
 | `GET /api/auth/oidc/callback` | none | 400 for missing/mismatched/unknown/reused/expired state, state from before an issuer or client change, or missing `code`; 503 on discovery failure. Verifies the ID token (signature, issuer, audience, expiry, nonce). Success: upsert user, set its server permissions when `oidc.permission_claim` is set, session with `oidc.session_ttl`, 302 `/`. Failure: 302 `/#/login?error=` `username_conflict` \| `invalid_username` \| `account_disabled` \| `sso_failed`. For a sign-in that `device` started, it starts no session and checks the same token, then that the token's issuer and `sub` belong to the account that started it, and that `auth_time` is present and at most 5 minutes old. Success: 302 `/#/device?code=<code>&grant=<grant>`. Failure: 302 `/#/device?code=<code>&error=` `wrong_account` \| `no_auth_time` \| `stale_sign_in` (the provider ignored `prompt=login`) \| `account_disabled` \| `sso_failed` |
@@ -716,10 +751,11 @@ transaction.
 | `GET /api/people?q=&after=&limit=` | `people.manage`, or `repo.access` on a repo | `{items: [{username}], next}`: the enabled usernames that start with `q`, at most 20 per page. The UI draws the avatar from the username |
 | `PATCH /api/users` | `people.manage` | `{usernames: [...], disabled: bool}`. The one way to disable or enable people. 400 `You cannot disable your own account.` when the list holds the caller and `disabled` is true. 403 for a person whose permissions the caller does not all hold. 409 when no enabled person would keep `people.manage`. A disabled person's sessions end, and their password and read tokens stop working. One `user.update` event per person whose value changed. 200 `{changed: n}` |
 | `GET /api/permissions` | none | The permission registry: `{subsystems: [{id, scope: "server"|"repo", label, help, module, permissions: [{id, label, help, needs, second_factor, all_repos}]}]}`, subsystems in module start order and permissions in registration order. See **Permissions** |
+| `GET /api/changes?since=<version>` | none | `{version, changes: [{version, scope, needs, summary}]}`: the version of the server, and the released entries of the embedded change log that are newer than `since`, in the order of the file. Without `since`, every released entry. 400 when `since` is not a release version (see **Change log**) |
 | `GET /api/formats` | none | The UI descriptor of every format, in module order (see **Format UI descriptors**): `[{name, title, description, icon?, kind_icons?, kinds, config: {default, fields}, repo_fields, repo_tabs, upload, delete_notes, file_details, browse: {versions, artifact_snippets}, remote_presets, proxy_note?, public_key?, labels: {artifact_kinds, artifact_name, tools, install_heading?, build_files}, import_sources, tools: [{id, label, setup, project?}], setup}]` |
-| `GET /api/repos`, `GET /api/repos/{name}` · `POST /api/repos` · `PATCH /api/repos/{name}` | any/anon · `repositories.all` · `repo.settings` | The list shows the repos where the caller holds a permission, and the public ones. Repo JSON has `permissions`, the caller's repository permissions on the repo. Repo JSON has `file_count`, `total_size` and `last_published_at` (null before the first publish), read from the repo row (see `assets` in **Data model**). `format` must be a registered name. `description` (POST and PATCH) has at most 500 characters and no control characters except newline and tab. `config` must be a JSON object that the format validates (400 otherwise; an unknown format lists the available ones). An empty config becomes the format default. Repo JSON has `operation`: `{id, type, owner, state, done, total, message, error}` of the repo's active operation, or null (see **Repo operations**). Repo JSON has `fields`: the values of the module fields of the repo (e.g. `{signing_key: "default"}`; `{}` for a format without fields). POST and PATCH take `fields` too; POST gives a field without a value its default, and a field that does not apply to the format and kind is 400. `PATCH /api/repos/{name}` takes `{description?, config?, proxy?, fields?}` and is one repo update (`repos.Service.Update`): the whole new state is checked first, then saved in one transaction with the field values, the format's `OnRepoChange` and one `repo.update` event with the changed fields. Repo JSON has `kind`, and a group has `member_count`. POST takes `kind` (`hosted` default, `proxy`, `group`), `members: [names]` for a group, `proxy: {remote_url, username?, password?, metadata_ttl?, not_found_ttl?}` (seconds) for a proxy, and `force`. A new proxy's remote is checked first (see **Group and proxy repositories**): 502 `{error}` when it does not answer, unless `force: true`. PATCH takes `proxy` with the same fields for a proxy; `username` and `password` together replace the credentials, `username: ""` removes them, and the password is never returned. `GET /api/repos/{name}` adds, for a group, `members: [{name, format, kind, public}]` (the members the caller can read, in order); for a hosted or proxy repo, `groups: [names]` (the groups it is in that the caller can read); for a proxy and a holder of `repo.settings`, `proxy: {remote_url, has_credentials, metadata_ttl, not_found_ttl, last_ok_at\|null, last_error, last_error_at\|null}` |
+| `GET /api/repos`, `GET /api/repos/{name}` · `POST /api/repos` · `PATCH /api/repos/{name}` | any/anon · `repositories.all` · `repo.settings` | The list shows the repos where the caller holds a permission, and the public ones. Repo JSON has `permissions`, the caller's repository permissions on the repo. Repo JSON has `file_count`, `total_size` and `last_published_at` (null before the first publish), read from the repo row (see `assets` in **Data model**). `format` must be a registered name. `description` (POST and PATCH) has at most 500 characters and no control characters except newline and tab. `config` must be a JSON object that the format validates (400 otherwise; an unknown format lists the available ones). An empty config becomes the format default. Repo JSON has `operation`: `{id, type, owner, state, done, total, message, error}` of the repo's active operation, or null (see **Repo operations**). Repo JSON has `fields`: the values of the module fields of the repo (e.g. `{signing_key: "default"}`; `{}` for a format without fields). POST and PATCH take `fields` too; POST gives a field without a value its default, and a field that does not apply to the format and kind is 400. `PATCH /api/repos/{name}` takes `{description?, config?, proxy?, fields?}` and is one repo update (`repos.Service.Update`): the whole new state is checked first, then saved in one transaction with the field values, the format's `OnRepoChange` and one `repo.update` event with the changed fields. Repo JSON has `kind`, and a group has `member_count`. POST takes `kind` (`hosted` default, `proxy`, `group`), `members: [names]` for a group, `proxy: {remote_url, username?, password?, metadata_ttl?, not_found_ttl?}` (seconds) for a proxy, and `force`. A new proxy's remote is checked first (see **Group and proxy repositories**): a 502 problem document when it does not answer, unless `force: true`. PATCH takes `proxy` with the same fields for a proxy; `username` and `password` together replace the credentials, `username: ""` removes them, and the password is never returned. `GET /api/repos/{name}` adds, for a group, `members: [{name, format, kind, public}]` (the members the caller can read, in order); for a hosted or proxy repo, `groups: [names]` (the groups it is in that the caller can read); for a proxy and a holder of `repo.settings`, `proxy: {remote_url, has_credentials, metadata_ttl, not_found_ttl, last_ok_at\|null, last_error, last_error_at\|null}` |
 | `PUT /api/repos/{name}/members` | `repo.settings` | `{members: [names]}` replaces the members of a group and their order; returns the repo. 400 for 0 or more than 50 members, a member of another format, a group, a name listed twice, an unknown name, or a repo that is not a group |
-| `POST /api/repos/{name}/proxy/test` | `repo.settings` | Checks the remote of a proxy now: 200 `{ok: true}` or 502 `{ok: false, error}`. It records the result as the proxy's last answer or last error |
+| `POST /api/repos/{name}/proxy/test` | `repo.settings` | Checks the remote of a proxy now: 200 `{ok: true}`, or a 502 problem document with the extension member `ok: false` and the reason as its detail. It records the result as the proxy's last answer or last error |
 | `PATCH /api/repos` | `repo.settings` on each repo | `{names: [...], anonymous_read: bool}`. The one way to make repos public or private: one repo update of every repo in one transaction. One `repo.update` event per repo whose value changed. 200 `{changed: n}` |
 | `POST /api/repos/delete` | `repositories.all` | `{names: [...]}`. Checks that every repo exists (404) and that none has an operation (409 `<name>: <message>`); then nothing is deleted. Then it deletes the repos one after another, each under a `delete` operation (see **Repo operations**). The first failure stops the rest: 500 `{deleted: [names done], error}`, and the failed repo keeps a failed `delete` operation. One `repo.delete` event per repo. 200 `{deleted: [names], files: n}` |
 | `POST /api/repos/{name}/operation/resume` · `DELETE /api/repos/{name}/operation` | `repositories.all` | Resume runs the failed operation of the repo again (a delete deletes the repo): 200 `{ok: true}`. Clear ends it, and the repo keeps the files that are left: 204. 409 when the repo has no operation, when it has not failed, or when its type cannot resume or clear here (a Nexus mirror ends at the cut-over). Records `repo.delete.resume` or `repo.delete.clear` |
@@ -789,7 +825,7 @@ mode). The publish routes are in **Publishing**.
 
 ## Client setup
 
-The UI shows these snippets per repo (`/usage`), and `telesphorepo dev` prints them. `HOST` is the server URL. For reads, credentials are a user and password, or any username with a
+The UI shows these snippets per repo (`/usage`), and `telesphorepo-server dev` prints them. `HOST` is the server URL. For reads, credentials are a user and password, or any username with a
 read token as the password. Uploads use a publish session token; the Maven and Gradle clients
 (see **Publishing**) get it themselves.
 
@@ -932,11 +968,11 @@ has no `gradlew`).
   device with a new sign-in at the provider instead.
 - **Setup-only session.** A UI session of a local account that needs the second factor and has
   none reaches only the routes whose policy accepts it (`route.Setup`): `/api/me`,
-  `/api/auth/logout` and `/api/security...`. Every other route answers 403
-  `{"error":"second_factor_required"}`. The break-glass `admin` follows the same rule. The
+  `/api/auth/logout` and `/api/security...`. Every other route answers 403 with the
+  detail `second_factor_required`. The break-glass `admin` follows the same rule. The
   `/api/security` routes need a UI session, so Basic auth and tokens get 401. A password alone
   cannot add a factor and cannot publish.
-- **Dev mode.** `telesphorepo dev` sets `server.Options.Dev`, which calls `auth.SetDevMode`. It is
+- **Dev mode.** `telesphorepo-server dev` sets `server.Options.Dev`, which calls `auth.SetDevMode`. It is
   an in-process flag: not a setting, not an env var, and not reachable from `serve`. In dev mode
   a person without a factor gets a full session, and a device approval or manual session without a
   factor passes. A factor that exists is still checked. `GET /api/auth/config` reports
@@ -946,7 +982,7 @@ has no `gradlew`).
   DELETE) or a permission route (GET too) needs the UI session. HTTP Basic with a password or a
   read token reaches only the GET routes that need no permission: repo list and repo, tree, assets,
   search, status, usage, `/api/me`, own tokens, devices and publish sessions. Anything else gets
-  401 `{"error":"sign in through the web UI for this action"}` without a Basic challenge. So a
+  401 with the detail `sign in through the web UI for this action` without a Basic challenge. So a
   stolen password cannot change users, permissions, settings or trust policies: the session of a
   person who holds a permission for them needs the second factor. The route policies say it, and
   the router refuses at startup a policy that lets a password or a read token change state or reach
@@ -955,7 +991,7 @@ has no `gradlew`).
   and poll, the publish challenge, the device and OIDC session mints, closing a session with its
   token, and the upload and delete routes with a publish session token. Dev mode does not change
   this rule.
-- **Lost factors.** `telesphorepo user reset-2fa NAME` removes the TOTP factors, passkeys and
+- **Lost factors.** `telesphorepo-server user reset-2fa NAME` removes the TOTP factors, passkeys and
   recovery codes of a user.
 - **Permissions.** The permission registry (`internal/perm`) holds every permission. Each module
   registers one or more **subsystems** (a part of the server, with a label and a one-line help)
@@ -1027,7 +1063,7 @@ Routes (`{items, next}` lists are keyset, `?after=&limit=`):
 | Method & path | Auth | Notes |
 |---|---|---|
 | `POST /api/devices/enroll` | none | `{name, client, public_key}` (`client` is a registered publisher client ID, `gradle`, `maven` or `docker`; another is 400 with the list) (`public_key` is the raw 32-byte key, base64url, no padding). Returns `{device_code, user_code: "ABCD-EFGH", verification_url: "<base_url>/#/device", expires_in: 600, interval: 5}`. `verification_url` uses the request URL when `base_url` is empty. Each IP gets a burst of 10, then 1 per 30 s (429) |
-| `POST /api/devices/enroll/poll` | none | `{device_code}`. 200 `{device_id}` once approved (single use). 400 `{"error": "authorization_pending" \| "slow_down" \| "expired_token"}`. `slow_down` answers a poll less than 4 s after the last. An unknown or used code gets `expired_token` |
+| `POST /api/devices/enroll/poll` | none | `{device_code}`. 200 `{device_id}` once approved (single use). 400, a problem document with the detail `authorization_pending`, `slow_down` or `expired_token`. `slow_down` answers a poll less than 4 s after the last. An unknown or used code gets `expired_token` |
 | `GET /api/devices/enroll?user_code=` | UI session or password | `{user_code, name, client, client_title, client_help, expires_at}`; 404 for an unknown or expired code |
 | `POST /api/devices/approve` | UI session and a fresh factor (`X-Telesphorepo-Proof`) | `{user_code}`. A local account proves with `totp <code>` or `passkey <assertion>`, an SSO account with `grant <grant>` of a fresh SSO sign-in for this code. 201 Device. 401 for a wrong second factor, or for a missing, used, expired or other grant (another user or code), 404 unknown or expired code, 409 used code, 403 `second_factor_required` |
 | `GET /api/devices` | password, read token or UI session | Own devices; a holder of `people.manage` sees all devices, with `username`. Newest first, `{items, next}`. A device is `{id, user_id, username?, name, client, client_title, created_at, expires_at, last_used_at, revoked_at, state}` |
@@ -1283,7 +1319,7 @@ server shuts down. The result of each file is `created`, `replaced` or `unchange
 Every writer uses it: the format routes, the web UI upload, the resumable uploads, the Nexus
 import, the proxy fetch, the Debian upload and index rebuild, the Maven checksums and metadata,
 and the dev demo data (source `demo` writes blobs without the store's fsync when the store is the
-filesystem). `telesphorepo seed` inserts rows only (`assets.SeedTx`).
+filesystem). `telesphorepo-server seed` inserts rows only (`assets.SeedTx`).
 
 **Delete (`Remove`).** A removal is `{repo, paths, prefixes (folders ending in "/"; "" is every
 file), origin}`. It works in batches of 500 rows: the path locks in path order, then one
@@ -1497,7 +1533,7 @@ LogLine      = {id, at, source_repo, level: "info"|"warn"|"error", message}
 mapped. The `Sync` counters are the sums over its repos; `checked` is imported + skipped +
 ignored + failed. `previous_checked` is the `checked` of the newest earlier walk of the same repo
 that reached the end (0 when there is none); the UI divides by it to estimate the progress,
-because Nexus gives no total count. Errors are `{"error"}` with 400 for invalid input or refused
+because Nexus gives no total count. Errors are problem documents with 400 for invalid input or refused
 credentials, 404, 409 (exists, running, not running, cut over, still mapped) and 502 when Nexus
 is unreachable.
 
@@ -2164,8 +2200,8 @@ IP list (the API names it; the row keeps its id). An empty list is unrestricted 
   too) and to minting device, manual and OIDC publish sessions. The network module is a guard of
   the access engine (`access.Guard` named `network`): it maps `Read` to the read rules and
   `Write`, `Delete` and `Mint` to the publish rules.
-- **Refusal.** The answer is 403 `{"error":"your address is not allowed to read|publish this
-  repository"}` and the audit event `network.denied` with `detail.scope` and the client IP. The IP
+- **Refusal.** The answer is 403 with the message `your address is not allowed to read|publish this
+  repository` (a problem document under `/api/`, `{"error"}` on a format route) and the audit event `network.denied` with `detail.scope` and the client IP. The IP
   appears only in the audit log.
 
 ## Signing keys
@@ -2208,7 +2244,7 @@ subsystem. `audit.Log.Record` refuses an action that no module registered (it lo
 the error). The route middleware puts the caller in the request context (`audit.WithActor`, with
 the client address); services record their own events with that actor, inside the transaction of
 the change when they have one (`RecordTx`). A job and an `Init` record as the system actor of its
-module (`audit.System`), the `telesphorepo user` commands as `cli` (`audit.CLI`).
+module (`audit.System`), the `telesphorepo-server user` commands as `cli` (`audit.CLI`).
 
 | Module | Subsystem | Actions |
 |---|---|---|
@@ -2544,14 +2580,14 @@ page are in `web/src/README.md`.
 
 | Command | Does |
 |---|---|
-| `telesphorepo [serve]` | Runs the server from the boot env and DB settings |
-| `telesphorepo dev [--empty]` | Zero-config local server. Data goes in `./.telesphorepo-dev`. The first run creates `admin` and the demo data (see **Demo data**) before the server listens; with `--empty` it creates one empty anonymous-read repo per registered format instead, named after the format. The banner prints the demo users, each format's usage snippets and "2FA not enforced (dev)". Dev mode makes the second factor optional (see **Auth model**) |
-| `telesphorepo user add NAME [--admin]` | Asks for the password twice on a TTY, or reads one line from a pipe. Every `user` command writes an audit event with the actor `cli` |
-| `telesphorepo user passwd NAME` | Resets the password and signs out the user's sessions. Refused for SSO users |
-| `telesphorepo user reset-2fa NAME` | Removes the TOTP factors, passkeys and recovery codes of a user, so the user sets up a new factor at the next sign-in |
-| `telesphorepo version` / `help [cmd]` | |
+| `telesphorepo-server [serve]` | Runs the server from the boot env and DB settings |
+| `telesphorepo-server dev [--empty]` | Zero-config local server. Data goes in `./.telesphorepo-dev`. The first run creates `admin` and the demo data (see **Demo data**) before the server listens; with `--empty` it creates one empty anonymous-read repo per registered format instead, named after the format. The banner prints the demo users, each format's usage snippets and "2FA not enforced (dev)". Dev mode makes the second factor optional (see **Auth model**) |
+| `telesphorepo-server user add NAME [--admin]` | Asks for the password twice on a TTY, or reads one line from a pipe. Every `user` command writes an audit event with the actor `cli` |
+| `telesphorepo-server user passwd NAME` | Resets the password and signs out the user's sessions. Refused for SSO users |
+| `telesphorepo-server user reset-2fa NAME` | Removes the TOTP factors, passkeys and recovery codes of a user, so the user sets up a new factor at the next sign-in |
+| `telesphorepo-server version` / `help [cmd]` | |
 
-**Demo data.** The first run of `telesphorepo dev` (without `--empty`) fills the dev instance
+**Demo data.** The first run of `telesphorepo-server dev` (without `--empty`) fills the dev instance
 for work on browsing and search. Paths, file contents, users and roles are the same on every fresh
 run. The times spread over the two years before the day of the run, and the Maven metadata
 timestamps follow them.
@@ -2586,14 +2622,14 @@ and raw insert asset rows, debian inserts one package and its asset row per unit
 | Command | Does |
 |---|---|
 | `go tool task dev` | Checks Go, bun/npm and Node (version in `.node-version`). Runs the backend on :8080 and rebuilds it on Go or `schema.sql` changes. Runs Vite with HMR on **:5173**, proxying every path except the UI's own files to the backend |
-| `go tool task build [image]` | Builds the UI, then `bin/telesphorepo` (`CGO_ENABLED=0`, version from git). `image` also builds the container image `telesphorepo:local` |
-| `go tool task preview` | Builds, then runs `bin/telesphorepo dev` on :8080 |
+| `go tool task build [image]` | Builds the UI, then `bin/telesphorepo-server` (`CGO_ENABLED=0`, version from git). `image` also builds the container image `telesphorepo:local` |
+| `go tool task preview` | Builds, then runs `bin/telesphorepo-server dev` on :8080 |
 | `go tool task test [go test args]` | Runs the core zone: `go test -tags e2e ./e2e/... -count=1 -v`, 60 min timeout |
 | `go tool task test import [go test args]` | Runs the import zone: `-tags import`, 45 min timeout. It starts a Nexus container |
 | `go tool task test scale [go test args]` | Runs `TestScale` (`-tags scale`, 60 min timeout) |
 | `go tool task test clients [go test args]` | Runs the clients zone: `-tags clients`, 40 min timeout. It builds the Gradle plugin and the Maven extension from the clients repo (`E2E_CLIENTS_DIR`, or a shallow clone of `E2E_CLIENTS_REF`, default `main`) |
 | `go tool task test all [go test args]` | Runs core, import, scale and clients one after the other. It runs every zone, lists the failed zones and exits non-zero if any failed |
-| `go tool task release [version]` | Builds the UI once. Then it cross-compiles the server (`./cmd/telesphorepo`) and the Docker credential helper (`./cmd/docker-credential-telesphorepo`) for linux, darwin and windows on amd64 and arm64 (`CGO_ENABLED=0`, `-trimpath`, `-X main.version`). Each binary goes into `bin/release/<program>_<version>_<os>_<arch>.tar.gz` (`.zip` on Windows) with `LICENSE` and `README.md`. The command writes `SHA256SUMS` of every archive. The version defaults to `git describe` |
+| `go tool task release [version]` | Builds the UI once. Then it cross-compiles the server (`./cmd/telesphorepo-server`) and the Docker credential helper (`./cmd/docker-credential-telesphorepo`) for linux, darwin and windows on amd64 and arm64 (`CGO_ENABLED=0`, `-trimpath`, `-X main.version`). Each binary goes into `bin/release/<program>_<version>_<os>_<arch>.tar.gz` (`.zip` on Windows) with `LICENSE` and `README.md`. The command writes `SHA256SUMS` of every archive. The version defaults to `git describe`. A version given as the argument must be a release version; the command first writes it into each `dev` entry of `changes.toml` (see **Change log**), so the binaries embed the stamped change log |
 | `go tool task gen` | Runs `go tool sqlc generate` for every `internal/**/sqlc.yaml` |
 | `go tool task doctor` | Shows the detected toolchain and container engine |
 
@@ -2601,7 +2637,7 @@ CI runs on GitHub Actions with the built-in `GITHUB_TOKEN` and no repository sec
 
 | Workflow | Runs | Does |
 |---|---|---|
-| `ci.yml` | Push to `main`, pull requests | `build` job: `go tool task build`, `go vet` for the `e2e`, `import`, `scale` and `clients` tags, `telesphorepo dbcheck`. `e2e-core` job: `go tool task test` (uploads the log on failure). `snapshot-image` job (push to `main` only, after `e2e-core` passes): multi-arch image with tags `main` and `sha-<short>`, version `main-<short sha>`. A newer push cancels the running pull request jobs |
+| `ci.yml` | Push to `main`, pull requests | `build` job: `go tool task build`, `go vet` for the `e2e`, `import`, `scale` and `clients` tags, `telesphorepo-server dbcheck`. `e2e-core` job: `go tool task test` (uploads the log on failure). `snapshot-image` job (push to `main` only, after `e2e-core` passes): multi-arch image with tags `main` and `sha-<short>`, version `main-<short sha>`. A newer push cancels the running pull request jobs |
 | `e2e-extended.yml` | Manual (zone `import`, `scale` or `all`), weekly for `import` | `go tool task test <zone>` |
 | `release.yml` | Push of a `v*` tag | `binaries` job: `go tool task release`, then a GitHub Release with the archives and `SHA256SUMS`. `image` job: multi-arch image (`linux/amd64`, `linux/arm64`) pushed to `ghcr.io/telesphorepo/telesphorepo` with tags `X.Y.Z`, `X.Y` and `latest` (no `latest` for pre-releases) |
 

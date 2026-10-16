@@ -46,8 +46,9 @@ type Policy struct {
 	SomeRepo perm.ID
 	// Repo is set when the route acts on one repo.
 	Repo *RepoRule
-	// Errors writes a refusal. nil: JSON {"error": message} (httpx.Error). A format with its own
-	// error format (e.g. the OCI error JSON) sets it.
+	// Errors writes a refusal. nil: httpx.Error, a problem document under /api/ and /cli/ and
+	// JSON {"error": message} on a format route. A format with its own error format (e.g. the
+	// OCI error JSON) sets it.
 	Errors ErrorWriter
 	// Challenge sets the WWW-Authenticate header of a 401. nil: a Basic challenge on a route
 	// outside /api/, none under /api/ and none for a request of the web UI (auth.UIHeader).
@@ -183,7 +184,7 @@ func (p Policy) refuse(w http.ResponseWriter, r *http.Request, d access.Decision
 		p.Errors(w, r, d)
 		return
 	}
-	httpx.Error(w, d.Status, d.Message)
+	httpx.Error(w, r, d.Status, d.Message)
 }
 
 // needs returns the server permissions of the policy: Perm, or AnyPerm.

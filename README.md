@@ -16,7 +16,7 @@ Open **http://localhost:5173**. The startup banner prints the admin username and
 some client snippets. The first run fills the instance with the same demo data each time, before the
 server starts: about 150,000 Maven files, Debian packages, raw files and container images in the public repos `maven`, `debian`, `raw` and `docker`, a
 private Maven repo `internal`, and five demo users (their passwords are in the banner). To start with
-empty repos, run the binary as `telesphorepo dev --empty` on a fresh data dir. Data lives in
+empty repos, run the binary as `telesphorepo-server dev --empty` on a fresh data dir. Data lives in
 `.telesphorepo-dev/`; delete it to start over. Press Ctrl+C to stop. The dev server does not enforce the second factor.
 
 ## Run it in production
@@ -30,7 +30,7 @@ The image supports `linux/amd64` and `linux/arm64`. `:latest` is the newest rele
 
 You can also download a binary for Linux, macOS or Windows (amd64 or arm64) from the
 [GitHub Releases](https://github.com/Telesphorepo/Telesphorepo/releases) page. Check the
-download against `SHA256SUMS`, unpack it, and run `./telesphorepo serve`.
+download against `SHA256SUMS`, unpack it, and run `./telesphorepo-server serve`.
 
 - **Admin password:** on first start the server prints a generated `admin` password once to
   the container log (`docker logs <container>`).
@@ -91,12 +91,12 @@ An admin can limit who may download from or publish to each repo by address. Ope
 ## Commands you'll use
 
 ```sh
-go tool task dev | build | test       # develop, build bin/telesphorepo, run the e2e suite
+go tool task dev | build | test       # develop, build bin/telesphorepo-server, run the e2e suite
 go tool task test import | scale | clients | all # other test zones (import needs a Nexus container)
-telesphorepo user add alice [--admin] # prompts for the password
-telesphorepo user passwd alice        # reset a password
-telesphorepo user reset-2fa alice     # remove the second factors of a user
-docker exec -it <container> /telesphorepo user add alice
+telesphorepo-server user add alice [--admin] # prompts for the password
+telesphorepo-server user passwd alice        # reset a password
+telesphorepo-server user reset-2fa alice     # remove the second factors of a user
+docker exec -it <container> /telesphorepo-server user add alice
 ```
 
 To move the blobs to another store, change the storage on the **Settings** page. The server
@@ -185,7 +185,7 @@ printf 'Publish token: '; read -rs TOKEN; echo
 printf 'user = "publish:%s"\n' "$TOKEN" | curl -fsS -K - -T file.tar.gz https://packages.example.com/raw/raw/path/file.tar.gz
 ```
 
-A user who loses every factor can be reset with `telesphorepo user reset-2fa NAME`.
+A user who loses every factor can be reset with `telesphorepo-server user reset-2fa NAME`.
 
 ## Clients
 

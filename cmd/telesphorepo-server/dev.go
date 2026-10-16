@@ -18,7 +18,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 )
 
-// devAdminUser is the admin "telesphorepo dev" creates unless TR_BOOTSTRAP_ADMIN_USER is set.
+// devAdminUser is the admin "telesphorepo-server dev" creates unless TR_BOOTSTRAP_ADMIN_USER is set.
 const devAdminUser = "admin"
 
 // devState is what Init learns and Ready prints.
@@ -75,6 +75,7 @@ func runDev(ctx context.Context, boot *config.Boot, st *devState) error {
 		// the second factor is optional ("2FA not enforced (dev)" in the banner).
 		Dev:      true,
 		TextLogs: true,
+		Version:  version,
 		Init:     func(ctx context.Context, s *server.Services) error { return devInit(ctx, s, st) },
 		Ready:    func(addr net.Addr) { printDevBanner(st, baseURL(st.settings.Current(), addr)) },
 	})
@@ -184,7 +185,7 @@ func printDevBanner(st *devState, base string) {
 	pw := st.password
 	shownPW := pw
 	if pw == "" {
-		shownPW = "(unknown - reset it: telesphorepo user passwd " + st.user + ")"
+		shownPW = "(unknown - reset it: telesphorepo-server user passwd " + st.user + ")"
 		pw = "<password>"
 	}
 	title := "Telesphorepo dev server is running"

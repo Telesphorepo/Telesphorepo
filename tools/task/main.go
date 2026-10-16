@@ -4,7 +4,7 @@
 // macOS and Linux.
 //
 //	go tool task dev            backend + Vite with live reload
-//	go tool task build [image]  bin/telesphorepo with the UI embedded (+ container image)
+//	go tool task build [image]  bin/telesphorepo-server with the UI embedded (+ container image)
 //	go tool task preview        build, then run the production binary locally
 //	go tool task test [zone] [args]  e2e zone: core (default), import, scale, clients or all; args go to "go test"
 //	go tool task release [version]  cross-compiled archives and SHA256SUMS in bin/release
@@ -25,7 +25,7 @@ import (
 const usage = `Usage: go tool task <command>
 
   dev              run everything locally with live reload: API on :8080, UI on http://localhost:5173
-  build            build bin/telesphorepo with the UI embedded
+  build            build bin/telesphorepo-server with the UI embedded
   build image      ...and the container image telesphorepo:local (Docker or Podman)
   preview          build, then run the production binary at http://localhost:8080
   test [args]      run the core e2e zone; args pass to go test (e.g. go tool task test -run TestMaven)
@@ -33,9 +33,10 @@ const usage = `Usage: go tool task <command>
   test scale       run the scale zone: 100k and 1M seeded assets, p95 must not double
   test clients     run the clients zone: the Gradle plugin and Maven extension built from the clients repo (E2E_CLIENTS_DIR or a git clone)
   test all         run the core, import, scale and clients zones one after the other; fails if any fails
-  release [version]  build the UI once, then bin/release/telesphorepo_<version>_<os>_<arch> archives
+  release [version]  build the UI once, then bin/release/<program>_<version>_<os>_<arch> archives
                    (.tar.gz, .zip on Windows) for linux, darwin and windows on amd64 and arm64,
-                   plus SHA256SUMS; the version defaults to git describe (e.g. go tool task release 1.2.3)
+                   plus SHA256SUMS; the version defaults to git describe (e.g. go tool task release 1.2.3).
+                   A given version is written into each "dev" entry of changes.toml first
   gen              regenerate the sqlc query code for every internal/**/sqlc.yaml
   doctor          show detected tools (Go, bun/npm, Docker/Podman) and what is missing
 

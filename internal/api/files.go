@@ -36,12 +36,12 @@ func (a *API) tree(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	q := r.URL.Query()
 	dir, err := repopath.Folder(q.Get("path"))
 	if err != nil {
-		httpx.Error(w, http.StatusBadRequest, "invalid path")
+		httpx.Error(w, r, http.StatusBadRequest, "invalid path")
 		return
 	}
 	items, next, err := a.files.Tree(r.Context(), repo, string(dir), q.Get("after"), httpx.Limit(r))
 	if errors.Is(err, files.ErrInvalid) {
-		httpx.Error(w, http.StatusBadRequest, "invalid cursor")
+		httpx.Error(w, r, http.StatusBadRequest, "invalid cursor")
 		return
 	}
 	if err != nil {
@@ -69,14 +69,14 @@ func (a *API) deleteFiles(w http.ResponseWriter, r *http.Request, c *route.Call)
 		return
 	}
 	if n := len(in.Paths) + len(in.Prefixes); n == 0 || n > maxBulk {
-		httpx.Error(w, http.StatusBadRequest, "paths and prefixes must hold 1 to "+strconv.Itoa(maxBulk)+" items together")
+		httpx.Error(w, r, http.StatusBadRequest, "paths and prefixes must hold 1 to "+strconv.Itoa(maxBulk)+" items together")
 		return
 	}
 	rm := assets.Removal{Repo: repo, Origin: format.OriginOf(c.P, assets.SourceUI)}
 	for _, f := range in.Paths {
 		p, err := repopath.Parse(f)
 		if err != nil {
-			httpx.Error(w, http.StatusBadRequest, "invalid path "+strconv.Quote(clipName(f)))
+			httpx.Error(w, r, http.StatusBadRequest, "invalid path "+strconv.Quote(clipName(f)))
 			return
 		}
 		rm.Paths = append(rm.Paths, p)
@@ -84,7 +84,7 @@ func (a *API) deleteFiles(w http.ResponseWriter, r *http.Request, c *route.Call)
 	for _, prefix := range in.Prefixes {
 		dir, err := repopath.Folder(prefix)
 		if err != nil || dir == "" {
-			httpx.Error(w, http.StatusBadRequest, "invalid prefix "+strconv.Quote(clipName(prefix)))
+			httpx.Error(w, r, http.StatusBadRequest, "invalid prefix "+strconv.Quote(clipName(prefix)))
 			return
 		}
 		if !slices.Contains(rm.Prefixes, dir) {
@@ -126,7 +126,7 @@ func (a *API) deletePlan(w http.ResponseWriter, r *http.Request, c *route.Call) 
 		return
 	}
 	if n := len(in.Paths) + len(in.Prefixes); n == 0 || n > maxBulk {
-		httpx.Error(w, http.StatusBadRequest, "paths and prefixes must hold 1 to "+strconv.Itoa(maxBulk)+" items together")
+		httpx.Error(w, r, http.StatusBadRequest, "paths and prefixes must hold 1 to "+strconv.Itoa(maxBulk)+" items together")
 		return
 	}
 	var notes []format.DeleteNote
@@ -151,7 +151,7 @@ func (a *API) deletePlan(w http.ResponseWriter, r *http.Request, c *route.Call) 
 	for _, raw := range in.Paths {
 		p, err := repopath.Parse(raw)
 		if err != nil {
-			httpx.Error(w, http.StatusBadRequest, "invalid path "+strconv.Quote(clipName(raw)))
+			httpx.Error(w, r, http.StatusBadRequest, "invalid path "+strconv.Quote(clipName(raw)))
 			return
 		}
 		if _, err := a.assets.Get(r.Context(), repo.ID, string(p)); errors.Is(err, assets.ErrNotFound) {
@@ -165,7 +165,7 @@ func (a *API) deletePlan(w http.ResponseWriter, r *http.Request, c *route.Call) 
 	for _, raw := range in.Prefixes {
 		dir, err := repopath.Folder(raw)
 		if err != nil || dir == "" {
-			httpx.Error(w, http.StatusBadRequest, "invalid prefix "+strconv.Quote(clipName(raw)))
+			httpx.Error(w, r, http.StatusBadRequest, "invalid prefix "+strconv.Quote(clipName(raw)))
 			return
 		}
 		after := ""
@@ -202,10 +202,10 @@ func (a *API) deletePlan(w http.ResponseWriter, r *http.Request, c *route.Call) 
 }
 
 // uploadSpec returns the upload spec of the repo's format, or answers 400.
-func (a *API) uploadSpec(w http.ResponseWriter, repo *repos.Repo) (*format.UploadSpec, bool) {
+func (a *API) uploadSpec(w http.ResponseWriter, r *http.Request, repo *repos.Repo) (*format.UploadSpec, bool) {
 	f := a.formats.Get(repo.Format)
 	if f == nil || f.Upload == nil {
-		httpx.Error(w, http.StatusBadRequest, "repos of format "+repo.Format+" take no uploads from the web UI")
+		httpx.Error(w, r, http.StatusBadRequest, "repos of format "+repo.Format+" take no uploads from the web UI")
 		return nil, false
 	}
 	return f.Upload, true
@@ -234,7 +234,7 @@ func planOut(p *format.Plan) *format.Plan {
 // the rule's max_bytes from the start of the file. It takes the credential of the upload.
 func (a *API) uploadPlan(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	repo := c.Repo
-	up, ok := a.uploadSpec(w, repo)
+	up, ok := a.uploadSpec(w, r, repo)
 	if !ok {
 		return
 	}
@@ -242,12 +242,12 @@ func (a *API) uploadPlan(w http.ResponseWriter, r *http.Request, c *route.Call) 
 	r.Body = http.MaxBytesReader(w, r.Body, limit+2<<20+int64(maxUploadFiles)*1024)
 	mr, err := r.MultipartReader()
 	if err != nil {
-		httpx.Error(w, http.StatusBadRequest, "send multipart/form-data")
+		httpx.Error(w, r, http.StatusBadRequest, "send multipart/form-data")
 		return
 	}
 	part, err := mr.NextPart()
 	if err != nil || part.FormName() != "plan" {
-		httpx.Error(w, http.StatusBadRequest, `the first part must be "plan"`)
+		httpx.Error(w, r, http.StatusBadRequest, `the first part must be "plan"`)
 		return
 	}
 	var req struct {
@@ -259,26 +259,26 @@ func (a *API) uploadPlan(w http.ResponseWriter, r *http.Request, c *route.Call) 
 		} `json:"files"`
 	}
 	if err := json.NewDecoder(io.LimitReader(part, 2<<20)).Decode(&req); err != nil {
-		httpx.Error(w, http.StatusBadRequest, "the plan part is not valid JSON: "+err.Error())
+		httpx.Error(w, r, http.StatusBadRequest, "the plan part is not valid JSON: "+err.Error())
 		return
 	}
 	if len(req.Files) == 0 || len(req.Files) > maxUploadFiles {
-		httpx.Error(w, http.StatusBadRequest, "a plan takes 1 to "+strconv.Itoa(maxUploadFiles)+" files")
+		httpx.Error(w, r, http.StatusBadRequest, "a plan takes 1 to "+strconv.Itoa(maxUploadFiles)+" files")
 		return
 	}
 	if len(req.Fields) > maxUploadFields {
-		httpx.Error(w, http.StatusBadRequest, "too many form fields")
+		httpx.Error(w, r, http.StatusBadRequest, "too many form fields")
 		return
 	}
 	for k, v := range req.Fields {
 		if len(v) > maxFieldBytes {
-			httpx.Error(w, http.StatusBadRequest, "form field "+k+" is too long")
+			httpx.Error(w, r, http.StatusBadRequest, "form field "+k+" is too long")
 			return
 		}
 	}
 	folder, err := repopath.Folder(req.Folder)
 	if err != nil {
-		httpx.Error(w, http.StatusBadRequest, "invalid folder")
+		httpx.Error(w, r, http.StatusBadRequest, "invalid folder")
 		return
 	}
 	in := format.PlanInput{Fields: req.Fields, Folder: string(folder)}
@@ -289,15 +289,15 @@ func (a *API) uploadPlan(w http.ResponseWriter, r *http.Request, c *route.Call) 
 	for _, f := range req.Files {
 		p := strings.TrimLeft(strings.ReplaceAll(f.Path, `\`, "/"), "/")
 		if _, err := repopath.Parse(p); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "invalid file name "+strconv.Quote(clipName(f.Path)))
+			httpx.Error(w, r, http.StatusBadRequest, "invalid file name "+strconv.Quote(clipName(f.Path)))
 			return
 		}
 		if _, dup := index[p]; dup {
-			httpx.Error(w, http.StatusBadRequest, p+" is in the upload twice")
+			httpx.Error(w, r, http.StatusBadRequest, p+" is in the upload twice")
 			return
 		}
 		if f.Size < 0 {
-			httpx.Error(w, http.StatusBadRequest, "invalid size of "+p)
+			httpx.Error(w, r, http.StatusBadRequest, "invalid size of "+p)
 			return
 		}
 		index[p] = len(in.Files)
@@ -317,7 +317,7 @@ func (a *API) uploadPlan(w http.ResponseWriter, r *http.Request, c *route.Call) 
 		i, known := index[rel]
 		rule := readRule(up, rel)
 		if !isFile || !known || rule == nil {
-			httpx.Error(w, http.StatusBadRequest, "a plan takes only the first bytes of the listed files that the format reads")
+			httpx.Error(w, r, http.StatusBadRequest, "a plan takes only the first bytes of the listed files that the format reads")
 			return
 		}
 		b, err := io.ReadAll(io.LimitReader(part, rule.MaxBytes+1))
@@ -326,11 +326,11 @@ func (a *API) uploadPlan(w http.ResponseWriter, r *http.Request, c *route.Call) 
 			return
 		}
 		if int64(len(b)) > rule.MaxBytes || int64(len(b)) > in.Files[i].Size {
-			httpx.Error(w, http.StatusBadRequest, "the part of "+rel+" is longer than the plan reads")
+			httpx.Error(w, r, http.StatusBadRequest, "the part of "+rel+" is longer than the plan reads")
 			return
 		}
 		if total += int64(len(b)); total > limit {
-			httpx.Error(w, http.StatusRequestEntityTooLarge, "upload too large")
+			httpx.Error(w, r, http.StatusRequestEntityTooLarge, "upload too large")
 			return
 		}
 		in.Files[i].Head = b
@@ -351,7 +351,7 @@ func (a *API) uploadPlan(w http.ResponseWriter, r *http.Request, c *route.Call) 
 // "ui"): 201 {files: [Uploaded]}. The files together may not exceed max_upload_size.
 func (a *API) upload(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	repo := c.Repo
-	up, ok := a.uploadSpec(w, repo)
+	up, ok := a.uploadSpec(w, r, repo)
 	if !ok {
 		return
 	}
@@ -379,7 +379,7 @@ func (a *API) upload(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		return
 	}
 	if msg := plan.Blocked(); msg != "" {
-		httpx.Error(w, http.StatusBadRequest, msg)
+		httpx.Error(w, r, http.StatusBadRequest, msg)
 		return
 	}
 	if len(plan.Items) == 0 {
@@ -387,7 +387,7 @@ func (a *API) upload(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		if msg == "" {
 			msg = "the upload has no file to store"
 		}
-		httpx.Error(w, http.StatusBadRequest, msg)
+		httpx.Error(w, r, http.StatusBadRequest, msg)
 		return
 	}
 	files := map[string]*assets.Spooled{}
@@ -427,7 +427,7 @@ func (a *API) readUpload(w http.ResponseWriter, r *http.Request) ([]uploadFile, 
 	r.Body = http.MaxBytesReader(w, r.Body, limit+1<<20+int64(maxUploadFiles)*1024)
 	mr, err := r.MultipartReader()
 	if err != nil {
-		httpx.Error(w, http.StatusBadRequest, "send multipart/form-data")
+		httpx.Error(w, r, http.StatusBadRequest, "send multipart/form-data")
 		return nil, nil, false
 	}
 	var ups []uploadFile
@@ -446,7 +446,7 @@ func (a *API) readUpload(w http.ResponseWriter, r *http.Request) ([]uploadFile, 
 		rel, isFile := partPath(part)
 		if !isFile {
 			if len(fields) >= maxUploadFields {
-				httpx.Error(w, http.StatusBadRequest, "too many form fields")
+				httpx.Error(w, r, http.StatusBadRequest, "too many form fields")
 				return ups, nil, false
 			}
 			b, err := io.ReadAll(io.LimitReader(part, maxFieldBytes+1))
@@ -455,22 +455,22 @@ func (a *API) readUpload(w http.ResponseWriter, r *http.Request) ([]uploadFile, 
 				return ups, nil, false
 			}
 			if len(b) > maxFieldBytes {
-				httpx.Error(w, http.StatusBadRequest, "form field "+part.FormName()+" is too long")
+				httpx.Error(w, r, http.StatusBadRequest, "form field "+part.FormName()+" is too long")
 				return ups, nil, false
 			}
 			fields[part.FormName()] = string(b)
 			continue
 		}
 		if len(ups) >= maxUploadFiles {
-			httpx.Error(w, http.StatusBadRequest, "upload at most "+strconv.Itoa(maxUploadFiles)+" files at a time")
+			httpx.Error(w, r, http.StatusBadRequest, "upload at most "+strconv.Itoa(maxUploadFiles)+" files at a time")
 			return ups, nil, false
 		}
 		if _, err := repopath.Parse(rel); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "invalid file name "+strconv.Quote(clipName(rel)))
+			httpx.Error(w, r, http.StatusBadRequest, "invalid file name "+strconv.Quote(clipName(rel)))
 			return ups, nil, false
 		}
 		if seen[rel] {
-			httpx.Error(w, http.StatusBadRequest, rel+" is in the upload twice")
+			httpx.Error(w, r, http.StatusBadRequest, rel+" is in the upload twice")
 			return ups, nil, false
 		}
 		seen[rel] = true
@@ -483,7 +483,7 @@ func (a *API) readUpload(w http.ResponseWriter, r *http.Request) ([]uploadFile, 
 		ups = append(ups, uploadFile{path: rel, sp: sp})
 	}
 	if len(ups) == 0 {
-		httpx.Error(w, http.StatusBadRequest, "no files in the upload")
+		httpx.Error(w, r, http.StatusBadRequest, "no files in the upload")
 		return nil, nil, false
 	}
 	return ups, fields, true
@@ -523,9 +523,9 @@ func uploadReadFail(w http.ResponseWriter, r *http.Request, err error) {
 	var mbe *http.MaxBytesError
 	switch {
 	case errors.Is(err, assets.ErrTooLarge) || errors.As(err, &mbe):
-		httpx.Error(w, http.StatusRequestEntityTooLarge, "upload too large")
+		httpx.Error(w, r, http.StatusRequestEntityTooLarge, "upload too large")
 	case errors.Is(err, io.ErrUnexpectedEOF) || strings.Contains(err.Error(), "multipart"):
-		httpx.Error(w, http.StatusBadRequest, "incomplete or malformed multipart body")
+		httpx.Error(w, r, http.StatusBadRequest, "incomplete or malformed multipart body")
 	default:
 		route.Fail(w, r, err)
 	}
@@ -537,9 +537,9 @@ func (a *API) fileDetails(w http.ResponseWriter, r *http.Request, c *route.Call)
 	f, err := a.files.Details(r.Context(), repo, r.URL.Query().Get("path"))
 	switch {
 	case errors.Is(err, files.ErrInvalid):
-		httpx.Error(w, http.StatusBadRequest, "invalid path")
+		httpx.Error(w, r, http.StatusBadRequest, "invalid path")
 	case errors.Is(err, files.ErrNotFound):
-		httpx.Error(w, http.StatusNotFound, "file not found")
+		httpx.Error(w, r, http.StatusNotFound, "file not found")
 	case err != nil:
 		route.Fail(w, r, err)
 	default:

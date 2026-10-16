@@ -2,7 +2,7 @@
   A fresh second-factor check before a sensitive action (approve a device, create a publish token,
   upload, delete), inline in the page. It loads the caller's methods and shows the code field or
   the passkey button. A user without a second factor gets a link to set one up, which offers a
-  way back to `back` after the setup; under `telesphorepo dev` (second_factor_optional) also a way
+  way back to `back` after the setup; under `telesphorepo-server dev` (second_factor_optional) also a way
   to go on without one. onProof does the action; when it throws, the form shows the error.
 
     <FreshFactor actionLabel="Approve device" onProof={approve} back="/device?code=ABCD-EFGH" />

@@ -137,9 +137,9 @@ func (m *mod) routes(r *route.Router) {
 func fail(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, ErrNotFound):
-		httpx.Error(w, http.StatusNotFound, "not found")
+		httpx.Error(w, r, http.StatusNotFound, "not found")
 	case errors.Is(err, ErrBusy), errors.Is(err, ErrNotRunning):
-		httpx.Error(w, http.StatusConflict, err.Error())
+		httpx.Error(w, r, http.StatusConflict, err.Error())
 	default:
 		route.Fail(w, r, err)
 	}

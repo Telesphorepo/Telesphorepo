@@ -442,7 +442,7 @@ func deleting(ctx context.Context, q *dbq.Queries, repoID int64) (bool, error) {
 	return err == nil && op.Type == ops.TypeDelete, err
 }
 
-// SeedRow is a synthetic file of "telesphorepo seed": no content is stored, only the rows.
+// SeedRow is a synthetic file of "telesphorepo-server seed": no content is stored, only the rows.
 type SeedRow struct {
 	Path        string
 	Size        int64
@@ -451,7 +451,7 @@ type SeedRow struct {
 	Kind        string
 }
 
-// SeedTx inserts blob and asset rows for "telesphorepo seed" in tx: a blob row per digest that has
+// SeedTx inserts blob and asset rows for "telesphorepo-server seed" in tx: a blob row per digest that has
 // none, and the asset row of each path. It writes no content and no MD5 or SHA-1, so it is for
 // the scale test only.
 func SeedTx(ctx context.Context, tx *sql.Tx, repoID int64, rows []SeedRow) ([]*Asset, error) {

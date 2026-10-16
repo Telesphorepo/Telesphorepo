@@ -27,7 +27,7 @@ func Standard(name string, r *route.Router, k Kit) {
 func (k Kit) Get(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	p, err := httpx.RepoPath(r, "path")
 	if err != nil {
-		httpx.Error(w, http.StatusBadRequest, "invalid path")
+		httpx.Error(w, r, http.StatusBadRequest, "invalid path")
 		return
 	}
 	k.Reader.Serve(w, r, c, p)
@@ -39,7 +39,7 @@ func (k Kit) Get(w http.ResponseWriter, r *http.Request, c *route.Call) {
 func (k Kit) Put(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	p, err := httpx.RepoPath(r, "path")
 	if err != nil {
-		httpx.Error(w, http.StatusBadRequest, "invalid path")
+		httpx.Error(w, r, http.StatusBadRequest, "invalid path")
 		return
 	}
 	sp, ok := k.SpoolBody(w, r)
@@ -57,7 +57,7 @@ func (k Kit) Put(w http.ResponseWriter, r *http.Request, c *route.Call) {
 func (k Kit) SpoolBody(w http.ResponseWriter, r *http.Request) (*assets.Spooled, bool) {
 	max := k.Assets.MaxUploadSize()
 	if r.ContentLength > max {
-		httpx.Error(w, http.StatusRequestEntityTooLarge, "upload too large")
+		httpx.Error(w, r, http.StatusRequestEntityTooLarge, "upload too large")
 		return nil, false
 	}
 	sp, err := k.Assets.Spool(http.MaxBytesReader(w, r.Body, max), max)
@@ -65,9 +65,9 @@ func (k Kit) SpoolBody(w http.ResponseWriter, r *http.Request) (*assets.Spooled,
 		var mbe *http.MaxBytesError
 		switch {
 		case errors.Is(err, assets.ErrTooLarge) || errors.As(err, &mbe):
-			httpx.Error(w, http.StatusRequestEntityTooLarge, "upload too large")
+			httpx.Error(w, r, http.StatusRequestEntityTooLarge, "upload too large")
 		case errors.Is(err, io.ErrUnexpectedEOF):
-			httpx.Error(w, http.StatusBadRequest, "incomplete request body")
+			httpx.Error(w, r, http.StatusBadRequest, "incomplete request body")
 		default:
 			route.Fail(w, r, err)
 		}

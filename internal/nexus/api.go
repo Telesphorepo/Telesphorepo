@@ -14,16 +14,16 @@ func nexusFail(w http.ResponseWriter, r *http.Request, err error) {
 	var se *SourceError
 	switch {
 	case errors.As(err, &se) && se.Unauthorized():
-		httpx.Error(w, http.StatusBadRequest, se.Error())
+		httpx.Error(w, r, http.StatusBadRequest, se.Error())
 	case errors.As(err, &se):
-		httpx.Error(w, http.StatusBadGateway, se.Error())
+		httpx.Error(w, r, http.StatusBadGateway, se.Error())
 	case errors.Is(err, ErrInvalid):
-		httpx.Error(w, http.StatusBadRequest, err.Error())
+		httpx.Error(w, r, http.StatusBadRequest, err.Error())
 	case errors.Is(err, ErrNotFound):
-		httpx.Error(w, http.StatusNotFound, "not found")
+		httpx.Error(w, r, http.StatusNotFound, "not found")
 	case errors.Is(err, ErrExists), errors.Is(err, ErrRunning), errors.Is(err, ErrNotRunning),
 		errors.Is(err, ErrCutOver), errors.Is(err, ErrMapped):
-		httpx.Error(w, http.StatusConflict, err.Error())
+		httpx.Error(w, r, http.StatusConflict, err.Error())
 	default:
 		route.Fail(w, r, err)
 	}

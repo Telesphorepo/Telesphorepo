@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Telesphorepo/Telesphorepo/changelog"
 	"github.com/Telesphorepo/Telesphorepo/internal/jobs"
 	"github.com/Telesphorepo/Telesphorepo/internal/module"
 	"github.com/Telesphorepo/Telesphorepo/internal/ops"
@@ -67,7 +68,8 @@ func Module() module.Module {
 				a.reader, a.uploads, a.ops = h.Reader, h.Uploads, h.Ops
 				a.audit, a.access, a.formats = h.Audit, h.Access, h.Formats
 				a.files = files.New(h.Assets, h.Auth, h.Builds)
-				return nil
+				_, err := changelog.Embedded() // a broken change log stops the startup
+				return err
 			})
 			x.TokenKind(token.ReadToken, func(ctx context.Context, publicID, secret string) (*auth.Principal, error) {
 				return a.auth.VerifyReadToken(ctx, publicID, secret)
@@ -100,6 +102,7 @@ func (a *API) routes(mux *route.Router) {
 	mux.Handle("PUT /api/users/{username}/permissions", route.UIPerm(perm.PeopleManage), a.setUserPermissions)
 	mux.Handle("GET /api/people", route.Policy{Accept: auth.CredSession, Perm: perm.PeopleManage, SomeRepo: perm.RepoAccess}, a.listPeople)
 
+	mux.Handle("GET /api/changes", route.Public, a.changes)
 	mux.Handle("GET /api/formats", route.Public, a.listFormats)
 	mux.Handle("GET /api/permissions", route.Public, a.listPermissionRegistry)
 
@@ -145,7 +148,7 @@ func (a *API) routes(mux *route.Router) {
 	a.registerRepoKinds(mux)
 
 	mux.Handle("/api/", route.Public, func(w http.ResponseWriter, r *http.Request, _ *route.Call) {
-		httpx.Error(w, http.StatusNotFound, "not found")
+		httpx.Error(w, r, http.StatusNotFound, "not found")
 	})
 }
 
@@ -189,7 +192,7 @@ func (a *API) createToken(w http.ResponseWriter, r *http.Request, c *route.Call)
 	p := c.P
 	// SSO accounts are UI-only.
 	if p.Kind != auth.KindLocal {
-		httpx.Error(w, http.StatusForbidden, "SSO accounts cannot create API tokens")
+		httpx.Error(w, r, http.StatusForbidden, "SSO accounts cannot create API tokens")
 		return
 	}
 	var in struct {
@@ -202,7 +205,7 @@ func (a *API) createToken(w http.ResponseWriter, r *http.Request, c *route.Call)
 	var exp time.Duration
 	if in.ExpiresInDays != nil {
 		if d := *in.ExpiresInDays; d < 1 || d > 36500 {
-			httpx.Error(w, http.StatusBadRequest, "expires_in_days must be between 1 and 36500")
+			httpx.Error(w, r, http.StatusBadRequest, "expires_in_days must be between 1 and 36500")
 			return
 		}
 		exp = time.Duration(*in.ExpiresInDays) * 24 * time.Hour
@@ -226,7 +229,7 @@ func (a *API) deleteToken(w http.ResponseWriter, r *http.Request, c *route.Call)
 	p := c.P
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		httpx.Error(w, http.StatusBadRequest, "invalid token id")
+		httpx.Error(w, r, http.StatusBadRequest, "invalid token id")
 		return
 	}
 	if err := a.auth.DeleteToken(r.Context(), p, id); err != nil {
@@ -261,10 +264,10 @@ func (a *API) getUser(w http.ResponseWriter, r *http.Request, c *route.Call) {
 }
 
 // permsIn reads a list of server permission IDs. An unknown ID or a broken need answers 400.
-func permsIn(w http.ResponseWriter, ids []string) (perm.Set, bool) {
+func permsIn(w http.ResponseWriter, r *http.Request, ids []string) (perm.Set, bool) {
 	set, err := perm.Current().Parse(perm.ScopeServer, ids)
 	if err != nil {
-		httpx.Error(w, http.StatusBadRequest, err.Error())
+		httpx.Error(w, r, http.StatusBadRequest, err.Error())
 		return perm.Set{}, false
 	}
 	return set, true
@@ -282,12 +285,12 @@ func (a *API) createUser(w http.ResponseWriter, r *http.Request, c *route.Call) 
 	if !a.kit.Decode(w, r, &in) {
 		return
 	}
-	perms, ok := permsIn(w, in.Permissions)
+	perms, ok := permsIn(w, r, in.Permissions)
 	if !ok {
 		return
 	}
 	if !p.Perms.Contains(perms) {
-		httpx.Error(w, http.StatusForbidden, auth.ErrNotHeld.Error())
+		httpx.Error(w, r, http.StatusForbidden, auth.ErrNotHeld.Error())
 		return
 	}
 	u, err := a.auth.CreateUser(r.Context(), in.Username, in.Password, perms)
@@ -311,7 +314,7 @@ func (a *API) updateUser(w http.ResponseWriter, r *http.Request, c *route.Call) 
 	name := r.PathValue("username")
 	if name != p.Username {
 		if !p.Is(auth.CredSession) || !p.Perms.Has(perm.PeopleManage) {
-			httpx.Error(w, http.StatusForbidden, "permission required: "+perm.Current().Label(perm.PeopleManage))
+			httpx.Error(w, r, http.StatusForbidden, "permission required: "+perm.Current().Label(perm.PeopleManage))
 			return
 		}
 		target, err := a.auth.GetUser(r.Context(), name)
@@ -323,7 +326,7 @@ func (a *API) updateUser(w http.ResponseWriter, r *http.Request, c *route.Call) 
 			if err != nil {
 				route.Fail(w, r, err)
 			} else {
-				httpx.Error(w, http.StatusForbidden, "you can change the password only of a person whose permissions you all hold")
+				httpx.Error(w, r, http.StatusForbidden, "you can change the password only of a person whose permissions you all hold")
 			}
 			return
 		}
@@ -347,7 +350,7 @@ func (a *API) setUserPermissions(w http.ResponseWriter, r *http.Request, c *rout
 	if !a.kit.Decode(w, r, &in) {
 		return
 	}
-	perms, ok := permsIn(w, in.Permissions)
+	perms, ok := permsIn(w, r, in.Permissions)
 	if !ok {
 		return
 	}
@@ -363,7 +366,7 @@ func (a *API) setUserPermissions(w http.ResponseWriter, r *http.Request, c *rout
 		return
 	}
 	if diff := cur.Perms.Minus(perms).Union(perms.Minus(cur.Perms)); !p.Perms.Contains(diff) {
-		httpx.Error(w, http.StatusForbidden, auth.ErrNotHeld.Error())
+		httpx.Error(w, r, http.StatusForbidden, auth.ErrNotHeld.Error())
 		return
 	}
 	if _, _, err := a.auth.SetUserPerms(ctx, name, in.Permissions); err != nil {
@@ -612,14 +615,14 @@ func (a *API) search(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	ctx, qs := r.Context(), r.URL.Query()
 	q := qs.Get("q")
 	if utf8.RuneCountInString(q) < 3 {
-		httpx.Error(w, http.StatusBadRequest, "q must be at least 3 characters")
+		httpx.Error(w, r, http.StatusBadRequest, "q must be at least 3 characters")
 		return
 	}
 	var after int64
 	if s := qs.Get("after"); s != "" {
 		var err error
 		if after, err = strconv.ParseInt(s, 10, 64); err != nil || after < 0 {
-			httpx.Error(w, http.StatusBadRequest, "invalid cursor")
+			httpx.Error(w, r, http.StatusBadRequest, "invalid cursor")
 			return
 		}
 	}

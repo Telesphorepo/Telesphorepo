@@ -16,7 +16,7 @@ const (
 	viteURL   = "http://localhost:5173"
 )
 
-// dev runs the backend ("telesphorepo dev") and Vite side by side, rebuilding and
+// dev runs the backend ("telesphorepo-server dev") and Vite side by side, rebuilding and
 // restarting the backend when Go sources, go.mod/go.sum or a schema.sql change.
 func dev(ctx context.Context) error {
 	pm, err := prepare(ctx)
@@ -26,7 +26,7 @@ func dev(ctx context.Context) error {
 	if err := os.MkdirAll(devBinDir, 0o755); err != nil {
 		return err
 	}
-	bin := exe(filepath.Join(devBinDir, "telesphorepo"))
+	bin := exe(filepath.Join(devBinDir, "telesphorepo-server"))
 	next := exe(filepath.Join(devBinDir, "telesphorepo.next"))
 
 	step("building backend")
@@ -127,7 +127,7 @@ func dev(ctx context.Context) error {
 
 // goBuildDev builds the backend to dst; the error carries the compiler output.
 func goBuildDev(ctx context.Context, dst string) error {
-	cmd := exec.CommandContext(ctx, "go", "build", "-o", dst, "./cmd/telesphorepo")
+	cmd := exec.CommandContext(ctx, "go", "build", "-o", dst, "./cmd/telesphorepo-server")
 	b, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(b))

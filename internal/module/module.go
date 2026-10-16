@@ -105,7 +105,7 @@ type TokenKind struct {
 	Verify auth.Verifier
 }
 
-// DemoData fills the module's part of the demo dataset of "telesphorepo dev". Repos lists the
+// DemoData fills the module's part of the demo dataset of "telesphorepo-server dev". Repos lists the
 // repos it fills, all of the module's format; the command creates them, gives users access, and
 // calls Fill once for each repo in that order, with a generator seeded by the repo's place in
 // the dataset. Fill stores the files through run (run.Add, or the module's own upload pipeline
@@ -122,7 +122,7 @@ type DemoRepo struct {
 	Public      bool // anonymous read
 }
 
-// SeedFunc inserts synthetic rows for the scale test ("telesphorepo seed"). It adds n rows to
+// SeedFunc inserts synthetic rows for the scale test ("telesphorepo-server seed"). It adds n rows to
 // repo, a repo of the module's format, numbered from start so that their paths are unique and a
 // repeated call is harmless. The caller opens the transaction and calls it in batches.
 type SeedFunc func(ctx context.Context, tx *sql.Tx, repo *repos.Repo, start, n int) error

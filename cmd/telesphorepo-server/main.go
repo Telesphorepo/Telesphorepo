@@ -1,4 +1,4 @@
-// Command telesphorepo is the single Telesphorepo binary: serve (default), dev,
+// Command telesphorepo-server is the Telesphorepo server binary: serve (default), dev,
 // user add|passwd|reset-2fa, version, help.
 package main
 
@@ -50,30 +50,30 @@ func init() {
 		summary: "add a user, reset a password or second factors",
 		usage: `Manage users in the local database.
 
-  telesphorepo user add alice            prompt for alice's password, create her
-  telesphorepo user add ops --admin      create an admin
-  telesphorepo user passwd alice         reset alice's password
-  telesphorepo user reset-2fa alice      remove alice's second factors (lost phone and codes)
+  telesphorepo-server user add alice            prompt for alice's password, create her
+  telesphorepo-server user add ops --admin      create an admin
+  telesphorepo-server user passwd alice         reset alice's password
+  telesphorepo-server user reset-2fa alice      remove alice's second factors (lost phone and codes)
 
 Passwords are prompted twice (hidden) on a terminal, or read as one line from a pipe:
-  echo 's3cretpass' | telesphorepo user add ci-bot
+  echo 's3cretpass' | telesphorepo-server user add ci-bot
 `,
 	}
 	userCmd.subs = []*command{
 		{name: "add", summary: "create a user", usage: `Create a user (password: prompted twice on a terminal, else one line from stdin; min 8 chars).
 
-  telesphorepo user add alice
-  telesphorepo user add ops --admin
-  echo 's3cretpass' | telesphorepo user add ci-bot
+  telesphorepo-server user add alice
+  telesphorepo-server user add ops --admin
+  echo 's3cretpass' | telesphorepo-server user add ci-bot
 `, run: userAdd},
 		{name: "passwd", summary: "reset a user's password", usage: `Reset a user's password and sign out their sessions.
 
-  telesphorepo user passwd alice
-  echo 'n3wpassword' | telesphorepo user passwd alice
+  telesphorepo-server user passwd alice
+  echo 'n3wpassword' | telesphorepo-server user passwd alice
 `, run: userPasswd},
 		{name: "reset-2fa", summary: "remove a user's second factors", usage: `Remove every authenticator app, passkey and recovery code of a user who lost them all.
 
-  telesphorepo user reset-2fa alice
+  telesphorepo-server user reset-2fa alice
 
 The user then signs in with the password and adds a new second factor on the Security page;
 until then the sign-in reaches only that page. Enrolled devices stay valid.
@@ -90,8 +90,8 @@ until then the sign-in reaches only that page. Enrolled devices stay valid.
 		{name: "serve", summary: "run the server (default)", usage: `Run the server. Settings are managed in the web UI (Settings) and stored in the
 database; secrets are encrypted with a master key.
 
-  telesphorepo                         same as "telesphorepo serve"
-  TR_DATA_DIR=/srv/tr telesphorepo serve
+  telesphorepo-server                  same as "telesphorepo-server serve"
+  TR_DATA_DIR=/srv/tr telesphorepo-server serve
 
 Environment (all optional): TR_DATA_DIR (default ./data), TR_LISTEN (default :8080),
 TR_MASTER_KEY (base64 32 bytes; default <data>/master.key, generated on first start).
@@ -103,8 +103,8 @@ repository signing key "default" is generated and stored encrypted in the databa
 `, run: serveCmd},
 		{name: "dev", summary: "zero-config local server with demo data", usage: `Run a zero-config local server for development.
 
-  telesphorepo dev             first run: admin, demo users and about 175,000 demo files
-  telesphorepo dev --empty     first run: admin and one empty repo per format
+  telesphorepo-server dev             first run: admin, demo users and about 175,000 demo files
+  telesphorepo-server dev --empty     first run: admin and one empty repo per format
 
 Data lives in ./.telesphorepo-dev, the server listens on http://localhost:8080 and cookies work
 over plain HTTP. The first run creates the admin and the demo data before the server starts:
@@ -116,7 +116,7 @@ TR_* env still overrides. Start over with a fresh instance by deleting ./.telesp
 		userCmd,
 		{name: "dbcheck", hidden: true, usage: `Check the query plans of every query against a fresh database.
 
-  telesphorepo dbcheck
+  telesphorepo-server dbcheck
 
 Creates the schema of every component on a temporary database, runs EXPLAIN QUERY PLAN on every
 query and exits 1 when one scans a table, uses a temp B-tree or writes a table outside its
@@ -124,15 +124,15 @@ component. Prints "ok: N queries" otherwise.
 `, run: dbcheckCmd},
 		{name: "seed", hidden: true, usage: `Bulk-insert synthetic data for the scale test.
 
-  telesphorepo seed 100000
-  TR_DATA_DIR=/srv/tr telesphorepo seed 1000000
+  telesphorepo-server seed 100000
+  TR_DATA_DIR=/srv/tr telesphorepo-server seed 1000000
 
 Splits N rows evenly over 10 repos per format (seed-<format>-00 to seed-<format>-09) for every
 format that supports seeding, then runs ANALYZE. A format adds its own rows, for example one
 package per row. Stop the server first.
 `, run: seedCmd},
-		{name: "version", summary: "print the version", usage: "Print the version.\n\n  telesphorepo version\n", run: versionCmd},
-		{name: "help", summary: "show help for a command", usage: "Show help.\n\n  telesphorepo help\n  telesphorepo help user add\n", run: helpCmd},
+		{name: "version", summary: "print the version", usage: "Print the version.\n\n  telesphorepo-server version\n", run: versionCmd},
+		{name: "help", summary: "show help for a command", usage: "Show help.\n\n  telesphorepo-server help\n  telesphorepo-server help user add\n", run: helpCmd},
 	}
 }
 
@@ -150,7 +150,7 @@ func main() {
 	if errors.As(err, &ue) {
 		fmt.Fprintln(os.Stderr, "error:", ue.msg)
 		if ue.cmd == nil {
-			fmt.Fprintln(os.Stderr, `Run "telesphorepo --help" for the list of commands.`)
+			fmt.Fprintln(os.Stderr, `Run "telesphorepo-server --help" for the list of commands.`)
 		} else {
 			fmt.Fprintln(os.Stderr)
 			printUsage(os.Stderr, ue.cmd)
@@ -259,16 +259,16 @@ func levenshtein(a, b string) int {
 const overview = `Telesphorepo - a small self-hosted artifact repository server.
 
 Usage:
-  telesphorepo [command]
+  telesphorepo-server [command]
 
 Commands:
 %s
 Examples:
-  telesphorepo dev                     try it locally (prints URL, user and password)
-  telesphorepo                         run the server (data in ./data)
-  telesphorepo user add alice          create a user (prompts for the password)
+  telesphorepo-server dev                     try it locally (prints URL, user and password)
+  telesphorepo-server                         run the server (data in ./data)
+  telesphorepo-server user add alice          create a user (prompts for the password)
 
-Run "telesphorepo <command> --help" for details.
+Run "telesphorepo-server <command> --help" for details.
 `
 
 func printUsage(w *os.File, cmd *command) {
@@ -321,7 +321,7 @@ func versionCmd(args []string) error {
 			}
 		}
 	}
-	fmt.Println("telesphorepo", v)
+	fmt.Println("telesphorepo-server", v)
 	return nil
 }
 
@@ -339,5 +339,5 @@ func serveCmd(args []string) error {
 	}
 	ctx, stop := signalContext()
 	defer stop()
-	return server.Run(ctx, boot)
+	return server.RunWith(ctx, boot, server.Options{Version: version})
 }
