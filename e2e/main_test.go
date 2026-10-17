@@ -70,6 +70,11 @@ func runMain(m *testing.M) int {
 		}
 	}
 
+	if err := pullFloating(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "e2e: floating images:", err)
+		return 1
+	}
+
 	if err := generateSigningKey(); err != nil {
 		fmt.Fprintln(os.Stderr, "e2e: signing key:", err)
 		return 1

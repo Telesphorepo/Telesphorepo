@@ -2693,8 +2693,16 @@ The suite is E2E only, with no unit tests and no mocks. `e2e/` builds the real i
 build with `E2E_SKIP_BUILD=1`, or override the image with `E2E_IMAGE`). It runs real `mvn`,
 `gradle` and `apt` clients in containers against the server. Each test runs on `fs` and on
 SeaweedFS S3 (`E2E_SEAWEEDFS_IMAGE`). The engine
-comes from `internal/containerengine`; `TR_ENGINE=docker|podman` forces one. `TestOIDC` runs a
-Keycloak container (`E2E_KEYCLOAK_IMAGE`, realm `e2e/testdata/keycloak/realm-e2e.json`) and
+comes from `internal/containerengine`; `TR_ENGINE=docker|podman` forces one. The images of the
+tools that people bring float (`e2e/images_test.go`): Maven (`maven:3`), Gradle, Debian
+(`stable`), curl, Helm, Docker (`docker:dind`), crane, skopeo, the reference registry, Keycloak,
+Nexus, the install images (`buildpack-deps:curl`, Alpine, PowerShell) and the newest ORAS
+release. Each file registers its images with `floatingImage`, and each run pulls the images of
+its zone again before the tests and prints the version of each. `TestCLIMaven` takes the newest
+Maven 4 from Maven Central, and `TestCLIJenkins` builds its Jenkins with `--pull` (Jenkins `lts`)
+and fetches the newest plugins once a day. The infrastructure of the tests stays pinned:
+SeaweedFS, Caddy, the OCI conformance suite and the curl of the volume tool. `TestOIDC` runs a
+Keycloak container (realm `e2e/testdata/keycloak/realm-e2e.json`) and
 drives the browser flow with a cookie-jar HTTP client: a sign-in with the claim map sets the
 permissions (409 on a change of them), a person outside the map signs in without permissions, a
 map change replaces them at the next sign-in, and without a claim a sign-in changes nothing; a map
@@ -2722,7 +2730,7 @@ names that are not one OCI segment are 400; `GET /v2/` answers the challenge and
 a token grants the subset (an anonymous bearer reads the public repo and gets 401 with
 `error="insufficient_scope"` and the scope on the private one); a bad password is 401
 `UNAUTHORIZED`; a
-one-segment name is `NAME_UNKNOWN`. Then the Docker CLI in Docker in Docker (`docker:29.9.0-dind`,
+one-segment name is `NAME_UNKNOWN`. Then the Docker CLI in Docker in Docker (`docker:dind`,
 privileged, `StartDind`, `DockerScratchImage`: images FROM scratch, no registry pull): a push of
 three layers (one of 20 MiB) with a device publish session, `rmi`, pull and a compare of the file
 hashes; a password and a read token pull but cannot push ("publishing needs a publish session");
@@ -2742,7 +2750,7 @@ store while the shared layer and the other image stay; a folder delete (`prefixe
 522 files (499 links, a two-platform index with its children, 20 tags), where the first batch holds
 the links and a child of the index, deletes every file and the image. `docker_proxy_test.go`: `TestDockerProxy`
 proxies two remotes, a second server with a private docker repo (its Bearer challenge runs through
-`RemoteAuth`; the remote's log shows the token request) and `registry:2.8.3` with htpasswd Basic
+`RemoteAuth`; the remote's log shows the token request) and the reference registry (`registry:latest`) with htpasswd Basic
 auth. For each: the check passes, and wrong credentials fail it with 502; Docker in Docker pulls an
 image of real tar layers (one of 30 MiB) through the proxy and the layer assets exist; a second
 pull sends no blob GET to the remote; after `metadata_ttl` (1 s) a HEAD of the tag finds the moved
@@ -2877,7 +2885,7 @@ a match fails the test. A terminal comes from `script -qec`, which also types th
 | `TestCLISetup` | In a git work tree that ignores the file: the setup line writes `telesphorepo.toml` and warns with the `.gitignore` rule; the line again prints `This setup line is already used`; on a terminal the answer `2` writes the GitHub Actions file; a Docker repo gets no project file, `y` adds the `credHelpers` entry and `n` keeps the Docker config file; an expired code (aged with `editDB`) names its repo |
 | `TestCLILogin` | A teammate's `publish` with no device prints the code, which the test approves, and publishes; `status` names the server, the device, the hook and the project; `device.json` is 600 in a 700 folder; `logout` revokes the device, removes only the server's `credHelpers` entry and deletes the server folder |
 | `TestCLIDocker` | Docker in Docker after setup (the printed entry added to `config.json`) pushes and pulls with a device session; `get` answers only the server's hosts, `list` and `store`; `publish` of a Helm chart (`alpine/helm`); ORAS push and pull through the helper |
-| `TestCLIMaven` | `publish` with a pom that names another deployment target, with Maven 3.9 and Maven 4 (`maven4Version` from the Apache archive); the mirror of the person's `settings.xml` (a proxy repo of Central) serves the plugins; `mvn` resolves both jars |
+| `TestCLIMaven` | `publish` with a pom that names another deployment target, with the newest Maven 3 and the newest Maven 4 (from the metadata of Maven Central); the mirror of the person's `settings.xml` (a proxy repo of Central) serves the plugins; `mvn` resolves both jars |
 | `TestCLIGradle` | `publish` of a library (Kotlin DSL) and a Gradle plugin (Groovy DSL); the build's own repository on another host (a Caddy that refuses credentials) gets none; a clean build applies the plugin and loads the library; a build with no `maven-publish` gets the message |
 | `TestCLIJenkins` | A real Jenkins (`testdata/jenkins`: Jenkins LTS with the OpenID Connect Provider plugin, Pipeline, Credentials Binding, Git, Maven and the Docker CLI; built once per run) runs, from local git repositories, the Jenkinsfiles that `GET /api/repos/{name}/ci` writes. The Maven job installs the CLI with the server's `install.sh` and publishes with `mvn`; the antrun plugin shows that Maven has no `OIDC_TOKEN`. The Docker job builds on a Docker in Docker engine (`DOCKER_HOST`) and pushes through the helper. The server checks the plugin's tokens with the keys that Jenkins serves; the build records name the job, the build number and the `GIT_COMMIT` of the checkout. A project file of another server gets no token, the helper gives none for a host of another server, and no file of Jenkins holds a session token. Both servers of the storage matrix share one alias, the audience of the Jenkins credential |
 | `TestCLIGitHubActions` | Runs in the `e2e-github-actions` job of `ci.yml` (`id-token: write`, `E2E_GITHUB_ACTIONS` set) and skips elsewhere: the CLI in a Maven container asks GitHub for the job's identity token and publishes with `mvn`; the server checks it with GitHub's keys; the build record names the repository, the run and the signed `sha`, also with another `GIT_COMMIT`; each session token is masked; a job without an identity token names `id-token: write` |

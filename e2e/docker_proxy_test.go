@@ -26,7 +26,7 @@ import (
 // repo and a proxy.
 
 // distributionImage is the reference registry that a proxy test uses as its remote.
-const distributionImage = "registry:2.8.3"
+var distributionImage = floatingImage("docker.io/library/registry:latest")
 
 // accessCount counts the requests of method whose path starts with prefix in the access log of s.
 func accessCount(t testing.TB, s *Server, method, prefix string) int {

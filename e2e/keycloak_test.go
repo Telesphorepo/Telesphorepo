@@ -23,8 +23,9 @@ import (
 
 // Keycloak test fixture (see testdata/keycloak/realm-e2e.json): the identity provider of single
 // sign-on, with the client "telesphorepo".
+var keycloakImage = floatingImage("quay.io/keycloak/keycloak:latest")
+
 const (
-	keycloakImage      = "quay.io/keycloak/keycloak:26.8.1" // E2E_KEYCLOAK_IMAGE overrides
 	kcRealm            = "e2e"
 	kcClientID         = "telesphorepo"
 	kcClientSecret     = "e2e-telesphorepo-client-secret"
@@ -85,12 +86,8 @@ func (kc *Keycloak) Start(t testing.TB, redirectURI string) {
 		t.Fatalf("read realm: %v", err)
 	}
 	realmJSON := strings.ReplaceAll(string(realm), kcRedirectSentinel, redirectURI)
-	img := os.Getenv("E2E_KEYCLOAK_IMAGE")
-	if img == "" {
-		img = keycloakImage
-	}
 	portSpec := strconv.Itoa(kc.Port) + "/tcp"
-	c, err := testcontainers.Run(context.Background(), img,
+	c, err := testcontainers.Run(context.Background(), keycloakImage,
 		testcontainers.WithCmd("start-dev", "--import-realm", "--http-port="+strconv.Itoa(kc.Port)),
 		testcontainers.WithEnv(map[string]string{
 			// Every URL Keycloak issues (issuer, endpoints, form actions) uses this hostname.

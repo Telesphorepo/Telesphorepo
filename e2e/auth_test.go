@@ -9,8 +9,6 @@ import (
 	"testing"
 )
 
-const authMavenImage = "maven:3.9.16-eclipse-temurin-21"
-
 func authPut(t *testing.T, s *Server, path string, body string, auth Auth) (*http.Response, []byte) {
 	t.Helper()
 	return s.Do(t, s.NewRequest(t, http.MethodPut, path, strings.NewReader(body)), auth)
@@ -110,7 +108,7 @@ func TestAuth(t *testing.T) {
 		pom := `<project xmlns="http://maven.apache.org/POM/4.0.0"><modelVersion>4.0.0</modelVersion>
 <groupId>` + group + `</groupId><artifactId>demo</artifactId><version>1.0</version><packaging>pom</packaging>
 <distributionManagement><repository><id>tr</id><url>` + s.InternalURL + `/maven/` + repo + `</url></repository></distributionManagement></project>`
-		code, out := RunClient(t, authMavenImage, ClientOpts{
+		code, out := RunClient(t, mavenImage, ClientOpts{
 			Cmd:        []string{"mvn", "-B", "-s", "/settings.xml", "deploy"},
 			Files:      []ContainerFile{{Content: settings, Path: "/settings.xml"}, {Content: pom, Path: "/proj/pom.xml"}},
 			Mounts:     map[string]string{M2Volume: "/root/.m2"},

@@ -29,7 +29,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-const nexusImage = "sonatype/nexus3:3.96.4"
+var nexusImage = floatingImage("docker.io/sonatype/nexus3:latest")
 
 // nexusAptDist is the distribution of the apt source repo; the Debian target takes it over.
 const nexusAptDist = "trixie"

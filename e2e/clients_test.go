@@ -23,17 +23,21 @@ import (
 // Client images and helpers that several zones share: Maven projects, Debian packages and apt,
 // curl for raw files, Docker in Docker, Helm, ORAS and the Caddy reverse proxy.
 
-const (
-	mavenImage  = "maven:3.9.16-eclipse-temurin-21"
-	gradleImage = "gradle:9.8.1-jdk21"
-	debImage    = "debian:trixie-20261005"
-	curlImage   = "curlimages/curl:8.16.0"
-	orasImage   = "ghcr.io/oras-project/oras:v1.3.4"
-	helmImage   = "alpine/helm:4.3.1"
-	// caddyImage is the reverse proxy of the tests: a redirector, a proxy with a body limit and a
-	// stub server.
-	caddyImage = "caddy:2.10.2-alpine"
+// The tools float (see images_test.go). orasImage is the newest ORAS release, which the run looks
+// up before it pulls: ORAS has no floating tag.
+var (
+	mavenImage  = floatingImage("docker.io/library/maven:3")
+	gradleImage = floatingImage("docker.io/library/gradle:latest")
+	debImage    = floatingImage("docker.io/library/debian:stable")
+	curlImage   = floatingImage("docker.io/curlimages/curl:latest")
+	helmImage   = floatingImage("docker.io/alpine/helm:latest")
+	orasImage   string
 )
+
+// caddyImage is the reverse proxy of the tests: a redirector, a proxy with a body limit, a
+// proxy in front of two servers and a proxy with no upstream. It is infrastructure of the tests,
+// so it stays pinned.
+const caddyImage = "caddy:2.10.2-alpine"
 
 // registryHost is the registry host of s as Docker names it: its network alias and port.
 func registryHost(s *Server) string { return s.Alias + ":8080" }
@@ -252,7 +256,7 @@ func rawRandom(t *testing.T, n int) []byte {
 // ---------------------------------------------------------------- Docker in Docker
 
 // dindImage is the Docker engine that the registry tests drive (privileged, on TestNetwork).
-const dindImage = "docker:29.9.0-dind"
+var dindImage = floatingImage("docker.io/library/docker:dind")
 
 // Dind is a running Docker engine with its CLI, on TestNetwork.
 type Dind struct {

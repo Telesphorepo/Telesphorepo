@@ -23,8 +23,9 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// jenkinsImage is the Jenkins of testdata/jenkins: Jenkins LTS with the OpenID Connect Provider
-// plugin, Pipeline, Credentials Binding and Git, Maven and the Docker CLI. The test builds it once.
+// jenkinsImage is the Jenkins of testdata/jenkins: the newest Jenkins LTS with the newest OpenID
+// Connect Provider, Pipeline, Credentials Binding and Git plugins, Maven and the Docker CLI. A
+// run builds it once, with the newest base images, and the plugins again each day.
 const jenkinsImage = "telesphorepo-e2e-jenkins"
 
 var buildJenkinsImage = sync.OnceValue(func() error {
@@ -34,7 +35,7 @@ var buildJenkinsImage = sync.OnceValue(func() error {
 	if err != nil {
 		return err
 	}
-	cmd := osexec.CommandContext(ctx, Engine.CLI, "build", "-t", jenkinsImage, dir)
+	cmd := osexec.CommandContext(ctx, Engine.CLI, "build", "--pull", "--build-arg", "E2E_DAY="+time.Now().Format(time.DateOnly), "-t", jenkinsImage, dir)
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	if err := cmd.Run(); err != nil {
@@ -77,6 +78,8 @@ func startJenkins(t testing.TB, audience string, env map[string]string) *jenkins
 	}
 	j := &jenkinsCI{c: c, URL: url}
 	j.mustExec(t, "the Jenkins CLI", "curl -fsS -o /opt/jenkins-cli.jar http://localhost:8080/jnlpJars/jenkins-cli.jar")
+	t.Logf("Jenkins %s", j.mustExec(t, "the Jenkins version", j.cli()+" version"))
+	t.Logf("plugins:\n%s", j.mustExec(t, "the plugins", j.cli()+" list-plugins | grep -E '^(oidc-provider|workflow-job|credentials-binding|git) '"))
 	return j
 }
 

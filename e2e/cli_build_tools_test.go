@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"encoding/xml"
 	"fmt"
 	"net/http"
 	"strings"
@@ -10,8 +11,30 @@ import (
 	"time"
 )
 
-// maven4Version is the Maven 4 release that TestCLIMaven downloads from the Apache archive.
-const maven4Version = "4.0.0-rc-4"
+// newestMaven4 returns the newest Maven 4 version (a release candidate before 4.0.0) in the
+// metadata of org.apache.maven:apache-maven on Maven Central.
+func newestMaven4(t testing.TB) string {
+	t.Helper()
+	resp, err := http.Get("https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/maven-metadata.xml")
+	if err != nil {
+		t.Fatalf("the Maven versions: %v", err)
+	}
+	defer resp.Body.Close()
+	var m struct {
+		Versions []string `xml:"versioning>versions>version"`
+	}
+	if err := xml.NewDecoder(resp.Body).Decode(&m); err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("the Maven versions: status %d: %v", resp.StatusCode, err)
+	}
+	// The file lists the versions from the oldest to the newest.
+	for i := len(m.Versions) - 1; i >= 0; i-- {
+		if v := m.Versions[i]; strings.HasPrefix(v, "4.") && !strings.Contains(v, "alpha") && !strings.Contains(v, "beta") {
+			return v
+		}
+	}
+	t.Fatal("Maven Central lists no Maven 4")
+	return ""
+}
 
 // mavenUserSettings is the ~/.m2/settings.xml of a person whose company mirrors Maven Central:
 // every request for Central goes to the mirror.
@@ -29,7 +52,7 @@ func mavenUserSettings(mirrorURL string) ContainerFile {
 }
 
 // TestCLIMaven: setup and publish run mvn deploy for a project whose pom names another deployment
-// target, with Maven 3.9 and with Maven 4; the mirror of the person's settings.xml stays in force
+// target, with the newest Maven 3 and the newest Maven 4; the mirror of the person's settings.xml stays in force
 // (Central comes through a proxy repo of the server); mvn resolves the published jars.
 func TestCLIMaven(t *testing.T) {
 	c := newCLI(t)
@@ -56,14 +79,14 @@ telesphorepo setup "$E2E_LINK"
 telesphorepo publish
 `
 
-		t.Run("maven 3.9", func(t *testing.T) {
+		t.Run("maven 3", func(t *testing.T) {
 			// A fresh local repository, so every plugin comes through the mirror.
-			out := c.mustRun(t, mavenImage, "publish with Maven 3.9", publish, ClientOpts{
+			out := c.mustRun(t, mavenImage, "publish with Maven 3", publish, ClientOpts{
 				Files:  project("1.0.0"),
 				Env:    map[string]string{"E2E_LINK": s.NewSetupCode(t, dev, repo).Link, "MAVEN_ARGS": "-B -ntp -Dmaven.repo.local=/tmp/m2"},
 				Mounts: map[string]string{devices: "/root/.telesphorepo"},
 			})
-			wantText(t, "publish with Maven 3.9", out, "Publishing to "+repo+" (maven)", " deploy -gs ", "-DaltDeploymentRepository=telesphorepo::"+s.InternalURL+"/maven/"+repo)
+			wantText(t, "publish with Maven 3", out, "Publishing to "+repo+" (maven)", " deploy -gs ", "-DaltDeploymentRepository=telesphorepo::"+s.InternalURL+"/maven/"+repo)
 			requireAssets(t, s, repo, gp+"/", gp+"/hello/1.0.0/hello-1.0.0.jar", gp+"/hello/1.0.0/hello-1.0.0.pom")
 			if len(assetPaths(t, s, central, "org/apache/maven/plugins/maven-deploy-plugin/")) == 0 {
 				t.Fatalf("the mirror of settings.xml served no maven-deploy-plugin: the user's settings were not in force")
@@ -71,13 +94,15 @@ telesphorepo publish
 		})
 
 		t.Run("maven 4", func(t *testing.T) {
+			maven4 := newestMaven4(t)
+			t.Logf("Maven %s", maven4)
 			c.mustRun(t, mavenImage, "publish with Maven 4", `set -e
-curl -fsSL "https://archive.apache.org/dist/maven/maven-4/$MAVEN4/binaries/apache-maven-$MAVEN4-bin.tar.gz" | tar -xz -C /opt
+curl -fsSL "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/$MAVEN4/apache-maven-$MAVEN4-bin.tar.gz" | tar -xz -C /opt
 export PATH="/opt/apache-maven-$MAVEN4/bin:$PATH"
 mvn --version
 `+publish, ClientOpts{
 				Files:  project("2.0.0"),
-				Env:    map[string]string{"E2E_LINK": s.NewSetupCode(t, dev, repo).Link, "MAVEN_ARGS": "-B -ntp", "MAVEN4": maven4Version},
+				Env:    map[string]string{"E2E_LINK": s.NewSetupCode(t, dev, repo).Link, "MAVEN_ARGS": "-B -ntp", "MAVEN4": maven4},
 				Mounts: map[string]string{devices: "/root/.telesphorepo", M2Volume: "/root/.m2/repository"},
 			})
 			requireAssets(t, s, repo, gp+"/", gp+"/hello/2.0.0/hello-2.0.0.jar", gp+"/hello/2.0.0/hello-2.0.0.pom")

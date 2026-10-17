@@ -8,12 +8,12 @@ import (
 	"testing"
 )
 
-const (
+var (
 	// installDebianImage is Debian with curl.
-	installDebianImage = "buildpack-deps:trixie-curl"
+	installDebianImage = floatingImage("docker.io/library/buildpack-deps:curl")
 	// installAlpineImage is Alpine with BusyBox only: the script downloads with wget.
-	installAlpineImage = "alpine:3.22.1"
-	installPwshImage   = "mcr.microsoft.com/powershell:7.5-ubuntu-24.04"
+	installAlpineImage = floatingImage("docker.io/library/alpine:latest")
+	installPwshImage   = floatingImage("mcr.microsoft.com/powershell:latest")
 )
 
 // installShScript installs the CLI with install.sh of $SERVER (fetch is the download command),
