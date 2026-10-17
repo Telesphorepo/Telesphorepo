@@ -37,16 +37,6 @@ type buildRecordJSON struct {
 	Links         []buildLinkJSON `json:"links"`
 }
 
-// sameBuild reports whether got is want, the id aside.
-func sameBuild(got *buildRecordJSON, want buildRecordJSON) bool {
-	if got == nil || got.ID == 0 {
-		return false
-	}
-	g := *got
-	g.ID = 0
-	return slices.Equal(g.Links, want.Links) && fmt.Sprint(g) == fmt.Sprint(want)
-}
-
 type versionJSON struct {
 	Version     string           `json:"version"`
 	Kind        string           `json:"kind"`
@@ -370,116 +360,10 @@ func TestVersionsAndSnippets(t *testing.T) {
 	})
 }
 
-// TestBuildProvenance publishes from a CI token with GitHub Actions claims (Keycloak plays
-// GitHub, see keycloak_test.go) and from a device, and checks the CI build record on the tree,
-// the file details, the versions and the builds.
-func TestBuildProvenance(t *testing.T) {
-	kc := newKeycloak(t)
-	s := StartServer(t, ServerOpts{})
-	kc.CIAudience = s.InternalURL
-	kc.Start(t, s.URL+oidcCallbackPath)
-
-	repo := RandName("prov")
-	s.CreateRepo(t, repo, "maven", true, nil)
-	createTrust(t, s, trustPolicy{Name: "acme-app", Issuer: kc.Issuer, Claims: map[string][]string{"repository": {kcCIRepository}},
-		Repos: []string{repo}})
-	ci := mustSession(t, "exchange a CI token")(s.OIDCSession(t, kc.CIToken(t), repo))
-	put := func(p, body string, auth Auth) {
-		t.Helper()
-		resp, b := authPut(t, s, "/maven/"+repo+"/"+p, body, auth)
-		if resp.StatusCode/100 != 2 {
-			t.Fatalf("PUT %s: status %d: %s", p, resp.StatusCode, b)
-		}
-	}
-	dir := "com/acme/app/"
-	put(dir+"1.0.0/app-1.0.0.pom", mavenPOM("com.acme", "app", "1.0.0", "jar", ""), ci.Auth())
-	put(dir+"1.0.0/app-1.0.0.jar", "jar", ci.Auth())
-	if st := s.CloseSession(t, ci); st/100 != 2 {
-		t.Fatalf("close the CI session: status %d", st)
-	}
-	device := s.PublishAuth(t, s.AdminUser, repo)
-	put(dir+"0.9.0/app-0.9.0.pom", mavenPOM("com.acme", "app", "0.9.0", "jar", ""), device)
-
-	origin := fmt.Sprintf("http://%s:%d", kc.Alias, kc.Port)
-	repoURL := origin + "/" + kcCIRepository
-	want := buildRecordJSON{
-		Provider: "github-actions", ProviderTitle: "GitHub Actions",
-		Repository: kcCIRepository, Revision: kcCISHA, Ref: kcCIRef, RefName: "v1.0.0", RefType: "tag",
-		Run: kcCIRunID, Workflow: kcCIWorkflow, Actor: kcCIActor,
-		Links: []buildLinkJSON{
-			{Rel: "repository", Label: kcCIRepository, URL: repoURL},
-			{Rel: "commit", Label: kcCISHA[:7], URL: repoURL + "/commit/" + kcCISHA},
-			{Rel: "run", Label: "Run " + kcCIRunID, URL: repoURL + "/actions/runs/" + kcCIRunID + "/attempts/" + kcCIRunAttempt},
-			{Rel: "workflow", Label: ".github/workflows/release.yml", URL: repoURL + "/blob/" + kcCISHA + "/.github/workflows/release.yml"},
-		},
-	}
-	read := Auth(nil)
-
-	t.Run("tree", func(t *testing.T) {
-		var tree struct {
-			Items []struct {
-				Name       string           `json:"name"`
-				UploadedBy string           `json:"uploaded_by"`
-				Build      *buildRecordJSON `json:"build"`
-			} `json:"items"`
-		}
-		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/tree?path="+dir+"1.0.0", nil, read, &tree)
-		if len(tree.Items) != 2 {
-			t.Fatalf("tree: %+v", tree)
-		}
-		for _, it := range tree.Items {
-			if !sameBuild(it.Build, want) || it.UploadedBy != "" {
-				t.Fatalf("%s: build %+v uploaded_by %q, want %+v and no user", it.Name, it.Build, it.UploadedBy, want)
-			}
-		}
-		// Decode into a fresh value: json keeps a field that the reply omits, so a reused
-		// item would keep the build of the first reply.
-		tree.Items = nil
-		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/tree?path="+dir+"0.9.0", nil, read, &tree)
-		if len(tree.Items) != 1 || tree.Items[0].Build != nil || tree.Items[0].UploadedBy != s.AdminUser {
-			t.Fatalf("a device upload has no build record: %+v", tree)
-		}
-	})
-
-	t.Run("file details", func(t *testing.T) {
-		var f struct {
-			Path  string           `json:"path"`
-			Size  int64            `json:"size"`
-			Kind  string           `json:"kind"`
-			Build *buildRecordJSON `json:"build"`
-		}
-		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/file?path="+dir+"1.0.0/app-1.0.0.jar", nil, read, &f)
-		if f.Path != dir+"1.0.0/app-1.0.0.jar" || f.Size != 3 || f.Kind != "artifact" || !sameBuild(f.Build, want) {
-			t.Fatalf("file details: %+v", f)
-		}
-		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/file?path="+dir+"0.9.0/app-0.9.0.pom", nil, read, &f)
-		if f.Build != nil {
-			t.Fatalf("device upload: build %+v", f.Build)
-		}
-		st, b := s.API(t, http.MethodGet, "/api/repos/"+repo+"/file?path="+dir+"nope.jar", nil, read)
-		wantAPIStatus(t, "details of a missing file", st, b, http.StatusNotFound)
-	})
-
-	t.Run("versions", func(t *testing.T) {
-		var v versionsJSON
-		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/versions?path="+dir, nil, read, &v)
-		if len(v.Items) != 2 || v.Items[0].Version != "1.0.0" || !sameBuild(v.Items[0].Build, want) || v.Items[1].Build != nil {
-			t.Fatalf("versions: %+v", v)
-		}
-		var b buildsJSON
-		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/builds?path="+dir+"&version=1.0.0", nil, read, &b)
-		if len(b.Items) != 1 || !sameBuild(b.Items[0].CI, want) {
-			t.Fatalf("builds: %+v", b)
-		}
-	})
-}
-
 // TestDockerVersions checks the versions (tags), builds (the manifest with its config and layers,
 // or the platforms of an index), artifact kinds, artifact snippets and manifest details of a
-// docker repo, and the CI build of a tag that a CI identity token pushed.
+// docker repo.
 func TestDockerVersions(t *testing.T) {
-	kc := newKeycloak(t)
-	kc.Start(t, "http://callback.invalid"+oidcCallbackPath)
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		repo := RandName("dkv")
@@ -514,13 +398,6 @@ func TestDockerVersions(t *testing.T) {
 			"layers": []map[string]any{{"mediaType": "application/vnd.cncf.helm.chart.content.v1.tar+gzip", "digest": "sha256:" + sha256Hex(chart), "size": len(chart)}}})
 		reg.pushManifest(t, repo+"/charts/demo", "0.1.0", "application/vnd.oci.image.manifest.v1+json", cm)
 
-		createTrust(t, s, trustPolicy{Name: "docker-versions", Issuer: kc.Issuer, Audience: ciAudience,
-			Claims: map[string][]string{"repository": {kcCIRepository}}, Repos: []string{repo}})
-		st, bearer, b := registryToken(t, s, Basic{"oidc", kc.CIToken(t)}, "repository:"+repo+"/ci:pull,push")
-		wantAPIStatus(t, "CI token for a push", st, b, http.StatusOK)
-		ciReg := registryClient{base: s.URL, auth: bearer.apply}
-		ciReg.pushImage(t, repo+"/ci", "v1", tarImage(t, "amd64", rawRandom(t, 1024)))
-
 		t.Run("versions", func(t *testing.T) {
 			var v versionsJSON
 			s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/versions?path=app", nil, read, &v)
@@ -541,10 +418,6 @@ func TestDockerVersions(t *testing.T) {
 			s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/versions?path=charts/demo", nil, read, &v)
 			if v.Artifact == nil || v.Artifact.Kind != "helm-chart" || len(v.Items) != 1 || v.Items[0].Version != "0.1.0" {
 				t.Fatalf("versions of the chart: %+v", v)
-			}
-			s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/versions?path=ci", nil, read, &v)
-			if len(v.Items) != 1 || v.Items[0].Build == nil || v.Items[0].Build.Provider != "github-actions" || v.Items[0].Build.Repository != kcCIRepository {
-				t.Fatalf("the CI build of the tag ci:v1: %+v", v)
 			}
 			var none versionsJSON
 			s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/versions?path=charts", nil, read, &none)

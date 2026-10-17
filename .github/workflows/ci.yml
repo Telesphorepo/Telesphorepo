@@ -67,6 +67,37 @@ jobs:
           name: e2e-core-log
           path: e2e-core.log
 
+  # The CLI publishes from this job with the identity token of GitHub Actions (TestCLIGitHubActions).
+  # A pull request from a fork gets no identity token, so the job runs only for this repository.
+  e2e-github-actions:
+    needs: build
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest # one runner label per job; change it here to switch runner provider
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - uses: oven-sh/setup-bun@v2
+      - name: Publish with the Telesphorepo CLI from GitHub Actions
+        shell: bash
+        env:
+          E2E_GITHUB_ACTIONS: "1" # the test fails, not skips, without an identity token
+        run: go tool task test clients -run 'TestCLIGitHubActions$' 2>&1 | tee e2e-github-actions.log
+      - name: Upload the test output
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-github-actions-log
+          path: e2e-github-actions.log
+
   # Every green push to main publishes ghcr.io/telesphorepo/telesphorepo:main (moving) and
   # :sha-<short> (fixed). Version tags and latest come only from release.yml.
   snapshot-image:

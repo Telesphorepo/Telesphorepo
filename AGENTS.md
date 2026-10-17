@@ -45,6 +45,11 @@ write gate, the device and OIDC routes or the change log. Run all zones before a
 - **E2E tests only.** Don't write unit tests or mocks. Test behaviour through the real image and
   real clients (`mvn`, `gradle`, `apt`, curl) in `e2e/` (`//go:build e2e`). Each test starts its
   own server through the harness.
+- **No fakes.** Never write a stand-in for another system: no fake build tool, no fake token
+  endpoint, no stub server that answers what the real one would. Run the real system in a
+  container (Jenkins with its plugins in `TestCLIJenkins`), or run the test where the real
+  system is (GitHub Actions tokens only in the `e2e-github-actions` job of `ci.yml`). Another
+  version of this server is a real build of it (`BuildServer`, `BuildServerWith`).
 - **Every route has a policy.** Register a route with `Router.Handle(pattern, route.Policy,
   handler)`. One middleware checks the credential, the second factor, the permission and the
   repo access. A handler never checks credentials itself. The router panics at startup on a
@@ -168,7 +173,7 @@ write gate, the device and OIDC routes or the change log. Run all zones before a
 | Single sign-on | `internal/oidc` (module `sso`: sign-in, the permission map, device approval), `web/src/pages/server/SingleSignOn.svelte` |
 | Nexus sources, syncs, cut-over | `internal/nexus` (module `nexus`: client, service, `sync.go` scheduler and runner, `api.go`), `web/src/pages/server/NexusMigration.svelte`, `NexusSource.svelte`. Per-format import code is the `Importer` of the format (`Plan` for the target repo, `Target`/`Store` per file). Repo lock: the repo operation `mirror` (`repo_ops`), checked in `access.Engine.Decide` |
 | Demo data and seed | `internal/demo`, and `Demo` and `Seed` of each module; `cmd/telesphorepo-server/demo.go` |
-| E2E harness | `e2e/harness_test.go` (servers, storage matrix `fs` + SeaweedFS), `e2e/clients_test.go` (Maven, Debian and curl helpers that several zones share), publish helpers at the end of `harness_test.go`, `e2e/keycloak_test.go` (Keycloak fixture), `e2e/build_test.go` (`BuildCLI`, `BuildServer`: programs of this repo built on the host with `go build -overlay`), `e2e/cli_server_test.go` (the CLI routes of the server, core zone), `e2e/cli_harness_test.go` and `e2e/cli_*_test.go` (clients zone: the CLI in containers, the secret scan) |
+| E2E harness | `e2e/harness_test.go` (servers, storage matrix `fs` + SeaweedFS), `e2e/clients_test.go` (Maven, Debian and curl helpers that several zones share), publish helpers at the end of `harness_test.go`, `e2e/keycloak_test.go` (Keycloak fixture), `e2e/build_test.go` (`BuildCLI`, `BuildServer`: programs of this repo built on the host with `go build -overlay`), `e2e/cli_server_test.go` (the CLI routes of the server, core zone), `e2e/cli_harness_test.go` and `e2e/cli_*_test.go` (clients zone: the CLI in containers, the secret scan), `e2e/cli_jenkins_test.go` with `e2e/testdata/jenkins` (the real Jenkins of the clients zone) |
 | Change log and server version | `changes.toml` at the repo root (embedded by `changes.go`, package `telesphorepo`), the parser in `changelog/` (stdlib and toml only, shared with the CLI), `GET /api/changes` in `internal/api/changes.go`, the `Telesphorepo-Version` header in `internal/server/server.go`; `go tool task tag <version>` stamps the `dev` entries |
 | Dev tooling | `tools/task` |
 

@@ -170,10 +170,8 @@ func TestDockerChallengeScheme(t *testing.T) {
 
 // TestDockerRegistry drives the registry with HTTP requests and the real Docker CLI: the
 // challenge, the token scopes, push and pull, logins that cannot push, anonymous pulls, a tag
-// move, a multi-platform index, a CI push and a read IP rule.
+// move, a multi-platform index and a read IP rule.
 func TestDockerRegistry(t *testing.T) {
-	kc := newKeycloak(t)
-	kc.Start(t, "http://callback.invalid"+oidcCallbackPath)
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		host := registryHost(s)
@@ -219,19 +217,6 @@ func TestDockerRegistry(t *testing.T) {
 			if ociErrorCode(b) != "UNAUTHORIZED" {
 				t.Fatalf("token with a bad password: %s", b)
 			}
-
-			// A CI token reads what anonymous reads; a bad one is refused.
-			createTrust(t, s, trustPolicy{Name: "docker-ci", Issuer: kc.Issuer, Audience: ciAudience,
-				Claims: map[string][]string{"repository": {kcCIRepository}}, Repos: []string{priv}})
-			jwt := kc.CIToken(t)
-			st, ci, b := registryToken(t, s, Basic{"oidc", jwt}, "repository:"+pub+"/app:pull", "repository:"+priv+"/app:pull")
-			wantAPIStatus(t, "CI token with pull scopes", st, b, http.StatusOK)
-			resp, b = ociDo(t, s, http.MethodGet, "/v2/"+pub+"/app/manifests/none", nil, ci, nil)
-			wantOCI(t, "CI bearer on the public repo", resp, b, http.StatusNotFound, "MANIFEST_UNKNOWN")
-			resp, b = ociDo(t, s, http.MethodGet, "/v2/"+priv+"/app/manifests/none", nil, ci, nil)
-			wantOCI(t, "CI bearer on the private repo", resp, b, http.StatusUnauthorized, "UNAUTHORIZED")
-			st, _, b = registryToken(t, s, Basic{"oidc", jwt[:len(jwt)-4] + "AAAA"}, "repository:"+pub+"/app:pull")
-			wantAPIStatus(t, "token with a bad CI token", st, b, http.StatusUnauthorized)
 
 			// A single-segment name names no image.
 			resp, b = ociDo(t, s, http.MethodGet, "/v2/"+pub+"/manifests/v1", nil, nil, nil)
@@ -320,24 +305,6 @@ docker push %[1]s:v1
 				t.Fatalf("index: Content-Type %q, platforms %v: %s", ct, archs, b)
 			}
 			d.MustExec(t, "pull one platform", fmt.Sprintf("set -e\ndocker pull --platform linux/arm64 %s:multi\n", img))
-		})
-
-		t.Run("CI push", func(t *testing.T) {
-			jwt := kc.CIToken(t)
-			d.MustExec(t, "CI push", "set -e\n"+login("oidc", jwt)+fmt.Sprintf(`docker tag %[1]s:v1 %[2]s/%[3]s/ci:v1
-docker push %[2]s/%[3]s/ci:v1
-docker logout %[2]s
-`, img, host, priv))
-			var f struct {
-				Build *struct {
-					Provider   string `json:"provider"`
-					Repository string `json:"repository"`
-				} `json:"build"`
-			}
-			s.MustAPI(t, http.MethodGet, "/api/repos/"+priv+"/file?path=ci/_tags/v1", nil, s.AdminBasic(), &f)
-			if f.Build == nil || f.Build.Provider != "github-actions" || f.Build.Repository != kcCIRepository {
-				t.Fatalf("the tag pushed by CI: build %+v, want the CI build record", f.Build)
-			}
 		})
 
 		t.Run("read IP rule", func(t *testing.T) {

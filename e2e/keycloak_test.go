@@ -1,16 +1,13 @@
-//go:build e2e || clients
+//go:build e2e
 
 package e2e
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"math/rand/v2"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -24,9 +21,8 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// Keycloak test fixture (see testdata/keycloak/realm-e2e.json). The realm has two clients:
-// "telesphorepo" for SSO sign-in, and "ci-github", a CI issuer for publish sessions
-// whose client-credentials tokens carry GitHub-shaped claims.
+// Keycloak test fixture (see testdata/keycloak/realm-e2e.json): the identity provider of single
+// sign-on, with the client "telesphorepo".
 const (
 	keycloakImage      = "quay.io/keycloak/keycloak:26.8.1" // E2E_KEYCLOAK_IMAGE overrides
 	kcRealm            = "e2e"
@@ -38,22 +34,6 @@ const (
 	oidcCallbackPath   = "/api/auth/oidc/callback"
 	oidcLoginPath      = "/api/auth/oidc/login"
 	kcRedirectSentinel = "__REDIRECT_URI__"
-
-	// ciAudience is the audience of the ci-github tokens when the test sets no other.
-	ciAudience = "telesphorepo-e2e"
-
-	kcCIClientID       = "ci-github"
-	kcCIClientSecret   = "e2e-ci-github-secret"
-	kcAudienceSentinel = "__CI_AUDIENCE__"
-	// The claims every ci-github token carries (hardcoded claim mappers in the realm).
-	kcCIRepository  = "acme/app"
-	kcCIRef         = "refs/tags/v1.0.0"
-	kcCIWorkflowRef = "acme/app/.github/workflows/release.yml@refs/tags/v1.0.0"
-	kcCISHA         = "0123456789abcdef0123456789abcdef01234567"
-	kcCIRunID       = "8123456789"
-	kcCIRunAttempt  = "2"
-	kcCIActor       = "octocat"
-	kcCIWorkflow    = "Release"
 )
 
 // Keycloak is a running Keycloak reachable under the same URL from the test process and from
@@ -64,9 +44,6 @@ type Keycloak struct {
 	Alias  string
 	Port   int
 	Issuer string // http://<alias>:<port>/realms/e2e
-	// CIAudience is the audience of ci-github tokens; set it before Start (usually the
-	// server's base_url, the default audience of a trust policy).
-	CIAudience string
 
 	c *testcontainers.DockerContainer
 }
@@ -107,11 +84,7 @@ func (kc *Keycloak) Start(t testing.TB, redirectURI string) {
 	if err != nil {
 		t.Fatalf("read realm: %v", err)
 	}
-	audience := kc.CIAudience
-	if audience == "" {
-		audience = ciAudience
-	}
-	realmJSON := strings.NewReplacer(kcRedirectSentinel, redirectURI, kcAudienceSentinel, audience).Replace(string(realm))
+	realmJSON := strings.ReplaceAll(string(realm), kcRedirectSentinel, redirectURI)
 	img := os.Getenv("E2E_KEYCLOAK_IMAGE")
 	if img == "" {
 		img = keycloakImage
@@ -143,16 +116,6 @@ func (kc *Keycloak) Start(t testing.TB, redirectURI string) {
 	kc.c = c
 }
 
-// Stop terminates Keycloak, so that nothing can reach the issuer any more.
-func (kc *Keycloak) Stop(t testing.TB) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	if err := kc.c.Terminate(ctx); err != nil {
-		t.Fatalf("stop keycloak: %v", err)
-	}
-}
-
 // Client returns a browser-like client: it keeps cookies (jar may be nil), follows redirects
 // until the response of the server's OIDC callback (returned as is, so its Location can be
 // inspected), and resolves the Keycloak alias to 127.0.0.1.
@@ -179,43 +142,4 @@ func (kc *Keycloak) Client(jar http.CookieJar) *http.Client {
 			return nil
 		},
 	}
-}
-
-// CIToken returns a new identity token of the ci-github client (client-credentials grant). It
-// is a JWT with iss = Issuer, aud containing CIAudience, a jti, and the GitHub-shaped claims
-// repository, ref, workflow_ref, sha, run_id, run_attempt, actor and workflow.
-func (kc *Keycloak) CIToken(t testing.TB) string {
-	t.Helper()
-	resp, err := kc.Client(nil).PostForm(kc.Issuer+"/protocol/openid-connect/token", url.Values{
-		"grant_type":    {"client_credentials"},
-		"client_id":     {kcCIClientID},
-		"client_secret": {kcCIClientSecret},
-	})
-	if err != nil {
-		t.Fatalf("keycloak token request: %v", err)
-	}
-	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
-	var tok struct {
-		AccessToken string `json:"access_token"`
-	}
-	if resp.StatusCode != http.StatusOK || json.Unmarshal(b, &tok) != nil || tok.AccessToken == "" {
-		t.Fatalf("keycloak token request: status %d: %s", resp.StatusCode, b)
-	}
-	return tok.AccessToken
-}
-
-// JWKS returns the realm's JSON Web Key Set, as an admin would paste it into a trust policy.
-func (kc *Keycloak) JWKS(t testing.TB) string {
-	t.Helper()
-	resp, err := kc.Client(nil).Get(kc.Issuer + "/protocol/openid-connect/certs")
-	if err != nil {
-		t.Fatalf("keycloak JWKS: %v", err)
-	}
-	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(b), `"keys"`) {
-		t.Fatalf("keycloak JWKS: status %d: %s", resp.StatusCode, b)
-	}
-	return string(b)
 }

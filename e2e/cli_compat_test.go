@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -43,34 +45,53 @@ const compatOlderPaths = `package main
 func init() { olderPaths["e2e-login"] = true }
 `
 
-// compatStubConf is a server of the CLI tests at /<path>: /hash/ is the compat server with a
-// SHA256SUMS that names another hash, /future/ answers a problem with fields and a remedy action
-// that no CLI knows, and /down/ is the HTML 502 page of a proxy.
-const compatStubConf = `{
+// compatProxyConf is the Caddy reverse proxy of TestCLICompat. /mixed/ is a rolling upgrade
+// behind one proxy: the archive of the CLI comes from the newer server %[3]s, every other path
+// from the server %[1]s, so SHA256SUMS names the hash of another archive. /down/ proxies to the
+// host %[4]s, which does not run, so Caddy answers 502 itself.
+const compatProxyConf = `{
 	admin off
 	auto_https off
 }
 :8080 {
-	handle /hash/cli/SHA256SUMS {
-		respond "%[1]s  %[2]s" 200
+	handle_path /mixed/* {
+		handle /cli/%[2]s {
+			reverse_proxy %[3]s:8080
+		}
+		handle {
+			reverse_proxy %[1]s:8080
+		}
 	}
-	handle_path /hash/* {
-		reverse_proxy %[3]s:8080
-	}
-	handle /future/* {
-		header Content-Type application/problem+json
-		respond ` + "`" + `{"type":"urn:telesphorepo:problem:e2e-future","title":"A problem of a newer server","detail":"The CLI prints the title and the detail of a problem that it does not know.","status":409,"e2e_field":{"x":1},"remedy":{"action":"e2e-teleport","url":"http://docs.example/e2e","e2e":true}}` + "`" + ` 409
-	}
-	handle /down/* {
-		header Content-Type "text/html; charset=utf-8"
-		respond "<html><body><h1>502 Bad Gateway</h1></body></html>" 502
+	handle_path /down/* {
+		reverse_proxy %[4]s:8080
 	}
 }
 `
 
+// futureRemedy is the remedy action of the newer server of TestCLICompat: that build of the
+// server gives the problem setup-code-used an action that no CLI knows.
+const futureRemedy = "e2e_teleport"
+
+// buildFutureServer builds the server at version with changes and the CLI archive of cli, with
+// futureRemedy in place of the remedy action of setup-code-used in internal/publish/setup.go.
+func buildFutureServer(t testing.TB, version, changes, cli string) string {
+	t.Helper()
+	const file = "internal/publish/setup.go"
+	src, err := os.ReadFile(filepath.Join(repoRoot(t), filepath.FromSlash(file)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const old = `Remedy: &httpx.Remedy{Action: httpx.RemedyOpenURL}`
+	if !strings.Contains(string(src), old) {
+		t.Fatalf("%s has no %s for the newer server to change", file, old)
+	}
+	future := strings.Replace(string(src), old, `Remedy: &httpx.Remedy{Action: "`+futureRemedy+`"}`, 1)
+	return BuildServerWith(t, version, changes, cli, map[string][]byte{file: []byte(future)})
+}
+
 // compatScript runs the CLI v0.8.0 (on the PATH) and the CLI v1.0.0 (/opt/new) against the
-// server v0.9.0 ($SERVER) and the stub ($STUB). update takes the server of the project file
-// first, so the update from the stub runs outside the project folder.
+// server v0.9.0 ($SERVER) and the proxy ($PROXY). update takes the server of the project file
+// first, so the update through the proxy runs outside the project folder.
 const compatScript = `cd /work/raw
 echo '=== setup ==='
 telesphorepo setup "$E2E_LINK"; echo "rc=$?"
@@ -87,11 +108,11 @@ before=$(sha256sum /opt/new/telesphorepo | cut -d ' ' -f 1)
 /opt/new/telesphorepo update "$SERVER"; echo "rc=$?"
 if [ "$(sha256sum /opt/new/telesphorepo | cut -d ' ' -f 1)" = "$before" ]; then echo 'new binary: kept'; fi
 echo '=== future ==='
-telesphorepo login "$STUB/future"; echo "rc=$?"
+telesphorepo setup "$UNKNOWN_LINK"; echo "rc=$?"
 echo '=== down ==='
-telesphorepo login "$STUB/down"; echo "rc=$?"
+telesphorepo login "$PROXY/down"; echo "rc=$?"
 echo '=== bad hash ==='
-(cd / && telesphorepo update "$STUB/hash"); echo "rc=$?"
+(cd / && telesphorepo update "$PROXY/mixed"); echo "rc=$?"
 telesphorepo version
 echo '=== update on a terminal ==='
 rm -f /usr/local/bin/docker-credential-telesphorepo
@@ -105,18 +126,26 @@ echo '=== end ==='
 // the drift notice once a day, stops a command whose entry needs a newer CLI (and on a terminal
 // updates itself and runs the command again), and ignores an unknown field of an entry; the newer
 // CLI v1.0.0 takes the older path of an entry that needs a newer server, or stops with the
-// summary; a problem with an unknown remedy action prints its text and link; an HTML 502 gets the
-// generic message; update checks the hash, replaces the binary and the helper name, and changes
-// nothing for a newer CLI.
+// summary; a remedy action that the CLI does not know (the server v0.9.0 has one for a used setup
+// line) prints the text and the link of the problem; the 502 of a proxy whose upstream is down gets
+// the generic message; update refuses an archive whose hash SHA256SUMS does not name (a proxy in
+// front of two server versions), replaces the binary and the helper name, and changes nothing for
+// a newer CLI.
 func TestCLICompat(t *testing.T) {
 	old := &cli{bin: BuildCLI(t, "v0.8.0", "", nil)}
 	newer := BuildCLI(t, "v1.0.0", compatNewChanges, map[string]string{"e2e_olderpaths.go": compatOlderPaths})
-	server := BuildServer(t, "v0.9.0", compatServerChanges, BuildCLI(t, "v0.9.0", compatServerChanges, nil))
+	server := buildFutureServer(t, "v0.9.0", compatServerChanges, BuildCLI(t, "v0.9.0", compatServerChanges, nil))
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
 		opts.Files = append(opts.Files, ServerBinary(server))
 		s := StartServer(t, opts)
-		stub := RandName("stub")
-		startCaddy(t, fmt.Sprintf(compatStubConf, strings.Repeat("0", 64), cliArchiveName, s.Alias), "Caddy stub", stub)
+		upgraded := StartServer(t, ServerOpts{}) // the server of this tree, with the CLI archives of its own build
+		proxy := RandName("proxy")
+		startCaddy(t, fmt.Sprintf(compatProxyConf, s.Alias, cliArchiveName, upgraded.Alias, RandName("down")), "Caddy proxy", proxy)
+		resp, sums := s.Do(t, s.NewRequest(t, http.MethodGet, "/cli/SHA256SUMS", nil), nil)
+		named, _, _ := strings.Cut(string(sums), " ")
+		if resp.StatusCode != http.StatusOK || len(named) != 64 {
+			t.Fatalf("GET /cli/SHA256SUMS of the server v0.9.0: %d %q", resp.StatusCode, sums)
+		}
 		repo := RandName("files")
 		s.CreateRepo(t, repo, "raw", false, nil)
 		dev := RandName("dev")
@@ -138,7 +167,7 @@ func TestCLICompat(t *testing.T) {
 		out := old.mustRun(t, debImage, "the CLI v0.8.0 and v1.0.0 with the server v0.9.0", compatScript, ClientOpts{
 			Files: []ContainerFile{{HostPath: newer, Path: "/opt/new/telesphorepo", Mode: 0o755}, {Path: "/work/raw/a.txt", Content: "compat\n"}},
 			Env: map[string]string{"E2E_LINK": s.NewSetupCode(t, dev, repo).Link, "SERVER": s.InternalURL,
-				"STUB": "http://" + stub + ":8080"},
+				"PROXY": "http://" + proxy + ":8080", "UNKNOWN_LINK": s.InternalURL + "/#/setup/trsu_" + strings.Repeat("A", 43)},
 		})
 		drift := fmt.Sprintf("telesphorepo: the server %[1]s has CLI v0.9.0, you have v0.8.0. Run: telesphorepo update %[1]s", s.InternalURL)
 		setup, login := section(out, "setup"), section(out, "login")
@@ -159,12 +188,12 @@ func TestCLICompat(t *testing.T) {
 			"This CLI (v1.0.0) is newer than the CLI of "+s.InternalURL+" (v0.9.0). A newer CLI works with an older server, so nothing changed.",
 			"rc=0", "new binary: kept")
 
-		wantText(t, "a problem that the CLI does not know", section(out, "future"), "A problem of a newer server",
-			"The CLI prints the title and the detail of a problem that it does not know.", "http://docs.example/e2e", "rc=1")
-		wantText(t, "an HTML 502 of a proxy", section(out, "down"),
-			"the server at http://"+stub+":8080/down answered 502 with text/html; a proxy in front of it may be down", "rc=1")
+		wantText(t, "a remedy action that the CLI does not know", section(out, "future"), "This setup line is already used",
+			s.InternalURL+"/\n", "rc=1")
+		wantText(t, "the 502 of a proxy", section(out, "down"),
+			"the server at http://"+proxy+":8080/down answered 502 with ", "; a proxy in front of it may be down", "rc=1")
 		wantText(t, "update with a wrong hash", section(out, "bad hash"), "the SHA-256 of "+cliArchiveName+" is ",
-			"but the server names "+strings.Repeat("0", 64)+"; nothing changed", "rc=1", "telesphorepo v0.8.0")
+			"but the server names "+named+"; nothing changed", "rc=1", "telesphorepo v0.8.0")
 
 		term := section(out, "update on a terminal")
 		wantText(t, "publish with the CLI v0.8.0 on a terminal", term,

@@ -2676,7 +2676,7 @@ CI runs on GitHub Actions with the built-in `GITHUB_TOKEN` and no repository sec
 
 | Workflow | Runs | Does |
 |---|---|---|
-| `ci.yml` | Push to `main`, pull requests | `build` job: `go tool task build`, `go vet` for the `e2e`, `import`, `scale`, `clients` and `macos` tags, `go vet` and `go build` of `./cmd/telesphorepo` for `GOOS=darwin` and `GOOS=windows`, `telesphorepo-server dbcheck`. `e2e-core` job: `go tool task test` (uploads the log on failure). `snapshot-image` job (push to `main` only, after `e2e-core` passes): multi-arch image with tags `main` and `sha-<short>`, version `main-<short sha>`. A newer push cancels the running pull request jobs |
+| `ci.yml` | Push to `main`, pull requests | `build` job: `go tool task build`, `go vet` for the `e2e`, `import`, `scale`, `clients` and `macos` tags, `go vet` and `go build` of `./cmd/telesphorepo` for `GOOS=darwin` and `GOOS=windows`, `telesphorepo-server dbcheck`. `e2e-core` job: `go tool task test` (uploads the log on failure). `e2e-github-actions` job (pushes and pull requests of this repository; `id-token: write`): `TestCLIGitHubActions` with the job's real identity token. `snapshot-image` job (push to `main` only, after `e2e-core` passes): multi-arch image with tags `main` and `sha-<short>`, version `main-<short sha>`. A newer push cancels the running pull request jobs |
 | `e2e-extended.yml` | Manual (zone `import`, `scale` or `all`), weekly for `import` | `go tool task test <zone>` |
 | `release.yml` | Push of a `v*` tag | `binaries` job: `go tool task release`, then a GitHub Release with the archives and `SHA256SUMS`. `image` job: multi-arch image (`linux/amd64`, `linux/arm64`) pushed to `ghcr.io/telesphorepo/telesphorepo` with tags `X.Y.Z`, `X.Y` and `latest` (no `latest` for pre-releases). `macos` job on `macos-latest`: `go tool task build`, then the macOS zone (`go test -tags macos -run TestMacOS ./e2e/` with `E2E_SERVER_BIN`) |
 
@@ -2721,15 +2721,14 @@ first forwarded proto gives the scheme, and no forwarded proto leaves http. `Tes
 names that are not one OCI segment are 400; `GET /v2/` answers the challenge and the API version;
 a token grants the subset (an anonymous bearer reads the public repo and gets 401 with
 `error="insufficient_scope"` and the scope on the private one); a bad password is 401
-`UNAUTHORIZED`; a CI token with pull scopes reads what anonymous reads, a bad one is 401; a
+`UNAUTHORIZED`; a
 one-segment name is `NAME_UNKNOWN`. Then the Docker CLI in Docker in Docker (`docker:29.9.0-dind`,
 privileged, `StartDind`, `DockerScratchImage`: images FROM scratch, no registry pull): a push of
 three layers (one of 20 MiB) with a device publish session, `rmi`, pull and a compare of the file
 hashes; a password and a read token pull but cannot push ("publishing needs a publish session");
 an anonymous pull of a public repo; a tag move (the old digest still pulls); a multi-platform
 index (`docker build` of two platforms and `docker push`; two platforms in the index, a pull of
-one); a push with a CI token of
-the Keycloak fixture (the tag file's `build` is the CI build record); a read IP rule that refuses
+one); a read IP rule that refuses
 the pull with "not allowed to read" and records `network.denied`. `TestDockerConformance` runs the
 OCI conformance suite (`conformance:v1.1.1`: pull, push, content discovery, content management).
 `TestDockerClients`: `crane copy` mounts a layer from a public repo (201), a mount from a repo
@@ -2773,8 +2772,7 @@ the `vfs` graph driver), crane and skopeo push the 5 MB layer through the proxy 
 back; `/docker/hosts` names the upload host, a POST on the upload host gets a relative `Location`
 and the challenge there names its own realm, and ORAS (5 MB) and Helm 4 push to the upload host by
 name and pull through the proxy hostname. `TestDockerVersions` (`versions_test.go`): the versions (tags, newest first, keyset pages),
-the kinds image, helm-chart, the builds of an image and of an index (platform classifiers), the
-CI build of a tag that a CI token pushed, the pinned and latest artifact snippets, the snippets of
+the kinds image, helm-chart, the builds of an image and of an index (platform classifiers), the pinned and latest artifact snippets, the snippets of
 a tag file and of a chart, and `GET /api/docker/{name}/manifest`. `TestFormatDescriptors` and
 `TestCIWorkflowRoute` check the docker descriptor (publish category `helper`), the CI files (build,
 the install step, the Docker config that names the credential helper, and the push in that order,
@@ -2805,7 +2803,7 @@ and networks, and the `telesphorepo-data-*` and `telesphorepo-scale-*` volumes.
 | core | `e2e` | `go tool task test` | Formats (the Docker registry with Docker in Docker too), auth, API, settings, storage move, query plans, the listener protocols |
 | import | `import` | `go tool task test import` | `TestNexus`, with the import of a Nexus docker hosted repo (`nexus_docker_test.go`: the Docker Bearer Token Realm on and `forceBasicAuth` off, so every download answers a Bearer challenge; skopeo pushes an image and a multi-platform index; the sync imports both tags and ignores the blobs; crane pulls both by tag and by digest; a second sync imports nothing) |
 | scale | `scale` | `go tool task test scale` | `TestScale` |
-| clients | `clients` | `go tool task test clients` | The Telesphorepo CLI with the real tools: `TestCLISetup`, `TestCLILogin`, `TestCLIDocker`, `TestCLIMaven`, `TestCLIGradle`, `TestCLICI`, `TestCLIUpload`, `TestCLICompat` and `TestInstall` (`e2e/cli_*_test.go`). It needs Go on the host to build the CLI and the internet for Maven Central, Gradle and the Maven 4 download |
+| clients | `clients` | `go tool task test clients` | The Telesphorepo CLI with the real tools: `TestCLISetup`, `TestCLILogin`, `TestCLIDocker`, `TestCLIMaven`, `TestCLIGradle`, `TestCLIJenkins`, `TestCLIGitHubActions`, `TestCLIUpload`, `TestCLICompat` and `TestInstall` (`e2e/cli_*_test.go`). It needs Go on the host to build the CLI and the internet for Maven Central, Gradle, the Maven 4 download and the Jenkins plugins |
 | all | all tags | `go tool task test all` | Every zone |
 
 **Admin and user calls.** The API changes state only through a UI session, so the suite signs in
@@ -2844,14 +2842,9 @@ token is refused; a session for another repo; lost permission; closed and expire
 replayed nonce; bad signature; revoked and expired devices; manual sessions),
 `TestSecondFactorLogin` (including the setup-only session), `TestDeviceEnrollment` (an unknown
 field is 400; the device has its name),
-`TestDeviceEnrollmentExpiry` (ages the row with `editDB` on a data volume) and `TestPublishOIDC`
-(Keycloak as the CI issuer through the client `ci-github` in `realm-e2e.json`, whose tokens carry
-GitHub-shaped claims: wrong claim, wrong audience, replayed token, an unlisted repo, a disabled
-policy, a pasted JWKS), and `TestPublishOIDCRevision` (a Jenkins token keeps the `revision` of
-the mint; a revision that is no commit hash gets 400). The Keycloak fixture is in
-`keycloak_test.go` (tags `e2e` and `clients`). `jenkins_test.go` (the same tags) plays the
-Jenkins OpenID Connect Provider plugin: it signs tokens with its own RSA key, and a CI pipeline
-holds the pasted keys.
+and `TestDeviceEnrollmentExpiry` (ages the row with `editDB` on a data volume). The CI token
+exchange runs with the real CI systems in the clients zone (`TestCLIJenkins`,
+`TestCLIGitHubActions`). The Keycloak fixture of single sign-on is in `keycloak_test.go`.
 `oidc_device_test.go` covers `TestOIDCDeviceApproval` (a person who signs in with single sign-on approves a device after a new
 Keycloak sign-in, then publishes with it; the authorization request carries `prompt=login` and
 `max_age=0`; a missing grant, a grant for another code and a used grant get 401) and
@@ -2883,12 +2876,13 @@ a match fails the test. A terminal comes from `script -qec`, which also types th
 |---|---|
 | `TestCLISetup` | In a git work tree that ignores the file: the setup line writes `telesphorepo.toml` and warns with the `.gitignore` rule; the line again prints `This setup line is already used`; on a terminal the answer `2` writes the GitHub Actions file; a Docker repo gets no project file, `y` adds the `credHelpers` entry and `n` keeps the Docker config file; an expired code (aged with `editDB`) names its repo |
 | `TestCLILogin` | A teammate's `publish` with no device prints the code, which the test approves, and publishes; `status` names the server, the device, the hook and the project; `device.json` is 600 in a 700 folder; `logout` revokes the device, removes only the server's `credHelpers` entry and deletes the server folder |
-| `TestCLIDocker` | Docker in Docker after setup (the printed entry added to `config.json`) pushes and pulls with a device session; `get` answers only the server's hosts, `list` and `store`; `publish` of a Helm chart (`alpine/helm`); ORAS push and pull through the helper; in CI with `OIDC_TOKEN`, `TELESPHOREPO_SERVER` and no device, `get` for a host of another server gets no credential and a plain `docker push` mints a CI session; a push with a Jenkins token records the `GIT_COMMIT` of the job on the tag |
+| `TestCLIDocker` | Docker in Docker after setup (the printed entry added to `config.json`) pushes and pulls with a device session; `get` answers only the server's hosts, `list` and `store`; `publish` of a Helm chart (`alpine/helm`); ORAS push and pull through the helper |
 | `TestCLIMaven` | `publish` with a pom that names another deployment target, with Maven 3.9 and Maven 4 (`maven4Version` from the Apache archive); the mirror of the person's `settings.xml` (a proxy repo of Central) serves the plugins; `mvn` resolves both jars |
 | `TestCLIGradle` | `publish` of a library (Kotlin DSL) and a Gradle plugin (Groovy DSL); the build's own repository on another host (a Caddy that refuses credentials) gets none; a clean build applies the plugin and loads the library; a build with no `maven-publish` gets the message |
-| `TestCLICI` | A fake `mvnw` that uploads with `TELESPHOREPO_TOKEN` and shows that `OIDC_TOKEN` is gone from its env; Jenkins (`OIDC_TOKEN`) and GitHub Actions (a `jwebserver` that serves a Keycloak token at `ACTIONS_ID_TOKEN_REQUEST_URL`) mint CI sessions, the files carry the build record with the commit of the token (else, for a Jenkins token, the `GIT_COMMIT` of the job), and each session token is masked; a project file of another server gets no `OIDC_TOKEN` (its audience is the test server); a GitHub job without an ID token names `id-token: write`. Keycloak issues the CI tokens for the base URL of the test's server alias (`ciAlias`) |
+| `TestCLIJenkins` | A real Jenkins (`testdata/jenkins`: Jenkins LTS with the OpenID Connect Provider plugin, Pipeline, Credentials Binding, Git, Maven and the Docker CLI; built once per run) runs, from local git repositories, the Jenkinsfiles that `GET /api/repos/{name}/ci` writes. The Maven job installs the CLI with the server's `install.sh` and publishes with `mvn`; the antrun plugin shows that Maven has no `OIDC_TOKEN`. The Docker job builds on a Docker in Docker engine (`DOCKER_HOST`) and pushes through the helper. The server checks the plugin's tokens with the keys that Jenkins serves; the build records name the job, the build number and the `GIT_COMMIT` of the checkout. A project file of another server gets no token, the helper gives none for a host of another server, and no file of Jenkins holds a session token. Both servers of the storage matrix share one alias, the audience of the Jenkins credential |
+| `TestCLIGitHubActions` | Runs in the `e2e-github-actions` job of `ci.yml` (`id-token: write`, `E2E_GITHUB_ACTIONS` set) and skips elsewhere: the CLI in a Maven container asks GitHub for the job's identity token and publishes with `mvn`; the server checks it with GitHub's keys; the build record names the repository, the run and the signed `sha`, also with another `GIT_COMMIT`; each session token is masked; a job without an identity token names `id-token: write` |
 | `TestCLIUpload` | `publish FILE` into the `path` folder of a raw repo (a 65 MiB file through the resumable routes) and of `.deb` packages to the `dist` of the project file (a 65 MiB package through the resumable routes); `apt` installs them |
-| `TestCLICompat` | Programs built at three versions with test entries: the server v0.9.0 (with the CLI archive v0.9.0), the CLI v0.8.0 and the CLI v1.0.0 (with an older path for one entry). The version header; the drift notice once a day; a `needs = "cli"` entry stops the older CLI with the install line, and on a terminal it updates and runs the command again; a `needs = "server"` entry stops the newer CLI with the summary, or takes the older path; an unknown field of an entry and a problem with an unknown remedy action (a Caddy stub) print their text; a proxy's HTML 502 gets the generic message; `update` refuses a wrong hash, makes the helper name again, and changes nothing for a newer CLI |
+| `TestCLICompat` | Programs built at three versions with test entries: the server v0.9.0 (with the CLI archive v0.9.0), the CLI v0.8.0 and the CLI v1.0.0 (with an older path for one entry). The version header; the drift notice once a day; a `needs = "cli"` entry stops the older CLI with the install line, and on a terminal it updates and runs the command again; a `needs = "server"` entry stops the newer CLI with the summary, or takes the older path; an unknown field of an entry is ignored; the server v0.9.0 is built with a remedy action for a used setup line that no CLI knows, and the CLI prints the problem's text and link; a Caddy proxy whose upstream does not run answers 502, which gets the generic message; `update` through a Caddy proxy in front of two server versions (`SHA256SUMS` of one, the archive of the other) refuses the archive, makes the helper name again, and changes nothing for a newer CLI |
 | `TestInstall` | `install.sh` with curl (`buildpack-deps`) and with BusyBox wget (Alpine) and `install.ps1` with PowerShell on Linux install a CLI that runs, make the helper name a symbolic link, write `$GITHUB_PATH`, pass the arguments to the CLI, and install nothing with a wrong hash |
 
 **macOS zone** (tag `macos`, the `macos` job of `release.yml` only). `TestMacOS` needs no container

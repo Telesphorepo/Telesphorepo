@@ -111,7 +111,17 @@ func BuildCLI(t testing.TB, version, changes string, extra map[string]string) st
 // ServerBinary.
 func BuildServer(t testing.TB, version, changes, cli string) string {
 	t.Helper()
+	return BuildServerWith(t, version, changes, cli, nil)
+}
+
+// BuildServerWith is BuildServer with the source files of the repo in files (path from the root
+// -> content) in place of those on disk: the code of another version of the server.
+func BuildServerWith(t testing.TB, version, changes, cli string, files map[string][]byte) string {
+	t.Helper()
 	overlay := map[string][]byte{}
+	for p, b := range files {
+		overlay[p] = b
+	}
 	if changes != "" {
 		overlay["changes.toml"] = []byte(changes)
 	}

@@ -18,24 +18,16 @@ func dindScan(t *testing.T, d *Dind, what, secret string) {
 
 // TestCLIDocker: after setup, Docker in Docker pushes and pulls with no docker login (a device
 // session); the helper answers only the hosts of the server; publish packs and pushes a Helm
-// chart; ORAS pushes and pulls through the helper; in CI with a CI token and no device, a plain
-// docker push mints a CI session, and a Jenkins push records the GIT_COMMIT of the job.
+// chart; ORAS pushes and pulls through the helper. TestCLIJenkins pushes from CI.
 func TestCLIDocker(t *testing.T) {
 	c := newCLI(t)
-	kc := newKeycloak(t)
-	alias := ciAlias(t, kc)
-	j := newJenkinsIssuer(t)
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
-		opts.Alias = alias
 		s := StartServer(t, opts)
 		host := registryHost(s)
-		own, ci := RandName("own"), RandName("ci")
+		own := RandName("own")
 		s.CreateRepo(t, own, "docker", false, nil)
-		s.CreateRepo(t, ci, "docker", false, nil)
 		s.CreateUser(t, "builder", "builder-pass-1234")
 		s.SetPerms(t, own, "builder", "repo.download", "repo.publish")
-		createCITrust(t, s, kc.Issuer, ci)
-		createJenkinsTrust(t, s, j, "team/app", ci)
 
 		t.Run("docker", func(t *testing.T) {
 			d := StartDind(t, host)
@@ -80,42 +72,6 @@ func TestCLIDocker(t *testing.T) {
 				t.Fatalf("store: exit %d: %s", code, out)
 			}
 			dindScan(t, d, "push and pull", "")
-
-			// A CI job: no device (another HOME), the identity token in OIDC_TOKEN, a temp Docker
-			// config that names the helper, and TELESPHOREPO_SERVER, as the Docker CI files set it.
-			// The helper refuses the token for a host of another server.
-			tok := kc.CIToken(t)
-			code, out = d.Exec(t, fmt.Sprintf("echo other.example:5000 | HOME=/ci CI=true TELESPHOREPO_SERVER='%s' OIDC_TOKEN='%s' docker-credential-telesphorepo get 2>&1", s.InternalURL, tok))
-			if code != 1 || !strings.Contains(out, "other.example:5000 is not a registry host of "+s.InternalURL) || strings.Contains(out, tok) {
-				t.Fatalf("get in CI for a host of another server: exit %d: %s", code, out)
-			}
-			ciImg := host + "/" + ci + "/app:ci"
-			d.MustExec(t, "docker push in CI", fmt.Sprintf(`set -e
-mkdir -p /ci/docker
-printf '%%s\n' '{"credHelpers": {"%[1]s": "telesphorepo"}}' > /ci/docker/config.json
-docker tag %[2]s:v1 %[3]s
-HOME=/ci DOCKER_CONFIG=/ci/docker CI=true TELESPHOREPO_SERVER='%[5]s' OIDC_TOKEN='%[4]s' docker push %[3]s
-`, host, img, ciImg, tok, s.InternalURL))
-			found = false
-			for _, it := range publishLog(t, s, ci) {
-				found = found || (it.Via == "oidc" && it.DeviceID == nil)
-			}
-			if !found {
-				t.Fatalf("publish log of %s: %+v, want a CI session", ci, publishLog(t, s, ci))
-			}
-			dindScan(t, d, "docker push in CI", tok)
-
-			// A token of the Jenkins plugin names no commit: the helper sends the GIT_COMMIT of the
-			// job, and the build record of the tag keeps it.
-			jt := j.Token(t, s.InternalURL, "team/app", 21)
-			d.MustExec(t, "docker push in Jenkins", fmt.Sprintf(`set -e
-docker tag %[1]s:v1 %[2]s:jenkins
-HOME=/ci DOCKER_CONFIG=/ci/docker JENKINS_URL=http://jenkins.example/ TELESPHOREPO_SERVER='%[4]s' OIDC_TOKEN='%[3]s' GIT_COMMIT=%[5]s docker push %[2]s:jenkins
-`, img, host+"/"+ci+"/app", jt, s.InternalURL, jobCommit))
-			if b := buildOf(t, s, ci, "app/_tags/jenkins"); b == nil || b.Provider != "jenkins" || b.Run != "21" || b.Revision != jobCommit {
-				t.Fatalf("build of the tag that Jenkins pushed: %+v, want Jenkins team/app #21 at %s", b, jobCommit)
-			}
-			dindScan(t, d, "docker push in Jenkins", jt)
 		})
 
 		t.Run("helm chart", func(t *testing.T) {

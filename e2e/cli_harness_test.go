@@ -4,7 +4,6 @@ package e2e
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -15,7 +14,6 @@ import (
 	"github.com/moby/moby/api/types/container"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/network"
-	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 // Zone clients: the Telesphorepo CLI of this repo, built on the host for Linux, runs in client
@@ -341,88 +339,4 @@ func publishLog(t testing.TB, s *Server, repo string) []publishLogItem {
 		}
 	}
 	return out
-}
-
-// ---------------------------------------------------------------- CI identity
-
-// createCITrust adds an enabled trust policy for the Keycloak issuer on repos, shaped like a
-// GitHub Actions release policy, for tokens with the audience base_url (the policy's audience
-// is empty). The CLI sends a CI token only to the server of its audience, so a test starts each
-// server with the alias of ciAlias.
-func createCITrust(t testing.TB, s *Server, issuer string, repos ...string) {
-	t.Helper()
-	s.MustAPI(t, http.MethodPost, "/api/publish/trusts", map[string]any{
-		"name":     RandName("github"),
-		"issuer":   issuer,
-		"audience": "",
-		"claims": map[string][]string{
-			"repository":   {kcCIRepository},
-			"ref":          {"refs/tags/v*"},
-			"workflow_ref": {"acme/app/.github/workflows/release.yml@*"},
-		},
-		"jwks":  "",
-		"repos": repos,
-	}, s.Admin(), nil)
-}
-
-// ciAlias starts a Keycloak whose CI tokens have the audience of a server with a new alias, and
-// returns the alias. Each server of the test starts with it (ForEachStorage runs the servers one
-// after the other), so its base_url is the audience of the tokens.
-func ciAlias(t testing.TB, kc *Keycloak) string {
-	t.Helper()
-	alias := RandName("repo")
-	kc.CIAudience = "http://" + alias + ":8080"
-	kc.Start(t, "http://callback.invalid"+oidcCallbackPath)
-	return alias
-}
-
-// gitHubTokenServer plays the GitHub Actions ID-token endpoint: a JDK jwebserver serving
-// /srv/token.json as {"value": "<token>"}. It ignores the query string (api-version, audience),
-// as a static file server does.
-type gitHubTokenServer struct {
-	c   *testcontainers.DockerContainer
-	url string
-}
-
-func startGitHubTokenServer(t testing.TB) *gitHubTokenServer {
-	t.Helper()
-	alias := RandName("gh-oidc")
-	c, err := testcontainers.Run(context.Background(), mavenImage,
-		testcontainers.WithLabels(e2eLabels),
-		testcontainers.WithEntrypoint("jwebserver"),
-		testcontainers.WithCmd("-b", "0.0.0.0", "-p", "8000", "-d", "/srv"),
-		testcontainers.WithExposedPorts("8000/tcp"),
-		testcontainers.WithFiles(testcontainers.ContainerFile{Reader: strings.NewReader(`{"value":""}`), ContainerFilePath: "/srv/token.json", FileMode: 0o644}),
-		network.WithNetwork([]string{alias}, TestNetwork),
-		testcontainers.WithWaitStrategyAndDeadline(2*time.Minute, wait.ForHTTP("/token.json").WithPort("8000/tcp").WithStartupTimeout(2*time.Minute)),
-	)
-	registerCleanup(t, c, "github token server "+alias)
-	if err != nil {
-		t.Fatalf("start github token server: %v", err)
-	}
-	return &gitHubTokenServer{c: c, url: "http://" + alias + ":8000/token.json?api-version=2.0"}
-}
-
-// Serve replaces the token that the endpoint returns.
-func (g *gitHubTokenServer) Serve(t testing.TB, token string) {
-	t.Helper()
-	b, _ := json.Marshal(map[string]any{"count": 1, "value": token})
-	if err := g.c.CopyToContainer(context.Background(), b, "/srv/token.json", 0o644); err != nil {
-		t.Fatalf("serve github token: %v", err)
-	}
-}
-
-// Requests counts the token requests that the endpoint has logged so far.
-func (g *gitHubTokenServer) Requests(t testing.TB) int {
-	t.Helper()
-	return strings.Count(containerLogs(g.c), "GET /token.json")
-}
-
-// Env is the environment of a GitHub Actions job with "permissions: id-token: write".
-func (g *gitHubTokenServer) Env() map[string]string {
-	return map[string]string{
-		"GITHUB_ACTIONS":                 "true",
-		"ACTIONS_ID_TOKEN_REQUEST_URL":   g.url,
-		"ACTIONS_ID_TOKEN_REQUEST_TOKEN": "e2e-request-token",
-	}
 }
