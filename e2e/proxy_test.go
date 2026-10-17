@@ -130,7 +130,7 @@ func debProxyApt(t *testing.T, s *Server, repo, key string) string {
 
 func TestProxy(t *testing.T) {
 	debs := buildDebPackages(t)
-	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
+	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		// The remote is a second server on the fs store, so its access log shows each request
 		// the proxy makes.
 		remote := StartServer(t, ServerOpts{})

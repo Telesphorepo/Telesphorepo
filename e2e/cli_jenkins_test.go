@@ -274,7 +274,7 @@ func TestCLIJenkins(t *testing.T) {
 	j := startJenkins(t, server, map[string]string{"DOCKER_HOST": "tcp://" + d.Alias + ":2375"})
 	const maven, docker = "releases", "images"
 	var mavenCommit, dockerCommit string
-	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
+	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		opts.Alias = alias
 		s := StartServer(t, opts)
 		s.CreateRepo(t, maven, "maven", false, nil)

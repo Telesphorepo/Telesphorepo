@@ -21,7 +21,7 @@ func dindScan(t *testing.T, d *Dind, what, secret string) {
 // chart; ORAS pushes and pulls through the helper. TestCLIJenkins pushes from CI.
 func TestCLIDocker(t *testing.T) {
 	c := newCLI(t)
-	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
+	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		host := registryHost(s)
 		own := RandName("own")

@@ -61,7 +61,7 @@ func TestDebianVersions(t *testing.T) {
 		debs[i] = r.ReadFile(t, fmt.Sprintf("/out/%d.deb", i+1))
 	}
 
-	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
+	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		repo := RandName("debv")
 		s.CreateRepo(t, repo, "debian", false, map[string]any{"architectures": []string{"amd64", "arm64"}})

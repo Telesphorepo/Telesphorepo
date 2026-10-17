@@ -91,7 +91,7 @@ tasks.register("resolve") {
 }
 
 func TestGroups(t *testing.T) {
-	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
+	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		rel, snap := RandName("releases"), RandName("snapshots")
 		s.CreateRepo(t, rel, "maven", true, nil)

@@ -144,7 +144,7 @@ func distributionRemote(t *testing.T) *proxyRemote {
 // missing tag, a mount that never asks the remote, a stopped remote, the read-only answer to a
 // push, wrong credentials, and a group of a hosted repo and the proxy.
 func TestDockerProxy(t *testing.T) {
-	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
+	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		host := registryHost(s)
 		d := StartDind(t, host)

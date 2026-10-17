@@ -135,7 +135,7 @@ func TestCLICompat(t *testing.T) {
 	old := &cli{bin: BuildCLI(t, "v0.8.0", "", nil)}
 	newer := BuildCLI(t, "v1.0.0", compatNewChanges, map[string]string{"e2e_olderpaths.go": compatOlderPaths})
 	server := buildFutureServer(t, "v0.9.0", compatServerChanges, BuildCLI(t, "v0.9.0", compatServerChanges, nil))
-	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
+	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		opts.Files = append(opts.Files, ServerBinary(server))
 		s := StartServer(t, opts)
 		upgraded := StartServer(t, ServerOpts{}) // the server of this tree, with the CLI archives of its own build

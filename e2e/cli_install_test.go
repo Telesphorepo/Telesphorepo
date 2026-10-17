@@ -4,8 +4,11 @@ package e2e
 
 import (
 	"fmt"
+	"net/http"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 var (
@@ -13,8 +16,28 @@ var (
 	installDebianImage = floatingImage("docker.io/library/buildpack-deps:curl")
 	// installAlpineImage is Alpine with BusyBox only: the script downloads with wget.
 	installAlpineImage = floatingImage("docker.io/library/alpine:latest")
-	installPwshImage   = floatingImage("mcr.microsoft.com/powershell:latest")
 )
+
+// newestPowerShell returns the URL of the newest PowerShell release for Linux on the CPU of the
+// test containers: the archive of the GitHub release that /releases/latest names. Microsoft's
+// container images of PowerShell no longer follow its releases.
+func newestPowerShell(t testing.TB) string {
+	t.Helper()
+	c := &http.Client{Timeout: time.Minute, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := c.Head("https://github.com/PowerShell/PowerShell/releases/latest")
+	if err != nil {
+		t.Fatalf("the newest PowerShell release: %v", err)
+	}
+	resp.Body.Close()
+	_, tag, ok := strings.Cut(resp.Header.Get("Location"), "/releases/tag/")
+	if !ok || !strings.HasPrefix(tag, "v") {
+		t.Fatalf("the newest PowerShell release: %d, Location %q", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	arch := map[string]string{"amd64": "x64", "arm64": "arm64"}[runtime.GOARCH]
+	v := strings.TrimPrefix(tag, "v")
+	t.Logf("PowerShell %s", v)
+	return "https://github.com/PowerShell/PowerShell/releases/download/" + tag + "/powershell-" + v + "-linux-" + arch + ".tar.gz"
+}
 
 // installShScript installs the CLI with install.sh of $SERVER (fetch is the download command),
 // runs "version" through it, and then runs install.sh with another SHA-256 for each archive.
@@ -62,25 +85,33 @@ Write-Output '=== end ==='
 // of the archive is not the one of the script.
 func TestInstall(t *testing.T) {
 	zeros := strings.Repeat("0", 64)
-	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
+	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		installed := "telesphorepo: installed the CLI of " + s.InternalURL + " in /root/.local/bin"
+		// PowerShell runs from its release archive on Debian, without ICU (invariant globalization).
+		pwsh := `mkdir -p /opt/pwsh && curl -fsSL "$PWSH_URL" | tar -xz -C /opt/pwsh && /opt/pwsh/pwsh -NoProfile -NonInteractive -File /e2e/install.ps1`
+		pwshEnv := map[string]string{"PWSH_URL": newestPowerShell(t), "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT": "1"}
 		for _, c := range []struct {
 			name, image, cmd, script string
+			env                      map[string]string
 		}{
-			{"debian", installDebianImage, "sh /e2e/install.sh", fmt.Sprintf(installShScript, "curl -fsSL", zeros)},
-			{"alpine", installAlpineImage, "sh /e2e/install.sh", fmt.Sprintf(installShScript, "wget -qO-", zeros)},
-			{"powershell", installPwshImage, "pwsh -NoProfile -NonInteractive -File /e2e/install.ps1", fmt.Sprintf(installPs1Script, zeros)},
+			{"debian", installDebianImage, "sh /e2e/install.sh", fmt.Sprintf(installShScript, "curl -fsSL", zeros), nil},
+			{"alpine", installAlpineImage, "sh /e2e/install.sh", fmt.Sprintf(installShScript, "wget -qO-", zeros), nil},
+			{"powershell", installDebianImage, pwsh, fmt.Sprintf(installPs1Script, zeros), pwshEnv},
 		} {
 			t.Run(c.name, func(t *testing.T) {
 				file := "/e2e/install.sh"
 				if c.name == "powershell" {
 					file = "/e2e/install.ps1"
 				}
+				env := map[string]string{"SERVER": s.InternalURL, "HOME": "/root"}
+				for k, v := range c.env {
+					env[k] = v
+				}
 				code, out := RunClient(t, c.image, ClientOpts{
 					Cmd:   []string{c.cmd},
 					Files: []ContainerFile{{Path: file, Content: c.script}},
-					Env:   map[string]string{"SERVER": s.InternalURL, "HOME": "/root"},
+					Env:   env,
 					User:  "0",
 				})
 				if code != 0 {

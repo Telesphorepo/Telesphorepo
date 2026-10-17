@@ -30,7 +30,7 @@ func TestCLIGitHubActions(t *testing.T) {
 	}
 	repository, sha := os.Getenv("GITHUB_REPOSITORY"), os.Getenv("GITHUB_SHA")
 	c := newCLI(t)
-	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
+	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		repo := RandName("ci")
 		s.CreateRepo(t, repo, "maven", false, nil)

@@ -56,7 +56,7 @@ func mavenUserSettings(mirrorURL string) ContainerFile {
 // (Central comes through a proxy repo of the server); mvn resolves the published jars.
 func TestCLIMaven(t *testing.T) {
 	c := newCLI(t)
-	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
+	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		repo, central := RandName("releases"), RandName("central")
 		s.CreateRepo(t, repo, "maven", false, nil)
@@ -291,7 +291,7 @@ func TestCLIGradle(t *testing.T) {
 	c := newCLI(t)
 	other := RandName("otherhost")
 	startCaddy(t, otherHostConf, "Caddy of another host", other)
-	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
+	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		repo := RandName("plugins")
 		s.CreateRepo(t, repo, "maven", true, nil)

@@ -2691,14 +2691,18 @@ distroless static, runs as uid 65532, and has `/data` as a volume.
 
 The suite is E2E only, with no unit tests and no mocks. `e2e/` builds the real image (skip the
 build with `E2E_SKIP_BUILD=1`, or override the image with `E2E_IMAGE`). It runs real `mvn`,
-`gradle` and `apt` clients in containers against the server. Each test runs on `fs` and on
-SeaweedFS S3 (`E2E_SEAWEEDFS_IMAGE`). The engine
+`gradle` and `apt` clients in containers against the server. A test whose subject is the store
+runs on `fs` and on SeaweedFS S3 (`ForEachStorage`, `E2E_SEAWEEDFS_IMAGE`): the byte path of each
+format (`TestMaven`, `TestRaw`, `TestDebian`, `TestDockerRegistry`), the presigned redirects and
+their cache headers (`TestCacheControl`, `TestBulkRepos`, `TestBulkFiles`), deletes (`TestDelete`),
+the blob GC (`TestBlobDedupeAndGC`, `TestDockerGC`), the uploads of the CLI (`TestCLIUpload`) and
+the Nexus import. Every other test runs once, on `fs` (`OnLocalDisk`). The engine
 comes from `internal/containerengine`; `TR_ENGINE=docker|podman` forces one. The images of the
 tools that people bring float (`e2e/images_test.go`): Maven (`maven:3`), Gradle, Debian
 (`stable`), curl, Helm, Docker (`docker:dind`), crane, skopeo, the reference registry, Keycloak,
-Nexus, the install images (`buildpack-deps:curl`, Alpine, PowerShell) and the newest ORAS
+Nexus, the install images (`buildpack-deps:curl`, Alpine) and the newest ORAS
 release. Each file registers its images with `floatingImage`, and each run pulls the images of
-its zone again before the tests and prints the version of each. `TestCLIMaven` takes the newest
+its zone again before the tests and prints the version of each. `TestInstall` runs the newest PowerShell release from GitHub on Debian, because Microsoft's PowerShell images no longer follow the releases. `TestCLIMaven` takes the newest
 Maven 4 from Maven Central, and `TestCLIJenkins` builds its Jenkins with `--pull` (Jenkins `lts`)
 and fetches the newest plugins once a day. The infrastructure of the tests stays pinned:
 SeaweedFS, Caddy, the OCI conformance suite and the curl of the volume tool. `TestOIDC` runs a
@@ -2722,7 +2726,7 @@ wrong digest, another publish session, finish into a raw and a Maven repo, an im
 cancel, a Debian repo that refuses a path and finishes a `.deb` through its upload route) and `TestMavenMetadataAfterDelete`. `bulk_test.go` checks the `mirror` operation of a mapped repo and
 the 409 of resume and clear.
 
-`docker_test.go` covers the registry, each test on both stores. `TestDockerChallengeScheme`: with
+`docker_test.go` covers the registry. `TestDockerChallengeScheme`: with
 no `base_url`, the realm is http over plain HTTP; `X-Forwarded-Proto` or `Forwarded` of https
 from an untrusted peer makes it https, http does not; through a trusted proxy (`private`) the
 first forwarded proto gives the scheme, and no forwarded proto leaves http. `TestDockerRegistry`: docker repo
@@ -2875,7 +2879,7 @@ a server built without archives answers the problem `no-cli-downloads`).
 
 **Clients zone.** Each test builds the CLI of this repo (`BuildCLI`), copies it into client
 containers at `/usr/local/bin/telesphorepo` with `docker-credential-telesphorepo` next to it, and
-runs on both stores. The harness (`cli_harness_test.go`) passes setup links and CI tokens in the
+runs on `fs`; `TestCLIUpload` runs on both stores. The harness (`cli_harness_test.go`) passes setup links and CI tokens in the
 env and, after each run, lists each file of the container (and of its volumes other than the
 build caches) that holds `trs_` or `trsu_` with 40 or more characters or the CI token of the test;
 a match fails the test. A terminal comes from `script -qec`, which also types the answers.
@@ -2887,7 +2891,7 @@ a match fails the test. A terminal comes from `script -qec`, which also types th
 | `TestCLIDocker` | Docker in Docker after setup (the printed entry added to `config.json`) pushes and pulls with a device session; `get` answers only the server's hosts, `list` and `store`; `publish` of a Helm chart (`alpine/helm`); ORAS push and pull through the helper |
 | `TestCLIMaven` | `publish` with a pom that names another deployment target, with the newest Maven 3 and the newest Maven 4 (from the metadata of Maven Central); the mirror of the person's `settings.xml` (a proxy repo of Central) serves the plugins; `mvn` resolves both jars |
 | `TestCLIGradle` | `publish` of a library (Kotlin DSL) and a Gradle plugin (Groovy DSL); the build's own repository on another host (a Caddy that refuses credentials) gets none; a clean build applies the plugin and loads the library; a build with no `maven-publish` gets the message |
-| `TestCLIJenkins` | A real Jenkins (`testdata/jenkins`: Jenkins LTS with the OpenID Connect Provider plugin, Pipeline, Credentials Binding, Git, Maven and the Docker CLI; built once per run) runs, from local git repositories, the Jenkinsfiles that `GET /api/repos/{name}/ci` writes. The Maven job installs the CLI with the server's `install.sh` and publishes with `mvn`; the antrun plugin shows that Maven has no `OIDC_TOKEN`. The Docker job builds on a Docker in Docker engine (`DOCKER_HOST`) and pushes through the helper. The server checks the plugin's tokens with the keys that Jenkins serves; the build records name the job, the build number and the `GIT_COMMIT` of the checkout. A project file of another server gets no token, the helper gives none for a host of another server, and no file of Jenkins holds a session token. Both servers of the storage matrix share one alias, the audience of the Jenkins credential |
+| `TestCLIJenkins` | A real Jenkins (`testdata/jenkins`: Jenkins LTS with the OpenID Connect Provider plugin, Pipeline, Credentials Binding, Git, Maven and the Docker CLI; built once per run) runs, from local git repositories, the Jenkinsfiles that `GET /api/repos/{name}/ci` writes. The Maven job installs the CLI with the server's `install.sh` and publishes with `mvn`; the antrun plugin shows that Maven has no `OIDC_TOKEN`. The Docker job builds on a Docker in Docker engine (`DOCKER_HOST`) and pushes through the helper. The server checks the plugin's tokens with the keys that Jenkins serves; the build records name the job, the build number and the `GIT_COMMIT` of the checkout. A project file of another server gets no token, the helper gives none for a host of another server, and no file of Jenkins holds a session token. The server has the alias that the Jenkins credential names as its audience |
 | `TestCLIGitHubActions` | Runs in the `e2e-github-actions` job of `ci.yml` (`id-token: write`, `E2E_GITHUB_ACTIONS` set) and skips elsewhere: the CLI in a Maven container asks GitHub for the job's identity token and publishes with `mvn`; the server checks it with GitHub's keys; the build record names the repository, the run and the signed `sha`, also with another `GIT_COMMIT`; each session token is masked; a job without an identity token names `id-token: write` |
 | `TestCLIUpload` | `publish FILE` into the `path` folder of a raw repo (a 65 MiB file through the resumable routes) and of `.deb` packages to the `dist` of the project file (a 65 MiB package through the resumable routes); `apt` installs them |
 | `TestCLICompat` | Programs built at three versions with test entries: the server v0.9.0 (with the CLI archive v0.9.0), the CLI v0.8.0 and the CLI v1.0.0 (with an older path for one entry). The version header; the drift notice once a day; a `needs = "cli"` entry stops the older CLI with the install line, and on a terminal it updates and runs the command again; a `needs = "server"` entry stops the newer CLI with the summary, or takes the older path; an unknown field of an entry is ignored; the server v0.9.0 is built with a remedy action for a used setup line that no CLI knows, and the CLI prints the problem's text and link; a Caddy proxy whose upstream does not run answers 502, which gets the generic message; `update` through a Caddy proxy in front of two server versions (`SHA256SUMS` of one, the archive of the other) refuses the archive, makes the helper name again, and changes nothing for a newer CLI |

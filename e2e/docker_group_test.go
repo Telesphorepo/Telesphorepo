@@ -17,7 +17,7 @@ import (
 // member that the user may not read, the token reads no member directly, and every read answer
 // carries Cache-Control: private.
 func TestDockerGroupBearer(t *testing.T) {
-	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
+	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		host := registryHost(s)
 		arch := hostArch()

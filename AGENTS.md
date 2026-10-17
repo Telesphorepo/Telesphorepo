@@ -173,7 +173,7 @@ write gate, the device and OIDC routes or the change log. Run all zones before a
 | Single sign-on | `internal/oidc` (module `sso`: sign-in, the permission map, device approval), `web/src/pages/server/SingleSignOn.svelte` |
 | Nexus sources, syncs, cut-over | `internal/nexus` (module `nexus`: client, service, `sync.go` scheduler and runner, `api.go`), `web/src/pages/server/NexusMigration.svelte`, `NexusSource.svelte`. Per-format import code is the `Importer` of the format (`Plan` for the target repo, `Target`/`Store` per file). Repo lock: the repo operation `mirror` (`repo_ops`), checked in `access.Engine.Decide` |
 | Demo data and seed | `internal/demo`, and `Demo` and `Seed` of each module; `cmd/telesphorepo-server/demo.go` |
-| E2E harness | `e2e/harness_test.go` (servers, storage matrix `fs` + SeaweedFS), `e2e/clients_test.go` (Maven, Debian and curl helpers that several zones share), publish helpers at the end of `harness_test.go`, `e2e/keycloak_test.go` (Keycloak fixture), `e2e/build_test.go` (`BuildCLI`, `BuildServer`: programs of this repo built on the host with `go build -overlay`), `e2e/cli_server_test.go` (the CLI routes of the server, core zone), `e2e/cli_harness_test.go` and `e2e/cli_*_test.go` (clients zone: the CLI in containers, the secret scan), `e2e/cli_jenkins_test.go` with `e2e/testdata/jenkins` (the real Jenkins of the clients zone) |
+| E2E harness | `e2e/harness_test.go` (servers, `ForEachStorage` for `fs` + SeaweedFS, `OnLocalDisk`), `e2e/clients_test.go` (Maven, Debian and curl helpers that several zones share), publish helpers at the end of `harness_test.go`, `e2e/keycloak_test.go` (Keycloak fixture), `e2e/build_test.go` (`BuildCLI`, `BuildServer`: programs of this repo built on the host with `go build -overlay`), `e2e/cli_server_test.go` (the CLI routes of the server, core zone), `e2e/cli_harness_test.go` and `e2e/cli_*_test.go` (clients zone: the CLI in containers, the secret scan), `e2e/cli_jenkins_test.go` with `e2e/testdata/jenkins` (the real Jenkins of the clients zone) |
 | Change log and server version | `changes.toml` at the repo root (embedded by `changes.go`, package `telesphorepo`), the parser in `changelog/` (stdlib and toml only, shared with the CLI), `GET /api/changes` in `internal/api/changes.go`, the `Telesphorepo-Version` header in `internal/server/server.go`; `go tool task tag <version>` stamps the `dev` entries |
 | Dev tooling | `tools/task` |
 
@@ -198,7 +198,7 @@ It calls the `x.*` methods of the `Extender` to declare what the module adds: `S
    `/<format>/` of its formats and under its `RootPrefix`es.
 5. If the module has tables, add `schema.sql`, `queries/*.sql` and a `sqlc.yaml` (copy
    `internal/debian/sqlc.yaml`), and declare them with `x.Schema`. Run `go tool task gen`.
-6. Add `e2e/<module>_test.go` that uses a real client and runs on every storage backend.
+6. Add `e2e/<module>_test.go` that uses a real client. Run its byte path on both stores (`ForEachStorage`) and the rest on the local disk (`OnLocalDisk`).
 7. Document the routes, tables and settings in `SPEC.md`.
 
 ### Adding a repo format

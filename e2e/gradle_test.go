@@ -84,7 +84,7 @@ rootProject.name = "consumer"
 }
 
 func TestGradlePlugin(t *testing.T) {
-	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
+	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		repo := RandName("gradle")
 		s.CreateRepo(t, repo, "maven", false, nil)

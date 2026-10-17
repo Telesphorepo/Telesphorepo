@@ -48,7 +48,7 @@ echo '=== end ==='
 // keeps the file as it is.
 func TestCLISetup(t *testing.T) {
 	c := newCLI(t)
-	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
+	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		data := NewDataVolume(t)
 		opts.DataVolume = data
 		s := StartServer(t, opts)
@@ -134,7 +134,7 @@ echo '=== end ==='
 // server, removes only the hook entries of the server and deletes the folder of the server.
 func TestCLILogin(t *testing.T) {
 	c := newCLI(t)
-	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
+	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		repo := RandName("files")
 		s.CreateRepo(t, repo, "raw", false, nil)

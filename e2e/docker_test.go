@@ -133,7 +133,7 @@ func dockerUsers(t *testing.T, s *Server, priv, pub string) {
 // client used. A trusted proxy gives it with X-Forwarded-Proto or Forwarded; any other peer can
 // only make it https.
 func TestDockerChallengeScheme(t *testing.T) {
-	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
+	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		env := map[string]string{"TR_BASE_URL": ""} // an empty override leaves base_url unset
 		for k, v := range opts.Env {
 			env[k] = v
@@ -325,7 +325,7 @@ docker push %[1]s:v1
 // discovery, content management) against a docker repo, with the publish session token of a user
 // who publishes and deletes.
 func TestDockerConformance(t *testing.T) {
-	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
+	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		repo := RandName("conf")
 		s.CreateRepo(t, repo, "docker", false, nil)
@@ -356,7 +356,7 @@ func TestDockerConformance(t *testing.T) {
 // an OCI layout), ORAS (an artifact with a subject, the referrers API) and Helm (OCI charts), and
 // checks the catalog of each kind of caller.
 func TestDockerClients(t *testing.T) {
-	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
+	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		host := registryHost(s)
 		priv, pub, dst := RandName("priv"), RandName("pub"), RandName("dst")

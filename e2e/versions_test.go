@@ -364,7 +364,7 @@ func TestVersionsAndSnippets(t *testing.T) {
 // or the platforms of an index), artifact kinds, artifact snippets and manifest details of a
 // docker repo.
 func TestDockerVersions(t *testing.T) {
-	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
+	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		repo := RandName("dkv")
 		s.CreateRepo(t, repo, "docker", false, nil)
