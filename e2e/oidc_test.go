@@ -145,6 +145,7 @@ func ssoMeOf(t *testing.T, s *Server, jar http.CookieJar) ssoMe {
 // gets none. A change of the map takes effect at the next sign-in. Without a claim, a sign-in
 // changes nothing.
 func TestOIDC(t *testing.T) {
+	t.Parallel()
 	kc := newKeycloak(t)
 	s := StartServer(t, ServerOpts{Env: map[string]string{
 		"TR_OIDC_ISSUER":        kc.Issuer,

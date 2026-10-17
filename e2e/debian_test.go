@@ -23,6 +23,7 @@ import (
 )
 
 func TestDebian(t *testing.T) {
+	t.Parallel()
 	pkgs := buildDebPackages(t)
 	archs := []string{"amd64", "arm64"}
 	if !slices.Contains(archs, pkgs.arch) {
@@ -137,6 +138,7 @@ func debCheckArchRemoval(t *testing.T, s *Server, tg *S3Target, repo string, arc
 
 // TestDebianOversizeUpload checks TR_MAX_UPLOAD_SIZE on a dedicated server.
 func TestDebianOversizeUpload(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{Env: map[string]string{"TR_MAX_UPLOAD_SIZE": "4KiB"}})
 	repo := RandName("deb")
 	s.CreateRepo(t, repo, "debian", false, nil)

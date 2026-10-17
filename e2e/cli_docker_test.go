@@ -20,6 +20,7 @@ func dindScan(t *testing.T, d *Dind, what, secret string) {
 // session); the helper answers only the hosts of the server; publish packs and pushes a Helm
 // chart; ORAS pushes and pulls through the helper. TestCLIJenkins pushes from CI.
 func TestCLIDocker(t *testing.T) {
+	t.Parallel()
 	c := newCLI(t)
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)

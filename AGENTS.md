@@ -44,7 +44,8 @@ write gate, the device and OIDC routes or the change log. Run all zones before a
 
 - **E2E tests only.** Don't write unit tests or mocks. Test behaviour through the real image and
   real clients (`mvn`, `gradle`, `apt`, curl) in `e2e/` (`//go:build e2e`). Each test starts its
-  own server through the harness.
+  own server through the harness and calls `t.Parallel()` first. A test never changes the
+  process env, and it shares no outside system with another test.
 - **No fakes.** Never write a stand-in for another system: no fake build tool, no fake token
   endpoint, no stub server that answers what the real one would. Run the real system in a
   container (Jenkins with its plugins in `TestCLIJenkins`), or run the test where the real

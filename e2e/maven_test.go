@@ -46,6 +46,7 @@ func mavenHead(t *testing.T, s *Server, path string, auth Auth) *http.Response {
 }
 
 func TestMaven(t *testing.T) {
+	t.Parallel()
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		repo := RandName("maven")

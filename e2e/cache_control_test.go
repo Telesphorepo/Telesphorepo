@@ -12,6 +12,7 @@ import (
 // keep it; a public repo answers with no Cache-Control. A public group with a private member, and
 // a public repo or member with a read IP rule, count as private.
 func TestCacheControl(t *testing.T) {
+	t.Parallel()
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		priv, pub := RandName("cpriv"), RandName("cpub")

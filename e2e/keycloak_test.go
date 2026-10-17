@@ -87,7 +87,7 @@ func (kc *Keycloak) Start(t testing.TB, redirectURI string) {
 	}
 	realmJSON := strings.ReplaceAll(string(realm), kcRedirectSentinel, redirectURI)
 	portSpec := strconv.Itoa(kc.Port) + "/tcp"
-	c, err := testcontainers.Run(context.Background(), keycloakImage,
+	c, err := runContainer(context.Background(), keycloakImage,
 		testcontainers.WithCmd("start-dev", "--import-realm", "--http-port="+strconv.Itoa(kc.Port)),
 		testcontainers.WithEnv(map[string]string{
 			// Every URL Keycloak issues (issuer, endpoints, form actions) uses this hostname.

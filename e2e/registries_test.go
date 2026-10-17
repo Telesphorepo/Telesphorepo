@@ -34,6 +34,7 @@ type permSubsystem struct {
 // TestPermissionRegistry: GET /api/permissions lists every subsystem with its permissions, and a
 // write of an unknown ID or an ID of the other scope is refused.
 func TestPermissionRegistry(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	var reg struct {
 		Subsystems []permSubsystem `json:"subsystems"`
@@ -101,6 +102,7 @@ func TestPermissionRegistry(t *testing.T) {
 // TestAuditActions: GET /api/audit/actions lists the actions that the modules register, each
 // with a label and a subsystem, and the log records the actions of the services.
 func TestAuditActions(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	var actions []struct {
 		ID        string `json:"id"`
@@ -164,6 +166,7 @@ func TestAuditActions(t *testing.T) {
 // TestSettingsS3Endpoint: an empty S3 endpoint means AWS, so the region is required; r2 is not a
 // storage backend.
 func TestSettingsS3Endpoint(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	aws := map[string]any{
 		"storage": "s3", "s3.endpoint": "", "s3.region": "", "s3.bucket": "b",
@@ -190,6 +193,7 @@ func TestSettingsS3Endpoint(t *testing.T) {
 // factor cannot sign in with a password, and a publisher can. SSO settings whose client secret no
 // longer decrypts (another master key) start the server without SSO and with password sign-in for everyone, so no admin is locked out.
 func TestSSOStartupGuard(t *testing.T) {
+	t.Parallel()
 	vol := NewDataVolume(t)
 	key := func() string {
 		b := make([]byte, 32)

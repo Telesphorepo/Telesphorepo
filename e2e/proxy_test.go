@@ -129,6 +129,7 @@ func debProxyApt(t *testing.T, s *Server, repo, key string) string {
 }
 
 func TestProxy(t *testing.T) {
+	t.Parallel()
 	debs := buildDebPackages(t)
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		// The remote is a second server on the fs store, so its access log shows each request
@@ -359,6 +360,7 @@ func TestProxy(t *testing.T) {
 // TestProxySnippets: a proxy of Maven Central and a group that holds it tell the build to use
 // only them, with no mavenCentral() line; a hosted repo keeps the line.
 func TestProxySnippets(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	hosted, proxy, group := RandName("hosted"), RandName("central"), RandName("all")
 	s.CreateRepo(t, hosted, "maven", true, nil)

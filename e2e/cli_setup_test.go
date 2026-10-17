@@ -47,6 +47,7 @@ echo '=== end ==='
 // repo gets no project file, and y adds the credential helper to the Docker config file while n
 // keeps the file as it is.
 func TestCLISetup(t *testing.T) {
+	t.Parallel()
 	c := newCLI(t)
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		data := NewDataVolume(t)
@@ -133,6 +134,7 @@ echo '=== end ==='
 // publishes; status names the device, the hook and the project; logout revokes the device on the
 // server, removes only the hook entries of the server and deletes the folder of the server.
 func TestCLILogin(t *testing.T) {
+	t.Parallel()
 	c := newCLI(t)
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)

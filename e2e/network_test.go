@@ -144,6 +144,7 @@ func candidateOf(t *testing.T, s *Server, addr string) *proxyCandidate {
 }
 
 func TestClientIP(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 
 	peer := signInIP(t, s, nil)
@@ -262,6 +263,7 @@ func wantDenied(t *testing.T, what string, st int, b []byte, scope string) {
 }
 
 func TestIPRules(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	setTrustedProxies(t, s, []string{"private"})
 	repo := RandName("raw")
@@ -429,6 +431,7 @@ func getIPList(t *testing.T, s *Server, name string) ipListJSON {
 // TestPresetIPLists serves the preset lists from a stub: a second server with an anonymous raw
 // repo, at the paths that TR_E2E_PRESET_BASE_URL points at.
 func TestPresetIPLists(t *testing.T) {
+	t.Parallel()
 	stub := StartServer(t, ServerOpts{})
 	ranges := RandName("ranges")
 	stub.CreateRepo(t, ranges, "raw", true, map[string]any{"overwrite": "allow"})
@@ -546,6 +549,7 @@ func TestPresetIPLists(t *testing.T) {
 // trusted proxies (by list id), a rename that keeps every reference, and delete refused while in
 // use.
 func TestCustomIPLists(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	setTrustedProxies(t, s, []string{"private"})
 
@@ -684,6 +688,7 @@ type parsedRanges struct {
 // of pasted text in any common layout, invalid lines with their numbers, duplicates, limits and
 // admin-only access.
 func TestIPRangeParse(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	parse := func(t *testing.T, text string) parsedRanges {
 		t.Helper()
@@ -779,6 +784,7 @@ func TestIPRangeParse(t *testing.T) {
 // TestTrustedProxyEnvList: TR_TRUSTED_PROXIES may name IP lists as "list:<name>"; the server
 // resolves them at startup and reports them as env_lists.
 func TestTrustedProxyEnvList(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{Env: map[string]string{"TR_TRUSTED_PROXIES": "private,list:cloudflare"}})
 	var trusted trustedLists
 	s.MustAPI(t, http.MethodGet, "/api/network/trusted-proxies", nil, s.Admin(), &trusted)

@@ -62,6 +62,7 @@ func listSettings(t *testing.T, s *Server) (map[string]settingItem, string) {
 }
 
 func TestSettingsAccess(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	items, _ := listSettings(t, s)
 	groups := map[string]bool{}
@@ -87,6 +88,7 @@ func TestSettingsAccess(t *testing.T) {
 }
 
 func TestSettingsLiveUpdateAndEnvLock(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	items, _ := listSettings(t, s)
 
@@ -129,6 +131,7 @@ func TestSettingsLiveUpdateAndEnvLock(t *testing.T) {
 // TestSettingsSurviveRestart checks that stored settings, a secret among them, come back from the
 // database after a restart, and that the secret stays hidden.
 func TestSettingsSurviveRestart(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	const secret = "restart-client-secret"
 	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{
@@ -165,6 +168,7 @@ func TestSettingsSurviveRestart(t *testing.T) {
 // TestSettingsSizeAndDuration checks the friendly input and the display text of size and
 // duration settings.
 func TestSettingsSizeAndDuration(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	patch := func(key string, v any) {
 		t.Helper()
@@ -211,6 +215,7 @@ func TestSettingsSizeAndDuration(t *testing.T) {
 
 // TestSettingsSizeEnv checks that TR_MAX_UPLOAD_SIZE with a unit limits uploads.
 func TestSettingsSizeEnv(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{Env: map[string]string{"TR_MAX_UPLOAD_SIZE": "1MiB"}})
 	items, _ := listSettings(t, s)
 	if got := items["max_upload_size"]; got.Source != "env" || string(got.Value) != "1048576" || got.Display != "1 MiB" {
@@ -250,6 +255,7 @@ func putGetMaven(t *testing.T, s *Server, repo, name, content string) {
 }
 
 func TestSettingsStorageBogusS3Refused(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	repo := RandName("mvn")
 	s.CreateRepo(t, repo, "maven", false, nil)
@@ -286,6 +292,7 @@ func TestSettingsStorageBogusS3Refused(t *testing.T) {
 }
 
 func TestSettingsLiveSwitchToS3(t *testing.T) {
+	t.Parallel()
 	tg := StartSeaweedFS(t)
 	s := StartServer(t, ServerOpts{})
 	repo := RandName("mvn")

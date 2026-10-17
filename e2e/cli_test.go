@@ -14,6 +14,7 @@ import (
 // TestZeroConfigStartup: no TR_BOOTSTRAP_*. The server must print a one-time admin password
 // banner and generate the signing key "default", which a new Debian repo uses.
 func TestZeroConfigStartup(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{NoBootstrapAdmin: true})
 
 	logs := s.Logs(t)
@@ -59,6 +60,7 @@ func TestZeroConfigStartup(t *testing.T) {
 // TestCLIUser drives "telesphorepo-server user add/passwd" inside the running container with the
 // password piped on stdin, exactly as an operator would: "<engine> exec -i <ctr> ...".
 func TestCLIUser(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	const bin = "/telesphorepo-server"
 
@@ -97,6 +99,7 @@ func TestCLIUser(t *testing.T) {
 }
 
 func TestCLIVersion(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	code, out := s.Exec(t, "", "/telesphorepo-server", "version")
 	if code != 0 || strings.TrimSpace(out) == "" {

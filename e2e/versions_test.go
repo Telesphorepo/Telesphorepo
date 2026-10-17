@@ -114,6 +114,7 @@ func mavenPOM(group, id, version, packaging, extra string) string {
 }
 
 func TestVersionsAndSnippets(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	repo := RandName("vers")
 	s.CreateRepo(t, repo, "maven", false, nil)
@@ -364,6 +365,7 @@ func TestVersionsAndSnippets(t *testing.T) {
 // or the platforms of an index), artifact kinds, artifact snippets and manifest details of a
 // docker repo.
 func TestDockerVersions(t *testing.T) {
+	t.Parallel()
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		repo := RandName("dkv")

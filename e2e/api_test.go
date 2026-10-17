@@ -52,6 +52,7 @@ func apiMavenPut(t testing.TB, s *Server, repo, path, body string) {
 }
 
 func TestAPISession(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	s.CreateUser(t, "alice", "alice-password-1")
 
@@ -107,6 +108,7 @@ func TestAPISession(t *testing.T) {
 }
 
 func TestAPICSRF(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	s.CreateUser(t, "alice", "alice-password-1")
 	sess := s.LoginTOTP(t, "alice")
@@ -126,6 +128,7 @@ func TestAPICSRF(t *testing.T) {
 }
 
 func TestAPITokens(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	s.CreateUser(t, "alice", "alice-password-1")
 	s.CreateUser(t, "bob", "bob-password-1")
@@ -169,6 +172,7 @@ func TestAPITokens(t *testing.T) {
 // a route that changes state, or an admin route, needs a UI session, so an admin password
 // alone cannot go around the second factor. HTTP Basic keeps working for the read routes.
 func TestAPISessionRule(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	repo := RandName("rule")
 	s.CreateRepo(t, repo, "maven", false, nil)
@@ -285,6 +289,7 @@ func TestAPISessionRule(t *testing.T) {
 }
 
 func TestAPIUsers(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	admin := s.Admin()
 	body := map[string]any{"username": "carol", "password": "carol-password-1", "permissions": []string{}}
@@ -317,6 +322,7 @@ func TestAPIUsers(t *testing.T) {
 }
 
 func TestAPIReposAndPermissions(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	admin := s.Admin()
 	s.CreateUser(t, "dave", "dave-password-1")
@@ -409,6 +415,7 @@ func TestAPIReposAndPermissions(t *testing.T) {
 }
 
 func TestAPIAssetsPagination(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	repo := RandName("assets")
 	s.CreateRepo(t, repo, "maven", false, nil)
@@ -467,6 +474,7 @@ func TestAPIAssetsPagination(t *testing.T) {
 }
 
 func TestAPISearch(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	s.CreateUser(t, "erin", "erin-password-1")
 	erin := Basic{"erin", "erin-password-1"}
@@ -509,6 +517,7 @@ func TestAPISearch(t *testing.T) {
 }
 
 func TestAPIErrors(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{Env: map[string]string{"TR_MAX_JSON_SIZE": "1KiB"}})
 
 	huge := `{"name":"` + strings.Repeat("a", 4096) + `","format":"maven"}`
@@ -533,6 +542,7 @@ func TestAPIErrors(t *testing.T) {
 
 // TestAPIChanges covers the public change log route GET /api/changes and the version header.
 func TestAPIChanges(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	for _, since := range []string{"", "?since=v0.0.0", "?since=0.0.1-rc.1"} {
 		resp, b := s.Do(t, s.NewRequest(t, http.MethodGet, "/api/changes"+since, nil), nil)
@@ -560,6 +570,7 @@ func TestAPIChanges(t *testing.T) {
 // TestAPIFormats covers the format registry routes: /api/formats, and the generic per-repo
 // /status and /usage.
 func TestAPIFormats(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	s.CreateUser(t, "erin", "erin-password-1")
 	erin := Basic{"erin", "erin-password-1"}

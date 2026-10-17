@@ -91,6 +91,7 @@ tasks.register("resolve") {
 }
 
 func TestGroups(t *testing.T) {
+	t.Parallel()
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		rel, snap := RandName("releases"), RandName("snapshots")

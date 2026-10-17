@@ -59,6 +59,7 @@ func httpVersion(t *testing.T, url string, flags ...string) string {
 // HTTPS with HTTP/2 when the TLS settings name a certificate, and the checksum headers of a
 // download.
 func TestServerProtocols(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 
 	t.Run("h2c", func(t *testing.T) {

@@ -53,7 +53,7 @@ func StartNexus(t *testing.T) *Nexus {
 	t.Helper()
 	ctx := context.Background()
 	alias := RandName("nexus")
-	c, err := testcontainers.Run(ctx, nexusImage,
+	c, err := runContainer(ctx, nexusImage,
 		testcontainers.WithLabels(e2eLabels),
 		testcontainers.WithEnv(map[string]string{
 			"INSTALL4J_ADD_VM_PARAMS": "-Xms1g -Xmx1g -XX:MaxDirectMemorySize=1g -Djava.util.prefs.userRoot=/nexus-data/javaprefs",
@@ -917,6 +917,7 @@ func nexusWantMirrorBlocked(t *testing.T, what string, st int, body []byte) {
 // the progress counters and the log of each sync, unpicking a repo, the refusal of uploads to
 // a mirrored repo, and the cut-over.
 func TestNexus(t *testing.T) {
+	t.Parallel()
 	group := "com.example.nexus" + randHex(4)
 	groupPath := strings.ReplaceAll(group, ".", "/")
 	message1 := "hello from " + group + " 1.0.0 mirrored from nexus"
@@ -933,7 +934,7 @@ func TestNexus(t *testing.T) {
 
 	n := StartNexus(t)
 
-	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
+	ForEachStorageInTurn(t, func(t *testing.T, opts ServerOpts) {
 		// Each storage backend gets its own source repos, since the test adds to them.
 		rs := n.createRepos(t)
 		n.uploadMaven(t, rs.maven, "1.0.0", jar1, pom1)

@@ -72,6 +72,7 @@ func encryptedSigningKey(t *testing.T) (armored, passphrase string) {
 // usage list, delete refused while a repo uses a key, and a Debian repo signed with its own key
 // that apt installs from, before and after the repo changes its key.
 func TestSigningKeys(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 
 	// The first start created "default".

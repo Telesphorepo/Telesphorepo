@@ -199,7 +199,7 @@ func startClient(t testing.TB, image string, opts ClientOpts) *clientRun {
 		testcontainers.WithLabels(e2eLabels),
 		testcontainers.WithEntrypoint("sh", "-c"),
 		testcontainers.WithCmd(strings.Join(opts.Cmd, " ")),
-		testcontainers.WithEnv(opts.Env),
+		testcontainers.WithEnv(clientEnv(opts)),
 		testcontainers.WithFiles(files...),
 		testcontainers.WithMounts(mounts...),
 		network.WithNetwork(nil, TestNetwork),

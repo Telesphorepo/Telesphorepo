@@ -21,6 +21,7 @@ const gitHubIssuer = "https://token.actions.githubusercontent.com"
 // message that names it. Outside GitHub Actions the test has no token and skips; with
 // E2E_GITHUB_ACTIONS set (the job of ci.yml) it fails without one.
 func TestCLIGitHubActions(t *testing.T) {
+	t.Parallel()
 	requestURL, requestToken := os.Getenv("ACTIONS_ID_TOKEN_REQUEST_URL"), os.Getenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
 	if requestURL == "" || requestToken == "" {
 		if os.Getenv("E2E_GITHUB_ACTIONS") != "" {

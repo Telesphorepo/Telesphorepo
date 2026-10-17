@@ -55,6 +55,7 @@ func mavenUserSettings(mirrorURL string) ContainerFile {
 // target, with the newest Maven 3 and the newest Maven 4; the mirror of the person's settings.xml stays in force
 // (Central comes through a proxy repo of the server); mvn resolves the published jars.
 func TestCLIMaven(t *testing.T) {
+	t.Parallel()
 	c := newCLI(t)
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
@@ -288,6 +289,7 @@ func gradleOpts(files []ContainerFile, devices string, env map[string]string) Cl
 // host gets no credentials; a build with no maven-publish gets the message of the CLI; a clean
 // build applies the plugin and loads the library.
 func TestCLIGradle(t *testing.T) {
+	t.Parallel()
 	c := newCLI(t)
 	other := RandName("otherhost")
 	startCaddy(t, otherHostConf, "Caddy of another host", other)

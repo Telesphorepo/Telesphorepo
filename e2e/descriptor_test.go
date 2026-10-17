@@ -59,6 +59,7 @@ type descriptorJSON struct {
 }
 
 func TestFormatDescriptors(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	var list []descriptorJSON
 	apiJSON(t, s, http.MethodGet, "/api/formats", nil, nil, http.StatusOK, &list)
@@ -102,6 +103,7 @@ func TestFormatDescriptors(t *testing.T) {
 }
 
 func TestCIWorkflowRoute(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	mvn, raw, prx := RandName("mvn"), RandName("raw"), RandName("prx")
 	s.CreateRepo(t, mvn, "maven", false, nil)
@@ -205,6 +207,7 @@ func TestCIWorkflowRoute(t *testing.T) {
 }
 
 func TestDeletePlan(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	repo := RandName("mvn")
 	s.CreateRepo(t, repo, "maven", false, nil)

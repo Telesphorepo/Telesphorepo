@@ -25,6 +25,7 @@ type permRoute struct {
 // TestServerPermissions gives each server permission to its own person. The holder reaches the
 // routes of the permission; every other holder gets 403 there.
 func TestServerPermissions(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	repo := RandName("perm")
 	s.CreateRepo(t, repo, "raw", false, nil)
@@ -114,6 +115,7 @@ func TestServerPermissions(t *testing.T) {
 // TestPipelinesPermission: a person sees and edits a CI pipeline only when they hold pipelines on
 // every repository of it.
 func TestPipelinesPermission(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	mine, other := RandName("mine"), RandName("other")
 	s.CreateRepo(t, mine, "raw", false, nil)
@@ -219,6 +221,7 @@ func TestPipelinesPermission(t *testing.T) {
 // TestPeoplePicker: GET /api/people lists enabled usernames by prefix, in keyset pages, to a person
 // with people or with access on a repository.
 func TestPeoplePicker(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	repo := RandName("pick")
 	s.CreateRepo(t, repo, "raw", false, nil)

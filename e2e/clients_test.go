@@ -45,7 +45,7 @@ func registryHost(s *Server) string { return s.Alias + ":8080" }
 // startCaddy starts Caddy on :8080 with the Caddyfile conf and the network aliases aliases.
 func startCaddy(t *testing.T, conf, what string, aliases ...string) {
 	t.Helper()
-	c, err := testcontainers.Run(context.Background(), caddyImage,
+	c, err := runContainer(context.Background(), caddyImage,
 		testcontainers.WithLabels(e2eLabels),
 		testcontainers.WithFiles(testcontainers.ContainerFile{Reader: strings.NewReader(conf), ContainerFilePath: "/etc/caddy/Caddyfile", FileMode: 0o644}),
 		testcontainers.WithExposedPorts("8080/tcp"),

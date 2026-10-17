@@ -42,6 +42,7 @@ var debVersionsBuilds = [][2]string{
 }
 
 func TestDebianVersions(t *testing.T) {
+	t.Parallel()
 	var list strings.Builder
 	for _, b := range debVersionsBuilds {
 		list.WriteString(b[0] + " " + b[1] + "\n")

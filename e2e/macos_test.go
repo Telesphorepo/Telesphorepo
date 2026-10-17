@@ -62,6 +62,7 @@ type macUser struct {
 // and writes telesphorepo.toml, and publish runs mvn deploy for a Maven project and uploads a
 // file to a raw repo.
 func TestMacOS(t *testing.T) {
+	t.Parallel()
 	bin := os.Getenv("E2E_SERVER_BIN")
 	if bin == "" {
 		t.Fatal("set E2E_SERVER_BIN to the server binary of go tool task build")

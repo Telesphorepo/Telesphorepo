@@ -174,6 +174,7 @@ func storedKeys(t *testing.T, opts ServerOpts) []string {
 }
 
 func TestTree(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	repo := RandName("tree")
 	s.CreateRepo(t, repo, "maven", false, nil)
@@ -245,6 +246,7 @@ func TestTree(t *testing.T) {
 }
 
 func TestDelete(t *testing.T) {
+	t.Parallel()
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
 		if opts.S3 == nil {
 			opts.DataVolume = NewDataVolume(t)
@@ -384,6 +386,7 @@ func countersOf(t *testing.T, s *Server, repo string) repoCounters {
 // TestRepoCounters checks file_count, total_size and last_published_at of the repo list through
 // uploads, a replace, a file delete and a folder delete.
 func TestRepoCounters(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	repo := RandName("raw")
 	s.CreateRepo(t, repo, "raw", false, map[string]any{"overwrite": "allow"})
@@ -437,6 +440,7 @@ func tinyJar(t *testing.T, marker string) []byte {
 }
 
 func TestManualUploadMaven(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	repo := RandName("mvn")
 	s.CreateRepo(t, repo, "maven", false, nil)
@@ -559,6 +563,7 @@ func TestManualUploadMaven(t *testing.T) {
 }
 
 func TestManualUploadRaw(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	repo, other := RandName("raw"), RandName("other")
 	s.CreateRepo(t, repo, "raw", false, nil)
@@ -606,6 +611,7 @@ done
 // TestDebianDeleteAndUpload uploads a package through the web UI route, deletes one through the
 // API (apt no longer sees it) and checks the by-hash cleanup.
 func TestDebianDeleteAndUpload(t *testing.T) {
+	t.Parallel()
 	pkgs := buildDebPackages(t)
 	archs := []string{"amd64", "arm64"}
 	if !slices.Contains(archs, pkgs.arch) {

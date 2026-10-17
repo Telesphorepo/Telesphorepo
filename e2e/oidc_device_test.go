@@ -106,6 +106,7 @@ func approveWith(t testing.TB, s *Server, jar http.CookieJar, userCode, proof st
 // TestOIDCDeviceApproval: an SSO admin approves a device after a new sign-in at Keycloak, then
 // publishes with the device.
 func TestOIDCDeviceApproval(t *testing.T) {
+	t.Parallel()
 	kc, s := startSSOServer(t)
 	alice := kc.SignIn(t, s, "alice", kcAlicePassword)
 	repo := RandName("sso-dev")

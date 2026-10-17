@@ -133,6 +133,7 @@ func dockerUsers(t *testing.T, s *Server, priv, pub string) {
 // client used. A trusted proxy gives it with X-Forwarded-Proto or Forwarded; any other peer can
 // only make it https.
 func TestDockerChallengeScheme(t *testing.T) {
+	t.Parallel()
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		env := map[string]string{"TR_BASE_URL": ""} // an empty override leaves base_url unset
 		for k, v := range opts.Env {
@@ -172,6 +173,7 @@ func TestDockerChallengeScheme(t *testing.T) {
 // challenge, the token scopes, push and pull, logins that cannot push, anonymous pulls, a tag
 // move, a multi-platform index and a read IP rule.
 func TestDockerRegistry(t *testing.T) {
+	t.Parallel()
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		host := registryHost(s)
@@ -325,6 +327,7 @@ docker push %[1]s:v1
 // discovery, content management) against a docker repo, with the publish session token of a user
 // who publishes and deletes.
 func TestDockerConformance(t *testing.T) {
+	t.Parallel()
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		repo := RandName("conf")
@@ -356,6 +359,7 @@ func TestDockerConformance(t *testing.T) {
 // an OCI layout), ORAS (an artifact with a subject, the referrers API) and Helm (OCI charts), and
 // checks the catalog of each kind of caller.
 func TestDockerClients(t *testing.T) {
+	t.Parallel()
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		host := registryHost(s)
@@ -515,6 +519,7 @@ cmp mychart-0.1.0.tgz /tmp/pulled/mychart-0.1.0.tgz
 // layer and the other image stay. A layer that a manifest uses cannot be deleted on its own. A
 // folder delete removes an image of more than 500 files with a multi-platform index.
 func TestDockerGC(t *testing.T) {
+	t.Parallel()
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
 		if opts.Env == nil {
 			opts.Env = map[string]string{}
@@ -591,6 +596,10 @@ func TestDockerGC(t *testing.T) {
 				t.Fatalf("GET a layer of image b after the GC: status %d", resp.StatusCode)
 			}
 		}
+
+		// The default grace again: the layers of the next image wait for their manifests longer
+		// than 1 s when the host is busy.
+		s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"docker.link_grace": "24h"}, s.Admin(), nil)
 
 		// A folder delete of an image of more than 500 files. The pipeline removes 500 files per
 		// batch in path order, so the first batch holds the 499 links (_blobs/ sorts first) and

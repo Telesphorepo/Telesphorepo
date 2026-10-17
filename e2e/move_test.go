@@ -178,6 +178,7 @@ func moveWantRaw(t *testing.T, s *Server, repo string, files map[string][]byte) 
 // TestStorageMove moves Maven, Debian and raw content between fs and SeaweedFS in both
 // directions while uploads continue, then checks both stores and real clients.
 func TestStorageMove(t *testing.T) {
+	t.Parallel()
 	pkgs := buildDebPackages(t)
 
 	t.Run("fs-to-seaweedfs", func(t *testing.T) {
@@ -328,6 +329,7 @@ func moveContent(t *testing.T, s *Server, pkgs *debPackages, patch map[string]an
 // its failures and storage stays on the source. After the blob is restored, a second move
 // skips what the first one copied and finishes.
 func TestStorageMoveFailure(t *testing.T) {
+	t.Parallel()
 	tg := StartSeaweedFS(t)
 	vol := NewDataVolume(t)
 	s := StartServer(t, ServerOpts{DataVolume: vol})
@@ -383,6 +385,7 @@ func TestStorageMoveFailure(t *testing.T) {
 // TestStorageMoveRestart restarts the server while a move copies; the move resumes and
 // finishes.
 func TestStorageMoveRestart(t *testing.T) {
+	t.Parallel()
 	tg := StartSeaweedFS(t)
 	vol := NewDataVolume(t)
 	s := StartServer(t, ServerOpts{DataVolume: vol})
@@ -408,6 +411,7 @@ func TestStorageMoveRestart(t *testing.T) {
 // TestStorageMoveCancel cancels a running move: storage drops back to the source, and a new
 // move can start afterwards.
 func TestStorageMoveCancel(t *testing.T) {
+	t.Parallel()
 	tg := StartSeaweedFS(t)
 	vol := NewDataVolume(t)
 	s := StartServer(t, ServerOpts{DataVolume: vol})

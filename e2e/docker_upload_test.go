@@ -45,6 +45,7 @@ func startBodyLimitProxy(t *testing.T, alias, upstream string) {
 // hostname and pull it back. ORAS and Helm 4 (oras-go v2.6.1 and later) refuse an upload Location
 // on another host, so they push to the upload host by name and pull through the proxy.
 func TestDockerUploadHost(t *testing.T) {
+	t.Parallel()
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		srvAlias, mainAlias := RandName("origin"), RandName("main")
 		opts.Alias = srvAlias

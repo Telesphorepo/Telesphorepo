@@ -183,6 +183,7 @@ func testPOM(group, artifact, version string) []byte {
 }
 
 func TestFolderUploadMaven(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	repo := RandName("mvn")
 	s.CreateRepo(t, repo, "maven", false, nil)
@@ -319,6 +320,7 @@ func (p planJSON) items0Target() string {
 }
 
 func TestFolderUploadDebianAndRaw(t *testing.T) {
+	t.Parallel()
 	pkgs := buildDebPackages(t)
 	archs := []string{"amd64", "arm64"}
 	if !slices.Contains(archs, pkgs.arch) {

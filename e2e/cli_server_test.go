@@ -54,6 +54,7 @@ func signText(key ed25519.PrivateKey, msg string) string { return b64(ed25519.Si
 // answers the repo with its format and kind; a used, unknown or expired code answers the problem
 // setup-code-used with a link; the device of another person leaves the code for its owner.
 func TestSetupCodes(t *testing.T) {
+	t.Parallel()
 	vol := NewDataVolume(t)
 	s := StartServer(t, ServerOpts{DataVolume: vol})
 	repo, img := RandName("app"), RandName("img")
@@ -172,6 +173,7 @@ func TestSetupCodes(t *testing.T) {
 // TestDeviceSelfRevoke: a device revokes itself with its own signature (DELETE
 // /api/devices/self); its sessions end and the audit log names the device as the cause.
 func TestDeviceSelfRevoke(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	repo := RandName("app")
 	s.CreateRepo(t, repo, "maven", false, nil)
@@ -224,6 +226,7 @@ func (b bearer) apply(r *http.Request) { r.Header.Set("Authorization", "Bearer "
 // (POST /api/publish/sessions/exchange) and answers the same session again; a format read takes
 // the proof as the Basic password or the Bearer value, and a write does not.
 func TestExchangeSession(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	repo, files := RandName("app"), RandName("files")
 	s.CreateRepo(t, repo, "maven", false, nil)
@@ -308,6 +311,7 @@ func TestExchangeSession(t *testing.T) {
 // /cli/, and writes its URL and the sums into the install scripts; a build without the archives
 // answers the problem no-cli-downloads.
 func TestCLIDownloads(t *testing.T) {
+	t.Parallel()
 	bare := BuildServer(t, "", "", "")
 	s := StartServer(t, ServerOpts{})
 	get := func(s *Server, path string) (*http.Response, []byte) {

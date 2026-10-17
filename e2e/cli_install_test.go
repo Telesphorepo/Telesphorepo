@@ -84,6 +84,7 @@ Write-Output '=== end ==='
 // the folder to $GITHUB_PATH, pass the arguments to the CLI, and install nothing when the hash
 // of the archive is not the one of the script.
 func TestInstall(t *testing.T) {
+	t.Parallel()
 	zeros := strings.Repeat("0", 64)
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)

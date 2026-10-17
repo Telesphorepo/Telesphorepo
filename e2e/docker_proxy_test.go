@@ -103,7 +103,7 @@ func distributionRemote(t *testing.T) *proxyRemote {
 		t.Fatal(err)
 	}
 	alias := RandName("reg")
-	c, err := testcontainers.Run(ctx, distributionImage,
+	c, err := runContainer(ctx, distributionImage,
 		testcontainers.WithLabels(e2eLabels),
 		testcontainers.WithEnv(map[string]string{
 			"REGISTRY_AUTH": "htpasswd", "REGISTRY_AUTH_HTPASSWD_REALM": "e2e", "REGISTRY_AUTH_HTPASSWD_PATH": "/auth/htpasswd",
@@ -126,8 +126,10 @@ func distributionRemote(t *testing.T) *proxyRemote {
 	return &proxyRemote{
 		kind: "distribution", url: "http://" + alias + ":5000/", user: user, pass: pass,
 		client: registryClient{base: ep, auth: func(r *http.Request) { r.SetBasicAuth(user, pass) }},
+		// The access log only (`... [time] "GET /v2/..."`): the registry also logs trace spans
+		// whose names hold the method and the path, in a batch some seconds later.
 		count: func(t *testing.T, method, prefix string) int {
-			return strings.Count(containerLogs(c), `"`+method+" "+prefix)
+			return strings.Count(containerLogs(c), `] "`+method+" "+prefix)
 		},
 		stop: func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -144,6 +146,7 @@ func distributionRemote(t *testing.T) *proxyRemote {
 // missing tag, a mount that never asks the remote, a stopped remote, the read-only answer to a
 // push, wrong credentials, and a group of a hosted repo and the proxy.
 func TestDockerProxy(t *testing.T) {
+	t.Parallel()
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		host := registryHost(s)

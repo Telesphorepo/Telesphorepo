@@ -36,7 +36,7 @@ func floatingImage(ref string) string {
 	return ref
 }
 
-// pullFloating pulls every floating image of this zone, at the same time, and prints the version
+// pullFloating pulls every floating image of this zone, four at a time, and prints the version
 // of each.
 func pullFloating(ctx context.Context) error {
 	if v, err := newestRelease(ctx, "oras-project/oras"); err != nil {
@@ -50,8 +50,13 @@ func pullFloating(ctx context.Context) error {
 	floatingMu.Unlock()
 	errs := make([]error, len(refs))
 	var wg sync.WaitGroup
+	// Four pulls at once: each pull of Podman on Windows and macOS opens an SSH connection to its
+	// machine, which refuses a burst of them.
+	slots := make(chan struct{}, 4)
 	for i, ref := range refs {
 		wg.Go(func() {
+			slots <- struct{}{}
+			defer func() { <-slots }()
 			ctx, cancel := context.WithTimeout(ctx, 20*time.Minute)
 			defer cancel()
 			if out, err := osexec.CommandContext(ctx, Engine.CLI, "pull", "-q", ref).CombinedOutput(); err != nil {

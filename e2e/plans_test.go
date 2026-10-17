@@ -8,6 +8,7 @@ import "testing"
 // checks every core and format query on a fresh database, so a query that no other test
 // reaches is still checked.
 func TestQueryPlans(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	code, out := s.Exec(t, "", "/telesphorepo-server", "dbcheck")
 	if code != 0 {

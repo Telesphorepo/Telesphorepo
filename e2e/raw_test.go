@@ -71,6 +71,7 @@ func rawWantStatus(t *testing.T, resp *http.Response, body []byte, want int) {
 }
 
 func TestRaw(t *testing.T) {
+	t.Parallel()
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		tg := opts.S3

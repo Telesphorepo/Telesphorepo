@@ -34,6 +34,7 @@ func wantChallenge(t *testing.T, resp *http.Response) {
 }
 
 func TestAuth(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	repo := RandName("auth")
 	s.CreateRepo(t, repo, "maven", false, nil)
@@ -190,6 +191,7 @@ func TestAuth(t *testing.T) {
 }
 
 func TestAuthRateLimit(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	repo := RandName("rl")
 	s.CreateRepo(t, repo, "maven", false, nil)
@@ -242,6 +244,7 @@ func TestAuthRateLimit(t *testing.T) {
 // (X-Telesphorepo-UI: 1) carries WWW-Authenticate, so a browser never opens its password dialog.
 // Format routes keep the challenge for package clients.
 func TestNoBrowserPasswordPrompt(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	repo := RandName("prompt")
 	s.CreateRepo(t, repo, "maven", false, nil)

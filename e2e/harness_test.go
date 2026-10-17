@@ -31,6 +31,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/moby/moby/api/types/container"
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
@@ -125,7 +126,7 @@ func StartServer(t testing.TB, opts ServerOpts) *Server {
 		mounts = append(mounts, testcontainers.VolumeMount(opts.DataVolume, "/data"))
 	}
 
-	c, err := testcontainers.Run(ctx, ServerImage,
+	c, err := runContainer(ctx, ServerImage,
 		testcontainers.WithLabels(e2eLabels),
 		testcontainers.WithEnv(env),
 		testcontainers.WithExposedPorts("8080/tcp"),
@@ -190,6 +191,22 @@ func (s *Server) Exec(t testing.TB, stdin string, args ...string) (int, string) 
 		t.Fatalf("%s %s: %v\n%s", Engine.CLI, strings.Join(argv, " "), err, out)
 	}
 	return 0, string(out)
+}
+
+// runContainer is testcontainers.Run for a container that publishes a port. Rootless Podman picks
+// a free host port for each container, and two containers that start at the same moment can get
+// the same port: the second start fails with "address already in use". runContainer removes that
+// container and starts it again, up to five times.
+func runContainer(ctx context.Context, image string, opts ...testcontainers.ContainerCustomizer) (*testcontainers.DockerContainer, error) {
+	for attempt := 1; ; attempt++ {
+		c, err := testcontainers.Run(ctx, image, opts...)
+		if err == nil || attempt == 5 || !strings.Contains(err.Error(), "address already in use") {
+			return c, err
+		}
+		if c != nil {
+			_ = c.Terminate(ctx)
+		}
+	}
 }
 
 // registerCleanup terminates c at test end, dumping its logs first if the test failed.
@@ -846,6 +863,10 @@ func (s *S3Target) Blobs(t testing.TB) map[string]string {
 	blobs := map[string]string{}
 	for _, k := range s.ListKeys(t) {
 		obj, err := c.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(s.Bucket), Key: aws.String(k)})
+		var gone *s3types.NoSuchKey
+		if errors.As(err, &gone) {
+			continue // the blob GC deleted it after the list
+		}
 		if err != nil {
 			t.Fatalf("get s3 object %s: %v", k, err)
 		}
@@ -888,7 +909,7 @@ func startSharedSeaweed() {
 		img = "chrislusf/seaweedfs:4.48"
 	}
 	s3conf := fmt.Sprintf(`{"identities":[{"name":"e2e","credentials":[{"accessKey":%q,"secretKey":%q}],"actions":["Admin","Read","Write","List","Tagging"]}]}`, seaweedAccess, seaweedSecret)
-	c, err := testcontainers.Run(ctx, img,
+	c, err := runContainer(ctx, img,
 		testcontainers.WithLabels(e2eLabels),
 		// Each test bucket is a SeaweedFS collection, and a collection grows 7 volumes on its first
 		// write. The default of 8 volumes (of 30 GB each) runs out after a few buckets, and later
@@ -959,6 +980,13 @@ func tail(s string, n int) string {
 
 // ForEachStorage runs fn as subtests "fs" and "seaweedfs".
 func ForEachStorage(t *testing.T, fn func(t *testing.T, opts ServerOpts)) {
+	t.Run("fs", func(t *testing.T) { t.Parallel(); fn(t, ServerOpts{Storage: "fs"}) })
+	t.Run("seaweedfs", func(t *testing.T) { t.Parallel(); fn(t, ServerOpts{Storage: "s3", S3: StartSeaweedFS(t)}) })
+}
+
+// ForEachStorageInTurn is ForEachStorage with one store after the other, for a test whose stores
+// share an outside system that each run changes (the Nexus of TestNexus).
+func ForEachStorageInTurn(t *testing.T, fn func(t *testing.T, opts ServerOpts)) {
 	t.Run("fs", func(t *testing.T) { fn(t, ServerOpts{Storage: "fs"}) })
 	t.Run("seaweedfs", func(t *testing.T) { fn(t, ServerOpts{Storage: "s3", S3: StartSeaweedFS(t)}) })
 }
@@ -1026,6 +1054,23 @@ func (r *ClientResult) ReadFile(t testing.TB, path string) []byte {
 	return b
 }
 
+// mavenFileLocks makes Maven lock the local repository with files, so the parallel tests that
+// share M2Volume never write the same file at once. Maven's default locks hold in one JVM only.
+const mavenFileLocks = "-Daether.syncContext.named.factory=file-lock -Daether.syncContext.named.nameMapper=file-gav"
+
+// clientEnv is the env of a client container: opts.Env, with mavenFileLocks in MAVEN_OPTS when the
+// container mounts M2Volume.
+func clientEnv(opts ClientOpts) map[string]string {
+	env := map[string]string{}
+	for k, v := range opts.Env {
+		env[k] = v
+	}
+	if _, ok := opts.Mounts[M2Volume]; ok {
+		env["MAVEN_OPTS"] = strings.TrimSpace(env["MAVEN_OPTS"] + " " + mavenFileLocks)
+	}
+	return env
+}
+
 // RunClient runs image with opts.Cmd on TestNetwork, waits for exit and returns exit code and combined output.
 func RunClient(t testing.TB, image string, opts ClientOpts) (int, string) {
 	t.Helper()
@@ -1056,7 +1101,7 @@ func RunClientResult(t testing.TB, image string, opts ClientOpts) *ClientResult 
 		customizers = append(customizers, testcontainers.WithHostConfigModifier(func(hc *container.HostConfig) { hc.Privileged = true }))
 	}
 	customizers = append(customizers,
-		testcontainers.WithEnv(opts.Env),
+		testcontainers.WithEnv(clientEnv(opts)),
 		testcontainers.WithFiles(files...),
 		testcontainers.WithMounts(mounts...),
 		network.WithNetwork(nil, TestNetwork),

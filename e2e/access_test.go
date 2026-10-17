@@ -106,6 +106,7 @@ func wantSentence(t *testing.T, what, got, want string) {
 const everyRepoPerm = "repo.download,repo.publish,repo.delete,repo.settings,repo.access,ci.pipelines"
 
 func TestEffectiveAccess(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	repo := RandName("acc")
 	s.CreateRepo(t, repo, "maven", false, nil)
@@ -316,6 +317,7 @@ func TestEffectiveAccess(t *testing.T) {
 // TestRepoSettingsPermission: a person with settings on one repository edits it, and gets 403 on
 // another.
 func TestRepoSettingsPermission(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	mine, other := RandName("mine"), RandName("other")
 	s.CreateRepo(t, mine, "raw", false, nil)
@@ -383,6 +385,7 @@ func TestRepoSettingsPermission(t *testing.T) {
 // TestAccessPermission: a person with access on a repository gives and removes only the
 // permissions they hold there; the dependency rules hold for everybody.
 func TestAccessPermission(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	repo, other := RandName("acc"), RandName("other")
 	s.CreateRepo(t, repo, "raw", false, nil)
@@ -467,6 +470,7 @@ func TestAccessPermission(t *testing.T) {
 // TestLastPeople: the server keeps at least one enabled person with the people permission, and a
 // person with people changes only the permissions they hold.
 func TestLastPeople(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	allBut := func(drop string) []string {
 		return slices.DeleteFunc(slices.Clone(AllServerPerms), func(p string) bool { return p == drop })
@@ -522,6 +526,7 @@ func TestLastPeople(t *testing.T) {
 // TestSecondFactorRule: a person needs the second factor for a UI session when they hold a server
 // permission or a repository permission other than download and publish.
 func TestSecondFactorRule(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	repo := RandName("tfa")
 	s.CreateRepo(t, repo, "raw", false, nil)
@@ -629,6 +634,7 @@ func TestSecondFactorRule(t *testing.T) {
 // issuer. A Jenkins policy (issuer <jenkins>/oidc) lists the job paths of its sub claims; a policy
 // of an issuer that no provider matches is "other" with its subjects.
 func TestCIProviderPipelines(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	repo := RandName("ci")
 	s.CreateRepo(t, repo, "raw", false, nil)

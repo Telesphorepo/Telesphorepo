@@ -132,6 +132,7 @@ echo '=== end ==='
 // front of two server versions), replaces the binary and the helper name, and changes nothing for
 // a newer CLI.
 func TestCLICompat(t *testing.T) {
+	t.Parallel()
 	old := &cli{bin: BuildCLI(t, "v0.8.0", "", nil)}
 	newer := BuildCLI(t, "v1.0.0", compatNewChanges, map[string]string{"e2e_olderpaths.go": compatOlderPaths})
 	server := buildFutureServer(t, "v0.9.0", compatServerChanges, BuildCLI(t, "v0.9.0", compatServerChanges, nil))

@@ -66,6 +66,7 @@ func lockRepo(t *testing.T, s *Server, repo string) {
 }
 
 func TestBulkRepos(t *testing.T) {
+	t.Parallel()
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
 		if opts.S3 == nil {
 			opts.DataVolume = NewDataVolume(t)
@@ -156,6 +157,7 @@ func TestBulkRepos(t *testing.T) {
 }
 
 func TestBulkFiles(t *testing.T) {
+	t.Parallel()
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
 		if opts.S3 == nil {
 			opts.DataVolume = NewDataVolume(t)
@@ -226,6 +228,7 @@ func TestBulkFiles(t *testing.T) {
 }
 
 func TestBulkPeople(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	repo := rawRepoWithFile(t, s, "people")
 	u1, u2, u3 := RandName("dis"), RandName("dis"), RandName("keep")
@@ -283,6 +286,7 @@ func TestBulkPeople(t *testing.T) {
 }
 
 func TestBulkAccess(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	r1, r2, r3 := rawRepoWithFile(t, s, "acc"), rawRepoWithFile(t, s, "acc"), rawRepoWithFile(t, s, "acc")
 	p1, p2, p3 := RandName("p"), RandName("p"), RandName("p")
@@ -359,6 +363,7 @@ func TestBulkAccess(t *testing.T) {
 // TestBulkSessionRule checks that every list route needs a UI session (a password over HTTP Basic
 // is refused) and holds 1 to 1000 items.
 func TestBulkSessionRule(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	repo := rawRepoWithFile(t, s, "rule")
 	s.CreateUser(t, "erin", "erin-password-1")

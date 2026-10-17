@@ -48,6 +48,7 @@ func setSetting(t *testing.T, s *Server, key string, value any) {
 }
 
 func TestPublishGate(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	repo, other := RandName("pub"), RandName("other")
 	s.CreateRepo(t, repo, "maven", false, nil)
@@ -226,6 +227,7 @@ func TestPublishGate(t *testing.T) {
 // person who only downloads and publishes signs in with the password and needs a factor only to
 // approve a device or create a manual publish session.
 func TestSecondFactorLogin(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	wantSetupOnly := func(t *testing.T, sess *Session, method, path string) {
 		t.Helper()
@@ -344,6 +346,7 @@ func TestSecondFactorLogin(t *testing.T) {
 var userCodeRe = regexp.MustCompile(`^[A-Z]{4}-[A-Z]{4}$`)
 
 func TestDeviceEnrollment(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	repo := RandName("dev")
 	s.CreateRepo(t, repo, "maven", false, nil)
@@ -417,6 +420,7 @@ func TestDeviceEnrollment(t *testing.T) {
 // TestDeviceEnrollmentExpiry ages an enrollment past its 10 minutes in the database while the
 // server is stopped: the poll answers expired_token and the code can no longer be approved.
 func TestDeviceEnrollmentExpiry(t *testing.T) {
+	t.Parallel()
 	vol := NewDataVolume(t)
 	s := StartServer(t, ServerOpts{DataVolume: vol})
 	u := RandName("dev")

@@ -2689,7 +2689,14 @@ distroless static, runs as uid 65532, and has `/data` as a volume.
 
 ## Testing
 
-The suite is E2E only, with no unit tests and no mocks. `e2e/` builds the real image (skip the
+The suite is E2E only, with no unit tests and no mocks. Every test calls `t.Parallel()` and
+starts its own server, so the tests of a zone run at the same time (`go test` runs as many as the
+host has CPUs), and `ForEachStorage` runs its two stores at the same time. `TestNexus` runs its
+stores one after the other (`ForEachStorageInTurn`), because both change the one Nexus. The
+harness starts each container that publishes a port with `runContainer`: rootless Podman can
+give two containers that start at the same moment one host port, and `runContainer` starts the
+second again. The containers that share the Maven cache volume lock it with files
+(`MAVEN_OPTS` with `aether.syncContext.named.factory=file-lock`). `e2e/` builds the real image (skip the
 build with `E2E_SKIP_BUILD=1`, or override the image with `E2E_IMAGE`). It runs real `mvn`,
 `gradle` and `apt` clients in containers against the server. A test whose subject is the store
 runs on `fs` and on SeaweedFS S3 (`ForEachStorage`, `E2E_SEAWEEDFS_IMAGE`): the byte path of each

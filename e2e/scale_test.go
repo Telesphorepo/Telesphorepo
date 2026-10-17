@@ -32,6 +32,7 @@ const (
 var scaleOps = []string{"maven-get", "asset-page", "search-rare", "search-common", "token-auth"}
 
 func TestScale(t *testing.T) {
+	t.Parallel()
 	results := map[int]map[string]time.Duration{}
 	for _, n := range []int{100_000, 1_000_000} {
 		t.Run(strconv.Itoa(n), func(t *testing.T) { results[n] = scaleRun(t, n) })

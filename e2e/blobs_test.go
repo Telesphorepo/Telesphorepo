@@ -52,6 +52,7 @@ func wantContentType(t *testing.T, s *Server, path, want string, auth Auth) {
 // while another file uses it; after the last delete the blob GC removes it once the grace
 // (TR_BLOBS_GC_GRACE=1s) is over, and an upload of the same bytes stores them again.
 func TestBlobDedupeAndGC(t *testing.T) {
+	t.Parallel()
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
 		if opts.S3 == nil {
 			opts.DataVolume = NewDataVolume(t)
@@ -142,6 +143,7 @@ func uploadSession(t *testing.T, s *Server, method, path string, body []byte, au
 // started an upload continues it. A Debian repo refuses a finished upload at a path (400); its
 // upload route of a distribution finishes the upload of a .deb.
 func TestUploadSessions(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{DataVolume: NewDataVolume(t)})
 	raw, mvn := RandName("chunks"), RandName("chunks-mvn")
 	s.CreateRepo(t, raw, "raw", false, nil)
@@ -295,6 +297,7 @@ func TestUploadSessions(t *testing.T) {
 // TestMavenMetadataAfterDelete deletes a version folder of a Maven artifact: the server writes
 // the artifact's maven-metadata.xml and its existing checksum again without that version.
 func TestMavenMetadataAfterDelete(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	repo := RandName("mvn-md")
 	s.CreateRepo(t, repo, "maven", false, nil)

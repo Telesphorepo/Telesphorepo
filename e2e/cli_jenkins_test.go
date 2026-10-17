@@ -61,7 +61,7 @@ func startJenkins(t testing.TB, audience string, env map[string]string) *jenkins
 	}
 	alias := RandName("jenkins")
 	url := "http://" + alias + ":8080/"
-	all := map[string]string{"E2E_JENKINS_URL": url, "E2E_AUDIENCE": audience}
+	all := map[string]string{"E2E_JENKINS_URL": url, "E2E_AUDIENCE": audience, "MAVEN_OPTS": mavenFileLocks}
 	for k, v := range env {
 		all[k] = v
 	}
@@ -268,6 +268,7 @@ const oidcUnset = "e2e: OIDC_TOKEN=${env.OIDC_TOKEN}"
 // and the helper gives none for a registry host of another server. No file of Jenkins holds a
 // session token.
 func TestCLIJenkins(t *testing.T) {
+	t.Parallel()
 	alias := RandName("repo")
 	server := "http://" + alias + ":8080"
 	d := StartDind(t, alias+":8080")

@@ -64,6 +64,7 @@ func findAudit(entries []auditEntry, action, actor string) *auditEntry {
 }
 
 func TestAudit(t *testing.T) {
+	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	repo, other := RandName("audit"), RandName("other")
 	s.CreateRepo(t, repo, "maven", false, nil)

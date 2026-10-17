@@ -14,6 +14,7 @@ import (
 // component of a Debian repo (a package of 64 MiB or more through the resumable upload routes as
 // well), which apt then installs.
 func TestCLIUpload(t *testing.T) {
+	t.Parallel()
 	c := newCLI(t)
 	debs := buildDebPackages(t)
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
