@@ -79,6 +79,9 @@ type MintCred struct {
 	// CIToken is a CI identity token (JWT) that a trust policy of the repo allows. A token that
 	// minted a session for the repo before gets that session back while it is open.
 	CIToken string
+	// Revision goes with CIToken: the commit that the CI job names from its env (Jenkins
+	// GIT_COMMIT). The build record keeps it when the token names no commit.
+	Revision string
 	// Fresh is a UI session whose request carried a fresh second factor (route policy
 	// FreshFactor).
 	Fresh *auth.Principal
@@ -163,7 +166,7 @@ func (s *Service) mintWith(ctx context.Context, r *http.Request, cred MintCred, 
 	case cred.Device != nil:
 		m, err = s.deviceSession(ctx, r, cred.Device, repoName, resolve, reuse)
 	case cred.CIToken != "":
-		m, err = s.ciSession(ctx, r, cred.CIToken, repoName, resolve, reuse)
+		m, err = s.ciSession(ctx, r, cred.CIToken, cred.Revision, repoName, resolve, reuse)
 	case cred.Fresh != nil:
 		m, err = s.manualSession(ctx, r, cred.Fresh, resolve)
 	default:

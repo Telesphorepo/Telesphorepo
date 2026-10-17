@@ -43,11 +43,16 @@ func NewBuilds(d *db.DB, reg *Registry) *Builds { return &Builds{d: d, reg: reg}
 
 // Record writes the build record of a verified CI token of issuer with claims in tx, through the
 // provider that matches the token, and returns its id. ok is false when no provider gives a
-// record (no row is written). at is the time of the build.
-func (b *Builds) Record(ctx context.Context, tx *sql.Tx, issuer string, claims map[string]any, at time.Time) (id int64, ok bool, err error) {
+// record (no row is written). at is the time of the build. revision is the commit that the CI job
+// names itself (the job env, not the token); the record keeps it only when the token names no
+// commit, and only when it is a commit hash (ValidRevision).
+func (b *Builds) Record(ctx context.Context, tx *sql.Tx, issuer string, claims map[string]any, revision string, at time.Time) (id int64, ok bool, err error) {
 	provider, rec, ok := b.reg.Build(issuer, claims)
 	if !ok {
 		return 0, false, nil
+	}
+	if rec.Revision == "" && ValidRevision(revision) {
+		rec.Revision = revision
 	}
 	id, err = b.Upsert(ctx, tx, provider, rec, at)
 	return id, err == nil, err

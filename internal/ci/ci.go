@@ -153,6 +153,12 @@ func Claim(claims map[string]any, name string, max int) string {
 	return s
 }
 
+var revisionRE = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
+
+// ValidRevision reports whether s is a git commit hash: 40 (SHA-1) or 64 (SHA-256) lower-case hex
+// digits.
+func ValidRevision(s string) bool { return revisionRE.MatchString(s) }
+
 // SplitRef returns the name and type of a git ref: ("main", "branch") for refs/heads/main,
 // ("v1", "tag") for refs/tags/v1, (ref, "") for another ref.
 func SplitRef(ref string) (name, typ string) {

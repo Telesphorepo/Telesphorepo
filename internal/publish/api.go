@@ -11,6 +11,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/activity"
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
+	"github.com/Telesphorepo/Telesphorepo/internal/ci"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/jobs"
 	"github.com/Telesphorepo/Telesphorepo/internal/module"
@@ -343,12 +344,13 @@ func (m *mod) manualSession(w http.ResponseWriter, r *http.Request, c *route.Cal
 	m.mintRoute(w, r, MintCred{Fresh: c.P}, in.Repo)
 }
 
-// oidcSession exchanges a CI identity token for a session (no auth): {token, repo} ->
-// 201 {id, token, repo, format, kind, expires_at}.
+// oidcSession exchanges a CI identity token for a session (no auth): {token, repo, revision?} ->
+// 201 {id, token, repo, format, kind, expires_at}. revision is the commit of the job.
 func (m *mod) oidcSession(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	var in struct {
-		Token string `json:"token"`
-		Repo  string `json:"repo"`
+		Token    string `json:"token"`
+		Repo     string `json:"repo"`
+		Revision string `json:"revision"`
 	}
 	if !m.h.API.Decode(w, r, &in) {
 		return
@@ -357,7 +359,11 @@ func (m *mod) oidcSession(w http.ResponseWriter, r *http.Request, c *route.Call)
 		publishFail(w, r, errorf(ErrInvalid, "token must be a CI identity token (JWT)"))
 		return
 	}
-	m.mintRoute(w, r, MintCred{CIToken: in.Token}, in.Repo)
+	if in.Revision != "" && !ci.ValidRevision(in.Revision) {
+		publishFail(w, r, errorf(ErrInvalid, "revision must be a git commit hash: 40 or 64 lower-case hex digits"))
+		return
+	}
+	m.mintRoute(w, r, MintCred{CIToken: in.Token, Revision: in.Revision}, in.Repo)
 }
 
 // listMySessions returns the caller's publish sessions, newest first: ?after=<id>&limit=.

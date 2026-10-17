@@ -190,7 +190,12 @@ func dockerGet(in io.Reader, out io.Writer) error {
 		}
 		if tok != "" {
 			mask(os.Stderr, tok)
-			return answer(ciUser, tok)
+			// The user name carries the commit of the job for the build record.
+			user := ciUser
+			if rev := ciRevision(""); rev != "" {
+				user += "@" + rev
+			}
+			return answer(user, tok)
 		}
 	}
 	return errNotFound

@@ -5,14 +5,18 @@
 # none. Each entry has four fields:
 #
 #   version  The release that made the change, or "dev" before a release. A "dev" entry counts
-#            for nothing. "go tool task release <version>" writes the release version into each
-#            "dev" entry before it builds.
+#            for nothing. "go tool task tag <version>" writes the release version into each
+#            "dev" entry, commits it and tags the release.
 #   scope    What the change affects: a command (setup, publish, login, update), a command and a
 #            format (publish/npm), or a helper (helper/docker, helper/cargo). A scope matches
 #            itself and every scope under it: publish matches publish/npm.
 #   needs    The side that must be at least version for the scope to work: "server" or "cli".
 #            An unknown value counts as "cli".
 #   summary  One sentence for the person. The CLI prints it as it is.
+#
+# An entry can also have an id (a-z, 0-9 and -, unique). A CLI that keeps the older path of an
+# entry with needs = "server" lists the id in olderPaths (cmd/telesphorepo/compat.go). The id
+# stays when "go tool task tag" stamps the version.
 #
 # Example:
 #

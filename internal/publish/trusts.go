@@ -677,8 +677,9 @@ func (s *Service) checkCI(ctx context.Context, raw string) error {
 // mints once, for one repo. With reuse (the Minter) a token mints once for each repo, and a token
 // that minted a session for the repo before gets that session back while it is open
 // (Minted.Token is then ""): that check skips exp and the age of iat, because the open session
-// bounds the time. A first mint needs a fresh token.
-func (s *Service) ciSession(ctx context.Context, r *http.Request, raw, repoName string, resolve func(context.Context) (*repos.Repo, error), reuse bool) (*Minted, error) {
+// bounds the time. A first mint needs a fresh token. revision is the commit that the job names
+// (MintCred.Revision).
+func (s *Service) ciSession(ctx context.Context, r *http.Request, raw, revision, repoName string, resolve func(context.Context) (*repos.Repo, error), reuse bool) (*Minted, error) {
 	repo, m, err := s.verifyCI(ctx, raw, repoName, resolve, !reuse)
 	if err != nil {
 		return nil, err
@@ -708,7 +709,7 @@ func (s *Service) ciSession(ctx context.Context, r *http.Request, raw, repoName 
 			}
 		}
 		// The build record and the session share the transaction.
-		build, _, err := s.builds.Record(ctx, tx, m.idt.Issuer, m.claims, time.Now())
+		build, _, err := s.builds.Record(ctx, tx, m.idt.Issuer, m.claims, revision, time.Now())
 		if err != nil {
 			return err
 		}

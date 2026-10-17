@@ -27,21 +27,27 @@ printf 'built in CI\n' > /tmp/ci.txt
 curl -fsS -u "telesphorepo:$TELESPHOREPO_TOKEN" -T /tmp/ci.txt "$url/com/acme/ci/$E2E_VERSION/ci-$E2E_VERSION.txt"
 `
 
+// jobCommit is the GIT_COMMIT of the CI jobs of the CLI tests.
+const jobCommit = "fedcba9876543210fedcba9876543210fedcba98"
+
 // TestCLICI: in CI, publish mints the session with the identity token of the job, from the
 // GitHub Actions token endpoint (a jwebserver that serves a Keycloak token) or from OIDC_TOKEN
-// (Jenkins); the files get the build record of the token; the child process never sees
-// OIDC_TOKEN; a GitHub Actions job without id-token: write gets the message.
+// (Jenkins); the files get the build record of the token, with the commit of the token, else the
+// GIT_COMMIT of the job; the child process never sees OIDC_TOKEN; a GitHub Actions job without
+// id-token: write gets the message.
 func TestCLICI(t *testing.T) {
 	c := newCLI(t)
 	kc := newKeycloak(t)
 	alias := ciAlias(t, kc)
 	gh := startGitHubTokenServer(t)
+	j := newJenkinsIssuer(t)
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
 		opts.Alias = alias
 		s := StartServer(t, opts)
 		repo := RandName("ci")
 		s.CreateRepo(t, repo, "maven", false, nil)
 		createCITrust(t, s, kc.Issuer, repo)
+		createJenkinsTrust(t, s, j, "team/app", repo)
 		files := []ContainerFile{projectFile(s, "/work/app", repo),
 			{Path: "/work/app/pom.xml", Content: "<project/>\n"},
 			{Path: "/work/app/mvnw", Content: fakeMvnw, Mode: 0o755}}
@@ -56,10 +62,19 @@ func TestCLICI(t *testing.T) {
 		}
 		wantText(t, "publish in GitHub Actions without an ID token", out, "permissions: id-token: write")
 
+		// The token names its commit, so the GIT_COMMIT of the job does not count.
 		tok := kc.CIToken(t)
 		out = c.mustRun(t, curlImage, "Jenkins", "cd /work/app && telesphorepo publish", ClientOpts{Files: files, Env: map[string]string{
-			"JENKINS_URL": "http://jenkins.example/", "OIDC_TOKEN": tok, "E2E_VERSION": "1.0", "E2E_SECRET": tok}})
+			"JENKINS_URL": "http://jenkins.example/", "OIDC_TOKEN": tok, "E2E_VERSION": "1.0", "E2E_SECRET": tok, "GIT_COMMIT": jobCommit}})
 		wantText(t, "publish in Jenkins", out, "Publishing to "+repo+" (maven)", "child: OIDC_TOKEN=unset", "child: TELESPHOREPO_TOKEN set")
+
+		// A token of the Jenkins plugin names no commit: the build record takes GIT_COMMIT.
+		jt := j.Token(t, s.InternalURL, "team/app", 12)
+		c.mustRun(t, curlImage, "Jenkins plugin token", "cd /work/app && telesphorepo publish", ClientOpts{Files: files, Env: map[string]string{
+			"JENKINS_URL": "http://jenkins.example/", "OIDC_TOKEN": jt, "E2E_VERSION": "3.0", "E2E_SECRET": jt, "GIT_COMMIT": jobCommit}})
+		if b := buildOf(t, s, repo, "com/acme/ci/3.0/ci-3.0.txt"); b == nil || b.Provider != "jenkins" || b.Run != "12" || b.Revision != jobCommit {
+			t.Fatalf("build of the Jenkins publish: %+v, want Jenkins team/app #12 at %s", b, jobCommit)
+		}
 
 		// A project file that names another server gets no CI token: its audience is this server.
 		other := []ContainerFile{{Path: "/work/app/telesphorepo.toml", Content: "server = \"http://other.invalid:8080\"\nrepo = \"" + repo + "\"\n"},
@@ -110,8 +125,8 @@ func TestCLICI(t *testing.T) {
 				n++
 			}
 		}
-		if n != 2 {
-			t.Fatalf("publish log of %s: %+v, want two CI sessions", repo, publishLog(t, s, repo))
+		if n != 3 {
+			t.Fatalf("publish log of %s: %+v, want three CI sessions", repo, publishLog(t, s, repo))
 		}
 	})
 }

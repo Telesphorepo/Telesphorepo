@@ -27,6 +27,9 @@ const (
 
 // Change is one entry of the change log. A field that this version does not know is ignored.
 type Change struct {
+	// ID names the entry in code: a CLI that keeps the older path of an entry lists its ID in
+	// olderPaths. It stays when the release stamps the version. Optional; unique; a-z, 0-9 and -.
+	ID      string `toml:"id" json:"id,omitempty"`
 	Version string `toml:"version" json:"version"`
 	Scope   string `toml:"scope" json:"scope"`
 	Needs   string `toml:"needs" json:"needs"`
@@ -52,7 +55,14 @@ func Parse(data []byte) ([]Change, error) {
 	if err := toml.Unmarshal(data, &f); err != nil {
 		return nil, fmt.Errorf("changes.toml: %w", err)
 	}
+	ids := map[string]bool{}
 	for i, c := range f.Change {
+		if c.ID != "" {
+			if !idRE.MatchString(c.ID) || ids[c.ID] {
+				return nil, fmt.Errorf("changes.toml: entry %d: id %q must be unique and use only a-z, 0-9 and -", i+1, c.ID)
+			}
+			ids[c.ID] = true
+		}
 		if c.Version != Dev {
 			if _, err := ParseVersion(c.Version); err != nil {
 				return nil, fmt.Errorf("changes.toml: entry %d: %w", i+1, err)
@@ -64,6 +74,8 @@ func Parse(data []byte) ([]Change, error) {
 	}
 	return f.Change, nil
 }
+
+var idRE = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 
 var embedded = sync.OnceValues(func() ([]Change, error) { return Parse(telesphorepo.ChangesTOML) })
 

@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -118,6 +120,27 @@ func orNone(s string) string {
 		return "no server"
 	}
 	return s
+}
+
+var revisionRE = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
+
+// ciRevision returns the commit that the CI job builds, for the build record of the server: the
+// Jenkins GIT_COMMIT, then GITHUB_SHA, then "git rev-parse HEAD" in dir. It returns "" when none
+// is a commit hash. GitHub Actions also names the commit in its signed token, and the server takes
+// that one first.
+func ciRevision(dir string) string {
+	for _, k := range []string{"GIT_COMMIT", "GITHUB_SHA"} {
+		if v := strings.ToLower(strings.TrimSpace(os.Getenv(k))); revisionRE.MatchString(v) {
+			return v
+		}
+	}
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if v := strings.TrimSpace(string(out)); err == nil && revisionRE.MatchString(v) {
+		return v
+	}
+	return ""
 }
 
 // childEnv is the environment of a child process: the CLI's own without OIDC_TOKEN, so a build

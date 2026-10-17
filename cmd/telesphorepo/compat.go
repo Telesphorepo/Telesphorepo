@@ -28,9 +28,10 @@ import (
 // ~/.telesphorepo/<server>/changes.json; the CLI fetches the entries again only when the
 // Telesphorepo-Version header of an answer names another version.
 
-// olderPaths are the entries of the embedded change log (scope@version) for which this CLI keeps
-// the older path of the scope. A CLI that adds an entry with needs = "server" and keeps the older
-// code path adds the entry here and asks compat.older before it takes the new path.
+// olderPaths are the IDs of the entries of the embedded change log for which this CLI keeps the
+// older path of the scope. A CLI that adds an entry with needs = "server" and keeps the older code
+// path gives the entry an id, adds the id here and asks compat.older before it takes the new path.
+// The id stays when "go tool task tag" stamps the version of the entry.
 var olderPaths = map[string]bool{}
 
 // changesState is changes.json.
@@ -195,7 +196,7 @@ func (cp *compat) evaluate() error {
 		}
 		var e *compatError
 		for _, ch := range newer {
-			if !ch.NeedsServer() || !cp.matches(ch) || olderPaths[ch.Scope+"@"+ch.Version] {
+			if !ch.NeedsServer() || !cp.matches(ch) || (ch.ID != "" && olderPaths[ch.ID]) {
 				continue
 			}
 			if e == nil {
@@ -221,18 +222,28 @@ func (cp *compat) matches(ch changelog.Change) bool {
 	return false
 }
 
-// older reports whether the CLI must take the older path of the entry scope@ver of olderPaths:
-// the server runs a release older than ver.
-func (cp *compat) older(scope, ver string) bool {
-	if !olderPaths[scope+"@"+ver] {
+// older reports whether the CLI must take the older path of the entry id of olderPaths: the
+// server runs a release older than the version of the entry. An entry that is still "dev" (a dev
+// CLI) takes the new path.
+func (cp *compat) older(id string) bool {
+	if !olderPaths[id] {
 		return false
 	}
 	srv, err := changelog.ParseVersion(cp.state.ServerVersion)
 	if err != nil {
 		return false
 	}
-	v, err := changelog.ParseVersion(ver)
-	return err == nil && srv.Compare(v) < 0
+	all, err := changelog.Embedded()
+	if err != nil {
+		return false
+	}
+	for _, ch := range all {
+		if ch.ID == id {
+			v, err := changelog.ParseVersion(ch.Version)
+			return err == nil && srv.Compare(v) < 0
+		}
+	}
+	return false
 }
 
 // drift tells the person once a day per server that the server has a newer CLI: on a terminal

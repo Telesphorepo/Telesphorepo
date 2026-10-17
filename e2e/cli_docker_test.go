@@ -19,11 +19,12 @@ func dindScan(t *testing.T, d *Dind, what, secret string) {
 // TestCLIDocker: after setup, Docker in Docker pushes and pulls with no docker login (a device
 // session); the helper answers only the hosts of the server; publish packs and pushes a Helm
 // chart; ORAS pushes and pulls through the helper; in CI with a CI token and no device, a plain
-// docker push mints a CI session.
+// docker push mints a CI session, and a Jenkins push records the GIT_COMMIT of the job.
 func TestCLIDocker(t *testing.T) {
 	c := newCLI(t)
 	kc := newKeycloak(t)
 	alias := ciAlias(t, kc)
+	j := newJenkinsIssuer(t)
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
 		opts.Alias = alias
 		s := StartServer(t, opts)
@@ -34,6 +35,7 @@ func TestCLIDocker(t *testing.T) {
 		s.CreateUser(t, "builder", "builder-pass-1234")
 		s.SetPerms(t, own, "builder", "repo.download", "repo.publish")
 		createCITrust(t, s, kc.Issuer, ci)
+		createJenkinsTrust(t, s, j, "team/app", ci)
 
 		t.Run("docker", func(t *testing.T) {
 			d := StartDind(t, host)
@@ -102,6 +104,18 @@ HOME=/ci DOCKER_CONFIG=/ci/docker CI=true TELESPHOREPO_SERVER='%[5]s' OIDC_TOKEN
 				t.Fatalf("publish log of %s: %+v, want a CI session", ci, publishLog(t, s, ci))
 			}
 			dindScan(t, d, "docker push in CI", tok)
+
+			// A token of the Jenkins plugin names no commit: the helper sends the GIT_COMMIT of the
+			// job, and the build record of the tag keeps it.
+			jt := j.Token(t, s.InternalURL, "team/app", 21)
+			d.MustExec(t, "docker push in Jenkins", fmt.Sprintf(`set -e
+docker tag %[1]s:v1 %[2]s:jenkins
+HOME=/ci DOCKER_CONFIG=/ci/docker JENKINS_URL=http://jenkins.example/ TELESPHOREPO_SERVER='%[4]s' OIDC_TOKEN='%[3]s' GIT_COMMIT=%[5]s docker push %[2]s:jenkins
+`, img, host+"/"+ci+"/app", jt, s.InternalURL, jobCommit))
+			if b := buildOf(t, s, ci, "app/_tags/jenkins"); b == nil || b.Provider != "jenkins" || b.Run != "21" || b.Revision != jobCommit {
+				t.Fatalf("build of the tag that Jenkins pushed: %+v, want Jenkins team/app #21 at %s", b, jobCommit)
+			}
+			dindScan(t, d, "docker push in Jenkins", jt)
 		})
 
 		t.Run("helm chart", func(t *testing.T) {

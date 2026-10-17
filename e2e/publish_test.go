@@ -489,6 +489,44 @@ func otherJWKS(t *testing.T, real string) string {
 	return string(b)
 }
 
+// TestPublishOIDCRevision: a Jenkins token names no commit, so the build record keeps the
+// revision that the job sends with the token; a revision that is no commit hash answers 400; a
+// mint without one gives a build record without a commit.
+func TestPublishOIDCRevision(t *testing.T) {
+	s := StartServer(t, ServerOpts{})
+	j := newJenkinsIssuer(t)
+	repo := RandName("files")
+	s.CreateRepo(t, repo, "raw", false, nil)
+	createJenkinsTrust(t, s, j, "team/app", repo)
+	const sha = "89abcdef0123456789abcdef0123456789abcdef"
+
+	st, b := s.API(t, http.MethodPost, "/api/publish/sessions/oidc", map[string]string{
+		"token": j.Token(t, s.InternalURL, "team/app", 7), "repo": repo, "revision": "main"}, nil)
+	if st != http.StatusBadRequest || !strings.Contains(string(b), "revision must be a git commit hash") {
+		t.Fatalf("mint with the revision main: %d %s, want 400", st, b)
+	}
+
+	for n, rev := range map[int]string{8: sha, 9: ""} {
+		body := map[string]string{"token": j.Token(t, s.InternalURL, "team/app", n), "repo": repo}
+		if rev != "" {
+			body["revision"] = rev
+		}
+		st, b := s.API(t, http.MethodPost, "/api/publish/sessions/oidc", body, nil)
+		if st != http.StatusCreated {
+			t.Fatalf("mint of build %d: %d %s", n, st, b)
+		}
+		p := ParseSession(t, b)
+		name := fmt.Sprintf("build-%d.txt", n)
+		if resp, b := s.Do(t, s.NewRequest(t, http.MethodPut, "/raw/"+repo+"/"+name, strings.NewReader("ci\n")), p.Auth()); resp.StatusCode >= 300 {
+			t.Fatalf("PUT %s: %d %s", name, resp.StatusCode, b)
+		}
+		got := buildOf(t, s, repo, name)
+		if got == nil || got.Provider != "jenkins" || got.Repository != "team/app" || got.Run != fmt.Sprint(n) || got.Revision != rev {
+			t.Fatalf("build of %s: %+v, want Jenkins team/app #%d with the revision %q", name, got, n, rev)
+		}
+	}
+}
+
 // TestPublishOIDC exchanges CI identity tokens for publish sessions. Keycloak plays the CI: its
 // ci-github client issues tokens with GitHub-shaped claims (see keycloak_test.go).
 func TestPublishOIDC(t *testing.T) {

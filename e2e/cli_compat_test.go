@@ -29,16 +29,18 @@ needs = "server"
 summary = "E2E: publishing to a raw repository needs server v1.0.0."
 
 [[change]]
+id = "e2e-login"
 version = "v1.0.0"
 scope = "login"
 needs = "server"
 summary = "E2E: login needs server v1.0.0."
 `
 
-// compatOlderPaths is the extra file of the newer CLI: it keeps the older path of the login entry.
+// compatOlderPaths is the extra file of the newer CLI: it keeps the older path of the login entry,
+// by its id.
 const compatOlderPaths = `package main
 
-func init() { olderPaths["login@v1.0.0"] = true }
+func init() { olderPaths["e2e-login"] = true }
 `
 
 // compatStubConf is a server of the CLI tests at /<path>: /hash/ is the compat server with a

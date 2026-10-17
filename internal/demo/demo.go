@@ -182,7 +182,7 @@ func (r *Run) Build(claims map[string]any, at int64) (int64, error) {
 	err := r.db.Tx(r.ctx, func(tx *sql.Tx) error {
 		var ok bool
 		var err error
-		id, ok, err = r.builds.Record(r.ctx, tx, GitHubActionsIssuer, claims, time.Unix(at, 0))
+		id, ok, err = r.builds.Record(r.ctx, tx, GitHubActionsIssuer, claims, "", time.Unix(at, 0))
 		if err == nil && !ok {
 			err = fmt.Errorf("demo: no CI provider reads the claims %v", claims)
 		}

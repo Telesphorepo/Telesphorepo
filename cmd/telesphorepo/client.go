@@ -372,11 +372,16 @@ func (c *client) mintDevice(ctx context.Context, d *deviceFile, repo string) (*s
 	return &s, nil
 }
 
-// mintCI mints a session for repo with the CI identity token tok.
-func (c *client) mintCI(ctx context.Context, tok, repo string) (*session, error) {
+// mintCI mints a session for repo with the CI identity token tok. revision ("" for none) is the
+// commit of the job, for the build record.
+func (c *client) mintCI(ctx context.Context, tok, repo, revision string) (*session, error) {
+	body := map[string]string{"token": tok, "repo": repo}
+	if revision != "" {
+		body["revision"] = revision
+	}
 	var s session
 	_, err := c.call(ctx, request{method: http.MethodPost, path: "/api/publish/sessions/oidc",
-		json: map[string]string{"token": tok, "repo": repo}, out: &s})
+		json: body, out: &s})
 	if err != nil {
 		return nil, err
 	}

@@ -30,7 +30,7 @@ func publish(ctx context.Context, files []string) error {
 	if err := cp.check(ctx, "publish"); err != nil {
 		return err
 	}
-	s, err := mint(ctx, c, p.Repo)
+	s, err := mint(ctx, c, p.Repo, p.dir)
 	if err != nil {
 		return err
 	}
@@ -95,8 +95,8 @@ func noProject() error {
 
 // mint mints a session for repo: in CI with the identity token of the job, on a computer with
 // the device proof. A computer without a device that the server accepts runs the device flow
-// first.
-func mint(ctx context.Context, c *client, repo string) (*session, error) {
+// first. dir is the project folder, for the commit of a CI job.
+func mint(ctx context.Context, c *client, repo, dir string) (*session, error) {
 	if inCI() {
 		tok, err := ciToken(ctx, c.id.base())
 		if err != nil {
@@ -104,7 +104,7 @@ func mint(ctx context.Context, c *client, repo string) (*session, error) {
 		}
 		if tok != "" {
 			mask(os.Stdout, tok)
-			return c.mintCI(ctx, tok, repo)
+			return c.mintCI(ctx, tok, repo, ciRevision(dir))
 		}
 		if d, _, err := deviceOf(c.id); err != nil || d == nil {
 			return nil, errors.New("this CI job has no identity token. In GitHub Actions, give the job permissions: id-token: write. " +

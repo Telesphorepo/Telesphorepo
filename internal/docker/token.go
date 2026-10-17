@@ -35,6 +35,10 @@ const (
 	credAccount // a password, a read token or a publish session token
 )
 
+// ciUserPrefix starts the user name of a CI token from the credential helper of the CLI:
+// "telesphorepo-ci@<commit>". The build record keeps the commit when the token names none.
+const ciUserPrefix = "telesphorepo-ci@"
+
 // tokenRequest is what a token request asks for.
 type tokenRequest struct {
 	user, pass string
@@ -221,7 +225,9 @@ func (f *Format) token(w http.ResponseWriter, r *http.Request, _ *route.Call) {
 	switch tr.kind {
 	case credCIToken:
 		if pushAt >= 0 && all[pushAt].repo.Kind == repos.KindHosted {
-			ps, err := f.minter.Mint(ctx, r, publish.MintCred{CIToken: tr.pass}, all[pushAt].repo)
+			// The credential helper of the CLI names the commit of the job in the user name.
+			revision, _ := strings.CutPrefix(tr.user, ciUserPrefix)
+			ps, err := f.minter.Mint(ctx, r, publish.MintCred{CIToken: tr.pass, Revision: revision}, all[pushAt].repo)
 			if err != nil {
 				f.mintFailed(w, r, err, http.StatusForbidden)
 				return

@@ -130,8 +130,10 @@ write gate, the device and OIDC routes or the change log. Run all zones before a
 - **Add a `changes.toml` entry when an older side would fail.** Add an entry with `version = "dev"`
   when a change makes an older CLI fail against a newer server (`needs = "cli"`), or a newer CLI
   fail against an older server (`needs = "server"`) in a command, a format or a helper. Most
-  changes need none. `go tool task tag <version>` writes the release version into each `dev`
-  entry, commits it and tags the release. See **Change log** in SPEC.md.
+  changes need none. When the CLI keeps the older path of a `needs = "server"` entry, give the
+  entry an `id` and list the id in `olderPaths` (`cmd/telesphorepo/compat.go`), never the
+  version. `go tool task tag <version>` writes the release version into each `dev` entry,
+  commits it and tags the release. See **Change log** in SPEC.md.
 
 ## Where things live
 
