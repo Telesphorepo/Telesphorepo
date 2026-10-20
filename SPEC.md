@@ -2181,12 +2181,11 @@ is unreachable.
 
 ## Group and proxy repositories
 
-A format takes proxy repos when its `format.Spec.Kinds` lists `proxy` (Maven, Debian, Docker, npm;
-it then sets `Classify` and `ProxyProbe`) and group repos when it lists `group` (Maven, Docker,
-npm; npm renders its group documents itself, see **npm registry**). `repos.Service` refuses a kind that the format's
-
-A format takes proxy repos when its `format.Spec.Kinds` lists `proxy` (Maven, Debian, Docker, NuGet; it
-then sets `Classify` and `ProxyProbe`) and group repos when it lists `group` (Maven, Docker, NuGet). `repos.Service` refuses a kind that the format's
+A format takes proxy repos when its `format.Spec.Kinds` lists `proxy` (Maven, Debian, Docker, npm,
+PyPI, Cargo, NuGet; it then sets `Classify` and `ProxyProbe`) and group repos when it lists `group`
+(Maven, Docker, npm, PyPI, Cargo, NuGet). npm, PyPI, Cargo and NuGet render their group documents
+themselves: the first member that has a package owns its name (`assets.Reader.Owner`, see each
+format's section). `repos.Service` refuses a kind that the format's
 `format.Spec.Kinds` does not list (400). Neither kind takes uploads, publish sessions or CI pipelines:
 minting a session for one answers 409 with the read-only text, and a CI pipeline that lists one
 answers 400. A Nexus mapping maps a Nexus hosted, proxy or group repo to a target of the same kind.
@@ -2588,9 +2587,10 @@ snippets of an image (a folder, a tag or a manifest file) pull the digest that t
 (pinned) or the tag (latest); a manifest without a tag pulls by digest; a Helm chart pulls with
 `helm pull --version`, another OCI artifact with `oras pull`; a private repo adds the login. The
 CI tool `docker` builds `HOST/<repo>/app` with the commit as the tag (`$GITHUB_SHA`, Jenkins
-`${GIT_COMMIT:-$BUILD_NUMBER}`), then logs in with the job's identity token
-(`printf '%s' "$OIDC_TOKEN" | docker login HOST -u oidc --password-stdin`) right before the push,
-pushes and logs out, so the token is fresh when the token endpoint mints the session. Its note:
+`${GIT_COMMIT:-$BUILD_NUMBER}`), then pushes with a Docker config of its own (`DOCKER_CONFIG`, a
+temp folder) whose `credHelpers` name the credential helper of the CLI for the registry host. The
+helper mints the publish session from the job's identity token (`TELESPHOREPO_SERVER` names the
+server of its audience), so the job runs no `docker login`. Its note:
 "Change app to the name of your image. The job needs Docker. The OIDC token pulls public images
 only: to build from a private image, log in with a read token before the build."
 
