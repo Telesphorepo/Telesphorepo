@@ -2713,6 +2713,10 @@ own URL.
     like of the latest version). Both send `Vary: Accept`, a strong `ETag` and 304
     (`format.WriteDocument`); `?write=true` is the same. `dist.tarball` is absolute under
     `route.API.BaseURL` (the base_url setting, else the request's scheme and host).
+  - `GET <name>/<version or dist-tag>`: the manifest of that version from the full packument
+    (`application/json`, strong `ETag`), 404 for a version the package does not have. pnpm 11+
+    run through corepack fetches its binary package (`@pnpm/exe.<os>-<arch>`) this way from the
+    registry of the project's `.npmrc`, without credentials on plain HTTP.
   - `GET <name>/-/<file>`: the tarball through the read path.
   - `PUT <name>` (`repo.publish`): with a `.tgz` attachment, a publish. The body is read as a
     stream: each field whole (at most 64 MiB), the base64 attachment decoded straight into the
@@ -3511,7 +3515,8 @@ tools that people bring float (`e2e/images_test.go`): Maven (`maven:3`), Gradle,
 Nexus, the install images (`buildpack-deps:curl`, Alpine), Node (`node:lts`, with pnpm and Yarn 4
 through corepack), Bun (`oven/bun`) and the newest ORAS release. The npm tests: `TestNPM` (npm
 publish of a plain and a scoped package, installs with npm, pnpm, Yarn and Bun, both stores),
-`TestNPMRegistry` (a registry.npmjs.org proxy and a group, the name rule, dist-tags, deprecate,
+`TestNPMRegistry` (a registry.npmjs.org proxy and a group, the pnpm binary that corepack's pnpm
+fetches through the proxy, the name rule, dist-tags, deprecate,
 unpublish with a device session and refused with a CI session minted from a Keycloak service
 account), `TestCLINPM` (clients zone: setup and publish with each package manager) and the npm part
 of `TestNexus`. Each file registers its images with `floatingImage`, and each run pulls the images of

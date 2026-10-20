@@ -15,11 +15,17 @@ var (
 	bunImage  = floatingImage("docker.io/oven/bun:latest")
 )
 
-// npmSetupTools installs pnpm and Yarn 4 in a node container through corepack (outside any project,
-// from the public registry).
-const npmSetupTools = `(cd / && npm install -g --silent corepack@latest >/dev/null && corepack enable && corepack prepare pnpm@latest --activate >/dev/null && corepack prepare yarn@stable --activate >/dev/null)
+// npmInstallTools installs pnpm and Yarn 4 in a node container through corepack (outside any
+// project, from the public registry). pnpm from corepack is a wrapper that downloads its native
+// binary (@pnpm/exe.<os>-<arch>) on first use from the registry of the project's .npmrc, and
+// sends no credentials there on plain HTTP.
+const npmInstallTools = `(cd / && npm install -g --silent corepack@latest >/dev/null && corepack enable && corepack prepare pnpm@latest --activate >/dev/null && corepack prepare yarn@stable --activate >/dev/null)
 export COREPACK_ENABLE_DOWNLOAD_PROMPT=0 COREPACK_ENABLE_STRICT=0
 `
+
+// npmSetupTools is npmInstallTools with the pnpm binary downloaded from the public registry too,
+// for a test whose first pnpm run is in a project of a private repo.
+const npmSetupTools = npmInstallTools + "(cd / && pnpm --version >/dev/null)\n"
 
 // npmPackage returns the files of a package in dir whose index.js exports message.
 func npmPackage(dir, name, version, message string) []ContainerFile {
