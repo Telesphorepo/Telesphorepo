@@ -1,6 +1,6 @@
 # Edge delivery: design spec
 
-Status: for approval. This spec replaces the note `docs/design/edge-delivery.md`. Cloudflare facts
+Status: approved 2026-10-20. This spec replaces the note `docs/design/edge-delivery.md`. Cloudflare facts
 were checked on 2026-10-19; the sources are at the end.
 
 ## Goal and rule
@@ -430,41 +430,47 @@ A new zone `edge` (tag `edge`, `go tool task test edge`) in `e2e/edge_test.go`. 
 no fakes: the tests run the real Worker and the real server.
 
 **Fixture.** A container built from `edge/test/Containerfile` (Node, bun, the `edge/` sources) runs
-`wrangler dev --local --ip 0.0.0.0 --test-scheduled --local-upstream <server>:8080` with a test
-`wrangler.jsonc`: a home bucket and two regional buckets (local R2), the queue, and
-`local_dev.experimental_s3_credentials` on each bucket. The server under test uses `storage=s3`
-with the endpoint `http://edge:8787/cdn-cgi/local/r2/s3`, `s3.path_style=true` and
-`s3.bucket=<home>`. Path style puts the bucket after the endpoint path, so the server reaches
-`/cdn-cgi/local/r2/s3/<bucket>/<key>`, the local endpoint of each bucket. The server writes the
-same local R2 that the Worker reads. `TR_BASE_URL` points at the Worker, because the Docker realm
-uses `base_url`. The trusted proxies of the server name the Worker container. Clients (`mvn`,
-Gradle, `apt`, `docker`, curl) point at the Worker; the pass-through reaches the server through
-`--local-upstream`. Each test starts its own fixture and calls `t.Parallel()` first.
+`wrangler dev --local --ip 0.0.0.0 --test-scheduled` on a Podman network shared with the server,
+with a test `wrangler.jsonc`: a home bucket and two regional buckets (local R2), the queue,
+`local_dev.experimental_s3_credentials` on each bucket, and the var `ORIGIN=http://server:8080`.
+The server under test uses `storage=s3` with the endpoint `http://edge:8787/cdn-cgi/local/r2/s3`,
+`s3.path_style=true` and `s3.bucket=<home>`. Path style puts the bucket after the endpoint path, so
+the server reaches `/cdn-cgi/local/r2/s3/<bucket>/<key>`, the local endpoint of each bucket. The
+server writes the same local R2 that the Worker reads. `TR_BASE_URL` points at the Worker, because
+the Docker realm uses `base_url`. The trusted proxies of the server name the Worker container.
+Clients (`mvn`, Gradle, `apt`, `docker`, curl) point at the Worker. Each test starts its own fixture
+and calls `t.Parallel()` first.
 
-**Spike first** (before the build). A self-terminating script `edge/test/spike.ts` starts a wrangler
-dev container, probes, prints the results and stops the container. It answers three questions:
+The fixture does not use `--local-upstream`. With it, wrangler dev rewrites the Host of every
+request to the upstream host, including requests to the local S3 endpoint, so every signed S3
+request fails. Instead, when the var `ORIGIN` is set, the Worker forwards to that URL with the
+request path and query; a deployed Worker has no `ORIGIN` and forwards with a same-zone
+`fetch(request)`.
 
-1. Does the server's S3 storage (aws-sdk-go-v2, path style) work against
-   `/cdn-cgi/local/r2/s3/<bucket>`: the storage probe, `Put`, `GetRange`, `List`, `DeleteMany` and
-   a multipart upload? The script also records which client headers wrangler dev sets
-   (`CF-Connecting-IP`, `x-real-ip`).
-2. Does local R2 emit event notifications to a local queue?
-3. How long does a read of a small object from a far bucket take? This runs on the real account
-   only if the maintainer runs it. Until then it is an estimate: about 100 to 300 ms per read from
-   another continent, against a few ms from a near bucket.
+**Local S3 and Accept-Encoding.** aws-sdk-go-v2 sends and signs `Accept-Encoding: identity`, and
+Miniflare overwrites that header with `br, gzip` before it checks the signature. `storage.NewS3`
+keeps `Accept-Encoding` out of the signature (a Finalize middleware removes it before `Signing` and
+sets it again after). R2 and other S3 servers accept a request whose signature leaves out that
+header.
 
-If question 1 fails, the `edge` zone runs against a real Cloudflare account, the same way as the
-`e2e-edge-cloudflare` job: in CI with the secrets, and on the maintainer's machine with their token.
-A different S3 server is not a fallback, because the Worker must read the same bucket that the
-server writes.
+**What the spike showed** (Wrangler 4.147.0, run on 2026-10-20). Against
+`/cdn-cgi/local/r2/s3/<bucket>`, with Accept-Encoding unsigned, the server's S3 store passes the
+storage probe on two buckets, `Put` and `GetRange`, `List` with `after` and `limit`, `Delete`,
+`PresignGet`, a 120 MiB single put, `DeleteObjects` and a multipart upload. An S3 write is visible
+through the Worker's binding and the reverse. The local queue delivers from producer to consumer.
+Local R2 sends no event notifications (Miniflare has no code for them, and its S3 endpoint answers
+`?notification` with 501). Locally a client can set `CF-Connecting-IP` itself, and Miniflare strips
+it from the Worker's subrequests; on Cloudflare the edge sets it. So the local client-IP test
+spoofs `X-Real-IP` and `X-Forwarded-For` only.
 
-The spike pins the exact Wrangler version in `edge/package.json`. The local S3 key is experimental
-(Wrangler 4.115.0 added it), and Miniflare has renamed it upstream, so a version bump reruns the
-spike.
+The far-bucket read time stays an estimate until the maintainer measures it on the real account:
+about 100 to 300 ms per read from another continent, against a few ms from a near bucket.
 
-**The notification path.** If local R2 emits event notifications, the local zone also tests the
-path from a home put to a regional copy. If it does not, the job `e2e-edge-cloudflare` of `ci.yml`
-tests it against a real Cloudflare account. The maintainer provides the account and the token as CI
+`edge/package.json` pins Wrangler at 4.147.0. The local S3 key is experimental, so a Wrangler bump
+reruns the `edge` zone before it lands.
+
+**The notification path.** The job `e2e-edge-cloudflare` of `ci.yml` tests the path from a home put
+to a regional copy against a real Cloudflare account. The maintainer provides the account and the token as CI
 secrets; agents never touch the account. The job provisions a home bucket and one regional bucket
 with unique names, the queue and the notification rule, deploys the Worker, puts and deletes blobs
 through S3, waits for the regional copies and deletions, and removes everything it made. The local
@@ -632,11 +638,12 @@ The spec author's calls:
 12. A removed region: the server stops writing to its bucket, and the page tells the admin to
     redeploy and to delete the bucket.
 13. Tests run the real Worker in wrangler dev with local R2 and local Queues. The consumer is tested
-    through the real scheduled gap check. The notification path is tested locally if local R2
-    emits notifications, else in a CI job against a real Cloudflare account. No stand-in producer,
-    no SeaweedFS copy fixture.
-14. A spike script answers the three open questions before the build and pins the Wrangler
-    version.
+    through the real scheduled gap check. Local R2 sends no notifications, so the notification
+    path is tested in a CI job against a real Cloudflare account. No stand-in producer, no
+    SeaweedFS copy fixture.
+14. The test Worker forwards to its `ORIGIN` var instead of using `--local-upstream`, and
+    `storage.NewS3` leaves `Accept-Encoding` out of the signature; the spike showed both are needed
+    for local R2.
 15. `edge.access_ttl` defaults to 30 s.
 16. A valid read token from an address that the origin blocked for failed attempts still downloads
     at the edge. The failed attempts still reach the origin and count there.
