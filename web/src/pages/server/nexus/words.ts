@@ -24,7 +24,8 @@ export const sourceStatus: Record<NexusStatus, { word: string; tone: Tone }> = {
 
 /**
  * A Nexus format id in words: the title of the format here that imports it (import_sources of its
- * descriptor), e.g. "maven2" → "Maven / Gradle"; another id with a capital letter ("Npm").
+ * descriptor), e.g. "maven2" → "Maven / Gradle", "pypi" → "PyPI"; an id that no format here
+ * imports with a capital letter ("Rubygems").
  */
 export const formatWord = (id: string) => formats.importer(id)?.title ?? (id ? id[0].toUpperCase() + id.slice(1) : "Unknown format");
 

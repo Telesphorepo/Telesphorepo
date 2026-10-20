@@ -1,8 +1,10 @@
 <!--
   One Nexus server, top to bottom: the header (the status and its line, Sync now or Cancel the
-  sync, Switch over, Delete); the repositories and the groups to copy, picked in tables and saved
-  with one button that also starts a sync; the running or chosen sync with its progress and log;
-  the history of syncs; the connection, saved from the SaveBar. The parent keys it by id.
+  sync, Switch over, Delete); every Nexus repository in one pick table, in the order a save sets
+  them up (repositories and proxies, then groups with their members, then what this server cannot
+  copy), each row with its state after a save, saved with one button that also starts a sync; the
+  running or chosen sync with its progress and log; the history of syncs; the connection, saved
+  from the SaveBar. The parent keys it by id.
 -->
 <script lang="ts">
   import { untrack } from "svelte";
@@ -22,7 +24,8 @@
   import { Spinner } from "$lib/components/ui/spinner";
   import PageHeader from "$lib/components/PageHeader.svelte";
   import Section from "$lib/components/Section.svelte";
-  import Toolbar from "$lib/components/Toolbar.svelte";
+  import { Separator } from "$lib/components/ui/separator";
+  import FormatIcon from "$lib/components/FormatIcon.svelte";
   import FormPage from "$lib/components/FormPage.svelte";
   import FormSection from "$lib/components/FormSection.svelte";
   import FormGrid from "$lib/components/FormGrid.svelte";
@@ -32,7 +35,7 @@
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import Loading from "$lib/components/Loading.svelte";
-  import StatusBadge from "$lib/components/StatusBadge.svelte";
+  import StatusBadge, { type Tone } from "$lib/components/StatusBadge.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
   import FileSize from "$lib/components/FileSize.svelte";
   import OptionRow from "$lib/components/OptionRow.svelte";
@@ -90,24 +93,34 @@
     return () => clearTimeout(timer);
   });
 
-  // --- the repositories to copy ---
+  // --- the repositories to copy: one list, in the order a save sets them up ---
   type Opt = { target: string; anon: boolean; answers: Record<string, string>; user: string; pw: string; members: string[] };
+  /** The picked Nexus repositories, groups included (Nexus names are unique across its kinds). */
   let picked = $state(new Set<string>());
-  let groupPicked = $state(new Set<string>());
   let opts = $state<Record<string, Opt>>({});
   let query = $state("");
 
   const all = $derived(d?.repos ?? []);
-  const repoRows = $derived(all.filter((r) => r.type !== "group"));
-  const groupRows = $derived(all.filter((r) => r.type === "group"));
-  const shownRepos = $derived.by(() => {
+  const byName = $derived(new Map(all.map((r) => [r.name, r])));
+  const isGroup = (r: NexusSourceRepo) => r.type === "group";
+  /** Repositories and proxies first, then the groups that read them, then what this server cannot copy. */
+  const ordered = $derived([
+    ...all.filter((r) => r.supported && !isGroup(r)),
+    ...all.filter((r) => r.supported && isGroup(r)),
+    ...all.filter((r) => !r.supported),
+  ]);
+  const groupRows = $derived(all.filter((r) => r.supported && isGroup(r)));
+  const shownRows = $derived.by(() => {
     const q = query.trim().toLowerCase();
-    return q ? repoRows.filter((r) => r.name.toLowerCase().includes(q)) : repoRows;
+    return q ? ordered.filter((r) => r.name.toLowerCase().includes(q)) : ordered;
   });
 
+  // The pick last seen by the effect below, so it knows which groups were just picked.
+  let seenPick = new Set<string>();
+
   function initPicks(s: NexusSourceDetail) {
-    picked = new Set(s.repos.filter((r) => r.type !== "group" && r.target).map((r) => r.name));
-    groupPicked = new Set(s.repos.filter((r) => r.type === "group" && r.target).map((r) => r.name));
+    picked = new Set(s.repos.filter((r) => r.target).map((r) => r.name));
+    seenPick = picked;
     opts = Object.fromEntries(
       s.repos.map((r): [string, Opt] => [
         r.name,
@@ -123,38 +136,104 @@
     );
   }
 
-  const isNew = (r: NexusSourceRepo) => !r.target && (r.type === "group" ? groupPicked : picked).has(r.name);
+  const isNew = (r: NexusSourceRepo) => !r.target && picked.has(r.name);
   // The questions of the target format (format.Importer Plan): a choice shows in its own column,
-  // a secret as a field below the table.
+  // a secret as a field below the table. Formats name their own questions, so the column takes
+  // the label when every choice shares it.
   const choiceOf = (r: NexusSourceRepo) => r.questions.find((q) => q.type === "choice");
-  const choiceLabel = $derived(repoRows.map(choiceOf).find((q) => q)?.label ?? "");
-  const hasChoice = $derived(repoRows.some((r) => r.supported && !r.target && choiceOf(r)));
+  const choiceLabels = $derived(new Set(all.filter((r) => r.supported && !r.target).flatMap((r) => choiceOf(r)?.label ?? [])));
+  const choiceLabel = $derived(choiceLabels.size === 1 ? [...choiceLabels][0] : "Options");
+  const hasChoice = $derived(choiceLabels.size > 0);
 
-  /** The repositories here that a group gets: its picked Nexus members (or those picked by hand), in order. */
-  function groupMembers(g: NexusSourceRepo): string[] {
+  /** A Nexus repository that a group here can read: a supported repository or proxy. */
+  const memberOK = (name: string) => {
+    const r = byName.get(name);
+    return !!r && r.supported && !isGroup(r);
+  };
+  /** The repositories here that a group gets: its picked Nexus members (or those chosen by hand), in order. */
+  function groupMembers(g: NexusSourceRepo, pick = picked): string[] {
     const names = g.members_known ? g.members : (opts[g.name]?.members ?? []);
-    return names.filter((m) => picked.has(m));
+    return names.filter((m) => memberOK(m) && pick.has(m));
   }
-  /** The picked repositories that can be members of a group whose members Nexus does not show. */
-  const candidates = (g: NexusSourceRepo) => repoRows.filter((r) => picked.has(r.name) && r.target_format === g.target_format);
-  const groupPickable = (g: NexusSourceRepo) =>
-    g.supported && (g.members_known ? g.members.some((m) => picked.has(m)) : candidates(g).length > 0);
+  /** The repositories that can be members of a group whose members Nexus does not show. */
+  const candidates = (g: NexusSourceRepo) => all.filter((r) => memberOK(r.name) && r.target_format === g.target_format);
+  const groupPickable = (g: NexusSourceRepo) => g.supported && (g.members_known ? g.members.some(memberOK) : candidates(g).length > 0);
+  const pickable = (r: NexusSourceRepo) => (isGroup(r) ? groupPickable(r) : r.supported);
 
-  // A group whose last picked member is unpicked leaves the pick.
+  // Picking a group picks its members, since a save sets them up first. A group whose last picked
+  // member is unpicked leaves the pick.
   $effect(() => {
-    const keep = [...groupPicked].filter((n) => {
-      const g = groupRows.find((x) => x.name === n);
-      return !!g && groupPickable(g);
+    const cur = picked;
+    untrack(() => {
+      const next = new Set(cur);
+      for (const g of groupRows) {
+        if (g.members_known && next.has(g.name) && !seenPick.has(g.name)) for (const m of g.members) if (memberOK(m)) next.add(m);
+      }
+      for (const g of groupRows) if (g.members_known && next.has(g.name) && groupMembers(g, next).length === 0) next.delete(g.name);
+      seenPick = next;
+      if (next.size !== cur.size || [...next].some((n) => !cur.has(n))) picked = next;
     });
-    if (keep.length !== groupPicked.size) untrack(() => (groupPicked = new Set(keep)));
   });
 
   const same = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
-  const pickedRows = $derived([...repoRows.filter((r) => picked.has(r.name)), ...groupRows.filter((g) => groupPicked.has(g.name))]);
+  const pickedRows = $derived(ordered.filter((r) => r.supported && picked.has(r.name)));
   const added = $derived(pickedRows.filter((r) => !r.target));
-  const removed = $derived(all.filter((r) => r.target && !(r.type === "group" ? groupPicked : picked).has(r.name)));
-  const membersChanged = $derived(groupRows.filter((g) => g.target && groupPicked.has(g.name) && !same(groupMembers(g), g.target_members)));
+  // A copied repository that Nexus no longer lists cannot stay in the mapping.
+  const removed = $derived(all.filter((r) => r.target && !(r.supported && picked.has(r.name))));
+  const membersChanged = $derived(groupRows.filter((g) => g.target && picked.has(g.name) && !same(groupMembers(g), g.target_members)));
   const dirty = $derived(added.length > 0 || removed.length > 0 || membersChanged.length > 0);
+
+  /** What Nexus changed in the members of a group that this server copies already. */
+  function nexusChange(g: NexusSourceRepo): string {
+    if (!g.target || !g.members_known) return "";
+    const plus = g.members.filter((m) => !g.target_members.includes(m));
+    const minus = g.target_members.filter((m) => !g.members.includes(m));
+    const parts = [];
+    if (plus.length) parts.push(`added ${someNames(plus)}`);
+    if (minus.length) parts.push(`removed ${someNames(minus)}`);
+    if (parts.length) return `Nexus ${parts.join(" and ")}.`;
+    return same(g.members, g.target_members) ? "" : "Nexus has the members in another order.";
+  }
+
+  /** The words after a row's name: why it cannot be copied, the remote of a proxy, the members of a group. */
+  function noteOf(r: NexusSourceRepo): { text: string; warn?: boolean } {
+    if (!r.supported) return { text: r.reason || "This server cannot copy it." };
+    if (r.type === "proxy") return { text: r.remote_url };
+    if (!isGroup(r)) return { text: "" };
+    const changed = nexusChange(r);
+    if (changed && picked.has(r.name)) return { text: changed, warn: true };
+    if (!r.members_known) {
+      const mine = groupMembers(r);
+      return { text: picked.has(r.name) && mine.length ? `Reads ${someNames(mine)}` : "Nexus does not show its members" };
+    }
+    if (r.members.length === 0) return { text: "Has no members" };
+    if (!picked.has(r.name)) return { text: `Reads ${someNames(r.members)}` };
+    const mine = groupMembers(r);
+    const out = r.members.filter((m) => !mine.includes(m));
+    return { text: `Reads ${someNames(mine)}${out.length ? `; leaves out ${someNames(out)}` : ""}` };
+  }
+
+  /** The state of a row after a save, or null for a row that is not copied. */
+  function stateOf(r: NexusSourceRepo): { word: string; tone: Tone; title: string } | null {
+    if (r.target && !(r.supported && picked.has(r.name))) return { word: "Stops copying", tone: "warning", title: `Saving stops copying it. ${r.target} keeps its files.` };
+    if (r.target && isGroup(r) && !same(groupMembers(r), r.target_members))
+      return { word: "Members change", tone: "warning", title: `Saving sets the members of ${r.target}.` };
+    if (r.target) return { word: "Copied", tone: "success", title: `Copies into ${r.target}` };
+    if (!r.supported || !picked.has(r.name)) return null;
+    const what = isGroup(r) ? "group" : r.type === "proxy" ? "proxy" : "repository";
+    return { word: `New ${what}`, tone: "info", title: `Saving creates this ${what} here.` };
+  }
+
+  /** What the one button does, in a sentence. */
+  const saveWhat = $derived.by(() => {
+    const parts: string[] = [];
+    if (added.length) parts.push(`creates ${count(added.length, "repository", "repositories")} here`);
+    if (membersChanged.length) parts.push(`sets the members of ${count(membersChanged.length, "group", "groups")}`);
+    if (removed.length) parts.push(`stops copying ${count(removed.length, "repository", "repositories")}`);
+    if (!parts.length) return "";
+    if (pickedRows.length) parts.push("starts a sync");
+    return `Saving ${someNames(parts)}.`;
+  });
 
   const nameRE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
   const problem = $derived.by(() => {
@@ -169,7 +248,7 @@
       if (seen.has(t)) return `Two repositories have the name ${t} here. Give one of them another name.`;
       seen.add(t);
     }
-    for (const g of groupRows) if (groupPicked.has(g.name) && !g.members_known && groupMembers(g).length === 0) return `Choose the members of ${g.name}.`;
+    for (const g of groupRows) if (picked.has(g.name) && !g.members_known && groupMembers(g).length === 0) return `Choose the members of ${g.name}.`;
     return "";
   });
 
@@ -234,9 +313,11 @@
   function keepMembers() {
     const g = membersOf;
     if (!g || !opts[g.name]) return;
-    opts[g.name].members = candidates(g)
+    const chosen = candidates(g)
       .map((r) => r.name)
       .filter((n) => membersPick.includes(n));
+    opts[g.name].members = chosen;
+    picked = new Set([...picked, ...chosen]);
   }
 
   // --- the connection ---
@@ -343,23 +424,17 @@
 
   const repoSource: TableSource<NexusSourceRepo> = {
     get items() {
-      return shownRepos;
+      return shownRows;
     },
     get loading() {
       return source.loading && !source.data;
     },
     error: "",
   };
-  const groupSource: TableSource<NexusSourceRepo> = {
-    get items() {
-      return groupRows;
-    },
-    loading: false,
-    error: "",
-  };
   const repoColumns = $derived<Column[]>([
     { label: "Nexus repository", grow: true },
     { label: "Kind", hideOnPhone: true },
+    { label: "State", hideOnPhone: true },
     { label: "Name here" },
     { label: "Who can download", hideOnPhone: true },
     ...(hasChoice ? [{ label: choiceLabel, hideOnPhone: true }] : []),
@@ -378,37 +453,73 @@
   </Select.Root>
 {/snippet}
 
-{#snippet targetCell(r: NexusSourceRepo)}
+{#snippet bulk()}
+  {#if editable}<Button variant="outline" size="sm" onclick={() => setPublic(picked, true)}>Make public</Button>
+  <Button variant="outline" size="sm" onclick={() => setPublic(picked, false)}>Make private</Button>{/if}
+{/snippet}
+
+{#snippet repoRow(r: NexusSourceRepo)}
   {@const o = opts[r.name]}
+  {@const note = noteOf(r)}
+  {@const st = stateOf(r)}
+  <Cell grow>
+    <span class="flex min-w-0 items-baseline gap-2">
+      <span class={cn("shrink-0", r.supported ? "font-medium" : "text-muted-foreground")}>{r.name}</span>
+      {#if note.text}
+        <span class={cn("min-w-0 truncate", note.warn ? "text-warning" : "text-muted-foreground")} title={note.text}>{note.text}</span>
+      {/if}
+      {#if editable && isGroup(r) && !r.members_known && picked.has(r.name)}
+        <button type="button" class={cn(link, "shrink-0 outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50")} onclick={() => chooseMembers(r)}>
+          {groupMembers(r).length ? "Change members" : "Choose members"}
+        </button>
+      {/if}
+    </span>
+  </Cell>
+  <Cell hideOnPhone muted>
+    <span class="flex items-center gap-2 whitespace-nowrap">
+      <FormatIcon format={r.target_format} />
+      {kindText(r.format, r.type)}
+    </span>
+  </Cell>
+  <Cell hideOnPhone>
+    {#if st}
+      <StatusBadge tone={st.tone} title={st.title}>{st.word}</StatusBadge>
+    {:else if r.supported}
+      <span class="text-muted-foreground">Not copied</span>
+    {/if}
+  </Cell>
   <Cell>
     {#if r.target}
-      <a class={link} href={href(repoSettingsPath(r.target))}>{r.target}</a>
-    {:else if editable && o && isNew(r)}
-      <Input class="h-8 w-48 max-sm:w-36" aria-label="Name here for {r.name}" autocomplete="off" spellcheck={false} bind:value={o.target} />
+      <a class={cn(link, removed.includes(r) && "text-muted-foreground line-through")} href={href(repoSettingsPath(r.target))}>{r.target}</a>
+    {:else if o && isNew(r)}
+      {#if editable}
+        <Input class="h-8 w-48 max-sm:w-36" aria-label="Name here for {r.name}" autocomplete="off" spellcheck={false} bind:value={o.target} />
+      {:else}
+        {o.target}
+      {/if}
     {/if}
   </Cell>
   <Cell hideOnPhone>
     {#if editable && o && isNew(r)}{@render who(r, o)}{/if}
   </Cell>
-{/snippet}
-
-{#snippet nameCell(r: NexusSourceRepo, note: string)}
-  <Cell grow>
-    <span class="flex min-w-0 items-baseline gap-2">
-      <span class={cn("shrink-0 font-medium", !r.supported && "text-muted-foreground")}>{r.name}</span>
-      {#if note}<span class="min-w-0 truncate text-muted-foreground" title={note}>{note}</span>{/if}
-    </span>
-  </Cell>
-{/snippet}
-
-{#snippet repoBulk()}
-  {#if editable}<Button variant="outline" size="sm" onclick={() => setPublic(picked, true)}>Make public</Button>
-  <Button variant="outline" size="sm" onclick={() => setPublic(picked, false)}>Make private</Button>{/if}
-{/snippet}
-
-{#snippet groupBulk()}
-  {#if editable}<Button variant="outline" size="sm" onclick={() => setPublic(groupPicked, true)}>Make public</Button>
-  <Button variant="outline" size="sm" onclick={() => setPublic(groupPicked, false)}>Make private</Button>{/if}
+  {#if hasChoice}
+    {@const q = choiceOf(r)}
+    <Cell hideOnPhone>
+      {#if editable && o && isNew(r) && q}
+        {@const chosen = q.options?.find((x) => x.value === o.answers[q.key])}
+        <Select.Root type="single" value={o.answers[q.key] ?? ""} onValueChange={(v) => (o.answers[q.key] = v)}>
+          <Select.Trigger size="sm" class="w-48" aria-label="{q.label} of {r.name}">
+            <span class="truncate">{chosen?.label ?? "Choose"}</span>
+          </Select.Trigger>
+          <Select.Content>
+            {#each q.options ?? [] as x (x.value)}
+              <Select.Item value={x.value} label={x.label} />
+            {/each}
+          </Select.Content>
+        </Select.Root>
+      {/if}
+    </Cell>
+  {/if}
 {/snippet}
 
 {#snippet repoFooter()}
@@ -419,7 +530,11 @@
       {#if saving}<Spinner />{/if}
       {saveLabel}
     </Button>
-    {#if dirty && problem}<p class="text-meta text-muted-foreground">{problem}</p>{/if}
+    {#if dirty && problem}
+      <p class="text-meta text-warning">{problem}</p>
+    {:else if saveWhat}
+      <p class="text-meta text-muted-foreground">{saveWhat}</p>
+    {/if}
     {#if saveError}<ErrorState inline error={saveError} />{/if}
   {/if}
 {/snippet}
@@ -449,7 +564,7 @@
             Sync now
           </Button>
         {/if}
-        <Button disabled={running || d.repo_count === 0} onclick={() => (switchOpen = true)}>Switch over</Button>
+        <Button variant="outline" disabled={running || d.repo_count === 0} onclick={() => (switchOpen = true)}>Switch over</Button>
       {/if}
       <Button variant="ghost" class={quietDanger} aria-disabled={running} title={running ? "Cancel the sync first" : undefined} onclick={askDelete}>Delete</Button>
     {/snippet}
@@ -459,164 +574,79 @@
 
   <Section
     title="Repositories to copy"
-    description="Pick the Nexus repositories to copy, the name each one gets here and who can download it."
+    description="Repositories and proxies are set up first, then the groups that read them. Picking a group picks its members."
     footer={mirroring ? repoFooter : undefined}
   >
-    {#if d.nexus_error}
-      <div class="mb-4"><ErrorState inline error="Nexus did not list its repositories, so this shows only the picked ones: {d.nexus_error}" /></div>
-    {/if}
-    {#if repoRows.length > 10}
-      <Toolbar>
+    {#snippet actions()}
+      {#if ordered.length > 10}
         <InputGroup.Root class="sm:w-64">
           <InputGroup.Addon><SearchIcon /></InputGroup.Addon>
           <InputGroup.Input bind:value={query} type="search" placeholder="Filter by name" aria-label="Filter the Nexus repositories" />
         </InputGroup.Root>
-      </Toolbar>
+      {/if}
+    {/snippet}
+    {#if d.nexus_error}
+      <div class="mb-4"><ErrorState inline error="Nexus did not list its repositories, so this shows only the copied ones: {d.nexus_error}" /></div>
     {/if}
     <DataTable
       source={repoSource}
-      caption="Nexus repositories and their names here"
+      caption="Nexus repositories, proxies and groups, in the order a save sets them up"
       key={(r) => r.name}
       columns={repoColumns}
       bind:picked
-      pickable={(r) => r.supported}
+      {pickable}
       pickLabel={(r) => r.name}
-      bulk={mirroring ? repoBulk : undefined}
+      bulk={mirroring ? bulk : undefined}
       pickOff={!editable}
       pickOnRow
       selectAllLabel="Select all supported"
     >
-      {#snippet row(r)}
-        {@const o = opts[r.name]}
-        {@render nameCell(r, !r.supported ? r.reason || "Not supported" : r.type === "proxy" ? r.remote_url : "")}
-        <Cell hideOnPhone muted text={kindText(r.format, r.type)} />
-        {@render targetCell(r)}
-        {#if hasChoice}
-          {@const q = choiceOf(r)}
-          <Cell hideOnPhone>
-            {#if editable && o && isNew(r) && q}
-              {@const chosen = q.options?.find((x) => x.value === o.answers[q.key])}
-              <Select.Root type="single" value={o.answers[q.key] ?? ""} onValueChange={(v) => (o.answers[q.key] = v)}>
-                <Select.Trigger size="sm" class="w-48" aria-label="{q.label} of {r.name}">
-                  <span class="truncate">{chosen?.label ?? "Choose"}</span>
-                </Select.Trigger>
-                <Select.Content>
-                  {#each q.options ?? [] as x (x.value)}
-                    <Select.Item value={x.value} label={x.label} />
-                  {/each}
-                </Select.Content>
-              </Select.Root>
-            {/if}
-          </Cell>
-        {/if}
-      {/snippet}
+      {#snippet row(r)}{@render repoRow(r)}{/snippet}
       {#snippet empty()}
         <CompactEmpty icon={ArrowRightLeftIcon} text={query.trim() ? "No Nexus repository has this name." : "Nexus lists no repositories. Check the permissions of the account on the Nexus server."} />
       {/snippet}
     </DataTable>
 
     {#if editable}
-      {@const secrets = repoRows.filter((r) => isNew(r)).flatMap((r) => r.questions.filter((q) => q.type === "secret").map((q) => ({ r, q })))}
-      {@const notes = repoRows.filter((r) => isNew(r) && typeof r.facts.note === "string")}
-      {@const remotes = repoRows.filter((r) => isNew(r) && r.type === "proxy" && r.remote_username)}
-      {#if secrets.length || remotes.length}
-        <div class="mt-6">
-          <FormGrid>
-            {#each secrets as { r, q } (r.name + "/" + q.key)}
-              {@const o = opts[r.name]}
-              <FormRow label="{q.label} of {r.name}" for="{fid}-q-{r.name}-{q.key}" help={q.help}>
-                <Input
-                  id="{fid}-q-{r.name}-{q.key}"
-                  type="password"
-                  autocomplete="new-password"
-                  aria-describedby="{fid}-q-{r.name}-{q.key}-help"
-                  value={o.answers[q.key] ?? ""}
-                  oninput={(e) => (o.answers[q.key] = e.currentTarget.value)}
-                />
-              </FormRow>
-            {/each}
-            {#each remotes as r (r.name)}
-              {@const o = opts[r.name]}
-              <FormRow label="Remote username of {r.name}" for="{fid}-ru-{r.name}" help="The remote needs a username and password. Nexus gives the username, but not the password.">
-                <Input id="{fid}-ru-{r.name}" autocomplete="off" aria-describedby="{fid}-ru-{r.name}-help" bind:value={o.user} />
-              </FormRow>
-              <FormRow label="Remote password of {r.name}" for="{fid}-rp-{r.name}" help="Without the password, the proxy asks the remote with no username and password.">
-                <Input id="{fid}-rp-{r.name}" type="password" autocomplete="new-password" aria-describedby="{fid}-rp-{r.name}-help" bind:value={o.pw} />
-              </FormRow>
-            {/each}
-          </FormGrid>
-        </div>
-      {/if}
-      {#each notes as r (r.name)}
-        <p class="mt-6 text-meta text-muted-foreground">{r.name}: {String(r.facts.note)}</p>
-      {/each}
-    {/if}
-
-    {#if groupRows.length}
-      <div class="mt-8 flex flex-col gap-2">
-        <h3 class="text-label">Groups</h3>
-        <DataTable
-          source={groupSource}
-          caption="Nexus groups and their names here"
-          key={(g) => g.name}
-          columns={[
-            { label: "Nexus group", grow: true },
-            { label: "Kind", hideOnPhone: true },
-            { label: "Members", align: "right", hideOnPhone: true },
-            { label: "Name here" },
-            { label: "Who can download", hideOnPhone: true },
-          ]}
-          bind:picked={groupPicked}
-          pickable={groupPickable}
-          pickLabel={(g) => g.name}
-          bulk={mirroring ? groupBulk : undefined}
-          pickOff={!editable}
-          pickOnRow
-          selectAllLabel="Select all pickable groups"
-        >
-          {#snippet row(g)}
-            {@const note = !g.supported ? g.reason || "Not supported" : editable && !groupPickable(g) ? "Pick one of its members first." : ""}
-            {@render nameCell(g, note)}
-            <Cell hideOnPhone muted text={kindText(g.format, g.type)} />
-            <Cell num muted hideOnPhone>
-              {#if g.members_known}{formatCount(groupMembers(g).length)} of {formatCount(g.members.length)} picked{:else}{formatCount(groupMembers(g).length)} picked{/if}
-            </Cell>
-            {@render targetCell(g)}
-          {/snippet}
-        </DataTable>
-
-        {#each groupRows.filter((g) => groupPicked.has(g.name)) as g (g.name)}
-          {@const missing = g.members_known ? g.members.filter((m) => !picked.has(m)) : []}
-          {@const nexusAdded = g.target && g.members_known ? g.members.filter((m) => !g.target_members.includes(m)) : []}
-          {@const nexusRemoved = g.target && g.members_known ? g.target_members.filter((m) => !g.members.includes(m)) : []}
-          {@const reordered = g.target && g.members_known && !nexusAdded.length && !nexusRemoved.length && !same(g.members, g.target_members)}
-          {#if missing.length || !g.members_known || nexusAdded.length || nexusRemoved.length || reordered}
-            <div class="mt-2 flex flex-col gap-1">
-              <p class="text-label">{g.name}</p>
-              {#if !g.members_known}
-                <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
-                  <p class="text-meta text-muted-foreground">
-                    The Nexus account cannot read this group's members.
-                    {#if groupMembers(g).length}Its members here: {someNames(groupMembers(g))}.{:else}Choose its members from the picked repositories.{/if}
-                  </p>
-                  {#if editable}<Button variant="outline" size="sm" onclick={() => chooseMembers(g)}>Choose the members</Button>{/if}
-                </div>
-              {/if}
-              {#each missing as m (m)}
-                <p class="text-meta text-muted-foreground">{m} is not picked, so it is not in this group.</p>
+      {@const fresh = pickedRows.filter((r) => isNew(r))}
+      {@const secrets = fresh.flatMap((r) => r.questions.filter((q) => q.type === "secret").map((q) => ({ r, q })))}
+      {@const notes = fresh.filter((r) => typeof r.facts.note === "string")}
+      {@const remotes = fresh.filter((r) => r.type === "proxy" && r.remote_username)}
+      {#if secrets.length || remotes.length || notes.length}
+        <Separator class="my-6" />
+        <h3 class="text-label">What Nexus does not give</h3>
+        {#if secrets.length || remotes.length}
+          <div class="mt-4">
+            <FormGrid>
+              {#each secrets as { r, q } (r.name + "/" + q.key)}
+                {@const o = opts[r.name]}
+                <FormRow label="{q.label} of {r.name}" for="{fid}-q-{r.name}-{q.key}" help={q.help}>
+                  <Input
+                    id="{fid}-q-{r.name}-{q.key}"
+                    type="password"
+                    autocomplete="new-password"
+                    aria-describedby="{fid}-q-{r.name}-{q.key}-help"
+                    value={o.answers[q.key] ?? ""}
+                    oninput={(e) => (o.answers[q.key] = e.currentTarget.value)}
+                  />
+                </FormRow>
               {/each}
-              {#if nexusAdded.length || nexusRemoved.length || reordered}
-                <p class="text-meta text-warning">
-                  Nexus has different members now.
-                  {#if nexusAdded.length}Nexus added {someNames(nexusAdded)}.{/if}
-                  {#if nexusRemoved.length}Nexus removed {someNames(nexusRemoved)}.{/if}
-                  {#if reordered}Nexus has the members in a different order.{/if}
-                </p>
-              {/if}
-            </div>
-          {/if}
+              {#each remotes as r (r.name)}
+                {@const o = opts[r.name]}
+                <FormRow label="Remote username of {r.name}" for="{fid}-ru-{r.name}" help="The remote needs a username and password. Nexus gives the username, but not the password.">
+                  <Input id="{fid}-ru-{r.name}" autocomplete="off" aria-describedby="{fid}-ru-{r.name}-help" bind:value={o.user} />
+                </FormRow>
+                <FormRow label="Remote password of {r.name}" for="{fid}-rp-{r.name}" help="Without the password, the proxy asks the remote with no username and password.">
+                  <Input id="{fid}-rp-{r.name}" type="password" autocomplete="new-password" aria-describedby="{fid}-rp-{r.name}-help" bind:value={o.pw} />
+                </FormRow>
+              {/each}
+            </FormGrid>
+          </div>
+        {/if}
+        {#each notes as r (r.name)}
+          <p class="mt-4 text-meta text-pretty text-muted-foreground"><span class="font-medium text-foreground">{r.name}</span>: {String(r.facts.note)}</p>
         {/each}
-      </div>
+      {/if}
     {/if}
   </Section>
 
@@ -756,7 +786,7 @@
     <ShortFormDialog
       bind:open={membersOpen}
       title="Members of {g.name}"
-      description="The Nexus account cannot read the members of this group. Choose the picked repositories that the group reads."
+      description="The Nexus account cannot read the members of this group. Choose the repositories it reads; they are copied too."
       submitLabel="Keep these members"
       canSubmit={membersPick.length > 0}
       onSubmit={keepMembers}
@@ -772,7 +802,7 @@
           {/snippet}
         </OptionRow>
       {:else}
-        <p class="text-meta text-muted-foreground">Pick a repository of the same format first.</p>
+        <p class="text-meta text-muted-foreground">Nexus has no repository of this format that this server can copy.</p>
       {/each}
     </ShortFormDialog>
   {/if}
