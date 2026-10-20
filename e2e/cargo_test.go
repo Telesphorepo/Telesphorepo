@@ -209,7 +209,7 @@ cat /tmp/clash.txt
 		if l := cargoIndexLines(t, s, repo, crate, s.AdminBasic()); l["1.1.0"] != "" || l["1.0.0"] == "" {
 			t.Fatalf("after the delete of 1.1.0 the index lists %v", l)
 		}
-		up := mustUpload(t, s, repo, s.Admin(), nil, uploadPart{Name: crate + "-1.1.0.crate", Body: crateFile})
+		up := mustUpload(t, s, repo, s.MintSession(t, s.AdminUser, repo).Auth(), nil, uploadPart{Name: crate + "-1.1.0.crate", Body: crateFile})
 		if len(up) != 1 || up[0].Path != path {
 			t.Fatalf("upload of the .crate: %+v, want %s", up, path)
 		}
@@ -218,7 +218,7 @@ cat /tmp/clash.txt
 		}
 
 		// In another repo, the dependency of the first repo names that repo's index.
-		mustUpload(t, s, other, s.Admin(), nil, uploadPart{Name: crate + "-1.1.0.crate", Body: crateFile})
+		mustUpload(t, s, other, s.MintSession(t, s.AdminUser, other).Auth(), nil, uploadPart{Name: crate + "-1.1.0.crate", Body: crateFile})
 		for _, d := range parseCargoEntry(t, cargoIndexLines(t, s, other, crate, s.AdminBasic())["1.1.0"]).Deps {
 			if d.Name == "base" && (d.Registry == nil || *d.Registry != "sparse+"+index) {
 				t.Fatalf("the dependency base of the upload to %s names registry %v, want sparse+%s", other, d.Registry, index)
