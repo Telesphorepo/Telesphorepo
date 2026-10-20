@@ -231,12 +231,16 @@ dotnet nuget delete %[1]s 1.1.0 --source tr --api-key "$API_KEY" --non-interacti
 			t.Fatalf("unlist with a read token: status %d, want a refusal", resp.StatusCode)
 		}
 
+		// bin goes before the second run: MSBuild skips the copy of a package DLL whose size and
+		// time match the copy in bin, and NuGet gives each extracted file the 2 s zip time of its
+		// entry, so two packs built within 2 s would leave the 1.0.0 Lib.dll in bin.
 		out := runDotnet(t, "add the package and run", fmt.Sprintf(`set -e
 cd /work/app
 dotnet package search %[2]s --source tr --prerelease
 dotnet add package %[1]s --version 1.0.0
 dotnet run
 dotnet add package %[1]s
+rm -rf bin
 dotnet run
 `, id, lid[4:]), append(nugetApp("Console.WriteLine(\"MESSAGE \" + E2E.Hello.Message());\n"), nugetConfigFile(src))).Output
 		wantOut(t, "add the package and run", out, id, "MESSAGE hello v1\n", "MESSAGE hello v1.1")
@@ -314,7 +318,7 @@ cd /work/app
 dotnet add package %s --version 1.0.0
 dotnet add package Humanizer.Core --version 2.14.1
 dotnet run
-`, id), append(nugetApp("using Humanizer;\nConsole.WriteLine(\"GROUP \" + E2E.Hello.Message() + \" \" + \"some_text\".Humanize());\n"), nugetConfigFile(grp))).Output
+`, id), append(nugetApp("using Humanizer;\nConsole.WriteLine(\"GROUP \" + E2E.Hello.Message() + \" \" + \"SomeText\".Humanize());\n"), nugetConfigFile(grp))).Output
 			wantOut(t, "restore through the group", out, "GROUP private hello Some text")
 		})
 	})
