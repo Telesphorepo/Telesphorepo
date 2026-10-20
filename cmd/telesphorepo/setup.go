@@ -92,7 +92,7 @@ func setup(ctx context.Context, args []string) error {
 			if err := setupProject(id, res, r, cwd, false); err != nil {
 				return err
 			}
-			ciTool = r.ciTool
+			ciTool = r.ciToolFor(cwd)
 		}
 	} else {
 		if len(rowsOf(res.Format)) == 0 {
@@ -110,7 +110,7 @@ func setup(ctx context.Context, args []string) error {
 		if err := setupProject(id, res, r, cwd, several); err != nil {
 			return err
 		}
-		ciTool = r.ciTool
+		ciTool = r.ciToolFor(cwd)
 	}
 	if interactive() {
 		return setupCI(ctx, c, d, res.Repo, ciTool, cwd)

@@ -25,3 +25,9 @@
 #   scope   = "publish/npm"
 #   needs   = "server"
 #   summary = "npm publish uses the new upload route"
+
+[[change]]
+version = "dev"
+scope   = "publish/pypi"
+needs   = "cli"
+summary = "telesphorepo publish builds Python projects and uploads them to PyPI repositories."

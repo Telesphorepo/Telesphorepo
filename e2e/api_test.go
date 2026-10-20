@@ -590,7 +590,7 @@ func TestAPIFormats(t *testing.T) {
 			t.Errorf("format %s: title %q, config.default %s", f.Name, f.Title, f.Config.Default)
 		}
 	}
-	for _, n := range []string{"maven", "debian"} {
+	for _, n := range []string{"maven", "debian", "pypi"} {
 		if !byName[n] {
 			t.Errorf("format %q missing from /api/formats: %+v", n, formats)
 		}

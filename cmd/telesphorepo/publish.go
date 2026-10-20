@@ -46,6 +46,16 @@ func publish(ctx context.Context, files []string) error {
 	}
 
 	r, ok, err := pickRow(s.Format, p.Kind, p.dir)
+	if len(files) > 0 {
+		// A row that takes FILE arguments too uploads them without a build, with or without a
+		// project in the folder.
+		for _, fr := range rowsOf(s.Format) {
+			if fr.files {
+				r, ok, err = fr, true, nil
+				break
+			}
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -58,7 +68,7 @@ func publish(ctx context.Context, files []string) error {
 		}
 		return fmt.Errorf("%s has no project of a %s repository: telesphorepo publish looks for %s", p.dir, s.Format, markersOf(s.Format))
 	}
-	if !r.takesFiles() && len(files) > 0 {
+	if !r.takesFiles() && !r.files && len(files) > 0 {
 		return fmt.Errorf("telesphorepo publish runs the %s build of %s and takes no FILE arguments; they are for raw and Debian repositories", r.title, p.dir)
 	}
 

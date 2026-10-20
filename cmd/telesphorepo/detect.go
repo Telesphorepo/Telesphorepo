@@ -30,6 +30,18 @@ type row struct {
 	ciTool  string   // the tool of GET /api/repos/{name}/ci; "": the server has no CI file for the row
 	run     func(*job) error
 	preview func(dir string) string // the command that "publish" runs, for "status"
+	// ciToolOf picks the CI tool by the project in dir, in place of ciTool (nil: ciTool).
+	ciToolOf func(dir string) string
+	// files lets a row with markers take FILE arguments too: they are uploaded without a build.
+	files bool
+}
+
+// ciToolFor returns the CI tool of the row for the project in dir.
+func (r row) ciToolFor(dir string) string {
+	if r.ciToolOf != nil {
+		return r.ciToolOf(dir)
+	}
+	return r.ciTool
 }
 
 var rows = []row{
@@ -42,6 +54,8 @@ var rows = []row{
 		run: runHelm, preview: func(string) string { return "helm package, then helm push" }},
 	{format: "raw", kind: "files", title: "Files", ciTool: "telesphorepo", run: uploadRaw},
 	{format: "debian", kind: "packages", title: "Debian packages", ciTool: "telesphorepo", run: uploadDebian},
+	{format: "pypi", kind: "python", title: "Python", markers: []string{"pyproject.toml", "setup.py"}, ciTool: "pip",
+		ciToolOf: pythonTool, files: true, run: runPython, preview: pythonPreview},
 }
 
 // helperFormat is a format of the helper category: its tool publishes with its own command and
