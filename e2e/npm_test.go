@@ -81,8 +81,12 @@ cd /work/plain && npm publish
 cd /work/scoped && npm publish --access public
 npm whoami
 if npm publish 2>/tmp/again.log; then echo REPUBLISH_ACCEPTED; else echo REPUBLISH_REFUSED; cat /tmp/again.log; fi
+if npm publish --force 2>/tmp/forced.log; then echo FORCED_ACCEPTED; else echo FORCED_REFUSED; cat /tmp/forced.log; fi
 `, files)
-		npmWant(t, "npm publish", out, writer, "REPUBLISH_REFUSED", "403")
+		// npm refuses a version that the packument lists before it sends anything; --force skips
+		// that check, and the server answers 403.
+		npmWant(t, "npm publish", out, writer, "REPUBLISH_REFUSED", "You cannot publish over the previously published versions: 1.0.0",
+			"FORCED_REFUSED", "403", "version 1.0.0 of "+scoped+" already exists")
 
 		for _, name := range []string{plain, scoped, "@e2e%2f" + strings.TrimPrefix(scoped, "@e2e/")} {
 			resp, d := npmGet(t, s, repo, name, true, auth)
@@ -239,7 +243,8 @@ npm unpublish ` + tools + `@1.0.0 --force && echo UNPUBLISHED`},
 		}
 		check := npmRequire("ms") + "test -f node_modules/@types/ms/package.json && echo TYPES_OK\n"
 		groupCheck := check + npmRequire("is-number", tools)
-		out = npmMust(t, nodeImage, "install from the proxy and the group", "set -e\n"+npmSetupTools+
+		// The first pnpm run is in the project of the proxy, so pnpm downloads its binary through it.
+		out = npmMust(t, nodeImage, "install from the proxy and the group", "set -e\n"+npmInstallTools+
 			"cd /work/npm-proxy && npm install --no-audit --no-fund\n"+check+
 			"cd /work/pnpm-proxy && pnpm install\n"+check+
 			"cd /work/yarn-proxy && yarn install\n"+check+
@@ -248,6 +253,9 @@ npm unpublish ` + tools + `@1.0.0 --force && echo UNPUBLISHED`},
 			"cd /work/yarn-group && yarn install\n"+groupCheck, install)
 		if strings.Count(out, "TYPES_OK") != 6 || strings.Count(out, "REQ is-number: private is-number") != 3 || strings.Count(out, "REQ "+tools+": tools 1.0.0") != 3 {
 			t.Fatalf("install from the proxy and the group:\n%s", out)
+		}
+		if paths := assetPathsOf(t, s, proxy, "@pnpm/"); !strings.Contains(out, "Downloading the pnpm") || len(paths) == 0 {
+			t.Fatalf("pnpm did not download its binary through the proxy (cached %v):\n%s", paths, out)
 		}
 		bunCheck := func(c string) string { return strings.ReplaceAll(c, "node -e", "bun -e") }
 		out = npmMust(t, bunImage, "bun install from the proxy and the group", "set -e\n"+

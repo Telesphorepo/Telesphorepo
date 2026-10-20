@@ -113,7 +113,7 @@ func (h *Handler) failRead(w http.ResponseWriter, r *http.Request, err error) {
 	}
 }
 
-// get serves the packument, a tarball and the dist-tags.
+// get serves the packument, the manifest of a version, a tarball and the dist-tags.
 func (h *Handler) get(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	t, err := parseTarget(r)
 	if err != nil {
@@ -135,11 +135,47 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	switch {
 	case len(t.rest) == 0:
 		h.packument(w, r, c, t.name)
+	case len(t.rest) == 1 && t.rest[0] != "-":
+		h.versionManifest(w, r, c, t.name, t.rest[0])
 	case len(t.rest) == 2 && t.rest[0] == "-":
 		h.file(w, r, c, t.name, t.rest[1])
 	default:
 		notFound(w, r)
 	}
+}
+
+// versionManifest answers GET <name>/<version or dist-tag>: the manifest of that version from the
+// full packument, as registry.npmjs.org does. pnpm, run through corepack, fetches its own binary
+// package this way from the registry of the project.
+func (h *Handler) versionManifest(w http.ResponseWriter, r *http.Request, c *route.Call, pkg, ref string) {
+	s, err := h.resolve(r.Context(), r, c.P, c.Repo, pkg, false)
+	if err != nil {
+		h.failRead(w, r, err)
+		return
+	}
+	body, err := h.document(r.Context(), s, pkg, h.urlBase(r, c.Repo), false)
+	if err != nil {
+		h.failRead(w, r, err)
+		return
+	}
+	var doc struct {
+		Tags     map[string]string          `json:"dist-tags"`
+		Versions map[string]json.RawMessage `json:"versions"`
+	}
+	if err := json.Unmarshal(body, &doc); err != nil {
+		h.failRead(w, r, err)
+		return
+	}
+	v := ref
+	if tv, ok := doc.Tags[ref]; ok {
+		v = tv
+	}
+	m, ok := doc.Versions[v]
+	if !ok {
+		httpx.Error(w, r, http.StatusNotFound, "version "+ref+" of "+pkg+" not found")
+		return
+	}
+	format.WriteDocument(w, r, "application/json", m)
 }
 
 // packument answers the full or the abbreviated packument of name (?write=true is the same).
