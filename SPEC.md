@@ -936,7 +936,7 @@ is written to it with `sudo tee -a FILE > /dev/null`.
 | Upload `.deb` | `telesphorepo publish x.deb` (with `dist` and `component` in `telesphorepo.toml`). Indexes rebuild after `index.debounce`; poll `GET /api/repos/{repo}/status` for `pending: 0` |
 | Docker | Pull: `docker pull <host>/{repo}/IMAGE:TAG`; a private repo needs `docker login <host>` with a read token. Push: the setup line of the Publish tab adds the credential helper of the CLI to the Docker config once, then `docker push <host>/{repo}/IMAGE:TAG` with no `docker login`. Helm and ORAS use the same helper (see **Docker registry** and **Publishing**) |
 | NuGet | Source `HOST/nuget/{repo}/index.json` in `nuget.config` (`allowInsecureConnections="true"` for plain http); a private repo adds `packageSourceCredentials` with the user and a read token as `ClearTextPassword` (dotnet sends them after the first 401). Publishes: `telesphorepo publish` in a .NET project, or `dotnet nuget push` with a publish session as the API key |
-| pip, uv, poetry | Index `HOST/pypi/{repo}/simple/`: `index-url` in `pip.conf` (a private repo: `USER:READ_TOKEN@` in the URL), a `[[tool.uv.index]]` with `default = true` (a private repo: `UV_INDEX_<NAME>_USERNAME` and `_PASSWORD`), `poetry source add --priority=primary` (a private repo: `poetry config http-basic.<repo>`). A hosted repo holds only its own packages; a group of it and a PyPI proxy also serves their dependencies. Publish: `telesphorepo publish` |
+| pip, uv, poetry | Index `HOST/pypi/{repo}/simple/`: `index-url` in `pip.conf` (a private repo: `USER:READ_TOKEN@` in the URL; a server on http: `trusted-host`, since pip ignores an http index on any host but localhost), a `[[tool.uv.index]]` with `default = true` (a private repo: `UV_INDEX_<NAME>_USERNAME` and `_PASSWORD`), `poetry source add --priority=primary` (a private repo: `poetry config http-basic.<repo>`). A hosted repo holds only its own packages; a group of it and a PyPI proxy also serves their dependencies. Publish: `telesphorepo publish` |
 | Raw | Upload: `telesphorepo publish file.tar.gz` (with `path` in `telesphorepo.toml`). Download: `curl -fLO HOST/raw/{repo}/path/file.tar.gz`; a private repo adds `-K -` with `user = "USER:READ_TOKEN"` on stdin |
 | npm, pnpm, bun | `.npmrc` of the project: `registry=HOST/npm/{repo}/`; a private repo adds `//HOST-without-scheme/npm/{repo}/:_authToken=${NPM_TOKEN}` with a read token in `NPM_TOKEN`. Publish: `telesphorepo publish` |
 | Yarn 2+ | `.yarnrc.yml`: `npmRegistryServer: "HOST/npm/{repo}/"`; a private repo adds `npmAlwaysAuth: true` and `npmAuthToken: "${NPM_TOKEN}"` (Yarn sends no token on reads without `npmAlwaysAuth`); a plain-HTTP server adds its host name to `unsafeHttpWhitelist` |
@@ -3541,7 +3541,8 @@ the 409 of resume and clear.
 
 `pypi_test.go` covers PyPI with the official `python` image (twine, build and poetry installed
 with pip) and uv's image: `TestPyPI` (both stores: `python -m build` and twine upload, the JSON
-page and the `.metadata` bytes, 409 and `twine --skip-existing`, `pip install --require-hashes`),
+page and the `.metadata` bytes, the 409 of other bytes under an existing file name,
+`pip install --require-hashes`),
 `TestPyPIProtocol` (negotiation, 406, 304, the 301s, the project list, the upload refusals, the
 version browser, deletes), `TestPyPIClients` (`uv publish`, `poetry publish`, `uv pip compile`
 reads the `.metadata` and not the wheel, uv and poetry install) and `TestPyPIProxyGroup` (a
