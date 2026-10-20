@@ -1,0 +1,16 @@
+{
+  "name": "telesphorepo-edge",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "wrangler deploy src/index.ts --dry-run --outdir dist --name telesphorepo-edge --compatibility-date 2026-10-01",
+    "typecheck": "tsc --noEmit",
+    "provision": "bun scripts/provision.ts",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261001.1",
+    "typescript": "7.0.2",
+    "wrangler": "4.147.0"
+  }
+}

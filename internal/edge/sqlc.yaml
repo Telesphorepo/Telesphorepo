@@ -1,0 +1,19 @@
+# Edge module data layer: the kernel schema, the publish schema (devices) and the module's
+# schema.sql. Run "go tool task gen" after editing queries/ or schema.sql.
+version: "2"
+sql:
+  - engine: sqlite
+    schema: ["../db/schema.sql", "../publish/schema.sql", "schema.sql"]
+    queries: queries
+    gen:
+      go:
+        package: dbq
+        out: dbq
+        sql_package: database/sql
+        emit_json_tags: false
+        omit_unused_structs: true
+        overrides:
+          - column: users.disabled
+            go_type: bool
+          - column: repos.anonymous_read
+            go_type: bool

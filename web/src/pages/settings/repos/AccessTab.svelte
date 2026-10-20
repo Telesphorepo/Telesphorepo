@@ -239,7 +239,7 @@
   {/if}
 
   {#if canSettings}
-    <FormSection title="Download">
+    <FormSection title="Download" description={a.download.notes.join(" ") || undefined}>
       <div class="flex flex-col gap-6">
         <FormGrid>
           <SwitchRow id="{id}-public" label="Public" help="Anyone can download without signing in." bind:checked={draft.value.public} />

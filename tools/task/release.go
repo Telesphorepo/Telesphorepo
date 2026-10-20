@@ -32,8 +32,8 @@ var releasePrograms = []struct{ name, pkg string }{
 }
 
 // release builds the UI once and the CLI archives that the server embeds, cross-compiles each
-// release program for every release target, packs each binary with LICENSE and README.md, and
-// writes SHA256SUMS. Output goes to bin/release. A version given as the argument must be a
+// release program for every release target, packs each binary with LICENSE and README.md, packs
+// the bundled edge Worker (telesphorepo-edge_<version>.tar.gz), and writes SHA256SUMS. Output goes to bin/release. A version given as the argument must be a
 // release version, and changes.toml must have no "dev" entry (go tool task tag stamps them).
 func release(ctx context.Context, version string) error {
 	pm, err := prepare(ctx)
@@ -85,6 +85,17 @@ func release(ctx context.Context, version string) error {
 			}
 			sums[archive] = sum
 		}
+	}
+	edge, err := edgeArchive(ctx, dir, version)
+	if err != nil {
+		return err
+	}
+	if edge != "" {
+		sum, err := fileSHA256(filepath.Join(dir, edge))
+		if err != nil {
+			return err
+		}
+		sums[edge] = sum
 	}
 	if err := writeSums(filepath.Join(dir, "SHA256SUMS"), sums); err != nil {
 		return err

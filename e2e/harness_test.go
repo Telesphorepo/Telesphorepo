@@ -1,4 +1,4 @@
-//go:build e2e || import || scale || clients
+//go:build e2e || import || scale || clients || edge
 
 package e2e
 
@@ -695,7 +695,7 @@ func (s *Server) SignIn(t testing.TB, user, pass string) *Session {
 
 // AllServerPerms holds every server permission, in registry order (module start order). A person
 // with all of them is an administrator.
-var AllServerPerms = []string{"repositories.all", "people.manage", "settings.general", "activity.read", "storage.manage", "network.manage", "signing.manage", "signin.manage", "nexus.manage"}
+var AllServerPerms = []string{"repositories.all", "people.manage", "settings.general", "activity.read", "storage.manage", "network.manage", "signing.manage", "edge.manage", "signin.manage", "nexus.manage"}
 
 // CreateUser creates a local user with the server permissions perms (none for a plain user).
 // The harness keeps the password, so the publish helpers can sign in as the user.

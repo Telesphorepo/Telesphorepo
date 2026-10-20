@@ -1,0 +1,34 @@
+// The Worker of the edge zone (e2e/edge_test.go), in wrangler dev with local R2 and Queues. It has
+// the shape of the wrangler.jsonc that the server writes, plus what the fixture needs: the local
+// S3 endpoint of each bucket (/cdn-cgi/local/r2/s3/<bucket>), which the server under test uses as
+// its S3 storage through forward.mjs, and the var ORIGIN, the server that the Worker forwards to. run.sh sets ORIGIN
+// and PREFIX for each test.
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "telesphorepo-edge-test",
+  "main": "../src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "r2_buckets": [
+    {
+      "binding": "HOME",
+      "bucket_name": "edge-home",
+      "local_dev": { "experimental_s3_credentials": { "accessKeyId": "edgee2eaccess", "secretAccessKey": "edgee2esecret0123456789" } }
+    },
+    {
+      "binding": "R2_WEUR",
+      "bucket_name": "edge-weur",
+      "local_dev": { "experimental_s3_credentials": { "accessKeyId": "edgee2eaccess", "secretAccessKey": "edgee2esecret0123456789" } }
+    },
+    {
+      "binding": "R2_APAC",
+      "bucket_name": "edge-apac",
+      "local_dev": { "experimental_s3_credentials": { "accessKeyId": "edgee2eaccess", "secretAccessKey": "edgee2esecret0123456789" } }
+    }
+  ],
+  "queues": {
+    "producers": [{ "binding": "COPY", "queue": "edge-home-edge-copy" }],
+    "consumers": [{ "queue": "edge-home-edge-copy", "max_batch_size": 100, "max_retries": 10, "max_batch_timeout": 1 }]
+  },
+  "triggers": { "crons": ["*/10 * * * *"] },
+  "vars": { "PREFIX": "", "ORIGIN": "http://server:8080" }
+}

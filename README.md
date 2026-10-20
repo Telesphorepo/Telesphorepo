@@ -92,13 +92,18 @@ An admin can limit who may download from or publish to each repo by address. Ope
 
 ```sh
 go tool task dev | build | test       # develop, build bin/telesphorepo-server, run the e2e suite
-go tool task test import | scale | clients | all # other test zones (import needs a Nexus container)
+go tool task test import | scale | clients | edge | all # other test zones (import needs a Nexus container)
 telesphorepo-server user add alice [--admin] # prompts for the password
 telesphorepo-server user passwd alice        # reset a password
 telesphorepo-server user reset-2fa alice     # remove the second factors of a user
 docker exec -it <container> /telesphorepo-server user add alice
 telesphorepo publish | status | update       # the CLI: publish a project, show the state, update the CLI
 ```
+
+With the blobs on Cloudflare R2, clients far from the server can download from R2 buckets near
+them: choose the regions on **Settings > Edge delivery**, then deploy the edge Worker with the
+`wrangler.jsonc` of that page (see `edge/README.md`, or the `telesphorepo-edge` archive of a
+release).
 
 To move the blobs to another store, change the storage on the **Settings** page. The server
 copies the existing blobs in the background. To move hosted repos from Nexus 3, add the Nexus

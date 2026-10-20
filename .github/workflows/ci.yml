@@ -34,7 +34,14 @@ jobs:
           go vet -tags import ./e2e/...
           go vet -tags scale ./e2e/...
           go vet -tags clients ./e2e/...
+          go vet -tags edge ./e2e/...
           go vet -tags macos ./e2e/...
+      - name: Type-check and bundle the edge Worker
+        working-directory: edge
+        run: |
+          bun install --frozen-lockfile
+          bunx tsc --noEmit
+          bun run build
       - name: Vet and build the CLI for macOS and Windows
         run: |
           for os in darwin windows; do
@@ -97,6 +104,43 @@ jobs:
         with:
           name: e2e-github-actions-log
           path: e2e-github-actions.log
+
+  # The path from a home bucket put to a regional copy needs R2 event notifications, which local R2
+  # does not send (TestEdgeCloudflare). The job runs against the maintainer's Cloudflare account
+  # from the repository secrets, so a pull request from a fork skips it. The test makes its
+  # buckets, queue, notification rule and Worker with names of the run and removes them.
+  e2e-edge-cloudflare:
+    needs: build
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest # one runner label per job; change it here to switch runner provider
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - uses: oven-sh/setup-bun@v2
+      - name: Install the edge Worker dependencies
+        working-directory: edge
+        run: bun install --frozen-lockfile
+      - name: Copy a blob to a region through a real R2 notification
+        shell: bash
+        env:
+          E2E_CLOUDFLARE: "1" # the test fails, not skips, without the account
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          E2E_R2_ACCESS_KEY_ID: ${{ secrets.E2E_R2_ACCESS_KEY_ID }}
+          E2E_R2_SECRET_ACCESS_KEY: ${{ secrets.E2E_R2_SECRET_ACCESS_KEY }}
+        run: go tool task test edge -run 'TestEdgeCloudflare$' 2>&1 | tee e2e-edge-cloudflare.log
+      - name: Upload the test output
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-edge-cloudflare-log
+          path: e2e-edge-cloudflare.log
 
   # Every green push to main publishes ghcr.io/telesphorepo/telesphorepo:main (moving) and
   # :sha-<short> (fixed). Version tags and latest come only from release.yml.

@@ -1,7 +1,7 @@
 // Typed functions for every /api route. Pages import `api` and call e.g. api.repos.list().
 // Routes and JSON shapes follow internal/api; see SPEC.md for the rules behind them.
 
-import { request, requestOrNull, requestWithProgress } from "./client";
+import { request, requestOrNull, requestText, requestWithProgress } from "./client";
 import type * as T from "./types";
 import { globMatch } from "$lib/glob";
 
@@ -289,6 +289,15 @@ export const api = {
     failures: (id: number, p?: T.PageParams) =>
       request<T.Page<T.MoveFailure>>("GET", `/api/storage/moves/${id}/failures`, { query: page(p) }),
     cancel: (id: number) => request<T.Move>("DELETE", `/api/storage/moves/${id}`),
+  },
+
+  /** Edge delivery: the state of the Worker and the regional buckets, and its generated config. */
+  edge: {
+    status: () => request<T.EdgeStatus>("GET", "/api/edge/status"),
+    /** The wrangler.jsonc that the server builds from its settings. */
+    wranglerConfig: () => requestText("/api/edge/wrangler.jsonc"),
+    /** The address of the file, for a download link. */
+    wranglerURL: "/api/edge/wrangler.jsonc",
   },
 
   nexus: {

@@ -6,7 +6,7 @@
 //	go tool task dev            backend + Vite with live reload
 //	go tool task build [image]  bin/telesphorepo-server with the UI embedded (+ container image)
 //	go tool task preview        build, then run the production binary locally
-//	go tool task test [zone] [args]  e2e zone: core (default), import, scale, clients or all; args go to "go test"
+//	go tool task test [zone] [args]  e2e zone: core (default), import, scale, clients, edge or all; args go to "go test"
 //	go tool task cli [version]  the six CLI archives that the server embeds (internal/clidist/dist)
 //	go tool task release [version]  cross-compiled archives and SHA256SUMS in bin/release
 //	go tool task gen           regenerate the sqlc data layer (every internal/**/sqlc.yaml)
@@ -36,7 +36,8 @@ const usage = `Usage: go tool task <command>
   test import      run the import zone: Nexus sources, sync and cut-over (e.g. go tool task test import -run TestNexus)
   test scale       run the scale zone: 100k and 1M seeded assets, p95 must not double
   test clients     run the clients zone: the CLI of cmd/telesphorepo with the real tools in containers
-  test all         run the core, import, scale and clients zones one after the other; fails if any fails
+  test edge        run the edge zone: the edge Worker in wrangler dev with local R2 in front of the server
+  test all         run the core, import, scale, clients and edge zones one after the other; fails if any fails
   cli [version]    build the six CLI archives that the server serves at /cli/ into internal/clidist/dist
                    (the version defaults to git describe; skipped while cmd/telesphorepo does not exist).
                    A given release version needs a changes.toml with no "dev" entry

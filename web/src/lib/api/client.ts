@@ -124,6 +124,27 @@ export async function request<T = void>(method: string, url: string, opts: Reque
   return (text ? JSON.parse(text) : undefined) as T;
 }
 
+/** A GET that answers plain text (a generated file), with the same errors as request(). */
+export async function requestText(url: string): Promise<string> {
+  let res: Response;
+  try {
+    res = await fetch(url, { headers: { Accept: "*/*", [uiHeader]: "1" }, credentials: "same-origin" });
+  } catch {
+    throw new ApiError(0, "The server cannot be reached. Check your connection and try again.");
+  }
+  if (!res.ok) {
+    let message = res.statusText || `Request failed (${res.status})`;
+    try {
+      message = problemMessage((await res.json()) as Problem, message);
+    } catch {
+      /* not JSON */
+    }
+    if (res.status === 401) lost.forEach((f) => f());
+    throw new ApiError(res.status, message);
+  }
+  return res.text();
+}
+
 /**
  * A multipart POST that reports the progress of its body. fetch() cannot do that, so this one
  * uses XMLHttpRequest. It answers like request(): JSON on success, ApiError otherwise, and an

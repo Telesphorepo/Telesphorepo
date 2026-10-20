@@ -6,7 +6,7 @@ on:
       zone:
         description: E2E zone to run
         type: choice
-        options: [import, scale, all]
+        options: [import, scale, edge, all]
         default: import
   schedule:
     - cron: "0 4 * * 1" # weekly, Monday 04:00 UTC: import zone

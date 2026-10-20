@@ -62,6 +62,10 @@ func TestServerPermissions(t *testing.T) {
 			{http.MethodGet, "/api/signing-keys/default", none, []int{http.StatusOK}},
 			{http.MethodPost, "/api/signing-keys", func() any { return map[string]any{"name": RandName("key")} }, []int{http.StatusCreated}},
 		}, false},
+		{"edge.manage", []permRoute{
+			{http.MethodGet, "/api/edge/status", none, []int{http.StatusOK}},
+			{http.MethodPatch, "/api/settings", func() any { return map[string]any{"edge.access_ttl": "45s"} }, []int{http.StatusOK}},
+		}, true},
 		{"nexus.manage", []permRoute{
 			{http.MethodGet, "/api/nexus/sources", none, []int{http.StatusOK}},
 			{http.MethodPatch, "/api/settings", func() any { return map[string]any{"nexus.sync_interval": "20m"} }, []int{http.StatusOK}},

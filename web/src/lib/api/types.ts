@@ -377,7 +377,7 @@ export type RepoAccess = {
   format: string;
   people: AccessPerson[];
   kind: RepoKind;
-  download: { public: boolean; people: AccessPerson[]; admins: number; guards: AccessGuards; sentence: string };
+  download: { public: boolean; people: AccessPerson[]; admins: number; guards: AccessGuards; sentence: string; /** Extra sentences from modules, e.g. "Downloads come from the edge." */ notes: string[] };
   publish: {
     people: AccessPerson[];
     admins: number;
@@ -641,6 +641,50 @@ export type SettingsPatch = Record<string, unknown>;
 /** 202 answer of a PATCH that changes the storage location while assets exist. */
 export type SettingsMoveStarted = { move: Move };
 export type TestResult = { ok: boolean; error?: string; fields?: Record<string, string> };
+
+// --- edge delivery ---
+
+/** The six R2 location hints. */
+export type EdgeHint = "wnam" | "enam" | "weur" | "eeur" | "apac" | "oc";
+/** not_used: no bucket; filling: pointers and blobs are copied; ready: the Worker reads it; waiting: saved, the Worker needs a deploy. */
+export type EdgeRegionState = "not_used" | "filling" | "ready" | "waiting";
+export type EdgeRegionStatus = {
+  hint: EdgeHint;
+  /** The area of the hint, e.g. "Western Europe". */
+  area: string;
+  bucket: string;
+  state: EdgeRegionState;
+  /** Backfill progress while the region is filling. */
+  pointers_written: number;
+  pointers_total: number;
+  /** Blobs of the home bucket that the region lacks; null before the count is known. */
+  blobs_missing: number | null;
+  /** Pointers waiting in the outbox for this bucket. */
+  outbox: number;
+  last_error: string;
+};
+/** GET /api/edge/status */
+export type EdgeStatus = {
+  enabled: boolean;
+  /** on, draining (stopped; the Workers' cached configuration still says on) or off. */
+  mode: "on" | "draining" | "off";
+  /** Why the settings cannot run edge delivery while it is switched on; "" when they can. */
+  unfit: string;
+  server_version: string;
+  /** The version the Worker reported at its last gap check; null before the first check. */
+  worker_version: string | null;
+  version_mismatch: boolean;
+  gap_checked_at: string | null;
+  /** A storage or region change needs a new deploy. */
+  deploy_needed: boolean;
+  /** The storage change that asks for the deploy ("storage change", "storage move"); "" otherwise. */
+  deploy_reason: string;
+  home: { hint: EdgeHint | ""; bucket: string; outbox: number; last_error: string };
+  /** The backfill of every pointer after edge delivery starts. */
+  backfill: { running: boolean; queued: number; total: number };
+  /** One entry per chosen region. */
+  regions: EdgeRegionStatus[];
+};
 
 // --- storage moves ---
 

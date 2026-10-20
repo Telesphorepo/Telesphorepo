@@ -86,6 +86,7 @@ server and the clients print keep working: `/#/device?code=ABCD-EFGH`, `/#/setti
 | `/settings/storage` | `server/Storage` | settings | storage.manage | Storage settings, connection test, and the storage move with its progress. |
 | `/settings/nexus` | `server/NexusMigration` | settings | nexus.manage | Nexus servers with status, repositories, last check and next check; Add a Nexus server. |
 | `/settings/nexus/:id?sync=&repo=` | `server/NexusSource` | settings | nexus.manage | The status and its line; Sync now or Cancel the sync, Switch over, Delete. Repositories to copy and Groups (pick tables; "Copy N repositories" saves and starts the sync); the running or chosen sync with its progress, its log (`repo` filters it) and its failed files; the syncs (a row opens its details); the connection. |
+| `/settings/edge` | `server/EdgeDelivery` | settings | edge.manage | Edge delivery: the status (Worker version, last gap check, home bucket), the six R2 regions as a table (Serve from it, bucket, state, pointers waiting, last error) with the home region select, the backfill progress while a region fills, the on switch and the access lifetime, and the Deploy section with the generated `wrangler.jsonc` (`CodeBlock`) and the provision and deploy commands. One `Draft` and one `SaveBar`: Save checks the buckets first and asks before the server stops writing to one. |
 | `/settings/proxy` | `server/ReverseProxy` | settings | network.manage | Network and proxy: the trusted proxies (none, this machine or network, the Cloudflare list, custom addresses) and the detected proxies. |
 | `/settings/general` | `server/General` | settings | settings.general | The settings groups with no page of their own (public URL, upload limits, logs, index and upload timing, publishing lifetimes, retention, the Nexus sync interval): one form, a section per group, with the server's labels and help. |
 | `/settings/activity?view=&action=&repo=` | `server/Activity` | settings | activity.read | Events (the audit log, filtered by what happened, from `GET /api/audit/actions` grouped by subsystem, and by repository) and Publish tokens (the publish log). |
@@ -533,6 +534,7 @@ unchanged.
 | Networks; network list; from where (any network / these networks) | IP list, preset, allow-list, CIDR list |
 | Nexus migration; copy; switch over | Nexus sources; mirror; cut over |
 | Network and proxy; trusted proxy | Reverse proxy settings |
+| Edge delivery; region; Worker | CDN, PoP, edge node |
 | Administrator | Admin (in sentences) |
 | Repository (hosted, when it needs a kind) | Hosted repository (in the UI) |
 | Proxy; remote (the remote repository that a proxy keeps the files of); Test the remote | Mirror, upstream |

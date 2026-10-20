@@ -50,10 +50,10 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/db` | SQLite (modernc, no cgo), WAL, separate writer/reader pools, one schema per component with a fingerprint (`Init`), `PRAGMA optimize`, the plan guard (`CheckPlans`) |
 | `internal/ci` | The CI provider registry (`Registry`: `Build`, `Describe`) and the build records (`Builds`: `Record`, `Upsert`, `Loader`, `Cleanup`). See **CI providers and build records** |
 | `internal/db/dbq` | sqlc-generated core queries (`internal/db/queries/*.sql`) plus hand-written FTS queries in `extra.go` |
-| `internal/storage` | `Store` interface; `fs`, `s3`, and `Live`, a hot-swappable wrapper with `Open`, `SameBackend` and `Probe`. Declares the storage setting keys and `ConfigView` (the store of a snapshot) |
+| `internal/storage` | `Store` interface (with `DeleteMany`: one S3 `DeleteObjects` per 1000 keys, one delete per key on fs); `fs`, `s3`, and `Live`, a hot-swappable wrapper with `Open`, `SameBackend` and `Probe`. Declares the storage setting keys and `ConfigView` (the store of a snapshot). The S3 store keeps `Accept-Encoding` out of the SigV4 signature, which the local R2 S3 endpoint of wrangler dev needs |
 | `internal/repopath` | The pure repo-path parser: `Parse` (a file path) and `Folder` (`""` or a folder ending in `/`). Routes, file operations, imports and uploads check every path with it |
 | `internal/blobs` | Content-addressed blobs: `Spooled` bodies with their hashes, `Store` (`Key`, digest `Lock`, `Ensure`/`EnsureAll`, `Get`, `Open`) and the blob GC. See **Byte pipeline** |
-| `internal/assets` | The byte pipeline: `Pipeline` (`Commit`, `CommitAll`, `Remove`, point lookups, listing, FTS search), `Reader` (the read path of hosted, proxy and group repos), `Uploads` (resumable uploads) and the asset hooks of a format (`Hooks`). See **Byte pipeline** |
+| `internal/assets` | The byte pipeline: `Pipeline` (`Commit`, `CommitAll`, `Remove`, point lookups, listing, FTS search), `Reader` (the read path of hosted, proxy and group repos), `Uploads` (resumable uploads), the asset hooks of a format (`Hooks`) and the watchers of every commit and remove (`Watcher`). See **Byte pipeline** |
 | `internal/ops` | Repo operations (`repo_ops`): `Begin`, `Progress`, `SetState`, `Fail`, `End`, and the operation types that modules register (`delete`, `mirror`) |
 | `internal/rebuild` | The durable rebuild queue of format indexes (`rebuilds`): `MarkTx`, `Pending`, and the debounced worker of the job `core.rebuild` |
 | `internal/move` | Module `storage`: the storage move copies every blob to a new backend in the background behind a `storage.Mirror`; owner hooks of the `storage` settings group |
@@ -61,6 +61,8 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/auth` | Users (kinds `local`/`oidc`), argon2id passwords, Basic-auth cache, read tokens, sessions, rate limiting, permission checks. A caller is a `Principal` with one credential kind (`Cred`: password, read token, session, setup session, publish session, device). `Identify` reads the credentials a route policy names. Token kinds are verifiers by prefix (`AddTokenKind`). Also core bearer tokens (`IssueBearer`), fresh second-factor proofs (`CheckProof`, `IssueGrant`) and the session view (`View`) |
 | `internal/oidc` | Module `sso`: OIDC sign-in for any person at the provider, the server permissions from a claim (`oidc.permission_claim`, `oidc.permission_map`), and the SSO confirmations of a device approval and of a setup code: `/api/auth/oidc/login`, `/device`, `/setup` and `/callback` (go-oidc + x/oauth2, PKCE S256); owner hooks of the `sso` settings group |
 | `internal/publish` | Module `publish`: device enrollment, setup codes, nonces, trust policies, the CI token exchange, the CI providers `github-actions` and `jenkins`, the token kind `trs` of publish sessions, the device proof of format reads, the publish API, the cleanup job, and the install scripts and downloads of the Telesphorepo CLI |
+| `internal/edge` | Module `edge`: the R2 objects that the edge Worker reads (pointers, access objects, `config.json`), the pipeline watcher and the outbox that keep them, the regions, `wrangler.jsonc`, `/api/edge/...`. See **Edge delivery** |
+| `edge/` | The edge Worker (TypeScript, bun, wrangler at an exact version): `fetch` (serve or pass), `queue` (blob copies) and `scheduled` (the gap check); `scripts/provision.ts`; `test/` holds the fixture of the `edge` e2e zone. See **Edge delivery** |
 | `internal/clidist` | The CLI archives that the server embeds (`go:embed all:dist`) and serves at `/cli/`: `Targets`, `Archive`, `FS`, `Sums`. `go tool task build`, `dev`, `cli` and `release` write them |
 | `internal/repos` | Repos, their kind, their active operation (`Repo.Op`) and per-format JSON config. `Create` and `Update` (a `Patch`) are the only changes of a repo record: each checks the whole new state first, then saves it in one transaction with the format's `OnRepoChange` and one audit event. A `Validator` (the format registry) checks the config and a `KindCheck` the kind. Modules drop what they keep about a deleted repo with `OnDelete`. A module adds repo values that it keeps in its own tables as fields (`repos.Field`, `AddField`): `Create` and `Update` validate and save them in the same transaction, and `Repo.Fields` holds them. Keeps the group members and the proxy remotes in memory (see **Group and proxy repositories**) |
 | `internal/proxy` | Fetches the files of proxy repos from their remotes (the `assets.Fetcher` of the read path), stores them through `Commit` with source `proxy`, answers a remote's 401 challenge through the format's `RemoteAuth`, and remembers remote 404s; `proxy.Answer` is the answer of the registry token protocol (also for the Nexus client), `proxy.Send` a request to a remote as a fetch sends it (e.g. a remote tags list) |
@@ -79,7 +81,7 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/containerengine` | Docker/Podman detection for tooling and e2e; not linked into the server |
 | `web/` | Svelte 5 + Vite UI (Tailwind CSS v4, shadcn-svelte Maia style), embedded via `web/embed.go` (`go:embed all:dist`). See **Web UI** |
 | `tools/task` | `go tool task`: dev, build, preview, test, cli, release, gen and doctor |
-| `e2e/` | End-to-end suite in four zones (tags `e2e`, `import`, `scale`, `clients`) using testcontainers |
+| `e2e/` | End-to-end suite in five zones (tags `e2e`, `import`, `scale`, `clients`, `edge`) using testcontainers, and the macOS zone (tag `macos`) of `release.yml` |
 
 ## Modules
 
@@ -139,6 +141,9 @@ it needs and leaves the others nil. The kernel gives it these parts:
   (`Settings`), permissions, audit actions and repo operation types.
 - The web UI: the descriptor in `format.Spec` (see **Format UI descriptors**), and a named
   `formatParts` slot in the UI module of the format for a part that only the format can draw.
+- Edge delivery: `Edge` (`format.EdgeSpec{Shape, Immutable, Mutable}`): the URL shape that the
+  Worker parses (`standard` or `oci`) and the globs of the paths that never change. A format
+  without it gets no Worker route (see **Edge delivery**).
 
 | ID | Package | Requires | Owns |
 |---|---|---|---|
@@ -148,6 +153,7 @@ it needs and leaves the others nil. The kernel gives it these parts:
 | `network` | `internal/netrules` | | The client address, IP lists, repo IP rules (a repo guard and the networks of the access report), the IP lists of the trusted proxies (`/api/network/trusted-proxies`), the subsystem `network`, the settings group `network` (`trusted_proxies`; its `Validate` refuses a `list:` entry in a change), the `network.*` actions, job `network.presets` (every hour) |
 | `signing` | `internal/signing` | | Signing keys and `/api/signing-keys/...`, the repo field `signing_key` (for the hosted repos of the formats with `SigningKey`), the subsystem `signing`, the `signing.key.*` actions; provides `*signing.Keys` |
 | `publish` | `internal/publish` | `audit` | Devices, publish sessions (`trs`), CI trust policies, the CI providers `github-actions` and `jenkins`, `/api/devices/...` and `/api/publish/...`, the subsystem `ci`, the settings group `publishing`, the `publish.session.*`, `device.*`, `setup_code.create` and `ci.pipeline.*` actions, job `publish.cleanup` (every minute), `/install.sh`, `/install.ps1` and `/cli/` (see **Install scripts and CLI downloads**); provides `*publish.Service` and `publish.Minter`; loads the publish sessions and devices of core bearer tokens and gives the access report its CI pipelines |
+| `edge` | `internal/edge` | `storage`, `network`, `publish` | Edge delivery (see **Edge delivery**): the subsystem `edge` with `edge.manage`, the settings group `edge`, `GET /api/edge/status` and `GET /api/edge/wrangler.jsonc`, the pipeline watcher, jobs `edge.outbox`, `edge.backfill`, `edge.reconcile` (every 5 min) and `edge.seen` (every minute), the line of the access report that says where downloads come from |
 | `sso` | `internal/oidc` | `publish` | `/api/auth/oidc/...`, the subsystem `signin`, the settings group `sso` (its `Validate` with the startup guard and the claim map check, `Test` and `Apply`: the discovery check), the `sso.*` actions; tells auth when single sign-on manages permissions |
 | `nexus` | `internal/nexus` | | `/api/nexus/...`, the subsystem `nexus`, the settings group `nexus`, the `nexus.*` actions, the operation type `mirror`, job `nexus.scheduler` (resumes running syncs, then the schedule loop) |
 | `maven` | `internal/maven` | | Format `maven` (publish category `cli`) with the tools `gradle` and `maven` (their CI steps) |
@@ -270,10 +276,16 @@ that the token passed, so the token reads no member directly. "May this caller w
 now" is always `Decide(..., Write)` or `Decide(..., Mint)`.
 
 **Core bearer tokens.** `auth.Service.IssueBearer(p, scopes, ttl)` returns
-`trb.<base64url payload>.<base64url HMAC-SHA256>` for at most 15 minutes. The key is HKDF-SHA256
-of the master key with the info `telesphorepo bearer v1`. The payload holds the credential kind
-(none for anonymous), the user, the read token, the scopes (`{repo, ops, session}`) and the
-expiry. The credential is a password, a read token, a publish session or a device
+`trb.<payload>.<HMAC-SHA256>.<Ed25519>` (each part base64url without padding) for at most 15
+minutes; `IssueUploadToken` signs the same way. Both signatures sign the ASCII bytes of the
+payload part. The HMAC key is HKDF-SHA256 of the master key with the info `telesphorepo bearer
+v1`. The server checks both signatures, so a token is valid in one spelling only (a token of
+another number of parts is refused). The
+Ed25519 key is derived from the master key with the info `telesphorepo edge v1` (the seed of the
+key); the edge Worker checks that signature with the public key of `config.json`
+(`auth.Service.EdgePublicKey`), so the HMAC key never leaves the server. The payload holds the
+credential kind (none for anonymous), the user, the read token (its row ID `t` and its public ID
+`tp`), the scopes (`{repo, ops, session}`) and the expiry. The credential is a password, a read token, a publish session or a device
 (`auth.CredDevice` with `Principal.DeviceID`: the device of a format's token exchange or of a
 device proof); a UI session gets no bearer. A scope holds `Read`, `Write` and `Delete` only. `Write` and `Delete` stay
 only with a scope session of the credential: the publish session of a publish session credential,
@@ -470,6 +482,15 @@ Tables of the `publish` component (`internal/publish/schema.sql`):
 | `publish_sessions` | PK `id`, UNIQUE `public_id`, idx `expires_at`, `repo_id`, `user_id`, `device_id`, `trust_id`, `build_id` | `secret_hash` = SHA-256(secret); `via` `device`/`oidc`/`manual`; `subject`; `build_id` (the CI build record of a CI session whose token a provider read); `closed_at`. `repo_id` cascades; `user_id`, `device_id`, `trust_id` and `build_id` are SET NULL |
 | `publish_oidc_seen` | PK `(id_hash, repo_id)` (WITHOUT ROWID), idx `expires_at`, `session_id`, `repo_id` | One row per CI token and repo, with the session the token minted there. `id_hash` is SHA-256 of `<issuer>\n<jti>`, or of the whole token when it has no `jti`. A second insert for the repo means a replay |
 
+Tables of the `edge` component (`internal/edge/schema.sql`). They reference no table, so an outbox
+row outlives a deleted repo and still deletes its pointers (see **Edge delivery**):
+
+| Table | Key / indexes | Notes |
+|---|---|---|
+| `edge_outbox` | PK `(repo_id, path)` (WITHOUT ROWID), idx `edge_outbox_due (due_at)`, partial idx `edge_outbox_backfill (repo_id) WHERE backfill = 1` | One row per dirty object. `repo_id` > 0: `path` is an asset path whose pointer the outbox writes or deletes; `repo_id` 0: `path` is the key of an access object or `config.json`. `sha256` is the digest of the commit that wrote the row (`''`: apply the current state); `due_at` (unix ms), `attempts`, `seq` (raised by each new row of the key, so the worker drops only the row it read), `timed_out_at` (unix ms of a put with an unknown outcome, 0 for none), `error`, `backfill` (1: the backfill of every pointer queued the row; a later row of the key keeps it) |
+| `edge_written` | PK `key` (WITHOUT ROWID) | The access objects and `config.json` in the home bucket: the key under `edge/v1/`, the hex SHA-256 of the JSON written, `written_at` |
+| `edge_state` | PK `key` (WITHOUT ROWID) | JSON state: `home` (the location fingerprint, without the secret, that the objects were written for, the backfill cursor and counts, home ready, deploy needed and its reason, the gone regions with the end of their drain, and the drain that runs: its end, the old home location without its secret, its regional buckets and the cache time of its off switch), `region:<hint>` (bucket, ready, cleared, the backfill cursor, the blob check cursor and the blobs missing) and `ttl` (the `access_ttl` of the last `config.json` written, and until when a Worker can still hold an earlier one) |
+
 Tables of the `nexus` component (`internal/nexus/schema.sql`):
 
 | Table | Key / indexes | Notes |
@@ -518,7 +539,9 @@ is missing or has a clean plan also fails. A query that writes (`INSERT`, `UPDAT
 and the kernel tables change only through kernel services. The kernel allows `ListSettings`,
 `HasUsers` and `ListRebuildGroups` (the startup walk of the rebuild queue); `storage` allows
 `CountBlobs` (the total of a storage move, once per move); `network` allows
-`ListTrustedProxyLists` and `DeleteTrustedProxyLists` (one row per IP list at most).
+`ListTrustedProxyLists` and `DeleteTrustedProxyLists` (one row per IP list at most); `edge` allows
+`CountOutbox` (the outbox job counts its rows every 5 seconds for the status page, never on a
+request path) and `SumFileCount` (the total of a backfill, once per backfill).
 `TestQueryPlans` runs the guard through the hidden `dbcheck` command.
 
 ## Storage layout
@@ -566,7 +589,7 @@ size item shows the largest binary unit that gives a whole number, else one deci
 `settings.Group` has an `ID`, a `Label`, the server permission `Perm` that reads and edits every
 key of it, the UI `Page` that edits it (`""` shows it on Settings › General), its definitions
 (`settings.Def`: key, label, help, type, default, `Dev`, `Secret`, options, `Normalize`,
-`Validate`) and three owner hooks:
+`Validate`, and `Zero`, which lets a duration be 0) and three owner hooks:
 
 - `Validate(draft, mode)`: the rules across keys. Field errors go through `draft.Fail`. It runs at
   startup on the stored values and the environment (`ModeStartup`) and on every PATCH and test
@@ -588,6 +611,7 @@ The `settings` package holds no feature rules and declares only the keys of the 
 | activity (audit) | `settings.general` · General | `audit.retention` (`8760h`, which is 365 days) |
 | storage (storage) | `storage.manage` · `/settings/storage` | `storage` (`fs`/`s3`), `fs.root` (default `blobs/` in the data dir), `s3.endpoint`, `s3.region`, `s3.bucket`, `s3.access_key_id`, `s3.secret_access_key`*, `s3.prefix`, `s3.path_style`, `s3.redirect`, `presign_ttl` |
 | network (network) | `network.manage` · `/settings/proxy` | `trusted_proxies` (literal entries; the IP lists of the trusted proxies are rows, see **Network rules**) |
+| edge (edge) | `edge.manage` · `/settings/edge` | `edge.enabled` (`false`; needs `storage=s3` and a `base_url` without a path), `edge.home_hint` (`""`; one of `wnam enam weur eeur apac oc`, required when edge delivery is on), `edge.regions` (`[]`; entries `<hint>=<bucket>`, each hint once, not the home hint, not the home bucket), `edge.access_ttl` (`30s`, 0 to 5 min). Its `Validate` checks the rules across keys and at startup turns edge delivery off instead of stopping the server; `Test` probes the home bucket and every regional bucket; `Apply` marks a save, which ends "deploy needed" after a storage change. See **Edge delivery** |
 | publishing (publish) | `settings.general` · General | `publish.session_ttl` (`15m`, maximum `1h`), `publish.device_ttl` (`2160h`, which is 90 days) |
 | sso (sso) | `signin.manage` · `/settings/sign-in` | `oidc.issuer`, `oidc.client_id`, `oidc.client_secret`*, `oidc.redirect_url`, `oidc.scopes` (`openid profile email`), `oidc.session_ttl` (`12h`), `oidc.permission_claim` (`""`; dotted paths allowed), `oidc.permission_map` (type `map`, `{}`), `signin.password_login` (`all` or `publishers`, default `all`) |
 | nexus (nexus) | `nexus.manage` · General | `nexus.sync_interval` (`15m`, minimum `1m`) |
@@ -790,7 +814,7 @@ transaction.
 | `POST /api/repos/delete` | `repositories.all` | `{names: [...]}`. Checks that every repo exists (404) and that none has an operation (409 `<name>: <message>`); then nothing is deleted. Then it deletes the repos one after another, each under a `delete` operation (see **Repo operations**). The first failure stops the rest: 500 `{deleted: [names done], error}`, and the failed repo keeps a failed `delete` operation. One `repo.delete` event per repo. 200 `{deleted: [names], files: n}` |
 | `POST /api/repos/{name}/operation/resume` · `DELETE /api/repos/{name}/operation` | `repositories.all` | Resume runs the failed operation of the repo again (a delete deletes the repo): 200 `{ok: true}`. Clear ends it, and the repo keeps the files that are left: 204. 409 when the repo has no operation, when it has not failed, or when its type cannot resume or clear here (a Nexus mirror ends at the cut-over). Records `repo.delete.resume` or `repo.delete.clear` |
 | `GET /api/repos/{name}/grants` | `repo.access` | `[{username, perms: [...]}]` by username; `perms` are permission IDs in registry order |
-| `GET /api/repos/{name}/access?admins=1` | a repository permission that manages the repo (one with a second-factor need: `repo.delete`, `repo.settings`, `repo.access`, `ci.pipelines`) | The access report, built from the parts of `access.Engine.Decide`: `{repo, format, kind, people, download: {public, people, admins, guards, sentence}, publish: {people, admins, ci, guards, blocked, sentence}}`. `people` are `{username, perms, via}` (`permission`; with `admins=1` the holders of `repositories.all` too, via `all_repos`). `guards` maps a guard name to `{restricted, summary, detail}`; the network guard's `detail` is `{any, lists: [{name, title}], cidrs: [{cidr, note}]}`. `blocked` is null, or `{code: "read_only_kind" \| "operation", message}`: a proxy or a group (it lists no publisher and no CI pipeline) or a locked repo. Each `sentence` says the answer in words, e.g. "2 people, only from 10.0.0.0/8." |
+| `GET /api/repos/{name}/access?admins=1` | a repository permission that manages the repo (one with a second-factor need: `repo.delete`, `repo.settings`, `repo.access`, `ci.pipelines`) | The access report, built from the parts of `access.Engine.Decide`: `{repo, format, kind, people, download: {public, people, admins, guards, sentence, notes}, publish: {people, admins, ci, guards, blocked, sentence}}`. `people` are `{username, perms, via}` (`permission`; with `admins=1` the holders of `repositories.all` too, via `all_repos`). `guards` maps a guard name to `{restricted, summary, detail}`; the network guard's `detail` is `{any, lists: [{name, title}], cidrs: [{cidr, note}]}`. `blocked` is null, or `{code: "read_only_kind" \| "operation", message}`: a proxy or a group (it lists no publisher and no CI pipeline) or a locked repo. Each `sentence` says the answer in words, e.g. "2 people, only from 10.0.0.0/8." `notes` are the sentences that modules add (`access.Engine.AddDownloadNote`): while edge delivery is on, "Downloads come from the edge." or "Downloads go to the server: read rules apply." |
 | `GET /api/users/{username}/access` · `GET /api/me/access` | `people.manage` · password, read token or UI session | `{username, permissions, disabled, kind, can_publish, items: [{repo, format, public, perms, via}], next}`, a keyset page by repo name. On a proxy or a group a person holds no `repo.publish` and no `ci.pipelines` |
 | `PUT /api/grants` | `repo.access` on each repo | `{users: [...], repos: [...], perms: [...]}`. Sets the repository permission set of every pair of user and repo, at most 1000 pairs; `perms: []` removes the pairs. 400 for an unknown permission ID, a server permission, or a permission without one it needs (e.g. `repo.publish` without `repo.download`, `ci.pipelines` without `repo.publish`); 404 for an unknown user or repo. 403 when the caller adds or removes a permission they do not hold on that repo. The auth service records one `grant.set` event with `{old, new}` per pair whose set changed, in the transaction. 200 `{changed: n}` |
 | `GET /api/repos/{name}/assets?prefix=&after=&limit=` | `repo.download` | Ordered by path; the prefix is a range scan |
@@ -833,6 +857,8 @@ transaction.
 | `GET /api/storage/moves/{id}` | `storage.manage` | `Move` = `{id, state, total, copied, skipped, failed, error, started_at, finished_at, target: {storage, endpoint?, bucket?, prefix?, fs_root?}}`. Never holds secrets |
 | `GET /api/storage/moves/{id}/failures?after=&limit=` | `storage.manage` | `{items: [{asset_id, key, reason}], next}` in asset id order |
 | `DELETE /api/storage/moves/{id}` | `storage.manage` | Cancels the move and returns it; 409 when it has ended |
+| `GET /api/edge/status` | `edge.manage` | `{enabled, mode: "on"\|"draining"\|"off", unfit, server_version, worker_version\|null, version_mismatch, gap_checked_at\|null, deploy_needed, deploy_reason, home: {hint, bucket, outbox, last_error}, backfill: {running, queued, total}, regions: [{hint, area, bucket, state: "filling"\|"ready"\|"waiting", pointers_written, pointers_total, blobs_missing\|null, outbox, last_error}]}`. `backfill.running` holds until the outbox wrote every pointer of the backfill (`home.ready`). The Worker version and the gap check come from `gap/state.json`; `waiting`: the Worker of the last gap check has no binding for the region, or its binding is a bucket whose `bucket.json` names another bucket; `deploy_needed` also holds when the `bucket.json` of its `HOME` names another bucket than the home bucket. The outbox counts come from the count of the outbox job. See **Edge delivery** |
+| `GET /api/edge/wrangler.jsonc` | `edge.manage` | The `wrangler.jsonc` of the Worker for the current settings, `text/plain`, `no-store`. 409 problem `edge-not-configured` when the settings cannot run edge delivery (storage fs, a base URL with a path, no home hint) |
 | `POST /api/nexus/sources` | `nexus.manage` | `{name, base_url, username, password}`; `name` matches the repo name pattern. Checks the connection. 201 `Source`. 400 for invalid input or refused credentials, 409 when the name exists, 502 when Nexus is unreachable |
 | `GET /api/nexus/sources?after=<name>&limit=` | `nexus.manage` | `{items: [Source], next}` in name order |
 | `GET /api/nexus/sources/{id}` | `nexus.manage` | `SourceDetail`. After cut-over, or when Nexus is unreachable, it lists only the mapped repos and `nexus_error` says why |
@@ -846,7 +872,7 @@ transaction.
 | `GET /api/nexus/syncs/{id}/log?after=<line id>&limit=&repo=` | `nexus.manage` | `{items: [LogLine], next}`, oldest first. `repo` keeps the lines of one Nexus repo |
 | `DELETE /api/nexus/syncs/{id}` | `nexus.manage` | Cancels the sync and returns it (200); 409 when it has ended |
 | `DELETE /api/nexus/sources/{id}` | `nexus.manage` | 204. 409 while a sync runs or while the source mirrors mapped repos (allowed after cut-over, or without a mapping) |
-| `POST /api/settings/{group}/test` | the permission of the group | Same body as the PATCH, merged over the current values and not saved. Runs the group's `Validate`, then its `Test` (`storage`: the probe of the store; `sso`: the discovery check). Returns `{ok:true}`, or 400 `{ok:false, error, fields?}`; 404 for an unknown group |
+| `POST /api/settings/{group}/test` | the permission of the group | Same body as the PATCH, merged over the current values and not saved. Runs the group's `Validate`, then its `Test` (`storage`: the probe of the store; `sso`: the discovery check; `edge`: the probe of the home bucket and of each regional bucket, a failed region under `fields["edge.regions.<hint>"]`). Returns `{ok:true}`, or 400 `{ok:false, error, fields?}`; 404 for an unknown group |
 
 A permission in these tables means the UI session of a person who holds it (see
 **Permissions**); `repositories.all` holds every repository permission. "UI session" means the `tr_session`
@@ -1421,6 +1447,19 @@ route reads its path with `httpx.RepoPath`, which first refuses an encoded `/`, 
 encoded `.` or `..` segment in the raw URL. Routes, the file tree, deletes, uploads and imports use
 the same rules.
 
+**Watchers.** A module that must see every commit and remove of every format and every writer
+registers an `assets.Watcher` with `Pipeline.Watch` in its `Init` (the edge module keeps its R2
+pointers with it); several run in the order they were added. `Replacing(repo, prev)` runs in
+`CommitAll` after `Admit` and before the blobs are ensured, under the path locks, with the assets
+that the stored writes replace; `Creating(repo, paths)` runs at the same point with the paths that
+they create. `Committed(tx, repo, stored)` runs in the commit transaction after `OnCommitted` (a
+retried transaction calls it again). `Removing(repo, paths)` runs in each remove batch after the
+path locks and before the transaction (also during a repo delete), and `Removed(tx, repo,
+removed)` in the remove transaction after `OnRemoved`. `Touched(repo, paths)` runs after
+`Pipeline.SetTimes` changed the dates of an asset. An error of `Replacing`, `Creating`,
+`Committed`, `Removing` or `Removed` fails the commit or the batch. `Pipeline.Lock(repo, path)`
+takes the path lock of a commit and a remove.
+
 **Format hooks.** `format.Spec` holds the hooks: `Describe`, `Admit`, `OnCommitted`, `AfterCommit`,
 `OnRemoved`, `AfterRemove`, `OnRepoChange` (in the transaction of every repo update), `Classify`
 and `ProxyProbe` (a proxy), `Merge` (a group), `RemoteAuth` (the answer to a remote's 401 challenge,
@@ -1532,6 +1571,336 @@ A settings PATCH that points the server at another blob location while blobs exi
   error.
 - **UI.** The **Storage** page (`/#/settings/storage`) shows a progress bar while a move copies, a Cancel button, and the
   failure list of a failed move.
+
+## Edge delivery
+
+Clients far from the server download from Cloudflare's edge: R2 buckets, a Queue and a Worker
+(`edge/`), kept by the module `edge` (`internal/edge`). The Worker answers a GET or HEAD only when
+it can prove that the server would give the same answer, and passes every other request to the
+server. It never refuses: every 401, 403, 404, 405, 409, 416 and 429 comes from the server, so the
+server keeps the audit events, the rate limits and the error bodies. It answers 502 itself only
+when it cannot reach the server. Cloudflare is the only provider (R2, Queues and Workers on the
+Workers Paid plan), and client URLs do not change: the Worker runs on routes of the base URL host.
+
+Two rules shape the design:
+
+- **Consistency before latency.** A path that can change (Maven metadata and snapshots, Debian
+  `dists/` outside `by-hash/`, Docker tags, every raw path) has its pointer in the home bucket only,
+  so every region reads the same current version. An immutable path has a pointer and a blob in
+  every region.
+- **Warm everywhere from the first request.** The server writes every pointer, and the copy Worker
+  copies every blob, when the file is stored, before any client asks for it. No region gets a file
+  only after a first miss.
+
+Workers Cache and Sippy are not the delivery path. Workers Cache evicts, so a far region is not
+always warm. Sippy copies a file only on the first miss, so the first client of each region pays for
+the far read. R2 has no bucket replication and its Workers binding has no copy method, so the copy
+Worker streams the home `get().body` into the regional `put` (or `uploadPart`), never a cross-bucket
+`CopyObject`.
+
+**Buckets.** The home bucket is the S3 storage of the server (`storage=s3` on R2); blobs keep
+their keys `[s3.prefix/]blobs/sha256/<2>/<hex>`. Each chosen region has a bucket of its own in the
+same account (`edge.regions`, `<hint>=<bucket>`); the module opens one `storage.Store` per region
+with the storage settings and the bucket of the region, so the R2 token of the storage settings
+covers every edge bucket. The server writes pointers to the regional buckets; the copy Worker
+writes the blobs there. A path that can change has its pointer in the home bucket only, so every
+region reads the same version; an immutable path has a pointer and a blob in every region.
+
+**Objects** (JSON, under `[s3.prefix/]edge/v1/`):
+
+| Key | Content | Buckets |
+|---|---|---|
+| `config.json` | `{version, enabled, access_ttl (seconds), edge_key (base64url of the Ed25519 public key), formats: {name: {shape, prefix, immutable, mutable}}, home: {hint, bucket, ready}, regions: [{hint, binding, bucket, ready}]}`; `home.ready`: the outbox wrote every pointer of the backfill; `bucket`: the bucket that the `bucket.json` of the binding must name | home |
+| `bucket.json` | `{hint, bucket}` (`hint` is `home` or the region): the bucket names itself, so the Worker sees a binding to another bucket. The controller writes it into each bucket it uses (again after the wipe of a first start, and once per process start); a region becomes ready only after its `bucket.json` is written | home and each region |
+| `p/<repo id>/<sha256 hex of the path>` | `{repo, path, sha256, sha1, md5, size, ct, mod (unix), kind}`, or `{repo, path, pending: true}` while a write runs | home; also each region for an immutable path |
+| `a/repo/<name>` | `{id, format, kind, anon, private, guarded, members: [names]}`: `private` is `access.Engine.Private`, `guarded` is `access.Engine.Guarded` (a read IP rule, or a guard that is not a `ReadRestricter`) | home |
+| `a/user/<id>` | `{enabled, local, all, read: [repo ids]}`: `all` is a server permission with `AllRepos`, `read` the repos with `repo.download` | home |
+| `a/token/<public id>` | `{id, user, hash (hex SHA-256 of the secret), exp (unix, 0 never)}`; an expired token has none | home |
+| `a/device/<id>` | `{user, exp}`; a revoked or expired device has none | home |
+| `seen/<isolate>-<unix ms>.json` | The Worker: `{version, tokens: [{id, at}]}`, the read tokens that one isolate checked itself, written 20 seconds after the first of them (at most one file per isolate in 20 seconds, each file a new key) | home |
+| `gap/state.json` | The Worker's gap check: `{version, last_run, bindings: [hints], markers: {home, regions: {hint: bucket}}, pass, last_pass: {started, finished}, regions}`; `markers` holds the bucket that the `bucket.json` of each binding names (`""` for none); every cron run reads them and writes the file when its version, bindings or markers differ from the stored ones. A gap pass skips a region whose binding names another bucket | home |
+| `gap/request.json` | The server asks for a gap pass: `{at, regions}` | home |
+| `copy/<hint>/<hex>.json` | The copy Worker: the multipart upload of a large copy, so a retried message resumes it | home |
+
+The pointer key hashes the path, so a 1024-byte path fits the R2 key limit. IDs are reused
+(`repos.id`, user and device IDs have no `AUTOINCREMENT`): a repo delete removes every file through
+`Remove` before the repo row goes, the Worker checks that a pointer's `repo` is the `id` of the
+repo object, and a repo delete marks every user object.
+
+**Formats.** A format opts in with `format.Spec.Edge`: the shape (`standard`:
+`/<format>/<repo>/<path>`; `oci`: `/v2/<repo>/<image>/manifests/<ref>` and
+`/v2/<repo>/<image>/blobs/sha256:<hex>`) and `format.Glob` patterns. A path is immutable when it
+matches an `Immutable` glob and no `Mutable` glob. maven: immutable `**/*`, mutable
+`**/maven-metadata.xml*` and `**/*-SNAPSHOT/*`; debian: immutable `pool/**/*` and
+`dists/**/by-hash/**/*`; docker (`oci`): immutable `**/_manifests/sha256/*` and
+`**/_blobs/sha256/*` (tags are mutable); raw: every path is mutable. A proxy gets a pointer only
+for a path whose `Classify` class is not `Changing`. A group has no pointers of its own.
+
+**The pointers.** The module's pipeline watcher (see **Byte pipeline**) and the outbox
+(`edge_outbox`) keep them:
+
+1. `Replacing` writes a dirty outbox row (empty digest) in its own transaction, then puts
+   `{pending}` in every bucket for an immutable path, or deletes the home pointer of a mutable one.
+   `Creating` does the same for a new immutable path of a repo that is a member of a group: the
+   Worker skips a group member without a pointer, so until the new pointer lands the group read
+   goes to the server and never serves a later member's copy.
+2. `Removing` writes dirty rows, then deletes the pointer keys of the batch with one `DeleteMany`
+   per bucket.
+3. `Committed` and `Removed` upsert the final rows in the commit and remove transactions.
+4. The job `edge.outbox` takes a due row and `Pipeline.Lock(repo, path)`, reads the asset row
+   again, and puts the home pointer and then the regional ones (immutable paths), deletes the
+   pointer in every bucket when the asset is gone, or drops the row when the asset has another
+   digest. It deletes the row only after every write succeeded and retries with a backoff up to
+   5 minutes. Writes to one key are spaced by a second (R2 takes one write per second per key),
+   the wait outside the lock; a 429 of a pre-step retries for up to 2 s. A put that timed out has
+   an unknown outcome: the row stays and the state is applied once more a minute later.
+
+A failed pre-step fails the commit or the remove batch. `Touched` (after `SetTimes`) marks the
+path dirty. Until a pointer lands, the Worker finds none, or a pending one, and passes.
+
+**Access objects.** The change notices of the kernel mark the keys of the affected objects:
+`auth.Service.AfterChange` (tokens, users, permissions, grants), `repos.Service.AfterChange`
+(create, update, members, delete; a repo marks its groups too, since a group is private when a
+member is), `netrules.Service.AfterRulesChange` (IP rules) and `publish.Service.AfterDeviceChange`
+(approve, setup, revoke). The outbox writes the marked keys within a second; `edge_written` keeps
+the hash of each object written. The job `edge.reconcile` computes every access object and
+`config.json` from the database every 5 minutes and marks in the outbox each key whose hash
+differs from `edge_written`, that was never written, or whose row is gone; the outbox computes the
+body again when it writes, so a reconcile never puts an older body over a newer write. It covers
+a lost notice. Device expiry needs no notice: the object carries `exp`. Every write of
+`config.json` (the controller's and the outbox's) runs under one lock and builds the body from the
+mode of that moment, so an `enabled: true` never lands after the off switch.
+
+**The controller** (job `edge.backfill`). It wakes on a settings change, a storage move and every
+10 s, and works at most about 5 s per step.
+
+- **On.** `edge.enabled` with settings that can run it (`storage=s3`, a `base_url` without a path,
+  `edge.home_hint`). A first start (edge turned on, or the first save of the edge settings after a
+  "deploy needed") deletes `edge/v1/` in the home bucket and in every region, writes
+  `config.json` with `home.ready: false`, queues the pointer of every asset (`assets` by
+  `id > cursor`, pages of 500, the cursor in `edge_state`, each row with `backfill = 1`) and runs a
+  reconcile. When every row is queued and no row with `backfill = 1` is left (the outbox wrote
+  each one), the home bucket is ready and `config.json` says `home.ready: true`. Until then a
+  missing pointer may be one not written yet, so the Worker answers nothing. A restart resumes
+  without a wipe: at module init, before any commit, the module turns on in the buckets of the
+  saved state when the settings still run it (the first controller step then follows the
+  settings), and it queues `config.json`, so a new server version reaches it.
+- **Regions.** A region is `filling` or `ready` (`config.json` lists it with `ready`). A region that
+  exists at a first start gets its pointers from the backfill of every pointer (done when the
+  home bucket is ready). A region added
+  later first loses every stale pointer of its bucket (list and `DeleteMany`), then gets the
+  pointer of every immutable path, under the path lock, and the server writes `gap/request.json`
+  so the Worker's gap check copies the blobs. When the pointers are done, the server compares the
+  home `blobs/` and the regional `blobs/` in key order (a resumable cursor, up to 50 pages of
+  1000 keys per step, every 2 minutes); a pass that finds every blob marks the region ready and
+  rewrites `config.json`. Missing blobs ask for a gap pass again, at most every 30 minutes. A
+  removed region that was never ready leaves `config.json` and gets no writes from then on. A
+  removed ready region (a hint taken out of `edge.regions`, or the old bucket of a hint that got
+  a new one) is gone: `config.json` is written without it first, then the pre-steps (`{pending}`
+  and deletes, never the outbox) keep changing its bucket until the drain end (below); then
+  nothing writes it. A region added again during its drain waits for the drain end before it
+  clears its bucket. A hint moved to a new bucket before the Worker is deployed again is safe: the
+  old Worker's binding reads the old bucket, whose `bucket.json` names the old bucket, so the
+  Worker does not read the region.
+- **Draining.** Edge turned off, a change of the home location (a key of `storage.LocationKeys`
+  other than `s3.redirect`) or a storage move (`move.Service.OnStart`) writes `config.json` with
+  `enabled: false` to the home bucket and marks "deploy needed" on a location change or a move.
+  The pre-steps keep changing the old buckets (gone regions included) until the drain end, so no
+  Worker with a cached `config.json` serves a file that changed; then the outbox is dropped and
+  nothing is written. The drain starts when the off switch is written (the controller writes it
+  again until a put succeeds). The drain end is the latest time a Worker can still hold a
+  `config.json` written before, plus 5 s: each write of `config.json` supersedes the one before,
+  which a Worker holds for at most that one's `access_ttl` (the row `ttl` of `edge_state` keeps
+  the latest such time), so lowering `edge.access_ttl` does not shorten a drain. The drain is
+  saved in the row `home` (its end, the old home location without the secret, its buckets), so
+  a restart during it builds the draining view at module init and the pre-steps go on until the
+  saved end; a removed region's drain is saved the same way (`gone`). The old home opens with the
+  secret of the storage settings, so this needs the same access key ID there; without it the
+  module logs that the drain cannot go on and drops it. A move to
+  `storage=fs` turns edge delivery off.
+- **The Worker's state.** The controller reads `gap/state.json` at most once a minute: the Worker
+  version (a mismatch is "Deploy the Worker of this server version") and the regions that the
+  Worker has a binding for (a chosen region without one is `waiting`).
+
+The job `edge.seen` lists `seen/` every minute, reads up to 16 files at once, sets
+`last_used_at` of those read tokens (`auth.Service.TouchTokens`, which never moves it back) and
+deletes the files. A token that the Worker serves goes into the pending set of its isolate. When a
+request notes a token and the isolate has no flush scheduled, the request schedules one
+(`waitUntil`): it waits 20 seconds, then writes every pending token in one file,
+`seen/<isolate>-<unix ms>.json`, a new key each time. A write that succeeds takes its tokens out of
+the set; a failed one leaves them for the next flush. So an isolate writes at most about three
+files a minute, and a token is lost only when the runtime ends the `waitUntil` before the write.
+
+**What the Worker answers.** A GET or HEAD where all of these hold; anything else goes to the
+server:
+
+1. `config.json` says `enabled` and `home.ready`, the `bucket.json` of `HOME` names
+   `home.bucket`, and the `version` of `config.json` is the Worker's (the
+   `wrangler.jsonc` of the server defines `TELESPHOREPO_VERSION` to the server version, and a
+   release bundles the Worker with `--define TELESPHOREPO_VERSION`; a build without it is `dev`,
+   like the server).
+2. The URL parses with the format's shape and the repopath rules; a path with an encoded `/`, `\`
+   or NUL, or with an empty, `.` or `..` segment, goes to the server, and so do uploads, tags
+   lists, referrers, `/v2/`, the catalog, `key.asc` and a request with the query parameter
+   `_state`.
+3. The repo object exists, has the route's format and is not `guarded`.
+4. The caller may read the repo: no credential on an anonymous-read repo; a read token `trp_` (the
+   Basic password with any username, or `Bearer trp_...`: the token object, a constant-time compare
+   of the SHA-256 of the secret, `exp`, the user `enabled` and `local`, then the repo in `read`, or
+   `all`, or `anon`); on the `oci` shape a core bearer of an anonymous, password, read token or
+   device credential without a session scope and without an upload binding (its Ed25519 signature,
+   `exp`, a scope of the repo with `Read`, then the rows of its credential). A `tr_session`
+   cookie, a password, a publish session, a device proof, any other token or `Authorization`, and
+   a credential that fails a check go to the server.
+5. A pointer exists and is not pending, and its `repo` and `path` match.
+
+A group read goes to the server for a mutable path (every `Merger` path is mutable) and when any
+member is `guarded`. The Worker walks the members in order: it skips a member the caller may not
+read (checked without the bearer's scopes, as `Principal.InGroup`), serves the first member with
+a pointer, skips a hosted member without one, and passes to the server at a pending pointer or at
+a proxy member without a pointer. It reads member pointers 6 at a time. It reads access objects
+and `config.json` through isolate memory and the Cache API for `edge.access_ttl` (0: every
+request reads the home bucket), so a revocation reaches the edge within that time plus the outbox
+write. The Cache API does not work behind Cloudflare Access, so the base URL host must not be
+behind it.
+
+**Which bucket.** The nearest ready region with a binding whose `bucket.json` names the region's
+`bucket` (read through isolate memory and the Cache API like `config.json`), or the home bucket, by great-circle
+distance from `request.cf` to a fixed point per hint (`wnam` San Francisco, `enam` Ashburn,
+`weur` London, `eeur` Warsaw, `apac` Singapore, `oc` Sydney; the home bucket at
+`edge.home_hint`); without coordinates the home bucket. An immutable path reads its pointer in
+that bucket, a mutable path in the home bucket; the blob is read in that bucket, then in the home
+bucket.
+
+**The answer** sets what `Reader.ServeAsset` sets on a streamed answer, from the pointer: the
+checksum headers, `Content-Type`, `ETag`, `Last-Modified`, nosniff, the sandbox CSP,
+`Content-Disposition: attachment` except for `text/plain`, `Accept-Ranges`,
+`Telesphorepo-Version` (from `config.json`), `Cache-Control: private` when the repo object is
+private, and on `oci` `Docker-Content-Digest` and `Docker-Distribution-API-Version`. A matching
+`If-None-Match` is 304; HEAD answers from the pointer; one range (`If-Range` absent or the exact
+ETag) is 206 from a ranged R2 read; several ranges or another `If-Range` serve the whole file; a
+range that the server answers with 416 goes to the server. `Telesphorepo-Edge: hit; region=<hint>`
+marks an edge answer. With `s3.redirect` the server answers a 302 to the store; the edge streams
+the same bytes with 200.
+
+**Forwarding.** The Worker forwards with `fetch()` (`redirect: manual`, the body streamed) and
+sets `x-real-ip` and `X-Forwarded-For` to the incoming `CF-Connecting-IP`, never a value from the
+client; with `list:cloudflare` in the trusted proxies the server sees the real client. It drops
+the hop-by-hop headers (`Connection`, `Keep-Alive`, `Proxy-Connection`, `TE`, `Trailer`,
+`Transfer-Encoding`, `Upgrade`) and `Expect`, so a client's `Expect: 100-continue` (mvn sends it
+on each PUT) stays on the client's hop. A deployed
+Worker runs on routes of the zone of the base URL host and forwards with a same-zone fetch; the
+var `ORIGIN` (the test fixture only) forwards to that URL. A GET or HEAD also calls
+`passThroughOnException`.
+
+**Copies.** An R2 event notification rule of the home bucket (prefix `[s3.prefix/]blobs/`,
+`object-create` and `object-delete`) sends to the queue `<home bucket>-edge-copy`. The consumer
+acts on the current state: it HEADs the home key and copies to each region that lacks the blob or
+holds another size (a put with the `sha256` option; above 4.9 GiB a multipart upload with parts of
+the larger of 100 MiB and the size / 10,000, its state in `copy/<hint>/<hex>.json` after each
+part), or deletes the regional copies when the home blob is gone. The cron (every 10 minutes) runs
+a gap pass when `gap/request.json` is at least as new as the start of the last pass or the last
+pass is older than 24 hours: it merges the key-ordered lists of the home `blobs/` and each region
+(1000 keys per list), queues copies and deletes 100 per batch, keeps its cursor in
+`gap/state.json` and stops before 5,000 subrequests.
+
+**Deploy.** `GET /api/edge/wrangler.jsonc` (and the Edge delivery page) gives the Worker
+configuration for the settings: the routes `<base URL host><prefix>*` of each format with `Edge`,
+the bindings `HOME` and `R2_<HINT>` of each chosen region, the queue (producer `COPY`, consumer
+batches of 100, 10 retries), the cron, the var `PREFIX` (`s3.prefix`) and the `define` of
+`TELESPHOREPO_VERSION` to the server version, so `bun run deploy` builds a Worker of that version
+(the bundle of the release archive carries the same define). In `edge/` (or the
+unpacked release archive) the operator runs `CLOUDFLARE_API_TOKEN=... bun run provision`
+(`scripts/provision.ts`: each regional bucket with its location hint, the queue and the
+notification rule, skipping what exists; it refuses a config with `vars.ORIGIN`, a custom domain,
+routes on several hosts or a route outside the zone it names) and `bun run deploy`. The token
+needs Workers Scripts and Routes edit, R2 edit and Queues edit. `go tool task release` adds
+`telesphorepo-edge_<version>.tar.gz` (see **Tooling**).
+
+**Revocation speed.** The Cache API keeps an object per data center and `cache.delete` purges only
+the local one, so `edge.access_ttl` (default 30 s, 0 to 5 min) is the bound.
+
+| Change | Reaches the edge | What a stale edge can serve meanwhile |
+|---|---|---|
+| Read token deleted or expired; user disabled; grant removed; repo made private; device revoked; IP read rule added | within `edge.access_ttl` plus the write (the outbox writes within a second); within 5 minutes plus the TTL after a server crash in that second | Downloads of that repo to that credential, from a data center that cached the object |
+| File deleted or replaced | at once (the pointer is deleted or pending before the commit) | nothing |
+| Edge turned off | within `edge.access_ttl` | downloads that the server would also allow |
+
+**Other rules.**
+
+- *Repo kinds and locks.* The edge only reads, so the 405 for writes to proxies and groups, the 409
+  of a repo operation and the mirror lock stay with the server (they refuse `Write`, `Delete` and
+  `Mint`, never a read).
+- *Formats.* maven: releases from the regions, `maven-metadata.xml*` and snapshots through the home
+  pointer; checksum files are assets and serve like any file. debian: `pool/**` and `by-hash/**`
+  from the regions, `Release`, `InRelease` and `Packages*` through the home pointer (apt with
+  `Acquire-By-Hash` reads the indexes by hash, so most bytes come from the region). docker:
+  manifests by digest and blobs from the regions, manifests by tag through the home pointer; a pull
+  still gets its token from the server (`/v2/` and `/docker/token`) once, and a CI identity pull
+  carries an anonymous bearer, so the edge serves it only on an anonymous-read repo. A cached proxy
+  file that is not `Changing` serves from the edge; a miss goes to the server, which fetches and
+  commits it and so writes the pointer for the next client.
+- *Audit and logs.* The server records no download events, so none are lost at the edge. Guard
+  refusals (`network.denied`) stay at the server because a guarded repo is never answered by the
+  edge. Edge downloads are absent from the server's access log. The Worker never logs
+  `Authorization`, cookies or query strings.
+- *Uploads.* Every method other than GET and HEAD goes to the server with its body streamed.
+  Cloudflare limits a request body to 100 MB on Free and Pro and 200 MB on Business, with or without
+  a Worker; Maven, raw and Debian uploads over the limit use the resumable upload routes in chunks,
+  and Docker pushes use `docker.direct_uploads` (the upload `Location` points at the DNS-only host
+  of `docker.upload_url`, which has no Worker route).
+- *Pass-through errors.* A request with a body never relies on `passThroughOnException`: when the
+  server fetch throws after the body was read, the Worker answers the 502 problem document itself.
+  `passThroughOnException` does not cover a CPU or memory overrun (error 1102), so the Worker keeps
+  its CPU per request small. On Workers Paid there is no request cap: cost grows with traffic and
+  the edge does not stop.
+- *Local R2.* The e2e fixture runs the Worker in `wrangler dev --local` against local R2 through its
+  S3 endpoint (`/cdn-cgi/local/r2/s3`), which is why `storage.NewS3` leaves `Accept-Encoding` out of
+  the signature and why the Worker forwards to its `ORIGIN` var instead of using
+  `--local-upstream`. Local R2 sends no event notifications, so the notification path is tested in
+  the job `e2e-edge-cloudflare`. `edge/package.json` pins Wrangler at an exact version, because the
+  local S3 key is experimental; a bump reruns the `edge` zone first.
+
+**Known difference.** The server refuses even a valid token from an address that it blocks after
+failed attempts (`authenticate` checks `limits.blocked` first); that block lives in server memory
+and changes every few seconds, and copying it to the edge would cost a write per change against the
+one-write-per-second key limit. The edge serves a valid read token from such an address. A valid
+256-bit token is not a guess, and every wrong guess still reaches the server and counts.
+
+**Operator flow.** In **Edge delivery** the admin picks the home hint and the regions and saves; the
+page probes every bucket first. The admin saves the generated `wrangler.jsonc` in `edge/` (or the
+unpacked `telesphorepo-edge_<version>.tar.gz`), runs `CLOUDFLARE_API_TOKEN=... bun run provision`
+after each region change and `bun run deploy` after each region change and each release, then turns
+`edge.enabled` on. The server backfills the pointers and the gap check copies the blobs; a region
+serves when the page says ready. A removed region needs a deploy and a manual bucket delete in
+Cloudflare. Download snippets for private repos use a read token, never a password.
+
+**Costs and limits** (Cloudflare prices and limits as of October 2026; the monthly figure is an
+estimate, not a measurement).
+
+- Workers Paid: $5 a month with 10 M requests and 30 M CPU ms, then $0.30 per million requests and
+  $0.02 per million CPU ms; subrequests are not billed. Limits: 30 s CPU per request by default
+  (5 min at most), 128 MB per isolate, 10,000 subrequests per invocation by default, 6 connections
+  waiting for response headers at once, 1,000 Cache API calls per request.
+- R2 Standard: $0.015 per GB-month; class A $4.50 per million (put, copy, list, multipart and its
+  parts); class B $0.36 per million (get, head); `DeleteObject` free (`DeleteObjects` is counted as
+  free, an estimate); egress free; the free tier is 10 GB, 1 M class A and 10 M class B a month.
+  A single put takes up to 4.995 GiB, a multipart upload 10,000 parts of equal size, one write per
+  second per key (429 above); reads and lists are strongly consistent. Event notifications: 100
+  rules per bucket, no overlapping rules.
+- Queues: 1 M operations a month included, then $0.40 per million; a message costs a write, a read
+  and a delete per 64 KB, and each retry a read; 5,000 messages per second per queue, batches of
+  100, 15 minutes wall time per consumer run.
+- Operations: a download reads one pointer (one per member for a group), one blob, and 0 to 3
+  access objects on a Cache API miss. A stored file puts one home pointer, and one per region for
+  an immutable path (a replacement adds a `{pending}` put per bucket). A new blob costs one queue
+  message and one put per region. The idle cron costs one class B read per run. A far-bucket read
+  takes roughly 100 to 300 ms against a few ms from a near bucket (an estimate).
+- Example estimate: 10 M downloads and 12 M Worker requests a month, 200 GB stored, 4 regions,
+  100,000 new files and 50,000 new blobs come to about $28 a month: $5 Workers base, $0.60 for
+  requests above 10 M, $0 CPU, $7.20 class B, $0 class A and Queues, $14.85 storage (1,000 GB with
+  the home copy and 4 regional copies, minus 10 GB free) and free egress. Storage of the regional
+  copies is the largest cost, so fewer regions cost less.
 
 ## Nexus sources
 
@@ -2573,10 +2942,23 @@ page are in `web/src/README.md`.
   that an environment variable sets shows a badge and cannot change.
 - **General page.** One form with a section per settings group whose page is empty (see **Settings
   model**), with the labels and help of the server, for the groups whose permission the person
-  holds. **Storage**, **Sign-in options** and **Network and proxy** edit their groups on their own
-  pages; each group names its page.
+  holds. **Storage**, **Sign-in options**, **Network and proxy** and **Edge delivery** edit their
+  groups on their own pages; each group names its page.
 - **Storage page.** The location card and, for an S3 bucket, the bucket card, each with **Test** in
   its footer. A running storage move is a card with progress and **Cancel**.
+- **Edge delivery page** (`/#/settings/edge`, `edge.manage`, Server group). Status: on, stopping
+  or off (and why the settings cannot run it), the Worker version with a badge when it is not the
+  server's, the last gap check and the home bucket. Regions: a select of the home region above a
+  table of the six R2 location hints, each row with its area, "Serve from this region", the bucket
+  (default `<home bucket>-<hint>`) and the state (not used, filling, ready, waiting for a deploy),
+  the pointers waiting in the outbox and the last error; the home row shows "Home bucket". Save
+  runs the group's **Test** first; a failed probe shows on its row and nothing is saved. Clearing a
+  saved region asks first ("The server stops writing to the bucket ... Deploy the Worker again,
+  then delete the bucket in Cloudflare"). Backfill shows the progress of each filling region,
+  polled every 3 seconds. Settings: `edge.enabled` and `edge.access_ttl`. Deploy: the generated
+  `wrangler.jsonc` in a `CodeBlock` with a download, `bun run provision` and `bun run deploy`, the
+  token permissions, and "Deploy needed" after a storage, region or version change. The access
+  tab of a repo shows the download notes under the Download section.
 - **Sign-in options page.** Three numbered cards: connect your provider (with **Test** in its
   footer), permissions from the provider (the claim `oidc.permission_claim`, and the map `oidc.permission_map` as groups: each value of the claim with its server permissions in a permission picker, with Change, Remove and Add a group), and how people sign in (`oidc.session_ttl`,
   `signin.password_login`). The labels are plain words; each
@@ -2666,18 +3048,20 @@ and raw insert asset rows, debian inserts one package and its asset row per unit
 | `go tool task test import [go test args]` | Runs the import zone: `-tags import`, 45 min timeout. It starts a Nexus container |
 | `go tool task test scale [go test args]` | Runs `TestScale` (`-tags scale`, 60 min timeout) |
 | `go tool task test clients [go test args]` | Runs the clients zone: `-tags clients`, 120 min timeout. It builds the CLI of this repo on the host and runs it in containers with the real tools |
-| `go tool task test all [go test args]` | Runs core, import, scale and clients one after the other. It runs every zone, lists the failed zones and exits non-zero if any failed |
-| `go tool task release [version]` | Builds the UI and the six CLI archives that the server embeds once. Then it cross-compiles each program whose package exists: the CLI (`./cmd/telesphorepo`, with its own `LICENSE`; the install scripts make its second name `docker-credential-telesphorepo`) and the server (`./cmd/telesphorepo-server`) for linux, darwin and windows on amd64 and arm64 (`CGO_ENABLED=0`, `-trimpath`, `-X main.version`). Each binary goes into `bin/release/<program>_<version>_<os>_<arch>.tar.gz` (`.zip` on Windows) with `LICENSE` and `README.md`. The command writes `SHA256SUMS` of every archive. The version defaults to `git describe`. A version given as the argument must be a release version, and `changes.toml` must have no `dev` entry (see **Change log**) |
+| `go tool task test edge [go test args]` | Runs the edge zone: `-tags edge`, 60 min timeout. It builds the fixture image of `edge/test/Containerfile` and runs the edge Worker in wrangler dev in front of each server |
+| `go tool task test all [go test args]` | Runs core, import, scale, clients and edge one after the other. It runs every zone, lists the failed zones and exits non-zero if any failed |
+| `go tool task release [version]` | Builds the UI and the six CLI archives that the server embeds once. Then it cross-compiles each program whose package exists: the CLI (`./cmd/telesphorepo`, with its own `LICENSE`; the install scripts make its second name `docker-credential-telesphorepo`) and the server (`./cmd/telesphorepo-server`) for linux, darwin and windows on amd64 and arm64 (`CGO_ENABLED=0`, `-trimpath`, `-X main.version`). Each binary goes into `bin/release/<program>_<version>_<os>_<arch>.tar.gz` (`.zip` on Windows) with `LICENSE` and `README.md`. With `edge/`, it runs `bun install --frozen-lockfile` there and bundles the Worker (`wrangler deploy --dry-run --outdir` with `--define TELESPHOREPO_VERSION:"<version>"`) into `telesphorepo-edge_<version>.tar.gz`: `dist/`, `package.json`, `bun.lock`, `README.md` and `scripts/provision.ts`. The command writes `SHA256SUMS` of every archive. The version defaults to `git describe`. A version given as the argument must be a release version, and `changes.toml` must have no `dev` entry (see **Change log**) |
 | `go tool task tag <version>` | Makes a release. It needs a clean work tree and a new tag. It writes `v<version>` into each `dev` entry of `changes.toml`, commits the file as `Release v<version>`, and creates the annotated tag `v<version>`. It pushes nothing. The tagged commit holds the stamped change log, so `release.yml` and every image build embed the same entries |
 | `go tool task gen` | Runs `go tool sqlc generate` for every `internal/**/sqlc.yaml` |
 | `go tool task doctor` | Shows the detected toolchain and container engine |
 
-CI runs on GitHub Actions with the built-in `GITHUB_TOKEN` and no repository secrets:
+CI runs on GitHub Actions with the built-in `GITHUB_TOKEN`; only `e2e-edge-cloudflare` reads
+repository secrets (a Cloudflare account of the maintainer):
 
 | Workflow | Runs | Does |
 |---|---|---|
-| `ci.yml` | Push to `main`, pull requests | `build` job: `go tool task build`, `go vet` for the `e2e`, `import`, `scale`, `clients` and `macos` tags, `go vet` and `go build` of `./cmd/telesphorepo` for `GOOS=darwin` and `GOOS=windows`, `telesphorepo-server dbcheck`. `e2e-core` job: `go tool task test` (uploads the log on failure). `e2e-github-actions` job (pushes and pull requests of this repository; `id-token: write`): `TestCLIGitHubActions` with the job's real identity token. `snapshot-image` job (push to `main` only, after `e2e-core` passes): multi-arch image with tags `main` and `sha-<short>`, version `main-<short sha>`. A newer push cancels the running pull request jobs |
-| `e2e-extended.yml` | Manual (zone `import`, `scale` or `all`), weekly for `import` | `go tool task test <zone>` |
+| `ci.yml` | Push to `main`, pull requests | `build` job: `go tool task build`, `go vet` for the `e2e`, `import`, `scale`, `clients`, `edge` and `macos` tags, `go vet` and `go build` of `./cmd/telesphorepo` for `GOOS=darwin` and `GOOS=windows`, `bunx tsc --noEmit` and `bun run build` in `edge/`, `telesphorepo-server dbcheck`. `e2e-core` job: `go tool task test` (uploads the log on failure). `e2e-github-actions` job (pushes and pull requests of this repository; `id-token: write`): `TestCLIGitHubActions` with the job's real identity token. `e2e-edge-cloudflare` job (pushes and pull requests of this repository): `TestEdgeCloudflare` against a real Cloudflare account (`CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `E2E_R2_ACCESS_KEY_ID`, `E2E_R2_SECRET_ACCESS_KEY`). `snapshot-image` job (push to `main` only, after `e2e-core` passes): multi-arch image with tags `main` and `sha-<short>`, version `main-<short sha>`. A newer push cancels the running pull request jobs |
+| `e2e-extended.yml` | Manual (zone `import`, `scale`, `edge` or `all`), weekly for `import` | `go tool task test <zone>` |
 | `release.yml` | Push of a `v*` tag | `binaries` job: `go tool task release`, then a GitHub Release with the archives and `SHA256SUMS`. `image` job: multi-arch image (`linux/amd64`, `linux/arm64`) pushed to `ghcr.io/telesphorepo/telesphorepo` with tags `X.Y.Z`, `X.Y` and `latest` (no `latest` for pre-releases). `macos` job on `macos-latest`: `go tool task build`, then the macOS zone (`go test -tags macos -run TestMacOS ./e2e/` with `E2E_SERVER_BIN`) |
 
 The Dockerfile builds the UI, the six CLI archives (`go tool task cli`) and the Go binary on the build platform and cross-compiles with
@@ -2939,3 +3323,58 @@ on a named volume. It starts a server on the volume and measures the p95 latency
 each operation: Maven GET with `If-None-Match`, an asset list walk, a rare search, a common
 search and token auth (`/api/me`). An operation fails when its p95 at 1M exceeds
 `max(2 x p95 at 100k, p95 at 100k + 2 ms)`.
+
+**The edge zone** (tag `edge`, `go tool task test edge`) runs the real Worker of `edge/` and the
+real server; there is no stand-in for either. `edge_harness_test.go` builds the fixture image of
+`edge/test/Containerfile` once per run (Node, bun, the `edge/` sources) and gives each test its own
+Worker container on `TestNetwork`: `wrangler dev --local --ip 0.0.0.0 --test-scheduled` with
+`edge/test/wrangler.jsonc` (a home bucket and the regional buckets `weur` and `apac` in local R2,
+each with `local_dev.experimental_s3_credentials`, the local copy queue, and the var `ORIGIN`
+that `edge/test/run.sh` sets to the server of the test). `run.sh` also writes the `request.cf` of
+the client (London) to `CLOUDFLARE_CF_FETCH_PATH`, so the bucket choice is the same everywhere.
+The server under test uses `storage=s3` with the endpoint
+`http://127.0.0.1:8787/cdn-cgi/local/r2/s3`, path style and the home bucket, so it writes the local
+R2 that the Worker reads; its `base_url` is the Worker and its trusted proxies are `private`.
+Miniflare answers a request under `/cdn-cgi/` only when its Host is `localhost`, `127.0.0.1` or
+`[::1]` (any other Host gets a bare 403), and the S3 signature covers the Host, so a forwarder
+(`edge/test/forward.mjs`, from the same image) runs in the network namespace of the server and
+passes `127.0.0.1:8787` to the Worker container unchanged. The
+test side reads and writes the buckets through `storage.NewS3`. Local R2 sends no event
+notifications, so the tests run the consumer through the scheduled gap check (`/__scheduled`)
+after a `gap/request.json`. Each case also asserts `Telesphorepo-Edge`, so the tests prove which
+requests the edge answers. `edge_test.go` covers:
+
+- `TestEdgeParity`: for maven, raw, debian and docker, each credential (none, a read token by
+  Basic and by Bearer, a token without a grant, a token of `repositories.all`, a password, a UI
+  session, a publish session, a device proof, a bad token; on `oci` a core bearer of anonymous, a
+  password, a read token, a device and a publish session; on `standard` a core bearer), each repo
+  setting (public, private with and without a grant, a read IP rule) and each kind the format has
+  (hosted, proxy, a group with a private member, a guarded member and a proxy member): the same
+  request to the Worker and to the server gives the same status, body and headers (an allowlist
+  with `Telesphorepo-Version` and `Cache-Control`), with `s3.redirect=false`. `TestEdgeRedirect`
+  compares the body after the server's redirect with `s3.redirect=true`.
+- `TestEdgeClientIP`: a spoofed `X-Real-IP` and `X-Forwarded-For` never reach the audit log; the
+  address that the Worker got does.
+- `TestEdgeRevocation` (`edge.access_ttl=1s`): a token delete, a user disable, a grant removal, a
+  repo made private, a device revoke and a read IP rule each turn edge answers into server answers
+  within 2 s.
+- `TestEdgeFreshness`: a file delete and a Maven republish show at the edge at once, a Docker tag
+  move serves the new digest, and a release that is back in the first member of a group never
+  serves the second member's copy.
+- `TestEdgeCopies`: the Worker reads the home blob until the gap check copies a new blob to both
+  regions; a regional copy deleted by hand comes back; the blob GC removes the regional copies.
+- `TestEdgeRegions`: an added region fills and becomes ready; a removed one gets no pointers.
+- `TestEdgeRanges`: Range, HEAD, 304, 416 and If-Range on a mutable and an immutable path.
+- `TestEdgeFailOpen`: a malformed pointer, `edge.enabled=false` and a Worker of another version
+  give server answers.
+- `TestEdgeLastUsed`: a read token checked at the edge gets its `last_used_at`.
+- `TestEdgeClients`: `mvn` (deploy and resolve), Gradle, `apt-get install` and `docker pull`
+  through the Worker, for a public and a private repo.
+
+`TestEdgeCloudflare` (`edge_cloudflare_test.go`) tests the notification path against a real
+Cloudflare account in the job `e2e-edge-cloudflare` of `ci.yml`: it makes a home bucket and a
+`weur` bucket with names of the run, the queue, the notification rule and the Worker, puts and
+deletes a blob through S3, waits for the regional copy and its delete, and removes everything it
+made. Without the account it skips; with `E2E_CLOUDFLARE` set it fails. `edge/package.json` pins
+Wrangler, because the local S3 endpoint of the fixture is experimental: a Wrangler bump runs the
+`edge` zone before it lands.

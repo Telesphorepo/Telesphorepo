@@ -13,7 +13,8 @@ go tool task test [args]    # core zone (tag e2e); args go to go test, e.g. -run
 go tool task test import    # import zone (tag import): TestNexus, starts a Nexus container (slow)
 go tool task test scale     # scale zone (tag scale): 100k and 1M asset latency test (slow)
 go tool task test clients   # clients zone (tag clients): the CLI of cmd/telesphorepo with the real tools in containers (slow)
-go tool task test all       # core, import, scale and clients one after the other
+go tool task test edge      # edge zone (tag edge): the edge Worker in wrangler dev with local R2 in front of the server (slow)
+go tool task test all       # core, import, scale, clients and edge one after the other
 go tool task tag <ver>      # stamp the dev entries of changes.toml, commit, tag v<ver> (push it yourself)
 go tool task release [ver]  # cross-compiled archives + SHA256SUMS in bin/release
 go tool task gen            # run sqlc for every internal/**/sqlc.yaml
@@ -21,24 +22,30 @@ go tool task doctor         # show detected Go / bun / Node / Docker-Podman
 
 go build ./...
 go vet ./...
-go vet -tags e2e ./e2e/...  # e2e files only compile with a tag; also vet -tags import, scale, clients and macos
-E2E_SKIP_BUILD=1 go tool task test -run TestX   # reuse the already-built image
+go vet -tags e2e ./e2e/...  # e2e files only compile with a tag; also vet -tags import, scale, clients, edge and macos
+E2E_SKIP_BUILD=1 go tool task test -run TestX   # reuse the already-built images
+cd edge && bunx tsc --noEmit && bun run build   # type-check and bundle the edge Worker
 ```
 
 `go tool task` is registered with `tool` in `go.mod`. There is no root `package.json`, Makefile
 or shell script, so it works the same on Windows, macOS and Linux. The UI build needs bun (npm is
-the fallback) and Node 26+ (see `.node-version`). The e2e suite needs Docker or Podman.
+the fallback) and Node 26+ (see `.node-version`); so does the edge Worker in `edge/` (lockfile
+`edge/bun.lock`). The e2e suite needs Docker or Podman.
 
 **Who runs what.** A subagent builds and vets: `go build ./...`, `go vet ./...`, `go vet` with
-each of the five tags, `go vet` of `./cmd/telesphorepo` with `GOOS=darwin` and `GOOS=windows`,
-`go tool task gen` and `bun run build` in `web/`. A subagent never runs a test, a dev server or a
-preview. The main session runs the zones. Only the `macos` job of `release.yml` runs the macOS
-zone (tag `macos`).
+each of the six tags (`e2e`, `import`, `scale`, `clients`, `edge`, `macos`), `go vet` of
+`./cmd/telesphorepo` with `GOOS=darwin` and `GOOS=windows`, `go tool task gen`, `bun run build` in
+`web/`, and `bunx tsc --noEmit` and `bun run build` in `edge/`. A subagent never runs a test, a
+dev server, a preview or `wrangler dev`, and never touches a Cloudflare account. The main session
+runs the zones. Only the `macos` job of `release.yml` runs the macOS zone (tag `macos`), and only
+the `e2e-edge-cloudflare` job of `ci.yml` runs `TestEdgeCloudflare` against a real account.
 
 **Which zone.** Run the core zone for every change. Run the import zone when you touch
 `internal/nexus`, an importer or the `mirror` operation. Run the scale zone when you touch a hot
 query or an index. Run the clients zone when you touch `cmd/telesphorepo`, `internal/publish`, the
-write gate, the device and OIDC routes or the change log. Run all zones before a push that touches several zones.
+write gate, the device and OIDC routes or the change log. Run the edge zone when you touch
+`internal/edge`, `internal/assets`, `internal/access`, `internal/auth`, `internal/storage` or
+`edge/`, and before a Wrangler bump lands. Run all zones before a push that touches several zones.
 
 ## Hard rules
 
@@ -171,6 +178,7 @@ write gate, the device and OIDC routes or the change log. Run all zones before a
 | Upload plan and upload | `Plan` and `Store` of the format (`format.Spec.Upload`), e.g. `internal/maven/plan.go`; routes in `internal/api/files.go`; UI in `web/src/pages/repo/UploadView.svelte` and `upload/` |
 | Snippets, CI files | `Usage` and `Tools` of the format (`format.CLITool`, `format.CLISnippet`); `internal/ci/workflow.go` (the GitHub Actions, Jenkinsfile and Jenkins freestyle builders, each with the install step of the CLI) |
 | Audit log | `internal/audit` (registry, `Record`), `internal/activity` (module `audit`: `GET /api/audit`), `web/src/pages/server/Activity.svelte` |
+| Edge delivery | `internal/edge` (module `edge`: `module.go` buckets and routes, `settings.go` the group `edge`, `objects.go` the R2 objects, `watcher.go` the pipeline watcher, `outbox.go` the job `edge.outbox`, `access.go` the access objects, the change notices and `edge.reconcile`, `control.go` the job `edge.backfill` (on, off, draining, regions, blob check), `gap.go` and `seen.go` what the Worker writes, `wrangler.go`, `api.go`); `format.Spec.Edge` of each format; the Worker in `edge/` (`src/index.ts` fetch, `shapes.ts`, `glob.ts` the port of `format.Glob`, `access.ts`, `serve.ts`, `copy.ts` queue, `gap.ts` cron, `scripts/provision.ts`, `test/` the fixture); the release archive in `tools/task/edge.go`; UI in `web/src/pages/server/EdgeDelivery.svelte` and `web/src/modules/edge/`; e2e in `e2e/edge_harness_test.go`, `e2e/edge_test.go` and `e2e/edge_cloudflare_test.go` (tag `edge`) |
 | Storage move (FS ↔ S3) | `internal/move` (module `storage`: service, copier, `module.go`), `internal/storage/mirror.go`, `web/src/pages/server/Storage.svelte` |
 | Single sign-on | `internal/oidc` (module `sso`: sign-in, the permission map, device approval), `web/src/pages/server/SingleSignOn.svelte` |
 | Nexus sources, syncs, cut-over | `internal/nexus` (module `nexus`: client, service, `sync.go` scheduler and runner, `api.go`), `web/src/pages/server/NexusMigration.svelte`, `NexusSource.svelte`. Per-format import code is the `Importer` of the format (`Plan` for the target repo, `Target`/`Store` per file). Repo lock: the repo operation `mirror` (`repo_ops`), checked in `access.Engine.Decide` |

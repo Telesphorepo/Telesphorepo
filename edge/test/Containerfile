@@ -1,0 +1,20 @@
+# The fixture of the edge zone (e2e/edge_test.go): the edge Worker in wrangler dev, with local R2
+# (a home bucket and two regional buckets, each with its local S3 endpoint), the local copy queue
+# and the scheduled gap check. The build context is edge/.
+#
+#   podman build -t telesphorepo-edge-e2e -f edge/test/Containerfile edge
+#
+# Wrangler runs on Node; bun installs the locked dependencies.
+FROM docker.io/library/node:26.12.0-trixie-slim
+COPY --from=docker.io/oven/bun:1.4.3-debian /usr/local/bin/bun /usr/local/bin/bun
+ENV WRANGLER_SEND_METRICS=false \
+    WRANGLER_SEND_ERROR_REPORTS=false \
+    CI=1
+WORKDIR /edge
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
+COPY tsconfig.json ./
+COPY src ./src
+COPY test ./test
+EXPOSE 8787
+ENTRYPOINT ["sh", "/edge/test/run.sh"]

@@ -10,13 +10,14 @@ import { storage } from "./storage/module";
 import { network } from "./network/module";
 import { signing } from "./signing/module";
 import { publish } from "./publish/module";
+import { edge } from "./edge/module";
 import { sso } from "./sso/module";
 import { nexus } from "./nexus/module";
 import { maven } from "./maven/module";
 import { debian } from "./debian/module";
 import { docker } from "./docker/module";
 
-export const modules: ModuleUI[] = [core, audit, storage, network, signing, publish, sso, nexus, maven, debian, docker];
+export const modules: ModuleUI[] = [core, audit, storage, network, signing, publish, edge, sso, nexus, maven, debian, docker];
 
 /** Every page, in module order; the first whose path matches wins. */
 export const pages: PageDef[] = modules.flatMap((m) => m.pages ?? []);
