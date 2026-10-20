@@ -68,6 +68,8 @@ its repository, and runs the publish command of the project with the token in th
   Maven    mvn deploy (or ./mvnw), with a temp settings file and the repository as the target
   Gradle   gradle publish (or ./gradlew), with an init script for projects with maven-publish
   Helm     helm package, then helm push to the registry
+  npm      npm publish, or pnpm publish, yarn npm publish or bun publish by the lockfile, with the
+           repository as the registry
   raw      uploads each FILE into the folder "path" of telesphorepo.toml
   Debian   uploads each .deb to "dist" and "component" of telesphorepo.toml
 A Docker repository publishes with docker push and the credential helper.

@@ -1270,5 +1270,6 @@ func TestNexus(t *testing.T) {
 
 		// A docker repo, through a source of its own (this one is cut over).
 		t.Run("docker", func(t *testing.T) { nexusDocker(t, n, s) })
+		t.Run("npm", func(t *testing.T) { nexusNpm(t, n, s) })
 	})
 }

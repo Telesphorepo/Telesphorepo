@@ -25,3 +25,10 @@
 #   scope   = "publish/npm"
 #   needs   = "server"
 #   summary = "npm publish uses the new upload route"
+
+[[change]]
+version = "dev"
+scope   = "publish/npm"
+needs   = "cli"
+summary = "telesphorepo publish publishes npm packages with npm, pnpm, yarn or bun; update the CLI to publish to npm repositories"
+

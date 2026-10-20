@@ -71,6 +71,7 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/maven` | Module and format `maven`: the standard routes, release immutability (`Admit`), the content types, the merge of `maven-metadata.xml` in a group, the metadata after a delete (`AfterRemove`), web UI uploads with checksums and metadata |
 | `internal/debian` | Module and format `debian`: `.deb` upload/parse through `Commit`, the package rows (`OnCommitted`, `OnRemoved`), the index rebuild (`Rebuild`), `/debian/{repo}/key.asc`, the plan of a Nexus apt import (distribution and signing key). Owns its tables, queries (`queries/`, `dbq/`) and architecture config; binds a signing key per repo (`SigningKey`) |
 | `internal/raw` | Module and format `raw`: plain files at `/raw/{repo}/{path...}` (the standard routes) with an `overwrite` policy (`Admit`) |
+| `internal/npm` | Module and format `npm`: the registry API at `/npm/{repo}/` (one route per method that parses the rest of the path), tarballs through `Commit`, the version rows (`OnCommitted`, `OnRemoved`), packuments rendered per request, the streaming publish body, the Nexus `npm` importer and web UI uploads of `.tgz` files. See **npm registry** |
 | `internal/signing` | Module `signing`. OpenPGP: key `Generate` and `Parse`, the `Keys` service (create, import, delete, one signer per key, the key of each repo), the repo field `signing_key`, clearsign/detach-sign (ProtonMail go-crypto). See **Signing keys** |
 | `internal/files` | The file tree and the details of one file. Writes and deletes go through the byte pipeline |
 | `internal/audit` | The audit log: the action registry (`Actions`), the actor in the context (`WithActor`, `System`, `CLI`), `Record` and `RecordTx`, the list query and `Cleanup`. See **Audit log** |
@@ -161,6 +162,7 @@ it needs and leaves the others nil. The kernel gives it these parts:
 | `debian` | `internal/debian` | `signing` | Format `debian` (publish category `cli`) with its schema, `Rebuild` and the tool `telesphorepo` |
 | `raw` | `internal/raw` | | Format `raw` (publish category `cli`) with the tool `telesphorepo` |
 | `docker` | `internal/docker` | `network`, `publish` | Format `docker` (an OCI registry: hosted, proxy and group repos) with its schema; the root prefix `/v2/`, `/docker/` (the token endpoint) and `GET /api/docker/{name}/manifest`; the settings group `docker`; job `docker.links`; the publish category `helper` (the native tools push through the credential helper of the CLI, see **Publishing**); the Nexus importer of `docker`; demo data and seed (see **Docker registry**) |
+| `npm` | `internal/npm` | | Format `npm` (hosted, proxy and group; publish category `cli`) with its schema, the tools `npm`, `pnpm`, `yarn` and `bun` (their CI steps), the Nexus importer of `npm`, demo data and seed (see **npm registry**) |
 
 **Routes.** The route table (`internal/route`) gives each module a `Router`. A module registers
 under `/api/`, under `/<name>/` of each format it registers, and under its root prefixes. Any
@@ -510,6 +512,16 @@ Tables of the `debian` component (`internal/debian/schema.sql`):
 | `deb_packages` | UNIQUE `(repo_id, distribution, component, architecture, package, version)`, idx `asset_id`, idx `deb_packages_sha256 (repo_id, distribution, component, sha256)`, idx `deb_packages_package (repo_id, component, package)` | Also the streaming index for `Packages`. The SHA-256 index finds a package an import already holds. The package index reads the versions and builds of a package. `asset_id` cascades with the pool file |
 | `deb_index_files` | PK `(repo_id, distribution, path)` (WITHOUT ROWID) | Sizes and hashes; `Release` is built from these rows |
 
+Tables of the `npm` component (`internal/npm/schema.sql`). Every `repo_id` cascades. Rows exist for
+hosted repos only; the commit of a tarball writes them and its removal deletes them (see **npm
+registry**):
+
+| Table | Key / indexes | Notes |
+|---|---|---|
+| `npm_packages` | PK `(repo_id, name)` (WITHOUT ROWID) | `created`, `modified` (unix seconds) and `rev`, the `_rev` of the packument: `<n>-<hash of the versions, deprecations and tags>`; the row goes with the last version |
+| `npm_versions` | PK `(repo_id, name, version)` (WITHOUT ROWID), idx `npm_versions_sort (repo_id, name, sort_key)`, UNIQUE `npm_versions_tarball (repo_id, tarball)` | `sort_key` (`version.SemVer.SortKey`), `manifest` (the version's package.json without `dist`), `tarball` (the asset path), `integrity` (`sha512-<base64>`), `shasum` (SHA-1 hex), `published_at`, `deprecated` (`''` for none) |
+| `npm_tags` | PK `(repo_id, name, tag)` (WITHOUT ROWID) | The dist-tags; a tag always names an existing version, and `latest` always exists |
+
 Tables of the `docker` component (`internal/docker/schema.sql`). Every column `repo_id` cascades;
 digests are the hex of a SHA-256. Only the hooks of the format write them, in the transaction of
 the asset change (see **Docker registry**):
@@ -683,6 +695,7 @@ signed-in browser downloads from a private repo without a Basic prompt. A **writ
 | `GET, HEAD, PUT /raw/{repo}/{path...}` | read / write | PUT: 201 new path; 200 identical bytes (any policy) or a replace when `overwrite` is `allow`; 409 different bytes when `overwrite` is `deny` (default); 413 over `max_upload_size`. Repo config: `{"overwrite":"deny"}` or `{"overwrite":"allow"}`. S3 redirect as for Maven |
 | `GET, HEAD /debian/{repo}/key.asc` | read | The armored public signing key of the repo (its repo field `signing_key`). Same read gate as the repo's other files |
 | `/v2/...`, `GET, POST /docker/token`, `GET /docker/hosts` | see **Docker registry** | The OCI registry of the docker format |
+| `GET, HEAD, PUT, DELETE /npm/{repo}/...` | see **npm registry** | The npm registry API of the npm format |
 | `GET /api/docker/{name}/manifest?path=` | `repo.download` (password, read token, UI session, anonymous on a public repo) | The details of the manifest at a tag or manifest path of a docker repo (a group: of the first readable member that stores it): `{digest, media_type, artifact_type, size, total_size, config: {digest, media_type, size}\|null, layers: [{digest, media_type, size}], platforms: [{digest, os, architecture, variant}], subject\|null, tags: [first 100], referrers: n}`. A link path or another path is 400; a file that does not parse is 422 |
 | `GET /install.sh`, `GET /install.ps1` | none | The install script of the Telesphorepo CLI (see **Install scripts and CLI downloads**), `text/plain`. The publish module mounts them. 404 problem `no-cli-downloads` on a build without CLI archives; 400 when the server address holds a quote, a space, a backslash or a control character |
 | `GET /cli/telesphorepo_<os>_<arch>.<ext>`, `GET /cli/SHA256SUMS` | none | A CLI archive of the server's build (`.tar.gz`, `.zip` on Windows) and the SHA-256 of each, `Cache-Control: no-cache`. 404 problem `no-cli-downloads` on a build without CLI archives; another name is 404 |
@@ -903,6 +916,8 @@ is written to it with `sudo tee -a FILE > /dev/null`.
 | Upload `.deb` | `telesphorepo publish x.deb` (with `dist` and `component` in `telesphorepo.toml`). Indexes rebuild after `index.debounce`; poll `GET /api/repos/{repo}/status` for `pending: 0` |
 | Docker | Pull: `docker pull <host>/{repo}/IMAGE:TAG`; a private repo needs `docker login <host>` with a read token. Push: the setup line of the Publish tab adds the credential helper of the CLI to the Docker config once, then `docker push <host>/{repo}/IMAGE:TAG` with no `docker login`. Helm and ORAS use the same helper (see **Docker registry** and **Publishing**) |
 | Raw | Upload: `telesphorepo publish file.tar.gz` (with `path` in `telesphorepo.toml`). Download: `curl -fLO HOST/raw/{repo}/path/file.tar.gz`; a private repo adds `-K -` with `user = "USER:READ_TOKEN"` on stdin |
+| npm, pnpm, bun | `.npmrc` of the project: `registry=HOST/npm/{repo}/`; a private repo adds `//HOST-without-scheme/npm/{repo}/:_authToken=${NPM_TOKEN}` with a read token in `NPM_TOKEN`. Publish: `telesphorepo publish` |
+| Yarn 2+ | `.yarnrc.yml`: `npmRegistryServer: "HOST/npm/{repo}/"`; a private repo adds `npmAlwaysAuth: true` and `npmAuthToken: "${NPM_TOKEN}"` (Yarn sends no token on reads without `npmAlwaysAuth`); a plain-HTTP server adds its host name to `unsafeHttpWhitelist` |
 
 ### Install scripts and CLI downloads
 
@@ -1261,6 +1276,7 @@ file. A row is one entry of a table in `cmd/telesphorepo/detect.go`; a new forma
 | Docker (Helm chart) | `Chart.yaml` | `helm` | `helm package <dir> -d <tmp>/chart`, then `helm push <chart>.tgz oci://<host>/<repo> --registry-config <tmp>/config.json` (the upload host when the server has one; `--plain-http` for an `http://` server) | The registry config names `credHelpers` `telesphorepo` for the Docker hosts; the helper answers `TELESPHOREPO_TOKEN` for the hosts of `TELESPHOREPO_DOCKER_HOSTS` |
 | raw | none | the CLI | `PUT /raw/<repo>/<path>/<file name>` for each FILE; a file of 64 MiB or more goes through `POST /api/repos/{name}/uploads`, `PATCH` chunks of 16 MiB (a failed chunk is sent again from the `received` of the server), and `PUT ...?path=&sha256=&size=` | Bearer session token |
 | Debian | none | the CLI | `PUT /debian/<repo>/upload/<dist>/<component>` for each FILE; a file of 64 MiB or more goes through the resumable routes as for raw, and `PUT /debian/<repo>/upload/<dist>/<component>?upload=<id>&sha256=&size=` finishes it | Bearer session token |
+| npm | `package.json` | by lockfile: `pnpm-lock.yaml` pnpm; `yarn.lock` with `.yarnrc.yml` yarn; `bun.lock` (or `bun.lockb`) bun; else npm, each on the `PATH` | `npm publish --registry <base>/npm/<repo>/`, `pnpm publish --registry ... --no-git-checks`, `yarn npm publish` or `bun publish --registry ...`; the package manager packs | npm and pnpm: `npm_config_userconfig=<tmp>/npmrc` with the registry and `//<host>/npm/<repo>/:_authToken=${TELESPHOREPO_TOKEN}`. bun: `NPM_CONFIG_TOKEN`. yarn: `YARN_NPM_PUBLISH_REGISTRY`, `YARN_NPM_AUTH_TOKEN` and, for an `http://` server, `YARN_UNSAFE_HTTP_WHITELIST`. `setup` offers the CI file of the tool of the lockfile |
 
 A wrapper in the project comes before a tool on the `PATH` (`exec.LookPath`); a wrapper without
 the execute bit runs through `sh`. The CLI prints each command before it runs it, without the
@@ -1634,7 +1650,9 @@ the repo object, and a repo delete marks every user object. User and device IDs 
 matches an `Immutable` glob and no `Mutable` glob. maven: immutable `**/*`, mutable
 `**/maven-metadata.xml*` and `**/*-SNAPSHOT/*`; debian: immutable `pool/**/*` and
 `dists/**/by-hash/**/*`; docker (`oci`): immutable `**/_manifests/sha256/*` and
-`**/_blobs/sha256/*` (tags are mutable); raw: every path is mutable. A proxy gets a pointer only
+`**/_blobs/sha256/*` (tags are mutable); npm: immutable `**/-/*.tgz` (packuments are rendered
+per request and have no pointer, so the Worker sends them to the server); raw: every path is
+mutable. A proxy gets a pointer only
 for a path whose `Classify` class is not `Changing`. A group has no pointers of its own.
 
 **The pointers.** The module's pipeline watcher (see **Byte pipeline**) and the outbox
@@ -1971,6 +1989,11 @@ is unreachable.
     config's `distribution`; the target of a package that the distribution holds already is its
     pool file, so it is skipped without a download. Other files are ignored. A target without
     `distribution` fails each package.
+  - npm (`npm`): each `<name>/-/<file>.tgz` at its path, through the commit of a version with the
+    manifest read from the tarball's `package/package.json` (the version cleaned as npm cleans
+    it). The dist-tags of the package at the source (`-/package/<name>/dist-tags`) that name the
+    version are set; without them `latest` is the highest release. Nexus's packuments are ignored.
+    A version that exists with the same tarball is skipped, with other bytes it fails.
   - docker (`docker`): `v2/<image>/manifests/<tag>` to the tag path and
     `v2/<image>/manifests/sha256:<hex>` to the manifest path; the blobs (`v2/-/blobs/...`) are
     ignored, because each manifest brings what it names. `Store` parses the manifest (the media
@@ -2097,8 +2120,9 @@ is unreachable.
 
 ## Group and proxy repositories
 
-A format takes proxy repos when its `format.Spec.Kinds` lists `proxy` (Maven, Debian, Docker; it
-then sets `Classify` and `ProxyProbe`) and group repos when it lists `group` (Maven, Docker). `repos.Service` refuses a kind that the format's
+A format takes proxy repos when its `format.Spec.Kinds` lists `proxy` (Maven, Debian, Docker, npm;
+it then sets `Classify` and `ProxyProbe`) and group repos when it lists `group` (Maven, Docker,
+npm; npm renders its group documents itself, see **npm registry**). `repos.Service` refuses a kind that the format's
 `format.Spec.Kinds` does not list (400). Neither kind takes uploads, publish sessions or CI pipelines:
 minting a session for one answers 409 with the read-only text, and a CI pipeline that lists one
 answers 400. A Nexus mapping maps a Nexus hosted, proxy or group repo to a target of the same kind.
@@ -2431,6 +2455,79 @@ platforms or the layers) and the artifact snippets. No repo tab and no config fi
 **Demo and seed.** The demo repo `docker` (public) holds 20 images with 1 to 8 tags each: two
 multi-platform indexes, one Helm chart, the rest image manifests of small random layers. The seed
 inserts per number a link, a manifest and a tag with their rows, 100 tags per image.
+
+## npm registry
+
+The npm module (`internal/npm`) serves the registry `HOST/npm/{repo}/` for npm, pnpm, Yarn 2+ and
+Bun, with hosted, proxy and group repos. Tarballs (`<name>/-/<unscoped>-<version>.tgz`, the paths
+of registry.npmjs.org) are assets; packuments are rendered per request and never stored at their
+own URL.
+
+- **Routes.** A scoped name comes as one segment with an encoded slash (`@scope%2fname`) or as two
+  segments; `httpx.RepoPath` refuses `%2f`, so one route per method (`/npm/{repo}/{rest...}`) reads
+  the escaped path itself and checks the name (URL-safe characters, an optional `@scope/`, at most
+  214 bytes, no leading `.` or `_`; a name that a version adds must be lower case).
+  - `GET <name>`: the packument. `Accept: application/vnd.npm.install-v1+json` gets the abbreviated
+    document with that content type (the install fields of npm's package-metadata.md), else the
+    full one (`_id`, `_rev`, `dist-tags`, `versions`, `time`, and `description`, `readme` and the
+    like of the latest version). Both send `Vary: Accept`, a strong `ETag` and 304
+    (`format.WriteDocument`); `?write=true` is the same. `dist.tarball` is absolute under
+    `route.API.BaseURL` (the base_url setting, else the request's scheme and host).
+  - `GET <name>/-/<file>`: the tarball through the read path.
+  - `PUT <name>` (`repo.publish`): with a `.tgz` attachment, a publish. The body is read as a
+    stream: each field whole (at most 64 MiB), the base64 attachment decoded straight into the
+    spool (`max_upload_size`). The body names exactly one version, strict SemVer, whose manifest
+    names the package and the version. The server computes `integrity` (sha512) and `shasum`
+    (SHA-1) and writes `dist`; a `.sigstore` attachment (provenance) is stored next to the tarball
+    and not advertised. A version that exists is 403 "version 1.2.0 of x already exists". The
+    dist-tags of the body that name the version are set, then `latest` names the highest release
+    when no latest is left. 201 `{"ok":true}`. Without an attachment it is a metadata update: a
+    changed `deprecated` of a version is applied (`npm deprecate`); versions missing from the body
+    stay.
+  - `PUT <name>/-rev/<rev>` (`repo.delete`): the step of `npm unpublish` that drops versions: every
+    version missing from the body is removed with its tarball. `DELETE <name>/-/<file>/-rev/<rev>`
+    (`repo.delete`) removes a tarball (200 when the step before removed it), `DELETE
+    <name>/-rev/<rev>` every version. A `_rev` that is not current is 409. The `RepoRule` picks
+    the operation from the URL (`Ops` and `Pick`), so a CI session cannot unpublish.
+  - `GET /-/package/<name>/dist-tags`, `PUT .../dist-tags/<tag>` (body: the version as a JSON
+    string, `repo.publish`, 201) and `DELETE .../dist-tags/<tag>` (`repo.publish`; `latest` is
+    refused with 400). A tag is up to 64 URL-safe characters and not a version.
+  - `GET /-/whoami` (`{"username"}` of the credential, 401 without one) and `GET /-/ping` (`{}`).
+  - `POST /-/v1/login` and `PUT /-/user/<user>` answer 401 "npm login is not used with
+    Telesphorepo. To install, put a read token in .npmrc (see the repo page). To publish, run
+    telesphorepo publish."; `GET /-/v1/search` and `/-/npm/v1/security/...` answer 404. Errors are
+    `{"error": "..."}`.
+- **Credentials.** npm, pnpm and Bun send `Authorization: Bearer <token>`, Yarn the same with
+  `npmAlwaysAuth`; a read token reads, a publish session writes.
+- **Rows.** The commit of a tarball whose write carries the version (`Write.Meta`) inserts its
+  `npm_versions` row, its tags and the package row in the transaction of the commit; `OnRemoved`
+  deletes the version of a removed tarball, drops the tags that named it, moves `latest` to the
+  highest release when it went, deletes a package without versions, and has the `.sigstore` of the
+  version removed next. So a file delete in the web UI unpublishes the version. Every change moves
+  `_rev` on. Tag changes and deprecations run in one transaction under the package lock.
+  `Admit` refuses a write without a version (a core upload) with 400.
+- **Proxy** (preset `https://registry.npmjs.org/`). The remote's abbreviated and full packuments are
+  cached as `Changing` assets at `.packument/abbreviated/<name>` and `.packument/full/<name>`, each
+  fetched only when a client asks for that form (with the matching `Accept`). Rendering rewrites
+  each `dist.tarball` to `<repo URL>/<name>/-/<file name of the remote URL>` and keeps
+  `integrity`, `shasum` and `signatures`; `dist.attestations` goes, and a version without a `.tgz`
+  tarball URL goes. A tarball is fetched from the same path at the remote and never changes.
+- **Group.** The first member in read order that has the name owns it (`assets.Reader.Owner`): a
+  hosted member with a package row, a proxy whose remote has the packument. The group renders the
+  owner's packument with the group's URLs and serves a tarball only from the owner, so a public
+  package in a later proxy never shadows a private name. A member that fails is skipped; with none
+  left and a failed proxy the answer is 502.
+- **Cache.** Rendered bodies stay in a `format.DocumentCache` (2,000 entries, 256 MiB) keyed by the
+  form, the name, the package `_rev` or the SHA-256 of the cached remote document, and the base URL.
+- **Versions.** An artifact folder is `<name>/`. Versions page newest first by `sort_key`
+  (`npm_versions_sort`); each is a release with one build, its tarball (`extension` `tgz`).
+  Proxies and groups have no versions.
+- **Upload.** The web UI takes `.tgz` files; the plan reads the first MiB for `package/package.json`
+  (name, version cleaned as npm does). A version that exists is a problem. An upload moves
+  `latest` to the version when it is a release above the current one.
+- **Snippets.** `.npmrc` (npm, pnpm, bun) and `.yarnrc.yml`, then `npm install` and `yarn add` of a
+  package (pinned, or by the latest tag). CI tools `npm`, `pnpm`, `yarn` and `bun`, each with its
+  install step before `telesphorepo publish`.
 
 ## Files, uploads and deletes
 
@@ -3022,6 +3119,7 @@ timestamps follow them.
 | `maven` | anonymous read | About 150,000 files. 400 groupIds of 2 to 4 segments from word lists (e.g. `io.northwind.billing.cli`), 3 to 60 artifacts each (a few groups are large), 1 to 40 versions each (most have few). Each version has a valid pom, jar and sources jar (minimal zips), sometimes a javadoc jar and Gradle `.module`, and real `.md5`/`.sha1`/`.sha256` files. Each artifact has a `maven-metadata.xml` with `latest` and `release`. Some artifacts end in a `-SNAPSHOT` with timestamped files and version metadata. 30 Gradle plugins have their `<id>.gradle.plugin` marker artifacts |
 | `internal` | private | About 2,000 files of the same shape. `lena` reads it; `jonas` writes it |
 | `debian` | anonymous read | About 300 binary packages from about 100 sources, 1 to 5 versions each, as real `.deb` files for `amd64` and `arm64` or `all`. They go through the format's upload pipeline into `stable/main`, so the indexes and signed `Release` files are valid |
+| `npm` | anonymous read | About 40 packages (a third under `@acme`), 1 to 6 versions each, some ending in a `-beta.1`, as real tarballs through the format's upload step |
 | `raw` | anonymous read | 20,000 files: `docs/<product>/<version>/` sites, `releases/<yyyy>/<mm>/<product>-<version>/` archives (valid `.tar.gz`/`.zip`) with `SHA256SUMS`, and `build-logs/<project>/<branch>/<build>/` logs and test reports |
 
 The demo users are `priya` (administrator), `jonas` (download and publish on `maven` and
@@ -3088,15 +3186,20 @@ second again. The containers that share the Maven cache volume lock it with file
 build with `E2E_SKIP_BUILD=1`, or override the image with `E2E_IMAGE`). It runs real `mvn`,
 `gradle` and `apt` clients in containers against the server. A test whose subject is the store
 runs on `fs` and on SeaweedFS S3 (`ForEachStorage`, `E2E_SEAWEEDFS_IMAGE`): the byte path of each
-format (`TestMaven`, `TestRaw`, `TestDebian`, `TestDockerRegistry`), the presigned redirects and
+format (`TestMaven`, `TestRaw`, `TestDebian`, `TestDockerRegistry`, `TestNPM`), the presigned redirects and
 their cache headers (`TestCacheControl`, `TestBulkRepos`, `TestBulkFiles`), deletes (`TestDelete`),
 the blob GC (`TestBlobDedupeAndGC`, `TestDockerGC`), the uploads of the CLI (`TestCLIUpload`) and
 the Nexus import. Every other test runs once, on `fs` (`OnLocalDisk`). The engine
 comes from `internal/containerengine`; `TR_ENGINE=docker|podman` forces one. The images of the
 tools that people bring float (`e2e/images_test.go`): Maven (`maven:3`), Gradle, Debian
 (`stable`), curl, Helm, Docker (`docker:dind`), crane, skopeo, the reference registry, Keycloak,
-Nexus, the install images (`buildpack-deps:curl`, Alpine) and the newest ORAS
-release. Each file registers its images with `floatingImage`, and each run pulls the images of
+Nexus, the install images (`buildpack-deps:curl`, Alpine), Node (`node:lts`, with pnpm and Yarn 4
+through corepack), Bun (`oven/bun`) and the newest ORAS release. The npm tests: `TestNPM` (npm
+publish of a plain and a scoped package, installs with npm, pnpm, Yarn and Bun, both stores),
+`TestNPMRegistry` (a registry.npmjs.org proxy and a group, the name rule, dist-tags, deprecate,
+unpublish with a device session and refused with a CI session minted from a Keycloak service
+account), `TestCLINPM` (clients zone: setup and publish with each package manager) and the npm part
+of `TestNexus`. Each file registers its images with `floatingImage`, and each run pulls the images of
 its zone again before the tests and prints the version of each. `TestInstall` runs the newest PowerShell release from GitHub on Debian, because Microsoft's PowerShell images no longer follow the releases. `TestCLIMaven` takes the newest
 Maven 4 from Maven Central, and `TestCLIJenkins` builds its Jenkins with `--pull` (Jenkins `lts`)
 and fetches the newest plugins once a day. The infrastructure of the tests stays pinned:
