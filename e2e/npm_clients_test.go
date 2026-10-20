@@ -52,9 +52,10 @@ func npmrc(registry, token string) string {
 	return out
 }
 
-// yarnrc is a .yarnrc.yml that installs from registry on plain HTTP into node_modules.
+// yarnrc is a .yarnrc.yml that installs from registry on plain HTTP into node_modules. The tests
+// install versions published seconds before, so it turns off the week-long age gate of Yarn 4.
 func yarnrc(registry, host, token string) string {
-	out := "nodeLinker: node-modules\nenableTelemetry: false\nnpmRegistryServer: \"" + registry + "\"\nunsafeHttpWhitelist:\n  - \"" + host + "\"\n"
+	out := "nodeLinker: node-modules\nenableTelemetry: false\nnpmMinimalAgeGate: 0\nnpmRegistryServer: \"" + registry + "\"\nunsafeHttpWhitelist:\n  - \"" + host + "\"\n"
 	if token != "" {
 		out += "npmAlwaysAuth: true\nnpmAuthToken: \"" + token + "\"\n"
 	}

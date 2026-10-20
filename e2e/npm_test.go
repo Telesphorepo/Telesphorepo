@@ -100,10 +100,10 @@ if npm publish --force 2>/tmp/forced.log; then echo FORCED_ACCEPTED; else echo F
 				t.Fatalf("dist of %s: %+v, want a tarball ending in %s", name, v.Dist, wantTarball)
 			}
 			u, _ := url.Parse(v.Dist.Tarball)
-			tresp, tgz := s.Do(t, s.NewRequest(t, http.MethodGet, u.Path, nil), auth)
+			tgz := getFollowS3(t, s, opts.S3, u.Path)
 			sum := sha512.Sum512(tgz)
-			if tresp.StatusCode != http.StatusOK || "sha512-"+base64.StdEncoding.EncodeToString(sum[:]) != v.Dist.Integrity {
-				t.Fatalf("tarball of %s: status %d, integrity of the bytes differs from %s", name, tresp.StatusCode, v.Dist.Integrity)
+			if "sha512-"+base64.StdEncoding.EncodeToString(sum[:]) != v.Dist.Integrity {
+				t.Fatalf("tarball of %s: integrity of the bytes differs from %s", name, v.Dist.Integrity)
 			}
 			req := s.NewRequest(t, http.MethodGet, "/npm/"+repo+"/"+name, nil)
 			req.Header.Set("If-None-Match", resp.Header.Get("ETag"))

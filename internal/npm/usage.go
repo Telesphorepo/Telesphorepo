@@ -54,6 +54,13 @@ func (s *snippets) setup() {
 		yarnrc += "unsafeHttpWhitelist:\n  - \"" + u.Hostname() + "\"\n"
 	}
 	ynote := "Yarn 2 and later read .yarnrc.yml."
+	// Yarn 4 installs a version only once it is a week old (npmMinimalAgeGate). A hosted repo
+	// holds only your own packages, so its snippet turns the gate off.
+	if s.repo.Kind == repos.KindHosted {
+		yarnrc += "npmMinimalAgeGate: 0\n"
+	} else {
+		ynote += " Yarn 4 installs a version only once it is a week old; list your own packages in npmPreapprovedPackages to install them at once."
+	}
 	if s.private() {
 		ynote += " Set NPM_TOKEN to a read token."
 	}
