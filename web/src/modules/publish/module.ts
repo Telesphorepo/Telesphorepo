@@ -1,4 +1,4 @@
-// The UI of the publish module: device approval, your devices and the CI pipelines.
+// The UI of the publish module: the CLI install page, device approval, your devices and the CI pipelines.
 
 import type { ModuleUI } from "../types";
 import LaptopIcon from "@lucide/svelte/icons/laptop";
@@ -8,6 +8,7 @@ export const publish: ModuleUI = {
   id: "publish",
   pages: [
     { path: "/setup/:code", layout: "app", access: "any", title: "Set up a project", page: () => import("../../pages/Setup.svelte") },
+    { path: "/install", layout: "app", access: "any", title: "Install the CLI", page: () => import("../../pages/InstallCLI.svelte") },
     { path: "/device", layout: "app", access: "user", title: "Approve a device", page: () => import("../../pages/DeviceApprove.svelte") },
     {
       path: "/settings/devices", layout: "settings", access: "user", title: "Devices",

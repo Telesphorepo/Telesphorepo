@@ -972,6 +972,30 @@ copy when a link fails. On Windows a running `telesphorepo.exe` is renamed to
 Arguments after the script go to the CLI, which runs once the install is done; `install.sh` gives
 it the terminal (`/dev/tty`) when there is one, because the script itself came on stdin.
 
+**PATH.** Outside GitHub Actions, when `~/.local/bin` is not on `PATH`, `install.sh` picks the
+start-up file of the shell that `$SHELL` names:
+
+| `$SHELL` | File | Line |
+|---|---|---|
+| zsh | `~/.zprofile` on macOS, `~/.zshrc` on Linux | `export PATH="$HOME/.local/bin:$PATH"` |
+| bash | `~/.bash_profile` on macOS, `~/.bashrc` on Linux | the same |
+| fish | `~/.config/fish/config.fish` | `set -gx PATH $HOME/.local/bin $PATH` |
+| any other, or unset | `~/.profile` | `export PATH="$HOME/.local/bin:$PATH"` |
+
+A file that already holds the line gets nothing: the script says to open a new terminal or to
+run the line now. On a terminal (`/dev/tty`) it asks `Add ~/.local/bin to your PATH in <file>?
+[Y/n]`; yes (or Enter) appends the line, creating the file and its folder when needed, and the
+script says to open a new terminal or to run the line now. No, or no terminal (CI, a pipe
+without a terminal), prints `~/.local/bin is not on PATH. Add this line to <file>, then open a
+new terminal:` and the line. `install.ps1` puts the folder on `$env:PATH` of the session, so the
+PowerShell session that ran it can run `telesphorepo` at once. On Windows it adds the folder to
+the user `PATH` and says that a new terminal is needed elsewhere; on Linux and macOS, when the
+folder is not on `PATH` and there is no `$GITHUB_PATH`, it prints the line for the PowerShell
+profile (`$env:PATH = "$HOME/.local/bin:$env:PATH"`).
+
+The web UI page **Install the CLI** (`/#/install`, see **Web UI**) shows the install lines, the
+archives with their SHA-256 and the commands to install one by hand.
+
 ## Auth model
 
 | Credential | Storage | Accepted on |
@@ -3199,6 +3223,16 @@ page are in `web/src/README.md`.
   - `/#/setup/<code>`: the page of a setup link. It says to run the line in a terminal in the
     project folder and shows the line for the OS of the browser. It makes no API call, and the
     code stays in the fragment.
+  - `/#/install?os=&cpu=`: **Install the CLI** (anyone). The account menu and the header of the
+    Set up a project card link to it. One tab per OS (Linux, macOS, Windows; without `os` the
+    OS of the browser). **Install**: `curl -fsSL <base>/install.sh | sh` or
+    `irm <base>/install.ps1 | iex` and what the script does with `PATH`. **Install by hand**: the
+    archives of the OS from `GET /cli/SHA256SUMS`, each with its CPU, its SHA-256 and a download
+    link; a row picks `cpu` (default `arm64` on macOS, else `amd64`), and below the table the
+    commands that download that archive, check its SHA-256 (`sha256sum -c`, `shasum -a 256 -c`
+    or `Get-FileHash`), unpack it into `~/.local/bin` or `%LOCALAPPDATA%\Programs\telesphorepo`
+    and make the helper name. **Update**: `telesphorepo update`. A build without CLI archives
+    (404 `no-cli-downloads`) shows one empty state in place of the cards.
   - The devices lists and the approval page name no client. They show "Telesphorepo CLI".    **New CI pipeline** (`ci.pipelines`) opens
     `/#/settings/ci-pipelines/new?repo={name}&back=/repo/{name}/publish`.
   - `upload?folder=`: a full page. It starts with the fresh second-factor check, then one drop

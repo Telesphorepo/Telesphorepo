@@ -40,7 +40,8 @@ func newestPowerShell(t testing.TB) string {
 }
 
 // installShScript installs the CLI with install.sh of $SERVER (fetch is the download command),
-// runs "version" through it, and then runs install.sh with another SHA-256 for each archive.
+// runs "version" through it, runs install.sh with another SHA-256 for each archive, and then runs
+// install.sh with no terminal and no GITHUB_PATH for each shell.
 const installShScript = `set -e
 export GITHUB_PATH=/tmp/github_path
 echo '=== install ==='
@@ -53,6 +54,27 @@ echo '=== wrong hash ==='
 rm -rf "$HOME/.local/bin"
 if %[1]s "$SERVER/install.sh" | sed "s/echo '[0-9a-f]\{64\}'/echo '%[2]s'/" | sh -s -- version; then echo 'wrong hash: installed'; else echo "wrong hash: exit $?"; fi
 if [ -e "$HOME/.local/bin/telesphorepo" ]; then echo 'wrong hash: binary present'; else echo 'wrong hash: no binary'; fi
+echo '=== path ==='
+unset GITHUB_PATH
+for shell in /bin/zsh /bin/bash /usr/bin/fish /bin/dash; do
+	echo "shell $shell"
+	%[1]s "$SERVER/install.sh" | SHELL=$shell sh 2>&1
+done
+echo '=== end ==='
+`
+
+// installTermScript runs install.sh twice on a terminal (script) with bash as the shell: the
+// first run asks to add ~/.local/bin to PATH in ~/.bashrc and adds the line, the second finds it.
+const installTermScript = `set -e
+unset GITHUB_PATH
+export SHELL=/bin/bash
+echo '=== first ==='
+printf 'y\n' | script -qec 'curl -fsSL "$SERVER/install.sh" | sh' /dev/null
+echo '=== second ==='
+printf 'y\n' | script -qec 'curl -fsSL "$SERVER/install.sh" | sh' /dev/null
+echo '=== bashrc ==='
+echo "lines: $(grep -cxF 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc")"
+bash -ic 'command -v telesphorepo' 2>/dev/null
 echo '=== end ==='
 `
 
@@ -82,7 +104,9 @@ Write-Output '=== end ==='
 // TestInstall: install.sh (Debian with curl, Alpine with wget) and install.ps1 (PowerShell on
 // Linux) install the CLI of the server into ~/.local/bin, make the helper name next to it, add
 // the folder to $GITHUB_PATH, pass the arguments to the CLI, and install nothing when the hash
-// of the archive is not the one of the script.
+// of the archive is not the one of the script. Without GITHUB_PATH, install.sh prints the PATH
+// line of each shell when there is no terminal, and on a terminal it adds the line to ~/.bashrc
+// once.
 func TestInstall(t *testing.T) {
 	t.Parallel()
 	zeros := strings.Repeat("0", 64)
@@ -129,7 +153,49 @@ func TestInstall(t *testing.T) {
 				wrong := section(out, "wrong hash")
 				wantText(t, "install with a wrong hash", wrong, "but the server names "+zeros+"; nothing was installed", "wrong hash: no binary")
 				wantNoText(t, "install with a wrong hash", wrong, "wrong hash: installed")
+				if c.name != "powershell" {
+					wantPathHints(t, section(out, "path"))
+				}
 			})
 		}
+		t.Run("terminal", func(t *testing.T) {
+			code, out := RunClient(t, installDebianImage, ClientOpts{
+				Cmd:   []string{"sh /e2e/install.sh"},
+				Files: []ContainerFile{{Path: "/e2e/install.sh", Content: installTermScript}},
+				Env:   map[string]string{"SERVER": s.InternalURL, "HOME": "/root"},
+				User:  "0",
+			})
+			if code != 0 {
+				t.Fatalf("install on a terminal: exit %d:\n%s", code, out)
+			}
+			wantText(t, "the first install", section(out, "first"),
+				"Add ~/.local/bin to your PATH in ~/.bashrc? [Y/n]",
+				"telesphorepo: added ~/.local/bin to PATH in ~/.bashrc; open a new terminal, or run now:")
+			second := section(out, "second")
+			wantText(t, "the second install", second, "telesphorepo: ~/.bashrc puts ~/.local/bin on PATH; open a new terminal, or run now:")
+			wantNoText(t, "the second install", second, "[Y/n]", "added ~/.local/bin")
+			wantText(t, "~/.bashrc", section(out, "bashrc"), "lines: 1\n", "/root/.local/bin/telesphorepo\n")
+		})
 	})
+}
+
+// wantPathHints checks the line that install.sh prints, with no terminal, for each shell on Linux
+// when ~/.local/bin is not on PATH.
+func wantPathHints(t *testing.T, out string) {
+	t.Helper()
+	posix := `  export PATH="$HOME/.local/bin:$PATH"` + "\n"
+	for _, c := range []struct{ shell, file, line string }{
+		{"/bin/zsh", "~/.zshrc", posix},
+		{"/bin/bash", "~/.bashrc", posix},
+		{"/usr/bin/fish", "~/.config/fish/config.fish", "  set -gx PATH $HOME/.local/bin $PATH\n"},
+		{"/bin/dash", "~/.profile", posix},
+	} {
+		_, rest, _ := strings.Cut(out, "shell "+c.shell+"\n")
+		if i := strings.Index(rest, "\nshell "); i >= 0 {
+			rest = rest[:i+1]
+		}
+		wantText(t, "the PATH hint for "+c.shell, rest,
+			"telesphorepo: ~/.local/bin is not on PATH. Add this line to "+c.file+", then open a new terminal:\n"+c.line)
+		wantNoText(t, "the PATH hint for "+c.shell, rest, "[Y/n]")
+	}
 }

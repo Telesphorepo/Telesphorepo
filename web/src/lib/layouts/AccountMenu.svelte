@@ -1,10 +1,11 @@
-<!-- The avatar menu of a signed-in user: your account, the theme, sign out. -->
+<!-- The avatar menu of a signed-in user: your account, the CLI install page, the theme, sign out. -->
 <script lang="ts">
   import * as DropdownMenu from "$lib/components/ui/dropdown-menu";
   import UserAvatar from "$lib/components/UserAvatar.svelte";
   import { buttonVariants } from "$lib/components/ui/button";
   import { setMode, userPrefersMode } from "mode-watcher";
   import UserIcon from "@lucide/svelte/icons/user-round";
+  import TerminalIcon from "@lucide/svelte/icons/terminal";
   import LogOutIcon from "@lucide/svelte/icons/log-out";
   import { auth } from "$lib/auth.svelte";
   import { navigate } from "$lib/router.svelte";
@@ -23,6 +24,7 @@
       </DropdownMenu.Label>
       <DropdownMenu.Separator />
       <DropdownMenu.Item onSelect={() => navigate("/settings/account")}><UserIcon />Your account</DropdownMenu.Item>
+      <DropdownMenu.Item onSelect={() => navigate("/install")}><TerminalIcon />Install the CLI</DropdownMenu.Item>
       <DropdownMenu.Separator />
       <DropdownMenu.Label class="text-xs font-normal text-muted-foreground">Theme</DropdownMenu.Label>
       <DropdownMenu.RadioGroup value={userPrefersMode.current} onValueChange={(v) => setMode(v as "light" | "dark" | "system")}>
