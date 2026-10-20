@@ -124,6 +124,9 @@
   // --- the pick ---
 
   const picking = $derived(bulk !== undefined);
+  // A table that picks rows has a taller heading row, so the selection bar that lies over it has
+  // room above and below its buttons; the row keeps its height when the bar shows, so nothing moves.
+  const headH = $derived(picking ? "h-11" : "h-9");
   const canPick = (item: T) => pickable?.(item) ?? true;
   const pickableRows = $derived(picking ? source.items.filter(canPick) : []);
   const allPicked = $derived(pickableRows.length > 0 && pickableRows.every((r) => picked.has(key(r))));
@@ -216,8 +219,8 @@
       <!-- The selection bar lies over the column headings, which keep their space, so the columns do not move. -->
       <Table.Row class="relative border-b hover:bg-transparent">
         {#if picking}
-          <Table.Head class="h-9 w-10 min-w-10 p-0">
-            <label data-pick class="flex h-9 w-10 cursor-pointer items-center justify-center select-none">
+          <Table.Head class={cn("w-10 min-w-10 p-0", headH)}>
+            <label data-pick class="flex h-full w-10 cursor-pointer items-center justify-center select-none">
               <Checkbox
                 checked={allPicked}
                 indeterminate={barOn && !allPicked}
@@ -241,7 +244,7 @@
         {#each columns as c, i (i)}
           <Table.Head
             aria-hidden={barOn ? "true" : undefined}
-            class={cn("h-9 text-xs font-medium text-muted-foreground", c.align === "right" && "text-right", c.grow && "w-full", c.hideOnPhone && "max-sm:hidden", barOn && "invisible", c.class)}
+            class={cn(headH, "text-xs font-medium text-muted-foreground", c.align === "right" && "text-right", c.grow && "w-full", c.hideOnPhone && "max-sm:hidden", barOn && "invisible", c.class)}
           >
             {#if c.label}{c.label}{:else if c.srLabel}<span class="sr-only">{c.srLabel}</span>{/if}
           </Table.Head>
