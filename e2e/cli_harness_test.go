@@ -33,10 +33,11 @@ const (
 
 // secretScan prints each file of the root file system of the container, and of the folders in
 // $E2E_SCAN, that holds a session token, a setup code or $E2E_SECRET. find -xdev stays on one
-// file system, so /proc, /sys, /dev and the volumes of build caches stay out.
+// file system, so /proc, /sys, /dev and the volumes of build caches stay out. A token starts a
+// word: C++ symbols in compilers (cc1plus, rustdoc) hold "trs_" inside longer names such as "attrs_".
 const secretScan = `echo '` + scanBegin + `'
 for d in / $E2E_SCAN; do
-	find "$d" -xdev -type f -size -65536k -print0 2>/dev/null | xargs -0 -r grep -lE 'trsu?_[A-Za-z0-9_-]{40,}' 2>/dev/null
+	find "$d" -xdev -type f -size -65536k -print0 2>/dev/null | xargs -0 -r grep -lE '(^|[^A-Za-z0-9_])trsu?_[A-Za-z0-9_-]{40,}' 2>/dev/null
 	if [ -n "${E2E_SECRET:-}" ]; then
 		find "$d" -xdev -type f -size -65536k -print0 2>/dev/null | xargs -0 -r grep -lF -e "$E2E_SECRET" 2>/dev/null
 	fi

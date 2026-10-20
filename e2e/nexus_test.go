@@ -283,7 +283,7 @@ type nexusRepoSet struct {
 	maven2  string // hosted, private in Nexus
 	apt     string // hosted with the key pair aptPriv (passphrase aptPass)
 	raw     string // hosted
-	npm     string // a format no plugin imports
+	gems    string // rubygems hosted: a format no plugin imports
 	offline string // raw hosted, offline in Nexus
 	proxy   string // maven2 proxy with remote credentials
 	group   string // maven2 group of maven, maven2 and proxy, in that order
@@ -296,7 +296,7 @@ type nexusRepoSet struct {
 func (n *Nexus) createRepos(t *testing.T) nexusRepoSet {
 	t.Helper()
 	rs := nexusRepoSet{maven: RandName("src-maven"), maven2: RandName("src-maven2"), apt: RandName("src-apt"),
-		raw: RandName("src-raw"), npm: RandName("src-npm"), offline: RandName("src-off"),
+		raw: RandName("src-raw"), gems: RandName("src-gems"), offline: RandName("src-off"),
 		proxy: RandName("src-proxy"), group: RandName("src-group")}
 	priv, pub, pass := nexusAptSigningKey(t)
 	rs.aptPub, rs.aptPass = pub, pass
@@ -320,8 +320,8 @@ func (n *Nexus) createRepos(t *testing.T) nexusRepoSet {
 		"name": rs.offline, "online": false, "storage": nexusStorage,
 		"raw": map[string]any{"contentDisposition": "ATTACHMENT"},
 	}, nil)
-	n.mustAPI(t, http.MethodPost, "/service/rest/v1/repositories/npm/hosted", map[string]any{
-		"name": rs.npm, "online": true, "storage": nexusStorage,
+	n.mustAPI(t, http.MethodPost, "/service/rest/v1/repositories/rubygems/hosted", map[string]any{
+		"name": rs.gems, "online": true, "storage": nexusStorage,
 	}, nil)
 	n.mustAPI(t, http.MethodPost, "/service/rest/v1/repositories/maven/proxy", map[string]any{
 		"name": rs.proxy, "online": true,
@@ -974,7 +974,7 @@ func TestNexus(t *testing.T) {
 		}{
 			rs.maven: {"maven2", "hosted", true, true}, rs.maven2: {"maven2", "hosted", true, false},
 			rs.apt: {"apt", "hosted", true, false}, rs.raw: {"raw", "hosted", true, false},
-			rs.npm: {"npm", "hosted", false, false}, rs.proxy: {"maven2", "proxy", true, false},
+			rs.gems: {"rubygems", "hosted", false, false}, rs.proxy: {"maven2", "proxy", true, false},
 			rs.group: {"maven2", "group", true, false}, rs.offline: {"raw", "hosted", false, false},
 		} {
 			r := got.repo(t, name)
