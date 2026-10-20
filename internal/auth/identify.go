@@ -180,6 +180,16 @@ type Read struct {
 // internal error.
 func (s *Service) Identify(r *http.Request, rd Read) (*Principal, error) {
 	ctx := r.Context()
+	// A token header of the route comes first: a client sends it on a write together with the
+	// read credentials of its source (dotnet sends X-NuGet-ApiKey and Basic on a push).
+	if rd.TokenHeader != "" && rd.TokenHeader != "Authorization" {
+		if tok := strings.TrimSpace(r.Header.Get(rd.TokenHeader)); tok != "" {
+			if !s.isToken(tok) {
+				return nil, ErrBadCredentials
+			}
+			return s.authenticate(ctx, s.clientIP(r), "", tok, true)
+		}
+	}
 	if h := r.Header.Get("Authorization"); h != "" {
 		if user, pass, ok := r.BasicAuth(); ok {
 			if strings.HasPrefix(pass, DeviceProofPrefix) {
@@ -218,14 +228,6 @@ func (s *Service) Identify(r *http.Request, rd Read) (*Principal, error) {
 				return nil, ErrBadCredentials
 			}
 			return s.verifyBearer(ctx, tok, upload)
-		}
-	}
-	if rd.TokenHeader != "" && rd.TokenHeader != "Authorization" {
-		if tok := strings.TrimSpace(r.Header.Get(rd.TokenHeader)); tok != "" {
-			if !s.isToken(tok) {
-				return nil, ErrBadCredentials
-			}
-			return s.authenticate(ctx, s.clientIP(r), "", tok, true)
 		}
 	}
 	if rd.Cookie {

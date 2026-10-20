@@ -1272,5 +1272,7 @@ func TestNexus(t *testing.T) {
 		t.Run("docker", func(t *testing.T) { nexusDocker(t, n, s) })
 		t.Run("cargo", func(t *testing.T) { nexusCargo(t, n, s) })
 		t.Run("npm", func(t *testing.T) { nexusNpm(t, n, s) })
+		// A nuget repo, through a source of its own.
+		t.Run("nuget", func(t *testing.T) { nexusNuGet(t, n, s) })
 	})
 }

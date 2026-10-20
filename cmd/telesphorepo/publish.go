@@ -49,6 +49,9 @@ func publish(ctx context.Context, files []string) error {
 	if err != nil {
 		return err
 	}
+	if fr, found := fileRow(s.Format); found && len(files) > 0 {
+		r, ok = fr, true // FILE arguments publish without a build, also in a folder without a project
+	}
 	if !ok {
 		if h, isHelper := helperFormats[s.Format]; isHelper {
 			return helperStop(c, h, p.Repo)
@@ -58,8 +61,8 @@ func publish(ctx context.Context, files []string) error {
 		}
 		return fmt.Errorf("%s has no project of a %s repository: telesphorepo publish looks for %s", p.dir, s.Format, markersOf(s.Format))
 	}
-	if !r.takesFiles() && len(files) > 0 {
-		return fmt.Errorf("telesphorepo publish runs the %s build of %s and takes no FILE arguments; they are for raw and Debian repositories", r.title, p.dir)
+	if !r.takesFiles() && !r.files && len(files) > 0 {
+		return fmt.Errorf("telesphorepo publish runs the %s build of %s and takes no FILE arguments; they are for raw, Debian and NuGet repositories", r.title, p.dir)
 	}
 
 	tmp, err := os.MkdirTemp("", "telesphorepo-")

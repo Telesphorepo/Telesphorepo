@@ -37,3 +37,9 @@ version = "dev"
 scope   = "publish/npm"
 needs   = "cli"
 summary = "telesphorepo publish publishes npm packages with npm, pnpm, yarn or bun; update the CLI to publish to npm repositories"
+
+[[change]]
+version = "dev"
+scope   = "publish/nuget"
+needs   = "cli"
+summary = "Publishing to NuGet repositories needs the CLI that runs dotnet pack and pushes each package."

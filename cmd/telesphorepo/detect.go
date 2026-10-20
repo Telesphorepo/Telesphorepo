@@ -26,7 +26,8 @@ type row struct {
 	format  string   // the format of the repo on the server
 	kind    string   // the marker kind; kind = "<kind>" in the project file picks it
 	title   string   // the name for the person
-	markers []string // the files that mark a project of the kind; none: the row takes FILE arguments
+	markers []string // the files (or globs) that mark a project of the kind; none: the row takes FILE arguments
+	files   bool     // a row with markers that also takes FILE arguments: it publishes them without a build
 	ciTool  string   // the tool of GET /api/repos/{name}/ci; "": the server has no CI file for the row
 	// ciToolOf picks the CI tool by the project folder (e.g. by lockfile); nil: ciTool.
 	ciToolOf func(dir string) string
@@ -48,6 +49,8 @@ var rows = []row{
 		run: runCargo, preview: func(string) string { return "cargo publish --registry telesphorepo" }},
 	{format: "npm", kind: "npm", title: "npm package", markers: []string{"package.json"}, ciTool: "npm", ciToolOf: npmTool,
 		run: runNPM, preview: npmPreview},
+	{format: "nuget", kind: "dotnet", title: ".NET", markers: []string{"*.csproj", "*.fsproj", "*.sln", "*.slnx"}, files: true, ciTool: "dotnet",
+		run: runDotnet, preview: func(string) string { return "dotnet pack -c Release, then a push of each package" }},
 }
 
 // helperFormat is a format of the helper category: its tool publishes with its own command and
@@ -75,14 +78,34 @@ func rowsOf(format string) []row {
 // takesFiles reports whether the row takes FILE arguments.
 func (r row) takesFiles() bool { return len(r.markers) == 0 }
 
-// marker returns the first marker of r in dir, or "".
+// marker returns the first marker of r in dir, or "". A marker with "*" is a glob: the first
+// file that matches it.
 func (r row) marker(dir string) string {
 	for _, m := range r.markers {
+		if strings.Contains(m, "*") {
+			found, _ := filepath.Glob(filepath.Join(dir, m))
+			for _, f := range found {
+				if fileExists(f) {
+					return filepath.Base(f)
+				}
+			}
+			continue
+		}
 		if st, err := os.Stat(filepath.Join(dir, m)); err == nil && !st.IsDir() {
 			return m
 		}
 	}
 	return ""
+}
+
+// fileRow returns the row of format that takes FILE arguments next to its markers.
+func fileRow(format string) (row, bool) {
+	for _, r := range rowsOf(format) {
+		if r.files {
+			return r, true
+		}
+	}
+	return row{}, false
 }
 
 // markersOf lists the markers of the rows of format, e.g. "pom.xml, settings.gradle.kts, ...".
