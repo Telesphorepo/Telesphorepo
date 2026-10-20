@@ -43,3 +43,9 @@ version = "dev"
 scope   = "publish/nuget"
 needs   = "cli"
 summary = "Publishing to NuGet repositories needs the CLI that runs dotnet pack and pushes each package."
+
+[[change]]
+version = "dev"
+scope   = "publish/pypi"
+needs   = "cli"
+summary = "telesphorepo publish builds Python projects and uploads them to PyPI repositories."

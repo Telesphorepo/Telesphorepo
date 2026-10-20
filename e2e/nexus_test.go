@@ -1274,5 +1274,6 @@ func TestNexus(t *testing.T) {
 		t.Run("npm", func(t *testing.T) { nexusNpm(t, n, s) })
 		// A nuget repo, through a source of its own.
 		t.Run("nuget", func(t *testing.T) { nexusNuGet(t, n, s) })
+		t.Run("pypi", func(t *testing.T) { nexusPyPI(t, n, s) })
 	})
 }

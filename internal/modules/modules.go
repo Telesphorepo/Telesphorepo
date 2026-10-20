@@ -18,6 +18,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/nuget"
 	"github.com/Telesphorepo/Telesphorepo/internal/oidc"
 	"github.com/Telesphorepo/Telesphorepo/internal/publish"
+	"github.com/Telesphorepo/Telesphorepo/internal/pypi"
 	"github.com/Telesphorepo/Telesphorepo/internal/raw"
 	"github.com/Telesphorepo/Telesphorepo/internal/signing"
 )
@@ -42,5 +43,6 @@ func All() []module.Module {
 		cargo.Module(),
 		npm.Module(),
 		nuget.Module(),
+		pypi.Module(),
 	}
 }

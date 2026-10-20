@@ -29,10 +29,18 @@ type row struct {
 	markers []string // the files (or globs) that mark a project of the kind; none: the row takes FILE arguments
 	files   bool     // a row with markers that also takes FILE arguments: it publishes them without a build
 	ciTool  string   // the tool of GET /api/repos/{name}/ci; "": the server has no CI file for the row
-	// ciToolOf picks the CI tool by the project folder (e.g. by lockfile); nil: ciTool.
+	run     func(*job) error
+	preview func(dir string) string // the command that "publish" runs, for "status"
+	// ciToolOf picks the CI tool by the project in dir, in place of ciTool (nil: ciTool).
 	ciToolOf func(dir string) string
-	run      func(*job) error
-	preview  func(dir string) string // the command that "publish" runs, for "status"
+}
+
+// ciToolFor returns the CI tool of the row for the project in dir.
+func (r row) ciToolFor(dir string) string {
+	if r.ciToolOf != nil {
+		return r.ciToolOf(dir)
+	}
+	return r.ciTool
 }
 
 var rows = []row{
@@ -51,6 +59,8 @@ var rows = []row{
 		run: runNPM, preview: npmPreview},
 	{format: "nuget", kind: "dotnet", title: ".NET", markers: []string{"*.csproj", "*.fsproj", "*.sln", "*.slnx"}, files: true, ciTool: "dotnet",
 		run: runDotnet, preview: func(string) string { return "dotnet pack -c Release, then a push of each package" }},
+	{format: "pypi", kind: "python", title: "Python", markers: []string{"pyproject.toml", "setup.py"}, ciTool: "pip",
+		ciToolOf: pythonTool, files: true, run: runPython, preview: pythonPreview},
 }
 
 // helperFormat is a format of the helper category: its tool publishes with its own command and

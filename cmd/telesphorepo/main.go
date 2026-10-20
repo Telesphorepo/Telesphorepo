@@ -63,6 +63,7 @@ The device name defaults to the host name of the computer.
   telesphorepo publish dist/app.zip build/app.tar.gz   (a raw repository)
   telesphorepo publish build/hello_1.0_amd64.deb       (a Debian repository)
   telesphorepo publish bin/Release/Acme.Lib.1.0.0.nupkg (a NuGet repository)
+  telesphorepo publish dist/app-1.0-py3-none-any.whl   (a PyPI repository, without a build)
 
 The CLI finds telesphorepo.toml in this folder or a folder above it, mints a publish session for
 its repository, and runs the publish command of the project with the token in the env:
@@ -75,6 +76,8 @@ its repository, and runs the publish command of the project with the token in th
   raw      uploads each FILE into the folder "path" of telesphorepo.toml
   Debian   uploads each .deb to "dist" and "component" of telesphorepo.toml
   .NET     dotnet pack -c Release, then pushes each package; with FILEs it pushes those .nupkg
+  Python   poetry build ([tool.poetry]), uv build (uv.lock) or python -m build, then uploads
+           each wheel and sdist
 A Docker repository publishes with docker push and the credential helper.
 
 In CI the CLI mints the session with the identity token of the job: GitHub Actions (the job

@@ -74,6 +74,7 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/cargo` | Module and format `cargo`: the Cargo sparse index (`index/`), the `.crate` files (`crates/`) and the publish and yank API (`api/v1/`) for hosted, proxy and group repos; owns its tables and queries. See **Cargo registry** |
 | `internal/npm` | Module and format `npm`: the registry API at `/npm/{repo}/` (one route per method that parses the rest of the path), tarballs through `Commit`, the version rows (`OnCommitted`, `OnRemoved`), packuments rendered per request, the streaming publish body, the Nexus `npm` importer and web UI uploads of `.tgz` files. See **npm registry** |
 | `internal/nuget` | Module and format `nuget`: the NuGet V3 protocol at `/nuget/{repo}/` (see **NuGet repositories**): push, unlist and relist, the flat container, the registrations and the search rendered per request, the proxy of a NuGet V3 remote and the group name rule. Owns its table and queries (`queries/`, `dbq/`) |
+| `internal/pypi` | Module and format `pypi`: the simple repository API rendered per request (hosted from its rows, proxy from the cached upstream page, group from the owning member), the legacy upload, the file and project rows (`OnCommitted`, `OnRemoved`), the proxy fetches with the `files` base of the repo config. Owns its tables, queries (`queries/`, `dbq/`). See **PyPI** |
 | `internal/signing` | Module `signing`. OpenPGP: key `Generate` and `Parse`, the `Keys` service (create, import, delete, one signer per key, the key of each repo), the repo field `signing_key`, clearsign/detach-sign (ProtonMail go-crypto). See **Signing keys** |
 | `internal/files` | The file tree and the details of one file. Writes and deletes go through the byte pipeline |
 | `internal/audit` | The audit log: the action registry (`Actions`), the actor in the context (`WithActor`, `System`, `CLI`), `Record` and `RecordTx`, the list query and `Cleanup`. See **Audit log** |
@@ -167,6 +168,7 @@ it needs and leaves the others nil. The kernel gives it these parts:
 | `docker` | `internal/docker` | `network`, `publish` | Format `docker` (an OCI registry: hosted, proxy and group repos) with its schema; the root prefix `/v2/`, `/docker/` (the token endpoint) and `GET /api/docker/{name}/manifest`; the settings group `docker`; job `docker.links`; the publish category `helper` (the native tools push through the credential helper of the CLI, see **Publishing**); the Nexus importer of `docker`; demo data and seed (see **Docker registry**) |
 | `cargo` | `internal/cargo` | | Format `cargo` (publish category `cli`, hosted, proxy and group repos) with its schema, the tool `cargo` (its CI steps), the `cargo.yank` and `cargo.unyank` actions, the Nexus importer of `cargo`, demo data and seed (see **Cargo registry**) |
 | `npm` | `internal/npm` | | Format `npm` (hosted, proxy and group; publish category `cli`) with its schema, the tools `npm`, `pnpm`, `yarn` and `bun` (their CI steps), the Nexus importer of `npm`, demo data and seed (see **npm registry**) |
+| `pypi` | `internal/pypi` | | Format `pypi` (hosted, proxy and group repos; publish category `cli`) with its schema, the tools `uv`, `poetry` and `pip`, the Nexus importer of `pypi`, demo data and seed (see **PyPI**) |
 
 **Routes.** The route table (`internal/route`) gives each module a `Router`. A module registers
 under `/api/`, under `/<name>/` of each format it registers, and under its root prefixes. Any
@@ -530,6 +532,14 @@ Tables of the `nuget` component (`internal/nuget/schema.sql`):
 | Table | Key / indexes | Notes |
 |---|---|---|
 | `nuget_versions` | UNIQUE `(repo_id, lower_id, sort_key)`, idx `nuget_versions_asset (asset_id)` | One row per package version of a hosted repo: `package_id` as the package writes it, `version` (normalised, with metadata), `normalized` (the identity), `sort_key` (`version.NuGet.SortKey`), `semver2`, `prerelease`, `listed`, `meta` (JSON of the `.nuspec` fields), `nupkg_path`, `published_at`. Written in the commit of the `.nupkg`, deleted in its remove; `asset_id` cascades with the `.nupkg`. The UNIQUE index reads a package's versions in order and pages the package ids of the search |
+
+Tables of the `pypi` component (`internal/pypi/schema.sql`). Only hosted repos have rows; the
+hooks write them in the transaction of the asset change (see **PyPI**):
+
+| Table | Key / indexes | Notes |
+|---|---|---|
+| `pypi_projects` | PK `(repo_id, project)` (WITHOUT ROWID) | `project` is the normalised name, `display_name` the `Name` of the newest upload's metadata; the row goes with the project's last file |
+| `pypi_files` | PK `id`, UNIQUE `(repo_id, filename)`, idx `pypi_files_project (repo_id, project, sort_key)`, idx `asset_id` | One row per wheel or sdist: `version` (PEP 440 normal form), `sort_key` (`version.PEP440.SortKey`), `path`, `sha256`, `size`, `requires_python`, `metadata_sha256` (`''` without a `.metadata`), `uploaded_at`. `asset_id` cascades with the file |
 
 Tables of the `docker` component (`internal/docker/schema.sql`). Every column `repo_id` cascades;
 digests are the hex of a SHA-256. Only the hooks of the format write them, in the transaction of
@@ -926,6 +936,7 @@ is written to it with `sudo tee -a FILE > /dev/null`.
 | Upload `.deb` | `telesphorepo publish x.deb` (with `dist` and `component` in `telesphorepo.toml`). Indexes rebuild after `index.debounce`; poll `GET /api/repos/{repo}/status` for `pending: 0` |
 | Docker | Pull: `docker pull <host>/{repo}/IMAGE:TAG`; a private repo needs `docker login <host>` with a read token. Push: the setup line of the Publish tab adds the credential helper of the CLI to the Docker config once, then `docker push <host>/{repo}/IMAGE:TAG` with no `docker login`. Helm and ORAS use the same helper (see **Docker registry** and **Publishing**) |
 | NuGet | Source `HOST/nuget/{repo}/index.json` in `nuget.config` (`allowInsecureConnections="true"` for plain http); a private repo adds `packageSourceCredentials` with the user and a read token as `ClearTextPassword` (dotnet sends them after the first 401). Publishes: `telesphorepo publish` in a .NET project, or `dotnet nuget push` with a publish session as the API key |
+| pip, uv, poetry | Index `HOST/pypi/{repo}/simple/`: `index-url` in `pip.conf` (a private repo: `USER:READ_TOKEN@` in the URL), a `[[tool.uv.index]]` with `default = true` (a private repo: `UV_INDEX_<NAME>_USERNAME` and `_PASSWORD`), `poetry source add --priority=primary` (a private repo: `poetry config http-basic.<repo>`). A hosted repo holds only its own packages; a group of it and a PyPI proxy also serves their dependencies. Publish: `telesphorepo publish` |
 | Raw | Upload: `telesphorepo publish file.tar.gz` (with `path` in `telesphorepo.toml`). Download: `curl -fLO HOST/raw/{repo}/path/file.tar.gz`; a private repo adds `-K -` with `user = "USER:READ_TOKEN"` on stdin |
 | npm, pnpm, bun | `.npmrc` of the project: `registry=HOST/npm/{repo}/`; a private repo adds `//HOST-without-scheme/npm/{repo}/:_authToken=${NPM_TOKEN}` with a read token in `NPM_TOKEN`. Publish: `telesphorepo publish` |
 | Yarn 2+ | `.yarnrc.yml`: `npmRegistryServer: "HOST/npm/{repo}/"`; a private repo adds `npmAlwaysAuth: true` and `npmAuthToken: "${NPM_TOKEN}"` (Yarn sends no token on reads without `npmAlwaysAuth`); a plain-HTTP server adds its host name to `unsafeHttpWhitelist` |
@@ -1290,6 +1301,7 @@ file. A row is one entry of a table in `cmd/telesphorepo/detect.go`; a new forma
 | Debian | none | the CLI | `PUT /debian/<repo>/upload/<dist>/<component>` for each FILE; a file of 64 MiB or more goes through the resumable routes as for raw, and `PUT /debian/<repo>/upload/<dist>/<component>?upload=<id>&sha256=&size=` finishes it | Bearer session token |
 | Cargo | `Cargo.toml` | `cargo` | `cargo publish --registry telesphorepo --config 'registries.telesphorepo.index="sparse+<base>/cargo/<repo>/index/"' --config 'registries.telesphorepo.credential-provider="cargo:token"'` | `CARGO_REGISTRIES_TELESPHOREPO_TOKEN` in the env of cargo; cargo sends it as a raw `Authorization` header |
 | npm | `package.json` | by lockfile: `pnpm-lock.yaml` pnpm; `yarn.lock` with `.yarnrc.yml` yarn; `bun.lock` (or `bun.lockb`) bun; else npm, each on the `PATH` | `npm publish --registry <base>/npm/<repo>/`, `pnpm publish --registry ... --no-git-checks`, `yarn npm publish` or `bun publish --registry ...`; the package manager packs | npm and pnpm: `npm_config_userconfig=<tmp>/npmrc` with the registry and `//<host>/npm/<repo>/:_authToken=${TELESPHOREPO_TOKEN}`. bun: `NPM_CONFIG_TOKEN`. yarn: `YARN_NPM_PUBLISH_REGISTRY`, `YARN_NPM_AUTH_TOKEN` and, for an `http://` server, `YARN_UNSAFE_HTTP_WHITELIST`. `setup` offers the CI file of the tool of the lockfile |
+| PyPI | `pyproject.toml`, `setup.py` | `poetry` (`[tool.poetry]` in `pyproject.toml`), `uv` (a `uv.lock`), else `python3`/`python` with the `build` package | `poetry build --output <tmp>/dist`, `uv build --out-dir <tmp>/dist` or `python -m build --outdir <tmp>/dist` (the build gets no token), then `POST /pypi/<repo>/legacy/` (the legacy upload form) for each wheel and sdist; a file of 64 MiB or more goes through the resumable routes and `POST /pypi/<repo>/legacy/?upload=<id>&sha256=&size=&filename=`. FILE arguments upload the named files without a build. The CI tool of setup follows the build tool (`poetry`, `uv` or `pip`) | Bearer session token |
 
 A wrapper in the project comes before a tool on the `PATH` (`exec.LookPath`); a wrapper without
 the execute bit runs through `sh`. The CLI prints each command before it runs it, without the
@@ -2239,6 +2251,97 @@ are dropped from memory, and the server logs the repo ids.
 - A Debian proxy serves the remote's files unchanged: no indexer, no signature of its own.
   Clients keep the remote archive's key. Its apt snippet has no key step and no `signed-by`.
 - Deleting files of a proxy (Files tab, admin) works; the next request fetches them again.
+
+## PyPI
+
+The module `pypi` (`internal/pypi`) is the format `pypi`: Python packages that pip, uv and poetry
+install and that twine, `uv publish`, `poetry publish` and `telesphorepo publish` upload. The index
+URL is `HOST/pypi/{repo}/simple/`, the upload URL `HOST/pypi/{repo}/` (or `.../legacy/`). Hosted,
+proxy and group repos.
+
+**Files.** A hosted repo stores each wheel and sdist at `packages/<project>/<file name>` and, for a
+wheel, the exact `*.dist-info/METADATA` at the same path plus `.metadata` (PEP 658), in one commit.
+`<project>` is the normalised name (PEP 503: lower case, each run of `-`, `_`, `.` one `-`). The
+files are immutable: the same bytes are kept, other bytes under a file name that exists are 409
+`File already exists`. A write of a path outside this pipeline (a core upload session) is 400. A
+proxy stores its upstream pages at `.simple/<project>` and its files at `files/<rest>` and
+`remote/<rest>` (below). `GET /pypi/{repo}/packages/{path...}`, `/files/{path...}` and
+`/remote/{path...}` serve them (`Range`, S3 redirects and the edge as every asset).
+
+**Pages.** `GET /pypi/{repo}/simple/` (the project list) and `GET /pypi/{repo}/simple/{project}/`
+are rendered per request; they are never stored at their URL. A name that is not normalised, or
+that lacks the trailing slash, is 301 to the normalised page. The `Accept` header picks the form
+(PEP 691): `application/vnd.pypi.simple.v1+json` (also `...latest+json`), `...v1+html` (also
+`...latest+html`) or `text/html`, the highest `q` winning and the server order (JSON, HTML,
+`text/html`) breaking a tie; no `Accept` is `text/html`; none of them is 406. Every page answers
+through `format.WriteDocument` with `Vary: Accept`, a strong `ETag` and 304. Both forms render
+from one model:
+
+- JSON: `meta.api-version` 1.1 (1.0 when a proxied HTML page gives no sizes), `name`, `versions`,
+  and per file `filename`, `url`, `hashes.sha256`, `requires-python`, `yanked` (`false` for a hosted
+  file), `size`, `upload-time` (`yyyy-mm-ddThh:mm:ss.ffffffZ`) and for a wheel `core-metadata`
+  and `dist-info-metadata` (`{"sha256": ...}`).
+- HTML: `<meta name="pypi:repository-version">`, one anchor per file with `#sha256=` on the href,
+  `data-requires-python` (escaped), `data-core-metadata` and `data-dist-info-metadata`
+  (`sha256=...`) and `data-yanked`.
+- Every URL is relative to the page (`../../packages/...`, `../../files/...`), so a group serves
+  the page of its owning member unchanged and the client follows each file to the repo it asked.
+
+**Upload.** `POST /pypi/{repo}/` and `POST /pypi/{repo}/legacy/` (`route.FormatWrite`) take the
+legacy upload form: the file in the field `content` goes to the spool; `:action` other than
+`file_upload` and `protocol_version` other than `1` are 400; `sha256_digest` and `md5_digest` must
+match; any other field is ignored. The project and the version come from the file's own metadata
+(a wheel's `METADATA`, the `PKG-INFO` in the top folder of an sdist) and must match the file name
+(wheel: PEP 427; sdist `.tar.gz` or `.zip`); a form `name` or `version` that disagrees is 400. The
+answer is 201 `{project, version, filename, sha256}` for a new file, 200 for the same bytes, 409
+for other bytes. With `?upload=<id>&sha256=&size=&filename=` and no body the route finishes a
+resumable upload of the same publish session. An error answers in text with the message in the
+body (twine prints it with `--verbose`, uv always); a client that asks for JSON gets `{"error"}`.
+twine, uv and poetry send the session token as Basic with user `__token__`.
+
+**Rows.** `OnCommitted` writes `pypi_projects` and `pypi_files` for the stored file; `OnRemoved`
+deletes the file row of a removed file (its `.metadata` follows), stops advertising a removed
+`.metadata`, and deletes a project without files. So a file delete in the web UI drops the file from
+the page, and the last file drops the project.
+
+**Proxy** (default remote `https://pypi.org/`). The config field `files` (default
+`https://files.pythonhosted.org/`, checked with `proxy.FilesURL`) is the host the remote serves its
+package files from. The upstream page `simple/<project>/` is fetched with a JSON-first `Accept`
+and cached at `.simple/<project>` (`Changing`, rechecked after `metadata_ttl`, its content type
+kept); a remote that answers HTML is read as PEP 503 anchors. Each file URL, resolved against the
+upstream page, maps to `files/<rest>` under the `files` base or to `remote/<rest>` under the remote
+URL; a file at any other address is left out of the page, so the server never fetches an address
+that a remote document names. A file's `.metadata` follows it. The rendered pages are kept in a
+`format.DocumentCache` keyed by the SHA-256 of the cached page, the form, the remote and the
+`files` base. The module fetches through its own `proxy.Service` with the class of each path,
+because the `files` base is in the repo config and `Classify` sees only the remote; `Classify`
+gives the edge the same `Changing` answer. The remote's credentials go only to the remote's host.
+A proxy's project list is the projects it has cached; the upstream list is not proxied.
+
+**Group.** A group asks its members in order for a project (`assets.Reader.Owner`): the first member
+that has it (a hosted repo with the project row, a proxy whose remote has the page) renders the
+page, and no later member is asked, so a public package cannot shadow a private one. A
+`packages/` file goes to that member; a `files/` or `remote/` file to the first proxy member that
+has it. The project list is the union of the members' lists.
+
+**Versions.** The artifact folder of a hosted repo is `packages/<project>/`. Versions are newest
+first by `sort_key` (keyset on the version string), one build per version with its files (the
+sdist, then the wheels with their tags as the classifier).
+
+**Edge.** `Immutable: packages/**/*, files/**/*, remote/**/*`. The pages are rendered, so the
+Worker finds no pointer for them and sends them to the server.
+
+**Import.** `Sources: ["pypi"]`: each wheel and sdist of a Nexus pypi repo
+(`packages/<name>/<version>/<file>`) goes through the upload code to `packages/<project>/<file>`;
+every other file is ignored.
+
+**Web UI upload.** Wheels and sdists, chosen or a dropped `dist` folder; the plan reads the project
+and the version from the file names, the upload checks the metadata.
+
+**Snippets and CI.** pip (`pip.conf`), uv (`[[tool.uv.index]]`) and poetry (`poetry source add`);
+the artifact snippets install one project (`pip install "<name>==<v>"`, `uv add`, `poetry add`).
+CI tools `uv` (`astral-sh/setup-uv`), `poetry` (`setup-python`, `pipx install poetry`) and `pip`
+(`setup-python`, `pip install build`), each then `telesphorepo publish`.
 
 ## Docker registry
 
@@ -3330,6 +3433,7 @@ timestamps follow them.
 | `debian` | anonymous read | About 300 binary packages from about 100 sources, 1 to 5 versions each, as real `.deb` files for `amd64` and `arm64` or `all`. They go through the format's upload pipeline into `stable/main`, so the indexes and signed `Release` files are valid |
 | `npm` | anonymous read | About 40 packages (a third under `@acme`), 1 to 6 versions each, some ending in a `-beta.1`, as real tarballs through the format's upload step |
 | `nuget` | anonymous read | About 120 `.nupkg` files: 20 `Contoso.*` packages, some with `.Abstractions`, `.Testing` and `.AspNetCore` packages that depend on them, 1 to 6 versions each (some prereleases), pushed through the format's push |
+| `pypi` | anonymous read | 40 projects (`<company>-<word>`), 1 to 6 versions each, each version an sdist and a pure-Python wheel built by the module, stored through the upload pipeline with their `.metadata` |
 | `raw` | anonymous read | 20,000 files: `docs/<product>/<version>/` sites, `releases/<yyyy>/<mm>/<product>-<version>/` archives (valid `.tar.gz`/`.zip`) with `SHA256SUMS`, and `build-logs/<project>/<branch>/<build>/` logs and test reports |
 
 The demo users are `priya` (administrator), `jonas` (download and publish on `maven` and
@@ -3347,7 +3451,8 @@ schema of every component on a temporary database and runs the plan guard. `seed
 `TR_DATA_DIR`. For the format of every module with a seed (`Extender.Seed`), it creates the repos
 `seed-<format>-00` to `seed-<format>-09` (anonymous read, default config) and splits N rows
 evenly over all of them in transactions of 10,000. Each format inserts its own rows: maven
-and raw insert asset rows, debian inserts one package and its asset row per unit. Then it runs
+and raw insert asset rows, debian inserts one package and its asset row per unit, pypi one sdist with its
+project and file rows per unit. Then it runs
 `ANALYZE`. It is safe to run again.
 
 ## Tooling (`go tool task`, registered in `go.mod`)
@@ -3433,6 +3538,16 @@ same bytes stores them again), `TestUploadSessions` (chunks, a wrong offset, a r
 wrong digest, another publish session, finish into a raw and a Maven repo, an immutable release path,
 cancel, a Debian repo that refuses a path and finishes a `.deb` through its upload route) and `TestMavenMetadataAfterDelete`. `bulk_test.go` checks the `mirror` operation of a mapped repo and
 the 409 of resume and clear.
+
+`pypi_test.go` covers PyPI with the official `python` image (twine, build and poetry installed
+with pip) and uv's image: `TestPyPI` (both stores: `python -m build` and twine upload, the JSON
+page and the `.metadata` bytes, 409 and `twine --skip-existing`, `pip install --require-hashes`),
+`TestPyPIProtocol` (negotiation, 406, 304, the 301s, the project list, the upload refusals, the
+version browser, deletes), `TestPyPIClients` (`uv publish`, `poetry publish`, `uv pip compile`
+reads the `.metadata` and not the wheel, uv and poetry install) and `TestPyPIProxyGroup` (a
+pypi.org proxy for pip, uv and poetry, and a group where a hosted `iniconfig` owns the name, though
+pypi.org has higher versions). `cli_pypi_test.go` (`TestCLIPyPI`, clients zone) publishes with uv, Poetry and
+`python -m build` and a FILE upload; `nexus_pypi_test.go` imports a Nexus pypi repo (import zone).
 
 `docker_test.go` covers the registry. `TestDockerChallengeScheme`: with
 no `base_url`, the realm is http over plain HTTP; `X-Forwarded-Proto` or `Forwarded` of https

@@ -319,9 +319,3 @@ dotnet run
 		})
 	})
 }
-
-// assetPathsOf lists the asset paths of repo under prefix.
-func assetPathsOf(t *testing.T, s *Server, repo, prefix string) []string {
-	t.Helper()
-	return mavenAssetPaths(t, s, repo, prefix, s.Admin())
-}
