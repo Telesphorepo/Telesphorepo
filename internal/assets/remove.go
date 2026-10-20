@@ -26,9 +26,9 @@ type Removal struct {
 }
 
 // Remove deletes the files of rm in batches of removeBatch rows: the path locks in path order,
-// then one transaction with the format's OnRemoved (the rows still readable), the row deletes
-// and the file.delete events (one per file of Paths, one per folder of Prefixes). Then
-// AfterRemove. The follow-up paths of OnRemoved are removed as the next batches. A path that does
+// the watchers' Removing, then one transaction with the format's OnRemoved and the watchers'
+// Removed (the rows still readable), the row deletes and the file.delete events (one per file of
+// Paths, one per folder of Prefixes). Then AfterRemove. The follow-up paths of OnRemoved are removed as the next batches. A path that does
 // not exist is skipped. Blob objects stay: the blob GC removes a blob that no asset references.
 //
 // While the repo has an active delete operation, Remove calls no OnRemoved and no AfterRemove
@@ -117,6 +117,12 @@ func (p *Pipeline) removeBatch(ctx context.Context, repo *repos.Repo, hooks *Hoo
 		keys[i] = lockKey(repo.ID, x)
 	}
 	release := p.lock(keys)
+	for _, w := range p.watch {
+		if err := w.Removing(ctx, repo, paths); err != nil {
+			release()
+			return 0, nil, err
+		}
+	}
 	var removed []*Asset
 	var follow []string
 	err := p.db.Tx(ctx, func(tx *sql.Tx) error {
@@ -142,6 +148,11 @@ func (p *Pipeline) removeBatch(ctx context.Context, repo *repos.Repo, hooks *Hoo
 			}
 			for _, m := range more {
 				follow = append(follow, string(m))
+			}
+		}
+		for _, w := range p.watch {
+			if err := w.Removed(ctx, tx, repo, removed); err != nil {
+				return err
 			}
 		}
 		for _, a := range removed {

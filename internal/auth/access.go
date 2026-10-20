@@ -219,6 +219,7 @@ func (s *Service) SetPermissions(ctx context.Context, by *Principal, users, repo
 		return nil, err
 	}
 	var changed []Grant
+	var changedIDs []int64 // the user IDs of users, in order
 	err = s.db.Tx(ctx, func(tx *sql.Tx) error {
 		changed = changed[:0]
 		q := s.wq.WithTx(tx)
@@ -226,6 +227,7 @@ func (s *Service) SetPermissions(ctx context.Context, by *Principal, users, repo
 		if err != nil {
 			return err
 		}
+		changedIDs = uids
 		held := make([]perm.Set, len(rs))
 		for j, r := range rs {
 			if by == nil {
@@ -283,6 +285,20 @@ func (s *Service) SetPermissions(ctx context.Context, by *Principal, users, repo
 	})
 	if err != nil {
 		return nil, err
+	}
+	if len(changed) > 0 {
+		names := map[string]bool{}
+		for _, g := range changed {
+			names[g.Username] = true
+		}
+		c := Change{}
+		for i, name := range users {
+			if names[name] {
+				c.Users = append(c.Users, changedIDs[i])
+				delete(names, name)
+			}
+		}
+		s.changed(ctx, c)
 	}
 	return changed, nil
 }

@@ -210,6 +210,7 @@ func (s *Service) setupWith(ctx context.Context, r *http.Request, sc *auth.Setup
 	if err != nil {
 		return nil, err
 	}
+	s.deviceChanged(ctx, res.DeviceID)
 	return res, nil
 }
 
@@ -247,7 +248,7 @@ func (s *Service) RevokeSelf(ctx context.Context, deviceID int64, nonce, signatu
 	}
 	ctx = audit.WithActor(ctx, audit.Actor{Kind: audit.ActorUser, UserID: d.UserID, Name: d.Username, IP: audit.ActorOf(ctx).IP})
 	now := nullID(time.Now().Unix())
-	return s.db.Tx(ctx, func(tx *sql.Tx) error {
+	err = s.db.Tx(ctx, func(tx *sql.Tx) error {
 		q := dbq.New(tx)
 		n, err := q.RevokeDevice(ctx, dbq.RevokeDeviceParams{RevokedAt: now, ID: d.ID})
 		if err != nil {
@@ -262,6 +263,10 @@ func (s *Service) RevokeSelf(ctx context.Context, deviceID int64, nonce, signatu
 		return s.audit.RecordTx(ctx, tx, audit.Event{Action: ActionDeviceRevoke, Target: strconv.FormatInt(d.ID, 10),
 			Detail: map[string]any{"device_id": d.ID, "by": "device"}})
 	})
+	if err == nil {
+		s.deviceChanged(ctx, d.ID)
+	}
+	return err
 }
 
 // --- routes ---

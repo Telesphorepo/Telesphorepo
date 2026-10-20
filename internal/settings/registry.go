@@ -43,7 +43,9 @@ type Def struct {
 	// DataDefault, when set, makes the default the path DataDefault in the data directory.
 	DataDefault string
 	Secret      bool
-	Options     []string // allowed values (lower case) of an enumerated string
+	// Zero lets a duration be 0 (e.g. edge.access_ttl, where 0 means no cache).
+	Zero    bool
+	Options []string // allowed values (lower case) of an enumerated string
 	// Normalize puts a decoded value in its canonical form (optional).
 	Normalize func(v any) any
 	// Validate checks a decoded, normalized value (optional).
@@ -380,7 +382,7 @@ func (d *Def) check(v any) (any, error) {
 			return nil, errors.New("must be a positive size")
 		}
 	case TypeDuration:
-		if v.(time.Duration) <= 0 {
+		if dur := v.(time.Duration); dur < 0 || (dur == 0 && !d.Zero) {
 			return nil, errors.New(durationHint)
 		}
 	case TypeList:

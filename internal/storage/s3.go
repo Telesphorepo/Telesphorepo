@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
+	"github.com/aws/smithy-go/middleware"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 type s3Store struct {
@@ -49,6 +52,7 @@ func NewS3(ctx context.Context, cfg Config) (Store, error) {
 			o.BaseEndpoint = aws.String(cfg.S3Endpoint)
 		}
 		o.UsePathStyle = cfg.S3PathStyle
+		o.APIOptions = append(o.APIOptions, unsignedAcceptEncoding)
 	})
 	s := &s3Store{c: c, ps: s3.NewPresignClient(c), bucket: cfg.S3Bucket, redirect: cfg.S3Redirect}
 	if p := strings.Trim(cfg.S3Prefix, "/"); p != "" {
@@ -58,6 +62,44 @@ func NewS3(ctx context.Context, cfg Config) (Store, error) {
 }
 
 func (s *s3Store) key(k string) *string { return aws.String(s.prefix + k) }
+
+// acceptEncodingKey holds the Accept-Encoding value that stripAcceptEncoding took off the request.
+type acceptEncodingKey struct{}
+
+// unsignedAcceptEncoding keeps Accept-Encoding out of the SigV4 signature: a Finalize middleware
+// removes the header before Signing and a second one sets it again after. The local R2 S3
+// endpoint of wrangler dev rewrites that header before it checks the signature; R2 and other S3
+// servers accept a signature that leaves it out. A presign stack has no "Signing" step (the
+// presign client swaps it for its presigner and drops the Accept-Encoding middleware), so the
+// option leaves that stack as it is.
+func unsignedAcceptEncoding(stack *middleware.Stack) error {
+	if _, ok := stack.Finalize.Get("Signing"); !ok {
+		return nil
+	}
+	strip := middleware.FinalizeMiddlewareFunc("TelesphorepoStripAcceptEncoding",
+		func(ctx context.Context, in middleware.FinalizeInput, next middleware.FinalizeHandler) (middleware.FinalizeOutput, middleware.Metadata, error) {
+			if req, ok := in.Request.(*smithyhttp.Request); ok {
+				if v := req.Header.Get("Accept-Encoding"); v != "" {
+					req.Header.Del("Accept-Encoding")
+					ctx = middleware.WithStackValue(ctx, acceptEncodingKey{}, v)
+				}
+			}
+			return next.HandleFinalize(ctx, in)
+		})
+	restore := middleware.FinalizeMiddlewareFunc("TelesphorepoRestoreAcceptEncoding",
+		func(ctx context.Context, in middleware.FinalizeInput, next middleware.FinalizeHandler) (middleware.FinalizeOutput, middleware.Metadata, error) {
+			if v, _ := middleware.GetStackValue(ctx, acceptEncodingKey{}).(string); v != "" {
+				if req, ok := in.Request.(*smithyhttp.Request); ok {
+					req.Header.Set("Accept-Encoding", v)
+				}
+			}
+			return next.HandleFinalize(ctx, in)
+		})
+	if err := stack.Finalize.Insert(strip, "Signing", middleware.Before); err != nil {
+		return err
+	}
+	return stack.Finalize.Insert(restore, "Signing", middleware.After)
+}
 
 func isNotFound(err error) bool {
 	var nf *types.NotFound
@@ -131,6 +173,32 @@ func (s *s3Store) Delete(ctx context.Context, key string) error {
 		return nil
 	}
 	return err
+}
+
+// deleteBatch is the most keys one DeleteObjects call takes.
+const deleteBatch = 1000
+
+func (s *s3Store) DeleteMany(ctx context.Context, keys []string) error {
+	for chunk := range slices.Chunk(keys, deleteBatch) {
+		objs := make([]types.ObjectIdentifier, len(chunk))
+		for i, k := range chunk {
+			objs[i] = types.ObjectIdentifier{Key: s.key(k)}
+		}
+		res, err := s.c.DeleteObjects(ctx, &s3.DeleteObjectsInput{Bucket: &s.bucket,
+			Delete: &types.Delete{Objects: objs, Quiet: aws.Bool(true)}})
+		if err != nil {
+			return err
+		}
+		for _, e := range res.Errors {
+			switch aws.ToString(e.Code) {
+			case "NoSuchKey", "NotFound":
+				continue
+			}
+			return fmt.Errorf("delete %s: %s: %s", strings.TrimPrefix(aws.ToString(e.Key), s.prefix),
+				aws.ToString(e.Code), aws.ToString(e.Message))
+		}
+	}
+	return nil
 }
 
 func (s *s3Store) List(ctx context.Context, prefix, after string, limit int) ([]ObjectInfo, error) {

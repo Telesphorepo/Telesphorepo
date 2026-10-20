@@ -4,6 +4,7 @@ package auth
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -83,7 +84,10 @@ type Principal struct {
 	Kind     string   // KindLocal or KindOIDC; "" for a publish session without a user
 	Perms    perm.Set // the user's server permissions
 	TokenID  int64    // CredReadToken only
-	DeviceID int64    // CredDevice only
+	// TokenPublicID is the public ID of the read token (CredReadToken only), the key of its edge
+	// access object.
+	TokenPublicID string
+	DeviceID      int64 // CredDevice only
 	// Publish is the open session of a CredPublish principal. The access engine limits such a
 	// principal to the session's repo, and the route policies to the publish routes.
 	Publish *PublishSession
@@ -163,14 +167,16 @@ type Service struct {
 	sealer Sealer     // seals TOTP secrets; set by the server
 	audit  *audit.Log // records sign-ins, tokens and permission changes; set by the server
 
-	tokens       map[token.Prefix]Verifier // the token kinds, by prefix (AddTokenKind)
-	background   sync.WaitGroup            // the last_used_at writes of read tokens (Wait)
-	bearerKey    []byte                    // signs core bearer tokens (SetBearerKey)
-	sessions     SessionLoader             // loads the publish sessions of bearer tokens
-	devices      DeviceLoader              // loads the devices of bearer tokens
-	deviceProofs DeviceProofVerifier       // checks device proofs on format reads
-	sso          func() bool               // reports whether single sign-on is on (SetSSO)
-	managed      func() bool               // reports whether single sign-on manages the permissions of SSO accounts (SetManaged)
+	tokens       map[token.Prefix]Verifier       // the token kinds, by prefix (AddTokenKind)
+	background   sync.WaitGroup                  // the last_used_at writes of read tokens (Wait)
+	bearerKey    []byte                          // signs core bearer tokens (SetBearerKey)
+	edgeKey      ed25519.PrivateKey              // adds the edge signature to core bearer tokens (SetEdgeKey)
+	notices      []func(context.Context, Change) // run after each change of users, grants and tokens (AfterChange)
+	sessions     SessionLoader                   // loads the publish sessions of bearer tokens
+	devices      DeviceLoader                    // loads the devices of bearer tokens
+	deviceProofs DeviceProofVerifier             // checks device proofs on format reads
+	sso          func() bool                     // reports whether single sign-on is on (SetSSO)
+	managed      func() bool                     // reports whether single sign-on manages the permissions of SSO accounts (SetManaged)
 
 	// dev makes the second factor optional (telesphorepo-server dev only): a person without a factor
 	// gets a full session, and an approval or a manual session without a factor passes. A

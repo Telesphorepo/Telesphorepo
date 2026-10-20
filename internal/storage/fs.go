@@ -165,6 +165,18 @@ func (s *fsStore) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
+func (s *fsStore) DeleteMany(ctx context.Context, keys []string) error {
+	for _, k := range keys {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := s.Delete(ctx, k); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *fsStore) List(ctx context.Context, prefix, after string, limit int) ([]ObjectInfo, error) {
 	start := s.root
 	if i := strings.LastIndex(prefix, "/"); i >= 0 {

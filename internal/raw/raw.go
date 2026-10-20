@@ -62,6 +62,8 @@ func Module() module.Module {
 				Upload:   f.uploadSpec(),
 				Importer: &format.Importer{Sources: []string{"raw"}, Target: format.SourcePath},
 				UI:       format.UIDescriptor{SnippetTools: map[string]string{"curl": "curl", "wget": "wget", "telesphorepo": "Telesphorepo CLI"}},
+				// Every path is mutable: the overwrite config can change at any time.
+				Edge: &format.EdgeSpec{Shape: format.EdgeStandard},
 			})
 			x.Demo(module.DemoData{
 				Repos: []module.DemoRepo{{Name: "raw", Description: "Documentation sites, release archives and build logs", Public: true}},

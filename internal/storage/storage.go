@@ -29,6 +29,9 @@ type Store interface {
 	Head(ctx context.Context, key string) (ObjectInfo, error)
 	// Delete removes key; deleting a missing key is not an error.
 	Delete(ctx context.Context, key string) error
+	// DeleteMany removes keys; missing keys are not an error. S3 sends DeleteObjects with up to
+	// 1000 keys per call; FS deletes one key at a time.
+	DeleteMany(ctx context.Context, keys []string) error
 	// List returns up to limit objects under prefix with Key > after, ordered by key.
 	// Not used on request paths.
 	List(ctx context.Context, prefix, after string, limit int) ([]ObjectInfo, error)

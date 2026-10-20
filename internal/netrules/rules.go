@@ -225,9 +225,27 @@ func (s *Service) normalize(scope string, in []Rule) ([]rule, error) {
 	return out, nil
 }
 
-// SetRules validates in and replaces every rule of repo with it, and records
-// network.rules.update. It returns the stored rules. A validation error wraps ErrInvalid.
+// AfterRulesChange registers fn to run after each committed SetRules, with the repo's id, after
+// the in-memory snapshot changed. fn runs on the request that made the change and must be quick
+// (the edge module marks the repo's access object). It runs before the server serves.
+func (s *Service) AfterRulesChange(fn func(ctx context.Context, repoID int64)) {
+	s.afterRules = append(s.afterRules, fn)
+}
+
+// SetRules validates in and replaces every rule of repo with it, records network.rules.update
+// and then runs the AfterRulesChange functions. It returns the stored rules. A validation error
+// wraps ErrInvalid.
 func (s *Service) SetRules(ctx context.Context, repo *repos.Repo, in Rules) (Rules, error) {
+	out, err := s.setRules(ctx, repo, in)
+	if err == nil {
+		for _, fn := range s.afterRules {
+			fn(ctx, repo.ID)
+		}
+	}
+	return out, err
+}
+
+func (s *Service) setRules(ctx context.Context, repo *repos.Repo, in Rules) (Rules, error) {
 	repoID := repo.ID
 	// The list names are checked under rulesMu, which a list delete or rename also holds.
 	s.rulesMu.Lock()

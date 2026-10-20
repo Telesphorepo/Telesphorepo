@@ -84,14 +84,34 @@ type Service struct {
 	groups  map[int64][]int64 // group id -> member ids in read order
 	proxies map[int64]*Proxy  // repo id -> remote
 
-	onDelete []func(id int64) // set before the server serves
-	fields   []Field          // set before the server serves
+	onDelete []func(id int64)                      // set before the server serves
+	after    []func(ctx context.Context, n Notice) // set before the server serves (AfterChange)
+	fields   []Field                               // set before the server serves
 }
 
 // OnDelete registers fn to run after a repo row is deleted, with the repo's id: a module drops
 // what it keeps in memory about the repo, because the id can be used again. It runs before the
 // server serves.
 func (s *Service) OnDelete(fn func(id int64)) { s.onDelete = append(s.onDelete, fn) }
+
+// Notice is one committed change of repos: the repos that were created or updated (after the
+// change), or the repo whose row was deleted with the groups it was a member of.
+type Notice struct {
+	Changed []*Repo
+	Deleted *Repo
+	Groups  []int64 // the groups that Deleted left
+}
+
+// AfterChange registers fn to run after each committed Create, Update, UpdateAll and DeleteRow
+// that changed a repo. fn runs on the request that made the change and must be quick (the edge
+// module marks its access objects). It runs before the server serves.
+func (s *Service) AfterChange(fn func(ctx context.Context, n Notice)) { s.after = append(s.after, fn) }
+
+func (s *Service) notify(ctx context.Context, n Notice) {
+	for _, fn := range s.after {
+		fn(ctx, n)
+	}
+}
 
 // SetAudit gives the service the audit log of repo.create and repo.update.
 func (s *Service) SetAudit(a *audit.Log) { s.audit = a }
@@ -347,7 +367,9 @@ func (s *Service) Create(ctx context.Context, in Create) (*Repo, error) {
 		s.proxies[repo.ID] = &p
 		s.mu.Unlock()
 	}
-	return s.counted(repo, nil)
+	out, err := s.counted(repo, nil)
+	s.notify(ctx, Notice{Changed: []*Repo{out}})
+	return out, err
 }
 
 func (s *Service) record(ctx context.Context, tx *sql.Tx, action string, repo *Repo, detail map[string]any) error {
@@ -557,6 +579,7 @@ func (s *Service) UpdateAll(ctx context.Context, names []string, p Patch) ([]*Re
 	}
 	out := make([]*Repo, len(all))
 	changed := 0
+	var n Notice
 	for i, c := range all {
 		if len(c.fields) > 0 {
 			changed++
@@ -565,6 +588,12 @@ func (s *Service) UpdateAll(ctx context.Context, names []string, p Patch) ([]*Re
 			}
 		}
 		out[i], _ = s.counted(c.new, nil)
+		if len(c.fields) > 0 {
+			n.Changed = append(n.Changed, out[i])
+		}
+	}
+	if len(n.Changed) > 0 {
+		s.notify(ctx, n)
 	}
 	return out, changed, nil
 }
@@ -572,6 +601,15 @@ func (s *Service) UpdateAll(ctx context.Context, names []string, p Patch) ([]*Re
 // DeleteRow deletes the repo row of id; the rows that reference it cascade, so a deleted member
 // leaves its groups. ErrNotFound when it does not exist.
 func (s *Service) DeleteRow(ctx context.Context, id int64) error {
+	var gone *Repo
+	var groups []int64
+	if len(s.after) > 0 {
+		r, err := byID(ctx, dbq.New(s.db.W), id)
+		if err != nil {
+			return err
+		}
+		gone, groups = r, s.GroupsOf(id)
+	}
 	n, err := dbq.New(s.db.W).DeleteRepo(ctx, id)
 	if err != nil {
 		return err
@@ -584,6 +622,9 @@ func (s *Service) DeleteRow(ctx context.Context, id int64) error {
 	}
 	for _, fn := range s.onDelete {
 		fn(id)
+	}
+	if gone != nil {
+		s.notify(ctx, Notice{Deleted: gone, Groups: groups})
 	}
 	return nil
 }

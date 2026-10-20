@@ -245,6 +245,7 @@ func (s *Service) Approve(ctx context.Context, r *http.Request, p *auth.Principa
 	if err != nil {
 		return nil, err
 	}
+	s.deviceChanged(ctx, id)
 	return &Device{
 		ID: id, UserID: p.UserID, Name: e.Name,
 		CreatedAt: unixTime(now.Unix()), ExpiresAt: unixTime(exp.Unix()), State: "active",
@@ -329,7 +330,7 @@ func (s *Service) Devices(ctx context.Context, after int64, limit int) ([]Device
 // sessions and records device.revoke. ErrNotFound: unknown, another user's or already revoked.
 func (s *Service) RevokeDevice(ctx context.Context, p *auth.Principal, id int64) error {
 	now := nullID(time.Now().Unix())
-	return s.db.Tx(ctx, func(tx *sql.Tx) error {
+	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
 		q := dbq.New(tx)
 		var n int64
 		var err error
@@ -349,4 +350,8 @@ func (s *Service) RevokeDevice(ctx context.Context, p *auth.Principal, id int64)
 		}
 		return s.audit.RecordTx(ctx, tx, audit.Event{Action: ActionDeviceRevoke, Target: strconv.FormatInt(id, 10), Detail: map[string]any{"device_id": id}})
 	})
+	if err == nil {
+		s.deviceChanged(ctx, id)
+	}
+	return err
 }

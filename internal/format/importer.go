@@ -129,7 +129,7 @@ func (im *Importer) Run(ctx context.Context, p *assets.Pipeline, repo *repos.Rep
 		a, err := p.Get(ctx, repo.ID, string(target))
 		switch {
 		case err == nil && a.SHA256 == it.SHA256:
-			return ImportSkipped, p.SetTimes(ctx, a, it.CreatedAt, it.UpdatedAt)
+			return ImportSkipped, p.SetTimes(ctx, repo, a, it.CreatedAt, it.UpdatedAt)
 		case err != nil && !errors.Is(err, assets.ErrNotFound):
 			return "", err
 		}
@@ -150,7 +150,7 @@ func (im *Importer) Run(ctx context.Context, p *assets.Pipeline, repo *repos.Rep
 	}
 	if res.Status == assets.Unchanged {
 		if res.Asset != nil {
-			if err := p.SetTimes(ctx, res.Asset, it.CreatedAt, it.UpdatedAt); err != nil {
+			if err := p.SetTimes(ctx, repo, res.Asset, it.CreatedAt, it.UpdatedAt); err != nil {
 				return "", err
 			}
 		}

@@ -109,11 +109,14 @@ func (p *Pipeline) Commit(ctx context.Context, w Write) (*Result, error) {
 //
 //  1. It takes the path locks and the extra Locks (sorted), and reads each existing asset.
 //  2. Describe fills an empty ContentType or Kind; a path that Describe refuses is a 400.
-//  3. Admit decides each write: Store, Keep or a *Refusal.
+//  3. Admit decides each write: Store, Keep or a *Refusal. The watchers get Replacing with the
+//     assets that the stored writes replace, and Creating with the paths that they create; an
+//     error fails the commit.
 //  4. It takes the digest locks of the writes that store, after the path locks, and makes sure
 //     each blob exists (blobs.Store.EnsureAll); a Body.Blob that no blob has is a 404.
-//  5. One transaction writes the asset rows, runs the format's OnCommitted and records one
-//     file.upload event per stored upload or import. A failed transaction is tried again.
+//  5. One transaction writes the asset rows, runs the format's OnCommitted, records one
+//     file.upload event per stored upload or import and calls the watchers' Committed. A failed
+//     transaction is tried again.
 //  6. It releases the digest locks, then the path locks, then calls AfterCommit.
 //
 // The writes run detached from ctx's cancel (a client that goes away does not leave a blob
@@ -149,6 +152,10 @@ func (p *Pipeline) CommitAll(ctx context.Context, ws []Write) ([]*Result, error)
 	release := p.lock(keys)
 	results, stored, err := p.admit(ctx, repo, ws)
 	if err != nil {
+		release()
+		return nil, err
+	}
+	if err := p.replacing(ctx, repo, stored); err != nil {
 		release()
 		return nil, err
 	}
@@ -248,6 +255,36 @@ func (p *Pipeline) admit(ctx context.Context, repo *repos.Repo, ws []Write) ([]*
 	return results, stored, nil
 }
 
+// replacing calls Watcher.Replacing with the existing assets that the stored writes replace, and
+// Watcher.Creating with the paths that they create.
+func (p *Pipeline) replacing(ctx context.Context, repo *repos.Repo, stored []*Result) error {
+	if len(p.watch) == 0 {
+		return nil
+	}
+	var prev []*Asset
+	var created []string
+	for _, r := range stored {
+		if r.Status == Replaced {
+			prev = append(prev, r.Asset)
+		} else {
+			created = append(created, string(r.Write.Path))
+		}
+	}
+	for _, w := range p.watch {
+		if len(prev) > 0 {
+			if err := w.Replacing(ctx, repo, prev); err != nil {
+				return err
+			}
+		}
+		if len(created) > 0 {
+			if err := w.Creating(ctx, repo, created); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // ensure takes the digest locks of the stored writes and makes sure their blobs exist. It
 // returns the release of the digest locks and the blobs by digest.
 func (p *Pipeline) ensure(ctx context.Context, stored []*Result) (func(), map[string]*blobs.Blob, error) {
@@ -323,6 +360,22 @@ func (p *Pipeline) write(ctx context.Context, tx *sql.Tx, hooks *Hooks, results 
 			}
 		}
 		written[i] = a
+	}
+	if len(p.watch) > 0 {
+		var stored []*Asset
+		for _, a := range written {
+			if a != nil {
+				stored = append(stored, a)
+			}
+		}
+		if len(stored) > 0 {
+			repo := results[0].Write.Repo
+			for _, wt := range p.watch {
+				if err := wt.Committed(ctx, tx, repo, stored); err != nil {
+					return nil, err
+				}
+			}
+		}
 	}
 	return written, nil
 }

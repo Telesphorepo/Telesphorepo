@@ -139,6 +139,8 @@ func Module() module.Module {
 				Publish:       format.PublishHelper,
 				Importer:      f.importer(),
 				UI:            ui,
+				// Tags (_tags/) match no immutable glob, so they are mutable.
+				Edge: &format.EdgeSpec{Shape: format.EdgeOCI, Immutable: []string{"**/_manifests/sha256/*", "**/_blobs/sha256/*"}},
 			})
 			x.Job(jobs.Job{Name: "docker.links", Run: f.sweepLinks})
 			x.Demo(module.DemoData{Repos: demoRepos, Fill: f.demo})

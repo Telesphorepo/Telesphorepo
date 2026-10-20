@@ -24,6 +24,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
 	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/ops"
+	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 )
 
@@ -83,6 +84,7 @@ type Pipeline struct {
 	set   settings.Provider
 	audit *audit.Log
 	hooks func(format string) *Hooks
+	watch []Watcher
 	base  context.Context // ends when the server shuts down
 
 	mu    sync.Mutex
@@ -99,6 +101,10 @@ func New(base context.Context, d *db.DB, bs *blobs.Store, set settings.Provider,
 // SetHooks gives the pipeline the hooks of each format (the format registry). It runs before
 // the server serves.
 func (p *Pipeline) SetHooks(fn func(format string) *Hooks) { p.hooks = fn }
+
+// Watch adds w to the watchers of every commit and remove, called in the order they were added.
+// It runs before the server serves (a module's Init).
+func (p *Pipeline) Watch(w Watcher) { p.watch = append(p.watch, w) }
 
 // Hooks returns the hooks of format, never nil.
 func (p *Pipeline) Hooks(format string) *Hooks {
@@ -254,10 +260,10 @@ func (p *Pipeline) ByBlob(ctx context.Context, repoID, blobID int64, limit int) 
 	return out, nil
 }
 
-// SetTimes gives file a the dates created and updated when they differ from a's, to the second.
-// Zero updated changes nothing; zero created is updated. An import calls it for a file that it
-// skips because the bytes are here.
-func (p *Pipeline) SetTimes(ctx context.Context, a *Asset, created, updated time.Time) error {
+// SetTimes gives file a of repo the dates created and updated when they differ from a's, to the
+// second, then tells the watchers (Touched). Zero updated changes nothing; zero created is
+// updated. An import calls it for a file that it skips because the bytes are here.
+func (p *Pipeline) SetTimes(ctx context.Context, repo *repos.Repo, a *Asset, created, updated time.Time) error {
 	if updated.IsZero() {
 		return nil
 	}
@@ -267,8 +273,16 @@ func (p *Pipeline) SetTimes(ctx context.Context, a *Asset, created, updated time
 	if a.CreatedAt.Unix() == created.Unix() && a.UpdatedAt.Unix() == updated.Unix() {
 		return nil
 	}
-	return dbq.New(p.db.W).SetAssetTimes(ctx, dbq.SetAssetTimesParams{CreatedAt: created.Unix(),
-		UpdatedAt: updated.Unix(), RepoID: a.RepoID, Path: a.Path})
+	if err := dbq.New(p.db.W).SetAssetTimes(ctx, dbq.SetAssetTimesParams{CreatedAt: created.Unix(),
+		UpdatedAt: updated.Unix(), RepoID: a.RepoID, Path: a.Path}); err != nil {
+		return err
+	}
+	for _, w := range p.watch {
+		if err := w.Touched(ctx, repo, []string{a.Path}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // SetChecked records that the remote of a proxy repo confirmed the cached file at at, with its

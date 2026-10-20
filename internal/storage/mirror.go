@@ -59,6 +59,14 @@ func (m *Mirror) Delete(ctx context.Context, key string) error {
 	return m.Src.Delete(ctx, key)
 }
 
+// DeleteMany removes keys from Dst, then from Src.
+func (m *Mirror) DeleteMany(ctx context.Context, keys []string) error {
+	if err := m.Dst.DeleteMany(ctx, keys); err != nil {
+		return fmt.Errorf("delete from move target: %w", err)
+	}
+	return m.Src.DeleteMany(ctx, keys)
+}
+
 func (m *Mirror) List(ctx context.Context, prefix, after string, limit int) ([]ObjectInfo, error) {
 	return m.Src.List(ctx, prefix, after, limit)
 }

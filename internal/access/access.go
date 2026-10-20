@@ -61,15 +61,24 @@ type Blocked struct {
 	Message string `json:"message"`
 }
 
+// DownloadNote returns one sentence about the downloads of repo for the access report, or "" for
+// none (e.g. the edge module: "Downloads come from the edge.").
+type DownloadNote func(ctx context.Context, repo *repos.Repo) (string, error)
+
+// AddDownloadNote adds a source of the Notes of Download, in module start order. It runs before
+// the server serves.
+func (e *Engine) AddDownloadNote(fn DownloadNote) { e.notes = append(e.notes, fn) }
+
 // Download is who can download from a repo. People are the users with a grant of download;
 // Admins counts the enabled holders of the All repositories permission. Guards are the reports
-// of the guards, by guard name.
+// of the guards, by guard name. Notes are the sentences of the DownloadNote sources.
 type Download struct {
 	Public   bool                   `json:"public"`
 	People   []Person               `json:"people"`
 	Admins   int                    `json:"admins"`
 	Guards   map[string]GuardReport `json:"guards"`
 	Sentence string                 `json:"sentence"`
+	Notes    []string               `json:"notes"`
 }
 
 // Publish is who can publish to a repo. People are the users with a grant of publish (they
@@ -186,6 +195,16 @@ func (e *Engine) Report(ctx context.Context, repo *repos.Repo, listAdmins bool) 
 		p.Guards[gd.Name()] = gd.Describe(repo, Write)
 	}
 	d.Sentence, p.Sentence = downloadSentence(d), publishSentence(p)
+	d.Notes = []string{}
+	for _, fn := range e.notes {
+		n, err := fn(ctx, repo)
+		if err != nil {
+			return nil, err
+		}
+		if n != "" {
+			d.Notes = append(d.Notes, n)
+		}
+	}
 	return out, nil
 }
 

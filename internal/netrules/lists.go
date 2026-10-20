@@ -190,6 +190,8 @@ type Service struct {
 	// list, holds it, so nothing names a list that is gone. Lock order: rulesMu, then listsMu.
 	rulesMu sync.RWMutex
 	rules   map[int64]*repoRules
+
+	afterRules []func(ctx context.Context, repoID int64) // set before the server serves (AfterRulesChange)
 }
 
 // New returns the service. Load must run before it serves requests.

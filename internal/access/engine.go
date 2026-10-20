@@ -96,7 +96,8 @@ type Engine struct {
 	ops    *ops.Service
 	guards []Guard
 
-	pipelines Pipelines // the CI rules of the report; set before the server serves
+	pipelines Pipelines      // the CI rules of the report; set before the server serves
+	notes     []DownloadNote // the notes of the report's downloads; set before the server serves
 }
 
 // New returns the engine. os gives the message of a repo's operation.
@@ -226,6 +227,19 @@ func (e *Engine) Private(ctx context.Context, repo *repos.Repo) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// Guarded reports, from memory, whether a guard can refuse a read of repo itself (not of its
+// members), e.g. a read IP rule: such a read depends on the client, so the edge Worker leaves it to
+// the server. A guard that is not a ReadRestricter counts as guarding every repo.
+func (e *Engine) Guarded(repo *repos.Repo) bool {
+	for _, g := range e.guards {
+		rr, ok := g.(ReadRestricter)
+		if !ok || rr.RestrictsRead(repo) {
+			return true
+		}
+	}
+	return false
 }
 
 // restricted reports whether repo has no anonymous read or a guard limits its reads.

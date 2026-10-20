@@ -29,7 +29,8 @@ const (
 
 // Module returns the storage module: the storage settings (group "storage") with their owner
 // hooks (the probe of a new store, and the move when its location changes), the storage move API
-// and the job that resumes a move left running by the previous process.
+// and the job that resumes a move left running by the previous process. It provides *Service to
+// the modules that require it.
 func Module() module.Module {
 	m := &mod{}
 	return module.Module{
@@ -50,6 +51,7 @@ func Module() module.Module {
 			x.Init(func(ctx context.Context, h *module.Host) error {
 				m.h = h
 				m.moves = New(h.DB, h.Settings, h.Storage, h.Blobs, h.Audit, h.Log, h.Context(), h.Go)
+				h.Provide(m.moves)
 				return nil
 			})
 			x.Job(jobs.Job{Name: "storage.resume", Start: func(ctx context.Context) error { return m.moves.Resume(ctx) }})

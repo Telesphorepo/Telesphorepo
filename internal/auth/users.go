@@ -57,6 +57,7 @@ func (s *Service) CreateUser(ctx context.Context, username, password string, per
 	if err != nil {
 		return nil, err
 	}
+	s.changed(ctx, Change{Users: []int64{id}})
 	return &User{ID: id, Username: username, Permissions: perms.Strings(), Perms: perms, Kind: KindLocal, CreatedAt: time.Unix(now, 0)}, nil
 }
 
@@ -93,7 +94,9 @@ func (s *Service) SetUserPerms(ctx context.Context, username string, ids []strin
 	if perms, err = perm.Current().Parse(perm.ScopeServer, ids); err != nil {
 		return perm.Set{}, perm.Set{}, err
 	}
+	var changedID int64
 	err = s.db.Tx(ctx, func(tx *sql.Tx) error {
+		changedID = 0
 		q := s.wq.WithTx(tx)
 		r, err := q.GetUserByUsername(ctx, username)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -109,6 +112,7 @@ func (s *Service) SetUserPerms(ctx context.Context, username string, ids []strin
 		if old == perms {
 			return nil
 		}
+		changedID = r.ID
 		before, err := userNeedsFactor(ctx, q, r.ID)
 		if err != nil {
 			return err
@@ -135,6 +139,9 @@ func (s *Service) SetUserPerms(ctx context.Context, username string, ids []strin
 		}
 		return nil
 	})
+	if err == nil && changedID != 0 {
+		s.changed(ctx, Change{Users: []int64{changedID}})
+	}
 	return old, perms, err
 }
 
@@ -231,6 +238,11 @@ func (s *Service) SetDisabled(ctx context.Context, names []string, disabled bool
 	for _, id := range ids {
 		s.cache.invalidate(id)
 	}
+	c := Change{}
+	for _, u := range changed {
+		c.Users = append(c.Users, u.ID)
+	}
+	s.changed(ctx, c)
 	return changed, nil
 }
 
@@ -343,6 +355,8 @@ func (s *Service) UpsertOIDCUser(ctx context.Context, issuer, subject, username,
 	if err != nil {
 		return nil, err
 	}
+	// A new account, or permissions that single sign-on changed.
+	s.changed(ctx, Change{Users: []int64{id}})
 	u, err := getUserByID(ctx, s.wq, id)
 	if err != nil {
 		return nil, err

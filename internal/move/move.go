@@ -109,6 +109,22 @@ type Service struct {
 
 	mu  sync.Mutex // serializes start, finish, cancel and resume
 	run *run       // the copying move of this process, nil when none
+
+	onStart []func(ctx context.Context, moveID int64) // set before the server serves (OnStart)
+}
+
+// OnStart registers fn to run when a move starts copying in this process: after Start, and after
+// Resume continues a move at startup. fn gets the move's id, runs under the lock of the Service
+// (it must not call the Service) and must be quick (the edge module suspends edge delivery, since
+// the home bucket changes). It runs before the server serves.
+func (s *Service) OnStart(fn func(ctx context.Context, moveID int64)) {
+	s.onStart = append(s.onStart, fn)
+}
+
+func (s *Service) started(ctx context.Context, id int64) {
+	for _, fn := range s.onStart {
+		fn(ctx, id)
+	}
 }
 
 // run is a move whose copier runs in this process.
@@ -189,6 +205,7 @@ func (s *Service) Start(ctx context.Context, dstCfg storage.Config, startedBy in
 	r := &run{id: id, startedBy: startedBy, target: dstCfg, mirror: storage.NewMirror(s.live.Active(), dst)}
 	s.live.Swap(r.mirror)
 	s.launch(r, 0, 0, 0, 0)
+	s.started(ctx, id)
 	s.log.Info("storage move started", "move", id, "storage", dstCfg.Backend, "blobs", total)
 	_ = s.audit.Record(ctx, audit.Event{Action: ActionStart, Target: strconv.FormatInt(id, 10),
 		Detail: map[string]any{"target": target(dstCfg), "blobs": total}})
@@ -234,6 +251,7 @@ func (s *Service) Resume(ctx context.Context) error {
 	r := &run{id: row.ID, startedBy: by, target: dstCfg, mirror: storage.NewMirror(s.live.Active(), dst)}
 	s.live.Swap(r.mirror)
 	s.launch(r, row.Cursor, row.Copied, row.Skipped, row.Failed)
+	s.started(ctx, row.ID)
 	s.log.Info("storage move resumed", "move", row.ID, "storage", dstCfg.Backend, "cursor", row.Cursor)
 	return nil
 }

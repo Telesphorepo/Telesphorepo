@@ -71,6 +71,10 @@ func (l *Live) Head(ctx context.Context, key string) (ObjectInfo, error) {
 
 func (l *Live) Delete(ctx context.Context, key string) error { return l.Active().Delete(ctx, key) }
 
+func (l *Live) DeleteMany(ctx context.Context, keys []string) error {
+	return l.Active().DeleteMany(ctx, keys)
+}
+
 func (l *Live) List(ctx context.Context, prefix, after string, limit int) ([]ObjectInfo, error) {
 	return l.Active().List(ctx, prefix, after, limit)
 }

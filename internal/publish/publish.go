@@ -87,6 +87,21 @@ type Service struct {
 
 	provMu sync.Mutex
 	provs  map[string]*gooidc.Provider // discovered CI issuers; failures are not cached
+
+	afterDevice []func(ctx context.Context, deviceID int64) // set before the server serves (AfterDeviceChange)
+}
+
+// AfterDeviceChange registers fn to run after each committed enrollment or revoke of a device,
+// with the device's id. fn runs on the request that made the change and must be quick (the edge
+// module marks the device's access object). It runs before the server serves.
+func (s *Service) AfterDeviceChange(fn func(ctx context.Context, deviceID int64)) {
+	s.afterDevice = append(s.afterDevice, fn)
+}
+
+func (s *Service) deviceChanged(ctx context.Context, id int64) {
+	for _, fn := range s.afterDevice {
+		fn(ctx, id)
+	}
 }
 
 // Deps are the kernel services of the publish service.

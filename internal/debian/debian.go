@@ -97,6 +97,7 @@ func Module() module.Module {
 				Upload:        h.uploadSpec(),
 				Importer:      &format.Importer{Sources: []string{"apt"}, Target: h.importTarget, Store: h.importStore, Plan: h.importPlan},
 				UI:            ui,
+				Edge:          &format.EdgeSpec{Shape: format.EdgeStandard, Immutable: []string{"pool/**/*", "dists/**/by-hash/**/*"}},
 			})
 			x.Demo(module.DemoData{Repos: demoRepos, Fill: h.Demo})
 			x.Seed(seed)

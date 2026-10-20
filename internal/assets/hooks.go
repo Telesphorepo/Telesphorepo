@@ -46,6 +46,31 @@ type Hooks struct {
 	RemoteAuth func(ctx context.Context, remote *repos.Proxy, challenge http.Header) (http.Header, error)
 }
 
+// Watcher sees every commit and remove of every format and every writer (format routes, uploads,
+// imports, proxy fetches, generated files), unlike Hooks, which belong to one format. A module
+// registers one with Pipeline.Watch in its Init (the edge module keeps its R2 pointers with it).
+// An error of Replacing, Creating, Committed, Removing or Removed fails the commit or the remove
+// batch.
+type Watcher interface {
+	// Replacing runs in CommitAll after Admit and before the blobs are ensured, under the path
+	// locks, with the existing assets that the commit replaces (only when there are some).
+	Replacing(ctx context.Context, repo *repos.Repo, prev []*Asset) error
+	// Creating runs at the same point as Replacing, after it, with the paths that the commit
+	// stores where no asset was (only when there are some).
+	Creating(ctx context.Context, repo *repos.Repo, paths []string) error
+	// Committed runs in the commit transaction, after OnCommitted, with every asset it stored. A
+	// failed transaction that is tried again calls it again.
+	Committed(ctx context.Context, tx *sql.Tx, repo *repos.Repo, stored []*Asset) error
+	// Removing runs in each remove batch after the path locks and before the transaction, with
+	// the paths of the batch (sorted, each once; a path may have no asset).
+	Removing(ctx context.Context, repo *repos.Repo, paths []string) error
+	// Removed runs in the remove transaction, after OnRemoved, with the assets it deletes (the
+	// rows are still readable).
+	Removed(ctx context.Context, tx *sql.Tx, repo *repos.Repo, removed []*Asset) error
+	// Touched runs after SetTimes changed the dates of an asset outside the pipeline transaction.
+	Touched(ctx context.Context, repo *repos.Repo, paths []string) error
+}
+
 // Describe is what a format says about a path.
 type Describe struct {
 	ContentType string

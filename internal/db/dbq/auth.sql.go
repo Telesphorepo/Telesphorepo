@@ -190,16 +190,20 @@ func (q *Queries) DeleteSession(ctx context.Context, idHash []byte) error {
 	return err
 }
 
-const deleteToken = `-- name: DeleteToken :execrows
-DELETE FROM api_tokens WHERE id = ?
+const deleteToken = `-- name: DeleteToken :one
+DELETE FROM api_tokens WHERE id = ? RETURNING user_id, public_id
 `
 
-func (q *Queries) DeleteToken(ctx context.Context, id int64) (int64, error) {
-	result, err := q.db.ExecContext(ctx, deleteToken, id)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
+type DeleteTokenRow struct {
+	UserID   int64
+	PublicID string
+}
+
+func (q *Queries) DeleteToken(ctx context.Context, id int64) (DeleteTokenRow, error) {
+	row := q.db.QueryRowContext(ctx, deleteToken, id)
+	var i DeleteTokenRow
+	err := row.Scan(&i.UserID, &i.PublicID)
+	return i, err
 }
 
 const deleteUserPerms = `-- name: DeleteUserPerms :exec
@@ -220,8 +224,8 @@ func (q *Queries) DeleteUserSessions(ctx context.Context, userID int64) error {
 	return err
 }
 
-const deleteUserToken = `-- name: DeleteUserToken :execrows
-DELETE FROM api_tokens WHERE id = ? AND user_id = ?
+const deleteUserToken = `-- name: DeleteUserToken :one
+DELETE FROM api_tokens WHERE id = ? AND user_id = ? RETURNING user_id, public_id
 `
 
 type DeleteUserTokenParams struct {
@@ -229,12 +233,16 @@ type DeleteUserTokenParams struct {
 	UserID int64
 }
 
-func (q *Queries) DeleteUserToken(ctx context.Context, arg DeleteUserTokenParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, deleteUserToken, arg.ID, arg.UserID)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
+type DeleteUserTokenRow struct {
+	UserID   int64
+	PublicID string
+}
+
+func (q *Queries) DeleteUserToken(ctx context.Context, arg DeleteUserTokenParams) (DeleteUserTokenRow, error) {
+	row := q.db.QueryRowContext(ctx, deleteUserToken, arg.ID, arg.UserID)
+	var i DeleteUserTokenRow
+	err := row.Scan(&i.UserID, &i.PublicID)
+	return i, err
 }
 
 const getOIDCUser = `-- name: GetOIDCUser :one
@@ -937,6 +945,23 @@ type TouchTokenParams struct {
 
 func (q *Queries) TouchToken(ctx context.Context, arg TouchTokenParams) error {
 	_, err := q.db.ExecContext(ctx, touchToken, arg.LastUsedAt, arg.ID)
+	return err
+}
+
+const touchTokenByPublicID = `-- name: TouchTokenByPublicID :exec
+UPDATE api_tokens SET last_used_at = ?1
+WHERE public_id = ?2 AND (last_used_at IS NULL OR last_used_at < ?1)
+`
+
+type TouchTokenByPublicIDParams struct {
+	LastUsedAt sql.NullInt64
+	PublicID   string
+}
+
+// The last use of a read token that the edge Worker served, by its public ID; an earlier time
+// than the stored one changes nothing.
+func (q *Queries) TouchTokenByPublicID(ctx context.Context, arg TouchTokenByPublicIDParams) error {
+	_, err := q.db.ExecContext(ctx, touchTokenByPublicID, arg.LastUsedAt, arg.PublicID)
 	return err
 }
 

@@ -67,6 +67,7 @@ func (s *Service) CreateToken(ctx context.Context, userID int64, name string, ex
 			return nil, "", err
 		}
 		t.ID = id
+		s.changed(ctx, Change{Users: []int64{userID}, Tokens: []string{pub}})
 		_ = s.audit.Record(ctx, audit.Event{Action: audit.TokenCreate, Target: name, Detail: map[string]any{"token_id": id}})
 		return t, tok, nil
 	}
@@ -99,19 +100,22 @@ func (s *Service) DeleteToken(ctx context.Context, p *Principal, id int64) error
 	if p == nil {
 		return ErrNotFound
 	}
-	var n int64
+	var row dbq.DeleteTokenRow
 	var err error
 	if p.Perms.Has(perm.PeopleManage) {
-		n, err = s.wq.DeleteToken(ctx, id)
+		row, err = s.wq.DeleteToken(ctx, id)
 	} else {
-		n, err = s.wq.DeleteUserToken(ctx, dbq.DeleteUserTokenParams{ID: id, UserID: p.UserID})
+		var r dbq.DeleteUserTokenRow
+		r, err = s.wq.DeleteUserToken(ctx, dbq.DeleteUserTokenParams{ID: id, UserID: p.UserID})
+		row = dbq.DeleteTokenRow(r)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
 	}
 	if err != nil {
 		return err
 	}
-	if n == 0 {
-		return ErrNotFound
-	}
+	s.changed(ctx, Change{Users: []int64{row.UserID}, Tokens: []string{row.PublicID}})
 	_ = s.audit.Record(ctx, audit.Event{Action: audit.TokenDelete, Target: strconv.FormatInt(id, 10), Detail: map[string]any{"token_id": id}})
 	return nil
 }
@@ -137,7 +141,7 @@ func (s *Service) VerifyReadToken(ctx context.Context, publicID, secret string) 
 	if !row.LastUsedAt.Valid || now-row.LastUsedAt.Int64 >= 60 {
 		s.touchToken(row.TokenID, now)
 	}
-	return &Principal{Cred: CredReadToken, UserID: row.UserID, Username: row.Username, Perms: perm.Joined(row.Perms), TokenID: row.TokenID, Kind: row.Kind}, nil
+	return &Principal{Cred: CredReadToken, UserID: row.UserID, Username: row.Username, Perms: perm.Joined(row.Perms), TokenID: row.TokenID, TokenPublicID: publicID, Kind: row.Kind}, nil
 }
 
 // touchToken updates last_used_at in the background, at most once per minute per token. Wait

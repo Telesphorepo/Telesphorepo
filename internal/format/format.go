@@ -131,6 +131,46 @@ type Spec struct {
 
 	// UI is what the web UI shows of the format (GET /api/formats).
 	UI UIDescriptor
+
+	// Edge lets the edge Worker serve the format's downloads (the edge module). nil: the format
+	// gets no Worker route, and every request goes to the server.
+	Edge *EdgeSpec
+}
+
+// EdgeSpec is how the edge Worker reads a format's URLs and which of its paths can change.
+type EdgeSpec struct {
+	// Shape is how a URL names a repo and an asset path: EdgeStandard or EdgeOCI.
+	Shape string
+	// Immutable and Mutable are Glob patterns of asset paths. A path is immutable when it matches
+	// an Immutable pattern and no Mutable pattern; every other path is mutable. The pointer of an
+	// immutable path is in every regional bucket, a mutable one only in the home bucket. Every
+	// path that the format's Merge merges must be mutable.
+	Immutable []string
+	Mutable   []string
+}
+
+// Edge URL shapes (EdgeSpec.Shape).
+const (
+	// EdgeStandard is /<format>/<repo>/<path>.
+	EdgeStandard = "standard"
+	// EdgeOCI is /v2/<repo>/<image>/manifests/<ref> and /v2/<repo>/<image>/blobs/sha256:<hex>.
+	EdgeOCI = "oci"
+)
+
+// Prefix is the URL prefix of the format's Worker route: "/v2/" for EdgeOCI, else "/<name>/".
+func (e *EdgeSpec) Prefix(name string) string {
+	if e.Shape == EdgeOCI {
+		return "/v2/"
+	}
+	return "/" + name + "/"
+}
+
+// IsImmutable reports whether the asset path p is immutable (see Immutable).
+func (e *EdgeSpec) IsImmutable(p string) bool {
+	if !slices.ContainsFunc(e.Immutable, func(g string) bool { return Glob(g, p) }) {
+		return false
+	}
+	return !slices.ContainsFunc(e.Mutable, func(g string) bool { return Glob(g, p) })
 }
 
 // Rebuild is the rebuild of a format (see rebuild.Run).
@@ -272,7 +312,8 @@ var reserved = map[string]bool{"api": true, "core": true, "healthz": true, "asse
 // name is not valid or is taken, when it has no Config.Validate, when its Kinds lack "hosted"
 // or name another kind, when it takes proxies without Classify and ProxyProbe, when its Merge
 // lacks Match or Merge, when it sets one of Versions and Builds without the other, when its
-// Upload, Importer or Rebuild is incomplete, or when its Publish category is unknown.
+// Upload, Importer or Rebuild is incomplete, when its Publish category is unknown, or when its
+// Edge has an unknown Shape or an empty or absolute glob.
 func NewRegistry(specs []Spec) (*Registry, error) {
 	r := &Registry{byName: map[string]*Spec{}, hooks: map[string]*assets.Hooks{}}
 	for i := range specs {
@@ -312,6 +353,15 @@ func check(s *Spec) error {
 		return fmt.Errorf("Rebuild needs Run")
 	case s.Publish != "" && s.Publish != PublishCLI && s.Publish != PublishHelper:
 		return fmt.Errorf("Publish must be %q or %q", PublishCLI, PublishHelper)
+	case s.Edge != nil && s.Edge.Shape != EdgeStandard && s.Edge.Shape != EdgeOCI:
+		return fmt.Errorf("Edge.Shape must be %q or %q", EdgeStandard, EdgeOCI)
+	}
+	if s.Edge != nil {
+		for _, g := range slices.Concat(s.Edge.Immutable, s.Edge.Mutable) {
+			if g == "" || strings.HasPrefix(g, "/") {
+				return fmt.Errorf("Edge glob %q must be a relative path pattern", g)
+			}
+		}
 	}
 	for _, k := range s.Kinds {
 		if k != repos.KindHosted && k != repos.KindProxy && k != repos.KindGroup {

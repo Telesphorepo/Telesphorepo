@@ -57,6 +57,9 @@ func Module() module.Module {
 				Upload:        h.uploadSpec(),
 				Importer:      &format.Importer{Sources: []string{"maven2"}, Target: format.SourcePath},
 				UI:            ui,
+				// The mutable globs are the paths of mutable: metadata and snapshot files.
+				Edge: &format.EdgeSpec{Shape: format.EdgeStandard, Immutable: []string{"**/*"},
+					Mutable: []string{"**/maven-metadata.xml*", "**/*-SNAPSHOT/*"}},
 			})
 			x.Demo(module.DemoData{Repos: demoRepos, Fill: h.Demo})
 			x.Seed(seed)

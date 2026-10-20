@@ -104,11 +104,11 @@ RETURNING id;
 -- name: ListTokens :many
 SELECT id, name, created_at, expires_at, last_used_at FROM api_tokens WHERE user_id = ? ORDER BY name;
 
--- name: DeleteToken :execrows
-DELETE FROM api_tokens WHERE id = ?;
+-- name: DeleteToken :one
+DELETE FROM api_tokens WHERE id = ? RETURNING user_id, public_id;
 
--- name: DeleteUserToken :execrows
-DELETE FROM api_tokens WHERE id = ? AND user_id = ?;
+-- name: DeleteUserToken :one
+DELETE FROM api_tokens WHERE id = ? AND user_id = ? RETURNING user_id, public_id;
 
 -- name: GetTokenAuth :one
 SELECT t.id AS token_id, t.secret_hash, t.expires_at, t.last_used_at,
@@ -127,6 +127,12 @@ WHERE t.id = ?;
 
 -- name: TouchToken :exec
 UPDATE api_tokens SET last_used_at = ? WHERE id = ?;
+
+-- The last use of a read token that the edge Worker served, by its public ID; an earlier time
+-- than the stored one changes nothing.
+-- name: TouchTokenByPublicID :exec
+UPDATE api_tokens SET last_used_at = sqlc.arg(last_used_at)
+WHERE public_id = sqlc.arg(public_id) AND (last_used_at IS NULL OR last_used_at < sqlc.arg(last_used_at));
 
 -- name: CreateSession :exec
 INSERT INTO sessions (id_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?);

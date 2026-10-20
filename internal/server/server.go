@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
 	"errors"
@@ -413,6 +414,7 @@ func kernel(base context.Context, d *db.DB, boot *config.Boot, set *settings.Ser
 	as.SetAudit(au)
 	as.SetDevMode(dev) // only "telesphorepo-server dev" makes the second factor optional
 	as.SetBearerKey(set.DeriveKey(auth.BearerKeyInfo))
+	as.SetEdgeKey(ed25519.NewKeyFromSeed(set.DeriveKey(auth.EdgeKeyInfo)))
 	bs := blobs.New(d, live)
 	pipe := assets.New(base, d, bs, set.Current, au)
 	pipe.SetHooks(b.Formats.Hooks)

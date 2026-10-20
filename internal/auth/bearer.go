@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/sha256"
 	"database/sql"
@@ -86,11 +87,30 @@ func (p *Principal) InGroup(group string) *Principal {
 	return &q
 }
 
-// bearerPrefix starts a core bearer token: "trb.<base64url payload>.<base64url HMAC-SHA256>".
+// bearerPrefix starts a core bearer token: "trb.<payload>.<HMAC-SHA256>.<Ed25519>", each part
+// base64url without padding. The HMAC and the Ed25519 signature both sign the ASCII bytes of the
+// base64url payload part. The server checks both; the edge Worker checks the Ed25519 signature
+// with the public key of EdgePublicKey, so the HMAC key never leaves the server.
 const bearerPrefix = "trb."
 
 // BearerKeyInfo is the HKDF info of the key that signs core bearer tokens.
 const BearerKeyInfo = "telesphorepo bearer v1"
+
+// EdgeKeyInfo is the HKDF info of the seed of the Ed25519 key that adds the edge signature to
+// core bearer tokens.
+const EdgeKeyInfo = "telesphorepo edge v1"
+
+// SetEdgeKey sets the Ed25519 key of the edge signature (ed25519.NewKeyFromSeed of the HKDF-SHA256
+// of the master key with EdgeKeyInfo). Without it IssueBearer fails.
+func (s *Service) SetEdgeKey(k ed25519.PrivateKey) { s.edgeKey = k }
+
+// EdgePublicKey returns the public key of the edge signature, nil before SetEdgeKey.
+func (s *Service) EdgePublicKey() ed25519.PublicKey {
+	if s.edgeKey == nil {
+		return nil
+	}
+	return s.edgeKey.Public().(ed25519.PublicKey)
+}
 
 // maxBearerTTL is the longest life of a core bearer token.
 const maxBearerTTL = 15 * time.Minute
@@ -130,14 +150,17 @@ type bearerScope struct {
 }
 
 type bearerPayload struct {
-	Cred    Cred          `json:"c"` // 0: anonymous
-	User    int64         `json:"u,omitempty"`
-	Token   int64         `json:"t,omitempty"` // CredReadToken
-	Session int64         `json:"p,omitempty"` // CredPublish: the session of the credential
-	Device  int64         `json:"d,omitempty"` // CredDevice
-	Scopes  []bearerScope `json:"s"`
-	Expires int64         `json:"e"`
-	Upload  string        `json:"up,omitempty"` // an upload token: the upload it is bound to
+	Cred  Cred  `json:"c"` // 0: anonymous
+	User  int64 `json:"u,omitempty"`
+	Token int64 `json:"t,omitempty"` // CredReadToken: the row ID
+	// TokenPublic is the public ID of the read token (CredReadToken), the key of its edge access
+	// object.
+	TokenPublic string        `json:"tp,omitempty"`
+	Session     int64         `json:"p,omitempty"` // CredPublish: the session of the credential
+	Device      int64         `json:"d,omitempty"` // CredDevice
+	Scopes      []bearerScope `json:"s"`
+	Expires     int64         `json:"e"`
+	Upload      string        `json:"up,omitempty"` // an upload token: the upload it is bound to
 }
 
 // IssueBearer returns a token for p, limited to scopes, for ttl (at most 15 minutes), and its
@@ -161,7 +184,7 @@ func (s *Service) IssueUploadToken(p *Principal, scopes []Scope, upload string, 
 }
 
 func (s *Service) issueBearer(p *Principal, scopes []Scope, ttl time.Duration, upload string) (string, time.Time, error) {
-	if len(s.bearerKey) == 0 {
+	if len(s.bearerKey) == 0 || s.edgeKey == nil {
 		return "", time.Time{}, errors.New("auth: no bearer key")
 	}
 	if p != nil && !p.Is(CredPassword|CredReadToken|CredPublish|CredDevice) {
@@ -172,6 +195,9 @@ func (s *Service) issueBearer(p *Principal, scopes []Scope, ttl time.Duration, u
 	pl := bearerPayload{Expires: exp.Unix(), Scopes: []bearerScope{}, Upload: upload}
 	if p != nil {
 		pl.Cred, pl.User, pl.Token, pl.Device = p.Cred, p.UserID, p.TokenID, p.DeviceID
+		if p.Is(CredReadToken) {
+			pl.TokenPublic = p.TokenPublicID
+		}
 		if p.Is(CredPublish) {
 			pl.Session = p.Publish.ID
 		}
@@ -200,8 +226,15 @@ func (s *Service) issueBearer(p *Principal, scopes []Scope, ttl time.Duration, u
 	if err != nil {
 		return "", time.Time{}, err
 	}
+	return s.signBearer(body), exp, nil
+}
+
+// signBearer returns the core bearer token of the payload body: its HMAC and its edge signature
+// (see bearerPrefix). IssueBearer and IssueUploadToken both sign through it.
+func (s *Service) signBearer(body []byte) string {
 	enc := base64.RawURLEncoding.EncodeToString(body)
-	return bearerPrefix + enc + "." + base64.RawURLEncoding.EncodeToString(s.bearerMAC(enc)), exp, nil
+	b64 := base64.RawURLEncoding.EncodeToString
+	return bearerPrefix + enc + "." + b64(s.bearerMAC(enc)) + "." + b64(ed25519.Sign(s.edgeKey, []byte(enc)))
 }
 
 func (s *Service) bearerMAC(payload string) []byte {
@@ -217,12 +250,19 @@ func (s *Service) bearerMAC(payload string) []byte {
 // ErrBadCredentials, or ErrPublishEnded for an ended publish session. upload is the upload of the
 // URL that carried tok ("" for an Authorization header): the token must be bound to it.
 func (s *Service) verifyBearer(ctx context.Context, tok, upload string) (*Principal, error) {
-	enc, sig, ok := strings.Cut(strings.TrimPrefix(tok, bearerPrefix), ".")
-	if !ok || len(s.bearerKey) == 0 {
+	// The four-part form: payload, HMAC, edge signature. The server checks both signatures, so a
+	// token is valid in exactly one spelling.
+	parts := strings.Split(strings.TrimPrefix(tok, bearerPrefix), ".")
+	if len(parts) != 3 || len(s.bearerKey) == 0 || s.edgeKey == nil {
 		return nil, ErrBadCredentials
 	}
-	mac, err := base64.RawURLEncoding.DecodeString(sig)
+	enc := parts[0]
+	mac, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil || !hmac.Equal(mac, s.bearerMAC(enc)) {
+		return nil, ErrBadCredentials
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil || !ed25519.Verify(s.EdgePublicKey(), []byte(enc), sig) {
 		return nil, ErrBadCredentials
 	}
 	body, err := base64.RawURLEncoding.DecodeString(enc)
@@ -297,7 +337,7 @@ func (s *Service) bearerPrincipal(ctx context.Context, pl bearerPayload) (*Princ
 		if row.Disabled || row.Kind != KindLocal || (row.ExpiresAt.Valid && time.Now().Unix() >= row.ExpiresAt.Int64) {
 			return nil, ErrBadCredentials
 		}
-		return &Principal{Cred: CredReadToken, UserID: row.UserID, Username: row.Username, Perms: perm.Joined(row.Perms), TokenID: row.TokenID, Kind: row.Kind}, nil
+		return &Principal{Cred: CredReadToken, UserID: row.UserID, Username: row.Username, Perms: perm.Joined(row.Perms), TokenID: row.TokenID, TokenPublicID: pl.TokenPublic, Kind: row.Kind}, nil
 	case CredPublish:
 		if s.sessions == nil {
 			return nil, ErrPublishEnded
