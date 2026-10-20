@@ -42,6 +42,8 @@ var rows = []row{
 		run: runHelm, preview: func(string) string { return "helm package, then helm push" }},
 	{format: "raw", kind: "files", title: "Files", ciTool: "telesphorepo", run: uploadRaw},
 	{format: "debian", kind: "packages", title: "Debian packages", ciTool: "telesphorepo", run: uploadDebian},
+	{format: "cargo", kind: "cargo", title: "Cargo", markers: []string{"Cargo.toml"}, ciTool: "cargo",
+		run: runCargo, preview: func(string) string { return "cargo publish --registry telesphorepo" }},
 }
 
 // helperFormat is a format of the helper category: its tool publishes with its own command and

@@ -71,6 +71,7 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/maven` | Module and format `maven`: the standard routes, release immutability (`Admit`), the content types, the merge of `maven-metadata.xml` in a group, the metadata after a delete (`AfterRemove`), web UI uploads with checksums and metadata |
 | `internal/debian` | Module and format `debian`: `.deb` upload/parse through `Commit`, the package rows (`OnCommitted`, `OnRemoved`), the index rebuild (`Rebuild`), `/debian/{repo}/key.asc`, the plan of a Nexus apt import (distribution and signing key). Owns its tables, queries (`queries/`, `dbq/`) and architecture config; binds a signing key per repo (`SigningKey`) |
 | `internal/raw` | Module and format `raw`: plain files at `/raw/{repo}/{path...}` (the standard routes) with an `overwrite` policy (`Admit`) |
+| `internal/cargo` | Module and format `cargo`: the Cargo sparse index (`index/`), the `.crate` files (`crates/`) and the publish and yank API (`api/v1/`) for hosted, proxy and group repos; owns its tables and queries. See **Cargo registry** |
 | `internal/signing` | Module `signing`. OpenPGP: key `Generate` and `Parse`, the `Keys` service (create, import, delete, one signer per key, the key of each repo), the repo field `signing_key`, clearsign/detach-sign (ProtonMail go-crypto). See **Signing keys** |
 | `internal/files` | The file tree and the details of one file. Writes and deletes go through the byte pipeline |
 | `internal/audit` | The audit log: the action registry (`Actions`), the actor in the context (`WithActor`, `System`, `CLI`), `Record` and `RecordTx`, the list query and `Cleanup`. See **Audit log** |
@@ -161,6 +162,7 @@ it needs and leaves the others nil. The kernel gives it these parts:
 | `debian` | `internal/debian` | `signing` | Format `debian` (publish category `cli`) with its schema, `Rebuild` and the tool `telesphorepo` |
 | `raw` | `internal/raw` | | Format `raw` (publish category `cli`) with the tool `telesphorepo` |
 | `docker` | `internal/docker` | `network`, `publish` | Format `docker` (an OCI registry: hosted, proxy and group repos) with its schema; the root prefix `/v2/`, `/docker/` (the token endpoint) and `GET /api/docker/{name}/manifest`; the settings group `docker`; job `docker.links`; the publish category `helper` (the native tools push through the credential helper of the CLI, see **Publishing**); the Nexus importer of `docker`; demo data and seed (see **Docker registry**) |
+| `cargo` | `internal/cargo` | | Format `cargo` (publish category `cli`, hosted, proxy and group repos) with its schema, the tool `cargo` (its CI steps), the `cargo.yank` and `cargo.unyank` actions, the Nexus importer of `cargo`, demo data and seed (see **Cargo registry**) |
 
 **Routes.** The route table (`internal/route`) gives each module a `Router`. A module registers
 under `/api/`, under `/<name>/` of each format it registers, and under its root prefixes. Any
@@ -1261,6 +1263,7 @@ file. A row is one entry of a table in `cmd/telesphorepo/detect.go`; a new forma
 | Docker (Helm chart) | `Chart.yaml` | `helm` | `helm package <dir> -d <tmp>/chart`, then `helm push <chart>.tgz oci://<host>/<repo> --registry-config <tmp>/config.json` (the upload host when the server has one; `--plain-http` for an `http://` server) | The registry config names `credHelpers` `telesphorepo` for the Docker hosts; the helper answers `TELESPHOREPO_TOKEN` for the hosts of `TELESPHOREPO_DOCKER_HOSTS` |
 | raw | none | the CLI | `PUT /raw/<repo>/<path>/<file name>` for each FILE; a file of 64 MiB or more goes through `POST /api/repos/{name}/uploads`, `PATCH` chunks of 16 MiB (a failed chunk is sent again from the `received` of the server), and `PUT ...?path=&sha256=&size=` | Bearer session token |
 | Debian | none | the CLI | `PUT /debian/<repo>/upload/<dist>/<component>` for each FILE; a file of 64 MiB or more goes through the resumable routes as for raw, and `PUT /debian/<repo>/upload/<dist>/<component>?upload=<id>&sha256=&size=` finishes it | Bearer session token |
+| Cargo | `Cargo.toml` | `cargo` | `cargo publish --registry telesphorepo --config 'registries.telesphorepo.index="sparse+<base>/cargo/<repo>/index/"' --config 'registries.telesphorepo.credential-provider="cargo:token"'` | `CARGO_REGISTRIES_TELESPHOREPO_TOKEN` in the env of cargo; cargo sends it as a raw `Authorization` header |
 
 A wrapper in the project comes before a tool on the `PATH` (`exec.LookPath`); a wrapper without
 the execute bit runs through `sh`. The CLI prints each command before it runs it, without the
@@ -2431,6 +2434,120 @@ platforms or the layers) and the artifact snippets. No repo tab and no config fi
 **Demo and seed.** The demo repo `docker` (public) holds 20 images with 1 to 8 tags each: two
 multi-platform indexes, one Helm chart, the rest image manifests of small random layers. The seed
 inserts per number a link, a manifest and a tag with their rows, 100 tags per image.
+
+## Cargo registry
+
+The module `cargo` (`internal/cargo`) is the format `cargo`: a Cargo registry with the sparse
+index protocol (Cargo 1.68 or later; a private repo needs 1.74 or later) for hosted repos, proxies
+of crates.io (or another sparse registry) and groups. The registry of a repo is
+`sparse+<base>/cargo/<repo>/index/`. Cargo sends its token as a raw `Authorization: <token>`
+header, so every Cargo route sets `Policy.TokenHeader = "Authorization"` (a read token or a
+publish session token; HTTP Basic works too). Every refusal and error is a Cargo error
+`{"errors": [{"detail": "..."}]}` (`Policy.Errors`).
+
+**Routes.**
+
+| Route | Policy | What |
+|---|---|---|
+| `GET, HEAD /cargo/{repo}/index/config.json` | read | `{"dl": "<base>/cargo/<repo>/crates/{crate}/{crate}-{version}.crate", "api": "<base>/cargo/<repo>"}`, with `"auth-required": true` when the repo has no anonymous read. Without a credential such a repo answers 401 with `WWW-Authenticate: Cargo login_url="<base>/#/repo/<repo>"`, so Cargo sends its token on every request of the registry |
+| `GET, HEAD /cargo/{repo}/index/{path...}` | read | The index file of a crate, one JSON line per version: `1/{n}`, `2/{n}`, `3/{c}/{n}` or `{ab}/{cd}/{n}` of the lowercased name (another path is 404). A rendered document (`format.WriteDocument`: strong ETag, 304 to `If-None-Match`, which Cargo sends for each file) |
+| `GET, HEAD /cargo/{repo}/crates/{name}/{name}-{version}.crate` | read | The `.crate`, an asset at that path (`Range`, S3 redirects and edge delivery as for every asset) |
+| `PUT /cargo/{repo}/api/v1/crates/new` | write | `cargo publish`: a u32 LE length, the JSON of the crate, a u32 LE length, the `.crate` (spooled, at most `max_upload_size`; the JSON at most `max_json_size`). The name and version of the JSON must be those of the `Cargo.toml` in the crate. 200 `{"warnings": {...}}`; 409 for a version that exists (ignoring build metadata) or a name that clashes |
+| `DELETE /cargo/{repo}/api/v1/crates/{name}/{version}/yank`, `PUT .../unyank` | write | `cargo yank` and `cargo yank --undo`: `{"ok": true}`; 404 for a version the repo lacks. Audit `cargo.yank`, `cargo.unyank` |
+| `GET /cargo/{repo}/api/v1/crates` and `/cargo/{repo}/api/v1/crates/{name}/owners` | public | 404 with a Cargo error that names what to do instead (`cargo search` and `cargo owner` are not served) |
+
+**Hosted repos.** A `.crate` is stored through `Commit` with its index entry as `Write.Meta` and
+the folded name (lowercase, `-` as `_`) as an extra lock. `Admit` refuses (409) a crate whose
+name folds to the name of another crate of the repo (as on crates.io), and a version that the
+repo has ignoring build metadata; the same bytes at the same path are kept (an upload or an
+import is then unchanged, a publish answers 409). A write without an entry (a core upload
+session) is 400. `OnCommitted` writes the rows; `OnRemoved` drops the version of each deleted
+`.crate` and the name of a crate with no version left, so a file delete in the web UI removes the
+version from the index at once. The index file is rendered from the rows on each request:
+`yanked` from the row, the rest as stored.
+
+The entry follows the Cargo book: `name`, `vers`, `deps` (`name`, `req`, `features`, `optional`,
+`default_features`, `target`, `kind`, `registry`, and `package` for a renamed dependency),
+`cksum` (the SHA-256 of the `.crate`, computed by the server), `features`, `yanked`, `links`,
+`rust_version`. Features whose values use `dep:` or `?/` go to `features2` with `"v": 2`, as
+crates.io writes them. Dependencies are sorted by name, kind and target. An entry comes from:
+
+- **a publish:** the JSON of the request with the Cargo book's conversion: `version_req` is
+  `req`; a dependency renamed in `Cargo.toml` has the new name (`explicit_name_in_toml`) in
+  `name` and the package name in `package`; `registry` is as Cargo sent it (null: this registry);
+- **an upload or an import:** the normalised `Cargo.toml` in the `.crate` (BurntSushi/toml),
+  converted as Cargo converts it for a publish: a requirement prints as the semver crate prints
+  it (`1.2` is `^1.2`, comparators joined by `, `), a `cfg()` target with Cargo's spacing, a
+  dependency without `registry-index` names crates.io (`https://github.com/rust-lang/crates.io-index`),
+  and one whose `registry-index` is this repo's own index (`.../cargo/<repo>/index/`) names none.
+  The two ways give byte-equal entries for one crate.
+
+**Proxies.** The remote URL is the remote's sparse index (default `https://index.crates.io/`;
+the check fetches its `config.json`). An index file is cached at `.index/<index path>`
+(`Changing`, checked again after `metadata_ttl`) and served unchanged: its `cksum` holds for the
+crate whatever the `dl`. Only `config.json` is the repo's own. A `.crate` comes from the repo
+config's `download` template (`{"download": "<template>"}`, default
+`https://static.crates.io/crates/{crate}/{crate}-{version}.crate`; markers `{crate}`,
+`{version}`, `{prefix}`, `{lowerprefix}`; a template without a marker gets
+`/{crate}/{version}/download` as Cargo does; `{sha256-checksum}` is refused because the proxy
+fetches a crate before it knows its checksum) through `assets.Class.Files`: the remote's
+credentials go there only on the remote's own scheme and host. The module keeps the template of
+each Cargo proxy in memory (read once from the repos, then from `repos.Service.AfterChange`),
+because `Classify` gets the remote, not the repo.
+
+**Groups.** For an index file, the first member in read order that has the crate owns the name
+(`assets.Reader.Owner`): its file serves, and a later member (the crates.io proxy) cannot shadow
+a hosted crate with higher versions. A `.crate` of a group serves from the member that owns the
+name. `config.json` points `dl` at the group. Use a proxy or a group as crates.io through source
+replacement (`[source.crates-io] replace-with = "<registry>"`).
+
+**Tables** (`internal/cargo/schema.sql`):
+
+| Table | Keys | What |
+|---|---|---|
+| `cargo_versions` | UNIQUE `(repo_id, lower_name, base_key)`, idx `cargo_versions_sort (repo_id, lower_name, sort_key)`, idx `cargo_versions_asset (asset_id)`; `repo_id` and `asset_id` cascade | One version of a hosted crate: `name` as published, `lower_name` (the index file), `version`, `sort_key` (`version.SemVer.SortKey`), `base_key` (the key without build metadata), `entry` (the index line with `yanked` false), `asset_id` and `path` of the `.crate`, `yanked`, `created_at` |
+| `cargo_names` | PK `(repo_id, folded_name)` (WITHOUT ROWID); `repo_id` cascades | The crate names of a repo, folded, with the name that holds each |
+
+**Versions and builds.** The artifact folder of a crate is `crates/<name>/` (kind `crate`). Its
+versions are the rows of a hosted repo, newest first by `sort_key` (keyset on the sort key of
+the cursor's version); each version is a release with one build, its `.crate`. Proxies and groups
+have no rows and list no versions.
+
+**Snippets.** `.cargo/config.toml` with `[registries.<repo>] index = "sparse+..."` (a repo name
+with characters other than letters, digits, `-` and `_` gets `-` for them), plus
+`[source.crates-io] replace-with` for a proxy or a group; `~/.cargo/credentials.toml` with
+`token = "YOUR_READ_TOKEN"` for a private repo (or `CARGO_REGISTRIES_<NAME>_TOKEN` in CI); a
+`Cargo.toml` dependency with `registry = "<repo>"`; `cargo add`. The CLI tool `cargo` publishes
+with `telesphorepo publish` (GitHub Actions adds `dtolnay/rust-toolchain@stable`; Jenkins runs
+`cargo test` first).
+
+**Uploads and imports.** The web UI takes `.crate` files (a folder keeps `**/*.crate`): the plan
+reads the first MiB of each for its `Cargo.toml` and shows `<name> <version>`, with a problem for
+a crate that does not parse, a name that clashes or a version the repo has. The Nexus importer
+takes the source format `cargo`: a file `<name>-<version>.crate`, or a path that ends in
+`<name>/<version>[/download]`, is stored with the entry of its `Cargo.toml`; index files are
+ignored.
+
+**Edge.** `Immutable: ["crates/*/*.crate"]`. The index files are rendered, so the Worker finds no
+pointer for them and passes them to the server.
+
+**Demo and seed.** The demo repo `crates` (anonymous read) holds 8 crates with 2 to 5 versions
+each, stored as real `.crate` files through the upload path, with `dep:` features, a crates.io
+dependency and dependencies between them. The seed inserts `seedcrate<i % 1000>` version
+`<i / 1000>.0.0` with its asset row.
+
+**Testing.** `cargo_test.go` (core zone, the real `cargo` of the `rust` image): `TestCargo` on
+both stores publishes with `cargo publish` to a private repo (401 with the Cargo challenge
+without a token, `auth-required`), refuses a second publish of a version and a clashing name,
+checks the entry (renamed, crates.io, target and `dep:` dependencies), yanks and unyanks with
+`cargo yank`, refuses a yank with a read token, builds a binary with a read token, deletes a
+version and uploads its `.crate` through the web UI path, and requires the byte-equal entry.
+`TestCargoProxyGroup` builds through a crates.io proxy by source replacement and through a
+private group, where a hosted `itoa` 0.0.1 is the only `itoa` version the group lists.
+`cli_cargo_test.go` (clients zone): `telesphorepo setup` and `telesphorepo publish` in the `rust`
+image, then a build from the repo, with the secret scan. `nexus_cargo_test.go` (import zone,
+part of `TestNexus`): `cargo publish` to a Nexus cargo hosted repo, the import, a build from the
+target and a second sync with nothing new.
 
 ## Files, uploads and deletes
 

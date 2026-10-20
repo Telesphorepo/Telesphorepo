@@ -25,3 +25,9 @@
 #   scope   = "publish/npm"
 #   needs   = "server"
 #   summary = "npm publish uses the new upload route"
+
+[[change]]
+version = "dev"
+scope   = "publish/cargo"
+needs   = "cli"
+summary = "telesphorepo publish runs cargo publish for Cargo repositories"

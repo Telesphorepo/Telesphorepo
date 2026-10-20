@@ -5,6 +5,7 @@ package modules
 import (
 	"github.com/Telesphorepo/Telesphorepo/internal/activity"
 	"github.com/Telesphorepo/Telesphorepo/internal/api"
+	"github.com/Telesphorepo/Telesphorepo/internal/cargo"
 	"github.com/Telesphorepo/Telesphorepo/internal/debian"
 	"github.com/Telesphorepo/Telesphorepo/internal/docker"
 	"github.com/Telesphorepo/Telesphorepo/internal/edge"
@@ -36,5 +37,6 @@ func All() []module.Module {
 		debian.Module(),
 		raw.Module(),
 		docker.Module(),
+		cargo.Module(),
 	}
 }
