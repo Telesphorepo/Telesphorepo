@@ -55,7 +55,7 @@ CREATE INDEX sessions_user ON sessions(user_id);
 -- what is published to it, a proxy repo keeps what it fetches from its remote (repo_proxies), a
 -- group repo serves the files of its members (repo_group_members) and has none of its own.
 CREATE TABLE repos (
-  id             INTEGER PRIMARY KEY,
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,   -- never reused: edge objects are keyed by it
   name           TEXT NOT NULL UNIQUE,
   format         TEXT NOT NULL,
   kind           TEXT NOT NULL DEFAULT 'hosted' CHECK (kind IN ('hosted','proxy','group')),

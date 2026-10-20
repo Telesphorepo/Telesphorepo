@@ -1622,10 +1622,10 @@ region reads the same version; an immutable path has a pointer and a blob in eve
 | `gap/request.json` | The server asks for a gap pass: `{at, regions}` | home |
 | `copy/<hint>/<hex>.json` | The copy Worker: the multipart upload of a large copy, so a retried message resumes it | home |
 
-The pointer key hashes the path, so a 1024-byte path fits the R2 key limit. IDs are reused
-(`repos.id`, user and device IDs have no `AUTOINCREMENT`): a repo delete removes every file through
-`Remove` before the repo row goes, the Worker checks that a pointer's `repo` is the `id` of the
-repo object, and a repo delete marks every user object.
+The pointer key hashes the path, so a 1024-byte path fits the R2 key limit. `repos.id` has
+`AUTOINCREMENT`, so the ID of a deleted repo never comes back. A repo delete removes every file
+through `Remove` before the repo row goes, the Worker checks that a pointer's `repo` is the `id` of
+the repo object, and a repo delete marks every user object. User and device IDs are reused.
 
 **Formats.** A format opts in with `format.Spec.Edge`: the shape (`standard`:
 `/<format>/<repo>/<path>`; `oci`: `/v2/<repo>/<image>/manifests/<ref>` and
