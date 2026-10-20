@@ -864,6 +864,9 @@ export type Device = {
 /** A setup code for one repo: link is the address to give to "telesphorepo setup". It is valid until expires_at and works once. */
 export type SetupCode = { code: string; link: string; expires_at: string };
 
+/** A CLI archive of the server's build (GET /cli/SHA256SUMS): os "linux", "darwin" or "windows"; arch "amd64" or "arm64". */
+export type CLIArchive = { name: string; sha256: string; os: string; arch: string; url: string };
+
 /** A minted publish session. `token` is shown once. */
 export type PublishSession = { id: number; token: string; repo: string; expires_at: string };
 

@@ -58,8 +58,9 @@ server and the clients print keep working: `/#/device?code=ABCD-EFGH`, `/#/setti
 | `/repo/:name` | `repo/RepoPage` | app | any | The repository header and the Files tab at the top folder. A group has no files and no tabs: the Use view and its members, each a link to the member's page. A proxy has Files (its cached files) and Use, and no publish or upload. |
 | `/repo/:name/files/<path>?version=&build=` | `repo/RepoPage` | app | any | Files tab: a folder (`path` ends with `/`) or a selected file. `version` names a version of the artifact folder (a Debian package keeps every version in one folder); `build` a chosen build. The details column always shows on wide screens: the selected file, or else the open folder (repository, folder, artifact or version). |
 | `/repo/:name/use` | `repo/RepoPage` | app | any | Use this repository: the address and the snippets for a build; a private repository adds a read-token step. |
-| `/repo/:name/publish` | `repo/RepoPage` | app | any (Publish on the repository) | Publish to this repository: from your computer, from CI, by hand. The Set up a project card (`repo/ProjectSetup`) comes first: a fresh second factor, then the install and setup line for the OS (a single sign-on account returns with `?setup_grant=`), then `telesphorepo publish` or the native command (`publish` of the descriptor); the snippets stay behind "Set it up by hand". |
+| `/repo/:name/publish` | `repo/RepoPage` | app | any (Publish on the repository) | Publish to this repository: from your computer, from CI, by hand. The Set up a project card (`repo/ProjectSetup`, with Install the CLI in its header) comes first: a fresh second factor, then the install and setup line for the OS (a single sign-on account returns with `?setup_grant=`), then `telesphorepo publish` or the native command (`publish` of the descriptor); the snippets stay behind "Set it up by hand". |
 | `/setup/:code` | `Setup` | app | any | A setup link: run the install line in a terminal in the project folder. The code stays in the address fragment and the page calls no API. |
+| `/install?os=&cpu=` | `InstallCLI` | app | any | Install the CLI: a tab per operating system (`os`: `linux`, `darwin`, `windows`; the browser's own when absent). Install (the one-line install of `/install.sh` or `/install.ps1`, and what it does with `PATH`), Install by hand (the archives of the system from `GET /cli/SHA256SUMS` with CPU, SHA-256 and Download; a row picks `cpu`, and the commands that download, check and unpack that archive follow it), Update (`telesphorepo update`). A build without CLI archives shows one empty state. The account menu and the Set up a project card of the Publish tab link to it. |
 | `/repo/:name/upload?folder=` | `repo/RepoPage` | app | any (Publish on the repository, a password account) | Upload files or a folder. |
 | **Settings › Your account** | | | | |
 | `/settings/account` | `account/Overview` | settings | user | Overview: one identity card (avatar, name, role), then your repositories, your devices and your recent publishes. |
@@ -130,7 +131,7 @@ The repository page is the one exception: it checks the caller's permissions on 
   page width and never add side padding.
 - **Top bar**, inside the same container: logo and name (Browse home) left; search centered (max
   480px); right: one **Sign in** button when signed out (hidden on `/login`), or **Settings** and
-  the avatar menu (Your account, theme, Sign out) when signed in. Under 640px the search is an icon
+  the avatar menu (Your account, Install the CLI, theme, Sign out) when signed in. Under 640px the search is an icon
   that opens `/search`.
 - **Settings.** A 220px sidebar inside the container, 40px gap, then the content column. Four
   groups from the sitemap: "Your account", "Repositories", "People and CI", "Server". Each item

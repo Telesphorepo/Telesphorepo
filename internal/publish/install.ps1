@@ -5,8 +5,9 @@
 #
 # The script downloads the archive of this OS and CPU from the server, checks its SHA-256, and
 # installs telesphorepo into %LOCALAPPDATA%\Programs\telesphorepo (on Linux and macOS:
-# ~/.local/bin) with docker-credential-telesphorepo next to it. On Windows it adds the folder to
-# the user PATH. In GitHub Actions it adds the folder to the PATH of the later steps. Arguments
+# ~/.local/bin) with docker-credential-telesphorepo next to it. It puts the folder on the PATH of
+# this session; on Windows it adds the folder to the user PATH too, and on Linux and macOS it
+# prints the line for the PowerShell profile when the folder is not on PATH. In GitHub Actions it adds the folder to the PATH of the later steps. Arguments
 # after the script go to the CLI, which runs once the install is done.
 
 $Url = '@@URL@@'
@@ -80,15 +81,19 @@ function Install-Telesphorepo {
 	[Console]::Error.WriteLine("telesphorepo: installed the CLI of $Url in $dir")
 
 	$sep = [IO.Path]::PathSeparator
+	$onPath = ($env:PATH -split [regex]::Escape($sep)) -contains $dir
 	if ($onWindows) {
 		$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 		if (-not (($userPath -split ';') -contains $dir)) {
 			$newPath = if ($userPath) { "$userPath;$dir" } else { $dir }
 			[Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
-			[Console]::Error.WriteLine("telesphorepo: added $dir to the user PATH; new terminals find telesphorepo")
+			[Console]::Error.WriteLine("telesphorepo: added $dir to your user PATH. This PowerShell session can run telesphorepo now; open a new terminal to run it anywhere else.")
 		}
+	} elseif (-not $onPath -and -not $env:GITHUB_PATH) {
+		[Console]::Error.WriteLine("telesphorepo: ~/.local/bin is not on PATH. This PowerShell session can run telesphorepo now; for new terminals, add this line to your PowerShell profile ($PROFILE):")
+		[Console]::Error.WriteLine('  $env:PATH = "$HOME/.local/bin:$env:PATH"')
 	}
-	if (-not (($env:PATH -split [regex]::Escape($sep)) -contains $dir)) { $env:PATH = "$dir$sep$env:PATH" }
+	if (-not $onPath) { $env:PATH = "$dir$sep$env:PATH" }
 	if ($env:GITHUB_PATH) { Add-Content -LiteralPath $env:GITHUB_PATH -Value $dir }
 
 	if ($CliArgs -and $CliArgs.Count -gt 0) {

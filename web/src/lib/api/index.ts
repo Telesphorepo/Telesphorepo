@@ -337,6 +337,21 @@ export const api = {
     revoke: (id: number) => request("DELETE", `/api/devices/${id}`),
   },
 
+  cli: {
+    /** The CLI archives of the server's build, from /cli/SHA256SUMS (lines "<sha256>  <name>"). */
+    archives: async (): Promise<T.CLIArchive[]> => {
+      const text = await requestText("/cli/SHA256SUMS");
+      return text
+        .split("\n")
+        .map((l) => l.trim().match(/^([0-9a-f]{64})\s+\*?(\S+)$/))
+        .filter((m): m is RegExpMatchArray => !!m)
+        .map(([, sha256, name]) => {
+          const [, os = "", arch = ""] = name.match(/^telesphorepo_([a-z]+)_([a-z0-9]+)\./) ?? [];
+          return { name, sha256, os, arch, url: `/cli/${enc(name)}` };
+        });
+    },
+  },
+
   publish: {
     /** Minting from a device or a CI token (client side; no auth). */
     challenge: (device_id: number) => request<{ nonce: string; expires_at: string }>("POST", "/api/publish/challenge", { body: { device_id } }),

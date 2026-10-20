@@ -120,6 +120,32 @@ publish session that the UI asks for with a second-factor code. A person with th
 permission sees every event, with its IP address, in **Settings > Server > Activity**. The server
 keeps events for 365 days (`audit.retention`).
 
+## Install the CLI
+
+Each server serves the Telesphorepo CLI of its own build. In the web UI, open **Install the CLI**
+in the account menu (or from the **Publish** tab of a repo) for the line of your system, the
+archives with their SHA-256, and the commands to install one by hand.
+
+Linux and macOS:
+
+```sh
+curl -fsSL https://packages.example.com/install.sh | sh
+```
+
+The script installs into `~/.local/bin`. When that folder is not on your `PATH`, it asks to add
+it to the start-up file of your shell (`~/.zprofile` for zsh on macOS, `~/.bashrc` for bash on
+Linux, and so on); open a new terminal afterwards.
+
+Windows (PowerShell):
+
+```powershell
+irm https://packages.example.com/install.ps1 | iex
+```
+
+It installs into `%LOCALAPPDATA%\Programs\telesphorepo` and adds that folder to your `PATH`.
+
+After the server is updated, run `telesphorepo update` to get its CLI.
+
 ## Publishing
 
 Every upload needs a publish session. It is a credential for one repo that ends after
@@ -144,10 +170,22 @@ works once, for 10 minutes.
 telesphorepo publish
 ```
 
-The CLI runs the standard publish command of the project (`mvn deploy`, `gradle publish`) with the
-session token in its environment; in a .NET project it runs `dotnet pack` and pushes each package. The build files stay as they are. Raw and Debian repos take files:
-`telesphorepo publish build/app.zip`. A teammate who clones the project runs `telesphorepo publish`
-and approves the computer in the browser once.
+The CLI runs the standard publish command of the project with the session token in its
+environment. The build files stay as they are.
+
+| Repo | The CLI finds | `telesphorepo publish` runs |
+|---|---|---|
+| Maven | `pom.xml` | `mvn deploy` (or `./mvnw`) |
+| Maven | `build.gradle(.kts)`, `settings.gradle(.kts)` | `gradle publish` (or `./gradlew`) |
+| NuGet | `*.csproj`, `*.fsproj`, `*.sln`, `*.slnx` | `dotnet pack`, then pushes each package |
+| npm | `package.json` | `npm publish`, `pnpm publish`, `yarn npm publish` or `bun publish`, after the lockfile |
+| PyPI | `pyproject.toml`, `setup.py` | `poetry build`, `uv build` or `python -m build`, then uploads each file |
+| Cargo | `Cargo.toml` | `cargo publish` |
+| Docker | `Chart.yaml` | `helm package`, then `helm push` |
+| Raw, Debian | the files you name | uploads them: `telesphorepo publish build/app.zip` |
+
+A teammate who clones the project runs `telesphorepo publish` and approves the computer in the
+browser once.
 
 **Docker.** The setup line adds the credential helper of the CLI to `~/.docker/config.json`. Then
 Docker, buildx, Podman, Helm and ORAS push with no `docker login`:

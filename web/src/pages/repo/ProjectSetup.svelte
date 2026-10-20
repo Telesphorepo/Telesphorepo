@@ -13,7 +13,7 @@
   import { api, errorMessage, type FreshProof, type Repo, type SetupCode, type Snippet } from "$lib/api";
   import { auth } from "$lib/auth.svelte";
   import { formats } from "$lib/formats/registry.svelte";
-  import { navigate, repoPath } from "$lib/router.svelte";
+  import { href, navigate, repoPath } from "$lib/router.svelte";
   import { Button } from "$lib/components/ui/button";
   import { Spinner } from "$lib/components/ui/spinner";
   import Section from "$lib/components/Section.svelte";
@@ -26,6 +26,7 @@
   import SnippetTabs from "./snippets/SnippetTabs.svelte";
   import { ssoErrors } from "../account/words";
   import FolderCogIcon from "@lucide/svelte/icons/folder-cog";
+  import TerminalIcon from "@lucide/svelte/icons/terminal";
   import type { ToolLabel } from "$lib/api";
 
   let {
@@ -83,6 +84,9 @@
     ? "Run one line in a terminal. It signs this computer in and adds the credential helper for the native command."
     : "Run one line in the project folder. It signs this computer in and writes telesphorepo.toml."}
 >
+  {#snippet actions()}
+    <Button variant="ghost" href={href("/install")}><TerminalIcon />Install the CLI</Button>
+  {/snippet}
   {#if created}
     <div class="flex flex-col gap-4">
       <p class="max-w-prose text-body text-muted-foreground">

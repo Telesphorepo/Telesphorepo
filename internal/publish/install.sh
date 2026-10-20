@@ -5,9 +5,10 @@
 #   curl -fsSL @@URL@@/install.sh | sh -s -- setup 'LINK'
 #
 # The script downloads the archive of this OS and CPU from the server, checks its SHA-256, and
-# installs telesphorepo into ~/.local/bin with docker-credential-telesphorepo next to it. In
-# GitHub Actions it adds the folder to the PATH of the later steps. Arguments after "--" go to
-# the CLI, which runs once the install is done.
+# installs telesphorepo into ~/.local/bin with docker-credential-telesphorepo next to it. When
+# that folder is not on PATH, it offers to add it in the start-up file of your shell. In GitHub
+# Actions it adds the folder to the PATH of the later steps. Arguments after "--" go to the CLI,
+# which runs once the install is done.
 set -eu
 
 URL='@@URL@@'
@@ -23,6 +24,60 @@ sum_of() {
 fail() {
 	echo "telesphorepo: $*" >&2
 	exit 1
+}
+
+has_tty() {
+	(: </dev/tty) 2>/dev/null
+}
+
+# add_to_path puts ~/.local/bin on the PATH of the user's shell ($SHELL): it appends one line to
+# the start-up file that the shell reads, after a question on the terminal, and only once. With
+# no terminal it prints the line and the file.
+add_to_path() {
+	line='export PATH="$HOME/.local/bin:$PATH"'
+	shell=${SHELL:-sh}
+	case "${shell##*/}" in
+	zsh)
+		# Terminal on macOS opens login shells (~/.zprofile); terminals on Linux open interactive
+		# shells that are no login shells (~/.zshrc).
+		if [ "$1" = darwin ]; then rc=.zprofile; else rc=.zshrc; fi
+		;;
+	bash)
+		if [ "$1" = darwin ]; then rc=.bash_profile; else rc=.bashrc; fi
+		;;
+	fish)
+		rc=.config/fish/config.fish
+		line='set -gx PATH $HOME/.local/bin $PATH'
+		;;
+	*) rc=.profile ;;
+	esac
+	file="$HOME/$rc"
+
+	if grep -qsxF "$line" "$file"; then
+		echo "telesphorepo: ~/$rc puts ~/.local/bin on PATH; open a new terminal, or run now:" >&2
+		echo "  $line" >&2
+		return 0
+	fi
+	answer=n
+	if has_tty; then
+		printf 'Add ~/.local/bin to your PATH in ~/%s? [Y/n] ' "$rc" >/dev/tty
+		read -r answer </dev/tty || answer=n
+		case "$answer" in
+		'' | [Yy] | [Yy][Ee][Ss]) answer=y ;;
+		esac
+	fi
+	if [ "$answer" = y ]; then
+		mkdir -p "$(dirname "$file")"
+		if [ -s "$file" ] && [ -n "$(tail -c 1 "$file")" ]; then
+			echo >>"$file"
+		fi
+		echo "$line" >>"$file"
+		echo "telesphorepo: added ~/.local/bin to PATH in ~/$rc; open a new terminal, or run now:" >&2
+		echo "  $line" >&2
+		return 0
+	fi
+	echo "telesphorepo: ~/.local/bin is not on PATH. Add this line to ~/$rc, then open a new terminal:" >&2
+	echo "  $line" >&2
 }
 
 main() {
@@ -76,15 +131,16 @@ main() {
 
 	if [ -n "${GITHUB_PATH:-}" ]; then
 		echo "$dir" >>"$GITHUB_PATH"
+	else
+		case ":$PATH:" in
+		*":$dir:"*) ;;
+		*) add_to_path "$os" ;;
+		esac
 	fi
-	case ":$PATH:" in
-	*":$dir:"*) ;;
-	*) [ -n "${GITHUB_PATH:-}" ] || echo "telesphorepo: add $dir to PATH, for example in ~/.profile: export PATH=\"\$HOME/.local/bin:\$PATH\"" >&2 ;;
-	esac
 
 	[ "$#" -gt 0 ] || return 0
 	# The script itself came on stdin, so the CLI reads the terminal when there is one.
-	if (: </dev/tty) 2>/dev/null; then
+	if has_tty; then
 		exec "$dir/telesphorepo" "$@" </dev/tty
 	fi
 	exec "$dir/telesphorepo" "$@"
