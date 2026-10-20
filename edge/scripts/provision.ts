@@ -93,10 +93,6 @@ async function main(): Promise<void> {
     fail(`${path} does not parse: ${err instanceof Error ? err.message : String(err)}`);
   }
 
-  if (cfg.vars && cfg.vars.ORIGIN !== undefined) {
-    fail("vars.ORIGIN is for the test fixture only; a deployed Worker reaches the origin with a same-zone fetch.");
-  }
-
   // Same zone: every route is a zone route on one host. A plain pattern (what the server writes)
   // is a route of the zone of its own host, which wrangler finds; a route object that names its
   // zone must name the zone of its host.

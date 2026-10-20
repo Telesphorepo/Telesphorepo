@@ -50,7 +50,7 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/db` | SQLite (modernc, no cgo), WAL, separate writer/reader pools, one schema per component with a fingerprint (`Init`), `PRAGMA optimize`, the plan guard (`CheckPlans`) |
 | `internal/ci` | The CI provider registry (`Registry`: `Build`, `Describe`) and the build records (`Builds`: `Record`, `Upsert`, `Loader`, `Cleanup`). See **CI providers and build records** |
 | `internal/db/dbq` | sqlc-generated core queries (`internal/db/queries/*.sql`) plus hand-written FTS queries in `extra.go` |
-| `internal/storage` | `Store` interface (with `DeleteMany`: one S3 `DeleteObjects` per 1000 keys, one delete per key on fs); `fs`, `s3`, and `Live`, a hot-swappable wrapper with `Open`, `SameBackend` and `Probe`. Declares the storage setting keys and `ConfigView` (the store of a snapshot). The S3 store keeps `Accept-Encoding` out of the SigV4 signature, which the local R2 S3 endpoint of wrangler dev needs |
+| `internal/storage` | `Store` interface (with `DeleteMany`: one S3 `DeleteObjects` per 1000 keys, one delete per key on fs); `fs`, `s3`, and `Live`, a hot-swappable wrapper with `Open`, `SameBackend` and `Probe`. Declares the storage setting keys and `ConfigView` (the store of a snapshot) |
 | `internal/repopath` | The pure repo-path parser: `Parse` (a file path) and `Folder` (`""` or a folder ending in `/`). Routes, file operations, imports and uploads check every path with it |
 | `internal/blobs` | Content-addressed blobs: `Spooled` bodies with their hashes, `Store` (`Key`, digest `Lock`, `Ensure`/`EnsureAll`, `Get`, `Open`) and the blob GC. See **Byte pipeline** |
 | `internal/assets` | The byte pipeline: `Pipeline` (`Commit`, `CommitAll`, `Remove`, point lookups, listing, FTS search), `Reader` (the read path of hosted, proxy and group repos), `Uploads` (resumable uploads), the asset hooks of a format (`Hooks`) and the watchers of every commit and remove (`Watcher`). See **Byte pipeline** |
@@ -81,7 +81,7 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/containerengine` | Docker/Podman detection for tooling and e2e; not linked into the server |
 | `web/` | Svelte 5 + Vite UI (Tailwind CSS v4, shadcn-svelte Maia style), embedded via `web/embed.go` (`go:embed all:dist`). See **Web UI** |
 | `tools/task` | `go tool task`: dev, build, preview, test, cli, release, gen and doctor |
-| `e2e/` | End-to-end suite in five zones (tags `e2e`, `import`, `scale`, `clients`, `edge`) using testcontainers, and the macOS zone (tag `macos`) of `release.yml` |
+| `e2e/` | End-to-end suite in four zones (tags `e2e`, `import`, `scale`, `clients`) using testcontainers, and the macOS zone (tag `macos`) of `release.yml` |
 
 ## Modules
 
@@ -1789,9 +1789,8 @@ client; with `list:cloudflare` in the trusted proxies the server sees the real c
 the hop-by-hop headers (`Connection`, `Keep-Alive`, `Proxy-Connection`, `TE`, `Trailer`,
 `Transfer-Encoding`, `Upgrade`) and `Expect`, so a client's `Expect: 100-continue` (mvn sends it
 on each PUT) stays on the client's hop. A deployed
-Worker runs on routes of the zone of the base URL host and forwards with a same-zone fetch; the
-var `ORIGIN` (the test fixture only) forwards to that URL. A GET or HEAD also calls
-`passThroughOnException`.
+Worker runs on routes of the zone of the base URL host and forwards with a same-zone fetch. A GET
+or HEAD also calls `passThroughOnException`.
 
 **Copies.** An R2 event notification rule of the home bucket (prefix `[s3.prefix/]blobs/`,
 `object-create` and `object-delete`) sends to the queue `<home bucket>-edge-copy`. The consumer
@@ -1812,7 +1811,7 @@ batches of 100, 10 retries), the cron, the var `PREFIX` (`s3.prefix`) and the `d
 (the bundle of the release archive carries the same define). In `edge/` (or the
 unpacked release archive) the operator runs `CLOUDFLARE_API_TOKEN=... bun run provision`
 (`scripts/provision.ts`: each regional bucket with its location hint, the queue and the
-notification rule, skipping what exists; it refuses a config with `vars.ORIGIN`, a custom domain,
+notification rule, skipping what exists; it refuses a config with a custom domain,
 routes on several hosts or a route outside the zone it names) and `bun run deploy`. The token
 needs Workers Scripts and Routes edit, R2 edit and Queues edit. `go tool task release` adds
 `telesphorepo-edge_<version>.tar.gz` (see **Tooling**).
@@ -1854,12 +1853,6 @@ the local one, so `edge.access_ttl` (default 30 s, 0 to 5 min) is the bound.
   `passThroughOnException` does not cover a CPU or memory overrun (error 1102), so the Worker keeps
   its CPU per request small. On Workers Paid there is no request cap: cost grows with traffic and
   the edge does not stop.
-- *Local R2.* The e2e fixture runs the Worker in `wrangler dev --local` against local R2 through its
-  S3 endpoint (`/cdn-cgi/local/r2/s3`), which is why `storage.NewS3` leaves `Accept-Encoding` out of
-  the signature and why the Worker forwards to its `ORIGIN` var instead of using
-  `--local-upstream`. Local R2 sends no event notifications, so the notification path is tested in
-  the job `e2e-edge-cloudflare`. `edge/package.json` pins Wrangler at an exact version, because the
-  local S3 key is experimental; a bump reruns the `edge` zone first.
 
 **Known difference.** The server refuses even a valid token from an address that it blocks after
 failed attempts (`authenticate` checks `limits.blocked` first); that block lives in server memory
@@ -3048,20 +3041,18 @@ and raw insert asset rows, debian inserts one package and its asset row per unit
 | `go tool task test import [go test args]` | Runs the import zone: `-tags import`, 45 min timeout. It starts a Nexus container |
 | `go tool task test scale [go test args]` | Runs `TestScale` (`-tags scale`, 60 min timeout) |
 | `go tool task test clients [go test args]` | Runs the clients zone: `-tags clients`, 120 min timeout. It builds the CLI of this repo on the host and runs it in containers with the real tools |
-| `go tool task test edge [go test args]` | Runs the edge zone: `-tags edge`, 60 min timeout. It builds the fixture image of `edge/test/Containerfile` and runs the edge Worker in wrangler dev in front of each server |
-| `go tool task test all [go test args]` | Runs core, import, scale, clients and edge one after the other. It runs every zone, lists the failed zones and exits non-zero if any failed |
+| `go tool task test all [go test args]` | Runs core, import, scale and clients one after the other. It runs every zone, lists the failed zones and exits non-zero if any failed |
 | `go tool task release [version]` | Builds the UI and the six CLI archives that the server embeds once. Then it cross-compiles each program whose package exists: the CLI (`./cmd/telesphorepo`, with its own `LICENSE`; the install scripts make its second name `docker-credential-telesphorepo`) and the server (`./cmd/telesphorepo-server`) for linux, darwin and windows on amd64 and arm64 (`CGO_ENABLED=0`, `-trimpath`, `-X main.version`). Each binary goes into `bin/release/<program>_<version>_<os>_<arch>.tar.gz` (`.zip` on Windows) with `LICENSE` and `README.md`. With `edge/`, it runs `bun install --frozen-lockfile` there and bundles the Worker (`wrangler deploy --dry-run --outdir` with `--define TELESPHOREPO_VERSION:"<version>"`) into `telesphorepo-edge_<version>.tar.gz`: `dist/`, `package.json`, `bun.lock`, `README.md` and `scripts/provision.ts`. The command writes `SHA256SUMS` of every archive. The version defaults to `git describe`. A version given as the argument must be a release version, and `changes.toml` must have no `dev` entry (see **Change log**) |
 | `go tool task tag <version>` | Makes a release. It needs a clean work tree and a new tag. It writes `v<version>` into each `dev` entry of `changes.toml`, commits the file as `Release v<version>`, and creates the annotated tag `v<version>`. It pushes nothing. The tagged commit holds the stamped change log, so `release.yml` and every image build embed the same entries |
 | `go tool task gen` | Runs `go tool sqlc generate` for every `internal/**/sqlc.yaml` |
 | `go tool task doctor` | Shows the detected toolchain and container engine |
 
-CI runs on GitHub Actions with the built-in `GITHUB_TOKEN`; only `e2e-edge-cloudflare` reads
-repository secrets (a Cloudflare account of the maintainer):
+CI runs on GitHub Actions with the built-in `GITHUB_TOKEN` and reads no repository secrets:
 
 | Workflow | Runs | Does |
 |---|---|---|
-| `ci.yml` | Push to `main`, pull requests | `build` job: `go tool task build`, `go vet` for the `e2e`, `import`, `scale`, `clients`, `edge` and `macos` tags, `go vet` and `go build` of `./cmd/telesphorepo` for `GOOS=darwin` and `GOOS=windows`, `bunx tsc --noEmit` and `bun run build` in `edge/`, `telesphorepo-server dbcheck`. `e2e-core` job: `go tool task test` (uploads the log on failure). `e2e-github-actions` job (pushes and pull requests of this repository; `id-token: write`): `TestCLIGitHubActions` with the job's real identity token. `e2e-edge-cloudflare` job (pushes and pull requests of this repository): `TestEdgeCloudflare` against a real Cloudflare account (`CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `E2E_R2_ACCESS_KEY_ID`, `E2E_R2_SECRET_ACCESS_KEY`). `snapshot-image` job (push to `main` only, after `e2e-core` passes): multi-arch image with tags `main` and `sha-<short>`, version `main-<short sha>`. A newer push cancels the running pull request jobs |
-| `e2e-extended.yml` | Manual (zone `import`, `scale`, `edge` or `all`), weekly for `import` | `go tool task test <zone>` |
+| `ci.yml` | Push to `main`, pull requests | `build` job: `go tool task build`, `go vet` for the `e2e`, `import`, `scale`, `clients` and `macos` tags, `go vet` and `go build` of `./cmd/telesphorepo` for `GOOS=darwin` and `GOOS=windows`, `bunx tsc --noEmit` and `bun run build` in `edge/`, `telesphorepo-server dbcheck`. `e2e-core` job: `go tool task test` (uploads the log on failure). `e2e-github-actions` job (pushes and pull requests of this repository; `id-token: write`): `TestCLIGitHubActions` with the job's real identity token. `snapshot-image` job (push to `main` only, after `e2e-core` passes): multi-arch image with tags `main` and `sha-<short>`, version `main-<short sha>`. A newer push cancels the running pull request jobs |
+| `e2e-extended.yml` | Manual (zone `import`, `scale` or `all`), weekly for `import` | `go tool task test <zone>` |
 | `release.yml` | Push of a `v*` tag | `binaries` job: `go tool task release`, then a GitHub Release with the archives and `SHA256SUMS`. `image` job: multi-arch image (`linux/amd64`, `linux/arm64`) pushed to `ghcr.io/telesphorepo/telesphorepo` with tags `X.Y.Z`, `X.Y` and `latest` (no `latest` for pre-releases). `macos` job on `macos-latest`: `go tool task build`, then the macOS zone (`go test -tags macos -run TestMacOS ./e2e/` with `E2E_SERVER_BIN`) |
 
 The Dockerfile builds the UI, the six CLI archives (`go tool task cli`) and the Go binary on the build platform and cross-compiles with
@@ -3323,58 +3314,3 @@ on a named volume. It starts a server on the volume and measures the p95 latency
 each operation: Maven GET with `If-None-Match`, an asset list walk, a rare search, a common
 search and token auth (`/api/me`). An operation fails when its p95 at 1M exceeds
 `max(2 x p95 at 100k, p95 at 100k + 2 ms)`.
-
-**The edge zone** (tag `edge`, `go tool task test edge`) runs the real Worker of `edge/` and the
-real server; there is no stand-in for either. `edge_harness_test.go` builds the fixture image of
-`edge/test/Containerfile` once per run (Node, bun, the `edge/` sources) and gives each test its own
-Worker container on `TestNetwork`: `wrangler dev --local --ip 0.0.0.0 --test-scheduled` with
-`edge/test/wrangler.jsonc` (a home bucket and the regional buckets `weur` and `apac` in local R2,
-each with `local_dev.experimental_s3_credentials`, the local copy queue, and the var `ORIGIN`
-that `edge/test/run.sh` sets to the server of the test). `run.sh` also writes the `request.cf` of
-the client (London) to `CLOUDFLARE_CF_FETCH_PATH`, so the bucket choice is the same everywhere.
-The server under test uses `storage=s3` with the endpoint
-`http://127.0.0.1:8787/cdn-cgi/local/r2/s3`, path style and the home bucket, so it writes the local
-R2 that the Worker reads; its `base_url` is the Worker and its trusted proxies are `private`.
-Miniflare answers a request under `/cdn-cgi/` only when its Host is `localhost`, `127.0.0.1` or
-`[::1]` (any other Host gets a bare 403), and the S3 signature covers the Host, so a forwarder
-(`edge/test/forward.mjs`, from the same image) runs in the network namespace of the server and
-passes `127.0.0.1:8787` to the Worker container unchanged. The
-test side reads and writes the buckets through `storage.NewS3`. Local R2 sends no event
-notifications, so the tests run the consumer through the scheduled gap check (`/__scheduled`)
-after a `gap/request.json`. Each case also asserts `Telesphorepo-Edge`, so the tests prove which
-requests the edge answers. `edge_test.go` covers:
-
-- `TestEdgeParity`: for maven, raw, debian and docker, each credential (none, a read token by
-  Basic and by Bearer, a token without a grant, a token of `repositories.all`, a password, a UI
-  session, a publish session, a device proof, a bad token; on `oci` a core bearer of anonymous, a
-  password, a read token, a device and a publish session; on `standard` a core bearer), each repo
-  setting (public, private with and without a grant, a read IP rule) and each kind the format has
-  (hosted, proxy, a group with a private member, a guarded member and a proxy member): the same
-  request to the Worker and to the server gives the same status, body and headers (an allowlist
-  with `Telesphorepo-Version` and `Cache-Control`), with `s3.redirect=false`. `TestEdgeRedirect`
-  compares the body after the server's redirect with `s3.redirect=true`.
-- `TestEdgeClientIP`: a spoofed `X-Real-IP` and `X-Forwarded-For` never reach the audit log; the
-  address that the Worker got does.
-- `TestEdgeRevocation` (`edge.access_ttl=1s`): a token delete, a user disable, a grant removal, a
-  repo made private, a device revoke and a read IP rule each turn edge answers into server answers
-  within 2 s.
-- `TestEdgeFreshness`: a file delete and a Maven republish show at the edge at once, a Docker tag
-  move serves the new digest, and a release that is back in the first member of a group never
-  serves the second member's copy.
-- `TestEdgeCopies`: the Worker reads the home blob until the gap check copies a new blob to both
-  regions; a regional copy deleted by hand comes back; the blob GC removes the regional copies.
-- `TestEdgeRegions`: an added region fills and becomes ready; a removed one gets no pointers.
-- `TestEdgeRanges`: Range, HEAD, 304, 416 and If-Range on a mutable and an immutable path.
-- `TestEdgeFailOpen`: a malformed pointer, `edge.enabled=false` and a Worker of another version
-  give server answers.
-- `TestEdgeLastUsed`: a read token checked at the edge gets its `last_used_at`.
-- `TestEdgeClients`: `mvn` (deploy and resolve), Gradle, `apt-get install` and `docker pull`
-  through the Worker, for a public and a private repo.
-
-`TestEdgeCloudflare` (`edge_cloudflare_test.go`) tests the notification path against a real
-Cloudflare account in the job `e2e-edge-cloudflare` of `ci.yml`: it makes a home bucket and a
-`weur` bucket with names of the run, the queue, the notification rule and the Worker, puts and
-deletes a blob through S3, waits for the regional copy and its delete, and removes everything it
-made. Without the account it skips; with `E2E_CLOUDFLARE` set it fails. `edge/package.json` pins
-Wrangler, because the local S3 endpoint of the fixture is experimental: a Wrangler bump runs the
-`edge` zone before it lands.

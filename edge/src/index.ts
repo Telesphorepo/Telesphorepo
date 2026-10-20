@@ -27,12 +27,12 @@ import { copy } from "./copy";
 import { gap } from "./gap";
 import { immutable } from "./glob";
 import { type Pointer, parsePointer, serve } from "./serve";
-import { parseTarget, rawPath } from "./shapes";
+import { parseTarget } from "./shapes";
 import { VERSION } from "./version";
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    if (request.method !== "GET" && request.method !== "HEAD") return forward(request, env);
+    if (request.method !== "GET" && request.method !== "HEAD") return forward(request);
     ctx.passThroughOnException();
     let answer: Response | null = null;
     try {
@@ -40,7 +40,7 @@ export default {
     } catch (err) {
       console.error("edge: read failed, passing to the origin:", err instanceof Error ? err.message : String(err));
     }
-    return answer ?? forward(request, env);
+    return answer ?? forward(request);
   },
   queue: copy,
   scheduled: gap,
@@ -49,16 +49,14 @@ export default {
 // ---------------------------------------------------------------------------------------------
 // Forwarding
 
-// forward passes the request to the origin: to the ORIGIN var when it is set (the test fixture),
-// else with a same-zone fetch of the request itself, which reaches the origin without running the
-// Worker again. x-real-ip and X-Forwarded-For carry the address that Cloudflare saw, never a value
+// forward passes the request to the origin with a same-zone fetch of the request itself, which
+// reaches the origin without running the Worker again. x-real-ip and X-Forwarded-For carry the address that Cloudflare saw, never a value
 // from the client. The hop-by-hop headers stay on the client's hop: an Expect: 100-continue (mvn
 // sends it on every PUT) would make the origin send the subrequest an interim 100 Continue that
 // the subrequest does not expect.
-async function forward(request: Request, env: Env): Promise<Response> {
+async function forward(request: Request): Promise<Response> {
   const headers = new Headers(request.headers);
   for (const h of HOP_BY_HOP) headers.delete(h);
-  if (env.ORIGIN) headers.delete("Host");
   const client = request.headers.get("CF-Connecting-IP");
   if (client) {
     headers.set("x-real-ip", client);
@@ -69,16 +67,9 @@ async function forward(request: Request, env: Env): Promise<Response> {
   }
   const url = new URL(request.url);
   headers.set("X-Forwarded-Proto", url.protocol.replace(/:$/, ""));
-  let target = request.url;
-  if (env.ORIGIN) {
-    // The path and query as the client sent them.
-    const q = request.url.indexOf("?");
-    const query = q >= 0 ? request.url.slice(q).split("#")[0] : "";
-    target = env.ORIGIN.replace(/\/+$/, "") + rawPath(request.url) + query;
-  }
   const hasBody = request.method !== "GET" && request.method !== "HEAD";
   try {
-    return await fetch(target, {
+    return await fetch(request.url, {
       method: request.method,
       headers,
       body: hasBody ? request.body : null,

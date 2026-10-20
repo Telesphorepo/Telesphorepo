@@ -40,8 +40,3 @@ bun install
 bunx tsc --noEmit    # type check
 bun run build        # bundle into dist/ (wrangler deploy --dry-run)
 ```
-
-`test/` holds the fixture of the `edge` e2e zone (`go tool task test edge` at the repository
-root): the Worker in `wrangler dev` with local R2 and Queues in front of a real server. Wrangler is
-pinned to an exact version because the local S3 endpoint of the tests is experimental; rerun the
-`edge` zone before you change it.

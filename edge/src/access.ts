@@ -7,7 +7,6 @@ import { VERSION } from "./version";
 export interface Env {
   HOME: R2Bucket;
   COPY?: Queue<CopyMessage>;
-  ORIGIN?: string;
   PREFIX?: string;
   [binding: string]: unknown;
 }
