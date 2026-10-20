@@ -402,6 +402,8 @@ export type Snippet = {
   title: string;
   lang: string;
   code: string;
+  /** A CI file that a project usually has already (a GitHub Actions workflow, a Jenkinsfile): what the existing file needs, as diff lines, each after its mark ("+" added, " " context). */
+  diff?: string;
   note?: string;
 };
 /** The label of a snippet tool, as the answer names it. */

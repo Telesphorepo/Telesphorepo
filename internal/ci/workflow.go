@@ -54,6 +54,10 @@ type PublishSteps struct {
 	// BuildPS is the PowerShell command of Build for a Jenkins agent on Windows. "": Build, which
 	// then must also run in PowerShell.
 	BuildPS string
+	// BuildAdded says that Build belongs to the publish (it names what Publish pushes, such as an
+	// image tag), so the change to an existing file adds it. Otherwise the change shows Build as a
+	// step the project already has.
+	BuildAdded bool
 	// Publish are the shell commands that publish after the install step, e.g. "telesphorepo
 	// publish".
 	Publish string
@@ -103,17 +107,56 @@ func ValidPattern(s string) bool {
 // baseURL. The install step adds the CLI to the PATH of the later steps.
 func GitHubWorkflow(repo, baseURL string, s PublishSteps, t Trigger) string {
 	var b strings.Builder
-	b.WriteString("on:\n  push:\n")
+	b.WriteString(ghTrigger(t) + "\n" + ghPermissions + "\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n")
+	b.WriteString(ghSetup(s))
+	if s.Build != "" {
+		b.WriteString(runStep("", s.Build, nil))
+	}
+	b.WriteString(ghPublish(repo, baseURL, s))
+	return b.String()
+}
+
+// GitHubWorkflowDiff returns what an existing workflow needs to publish to repo with s, as the
+// lines of a diff (see Added and Context): the permissions and the publish steps are added; the
+// trigger of t, a job with the checkout, the toolchain and the build are context.
+func GitHubWorkflowDiff(repo, baseURL string, s PublishSteps, t Trigger) string {
+	var b strings.Builder
+	b.WriteString(Context(ghTrigger(t) + "\n"))
+	b.WriteString(Added(ghPermissions))
+	b.WriteString(Context("\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n" + ghSetup(s)))
+	switch {
+	case s.Build == "":
+		b.WriteString(Context("      # your build steps\n"))
+	case s.BuildAdded:
+		b.WriteString(Added(runStep("", s.Build, nil)))
+	default:
+		b.WriteString(Context(runStep("", s.Build, nil)))
+	}
+	b.WriteString(Added(ghPublish(repo, baseURL, s)))
+	return b.String()
+}
+
+// ghPermissions lets the job ask for an identity token.
+const ghPermissions = "permissions:\n  id-token: write\n  contents: read\n"
+
+// ghTrigger is the on: block of t; the zero Trigger is a push to main.
+func ghTrigger(t Trigger) string {
 	if t.zero() {
 		t.Branches = []string{"main"}
 	}
+	s := "on:\n  push:\n"
 	if len(t.Branches) > 0 {
-		b.WriteString("    branches: " + yamlList(t.Branches) + "\n")
+		s += "    branches: " + yamlList(t.Branches) + "\n"
 	}
 	if len(t.Tags) > 0 {
-		b.WriteString("    tags: " + yamlList(t.Tags) + "\n")
+		s += "    tags: " + yamlList(t.Tags) + "\n"
 	}
-	b.WriteString("\npermissions:\n  id-token: write\n  contents: read\n\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n")
+	return s
+}
+
+// ghSetup are the checkout and the toolchain steps.
+func ghSetup(s PublishSteps) string {
+	var b strings.Builder
 	b.WriteString("      - uses: actions/checkout@v7\n")
 	for _, st := range s.Toolchain {
 		b.WriteString("      - uses: " + st.Uses + "\n")
@@ -124,16 +167,29 @@ func GitHubWorkflow(repo, baseURL string, s PublishSteps, t Trigger) string {
 			}
 		}
 	}
-	if s.Build != "" {
-		b.WriteString(runStep("", s.Build, nil))
-	}
-	b.WriteString(runStep("", InstallSh(baseURL), nil))
-	publish := s.Publish
+	return b.String()
+}
+
+// ghPublish are the install step of the CLI and the publish step.
+func ghPublish(repo, baseURL string, s PublishSteps) string {
 	name := ""
-	if strings.Contains(strings.TrimRight(publish, "\n"), "\n") {
+	if strings.Contains(strings.TrimRight(s.Publish, "\n"), "\n") {
 		name = "Publish to " + repo
 	}
-	b.WriteString(runStep(name, publish, s.Env))
+	return runStep("", InstallSh(baseURL), nil) + runStep(name, s.Publish, s.Env)
+}
+
+// Added marks each line of block as added in a diff: "+" and the line.
+func Added(block string) string { return markLines("+", block) }
+
+// Context marks each line of block as context in a diff: " " and the line.
+func Context(block string) string { return markLines(" ", block) }
+
+func markLines(mark, block string) string {
+	var b strings.Builder
+	for _, l := range strings.Split(strings.TrimSuffix(block, "\n"), "\n") {
+		b.WriteString(mark + l + "\n")
+	}
 	return b.String()
 }
 
@@ -175,28 +231,68 @@ func yamlList(xs []string) string {
 // stage to its branches and tags (a multibranch job). A Groovy string in single quotes reads a
 // backslash as an escape, so each backslash of a script is doubled.
 func Jenkinsfile(repo, baseURL string, s PublishSteps, t Trigger) string {
-	step := func(kind, script, prefix string) string {
-		script = strings.ReplaceAll(strings.TrimRight(script, "\n"), `\`, `\\`)
-		if !strings.ContainsAny(script, "\n'") {
-			return prefix + kind + " '" + script + "'\n"
-		}
-		return prefix + kind + " '''\n" + Indent(script, prefix+"  ") + prefix + "'''\n"
+	var b strings.Builder
+	b.WriteString(jenkinsHead)
+	if s.Build != "" {
+		b.WriteString(jenkinsBuild(s))
 	}
+	b.WriteString(jenkinsPublish(repo, baseURL, s, t))
+	b.WriteString(jenkinsTail)
+	return b.String()
+}
+
+// JenkinsfileDiff returns what an existing declarative Jenkinsfile needs to publish to repo with
+// s, as the lines of a diff (see Added and Context): the publish stage of Jenkinsfile is added
+// after a Build stage of context.
+func JenkinsfileDiff(repo, baseURL string, s PublishSteps, t Trigger) string {
+	var b strings.Builder
+	b.WriteString(Context(jenkinsHead))
+	switch {
+	case s.Build == "":
+		b.WriteString(Context("    stage('Build') {\n      steps {\n        // your build steps\n      }\n    }\n"))
+	case s.BuildAdded:
+		b.WriteString(Added(jenkinsBuild(s)))
+	default:
+		b.WriteString(Context("    stage('Build') {\n      steps {\n" + groovyStep("sh", s.Build, "        ") + "      }\n    }\n"))
+	}
+	b.WriteString(Added(jenkinsPublish(repo, baseURL, s, t)))
+	b.WriteString(Context(jenkinsTail))
+	return b.String()
+}
+
+const (
+	jenkinsHead = "pipeline {\n  agent any\n  stages {\n"
+	jenkinsTail = "  }\n}\n"
+)
+
+// groovyStep is a sh or powershell step with script, each line after prefix.
+func groovyStep(kind, script, prefix string) string {
+	script = strings.ReplaceAll(strings.TrimRight(script, "\n"), `\`, `\\`)
+	if !strings.ContainsAny(script, "\n'") {
+		return prefix + kind + " '" + script + "'\n"
+	}
+	return prefix + kind + " '''\n" + Indent(script, prefix+"  ") + prefix + "'''\n"
+}
+
+// jenkinsBuild is the Build stage: Build with sh on a Unix agent, BuildPS with PowerShell on a
+// Windows agent.
+func jenkinsBuild(s PublishSteps) string {
+	buildPS := s.BuildPS
+	if buildPS == "" {
+		buildPS = s.Build
+	}
+	return "    stage('Build') {\n      steps {\n        script {\n          if (isUnix()) {\n" +
+		groovyStep("sh", s.Build, "            ") + "          } else {\n" +
+		groovyStep("powershell", buildPS, "            ") + "          }\n        }\n      }\n    }\n"
+}
+
+// jenkinsPublish is the publish stage.
+func jenkinsPublish(repo, baseURL string, s PublishSteps, t Trigger) string {
 	ps := s.PublishPS
 	if ps == "" {
 		ps = s.Publish
 	}
 	var b strings.Builder
-	b.WriteString("pipeline {\n  agent any\n  stages {\n")
-	if s.Build != "" {
-		buildPS := s.BuildPS
-		if buildPS == "" {
-			buildPS = s.Build
-		}
-		b.WriteString("    stage('Build') {\n      steps {\n        script {\n          if (isUnix()) {\n" +
-			step("sh", s.Build, "            ") + "          } else {\n" +
-			step("powershell", buildPS, "            ") + "          }\n        }\n      }\n    }\n")
-	}
 	b.WriteString("    stage('Publish to " + repo + "') {\n")
 	if !t.zero() {
 		b.WriteString("      when {\n        anyOf {\n")
@@ -222,16 +318,16 @@ func Jenkinsfile(repo, baseURL string, s PublishSteps, t Trigger) string {
 		inner + "withCredentials([string(credentialsId: '" + JenkinsCredential + "', variable: 'OIDC_TOKEN')]) {\n" +
 		inner + "  script {\n" +
 		inner + "    if (isUnix()) {\n" +
-		step("sh", InstallSh(baseURL)+"\n"+localBin+"\n"+s.Publish, inner+"      ") +
+		groovyStep("sh", InstallSh(baseURL)+"\n"+localBin+"\n"+s.Publish, inner+"      ") +
 		inner + "    } else {\n" +
-		step("powershell", InstallPS(baseURL)+"\n"+ps, inner+"      ") +
+		groovyStep("powershell", InstallPS(baseURL)+"\n"+ps, inner+"      ") +
 		inner + "    }\n" +
 		inner + "  }\n" +
 		inner + "}\n")
 	if len(s.Env) > 0 {
 		b.WriteString("        }\n")
 	}
-	b.WriteString("      }\n    }\n  }\n}\n")
+	b.WriteString("      }\n    }\n")
 	return b.String()
 }
 

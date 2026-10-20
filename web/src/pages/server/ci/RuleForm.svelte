@@ -50,6 +50,10 @@
     gitHubAccepts,
     gitHubRepo,
     jenkinsAccepts,
+    jenkinsJob,
+    jenkinsURL,
+    parseGitHub,
+    workflowFile,
     knownFields,
     readGitHub,
     readJenkins,
@@ -271,6 +275,30 @@
     byHand = s === "other";
   }
 
+  // A pasted GitHub or Jenkins address becomes what it names, at once on a paste and else when
+  // the field is left: a file's address fills the repository and the workflow file.
+  const pasted = (e: Event) => (e as InputEvent).inputType === "insertFromPaste";
+  function tidyRepo() {
+    if (!draft) return;
+    const gh = draft.value.gh;
+    const p = parseGitHub(gh.repo);
+    if (p.repo) gh.repo = p.repo;
+    if (p.workflow && !gh.workflow.trim()) gh.workflow = p.workflow;
+  }
+  function tidyWorkflow() {
+    if (!draft) return;
+    const gh = draft.value.gh;
+    if (!gh.workflow.trim()) return;
+    const p = parseGitHub(gh.workflow);
+    if (p.repo && !gh.repo.trim()) gh.repo = p.repo;
+    gh.workflow = workflowFile(gh.workflow);
+  }
+  function jobOf(s: string): string {
+    const jk = draft?.value.jk;
+    if (jk && !jk.url.trim() && /^https?:\/\/.+\/job\//i.test(s)) jk.url = jenkinsURL(s);
+    return jenkinsJob(s);
+  }
+
   function setRepo(name: string, on: boolean) {
     if (!draft) return;
     const r = draft.value.repos.filter((x) => x !== name);
@@ -416,12 +444,28 @@
 
         {#if !hand && v.system === "github"}
           <FormGrid>
-            <FormRow label="GitHub repository" for="{fid}-gh-repo" help="Write the owner and the name, as in the address of the repository.">
-              <Input id="{fid}-gh-repo" spellcheck={false} placeholder="acme/app" aria-describedby="{fid}-gh-repo-help" bind:value={v.gh.repo} />
+            <FormRow label="GitHub repository" for="{fid}-gh-repo" help="The repository whose workflow publishes.">
+              <Input
+                id="{fid}-gh-repo"
+                spellcheck={false}
+                placeholder="https://github.com/acme/app"
+                aria-describedby="{fid}-gh-repo-help"
+                bind:value={v.gh.repo}
+                oninput={(e) => pasted(e) && queueMicrotask(tidyRepo)}
+                onchange={tidyRepo}
+              />
             </FormRow>
             <FormRow label="Workflow file" for="{fid}-gh-wf" help="Leave it empty to let every workflow of the repository publish.">
-              <Input id="{fid}-gh-wf" spellcheck={false} placeholder="release.yml" aria-describedby="{fid}-gh-wf-help" bind:value={v.gh.workflow} />
-              {#snippet more()}Write the name of the file in .github/workflows that publishes. The other workflows of the repository then cannot publish, also when they run on the same branch.{/snippet}
+              <Input
+                id="{fid}-gh-wf"
+                spellcheck={false}
+                placeholder="https://github.com/acme/app/blob/main/.github/workflows/release.yml"
+                aria-describedby="{fid}-gh-wf-help"
+                bind:value={v.gh.workflow}
+                oninput={(e) => pasted(e) && queueMicrotask(tidyWorkflow)}
+                onchange={tidyWorkflow}
+              />
+              {#snippet more()}The file in .github/workflows that publishes, such as release.yml. The other workflows of the repository then cannot publish, also when they run on the same branch.{/snippet}
             </FormRow>
             <FormRow label="Branches" for="{fid}-gh-br" help="A * matches any text, such as release/* for every release branch.">
               <ListInput id="{fid}-gh-br" values={v.gh.branches} onchange={(x) => (v.gh.branches = x)} placeholder="main" describedby="{fid}-gh-br-help" label="branch" />
@@ -437,12 +481,28 @@
         {:else if !hand && v.system === "jenkins"}
           <FormGrid>
             <FormRow label="Jenkins address" for="{fid}-jk-url" help="Write the address that you open Jenkins at.">
-              <Input id="{fid}-jk-url" type="url" spellcheck={false} placeholder="https://jenkins.example.com" aria-describedby="{fid}-jk-url-help" bind:value={v.jk.url} />
+              <Input
+                id="{fid}-jk-url"
+                type="url"
+                spellcheck={false}
+                placeholder="https://jenkins.example.com"
+                aria-describedby="{fid}-jk-url-help"
+                bind:value={v.jk.url}
+                onchange={() => v.jk.url.trim() && (v.jk.url = jenkinsURL(v.jk.url))}
+              />
               {#snippet more()}Jenkins gives each job a token with the OpenID Connect Provider plugin. This server reads the keys that check the token from the Jenkins address followed by /oidc.{/snippet}
             </FormRow>
             <FormRow label="Jobs" for="{fid}-jk-jobs" help="Write each full job name with its folders, such as team/app.">
-              <ListInput id="{fid}-jk-jobs" values={v.jk.jobs} onchange={(x) => (v.jk.jobs = x)} placeholder="team/app" describedby="{fid}-jk-jobs-help" label="job" />
-              {#snippet more()}A branch of a multibranch pipeline is a job of its own: write app/main. A * matches any text, so app/* lets every branch of app publish.{/snippet}
+              <ListInput
+                id="{fid}-jk-jobs"
+                values={v.jk.jobs}
+                onchange={(x) => (v.jk.jobs = x)}
+                normalize={jobOf}
+                placeholder="https://jenkins.example.com/job/team/job/app/"
+                describedby="{fid}-jk-jobs-help"
+                label="job"
+              />
+              {#snippet more()}Paste the address of the job, or write its name with its folders. A branch of a multibranch pipeline is a job of its own: write app/main. A * matches any text, so app/* lets every branch of app publish.{/snippet}
             </FormRow>
             <FormRow label="Jenkins keys" for="{fid}-jk-keys" help="Leave this empty when this server can reach Jenkins." full>
               <Textarea id="{fid}-jk-keys" rows={3} spellcheck={false} placeholder={'{"keys": [...]}'} aria-describedby="{fid}-jk-keys-help" bind:value={v.jk.jwks} />

@@ -13,7 +13,7 @@
   import ErrorState from "$lib/components/ErrorState.svelte";
   import Loading from "$lib/components/Loading.svelte";
   import SnippetTabs from "./SnippetTabs.svelte";
-  import Segmented from "./Segmented.svelte";
+  import Segmented from "$lib/components/Segmented.svelte";
   import { api, type VersionMode } from "$lib/api";
   import { formats } from "$lib/formats/registry.svelte";
 

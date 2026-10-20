@@ -22,7 +22,7 @@
   import FreshFactor from "$lib/components/FreshFactor.svelte";
   import LearnMore from "$lib/components/LearnMore.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
-  import Segmented from "./snippets/Segmented.svelte";
+  import Segmented from "$lib/components/Segmented.svelte";
   import SnippetTabs from "./snippets/SnippetTabs.svelte";
   import { ssoErrors } from "../account/words";
   import FolderCogIcon from "@lucide/svelte/icons/folder-cog";

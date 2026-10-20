@@ -25,6 +25,8 @@ func (f *Format) dockerTool() format.Tool {
 			return ci.PublishSteps{
 				Build:   `docker build -t "` + image + ":" + tag + `" .`,
 				BuildPS: `docker build -t "` + image + ":" + psTag + `" .`,
+				// The tag names this registry, so an existing workflow gets the build too.
+				BuildAdded: true,
 				// The helper asks for an identity token for this server and checks the audience of
 				// OIDC_TOKEN against it.
 				Env: map[string]string{"TELESPHOREPO_SERVER": baseURL},
