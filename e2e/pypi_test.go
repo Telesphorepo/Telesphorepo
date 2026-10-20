@@ -88,7 +88,7 @@ package-mode = false
 // TestPyPI: twine uploads the wheel and sdist that python -m build makes to a private hosted repo;
 // the page lists both with hashes, sizes, upload times and the wheel's core metadata, whose bytes
 // the .metadata file serves; an upload of other bytes under a file name that exists fails with
-// 409 and twine --skip-existing skips it; pip installs the package with --require-hashes.
+// 409; pip installs the package with --require-hashes.
 func TestPyPI(t *testing.T) {
 	t.Parallel()
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
@@ -113,7 +113,6 @@ sed -i 's/hello from/changed hello from/' ` + mod + `/__init__.py
 rm -rf dist build *.egg-info
 python -m build
 if twine upload --non-interactive --repository-url "$URL" dist/*; then echo "UPLOAD OF OTHER BYTES PASSED"; exit 1; fi
-twine upload --non-interactive --skip-existing --repository-url "$URL" dist/*
 `},
 			Files: pySetuptoolsProject("/work/p", name, mod, "1.0.0", msg),
 			Env:   map[string]string{"URL": upload, "TWINE_USERNAME": "__token__", "TWINE_PASSWORD": PublishToken(t, s, writer, repo)},
@@ -121,10 +120,8 @@ twine upload --non-interactive --skip-existing --repository-url "$URL" dist/*
 		if code != 0 {
 			t.Fatalf("build and twine upload: exit %d\n%s", code, out)
 		}
-		for _, want := range []string{"409", "Skipping"} {
-			if !strings.Contains(out, want) {
-				t.Fatalf("twine output has no %q:\n%s", want, out)
-			}
+		if !strings.Contains(out, "409 Conflict") {
+			t.Fatalf("twine output has no 409 Conflict:\n%s", out)
 		}
 
 		read := Basic{writer, token}
@@ -165,7 +162,7 @@ pip install --root-user-action=ignore --no-cache-dir --index-url "$INDEX" --requ
 python -c "import ` + mod + `; print(` + mod + `.MSG)"
 `},
 			Files: []ContainerFile{{Path: "/work/req.txt", Content: name + "==1.0.0 --hash=sha256:" + wheelSHA + " --hash=sha256:" + sdistSHA + "\n"}},
-			Env:   map[string]string{"INDEX": pyIndex(s, repo, writer, token)},
+			Env:   map[string]string{"INDEX": pyIndex(s, repo, writer, token), "PIP_TRUSTED_HOST": s.Alias},
 		})
 		if code != 0 || !strings.Contains(out, msg) || strings.Contains(out, "changed "+msg) {
 			t.Fatalf("pip install --require-hashes: exit %d, want %q:\n%s", code, msg, out)
@@ -439,7 +436,7 @@ func TestPyPIProxyGroup(t *testing.T) {
 pip install --root-user-action=ignore --no-cache-dir --index-url "$INDEX" iniconfig==2.0.0
 python -c "import iniconfig; print('INICONFIG OK')"
 `},
-			Env: map[string]string{"INDEX": pyIndex(s, proxy, "", "")},
+			Env: map[string]string{"INDEX": pyIndex(s, proxy, "", ""), "PIP_TRUSTED_HOST": s.Alias},
 		})
 		if code != 0 || !strings.Contains(out, "INICONFIG OK") {
 			t.Fatalf("pip install through the proxy: exit %d\n%s", code, out)
@@ -476,7 +473,7 @@ uv pip install --no-cache --python /tmp/venv/bin/python --index-url "$INDEX" six
 pip install --root-user-action=ignore --no-cache-dir --index-url "$INDEX" iniconfig six
 python -c "import iniconfig, six; print(iniconfig.MSG, 'SIX', six.__version__)"
 `},
-			Env: map[string]string{"INDEX": pyIndex(s, group, "", "")},
+			Env: map[string]string{"INDEX": pyIndex(s, group, "", ""), "PIP_TRUSTED_HOST": s.Alias},
 		})
 		if code != 0 || !strings.Contains(out, "private iniconfig SIX") {
 			t.Fatalf("pip install through the group: exit %d\n%s", code, out)

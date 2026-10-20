@@ -39,7 +39,7 @@ func nexusPyPI(t *testing.T, n *Nexus, s *Server) {
 	code, out := RunClient(t, pythonImage, ClientOpts{Cmd: []string{`set -e
 pip install --root-user-action=ignore --no-cache-dir --index-url "$INDEX" ` + name + `
 python -c "import ` + mod + `; print(` + mod + `.MSG)"
-`}, Env: map[string]string{"INDEX": pyIndex(s, target, "", "")}})
+`}, Env: map[string]string{"INDEX": pyIndex(s, target, "", ""), "PIP_TRUSTED_HOST": s.Alias}})
 	if code != 0 || !strings.Contains(out, "nexus "+name+" 1.1") {
 		t.Fatalf("pip install from the imported repo: exit %d\n%s", code, out)
 	}

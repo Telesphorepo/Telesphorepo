@@ -53,8 +53,13 @@ func setupSnippets(repo *repos.Repo, baseURL, snippetContext string) []format.Sn
 	if private {
 		pipNote = strings.TrimSpace("Create a read token on Settings › Tokens. pip reads the credentials from the address. " + note)
 	}
+	pipConfText := "[global]\nindex-url = " + pipURL + "\n"
+	// pip ignores an http index unless its host is trusted (or is localhost).
+	if u, err := url.Parse(index); err == nil && u.Scheme == "http" {
+		pipConfText += "trusted-host = " + u.Hostname() + "\n"
+	}
 	const pipConf = "~/.config/pip/pip.conf"
-	out = add(out, "pip", "config", pipConf, pipConf, "ini", "[global]\nindex-url = "+pipURL+"\n", pipNote)
+	out = add(out, "pip", "config", pipConf, pipConf, "ini", pipConfText, pipNote)
 
 	uvName := repo.Name
 	out = add(out, "uv", "index", "pyproject.toml", "pyproject.toml", "toml",

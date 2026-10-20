@@ -26,7 +26,8 @@ func pyNames() (string, string) {
 }
 
 // pyIndex is the simple index URL of repo on s for a client container, with user and pass in
-// the URL ("" for none).
+// the URL ("" for none). It is http, so pip needs PIP_TRUSTED_HOST=s.Alias: pip ignores an http
+// index on any host but localhost (SECURE_ORIGINS in pip/_internal/network/session.py).
 func pyIndex(s *Server, repo, user, pass string) string {
 	host := s.Alias + ":8080"
 	if user != "" {

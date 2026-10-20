@@ -63,7 +63,7 @@ telesphorepo publish /work/extra/`+extra+`
 		code, out := RunClient(t, pythonImage, ClientOpts{Cmd: []string{`set -e
 pip install --root-user-action=ignore --no-cache-dir --index-url "$INDEX" ` + strings.Join([]string{uvName, poName, pipName, fileName}, " ") + `
 python -c "import ` + uvMod + `, ` + poMod + `, ` + pipMod + `, ` + fileMod + ` as f; print(` + uvMod + `.MSG, ` + poMod + `.MSG, ` + pipMod + `.MSG, f.MSG)"
-`}, Env: map[string]string{"INDEX": pyIndex(s, repo, "", "")}})
+`}, Env: map[string]string{"INDEX": pyIndex(s, repo, "", ""), "PIP_TRUSTED_HOST": s.Alias}})
 		if code != 0 {
 			t.Fatalf("pip install the published packages: exit %d\n%s", code, out)
 		}
