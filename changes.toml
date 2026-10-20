@@ -31,3 +31,9 @@ version = "dev"
 scope   = "publish/cargo"
 needs   = "cli"
 summary = "telesphorepo publish runs cargo publish for Cargo repositories"
+
+[[change]]
+version = "dev"
+scope   = "publish/npm"
+needs   = "cli"
+summary = "telesphorepo publish publishes npm packages with npm, pnpm, yarn or bun; update the CLI to publish to npm repositories"

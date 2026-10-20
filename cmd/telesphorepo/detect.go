@@ -28,8 +28,10 @@ type row struct {
 	title   string   // the name for the person
 	markers []string // the files that mark a project of the kind; none: the row takes FILE arguments
 	ciTool  string   // the tool of GET /api/repos/{name}/ci; "": the server has no CI file for the row
-	run     func(*job) error
-	preview func(dir string) string // the command that "publish" runs, for "status"
+	// ciToolOf picks the CI tool by the project folder (e.g. by lockfile); nil: ciTool.
+	ciToolOf func(dir string) string
+	run      func(*job) error
+	preview  func(dir string) string // the command that "publish" runs, for "status"
 }
 
 var rows = []row{
@@ -44,6 +46,8 @@ var rows = []row{
 	{format: "debian", kind: "packages", title: "Debian packages", ciTool: "telesphorepo", run: uploadDebian},
 	{format: "cargo", kind: "cargo", title: "Cargo", markers: []string{"Cargo.toml"}, ciTool: "cargo",
 		run: runCargo, preview: func(string) string { return "cargo publish --registry telesphorepo" }},
+	{format: "npm", kind: "npm", title: "npm package", markers: []string{"package.json"}, ciTool: "npm", ciToolOf: npmTool,
+		run: runNPM, preview: npmPreview},
 }
 
 // helperFormat is a format of the helper category: its tool publishes with its own command and

@@ -263,7 +263,7 @@ func TestCargoProxyGroup(t *testing.T) {
 		if code != 0 || !strings.Contains(out, "BUILT") {
 			t.Fatalf("cargo build through the proxy: exit %d\n%s", code, out)
 		}
-		paths := assetPathsOf(t, s, proxy)
+		paths := assetPathsOf(t, s, proxy, "")
 		for _, want := range []string{".index/it/oa/itoa", ".index/cf/g-/cfg-if"} {
 			if !strings.Contains(strings.Join(paths, "\n"), want) {
 				t.Fatalf("the proxy keeps no %s: %v", want, paths)
@@ -294,10 +294,4 @@ func TestCargoProxyGroup(t *testing.T) {
 			t.Fatalf("cargo run through the group: exit %d\n%s", code, out)
 		}
 	})
-}
-
-// assetPathsOf lists every asset path of repo as the admin.
-func assetPathsOf(t *testing.T, s *Server, repo string) []string {
-	t.Helper()
-	return mavenAssetPaths(t, s, repo, "", s.Admin())
 }

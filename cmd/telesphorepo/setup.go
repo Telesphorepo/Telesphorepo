@@ -111,6 +111,9 @@ func setup(ctx context.Context, args []string) error {
 			return err
 		}
 		ciTool = r.ciTool
+		if r.ciToolOf != nil {
+			ciTool = r.ciToolOf(cwd)
+		}
 	}
 	if interactive() {
 		return setupCI(ctx, c, d, res.Repo, ciTool, cwd)

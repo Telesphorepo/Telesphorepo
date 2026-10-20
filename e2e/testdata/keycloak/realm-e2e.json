@@ -47,9 +47,41 @@
           }
         }
       ]
+    },
+    {
+      "clientId": "e2e-ci",
+      "name": "A CI system of the e2e tests",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "e2e-ci-client-secret",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "protocolMappers": [
+        {
+          "name": "audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "telesphorepo-e2e-ci",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
     }
   ],
   "users": [
+    {
+      "username": "service-account-e2e-ci",
+      "enabled": true,
+      "serviceAccountClientId": "e2e-ci"
+    },
     {
       "username": "alice",
       "enabled": true,
