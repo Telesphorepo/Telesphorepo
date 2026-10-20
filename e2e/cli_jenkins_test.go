@@ -70,7 +70,7 @@ func startJenkins(t testing.TB, audience string, env map[string]string) *jenkins
 		testcontainers.WithEnv(all),
 		testcontainers.WithMounts(testcontainers.VolumeMount(M2Volume, "/root/.m2/repository")),
 		network.WithNetwork([]string{alias}, TestNetwork),
-		testcontainers.WithWaitStrategy(wait.ForLog("Jenkins is fully up and running").WithStartupTimeout(5*time.Minute)),
+		testcontainers.WithWaitStrategyAndDeadline(5*time.Minute, wait.ForLog("Jenkins is fully up and running").WithStartupTimeout(5*time.Minute)),
 	)
 	registerCleanup(t, c, "jenkins "+alias)
 	if err != nil {

@@ -133,7 +133,7 @@ func StartServer(t testing.TB, opts ServerOpts) *Server {
 		testcontainers.WithFiles(files...),
 		testcontainers.WithMounts(mounts...),
 		network.WithNetwork(append([]string{opts.Alias}, opts.Aliases...), TestNetwork),
-		testcontainers.WithWaitStrategy(wait.ForHTTP("/healthz").WithPort("8080/tcp").WithTLS(opts.TLS).WithAllowInsecure(opts.TLS).
+		testcontainers.WithWaitStrategyAndDeadline(90*time.Second, wait.ForHTTP("/healthz").WithPort("8080/tcp").WithTLS(opts.TLS).WithAllowInsecure(opts.TLS).
 			WithStartupTimeout(90*time.Second)),
 	)
 	registerCleanup(t, c, "server "+opts.Alias)
@@ -919,7 +919,7 @@ func startSharedSeaweed() {
 		testcontainers.WithExposedPorts("8333/tcp"),
 		testcontainers.WithFiles(testcontainers.ContainerFile{Reader: strings.NewReader(s3conf), ContainerFilePath: "/etc/seaweedfs/s3.json", FileMode: 0o644}),
 		network.WithNetwork([]string{seaweedAlias}, TestNetwork),
-		testcontainers.WithWaitStrategy(wait.ForListeningPort("8333/tcp").WithStartupTimeout(2*time.Minute)),
+		testcontainers.WithWaitStrategyAndDeadline(2*time.Minute, wait.ForListeningPort("8333/tcp").WithStartupTimeout(2*time.Minute)),
 	)
 	seaweed.c = c
 	if err != nil {

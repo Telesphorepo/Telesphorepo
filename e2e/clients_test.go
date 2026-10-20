@@ -286,7 +286,7 @@ func StartDindArgs(t testing.TB, args ...string) *Dind {
 		testcontainers.WithCmd(args...),
 		testcontainers.WithHostConfigModifier(func(hc *container.HostConfig) { hc.Privileged = true }),
 		network.WithNetwork([]string{alias}, TestNetwork),
-		testcontainers.WithWaitStrategy(wait.ForExec([]string{"docker", "info"}).WithStartupTimeout(3*time.Minute)),
+		testcontainers.WithWaitStrategyAndDeadline(3*time.Minute, wait.ForExec([]string{"docker", "info"}).WithStartupTimeout(3*time.Minute)),
 	)
 	registerCleanup(t, c, "dind "+alias)
 	if err != nil {

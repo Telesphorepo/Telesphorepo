@@ -103,7 +103,7 @@ func (kc *Keycloak) Start(t testing.TB, redirectURI string) {
 			Reader: strings.NewReader(realmJSON), ContainerFilePath: "/opt/keycloak/data/import/realm-e2e.json", FileMode: 0o644,
 		}),
 		network.WithNetwork([]string{kc.Alias}, TestNetwork),
-		testcontainers.WithWaitStrategy(wait.ForHTTP("/realms/"+kcRealm+"/.well-known/openid-configuration").
+		testcontainers.WithWaitStrategyAndDeadline(3*time.Minute, wait.ForHTTP("/realms/"+kcRealm+"/.well-known/openid-configuration").
 			WithPort(portSpec).WithStartupTimeout(3*time.Minute)),
 	)
 	registerCleanup(t, c, "keycloak "+kc.Alias)
