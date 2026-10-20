@@ -137,9 +137,15 @@ func (h *Handler) importPlan(ctx context.Context, src format.SourceRepo, target 
 	return plan, nil
 }
 
-// keyQuestions are the questions about the signing key of a new hosted target.
+// keyQuestions are the questions about the signing key of a new hosted target. When Nexus gives
+// the key pair, the answer starts at that key, so apt clients that trust the Nexus key keep
+// trusting the repository after the switch-over.
 func (h *Handler) keyQuestions(inSource, encrypted bool) []format.Question {
-	key := format.Question{Key: "signing_key", Label: "Signing key", Type: "choice", Required: true, Default: signing.DefaultKey,
+	def := signing.DefaultKey
+	if inSource {
+		def = keySource
+	}
+	key := format.Question{Key: "signing_key", Label: "Signing key", Type: "choice", Required: true, Default: def,
 		Help: "The key that signs the indexes of the new repository. apt clients trust the key they have."}
 	for _, k := range h.keys.List() {
 		key.Options = append(key.Options, format.Option{Value: k.Name, Label: "Signing key " + k.Name})
@@ -151,7 +157,8 @@ func (h *Handler) keyQuestions(inSource, encrypted bool) []format.Question {
 	out := []format.Question{key}
 	if encrypted {
 		out = append(out, format.Question{Key: "signing_passphrase", Label: "Passphrase of the Nexus key", Type: "secret",
-			Help: "Nexus gives the key pair but never its passphrase. Needed when the key of the Nexus repository signs."})
+			Help:     "Nexus gives the key pair but never its passphrase.",
+			ShowWhen: &format.ShowWhen{Key: "signing_key", Value: keySource}})
 	}
 	return out
 }
@@ -159,7 +166,15 @@ func (h *Handler) keyQuestions(inSource, encrypted bool) []format.Question {
 // planKey returns the signing key of a new hosted target for the answer to signing_key, and the
 // work that creates it before the save (nil when the key exists).
 func (h *Handler) planKey(target string, answers map[string]string, keypair string) (string, func(context.Context) error, error) {
-	switch choice := answers["signing_key"]; choice {
+	choice := answers["signing_key"]
+	if choice == "" && keypair != "" {
+		choice = keySource // the default of the question
+	}
+	// A passphrase opens only the Nexus key: with another key it would be dropped without a word.
+	if answers["signing_passphrase"] != "" && choice != keySource {
+		return "", nil, fmt.Errorf("the passphrase opens the key of the Nexus repository, but %s signs with %s: choose the key of the Nexus repository, or leave the passphrase empty", target, choice)
+	}
+	switch choice {
 	case keyNew:
 		name := keyName(target)
 		if h.keys.Exists(name) {

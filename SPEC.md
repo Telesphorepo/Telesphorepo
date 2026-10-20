@@ -2030,8 +2030,13 @@ is unreachable.
   - debian (`apt`): `facts` `{distribution, key_in_source, key_encrypted}`. A new target gets the
     default config with the Nexus `apt.distribution`; an existing hosted target without a
     distribution gets it (a repo update). A new hosted target asks `signing_key` (a choice: an
-    existing key, default `default`; `new`, a new key named after the repo; `source`, the key pair
-    of the Nexus repo) and, when the Nexus key is encrypted, `signing_passphrase` (a secret).
+    existing key; `new`, a new key named after the repo; `source`, the key pair of the Nexus
+    repo). The default, and the answer when the save names none, is `source` when Nexus gives
+    the key pair, so apt clients that trust the Nexus key keep trusting the repo, else `default`.
+    When the Nexus key is encrypted it also asks `signing_passphrase` (a secret, `show_when`
+    `signing_key` = `source`: a question's `show_when {key, value}` asks it only while that other
+    answer holds, and the UI neither shows nor sends it otherwise). A passphrase with another
+    answer than `source` is 400, so it is never dropped without a word.
     `source` opens the key pair with the passphrase (400 when it does not) and `Prepare` imports it
     as `nexus-<target>` (a key of that name with the same fingerprint is used again; another one
     is 400). The answer becomes the repo field `signing_key`.

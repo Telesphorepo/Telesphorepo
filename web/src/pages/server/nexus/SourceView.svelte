@@ -9,7 +9,7 @@
 <script lang="ts">
   import { untrack } from "svelte";
   import { toast } from "svelte-sonner";
-  import { api, errorMessage, type NexusMapping, type NexusSourceDetail, type NexusSourceRepo, type NexusSync } from "$lib/api";
+  import { api, errorMessage, type NexusMapping, type NexusSourceDetail, type NexusSourceRepo, type NexusSync, type ImportQuestion } from "$lib/api";
   import { Keyset, Resource, type TableSource } from "$lib/load.svelte";
   import { Draft } from "$lib/unsaved.svelte";
   import { href, navigate, repoSettingsPath, router } from "$lib/router.svelte";
@@ -252,13 +252,19 @@
     return "";
   });
 
+  // A question with show_when is asked only while the other question has that answer.
+  function asked(q: ImportQuestion, answers: Record<string, string>): boolean {
+    return !q.show_when || answers[q.show_when.key] === q.show_when.value;
+  }
+
   const saveLabel = $derived(added.length > 0 ? `Copy ${count(pickedRows.length, "repository", "repositories")}` : "Save");
 
   function mapping(r: NexusSourceRepo): NexusMapping {
     const o = opts[r.name];
     const create = !r.target;
     const m: NexusMapping = { source_repo: r.name, target: r.target || o.target.trim(), create, anonymous_read: o.anon };
-    if (create && r.questions.length) m.answers = { ...o.answers };
+    // A question that is not asked now (show_when) sends no answer, so a hidden field cannot change the save.
+    if (create && r.questions.length) m.answers = Object.fromEntries(r.questions.filter((q) => asked(q, o.answers) && o.answers[q.key] !== undefined).map((q) => [q.key, o.answers[q.key]]));
     if (create && r.type === "proxy" && r.remote_username && o.pw) {
       m.remote_username = o.user.trim();
       m.remote_password = o.pw;
@@ -609,7 +615,7 @@
 
     {#if editable}
       {@const fresh = pickedRows.filter((r) => isNew(r))}
-      {@const secrets = fresh.flatMap((r) => r.questions.filter((q) => q.type === "secret").map((q) => ({ r, q })))}
+      {@const secrets = fresh.flatMap((r) => r.questions.filter((q) => q.type === "secret" && asked(q, opts[r.name].answers)).map((q) => ({ r, q })))}
       {@const notes = fresh.filter((r) => typeof r.facts.note === "string")}
       {@const remotes = fresh.filter((r) => r.type === "proxy" && r.remote_username)}
       {#if secrets.length || remotes.length || notes.length}

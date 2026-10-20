@@ -489,14 +489,32 @@ type nexusSourceRepo struct {
 	Members        []string `json:"members"`
 	MembersKnown   bool     `json:"members_known"`
 	// Questions and Facts come from the planning hook of the target format.
-	Questions []struct {
-		Key     string `json:"key"`
-		Type    string `json:"type"`
-		Options []struct {
-			Value string `json:"value"`
-		} `json:"options"`
-	} `json:"questions"`
-	Facts map[string]any `json:"facts"`
+	Questions []nexusQuestion `json:"questions"`
+	Facts     map[string]any  `json:"facts"`
+}
+
+// nexusQuestion is one question of a target format's plan.
+type nexusQuestion struct {
+	Key     string `json:"key"`
+	Type    string `json:"type"`
+	Default string `json:"default"`
+	Options []struct {
+		Value string `json:"value"`
+	} `json:"options"`
+	ShowWhen *struct {
+		Key   string `json:"key"`
+		Value string `json:"value"`
+	} `json:"show_when"`
+}
+
+// question returns the question key of r, or a zero question.
+func (r nexusSourceRepo) question(key string) nexusQuestion {
+	for _, q := range r.Questions {
+		if q.Key == key {
+			return q
+		}
+	}
+	return nexusQuestion{}
 }
 
 // hasQuestion reports whether r asks question key of type typ with every option of options.
@@ -987,7 +1005,8 @@ func TestNexus(t *testing.T) {
 			t.Fatalf("offline source repo: %+v, want offline with the reason", r)
 		}
 		if r := got.repo(t, rs.apt); r.Facts["key_in_source"] != true || r.Facts["key_encrypted"] != true || r.Facts["distribution"] != nexusAptDist ||
-			!r.hasQuestion("signing_key", "choice", "default", "new", "source") || !r.hasQuestion("signing_passphrase", "secret") {
+			!r.hasQuestion("signing_key", "choice", "default", "new", "source") || !r.hasQuestion("signing_passphrase", "secret") ||
+			r.question("signing_key").Default != "source" || r.question("signing_passphrase").ShowWhen == nil {
 			t.Fatalf("apt source repo: %+v, want the facts of the Nexus key pair with a passphrase and the key questions", r)
 		}
 		if r := got.repo(t, rs.maven); len(r.Questions) != 0 {
@@ -1013,6 +1032,13 @@ func TestNexus(t *testing.T) {
 			{"source_repo": rs.proxy, "target": targets[rs.proxy], "create": true, "anonymous_read": false,
 				"remote_username": nexusRemoteUser, "remote_password": nexusRemotePass},
 			{"source_repo": rs.group, "target": targets[rs.group], "create": true, "anonymous_read": false},
+		}
+		// A passphrase opens only the Nexus key: with another key the save refuses it and creates nothing.
+		if st, b := s.API(t, http.MethodPut, nexusSourcePath(src.ID)+"/repos", map[string]any{"repos": []map[string]any{
+			{"source_repo": rs.apt, "target": targets[rs.apt], "create": true, "anonymous_read": false,
+				"answers": map[string]string{"signing_key": "default", "signing_passphrase": rs.aptPass}},
+		}}, s.Admin()); st != http.StatusBadRequest || !strings.Contains(string(b), "choose the key of the Nexus repository") {
+			t.Fatalf("a save with the passphrase and the key default: status %d, want 400 that names the choice: %s", st, b)
 		}
 		first := nexusSaveAndWait(t, s, src.ID, maps)
 		got = nexusGetSource(t, s, src.ID)

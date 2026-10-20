@@ -814,6 +814,8 @@ export type ImportQuestion = {
   options?: { value: string; label: string }[];
   required: boolean;
   default?: string;
+  /** Asked only while the answer to the question `key` is `value`; otherwise not shown and not sent. */
+  show_when?: { key: string; value: string };
 };
 export type NexusSourceDetail = NexusSource & {
   /** Supported first, then by name. */

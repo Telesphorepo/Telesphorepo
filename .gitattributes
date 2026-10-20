@@ -3,3 +3,6 @@
 
 # The schema fingerprint and the generated queries must not depend on the checkout's line ends.
 *.sql text eol=lf
+
+# Podman reads .dockerignore with its line ends: a CR ends every pattern, and then none matches.
+.dockerignore text eol=lf

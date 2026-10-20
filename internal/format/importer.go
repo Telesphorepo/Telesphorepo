@@ -75,6 +75,15 @@ type Question struct {
 	Options  []Option `json:"options,omitempty"`
 	Required bool     `json:"required"`
 	Default  string   `json:"default,omitempty"`
+	// ShowWhen asks the question only while another question has a given answer; the UI neither
+	// shows nor sends it otherwise. nil: always asked.
+	ShowWhen *ShowWhen `json:"show_when,omitempty"`
+}
+
+// ShowWhen names the question (Key) and the answer (Value) that a Question depends on.
+type ShowWhen struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
 }
 
 // Option is one choice of a Question.

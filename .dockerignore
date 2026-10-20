@@ -24,3 +24,4 @@ e2e/**/*.log
 *.db-wal
 *.db-shm
 data
+.claude
