@@ -229,7 +229,7 @@ npm unpublish ` + tools + `@1.0.0 --force && echo UNPUBLISHED`},
 		var install []ContainerFile
 		for _, k := range []struct {
 			dir, registry, token string
-			deps              map[string]string
+			deps                 map[string]string
 		}{{"proxy", reg(proxy), "", pub}, {"group", reg(group), read, mixed}} {
 			install = append(install,
 				npmConsumer("/work/npm-"+k.dir, k.deps), ContainerFile{Path: "/work/npm-" + k.dir + "/.npmrc", Content: npmrc(k.registry, k.token)},
