@@ -106,9 +106,14 @@ type Class struct {
 	// Changing files can change at the remote (maven-metadata.xml, InRelease): they are checked
 	// again after the repo's metadata_ttl. Other files are fetched once.
 	Changing bool
-	// Remote is the path of the file at the remote: relative to the remote URL, or from the root
-	// of the remote's host when it starts with "/". "" is the local path.
+	// Remote is the path of the file at the remote: relative to the remote URL (to Files when it
+	// is set), or from the root of that URL's host when it starts with "/". "" is the local path.
 	Remote string
+	// Files is an absolute http(s) base URL that the file comes from instead of the remote URL,
+	// e.g. the host a registry serves its package files from. A format takes it only from the
+	// repo config that an admin wrote, never from a remote document. The remote's credentials go
+	// with the request only when Files has the scheme and host of the remote URL.
+	Files string
 	// Header holds extra headers of the remote request, e.g. Accept.
 	Header http.Header
 	// KeepType stores the Content-Type of the remote's answer as the content type of the file.

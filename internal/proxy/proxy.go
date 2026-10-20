@@ -94,15 +94,60 @@ func remoteURL(base, p string) string {
 	return base + strings.Join(segs, "/") + query
 }
 
-// newRequest builds a request of p at the remote of px with the extra headers. basic sends the
-// remote's credentials as HTTP Basic.
-func newRequest(ctx context.Context, method string, px *repos.Proxy, p string, extra http.Header, basic bool) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, method, remoteURL(px.RemoteURL, p), nil)
+// target is where a request goes: a base URL that ends with "/", and whether the remote's
+// credentials may go there.
+type target struct {
+	base  string
+	creds bool
+}
+
+// remoteOf is the remote URL of px, which gets the remote's credentials.
+func remoteOf(px *repos.Proxy) target { return target{base: px.RemoteURL, creds: true} }
+
+// FilesURL checks a base URL that a format puts in assets.Class.Files (e.g. a field of its repo
+// config): an absolute http or https URL with a host and no user, query or fragment. It returns
+// it with a trailing "/".
+func FilesURL(raw string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil ||
+		u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
+		// raw is not in the message: it may hold a password.
+		return "", errors.New("the address must be http or https, with a host and without a user, query or fragment")
+	}
+	if !strings.HasSuffix(u.Path, "/") {
+		u.Path += "/"
+		if u.RawPath != "" {
+			u.RawPath += "/"
+		}
+	}
+	return u.String(), nil
+}
+
+// targetOf is where a fetch of class from px goes: class.Files when it is set, else the remote
+// URL. The credentials go to Files only when it has the scheme and host of the remote URL.
+func targetOf(px *repos.Proxy, class assets.Class) (target, error) {
+	if class.Files == "" {
+		return remoteOf(px), nil
+	}
+	base, err := FilesURL(class.Files)
+	if err != nil {
+		return target{}, fmt.Errorf("the files address of the repo is wrong: %w", err)
+	}
+	u, _ := url.Parse(base)
+	rem, err := url.Parse(px.RemoteURL)
+	same := err == nil && strings.EqualFold(rem.Scheme, u.Scheme) && strings.EqualFold(rem.Host, u.Host)
+	return target{base: base, creds: same}, nil
+}
+
+// newRequest builds a request of p at to with the extra headers. basic sends the remote's
+// credentials as HTTP Basic when to may get them.
+func newRequest(ctx context.Context, method string, px *repos.Proxy, to target, p string, extra http.Header, basic bool) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, remoteURL(to.base, p), nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "Telesphorepo proxy")
-	if basic && px.HasCredentials() {
+	if basic && to.creds && px.HasCredentials() {
 		req.SetBasicAuth(px.Username, px.Password)
 	}
 	for k, vs := range extra {
@@ -138,7 +183,7 @@ func reason(err error) string {
 func Check(ctx context.Context, px *repos.Proxy, probe string, auth RemoteAuth) error {
 	ctx, cancel := context.WithTimeout(ctx, firstByteTimeout+5*time.Second)
 	defer cancel()
-	resp, err := send(ctx, http.MethodGet, px, probe, nil, auth)
+	resp, err := send(ctx, http.MethodGet, px, remoteOf(px), probe, nil, auth)
 	if errors.Is(err, ErrRefused) || errors.Is(err, ErrNeedsCredentials) {
 		return err
 	}
@@ -218,6 +263,10 @@ func (s *Service) fetch(ctx context.Context, repo *repos.Repo, px *repos.Proxy, 
 	if remote == "" {
 		remote = string(p)
 	}
+	to, err := targetOf(px, class)
+	if err != nil {
+		return s.failed(ctx, repo, p, cached, err.Error())
+	}
 	auth := s.assets.Hooks(repo.Format).RemoteAuth
 	now := time.Now()
 	// missing answers a remote that does not have p: a 404 or 410, or a registry that denies the
@@ -235,7 +284,7 @@ func (s *Service) fetch(ctx context.Context, repo *repos.Repo, px *repos.Proxy, 
 		return nil, assets.ErrRemoteMissing
 	}
 	if cached != nil && class.Unchanged != nil {
-		resp, err := send(ctx, http.MethodHead, px, remote, class.Header, auth)
+		resp, err := send(ctx, http.MethodHead, px, to, remote, class.Header, auth)
 		if errors.Is(err, ErrDenied) {
 			return missing()
 		}
@@ -261,7 +310,7 @@ func (s *Service) fetch(ctx context.Context, repo *repos.Repo, px *repos.Proxy, 
 		}
 		hdr.Set("If-Modified-Since", cached.UpdatedAt.Format(http.TimeFormat))
 	}
-	resp, err := send(ctx, http.MethodGet, px, remote, hdr, auth)
+	resp, err := send(ctx, http.MethodGet, px, to, remote, hdr, auth)
 	if errors.Is(err, ErrDenied) {
 		return missing()
 	}
@@ -307,15 +356,19 @@ func Send(ctx context.Context, method string, px *repos.Proxy, p string, query u
 	if len(query) > 0 {
 		p += "?" + query.Encode()
 	}
-	return send(ctx, method, px, p, header, auth)
+	return send(ctx, method, px, remoteOf(px), p, header, auth)
 }
 
-// send sends a request of p to the remote of px. Without auth, the remote's credentials go as
-// HTTP Basic. With auth, the request goes without them; a 401 with a challenge goes to auth once
-// (e.g. a registry's token exchange), and the request is sent again with the headers it returns.
-// ErrDenied: the remote refused that second request after a Bearer challenge.
-func send(ctx context.Context, method string, px *repos.Proxy, p string, extra http.Header, auth RemoteAuth) (*http.Response, error) {
-	req, err := newRequest(ctx, method, px, p, extra, auth == nil)
+// send sends a request of p to to, for the remote of px. Without auth, the remote's credentials
+// go as HTTP Basic. With auth, the request goes without them; a 401 with a challenge goes to auth
+// once (e.g. a registry's token exchange), and the request is sent again with the headers it
+// returns. A target that may not get the credentials gets neither. ErrDenied: the remote refused
+// that second request after a Bearer challenge.
+func send(ctx context.Context, method string, px *repos.Proxy, to target, p string, extra http.Header, auth RemoteAuth) (*http.Response, error) {
+	if !to.creds {
+		auth = nil
+	}
+	req, err := newRequest(ctx, method, px, to, p, extra, auth == nil)
 	if err != nil {
 		return nil, err
 	}
@@ -337,7 +390,7 @@ func send(ctx context.Context, method string, px *repos.Proxy, p string, extra h
 	for k, vs := range h {
 		retry[k] = vs
 	}
-	if req, err = newRequest(ctx, method, px, p, retry, false); err != nil {
+	if req, err = newRequest(ctx, method, px, to, p, retry, false); err != nil {
 		return nil, err
 	}
 	if resp, err = client.Do(req); err != nil {

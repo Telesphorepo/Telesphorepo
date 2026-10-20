@@ -131,6 +131,39 @@ func (rd *Reader) Resolve(ctx context.Context, r *http.Request, p *auth.Principa
 	return nil, nil
 }
 
+// Owner returns the member of group that owns a package name for p, who reads through r: the
+// first member in read order that p may read and for which has reports the name. A format whose
+// group renders documents from its members (npm, PyPI, Cargo, NuGet) serves every version of the
+// name from that member alone, so a later member cannot shadow it. A member whose has fails is
+// logged and skipped. nil when no member has the name; ErrRemoteFailed when, in addition, a
+// member failed with it (a proxy whose remote is down with nothing cached).
+func (rd *Reader) Owner(ctx context.Context, r *http.Request, p *auth.Principal, group *repos.Repo,
+	has func(ctx context.Context, member *repos.Repo) (bool, error)) (*repos.Repo, error) {
+	members, err := rd.access.GroupMembers(ctx, r, p, group)
+	if err != nil {
+		return nil, err
+	}
+	remoteFailed := false
+	for _, m := range members {
+		ok, err := has(ctx, m)
+		switch {
+		case ctx.Err() != nil:
+			return nil, ctx.Err() // the client went away: no member failed
+		case err != nil:
+			if errors.Is(err, ErrRemoteFailed) {
+				remoteFailed = true
+			}
+			rd.log.Warn("group: member skipped", "group", group.Name, "member", m.Name, "err", err)
+		case ok:
+			return m, nil
+		}
+	}
+	if remoteFailed {
+		return nil, ErrRemoteFailed
+	}
+	return nil, nil
+}
+
 // Stored returns the stored asset of path in repo for p, who reads through r, and never
 // contacts a remote: a hosted file, a proxy's cached file, or in a group the first member in read
 // order that p may read and that stores the file. nil when there is none.

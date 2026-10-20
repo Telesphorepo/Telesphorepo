@@ -66,7 +66,8 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/clidist` | The CLI archives that the server embeds (`go:embed all:dist`) and serves at `/cli/`: `Targets`, `Archive`, `FS`, `Sums`. `go tool task build`, `dev`, `cli` and `release` write them |
 | `internal/repos` | Repos, their kind, their active operation (`Repo.Op`) and per-format JSON config. `Create` and `Update` (a `Patch`) are the only changes of a repo record: each checks the whole new state first, then saves it in one transaction with the format's `OnRepoChange` and one audit event. A `Validator` (the format registry) checks the config and a `KindCheck` the kind. Modules drop what they keep about a deleted repo with `OnDelete`. A module adds repo values that it keeps in its own tables as fields (`repos.Field`, `AddField`): `Create` and `Update` validate and save them in the same transaction, and `Repo.Fields` holds them. Keeps the group members and the proxy remotes in memory (see **Group and proxy repositories**) |
 | `internal/proxy` | Fetches the files of proxy repos from their remotes (the `assets.Fetcher` of the read path), stores them through `Commit` with source `proxy`, answers a remote's 401 challenge through the format's `RemoteAuth`, and remembers remote 404s; `proxy.Answer` is the answer of the registry token protocol (also for the Nexus client), `proxy.Send` a request to a remote as a fetch sends it (e.g. a remote tags list) |
-| `internal/format` | The format contract: `Spec` (every optional capability is a field that is nil when the format lacks it), the `Registry` (`All`, `Get`, `Hooks`, `RebuildRun`, `OnRepoChange`, `ValidateConfig`, `SupportsKind`, `Importer`), `Kit` and `Standard` (the default routes), and `Importer.Run` (the shared import of one source file) |
+| `internal/format` | The format contract: `Spec` (every optional capability is a field that is nil when the format lacks it), the `Registry` (`All`, `Get`, `Hooks`, `RebuildRun`, `OnRepoChange`, `ValidateConfig`, `SupportsKind`, `Importer`), `Kit` and `Standard` (the default routes), `Importer.Run` (the shared import of one source file), and the rendered documents: `WriteDocument` (a metadata document built per request, with a strong SHA-256 `ETag`, 304 on `If-None-Match`, `Vary`) and `DocumentCache` (an LRU of rendered bodies, bounded in entries and bytes, keyed by `DocumentKey` of what the body depends on); absolute URLs in a document start at `route.API.BaseURL` |
+| `internal/version` | The version schemes of the package formats, with no outside module: `semver.go` (SemVer 2.0 for npm and Cargo; `CleanSemVer` is npm's loose clean of a package.json version), `pep440.go` (PEP 440: normal form and order), `nuget.go` (NuGet: normal form, order, `IsSemVer2`). Each version has a `SortKey`, a string whose byte order is the scheme's order, for the `sort_key` columns that keyset paging reads |
 | `internal/maven` | Module and format `maven`: the standard routes, release immutability (`Admit`), the content types, the merge of `maven-metadata.xml` in a group, the metadata after a delete (`AfterRemove`), web UI uploads with checksums and metadata |
 | `internal/debian` | Module and format `debian`: `.deb` upload/parse through `Commit`, the package rows (`OnCommitted`, `OnRemoved`), the index rebuild (`Rebuild`), `/debian/{repo}/key.asc`, the plan of a Nexus apt import (distribution and signing key). Owns its tables, queries (`queries/`, `dbq/`) and architecture config; binds a signing key per repo (`SigningKey`) |
 | `internal/raw` | Module and format `raw`: plain files at `/raw/{repo}/{path...}` (the standard routes) with an `overwrite` policy (`Admit`) |
@@ -2128,6 +2129,12 @@ are dropped from memory, and the server logs the repo ids.
   `.sha256` and `.sha512` are computed from the merged bytes. With one such member, that member's
   own files serve (a checksum file it lacks is computed from its file). A version-level file (under
   a `-SNAPSHOT` folder) comes from the first member that has it.
+- A format that renders its metadata documents from the members of a group picks one member per
+  package name with `assets.Reader.Owner`: the first member in read order that the reader can
+  read and that has the name (the format's own check). That member serves every version of the
+  name, so a later member cannot shadow it. A member whose check fails is skipped with a warning
+  in the log; `Owner` answers `ErrRemoteFailed` when no member has the name and a proxy member's
+  remote failed.
 
 **Proxies** (`internal/proxy`).
 
@@ -2140,7 +2147,10 @@ are dropped from memory, and the server logs the repo ids.
   password"). `force: true` skips the check (`proxy.Check`).
 - `format.Spec.Classify(remote, path)` sorts a path into an `assets.Class`: `Changing` (checked
   again after `metadata_ttl`), `Remote` (the path at the remote: relative to `remote_url`, or from
-  the root of its host when it starts with `/`; `""` is the local path), `Header` (extra request
+  the root of its host when it starts with `/`; `""` is the local path), `Files` (an absolute
+  http or https base URL that `Remote` is relative to instead of `remote_url`, for a registry
+  that serves its package files from another host; a format takes it only from its repo config,
+  checked with `proxy.FilesURL`, never from a remote document), `Header` (extra request
   headers, e.g. `Accept`), `KeepType` (the remote's `Content-Type` becomes the file's content type)
   and `Unchanged` (nil: a conditional GET; set: a HEAD with the same headers, and a 200 answer for
   which `Unchanged(head, cached)` is true only sets `checked_at`, else a GET). Maven
@@ -2175,7 +2185,10 @@ are dropped from memory, and the server logs the repo ids.
   remote repository did not answer." `last_error` and `last_error_at` record it; a success sets
   `last_ok_at`. A fetch continues when the client goes away, for at most 30 minutes.
 - The fetch follows at most 5 redirects. The credentials (HTTP Basic or a token) go only to the
-  remote's host: a redirect to another host drops them. No log line holds them.
+  remote's host: a redirect to another host drops them, and a fetch from a `Files` base with
+  another scheme or host sends none and does not call `RemoteAuth`. The not-found memory, the
+  conditional GET and the stale copy on a failure work the same for a `Files` base. No log line
+  holds the credentials.
 - A Debian proxy serves the remote's files unchanged: no indexer, no signature of its own.
   Clients keep the remote archive's key. Its apt snippet has no key step and no `signed-by`.
 - Deleting files of a proxy (Files tab, admin) works; the next request fetches them again.
