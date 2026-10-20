@@ -377,7 +377,13 @@ one character except `/`, `**/` any number of folders; matching is case-sensitiv
 (`format.Glob`, and `lib/glob.ts` in the UI).
 
 **Snippets and CI files.** A `format.Snippet` is `{id, tool, purpose, context, via, file, title,
-lang, code, note}`. A format's `Usage` gives the use snippets and the publish snippets for a
+lang, code, diff, note}`. `diff` is set on a GitHub Actions workflow and a Jenkinsfile: what a
+project's existing file needs, as diff lines, each after its mark (`+` added, a space for
+context). The workflow change adds `permissions` (`id-token: write`, `contents: read`), the
+install step and the publish step, with the trigger, a job with the checkout and the toolchain,
+and the build as context; the Jenkinsfile change adds the publish stage after a Build stage of
+context (`ci.GitHubWorkflowDiff`, `ci.JenkinsfileDiff`). A build that belongs to the publish
+(`PublishSteps.BuildAdded`: the Docker build, whose tag names the registry) is added too. A format's `Usage` gives the use snippets and the publish snippets for a
 computer (the Telesphorepo CLI, `format.CLISnippet`) and by hand; the core adds the CI files.
 `internal/ci/workflow.go` holds the one GitHub Actions builder (`GitHubWorkflow`), the one
 Jenkinsfile builder (`Jenkinsfile`), the Jenkins freestyle builder (`JenkinsFreestyle`) and
@@ -881,7 +887,7 @@ transaction.
 | `GET /api/search?q=&repo=&after=&limit=` | any/anon | FTS5 trigram, `q` ≥ 3 chars, only repos where the caller holds `repo.download` |
 | `GET /api/repos/{name}/status` | `repo.download` | `{pending}`: the units of the repo that wait for a rebuild of its indexes (`rebuilds`), the ones being rebuilt included; 0 for a format without a `Rebuild` |
 | `GET /api/repos/{name}/usage` | `repo.download` | `{base_url, tools: [{id, label}], snippets: [Snippet]}`: the format's `Usage` (use, a computer and by hand), then for a hosted repo the CI file of each of the format's tools for GitHub Actions and Jenkins (default trigger). A proxy or a group gets no publish snippets. `Snippet` = `{id, tool, purpose: "use"\|"publish", context: "repo"\|"artifact", via?: "computer"\|"ci"\|"hand", file?, title, lang, code, note?}`. `tools` names each tool of the snippets with its label (the format's `SnippetTools`, the CI provider titles). `base_url` is the `base_url` setting, else the request scheme and host |
-| `GET /api/repos/{name}/ci?system=github-actions\|jenkins&tool=&branches=&tags=` | `repo.download` | The CI file that publishes to a hosted repo (one `Snippet`), built by `internal/ci/workflow.go` from the `PublishSteps` of the tool (a tool of the format; default the first). `branches` and `tags` are comma-separated names or globs (letters, digits and `. _ / * -`, at most 20 each): the GitHub Actions trigger (default: a push to `main`), and a `when { anyOf { branch; tag } }` on the Jenkins publish stage (none by default). 400 for another system, an unknown tool, a bad pattern, or a proxy or a group |
+| `GET /api/repos/{name}/ci?system=github-actions\|jenkins&tool=&branches=&tags=` | `repo.download` | The CI file that publishes to a hosted repo (one `Snippet`; the whole file in `code`, and for `github-actions` and `jenkins` the change to an existing file in `diff`), built by `internal/ci/workflow.go` from the `PublishSteps` of the tool (a tool of the format; default the first). `branches` and `tags` are comma-separated names or globs (letters, digits and `. _ / * -`, at most 20 each): the GitHub Actions trigger (default: a push to `main`), and a `when { anyOf { branch; tag } }` on the Jenkins publish stage (none by default). 400 for another system, an unknown tool, a bad pattern, or a proxy or a group |
 | `GET /api/repos/{name}/versions?path=&after=&limit=` | `repo.download` | The versions of the artifact folder `path`, newest first (`format.Spec.Versions`): `{artifact: {path, title, kind}\|null, items: [{version, kind, latest_build, latest_label, builds_count, published_at, build}], next}`. `artifact` is null for any other folder. `latest_label` is the format's name of the latest build for people (Maven: "Build 3"); the UI shows `latest_build` when it is absent. See **Versions and builds** |
 | `GET /api/repos/{name}/builds?path=&version=&after=&limit=` | `repo.download` | The builds of one version of the artifact folder `path`, newest first: `{artifact, version, items: [{id, label, files: [{name, path, size, sha256, classifier, extension}], published_at, build}], next}`. `label` is the format's name of the build for people (Maven: "Build 3", "Build without a timestamp"); the UI shows `id` when it is absent. `artifact` and `version` are null when the artifact has no such version. 400 without `version` |
 | `GET /api/repos/{name}/snippets?path=&version=&version_mode=pinned\|latest` | `repo.download` | The snippets that use one artifact (`format.Spec.ArtifactUsage`): `{base_url, artifact, version, version_mode, fixed_version, tools, snippets}`. `path` is an artifact folder (with an optional `version`), a version folder or a file |
@@ -3218,7 +3224,11 @@ page are in `web/src/README.md`.
     Jenkinsfile that binds the credential `telesphorepo-id-token` to `OIDC_TOKEN` only in the
     publish stage, because Jenkins makes the token when `withCredentials` starts and the server
     takes a token for 10 minutes only) and By hand. The tabs are the tools of the snippets, with
-    the labels of the `/usage` answer. The notice of a paused repo (a Nexus mirror) shows once,
+    the labels of the `/usage` answer. A CI file opens on its `diff`, the change to the reader's
+    own workflow or Jenkinsfile (**Add to a workflow**), with **New workflow** (the whole file)
+    beside it; the choice is remembered in the browser. Snippets of one tab with the same file,
+    code, change and note show once, titled with every tool (`.github/workflows/publish.yml
+    (Gradle and Maven)`). The notice of a paused repo (a Nexus mirror) shows once,
     above the tabs.
   - `/#/setup/<code>`: the page of a setup link. It says to run the line in a terminal in the
     project folder and shows the line for the OS of the browser. It makes no API call, and the
@@ -3373,9 +3383,16 @@ page are in `web/src/README.md`.
   `<address>/job/team/job/app/`), with optional pasted keys. **Edit the token conditions** shows
   the claims, the audience and the keys instead; another CI system always uses them. **Use the
   simple form** reads the claims back, and asks first when they say more than the answers can.
-  The workflow or Jenkinsfile comes from `GET /api/repos/{name}/ci` for the chosen repository and
-  build tool, with the branches and tags of the pipeline as the trigger, and the workflow file of
-  the pipeline as its name. `?repo=<name>` starts with that repository chosen; `?back=<path>`
+  The GitHub repository and workflow file fields take what people copy from GitHub: owner/name,
+  the address of the repository (with or without `.git`, or the clone address), of a file in it
+  (`/blob/`, `raw.githubusercontent.com`) or of the workflow's Actions page
+  (`/actions/workflows/<file>`); on a paste or when the field is left, the field shows what the
+  address names, and a file's address also fills the repository. The Jenkins address and the
+  jobs take a job's address (`<address>/job/team/job/app/` becomes `team/app`). The placeholders
+  are full addresses. The workflow or Jenkinsfile comes from `GET /api/repos/{name}/ci` for the
+  chosen repository and each build tool of its format, with the branches and tags of the
+  pipeline as the trigger, and the workflow file of the pipeline as its name; tools that give the
+  same file show as one, and the build tool choice shows only when the files differ. `?repo=<name>` starts with that repository chosen; `?back=<path>`
   (only a `/settings/` or `/repo/` path) is where Create and Cancel return. When the `base_url`
   setting is empty and the pipeline has no audience of its own, the page warns that CI jobs
   cannot publish and links to General.

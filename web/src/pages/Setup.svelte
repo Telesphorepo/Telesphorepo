@@ -10,7 +10,7 @@
   import FormPage from "$lib/components/FormPage.svelte";
   import Step from "$lib/components/Step.svelte";
   import CodeSnippet from "$lib/components/CodeSnippet.svelte";
-  import Segmented from "./repo/snippets/Segmented.svelte";
+  import Segmented from "$lib/components/Segmented.svelte";
 
   let { params }: PageProps = $props();
 

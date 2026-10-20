@@ -1,7 +1,9 @@
 <!--
   Snippets with one tab per tool: Gradle (Kotlin) · Gradle (Groovy) · Maven, GitHub Actions ·
-  Jenkins, apt, curl. Each tab holds that tool's snippets in the server's order, each a CodeBlock
-  with its note under it. `tools` are the labels of the answer the snippets came from. The chosen
+  Jenkins, apt, curl. Each tab holds that tool's snippets in the server's order, each a
+  SnippetBlock with its note under it. Snippets of a tab that are the same file show once, with
+  every title: the GitHub Actions workflow of Gradle and of Maven is one
+  ".github/workflows/publish.yml (Gradle and Maven)". `tools` are the labels of the answer the snippets came from. The chosen
   tool is remembered in this browser (one choice for CI systems, one for the other tools), so every
   page opens on the reader's tool. One tool shows without tabs.
 
@@ -9,7 +11,7 @@
 -->
 <script lang="ts">
   import * as Tabs from "$lib/components/ui/tabs";
-  import CodeBlock from "$lib/components/CodeBlock.svelte";
+  import SnippetBlock, { andList, mergeSame } from "./SnippetBlock.svelte";
   import type { Snippet, ToolLabel } from "$lib/api";
 
   let {
@@ -31,8 +33,6 @@
   const labelOf = (id: string) => tools.find((t) => t.id === id)?.label ?? id;
   const family = (id: string) => (snippets.find((s) => s.tool === id)?.via === "ci" ? "ci" : "build");
   const key = (id: string) => `telesphorepo.client.${family(id)}`;
-  // A block's title names the file it belongs in: ".github/workflows/publish.yml (Gradle)".
-  const titleOf = (s: Snippet) => (s.file && !s.title.includes(s.file) ? (s.title ? `${s.file} (${s.title})` : s.file) : s.title);
 
   function remembered(cs: string[]): string | null {
     try {
@@ -58,11 +58,8 @@
 
 {#snippet blocks(tool: string)}
   <div class="flex flex-col gap-5">
-    {#each snippets.filter((s) => s.tool === tool) as s (s.id)}
-      <div class="flex min-w-0 flex-col gap-2">
-        <CodeBlock title={titleOf(s)} code={s.code} />
-        {#if s.note}<p class="text-meta text-muted-foreground">{s.note}</p>{/if}
-      </div>
+    {#each mergeSame(snippets.filter((s) => s.tool === tool)) as m (m.snippet.id)}
+      <SnippetBlock snippet={m.snippet} label={andList(m.titles)} />
     {/each}
   </div>
 {/snippet}

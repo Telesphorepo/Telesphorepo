@@ -29,14 +29,56 @@ export const emptyJenkins = (): JenkinsJobs => ({ url: "", jobs: [], jwks: "" })
 
 const trimSlash = (s: string) => s.trim().replace(/\/+$/, "");
 
-/** "https://github.com/acme/app.git" and "acme/app/" become "acme/app". */
-export function gitHubRepo(s: string): string {
-  return trimSlash(s.trim().replace(/^(https?:\/\/)?(www\.)?github\.com\//i, "").replace(/\.git$/i, ""));
+const WORKFLOWS = ".github/workflows/";
+
+/**
+ * The repository and the workflow file in what a person pastes from GitHub: the address of the
+ * repository (with or without .git, a clone address git@github.com:acme/app.git), of any page in
+ * it, of a file (blob, raw.githubusercontent.com), of a workflow's Actions page
+ * (/actions/workflows/release.yml), or owner/name, .github/workflows/release.yml and release.yml.
+ * A part it does not find is "".
+ */
+export function parseGitHub(s: string): { repo: string; workflow: string } {
+  let t = s.trim().replace(/[?#].*$/, "");
+  let repo = "";
+  let rest = "";
+  const host = /^(?:(?:https?|ssh|git):\/\/)?(?:[^@/]+@)?(?:www\.)?(github\.com|raw\.githubusercontent\.com)[:/](.*)$/i.exec(t);
+  if (host) {
+    const parts = host[2].split("/").filter(Boolean);
+    if (parts.length >= 2) {
+      repo = `${parts[0]}/${parts[1].replace(/\.git$/i, "")}`;
+      rest = parts.slice(2).join("/");
+    }
+  } else if (/^[\w.-]+\/[\w.-]+\/?$/.test(t) && !t.startsWith(".github/")) {
+    repo = trimSlash(t).replace(/\.git$/i, "");
+  } else {
+    rest = t;
+  }
+  t = rest;
+  let workflow = "";
+  const i = t.indexOf(WORKFLOWS);
+  const actions = /^actions\/workflows\/([^/]+)$/.exec(t);
+  if (i >= 0) workflow = t.slice(i + WORKFLOWS.length).split("/")[0];
+  else if (actions) workflow = actions[1];
+  else if (!host && /^[\w.-]+\.ya?ml$/i.test(t)) workflow = t;
+  try {
+    workflow = decodeURIComponent(workflow);
+  } catch {
+    /* not percent-encoded: keep it as it is */
+  }
+  return { repo, workflow };
 }
 
-/** "release.yml" from ".github/workflows/release.yml" or a pasted address of the file. */
+/** "https://github.com/acme/app.git", a page or a file in it, and "acme/app/" become "acme/app". */
+export function gitHubRepo(s: string): string {
+  return parseGitHub(s).repo || trimSlash(s.trim());
+}
+
+/** "release.yml" from ".github/workflows/release.yml" or a pasted address of the file or of its Actions page; "" from a repository's address. */
 export function workflowFile(s: string): string {
-  const t = s.trim();
+  const p = parseGitHub(s);
+  if (p.workflow || p.repo) return p.workflow;
+  const t = trimSlash(s.trim().replace(/[?#].*$/, ""));
   return t.slice(t.lastIndexOf("/") + 1);
 }
 
@@ -70,7 +112,27 @@ export function readGitHub(a: Accepts): GitHubJobs | null {
   return { repo, branches, tags, workflow };
 }
 
-export const jenkinsIssuer = (url: string) => `${trimSlash(url)}/oidc`;
+/** The Jenkins address in a pasted address of Jenkins or of a job in it: "https://ci.example.com/job/app/" → "https://ci.example.com". */
+export function jenkinsURL(s: string): string {
+  const t = s.trim().replace(/[?#].*$/, "");
+  const i = t.indexOf("/job/");
+  return trimSlash(i >= 0 ? t.slice(0, i) : t);
+}
+
+/** The full job name in a pasted job address: "https://ci.example.com/job/team/job/app/" → "team/app"; a name stays as it is. */
+export function jenkinsJob(s: string): string {
+  const t = s.trim().replace(/[?#].*$/, "");
+  if (!/^https?:\/\//i.test(t)) return t;
+  const i = t.indexOf("/job/");
+  if (i < 0) return t;
+  // "/job/team/job/app/lastBuild/": each name follows a "job".
+  const parts = ["job", ...t.slice(i + 5).split("/")];
+  const names: string[] = [];
+  for (let k = 0; k + 1 < parts.length && parts[k] === "job" && parts[k + 1]; k += 2) names.push(parts[k + 1]);
+  return names.join("/");
+}
+
+export const jenkinsIssuer =(url: string) => `${trimSlash(url)}/oidc`;
 
 /** The job address that Jenkins puts in the token: "team/app" → "<url>/job/team/job/app/". */
 function jobAddress(url: string, job: string): string {

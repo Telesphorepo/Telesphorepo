@@ -26,7 +26,11 @@ type Snippet struct {
 	Title string `json:"title"` // what the block is, e.g. "~/.m2/settings.xml" or "Publish"
 	Lang  string `json:"lang"`  // highlighting hint: "xml", "kotlin", "groovy", "sh", "yaml", ...
 	Code  string `json:"code"`
-	Note  string `json:"note,omitempty"` // one line under the code, e.g. a trade-off
+	// Diff is what an existing file needs, for a CI file that a project usually has already (a
+	// GitHub Actions workflow, a Jenkinsfile): the lines of a diff, each after its mark, "+" for an
+	// added line and " " for context. "" for none: Code is then the only form.
+	Diff string `json:"diff,omitempty"`
+	Note string `json:"note,omitempty"` // one line under the code, e.g. a trade-off
 }
 
 // Snippet purposes, contexts and publish sources.
@@ -86,6 +90,7 @@ func CISnippet(repo *repos.Repo, baseURL string, tool Tool, system string, t ci.
 	case ci.Jenkins:
 		s.ID, s.File, s.Lang = "jenkins.pipeline."+tool.ID, "Jenkinsfile", "groovy"
 		s.Code = ci.Jenkinsfile(repo.Name, baseURL, steps, t)
+		s.Diff = ci.JenkinsfileDiff(repo.Name, baseURL, steps, t)
 		s.Note = joinNote(ci.JenkinsNote(baseURL), tool.CINote)
 	case ci.JenkinsFreestyleSystem:
 		s.ID, s.Lang = "jenkins.freestyle."+tool.ID, "sh"
@@ -94,6 +99,7 @@ func CISnippet(repo *repos.Repo, baseURL string, tool Tool, system string, t ci.
 	default:
 		s.ID, s.File, s.Lang = "github-actions.workflow."+tool.ID, ".github/workflows/publish.yml", "yaml"
 		s.Code = ci.GitHubWorkflow(repo.Name, baseURL, steps, t)
+		s.Diff = ci.GitHubWorkflowDiff(repo.Name, baseURL, steps, t)
 	}
 	return s
 }

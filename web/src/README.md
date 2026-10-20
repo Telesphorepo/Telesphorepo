@@ -251,7 +251,8 @@ The repository page is the one exception: it checks the caller's permissions on 
 | `ShortFormDialog` | `bind:open`, `title`, `description?`, `submitLabel`, `canSubmit?`, `onSubmit` (async); at most five `FormField`s as children. |
 | `DetailsColumn` | `title`, `onClose`, snippet `actions?`: the details of the selected row in a 360px column right of the table. On the Files tab the column always shows (the selected file, or else the open folder); Close hides it until the person selects a file or clicks "Show details". |
 | `TabNav` | Tabs that are pages (each tab has its own address): `label`, `items: {label, href, active, icon?}[]`. The open tab fills like a sidebar item; no line under the row; 24px to the content. |
-| `CodeBlock` | `code`, `title?`: multi-line code with a copy button (monospace). |
+| `CodeBlock` | `code`, `title?`, `diff?`, snippet `actions?` (at the end of the title row): multi-line code with a copy button (monospace). With `diff` (diff lines, each after its mark: `+` added, a space for context) it shows the change to a file the reader has: added lines marked and filled, context muted; copy takes the added lines only, and a selection never takes the marks. `repo/snippets/SnippetBlock` shows a CI file this way, with Add to a workflow / New workflow. |
+| `Segmented` | `bind:value`, `options` (`{value, label, title?}[]`), `label`, `compact?`: two or three short choices as one segmented control (a radio group); arrow keys move. It fills its cell; `compact` is as wide as its labels, for the title row of a `CodeBlock`. |
 | `CodeSnippet` | `value`, `label?`, `secret?`: one line to copy: a command, a token, an address (monospace). |
 | `CopyValue` | `value`, `label?`: data in sans with a copy button (a checksum, a fingerprint). |
 | `StatusBadge` | `tone` (`neutral`, `success`, `warning`, `danger`, `info`), `icon?`, the word as child. |
