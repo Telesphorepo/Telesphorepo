@@ -483,6 +483,8 @@ export type ArtifactSnippets = {
   artifact: Artifact | null;
   version: string;
   version_mode: VersionMode;
+  /** The snippets take one version only: the UI offers no choice of version. */
+  fixed_version: boolean;
   tools: ToolLabel[];
   snippets: Snippet[];
 };
@@ -579,7 +581,7 @@ export type ParsedRanges = {
 };
 export type IPListPatch = { name?: string; title?: string; description?: string; ranges?: string[] };
 
-/** A key that signs Debian package lists. error says why the server cannot use it. */
+/** A key that signs the indexes of repositories. error says why the server cannot use it. */
 export type SigningKey = {
   name: string;
   fingerprint: string;
@@ -882,30 +884,4 @@ export type TrustedProxyLists = {
   lists: { id: number; name: string }[];
   /** The lists that TR_TRUSTED_PROXIES names; they change only with the environment. */
   env_lists: string[];
-};
-
-// --- docker ---
-
-/** A blob or a manifest that a manifest names. */
-export type OCIDescriptor = { digest: string; media_type: string; size: number };
-/** A manifest of an index with its platform. */
-export type OCIPlatform = { digest: string; os: string; architecture: string; variant?: string };
-/** GET /api/docker/{name}/manifest?path=: the details of a manifest at a tag or manifest path. */
-export type DockerManifest = {
-  digest: string;
-  media_type: string;
-  /** The artifactType, else the config type unless it is the OCI empty config; "" for none. */
-  artifact_type: string;
-  size: number;
-  /** The manifest with its config and layers; an index counts only itself. */
-  total_size: number;
-  config: OCIDescriptor | null;
-  layers: OCIDescriptor[];
-  /** The platform manifests of an index; empty for an image manifest. */
-  platforms: OCIPlatform[];
-  subject: OCIDescriptor | null;
-  /** The first 100 tags that name the manifest. */
-  tags: string[];
-  /** How many manifests name it as their subject (signatures, SBOMs, attestations). */
-  referrers: number;
 };

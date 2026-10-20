@@ -342,7 +342,7 @@ func (h *Handler) ArtifactUsage(ctx context.Context, repo *repos.Repo, baseURL, 
 		s.mavenRepos()
 		s.add("maven", "dependency", "pom.xml", "pom.xml (dependency)", "xml", mdep, note)
 	}
-	return &format.ArtifactUsage{Artifact: art, Version: version, Mode: mode, Snippets: s.out}, nil
+	return &format.ArtifactUsage{Artifact: art, Version: version, Mode: mode, FixedVersion: art.Kind == "parent", Snippets: s.out}, nil
 }
 
 // order puts the snippets of each tool together, in the order the tools first appear.

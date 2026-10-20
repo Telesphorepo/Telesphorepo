@@ -115,8 +115,9 @@ write gate, the device and OIDC routes or the change log. Run all zones before a
   separators and process signals (see `tools/task/proc_*.go`).
 - **Use bun for the web app.** The lockfile is `web/bun.lock`. Don't commit a `package-lock.json`.
   The web stack is Svelte 5 + Vite (no SvelteKit), Tailwind CSS v4, shadcn-svelte (Maia style) and
-  TypeScript. Add a shadcn component with `bunx shadcn-svelte@latest add <name>`. Call the API only
-  through `api.*` in `web/src/lib/api/`. `bun run build` runs `svelte-check` first.
+  TypeScript. Add a shadcn component with `bunx shadcn-svelte@latest add <name>`. A format module keeps the
+  calls to its own routes in its own folder. Everything else calls the API through `api.*` in
+  `web/src/lib/api/`. `bun run build` runs `svelte-check` first.
 - **Follow the UI rules of `web/src/README.md`.** Every page sits in the one centered 1200 px
   container. The API client sends `X-Telesphorepo-UI: 1` on every request, so the server never
   sends a browser password prompt. Use monospace only in `CodeBlock`, `CodeSnippet` and the JSON
@@ -160,7 +161,7 @@ write gate, the device and OIDC routes or the change log. Run all zones before a
 | Credentials, permission checks | `internal/auth` (`Identify`, sessions, tokens, second factor, bearer tokens), `internal/route/policy.go` (the policy), `internal/access/engine.go` (`Decide`, the access report) |
 | Publish sessions, devices, trust policies, CI providers | `internal/publish` (module `publish`, routes in `api.go`, `mint.go`, `providers.go`); `internal/ci` (provider registry, build records); setup codes, `/api/devices/setup`, `/api/devices/self` and `/api/publish/sessions/exchange` in `setup.go`; the install scripts and CLI downloads in `install.go`, `install.sh`, `install.ps1` with the archives of `internal/clidist` (built by `tools/task/cli.go`); sign-in and second factor routes in `internal/api/security.go` |
 | Byte pipeline | `internal/assets` (`Commit`, `Remove`, `Reader`, `Uploads`), `internal/blobs` (content-addressed blobs, GC), `internal/repopath`, `internal/ops` (repo operations), `internal/rebuild` (index rebuild queue), on top of `internal/storage` |
-| UI page | `web/src/pages/**/*.svelte` (`repo/`, `account/`, `repositories/`, `server/`, `settings/repos/`); its `PageDef` (path, access, Settings nav) in the owning module's `web/src/modules/<id>/module.ts`; API calls in `web/src/lib/api/`. See `web/src/README.md` |
+| UI page | `web/src/pages/**/*.svelte` (`repo/`, `account/`, `repositories/`, `server/`, `settings/repos/`); its `PageDef` (path, access, Settings nav) in the owning module's `web/src/modules/<id>/module.ts`; API calls in `web/src/lib/api/` (a format module's own routes in its own folder). See `web/src/README.md` |
 | UI of a format | The descriptor (`format.Spec` fields and `UI`, `GET /api/formats`; `web/src/lib/formats/registry.svelte.ts`); a format-specific component only as a named `formatParts` slot in `web/src/modules/<format>/module.ts` |
 | File tree, deletes, manual upload | `internal/files` (tree), `internal/api/files.go`, `internal/api/pipeline.go` (repo delete, resumable uploads), `format.Spec.Upload`; UI in `web/src/pages/repo/` (`FilesTab`, `upload/`, `delete/`) |
 | Client IP, IP lists, repo IP rules | `internal/netrules` (module `network`: `lists.go`, `rules.go`, `clientip.go`, `module.go`), `web/src/pages/settings/repos/` (Access tab), `web/src/pages/server/IPLists.svelte`, `IPListPage.svelte`, `ReverseProxy.svelte` |
@@ -237,8 +238,8 @@ and an importer plan. `maven` shows proxy, group, `Merge`, `Upload` and `Tools`.
    permission ID), `title`, and `setup` for a page of a setup-only session.
 3. For a Settings page, give it `nav` (group, label, icon, order).
 4. Add the route to the table in `web/src/README.md`.
-5. Call the API only through `api.*`. For a new server route, add a function and its type in
-   `web/src/lib/api/`.
+5. Call the API through `api.*`. For a new server route, add a function and its type in
+   `web/src/lib/api/`. A format module keeps the calls to its own routes in its own folder.
 6. Use `Resource` or `Keyset` (`lib/load.svelte.ts`) for requests, and show loading, error and
    empty states. Use `ConfirmDialog` for every destructive action.
 

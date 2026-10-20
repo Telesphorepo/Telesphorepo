@@ -17,10 +17,10 @@ the checklist below. The sitemap and the Settings navigation come from
 | Path | What it holds |
 |---|---|
 | `main.ts`, `App.svelte` | Mount; the shell: loads the user and the formats, matches the route, checks access, renders the page in `AppShell`. |
-| `modules/` | The UI of each server module (`<id>/module.ts`, one `ModuleUI`: pages with their sidebar items, redirects, repository settings tabs, repository field controls, format parts of the file details) and `index.ts`, the registry in the server's module start order. `types.ts` holds `PageDef`, `Access`, `RepoTabDef`, `RepoFieldDef`, `ModuleUI`. A module's own components sit next to its `module.ts` (the Signing tab, the signing key field, the Maven, Debian and Docker file parts). |
+| `modules/` | The UI of each server module (`<id>/module.ts`, one `ModuleUI`: pages with their sidebar items, redirects, repository settings tabs, repository field controls, format parts of the file details) and `index.ts`, the registry in the server's module start order. `types.ts` holds `PageDef`, `Access`, `RepoTabDef`, `RepoFieldDef`, `ModuleUI`. A module's own components sit next to its `module.ts` (the Signing tab, the signing key field, the Maven, Debian and Docker file parts), and so do the calls to a format module's own routes (`docker/api.ts`). |
 | `app.css` | Design tokens: colors (light and dark), the type scale, fonts, the one radius, the width scale, the control widths, the scrollbars. |
 | `pages/` | One component per route: `Home`, `Search`, `SignIn`, `DeviceApprove`; `repo/` (one page per repository), `settings/repos/` (a repository's settings: the shell, its tabs and the Access tab's parts), `account/`, `repositories/`, `server/` (sub-folders `ci/`, `ip-lists/`, `nexus/`, `people/` hold the parts of those pages). |
-| `lib/api/` | The one API client: `client.ts` (fetch wrapper, `ApiError`, the `X-Telesphorepo-UI` header, the XHR upload with progress), `types.ts` (JSON shapes), `index.ts` (`api.*` for every route). |
+| `lib/api/` | The one API client: `client.ts` (fetch wrapper, `ApiError`, the `X-Telesphorepo-UI` header, the XHR upload with progress), `types.ts` (JSON shapes), `index.ts` (`api.*` for every route outside the routes of a format module). |
 | `lib/auth.svelte.ts` | `auth`: current user, sign in (two steps), sign out (returns to Browse home); the permission checks `can(perm)`, `canRepo(repo, perm)`, `managesRepo(repo)`, `allows(access, params)`. |
 | `lib/permissions.ts` | The permission registry of the server (`GET /api/permissions`, read by `auth.load()` before the first page): the server and repository permissions in registry order with their labels and help, the needs of each (`needsOf`), the picker groups, one per subsystem (`pickerGroups`), and the phrases of a set: `repoPhrase` ("Download, publish", "Everything") and `serverPhrase` ("Administrator", "Manage people, manage storage"). |
 | `lib/router.svelte.ts` | Hash router: `router`, `href()`, `navigate()`, `go()`, `isActive()`, `encodePath()`, `repoPath()`, `filesPath()`, `repoSettingsPath()`; the navigation guard hook. |
@@ -119,8 +119,8 @@ The repository page is the one exception: it checks the caller's permissions on 
    stays open because `isActive` matches the prefix, and its breadcrumbs end with the item and
    the page title.
 4. Add the route to the table above.
-5. Call the API only through `api.*` (`lib/api/index.ts`). A new server route gets a function
-   and its types there first.
+5. Call the API through `api.*` (`lib/api/index.ts`). A new server route gets a function
+   and its types there first. A format module keeps the calls to its own routes in its own folder.
 
 ## Layout
 

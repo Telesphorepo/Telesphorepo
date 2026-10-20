@@ -34,8 +34,8 @@
   });
 
   const data = $derived(snippets.data);
-  // A parent POM takes a fixed version, so it gets no choice.
-  const choice = $derived(!!data?.artifact && data.artifact.kind !== "parent");
+  // An artifact that takes a fixed version gets no choice.
+  const choice = $derived(!!data?.artifact && !data.fixed_version);
   // The pinned version, kept while "Always the newest" shows.
   let pinnedSeen = $state("");
   $effect(() => {

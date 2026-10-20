@@ -265,7 +265,7 @@ export const api = {
     parse: (text: string, signal?: AbortSignal) => request<T.ParsedRanges>("POST", "/api/ip-ranges/parse", { body: { text }, signal }),
   },
 
-  /** Signing keys: keys that sign the package lists of Debian repositories. */
+  /** Signing keys: keys that sign the indexes of repositories. */
   signingKeys: {
     list: () => request<T.SigningKey[]>("GET", "/api/signing-keys"),
     get: (name: string) => request<T.SigningKey>("GET", `/api/signing-keys/${enc(name)}`),
@@ -289,12 +289,6 @@ export const api = {
     failures: (id: number, p?: T.PageParams) =>
       request<T.Page<T.MoveFailure>>("GET", `/api/storage/moves/${id}/failures`, { query: page(p) }),
     cancel: (id: number) => request<T.Move>("DELETE", `/api/storage/moves/${id}`),
-  },
-
-  docker: {
-    /** The details of the manifest at a tag or manifest path of a docker repo. */
-    manifest: (name: string, path: string) =>
-      request<T.DockerManifest>("GET", `/api/docker/${enc(name)}/manifest`, { query: { path } }),
   },
 
   nexus: {

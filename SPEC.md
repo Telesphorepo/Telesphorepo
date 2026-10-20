@@ -826,7 +826,7 @@ transaction.
 | `GET /api/repos/{name}/ci?system=github-actions\|jenkins&tool=&branches=&tags=` | `repo.download` | The CI file that publishes to a hosted repo (one `Snippet`), built by `internal/ci/workflow.go` from the `PublishSteps` of the tool (a tool of the format; default the first). `branches` and `tags` are comma-separated names or globs (letters, digits and `. _ / * -`, at most 20 each): the GitHub Actions trigger (default: a push to `main`), and a `when { anyOf { branch; tag } }` on the Jenkins publish stage (none by default). 400 for another system, an unknown tool, a bad pattern, or a proxy or a group |
 | `GET /api/repos/{name}/versions?path=&after=&limit=` | `repo.download` | The versions of the artifact folder `path`, newest first (`format.Spec.Versions`): `{artifact: {path, title, kind}\|null, items: [{version, kind, latest_build, latest_label, builds_count, published_at, build}], next}`. `artifact` is null for any other folder. `latest_label` is the format's name of the latest build for people (Maven: "Build 3"); the UI shows `latest_build` when it is absent. See **Versions and builds** |
 | `GET /api/repos/{name}/builds?path=&version=&after=&limit=` | `repo.download` | The builds of one version of the artifact folder `path`, newest first: `{artifact, version, items: [{id, label, files: [{name, path, size, sha256, classifier, extension}], published_at, build}], next}`. `label` is the format's name of the build for people (Maven: "Build 3", "Build without a timestamp"); the UI shows `id` when it is absent. `artifact` and `version` are null when the artifact has no such version. 400 without `version` |
-| `GET /api/repos/{name}/snippets?path=&version=&version_mode=pinned\|latest` | `repo.download` | The snippets that use one artifact (`format.Spec.ArtifactUsage`): `{base_url, artifact, version, version_mode, tools, snippets}`. `path` is an artifact folder (with an optional `version`), a version folder or a file |
+| `GET /api/repos/{name}/snippets?path=&version=&version_mode=pinned\|latest` | `repo.download` | The snippets that use one artifact (`format.Spec.ArtifactUsage`): `{base_url, artifact, version, version_mode, fixed_version, tools, snippets}`. `path` is an artifact folder (with an optional `version`), a version folder or a file |
 | `GET /api/settings` | the permission of a settings group | `{groups: [{id, label, module, perm, page, settings: [Item]}]}`: the groups whose permission the caller holds, in module start order. An Item has key, env, group, label, help, type, options, secret (from the definition), value, default, display, default_display, source (`stored`/`env`/`default`), locked |
 | `PATCH /api/settings` | the permission of each key's group | `{key: value}`. Each key needs the permission of its group (403 otherwise). `null` resets a key; `""` for a secret means unchanged. The server runs the `Validate` of every touched group, then each `Apply`, then saves (see **Settings model**). Returns 400 `{error, fields}`, or 409 when an env-locked key gets a different value. Location changes must pass the probe; SSO connection changes must pass discovery. A location change that starts a storage move saves the other keys of the patch and returns 202 `{move: Move}`; 409 while a move runs. The settings service records one `settings.update` event that names the saved keys, never the values; a patch that saves no key records none |
 | `GET /api/storage/moves/current` | `storage.manage` | The newest Move, running or ended; 404 when there has been none |
@@ -1780,8 +1780,8 @@ are dropped from memory, and the server logs the repo ids.
   again after `metadata_ttl`), `Remote` (the path at the remote: relative to `remote_url`, or from
   the root of its host when it starts with `/`; `""` is the local path), `Header` (extra request
   headers, e.g. `Accept`), `KeepType` (the remote's `Content-Type` becomes the file's content type)
-  and `Revalidate` (`""`: a conditional GET; `head-digest`: a HEAD with the same headers, and a
-  `Docker-Content-Digest` equal to the cached SHA-256 only sets `checked_at`, else a GET). Maven
+  and `Unchanged` (nil: a conditional GET; set: a HEAD with the same headers, and a 200 answer for
+  which `Unchanged(head, cached)` is true only sets `checked_at`, else a GET). Maven
   `maven-metadata.xml*` and files under a `-SNAPSHOT` folder change, the rest is immutable;
   Debian `pool/**` and `dists/**/by-hash/**` are immutable, the rest of `dists/**` changes, other
   paths are refused (404). Docker: see **Docker registry**.
@@ -1955,7 +1955,7 @@ is `library/<image>`. `Classify`:
 
 | Local path | Remote path | Class |
 |---|---|---|
-| `<image>/_tags/<tag>` | `/v2/<remote image>/manifests/<tag>` | changing, `Accept` of the four manifest types, `KeepType`, `head-digest` |
+| `<image>/_tags/<tag>` | `/v2/<remote image>/manifests/<tag>` | changing, `Accept` of the four manifest types, `KeepType`, `Unchanged` (the `Docker-Content-Digest` of a HEAD is the cached SHA-256) |
 | `<image>/_manifests/sha256/<hex>` | `/v2/<remote image>/manifests/sha256:<hex>` | immutable, `Accept`, `KeepType` |
 | `<image>/_blobs/sha256/<hex>` | `/v2/<remote image>/blobs/sha256:<hex>` | immutable |
 

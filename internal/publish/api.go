@@ -40,7 +40,7 @@ const (
 // The settings of the group "publishing".
 var (
 	SessionTTL = settings.Duration(&settings.Def{Key: "publish.session_ttl", Default: "15m", Label: "Publish session lifetime",
-		Help: "A publish session, the credential that every upload needs, lasts at most this time, for example 15m. A client ends its session when the publish is done. The maximum is 1h. A Docker push must end within it.",
+		Help: "A publish session, the credential that every upload needs, lasts at most this time, for example 15m. A client ends its session when the publish is done. The maximum is 1h. A publish must end within it.",
 		Validate: func(v any) error {
 			if v.(time.Duration) > time.Hour {
 				return errors.New("must be at most 1h")

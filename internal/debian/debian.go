@@ -43,7 +43,6 @@ type Handler struct {
 	q        *dbq.Queries // on the reader pool
 	assets   *assets.Pipeline
 	rebuilds *rebuild.Queue
-	repos    *repos.Service
 	settings *settings.Service
 	log      *slog.Logger
 
@@ -68,7 +67,7 @@ func Module() module.Module {
 			x.Init(func(ctx context.Context, host *module.Host) error {
 				h.host = host
 				h.db, h.q = host.DB, dbq.New(host.DB.R)
-				h.assets, h.rebuilds, h.repos = host.Assets, host.Rebuilds, host.Repos
+				h.assets, h.rebuilds = host.Assets, host.Rebuilds
 				h.settings, h.log = host.Settings, host.Log
 				h.keys = module.Use[*signing.Keys](host)
 				return nil

@@ -234,7 +234,7 @@ func (s *Service) fetch(ctx context.Context, repo *repos.Repo, px *repos.Proxy, 
 		}
 		return nil, assets.ErrRemoteMissing
 	}
-	if cached != nil && class.Revalidate == assets.RevalidateHeadDigest {
+	if cached != nil && class.Unchanged != nil {
 		resp, err := send(ctx, http.MethodHead, px, remote, class.Header, auth)
 		if errors.Is(err, ErrDenied) {
 			return missing()
@@ -243,7 +243,7 @@ func (s *Service) fetch(ctx context.Context, repo *repos.Repo, px *repos.Proxy, 
 			return s.failed(ctx, repo, p, cached, reason(err))
 		}
 		resp.Body.Close()
-		if resp.StatusCode == http.StatusOK && resp.Header.Get("Docker-Content-Digest") == "sha256:"+cached.SHA256 {
+		if resp.StatusCode == http.StatusOK && class.Unchanged(resp, cached) {
 			if err := s.assets.SetChecked(ctx, repo.ID, string(p), now, cached.RemoteETag); err != nil {
 				return nil, err
 			}
@@ -255,7 +255,7 @@ func (s *Service) fetch(ctx context.Context, repo *repos.Repo, px *repos.Proxy, 
 	if hdr == nil {
 		hdr = http.Header{}
 	}
-	if cached != nil && class.Revalidate == "" {
+	if cached != nil && class.Unchanged == nil {
 		if cached.RemoteETag != "" {
 			hdr.Set("If-None-Match", cached.RemoteETag)
 		}

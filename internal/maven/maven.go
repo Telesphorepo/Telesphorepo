@@ -13,7 +13,6 @@ import (
 	"strings"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
-	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/module"
 	"github.com/Telesphorepo/Telesphorepo/internal/repopath"
@@ -22,7 +21,6 @@ import (
 
 // Handler serves the Maven format.
 type Handler struct {
-	auth   *auth.Service
 	assets *assets.Pipeline
 	host   *module.Host
 }
@@ -35,7 +33,7 @@ func Module() module.Module {
 		ID: "maven", Title: "Maven / Gradle",
 		Register: func(x *module.Extender) {
 			x.Init(func(ctx context.Context, host *module.Host) error {
-				h.auth, h.assets, h.host = host.Auth, host.Assets, host
+				h.assets, h.host = host.Assets, host
 				return nil
 			})
 			x.Format(format.Spec{

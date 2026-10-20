@@ -4,7 +4,6 @@
   manifests refer to it, then how to pull it (the format's artifact snippets).
 -->
 <script lang="ts">
-  import { api } from "$lib/api";
   import { Resource } from "$lib/load.svelte";
   import CopyValue from "$lib/components/CopyValue.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
@@ -12,11 +11,12 @@
   import Loading from "$lib/components/Loading.svelte";
   import ArtifactSnippets from "../../pages/repo/snippets/ArtifactSnippets.svelte";
   import type { FilePartProps } from "../types";
+  import { dockerApi } from "./api";
 
   let { repo, file }: FilePartProps = $props();
 
   /* svelte-ignore state_referenced_locally */
-  const manifest = new Resource(() => api.docker.manifest(repo.name, file.path));
+  const manifest = new Resource(() => dockerApi.manifest(repo.name, file.path));
   const m = $derived(manifest.data);
   const short = (digest: string) => digest.replace(/^sha256:/, "").slice(0, 12);
   const platform = (p: { os: string; architecture: string; variant?: string }) =>

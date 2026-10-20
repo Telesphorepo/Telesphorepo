@@ -304,7 +304,7 @@ func (a *API) repoCI(w http.ResponseWriter, r *http.Request, c *route.Call) {
 
 // artifactSnippets returns the snippets that use one artifact (format.Spec ArtifactUsage):
 // ?path=<artifact folder, version folder or file>&version=<v>&version_mode=pinned|latest ->
-// {base_url, artifact, version, version_mode, tools, snippets}. version names a version of the
+// {base_url, artifact, version, version_mode, fixed_version, tools, snippets}. version names a version of the
 // artifact folder path (optional). artifact is null, and snippets empty, when the path is not an
 // artifact or the format has no artifact snippets.
 func (a *API) artifactSnippets(w http.ResponseWriter, r *http.Request, c *route.Call) {
@@ -330,6 +330,7 @@ func (a *API) artifactSnippets(w http.ResponseWriter, r *http.Request, c *route.
 		Artifact *format.Artifact `json:"artifact"`
 		Version  string           `json:"version"`
 		Mode     string           `json:"version_mode"`
+		Fixed    bool             `json:"fixed_version"`
 		Tools    []toolLabel      `json:"tools"`
 		Snippets []format.Snippet `json:"snippets"`
 	}
@@ -342,7 +343,7 @@ func (a *API) artifactSnippets(w http.ResponseWriter, r *http.Request, c *route.
 			return
 		}
 		if u != nil {
-			res.Artifact, res.Version, res.Mode = &u.Artifact, u.Version, u.Mode
+			res.Artifact, res.Version, res.Mode, res.Fixed = &u.Artifact, u.Version, u.Mode, u.FixedVersion
 			if u.Snippets != nil {
 				res.Snippets = u.Snippets
 			}

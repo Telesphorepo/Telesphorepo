@@ -1,5 +1,5 @@
 <!--
-  Signing keys (Signing keys permission): the keys that sign the package lists of Debian repositories, and
+  Signing keys (Signing keys permission): the keys that sign the indexes of repositories, and
   which repositories use each one (links to their Signing tab). Download a public key; delete a key
   that no repository uses. New signing key opens a page that creates or imports one.
 -->
@@ -45,7 +45,7 @@
   const quietDanger = "hover:bg-destructive/10 hover:text-destructive";
 </script>
 
-<PageHeader title="Signing keys" description="Keys that sign the package lists of Debian repositories, so apt can check them.">
+<PageHeader title="Signing keys" description="Keys that sign the indexes of repositories, so clients can check them.">
   {#snippet actions()}{#if keys.data?.length}<Button href={newKey}><PlusIcon />New signing key</Button>{/if}{/snippet}
 </PageHeader>
 
@@ -90,7 +90,7 @@
     </Cell>
   {/snippet}
   {#snippet empty()}
-    <CompactEmpty icon={FileKeyIcon} text="None yet. Debian repositories need a key, so apt can check their package lists.">
+    <CompactEmpty icon={FileKeyIcon} text="None yet. A repository that signs its indexes needs a key, so clients can check them.">
       <Button variant="outline" href={newKey}><PlusIcon />New signing key</Button>
     </CompactEmpty>
   {/snippet}

@@ -261,7 +261,7 @@
 
       <FormSection title={kind === "proxy" ? "Proxy" : kind === "group" ? "Group" : "Repository"}>
         <FormGrid>
-          <FormRow label="Name" for="{id}-name" help="Builds and apt use the name in the address of the repository." error={nameError || undefined}>
+          <FormRow label="Name" for="{id}-name" help="Builds and clients use the name in the address of the repository." error={nameError || undefined}>
             <Input id="{id}-name" spellcheck={false} aria-describedby="{id}-name-help" aria-invalid={nameError ? true : undefined} bind:value={name} />
           </FormRow>
           <FormRow label="Description" for="{id}-desc" help="The list of repositories shows this text after the name.">

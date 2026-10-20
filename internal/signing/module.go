@@ -42,7 +42,7 @@ func Module() module.Module {
 		Register: func(x *module.Extender) {
 			x.Schema(component())
 			x.Permissions(perm.Subsystem{ID: "signing", Scope: perm.ScopeServer, Label: "Signing keys",
-				Help: "The OpenPGP keys that sign repository indexes, such as the Release files of Debian repositories."},
+				Help: "The OpenPGP keys that sign the indexes of repositories, so clients can check them."},
 				perm.Def{ID: PermManage, Label: "Manage signing keys", Help: "Create, import and delete signing keys, and download their public keys.", SecondFactor: true})
 			x.AuditActions(
 				audit.ActionDef{ID: ActionKeyCreate, Label: "Signing key created", Subsystem: "signing"},
@@ -154,7 +154,7 @@ func fail(w http.ResponseWriter, r *http.Request, err error) {
 }
 
 // list returns every key by name: [{name, fingerprint, public_key, created_at, error?, repos}].
-// It needs signing.manage, or repo.settings on a repository (the Signing tab of a Debian repository picks a key
+// It needs signing.manage, or repo.settings on a repository (the Signing tab of a repository picks a key
 // from this list).
 func (m *mod) list(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	keys := m.keys.List()

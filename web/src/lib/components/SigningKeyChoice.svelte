@@ -1,5 +1,5 @@
 <!--
-  Which key signs a Debian repository: a key that exists, or a new key for this repository. The
+  Which key signs the indexes of a repository: a key that exists, or a new key for this repository. The
   name of a new key follows the repository name until the user types one. The parent creates the
   new key (POST /api/signing-keys) before it saves the repository.
 

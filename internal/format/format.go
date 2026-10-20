@@ -180,10 +180,13 @@ const (
 
 // ArtifactUsage is what Spec.ArtifactUsage returns.
 type ArtifactUsage struct {
-	Artifact Artifact  `json:"artifact"`
-	Version  string    `json:"version"`      // the version the pinned snippets name; "" when none
-	Mode     string    `json:"version_mode"` // VersionPinned or VersionLatest
-	Snippets []Snippet `json:"snippets"`
+	Artifact Artifact `json:"artifact"`
+	Version  string   `json:"version"`      // the version the pinned snippets name; "" when none
+	Mode     string   `json:"version_mode"` // VersionPinned or VersionLatest
+	// FixedVersion is true when the snippets take one version only (e.g. a Maven parent POM), so
+	// the UI offers no choice between a pinned and the newest version.
+	FixedVersion bool      `json:"fixed_version"`
+	Snippets     []Snippet `json:"snippets"`
 }
 
 // Artifact names an artifact of a repo: Path is its folder (with a trailing slash), Title its

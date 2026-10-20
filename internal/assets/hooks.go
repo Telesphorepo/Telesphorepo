@@ -88,14 +88,11 @@ type Class struct {
 	Header http.Header
 	// KeepType stores the Content-Type of the remote's answer as the content type of the file.
 	KeepType bool
-	// Revalidate is how a cached changing file is checked again: "" sends a conditional GET;
-	// RevalidateHeadDigest sends a HEAD and keeps the file when the remote's
-	// Docker-Content-Digest is its SHA-256, else it GETs the file.
-	Revalidate string
+	// Unchanged is how a cached changing file is checked again: nil sends a conditional GET. With
+	// Unchanged, the proxy sends a HEAD with the same headers and keeps the file when Unchanged
+	// returns true for the answer; else it GETs the file.
+	Unchanged func(head *http.Response, cached *Asset) bool
 }
-
-// RevalidateHeadDigest is the Class.Revalidate of a file that a registry names by digest.
-const RevalidateHeadDigest = "head-digest"
 
 // Merger merges a file that several members of a group have.
 type Merger struct {

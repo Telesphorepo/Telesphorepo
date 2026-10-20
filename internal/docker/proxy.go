@@ -80,8 +80,13 @@ func (f *Format) classify(px *repos.Proxy, p repopath.Path) (assets.Class, bool)
 	default:
 		hdr.Set("Accept", manifestAccept)
 		return assets.Class{Remote: "/v2/" + rimage + "/manifests/" + op.ref, Header: hdr, KeepType: true,
-			Changing: true, Revalidate: assets.RevalidateHeadDigest}, true
+			Changing: true, Unchanged: sameDigest}, true
 	}
+}
+
+// sameDigest reports whether the HEAD answer of a remote tag names the cached manifest.
+func sameDigest(head *http.Response, cached *assets.Asset) bool {
+	return head.Header.Get("Docker-Content-Digest") == "sha256:"+cached.SHA256
 }
 
 // proxyProbe is the path of the check of a remote: the registry's API root.
