@@ -22,9 +22,11 @@ func cargoEnv(extra map[string]string) map[string]string {
 }
 
 // cargoRegistry is a .cargo/config.toml under dir that names the registry reg at index (a sparse
-// index URL without "sparse+"). replace makes reg the source of every crates.io crate.
+// index URL without "sparse+"). replace makes reg the source of every crates.io crate. The registry
+// names the credential provider cargo:token, as a user's config must: Cargo refuses to read a
+// registry with auth-required when no credential provider is configured for it.
 func cargoRegistry(dir, reg, index string, replace bool) ContainerFile {
-	c := fmt.Sprintf("[registries.%s]\nindex = \"sparse+%s\"\n", reg, index)
+	c := fmt.Sprintf("[registries.%s]\nindex = \"sparse+%s\"\ncredential-provider = \"cargo:token\"\n", reg, index)
 	if replace {
 		c += fmt.Sprintf("\n[source.crates-io]\nreplace-with = %q\n", reg)
 	}

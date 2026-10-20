@@ -2662,7 +2662,9 @@ have no rows and list no versions.
 
 **Snippets.** `.cargo/config.toml` with `[registries.<repo>] index = "sparse+..."` (a repo name
 with characters other than letters, digits, `-` and `_` gets `-` for them), plus
-`[source.crates-io] replace-with` for a proxy or a group; `~/.cargo/credentials.toml` with
+`credential-provider = "cargo:token"` for a private repo (Cargo refuses a registry with
+`auth-required` that has no credential provider) and `[source.crates-io] replace-with` for a
+proxy or a group; `~/.cargo/credentials.toml` with
 `token = "YOUR_READ_TOKEN"` for a private repo (or `CARGO_REGISTRIES_<NAME>_TOKEN` in CI); a
 `Cargo.toml` dependency with `registry = "<repo>"`; `cargo add`. The CLI tool `cargo` publishes
 with `telesphorepo publish` (GitHub Actions adds `dtolnay/rust-toolchain@stable`; Jenkins runs

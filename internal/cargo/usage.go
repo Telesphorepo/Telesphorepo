@@ -16,7 +16,8 @@ import (
 // Snippets of the Cargo format (format.Spec Usage and ArtifactUsage). Cargo names a registry in
 // .cargo/config.toml ([registries.<name>] index = "sparse+<url>") and reads its token from
 // ~/.cargo/credentials.toml or CARGO_REGISTRIES_<NAME>_TOKEN; a private repo needs Cargo 1.74 or
-// later, which sends the token on every request of a registry with auth-required.
+// later, which sends the token on every request of a registry with auth-required, and only when
+// a credential provider is configured (credential-provider = "cargo:token" on the registry).
 
 var regNameRE = regexp.MustCompile(`[^A-Za-z0-9_-]`)
 
@@ -39,7 +40,10 @@ func indexURL(repo *repos.Repo, baseURL string) string {
 func setup(repo *repos.Repo, baseURL, snippetContext string) []format.Snippet {
 	reg := registryName(repo.Name)
 	code := "[registries." + reg + "]\nindex = \"" + indexURL(repo, baseURL) + "\"\n"
-	note := "Put it in .cargo/config.toml of the project, or in ~/.cargo/config.toml for every project."
+	if !repo.AnonymousRead {
+		code += "credential-provider = \"cargo:token\"\n"
+	}
+	note :="Put it in .cargo/config.toml of the project, or in ~/.cargo/config.toml for every project."
 	if repo.Kind != repos.KindHosted {
 		code += "\n[source.crates-io]\nreplace-with = \"" + reg + "\"\n"
 		note = "Cargo then fetches every crate of crates.io through this repository. " + note
