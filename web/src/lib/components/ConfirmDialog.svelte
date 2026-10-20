@@ -9,7 +9,8 @@
       onConfirm={() => api.devices.revoke(id)} />
 
   With `typeToConfirm`, the dialog shows a field, and the confirm button stays off until the
-  field holds exactly that text: "Type 12 to confirm".
+  field holds exactly that text: the name of the one thing ("Type oasis to confirm"), or the
+  action of a bulk delete ("Type delete 12 repositories to confirm"), never a bare count.
 -->
 <script lang="ts">
   import type { Snippet } from "svelte";
@@ -92,9 +93,10 @@
     {/if}
     {#if children}{@render children()}{/if}
     {#if typeToConfirm !== undefined}
-      <FormField label="Type {typeToConfirm} to confirm" for="{id}-type">
+      <FormField label="Type “{typeToConfirm}” to confirm" for="{id}-type">
         <Input
           id="{id}-type"
+          placeholder={typeToConfirm}
           autocomplete="off"
           spellcheck={false}
           bind:value={typed}

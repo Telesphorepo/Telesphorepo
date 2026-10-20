@@ -106,7 +106,7 @@
   description="{someNames(names)}."
   confirmLabel="Delete {repoCount(names.length)}"
   destructive
-  typeToConfirm={names.length > 1 ? String(names.length) : undefined}
+  typeToConfirm={names.length > 1 ? `delete ${repoCount(names.length)}` : undefined}
   changes={[
     `Deletes the ${count(deleteFiles, "file", "files")} of ${names.length === 1 ? "this repository" : "these repositories"} from the storage`,
     "Removes the access that people and CI pipelines have to them, and their network rules",
