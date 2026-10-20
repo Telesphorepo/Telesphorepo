@@ -923,8 +923,8 @@ func nexusMavenBuild(t *testing.T, group, version, message string) (jar, pom []b
 // nexusWantMirrorBlocked requires the 409 that an upload to a mirrored repo answers.
 func nexusWantMirrorBlocked(t *testing.T, what string, st int, body []byte) {
 	t.Helper()
-	if st != http.StatusConflict || !strings.Contains(strings.ToLower(string(body)), "mirror") {
-		t.Fatalf("%s to a mirrored repo: status %d, want 409 naming the mirror: %s", what, st, body)
+	if st != http.StatusConflict || !strings.Contains(string(body), "after the switch-over from Nexus server") {
+		t.Fatalf("%s to a mirrored repo: status %d, want 409 naming the switch-over from Nexus: %s", what, st, body)
 	}
 }
 
