@@ -2140,10 +2140,15 @@ is unreachable.
 - **UI.** The admin-only **Nexus** pages (`/#/settings/nexus`, `/#/settings/nexus/{id}`). The
   list shows Server, Status, Repositories, Last check and Next check; a syncing source shows its
   progress line. The source page has, top to bottom: the header (status badge and line, Sync now
-  or Cancel the sync, Switch over, Delete), Repositories to copy (a pick table with a filter
-  above 10 repos, Kind, Name here, Who can download, and the choice question of the target
-  format (Debian: Signing key), with its secret questions below the table; one button "Copy N
-  repositories" or "Save" saves and opens the sync), Groups (their own pick table), the sync
+  or Cancel the sync, Switch over, Delete), Repositories to copy (one pick table of every Nexus repo
+  in the order a save sets them up: repos and proxies, then groups, then the repos this server
+  cannot copy, muted with their reason; a filter above 10 repos; Kind, State (Copied, New
+  repository, New proxy, New group, Stops copying, Members change, or Not copied), Name here, Who
+  can download, and the choice question of the target format (Debian: Signing key); a proxy
+  shows its remote and a group the members it reads and leaves out, and picking a group picks its
+  members; the secret questions and the remote credentials of the new repos below the table; one
+  button "Copy N repositories" or "Save", with a sentence of what the save does, saves and opens
+  the sync), the sync
   detail (per repo "copied (size) of checked", last activity, a bar with "about N%" when an
   earlier walk exists, "No progress for N minutes" after two minutes; the log, which polls every
   2 s and filters by a clicked repo; the failed files), the sync history (Started, How, Took, New
@@ -3388,8 +3393,9 @@ page are in `web/src/README.md`.
   edits and marks the fields that are wrong.
 - **Nexus migration.** A table of Nexus servers with their status, repositories, last check and
   next check. Adding a server opens a dialog. A server's page shows its status as a badge and a
-  line next to its title, then the repositories to copy and the groups (pick tables; a click on a
-  row picks it), the running or chosen sync with its progress and log, the syncs (a row opens its
+  line next to its title, then the repositories to copy (one pick table: repositories and
+  proxies, then the groups with their members, then what cannot be copied; a click on a row picks
+  it, and each row says its state after a save), the running or chosen sync with its progress and log, the syncs (a row opens its
   details) and the connection. Sync now or Cancel the sync, Switch over and **Delete** are in the
   header; while a sync runs, Delete says "Cancel the sync first".
 - **Your account.**

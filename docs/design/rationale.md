@@ -540,8 +540,11 @@ repository, a click anywhere on a row picks it, and a filter shows above ten rep
 can download each one starts as Nexus does it, so the admin changes a row only to differ from
 Nexus. An apt repository can keep the Nexus key; the page asks for its passphrase only when the
 key has one, because Nexus never gives it. A proxy keeps its remote and asks only for the remote
-password, which Nexus never gives. Groups have their own table and say which of their members
-are not picked. One button, "Copy N repositories", saves and starts the copy and opens it, so
+password, which Nexus never gives. Groups sit in the same table after the repositories they read,
+because a save sets those up first; each group names its members and the ones it leaves out, and
+picking a group picks its members. Each row says what a save does to it (Copied, New repository,
+Stops copying), and the repositories this server cannot copy stay at the end, muted, with their
+reason. One button, "Copy N repositories", saves and starts the copy and opens it, so
 the next step is the same click. The sync shows per repository what it copied of what it
 checked, the last activity, and a bar only when an earlier sync gives a total to divide by; a
 repository with no progress for two minutes says so in the warning tone. The log names each step
