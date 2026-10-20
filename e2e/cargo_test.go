@@ -129,6 +129,8 @@ cd /work/base && cargo publish --registry tr
 cd /work/lib && cargo publish --registry tr
 sed -i 's/^version = "1.0.0"/version = "1.1.0"/; s/hello 1.0.0/hello 1.1.0/' Cargo.toml src/lib.rs
 cargo publish --registry tr
+# The crate file that the test compares: cargo package writes the same bytes to target/package.
+cargo package --registry tr --no-verify
 if cargo publish --registry tr --no-verify 2>/tmp/again.txt; then echo "REPUBLISH ACCEPTED"; exit 1; fi
 cat /tmp/again.txt
 cd /work/clash
