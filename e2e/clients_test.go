@@ -230,19 +230,27 @@ rm -f /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list
 if ! apt-get update >/tmp/update.log 2>&1; then cat /tmp/update.log; exit 1; fi
 cat /tmp/update.log
 echo '=== end of apt-get update ==='
-apt-get install -y --no-install-recommends e2e-hello e2e-native
+apt-get install -y --no-install-recommends ${E2E_PKGS:-e2e-hello e2e-native}
 echo "RESULT: $(e2e-hello)"
-echo "NATIVE: $(e2e-native)"
+if command -v e2e-native >/dev/null; then echo "NATIVE: $(e2e-native)"; fi
 `
 
-// debAptInstall runs apt-get update/install in a fresh container and returns its output.
+// debAptInstall runs apt-get update/install of e2e-hello and e2e-native in a fresh container and
+// returns its output.
 func debAptInstall(t *testing.T, s *Server, repo, user, pass, key string) string {
+	t.Helper()
+	return debAptInstallOf(t, s, repo, user, pass, key, "e2e-hello e2e-native")
+}
+
+// debAptInstallOf is debAptInstall of the packages pkgs (separated by spaces).
+func debAptInstallOf(t *testing.T, s *Server, repo, user, pass, key, pkgs string) string {
 	t.Helper()
 	sources := fmt.Sprintf("Types: deb\nURIs: %s/debian/%s\nSuites: trixie\nComponents: main\nSigned-By: /etc/apt/keyrings/tr.asc\n", s.InternalURL, repo)
 	// apt only applies auth.conf entries to plain http when the protocol is spelled out.
 	auth := fmt.Sprintf("machine http://%s:8080/debian/%s login %s password %s\n", s.Alias, repo, user, pass)
 	code, out := RunClient(t, debImage, ClientOpts{
 		Cmd: []string{"sh", "/apt.sh"},
+		Env: map[string]string{"E2E_PKGS": pkgs},
 		Files: []ContainerFile{
 			{Content: debAptScript, Path: "/apt.sh", Mode: 0o755},
 			{Content: key, Path: "/etc/apt/keyrings/tr.asc"},
@@ -257,7 +265,9 @@ func debAptInstall(t *testing.T, s *Server, repo, user, pass, key string) string
 	if !ok {
 		t.Fatalf("apt output missing update marker:\n%s", out)
 	}
-	for _, bad := range []string{"NO_PUBKEY", "not signed", "insecure", "Err:"} {
+	// "doesn't support architecture": a Release whose Architectures lacks the client's, as Nexus
+	// writes for a repo of only "all" packages.
+	for _, bad := range []string{"NO_PUBKEY", "not signed", "insecure", "Err:", "doesn't support architecture"} {
 		if strings.Contains(update, bad) {
 			t.Fatalf("apt-get update output contains %q:\n%s", bad, update)
 		}

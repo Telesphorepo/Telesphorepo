@@ -63,6 +63,19 @@ func TestDebian(t *testing.T) {
 		if st, b := debUpload(t, s, repo, pkgs.hello1Conflict, w); st != http.StatusConflict {
 			t.Fatalf("conflicting upload: status %d, want 409: %s", st, b)
 		}
+		// A repo of only "all" packages: its Release still lists the configured architectures, and
+		// each binary-<arch>/Packages holds the "all" packages, so apt on any of them reads its own
+		// index with no "doesn't support architecture" notice (debAptInstall fails on one).
+		allRepo := RandName("deball")
+		s.CreateRepo(t, allRepo, "debian", false, map[string]any{"architectures": archs})
+		s.SetPerms(t, allRepo, writer, "repo.download", "repo.publish")
+		s.SetPerms(t, allRepo, reader, "repo.download")
+		debMustUpload(t, s, allRepo, pkgs.hello1, Basic{User: "ci", Pass: PublishToken(t, s, writer, allRepo)}, "e2e-hello", "1.0", "all")
+		s.WaitDebianIndexed(t, allRepo)
+		if out := debAptInstallOf(t, s, allRepo, reader, readerPass, s.DebianKey(t, allRepo, rauth), "e2e-hello"); !strings.Contains(out, "RESULT: hello 1.0\n") {
+			t.Fatalf("apt install from a repo of only \"all\" packages:\n%s", out)
+		}
+
 		debMustUpload(t, s, repo, pkgs.native, w, "e2e-native", "1.0", pkgs.arch)
 
 		poolPath := "pool/main/e/e2e-hello/e2e-hello_1.0_all.deb"
