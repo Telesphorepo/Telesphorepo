@@ -4,7 +4,7 @@
   the Telesphorepo CLI: ProjectSetup makes a setup line, with the snippets behind "Set it up by
   hand"), from CI (the CI pipeline that a person with CI pipelines adds, then the CI file), and by
   hand (upload in the browser, or a publish token with curl). The snippets come from the server
-  (GET /api/repos/{name}/usage). A pause shows once, above the tabs (RepoView).
+  (GET /api/repos/{name}/usage). A pause shows once, as a line under the header (RepoView).
 -->
 <script lang="ts">
   import type { Repo } from "$lib/api";

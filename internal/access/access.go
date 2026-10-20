@@ -283,10 +283,11 @@ func downloadSentence(d *Download) string {
 }
 
 // publishSentence: "3 people and 1 CI pipeline (acme/app, branch main), only from GitHub
-// Actions.", "only admins.", "nobody: mirrors Nexus source acme; cut over first."
+// Actions.", "only admins.", "nobody. Uploads and deletes start after the switch-over from Nexus
+// server acme." A blocked message is full sentences, so it follows "nobody." as it is.
 func publishSentence(p *Publish) string {
 	if p.Blocked != nil {
-		return "nobody: " + strings.TrimSuffix(p.Blocked.Message, ".") + "."
+		return "nobody. " + p.Blocked.Message
 	}
 	var parts []string
 	people := 0

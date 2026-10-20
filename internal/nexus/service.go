@@ -993,7 +993,7 @@ func (s *Service) hold(ctx context.Context, tx *sql.Tx, target *repos.Repo, sour
 	case err == nil && op.Type == OpMirror && op.Ref == mirrorRef(source):
 		return nil
 	case err == nil:
-		return fmt.Errorf("%w: target repo %q is busy: %s", ErrInvalid, target.Name, s.ops.Message(op))
+		return fmt.Errorf("%w: target repo %q is busy. %s", ErrInvalid, target.Name, s.ops.Message(op))
 	case !errors.Is(err, ops.ErrNone):
 		return err
 	}
@@ -1016,13 +1016,14 @@ func (s *Service) release(ctx context.Context, tx *sql.Tx, repoID, source int64)
 	return s.ops.End(ctx, tx, op.ID, "nexus")
 }
 
-// mirrorMessage is the text of a mirror operation: the 409 answer of a write and the UI line.
+// mirrorMessage is the text of a mirror operation, one full sentence: the 409 answer of a write,
+// the access report and the line on the repository page.
 func (s *Service) mirrorMessage(op *ops.Op) string {
-	name := "a Nexus source"
+	name := "a Nexus server"
 	if id, err := strconv.ParseInt(op.Ref, 10, 64); err == nil {
 		if row, err := dbq.New(s.db.R).GetNexusSource(context.Background(), id); err == nil {
-			name = "Nexus source " + row.Name
+			name = "Nexus server " + row.Name
 		}
 	}
-	return "mirrors " + name + "; cut over first"
+	return "Uploads and deletes start after the switch-over from " + name + "."
 }

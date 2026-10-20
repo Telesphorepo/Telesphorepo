@@ -53,7 +53,8 @@ type Op struct {
 type Type struct {
 	ID    string // e.g. "delete", "mirror"
 	Label string
-	// Message is the 409 text of a refused write and the line the UI shows, made from the state.
+	// Message is the 409 text of a refused write and the line the UI shows, made from the state:
+	// full sentences, each with its capital and its period.
 	Message func(op *Op) string
 	// Resume continues a failed operation; nil: it cannot be resumed.
 	Resume func(ctx context.Context, op *Op) error
@@ -94,12 +95,13 @@ func (s *Service) Types() []*Type {
 	return out
 }
 
-// Message is the text of op: the 409 answer of a refused write and the UI line.
+// Message is the text of op, in full sentences: the 409 answer of a refused write, the access
+// report and the line on the repository page.
 func (s *Service) Message(op *Op) string {
 	if t := s.types[op.Type]; t != nil {
 		return t.Message(op)
 	}
-	return "the repository has an operation (" + op.Type + ")"
+	return "The repository has an operation (" + op.Type + ")."
 }
 
 // FromRow builds an Op from the columns of a repo row joined with repo_ops (nil when the repo

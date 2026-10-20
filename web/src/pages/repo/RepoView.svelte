@@ -6,8 +6,12 @@
   page is a level below. The parent keys it by name.
 
   A proxy has the Files tab (its cached files; people with Delete files delete them) and the Use tab, and no
-  publish or upload. A group has no files and no tabs: its page is the Use view and its members,
-  each a link to the member's page.
+  publish or upload. A group has no files and no tabs: its page is its members, each a link to the
+  member's page, then the Use view.
+
+  While the repository has an operation (a copy from Nexus that waits for the switch-over, a
+  delete), the people who could upload or delete see its sentence as one muted line under the
+  header. A failed operation is an alert with Resume and Stop for the holders of All repositories.
 -->
 <script lang="ts">
   import { api, ApiError, type Repo } from "$lib/api";
@@ -93,6 +97,10 @@
   // Nobody publishes to a group or a proxy.
   const canWrite = $derived(!!r && r.kind === "hosted" && perms.includes("repo.publish"));
   const locked = $derived(r?.operation?.message ?? "");
+  // The line under the header for the people who could upload or delete: the operation's own
+  // sentence (a failed one shows as an alert to the holders of All repositories instead).
+  const failedForAdmin = $derived(r?.operation?.state === "failed" && auth.allRepos());
+  const paused = $derived(!!locked && !failedForAdmin && (canWrite || perms.includes("repo.delete")));
   let resumeOpen = $state(false);
   let clearOpen = $state(false);
   async function resumeOperation() {
@@ -126,6 +134,11 @@
   // The folder that Upload starts in: the open folder of the Files tab.
   const uploadFolder = $derived(view.kind !== "files" ? "" : view.path === "" || view.path.endsWith("/") ? view.path : parentOf(view.path));
 </script>
+
+{#snippet pausedLine()}
+  <PauseIcon aria-hidden="true" />
+  <span>{locked}{r?.operation?.type === "delete" ? "" : " Downloads work."}</span>
+{/snippet}
 
 {#if repo.loading && repo.data === undefined}
   <Loading rows={5} />
@@ -170,7 +183,12 @@
     <Button variant="outline" href={href(repoPath(r.name))}>Open the files</Button>
   </EmptyState>
 {:else}
-  <PageHeader title={r.name} description={r.description || undefined} crumbs={[{ label: "Repositories", href: href("/") }, { label: r.name }]}>
+  <PageHeader
+    title={r.name}
+    description={r.description || undefined}
+    crumbs={[{ label: "Repositories", href: href("/") }, { label: r.name }]}
+    status={paused ? pausedLine : undefined}
+  >
     {#snippet meta()}
       {#if !r.anonymous_read}
         <LockIcon role="img" aria-label="Private" class="size-5 shrink-0 text-muted-foreground" />
@@ -190,7 +208,7 @@
     {/snippet}
   </PageHeader>
 
-  {#if r.operation?.state === "failed" && auth.allRepos()}
+  {#if r.operation && failedForAdmin}
     <Alert.Root variant="destructive" class="mb-6">
       <PauseIcon />
       <Alert.Title>An operation on this repository failed</Alert.Title>
@@ -208,12 +226,6 @@
     <ConfirmDialog bind:open={clearOpen} title="Stop the {r.operation.type}?" confirmLabel="Stop the operation"
       changes={["Ends the operation", "Keeps the repository with the files that are left"]}
       onConfirm={clearOperation} />
-  {:else if (canWrite || perms.includes("repo.delete")) && locked}
-    <Alert.Root class="mb-6">
-      <PauseIcon />
-      <Alert.Title>Uploads and deletes are paused</Alert.Title>
-      <Alert.Description>{locked}. Try again when it has finished. Downloads keep working.</Alert.Description>
-    </Alert.Root>
   {/if}
 
   <!-- On a phone the tabs scroll sideways; the cut-off last tab shows that, without a scrollbar. A group has one view and no tabs. -->
@@ -233,8 +245,9 @@
   {#if view.kind === "files"}
     <FilesTab repo={r} path={view.path} {query} {base} canWrite={canDelete} {canUpload} />
   {:else if view.kind === "use"}
-    <UseTab repo={r} {usage} {base} />
+    <!-- A group's page: its members first, then how to use it. -->
     {#if group}<GroupMembersList repo={r} />{/if}
+    <UseTab repo={r} {usage} {base} />
   {:else}
     <PublishTab repo={r} {usage} {canUpload} {query} />
   {/if}

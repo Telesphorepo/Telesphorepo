@@ -1,7 +1,9 @@
 <!--
   The top of every page: the breadcrumbs, the title (the page's only h1), an optional one-line
   description that says what the page is for, and actions on the right. `meta` sits next to the
-  title (badges such as the format and visibility of a repository).
+  title (badges such as the format and visibility of a repository). `status` is one muted line under
+  them: an icon and one sentence about a state that has no other place on the page (a repository
+  whose uploads wait for the switch-over from Nexus).
 
   On a Settings page the breadcrumbs come from the sidebar: Settings › group › item, then the title
   on a sub-page (Settings › People and CI › CI pipelines › acme/app). `crumbs` replaces what
@@ -25,6 +27,7 @@
     crumbs,
     back,
     meta,
+    status,
     actions,
   }: {
     title: string;
@@ -35,6 +38,8 @@
     /** @deprecated Pass `crumbs`. A Browse sub-page's parent; it shows as the breadcrumb before the title. */
     back?: { href: string; label: string };
     meta?: Snippet;
+    /** One muted line under the title: an icon and one sentence. */
+    status?: Snippet;
     actions?: Snippet;
   } = $props();
 
@@ -55,6 +60,11 @@
         {#if meta}<div class="flex flex-wrap items-center gap-2">{@render meta()}</div>{/if}
       </div>
       {#if description}<p class="mt-1.5 max-w-prose text-body text-muted-foreground">{description}</p>{/if}
+      {#if status}
+        <p class="mt-2 flex max-w-prose items-start gap-2 text-meta text-pretty text-muted-foreground [&_svg]:mt-0.5 [&_svg]:size-3.5 [&_svg]:shrink-0">
+          {@render status()}
+        </p>
+      {/if}
     </div>
     {#if actions}<div class="flex shrink-0 flex-wrap items-center gap-2">{@render actions()}</div>{/if}
   </div>

@@ -60,7 +60,7 @@ func lockRepo(t *testing.T, s *Server, repo string) {
 		} `json:"operation"`
 	}
 	s.MustAPI(t, http.MethodGet, "/api/repos/"+repo, nil, s.Admin(), &r)
-	if r.Operation == nil || r.Operation.Type != "mirror" || r.Operation.State != "held" || !strings.Contains(r.Operation.Message, "cut over first") {
+	if r.Operation == nil || r.Operation.Type != "mirror" || r.Operation.State != "held" || !strings.Contains(r.Operation.Message, "Uploads and deletes start after the switch-over from Nexus server ") {
 		t.Fatalf("repo %s after the Nexus mapping: operation %+v, want a held mirror", repo, r.Operation)
 	}
 }

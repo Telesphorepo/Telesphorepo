@@ -845,10 +845,10 @@ transaction.
 | `PUT /api/repos/{name}/members` | `repo.settings` | `{members: [names]}` replaces the members of a group and their order; returns the repo. 400 for 0 or more than 50 members, a member of another format, a group, a name listed twice, an unknown name, or a repo that is not a group |
 | `POST /api/repos/{name}/proxy/test` | `repo.settings` | Checks the remote of a proxy now: 200 `{ok: true}`, or a 502 problem document with the extension member `ok: false` and the reason as its detail. It records the result as the proxy's last answer or last error |
 | `PATCH /api/repos` | `repo.settings` on each repo | `{names: [...], anonymous_read: bool}`. The one way to make repos public or private: one repo update of every repo in one transaction. One `repo.update` event per repo whose value changed. 200 `{changed: n}` |
-| `POST /api/repos/delete` | `repositories.all` | `{names: [...]}`. Checks that every repo exists (404) and that none has an operation (409 `<name>: <message>`); then nothing is deleted. Then it deletes the repos one after another, each under a `delete` operation (see **Repo operations**). The first failure stops the rest: 500 `{deleted: [names done], error}`, and the failed repo keeps a failed `delete` operation. One `repo.delete` event per repo. 200 `{deleted: [names], files: n}` |
+| `POST /api/repos/delete` | `repositories.all` | `{names: [...]}`. Checks that every repo exists (404) and that none has an operation (409 `You cannot delete <name> now. <message>`); then nothing is deleted. Then it deletes the repos one after another, each under a `delete` operation (see **Repo operations**). The first failure stops the rest: 500 `{deleted: [names done], error}`, and the failed repo keeps a failed `delete` operation. One `repo.delete` event per repo. 200 `{deleted: [names], files: n}` |
 | `POST /api/repos/{name}/operation/resume` · `DELETE /api/repos/{name}/operation` | `repositories.all` | Resume runs the failed operation of the repo again (a delete deletes the repo): 200 `{ok: true}`. Clear ends it, and the repo keeps the files that are left: 204. 409 when the repo has no operation, when it has not failed, or when its type cannot resume or clear here (a Nexus mirror ends at the cut-over). Records `repo.delete.resume` or `repo.delete.clear` |
 | `GET /api/repos/{name}/grants` | `repo.access` | `[{username, perms: [...]}]` by username; `perms` are permission IDs in registry order |
-| `GET /api/repos/{name}/access?admins=1` | a repository permission that manages the repo (one with a second-factor need: `repo.delete`, `repo.settings`, `repo.access`, `ci.pipelines`) | The access report, built from the parts of `access.Engine.Decide`: `{repo, format, kind, people, download: {public, people, admins, guards, sentence, notes}, publish: {people, admins, ci, guards, blocked, sentence}}`. `people` are `{username, perms, via}` (`permission`; with `admins=1` the holders of `repositories.all` too, via `all_repos`). `guards` maps a guard name to `{restricted, summary, detail}`; the network guard's `detail` is `{any, lists: [{name, title}], cidrs: [{cidr, note}]}`. `blocked` is null, or `{code: "read_only_kind" \| "operation", message}`: a proxy or a group (it lists no publisher and no CI pipeline) or a locked repo. Each `sentence` says the answer in words, e.g. "2 people, only from 10.0.0.0/8." `notes` are the sentences that modules add (`access.Engine.AddDownloadNote`): while edge delivery is on, "Downloads come from the edge." or "Downloads go to the server: read rules apply." |
+| `GET /api/repos/{name}/access?admins=1` | a repository permission that manages the repo (one with a second-factor need: `repo.delete`, `repo.settings`, `repo.access`, `ci.pipelines`) | The access report, built from the parts of `access.Engine.Decide`: `{repo, format, kind, people, download: {public, people, admins, guards, sentence, notes}, publish: {people, admins, ci, guards, blocked, sentence}}`. `people` are `{username, perms, via}` (`permission`; with `admins=1` the holders of `repositories.all` too, via `all_repos`). `guards` maps a guard name to `{restricted, summary, detail}`; the network guard's `detail` is `{any, lists: [{name, title}], cidrs: [{cidr, note}]}`. `blocked` is null, or `{code: "read_only_kind" \| "operation", message}`: a proxy or a group (it lists no publisher and no CI pipeline) or a locked repo. Each `sentence` says the answer in words, e.g. "2 people, only from 10.0.0.0/8." A blocked publish sentence is "nobody." followed by the message. `notes` are the sentences that modules add (`access.Engine.AddDownloadNote`): while edge delivery is on, "Downloads come from the edge." or "Downloads go to the server: read rules apply." |
 | `GET /api/users/{username}/access` · `GET /api/me/access` | `people.manage` · password, read token or UI session | `{username, permissions, disabled, kind, can_publish, items: [{repo, format, public, perms, via}], next}`, a keyset page by repo name. On a proxy or a group a person holds no `repo.publish` and no `ci.pipelines` |
 | `PUT /api/grants` | `repo.access` on each repo | `{users: [...], repos: [...], perms: [...]}`. Sets the repository permission set of every pair of user and repo, at most 1000 pairs; `perms: []` removes the pairs. 400 for an unknown permission ID, a server permission, or a permission without one it needs (e.g. `repo.publish` without `repo.download`, `ci.pipelines` without `repo.publish`); 404 for an unknown user or repo. 403 when the caller adds or removes a permission they do not hold on that repo. The auth service records one `grant.set` event with `{old, new}` per pair whose set changed, in the transaction. 200 `{changed: n}` |
 | `GET /api/repos/{name}/assets?prefix=&after=&limit=` | `repo.download` | Ordered by path; the prefix is a range scan |
@@ -1533,7 +1533,7 @@ A repo operation (`repo_ops`, `internal/ops`) is a long task that owns a repo: a
 with an ID, a type, its owner module, the owner's reference, a state (`running`, `held`, `failed`),
 progress (`done`, `total`) and the error of a failure. Its row is deleted when it ends. While a repo
 has an operation, the access engine refuses `Write`, `Delete` and `Mint` with 409 and the message
-of the operation type; repo JSON shows it as `operation`. A module registers its types with
+of the operation type, in full sentences; repo JSON shows it as `operation`. A module registers its types with
 `Extender.OpType` (`ID`, `Label`, `Message`, and `Resume` and `Clear` when it has them).
 
 - **`delete`** (core). `POST /api/repos/delete` begins it (`running`) for each repo, removes the
@@ -1544,7 +1544,7 @@ of the operation type; repo JSON shows it as `operation`. A module registers its
   left. The repo page shows a failed operation with Resume and "Stop and keep the files" to a holder
   of `repositories.all`.
 - **`mirror`** (nexus). `held` while a Nexus source mirrors a hosted repo; its reference is the
-  source ID and its message is `mirrors Nexus source <name>; cut over first`. Saving the mapping
+  source ID and its message is `Uploads and deletes start after the switch-over from Nexus server <name>.` Saving the mapping
   begins it, and unmapping or the cut-over ends it. It cannot be resumed or cleared through the repo
   routes.
 
@@ -2090,7 +2090,7 @@ is unreachable.
 
   An existing target gets the config and the field values that its plan gives (a repo update). Each
   hosted target gets the operation `mirror` (state `held`, see **Repo operations**), whose message
-  is `mirrors Nexus source <name>; cut over first`; a target with another operation cannot be
+  is `Uploads and deletes start after the switch-over from Nexus server <name>.`; a target with another operation cannot be
   mapped (400). A hosted target that leaves the mapping loses the operation and keeps its files.
   Targets are created and changed through `repos.Service.Create` and `Update`. Targets that the request creates stay when its
   transaction fails. After the mapping, the save starts a sync with `trigger: save`.
@@ -2147,8 +2147,8 @@ is unreachable.
   detail (per repo "copied (size) of checked", last activity, a bar with "about N%" when an
   earlier walk exists, "No progress for N minutes" after two minutes; the log, which polls every
   2 s and filters by a clicked repo; the failed files), the sync history (Started, How, Took, New
-  files, Size, Failed, State) and the connection with the save bar. The repo list and the repo
-  page show a "mirrors Nexus" badge while the repo has the `mirror` operation.
+  files, Size, Failed, State) and the connection with the save bar. While a repo has the `mirror`
+  operation, its page shows the operation's message under the header to the people who could upload or delete.
 
 ## Group and proxy repositories
 

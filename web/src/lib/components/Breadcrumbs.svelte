@@ -5,19 +5,37 @@
   full text on hover.
 
     <Breadcrumbs items={[{ label: "Settings", href: "#/settings" }, { label: "Repositories", href: "#/settings/repositories" }, { label: "maven" }]} />
+
+  `path` is the other look, for a place inside a repository (the folder path of the Files tab, in
+  the toolbar of its panel): body text after a folder icon, the steps parted by slashes, so it
+  never reads as a second page trail.
+
+    <Breadcrumbs path label="Folder" items={[{ label: "maven", href }, { label: "com", href }, { label: "acme" }]} />
 -->
 <script lang="ts">
   import ChevronRightIcon from "@lucide/svelte/icons/chevron-right";
+  import FolderOpenIcon from "@lucide/svelte/icons/folder-open";
   import type { Crumb } from "$lib/crumbs";
 
-  let { items }: { items: Crumb[] } = $props();
+  let {
+    items,
+    path = false,
+    label = "Breadcrumb",
+  }: {
+    items: Crumb[];
+    /** A path inside a repository: body text, a folder icon, slashes between the steps. */
+    path?: boolean;
+    /** Accessible name of the trail. */
+    label?: string;
+  } = $props();
 </script>
 
-<nav aria-label="Breadcrumb">
-  <ol class="flex min-w-0 flex-wrap items-center gap-x-1 gap-y-1 text-meta text-muted-foreground">
+<nav aria-label={label} class={path ? "flex min-w-0 items-start gap-2" : undefined}>
+  {#if path}<FolderOpenIcon aria-hidden="true" class="mt-0.5 size-4 shrink-0 text-muted-foreground" />{/if}
+  <ol class="flex min-w-0 flex-wrap items-center gap-y-1 text-muted-foreground {path ? 'gap-x-1.5 text-body' : 'gap-x-1 text-meta'}">
     {#each items as c, i (i)}
       {@const last = i === items.length - 1}
-      <li class="flex min-w-0 items-center gap-1">
+      <li class="flex min-w-0 items-center {path ? 'gap-1.5' : 'gap-1'}">
         {#if c.href && !last}
           <a
             href={c.href}
@@ -29,10 +47,12 @@
           <span
             aria-current={last ? "page" : undefined}
             title={c.label.length > 24 ? c.label : undefined}
-            class="block max-w-[16rem] truncate {last ? 'text-foreground' : ''}">{c.label}</span
+            class="block max-w-[16rem] truncate {last ? 'text-foreground' : ''} {last && path ? 'font-medium' : ''}">{c.label}</span
           >
         {/if}
-        {#if !last}<ChevronRightIcon aria-hidden="true" class="size-3.5 shrink-0 opacity-60" />{/if}
+        {#if !last}
+          {#if path}<span aria-hidden="true" class="opacity-60">/</span>{:else}<ChevronRightIcon aria-hidden="true" class="size-3.5 shrink-0 opacity-60" />{/if}
+        {/if}
       </li>
     {/each}
   </ol>

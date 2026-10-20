@@ -1,8 +1,9 @@
 <!--
-  The Files tab: the folder path and the choice of view, then the open folder in that view, and on
-  the right the details column. The column shows the selected file, else the open folder: the
-  repository at the top folder, what a plain folder holds, or the artifact and its snippets at an
-  artifact or a version folder. It stays while the reader moves between files and folders, so the
+  The Files tab: one panel (a card) whose toolbar holds the folder path and the choice of view, and
+  under it the open folder in that view; on the right the details column. The folder path is a
+  path (slashes, body text) in the panel, so it never reads as the page's breadcrumbs. The column
+  shows the selected file, else the open folder: the repository at the top folder, what a plain
+  folder holds, or the artifact and its snippets at an artifact or a version folder. It stays while the reader moves between files and folders, so the
   view never changes width. `path` is a folder ("" or ending in "/") or a file; ?version= names a
   version of the artifact folder (a Debian package keeps every version in one folder).
 
@@ -28,7 +29,7 @@
   import { ViewChoice, type ViewKind } from "$lib/view.svelte";
   import type { Crumb } from "$lib/crumbs";
   import { Button } from "$lib/components/ui/button";
-  import Toolbar from "$lib/components/Toolbar.svelte";
+  import * as Card from "$lib/components/ui/card";
   import Breadcrumbs from "$lib/components/Breadcrumbs.svelte";
   import ViewSwitcher from "$lib/components/ViewSwitcher.svelte";
   import DataTable from "$lib/components/DataTable.svelte";
@@ -243,67 +244,69 @@
   <Button variant="outline" class="hover:text-destructive" onclick={() => askDelete({ path: folder, dir: true })}><Trash2Icon />Delete folder</Button>
 {/snippet}
 
-<Toolbar>
-  <div class="min-w-0 flex-1"><Breadcrumbs items={crumbs} /></div>
-  {#snippet end()}
-    {#if !details}
-      <Button variant="ghost" size="sm" onclick={() => (closed = false)}><PanelRightOpenIcon />Show details</Button>
-    {/if}
-    <ViewSwitcher bind:value={view.value} {views} label="Show files as" />
-  {/snippet}
-</Toolbar>
-
-<div class="flex flex-col gap-6 lg:flex-row lg:items-start">
-  <div class="min-w-0 flex-1 {viewMin}">
-    {#if view.value === "tree"}
-      {#key version}<TreeView {repo} {folder} {file} onEarlier={earlierBuilds} />{/key}
-    {:else if !place.data && place.error}
-      <div class="flex flex-wrap items-center gap-3 py-3">
-        <ErrorState inline error={place.error} />
-        <Button variant="outline" size="sm" onclick={place.reload}>Try again</Button>
-      </div>
-    {:else if view.value === "columns"}
-      {#key version}<ColumnsView {repo} {folder} {file} onEarlier={earlierBuilds} />{/key}
-    {:else if !place.data}
-      <DataTable source={loadingSource} caption="Loading" key={() => 0} columns={[{ label: "Name", grow: true }, { label: "Size", align: "right" }]}>
-        {#snippet row()}{/snippet}
-      </DataTable>
-    {:else}
-      {@const p = place.data}
-      {#key folder + "\n" + versionQ + "\n" + version}
-        {#if p.kind === "artifact"}
-          <VersionsView {repo} artifact={p.artifact} flow={view.value === "coverflow"} canWrite={canWrite} onDelete={askDelete} />
-        {:else if p.kind === "version"}
-          <BuildsView
-            {repo}
-            artifact={p.artifact}
-            {folder}
-            version={p.version}
-            {build}
-            earlier={query.get("earlier") === "1"}
-            flow={view.value === "coverflow"}
-            selected={file}
-            compact={details}
-            {canWrite}
-            onDelete={askDelete}
-            onList={showList}
-          />
-        {:else}
-          <FolderList
-            {repo}
-            {folder}
-            selected={file}
-            {canWrite}
-            {canUpload}
-            compact={details || pickedRows.length > 0}
-            bind:picked
-            onPicked={(rows) => (pickedRows = rows)}
-            onDelete={askDeleteMany}
-          />
+<div class="flex flex-col gap-4 lg:flex-row lg:items-start">
+  <Card.Root class="min-w-0 flex-1 gap-0 py-0">
+    <!-- The panel's toolbar: where in the repository, then how to show it. -->
+    <div class="flex flex-wrap items-center gap-x-4 gap-y-2 border-b px-4 py-2 sm:px-5">
+      <div class="min-w-0 flex-1 basis-48 py-1.5"><Breadcrumbs path label="Folder" items={crumbs} /></div>
+      <div class="ml-auto flex items-center gap-2">
+        {#if !details}
+          <Button variant="ghost" size="sm" onclick={() => (closed = false)}><PanelRightOpenIcon />Show details</Button>
         {/if}
-      {/key}
-    {/if}
-  </div>
+        <ViewSwitcher bind:value={view.value} {views} label="Show files as" />
+      </div>
+    </div>
+    <div class="min-w-0 px-2 pt-2 pb-3 sm:px-3 {viewMin}">
+      {#if view.value === "tree"}
+        {#key version}<TreeView {repo} {folder} {file} onEarlier={earlierBuilds} />{/key}
+      {:else if !place.data && place.error}
+        <div class="flex flex-wrap items-center gap-3 py-3">
+          <ErrorState inline error={place.error} />
+          <Button variant="outline" size="sm" onclick={place.reload}>Try again</Button>
+        </div>
+      {:else if view.value === "columns"}
+        {#key version}<ColumnsView {repo} {folder} {file} onEarlier={earlierBuilds} />{/key}
+      {:else if !place.data}
+        <DataTable source={loadingSource} caption="Loading" key={() => 0} columns={[{ label: "Name", grow: true }, { label: "Size", align: "right" }]}>
+          {#snippet row()}{/snippet}
+        </DataTable>
+      {:else}
+        {@const p = place.data}
+        {#key folder + "\n" + versionQ + "\n" + version}
+          {#if p.kind === "artifact"}
+            <VersionsView {repo} artifact={p.artifact} flow={view.value === "coverflow"} canWrite={canWrite} onDelete={askDelete} />
+          {:else if p.kind === "version"}
+            <BuildsView
+              {repo}
+              artifact={p.artifact}
+              {folder}
+              version={p.version}
+              {build}
+              earlier={query.get("earlier") === "1"}
+              flow={view.value === "coverflow"}
+              selected={file}
+              compact={details}
+              {canWrite}
+              onDelete={askDelete}
+              onList={showList}
+            />
+          {:else}
+            <FolderList
+              {repo}
+              {folder}
+              selected={file}
+              {canWrite}
+              {canUpload}
+              compact={details || pickedRows.length > 0}
+              bind:picked
+              onPicked={(rows) => (pickedRows = rows)}
+              onDelete={askDeleteMany}
+            />
+          {/if}
+        {/key}
+      {/if}
+    </div>
+  </Card.Root>
 
   {#if pickedRows.length}
     {@const s = pickSummary}

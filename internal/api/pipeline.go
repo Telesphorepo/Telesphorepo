@@ -72,9 +72,9 @@ func (a *API) collectBlobs(ctx context.Context) {
 // deleteMessage is the text of a repo delete.
 func deleteMessage(op *ops.Op) string {
 	if op.State == ops.Failed {
-		return "a delete of the repository failed (" + op.Error + "); resume it, or stop it and keep the files, on the repository's page"
+		return "A delete of the repository failed (" + op.Error + "). Resume it, or stop it and keep the files, on the repository's page."
 	}
-	return "the repository is being deleted"
+	return "The repository is being deleted."
 }
 
 // deleteRepos deletes the repos of names with all their files (repositories.all): {names} ->
@@ -106,7 +106,7 @@ func (a *API) deleteRepos(w http.ResponseWriter, r *http.Request, c *route.Call)
 			return
 		}
 		if repo.Op != nil {
-			httpx.Error(w, r, http.StatusConflict, repo.Name+": "+a.ops.Message(repo.Op))
+			httpx.Error(w, r, http.StatusConflict, "You cannot delete "+repo.Name+" now. "+a.ops.Message(repo.Op))
 			return
 		}
 		all = append(all, repo)

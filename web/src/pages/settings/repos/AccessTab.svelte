@@ -252,7 +252,7 @@
 
   <!-- Nobody publishes to a group or a proxy. -->
   {#if repo.kind === "hosted" && (canSettings || canPipelines)}
-    <FormSection title="Publish" description={a.publish.blocked?.code === "operation" ? "Nobody can publish until the copy from Nexus ends. The access below applies after that." : a.publish.blocked?.message}>
+    <FormSection title="Publish" description={a.publish.blocked?.code === "operation" ? "Nobody can publish until the switch-over from Nexus. The access below applies after that." : a.publish.blocked?.message}>
       {#snippet actions()}
         {#if a.publish.blocked?.code === "operation" && auth.can("nexus.manage")}<Button variant="outline" size="sm" href={href("/settings/nexus")}>Open Nexus migration</Button>{/if}
       {/snippet}

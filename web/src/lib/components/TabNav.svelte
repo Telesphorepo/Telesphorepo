@@ -34,7 +34,7 @@
 <nav
   bind:this={row}
   aria-label={label}
-  class="-mx-1 mb-8 flex gap-1 overflow-x-auto px-1 py-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+  class="-mx-1 mb-6 flex gap-1 overflow-x-auto px-1 py-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
 >
   {#each items as t (t.href)}
     <a
