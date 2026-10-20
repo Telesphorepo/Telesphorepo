@@ -29,10 +29,27 @@ import (
 var distributionImage = floatingImage("docker.io/library/registry:latest")
 
 // accessCount counts the requests of method whose path starts with prefix in the access log of s.
+// The server writes an access log line after the handler returns, and the engine delivers the
+// output later still, so a client can hold the whole response before its line is readable. The
+// count waits first for the line of a marker request that it sends after every earlier request
+// has returned.
 func accessCount(t testing.TB, s *Server, method, prefix string) int {
 	t.Helper()
+	mark := "/e2e-log-mark/" + RandName("m")
+	resp, err := http.Get(s.URL + mark)
+	if err != nil {
+		t.Fatalf("log marker: %v", err)
+	}
+	resp.Body.Close()
+	logs := s.Logs(t)
+	for deadline := time.Now().Add(30 * time.Second); !strings.Contains(logs, `"path":"`+mark+`"`); logs = s.Logs(t) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the access log line of %s did not appear in 30 s", mark)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 	n := 0
-	sc := bufio.NewScanner(strings.NewReader(s.Logs(t)))
+	sc := bufio.NewScanner(strings.NewReader(logs))
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
 	for sc.Scan() {
 		line := sc.Text()

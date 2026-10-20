@@ -1,4 +1,4 @@
-//go:build e2e || import || scale || clients || edge
+//go:build e2e || import || scale || clients
 
 package e2e
 
@@ -6,9 +6,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	osexec "os/exec"
+	"path"
 	"strings"
 	"testing"
 	"time"
@@ -144,6 +148,36 @@ func mavenConsumerProject(group, repoURL string) ContainerFile {
   </dependencies>
 </project>
 `, group, repoURL)}
+}
+
+// warmMaven fills M2Volume with the plugins of mavenPluginVersions and maven-dependency-plugin
+// 3.8.1 before the tests run: it builds, deploys and resolves a tiny project against a local file
+// repo. Maven retries no download whose body Maven Central cuts off, so a reset fails the build;
+// warmMaven runs the build up to three times, and the parallel tests then find every plugin in
+// the volume.
+func warmMaven(ctx context.Context) error {
+	const repo = "file:///tmp/deployed"
+	var script strings.Builder
+	script.WriteString("set -e\n")
+	for _, f := range append(mavenLibProject("e2e.warm", "1.0.0", repo, "warm"), mavenConsumerProject("e2e.warm", repo)) {
+		fmt.Fprintf(&script, "mkdir -p %s && echo %s | base64 -d > %s\n", path.Dir(f.Path), base64.StdEncoding.EncodeToString([]byte(f.Content)), f.Path)
+	}
+	script.WriteString("cd /work/lib && mvn -B -ntp -q deploy\n")
+	script.WriteString("cd /work/consumer && mvn -B -ntp -q -Ddep.version=1.0.0 -Dmdep.outputFile=/tmp/cp.txt org.apache.maven.plugins:maven-dependency-plugin:3.8.1:build-classpath\n")
+	var out []byte
+	var err error
+	for attempt := 1; attempt <= 3; attempt++ {
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+		out, err = osexec.CommandContext(ctx, Engine.CLI, "run", "--rm", "--label", "telesphorepo.e2e=1",
+			"-v", M2Volume+":/root/.m2/repository", "-e", "MAVEN_OPTS="+mavenFileLocks,
+			mavenImage, "sh", "-c", script.String()).CombinedOutput()
+		cancel()
+		if err == nil {
+			return nil
+		}
+		fmt.Fprintf(os.Stderr, "e2e: maven warm-up attempt %d failed: %v\n", attempt, err)
+	}
+	return fmt.Errorf("%w\n%s", err, out)
 }
 
 // debBuildScript builds the test packages with dpkg-deb into /out.

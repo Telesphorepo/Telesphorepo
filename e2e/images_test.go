@@ -1,4 +1,4 @@
-//go:build e2e || import || scale || clients || edge
+//go:build e2e || import || scale || clients
 
 package e2e
 

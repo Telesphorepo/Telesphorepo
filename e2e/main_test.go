@@ -1,4 +1,4 @@
-//go:build e2e || import || scale || clients || edge
+//go:build e2e || import || scale || clients
 
 package e2e
 
@@ -72,6 +72,10 @@ func runMain(m *testing.M) int {
 
 	if err := pullFloating(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "e2e: floating images:", err)
+		return 1
+	}
+	if err := warmMaven(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "e2e: maven warm-up:", err)
 		return 1
 	}
 
