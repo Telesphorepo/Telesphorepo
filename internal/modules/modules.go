@@ -13,6 +13,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/move"
 	"github.com/Telesphorepo/Telesphorepo/internal/netrules"
 	"github.com/Telesphorepo/Telesphorepo/internal/nexus"
+	"github.com/Telesphorepo/Telesphorepo/internal/nuget"
 	"github.com/Telesphorepo/Telesphorepo/internal/oidc"
 	"github.com/Telesphorepo/Telesphorepo/internal/publish"
 	"github.com/Telesphorepo/Telesphorepo/internal/raw"
@@ -36,5 +37,6 @@ func All() []module.Module {
 		debian.Module(),
 		raw.Module(),
 		docker.Module(),
+		nuget.Module(),
 	}
 }

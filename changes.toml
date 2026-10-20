@@ -25,3 +25,9 @@
 #   scope   = "publish/npm"
 #   needs   = "server"
 #   summary = "npm publish uses the new upload route"
+
+[[change]]
+version = "dev"
+scope   = "publish/nuget"
+needs   = "cli"
+summary = "Publishing to NuGet repositories needs the CLI that runs dotnet pack and pushes each package."

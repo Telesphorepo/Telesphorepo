@@ -1,6 +1,6 @@
 # Telesphorepo
 
-A small self-hosted package repository for Maven/Gradle artifacts, Debian packages, container images and Helm charts (OCI), and raw files. It is a
+A small self-hosted package repository for Maven/Gradle artifacts, Debian packages, NuGet packages, container images and Helm charts (OCI), and raw files. It is a
 single Go binary with a web UI, and stores files on local disk or in any S3-compatible bucket.
 
 ## Run it locally
@@ -14,7 +14,7 @@ go tool task dev
 
 Open **http://localhost:5173**. The startup banner prints the admin username and password and
 some client snippets. The first run fills the instance with the same demo data each time, before the
-server starts: about 150,000 Maven files, Debian packages, raw files and container images in the public repos `maven`, `debian`, `raw` and `docker`, a
+server starts: about 150,000 Maven files, Debian packages, NuGet packages, raw files and container images in the public repos `maven`, `debian`, `nuget`, `raw` and `docker`, a
 private Maven repo `internal`, and five demo users (their passwords are in the banner). To start with
 empty repos, run the binary as `telesphorepo-server dev --empty` on a fresh data dir. Data lives in
 `.telesphorepo-dev/`; delete it to start over. Press Ctrl+C to stop. The dev server does not enforce the second factor.
@@ -145,7 +145,7 @@ telesphorepo publish
 ```
 
 The CLI runs the standard publish command of the project (`mvn deploy`, `gradle publish`) with the
-session token in its environment. The build files stay as they are. Raw and Debian repos take files:
+session token in its environment; in a .NET project it runs `dotnet pack` and pushes each package. The build files stay as they are. Raw and Debian repos take files:
 `telesphorepo publish build/app.zip`. A teammate who clones the project runs `telesphorepo publish`
 and approves the computer in the browser once.
 
@@ -194,6 +194,9 @@ sudo curl -fsSL https://packages.example.com/debian/debian/key.asc -o /etc/apt/k
 echo "deb [signed-by=/etc/apt/keyrings/telesphorepo.asc] https://packages.example.com/debian/debian stable main" \
   | sudo tee /etc/apt/sources.list.d/telesphorepo.list
 ```
+
+dotnet reads the source `https://packages.example.com/nuget/nuget/index.json` from `nuget.config`
+(the repo page shows the file, with the credentials of a private repo).
 
 Docker, Helm and ORAS use the repo as the first part of the image name. The registry must be at
 the root of a host:

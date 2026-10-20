@@ -100,6 +100,12 @@ func TestFormatDescriptors(t *testing.T) {
 		!dk.Browse.Versions || !dk.Browse.ArtifactSnippets {
 		t.Fatalf("docker descriptor: %+v", dk)
 	}
+	nu := by["nuget"]
+	if !slices.Equal(nu.Kinds, []string{"hosted", "proxy", "group"}) || nu.Upload == nil || len(nu.Upload.Reads) != 1 || nu.Upload.Reads[0].Glob != "**/*.nupkg" ||
+		nu.Publish != "cli" || len(nu.Tools) != 1 || nu.Tools[0].ID != "dotnet" || !slices.Contains(nu.ImportSources, "nuget") ||
+		!nu.Browse.Versions || !nu.Browse.ArtifactSnippets || len(nu.RemotePresets) != 1 || nu.RemotePresets[0].URL != "https://api.nuget.org/v3/index.json" {
+		t.Fatalf("nuget descriptor: %+v", nu)
+	}
 }
 
 func TestCIWorkflowRoute(t *testing.T) {

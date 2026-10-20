@@ -6,8 +6,8 @@ guide for people who run the server.
 
 ## Purpose
 
-A self-hosted repository for Maven repos (including Gradle plugins), Debian (apt) repos and raw
-file repos. Each format is a module (see **Modules**), and a new format is one more module: the
+A self-hosted repository for Maven repos (including Gradle plugins), Debian (apt) repos, NuGet
+repos and raw file repos. Each format is a module (see **Modules**), and a new format is one more module: the
 core names no format. A repo is **hosted** (it stores what is published to it), a
 **proxy** (Maven and Debian: it fetches files from a remote repository and keeps them) or a
 **group** (Maven: one address for the files of several repos). It ships as one Go binary with the
@@ -71,6 +71,7 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/maven` | Module and format `maven`: the standard routes, release immutability (`Admit`), the content types, the merge of `maven-metadata.xml` in a group, the metadata after a delete (`AfterRemove`), web UI uploads with checksums and metadata |
 | `internal/debian` | Module and format `debian`: `.deb` upload/parse through `Commit`, the package rows (`OnCommitted`, `OnRemoved`), the index rebuild (`Rebuild`), `/debian/{repo}/key.asc`, the plan of a Nexus apt import (distribution and signing key). Owns its tables, queries (`queries/`, `dbq/`) and architecture config; binds a signing key per repo (`SigningKey`) |
 | `internal/raw` | Module and format `raw`: plain files at `/raw/{repo}/{path...}` (the standard routes) with an `overwrite` policy (`Admit`) |
+| `internal/nuget` | Module and format `nuget`: the NuGet V3 protocol at `/nuget/{repo}/` (see **NuGet repositories**): push, unlist and relist, the flat container, the registrations and the search rendered per request, the proxy of a NuGet V3 remote and the group name rule. Owns its table and queries (`queries/`, `dbq/`) |
 | `internal/signing` | Module `signing`. OpenPGP: key `Generate` and `Parse`, the `Keys` service (create, import, delete, one signer per key, the key of each repo), the repo field `signing_key`, clearsign/detach-sign (ProtonMail go-crypto). See **Signing keys** |
 | `internal/files` | The file tree and the details of one file. Writes and deletes go through the byte pipeline |
 | `internal/audit` | The audit log: the action registry (`Actions`), the actor in the context (`WithActor`, `System`, `CLI`), `Record` and `RecordTx`, the list query and `Cleanup`. See **Audit log** |
@@ -160,6 +161,7 @@ it needs and leaves the others nil. The kernel gives it these parts:
 | `maven` | `internal/maven` | | Format `maven` (publish category `cli`) with the tools `gradle` and `maven` (their CI steps) |
 | `debian` | `internal/debian` | `signing` | Format `debian` (publish category `cli`) with its schema, `Rebuild` and the tool `telesphorepo` |
 | `raw` | `internal/raw` | | Format `raw` (publish category `cli`) with the tool `telesphorepo` |
+| `nuget` | `internal/nuget` | | Format `nuget` (hosted, proxy and group repos; publish category `cli`) with its schema, the tool `dotnet`, the audit actions `nuget.unlist` and `nuget.relist`, the Nexus importer of `nuget`, demo data and seed |
 | `docker` | `internal/docker` | `network`, `publish` | Format `docker` (an OCI registry: hosted, proxy and group repos) with its schema; the root prefix `/v2/`, `/docker/` (the token endpoint) and `GET /api/docker/{name}/manifest`; the settings group `docker`; job `docker.links`; the publish category `helper` (the native tools push through the credential helper of the CLI, see **Publishing**); the Nexus importer of `docker`; demo data and seed (see **Docker registry**) |
 
 **Routes.** The route table (`internal/route`) gives each module a `Router`. A module registers
@@ -510,6 +512,12 @@ Tables of the `debian` component (`internal/debian/schema.sql`):
 | `deb_packages` | UNIQUE `(repo_id, distribution, component, architecture, package, version)`, idx `asset_id`, idx `deb_packages_sha256 (repo_id, distribution, component, sha256)`, idx `deb_packages_package (repo_id, component, package)` | Also the streaming index for `Packages`. The SHA-256 index finds a package an import already holds. The package index reads the versions and builds of a package. `asset_id` cascades with the pool file |
 | `deb_index_files` | PK `(repo_id, distribution, path)` (WITHOUT ROWID) | Sizes and hashes; `Release` is built from these rows |
 
+Tables of the `nuget` component (`internal/nuget/schema.sql`):
+
+| Table | Key / indexes | Notes |
+|---|---|---|
+| `nuget_versions` | UNIQUE `(repo_id, lower_id, sort_key)`, idx `nuget_versions_asset (asset_id)` | One row per package version of a hosted repo: `package_id` as the package writes it, `version` (normalised, with metadata), `normalized` (the identity), `sort_key` (`version.NuGet.SortKey`), `semver2`, `prerelease`, `listed`, `meta` (JSON of the `.nuspec` fields), `nupkg_path`, `published_at`. Written in the commit of the `.nupkg`, deleted in its remove; `asset_id` cascades with the `.nupkg`. The UNIQUE index reads a package's versions in order and pages the package ids of the search |
+
 Tables of the `docker` component (`internal/docker/schema.sql`). Every column `repo_id` cascades;
 digests are the hex of a SHA-256. Only the hooks of the format write them, in the transaction of
 the asset change (see **Docker registry**):
@@ -683,6 +691,7 @@ signed-in browser downloads from a private repo without a Basic prompt. A **writ
 | `GET, HEAD, PUT /raw/{repo}/{path...}` | read / write | PUT: 201 new path; 200 identical bytes (any policy) or a replace when `overwrite` is `allow`; 409 different bytes when `overwrite` is `deny` (default); 413 over `max_upload_size`. Repo config: `{"overwrite":"deny"}` or `{"overwrite":"allow"}`. S3 redirect as for Maven |
 | `GET, HEAD /debian/{repo}/key.asc` | read | The armored public signing key of the repo (its repo field `signing_key`). Same read gate as the repo's other files |
 | `/v2/...`, `GET, POST /docker/token`, `GET /docker/hosts` | see **Docker registry** | The OCI registry of the docker format |
+| `/nuget/{repo}/...` | see **NuGet repositories** | The NuGet V3 resources of the nuget format |
 | `GET /api/docker/{name}/manifest?path=` | `repo.download` (password, read token, UI session, anonymous on a public repo) | The details of the manifest at a tag or manifest path of a docker repo (a group: of the first readable member that stores it): `{digest, media_type, artifact_type, size, total_size, config: {digest, media_type, size}\|null, layers: [{digest, media_type, size}], platforms: [{digest, os, architecture, variant}], subject\|null, tags: [first 100], referrers: n}`. A link path or another path is 400; a file that does not parse is 422 |
 | `GET /install.sh`, `GET /install.ps1` | none | The install script of the Telesphorepo CLI (see **Install scripts and CLI downloads**), `text/plain`. The publish module mounts them. 404 problem `no-cli-downloads` on a build without CLI archives; 400 when the server address holds a quote, a space, a backslash or a control character |
 | `GET /cli/telesphorepo_<os>_<arch>.<ext>`, `GET /cli/SHA256SUMS` | none | A CLI archive of the server's build (`.tar.gz`, `.zip` on Windows) and the SHA-256 of each, `Cache-Control: no-cache`. 404 problem `no-cli-downloads` on a build without CLI archives; another name is 404 |
@@ -902,6 +911,7 @@ is written to it with `sudo tee -a FILE > /dev/null`.
 | apt | Key: `curl -fsSL HOST/debian/{repo}/key.asc -o /etc/apt/keyrings/telesphorepo.asc`. Source: `deb [signed-by=/etc/apt/keyrings/telesphorepo.asc] HOST/debian/{repo} {dist} {component}`. For a private repo, the `curl` command reads `USER:READ_TOKEN` from a config on stdin, and `/etc/apt/auth.conf.d/{repo}.conf` holds `machine HOST/debian/{repo} login USER password TOKEN` (mode 600) |
 | Upload `.deb` | `telesphorepo publish x.deb` (with `dist` and `component` in `telesphorepo.toml`). Indexes rebuild after `index.debounce`; poll `GET /api/repos/{repo}/status` for `pending: 0` |
 | Docker | Pull: `docker pull <host>/{repo}/IMAGE:TAG`; a private repo needs `docker login <host>` with a read token. Push: the setup line of the Publish tab adds the credential helper of the CLI to the Docker config once, then `docker push <host>/{repo}/IMAGE:TAG` with no `docker login`. Helm and ORAS use the same helper (see **Docker registry** and **Publishing**) |
+| NuGet | Source `HOST/nuget/{repo}/index.json` in `nuget.config` (`allowInsecureConnections="true"` for plain http); a private repo adds `packageSourceCredentials` with the user and a read token as `ClearTextPassword` (dotnet sends them after the first 401). Publishes: `telesphorepo publish` in a .NET project, or `dotnet nuget push` with a publish session as the API key |
 | Raw | Upload: `telesphorepo publish file.tar.gz` (with `path` in `telesphorepo.toml`). Download: `curl -fLO HOST/raw/{repo}/path/file.tar.gz`; a private repo adds `-K -` with `user = "USER:READ_TOKEN"` on stdin |
 
 ### Install scripts and CLI downloads
@@ -1260,6 +1270,7 @@ file. A row is one entry of a table in `cmd/telesphorepo/detect.go`; a new forma
 | Maven (Gradle) | `settings.gradle(.kts)`, `build.gradle(.kts)` | `gradlew` (`gradlew.bat`), else `gradle` | `gradle publish --init-script <tmp>/telesphorepo.init.gradle.kts` | The init script adds the repository `telesphorepo` (URL from `TELESPHOREPO_MAVEN_URL`, password from `TELESPHOREPO_TOKEN`) to each project that applies `maven-publish` (with `allowInsecureProtocol` for an `http://` server); with none it stops the build with the plugin line |
 | Docker (Helm chart) | `Chart.yaml` | `helm` | `helm package <dir> -d <tmp>/chart`, then `helm push <chart>.tgz oci://<host>/<repo> --registry-config <tmp>/config.json` (the upload host when the server has one; `--plain-http` for an `http://` server) | The registry config names `credHelpers` `telesphorepo` for the Docker hosts; the helper answers `TELESPHOREPO_TOKEN` for the hosts of `TELESPHOREPO_DOCKER_HOSTS` |
 | raw | none | the CLI | `PUT /raw/<repo>/<path>/<file name>` for each FILE; a file of 64 MiB or more goes through `POST /api/repos/{name}/uploads`, `PATCH` chunks of 16 MiB (a failed chunk is sent again from the `received` of the server), and `PUT ...?path=&sha256=&size=` | Bearer session token |
+| NuGet | `*.csproj`, `*.fsproj`, `*.sln`, `*.slnx` | `dotnet` | `dotnet pack -c Release -o <tmp>/nupkg` (no token in its env), then for each `.nupkg` but `*.symbols.nupkg` `PUT /nuget/<repo>/package` with the package as the first part of `multipart/form-data`. With FILE arguments: a push of each FILE, no build, also in a folder without a project | `X-NuGet-ApiKey: <session token>` |
 | Debian | none | the CLI | `PUT /debian/<repo>/upload/<dist>/<component>` for each FILE; a file of 64 MiB or more goes through the resumable routes as for raw, and `PUT /debian/<repo>/upload/<dist>/<component>?upload=<id>&sha256=&size=` finishes it | Bearer session token |
 
 A wrapper in the project comes before a tool on the `PATH` (`exec.LookPath`); a wrapper without
@@ -1634,7 +1645,8 @@ the repo object, and a repo delete marks every user object. User and device IDs 
 matches an `Immutable` glob and no `Mutable` glob. maven: immutable `**/*`, mutable
 `**/maven-metadata.xml*` and `**/*-SNAPSHOT/*`; debian: immutable `pool/**/*` and
 `dists/**/by-hash/**/*`; docker (`oci`): immutable `**/_manifests/sha256/*` and
-`**/_blobs/sha256/*` (tags are mutable); raw: every path is mutable. A proxy gets a pointer only
+`**/_blobs/sha256/*` (tags are mutable); nuget: immutable `v3-flatcontainer/*/*/*.nupkg` and
+`v3-flatcontainer/*/*/*.nuspec` (the documents are rendered per request and have no pointer); raw: every path is mutable. A proxy gets a pointer only
 for a path whose `Classify` class is not `Changing`. A group has no pointers of its own.
 
 **The pointers.** The module's pipeline watcher (see **Byte pipeline**) and the outbox
@@ -1985,6 +1997,10 @@ is unreachable.
     answers it with `proxy.Answer` and the source's credentials and keeps the newest token of each
     Nexus repo while it lives. A Nexus docker proxy becomes a docker proxy with the Nexus remote
     URL.
+  - nuget (`nuget`): an asset `<id>/<version>` (a Nexus nuget hosted repo) or
+    `<id>/<version>/<id>.<version>.nupkg` to the flat-container path of the `.nupkg`; `Store`
+    pushes it through the push of the format (its `.nuspec` gives the id and the version). Other
+    files are ignored.
   - Imported files have no uploader. The import is the owner of the repo's `mirror` operation, so
     it writes while uploads answer 409; each imported file records `file.upload` with the actor
     `nexus`.
@@ -2097,8 +2113,8 @@ is unreachable.
 
 ## Group and proxy repositories
 
-A format takes proxy repos when its `format.Spec.Kinds` lists `proxy` (Maven, Debian, Docker; it
-then sets `Classify` and `ProxyProbe`) and group repos when it lists `group` (Maven, Docker). `repos.Service` refuses a kind that the format's
+A format takes proxy repos when its `format.Spec.Kinds` lists `proxy` (Maven, Debian, Docker, NuGet; it
+then sets `Classify` and `ProxyProbe`) and group repos when it lists `group` (Maven, Docker, NuGet). `repos.Service` refuses a kind that the format's
 `format.Spec.Kinds` does not list (400). Neither kind takes uploads, publish sessions or CI pipelines:
 minting a session for one answers 409 with the read-only text, and a CI pipeline that lists one
 answers 400. A Nexus mapping maps a Nexus hosted, proxy or group repo to a target of the same kind.
@@ -2431,6 +2447,78 @@ platforms or the layers) and the artifact snippets. No repo tab and no config fi
 **Demo and seed.** The demo repo `docker` (public) holds 20 images with 1 to 8 tags each: two
 multi-platform indexes, one Helm chart, the rest image manifests of small random layers. The seed
 inserts per number a link, a manifest and a tag with their rows, 100 tags per image.
+
+## NuGet repositories
+
+The module `nuget` (`internal/nuget`) is the format `nuget`: the NuGet V3 protocol that dotnet,
+nuget.exe and Visual Studio speak, with hosted, proxy and group repos. The source is
+`<base>/nuget/{repo}/index.json`; every resource is under `/nuget/{repo}/`, so dotnet sends the
+credentials of the source to each of them once the first 401 (`WWW-Authenticate: Basic`) asked.
+
+**Stored files and rendered documents.** A package is two assets: the `.nupkg` at
+`v3-flatcontainer/<id>/<version>/<id>.<version>.nupkg` and its root `.nuspec` (the exact bytes from
+the package) at `v3-flatcontainer/<id>/<version>/<id>.nuspec`, with the id lowered and the version
+normalised and lowered (`version.NuGet`: leading zeros dropped, a fourth part of 0 dropped, no build
+metadata). The bytes of a `.nupkg` are never changed, so a signed package keeps its signature. The
+service index, the version lists, the registrations, the search and the vulnerability index are
+rendered per request (`format.WriteDocument`: strong ETag, 304) from `nuget_versions` in a hosted
+repo, from the remote's cached documents in a proxy, and from the member that owns the package id
+in a group. Rendered bodies that come from remote documents are kept in a `format.DocumentCache`
+(512 entries, 64 MiB) keyed by the SHA-256s of those documents and the URL of the repo.
+
+**Routes** (`route.FormatRead` for reads; push, unlist and relist `route.FormatWrite` with
+`Policy.TokenHeader = "X-NuGet-ApiKey"`, so the API key is a publish session; that header comes
+before the `Authorization` of the source's read credentials):
+
+| Method & path | Answer |
+|---|---|
+| `GET /nuget/{repo}/index.json` | The service index `{"version": "3.0.0", "resources": [...]}`: `PackageBaseAddress/3.0.0` (`v3-flatcontainer/`), `RegistrationsBaseUrl/3.6.0` (`registration/`), the plain `RegistrationsBaseUrl` and its `3.0.0-beta`, `3.0.0-rc` and `3.4.0` (`registration-semver1/`, without SemVer 2.0 versions), `SearchQueryService` with `3.0.0-beta`, `3.0.0-rc` and `3.5.0` (`query`), `PackagePublish/2.0.0` (`package`), `VulnerabilityInfo/6.7.0` (`vulnerabilities/index.json`) |
+| `GET /nuget/{repo}/vulnerabilities/index.json`, `.../base.json` | One page `base` of vulnerability data, and that page: `{}`. Restore finds the source audited and warns nothing |
+| `GET /nuget/{repo}/v3-flatcontainer/{id}/index.json` | `{"versions": [...]}`: every version, unlisted ones too, lowered and normalised, oldest first. A proxy serves its remote's list as the remote wrote it |
+| `GET /nuget/{repo}/v3-flatcontainer/{id}/{version}/{file}` | The `.nupkg` or the `.nuspec` (`Reader.ServeAsset`, S3 redirect as for every file) |
+| `GET /nuget/{repo}/registration/{id}/index.json` (and `registration-semver1/`) | The registration index: up to 128 versions inlined in one page (`#page/<lower>/<upper>`, with `parent`), more in pages of 64 that the index names. Each leaf has the catalog entry inline (`id`, `version`, `listed`, `published` (`1900-01-01T00:00:00+00:00` when unlisted), `packageContent`, `dependencyGroups` with each dependency's `registration`, and the `.nuspec` fields), `packageContent` of this repo's flat container and `registration` |
+| `GET /nuget/{repo}/registration/{id}/page/{lower}/{upper}.json` | One page of a paged registration |
+| `GET /nuget/{repo}/registration/{id}/{version}.json` | One registration leaf |
+| `GET /nuget/{repo}/query?q=&skip=&take=&prerelease=&semVerLevel=` | The packages of a hosted repo (a group: the union of its hosted members that the caller reads, the first member wins an id) whose id holds `q` (3 or more characters: the trigram index of the asset paths through the `.nuspec` paths, at most 2,000 path hits; 1 or 2 characters: a prefix of the id; empty: every id), in id order, `skip` at most 3,000 and `take` at most 1,000 (20 by default). Unlisted versions, prerelease versions without `prerelease=true` and SemVer 2.0 versions without `semVerLevel=2.0.0` are left out. A proxy answers no package |
+| `PUT /nuget/{repo}/package` (and `.../package/`) | Push: the first part of `multipart/form-data` (or a body that is the `.nupkg`) is the package; the id and the version come from its root `.nuspec`, matched by local name. 201; 409 for a version that the repo has (also with the same bytes, so `--skip-duplicate` skips it); 400 for a package that does not read (no zip, no or several root `.nuspec`, a bad id or version); 413 above `max_upload_size` |
+| `DELETE /nuget/{repo}/package/{id}/{version}` · `POST` the same | Unlist and relist (`listed` of the row, audit `nuget.unlist` and `nuget.relist`); 200, 404 for a version the repo lacks. dotnet restores an unlisted version by its exact version |
+
+The push, the web UI upload (`.nupkg` files; a plan reads up to 16 MiB of each, a larger one is
+read at the upload), the Nexus import and the demo data share one ingest: a `CommitAll` of the
+`.nupkg` and the `.nuspec` with the package version as an extra lock. `Admit` keeps the same bytes
+and refuses other bytes at a package path with 409; a write without a parsed package from a source
+other than a proxy (a core upload session) is 400. `OnCommitted` writes the `nuget_versions` row;
+`OnRemoved` deletes the row of a removed `.nupkg` and removes its `.nuspec` next. Errors are the
+`{"error"}` JSON of format routes; dotnet prints the status line.
+
+**Proxy.** The remote URL is the service index (`https://api.nuget.org/v3/index.json`; stored with
+a trailing `/` like every remote, which the format drops again) or the folder that holds
+`index.json`. The proxy caches what it reads from the remote under `.upstream/`, a folder no client
+asks for: the service index (`.upstream/index.json`), the version list of a package
+(`.upstream/flat/<id>/index.json`), the registration index (`.upstream/registration/<id>/index.json`,
+from `RegistrationsBaseUrl/3.6.0`, else `3.4.0`, `3.0.0-rc` or the plain one) and the pages that the
+index does not inline (`.upstream/page/<path on the remote host>`), each `Changing` with the repo's
+`metadata_ttl`. Packages are stored at their own flat-container paths and fetched once. The proxy
+follows only resources of the service index on the remote's scheme and host, and a page only under
+the registration base. Its registration is rendered from the remote's leaves with this repo's URLs:
+every value of a catalog entry that points at the remote's host (`@id`, `iconUrl`, catalog
+references) is dropped, and `packageContent` and the dependencies' `registration` point here. A
+remote without a usable service index, or with nothing cached while it is down, answers 502.
+
+**Group.** A group answers each package id from the member that owns it (`assets.Reader.Owner`:
+the first readable member that has the id; a hosted member through `nuget_versions`, a proxy
+member through the remote's version list), so a public package cannot shadow a private one with
+the same id and a higher version. The registration and the version list are rendered from that
+member with the group's URLs, and the packages download from it.
+
+**Snippets and tools.** `Usage`: a `nuget.config` with the source (and `allowInsecureConnections`
+on plain http, `packageSourceCredentials` with `YOUR_USERNAME` and `YOUR_READ_TOKEN` for a private
+repo), `dotnet nuget add source` and, for a hosted repo, `telesphorepo publish`. `ArtifactUsage`
+(hosted): `dotnet add package <id> --version <v>` and a `PackageReference`; the latest mode drops the
+version (`Version="*"`). The tool `dotnet` builds the CI files (`actions/setup-dotnet@v5` with
+`10.0.x`, then `telesphorepo publish`). `Versions` and `Builds` list the versions of
+`v3-flatcontainer/<id>/` newest first (keyset on `sort_key`); a version has one build, its `.nupkg`
+and `.nuspec`.
 
 ## Files, uploads and deletes
 
@@ -3022,6 +3110,7 @@ timestamps follow them.
 | `maven` | anonymous read | About 150,000 files. 400 groupIds of 2 to 4 segments from word lists (e.g. `io.northwind.billing.cli`), 3 to 60 artifacts each (a few groups are large), 1 to 40 versions each (most have few). Each version has a valid pom, jar and sources jar (minimal zips), sometimes a javadoc jar and Gradle `.module`, and real `.md5`/`.sha1`/`.sha256` files. Each artifact has a `maven-metadata.xml` with `latest` and `release`. Some artifacts end in a `-SNAPSHOT` with timestamped files and version metadata. 30 Gradle plugins have their `<id>.gradle.plugin` marker artifacts |
 | `internal` | private | About 2,000 files of the same shape. `lena` reads it; `jonas` writes it |
 | `debian` | anonymous read | About 300 binary packages from about 100 sources, 1 to 5 versions each, as real `.deb` files for `amd64` and `arm64` or `all`. They go through the format's upload pipeline into `stable/main`, so the indexes and signed `Release` files are valid |
+| `nuget` | anonymous read | About 120 `.nupkg` files: 20 `Contoso.*` packages, some with `.Abstractions`, `.Testing` and `.AspNetCore` packages that depend on them, 1 to 6 versions each (some prereleases), pushed through the format's push |
 | `raw` | anonymous read | 20,000 files: `docs/<product>/<version>/` sites, `releases/<yyyy>/<mm>/<product>-<version>/` archives (valid `.tar.gz`/`.zip`) with `SHA256SUMS`, and `build-logs/<project>/<branch>/<build>/` logs and test reports |
 
 The demo users are `priya` (administrator), `jonas` (download and publish on `maven` and
@@ -3208,9 +3297,9 @@ and networks, and the `telesphorepo-data-*` and `telesphorepo-scale-*` volumes.
 | Zone | Tag | Command | Contents |
 |---|---|---|---|
 | core | `e2e` | `go tool task test` | Formats (the Docker registry with Docker in Docker too), auth, API, settings, storage move, query plans, the listener protocols |
-| import | `import` | `go tool task test import` | `TestNexus`, with the import of a Nexus docker hosted repo (`nexus_docker_test.go`: the Docker Bearer Token Realm on and `forceBasicAuth` off, so every download answers a Bearer challenge; skopeo pushes an image and a multi-platform index; the sync imports both tags and ignores the blobs; crane pulls both by tag and by digest; a second sync imports nothing) |
+| import | `import` | `go tool task test import` | `TestNexus`, with the import of a Nexus docker hosted repo (`nexus_docker_test.go`: the Docker Bearer Token Realm on and `forceBasicAuth` off, so every download answers a Bearer challenge; skopeo pushes an image and a multi-platform index; the sync imports both tags and ignores the blobs; crane pulls both by tag and by digest; a second sync imports nothing) and of a Nexus nuget hosted repo (`nexus_nuget_test.go`: a package of `dotnet pack` uploaded to Nexus, imported, then restored and run with dotnet) |
 | scale | `scale` | `go tool task test scale` | `TestScale` |
-| clients | `clients` | `go tool task test clients` | The Telesphorepo CLI with the real tools: `TestCLISetup`, `TestCLILogin`, `TestCLIDocker`, `TestCLIMaven`, `TestCLIGradle`, `TestCLIJenkins`, `TestCLIGitHubActions`, `TestCLIUpload`, `TestCLICompat` and `TestInstall` (`e2e/cli_*_test.go`). It needs Go on the host to build the CLI and the internet for Maven Central, Gradle, the Maven 4 download and the Jenkins plugins |
+| clients | `clients` | `go tool task test clients` | The Telesphorepo CLI with the real tools: `TestCLISetup`, `TestCLILogin`, `TestCLIDocker`, `TestCLIMaven`, `TestCLIGradle`, `TestCLIJenkins`, `TestCLIGitHubActions`, `TestCLIUpload`, `TestCLINuGet`, `TestCLICompat` and `TestInstall` (`e2e/cli_*_test.go`). It needs Go on the host to build the CLI and the internet for Maven Central, Gradle, the Maven 4 download and the Jenkins plugins |
 | all | all tags | `go tool task test all` | Every zone |
 
 **Admin and user calls.** The API changes state only through a UI session, so the suite signs in
