@@ -76,9 +76,9 @@ type Spec struct {
 	// rows changed, with the repo before and after.
 	OnRepoChange func(ctx context.Context, tx *sql.Tx, old, new *repos.Repo) error
 
-	// Classify tells the proxy how to cache a path of a proxy with the remote remote; ok=false
-	// refuses the path (404).
-	Classify func(remote *repos.Proxy, path repopath.Path) (assets.Class, bool)
+	// Classify tells the proxy how to cache a path of proxy repo repo, whose remote is remote (the
+	// repo config is repo.Config); ok=false refuses the path (404).
+	Classify func(repo *repos.Repo, remote *repos.Proxy, path repopath.Path) (assets.Class, bool)
 	// ProxyProbe is the path that a check of a proxy's remote requests: "" for the remote's root,
 	// or a file that the remote of a repo with config must have.
 	ProxyProbe func(config json.RawMessage) string

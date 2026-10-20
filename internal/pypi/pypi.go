@@ -45,10 +45,7 @@ type Handler struct {
 	q      *dbq.Queries // on the reader pool
 	assets *assets.Pipeline
 	log    *slog.Logger
-	// fetch fetches the files of proxy repos. The module calls it with the class of each path,
-	// which holds the files base of the repo config (Classify does not see the repo config).
-	fetch *proxy.Service
-	docs  *format.DocumentCache // rendered pages of proxies (and groups that a proxy member serves)
+	docs   *format.DocumentCache // rendered pages of proxies (and groups that a proxy member serves)
 }
 
 // Module returns the PyPI module: the format with proxies, groups, the legacy upload, web UI
@@ -61,7 +58,6 @@ func Module() module.Module {
 			x.Schema(db.Component{Schema: schema, Queries: db.Sub(queriesFS, "queries")})
 			x.Init(func(ctx context.Context, host *module.Host) error {
 				h.host, h.q, h.assets, h.log = host, dbq.New(host.DB.R), host.Assets, host.Log
-				h.fetch = proxy.New(host.Repos, host.Assets, host.Log.With("component", "proxy"))
 				return nil
 			})
 			x.Format(format.Spec{
@@ -271,30 +267,20 @@ func (h *Handler) onRemoved(ctx context.Context, tx *sql.Tx, repo *repos.Repo, r
 const pageAccept = ctJSON + ", " + ctHTML + ";q=0.2, text/html;q=0.01"
 
 // classify tells the proxy how to cache a path: the cached upstream page .simple/<name> changes;
-// the package files under files/ and remote/ (and their .metadata) never do. The module's routes
-// fetch a files/ path from the files base of the repo config (classOf); this class names none.
-func classify(_ *repos.Proxy, p repopath.Path) (assets.Class, bool) {
+// the package files under files/ and remote/ (and their .metadata) never do. A files/ path comes
+// from the files base of the repo config, a remote/ path from the remote URL.
+func classify(repo *repos.Repo, _ *repos.Proxy, p repopath.Path) (assets.Class, bool) {
 	s := string(p)
 	switch {
 	case strings.HasPrefix(s, ".simple/"):
 		return assets.Class{Changing: true, Remote: "simple/" + strings.TrimPrefix(s, ".simple/") + "/",
 			Header: http.Header{"Accept": {pageAccept}}, KeepType: true}, true
 	case strings.HasPrefix(s, "files/"):
-		return assets.Class{Remote: strings.TrimPrefix(s, "files/")}, true
+		return assets.Class{Remote: strings.TrimPrefix(s, "files/"), Files: filesBase(repo)}, true
 	case strings.HasPrefix(s, "remote/"):
 		return assets.Class{Remote: strings.TrimPrefix(s, "remote/")}, true
 	}
 	return assets.Class{}, false
-}
-
-// classOf is the class of path p of proxy repo: classify, with the files base of the repo config
-// for a files/ path.
-func classOf(repo *repos.Repo, p repopath.Path) (assets.Class, bool) {
-	c, ok := classify(nil, p)
-	if ok && strings.HasPrefix(string(p), "files/") {
-		c.Files = filesBase(repo)
-	}
-	return c, ok
 }
 
 // routes mounts the simple API, the files and the legacy upload.

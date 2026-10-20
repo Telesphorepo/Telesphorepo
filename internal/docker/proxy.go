@@ -59,7 +59,7 @@ func pullScope(rimage string) string { return "repository:" + rimage + ":pull" }
 // classify tells the proxy how to cache an OCI object path: a link and a manifest by digest never
 // change; a tag changes, and a HEAD of the tag that names the cached digest keeps it. Manifests
 // keep the remote's media type.
-func (f *Format) classify(px *repos.Proxy, p repopath.Path) (assets.Class, bool) {
+func (f *Format) classify(_ *repos.Repo, px *repos.Proxy, p repopath.Path) (assets.Class, bool) {
 	op, ok := parsePath(string(p))
 	if !ok {
 		return assets.Class{}, false

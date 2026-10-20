@@ -43,7 +43,7 @@ func (m *mod) eligible(repo *repos.Repo, path string) bool {
 		if !ok {
 			return false
 		}
-		c, ok := hk.Classify(remote, repopath.Path(path))
+		c, ok := hk.Classify(repo, remote, repopath.Path(path))
 		return ok && !c.Changing
 	}
 	return false

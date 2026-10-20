@@ -192,7 +192,7 @@ func (rd *Reader) has(ctx context.Context, repo *repos.Repo, path repopath.Path)
 		if hooks.Classify == nil || rd.remote == nil || !isProxy {
 			return nil, nil
 		}
-		class, ok := hooks.Classify(px, path)
+		class, ok := hooks.Classify(repo, px, path)
 		if !ok {
 			return nil, nil
 		}

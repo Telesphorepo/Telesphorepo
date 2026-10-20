@@ -34,9 +34,9 @@ type Hooks struct {
 	// AfterRemove runs after a remove, without locks (e.g. Maven writes maven-metadata.xml again).
 	AfterRemove func(ctx context.Context, repo *repos.Repo, removed []*Asset)
 
-	// Classify tells the proxy how to cache a path of a proxy with the remote remote; ok=false
-	// refuses the path (404).
-	Classify func(remote *repos.Proxy, path repopath.Path) (Class, bool)
+	// Classify tells the proxy how to cache a path of proxy repo repo, whose remote is remote (the
+	// repo config is repo.Config); ok=false refuses the path (404).
+	Classify func(repo *repos.Repo, remote *repos.Proxy, path repopath.Path) (Class, bool)
 	// Merge merges a file of a group from its members (e.g. maven-metadata.xml).
 	Merge *Merger
 	// RemoteAuth answers a remote's 401 challenge with the headers of a retry (e.g. a registry's

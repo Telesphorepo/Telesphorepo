@@ -2,15 +2,12 @@ package cargo
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"net/url"
 	"strings"
-	"sync"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/proxy"
-	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
 // The repo config of Cargo repos: {"download": "<template>"}, used by proxies only. The template
@@ -109,65 +106,4 @@ func fileSource(template, name, vers string) (files, remote string, ok bool) {
 		return "", "", false
 	}
 	return base, strings.TrimPrefix(u.Path, "/"), true
-}
-
-// downloads is the download template of each Cargo proxy repo, by repo ID, read once from the repos
-// and then kept by their changes. Classify gets the remote of a proxy, not the repo: it finds the
-// repo whose remote is that one.
-type downloads struct {
-	rs   *repos.Service
-	once sync.Once
-	mu   sync.RWMutex
-	by   map[int64]string
-}
-
-func (d *downloads) load(ctx context.Context) {
-	d.once.Do(func() {
-		all, err := d.rs.List(ctx)
-		d.mu.Lock()
-		defer d.mu.Unlock()
-		if d.by == nil {
-			d.by = map[int64]string{}
-		}
-		if err != nil {
-			return
-		}
-		for _, r := range all {
-			if r.Format == name && r.Kind == repos.KindProxy {
-				if _, known := d.by[r.ID]; !known {
-					d.by[r.ID] = downloadOf(r.Config)
-				}
-			}
-		}
-	})
-}
-
-// changed keeps the templates of a change of repos (repos.Service.AfterChange).
-func (d *downloads) changed(_ context.Context, n repos.Notice) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.by == nil {
-		d.by = map[int64]string{}
-	}
-	for _, r := range n.Changed {
-		if r.Format == name && r.Kind == repos.KindProxy {
-			d.by[r.ID] = downloadOf(r.Config)
-		}
-	}
-	if n.Deleted != nil {
-		delete(d.by, n.Deleted.ID)
-	}
-}
-
-// of returns the download template of the proxy whose remote is px.
-func (d *downloads) of(px *repos.Proxy) string {
-	d.load(context.Background())
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	for id, t := range d.by {
-		if p, ok := d.rs.Proxy(id); ok && p == px {
-			return t
-		}
-	}
-	return defaultDownload
 }

@@ -2204,7 +2204,8 @@ are dropped from memory, and the server logs the repo ids.
   a probe file must exist. A format with `RemoteAuth` answers a 401 challenge of the check too; a
   token realm that refuses the credentials fails the check ("the remote refused the username and
   password"). `force: true` skips the check (`proxy.Check`).
-- `format.Spec.Classify(remote, path)` sorts a path into an `assets.Class`: `Changing` (checked
+- `format.Spec.Classify(repo, remote, path)` sorts a path of a proxy repo (its config in
+  `repo.Config`, its remote in `remote`) into an `assets.Class`: `Changing` (checked
   again after `metadata_ttl`), `Remote` (the path at the remote: relative to `remote_url`, or from
   the root of its host when it starts with `/`; `""` is the local path), `Files` (an absolute
   http or https base URL that `Remote` is relative to instead of `remote_url`, for a registry
@@ -2313,9 +2314,9 @@ upstream page, maps to `files/<rest>` under the `files` base or to `remote/<rest
 URL; a file at any other address is left out of the page, so the server never fetches an address
 that a remote document names. A file's `.metadata` follows it. The rendered pages are kept in a
 `format.DocumentCache` keyed by the SHA-256 of the cached page, the form, the remote and the
-`files` base. The module fetches through its own `proxy.Service` with the class of each path,
-because the `files` base is in the repo config and `Classify` sees only the remote; `Classify`
-gives the edge the same `Changing` answer. The remote's credentials go only to the remote's host.
+`files` base. The module fetches through `assets.Reader.Resolve`; `Classify` puts the `files`
+base of the repo config in `Files` for a `files/` path. The remote's credentials go only to the
+remote's host.
 A proxy's project list is the projects it has cached; the upstream list is not proxied.
 
 **Group.** A group asks its members in order for a project (`assets.Reader.Owner`): the first member
@@ -2638,9 +2639,8 @@ config's `download` template (`{"download": "<template>"}`, default
 `{version}`, `{prefix}`, `{lowerprefix}`; a template without a marker gets
 `/{crate}/{version}/download` as Cargo does; `{sha256-checksum}` is refused because the proxy
 fetches a crate before it knows its checksum) through `assets.Class.Files`: the remote's
-credentials go there only on the remote's own scheme and host. The module keeps the template of
-each Cargo proxy in memory (read once from the repos, then from `repos.Service.AfterChange`),
-because `Classify` gets the remote, not the repo.
+credentials go there only on the remote's own scheme and host. `Classify` reads the template
+from the repo config.
 
 **Groups.** For an index file, the first member in read order that has the crate owns the name
 (`assets.Reader.Owner`): its file serves, and a later member (the crates.io proxy) cannot shadow

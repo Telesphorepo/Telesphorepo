@@ -147,7 +147,7 @@ func describe(p repopath.Path) (assets.Describe, bool) {
 // classify tells the proxy how to cache a path: a tarball never changes and lies at the same path
 // at the remote; a cached packument changes and is the remote's document of the name, in the form
 // that the Accept header asks for.
-func classify(_ *repos.Proxy, p repopath.Path) (assets.Class, bool) {
+func classify(_ *repos.Repo, _ *repos.Proxy, p repopath.Path) (assets.Class, bool) {
 	s := string(p)
 	if rest, ok := strings.CutPrefix(s, packumentDir); ok {
 		form, pkg, _ := strings.Cut(rest, "/")

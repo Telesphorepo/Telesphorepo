@@ -359,7 +359,7 @@ func (h *Handler) renderPage(ctx context.Context, r *http.Request, c *route.Call
 		}
 		return m.render(f), nil
 	case repos.KindProxy:
-		a, err := h.upstreamPage(ctx, repo, n)
+		a, err := h.upstreamPage(ctx, r, c, repo, n)
 		if err != nil || a == nil {
 			return nil, err
 		}
@@ -391,7 +391,7 @@ func (h *Handler) owner(ctx context.Context, r *http.Request, c *route.Call, gro
 			}
 			return err == nil, err
 		case repos.KindProxy:
-			a, err := h.upstreamPage(ctx, m, n)
+			a, err := h.upstreamPage(ctx, r, c, m, n)
 			return a != nil, err
 		}
 		return false, nil
@@ -429,26 +429,12 @@ func (h *Handler) remoteURL(repo *repos.Repo) string {
 
 // upstreamPage returns the cached upstream page of project n of proxy repo, fetched again after
 // the repo's metadata_ttl; nil when the remote has no such project.
-func (h *Handler) upstreamPage(ctx context.Context, repo *repos.Repo, n string) (*assets.Asset, error) {
+func (h *Handler) upstreamPage(ctx context.Context, r *http.Request, c *route.Call, repo *repos.Repo, n string) (*assets.Asset, error) {
 	p, err := repopath.Parse(".simple/" + n)
 	if err != nil {
 		return nil, nil
 	}
-	return h.ensure(ctx, repo, p)
-}
-
-// ensure returns the asset of path p of proxy repo, from the cache or the remote; nil when the
-// remote does not have it.
-func (h *Handler) ensure(ctx context.Context, repo *repos.Repo, p repopath.Path) (*assets.Asset, error) {
-	class, ok := classOf(repo, p)
-	if !ok {
-		return nil, nil
-	}
-	a, err := h.fetch.Ensure(ctx, repo, p, class)
-	if errors.Is(err, assets.ErrRemoteMissing) {
-		return nil, nil
-	}
-	return a, err
+	return h.host.Reader.Resolve(ctx, r, c.P, repo, p)
 }
 
 // file returns the handler of the files under prefix ("packages/", "files/" or "remote/").
@@ -495,7 +481,7 @@ func (h *Handler) resolve(ctx context.Context, r *http.Request, c *route.Call, r
 		if strings.HasPrefix(s, "packages/") {
 			return nil, nil
 		}
-		return h.ensure(ctx, repo, p)
+		return h.host.Reader.Resolve(ctx, r, c.P, repo, p)
 	}
 	if strings.HasPrefix(s, "packages/") {
 		proj, _, _ := strings.Cut(strings.TrimPrefix(s, "packages/"), "/")
@@ -514,7 +500,7 @@ func (h *Handler) resolve(ctx context.Context, r *http.Request, c *route.Call, r
 		if m.Kind != repos.KindProxy {
 			continue
 		}
-		a, err := h.ensure(ctx, m, p)
+		a, err := h.host.Reader.Resolve(ctx, r, c.P, m, p)
 		switch {
 		case errors.Is(err, assets.ErrRemoteFailed):
 			remoteFailed = true

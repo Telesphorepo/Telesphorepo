@@ -60,7 +60,7 @@ func originOf(u *url.URL) string { return strings.ToLower(u.Scheme + "://" + u.H
 // classify tells the proxy where a path of a NuGet proxy is on the remote (format.Spec Classify).
 // The paths of the version lists, the registrations and the packages need the resources of the
 // remote's service index, which upstreamOf reads before every such fetch.
-func (h *Handler) classify(px *repos.Proxy, p repopath.Path) (assets.Class, bool) {
+func (h *Handler) classify(_ *repos.Repo, px *repos.Proxy, p repopath.Path) (assets.Class, bool) {
 	s := string(p)
 	if s == upstreamDir+"index.json" {
 		return assets.Class{Changing: true, Remote: serviceIndexPath(px.RemoteURL)}, true

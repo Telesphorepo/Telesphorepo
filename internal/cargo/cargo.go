@@ -44,15 +44,14 @@ const (
 
 // Handler serves the Cargo format.
 type Handler struct {
-	host      *module.Host
-	q         *dbq.Queries // on the reader pool
-	downloads *downloads
+	host *module.Host
+	q    *dbq.Queries // on the reader pool
 }
 
 // Module returns the Cargo module: the Cargo format with proxies, groups, uploads, imports, demo
 // data and seeds. The Telesphorepo CLI publishes to it with cargo publish.
 func Module() module.Module {
-	h := &Handler{downloads: &downloads{}}
+	h := &Handler{}
 	return module.Module{
 		ID: name, Title: "Cargo (Rust)",
 		Register: func(x *module.Extender) {
@@ -63,8 +62,6 @@ func Module() module.Module {
 			)
 			x.Init(func(ctx context.Context, host *module.Host) error {
 				h.host, h.q = host, dbq.New(host.DB.R)
-				h.downloads.rs = host.Repos
-				host.Repos.AfterChange(h.downloads.changed)
 				return nil
 			})
 			x.Format(format.Spec{
@@ -77,7 +74,7 @@ func Module() module.Module {
 				Admit:         h.admit,
 				OnCommitted:   h.onCommitted,
 				OnRemoved:     h.onRemoved,
-				Classify:      h.classify,
+				Classify:      classify,
 				ProxyProbe:    func(json.RawMessage) string { return "config.json" },
 				Versions:      h.Versions,
 				Builds:        h.Builds,
@@ -121,7 +118,7 @@ func describe(p repopath.Path) (assets.Describe, bool) {
 // classify tells the proxy how to cache a path: an index file under .index/ changes at the remote
 // (the path under the remote URL); a .crate never changes and comes from the download URL of the
 // repo config. Other paths are refused.
-func (h *Handler) classify(px *repos.Proxy, p repopath.Path) (assets.Class, bool) {
+func classify(repo *repos.Repo, _ *repos.Proxy, p repopath.Path) (assets.Class, bool) {
 	s := string(p)
 	if rest, ok := strings.CutPrefix(s, ".index/"); ok {
 		if _, ok := nameOfIndexPath(rest); ok {
@@ -133,7 +130,7 @@ func (h *Handler) classify(px *repos.Proxy, p repopath.Path) (assets.Class, bool
 	if !ok {
 		return assets.Class{}, false
 	}
-	files, remote, ok := fileSource(h.downloads.of(px), n, v)
+	files, remote, ok := fileSource(downloadOf(repo.Config), n, v)
 	if !ok {
 		return assets.Class{}, false
 	}
