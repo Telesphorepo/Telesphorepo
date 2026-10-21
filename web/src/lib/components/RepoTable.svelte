@@ -1,5 +1,6 @@
 <!--
-  The table of repositories (Browse home, All repositories): name and description on one line,
+  The table of repositories that people manage (Settings › Repositories; Browse home lists them
+  with RepoList): name and description on one line,
   format, files, size and last publish. A private repository has a lock after its name; a public
   one has no mark. A group or a proxy has its kind icon after the name; a group shows its number
   of repositories in place of the files. On a phone the format icon sits before the name. A

@@ -1,6 +1,6 @@
 <!--
   One area of a form: a Section (a card with its title, the area's actions at the header's end,
-  and a footer for the submit row) that holds a FormGrid. Sections stack 24px apart.
+  and a footer for the submit row) that holds a FormGrid. Sections stack --section-gap apart.
 
     <FormSection title="Repository">
       <FormGrid>...</FormGrid>

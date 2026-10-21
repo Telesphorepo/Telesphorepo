@@ -1,7 +1,7 @@
 <!--
   The one loading state (principle 11). It shows nothing for the first 300 ms, so a fast answer
   never flashes. After that it shows a quiet spinner and "Loading" in the space the content will
-  take: `rows` reserves that many table rows (40px each), so nothing jumps when the content comes.
+  take: `rows` reserves that many table rows (`--row` each: 48px on Browse, 44px in Settings), so nothing jumps when the content comes.
   `inline` is one line in a form, a dialog or a row.
 
     {#if repo.loading && !repo.data}<Loading rows={5} />{:else if repo.error}...{/if}
@@ -38,7 +38,7 @@
 <div
   role="status"
   class={cn("flex items-center", inline ? "min-h-9" : "justify-center", className)}
-  style={inline ? undefined : `min-height: calc(${rows} * var(--spacing-row))`}
+  style={inline ? undefined : `min-height: calc(${rows} * var(--row))`}
 >
   {#if shown}
     <span class="flex items-center gap-2 text-meta text-muted-foreground animate-in fade-in duration-200">

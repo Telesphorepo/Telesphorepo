@@ -85,7 +85,7 @@
             />
           {/if}
           <div class="flex min-w-0 flex-1 flex-col gap-1">
-            {#if many}<Label for="{id}-item-{i}" class="text-[0.8125rem] font-medium break-all">{item.title}</Label>{:else}<span class="text-[0.8125rem] font-medium break-all">{item.title}</span>{/if}
+            {#if many}<Label for="{id}-item-{i}" class="text-[0.875rem] font-medium break-all">{item.title}</Label>{:else}<span class="text-[0.875rem] font-medium break-all">{item.title}</span>{/if}
             {#if single && item.files[0].target && item.files[0].target !== item.title}
               <p class="text-xs break-all text-muted-foreground">Stored as {item.files[0].target}</p>
             {:else if !single}

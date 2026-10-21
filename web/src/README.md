@@ -31,7 +31,7 @@ the checklist below. The sitemap and the Settings navigation come from
 | `lib/view.svelte.ts` | `ViewChoice` and `viewLook`: List, Tree, Columns, Cover Flow, remembered per user. |
 | `lib/load.svelte.ts` | `Resource` (one request), `Keyset` (a paged list), `listOf()` and `TableSource` (what `DataTable` reads). |
 | `lib/format.ts` | `formatSize`, `formatRelative`, `formatDateTime`, `formatCount`. |
-| `lib/words.ts` | `count` ("12 repositories"), `selectedText` ("12 selected"), `someNames` (the first five names "and 7 more"): the words of bulk actions. |
+| `lib/words.ts` | `count` ("12 repositories"), `selectedText` ("12 selected"), `someNames` (the first five names "and 7 more"): the words of bulk actions; `kindPhrase` (the kind of a repository: "Hosted", "Proxy of a remote repository", "Group of 3 repositories"). |
 | `lib/utils.ts` | `cn()`: joins classes; it knows that `text-title` … `text-meta` are font sizes, not colors. |
 | `lib/layouts/` | `AppShell` (top bar + container + Settings sidebar), `AddressNotice` (the server's address differs from the one in the browser), `TopBar`, `AccountMenu`, `GlobalSearch`, `SettingsNav`, `UnsavedGuard` (the leave question). |
 | `lib/components/` | The shared components (below). Pages build only from these and `ui/`. |
@@ -52,7 +52,7 @@ server and the clients print keep working: `/#/device?code=ABCD-EFGH`, `/#/setti
 
 | Path | Page | Layout | Access | What it shows |
 |---|---|---|---|---|
-| `/` | `Home` | app | any | Repositories: a table with name (a lock after a private one, the kind icon after a group or a proxy), format, files (a group: its number of repositories), size, last publish. Filter box, format filter, New repository (All repositories). |
+| `/` | `Home` | app | any | Repositories: one list sorted by name (`RepoList`), a row per repository with the same fields for every kind: format icon, name (a lock after a private one), description, and the format and kind in plain words ("Hosted", "Proxy of a remote repository", "Group of 3 repositories"). No counts or sizes: Settings › Repositories and the details of a repository's top folder show them. Filter box, format filter, New repository (All repositories). |
 | `/search?q=&repo=` | `Search` | app | any | Files whose path contains `q` (3+ characters). The top bar's search field holds `q`. |
 | `/login?next=&error=` | `SignIn` | app | any | The one place to sign in: single sign-on, password, then the second step. |
 | `/device?code=&grant=&error=` | `DeviceApprove` | app | user | Look up a device code, check the device, approve it with a fresh second factor. A single sign-on account signs in again at its identity provider instead; the server returns with `grant` (the page approves at once) or `error`. |
@@ -146,8 +146,8 @@ The repository page is the one exception: it checks the caller's permissions on 
   the page header, sections, tables and forms start and end at the same edges on every page.
   Pages never set a `max-w-*` on a block of their own.
 - **Logical containers** (principle 12). Each area of a page is a `Section`: a card with its
-  title (and the area's actions at the header's end), 24px padding (20px on a phone), and 24px
-  between cards. Inside a card, a form is a two-column `FormGrid`; a thin `<Separator />` may part
+  title (and the area's actions at the header's end), 24px padding (20px on a phone), and 32px
+  between cards on a Browse page, 28px in Settings. Inside a card, a form is a two-column `FormGrid`; a thin `<Separator />` may part
   sub-groups of one card. Never a line between cards.
 - **Breadcrumbs** sit above the title of every Settings page (`PageHeader` builds them):
   Settings › group › item, then deeper steps on a sub-page (Settings › People and CI › CI
@@ -175,24 +175,30 @@ The repository page is the one exception: it checks the caller's permissions on 
 ## Tokens (`app.css`)
 
 - **Type.** One sans family (Geist) for all text: titles, labels, repository names, paths,
-  checksums, badges. One scale, as utilities from `app.css`: `text-title` (page title, 24/32
-  semibold), `text-section` (section and step titles, 16/24 semibold), `text-label` (row labels,
-  14/20 medium), `text-body` (body and tables, 14/20), `text-meta` (help, facts, timestamps, 13/18,
-  always `text-muted-foreground`). Table headings and sidebar headings stay `text-xs font-medium
-  text-muted-foreground`. Numbers in tables and checksums use `tabular-nums`. Sentence case
-  everywhere; never all caps.
+  checksums, badges. One scale, as utilities from `app.css`: `text-title` (page title, 26/34
+  semibold), `text-section` (section and step titles, 17/26 semibold), `text-label` (row labels,
+  15/22 medium), `text-body` (body and tables, 15/22), `text-meta` (help, facts, timestamps, 14/20,
+  always `text-muted-foreground`). The shadcn primitives' `text-sm` is the body size (15/22) and
+  `text-xs` is 13/18, so buttons, inputs and menus follow the scale. Table headings and sidebar
+  headings stay `text-xs font-medium text-muted-foreground`. Code in `CodeBlock` and `CodeSnippet`
+  is 14px. Numbers in tables and checksums use `tabular-nums`. Sentence case everywhere; never all
+  caps.
 - **Contrast.** `--muted-foreground` (meta and help text) is at least 4.5:1 on `--background`,
   `--panel` and `--muted` in both themes (light 6.2 / 5.8 / 5.6, dark 7.8 / 7.4 / 6.3). So are
   `--success`, `--warning` and `--destructive` on the panel.
 - **Monospace** (Geist Mono) only inside `CodeBlock` and `CodeSnippet`, and in the JSON editor
   of format settings (an editable code block). Nowhere else: not for names, paths, checksums,
   labels, badges, codes or input values.
-- **Spacing.** Tailwind's 4px scale only. Breadcrumbs to title 12px; page header to content `mb-8`
-  (32px, `PageHeader` does it); tabs to content 24px (`TabNav`). Between sections: 24px (`Section`
-  does it). Inside a section: 24px padding (20px under 640px), 24px from the header to the content
-  and from the content to the footer. Form grid: 24px between cells (`FormGrid`), 8px from a label
-  to its control and from the control to its help (`FormRow`). Buttons in a row `gap-2`; toolbar
-  to table `mb-4` (`Toolbar` does it). Do not add other margins between these blocks.
+- **Spacing.** Tailwind's 4px scale only. Browse pages (home, a repository, search) are airier
+  than Settings pages, which stay a little denser: `AppShell` sets `data-layout` on the container
+  and `app.css` sets the variables below for each layout (Browse / Settings). Breadcrumbs to title
+  12px; page header to content `--header-gap` (40 / 32px, `PageHeader` does it); tabs to content
+  `--tabs-gap` (32 / 24px, `TabNav`). Between sections: `--section-gap` (32 / 28px, `Section` does
+  it). Inside a section: 24px padding (20px under 640px), 24px from the header to the content and
+  from the content to the footer. Form grid: 24px between cells (`FormGrid`), 8px from a label to
+  its control and from the control to its help (`FormRow`). Buttons in a row `gap-2`; toolbar to
+  table `--toolbar-gap` (20 / 16px, `Toolbar` does it). Do not add other margins between these
+  blocks.
 - **Control width.** Every text control fills its cell of the form grid, so every text control
   in a grid has one width. That covers an input, a select, a `ListInput`, a `SecretInput`, and a
   number with its unit (`UnitInput`: one control, the unit is a menu at its end). A field that
@@ -200,7 +206,8 @@ The repository page is the one exception: it checks the caller's permissions on 
   control in a page. Only a control that sizes itself sits at the start of its cell with
   `width="auto"`: a switch (`SwitchRow`), a checkbox, a button. The values `wide`, `medium` and
   `short` are deprecated and render the full width.
-- **Rows.** A table row is one line, `h-row` (40px). Zebra stripes use `--stripe` (between the
+- **Rows.** A table row is one line, `h-row` (`--row`: 48px on a Browse page, 44px in Settings);
+  its heading row is `--row-head` (40 / 36px). Zebra stripes use `--stripe` (between the
   background and `--hover`), so a stripe and a hover never look the same.
 - **Scrollbars.** The page and every inner scroll area use the themed scrollbar from `app.css`:
   a rounded thumb (`--scrollbar-thumb`) that darkens in light and lightens in dark under the
@@ -231,12 +238,13 @@ The repository page is the one exception: it checks the caller's permissions on 
 | `PageHeader` | `title`, `description?` (one sentence), `crumbs?`, snippets `meta?` (badges next to the title), `status?` (one muted line under the title: an icon and one sentence, for a state with no other place on the page; the repository page uses it while an operation holds the repository), `actions?`. The page's only h1, with the breadcrumbs above it. On a Settings page the breadcrumbs come from the sidebar (Settings › group › item › title); `crumbs` replaces the steps after the group when the page sits deeper (`[{label: "maven", href}, {label: "Access"}]`). A Browse page shows breadcrumbs only when it passes `crumbs` (its whole trail). `back` is deprecated: use `crumbs`. |
 | `Breadcrumbs` | `items: Crumb[]` (`{label, href?}`; the last is the current page), `path?`, `label?` (the accessible name). `PageHeader` renders it; use it directly only outside a page header. `path` is the look of a place inside a repository (the Files tab's folder path, in the toolbar of its panel): body text after a folder icon, slashes between the steps, so it never reads as a second page trail. |
 | `Toolbar` | The row above a table: filters as children, the main action in `end`. |
-| `DataTable` | Every table, at the full content width: `source` (a `Keyset`, or `listOf(resource)`), `columns` (`{label, srLabel?, align?: "right", grow?, hideOnPhone?}`), `caption`, `key`, `href?` (whole-row click), `selected?`, snippets `row(item)` (the cells, as `Cell`s) and `empty?` (a `CompactEmpty`). Zebra stripes, one fixed row height (40px, one line), rounded row ends, a fill on the whole row under the pointer, the selected fill on the `selected` row. Loading (`Loading` in the space of four rows, after 300 ms; a reload keeps the current rows) and error (a row with Try again) show under the headings; an empty table is never drawn: `empty` shows in its place, without column headings. A `Keyset` gets "Load more". Bulk actions: `bind:picked` (a `Set` of row keys), `pickable?(item)`, `pickLabel?(item)` (the checkbox's name) and snippet `bulk` (the actions). Each row then gets a checkbox in a first column, a 40px hit target over the full row height; a row that is not pickable has an empty cell. The header checkbox picks every pickable loaded row and clears them on the next click ("Select the 50 rows shown" for a keyset). While rows are picked, a bar of the header's height lies over the headings: "12 selected", the `bulk` actions, "Select all 50", "Clear". Shift+click picks a range; Esc clears the pick when no dialog is open. `pickOnRow` (a table without `href`): a click anywhere on a pickable row, outside its controls, toggles its checkbox. `pickOff`: the checkboxes show, turned off. `selectAllLabel`: the text of the "Select all" button. `picked` is not `selected`. After an action, reload the table, empty `picked` and say what changed in a toast. |
+| `DataTable` | Every table, at the full content width: `source` (a `Keyset`, or `listOf(resource)`), `columns` (`{label, srLabel?, align?: "right", grow?, hideOnPhone?}`), `caption`, `key`, `href?` (whole-row click), `selected?`, snippets `row(item)` (the cells, as `Cell`s) and `empty?` (a `CompactEmpty`). Zebra stripes, one fixed row height (`h-row`, one line), rounded row ends, a fill on the whole row under the pointer, the selected fill on the `selected` row. Loading (`Loading` in the space of four rows, after 300 ms; a reload keeps the current rows) and error (a row with Try again) show under the headings; an empty table is never drawn: `empty` shows in its place, without column headings. A `Keyset` gets "Load more". Bulk actions: `bind:picked` (a `Set` of row keys), `pickable?(item)`, `pickLabel?(item)` (the checkbox's name) and snippet `bulk` (the actions). Each row then gets a checkbox in a first column, a 40px hit target over the full row height; a row that is not pickable has an empty cell. The header checkbox picks every pickable loaded row and clears them on the next click ("Select the 50 rows shown" for a keyset). While rows are picked, a bar of the header's height lies over the headings: "12 selected", the `bulk` actions, "Select all 50", "Clear". Shift+click picks a range; Esc clears the pick when no dialog is open. `pickOnRow` (a table without `href`): a click anywhere on a pickable row, outside its controls, toggles its checkbox. `pickOff`: the checkboxes show, turned off. `selectAllLabel`: the text of the "Select all" button. `picked` is not `selected`. After an action, reload the table, empty `picked` and say what changed in a toast. |
 | `Cell` | One cell of a `DataTable` row: `text?` (one line that truncates, full value in a tooltip), `copy?` (`true` or the value to copy: a copy button that shows on row hover), `copyLabel?`, `grow?` (the column that takes the free width, at least 10rem), `num?` (numbers, sizes, times: right-aligned, tabular numerals), `actions?` (the row's buttons, right-aligned), `strong?` (the row's name), `muted?`, `hideOnPhone?`. Children for anything else (a badge, a `RelativeTime`). Use `Table.Cell` only for a control that `Cell` does not cover, and keep it one line. |
 | `Truncate` | `text`, `copy?`, `copyLabel?`, `class?`: one line that never wraps; "…" and a tooltip when it is cut (a path breaks after its slashes in the tooltip); an optional copy button. `Cell text` uses it; use it directly for a long value outside a table. |
-| `RepoTable` | The repositories table (Browse home, All repositories): name, a lock after a private one, the kind icon after a group or a proxy, and the description on one line; format, files (a group: its number of repositories), size, last publish. On a phone the format icon, the name and the last publish. |
+| `RepoList` | `repos`, `href`. The list of Browse home, for a visitor who looks for one repository: one card, a row per repository (the whole row is the link) with the same fields in the same places for every kind: the format icon, the name (`text-section`) with a lock after a private one, the description on one line under it, and at the end the format title and the kind in plain words (`kindPhrase` in `lib/words.ts`). Under 640px the format and the kind move under the description. No counts, sizes or times. |
+| `RepoTable` | The repositories table for the people who manage them (Settings › Repositories): name, a lock after a private one, the kind icon after a group or a proxy, and the description on one line; format, files (a group: its number of repositories), size, last publish. On a phone the format icon, the name and the last publish. |
 | `RepoKindIcon` | `kind`, `iconClass?`, `class?`. The mark of a group (layers) or a proxy (cloud download), with the word "Group" or "Proxy" for screen readers; nothing for a hosted repository. |
-| `Section` | `title?`, `description?` (one sentence), snippets `actions?` (the area's actions at the header's end; on a phone they wrap under the title) and `footer?` (a submit row), `class?`. One logical area of a page on its own surface (a shadcn `Card`): 24px padding, 24px to the next section. A page with a table or a list puts it in a `Section` too. |
+| `Section` | `title?`, `description?` (one sentence), snippets `actions?` (the area's actions at the header's end; on a phone they wrap under the title) and `footer?` (a submit row), `class?`. One logical area of a page on its own surface (a shadcn `Card`): 24px padding, `--section-gap` to the next section. A page with a table or a list puts it in a `Section` too. |
 | `FormPage` | The body of a form page. It sets no width: every Settings page uses the full content column. |
 | `FormSection` | `title?`, `description?`, snippets `actions?` and `footer?` (the submit row). A `Section` that holds a form: put one `FormGrid` in it, or two with a `<Separator />` between sub-groups. |
 | `FormGrid` | The one form grid: holds `FormRow` and `SwitchRow` in two columns (`sm:grid-cols-2`), 24px apart; one column under 640px. Each label sits above its control and every control fills its cell, so there is no label column. |
@@ -256,7 +264,7 @@ The repository page is the one exception: it checks the caller's permissions on 
 | `ConfirmDialog` | `bind:open`, `title` (a question), `description?`, `changes: string[]`, `confirmLabel`, `destructive?`, `typeToConfirm?` (a field; the confirm button stays off until it holds this text: the name of the one thing, or the action of a bulk delete, "delete 12 repositories"; never a bare count), `onConfirm` (async; errors stay in the dialog). A bulk delete names the count and the first five names (`someNames` in `lib/words.ts`): "Delete 12 repositories? oasis, plex, scissors, enginehub, worldedit and 7 more." |
 | `ShortFormDialog` | `bind:open`, `title`, `description?`, `submitLabel`, `canSubmit?`, `onSubmit` (async); at most five `FormField`s as children. |
 | `DetailsColumn` | `title`, `onClose`, snippet `actions?`: the details of the selected row in a 360px column right of the table. On the Files tab the column always shows (the selected file, or else the open folder); Close hides it until the person selects a file or clicks "Show details". |
-| `TabNav` | Tabs that are pages (each tab has its own address): `label`, `items: {label, href, active, icon?}[]`. The open tab fills like a sidebar item; no line under the row; 24px to the content. |
+| `TabNav` | Tabs that are pages (each tab has its own address): `label`, `items: {label, href, active, icon?}[]`. The open tab fills like a sidebar item; no line under the row; `--tabs-gap` to the content. |
 | `CodeBlock` | `code`, `title?`, `diff?`, snippet `actions?` (at the end of the title row): multi-line code with a copy button (monospace). With `diff` (diff lines, each after its mark: `+` added, a space for context) it shows the change to a file the reader has: added lines marked and filled, context muted; copy takes the added lines only, and a selection never takes the marks. `repo/snippets/SnippetBlock` shows a CI file this way, with Add to a workflow / New workflow. |
 | `Segmented` | `bind:value`, `options` (`{value, label, title?}[]`), `label`, `compact?`: two or three short choices as one segmented control (a radio group); arrow keys move. It fills its cell; `compact` is as wide as its labels, for the title row of a `CodeBlock`. |
 | `CodeSnippet` | `value`, `label?`, `secret?`: one line to copy: a command, a token, an address (monospace). |
@@ -267,7 +275,7 @@ The repository page is the one exception: it checks the caller's permissions on 
 | `FormatBadge` | `format`, `title?`. The format's icon and title, inline, with no box and no tint. |
 | `EmptyState` | `title`, `description?`, `icon?`; children are the action that fills it. A whole page or result that has nothing to show; a list uses `CompactEmpty`. |
 | `ErrorState` | `error`, `title?`, `onRetry?`, `inline?` (one line in a form, a dialog or a table). |
-| `Loading` | `rows?` (the height to reserve, in 40px rows; 4), `inline?` (one line in a form, a dialog or a row), `label?`. The one loading state: nothing for 300 ms, then a quiet spinner and "Loading" in the reserved space. Show it for `loading && !data`, so a reload keeps the current content. `DataTable` uses it. |
+| `Loading` | `rows?` (the height to reserve, in table rows of `--row`; 4), `inline?` (one line in a form, a dialog or a row), `label?`. The one loading state: nothing for 300 ms, then a quiet spinner and "Loading" in the reserved space. Show it for `loading && !data`, so a reload keeps the current content. `DataTable` uses it. |
 | `FreshFactor` | `actionLabel`, `onProof(proof)`: the fresh second-factor check, inline in a page. |
 | `SecondFactorPrompt` | The same in a short dialog, before an action started from a button. |
 | `SecondFactorForm` | The code or passkey form inside the two above and the sign-in page. |

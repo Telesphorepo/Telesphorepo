@@ -3475,12 +3475,14 @@ page are in `web/src/README.md`.
   `base_url`. It reads `GET /api/settings` when the person signs in and after they leave
   Settings › General.
 - **Cards.** Each area of a page is a card (`Section`): a header with its title and its actions,
-  then its content. Every table is in a card too. Cards are 24 px apart. A form card holds a
+  then its content. Every table is in a card too. Cards are 32 px apart on Browse pages and 28 px in Settings. A form card holds a
   two-column grid: the label above each control, every control the width of its cell, and a long
   field across both cells. The grid is one column under 640 px. A setup is a row of numbered cards
   (`Step`).
 - **Type, spacing and states.** One sans-serif family for all text. Monospace is for code blocks
-  and copy-paste snippets only. One spacing scale (4 px base) and one radius (8 px). Hover and
+  and copy-paste snippets only. Body text is 15 px, help and facts 14 px, section titles 17 px and
+  the page title 26 px. One spacing scale (4 px base) and one radius (8 px). A table row is 48 px
+  on Browse pages and 44 px in Settings, which are a little denser. Hover and
   selected states fill the whole row or item. There is no left-border accent. Every page has
   loading, empty and error states.
 - **Loading.** The UI shows no skeletons. A loading area shows nothing for 300 ms, then a quiet
@@ -3504,9 +3506,12 @@ page are in `web/src/README.md`.
   challenge.
 - **Browse** (anyone; visitors see the anonymous-read repos). `/#/` is titled "Repositories", with
   no subtitle. A toolbar holds a filter box, a format filter and **New repository** (`repositories.all`). A
-  table shows the format icon, the name (with a lock when the repo is private, and the mark of a
-  proxy or a group), files (a group: its member count), size and last publish (`file_count`, `total_size`, `last_published_at`). On a phone the format icon sits
-  before the name. A click anywhere on a row opens the repo. Search is `/#/search?q=&repo=`: the
+  list sorted by name has one row per repo, the same for every kind: the format icon, the name
+  (with a lock when the repo is private), the description on one line, and the format title and
+  the kind in plain words ("Hosted", "Proxy of a remote repository", "Group of 3 repositories").
+  Files, size and last publish show in Settings › Repositories and in the details of a repo's top
+  folder. On a phone the format and the kind move under the description. A click anywhere on a row
+  opens the repo. Search is `/#/search?q=&repo=`: the
   top-bar field holds the query, and a select picks the repo.
 - **Repository page** (`/#/repo/{name}/...`). The header shows the name with a lock for a private
   repo, the format (icon and title) and the description. **Upload** and **Settings** show for users
