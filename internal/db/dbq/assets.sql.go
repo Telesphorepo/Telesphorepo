@@ -488,19 +488,21 @@ func (q *Queries) ListAssetsFromRange(ctx context.Context, arg ListAssetsFromRan
 }
 
 const listCollectableBlobs = `-- name: ListCollectableBlobs :many
-SELECT id FROM blobs WHERE id IN (/*SLICE:ids*/?) AND refs = 0 AND unreferenced_at < ?2
+SELECT id FROM blobs WHERE refs = 0 AND unreferenced_at < ?1 AND id IN (/*SLICE:ids*/?)
 `
 
 type ListCollectableBlobsParams struct {
-	Ids    []int64
 	Cutoff int64
+	Ids    []int64
 }
 
 // The blobs of ids that no asset referenced since before cutoff (the GC checks a round under its
-// digest locks).
+// digest locks). The slice comes last: sqlc writes the cutoff as ?2 after a slice, and SQLite
+// gives ?2 to the second id of the expanded slice.
 func (q *Queries) ListCollectableBlobs(ctx context.Context, arg ListCollectableBlobsParams) ([]int64, error) {
 	query := listCollectableBlobs
 	var queryParams []interface{}
+	queryParams = append(queryParams, arg.Cutoff)
 	if len(arg.Ids) > 0 {
 		for _, v := range arg.Ids {
 			queryParams = append(queryParams, v)
@@ -509,7 +511,6 @@ func (q *Queries) ListCollectableBlobs(ctx context.Context, arg ListCollectableB
 	} else {
 		query = strings.Replace(query, "/*SLICE:ids*/?", "NULL", 1)
 	}
-	queryParams = append(queryParams, arg.Cutoff)
 	rows, err := q.db.QueryContext(ctx, query, queryParams...)
 	if err != nil {
 		return nil, err

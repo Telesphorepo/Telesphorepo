@@ -91,9 +91,10 @@ WHERE refs = 0 AND unreferenced_at < sqlc.arg(cutoff)
 ORDER BY unreferenced_at LIMIT sqlc.arg(limit);
 
 -- The blobs of ids that no asset referenced since before cutoff (the GC checks a round under its
--- digest locks).
+-- digest locks). The slice comes last: sqlc writes the cutoff as ?2 after a slice, and SQLite
+-- gives ?2 to the second id of the expanded slice.
 -- name: ListCollectableBlobs :many
-SELECT id FROM blobs WHERE id IN (sqlc.slice(ids)) AND refs = 0 AND unreferenced_at < sqlc.arg(cutoff);
+SELECT id FROM blobs WHERE refs = 0 AND unreferenced_at < sqlc.arg(cutoff) AND id IN (sqlc.slice(ids));
 
 -- Deletes a blob row only while no asset points to it.
 -- name: DeleteUnreferencedBlob :execrows

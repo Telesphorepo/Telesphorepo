@@ -448,13 +448,7 @@ func TestLargeUploadAndRepoGC(t *testing.T) {
 				t.Fatalf("blob %s: %d objects, want 1", k, n)
 			}
 		}
-		var res struct {
-			Deleted []string `json:"deleted"`
-		}
-		s.MustAPI(t, http.MethodPost, "/api/repos/delete", map[string][]string{"names": {repo}}, s.Admin(), &res)
-		if len(res.Deleted) != 1 {
-			t.Fatalf("repo delete: %+v, want the repo deleted", res)
-		}
+		deleteRepos(t, s, repo)
 		deadline := time.Now().Add(60 * time.Second)
 		for {
 			stored := storedKeys(t, opts)

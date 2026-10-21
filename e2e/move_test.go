@@ -471,7 +471,11 @@ func TestStorageMoveRetry(t *testing.T) {
 		t.Fatalf("s3.redirect after the retry = %s, want true", got)
 	}
 	moveWantBlobs(t, "target", tg.Blobs(t), moveAssets(t, s, repo))
-	moveWantRaw(t, s, repo, files)
+	// With s3.redirect on, a download answers 302 with a presigned URL on the target: the GET
+	// follows it at the host address of SeaweedFS.
+	for p, body := range files {
+		rawWantGet(t, s, tg, "/raw/"+repo+"/"+p, s.AdminBasic(), body)
+	}
 
 	// The failed move is put away; the done one cannot be tried again.
 	if old := s.GetMove(t, m.ID); old.DismissedAt == nil {
