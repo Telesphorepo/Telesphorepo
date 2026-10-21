@@ -38,9 +38,14 @@
 
   let editing = $state(false);
   let field = $state<HTMLInputElement | null>(null);
-  // A parent reset (change back to undefined) closes the field.
+  // A parent reset (a typed value back to undefined, as after a save) closes the field. Opening the
+  // field also has change undefined, before the focus reaches it, so only a change from a value
+  // counts.
+  let prev: string | null | undefined;
   $effect(() => {
-    if (change === undefined && editing && field && document.activeElement !== field) editing = false;
+    const c = change;
+    if (prev !== undefined && c === undefined && editing && document.activeElement !== field) editing = false;
+    prev = c;
   });
 
   async function replace() {
