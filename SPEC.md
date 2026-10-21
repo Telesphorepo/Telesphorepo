@@ -82,7 +82,7 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/activity` | Module `audit`: `GET /api/audit`, `GET /api/audit/actions`, the permission `activity.read`, the settings group `activity` and the job `audit.retention` |
 | `internal/netrules` | Module `network`: client IP resolution behind trusted proxies (the client address of every request), the IP lists (presets and custom lists) and the per-repo IP rules. See **Network rules** |
 | `internal/api` | Module `core`: sign-in, the account, people, read tokens (token kind `trp`), repos, grants, files, uploads, search, the settings API and `/api/formats`. The JSON API of every module is under `/api/`, wrapped in `http.CrossOriginProtection` |
-| `internal/httpx` | JSON helpers, the error answers (`Error`, the problem types of `DeclareProblem`, `WriteProblem`; see **Problem documents**), `StatusError` (an error with its HTTP status), `RepoPath` (the URL check of a `{path...}`, then `repopath.Parse`), `Limit` (default 50, max 200) |
+| `internal/httpx` | JSON helpers, the error answers (`Error`, the problem types of `DeclareProblem`, `WriteProblem`; see **Problem documents**), `StatusError` (an error with its HTTP status), `RepoPath` (the URL check of a `{path...}`, then `repopath.Parse`), `Limit` (default 50, max 200), `AcceptsEncoding` and `GzipJSON` (see **Compression** under the JSON API) |
 | `internal/demo` | The dev demo data (`telesphorepo-server dev`): it writes repos, users and files through the byte pipeline, with the demo data of each module (`Extender.Demo`). See **Demo data** |
 | `internal/containerengine` | Docker/Podman detection for tooling and e2e; not linked into the server |
 | `web/` | Svelte 5 + Vite UI (Tailwind CSS v4, shadcn-svelte Maia style), embedded via `web/embed.go` (`go:embed all:dist`). See **Web UI** |
@@ -752,7 +752,7 @@ signed-in browser downloads from a private repo without a Basic prompt. A **writ
 | `GET /api/docker/{name}/manifest?path=` | `repo.download` (password, read token, UI session, anonymous on a public repo) | The details of the manifest at a tag or manifest path of a docker repo (a group: of the first readable member that stores it): `{digest, media_type, artifact_type, size, total_size, config: {digest, media_type, size}\|null, layers: [{digest, media_type, size}], platforms: [{digest, os, architecture, variant}], subject\|null, tags: [first 100], referrers: n}`. A link path or another path is 400; a file that does not parse is 422 |
 | `GET /install.sh`, `GET /install.ps1` | none | The install script of the Telesphorepo CLI (see **Install scripts and CLI downloads**), `text/plain`. The publish module mounts them. 404 problem `no-cli-downloads` on a build without CLI archives; 400 when the server address holds a quote, a space, a backslash or a control character |
 | `GET /cli/telesphorepo_<os>_<arch>.<ext>`, `GET /cli/SHA256SUMS` | none | A CLI archive of the server's build (`.tar.gz`, `.zip` on Windows) and the SHA-256 of each, `Cache-Control: no-cache`. 404 problem `no-cli-downloads` on a build without CLI archives; another name is 404 |
-| `/` | none | Embedded UI, hash-routed |
+| `/` | none | Embedded UI, hash-routed (see **Web UI**). `/assets/...` has `Cache-Control: public, max-age=31536000, immutable`; `index.html` and a path without a file extension (the SPA fallback to `index.html`) have `no-cache`; another path with an extension that is not a file is 404 |
 
 A read of a proxy or a group repo on a format route follows **Group and proxy repositories**. A
 write (Maven PUT, Debian upload, manual upload, upload plan) to a proxy or a group answers 405 with
@@ -803,6 +803,16 @@ accepts it: `DELETE /api/publish/sessions/{id}`, `POST /api/repos/{name}/upload`
 `POST /api/repos/{name}/files/delete` and `.../files/delete/plan`, and only for its own repo. Every other `/api` route answers it with 403. Errors are problem documents (see **Problem
 documents**), with the extension member `fields` for settings validation. Bodies are capped at
 `max_json_size`. Lists are `{items, next}` with `?after=&limit=`.
+
+**Compression.** Every route under `/api/` answers with `Vary: Accept-Encoding`. A JSON answer
+(`application/json` or a `+json` type such as a problem document) of 1 KiB or more goes out with
+`Content-Encoding: gzip` (stdlib `compress/gzip`, without `Content-Length` and `Accept-Ranges`)
+when `Accept-Encoding` accepts gzip with a q above 0 (`httpx.GzipJSON`, which the router puts
+around each `/api/` route). The answer stays as it is for HEAD, for a request with `Range`, for
+204 and 304, for an answer that sets `Content-Encoding` itself or has another content type (a
+download), for a body below 1 KiB, and for an answer that flushes before its body reaches 1 KiB.
+The access log records the status and the bytes sent, so a compressed answer logs its compressed
+size.
 
 **Problem documents.** Every error answer under `/api/` and `/cli/`, and of `/install.sh` and
 `/install.ps1`, is an RFC 9457 problem document (`Content-Type: application/problem+json`,
@@ -3240,7 +3250,14 @@ module (`audit.System`), the `telesphorepo-server user` commands as `cli` (`audi
 
 Svelte 5 + Vite (no SvelteKit), Tailwind CSS v4, shadcn-svelte with the Maia style, TypeScript
 and bun. `bun run build` runs `svelte-check` and `vite build` into `web/dist`, which the binary
-embeds. Routing is hash-based (`/#/...`), so the URLs that the server and the clients print keep
+embeds. The build's `precompress-dist` plugin (`web/vite.config.ts`, `node:zlib`) writes a `.br`
+(quality 11) and a `.gz` (level 9) next to each text file of 1 KiB or more (`.html`, `.js`, `.mjs`,
+`.css`, `.svg`, `.json`, `.webmanifest`, `.map`, `.txt`, `.xml`), each only when it is smaller
+than the file; images and fonts get none. `web/embed.go` sends the `.br`, else the `.gz`, to a
+client whose `Accept-Encoding` accepts that coding, with `Content-Encoding`, the `Content-Type` of
+the original file and its `Cache-Control`; the SPA fallback to `index.html` too. A request with
+`Range` gets the plain file. Every answer of a file that has a precompressed file carries
+`Vary: Accept-Encoding`. Routing is hash-based (`/#/...`), so the URLs that the server and the clients print keep
 working. The UI is only a client of the JSON API and has no tests of its own. `web/index.html` holds one inline script that sets the theme before the first paint; a future Content-Security-Policy needs a hash for it. The page registry
 (`web/src/modules`), the folder layout, the components, the design rules and the steps to add a
 page are in `web/src/README.md`.

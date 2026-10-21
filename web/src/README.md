@@ -2,7 +2,8 @@
 
 Svelte 5 + Vite (no SvelteKit), Tailwind CSS v4, shadcn-svelte (Maia style), TypeScript, bun.
 `bun run build` type-checks with `svelte-check` and writes `web/dist`, which the Go binary embeds
-(`web/embed.go`). `bun run dev` serves the UI on :5173 and proxies every other path to the backend
+(`web/embed.go`). The build also writes a `.br` and a `.gz` next to each text file of 1 KiB or more,
+which the server sends to a browser that accepts them (see **Web UI** in SPEC.md). `bun run dev` serves the UI on :5173 and proxies every other path to the backend
 on :8080. Run both with `go tool task dev`.
 
 The UI is only a client of the JSON API (`/api/...`). It has no tests of its own: e2e tests cover
