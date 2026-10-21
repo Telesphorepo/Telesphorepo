@@ -38,13 +38,16 @@ the fallback) and Node 26+ (see `.node-version`); so does the edge Worker in `ed
 each of the five tags (`e2e`, `import`, `scale`, `clients`, `macos`), `go vet` of
 `./cmd/telesphorepo` with `GOOS=darwin` and `GOOS=windows`, `go tool task gen`, `bun run build` in
 `web/`, and `bunx tsc --noEmit` and `bun run build` in `edge/`. A subagent never runs a test, a
-dev server, a preview or `wrangler dev`, and never touches a Cloudflare account. The main session
-runs the zones. Only the `macos` job of `release.yml` runs the macOS zone (tag `macos`).
+dev server, a preview or `wrangler dev`, and never touches a Cloudflare account. Nobody runs the
+zones locally: CI runs them on every pull request.
 
-**Which zone.** Run the core zone for every change. Run the import zone when you touch
-`internal/nexus`, an importer or the `mirror` operation. Run the scale zone when you touch a hot
-query or an index. Run the clients zone when you touch `cmd/telesphorepo`, `internal/publish`, the
-write gate, the device and OIDC routes or the change log. Run all zones before a push that touches several zones.
+**Pull requests.** Every change reaches `main` through a pull request. CI (`ci.yml`) runs the build,
+the core zone (four shards), the clients zone and the GitHub Actions publish test on each pull
+request and on each new commit to it; a push to `main` only builds and publishes the `main` image.
+Open the pull request, read the failing job's log when CI fails, fix and push to the same branch.
+The import and scale zones run weekly and on demand (`e2e-extended.yml`): start them by hand for a
+change to `internal/nexus`, an importer, the `mirror` operation, a hot query or an index. Only the
+`macos` job of `release.yml` runs the macOS zone (tag `macos`).
 
 ## Hard rules
 
@@ -264,11 +267,11 @@ and an importer plan. `maven` shows proxy, group, `Merge`, `Upload` and `Tools`.
   move what stays true into `SPEC.md`.
 - **Use subagents freely.** Large parallel swarms are welcome. Use Opus or Sonnet subagents, and
   Haiku only for read-only work. Never use Fable subagents.
-- **Subagents build and vet, but never test.** They do not run tests, dev servers or the app.
-  After each milestone the main session runs the zones once and sends fix-up agents for failures.
+- **Agents build and vet, but never test.** No agent runs tests, dev servers or the app; CI runs
+  the zones on the pull request, and failures there go to fix-up agents.
 - **Make decisions instead of asking a lot of questions.** Flag a real trade-off when there is one,
   then pick a sensible default.
 - **Treat other tools as inspiration, not a requirement.** When the maintainer cites another tool
   ("like `bun run dev/build/preview`"), copy its shape using this project's own tooling.
-- Commit in logical chunks and push to `origin` (github.com/Telesphorepo/Telesphorepo) once the
-  suite is green.
+- Commit in logical chunks on a branch, push it to `origin` (github.com/Telesphorepo/Telesphorepo)
+  and open a pull request; merge it once CI is green.
