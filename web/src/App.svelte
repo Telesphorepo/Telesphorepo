@@ -41,7 +41,9 @@
       navigate("/login", { query: { next: router.path + (router.search ? "?" + router.search : "") }, replace: true });
       return;
     }
-    if (auth.setupOnly && r && r.access !== "any" && !setupPaths.includes(router.path)) {
+    // A setup-only session reaches only the setup routes, so every other page (one open to anyone
+    // too: its requests carry the session) sends it to the setup page.
+    if (auth.setupOnly && r && router.path !== "/login" && !setupPaths.includes(router.path)) {
       navigate(setupPaths[0], { replace: true });
     }
   });

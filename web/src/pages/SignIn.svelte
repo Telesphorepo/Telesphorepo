@@ -7,6 +7,7 @@
   import type { PageProps } from "$lib/router.svelte";
   import { navigate } from "$lib/router.svelte";
   import { auth } from "$lib/auth.svelte";
+  import { setupPaths } from "../modules";
   import { api, errorMessage, type AuthConfig, type Proof, type SecondFactorMethod } from "$lib/api";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
@@ -58,7 +59,8 @@
   );
 
   function done() {
-    navigate(next, { replace: true });
+    // An account without a second step goes to the page that adds one, not to where it was headed.
+    navigate(auth.setupOnly ? setupPaths[0] : next, { replace: true });
   }
 
   // A visitor who is already signed in goes on.

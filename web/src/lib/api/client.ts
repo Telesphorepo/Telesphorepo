@@ -115,7 +115,10 @@ export async function request<T = void>(method: string, url: string, opts: Reque
       /* not JSON */
     }
     if (res.status === 401 && !opts.token && !carriesCredentials.test(url)) lost.forEach((f) => f());
-    if (res.status === 403 && message === "second_factor_required") setupOnly.forEach((f) => f());
+    if (res.status === 403 && message === "second_factor_required") {
+      setupOnly.forEach((f) => f());
+      message = "Add an authenticator app or a passkey to your account first.";
+    }
     const ra = Number(res.headers.get("Retry-After"));
     throw new ApiError(res.status, message, fields, Number.isFinite(ra) && ra > 0 ? ra : undefined);
   }

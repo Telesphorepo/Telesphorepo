@@ -3568,7 +3568,10 @@ page are in `web/src/README.md`.
   dashed frame. The header action of the card is hidden while the list is empty, so the row holds
   the only action.
 - **Auth in the UI.** A 401 outside the sign-in routes signs the user out. A 403
-  `second_factor_required` sets the setup-only state. Signing out returns to Home.
+  `second_factor_required` sets the setup-only state; the UI shows its message as a sentence, never
+  the code. A setup-only session goes from the sign-in, and from every page but the sign-in, to
+  Sign-in and security, which says why and, once a method is added, offers the way on. Signing out
+  returns to Home.
 
 ## CLI
 

@@ -44,6 +44,10 @@
     const b = query.get("back") ?? "";
     return /^\/[^/]/.test(b) && !b.includes("//") ? b : "";
   });
+  // Opened for an account that must add a second step first (right after its sign-in): the page
+  // says why, and once a method is added it offers the way on.
+  const required = auth.setupOnly;
+  const onward = $derived(back || "/");
 
   const user = $derived(auth.user);
   const local = $derived(user?.kind === "local");
@@ -197,16 +201,18 @@
 
 <PageHeader title="Sign-in and security" />
 
-{#if back}
+{#if back || required}
   <Alert.Root class="mb-6">
     {#if count}<CircleCheckIcon />{:else}<ShieldCheckIcon />{/if}
     <Alert.Title>{count ? "Two-step verification is on" : "Add a second step to go on"}</Alert.Title>
     <Alert.Description>
       {#if count}
-        <p>Go back to finish what you started.</p>
-        <div class="mt-2"><Button href={href(back)}>Go back</Button></div>
-      {:else}
+        <p>{back ? "Go back to finish what you started." : "Your account is ready."}</p>
+        <div class="mt-2"><Button href={href(onward)}>{back ? "Go back" : "Open repositories"}</Button></div>
+      {:else if back}
         <p>Add an authenticator app or a passkey below. Then you can go back to finish what you started.</p>
+      {:else}
+        <p>Your account signs in with a password and one more step. Add an authenticator app or a passkey below to use Telesphorepo.</p>
       {/if}
     </Alert.Description>
   </Alert.Root>
