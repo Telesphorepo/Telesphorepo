@@ -15,7 +15,8 @@ import (
 // watcher is the pipeline watcher of the module (assets.Watcher). Before a replacement or a
 // remove it makes the old pointers unusable in every bucket, under the path locks, after a dirty
 // outbox row in its own transaction. In the commit and remove transactions it queues the final
-// state. A failed pre-step fails the commit or the remove batch.
+// state, or drops the dirty row of a removed path whose pointers are deleted already. A failed
+// pre-step fails the commit or the remove batch.
 type watcher struct{ m *mod }
 
 // edgeOf returns the edge spec of the format of repo, nil when the format has none.
@@ -197,29 +198,75 @@ func (w watcher) Removing(ctx context.Context, repo *repos.Repo, paths []string)
 			immutable = append(immutable, all[i])
 		}
 	}
-	return parallel(8, v.pre(), func(b *bucket) error {
+	err := parallel(8, v.pre(), func(b *bucket) error {
 		keys := all
 		if b != v.home {
 			keys = immutable
 		}
 		return retry429(ctx, func() error { return m.del(ctx, b, keys...) })
 	})
+	if err == nil && v.mode == modeOn {
+		m.cleared(v, all)
+	}
+	return err
 }
 
+// Removed drops the dirty row of each removed path whose pointers Removing deleted in every
+// bucket of the view that is still current: the pointers are already in their final state.
+// Every other removed path gets a row with the current state, so the outbox deletes its pointer
+// in every bucket. When the remove transaction fails, the dirty rows of Removing stay and the
+// outbox puts the pointers of the assets that are still there.
 func (w watcher) Removed(ctx context.Context, tx *sql.Tx, repo *repos.Repo, removed []*assets.Asset) error {
 	m := w.m
-	if m.cur.Load().mode != modeOn || m.edgeOf(repo) == nil {
+	v := m.cur.Load()
+	if v.mode != modeOn || m.edgeOf(repo) == nil {
 		return nil
 	}
 	q := dbq.New(tx)
 	now := nowMS()
+	queued := false
 	for _, a := range removed {
+		if m.takeCleared(pointerKey(repo.ID, a.Path)) == v {
+			if err := q.DropRemoved(ctx, dbq.DropRemovedParams{RepoID: repo.ID, Path: a.Path}); err != nil {
+				return err
+			}
+			continue
+		}
 		if err := q.UpsertOutbox(ctx, dbq.UpsertOutboxParams{RepoID: repo.ID, Path: a.Path, DueAt: now}); err != nil {
 			return err
 		}
+		queued = true
 	}
-	time.AfterFunc(50*time.Millisecond, m.wake)
+	if queued {
+		time.AfterFunc(50*time.Millisecond, m.wake)
+	}
 	return nil
+}
+
+// maxCleared bounds the keys that Removing keeps for Removed. A key that is not kept gets an
+// outbox row, which deletes its pointers once more.
+const maxCleared = 100000
+
+// cleared notes that the pointer keys were deleted in every bucket of v. The path locks of the
+// remove batch are held until its Removed, which takes the keys again.
+func (m *mod) cleared(v *view, keys []string) {
+	m.clearMu.Lock()
+	defer m.clearMu.Unlock()
+	if len(m.removedKeys)+len(keys) > maxCleared {
+		clear(m.removedKeys) // the keys of failed remove transactions and of paths without an asset
+	}
+	for _, k := range keys {
+		m.removedKeys[k] = v
+	}
+}
+
+// takeCleared returns the view of Removing for key and forgets it; nil when none is kept.
+func (m *mod) takeCleared(key string) *view {
+	m.clearMu.Lock()
+	defer m.clearMu.Unlock()
+	v := m.removedKeys[key]
+	delete(m.removedKeys, key)
+	return v
 }
 
 func (w watcher) Touched(ctx context.Context, repo *repos.Repo, paths []string) error {

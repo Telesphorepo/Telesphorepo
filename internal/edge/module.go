@@ -42,9 +42,12 @@ var ProblemNotConfigured = httpx.DeclareProblem(httpx.Problem{Name: "edge-not-co
 // pipeline watcher, the change notices of auth, repos, network, publish and storage, the jobs
 // edge.outbox, edge.backfill, edge.reconcile and edge.seen, and the routes of /api/edge/.
 func Module() module.Module {
-	m := &mod{kick: make(chan struct{}, 1), ctl: make(chan struct{}, 1), sp: newSpacer(), errs: map[string]string{},
+	m := &mod{kick: make(chan struct{}, 1), akick: make(chan struct{}, 1), ctl: make(chan struct{}, 1),
+		countKick: make(chan struct{}, 1), sp: newSpacer(), errs: map[string]string{}, removedKeys: map[string]*view{},
 		marked: map[string]bool{}}
 	m.cur.Store(&view{})
+	counted := make(chan struct{})
+	m.counted.Store(&counted)
 	return module.Module{
 		ID: "edge", Title: "Edge delivery", Requires: []string{"storage", "network", "publish"},
 		Register: func(x *module.Extender) {
@@ -70,19 +73,26 @@ type mod struct {
 	rq    *dbq.Queries // the read pool
 	moves *move.Service
 
-	cur  atomic.Pointer[view] // the buckets that the watcher and the outbox write now
-	kick chan struct{}        // wakes the outbox
-	ctl  chan struct{}        // wakes the controller (edge.backfill)
+	cur   atomic.Pointer[view] // the buckets that the watcher and the outbox write now
+	kick  chan struct{}        // wakes the outbox
+	akick chan struct{}        // an access object was marked: the outbox reads them before its next pointer
+	ctl   chan struct{}        // wakes the controller (edge.backfill)
 
-	ack        atomic.Bool  // the edge settings were saved since the last "deploy needed"
-	locChanged atomic.Bool  // a location key of the storage settings changed
-	suspend    atomic.Value // string: why a storage move suspends edge delivery, "" for none
-	counts     atomic.Value // outboxCounts
-	gap        atomic.Value // *gapState: the last read of gap/state.json
+	ack        atomic.Bool                   // the edge settings were saved since the last "deploy needed"
+	locChanged atomic.Bool                   // a location key of the storage settings changed
+	suspend    atomic.Value                  // string: why a storage move suspends edge delivery, "" for none
+	counts     atomic.Value                  // outboxCounts
+	countAsked atomic.Int64                  // unix ms of the last status request that read the counts
+	countKick  chan struct{}                 // a status request asks for a count now
+	counted    atomic.Pointer[chan struct{}] // closed by the next count
+	gap        atomic.Value                  // *gapState: the last read of gap/state.json
 	sp         *spacer
 
 	errMu sync.Mutex
 	errs  map[string]string // bucket label ("home" or a hint) -> the last write error, "" after a success
+
+	clearMu     sync.Mutex
+	removedKeys map[string]*view // pointer key -> the view whose buckets Removing deleted it in, until Removed
 
 	stMu    sync.Mutex // guards home and regions, which the controller owns
 	home    homeState
@@ -96,10 +106,11 @@ type mod struct {
 	ttl   ttlState
 }
 
-// outboxCounts are the rows of the outbox at its last count.
+// outboxCounts are the rows of the outbox at its last count (At).
 type outboxCounts struct {
 	Total, Pointers int64
 	LastError       string
+	At              time.Time
 }
 
 func (m *mod) init(ctx context.Context, h *module.Host) error {

@@ -3,3 +3,8 @@
 //   sqlc v1.31.1
 
 package dbq
+
+type UserPermission struct {
+	UserID int64
+	Perm   string
+}

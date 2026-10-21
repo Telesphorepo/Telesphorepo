@@ -578,17 +578,17 @@ export async function rights(caller: Caller, objects: Objects): Promise<Rights |
       if (!u || !u.enabled) return null;
       return { ...userRights(u), scopes: caller.scopes, seen: null };
     }
+    // The token and the device must belong to the user of the bearer, so its user object is read
+    // at the same time.
     case CRED_READ_TOKEN: {
-      const t = await tokenObject(objects, caller.tokenPublic);
+      const [t, u] = await Promise.all([tokenObject(objects, caller.tokenPublic), userObject(objects, caller.user)]);
       if (!t || t.id !== caller.token || t.user !== caller.user || !live(t.exp)) return null;
-      const u = await userObject(objects, t.user);
       if (!u || !u.enabled || !u.local) return null;
       return { ...userRights(u), scopes: caller.scopes, seen: null };
     }
     case CRED_DEVICE: {
-      const d = await deviceObject(objects, caller.device);
+      const [d, u] = await Promise.all([deviceObject(objects, caller.device), userObject(objects, caller.user)]);
       if (!d || d.user !== caller.user || !live(d.exp)) return null;
-      const u = await userObject(objects, d.user);
       if (!u || !u.enabled) return null;
       return { ...userRights(u), scopes: caller.scopes, seen: null };
     }

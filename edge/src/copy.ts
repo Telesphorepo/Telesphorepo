@@ -57,16 +57,24 @@ async function handle(env: Env, config: Config, body: CopyMessage, deadline: num
   const targets = regions(env, config, typeof body?.hint === "string" ? body.hint : undefined);
   if (targets.length === 0) return true;
   const home = await env.HOME.head(key);
-  let done = true;
-  for (const t of targets) {
-    if (home) {
-      const have = await t.r2.head(key);
-      if (have && have.size === home.size) continue;
-      if (!(await copyTo(env, t, key, hex, home.size, deadline))) done = false;
-    } else {
+  // Every region at once. Each one finishes its copy or delete; a failed one throws its error
+  // afterwards, so the message is retried and the regions that have the blob skip it then.
+  const results = await Promise.allSettled(
+    targets.map(async (t) => {
+      if (home) {
+        const have = await t.r2.head(key);
+        if (have && have.size === home.size) return true;
+        return copyTo(env, t, key, hex, home.size, deadline);
+      }
       await t.r2.delete(key);
       await dropState(env, t, key, hex);
-    }
+      return true;
+    }),
+  );
+  let done = true;
+  for (const r of results) {
+    if (r.status === "rejected") throw r.reason;
+    done = done && r.value;
   }
   return done;
 }

@@ -53,6 +53,7 @@ type CountOutboxRow struct {
 	LastError string
 }
 
+// The counts of the status page, while it is open.
 func (q *Queries) CountOutbox(ctx context.Context) (CountOutboxRow, error) {
 	row := q.db.QueryRowContext(ctx, countOutbox)
 	var i CountOutboxRow
@@ -124,9 +125,78 @@ func (q *Queries) DeleteWritten(ctx context.Context, key string) error {
 	return err
 }
 
+const dropRemoved = `-- name: DropRemoved :exec
+DELETE FROM edge_outbox WHERE repo_id = ? AND path = ? AND timed_out_at = 0
+`
+
+type DropRemovedParams struct {
+	RepoID int64
+	Path   string
+}
+
+// The row of a removed path whose pointers Removing deleted in every bucket of the current view.
+// A row with a put of unknown outcome stays, for its second application.
+func (q *Queries) DropRemoved(ctx context.Context, arg DropRemovedParams) error {
+	_, err := q.db.ExecContext(ctx, dropRemoved, arg.RepoID, arg.Path)
+	return err
+}
+
+const dueAccess = `-- name: DueAccess :many
+SELECT repo_id, path, sha256, due_at, attempts, seq, timed_out_at FROM edge_outbox
+WHERE repo_id = 0 AND due_at <= ?1 ORDER BY due_at LIMIT ?2
+`
+
+type DueAccessParams struct {
+	Now   int64
+	Limit int64
+}
+
+type DueAccessRow struct {
+	RepoID     int64
+	Path       string
+	Sha256     string
+	DueAt      int64
+	Attempts   int64
+	Seq        int64
+	TimedOutAt int64
+}
+
+// The rows of the access objects and config.json due at now, oldest first, through
+// edge_outbox_access: the worker writes them before the pointers.
+func (q *Queries) DueAccess(ctx context.Context, arg DueAccessParams) ([]DueAccessRow, error) {
+	rows, err := q.db.QueryContext(ctx, dueAccess, arg.Now, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []DueAccessRow
+	for rows.Next() {
+		var i DueAccessRow
+		if err := rows.Scan(
+			&i.RepoID,
+			&i.Path,
+			&i.Sha256,
+			&i.DueAt,
+			&i.Attempts,
+			&i.Seq,
+			&i.TimedOutAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const dueOutbox = `-- name: DueOutbox :many
 SELECT repo_id, path, sha256, due_at, attempts, seq, timed_out_at FROM edge_outbox
-WHERE due_at <= ?1 ORDER BY due_at LIMIT ?2
+WHERE due_at <= ?1 AND repo_id > 0 ORDER BY due_at LIMIT ?2
 `
 
 type DueOutboxParams struct {
@@ -144,7 +214,7 @@ type DueOutboxRow struct {
 	TimedOutAt int64
 }
 
-// The rows due at now, oldest first, through edge_outbox_due.
+// The pointer rows due at now, oldest first, through edge_outbox_due.
 func (q *Queries) DueOutbox(ctx context.Context, arg DueOutboxParams) ([]DueOutboxRow, error) {
 	rows, err := q.db.QueryContext(ctx, dueOutbox, arg.Now, arg.Limit)
 	if err != nil {
@@ -368,6 +438,80 @@ func (q *Queries) ListEdgeDevices(ctx context.Context, arg ListEdgeDevicesParams
 			&i.ExpiresAt,
 			&i.RevokedAt,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listEdgeGrantsIn = `-- name: ListEdgeGrantsIn :many
+SELECT user_id, repo_id FROM repo_permissions
+WHERE user_id > ?1 AND user_id <= ?2 AND perm = ?3
+`
+
+type ListEdgeGrantsInParams struct {
+	After int64
+	Last  int64
+	Perm  string
+}
+
+type ListEdgeGrantsInRow struct {
+	UserID int64
+	RepoID int64
+}
+
+// The repos where the users in (after, last] hold perm, through repo_permissions_user.
+func (q *Queries) ListEdgeGrantsIn(ctx context.Context, arg ListEdgeGrantsInParams) ([]ListEdgeGrantsInRow, error) {
+	rows, err := q.db.QueryContext(ctx, listEdgeGrantsIn, arg.After, arg.Last, arg.Perm)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListEdgeGrantsInRow
+	for rows.Next() {
+		var i ListEdgeGrantsInRow
+		if err := rows.Scan(&i.UserID, &i.RepoID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listEdgePermsIn = `-- name: ListEdgePermsIn :many
+SELECT user_id, perm FROM user_permissions WHERE user_id > ?1 AND user_id <= ?2
+`
+
+type ListEdgePermsInParams struct {
+	After int64
+	Last  int64
+}
+
+// The server permissions of the users in (after, last], through the user_permissions primary
+// key: the reconcile reads them per page of users.
+func (q *Queries) ListEdgePermsIn(ctx context.Context, arg ListEdgePermsInParams) ([]UserPermission, error) {
+	rows, err := q.db.QueryContext(ctx, listEdgePermsIn, arg.After, arg.Last)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []UserPermission
+	for rows.Next() {
+		var i UserPermission
+		if err := rows.Scan(&i.UserID, &i.Perm); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
