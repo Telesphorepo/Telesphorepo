@@ -2,7 +2,8 @@
   The body of the details column at a plain folder. At the top folder: the facts of the whole
   repository (files, size, last publish). At any other folder: what it holds (its folders and its
   files, without checksum and signature files, as the views count them) and when a file in it was
-  last published. The parent keys it by folder, and again after a delete.
+  last published. The parent keys it by folder, and again after a delete. A group's top folder
+  names its members in read order.
 -->
 <script lang="ts">
   import { api, type Repo } from "$lib/api";
@@ -13,6 +14,7 @@
   import RelativeTime from "$lib/components/RelativeTime.svelte";
   import { sideOf } from "../browse";
   import { formatCount } from "$lib/format";
+  import { href, repoPath } from "$lib/router.svelte";
 
   let { repo, folder }: { repo: Repo; folder: string } = $props();
 
@@ -42,7 +44,23 @@
   const r = $derived(top?.data ?? repo);
 </script>
 
-{#if top}
+{#if top && repo.kind === "group"}
+  <!-- A group's top folder: the repositories it reads, in read order. -->
+  <dl class="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-4 gap-y-2 text-body">
+    <dt class="text-muted-foreground">Reads from</dt>
+    <dd class="min-w-0">
+      {#if r.members?.length}
+        <ol class="flex flex-col gap-1">
+          {#each r.members as m (m.name)}
+            <li class="truncate"><a class="text-link hover:underline" href={href(repoPath(m.name))}>{m.name}</a></li>
+          {/each}
+        </ol>
+      {:else}
+        <span class="text-muted-foreground">No repositories</span>
+      {/if}
+    </dd>
+  </dl>
+{:else if top}
   <dl class="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-4 gap-y-2 text-body">
     <dt class="text-muted-foreground">Files</dt>
     <dd class="tabular-nums">{formatCount(r.file_count)}</dd>

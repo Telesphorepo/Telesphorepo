@@ -6,8 +6,10 @@
   page is a level below. The parent keys it by name.
 
   A proxy has the Files tab (its cached files; people with Delete files delete them) and the Use tab, and no
-  publish or upload. A group has no files and no tabs: its page is its members, each a link to the
-  member's page, then the Use view.
+  publish or upload. A group has the tabs too: Files is the merged folders of its members (read-only,
+  each file names its member and opens in it), Use this repository lists its members first, and
+  Publish to this repository shows to a person who publishes to one of its repositories: they pick
+  one (?to=) and get that repository's Publish tab.
 
   While the repository has an operation (a copy from Nexus that waits for the switch-over, a
   delete), the people who could upload or delete see its sentence as one muted line under the
@@ -32,6 +34,7 @@
   import GroupMembersList from "./GroupMembersList.svelte";
   import RepoKindIcon from "$lib/components/RepoKindIcon.svelte";
   import PublishTab from "./PublishTab.svelte";
+  import GroupPublish from "./GroupPublish.svelte";
   import UploadView from "./UploadView.svelte";
   import { formats } from "$lib/formats/registry.svelte";
   import { parentOf } from "./browse";
@@ -65,8 +68,6 @@
 
   const view = $derived.by((): View => {
     const r = rest.replace(/\/$/, "");
-    // A group has no files: its page is the Use view.
-    if (group && (r === "" || r === "use")) return { kind: "use" };
     if (r === "") return { kind: "files", path: "" };
     if (rest === "files" || rest.startsWith("files/")) return { kind: "files", path: rest.slice("files/".length) };
     if (r === "use") return { kind: "use" };
@@ -96,6 +97,11 @@
   const canSettings = $derived(perms.includes("repo.settings") || perms.includes("repo.access") || perms.includes("ci.pipelines"));
   // Nobody publishes to a group or a proxy.
   const canWrite = $derived(!!r && r.kind === "hosted" && perms.includes("repo.publish"));
+  // A group's Publish tab: its repositories that the person publishes to, in read order.
+  const publishTargets = $derived(
+    group && auth.user && !auth.setupOnly ? (r?.members ?? []).filter((m) => m.kind === "hosted" && (m.permissions ?? []).includes("repo.publish")) : [],
+  );
+  const canPublish = $derived(canWrite || publishTargets.length > 0);
   const locked = $derived(r?.operation?.message ?? "");
   // The line under the header for the people who could upload or delete: the operation's own
   // sentence (a failed one shows as an alert to the holders of All repositories instead).
@@ -162,7 +168,7 @@
       <Button variant="outline" href={href(repoPath(r.name))}>Open the files</Button>
     </EmptyState>
   {/if}
-{:else if view.kind === "publish" && !canWrite}
+{:else if view.kind === "publish" && !canPublish}
   <EmptyState
     icon={LockIcon}
     title="You cannot publish to {r.name}"
@@ -173,10 +179,6 @@
         : "A person who manages its access gives the Publish permission."}
   >
     <Button variant="outline" href={href(repoPath(r.name))}>{group ? "Open the group" : "Open the files"}</Button>
-  </EmptyState>
-{:else if view.kind === "files" && group}
-  <EmptyState icon={CompassIcon} title="A group has no files" description="Open one of its repositories to see files.">
-    <Button variant="outline" href={href(repoPath(r.name))}>Open the group</Button>
   </EmptyState>
 {:else if view.kind === "unknown"}
   <EmptyState icon={CompassIcon} title="This page does not exist" description="Check the address, or open the files of {r.name}.">
@@ -228,19 +230,17 @@
       onConfirm={clearOperation} />
   {/if}
 
-  <!-- On a phone the tabs scroll sideways; the cut-off last tab shows that, without a scrollbar. A group has one view and no tabs. -->
-  {#if !group}
+  <!-- On a phone the tabs scroll sideways; the cut-off last tab shows that, without a scrollbar. -->
   <div bind:this={tabRail} class="[&>nav]:[scrollbar-width:none] [&>nav::-webkit-scrollbar]:hidden">
   <TabNav
     label="Repository"
     items={[
       { label: "Files", href: href(repoPath(r.name)), active: view.kind === "files", icon: FolderIcon },
       { label: "Use this repository", href: href(repoPath(r.name, "use")), active: view.kind === "use", icon: DownloadIcon },
-      ...(canWrite ? [{ label: "Publish to this repository", href: href(repoPath(r.name, "publish")), active: view.kind === "publish", icon: SendIcon }] : []),
+      ...(canPublish ? [{ label: "Publish to this repository", href: href(repoPath(r.name, "publish")), active: view.kind === "publish", icon: SendIcon }] : []),
     ]}
   />
   </div>
-  {/if}
 
   {#if view.kind === "files"}
     <FilesTab repo={r} path={view.path} {query} {base} canWrite={canDelete} {canUpload} />
@@ -248,6 +248,8 @@
     <!-- A group's page: its members first, then how to use it. -->
     {#if group}<GroupMembersList repo={r} />{/if}
     <UseTab repo={r} {usage} {base} />
+  {:else if group}
+    <GroupPublish group={r} targets={publishTargets} {query} />
   {:else}
     <PublishTab repo={r} {usage} {canUpload} {query} />
   {/if}

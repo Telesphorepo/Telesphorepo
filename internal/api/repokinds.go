@@ -28,6 +28,9 @@ type memberJSON struct {
 	Format string `json:"format"`
 	Kind   string `json:"kind"`
 	Public bool   `json:"public"`
+	// Permissions are the caller's permissions on the member: the Publish tab of a group offers
+	// the hosted members that the caller publishes to.
+	Permissions []string `json:"permissions"`
 }
 
 // proxyJSON is the remote of a proxy, without its credentials.
@@ -68,13 +71,13 @@ func (a *API) writeRepo(w http.ResponseWriter, r *http.Request, status int, p *a
 		}
 		out.Members = []memberJSON{}
 		for _, m := range members {
-			ok, err := readable(m)
+			set, err := a.auth.RepoPerms(ctx, p, m)
 			if err != nil {
 				route.Fail(w, r, err)
 				return
 			}
-			if ok {
-				out.Members = append(out.Members, memberJSON{m.Name, m.Format, m.Kind, m.AnonymousRead})
+			if set.Has(perm.RepoDownload) {
+				out.Members = append(out.Members, memberJSON{m.Name, m.Format, m.Kind, m.AnonymousRead, set.Strings()})
 			}
 		}
 	case repos.KindProxy:

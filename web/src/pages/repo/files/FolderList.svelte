@@ -5,6 +5,9 @@
   Pages load by key ("Load more"). The parent keys it by folder. People who can delete pick rows
   (files and folders mix) and delete them together; the parent holds the pick and shows its
   summary in the details column.
+
+  In a group the list is the merged folder of its members: a file names the member that serves
+  it, muted after its name, and its row opens the file in that member.
 -->
 <script lang="ts" module>
   /**
@@ -101,6 +104,9 @@
   });
 
   const label = (e: TreeNode) => e.name.replace(/\/$/, "");
+  // A group's file opens in the member that serves it; a folder stays in the group.
+  const open = (e: TreeNode) => href(filesPath(e.type === "file" && e.repo ? e.repo : repo.name, e.path));
+  const group = $derived(repo.kind === "group");
   const columns = $derived<Column[]>([
     { label: "Name", grow: true },
     { label: "Size", align: "right" },
@@ -123,7 +129,7 @@
   {columns}
   caption="Files in {folder || 'the top folder'} of {repo.name}"
   key={(e) => e.path}
-  href={(e) => href(filesPath(repo.name, e.path))}
+  href={open}
   selected={(e) => e.type === "file" && e.path === selected}
   bind:picked
   pickLabel={label}
@@ -132,7 +138,7 @@
   {#snippet row(e)}
     <Cell grow>
       <a
-        href={href(filesPath(repo.name, e.path))}
+        href={open(e)}
         aria-current={e.type === "file" && e.path === selected ? "true" : undefined}
         class="flex min-w-0 items-center gap-2 rounded-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 {e.type === 'dir' ? 'font-medium' : ''}"
       >
@@ -142,6 +148,11 @@
           <FileIcon aria-hidden="true" class="size-4 shrink-0 text-muted-foreground" />
         {/if}
         <Truncate text={label(e)} />
+        {#if group && e.type === "file" && e.repo}
+          <span class="flex h-5 max-w-40 shrink-0 items-center rounded-sm bg-muted px-1.5 text-meta text-muted-foreground" title="Served by {e.repo}">
+            <span class="sr-only">from</span><span class="truncate">{e.repo}</span>
+          </span>
+        {/if}
       </a>
     </Cell>
     <Cell num>{#if e.size !== undefined}<FileSize bytes={e.size} />{/if}</Cell>
@@ -160,7 +171,9 @@
         state="None yet"
         text={repo.kind === "proxy"
           ? "The proxy keeps a file here after a build asks for it the first time."
-          : canUpload
+          : group
+            ? "The files of its repositories appear here, once one of them has files you can download."
+            : canUpload
             ? "Publish with your build tool, or upload files here."
             : "Files appear here when someone publishes to this repository."}
       >

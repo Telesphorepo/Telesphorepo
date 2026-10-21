@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"path"
+	"slices"
 	"strings"
 	"time"
 
@@ -45,6 +46,9 @@ type Node struct {
 	UploadedBy string     `json:"uploaded_by,omitempty"` // username; "" when unknown or imported
 	// Build is the CI build record that published the file; absent when none.
 	Build *ci.Build `json:"build,omitempty"`
+	// Repo is the member that serves the file, in the listing of a group; absent elsewhere and
+	// on a folder.
+	Repo string `json:"repo,omitempty"`
 }
 
 // File is one file with its details (GET /api/repos/{name}/file).
@@ -59,6 +63,7 @@ type File struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 	UploadedBy  string    `json:"uploaded_by"` // username; "" when unknown or imported
 	Build       *ci.Build `json:"build"`       // the CI build record; null when none
+	Repo        string    `json:"repo,omitempty"` // a group: the member that serves the file
 }
 
 // Details returns file p of repo. ErrInvalid for an invalid path, ErrNotFound when it does not
@@ -147,11 +152,55 @@ func (s *Service) Tree(ctx context.Context, repo *repos.Repo, dir, after string,
 	next := ""
 	if len(out) > limit {
 		out = out[:limit]
-		last := out[limit-1]
-		next = last.Name
-		if last.Type == "dir" {
-			next += "/"
+		next = cursorOf(out[limit-1])
+	}
+	return out, next, nil
+}
+
+// cursorOf returns the cursor that a page ending with n hands on: its name, with "/" for a folder.
+func cursorOf(n Node) string {
+	if n.Type == "dir" {
+		return n.Name + "/"
+	}
+	return n.Name
+}
+
+// GroupTree is Tree for a group: the merged children of folder dir in the members the reader
+// may read, in read order. Each member is read with the same cursor and limit, and the pages are
+// merged by path. A folder that several members hold is one entry; a file that several members
+// hold comes from the first of them, the one the group serves, and names it in Repo. The first
+// limit entries of the merge are exactly the first limit of the union: a member holds every one
+// of its entries below the limit-th in its own page. next is the last path returned while any
+// entry follows it in the union, "" at the end. A page costs at most limit+1 seeks per member.
+func (s *Service) GroupTree(ctx context.Context, members []*repos.Repo, dir, after string, limit int) ([]Node, string, error) {
+	byPath := map[string]int{}
+	var out []Node
+	more := false
+	for _, m := range members {
+		page, next, err := s.Tree(ctx, m, dir, after, limit)
+		if err != nil {
+			return nil, "", err
 		}
+		more = more || next != ""
+		for _, n := range page {
+			if _, seen := byPath[n.Path]; seen {
+				continue // an earlier member holds the folder, or serves the file
+			}
+			if n.Type == "file" {
+				n.Repo = m.Name
+			}
+			byPath[n.Path] = len(out)
+			out = append(out, n)
+		}
+	}
+	// Every path shares the prefix dir, so path order is the order of Tree.
+	slices.SortFunc(out, func(a, b Node) int { return strings.Compare(a.Path, b.Path) })
+	if len(out) > limit {
+		out, more = out[:limit], true
+	}
+	next := ""
+	if more && len(out) > 0 {
+		next = cursorOf(out[len(out)-1])
 	}
 	return out, next, nil
 }
