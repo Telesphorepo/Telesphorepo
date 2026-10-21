@@ -10,8 +10,26 @@ import (
 	"database/sql"
 )
 
-const clearMetadata = `-- name: ClearMetadata :exec
+const bumpProject = `-- name: BumpProject :exec
+UPDATE pypi_projects SET rev = max(rev + 1, CAST(?1 AS INTEGER))
+WHERE repo_id = ?2 AND project = ?3
+`
+
+type BumpProjectParams struct {
+	At      int64
+	RepoID  int64
+	Project string
+}
+
+// Moves the revision of a project on after a removal: rev becomes max(rev + 1, at).
+func (q *Queries) BumpProject(ctx context.Context, arg BumpProjectParams) error {
+	_, err := q.db.ExecContext(ctx, bumpProject, arg.At, arg.RepoID, arg.Project)
+	return err
+}
+
+const clearMetadata = `-- name: ClearMetadata :many
 UPDATE pypi_files SET metadata_sha256 = '' WHERE repo_id = ? AND filename = ?
+RETURNING project
 `
 
 type ClearMetadataParams struct {
@@ -20,9 +38,27 @@ type ClearMetadataParams struct {
 }
 
 // A deleted .metadata sibling: the file no longer advertises it.
-func (q *Queries) ClearMetadata(ctx context.Context, arg ClearMetadataParams) error {
-	_, err := q.db.ExecContext(ctx, clearMetadata, arg.RepoID, arg.Filename)
-	return err
+func (q *Queries) ClearMetadata(ctx context.Context, arg ClearMetadataParams) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, clearMetadata, arg.RepoID, arg.Filename)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var project string
+		if err := rows.Scan(&project); err != nil {
+			return nil, err
+		}
+		items = append(items, project)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const deleteFilesOfAsset = `-- name: DeleteFilesOfAsset :many
@@ -105,6 +141,23 @@ func (q *Queries) GetProject(ctx context.Context, arg GetProjectParams) (string,
 	var display_name string
 	err := row.Scan(&display_name)
 	return display_name, err
+}
+
+const getProjectRev = `-- name: GetProjectRev :one
+SELECT rev FROM pypi_projects WHERE repo_id = ? AND project = ?
+`
+
+type GetProjectRevParams struct {
+	RepoID  int64
+	Project string
+}
+
+// The revision of a project of a hosted repo, through the primary key.
+func (q *Queries) GetProjectRev(ctx context.Context, arg GetProjectRevParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, getProjectRev, arg.RepoID, arg.Project)
+	var rev int64
+	err := row.Scan(&rev)
+	return rev, err
 }
 
 const insertFile = `-- name: InsertFile :exec
@@ -416,18 +469,26 @@ func (q *Queries) ProjectHasFiles(ctx context.Context, arg ProjectHasFilesParams
 
 const upsertProject = `-- name: UpsertProject :exec
 
-INSERT INTO pypi_projects (repo_id, project, display_name) VALUES (?, ?, ?)
-ON CONFLICT (repo_id, project) DO UPDATE SET display_name = excluded.display_name
+INSERT INTO pypi_projects (repo_id, project, display_name, rev) VALUES (?, ?, ?, ?)
+ON CONFLICT (repo_id, project) DO UPDATE SET display_name = excluded.display_name,
+  rev = max(pypi_projects.rev + 1, excluded.rev)
 `
 
 type UpsertProjectParams struct {
 	RepoID      int64
 	Project     string
 	DisplayName string
+	Rev         int64
 }
 
 // The pypi_* tables (internal/pypi).
+// Records the project of a stored file and moves its revision on.
 func (q *Queries) UpsertProject(ctx context.Context, arg UpsertProjectParams) error {
-	_, err := q.db.ExecContext(ctx, upsertProject, arg.RepoID, arg.Project, arg.DisplayName)
+	_, err := q.db.ExecContext(ctx, upsertProject,
+		arg.RepoID,
+		arg.Project,
+		arg.DisplayName,
+		arg.Rev,
+	)
 	return err
 }

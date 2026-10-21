@@ -137,6 +137,20 @@ if npm publish --force 2>/tmp/forced.log; then echo FORCED_ACCEPTED; else echo F
 			strings.ReplaceAll(npmRequire(plain, scoped), "node -e", "bun -e"),
 			[]ContainerFile{npmConsumer("/work/bun", deps), {Path: "/work/bun/.npmrc", Content: npmrc(registry, read)}})
 		npmWant(t, "install with bun", out, "REQ "+plain+": plain 1.0.0", "REQ "+scoped+": scoped 1.0.0")
+
+		// A new version shows in the packument at once: the packument of before no longer answers
+		// 304 to its ETag.
+		resp, _ := npmGet(t, s, repo, plain, true, auth)
+		before := resp.Header.Get("ETag")
+		npmMust(t, nodeImage, "npm publish of 1.1.0", "set -e\ncd /work/plain && npm publish\n",
+			append(npmPackage("/work/plain", plain, "1.1.0", "plain 1.1.0"),
+				ContainerFile{Path: "/root/.npmrc", Content: npmrc(registry, PublishToken(t, s, writer, repo))}))
+		if _, d := npmGet(t, s, repo, plain, true, auth); d == nil || d.DistTags["latest"] != "1.1.0" || len(d.Versions) != 2 {
+			t.Fatalf("abbreviated packument of %s after the publish of 1.1.0: %+v, want 1.0.0 and 1.1.0 with latest 1.1.0", plain, d)
+		}
+		if st, etag := conditionalGet(t, s, "/npm/"+repo+"/"+plain, "application/vnd.npm.install-v1+json", before, auth); st != http.StatusOK || etag == before {
+			t.Fatalf("packument after the publish of 1.1.0 with the ETag from before: status %d, ETag %s, want 200 and a new ETag", st, etag)
+		}
 	})
 }
 

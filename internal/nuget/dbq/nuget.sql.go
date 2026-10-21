@@ -10,14 +10,65 @@ import (
 	"database/sql"
 )
 
-const deleteVersionsOfAsset = `-- name: DeleteVersionsOfAsset :exec
+const deletePackage = `-- name: DeletePackage :exec
+DELETE FROM nuget_packages WHERE repo_id = ? AND lower_id = ?
+`
+
+type DeletePackageParams struct {
+	RepoID  int64
+	LowerID string
+}
+
+func (q *Queries) DeletePackage(ctx context.Context, arg DeletePackageParams) error {
+	_, err := q.db.ExecContext(ctx, deletePackage, arg.RepoID, arg.LowerID)
+	return err
+}
+
+const deleteVersionsOfAsset = `-- name: DeleteVersionsOfAsset :many
 DELETE FROM nuget_versions WHERE asset_id = ?
+RETURNING lower_id
 `
 
 // Removes the version of a deleted .nupkg, through nuget_versions_asset.
-func (q *Queries) DeleteVersionsOfAsset(ctx context.Context, assetID int64) error {
-	_, err := q.db.ExecContext(ctx, deleteVersionsOfAsset, assetID)
-	return err
+func (q *Queries) DeleteVersionsOfAsset(ctx context.Context, assetID int64) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, deleteVersionsOfAsset, assetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var lower_id string
+		if err := rows.Scan(&lower_id); err != nil {
+			return nil, err
+		}
+		items = append(items, lower_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getPackageRev = `-- name: GetPackageRev :one
+SELECT rev FROM nuget_packages WHERE repo_id = ? AND lower_id = ?
+`
+
+type GetPackageRevParams struct {
+	RepoID  int64
+	LowerID string
+}
+
+// The revision of a package of a hosted repo, through the UNIQUE index: none when the repo has
+// no version of it.
+func (q *Queries) GetPackageRev(ctx context.Context, arg GetPackageRevParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, getPackageRev, arg.RepoID, arg.LowerID)
+	var rev int64
+	err := row.Scan(&rev)
+	return rev, err
 }
 
 const getVersion = `-- name: GetVersion :one
@@ -82,7 +133,7 @@ type HasPackageParams struct {
 	LowerID string
 }
 
-// Whether a repo has a package: the group name rule.
+// Whether a repo has a version of a package.
 func (q *Queries) HasPackage(ctx context.Context, arg HasPackageParams) (int64, error) {
 	row := q.db.QueryRowContext(ctx, hasPackage, arg.RepoID, arg.LowerID)
 	var column_1 int64
@@ -136,8 +187,37 @@ func (q *Queries) InsertVersion(ctx context.Context, arg InsertVersionParams) er
 	return err
 }
 
+const latestVisibleVersion = `-- name: LatestVisibleVersion :one
+SELECT sort_key FROM nuget_versions
+WHERE repo_id = ? AND lower_id = ? AND listed = 1 AND prerelease <= ? AND semver2 <= ?
+ORDER BY sort_key DESC
+LIMIT 1
+`
+
+type LatestVisibleVersionParams struct {
+	RepoID     int64
+	LowerID    string
+	Prerelease int64
+	Semver2    int64
+}
+
+// The newest version of a package that a search shows: listed, a prerelease only with prerelease
+// 1 and a SemVer 2.0 version only with semver2 1. It walks the UNIQUE index from the newest
+// version and stops at the first match.
+func (q *Queries) LatestVisibleVersion(ctx context.Context, arg LatestVisibleVersionParams) (string, error) {
+	row := q.db.QueryRowContext(ctx, latestVisibleVersion,
+		arg.RepoID,
+		arg.LowerID,
+		arg.Prerelease,
+		arg.Semver2,
+	)
+	var sort_key string
+	err := row.Scan(&sort_key)
+	return sort_key, err
+}
+
 const listPackageIDs = `-- name: ListPackageIDs :many
-SELECT DISTINCT lower_id FROM nuget_versions
+SELECT lower_id FROM nuget_packages
 WHERE repo_id = ? AND lower_id >= ? AND lower_id < ?
 ORDER BY lower_id
 LIMIT ?
@@ -170,6 +250,43 @@ func (q *Queries) ListPackageIDs(ctx context.Context, arg ListPackageIDsParams) 
 			return nil, err
 		}
 		items = append(items, lower_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listVersionNames = `-- name: ListVersionNames :many
+SELECT normalized FROM nuget_versions
+WHERE repo_id = ? AND lower_id = ?
+ORDER BY sort_key
+LIMIT ?
+`
+
+type ListVersionNamesParams struct {
+	RepoID  int64
+	LowerID string
+	Limit   int64
+}
+
+// The versions of one package, oldest first, without their metadata: the flat version list.
+func (q *Queries) ListVersionNames(ctx context.Context, arg ListVersionNamesParams) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listVersionNames, arg.RepoID, arg.LowerID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var normalized string
+		if err := rows.Scan(&normalized); err != nil {
+			return nil, err
+		}
+		items = append(items, normalized)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -400,6 +517,56 @@ func (q *Queries) ListVersionsDesc(ctx context.Context, arg ListVersionsDescPara
 	return items, nil
 }
 
+const listVisibleVersions = `-- name: ListVisibleVersions :many
+SELECT version, normalized FROM nuget_versions
+WHERE repo_id = ? AND lower_id = ? AND listed = 1 AND prerelease <= ? AND semver2 <= ?
+ORDER BY sort_key
+LIMIT ?
+`
+
+type ListVisibleVersionsParams struct {
+	RepoID     int64
+	LowerID    string
+	Prerelease int64
+	Semver2    int64
+	Limit      int64
+}
+
+type ListVisibleVersionsRow struct {
+	Version    string
+	Normalized string
+}
+
+// The versions of a package that a search shows, oldest first, without their metadata.
+func (q *Queries) ListVisibleVersions(ctx context.Context, arg ListVisibleVersionsParams) ([]ListVisibleVersionsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listVisibleVersions,
+		arg.RepoID,
+		arg.LowerID,
+		arg.Prerelease,
+		arg.Semver2,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListVisibleVersionsRow
+	for rows.Next() {
+		var i ListVisibleVersionsRow
+		if err := rows.Scan(&i.Version, &i.Normalized); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const setListed = `-- name: SetListed :execrows
 UPDATE nuget_versions SET listed = ? WHERE repo_id = ? AND lower_id = ? AND sort_key = ?
 `
@@ -423,4 +590,21 @@ func (q *Queries) SetListed(ctx context.Context, arg SetListedParams) (int64, er
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const upsertPackage = `-- name: UpsertPackage :exec
+INSERT INTO nuget_packages (repo_id, lower_id, rev) VALUES (?, ?, ?)
+ON CONFLICT (repo_id, lower_id) DO UPDATE SET rev = max(nuget_packages.rev + 1, excluded.rev)
+`
+
+type UpsertPackageParams struct {
+	RepoID  int64
+	LowerID string
+	Rev     int64
+}
+
+// Records a package with a changed version and moves its revision on.
+func (q *Queries) UpsertPackage(ctx context.Context, arg UpsertPackageParams) error {
+	_, err := q.db.ExecContext(ctx, upsertPackage, arg.RepoID, arg.LowerID, arg.Rev)
+	return err
 }

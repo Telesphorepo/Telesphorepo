@@ -161,6 +161,32 @@ func nugetLeaves(t *testing.T, s *Server, repo, lid string, auth Auth) map[strin
 	return out
 }
 
+// nugetSearch runs the search of repo for q with prerelease versions and returns the versions of
+// the one package that it finds (none: nil).
+func nugetSearch(t *testing.T, s *Server, repo, q string, auth Auth) []string {
+	t.Helper()
+	resp, b := s.Do(t, s.NewRequest(t, http.MethodGet, "/nuget/"+repo+"/query?prerelease=true&semVerLevel=2.0.0&q="+q, nil), auth)
+	var doc struct {
+		TotalHits int `json:"totalHits"`
+		Data      []struct {
+			Versions []struct {
+				Version string `json:"version"`
+			} `json:"versions"`
+		} `json:"data"`
+	}
+	if resp.StatusCode != http.StatusOK || json.Unmarshal(b, &doc) != nil || doc.TotalHits != len(doc.Data) || len(doc.Data) > 1 {
+		t.Fatalf("search of %s for %s: status %d: %s", repo, q, resp.StatusCode, b)
+	}
+	if len(doc.Data) == 0 {
+		return nil
+	}
+	var out []string
+	for _, v := range doc.Data[0].Versions {
+		out = append(out, v.Version)
+	}
+	return out
+}
+
 // TestNuGet: dotnet pack and dotnet nuget push to a private hosted repo (a second push of a
 // version fails with 409, --skip-duplicate skips it), the package bytes stay unchanged, unlist with
 // dotnet nuget delete and relist with POST, search with dotnet package search, and a console app
@@ -216,6 +242,15 @@ dotnet nuget delete %[1]s 1.1.0 --source tr --api-key "$API_KEY" --non-interacti
 		if l := nugetLeaves(t, s, repo, lid, read); !l["1.0.0"] || l["1.1.0"] {
 			t.Fatalf("registration after the unlist of 1.1.0: %v", l)
 		}
+		if vs := nugetSearch(t, s, repo, lid[4:], read); !slices.Equal(vs, []string{"1.0.0"}) {
+			t.Fatalf("search after the unlist of 1.1.0: versions %v, want [1.0.0]", vs)
+		}
+		regPath := "/nuget/" + repo + "/registration/" + lid + "/index.json"
+		resp, _ := s.Do(t, s.NewRequest(t, http.MethodGet, regPath, nil), read)
+		before := resp.Header.Get("ETag")
+		if st, _ := conditionalGet(t, s, regPath, "", before, read); before == "" || st != http.StatusNotModified {
+			t.Fatalf("registration with its ETag %s: status %d, want 304", before, st)
+		}
 		req := s.NewRequest(t, http.MethodPost, "/nuget/"+repo+"/package/"+id+"/1.1.0", nil)
 		req.Header.Set("X-NuGet-ApiKey", apiKey)
 		if resp, b := s.Do(t, req, nil); resp.StatusCode != http.StatusOK {
@@ -223,6 +258,29 @@ dotnet nuget delete %[1]s 1.1.0 --source tr --api-key "$API_KEY" --non-interacti
 		}
 		if l := nugetLeaves(t, s, repo, lid, read); !l["1.0.0"] || !l["1.1.0"] {
 			t.Fatalf("registration after the relist of 1.1.0: %v", l)
+		}
+		if st, etag := conditionalGet(t, s, regPath, "", before, read); st != http.StatusOK || etag == before {
+			t.Fatalf("registration after the relist with the ETag from before: status %d, ETag %s, want 200 and a new ETag", st, etag)
+		}
+		if vs := nugetSearch(t, s, repo, lid[4:], read); !slices.Equal(vs, []string{"1.0.0", "1.1.0"}) {
+			t.Fatalf("search after the relist of 1.1.0: versions %v, want [1.0.0 1.1.0]", vs)
+		}
+
+		// A deleted version leaves the version list and the search at once, and an upload of it
+		// brings it back.
+		nupkg11 := pushed.ReadFile(t, "/work/out/"+id+".1.1.0.nupkg")
+		if st, n := deleteFiles(t, s, repo, "path", "v3-flatcontainer/"+lid+"/1.1.0/"+lid+".1.1.0.nupkg", s.Admin()); st != http.StatusOK || n == 0 {
+			t.Fatalf("delete of the 1.1.0 package: status %d, deleted %d", st, n)
+		}
+		if st, vs := nugetVersions(t, s, repo, lid, read); st != http.StatusOK || !slices.Equal(vs, []string{"1.0.0"}) {
+			t.Fatalf("version list after the delete of 1.1.0: status %d, %v, want [1.0.0]", st, vs)
+		}
+		if vs := nugetSearch(t, s, repo, lid[4:], read); !slices.Equal(vs, []string{"1.0.0"}) {
+			t.Fatalf("search after the delete of 1.1.0: versions %v, want [1.0.0]", vs)
+		}
+		mustUpload(t, s, repo, s.MintSession(t, s.AdminUser, repo).Auth(), nil, uploadPart{Name: id + ".1.1.0.nupkg", Body: nupkg11})
+		if st, vs := nugetVersions(t, s, repo, lid, read); st != http.StatusOK || !slices.Equal(vs, []string{"1.0.0", "1.1.0"}) {
+			t.Fatalf("version list after the upload of 1.1.0: status %d, %v, want [1.0.0 1.1.0]", st, vs)
 		}
 		// A password or a read token never pushes.
 		req = s.NewRequest(t, http.MethodDelete, "/nuget/"+repo+"/package/"+id+"/1.1.0", nil)

@@ -309,19 +309,36 @@ func fileRank(f format.BuildFile) int {
 	return 3
 }
 
-// latestVersion returns the newest release of the artifact folder, else the newest snapshot.
+// latestVersion returns the newest release of the artifact folder, else the newest snapshot. It
+// walks the version folders newest first and stops at the first release with files; of the
+// snapshots above it, only the newest one with files has its builds read.
 func (h *Handler) latestVersion(ctx context.Context, repo *repos.Repo, dir string) (string, error) {
-	_, versions, _, err := h.Versions(ctx, repo, dir, "", maxChildren)
+	art, _, id, ok := artifactOf(dir)
+	if !ok {
+		return "", nil
+	}
+	names, err := h.childDirs(ctx, repo.ID, art.Path)
 	if err != nil {
 		return "", err
 	}
-	for _, v := range versions {
-		if v.Kind == format.VersionRelease {
-			return v.Version, nil
+	slices.SortFunc(names, func(a, b string) int { return -compareVersions(a, b) })
+	snapshot := ""
+	for _, v := range names {
+		isSnapshot := strings.HasSuffix(v, "-SNAPSHOT")
+		if isSnapshot && snapshot != "" {
+			continue
+		}
+		bs, err := h.readBuilds(ctx, repo.ID, art.Path+v+"/", id, v)
+		if err != nil {
+			return "", err
+		}
+		switch {
+		case len(bs.builds) == 0:
+		case !isSnapshot:
+			return v, nil
+		default:
+			snapshot = v
 		}
 	}
-	if len(versions) > 0 {
-		return versions[0].Version, nil
-	}
-	return "", nil
+	return snapshot, nil
 }

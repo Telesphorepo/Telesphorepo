@@ -1,11 +1,14 @@
 -- PyPI module schema. Applied after the core schema; references repos and assets. Only hosted
 -- repos have rows: a proxy renders from its cached upstream pages, a group from its members.
 
--- The projects of a hosted repo: one row per normalised name that has at least one file.
+-- The projects of a hosted repo: one row per normalised name that has at least one file. rev
+-- names the state of the project page: it moves on with each change of a file, so the rendered
+-- page is kept per revision.
 CREATE TABLE pypi_projects (
   repo_id      INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
   project      TEXT NOT NULL,                        -- normalised name (PEP 503), e.g. my-lib
   display_name TEXT NOT NULL,                        -- the Name of the newest upload's metadata, e.g. My_Lib
+  rev          INTEGER NOT NULL,                     -- max(the rev before + 1, unix ns of the change)
   PRIMARY KEY (repo_id, project)
 ) STRICT, WITHOUT ROWID;
 

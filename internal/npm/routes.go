@@ -175,7 +175,7 @@ func (h *Handler) versionManifest(w http.ResponseWriter, r *http.Request, c *rou
 		httpx.Error(w, r, http.StatusNotFound, "version "+ref+" of "+pkg+" not found")
 		return
 	}
-	format.WriteDocument(w, r, "application/json", m)
+	format.WriteDocument(w, r, "application/json", format.NewDocument(m))
 }
 
 // packument answers the full or the abbreviated packument of name (?write=true is the same).
@@ -186,16 +186,14 @@ func (h *Handler) packument(w http.ResponseWriter, r *http.Request, c *route.Cal
 		h.failRead(w, r, err)
 		return
 	}
-	body, err := h.document(r.Context(), s, pkg, h.urlBase(r, c.Repo), abbreviated)
-	if err != nil {
-		h.failRead(w, r, err)
-		return
-	}
 	ct := "application/json"
 	if abbreviated {
 		ct = abbreviatedType
 	}
-	format.WriteDocument(w, r, ct, body, "Accept")
+	key, build := h.documentOf(r.Context(), s, pkg, h.urlBase(r, c.Repo), abbreviated)
+	if err := h.docs.Serve(w, r, ct, key, build, "Accept"); err != nil {
+		h.failRead(w, r, err)
+	}
 }
 
 // file serves <name>/-/<file>. A group serves it from the member that owns the name.

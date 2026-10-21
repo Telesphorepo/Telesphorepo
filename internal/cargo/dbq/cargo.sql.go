@@ -10,6 +10,23 @@ import (
 	"database/sql"
 )
 
+const bumpRev = `-- name: BumpRev :exec
+UPDATE cargo_names SET rev = max(rev + 1, CAST(?1 AS INTEGER))
+WHERE repo_id = ?2 AND folded_name = ?3
+`
+
+type BumpRevParams struct {
+	At         int64
+	RepoID     int64
+	FoldedName string
+}
+
+// Moves the revision of a crate on after a removal or a yank: rev becomes max(rev + 1, at).
+func (q *Queries) BumpRev(ctx context.Context, arg BumpRevParams) error {
+	_, err := q.db.ExecContext(ctx, bumpRev, arg.At, arg.RepoID, arg.FoldedName)
+	return err
+}
+
 const crateName = `-- name: CrateName :one
 SELECT name FROM cargo_versions WHERE repo_id = ? AND lower_name = ? LIMIT 1
 `
@@ -95,6 +112,28 @@ func (q *Queries) GetName(ctx context.Context, arg GetNameParams) (string, error
 	return name, err
 }
 
+const getNameRev = `-- name: GetNameRev :one
+SELECT name, rev FROM cargo_names WHERE repo_id = ? AND folded_name = ?
+`
+
+type GetNameRevParams struct {
+	RepoID     int64
+	FoldedName string
+}
+
+type GetNameRevRow struct {
+	Name string
+	Rev  int64
+}
+
+// The name and the revision of a crate, through the cargo_names primary key.
+func (q *Queries) GetNameRev(ctx context.Context, arg GetNameRevParams) (GetNameRevRow, error) {
+	row := q.db.QueryRowContext(ctx, getNameRev, arg.RepoID, arg.FoldedName)
+	var i GetNameRevRow
+	err := row.Scan(&i.Name, &i.Rev)
+	return i, err
+}
+
 const getVersion = `-- name: GetVersion :one
 SELECT v.name, v.version, v.path, v.yanked, a.size, a.sha256, a.updated_at, a.build_id
 FROM cargo_versions v JOIN assets a ON a.id = v.asset_id
@@ -159,18 +198,25 @@ func (q *Queries) GetVersionByBase(ctx context.Context, arg GetVersionByBasePara
 }
 
 const insertName = `-- name: InsertName :exec
-INSERT INTO cargo_names (repo_id, folded_name, name) VALUES (?, ?, ?)
-ON CONFLICT (repo_id, folded_name) DO NOTHING
+INSERT INTO cargo_names (repo_id, folded_name, name, rev) VALUES (?, ?, ?, ?)
+ON CONFLICT (repo_id, folded_name) DO UPDATE SET rev = max(cargo_names.rev + 1, excluded.rev)
 `
 
 type InsertNameParams struct {
 	RepoID     int64
 	FoldedName string
 	Name       string
+	Rev        int64
 }
 
+// Records the name of a published version and moves the revision of the crate on.
 func (q *Queries) InsertName(ctx context.Context, arg InsertNameParams) error {
-	_, err := q.db.ExecContext(ctx, insertName, arg.RepoID, arg.FoldedName, arg.Name)
+	_, err := q.db.ExecContext(ctx, insertName,
+		arg.RepoID,
+		arg.FoldedName,
+		arg.Name,
+		arg.Rev,
+	)
 	return err
 }
 

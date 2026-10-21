@@ -38,6 +38,9 @@ func seed(ctx context.Context, tx *sql.Tx, repo *repos.Repo, start, n int) error
 			AssetID: rows[0].ID, PublishedAt: now}); err != nil {
 			return err
 		}
+		if err := bumpPackage(ctx, q, repo.ID, lid); err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -4,9 +4,19 @@
 -- name: GetName :one
 SELECT name FROM cargo_names WHERE repo_id = ? AND folded_name = ?;
 
+-- Records the name of a published version and moves the revision of the crate on.
 -- name: InsertName :exec
-INSERT INTO cargo_names (repo_id, folded_name, name) VALUES (?, ?, ?)
-ON CONFLICT (repo_id, folded_name) DO NOTHING;
+INSERT INTO cargo_names (repo_id, folded_name, name, rev) VALUES (?, ?, ?, ?)
+ON CONFLICT (repo_id, folded_name) DO UPDATE SET rev = max(cargo_names.rev + 1, excluded.rev);
+
+-- Moves the revision of a crate on after a removal or a yank: rev becomes max(rev + 1, at).
+-- name: BumpRev :exec
+UPDATE cargo_names SET rev = max(rev + 1, CAST(sqlc.arg(at) AS INTEGER))
+WHERE repo_id = sqlc.arg(repo_id) AND folded_name = sqlc.arg(folded_name);
+
+-- The name and the revision of a crate, through the cargo_names primary key.
+-- name: GetNameRev :one
+SELECT name, rev FROM cargo_names WHERE repo_id = ? AND folded_name = ?;
 
 -- name: DeleteName :exec
 DELETE FROM cargo_names WHERE repo_id = ? AND folded_name = ?;

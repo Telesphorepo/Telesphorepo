@@ -1,8 +1,19 @@
 -- The pypi_* tables (internal/pypi).
 
+-- Records the project of a stored file and moves its revision on.
 -- name: UpsertProject :exec
-INSERT INTO pypi_projects (repo_id, project, display_name) VALUES (?, ?, ?)
-ON CONFLICT (repo_id, project) DO UPDATE SET display_name = excluded.display_name;
+INSERT INTO pypi_projects (repo_id, project, display_name, rev) VALUES (?, ?, ?, ?)
+ON CONFLICT (repo_id, project) DO UPDATE SET display_name = excluded.display_name,
+  rev = max(pypi_projects.rev + 1, excluded.rev);
+
+-- Moves the revision of a project on after a removal: rev becomes max(rev + 1, at).
+-- name: BumpProject :exec
+UPDATE pypi_projects SET rev = max(rev + 1, CAST(sqlc.arg(at) AS INTEGER))
+WHERE repo_id = sqlc.arg(repo_id) AND project = sqlc.arg(project);
+
+-- The revision of a project of a hosted repo, through the primary key.
+-- name: GetProjectRev :one
+SELECT rev FROM pypi_projects WHERE repo_id = ? AND project = ?;
 
 -- name: InsertFile :exec
 INSERT INTO pypi_files (repo_id, project, version, sort_key, filename, path, asset_id, sha256, size,
@@ -57,8 +68,9 @@ SELECT project, version, filename FROM pypi_files WHERE repo_id = ? AND filename
 DELETE FROM pypi_files WHERE asset_id = ? RETURNING project;
 
 -- A deleted .metadata sibling: the file no longer advertises it.
--- name: ClearMetadata :exec
-UPDATE pypi_files SET metadata_sha256 = '' WHERE repo_id = ? AND filename = ?;
+-- name: ClearMetadata :many
+UPDATE pypi_files SET metadata_sha256 = '' WHERE repo_id = ? AND filename = ?
+RETURNING project;
 
 -- Whether a project has a file left, through pypi_files_project.
 -- name: ProjectHasFiles :one

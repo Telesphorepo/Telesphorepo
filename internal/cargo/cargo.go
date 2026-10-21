@@ -46,12 +46,15 @@ const (
 type Handler struct {
 	host *module.Host
 	q    *dbq.Queries // on the reader pool
+	// docs keeps rendered index files: a hosted crate's by its revision, a proxy's by the SHA-256
+	// of the remote's file.
+	docs *format.DocumentCache
 }
 
 // Module returns the Cargo module: the Cargo format with proxies, groups, uploads, imports, demo
 // data and seeds. The Telesphorepo CLI publishes to it with cargo publish.
 func Module() module.Module {
-	h := &Handler{}
+	h := &Handler{docs: format.NewDocumentCache(1024, 64<<20, 16<<20)}
 	return module.Module{
 		ID: name, Title: "Cargo (Rust)",
 		Register: func(x *module.Extender) {
@@ -227,12 +230,12 @@ func (h *Handler) onCommitted(ctx context.Context, tx *sql.Tx, w *assets.Write, 
 		CreatedAt: time.Now().Unix()}); err != nil {
 		return err
 	}
-	return q.InsertName(ctx, dbq.InsertNameParams{RepoID: w.Repo.ID, FoldedName: fold(e.Name), Name: e.Name})
+	return q.InsertName(ctx, dbq.InsertNameParams{RepoID: w.Repo.ID, FoldedName: fold(e.Name), Name: e.Name, Rev: time.Now().UnixNano()})
 }
 
 // onRemoved removes the version of each deleted .crate, and the name of a crate that has no
-// version left, while the rows are still readable (format.Spec OnRemoved). The index stops
-// listing the version at once.
+// version left, while the rows are still readable (format.Spec OnRemoved); a crate with versions
+// left gets a new revision. The index stops listing the version at once.
 func (h *Handler) onRemoved(ctx context.Context, tx *sql.Tx, repo *repos.Repo, removed []*assets.Asset, _ []repopath.Path) ([]repopath.Path, error) {
 	q := dbq.New(tx)
 	for _, a := range removed {
@@ -252,6 +255,10 @@ func (h *Handler) onRemoved(ctx context.Context, tx *sql.Tx, repo *repos.Repo, r
 				}
 			case err != nil:
 				return nil, err
+			default:
+				if err := q.BumpRev(ctx, dbq.BumpRevParams{At: time.Now().UnixNano(), RepoID: repo.ID, FoldedName: fold(r.Name)}); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}

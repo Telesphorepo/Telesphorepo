@@ -317,6 +317,28 @@ func TestPyPIProtocol(t *testing.T) {
 		if resp, b := get("/pypi/"+repo+"/simple/", "application/vnd.pypi.simple.v1+json", read); !strings.Contains(string(b), `"projects":[]`) {
 			t.Fatalf("project list after the delete: status %d: %s", resp.StatusCode, b)
 		}
+
+		// The project comes back with an upload, and each new file shows on the page at once: the
+		// page of before no longer answers 304 to its ETag.
+		if st, b := pyUpload(t, s, repo, file1, v1, pub, nil); st != http.StatusCreated {
+			t.Fatalf("upload of 1.0 after the delete: status %d: %s", st, b)
+		}
+		if st, page := pyGetPage(t, s, repo, name, read); st != http.StatusOK || len(page.Files) != 1 || page.Files[0].Filename != file1 {
+			t.Fatalf("page after the upload of 1.0 again: status %d: %+v", st, page)
+		}
+		const jsonForm = "application/vnd.pypi.simple.v1+json"
+		resp, _ = get(pagePath, jsonForm, read)
+		before := resp.Header.Get("ETag")
+		file3, v3 := pyWheel(name, mod, "3.0", "v3")
+		if st, b := pyUpload(t, s, repo, file3, v3, pub, nil); st != http.StatusCreated {
+			t.Fatalf("upload of 3.0: status %d: %s", st, b)
+		}
+		if st, page := pyGetPage(t, s, repo, name, read); st != http.StatusOK || len(page.Files) != 2 || strings.Join(page.Versions, ",") != "1.0,3.0" {
+			t.Fatalf("page after the upload of 3.0: status %d: %+v", st, page)
+		}
+		if st, etag := conditionalGet(t, s, pagePath, jsonForm, before, read); st != http.StatusOK || etag == before {
+			t.Fatalf("page after the upload of 3.0 with the ETag from before: status %d, ETag %s, want 200 and a new ETag", st, etag)
+		}
 	})
 }
 

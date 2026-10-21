@@ -26,6 +26,15 @@ WHERE repo_id = ? AND name = ?
 ORDER BY sort_key
 LIMIT ?;
 
+-- Every version of a package in SemVer order without its manifest: what the package row and the
+-- latest tag follow after a change.
+-- name: ListVersionStates :many
+SELECT version, published_at, deprecated
+FROM npm_versions
+WHERE repo_id = ? AND name = ?
+ORDER BY sort_key
+LIMIT ?;
+
 -- A page of the versions of a package, newest first, below a sort key, with the CI build record of
 -- each tarball.
 -- name: ListVersionsBefore :many

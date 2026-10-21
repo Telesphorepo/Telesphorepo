@@ -37,7 +37,7 @@ func seed(ctx context.Context, tx *sql.Tx, repo *repos.Repo, start, n int) error
 		if err != nil {
 			return err
 		}
-		if err := q.UpsertProject(ctx, dbq.UpsertProjectParams{RepoID: repo.ID, Project: project, DisplayName: project}); err != nil {
+		if err := q.UpsertProject(ctx, dbq.UpsertProjectParams{RepoID: repo.ID, Project: project, DisplayName: project, Rev: time.Now().UnixNano()}); err != nil {
 			return err
 		}
 		if err := q.InsertFile(ctx, dbq.InsertFileParams{RepoID: repo.ID, Project: project, Version: v.String(), SortKey: v.SortKey(),

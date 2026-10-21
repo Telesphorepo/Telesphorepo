@@ -230,7 +230,7 @@ func (h *Handler) buildPackages(ctx context.Context, repo *repos.Repo, dist, com
 }
 
 func (h *Handler) writePackages(ctx context.Context, repoID int64, dist, comp, arch string, plain, gzOut io.Writer) error {
-	zw, err := gzip.NewWriterLevel(gzOut, gzip.BestCompression)
+	zw, err := gzip.NewWriterLevel(gzOut, gzip.DefaultCompression)
 	if err != nil {
 		return err
 	}

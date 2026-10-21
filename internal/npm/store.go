@@ -158,7 +158,7 @@ func (h *Handler) onRemoved(ctx context.Context, tx *sql.Tx, repo *repos.Repo, r
 // when every version is a prerelease) when no latest is left, and the revision moves on. A
 // package without versions loses its row and its tags.
 func refresh(ctx context.Context, q *dbq.Queries, repoID int64, name string, at time.Time) error {
-	vs, err := q.ListVersions(ctx, dbq.ListVersionsParams{RepoID: repoID, Name: name, Limit: maxVersions})
+	vs, err := q.ListVersionStates(ctx, dbq.ListVersionStatesParams{RepoID: repoID, Name: name, Limit: maxVersions})
 	if err != nil {
 		return err
 	}
@@ -219,7 +219,7 @@ func refresh(ctx context.Context, q *dbq.Queries, repoID int64, name string, at 
 
 // highest returns the highest release of vs (in SemVer order), or the highest version when every
 // version is a prerelease.
-func highest(vs []dbq.ListVersionsRow) string {
+func highest(vs []dbq.ListVersionStatesRow) string {
 	for i := len(vs) - 1; i >= 0; i-- {
 		if sv, err := version.ParseSemVer(vs[i].Version); err == nil && !sv.Prerelease() {
 			return vs[i].Version

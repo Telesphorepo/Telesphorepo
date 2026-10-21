@@ -189,7 +189,18 @@ cat /tmp/clash.txt
 				t.Fatalf("after %s the index says yanked %v", cmd, got)
 			}
 		}
+		// The index file answers 304 to its ETag until a yank changes it; then the old ETag gets
+		// the new file.
+		indexFile := "/cargo/" + repo + "/index/" + crate[:2] + "/" + crate[2:4] + "/" + crate
+		resp, _ = s.Do(t, s.NewRequest(t, http.MethodGet, indexFile, nil), s.AdminBasic())
+		before := resp.Header.Get("ETag")
+		if st, _ := conditionalGet(t, s, indexFile, "", before, s.AdminBasic()); before == "" || st != http.StatusNotModified {
+			t.Fatalf("the index file with its ETag %s: status %d, want 304", before, st)
+		}
 		yank(false)
+		if st, etag := conditionalGet(t, s, indexFile, "", before, s.AdminBasic()); st != http.StatusOK || etag == before {
+			t.Fatalf("the index file after a yank with the ETag from before: status %d, ETag %s, want 200 and a new ETag", st, etag)
+		}
 
 		// A build with the read token resolves the newest version; the yanked one stays out.
 		consumer := append(cargoBin("/work/app", crate+" = { version = \"1\", registry = \"tr\" }\n", crate),

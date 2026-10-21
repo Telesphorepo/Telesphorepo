@@ -155,26 +155,32 @@ func (f *Format) afterCommit(ctx context.Context, repo *repos.Repo, rs []*assets
 }
 
 // dropUnnamed removes the cached manifest digest of image from a proxy when no tag names it and
-// no index lists it, and then each manifest of its index that is unnamed in the same way. The
-// links of a removed manifest lose its uses; the job docker.links removes a link that no
-// manifest uses after docker.link_grace, and the blob GC deletes its blob. A client that asks
-// for a dropped digest again gets it from the remote.
+// no index lists it, and with it each manifest of its index that no tag names and that no index
+// lists but the ones it removes, in one removal. The links of a removed manifest lose its uses;
+// the job docker.links removes a link that no manifest uses after docker.link_grace, and the
+// blob GC deletes its blob. A client that asks for a dropped digest again gets it from the
+// remote.
 func (f *Format) dropUnnamed(ctx context.Context, repo *repos.Repo, image, digest string) {
+	gone := map[string]bool{}
+	var paths []repopath.Path
 	queue := []string{digest}
 	for len(queue) > 0 {
 		d := queue[0]
 		queue = queue[1:]
+		if gone[d] {
+			continue
+		}
 		tags, err := f.q.SomeTagsOfDigest(ctx, dbq.SomeTagsOfDigestParams{RepoID: repo.ID, Image: image, Digest: d, Limit: 1})
 		if err != nil {
 			f.h.Log.Warn("proxy: read the tags of a manifest", "repo", repo.Name, "image", image, "err", err)
 			continue
 		}
-		parents, err := f.q.ParentIndexes(ctx, dbq.ParentIndexesParams{RepoID: repo.ID, Image: image, Child: d, Limit: 1})
+		parents, err := f.q.ParentIndexes(ctx, dbq.ParentIndexesParams{RepoID: repo.ID, Image: image, Child: d, Limit: maxDropParents + 1})
 		if err != nil {
 			f.h.Log.Warn("proxy: read the indexes of a manifest", "repo", repo.Name, "image", image, "err", err)
 			continue
 		}
-		if len(tags) > 0 || len(parents) > 0 {
+		if len(tags) > 0 || len(parents) > maxDropParents || slices.ContainsFunc(parents, func(p string) bool { return !gone[p] }) {
 			continue
 		}
 		children, err := f.q.ListRefs(ctx, dbq.ListRefsParams{RepoID: repo.ID, Image: image, Manifest: d})
@@ -182,18 +188,25 @@ func (f *Format) dropUnnamed(ctx context.Context, repo *repos.Repo, image, diges
 			f.h.Log.Warn("proxy: read the children of a manifest", "repo", repo.Name, "image", image, "err", err)
 			continue
 		}
-		if _, err := f.h.Assets.Remove(ctx, assets.Removal{Repo: repo, Paths: []repopath.Path{repopath.Path(manifestPath(image, d))},
-			Origin: assets.Origin{Source: assets.SourceGenerated}}); err != nil {
-			f.h.Log.Warn("proxy: remove an unnamed manifest", "repo", repo.Name, "image", image, "err", err)
-			continue
-		}
+		gone[d] = true
+		paths = append(paths, repopath.Path(manifestPath(image, d)))
 		for _, c := range children {
 			if c.Kind == "manifest" {
 				queue = append(queue, c.Child)
 			}
 		}
 	}
+	if len(paths) == 0 {
+		return
+	}
+	if _, err := f.h.Assets.Remove(ctx, assets.Removal{Repo: repo, Paths: paths, Origin: assets.Origin{Source: assets.SourceGenerated}}); err != nil {
+		f.h.Log.Warn("proxy: remove the unnamed manifests", "repo", repo.Name, "image", image, "err", err)
+	}
 }
+
+// maxDropParents is the most indexes that may list a manifest for dropUnnamed to check them: a
+// manifest that more indexes list stays.
+const maxDropParents = 16
 
 // proxyTags answers the tags list of an image of a proxy from the remote's tags list, with the
 // Link of the next page on the local name. A remote that fails gives the cached tags.

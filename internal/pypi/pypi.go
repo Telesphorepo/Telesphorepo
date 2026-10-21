@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/access"
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
@@ -45,13 +46,13 @@ type Handler struct {
 	q      *dbq.Queries // on the reader pool
 	assets *assets.Pipeline
 	log    *slog.Logger
-	docs   *format.DocumentCache // rendered pages of proxies (and groups that a proxy member serves)
+	docs   *format.DocumentCache // rendered project pages: hosted ones by revision, proxy ones by upstream page
 }
 
 // Module returns the PyPI module: the format with proxies, groups, the legacy upload, web UI
 // uploads, imports, demo data and seeds.
 func Module() module.Module {
-	h := &Handler{docs: format.NewDocumentCache(512, 64<<20)}
+	h := &Handler{docs: format.NewDocumentCache(1024, 64<<20, 8<<20)}
 	return module.Module{
 		ID: name, Title: "Python (PyPI)",
 		Register: func(x *module.Extender) {
@@ -213,7 +214,7 @@ func (h *Handler) onCommitted(ctx context.Context, tx *sql.Tx, w *assets.Write, 
 		return nil
 	}
 	q := dbq.New(tx)
-	if err := q.UpsertProject(ctx, dbq.UpsertProjectParams{RepoID: w.Repo.ID, Project: m.project, DisplayName: m.display}); err != nil {
+	if err := q.UpsertProject(ctx, dbq.UpsertProjectParams{RepoID: w.Repo.ID, Project: m.project, DisplayName: m.display, Rev: time.Now().UnixNano()}); err != nil {
 		return err
 	}
 	return q.InsertFile(ctx, dbq.InsertFileParams{RepoID: w.Repo.ID, Project: m.project, Version: m.md.version.String(),
@@ -222,8 +223,8 @@ func (h *Handler) onCommitted(ctx context.Context, tx *sql.Tx, w *assets.Write, 
 }
 
 // onRemoved runs in the transaction of a remove: it deletes the file rows of removed distribution
-// files (their .metadata follows), stops advertising a removed .metadata, and deletes a project
-// without files. A remove of the whole repo does not call it.
+// files (their .metadata follows), stops advertising a removed .metadata, deletes a project
+// without files and moves the revision of a project with files left on. A remove of the whole repo does not call it.
 func (h *Handler) onRemoved(ctx context.Context, tx *sql.Tx, repo *repos.Repo, removed []*assets.Asset, _ []repopath.Path) ([]repopath.Path, error) {
 	q := dbq.New(tx)
 	var follow []repopath.Path
@@ -233,8 +234,12 @@ func (h *Handler) onRemoved(ctx context.Context, tx *sql.Tx, repo *repos.Repo, r
 			continue
 		}
 		if base, ok := strings.CutSuffix(a.Path, ".metadata"); ok {
-			if err := q.ClearMetadata(ctx, dbq.ClearMetadataParams{RepoID: repo.ID, Filename: repopath.Path(base).Base()}); err != nil {
+			ps, err := q.ClearMetadata(ctx, dbq.ClearMetadataParams{RepoID: repo.ID, Filename: repopath.Path(base).Base()})
+			if err != nil {
 				return nil, err
+			}
+			for _, p := range ps {
+				projects[p] = true
 			}
 			continue
 		}
@@ -255,9 +260,12 @@ func (h *Handler) onRemoved(ctx context.Context, tx *sql.Tx, repo *repos.Repo, r
 			return nil, err
 		}
 		if !has {
-			if err := q.DeleteProject(ctx, dbq.DeleteProjectParams{RepoID: repo.ID, Project: p}); err != nil {
-				return nil, err
-			}
+			err = q.DeleteProject(ctx, dbq.DeleteProjectParams{RepoID: repo.ID, Project: p})
+		} else {
+			err = q.BumpProject(ctx, dbq.BumpProjectParams{At: time.Now().UnixNano(), RepoID: repo.ID, Project: p})
+		}
+		if err != nil {
+			return nil, err
 		}
 	}
 	return follow, nil

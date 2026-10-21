@@ -7,6 +7,19 @@ import (
 	"testing"
 )
 
+// conditionalGet sends GET path with If-None-Match etag (and Accept accept when not "") and
+// returns the status and the ETag of the answer.
+func conditionalGet(t *testing.T, s *Server, path, accept, etag string, auth Auth) (int, string) {
+	t.Helper()
+	req := s.NewRequest(t, http.MethodGet, path, nil)
+	req.Header.Set("If-None-Match", etag)
+	if accept != "" {
+		req.Header.Set("Accept", accept)
+	}
+	resp, _ := s.Do(t, req, auth)
+	return resp.StatusCode, resp.Header.Get("ETag")
+}
+
 // TestCacheControl: a format read of a repo that not everyone reads answers with
 // Cache-Control: private (GET, HEAD and 304), so a shared cache in front of the server does not
 // keep it; a public repo answers with no Cache-Control. A public group with a private member, and
