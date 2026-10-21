@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/access"
@@ -37,12 +38,17 @@ var (
 
 // Fetcher fetches the files of proxy repos (internal/proxy): it returns the cached asset of path
 // when it is fresh, else the one the remote sends now (stored through Commit with SourceProxy).
+// live, when not nil, is the client of the request: a fetch of a file that is not cached may
+// send the remote's bytes to it while it stores them (Live).
 type Fetcher interface {
-	Ensure(ctx context.Context, repo *repos.Repo, path repopath.Path, c Class) (*Asset, error)
+	Ensure(ctx context.Context, repo *repos.Repo, path repopath.Path, c Class, live *Live) (*Asset, error)
 }
 
-// maxMergeBytes is the largest file of a group member that a merge reads.
-const maxMergeBytes = 4 << 20
+const (
+	maxMergeBytes = 4 << 20   // the largest file of a group member that a merge reads
+	mergedEntries = 1024      // merged files kept in memory
+	mergedBytes   = 128 << 20 // the bytes of the merged files kept in memory
+)
 
 // Reader is the read path of hosted, proxy and group repos.
 type Reader struct {
@@ -52,11 +58,12 @@ type Reader struct {
 	remote Fetcher
 	ttl    func() time.Duration // the presign lifetime of an S3 redirect
 	log    *slog.Logger
+	merged *mergeCache
 }
 
 // NewReader returns the read path. ttl returns the lifetime of a presigned S3 redirect.
 func NewReader(p *Pipeline, rs *repos.Service, e *access.Engine, ttl func() time.Duration, log *slog.Logger) *Reader {
-	return &Reader{p: p, repos: rs, access: e, ttl: ttl, log: log}
+	return &Reader{p: p, repos: rs, access: e, ttl: ttl, log: log, merged: newMergeCache(mergedEntries, mergedBytes)}
 }
 
 // SetFetcher gives the reader the proxy fetcher. It runs before the server serves.
@@ -66,11 +73,13 @@ func (rd *Reader) SetFetcher(f Fetcher) { rd.remote = f }
 //
 //   - hosted: the asset, or 404.
 //   - proxy: the format's Classify (a refused path is 404), then the remote fetch, then the asset.
+//     A GET of a file that is not cached gets the remote's bytes while the proxy stores them
+//     (Live).
 //   - group: the members in read order that the caller may read; the first that has the file
-//     serves it (a proxy member fetches only when no member before it has the file). With a
-//     format Merger that matches the path and two or more members that have it, the server
-//     merges the members' files and serves the merged bytes. No member: 404, or 502 when a
-//     proxy member's remote failed.
+//     serves it (a proxy member fetches only when no member before it has the file; see
+//     ResolveLive). With a format Merger that matches the path and two or more members that have
+//     it, the server merges the members' files and serves the merged bytes. No member: 404, or
+//     502 when a proxy member's remote failed.
 func (rd *Reader) Serve(w http.ResponseWriter, r *http.Request, c *route.Call, path repopath.Path) {
 	repo := c.Repo
 	if repo.Kind == repos.KindGroup {
@@ -86,7 +95,11 @@ func (rd *Reader) Serve(w http.ResponseWriter, r *http.Request, c *route.Call, p
 			}
 		}
 	}
-	a, err := rd.Resolve(r.Context(), r, c.P, repo, path)
+	live := rd.Live(w, r, nil)
+	a, err := rd.ResolveLive(r.Context(), r, c.P, repo, path, live)
+	if live.Done() {
+		return
+	}
 	switch {
 	case errors.Is(err, ErrRemoteFailed):
 		httpx.Error(w, r, http.StatusBadGateway, "The remote repository did not answer.")
@@ -106,16 +119,34 @@ func (rd *Reader) Serve(w http.ResponseWriter, r *http.Request, c *route.Call, p
 // when no member before it has the file). nil when there is none. ErrRemoteFailed: a proxy's
 // remote failed and nothing else has the file.
 func (rd *Reader) Resolve(ctx context.Context, r *http.Request, p *auth.Principal, repo *repos.Repo, path repopath.Path) (*Asset, error) {
+	return rd.ResolveLive(ctx, r, p, repo, path, nil)
+}
+
+// ResolveLive is Resolve for a request whose client is live (Reader.Live; nil: none): a proxy
+// that fetches a file that is not cached sends the remote's bytes to it while it stores them.
+// The caller checks live.Done before it answers.
+//
+// In a group, the stored copies come first as far as the answer is the same as the read in
+// order (storedFirst): a path that names its bytes (Class.Addressed) serves from any member that
+// stores it before a proxy member asks its remote.
+func (rd *Reader) ResolveLive(ctx context.Context, r *http.Request, p *auth.Principal, repo *repos.Repo, path repopath.Path, live *Live) (*Asset, error) {
 	if repo.Kind != repos.KindGroup {
-		return rd.has(ctx, repo, path)
+		return rd.has(ctx, repo, path, live)
 	}
 	members, err := rd.access.GroupMembers(ctx, r, p, repo)
 	if err != nil {
 		return nil, err
 	}
+	from, a, err := rd.storedFirst(ctx, members, path)
+	if err != nil || a != nil {
+		return a, err
+	}
 	remoteFailed := false
-	for _, m := range members {
-		a, err := rd.has(ctx, m, path)
+	for _, m := range members[from:] {
+		a, err := rd.has(ctx, m, path, live)
+		if live != nil && live.started {
+			return a, err // the member's answer went out: no other member serves
+		}
 		switch {
 		case errors.Is(err, ErrRemoteFailed):
 			remoteFailed = true
@@ -185,18 +216,72 @@ func (rd *Reader) Stored(ctx context.Context, r *http.Request, p *auth.Principal
 	return nil, nil
 }
 
-func (rd *Reader) has(ctx context.Context, repo *repos.Repo, path repopath.Path) (*Asset, error) {
-	if repo.Kind == repos.KindProxy {
-		hooks := rd.p.Hooks(repo.Format)
-		px, isProxy := rd.repos.Proxy(repo.ID)
-		if hooks.Classify == nil || rd.remote == nil || !isProxy {
-			return nil, nil
+// storedFirst looks for path in the stored rows of members, in read order and without a remote,
+// as far as the answer cannot differ from the read in order. A hosted member without the file
+// and a proxy member that refuses the path would not serve it; a proxy member without a stored
+// copy of a path that names its bytes (Class.Addressed) would serve the same bytes as any stored
+// copy, so the pass goes on past it. It stops at a proxy member that would fetch a changing file
+// or a file that does not name its bytes: an immutable file at the same path in a later member
+// may hold other bytes than the remote's (a Maven release), and the first member wins. It returns
+// the stored asset, else the index from which the read in order goes on (the members before it
+// do not serve the file; len(members) when none does).
+func (rd *Reader) storedFirst(ctx context.Context, members []*repos.Repo, path repopath.Path) (int, *Asset, error) {
+	from := -1 // the first proxy member that the pass went past
+	for i, m := range members {
+		if m.Kind == repos.KindProxy {
+			class, ok := rd.classify(m, path)
+			if !ok {
+				continue
+			}
+			if class.Changing {
+				return firstOf(from, i), nil, nil
+			}
+			a, err := rd.p.Get(ctx, m.ID, string(path))
+			switch {
+			case err == nil:
+				return 0, a, nil // an immutable cached file is always fresh
+			case !errors.Is(err, ErrNotFound):
+				return 0, nil, err
+			case !class.Addressed:
+				return firstOf(from, i), nil, nil
+			case from < 0:
+				from = i
+			}
+			continue
 		}
-		class, ok := hooks.Classify(repo, px, path)
+		a, err := rd.p.Get(ctx, m.ID, string(path))
+		if err == nil || !errors.Is(err, ErrNotFound) {
+			return 0, a, err
+		}
+	}
+	return firstOf(from, len(members)), nil, nil
+}
+
+// firstOf is from when it is set (>= 0), else i.
+func firstOf(from, i int) int {
+	if from >= 0 {
+		return from
+	}
+	return i
+}
+
+// classify is the Class of path in proxy repo repo; false when the repo does not fetch it.
+func (rd *Reader) classify(repo *repos.Repo, path repopath.Path) (Class, bool) {
+	hooks := rd.p.Hooks(repo.Format)
+	px, isProxy := rd.repos.Proxy(repo.ID)
+	if hooks.Classify == nil || rd.remote == nil || !isProxy {
+		return Class{}, false
+	}
+	return hooks.Classify(repo, px, path)
+}
+
+func (rd *Reader) has(ctx context.Context, repo *repos.Repo, path repopath.Path, live *Live) (*Asset, error) {
+	if repo.Kind == repos.KindProxy {
+		class, ok := rd.classify(repo, path)
 		if !ok {
 			return nil, nil
 		}
-		a, err := rd.remote.Ensure(ctx, repo, path, class)
+		a, err := rd.remote.Ensure(ctx, repo, path, class, live)
 		if errors.Is(err, ErrRemoteMissing) {
 			return nil, nil
 		}
@@ -222,26 +307,39 @@ var checksums = map[string]func() hash.Hash{"md5": md5.New, "sha1": sha1.New, "s
 
 // serveMerged answers path of a group, whose base file the format merges. With one member that
 // has the base file, that member's file (or its checksum file, when it has one) serves; with more,
-// the server merges them. A checksum path is the checksum of the bytes the base path serves.
+// the server merges them. A checksum path is the checksum of the bytes the base path serves. The
+// members are asked and read at the same time; the merge keeps member order. The merged bytes
+// stay in memory under the SHA-256s of the members' files, so a checksum request and the next
+// request of the same files reuse them.
 func (rd *Reader) serveMerged(w http.ResponseWriter, r *http.Request, group *repos.Repo, members []*repos.Repo, mg *Merger,
 	path, base repopath.Path, checksum string) {
 	ctx := r.Context()
 	type source struct {
 		repo *repos.Repo
 		a    *Asset
+		err  error
 	}
+	found := make([]source, len(members))
+	var wg sync.WaitGroup
+	for i, m := range members {
+		wg.Go(func() {
+			a, err := rd.has(ctx, m, base, nil)
+			found[i] = source{m, a, err}
+		})
+	}
+	wg.Wait()
 	var srcs []source
 	remoteFailed := false
-	for _, m := range members {
-		a, err := rd.has(ctx, m, base)
+	for _, s := range found {
 		switch {
-		case errors.Is(err, ErrRemoteFailed):
+		case errors.Is(s.err, ErrRemoteFailed):
 			remoteFailed = true
-		case err != nil:
+		case s.err != nil:
+			rd.log.Error("group: member file", "group", group.Name, "member", s.repo.Name, "path", base, "err", s.err)
 			httpx.Error(w, r, http.StatusInternalServerError, "internal error")
 			return
-		case a != nil:
-			srcs = append(srcs, source{m, a})
+		case s.a != nil:
+			srcs = append(srcs, s)
 		}
 	}
 	if len(srcs) == 0 {
@@ -253,35 +351,52 @@ func (rd *Reader) serveMerged(w http.ResponseWriter, r *http.Request, group *rep
 			rd.ServeAsset(w, r, srcs[0].a, ServeOptions{})
 			return
 		}
-		if a, err := rd.has(ctx, srcs[0].repo, path); err == nil && a != nil {
+		if a, err := rd.has(ctx, srcs[0].repo, path, nil); err == nil && a != nil {
 			rd.ServeAsset(w, r, a, ServeOptions{})
 			return
 		}
 	}
-	var parts [][]byte
 	var modified time.Time
+	key := make([]string, 0, 2+2*len(srcs))
+	key = append(key, strconv.FormatInt(group.ID, 10), string(base))
 	for _, s := range srcs {
-		b, err := rd.p.ReadAll(ctx, s.a, maxMergeBytes)
-		if err != nil {
-			rd.log.Warn("group: read member file", "member", s.repo.Name, "path", base, "err", err)
-			continue
-		}
-		parts = append(parts, b)
+		key = append(key, strconv.FormatInt(s.repo.ID, 10), s.a.SHA256)
 		if s.a.UpdatedAt.After(modified) {
 			modified = s.a.UpdatedAt
 		}
 	}
-	if len(parts) == 0 {
-		httpx.Error(w, r, http.StatusNotFound, "not found")
-		return
-	}
-	data := parts[0]
-	if len(parts) > 1 {
-		var err error
-		if data, err = mg.Merge(ctx, base, parts); err != nil {
-			rd.log.Warn("group: merge", "group", group.Name, "path", base, "err", err)
+	mkey := strings.Join(key, "\x00")
+	data, ok := rd.merged.get(mkey)
+	if !ok {
+		parts := make([][]byte, len(srcs))
+		errs := make([]error, len(srcs))
+		for i, s := range srcs {
+			wg.Go(func() { parts[i], errs[i] = rd.p.ReadAll(ctx, s.a, maxMergeBytes) })
+		}
+		wg.Wait()
+		read := parts[:0]
+		for i, s := range srcs {
+			if errs[i] != nil {
+				rd.log.Warn("group: read member file", "member", s.repo.Name, "path", base, "err", errs[i])
+				continue
+			}
+			read = append(read, parts[i])
+		}
+		if len(read) == 0 {
 			httpx.Error(w, r, http.StatusNotFound, "not found")
 			return
+		}
+		data = read[0]
+		if len(read) > 1 {
+			var err error
+			if data, err = mg.Merge(ctx, base, read); err != nil {
+				rd.log.Warn("group: merge", "group", group.Name, "path", base, "err", err)
+				httpx.Error(w, r, http.StatusNotFound, "not found")
+				return
+			}
+		}
+		if len(read) == len(srcs) {
+			rd.merged.put(mkey, data) // a merge without a member that failed to read
 		}
 	}
 	ct := FallbackContentType

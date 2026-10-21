@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -350,9 +351,37 @@ func (s *Service) GroupsOf(id int64) []int64 {
 	return out
 }
 
+// memoKey is the context key of a request's memo (Remember).
+type memoKey struct{}
+
+// memo holds the member repos of the groups that one request read.
+type memo struct {
+	mu      sync.Mutex
+	members map[int64][]*Repo
+}
+
+// Remember returns ctx with a memo for one request: MemberRepos reads the members of a group once
+// per request, although the route policy and the read path both ask for them. The repos stay as
+// they were when the request first read them.
+func Remember(ctx context.Context) context.Context {
+	if _, ok := ctx.Value(memoKey{}).(*memo); ok {
+		return ctx
+	}
+	return context.WithValue(ctx, memoKey{}, &memo{members: map[int64][]*Repo{}})
+}
+
 // MemberRepos returns the member repos of group in read order: the members from memory, each
-// repo an indexed point lookup.
+// repo an indexed point lookup, or the memo of the request (Remember).
 func (s *Service) MemberRepos(ctx context.Context, group *Repo) ([]*Repo, error) {
+	m, _ := ctx.Value(memoKey{}).(*memo)
+	if m != nil {
+		m.mu.Lock()
+		out, ok := m.members[group.ID]
+		m.mu.Unlock()
+		if ok {
+			return slices.Clone(out), nil
+		}
+	}
 	ids := s.Members(group.ID)
 	out := make([]*Repo, 0, len(ids))
 	for _, id := range ids {
@@ -364,6 +393,11 @@ func (s *Service) MemberRepos(ctx context.Context, group *Repo) ([]*Repo, error)
 			return nil, err
 		}
 		out = append(out, r)
+	}
+	if m != nil {
+		m.mu.Lock()
+		m.members[group.ID] = slices.Clone(out)
+		m.mu.Unlock()
 	}
 	return out, nil
 }

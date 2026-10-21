@@ -18,14 +18,19 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/route"
 )
 
-// getBlob serves a blob of the image, with ranges; a GET may redirect to the store.
+// getBlob serves a blob of the image, with ranges; a GET may redirect to the store. A proxy that
+// fetches the blob now sends the remote's bytes while it stores them.
 func (f *Format) getBlob(w http.ResponseWriter, r *http.Request, c *route.Call, t target) {
 	hex, err := parseDigest(t.ref)
 	if err != nil {
 		fail(w, r, err)
 		return
 	}
-	a, err := f.h.Reader.Resolve(r.Context(), r, c.P, c.Repo, repopath.Path(linkPath(t.image, hex)))
+	live := f.h.Reader.Live(w, r, func(h http.Header) { h.Set("Docker-Content-Digest", "sha256:"+hex) })
+	a, err := f.h.Reader.ResolveLive(r.Context(), r, c.P, c.Repo, repopath.Path(linkPath(t.image, hex)), live)
+	if live.Done() {
+		return
+	}
 	switch {
 	case errors.Is(err, assets.ErrRemoteFailed):
 		writeOCI(w, ociErr(http.StatusBadGateway, codeUnknown, "The remote repository did not answer."))

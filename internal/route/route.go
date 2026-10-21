@@ -153,7 +153,8 @@ func (r *Router) Handle(pattern string, p Policy, h Handler) {
 //  4. The server permission, or the repository permission SomeRepo on at least one repo.
 //  5. The repo: its name, then access.Engine.Decide. A format read of a repo that not everyone reads
 //     (access.Engine.Private) answers with Cache-Control: private, so a shared cache
-//     in front of the server does not keep it. A public repo gets no Cache-Control here.
+//     in front of the server does not keep it. A public repo gets no Cache-Control here. A format
+//     read keeps the members of a group that it reads for the request (repos.Remember).
 //
 // The audit actor of the caller (with the client address) is in the request context from step 1
 // on, so the handler, the services it calls and a guard refusal record events with it.
@@ -275,6 +276,8 @@ func (m *Mux) enforce(p Policy, h Handler) http.HandlerFunc {
 			}
 			c.Repo, c.RepoPerms = repo, d.Perms
 			if rule.Format != "" && op == access.Read {
+				// A format read reads the members of a group once: here, and again in the read path.
+				r = r.WithContext(repos.Remember(r.Context()))
 				private, err := m.access.Private(r.Context(), repo)
 				if err != nil {
 					fail(access.Refuse(http.StatusInternalServerError, "internal", "internal error"))

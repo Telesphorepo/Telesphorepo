@@ -4,11 +4,13 @@ package e2e
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -355,6 +357,99 @@ func TestProxy(t *testing.T) {
 		s.MustAPI(t, http.MethodGet, "/api/repos/"+central, nil, s.Admin(), &ps)
 		if ps.Proxy == nil || ps.Proxy.LastError == "" {
 			t.Fatalf("the proxy has no last_error after the remote stopped: %+v", ps.Proxy)
+		}
+
+		// A stale changing file serves from the cache while the remote is down, and the failure
+		// is remembered: a second request within 30 s does not ask the remote again.
+		for i := range 2 {
+			st, b := rawGet(t, s, opts.S3, mdURL, nil)
+			if st != http.StatusOK || !strings.Contains(string(b), "0.0.1-e2e") {
+				t.Fatalf("GET %d of a stale maven-metadata.xml while the remote is down: status %d: %s", i+1, st, b)
+			}
+		}
+		if n := logCount(t, s, "remote failed; serving the cached copy", mdRel); n != 1 {
+			t.Fatalf("two GETs of a stale file while the remote is down asked the remote %d times, want 1", n)
+		}
+	})
+}
+
+// logCount counts the log lines of s with message msg and path path, through every request that
+// returned before the call (Server.LogsThrough).
+func logCount(t testing.TB, s *Server, msg, path string) int {
+	t.Helper()
+	n := 0
+	sc := bufio.NewScanner(strings.NewReader(s.LogsThrough(t)))
+	sc.Buffer(make([]byte, 1<<20), 1<<20)
+	for sc.Scan() {
+		line := sc.Text()
+		if i := strings.IndexByte(line, '{'); i > 0 {
+			line = line[i:]
+		}
+		var e struct {
+			Msg  string `json:"msg"`
+			Path string `json:"path"`
+		}
+		if json.Unmarshal([]byte(line), &e) == nil && e.Msg == msg && e.Path == path {
+			n++
+		}
+	}
+	return n
+}
+
+// TestProxyStream: the first GET of a large file that a proxy has not cached gets the remote's
+// bytes while the proxy stores them (no ETag yet, the remote's length), on both stores. Requests
+// that come at the same time wait for that fetch; the remote sees one GET, and the stored file
+// serves the same bytes afterwards.
+func TestProxyStream(t *testing.T) {
+	t.Parallel()
+	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
+		remote := StartServer(t, ServerOpts{})
+		s := StartServer(t, opts)
+		up := RandName("upstream")
+		remote.CreateRepo(t, up, "maven", true, nil)
+		single, together := "com/e2e/big/1.0/big-1.0.jar", "com/e2e/big/2.0/big-2.0.jar"
+		files := map[string][]byte{single: rawRandom(t, 24<<20), together: rawRandom(t, 16<<20)}
+		for p, b := range files {
+			mavenPut(t, remote, remote.AdminUser, up, p, b)
+		}
+		central := RandName("central")
+		s.CreateProxy(t, central, "maven", true, map[string]any{"remote_url": remote.InternalURL + "/maven/" + up}, false)
+
+		resp, body := s.Do(t, s.NewRequest(t, http.MethodGet, "/maven/"+central+"/"+single, nil), nil)
+		switch {
+		case resp.StatusCode != http.StatusOK:
+			t.Fatalf("streamed GET through the proxy: status %d: %.200s", resp.StatusCode, body)
+		case !bytes.Equal(body, files[single]):
+			t.Fatalf("streamed GET through the proxy: got %d bytes, want %d (content differs)", len(body), len(files[single]))
+		case resp.ContentLength != int64(len(files[single])):
+			t.Fatalf("streamed GET through the proxy: Content-Length %d, want %d", resp.ContentLength, len(files[single]))
+		case resp.Header.Get("ETag") != "":
+			t.Fatalf("the first GET of an uncached file did not stream (it has the ETag %s of a stored file)", resp.Header.Get("ETag"))
+		case resp.Header.Get("Content-Type") != "application/java-archive":
+			t.Fatalf("streamed GET through the proxy: Content-Type %q", resp.Header.Get("Content-Type"))
+		}
+		rawWantGet(t, s, opts.S3, "/maven/"+central+"/"+single, nil, files[single])
+
+		var wg sync.WaitGroup
+		errs := make([]string, 3)
+		for i := range errs {
+			wg.Go(func() {
+				st, b := rawGet(t, s, opts.S3, "/maven/"+central+"/"+together, nil)
+				if st != http.StatusOK || !bytes.Equal(b, files[together]) {
+					errs[i] = fmt.Sprintf("status %d, %d bytes", st, len(b))
+				}
+			})
+		}
+		wg.Wait()
+		for i, e := range errs {
+			if e != "" {
+				t.Fatalf("concurrent GET %d of an uncached file: %s, want 200 with the remote's bytes", i+1, e)
+			}
+		}
+		for _, p := range []string{single, together} {
+			if got := remoteGets(t, remote, "/maven/"+up+"/"+p); len(got) != 1 {
+				t.Fatalf("the remote got %v for %s, want one GET", got, p)
+			}
 		}
 	})
 }

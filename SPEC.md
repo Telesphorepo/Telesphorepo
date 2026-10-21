@@ -1525,12 +1525,15 @@ the format's `Classify` (a refused path is 404), fetches the file through `proxy
 when the cached copy is missing or stale (see **Group and proxy repositories**), then serves it. A
 group tries its members in read order that the caller may read (`access.Engine.Allows` with
 `Read`); the first member with the file serves it, and a proxy member fetches only when no member
-before it has the file. With a format `Merger` that matches the path and two or more members that
+before it has the file (stored copies of a path that names its bytes come first; see **Groups**).
+With a format `Merger` that matches the path and two or more members that
 have its base file, the server merges the members' files and serves the merged bytes; a checksum
 path (`md5`, `sha1`, `sha256`, `sha512`) of a merged file is the checksum of the merged bytes. No
 member: 404, or 502 when a proxy member's remote failed. A format with its own answers uses the
 parts: `Reader.Resolve(ctx, r, p, repo, path)` (the asset by the rules above, nil when none,
-`ErrRemoteFailed` when a proxy failed and nothing else has it), `Reader.Stored(ctx, r, p, repo,
+`ErrRemoteFailed` when a proxy failed and nothing else has it), `Reader.ResolveLive` (the same with
+`Reader.Live(w, r, header)`: a proxy fetch of a file that is not cached streams to the client, and
+the caller checks `live.Done()` before it answers; see **Proxies**), `Reader.Stored(ctx, r, p, repo,
 path)` (a stored asset only: hosted, a proxy's cache, or the first readable group member that
 stores it; it never contacts a remote) and `Reader.ServeAsset(w, r, asset, ServeOptions{NoRedirect})`
 (the download of one asset; `NoRedirect` streams it even when the store presigns).
@@ -2347,7 +2350,21 @@ are dropped from memory, and the server logs the repo ids.
   (`access.Engine.Allows` with `Read`: the reader's access and the guards, the member's read rules,
   both count; no audit event). The first member that has the file serves it. A proxy member fetches from its remote
   only when no member before it has the file. No member: 404, or 502 when a proxy member's remote
-  failed.
+  failed. The members and the reader's grants on them are read once per request (`repos.Remember`
+  for the members, `auth.Service.WithGrants` for the grants, one query).
+- Stored copies first (`Reader.ResolveLive`): before a proxy member asks its remote, the read
+  checks the stored rows of the members in read order, as far as the answer is the same as the
+  read in order. A hosted member without the file and a proxy member that refuses the path do not
+  serve it. A proxy member without a stored copy of a path that names its bytes
+  (`assets.Class.Addressed`: OCI blobs and manifests by digest) would serve the same bytes as any
+  stored copy, so the pass goes on past it, and a later member's stored copy serves without a
+  remote request. The pass stops at a proxy member that would fetch a changing file or an
+  immutable file that does not name its bytes (a Maven release: a later member may hold other
+  bytes at the same path, and the first member wins); the read in order goes on from there.
+- A merged file asks its members and reads their files at the same time, and merges in member
+  order. The merged bytes stay in memory (1,024 files, 128 MiB) under the group, the base path and
+  each member file's SHA-256, so its checksum files and the next request reuse them until a member
+  file changes.
 - Maven's `Merger`: an artifact-level (or group-level) `maven-metadata.xml` merges over the
   readable members that have it: the union of the versions in Maven order, the newest `latest`,
   `release` and `lastUpdated`, and the union of the plugins by prefix. Its `.md5`, `.sha1`,
@@ -2393,14 +2410,28 @@ are dropped from memory, and the server logs the repo ids.
   is the answer of the registry token protocol: for `Bearer realm,service,scope` it GETs
   `realm?service=&scope=` with the credentials as Basic and returns `Authorization: Bearer
   <token>` with its life (`expires_in`, 60 s without it); for `Basic` it returns the Basic header.
-  One fetch per (repo, path) runs at a time (a fetch lock of its own); a second request waits and
-  then serves the stored file.
+  One fetch per (repo, path) runs at a time (a fetch lock of its own). A request for a file that
+  is not cached waits for the fetch that runs and then serves the stored file (or the failure of
+  that fetch). A request with a stale cached copy does not wait: while another request checks the
+  file again, the stale copy serves at once, so only that request waits for the remote.
 - A 200 is spooled (`max_upload_size`, hashes) and committed through the byte pipeline with
   source `proxy`: no uploader, the remote's `Last-Modified` as `created_at` and `updated_at`,
-  `checked_at` and the ETag; the bytes of a blob that exists already are not stored again. The
-  client waits for the whole file, also for the first pull of a large image layer. A file that the
-  format refuses (a `*assets.Refusal`, e.g. bytes that do not have the digest of their path) is a
-  remote failure: "the remote sent a file that the format refuses: <message>".
+  `checked_at` and the ETag; the bytes of a blob that exists already are not stored again. A file
+  that the format refuses (a `*assets.Refusal`, e.g. bytes that do not have the digest of their
+  path) is a remote failure: "the remote sent a file that the format refuses: <message>"; a body
+  that the remote breaks off is one too.
+- The request that fetches an immutable file that is not cached gets the remote's bytes while they
+  spool (`assets.Live`, through `Reader.Serve` and the Docker blob route): a GET without `Range`
+  or a condition. The answer is 200 with the content type of the format's `Describe`, the remote's
+  `Last-Modified` and its length (chunked when the remote sent none), and the headers the route
+  adds (Docker: `Docker-Content-Digest` of the path); it has no `ETag` and no checksum headers,
+  since the hashes are known only at the end. The last block of the body goes out after the
+  commit: a body that breaks off, a file above `max_upload_size` or a file that the format refuses
+  aborts the connection and is not stored, so the client never takes a short body for the file. A
+  client that takes no bytes for 30 s is dropped, and the fetch goes on. A changing file, a file
+  that keeps the remote's content type (`KeepType`, e.g. an OCI manifest, whose `Admit` sets the
+  media type), a HEAD and a request with `Range` or a condition serve from storage after the
+  commit. Other requests for the same path wait for the fetch and serve the stored file.
 - A remote 404 or 410 answers 404 and is remembered in memory for `not_found_ttl` (an LRU of
   10,000 paths per server). A cached file that the remote no longer has stays and serves. A 401
   or 403 to the request with the token of a Bearer challenge counts as a 404 (`proxy.ErrDenied`):
@@ -2409,7 +2440,12 @@ are dropped from memory, and the server logs the repo ids.
 - A remote error, a refusal (for example 401) or no answer headers within 30 s: a cached file
   serves although stale, with a warning in the log; with nothing cached the answer is 502 "The
   remote repository did not answer." `last_error` and `last_error_at` record it; a success sets
-  `last_ok_at`. A fetch continues when the client goes away, for at most 30 minutes.
+  `last_ok_at`. The failure is remembered in memory for 30 s per (repo, path) (an LRU of 10,000
+  paths per server): in that time a stale cached copy serves without a remote request, and the
+  requests that waited for the failed fetch get its answer. A new request for a file that is not
+  cached asks the remote again, and an answer of the remote forgets the failure. A fetch continues
+  when the client goes away, for at most 30 minutes. The remote client keeps up to 64 idle
+  connections per host (256 in all) and uses HTTP/2 where the remote offers it.
 - The fetch follows at most 5 redirects. The credentials (HTTP Basic or a token) go only to the
   remote's host: a redirect to another host drops them, and a fetch from a `Files` base with
   another scheme or host sends none and does not call `RemoteAuth`. The not-found memory, the
@@ -2665,8 +2701,11 @@ removes the old manifest (`Remove`, source `generated`) when no tag names it and
 it, and each manifest of its index that no tag names and no other index lists. Their links lose
 those uses, so the job `docker.links` and the blob GC reclaim the layers that only the old version
 used; a client that asks for the old digest gets it from the remote again. The children of a
-fetched manifest come when a client asks for them. A mount never contacts a remote. The first pull of an uncached layer waits until the proxy
-holds the whole layer. The tags list of a proxy is the remote's tags list (with `n` and `last`;
+fetched manifest come when a client asks for them. A mount never contacts a remote. The first GET of an uncached layer gets the remote's bytes while
+the proxy stores them, with `Docker-Content-Digest` and the remote's length (see **Proxies**); a
+pull that asks for the same layer meanwhile waits until the proxy holds it. A group serves a link
+or a manifest by digest from any member that stores it before a proxy member asks its remote
+(`Addressed`). The tags list of a proxy is the remote's tags list (with `n` and `last`;
 the `Link` of the next page names the local name); a remote that denies the name (404, or
 `proxy.ErrDenied`) gives 404 `NAME_UNKNOWN`; a remote that fails gives the cached tags.
 The catalog lists the images that a proxy has cached. A group reads its members in order
@@ -3745,7 +3784,7 @@ inside a server container. `migrations_test.go` covers `TestMigrations`, a real 
 `TestCacheControl`: HEAD, a 304 and a GET of a private Maven repo, of a public group with a
 private member (also for the public member's file) carry `Cache-Control: private`; a public repo
 and a group of public members carry none (an S3 redirect carries `no-store`); after a read IP rule
-that allows every address, the public repo and the group of it carry `private`. `proxy_test.go` covers `TestProxy` with a second Telesphorepo server as the remote: `mvn` through the proxy and no remote request on the second resolve, the `metadata_ttl` recheck with a 304 and a changed file, a remembered 404, 405 for a PUT, a group where the hosted member wins over the proxy, remote credentials (with them, 502 without them), a Caddy container that redirects to another host and refuses a request that carries credentials, `apt-get` through a Debian proxy with the remote's key, and a stopped remote (cached file served, 502, `last_error`). `TestNoBrowserPasswordPrompt` (in `auth_test.go`) checks that a 401 under `/api` or with `X-Telesphorepo-UI` has no `WWW-Authenticate`. `folder_upload_test.go` covers `TestFolderUploadMaven` (a Maven-layout tree with checksum, signature and stray files; a flat folder with two poms; a bad tree that gives 400; plans store nothing; checksums and metadata) and `TestFolderUploadDebianAndRaw`. `TestStorageMove*` run each server on a named data volume: fs to
+that allows every address, the public repo and the group of it carry `private`. `proxy_test.go` covers `TestProxy` with a second Telesphorepo server as the remote: `mvn` through the proxy and no remote request on the second resolve, the `metadata_ttl` recheck with a 304 and a changed file, a remembered 404, 405 for a PUT, a group where the hosted member wins over the proxy, remote credentials (with them, 502 without them), a Caddy container that redirects to another host and refuses a request that carries credentials, `apt-get` through a Debian proxy with the remote's key, and a stopped remote (cached file served, 502, `last_error`, and a stale `maven-metadata.xml` that serves twice with one remote attempt in the log). `TestProxyStream` (both stores) checks that the first GET of an uncached 24 MiB file streams (the remote's length, no `ETag` yet) with the remote's bytes, that a later GET serves the stored file, and that three concurrent GETs of another uncached file get its bytes with one remote GET. `TestNoBrowserPasswordPrompt` (in `auth_test.go`) checks that a 401 under `/api` or with `X-Telesphorepo-UI` has no `WWW-Authenticate`. `folder_upload_test.go` covers `TestFolderUploadMaven` (a Maven-layout tree with checksum, signature and stray files; a flat folder with two poms; a bad tree that gives 400; plans store nothing; checksums and metadata) and `TestFolderUploadDebianAndRaw`. `TestStorageMove*` run each server on a named data volume: fs to
 SeaweedFS and back with uploads during the move, a forced failure, a restart mid-move
 (`Server.Restart`) and a cancel. `backup_test.go` covers `TestBackupRestore`: on fs, a server with Maven, Debian and raw repos backs up through the API while raw uploads run; the folder holds the database (its SHA-256 in `backup.json`), `master.key` (0600) and `backup.json`, and the blobs folder every blob; `telesphorepo-server restore` of the image restores it into a new volume and refuses a volume that is not empty; a server on that volume reads every file back byte for byte (the uploads during the backup that it has too), `mvn` resolves and `apt` installs with the same signing key; with `backup.keep=2` two more backups remove the first one and the blob only it used (made an hour old first), while a fresh unused file of the blobs folder stays; an incomplete folder is listed, refused by restore and removed by the next run. On SeaweedFS the backup has no blobs folder, `backup.json` names the bucket, and the restored server reads the files from the bucket. `blobs_test.go` covers `TestBlobDedupeAndGC` (the same bytes in two raw repos
 and a Maven repo are one stored blob, each path keeps its own content type, also in an S3 redirect;

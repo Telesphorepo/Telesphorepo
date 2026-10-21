@@ -160,11 +160,6 @@ WHERE s.id_hash = ?;
 -- name: ListRepoUserPerms :many
 SELECT perm FROM repo_permissions WHERE repo_id = ? AND user_id = ?;
 
--- The repos where user id holds a permission (a repo once per permission), through
--- repo_permissions_user.
--- name: ListPermittedRepoIDs :many
-SELECT repo_id FROM repo_permissions WHERE user_id = ?;
-
 -- Served by the partial index repos_anonymous.
 -- name: ListAnonymousRepoIDs :many
 SELECT id FROM repos WHERE anonymous_read = 1;

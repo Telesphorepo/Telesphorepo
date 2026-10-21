@@ -106,6 +106,10 @@ type Class struct {
 	// Changing files can change at the remote (maven-metadata.xml, InRelease): they are checked
 	// again after the repo's metadata_ttl. Other files are fetched once.
 	Changing bool
+	// Addressed is a path that names its bytes by their digest (an OCI blob or a manifest by
+	// digest): a stored copy of the path in any member of a group is the same file, so a group
+	// serves a stored copy before it asks a proxy member's remote.
+	Addressed bool
 	// Remote is the path of the file at the remote: relative to the remote URL (to Files when it
 	// is set), or from the root of that URL's host when it starts with "/". "" is the local path.
 	Remote string

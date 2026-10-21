@@ -57,8 +57,8 @@ func remoteImage(px *repos.Proxy, image string) string {
 func pullScope(rimage string) string { return "repository:" + rimage + ":pull" }
 
 // classify tells the proxy how to cache an OCI object path: a link and a manifest by digest never
-// change; a tag changes, and a HEAD of the tag that names the cached digest keeps it. Manifests
-// keep the remote's media type.
+// change and name their bytes (Addressed); a tag changes, and a HEAD of the tag that names the
+// cached digest keeps it. Manifests keep the remote's media type.
 func (f *Format) classify(_ *repos.Repo, px *repos.Proxy, p repopath.Path) (assets.Class, bool) {
 	op, ok := parsePath(string(p))
 	if !ok {
@@ -73,10 +73,10 @@ func (f *Format) classify(_ *repos.Repo, px *repos.Proxy, p repopath.Path) (asse
 	}
 	switch op.kind {
 	case kindLink:
-		return assets.Class{Remote: "/v2/" + rimage + "/blobs/sha256:" + op.ref, Header: hdr}, true
+		return assets.Class{Remote: "/v2/" + rimage + "/blobs/sha256:" + op.ref, Header: hdr, Addressed: true}, true
 	case kindManifest:
 		hdr.Set("Accept", manifestAccept)
-		return assets.Class{Remote: "/v2/" + rimage + "/manifests/sha256:" + op.ref, Header: hdr, KeepType: true}, true
+		return assets.Class{Remote: "/v2/" + rimage + "/manifests/sha256:" + op.ref, Header: hdr, KeepType: true, Addressed: true}, true
 	default:
 		hdr.Set("Accept", manifestAccept)
 		return assets.Class{Remote: "/v2/" + rimage + "/manifests/" + op.ref, Header: hdr, KeepType: true,

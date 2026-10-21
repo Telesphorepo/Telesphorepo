@@ -13,9 +13,37 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
+// grantsKey is the context key of the grants of one user (WithGrants).
+type grantsKey struct{}
+
+// grants are the granted repository permissions of a user by repo id.
+type grants struct {
+	user int64
+	sets map[int64]perm.Set
+}
+
+// WithGrants returns ctx with the granted repository permissions of p's user, read in one query,
+// so that RepoPerms on many repos (the members of a group, the list of repos) reads no row per
+// repo. ctx comes back as it is when p needs no rows (anonymous, or all repositories) or holds
+// them already.
+func (s *Service) WithGrants(ctx context.Context, p *Principal) (context.Context, error) {
+	if p == nil || p.UserID == 0 || perm.Current().AllRepos(p.Perms) {
+		return ctx, nil
+	}
+	if g, ok := ctx.Value(grantsKey{}).(*grants); ok && g.user == p.UserID {
+		return ctx, nil
+	}
+	sets, err := s.UserRepoPerms(ctx, p.UserID)
+	if err != nil {
+		return nil, err
+	}
+	return context.WithValue(ctx, grantsKey{}, &grants{user: p.UserID, sets: sets}), nil
+}
+
 // RepoPerms returns what p may do on repo: the repository permissions of p's grants, every one
 // for a holder of a permission that gives all repositories (repositories.all), and
-// repo.download for anyone on a repo with anonymous read.
+// repo.download for anyone on a repo with anonymous read. The grants come from ctx when it holds
+// those of p's user (WithGrants).
 func (s *Service) RepoPerms(ctx context.Context, p *Principal, repo *repos.Repo) (perm.Set, error) {
 	var set perm.Set
 	if repo.AnonymousRead {
@@ -31,6 +59,9 @@ func (s *Service) RepoPerms(ctx context.Context, p *Principal, repo *repos.Repo)
 	if p.UserID == 0 {
 		return set, nil
 	}
+	if gr, ok := ctx.Value(grantsKey{}).(*grants); ok && gr.user == p.UserID {
+		return set.Union(gr.sets[repo.ID]), nil
+	}
 	rows, err := s.rq.ListRepoUserPerms(ctx, dbq.ListRepoUserPermsParams{RepoID: repo.ID, UserID: p.UserID})
 	if err != nil {
 		return perm.Set{}, err
@@ -38,38 +69,9 @@ func (s *Service) RepoPerms(ctx context.Context, p *Principal, repo *repos.Repo)
 	return set.Union(perm.SetOfStrings(rows).Of(perm.ScopeRepo)), nil
 }
 
-// ReadableRepoIDs returns the ids of the repos where p holds a permission or that are anonymous,
-// or all=true for a holder of all repositories. It merges the user's permission rows with the
-// anonymous repos (served by the partial index repos_anonymous). Callers that list files check
-// repo.download per repo.
-func (s *Service) ReadableRepoIDs(ctx context.Context, p *Principal) ([]int64, bool, error) {
-	if p != nil && perm.Current().AllRepos(p.Perms) {
-		return nil, true, nil
-	}
-	anon, err := s.rq.ListAnonymousRepoIDs(ctx)
-	if err != nil {
-		return nil, false, err
-	}
-	if p == nil || p.UserID == 0 {
-		return anon, false, nil
-	}
-	permitted, err := s.rq.ListPermittedRepoIDs(ctx, p.UserID)
-	if err != nil {
-		return nil, false, err
-	}
-	seen := make(map[int64]struct{}, len(anon)+len(permitted))
-	ids := make([]int64, 0, len(anon)+len(permitted))
-	for _, id := range append(permitted, anon...) {
-		if _, dup := seen[id]; !dup {
-			seen[id] = struct{}{}
-			ids = append(ids, id)
-		}
-	}
-	return ids, false, nil
-}
-
-// DownloadableRepoIDs is ReadableRepoIDs limited to the repos where p holds repo.download (a
-// grant, or anonymous read).
+// DownloadableRepoIDs returns the ids of the repos where p holds repo.download (a grant, or
+// anonymous read, served by the partial index repos_anonymous), or all=true for a holder of all
+// repositories.
 func (s *Service) DownloadableRepoIDs(ctx context.Context, p *Principal) ([]int64, bool, error) {
 	if p != nil && perm.Current().AllRepos(p.Perms) {
 		return nil, true, nil

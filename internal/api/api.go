@@ -472,20 +472,13 @@ func (a *API) listRepos(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		route.Fail(w, r, err)
 		return
 	}
-	ids, isAll, err := a.auth.ReadableRepoIDs(ctx, p)
-	if err != nil {
+	// One query reads the caller's grants on every repo; a repo without a permission is left out.
+	if ctx, err = a.auth.WithGrants(ctx, p); err != nil {
 		route.Fail(w, r, err)
 		return
 	}
-	readable := make(map[int64]bool, len(ids))
-	for _, id := range ids {
-		readable[id] = true
-	}
 	out := []repoJSON{}
 	for _, repo := range all {
-		if !isAll && !readable[repo.ID] && !repo.AnonymousRead {
-			continue
-		}
 		perms, err := a.auth.RepoPerms(ctx, p, repo)
 		if err != nil {
 			route.Fail(w, r, err)
