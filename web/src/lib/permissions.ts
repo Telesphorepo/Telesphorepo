@@ -1,10 +1,11 @@
 // The permission registry of the server (GET /api/permissions): every subsystem with its
 // permissions, their labels, help and needs. Server permissions belong to a person; repository
 // permissions belong to a person on one repository. auth.load() reads the registry before the
-// first page renders. PermissionPicker shows one group of checkboxes per subsystem; tables show a
-// set as one short phrase.
+// first page renders. ServerPermissionPicker shows the server permissions as a role (Member,
+// Administrator or Custom); PermissionPicker shows the repository permissions as one group of
+// checkboxes per subsystem; tables show a set as one short phrase.
 
-import { api, type PermId, type PermissionSubsystem } from "$lib/api";
+import { api, type PermId, type PermissionDef, type PermissionSubsystem } from "$lib/api";
 
 export type PermissionInfo<P extends string = PermId> = { name: P; label: string; help: string };
 export type PermissionGroup = { title: string; help: string; items: PermissionInfo[] };
@@ -23,6 +24,9 @@ export const subsystems = (): PermissionSubsystem[] => subsystems_;
 
 /** The server permissions in registry order. */
 export const serverPermissions = (): PermissionInfo[] => of("server").map((p) => ({ name: p.id, label: p.label, help: p.help }));
+
+/** The server permissions in registry order, with their needs and all_repos. */
+export const serverPermissionDefs = (): PermissionDef[] => of("server");
 
 /** The repository permissions in registry order. */
 export const repoPermissions = (): PermissionInfo[] => of("repo").map((p) => ({ name: p.id, label: p.label, help: p.help }));
@@ -51,7 +55,14 @@ export const sortRepoPermissions = (set: readonly PermId[]): PermId[] => of("rep
 export const sortServerPermissions = (set: readonly PermId[]): PermId[] => of("server").map((p) => p.id).filter((x) => set.includes(x));
 
 const capital = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
-const phrase = (labels: string[]) => capital(labels.map((l, i) => (i === 0 ? l : l.toLowerCase())).join(", "));
+const lower = (s: string) => s.charAt(0).toLowerCase() + s.slice(1);
+const phrase = (labels: string[]) => capital(labels.map((l, i) => (i === 0 ? l : lower(l))).join(", "));
+
+/** The labels as one list in a sentence: "download, publish and delete files". */
+export const listPhrase = (labels: string[]): string => {
+  const l = labels.map(lower);
+  return l.length < 2 ? (l[0] ?? "") : `${l.slice(0, -1).join(", ")} and ${l[l.length - 1]}`;
+};
 
 /** A repository permission set as a short phrase: "Download", "Download, publish", "Everything". "" for none. */
 export function repoPhrase(set: readonly PermId[] | null | undefined): string {
@@ -63,6 +74,11 @@ export function repoPhrase(set: readonly PermId[] | null | undefined): string {
 /** True when the set holds every server permission. */
 export const isAdministrator = (set: readonly PermId[] | null | undefined): boolean =>
   of("server").length > 0 && of("server").every((p) => (set ?? []).includes(p.id));
+
+/** The role of a set of server permissions: none, every one, or some. */
+export type ServerRole = "member" | "administrator" | "custom";
+export const serverRole = (set: readonly PermId[] | null | undefined): ServerRole =>
+  isAdministrator(set) ? "administrator" : sortServerPermissions(set ?? []).length ? "custom" : "member";
 
 /** A person's role from their server permissions: "Administrator", the list ("Manage people, manage storage"), or "". */
 export function serverPhrase(set: readonly PermId[] | null | undefined): string {

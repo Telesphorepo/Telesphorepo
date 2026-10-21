@@ -3464,13 +3464,17 @@ page are in `web/src/README.md`.
   nothing. The sign-in method column shows only when someone uses single sign-on. A row opens the
   person's page (`/#/settings/people/{name}`): an identity card (avatar, role, how the person
   signs in, a Disabled badge) with Reset password (only for a person whose permissions the caller
-  all holds) and Disable account or Enable account; then the server permissions in the picker,
-  saved from the save bar after a confirm through `PUT /api/users/{name}/permissions`; then the
+  all holds) and Disable account or Enable account; then the server permissions as a role:
+  Member (none), Administrator (every one) or Custom, which lists one switch per server permission
+  under the Settings sidebar group of its page. A permission that another switched-on one needs is
+  locked on, and one the caller does not hold cannot change. The role is saved from the save bar
+  after a confirm through `PUT /api/users/{name}/permissions`; then the
   person's permissions on each repository. **Give access** opens the grant dialog with the
   repositories and the picker. The repository table takes a pick, with **Change permissions** and
   **Remove access** (asks first). Each repository action saves at once. A holder of `repositories.all`
   reaches every repository, and the page says so. When single sign-on manages the permissions of an
-  account, the server permissions show read-only ("Single sign-on manages these permissions."). The
+  account, the role and its permissions show read-only ("Single sign-on manages these
+  permissions"), with Open sign-in options for a holder of `signin.manage`. The
   People table takes a pick of every row except your own: **Disable** asks first ("Disable 4
   people? They are signed out and cannot sign in."), **Enable** acts at once. **New account**
   opens a short form; after Create, the new person's page opens, where the permissions are set.
@@ -3547,7 +3551,7 @@ page are in `web/src/README.md`.
   token permissions, and "Deploy needed" after a storage, region or version change. The access
   tab of a repo shows the download notes under the Download section.
 - **Sign-in options page.** Three numbered cards: connect your provider (with **Test** in its
-  footer), permissions from the provider (the claim `oidc.permission_claim`, and the map `oidc.permission_map` as groups: each value of the claim with its server permissions in a permission picker, with Change, Remove and Add a group), and how people sign in (`oidc.session_ttl`,
+  footer), permissions from the provider (the claim `oidc.permission_claim`, and the map `oidc.permission_map` as groups: each value of the claim with its server permissions as a role (Member, Administrator or Custom), with Change, Remove and Add a group), and how people sign in (`oidc.session_ttl`,
   `signin.password_login`). The labels are plain words; each
   field also names its term at the provider (Issuer URL, Client ID). The page tests the saved
   settings when it opens and shows the result only when the test fails. **Test** checks the unsaved

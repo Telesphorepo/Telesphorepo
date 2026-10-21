@@ -1,8 +1,10 @@
 <!--
   One person (People). The identity card shows the avatar, the role (Administrator, the phrase of
   the server permissions, or Member), how the person signs in and a disabled account, with the
-  account actions. Server permissions holds the picker of the server permissions; the save bar
-  saves it after a confirm. The Repositories card lists every repository the person can use, with
+  account actions. Server permissions holds the role (ServerPermissionPicker: Member,
+  Administrator, or Custom with one switch per permission); the save bar saves it after a
+  confirm. For an account whose permissions single sign-on manages, the section shows the role and
+  the permissions read-only, with a link to Sign-in options for a person who can open it. The Repositories card lists every repository the person can use, with
   the phrase of their permissions there. Give access opens a short form that gives the person
   permissions on many repositories at once; Change edits one repository; picked rows get one set
   of permissions, or lose their access after a confirm. A public repository shows because anyone
@@ -15,7 +17,7 @@
   import { Keyset, Resource, type TableSource } from "$lib/load.svelte";
   import { href, repoPath, repoSettingsPath } from "$lib/router.svelte";
   import { auth } from "$lib/auth.svelte";
-  import { allReposPermissions, labelOf, pickerGroups, repoPhrase, serverPhrase, sortServerPermissions } from "$lib/permissions";
+  import { allReposPermissions, labelOf, repoPhrase, serverPhrase, serverRole, sortServerPermissions } from "$lib/permissions";
   import { count, someNames } from "$lib/words";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
@@ -35,7 +37,7 @@
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import ShortFormDialog from "$lib/components/ShortFormDialog.svelte";
   import SaveBar from "$lib/components/SaveBar.svelte";
-  import PermissionPicker from "$lib/components/PermissionPicker.svelte";
+  import ServerPermissionPicker from "$lib/components/ServerPermissionPicker.svelte";
   import GrantDialog from "../../settings/repos/GrantDialog.svelte";
   import PlusIcon from "@lucide/svelte/icons/plus";
   import LockIcon from "@lucide/svelte/icons/lock";
@@ -76,6 +78,13 @@
   });
   const added = $derived(serverValue.filter((p) => !serverSaved.includes(p)));
   const removed = $derived(serverSaved.filter((p) => !serverValue.includes(p)));
+  // Becoming an administrator or a member is one line; other changes name each permission.
+  const serverChanges = $derived.by(() => {
+    const to = serverRole(serverValue);
+    if (to === "administrator") return [`${person} gets every server permission and becomes an administrator`];
+    if (to === "member") return [`${person} loses every server permission and becomes a member`];
+    return [...added.map((p) => `${person} gets ${labelOf(p)}`), ...removed.map((p) => `${person} loses ${labelOf(p)}`)];
+  });
   let serverConfirm = $state(false);
   async function saveServer() {
     const next = await api.users.setPermissions(person, serverValue);
@@ -281,10 +290,13 @@
   <FormSection
     title="Server permissions"
     description={u.permissions_managed
-      ? "Single sign-on manages these permissions."
-      : "Check the parts of the server that this person manages. Every one together makes an administrator."}
+      ? "Single sign-on manages these permissions: the groups of the person at the identity provider set them at each sign-in."
+      : "What this person manages on the server, beyond the repositories below."}
   >
-    <PermissionPicker id="{id}-server" groups={pickerGroups("server")} held={u.permissions_managed ? [] : mine} columns={2} bind:value={serverValue} />
+    {#snippet actions()}
+      {#if u.permissions_managed && auth.can("signin.manage")}<Button variant="outline" size="sm" href={href("/settings/sign-in")}>Open sign-in options</Button>{/if}
+    {/snippet}
+    <ServerPermissionPicker id="{id}-server" readonly={u.permissions_managed} held={mine} bind:value={serverValue} />
   </FormSection>
 
   <Section title="Repositories">
@@ -341,10 +353,7 @@
   title="Save the server permissions of {person}?"
   confirmLabel="Save permissions"
   destructive={removed.length > 0}
-  changes={[
-    ...added.map((p) => `${person} gets ${labelOf(p)}`),
-    ...removed.map((p) => `${person} loses ${labelOf(p)}`),
-  ]}
+  changes={serverChanges}
   onConfirm={saveServer}
 />
 
