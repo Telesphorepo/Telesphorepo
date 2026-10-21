@@ -5,6 +5,7 @@ package e2e
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -33,11 +34,24 @@ INSERT INTO e2e_probe (note) SELECT 'user ' || username FROM users;
 // refusal changes the database: the newer build starts on it again.
 func TestMigrations(t *testing.T) {
 	t.Parallel()
-	const initFile, probeFile = "internal/db/migrations/0001_init.sql", "internal/db/migrations/0002_e2e_probe.sql"
+	const dir, initFile = "internal/db/migrations", "internal/db/migrations/0001_init.sql"
 	initial, err := os.ReadFile(filepath.Join(repoRoot(t), filepath.FromSlash(initFile)))
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The probe is the version after the last core migration of this tree.
+	files, err := filepath.Glob(filepath.Join(repoRoot(t), filepath.FromSlash(dir), "*.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, f := range files {
+		names = append(names, filepath.Base(f))
+	}
+	slices.Sort(names)
+	version := fmt.Sprintf("%04d", len(names)+1)
+	probeName := version + "_e2e_probe.sql"
+	probeFile := dir + "/" + probeName
 	older := BuildServer(t, "", "", "")
 	newer := BuildServerWith(t, "", "", "", map[string][]byte{probeFile: []byte(probeMigration)})
 	edited := BuildServerWith(t, "", "", "", map[string][]byte{
@@ -75,8 +89,8 @@ func TestMigrations(t *testing.T) {
 
 	second := StartServer(t, ServerOpts{DataVolume: vol, Files: []ContainerFile{ServerBinary(newer)}})
 	logs := second.Logs(t)
-	if !strings.Contains(logs, `"msg":"applied migration","component":"core","migration":"0002_e2e_probe.sql"`) {
-		t.Fatalf("the newer build did not log the migration 0002_e2e_probe.sql:\n%s", logs)
+	if !strings.Contains(logs, `"msg":"applied migration","component":"core","migration":"`+probeName+`"`) {
+		t.Fatalf("the newer build did not log the migration %s:\n%s", probeName, logs)
 	}
 	if strings.Contains(logs, `"migration":"0001_init.sql"`) {
 		t.Fatalf("the newer build applied a migration 0001 again:\n%s", logs)
@@ -89,8 +103,8 @@ func TestMigrations(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer d.Close()
-	if core := dbColumn(t, d, `SELECT name FROM schema_migrations WHERE component = 'core' ORDER BY version`); !slices.Equal(core, []string{"0001_init.sql", "0002_e2e_probe.sql"}) {
-		t.Fatalf("core migrations of the database: %v, want 0001_init.sql and 0002_e2e_probe.sql", core)
+	if core := dbColumn(t, d, `SELECT name FROM schema_migrations WHERE component = 'core' ORDER BY version`); !slices.Equal(core, append(names, probeName)) {
+		t.Fatalf("core migrations of the database: %v, want %v", core, append(names, probeName))
 	}
 	notes := dbColumn(t, d, `SELECT note FROM e2e_probe`)
 	for _, want := range []string{"repo " + repo, "user " + user, "user " + first.AdminUser} {
@@ -100,7 +114,7 @@ func TestMigrations(t *testing.T) {
 	}
 
 	wantRefusal(t, vol, edited, "the database applied the core migration 0001_init.sql, and that file has changed since; an applied migration must not change")
-	wantRefusal(t, vol, older, "the database is from a newer Telesphorepo (core migration 0002); run that version or newer")
+	wantRefusal(t, vol, older, "the database is from a newer Telesphorepo (core migration "+version+"); run that version or newer")
 
 	third := StartServer(t, ServerOpts{DataVolume: vol, Files: []ContainerFile{ServerBinary(newer)}})
 	if logs := third.Logs(t); strings.Contains(logs, `"msg":"applied migration"`) {
