@@ -346,7 +346,7 @@
     <p class="mt-1 text-meta text-muted-foreground">Uploads keep working and go to both places. Downloads come from {storeText(here)} until the move ends.</p>
   </Section>
 {:else if move && move.state !== "done" && changing}
-  <Section class="mb-6" title="Change the target" description="Storage stays on {storeText(here)} until a new move copies every file.">
+  <Section title="Change the target" description="Storage stays on {storeText(here)} until a new move copies every file.">
     {#snippet actions()}<Button variant="outline" onclick={back}><ArrowLeftIcon />Back</Button>{/snippet}
     <p class="text-meta text-muted-foreground">
       The form holds the target of the move. Save to start a new move to it: files it already holds are not copied again. The secret access key stays
@@ -397,7 +397,7 @@
   </Section>
 {:else}
   {#if move && move.state === "done"}
-    <Alert.Root class="mb-6">
+    <Alert.Root>
       <CircleCheckIcon />
       <Alert.Title>The files moved to {placeText(move.target)}</Alert.Title>
       <Alert.Description>

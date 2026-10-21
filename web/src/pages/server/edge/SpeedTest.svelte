@@ -4,8 +4,10 @@
   that lets the Worker take the choice from the headers Telesphorepo-Edge-Region and
   Telesphorepo-Edge-Pass; the answer says which bucket served (Telesphorepo-Edge) and whether the
   Worker took the choice (Telesphorepo-Edge-Override). Run tests one bucket, Run all every bucket one
-  after another. The browser downloads from the address it runs on, so the test runs only when the
-  page is open at the base URL, where the Worker's routes are.
+  after another. The table has one row per bucket and marks Nearest, the bucket the Worker picks for
+  this browser when nothing is chosen (from a HEAD without a choice), and Fastest. A row says more
+  only when the Worker did not read the bucket asked for. The browser downloads from the address it
+  runs on, so the test runs only when the page is open at the base URL, where the Worker's routes are.
 -->
 <script lang="ts">
   import GaugeIcon from "@lucide/svelte/icons/gauge";
@@ -30,9 +32,8 @@
 
   const files = new Resource(() => api.edge.speedFiles());
 
-  // A bucket to read from. header is the value of Telesphorepo-Edge-Region; null sends no choice,
-  // so the Worker reads the nearest bucket as it does for every client.
-  type Target = { key: string; label: string; header: string | null };
+  // A bucket to read from: key is its location hint, header the value of Telesphorepo-Edge-Region.
+  type Target = { key: string; label: string; header: string };
   const homeLabel = $derived(status.home.hint ? `Home bucket (${status.home.hint})` : "Home bucket");
   const areaOf = (hint: string) => {
     if (hint === status.home.hint) return homeLabel;
@@ -40,12 +41,12 @@
     return r ? `${r.area} (${hint})` : hint;
   };
   const targets = $derived<Target[]>([
-    { key: "nearest", label: "Nearest bucket", header: null },
-    ...status.regions.filter((r) => r.state === "ready").map((r) => ({ key: r.hint, label: areaOf(r.hint), header: r.hint })),
-    { key: "home", label: homeLabel, header: "home" },
-    { key: "origin", label: "Server, no Worker", header: "origin" },
+    { key: status.home.hint, label: homeLabel, header: "home" },
+    ...status.regions
+      .filter((r) => r.state === "ready" && r.hint !== status.home.hint)
+      .map((r) => ({ key: r.hint, label: areaOf(r.hint), header: r.hint })),
   ]);
-  let targetKey = $state("nearest");
+  let targetKey = $state("");
   const target = $derived(targets.find((t) => t.key === targetKey) ?? targets[0]);
 
   const OTHER = "other";
@@ -87,8 +88,8 @@
     label: string;
     running: boolean;
     error?: string;
-    answeredBy?: string;
-    choice?: { word: string; tone: Tone; title: string };
+    // Set when the Worker did not read the bucket that was asked for: what happened instead.
+    other?: { word: string; tone: Tone; title: string };
     ttfb?: number;
     total?: number;
     speed?: number;
@@ -99,9 +100,11 @@
   let running = $state(false);
   // The data center of Cloudflare that answered the last run (from CF-Ray).
   let colo = $state("");
+  // The hint of the bucket that the Worker picks for this browser when nothing is chosen.
+  let nearest = $state("");
 
   const fastest = $derived.by(() => {
-    const done = results.filter((r) => !r.running && !r.error && r.total !== undefined);
+    const done = results.filter((r) => !r.running && !r.error && !r.other && r.total !== undefined);
     if (done.length < 2) return "";
     return done.reduce((a, b) => (b.total! < a.total! ? b : a)).key;
   });
@@ -115,28 +118,29 @@
     return p.token;
   }
 
-  const choiceOf = (h: string | null): Result["choice"] => {
-    if (h === null) {
-      return { word: "Not seen", tone: "warning", title: "No Worker of this server's version saw the request: it went to the server." };
+  // otherOf says what happened when the Worker did not read the bucket that was asked for;
+  // undefined when it did.
+  const otherOf = (override: string | null, servedBy: string): Result["other"] => {
+    if (override?.startsWith("applied")) return undefined;
+    if (override === null) {
+      return { word: "Went to the server", tone: "warning", title: "No Worker of this server's version answered the request." };
     }
-    if (h.startsWith("applied")) return { word: "Taken", tone: "success", title: "The Worker read from the bucket you picked." };
-    if (h.includes("reason=pass")) return { word: "Pass refused", tone: "danger", title: "The Worker did not accept the pass, so it read from the nearest bucket." };
-    if (h.includes("reason=region")) {
-      return { word: "Region not read", tone: "warning", title: "The Worker does not read this region yet (not ready, or no binding), so it read from the nearest bucket." };
+    if (override.includes("reason=pass")) {
+      return { word: `Pass refused: served from ${servedBy}`, tone: "danger", title: "The Worker did not accept the pass, so it read from the nearest bucket." };
     }
-    return { word: "Not used", tone: "neutral", title: "The Worker does not answer this file from a bucket, so it went to the server." };
+    if (override.includes("reason=region")) {
+      return { word: `Served from ${servedBy}`, tone: "warning", title: "The Worker does not read this region yet (not ready, or no binding), so it read from the nearest bucket." };
+    }
+    return { word: "Went to the server", tone: "neutral", title: "The Worker does not answer this file from a bucket." };
   };
 
   const ms = (v: number) => (v >= 10_000 ? `${(v / 1000).toFixed(1)} s` : `${Math.round(v)} ms`);
+  const hintOf = (res: Response) => res.headers.get("Telesphorepo-Edge")?.match(/region=([a-z]+)/)?.[1] ?? "";
 
-  // measure downloads path once, reading the whole body, and times it with the browser's resource
-  // timing of the request (its own clock when the entry is missing).
+  // measure downloads path once from the bucket of t, reading the whole body, and times it with
+  // the browser's resource timing of the request (its own clock when the entry is missing).
   async function measure(path: string, t: Target): Promise<Omit<Result, "key" | "label" | "running">> {
-    const headers: Record<string, string> = {};
-    if (t.header) {
-      headers["Telesphorepo-Edge-Region"] = t.header;
-      headers["Telesphorepo-Edge-Pass"] = await passToken();
-    }
+    const headers = { "Telesphorepo-Edge-Region": t.header, "Telesphorepo-Edge-Pass": await passToken() };
     const url = new URL(path, location.origin).href;
     // Room for the entry of this request in the browser's resource timing buffer.
     performance.clearResourceTimings();
@@ -144,7 +148,7 @@
     const res = await fetch(url, { headers, cache: "no-store", credentials: "omit", redirect: "manual" });
     const headersAt = performance.now();
     if (res.type === "opaqueredirect") {
-      return { error: "The server answers with a redirect to the storage bucket, which this browser cannot time." };
+      return { error: "The server answered, not the Worker: deploy the Worker (Deploy, below)." };
     }
     let bytes = 0;
     const reader = res.body?.getReader();
@@ -169,12 +173,11 @@
     const ttfb = timed ? entry.responseStart - entry.startTime : headersAt - start;
     const total = timed ? entry.responseEnd - entry.startTime : end - start;
     const transfer = timed ? entry.responseEnd - entry.responseStart : end - headersAt;
-    const hit = res.headers.get("Telesphorepo-Edge")?.match(/region=([a-z]+)/)?.[1];
-    const cache = res.headers.get("CF-Cache-Status") === "HIT" ? "Cloudflare cache" : "Server";
+    const hit = hintOf(res);
+    const servedBy = hit ? areaOf(hit) : res.headers.get("CF-Cache-Status") === "HIT" ? "Cloudflare's cache" : "the server";
     const timing = (entry?.serverTiming ?? []).map((s) => `${s.name} ${Math.round(s.duration)} ms${s.description ? ` (${s.description})` : ""}`).join(", ");
     return {
-      answeredBy: hit ? areaOf(hit) : cache,
-      choice: t.header ? choiceOf(res.headers.get("Telesphorepo-Edge-Override")) : undefined,
+      other: otherOf(res.headers.get("Telesphorepo-Edge-Override"), servedBy),
       ttfb,
       total,
       speed: transfer > 0 ? bytes / (transfer / 1000) : undefined,
@@ -194,6 +197,13 @@
     const keys = new Set(list.map((t) => t.key));
     results = list.length > 1 ? [] : results.filter((r) => !keys.has(r.key));
     try {
+      // The bucket the Worker picks here when nothing is chosen, from a HEAD without a choice.
+      try {
+        const head = await fetch(new URL(p.path, location.origin).href, { method: "HEAD", cache: "no-store", credentials: "omit", redirect: "manual" });
+        nearest = hintOf(head);
+      } catch {
+        nearest = "";
+      }
       for (const t of list) {
         results.push({ key: t.key, label: t.label, running: true });
         const i = results.length - 1;
@@ -227,7 +237,7 @@
 </script>
 
 {#snippet runButtons()}
-  <Button disabled={running} onclick={() => run([target])}>{running ? "Running" : "Run"}</Button>
+  <Button disabled={running || !target} onclick={() => target && run([target])}>{running ? "Running" : "Run"}</Button>
   <Button variant="outline" disabled={running} onclick={() => run(targets)}>Run all</Button>
 {/snippet}
 
@@ -272,10 +282,10 @@
               </Select.Content>
             </Select.Root>
           </FormRow>
-          <FormRow label="Read from" for="speed-target" help="Nearest is the bucket that a client here gets; the others make the Worker read that bucket.">
-            <Select.Root type="single" value={targetKey} onValueChange={(v) => (targetKey = v)} disabled={running}>
+          <FormRow label="Bucket" for="speed-target" help="Run reads the file from this bucket. Run all reads it from every bucket in turn.">
+            <Select.Root type="single" value={target?.key ?? ""} onValueChange={(v) => (targetKey = v)} disabled={running}>
               <Select.Trigger id="speed-target" class="w-full" aria-describedby="speed-target-help">
-                <span class="truncate">{target.label}</span>
+                <span class="truncate">{target?.label ?? "Choose a bucket"}</span>
               </Select.Trigger>
               <Select.Content>
                 {#each targets as t (t.key)}
@@ -302,9 +312,7 @@
             caption="Speed test results"
             key={(r) => r.key}
             columns={[
-              { label: "Read from", grow: true },
-              { label: "Answered by" },
-              { label: "Choice", hideOnPhone: true },
+              { label: "Bucket", grow: true },
               { label: "First byte", align: "right", hideOnPhone: true },
               { label: "Total", align: "right" },
               { label: "Speed", align: "right", hideOnPhone: true },
@@ -312,35 +320,21 @@
           >
             {#snippet row(r)}
               <Cell grow>
-                <span class="flex min-w-0 items-center gap-2">
+                <span class="flex min-w-0 flex-wrap items-center gap-2">
                   <span class="truncate font-medium">{r.label}</span>
+                  {#if r.key === nearest}<StatusBadge tone="neutral" title="The bucket the Worker picks for this browser when nothing is chosen.">Nearest</StatusBadge>{/if}
                   {#if r.key === fastest}<StatusBadge tone="success">Fastest</StatusBadge>{/if}
+                  {#if r.other}<StatusBadge tone={r.other.tone} title={r.other.title}>{r.other.word}</StatusBadge>{/if}
+                  {#if r.error}<span class="text-meta text-destructive">{r.error}</span>{/if}
+                  {#if r.running}<span class="flex items-center gap-2 text-meta text-muted-foreground"><Spinner class="size-3.5" />Downloading</span>{/if}
                 </span>
               </Cell>
-              {#if r.running}
-                <Cell><span class="flex items-center gap-2 text-muted-foreground"><Spinner class="size-3.5" />Downloading</span></Cell>
-                <Cell hideOnPhone />
-                <Cell num hideOnPhone />
-                <Cell num />
-                <Cell num hideOnPhone />
-              {:else if r.error}
-                <Cell><span class="block max-w-80 truncate text-destructive" title={r.error}>{r.error}</span></Cell>
-                <Cell hideOnPhone />
-                <Cell num hideOnPhone />
-                <Cell num />
-                <Cell num hideOnPhone />
-              {:else}
-                <Cell text={r.answeredBy} />
-                <Cell hideOnPhone>
-                  {#if r.choice}<StatusBadge tone={r.choice.tone} title={r.choice.title}>{r.choice.word}</StatusBadge>{:else}<span class="text-muted-foreground">None</span>{/if}
-                </Cell>
-                <Cell num hideOnPhone><span title={r.timing}>{r.ttfb === undefined ? "" : ms(r.ttfb)}</span></Cell>
-                <Cell num><span class={r.key === fastest ? "font-medium text-success" : ""}>{r.total === undefined ? "" : ms(r.total)}</span></Cell>
-                <Cell num hideOnPhone>{r.speed === undefined ? "" : `${formatSize(Math.round(r.speed))}/s`}</Cell>
-              {/if}
+              <Cell num hideOnPhone><span title={r.timing}>{r.ttfb === undefined ? "" : ms(r.ttfb)}</span></Cell>
+              <Cell num><span class={r.key === fastest ? "font-medium text-success" : ""}>{r.total === undefined ? "" : ms(r.total)}</span></Cell>
+              <Cell num hideOnPhone>{r.speed === undefined ? "" : `${formatSize(Math.round(r.speed))}/s`}</Cell>
             {/snippet}
             {#snippet empty()}
-              <CompactEmpty icon={GaugeIcon} title="Speed test" state="Not run yet" text="Run reads the file from one bucket; Run all reads it from each bucket in turn." />
+              <CompactEmpty icon={GaugeIcon} title="Speed test" state="Not run yet" text="Run reads the file from one bucket; Run all reads it from every bucket in turn." />
             {/snippet}
           </DataTable>
           {#if results.length > 0}

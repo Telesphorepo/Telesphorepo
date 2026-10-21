@@ -9,4 +9,6 @@
   let { children }: { children: Snippet } = $props();
 </script>
 
-<div>{@render children()}</div>
+<!-- Its own section gap: the first section inside is the wrapper's first child, so after a
+  section above the form the gap would be lost. -->
+<div class="mt-(--section-gap) first:mt-0">{@render children()}</div>
