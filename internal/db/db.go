@@ -1,27 +1,17 @@
-// Package db opens the SQLite database, creates the schema of each component (the kernel and
+// Package db opens the SQLite database, applies the migrations of each component (the kernel and
 // each module with tables) and checks query plans. Queries live in queries/*.sql and are
 // generated into package dbq by sqlc.
 package db
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	_ "embed"
-	"encoding/hex"
-	"errors"
-	"fmt"
 	"log/slog"
 	"net/url"
 	"os"
-	"strings"
-	"time"
 
 	_ "modernc.org/sqlite"
 )
-
-//go:embed schema.sql
-var coreSchema string
 
 // CoreComponent is the name of the kernel's schema component.
 const CoreComponent = "core"
@@ -33,7 +23,7 @@ type DB struct {
 	R *sql.DB
 }
 
-// Open opens (creating if needed) the database file. Init creates the schema.
+// Open opens (creating if needed) the database file. Init applies the migrations.
 func Open(ctx context.Context, file string) (*DB, error) {
 	// Create the file owner-only before SQLite does (it would use 0644); WAL/SHM files
 	// inherit these permissions.
@@ -106,11 +96,26 @@ func VacuumInto(ctx context.Context, r *sql.DB, file string) error {
 	return err
 }
 
-// Fingerprint is the fingerprint of a schema text that schema_components holds: the hex SHA-256
-// of the text with CRLF line ends read as LF.
-func Fingerprint(schema string) string {
-	sum := sha256.Sum256([]byte(strings.ReplaceAll(schema, "\r\n", "\n")))
-	return hex.EncodeToString(sum[:])
+// Migration names one migration of a component: a row of schema_migrations, or a file of this
+// binary.
+type Migration struct {
+	Component string `json:"component"`
+	Version   int    `json:"version"`
+	Name      string `json:"name"`
+	Checksum  string `json:"checksum"`
+}
+
+// Files returns the migration files of c in version order.
+func (c Component) Files() ([]Migration, error) {
+	ms, err := c.migrations()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Migration, len(ms))
+	for i, m := range ms {
+		out[i] = Migration{Component: c.Name, Version: m.version, Name: m.file, Checksum: m.checksum}
+	}
+	return out, nil
 }
 
 // Close refreshes the planner statistics (PRAGMA optimize) and closes both pools.
@@ -144,59 +149,4 @@ func (d *DB) Tx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 		return err
 	}
 	return tx.Commit()
-}
-
-// ErrSchemaChanged means the database holds a component whose schema text differs from the
-// schema of this binary. The schema files are edited in place, so the database must be created
-// again: "telesphorepo-server dev" deletes and recreates its own data dir; serve refuses to start.
-type ErrSchemaChanged struct {
-	Component string
-}
-
-func (e *ErrSchemaChanged) Error() string {
-	return "the database was created with another schema of component " + e.Component +
-		"; delete the data directory to start fresh"
-}
-
-// IsSchemaChanged reports whether err is an ErrSchemaChanged.
-func IsSchemaChanged(err error) bool {
-	var e *ErrSchemaChanged
-	return errors.As(err, &e)
-}
-
-// Init creates the schema of each component, in order. schema_components holds one row per
-// component with the SHA-256 of its schema text, with CRLF line ends read as LF. A component without a row gets its schema and
-// its row in one transaction. A row with another fingerprint is an ErrSchemaChanged.
-func (d *DB) Init(ctx context.Context, comps []Component) error {
-	if _, err := d.W.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_components (
-		component   TEXT PRIMARY KEY,
-		fingerprint TEXT NOT NULL,
-		applied_at  INTEGER NOT NULL) STRICT, WITHOUT ROWID`); err != nil {
-		return err
-	}
-	for _, c := range comps {
-		fp := Fingerprint(c.Schema)
-		var stored string
-		err := d.W.QueryRowContext(ctx, `SELECT fingerprint FROM schema_components WHERE component = ?`, c.Name).Scan(&stored)
-		switch {
-		case err == nil && stored == fp:
-			continue
-		case err == nil:
-			return &ErrSchemaChanged{Component: c.Name}
-		case !errors.Is(err, sql.ErrNoRows):
-			return err
-		}
-		err = d.Tx(ctx, func(tx *sql.Tx) error {
-			if _, err := tx.ExecContext(ctx, c.Schema); err != nil {
-				return fmt.Errorf("schema %s: %w", c.Name, err)
-			}
-			_, err := tx.ExecContext(ctx, `INSERT INTO schema_components (component, fingerprint, applied_at) VALUES (?, ?, ?)`,
-				c.Name, fp, time.Now().Unix())
-			return err
-		})
-		if err != nil {
-			return err
-		}
-	}
-	return nil
 }

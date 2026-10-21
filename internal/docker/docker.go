@@ -33,8 +33,8 @@ import (
 // repos.format value and the schema component.
 const name = "docker"
 
-//go:embed schema.sql
-var schema string
+//go:embed migrations/*.sql
+var migrationsFS embed.FS
 
 //go:embed queries/*.sql
 var queriesFS embed.FS
@@ -104,7 +104,7 @@ func Module() module.Module {
 	return module.Module{
 		ID: name, Title: "Docker", Requires: []string{"network", "publish"},
 		Register: func(x *module.Extender) {
-			x.Schema(db.Component{Schema: schema, Queries: db.Sub(queriesFS, "queries")})
+			x.Schema(db.Component{Migrations: db.Sub(migrationsFS, "migrations"), Queries: db.Sub(queriesFS, "queries")})
 			x.Settings(&settings.Group{ID: "docker", Label: "Docker", Perm: perm.SettingsGeneral,
 				Defs: []*settings.Def{DirectUploads.Def(), UploadURL.Def(), LinkGrace.Def()}, Validate: validate})
 			x.Init(func(ctx context.Context, h *module.Host) error {

@@ -1,7 +1,7 @@
 # The server embeds install.sh and serves it to sh, so it must keep LF endings on a Windows checkout.
 *.sh text eol=lf
 
-# The schema fingerprint and the generated queries must not depend on the checkout's line ends.
+# The migration checksums and the generated queries must not depend on the checkout's line ends.
 *.sql text eol=lf
 
 # Podman reads .dockerignore with its line ends: a CR ends every pattern, and then none matches.

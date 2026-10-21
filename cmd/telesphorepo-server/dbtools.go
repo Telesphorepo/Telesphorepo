@@ -21,7 +21,7 @@ import (
 
 var queryNameRE = regexp.MustCompile(`(?m)^--\s*name:\s*\w+\s+:\w+`)
 
-// dbcheckCmd creates the schema of every component on a temporary database and runs the plan guard
+// dbcheckCmd applies the migrations of every component to a temporary database and runs the plan guard
 // on the queries of the kernel and of every module.
 func dbcheckCmd(args []string) error {
 	if err := noArgs("dbcheck", args); err != nil {

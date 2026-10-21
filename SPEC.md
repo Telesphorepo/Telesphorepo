@@ -99,7 +99,7 @@ type assertion.
 
 | Extender call | What it adds |
 |---|---|
-| `Schema(db.Component)` | The module's schema (`schema.sql`) and queries for the plan guard; the component is named after the module |
+| `Schema(db.Component)` | The module's migrations (`migrations/*.sql`) and queries for the plan guard; the component is named after the module |
 | `Settings(*settings.Group)` | A settings group that the module owns: its keys, the permission that edits them, the UI page, and the owner hooks `Validate`, `Test` and `Apply` (see **Settings model**) |
 | `Permissions(perm.Subsystem, perm.Def...)` | A permission subsystem of the module and its permissions (see **Permissions**); one call per subsystem |
 | `AuditActions(audit.ActionDef...)` | The audit actions the module records, each with a label and a subsystem (see **Audit log**) |
@@ -408,8 +408,8 @@ the helper knows the server of the identity token. `format.CISnippet` builds the
 
 **Lifecycle.** `server.RunWith` starts in this order: logger and data dirs; `db.Open`; every
 `Register` once per process (then the permission registry is fixed, and the audit actions, the
-settings groups and the format registry are built); the schema of the kernel and of each module
-(`db.Init`, in start order); `settings.Load` with every group; the kernel services; each module's `Init` in start order, then the
+settings groups and the format registry are built); the migrations of the kernel and of each module
+(`db.Init`, in start order; see **Schema migrations**); `settings.Load` with every group; the kernel services; each module's `Init` in start order, then the
 token kinds, guards and jobs of every module; the routes; `Options.Init` of the dev command; the
 bootstrap admin; the `Start` of every job in start order (an error stops startup); listen; the
 `Run` and `Tick` loops of every job (`Tick` runs at once and then every `Every`). A module runs an
@@ -424,21 +424,44 @@ and the database closes. No worker runs after the database closes.
 
 ## Data model (SQLite)
 
-Each schema component has exactly one schema file: `internal/db/schema.sql` for the kernel
-(component `core`), and `internal/<module>/schema.sql` for each module with tables
+Each schema component has its own migrations: `internal/db/migrations` for the kernel
+(component `core`), and `internal/<module>/migrations` for each module with tables
 (`Extender.Schema`; the component is named after the module: `storage`, `network`, `signing`,
-`publish`, `nexus`, `debian`, `docker`). A module schema may reference the kernel tables and the tables of
-the modules it requires; the kernel schema references no module table. `db.Init` runs the
-components in start order (the kernel first). The table `schema_components` (`component`,
-`fingerprint`, `applied_at`) holds one row per component with the SHA-256 of its schema text, with CRLF line ends read as LF
-(`.gitattributes` also checks out every `*.sql` with LF). A component without a row gets its schema and its row in one transaction. A row with another
-fingerprint is `db.ErrSchemaChanged{Component}`: the schema files change in place, so
-`telesphorepo-server dev` deletes and recreates its own data dir, and `serve` refuses to start and names
-the component. All tables are `STRICT`. Tables with a natural key are also `WITHOUT ROWID`. Every
-foreign-key child column has an index. SQLite runs `PRAGMA optimize` at close and every 6 hours
-(job `core.optimize`).
+`publish`, `edge`, `nexus`, `debian`, `docker`, `cargo`, `npm`, `nuget`, `pypi`). A module schema
+may reference the kernel tables and the tables of the modules it requires; the kernel schema
+references no module table. All tables are `STRICT`. Tables with a natural key are also
+`WITHOUT ROWID`. Every foreign-key child column has an index. SQLite runs `PRAGMA optimize` at
+close and every 6 hours (job `core.optimize`).
 
-Kernel tables (`internal/db/schema.sql`):
+**Schema migrations.** A migration is a SQL file `NNNN_name.sql` (4 digits from `0001` with no
+gap, then `a-z`, `0-9` and `_`), embedded in the binary; `db.Component.Migrations` holds the
+folder. The table `schema_migrations` (`component`, `version`, `name` (the file name), `checksum`,
+`applied_at`; PK `(component, version)`, `STRICT`, `WITHOUT ROWID`) holds one row per applied
+migration. The checksum is the hex SHA-256 of the file with CRLF line ends read as LF
+(`.gitattributes` also checks out every `*.sql` with LF). `db.Init` creates the table and then,
+per component in start order (the kernel first):
+
+1. An applied version above the newest file is `db.ErrDatabaseNewer{Component, Version}`: "the
+   database is from a newer Telesphorepo (core migration 0007); run that version or newer".
+2. An applied migration whose file has another name or checksum is
+   `db.ErrMigrationChanged{Component, Version, Name}`: the sentence names the component and the
+   file and says that an applied migration must not change, so the file must be restored and the
+   change made in the next migration.
+3. Each file above the last applied version runs in order, each in its own transaction together
+   with its `schema_migrations` row, and the server logs `applied migration` with the component
+   and the file. The transaction runs on a connection of its own with `PRAGMA foreign_keys = OFF`,
+   so a migration can rebuild a table (create the new table, copy the rows, drop the old one,
+   rename the new one) without the drop deleting or cascading to the rows that reference it.
+   `PRAGMA foreign_key_check` runs before the commit; a row left without its parent fails the
+   migration, and the error names its table and rowid. The connection gets `foreign_keys = ON`
+   back afterwards. A failed migration leaves no row, so the next start runs it again.
+
+A database with the table `schema_components` and no migrations is `db.ErrDevDatabase`.
+`db.IsIncompatible` covers all three errors: `serve` refuses to start and prints the sentence,
+and `telesphorepo-server dev` deletes and recreates its own data dir. A new database applies
+every migration from `0001`. `go tool task migration <folder> <name>` creates the next file.
+
+Kernel tables (`internal/db/migrations`):
 
 | Table | Key / indexes | Notes |
 |---|---|---|
@@ -464,14 +487,14 @@ Kernel tables (`internal/db/schema.sql`):
 | `auth_challenges` | PK `id_hash` (WITHOUT ROWID), idx `expires_at`, `user_id` | Short-lived single-use state: `kind` is `login`, `totp_setup`, `webauthn_register`, `webauthn_assert` `device_grant` (an SSO grant: `user_id` set, `data` is the user code of a device approval or `setup:<repo>` for a setup code, 5 min) or `setup_code` (a setup code: `id_hash` is SHA-256 of `trsu_<32 random bytes, base64url>`, `user_id` the person who made it, `data` the repo id, 10 min; the first use deletes it); `data` holds the payload. A new challenge deletes up to 100 expired ones |
 | `audit_events` | PK `id`, idx `at`, idx `(repo_id, id)`, idx `(action, id)`, idx `actor_user_id` | `at` unix time; `action` is a registered action ID; `actor` is a username, a CI subject, `cli`, the module ID of a job, `anonymous`, or the attempted username of a failed sign-in; `actor_user_id` and `repo_id` are SET NULL; `target`; `detail` is JSON and never holds a secret value; `ip` is the client address. This table is the only place that stores or shows an IP address. See **Audit log** |
 
-Tables of the `storage` component (`internal/move/schema.sql`):
+Tables of the `storage` component (`internal/move/migrations`):
 
 | Table | Key / indexes | Notes |
 |---|---|---|
 | `storage_moves` | PK `id`, UNIQUE partial `storage_moves_copying (state) WHERE state = 'copying'`, idx `started_by` | `target` is the sealed JSON of the target storage settings (AAD `storage_moves:<id>`); `state` `copying`/`done`/`failed`/`cancelled`; `cursor` (last blob id done), `total` (the blob rows when the move started), `copied`, `skipped`, `failed`, `error` |
 | `storage_move_failures` | PK `(move_id, blob_id)` (WITHOUT ROWID) | `key` and `reason` of each blob the copier could not copy |
 
-Tables of the `network` component (`internal/netrules/schema.sql`):
+Tables of the `network` component (`internal/netrules/migrations`):
 
 | Table | Key / indexes | Notes |
 |---|---|---|
@@ -479,14 +502,14 @@ Tables of the `network` component (`internal/netrules/schema.sql`):
 | `repo_ip_rules` | PK `id`, UNIQUE partial `(repo_id, scope, cidr) WHERE cidr IS NOT NULL`, UNIQUE partial `(repo_id, scope, list_id) WHERE list_id IS NOT NULL`, idx `(repo_id, scope)`, idx `list_id` | One allow-list entry. `scope` is `read` or `publish`; a rule holds a `cidr` or the `list_id` of an IP list (exactly one; `ON DELETE RESTRICT`); `note` is free text. `repo_id` cascades. A scope without rows is unrestricted |
 | `trusted_proxy_lists` | PK `list_id` (`ON DELETE RESTRICT`) | The IP lists that the trusted proxies include. The `list:<name>` entries of `TR_TRUSTED_PROXIES` are resolved at startup and are not rows |
 
-Tables of the `signing` component (`internal/signing/schema.sql`):
+Tables of the `signing` component (`internal/signing/migrations`):
 
 | Table | Key / indexes | Notes |
 |---|---|---|
 | `signing_keys` | PK `id`, UNIQUE `name` | An OpenPGP signing key: `fingerprint`, armored `public_key`, `private_key` (armored, no passphrase, sealed with the master key, AAD `signing_keys:<id>`), `created_at` |
 | `repo_signing_keys` | PK `repo_id` (cascades), idx `(key_id, repo_id)` | The key of a repo (the repo field `signing_key`). `key_id` is `ON DELETE RESTRICT`, so a key in use cannot be deleted |
 
-Tables of the `publish` component (`internal/publish/schema.sql`):
+Tables of the `publish` component (`internal/publish/migrations`):
 
 | Table | Key / indexes | Notes |
 |---|---|---|
@@ -499,7 +522,7 @@ Tables of the `publish` component (`internal/publish/schema.sql`):
 | `publish_sessions` | PK `id`, UNIQUE `public_id`, idx `expires_at`, `repo_id`, `user_id`, `device_id`, `trust_id`, `build_id` | `secret_hash` = SHA-256(secret); `via` `device`/`oidc`/`manual`; `subject`; `build_id` (the CI build record of a CI session whose token a provider read); `closed_at`. `repo_id` cascades; `user_id`, `device_id`, `trust_id` and `build_id` are SET NULL |
 | `publish_oidc_seen` | PK `(id_hash, repo_id)` (WITHOUT ROWID), idx `expires_at`, `session_id`, `repo_id` | One row per CI token and repo, with the session the token minted there. `id_hash` is SHA-256 of `<issuer>\n<jti>`, or of the whole token when it has no `jti`. A second insert for the repo means a replay |
 
-Tables of the `edge` component (`internal/edge/schema.sql`). They reference no table, so an outbox
+Tables of the `edge` component (`internal/edge/migrations`). They reference no table, so an outbox
 row outlives a deleted repo and still deletes its pointers (see **Edge delivery**):
 
 | Table | Key / indexes | Notes |
@@ -508,7 +531,7 @@ row outlives a deleted repo and still deletes its pointers (see **Edge delivery*
 | `edge_written` | PK `key` (WITHOUT ROWID) | The access objects and `config.json` in the home bucket: the key under `edge/v1/`, the hex SHA-256 of the JSON written, `written_at` |
 | `edge_state` | PK `key` (WITHOUT ROWID) | JSON state: `home` (the location fingerprint, without the secret, that the objects were written for, the backfill cursor and counts, home ready, deploy needed and its reason, the gone regions with the end of their drain, and the drain that runs: its end, the old home location without its secret, its regional buckets and the cache time of its off switch), `region:<hint>` (bucket, ready, cleared, the backfill cursor, the blob check cursor and the blobs missing) and `ttl` (the `access_ttl` of the last `config.json` written, and until when a Worker can still hold an earlier one) |
 
-Tables of the `nexus` component (`internal/nexus/schema.sql`):
+Tables of the `nexus` component (`internal/nexus/migrations`):
 
 | Table | Key / indexes | Notes |
 |---|---|---|
@@ -519,14 +542,14 @@ Tables of the `nexus` component (`internal/nexus/schema.sql`):
 | `nexus_sync_failures` | PK `id`, UNIQUE `(sync_id, source_repo, path)`, idx `sync_id` | One row per source file that a sync did not import |
 | `nexus_sync_log` | PK `id`, idx `(sync_id, id)` | The log of a sync for the admin: `at`, `source_repo` (`''` for a line about the whole sync), `level` `info`/`warn`/`error`, `message` |
 
-Tables of the `debian` component (`internal/debian/schema.sql`):
+Tables of the `debian` component (`internal/debian/migrations`):
 
 | Table | Key / indexes | Notes |
 |---|---|---|
 | `deb_packages` | UNIQUE `(repo_id, distribution, component, architecture, package, version)`, idx `asset_id`, idx `deb_packages_sha256 (repo_id, distribution, component, sha256)`, idx `deb_packages_package (repo_id, component, package)` | Also the streaming index for `Packages`. The SHA-256 index finds a package an import already holds. The package index reads the versions and builds of a package. `asset_id` cascades with the pool file |
 | `deb_index_files` | PK `(repo_id, distribution, path)` (WITHOUT ROWID) | Sizes and hashes; `Release` is built from these rows |
 
-Tables of the `npm` component (`internal/npm/schema.sql`). Every `repo_id` cascades. Rows exist for
+Tables of the `npm` component (`internal/npm/migrations`). Every `repo_id` cascades. Rows exist for
 hosted repos only; the commit of a tarball writes them and its removal deletes them (see **npm
 registry**):
 
@@ -535,13 +558,13 @@ registry**):
 | `npm_packages` | PK `(repo_id, name)` (WITHOUT ROWID) | `created`, `modified` (unix seconds) and `rev`, the `_rev` of the packument: `<n>-<hash of the versions, deprecations and tags>`; the row goes with the last version |
 | `npm_versions` | PK `(repo_id, name, version)` (WITHOUT ROWID), idx `npm_versions_sort (repo_id, name, sort_key)`, UNIQUE `npm_versions_tarball (repo_id, tarball)` | `sort_key` (`version.SemVer.SortKey`), `manifest` (the version's package.json without `dist`), `tarball` (the asset path), `integrity` (`sha512-<base64>`), `shasum` (SHA-1 hex), `published_at`, `deprecated` (`''` for none) |
 | `npm_tags` | PK `(repo_id, name, tag)` (WITHOUT ROWID) | The dist-tags; a tag always names an existing version, and `latest` always exists |
-Tables of the `nuget` component (`internal/nuget/schema.sql`):
+Tables of the `nuget` component (`internal/nuget/migrations`):
 
 | Table | Key / indexes | Notes |
 |---|---|---|
 | `nuget_versions` | UNIQUE `(repo_id, lower_id, sort_key)`, idx `nuget_versions_asset (asset_id)` | One row per package version of a hosted repo: `package_id` as the package writes it, `version` (normalised, with metadata), `normalized` (the identity), `sort_key` (`version.NuGet.SortKey`), `semver2`, `prerelease`, `listed`, `meta` (JSON of the `.nuspec` fields), `nupkg_path`, `published_at`. Written in the commit of the `.nupkg`, deleted in its remove; `asset_id` cascades with the `.nupkg`. The UNIQUE index reads a package's versions in order and pages the package ids of the search |
 
-Tables of the `pypi` component (`internal/pypi/schema.sql`). Only hosted repos have rows; the
+Tables of the `pypi` component (`internal/pypi/migrations`). Only hosted repos have rows; the
 hooks write them in the transaction of the asset change (see **PyPI**):
 
 | Table | Key / indexes | Notes |
@@ -549,7 +572,7 @@ hooks write them in the transaction of the asset change (see **PyPI**):
 | `pypi_projects` | PK `(repo_id, project)` (WITHOUT ROWID) | `project` is the normalised name, `display_name` the `Name` of the newest upload's metadata; the row goes with the project's last file |
 | `pypi_files` | PK `id`, UNIQUE `(repo_id, filename)`, idx `pypi_files_project (repo_id, project, sort_key)`, idx `asset_id` | One row per wheel or sdist: `version` (PEP 440 normal form), `sort_key` (`version.PEP440.SortKey`), `path`, `sha256`, `size`, `requires_python`, `metadata_sha256` (`''` without a `.metadata`), `uploaded_at`. `asset_id` cascades with the file |
 
-Tables of the `docker` component (`internal/docker/schema.sql`). Every column `repo_id` cascades;
+Tables of the `docker` component (`internal/docker/migrations`). Every column `repo_id` cascades;
 digests are the hex of a SHA-256. Only the hooks of the format write them, in the transaction of
 the asset change (see **Docker registry**):
 
@@ -565,7 +588,7 @@ Every query on a request path uses an index. Lists use keyset pagination (`?afte
 `?limit=`), never `OFFSET` or `LIKE '%x%'`.
 
 **Queries.** The kernel and each module with a schema keep their SQL in `queries/*.sql` next to a
-`sqlc.yaml` (a module's config reads the kernel schema and its own `schema.sql`). `go tool task
+`sqlc.yaml`. Its `schema` is the `migrations` folder of the component; a module's config lists the folder of the kernel (`../db/migrations`) and of each module whose tables it reads first (`edge` reads `../publish/migrations`), and sqlc applies the files of each folder in name order. `go tool task
 gen` runs sqlc and writes the typed `dbq` package of each component. Queries that sqlc cannot
 express (FTS5 `MATCH`, streaming rows with `iter.Seq2`) are hand-written in `dbq/extra.go` and
 listed in its `Extra` map.
@@ -577,7 +600,8 @@ that must scan goes in the component's `Allow` map with a reason. An `Allow` ent
 is missing or has a clean plan also fails. A query that writes (`INSERT`, `UPDATE`, `DELETE`,
 `REPLACE`) a table outside its component's schema fails too: a module writes only its own tables,
 and the kernel tables change only through kernel services. The kernel allows `ListSettings`,
-`HasUsers` and `ListRebuildGroups` (the startup walk of the rebuild queue); `storage` allows
+`HasUsers`, `ListRebuildGroups` (the startup walk of the rebuild queue), and `CountRepoTotals` and
+`ListMigrations` (hand-written, `schema_migrations`; both once per backup); `storage` allows
 `CountBlobs` (the total of a storage move, once per move); `network` allows
 `ListTrustedProxyLists` and `DeleteTrustedProxyLists` (one row per IP list at most); `edge` allows
 `CountOutbox` (the outbox job counts its rows every 5 seconds for the status page, never on a
@@ -1677,13 +1701,17 @@ itself: the module has no table.
 - **Blobs (S3).** No blob is copied. `backup.json` names the bucket, the prefix and the endpoint
   (never a credential): back up the bucket with the tools of its provider.
 - **`backup.json`** (written last, through a temp file): `format` (1), `version` of the server,
-  `created_at`, `storage` (`fs`/`s3`), `s3`, `blobs_included`, `schema` (the fingerprint of each
-  schema component, from `schema_components`), `counts` (`repos`, `files`, `file_bytes`, `blobs`,
-  `blob_bytes`), `database` (`file`, `size`, `sha256`), `master_key_included`, `master_key_source`.
+  `created_at`, `storage` (`fs`/`s3`), `s3`, `blobs_included`, `migrations` (the rows of
+  `schema_migrations` of the database: `component`, `version`, `name`, `checksum`), `counts`
+  (`repos`, `files`, `file_bytes`, `blobs`, `blob_bytes`), `database` (`file`, `size`, `sha256`),
+  `master_key_included`, `master_key_source`.
 - **Retention.** After a run, the newest `backup.keep` complete backups stay; every other backup
-  folder, incomplete ones too, is removed. Then each file of `blobs/` that no kept backup uses is
-  removed: the module reads the blob list of each kept backup's database, read-only. When one of
-  them cannot be read, no blob is removed. A temp file older than an hour is removed too.
+  folder is removed. Then each file of `blobs/` that no kept backup uses is removed: the module
+  reads the blob list of each kept backup's database, read-only. When one of them cannot be read,
+  no blob is removed. Retention leaves alone what may still be written: an incomplete folder while
+  both its name (the start time) and its mtime are less than an hour old, and a file of `blobs/`
+  (a temp file too) while its mtime is less than an hour old. So a `telesphorepo-server backup`
+  into the folder of the server's backups is safe while the server runs retention.
 - **Log and audit.** One log line per run (`backup written` with the name, the counts and the
   duration, or `backup failed` with the error) and one audit event (`backup.done` or
   `backup.failed`). Neither holds a secret.
@@ -1693,10 +1721,15 @@ itself: the module has no table.
   (`TR_FS_ROOT`, else the stored `fs.root`, else `blobs/` in the data dir; it first checks that the
   folder holds all of them), then `master.key` (0600), and the database last. The restored database
   is byte for byte the backed-up one. With S3 the restored server reads the blobs from the bucket,
-  which must still hold them.
+  which must still hold them. It then compares the `migrations` of `backup.json` with the
+  migration files of the binary and says which holds: the same migrations; older, so the server
+  applies the newer migrations at its start; or from a newer Telesphorepo (or with a changed
+  migration), so this binary refuses to start on it, and the line names the version of the backup
+  to run. The files are restored in every case.
 - **UI.** Settings › Backups (`/#/settings/backups`): the list with Back up now, the progress of a
   running backup or the time of the next one, the error of a failed run, and the settings form with
   Test the folder.
+
 ## Edge delivery
 
 Clients far from the server download from Cloudflare's edge: R2 buckets, a Queue and a Worker
@@ -2741,7 +2774,7 @@ a hosted crate with higher versions. A `.crate` of a group serves from the membe
 name. `config.json` points `dl` at the group. Use a proxy or a group as crates.io through source
 replacement (`[source.crates-io] replace-with = "<registry>"`).
 
-**Tables** (`internal/cargo/schema.sql`):
+**Tables** (`internal/cargo/migrations`):
 
 | Table | Keys | What |
 |---|---|---|
@@ -3542,7 +3575,7 @@ page are in `web/src/README.md`.
 | `telesphorepo-server user passwd NAME` | Resets the password and signs out the user's sessions. Refused for SSO users |
 | `telesphorepo-server user reset-2fa NAME` | Removes the TOTP factors, passkeys and recovery codes of a user, so the user sets up a new factor at the next sign-in |
 | `telesphorepo-server backup DIR` | One backup of the data dir (`TR_DATA_DIR`, else `./data`) into `DIR`, as the job writes it (see **Backups**). It opens the database read-only, so a server may run on the data dir; it reads the storage settings from the `TR_*` environment, else the stored rows. It applies no retention and writes no audit event |
-| `telesphorepo-server restore FOLDER [--data-dir DIR]` | Restores a backup folder into `DIR`, else `TR_DATA_DIR`, else `./data`, which must be empty or missing (see **Backups**). It prints what it wrote, and a line when the database schema of the backup differs from this binary |
+| `telesphorepo-server restore FOLDER [--data-dir DIR]` | Restores a backup folder into `DIR`, else `TR_DATA_DIR`, else `./data`, which must be empty or missing (see **Backups**). It prints what it wrote, and how the migrations of the backup fit this binary: the same, older (applied at the next start) or newer (this binary refuses to start; it names the version to run) |
 | `telesphorepo-server version` / `help [cmd]` | |
 
 **Demo data.** The first run of `telesphorepo-server dev` (without `--empty`) fills the dev instance
@@ -3570,8 +3603,8 @@ command prints its progress to stderr every 3 seconds, then runs `ANALYZE`. Whil
 `<data>/demo-data.pending` exists; a dev start that finds that file deletes the data dir and
 starts again.
 
-Two hidden commands support testing and do not appear in the overview. `dbcheck` creates the
-schema of every component on a temporary database and runs the plan guard. `seed N` fills the database in
+Two hidden commands support testing and do not appear in the overview. `dbcheck` applies the
+migrations of every component to a temporary database and runs the plan guard. `seed N` fills the database in
 `TR_DATA_DIR`. For the format of every module with a seed (`Extender.Seed`), it creates the repos
 `seed-<format>-00` to `seed-<format>-09` (anonymous read, default config) and splits N rows
 evenly over all of them in transactions of 10,000. Each format inserts its own rows: maven
@@ -3583,7 +3616,7 @@ project and file rows per unit. Then it runs
 
 | Command | Does |
 |---|---|
-| `go tool task dev` | Checks Go, bun/npm and Node (version in `.node-version`). Builds the CLI archive of this computer once (see **Install scripts and CLI downloads**). Runs the backend on :8080 and rebuilds it on Go or `schema.sql` changes. Runs Vite with HMR on **:5173**, proxying every path except the UI's own files to the backend |
+| `go tool task dev` | Checks Go, bun/npm and Node (version in `.node-version`). Builds the CLI archive of this computer once (see **Install scripts and CLI downloads**). Runs the backend on :8080 and rebuilds it on Go or `internal/**/migrations/*.sql` changes. Runs Vite with HMR on **:5173**, proxying every path except the UI's own files to the backend |
 | `go tool task build [image]` | Builds the UI and the six CLI archives (`internal/clidist/dist`), then `bin/telesphorepo-server` with both embedded (`CGO_ENABLED=0`, version from git). `image` also builds the container image `telesphorepo:local` |
 | `go tool task cli [version]` | Builds the six CLI archives of `./cmd/telesphorepo` and `SHA256SUMS` into `internal/clidist/dist` (version from git by default). A given release version needs a `changes.toml` with no `dev` entry. Without `cmd/telesphorepo` it writes none and says so |
 | `go tool task preview` | Builds, then runs `bin/telesphorepo-server dev` on :8080 |
@@ -3595,6 +3628,7 @@ project and file rows per unit. Then it runs
 | `go tool task release [version]` | Builds the UI and the six CLI archives that the server embeds once. Then it cross-compiles each program whose package exists: the CLI (`./cmd/telesphorepo`, with its own `LICENSE`; the install scripts make its second name `docker-credential-telesphorepo`) and the server (`./cmd/telesphorepo-server`) for linux, darwin and windows on amd64 and arm64 (`CGO_ENABLED=0`, `-trimpath`, `-X main.version`). Each binary goes into `bin/release/<program>_<version>_<os>_<arch>.tar.gz` (`.zip` on Windows) with `LICENSE` and `README.md`. With `edge/`, it runs `bun install --frozen-lockfile` there and bundles the Worker (`wrangler deploy --dry-run --outdir` with `--define TELESPHOREPO_VERSION:"<version>"`) into `telesphorepo-edge_<version>.tar.gz`: `dist/`, `package.json`, `bun.lock`, `README.md` and `scripts/provision.ts`. The command writes `SHA256SUMS` of every archive. The version defaults to `git describe`. A version given as the argument must be a release version, and `changes.toml` must have no `dev` entry (see **Change log**) |
 | `go tool task tag <version>` | Makes a release. It needs a clean work tree and a new tag. It writes `v<version>` into each `dev` entry of `changes.toml`, commits the file as `Release v<version>`, and creates the annotated tag `v<version>`. It pushes nothing. The tagged commit holds the stamped change log, so `release.yml` and every image build embed the same entries |
 | `go tool task gen` | Runs `go tool sqlc generate` for every `internal/**/sqlc.yaml` |
+| `go tool task migration <folder> <name>` | Creates the next migration `internal/<folder>/migrations/NNNN_<name>.sql` of a component (`db`, or `core`, for the kernel; the folder of the module otherwise, e.g. `move` for `storage`) with a header comment. The name holds only `a-z`, `0-9` and `_` |
 | `go tool task doctor` | Shows the detected toolchain and container engine |
 
 CI runs on GitHub Actions with the built-in `GITHUB_TOKEN` and reads no repository secrets:
@@ -3650,13 +3684,13 @@ permissions (409 on a change of them), a person outside the map signs in without
 map change replaces them at the next sign-in, and without a claim a sign-in changes nothing; a map
 without a claim or with an unknown or repository permission is 400. `TestRaw` uses a curl container.
 `TestAPIFormats` covers `/api/formats`, `/status` and `/usage`; `descriptor_test.go` covers the format descriptors (`TestFormatDescriptors`), the CI file route with branches and tags (`TestCIWorkflowRoute`) and the delete plan (`TestDeletePlan`). `TestQueryPlans` runs `dbcheck`
-inside a server container. `files_test.go` covers `TestTree`, `TestDelete` (who may delete: `repo.delete` with a publish session or a UI session, file, prefix and Bearer deletes, blobs kept for the blob GC, repo delete and name reuse), `TestManualUploadMaven` (checksums, metadata order, `mvn` resolves the uploaded and the generated pom), `TestManualUploadRaw`, `TestRepoCounters` (`file_count`, `total_size` and `last_published_at` through uploads, a replace, a file delete and a folder delete) and `TestDebianDeleteAndUpload` (apt sees the package, then not; 4 by-hash files remain). `audit_test.go` covers `TestAudit`: events, filters, paging, no secret values, `activity.read` only, and no IP outside the audit log. `network_test.go` covers `TestClientIP` (with the default an `X-Forwarded-For` from the harness peer is ignored and the peer becomes a proxy candidate; trusting the candidate makes the header count and removes the candidate; `private`: a chain through a private hop, `CF-Connecting-IP` from a non-Cloudflare peer; an untrusted peer's header, an empty list, invalid entries, reset to the default). `TestIPRules` and `TestPresetIPLists` set `trusted_proxies` to `private` first, so `X-Forwarded-For` sets the client address, `TestIPRules` (validation; allowed and refused reads of the format route, tree, assets, usage and status; the repo record stays readable; search drops the repo; refused device and manual mints, PUT and admin delete, each audited with its IP and scope; empty lists lift the rule) and `TestPresetIPLists` (a second Telesphorepo server is the stub: startup fetch, a preset in read rules, a Cloudflare hop in the chain, a failed refresh that keeps the last good list, recovery, and stored lists after a restart without the stub) and `TestCustomIPLists` (create, edit, a rename that keeps the rules and the trusted proxies (by list id), use in rules and in the trusted proxies, delete while in use gives 409, an unknown list id gives 400) and `TestTrustedProxyEnvList` (`TR_TRUSTED_PROXIES` with `list:cloudflare` shows as `env_lists`) and `TestIPRangeParse` (the paste parser: one per line, comma, space, tab and `|` separated, CSV with a header row, tables, comments, labels, quotes, IPv6 and IPv4-mapped IPv6, an unmasked CIDR, duplicates, invalid lines with their numbers, the 1 MiB limit, `network.manage` only). `signing_keys_test.go` covers create, import of plain and encrypted keys, delete while in use gives 409, a per-repo key (the repo field `signing_key`; an unknown key, a key in the config and a key of a raw repo give 400) that `apt` installs from, a key change that signs again, and keys and bindings after a restart. `groups_test.go` covers `TestGroups`: a release and a snapshot member resolve through the group with `mvn` and Gradle, the merged `maven-metadata.xml` and its `.sha1`, the member order, a public group with a private member (anonymous and a reader), 405 for a PUT and 409 for a publish session, 400 for a member of another format, a nested group, an unknown name and no member, and a member delete. `cache_control_test.go` covers
+inside a server container. `migrations_test.go` covers `TestMigrations`, a real upgrade with three builds of the server (`BuildServer`, `BuildServerWith` with an overlay): the tree writes a private raw repo, a user with `repo.download` on it and a file; a build with one more core migration (`0002_e2e_probe.sql`, a new table filled from `repos` and `users`) starts on the same data volume, logs `applied migration` for that file only, and the user reads the file and its grant back; the exported database holds both core rows of `schema_migrations` and the probe rows of the older data; a build whose `0001_init.sql` has another content refuses to start with the sentence that names `core` and the file; the tree refuses the database of the newer build ("core migration 0002"); then the newer build starts on it again and applies nothing. `files_test.go` covers `TestTree`, `TestDelete` (who may delete: `repo.delete` with a publish session or a UI session, file, prefix and Bearer deletes, blobs kept for the blob GC, repo delete and name reuse), `TestManualUploadMaven` (checksums, metadata order, `mvn` resolves the uploaded and the generated pom), `TestManualUploadRaw`, `TestRepoCounters` (`file_count`, `total_size` and `last_published_at` through uploads, a replace, a file delete and a folder delete) and `TestDebianDeleteAndUpload` (apt sees the package, then not; 4 by-hash files remain). `audit_test.go` covers `TestAudit`: events, filters, paging, no secret values, `activity.read` only, and no IP outside the audit log. `network_test.go` covers `TestClientIP` (with the default an `X-Forwarded-For` from the harness peer is ignored and the peer becomes a proxy candidate; trusting the candidate makes the header count and removes the candidate; `private`: a chain through a private hop, `CF-Connecting-IP` from a non-Cloudflare peer; an untrusted peer's header, an empty list, invalid entries, reset to the default). `TestIPRules` and `TestPresetIPLists` set `trusted_proxies` to `private` first, so `X-Forwarded-For` sets the client address, `TestIPRules` (validation; allowed and refused reads of the format route, tree, assets, usage and status; the repo record stays readable; search drops the repo; refused device and manual mints, PUT and admin delete, each audited with its IP and scope; empty lists lift the rule) and `TestPresetIPLists` (a second Telesphorepo server is the stub: startup fetch, a preset in read rules, a Cloudflare hop in the chain, a failed refresh that keeps the last good list, recovery, and stored lists after a restart without the stub) and `TestCustomIPLists` (create, edit, a rename that keeps the rules and the trusted proxies (by list id), use in rules and in the trusted proxies, delete while in use gives 409, an unknown list id gives 400) and `TestTrustedProxyEnvList` (`TR_TRUSTED_PROXIES` with `list:cloudflare` shows as `env_lists`) and `TestIPRangeParse` (the paste parser: one per line, comma, space, tab and `|` separated, CSV with a header row, tables, comments, labels, quotes, IPv6 and IPv4-mapped IPv6, an unmasked CIDR, duplicates, invalid lines with their numbers, the 1 MiB limit, `network.manage` only). `signing_keys_test.go` covers create, import of plain and encrypted keys, delete while in use gives 409, a per-repo key (the repo field `signing_key`; an unknown key, a key in the config and a key of a raw repo give 400) that `apt` installs from, a key change that signs again, and keys and bindings after a restart. `groups_test.go` covers `TestGroups`: a release and a snapshot member resolve through the group with `mvn` and Gradle, the merged `maven-metadata.xml` and its `.sha1`, the member order, a public group with a private member (anonymous and a reader), 405 for a PUT and 409 for a publish session, 400 for a member of another format, a nested group, an unknown name and no member, and a member delete. `cache_control_test.go` covers
 `TestCacheControl`: HEAD, a 304 and a GET of a private Maven repo, of a public group with a
 private member (also for the public member's file) carry `Cache-Control: private`; a public repo
 and a group of public members carry none (an S3 redirect carries `no-store`); after a read IP rule
 that allows every address, the public repo and the group of it carry `private`. `proxy_test.go` covers `TestProxy` with a second Telesphorepo server as the remote: `mvn` through the proxy and no remote request on the second resolve, the `metadata_ttl` recheck with a 304 and a changed file, a remembered 404, 405 for a PUT, a group where the hosted member wins over the proxy, remote credentials (with them, 502 without them), a Caddy container that redirects to another host and refuses a request that carries credentials, `apt-get` through a Debian proxy with the remote's key, and a stopped remote (cached file served, 502, `last_error`). `TestNoBrowserPasswordPrompt` (in `auth_test.go`) checks that a 401 under `/api` or with `X-Telesphorepo-UI` has no `WWW-Authenticate`. `folder_upload_test.go` covers `TestFolderUploadMaven` (a Maven-layout tree with checksum, signature and stray files; a flat folder with two poms; a bad tree that gives 400; plans store nothing; checksums and metadata) and `TestFolderUploadDebianAndRaw`. `TestStorageMove*` run each server on a named data volume: fs to
 SeaweedFS and back with uploads during the move, a forced failure, a restart mid-move
-(`Server.Restart`) and a cancel. `backup_test.go` covers `TestBackupRestore`: on fs, a server with Maven, Debian and raw repos backs up through the API while raw uploads run; the folder holds the database (its SHA-256 in `backup.json`), `master.key` (0600) and `backup.json`, and the blobs folder every blob; `telesphorepo-server restore` of the image restores it into a new volume and refuses a volume that is not empty; a server on that volume reads every file back byte for byte (the uploads during the backup that it has too), `mvn` resolves and `apt` installs with the same signing key; with `backup.keep=2` two more backups remove the first one and the blob only it used; an incomplete folder is listed, refused by restore and removed by the next run. On SeaweedFS the backup has no blobs folder, `backup.json` names the bucket, and the restored server reads the files from the bucket. `blobs_test.go` covers `TestBlobDedupeAndGC` (the same bytes in two raw repos
+(`Server.Restart`) and a cancel. `backup_test.go` covers `TestBackupRestore`: on fs, a server with Maven, Debian and raw repos backs up through the API while raw uploads run; the folder holds the database (its SHA-256 in `backup.json`), `master.key` (0600) and `backup.json`, and the blobs folder every blob; `telesphorepo-server restore` of the image restores it into a new volume and refuses a volume that is not empty; a server on that volume reads every file back byte for byte (the uploads during the backup that it has too), `mvn` resolves and `apt` installs with the same signing key; with `backup.keep=2` two more backups remove the first one and the blob only it used (made an hour old first), while a fresh unused file of the blobs folder stays; an incomplete folder is listed, refused by restore and removed by the next run. On SeaweedFS the backup has no blobs folder, `backup.json` names the bucket, and the restored server reads the files from the bucket. `blobs_test.go` covers `TestBlobDedupeAndGC` (the same bytes in two raw repos
 and a Maven repo are one stored blob, each path keeps its own content type, also in an S3 redirect;
 the blob stays while a file uses it and the blob GC removes it after `TR_BLOBS_GC_GRACE=1s`; an upload of the
 same bytes stores them again), `TestUploadSessions` (chunks, a wrong offset, a restart between chunks, a

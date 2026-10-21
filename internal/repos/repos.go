@@ -48,7 +48,7 @@ type Repo struct {
 	Op *ops.Op
 	// FileCount and TotalSize count every asset row of the repo (artifacts, metadata, checksums
 	// and index files). LastPublishedAt is the newest write of a non-index asset; zero for
-	// never. Triggers on the assets table keep them (internal/db/schema.sql).
+	// never. Triggers on the assets table keep them (internal/db/migrations).
 	FileCount       int64
 	TotalSize       int64
 	LastPublishedAt time.Time

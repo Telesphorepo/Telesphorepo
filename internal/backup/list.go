@@ -76,18 +76,21 @@ func List(dir string) ([]Entry, error) {
 
 // Pruned is what a retention run removed.
 type Pruned struct {
-	Backups []string // folders: the complete ones past keep, and the incomplete ones
+	Backups []string // folders: the complete ones past keep, and the incomplete ones past graceAge
 	Blobs   int64    // files of the blobs folder that no kept backup uses
 }
 
-// tmpAge is how old a temp file of the blobs folder must be before retention removes it: a temp
-// file of a run that ended without its rename.
-const tmpAge = time.Hour
+// graceAge is how old a file must be before retention removes it, when no kept backup accounts
+// for it: an incomplete backup folder (by its name and its mtime), a file of the blobs folder and a
+// temp file there. Another process may be writing it: a backup from the command line into the
+// folder of the server's backups.
+const graceAge = time.Hour
 
 // Prune keeps the newest keep complete backups of dir and removes the other backup folders, the
-// incomplete ones too. Then it removes each file of the blobs folder that no kept backup uses: it
-// reads the blob list of each kept backup's database. When a kept database cannot be read, it
-// removes no blob.
+// incomplete ones too unless their name and their mtime are both younger than graceAge. Then it
+// removes each file of the blobs folder that no kept backup uses and whose mtime is older than
+// graceAge: it reads the blob list of each kept backup's database. When a kept database cannot be
+// read, it removes no blob.
 func Prune(ctx context.Context, dir string, keep int) (Pruned, error) {
 	var p Pruned
 	entries, err := List(dir)
@@ -99,6 +102,11 @@ func Prune(ctx context.Context, dir string, keep int) (Pruned, error) {
 		if e.Complete && len(kept) < keep {
 			kept = append(kept, e)
 			continue
+		}
+		if !e.Complete && young(e.CreatedAt) {
+			if st, err := os.Stat(filepath.Join(dir, e.Name)); err == nil && young(st.ModTime()) {
+				continue
+			}
 		}
 		if err := os.RemoveAll(filepath.Join(dir, e.Name)); err != nil {
 			return p, err
@@ -126,12 +134,19 @@ func Prune(ctx context.Context, dir string, keep int) (Pruned, error) {
 		if d.IsDir() {
 			return ctx.Err()
 		}
+		info, err := d.Info()
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if young(info.ModTime()) {
+			return nil
+		}
 		name := d.Name()
 		if strings.HasPrefix(name, tmpPrefix) {
-			if info, err := d.Info(); err == nil && time.Since(info.ModTime()) > tmpAge {
-				return os.Remove(file)
-			}
-			return nil
+			return os.Remove(file)
 		}
 		var sum [32]byte
 		if n, err := hex.Decode(sum[:], []byte(name)); err == nil && n == 32 {
@@ -147,6 +162,9 @@ func Prune(ctx context.Context, dir string, keep int) (Pruned, error) {
 	})
 	return p, err
 }
+
+// young reports whether t is less than graceAge ago.
+func young(t time.Time) bool { return time.Since(t) < graceAge }
 
 // usedBlobs adds the SHA-256 of every blob that an asset of the database file uses to used.
 func usedBlobs(ctx context.Context, file string, used map[[32]byte]struct{}) error {

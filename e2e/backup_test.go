@@ -374,6 +374,13 @@ func backupRestoreFS(t *testing.T) {
 	if code, out := runRestore(t, bvol, NewDataVolume(t), partial); code == 0 || !strings.Contains(out, "backup.json") {
 		t.Fatalf("restore of an incomplete backup: exit %d, want a refusal that names backup.json:\n%s", code, out)
 	}
+	// Retention leaves a blob file alone for an hour after its last write (a backup from the
+	// command line may be writing into the folder): the blob of gone.bin is made old, and a fresh
+	// file that no backup uses stays.
+	goneKey := blobKey(sha256Hex(gone))
+	fresh := blobKey(strings.Repeat("f", 64))
+	VolumeExec(t, bvol, "set -e\ntouch -d '2020-01-01 00:00:00' /data/"+goneKey+"\nmkdir -p /data/"+fresh[:strings.LastIndex(fresh, "/")]+
+		"\necho fresh > /data/"+fresh+"\nchown -R 65532:65532 /data/blobs\n")
 	third := backupNow(t, s)
 
 	var names []string
@@ -388,8 +395,11 @@ func backupRestoreFS(t *testing.T) {
 		t.Fatalf("the backup volume still holds %s or %s:\n%s", name, partial, top)
 	}
 	have := backupBlobs(t, bvol)
-	if _, ok := have[blobKey(sha256Hex(gone))]; ok {
+	if _, ok := have[goneKey]; ok {
 		t.Fatal("retention kept the blob that only the removed backup used")
+	}
+	if _, ok := have[fresh]; !ok {
+		t.Fatal("retention removed a blob file younger than an hour")
 	}
 	moveWantBlobs(t, "backup blobs folder after retention", have, moveAssets(t, s, mvnRepo, debRepo, rawRepo))
 }

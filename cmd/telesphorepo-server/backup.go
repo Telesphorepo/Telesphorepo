@@ -9,7 +9,6 @@ import (
 
 	"github.com/Telesphorepo/Telesphorepo/internal/backup"
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
-	"github.com/Telesphorepo/Telesphorepo/internal/db"
 	"github.com/Telesphorepo/Telesphorepo/internal/server"
 )
 
@@ -115,28 +114,30 @@ func restoreCmd(args []string) error {
 	} else {
 		fmt.Printf("  files       not in the backup: the server reads them from the S3 bucket %s, which must still hold them\n", s3Text(m.S3))
 	}
-	if changed := schemaChanges(m.Schema); len(changed) > 0 {
-		fmt.Printf("This server has another database schema (%s) than the backup; run the server version %s on it.\n",
-			strings.Join(changed, ", "), m.Version)
+	comps, err := server.Components()
+	if err != nil {
+		return err
+	}
+	fit, mig, err := backup.CompareMigrations(m.Migrations, comps)
+	if err != nil {
+		return err
+	}
+	switch fit {
+	case backup.FitSame:
+		fmt.Println("  schema      the same migrations as this server")
+	case backup.FitOlder:
+		fmt.Printf("  schema      older than this server: it applies the newer migrations at its start (from the %s)\n", backup.MigrationText(mig))
+	case backup.FitNewer:
+		fmt.Printf("The backup is from a newer Telesphorepo (%s, applied %s): this server (%s) refuses to start on it. Run %s or newer.\n",
+			m.Version, backup.MigrationText(mig), version, m.Version)
+		return nil
+	case backup.FitChanged:
+		fmt.Printf("The backup applied the %s, which differs from the file of this server (%s): this server refuses to start on it. Run %s.\n",
+			backup.MigrationText(mig), version, m.Version)
+		return nil
 	}
 	fmt.Printf("Start the server with TR_DATA_DIR=%s.\n", dataDir)
 	return nil
-}
-
-// schemaChanges names the schema components whose fingerprint in schema differs from this
-// server's.
-func schemaChanges(schema map[string]string) []string {
-	comps, err := server.Components()
-	if err != nil {
-		return nil
-	}
-	var out []string
-	for _, c := range comps {
-		if fp, ok := schema[c.Name]; !ok || fp != db.Fingerprint(c.Schema) {
-			out = append(out, c.Name)
-		}
-	}
-	return out
 }
 
 func s3Text(l *backup.S3Location) string {

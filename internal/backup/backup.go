@@ -59,10 +59,10 @@ type Manifest struct {
 	S3 *S3Location `json:"s3,omitempty"`
 	// BlobsIncluded: the blobs that the database uses are in the shared blobs folder (fs).
 	BlobsIncluded bool `json:"blobs_included"`
-	// Schema is the fingerprint of each schema component of the database.
-	Schema   map[string]string `json:"schema"`
-	Counts   Counts            `json:"counts"`
-	Database Database          `json:"database"`
+	// Migrations are the migrations that the database applied, by component and version.
+	Migrations []db.Migration `json:"migrations"`
+	Counts     Counts         `json:"counts"`
+	Database   Database       `json:"database"`
 	// MasterKeyIncluded: master.key is in the folder. MasterKeySource says where the server
 	// had its key: "file" (master.key in the data dir) or "env" (TR_MASTER_KEY, never written).
 	MasterKeyIncluded bool   `json:"master_key_included"`
@@ -206,8 +206,12 @@ func run(ctx context.Context, dir, folder string, src Source) (*Result, error) {
 		return nil, err
 	}
 	m.Counts.Repos, m.Counts.Files, m.Counts.FileBytes = tot.Repos, tot.Files, tot.Bytes
-	if m.Schema, err = q.ListSchemaComponents(ctx); err != nil {
+	applied, err := q.ListMigrations(ctx)
+	if err != nil {
 		return nil, err
+	}
+	for _, a := range applied {
+		m.Migrations = append(m.Migrations, db.Migration{Component: a.Component, Version: int(a.Version), Name: a.Name, Checksum: a.Checksum})
 	}
 	if err := snap.Close(); err != nil {
 		return nil, err

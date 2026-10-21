@@ -11,9 +11,9 @@ import (
 // Extra maps each hand-written query name to its SQL. A slice parameter is written as
 // "/*SLICE:name*/?"; the plan guard checks it with a single placeholder.
 var Extra = map[string]string{
-	"SearchAssets":         searchAssets,
-	"SearchAssetsInRepos":  searchAssetsInRepos,
-	"ListSchemaComponents": listSchemaComponents,
+	"SearchAssets":        searchAssets,
+	"SearchAssetsInRepos": searchAssetsInRepos,
+	"ListMigrations":      listMigrations,
 }
 
 // The FTS5 trigram search walks assets_fts in rowid order, which is the keyset order, so no
@@ -92,24 +92,32 @@ func (q *Queries) searchArgs(ctx context.Context, query string, args ...any) ([]
 	return items, nil
 }
 
-// schema_components is created by db.Init, not by schema.sql, so sqlc does not know it.
-const listSchemaComponents = `SELECT component, fingerprint FROM schema_components ORDER BY component`
+// schema_migrations is created by db.Init, not by a migration, so sqlc does not know it.
+const listMigrations = `SELECT component, version, name, checksum FROM schema_migrations ORDER BY component, version`
 
-// ListSchemaComponents returns the fingerprint of each schema component of the database: the
+// AppliedMigration is a row of schema_migrations.
+type AppliedMigration struct {
+	Component string
+	Version   int64
+	Name      string
+	Checksum  string
+}
+
+// ListMigrations returns the applied migrations of the database, by component and version: the
 // schema state that backup.json records.
-func (q *Queries) ListSchemaComponents(ctx context.Context) (map[string]string, error) {
-	rows, err := q.db.QueryContext(ctx, listSchemaComponents)
+func (q *Queries) ListMigrations(ctx context.Context) ([]AppliedMigration, error) {
+	rows, err := q.db.QueryContext(ctx, listMigrations)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[string]string{}
+	var out []AppliedMigration
 	for rows.Next() {
-		var name, fp string
-		if err := rows.Scan(&name, &fp); err != nil {
+		var m AppliedMigration
+		if err := rows.Scan(&m.Component, &m.Version, &m.Name, &m.Checksum); err != nil {
 			return nil, err
 		}
-		out[name] = fp
+		out = append(out, m)
 	}
 	return out, rows.Err()
 }
