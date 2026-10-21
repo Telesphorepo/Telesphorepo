@@ -210,6 +210,9 @@
 
   const needsDeploy = $derived(provisionNeeded || status.data?.deploy_needed === true);
   const mismatch = $derived(status.data?.version_mismatch === true);
+  // Edge delivery turns on only once a deployed Worker has reported its version; turning it off
+  // always works.
+  const noWorker = $derived(!!status.data && !status.data.worker_version && !draft?.saved.enabled);
 </script>
 
 <PageHeader title="Edge delivery" description="Serve downloads from Cloudflare R2 buckets near your clients." />
@@ -382,8 +385,10 @@
           id="edge-enabled"
           label="Edge delivery"
           help={lockHelp("edge.enabled") ??
-            "Turn this on after you deploy the Worker (Deploy, below), then save. The Worker answers downloads that it can prove the server would answer the same way."}
-          disabled={locked("edge.enabled")}
+            (noWorker
+              ? "Deploy the Worker first (Deploy, below). You can turn this on once the Worker has reported its version, within 10 minutes of the deploy."
+              : "The Worker answers downloads that it can prove the server would answer the same way.")}
+          disabled={locked("edge.enabled") || noWorker}
           bind:checked={draft.value.enabled}
         />
         <FormRow label="Access lifetime" for="edge-ttl" help="How long a Worker keeps a token, a grant or a repository's visibility before it asks again. 0 asks every time.">
@@ -471,7 +476,9 @@
             <span class="w-4 shrink-0 text-section text-muted-foreground tabular-nums">7</span>
             <div class="flex min-w-0 grow flex-col gap-2">
               <p class="text-label">Turn on Edge delivery under Settings above, and save</p>
-              <p class="text-meta text-muted-foreground">The status shows the Worker's version within 10 minutes of the deploy.</p>
+              <p class="text-meta text-muted-foreground">
+                Only after the deploy: the switch turns on once the Worker has reported its version, within 10 minutes of the deploy.
+              </p>
             </div>
           </li>
         </ol>

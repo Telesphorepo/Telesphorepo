@@ -2146,7 +2146,8 @@ one-write-per-second key limit. The edge serves a valid read token from such an 
 **Operator flow.** In **Edge delivery** the admin picks the home hint and the regions and saves; the
 page probes every bucket first. The admin downloads the edge Worker from the Deploy section,
 unpacks it, and in its `telesphorepo-edge` folder runs `bun install`, `bunx wrangler login`,
-`bun run provision` and `bun run deploy`, then turns `edge.enabled` on. After each region change
+`bun run provision` and `bun run deploy`, then turns `edge.enabled` on (the page keeps its switch off
+until the deployed Worker has reported its version through the gap check). After each region change
 the admin downloads the Worker again (its `wrangler.jsonc` has the new bindings) and runs
 provision and deploy; for each server release, downloads it again (the bundle is that version)
 and runs deploy. The server backfills the pointers and the gap check copies the blobs; a region
