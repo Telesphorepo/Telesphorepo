@@ -589,21 +589,61 @@ type assetJSON struct {
 	ContentType string    `json:"content_type"`
 	Kind        string    `json:"kind"`
 	UpdatedAt   time.Time `json:"updated_at"`
+	Repo        string    `json:"repo,omitempty"` // a group: the member that serves the file
 }
 
+// listAssets lists the files of the repo under ?prefix= in path order: ?after=<path>&limit= ->
+// {items: [{path, size, sha256, content_type, kind, updated_at, repo}], next}. A group merges the
+// pages of the members that the caller reads, each read from the same cursor: a path comes from
+// the first member that has it (named in repo), as a group read serves it. The first limit paths
+// of the merge are the first limit of the union, because each member's page holds all its paths
+// before its limit-th.
 func (a *API) listAssets(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	repo := c.Repo
 	q := r.URL.Query()
-	items, next, err := a.assets.List(r.Context(), repo.ID, q.Get("prefix"), q.Get("after"), httpx.Limit(r))
-	if err != nil {
-		route.Fail(w, r, err)
-		return
+	limit := httpx.Limit(r)
+	members := []*repos.Repo{repo}
+	if repo.Kind == repos.KindGroup {
+		var err error
+		if members, err = a.access.GroupMembers(r.Context(), r, c.P, repo); err != nil {
+			route.Fail(w, r, err)
+			return
+		}
 	}
-	out := route.Page[assetJSON]{Items: make([]assetJSON, 0, len(items)), Next: route.Cursor(next)}
-	for _, x := range items {
-		out.Items = append(out.Items, assetJSON{x.Path, x.Size, x.SHA256, x.ContentType, x.Kind, x.UpdatedAt})
+	var out []assetJSON
+	byPath := map[string]bool{}
+	more := false
+	for _, m := range members {
+		items, next, err := a.assets.List(r.Context(), m.ID, q.Get("prefix"), q.Get("after"), limit)
+		if err != nil {
+			route.Fail(w, r, err)
+			return
+		}
+		more = more || next != ""
+		for _, x := range items {
+			if byPath[x.Path] {
+				continue // an earlier member serves it
+			}
+			byPath[x.Path] = true
+			j := assetJSON{Path: x.Path, Size: x.Size, SHA256: x.SHA256, ContentType: x.ContentType, Kind: x.Kind, UpdatedAt: x.UpdatedAt}
+			if m != repo {
+				j.Repo = m.Name
+			}
+			out = append(out, j)
+		}
 	}
-	httpx.WriteJSON(w, http.StatusOK, out)
+	slices.SortFunc(out, func(x, y assetJSON) int { return strings.Compare(x.Path, y.Path) })
+	if len(out) > limit {
+		out, more = out[:limit], true
+	}
+	next := ""
+	if more && len(out) > 0 {
+		next = out[len(out)-1].Path
+	}
+	if out == nil {
+		out = []assetJSON{}
+	}
+	httpx.WriteJSON(w, http.StatusOK, route.Page[assetJSON]{Items: out, Next: route.Cursor(next)})
 }
 
 type hitJSON struct {

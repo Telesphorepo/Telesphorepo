@@ -47,25 +47,25 @@ func kindOf(m dbq.DockerManifest) string {
 	return kindArtifact
 }
 
-// imageOf returns the image of an artifact folder of repo and its artifact; ok is false when the
+// imageOf returns the image of an artifact folder that from holds and its artifact, named in repo; art is nil when the
 // folder is not an image.
-func (f *Format) imageOf(ctx context.Context, repo *repos.Repo, folder string) (string, *format.Artifact, error) {
+func (f *Format) imageOf(ctx context.Context, repo, from *repos.Repo, folder string) (string, *format.Artifact, error) {
 	image := strings.Trim(folder, "/")
 	if image == "" {
 		return "", nil, nil
 	}
-	if _, err := f.q.GetImage(ctx, dbq.GetImageParams{RepoID: repo.ID, Image: image}); errors.Is(err, sql.ErrNoRows) {
+	if _, err := f.q.GetImage(ctx, dbq.GetImageParams{RepoID: from.ID, Image: image}); errors.Is(err, sql.ErrNoRows) {
 		return "", nil, nil
 	} else if err != nil {
 		return "", nil, err
 	}
 	kind := kindImage
-	rows, err := f.q.ListTagsRecent(ctx, dbq.ListTagsRecentParams{RepoID: repo.ID, Image: image, BeforeAt: math.MaxInt64, Limit: 1})
+	rows, err := f.q.ListTagsRecent(ctx, dbq.ListTagsRecentParams{RepoID: from.ID, Image: image, BeforeAt: math.MaxInt64, Limit: 1})
 	if err != nil {
 		return "", nil, err
 	}
 	if len(rows) > 0 {
-		m, err := f.q.GetManifest(ctx, dbq.GetManifestParams{RepoID: repo.ID, Image: image, Digest: rows[0].Digest})
+		m, err := f.q.GetManifest(ctx, dbq.GetManifestParams{RepoID: from.ID, Image: image, Digest: rows[0].Digest})
 		switch {
 		case err == nil:
 			kind = kindOf(m)
@@ -90,14 +90,14 @@ func (f *Format) tagBuild(ctx context.Context, loader *ci.Loader, repo *repos.Re
 
 // versions lists the tags of an image folder, newest first. after is the last tag of the previous
 // page.
-func (f *Format) versions(ctx context.Context, repo *repos.Repo, folder, after string, limit int) (*format.Artifact, []format.Version, string, error) {
-	image, art, err := f.imageOf(ctx, repo, folder)
+func (f *Format) versions(ctx context.Context, repo, from *repos.Repo, folder, after string, limit int) (*format.Artifact, []format.Version, string, error) {
+	image, art, err := f.imageOf(ctx, repo, from, folder)
 	if err != nil || art == nil {
 		return nil, nil, "", err
 	}
 	beforeAt, beforeTag := int64(math.MaxInt64), ""
 	if after != "" {
-		t, err := f.q.GetTag(ctx, dbq.GetTagParams{RepoID: repo.ID, Image: image, Tag: after})
+		t, err := f.q.GetTag(ctx, dbq.GetTagParams{RepoID: from.ID, Image: image, Tag: after})
 		if errors.Is(err, sql.ErrNoRows) {
 			return art, []format.Version{}, "", nil
 		}
@@ -106,14 +106,14 @@ func (f *Format) versions(ctx context.Context, repo *repos.Repo, folder, after s
 		}
 		beforeAt, beforeTag = t.UpdatedAt, t.Tag
 	}
-	rows, err := f.q.ListTagsRecent(ctx, dbq.ListTagsRecentParams{RepoID: repo.ID, Image: image, BeforeAt: beforeAt, BeforeTag: beforeTag, Limit: int64(limit)})
+	rows, err := f.q.ListTagsRecent(ctx, dbq.ListTagsRecentParams{RepoID: from.ID, Image: image, BeforeAt: beforeAt, BeforeTag: beforeTag, Limit: int64(limit)})
 	if err != nil {
 		return nil, nil, "", err
 	}
 	loader := f.h.Builds.Loader()
 	out := make([]format.Version, 0, len(rows))
 	for _, t := range rows {
-		b, err := f.tagBuild(ctx, loader, repo, image, t.Tag)
+		b, err := f.tagBuild(ctx, loader, from, image, t.Tag)
 		if err != nil {
 			return nil, nil, "", err
 		}
@@ -127,24 +127,32 @@ func (f *Format) versions(ctx context.Context, repo *repos.Repo, folder, after s
 	return art, out, next, nil
 }
 
+// versionOrder is the order of versions: newest tag first (ListTagsRecent), by name for the same time.
+func versionOrder(a, b format.Version) int {
+	if c := b.PublishedAt.Compare(a.PublishedAt); c != 0 {
+		return c
+	}
+	return strings.Compare(b.Version, a.Version)
+}
+
 // shortDigest is the first 12 hex digits of a digest, as docker shows image IDs.
 func shortDigest(hex string) string { return hex[:min(12, len(hex))] }
 
 // builds lists the one build of tag of an image folder: the files of the manifest that the tag
 // names.
-func (f *Format) builds(ctx context.Context, repo *repos.Repo, folder, tag, build, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
-	image, art, err := f.imageOf(ctx, repo, folder)
+func (f *Format) builds(ctx context.Context, repo, from *repos.Repo, folder, tag, build, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
+	image, art, err := f.imageOf(ctx, repo, from, folder)
 	if err != nil || art == nil {
 		return nil, nil, nil, "", err
 	}
-	t, err := f.q.GetTag(ctx, dbq.GetTagParams{RepoID: repo.ID, Image: image, Tag: tag})
+	t, err := f.q.GetTag(ctx, dbq.GetTagParams{RepoID: from.ID, Image: image, Tag: tag})
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil, nil, "", nil
 	}
 	if err != nil {
 		return nil, nil, nil, "", err
 	}
-	b, err := f.tagBuild(ctx, f.h.Builds.Loader(), repo, image, tag)
+	b, err := f.tagBuild(ctx, f.h.Builds.Loader(), from, image, tag)
 	if err != nil {
 		return nil, nil, nil, "", err
 	}
@@ -153,7 +161,7 @@ func (f *Format) builds(ctx context.Context, repo *repos.Repo, folder, tag, buil
 	if after != "" || limit <= 0 || build != "" && build != ver.LatestBuild {
 		return art, ver, []format.Build{}, "", nil
 	}
-	files, err := f.manifestFiles(ctx, repo, image, t.Digest)
+	files, err := f.manifestFiles(ctx, from, image, t.Digest)
 	if err != nil {
 		return nil, nil, nil, "", err
 	}

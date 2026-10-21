@@ -52,9 +52,9 @@ func buildID(n sql.NullInt64) int64 {
 }
 
 // Versions lists the versions of a crate, newest first, keyset by the sort key of after.
-func (h *Handler) Versions(ctx context.Context, repo *repos.Repo, p, after string, limit int) (*format.Artifact, []format.Version, string, error) {
+func (h *Handler) Versions(ctx context.Context, _, from *repos.Repo, p, after string, limit int) (*format.Artifact, []format.Version, string, error) {
 	art, lower, ok := artifactOf(p)
-	if !ok || repo.Kind != repos.KindHosted {
+	if !ok || from.Kind != repos.KindHosted {
 		return nil, nil, "", nil
 	}
 	cursor := cursorTop
@@ -65,7 +65,7 @@ func (h *Handler) Versions(ctx context.Context, repo *repos.Repo, p, after strin
 		}
 		cursor = v.SortKey()
 	}
-	rows, err := h.q.ListVersionsPage(ctx, dbq.ListVersionsPageParams{RepoID: repo.ID, LowerName: lower, SortKey: cursor, Limit: int64(limit) + 1})
+	rows, err := h.q.ListVersionsPage(ctx, dbq.ListVersionsPageParams{RepoID: from.ID, LowerName: lower, SortKey: cursor, Limit: int64(limit) + 1})
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -106,12 +106,12 @@ func (h *Handler) getVersion(ctx context.Context, repo *repos.Repo, lower, vers 
 }
 
 // Builds lists the one build of a version: its .crate.
-func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, vers, build, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
+func (h *Handler) Builds(ctx context.Context, _, from *repos.Repo, p, vers, build, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
 	art, lower, ok := artifactOf(p)
-	if !ok || repo.Kind != repos.KindHosted {
+	if !ok || from.Kind != repos.KindHosted {
 		return nil, nil, nil, "", nil
 	}
-	r, found, err := h.getVersion(ctx, repo, lower, vers)
+	r, found, err := h.getVersion(ctx, from, lower, vers)
 	if err != nil || !found {
 		return nil, nil, nil, "", err
 	}

@@ -3,13 +3,14 @@
   the SHA-256 and its checksum files as attributes), the CI build that published it, a curl and
   wget download, and the format's part for the file: the part of the format's UI module that the
   first file_details entry of its descriptor names whose glob matches the path (a Maven artifact
-  or a .deb shows how to use it). The parent keys it by path. A path that turns out to be a
+  or a .deb shows how to use it). In a group it names the repository that serves the file. The
+  parent keys it by path. A path that turns out to be a
   folder (typed without its "/") opens the folder instead.
 -->
 <script lang="ts">
   import { api, ApiError, type FileInfo, type Repo } from "$lib/api";
   import { Resource } from "$lib/load.svelte";
-  import { filesPath, navigate } from "$lib/router.svelte";
+  import { filesPath, href, navigate, repoPath } from "$lib/router.svelte";
   import CopyValue from "$lib/components/CopyValue.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import Loading from "$lib/components/Loading.svelte";
@@ -73,6 +74,10 @@
     {#if by}
       <dt class="text-muted-foreground">Published by</dt>
       <dd class="truncate">{by}</dd>
+    {/if}
+    {#if f.repo}
+      <dt class="text-muted-foreground">Served by</dt>
+      <dd class="truncate"><a class="text-link hover:underline" href={href(repoPath(f.repo))}>{f.repo}</a></dd>
     {/if}
     {#if f.content_type}
       <dt class="text-muted-foreground">Type</dt>

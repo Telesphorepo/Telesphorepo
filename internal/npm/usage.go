@@ -78,7 +78,7 @@ func (h *Handler) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
 
 // ArtifactUsage returns the install snippets of one package: p is its folder or a file of it.
 // The pinned mode names version v, else the latest tag (a hosted repo) or none.
-func (h *Handler) ArtifactUsage(ctx context.Context, repo *repos.Repo, baseURL, p, v, mode string) (*format.ArtifactUsage, error) {
+func (h *Handler) ArtifactUsage(ctx context.Context, repo, from *repos.Repo, baseURL, p, v, mode string) (*format.ArtifactUsage, error) {
 	pkg, file, isFile := splitFile(strings.Trim(p, "/"))
 	if !isFile {
 		_, n, ok := artifactOf(p)
@@ -90,8 +90,8 @@ func (h *Handler) ArtifactUsage(ctx context.Context, repo *repos.Repo, baseURL, 
 		v = strings.TrimSuffix(strings.TrimPrefix(file, unscoped(pkg)+"-"), ".tgz")
 	}
 	art, _, _ := artifactOf(pkg + "/")
-	if v == "" && repo.Kind == repos.KindHosted {
-		tags, err := h.q.ListTags(ctx, dbq.ListTagsParams{RepoID: repo.ID, Name: pkg})
+	if v == "" && from.Kind == repos.KindHosted {
+		tags, err := h.q.ListTags(ctx, dbq.ListTagsParams{RepoID: from.ID, Name: pkg})
 		if err != nil {
 			return nil, err
 		}

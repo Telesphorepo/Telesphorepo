@@ -1,7 +1,8 @@
 <!--
   The body of the details column at an artifact or a version: what the artifact is (its kind and
   coordinates or package name), the version's facts and the GitHub Actions build it came from, then how
-  to use it in a build, pinned to this version or always the newest.
+  to use it in a build, pinned to this version or always the newest. In a group the version names
+  the repository that serves it.
 -->
 <script lang="ts">
   import type { Repo } from "$lib/api";
@@ -14,6 +15,7 @@
   import { formats } from "$lib/formats/registry.svelte";
   import { buildInline } from "../browse";
   import { formatCount } from "$lib/format";
+  import { href, repoPath } from "$lib/router.svelte";
 
   let { repo, artifact, version }: { repo: Repo; artifact: Artifact; version: Version | null } = $props();
 
@@ -36,6 +38,10 @@
   {#if version}
     <dt class="text-muted-foreground">Version</dt>
     <dd class="truncate">{version.version}</dd>
+    {#if version.repo}
+      <dt class="text-muted-foreground">Served by</dt>
+      <dd class="truncate"><a class="text-link hover:underline" href={href(repoPath(version.repo))}>{version.repo}</a></dd>
+    {/if}
     <dt class="text-muted-foreground">Published</dt>
     <dd><RelativeTime at={version.published_at} /></dd>
     {#if version.kind === "snapshot"}

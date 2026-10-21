@@ -82,6 +82,7 @@ func Module() module.Module {
 				ProxyProbe:    func(json.RawMessage) string { return "config.json" },
 				Versions:      h.Versions,
 				Builds:        h.Builds,
+				GroupVersions: format.GroupOwner,
 				Usage:         h.Usage,
 				ArtifactUsage: h.ArtifactUsage,
 				Tools:         tools(),

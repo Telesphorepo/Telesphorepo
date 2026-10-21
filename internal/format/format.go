@@ -102,9 +102,21 @@ type Spec struct {
 	// are newest first; after is the last version of the previous page ("" for the first). Builds
 	// are newest first; after is the last build of the previous page. next is "" at the end. A
 	// non-empty build keeps only the build of that id (no items when the version has none); the
-	// caller then passes after "" and limit 1. A format sets both or neither.
-	Versions func(ctx context.Context, repo *repos.Repo, artifactPath, after string, limit int) (*Artifact, []Version, string, error)
-	Builds   func(ctx context.Context, repo *repos.Repo, artifactPath, version, build, after string, limit int) (*Artifact, *Version, []Build, string, error)
+	// caller then passes after "" and limit 1. A format sets both or neither. repo is the repo
+	// that the answer names (a group for a group's Files tab); from is the repo whose files and
+	// rows hold the artifact: repo itself, or a member of the group repo (see GroupVersions).
+	Versions func(ctx context.Context, repo, from *repos.Repo, artifactPath, after string, limit int) (*Artifact, []Version, string, error)
+	Builds   func(ctx context.Context, repo, from *repos.Repo, artifactPath, version, build, after string, limit int) (*Artifact, *Version, []Build, string, error)
+	// GroupVersions is how a group lists the versions of an artifact, for a format that takes
+	// groups and sets Versions. GroupEach: each version comes from the first member that has it,
+	// and the members' versions merge in VersionOrder (Maven, where a group read serves each
+	// path from the first member that has it). GroupOwner: every version comes from the first
+	// member that has the artifact, the member that assets.Reader.Owner picks for the package
+	// name (npm, PyPI, Cargo, NuGet).
+	GroupVersions string
+	// VersionOrder orders two versions of one artifact as Versions lists them: negative when a
+	// comes first. GroupEach needs it.
+	VersionOrder func(a, b Version) int
 
 	// Usage returns the repo-level snippets of a repo (UI and "telesphorepo-server dev"): how to use the
 	// repo in a build (Purpose "use") and how to publish to it from a computer and by hand
@@ -122,8 +134,9 @@ type Spec struct {
 	// the dependency or install line with the repository setup it needs. path is an artifact
 	// folder, a version folder or a file of a version. version names a version of the artifact
 	// folder path ("" for none), as Versions names it. mode is VersionPinned or VersionLatest. A
-	// path that is not an artifact gives a nil *ArtifactUsage.
-	ArtifactUsage func(ctx context.Context, repo *repos.Repo, baseURL, path, version, mode string) (*ArtifactUsage, error)
+	// path that is not an artifact gives a nil *ArtifactUsage. The snippets use repo; the
+	// artifact is read from from (repo itself, or the member of the group repo that holds it).
+	ArtifactUsage func(ctx context.Context, repo, from *repos.Repo, baseURL, path, version, mode string) (*ArtifactUsage, error)
 
 	// Upload takes files uploaded through the web UI.
 	Upload *UploadSpec
@@ -261,6 +274,7 @@ type Version struct {
 	BuildsCount int       `json:"builds_count"`
 	PublishedAt time.Time `json:"published_at"`
 	CI          *ci.Build `json:"build"`
+	Repo        string    `json:"repo,omitempty"` // a group: the member that serves the version
 }
 
 // Build is one build of a version: its id (a snapshot's "20261014.103000-3", a release's
@@ -315,7 +329,8 @@ var reserved = map[string]bool{"api": true, "core": true, "healthz": true, "asse
 // NewRegistry checks the specs and returns their registry. A spec breaks the contract when its
 // name is not valid or is taken, when it has no Config.Validate, when its Kinds lack "hosted"
 // or name another kind, when it takes proxies without Classify and ProxyProbe, when its Merge
-// lacks Match or Merge, when it sets one of Versions and Builds without the other, when its
+// lacks Match or Merge, when it sets one of Versions and Builds without the other, when it takes
+// groups and sets Versions without GroupVersions (or GroupEach without VersionOrder), when its
 // Upload, Importer or Rebuild is incomplete, when its Publish category is unknown, or when its
 // Edge has an unknown Shape or an empty or absolute glob.
 func NewRegistry(specs []Spec) (*Registry, error) {
@@ -349,6 +364,10 @@ func check(s *Spec) error {
 		return fmt.Errorf("Merge needs Match and Merge")
 	case (s.Versions == nil) != (s.Builds == nil):
 		return fmt.Errorf("set both Versions and Builds, or neither")
+	case s.Versions != nil && s.Takes(repos.KindGroup) && s.GroupVersions != GroupEach && s.GroupVersions != GroupOwner:
+		return fmt.Errorf("a group format with Versions needs GroupVersions %q or %q", GroupEach, GroupOwner)
+	case s.GroupVersions == GroupEach && s.VersionOrder == nil:
+		return fmt.Errorf("GroupVersions %q needs VersionOrder", GroupEach)
 	case s.Upload != nil && (s.Upload.Store == nil || s.Upload.Plan == nil):
 		return fmt.Errorf("Upload needs Plan and Store")
 	case s.Importer != nil && (len(s.Importer.Sources) == 0 || s.Importer.Target == nil):

@@ -53,14 +53,14 @@ func buildOf(r versionRow) int64 {
 }
 
 // Versions lists the versions of a package folder, newest first.
-func (h *Handler) Versions(ctx context.Context, repo *repos.Repo, p, after string, limit int) (*format.Artifact, []format.Version, string, error) {
+func (h *Handler) Versions(ctx context.Context, _, from *repos.Repo, p, after string, limit int) (*format.Artifact, []format.Version, string, error) {
 	lid, ok := packageOf(p)
-	if !ok || repo.Kind != repos.KindHosted {
+	if !ok || from.Kind != repos.KindHosted {
 		return nil, nil, "", nil
 	}
 	var rows []versionRow
 	if after == "" {
-		rs, err := h.q.ListVersionsDesc(ctx, dbq.ListVersionsDescParams{RepoID: repo.ID, LowerID: lid, Limit: int64(limit) + 1})
+		rs, err := h.q.ListVersionsDesc(ctx, dbq.ListVersionsDescParams{RepoID: from.ID, LowerID: lid, Limit: int64(limit) + 1})
 		if err != nil {
 			return nil, nil, "", err
 		}
@@ -72,7 +72,7 @@ func (h *Handler) Versions(ctx context.Context, repo *repos.Repo, p, after strin
 		if err != nil {
 			return nil, nil, "", nil
 		}
-		rs, err := h.q.ListVersionsBefore(ctx, dbq.ListVersionsBeforeParams{RepoID: repo.ID, LowerID: lid, SortKey: v.SortKey(), Limit: int64(limit) + 1})
+		rs, err := h.q.ListVersionsBefore(ctx, dbq.ListVersionsBeforeParams{RepoID: from.ID, LowerID: lid, SortKey: v.SortKey(), Limit: int64(limit) + 1})
 		if err != nil {
 			return nil, nil, "", err
 		}
@@ -122,12 +122,12 @@ func (h *Handler) getVersion(ctx context.Context, repoID int64, lid, v string) (
 }
 
 // Builds lists the one build of a version: its .nupkg and its .nuspec.
-func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, v, build, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
+func (h *Handler) Builds(ctx context.Context, _, from *repos.Repo, p, v, build, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
 	lid, ok := packageOf(p)
-	if !ok || repo.Kind != repos.KindHosted {
+	if !ok || from.Kind != repos.KindHosted {
 		return nil, nil, nil, "", nil
 	}
-	r, err := h.getVersion(ctx, repo.ID, lid, v)
+	r, err := h.getVersion(ctx, from.ID, lid, v)
 	if err != nil || r == nil {
 		return nil, nil, nil, "", err
 	}
@@ -143,7 +143,7 @@ func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, v, build, aft
 	lver := strings.ToLower(r.Normalized)
 	_, nuspec := packagePaths(lid, lver)
 	files := []format.BuildFile{{Name: lid + "." + lver + ".nupkg", Path: r.NupkgPath, Size: r.Size, SHA256: r.Sha256, Extension: "nupkg"}}
-	if a, err := h.host.Assets.Get(ctx, repo.ID, nuspec); err == nil {
+	if a, err := h.host.Assets.Get(ctx, from.ID, nuspec); err == nil {
 		files = append(files, format.BuildFile{Name: lid + ".nuspec", Path: a.Path, Size: a.Size, SHA256: a.SHA256, Extension: "nuspec"})
 	}
 	return &art, &s, []format.Build{{Build: r.Normalized, Files: files, PublishedAt: s.PublishedAt, CI: s.CI}}, "", nil

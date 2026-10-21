@@ -20,6 +20,7 @@
   import ErrorState from "$lib/components/ErrorState.svelte";
   import Loading from "$lib/components/Loading.svelte";
   import FileSize from "$lib/components/FileSize.svelte";
+  import MemberTag from "./MemberTag.svelte";
   import { Column, type Entry } from "./columns.svelte";
   import { viewBox } from "./area";
   import { parentOf } from "../browse";
@@ -240,6 +241,7 @@
           <FileIcon aria-hidden="true" class={cn("size-4 shrink-0", on ? "" : "text-muted-foreground")} />
         {/if}
         <span class={cn("min-w-0 flex-1 truncate", isDir && "font-medium")} title={e.name.length > 40 ? e.name : undefined}>{e.name}</span>
+        <MemberTag repo={e.repo} />
         {#if e.size !== undefined}
           <span class={cn("shrink-0 text-meta tabular-nums", on ? "" : "text-muted-foreground")}><FileSize bytes={e.size} /></span>
         {/if}

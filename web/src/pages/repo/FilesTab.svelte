@@ -12,8 +12,9 @@
   falls back to the last List, Tree or Columns choice. Every view fills the same area (files/area.ts),
   so a switch moves nothing around it.
 
-  A group shows the merged folders of the members the reader can download from, in the List view
-  only and read-only: each file names its member and opens in it.
+  A group shows the merged files of the members the reader can download from, in the same views:
+  the server answers the tree, the versions, the builds and the details from its members, and each
+  file and version names the member that serves it.
 
   People with Delete files delete files and folders here, with the UI session. In the List view they pick rows (files and folders mix): while rows are picked,
   the details column shows how many and the size of the picked files, and Delete removes them all
@@ -93,11 +94,8 @@
     ];
   });
 
-  // A group lists the merged folders of its members, read-only, in the List view.
-  const group = $derived(repo.kind === "group");
-  // What the open folder is: a plain folder, an artifact or a version. A group's folders are plain:
-  // an artifact and its versions open in the member that holds them.
-  const place = $derived(new Resource<Place>(() => (group ? Promise.resolve<Place>({ kind: "folder" }) : placeOf(repo.name, folder, versionQ))));
+  // What the open folder is: a plain folder, an artifact or a version.
+  const place = $derived(new Resource<Place>(() => placeOf(repo.name, folder, versionQ)));
   // The last place that loaded, so the view choice does not jump while the next one loads.
   let known = $state<Place | undefined>(undefined);
   $effect(() => {
@@ -112,7 +110,6 @@
   const flow = $derived(flowsHere(here));
   const view = {
     get value(): ViewKind {
-      if (group) return "list";
       const v = allViews.value;
       return flow || v !== "coverflow" ? v : plainViews.value;
     },
@@ -133,7 +130,7 @@
   const firstPage = $derived.by(() => {
     void version;
     const v = allViews.value === "coverflow" ? plainViews.value : allViews.value;
-    if (!group && (versionQ || v !== "list")) return undefined;
+    if (versionQ || v !== "list") return undefined;
     const name = repo.name;
     const f = folder;
     const p = untrack(() => api.repos.tree(name, f, { limit: FOLDER_PAGE }));
@@ -280,7 +277,7 @@
         {#if !details}
           <Button variant="ghost" size="sm" onclick={() => (closed = false)}><PanelRightOpenIcon />Show details</Button>
         {/if}
-        {#if !group}<ViewSwitcher bind:value={view.value} {views} label="Show files as" />{/if}
+        <ViewSwitcher bind:value={view.value} {views} label="Show files as" />
       </div>
     </div>
     <div class="min-w-0 px-2 pt-2 pb-3 sm:px-3 {viewMin}">

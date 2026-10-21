@@ -24,6 +24,7 @@
   import RelativeTime from "$lib/components/RelativeTime.svelte";
   import CoverFlow, { type Ticket } from "./CoverFlow.svelte";
   import BuildInline from "./BuildInline.svelte";
+  import MemberTag from "./MemberTag.svelte";
   import type { DeleteTarget } from "./FolderList.svelte";
   import { api, type Artifact, type Build, type BuildFile, type Version } from "$lib/api";
   import { formats } from "$lib/formats/registry.svelte";
@@ -277,6 +278,7 @@
         >
           <FileIcon aria-hidden="true" class="size-4 shrink-0 text-muted-foreground" />
           <Truncate text={f.name} />
+          <MemberTag repo={version.repo} />
         </a>
       </Cell>
       {#if !compact}<Cell hideOnPhone muted text={kindOf(f)} />{/if}

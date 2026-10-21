@@ -84,15 +84,15 @@ func aptAuth(url, repo, snippetContext string) format.Snippet {
 // pinned mode installs a release or a build (a file) at its version, e.g.
 // "apt-get install urn=3.0~SNAPSHOT.20261014211855", and a snapshot version without a version:
 // apt takes the newest. The latest mode always installs without a version.
-func (h *Handler) ArtifactUsage(ctx context.Context, repo *repos.Repo, baseURL, p, v, mode string) (*format.ArtifactUsage, error) {
-	if repo.Kind != repos.KindHosted {
+func (h *Handler) ArtifactUsage(ctx context.Context, repo, from *repos.Repo, baseURL, p, v, mode string) (*format.ArtifactUsage, error) {
+	if from.Kind != repos.KindHosted {
 		return nil, nil
 	}
 	p = strings.Trim(p, "/")
 	var art format.Artifact
 	var dist, component, version, pin string
 	if strings.HasSuffix(p, ".deb") {
-		a, err := h.assets.Get(ctx, repo.ID, p)
+		a, err := h.assets.Get(ctx, from.ID, p)
 		if errors.Is(err, assets.ErrNotFound) {
 			return nil, nil
 		} else if err != nil {
@@ -111,7 +111,7 @@ func (h *Handler) ArtifactUsage(ctx context.Context, repo *repos.Repo, baseURL, 
 		if !ok {
 			return nil, nil
 		}
-		versions, err := h.readPackage(ctx, repo.ID, a, comp, pkg)
+		versions, err := h.readPackage(ctx, from.ID, a, comp, pkg)
 		if err != nil || len(versions) == 0 {
 			return nil, err
 		}

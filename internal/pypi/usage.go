@@ -121,11 +121,11 @@ func tools() []format.Tool {
 // ArtifactUsage returns the snippets of one project of a hosted repo. p is the project folder
 // packages/<project>/ or a file in it. The pinned mode names version v (a file: its version; none:
 // the newest release, else the newest version); the latest mode names none.
-func (h *Handler) ArtifactUsage(ctx context.Context, repo *repos.Repo, baseURL, p, v, mode string) (*format.ArtifactUsage, error) {
+func (h *Handler) ArtifactUsage(ctx context.Context, repo, from *repos.Repo, baseURL, p, v, mode string) (*format.ArtifactUsage, error) {
 	p = strings.Trim(p, "/")
 	dir := p
 	if segs := strings.Split(p, "/"); len(segs) == 3 && segs[0] == "packages" {
-		row, err := h.q.GetFile(ctx, dbq.GetFileParams{RepoID: repo.ID, Filename: segs[2]})
+		row, err := h.q.GetFile(ctx, dbq.GetFileParams{RepoID: from.ID, Filename: segs[2]})
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 			return nil, nil
@@ -134,12 +134,12 @@ func (h *Handler) ArtifactUsage(ctx context.Context, repo *repos.Repo, baseURL, 
 		}
 		dir, v = "packages/"+segs[1], row.Version
 	}
-	art, project, err := h.projectOf(ctx, repo, dir+"/")
+	art, project, err := h.projectOf(ctx, from, dir+"/")
 	if err != nil || art == nil {
 		return nil, err
 	}
 	if v == "" {
-		rows, err := h.q.ListVersions(ctx, dbq.ListVersionsParams{RepoID: repo.ID, Project: project, Limit: 100})
+		rows, err := h.q.ListVersions(ctx, dbq.ListVersionsParams{RepoID: from.ID, Project: project, Limit: 100})
 		if err != nil || len(rows) == 0 {
 			return nil, err
 		}

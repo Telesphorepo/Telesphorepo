@@ -6,8 +6,9 @@
   page is a level below. The parent keys it by name.
 
   A proxy has the Files tab (its cached files; people with Delete files delete them) and the Use tab, and no
-  publish or upload. A group has the tabs too: Files is the merged folders of its members (read-only,
-  each file names its member and opens in it), Use this repository lists its members first, and
+  publish or upload. A group has the tabs too: Files is the Files tab of a hosted repository of its
+  format over the files of its members (read-only, where the header says so; each file and version
+  names the member that serves it), Use this repository lists its members first, and
   Publish to this repository shows to a person who publishes to one of its repositories: they pick
   one (?to=) and get that repository's Publish tab.
 
@@ -212,6 +213,8 @@
         <Button href={href(repoPath(r.name, "upload"), { folder: uploadFolder || undefined })} disabled={!!locked}>
           <UploadIcon />Upload
         </Button>
+      {:else if group}
+        <span class="text-meta text-muted-foreground">Read-only: this group serves its members' files</span>
       {/if}
     {/snippet}
   </PageHeader>

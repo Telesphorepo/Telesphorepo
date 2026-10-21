@@ -97,8 +97,8 @@ func tools() []format.Tool {
 // v3-flatcontainer/<id>/, a version folder in it or a file of a version. The pinned mode names
 // the version of the path, else the newest listed release (the newest listed version when there
 // is none); the latest mode lets NuGet take the newest version (Version="*").
-func (h *Handler) ArtifactUsage(ctx context.Context, repo *repos.Repo, baseURL, p, v, mode string) (*format.ArtifactUsage, error) {
-	if repo.Kind != repos.KindHosted {
+func (h *Handler) ArtifactUsage(ctx context.Context, repo, from *repos.Repo, baseURL, p, v, mode string) (*format.ArtifactUsage, error) {
+	if from.Kind != repos.KindHosted {
 		return nil, nil
 	}
 	segs := strings.Split(strings.Trim(p, "/"), "/")
@@ -109,7 +109,7 @@ func (h *Handler) ArtifactUsage(ctx context.Context, repo *repos.Repo, baseURL, 
 	if len(segs) >= 3 && v == "" {
 		v = segs[2]
 	}
-	m, err := h.hostedModel(ctx, repo.ID, lid)
+	m, err := h.hostedModel(ctx, from.ID, lid)
 	if err != nil || m == nil {
 		return nil, err
 	}
