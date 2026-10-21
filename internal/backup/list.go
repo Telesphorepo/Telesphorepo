@@ -81,13 +81,13 @@ type Pruned struct {
 }
 
 // graceAge is how old a file must be before retention removes it, when no kept backup accounts
-// for it: an incomplete backup folder (by its name and its mtime), a file of the blobs folder and a
-// temp file there. Another process may be writing it: a backup from the command line into the
-// folder of the server's backups.
+// for it, by its mtime: an incomplete backup folder, a file of the blobs folder and a temp file there.
+// Another process may be writing it: a backup from the command line into the folder of the server's
+// backups, which keeps the mtime of its folder and of the blobs it uses fresh while it runs.
 const graceAge = time.Hour
 
 // Prune keeps the newest keep complete backups of dir and removes the other backup folders, the
-// incomplete ones too unless their name and their mtime are both younger than graceAge. Then it
+// incomplete ones too unless their mtime is younger than graceAge. Then it
 // removes each file of the blobs folder that no kept backup uses and whose mtime is older than
 // graceAge: it reads the blob list of each kept backup's database. When a kept database cannot be
 // read, it removes no blob.
@@ -103,7 +103,8 @@ func Prune(ctx context.Context, dir string, keep int) (Pruned, error) {
 			kept = append(kept, e)
 			continue
 		}
-		if !e.Complete && young(e.CreatedAt) {
+		// A backup that runs keeps the mtime of its folder fresh (copier.report).
+		if !e.Complete {
 			if st, err := os.Stat(filepath.Join(dir, e.Name)); err == nil && young(st.ModTime()) {
 				continue
 			}

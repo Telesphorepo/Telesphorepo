@@ -168,7 +168,7 @@ func run(ctx context.Context, dir, folder string, src Source) (*Result, error) {
 	started := time.Now().UTC()
 	withBlobs := src.Storage.Backend != "s3"
 	res := &Result{}
-	c := &copier{dir: dir, src: src, res: res}
+	c := &copier{dir: dir, folder: folder, src: src, res: res}
 	if withBlobs {
 		c.step("files")
 		if err := c.walk(ctx, src.DB, false); err != nil {
@@ -247,11 +247,14 @@ func run(ctx context.Context, dir, folder string, src Source) (*Result, error) {
 	return res, nil
 }
 
-// copier copies blobs into the blobs folder of a backup dir.
+// copier copies blobs into the blobs folder of a backup dir. It keeps the mtime of its backup folder
+// and of each blob that the backup uses fresh, so a retention run of another process (the server's,
+// next to a CLI backup into the same dir) leaves them alone however long the backup takes.
 type copier struct {
-	dir string
-	src Source
-	res *Result
+	dir    string
+	folder string
+	src    Source
+	res    *Result
 
 	stepName     string
 	checked      int64
@@ -264,6 +267,8 @@ func (c *copier) step(name string) {
 }
 
 func (c *copier) report() {
+	now := time.Now()
+	_ = os.Chtimes(c.folder, now, now)
 	if c.src.Progress != nil {
 		c.src.Progress(Progress{Step: c.stepName, Blobs: c.checked, Copied: c.res.Copied})
 	}
@@ -308,6 +313,8 @@ func (c *copier) copyOne(ctx context.Context, b dbq.WalkReferencedBlobsRow, requ
 	key := blobs.Key(b.Sha256)
 	dst := filepath.Join(c.dir, filepath.FromSlash(key))
 	if st, err := os.Stat(dst); err == nil && st.Size() == b.Size {
+		now := time.Now()
+		_ = os.Chtimes(dst, now, now)
 		return nil
 	}
 	if c.src.Hold != nil {

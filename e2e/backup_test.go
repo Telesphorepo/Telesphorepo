@@ -366,7 +366,7 @@ func backupRestoreFS(t *testing.T) {
 	}
 	second := backupNow(t, s)
 	const partial = "20200101T000000.000Z"
-	VolumeExec(t, bvol, "set -e\nmkdir /data/"+partial+"\necho partial > /data/"+partial+"/telesphorepo.db\nchown -R 65532:65532 /data/"+partial+"\n")
+	VolumeExec(t, bvol, "set -e\nmkdir /data/"+partial+"\necho partial > /data/"+partial+"/telesphorepo.db\ntouch -d '2020-01-01 00:00:00' /data/"+partial+"\nchown -R 65532:65532 /data/"+partial+"\n")
 	o = backupList(t, s)
 	if i := slices.IndexFunc(o.Backups, func(b backupEntry) bool { return b.Name == partial }); i < 0 || o.Backups[i].Complete {
 		t.Fatalf("GET /api/backup with an incomplete folder: %+v, want %s listed as incomplete", o.Backups, partial)

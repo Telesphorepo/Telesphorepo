@@ -1708,9 +1708,10 @@ itself: the module has no table.
 - **Retention.** After a run, the newest `backup.keep` complete backups stay; every other backup
   folder is removed. Then each file of `blobs/` that no kept backup uses is removed: the module
   reads the blob list of each kept backup's database, read-only. When one of them cannot be read,
-  no blob is removed. Retention leaves alone what may still be written: an incomplete folder while
-  both its name (the start time) and its mtime are less than an hour old, and a file of `blobs/`
-  (a temp file too) while its mtime is less than an hour old. So a `telesphorepo-server backup`
+  no blob is removed. Retention leaves alone what may still be written: an incomplete folder, and a
+  file of `blobs/` (a temp file too), while its mtime is less than an hour old. A running backup
+  touches its folder after each page of blobs and each blob it uses that is already there, so it
+  stays young however long it takes. So a `telesphorepo-server backup`
   into the folder of the server's backups is safe while the server runs retention.
 - **Log and audit.** One log line per run (`backup written` with the name, the counts and the
   duration, or `backup failed` with the error) and one audit event (`backup.done` or
