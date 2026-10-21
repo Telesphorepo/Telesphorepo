@@ -67,7 +67,7 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/clidist` | The CLI archives that the server embeds (`go:embed all:dist`) and serves at `/cli/`: `Targets`, `Archive`, `FS`, `Sums`. `go tool task build`, `dev`, `cli` and `release` write them |
 | `internal/repos` | Repos, their kind, their active operation (`Repo.Op`) and per-format JSON config. `Create` and `Update` (a `Patch`) are the only changes of a repo record: each checks the whole new state first, then saves it in one transaction with the format's `OnRepoChange` and one audit event. A `Validator` (the format registry) checks the config and a `KindCheck` the kind. Modules drop what they keep about a deleted repo with `OnDelete`. A module adds repo values that it keeps in its own tables as fields (`repos.Field`, `AddField`): `Create` and `Update` validate and save them in the same transaction, and `Repo.Fields` holds them. Keeps the group members and the proxy remotes in memory (see **Group and proxy repositories**) |
 | `internal/proxy` | Fetches the files of proxy repos from their remotes (the `assets.Fetcher` of the read path), stores them through `Commit` with source `proxy`, answers a remote's 401 challenge through the format's `RemoteAuth`, and remembers remote 404s; `proxy.Answer` is the answer of the registry token protocol (also for the Nexus client), `proxy.Send` a request to a remote as a fetch sends it (e.g. a remote tags list) |
-| `internal/format` | The format contract: `Spec` (every optional capability is a field that is nil when the format lacks it), the `Registry` (`All`, `Get`, `Hooks`, `RebuildRun`, `OnRepoChange`, `ValidateConfig`, `SupportsKind`, `Importer`), `Kit` and `Standard` (the default routes), `Importer.Run` (the shared import of one source file), and the rendered documents: `WriteDocument` (a metadata document built per request, with a strong SHA-256 `ETag`, 304 on `If-None-Match`, `Vary`) and `DocumentCache` (an LRU of rendered bodies, bounded in entries and bytes, keyed by `DocumentKey` of what the body depends on); absolute URLs in a document start at `route.API.BaseURL` |
+| `internal/format` | The format contract: `Spec` (every optional capability is a field that is nil when the format lacks it), the `Registry` (`All`, `Get`, `Hooks`, `RebuildRun`, `OnRepoChange`, `ValidateConfig`, `SupportsKind`, `Importer`), `Kit` and `Standard` (the default routes), `Importer.Run` (the shared import of one source file), and the rendered documents: `WriteDocument` (a `Document`, a body with its strong `ETag`, answered with 304 on `If-None-Match` and `Vary`; `NewDocument` gives an uncached body the SHA-256 of the body) and `DocumentCache` (an LRU of rendered documents, bounded in entries, in bytes and per entry, keyed by `DocumentKey` of what the body depends on: a revision of the rows or the SHA-256s of the sources, and the base URL). A cached document's ETag is the SHA-256 of its key, so `DocumentCache.Serve` answers a matching `If-None-Match` with 304 before it looks up or builds the body; absolute URLs in a document start at `route.API.BaseURL` |
 | `internal/version` | The version schemes of the package formats, with no outside module: `semver.go` (SemVer 2.0 for npm and Cargo; `CleanSemVer` is npm's loose clean of a package.json version), `pep440.go` (PEP 440: normal form and order), `nuget.go` (NuGet: normal form, order, `IsSemVer2`). Each version has a `SortKey`, a string whose byte order is the scheme's order, for the `sort_key` columns that keyset paging reads |
 | `internal/maven` | Module and format `maven`: the standard routes, release immutability (`Admit`), the content types, the merge of `maven-metadata.xml` in a group, the metadata after a delete (`AfterRemove`), web UI uploads with checksums and metadata |
 | `internal/debian` | Module and format `debian`: `.deb` upload/parse through `Commit`, the package rows (`OnCommitted`, `OnRemoved`), the index rebuild (`Rebuild`), `/debian/{repo}/key.asc`, the plan of a Nexus apt import (distribution and signing key). Owns its tables, queries (`queries/`, `dbq/`) and architecture config; binds a signing key per repo (`SigningKey`) |
@@ -556,20 +556,22 @@ registry**):
 | Table | Key / indexes | Notes |
 |---|---|---|
 | `npm_packages` | PK `(repo_id, name)` (WITHOUT ROWID) | `created`, `modified` (unix seconds) and `rev`, the `_rev` of the packument: `<n>-<hash of the versions, deprecations and tags>`; the row goes with the last version |
-| `npm_versions` | PK `(repo_id, name, version)` (WITHOUT ROWID), idx `npm_versions_sort (repo_id, name, sort_key)`, UNIQUE `npm_versions_tarball (repo_id, tarball)` | `sort_key` (`version.SemVer.SortKey`), `manifest` (the version's package.json without `dist`), `tarball` (the asset path), `integrity` (`sha512-<base64>`), `shasum` (SHA-1 hex), `published_at`, `deprecated` (`''` for none) |
+| `npm_versions` | PK `(repo_id, name, version)` (WITHOUT ROWID), idx `npm_versions_sort (repo_id, name, sort_key)`, UNIQUE `npm_versions_tarball (repo_id, tarball)` | `sort_key` (`version.SemVer.SortKey`), `tarball` (the asset path), `integrity` (`sha512-<base64>`), `shasum` (SHA-1 hex), `published_at`, `deprecated` (`''` for none), and last `manifest` (the version's package.json without `dist`), so the refresh of the package row after a change reads version, time and deprecation without the overflow pages of a large manifest |
 | `npm_tags` | PK `(repo_id, name, tag)` (WITHOUT ROWID) | The dist-tags; a tag always names an existing version, and `latest` always exists |
 Tables of the `nuget` component (`internal/nuget/migrations`):
 
 | Table | Key / indexes | Notes |
 |---|---|---|
-| `nuget_versions` | UNIQUE `(repo_id, lower_id, sort_key)`, idx `nuget_versions_asset (asset_id)` | One row per package version of a hosted repo: `package_id` as the package writes it, `version` (normalised, with metadata), `normalized` (the identity), `sort_key` (`version.NuGet.SortKey`), `semver2`, `prerelease`, `listed`, `meta` (JSON of the `.nuspec` fields), `nupkg_path`, `published_at`. Written in the commit of the `.nupkg`, deleted in its remove; `asset_id` cascades with the `.nupkg`. The UNIQUE index reads a package's versions in order and pages the package ids of the search |
+| `nuget_versions` | UNIQUE `(repo_id, lower_id, sort_key)`, idx `nuget_versions_asset (asset_id)` | One row per package version of a hosted repo: `package_id` as the package writes it, `version` (normalised, with metadata), `normalized` (the identity), `sort_key` (`version.NuGet.SortKey`), `semver2`, `prerelease`, `listed`, `meta` (JSON of the `.nuspec` fields), `nupkg_path`, `published_at`. Written in the commit of the `.nupkg`, deleted in its remove; `asset_id` cascades with the `.nupkg`. The UNIQUE index reads a package's versions in order |
+| `nuget_packages` | PK `id`, UNIQUE `(repo_id, lower_id)` | One row per package of a hosted repo with a version: `lower_id` and `rev`, the revision of the package's documents: `max(rev + 1, unix ns)` on each push, removal, unlist and relist, so a package removed and pushed again never reuses one. The row goes with the last version. The UNIQUE index pages the package ids of the search |
+| `nuget_packages_fts` | FTS5 trigram on `lower_id` | Kept in sync by triggers; the substring search of package ids |
 
 Tables of the `pypi` component (`internal/pypi/migrations`). Only hosted repos have rows; the
 hooks write them in the transaction of the asset change (see **PyPI**):
 
 | Table | Key / indexes | Notes |
 |---|---|---|
-| `pypi_projects` | PK `(repo_id, project)` (WITHOUT ROWID) | `project` is the normalised name, `display_name` the `Name` of the newest upload's metadata; the row goes with the project's last file |
+| `pypi_projects` | PK `(repo_id, project)` (WITHOUT ROWID) | `project` is the normalised name, `display_name` the `Name` of the newest upload's metadata, `rev` the revision of the project page (`max(rev + 1, unix ns)` on each stored or removed file and removed `.metadata`); the row goes with the project's last file |
 | `pypi_files` | PK `id`, UNIQUE `(repo_id, filename)`, idx `pypi_files_project (repo_id, project, sort_key)`, idx `asset_id` | One row per wheel or sdist: `version` (PEP 440 normal form), `sort_key` (`version.PEP440.SortKey`), `path`, `sha256`, `size`, `requires_python`, `metadata_sha256` (`''` without a `.metadata`), `uploaded_at`. `asset_id` cascades with the file |
 
 Tables of the `docker` component (`internal/docker/migrations`). Every column `repo_id` cascades;
@@ -1654,7 +1656,7 @@ of the operation type, in full sentences; repo JSON shows it as `operation`. A m
    `index.debounce` and `index.max_delay` and calls the format's `Rebuild.Run` (see **Byte
    pipeline**).
 5. **Package indexes.** For each unit, rows are streamed through the unique index into `Packages`
-   and `Packages.gz`. One `CommitAll` (source `generated`) writes them with their
+   and `Packages.gz` (gzip at the default level). One `CommitAll` (source `generated`) writes them with their
    `by-hash/SHA256/*` copies (the same blobs), then `deb_index_files` is updated.
 6. **Release.** `Release` is rebuilt from `deb_index_files` (`Acquire-By-Hash: yes`); one
    `CommitAll` writes `Release`, `Release.gpg` and `InRelease`.
@@ -2505,7 +2507,10 @@ twine, uv and poetry send the session token as Basic with user `__token__`.
 **Rows.** `OnCommitted` writes `pypi_projects` and `pypi_files` for the stored file; `OnRemoved`
 deletes the file row of a removed file (its `.metadata` follows), stops advertising a removed
 `.metadata`, and deletes a project without files. So a file delete in the web UI drops the file from
-the page, and the last file drops the project.
+the page, and the last file drops the project. Each change moves the project's `rev` on; the
+rendered pages of a hosted project are kept in the module's `format.DocumentCache` (1,024
+entries, 64 MiB, 8 MiB each) keyed by the form, the repo, the project and `rev`, so a page renders
+once per change and a new or removed file shows at once.
 
 **Proxy** (default remote `https://pypi.org/`). The config field `files` (default
 `https://files.pythonhosted.org/`, checked with `proxy.FilesURL`) is the host the remote serves its
@@ -2514,8 +2519,8 @@ and cached at `.simple/<project>` (`Changing`, rechecked after `metadata_ttl`, i
 kept); a remote that answers HTML is read as PEP 503 anchors. Each file URL, resolved against the
 upstream page, maps to `files/<rest>` under the `files` base or to `remote/<rest>` under the remote
 URL; a file at any other address is left out of the page, so the server never fetches an address
-that a remote document names. A file's `.metadata` follows it. The rendered pages are kept in a
-`format.DocumentCache` keyed by the SHA-256 of the cached page, the form, the remote and the
+that a remote document names. A file's `.metadata` follows it. The rendered pages are kept in the
+same `format.DocumentCache`, keyed by the SHA-256 of the cached page, the form, the remote and the
 `files` base. The module fetches through `assets.Reader.Resolve`; `Classify` puts the `files`
 base of the repo config in `Files` for a `files/` path. The remote's credentials go only to the
 remote's host.
@@ -2697,8 +2702,9 @@ digest only sets `checked_at`; another digest fetches the tag. `Admit` refuses a
 manifest that does not parse and a fetched file without the digest of its path (a remote
 failure); a fetched tag needs no manifest in the image, and `AfterCommit` stores the manifest of a
 fetched tag at its digest path. When the fetched tag replaced another digest, `AfterCommit` then
-removes the old manifest (`Remove`, source `generated`) when no tag names it and no index lists
-it, and each manifest of its index that no tag names and no other index lists. Their links lose
+removes the old manifest when no tag names it and no index lists it, and each manifest of its
+index that no tag names and that no index lists but the ones removed with it, all in one `Remove`
+(source `generated`, one transaction for an index and its platform manifests). Their links lose
 those uses, so the job `docker.links` and the blob GC reclaim the layers that only the old version
 used; a client that asks for the old digest gets it from the remote again. The children of a
 fetched manifest come when a client asks for them. A mount never contacts a remote. The first GET of an uncached layer gets the remote's bytes while
@@ -2804,7 +2810,7 @@ publish session token; HTTP Basic works too). Every refusal and error is a Cargo
 | Route | Policy | What |
 |---|---|---|
 | `GET, HEAD /cargo/{repo}/index/config.json` | read | `{"dl": "<base>/cargo/<repo>/crates/{crate}/{crate}-{version}.crate", "api": "<base>/cargo/<repo>"}`, with `"auth-required": true` when the repo has no anonymous read. Without a credential such a repo answers 401 with `WWW-Authenticate: Cargo login_url="<base>/#/repo/<repo>"`, so Cargo sends its token on every request of the registry |
-| `GET, HEAD /cargo/{repo}/index/{path...}` | read | The index file of a crate, one JSON line per version: `1/{n}`, `2/{n}`, `3/{c}/{n}` or `{ab}/{cd}/{n}` of the lowercased name (another path is 404). A rendered document (`format.WriteDocument`: strong ETag, 304 to `If-None-Match`, which Cargo sends for each file) |
+| `GET, HEAD /cargo/{repo}/index/{path...}` | read | The index file of a crate, one JSON line per version: `1/{n}`, `2/{n}`, `3/{c}/{n}` or `{ab}/{cd}/{n}` of the lowercased name (another path is 404). A rendered document (`format.DocumentCache.Serve`: strong ETag of the revision, 304 to `If-None-Match`, which Cargo sends for each file) |
 | `GET, HEAD /cargo/{repo}/crates/{name}/{name}-{version}.crate` | read | The `.crate`, an asset at that path (`Range`, S3 redirects and edge delivery as for every asset) |
 | `PUT /cargo/{repo}/api/v1/crates/new` | write | `cargo publish`: a u32 LE length, the JSON of the crate, a u32 LE length, the `.crate` (spooled, at most `max_upload_size`; the JSON at most `max_json_size`). The name and version of the JSON must be those of the `Cargo.toml` in the crate. 200 `{"warnings": {...}}`; 409 for a version that exists (ignoring build metadata) or a name that clashes |
 | `DELETE /cargo/{repo}/api/v1/crates/{name}/{version}/yank`, `PUT .../unyank` | write | `cargo yank` and `cargo yank --undo`: `{"ok": true}`; 404 for a version the repo lacks. Audit `cargo.yank`, `cargo.unyank` |
@@ -2817,8 +2823,13 @@ repo has ignoring build metadata; the same bytes at the same path are kept (an u
 import is then unchanged, a publish answers 409). A write without an entry (a core upload
 session) is 400. `OnCommitted` writes the rows; `OnRemoved` drops the version of each deleted
 `.crate` and the name of a crate with no version left, so a file delete in the web UI removes the
-version from the index at once. The index file is rendered from the rows on each request:
-`yanked` from the row, the rest as stored.
+version from the index at once. The index file is rendered from the rows: `yanked` from the row,
+the rest as stored. Each publish, removal and yank moves the `rev` of the crate's `cargo_names`
+row on (`max(rev + 1, unix ns)`, so a crate removed and published again never reuses one), and the
+rendered file is kept in the module's `format.DocumentCache` (1,024 entries, 64 MiB, 16 MiB each)
+keyed by the repo, the crate and `rev`. Its ETag comes from that key: a request costs one point
+read of the name row, and an `If-None-Match` that names the current revision answers 304 without
+the file. A proxy's file is kept the same way, keyed by the SHA-256 of the cached remote file.
 
 The entry follows the Cargo book: `name`, `vers`, `deps` (`name`, `req`, `features`, `optional`,
 `default_features`, `target`, `kind`, `registry`, and `package` for a renamed dependency),
@@ -2851,7 +2862,8 @@ from the repo config.
 **Groups.** For an index file, the first member in read order that has the crate owns the name
 (`assets.Reader.Owner`): its file serves, and a later member (the crates.io proxy) cannot shadow
 a hosted crate with higher versions. A `.crate` of a group serves from the member that owns the
-name. `config.json` points `dl` at the group. Use a proxy or a group as crates.io through source
+name: a hosted member that has the name row, a proxy that has the remote's index file of the
+crate (the asset, not its body). `config.json` points `dl` at the group. Use a proxy or a group as crates.io through source
 replacement (`[source.crates-io] replace-with = "<registry>"`).
 
 **Tables** (`internal/cargo/migrations`):
@@ -2859,7 +2871,7 @@ replacement (`[source.crates-io] replace-with = "<registry>"`).
 | Table | Keys | What |
 |---|---|---|
 | `cargo_versions` | UNIQUE `(repo_id, lower_name, base_key)`, idx `cargo_versions_sort (repo_id, lower_name, sort_key)`, idx `cargo_versions_asset (asset_id)`; `repo_id` and `asset_id` cascade | One version of a hosted crate: `name` as published, `lower_name` (the index file), `version`, `sort_key` (`version.SemVer.SortKey`), `base_key` (the key without build metadata), `entry` (the index line with `yanked` false), `asset_id` and `path` of the `.crate`, `yanked`, `created_at` |
-| `cargo_names` | PK `(repo_id, folded_name)` (WITHOUT ROWID); `repo_id` cascades | The crate names of a repo, folded, with the name that holds each |
+| `cargo_names` | PK `(repo_id, folded_name)` (WITHOUT ROWID); `repo_id` cascades | The crate names of a repo, folded, with the name that holds each and `rev`, the revision of the crate's index file |
 
 **Versions and builds.** The artifact folder of a crate is `crates/<name>/` (kind `crate`). Its
 versions are the rows of a hosted repo, newest first by `sort_key` (keyset on the sort key of
@@ -2956,7 +2968,8 @@ own URL.
   deletes the version of a removed tarball, drops the tags that named it, moves `latest` to the
   highest release when it went, deletes a package without versions, and has the `.sigstore` of the
   version removed next. So a file delete in the web UI unpublishes the version. Every change moves
-  `_rev` on. Tag changes and deprecations run in one transaction under the package lock.
+  `_rev` on; the refresh reads the version, time and deprecation of each version, not its
+  manifest. Tag changes and deprecations run in one transaction under the package lock.
   `Admit` refuses a write without a version (a core upload) with 400.
 - **Proxy** (preset `https://registry.npmjs.org/`). The remote's abbreviated and full packuments are
   cached as `Changing` assets at `.packument/abbreviated/<name>` and `.packument/full/<name>`, each
@@ -2969,8 +2982,11 @@ own URL.
   owner's packument with the group's URLs and serves a tarball only from the owner, so a public
   package in a later proxy never shadows a private name. A member that fails is skipped; with none
   left and a failed proxy the answer is 502.
-- **Cache.** Rendered bodies stay in a `format.DocumentCache` (2,000 entries, 256 MiB) keyed by the
-  form, the name, the package `_rev` or the SHA-256 of the cached remote document, and the base URL.
+- **Cache.** Rendered packuments stay in a `format.DocumentCache` (2,000 entries, 256 MiB, 64 MiB
+  each, so the full packument of a big remote package is rewritten once per change of the cached
+  copy) keyed by the form, the name, the package `_rev` or the SHA-256 of the cached remote
+  document, and the base URL. The ETag comes from that key, so a matching `If-None-Match` answers
+  304 without the body.
 - **Versions.** An artifact folder is `<name>/`. Versions page newest first by `sort_key`
   (`npm_versions_sort`); each is a release with one build, its tarball (`extension` `tgz`).
   Proxies and groups have no versions.
@@ -2994,10 +3010,14 @@ the package) at `v3-flatcontainer/<id>/<version>/<id>.nuspec`, with the id lower
 normalised and lowered (`version.NuGet`: leading zeros dropped, a fourth part of 0 dropped, no build
 metadata). The bytes of a `.nupkg` are never changed, so a signed package keeps its signature. The
 service index, the version lists, the registrations, the search and the vulnerability index are
-rendered per request (`format.WriteDocument`: strong ETag, 304) from `nuget_versions` in a hosted
-repo, from the remote's cached documents in a proxy, and from the member that owns the package id
-in a group. Rendered bodies that come from remote documents are kept in a `format.DocumentCache`
-(512 entries, 64 MiB) keyed by the SHA-256s of those documents and the URL of the repo.
+rendered (strong ETag, 304) from `nuget_versions` in a hosted repo, from the remote's cached
+documents in a proxy, and from the member that owns the package id in a group. The version lists
+and the registrations are kept in a `format.DocumentCache` (1,024 entries, 64 MiB, 8 MiB each)
+keyed by the URL of the repo, the document, and the `rev` of the package's `nuget_packages` row
+(hosted) or the SHA-256s of the cached service index, registration index and pages (proxy). A
+request reads one package row, or resolves the cached remote documents without reading them, and
+renders only when the key is new; an `If-None-Match` of the key's ETag answers 304 at once. The
+proxy parses the service index once per change of its cached copy.
 
 **Routes** (`route.FormatRead` for reads; push, unlist and relist `route.FormatWrite` with
 `Policy.TokenHeader = "X-NuGet-ApiKey"`, so the API key is a publish session; that header comes
@@ -3012,7 +3032,7 @@ before the `Authorization` of the source's read credentials):
 | `GET /nuget/{repo}/registration/{id}/index.json` (and `registration-semver1/`) | The registration index: up to 128 versions inlined in one page (`#page/<lower>/<upper>`, with `parent`), more in pages of 64 that the index names. Each leaf has the catalog entry inline (`id`, `version`, `listed`, `published` (`1900-01-01T00:00:00+00:00` when unlisted), `packageContent`, `dependencyGroups` with each dependency's `registration`, and the `.nuspec` fields), `packageContent` of this repo's flat container and `registration` |
 | `GET /nuget/{repo}/registration/{id}/page/{lower}/{upper}.json` | One page of a paged registration |
 | `GET /nuget/{repo}/registration/{id}/{version}.json` | One registration leaf |
-| `GET /nuget/{repo}/query?q=&skip=&take=&prerelease=&semVerLevel=` | The packages of a hosted repo (a group: the union of its hosted members that the caller reads, the first member wins an id) whose id holds `q` (3 or more characters: the trigram index of the asset paths through the `.nuspec` paths, at most 2,000 path hits; 1 or 2 characters: a prefix of the id; empty: every id), in id order, `skip` at most 3,000 and `take` at most 1,000 (20 by default). Unlisted versions, prerelease versions without `prerelease=true` and SemVer 2.0 versions without `semVerLevel=2.0.0` are left out. A proxy answers no package |
+| `GET /nuget/{repo}/query?q=&skip=&take=&prerelease=&semVerLevel=` | The packages of a hosted repo (a group: the union of its hosted members that the caller reads, the first member wins an id) whose id holds `q` (3 or more characters: the trigram index `nuget_packages_fts`, at most 10,000 ids per repo; 1 or 2 characters: a prefix of the id; empty: every id), in id order, `skip` at most 3,000 and `take` at most 1,000 (20 by default). Unlisted versions, prerelease versions without `prerelease=true` and SemVer 2.0 versions without `semVerLevel=2.0.0` are left out. Per id the search reads the newest visible version only (a package without one does not count); the metadata of the newest version and the list of visible versions are read only for the packages of the answered page. A proxy answers no package |
 | `PUT /nuget/{repo}/package` (and `.../package/`) | Push: the first part of `multipart/form-data` (or a body that is the `.nupkg`) is the package; the id and the version come from its root `.nuspec`, matched by local name. 201; 409 for a version that the repo has (also with the same bytes, so `--skip-duplicate` skips it); 400 for a package that does not read (no zip, no or several root `.nuspec`, a bad id or version); 413 above `max_upload_size` |
 | `DELETE /nuget/{repo}/package/{id}/{version}` · `POST` the same | Unlist and relist (`listed` of the row, audit `nuget.unlist` and `nuget.relist`); 200, 404 for a version the repo lacks. dotnet restores an unlisted version by its exact version |
 
@@ -3020,8 +3040,10 @@ The push, the web UI upload (`.nupkg` files; a plan reads up to 16 MiB of each, 
 read at the upload), the Nexus import and the demo data share one ingest: a `CommitAll` of the
 `.nupkg` and the `.nuspec` with the package version as an extra lock. `Admit` keeps the same bytes
 and refuses other bytes at a package path with 409; a write without a parsed package from a source
-other than a proxy (a core upload session) is 400. `OnCommitted` writes the `nuget_versions` row;
-`OnRemoved` deletes the row of a removed `.nupkg` and removes its `.nuspec` next. Errors are the
+other than a proxy (a core upload session) is 400. `OnCommitted` writes the `nuget_versions` row
+and moves the package's `rev` on; `OnRemoved` deletes the row of a removed `.nupkg`, moves the
+`rev` on (or deletes the package row with its last version) and removes the `.nuspec` next.
+Unlist and relist move the `rev` on in their transaction. Errors are the
 `{"error"}` JSON of format routes; dotnet prints the status line.
 
 **Proxy.** The remote URL is the service index (`https://api.nuget.org/v3/index.json`; stored with
@@ -3039,8 +3061,8 @@ references) is dropped, and `packageContent` and the dependencies' `registration
 remote without a usable service index, or with nothing cached while it is down, answers 502.
 
 **Group.** A group answers each package id from the member that owns it (`assets.Reader.Owner`:
-the first readable member that has the id; a hosted member through `nuget_versions`, a proxy
-member through the remote's version list), so a public package cannot shadow a private one with
+the first readable member that has the id; a hosted member through its `nuget_packages` row, a
+proxy member through the cached asset of the remote's version list), so a public package cannot shadow a private one with
 the same id and a higher version. The registration and the version list are rendered from that
 member with the group's URLs, and the packages download from it.
 
@@ -3456,6 +3478,9 @@ page are in `web/src/README.md`.
   artifact folder and its name the version. `?build=` keeps a chosen build in the address.
   - *Maven:* an artifact folder is `<group path>/<artifactId>/` with one folder per version. A
     `-SNAPSHOT` version has timestamped builds (`20261014.103000-3`); a release has one build.
+    The snippets of an artifact folder without a version use its newest release with files, else
+    its newest snapshot: the version folders are walked newest first up to the first release with
+    files, and of the snapshots above it only the newest one with files has its builds read.
   - *Debian:* the format reads `deb_packages`, through the index `deb_packages_package`. An artifact
     folder is `pool/<component>/<prefix>/<package>/`; its versions are those of the package of that
     name in that component whose files lie in the folder. `Artifact.Kind` is `package`. A Debian

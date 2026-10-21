@@ -40,7 +40,7 @@ func seed(ctx context.Context, tx *sql.Tx, repo *repos.Repo, start, n int) error
 			SortKey: v.SortKey(), BaseKey: baseKey(v), Entry: line, AssetID: rows[0].ID, Path: p, CreatedAt: now}); err != nil {
 			return err
 		}
-		if err := q.InsertName(ctx, dbq.InsertNameParams{RepoID: repo.ID, FoldedName: fold(crate), Name: crate}); err != nil {
+		if err := q.InsertName(ctx, dbq.InsertNameParams{RepoID: repo.ID, FoldedName: fold(crate), Name: crate, Rev: time.Now().UnixNano()}); err != nil {
 			return err
 		}
 	}

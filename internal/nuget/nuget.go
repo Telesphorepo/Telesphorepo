@@ -49,22 +49,22 @@ const apiKeyHeader = "X-NuGet-ApiKey"
 type Handler struct {
 	host *module.Host
 	q    *dbq.Queries // on the reader pool
-	// docs keeps rendered documents of proxies and groups, keyed by the SHA-256s of the remote
-	// documents they come from and the base URL.
+	// docs keeps rendered documents, keyed by the revision of a hosted package or the SHA-256s of
+	// the remote documents of a proxy, and the base URL.
 	docs *format.DocumentCache
-	// upstreams holds the resources of the service index of each proxy remote, by remote URL
-	// (see upstream.go).
+	// upstreams holds the resources of the service index of each proxy remote, by remote URL,
+	// with the SHA-256 of the copy they come from (see upstream.go).
 	upstreams sync.Map
 }
 
 // Module returns the NuGet module: the NuGet format with proxies, groups, uploads, imports, demo
 // data and seeds. The Telesphorepo CLI publishes to it ("telesphorepo publish").
 func Module() module.Module {
-	h := &Handler{docs: format.NewDocumentCache(512, 64<<20)}
+	h := &Handler{docs: format.NewDocumentCache(1024, 64<<20, 8<<20)}
 	return module.Module{
 		ID: name, Title: "NuGet",
 		Register: func(x *module.Extender) {
-			x.Schema(db.Component{Migrations: db.Sub(migrationsFS, "migrations"), Queries: db.Sub(queriesFS, "queries")})
+			x.Schema(db.Component{Migrations: db.Sub(migrationsFS, "migrations"), Queries: db.Sub(queriesFS, "queries"), Extra: dbq.Extra})
 			x.AuditActions(
 				audit.ActionDef{ID: ActionUnlist, Label: "NuGet package unlisted", Subsystem: "repo"},
 				audit.ActionDef{ID: ActionRelist, Label: "NuGet package relisted", Subsystem: "repo"},

@@ -83,19 +83,24 @@ func leafOfRow(r versionRow) (leaf, error) {
 // errNotFound is a package, a page or a version that the repo does not have (404).
 var errNotFound = errors.New("not found")
 
-// pkgSource is how a document of one package of one repo renders: key names the remote documents
-// it comes from (nil for a hosted repo, which renders from its rows each time), load reads the
-// model.
+// pkgSource is how a document of one package of one repo renders: key names what the model comes
+// from (the revision of a hosted package, the SHA-256s of the remote documents of a proxy), load
+// reads the model. Only load reads the rows or the documents.
 type pkgSource struct {
 	key  []string
 	load func() (*model, error)
 }
 
-// source returns the pkgSource of package lid in repo (hosted or proxy). A proxy's model comes
-// from the registration of its remote: the index, and each page that the index does not inline.
+// source returns the pkgSource of package lid in repo (hosted or proxy); errNotFound when repo
+// does not have it. A proxy's model comes from the registration of its remote: the index, and
+// each page that the index does not inline.
 func (h *Handler) source(ctx context.Context, r *http.Request, p *auth.Principal, repo *repos.Repo, lid string) (*pkgSource, error) {
 	if repo.Kind != repos.KindProxy {
-		return &pkgSource{load: func() (*model, error) {
+		rev, err := h.hostedRev(ctx, repo.ID, lid)
+		if err != nil {
+			return nil, err
+		}
+		return &pkgSource{key: []string{"hosted", strconv.FormatInt(repo.ID, 10), rev}, load: func() (*model, error) {
 			m, err := h.hostedModel(ctx, repo.ID, lid)
 			if err == nil && m == nil {
 				err = errNotFound
@@ -107,7 +112,7 @@ func (h *Handler) source(ctx context.Context, r *http.Request, p *auth.Principal
 	if err != nil {
 		return nil, err
 	}
-	idx, body, err := h.remoteDoc(ctx, r, p, repo, upstreamDir+"registration/"+lid+"/index.json")
+	idx, err := h.remoteDoc(ctx, r, p, repo, upstreamDir+"registration/"+lid+"/index.json")
 	if err != nil {
 		return nil, err
 	}
@@ -115,27 +120,31 @@ func (h *Handler) source(ctx context.Context, r *http.Request, p *auth.Principal
 		return nil, errNotFound
 	}
 	// The page URLs of an index, parsed once per index.
-	refsJSON, err := h.docs.Render(format.DocumentKey("nuget-refs", idx.SHA256), func() ([]byte, error) {
-		refs, err := pageRefs(body)
+	refsDoc, err := h.docs.Render(format.DocumentKey("nuget-refs", idx.SHA256), func() ([]byte, error) {
+		body, err := h.readDoc(ctx, idx)
 		if err != nil {
 			return nil, err
+		}
+		refs, err := pageRefs(body)
+		if err != nil {
+			return nil, errNotFound
 		}
 		return json.Marshal(refs)
 	})
 	if err != nil {
-		return nil, errNotFound
+		return nil, err
 	}
 	var refs []string
-	_ = json.Unmarshal(refsJSON, &refs)
-	key := []string{"proxy", strconv.FormatInt(repo.ID, 10), idx.SHA256}
-	pages := map[string][]byte{}
+	_ = json.Unmarshal(refsDoc.Body, &refs)
+	key := []string{"proxy", strconv.FormatInt(repo.ID, 10), up.sha, idx.SHA256}
+	pages := map[string]*assets.Asset{}
 	for _, ref := range refs {
 		local, ok := up.pagePath(ref)
 		if !ok {
 			h.host.Log.Warn("nuget proxy: a registration page is outside the registration base of the remote", "repo", repo.Name)
 			continue
 		}
-		a, b, err := h.remoteDoc(ctx, r, p, repo, local)
+		a, err := h.remoteDoc(ctx, r, p, repo, local)
 		if err != nil {
 			return nil, err
 		}
@@ -143,9 +152,21 @@ func (h *Handler) source(ctx context.Context, r *http.Request, p *auth.Principal
 			continue
 		}
 		key = append(key, a.SHA256)
-		pages[ref] = b
+		pages[ref] = a
 	}
-	return &pkgSource{key: key, load: func() (*model, error) { return remoteModel(up, body, pages) }}, nil
+	return &pkgSource{key: key, load: func() (*model, error) {
+		body, err := h.readDoc(ctx, idx)
+		if err != nil {
+			return nil, err
+		}
+		bodies := make(map[string][]byte, len(pages))
+		for ref, a := range pages {
+			if bodies[ref], err = h.readDoc(ctx, a); err != nil {
+				return nil, err
+			}
+		}
+		return remoteModel(up, body, bodies)
+	}}, nil
 }
 
 // pageRefs returns the URLs of the pages of a registration index that do not inline their
@@ -418,27 +439,31 @@ func (m *model) renderLeafDoc(u urls, semver2 bool, lver string) ([]byte, error)
 	return nil, errNotFound
 }
 
-// renderFlat is the version list of the flat container: every version, unlisted ones included,
-// lowered and normalised, oldest first.
-func (m *model) renderFlat() ([]byte, error) {
-	vs := make([]string, len(m.leaves))
-	for i, l := range m.leaves {
-		vs[i] = strings.ToLower(l.ver.Normalized())
+// hostedRev returns the revision of package lid of a hosted repo; errNotFound when the repo has
+// no version of it.
+func (h *Handler) hostedRev(ctx context.Context, repoID int64, lid string) (string, error) {
+	rev, err := h.q.GetPackageRev(ctx, dbq.GetPackageRevParams{RepoID: repoID, LowerID: lid})
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", errNotFound
 	}
-	return json.Marshal(map[string][]string{"versions": vs})
+	if err != nil {
+		return "", err
+	}
+	return strconv.FormatInt(rev, 10), nil
 }
 
 // hostedHas reports whether a hosted repo has package lid.
 func (h *Handler) hostedHas(ctx context.Context, repoID int64, lid string) (bool, error) {
-	_, err := h.q.HasPackage(ctx, dbq.HasPackageParams{RepoID: repoID, LowerID: lid})
-	if errors.Is(err, sql.ErrNoRows) {
+	_, err := h.hostedRev(ctx, repoID, lid)
+	if errors.Is(err, errNotFound) {
 		return false, nil
 	}
 	return err == nil, err
 }
 
 // owner returns the repo that answers for package lid in repo: repo itself, or in a group the
-// member that owns the name (assets.Reader.Owner). nil when no member has it.
+// member that owns the name (assets.Reader.Owner): a hosted member with a version of it, a proxy
+// whose remote has its version list. nil when no member has it.
 func (h *Handler) owner(ctx context.Context, r *http.Request, p *auth.Principal, repo *repos.Repo, lid string) (*repos.Repo, error) {
 	if repo.Kind != repos.KindGroup {
 		return repo, nil
@@ -450,7 +475,7 @@ func (h *Handler) owner(ctx context.Context, r *http.Request, p *auth.Principal,
 		if _, err := h.upstreamOf(ctx, r, p, m); err != nil {
 			return false, err
 		}
-		a, _, err := h.remoteDoc(ctx, r, p, m, upstreamDir+"flat/"+lid+"/index.json")
+		a, err := h.remoteDoc(ctx, r, p, m, upstreamDir+"flat/"+lid+"/index.json")
 		return a != nil, err
 	})
 }

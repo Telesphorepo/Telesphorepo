@@ -257,7 +257,7 @@ func (h *Handler) index(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		route.Fail(w, r, err)
 		return
 	}
-	format.WriteDocument(w, r, f.contentType(), renderIndex(list, f), "Accept")
+	format.WriteDocument(w, r, f.contentType(), format.NewDocument(renderIndex(list, f)), "Accept")
 }
 
 // projects returns the project list of repo, sorted by name.
@@ -335,29 +335,48 @@ func (h *Handler) page(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		notAcceptable(w, r)
 		return
 	}
-	body, err := h.renderPage(r.Context(), r, c, c.Repo, n, f)
+	d, err := h.renderPage(r.Context(), r, c, c.Repo, n, f)
 	switch {
 	case errors.Is(err, assets.ErrRemoteFailed):
 		httpx.Error(w, r, http.StatusBadGateway, "The remote repository did not answer.")
+	case errors.Is(err, errNoProject) || (err == nil && d == nil):
+		httpx.Error(w, r, http.StatusNotFound, "not found")
 	case err != nil:
 		route.Fail(w, r, err)
-	case body == nil:
-		httpx.Error(w, r, http.StatusNotFound, "not found")
 	default:
-		format.WriteDocument(w, r, f.contentType(), body, "Accept")
+		format.WriteDocument(w, r, f.contentType(), *d, "Accept")
 	}
 }
 
-// renderPage renders the page of project n of repo in form f; nil when repo has no such project.
-// A group renders the page of the first member that has it (assets.Reader.Owner).
-func (h *Handler) renderPage(ctx context.Context, r *http.Request, c *route.Call, repo *repos.Repo, n string, f form) ([]byte, error) {
+// errNoProject is a project that a hosted repo has no files of.
+var errNoProject = errors.New("no such project")
+
+// renderPage renders the page of project n of repo in form f through the document cache: a
+// hosted repo's page by the revision of the project, a proxy's by the SHA-256 of the cached
+// upstream page. nil when repo has no such project. A group renders the page of the first member
+// that has it (assets.Reader.Owner).
+func (h *Handler) renderPage(ctx context.Context, r *http.Request, c *route.Call, repo *repos.Repo, n string, f form) (*format.Document, error) {
 	switch repo.Kind {
 	case repos.KindHosted:
-		m, err := h.hostedModel(ctx, repo, n)
-		if err != nil || m == nil {
+		rev, err := h.q.GetProjectRev(ctx, dbq.GetProjectRevParams{RepoID: repo.ID, Project: n})
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		if err != nil {
 			return nil, err
 		}
-		return m.render(f), nil
+		key := format.DocumentKey("hosted", strconv.Itoa(int(f)), strconv.FormatInt(repo.ID, 10), n, strconv.FormatInt(rev, 10))
+		d, err := h.docs.Render(key, func() ([]byte, error) {
+			m, err := h.hostedModel(ctx, repo, n)
+			if err == nil && m == nil {
+				err = errNoProject
+			}
+			if err != nil {
+				return nil, err
+			}
+			return m.render(f), nil
+		})
+		return &d, err
 	case repos.KindProxy:
 		a, err := h.upstreamPage(ctx, r, c, repo, n)
 		if err != nil || a == nil {
@@ -365,13 +384,14 @@ func (h *Handler) renderPage(ctx context.Context, r *http.Request, c *route.Call
 		}
 		key := format.DocumentKey("page", strconv.Itoa(int(f)), strconv.FormatInt(repo.ID, 10), a.SHA256, a.ContentType,
 			h.remoteURL(repo), filesBase(repo), n)
-		return h.docs.Render(key, func() ([]byte, error) {
+		d, err := h.docs.Render(key, func() ([]byte, error) {
 			m, err := h.proxyModel(ctx, repo, n, a)
 			if err != nil {
 				return nil, err
 			}
 			return m.render(f), nil
 		})
+		return &d, err
 	}
 	owner, err := h.owner(ctx, r, c, repo, n)
 	if err != nil || owner == nil {

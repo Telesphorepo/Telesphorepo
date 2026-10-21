@@ -45,7 +45,9 @@ type Handler struct {
 // Module returns the npm module: the npm format with proxies, groups, uploads, imports, demo data
 // and seeds. The Telesphorepo CLI publishes to it with the project's own package manager.
 func Module() module.Module {
-	h := &Handler{docs: format.NewDocumentCache(2000, 256<<20)}
+	// A full packument of a big remote package runs to tens of MB: an entry may take a quarter
+	// of the cache, so it is rewritten once per change of the remote copy.
+	h := &Handler{docs: format.NewDocumentCache(2000, 256<<20, 64<<20)}
 	return module.Module{
 		ID: name, Title: "npm",
 		Register: func(x *module.Extender) {

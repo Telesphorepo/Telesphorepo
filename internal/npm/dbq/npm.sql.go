@@ -239,6 +239,51 @@ func (q *Queries) ListTags(ctx context.Context, arg ListTagsParams) ([]ListTagsR
 	return items, nil
 }
 
+const listVersionStates = `-- name: ListVersionStates :many
+SELECT version, published_at, deprecated
+FROM npm_versions
+WHERE repo_id = ? AND name = ?
+ORDER BY sort_key
+LIMIT ?
+`
+
+type ListVersionStatesParams struct {
+	RepoID int64
+	Name   string
+	Limit  int64
+}
+
+type ListVersionStatesRow struct {
+	Version     string
+	PublishedAt int64
+	Deprecated  string
+}
+
+// Every version of a package in SemVer order without its manifest: what the package row and the
+// latest tag follow after a change.
+func (q *Queries) ListVersionStates(ctx context.Context, arg ListVersionStatesParams) ([]ListVersionStatesRow, error) {
+	rows, err := q.db.QueryContext(ctx, listVersionStates, arg.RepoID, arg.Name, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListVersionStatesRow
+	for rows.Next() {
+		var i ListVersionStatesRow
+		if err := rows.Scan(&i.Version, &i.PublishedAt, &i.Deprecated); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listVersions = `-- name: ListVersions :many
 SELECT version, sort_key, manifest, tarball, integrity, shasum, published_at, deprecated
 FROM npm_versions

@@ -115,8 +115,8 @@ func (h *Handler) ingest(ctx context.Context, repo *repos.Repo, sp *assets.Spool
 	return rs[0], info, nil
 }
 
-// onCommitted writes the version row of a stored .nupkg, in the transaction of the commit
-// (format.Spec OnCommitted).
+// onCommitted writes the version row of a stored .nupkg and moves the revision of its package on,
+// in the transaction of the commit (format.Spec OnCommitted).
 func (h *Handler) onCommitted(ctx context.Context, tx *sql.Tx, w *assets.Write, a *assets.Asset, _ *assets.Asset) error {
 	m, ok := w.Meta.(*pushMeta)
 	if !ok || m.nuspec {
@@ -131,9 +131,20 @@ func (h *Handler) onCommitted(ctx context.Context, tx *sql.Tx, w *assets.Write, 
 	if published.IsZero() {
 		published = time.Now()
 	}
-	return dbq.New(tx).InsertVersion(ctx, dbq.InsertVersionParams{RepoID: w.Repo.ID, LowerID: m.info.lowerID(), PackageID: m.info.ID,
+	q := dbq.New(tx)
+	if err := q.InsertVersion(ctx, dbq.InsertVersionParams{RepoID: w.Repo.ID, LowerID: m.info.lowerID(), PackageID: m.info.ID,
 		Version: v.Full(), Normalized: v.Normalized(), SortKey: v.SortKey(), Semver2: b2i(v.IsSemVer2()), Prerelease: b2i(v.Prerelease()),
-		Meta: string(meta), NupkgPath: a.Path, AssetID: a.ID, PublishedAt: published.Unix()})
+		Meta: string(meta), NupkgPath: a.Path, AssetID: a.ID, PublishedAt: published.Unix()}); err != nil {
+		return err
+	}
+	return bumpPackage(ctx, q, w.Repo.ID, m.info.lowerID())
+}
+
+// bumpPackage moves the revision of package lid of a hosted repo on, so its documents render
+// anew: the package row gets a revision above every earlier one, also above the revision of a
+// package of the same id that was removed before.
+func bumpPackage(ctx context.Context, q *dbq.Queries, repoID int64, lid string) error {
+	return q.UpsertPackage(ctx, dbq.UpsertPackageParams{RepoID: repoID, LowerID: lid, Rev: time.Now().UnixNano()})
 }
 
 func b2i(b bool) int64 {
@@ -144,21 +155,39 @@ func b2i(b bool) int64 {
 }
 
 // onRemoved removes the version of each removed .nupkg, in the transaction of the remove
-// (format.Spec OnRemoved), and removes its .nuspec next.
-func (h *Handler) onRemoved(ctx context.Context, tx *sql.Tx, _ *repos.Repo, removed []*assets.Asset, _ []repopath.Path) ([]repopath.Path, error) {
+// (format.Spec OnRemoved), and removes its .nuspec next. A package with versions left gets a new
+// revision; a package without goes.
+func (h *Handler) onRemoved(ctx context.Context, tx *sql.Tx, repo *repos.Repo, removed []*assets.Asset, _ []repopath.Path) ([]repopath.Path, error) {
 	q := dbq.New(tx)
 	var follow []repopath.Path
+	changed := map[string]bool{}
 	for _, a := range removed {
 		lid, lver, file, ok := flatFile(a.Path)
 		if !ok || !strings.HasSuffix(file, ".nupkg") {
 			continue
 		}
-		if err := q.DeleteVersionsOfAsset(ctx, a.ID); err != nil {
+		ids, err := q.DeleteVersionsOfAsset(ctx, a.ID)
+		if err != nil {
 			return nil, err
+		}
+		for _, id := range ids {
+			changed[id] = true
 		}
 		_, nuspec := packagePaths(lid, lver)
 		if p, err := repopath.Parse(nuspec); err == nil {
 			follow = append(follow, p)
+		}
+	}
+	for lid := range changed {
+		_, err := q.HasPackage(ctx, dbq.HasPackageParams{RepoID: repo.ID, LowerID: lid})
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			err = q.DeletePackage(ctx, dbq.DeletePackageParams{RepoID: repo.ID, LowerID: lid})
+		case err == nil:
+			err = bumpPackage(ctx, q, repo.ID, lid)
+		}
+		if err != nil {
+			return nil, err
 		}
 	}
 	return follow, nil
@@ -188,12 +217,16 @@ func (h *Handler) setListed(w http.ResponseWriter, r *http.Request, c *route.Cal
 	}
 	found := false
 	err = h.host.DB.Tx(r.Context(), func(tx *sql.Tx) error {
-		n, err := dbq.New(tx).SetListed(r.Context(), dbq.SetListedParams{Listed: b2i(listed), RepoID: c.Repo.ID,
+		q := dbq.New(tx)
+		n, err := q.SetListed(r.Context(), dbq.SetListedParams{Listed: b2i(listed), RepoID: c.Repo.ID,
 			LowerID: strings.ToLower(id), SortKey: v.SortKey()})
 		if err != nil || n == 0 {
 			return err
 		}
 		found = true
+		if err := bumpPackage(r.Context(), q, c.Repo.ID, strings.ToLower(id)); err != nil {
+			return err
+		}
 		return h.host.Audit.RecordTx(r.Context(), tx, audit.Event{Action: action, RepoID: c.Repo.ID, Repo: c.Repo.Name,
 			Target: id + " " + v.Normalized()})
 	})

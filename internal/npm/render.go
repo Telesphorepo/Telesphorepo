@@ -236,29 +236,37 @@ func (h *Handler) resolve(ctx context.Context, r *http.Request, p *auth.Principa
 	return found, nil
 }
 
-// document renders the packument of s for urlBase, through the document cache.
-func (h *Handler) document(ctx context.Context, s *source, name, urlBase string, abbreviated bool) ([]byte, error) {
+// documentOf returns the cache key of the packument of s for urlBase and the build of its body:
+// a hosted package's key holds its revision, a proxy's the SHA-256 of the cached remote
+// packument.
+func (h *Handler) documentOf(ctx context.Context, s *source, name, urlBase string, abbreviated bool) (string, func() ([]byte, error)) {
 	form := formFull
 	if abbreviated {
 		form = formAbbrev
 	}
 	if s.hosted != nil {
 		key := format.DocumentKey("hosted", form, name, s.hosted.pkg.Rev, urlBase, s.repo.Name)
-		return h.docs.Render(key, func() ([]byte, error) {
+		return key, func() ([]byte, error) {
 			if err := s.hosted.load(ctx, h.q); err != nil {
 				return nil, err
 			}
 			return s.hosted.render(name, urlBase, abbreviated)
-		})
+		}
 	}
 	key := format.DocumentKey("remote", form, name, s.remote.SHA256, urlBase)
-	return h.docs.Render(key, func() ([]byte, error) {
+	return key, func() ([]byte, error) {
 		body, err := h.assets.ReadAll(ctx, s.remote, h.assets.MaxUploadSize())
 		if err != nil {
 			return nil, err
 		}
 		return rewriteRemote(body, name, urlBase)
-	})
+	}
+}
+
+// document renders the packument of s for urlBase, through the document cache.
+func (h *Handler) document(ctx context.Context, s *source, name, urlBase string, abbreviated bool) ([]byte, error) {
+	d, err := h.docs.Render(h.documentOf(ctx, s, name, urlBase, abbreviated))
+	return d.Body, err
 }
 
 // distTagsOf returns the dist-tags of the source s.

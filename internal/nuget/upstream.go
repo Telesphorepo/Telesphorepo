@@ -35,6 +35,7 @@ type upstream struct {
 	origin string // scheme://host of the remote, lowered
 	flat   string // e.g. "/v3-flatcontainer/"
 	reg    string // e.g. "/v3/registration5-gz-semver2/"
+	sha    string // the SHA-256 of the cached service index that it comes from
 }
 
 // serviceIndexPath is the path of the service index on the remote's host: the remote URL itself
@@ -91,48 +92,55 @@ func (h *Handler) classify(_ *repos.Repo, px *repos.Proxy, p repopath.Path) (ass
 // maxDocument is the largest remote document a proxy reads.
 const maxDocument = 64 << 20
 
-// remoteDoc returns the asset of a cached remote document of proxy repo and its bytes: nil when
-// the remote does not have it, assets.ErrRemoteFailed when the remote failed with nothing cached.
-func (h *Handler) remoteDoc(ctx context.Context, r *http.Request, p *auth.Principal, repo *repos.Repo, path string) (*assets.Asset, []byte, error) {
+// remoteDoc returns the asset of a cached remote document of proxy repo, fetched again after the
+// repo's metadata_ttl: nil when the remote does not have it, assets.ErrRemoteFailed when the
+// remote failed with nothing cached. readDoc reads its bytes.
+func (h *Handler) remoteDoc(ctx context.Context, r *http.Request, p *auth.Principal, repo *repos.Repo, path string) (*assets.Asset, error) {
 	rp, err := repopath.Parse(path)
 	if err != nil {
-		return nil, nil, nil
+		return nil, nil
 	}
-	a, err := h.host.Reader.Resolve(ctx, r, p, repo, rp)
-	if err != nil || a == nil {
-		return nil, nil, err
-	}
-	b, err := h.host.Assets.ReadAll(ctx, a, maxDocument)
-	if err != nil {
-		return nil, nil, err
-	}
-	return a, b, nil
+	return h.host.Reader.Resolve(ctx, r, p, repo, rp)
+}
+
+// readDoc reads the bytes of a cached remote document.
+func (h *Handler) readDoc(ctx context.Context, a *assets.Asset) ([]byte, error) {
+	return h.host.Assets.ReadAll(ctx, a, maxDocument)
 }
 
 // errNoServiceIndex is a remote without a usable service index.
 var errNoServiceIndex = errors.New("the remote has no NuGet service index")
 
-// upstreamOf reads the service index of proxy repo (cached for metadata_ttl) and records its
-// resources for classify. A remote without a service index, or whose flat container or
-// registration lies on another host, fails with assets.ErrRemoteFailed.
+// upstreamOf returns the resources of the service index of proxy repo (cached for metadata_ttl)
+// and records them for classify. It parses the service index once per change of the cached copy.
+// A remote without a service index, or whose flat container or registration lies on another
+// host, fails with assets.ErrRemoteFailed.
 func (h *Handler) upstreamOf(ctx context.Context, r *http.Request, p *auth.Principal, repo *repos.Repo) (*upstream, error) {
 	px, ok := h.host.Repos.Proxy(repo.ID)
 	if !ok {
 		return nil, fmt.Errorf("proxy repo %s has no remote", repo.Name)
 	}
-	_, body, err := h.remoteDoc(ctx, r, p, repo, upstreamDir+"index.json")
+	a, err := h.remoteDoc(ctx, r, p, repo, upstreamDir+"index.json")
 	if err != nil {
 		return nil, err
 	}
-	if body == nil {
+	if a == nil {
 		h.host.Log.Warn("nuget proxy: the remote has no service index", "repo", repo.Name)
 		return nil, assets.ErrRemoteFailed
+	}
+	if v, ok := h.upstreams.Load(px.RemoteURL); ok && v.(*upstream).sha == a.SHA256 {
+		return v.(*upstream), nil
+	}
+	body, err := h.readDoc(ctx, a)
+	if err != nil {
+		return nil, err
 	}
 	up, err := parseServiceIndex(px.RemoteURL, body)
 	if err != nil {
 		h.host.Log.Warn("nuget proxy: the service index of the remote is not usable", "repo", repo.Name, "err", err)
 		return nil, assets.ErrRemoteFailed
 	}
+	up.sha = a.SHA256
 	h.upstreams.Store(px.RemoteURL, up)
 	return up, nil
 }

@@ -1,6 +1,7 @@
 package nuget
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/nuget/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/repopath"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/route"
@@ -50,7 +52,7 @@ func (h *Handler) serviceIndex(w http.ResponseWriter, r *http.Request, c *route.
 	rs = append(rs, res{base + "/package", "PackagePublish/2.0.0", "Push with a publish session as the API key"})
 	rs = append(rs, res{base + "/vulnerabilities/index.json", "VulnerabilityInfo/6.7.0", "This server knows no vulnerabilities"})
 	body, _ := json.Marshal(map[string]any{"version": "3.0.0", "resources": rs})
-	format.WriteDocument(w, r, jsonType, body)
+	format.WriteDocument(w, r, jsonType, format.NewDocument(body))
 }
 
 // vulnerabilityIndex lists one page of vulnerability data, which is empty: restore then finds
@@ -58,13 +60,13 @@ func (h *Handler) serviceIndex(w http.ResponseWriter, r *http.Request, c *route.
 func (h *Handler) vulnerabilityIndex(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	body, _ := json.Marshal([]map[string]string{{"@name": "base", "@id": h.repoBase(r, c.Repo) + "/vulnerabilities/base.json",
 		"@updated": "2026-01-01T00:00:00Z", "comment": "This server knows no vulnerabilities."}})
-	format.WriteDocument(w, r, jsonType, body)
+	format.WriteDocument(w, r, jsonType, format.NewDocument(body))
 }
 
 // vulnerabilityPage is the empty page of vulnerability data: no package has a known
 // vulnerability.
 func (h *Handler) vulnerabilityPage(w http.ResponseWriter, r *http.Request, _ *route.Call) {
-	format.WriteDocument(w, r, jsonType, []byte("{}"))
+	format.WriteDocument(w, r, jsonType, format.NewDocument([]byte("{}")))
 }
 
 // lowerIDOf reads the {id} of the request, lowered; ok is false (and answered 404) for an id
@@ -110,25 +112,17 @@ func (h *Handler) document(w http.ResponseWriter, r *http.Request, c *route.Call
 		h.fail(w, r, err)
 		return
 	}
-	render := func() ([]byte, error) {
+	key := append(append([]string{h.repoBase(r, c.Repo), lid}, parts...), src.key...)
+	err = h.docs.Serve(w, r, jsonType, format.DocumentKey(key...), func() ([]byte, error) {
 		m, err := src.load()
 		if err != nil {
 			return nil, err
 		}
 		return build(m)
-	}
-	var body []byte
-	if src.key == nil {
-		body, err = render()
-	} else {
-		key := append(append([]string{h.repoBase(r, c.Repo), lid}, parts...), src.key...)
-		body, err = h.docs.Render(format.DocumentKey(key...), render)
-	}
+	})
 	if err != nil {
 		h.fail(w, r, err)
-		return
 	}
-	format.WriteDocument(w, r, jsonType, body)
 }
 
 // variant reads which registration base the request names, and its URLs.
@@ -158,25 +152,43 @@ func (h *Handler) flatIndex(w http.ResponseWriter, r *http.Request, c *route.Cal
 			h.fail(w, r, err)
 			return
 		}
-		a, body, err := h.remoteDoc(ctx, r, c.P, owner, upstreamDir+"flat/"+lid+"/index.json")
+		a, err := h.remoteDoc(ctx, r, c.P, owner, upstreamDir+"flat/"+lid+"/index.json")
 		if err != nil || a == nil {
 			h.fail(w, r, errOr(err))
 			return
 		}
-		format.WriteDocument(w, r, jsonType, body)
+		if err := h.docs.Serve(w, r, jsonType, format.DocumentKey("flat-remote", a.SHA256), func() ([]byte, error) {
+			return h.readDoc(ctx, a)
+		}); err != nil {
+			h.fail(w, r, err)
+		}
 		return
 	}
-	m, err := h.hostedModel(ctx, owner.ID, lid)
-	if err != nil || m == nil {
-		h.fail(w, r, errOr(err))
-		return
-	}
-	body, err := m.renderFlat()
+	rev, err := h.hostedRev(ctx, owner.ID, lid)
 	if err != nil {
 		h.fail(w, r, err)
 		return
 	}
-	format.WriteDocument(w, r, jsonType, body)
+	key := format.DocumentKey("flat", strconv.FormatInt(owner.ID, 10), lid, rev)
+	if err := h.docs.Serve(w, r, jsonType, key, func() ([]byte, error) { return h.renderFlat(ctx, owner.ID, lid) }); err != nil {
+		h.fail(w, r, err)
+	}
+}
+
+// renderFlat is the version list of the flat container of package lid of a hosted repo: every
+// version, unlisted ones included, lowered and normalised, oldest first.
+func (h *Handler) renderFlat(ctx context.Context, repoID int64, lid string) ([]byte, error) {
+	vs, err := h.q.ListVersionNames(ctx, dbq.ListVersionNamesParams{RepoID: repoID, LowerID: lid, Limit: maxVersions})
+	if err != nil {
+		return nil, err
+	}
+	if len(vs) == 0 {
+		return nil, errNotFound
+	}
+	for i, v := range vs {
+		vs[i] = strings.ToLower(v)
+	}
+	return json.Marshal(map[string][]string{"versions": vs})
 }
 
 // errOr is err, or errNotFound when err is nil.

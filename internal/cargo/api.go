@@ -10,7 +10,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/access"
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
@@ -111,7 +113,7 @@ func (h *Handler) config(w http.ResponseWriter, r *http.Request, c *route.Call) 
 		API          string `json:"api"`
 		AuthRequired bool   `json:"auth-required,omitempty"`
 	}{DL: base + "/crates/{crate}/{crate}-{version}.crate", API: base, AuthRequired: !c.Repo.AnonymousRead}
-	format.WriteDocument(w, r, "application/json", encode(doc))
+	format.WriteDocument(w, r, "application/json", format.NewDocument(encode(doc)))
 }
 
 // index serves the index file of a crate.
@@ -121,62 +123,95 @@ func (h *Handler) index(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		cargoError(w, http.StatusNotFound, "not an index file")
 		return
 	}
-	body, found, err := h.indexFile(r.Context(), r, c.P, c.Repo, crate)
+	d, err := h.indexOf(r.Context(), r, c.P, c.Repo, crate)
+	if err == nil && d == nil {
+		err = errNoCrate
+	}
+	if err == nil {
+		err = h.docs.Serve(w, r, "application/json", d.key, d.build)
+	}
 	switch {
+	case errors.Is(err, errNoCrate):
+		cargoError(w, http.StatusNotFound, "crate "+crate+" is not in this repository")
 	case err != nil:
 		h.fail(w, r, err)
-	case !found:
-		cargoError(w, http.StatusNotFound, "crate "+crate+" is not in this repository")
-	default:
-		format.WriteDocument(w, r, "application/json", body)
 	}
 }
 
-// indexFile returns the index file of crate (lowercase) in repo for p: rendered from the rows of a
-// hosted repo, the remote's file of a proxy (cached under .index/), and in a group the file of the
-// first member that has the crate (assets.Reader.Owner). found is false when there is none.
-func (h *Handler) indexFile(ctx context.Context, r *http.Request, p *auth.Principal, repo *repos.Repo, crate string) ([]byte, bool, error) {
+// errNoCrate is a crate that a repo does not have.
+var errNoCrate = errors.New("no such crate")
+
+// indexDoc is the index file of a crate: its key in the document cache and the build of its body.
+type indexDoc struct {
+	key   string
+	build func() ([]byte, error)
+}
+
+// indexOf returns the index file of crate (lowercase) in repo for p: rendered from the rows of a
+// hosted repo (keyed by the revision of the crate), the remote's file of a proxy (cached under
+// .index/, keyed by its SHA-256), and in a group the file of the first member that has the crate
+// (assets.Reader.Owner). nil when there is none. Only the build reads the rows or the file.
+func (h *Handler) indexOf(ctx context.Context, r *http.Request, p *auth.Principal, repo *repos.Repo, crate string) (*indexDoc, error) {
 	switch repo.Kind {
 	case repos.KindHosted:
-		rows, err := h.q.ListEntries(ctx, dbq.ListEntriesParams{RepoID: repo.ID, LowerName: crate, Limit: maxIndexRows})
-		if err != nil || len(rows) == 0 {
-			return nil, false, err
+		n, err := h.q.GetNameRev(ctx, dbq.GetNameRevParams{RepoID: repo.ID, FoldedName: fold(crate)})
+		if errors.Is(err, sql.ErrNoRows) || (err == nil && strings.ToLower(n.Name) != crate) {
+			return nil, nil // the folded name is held by a crate of another lowercase name
 		}
-		var b bytes.Buffer
-		for _, row := range rows {
-			l, err := withYanked(row.Entry, row.Yanked != 0)
-			if err != nil {
-				return nil, false, err
-			}
-			b.Write(l)
+		if err != nil {
+			return nil, err
 		}
-		return b.Bytes(), true, nil
+		key := format.DocumentKey("hosted", strconv.FormatInt(repo.ID, 10), crate, strconv.FormatInt(n.Rev, 10))
+		return &indexDoc{key: key, build: func() ([]byte, error) { return h.renderIndex(ctx, repo.ID, crate) }}, nil
 	case repos.KindProxy:
 		a, err := h.host.Reader.Resolve(ctx, r, p, repo, repopath.Path(".index/"+indexPath(crate)))
 		if err != nil || a == nil {
-			return nil, false, err
+			return nil, err
 		}
-		b, err := h.host.Assets.ReadAll(ctx, a, maxIndexBytes)
-		return b, err == nil, err
+		return &indexDoc{key: format.DocumentKey("proxy", a.SHA256), build: func() ([]byte, error) {
+			return h.host.Assets.ReadAll(ctx, a, maxIndexBytes)
+		}}, nil
 	case repos.KindGroup:
-		var body []byte
+		var d *indexDoc
 		owner, err := h.host.Reader.Owner(ctx, r, p, repo, func(ctx context.Context, m *repos.Repo) (bool, error) {
-			b, ok, err := h.indexFile(ctx, r, p, m, crate)
-			if ok {
-				body = b
+			x, err := h.indexOf(ctx, r, p, m, crate)
+			if x != nil {
+				d = x
 			}
-			return ok, err
+			return x != nil, err
 		})
 		if err != nil || owner == nil {
-			return nil, false, err
+			return nil, err
 		}
-		return body, true, nil
+		return d, nil
 	}
-	return nil, false, nil
+	return nil, nil
+}
+
+// renderIndex renders the index file of crate (lowercase) of a hosted repo from its rows, one
+// line per version with its yanked flag.
+func (h *Handler) renderIndex(ctx context.Context, repoID int64, crate string) ([]byte, error) {
+	rows, err := h.q.ListEntries(ctx, dbq.ListEntriesParams{RepoID: repoID, LowerName: crate, Limit: maxIndexRows})
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, errNoCrate
+	}
+	var b bytes.Buffer
+	for _, row := range rows {
+		l, err := withYanked(row.Entry, row.Yanked != 0)
+		if err != nil {
+			return nil, err
+		}
+		b.Write(l)
+	}
+	return b.Bytes(), nil
 }
 
 // download serves a .crate. A group serves it from the member that owns the crate's name, so a
-// later member cannot shadow it.
+// later member cannot shadow it: a hosted member owns it when it has the name, a proxy when it
+// has the remote's index file of the crate.
 func (h *Handler) download(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	p := "crates/" + r.PathValue("name") + "/" + r.PathValue("file")
 	crate, _, ok := parseCratePath(p)
@@ -191,8 +226,8 @@ func (h *Handler) download(w http.ResponseWriter, r *http.Request, c *route.Call
 	ctx := r.Context()
 	lower := strings.ToLower(crate)
 	owner, err := h.host.Reader.Owner(ctx, r, c.P, c.Repo, func(ctx context.Context, m *repos.Repo) (bool, error) {
-		_, ok, err := h.indexFile(ctx, r, c.P, m, lower)
-		return ok, err
+		d, err := h.indexOf(ctx, r, c.P, m, lower)
+		return d != nil, err
 	})
 	if err != nil {
 		h.fail(w, r, err)
@@ -325,9 +360,13 @@ func (h *Handler) yank(yanked bool) route.Handler {
 		var changed int64
 		err = h.host.DB.Tx(r.Context(), func(tx *sql.Tx) error {
 			var err error
-			changed, err = dbq.New(tx).SetYanked(r.Context(), dbq.SetYankedParams{Yanked: flag, RepoID: c.Repo.ID,
+			q := dbq.New(tx)
+			changed, err = q.SetYanked(r.Context(), dbq.SetYankedParams{Yanked: flag, RepoID: c.Repo.ID,
 				LowerName: strings.ToLower(crate), SortKey: v.SortKey()})
-			return err
+			if err != nil || changed == 0 {
+				return err
+			}
+			return q.BumpRev(r.Context(), dbq.BumpRevParams{At: time.Now().UnixNano(), RepoID: c.Repo.ID, FoldedName: fold(crate)})
 		})
 		if err != nil {
 			h.fail(w, r, err)
