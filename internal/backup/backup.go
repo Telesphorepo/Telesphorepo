@@ -21,6 +21,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/blobs"
@@ -247,6 +250,9 @@ func run(ctx context.Context, dir, folder string, src Source) (*Result, error) {
 	return res, nil
 }
 
+// copyWorkers is how many blobs a walk copies at once.
+const copyWorkers = 12
+
 // copier copies blobs into the blobs folder of a backup dir. It keeps the mtime of its backup folder
 // and of each blob that the backup uses fresh, so a retention run of another process (the server's,
 // next to a CLI backup into the same dir) leaves them alone however long the backup takes.
@@ -258,7 +264,25 @@ type copier struct {
 
 	stepName     string
 	checked      int64
+	copied       atomic.Int64
 	blobs, bytes int64 // the blobs of the last walk and their bytes
+
+	// covered are the blobs that the first walk found in the blobs folder or copied there, in id
+	// order, since firstAt. The second walk does not look at them again: a blob never changes.
+	covered []coveredBlob
+	firstAt time.Time
+}
+
+// coveredBlob is a blob by its id and the first 64 bits of its SHA-256 (a row id that the
+// database reuses for other bytes does not match).
+type coveredBlob struct {
+	id  int64
+	sum uint64
+}
+
+func cover(b dbq.WalkReferencedBlobsRow) coveredBlob {
+	sum, _ := strconv.ParseUint(b.Sha256[:min(16, len(b.Sha256))], 16, 64)
+	return coveredBlob{id: b.ID, sum: sum}
 }
 
 func (c *copier) step(name string) {
@@ -269,34 +293,64 @@ func (c *copier) step(name string) {
 func (c *copier) report() {
 	now := time.Now()
 	_ = os.Chtimes(c.folder, now, now)
+	c.res.Copied = c.copied.Load()
 	if c.src.Progress != nil {
 		c.src.Progress(Progress{Step: c.stepName, Blobs: c.checked, Copied: c.res.Copied})
 	}
 }
 
 // walk goes through the blobs that the assets of database q use and, with fs storage, copies each
-// one that the blobs folder lacks. With required, a blob that is gone from the store fails the
-// run: the database copy needs it. The first walk (the live database) skips such a blob, because
-// the blob GC may have removed it since the page was read.
+// one that the blobs folder lacks, copyWorkers at once. With required, a blob that is gone from
+// the store fails the run: the database copy needs it. The first walk (the live database, required
+// false) skips such a blob, because the blob GC may have removed it since the page was read, and
+// records the blobs it covered. The second walk skips those; when the run is past half of
+// graceAge, it only touches them, so their mtime stays fresh until the backup is complete.
 func (c *copier) walk(ctx context.Context, q *sql.DB, required bool) error {
 	c.blobs, c.bytes = 0, 0
 	withBlobs := c.src.Storage.Backend != "s3"
+	first := !required
+	if first {
+		c.covered, c.firstAt = nil, time.Now()
+	}
+	retouch := !first && time.Since(c.firstAt) > graceAge/2
 	var after int64
+	next := 0 // the next entry of c.covered (second walk)
 	for {
 		page, err := dbq.New(q).WalkReferencedBlobs(ctx, dbq.WalkReferencedBlobsParams{AfterID: after, Limit: pageSize})
 		if err != nil {
 			return fmt.Errorf("read blobs: %w", err)
 		}
+		jobs := make([]blobJob, 0, len(page))
 		for _, b := range page {
 			c.blobs++
 			c.bytes += b.Size
-			if withBlobs {
-				if err := c.copyOne(ctx, b, required); err != nil {
-					return err
+			if !withBlobs {
+				continue
+			}
+			if !first {
+				for next < len(c.covered) && c.covered[next].id < b.ID {
+					next++
+				}
+				if next < len(c.covered) && c.covered[next] == cover(b) {
+					if retouch {
+						jobs = append(jobs, blobJob{b: b, touch: true})
+					}
+					continue
 				}
 			}
-			c.checked++
+			jobs = append(jobs, blobJob{b: b})
 		}
+		if err := c.work(ctx, jobs, required); err != nil {
+			return err
+		}
+		if first {
+			for _, j := range jobs {
+				if j.present {
+					c.covered = append(c.covered, cover(j.b))
+				}
+			}
+		}
+		c.checked += int64(len(page))
 		c.report()
 		if len(page) < pageSize {
 			return nil
@@ -305,47 +359,93 @@ func (c *copier) walk(ctx context.Context, q *sql.DB, required bool) error {
 	}
 }
 
-// copyOne copies blob b into the blobs folder unless the folder holds it with its size.
-func (c *copier) copyOne(ctx context.Context, b dbq.WalkReferencedBlobsRow, required bool) error {
+// blobJob is one blob of a page for the workers: touch only sets its mtime; present says that
+// the blobs folder holds it afterwards.
+type blobJob struct {
+	b       dbq.WalkReferencedBlobsRow
+	touch   bool
+	present bool
+}
+
+// work does jobs with copyWorkers workers and returns the first error.
+func (c *copier) work(ctx context.Context, jobs []blobJob, required bool) error {
+	ctx, stop := context.WithCancelCause(ctx)
+	defer stop(nil)
+	next := make(chan int)
+	var wg sync.WaitGroup
+	for range min(copyWorkers, len(jobs)) {
+		wg.Go(func() {
+			for i := range next {
+				j := &jobs[i]
+				if j.touch {
+					now := time.Now()
+					_ = os.Chtimes(filepath.Join(c.dir, filepath.FromSlash(blobs.Key(j.b.Sha256))), now, now)
+					continue
+				}
+				present, err := c.copyOne(ctx, j.b, required)
+				if err != nil {
+					stop(err)
+					continue
+				}
+				j.present = present
+			}
+		})
+	}
+feed:
+	for i := range jobs {
+		select {
+		case next <- i:
+		case <-ctx.Done():
+			break feed
+		}
+	}
+	close(next)
+	wg.Wait()
+	return context.Cause(ctx)
+}
+
+// copyOne copies blob b into the blobs folder unless the folder holds it with its size (then it
+// sets its mtime). It reports whether the folder holds the blob afterwards.
+func (c *copier) copyOne(ctx context.Context, b dbq.WalkReferencedBlobsRow, required bool) (bool, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return false, err
 	}
 	key := blobs.Key(b.Sha256)
 	dst := filepath.Join(c.dir, filepath.FromSlash(key))
 	if st, err := os.Stat(dst); err == nil && st.Size() == b.Size {
 		now := time.Now()
 		_ = os.Chtimes(dst, now, now)
-		return nil
+		return true, nil
 	}
 	if c.src.Hold != nil {
 		release, exists, err := c.src.Hold(ctx, b.Sha256)
 		if err != nil {
-			return err
+			return false, err
 		}
 		defer release()
 		if !exists {
 			if required {
-				return fmt.Errorf("blob %s is gone from the server", b.Sha256)
+				return false, fmt.Errorf("blob %s is gone from the server", b.Sha256)
 			}
-			return nil
+			return false, nil
 		}
 	}
 	body, _, err := c.src.Get(ctx, key)
 	if errors.Is(err, storage.ErrNotFound) {
 		if required {
-			return fmt.Errorf("blob %s is missing in the store", b.Sha256)
+			return false, fmt.Errorf("blob %s is missing in the store", b.Sha256)
 		}
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return fmt.Errorf("read blob %s: %w", b.Sha256, err)
+		return false, fmt.Errorf("read blob %s: %w", b.Sha256, err)
 	}
 	defer body.Close()
 	if err := copyBlob(dst, body, b.Sha256, b.Size); err != nil {
-		return err
+		return false, err
 	}
-	c.res.Copied++
-	return nil
+	c.copied.Add(1)
+	return true, nil
 }
 
 // copyBlob writes body to dst through a temp file in the same folder, checking its size and

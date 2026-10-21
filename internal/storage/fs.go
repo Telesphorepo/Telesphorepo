@@ -38,7 +38,7 @@ func (s *fsStore) path(key string) (string, error) {
 	return filepath.Join(s.root, filepath.FromSlash(key)), nil
 }
 
-func (s *fsStore) Put(ctx context.Context, key string, r io.Reader, size int64, contentType string) error {
+func (s *fsStore) Put(ctx context.Context, key string, r io.ReaderAt, size int64, contentType string) error {
 	p, err := s.path(key)
 	if err != nil {
 		return err
@@ -57,7 +57,8 @@ func (s *fsStore) Put(ctx context.Context, key string, r io.Reader, size int64, 
 			os.Remove(tmp)
 		}
 	}()
-	n, err := io.Copy(f, r)
+	// One byte past size, so a source longer than size fails like a shorter one.
+	n, err := io.Copy(f, io.NewSectionReader(r, 0, size+1))
 	if err == nil && n != size {
 		err = fmt.Errorf("storage: wrote %d bytes, expected %d", n, size)
 	}
@@ -78,6 +79,25 @@ func (s *fsStore) Put(ctx context.Context, key string, r io.Reader, size int64, 
 	}
 	tmp = ""
 	return nil
+}
+
+// Adopt makes the file f of size bytes the object key without a copy: it syncs f, gives it the
+// mode of an object and renames it into place, so the object is as crash safe as one that Put
+// writes. f stays open and now reads the object. It reports false when the rename is not possible
+// (f is on another volume than the store, or the system does not rename an open file); the
+// caller then writes the object with Put.
+func (s *fsStore) Adopt(key string, f *os.File, size int64) bool {
+	p, err := s.path(key)
+	if err != nil {
+		return false
+	}
+	if st, err := f.Stat(); err != nil || st.Size() != size {
+		return false
+	}
+	if os.MkdirAll(filepath.Dir(p), 0o750) != nil || f.Sync() != nil || f.Chmod(0o640) != nil {
+		return false
+	}
+	return os.Rename(f.Name(), p) == nil
 }
 
 // WriteUnsynced writes data to key directly: no temp file, no fsync, no rename, and the parent
@@ -166,15 +186,17 @@ func (s *fsStore) Delete(ctx context.Context, key string) error {
 }
 
 func (s *fsStore) DeleteMany(ctx context.Context, keys []string) error {
-	for _, k := range keys {
+	var de DeleteError
+	for i, k := range keys {
 		if err := ctx.Err(); err != nil {
-			return err
+			de.add(keys[i:], err)
+			break
 		}
 		if err := s.Delete(ctx, k); err != nil {
-			return err
+			de.add([]string{k}, err)
 		}
 	}
-	return nil
+	return de.err()
 }
 
 func (s *fsStore) List(ctx context.Context, prefix, after string, limit int) ([]ObjectInfo, error) {

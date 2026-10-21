@@ -50,7 +50,7 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/db` | SQLite (modernc, no cgo), WAL, separate writer/reader pools, one schema per component with a fingerprint (`Init`), `PRAGMA optimize`, the plan guard (`CheckPlans`) |
 | `internal/ci` | The CI provider registry (`Registry`: `Build`, `Describe`) and the build records (`Builds`: `Record`, `Upsert`, `Loader`, `Cleanup`). See **CI providers and build records** |
 | `internal/db/dbq` | sqlc-generated core queries (`internal/db/queries/*.sql`) plus hand-written FTS queries in `extra.go` |
-| `internal/storage` | `Store` interface (with `DeleteMany`: one S3 `DeleteObjects` per 1000 keys, one delete per key on fs); `fs`, `s3`, and `Live`, a hot-swappable wrapper with `Open`, `SameBackend` and `Probe`. Declares the storage setting keys and `ConfigView` (the store of a snapshot) |
+| `internal/storage` | `Store` interface (`Put` reads an `io.ReaderAt`; `DeleteMany`: one S3 `DeleteObjects` per 1000 keys, one delete per key on fs, and a `DeleteError` that names the keys left); `fs` (with `Adopt`), `s3` (multipart from 64 MiB), `Mirror`, and `Live`, a hot-swappable wrapper with `Open`, `SameBackend` and `Probe`. Declares the storage setting keys and `ConfigView` (the store of a snapshot) |
 | `internal/repopath` | The pure repo-path parser: `Parse` (a file path) and `Folder` (`""` or a folder ending in `/`). Routes, file operations, imports and uploads check every path with it |
 | `internal/blobs` | Content-addressed blobs: `Spooled` bodies with their hashes, `Store` (`Key`, digest `Lock`, `Ensure`/`EnsureAll`, `Get`, `Open`) and the blob GC. See **Byte pipeline** |
 | `internal/assets` | The byte pipeline: `Pipeline` (`Commit`, `CommitAll`, `Remove`, point lookups, listing, FTS search), `Reader` (the read path of hosted, proxy and group repos), `Uploads` (resumable uploads), the asset hooks of a format (`Hooks`) and the watchers of every commit and remove (`Watcher`). See **Byte pipeline** |
@@ -616,12 +616,23 @@ request path) and `SumFileCount` (the total of a backfill, once per backfill).
 | `$TR_DATA_DIR/master.key` | Master key (base64, mode 0600). Generated on first start unless `TR_MASTER_KEY` is set |
 | `$TR_DATA_DIR/tmp/` | Upload spool, kept on the data volume rather than tmpfs |
 | `$TR_DATA_DIR/tmp/uploads/<id>` | The bytes of a resumable upload |
+| `$TR_DATA_DIR/tmp/uploads/<id>.hash` | The MD5, SHA-1 and SHA-256 state of the bytes received (with a checksum of its own) |
 | `$TR_DATA_DIR/blobs/` | FS blob root (default for the `fs.root` setting) |
 
 Blob keys are the same on every backend: `blobs/sha256/<first 2 hex>/<sha256 hex>`, built with
 package `path`. A blob holds the content of any number of files in any repos; the asset rows hold
 the paths and the content types. S3 keys get the optional `s3.prefix` in front. The FS backend
-writes a temp file and renames it into place.
+writes a temp file, syncs it and renames it into place. A new blob whose spool (an upload in
+`tmp/`) is on the volume of the FS root is not copied: the spool is synced and renamed into place
+(`Adopt`); across volumes the blob is copied.
+
+The S3 backend writes an object below 64 MiB with one `PutObject`, and from 64 MiB as a multipart
+upload: parts of 16 MiB (larger for an object above 156 GiB, so it fits in 10,000 parts; every
+part but the last has the same size, as R2 requires), 8 parts at once, each read from the spool at
+its offset; a failed upload is aborted. Its HTTP client keeps up to 64 idle connections, fails a
+request whose connection reads or writes nothing for a minute, and the retryer (3 attempts with a
+backoff) has no shared retry quota, so an outage of the store does not make every later call fail
+at once.
 Debian pool path: `pool/{component}/{prefix}/{source}/{package}_{version-without-epoch}_{arch}.deb`.
 The `{prefix}` is the first letter of the source name, or `lib` plus the 4th letter for `lib*`
 sources.
@@ -1473,7 +1484,8 @@ and check time. `CommitAll` writes files of one repo in one transaction:
 3. `Admit` of the format decides each write: store, keep (the same bytes: status `unchanged`, no
    write) or a refusal with its status (400, 404, 409). Without `Admit`, the same bytes are kept and
    other bytes replace the file.
-4. The digest locks; each new blob is written once (a few at a time), and its row is inserted.
+4. The digest locks; each new blob is written once (a few at a time; on the filesystem a spool on
+   the store's volume is renamed into place), and its row is inserted.
 5. One transaction: the asset rows, the format's `OnCommitted` (its own rows, rebuild marks), and
    one `file.upload` event per stored file whose source is `put`, `ui` or `import`. A failed
    transaction is tried again up to 3 times.
@@ -1501,10 +1513,12 @@ file uses. While the repo has an active `delete` operation, `Remove` calls no `O
 the format go with the repo row (`ON DELETE CASCADE`).
 
 **Blob GC.** The job `core.blob-gc` waits `blobs.gc_grace` (at least a second, at most 10 minutes),
-then deletes every blob with `refs = 0` for longer than the grace. Under its digest lock, which
-every write that references the blob also holds, it reads the row again and checks that `refs` is
-still 0 since before the cutoff. Then it deletes the object, then the row. When the object delete
-fails, the row stays and the next round tries again.
+then deletes every blob with `refs = 0` for longer than the grace, in rounds of up to 1000 blobs.
+Under the digest locks of the round, which every write that references a blob also holds, one
+query reads which blobs still have `refs` 0 since before the cutoff. One `DeleteMany` deletes
+their objects (one `DeleteObjects` on S3), then one transaction deletes the rows of the objects
+that are gone, also when the job stops meanwhile. A blob whose object delete failed keeps its
+row, and the next run tries again.
 
 **Read path (`Reader.Serve`).** A hosted repo serves the asset of the path, or 404. A proxy asks
 the format's `Classify` (a refused path is 404), fetches the file through `proxy.Service.Ensure`
@@ -1536,9 +1550,12 @@ answers carry no `Cache-Control`.
 increasing offsets (`Append` needs the offset to equal the bytes received, else 416 with the bytes
 received), and finishes it with the SHA-256 (and optionally the size) of the whole file. The bytes
 are in `$TR_DATA_DIR/tmp/uploads/<id>`; the row saves the count after each append, so an upload
-continues after a restart; no hash state is kept. `Finish` reads the file once for its MD5, SHA-1 and
-SHA-256, deletes the upload on a mismatch (400), and returns the body for a `Commit` with source
-`put`. Only the publish session that started an upload continues it (a core bearer token counts
+continues after a restart. Each append hashes its bytes as they arrive and saves the MD5, SHA-1
+and SHA-256 state in `<id>.hash` (with the byte count and a SHA-256 of the state); a state that
+does not cover exactly the bytes received (an append that stopped before its row update, a damaged
+file) is rebuilt from a read of those bytes. `Finish` drops bytes past the count, takes the hashes
+from the state without reading the file again, deletes the upload on a mismatch (400), and returns
+the body for a `Commit` with source `put`. Only the publish session that started an upload continues it (a core bearer token counts
 with the publish session of its scope of the repo); `Status` returns the bytes received. `max_upload_size` caps it, and
 the job `core.upload-sessions` deletes uploads idle past `upload.session_ttl` (`24h`) with their files.
 A repo delete or a user delete removes the rows of their uploads (`ON DELETE CASCADE`), so the job
@@ -1657,13 +1674,15 @@ A settings PATCH that points the server at another blob location while blobs exi
   the target storage settings in a `storage_moves` row, encrypted (AAD `storage_moves:<id>`).
   The storage settings do not change yet. One move runs at a time.
 - **Mirror.** While the move copies, `Live` holds a `storage.Mirror`. Reads and listings use the
-  source. `Put` and `Delete` (new blobs, the blob GC) go to the target first, then to the source;
-  an error on either fails the call.
+  source. `Put`, `Delete` and `DeleteMany` (new blobs, the blob GC) go to the target and the
+  source at once, each store reading the spool on its own; an error on either fails the call.
 - **Copier.** It walks `blobs` by `id > cursor` in pages of 500 and saves the cursor and counters
   after each page. For each blob it takes its digest lock (so the blob GC waits) and reads the row
   again. It skips a blob that the GC deleted, and one that the target holds with the same size (a
   blob never changes). It checks the source size and SHA-256 before it writes the target. A missing
-  source blob or a mismatch is a `storage_move_failures` row.
+  source blob or a mismatch is a `storage_move_failures` row. The copy of a blob has a deadline of
+  5 minutes plus a second per MiB; a copy past it is a failure row, and the copier goes on with the
+  next blobs.
 - **Finish.** Without failures, one settings write makes the target the active storage, `Live`
   swaps to the target and the move is `done`. With failures the move is `failed` ("N blobs could
   not be copied"), and `Live` returns to the source. A later move skips the blobs already copied.
@@ -1697,9 +1716,11 @@ itself: the module has no table.
 - **Blobs (fs).** The blobs that an asset uses (`refs > 0`) go into `<backup.dir>/blobs/`, the same
   layout as the store (`blobs/sha256/<2 hex>/<hex>`), shared by every backup of the folder. A blob
   that the folder holds with its size is not copied again (a blob never changes); a copy goes to a
-  temp name, its size and SHA-256 are checked, then it is renamed. The run copies the blobs of the
-  live database first, then writes the database copy, then copies the blobs of the copy that the
-  first pass missed (uploads in between). In the server each copy holds the digest lock of the
+  temp name, its size and SHA-256 are checked, then it is renamed. Each page of 500 blobs is copied
+  12 at a time. The run copies the blobs of the live database first, then writes the database copy,
+  then copies the blobs of the copy that the first pass missed (uploads in between): the second
+  pass does not look again at a blob that the first pass found or copied (by id and SHA-256), and
+  only sets its mtime when the run has taken more than half an hour. In the server each copy holds the digest lock of the
   blob, so the blob GC waits; a blob that the copy uses and the store no longer holds fails the
   run.
 - **Blobs (S3).** No blob is copied. `backup.json` names the bucket, the prefix and the endpoint
@@ -3716,7 +3737,10 @@ and a Maven repo are one stored blob, each path keeps its own content type, also
 the blob stays while a file uses it and the blob GC removes it after `TR_BLOBS_GC_GRACE=1s`; an upload of the
 same bytes stores them again), `TestUploadSessions` (chunks, a wrong offset, a restart between chunks, a
 wrong digest, another publish session, finish into a raw and a Maven repo, an immutable release path,
-cancel, a Debian repo that refuses a path and finishes a `.deb` through its upload route) and `TestMavenMetadataAfterDelete`. `bulk_test.go` checks the `mirror` operation of a mapped repo and
+cancel, a Debian repo that refuses a path and finishes a `.deb` through its upload route), `TestLargeUploadAndRepoGC`
+(on both stores: an 80 MiB resumable upload in three chunks, one sent again at a wrong offset, whose checksum headers
+are the hashes of the whole file; on SeaweedFS a multipart object of 5 parts; the file reads back byte for byte; after a
+repo delete the blob GC removes every object of the repo) and `TestMavenMetadataAfterDelete`. `bulk_test.go` checks the `mirror` operation of a mapped repo and
 the 409 of resume and clear.
 
 `pypi_test.go` covers PyPI with the official `python` image (twine, build and poetry installed

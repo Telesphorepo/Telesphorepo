@@ -107,12 +107,19 @@ func (s *Service) copy(ctx context.Context, r *run, c counters) {
 				}
 			}()
 			for i, b := range page {
+				// copyOne ends at its deadline; a worker stuck past it (a read that no context
+				// ends, such as a hung disk) fails the blob here, so the cursor moves on.
+				wait := time.NewTimer(copyTimeout(b.Size) + time.Minute)
 				var got result
 				select {
 				case got = <-results[i]:
+				case <-wait.C:
+					got = result{failed, "the copy did not end within " + (copyTimeout(b.Size) + time.Minute).String()}
 				case <-ctx.Done():
+					wait.Stop()
 					return false
 				}
+				wait.Stop()
 				if ctx.Err() != nil {
 					return false
 				}
@@ -150,12 +157,44 @@ func (s *Service) copy(ctx context.Context, r *run, c counters) {
 	s.finish(r, c.failed)
 }
 
-// copyOne copies blob b under its digest lock, which the asset pipeline and the blob GC take, so
+// copyTimeout is how long the copy of a blob of size bytes may take: 5 minutes, plus a second
+// per MiB (a copy at 1 MiB/s).
+func copyTimeout(size int64) time.Duration {
+	return 5*time.Minute + time.Duration(size>>20)*time.Second
+}
+
+// copyOne copies blob b within copyTimeout: a copy that takes longer fails the blob, and the
+// move goes on with the next one.
+func (s *Service) copyOne(ctx context.Context, r *run, b dbq.WalkBlobsRow) (outcome, string) {
+	d := copyTimeout(b.Size)
+	cctx, cancel := context.WithTimeout(ctx, d)
+	defer cancel()
+	res, reason := s.copyBlob(cctx, r, b)
+	if res == failed && ctx.Err() == nil && cctx.Err() != nil {
+		reason = "the copy took longer than " + d.String() + ": " + reason
+	}
+	return res, reason
+}
+
+// ctxReader reads r until ctx ends.
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c ctxReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
+}
+
+// copyBlob copies blob b under its digest lock, which the asset pipeline and the blob GC take, so
 // the GC does not delete it meanwhile. It skips a blob that the GC deleted, and one that the
 // target already holds with its size (a blob never changes). A missing source object, or one
 // whose size or SHA-256 differs from the blob row, is a failure; the content is checked before
 // it is written to the target.
-func (s *Service) copyOne(ctx context.Context, r *run, b dbq.WalkBlobsRow) (outcome, string) {
+func (s *Service) copyBlob(ctx context.Context, r *run, b dbq.WalkBlobsRow) (outcome, string) {
 	release := s.blobs.Lock([]string{b.Sha256})
 	defer release()
 	if _, err := s.blobs.Get(ctx, b.Sha256); errors.Is(err, blobs.ErrUnknown) {
@@ -186,21 +225,18 @@ func (s *Service) copyOne(ctx context.Context, r *run, b dbq.WalkBlobsRow) (outc
 		return failed, fmt.Sprintf("source blob is %d bytes; the blob row says %d bytes", info.Size, b.Size)
 	}
 
-	// The S3 client needs a seekable body, and the hash must be checked before the target holds
-	// the blob: hash a seekable source (a file) in place, spool any other to a temp file.
-	var content io.Reader
+	// A put reads its body at offsets, and the hash must be checked before the target holds the
+	// blob: hash a source file in place, spool any other source to a temp file.
+	var content io.ReaderAt
 	var sum string
-	if seeker, ok := body.(io.ReadSeeker); ok {
+	if file, ok := body.(io.ReaderAt); ok {
 		h := sha256.New()
-		if _, err := io.Copy(h, seeker); err != nil {
+		if _, err := io.Copy(h, ctxReader{ctx, io.NewSectionReader(file, 0, b.Size)}); err != nil {
 			return failed, "read source: " + err.Error()
 		}
-		if _, err := seeker.Seek(0, io.SeekStart); err != nil {
-			return failed, "read source: " + err.Error()
-		}
-		content, sum = seeker, hex.EncodeToString(h.Sum(nil))
+		content, sum = file, hex.EncodeToString(h.Sum(nil))
 	} else {
-		sp, err := blobs.Spool(s.set.Current().TmpDir(), body, b.Size)
+		sp, err := blobs.Spool(s.set.Current().TmpDir(), ctxReader{ctx, body}, b.Size)
 		if errors.Is(err, blobs.ErrTooLarge) {
 			return failed, "source blob is larger than the blob row (" + strconv.FormatInt(b.Size, 10) + " bytes)"
 		}
@@ -211,7 +247,7 @@ func (s *Service) copyOne(ctx context.Context, r *run, b dbq.WalkBlobsRow) (outc
 		if sp.Size != b.Size {
 			return failed, fmt.Sprintf("source blob is %d bytes; the blob row says %d bytes", sp.Size, b.Size)
 		}
-		if content, err = sp.Reader(); err != nil {
+		if content, err = sp.ReaderAt(); err != nil {
 			return failed, "read source: " + err.Error()
 		}
 		sum = sp.SHA256

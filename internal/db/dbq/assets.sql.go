@@ -8,6 +8,7 @@ package dbq
 import (
 	"context"
 	"database/sql"
+	"strings"
 )
 
 const deleteAsset = `-- name: DeleteAsset :execrows
@@ -196,23 +197,6 @@ func (q *Queries) InsertUploadSession(ctx context.Context, arg InsertUploadSessi
 		arg.ExpiresAt,
 	)
 	return err
-}
-
-const isBlobCollectable = `-- name: IsBlobCollectable :one
-SELECT count(*) FROM blobs WHERE id = ?1 AND refs = 0 AND unreferenced_at < ?2
-`
-
-type IsBlobCollectableParams struct {
-	ID     int64
-	Cutoff int64
-}
-
-// One blob, when no asset referenced it since before cutoff (the GC checks it under the digest lock).
-func (q *Queries) IsBlobCollectable(ctx context.Context, arg IsBlobCollectableParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, isBlobCollectable, arg.ID, arg.Cutoff)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
 }
 
 const listAssetsAfter = `-- name: ListAssetsAfter :many
@@ -493,6 +477,51 @@ func (q *Queries) ListAssetsFromRange(ctx context.Context, arg ListAssetsFromRan
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCollectableBlobs = `-- name: ListCollectableBlobs :many
+SELECT id FROM blobs WHERE id IN (/*SLICE:ids*/?) AND refs = 0 AND unreferenced_at < ?2
+`
+
+type ListCollectableBlobsParams struct {
+	Ids    []int64
+	Cutoff int64
+}
+
+// The blobs of ids that no asset referenced since before cutoff (the GC checks a round under its
+// digest locks).
+func (q *Queries) ListCollectableBlobs(ctx context.Context, arg ListCollectableBlobsParams) ([]int64, error) {
+	query := listCollectableBlobs
+	var queryParams []interface{}
+	if len(arg.Ids) > 0 {
+		for _, v := range arg.Ids {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:ids*/?", strings.Repeat(",?", len(arg.Ids))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:ids*/?", "NULL", 1)
+	}
+	queryParams = append(queryParams, arg.Cutoff)
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err

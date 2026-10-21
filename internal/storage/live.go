@@ -7,8 +7,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net"
 	"io"
+	"net"
 	"slices"
 	"sync/atomic"
 	"time"
@@ -54,7 +54,7 @@ func (l *Live) Swap(st Store) { l.cur.Store(&holder{st}) }
 // Active returns the active store.
 func (l *Live) Active() Store { return l.cur.Load().Store }
 
-func (l *Live) Put(ctx context.Context, key string, r io.Reader, size int64, contentType string) error {
+func (l *Live) Put(ctx context.Context, key string, r io.ReaderAt, size int64, contentType string) error {
 	return l.Active().Put(ctx, key, r, size, contentType)
 }
 
