@@ -206,9 +206,12 @@ func TestBaseURLFromFirstSignIn(t *testing.T) {
 			}
 		}
 
-		var admin *Session
+		// The harness admin session reads and changes the settings: it signs in at the localhost
+		// port mapping, which leaves base_url unset. A session of signInAt is not used afterwards,
+		// because its client keeps the cookie under the Host it signed in at.
+		admin := s.Admin()
 		for _, host := range []string{"localhost:8080", "127.0.0.1:8080", "[::1]:8080"} {
-			admin = signInAt(t, s, s.AdminUser, host, nil)
+			signInAt(t, s, s.AdminUser, host, nil)
 			unset(admin, "a sign-in at "+host)
 		}
 
