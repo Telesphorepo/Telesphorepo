@@ -15,6 +15,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -40,11 +41,45 @@ func userAgent() string {
 type client struct {
 	id   identity
 	http *http.Client
-	// onVersion gets the Telesphorepo-Version header of each answer. An error stops the request
-	// that got the answer.
+	// onVersion gets the Telesphorepo-Version header of an answer until it accepts that version.
+	// An error stops the request that got the answer.
 	onVersion func(ctx context.Context, v string) error
+
+	mu sync.Mutex
 	// version is the last version header that the server sent ("" before the first answer).
 	version string
+	// observed is the last version that onVersion accepted.
+	observed string
+	// observing is held while onVersion runs.
+	observing sync.Mutex
+}
+
+// serverVersion is the last version header that the server sent ("" before the first answer).
+func (c *client) serverVersion() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.version
+}
+
+// sawVersion records the version header v of an answer and runs onVersion when onVersion has not
+// accepted v yet. One request at a time runs onVersion; a request that onVersion sends itself, or
+// that gets its answer while another request runs onVersion, goes on without it.
+func (c *client) sawVersion(ctx context.Context, v string) error {
+	c.mu.Lock()
+	c.version = v
+	seen := v == c.observed
+	c.mu.Unlock()
+	if seen || c.onVersion == nil || !c.observing.TryLock() {
+		return nil
+	}
+	defer c.observing.Unlock()
+	if err := c.onVersion(ctx, v); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.observed = v
+	c.mu.Unlock()
+	return nil
 }
 
 func newClient(id identity) *client {
@@ -133,11 +168,8 @@ func (c *client) callOnce(ctx context.Context, k request) (http.Header, error) {
 	}
 	defer resp.Body.Close()
 	if v := resp.Header.Get(versionHeader); v != "" {
-		c.version = v
-		if c.onVersion != nil {
-			if err := c.onVersion(ctx, v); err != nil {
-				return nil, err
-			}
+		if err := c.sawVersion(ctx, v); err != nil {
+			return nil, err
 		}
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -177,14 +209,14 @@ func (c *client) answerError(resp *http.Response, b []byte) error {
 			if p.Status == 0 {
 				p.Status = resp.StatusCode
 			}
-			return &problemError{p: p, server: c.id.base(), version: c.version}
+			return &problemError{p: p, server: c.id.base(), version: c.serverVersion()}
 		}
 		var e struct {
 			Error string `json:"error"`
 		}
 		if json.Unmarshal(b, &e) == nil && e.Error != "" {
 			return &problemError{p: problem{Type: "about:blank", Title: http.StatusText(resp.StatusCode), Detail: e.Error,
-				Status: resp.StatusCode}, server: c.id.base(), version: c.version}
+				Status: resp.StatusCode}, server: c.id.base(), version: c.serverVersion()}
 		}
 	}
 	return c.genericError(resp)
@@ -361,9 +393,15 @@ func (c *client) mintDevice(ctx context.Context, d *deviceFile, repo string) (*s
 	if err != nil {
 		return nil, err
 	}
+	return c.mintNonce(ctx, d, nonce, repo)
+}
+
+// mintNonce mints a session for repo with the one-request nonce of device d and the device
+// signature over the nonce and the repo.
+func (c *client) mintNonce(ctx context.Context, d *deviceFile, nonce, repo string) (*session, error) {
 	id := strconv.FormatInt(d.DeviceID, 10)
 	var s session
-	_, err = c.call(ctx, request{method: http.MethodPost, path: "/api/publish/sessions", json: map[string]any{
+	_, err := c.call(ctx, request{method: http.MethodPost, path: "/api/publish/sessions", json: map[string]any{
 		"device_id": d.DeviceID, "repo": repo, "nonce": nonce, "signature": d.sign(signPrefix + nonce + "\n" + id + "\n" + repo),
 	}, out: &s})
 	if err != nil {

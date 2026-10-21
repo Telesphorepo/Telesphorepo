@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -24,6 +25,68 @@ const (
 	chunkSize     = 16 << 20
 	chunkTries    = 4
 )
+
+// uploadWorkers is how many files the CLI uploads at the same time.
+const uploadWorkers = 4
+
+// uploadEach runs up for each file, uploadWorkers files at a time, and prints the line that up
+// returns for each file in the order of files. The first error cancels the uploads that run and
+// starts no other; it is the error of uploadEach. up gets a job whose context ends then.
+func (j *job) uploadEach(files []string, up func(j *job, f string) (string, error)) error {
+	ctx, cancel := context.WithCancel(j.ctx)
+	defer cancel()
+	wj := *j
+	wj.ctx = ctx
+	var (
+		mu      sync.Mutex
+		first   error
+		lines   = make([]string, len(files))
+		done    = make([]bool, len(files))
+		printed int
+		wg      sync.WaitGroup
+	)
+	next := make(chan int)
+	for range min(uploadWorkers, len(files)) {
+		wg.Go(func() {
+			for i := range next {
+				line, err := up(&wj, files[i])
+				mu.Lock()
+				switch {
+				case err != nil && first == nil:
+					first = err
+					cancel()
+				case err == nil:
+					lines[i], done[i] = line, true
+					for printed < len(files) && done[printed] {
+						fmt.Fprintln(os.Stderr, lines[printed])
+						printed++
+					}
+				}
+				mu.Unlock()
+			}
+		})
+	}
+feed:
+	for i := range files {
+		select {
+		case next <- i:
+		case <-ctx.Done():
+			break feed
+		}
+	}
+	close(next)
+	wg.Wait()
+	// After a failure, the files after it that were uploaded all the same.
+	for i := printed; i < len(files); i++ {
+		if done[i] {
+			fmt.Fprintln(os.Stderr, lines[i])
+		}
+	}
+	if first == nil {
+		first = j.ctx.Err()
+	}
+	return first
+}
 
 // escapePath escapes each segment of the repo path p for a URL.
 func escapePath(p string) string {
@@ -67,11 +130,20 @@ func uploadRaw(j *job) error {
 		return err
 	}
 	folder := strings.Trim(strings.ReplaceAll(j.p.Path, `\`, "/"), "/")
+	// The files upload at the same time, so two of them may not go to one path.
+	from := map[string]string{}
 	for _, f := range j.files {
+		dest := path.Clean(path.Join(folder, filepath.Base(f)))
+		if o, dup := from[dest]; dup {
+			return fmt.Errorf("%s and %s both go to %s; upload them one at a time", o, f, dest)
+		}
+		from[dest] = f
+	}
+	return j.uploadEach(j.files, func(j *job, f string) (string, error) {
 		dest := path.Clean(path.Join(folder, filepath.Base(f)))
 		st, err := os.Stat(f)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if st.Size() >= resumableFrom {
 			err = j.resumable(f, st.Size(), func(id string, q url.Values) error {
@@ -84,16 +156,16 @@ func uploadRaw(j *job) error {
 			err = j.putFile(f, st.Size(), "/raw/"+url.PathEscape(j.p.Repo)+"/"+escapePath(dest), nil)
 		}
 		if err != nil {
-			return err
+			return "", err
 		}
-		fmt.Fprintf(os.Stderr, "Uploaded %s to %s/raw/%s/%s\n", f, j.c.id.base(), j.p.Repo, dest)
-	}
-	return nil
+		return fmt.Sprintf("Uploaded %s to %s/raw/%s/%s", f, j.c.id.base(), j.p.Repo, dest), nil
+	})
 }
 
 // uploadDebian uploads each FILE (a .deb) to the distribution and the component of the project
 // file: a PUT of the file, or for a large file the resumable upload routes, which the upload
-// route of the distribution then finishes.
+// route of the distribution then finishes. Uploads to one distribution may run at the same time:
+// each marks the indexes of its units, and the rebuild queue builds them once after the last mark.
 func uploadDebian(j *job) error {
 	if j.p.Dist == "" || j.p.Component == "" {
 		return fmt.Errorf(`%s needs dist and component for a Debian repo, for example dist = "stable" and component = "main"`, j.p.file)
@@ -101,10 +173,11 @@ func uploadDebian(j *job) error {
 	if err := openFiles(j.files); err != nil {
 		return err
 	}
-	for _, f := range j.files {
+	p := "/debian/" + url.PathEscape(j.p.Repo) + "/upload/" + url.PathEscape(j.p.Dist) + "/" + url.PathEscape(j.p.Component)
+	return j.uploadEach(j.files, func(j *job, f string) (string, error) {
 		st, err := os.Stat(f)
 		if err != nil {
-			return err
+			return "", err
 		}
 		var out struct {
 			Package      string `json:"package"`
@@ -112,7 +185,6 @@ func uploadDebian(j *job) error {
 			Architecture string `json:"architecture"`
 			Filename     string `json:"filename"`
 		}
-		p := "/debian/" + url.PathEscape(j.p.Repo) + "/upload/" + url.PathEscape(j.p.Dist) + "/" + url.PathEscape(j.p.Component)
 		if st.Size() >= resumableFrom {
 			err = j.resumable(f, st.Size(), func(id string, q url.Values) error {
 				q.Set("upload", id)
@@ -123,11 +195,10 @@ func uploadDebian(j *job) error {
 			err = j.putFile(f, st.Size(), p, &out)
 		}
 		if err != nil {
-			return err
+			return "", err
 		}
-		fmt.Fprintf(os.Stderr, "Uploaded %s %s (%s) to %s/%s of %s\n", out.Package, out.Version, out.Architecture, j.p.Dist, j.p.Component, j.p.Repo)
-	}
-	return nil
+		return fmt.Sprintf("Uploaded %s %s (%s) to %s/%s of %s", out.Package, out.Version, out.Architecture, j.p.Dist, j.p.Component, j.p.Repo), nil
+	})
 }
 
 // putFile sends the file f of size bytes with PUT to p.

@@ -77,6 +77,37 @@ telesphorepo publish /tmp/pkgs/%s.2.0.0.nupkg
 		wantText(t, "telesphorepo publish FILE", out, "Pushed "+id+".2.0.0.nupkg")
 		wantNoText(t, "telesphorepo publish FILE", out, "pack -c Release -o /tmp/telesphorepo")
 
+		// Two packages at once: the large one goes in chunks and the push finishes it, the small one
+		// goes in one push. The lines say what was pushed in the order of the arguments.
+		big := []ContainerFile{{Path: "/work/big/Big.csproj", Content: fmt.Sprintf(`<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <PackageId>%s.Big</PackageId>
+    <Version>3.0.0</Version>
+    <Authors>e2e</Authors>
+    <Description>A large package of the CLI tests.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="big.bin" Pack="true" PackagePath="content" />
+  </ItemGroup>
+</Project>
+`, id)}}
+		what := "telesphorepo publish of a large and a small package"
+		out = c.mustRun(t, cliDotnetImage, what, fmt.Sprintf(`set -e
+head -c 80000000 /dev/urandom > /work/big/big.bin
+dotnet pack /work/big -c Release -o /tmp/pkgs
+dotnet pack /work/lib -c Release -o /tmp/pkgs
+cd /work/lib
+telesphorepo publish /tmp/pkgs/%[1]s.Big.3.0.0.nupkg /tmp/pkgs/%[1]s.3.0.0.nupkg
+`, id), cliDotnetOpts(append(append(cliNuGetLib(id, "3.0.0", "cli hello 3"), big...), projectFile(s, "/work/lib", repo)), devices, nil))
+		bigLine, smallLine := "Pushed "+id+".Big.3.0.0.nupkg", "Pushed "+id+".3.0.0.nupkg"
+		wantText(t, what, out, "Uploading /tmp/pkgs/"+id+".Big.3.0.0.nupkg", "in chunks of", bigLine, smallLine)
+		if strings.Index(out, bigLine) > strings.Index(out, smallLine) {
+			t.Fatalf("%s: the lines are not in the order of the arguments:\n%s", what, out)
+		}
+		requireAssets(t, s, repo, "v3-flatcontainer/"+lid+".big/", "v3-flatcontainer/"+lid+".big/3.0.0/"+lid+".big.3.0.0.nupkg",
+			"v3-flatcontainer/"+lid+".big/3.0.0/"+lid+".big.nuspec")
+
 		token := s.CreateToken(t, dev, "dev-pass-1234", "cli-nuget")
 		config := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
 <configuration>

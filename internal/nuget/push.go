@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,14 +25,24 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/version"
 )
 
-// push takes a package (PackagePublish/2.0.0): the first part of a multipart/form-data body, or
-// a body that is the .nupkg itself. 201 for a new package version, 409 for a version that the
-// repo has (also with the same bytes, so dotnet nuget push --skip-duplicate skips it), 400 for a
-// package that does not read, 413 above max_upload_size.
+// push takes a package (PackagePublish/2.0.0): the first part of a multipart/form-data body, a
+// body that is the .nupkg itself, or with ?upload=<id>&sha256=<hex>[&size=<n>] and no body the
+// file of a resumable upload of the same publish session (/api/repos/{name}/uploads), which this
+// request finishes (telesphorepo publish of a large package). 201 for a new package version, 409
+// for a version that the repo has (also with the same bytes, so dotnet nuget push
+// --skip-duplicate skips it), 400 for a package that does not read or an upload whose bytes do
+// not match, 404 for an unknown upload, 413 above max_upload_size.
 func (h *Handler) push(w http.ResponseWriter, r *http.Request, c *route.Call) {
-	sp, ok := h.readPush(w, r)
-	if !ok {
-		return
+	var sp *assets.Spooled
+	if id := r.URL.Query().Get("upload"); id != "" {
+		if sp = h.finishUpload(w, r, c, id); sp == nil {
+			return
+		}
+	} else {
+		var ok bool
+		if sp, ok = h.readPush(w, r); !ok {
+			return
+		}
 	}
 	defer sp.Close()
 	res, info, err := h.ingest(r.Context(), c.Repo, sp, format.OriginOf(c.P, assets.SourcePut))
@@ -43,6 +54,39 @@ func (h *Handler) push(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	default:
 		w.WriteHeader(http.StatusCreated)
 	}
+}
+
+// finishUpload ends the resumable upload id of the caller's publish session with the sha256 and
+// size of the query, and returns its file. It answers the error itself and returns nil: 404 for
+// an unknown upload, 400 for a bad query or bytes that do not match (the upload is deleted).
+func (h *Handler) finishUpload(w http.ResponseWriter, r *http.Request, c *route.Call, id string) *assets.Spooled {
+	q := r.URL.Query()
+	digest := strings.ToLower(q.Get("sha256"))
+	if len(digest) != 64 || strings.Trim(digest, "0123456789abcdef") != "" {
+		httpx.Error(w, r, http.StatusBadRequest, "give sha256, the 64 hex digits of the SHA-256 of the whole file")
+		return nil
+	}
+	size := int64(-1)
+	if s := q.Get("size"); s != "" {
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil || n < 0 {
+			httpx.Error(w, r, http.StatusBadRequest, "invalid size")
+			return nil
+		}
+		size = n
+	}
+	sp, err := h.host.Uploads.Finish(r.Context(), id, c.P, c.Repo, digest, size)
+	switch {
+	case errors.Is(err, assets.ErrUploadUnknown):
+		httpx.Error(w, r, http.StatusNotFound, err.Error())
+	case errors.Is(err, assets.ErrDigest):
+		httpx.Error(w, r, http.StatusBadRequest, err.Error())
+	case err != nil:
+		route.Fail(w, r, err)
+	default:
+		return sp
+	}
+	return nil
 }
 
 // readPush spools the package of a push. On failure it has answered and returns false.
