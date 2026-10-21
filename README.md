@@ -1,7 +1,11 @@
 # Telesphorepo
 
-A small self-hosted package repository for Maven/Gradle artifacts, Debian packages, NuGet packages, container images and Helm charts (OCI), and raw files. It is a
-single Go binary with a web UI, and stores files on local disk or in any S3-compatible bucket.
+A small self-hosted package repository for Maven and Gradle artifacts, npm packages, Python
+packages, Rust crates, NuGet packages, container images and Helm charts (OCI), Debian packages and
+raw files. Each format has hosted repos; every format but raw also takes proxies of a public
+registry, and every format but raw and Debian takes groups that put several repos behind one URL.
+It is a single Go binary with a web UI, and
+stores files on local disk or in any S3-compatible bucket.
 
 ## Run it locally
 
@@ -14,7 +18,9 @@ go tool task dev
 
 Open **http://localhost:5173**. The startup banner prints the admin username and password and
 some client snippets. The first run fills the instance with the same demo data each time, before the
-server starts: about 150,000 Maven files, Debian packages, NuGet packages, raw files and container images in the public repos `maven`, `debian`, `nuget`, `raw` and `docker`, a
+server starts: about 150,000 Maven files, and npm, Python, Rust, NuGet and Debian packages, raw
+files and container images, in the public repos `maven`, `npm`, `pypi`, `crates`, `nuget`,
+`debian`, `raw` and `docker`, a
 private Maven repo `internal`, and five demo users (their passwords are in the banner). To start with
 empty repos, run the binary as `telesphorepo-server dev --empty` on a fresh data dir. Data lives in
 `.telesphorepo-dev/`; delete it to start over. Press Ctrl+C to stop. The dev server does not enforce the second factor.
