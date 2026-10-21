@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"slices"
 	"sync"
 	"time"
@@ -181,20 +182,32 @@ type unsynced interface {
 	WriteUnsynced(key string, data []byte) error
 }
 
+// adopter is the rename path of the filesystem store (fsStore.Adopt): a spool on the volume of
+// the store becomes the object without a copy.
+type adopter interface {
+	Adopt(key string, f *os.File, size int64) bool
+}
+
 func (s *Store) putAll(ctx context.Context, sps []*Spooled, fast bool) error {
+	active := s.st.Active()
 	var fastStore unsynced
 	if fast {
-		fastStore, _ = s.st.Active().(unsynced)
+		fastStore, _ = active.(unsynced)
 	}
+	adopt, _ := active.(adopter)
 	put := func(sp *Spooled) error {
 		if fastStore != nil && sp.Data != nil {
 			return fastStore.WriteUnsynced(Key(sp.SHA256), sp.Data)
 		}
-		rd, err := sp.Reader()
+		if adopt != nil && sp.File != nil && !sp.adopted && adopt.Adopt(Key(sp.SHA256), sp.File, sp.Size) {
+			sp.adopted = true
+			return nil
+		}
+		rd, err := sp.ReaderAt()
 		if err != nil {
 			return err
 		}
-		return s.st.Put(ctx, Key(sp.SHA256), rd, sp.Size, "application/octet-stream")
+		return active.Put(ctx, Key(sp.SHA256), rd, sp.Size, "application/octet-stream")
 	}
 	if len(sps) == 1 {
 		return put(sps[0])
@@ -215,13 +228,15 @@ func (s *Store) putAll(ctx context.Context, sps []*Spooled, fast bool) error {
 	return errors.Join(errs...)
 }
 
-// gcBatch is how many blobs one garbage collector round reads.
-const gcBatch = 100
+// gcBatch is how many blobs one garbage collector round reads, locks and deletes (one S3
+// DeleteObjects).
+const gcBatch = 1000
 
-// GC deletes every blob that no asset referenced for longer than grace. Under the digest lock,
-// which every new reference to the blob also holds, it checks again that no asset points to the
-// blob, deletes the object, then the row. When the object delete fails, the row stays and a later
-// round tries again. It returns how many blobs it deleted.
+// GC deletes every blob that no asset referenced for longer than grace, in rounds of gcBatch.
+// Under the digest locks of the round, which every new reference to a blob also holds, it checks
+// again in one query which blobs no asset points to, deletes their objects with one DeleteMany,
+// then their rows in one transaction. A blob whose object delete failed keeps its row, and a
+// later run tries again. It returns how many blobs it deleted.
 func (s *Store) GC(ctx context.Context, grace time.Duration) (int, error) {
 	n := 0
 	for {
@@ -231,14 +246,17 @@ func (s *Store) GC(ctx context.Context, grace time.Duration) (int, error) {
 		if err != nil {
 			return n, err
 		}
-		for _, r := range rows {
-			gone, err := s.collect(ctx, r.ID, r.Sha256, cutoff)
-			if err != nil {
-				return n, err
-			}
-			if gone {
-				n++
-			}
+		if len(rows) == 0 {
+			return n, nil
+		}
+		digests := make([]string, len(rows))
+		for i, r := range rows {
+			digests[i] = r.Sha256
+		}
+		gone, err := s.collect(ctx, rows, digests, cutoff)
+		n += gone
+		if err != nil {
+			return n, err
 		}
 		if len(rows) < gcBatch {
 			return n, nil
@@ -246,16 +264,58 @@ func (s *Store) GC(ctx context.Context, grace time.Duration) (int, error) {
 	}
 }
 
-func (s *Store) collect(ctx context.Context, id int64, sha256 string, cutoff int64) (bool, error) {
-	release := s.Lock([]string{sha256})
+// collect deletes the blobs of rows that are still collectable, under their digest locks, and
+// returns how many it deleted.
+func (s *Store) collect(ctx context.Context, rows []dbq.ListUnreferencedBlobsRow, digests []string, cutoff int64) (int, error) {
+	release := s.Lock(digests)
 	defer release()
-	ok, err := dbq.New(s.db.W).IsBlobCollectable(ctx, dbq.IsBlobCollectableParams{ID: id, Cutoff: cutoff})
-	if err != nil || ok == 0 {
-		return false, err
+	ids := make([]int64, len(rows))
+	for i, r := range rows {
+		ids[i] = r.ID
 	}
-	if err := s.st.Delete(ctx, Key(sha256)); err != nil {
-		return false, fmt.Errorf("delete blob object %s: %w", sha256, err)
+	ok, err := dbq.New(s.db.W).ListCollectableBlobs(ctx, dbq.ListCollectableBlobsParams{Ids: ids, Cutoff: cutoff})
+	if err != nil || len(ok) == 0 {
+		return 0, err
 	}
-	n, err := dbq.New(s.db.W).DeleteUnreferencedBlob(ctx, id)
-	return n > 0, err
+	collectable := make(map[int64]bool, len(ok))
+	for _, id := range ok {
+		collectable[id] = true
+	}
+	var keys []string
+	for _, r := range rows {
+		if collectable[r.ID] {
+			keys = append(keys, Key(r.Sha256))
+		}
+	}
+	delErr := s.st.DeleteMany(ctx, keys)
+	if delErr != nil {
+		delErr = fmt.Errorf("delete blob objects: %w", delErr)
+	}
+	left := map[string]bool{}
+	for _, k := range storage.Undeleted(keys, delErr) {
+		left[k] = true
+	}
+	// The rows of deleted objects go even when ctx ends: a row without its object would make a
+	// new upload of the same bytes reuse a blob that is gone.
+	dctx := context.WithoutCancel(ctx)
+	n := 0
+	err = s.db.Tx(dctx, func(tx *sql.Tx) error {
+		n = 0
+		q := dbq.New(tx)
+		for _, r := range rows {
+			if !collectable[r.ID] || left[Key(r.Sha256)] {
+				continue
+			}
+			c, err := q.DeleteUnreferencedBlob(dctx, r.ID)
+			if err != nil {
+				return err
+			}
+			n += int(c)
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, errors.Join(delErr, err)
+	}
+	return n, delErr
 }

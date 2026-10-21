@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -65,6 +66,48 @@ func NewUploads(d *db.DB, set settings.Provider) *Uploads {
 func (u *Uploads) dir() string { return filepath.Join(u.set().TmpDir(), "uploads") }
 
 func (u *Uploads) file(id string) string { return filepath.Join(u.dir(), id) }
+
+// hashSuffix ends the name of the file next to an upload's bytes that holds the hash state of
+// the bytes received (blobs.Hasher), so Finish needs no second read of the bytes.
+const hashSuffix = ".hash"
+
+func (u *Uploads) hashFile(id string) string { return u.file(id) + hashSuffix }
+
+// hasher returns the hash state of the first received bytes of upload id, whose bytes are f: the
+// saved state when it covers exactly those bytes, else the hashes of a read of them (after an
+// append whose row update did not happen, or a damaged state file).
+func (u *Uploads) hasher(id string, f *os.File, received int64) (*blobs.Hasher, error) {
+	h := blobs.NewHasher()
+	if b, err := os.ReadFile(u.hashFile(id)); err == nil && h.UnmarshalBinary(b) == nil && h.Size() == received {
+		return h, nil
+	}
+	h = blobs.NewHasher()
+	if _, err := io.Copy(h, io.NewSectionReader(f, 0, received)); err != nil {
+		return nil, err
+	}
+	if h.Size() != received {
+		return nil, fmt.Errorf("upload %s has %d bytes, not %d", id, h.Size(), received)
+	}
+	return h, nil
+}
+
+// saveHasher writes the hash state of upload id through a temp file and a rename. hasher checks
+// what it reads, so the write needs no sync.
+func (u *Uploads) saveHasher(id string, h *blobs.Hasher) error {
+	b, err := h.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	tmp := u.hashFile(id) + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o640); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, u.hashFile(id)); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
 
 // lock serializes the calls of one upload.
 func (u *Uploads) lock(id string) func() {
@@ -167,7 +210,7 @@ func (u *Uploads) Append(ctx context.Context, id string, p *auth.Principal, repo
 	if offset != r.Received {
 		return r.Received, &RangeError{Received: r.Received}
 	}
-	f, err := os.OpenFile(u.file(id), os.O_WRONLY, 0)
+	f, err := os.OpenFile(u.file(id), os.O_RDWR, 0)
 	if err != nil {
 		return r.Received, err
 	}
@@ -176,11 +219,15 @@ func (u *Uploads) Append(ctx context.Context, id string, p *auth.Principal, repo
 	if err := f.Truncate(r.Received); err != nil {
 		return r.Received, err
 	}
+	h, err := u.hasher(id, f, r.Received)
+	if err != nil {
+		return r.Received, err
+	}
 	if _, err := f.Seek(r.Received, io.SeekStart); err != nil {
 		return r.Received, err
 	}
 	max := settings.MaxUploadSize.Get(u.set())
-	n, err := io.Copy(f, io.LimitReader(body, max-r.Received+1))
+	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(body, max-r.Received+1))
 	if err == nil && r.Received+n > max {
 		err = ErrTooLarge
 	}
@@ -189,6 +236,9 @@ func (u *Uploads) Append(ctx context.Context, id string, p *auth.Principal, repo
 		return r.Received, err
 	}
 	if err := f.Sync(); err != nil {
+		return r.Received, err
+	}
+	if err := u.saveHasher(id, h); err != nil {
 		return r.Received, err
 	}
 	now := time.Now()
@@ -200,29 +250,39 @@ func (u *Uploads) Append(ctx context.Context, id string, p *auth.Principal, repo
 	return received, nil
 }
 
-// Finish ends upload id: it reads the file once for its hashes and checks the digest sha256 and,
-// when size >= 0, the size. It returns the body for a Commit; closing the body removes the file.
-// A mismatch deletes the upload and returns ErrDigest.
+// Finish ends upload id: it takes the hashes of the bytes received from the state that the
+// appends saved, and checks the digest sha256 and, when size >= 0, the size. It returns the body
+// for a Commit; closing the body removes the file. A mismatch deletes the upload and returns
+// ErrDigest.
 func (u *Uploads) Finish(ctx context.Context, id string, p *auth.Principal, repo *repos.Repo, sha256 string, size int64) (*Spooled, error) {
 	unlock := u.lock(id)
 	defer unlock()
-	if _, err := u.row(ctx, id, p, repo); err != nil {
-		return nil, err
-	}
-	f, err := os.Open(u.file(id))
+	r, err := u.row(ctx, id, p, repo)
 	if err != nil {
 		return nil, err
 	}
-	sp, err := blobs.Hash(f)
+	f, err := os.OpenFile(u.file(id), os.O_RDWR, 0)
+	if err != nil {
+		return nil, err
+	}
+	// Bytes past received are from an append that did not finish.
+	h, err := func() (*blobs.Hasher, error) {
+		if err := f.Truncate(r.Received); err != nil {
+			return nil, err
+		}
+		return u.hasher(id, f, r.Received)
+	}()
 	if err != nil {
 		f.Close()
 		return nil, err
 	}
+	sp := h.Spooled(f)
 	if err := dbq.New(u.db.W).DeleteUploadSession(context.WithoutCancel(ctx), id); err != nil {
 		sp.Close()
 		return nil, err
 	}
 	u.forget(id)
+	os.Remove(u.hashFile(id))
 	if sp.SHA256 != sha256 || (size >= 0 && sp.Size != size) {
 		sp.Close()
 		return nil, ErrDigest
@@ -245,6 +305,9 @@ func (u *Uploads) drop(ctx context.Context, id string) error {
 		return err
 	}
 	u.forget(id)
+	if err := os.Remove(u.hashFile(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	if err := os.Remove(u.file(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -306,11 +369,11 @@ func (u *Uploads) sweep(ctx context.Context) error {
 		if !info.ModTime().Before(cutoff) {
 			continue
 		}
-		id := e.Name()
+		id := strings.TrimSuffix(e.Name(), hashSuffix)
 		unlock := u.lock(id)
 		_, err = dbq.New(u.db.R).GetUploadSession(ctx, id)
 		if errors.Is(err, sql.ErrNoRows) {
-			err = os.Remove(u.file(id))
+			err = os.Remove(filepath.Join(u.dir(), e.Name()))
 			if errors.Is(err, os.ErrNotExist) {
 				err = nil
 			}

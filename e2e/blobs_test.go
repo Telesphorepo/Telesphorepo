@@ -4,16 +4,22 @@ package e2e
 
 import (
 	"bytes"
+	"context"
+	"crypto/md5"
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 // countKeys returns how many stored keys end in key (an S3 key carries the target's prefix).
@@ -292,6 +298,108 @@ func TestUploadSessions(t *testing.T) {
 	if st, b := uploadSession(t, s, http.MethodPut, up+id+"&sha256="+sha256Hex(pkg), nil, dauth, nil); st != http.StatusNotFound {
 		t.Fatalf("finish a finished .deb upload again: status %d, want 404: %s", st, b)
 	}
+}
+
+// TestLargeUploadAndRepoGC uploads an 80 MiB file into a raw repo through a resumable upload in
+// three chunks, one of them sent again at a wrong offset (416). The checksum headers of the file
+// are the MD5, SHA-1 and SHA-256 of the whole file (the hashes carry over from append to append).
+// The S3 store holds it as a multipart upload of 5 parts of 16 MiB (from 64 MiB), and both stores
+// serve it back byte for byte. After a delete of the repo, the blob GC (TR_BLOBS_GC_GRACE=1s)
+// removes the object of every file of the repo.
+func TestLargeUploadAndRepoGC(t *testing.T) {
+	t.Parallel()
+	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
+		if opts.S3 == nil {
+			opts.DataVolume = NewDataVolume(t)
+		}
+		opts.Env = map[string]string{"TR_BLOBS_GC_GRACE": "1s"}
+		s := StartServer(t, opts)
+		repo := RandName("large")
+		s.CreateRepo(t, repo, "raw", false, nil)
+		auth := s.PublishAuth(t, s.AdminUser, repo)
+		base := "/api/repos/" + repo + "/uploads"
+
+		body := rawRandom(t, 80<<20)
+		st, b := uploadSession(t, s, http.MethodPost, base, nil, auth, nil)
+		var up struct {
+			ID string `json:"id"`
+		}
+		if st != http.StatusCreated || json.Unmarshal(b, &up) != nil || up.ID == "" {
+			t.Fatalf("start an upload: status %d: %s", st, b)
+		}
+		const chunk = 30 << 20
+		send := func(from, to int, want int) {
+			t.Helper()
+			part := body[from:to]
+			st, b := uploadSession(t, s, http.MethodPatch, base+"/"+up.ID, part, auth,
+				map[string]string{"Content-Range": fmt.Sprintf("bytes %d-%d/*", from, to-1)})
+			if st != want {
+				t.Fatalf("append bytes %d-%d: status %d, want %d: %s", from, to-1, st, want, b)
+			}
+		}
+		send(0, chunk, http.StatusAccepted)
+		send(0, chunk, http.StatusRequestedRangeNotSatisfiable)
+		send(chunk, 2*chunk, http.StatusAccepted)
+		send(2*chunk, len(body), http.StatusAccepted)
+		q := "?path=big/large.bin&sha256=" + sha256Hex(body) + "&size=" + strconv.Itoa(len(body))
+		if st, b := uploadSession(t, s, http.MethodPut, base+"/"+up.ID+q, nil, auth, nil); st != http.StatusCreated {
+			t.Fatalf("finish the upload: status %d, want 201: %s", st, b)
+		}
+
+		path := "/raw/" + repo + "/big/large.bin"
+		resp, _ := s.Do(t, s.NewRequest(t, http.MethodHead, path, nil), s.AdminBasic())
+		m5, s1 := md5.Sum(body), sha1.Sum(body)
+		for h, want := range map[string]string{
+			"X-Checksum-MD5": hex.EncodeToString(m5[:]), "X-Checksum-SHA1": hex.EncodeToString(s1[:]), "X-Checksum-SHA256": sha256Hex(body),
+		} {
+			if got := resp.Header.Get(h); got != want {
+				t.Fatalf("HEAD %s: %s %q, want %q", path, h, got, want)
+			}
+		}
+		rawWantGet(t, s, opts.S3, path, s.AdminBasic(), body)
+		key := blobKey(sha256Hex(body))
+		if tg := opts.S3; tg != nil {
+			o, err := tg.Client().HeadObject(context.Background(), &s3.HeadObjectInput{Bucket: &tg.Bucket, Key: aws.String(tg.Prefix + "/" + key)})
+			if err != nil {
+				t.Fatalf("head the object of the large file: %v", err)
+			}
+			if etag := strings.Trim(aws.ToString(o.ETag), `"`); !strings.HasSuffix(etag, "-5") {
+				t.Fatalf("the object of an 80 MiB file has ETag %q, want the ETag of a multipart upload of 5 parts", etag)
+			}
+		}
+
+		keys := []string{key}
+		for i := range 3 {
+			small := rawRandom(t, 4<<10)
+			resp, rb := rawPut(t, s, fmt.Sprintf("/raw/%s/small/%d.bin", repo, i), small, auth)
+			wantStatus(t, resp, rb, http.StatusCreated)
+			keys = append(keys, blobKey(sha256Hex(small)))
+		}
+		for _, k := range keys {
+			if n := countKeys(t, opts, k); n != 1 {
+				t.Fatalf("blob %s: %d objects, want 1", k, n)
+			}
+		}
+		var res struct {
+			Deleted []string `json:"deleted"`
+		}
+		s.MustAPI(t, http.MethodPost, "/api/repos/delete", map[string][]string{"names": {repo}}, s.Admin(), &res)
+		if len(res.Deleted) != 1 {
+			t.Fatalf("repo delete: %+v, want the repo deleted", res)
+		}
+		deadline := time.Now().Add(60 * time.Second)
+		for {
+			stored := storedKeys(t, opts)
+			left := slices.DeleteFunc(slices.Clone(keys), func(k string) bool { return !slices.Contains(stored, k) })
+			if len(left) == 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("60s after the repo delete, the store still holds %v", left)
+			}
+			time.Sleep(time.Second)
+		}
+	})
 }
 
 // TestMavenMetadataAfterDelete deletes a version folder of a Maven artifact: the server writes

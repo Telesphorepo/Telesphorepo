@@ -90,9 +90,10 @@ SELECT id, sha256 FROM blobs
 WHERE refs = 0 AND unreferenced_at < sqlc.arg(cutoff)
 ORDER BY unreferenced_at LIMIT sqlc.arg(limit);
 
--- One blob, when no asset referenced it since before cutoff (the GC checks it under the digest lock).
--- name: IsBlobCollectable :one
-SELECT count(*) FROM blobs WHERE id = sqlc.arg(id) AND refs = 0 AND unreferenced_at < sqlc.arg(cutoff);
+-- The blobs of ids that no asset referenced since before cutoff (the GC checks a round under its
+-- digest locks).
+-- name: ListCollectableBlobs :many
+SELECT id FROM blobs WHERE id IN (sqlc.slice(ids)) AND refs = 0 AND unreferenced_at < sqlc.arg(cutoff);
 
 -- Deletes a blob row only while no asset points to it.
 -- name: DeleteUnreferencedBlob :execrows
