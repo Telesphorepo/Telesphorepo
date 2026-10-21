@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"text/tabwriter"
 
@@ -88,9 +90,10 @@ var testZones = map[string][]string{
 }
 
 // test runs e2e zones with the detected container engine. An optional first argument picks
-// the zone ("import", "scale", "clients" or "all"; the default is core); the remaining
-// args pass to go test. "all" runs core, import, scale and clients one after the other and
-// fails if any fails.
+// the zone ("import", "scale", "clients" or "all"; the default is core); then "--shard i/n"
+// runs only every n-th top-level test of the zone from the i-th on (CI runs a zone on n
+// machines at once); the remaining args pass to go test. "all" runs core, import, scale and
+// clients one after the other and fails if any fails.
 func test(ctx context.Context, args []string) error {
 	if _, err := checkGo(); err != nil {
 		return err
@@ -104,6 +107,16 @@ func test(ctx context.Context, args []string) error {
 			zones, args = []string{"core", "import", "scale", "clients"}, args[1:]
 		}
 	}
+	shard, shards := 0, 0
+	if len(args) > 1 && args[0] == "--shard" {
+		if _, err := fmt.Sscanf(args[1], "%d/%d", &shard, &shards); err != nil || shards < 1 || shard < 1 || shard > shards {
+			return usageErr(fmt.Sprintf("--shard takes i/n with 1 <= i <= n, not %q", args[1]))
+		}
+		if len(zones) > 1 || slices.Contains(args[2:], "-run") {
+			return usageErr("--shard takes one zone and no -run")
+		}
+		args = args[2:]
+	}
 	eng, err := containerengine.Detect(ctx)
 	if err != nil {
 		return err
@@ -116,6 +129,13 @@ func test(ctx context.Context, args []string) error {
 	for _, zone := range zones {
 		argv := append([]string{"go", "test"}, testZones[zone]...)
 		argv = append(argv, "./e2e/...", "-count=1", "-v")
+		if shards > 0 {
+			run, err := shardRun(ctx, zone, shard, shards)
+			if err != nil {
+				return err
+			}
+			argv = append(argv, "-run", run)
+		}
 		argv = append(argv, args...)
 		step("zone %s: %s", zone, strings.Join(argv, " "))
 		err := runStep(ctx, ".", nil, argv...)
@@ -130,6 +150,40 @@ func test(ctx context.Context, args []string) error {
 		out.line(red("✗ ") + "failed zones: " + strings.Join(failed, ", "))
 	}
 	return last
+}
+
+// shardRun returns the -run pattern of shard i of n of a zone: its top-level tests by name
+// (go test -list), every n-th from the i-th. A zone whose own args hold -run (scale) lists only
+// those tests.
+func shardRun(ctx context.Context, zone string, i, n int) (string, error) {
+	argv := append([]string{"test"}, testZones[zone]...)
+	if !slices.Contains(argv, "-run") {
+		argv = append(argv, "-list", ".")
+	} else {
+		argv = append(argv, "-list", argv[slices.Index(argv, "-run")+1])
+	}
+	cmd := exec.CommandContext(ctx, "go", append(argv, "./e2e/")...)
+	cmd.Stderr = os.Stderr
+	b, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("list the tests of zone %s: %w", zone, err)
+	}
+	var names []string
+	for _, l := range strings.Split(string(b), "\n") {
+		if l = strings.TrimSpace(l); strings.HasPrefix(l, "Test") {
+			names = append(names, l)
+		}
+	}
+	slices.Sort(names)
+	var mine []string
+	for k := i - 1; k < len(names); k += n {
+		mine = append(mine, names[k])
+	}
+	if len(mine) == 0 {
+		return "", fmt.Errorf("zone %s has %d tests: shard %d/%d has none", zone, len(names), i, n)
+	}
+	step("shard %d/%d: %d of %d tests", i, n, len(mine), len(names))
+	return "^(" + strings.Join(mine, "|") + ")$", nil
 }
 
 // doctor prints what was detected and fails when a required tool is missing.

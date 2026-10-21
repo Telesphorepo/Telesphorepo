@@ -34,6 +34,7 @@ const usage = `Usage: go tool task <command>
   build image      ...and the container image telesphorepo:local (Docker or Podman)
   preview          build, then run the production binary at http://localhost:8080
   test [args]      run the core e2e zone; args pass to go test (e.g. go tool task test -run TestMaven)
+  test --shard i/n run every n-th test of the zone from the i-th (CI runs the core zone on n machines)
   test import      run the import zone: Nexus sources, sync and cut-over (e.g. go tool task test import -run TestNexus)
   test scale       run the scale zone: 100k and 1M seeded assets, p95 must not double
   test clients     run the clients zone: the CLI of cmd/telesphorepo with the real tools in containers

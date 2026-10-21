@@ -5,6 +5,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -46,6 +47,11 @@ func TestMain(m *testing.M) {
 }
 
 func runMain(m *testing.M) int {
+	// "go test -list" (go tool task test --shard) only names the tests: no engine, image or pulls.
+	flag.Parse()
+	if f := flag.Lookup("test.list"); f != nil && f.Value.String() != "" {
+		return m.Run()
+	}
 	ctx := context.Background()
 	RunID = randHex(6)
 
@@ -136,6 +142,18 @@ func sweepLeftovers(ctx context.Context) {
 	remove("volumes", []string{"volume", "rm", "-f"}, vols)
 }
 
+// buildArgs returns the arguments of "<engine> build" with args. With Docker it adds --load: a
+// builder other than Docker's own (CI's persistent BuildKit) keeps its result to itself unless
+// asked to load it into the engine that the tests start containers in. Podman builds into its own
+// store.
+func buildArgs(args ...string) []string {
+	out := []string{"build"}
+	if Engine.Name == "docker" {
+		out = append(out, "--load")
+	}
+	return append(out, args...)
+}
+
 // buildImage shells out to "<engine> build" (docker: BuildKit; podman: buildah). Both respect
 // .dockerignore and RUN --mount=type=cache.
 func buildImage(ctx context.Context) error {
@@ -145,7 +163,7 @@ func buildImage(ctx context.Context) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, Engine.CLI, "build", "-t", ServerImage, "-f", filepath.Join(root, "Dockerfile"), root)
+	cmd := exec.CommandContext(ctx, Engine.CLI, buildArgs("-t", ServerImage, "-f", filepath.Join(root, "Dockerfile"), root)...)
 	cmd.Env = append(os.Environ(), "DOCKER_BUILDKIT=1")
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out

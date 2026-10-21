@@ -28,6 +28,9 @@ jobs:
         with:
           node-version-file: .node-version
       - uses: oven-sh/setup-bun@v2
+      - uses: useblacksmith/setup-docker-builder@v2
+        with:
+          cache-key: telesphorepo-image
       - name: Run the e2e zone
         shell: bash
         env:

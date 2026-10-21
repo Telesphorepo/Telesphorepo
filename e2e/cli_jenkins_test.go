@@ -35,7 +35,7 @@ var buildJenkinsImage = sync.OnceValue(func() error {
 	if err != nil {
 		return err
 	}
-	cmd := osexec.CommandContext(ctx, Engine.CLI, "build", "--pull", "--build-arg", "E2E_DAY="+time.Now().Format(time.DateOnly), "-t", jenkinsImage, dir)
+	cmd := osexec.CommandContext(ctx, Engine.CLI, buildArgs("--pull", "--build-arg", "E2E_DAY="+time.Now().Format(time.DateOnly), "-t", jenkinsImage, dir)...)
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	if err := cmd.Run(); err != nil {

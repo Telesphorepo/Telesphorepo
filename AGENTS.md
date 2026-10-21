@@ -14,6 +14,7 @@ go tool task test import    # import zone (tag import): TestNexus, starts a Nexu
 go tool task test scale     # scale zone (tag scale): 100k and 1M asset latency test (slow)
 go tool task test clients   # clients zone (tag clients): the CLI of cmd/telesphorepo with the real tools in containers (slow)
 go tool task test all       # core, import, scale and clients one after the other
+go tool task test --shard 2/4  # every 4th core test from the 2nd (CI runs the core zone on 4 machines)
 go tool task tag <ver>      # stamp the dev entries of changes.toml, commit, tag v<ver> (push it yourself)
 go tool task release [ver]  # cross-compiled archives + SHA256SUMS in bin/release
 go tool task gen            # run sqlc for every internal/**/sqlc.yaml
