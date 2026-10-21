@@ -9,7 +9,7 @@ INSERT INTO cargo_names (repo_id, folded_name, name) VALUES (?, ?, ?)
 ON CONFLICT (repo_id, folded_name) DO NOTHING;
 
 -- name: DeleteName :exec
-DELETE FROM cargo_names WHERE repo_id = ? AND folded_name = ?;
+DELETE FROM cargo_names WHERE cargo_names.repo_id = ? AND folded_name = ?;
 
 -- The version of a crate that equals a version ignoring build metadata, through the UNIQUE index.
 -- name: GetVersionByBase :one
@@ -59,3 +59,11 @@ WHERE v.repo_id = ? AND v.lower_name = ? AND v.sort_key = ?;
 INSERT INTO cargo_versions (repo_id, name, lower_name, version, sort_key, base_key, entry, asset_id, path, yanked, created_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
 ON CONFLICT (repo_id, lower_name, base_key) DO NOTHING;
+
+-- A repo delete empties these tables batch by batch before its row goes (repos.Service.OnPurge).
+-- name: PurgeCargoVersions :execrows
+DELETE FROM cargo_versions WHERE id IN (SELECT x.id FROM cargo_versions x WHERE x.repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
+
+-- name: PurgeCargoNames :execrows
+DELETE FROM cargo_names WHERE cargo_names.repo_id = sqlc.arg(repo_id) AND folded_name IN (SELECT x.folded_name FROM cargo_names x WHERE x.repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
+

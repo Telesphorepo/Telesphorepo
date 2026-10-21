@@ -1,9 +1,13 @@
-<!-- Delete a repository with all its files, after typing its name: the dialog of the Delete action in the header of its settings. -->
+<!--
+  Delete a repository with all its files, after typing its name: the dialog of the Delete action in the header of its settings.
+  The server deletes it in the background; the dialog waits until it is gone, with the progress in a toast.
+-->
 <script lang="ts">
   import { toast } from "svelte-sonner";
   import { api, type Repo } from "$lib/api";
   import { navigate } from "$lib/router.svelte";
   import { count } from "$lib/words";
+  import { waitForDeletes } from "$lib/deletes";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
 
   let { repo, open = $bindable(false) }: { repo: Repo; open?: boolean } = $props();
@@ -12,6 +16,7 @@
 
   async function remove() {
     await api.repos.delete([repo.name]);
+    await waitForDeletes([repo.name]);
     toast.success(`Deleted the repository ${repo.name}`);
     navigate("/settings/repositories", { force: true });
   }

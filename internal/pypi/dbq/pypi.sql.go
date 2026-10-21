@@ -54,7 +54,7 @@ func (q *Queries) DeleteFilesOfAsset(ctx context.Context, assetID int64) ([]stri
 }
 
 const deleteProject = `-- name: DeleteProject :exec
-DELETE FROM pypi_projects WHERE repo_id = ? AND project = ?
+DELETE FROM pypi_projects WHERE pypi_projects.repo_id = ? AND project = ?
 `
 
 type DeleteProjectParams struct {
@@ -412,6 +412,41 @@ func (q *Queries) ProjectHasFiles(ctx context.Context, arg ProjectHasFilesParams
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
+}
+
+const purgePypiFiles = `-- name: PurgePypiFiles :execrows
+DELETE FROM pypi_files WHERE id IN (SELECT x.id FROM pypi_files x WHERE x.repo_id = ?1 LIMIT ?2)
+`
+
+type PurgePypiFilesParams struct {
+	RepoID int64
+	Limit  int64
+}
+
+// A repo delete empties these tables batch by batch before its row goes (repos.Service.OnPurge).
+func (q *Queries) PurgePypiFiles(ctx context.Context, arg PurgePypiFilesParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, purgePypiFiles, arg.RepoID, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const purgePypiProjects = `-- name: PurgePypiProjects :execrows
+DELETE FROM pypi_projects WHERE pypi_projects.repo_id = ?1 AND project IN (SELECT x.project FROM pypi_projects x WHERE x.repo_id = ?1 LIMIT ?2)
+`
+
+type PurgePypiProjectsParams struct {
+	RepoID int64
+	Limit  int64
+}
+
+func (q *Queries) PurgePypiProjects(ctx context.Context, arg PurgePypiProjectsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, purgePypiProjects, arg.RepoID, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const upsertProject = `-- name: UpsertProject :exec

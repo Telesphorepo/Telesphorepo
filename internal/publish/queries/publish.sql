@@ -248,3 +248,13 @@ ORDER BY s.id DESC LIMIT sqlc.arg(limit);
 -- name: DeleteOldPublishSessions :execrows
 DELETE FROM publish_sessions WHERE id IN
   (SELECT x.id FROM publish_sessions x WHERE x.expires_at <= sqlc.arg(cutoff) LIMIT 100);
+-- A repo delete empties these tables batch by batch before its row goes (repos.Service.OnPurge).
+-- name: PurgePublishExchangeSessions :execrows
+DELETE FROM publish_exchange_sessions WHERE publish_exchange_sessions.repo_id = sqlc.arg(repo_id) AND nonce_hash IN (SELECT x.nonce_hash FROM publish_exchange_sessions x WHERE x.repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
+
+-- name: PurgePublishOIDCSeen :execrows
+DELETE FROM publish_oidc_seen WHERE publish_oidc_seen.repo_id = sqlc.arg(repo_id) AND id_hash IN (SELECT x.id_hash FROM publish_oidc_seen x WHERE x.repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
+
+-- name: PurgePublishSessions :execrows
+DELETE FROM publish_sessions WHERE id IN (SELECT x.id FROM publish_sessions x WHERE x.repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
+

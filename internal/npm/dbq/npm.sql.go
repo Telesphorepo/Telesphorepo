@@ -11,7 +11,7 @@ import (
 )
 
 const deletePackage = `-- name: DeletePackage :exec
-DELETE FROM npm_packages WHERE repo_id = ? AND name = ?
+DELETE FROM npm_packages WHERE npm_packages.repo_id = ? AND name = ?
 `
 
 type DeletePackageParams struct {
@@ -25,7 +25,7 @@ func (q *Queries) DeletePackage(ctx context.Context, arg DeletePackageParams) er
 }
 
 const deleteTag = `-- name: DeleteTag :exec
-DELETE FROM npm_tags WHERE repo_id = ? AND name = ? AND tag = ?
+DELETE FROM npm_tags WHERE npm_tags.repo_id = ? AND name = ? AND tag = ?
 `
 
 type DeleteTagParams struct {
@@ -40,7 +40,7 @@ func (q *Queries) DeleteTag(ctx context.Context, arg DeleteTagParams) error {
 }
 
 const deleteTagsOfPackage = `-- name: DeleteTagsOfPackage :exec
-DELETE FROM npm_tags WHERE repo_id = ? AND name = ?
+DELETE FROM npm_tags WHERE npm_tags.repo_id = ? AND name = ?
 `
 
 type DeleteTagsOfPackageParams struct {
@@ -54,7 +54,7 @@ func (q *Queries) DeleteTagsOfPackage(ctx context.Context, arg DeleteTagsOfPacka
 }
 
 const deleteVersion = `-- name: DeleteVersion :exec
-DELETE FROM npm_versions WHERE repo_id = ? AND name = ? AND version = ?
+DELETE FROM npm_versions WHERE npm_versions.repo_id = ? AND name = ? AND version = ?
 `
 
 type DeleteVersionParams struct {
@@ -356,6 +356,58 @@ func (q *Queries) ListVersionsBefore(ctx context.Context, arg ListVersionsBefore
 		return nil, err
 	}
 	return items, nil
+}
+
+const purgeNpmPackages = `-- name: PurgeNpmPackages :execrows
+DELETE FROM npm_packages WHERE npm_packages.repo_id = ?1 AND name IN (SELECT x.name FROM npm_packages x WHERE x.repo_id = ?1 LIMIT ?2)
+`
+
+type PurgeNpmPackagesParams struct {
+	RepoID int64
+	Limit  int64
+}
+
+func (q *Queries) PurgeNpmPackages(ctx context.Context, arg PurgeNpmPackagesParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, purgeNpmPackages, arg.RepoID, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const purgeNpmTags = `-- name: PurgeNpmTags :execrows
+DELETE FROM npm_tags WHERE npm_tags.repo_id = ?1 AND (name, tag) IN (SELECT x.name, x.tag FROM npm_tags x WHERE x.repo_id = ?1 LIMIT ?2)
+`
+
+type PurgeNpmTagsParams struct {
+	RepoID int64
+	Limit  int64
+}
+
+// A repo delete empties these tables batch by batch before its row goes (repos.Service.OnPurge).
+func (q *Queries) PurgeNpmTags(ctx context.Context, arg PurgeNpmTagsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, purgeNpmTags, arg.RepoID, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const purgeNpmVersions = `-- name: PurgeNpmVersions :execrows
+DELETE FROM npm_versions WHERE npm_versions.repo_id = ?1 AND (name, version) IN (SELECT x.name, x.version FROM npm_versions x WHERE x.repo_id = ?1 LIMIT ?2)
+`
+
+type PurgeNpmVersionsParams struct {
+	RepoID int64
+	Limit  int64
+}
+
+func (q *Queries) PurgeNpmVersions(ctx context.Context, arg PurgeNpmVersionsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, purgeNpmVersions, arg.RepoID, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const setDeprecated = `-- name: SetDeprecated :exec

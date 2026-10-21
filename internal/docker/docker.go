@@ -109,6 +109,7 @@ func Module() module.Module {
 				Defs: []*settings.Def{DirectUploads.Def(), UploadURL.Def(), LinkGrace.Def()}, Validate: validate})
 			x.Init(func(ctx context.Context, h *module.Host) error {
 				f.h = h
+				h.Repos.OnPurge(purge(dbq.New(h.DB.W))) // empties the module's rows of a repo in batches before the repo row goes
 				f.q = dbq.New(h.DB.R)
 				f.minter = module.Use[publish.Minter](h)
 				f.network = module.Use[*netrules.Service](h)

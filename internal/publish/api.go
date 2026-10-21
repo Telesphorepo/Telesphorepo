@@ -82,6 +82,7 @@ func Module() module.Module {
 				Defs: []*settings.Def{SessionTTL.Def(), DeviceTTL.Def()}})
 			x.Init(func(ctx context.Context, h *module.Host) error {
 				m.h = h
+				h.Repos.OnPurge(purge(h.DB.W)) // empties the module's rows of a repo in batches before the repo row goes
 				m.svc = New(Deps{DB: h.DB, Auth: h.Auth, Access: h.Access, Repos: h.Repos, Settings: h.Settings,
 					Audit: h.Audit, CI: h.CI, Builds: h.Builds, Log: h.Log})
 				h.Auth.SetSessionLoader(m.svc.LoadSession)

@@ -340,17 +340,7 @@ func TestDelete(t *testing.T) {
 		if st, b := s.API(t, http.MethodPost, "/api/repos/delete", del, s.AdminBasic()); st != http.StatusUnauthorized {
 			t.Fatalf("repo delete with the admin's password: status %d, want 401: %s", st, b)
 		}
-		var res struct {
-			Deleted []string `json:"deleted"`
-			Files   int      `json:"files"`
-		}
-		s.MustAPI(t, http.MethodPost, "/api/repos/delete", del, s.Admin(), &res)
-		if !slices.Equal(res.Deleted, []string{raw}) || res.Files != 1 {
-			t.Fatalf("repo delete: %+v, want deleted [%s] and 1 file", res, raw)
-		}
-		if st, _ := s.API(t, http.MethodGet, "/api/repos/"+raw, nil, s.Admin()); st != http.StatusNotFound {
-			t.Fatalf("GET a deleted repo: status %d, want 404", st)
-		}
+		deleteRepos(t, s, raw)
 		if resp, body := rawPut(t, s, "/raw/"+raw+"/after.bin", []byte("x"), rps.Auth()); resp.StatusCode/100 == 2 {
 			t.Fatalf("upload with a session of a deleted repo: status %d: %s", resp.StatusCode, body)
 		}

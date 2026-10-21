@@ -47,7 +47,7 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/token` | The token format of every token kind: `Mint`, `Parse`, `Hash`, `Check` |
 | `internal/config` | Boot env (`LoadBoot`): `TR_DATA_DIR`, `TR_LISTEN`, `TR_MASTER_KEY`, the bootstrap admin. Everything else is a setting |
 | `internal/settings` | The settings store: the groups that modules own (`settings.Group`), one immutable snapshot read through typed `Key`s and `View`s, AES-256-GCM secrets, master key, env overrides, subscribers. Declares the keys of the `general` group. See **Settings model** |
-| `internal/db` | SQLite (modernc, no cgo), WAL, separate writer/reader pools, one schema per component with a fingerprint (`Init`), `PRAGMA optimize`, the plan guard (`CheckPlans`) |
+| `internal/db` | SQLite (modernc, no cgo), WAL, separate writer (1 connection) and reader (8 connections, all kept open) pools, a 64 MiB page cache and a 256 MiB memory map per connection, one schema per component with a fingerprint (`Init`), `PRAGMA optimize`, the plan guard (`CheckPlans`) |
 | `internal/ci` | The CI provider registry (`Registry`: `Build`, `Describe`) and the build records (`Builds`: `Record`, `Upsert`, `Loader`, `Cleanup`). See **CI providers and build records** |
 | `internal/db/dbq` | sqlc-generated core queries (`internal/db/queries/*.sql`) plus hand-written FTS queries in `extra.go` |
 | `internal/storage` | `Store` interface (with `DeleteMany`: one S3 `DeleteObjects` per 1000 keys, one delete per key on fs); `fs`, `s3`, and `Live`, a hot-swappable wrapper with `Open`, `SameBackend` and `Probe`. Declares the storage setting keys and `ConfigView` (the store of a snapshot) |
@@ -452,7 +452,9 @@ per component in start order (the kernel first):
    and the file. The transaction runs on a connection of its own with `PRAGMA foreign_keys = OFF`,
    so a migration can rebuild a table (create the new table, copy the rows, drop the old one,
    rename the new one) without the drop deleting or cascading to the rows that reference it.
-   `PRAGMA foreign_key_check` runs before the commit; a row left without its parent fails the
+   `PRAGMA foreign_key_check` runs before the commit on the tables that the migration creates,
+   alters, renames, drops or writes, and on the tables whose foreign keys point at one of them (so
+   a migration costs what it touches, not the size of the database); a row left without its parent fails the
    migration, and the error names its table and rowid. The connection gets `foreign_keys = ON`
    back afterwards. A failed migration leaves no row, so the next start runs it again.
 
@@ -485,7 +487,7 @@ Kernel tables (`internal/db/migrations`):
 | `user_passkeys` | PK `id`, UNIQUE `credential_id`, idx `user_id` | `credential` is the JSON of the `webauthn.Credential` (the public key, the sign count, the flags, the transports, the AAGUID); `credential_id` is its lookup key; `name`, `created_at`, `last_used_at` |
 | `user_recovery_codes` | PK `(user_id, code_hash)` (WITHOUT ROWID) | `code_hash` is argon2id PHC; `used_at` is set when the code is used |
 | `auth_challenges` | PK `id_hash` (WITHOUT ROWID), idx `expires_at`, `user_id` | Short-lived single-use state: `kind` is `login`, `totp_setup`, `webauthn_register`, `webauthn_assert` `device_grant` (an SSO grant: `user_id` set, `data` is the user code of a device approval or `setup:<repo>` for a setup code, 5 min) or `setup_code` (a setup code: `id_hash` is SHA-256 of `trsu_<32 random bytes, base64url>`, `user_id` the person who made it, `data` the repo id, 10 min; the first use deletes it); `data` holds the payload. A new challenge deletes up to 100 expired ones |
-| `audit_events` | PK `id`, idx `at`, idx `(repo_id, id)`, idx `(action, id)`, idx `actor_user_id` | `at` unix time; `action` is a registered action ID; `actor` is a username, a CI subject, `cli`, the module ID of a job, `anonymous`, or the attempted username of a failed sign-in; `actor_user_id` and `repo_id` are SET NULL; `target`; `detail` is JSON and never holds a secret value; `ip` is the client address. This table is the only place that stores or shows an IP address. See **Audit log** |
+| `audit_events` | PK `id`, idx `at`, idx `(repo_id, id)`, idx `(repo_id, action, id)`, idx `(action, id)`, idx `actor_user_id` | `at` unix time; `action` is a registered action ID; `actor` is a username, a CI subject, `cli`, the module ID of a job, `anonymous`, or the attempted username of a failed sign-in; `actor_user_id` and `repo_id` are SET NULL; `target`; `detail` is JSON and never holds a secret value; `ip` is the client address. This table is the only place that stores or shows an IP address. See **Audit log** |
 
 Tables of the `storage` component (`internal/move/migrations`):
 
@@ -527,7 +529,7 @@ row outlives a deleted repo and still deletes its pointers (see **Edge delivery*
 
 | Table | Key / indexes | Notes |
 |---|---|---|
-| `edge_outbox` | PK `(repo_id, path)` (WITHOUT ROWID), idx `edge_outbox_due (due_at)`, partial idx `edge_outbox_backfill (repo_id) WHERE backfill = 1` | One row per dirty object. `repo_id` > 0: `path` is an asset path whose pointer the outbox writes or deletes; `repo_id` 0: `path` is the key of an access object or `config.json`. `sha256` is the digest of the commit that wrote the row (`''`: apply the current state); `due_at` (unix ms), `attempts`, `seq` (raised by each new row of the key, so the worker drops only the row it read), `timed_out_at` (unix ms of a put with an unknown outcome, 0 for none), `error`, `backfill` (1: the backfill of every pointer queued the row; a later row of the key keeps it) |
+| `edge_outbox` | PK `(repo_id, path)` (WITHOUT ROWID), idx `edge_outbox_due (due_at)`, partial idx `edge_outbox_backfill (repo_id) WHERE backfill = 1`, partial idx `edge_outbox_access (repo_id, due_at) WHERE repo_id = 0` (the access objects in due order) | One row per dirty object. `repo_id` > 0: `path` is an asset path whose pointer the outbox writes or deletes; `repo_id` 0: `path` is the key of an access object or `config.json`. `sha256` is the digest of the commit that wrote the row (`''`: apply the current state); `due_at` (unix ms), `attempts`, `seq` (raised by each new row of the key, so the worker drops only the row it read), `timed_out_at` (unix ms of a put with an unknown outcome, 0 for none), `error`, `backfill` (1: the backfill of every pointer queued the row; a later row of the key keeps it) |
 | `edge_written` | PK `key` (WITHOUT ROWID) | The access objects and `config.json` in the home bucket: the key under `edge/v1/`, the hex SHA-256 of the JSON written, `written_at` |
 | `edge_state` | PK `key` (WITHOUT ROWID) | JSON state: `home` (the location fingerprint, without the secret, that the objects were written for, the backfill cursor and counts, home ready, deploy needed and its reason, the gone regions with the end of their drain, and the drain that runs: its end, the old home location without its secret, its regional buckets and the cache time of its off switch), `region:<hint>` (bucket, ready, cleared, the backfill cursor, the blob check cursor and the blobs missing) and `ttl` (the `access_ttl` of the last `config.json` written, and until when a Worker can still hold an earlier one) |
 
@@ -604,8 +606,8 @@ and the kernel tables change only through kernel services. The kernel allows `Li
 `ListMigrations` (hand-written, `schema_migrations`; both once per backup); `storage` allows
 `CountBlobs` (the total of a storage move, once per move); `network` allows
 `ListTrustedProxyLists` and `DeleteTrustedProxyLists` (one row per IP list at most); `edge` allows
-`CountOutbox` (the outbox job counts its rows every 5 seconds for the status page, never on a
-request path) and `SumFileCount` (the total of a backfill, once per backfill).
+`CountOutbox` (the outbox job counts its rows for the status page, every 5 seconds only while
+the page polls it, never per request) and `SumFileCount` (the total of a backfill, once per backfill).
 `TestQueryPlans` runs the guard through the hidden `dbcheck` command.
 
 ## Storage layout
@@ -878,8 +880,8 @@ transaction.
 | `PUT /api/repos/{name}/members` | `repo.settings` | `{members: [names]}` replaces the members of a group and their order; returns the repo. 400 for 0 or more than 50 members, a member of another format, a group, a name listed twice, an unknown name, or a repo that is not a group |
 | `POST /api/repos/{name}/proxy/test` | `repo.settings` | Checks the remote of a proxy now: 200 `{ok: true}`, or a 502 problem document with the extension member `ok: false` and the reason as its detail. It records the result as the proxy's last answer or last error |
 | `PATCH /api/repos` | `repo.settings` on each repo | `{names: [...], anonymous_read: bool}`. The one way to make repos public or private: one repo update of every repo in one transaction. One `repo.update` event per repo whose value changed. 200 `{changed: n}` |
-| `POST /api/repos/delete` | `repositories.all` | `{names: [...]}`. Checks that every repo exists (404) and that none has an operation (409 `You cannot delete <name> now. <message>`); then nothing is deleted. Then it deletes the repos one after another, each under a `delete` operation (see **Repo operations**). The first failure stops the rest: 500 `{deleted: [names done], error}`, and the failed repo keeps a failed `delete` operation. One `repo.delete` event per repo. 200 `{deleted: [names], files: n}` |
-| `POST /api/repos/{name}/operation/resume` · `DELETE /api/repos/{name}/operation` | `repositories.all` | Resume runs the failed operation of the repo again (a delete deletes the repo): 200 `{ok: true}`. Clear ends it, and the repo keeps the files that are left: 204. 409 when the repo has no operation, when it has not failed, or when its type cannot resume or clear here (a Nexus mirror ends at the cut-over). Records `repo.delete.resume` or `repo.delete.clear` |
+| `POST /api/repos/delete` | `repositories.all` | `{names: [...]}`. Checks that every repo exists (404) and that none has an operation (409 `You cannot delete <name> now. <message>`); then nothing is deleted. Then every repo gets its `delete` operation in one transaction (409 that names the repo when one got an operation meanwhile; then none starts), and each delete runs as a task of the core module (see **Repo operations**). 202 `{deleting: [{name, operation}]}` in the order of names, each with its running operation. `GET /api/repos/{name}` shows the progress in `operation` (`done` of `total` files) until it answers 404; a failed delete keeps a failed `delete` operation. One `repo.delete` event per repo, with the number of files |
+| `POST /api/repos/{name}/operation/resume` · `DELETE /api/repos/{name}/operation` | `repositories.all` | Resume runs the failed operation of the repo again: 200 `{ok: true}` (a delete runs on as a task until the repo is gone). Clear ends it, and the repo keeps the files that are left: 204. 409 when the repo has no operation, when it has not failed, or when its type cannot resume or clear here (a Nexus mirror ends at the cut-over). Records `repo.delete.resume` or `repo.delete.clear` |
 | `GET /api/repos/{name}/grants` | `repo.access` | `[{username, perms: [...]}]` by username; `perms` are permission IDs in registry order |
 | `GET /api/repos/{name}/access?admins=1` | a repository permission that manages the repo (one with a second-factor need: `repo.delete`, `repo.settings`, `repo.access`, `ci.pipelines`) | The access report, built from the parts of `access.Engine.Decide`: `{repo, format, kind, people, download: {public, people, admins, guards, sentence, notes}, publish: {people, admins, ci, guards, blocked, sentence}}`. `people` are `{username, perms, via}` (`permission`; with `admins=1` the holders of `repositories.all` too, via `all_repos`). `guards` maps a guard name to `{restricted, summary, detail}`; the network guard's `detail` is `{any, lists: [{name, title}], cidrs: [{cidr, note}]}`. `blocked` is null, or `{code: "read_only_kind" \| "operation", message}`: a proxy or a group (it lists no publisher and no CI pipeline) or a locked repo. Each `sentence` says the answer in words, e.g. "2 people, only from 10.0.0.0/8." A blocked publish sentence is "nobody." followed by the message. `notes` are the sentences that modules add (`access.Engine.AddDownloadNote`): while edge delivery is on, "Downloads come from the edge." or "Downloads go to the server: read rules apply." |
 | `GET /api/users/{username}/access` · `GET /api/me/access` | `people.manage` · password, read token or UI session | `{username, permissions, disabled, kind, can_publish, items: [{repo, format, public, perms, via}], next}`, a keyset page by repo name. On a proxy or a group a person holds no `repo.publish` and no `ci.pipelines` |
@@ -911,7 +913,7 @@ transaction.
 | `GET /api/network/proxy-candidates` | `network.manage` | `[{address, last_seen, count, header}]`, newest first: the untrusted TCP peers that sent a forwarded header. See **Network rules** |
 | `GET /api/audit?after=&limit=&action=&repo=` | `activity.read` | `{items: [{id, at, actor, actor_user_id\|null, action, repo, target, detail, ip}], next}`, newest first. `repo` is a repo name |
 | `GET /api/audit/actions` | `activity.read` | `[{id, label, subsystem}]`: every action that a module registers, in module start order. The Activity filter reads it |
-| `GET /api/search?q=&repo=&after=&limit=` | any/anon | FTS5 trigram, `q` ≥ 3 chars, only repos where the caller holds `repo.download` |
+| `GET /api/search?q=&repo=&after=&limit=` | any/anon | FTS5 trigram, `q` ≥ 3 chars, only repos where the caller holds `repo.download`. The index walks the matches of every repo in asset id order; a search restricted to some repos (a `repo`, or a caller who reads only some) reads at most 10,000 matches per page and keeps those of its repos, so a page can hold fewer than `limit` hits, even none, with a `next` cursor (the asset id the read reached). The Search page then offers Search further |
 | `GET /api/repos/{name}/status` | `repo.download` | `{pending}`: the units of the repo that wait for a rebuild of its indexes (`rebuilds`), the ones being rebuilt included; 0 for a format without a `Rebuild` |
 | `GET /api/repos/{name}/usage` | `repo.download` | `{base_url, tools: [{id, label}], snippets: [Snippet]}`: the format's `Usage` (use, a computer and by hand), then for a hosted repo the CI file of each of the format's tools for GitHub Actions and Jenkins (default trigger). A proxy or a group gets no publish snippets. `Snippet` = `{id, tool, purpose: "use"\|"publish", context: "repo"\|"artifact", via?: "computer"\|"ci"\|"hand", file?, title, lang, code, note?}`. `tools` names each tool of the snippets with its label (the format's `SnippetTools`, the CI provider titles). `base_url` is the `base_url` setting, else the request scheme and host |
 | `GET /api/repos/{name}/ci?system=github-actions\|jenkins&tool=&branches=&tags=` | `repo.download` | The CI file that publishes to a hosted repo (one `Snippet`; the whole file in `code`, and for `github-actions` and `jenkins` the change to an existing file in `diff`), built by `internal/ci/workflow.go` from the `PublishSteps` of the tool (a tool of the format; default the first). `branches` and `tags` are comma-separated names or globs (letters, digits and `. _ / * -`, at most 20 each): the GitHub Actions trigger (default: a push to `main`), and a `when { anyOf { branch; tag } }` on the Jenkins publish stage (none by default). 400 for another system, an unknown tool, a bad pattern, or a proxy or a group |
@@ -926,7 +928,7 @@ transaction.
 | `GET /api/storage/moves/{id}` | `storage.manage` | `Move` = `{id, state, total, copied, skipped, failed, error, started_at, finished_at, target: {storage, endpoint?, bucket?, prefix?, fs_root?}}`. Never holds secrets |
 | `GET /api/storage/moves/{id}/failures?after=&limit=` | `storage.manage` | `{items: [{asset_id, key, reason}], next}` in asset id order |
 | `DELETE /api/storage/moves/{id}` | `storage.manage` | Cancels the move and returns it; 409 when it has ended |
-| `GET /api/edge/status` | `edge.manage` | `{enabled, mode: "on"\|"draining"\|"off", unfit, server_version, worker_version\|null, version_mismatch, gap_checked_at\|null, deploy_needed, deploy_reason, home: {hint, bucket, outbox, last_error}, backfill: {running, queued, total}, regions: [{hint, area, bucket, state: "filling"\|"ready"\|"waiting", pointers_written, pointers_total, blobs_missing\|null, outbox, last_error}]}`. `backfill.running` holds until the outbox wrote every pointer of the backfill (`home.ready`). The Worker version and the gap check come from `gap/state.json`; `waiting`: the Worker of the last gap check has no binding for the region, or its binding is a bucket whose `bucket.json` names another bucket; `deploy_needed` also holds when the `bucket.json` of its `HOME` names another bucket than the home bucket. The outbox counts come from the count of the outbox job. See **Edge delivery** |
+| `GET /api/edge/status` | `edge.manage` | `{enabled, mode: "on"\|"draining"\|"off", unfit, server_version, worker_version\|null, version_mismatch, gap_checked_at\|null, deploy_needed, deploy_reason, home: {hint, bucket, outbox, last_error}, backfill: {running, queued, total}, regions: [{hint, area, bucket, state: "filling"\|"ready"\|"waiting", pointers_written, pointers_total, blobs_missing\|null, outbox, last_error}]}`. `backfill.running` holds until the outbox wrote every pointer of the backfill (`home.ready`). The Worker version and the gap check come from `gap/state.json`; `waiting`: the Worker of the last gap check has no binding for the region, or its binding is a bucket whose `bucket.json` names another bucket; `deploy_needed` also holds when the `bucket.json` of its `HOME` names another bucket than the home bucket. The outbox counts come from the count of the outbox job: every 5 s while the page asks for the status at least every 30 s; after a longer pause the request asks for a count and waits for it up to a second. See **Edge delivery** |
 | `GET /api/edge/wrangler.jsonc` | `edge.manage` | The `wrangler.jsonc` of the Worker for the current settings, `text/plain`, `no-store`. 409 problem `edge-not-configured` when the settings cannot run edge delivery (storage fs, a base URL with a path, no home hint) |
 | `POST /api/nexus/sources` | `nexus.manage` | `{name, base_url, username, password}`; `name` matches the repo name pattern. Checks the connection. 201 `Source`. 400 for invalid input or refused credentials, 409 when the name exists, 502 when Nexus is unreachable |
 | `GET /api/nexus/sources?after=<name>&limit=` | `nexus.manage` | `{items: [Source], next}` in name order |
@@ -1598,11 +1600,17 @@ has an operation, the access engine refuses `Write`, `Delete` and `Mint` with 40
 of the operation type, in full sentences; repo JSON shows it as `operation`. A module registers its types with
 `Extender.OpType` (`ID`, `Label`, `Message`, and `Resume` and `Clear` when it has them).
 
-- **`delete`** (core). `POST /api/repos/delete` begins it (`running`) for each repo, removes the
-  files with progress, then deletes the repo row (the operation goes with it) and records
-  `repo.delete`. A failure sets `failed` with the error and keeps the operation; the job `core.ops`
-  continues running deletes at startup. `POST /api/repos/{name}/operation/resume` runs a failed
-  delete again; `DELETE /api/repos/{name}/operation` ends it and the repo keeps the files that are
+- **`delete`** (core). `POST /api/repos/delete` begins it (`running`) for each repo and answers
+  202; each delete is a task of the core module, at most 4 at once (the others wait for a slot).
+  It removes the files with progress (`done` and `total`), then `repos.Service.DeleteRow` empties
+  what the row delete would cascade to in short writes: it sets `audit_events.repo_id` to NULL in
+  batches of 1000 through `audit_events_repo`, and runs the `repos.Purge` that each module with
+  rows of a repo registers (`Repos.OnPurge`; one batch of at most 1000 rows per statement, children
+  first: docker, npm, pypi, debian, cargo, nuget, publish sessions and Nexus mappings) until it
+  deletes nothing. Then it deletes the repo row (the operation and the few rows left go with it)
+  and records `repo.delete`. A failure sets `failed` with the error and keeps the operation; a
+  server stop leaves it `running`, and the job `core.ops` continues running deletes at startup.
+  `POST /api/repos/{name}/operation/resume` starts a failed delete again; `DELETE /api/repos/{name}/operation` ends it and the repo keeps the files that are
   left. The repo page shows a failed operation with Resume and "Stop and keep the files" to a holder
   of `repositories.all`.
 - **`mirror`** (nexus). `held` while a Nexus source mirrors a hosted repo; its reference is the
@@ -1645,8 +1653,8 @@ of the operation type, in full sentences; repo JSON shows it as `operation`. A m
    previous generation of `by-hash/` files for that index and removes the rest (source
    `generated`).
 9. **Delete.** The format's `OnRemoved` deletes the `deb_packages` rows of each removed pool file and
-   marks the affected units. During a repo delete the package rows go with their pool files
-   (`ON DELETE CASCADE`).
+   marks the affected units. During a repo delete the module's `repos.Purge` deletes the package
+   and index rows in batches before the repo row goes.
 
 ## Storage move
 
@@ -1814,12 +1822,22 @@ for a path whose `Classify` class is not `Changing`. A group has no pointers of 
    goes to the server and never serves a later member's copy.
 2. `Removing` writes dirty rows, then deletes the pointer keys of the batch with one `DeleteMany`
    per bucket.
-3. `Committed` and `Removed` upsert the final rows in the commit and remove transactions.
-4. The job `edge.outbox` takes a due row and `Pipeline.Lock(repo, path)`, reads the asset row
-   again, and puts the home pointer and then the regional ones (immutable paths), deletes the
-   pointer in every bucket when the asset is gone, or drops the row when the asset has another
-   digest. It deletes the row only after every write succeeded and retries with a backoff up to
-   5 minutes. Writes to one key are spaced by a second (R2 takes one write per second per key),
+3. `Committed` upserts the final rows in the commit transaction. `Removed`, in the remove
+   transaction, deletes the dirty row of each removed path whose pointers `Removing` deleted in
+   every bucket of the view that is still current (a row with a put of unknown outcome stays);
+   any other removed path gets a row with the current state. When the remove transaction fails,
+   the dirty rows stay and the outbox puts the pointers of the files that are still there.
+4. The job `edge.outbox` runs 32 workers, each writing one row at a time, so one slow put holds
+   only its own worker. One reader hands out the due rows (pages of 512, oldest first): the
+   access objects and `config.json` first (`edge_outbox_access`), then the pointers; a newly
+   marked access object goes out before the next pointer row, so a revocation never waits behind
+   a large import. A row is never handed out twice at once. A worker takes `Pipeline.Lock(repo,
+   path)`, reads the asset row again, and puts the home pointer and then the regional ones
+   (immutable paths), deletes the pointer in every bucket when the asset is gone, or drops the row
+   when the asset has another digest. A row is deleted only after every write of it succeeded,
+   in transactions of up to 128 rows, at most 200 ms after its writes; a row whose delete did not
+   commit is written again, which leaves the same state. A failed row retries with a backoff up
+   to 5 minutes. Writes to one key are spaced by a second (R2 takes one write per second per key),
    the wait outside the lock; a 429 of a pre-step retries for up to 2 s. A put that timed out has
    an unknown outcome: the row stays and the state is applied once more a minute later.
 
@@ -1830,9 +1848,10 @@ path dirty. Until a pointer lands, the Worker finds none, or a pending one, and 
 `auth.Service.AfterChange` (tokens, users, permissions, grants), `repos.Service.AfterChange`
 (create, update, members, delete; a repo marks its groups too, since a group is private when a
 member is), `netrules.Service.AfterRulesChange` (IP rules) and `publish.Service.AfterDeviceChange`
-(approve, setup, revoke). The outbox writes the marked keys within a second; `edge_written` keeps
-the hash of each object written. The job `edge.reconcile` computes every access object and
-`config.json` from the database every 5 minutes and marks in the outbox each key whose hash
+(approve, setup, revoke). The outbox writes the marked keys within a second, before its pointer
+rows; `edge_written` keeps the hash of each object written. The job `edge.reconcile` computes
+every access object and `config.json` from the database every 5 minutes (the users in pages of
+500, with one read of the permissions and one of the grants per page) and marks in the outbox each key whose hash
 differs from `edge_written`, that was never written, or whose row is gone; the outbox computes the
 body again when it writes, so a reconcile never puts an older body over a newer write. It covers
 a lost notice. Device expiry needs no notice: the object carries `exp`. Every write of
@@ -1926,7 +1945,11 @@ A group read goes to the server for a mutable path (every `Merger` path is mutab
 member is `guarded`. The Worker walks the members in order: it skips a member the caller may not
 read (checked without the bearer's scopes, as `Principal.InGroup`), serves the first member with
 a pointer, skips a hosted member without one, and passes to the server at a pending pointer or at
-a proxy member without a pointer. It reads member pointers 6 at a time. It reads access objects
+a proxy member without a pointer. It reads member pointers 6 at a time. After `config.json` it
+reads the `bucket.json` of `HOME`, the repo object, the objects of the credential and the
+`bucket.json` of the nearer regions at once (a read token's user object follows its token object,
+whose `user` it names; a bearer's token or device object and its user object are read at once),
+so a cache expiry costs about one far read, not one per object. It reads access objects
 and `config.json` through isolate memory and the Cache API for `edge.access_ttl` (0: every
 request reads the home bucket), so a revocation reaches the edge within that time plus the outbox
 write. The Cache API does not work behind Cloudflare Access, so the base URL host must not be
@@ -1962,10 +1985,11 @@ or HEAD also calls `passThroughOnException`.
 
 **Copies.** An R2 event notification rule of the home bucket (prefix `[s3.prefix/]blobs/`,
 `object-create` and `object-delete`) sends to the queue `<home bucket>-edge-copy`. The consumer
-acts on the current state: it HEADs the home key and copies to each region that lacks the blob or
-holds another size (a put with the `sha256` option; above 4.9 GiB a multipart upload with parts of
+acts on the current state: it HEADs the home key and, for every region at once, copies to a
+region that lacks the blob or holds another size (a put with the `sha256` option; above 4.9 GiB a multipart upload with parts of
 the larger of 100 MiB and the size / 10,000, its state in `copy/<hint>/<hex>.json` after each
-part), or deletes the regional copies when the home blob is gone. The cron (every 10 minutes) runs
+part), or deletes the regional copies when the home blob is gone. A region that fails retries the
+message after every other region finished; a region that has the blob skips it then. The cron (every 10 minutes) runs
 a gap pass when `gap/request.json` is at least as new as the start of the last pass or the last
 pass is older than 24 hours: it merges the key-ordered lists of the home `blobs/` and each region
 (1000 keys per list), queues copies and deletes 100 per batch, keeps its cursor in
@@ -2590,9 +2614,11 @@ repo; with a device proof the device's user reads the source, so the mount works
 
 **Unused layers.** A manifest delete gives back one use of each blob it references; a link at 0
 uses gets `unreferenced_at`. The job `docker.links` runs every `min(docker.link_grace, 1 min)` and
-at once after a settings change: it removes each link unused for `docker.link_grace` (`24h`,
-minimum `1s`) with `Remove` (source `generated`, no audit event); a link that a manifest took
-meanwhile is refused and stays. Then the core blob GC deletes the blob after `blobs.gc_grace` when
+at once after a settings change: it reads up to 1000 links unused for `docker.link_grace` (`24h`,
+minimum `1s`) at a time and removes the links of each repo with one `Remove` (source
+`generated`, no audit event). When the hooks refuse the group (a manifest took one of its links
+meanwhile), it removes the group link by link and the refused link stays; the row of a link
+whose asset is gone already is dropped. Then the core blob GC deletes the blob after `blobs.gc_grace` when
 no asset uses it. The grace also keeps a layer that a client pushed before its manifest, so it
 must outlast the slowest push. Untagged manifests of a hosted repo stay until deleted; a proxy
 drops the manifest of a tag that moved (see **Proxy**).
@@ -3008,9 +3034,10 @@ the capabilities of the repo's `format.Spec` that are set.
   every path and prefix first, then calls `Remove` (see **Byte pipeline**): the `paths`, then each
   folder, in batches of 500. `deleted` is the number of files. The blobs stay until the blob GC
   removes those that no file uses.
-- **Repo delete.** `POST /api/repos/delete` (`repositories.all`) deletes one repo after another,
-  each under a `delete` operation (see **Repo operations**), so writes get 409. It removes the
-  files batch by batch, then the repo row. The name can be used again afterwards.
+- **Repo delete.** `POST /api/repos/delete` (`repositories.all`) starts a `delete` operation per
+  repo and answers 202; the deletes run as tasks (see **Repo operations**), and writes get 409
+  meanwhile. Each removes the files batch by batch, empties the rows of the repo in batches, then
+  deletes the repo row. The UI waits for each repo to answer 404 and shows the progress in a toast. The name can be used again afterwards.
 - **`format.Spec.OnRemoved` and `AfterRemove`.** `OnRemoved(ctx, tx, repo, removed, prefixes)` runs in
   the transaction of each batch, before the rows go, with the folders of the removal; Debian and
   Docker use it (see **Debian indexing

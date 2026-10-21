@@ -28,7 +28,7 @@ func (q *Queries) CrateName(ctx context.Context, arg CrateNameParams) (string, e
 }
 
 const deleteName = `-- name: DeleteName :exec
-DELETE FROM cargo_names WHERE repo_id = ? AND folded_name = ?
+DELETE FROM cargo_names WHERE cargo_names.repo_id = ? AND folded_name = ?
 `
 
 type DeleteNameParams struct {
@@ -315,6 +315,41 @@ func (q *Queries) ListVersionsPage(ctx context.Context, arg ListVersionsPagePara
 		return nil, err
 	}
 	return items, nil
+}
+
+const purgeCargoNames = `-- name: PurgeCargoNames :execrows
+DELETE FROM cargo_names WHERE cargo_names.repo_id = ?1 AND folded_name IN (SELECT x.folded_name FROM cargo_names x WHERE x.repo_id = ?1 LIMIT ?2)
+`
+
+type PurgeCargoNamesParams struct {
+	RepoID int64
+	Limit  int64
+}
+
+func (q *Queries) PurgeCargoNames(ctx context.Context, arg PurgeCargoNamesParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, purgeCargoNames, arg.RepoID, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const purgeCargoVersions = `-- name: PurgeCargoVersions :execrows
+DELETE FROM cargo_versions WHERE id IN (SELECT x.id FROM cargo_versions x WHERE x.repo_id = ?1 LIMIT ?2)
+`
+
+type PurgeCargoVersionsParams struct {
+	RepoID int64
+	Limit  int64
+}
+
+// A repo delete empties these tables batch by batch before its row goes (repos.Service.OnPurge).
+func (q *Queries) PurgeCargoVersions(ctx context.Context, arg PurgeCargoVersionsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, purgeCargoVersions, arg.RepoID, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const seedVersion = `-- name: SeedVersion :exec

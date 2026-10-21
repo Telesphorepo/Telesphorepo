@@ -67,6 +67,7 @@ func Module() module.Module {
 			x.Init(func(ctx context.Context, host *module.Host) error {
 				h.host = host
 				h.db, h.q = host.DB, dbq.New(host.DB.R)
+				host.Repos.OnPurge(purge(dbq.New(host.DB.W))) // empties the module's rows of a repo in batches before the repo row goes
 				h.assets, h.rebuilds = host.Assets, host.Rebuilds
 				h.settings, h.log = host.Settings, host.Log
 				h.keys = module.Use[*signing.Keys](host)

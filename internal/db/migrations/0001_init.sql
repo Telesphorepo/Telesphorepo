@@ -355,4 +355,5 @@ CREATE TABLE audit_events (
 CREATE INDEX audit_events_at ON audit_events(at);
 CREATE INDEX audit_events_repo ON audit_events(repo_id, id);
 CREATE INDEX audit_events_action ON audit_events(action, id);
+CREATE INDEX audit_events_repo_action ON audit_events(repo_id, action, id);
 CREATE INDEX audit_events_actor ON audit_events(actor_user_id);

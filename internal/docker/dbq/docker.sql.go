@@ -87,7 +87,7 @@ func (q *Queries) CountReferrers(ctx context.Context, arg CountReferrersParams) 
 }
 
 const deleteEmptyImage = `-- name: DeleteEmptyImage :exec
-DELETE FROM docker_images WHERE repo_id = ? AND image = ? AND manifests <= 0
+DELETE FROM docker_images WHERE docker_images.repo_id = ? AND image = ? AND manifests <= 0
 `
 
 type DeleteEmptyImageParams struct {
@@ -101,7 +101,7 @@ func (q *Queries) DeleteEmptyImage(ctx context.Context, arg DeleteEmptyImagePara
 }
 
 const deleteLink = `-- name: DeleteLink :exec
-DELETE FROM docker_links WHERE repo_id = ? AND image = ? AND digest = ?
+DELETE FROM docker_links WHERE docker_links.repo_id = ? AND image = ? AND digest = ?
 `
 
 type DeleteLinkParams struct {
@@ -116,7 +116,7 @@ func (q *Queries) DeleteLink(ctx context.Context, arg DeleteLinkParams) error {
 }
 
 const deleteManifest = `-- name: DeleteManifest :exec
-DELETE FROM docker_manifests WHERE repo_id = ? AND image = ? AND digest = ?
+DELETE FROM docker_manifests WHERE docker_manifests.repo_id = ? AND image = ? AND digest = ?
 `
 
 type DeleteManifestParams struct {
@@ -131,7 +131,7 @@ func (q *Queries) DeleteManifest(ctx context.Context, arg DeleteManifestParams) 
 }
 
 const deleteRefs = `-- name: DeleteRefs :exec
-DELETE FROM docker_refs WHERE repo_id = ? AND image = ? AND manifest = ?
+DELETE FROM docker_refs WHERE docker_refs.repo_id = ? AND image = ? AND manifest = ?
 `
 
 type DeleteRefsParams struct {
@@ -146,7 +146,7 @@ func (q *Queries) DeleteRefs(ctx context.Context, arg DeleteRefsParams) error {
 }
 
 const deleteStaleLink = `-- name: DeleteStaleLink :exec
-DELETE FROM docker_links WHERE repo_id = ? AND image = ? AND digest = ? AND refs = 0 AND unreferenced_at < ?
+DELETE FROM docker_links WHERE docker_links.repo_id = ? AND image = ? AND digest = ? AND refs = 0 AND unreferenced_at < ?
 `
 
 type DeleteStaleLinkParams struct {
@@ -168,7 +168,7 @@ func (q *Queries) DeleteStaleLink(ctx context.Context, arg DeleteStaleLinkParams
 }
 
 const deleteTag = `-- name: DeleteTag :exec
-DELETE FROM docker_tags WHERE repo_id = ? AND image = ? AND tag = ?
+DELETE FROM docker_tags WHERE docker_tags.repo_id = ? AND image = ? AND tag = ?
 `
 
 type DeleteTagParams struct {
@@ -713,6 +713,92 @@ func (q *Queries) ParentIndexes(ctx context.Context, arg ParentIndexesParams) ([
 		return nil, err
 	}
 	return items, nil
+}
+
+const purgeDockerImages = `-- name: PurgeDockerImages :execrows
+DELETE FROM docker_images WHERE docker_images.repo_id = ?1 AND image IN (SELECT x.image FROM docker_images x WHERE x.repo_id = ?1 LIMIT ?2)
+`
+
+type PurgeDockerImagesParams struct {
+	RepoID int64
+	Limit  int64
+}
+
+func (q *Queries) PurgeDockerImages(ctx context.Context, arg PurgeDockerImagesParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, purgeDockerImages, arg.RepoID, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const purgeDockerLinks = `-- name: PurgeDockerLinks :execrows
+DELETE FROM docker_links WHERE docker_links.repo_id = ?1 AND (image, digest) IN (SELECT x.image, x.digest FROM docker_links x WHERE x.repo_id = ?1 LIMIT ?2)
+`
+
+type PurgeDockerLinksParams struct {
+	RepoID int64
+	Limit  int64
+}
+
+func (q *Queries) PurgeDockerLinks(ctx context.Context, arg PurgeDockerLinksParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, purgeDockerLinks, arg.RepoID, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const purgeDockerManifests = `-- name: PurgeDockerManifests :execrows
+DELETE FROM docker_manifests WHERE docker_manifests.repo_id = ?1 AND (image, digest) IN (SELECT x.image, x.digest FROM docker_manifests x WHERE x.repo_id = ?1 LIMIT ?2)
+`
+
+type PurgeDockerManifestsParams struct {
+	RepoID int64
+	Limit  int64
+}
+
+func (q *Queries) PurgeDockerManifests(ctx context.Context, arg PurgeDockerManifestsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, purgeDockerManifests, arg.RepoID, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const purgeDockerRefs = `-- name: PurgeDockerRefs :execrows
+DELETE FROM docker_refs WHERE docker_refs.repo_id = ?1 AND (image, manifest, child) IN (SELECT x.image, x.manifest, x.child FROM docker_refs x WHERE x.repo_id = ?1 LIMIT ?2)
+`
+
+type PurgeDockerRefsParams struct {
+	RepoID int64
+	Limit  int64
+}
+
+func (q *Queries) PurgeDockerRefs(ctx context.Context, arg PurgeDockerRefsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, purgeDockerRefs, arg.RepoID, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const purgeDockerTags = `-- name: PurgeDockerTags :execrows
+DELETE FROM docker_tags WHERE docker_tags.repo_id = ?1 AND (image, tag) IN (SELECT x.image, x.tag FROM docker_tags x WHERE x.repo_id = ?1 LIMIT ?2)
+`
+
+type PurgeDockerTagsParams struct {
+	RepoID int64
+	Limit  int64
+}
+
+// A repo delete empties these tables batch by batch before its row goes (repos.Service.OnPurge).
+func (q *Queries) PurgeDockerTags(ctx context.Context, arg PurgeDockerTagsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, purgeDockerTags, arg.RepoID, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const repoLinkOf = `-- name: RepoLinkOf :one

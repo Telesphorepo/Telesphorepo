@@ -64,3 +64,8 @@ SELECT DISTINCT lower_id FROM nuget_versions
 WHERE repo_id = ? AND lower_id >= ? AND lower_id < ?
 ORDER BY lower_id
 LIMIT ?;
+
+-- A repo delete empties this table batch by batch before its row goes (repos.Service.OnPurge).
+-- name: PurgeNugetVersions :execrows
+DELETE FROM nuget_versions WHERE id IN (SELECT x.id FROM nuget_versions x WHERE x.repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
+

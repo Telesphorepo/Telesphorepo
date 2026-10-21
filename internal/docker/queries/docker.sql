@@ -11,7 +11,7 @@ ON CONFLICT (repo_id, image) DO NOTHING;
 UPDATE docker_images SET manifests = manifests + sqlc.arg(delta) WHERE repo_id = sqlc.arg(repo_id) AND image = sqlc.arg(image);
 
 -- name: DeleteEmptyImage :exec
-DELETE FROM docker_images WHERE repo_id = ? AND image = ? AND manifests <= 0;
+DELETE FROM docker_images WHERE docker_images.repo_id = ? AND image = ? AND manifests <= 0;
 
 -- A keyset page of every image by full name, through docker_images_full.
 -- name: ListCatalog :many
@@ -26,7 +26,7 @@ INSERT INTO docker_manifests (repo_id, image, digest, media_type, artifact_type,
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- name: DeleteManifest :exec
-DELETE FROM docker_manifests WHERE repo_id = ? AND image = ? AND digest = ?;
+DELETE FROM docker_manifests WHERE docker_manifests.repo_id = ? AND image = ? AND digest = ?;
 
 -- The manifests whose subject is a digest, in digest order after a cursor, through
 -- docker_manifests_subject.
@@ -50,7 +50,7 @@ INSERT INTO docker_refs (repo_id, image, manifest, child, kind) VALUES (?, ?, ?,
 SELECT child, kind FROM docker_refs WHERE repo_id = ? AND image = ? AND manifest = ?;
 
 -- name: DeleteRefs :exec
-DELETE FROM docker_refs WHERE repo_id = ? AND image = ? AND manifest = ?;
+DELETE FROM docker_refs WHERE docker_refs.repo_id = ? AND image = ? AND manifest = ?;
 
 -- How many manifests of the image use a blob, through docker_refs_child.
 -- name: CountChildRefs :one
@@ -74,11 +74,11 @@ UPDATE docker_links SET refs = refs + sqlc.arg(delta),
 WHERE repo_id = sqlc.arg(repo_id) AND image = sqlc.arg(image) AND digest = sqlc.arg(digest);
 
 -- name: DeleteLink :exec
-DELETE FROM docker_links WHERE repo_id = ? AND image = ? AND digest = ?;
+DELETE FROM docker_links WHERE docker_links.repo_id = ? AND image = ? AND digest = ?;
 
 -- Deletes the row of a link whose asset is gone, while it is still unused since before cutoff.
 -- name: DeleteStaleLink :exec
-DELETE FROM docker_links WHERE repo_id = ? AND image = ? AND digest = ? AND refs = 0 AND unreferenced_at < ?;
+DELETE FROM docker_links WHERE docker_links.repo_id = ? AND image = ? AND digest = ? AND refs = 0 AND unreferenced_at < ?;
 
 -- An image of the repo that links a blob, through docker_links_digest.
 -- name: RepoLinkOf :one
@@ -96,7 +96,7 @@ INSERT INTO docker_tags (repo_id, image, tag, digest, updated_at) VALUES (?, ?, 
 ON CONFLICT (repo_id, image, tag) DO UPDATE SET digest = excluded.digest, updated_at = excluded.updated_at;
 
 -- name: DeleteTag :exec
-DELETE FROM docker_tags WHERE repo_id = ? AND image = ? AND tag = ?;
+DELETE FROM docker_tags WHERE docker_tags.repo_id = ? AND image = ? AND tag = ?;
 
 -- name: GetTag :one
 SELECT tag, digest, updated_at FROM docker_tags WHERE repo_id = ? AND image = ? AND tag = ?;
@@ -124,3 +124,20 @@ SELECT tag FROM docker_tags WHERE repo_id = ? AND image = ? AND digest = ? LIMIT
 -- How many manifests of the image name a subject, through docker_manifests_subject.
 -- name: CountReferrers :one
 SELECT count(*) FROM docker_manifests WHERE repo_id = ? AND image = ? AND subject = ?;
+
+-- A repo delete empties these tables batch by batch before its row goes (repos.Service.OnPurge).
+-- name: PurgeDockerTags :execrows
+DELETE FROM docker_tags WHERE docker_tags.repo_id = sqlc.arg(repo_id) AND (image, tag) IN (SELECT x.image, x.tag FROM docker_tags x WHERE x.repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
+
+-- name: PurgeDockerRefs :execrows
+DELETE FROM docker_refs WHERE docker_refs.repo_id = sqlc.arg(repo_id) AND (image, manifest, child) IN (SELECT x.image, x.manifest, x.child FROM docker_refs x WHERE x.repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
+
+-- name: PurgeDockerLinks :execrows
+DELETE FROM docker_links WHERE docker_links.repo_id = sqlc.arg(repo_id) AND (image, digest) IN (SELECT x.image, x.digest FROM docker_links x WHERE x.repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
+
+-- name: PurgeDockerManifests :execrows
+DELETE FROM docker_manifests WHERE docker_manifests.repo_id = sqlc.arg(repo_id) AND (image, digest) IN (SELECT x.image, x.digest FROM docker_manifests x WHERE x.repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
+
+-- name: PurgeDockerImages :execrows
+DELETE FROM docker_images WHERE docker_images.repo_id = sqlc.arg(repo_id) AND image IN (SELECT x.image FROM docker_images x WHERE x.repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
+

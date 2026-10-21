@@ -10,6 +10,26 @@ import (
 	"database/sql"
 )
 
+const clearAuditRepo = `-- name: ClearAuditRepo :execrows
+UPDATE audit_events SET repo_id = NULL WHERE id IN
+  (SELECT x.id FROM audit_events x WHERE x.repo_id = ?1 LIMIT ?2)
+`
+
+type ClearAuditRepoParams struct {
+	RepoID sql.NullInt64
+	Limit  int64
+}
+
+// A repo delete detaches the events of the repo in batches through audit_events_repo, before
+// the repo row goes (its ON DELETE SET NULL would rewrite them all in one statement).
+func (q *Queries) ClearAuditRepo(ctx context.Context, arg ClearAuditRepoParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, clearAuditRepo, arg.RepoID, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const deleteOldAudit = `-- name: DeleteOldAudit :execrows
 DELETE FROM audit_events WHERE id IN
   (SELECT x.id FROM audit_events x WHERE x.at < ?1 ORDER BY x.at LIMIT ?2)
@@ -195,23 +215,23 @@ func (q *Queries) ListAuditByRepo(ctx context.Context, arg ListAuditByRepoParams
 
 const listAuditByRepoAction = `-- name: ListAuditByRepoAction :many
 SELECT id, at, actor_user_id, actor, action, repo_id, target, detail, ip FROM audit_events
-WHERE repo_id = ?1 AND id < ?2 AND action = ?3
+WHERE repo_id = ?1 AND action = ?2 AND id < ?3
 ORDER BY id DESC LIMIT ?4
 `
 
 type ListAuditByRepoActionParams struct {
 	RepoID sql.NullInt64
-	Before int64
 	Action string
+	Before int64
 	Limit  int64
 }
 
-// The repo index drives the scan; the action is checked on the repo's rows.
+// audit_events_repo_action serves the repo and the action together.
 func (q *Queries) ListAuditByRepoAction(ctx context.Context, arg ListAuditByRepoActionParams) ([]AuditEvent, error) {
 	rows, err := q.db.QueryContext(ctx, listAuditByRepoAction,
 		arg.RepoID,
-		arg.Before,
 		arg.Action,
+		arg.Before,
 		arg.Limit,
 	)
 	if err != nil {

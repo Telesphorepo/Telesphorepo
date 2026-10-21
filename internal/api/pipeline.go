@@ -31,6 +31,7 @@ const (
 	gcMaxWait      = 10 * time.Minute // the blob GC runs at least this often
 	expireEvery    = 10 * time.Minute // how often expired uploads are deleted
 	resumeAtStart  = 100              // running repo deletes resumed per start
+	deleteSlots    = 4                // repo deletes that run at once
 	digestHexchars = 64
 )
 
@@ -77,12 +78,19 @@ func deleteMessage(op *ops.Op) string {
 	return "The repository is being deleted."
 }
 
-// deleteRepos deletes the repos of names with all their files (repositories.all): {names} ->
-// 200 {deleted: [names], files: n}. It first checks that every repo exists (404) and that none
-// has an operation (409); then nothing is deleted yet. Each repo then gets a delete operation,
-// which removes its files batch by batch (writes answer 409 meanwhile) and then the repo row. A
-// failure keeps the operation as failed: the repo can be resumed or cleared, and the answer is
-// 500 {deleted: [names done], error}.
+// deletingJSON is a repo whose delete started: its name and its delete operation.
+type deletingJSON struct {
+	Name      string         `json:"name"`
+	Operation *operationJSON `json:"operation"`
+}
+
+// deleteRepos starts the delete of the repos of names with all their files (repositories.all):
+// {names} -> 202 {deleting: [{name, operation}]}. It first checks that every repo exists (404)
+// and that none has an operation (409); then nothing is deleted yet. Every repo then gets its
+// delete operation in one transaction, and each delete runs as a task of the core module: it
+// removes the files batch by batch (writes answer 409 meanwhile, the operation counts the
+// progress), empties the rows that reference the repo in batches, and deletes the repo row with
+// its operation. A failure keeps the operation as failed: the repo can be resumed or cleared.
 func (a *API) deleteRepos(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	var in struct {
 		Names []string `json:"names"`
@@ -111,59 +119,94 @@ func (a *API) deleteRepos(w http.ResponseWriter, r *http.Request, c *route.Call)
 		}
 		all = append(all, repo)
 	}
-	deleted := make([]string, 0, len(all))
-	files := 0
-	for _, repo := range all {
-		var op *ops.Op
-		err := a.h.DB.Tx(ctx, func(tx *sql.Tx) error {
-			var err error
-			op, err = a.ops.Begin(ctx, tx, repo.ID, ops.TypeDelete, "core", "", ops.Running, c.P.UserID)
-			return err
-		})
-		if errors.Is(err, ops.ErrBusy) {
-			httpx.WriteProblem(w, r, httpx.Blank(http.StatusConflict, repo.Name+": "+err.Error()).With(map[string]any{"deleted": deleted}))
-			return
+	started := make([]*ops.Op, len(all))
+	err := a.h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		for i, repo := range all {
+			op, err := a.ops.Begin(ctx, tx, repo.ID, ops.TypeDelete, "core", "", ops.Running, c.P.UserID)
+			if errors.Is(err, ops.ErrBusy) {
+				return &busyError{repo: repo.Name, err: err}
+			}
+			if err != nil {
+				return err
+			}
+			op.Total = repo.FileCount
+			started[i] = op
 		}
-		if err != nil {
-			route.Fail(w, r, err)
-			return
-		}
-		n, err := a.runDelete(ctx, repo, op)
-		files += n
-		if err != nil {
-			httpx.WriteProblem(w, r, httpx.Blank(http.StatusInternalServerError, "The server could not delete "+repo.Name+": "+err.Error()).With(map[string]any{"deleted": deleted}))
-			return
-		}
-		deleted = append(deleted, repo.Name)
+		return nil
+	})
+	var busy *busyError
+	if errors.As(err, &busy) {
+		httpx.Error(w, r, http.StatusConflict, busy.Error())
+		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"deleted": deleted, "files": files})
+	if err != nil {
+		route.Fail(w, r, err)
+		return
+	}
+	out := make([]deletingJSON, len(all))
+	for i, repo := range all {
+		a.startDelete(repo, started[i])
+		out[i] = deletingJSON{Name: repo.Name, Operation: a.toOperationJSON(started[i])}
+	}
+	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"deleting": out})
+}
+
+// busyError is a repo of a delete that got an operation meanwhile.
+type busyError struct {
+	repo string
+	err  error
+}
+
+func (e *busyError) Error() string { return e.repo + ": " + e.err.Error() }
+
+// startDelete runs the delete of repo under its operation op as a task of the core module. At
+// most deleteSlots deletes run at once; the others wait for a slot.
+func (a *API) startDelete(repo *repos.Repo, op *ops.Op) {
+	a.h.Go("repo delete", func(ctx context.Context) {
+		select {
+		case a.deleteSlots <- struct{}{}:
+		case <-ctx.Done():
+			return // the operation stays running: the next start resumes it
+		}
+		defer func() { <-a.deleteSlots }()
+		a.runDelete(ctx, repo, op)
+	})
 }
 
 // runDelete removes every file of repo under its delete operation op, with progress, then deletes
-// the repo row (the operation row goes with it) and records repo.delete. A failure sets the
-// operation to failed with the error. It runs to the end when the client goes away.
-func (a *API) runDelete(ctx context.Context, repo *repos.Repo, op *ops.Op) (int, error) {
-	ctx = context.WithoutCancel(ctx)
+// the repo row (repos.Service.DeleteRow empties the rows that reference it in batches first; the
+// operation row goes with it) and records repo.delete. A failure sets the operation to failed with
+// the error. When ctx ends (the server stops), the operation stays running and the next start
+// resumes it.
+func (a *API) runDelete(ctx context.Context, repo *repos.Repo, op *ops.Op) {
+	work := context.WithoutCancel(ctx)
 	total := repo.FileCount
+	_ = a.ops.Progress(work, op.ID, 0, total) // a resumed delete counts the files that are left
 	n, err := a.assets.Remove(ctx, assets.Removal{Repo: repo, Prefixes: []repopath.Path{""},
 		Origin: assets.Origin{Source: assets.SourceGenerated},
 		Progress: func(done int) {
-			_ = a.ops.Progress(ctx, op.ID, int64(done), max(total, int64(done)))
+			_ = a.ops.Progress(work, op.ID, int64(done), max(total, int64(done)))
 		}})
-	if err == nil {
+	if err == nil && ctx.Err() == nil {
 		err = a.repos.DeleteRow(ctx, repo.ID)
 	}
+	if err == nil && ctx.Err() != nil {
+		err = ctx.Err()
+	}
 	if err != nil {
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+			a.h.Log.Info("repo delete stopped with the server; it resumes at the next start", "repo", repo.Name, "files", n)
+			return
+		}
 		a.h.Log.Error("delete repo", "repo", repo.Name, "err", err)
-		_ = a.ops.Fail(ctx, op.ID, err)
-		return n, err
+		_ = a.ops.Fail(work, op.ID, err)
+		return
 	}
 	// The repo row is gone, so the event keeps only its name.
-	_ = a.audit.Record(ctx, audit.Event{Action: audit.RepoDelete, Repo: repo.Name, Target: repo.Name, Detail: map[string]any{"count": n}})
-	return n, nil
+	_ = a.audit.Record(work, audit.Event{Action: audit.RepoDelete, Repo: repo.Name, Target: repo.Name, Detail: map[string]any{"count": n}})
 }
 
-// resumeDelete runs a failed repo delete again (ops.Type Resume).
+// resumeDelete sets a failed repo delete running again and starts it as a task (ops.Type Resume).
 func (a *API) resumeDelete(ctx context.Context, op *ops.Op) error {
 	repo, err := a.repos.ByID(ctx, op.RepoID)
 	if err != nil {
@@ -173,8 +216,8 @@ func (a *API) resumeDelete(ctx context.Context, op *ops.Op) error {
 		return err
 	}
 	_ = a.audit.Record(ctx, audit.Event{Action: audit.RepoDeleteResume, RepoID: repo.ID, Repo: repo.Name, Target: repo.Name})
-	_, err = a.runDelete(ctx, repo, op)
-	return err
+	a.startDelete(repo, op)
+	return nil
 }
 
 // clearDelete ends a failed repo delete: the repo stays with the files that are left (ops.Type
@@ -204,7 +247,7 @@ func (a *API) resumeDeletes(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		a.h.Go("repo delete", func(ctx context.Context) { _, _ = a.runDelete(ctx, repo, op) })
+		a.startDelete(repo, op)
 	}
 	return nil
 }
@@ -229,7 +272,7 @@ func (a *API) operationOf(w http.ResponseWriter, r *http.Request) (*ops.Op, *ops
 }
 
 // resumeOperation resumes the failed operation of repo {name} (repositories.all): 200 {ok: true}
-// when it finished, 409 when the operation is not failed or its type cannot resume, or the error.
+// when it runs again (a delete goes on as a task; its operation shows the progress), 409 when the operation is not failed or its type cannot resume, or the error.
 func (a *API) resumeOperation(w http.ResponseWriter, r *http.Request, _ *route.Call) {
 	op, t, ok := a.operationOf(w, r)
 	if !ok {

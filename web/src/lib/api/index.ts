@@ -128,12 +128,12 @@ export const api = {
     setPublic: (names: string[], anonymous_read: boolean) =>
       request<T.Changed>("PATCH", "/api/repos", { body: { names, anonymous_read } }),
     /**
-     * All repositories: removes 1 to 1000 repositories and their files. 409 when one has an operation
-     * (nothing is deleted); a failure part way is an ApiError, the repositories before it are gone, and the
-     * failed one keeps a failed delete operation that can be resumed or cleared.
+     * All repositories: starts the delete of 1 to 1000 repositories and their files (202). 409 when one has an
+     * operation (nothing is deleted). Each delete runs on the server: the repository keeps its delete operation
+     * with the progress until it is gone (404); a failed one keeps a failed operation that can be resumed or cleared.
      */
     delete: (names: string[]) => request<T.ReposDeleted>("POST", "/api/repos/delete", { body: { names } }),
-    /** All repositories: runs the failed operation of the repository again (a failed delete deletes the repository). */
+    /** All repositories: runs the failed operation of the repository again (a failed delete goes on deleting the repository on the server). */
     resumeOperation: (name: string) => request<{ ok: boolean }>("POST", repo(name) + "/operation/resume"),
     /** All repositories: ends the failed operation of the repository; the repository keeps the files that are left. */
     clearOperation: (name: string) => request<void>("DELETE", repo(name) + "/operation"),

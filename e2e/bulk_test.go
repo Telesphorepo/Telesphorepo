@@ -3,12 +3,14 @@
 package e2e
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Bulk actions: the write routes that take a list (see Bulk actions in SPEC.md).
@@ -21,6 +23,69 @@ func rawRepoWithFile(t *testing.T, s *Server, prefix string) string {
 	resp, body := rawPut(t, s, "/raw/"+repo+"/f.txt", []byte(repo+" file"), s.PublishAuth(t, s.AdminUser, repo))
 	wantStatus(t, resp, body, http.StatusCreated)
 	return repo
+}
+
+// deleteRepos deletes the repos of names as the admin: POST /api/repos/delete answers 202 with
+// a running delete operation per repo, in the order of names, and the test waits until each repo
+// answers 404. A delete that fails fails the test.
+func deleteRepos(t *testing.T, s *Server, names ...string) {
+	t.Helper()
+	var out struct {
+		Deleting []struct {
+			Name      string `json:"name"`
+			Operation struct {
+				Type  string `json:"type"`
+				State string `json:"state"`
+			} `json:"operation"`
+		} `json:"deleting"`
+	}
+	st, b := s.API(t, http.MethodPost, "/api/repos/delete", map[string]any{"names": names}, s.Admin())
+	if st != http.StatusAccepted {
+		t.Fatalf("delete %v: status %d, want 202: %s", names, st, b)
+	}
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("delete %v: %v: %s", names, err, b)
+	}
+	if len(out.Deleting) != len(names) {
+		t.Fatalf("delete %v: %s, want one entry per repo", names, b)
+	}
+	for i, d := range out.Deleting {
+		if d.Name != names[i] || d.Operation.Type != "delete" || d.Operation.State != "running" {
+			t.Fatalf("delete %v: entry %d is %+v, want %s with a running delete", names, i, d, names[i])
+		}
+	}
+	for _, name := range names {
+		waitRepoGone(t, s, name)
+	}
+}
+
+// waitRepoGone waits until GET /api/repos/{name} answers 404; a failed operation of the repo
+// fails the test.
+func waitRepoGone(t *testing.T, s *Server, name string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		st, b := s.API(t, http.MethodGet, "/api/repos/"+name, nil, s.Admin())
+		if st == http.StatusNotFound {
+			return
+		}
+		var r struct {
+			Operation *struct {
+				State string `json:"state"`
+				Error string `json:"error"`
+			} `json:"operation"`
+		}
+		_ = json.Unmarshal(b, &r)
+		switch {
+		case st != http.StatusOK:
+			t.Fatalf("GET %s while it is deleted: status %d: %s", name, st, b)
+		case r.Operation != nil && r.Operation.State == "failed":
+			t.Fatalf("the delete of %s failed: %s", name, r.Operation.Error)
+		case time.Now().After(deadline):
+			t.Fatalf("%s still exists 2 minutes after its delete: %s", name, b)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // wantGet requires status want for GET /raw/{repo}/f.txt with auth.
@@ -109,20 +174,14 @@ func TestBulkRepos(t *testing.T) {
 		apiWant(t, s, http.MethodPost, "/api/repos/delete", map[string]any{"names": []string{a, missing}}, s.Admin(), http.StatusNotFound)
 		wantGet(t, s, a, nil, http.StatusOK)
 
-		// Delete two: both answer 404. Their blobs stay until the blob GC.
-		var del struct {
-			Deleted []string `json:"deleted"`
-			Files   int      `json:"files"`
-		}
-		s.MustAPI(t, http.MethodPost, "/api/repos/delete", map[string]any{"names": []string{a, b}}, s.Admin(), &del)
-		if !slices.Equal(del.Deleted, []string{a, b}) || del.Files != 2 {
-			t.Fatalf("delete 2 repos: %+v, want deleted [%s %s] and 2 files", del, a, b)
-		}
-		for _, r := range []string{a, b} {
-			apiWant(t, s, http.MethodGet, "/api/repos/"+r, nil, s.Admin(), http.StatusNotFound)
-		}
+		// Delete two: 202, then both answer 404 once their deletes ran. Their blobs stay until the
+		// blob GC.
+		deleteRepos(t, s, a, b)
 		var gone []string
 		for _, e := range auditAll(t, s, "action=repo.delete") {
+			if n, _ := e.Detail["count"].(float64); n != 1 {
+				t.Fatalf("repo.delete event of %s counts %v files, want 1", e.Target, e.Detail["count"])
+			}
 			gone = append(gone, e.Target)
 		}
 		slices.Sort(gone)

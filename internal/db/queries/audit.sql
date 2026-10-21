@@ -17,13 +17,19 @@ WHERE action = sqlc.arg(action) AND id < sqlc.arg(before) ORDER BY id DESC LIMIT
 SELECT id, at, actor_user_id, actor, action, repo_id, target, detail, ip FROM audit_events
 WHERE repo_id = sqlc.arg(repo_id) AND id < sqlc.arg(before) ORDER BY id DESC LIMIT sqlc.arg(limit);
 
--- The repo index drives the scan; the action is checked on the repo's rows.
+-- audit_events_repo_action serves the repo and the action together.
 -- name: ListAuditByRepoAction :many
 SELECT id, at, actor_user_id, actor, action, repo_id, target, detail, ip FROM audit_events
-WHERE repo_id = sqlc.arg(repo_id) AND id < sqlc.arg(before) AND action = sqlc.arg(action)
+WHERE repo_id = sqlc.arg(repo_id) AND action = sqlc.arg(action) AND id < sqlc.arg(before)
 ORDER BY id DESC LIMIT sqlc.arg(limit);
 
 -- Retention cleanup in batches, oldest first through audit_events_at.
 -- name: DeleteOldAudit :execrows
 DELETE FROM audit_events WHERE id IN
   (SELECT x.id FROM audit_events x WHERE x.at < sqlc.arg(before) ORDER BY x.at LIMIT sqlc.arg(limit));
+
+-- A repo delete detaches the events of the repo in batches through audit_events_repo, before
+-- the repo row goes (its ON DELETE SET NULL would rewrite them all in one statement).
+-- name: ClearAuditRepo :execrows
+UPDATE audit_events SET repo_id = NULL WHERE id IN
+  (SELECT x.id FROM audit_events x WHERE x.repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));

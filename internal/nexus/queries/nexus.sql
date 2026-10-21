@@ -155,3 +155,11 @@ INSERT INTO nexus_sync_log (sync_id, at, source_repo, level, message) VALUES (?,
 SELECT id, at, source_repo, level, message FROM nexus_sync_log
 WHERE sync_id = sqlc.arg(sync_id) AND id > sqlc.arg(after_id)
 ORDER BY id LIMIT sqlc.arg(limit);
+
+-- A repo delete empties these tables batch by batch before its row goes (repos.Service.OnPurge).
+-- name: PurgeNexusSyncRepos :execrows
+DELETE FROM nexus_sync_repos WHERE (sync_id, source_repo) IN (SELECT x.sync_id, x.source_repo FROM nexus_sync_repos x WHERE x.target_repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
+
+-- name: PurgeNexusSourceRepos :execrows
+DELETE FROM nexus_source_repos WHERE (source_id, source_repo) IN (SELECT x.source_id, x.source_repo FROM nexus_source_repos x WHERE x.target_repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
+

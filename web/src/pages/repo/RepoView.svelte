@@ -18,6 +18,8 @@
 <script lang="ts">
   import { api, ApiError, type Repo } from "$lib/api";
   import { auth } from "$lib/auth.svelte";
+  import { waitForDeletes } from "$lib/deletes";
+  import { toast } from "svelte-sonner";
   import { Resource } from "$lib/load.svelte";
   import { href, navigate, repoPath, repoSettingsPath } from "$lib/router.svelte";
   import * as Alert from "$lib/components/ui/alert";
@@ -112,7 +114,11 @@
   async function resumeOperation() {
     const deleting = r?.operation?.type === "delete";
     await api.repos.resumeOperation(name);
-    if (deleting) navigate("/");
+    if (deleting) {
+      await waitForDeletes([name]);
+      toast.success(`Deleted the repository ${name}`);
+      navigate("/");
+    }
     else await repo.reload();
   }
   async function clearOperation() {

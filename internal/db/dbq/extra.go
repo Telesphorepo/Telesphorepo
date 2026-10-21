@@ -5,15 +5,13 @@ package dbq
 
 import (
 	"context"
-	"strings"
+	"database/sql"
 )
 
-// Extra maps each hand-written query name to its SQL. A slice parameter is written as
-// "/*SLICE:name*/?"; the plan guard checks it with a single placeholder.
+// Extra maps each hand-written query name to its SQL.
 var Extra = map[string]string{
-	"SearchAssets":        searchAssets,
-	"SearchAssetsInRepos": searchAssetsInRepos,
-	"ListMigrations":      listMigrations,
+	"SearchAssets":   searchAssets,
+	"ListMigrations": listMigrations,
 }
 
 // The FTS5 trigram search walks assets_fts in rowid order, which is the keyset order, so no
@@ -25,9 +23,6 @@ FROM assets_fts f JOIN assets a ON a.id = f.rowid JOIN repos r ON r.id = a.repo_
 WHERE assets_fts MATCH ? AND f.rowid > ?`
 
 const searchAssets = searchSelect + `
-ORDER BY f.rowid LIMIT ?`
-
-const searchAssetsInRepos = searchSelect + ` AND a.repo_id IN (/*SLICE:repo_ids*/?)
 ORDER BY f.rowid LIMIT ?`
 
 // SearchAssetsRow is one search hit: the asset and its repo's name.
@@ -47,27 +42,30 @@ func (q *Queries) SearchAssets(ctx context.Context, arg SearchAssetsParams) ([]S
 	return q.searchArgs(ctx, searchAssets, arg.Match, arg.After, arg.Limit)
 }
 
-type SearchAssetsInReposParams struct {
-	Match   string
-	After   int64
-	RepoIDs []int64 // must not be empty
-	Limit   int64
-}
-
-// SearchAssetsInRepos is SearchAssets restricted to RepoIDs.
-func (q *Queries) SearchAssetsInRepos(ctx context.Context, arg SearchAssetsInReposParams) ([]SearchAssetsRow, error) {
-	if len(arg.RepoIDs) == 0 {
-		return nil, nil
+// WalkSearchAssets reads the matches of SearchAssets after the asset id after, in asset id
+// order, at most limit of them, and gives each to fn until fn returns false. It returns how many
+// it read and the asset id of the last one (0 for none). A search restricted to some repos
+// filters in fn: it reads a bounded window of the index, however few of its matches are in
+// those repos.
+func (q *Queries) WalkSearchAssets(ctx context.Context, match string, after, limit int64, fn func(SearchAssetsRow) bool) (int64, int64, error) {
+	rows, err := q.db.QueryContext(ctx, searchAssets, match, after, limit)
+	if err != nil {
+		return 0, 0, err
 	}
-	marks := strings.Repeat(",?", len(arg.RepoIDs))[1:]
-	query := strings.Replace(searchAssetsInRepos, "/*SLICE:repo_ids*/?", marks, 1)
-	args := make([]any, 0, len(arg.RepoIDs)+3)
-	args = append(args, arg.Match, arg.After)
-	for _, id := range arg.RepoIDs {
-		args = append(args, id)
+	defer rows.Close()
+	var read, last int64
+	for rows.Next() {
+		i, err := scanSearchRow(rows)
+		if err != nil {
+			return read, last, err
+		}
+		read++
+		last = i.Asset.ID
+		if !fn(i) {
+			break
+		}
 	}
-	args = append(args, arg.Limit)
-	return q.searchArgs(ctx, query, args...)
+	return read, last, rows.Err()
 }
 
 func (q *Queries) searchArgs(ctx context.Context, query string, args ...any) ([]SearchAssetsRow, error) {
@@ -78,10 +76,8 @@ func (q *Queries) searchArgs(ctx context.Context, query string, args ...any) ([]
 	defer rows.Close()
 	var items []SearchAssetsRow
 	for rows.Next() {
-		var i SearchAssetsRow
-		a := &i.Asset
-		if err := rows.Scan(&a.ID, &a.RepoID, &a.Path, &a.BlobID, &a.Size, &a.Sha256, &a.ContentType, &a.Kind,
-			&a.UploadedBy, &a.CreatedAt, &a.UpdatedAt, &a.BuildID, &a.Md5, &a.Sha1, &i.RepoName); err != nil {
+		i, err := scanSearchRow(rows)
+		if err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -90,6 +86,14 @@ func (q *Queries) searchArgs(ctx context.Context, query string, args ...any) ([]
 		return nil, err
 	}
 	return items, nil
+}
+
+func scanSearchRow(rows *sql.Rows) (SearchAssetsRow, error) {
+	var i SearchAssetsRow
+	a := &i.Asset
+	err := rows.Scan(&a.ID, &a.RepoID, &a.Path, &a.BlobID, &a.Size, &a.Sha256, &a.ContentType, &a.Kind,
+		&a.UploadedBy, &a.CreatedAt, &a.UpdatedAt, &a.BuildID, &a.Md5, &a.Sha1, &i.RepoName)
+	return i, err
 }
 
 // schema_migrations is created by db.Init, not by a migration, so sqlc does not know it.

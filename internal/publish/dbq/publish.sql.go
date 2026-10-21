@@ -1155,6 +1155,58 @@ func (q *Queries) ListUserPublishSessions(ctx context.Context, arg ListUserPubli
 	return items, nil
 }
 
+const purgePublishExchangeSessions = `-- name: PurgePublishExchangeSessions :execrows
+DELETE FROM publish_exchange_sessions WHERE publish_exchange_sessions.repo_id = ?1 AND nonce_hash IN (SELECT x.nonce_hash FROM publish_exchange_sessions x WHERE x.repo_id = ?1 LIMIT ?2)
+`
+
+type PurgePublishExchangeSessionsParams struct {
+	RepoID int64
+	Limit  int64
+}
+
+// A repo delete empties these tables batch by batch before its row goes (repos.Service.OnPurge).
+func (q *Queries) PurgePublishExchangeSessions(ctx context.Context, arg PurgePublishExchangeSessionsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, purgePublishExchangeSessions, arg.RepoID, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const purgePublishOIDCSeen = `-- name: PurgePublishOIDCSeen :execrows
+DELETE FROM publish_oidc_seen WHERE publish_oidc_seen.repo_id = ?1 AND id_hash IN (SELECT x.id_hash FROM publish_oidc_seen x WHERE x.repo_id = ?1 LIMIT ?2)
+`
+
+type PurgePublishOIDCSeenParams struct {
+	RepoID int64
+	Limit  int64
+}
+
+func (q *Queries) PurgePublishOIDCSeen(ctx context.Context, arg PurgePublishOIDCSeenParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, purgePublishOIDCSeen, arg.RepoID, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const purgePublishSessions = `-- name: PurgePublishSessions :execrows
+DELETE FROM publish_sessions WHERE id IN (SELECT x.id FROM publish_sessions x WHERE x.repo_id = ?1 LIMIT ?2)
+`
+
+type PurgePublishSessionsParams struct {
+	RepoID int64
+	Limit  int64
+}
+
+func (q *Queries) PurgePublishSessions(ctx context.Context, arg PurgePublishSessionsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, purgePublishSessions, arg.RepoID, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const revokeDevice = `-- name: RevokeDevice :execrows
 UPDATE devices SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL
 `

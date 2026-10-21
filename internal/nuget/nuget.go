@@ -71,6 +71,7 @@ func Module() module.Module {
 			)
 			x.Init(func(ctx context.Context, host *module.Host) error {
 				h.host, h.q = host, dbq.New(host.DB.R)
+				host.Repos.OnPurge(purge(dbq.New(host.DB.W))) // empties the module's rows of a repo in batches before the repo row goes
 				return nil
 			})
 			x.Format(format.Spec{
