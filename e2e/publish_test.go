@@ -240,7 +240,7 @@ func TestSecondFactorLogin(t *testing.T) {
 	wantSetupOnly(t, s.Login(t, s.AdminUser, s.AdminPass), http.MethodGet, "/api/settings")
 
 	u, pw := RandName("twofa"), "twofa-pass-1234"
-	s.CreateUser(t, u, pw, AllServerPerms...)
+	s.CreateUser(t, u, pw, s.ServerPerms(t)...)
 	pub, pubPw := RandName("publisher"), "publisher-pass-1234"
 	s.CreateUser(t, pub, pubPw)
 	type me struct {

@@ -114,7 +114,7 @@ func TestEffectiveAccess(t *testing.T) {
 	for _, u := range []string{reader, writer, gone} {
 		s.CreateUser(t, u, u+"-password-1")
 	}
-	s.CreateUser(t, boss, boss+"-password-1", AllServerPerms...)
+	s.CreateUser(t, boss, boss+"-password-1", s.ServerPerms(t)...)
 	s.SetPerms(t, repo, reader, "repo.download")
 	s.SetPerms(t, repo, writer, "repo.download", "repo.publish")
 	s.SetPerms(t, repo, gone, "repo.download", "repo.publish")
@@ -220,7 +220,7 @@ func TestEffectiveAccess(t *testing.T) {
 			t.Fatalf("GET /api/users/%s: %+v", writer, u)
 		}
 		s.MustAPI(t, http.MethodGet, "/api/users/"+boss, nil, s.Admin(), &u)
-		if strings.Join(u.Permissions, ",") != strings.Join(AllServerPerms, ",") {
+		if strings.Join(u.Permissions, ",") != strings.Join(s.ServerPerms(t), ",") {
 			t.Fatalf("GET /api/users/%s: %+v, want every server permission", boss, u)
 		}
 		st, b := s.API(t, http.MethodGet, "/api/users/"+RandName("nobody"), nil, s.Admin())
@@ -262,7 +262,7 @@ func TestEffectiveAccess(t *testing.T) {
 		}
 		var b userAccess
 		s.MustAPI(t, http.MethodGet, "/api/users/"+boss+"/access?limit=500", nil, s.Admin(), &b)
-		if strings.Join(b.Permissions, ",") != strings.Join(AllServerPerms, ",") ||
+		if strings.Join(b.Permissions, ",") != strings.Join(s.ServerPerms(t), ",") ||
 			permsOf(b, private) != everyRepoPerm+"/all_repos" || permsOf(b, repo) != everyRepoPerm+"/all_repos" {
 			t.Fatalf("admin's access: %+v", b)
 		}
@@ -473,7 +473,7 @@ func TestLastPeople(t *testing.T) {
 	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	allBut := func(drop string) []string {
-		return slices.DeleteFunc(slices.Clone(AllServerPerms), func(p string) bool { return p == drop })
+		return slices.DeleteFunc(s.ServerPerms(t), func(p string) bool { return p == drop })
 	}
 	// The bootstrap admin is the only holder: removing people from themselves is refused.
 	st, b := s.API(t, http.MethodPut, "/api/users/"+s.AdminUser+"/permissions", map[string]any{"permissions": allBut("people.manage")}, s.Admin())

@@ -84,8 +84,12 @@ func TestServerPermissions(t *testing.T) {
 			{http.MethodGet, "/api/publish/log", none, []int{http.StatusOK}},
 		}, false},
 	}
-	if len(cases) != len(AllServerPerms) {
-		t.Fatalf("%d cases for %d server permissions", len(cases), len(AllServerPerms))
+	var covered []string
+	for _, c := range cases {
+		covered = append(covered, c.perm)
+	}
+	if registry := s.ServerPerms(t); !slices.Equal(slices.Sorted(slices.Values(covered)), slices.Sorted(slices.Values(registry))) {
+		t.Fatalf("cases for the server permissions %v, want one case for each of %v", covered, registry)
 	}
 
 	sessions := map[string]*Session{}

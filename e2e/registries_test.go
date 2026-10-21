@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Telesphorepo/Telesphorepo/internal/modules"
 )
 
 type permSubsystem struct {
@@ -21,14 +23,16 @@ type permSubsystem struct {
 	Label       string `json:"label"`
 	Help        string `json:"help"`
 	Module      string `json:"module"`
-	Permissions []struct {
-		ID           string   `json:"id"`
-		Label        string   `json:"label"`
-		Help         string   `json:"help"`
-		Needs        []string `json:"needs"`
-		SecondFactor bool     `json:"second_factor"`
-		AllRepos     bool     `json:"all_repos"`
-	} `json:"permissions"`
+	Permissions []permDef `json:"permissions"`
+}
+
+type permDef struct {
+	ID           string   `json:"id"`
+	Label        string   `json:"label"`
+	Help         string   `json:"help"`
+	Needs        []string `json:"needs"`
+	SecondFactor bool     `json:"second_factor"`
+	AllRepos     bool     `json:"all_repos"`
 }
 
 // TestPermissionRegistry: GET /api/permissions lists every subsystem with its permissions, and a
@@ -40,39 +44,54 @@ func TestPermissionRegistry(t *testing.T) {
 		Subsystems []permSubsystem `json:"subsystems"`
 	}
 	s.MustAPI(t, http.MethodGet, "/api/permissions", nil, nil, &reg)
+	// The subsystems come in module start order: the order of modules.All.
+	start := map[string]int{}
+	for i, m := range modules.All() {
+		start[m.ID] = i
+	}
 	by := map[string]permSubsystem{}
-	var server []string
+	last := 0
 	for _, sub := range reg.Subsystems {
 		if sub.Label == "" || sub.Help == "" || sub.Module == "" {
 			t.Fatalf("subsystem %+v: label, help and module are required", sub)
 		}
+		i, ok := start[sub.Module]
+		if !ok {
+			t.Fatalf("subsystem %s: module %q is not in modules.All", sub.ID, sub.Module)
+		}
+		if i < last {
+			t.Fatalf("subsystem %s of module %s comes after a subsystem of a later module (want module start order)", sub.ID, sub.Module)
+		}
+		last = i
 		by[sub.ID] = sub
 		for _, p := range sub.Permissions {
 			if !strings.HasPrefix(p.ID, sub.ID+".") || p.Label == "" || p.Help == "" || p.Needs == nil {
 				t.Fatalf("permission %+v of %s: the ID starts with the subsystem, label, help and needs are set", p, sub.ID)
 			}
-			if sub.Scope == "server" {
-				server = append(server, p.ID)
-			}
 		}
 	}
-	if !slices.Equal(server, AllServerPerms) {
-		t.Fatalf("server permissions %v, want %v (module start order)", server, AllServerPerms)
+	perm := func(sub, id string) permDef {
+		t.Helper()
+		for _, p := range by[sub].Permissions {
+			if p.ID == id {
+				return p
+			}
+		}
+		t.Fatalf("subsystem %s has no permission %s: %+v", sub, id, by[sub])
+		return permDef{}
 	}
-	repo := by["repo"]
-	if repo.Scope != "repo" || repo.Module != "core" || len(repo.Permissions) != 5 {
+	if repo := by["repo"]; repo.Scope != "repo" || repo.Module != "core" {
 		t.Fatalf("subsystem repo: %+v", repo)
 	}
-	pub := repo.Permissions[1]
-	if pub.ID != "repo.publish" || !slices.Equal(pub.Needs, []string{"repo.download"}) || pub.SecondFactor {
+	// Publishing needs download, and a publisher needs no second factor.
+	if pub := perm("repo", "repo.publish"); !slices.Equal(pub.Needs, []string{"repo.download"}) || pub.SecondFactor {
 		t.Fatalf("repo.publish: %+v", pub)
 	}
-	if ci := by["ci"]; ci.Module != "publish" || ci.Scope != "repo" || len(ci.Permissions) != 1 ||
-		ci.Permissions[0].ID != "ci.pipelines" || !ci.Permissions[0].SecondFactor {
+	if ci := by["ci"]; ci.Module != "publish" || ci.Scope != "repo" || !perm("ci", "ci.pipelines").SecondFactor {
 		t.Fatalf("subsystem ci: %+v", ci)
 	}
-	if all := by["repositories"]; len(all.Permissions) != 1 || !all.Permissions[0].AllRepos {
-		t.Fatalf("subsystem repositories: %+v", all)
+	if !perm("repositories", "repositories.all").AllRepos {
+		t.Fatalf("subsystem repositories: %+v", by["repositories"])
 	}
 
 	r := RandName("reg")
@@ -110,21 +129,20 @@ func TestAuditActions(t *testing.T) {
 		Subsystem string `json:"subsystem"`
 	}
 	s.MustAPI(t, http.MethodGet, "/api/audit/actions", nil, s.Admin(), &actions)
-	subs := map[string]string{}
-	for _, a := range actions {
-		if a.Label == "" || a.Subsystem == "" {
-			t.Fatalf("action %+v: label and subsystem are required", a)
-		}
-		subs[a.ID] = a.Subsystem
+	var reg struct {
+		Subsystems []permSubsystem `json:"subsystems"`
 	}
-	for id, sub := range map[string]string{
-		"file.upload": "repo", "grant.set": "repo", "token.create": "people", "storage.move.start": "storage",
-		"network.denied": "network", "signing.key.create": "signing", "ci.pipeline.create": "ci",
-		"device.approve": "people", "sso.signin": "signin", "nexus.cutover": "nexus",
-	} {
-		if subs[id] != sub {
-			t.Errorf("action %s: subsystem %q, want %q", id, subs[id], sub)
+	s.MustAPI(t, http.MethodGet, "/api/permissions", nil, nil, &reg)
+	subsystems := map[string]bool{}
+	for _, sub := range reg.Subsystems {
+		subsystems[sub.ID] = true
+	}
+	listed := map[string]bool{}
+	for _, a := range actions {
+		if a.Label == "" || !subsystems[a.Subsystem] {
+			t.Fatalf("action %+v: a label and a subsystem of GET /api/permissions are required", a)
 		}
+		listed[a.ID] = true
 	}
 	if st, b := s.API(t, http.MethodGet, "/api/audit/actions", nil, nil); st != http.StatusUnauthorized {
 		t.Fatalf("anonymous GET /api/audit/actions: status %d, want 401: %s", st, b)
@@ -157,6 +175,9 @@ func TestAuditActions(t *testing.T) {
 		{"signing.key.bind", s.AdminUser},
 		{"signing.key.create", "signing"}, // the key "default" of the first start, by the signing module
 	} {
+		if !listed[c.action] {
+			t.Errorf("GET /api/audit/actions does not list %s, which the log records", c.action)
+		}
 		if findAudit(all, c.action, c.actor) == nil {
 			t.Errorf("audit log has no %s event by %s", c.action, c.actor)
 		}

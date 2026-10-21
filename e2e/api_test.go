@@ -202,8 +202,8 @@ func TestAPISessionRule(t *testing.T) {
 
 	t.Run("admin password on write routes", func(t *testing.T) {
 		wantSessionRequired(t, http.MethodPost, "/api/publish/trusts", trust, adminPw)
-		wantSessionRequired(t, http.MethodPost, "/api/users", map[string]any{"username": RandName("evil"), "password": "evil-password-1", "permissions": AllServerPerms}, adminPw)
-		wantSessionRequired(t, http.MethodPut, "/api/users/frank/permissions", map[string]any{"permissions": AllServerPerms}, adminPw)
+		wantSessionRequired(t, http.MethodPost, "/api/users", map[string]any{"username": RandName("evil"), "password": "evil-password-1", "permissions": s.ServerPerms(t)}, adminPw)
+		wantSessionRequired(t, http.MethodPut, "/api/users/frank/permissions", map[string]any{"permissions": s.ServerPerms(t)}, adminPw)
 		wantSessionRequired(t, http.MethodPut, "/api/grants", map[string]any{"users": []string{"frank"}, "repos": []string{repo}, "perms": []string{"repo.download", "repo.publish"}}, adminPw)
 		wantSessionRequired(t, http.MethodPatch, "/api/settings", map[string]any{"max_json_size": 4096}, adminPw)
 		wantSessionRequired(t, http.MethodPost, "/api/repos", map[string]any{"name": RandName("evil"), "format": "maven"}, adminPw)
@@ -309,8 +309,8 @@ func TestAPIUsers(t *testing.T) {
 	apiWant(t, s, http.MethodGet, "/api/users", nil, Basic{"carol", "carol-password-1"}, http.StatusUnauthorized)
 	apiWant(t, s, http.MethodGet, "/api/users", nil, admin, 200)
 
-	apiJSON(t, s, http.MethodPut, "/api/users/carol/permissions", map[string]any{"permissions": AllServerPerms}, admin, 200, &u)
-	if strings.Join(u.Permissions, ",") != strings.Join(AllServerPerms, ",") {
+	apiJSON(t, s, http.MethodPut, "/api/users/carol/permissions", map[string]any{"permissions": s.ServerPerms(t)}, admin, 200, &u)
+	if strings.Join(u.Permissions, ",") != strings.Join(s.ServerPerms(t), ",") {
 		t.Fatalf("set permissions: %+v", u)
 	}
 	// The grant ends carol's session, which a password alone started.

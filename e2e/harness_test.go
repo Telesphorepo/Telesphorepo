@@ -730,9 +730,33 @@ func (s *Server) SignIn(t testing.TB, user, pass string) *Session {
 	return sess
 }
 
-// AllServerPerms holds every server permission, in registry order (module start order). A person
-// with all of them is an administrator.
-var AllServerPerms = []string{"repositories.all", "people.manage", "settings.general", "activity.read", "storage.manage", "backup.manage", "network.manage", "signing.manage", "edge.manage", "signin.manage", "nexus.manage"}
+// ServerPerms returns every server permission of the registry of s (GET /api/permissions), in
+// registry order. A person with all of them is an administrator.
+func (s *Server) ServerPerms(t testing.TB) []string {
+	t.Helper()
+	var reg struct {
+		Subsystems []struct {
+			Scope       string `json:"scope"`
+			Permissions []struct {
+				ID string `json:"id"`
+			} `json:"permissions"`
+		} `json:"subsystems"`
+	}
+	s.MustAPI(t, http.MethodGet, "/api/permissions", nil, nil, &reg)
+	var perms []string
+	for _, sub := range reg.Subsystems {
+		if sub.Scope != "server" {
+			continue
+		}
+		for _, p := range sub.Permissions {
+			perms = append(perms, p.ID)
+		}
+	}
+	if len(perms) == 0 {
+		t.Fatal("GET /api/permissions: no server permission")
+	}
+	return perms
+}
 
 // CreateUser creates a local user with the server permissions perms (none for a plain user).
 // The harness keeps the password, so the publish helpers can sign in as the user.

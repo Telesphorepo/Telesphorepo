@@ -64,7 +64,7 @@ func scaleRun(t *testing.T, n int) map[string]time.Duration {
 
 	first := StartServer(t, ServerOpts{DataVolume: vol})
 	const user, pass = "scale", "scale-password-1"
-	first.CreateUser(t, user, pass, AllServerPerms...)
+	first.CreateUser(t, user, pass, first.ServerPerms(t)...)
 	auth := Basic{user, first.CreateToken(t, user, pass, "scale")}
 	terminate(t, first)
 
