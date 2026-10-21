@@ -694,6 +694,18 @@ The `settings` package holds no feature rules and declares only the keys of the 
 - **A PATCH.** The server builds the whole new state and runs the `Validate` of every group that
   the patch names a key of, then their `Apply` hooks in group order, then saves the keys that no
   `Apply` held back, in one transaction.
+- **base_url from the first sign-in.** While `base_url` holds its default (no stored value, no
+  `TR_BASE_URL`) and is empty, the first full UI sign-in (`POST /api/auth/login` that starts a
+  session that is not setup-only, or `POST /api/auth/login/second`) of a person who holds
+  `settings.general` saves `base_url` as the origin of that request (`httpx.Origin`: the scheme
+  from a trusted proxy's forwarded proto or the connection, and the `Host`). A loopback or
+  unspecified host (`localhost`, `*.localhost`, `127.0.0.0/8`, `::1`, `0.0.0.0`, `::`) is never
+  saved: a browser on the server or on an SSH tunnel does not use the public address.
+  `settings.Service.Fill` saves it like a PATCH, under the writer lock and only while the key still
+  holds its default, so a later sign-in from another address changes nothing. The settings.update
+  event has that person as its actor and the detail `{keys: ["base_url"], via: "first sign-in"}`.
+  A single sign-on sign-in does not set it. The web UI then offers the address in the browser when
+  it differs (see **Web UI**).
 - **Storage rules.** `storage` is `fs` or `s3`. With `s3` the bucket, the access key ID and the
   secret are required. An empty `s3.endpoint` means AWS: the store uses the AWS endpoint of
   `s3.region`, so the region is required then. A set endpoint must be an http(s) URL; with an
@@ -854,9 +866,9 @@ transaction.
 
 | Method & path | Permission | Notes |
 |---|---|---|
-| `POST /api/auth/login` · `POST /api/auth/logout` | none · session | Login `{username, password}`. A person who needs the second factor (see **Permissions**) and has one gets `{second_factor: true, methods: [...]}` and the cookie `tr_login`; one without a factor gets `{session: <session view>}` with `second_factor_required: true` and a setup-only session. Anyone else gets `{session: <session view>}` and a full session after the password alone (see **Auth model**). 401 for SSO users; 403 `password sign-in is off for people who manage; sign in with single sign-on` for a person who needs the second factor when `signin.password_login=publishers`. Logout ends the local session only |
+| `POST /api/auth/login` · `POST /api/auth/logout` | none · session | Login `{username, password}`. A person who needs the second factor (see **Permissions**) and has one gets `{second_factor: true, methods: [...]}` and the cookie `tr_login`; one without a factor gets `{session: <session view>}` with `second_factor_required: true` and a setup-only session. Anyone else gets `{session: <session view>}` and a full session after the password alone (see **Auth model**). The first full session of a person who holds `settings.general` on a server without `base_url` saves it (see **Settings model**). 401 for SSO users; 403 `password sign-in is off for people who manage; sign in with single sign-on` for a person who needs the second factor when `signin.password_login=publishers`. Logout ends the local session only |
 | `POST /api/auth/login/passkey` | `tr_login` cookie | Returns `{publicKey: {...}}`, the WebAuthn assertion options for the pending sign-in |
-| `POST /api/auth/login/second` | `tr_login` cookie | `{totp_code}`, `{passkey: <assertion>}` or `{recovery_code}`. 200 sets `tr_session` and returns `{session: <session view>}` with `second_factor_required: false`. 401 for a wrong proof (the sign-in stays pending) or an expired sign-in; 429 with `Retry-After` after too many failures |
+| `POST /api/auth/login/second` | `tr_login` cookie | `{totp_code}`, `{passkey: <assertion>}` or `{recovery_code}`. 200 sets `tr_session` and returns `{session: <session view>}` with `second_factor_required: false`. It may save `base_url` like the password step. 401 for a wrong proof (the sign-in stays pending) or an expired sign-in; 429 with `Retry-After` after too many failures |
 | `GET /api/security` | UI session | `{totp: [{id, name, created_at}], passkeys: [{id, name, created_at, last_used_at}], recovery_codes: <unused count>, second_factor: bool}` |
 | `POST /api/security/totp/begin` · `.../totp/confirm` · `DELETE .../totp/{id}` | UI session | `{name}` returns `{setup_id, secret, otpauth_url}` (the secret is shown once; the setup lasts 10 min). `{setup_id, code}` returns 201 `{id, name, created_at}`. Delete is 204 |
 | `POST /api/security/passkeys/begin` · `.../passkeys/finish` · `.../passkeys/assert` · `DELETE .../passkeys/{id}` | UI session | `begin` returns `{publicKey}` creation options. `finish` `{name, credential}` returns 201 `{id, name, created_at, last_used_at}`. `assert` returns `{publicKey}` options for a fresh check before an approval or a manual session. 409 when `base_url` is empty |
@@ -3219,7 +3231,7 @@ module (`audit.System`), the `telesphorepo-server user` commands as `cli` (`audi
 | core | `people` | `signin.success` (`detail.method`), `signin.failed` (the actor is the tried username), `token.create`, `token.delete`, `user.create` (`detail.permissions`), `user.update` (password changed, disabled, second factors reset), `user.permissions` (`detail.old` and `detail.new`: the server permission sets; the actor kind is `sso` when single sign-on set them at a sign-in) |
 | core | `repo` | `file.upload`, `file.delete`, `grant.set` (`detail.old` and `detail.new`: the repository permission sets) |
 | core | `repositories` | `repo.create`, `repo.update`, `repo.delete`, `repo.delete.resume`, `repo.delete.clear` |
-| core | `settings` | `settings.update` (keys only, never values) |
+| core | `settings` | `settings.update` (keys only, never values; `via: "first sign-in"` when the sign-in set `base_url`) |
 | storage | `storage` | `storage.move.start` (`detail.target` without secrets), `storage.move.cancel`, `storage.move.done`, `storage.move.failed` (`detail.error`) |
 | backup | `backup` | `backup.done` (`target` the backup name; `detail`: `dir`, `storage`, `blobs`, `copied`, `size`, `master_key_included`, `removed` (the folders retention removed), `removed_blobs`), `backup.failed` (`detail.error`). A scheduled run has the module as actor, Back up now the person |
 | network | `network` | `network.denied` (`detail.scope` is `read` or `publish`), `network.rules.update` (counts of read and publish rules only), `network.list.create`, `network.list.update` (`detail.renamed_from` after a rename), `network.list.delete`, `network.trusted.update` (`detail.lists`: the IP lists of the trusted proxies after a change) |
@@ -3267,6 +3279,14 @@ page are in `web/src/README.md`.
 - **State on the thing.** No page opens with a status row or a summary banner. A switch shows that
   it is on. A method shows in its list. A private repository has a lock after its name, and a
   public repository has no mark. A badge marks the one row that needs attention.
+- **Address notice.** The one notice of the whole app sits at the top of the container: a person
+  who holds `settings.general` (not a setup-only session) opened the app at an origin that is not
+  `base_url`. It says "This server's address is set to <base_url>, but you opened it at
+  <origin>. Clients and snippets use the set address." with **Use <origin>** (saves `base_url`,
+  with a toast) and **Keep** (hides it for that origin in this browser, in `localStorage`). It
+  never shows under the Vite dev server, at a loopback origin, or when `TR_BASE_URL` sets
+  `base_url`. It reads `GET /api/settings` when the person signs in and after they leave
+  Settings › General.
 - **Cards.** Each area of a page is a card (`Section`): a header with its title and its actions,
   then its content. Every table is in a card too. Cards are 24 px apart. A form card holds a
   two-column grid: the label above each control, every control the width of its cell, and a long
@@ -3848,7 +3868,12 @@ region, `r2` is refused, an unknown group's test is 404) and `TestSSOStartupGuar
 and `signin.password_login=publishers` saved with one master key; after a restart with another the
 server starts with SSO off and password sign-in for all). `settings_test.go` has
 `TestSettingsSurviveRestart` (a size, a duration and a secret setting come back from the database
-after `Server.Restart`, the secret shows only as set, and the stored size limit applies).
+after `Server.Restart`, the secret shows only as set, and the stored size limit applies) and
+`TestBaseURLFromFirstSignIn` (no `base_url`: sign-ins at `localhost`, `127.0.0.1` and `[::1]` and
+of a person without `settings.general` leave it unset; the admin's sign-in with `Host:
+repo.example.com` and `X-Forwarded-Proto: https` behind a trusted proxy saves
+`https://repo.example.com` with one settings.update event of the admin with `via: "first
+sign-in"`; a later sign-in at another host changes nothing).
 
 **Publishing tests.** Every publish in the suite uses a publish session. The harness helper
 `PublishToken(t, s, user, repo)` enrolls a device the real way (the test computes the TOTP

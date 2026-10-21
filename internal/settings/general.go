@@ -34,7 +34,7 @@ func Lower(v any) any { return strings.ToLower(strings.TrimSpace(v.(string))) }
 // group (General).
 var (
 	BaseURL = String(&Def{Key: "base_url", Label: "Public base URL", Dev: "http://localhost:8080",
-		Help:      "Clients reach this server at this URL, for example https://repo.example.com. The UI uses it in client snippets.",
+		Help:      "Clients reach this server at this URL, for example https://repo.example.com. The UI uses it in client snippets. The server sets it to the address of the first sign-in of an administrator (not a localhost address); change it if clients reach the server at another address.",
 		Normalize: func(v any) any { return strings.TrimRight(strings.TrimSpace(v.(string)), "/") },
 		Validate:  HTTPURL})
 	LogLevel = String(&Def{Key: "log.level", Default: "info", Label: "Log level",
