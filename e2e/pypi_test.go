@@ -381,7 +381,7 @@ uv pip compile --no-cache --index-url "$INDEX" /work/req.in
 		if code != 0 || !strings.Contains(out, uvName+"==1.0.0") {
 			t.Fatalf("uv pip compile: exit %d\n%s", code, out)
 		}
-		logs := s.Logs(t)
+		logs := s.LogsThrough(t)
 		if !strings.Contains(logs, wheel+".metadata") || strings.Contains(logs, wheel+" ") || strings.Contains(logs, wheel+"\"") {
 			t.Fatalf("uv resolved without the .metadata file, or downloaded the wheel %s:\n%s", wheel, logs)
 		}

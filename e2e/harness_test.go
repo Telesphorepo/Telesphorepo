@@ -243,6 +243,28 @@ func containerLogs(c testcontainers.Container) string {
 // Logs returns the server container's combined output so far.
 func (s *Server) Logs(t testing.TB) string { t.Helper(); return containerLogs(s.Container) }
 
+// LogsThrough returns the server's output once it holds the access log line of every request that
+// returned before the call. The server writes an access log line after the handler returns, and
+// the engine delivers the output later still, so a client can hold the whole response before its
+// line is readable. LogsThrough sends a marker request and waits for its line.
+func (s *Server) LogsThrough(t testing.TB) string {
+	t.Helper()
+	mark := "/e2e-log-mark/" + RandName("m")
+	resp, err := http.Get(s.URL + mark)
+	if err != nil {
+		t.Fatalf("log marker: %v", err)
+	}
+	resp.Body.Close()
+	logs := s.Logs(t)
+	for deadline := time.Now().Add(30 * time.Second); !strings.Contains(logs, `"path":"`+mark+`"`); logs = s.Logs(t) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the access log line of %s did not appear in 30 s", mark)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return logs
+}
+
 // Restart stops the server container gracefully (SIGTERM) and starts it again, then waits for
 // /healthz. The container keeps its /data, env and network alias; URL follows the new host port.
 func (s *Server) Restart(t testing.TB) { t.Helper(); s.RestartAfter(t, nil) }

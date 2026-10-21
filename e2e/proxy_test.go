@@ -34,11 +34,12 @@ type ProxyState struct {
 	} `json:"proxy"`
 }
 
-// remoteGets returns the status of every GET of path in the access log of s, in order.
+// remoteGets returns the status of every GET of path in the access log of s, in order, through
+// every request that returned before the call (Server.LogsThrough).
 func remoteGets(t testing.TB, s *Server, path string) []int {
 	t.Helper()
 	var out []int
-	sc := bufio.NewScanner(strings.NewReader(s.Logs(t)))
+	sc := bufio.NewScanner(strings.NewReader(s.LogsThrough(t)))
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
 	for sc.Scan() {
 		line := sc.Text()
@@ -58,11 +59,12 @@ func remoteGets(t testing.TB, s *Server, path string) []int {
 	return out
 }
 
-// remoteGetCount counts the GETs of paths under prefix in the access log of s.
+// remoteGetCount counts the GETs of paths under prefix in the access log of s, through every
+// request that returned before the call (Server.LogsThrough).
 func remoteGetCount(t testing.TB, s *Server, prefix string) map[string]int {
 	t.Helper()
 	out := map[string]int{}
-	sc := bufio.NewScanner(strings.NewReader(s.Logs(t)))
+	sc := bufio.NewScanner(strings.NewReader(s.LogsThrough(t)))
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
 	for sc.Scan() {
 		line := sc.Text()
