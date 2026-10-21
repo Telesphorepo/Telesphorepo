@@ -85,7 +85,7 @@ func normalizeRemote(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return "", invalid("the remote URL must be an http or https address, e.g. https://repo1.maven.org/maven2/")
+		return "", invalid("the remote URL must be an http or https address, e.g. https://repo.maven.apache.org/maven2/")
 	}
 	if u.User != nil {
 		return "", invalid("put the remote's username and password in their own fields, not in the URL")

@@ -128,7 +128,7 @@ var ui = format.UIDescriptor{
 		Text: "maven-metadata.xml stops listing the deleted versions."}},
 	FileDetails: []format.FileDetail{{Match: "**/*.pom", Part: "maven-artifact"}, {Match: "**/*.jar", Part: "maven-artifact"}},
 	RemotePresets: []format.RemotePreset{
-		{Label: "Maven Central", URL: "https://repo1.maven.org/maven2/"},
+		{Label: "Maven Central", URL: "https://repo.maven.apache.org/maven2/"},
 		{Label: "Gradle Plugin Portal", URL: "https://plugins.gradle.org/m2/"},
 	},
 	ArtifactKinds: map[string]string{"library": "Library", "bom": "Bill of materials", "parent": "Parent POM", "gradle-plugin": "Gradle plugin"},
