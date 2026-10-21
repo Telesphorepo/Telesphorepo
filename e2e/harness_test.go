@@ -519,6 +519,16 @@ type Problem struct {
 	} `json:"remedy"`
 }
 
+// RefusalCode returns the refusal code of a refusal answer of the route policy: the member
+// "code" of the problem document under /api/, or of the {"error"} body on a format route.
+func RefusalCode(b []byte) string {
+	var r struct {
+		Code string `json:"code"`
+	}
+	_ = json.Unmarshal(b, &r)
+	return r.Code
+}
+
 // Auth decorates a request with credentials. nil means anonymous.
 type Auth interface{ apply(*http.Request) }
 
@@ -734,6 +744,19 @@ func (s *Server) SignIn(t testing.TB, user, pass string) *Session {
 // registry order. A person with all of them is an administrator.
 func (s *Server) ServerPerms(t testing.TB) []string {
 	t.Helper()
+	return s.registryPerms(t, "server")
+}
+
+// RepoPerms returns every repository permission of the registry of s, in registry order: the
+// permissions that the All repositories permission holds on each repo.
+func (s *Server) RepoPerms(t testing.TB) []string {
+	t.Helper()
+	return s.registryPerms(t, "repo")
+}
+
+// registryPerms returns the permissions of the subsystems of scope in GET /api/permissions.
+func (s *Server) registryPerms(t testing.TB, scope string) []string {
+	t.Helper()
 	var reg struct {
 		Subsystems []struct {
 			Scope       string `json:"scope"`
@@ -745,7 +768,7 @@ func (s *Server) ServerPerms(t testing.TB) []string {
 	s.MustAPI(t, http.MethodGet, "/api/permissions", nil, nil, &reg)
 	var perms []string
 	for _, sub := range reg.Subsystems {
-		if sub.Scope != "server" {
+		if sub.Scope != scope {
 			continue
 		}
 		for _, p := range sub.Permissions {
@@ -753,7 +776,7 @@ func (s *Server) ServerPerms(t testing.TB) []string {
 		}
 	}
 	if len(perms) == 0 {
-		t.Fatal("GET /api/permissions: no server permission")
+		t.Fatalf("GET /api/permissions: no %s permission", scope)
 	}
 	return perms
 }

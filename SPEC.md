@@ -193,7 +193,7 @@ the fresh second factor (`Proof`), and the repos of `SomeRepo` (`Managed`). No h
 | `Perm`, `AnyPerm` | A server permission ID the caller holds, or one of several |
 | `SomeRepo` | A repository permission ID that passes in place of `Perm` when the caller holds it on at least one repo. The handler gets those repos in `Call.Managed` (`All`, or the repo IDs) |
 | `Repo` | `route.RepoRule{Name, Format, Op, Perm, AnyPerm, Ops, Pick}`: the repo the route acts on (default: the path value `{repo}`, else `{name}`), the format it must be of (another format is 404), the operation (`access.Meta`, `Read`, `Write`, `Delete`, `Manage`, `Mint`) and the repository permission it needs (or one of `AnyPerm`; none with `Meta` is any). With `Pick`, the operation and its permission are the entry of `Ops` (`route.RepoOp{Op, Perm}`) at the index `Pick(r)` returns, per request (an index outside `Ops` is 500); the router checks every entry at startup. The docker `DELETE /v2/...` route is the one user: an upload cancel is a `Write`, everything else a `Delete` |
-| `Errors` | The writer of a refusal; nil is `httpx.Error`: a problem document under `/api/` (see **Problem documents**), `{"error": "..."}` on a format route. A format with its own error JSON sets it |
+| `Errors` | The writer of a refusal; nil is a problem document under `/api/` (see **Problem documents**), `{"error": "..."}` on a format route, each with the refusal code of the decision as the member `code` (e.g. `session`, `publish_session`, `network`, `read_only_kind`). A format with its own error JSON sets it |
 | `Challenge` | The `WWW-Authenticate` of a 401, from the refusal (`route.Challenger(w, r, decision)`); nil is a Basic challenge outside `/api/` and none for a request with `X-Telesphorepo-UI: 1` |
 
 Presets: `route.Public`, `route.UI` (a full UI session), `route.Setup` (a UI session, setup-only
@@ -3362,7 +3362,7 @@ IP list (the API names it; the row keeps its id). An empty list is unrestricted 
   the access engine (`access.Guard` named `network`): it maps `Read` to the read rules and
   `Write`, `Delete` and `Mint` to the publish rules.
 - **Refusal.** The answer is 403 with the message `your address is not allowed to read|publish this
-  repository` (a problem document under `/api/`, `{"error"}` on a format route) and the audit event `network.denied` with `detail.scope` and the client IP. The IP
+  repository` and the code `network` (a problem document under `/api/`, `{"error"}` on a format route) and the audit event `network.denied` with `detail.scope` and the client IP. The IP
   appears only in the audit log.
 
 ## Signing keys
