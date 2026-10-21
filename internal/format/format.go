@@ -101,9 +101,10 @@ type Spec struct {
 	// Builds returns a nil *Artifact or *Version when the artifact has no such version. Versions
 	// are newest first; after is the last version of the previous page ("" for the first). Builds
 	// are newest first; after is the last build of the previous page. next is "" at the end. A
-	// format sets both or neither.
+	// non-empty build keeps only the build of that id (no items when the version has none); the
+	// caller then passes after "" and limit 1. A format sets both or neither.
 	Versions func(ctx context.Context, repo *repos.Repo, artifactPath, after string, limit int) (*Artifact, []Version, string, error)
-	Builds   func(ctx context.Context, repo *repos.Repo, artifactPath, version, after string, limit int) (*Artifact, *Version, []Build, string, error)
+	Builds   func(ctx context.Context, repo *repos.Repo, artifactPath, version, build, after string, limit int) (*Artifact, *Version, []Build, string, error)
 
 	// Usage returns the repo-level snippets of a repo (UI and "telesphorepo-server dev"): how to use the
 	// repo in a build (Purpose "use") and how to publish to it from a computer and by hand
@@ -248,10 +249,13 @@ const (
 // Version is one version of an artifact. A release has one build; a snapshot has one or more,
 // and LatestBuild names the newest. LatestLabel is the format's name for that build for people
 // ("Build 3"); the UI shows LatestBuild when it is empty. PublishedAt is when its newest build
-// was published, and CI is the CI build record of that build (nil: none).
+// was published, and CI is the CI build record of that build (nil: none). Folder is the folder
+// that holds every file of the version and no file of another version (Maven:
+// <artifact folder>/<version>/); "" when the version shares its folder (Debian).
 type Version struct {
 	Version     string    `json:"version"`
 	Kind        string    `json:"kind"` // VersionRelease or VersionSnapshot
+	Folder      string    `json:"folder,omitempty"`
 	LatestBuild string    `json:"latest_build,omitempty"`
 	LatestLabel string    `json:"latest_label,omitempty"`
 	BuildsCount int       `json:"builds_count"`

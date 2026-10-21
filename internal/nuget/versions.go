@@ -37,10 +37,11 @@ func artifactOf(lid, id string) format.Artifact {
 	return format.Artifact{Path: flatDir + lid + "/", Title: id, Name: id, Kind: "package"}
 }
 
-// summary is the format.Version of a version row.
+// summary is the format.Version of a version row. Its folder is the one of its .nupkg
+// (v3-flatcontainer/<id>/<version>/), which holds the .nuspec too.
 func summary(ctx context.Context, builds *ci.Loader, r versionRow) (format.Version, error) {
 	b, err := builds.Get(ctx, buildOf(r))
-	return format.Version{Version: r.Normalized, Kind: format.VersionRelease, BuildsCount: 1,
+	return format.Version{Version: r.Normalized, Kind: format.VersionRelease, Folder: r.NupkgPath[:strings.LastIndexByte(r.NupkgPath, '/')+1], BuildsCount: 1,
 		PublishedAt: time.Unix(r.UpdatedAt, 0).UTC(), CI: b}, err
 }
 
@@ -121,7 +122,7 @@ func (h *Handler) getVersion(ctx context.Context, repoID int64, lid, v string) (
 }
 
 // Builds lists the one build of a version: its .nupkg and its .nuspec.
-func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, v, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
+func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, v, build, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
 	lid, ok := packageOf(p)
 	if !ok || repo.Kind != repos.KindHosted {
 		return nil, nil, nil, "", nil
@@ -136,7 +137,7 @@ func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, v, after stri
 	if err != nil {
 		return nil, nil, nil, "", err
 	}
-	if after != "" || limit < 1 {
+	if after != "" || limit < 1 || build != "" && build != r.Normalized {
 		return &art, &s, []format.Build{}, "", nil
 	}
 	lver := strings.ToLower(r.Normalized)

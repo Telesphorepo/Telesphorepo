@@ -154,6 +154,9 @@ export const api = {
     /** The builds of one version of an artifact folder, newest first; version is null when the artifact has no such version. */
     builds: (name: string, path: string, version: string, p?: T.PageParams) =>
       request<T.Builds>("GET", repo(name) + "/builds", { query: { path, version, ...page(p) } }),
+    /** One build of a version, by its id: items holds it, or nothing when the version has no such build. */
+    build: (name: string, path: string, version: string, id: string) =>
+      request<T.Builds>("GET", repo(name) + "/builds", { query: { path, version, build: id } }),
     /** One file with its details; 404 when it does not exist. */
     file: (name: string, path: string) => request<T.FileInfo>("GET", repo(name) + "/file", { query: { path } }),
     /** The snippets that use one artifact: an artifact folder (with a version, or "" for none), a version folder, or a file. */

@@ -2,7 +2,8 @@
   List view of a plain folder: folders first, then files, one dense line each (name, size, when and
   by whom it was published). Checksum and signature files are not rows: they are attributes of
   their file, shown in its details. A click on a row opens the folder or shows the file's details.
-  Pages load by key ("Load more"). The parent keys it by folder. People who can delete pick rows
+  Pages load by key ("Load more"); the first page comes from the parent (`first`), which asks for
+  it together with the folder's place and shares it with the details column. The parent keys it by folder. People who can delete pick rows
   (files and folders mix) and delete them together; the parent holds the pick and shows its
   summary in the details column.
 
@@ -16,10 +17,13 @@
    * is the artifact folder and `version` names the version.
    */
   export type DeleteTarget = { path: string; dir: boolean; files?: string[]; version?: string };
+
+  /** The rows of one page of the list (GET /tree). */
+  export const FOLDER_PAGE = 100;
 </script>
 
 <script lang="ts">
-  import { api, type Repo } from "$lib/api";
+  import { api, type Page, type Repo } from "$lib/api";
   import { Keyset, type TableSource } from "$lib/load.svelte";
   import { filesPath, href, repoPath } from "$lib/router.svelte";
   import { Button } from "$lib/components/ui/button";
@@ -40,6 +44,7 @@
   let {
     repo,
     folder,
+    first,
     selected,
     canWrite,
     canUpload,
@@ -51,6 +56,8 @@
     repo: Repo;
     /** "" (the top) or a path that ends with "/". */
     folder: string;
+    /** The first page of the folder (FOLDER_PAGE rows), already asked for by the parent. */
+    first?: Promise<Page<TreeNode>>;
     /** The file whose details show; its row is filled. */
     selected: string;
     canWrite: boolean;
@@ -66,7 +73,7 @@
   } = $props();
 
   /* svelte-ignore state_referenced_locally */
-  const list = new Keyset<TreeNode>((p) => api.repos.tree(repo.name, folder, p), 100);
+  const list = new Keyset<TreeNode>((p) => api.repos.tree(repo.name, folder, p), FOLDER_PAGE, first);
 
   // Folders first; a checksum or signature whose file is listed is not a row of its own.
   const rows = $derived.by(() => {
