@@ -19,6 +19,7 @@ const SEND_BATCH = 100;
 // GapState is gap/state.json. Times are unix seconds.
 interface GapState {
   version: string; // the Worker version that wrote it
+  checked: number; // the last run of the gap check, with or without a pass
   last_run: number; // the last run that did a pass
   bindings: string[]; // the hints of the regional buckets that this Worker has a binding for
   // The bucket that the bucket.json of each binding names ("" for none): HOME and each hint.
@@ -36,7 +37,7 @@ const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object
 const isStrs = (v: unknown): v is string[] => Array.isArray(v) && v.every((s) => typeof s === "string");
 
 async function readState(env: Env): Promise<GapState> {
-  const state: GapState = { version: "", last_run: 0, bindings: [], markers: { home: "", regions: {} }, pass: null, last_pass: null, regions: {} };
+  const state: GapState = { version: "", checked: 0, last_run: 0, bindings: [], markers: { home: "", regions: {} }, pass: null, last_pass: null, regions: {} };
   const obj = await env.HOME.get(edgeKey(env, "gap/state.json"));
   if (!obj) return state;
   let v: unknown;
@@ -52,6 +53,7 @@ async function readState(env: Env): Promise<GapState> {
   if (isObj(mk) && typeof mk.home === "string" && isObj(mk.regions)) {
     state.markers = { home: mk.home, regions: mk.regions as Record<string, string> };
   }
+  if (typeof v.checked === "number") state.checked = v.checked;
   if (typeof v.last_run === "number") state.last_run = v.last_run;
   const p = v.pass;
   if (isObj(p) && typeof p.started === "number") {
@@ -108,9 +110,9 @@ export async function gap(_controller: ScheduledController, env: Env, _ctx: Exec
 }
 
 // runGap is one run of the gap check: the cron's, or the check of the server (check.ts). Every run
-// reads the bucket.json of each binding and writes gap/state.json when the version, the bindings
-// or the buckets they name differ from the stored ones, so the status page sees a deploy at the
-// next run; a run that does a pass writes it with its cursor.
+// reads the bucket.json of each binding and writes gap/state.json with the time of the run
+// (checked), its version, bindings and the buckets they name, so the status page sees every run
+// and a deploy at once; a run that does a pass writes it with its cursor.
 export async function runGap(env: Env, opts: GapOptions): Promise<GapPass> {
   const budget = new Budget(opts.max, opts.deadline);
   budget.take(); // gap/state.json
@@ -120,10 +122,7 @@ export async function runGap(env: Env, opts: GapOptions): Promise<GapPass> {
   budget.take(1 + bindings.length);
   markers.home = await readMarker(env, env.HOME);
   for (const h of bindings) markers.regions[h] = await readMarker(env, bucket(env, "R2_" + h.toUpperCase())!);
-  const stale =
-    state.version !== VERSION ||
-    state.bindings.join(",") !== bindings.join(",") ||
-    JSON.stringify(state.markers) !== JSON.stringify(markers);
+  state.checked = now();
   state.version = VERSION;
   state.bindings = bindings;
   state.markers = markers;
@@ -145,7 +144,7 @@ export async function runGap(env: Env, opts: GapOptions): Promise<GapPass> {
     config = await readConfig(env);
   }
   if (!config || !config.enabled || config.version !== VERSION || !env.COPY) {
-    if (stale) await save();
+    await save();
     return due ? "off" : "none";
   }
   const done = await pass(env, config, state, env.COPY, budget);
