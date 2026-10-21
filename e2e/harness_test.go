@@ -404,10 +404,11 @@ rm -f /data/telesphorepo.db-wal /data/telesphorepo.db-shm
 var sha256sumLineRe = regexp.MustCompile(`(?m)^([0-9a-f]{64})  \./(\S+)$`)
 
 // FSBlobs returns the SHA-256 of every blob of the fs store at /data/blobs on vol (the default
-// fs root), keyed by storage key.
+// fs root), keyed by storage key. A file that the server deletes while the list runs (the blob GC)
+// is left out.
 func FSBlobs(t testing.TB, vol string) map[string]string {
 	t.Helper()
-	out := VolumeExec(t, vol, "set -e\nif [ -d /data/blobs ]; then cd /data/blobs && find . -type f ! -name '.tmp-*' -exec sha256sum {} +; fi\n")
+	out := VolumeExec(t, vol, "set -e\nif [ -d /data/blobs ]; then cd /data/blobs && find . -type f ! -name '.tmp-*' -exec sh -c 'for f; do sha256sum \"$f\" 2>/dev/null || [ ! -e \"$f\" ]; done' sh {} +; fi\n")
 	blobs := map[string]string{}
 	for _, m := range sha256sumLineRe.FindAllStringSubmatch(out, -1) {
 		blobs[m[2]] = m[1]
