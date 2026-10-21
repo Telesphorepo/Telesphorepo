@@ -11,6 +11,7 @@ bin
 node_modules
 web/node_modules
 web/dist
+web/.svelte-check
 edge/node_modules
 edge/dist
 edge/.wrangler

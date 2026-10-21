@@ -1,6 +1,7 @@
 /web/dist/*
 !/web/dist/.keep
 /web/node_modules/
+/web/.svelte-check/
 /internal/clidist/dist/*
 !/internal/clidist/dist/.keep
 /telesphorepo
