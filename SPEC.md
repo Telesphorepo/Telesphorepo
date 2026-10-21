@@ -1587,7 +1587,10 @@ gets the source's dates), the download under `max_upload_size` with the source c
 then `Store` or a `Commit` with source `import`. An `unchanged` result counts as skipped. An
 `ImportItem` carries the source's `ContentType` of the file and `Fetch(ctx, sourcePath, header)`,
 which downloads another path of the same source repo (e.g. a layer that a manifest names) and
-answers the source's authentication challenges.
+answers the source's authentication challenges, and `Cache`, the `RunCache` of the import run:
+`Do(ctx, key, fn)` calls `fn` once per key for the items of the run (callers of a key wait for
+it), and drops a failed result so the next caller asks again. Items of a run import at the same
+time, so `Run`, `Target` and `Store` are safe for concurrent use.
 
 ## Repo operations
 
@@ -2145,16 +2148,18 @@ is unreachable.
     `distribution` fails each package.
   - npm (`npm`): each `<name>/-/<file>.tgz` at its path, through the commit of a version with the
     manifest read from the tarball's `package/package.json` (the version cleaned as npm cleans
-    it). The dist-tags of the package at the source (`-/package/<name>/dist-tags`) that name the
-    version are set; without them `latest` is the highest release. Nexus's packuments are ignored.
+    it). The dist-tags of the package at the source (`-/package/<name>/dist-tags`, read once per
+    package and run through `ImportItem.Cache`) that name the version are set; without them
+    `latest` is the highest release. Nexus's packuments are ignored.
     A version that exists with the same tarball is skipped, with other bytes it fails.
   - docker (`docker`): `v2/<image>/manifests/<tag>` to the tag path and
     `v2/<image>/manifests/sha256:<hex>` to the manifest path; the blobs (`v2/-/blobs/...`) are
     ignored, because each manifest brings what it names. `Store` parses the manifest (the media
     type of `ContentType`, else the JSON `mediaType`), fetches through `Fetch` each blob
     (`v2/<image>/blobs/sha256:<hex>`, spooled under `max_upload_size`; a blob that another image of
-    the repo links is linked without a download) and each child manifest of an index
-    (`v2/<image>/manifests/sha256:<hex>`, recursively) that the image lacks, checks each digest, and
+    the repo links is linked without a download; 6 blobs of a manifest download at once) and each
+    child manifest of an index (`v2/<image>/manifests/sha256:<hex>`, recursively, one after the
+    other) that the image lacks, checks each digest, and
     commits the links, the child manifests, the manifest and the tag in one `CommitAll` with source
     `import`. So the page order of Nexus does not matter. Every download asks for the four manifest
     types (`Importer.Header`), so Nexus sends a manifest as it stores it. A Nexus Docker repo with
@@ -2224,13 +2229,23 @@ is unreachable.
   (`cutover`) start a sync. One sync runs per source (unique partial index). The sync copies the
   hosted part of the mapping into `nexus_sync_repos`; proxies and groups have no files to copy.
   At the start the runner lists the Nexus repos once and fails each mapped repo that is offline.
-  For each other repo it pages `GET /service/rest/v1/assets?repository=X` from the saved
-  continuation token and offers each asset to the importer of the target format. A failed page is retried 3 times (2 s,
-  4 s, 8 s), except on 401/403. Downloads use the asset's `downloadUrl` only when it is on the
-  base URL's host, else `{base}/repository/{repo}/{path}`. One transaction per page saves the
+  The repos sync one after the other. For each other repo it pages
+  `GET /service/rest/v1/assets?repository=X` from the saved continuation token and offers each
+  asset to the importer of the target format. Nexus sets the page size and takes no page size
+  parameter (10 assets before 3.74, larger pages since). A reader fetches the pages one after the
+  other, up to 8 pages ahead of the oldest page not saved yet, and 16 workers import the assets of
+  the repo at the same time. A failed page is retried 3 times (2 s, 4 s, 8 s), except on 401/403.
+  Downloads use the asset's `downloadUrl` only when it is on the base URL's host, else
+  `{base}/repository/{repo}/{path}`. A download whose body sends no bytes for 1 minute fails the
+  asset. The runner takes the results in page order: one transaction per page saves the
   failures, the counters (`checked`, `bytes` counts the bytes read for imported files),
-  `active_at`, the next token and the page's log line. A file that is already present with the
-  same bytes is skipped, so a later sync copies only new and changed files.
+  `active_at`, the next token and the page's log line, once every asset of that page and of the
+  pages before it is done. So the saved token always follows a done prefix, and a resume redoes
+  the pages after it. A file that is already present with the same bytes is skipped, so a later
+  sync copies only new and changed files. Imports at the same time are safe because the commit
+  takes the path locks and the extra locks of the format (the package of npm, Debian, Cargo and
+  NuGet), and no importer depends on the order of the assets. Each repo's run keeps a
+  `format.RunCache` (`ImportItem.Cache`) for what its items share.
 - **Log.** The runner writes a line for: the start ("Started after the repositories were
   saved.", "Started by sam.", "Scheduled sync started.", "Final sync before the switch-over
   started by sam."), the proxies it skips, each repo's start or resume ("Started.", "Resumed
