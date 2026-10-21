@@ -12,6 +12,10 @@ const SINGLE_MAX = 4.9 * 1024 * MiB;
 // A consumer run lasts at most 15 minutes of wall time; a multipart copy stops in time to save
 // its state.
 const RUN_BUDGET_MS = 12 * 60 * 1000;
+// The messages of a batch copied at once. The runtime holds at most six requests that wait for
+// response headers and queues the rest; a request that streams its body does not count, so many
+// copies run at once and the run waits on R2, not on this number.
+const COPIES = 32;
 
 interface Target {
   hint: string;
@@ -36,7 +40,7 @@ export async function copy(batch: MessageBatch<CopyMessage>, env: Env, _ctx: Exe
     return;
   }
   const deadline = Date.now() + RUN_BUDGET_MS;
-  await limited(batch.messages, 4, async (msg) => {
+  await limited(batch.messages, COPIES, async (msg) => {
     try {
       const done = await handle(env, config, msg.body, deadline);
       if (done) msg.ack();
