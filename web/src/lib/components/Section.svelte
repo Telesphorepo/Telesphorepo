@@ -1,7 +1,7 @@
 <!--
   A surface for one logical area of a page (principle 12): a card with a header (the title, an
   optional one-sentence description, and the area's actions at the header's end), then its
-  content, then an optional footer (a submit row). Sections stack 24px apart, so the eye takes one
+  content, then an optional footer (a submit row). Sections stack 32px apart on Browse pages and 28px in Settings (--section-gap), so the eye takes one
   area at a time. Inside a section, a thin <Separator /> may part sub-groups; never put a line
   between sections.
 
@@ -37,7 +37,7 @@
   } = $props();
 </script>
 
-<Card.Root class={cn("mt-6 text-body first:mt-0 max-sm:[--card-spacing:--spacing(5)]", className)}>
+<Card.Root class={cn("mt-(--section-gap) text-body first:mt-0 max-sm:[--card-spacing:--spacing(5)]", className)}>
   {#if title || actions}
     <Card.Header class="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
       <div class="min-w-0 grow basis-56">

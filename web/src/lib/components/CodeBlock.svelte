@@ -45,7 +45,7 @@
   {/if}
   <div class="relative min-w-0 rounded-lg border bg-panel">
     {#if lines}
-      <div class="max-h-96 overflow-auto py-3 font-mono text-[0.8125rem] leading-relaxed [font-variant-ligatures:none]">
+      <div class="max-h-96 overflow-auto py-3 font-mono text-[0.875rem] leading-relaxed [font-variant-ligatures:none]">
         <code class="flex w-max min-w-full flex-col">
           {#each lines as l, i (i)}
             <span class={cn("flex pr-12 pl-4", l.added ? "bg-success/10" : "text-muted-foreground")}>
@@ -56,7 +56,7 @@
         </code>
       </div>
     {:else}
-      <pre class="max-h-96 overflow-auto px-4 py-3 pr-12 font-mono text-[0.8125rem] leading-relaxed [font-variant-ligatures:none]"><code>{code}</code></pre>
+      <pre class="max-h-96 overflow-auto px-4 py-3 pr-12 font-mono text-[0.875rem] leading-relaxed [font-variant-ligatures:none]"><code>{code}</code></pre>
     {/if}
     <CopyButton value={copied} label={copyLabel} class="absolute top-1.5 right-1.5 bg-panel" />
   </div>

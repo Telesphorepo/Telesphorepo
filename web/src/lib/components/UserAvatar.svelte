@@ -8,5 +8,5 @@
 </script>
 
 <Avatar.Root {size} aria-hidden="true">
-  <Avatar.Fallback class={cn("font-semibold", size === "sm" ? "text-[0.6875rem]" : "text-sm")}>{initials}</Avatar.Fallback>
+  <Avatar.Fallback class={cn("font-semibold", size === "sm" ? "text-[0.75rem]" : "text-sm")}>{initials}</Avatar.Fallback>
 </Avatar.Root>

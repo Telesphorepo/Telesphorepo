@@ -4,7 +4,9 @@
   40px from the content column; every Settings page uses that whole column. The sidebar sticks under
   the top bar and scrolls on its own when it is taller than the window. Under 768px the sidebar is
   a menu that the top bar's menu button opens (the only side sheet). The address notice
-  (AddressNotice) sits at the top of the container.
+  (AddressNotice) sits at the top of the container. The container names its layout
+  (data-layout="browse" or "settings"), which sets the row height and the space between blocks
+  (app.css): Browse pages are airier than Settings pages.
 -->
 <script lang="ts">
   import type { Snippet } from "svelte";
@@ -30,7 +32,7 @@
 
 <div class="flex min-h-svh flex-col">
   <TopBar onMenu={settings ? () => (menuOpen = true) : undefined} />
-  <div class="mx-auto w-full max-w-page flex-1 px-4 pt-8 pb-16 sm:px-6">
+  <div data-layout={settings ? "settings" : "browse"} class="mx-auto w-full max-w-page flex-1 px-4 pt-10 pb-20 sm:px-6">
     <AddressNotice />
     {#if settings}
       <div class="flex gap-10">

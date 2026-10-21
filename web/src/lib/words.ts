@@ -1,10 +1,20 @@
 // Counts and lists of names in the words that every page uses: the selection bar, the confirm
-// dialogs and the toasts of bulk actions.
+// dialogs and the toasts of bulk actions, and the kind of a repository.
 
 import { formatCount } from "$lib/format";
 
 /** A count and its noun: count(1, "file", "files") is "1 file", count(12, ...) is "12 files". */
 export const count = (n: number, one: string, many: string) => `${formatCount(n)} ${n === 1 ? one : many}`;
+
+/**
+ * The kind of a repository in plain words: "Hosted", "Proxy of a remote repository", "Group of 3
+ * repositories". The remote of a proxy shows only to the holders of Edit settings (its Settings).
+ */
+export function kindPhrase(r: { kind: string; member_count?: number }): string {
+  if (r.kind === "group") return `Group of ${count(r.member_count ?? 0, "repository", "repositories")}`;
+  if (r.kind === "proxy") return "Proxy of a remote repository";
+  return "Hosted";
+}
 
 /** The text of the selection bar: "1 selected", "12 selected". */
 export const selectedText = (n: number) => `${formatCount(n)} selected`;

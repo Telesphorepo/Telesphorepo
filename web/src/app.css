@@ -115,21 +115,27 @@
 	/*
 	  The type scale: text-title (page title), text-section (section title), text-label (row label),
 	  text-body (body, tables), text-meta (help, facts, timestamps). Use these, not text-xs..2xl.
+	  text-sm and text-xs, which the shadcn primitives use (buttons, inputs, menus, table headings),
+	  follow the same scale: text-sm is the body size, text-xs one step under the meta size.
 	*/
-	--text-title: 1.5rem;
-	--text-title--line-height: 2rem;
+	--text-title: 1.625rem;
+	--text-title--line-height: 2.125rem;
 	--text-title--letter-spacing: -0.02em;
 	--text-title--font-weight: 600;
-	--text-section: 1rem;
-	--text-section--line-height: 1.5rem;
+	--text-section: 1.0625rem;
+	--text-section--line-height: 1.625rem;
 	--text-section--font-weight: 600;
-	--text-label: 0.875rem;
-	--text-label--line-height: 1.25rem;
+	--text-label: 0.9375rem;
+	--text-label--line-height: 1.375rem;
 	--text-label--font-weight: 500;
-	--text-body: 0.875rem;
-	--text-body--line-height: 1.25rem;
-	--text-meta: 0.8125rem;
-	--text-meta--line-height: 1.125rem;
+	--text-body: 0.9375rem;
+	--text-body--line-height: 1.375rem;
+	--text-meta: 0.875rem;
+	--text-meta--line-height: 1.25rem;
+	--text-sm: 0.9375rem;
+	--text-sm--line-height: 1.375rem;
+	--text-xs: 0.8125rem;
+	--text-xs--line-height: 1.125rem;
 	--color-link: var(--link);
 	--color-hover: var(--hover);
 	--color-stripe: var(--stripe);
@@ -141,8 +147,8 @@
 	--color-brand: oklch(0.801 0.138 83);
 	/* The page container. Every Settings page uses the full content column next to the sidebar. */
 	--container-page: 75rem;
-	/* Table rows: one fixed height, a single line. */
-	--spacing-row: 2.5rem;
+	/* Table rows: one fixed height, a single line; the height comes from the layout (--row below). */
+	--spacing-row: var(--row);
 	--color-sidebar-ring: var(--sidebar-ring);
 	--color-sidebar-border: var(--sidebar-border);
 	--color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -183,6 +189,31 @@
 	--radius-2xl: var(--radius);
 	--radius-3xl: var(--radius);
 	--radius-4xl: var(--radius);
+}
+
+/*
+  The air of a layout. Browse pages (home, a repository, search) are for reading and finding, so
+  they get taller rows and more space between blocks; Settings pages (AppShell sets
+  data-layout="settings") are for working through forms and lists, so they stay a little denser.
+  --row is the table row (h-row), --row-head the table heading row, --header-gap the page header to
+  the content, --tabs-gap the tabs to the content, --toolbar-gap the toolbar to its table, and
+  --section-gap the space between sections.
+*/
+:root {
+	--row: 3rem;
+	--row-head: 2.5rem;
+	--header-gap: 2.5rem;
+	--tabs-gap: 2rem;
+	--toolbar-gap: 1.25rem;
+	--section-gap: 2rem;
+}
+[data-layout="settings"] {
+	--row: 2.75rem;
+	--row-head: 2.25rem;
+	--header-gap: 2rem;
+	--tabs-gap: 1.5rem;
+	--toolbar-gap: 1rem;
+	--section-gap: 1.75rem;
 }
 
 @layer base {

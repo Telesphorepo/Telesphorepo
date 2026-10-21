@@ -51,7 +51,7 @@
   });
 </script>
 
-<header class="mb-8">
+<header class="mb-(--header-gap)">
   {#if trail.length}<div class="mb-3"><Breadcrumbs items={trail} /></div>{/if}
   <div class="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
     <div class="min-w-0 grow basis-64">

@@ -36,7 +36,7 @@
       >
         <!-- 48 px wide: the brand scales the flat mark in multiples of 16 px wide. -->
         <Logo size={30} />
-        <span class="text-[0.9375rem]">Telesphorepo</span>
+        <span class="text-base">Telesphorepo</span>
       </a>
     </div>
 

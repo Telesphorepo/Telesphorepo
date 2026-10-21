@@ -15,7 +15,7 @@
 <div class="flex min-w-0 flex-col gap-2">
   {#if label}<span class="text-sm font-medium">{label}</span>{/if}
   <div class="flex min-w-0 items-center gap-1 rounded-lg border bg-panel pl-3 pr-1">
-    <code class="min-w-0 flex-1 overflow-x-auto py-2 font-mono text-[0.8125rem] whitespace-nowrap select-all [font-variant-ligatures:none]">{value}</code>
+    <code class="min-w-0 flex-1 overflow-x-auto py-2 font-mono text-[0.875rem] whitespace-nowrap select-all [font-variant-ligatures:none]">{value}</code>
     <CopyButton {value} label={label ? `Copy ${label.toLowerCase()}` : "Copy"} />
   </div>
   {#if secret}<p class="text-sm text-muted-foreground">Copy it now. It is not shown again.</p>{/if}

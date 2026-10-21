@@ -1,6 +1,6 @@
 <!--
   Every table. It takes the full content width. Rows have zebra stripes and one fixed height (a
-  single line, 40px): cells never wrap, a long value truncates with a tooltip (Cell `text`). Hover
+  single line, `h-row`: 48px on Browse pages, 44px in Settings): cells never wrap, a long value truncates with a tooltip (Cell `text`). Hover
   fills the whole row; the `selected` row has the selected fill. Numbers and times are
   right-aligned with tabular numerals (column `align: "right"`, Cell `num`).
 
@@ -126,7 +126,7 @@
   const picking = $derived(bulk !== undefined);
   // A table that picks rows has a taller heading row, so the selection bar that lies over it has
   // room above and below its buttons; the row keeps its height when the bar shows, so nothing moves.
-  const headH = $derived(picking ? "h-11" : "h-9");
+  const headH = $derived(picking ? "h-11" : "h-(--row-head)");
   const canPick = (item: T) => pickable?.(item) ?? true;
   const pickableRows = $derived(picking ? source.items.filter(canPick) : []);
   const allPicked = $derived(pickableRows.length > 0 && pickableRows.every((r) => picked.has(key(r))));
