@@ -192,8 +192,10 @@ async function main(): Promise<void> {
   const raw = typeof cfg.vars?.PREFIX === "string" ? cfg.vars.PREFIX.replace(/^\/+|\/+$/g, "") : "";
   const prefix = (raw === "" ? "" : raw + "/") + "blobs/";
   const rules = wrangler(["r2", "bucket", "notification", "list", homeName], true);
-  if (!rules.ok) fail(`cannot list the notification rules of ${homeName}:\n${rules.out}`);
-  if (rules.out.includes(queue)) {
+  // A bucket without notification rules answers the list with error 11015, not an empty list.
+  const none = !rules.ok && rules.out.includes("[code: 11015]");
+  if (!rules.ok && !none) fail(`cannot list the notification rules of ${homeName}:\n${rules.out}`);
+  if (!none && rules.out.includes(queue)) {
     console.log(`provision: the notification rule of ${homeName} to ${queue} exists`);
   } else {
     run([
