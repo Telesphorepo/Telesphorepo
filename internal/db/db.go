@@ -74,6 +74,45 @@ func Open(ctx context.Context, file string) (*DB, error) {
 	return &DB{W: w, R: r}, nil
 }
 
+// OpenReadOnly opens the database file for reading only, as one pool. It writes nothing to the
+// file: a backup reads the live database of a running server with it, and a restore reads the
+// database of a backup.
+func OpenReadOnly(file string) (*sql.DB, error) {
+	if _, err := os.Stat(file); err != nil {
+		return nil, err
+	}
+	q := url.Values{}
+	q.Set("mode", "ro")
+	q.Add("_pragma", "busy_timeout(5000)")
+	return sql.Open("sqlite", "file:"+file+"?"+q.Encode())
+}
+
+// VacuumInto writes a copy of the database that r reads into the empty file: SQLite's VACUUM
+// INTO, a consistent snapshot while the server keeps writing. The copy is in rollback journal
+// mode (the copy of a WAL database starts in WAL mode), so it opens read-only without -wal and
+// -shm files, also from read-only media; the server sets WAL again when it opens it.
+func VacuumInto(ctx context.Context, r *sql.DB, file string) error {
+	if _, err := r.ExecContext(ctx, "VACUUM INTO ?", file); err != nil {
+		return err
+	}
+	w, err := sql.Open("sqlite", "file:"+file)
+	if err != nil {
+		return err
+	}
+	_, err = w.ExecContext(ctx, "PRAGMA journal_mode=DELETE")
+	if cerr := w.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// Fingerprint is the fingerprint of a schema text that schema_components holds: the hex SHA-256
+// of the text with CRLF line ends read as LF.
+func Fingerprint(schema string) string {
+	sum := sha256.Sum256([]byte(strings.ReplaceAll(schema, "\r\n", "\n")))
+	return hex.EncodeToString(sum[:])
+}
+
 // Close refreshes the planner statistics (PRAGMA optimize) and closes both pools.
 func (d *DB) Close() error {
 	if _, err := d.W.Exec("PRAGMA optimize"); err != nil {
@@ -136,8 +175,7 @@ func (d *DB) Init(ctx context.Context, comps []Component) error {
 		return err
 	}
 	for _, c := range comps {
-		sum := sha256.Sum256([]byte(strings.ReplaceAll(c.Schema, "\r\n", "\n")))
-		fp := hex.EncodeToString(sum[:])
+		fp := Fingerprint(c.Schema)
 		var stored string
 		err := d.W.QueryRowContext(ctx, `SELECT fingerprint FROM schema_components WHERE component = ?`, c.Name).Scan(&stored)
 		switch {

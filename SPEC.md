@@ -34,7 +34,7 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 
 | Package | Role |
 |---|---|
-| `cmd/telesphorepo-server` | The server binary `telesphorepo-server`: `serve` (default), `dev`, `user add/passwd/reset-2fa`, `version`, `help`; hidden `dbcheck` and `seed`. `cmd/telesphorepo` is the name of the publishing client |
+| `cmd/telesphorepo-server` | The server binary `telesphorepo-server`: `serve` (default), `dev`, `user add/passwd/reset-2fa`, `backup`, `restore`, `version`, `help`; hidden `dbcheck` and `seed`. `cmd/telesphorepo` is the name of the publishing client |
 | `changes.go` (package `telesphorepo` at the repo root) | Embeds `changes.toml`, the change log (`ChangesTOML`). It imports nothing |
 | `changelog` | Reads the change log (`Parse`, `Embedded`, `Since`, `Stamp`) and compares release versions (`ParseVersion`, `Version.Compare`). It imports only the stdlib, `github.com/BurntSushi/toml` and the root package, so the server and the CLI both use it. See **Change log** |
 | `internal/server` | Builds the kernel and runs the module lifecycle (see **Modules**): logger, DB, schemas, settings, live storage, kernel services, module `Init`, routes, bootstrap admin, jobs, client address, access log |
@@ -56,6 +56,7 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/assets` | The byte pipeline: `Pipeline` (`Commit`, `CommitAll`, `Remove`, point lookups, listing, FTS search), `Reader` (the read path of hosted, proxy and group repos), `Uploads` (resumable uploads), the asset hooks of a format (`Hooks`) and the watchers of every commit and remove (`Watcher`). See **Byte pipeline** |
 | `internal/ops` | Repo operations (`repo_ops`): `Begin`, `Progress`, `SetState`, `Fail`, `End`, and the operation types that modules register (`delete`, `mirror`) |
 | `internal/rebuild` | The durable rebuild queue of format indexes (`rebuilds`): `MarkTx`, `Pending`, and the debounced worker of the job `core.rebuild` |
+| `internal/backup` | Module `backup`: a backup of the database (`VACUUM INTO`), the master key and, on fs, the blobs into a backup folder (`Run`), the list (`List`), the retention (`Prune`), the restore (`Restore`), the source of a backup from the command line (`Offline`); the settings group `backup` and its job. See **Backups** |
 | `internal/move` | Module `storage`: the storage move copies every blob to a new backend in the background behind a `storage.Mirror`; owner hooks of the `storage` settings group |
 | `internal/nexus` | Module `nexus`: Nexus 3 REST client, sources, mapping, the sync scheduler and runner, and cut-over. Names no format; it calls the `Importer` of the target format (its `Plan` for the target repo, its `Run` for each file) |
 | `internal/auth` | Users (kinds `local`/`oidc`), argon2id passwords, Basic-auth cache, read tokens, sessions, rate limiting, permission checks. A caller is a `Principal` with one credential kind (`Cred`: password, read token, session, setup session, publish session, device). `Identify` reads the credentials a route policy names. Token kinds are verifiers by prefix (`AddTokenKind`). Also core bearer tokens (`IssueBearer`), fresh second-factor proofs (`CheckProof`, `IssueGrant`) and the session view (`View`) |
@@ -155,6 +156,7 @@ it needs and leaves the others nil. The kernel gives it these parts:
 | `core` | `internal/api` | | Sign-in, `/api/me`, users, read tokens (`trp`), repos, grants, files, upload plans and uploads, delete plans, resumable uploads, repo operations, search, the settings API, `/api/formats` (the UI descriptors), the snippets and CI files of each repo, `/api/permissions`, the access report; the subsystems `repositories`, `people`, `settings` and `repo`; the kernel's audit actions; the settings group `general`; the operation type `delete`; jobs `core.optimize` (`PRAGMA optimize` every 6 h), `core.blob-gc`, `core.upload-sessions` (every 10 min), `core.rebuild` and `core.ops` |
 | `audit` | `internal/activity` | | `GET /api/audit`, `GET /api/audit/actions`, the subsystem `activity`, the settings group `activity`, job `audit.retention` (every hour) |
 | `storage` | `internal/move` | | `/api/storage/moves/...`, the subsystem `storage`, the settings group `storage` (its `Validate`: the S3 rules; `Test`: the probe; `Apply`: refuse a change while a move runs, probe the new store, start the move), the `storage.move.*` actions, job `storage.resume` |
+| `backup` | `internal/backup` | | `GET /api/backup`, `POST /api/backup/run`, the subsystem `backup`, the settings group `backup` (its `Test`: the server writes a probe file into the folder), the `backup.*` actions, job `backup.schedule` (every minute: a backup when one is due). No table: the backup folder holds its state |
 | `network` | `internal/netrules` | | The client address, IP lists, repo IP rules (a repo guard and the networks of the access report), the IP lists of the trusted proxies (`/api/network/trusted-proxies`), the subsystem `network`, the settings group `network` (`trusted_proxies`; its `Validate` refuses a `list:` entry in a change), the `network.*` actions, job `network.presets` (every hour) |
 | `signing` | `internal/signing` | | Signing keys and `/api/signing-keys/...`, the repo field `signing_key` (for the hosted repos of the formats with `SigningKey`), the subsystem `signing`, the `signing.key.*` actions; provides `*signing.Keys` |
 | `publish` | `internal/publish` | `audit` | Devices, publish sessions (`trs`), CI trust policies, the CI providers `github-actions` and `jenkins`, `/api/devices/...` and `/api/publish/...`, the subsystem `ci`, the settings group `publishing`, the `publish.session.*`, `device.*`, `setup_code.create` and `ci.pipeline.*` actions, job `publish.cleanup` (every minute), `/install.sh`, `/install.ps1` and `/cli/` (see **Install scripts and CLI downloads**); provides `*publish.Service` and `publish.Minter`; loads the publish sessions and devices of core bearer tokens and gives the access report its CI pipelines |
@@ -613,7 +615,7 @@ Precedence is env override, then stored value, then default. A setting can carry
 (`settings.Def.Dev`). `telesphorepo-server dev` uses it instead of `Default`: `cookie.secure=false` and
 `index.debounce=300ms` in the core.
 
-Setting types are `string`, `bool`, `size`, `duration`, `list` and `map`. A `size` is stored as an
+Setting types are `string`, `bool`, `int` (a whole number, positive unless `Zero`), `size`, `duration`, `list` and `map`. A `size` is stored as an
 integer number of bytes. Input (API PATCH, env) is a number with an optional unit: `B`, `KiB`,
 `MiB`, `GiB`, `TiB` (binary) or `KB`, `MB`, `GB`, `TB` (decimal), case-insensitive, with optional
 space and decimals (`512MiB`, `1.5 GiB`, `500MB`). A bare number is bytes. A `duration` is stored
@@ -648,6 +650,7 @@ The `settings` package holds no feature rules and declares only the keys of the 
 | docker (docker) | `settings.general` · General | `docker.direct_uploads` (`false`; "Expose the origin IP for Docker uploads", see **Upload host**), `docker.upload_url` (`""`; empty or an http(s) URL of a scheme and a host only: the DNS-only name or address of the server that takes the upload bytes; required when `docker.direct_uploads` is on), `docker.link_grace` (`24h`, minimum `1s`) |
 | activity (audit) | `settings.general` · General | `audit.retention` (`8760h`, which is 365 days) |
 | storage (storage) | `storage.manage` · `/settings/storage` | `storage` (`fs`/`s3`), `fs.root` (default `blobs/` in the data dir), `s3.endpoint`, `s3.region`, `s3.bucket`, `s3.access_key_id`, `s3.secret_access_key`*, `s3.prefix`, `s3.path_style`, `s3.redirect`, `presign_ttl` |
+| backup (backup) | `backup.manage` · `/settings/backups` | `backup.dir` (`""`: off; an absolute path), `backup.interval` (`24h`, minimum `1m`), `backup.keep` (type `int`, `7`, at most 1000). See **Backups** |
 | network (network) | `network.manage` · `/settings/proxy` | `trusted_proxies` (literal entries; the IP lists of the trusted proxies are rows, see **Network rules**) |
 | edge (edge) | `edge.manage` · `/settings/edge` | `edge.enabled` (`false`; needs `storage=s3` and a `base_url` without a path), `edge.home_hint` (`""`; one of `wnam enam weur eeur apac oc`, required when edge delivery is on), `edge.regions` (`[]`; entries `<hint>=<bucket>`, each hint once, not the home hint, not the home bucket), `edge.access_ttl` (`30s`, 0 to 5 min). Its `Validate` checks the rules across keys and at startup turns edge delivery off instead of stopping the server; `Test` probes the home bucket and every regional bucket; `Apply` marks a save, which ends "deploy needed" after a storage change. See **Edge delivery** |
 | publishing (publish) | `settings.general` · General | `publish.session_ttl` (`15m`, maximum `1h`), `publish.device_ttl` (`2160h`, which is 90 days) |
@@ -893,6 +896,8 @@ transaction.
 | `GET /api/repos/{name}/snippets?path=&version=&version_mode=pinned\|latest` | `repo.download` | The snippets that use one artifact (`format.Spec.ArtifactUsage`): `{base_url, artifact, version, version_mode, fixed_version, tools, snippets}`. `path` is an artifact folder (with an optional `version`), a version folder or a file |
 | `GET /api/settings` | the permission of a settings group | `{groups: [{id, label, module, perm, page, settings: [Item]}]}`: the groups whose permission the caller holds, in module start order. An Item has key, env, group, label, help, type, options, secret (from the definition), value, default, display, default_display, source (`stored`/`env`/`default`), locked |
 | `PATCH /api/settings` | the permission of each key's group | `{key: value}`. Each key needs the permission of its group (403 otherwise). `null` resets a key; `""` for a secret means unchanged. The server runs the `Validate` of every touched group, then each `Apply`, then saves (see **Settings model**). Returns 400 `{error, fields}`, or 409 when an env-locked key gets a different value. Location changes must pass the probe; SSO connection changes must pass discovery. A location change that starts a storage move saves the other keys of the patch and returns 202 `{move: Move}`; 409 while a move runs. The settings service records one `settings.update` event that names the saved keys, never the values; a patch that saves no key records none |
+| `GET /api/backup` | `backup.manage` | `{job: {running, started_at, progress: {step, blobs, copied} | null, last_at, last_error}, next_at, backups: [{name, created_at, complete, version, storage, size, files, blobs_included, master_key_included}], error}`: the folders of `backup.dir`, newest first (`next_at` and the list are empty while backups are off). `size` is the database and the blobs it uses. `job` is the state of this process: `last_*` are lost at a restart. `error` says why the folder could not be read |
+| `POST /api/backup/run` | `backup.manage` | Starts a backup now: 202 with the `job`; 409 while one runs; 400 without `backup.dir` |
 | `GET /api/storage/moves/current` | `storage.manage` | The newest Move, running or ended; 404 when there has been none |
 | `GET /api/storage/moves/{id}` | `storage.manage` | `Move` = `{id, state, total, copied, skipped, failed, error, started_at, finished_at, target: {storage, endpoint?, bucket?, prefix?, fs_root?}}`. Never holds secrets |
 | `GET /api/storage/moves/{id}/failures?after=&limit=` | `storage.manage` | `{items: [{asset_id, key, reason}], next}` in asset id order |
@@ -1097,6 +1102,7 @@ archives with their SHA-256 and the commands to install one by hand.
   | `settings` (server, core) | `settings.general` | General settings: the groups on Settings › General | | yes |
   | `activity` (server, audit) | `activity.read` | Read the audit log: Settings › Activity, the audit log and the publish log | | yes |
   | `storage` (server, storage) | `storage.manage` | Manage storage: Settings › Storage and the storage moves | | yes |
+  | `backup` (server, backup) | `backup.manage` | Manage backups: Settings › Backups, Back up now and the list of backups | | yes |
   | `network` (server, network) | `network.manage` | Manage networks and proxy: Networks (IP lists) and Network and proxy (`trusted_proxies`) | | yes |
   | `signing` (server, signing) | `signing.manage` | Manage signing keys | | yes |
   | `signin` (server, sso) | `signin.manage` | Manage sign-in options: Settings › Sign-in options | | yes |
@@ -1644,6 +1650,53 @@ A settings PATCH that points the server at another blob location while blobs exi
 - **UI.** The **Storage** page (`/#/settings/storage`) shows a progress bar while a move copies, a Cancel button, and the
   failure list of a failed move.
 
+## Backups
+
+Module `backup` (`internal/backup`). With `backup.dir` set, the job `backup.schedule` checks every
+minute whether a backup is due: when the folder has no complete backup, or the newest is older than
+`backup.interval`. After a failed run it waits `backup.interval`, at most an hour, before it tries
+again. `POST /api/backup/run` starts one at once; one runs at a time. The state is the folder
+itself: the module has no table.
+
+- **Folder.** A backup is `<backup.dir>/<UTC start time>/`, named `20261020T201500.123Z` (sortable).
+  It holds `telesphorepo.db`, `master.key` and `backup.json`. A folder without a readable
+  `backup.json` is incomplete: the list shows it, restore refuses it and the next run removes it.
+- **Database.** `VACUUM INTO` from a reader of the live database writes a consistent copy while the
+  server writes (`db.VacuumInto`); the copy is in rollback journal mode, so it opens read-only
+  without side files. The file is owner-only (0600).
+- **Master key.** `master.key` of the data dir is copied with mode 0600. With `TR_MASTER_KEY` set
+  the backup has none, and `backup.json` says `master_key_source: "env"`.
+- **Blobs (fs).** The blobs that an asset uses (`refs > 0`) go into `<backup.dir>/blobs/`, the same
+  layout as the store (`blobs/sha256/<2 hex>/<hex>`), shared by every backup of the folder. A blob
+  that the folder holds with its size is not copied again (a blob never changes); a copy goes to a
+  temp name, its size and SHA-256 are checked, then it is renamed. The run copies the blobs of the
+  live database first, then writes the database copy, then copies the blobs of the copy that the
+  first pass missed (uploads in between). In the server each copy holds the digest lock of the
+  blob, so the blob GC waits; a blob that the copy uses and the store no longer holds fails the
+  run.
+- **Blobs (S3).** No blob is copied. `backup.json` names the bucket, the prefix and the endpoint
+  (never a credential): back up the bucket with the tools of its provider.
+- **`backup.json`** (written last, through a temp file): `format` (1), `version` of the server,
+  `created_at`, `storage` (`fs`/`s3`), `s3`, `blobs_included`, `schema` (the fingerprint of each
+  schema component, from `schema_components`), `counts` (`repos`, `files`, `file_bytes`, `blobs`,
+  `blob_bytes`), `database` (`file`, `size`, `sha256`), `master_key_included`, `master_key_source`.
+- **Retention.** After a run, the newest `backup.keep` complete backups stay; every other backup
+  folder, incomplete ones too, is removed. Then each file of `blobs/` that no kept backup uses is
+  removed: the module reads the blob list of each kept backup's database, read-only. When one of
+  them cannot be read, no blob is removed. A temp file older than an hour is removed too.
+- **Log and audit.** One log line per run (`backup written` with the name, the counts and the
+  duration, or `backup failed` with the error) and one audit event (`backup.done` or
+  `backup.failed`). Neither holds a secret.
+- **Restore.** `telesphorepo-server restore FOLDER` reads `backup.json`, refuses a data dir that is
+  not empty, checks the SHA-256 of the database, then copies, with fs storage, every blob that the
+  database uses from the `blobs/` folder next to the backup into the fs store of the data dir
+  (`TR_FS_ROOT`, else the stored `fs.root`, else `blobs/` in the data dir; it first checks that the
+  folder holds all of them), then `master.key` (0600), and the database last. The restored database
+  is byte for byte the backed-up one. With S3 the restored server reads the blobs from the bucket,
+  which must still hold them.
+- **UI.** Settings › Backups (`/#/settings/backups`): the list with Back up now, the progress of a
+  running backup or the time of the next one, the error of a failed run, and the settings form with
+  Test the folder.
 ## Edge delivery
 
 Clients far from the server download from Cloudflare's edge: R2 buckets, a Queue and a Worker
@@ -3121,6 +3174,7 @@ module (`audit.System`), the `telesphorepo-server user` commands as `cli` (`audi
 | core | `repositories` | `repo.create`, `repo.update`, `repo.delete`, `repo.delete.resume`, `repo.delete.clear` |
 | core | `settings` | `settings.update` (keys only, never values) |
 | storage | `storage` | `storage.move.start` (`detail.target` without secrets), `storage.move.cancel`, `storage.move.done`, `storage.move.failed` (`detail.error`) |
+| backup | `backup` | `backup.done` (`target` the backup name; `detail`: `dir`, `storage`, `blobs`, `copied`, `size`, `master_key_included`, `removed` (the folders retention removed), `removed_blobs`), `backup.failed` (`detail.error`). A scheduled run has the module as actor, Back up now the person |
 | network | `network` | `network.denied` (`detail.scope` is `read` or `publish`), `network.rules.update` (counts of read and publish rules only), `network.list.create`, `network.list.update` (`detail.renamed_from` after a rename), `network.list.delete`, `network.trusted.update` (`detail.lists`: the IP lists of the trusted proxies after a change) |
 | signing | `signing` | `signing.key.create` (`detail.imported`), `signing.key.delete`, `signing.key.bind` (a repo got its key: the repo, `target` the key name) |
 | publish | `repo` | `publish.session.create` (`detail.via`; the actor is the person or the CI subject of the session), `publish.session.close`, `setup_code.create` (a setup line of the repo), `device.setup` (a project setup with a setup code; the actor is the person of the code, `detail.device_id` and `detail.new`) |
@@ -3487,6 +3541,8 @@ page are in `web/src/README.md`.
 | `telesphorepo-server user add NAME [--admin]` | Asks for the password twice on a TTY, or reads one line from a pipe. Every `user` command writes an audit event with the actor `cli` |
 | `telesphorepo-server user passwd NAME` | Resets the password and signs out the user's sessions. Refused for SSO users |
 | `telesphorepo-server user reset-2fa NAME` | Removes the TOTP factors, passkeys and recovery codes of a user, so the user sets up a new factor at the next sign-in |
+| `telesphorepo-server backup DIR` | One backup of the data dir (`TR_DATA_DIR`, else `./data`) into `DIR`, as the job writes it (see **Backups**). It opens the database read-only, so a server may run on the data dir; it reads the storage settings from the `TR_*` environment, else the stored rows. It applies no retention and writes no audit event |
+| `telesphorepo-server restore FOLDER [--data-dir DIR]` | Restores a backup folder into `DIR`, else `TR_DATA_DIR`, else `./data`, which must be empty or missing (see **Backups**). It prints what it wrote, and a line when the database schema of the backup differs from this binary |
 | `telesphorepo-server version` / `help [cmd]` | |
 
 **Demo data.** The first run of `telesphorepo-server dev` (without `--empty`) fills the dev instance
@@ -3600,7 +3656,7 @@ private member (also for the public member's file) carry `Cache-Control: private
 and a group of public members carry none (an S3 redirect carries `no-store`); after a read IP rule
 that allows every address, the public repo and the group of it carry `private`. `proxy_test.go` covers `TestProxy` with a second Telesphorepo server as the remote: `mvn` through the proxy and no remote request on the second resolve, the `metadata_ttl` recheck with a 304 and a changed file, a remembered 404, 405 for a PUT, a group where the hosted member wins over the proxy, remote credentials (with them, 502 without them), a Caddy container that redirects to another host and refuses a request that carries credentials, `apt-get` through a Debian proxy with the remote's key, and a stopped remote (cached file served, 502, `last_error`). `TestNoBrowserPasswordPrompt` (in `auth_test.go`) checks that a 401 under `/api` or with `X-Telesphorepo-UI` has no `WWW-Authenticate`. `folder_upload_test.go` covers `TestFolderUploadMaven` (a Maven-layout tree with checksum, signature and stray files; a flat folder with two poms; a bad tree that gives 400; plans store nothing; checksums and metadata) and `TestFolderUploadDebianAndRaw`. `TestStorageMove*` run each server on a named data volume: fs to
 SeaweedFS and back with uploads during the move, a forced failure, a restart mid-move
-(`Server.Restart`) and a cancel. `blobs_test.go` covers `TestBlobDedupeAndGC` (the same bytes in two raw repos
+(`Server.Restart`) and a cancel. `backup_test.go` covers `TestBackupRestore`: on fs, a server with Maven, Debian and raw repos backs up through the API while raw uploads run; the folder holds the database (its SHA-256 in `backup.json`), `master.key` (0600) and `backup.json`, and the blobs folder every blob; `telesphorepo-server restore` of the image restores it into a new volume and refuses a volume that is not empty; a server on that volume reads every file back byte for byte (the uploads during the backup that it has too), `mvn` resolves and `apt` installs with the same signing key; with `backup.keep=2` two more backups remove the first one and the blob only it used; an incomplete folder is listed, refused by restore and removed by the next run. On SeaweedFS the backup has no blobs folder, `backup.json` names the bucket, and the restored server reads the files from the bucket. `blobs_test.go` covers `TestBlobDedupeAndGC` (the same bytes in two raw repos
 and a Maven repo are one stored blob, each path keeps its own content type, also in an S3 redirect;
 the blob stays while a file uses it and the blob GC removes it after `TR_BLOBS_GC_GRACE=1s`; an upload of the
 same bytes stores them again), `TestUploadSessions` (chunks, a wrong offset, a restart between chunks, a

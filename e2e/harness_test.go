@@ -56,6 +56,7 @@ type ServerOpts struct {
 	S3         *S3Target         // required when Storage == "s3"
 	Files      []ContainerFile   // extra files copied into the server container
 	DataVolume string            // named volume mounted at /data; default: the container's own
+	Mounts     map[string]string // more named volumes: volume -> container path
 	// NoBootstrapAdmin omits TR_BOOTSTRAP_ADMIN_*: the server creates "admin" with a random
 	// password and prints it in its startup banner; StartServer reads it from the logs.
 	NoBootstrapAdmin bool
@@ -124,6 +125,9 @@ func StartServer(t testing.TB, opts ServerOpts) *Server {
 	var mounts []testcontainers.ContainerMount
 	if opts.DataVolume != "" {
 		mounts = append(mounts, testcontainers.VolumeMount(opts.DataVolume, "/data"))
+	}
+	for vol, target := range opts.Mounts {
+		mounts = append(mounts, testcontainers.VolumeMount(vol, testcontainers.ContainerMountTarget(target)))
 	}
 
 	c, err := runContainer(ctx, ServerImage,
@@ -695,7 +699,7 @@ func (s *Server) SignIn(t testing.TB, user, pass string) *Session {
 
 // AllServerPerms holds every server permission, in registry order (module start order). A person
 // with all of them is an administrator.
-var AllServerPerms = []string{"repositories.all", "people.manage", "settings.general", "activity.read", "storage.manage", "network.manage", "signing.manage", "edge.manage", "signin.manage", "nexus.manage"}
+var AllServerPerms = []string{"repositories.all", "people.manage", "settings.general", "activity.read", "storage.manage", "backup.manage", "network.manage", "signing.manage", "edge.manage", "signin.manage", "nexus.manage"}
 
 // CreateUser creates a local user with the server permissions perms (none for a plain user).
 // The harness keeps the password, so the publish helpers can sign in as the user.
@@ -1028,7 +1032,8 @@ type ClientOpts struct {
 	User       string
 	Timeout    time.Duration // default 10m
 	Privileged bool          // run the container privileged (e.g. Docker in Docker)
-	// NoShell runs the image's own entrypoint and command; Cmd is ignored.
+	// NoShell runs the image's own entrypoint; Cmd, when set, is its command (the arguments of the
+	// entrypoint, not joined), else the image's own command.
 	NoShell bool
 }
 
@@ -1094,8 +1099,11 @@ func RunClientResult(t testing.TB, image string, opts ClientOpts) *ClientResult 
 		mounts = append(mounts, testcontainers.VolumeMount(vol, testcontainers.ContainerMountTarget(target)))
 	}
 	var customizers []testcontainers.ContainerCustomizer
-	if !opts.NoShell {
+	switch {
+	case !opts.NoShell:
 		customizers = append(customizers, testcontainers.WithEntrypoint("sh", "-c"), testcontainers.WithCmd(strings.Join(opts.Cmd, " ")))
+	case len(opts.Cmd) > 0:
+		customizers = append(customizers, testcontainers.WithCmd(opts.Cmd...))
 	}
 	if opts.Privileged {
 		customizers = append(customizers, testcontainers.WithHostConfigModifier(func(hc *container.HostConfig) { hc.Privileged = true }))

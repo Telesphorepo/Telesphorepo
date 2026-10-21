@@ -52,6 +52,10 @@ func TestServerPermissions(t *testing.T) {
 		{"storage.manage", []permRoute{
 			{http.MethodGet, "/api/storage/moves/current", none, []int{http.StatusOK, http.StatusNotFound}},
 		}, true},
+		{"backup.manage", []permRoute{
+			{http.MethodGet, "/api/backup", none, []int{http.StatusOK}},
+			{http.MethodPatch, "/api/settings", func() any { return map[string]any{"backup.keep": 5} }, []int{http.StatusOK}},
+		}, true},
 		{"network.manage", []permRoute{
 			// The list route also serves repo.settings on a repo (which repositories.all holds); one list needs network.manage.
 			{http.MethodGet, "/api/ip-lists/github-actions", none, []int{http.StatusOK}},

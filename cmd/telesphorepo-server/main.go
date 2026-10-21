@@ -1,5 +1,5 @@
 // Command telesphorepo-server is the Telesphorepo server binary: serve (default), dev,
-// user add|passwd|reset-2fa, version, help.
+// user add|passwd|reset-2fa, backup, restore, version, help.
 package main
 
 import (
@@ -114,6 +114,28 @@ times spread over the last two years. The URL and the passwords are printed on e
 TR_* env still overrides. Start over with a fresh instance by deleting ./.telesphorepo-dev.
 `, run: devCmd},
 		userCmd,
+		{name: "backup", summary: "write a backup of the data folder", usage: `Write one backup of the data folder into a backup folder.
+
+  telesphorepo-server backup /mnt/backups
+  TR_DATA_DIR=/srv/tr telesphorepo-server backup /mnt/backups
+
+The backup is a new folder named by the UTC time, for example /mnt/backups/20261020T201500.123Z,
+with a copy of the database, the master key (none when TR_MASTER_KEY holds it) and backup.json.
+With fs storage the stored files go into /mnt/backups/blobs, shared by every backup in the folder:
+a file that is there already is not copied again. With S3 storage the files stay in the bucket;
+back up the bucket too. A server may run on the data folder meanwhile.
+`, run: backupCmd},
+		{name: "restore", summary: "restore a backup into an empty data folder", usage: `Restore a backup into an empty data folder.
+
+  telesphorepo-server restore /mnt/backups/20261020T201500.123Z
+  telesphorepo-server restore /mnt/backups/20261020T201500.123Z --data-dir /srv/tr
+
+The data folder is --data-dir, else TR_DATA_DIR, else ./data; it must be empty or missing. The
+restore checks the backup, then copies the database, the master key and, with fs storage, the
+files the database uses from the blobs folder next to the backup. With S3 storage the restored
+server reads the files from the bucket, which must still hold them. Start the server on the
+data folder afterwards.
+`, run: restoreCmd},
 		{name: "dbcheck", hidden: true, usage: `Check the query plans of every query against a fresh database.
 
   telesphorepo-server dbcheck

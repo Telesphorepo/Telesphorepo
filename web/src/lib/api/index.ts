@@ -282,6 +282,12 @@ export const api = {
     proxyCandidates: () => request<T.ProxyCandidate[]>("GET", "/api/network/proxy-candidates"),
   },
 
+  backups: {
+    /** The backups in the backup folder and the state of the backup job. */
+    get: () => request<T.BackupOverview>("GET", "/api/backup"),
+    /** Starts a backup now; 409 while one runs, 400 without a backup folder. */
+    run: () => request<T.BackupJob>("POST", "/api/backup/run"),
+  },
   moves: {
     /** The newest move, running or ended; null when there has been none. */
     current: () => requestOrNull<T.Move>("GET", "/api/storage/moves/current"),

@@ -71,6 +71,7 @@ Settings (signed in)
    ├─ Sign-in options                single sign-on, password sign-in for admins
    ├─ Signing keys
    ├─ Storage
+   ├─ Backups                        the backups in the folder, Back up now; folder, interval, keep
    ├─ Nexus migration
    ├─ Network and proxy              trusted proxies only: none / proxy on this machine or network /
    │                                 Cloudflare / custom addresses; detected proxies; NOT IP lists

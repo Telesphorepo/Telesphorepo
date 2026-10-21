@@ -15,7 +15,8 @@ import (
 )
 
 // Type is a setting's value type. The value a Key returns: string -> string, bool -> bool,
-// size -> int64 (bytes), duration -> time.Duration, list -> []string, map -> map[string][]string.
+// int -> int64, size -> int64 (bytes), duration -> time.Duration, list -> []string,
+// map -> map[string][]string.
 // The JSON form of a duration is its text ("15m"). Input of a size or a duration accepts
 // friendly forms ("512MiB", "1.5 GiB", "90 days"). A map is a JSON object of string to a list of
 // strings, in the environment too.
@@ -24,6 +25,7 @@ type Type string
 const (
 	TypeString   Type = "string"
 	TypeBool     Type = "bool"
+	TypeInt      Type = "int"
 	TypeSize     Type = "size"
 	TypeDuration Type = "duration"
 	TypeList     Type = "list"
@@ -43,7 +45,7 @@ type Def struct {
 	// DataDefault, when set, makes the default the path DataDefault in the data directory.
 	DataDefault string
 	Secret      bool
-	// Zero lets a duration be 0 (e.g. edge.access_ttl, where 0 means no cache).
+	// Zero lets a duration or a whole number be 0 (e.g. edge.access_ttl, where 0 means no cache).
 	Zero    bool
 	Options []string // allowed values (lower case) of an enumerated string
 	// Normalize puts a decoded value in its canonical form (optional).
@@ -83,6 +85,9 @@ func String(d *Def) Key[string] { d.Type = TypeString; return Key[string]{d} }
 
 // Bool declares a bool setting.
 func Bool(d *Def) Key[bool] { d.Type = TypeBool; return Key[bool]{d} }
+
+// Int declares a whole number setting.
+func Int(d *Def) Key[int64] { d.Type = TypeInt; return Key[int64]{d} }
 
 // Size declares a size setting, in bytes.
 func Size(d *Def) Key[int64] { d.Type = TypeSize; return Key[int64]{d} }
@@ -275,6 +280,12 @@ func (d *Def) parseText(s string) (any, error) {
 			return nil, errors.New("must be true or false")
 		}
 		v = b
+	case TypeInt:
+		n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+		if err != nil {
+			return nil, errors.New("must be a whole number")
+		}
+		v = n
 	case TypeSize:
 		n, err := parseSize(s)
 		if err != nil {
@@ -332,6 +343,16 @@ func (d *Def) decodeJSON(raw json.RawMessage) (any, error) {
 			return d.parseText(s)
 		}
 		v = b
+	case TypeInt:
+		var n int64
+		if err := json.Unmarshal(raw, &n); err != nil {
+			var s string
+			if json.Unmarshal(raw, &s) != nil {
+				return nil, errors.New("must be a whole number")
+			}
+			return d.parseText(s)
+		}
+		v = n
 	case TypeSize:
 		var n int64
 		if err := json.Unmarshal(raw, &n); err != nil {
@@ -377,6 +398,10 @@ func (d *Def) check(v any) (any, error) {
 		v = d.Normalize(v)
 	}
 	switch d.Type {
+	case TypeInt:
+		if n := v.(int64); n < 0 || (n == 0 && !d.Zero) {
+			return nil, errors.New("must be a positive whole number")
+		}
 	case TypeSize:
 		if v.(int64) <= 0 {
 			return nil, errors.New("must be a positive size")

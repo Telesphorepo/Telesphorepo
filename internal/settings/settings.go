@@ -380,11 +380,11 @@ func (s *Service) Items(g *Group) []Item {
 				it.Default = def.jsonValue(dv)
 			}
 		}
-		it.Display, it.DefaultDisplay = display(snap.values[def.idx]), ""
+		it.Display, it.DefaultDisplay = def.display(snap.values[def.idx]), ""
 		if def.Secret {
 			it.Display = ""
 		} else if dv, err := def.parseText(s.defaultText(def)); err == nil {
-			it.DefaultDisplay = display(dv)
+			it.DefaultDisplay = def.display(dv)
 		}
 		out = append(out, it)
 	}
@@ -392,10 +392,12 @@ func (s *Service) Items(g *Group) []Item {
 }
 
 // display puts a size or a duration value in words; other values give "".
-func display(v any) string {
+func (d *Def) display(v any) string {
 	switch x := v.(type) {
 	case int64:
-		return formatSize(x)
+		if d.Type == TypeSize {
+			return formatSize(x)
+		}
 	case time.Duration:
 		return formatDuration(x)
 	}

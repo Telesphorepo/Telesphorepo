@@ -5,6 +5,7 @@ package modules
 import (
 	"github.com/Telesphorepo/Telesphorepo/internal/activity"
 	"github.com/Telesphorepo/Telesphorepo/internal/api"
+	"github.com/Telesphorepo/Telesphorepo/internal/backup"
 	"github.com/Telesphorepo/Telesphorepo/internal/cargo"
 	"github.com/Telesphorepo/Telesphorepo/internal/debian"
 	"github.com/Telesphorepo/Telesphorepo/internal/docker"
@@ -30,6 +31,7 @@ func All() []module.Module {
 		api.Module(),      // core
 		activity.Module(), // audit
 		move.Module(),     // storage
+		backup.Module(),
 		netrules.Module(), // network
 		signing.Module(),
 		publish.Module(),

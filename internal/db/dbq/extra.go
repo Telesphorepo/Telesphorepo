@@ -11,8 +11,9 @@ import (
 // Extra maps each hand-written query name to its SQL. A slice parameter is written as
 // "/*SLICE:name*/?"; the plan guard checks it with a single placeholder.
 var Extra = map[string]string{
-	"SearchAssets":        searchAssets,
-	"SearchAssetsInRepos": searchAssetsInRepos,
+	"SearchAssets":         searchAssets,
+	"SearchAssetsInRepos":  searchAssetsInRepos,
+	"ListSchemaComponents": listSchemaComponents,
 }
 
 // The FTS5 trigram search walks assets_fts in rowid order, which is the keyset order, so no
@@ -89,4 +90,26 @@ func (q *Queries) searchArgs(ctx context.Context, query string, args ...any) ([]
 		return nil, err
 	}
 	return items, nil
+}
+
+// schema_components is created by db.Init, not by schema.sql, so sqlc does not know it.
+const listSchemaComponents = `SELECT component, fingerprint FROM schema_components ORDER BY component`
+
+// ListSchemaComponents returns the fingerprint of each schema component of the database: the
+// schema state that backup.json records.
+func (q *Queries) ListSchemaComponents(ctx context.Context) (map[string]string, error) {
+	rows, err := q.db.QueryContext(ctx, listSchemaComponents)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var name, fp string
+		if err := rows.Scan(&name, &fp); err != nil {
+			return nil, err
+		}
+		out[name] = fp
+	}
+	return out, rows.Err()
 }

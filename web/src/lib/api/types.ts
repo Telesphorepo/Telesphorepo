@@ -609,7 +609,7 @@ export type SearchHit = {
 
 // --- settings ---
 
-export type SettingType = "string" | "bool" | "size" | "duration" | "list" | "map";
+export type SettingType = "string" | "bool" | "int" | "size" | "duration" | "list" | "map";
 export type SettingSource = "stored" | "env" | "default";
 /** A secret's value is never sent: only whether it is set. */
 export type SecretValue = { set: boolean };
@@ -688,6 +688,42 @@ export type EdgeStatus = {
   regions: EdgeRegionStatus[];
 };
 
+// --- backups ---
+
+/** The step of a running backup. */
+export type BackupProgress = { step: "files" | "database" | "cleanup"; blobs: number; copied: number };
+/** The backup job of the server process. */
+export type BackupJob = {
+  running: boolean;
+  started_at: string | null;
+  progress: BackupProgress | null;
+  /** The end and the error ("" for none) of the last run since the server started. */
+  last_at: string | null;
+  last_error: string;
+};
+/** One folder of the backup folder. An incomplete one did not finish; the next run removes it. */
+export type Backup = {
+  name: string;
+  created_at: string;
+  complete: boolean;
+  version: string;
+  storage: string;
+  /** The database and the files it uses: what a restore brings back. */
+  size: number;
+  files: number;
+  blobs_included: boolean;
+  master_key_included: boolean;
+};
+/** GET /api/backup. */
+export type BackupOverview = {
+  job: BackupJob;
+  /** When the next scheduled backup is due; null while backups are off. */
+  next_at: string | null;
+  /** Newest first. */
+  backups: Backup[];
+  /** Why the folder could not be read; "" for none. */
+  error: string;
+};
 // --- storage moves ---
 
 export type MoveState = "copying" | "done" | "failed" | "cancelled";

@@ -35,9 +35,11 @@ func Core() Component {
 		Queries: Sub(queriesFS, "queries"),
 		Extra:   dbq.Extra,
 		Allow: map[string]string{
-			"ListSettings":      "loads every stored setting at startup and after a settings write, never on a request path; at most one row per registered setting",
-			"HasUsers":          "EXISTS stops at the first row; startup check for the first admin",
-			"ListRebuildGroups": "startup: picks up every pending rebuild once per start; the rebuilds table holds only units not built yet",
+			"ListSettings":         "loads every stored setting at startup and after a settings write, never on a request path; at most one row per registered setting",
+			"HasUsers":             "EXISTS stops at the first row; startup check for the first admin",
+			"ListRebuildGroups":    "startup: picks up every pending rebuild once per start; the rebuilds table holds only units not built yet",
+			"CountRepoTotals":      "a backup counts the repos of its database copy once per backup, never on a request path; one row per repo",
+			"ListSchemaComponents": "a backup records the schema state of its database copy once per backup; one row per schema component",
 		},
 	}
 }

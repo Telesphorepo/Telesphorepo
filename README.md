@@ -53,8 +53,32 @@ download against `SHA256SUMS`, unpack it, and run `./telesphorepo-server serve`.
 | `TR_MASTER_KEY` | Generated into the data dir | Key that encrypts secret settings (base64, 32 bytes); pass it from a secret manager to keep it off the volume |
 
 Any setting can also be forced from the environment, e.g. `TR_COOKIE_SECURE=false` when the
-server is served over plain HTTP. A forced setting is read-only in the UI. Back up the data
-volume.
+server is served over plain HTTP. A forced setting is read-only in the UI.
+
+## Back up and restore
+
+Mount a backup volume and set its folder under **Settings > Server > Backups**; the server then
+writes a backup every 24 hours and keeps the newest 7 (both are settings there, next to
+**Back up now**). A backup holds the database, the master key and, with local disk storage, the
+stored files. Files in an S3 bucket stay in the bucket, so back up the bucket too; a key in
+`TR_MASTER_KEY` is not written, so keep it with the backups.
+
+```sh
+docker run -d -p 8080:8080 -v telesphorepo-data:/data -v telesphorepo-backups:/backups ghcr.io/telesphorepo/telesphorepo:latest
+# then set the backup folder to /backups in the UI, or start with -e TR_BACKUP_DIR=/backups
+```
+
+To back up from the command line, also while the server runs: `telesphorepo-server backup /backups`.
+To restore, stop the server and restore a backup folder into an empty data volume:
+
+```sh
+docker run --rm -v telesphorepo-backups:/backups -v telesphorepo-restored:/data \
+  ghcr.io/telesphorepo/telesphorepo:latest restore /backups/20261020T201500.123Z
+```
+
+Then start the server on `telesphorepo-restored`. The server's user (uid 65532 in the image)
+must be able to write the backup volume; give a new volume to it once with
+`docker run --rm -v telesphorepo-backups:/b alpine chown 65532:65532 /b`.
 
 ## Behind a reverse proxy
 

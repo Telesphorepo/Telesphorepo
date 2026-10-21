@@ -7,6 +7,7 @@ import type { NavGroup, PageDef, RedirectDef, RepoFieldDef, RepoTabDef, ModuleUI
 import { core } from "./core/module";
 import { audit } from "./audit/module";
 import { storage } from "./storage/module";
+import { backup } from "./backup/module";
 import { network } from "./network/module";
 import { signing } from "./signing/module";
 import { publish } from "./publish/module";
@@ -17,7 +18,7 @@ import { maven } from "./maven/module";
 import { debian } from "./debian/module";
 import { docker } from "./docker/module";
 
-export const modules: ModuleUI[] = [core, audit, storage, network, signing, publish, edge, sso, nexus, maven, debian, docker];
+export const modules: ModuleUI[] = [core, audit, storage, backup, network, signing, publish, edge, sso, nexus, maven, debian, docker];
 
 /** Every page, in module order; the first whose path matches wins. */
 export const pages: PageDef[] = modules.flatMap((m) => m.pages ?? []);

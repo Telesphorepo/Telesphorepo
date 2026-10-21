@@ -69,7 +69,7 @@ func TestSettingsAccess(t *testing.T) {
 	for _, it := range items {
 		groups[it.Group] = true
 	}
-	for _, g := range []string{"general", "activity", "storage", "network", "publishing", "sso", "nexus"} {
+	for _, g := range []string{"general", "activity", "storage", "backup", "network", "publishing", "sso", "nexus"} {
 		if !groups[g] {
 			t.Errorf("group %q missing from settings (have %v)", g, groups)
 		}

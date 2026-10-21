@@ -400,6 +400,8 @@
         <Input
           {id}
           type="text"
+          inputmode={s.type === "int" ? "numeric" : undefined}
+          class={s.type === "int" ? "tabular-nums" : undefined}
           disabled={ro}
           spellcheck={false}
           autocomplete="off"
