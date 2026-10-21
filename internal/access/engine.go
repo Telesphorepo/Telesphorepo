@@ -186,14 +186,17 @@ func (e *Engine) Allows(ctx context.Context, r *http.Request, p *auth.Principal,
 // GroupMembers returns the members of group that p reads through r, in read order: a group read
 // skips a member that p may not read. p read the group already. A core bearer token reads each
 // member with the rights of its credential (auth.Principal.InGroup), since its scopes name the
-// group only.
+// group only. The grants of p's user are read once for all members (auth.Service.WithGrants).
 func (e *Engine) GroupMembers(ctx context.Context, r *http.Request, p *auth.Principal, group *repos.Repo) ([]*repos.Repo, error) {
 	members, err := e.repos.MemberRepos(ctx, group)
 	if err != nil {
 		return nil, err
 	}
 	q := p.InGroup(group.Name)
-	out := members[:0]
+	if ctx, err = e.auth.WithGrants(ctx, q); err != nil {
+		return nil, err
+	}
+	out := make([]*repos.Repo, 0, len(members))
 	for _, m := range members {
 		ok, err := e.Allows(ctx, r, q, m, Read, perm.RepoDownload)
 		if err != nil {

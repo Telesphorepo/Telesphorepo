@@ -719,35 +719,6 @@ func (q *Queries) ListPermissions(ctx context.Context, repoID int64) ([]ListPerm
 	return items, nil
 }
 
-const listPermittedRepoIDs = `-- name: ListPermittedRepoIDs :many
-SELECT repo_id FROM repo_permissions WHERE user_id = ?
-`
-
-// The repos where user id holds a permission (a repo once per permission), through
-// repo_permissions_user.
-func (q *Queries) ListPermittedRepoIDs(ctx context.Context, userID int64) ([]int64, error) {
-	rows, err := q.db.QueryContext(ctx, listPermittedRepoIDs, userID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []int64
-	for rows.Next() {
-		var repo_id int64
-		if err := rows.Scan(&repo_id); err != nil {
-			return nil, err
-		}
-		items = append(items, repo_id)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const listRepoUserPerms = `-- name: ListRepoUserPerms :many
 
 SELECT perm FROM repo_permissions WHERE repo_id = ? AND user_id = ?
