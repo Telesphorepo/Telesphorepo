@@ -145,6 +145,14 @@
 	--color-success: var(--success);
 	--color-warning: var(--warning);
 	--color-brand: oklch(0.801 0.138 83);
+	/* The dot of LiveStatus while a refresh runs: a slow, quiet pulse (none under reduced motion). */
+	--animate-live: live-pulse 1.2s ease-in-out infinite;
+	@keyframes live-pulse {
+		50% {
+			opacity: 0.35;
+			transform: scale(0.75);
+		}
+	}
 	/* The page container. Every Settings page uses the full content column next to the sidebar. */
 	--container-page: 75rem;
 	/* Table rows: one fixed height, a single line; the height comes from the layout (--row below). */

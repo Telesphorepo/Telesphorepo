@@ -688,6 +688,8 @@ export type EdgeRegionStatus = {
   blobs_missing: number | null;
   /** When the count of missing files last changed; null before a count. */
   blobs_missing_since: string | null;
+  /** The end of the last whole count of missing files; null before one. */
+  blobs_checked_at: string | null;
   /** The copies and deletes that the Worker's last finished copy pass queued for the region; null before one. */
   copies_queued: number | null;
   /** Pointers waiting in the outbox for this bucket. */
@@ -706,6 +708,10 @@ export type EdgeStatus = {
   worker_version: string | null;
   version_mismatch: boolean;
   gap_checked_at: string | null;
+  /** Seconds: the interval of the Worker's gap check (its cron). */
+  gap_check_every: number;
+  /** Seconds: the interval of the server's count of the files of a filling region. */
+  blob_check_every: number;
   /** The start of the Worker's copy pass that runs now; null between passes. */
   gap_pass_started: string | null;
   /** A storage or region change needs a new deploy. */
@@ -796,6 +802,12 @@ export type Move = {
    * the secret access key is {set}, never the secret.
    */
   target_settings: Record<string, unknown>;
+  /**
+   * The copier's last save of the counters; null when no copier of the server process runs the
+   * move. It saves at most every `save_every` seconds, when a file is done.
+   */
+  progress_at: string | null;
+  save_every: number;
 };
 /** POST /api/storage/moves/{id}/retry: the new move, or null when the settings saved at once. */
 export type MoveRetried = { move: Move | null };

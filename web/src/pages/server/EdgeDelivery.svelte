@@ -6,12 +6,12 @@
   One Draft holds the home region, the regions with their buckets, the on switch and the access
   lifetime; Save checks every bucket first (the Test of the settings group), asks before the server
   stops writing to a bucket, and then saves. While a region fills, the page asks for progress and
-  says what the region waits for. Check now makes the deployed Worker run its gap check at once
-  (POST /api/edge/check); the page runs it by itself when it opens and every 30 seconds while the
-  Worker has not reported this server's version.
+  says what the region waits for, with the cadence of the count and of the Worker's gap check (from
+  the status). Check now makes the deployed Worker run its gap check at once (POST
+  /api/edge/check); the page runs it by itself when it opens and every 30 seconds while the Worker
+  has not reported this server's version. One Live does both, with its LiveStatus in the header.
 -->
 <script lang="ts">
-  import { untrack } from "svelte";
   import { toast } from "svelte-sonner";
   import DownloadIcon from "@lucide/svelte/icons/download";
   import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
@@ -30,7 +30,11 @@
   } from "$lib/api";
   import { Resource } from "$lib/load.svelte";
   import { Draft } from "$lib/unsaved.svelte";
-  import { formatCount } from "$lib/format";
+  import { formatCount, formatEvery } from "$lib/format";
+  import { Live } from "$lib/live.svelte";
+  import LiveStatus from "$lib/components/LiveStatus.svelte";
+  import LiveValue from "$lib/components/LiveValue.svelte";
+  import Cadence from "$lib/components/Cadence.svelte";
   import { DURATION_UNITS, splitDuration } from "$lib/units";
   import { Button } from "$lib/components/ui/button";
   import { Checkbox } from "$lib/components/ui/checkbox";
@@ -199,13 +203,7 @@
     draft?.reset();
   }
 
-  // While a region fills, ask for progress every three seconds.
   const filling = $derived((status.data?.regions ?? []).filter((r) => r.state === "filling"));
-  $effect(() => {
-    if (filling.length === 0) return;
-    const timer = setInterval(() => status.reload(), 3000);
-    return () => clearInterval(timer);
-  });
 
   const fillingSource = {
     get items() {
@@ -250,15 +248,39 @@
     }
   }
 
-  // While the Worker has not reported this server's version, check when the page opens and every
-  // 30 seconds, so the version shows within seconds of a deploy.
+  // One Live keeps the page current. While a region fills, it asks for the status every 3 seconds.
+  // While the Worker has not reported this server's version, it checks the Worker when the page
+  // opens and every 30 seconds, so the version shows within seconds of a deploy.
+  const FILL_EVERY = 3000;
+  const CHECK_EVERY = 30_000;
   const autoCheck = $derived(!!status.data && status.data.check_unfit === "" && (!status.data.worker_version || status.data.version_mismatch));
-  $effect(() => {
-    if (!autoCheck) return;
-    untrack(() => void checkNow(false));
-    const timer = setInterval(() => untrack(() => void checkNow(false)), 30_000);
-    return () => clearInterval(timer);
+  let autoAt = 0;
+  const live = new Live({
+    now: true,
+    while: () => filling.length > 0 || autoCheck,
+    every: () => (filling.length > 0 ? FILL_EVERY : CHECK_EVERY),
+    run: async () => {
+      if (autoCheck && Date.now() - autoAt >= CHECK_EVERY - FILL_EVERY) {
+        autoAt = Date.now();
+        await checkNow(false);
+        if (checkError || status.error) throw new Error(checkError || status.error);
+      } else await status.fetch();
+    },
   });
+  const liveCadence = $derived(
+    filling.length > 0
+      ? `Refreshes every ${formatEvery(FILL_EVERY / 1000)} while a region fills`
+      : `Checks the Worker every ${formatEvery(CHECK_EVERY / 1000)} until it reports this server's version`,
+  );
+  // The regions whose files the server counts, and the oldest of their last counts (null while one
+  // has none yet).
+  const counting = $derived(filling.filter((r) => r.pointers_done));
+  const countedAt = $derived.by(() => {
+    const times = counting.map((r) => r.blobs_checked_at);
+    if (times.length === 0 || times.some((t) => t === null)) return null;
+    return (times as string[]).reduce((a, b) => (Date.parse(a) < Date.parse(b) ? a : b));
+  });
+  const copying = $derived(!!status.data && filling.some((r) => waitsFor(status.data!, r).copying));
 
   const checkWord: Record<EdgeCheck["outcome"], string> = {
     worker: "Worker answered",
@@ -282,15 +304,17 @@
     }
     if (!st.worker_version) return say("Waiting for the Worker's first gap check, which copies the files.");
     if (st.version_mismatch) return say("Waiting for the Worker of this server version. Deploy it to copy the files.");
-    if (r.blobs_missing === null) return say("Counting the files in the region (every 2 minutes).");
+    if (r.blobs_missing === null) return say("Counting the files in the region.");
     if (r.blobs_missing > 0) {
-      return { text: "Copying files: the Worker copies the missing files from the home bucket at each gap check (every 10 minutes, or Check now).", copying: true };
+      return { text: "Copying files: the Worker copies the missing files from the home bucket at each gap check, or at Check now.", copying: true };
     }
     return say("Every file is there. The region turns ready at the next count.");
   }
 </script>
 
-<PageHeader title="Edge delivery" description="Serve downloads from Cloudflare R2 buckets near your clients." />
+<PageHeader title="Edge delivery" description="Serve downloads from Cloudflare R2 buckets near your clients.">
+  {#snippet actions()}<LiveStatus {live} cadence={liveCadence} />{/snippet}
+</PageHeader>
 
 {#if (status.loading && !status.data) || (settings.loading && !settings.data) || !draft}
   {#if status.error && !status.data}
@@ -338,8 +362,8 @@
             </dd>
             {#if !st.worker_version}
               <p class="mt-1 text-meta text-muted-foreground">
-                The Worker reports at its first gap check (every 10 minutes).{st.check_unfit === ""
-                  ? " This page checks every 30 seconds until then; select Check now to check at once."
+                The Worker reports at its first gap check.{st.check_unfit === ""
+                  ? ` This page checks it every ${formatEvery(CHECK_EVERY / 1000)} until then; select Check now to check at once.`
                   : ""}
               </p>
             {/if}
@@ -347,7 +371,7 @@
           <div>
             <dt class="text-meta text-muted-foreground">Last gap check</dt>
             <dd class="text-label"><RelativeTime at={st.gap_checked_at} empty="Not yet" /></dd>
-            {#if !st.gap_checked_at}<p class="mt-1 text-meta text-muted-foreground">The Worker checks every 10 minutes.</p>{/if}
+            <Cadence class="mt-1" what="The Worker checks" noun="check" every={st.gap_check_every} last={st.gap_checked_at} />
           </div>
           <div>
             <dt class="text-meta text-muted-foreground">Home bucket</dt>
@@ -489,8 +513,8 @@
         >
           {#snippet row(r)}
             <Cell grow strong text={areaText(r.hint)} />
-            <Cell num>{formatCount(r.pointers_written)} of {formatCount(r.pointers_total)}</Cell>
-            <Cell num>{r.blobs_missing === null ? "Not counted yet" : formatCount(r.blobs_missing)}</Cell>
+            <Cell num><LiveValue value={r.pointers_written}>{formatCount(r.pointers_written)}</LiveValue> of {formatCount(r.pointers_total)}</Cell>
+            <Cell num>{#if r.blobs_missing === null}Not counted yet{:else}<LiveValue value={r.blobs_missing}>{formatCount(r.blobs_missing)}</LiveValue>{/if}</Cell>
             <Cell grow>
               {#if st}
                 {@const w = waitsFor(st, r)}
@@ -511,6 +535,16 @@
           {/snippet}
           {#snippet empty()}<CompactEmpty title="Backfill" state="Done" text="Every region has its pointers." />{/snippet}
         </DataTable>
+        {#if st && (counting.length > 0 || copying)}
+          <div class="mt-4 flex flex-col gap-1">
+            {#if counting.length > 0}
+              <Cadence what="The server counts the missing files of a region" noun="count" every={st.blob_check_every} last={countedAt} />
+            {/if}
+            {#if copying}
+              <Cadence what="The Worker copies them at its gap check" noun="check" every={st.gap_check_every} last={st.gap_checked_at} />
+            {/if}
+          </div>
+        {/if}
       </Section>
     {/if}
 
@@ -521,7 +555,7 @@
           label="Edge delivery"
           help={lockHelp("edge.enabled") ??
             (noWorker
-              ? "Deploy the Worker first (Deploy, below). You can turn this on once the Worker has reported its version: this page checks every 30 seconds."
+              ? `Deploy the Worker first (Deploy, below). You can turn this on once the Worker has reported its version: this page checks every ${formatEvery(CHECK_EVERY / 1000)}.`
               : "The Worker answers downloads that it can prove the server would answer the same way.")}
           disabled={locked("edge.enabled") || noWorker}
           bind:checked={draft.value.enabled}
@@ -612,8 +646,8 @@
             <div class="flex min-w-0 grow flex-col gap-2">
               <p class="text-label">Turn on Edge delivery under Settings above, and save</p>
               <p class="text-meta text-muted-foreground">
-                Only after the deploy: the switch turns on once the Worker has reported its version. This page checks every 30 seconds; select
-                Check now under Status to check at once.
+                Only after the deploy: the switch turns on once the Worker has reported its version. This page checks every
+                {formatEvery(CHECK_EVERY / 1000)}; select Check now under Status to check at once.
               </p>
             </div>
           </li>

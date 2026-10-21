@@ -28,8 +28,9 @@ the checklist below.
 | `lib/crumbs.ts` | `Crumb` and `settingsTrail()`: the breadcrumbs of a Settings page, from the sidebar items of the module registry. |
 | `lib/unsaved.svelte.ts` | `unsaved` (the unsaved-changes guard) and `Draft` (a form's edits and what is saved). |
 | `lib/view.svelte.ts` | `ViewChoice` and `viewLook`: List, Tree, Columns, Cover Flow, remembered per user. |
-| `lib/load.svelte.ts` | `Resource` (one request), `Keyset` (a paged list), `listOf()` and `TableSource` (what `DataTable` reads). |
-| `lib/format.ts` | `formatSize`, `formatRelative`, `formatDateTime`, `formatCount`. |
+| `lib/load.svelte.ts` | `Resource` (one request), `Keyset` (a paged list), `listOf()` and `TableSource` (what `DataTable` reads). `fetch()` of a `Resource` or a `Keyset` reloads and throws on an error: the `run` of a `Live`. |
+| `lib/live.svelte.ts` | `Live` (a refresh on a timer: see **Live data**), `clock` (the time now, reactive each second), `pause` (a wait that holds while the tab is hidden or offline), `flash` (the action of `LiveValue`). |
+| `lib/format.ts` | `formatSize`, `formatRelative`, `formatDateTime`, `formatCount`, `formatDuration` ("6 minutes"), `formatSpan` ("6 min", for a value that ticks), `formatEvery` (an interval after "every": "3 seconds", "10 minutes"). |
 | `lib/words.ts` | `count` ("12 repositories"), `selectedText` ("12 selected"), `someNames` (the first five names "and 7 more"): the words of bulk actions; `kindPhrase` (the kind of a repository: "Hosted", "Proxy of a remote repository", "Group of 3 repositories"). |
 | `lib/utils.ts` | `cn()`: joins classes; it knows that `text-title` … `text-meta` are font sizes, not colors. |
 | `lib/layouts/` | `AppShell` (top bar + container + Settings sidebar), `AddressNotice` (the server's address differs from the one in the browser), `TopBar`, `AccountMenu`, `GlobalSearch`, `SettingsNav`, `UnsavedGuard` (the leave question). |
@@ -84,7 +85,7 @@ server and the clients print keep working: `/#/device?code=ABCD-EFGH`, `/#/setti
 | `/settings/sign-in` | `server/SingleSignOn` | settings | signin.manage | Sign-in options in three steps: connect the provider (with Test), permissions from the provider (the group field and the groups, each with its server permissions as a role in a `ServerPermissionPicker`: `PermissionMapInput`), and how people sign in (password sign-in for everyone or for people who publish). |
 | `/settings/signing-keys` | `server/SigningKeys` | settings | signing.manage | Signing keys: fingerprint, the repositories that use each key, public key download, delete. |
 | `/settings/signing-keys/new` | `server/NewSigningKey` | settings | signing.manage | Create an Ed25519 key or import an armored key. |
-| `/settings/storage` | `server/Storage` | settings | storage.manage | One state at a time: the storage settings with the connection test; a running move (where the files go, where storage is now, the progress, Cancel; no form); a failed or cancelled move (storage is still where it was, why the move ended, the failed files, Try again, Change the target with the form filled from the target, Keep); or a done move's success line over the form. |
+| `/settings/storage` | `server/Storage` | settings | storage.manage | One state at a time: the storage settings with the connection test; a running move (where the files go, where storage is now, the progress and when the server last saved it, Cancel; no form); a failed or cancelled move (storage is still where it was, why the move ended, the failed files, Try again, Change the target with the form filled from the target, Keep); or a done move's success line over the form. |
 | `/settings/backups` | `server/Backups` | settings | backup.manage | Backups: the backups in the backup folder, newest first (time, version, files, size; Incomplete, Files in the bucket, No master key), Back up now, the progress of a running backup or the time of the next one, the error of a failed one, and one sentence on what a backup holds; then the folder, the interval and how many to keep (`SettingsGroupForm`) with Test the folder. |
 | `/settings/nexus` | `server/NexusMigration` | settings | nexus.manage | Nexus servers with status, repositories, last check and next check; Add a Nexus server. |
 | `/settings/nexus/:id?sync=&repo=` | `server/NexusSource` | settings | nexus.manage | The status and its line; Sync now or Cancel the sync, Switch over, Delete. Repositories to copy (one pick table in set-up order: repositories and proxies, then groups with their members, then the ones this server cannot copy; each row with its state; picking a group picks its members; "Copy N repositories" saves and starts the sync); the running or chosen sync with its progress, its log (`repo` filters it) and its failed files; the syncs (a row opens its details); the connection. |
@@ -286,6 +287,9 @@ The repository page is the one exception: it checks the caller's permissions on 
 | `SigningKeyChoice` | `keys`, `repoName`, `exclude?`, `bind:choice` (`{mode: "existing" \| "new", name}`): the signing key of a repository (the signing module's Signing tab and repo field). |
 | `PermissionMapInput` | `id`, `value` (group → server permission IDs), `onchange`, `disabled?`: the groups of a permission map, each with the phrase of its permissions (or Member), Change and Remove, and Add a group; a short form with a `ServerPermissionPicker` edits one. `SettingsGroupForm` uses it for a `map` setting with `permissionMap` in `fields`. |
 | `RangePaste` | `id`, `label?`, `disabled?`, `onAdd?(ranges)`, `onReplace?(ranges)`, `buttons?`, `bind:found?`: paste addresses and ranges in any format. See below. |
+| `LiveStatus` | `live`, `verb?` ("Updated"), `cadence?` (the sentence of how often; "Refreshes every 3 seconds" by default). The state of a `Live`: a small dot and "Updated 4 s ago" (ticking); the dot pulses while a refresh runs (not under reduced motion). The tooltip says how often it refreshes and why the last refresh failed; a click refreshes now. When refreshes fail or the browser is offline it says "Not updated for 2 min · trying again in 20 s" in the warning color. It shows only while the `Live` is active. See **Live data**. |
+| `LiveValue` | `value`; the text is the child (or `value`). A number that a `Live` refreshes: a brief faint brand tint behind it when it changes, nothing under reduced motion. |
+| `Cadence` | `what` ("The Worker checks"), `noun` ("check"), `every` (seconds, from the server), `last?`, `next?`, `class?`. The cadence of a slower process outside the page, as meta text where its value is: "The Worker checks every 10 minutes. Next check in about 7 min." A next time more than one interval past reads "The check is 14 min late." in the warning color. |
 | `FileSize`, `RelativeTime`, `QR`, `Logo`, `CopyButton` | Small parts. |
 
 ### Examples
@@ -407,6 +411,46 @@ button takes the ranges of the checked text (Add addresses on the Access tab).
 />
 ```
 
+## Live data
+
+A page that follows a process on the server (a backup, a storage move, a Nexus sync, a region
+that fills) shows that it is live, how often it refreshes, when it last did, and whether a value
+that does not move waits for a slower process. Every such page does it the same way.
+
+- **One `Live` per refreshed area** (`lib/live.svelte.ts`). It owns the timer: `run` asks for the
+  data and throws on an error (`resource.fetch`), `every` is the wait in ms, `while` the condition
+  (a running backup, a copying move), `now` refreshes at once when it starts. It pauses while the
+  tab is hidden or the browser is offline and refreshes at once on return, never runs two
+  requests at once, and waits twice as long after each failure (up to a minute). A page never
+  writes its own `setInterval` or `setTimeout` loop for data.
+- **One `LiveStatus`, where the data is.** In the actions of the `Section` whose data refreshes,
+  first, before the section's buttons; in the `PageHeader` actions when the whole page refreshes
+  (Edge delivery, Nexus migration). One per area: an area that refreshes two things (a sync and
+  its log) refreshes them in one `Live`. While a refresh fails, the area's own error row stays
+  quiet: `LiveStatus` says it.
+- **Keep the intervals of the processes.** 2 s for a backup, a move and a Nexus sync (its log reads
+  its new lines at each refresh), 3 s for the Nexus servers and a filling region, 30 s for the
+  check of the Worker. A Nexus server's page reads the server again only when the next sync is due
+  (reading it asks Nexus), and shows no `LiveStatus`: its status line names the next check.
+- **Say the cadence of a slower process where its value is** (`Cadence`), with the interval from
+  the server that owns it, never a number written into the page: the Worker's gap check
+  (`gap_check_every` of the edge status), the count of a region's files (`blob_check_every`), the
+  move's progress saves (`progress_at`, `save_every`), the Nexus sync (`sync_interval`,
+  `next_sync_at`). A value that waits for such a process then reads as waiting, and a process that
+  is late says so.
+- **A changed number may flash** (`LiveValue`): the count that a refresh moves (files copied,
+  pointers written, files missing), not every value of the area.
+- **Outside a page** (a repository delete in a toast), loop with `pause` from `lib/live.svelte.ts`
+  and say in the toast since when it is not updated when requests fail.
+
+| Say | Not |
+|---|---|
+| Updated 4 s ago; Updated just now | Last refreshed at 14:02:11; Live |
+| Refreshes every 3 seconds (tooltip); Click to refresh now | Polling, auto-refresh on |
+| Not updated for 2 min · trying again in 20 s; Offline · not updated for 2 min | Stale, connection lost, error icon alone |
+| The Worker checks every 10 minutes. Next check in about 7 min. | Cron, next tick, ETA |
+| Progress saved 12 s ago | Heartbeat, last write |
+
 ## Interaction rules
 
 - **Navigation.** Every view has its own address, so the browser's back and forward buttons move
@@ -470,6 +514,8 @@ button takes the ranges of the checked text (Add addresses on the Access tab).
   for a format.
 - Skeletons, and a loading state that replaces content that is already on screen.
 - A lone action button in a section: open the action in a dialog from the section header.
+- A timer in a page that asks the server again (`setInterval`, a `setTimeout` loop): use a `Live`.
+  An interval or a schedule that the server owns, written into the UI: read it from the API.
 - Unit tests and mocks.
 
 ## Checklist for every page
@@ -499,6 +545,8 @@ button takes the ranges of the checked text (Add addresses on the Access tab).
       is a page one level down.
 - [ ] No `font-mono`, no `Sheet`, no `Skeleton`, no border accents, no all caps, no `max-w-` on
       a page block (`grep` before you finish).
+- [ ] Data that the server changes on its own refreshes through a `Live` with a `LiveStatus` (no
+      `setInterval` in a page); a slower outside process shows its `Cadence` from the server.
 - [ ] Words follow the table below; buttons name the action; toasts reuse the verb.
 - [ ] It works at 390px with no sideways page scroll.
 

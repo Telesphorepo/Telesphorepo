@@ -65,6 +65,11 @@ type Move struct {
 	// of GET /api/settings: the secret access key is settings.SecretValue ({set}), never the
 	// secret. The Storage page fills its form with them to change the target of a retry.
 	TargetSettings map[string]any `json:"target_settings"`
+	// ProgressAt is the last save of the counters by the copier of this process (null when no
+	// copier of this process runs the move). The copier saves at most every SaveEvery seconds, when
+	// a file in id order is done, so a large file holds the counters until it is copied.
+	ProgressAt *time.Time `json:"progress_at"`
+	SaveEvery  int64      `json:"save_every"`
 }
 
 // Target describes where a move copies to, without credentials.
@@ -136,6 +141,9 @@ type Service struct {
 
 	mu  sync.Mutex // serializes start, finish, cancel and resume
 	run *run       // the copying move of this process, nil when none
+	// saved holds, by move id, the unix milliseconds of the copier's last save of the counters
+	// in this process (its start counts as one).
+	saved sync.Map
 
 	onStart []func(ctx context.Context, moveID int64) // set before the server serves (OnStart)
 }
@@ -471,6 +479,13 @@ func (s *Service) toMove(row dbq.StorageMove) *Move {
 	m := &Move{
 		ID: row.ID, State: row.State, Total: row.Total, Copied: row.Copied, Skipped: row.Skipped,
 		Failed: row.Failed, Error: row.Error, StartedAt: time.Unix(row.StartedAt, 0).UTC(),
+		SaveEvery: int64(saveEvery / time.Second),
+	}
+	if row.State == StateCopying {
+		if v, ok := s.saved.Load(row.ID); ok {
+			t := time.UnixMilli(v.(int64)).UTC()
+			m.ProgressAt = &t
+		}
 	}
 	if row.FinishedAt.Valid {
 		t := time.Unix(row.FinishedAt.Int64, 0).UTC()

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 	"github.com/Telesphorepo/Telesphorepo/internal/storage"
@@ -14,8 +15,14 @@ import (
 const (
 	workerName        = "telesphorepo-edge"
 	compatibilityDate = "2026-10-01"
-	gapCron           = "*/10 * * * *"
 	copyQueueBinding  = "COPY"
+)
+
+// gapCron is the cron trigger of the Worker's gap check, which runs every gapEvery. The status of
+// the Edge delivery page names gapEvery, so the page says when the next check is due.
+const (
+	gapCron  = "*/10 * * * *"
+	gapEvery = 10 * time.Minute
 )
 
 // versionDefine is the global of the Worker that a build defines to the server version

@@ -965,13 +965,13 @@ transaction.
 | `GET /api/backup` | `backup.manage` | `{job: {running, started_at, progress: {step, blobs, copied} | null, last_at, last_error}, next_at, backups: [{name, created_at, complete, version, storage, size, files, blobs_included, master_key_included}], error}`: the folders of `backup.dir`, newest first (`next_at` and the list are empty while backups are off). `size` is the database and the blobs it uses. `job` is the state of this process: `last_*` are lost at a restart. `error` says why the folder could not be read |
 | `POST /api/backup/run` | `backup.manage` | Starts a backup now: 202 with the `job`; 409 while one runs; 400 without `backup.dir` |
 | `GET /api/storage/moves/current` | `storage.manage` | The newest Move, running or ended; 404 when there has been none or the newest one is dismissed |
-| `GET /api/storage/moves/{id}` | `storage.manage` | `Move` = `{id, state, total, copied, skipped, failed, error, started_at, finished_at, dismissed_at, target: {storage, endpoint?, bucket?, prefix?, fs_root?}, target_settings}`. `target_settings` are the storage settings the move switches to, by setting key (`storage`, `fs.root`, `s3.*` but `presign_ttl`), with `s3.secret_access_key` as `{set}`. Never holds secrets |
+| `GET /api/storage/moves/{id}` | `storage.manage` | `Move` = `{id, state, total, copied, skipped, failed, error, started_at, finished_at, dismissed_at, target: {storage, endpoint?, bucket?, prefix?, fs_root?}, target_settings, progress_at|null, save_every}`. `progress_at` is the copier's last save of the counters in this server process (null when no copier of this process runs the move); it saves at most every `save_every` seconds, when a file in id order is done, so a large file holds the counters until it is copied. `target_settings` are the storage settings the move switches to, by setting key (`storage`, `fs.root`, `s3.*` but `presign_ttl`), with `s3.secret_access_key` as `{set}`. Never holds secrets |
 | `GET /api/storage/moves/{id}/failures?after=&limit=` | `storage.manage` | `{items: [{blob_id, key, reason}], next}` in blob id order |
 | `DELETE /api/storage/moves/{id}` | `storage.manage` | Cancels the move and returns it; 409 when it has ended |
 | `POST /api/storage/moves/{id}/retry` | `storage.manage` | Tries the newest move again when it failed or was cancelled (409 otherwise). The body `{key: value}` holds storage settings that change the target (`{}` keeps it; a secret left out or `""` keeps the target's secret; a key of another group is 400). The server builds the settings PATCH that makes the sealed target the active storage, puts the body on top and saves it like `PATCH /api/settings`: 202 `{move}` with the new move, or 200 `{move: null}` when the settings saved at once; a refusal answers like the PATCH. The old move is dismissed. Records `storage.move.retry` |
 | `POST /api/storage/moves/{id}/test` | `storage.manage` | The same body as the retry; runs the storage `Validate` and the probe on the target a retry would move to, saves nothing. Answers like `POST /api/settings/storage/test` |
 | `POST /api/storage/moves/{id}/dismiss` | `storage.manage` | Dismisses an ended move and returns it; storage stays where it is. 409 while it copies. Records `storage.move.dismiss` |
-| `GET /api/edge/status` | `edge.manage` | `{enabled, mode: "on"\|"draining"\|"off", unfit, server_version, worker_version\|null, version_mismatch, gap_checked_at\|null, deploy_needed, deploy_reason, worker_missing, check_unfit, last_check\|null, home: {hint, bucket, outbox, pointers, last_error}, backfill: {running, queued, total}, regions: [{hint, area, bucket, state: "filling"\|"ready"\|"waiting", pointers_written, pointers_total, pointers_done, blobs_missing\|null, outbox, last_error}]}`. `home.outbox` counts every outbox row, `home.pointers` and each region's `outbox` the pointer rows; `pointers_done`: every pointer of the region is written, so the blob check runs. `check_unfit` says why `POST /api/edge/check` cannot run (`""` when it can); `last_check` is the answer of the last check since the server started. `backfill.running` holds until the outbox wrote every pointer of the backfill (`home.ready`). The Worker version and the gap check come from `gap/state.json`; `waiting`: the Worker of the last gap check has no binding for the region, or its binding is a bucket whose `bucket.json` names another bucket; `deploy_needed` also holds when the `bucket.json` of its `HOME` names another bucket than the home bucket. The outbox counts come from the count of the outbox job: every 5 s while the page asks for the status at least every 30 s; after a longer pause the request asks for a count and waits for it up to a second. `worker_missing` is the detail of the `no-edge-worker` problem of `GET /api/edge/worker.zip`, `""` when the build holds the Worker of the server's version. See **Edge delivery** |
+| `GET /api/edge/status` | `edge.manage` | `{enabled, mode: "on"\|"draining"\|"off", unfit, server_version, worker_version\|null, version_mismatch, gap_checked_at\|null, gap_check_every, blob_check_every, deploy_needed, deploy_reason, worker_missing, check_unfit, last_check\|null, home: {hint, bucket, outbox, pointers, last_error}, backfill: {running, queued, total}, regions: [{hint, area, bucket, state: "filling"\|"ready"\|"waiting", pointers_written, pointers_total, pointers_done, blobs_missing\|null, blobs_checked_at\|null, outbox, last_error}]}`. `gap_check_every` is the interval of the Worker's gap check (its cron, 600 s) and `blob_check_every` the interval of the server's count of the files of a filling region (120 s), in seconds; `blobs_checked_at` is the end of the region's last whole count. `home.outbox` counts every outbox row, `home.pointers` and each region's `outbox` the pointer rows; `pointers_done`: every pointer of the region is written, so the blob check runs. `check_unfit` says why `POST /api/edge/check` cannot run (`""` when it can); `last_check` is the answer of the last check since the server started. `backfill.running` holds until the outbox wrote every pointer of the backfill (`home.ready`). The Worker version and the gap check come from `gap/state.json`; `waiting`: the Worker of the last gap check has no binding for the region, or its binding is a bucket whose `bucket.json` names another bucket; `deploy_needed` also holds when the `bucket.json` of its `HOME` names another bucket than the home bucket. The outbox counts come from the count of the outbox job: every 5 s while the page asks for the status at least every 30 s; after a longer pause the request asks for a count and waits for it up to a second. `worker_missing` is the detail of the `no-edge-worker` problem of `GET /api/edge/worker.zip`, `""` when the build holds the Worker of the server's version. See **Edge delivery** |
 | `POST /api/edge/check` | `edge.manage` | Check now: the deployed Worker runs its gap check at once (see **The check of the Worker** under **Edge delivery**). 200 `{at, outcome: "worker"\|"refused"\|"server"\|"other"\|"unreachable"\|"error", ok, message, worker_version?}`; `ok` when the Worker of the server's version answered and ran the check. 409 problem `edge-not-configured` without storage s3 or without a base URL without a path; 429 problem `edge-check-busy` (with `Retry-After`) while a check runs or within 10 s of the start of the last one. No audit event: the check changes nothing on the server, and the page runs it every 30 s while the Worker has not reported this server's version |
 | `GET /.well-known/telesphorepo-edge/check?n=<nonce>` | public | The reserved path of the check. On the server it answers that the request reached the origin: `Telesphorepo-Edge-Check: server`, 200 `{answered_by: "server"}` for the nonce of the check that runs, else 403. The Worker answers the same path on its route (see **Edge delivery**) |
 | `GET /api/edge/worker.zip` | `edge.manage` | The edge Worker folder of the server's build, `application/zip`, `attachment; filename="telesphorepo-edge_<version>.zip"`, `no-store`: every file of `internal/edgedist` under `telesphorepo-edge/`, plus `telesphorepo-edge/wrangler.jsonc` for the current settings with `"main": "dist/index.js"` and `"no_bundle": true`. 409 problem `edge-not-configured` as below; 404 problem `no-edge-worker` when the build holds no Worker, or one of another version than the server |
@@ -2442,8 +2442,8 @@ is unreachable.
   button "Copy N repositories" or "Save", with a sentence of what the save does, saves and opens
   the sync), the sync
   detail (per repo "copied (size) of checked", last activity, a bar with "about N%" when an
-  earlier walk exists, "No progress for N minutes" after two minutes; the log, which polls every
-  2 s and filters by a clicked repo; the failed files), the sync history (Started, How, Took, New
+  earlier walk exists, "No progress for N minutes" after two minutes; the log, which reads its new lines at each refresh of the sync
+  (every 2 s) and filters by a clicked repo; the failed files), the sync history (Started, How, Took, New
   files, Size, Failed, State) and the connection with the save bar. While a repo has the `mirror`
   operation, its page shows the operation's message under the header to the people who could upload or delete.
 
@@ -3525,6 +3525,14 @@ page are in `web/src/README.md`.
   loading, empty and error states.
 - **Loading.** The UI shows no skeletons. A loading area shows nothing for 300 ms, then a quiet
   spinner in the space the content will take. A reload keeps the content on screen.
+- **Live data.** A page that follows a process on the server (a backup, a storage move, a Nexus
+  sync, a region that fills) refreshes on a timer through one `Live` (`web/src/lib/live.svelte.ts`):
+  it pauses while the tab is hidden or the browser is offline and refreshes at once on return,
+  never runs two requests at once, and waits longer after each failure. A `LiveStatus` says
+  "Updated 4 s ago" with how often it refreshes, and says plainly when updates stop. A slower
+  process outside the page shows its cadence where its value is, from the server that owns it
+  (the Worker's gap check, the count of a region's files, the move's progress saves, the next
+  Nexus sync). A repository delete follows its operation in a toast the same way.
 - **Icons.** An icon marks a meaning (format, lock, state) and sits bare, never in a tinted square.
   Each format supplies its own SVG (`format.Spec.Icon`, returned by `GET /api/formats`):
   the Maven feather, the Gradle elephant for Gradle plugins, the Debian swirl and a file glyph for
@@ -3791,11 +3799,12 @@ page are in `web/src/README.md`.
   holds. **Storage**, **Sign-in options**, **Network and proxy** and **Edge delivery** edit their
   groups on their own pages; each group names its page.
 - **Storage page.** The location card and, for an S3 bucket, the bucket card, each with **Test** in
-  its footer. A running storage move is a card with progress and **Cancel**.
+  its footer. A running storage move is a card with progress, when the copier last saved it (`progress_at`)
+  and **Cancel**.
 - **Edge delivery page** (`/#/settings/edge`, `edge.manage`, Server group). Status: on, stopping
   or off (and why the settings cannot run it), the Worker version with a badge when it is not the
-  server's (before the first report: the Worker reports at its first gap check, every 10 minutes),
-  the last gap check, the home bucket, and the last check of the Worker (a badge of its outcome,
+  server's (before the first report: the Worker reports at its first gap check),
+  the last gap check with its cadence (`gap_check_every`: the next check, or how late it is), the home bucket, and the last check of the Worker (a badge of its outcome,
   when, and its message). **Check now** in the header runs `POST /api/edge/check`; the page runs it
   by itself when it opens and every 30 seconds while the Worker has not reported the server's
   version (a 429 of another tab is silent). Regions: a select of the home region above a
@@ -3806,11 +3815,12 @@ page are in `web/src/README.md`.
   runs the group's **Test** first; a failed probe shows on its row and nothing is saved. Clearing a
   saved region asks first ("The server stops writing to the bucket ... Deploy the Worker again,
   then delete the bucket in Cloudflare"). Backfill shows the progress of each filling region,
-  polled every 3 seconds, and what it waits for: edge delivery off (the Worker copies files only
+  refreshed every 3 seconds, and what it waits for: edge delivery off (the Worker copies files only
   while it is on), pointers being written (with the count waiting), the Worker's first gap check,
   the Worker of the server version, the first count of its files, or "Copying files" with the
   files missing, when that count last changed, and the copy pass that runs (or what the last pass
-  queued). Settings: `edge.enabled` and `edge.access_ttl`. Deploy: numbered
+  queued); under it the cadence of the count (`blob_check_every`) and of the Worker's copy
+  (`gap_check_every`). Settings: `edge.enabled` and `edge.access_ttl`. Deploy: numbered
   steps: download the edge Worker (the one button, `GET /api/edge/worker.zip`; in its place the
   `worker_missing` sentence of the status when the build has none), unpack it and open a terminal
   in `telesphorepo-edge`, then `bun install`, `bunx wrangler login` (with `CLOUDFLARE_API_TOKEN`

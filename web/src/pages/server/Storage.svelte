@@ -17,7 +17,10 @@
   import type { PageProps } from "$lib/router.svelte";
   import { api, errorMessage, type Move, type MoveFailure, type Setting, type Settings, type SettingsMoveStarted } from "$lib/api";
   import { Keyset, Resource } from "$lib/load.svelte";
-  import { formatCount } from "$lib/format";
+  import { formatCount, formatEvery, formatSpan } from "$lib/format";
+  import { clock, Live } from "$lib/live.svelte";
+  import LiveStatus from "$lib/components/LiveStatus.svelte";
+  import LiveValue from "$lib/components/LiveValue.svelte";
   import { Button } from "$lib/components/ui/button";
   import * as Alert from "$lib/components/ui/alert";
   import PageHeader from "$lib/components/PageHeader.svelte";
@@ -48,25 +51,23 @@
   let changing = $state(false);
 
   // While files copy, ask for progress every two seconds.
-  $effect(() => {
-    const m = move;
-    if (!m || m.state !== "copying") return;
-    const id = m.id;
-    const timer = setInterval(async () => {
-      try {
-        const next = await api.moves.get(id);
-        move = next;
-        if (next.state !== "copying") {
-          clearInterval(timer);
-          if (next.state === "done") toast.success("Every file is moved");
-          settings.reload();
-        }
-      } catch {
-        // The next tick asks again; a lasting failure shows when the page loads again.
+  const live = new Live({
+    every: 2000,
+    while: () => move?.state === "copying",
+    run: async () => {
+      if (!move) return;
+      const next = await api.moves.get(move.id);
+      move = next;
+      if (next.state !== "copying") {
+        if (next.state === "done") toast.success("Every file is moved");
+        settings.reload();
       }
-    }, 2000);
-    return () => clearInterval(timer);
+    },
   });
+  // The copier saves its counters at most every save_every seconds, when a file is done: a save
+  // older than a few of those means a large file copies.
+  const savedAgo = $derived(move?.progress_at ? clock.now - Date.parse(move.progress_at) : null);
+  const bigFile = $derived(!!move && savedAgo !== null && savedAgo > Math.max(10, 5 * move.save_every) * 1000);
 
   // The files that failed to copy, once an ended move has any.
   let failures = $state<Keyset<MoveFailure> | null>(null);
@@ -270,7 +271,8 @@
     changing = false;
   }
 
-  const percent = (m: Move) => (m.total > 0 ? Math.min(100, Math.round(((m.copied + m.skipped + m.failed) / m.total) * 100)) : 0);
+  const doneOf = (m: Move) => m.copied + m.skipped + m.failed;
+  const percent = (m: Move) => (m.total > 0 ? Math.min(100, Math.round((doneOf(m) / m.total) * 100)) : 0);
   const files = (n: number) => `${formatCount(n)} ${n === 1 ? "file" : "files"}`;
   // Why an ended move ended, in words.
   const endText = (m: Move) => {
@@ -312,7 +314,7 @@
   <ErrorState error="The server sent no storage settings." onRetry={settings.reload} />
 {:else if move && move.state === "copying"}
   <Section title="Moving files">
-    {#snippet actions()}<Button variant="outline" onclick={() => (confirmCancel = true)}>Cancel the move</Button>{/snippet}
+    {#snippet actions()}<LiveStatus {live} /><Button variant="outline" onclick={() => (confirmCancel = true)}>Cancel the move</Button>{/snippet}
     <dl class="grid gap-x-6 gap-y-4 sm:grid-cols-2">
       <div class="min-w-0">
         <dt class="text-meta text-muted-foreground">Moving to</dt>
@@ -325,13 +327,23 @@
       </div>
     </dl>
     <div class="mt-6 flex items-baseline justify-between gap-4 text-meta text-muted-foreground tabular-nums">
-      <span>{formatCount(move.copied + move.skipped + move.failed)} of {files(move.total)}</span>
+      <span><LiveValue value={doneOf(move)}>{formatCount(doneOf(move))}</LiveValue> of {files(move.total)}</span>
       <span>{percent(move)}%</span>
     </div>
     <div class="mt-2 h-2 w-full overflow-hidden rounded-full bg-muted" role="progressbar" aria-label="Files moved" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent(move)}>
       <div class="h-full rounded-full bg-primary transition-[width]" style="width: {percent(move)}%"></div>
     </div>
-    <p class="mt-3 text-meta text-muted-foreground">Uploads keep working and go to both places. Downloads come from {storeText(here)} until the move ends.</p>
+    <p class="mt-3 text-meta text-muted-foreground tabular-nums">
+      {#if savedAgo === null}
+        The server saves the progress every {formatEvery(move.save_every)} while files finish.
+      {:else}
+        Progress saved {savedAgo < 2000 ? "just now" : `${formatSpan(savedAgo)} ago`}.
+        {bigFile
+          ? "The server saves it when the next file is done, so a large file holds it until it is copied."
+          : `The server saves it every ${formatEvery(move.save_every)} while files finish.`}
+      {/if}
+    </p>
+    <p class="mt-1 text-meta text-muted-foreground">Uploads keep working and go to both places. Downloads come from {storeText(here)} until the move ends.</p>
   </Section>
 {:else if move && move.state !== "done" && changing}
   <Section class="mb-6" title="Change the target" description="Storage stays on {storeText(here)} until a new move copies every file.">
