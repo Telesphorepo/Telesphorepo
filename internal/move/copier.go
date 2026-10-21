@@ -15,9 +15,13 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/storage"
 )
 
-// pageSize is the number of blobs the copier reads per page and the interval at which it saves
-// its cursor and counters.
-const pageSize = 500
+// pageSize is the number of blobs the copier reads per page. It saves its cursor and counters
+// after each page, and at least every saveEvery within a page, so the progress shows while a slow
+// store takes a page for minutes.
+const (
+	pageSize  = 500
+	saveEvery = time.Second
+)
 
 // finishTimeout bounds the database and settings writes that end a move.
 const finishTimeout = time.Minute
@@ -40,6 +44,22 @@ const (
 // resumes at the next start).
 func (s *Service) copy(ctx context.Context, r *run, c counters) {
 	rq, wq := dbq.New(s.db.R), dbq.New(s.db.W)
+	// save writes the cursor and counters; false when the move must stop (an error, or a cancel).
+	// The cursor is the last blob done, in id order, so a resume starts after it.
+	lastSave := time.Now()
+	save := func() bool {
+		lastSave = time.Now()
+		n, err := wq.UpdateMoveProgress(ctx, dbq.UpdateMoveProgressParams{
+			Cursor: c.cursor, Copied: c.copied, Skipped: c.skipped, Failed: c.failed, ID: r.id,
+		})
+		if err != nil {
+			if ctx.Err() == nil {
+				s.fail(r, "save progress: "+err.Error())
+			}
+			return false
+		}
+		return n > 0 // 0: cancelled
+	}
 	for {
 		page, err := rq.WalkBlobs(ctx, dbq.WalkBlobsParams{AfterID: c.cursor, Limit: pageSize})
 		if err != nil {
@@ -70,21 +90,13 @@ func (s *Service) copy(ctx context.Context, r *run, c counters) {
 					return
 				}
 			}
-		}
-		if len(page) > 0 {
-			c.cursor = page[len(page)-1].ID
-			n, err := wq.UpdateMoveProgress(ctx, dbq.UpdateMoveProgressParams{
-				Cursor: c.cursor, Copied: c.copied, Skipped: c.skipped, Failed: c.failed, ID: r.id,
-			})
-			if err != nil {
-				if ctx.Err() == nil {
-					s.fail(r, "save progress: "+err.Error())
-				}
+			c.cursor = b.ID
+			if time.Since(lastSave) >= saveEvery && !save() {
 				return
 			}
-			if n == 0 {
-				return // cancelled
-			}
+		}
+		if len(page) > 0 && !save() {
+			return
 		}
 		if len(page) < pageSize {
 			break

@@ -84,7 +84,7 @@
   const fields = {
     storage: { label: "Storage type", help: "When you change it, the server moves the existing files in the background." },
     "fs.root": { label: "Folder", help: "A relative path starts in the data folder." },
-    "s3.endpoint": { label: "Address", help: "Leave it empty for AWS: the server then uses the AWS address of the region." },
+    "s3.endpoint": { label: "Address", help: "The address of the S3 API. For Cloudflare R2: https://<account id>.r2.cloudflarestorage.com, from the S3 API part of the bucket's settings, not a custom domain of the bucket. Leave it empty for AWS: the server then uses the AWS address of the region." },
     "s3.region": { label: "Region", help: "Required for AWS, for example us-east-1. With an address and no region, the server uses auto." },
     "s3.bucket": { label: "Bucket" },
     "s3.access_key_id": { label: "Access key ID" },
@@ -153,7 +153,7 @@
 <PageHeader title="Storage" description="Where the server keeps the files of every repository." />
 
 {#if move && move.state === "copying"}
-  <Section title="Moving files" description={targetText(move)}>
+  <Section class="mb-6" title="Moving files" description={targetText(move)}>
     {#snippet actions()}<Button variant="outline" onclick={() => (confirmCancel = true)}>Cancel the move</Button>{/snippet}
     <div class="flex items-baseline justify-between gap-4 text-meta text-muted-foreground tabular-nums">
       <span>{formatCount(move.copied + move.skipped + move.failed)} of {formatCount(move.total)} files</span>
@@ -165,7 +165,7 @@
     <p class="mt-3 text-meta text-muted-foreground">Uploads keep working and go to both locations. Downloads come from the old location until the move ends.</p>
   </Section>
 {:else if move && (move.state !== "done" || move.failed > 0)}
-  <Section title="Last storage move" description={targetText(move)}>
+  <Section class="mb-6" title="Last storage move" description={targetText(move)}>
     {#snippet actions()}<StatusBadge tone={moveTone[move!.state]}>{moveWord[move!.state]}</StatusBadge>{/snippet}
     <dl class="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-4">
       {#each [["Copied", move.copied], ["Already there", move.skipped], ["Failed", move.failed]] as [label, n] (label)}
@@ -193,7 +193,7 @@
     {/if}
   </Section>
 {:else if current.error}
-  <Section><ErrorState error={current.error} title="The storage move did not load" onRetry={current.reload} /></Section>
+  <Section class="mb-6"><ErrorState error={current.error} title="The storage move did not load" onRetry={current.reload} /></Section>
 {/if}
 
 {#if settings.loading && !settings.data}

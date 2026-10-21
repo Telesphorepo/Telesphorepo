@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"io"
 	"slices"
 	"sync/atomic"
@@ -97,6 +98,10 @@ func Probe(ctx context.Context, st Store) error {
 	body := []byte("telesphorepo storage probe " + key + "\n")
 
 	if err := st.Put(ctx, key, bytes.NewReader(body), int64(len(body)), "text/plain"); err != nil {
+		var dns *net.DNSError
+		if errors.As(err, &dns) && dns.IsNotFound {
+			return fmt.Errorf("the host %s does not exist. Check the S3 address: it is the address of the S3 API, such as https://<account id>.r2.cloudflarestorage.com for Cloudflare R2, not a custom domain of the bucket. Without path-style addresses, the bucket name goes in front of the host of the address", dns.Name)
+		}
 		return fmt.Errorf("write test object: %w", err)
 	}
 	cleanup := true

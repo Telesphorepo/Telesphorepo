@@ -2,6 +2,7 @@ package storage
 
 import (
 	"errors"
+	"net/url"
 	"path"
 	"strings"
 	"time"
@@ -19,7 +20,17 @@ var (
 		Help: "The server keeps blobs in this directory when storage is fs. The default is blobs/ in the data directory.", Normalize: settings.Trim})
 	S3Endpoint = settings.String(&settings.Def{Key: "s3.endpoint", Label: "S3 endpoint",
 		Help:      "The URL of the S3 API, for example https://<account>.r2.cloudflarestorage.com or http://seaweedfs:8333. Leave it empty for AWS: the server then uses the AWS endpoint of the S3 region, so the region is required.",
-		Normalize: settings.Trim, Validate: settings.HTTPURL})
+		Normalize: settings.Trim, Validate: func(v any) error {
+			if err := settings.HTTPURL(v); err != nil {
+				return err
+			}
+			// A path after the host would go in front of every object key; the bucket has a
+			// setting of its own, and a folder in the bucket is s3.prefix.
+			if u, _ := url.Parse(v.(string)); u != nil && strings.Trim(u.Path, "/") != "" {
+				return errors.New("must be only the address of the S3 API, with nothing after the host: put the bucket name in the bucket setting")
+			}
+			return nil
+		}})
 	S3Region = settings.String(&settings.Def{Key: "s3.region", Label: "S3 region",
 		Help:      "The region of the bucket, for example us-east-1. It is required when the endpoint is empty (AWS). With an endpoint and no region, the server signs for the region auto, which Cloudflare R2 and SeaweedFS accept.",
 		Normalize: settings.Trim})

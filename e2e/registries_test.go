@@ -184,6 +184,11 @@ func TestSettingsS3Endpoint(t *testing.T) {
 	if st, b := s.API(t, http.MethodPatch, "/api/settings", map[string]any{"storage": "r2"}, s.Admin()); st != http.StatusBadRequest {
 		t.Fatalf("storage r2: status %d, want 400: %s", st, b)
 	}
+	// The bucket goes in s3.bucket: an address with a path (the bucket after the host, as a person
+	// copies it) is refused, so the path never lands in front of every key.
+	if st, b := s.API(t, http.MethodPatch, "/api/settings", map[string]any{"s3.endpoint": "https://acct.r2.cloudflarestorage.com/bucket"}, s.Admin()); st != http.StatusBadRequest || !strings.Contains(string(b), "nothing after the host") {
+		t.Fatalf("s3.endpoint with a path: status %d, want 400 that says to put only the address: %s", st, b)
+	}
 	if st, b := s.API(t, http.MethodPost, "/api/settings/nope/test", map[string]any{}, s.Admin()); st != http.StatusNotFound {
 		t.Fatalf("test of an unknown group: status %d, want 404: %s", st, b)
 	}

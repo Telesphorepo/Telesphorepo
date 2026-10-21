@@ -82,11 +82,12 @@
       {#if description}<AlertDialog.Description>{description}</AlertDialog.Description>{/if}
     </AlertDialog.Header>
     {#if changes.length}
-      <ul class="flex flex-col gap-2 rounded-lg bg-panel px-4 py-3 text-sm">
+      <!-- A change can hold a long address: it wraps anywhere, so the dialog never scrolls sideways. -->
+      <ul class="flex min-w-0 flex-col gap-2 rounded-lg bg-panel px-4 py-3 text-sm">
         {#each changes as c, i (i)}
           <li class="flex gap-2">
             <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full {destructive ? 'bg-destructive' : 'bg-foreground/40'}"></span>
-            <span class="min-w-0 break-words">{c}</span>
+            <span class="min-w-0 [overflow-wrap:anywhere]">{c}</span>
           </li>
         {/each}
       </ul>
