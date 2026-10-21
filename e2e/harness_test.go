@@ -33,6 +33,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/client"
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
 	"github.com/testcontainers/testcontainers-go"
@@ -519,7 +520,7 @@ type Problem struct {
 	} `json:"remedy"`
 }
 
-// RefusalCode returns the refusal code of a refusal answer of the route policy: the member
+// RefusalCode returns the refusal code of a refusal answer of the access engine: the member
 // "code" of the problem document under /api/, or of the {"error"} body on a format route.
 func RefusalCode(b []byte) string {
 	var r struct {
@@ -990,7 +991,16 @@ func stopSharedSeaweed() {
 }
 
 func startSharedSeaweed() {
-	ctx := context.Background()
+	c, host, err := runSeaweed(context.Background(), seaweedAlias)
+	if c != nil {
+		seaweed.c = c
+	}
+	seaweed.host, seaweed.err = host, err
+}
+
+// runSeaweed starts a SeaweedFS S3 gateway on TestNetwork under alias and returns it with the
+// host address of its S3 port.
+func runSeaweed(ctx context.Context, alias string) (*testcontainers.DockerContainer, string, error) {
 	img := os.Getenv("E2E_SEAWEEDFS_IMAGE")
 	if img == "" {
 		img = "chrislusf/seaweedfs:4.48"
@@ -1005,18 +1015,18 @@ func startSharedSeaweed() {
 			"-master.volumeSizeLimitMB=32", "-volume.max=2000"),
 		testcontainers.WithExposedPorts("8333/tcp"),
 		testcontainers.WithFiles(testcontainers.ContainerFile{Reader: strings.NewReader(s3conf), ContainerFilePath: "/etc/seaweedfs/s3.json", FileMode: 0o644}),
-		network.WithNetwork([]string{seaweedAlias}, TestNetwork),
+		network.WithNetwork([]string{alias}, TestNetwork),
 		testcontainers.WithWaitStrategyAndDeadline(2*time.Minute, wait.ForListeningPort("8333/tcp").WithStartupTimeout(2*time.Minute)),
 	)
-	seaweed.c = c
 	if err != nil {
-		seaweed.err = fmt.Errorf("start seaweedfs: %w", err)
+		err = fmt.Errorf("start seaweedfs: %w", err)
 		if c != nil {
-			seaweed.err = fmt.Errorf("%w\n%s", seaweed.err, containerLogs(c))
+			err = fmt.Errorf("%w\n%s", err, containerLogs(c))
 		}
-		return
+		return c, "", err
 	}
-	seaweed.host, seaweed.err = c.PortEndpoint(ctx, "8333/tcp", "http")
+	host, err := c.PortEndpoint(ctx, "8333/tcp", "http")
+	return c, host, err
 }
 
 // StartSeaweedFS returns a target on the run-wide SeaweedFS S3 gateway (started on first use)
@@ -1027,9 +1037,81 @@ func StartSeaweedFS(t testing.TB) *S3Target {
 	if seaweed.err != nil {
 		t.Fatal(seaweed.err)
 	}
+	return seaweedTarget(t, seaweed.c, seaweedAlias, seaweed.host)
+}
+
+// OwnSeaweedFS is a SeaweedFS S3 gateway of one test with one target on it, for a test that
+// pauses the gateway: a pause of the run-wide gateway would hold the other tests too.
+type OwnSeaweedFS struct {
+	*S3Target
+	c      *testcontainers.DockerContainer
+	paused bool
+}
+
+// StartOwnSeaweedFS starts a SeaweedFS S3 gateway for t alone and returns a target on it. The
+// gateway is unpaused, then removed, at test end.
+func StartOwnSeaweedFS(t testing.TB) *OwnSeaweedFS {
+	t.Helper()
+	alias := RandName(seaweedAlias)
+	c, host, err := runSeaweed(context.Background(), alias)
+	registerCleanup(t, c, "seaweedfs "+alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := &OwnSeaweedFS{c: c}
+	t.Cleanup(func() {
+		if o.paused {
+			o.Unpause(t)
+		}
+	})
+	o.S3Target = seaweedTarget(t, c, alias, host)
+	return o
+}
+
+// Pause freezes every process of the gateway (the pause of the container engine): a request to
+// it waits for an answer until Unpause.
+func (o *OwnSeaweedFS) Pause(t testing.TB) {
+	t.Helper()
+	o.engine(t, "pause", func(ctx context.Context, dc *testcontainers.DockerClient, id string) error {
+		_, err := dc.ContainerPause(ctx, id, client.ContainerPauseOptions{})
+		return err
+	})
+	o.paused = true
+}
+
+// Unpause lets the gateway run again after Pause.
+func (o *OwnSeaweedFS) Unpause(t testing.TB) {
+	t.Helper()
+	o.engine(t, "unpause", func(ctx context.Context, dc *testcontainers.DockerClient, id string) error {
+		_, err := dc.ContainerUnpause(ctx, id, client.ContainerUnpauseOptions{})
+		return err
+	})
+	o.paused = false
+}
+
+// engine runs fn on the gateway's container through the API of the container engine, which
+// answers in milliseconds where its CLI takes a process start.
+func (o *OwnSeaweedFS) engine(t testing.TB, what string, fn func(ctx context.Context, dc *testcontainers.DockerClient, id string) error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	dc, err := testcontainers.NewDockerClientWithOpts(ctx)
+	if err != nil {
+		t.Fatalf("%s seaweedfs: container engine client: %v", what, err)
+	}
+	defer dc.Close()
+	if err := fn(ctx, dc, o.c.GetContainerID()); err != nil {
+		t.Fatalf("%s seaweedfs: %v", what, err)
+	}
+}
+
+// seaweedTarget returns a target with a fresh bucket and a unique prefix on the gateway c, which
+// containers on TestNetwork reach at alias and the test process at host.
+func seaweedTarget(t testing.TB, c testcontainers.Container, alias, host string) *S3Target {
+	t.Helper()
 	tg := &S3Target{
-		Endpoint:     "http://" + seaweedAlias + ":8333",
-		HostEndpoint: seaweed.host,
+		Endpoint:     "http://" + alias + ":8333",
+		HostEndpoint: host,
 		Region:       "us-east-1",
 		Bucket:       RandName("e2e"),
 		AccessKey:    seaweedAccess,
@@ -1053,7 +1135,7 @@ func StartSeaweedFS(t testing.TB) *S3Target {
 	}
 	t.Cleanup(func() {
 		if t.Failed() {
-			t.Logf("---- last lines of the SeaweedFS log ----\n%s", tail(containerLogs(seaweed.c), 100))
+			t.Logf("---- last lines of the SeaweedFS log ----\n%s", tail(containerLogs(c), 100))
 		}
 	})
 	return tg

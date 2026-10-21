@@ -12,8 +12,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -36,23 +38,37 @@ func countKeys(t *testing.T, opts ServerOpts, key string) int {
 	return n
 }
 
-// wantContentType checks the content type of path: HEAD answers it itself, and a GET that
-// redirects to S3 signs it into the presigned URL.
-func wantContentType(t *testing.T, s *Server, path, want string, auth Auth) {
+// wantContentType checks the content type of the request path p: HEAD answers it itself, and a
+// GET that redirects to S3 signs it into the presigned URL, with a disposition that names the
+// file of p, so a browser saves the download under that name. It reports whether the GET
+// redirected.
+func wantContentType(t *testing.T, s *Server, p, want string, auth Auth) bool {
 	t.Helper()
-	resp, b := s.Do(t, s.NewRequest(t, http.MethodHead, path, nil), auth)
+	resp, b := s.Do(t, s.NewRequest(t, http.MethodHead, p, nil), auth)
 	if resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != want {
-		t.Fatalf("HEAD %s: status %d, Content-Type %q, want 200 and %q: %s", path, resp.StatusCode, resp.Header.Get("Content-Type"), want, b)
+		t.Fatalf("HEAD %s: status %d, Content-Type %q, want 200 and %q: %s", p, resp.StatusCode, resp.Header.Get("Content-Type"), want, b)
 	}
-	resp, _ = s.Do(t, s.NewRequest(t, http.MethodGet, path, nil), auth)
-	if resp.StatusCode == http.StatusFound {
-		loc, err := url.Parse(resp.Header.Get("Location"))
-		if err != nil || loc.Query().Get("response-content-type") != want {
-			t.Fatalf("GET %s: redirect %q, want a presigned URL with response-content-type %q", path, resp.Header.Get("Location"), want)
+	resp, _ = s.Do(t, s.NewRequest(t, http.MethodGet, p, nil), auth)
+	if resp.StatusCode != http.StatusFound {
+		if ct := resp.Header.Get("Content-Type"); resp.StatusCode != http.StatusOK || ct != want {
+			t.Fatalf("GET %s: status %d, Content-Type %q, want 200 and %q", p, resp.StatusCode, ct, want)
 		}
-	} else if ct := resp.Header.Get("Content-Type"); resp.StatusCode != http.StatusOK || ct != want {
-		t.Fatalf("GET %s: status %d, Content-Type %q, want 200 and %q", path, resp.StatusCode, ct, want)
+		return false
 	}
+	loc, err := url.Parse(resp.Header.Get("Location"))
+	if err != nil || loc.Query().Get("response-content-type") != want {
+		t.Fatalf("GET %s: redirect %q, want a presigned URL with response-content-type %q", p, resp.Header.Get("Location"), want)
+	}
+	name, err := url.PathUnescape(path.Base(p))
+	if err != nil {
+		t.Fatalf("request path %s: %v", p, err)
+	}
+	cd := loc.Query().Get("response-content-disposition")
+	kind, params, err := mime.ParseMediaType(cd)
+	if err != nil || (kind != "attachment" && kind != "inline") || params["filename"] != name {
+		t.Fatalf("GET %s: presigned response-content-disposition %q, want attachment or inline with the filename %q", p, cd, name)
+	}
+	return true
 }
 
 // TestBlobDedupeAndGC stores the same bytes in two raw repos and a Maven repo: the store holds
@@ -93,6 +109,14 @@ func TestBlobDedupeAndGC(t *testing.T) {
 		for _, f := range files {
 			rawWantGet(t, s, opts.S3, f.path, s.AdminBasic(), body)
 			wantContentType(t, s, f.path, f.ct, s.AdminBasic())
+		}
+		// The disposition of a redirect quotes a file name with a space. Other bytes, so the GC
+		// below sees only the files above.
+		spaced := "/raw/" + a + "/x/two%20words.bin"
+		sresp, sb := rawPut(t, s, spaced, rawRandom(t, 1024), s.PublishAuth(t, s.AdminUser, a))
+		wantStatus(t, sresp, sb, http.StatusCreated)
+		if !wantContentType(t, s, spaced, files[0].ct, s.AdminBasic()) && opts.S3 != nil {
+			t.Fatalf("GET %s on S3 storage: no redirect, want 302 to a presigned URL", spaced)
 		}
 
 		del := func(repo, p string) {

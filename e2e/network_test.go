@@ -254,8 +254,8 @@ func mintFrom(t *testing.T, s *Server, user, repo, from string) (int, []byte) {
 		map[string]any{"device_id": d.ID, "repo": repo, "nonce": nonce, "signature": d.Sign(nonce, repo)}, nil, xff(from))
 }
 
-// wantDenied checks that a request through the route policy got the refusal of the IP rule
-// guard: 403 with the code network.
+// wantDenied checks that a request got the refusal of the IP rule guard: 403 with the code
+// network.
 func wantDenied(t *testing.T, what string, st int, b []byte) {
 	t.Helper()
 	if st != http.StatusForbidden || RefusalCode(b) != "network" {
@@ -263,31 +263,11 @@ func wantDenied(t *testing.T, what string, st int, b []byte) {
 	}
 }
 
-// deniedCount counts the network.denied events of repo for scope from the address from.
-func deniedCount(t *testing.T, s *Server, repo, scope, from string) int {
-	t.Helper()
-	n := 0
-	for _, e := range auditEvents(t, s, "network.denied", repo) {
-		if e.IP == from && fmt.Sprint(e.Detail["scope"]) == scope {
-			n++
-		}
-	}
-	return n
-}
-
-// mintDenied mints from the address from and checks that the IP rule guard refused it: 403 and
-// one more network.denied event of the publish scope from that address. The mint routes answer
-// a refusal with its status and message only, so the audit event tells the guard refusal apart.
+// mintDenied mints from the address from and checks that the IP rule guard refused it.
 func mintDenied(t *testing.T, s *Server, what, user, repo, from string) {
 	t.Helper()
-	before := deniedCount(t, s, repo, "publish", from)
 	st, b := mintFrom(t, s, user, repo, from)
-	if st != http.StatusForbidden {
-		t.Fatalf("%s: status %d, want 403: %s", what, st, b)
-	}
-	if after := deniedCount(t, s, repo, "publish", from); after != before+1 {
-		t.Fatalf("%s: %d network.denied publish events from %s, want %d", what, after, from, before+1)
-	}
+	wantDenied(t, what, st, b)
 }
 
 func TestIPRules(t *testing.T) {
@@ -394,17 +374,9 @@ func TestIPRules(t *testing.T) {
 	st, b = apiHeaders(t, s, http.MethodPost, "/api/repos/"+repo+"/files/delete",
 		map[string][]string{"paths": {"doc/two.txt"}}, s.Admin(), xff("192.0.2.1"))
 	wantDenied(t, "admin delete from a refused address", st, b)
-	before := deniedCount(t, s, repo, "publish", "192.0.2.1")
 	st, b = apiHeaders(t, s, http.MethodPost, "/api/publish/sessions/manual",
 		map[string]string{"repo": repo}, s.TOTPProof(t, s.LoginTOTP(t, w), w), xff("192.0.2.1"))
-	if st != http.StatusForbidden {
-		t.Fatalf("manual session from a refused address: status %d, want 403: %s", st, b)
-	}
-	// The mint routes answer a refusal with its status and message only; the audit event tells
-	// the guard refusal apart.
-	if after := deniedCount(t, s, repo, "publish", "192.0.2.1"); after != before+1 {
-		t.Fatalf("manual session from a refused address: %d network.denied publish events, want %d", after, before+1)
-	}
+	wantDenied(t, "manual session from a refused address", st, b)
 
 	// Every refusal is in the audit log with the address and the scope.
 	events := auditEvents(t, s, "network.denied", repo)

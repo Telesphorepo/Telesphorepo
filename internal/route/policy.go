@@ -169,7 +169,7 @@ func BasicChallenge(w http.ResponseWriter, _ *http.Request, _ access.Decision) {
 }
 
 // refuse writes the refusal d: the challenge of a 401, the Allow header of a write to a
-// read-only repo, then the ErrorWriter.
+// read-only repo, then the ErrorWriter, or Refuse without one.
 func (p Policy) refuse(w http.ResponseWriter, r *http.Request, d access.Decision) {
 	if d.Status == http.StatusUnauthorized && r.Header.Get(auth.UIHeader) != "1" {
 		switch {
@@ -179,18 +179,31 @@ func (p Policy) refuse(w http.ResponseWriter, r *http.Request, d access.Decision
 			BasicChallenge(w, r, d)
 		}
 	}
-	if d.Code == access.CodeReadOnlyKind {
-		w.Header().Set("Allow", "GET, HEAD")
-	}
 	if p.Errors != nil {
+		allowReads(w, d)
 		p.Errors(w, r, d)
 		return
 	}
+	Refuse(w, r, d)
+}
+
+// Refuse writes the refusal d of the access engine: a problem document with the refusal code of
+// d as the member code, and the Allow header of a write to a read-only repo. A handler that asks
+// the engine itself (a mint) answers its refusal with Refuse.
+func Refuse(w http.ResponseWriter, r *http.Request, d access.Decision) {
+	allowReads(w, d)
 	doc := httpx.Blank(d.Status, d.Message)
 	if d.Code != "" {
 		doc = doc.With(map[string]any{"code": d.Code})
 	}
 	httpx.WriteProblem(w, r, doc)
+}
+
+// allowReads sets the Allow header of a refused write to a repo of a read-only kind.
+func allowReads(w http.ResponseWriter, d access.Decision) {
+	if d.Code == access.CodeReadOnlyKind {
+		w.Header().Set("Allow", "GET, HEAD")
+	}
 }
 
 // needs returns the server permissions of the policy: Perm, or AnyPerm.

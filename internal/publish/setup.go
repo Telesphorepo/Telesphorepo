@@ -343,7 +343,7 @@ func (m *mod) setupDevice(w http.ResponseWriter, r *http.Request, c *route.Call)
 		}
 		httpx.WriteProblem(w, r, d)
 	case errors.As(err, &refused):
-		httpx.Error(w, r, refused.D.Status, refused.D.Message)
+		route.Refuse(w, r, refused.D)
 	case err != nil:
 		if errors.Is(err, ErrDenied) {
 			m.h.Auth.Failed(r, "")
@@ -397,10 +397,7 @@ func (m *mod) exchangeSession(w http.ResponseWriter, r *http.Request, c *route.C
 	var refused *RefusedError
 	switch {
 	case errors.As(err, &refused):
-		if refused.D.Code == access.CodeReadOnlyKind {
-			w.Header().Set("Allow", "GET, HEAD")
-		}
-		httpx.Error(w, r, refused.D.Status, refused.D.Message)
+		route.Refuse(w, r, refused.D)
 	case err != nil:
 		if errors.Is(err, ErrDenied) {
 			m.h.Auth.Failed(r, "")
