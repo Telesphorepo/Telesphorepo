@@ -6,7 +6,7 @@ on:
 
 jobs:
   binaries:
-    runs-on: ubuntu-latest # one runner label per job; change it here to switch runner provider
+    runs-on: blacksmith-4vcpu-ubuntu-2404 # one runner label per job; change it here to switch runner provider
     timeout-minutes: 30
     permissions:
       contents: write
@@ -17,6 +17,7 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+          cache: false # Blacksmith caches Go builds itself
       - uses: actions/setup-node@v7
         with:
           node-version-file: .node-version
@@ -35,7 +36,7 @@ jobs:
   # The darwin server and CLI on a real Mac: install.sh installs the CLI, which sets up and
   # publishes a Maven and a raw project (e2e/macos_test.go).
   macos:
-    runs-on: macos-latest
+    runs-on: blacksmith-6vcpu-macos-latest # one runner label per job; change it here to switch runner provider
     timeout-minutes: 45
     permissions:
       contents: read
@@ -62,7 +63,7 @@ jobs:
           E2E_SERVER_BIN: ${{ github.workspace }}/bin/telesphorepo-server
 
   image:
-    runs-on: ubuntu-latest # one runner label per job; change it here to switch runner provider
+    runs-on: blacksmith-4vcpu-ubuntu-2404 # one runner label per job; change it here to switch runner provider
     timeout-minutes: 60
     permissions:
       contents: read

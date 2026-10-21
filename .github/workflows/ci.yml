@@ -14,13 +14,14 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest # one runner label per job; change it here to switch runner provider
+    runs-on: blacksmith-4vcpu-ubuntu-2404 # one runner label per job; change it here to switch runner provider
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+          cache: false # Blacksmith caches Go builds itself
       - uses: actions/setup-node@v7
         with:
           node-version-file: .node-version
@@ -52,13 +53,14 @@ jobs:
 
   e2e-core:
     needs: build
-    runs-on: ubuntu-latest # one runner label per job; change it here to switch runner provider
+    runs-on: blacksmith-8vcpu-ubuntu-2404 # one runner label per job; change it here to switch runner provider
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+          cache: false # Blacksmith caches Go builds itself
       - uses: actions/setup-node@v7
         with:
           node-version-file: .node-version
@@ -78,7 +80,7 @@ jobs:
   e2e-github-actions:
     needs: build
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest # one runner label per job; change it here to switch runner provider
+    runs-on: blacksmith-4vcpu-ubuntu-2404 # one runner label per job; change it here to switch runner provider
     timeout-minutes: 45
     permissions:
       contents: read
@@ -88,6 +90,7 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+          cache: false # Blacksmith caches Go builds itself
       - uses: actions/setup-node@v7
         with:
           node-version-file: .node-version
@@ -109,7 +112,7 @@ jobs:
   snapshot-image:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: e2e-core
-    runs-on: ubuntu-latest # one runner label per job; change it here to switch runner provider
+    runs-on: blacksmith-4vcpu-ubuntu-2404 # one runner label per job; change it here to switch runner provider
     timeout-minutes: 60
     permissions:
       contents: read
