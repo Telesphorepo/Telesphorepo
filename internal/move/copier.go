@@ -21,6 +21,9 @@ import (
 const (
 	pageSize  = 500
 	saveEvery = time.Second
+	// workers is the number of blobs copied at once. A copy to a bucket over the internet takes
+	// most of its time waiting for the network, so many at once go many times faster.
+	workers = 16
 )
 
 // finishTimeout bounds the database and settings writes that end a move.
@@ -39,13 +42,15 @@ const (
 )
 
 // copy walks every blob with id > c.cursor in id order and copies it from the source to the
-// target store. It saves the cursor and counters after each page, and ends the move when the walk
-// is complete. It returns without ending the move when ctx ends (cancel or shutdown; a shutdown
-// resumes at the next start).
+// target store, workers blobs at once within a page. It saves the cursor and counters at least
+// every saveEvery and after each page, and ends the move when the walk is complete. It returns
+// without ending the move when ctx ends (cancel or shutdown; a shutdown resumes at the next start).
+//
+// The cursor and the counters cover only the blobs done in id order from the start of the page
+// (the prefix): a blob after an unfinished one is done again after a resume, and counted once.
 func (s *Service) copy(ctx context.Context, r *run, c counters) {
 	rq, wq := dbq.New(s.db.R), dbq.New(s.db.W)
 	// save writes the cursor and counters; false when the move must stop (an error, or a cancel).
-	// The cursor is the last blob done, in id order, so a resume starts after it.
 	lastSave := time.Now()
 	save := func() bool {
 		lastSave = time.Now()
@@ -60,6 +65,10 @@ func (s *Service) copy(ctx context.Context, r *run, c counters) {
 		}
 		return n > 0 // 0: cancelled
 	}
+	type result struct {
+		res    outcome
+		reason string
+	}
 	for {
 		page, err := rq.WalkBlobs(ctx, dbq.WalkBlobsParams{AfterID: c.cursor, Limit: pageSize})
 		if err != nil {
@@ -68,34 +77,70 @@ func (s *Service) copy(ctx context.Context, r *run, c counters) {
 			}
 			return
 		}
-		for _, b := range page {
-			res, reason := s.copyOne(ctx, r, b)
-			if ctx.Err() != nil {
-				return
+		// copyPage copies page with the workers and takes the results in id order: the prefix of
+		// done blobs moves the cursor. False when the move must stop. Its own context stops the
+		// workers whenever it returns, a stop of the move included.
+		copyPage := func() bool {
+			pctx, stop := context.WithCancel(ctx)
+			defer stop()
+			results := make([]chan result, len(page))
+			for i := range results {
+				results[i] = make(chan result, 1)
 			}
-			switch res {
-			case copied:
-				c.copied++
-			case skipped:
-				c.skipped++
-			case failed:
-				c.failed++
-				err := wq.InsertMoveFailure(ctx, dbq.InsertMoveFailureParams{
-					MoveID: r.id, BlobID: b.ID, Key: blobs.Key(b.Sha256), Reason: reason,
-				})
-				if err != nil {
-					if ctx.Err() == nil {
-						s.fail(r, "save failure: "+err.Error())
+			next := make(chan int)
+			for range min(workers, len(page)) {
+				go func() {
+					for i := range next {
+						res, reason := s.copyOne(pctx, r, page[i])
+						results[i] <- result{res, reason}
 					}
-					return
+				}()
+			}
+			go func() {
+				defer close(next)
+				for i := range page {
+					select {
+					case next <- i:
+					case <-pctx.Done():
+						return
+					}
+				}
+			}()
+			for i, b := range page {
+				var got result
+				select {
+				case got = <-results[i]:
+				case <-ctx.Done():
+					return false
+				}
+				if ctx.Err() != nil {
+					return false
+				}
+				switch got.res {
+				case copied:
+					c.copied++
+				case skipped:
+					c.skipped++
+				case failed:
+					c.failed++
+					err := wq.InsertMoveFailure(ctx, dbq.InsertMoveFailureParams{
+						MoveID: r.id, BlobID: b.ID, Key: blobs.Key(b.Sha256), Reason: got.reason,
+					})
+					if err != nil {
+						if ctx.Err() == nil {
+							s.fail(r, "save failure: "+err.Error())
+						}
+						return false
+					}
+				}
+				c.cursor = b.ID
+				if time.Since(lastSave) >= saveEvery && !save() {
+					return false
 				}
 			}
-			c.cursor = b.ID
-			if time.Since(lastSave) >= saveEvery && !save() {
-				return
-			}
+			return len(page) == 0 || save()
 		}
-		if len(page) > 0 && !save() {
+		if !copyPage() {
 			return
 		}
 		if len(page) < pageSize {
