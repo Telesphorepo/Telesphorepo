@@ -55,6 +55,14 @@ var (
 		Help: "Each value of the permission claim gives these server permissions, for example {\"repo-admins\": [\"repositories.all\"]}. A person gets the permissions of every value they have."})
 	SessionTTL = settings.Duration(&settings.Def{Key: "oidc.session_ttl", Default: "12h", Label: "SSO session lifetime",
 		Help: "After this time, a person signed in through single sign-on must sign in again."})
+	ApprovalMaxAge = settings.Duration(&settings.Def{Key: "oidc.approval_max_age", Default: "5m", Label: "Sign-in age for approvals",
+		Help: "To approve a computer for the CLI, a person signs in at the identity provider again. The server takes that sign-in only when it is at most this old; a provider that skipped the new sign-in gives an older one.",
+		Validate: func(v any) error {
+			if d := v.(time.Duration); d < 10*time.Second || d > time.Hour {
+				return errors.New("must be between 10s and 1h")
+			}
+			return nil
+		}})
 )
 
 // connectionKeys are the settings whose change the discovery check of the issuer covers.
@@ -103,7 +111,7 @@ var ConfigView = settings.NewView(func(s *settings.Snapshot) Config {
 func (h *Handler) group() *settings.Group {
 	return &settings.Group{ID: "sso", Label: "Single sign-on", Perm: PermManage, Page: "/settings/sign-in",
 		Defs: []*settings.Def{Issuer.Def(), ClientID.Def(), ClientSecret.Def(), RedirectURL.Def(), Scopes.Def(),
-			SessionTTL.Def(), PermissionClaim.Def(), PermissionMap.Def(), auth.PasswordLogin.Def()},
+			SessionTTL.Def(), ApprovalMaxAge.Def(), PermissionClaim.Def(), PermissionMap.Def(), auth.PasswordLogin.Def()},
 		Validate: validate, Test: h.test, Apply: h.apply}
 }
 

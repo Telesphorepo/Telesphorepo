@@ -40,8 +40,6 @@ const (
 	stateTTL         = 10 * time.Minute
 	maxStates        = 10000
 	discoveryTimeout = 10 * time.Second
-	// maxAuthAge is the oldest sign-in (ID token auth_time) that approves a device.
-	maxAuthAge = 5 * time.Minute
 )
 
 // Error codes of the sign-in page (/#/login?error=...) and the approval page
@@ -55,7 +53,7 @@ const (
 	errNotSSO       = "not_sso"       // the UI session is not an SSO account
 	errWrongAccount = "wrong_account" // the provider signed in another account
 	errNoAuthTime   = "no_auth_time"  // the ID token has no auth_time
-	errStaleSignIn  = "stale_sign_in" // auth_time is older than maxAuthAge: the provider ignored prompt=login
+	errStaleSignIn  = "stale_sign_in" // auth_time is older than oidc.approval_max_age: the provider ignored prompt=login
 )
 
 // Handler serves GET /api/auth/oidc/login, GET /api/auth/oidc/device and
@@ -477,7 +475,7 @@ func (h *Handler) exchange(ctx context.Context, c *Config, p *gooidc.Provider, p
 }
 
 // approval ends the sign-in that device or setup started: the provider must have signed in the
-// same account within maxAuthAge. It then sends the browser back to the approval page with a
+// same account within oidc.approval_max_age. It then sends the browser back to the approval page with a
 // single-use grant for the code and the account, or to the page of the repo with a single-use
 // grant that makes one setup code of the repo. It starts no session; the UI session stays.
 func (h *Handler) approval(w http.ResponseWriter, r *http.Request, pend pending, si *signedIn) {
@@ -509,7 +507,7 @@ func (h *Handler) approval(w http.ResponseWriter, r *http.Request, pend pending,
 		back(errNoAuthTime)
 		return
 	}
-	if age := time.Since(time.Unix(int64(at), 0)); age > maxAuthAge {
+	if age := time.Since(time.Unix(int64(at), 0)); age > ApprovalMaxAge.Get(h.settings.Current()) {
 		h.log.WarnContext(ctx, "SSO device approval refused: the provider did not sign the user in again",
 			"auth_age", age.Round(time.Second).String())
 		back(errStaleSignIn)

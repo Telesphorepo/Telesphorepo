@@ -178,11 +178,13 @@ func TestOIDCDeviceApproval(t *testing.T) {
 // sequential tests of the zone run during the wait.
 func TestOIDCDeviceApprovalStale(t *testing.T) {
 	kc, s := startSSOServer(t)
+	// An approval takes a sign-in of at most oidc.approval_max_age; a short one keeps the wait short.
+	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"oidc.approval_max_age": "20s"}, s.Admin(), nil)
 	signedIn := time.Now()
 	alice := kc.SignIn(t, s, "alice", kcAlicePassword)
 
 	t.Parallel()
-	time.Sleep(time.Until(signedIn.Add(5*time.Minute + 15*time.Second)))
+	time.Sleep(time.Until(signedIn.Add(25 * time.Second)))
 
 	en, _ := s.StartEnrollment(t, "e2e alice stale laptop")
 	auth := kc.startDeviceSignIn(t, s, alice.Jar, en.UserCode)

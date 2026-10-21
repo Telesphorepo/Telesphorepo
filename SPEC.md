@@ -678,7 +678,7 @@ The `settings` package holds no feature rules and declares only the keys of the 
 | network (network) | `network.manage` · `/settings/proxy` | `trusted_proxies` (literal entries; the IP lists of the trusted proxies are rows, see **Network rules**) |
 | edge (edge) | `edge.manage` · `/settings/edge` | `edge.enabled` (`false`; needs `storage=s3` and a `base_url` without a path), `edge.home_hint` (`""`; one of `wnam enam weur eeur apac oc`, required when edge delivery is on), `edge.regions` (`[]`; entries `<hint>=<bucket>`, each hint once, not the home hint, not the home bucket), `edge.access_ttl` (`30s`, 0 to 5 min). Its `Validate` checks the rules across keys and at startup turns edge delivery off instead of stopping the server; `Test` probes the home bucket and every regional bucket; `Apply` marks a save, which ends "deploy needed" after a storage change. See **Edge delivery** |
 | publishing (publish) | `settings.general` · General | `publish.session_ttl` (`15m`, maximum `1h`), `publish.device_ttl` (`2160h`, which is 90 days) |
-| sso (sso) | `signin.manage` · `/settings/sign-in` | `oidc.issuer`, `oidc.client_id`, `oidc.client_secret`*, `oidc.redirect_url`, `oidc.scopes` (`openid profile email`), `oidc.session_ttl` (`12h`), `oidc.permission_claim` (`""`; dotted paths allowed), `oidc.permission_map` (type `map`, `{}`), `signin.password_login` (`all` or `publishers`, default `all`) |
+| sso (sso) | `signin.manage` · `/settings/sign-in` | `oidc.issuer`, `oidc.client_id`, `oidc.client_secret`*, `oidc.redirect_url`, `oidc.scopes` (`openid profile email`), `oidc.session_ttl` (`12h`), `oidc.approval_max_age` (`5m`, 10 s to 1 h: the oldest sign-in that approves a device), `oidc.permission_claim` (`""`; dotted paths allowed), `oidc.permission_map` (type `map`, `{}`), `signin.password_login` (`all` or `publishers`, default `all`) |
 | nexus (nexus) | `nexus.manage` · General | `nexus.sync_interval` (`15m`, minimum `1m`) |
 
 \* secret
@@ -1219,7 +1219,7 @@ also not for an admin user.
    approves with a fresh TOTP code or passkey check. An SSO account selects **Sign in again with
    single sign-on to approve**: `GET /api/auth/oidc/device?code=` asks the provider for a new
    sign-in (`prompt=login`, `max_age=0`). The callback checks that the provider signed in the same
-   account (issuer and `sub`) and that `auth_time` is at most 5 minutes old; a token without
+   account (issuer and `sub`) and that `auth_time` is at most `oidc.approval_max_age` old (5 minutes by default); a token without
    `auth_time` is refused. It stores a grant in `auth_challenges` (kind `device_grant`, SHA-256 of
    the grant, the user id and the user code, single use, 5 min) and returns to
    `/#/device?code=<code>&grant=<grant>`. The page removes the grant from the address and sends
@@ -3848,8 +3848,8 @@ exchange runs with the real CI systems in the clients zone (`TestCLIJenkins`,
 `oidc_device_test.go` covers `TestOIDCDeviceApproval` (a person who signs in with single sign-on approves a device after a new
 Keycloak sign-in, then publishes with it; the authorization request carries `prompt=login` and
 `max_age=0`; a missing grant, a grant for another code and a used grant get 401) and
-`TestOIDCDeviceApprovalStale`. That test signs in first, then calls `t.Parallel()`, so the wait
-for a sign-in older than 5 minutes runs while the other tests run. The test then removes
+`TestOIDCDeviceApprovalStale`. That test sets `oidc.approval_max_age` to 20 s, signs in, calls
+`t.Parallel()` and waits 25 s while the other tests run. The test then removes
 `prompt` and `max_age` from the authorization request, as a provider that ignores them, and
 checks that the callback returns `error=stale_sign_in` and that the code stays pending.
 
