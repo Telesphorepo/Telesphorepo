@@ -10,6 +10,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -520,26 +521,61 @@ func TestStorageMoveRetry(t *testing.T) {
 	}
 }
 
-// TestStorageMoveRestart restarts the server while a move copies; the move resumes and
-// finishes.
+// moveHold waits until move id has copied a blob, then pauses the target tg: the copier waits on
+// tg, so the move stays copying until tg.Unpause. It fails the test when the move ends first.
+func moveHold(t *testing.T, s *Server, tg *OwnSeaweedFS, id int64) Move {
+	t.Helper()
+	deadline := time.Now().Add(moveWait)
+	for {
+		m := s.GetMove(t, id)
+		if m.State != "copying" {
+			t.Fatalf("move ended before its target was paused: %+v; seed more assets", m)
+		}
+		if m.Copied > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("move %d copied no blob in %s: %+v", id, moveWait, m)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	tg.Pause(t)
+	m := s.GetMove(t, id)
+	if m.State != "copying" || m.Copied+m.Skipped+m.Failed >= m.Total {
+		t.Fatalf("move ended before its target was paused: %+v; seed more assets", m)
+	}
+	return m
+}
+
+// moveResumedRe matches the log line of a move that resumed at startup from a saved cursor.
+var moveResumedRe = regexp.MustCompile(`"msg":"storage move resumed".*"cursor":[1-9]`)
+
+// TestStorageMoveRestart restarts the server while a move copies; the move resumes from its
+// cursor and finishes with every blob counted once.
 func TestStorageMoveRestart(t *testing.T) {
 	t.Parallel()
-	tg := StartSeaweedFS(t)
+	tg := StartOwnSeaweedFS(t)
 	vol := NewDataVolume(t)
 	s := StartServer(t, ServerOpts{DataVolume: vol, Env: moveKeepBlobs()})
 	repo := RandName("raw")
 	s.CreateRepo(t, repo, "raw", false, nil)
-	files := moveRawSeed(t, s, repo, "seed", 1500, 1024)
+	files := moveRawSeed(t, s, repo, "seed", 2000, 1024)
 	before := moveAssets(t, s, repo)
 
-	m := s.StartMove(t, moveS3Patch(tg))
-	if cur := s.GetMove(t, m.ID); cur.State != "copying" {
-		t.Fatalf("move ended before the restart: %+v; seed more assets", cur)
+	m := s.StartMove(t, moveS3Patch(tg.S3Target))
+	held := moveHold(t, s, tg, m.ID)
+	// The server stops while the copier waits on the paused target. The target runs again before
+	// the server starts, since the resume probes it.
+	s.RestartAfter(t, func() { tg.Unpause(t) })
+	if !moveResumedRe.MatchString(s.LogsThrough(t)) {
+		t.Fatalf("no \"storage move resumed\" line with a cursor in the server log after the restart (held at %+v)", held)
 	}
-	s.Restart(t)
 
 	m = s.WaitMove(t, m.ID, moveWait)
 	moveWantDone(t, s, m)
+	if m.Copied+m.Skipped != m.Total || m.Copied < held.Copied {
+		t.Fatalf("resumed move ended %+v, want copied + skipped = total and copied >= %d (before the restart)", m, held.Copied)
+	}
 	moveWantStorage(t, s, "s3")
 	moveWantBlobs(t, "target", tg.Blobs(t), moveAssets(t, s, repo))
 	moveWantBlobs(t, "source", FSBlobs(t, vol), before)
@@ -550,16 +586,17 @@ func TestStorageMoveRestart(t *testing.T) {
 // move can start afterwards.
 func TestStorageMoveCancel(t *testing.T) {
 	t.Parallel()
-	tg := StartSeaweedFS(t)
+	tg := StartOwnSeaweedFS(t)
 	vol := NewDataVolume(t)
 	s := StartServer(t, ServerOpts{DataVolume: vol, Env: moveKeepBlobs()})
 	repo := RandName("raw")
 	s.CreateRepo(t, repo, "raw", false, nil)
-	files := moveRawSeed(t, s, repo, "seed", 1500, 1024)
+	files := moveRawSeed(t, s, repo, "seed", 2000, 1024)
 	before := moveAssets(t, s, repo)
 
-	m := s.StartMove(t, moveS3Patch(tg))
-	if st, b := s.API(t, http.MethodPatch, "/api/settings", moveS3Patch(tg), s.Admin()); st != http.StatusConflict {
+	m := s.StartMove(t, moveS3Patch(tg.S3Target))
+	moveHold(t, s, tg, m.ID)
+	if st, b := s.API(t, http.MethodPatch, "/api/settings", moveS3Patch(tg.S3Target), s.Admin()); st != http.StatusConflict {
 		t.Fatalf("second storage PATCH during a move: status %d, want 409: %s", st, b)
 	}
 	var cur Move
@@ -576,7 +613,8 @@ func TestStorageMoveCancel(t *testing.T) {
 	}
 	moveWantStorage(t, s, "fs")
 
-	// Reads and writes use the source store again.
+	// Reads and writes use the source store again: the target is still paused, so a request that
+	// went to it would not end.
 	moveWantRaw(t, s, repo, files)
 	body := rawRandom(t, 4096)
 	if err := movePut(s, "/raw/"+repo+"/after/new.bin", body, PublishToken(t, s, s.AdminUser, repo)); err != nil {
@@ -587,7 +625,8 @@ func TestStorageMoveCancel(t *testing.T) {
 	srcWant[blobKey(sha256Hex(body))] = sha256Hex(body)
 	moveWantBlobs(t, "source", FSBlobs(t, vol), srcWant)
 
-	m2 := s.StartMove(t, moveS3Patch(tg))
+	tg.Unpause(t)
+	m2 := s.StartMove(t, moveS3Patch(tg.S3Target))
 	if m2.ID == m.ID {
 		t.Fatalf("new move reuses id %d", m.ID)
 	}
