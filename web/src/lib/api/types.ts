@@ -704,6 +704,8 @@ export type EdgeStatus = {
   deploy_needed: boolean;
   /** The storage change that asks for the deploy ("storage change", "storage move"); "" otherwise. */
   deploy_reason: string;
+  /** Why this build has no edge Worker to download; "" when it has. */
+  worker_missing: string;
   home: { hint: EdgeHint | ""; bucket: string; outbox: number; last_error: string };
   /** The backfill of every pointer after edge delivery starts. */
   backfill: { running: boolean; queued: number; total: number };

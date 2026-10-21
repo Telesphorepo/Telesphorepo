@@ -38,6 +38,11 @@ const PermManage perm.ID = "edge.manage"
 var ProblemNotConfigured = httpx.DeclareProblem(httpx.Problem{Name: "edge-not-configured", Status: http.StatusConflict,
 	Title: "Edge delivery is not configured"})
 
+// ProblemNoWorker answers a download of the edge Worker on a server whose build holds no Worker of
+// its own version.
+var ProblemNoWorker = httpx.DeclareProblem(httpx.Problem{Name: "no-edge-worker", Status: http.StatusNotFound,
+	Title: "This build has no edge Worker download"})
+
 // Module returns the edge module: the settings group edge, the permission edge.manage, the
 // pipeline watcher, the change notices of auth, repos, network, publish and storage, the jobs
 // edge.outbox, edge.backfill, edge.reconcile and edge.seen, and the routes of /api/edge/.
@@ -393,4 +398,5 @@ func parallel[T any](n int, items []T, fn func(T) error) error {
 func (m *mod) routes(r *route.Router) {
 	r.Handle("GET /api/edge/status", route.UIPerm(PermManage), m.status)
 	r.Handle("GET /api/edge/wrangler.jsonc", route.UIPerm(PermManage), m.wranglerConfig)
+	r.Handle("GET /api/edge/worker.zip", route.UIPerm(PermManage), m.workerZip)
 }

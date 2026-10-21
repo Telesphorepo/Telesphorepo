@@ -1,7 +1,8 @@
 // bun run provision [wrangler.jsonc]
 //
 // Creates what the edge Worker needs in the Cloudflare account, from the wrangler.jsonc that the
-// server generates (Settings > Edge delivery, or GET /api/edge/wrangler.jsonc):
+// server generates (in the Worker folder of Settings > Edge delivery, or GET
+// /api/edge/wrangler.jsonc for a checkout of the repository):
 //
 //   - each regional bucket (binding R2_<HINT>) with its location hint, when it does not exist
 //   - the copy queue, when it does not exist
@@ -9,7 +10,11 @@
 //     [s3.prefix/]blobs/, sent to the copy queue
 //
 // It runs again safely: it skips what exists. Run it after a region change, then `bun run deploy`.
-// It needs CLOUDFLARE_API_TOKEN with Workers Scripts and Routes edit, R2 edit and Queues edit.
+//
+// It runs wrangler as you are signed in: sign in once with `bunx wrangler login`. In CI, set
+// CLOUDFLARE_API_TOKEN (Workers Scripts and Routes edit, R2 edit, Queues edit) instead. It asks
+// nothing, so when your login reaches several accounts it needs CLOUDFLARE_ACCOUNT_ID (or
+// "account_id" in wrangler.jsonc).
 //
 // It refuses a config whose routes are not on the zone of their host, because a cross-zone
 // fetch from the Worker would reach the origin without the client address.
@@ -50,15 +55,53 @@ function stripJSONC(src: string): string {
 
 const decoder = new TextDecoder();
 
-// wrangler runs a wrangler command of the pinned version. quiet captures its output.
-function wrangler(args: string[], quiet: boolean): { ok: boolean; out: string } {
+// wrangler runs a wrangler command of the pinned version. quiet captures its output: stdout is
+// the standard output alone, out both streams.
+function wrangler(args: string[], quiet: boolean): { ok: boolean; stdout: string; out: string } {
   const r = Bun.spawnSync([process.execPath, "x", "wrangler", ...args], {
     stdout: quiet ? "pipe" : "inherit",
     stderr: quiet ? "pipe" : "inherit",
     stdin: "ignore",
   });
-  const out = (r.stdout ? decoder.decode(r.stdout) : "") + (r.stderr ? decoder.decode(r.stderr) : "");
-  return { ok: r.exitCode === 0, out };
+  const stdout = r.stdout ? decoder.decode(r.stdout) : "";
+  return { ok: r.exitCode === 0, stdout, out: stdout + (r.stderr ? decoder.decode(r.stderr) : "") };
+}
+
+interface WhoAmI {
+  loggedIn?: unknown;
+  accounts?: { id?: unknown; name?: unknown }[];
+}
+
+// checkLogin fails unless wrangler is signed in (wrangler login, or CLOUDFLARE_API_TOKEN), and
+// unless the account is clear: wrangler asks which account when a login reaches several, and it
+// cannot ask here, since provision runs it without a terminal.
+function checkLogin(accountID: string): void {
+  const r = wrangler(["whoami", "--json"], true);
+  const start = r.stdout.indexOf("{");
+  const end = r.stdout.lastIndexOf("}");
+  let who: WhoAmI | undefined;
+  try {
+    who = start >= 0 && end > start ? (JSON.parse(r.stdout.slice(start, end + 1)) as WhoAmI) : undefined;
+  } catch {
+    who = undefined;
+  }
+  if (!who) fail(`wrangler whoami failed:\n${r.out}`);
+  if (who.loggedIn !== true) fail("Sign in first: bunx wrangler login");
+  const accounts = (who.accounts ?? []).filter((a) => typeof a.id === "string") as { id: string; name?: unknown }[];
+  const list = accounts.map((a) => `  ${typeof a.name === "string" ? a.name : "(no name)"}: ${a.id}`).join("\n");
+  if (accountID !== "") {
+    if (accounts.length > 0 && !accounts.some((a) => a.id === accountID)) {
+      fail(`your Cloudflare login cannot reach the account ${accountID}. Your accounts are:\n${list}`);
+    }
+    return;
+  }
+  if (accounts.length > 1) {
+    fail(
+      `your Cloudflare login reaches ${accounts.length} accounts, and provision cannot ask which one. ` +
+        `Set CLOUDFLARE_ACCOUNT_ID to the ID of the account of the R2 buckets (for example CLOUDFLARE_ACCOUNT_ID=${accounts[0].id} bun run provision), ` +
+        `and use it for bun run deploy too. Your accounts are:\n${list}`,
+    );
+  }
 }
 
 function run(args: string[]): void {
@@ -74,6 +117,7 @@ interface Route {
 }
 
 interface WranglerConfig {
+  account_id?: unknown;
   routes?: unknown;
   r2_buckets?: { binding?: unknown; bucket_name?: unknown }[];
   queues?: { producers?: { queue?: unknown }[]; consumers?: { queue?: unknown }[] };
@@ -84,7 +128,7 @@ async function main(): Promise<void> {
   const path = Bun.argv[2] ?? "wrangler.jsonc";
   const file = Bun.file(path);
   if (!(await file.exists())) {
-    fail(`${path} not found. Save the wrangler.jsonc of Settings > Edge delivery in this folder first.`);
+    fail(`${path} not found. Run provision in the folder of the edge Worker download of Settings > Edge delivery, or save the wrangler.jsonc of that page here.`);
   }
   let cfg: WranglerConfig;
   try {
@@ -92,6 +136,7 @@ async function main(): Promise<void> {
   } catch (err) {
     fail(`${path} does not parse: ${err instanceof Error ? err.message : String(err)}`);
   }
+  checkLogin(process.env.CLOUDFLARE_ACCOUNT_ID || (typeof cfg.account_id === "string" ? cfg.account_id : ""));
 
   // Same zone: every route is a zone route on one host. A plain pattern (what the server writes)
   // is a route of the zone of its own host, which wrangler finds; a route object that names its
@@ -122,7 +167,7 @@ async function main(): Promise<void> {
   if (!home || typeof home.bucket_name !== "string") fail("the config has no HOME bucket.");
   const homeName = home.bucket_name as string;
   if (!wrangler(["r2", "bucket", "info", homeName], true).ok) {
-    fail(`the home bucket ${homeName} does not exist or the token cannot read it. It is the S3 bucket of the server.`);
+    fail(`the home bucket ${homeName} does not exist in this Cloudflare account, or your login cannot read it. It is the S3 bucket of the server.`);
   }
   for (const b of buckets) {
     if (typeof b.binding !== "string" || !b.binding.startsWith("R2_")) continue;

@@ -16,9 +16,10 @@ import (
 
 const imageTag = "telesphorepo:local"
 
-// build builds the UI and the six CLI archives, then bin/telesphorepo-server with both embedded;
-// with image it also builds the container image with the detected engine (which builds its own
-// CLI archives). It returns the binary path.
+// build builds the UI, the six CLI archives and the edge Worker folder, then
+// bin/telesphorepo-server with them embedded; with image it also builds the container image with
+// the detected engine (which builds its own CLI archives and edge Worker folder). It returns the
+// binary path.
 func build(ctx context.Context, image bool) (string, error) {
 	pm, err := prepare(ctx)
 	if err != nil {
@@ -30,6 +31,9 @@ func build(ctx context.Context, image bool) (string, error) {
 	}
 	version := gitVersion(ctx)
 	if err := cliArchives(ctx, version, clidist.Targets); err != nil {
+		return "", err
+	}
+	if err := edgeWorker(ctx, version, false); err != nil {
 		return "", err
 	}
 	bin := exe(filepath.Join("bin", "telesphorepo-server"))

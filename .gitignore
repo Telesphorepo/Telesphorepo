@@ -3,6 +3,8 @@
 /web/node_modules/
 /internal/clidist/dist/*
 !/internal/clidist/dist/.keep
+/internal/edgedist/dist/*
+!/internal/edgedist/dist/.keep
 /telesphorepo
 *.db
 *.db-wal

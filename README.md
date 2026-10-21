@@ -129,9 +129,8 @@ telesphorepo publish | status | update       # the CLI: publish a project, show 
 ```
 
 With the blobs on Cloudflare R2, clients far from the server can download from R2 buckets near
-them: choose the regions on **Settings > Edge delivery**, then deploy the edge Worker with the
-`wrangler.jsonc` of that page (see `edge/README.md`, or the `telesphorepo-edge` archive of a
-release).
+them: choose the regions on **Settings > Edge delivery**, then download the edge Worker there and
+deploy it with the steps of that page (see `edge/README.md`).
 
 To move the blobs to another store, change the storage on the **Settings** page. The server
 copies the existing blobs in the background. To move hosted repos from Nexus 3, add the Nexus

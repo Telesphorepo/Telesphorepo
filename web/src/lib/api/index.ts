@@ -331,10 +331,12 @@ export const api = {
   /** Edge delivery: the state of the Worker and the regional buckets, and its generated config. */
   edge: {
     status: () => request<T.EdgeStatus>("GET", "/api/edge/status"),
-    /** The wrangler.jsonc that the server builds from its settings. */
+    /** The wrangler.jsonc that the server builds from its settings, for a checkout of edge/. */
     wranglerConfig: () => requestText("/api/edge/wrangler.jsonc"),
     /** The address of the file, for a download link. */
     wranglerURL: "/api/edge/wrangler.jsonc",
+    /** The address of the edge Worker folder (a zip with the wrangler.jsonc in it), for a download link. */
+    workerURL: "/api/edge/worker.zip",
   },
 
   nexus: {

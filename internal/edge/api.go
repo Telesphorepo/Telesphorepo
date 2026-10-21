@@ -1,9 +1,15 @@
 package edge
 
 import (
+	"archive/zip"
+	"bytes"
+	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/edgedist"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/route"
 	"github.com/Telesphorepo/Telesphorepo/internal/storage"
@@ -23,11 +29,13 @@ type statusJSON struct {
 	GapCheckedAt  *time.Time `json:"gap_checked_at"`
 	// DeployNeeded: a storage change or move, a region change, or a Worker of another version
 	// asks for a new deploy. DeployReason names the storage change ("" otherwise).
-	DeployNeeded bool         `json:"deploy_needed"`
-	DeployReason string       `json:"deploy_reason"`
-	Home         homeJSON     `json:"home"`
-	Backfill     backfillJSON `json:"backfill"`
-	Regions      []regionJSON `json:"regions"`
+	DeployNeeded bool   `json:"deploy_needed"`
+	DeployReason string `json:"deploy_reason"`
+	// WorkerMissing says why GET /api/edge/worker.zip has no Worker of this build ("" when it has).
+	WorkerMissing string       `json:"worker_missing"`
+	Home          homeJSON     `json:"home"`
+	Backfill      backfillJSON `json:"backfill"`
+	Regions       []regionJSON `json:"regions"`
 }
 
 type homeJSON struct {
@@ -70,7 +78,7 @@ func (m *mod) status(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	}
 	out := statusJSON{
 		Enabled: v.mode == modeOn, Mode: [...]string{"off", "on", "draining"}[v.mode], Unfit: unfit(snap),
-		ServerVersion: m.h.Version, DeployNeeded: p.home.DeployNeeded, DeployReason: p.home.Reason,
+		ServerVersion: m.h.Version, DeployNeeded: p.home.DeployNeeded, DeployReason: p.home.Reason, WorkerMissing: m.workerMissing(),
 		Home:     homeJSON{Hint: HomeHint.Get(snap), Bucket: storage.S3Bucket.Get(snap), LastError: m.lastErr("home")},
 		Backfill: backfillJSON{Running: v.mode == modeOn && p.home.Started && !p.home.Ready, Queued: p.home.Queued, Total: p.home.Total},
 		Regions:  []regionJSON{},
@@ -137,10 +145,10 @@ func containsHint(rs []regionState, h string) bool {
 	return false
 }
 
-// wranglerConfig answers the wrangler.jsonc of the Worker for the current settings; 409
-// edge-not-configured when they cannot run edge delivery.
+// wranglerConfig answers the wrangler.jsonc of the Worker for the current settings, for a
+// checkout of edge/; 409 edge-not-configured when they cannot run edge delivery.
 func (m *mod) wranglerConfig(w http.ResponseWriter, r *http.Request, c *route.Call) {
-	body, err := m.wrangler(m.h.Settings.Current())
+	body, err := m.wrangler(m.h.Settings.Current(), false)
 	if err != nil {
 		ProblemNotConfigured.Write(w, r, err.Error())
 		return
@@ -149,4 +157,73 @@ func (m *mod) wranglerConfig(w http.ResponseWriter, r *http.Request, c *route.Ca
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	w.Write(body)
+}
+
+// workerZip answers the edge Worker folder of the server's build as a zip, with the wrangler.jsonc
+// of the current settings in it; 409 edge-not-configured when they cannot run edge delivery, 404
+// no-edge-worker when the build holds no Worker of the server's version.
+func (m *mod) workerZip(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	cfg, err := m.wrangler(m.h.Settings.Current(), true)
+	if err != nil {
+		ProblemNotConfigured.Write(w, r, err.Error())
+		return
+	}
+	src, version := edgedist.Zip()
+	if why := m.workerMissing(); why != "" {
+		ProblemNoWorker.Write(w, r, why)
+		return
+	}
+	zr, err := zip.NewReader(bytes.NewReader(src), int64(len(src)))
+	if err != nil {
+		httpx.Error(w, r, http.StatusInternalServerError, "the edge Worker of this build does not open")
+		return
+	}
+	var out bytes.Buffer
+	zw := zip.NewWriter(&out)
+	for _, f := range zr.File {
+		if err := zw.Copy(f); err != nil {
+			httpx.Error(w, r, http.StatusInternalServerError, "the edge Worker of this build does not open")
+			return
+		}
+	}
+	fw, err := zw.CreateHeader(&zip.FileHeader{Name: edgedist.Dir + "wrangler.jsonc", Method: zip.Deflate, Modified: time.Now()})
+	if err == nil {
+		_, err = fw.Write(cfg)
+	}
+	if err == nil {
+		err = zw.Close()
+	}
+	if err != nil {
+		httpx.Error(w, r, http.StatusInternalServerError, "the edge Worker zip could not be written")
+		return
+	}
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", `attachment; filename="telesphorepo-edge_`+safeFileVersion(version)+`.zip"`)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Length", strconv.Itoa(out.Len()))
+	w.WriteHeader(http.StatusOK)
+	w.Write(out.Bytes())
+}
+
+// workerMissing says why the build holds no edge Worker of the server's version, or "".
+func (m *mod) workerMissing() string {
+	src, version := edgedist.Zip()
+	if src == nil {
+		return "This server was built without the edge Worker. Build it with go tool task build (it needs bun), or install a release."
+	}
+	if version != m.h.Version {
+		return fmt.Sprintf("This server %s holds the edge Worker of %s. Build both again with go tool task build.", m.h.Version, version)
+	}
+	return ""
+}
+
+// safeFileVersion is version with every character outside [A-Za-z0-9.+-] replaced by "_", for a
+// file name.
+func safeFileVersion(version string) string {
+	return strings.Map(func(c rune) rune {
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '+' || c == '-' {
+			return c
+		}
+		return '_'
+	}, version)
 }

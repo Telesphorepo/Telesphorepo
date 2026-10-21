@@ -17,6 +17,9 @@ ARG VERSION=dev
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
+# bun (from the web stage, with the C++ runtime it links) and Node bundle the edge Worker.
+RUN apk add --no-cache libgcc libstdc++ nodejs
+COPY --from=web /usr/local/bin/bun /usr/local/bin/bun
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY . .
@@ -24,9 +27,13 @@ COPY --from=web /src/web/dist ./web/dist
 # The server embeds the six CLI archives of the same source (internal/clidist), which it serves
 # at /cli/ and its install scripts download. With a release VERSION, "go tool task cli" refuses
 # a changes.toml that still has a "dev" entry: the tagged commit holds the stamped change log.
+# It also embeds the edge Worker folder of the same VERSION (internal/edgedist), which it hands
+# out at /api/edge/worker.zip.
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/root/.bun/install/cache \
     go tool task cli "${VERSION}" \
+ && go tool task edge "${VERSION}" \
  && CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -trimpath -ldflags="-s -w -X main.version=${VERSION} -X github.com/Telesphorepo/Telesphorepo/internal/backup.defaultDir=/backups" -o /out/telesphorepo-server ./cmd/telesphorepo-server \
  && mkdir -p /out/data /out/backups
 

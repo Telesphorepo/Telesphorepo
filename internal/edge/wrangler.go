@@ -34,10 +34,13 @@ func copyQueue(homeBucket string) string { return homeBucket + "-edge-copy" }
 
 // wrangler returns the wrangler.jsonc of the Worker for the settings of s: the routes (the base
 // URL host with the prefix of each format that the edge serves), the bucket bindings (HOME and
-// R2_<HINT> of each chosen region), the copy queue (binding COPY), the cron of the gap check, the
-// var PREFIX (s3.prefix) and the define of TELESPHOREPO_VERSION to the server version. It fails
-// when s cannot run edge delivery.
-func (m *mod) wrangler(s *settings.Snapshot) ([]byte, error) {
+// R2_<HINT> of each chosen region), the copy queue (binding COPY), the cron of the gap check and
+// the var PREFIX (s3.prefix). With bundled it is the config of the Worker folder of the download:
+// "main" is the bundle dist/index.js with "no_bundle", which the build defined to the server
+// version. Without, it is the config of a checkout of edge/: "main" is src/index.ts and the
+// define of TELESPHOREPO_VERSION to the server version goes into the bundle that deploy builds.
+// It fails when s cannot run edge delivery.
+func (m *mod) wrangler(s *settings.Snapshot, bundled bool) ([]byte, error) {
 	if storage.Backend.Get(s) != "s3" {
 		return nil, errors.New("edge delivery needs storage s3 (Cloudflare R2)")
 	}
@@ -93,8 +96,13 @@ func (m *mod) wrangler(s *settings.Snapshot) ([]byte, error) {
 		},
 		"triggers": map[string]any{"crons": []string{gapCron}},
 		"vars":     map[string]string{"PREFIX": storage.S3Prefix.Get(s)},
+	}
+	if bundled {
+		cfg["main"] = "dist/index.js"
+		cfg["no_bundle"] = true
+	} else {
 		// The Worker's VERSION: it serves only while config.json carries the same version.
-		"define": map[string]string{versionDefine: versionLiteral(m.h.Version)},
+		cfg["define"] = map[string]string{versionDefine: versionLiteral(m.h.Version)}
 	}
 	var body bytes.Buffer
 	enc := json.NewEncoder(&body)
@@ -105,12 +113,23 @@ func (m *mod) wrangler(s *settings.Snapshot) ([]byte, error) {
 	}
 	var out bytes.Buffer
 	fmt.Fprintf(&out, "// wrangler.jsonc of the Telesphorepo edge Worker, made by the server %s for %s.\n", m.h.Version, host)
-	out.WriteString("// Save it in edge/ (or in the folder of the unpacked telesphorepo-edge archive, with \"main\"\n")
-	out.WriteString("// set to \"dist/index.js\" and \"no_bundle\": true), then run:\n")
-	out.WriteString("//   CLOUDFLARE_API_TOKEN=... bun run provision\n")
+	if bundled {
+		out.WriteString("// It belongs to the Worker of this download, which holds the Worker of the same server version.\n")
+		out.WriteString("// In this folder, run:\n")
+	} else {
+		out.WriteString("// Save it in the edge folder of a checkout of the repository, then run there:\n")
+	}
+	out.WriteString("//   bun install\n")
+	out.WriteString("//   bunx wrangler login\n")
+	out.WriteString("//   bun run provision\n")
 	out.WriteString("//   bun run deploy\n")
-	out.WriteString("// The token needs Workers Scripts and Routes edit, R2 edit and Queues edit. Run provision again\n")
-	out.WriteString("// after a region change, and deploy for each server release.\n")
+	out.WriteString("// In CI, set CLOUDFLARE_API_TOKEN (Workers Scripts and Routes edit, R2 edit, Queues edit) in\n")
+	out.WriteString("// place of the login. Run provision and deploy again after a region change, and deploy the\n")
+	if bundled {
+		out.WriteString("// Worker of each server release: download it again from Settings > Edge delivery.\n")
+	} else {
+		out.WriteString("// Worker of each server release.\n")
+	}
 	out.Write(body.Bytes())
 	return out.Bytes(), nil
 }

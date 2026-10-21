@@ -62,9 +62,10 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/auth` | Users (kinds `local`/`oidc`), argon2id passwords, Basic-auth cache, read tokens, sessions, rate limiting, permission checks. A caller is a `Principal` with one credential kind (`Cred`: password, read token, session, setup session, publish session, device). `Identify` reads the credentials a route policy names. Token kinds are verifiers by prefix (`AddTokenKind`). Also core bearer tokens (`IssueBearer`), fresh second-factor proofs (`CheckProof`, `IssueGrant`) and the session view (`View`) |
 | `internal/oidc` | Module `sso`: OIDC sign-in for any person at the provider, the server permissions from a claim (`oidc.permission_claim`, `oidc.permission_map`), and the SSO confirmations of a device approval and of a setup code: `/api/auth/oidc/login`, `/device`, `/setup` and `/callback` (go-oidc + x/oauth2, PKCE S256); owner hooks of the `sso` settings group |
 | `internal/publish` | Module `publish`: device enrollment, setup codes, nonces, trust policies, the CI token exchange, the CI providers `github-actions` and `jenkins`, the token kind `trs` of publish sessions, the device proof of format reads, the publish API, the cleanup job, and the install scripts and downloads of the Telesphorepo CLI |
-| `internal/edge` | Module `edge`: the R2 objects that the edge Worker reads (pointers, access objects, `config.json`), the pipeline watcher and the outbox that keep them, the regions, `wrangler.jsonc`, `/api/edge/...`. See **Edge delivery** |
+| `internal/edge` | Module `edge`: the R2 objects that the edge Worker reads (pointers, access objects, `config.json`), the pipeline watcher and the outbox that keep them, the regions, `wrangler.jsonc`, the Worker download, `/api/edge/...`. See **Edge delivery** |
 | `edge/` | The edge Worker (TypeScript, bun, wrangler at an exact version): `fetch` (serve or pass), `queue` (blob copies) and `scheduled` (the gap check); `scripts/provision.ts`; `test/` holds the fixture of the `edge` e2e zone. See **Edge delivery** |
 | `internal/clidist` | The CLI archives that the server embeds (`go:embed all:dist`) and serves at `/cli/`: `Targets`, `Archive`, `FS`, `Sums`. `go tool task build`, `dev`, `cli` and `release` write them |
+| `internal/edgedist` | The edge Worker folder that the server embeds (`go:embed all:dist`) and hands out at `GET /api/edge/worker.zip`: `telesphorepo-edge.zip` (the bundle, `package.json`, `bun.lock`, `README.md`, `scripts/provision.ts`, all under `telesphorepo-edge/`) and `VERSION`, read by `Zip`. `go tool task build`, `dev`, `edge` and `release` write them |
 | `internal/repos` | Repos, their kind, their active operation (`Repo.Op`) and per-format JSON config. `Create` and `Update` (a `Patch`) are the only changes of a repo record: each checks the whole new state first, then saves it in one transaction with the format's `OnRepoChange` and one audit event. A `Validator` (the format registry) checks the config and a `KindCheck` the kind. Modules drop what they keep about a deleted repo with `OnDelete`. A module adds repo values that it keeps in its own tables as fields (`repos.Field`, `AddField`): `Create` and `Update` validate and save them in the same transaction, and `Repo.Fields` holds them. Keeps the group members and the proxy remotes in memory (see **Group and proxy repositories**) |
 | `internal/proxy` | Fetches the files of proxy repos from their remotes (the `assets.Fetcher` of the read path), stores them through `Commit` with source `proxy`, answers a remote's 401 challenge through the format's `RemoteAuth`, and remembers remote 404s; `proxy.Answer` is the answer of the registry token protocol (also for the Nexus client), `proxy.Send` a request to a remote as a fetch sends it (e.g. a remote tags list) |
 | `internal/format` | The format contract: `Spec` (every optional capability is a field that is nil when the format lacks it), the `Registry` (`All`, `Get`, `Hooks`, `RebuildRun`, `OnRepoChange`, `ValidateConfig`, `SupportsKind`, `Importer`), `Kit` and `Standard` (the default routes), `Importer.Run` (the shared import of one source file), and the rendered documents: `WriteDocument` (a `Document`, a body with its strong `ETag`, answered with 304 on `If-None-Match` and `Vary`; `NewDocument` gives an uncached body the SHA-256 of the body) and `DocumentCache` (an LRU of rendered documents, bounded in entries, in bytes and per entry, keyed by `DocumentKey` of what the body depends on: a revision of the rows or the SHA-256s of the sources, and the base URL). A cached document's ETag is the SHA-256 of its key, so `DocumentCache.Serve` answers a matching `If-None-Match` with 304 before it looks up or builds the body; absolute URLs in a document start at `route.API.BaseURL` |
@@ -160,7 +161,7 @@ it needs and leaves the others nil. The kernel gives it these parts:
 | `network` | `internal/netrules` | | The client address, IP lists, repo IP rules (a repo guard and the networks of the access report), the IP lists of the trusted proxies (`/api/network/trusted-proxies`), the subsystem `network`, the settings group `network` (`trusted_proxies`; its `Validate` refuses a `list:` entry in a change), the `network.*` actions, job `network.presets` (every hour) |
 | `signing` | `internal/signing` | | Signing keys and `/api/signing-keys/...`, the repo field `signing_key` (for the hosted repos of the formats with `SigningKey`), the subsystem `signing`, the `signing.key.*` actions; provides `*signing.Keys` |
 | `publish` | `internal/publish` | `audit` | Devices, publish sessions (`trs`), CI trust policies, the CI providers `github-actions` and `jenkins`, `/api/devices/...` and `/api/publish/...`, the subsystem `ci`, the settings group `publishing`, the `publish.session.*`, `device.*`, `setup_code.create` and `ci.pipeline.*` actions, job `publish.cleanup` (every minute), `/install.sh`, `/install.ps1` and `/cli/` (see **Install scripts and CLI downloads**); provides `*publish.Service` and `publish.Minter`; loads the publish sessions and devices of core bearer tokens and gives the access report its CI pipelines |
-| `edge` | `internal/edge` | `storage`, `network`, `publish` | Edge delivery (see **Edge delivery**): the subsystem `edge` with `edge.manage`, the settings group `edge`, `GET /api/edge/status` and `GET /api/edge/wrangler.jsonc`, the pipeline watcher, jobs `edge.outbox`, `edge.backfill`, `edge.reconcile` (every 5 min) and `edge.seen` (every minute), the line of the access report that says where downloads come from |
+| `edge` | `internal/edge` | `storage`, `network`, `publish` | Edge delivery (see **Edge delivery**): the subsystem `edge` with `edge.manage`, the settings group `edge`, `GET /api/edge/status`, `GET /api/edge/worker.zip` and `GET /api/edge/wrangler.jsonc`, the pipeline watcher, jobs `edge.outbox`, `edge.backfill`, `edge.reconcile` (every 5 min) and `edge.seen` (every minute), the line of the access report that says where downloads come from |
 | `sso` | `internal/oidc` | `publish` | `/api/auth/oidc/...`, the subsystem `signin`, the settings group `sso` (its `Validate` with the startup guard and the claim map check, `Test` and `Apply`: the discovery check), the `sso.*` actions; tells auth when single sign-on manages permissions |
 | `nexus` | `internal/nexus` | | `/api/nexus/...`, the subsystem `nexus`, the settings group `nexus`, the `nexus.*` actions, the operation type `mirror`, job `nexus.scheduler` (resumes running syncs, then the schedule loop) |
 | `maven` | `internal/maven` | | Format `maven` (publish category `cli`) with the tools `gradle` and `maven` (their CI steps) |
@@ -967,8 +968,9 @@ transaction.
 | `POST /api/storage/moves/{id}/retry` | `storage.manage` | Tries the newest move again when it failed or was cancelled (409 otherwise). The body `{key: value}` holds storage settings that change the target (`{}` keeps it; a secret left out or `""` keeps the target's secret; a key of another group is 400). The server builds the settings PATCH that makes the sealed target the active storage, puts the body on top and saves it like `PATCH /api/settings`: 202 `{move}` with the new move, or 200 `{move: null}` when the settings saved at once; a refusal answers like the PATCH. The old move is dismissed. Records `storage.move.retry` |
 | `POST /api/storage/moves/{id}/test` | `storage.manage` | The same body as the retry; runs the storage `Validate` and the probe on the target a retry would move to, saves nothing. Answers like `POST /api/settings/storage/test` |
 | `POST /api/storage/moves/{id}/dismiss` | `storage.manage` | Dismisses an ended move and returns it; storage stays where it is. 409 while it copies. Records `storage.move.dismiss` |
-| `GET /api/edge/status` | `edge.manage` | `{enabled, mode: "on"\|"draining"\|"off", unfit, server_version, worker_version\|null, version_mismatch, gap_checked_at\|null, deploy_needed, deploy_reason, home: {hint, bucket, outbox, last_error}, backfill: {running, queued, total}, regions: [{hint, area, bucket, state: "filling"\|"ready"\|"waiting", pointers_written, pointers_total, blobs_missing\|null, outbox, last_error}]}`. `backfill.running` holds until the outbox wrote every pointer of the backfill (`home.ready`). The Worker version and the gap check come from `gap/state.json`; `waiting`: the Worker of the last gap check has no binding for the region, or its binding is a bucket whose `bucket.json` names another bucket; `deploy_needed` also holds when the `bucket.json` of its `HOME` names another bucket than the home bucket. The outbox counts come from the count of the outbox job: every 5 s while the page asks for the status at least every 30 s; after a longer pause the request asks for a count and waits for it up to a second. See **Edge delivery** |
-| `GET /api/edge/wrangler.jsonc` | `edge.manage` | The `wrangler.jsonc` of the Worker for the current settings, `text/plain`, `no-store`. 409 problem `edge-not-configured` when the settings cannot run edge delivery (storage fs, a base URL with a path, no home hint) |
+| `GET /api/edge/status` | `edge.manage` | `{enabled, mode: "on"\|"draining"\|"off", unfit, server_version, worker_version\|null, version_mismatch, gap_checked_at\|null, deploy_needed, deploy_reason, worker_missing, home: {hint, bucket, outbox, last_error}, backfill: {running, queued, total}, regions: [{hint, area, bucket, state: "filling"\|"ready"\|"waiting", pointers_written, pointers_total, blobs_missing\|null, outbox, last_error}]}`. `backfill.running` holds until the outbox wrote every pointer of the backfill (`home.ready`). The Worker version and the gap check come from `gap/state.json`; `waiting`: the Worker of the last gap check has no binding for the region, or its binding is a bucket whose `bucket.json` names another bucket; `deploy_needed` also holds when the `bucket.json` of its `HOME` names another bucket than the home bucket. The outbox counts come from the count of the outbox job: every 5 s while the page asks for the status at least every 30 s; after a longer pause the request asks for a count and waits for it up to a second. `worker_missing` is the detail of the `no-edge-worker` problem of `GET /api/edge/worker.zip`, `""` when the build holds the Worker of the server's version. See **Edge delivery** |
+| `GET /api/edge/worker.zip` | `edge.manage` | The edge Worker folder of the server's build, `application/zip`, `attachment; filename="telesphorepo-edge_<version>.zip"`, `no-store`: every file of `internal/edgedist` under `telesphorepo-edge/`, plus `telesphorepo-edge/wrangler.jsonc` for the current settings with `"main": "dist/index.js"` and `"no_bundle": true`. 409 problem `edge-not-configured` as below; 404 problem `no-edge-worker` when the build holds no Worker, or one of another version than the server |
+| `GET /api/edge/wrangler.jsonc` | `edge.manage` | The `wrangler.jsonc` of the Worker for the current settings, for a checkout of `edge/` (`"main": "src/index.ts"` and the `define`), `text/plain`, `no-store`. 409 problem `edge-not-configured` when the settings cannot run edge delivery (storage fs, a base URL with a path, no home hint) |
 | `POST /api/nexus/sources` | `nexus.manage` | `{name, base_url, username, password}`; `name` matches the repo name pattern. Checks the connection. 201 `Source`. 400 for invalid input or refused credentials, 409 when the name exists, 502 when Nexus is unreachable |
 | `GET /api/nexus/sources?after=<name>&limit=` | `nexus.manage` | `{items: [Source], next}` in name order |
 | `GET /api/nexus/sources/{id}` | `nexus.manage` | `SourceDetail`. After cut-over, or when Nexus is unreachable, it lists only the mapped repos and `nexus_error` says why |
@@ -1993,10 +1995,10 @@ files a minute, and a token is lost only when the runtime ends the `waitUntil` b
 server:
 
 1. `config.json` says `enabled` and `home.ready`, the `bucket.json` of `HOME` names
-   `home.bucket`, and the `version` of `config.json` is the Worker's (the
-   `wrangler.jsonc` of the server defines `TELESPHOREPO_VERSION` to the server version, and a
-   release bundles the Worker with `--define TELESPHOREPO_VERSION`; a build without it is `dev`,
-   like the server).
+   `home.bucket`, and the `version` of `config.json` is the Worker's (the build of the server
+   bundles the Worker of its download with `--define TELESPHOREPO_VERSION` to its version, and
+   the `wrangler.jsonc` of a checkout defines it to the server version; a build without it is
+   `dev`, like the server).
 2. The URL parses with the format's shape and the repopath rules; a path with an encoded `/`, `\`
    or NUL, or with an empty, `.` or `..` segment, goes to the server, and so do uploads, tags
    lists, referrers, `/v2/`, the catalog, `key.asc` and a request with the query parameter
@@ -2066,18 +2068,35 @@ pass is older than 24 hours: it merges the key-ordered lists of the home `blobs/
 (1000 keys per list), queues copies and deletes 100 per batch, keeps its cursor in
 `gap/state.json` and stops before 5,000 subrequests.
 
-**Deploy.** `GET /api/edge/wrangler.jsonc` (and the Edge delivery page) gives the Worker
-configuration for the settings: the routes `<base URL host><prefix>*` of each format with `Edge`,
-the bindings `HOME` and `R2_<HINT>` of each chosen region, the queue (producer `COPY`, consumer
-batches of 100, 10 retries), the cron, the var `PREFIX` (`s3.prefix`) and the `define` of
-`TELESPHOREPO_VERSION` to the server version, so `bun run deploy` builds a Worker of that version
-(the bundle of the release archive carries the same define). In `edge/` (or the
-unpacked release archive) the operator runs `CLOUDFLARE_API_TOKEN=... bun run provision`
-(`scripts/provision.ts`: each regional bucket with its location hint, the queue and the
-notification rule, skipping what exists; it refuses a config with a custom domain,
-routes on several hosts or a route outside the zone it names) and `bun run deploy`. The token
-needs Workers Scripts and Routes edit, R2 edit and Queues edit. `go tool task release` adds
-`telesphorepo-edge_<version>.tar.gz` (see **Tooling**).
+**Deploy.** The server writes the Worker configuration for the settings: the routes
+`<base URL host><prefix>*` of each format with `Edge`, the bindings `HOME` and `R2_<HINT>` of
+each chosen region, the queue (producer `COPY`, consumer batches of 100, 10 retries), the cron and
+the var `PREFIX` (`s3.prefix`). `GET /api/edge/worker.zip` (the download of the Edge delivery
+page) is the Worker folder, ready to run: the bundle `dist/index.js` that the build of the server
+made with `--define TELESPHOREPO_VERSION:"<server version>"` (`internal/edgedist`, see
+**Tooling**), `package.json` (wrangler at an exact version, the scripts `provision` and
+`deploy`), `bun.lock`, `scripts/provision.ts`, the README and the `wrangler.jsonc` with
+`"main": "dist/index.js"` and `"no_bundle": true`. The server refuses the download when its build
+holds no Worker, or one of another version, so a deploy from it is always a Worker of the
+server's version. `GET /api/edge/wrangler.jsonc` is the configuration for a checkout of `edge/`:
+`"main": "src/index.ts"` and the `define` of `TELESPHOREPO_VERSION` to the server version, so
+`bun run deploy` bundles a Worker of that version.
+
+In the folder the operator runs `bun install`, `bunx wrangler login` (once), `bun run provision`
+and `bun run deploy`. Wrangler's OAuth login asks for its default scopes, which include
+`workers:write`, `workers_scripts:write`, `workers_routes:write`, `zone:read` and `queues:write`;
+R2 has no scope of its own there, and Cloudflare's R2 guides run `r2 bucket create`, `r2 bucket
+notification create` and `queues create` after a plain `wrangler login`. In CI,
+`CLOUDFLARE_API_TOKEN` (Workers Scripts and Routes edit, R2 edit, Queues edit) takes the place of
+the login; wrangler reads it itself. `scripts/provision.ts` first runs `wrangler whoami --json`:
+without a login or a token it stops with "Sign in first: bunx wrangler login". Provision runs
+wrangler without a terminal, and wrangler cannot ask which account to use, so when the login
+reaches several accounts and neither `CLOUDFLARE_ACCOUNT_ID` nor `account_id` in
+`wrangler.jsonc` names one, provision stops, names `CLOUDFLARE_ACCOUNT_ID` and lists the accounts;
+an account ID that the login cannot reach stops it too. Then it creates each regional bucket with
+its location hint, the queue and the notification rule, skipping what exists; it refuses a config
+with a custom domain, routes on several hosts or a route outside the zone it names.
+`go tool task release` adds the same folder as `telesphorepo-edge_<version>.tar.gz`.
 
 **Revocation speed.** The Cache API keeps an object per data center and `cache.delete` purges only
 the local one, so `edge.access_ttl` (default 30 s, 0 to 5 min) is the bound.
@@ -2124,10 +2143,12 @@ one-write-per-second key limit. The edge serves a valid read token from such an 
 256-bit token is not a guess, and every wrong guess still reaches the server and counts.
 
 **Operator flow.** In **Edge delivery** the admin picks the home hint and the regions and saves; the
-page probes every bucket first. The admin saves the generated `wrangler.jsonc` in `edge/` (or the
-unpacked `telesphorepo-edge_<version>.tar.gz`), runs `CLOUDFLARE_API_TOKEN=... bun run provision`
-after each region change and `bun run deploy` after each region change and each release, then turns
-`edge.enabled` on. The server backfills the pointers and the gap check copies the blobs; a region
+page probes every bucket first. The admin downloads the edge Worker from the Deploy section,
+unpacks it, and in its `telesphorepo-edge` folder runs `bun install`, `bunx wrangler login`,
+`bun run provision` and `bun run deploy`, then turns `edge.enabled` on. After each region change
+the admin downloads the Worker again (its `wrangler.jsonc` has the new bindings) and runs
+provision and deploy; for each server release, downloads it again (the bundle is that version)
+and runs deploy. The server backfills the pointers and the gap check copies the blobs; a region
 serves when the page says ready. A removed region needs a deploy and a manual bucket delete in
 Cloudflare. Download snippets for private repos use a read token, never a password.
 
@@ -3737,9 +3758,14 @@ page are in `web/src/README.md`.
   runs the group's **Test** first; a failed probe shows on its row and nothing is saved. Clearing a
   saved region asks first ("The server stops writing to the bucket ... Deploy the Worker again,
   then delete the bucket in Cloudflare"). Backfill shows the progress of each filling region,
-  polled every 3 seconds. Settings: `edge.enabled` and `edge.access_ttl`. Deploy: the generated
-  `wrangler.jsonc` in a `CodeBlock` with a download, `bun run provision` and `bun run deploy`, the
-  token permissions, and "Deploy needed" after a storage, region or version change. The access
+  polled every 3 seconds. Settings: `edge.enabled` and `edge.access_ttl`. Deploy: numbered
+  steps: download the edge Worker (the one button, `GET /api/edge/worker.zip`; in its place the
+  `worker_missing` sentence of the status when the build has none), unpack it and open a terminal
+  in `telesphorepo-edge`, then `bun install`, `bunx wrangler login` (with `CLOUDFLARE_API_TOKEN`
+  for CI), `bun run provision` (with `CLOUDFLARE_ACCOUNT_ID` for a login with several accounts)
+  and `bun run deploy`, each a `CodeSnippet`; when to repeat them; "Deploy needed" after a
+  storage, region or version change; and behind a `LearnMore` the `wrangler.jsonc` of a checkout
+  in a `CodeBlock` with its download. The access
   tab of a repo shows the download notes under the Download section.
 - **Sign-in options page.** Three numbered cards: connect your provider (with **Test** in its
   footer), permissions from the provider (the claim `oidc.permission_claim`, and the map `oidc.permission_map` as groups: each value of the claim with its server permissions as a role (Member, Administrator or Custom), with Change, Remove and Add a group), and how people sign in (`oidc.session_ttl`,
@@ -3832,16 +3858,17 @@ project and file rows per unit. Then it runs
 
 | Command | Does |
 |---|---|
-| `go tool task dev` | Checks Go, bun/npm and Node (version in `.node-version`). Builds the CLI archive of this computer once (see **Install scripts and CLI downloads**). Runs the backend on :8080 and rebuilds it on Go or `internal/**/migrations/*.sql` changes. Runs Vite with HMR on **:5173**, proxying every path except the UI's own files to the backend |
-| `go tool task build [image]` | Builds the UI and the six CLI archives (`internal/clidist/dist`), then `bin/telesphorepo-server` with both embedded (`CGO_ENABLED=0`, version from git). `image` also builds the container image `telesphorepo:local` |
+| `go tool task dev` | Checks Go, bun/npm and Node (version in `.node-version`). Builds the CLI archive of this computer and the edge Worker folder once (see **Install scripts and CLI downloads**). Runs the backend on :8080 and rebuilds it on Go or `internal/**/migrations/*.sql` changes. Runs Vite with HMR on **:5173**, proxying every path except the UI's own files to the backend |
+| `go tool task build [image]` | Builds the UI, the six CLI archives (`internal/clidist/dist`) and the edge Worker folder (`internal/edgedist/dist`, as `go tool task edge`; without bun it writes none and says so), then `bin/telesphorepo-server` with them embedded (`CGO_ENABLED=0`, version from git). `image` also builds the container image `telesphorepo:local` |
 | `go tool task cli [version]` | Builds the six CLI archives of `./cmd/telesphorepo` and `SHA256SUMS` into `internal/clidist/dist` (version from git by default). A given release version needs a `changes.toml` with no `dev` entry. Without `cmd/telesphorepo` it writes none and says so |
+| `go tool task edge [version]` | Runs `bun install --frozen-lockfile` in `edge/`, bundles the Worker (`wrangler deploy src/index.ts --dry-run --outdir` with `--define TELESPHOREPO_VERSION:"<version>"`; version from git by default) and packs the folder that `GET /api/edge/worker.zip` hands out into `internal/edgedist/dist`: `telesphorepo-edge.zip` with `dist/`, `package.json` without the scripts `build` and `typecheck` (its dependencies unchanged, so `bun.lock` matches it), `bun.lock`, `README.md` and `scripts/provision.ts`, and `VERSION`. It needs bun. The image build runs it with Node and the bun of the web stage. `dev` runs it with the version `dev` (the dev backend's) and goes on without it when it fails |
 | `go tool task preview` | Builds, then runs `bin/telesphorepo-server dev` on :8080 |
 | `go tool task test [go test args]` | Runs the core zone: `go test -tags e2e ./e2e/... -count=1 -v`, 60 min timeout |
 | `go tool task test import [go test args]` | Runs the import zone: `-tags import`, 45 min timeout. It starts a Nexus container |
 | `go tool task test scale [go test args]` | Runs `TestScale` (`-tags scale`, 60 min timeout) |
 | `go tool task test clients [go test args]` | Runs the clients zone: `-tags clients`, 120 min timeout. It builds the CLI of this repo on the host and runs it in containers with the real tools |
 | `go tool task test [zone] --shard i/n [go test args]` | Runs every n-th top-level test of the zone, by name, from the i-th (`go test -list`, then one `-run`); `TestMain` skips its setup while listing | Runs core, import, scale and clients one after the other. It runs every zone, lists the failed zones and exits non-zero if any failed |
-| `go tool task release [version]` | Builds the UI and the six CLI archives that the server embeds once. Then it cross-compiles each program whose package exists: the CLI (`./cmd/telesphorepo`, with its own `LICENSE`; the install scripts make its second name `docker-credential-telesphorepo`) and the server (`./cmd/telesphorepo-server`) for linux, darwin and windows on amd64 and arm64 (`CGO_ENABLED=0`, `-trimpath`, `-X main.version`). Each binary goes into `bin/release/<program>_<version>_<os>_<arch>.tar.gz` (`.zip` on Windows) with `LICENSE` and `README.md`. With `edge/`, it runs `bun install --frozen-lockfile` there and bundles the Worker (`wrangler deploy --dry-run --outdir` with `--define TELESPHOREPO_VERSION:"<version>"`) into `telesphorepo-edge_<version>.tar.gz`: `dist/`, `package.json`, `bun.lock`, `README.md` and `scripts/provision.ts`. The command writes `SHA256SUMS` of every archive. The version defaults to `git describe`. A version given as the argument must be a release version, and `changes.toml` must have no `dev` entry (see **Change log**) |
+| `go tool task release [version]` | Builds the UI and the six CLI archives that the server embeds once. Then it cross-compiles each program whose package exists: the CLI (`./cmd/telesphorepo`, with its own `LICENSE`; the install scripts make its second name `docker-credential-telesphorepo`) and the server (`./cmd/telesphorepo-server`) for linux, darwin and windows on amd64 and arm64 (`CGO_ENABLED=0`, `-trimpath`, `-X main.version`). Each binary goes into `bin/release/<program>_<version>_<os>_<arch>.tar.gz` (`.zip` on Windows) with `LICENSE` and `README.md`. With `edge/`, it bundles the edge Worker folder once (as `go tool task edge`; it needs bun), embeds it in the server, and packs the same folder into `telesphorepo-edge_<version>.tar.gz`: `dist/`, `package.json`, `bun.lock`, `README.md` and `scripts/provision.ts`. The command writes `SHA256SUMS` of every archive. The version defaults to `git describe`. A version given as the argument must be a release version, and `changes.toml` must have no `dev` entry (see **Change log**) |
 | `go tool task tag <version>` | Makes a release. It needs a clean work tree and a new tag. It writes `v<version>` into each `dev` entry of `changes.toml`, commits the file as `Release v<version>`, and creates the annotated tag `v<version>`. It pushes nothing. The tagged commit holds the stamped change log, so `release.yml` and every image build embed the same entries |
 | `go tool task gen` | Runs `go tool sqlc generate` for every `internal/**/sqlc.yaml` |
 | `go tool task migration <folder> <name>` | Creates the next migration `internal/<folder>/migrations/NNNN_<name>.sql` of a component (`db`, or `core`, for the kernel; the folder of the module otherwise, e.g. `move` for `storage`) with a header comment. The name holds only `a-z`, `0-9` and `_` |
@@ -4035,6 +4062,13 @@ and removes only held permissions; 400 for a set that breaks the dependency rule
 `TestLastPeople` (409 when the last enabled holder of `people.manage` would lose it; `people.manage` acts only
 on people it covers) and `TestSecondFactorRule` (who signs in with the password alone, the
 setup-only session, the second step, and a grant that ends a password-only session).
+`edge_test.go` covers `TestEdgeWorkerDownload`: on SeaweedFS with a home region and one region,
+`GET /api/edge/worker.zip` holds `dist/index.js`, `package.json` (wrangler at an exact version,
+`provision` and `deploy`), `bun.lock`, `README.md`, `scripts/provision.ts` and a
+`wrangler.jsonc` with `"main": "dist/index.js"`, `"no_bundle": true`, the routes and the buckets
+of the settings; the `wrangler.jsonc` of a checkout has the same routes with `src/index.ts` and
+the define; a server on the local disk answers 409 `edge-not-configured`. No Cloudflare account is
+needed.
 `permissions_test.go` covers `TestServerPermissions` (one subtest per server permission: the
 holder reaches its routes, anyone else gets 403), `TestPipelinesPermission` (the CI pipeline
 scope) and `TestPeoplePicker` (`GET /api/people`). `registries_test.go` covers

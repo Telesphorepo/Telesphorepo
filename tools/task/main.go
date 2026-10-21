@@ -8,6 +8,7 @@
 //	go tool task preview        build, then run the production binary locally
 //	go tool task test [zone] [args]  e2e zone: core (default), import, scale, clients or all; args go to "go test"
 //	go tool task cli [version]  the six CLI archives that the server embeds (internal/clidist/dist)
+//	go tool task edge [version]  the edge Worker folder that the server embeds (internal/edgedist/dist)
 //	go tool task release [version]  cross-compiled archives and SHA256SUMS in bin/release
 //	go tool task gen           regenerate the sqlc data layer (every internal/**/sqlc.yaml)
 //	go tool task migration <folder> <name>  the next migration file of a component
@@ -30,7 +31,7 @@ import (
 const usage = `Usage: go tool task <command>
 
   dev              run everything locally with live reload: API on :8080, UI on http://localhost:5173
-  build            build bin/telesphorepo-server with the UI and the six CLI archives embedded
+  build            build bin/telesphorepo-server with the UI, the six CLI archives and the edge Worker embedded
   build image      ...and the container image telesphorepo:local (Docker or Podman)
   preview          build, then run the production binary at http://localhost:8080
   test [args]      run the core e2e zone; args pass to go test (e.g. go tool task test -run TestMaven)
@@ -42,6 +43,8 @@ const usage = `Usage: go tool task <command>
   cli [version]    build the six CLI archives that the server serves at /cli/ into internal/clidist/dist
                    (the version defaults to git describe; skipped while cmd/telesphorepo does not exist).
                    A given release version needs a changes.toml with no "dev" entry
+  edge [version]   bundle the edge Worker of the version (default git describe) into the folder that
+                   the server hands out at /api/edge/worker.zip (internal/edgedist/dist); needs bun
   tag <version>    make a release: write the version into each "dev" entry of changes.toml, commit
                    it, and create the tag v<version> (e.g. go tool task tag 1.2.3); push it yourself
   release [version]  build the UI once, then bin/release/<program>_<version>_<os>_<arch> archives
@@ -146,6 +149,15 @@ func run(ctx context.Context, args []string) error {
 			}
 		}
 		return cliArchives(ctx, version, clidist.Targets)
+	case "edge":
+		if len(rest) > 1 {
+			return usageErr("edge takes at most one argument, the version (go tool task edge 1.2.3)")
+		}
+		version := gitVersion(ctx)
+		if len(rest) == 1 {
+			version = rest[0]
+		}
+		return edgeWorker(ctx, version, true)
 	case "tag":
 		if len(rest) != 1 {
 			return usageErr("tag takes one argument, the release version (go tool task tag 1.2.3)")
