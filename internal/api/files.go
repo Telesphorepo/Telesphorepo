@@ -238,10 +238,13 @@ func planOut(p *format.Plan) *format.Plan {
 }
 
 // uploadPlan works out what an upload of files would store, with the format's Upload.Plan, and
-// stores nothing: 200 Plan. The multipart body holds the part "plan" first, a JSON object
-// {fields, folder, files: [{path, size}]} (paths relative to the drop, at most 500), then one part
-// per file whose path matches a read rule of the format (filename: its path), holding at most
-// the rule's max_bytes from the start of the file. It takes the credential of the upload.
+// stores nothing: 200 Plan with heads. The multipart body holds the part "plan" first, a JSON
+// object {fields, folder, files: [{path, size}], heads} (paths relative to the drop, at most 500),
+// then one part per file whose path matches a read rule of the format (filename: its path),
+// holding at most the rule's max_bytes from the start of the file. The server holds the parts it
+// read (heldHeads): heads in the answer names them, and a later plan with that heads needs no part
+// of a file that it held at the same size; such a plan that lacks the first bytes of a file the
+// format reads answers 409 plan-heads-gone. It takes the credential of the upload.
 func (a *API) uploadPlan(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	repo := c.Repo
 	up, ok := a.uploadSpec(w, r, repo)
@@ -267,6 +270,7 @@ func (a *API) uploadPlan(w http.ResponseWriter, r *http.Request, c *route.Call) 
 			Path string `json:"path"`
 			Size int64  `json:"size"`
 		} `json:"files"`
+		Heads string `json:"heads"`
 	}
 	if err := json.NewDecoder(io.LimitReader(part, 2<<20)).Decode(&req); err != nil {
 		httpx.Error(w, r, http.StatusBadRequest, "the plan part is not valid JSON: "+err.Error())
@@ -314,6 +318,7 @@ func (a *API) uploadPlan(w http.ResponseWriter, r *http.Request, c *route.Call) 
 		in.Files = append(in.Files, format.PlanFile{Path: p, Size: f.Size})
 	}
 	var total int64
+	fresh := map[string][]byte{} // the heads of this request, by path
 	for {
 		part, err := mr.NextPart()
 		if err == io.EOF {
@@ -344,17 +349,51 @@ func (a *API) uploadPlan(w http.ResponseWriter, r *http.Request, c *route.Call) 
 			return
 		}
 		in.Files[i].Head = b
+		fresh[rel] = b
+	}
+	user, session := assets.UploadOwner(c.P, repo)
+	held := a.heads.get(req.Heads, repo.ID, user, session)
+	for i, f := range in.Files {
+		if _, sent := fresh[f.Path]; sent || req.Heads == "" || readRule(up, f.Path) == nil {
+			continue
+		}
+		var b []byte
+		ok := false
+		if held != nil {
+			if b, ok, err = held.read(f.Path, f.Size); err != nil {
+				route.Fail(w, r, err)
+				return
+			}
+		}
+		if !ok {
+			problemHeadsGone.Write(w, r, "the server holds no first bytes of "+f.Path+"; send them with the plan")
+			return
+		}
+		in.Files[i].Head = b
 	}
 	plan, err := up.Plan(r.Context(), repo, in)
 	if err != nil {
 		route.Fail(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, planOut(plan))
+	sizes := make(map[string]int64, len(in.Files))
+	for _, f := range in.Files {
+		sizes[f.Path] = f.Size
+	}
+	heads, err := a.heads.hold(req.Heads, repo.ID, user, session, fresh, sizes)
+	if err != nil {
+		a.h.Log.Warn("hold the first bytes of an upload plan", "repo", repo.Name, "err", err)
+		heads = ""
+	}
+	httpx.WriteJSON(w, http.StatusOK, struct {
+		*format.Plan
+		Heads string `json:"heads"`
+	}{planOut(plan), heads})
 }
 
 // upload takes a multipart upload of files with a publish session for the repo: the format's
-// fields first, then the files, each with its path relative to the drop as its filename. It runs
+// fields first, then the files, each with its path relative to the drop as its filename, and the
+// part "uploads" for files that went through the resumable upload routes. It runs
 // the format's Upload.Plan on the files (the first bytes of each file that a read rule matches),
 // refuses 400 when a field or an item has a problem or no item takes a file, then hands the
 // files of the items to Upload.Store, which commits them through the asset pipeline (source
@@ -365,7 +404,7 @@ func (a *API) upload(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	if !ok {
 		return
 	}
-	ups, fields, ok := a.readUpload(w, r)
+	ups, fields, ok := a.readUpload(w, r, c)
 	defer closeUploads(ups)
 	if !ok {
 		return
@@ -427,11 +466,17 @@ type uploadFile struct {
 	sp   *assets.Spooled
 }
 
+// maxUploadsPart is the largest "uploads" part of an upload.
+const maxUploadsPart = 256 << 10
+
 // readUpload reads the multipart body of an upload: text fields first, then files. A file's
 // path is its filename as sent (the browser's path inside the dropped folder); every path must
-// be a valid repo path and appear once. The files together may not exceed max_upload_size. On
-// failure it has answered and returns ok=false; the caller closes the files either way.
-func (a *API) readUpload(w http.ResponseWriter, r *http.Request) ([]uploadFile, map[string]string, bool) {
+// be a valid repo path and appear once. The text part "uploads", a JSON list [{path, id, size}],
+// names files that went through the resumable upload routes with the caller's publish session:
+// each upload is finished with its size and is the file at its path. The files together may not
+// exceed max_upload_size. On failure it has answered and returns ok=false; the caller closes the
+// files either way.
+func (a *API) readUpload(w http.ResponseWriter, r *http.Request, c *route.Call) ([]uploadFile, map[string]string, bool) {
 	limit := settings.MaxUploadSize.Get(a.settings.Current())
 	// The files plus the multipart framing.
 	r.Body = http.MaxBytesReader(w, r.Body, limit+1<<20+int64(maxUploadFiles)*1024)
@@ -454,6 +499,47 @@ func (a *API) readUpload(w http.ResponseWriter, r *http.Request) ([]uploadFile, 
 			return ups, nil, false
 		}
 		rel, isFile := partPath(part)
+		if !isFile && part.FormName() == "uploads" {
+			var list []struct {
+				Path string `json:"path"`
+				ID   string `json:"id"`
+				Size int64  `json:"size"`
+			}
+			if err := json.NewDecoder(io.LimitReader(part, maxUploadsPart)).Decode(&list); err != nil {
+				httpx.Error(w, r, http.StatusBadRequest, "the uploads part is not a JSON list of {path, id, size}")
+				return ups, nil, false
+			}
+			for _, u := range list {
+				p := strings.TrimLeft(strings.ReplaceAll(u.Path, `\`, "/"), "/")
+				_, perr := repopath.Parse(p)
+				switch {
+				case len(ups) >= maxUploadFiles:
+					httpx.Error(w, r, http.StatusBadRequest, "upload at most "+strconv.Itoa(maxUploadFiles)+" files at a time")
+					return ups, nil, false
+				case perr != nil:
+					httpx.Error(w, r, http.StatusBadRequest, "invalid file name "+strconv.Quote(clipName(u.Path)))
+					return ups, nil, false
+				case seen[p]:
+					httpx.Error(w, r, http.StatusBadRequest, p+" is in the upload twice")
+					return ups, nil, false
+				case u.ID == "" || u.Size < 0:
+					httpx.Error(w, r, http.StatusBadRequest, "give the id and the size of the upload of "+p)
+					return ups, nil, false
+				case total+u.Size > limit:
+					httpx.Error(w, r, http.StatusRequestEntityTooLarge, "upload too large")
+					return ups, nil, false
+				}
+				seen[p] = true
+				sp, err := a.uploads.Finish(r.Context(), u.ID, c.P, c.Repo, "", u.Size)
+				if err != nil {
+					uploadFail(w, r, err)
+					return ups, nil, false
+				}
+				total += sp.Size
+				ups = append(ups, uploadFile{path: p, sp: sp})
+			}
+			continue
+		}
 		if !isFile {
 			if len(fields) >= maxUploadFields {
 				httpx.Error(w, r, http.StatusBadRequest, "too many form fields")

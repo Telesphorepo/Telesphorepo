@@ -61,6 +61,7 @@ type planJSON struct {
 	Items   []planItemJSON  `json:"items"`
 	Ignored []string        `json:"ignored"`
 	Fields  []planFieldJSON `json:"fields"`
+	Heads   string          `json:"heads"`
 }
 
 func (p planJSON) field(key string) planFieldJSON {
@@ -78,6 +79,7 @@ type planOpts struct {
 	fields map[string]string
 	folder string
 	reads  func(name string) bool
+	heads  string // the heads of an earlier plan
 }
 
 // readsPOMs and readsDebs are the read rules of the Maven and Debian formats.
@@ -97,7 +99,8 @@ func planUpload(t *testing.T, s *Server, repo string, auth Auth, o planOpts, par
 		Fields map[string]string `json:"fields"`
 		Folder string            `json:"folder"`
 		Files  []file            `json:"files"`
-	}{o.fields, o.folder, nil}
+		Heads  string            `json:"heads,omitempty"`
+	}{o.fields, o.folder, nil, o.heads}
 	for _, p := range parts {
 		req.Files = append(req.Files, file{p.Name, len(p.Body)})
 	}
@@ -375,4 +378,105 @@ func TestFolderUploadDebianAndRaw(t *testing.T) {
 		t.Fatalf("raw folder upload: %+v", got)
 	}
 	rawWantGet(t, s, nil, "/raw/"+raw+"/web/site/css/a.css", s.AdminBasic(), []byte("a{}"))
+}
+
+// TestUploadHeadsAndChunks: a plan answers heads, and a later plan that names them sends no first
+// bytes; heads the server does not hold, or of another publish session, answer 409. An upload
+// names files that went through the resumable upload routes in its part "uploads": the server
+// finishes each one with its size and stores it with the files of the request.
+func TestUploadHeadsAndChunks(t *testing.T) {
+	t.Parallel()
+	s := StartServer(t, ServerOpts{})
+	deb, raw := RandName("deb"), RandName("raw")
+	s.CreateRepo(t, deb, "debian", false, map[string]any{"architectures": []string{"amd64"}})
+	s.CreateRepo(t, raw, "raw", false, nil)
+
+	ps := s.MintSession(t, s.AdminUser, deb)
+	pkg := goDeb(t, debMember{"./control", []byte("Package: e2e-heads\nVersion: 1.0\nArchitecture: all\nMaintainer: E2E <e2e@telesphorepo.test>\nDescription: heads\n")})
+	debs := []uploadPart{{"e2e-heads.deb", pkg}}
+	first := mustPlan(t, s, deb, ps.Auth(), planOpts{reads: readsDebs}, debs...)
+	if first.Heads == "" || len(first.Items) != 1 || first.Items[0].Title != "e2e-heads 1.0 (all)" {
+		t.Fatalf("first plan: %+v, want one package and heads", first)
+	}
+	// An edit of a field: the plan names the heads and sends no first bytes.
+	again := mustPlan(t, s, deb, ps.Auth(), planOpts{fields: map[string]string{"component": "extra"}, heads: first.Heads}, debs...)
+	if len(again.Items) != 1 || again.Items[0].Title != "e2e-heads 1.0 (all)" || again.items0Target() != "pool/extra/e/e2e-heads/e2e-heads_1.0_all.deb" || again.Heads == "" {
+		t.Fatalf("plan with held heads: %+v", again)
+	}
+	if st, _, b := planUpload(t, s, deb, ps.Auth(), planOpts{heads: strings.Repeat("0", 32)}, debs...); st != http.StatusConflict ||
+		!strings.Contains(string(b), "plan-heads-gone") {
+		t.Fatalf("plan with unknown heads: status %d, want 409 plan-heads-gone: %s", st, b)
+	}
+	if st, _, b := planUpload(t, s, deb, s.MintSession(t, s.AdminUser, deb).Auth(), planOpts{heads: first.Heads}, debs...); st != http.StatusConflict {
+		t.Fatalf("plan with the heads of another publish session: status %d, want 409: %s", st, b)
+	}
+	// Another file is in the list with a size the held heads do not have.
+	if st, _, b := planUpload(t, s, deb, ps.Auth(), planOpts{heads: first.Heads}, uploadPart{"e2e-heads.deb", append(pkg, 0)}); st != http.StatusConflict {
+		t.Fatalf("plan with held heads of another size: status %d, want 409: %s", st, b)
+	}
+
+	// A raw upload: one file through a resumable upload in two chunks, one in the request.
+	rs := s.MintSession(t, s.AdminUser, raw)
+	base := "/api/repos/" + raw + "/uploads"
+	big := rawRandom(t, 3<<20)
+	start := func() string {
+		t.Helper()
+		st, b := uploadSession(t, s, http.MethodPost, base, nil, rs.Auth(), nil)
+		var out struct {
+			ID string `json:"id"`
+		}
+		if st != http.StatusCreated || json.Unmarshal(b, &out) != nil || out.ID == "" {
+			t.Fatalf("start an upload: status %d: %s", st, b)
+		}
+		return out.ID
+	}
+	id := start()
+	for _, from := range []int{0, 2 << 20} {
+		c := big[from:min(from+2<<20, len(big))]
+		if st, b := uploadSession(t, s, http.MethodPatch, base+"/"+id, c, rs.Auth(),
+			map[string]string{"Content-Range": fmt.Sprintf("bytes %d-%d/*", from, from+len(c)-1)}); st != http.StatusAccepted {
+			t.Fatalf("append at %d: status %d: %s", from, st, b)
+		}
+	}
+	send := func(uploads any, parts ...uploadPart) (int, []byte) {
+		t.Helper()
+		var buf bytes.Buffer
+		mw := multipart.NewWriter(&buf)
+		mw.WriteField("folder", "chunked")
+		ub, _ := json.Marshal(uploads)
+		mw.WriteField("uploads", string(ub))
+		for _, p := range parts {
+			w, _ := mw.CreateFormFile("file", p.Name)
+			w.Write(p.Body)
+		}
+		mw.Close()
+		req := s.NewRequest(t, http.MethodPost, "/api/repos/"+raw+"/upload", &buf)
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+		resp, b := s.Do(t, req, rs.Auth())
+		return resp.StatusCode, b
+	}
+	type finished struct {
+		Path string `json:"path"`
+		ID   string `json:"id"`
+		Size int    `json:"size"`
+	}
+	if st, b := send([]finished{{"big.bin", strings.Repeat("0", 32), len(big)}}); st != http.StatusNotFound {
+		t.Fatalf("upload that names an unknown upload: status %d, want 404: %s", st, b)
+	}
+	if st, b := send([]finished{{"big.bin", id, len(big) + 1}}); st != http.StatusBadRequest {
+		t.Fatalf("upload that names an upload with a wrong size: status %d, want 400: %s", st, b)
+	}
+	id = start()
+	if st, b := uploadSession(t, s, http.MethodPatch, base+"/"+id, big, rs.Auth(), nil); st != http.StatusAccepted {
+		t.Fatalf("append: status %d: %s", st, b)
+	}
+	st, b := send([]finished{{"site/big.bin", id, len(big)}}, uploadPart{"site/small.txt", []byte("small")})
+	if st != http.StatusCreated || !strings.Contains(string(b), `"chunked/site/big.bin"`) || !strings.Contains(string(b), `"chunked/site/small.txt"`) {
+		t.Fatalf("upload with a finished upload and a file: status %d, want 201 with both: %s", st, b)
+	}
+	rawWantGet(t, s, nil, "/raw/"+raw+"/chunked/site/big.bin", s.AdminBasic(), big)
+	rawWantGet(t, s, nil, "/raw/"+raw+"/chunked/site/small.txt", s.AdminBasic(), []byte("small"))
+	if st, b := uploadSession(t, s, http.MethodPatch, base+"/"+id, big, rs.Auth(), nil); st != http.StatusNotFound {
+		t.Fatalf("append to an upload that the upload finished: status %d, want 404: %s", st, b)
+	}
 }
