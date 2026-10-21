@@ -56,6 +56,7 @@
   import LearnMore from "$lib/components/LearnMore.svelte";
   import Loading from "$lib/components/Loading.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
+  import SpeedTest from "./edge/SpeedTest.svelte";
 
   let {}: PageProps = $props();
 
@@ -513,6 +514,8 @@
         </DataTable>
       </Section>
     {/if}
+
+    {#if st}<SpeedTest status={st} />{/if}
 
     <FormSection title="Settings">
       <FormGrid>

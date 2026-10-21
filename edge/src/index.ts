@@ -28,6 +28,7 @@ import { copy } from "./copy";
 import { gap } from "./gap";
 import { immutable } from "./glob";
 import { type Pointer, parsePointer, serve } from "./serve";
+import { OVERRIDE_HEADER, PASS_HEADER, REGION_HEADER, type Override, parseOverride, passValid } from "./speedtest";
 import { parseTarget } from "./shapes";
 import { VERSION } from "./version";
 
@@ -38,13 +39,16 @@ export default {
     if (request.method === "GET" && new URL(request.url).pathname === CHECK_PATH) return check(request, env);
     if (request.method !== "GET" && request.method !== "HEAD") return forward(request);
     ctx.passThroughOnException();
+    const override = parseOverride(request.headers);
+    const note: Note = { override: "unused" };
     let answer: Response | null = null;
     try {
-      answer = await edge(request, env, ctx);
+      answer = await edge(request, env, ctx, override, note);
     } catch (err) {
       console.error("edge: read failed, passing to the origin:", err instanceof Error ? err.message : String(err));
     }
-    return answer ?? forward(request);
+    const res = answer ?? (await forward(request));
+    return override ? marked(res, note.override) : res;
   },
   queue: copy,
   scheduled: gap,
@@ -61,6 +65,9 @@ export default {
 async function forward(request: Request): Promise<Response> {
   const headers = new Headers(request.headers);
   for (const h of HOP_BY_HOP) headers.delete(h);
+  // The headers of the speed test are for the Worker only.
+  headers.delete(REGION_HEADER);
+  headers.delete(PASS_HEADER);
   const client = request.headers.get("CF-Connecting-IP");
   if (client) {
     headers.set("x-real-ip", client);
@@ -184,8 +191,36 @@ async function pointer(env: Env, b: R2Bucket, repo: RepoObject, path: string): P
 // ---------------------------------------------------------------------------------------------
 // The edge answer
 
-// edge answers the request at the edge, or returns null when the origin must answer.
-async function edge(request: Request, env: Env, ctx: ExecutionContext): Promise<Response | null> {
+// Note is what became of the speed test's choice of bucket, for OVERRIDE_HEADER.
+interface Note {
+  override: string;
+}
+
+// marked returns res with OVERRIDE_HEADER set to value.
+function marked(res: Response, value: string): Response {
+  try {
+    const out = new Response(res.body, res);
+    out.headers.set(OVERRIDE_HEADER, value);
+    return out;
+  } catch {
+    return res;
+  }
+}
+
+// chosen returns the bucket that the speed test names: "home", or a ready region whose binding's
+// bucket.json names the region's bucket; null when the Worker does not read it.
+async function chosen(env: Env, config: Config, objects: Objects, region: string): Promise<Bucket | null> {
+  if (region === "home") return { hint: config.homeHint, r2: env.HOME };
+  const r = config.regions.find((x) => x.hint === region);
+  const r2 = r?.ready && r.bucket !== "" ? bucket(env, r.binding) : null;
+  if (!r || !r2) return null;
+  return (await objects.bucketOf(r.binding, r2)) === r.bucket ? { hint: r.hint, r2 } : null;
+}
+
+// edge answers the request at the edge, or returns null when the origin must answer. override is
+// the speed test's choice of bucket; it applies only to a request that passes every check below,
+// and note says what became of it.
+async function edge(request: Request, env: Env, ctx: ExecutionContext, override: Override | null, note: Note): Promise<Response | null> {
   const url = new URL(request.url);
   if (url.searchParams.has("_state")) return null; // a Docker upload token
   const loaded = await loadConfig(env, url.origin);
@@ -199,21 +234,39 @@ async function edge(request: Request, env: Env, ctx: ExecutionContext): Promise<
   if (!caller) return null;
   // The reads behind these checks do not depend on each other, so after a cache expiry they cost
   // one far read, not one each.
-  const [homeBucket, repo, r, near] = await Promise.all([
+  const [homeBucket, repo, r, nearestBucket, passOK] = await Promise.all([
     objects.bucketOf("HOME", env.HOME),
     repoObject(objects, target.repo),
     rights(caller, objects),
     nearest(request, env, config, objects),
+    override ? passValid(env, override.pass) : Promise.resolve(false),
   ]);
   // The HOME binding must be the home bucket of config.json (its bucket.json).
   if (homeBucket !== config.homeBucket) return null;
   if (!repo || repo.format !== target.format.name || repo.guarded) return null;
   if (!r || !mayRead(r, repo, true)) return null;
 
+  // The speed test picks the bucket only now, after every check of the request.
+  let near = nearestBucket;
+  let picked = false;
+  if (override) {
+    if (!passOK) {
+      note.override = "refused; reason=pass";
+    } else if (override.region === "origin") {
+      note.override = "applied; region=origin";
+      return null;
+    } else {
+      const b = await chosen(env, config, objects, override.region);
+      if (b) [near, picked] = [b, true];
+      else note.override = "refused; reason=region";
+    }
+  }
+
   const imm = immutable(target.path, target.format.immutable, target.format.mutable);
   const home: Bucket = { hint: config.homeHint, r2: env.HOME };
   const at = imm ? near : home; // the bucket of the pointer
 
+  const started = Date.now();
   let found: { repo: RepoObject; pointer: Pointer } | null;
   if (repo.kind === "group") {
     found = await groupPointer(env, objects, r, repo, target.format.name, target.path, imm, at);
@@ -222,8 +275,10 @@ async function edge(request: Request, env: Env, ctx: ExecutionContext): Promise<
     found = l.kind === "hit" ? { repo, pointer: l.pointer } : null;
   }
   if (!found) return null;
+  const pointerMs = Date.now() - started;
 
   const p = found.pointer;
+  let blobRead: { ms: number; hint: string } | null = null;
   const answer = await serve(request, p, {
     private: repo.private,
     version: config.version,
@@ -231,14 +286,26 @@ async function edge(request: Request, env: Env, ctx: ExecutionContext): Promise<
     pointerHint: at.hint,
     blob: async (range) => {
       const key = blobKey(env, p.sha256);
+      const t = Date.now();
       for (const b of near.r2 === env.HOME ? [home] : [near, home]) {
         const body = await b.r2.get(key, range ? { range } : undefined);
-        if (body) return { body, hint: b.hint };
+        if (body) {
+          blobRead = { ms: Date.now() - t, hint: b.hint };
+          return { body, hint: b.hint };
+        }
       }
       return null;
     },
   });
   if (answer && r.seen) noteSeen(env, ctx, r.seen);
+  if (answer && picked && override) {
+    note.override = "applied; region=" + override.region;
+    // The time to the headers of each bucket read; the body streams after.
+    const read = blobRead as { ms: number; hint: string } | null;
+    const timing = [`pointer;dur=${pointerMs};desc="${at.hint}"`];
+    if (read) timing.push(`blob;dur=${read.ms};desc="${read.hint}"`);
+    answer.headers.set("Server-Timing", timing.join(", "));
+  }
   return answer;
 }
 
