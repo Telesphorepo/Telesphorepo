@@ -247,10 +247,12 @@
               {st.worker_version ?? "Not seen yet"}
               {#if mismatch}<StatusBadge tone="warning">Server is {st.server_version}</StatusBadge>{/if}
             </dd>
+            {#if !st.worker_version}<p class="mt-1 text-meta text-muted-foreground">The Worker reports its version at its first gap check, within 10 minutes of a deploy.</p>{/if}
           </div>
           <div>
             <dt class="text-meta text-muted-foreground">Last gap check</dt>
             <dd class="text-label"><RelativeTime at={st.gap_checked_at} empty="Not yet" /></dd>
+            {#if !st.gap_checked_at}<p class="mt-1 text-meta text-muted-foreground">The Worker checks every 10 minutes.</p>{/if}
           </div>
           <div>
             <dt class="text-meta text-muted-foreground">Home bucket</dt>
@@ -379,7 +381,8 @@
         <SwitchRow
           id="edge-enabled"
           label="Edge delivery"
-          help={lockHelp("edge.enabled") ?? "The Worker answers downloads that it can prove the server would answer the same way."}
+          help={lockHelp("edge.enabled") ??
+            "Turn this on after you deploy the Worker (Deploy, below), then save. The Worker answers downloads that it can prove the server would answer the same way."}
           disabled={locked("edge.enabled")}
           bind:checked={draft.value.enabled}
         />
@@ -462,6 +465,13 @@
             <span class="w-4 shrink-0 text-section text-muted-foreground tabular-nums">6</span>
             <div class="flex min-w-0 grow flex-col gap-2">
               <CodeSnippet label="Deploy the Worker" value="bun run deploy" />
+            </div>
+          </li>
+          <li class="flex gap-3">
+            <span class="w-4 shrink-0 text-section text-muted-foreground tabular-nums">7</span>
+            <div class="flex min-w-0 grow flex-col gap-2">
+              <p class="text-label">Turn on Edge delivery under Settings above, and save</p>
+              <p class="text-meta text-muted-foreground">The status shows the Worker's version within 10 minutes of the deploy.</p>
             </div>
           </li>
         </ol>
