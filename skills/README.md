@@ -1,7 +1,7 @@
 # Agent skills
 
-[`telesphorepo-migrate`](telesphorepo-migrate/SKILL.md) moves a project from Nexus to
-Telesphorepo with a coding agent. The agent changes the download addresses in every file of the
+With the skill [`telesphorepo-migrate`](telesphorepo-migrate/SKILL.md), a coding agent moves a
+project from Nexus to Telesphorepo with you. The agent changes the download addresses in every file of the
 project and, for the full switch-over, sets up `telesphorepo publish`, its CI steps and a
 rehearsal on a test repository. You do only the steps that need a person: approving the computer,
 making a read token, making repositories and the CI pipeline. The agent asks for each one and
