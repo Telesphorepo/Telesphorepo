@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -505,10 +506,13 @@ func (rd *Reader) ServeAsset(w http.ResponseWriter, r *http.Request, a *Asset, o
 	key := blobs.Key(a.SHA256)
 	st := rd.p.blobs.Storage()
 	if !opts.NoRedirect {
-		disposition := ""
-		if !inline(a.ContentType) {
-			disposition = "attachment"
+		// The presigned URL ends in the blob key, so the disposition names the file: else a
+		// browser saves the download under the SHA-256.
+		kind := "attachment"
+		if inline(a.ContentType) {
+			kind = "inline"
 		}
+		disposition := mime.FormatMediaType(kind, map[string]string{"filename": path.Base(a.Path)})
 		if u, ok, err := st.PresignGet(ctx, key, rd.ttl(), storage.Response{ContentType: a.ContentType, ContentDisposition: disposition}); err != nil {
 			rd.log.Error("presign failed", "key", key, "err", err)
 			httpx.Error(w, r, http.StatusInternalServerError, "internal error")
