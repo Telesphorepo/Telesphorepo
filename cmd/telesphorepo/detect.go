@@ -161,10 +161,12 @@ func pickRow(format, kind, dir string) (row, bool, error) {
 	return found[choose("This folder has projects of several kinds. Which one?", options, 0)], true, nil
 }
 
-// job is one run of "publish": the project, the session and the private temp folder.
+// job is one run of "publish": the project, the session and the private temp folder. cp is the
+// change log check of the server, for the older paths (compat.older).
 type job struct {
 	ctx   context.Context
 	c     *client
+	cp    *compat
 	p     *project
 	s     *session
 	tmp   string

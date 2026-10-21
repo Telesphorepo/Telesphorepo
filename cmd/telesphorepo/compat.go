@@ -32,7 +32,10 @@ import (
 // older path of the scope. A CLI that adds an entry with needs = "server" and keeps the older code
 // path gives the entry an id, adds the id here and asks compat.older before it takes the new path.
 // The id stays when "go tool task tag" stamps the version of the entry.
-var olderPaths = map[string]bool{}
+var olderPaths = map[string]bool{
+	// A large .nupkg goes in one push to a server whose push takes no resumable upload.
+	nugetResumable: true,
+}
 
 // changesState is changes.json.
 type changesState struct {
@@ -123,7 +126,7 @@ func (cp *compat) fetch(ctx context.Context) error {
 		return err
 	}
 	if out.Version == "" {
-		out.Version = cp.c.version
+		out.Version = cp.c.serverVersion()
 	}
 	cp.state.ServerVersion, cp.state.Since, cp.state.Changes = out.Version, version, out.Changes
 	cp.save()

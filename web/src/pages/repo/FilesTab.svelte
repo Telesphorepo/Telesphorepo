@@ -38,7 +38,7 @@
   import DataTable from "$lib/components/DataTable.svelte";
   import DetailsColumn from "$lib/components/DetailsColumn.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
-  import FolderList, { type DeleteTarget } from "./files/FolderList.svelte";
+  import FolderList, { FOLDER_PAGE, type DeleteTarget } from "./files/FolderList.svelte";
   import VersionsView from "./files/VersionsView.svelte";
   import BuildsView from "./files/BuildsView.svelte";
   import ColumnsView from "./files/ColumnsView.svelte";
@@ -123,6 +123,29 @@
   };
   const views = $derived<ViewKind[]>(flow ? allViews.views : plainViews.views);
 
+  // Bumped after a delete, so the folder loads again.
+  let version = $state(0);
+
+  // The first page of the open folder, asked for together with its place (not after it), so a
+  // plain folder's list does not wait for the place. FolderList and FolderDetails share it. None
+  // with ?version= (it names a version, whose builds show) or where a plain folder shows as a
+  // Tree or Columns (they load their own pages).
+  const firstPage = $derived.by(() => {
+    void version;
+    const v = allViews.value === "coverflow" ? plainViews.value : allViews.value;
+    if (!group && (versionQ || v !== "list")) return undefined;
+    const name = repo.name;
+    const f = folder;
+    const p = untrack(() => api.repos.tree(name, f, { limit: FOLDER_PAGE }));
+    // An artifact or a version folder shows no list, so its page may never be read.
+    p.catch(() => {});
+    return p;
+  });
+  // Read it at once, so its request starts with the place's.
+  $effect.pre(() => {
+    void firstPage;
+  });
+
   // The details column is always there: it shows the selected file, else the open folder (a plain
   // folder, an artifact or a version), so it never comes and goes while the reader browses. Only
   // Close hides it, and it stays hidden until the reader selects a file or asks for it again.
@@ -137,9 +160,6 @@
     return p && p.kind !== "folder" ? p : null;
   });
   const folderTitle = $derived(folder === "" ? repo.name : baseName(folder));
-
-  // Bumped after a delete, so the folder loads again.
-  let version = $state(0);
 
   // --- the pick of the List view ---
   let picked = $state(new Set<string>());
@@ -301,6 +321,7 @@
             <FolderList
               {repo}
               {folder}
+              first={firstPage}
               selected={file}
               {canWrite}
               {canUpload}
@@ -364,7 +385,7 @@
       {:else}
         <DetailsColumn title={folderTitle} onClose={() => (closed = true)} actions={canWrite && folder ? deleteFolder : undefined}>
           {#if place.data || place.error}
-            {#key folder + "\n" + version}<FolderDetails {repo} {folder} />{/key}
+            {#key folder + "\n" + version}<FolderDetails {repo} {folder} first={firstPage} />{/key}
           {:else}
             <Loading rows={2} />
           {/if}

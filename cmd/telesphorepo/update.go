@@ -105,7 +105,7 @@ func update(ctx context.Context, id identity) error {
 	if err != nil {
 		return err
 	}
-	serverVersion := c.version
+	serverVersion := c.serverVersion()
 	if s, err1 := changelog.ParseVersion(serverVersion); err1 == nil {
 		if mine, err2 := changelog.ParseVersion(version); err2 == nil {
 			switch mine.Compare(s) {
@@ -198,7 +198,9 @@ func (c *client) download(ctx context.Context, path string, w io.Writer) (http.H
 	}
 	defer resp.Body.Close()
 	if v := resp.Header.Get(versionHeader); v != "" {
+		c.mu.Lock()
 		c.version = v
+		c.mu.Unlock()
 	}
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))

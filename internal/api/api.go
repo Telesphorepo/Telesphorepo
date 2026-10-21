@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -35,20 +36,20 @@ import (
 // API is the core module: sign-in, the account, people, read tokens, repos, grants, files,
 // uploads, search, the settings API and the format list.
 type API struct {
-	h        *module.Host
-	kit      *route.API
-	auth     *auth.Service
-	repos    *repos.Service
-	assets   *assets.Pipeline
-	reader   *assets.Reader
-	uploads  *assets.Uploads
-	ops      *ops.Service
-	settings *settings.Service
-	files    *files.Service
-	audit    *audit.Log
-	access   *access.Engine
-	formats  *format.Registry
-
+	h           *module.Host
+	kit         *route.API
+	auth        *auth.Service
+	repos       *repos.Service
+	assets      *assets.Pipeline
+	reader      *assets.Reader
+	uploads     *assets.Uploads
+	ops         *ops.Service
+	settings    *settings.Service
+	files       *files.Service
+	audit       *audit.Log
+	access      *access.Engine
+	formats     *format.Registry
+	heads       *heldHeads
 	deleteSlots chan struct{} // one value per running repo delete (startDelete)
 }
 
@@ -70,6 +71,7 @@ func Module() module.Module {
 				a.reader, a.uploads, a.ops = h.Reader, h.Uploads, h.Ops
 				a.audit, a.access, a.formats = h.Audit, h.Access, h.Formats
 				a.files = files.New(h.Assets, h.Auth, h.Builds)
+				a.heads = newHeldHeads(func() string { return filepath.Join(a.settings.Current().TmpDir(), "plans") })
 				_, err := changelog.Embedded() // a broken change log stops the startup
 				return err
 			})

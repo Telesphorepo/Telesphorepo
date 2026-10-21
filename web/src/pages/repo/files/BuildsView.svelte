@@ -3,13 +3,15 @@
   the main file, the Gradle module metadata and the classified files; Debian: one .deb for each
   architecture). A release has one build. A
   snapshot shows only its latest build; "11 earlier builds" opens the list of the others, and a
-  row of that list shows its files (?build= keeps the choice in the address). A file row opens its
+  row of that list shows its files (?build= keeps the choice in the address; a build named there
+  that the loaded pages lack is asked for by its id, ?build= of GET /builds). A file row opens its
   details. With `flow`, Cover Flow shows the builds as felt tickets in place of the files, in the
   same area; opening a ticket shows its files in the List view.
 -->
 <script lang="ts">
+  import { untrack } from "svelte";
   import type { Repo } from "$lib/api";
-  import { Keyset, type TableSource } from "$lib/load.svelte";
+  import { Keyset, Resource, type TableSource } from "$lib/load.svelte";
   import { filesPath, href, navigate } from "$lib/router.svelte";
   import { Button } from "$lib/components/ui/button";
   import DataTable from "$lib/components/DataTable.svelte";
@@ -74,18 +76,30 @@
 
   const snapshot = $derived(version.kind === "snapshot");
   const newest = $derived(builds.items[0]);
-  const shown = $derived(builds.items.find((b) => b.id === build) ?? newest);
-  // A build named in the address may sit on a later page: load pages until it shows.
-  $effect(() => {
-    if (build && !builds.items.some((b) => b.id === build) && builds.hasMore && !builds.loadingMore && !builds.loading) builds.more();
+  // The id of the latest build: the version names it, so a named build is known as latest or not
+  // before the first page loads.
+  const newestId = $derived(version.latest_build || newest?.id);
+  // A build named in the address that the loaded pages do not hold is asked for by its id, alongside
+  // the first page, so it shows wherever it sits in the list.
+  const named = $derived.by(() => {
+    if (!build || build === version.latest_build) return null;
+    const id = build;
+    if (untrack(() => builds.items.some((b) => b.id === id))) return null;
+    return new Resource(() => api.repos.build(repo.name, artifact.path, version.version, id));
   });
+  const shown = $derived.by(() => {
+    if (!build) return newest;
+    // A build that is gone shows the latest.
+    return builds.items.find((b) => b.id === build) ?? named?.data?.items[0] ?? (named?.loading ? undefined : newest);
+  });
+  const latest = (b: Build) => b.id === newestId;
 
   /* svelte-ignore state_referenced_locally */
   let earlierOpen = $state(earlierAsked);
-  const earlier = $derived(earlierOpen || (!!build && build !== newest?.id));
+  const earlier = $derived(earlierOpen || (!!build && build !== newestId));
   // Closing the list goes back to the latest build.
   function toggleEarlier() {
-    if (earlier && newest && shown !== newest) choose(newest.id);
+    if (earlier && newestId && shown && !latest(shown)) choose(newestId);
     earlierOpen = !earlier;
   }
 
@@ -93,10 +107,10 @@
   // the artifact folder. A file in the artifact folder keeps it too.
   const at = (dir: string, build: string | undefined) => ({ version: dir === artifact.path ? version.version : undefined, build });
   const choose = (key: string) =>
-    navigate(filesPath(repo.name, folder), { query: at(folder, key === newest?.id ? undefined : key), replace: true });
+    navigate(filesPath(repo.name, folder), { query: at(folder, key === newestId ? undefined : key), replace: true });
   const fileHref = (f: BuildFile) =>
-    href(filesPath(repo.name, f.path), at(parentOf(f.path), shown && shown !== newest ? shown.id : undefined));
-  const buildHref = (b: Build) => href(filesPath(repo.name, folder), at(folder, b === newest ? undefined : b.id));
+    href(filesPath(repo.name, f.path), at(parentOf(f.path), shown && !latest(shown) ? shown.id : undefined));
+  const buildHref = (b: Build) => href(filesPath(repo.name, folder), at(folder, latest(b) ? undefined : b.id));
 
   const day = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", year: "numeric" });
   const tickets = $derived<Ticket[]>(
@@ -127,12 +141,15 @@
       return shown?.files ?? [];
     },
     get loading() {
-      return builds.loading;
+      return builds.loading || (!!named?.loading && !named.data);
     },
     get error() {
-      return builds.error;
+      return builds.error || named?.error || "";
     },
-    reload: builds.reload,
+    reload: () => {
+      builds.reload();
+      named?.reload();
+    },
   };
   // The other builds of a snapshot, newest first.
   const others: TableSource<Build> = {
@@ -158,7 +175,7 @@
 {#snippet head(b: Build)}
   <p class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
     <span class="text-label">{buildLabel(b.id, b.label)}</span>
-    {#if b === newest}<StatusBadge tone="success" title="The build a snapshot dependency resolves to">Latest</StatusBadge>{/if}
+    {#if latest(b)}<StatusBadge tone="success" title="The build a snapshot dependency resolves to">Latest</StatusBadge>{/if}
     <span class="flex flex-wrap items-center gap-x-3 gap-y-1 text-meta text-muted-foreground">
       <span>Published <RelativeTime at={b.published_at} /></span>
       <BuildInline p={b.build} />
@@ -209,7 +226,7 @@
           caption="Builds of {version.version}"
           key={(b) => b.id}
           href={buildHref}
-          selected={(b) => b === shown}
+          selected={(b) => b.id === shown?.id}
           columns={[
             { label: "Build", grow: true },
             { label: "Commit", hideOnPhone: true },
@@ -225,7 +242,7 @@
                   ><Truncate text={buildLabel(b.id, b.label)} /></a
                 >
                 {#if b.label}<span class="min-w-0 truncate text-muted-foreground max-sm:hidden">{b.id}</span>{/if}
-                {#if b === newest}<StatusBadge tone="success">Latest</StatusBadge>{/if}
+                {#if latest(b)}<StatusBadge tone="success">Latest</StatusBadge>{/if}
               </span>
             </Cell>
             <Cell hideOnPhone muted><BuildInline p={b.build} /></Cell>

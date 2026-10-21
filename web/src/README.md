@@ -2,7 +2,8 @@
 
 Svelte 5 + Vite (no SvelteKit), Tailwind CSS v4, shadcn-svelte (Maia style), TypeScript, bun.
 `bun run build` type-checks with `svelte-check` and writes `web/dist`, which the Go binary embeds
-(`web/embed.go`). `bun run dev` serves the UI on :5173 and proxies every other path to the backend
+(`web/embed.go`). The build also writes a `.br` and a `.gz` next to each text file of 1 KiB or more,
+which the server sends to a browser that accepts them (see **Web UI** in SPEC.md). `bun run dev` serves the UI on :5173 and proxies every other path to the backend
 on :8080. Run both with `go tool task dev`.
 
 The UI is only a client of the JSON API (`/api/...`). It has no tests of its own: e2e tests cover
@@ -56,7 +57,7 @@ server and the clients print keep working: `/#/device?code=ABCD-EFGH`, `/#/setti
 | `/login?next=&error=` | `SignIn` | app | any | The one place to sign in: single sign-on, password, then the second step. |
 | `/device?code=&grant=&error=` | `DeviceApprove` | app | user | Look up a device code, check the device, approve it with a fresh second factor. A single sign-on account signs in again at its identity provider instead; the server returns with `grant` (the page approves at once) or `error`. |
 | `/repo/:name` | `repo/RepoPage` | app | any | The repository header and the Files tab at the top folder. A group has the tabs too, read-only: Files is the merged folders of its members (`GroupTree`, List view only; a file shows its member muted after its name and opens in that member; the details column at the top folder names the members), Use lists its members first, and Publish shows to a person who publishes to one of its hosted members. While an operation holds the repository, the people who could upload or delete see its sentence as one muted line under the header (`PageHeader` `status`). A proxy has Files (its cached files) and Use, and no publish or upload. |
-| `/repo/:name/files/<path>?version=&build=` | `repo/RepoPage` | app | any | Files tab: one panel (a card) with a toolbar (the folder path, Show details, the view) over the open folder. A folder (`path` ends with `/`) or a selected file. `version` names a version of the artifact folder (a Debian package keeps every version in one folder); `build` a chosen build. The details column always shows on wide screens: the selected file, or else the open folder (repository, folder, artifact or version). |
+| `/repo/:name/files/<path>?version=&build=` | `repo/RepoPage` | app | any | Files tab: one panel (a card) with a toolbar (the folder path, Show details, the view) over the open folder. A folder (`path` ends with `/`) or a selected file. `version` names a version of the artifact folder (a Debian package keeps every version in one folder); `build` a chosen build, read by its id (`api.repos.build`) when the loaded pages of builds lack it. The first page of a plain folder is asked for together with its place (`placeOf` in `files/place.ts`), and the List view and the details column share it. The details column always shows on wide screens: the selected file, or else the open folder (repository, folder, artifact or version). |
 | `/repo/:name/use` | `repo/RepoPage` | app | any | Use this repository: the address and the snippets for a build; a private repository adds a read-token step. |
 | `/repo/:name/publish?to=` | `repo/RepoPage` | app | any (Publish on the repository; a group: on one of its hosted members) | Publish to this repository: from your computer, from CI, by hand. A group (`repo/GroupPublish`) first has a select of the hosted members the person publishes to (`to`, the first by default), then that member's Publish view. The Set up a project card (`repo/ProjectSetup`, with Install the CLI in its header) comes first: a fresh second factor, then the install and setup line for the OS (a single sign-on account returns with `?setup_grant=`), then `telesphorepo publish` or the native command (`publish` of the descriptor); the snippets stay behind "Set it up by hand". |
 | `/setup/:code` | `Setup` | app | any | A setup link: run the install line in a terminal in the project folder. The code stays in the address fragment and the page calls no API. |
@@ -499,13 +500,17 @@ expires or when the server answers 401.
 - **Upload** (`pages/repo/UploadView.svelte`, `/repo/:name/upload`): first `FreshFactor`, which
   mints the token with `api.publish.manualSession`. Then one `DropZone` takes files or a folder,
   as the `upload` of the format's descriptor allows (a format without it takes no uploads).
-  `folder.ts` reads a folder, at most 500 files, only the ones that the `keep` globs take.
+  `folder.ts` reads a folder, at most 500 files, only the ones that the `keep` globs take. It skips dot-folders and `node_modules`, and folders that no `keep` glob can match below, and reads sibling folders 8 at a time.
   `api.repos.uploadPlan` sends the list of files and the first bytes of the files that a `reads`
-  rule matches, and stores nothing; `PlanView` shows the plan (each item with the path of each
+  rule matches, and stores nothing; a new plan aborts the one in flight, and names the `heads` of
+  the last plan, so it sends only the first bytes of files added since (a 409 sends them all
+  again). `PlanView` shows the plan (each item with the path of each
   file and its problems, the files left out), and the form shows the plan's fields (a value the
   plan read from the files is fixed). An edit of a field plans again after 400 ms. The ticked
-  items then upload with `api.repos.upload` and progress, the fields first, each file with its
-  path in the upload as its multipart filename.
+  items then upload with progress: past 90 MB, `upload/send.ts` sends the largest files through
+  resumable uploads in 16 MiB chunks (`api.repos.startUpload`, `appendUpload`) until the rest fit
+  in one request; then `api.repos.upload` sends the fields first, the part `uploads` that names the
+  finished uploads, and each other file with its path in the upload as its multipart filename.
 - **Delete** (`pages/repo/FilesTab.svelte`): a person with Delete files deletes with the UI session,
   in a repository or in the cached files of a proxy.
   `delete/DeleteDialog.svelte` asks the server for the delete plan (`api.repos.deletePlan`)
@@ -513,7 +518,7 @@ expires or when the server answers 401.
   `maven-metadata.xml` stops listing, the packages that apt stops offering). In the
   List view, people who can delete pick rows (files and folders mix); the details column then
   shows "3 selected" and the size of the picked files, and Delete removes them all after one
-  confirm. A version delete (`versionTarget` in `files/place.ts`) removes the version folder, or
+  confirm. A version delete (`versionTarget` in `files/place.ts`) removes the version's `folder`, with no request, or
   the files of all its builds when the version has no folder of its own (Debian). Every delete
   calls `POST /api/repos/{name}/files/delete` (`api.repos.deleteFiles`), at most 1000 paths and
   prefixes in one request.

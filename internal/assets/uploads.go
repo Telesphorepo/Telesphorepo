@@ -128,9 +128,9 @@ func (u *Uploads) forget(id string) {
 	u.mu.Unlock()
 }
 
-// owner returns the user and the publish session of p in repo: a core bearer token counts with
+// UploadOwner returns the user and the publish session of p in repo: a core bearer token counts with
 // the publish session of its scope of the repo (auth.Principal.For).
-func owner(p *auth.Principal, repo *repos.Repo) (user, session int64) {
+func UploadOwner(p *auth.Principal, repo *repos.Repo) (user, session int64) {
 	p = p.For(repo.Name)
 	if p == nil {
 		return 0, 0
@@ -154,7 +154,7 @@ func (u *Uploads) Start(ctx context.Context, p *auth.Principal, repo *repos.Repo
 		return nil, err
 	}
 	f.Close()
-	user, session := owner(p, repo)
+	user, session := UploadOwner(p, repo)
 	now := time.Now()
 	exp := now.Add(settings.UploadSessionTTL.Get(u.set()))
 	err = dbq.New(u.db.W).InsertUploadSession(ctx, dbq.InsertUploadSessionParams{ID: id, RepoID: repo.ID,
@@ -177,7 +177,7 @@ func (u *Uploads) row(ctx context.Context, id string, p *auth.Principal, repo *r
 	if err != nil {
 		return r, err
 	}
-	user, session := owner(p, repo)
+	user, session := UploadOwner(p, repo)
 	if r.RepoID != repo.ID || r.PublishSessionID.Int64 != session || (session == 0 && r.UserID.Int64 != user) ||
 		r.ExpiresAt < time.Now().Unix() {
 		return r, ErrUploadUnknown
@@ -251,9 +251,9 @@ func (u *Uploads) Append(ctx context.Context, id string, p *auth.Principal, repo
 }
 
 // Finish ends upload id: it takes the hashes of the bytes received from the state that the
-// appends saved, and checks the digest sha256 and, when size >= 0, the size. It returns the body
-// for a Commit; closing the body removes the file. A mismatch deletes the upload and returns
-// ErrDigest.
+// appends saved, and checks the digest sha256 ("" checks none; the web UI, which cannot hash a
+// large file in parts, gives the size) and, when size >= 0, the size. It returns the body for a
+// Commit; closing the body removes the file. A mismatch deletes the upload and returns ErrDigest.
 func (u *Uploads) Finish(ctx context.Context, id string, p *auth.Principal, repo *repos.Repo, sha256 string, size int64) (*Spooled, error) {
 	unlock := u.lock(id)
 	defer unlock()
@@ -283,7 +283,7 @@ func (u *Uploads) Finish(ctx context.Context, id string, p *auth.Principal, repo
 	}
 	u.forget(id)
 	os.Remove(u.hashFile(id))
-	if sp.SHA256 != sha256 || (size >= 0 && sp.Size != size) {
+	if (sha256 != "" && sp.SHA256 != sha256) || (size >= 0 && sp.Size != size) {
 		sp.Close()
 		return nil, ErrDigest
 	}

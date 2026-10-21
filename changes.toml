@@ -25,3 +25,10 @@
 #   scope   = "publish/npm"
 #   needs   = "server"
 #   summary = "npm publish uses the new upload route"
+
+[[change]]
+id      = "nuget-resumable-push"
+version = "dev"
+scope   = "publish/nuget"
+needs   = "server"
+summary = "telesphorepo publish sends a .nupkg of 64 MiB or more in chunks, which the NuGet push of the server finishes"

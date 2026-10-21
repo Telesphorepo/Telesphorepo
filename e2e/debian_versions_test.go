@@ -152,6 +152,15 @@ func TestDebianVersions(t *testing.T) {
 			if rel.Version == nil || rel.Version.Kind != "release" || len(rel.Items) != 1 || rel.Items[0].Build != "3.0" {
 				t.Fatalf("release builds = %+v", rel)
 			}
+
+			// One build by its id; a Debian version shares its package folder, so it has no folder.
+			var one buildsJSON
+			s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/builds?path="+dir+"&version="+url.QueryEscape("3.0~SNAPSHOT")+
+				"&build="+url.QueryEscape("3.0~SNAPSHOT.20261009160251"), nil, read, &one)
+			if one.Version == nil || one.Version.Folder != "" || one.Version.LatestBuild != "3.0~SNAPSHOT.20261014211855" || one.Next != nil ||
+				len(one.Items) != 1 || one.Items[0].Build != "3.0~SNAPSHOT.20261009160251" || len(one.Items[0].Files) != 1 {
+				t.Fatalf("build by id = %+v", one)
+			}
 		})
 
 		t.Run("not a package", func(t *testing.T) {

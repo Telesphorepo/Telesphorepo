@@ -50,23 +50,44 @@ func runDotnet(j *job) error {
 	return pushNupkgs(j, pkgs)
 }
 
+// nugetResumable is the change log entry of the push that finishes a resumable upload.
+const nugetResumable = "nuget-resumable-push"
+
 // pushNupkgs pushes each package to the NuGet repo of the job: PUT /nuget/<repo>/package with the
-// package as the first part of a multipart body and the session in X-NuGet-ApiKey. The bytes go
-// unchanged, so a signed package keeps its signature.
+// package as the first part of a multipart body and the session in X-NuGet-ApiKey, or for a large
+// package the resumable upload routes, which the push then finishes. The bytes go unchanged, so a
+// signed package keeps its signature.
 func pushNupkgs(j *job, files []string) error {
-	p := "/nuget/" + url.PathEscape(j.p.Repo) + "/package"
 	for _, f := range files {
 		if !strings.HasSuffix(strings.ToLower(f), ".nupkg") {
 			return fmt.Errorf("%s is not a .nupkg package", f)
 		}
-		if err := pushNupkg(j, p, f); err != nil {
-			return err
-		}
-		fmt.Fprintf(os.Stderr, "Pushed %s to %s\n", filepath.Base(f), j.p.Repo)
 	}
-	return nil
+	p := "/nuget/" + url.PathEscape(j.p.Repo) + "/package"
+	whole := j.cp != nil && j.cp.older(nugetResumable)
+	return j.uploadEach(files, func(j *job, f string) (string, error) {
+		st, err := os.Stat(f)
+		if err != nil {
+			return "", err
+		}
+		if st.Size() >= resumableFrom && !whole {
+			err = j.resumable(f, st.Size(), func(id string, q url.Values) error {
+				q.Set("upload", id)
+				_, err := j.c.call(j.ctx, request{method: http.MethodPut, path: p + "?" + q.Encode(),
+					header: map[string]string{nugetAPIKey: j.s.Token}, timeout: -1})
+				return err
+			})
+		} else {
+			err = pushNupkg(j, p, f)
+		}
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Pushed %s to %s", filepath.Base(f), j.p.Repo), nil
+	})
 }
 
+// pushNupkg pushes the package f in one multipart PUT to p.
 func pushNupkg(j *job, p, f string) error {
 	in, err := os.Open(f)
 	if err != nil {

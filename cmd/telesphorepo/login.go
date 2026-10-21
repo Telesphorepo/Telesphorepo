@@ -31,10 +31,15 @@ func usableDevice(ctx context.Context, c *client) (*deviceFile, string, error) {
 	case err == nil:
 		return d, dir, nil
 	case refused(err):
-		fmt.Fprintf(os.Stderr, "%s no longer accepts device %d (%s).\n", c.id.base(), d.DeviceID, detailOf(err))
+		deviceRefused(c, d, err)
 		return nil, dir, nil
 	}
 	return nil, dir, err
+}
+
+// deviceRefused prints that the server of c refused device d with err.
+func deviceRefused(c *client, d *deviceFile, err error) {
+	fmt.Fprintf(os.Stderr, "%s no longer accepts device %d (%s).\n", c.id.base(), d.DeviceID, detailOf(err))
 }
 
 // loginDevice runs the device flow for the server of c and saves the device file and hosts.json.
@@ -66,17 +71,6 @@ func saveRegistryHosts(ctx context.Context, c *client, dir string) {
 	if err := saveHosts(dir, hosts); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 	}
-}
-
-// ensureDevice returns the device of the server of c. Without a device that the server accepts,
-// it runs the device flow first.
-func ensureDevice(ctx context.Context, c *client) (*deviceFile, error) {
-	d, _, err := usableDevice(ctx, c)
-	if err != nil || d != nil {
-		return d, err
-	}
-	fmt.Fprintf(os.Stderr, "This computer has no device of %s yet.\n", c.id.base())
-	return loginDevice(ctx, c, deviceName())
 }
 
 // login enrolls this computer as a device of the server, or keeps the device that the server

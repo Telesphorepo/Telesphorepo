@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/md5"
@@ -10,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"slices"
@@ -298,6 +300,72 @@ func TestUploadSessions(t *testing.T) {
 	if st, b := uploadSession(t, s, http.MethodPut, up+id+"&sha256="+sha256Hex(pkg), nil, dauth, nil); st != http.StatusNotFound {
 		t.Fatalf("finish a finished .deb upload again: status %d, want 404: %s", st, b)
 	}
+
+	// The NuGet push finishes a resumable upload of a .nupkg (telesphorepo publish of a large
+	// package), with the session as the API key: ?upload=<id>&sha256=<hex>&size=<n> and no body.
+	ng := RandName("chunks-nuget")
+	s.CreateRepo(t, ng, "nuget", false, nil)
+	tok := s.MintSession(t, s.AdminUser, ng).Token
+	nauth, key := Bearer{tok}, map[string]string{"X-NuGet-ApiKey": tok}
+	nbase := "/api/repos/" + ng + "/uploads"
+	nupkg := testNupkg(t, "E2E.Chunked", "1.2.0")
+	push := "/nuget/" + ng + "/package?upload="
+	id = start(nbase, nauth)
+	half = len(nupkg) / 2
+	for _, c := range []struct {
+		from int
+		b    []byte
+	}{{0, nupkg[:half]}, {half, nupkg[half:]}} {
+		if st, b := uploadSession(t, s, http.MethodPatch, nbase+"/"+id, c.b, nauth, chunk(c.from, c.b)); st != http.StatusAccepted {
+			t.Fatalf("append a .nupkg at %d: status %d: %s", c.from, st, b)
+		}
+	}
+	if st, b := uploadSession(t, s, http.MethodPut, push+id+"&sha256="+wrong, nil, nil, key); st != http.StatusBadRequest {
+		t.Fatalf("finish a .nupkg upload with a wrong digest: status %d, want 400: %s", st, b)
+	}
+	id = start(nbase, nauth)
+	if st, b := uploadSession(t, s, http.MethodPatch, nbase+"/"+id, nupkg, nauth, nil); st != http.StatusAccepted {
+		t.Fatalf("append a .nupkg: status %d: %s", st, b)
+	}
+	if st, b := uploadSession(t, s, http.MethodPut, push+id+"&sha256="+sha256Hex(nupkg)+"&size="+strconv.Itoa(len(nupkg)), nil, nil, key); st != http.StatusCreated {
+		t.Fatalf("finish a .nupkg upload through the push: status %d, want 201: %s", st, b)
+	}
+	rawWantGet(t, s, nil, "/nuget/"+ng+"/v3-flatcontainer/e2e.chunked/1.2.0/e2e.chunked.1.2.0.nupkg", s.AdminBasic(), nupkg)
+	if st, b := uploadSession(t, s, http.MethodPut, push+id+"&sha256="+sha256Hex(nupkg), nil, nil, key); st != http.StatusNotFound {
+		t.Fatalf("finish a finished .nupkg upload again: status %d, want 404: %s", st, b)
+	}
+}
+
+// testNupkg is a .nupkg of package id at version: a zip with the .nuspec at its root and a file.
+func testNupkg(t *testing.T, id, version string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, body := range map[string]string{
+		id + ".nuspec": `<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
+  <metadata>
+    <id>` + id + `</id>
+    <version>` + version + `</version>
+    <authors>e2e</authors>
+    <description>A package of the e2e tests.</description>
+  </metadata>
+</package>
+`,
+		"content/data.txt": strings.Repeat("e2e nuget chunk\n", 4096),
+	} {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.WriteString(w, body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
 }
 
 // TestLargeUploadAndRepoGC uploads an 80 MiB file into a raw repo through a resumable upload in

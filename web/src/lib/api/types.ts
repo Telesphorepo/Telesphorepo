@@ -448,6 +448,8 @@ export type Artifact = { path: string; title: string; name: string; kind: string
 export type Version = {
   version: string;
   kind: "release" | "snapshot";
+  /** The folder that holds every file of the version and no file of another (Maven: the version folder); absent when the version shares its folder (Debian). */
+  folder?: string;
   latest_build?: string;
   /** The format's name of the latest build for people ("Build 3"); empty: show latest_build. */
   latest_label?: string;
@@ -543,10 +545,26 @@ export type PlanTarget = { path: string; target: string };
 export type PlanItem = { title: string; files: PlanTarget[]; facts?: Record<string, string>; problems: string[] };
 /** A field that applies to an upload: its value, read from the files (read: fixed) or typed; problem refuses the upload. */
 export type PlanField = FormatField & { value: string; read?: boolean; problem?: string };
-/** POST /api/repos/{name}/upload/plan: what an upload stores. ignored are the paths no item takes. */
-export type UploadPlan = { items: PlanItem[]; ignored: string[]; fields: PlanField[] };
-/** The request of an upload plan: the typed fields, the open folder, and the files with their heads. */
-export type PlanRequest = { fields: Record<string, string>; folder: string; files: { path: string; file: File }[] };
+/**
+ * POST /api/repos/{name}/upload/plan: what an upload stores. ignored are the paths no item takes.
+ * heads names the first bytes the server holds for a later plan ("" when it holds none).
+ */
+export type UploadPlan = { items: PlanItem[]; ignored: string[]; fields: PlanField[]; heads?: string };
+/**
+ * The request of an upload plan: the typed fields, the open folder, and the files with their heads.
+ * With heads (of an earlier plan), the heads of the paths in held are not sent: the server has them.
+ */
+export type PlanRequest = {
+  fields: Record<string, string>;
+  folder: string;
+  files: { path: string; file: File }[];
+  heads?: string;
+  held?: Set<string>;
+};
+/** POST /api/repos/{name}/uploads: a resumable upload. */
+export type UploadSession = { id: string; received: number; expires_at: string };
+/** A file that went through a resumable upload, for the part "uploads" of POST /api/repos/{name}/upload. */
+export type FinishedUpload = { path: string; id: string; size: number };
 // --- network rules ---
 
 /** One entry of a repo's IP rule: a CIDR ("203.0.113.0/24") or the name of an IP list. */

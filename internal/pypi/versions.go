@@ -123,7 +123,7 @@ func (h *Handler) Versions(ctx context.Context, repo *repos.Repo, p, after strin
 }
 
 // Builds lists the one build of version v of a project folder: its files.
-func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, v, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
+func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, v, id, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
 	art, project, err := h.projectOf(ctx, repo, p)
 	if err != nil || art == nil {
 		return nil, nil, nil, "", err
@@ -141,7 +141,7 @@ func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, v, after stri
 		return nil, nil, nil, "", err
 	}
 	ver := &format.Version{Version: v, Kind: format.VersionRelease, BuildsCount: 1, PublishedAt: at, CI: ci}
-	if after != "" || limit < 1 {
+	if after != "" || limit < 1 || id != "" && id != v {
 		return art, ver, []format.Build{}, "", nil
 	}
 	return art, ver, []format.Build{{Build: v, Files: files, PublishedAt: at, CI: ci}}, "", nil

@@ -83,7 +83,7 @@ func publish(ctx context.Context, files []string) error {
 	if err := restrictDir(tmp); err != nil {
 		return err
 	}
-	j := &job{ctx: ctx, c: c, p: p, s: s, tmp: tmp, files: files}
+	j := &job{ctx: ctx, c: c, cp: cp, p: p, s: s, tmp: tmp, files: files}
 	err = r.run(j)
 	var ee *exitError
 	if errors.As(err, &ee) && time.Now().After(s.ExpiresAt) {
@@ -107,8 +107,9 @@ func noProject() error {
 }
 
 // mint mints a session for repo: in CI with the identity token of the job, on a computer with
-// the device proof. A computer without a device that the server accepts runs the device flow
-// first. dir is the project folder, for the commit of a CI job.
+// the device proof. The challenge of the mint also shows whether the server accepts the device; a
+// computer without a device that the server accepts runs the device flow, then mints. dir is the
+// project folder, for the commit of a CI job.
 func mint(ctx context.Context, c *client, repo, dir string) (*session, error) {
 	if inCI() {
 		tok, err := ciToken(ctx, c.id.base())
@@ -124,8 +125,22 @@ func mint(ctx context.Context, c *client, repo, dir string) (*session, error) {
 				"In Jenkins, bind the identity token credential to OIDC_TOKEN")
 		}
 	}
-	d, err := ensureDevice(ctx, c)
+	d, _, err := deviceOf(c.id)
 	if err != nil {
+		return nil, err
+	}
+	if d != nil {
+		nonce, _, err := c.challenge(ctx, d, false, "")
+		switch {
+		case err == nil:
+			return c.mintNonce(ctx, d, nonce, repo)
+		case !refused(err):
+			return nil, err
+		}
+		deviceRefused(c, d, err)
+	}
+	fmt.Fprintf(os.Stderr, "This computer has no device of %s yet.\n", c.id.base())
+	if d, err = loginDevice(ctx, c, deviceName()); err != nil {
 		return nil, err
 	}
 	return c.mintDevice(ctx, d, repo)

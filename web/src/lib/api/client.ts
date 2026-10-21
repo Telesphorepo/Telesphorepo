@@ -10,6 +10,8 @@ export class ApiError extends Error {
     public fields?: Record<string, string>,
     /** Seconds from the Retry-After header of a 429. */
     public retryAfter?: number,
+    /** The problem document of the answer, when it had one (e.g. the received of a 416). */
+    public problem?: unknown,
   ) {
     super(message);
   }
@@ -159,35 +161,48 @@ export function requestWithProgress<T>(
   token: string,
   onProgress: (sent: number, total: number) => void,
 ): { done: Promise<T>; abort: () => void } {
+  return sendWithProgress<T>("POST", url, form, token, {}, onProgress);
+}
+
+/** Like requestWithProgress, with any method, body and extra headers (a chunk of a resumable upload). */
+export function sendWithProgress<T>(
+  method: string,
+  url: string,
+  body: FormData | Blob | null,
+  token: string,
+  headers: Record<string, string>,
+  onProgress: (sent: number, total: number) => void,
+): { done: Promise<T>; abort: () => void } {
   const xhr = new XMLHttpRequest();
   const done = new Promise<T>((resolve, reject) => {
-    xhr.open("POST", url);
+    xhr.open(method, url);
     xhr.setRequestHeader("Accept", "application/json");
     xhr.setRequestHeader(uiHeader, "1");
     xhr.setRequestHeader("Authorization", "Bearer " + token);
+    for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v);
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) onProgress(e.loaded, e.total);
     };
     xhr.onabort = () => reject(new DOMException("The upload was cancelled.", "AbortError"));
     xhr.onerror = () => reject(new ApiError(0, "The server cannot be reached. Check your connection and try again."));
     xhr.onload = () => {
-      let body: unknown;
+      let answer: unknown;
       try {
-        body = xhr.responseText ? JSON.parse(xhr.responseText) : undefined;
+        answer = xhr.responseText ? JSON.parse(xhr.responseText) : undefined;
       } catch {
-        body = undefined;
+        answer = undefined;
       }
       if (xhr.status >= 200 && xhr.status < 300) {
-        resolve(body as T);
+        resolve(answer as T);
         return;
       }
-      const p = body as Problem | undefined;
+      const p = answer as Problem | undefined;
       let message = problemMessage(p, xhr.statusText || `Request failed (${xhr.status})`);
       if (xhr.status === 413) message = "The files are larger than the upload limit of this server. Upload fewer or smaller files.";
       const fields = problemFields(p);
-      reject(new ApiError(xhr.status, message, fields));
+      reject(new ApiError(xhr.status, message, fields, undefined, answer));
     };
-    xhr.send(form);
+    xhr.send(body);
   });
   return { done, abort: () => xhr.abort() };
 }

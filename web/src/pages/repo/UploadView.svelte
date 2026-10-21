@@ -5,14 +5,27 @@
   upload (POST /upload/plan stores nothing): the browser sends the list of files and the first
   bytes of the files the format reads, and shows what the plan stores, where each file goes, the
   problems, the files it leaves out and the fields of the format (values it read from the files
-  show fixed). An edit of a field plans again. The ticked items then upload with progress; each
-  file goes with its path in the upload as its multipart filename, and the server plans them once
-  more before it stores them. `folder` is the open folder of the Files tab ("" or ending in "/");
+  show fixed). An edit of a field plans again, and aborts a check in flight; the server holds the
+  first bytes it read (heads), so a later plan sends only the fields, the list and the first bytes
+  of new files (a 409 sends them all again). The ticked items then upload with progress: past
+  90 MB, the largest files first go through resumable uploads in 16 MiB chunks (upload/send.ts),
+  and the upload names them in its part "uploads"; each other file goes with its path in the
+  upload as its multipart filename. The server plans them once more before it stores them. `folder` is the open folder of the Files tab ("" or ending in "/");
   the plan takes the first values of fields from it.
 -->
 <script lang="ts">
   import { toast } from "svelte-sonner";
-  import { api, ApiError, errorMessage, type Proof, type Repo, type UploadPlan, type Uploaded, type UploadProgress } from "$lib/api";
+  import {
+    api,
+    ApiError,
+    errorMessage,
+    type FinishedUpload,
+    type Proof,
+    type Repo,
+    type UploadPlan,
+    type Uploaded,
+    type UploadProgress,
+  } from "$lib/api";
   import { formats } from "$lib/formats/registry.svelte";
   import { filesPath, href, navigate } from "$lib/router.svelte";
   import { formatSize } from "$lib/format";
@@ -33,6 +46,7 @@
   import PlanView from "./upload/PlanView.svelte";
   import UploadResults from "./upload/UploadResults.svelte";
   import { filesFromEntries, filesFromInput, keepOf, type FolderDrop, type FolderFile, type FolderRead } from "./upload/folder";
+  import { resumableOf, sendResumable } from "./upload/send";
   import { dropSession, keepSession, sessionToken } from "./session";
   import PlusIcon from "@lucide/svelte/icons/plus";
   import UploadIcon from "@lucide/svelte/icons/upload";
@@ -114,6 +128,9 @@
     planError = "";
     progress = null;
     results = [];
+    planSeq++;
+    planAbort?.();
+    forgetHeads();
   }
 
   const cancelled = (e: unknown) => e instanceof DOMException && e.name === "AbortError";
@@ -121,7 +138,10 @@
   function addFiles(list: File[]) {
     error = "";
     const byName = new Map(files.map((f) => [f.path, f]));
-    for (const file of list) byName.set(file.name, { file, path: file.name });
+    for (const file of list) {
+      byName.set(file.name, { file, path: file.name });
+      held.delete(file.name);
+    }
     let all = [...byName.values()];
     if (all.length > maxFiles) {
       all = all.slice(0, maxFiles);
@@ -164,6 +184,7 @@
       error = `The folder has more than ${maxFiles} files to upload. Choose a smaller folder, such as the one that holds only the packages.`;
       return;
     }
+    forgetHeads();
     files = read.files;
     skipped = read.skipped;
     fromFolder = true;
@@ -174,6 +195,16 @@
 
   let planSeq = 0;
   let planTimer: ReturnType<typeof setTimeout> | undefined;
+  // The plan request in flight: a new plan aborts it.
+  let planAbort: (() => void) | null = null;
+  // The first bytes the server holds (heads of the last plan) and the paths it holds them for.
+  let heads = "";
+  let held = new Set<string>();
+
+  function forgetHeads() {
+    heads = "";
+    held = new Set();
+  }
 
   /** Plans the files now (first: the plan of new files, with a progress bar), or 400 ms after the last edit of a field. */
   function runPlan(first: boolean) {
@@ -202,13 +233,33 @@
       phase = "planning";
       progress = { sent: 0, total: 0 };
     }
-    try {
-      const r = api.repos.uploadPlan(repo.name, { fields: { ...typed }, folder, files }, up.reads, t, (p) => {
+    planAbort?.();
+    const reads = up.reads;
+    const list = files;
+    const send = (withHeads: boolean) => {
+      const req = { fields: { ...typed }, folder, files: list, heads: withHeads ? heads : "", held };
+      const r = api.repos.uploadPlan(repo.name, req, reads, t, (p) => {
         if (first && mine === planSeq) progress = p;
       });
+      planAbort = r.abort;
       if (first) abort = r.abort;
-      const p = await r.done;
+      return r.done;
+    };
+    try {
+      let p: UploadPlan;
+      try {
+        p = await send(!!heads);
+      } catch (e) {
+        // The server no longer holds the first bytes: send them again.
+        if (!(e instanceof ApiError && e.status === 409 && heads) || mine !== planSeq) throw e;
+        forgetHeads();
+        p = await send(false);
+      }
       if (mine !== planSeq) return;
+      if (p.heads) {
+        heads = p.heads;
+        held = new Set(list.map((f) => f.path));
+      } else forgetHeads();
       const before = plan;
       plan = p;
       // Keep the choice of the items that stay; a new item is ticked when it can go.
@@ -226,6 +277,7 @@
         error = cancelled(e) ? "You cancelled the check." : errorMessage(e);
       } else planError = errorMessage(e);
     } finally {
+      if (mine === planSeq) planAbort = null;
       if (first && mine === planSeq) {
         abort = null;
         progress = null;
@@ -261,21 +313,38 @@
   async function upload() {
     if (problem || !plan) return;
     error = "";
+    const ctl = new AbortController();
+    const sent: FinishedUpload[] = [];
+    let t = "";
     try {
-      const t = token();
-      const form = new FormData();
-      // The fields first (the server reads parts in order), then each file.
-      for (const f of plan.fields) if (!f.read) form.append(f.key, valueOf(f.key));
-      for (const f of chosen) form.append("file", f.file, f.path);
+      t = token();
+      const total = chosen.reduce((n, f) => n + f.file.size, 0);
       phase = "sending";
-      progress = { sent: 0, total: chosen.reduce((n, f) => n + f.file.size, 0) };
-      const s = api.repos.upload(repo.name, form, t, (p) => (progress = p));
-      abort = s.abort;
+      progress = { sent: 0, total };
+      abort = () => ctl.abort();
+      // The large files first, each through a resumable upload in chunks.
+      const big = resumableOf(chosen);
+      let base = 0;
+      for (const f of chosen) {
+        if (!big.has(f)) continue;
+        sent.push(await sendResumable(repo.name, f, t, ctl.signal, (n) => (progress = { sent: base + n, total })));
+        base += f.file.size;
+      }
+      const form = new FormData();
+      // The fields first (the server reads parts in order), then the finished uploads, then each file.
+      for (const f of plan.fields) if (!f.read) form.append(f.key, valueOf(f.key));
+      if (sent.length) form.append("uploads", JSON.stringify(sent));
+      for (const f of chosen) if (!big.has(f)) form.append("file", f.file, f.path);
+      if (ctl.signal.aborted) throw new DOMException("The upload was cancelled.", "AbortError");
+      const s = api.repos.upload(repo.name, form, t, (p) => (progress = { sent: base + p.sent, total: base + p.total }));
+      ctl.signal.addEventListener("abort", s.abort);
       const a = await s.done;
       results = a.files;
       phase = "done";
       toast.success(`Uploaded ${nItems.toLocaleString()} ${word(nItems)} to ${repo.name}`);
     } catch (e) {
+      // The uploads that the server did not finish go now.
+      for (const u of sent) void api.repos.cancelUpload(repo.name, u.id, t).catch(() => {});
       phase = "plan";
       if (cancelled(e)) error = "You cancelled the upload. Nothing was stored.";
       else {

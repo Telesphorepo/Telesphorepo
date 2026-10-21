@@ -6,8 +6,9 @@
   names its members in read order.
 -->
 <script lang="ts">
-  import { api, type Repo } from "$lib/api";
+  import { api, type Page, type Repo, type TreeEntry } from "$lib/api";
   import { Resource } from "$lib/load.svelte";
+  import { FOLDER_PAGE } from "./FolderList.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import Loading from "$lib/components/Loading.svelte";
   import FileSize from "$lib/components/FileSize.svelte";
@@ -16,9 +17,18 @@
   import { formatCount } from "$lib/format";
   import { href, repoPath } from "$lib/router.svelte";
 
-  let { repo, folder }: { repo: Repo; folder: string } = $props();
+  let {
+    repo,
+    folder,
+    first,
+  }: {
+    repo: Repo;
+    folder: string;
+    /** The first page of the folder (FOLDER_PAGE rows) that the List view shows too, already asked for by the parent. */
+    first?: Promise<Page<TreeEntry>>;
+  } = $props();
 
-  const LIMIT = 100;
+  const LIMIT = FOLDER_PAGE;
 
   // The top folder: the repository again, so the numbers are fresh after a delete.
   /* svelte-ignore state_referenced_locally */
@@ -26,7 +36,7 @@
 
   // Any other folder: the first page of its children.
   /* svelte-ignore state_referenced_locally */
-  const kids = folder === "" ? null : new Resource(() => api.repos.tree(repo.name, folder, { limit: LIMIT }));
+  const kids = folder === "" ? null : new Resource(() => first ?? api.repos.tree(repo.name, folder, { limit: LIMIT }));
   const held = $derived.by(() => {
     const page = kids?.data;
     if (!page) return null;

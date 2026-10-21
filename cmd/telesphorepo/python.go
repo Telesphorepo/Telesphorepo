@@ -131,20 +131,16 @@ func runPython(j *job) error {
 			return fmt.Errorf("%s is not a wheel (.whl) or an sdist (.tar.gz)", f)
 		}
 	}
-	for _, f := range files {
-		if err := j.uploadPython(f); err != nil {
-			return err
-		}
-	}
-	return nil
+	return j.uploadEach(files, (*job).uploadPython)
 }
 
 // uploadPython uploads the distribution file f to the legacy upload of the repo: one multipart
 // POST, or for a large file the resumable upload routes, which the upload route then finishes.
-func (j *job) uploadPython(f string) error {
+// It returns the line that says what the server stored.
+func (j *job) uploadPython(f string) (string, error) {
 	st, err := os.Stat(f)
 	if err != nil {
-		return err
+		return "", err
 	}
 	name := filepath.Base(f)
 	route := "/pypi/" + url.PathEscape(j.p.Repo) + "/legacy/"
@@ -163,10 +159,9 @@ func (j *job) uploadPython(f string) error {
 		err = j.postDist(f, name, st.Size(), route, &out)
 	}
 	if err != nil {
-		return err
+		return "", err
 	}
-	fmt.Fprintf(os.Stderr, "Uploaded %s (%s %s) to %s\n", name, out.Project, out.Version, j.p.Repo)
-	return nil
+	return fmt.Sprintf("Uploaded %s (%s %s) to %s", name, out.Project, out.Version, j.p.Repo), nil
 }
 
 // postDist sends the file f of size bytes as the content of a legacy upload form to p.

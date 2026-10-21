@@ -1,7 +1,7 @@
 // Typed functions for every /api route. Pages import `api` and call e.g. api.repos.list().
 // Routes and JSON shapes follow internal/api; see SPEC.md for the rules behind them.
 
-import { request, requestOrNull, requestText, requestWithProgress } from "./client";
+import { request, requestOrNull, requestText, requestWithProgress, sendWithProgress } from "./client";
 import type * as T from "./types";
 import { globMatch } from "$lib/glob";
 
@@ -154,6 +154,9 @@ export const api = {
     /** The builds of one version of an artifact folder, newest first; version is null when the artifact has no such version. */
     builds: (name: string, path: string, version: string, p?: T.PageParams) =>
       request<T.Builds>("GET", repo(name) + "/builds", { query: { path, version, ...page(p) } }),
+    /** One build of a version, by its id: items holds it, or nothing when the version has no such build. */
+    build: (name: string, path: string, version: string, id: string) =>
+      request<T.Builds>("GET", repo(name) + "/builds", { query: { path, version, build: id } }),
     /** One file with its details; 404 when it does not exist. */
     file: (name: string, path: string) => request<T.FileInfo>("GET", repo(name) + "/file", { query: { path } }),
     /** The snippets that use one artifact: an artifact folder (with a version, or "" for none), a version folder, or a file. */
@@ -184,8 +187,10 @@ export const api = {
     ) => {
       const form = new FormData();
       const list = req.files.map((f) => ({ path: f.path, size: f.file.size }));
-      form.append("plan", new Blob([JSON.stringify({ fields: req.fields, folder: req.folder, files: list })], { type: "application/json" }));
+      const plan = { fields: req.fields, folder: req.folder, files: list, heads: req.heads };
+      form.append("plan", new Blob([JSON.stringify(plan)], { type: "application/json" }));
       for (const f of req.files) {
+        if (req.heads && req.held?.has(f.path)) continue;
         const rule = reads.find((r) => globMatch(r.glob, f.path));
         if (rule) form.append("head", f.file.slice(0, rule.max_bytes), f.path);
       }
@@ -203,6 +208,21 @@ export const api = {
       );
       return { done: r.done.then((a) => ({ files: Array.isArray(a?.files) ? a.files : [] })), abort: r.abort };
     },
+    /** Starts a resumable upload with a publish session token; its chunks go with appendUpload. */
+    startUpload: (name: string, token: string) => request<T.UploadSession>("POST", repo(name) + "/uploads", { token }),
+    /**
+     * Appends chunk at offset to the resumable upload id: answers the bytes the server holds. A
+     * wrong offset is an ApiError 416 whose problem holds received. Reports the progress of the chunk.
+     */
+    appendUpload: (name: string, id: string, chunk: Blob, offset: number, token: string, onProgress: (sent: number) => void) => {
+      const range = `bytes ${offset}-${offset + chunk.size - 1}/*`;
+      const r = sendWithProgress<{ received: number }>("PATCH", repo(name) + "/uploads/" + enc(id), chunk, token, { "Content-Range": range }, (sent) =>
+        onProgress(sent),
+      );
+      return { done: r.done, abort: r.abort };
+    },
+    /** Deletes the resumable upload id and its bytes. */
+    cancelUpload: (name: string, id: string, token: string) => request("DELETE", repo(name) + "/uploads/" + enc(id), { token }),
     /** Edit settings: the repo's IP allow-lists for downloads (read) and publishing. */
     ipRules: {
       get: (name: string) => request<T.IPRules>("GET", repo(name) + "/ip-rules"),

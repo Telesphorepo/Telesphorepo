@@ -220,7 +220,7 @@ func (h *Handler) version(ctx context.Context, repoID int64, dir, id, v string, 
 		return nil, nil, err
 	}
 	newest := bs.builds[0]
-	out := &format.Version{Version: v, Kind: format.VersionRelease, BuildsCount: len(bs.builds), PublishedAt: newest.at}
+	out := &format.Version{Version: v, Kind: format.VersionRelease, Folder: dir, BuildsCount: len(bs.builds), PublishedAt: newest.at}
 	if strings.HasSuffix(v, "-SNAPSHOT") {
 		out.Kind, out.LatestBuild, out.LatestLabel = format.VersionSnapshot, newest.id, buildLabel(newest.id)
 	}
@@ -265,8 +265,8 @@ func (h *Handler) Versions(ctx context.Context, repo *repos.Repo, p, after strin
 }
 
 // Builds lists the builds of version v of an artifact folder: the files of the
-// version folder <artifact folder>/<v>/.
-func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, v, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
+// version folder <artifact folder>/<v>/. A non-empty build keeps only that build.
+func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, v, build, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
 	art, _, id, ok := artifactOf(p)
 	if !ok || v == "" || v == "." || v == ".." || strings.Contains(v, "/") {
 		return nil, nil, nil, "", nil
@@ -278,7 +278,7 @@ func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, v, after stri
 	}
 	var out []format.Build
 	for _, b := range bs.builds {
-		if after != "" && compareBuilds(b.id, after) >= 0 {
+		if build != "" && b.id != build || after != "" && compareBuilds(b.id, after) >= 0 {
 			continue
 		}
 		if len(out) == limit {

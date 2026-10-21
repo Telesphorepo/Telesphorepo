@@ -397,7 +397,9 @@ func (a *API) versions(w http.ResponseWriter, r *http.Request, c *route.Call) {
 
 // builds lists the builds of one version of an artifact, newest first (format.Spec Versions and Builds):
 // ?path=<artifact folder>&version=<v>&after=<build>&limit= -> {artifact, version, items: [Build],
-// next}. artifact and version are null when the artifact has no such version.
+// next}. artifact and version are null when the artifact has no such version. &build=<id> answers
+// that one build alone (items empty when the version has no such build; next null), in place of
+// a page.
 func (a *API) builds(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	repo, v, p, ok := a.versionedPath(w, r, c)
 	if !ok {
@@ -415,8 +417,12 @@ func (a *API) builds(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		Next     *string          `json:"next"`
 	}
 	res := out{Items: []format.Build{}}
+	build, after, limit := q.Get("build"), q.Get("after"), httpx.Limit(r)
+	if build != "" {
+		after, limit = "", 1
+	}
 	if v != nil && v.Builds != nil {
-		art, ver, items, next, err := v.Builds(r.Context(), repo, p, q.Get("version"), q.Get("after"), httpx.Limit(r))
+		art, ver, items, next, err := v.Builds(r.Context(), repo, p, q.Get("version"), build, after, limit)
 		if err != nil {
 			route.Fail(w, r, err)
 			return
