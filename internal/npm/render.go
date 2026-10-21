@@ -151,12 +151,8 @@ func rewriteRemote(body []byte, name, urlBase string) ([]byte, error) {
 			delete(versions, v)
 			continue
 		}
-		u, err := url.Parse(tarball)
-		file := ""
-		if err == nil {
-			file = path.Base(u.Path)
-		}
-		if _, perr := repopath.Parse(name + "/-/" + file); err != nil || perr != nil || !strings.HasSuffix(file, ".tgz") {
+		file, ok := remoteFile(name, tarball)
+		if !ok {
 			delete(versions, v)
 			continue
 		}
@@ -168,6 +164,20 @@ func rewriteRemote(body []byte, name, urlBase string) ([]byte, error) {
 		doc["versions"], _ = json.Marshal(versions)
 	}
 	return json.Marshal(doc)
+}
+
+// remoteFile returns the file name of the remote tarball URL of a version of name, the file of
+// <name>/-/<file> in a proxy; ok is false for a URL without a .tgz file name.
+func remoteFile(name, tarball string) (string, bool) {
+	u, err := url.Parse(tarball)
+	if err != nil {
+		return "", false
+	}
+	file := path.Base(u.Path)
+	if _, err := repopath.Parse(name + "/-/" + file); err != nil || !strings.HasSuffix(file, ".tgz") {
+		return "", false
+	}
+	return file, true
 }
 
 // source is where the packument of a name comes from: a hosted repo's rows, or the cached remote

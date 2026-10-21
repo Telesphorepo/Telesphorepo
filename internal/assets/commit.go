@@ -344,7 +344,7 @@ func (p *Pipeline) write(ctx context.Context, tx *sql.Tx, hooks *Hooks, results 
 		if b == nil {
 			return nil, fmt.Errorf("assets: no blob for %s", w.Path)
 		}
-		a, err := upsert(ctx, q, w, b)
+		a, err := upsert(ctx, q, w, b, hooks.unitOf(string(w.Path)))
 		if err != nil {
 			return nil, err
 		}
@@ -383,7 +383,7 @@ func (p *Pipeline) write(ctx context.Context, tx *sql.Tx, hooks *Hooks, results 
 // upsert writes the asset row of w pointing to blob b. The times are the origin's (an import,
 // or a proxy's remote Last-Modified); zero means now. An insert writes created_at from Created
 // (else Updated) and updated_at from Updated; a replace writes only updated_at.
-func upsert(ctx context.Context, q *dbq.Queries, w *Write, b *blobs.Blob) (*Asset, error) {
+func upsert(ctx context.Context, q *dbq.Queries, w *Write, b *blobs.Blob, unit string) (*Asset, error) {
 	o := w.Origin
 	now := time.Now()
 	updated := now
@@ -416,6 +416,7 @@ func upsert(ctx context.Context, q *dbq.Queries, w *Write, b *blobs.Blob) (*Asse
 		BuildID:    sql.NullInt64{Int64: o.BuildID, Valid: o.BuildID != 0},
 		CheckedAt:  checked,
 		RemoteEtag: etag,
+		Unit:       sql.NullString{String: unit, Valid: true},
 	})
 	if err != nil {
 		return nil, err

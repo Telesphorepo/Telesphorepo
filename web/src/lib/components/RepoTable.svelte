@@ -2,8 +2,8 @@
   The table of repositories that people manage (Settings › Repositories; Browse home lists them
   with RepoList): name and description on one line,
   format, files, size and last publish. A private repository has a lock after its name; a public
-  one has no mark. A group or a proxy has its kind icon after the name; a group shows its number
-  of repositories in place of the files. On a phone the format icon sits before the name. A
+  one has no mark. A group or a proxy has its kind icon after the name; a group counts each file it
+  serves once, and shows Counting… until the server has counted it. On a phone the format icon sits before the name. A
   click anywhere on a row opens `href`. With `bind:picked` and a `bulk` snippet (All
   repositories), every row gets a checkbox for bulk actions (DataTable).
 -->
@@ -76,9 +76,9 @@
       </span>
     </Table.Cell>
     <Table.Cell class="max-sm:hidden"><FormatBadge format={r.format} title={titles[r.format]} /></Table.Cell>
-    {#if r.kind === "group"}
-      <!-- A group holds no files of its own: it shows how many repositories it reads. -->
-      <Cell num hideOnPhone>{formatCount(r.member_count ?? 0)} {r.member_count === 1 ? "repository" : "repositories"}</Cell>
+    {#if r.counts_pending}
+      <!-- A group whose files the server has not counted for this reader yet. -->
+      <Cell num muted hideOnPhone>Counting…</Cell>
       <Cell num hideOnPhone />
       <Cell num muted />
     {:else}

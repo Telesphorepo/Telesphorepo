@@ -36,6 +36,7 @@ type Asset struct {
 	RemoteEtag  string
 	Md5         string
 	Sha1        string
+	Unit        sql.NullString
 }
 
 type AssetsFt struct {
@@ -88,6 +89,21 @@ type Build struct {
 	Actor      string
 	Links      string
 	CreatedAt  int64
+}
+
+type GroupCount struct {
+	ID              int64
+	GroupID         int64
+	Members         string
+	FileCount       int64
+	TotalSize       int64
+	LastPublishedAt int64
+}
+
+type GroupCountMember struct {
+	CountID  int64
+	Position int64
+	MemberID int64
 }
 
 type Rebuild struct {

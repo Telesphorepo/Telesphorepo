@@ -9,10 +9,13 @@ import (
 	"mime"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
+	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/repopath"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
@@ -53,9 +56,11 @@ func (h *Handler) proxyModel(ctx context.Context, repo *repos.Repo, n string, a 
 	bases := []localBase{{"files/", filesBase(repo)}, {"remote/", remote}}
 	var files []upstreamFile
 	var versions []string
+	display := ""
 	ct, _, _ := mime.ParseMediaType(a.ContentType)
 	if ct == ctJSON || strings.HasSuffix(ct, "+json") || ct == "application/json" || bytes.HasPrefix(bytes.TrimSpace(body), []byte("{")) {
 		var page struct {
+			Name     string         `json:"name"`
 			Versions []string       `json:"versions"`
 			Files    []upstreamFile `json:"files"`
 		}
@@ -63,10 +68,13 @@ func (h *Handler) proxyModel(ctx context.Context, repo *repos.Repo, n string, a 
 			return nil, fmt.Errorf("the upstream page of %s is not valid JSON: %w", n, err)
 		}
 		files, versions = page.Files, page.Versions
+		if validName(page.Name) && normalize(page.Name) == n {
+			display = page.Name
+		}
 	} else {
 		files = parseHTMLPage(body)
 	}
-	m := &model{name: n}
+	m := &model{name: n, display: display}
 	seen := map[string]bool{}
 	for _, f := range files {
 		ref, err := url.Parse(f.URL)
@@ -79,7 +87,7 @@ func (h *Handler) proxyModel(ctx context.Context, repo *repos.Repo, n string, a 
 		if !ok {
 			continue
 		}
-		x := mfile{filename: f.Filename, href: "../../" + escapePath(local), hashes: f.Hashes, size: -1}
+		x := mfile{filename: f.Filename, href: "../../" + escapePath(local), local: local, hashes: f.Hashes, size: -1}
 		if f.Size != nil {
 			x.size = *f.Size
 		}
@@ -106,6 +114,55 @@ func (h *Handler) proxyModel(ctx context.Context, repo *repos.Repo, n string, a 
 	if len(versions) > 0 {
 		m.versions = versions
 	}
+	return m, nil
+}
+
+// maxModels is the number of proxy page models that modelCache keeps.
+const maxModels = 32
+
+// modelCache keeps the models of the last proxy pages that the versions of the web UI read, keyed
+// by the repo, its bases and the SHA-256 of the cached upstream page. The oldest goes first. A
+// model in it is never changed.
+type modelCache struct {
+	mu    sync.Mutex
+	m     map[string]*model
+	order []string
+}
+
+func (c *modelCache) get(key string) *model {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.m[key]
+}
+
+func (c *modelCache) put(key string, m *model) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.m == nil {
+		c.m = map[string]*model{}
+	}
+	if _, ok := c.m[key]; ok {
+		return
+	}
+	if len(c.order) >= maxModels {
+		delete(c.m, c.order[0])
+		c.order = c.order[1:]
+	}
+	c.m[key] = m
+	c.order = append(c.order, key)
+}
+
+// cachedModel is proxyModel through h.models.
+func (h *Handler) cachedModel(ctx context.Context, repo *repos.Repo, n string, a *assets.Asset) (*model, error) {
+	key := format.DocumentKey(strconv.FormatInt(repo.ID, 10), a.SHA256, a.ContentType, h.remoteURL(repo), filesBase(repo), n)
+	if m := h.models.get(key); m != nil {
+		return m, nil
+	}
+	m, err := h.proxyModel(ctx, repo, n, a)
+	if err != nil {
+		return nil, err
+	}
+	h.models.put(key, m)
 	return m, nil
 }
 

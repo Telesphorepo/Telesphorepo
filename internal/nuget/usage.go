@@ -2,6 +2,7 @@ package nuget
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/ci"
@@ -93,23 +94,24 @@ func tools() []format.Tool {
 		}}}
 }
 
-// ArtifactUsage returns the snippets of one package of a hosted repo. p is the package folder
-// v3-flatcontainer/<id>/, a version folder in it or a file of a version. The pinned mode names
-// the version of the path, else the newest listed release (the newest listed version when there
-// is none); the latest mode lets NuGet take the newest version (Version="*").
+// ArtifactUsage returns the snippets of one package of a hosted or proxy repo; a proxy reads the
+// registration of its remote. p is the package folder v3-flatcontainer/<id>/, a version folder
+// in it or a file of a version. The pinned mode names the version of the path, else the newest
+// listed release (the newest listed version when there is none); the latest mode lets NuGet take
+// the newest version (Version="*").
 func (h *Handler) ArtifactUsage(ctx context.Context, repo, from *repos.Repo, baseURL, p, v, mode string) (*format.ArtifactUsage, error) {
-	if from.Kind != repos.KindHosted {
+	if from.Kind != repos.KindHosted && from.Kind != repos.KindProxy {
 		return nil, nil
 	}
 	segs := strings.Split(strings.Trim(p, "/"), "/")
-	if len(segs) < 2 || segs[0]+"/" != flatDir {
+	if len(segs) < 2 || segs[0]+"/" != flatDir || !validID(segs[1]) {
 		return nil, nil
 	}
-	lid := segs[1]
+	lid := strings.ToLower(segs[1])
 	if len(segs) >= 3 && v == "" {
 		v = segs[2]
 	}
-	m, err := h.hostedModel(ctx, from.ID, lid)
+	m, err := h.usageModel(ctx, from, lid)
 	if err != nil || m == nil {
 		return nil, err
 	}
@@ -148,4 +150,23 @@ func (h *Handler) ArtifactUsage(ctx context.Context, repo, from *repos.Repo, bas
 		format.Snippet{ID: "msbuild.reference", Tool: "msbuild", Purpose: format.SnippetUse, Context: format.SnippetArtifact,
 			File: "*.csproj", Title: "Project file", Lang: "xml", Code: ref, Note: note})
 	return &format.ArtifactUsage{Artifact: artifactOf(lid, m.id), Version: ver, Mode: mode, Snippets: out}, nil
+}
+
+// usageModel reads the model of package lid of a hosted repo or of the registration of a
+// proxy's remote: nil when the repo does not have the package.
+func (h *Handler) usageModel(ctx context.Context, repo *repos.Repo, lid string) (*model, error) {
+	if repo.Kind != repos.KindProxy {
+		return h.hostedModel(ctx, repo.ID, lid)
+	}
+	src, err := h.source(ctx, nil, nil, repo, lid)
+	if err == nil {
+		var m *model
+		if m, err = src.load(); err == nil {
+			return m, nil
+		}
+	}
+	if errors.Is(err, errNotFound) {
+		return nil, nil
+	}
+	return nil, err
 }

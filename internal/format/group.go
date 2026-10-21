@@ -5,8 +5,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strconv"
+	"time"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
@@ -82,16 +85,25 @@ func (s *Spec) VersionsOf(ctx context.Context, repo *repos.Repo, members []*repo
 	return s.mergeVersions(ctx, repo, members, p, after, limit)
 }
 
-// owner is the first member that has the artifact at p, or nil.
+// owner is the first member that has the artifact at p, or nil, as assets.Reader.Owner picks it
+// for a group read: a proxy member's Versions reads its remote's document through the read path
+// (fetching it when the read path would), and a member whose Versions fails is skipped.
+// assets.ErrRemoteFailed when no member has the artifact and a proxy member's remote failed.
 func (s *Spec) owner(ctx context.Context, repo *repos.Repo, members []*repos.Repo, p string) (*repos.Repo, error) {
+	remoteFailed := false
 	for _, m := range members {
 		art, _, _, err := s.Versions(ctx, repo, m, p, "", 1)
-		if err != nil {
-			return nil, err
-		}
-		if art != nil {
+		switch {
+		case ctx.Err() != nil:
+			return nil, ctx.Err()
+		case err != nil:
+			remoteFailed = remoteFailed || errors.Is(err, assets.ErrRemoteFailed)
+		case art != nil:
 			return m, nil
 		}
+	}
+	if remoteFailed {
+		return nil, assets.ErrRemoteFailed
 	}
 	return nil, nil
 }
@@ -180,6 +192,23 @@ func (s *Spec) mergeVersions(ctx context.Context, repo *repos.Repo, members []*r
 		}
 		taken[v.Version] = true
 		v.Repo = pg.m.Name
+		if v.Folder != "" {
+			// The files of a version folder serve path by path: a version that later members hold
+			// too is the union of their builds.
+			later, err := s.laterHolders(ctx, repo, pages[best+1:], p, v.Version)
+			if err != nil {
+				return nil, nil, "", err
+			}
+			if len(later) > 0 {
+				u, err := s.union(ctx, repo, append([]*repos.Repo{pg.m}, later...), p, v.Version)
+				if err != nil {
+					return nil, nil, "", err
+				}
+				if u != nil {
+					v = *u.ver
+				}
+			}
+		}
 		out = append(out, v)
 	}
 	next := &groupCursor{After: map[string]string{}}
@@ -230,10 +259,178 @@ func (s *Spec) earlierHas(ctx context.Context, repo *repos.Repo, earlier []*memb
 	return false, nil
 }
 
-// BuildsOf answers Builds for repo. In a group (members as for VersionsOf) the builds are those of
-// the member that serves the version: the owner of the artifact (GroupOwner), else the first
-// member that has the version. The version names that member in Repo.
-func (s *Spec) BuildsOf(ctx context.Context, repo *repos.Repo, members []*repos.Repo, p, version, build, after string, limit int) (*Artifact, *Version, []Build, string, error) {
+// laterHolders returns the members of pages that have version v: in the page they read, or else by
+// a lookup of the version's Builds.
+func (s *Spec) laterHolders(ctx context.Context, repo *repos.Repo, pages []*memberPage, p, v string) ([]*repos.Repo, error) {
+	var out []*repos.Repo
+	for _, pg := range pages {
+		found := false
+		for _, x := range pg.items {
+			if x.Version == v {
+				found = true
+				break
+			}
+		}
+		if !found {
+			_, ver, _, _, err := s.Builds(ctx, repo, pg.m, p, v, "", "", 1)
+			if err != nil {
+				return nil, err
+			}
+			found = ver != nil
+		}
+		if found {
+			out = append(out, pg.m)
+		}
+	}
+	return out, nil
+}
+
+// buildsPage is the number of builds that one Builds call of a union reads.
+const buildsPage = 1000
+
+// allBuilds returns the version v of member m and all its builds; a nil version when m does not
+// have it.
+func (s *Spec) allBuilds(ctx context.Context, repo, m *repos.Repo, p, v string) (*Artifact, *Version, []Build, error) {
+	var art *Artifact
+	var ver *Version
+	var out []Build
+	after := ""
+	for range 1000 {
+		a, x, items, next, err := s.Builds(ctx, repo, m, p, v, "", after, buildsPage)
+		if err != nil || a == nil || x == nil {
+			return nil, nil, nil, err
+		}
+		if art == nil {
+			art, ver = a, x
+		}
+		out = append(out, items...)
+		if next == "" || len(items) == 0 {
+			break
+		}
+		after = next
+	}
+	return art, ver, out, nil
+}
+
+// unionBuilds is the version of a group that the builds of several members make up.
+type unionBuilds struct {
+	art    *Artifact
+	ver    *Version
+	builds []Build
+}
+
+// union is version v of the members holders (in read order) of a group: the union of their builds,
+// a build id once, a file path once from the first member that has it (named in the file's Repo),
+// as a group read serves the files of a version folder path by path. The builds are in BuildOrder;
+// the version is the first holder's with the count, the latest build, its time and its CI build
+// record taken from the union. nil when no holder has the version.
+func (s *Spec) union(ctx context.Context, repo *repos.Repo, holders []*repos.Repo, p, v string) (*unionBuilds, error) {
+	var u *unionBuilds
+	byID := map[string]int{}
+	seen := map[string]bool{}
+	for _, m := range holders {
+		art, ver, builds, err := s.allBuilds(ctx, repo, m, p, v)
+		if err != nil {
+			return nil, err
+		}
+		if ver == nil {
+			continue
+		}
+		if u == nil {
+			x := *ver
+			x.Repo = m.Name
+			u = &unionBuilds{art: art, ver: &x}
+		}
+		for _, b := range builds {
+			i, ok := byID[b.Build]
+			if !ok {
+				i = len(u.builds)
+				byID[b.Build] = i
+				nb := b
+				nb.Files = nil
+				nb.PublishedAt = time.Time{}
+				u.builds = append(u.builds, nb)
+			}
+			ub := &u.builds[i]
+			for _, f := range b.Files {
+				if seen[f.Path] {
+					continue // an earlier member serves it
+				}
+				seen[f.Path] = true
+				f.Repo = m.Name
+				ub.Files = append(ub.Files, f)
+				at := f.UpdatedAt
+				if at.IsZero() {
+					at = b.PublishedAt
+				}
+				if at.After(ub.PublishedAt) {
+					ub.PublishedAt = at
+				}
+			}
+		}
+	}
+	if u == nil {
+		return nil, nil
+	}
+	u.builds = slices.DeleteFunc(u.builds, func(b Build) bool { return len(b.Files) == 0 })
+	if s.BuildOrder != nil {
+		slices.SortStableFunc(u.builds, s.BuildOrder)
+	}
+	if len(u.builds) > 0 {
+		newest := u.builds[0]
+		u.ver.BuildsCount, u.ver.PublishedAt, u.ver.CI = len(u.builds), newest.PublishedAt, newest.CI
+		if u.ver.LatestBuild != "" {
+			u.ver.LatestBuild, u.ver.LatestLabel = newest.Build, newest.Label
+		}
+	}
+	return u, nil
+}
+
+// page is the page of builds of u after build after (in BuildOrder; "" for the first), at most
+// limit, or the one build of that id when build is set.
+func (u *unionBuilds) page(order func(a, b Build) int, build, after string, limit int) ([]Build, string) {
+	var out []Build
+	from := 0
+	if after != "" {
+		from = len(u.builds)
+		for i, b := range u.builds {
+			if b.Build == after {
+				from = i + 1
+				break
+			}
+			if order != nil && order(Build{Build: after}, b) < 0 {
+				from = i // the first build that sorts after the cursor
+				break
+			}
+		}
+	}
+	for _, b := range u.builds[from:] {
+		if build != "" && b.Build != build {
+			continue
+		}
+		if len(out) == limit {
+			return out, out[len(out)-1].Build
+		}
+		out = append(out, b)
+	}
+	return out, ""
+}
+
+// Stores reports whether member m stores the file at path (a hosted file, a proxy's cached copy).
+type Stores func(ctx context.Context, m *repos.Repo, path string) (bool, error)
+
+// BuildsOf answers Builds for repo. In a group (members as for VersionsOf) the builds are those
+// that a group read serves for the version, and every file names in Repo the member that serves
+// it:
+//   - GroupOwner: the builds of the owner of the artifact; every file is the owner's.
+//   - GroupEach, a version with a Folder (its files serve path by path): the union of the builds
+//     of every member that has the version (see union).
+//   - GroupEach, a version without a Folder (one path names it, e.g. a Docker tag): the builds of
+//     the first member that has the version; each file names the first member that stores its
+//     path (stores), else that member.
+//
+// The version names the first member that has it in Repo.
+func (s *Spec) BuildsOf(ctx context.Context, repo *repos.Repo, members []*repos.Repo, stores Stores, p, version, build, after string, limit int) (*Artifact, *Version, []Build, string, error) {
 	if s.Builds == nil {
 		return nil, nil, nil, "", nil
 	}
@@ -245,17 +442,52 @@ func (s *Spec) BuildsOf(ctx context.Context, repo *repos.Repo, members []*repos.
 		if err != nil || m == nil {
 			return nil, nil, nil, "", err
 		}
-		members = []*repos.Repo{m}
+		art, ver, items, next, err := s.Builds(ctx, repo, m, p, version, build, after, limit)
+		if err != nil || art == nil || ver == nil {
+			return nil, nil, nil, "", err
+		}
+		ver.Repo = m.Name
+		for i := range items {
+			for j := range items[i].Files {
+				items[i].Files[j].Repo = m.Name
+			}
+		}
+		return art, ver, items, next, nil
 	}
-	for _, m := range members {
+	for i, m := range members {
 		art, ver, items, next, err := s.Builds(ctx, repo, m, p, version, build, after, limit)
 		if err != nil {
 			return nil, nil, nil, "", err
 		}
-		if art != nil && ver != nil {
-			ver.Repo = m.Name
-			return art, ver, items, next, nil
+		if art == nil || ver == nil {
+			continue
 		}
+		if ver.Folder != "" {
+			u, err := s.union(ctx, repo, members[i:], p, version)
+			if err != nil || u == nil {
+				return nil, nil, nil, "", err
+			}
+			items, next := u.page(s.BuildOrder, build, after, limit)
+			return u.art, u.ver, items, next, nil
+		}
+		ver.Repo = m.Name
+		for i := range items {
+			for j := range items[i].Files {
+				f := &items[i].Files[j]
+				f.Repo = m.Name
+				for _, x := range members {
+					ok, err := stores(ctx, x, f.Path)
+					if err != nil {
+						return nil, nil, nil, "", err
+					}
+					if ok {
+						f.Repo = x.Name
+						break
+					}
+				}
+			}
+		}
+		return art, ver, items, next, nil
 	}
 	return nil, nil, nil, "", nil
 }
@@ -270,11 +502,31 @@ func (s *Spec) UsageOf(ctx context.Context, repo *repos.Repo, members []*repos.R
 	if repo.Kind != repos.KindGroup {
 		return s.ArtifactUsage(ctx, repo, repo, baseURL, p, version, mode)
 	}
+	if s.GroupVersions == GroupOwner && s.Versions != nil {
+		// The owner of an artifact folder; a path that is not one (a file) goes to the first
+		// member that answers for it.
+		m, err := s.owner(ctx, repo, members, p+"/")
+		if err != nil {
+			return nil, err
+		}
+		if m != nil {
+			members = []*repos.Repo{m}
+		}
+	}
+	remoteFailed := false
 	for _, m := range members {
 		u, err := s.ArtifactUsage(ctx, repo, m, baseURL, p, version, mode)
-		if err != nil || u != nil {
+		switch {
+		case ctx.Err() != nil:
+			return nil, ctx.Err()
+		case errors.Is(err, assets.ErrRemoteFailed):
+			remoteFailed = true // a proxy whose remote failed: the next member may answer
+		case err != nil || u != nil:
 			return u, err
 		}
+	}
+	if remoteFailed {
+		return nil, assets.ErrRemoteFailed
 	}
 	return nil, nil
 }

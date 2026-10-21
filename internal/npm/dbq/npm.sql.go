@@ -93,7 +93,7 @@ func (q *Queries) GetPackage(ctx context.Context, arg GetPackageParams) (GetPack
 }
 
 const getVersionFile = `-- name: GetVersionFile :one
-SELECT v.version, v.tarball, v.published_at, a.size, a.sha256, a.build_id
+SELECT v.version, v.tarball, v.published_at, a.size, a.sha256, a.build_id, a.updated_at
 FROM npm_versions v JOIN assets a ON a.repo_id = v.repo_id AND a.path = v.tarball
 WHERE v.repo_id = ? AND v.name = ? AND v.version = ?
 `
@@ -111,6 +111,7 @@ type GetVersionFileRow struct {
 	Size        int64
 	Sha256      string
 	BuildID     sql.NullInt64
+	UpdatedAt   int64
 }
 
 // One version with its tarball asset.
@@ -124,6 +125,7 @@ func (q *Queries) GetVersionFile(ctx context.Context, arg GetVersionFileParams) 
 		&i.Size,
 		&i.Sha256,
 		&i.BuildID,
+		&i.UpdatedAt,
 	)
 	return i, err
 }

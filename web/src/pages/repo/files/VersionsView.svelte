@@ -55,9 +55,9 @@
     versions.items.map((v) => ({
       key: v.version,
       top: v.version,
-      bottom: day.format(new Date(v.published_at)),
+      bottom: v.published_at ? day.format(new Date(v.published_at)) : "",
       serial: v.build?.revision ? shortSha(v.build.revision) : v.kind === "snapshot" ? "Snapshot" : "Release",
-      label: `${v.version}, ${v.kind}, published ${formatDateTime(v.published_at)}`,
+      label: `${v.version}, ${v.kind}${v.published_at ? `, published ${formatDateTime(v.published_at)}` : ""}`,
     })),
   );
   const byVersion = $derived(new Map(versions.items.map((v) => [v.version, v])));
@@ -96,6 +96,7 @@
   {:else if v.kind === "snapshot"}
     <span class="max-sm:hidden"><StatusBadge title="A snapshot changes with each build">Snapshot</StatusBadge></span>
   {/if}
+  {#if v.remote}<StatusBadge title="The proxy lists this version from its remote and fetches its files on the first download">Not cached</StatusBadge>{/if}
 {/snippet}
 
 {#if flow && versions.items.length}
@@ -120,7 +121,7 @@
               <MemberTag repo={v.repo} />
             </p>
             <p class="flex flex-wrap items-center gap-x-3 gap-y-1 text-meta text-muted-foreground">
-              <span>Published <RelativeTime at={v.published_at} /></span>
+              {#if v.published_at}<span>Published <RelativeTime at={v.published_at} /></span>{/if}
               {#if builds(v)}<span>{builds(v)}</span>{/if}
               <BuildInline p={v.build} />
             </p>
@@ -169,7 +170,7 @@
       </Cell>
       {#if anySnapshot}<Cell hideOnPhone muted class="whitespace-nowrap">{builds(v)}</Cell>{/if}
       <Cell hideOnPhone muted><BuildInline p={v.build} /></Cell>
-      <Cell num muted><RelativeTime at={v.published_at} /></Cell>
+      <Cell num muted><RelativeTime at={v.published_at} empty="Unknown" /></Cell>
       {#if canWrite}
         <Cell actions>
           <Button
