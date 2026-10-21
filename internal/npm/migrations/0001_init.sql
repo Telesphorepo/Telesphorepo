@@ -16,13 +16,12 @@ CREATE TABLE npm_versions (
   name         TEXT NOT NULL,
   version      TEXT NOT NULL,    -- strict SemVer
   sort_key     TEXT NOT NULL,    -- version.SemVer.SortKey: byte order is SemVer order
+  manifest     TEXT NOT NULL,    -- the version's package.json as published, without dist
   tarball      TEXT NOT NULL,    -- the asset path of the tarball: <name>/-/<file>.tgz
   integrity    TEXT NOT NULL,    -- "sha512-<base64>"
   shasum       TEXT NOT NULL,    -- SHA-1 hex
   published_at INTEGER NOT NULL,
   deprecated   TEXT NOT NULL,    -- the deprecation message; "" for none
-  -- Last, so a read of the columns above leaves the overflow pages of a large manifest unread.
-  manifest     TEXT NOT NULL,    -- the version's package.json as published, without dist
   PRIMARY KEY (repo_id, name, version)
 ) STRICT, WITHOUT ROWID;
 -- Versions of a package in SemVer order (packuments, the version browser).

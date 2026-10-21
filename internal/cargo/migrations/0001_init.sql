@@ -24,12 +24,10 @@ CREATE INDEX cargo_versions_sort ON cargo_versions(repo_id, lower_name, sort_key
 CREATE INDEX cargo_versions_asset ON cargo_versions(asset_id);
 
 -- The crate names of a repo, folded (lowercase, "-" as "_"): two names that fold alike clash,
--- as on crates.io. rev names the state of the crate's index file: it moves on with each publish,
--- removal and yank, so the rendered file is kept per revision.
+-- as on crates.io.
 CREATE TABLE cargo_names (
   repo_id     INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
   folded_name TEXT NOT NULL,
   name        TEXT NOT NULL,                        -- the name that holds the folded name
-  rev         INTEGER NOT NULL,                     -- max(the rev before + 1, unix ns of the change)
   PRIMARY KEY (repo_id, folded_name)
 ) STRICT, WITHOUT ROWID;

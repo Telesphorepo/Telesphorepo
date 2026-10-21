@@ -10,8 +10,7 @@
 -- row that it read. due_at is unix milliseconds. timed_out_at (unix milliseconds, 0 for none) is
 -- the last put whose outcome is unknown: the worker applies the state once more a minute later.
 -- backfill is 1 for a row that the backfill of every pointer queued (kept when a later write
--- replaces the row): the home bucket is ready once no such row is left. edge_outbox_access holds
--- the due order of the access objects, which the worker reads before the pointers.
+-- replaces the row): the home bucket is ready once no such row is left.
 CREATE TABLE edge_outbox (
   repo_id      INTEGER NOT NULL,
   path         TEXT NOT NULL,
@@ -26,7 +25,6 @@ CREATE TABLE edge_outbox (
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX edge_outbox_due ON edge_outbox(due_at);
 CREATE INDEX edge_outbox_backfill ON edge_outbox(repo_id) WHERE backfill = 1;
-CREATE INDEX edge_outbox_access ON edge_outbox(repo_id, due_at) WHERE repo_id = 0;
 
 -- The access objects and config.json in the home bucket, by key under edge/v1/, with the hex
 -- SHA-256 of the JSON written. The reconcile writes an object whose hash differs and deletes an

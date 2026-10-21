@@ -101,10 +101,9 @@ write gate, the device and OIDC routes or the change log. Run all zones before a
   <name>` creates the next file). A migration is SQL only. `db.Init` runs each file once, in its
   own transaction with foreign keys off and `PRAGMA foreign_key_check` before the commit, so it
   may rebuild a table (create the new table, copy, drop the old one, rename; then recreate its
-  indexes and triggers). Until the first release (no `v*` tag yet), edit `0001_init.sql` in place:
-  `dev` recreates its data dir when an applied migration changed. Once a release has applied a
-  migration, never edit, rename or delete it: add the next file. `serve` refuses a database whose
-  applied migration changed, or that a newer build migrated.
+  indexes and triggers). Production servers run every push to `main` (the `main` image), so
+  never edit, rename or delete a migration that `main` holds: add the next file. `serve` refuses
+  a database whose applied migration changed, or that a newer build migrated.
 - **Keep dependencies few and mature.** Use the stdlib first: `crypto/*`, `crypto/hkdf`,
   `net/http` routing, `http.CrossOriginProtection` and `log/slog`. Explain any new module in the
   change, and don't run `go mod tidy` unless an import needs it.
@@ -164,8 +163,8 @@ write gate, the device and OIDC routes or the change log. Run all zones before a
 | Module setting | `x.Settings(&settings.Group{...})` in the module's `Register`; the group owns its keys, its permission, its page and its `Validate`, `Test` and `Apply` hooks |
 | Permission | `x.Permissions(perm.Subsystem{...}, perm.Def{...})` in the module's `Register`; the registry is `internal/perm` |
 | Audit action | `x.AuditActions(...)`; record with `h.Audit.Record(ctx, ...)` or `RecordTx`; the actor comes from the context (`internal/audit`) |
-| Core schema change | The next file of `internal/db/migrations` (before the first release: edit `0001_init.sql`); the runner is `internal/db/migrate.go` |
-| Module schema change | The next file of `internal/<module>/migrations` (before the first release: edit `0001_init.sql`) |
+| Core schema change | The next file of `internal/db/migrations`; the runner is `internal/db/migrate.go` |
+| Module schema change | The next file of `internal/<module>/migrations` |
 | Query | `queries/*.sql` of the owner (`internal/db` or the module), then `go tool task gen` |
 | New module | `internal/<module>` + one line in `internal/modules/modules.go` (see below) |
 | Format contract | `internal/format/format.go` (`format.Spec`), `kit.go` (the standard routes) |
