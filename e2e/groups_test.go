@@ -231,8 +231,8 @@ func TestGroups(t *testing.T) {
 		// A group is read-only.
 		for _, auth := range []Auth{nil, s.AdminBasic()} {
 			resp, b := rawPut(t, s, "/maven/"+grp+"/com/e2e/x/1.0/x-1.0.jar", []byte("x"), auth)
-			if resp.StatusCode != http.StatusMethodNotAllowed || !strings.Contains(string(b), "A group is read-only") {
-				t.Fatalf("PUT to the group: status %d: %s, want 405", resp.StatusCode, b)
+			if resp.StatusCode != http.StatusMethodNotAllowed || resp.Header.Get("Allow") != "GET, HEAD" || RefusalCode(b) != "read_only_kind" {
+				t.Fatalf("PUT to the group: status %d, Allow %q: %s, want 405, Allow GET, HEAD and code read_only_kind", resp.StatusCode, resp.Header.Get("Allow"), b)
 			}
 		}
 		if st, b := s.ManualSession(t, s.Admin(), s.AdminUser, grp); st != http.StatusConflict {

@@ -301,7 +301,7 @@ const volumeToolImage = "curlimages/curl:8.16.0"
 // removed at test end, after the containers that use it.
 func NewDataVolume(t testing.TB) string {
 	t.Helper()
-	vol := RandName("telesphorepo-data")
+	vol := RandName(dataVolumePrefix)
 	t.Cleanup(func() {
 		if out, err := osexec.Command(Engine.CLI, "volume", "rm", "-f", vol).CombinedOutput(); err != nil {
 			t.Errorf("remove volume %s: %v\n%s", vol, err, out)
@@ -866,8 +866,11 @@ func (s *Server) DebianKey(t testing.TB, repo string, auth Auth) string {
 	return string(b)
 }
 
-// RandName returns prefix-<8 hex>, safe for repo, user and alias names.
-func RandName(prefix string) string { return prefix + "-" + randHex(4) }
+// randNameBytes is the number of random bytes of RandName.
+const randNameBytes = 4
+
+// RandName returns prefix-<hex of randNameBytes random bytes>, safe for repo, user and alias names.
+func RandName(prefix string) string { return prefix + "-" + randHex(randNameBytes) }
 
 func randHex(n int) string {
 	b := make([]byte, n)

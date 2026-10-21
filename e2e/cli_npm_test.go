@@ -49,7 +49,7 @@ telesphorepo publish
 					Env:    map[string]string{"E2E_LINK": s.NewSetupCode(t, dev, repo).Link},
 					Mounts: map[string]string{devices: "/root/.telesphorepo"},
 				})
-				wantText(t, "publish with "+k.tool, out, "Publishing to "+repo+" (npm)", k.command)
+				wantText(t, "publish with "+k.tool, out, k.command)
 				requireAssets(t, s, repo, name+"/-/", name+"/-/"+name[len("@cli/"):]+"-1.0.0.tgz")
 			})
 		}

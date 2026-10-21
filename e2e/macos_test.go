@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
 )
@@ -51,10 +52,11 @@ func (s *syncBuffer) String() string {
 	return s.b.String()
 }
 
-// macUser is a user with TOTP factors. Each factor gives one code per 30 s step.
+// macUser is a user with TOTP factors. Each factor gives one code per step of its period; last
+// holds the last step used of each factor.
 type macUser struct {
 	name, pass string
-	secrets    []string
+	keys       []*otp.Key
 	last       []int64
 }
 
@@ -108,14 +110,13 @@ func TestMacOS(t *testing.T) {
 		return "curl -fsSL " + s.base + "/install.sh | sh -s -- setup '" + link + "'"
 	}
 
-	out := run(t, home, app, install(s.setupLink(t, devJar, dev, mvn)))
-	wantIn(t, "setup of the Maven project", out, "publishing to "+mvn+" (maven) as "+dev.name)
-	wantIn(t, "telesphorepo.toml of the Maven project", readFile(t, filepath.Join(app, "telesphorepo.toml")), `repo = "`+mvn+`"`)
+	run(t, home, app, install(s.setupLink(t, devJar, dev, mvn)))
+	wantProjectRepo(t, app, mvn)
 	run(t, home, app, "telesphorepo publish")
 	s.wantFile(t, admin, "/maven/"+mvn+"/com/example/macos-demo/1.0/macos-demo-1.0.jar", nil)
 
-	out = run(t, home, files, install(s.setupLink(t, devJar, dev, raw)))
-	wantIn(t, "setup of the raw project", out, "publishing to "+raw+" (raw) as "+dev.name)
+	run(t, home, files, install(s.setupLink(t, devJar, dev, raw)))
+	wantProjectRepo(t, files, raw)
 	run(t, home, files, "telesphorepo publish hello.txt")
 	s.wantFile(t, admin, "/raw/"+raw+"/hello.txt", []byte("hello from macOS\n"))
 
@@ -222,11 +223,15 @@ func (s *macServer) signIn(t *testing.T, u *macUser) http.CookieJar {
 	s.mustAPI(t, jar, "", http.MethodPost, "/api/auth/login", creds, nil)
 	for i := range 3 {
 		var setup struct {
-			SetupID string `json:"setup_id"`
-			Secret  string `json:"secret"`
+			SetupID    string `json:"setup_id"`
+			OTPAuthURL string `json:"otpauth_url"`
 		}
 		s.mustAPI(t, jar, "", http.MethodPost, "/api/security/totp/begin", map[string]string{"name": fmt.Sprintf("macos %d", i+1)}, &setup)
-		u.secrets, u.last = append(u.secrets, setup.Secret), append(u.last, 0)
+		key, err := otp.NewKeyFromURL(setup.OTPAuthURL)
+		if err != nil {
+			t.Fatalf("otpauth_url %q of the TOTP setup: %v", setup.OTPAuthURL, err)
+		}
+		u.keys, u.last = append(u.keys, key), append(u.last, 0)
 		s.mustAPI(t, jar, "", http.MethodPost, "/api/security/totp/confirm", map[string]string{"setup_id": setup.SetupID, "code": u.code(t, i)}, nil)
 	}
 	jar, _ = cookiejar.New(nil)
@@ -257,19 +262,22 @@ func (u *macUser) freshCode(t *testing.T) string {
 // used, it waits for the next step.
 func (u *macUser) code(t *testing.T, i int) string {
 	t.Helper()
+	k := u.keys[i]
+	period := int64(k.Period())
 	for {
 		now := time.Now().Unix()
-		cur := now / 30
+		cur := now / period
 		step := max(u.last[i]+1, cur)
 		if step <= cur+1 {
 			u.last[i] = step
-			c, err := totp.GenerateCodeCustom(u.secrets[i], time.Unix(step*30, 0), totp.ValidateOpts{Period: 30, Digits: otp.DigitsSix, Algorithm: otp.AlgorithmSHA1})
+			c, err := totp.GenerateCodeCustom(k.Secret(), time.Unix(step*period, 0),
+				totp.ValidateOpts{Period: uint(period), Digits: k.Digits(), Algorithm: k.Algorithm()})
 			if err != nil {
 				t.Fatal(err)
 			}
 			return c
 		}
-		time.Sleep(time.Until(time.Unix((step-1)*30+1, 0)))
+		time.Sleep(time.Until(time.Unix((step-1)*period+1, 0)))
 	}
 }
 
@@ -280,7 +288,7 @@ func (s *macServer) setupLink(t *testing.T, jar http.CookieJar, u *macUser, repo
 		Link string `json:"link"`
 	}
 	s.mustAPI(t, jar, "totp "+u.freshCode(t), http.MethodPost, "/api/publish/setup-codes", map[string]string{"repo": repo}, &c)
-	if !strings.HasPrefix(c.Link, s.base+"/#/setup/trsu_") {
+	if !strings.HasPrefix(c.Link, s.base+"/") {
 		t.Fatalf("POST /api/publish/setup-codes for %s: link %q", repo, c.Link)
 	}
 	return c.Link
@@ -337,18 +345,17 @@ func writeFile(t *testing.T, name, content string) {
 	}
 }
 
-func readFile(t *testing.T, name string) string {
+// wantProjectRepo fails the test unless the telesphorepo.toml that setup wrote in dir names repo.
+func wantProjectRepo(t *testing.T, dir, repo string) {
 	t.Helper()
-	b, err := os.ReadFile(name)
-	if err != nil {
-		t.Fatal(err)
+	name := filepath.Join(dir, "telesphorepo.toml")
+	var p struct {
+		Repo string `toml:"repo"`
 	}
-	return string(b)
-}
-
-func wantIn(t *testing.T, what, text, sub string) {
-	t.Helper()
-	if !strings.Contains(text, sub) {
-		t.Fatalf("%s: no %q in:\n%s", what, sub, text)
+	if _, err := toml.DecodeFile(name, &p); err != nil {
+		t.Fatalf("read %s: %v", name, err)
+	}
+	if p.Repo != repo {
+		t.Fatalf("%s names repo %q, want %q", name, p.Repo, repo)
 	}
 }

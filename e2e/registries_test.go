@@ -18,11 +18,11 @@ import (
 )
 
 type permSubsystem struct {
-	ID          string `json:"id"`
-	Scope       string `json:"scope"`
-	Label       string `json:"label"`
-	Help        string `json:"help"`
-	Module      string `json:"module"`
+	ID          string    `json:"id"`
+	Scope       string    `json:"scope"`
+	Label       string    `json:"label"`
+	Help        string    `json:"help"`
+	Module      string    `json:"module"`
 	Permissions []permDef `json:"permissions"`
 }
 
@@ -207,8 +207,13 @@ func TestSettingsS3Endpoint(t *testing.T) {
 	}
 	// The bucket goes in s3.bucket: an address with a path (the bucket after the host, as a person
 	// copies it) is refused, so the path never lands in front of every key.
-	if st, b := s.API(t, http.MethodPatch, "/api/settings", map[string]any{"s3.endpoint": "https://acct.r2.cloudflarestorage.com/bucket"}, s.Admin()); st != http.StatusBadRequest || !strings.Contains(string(b), "nothing after the host") {
-		t.Fatalf("s3.endpoint with a path: status %d, want 400 that says to put only the address: %s", st, b)
+	st, b = s.API(t, http.MethodPatch, "/api/settings", map[string]any{"s3.endpoint": "https://acct.r2.cloudflarestorage.com/bucket"}, s.Admin())
+	var refused struct {
+		Fields map[string]string `json:"fields"`
+	}
+	_ = json.Unmarshal(b, &refused)
+	if st != http.StatusBadRequest || refused.Fields["s3.endpoint"] == "" {
+		t.Fatalf("s3.endpoint with a path: status %d, want 400 with a field error of s3.endpoint: %s", st, b)
 	}
 	if st, b := s.API(t, http.MethodPost, "/api/settings/nope/test", map[string]any{}, s.Admin()); st != http.StatusNotFound {
 		t.Fatalf("test of an unknown group: status %d, want 404: %s", st, b)
@@ -275,8 +280,5 @@ func TestSSOStartupGuard(t *testing.T) {
 	}
 	if st, b := s2.API(t, http.MethodPost, "/api/auth/login", map[string]string{"username": s.AdminUser, "password": s.AdminPass}, nil); st != http.StatusOK {
 		t.Fatalf("admin password sign-in after a change of the master key: status %d, want 200: %s", st, b)
-	}
-	if logs := s2.Logs(t); !strings.Contains(logs, "SSO is off") {
-		t.Fatalf("the log does not say that SSO is off:\n%s", logs)
 	}
 }

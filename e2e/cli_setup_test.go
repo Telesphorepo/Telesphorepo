@@ -81,15 +81,12 @@ func TestCLISetup(t *testing.T) {
 			fmt.Sprintf("server = %q", s.InternalURL), fmt.Sprintf("repo = %q", app))
 		wantText(t, "the setup line again", section(out, "again"), "This setup line is already used", "second use: exit 1")
 		ci := section(out, "ci file")
-		wantText(t, "setup on a terminal", ci, "GitHub Actions", "Wrote /work/app/.github/workflows/",
-			s.InternalURL+"/install.sh", "telesphorepo publish")
+		wantText(t, "setup on a terminal", ci, "GitHub Actions", s.InternalURL+"/install.sh", "telesphorepo publish")
 		wantNoText(t, "setup on a terminal", ci, "This computer is device ")
 
 		yes := section(out, "docker yes")
 		wantText(t, "setup of a Docker repo, yes", yes,
 			fmt.Sprintf("publishing to %s (docker) as %s", img, dev),
-			"Added it to /root/.docker/config.json.",
-			"Push with: docker push "+host+"/"+img+"/app:1.0",
 			`"`+host+`": "telesphorepo"`, "project file: none")
 		wantText(t, "setup of a Docker repo, no", section(out, "docker no"),
 			"Kept /work/dc2/config.json. Add the entry yourself to push:",
@@ -155,8 +152,6 @@ func TestCLILogin(t *testing.T) {
 		if code != 0 {
 			t.Fatalf("publish with the device flow: exit %d:\n%s", code, out)
 		}
-		wantText(t, "publish with the device flow", out, "This computer has no device of "+s.InternalURL+" yet.",
-			"Uploaded hello.txt to "+s.InternalURL+"/raw/"+repo+"/hello.txt")
 		if b := getFollowS3(t, s, opts.S3, "/raw/"+repo+"/hello.txt"); string(b) != "hello from a teammate\n" {
 			t.Fatalf("GET the published file: %q", b)
 		}

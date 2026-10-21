@@ -102,9 +102,6 @@ func wantSentence(t *testing.T, what, got, want string) {
 	}
 }
 
-// everyRepoPerm is the set of the All repositories permission, in display order.
-const everyRepoPerm = "repo.download,repo.publish,repo.delete,repo.settings,repo.access,ci.pipelines"
-
 func TestEffectiveAccess(t *testing.T) {
 	t.Parallel()
 	s := StartServer(t, ServerOpts{})
@@ -120,6 +117,7 @@ func TestEffectiveAccess(t *testing.T) {
 	s.SetPerms(t, repo, gone, "repo.download", "repo.publish")
 	s.SetPerms(t, repo, boss, "repo.download") // a grant of a holder of All repositories changes nothing
 	s.MustAPI(t, http.MethodPatch, "/api/users", map[string]any{"usernames": []string{gone}, "disabled": true}, s.Admin(), nil)
+	everyRepoPerm := strings.Join(s.RepoPerms(t), ",") // the set of the All repositories permission
 
 	t.Run("people and admins", func(t *testing.T) {
 		a := getAccess(t, s, repo, "")

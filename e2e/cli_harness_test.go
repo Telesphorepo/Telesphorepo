@@ -4,8 +4,15 @@ package e2e
 
 import (
 	"context"
+	"go/ast"
+	"go/constant"
+	"go/parser"
+	"go/printer"
+	"go/token"
+	"go/types"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -166,6 +173,49 @@ func wantNoText(t testing.TB, what, text string, subs ...string) {
 			t.Fatalf("%s: %q in:\n%s", what, s, text)
 		}
 	}
+}
+
+// cliConst returns the integer constant name of cmd/telesphorepo/file, read from the source. Its
+// value is a constant expression of literals, such as 64 << 20.
+func cliConst(t testing.TB, file, name string) int64 {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, filepath.Join(repoRoot(t), "cmd", "telesphorepo", file), nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range f.Decls {
+		g, ok := d.(*ast.GenDecl)
+		if !ok || g.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range g.Specs {
+			vs := spec.(*ast.ValueSpec)
+			for i, id := range vs.Names {
+				if id.Name != name || i >= len(vs.Values) {
+					continue
+				}
+				var src strings.Builder
+				if err := printer.Fprint(&src, fset, vs.Values[i]); err != nil {
+					t.Fatal(err)
+				}
+				tv, err := types.Eval(fset, nil, token.NoPos, src.String())
+				if err != nil {
+					t.Fatalf("the constant %s of %s: %v", name, file, err)
+				}
+				if tv.Value == nil || tv.Value.Kind() != constant.Int {
+					t.Fatalf("the constant %s of %s is %s, not an integer", name, file, src.String())
+				}
+				v, exact := constant.Int64Val(tv.Value)
+				if !exact {
+					t.Fatalf("the constant %s of %s is %s, more than an int64", name, file, src.String())
+				}
+				return v
+			}
+		}
+	}
+	t.Fatalf("cmd/telesphorepo/%s has no constant %s", file, name)
+	return 0
 }
 
 // projectFile is a telesphorepo.toml in dir for repo on s, as setup writes it.

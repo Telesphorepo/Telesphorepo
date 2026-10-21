@@ -36,6 +36,10 @@ func moveS3Patch(tg *S3Target) map[string]any {
 	}
 }
 
+// moveKeepBlobs is the server env of a test that expects the source store to keep every blob
+// after a move: the blob GC keeps an unused blob for a day.
+func moveKeepBlobs() map[string]string { return map[string]string{"TR_BLOBS_GC_GRACE": "24h"} }
+
 // moveFSPatch is the settings PATCH that moves storage to the default fs root.
 func moveFSPatch() map[string]any { return map[string]any{"storage": "fs"} }
 
@@ -186,7 +190,7 @@ func TestStorageMove(t *testing.T) {
 	t.Run("fs-to-seaweedfs", func(t *testing.T) {
 		tg := StartSeaweedFS(t)
 		vol := NewDataVolume(t)
-		s := StartServer(t, ServerOpts{DataVolume: vol})
+		s := StartServer(t, ServerOpts{DataVolume: vol, Env: moveKeepBlobs()})
 		moveContent(t, s, pkgs, moveS3Patch(tg), "s3",
 			func(t *testing.T) map[string]string { return FSBlobs(t, vol) },
 			func(t *testing.T) map[string]string { return tg.Blobs(t) })
@@ -195,7 +199,7 @@ func TestStorageMove(t *testing.T) {
 	t.Run("seaweedfs-to-fs", func(t *testing.T) {
 		tg := StartSeaweedFS(t)
 		vol := NewDataVolume(t)
-		s := StartServer(t, ServerOpts{DataVolume: vol})
+		s := StartServer(t, ServerOpts{DataVolume: vol, Env: moveKeepBlobs()})
 		// A server without assets switches at once; no move starts.
 		if st, b := s.API(t, http.MethodPatch, "/api/settings", moveS3Patch(tg), s.Admin()); st != http.StatusOK {
 			t.Fatalf("PATCH to s3 on an empty server: status %d, want 200: %s", st, b)
@@ -334,7 +338,7 @@ func TestStorageMoveFailure(t *testing.T) {
 	t.Parallel()
 	tg := StartSeaweedFS(t)
 	vol := NewDataVolume(t)
-	s := StartServer(t, ServerOpts{DataVolume: vol})
+	s := StartServer(t, ServerOpts{DataVolume: vol, Env: moveKeepBlobs()})
 	repo := RandName("raw")
 	s.CreateRepo(t, repo, "raw", false, nil)
 	files := moveRawSeed(t, s, repo, "seed", 20, 4096)
@@ -437,8 +441,19 @@ func TestStorageMoveRetry(t *testing.T) {
 	if !ok.OK {
 		t.Fatal("test of the retry target: ok false")
 	}
-	if st, b := s.API(t, http.MethodPost, fmt.Sprintf("/api/storage/moves/%d/retry", m.ID), map[string]any{"session_ttl": "5h"}, admin); st != http.StatusBadRequest {
-		t.Fatalf("retry with a key outside the storage group: status %d, want 400: %s", st, b)
+	settingItems, _ := listSettings(t, s)
+	var other *settingItem
+	for _, k := range slices.Sorted(maps.Keys(settingItems)) {
+		if it := settingItems[k]; it.Group != "storage" {
+			other = &it
+			break
+		}
+	}
+	if other == nil {
+		t.Fatal("GET /api/settings lists no setting outside the storage group")
+	}
+	if st, b := s.API(t, http.MethodPost, fmt.Sprintf("/api/storage/moves/%d/retry", m.ID), map[string]any{other.Key: other.Value}, admin); st != http.StatusBadRequest {
+		t.Fatalf("retry with %s of the group %s: status %d, want 400: %s", other.Key, other.Group, st, b)
 	}
 	// A password reaches neither route.
 	if st, b := s.API(t, http.MethodPost, fmt.Sprintf("/api/storage/moves/%d/retry", m.ID), map[string]any{}, s.AdminBasic()); st != http.StatusUnauthorized {
@@ -511,7 +526,7 @@ func TestStorageMoveRestart(t *testing.T) {
 	t.Parallel()
 	tg := StartSeaweedFS(t)
 	vol := NewDataVolume(t)
-	s := StartServer(t, ServerOpts{DataVolume: vol})
+	s := StartServer(t, ServerOpts{DataVolume: vol, Env: moveKeepBlobs()})
 	repo := RandName("raw")
 	s.CreateRepo(t, repo, "raw", false, nil)
 	files := moveRawSeed(t, s, repo, "seed", 1500, 1024)
@@ -537,7 +552,7 @@ func TestStorageMoveCancel(t *testing.T) {
 	t.Parallel()
 	tg := StartSeaweedFS(t)
 	vol := NewDataVolume(t)
-	s := StartServer(t, ServerOpts{DataVolume: vol})
+	s := StartServer(t, ServerOpts{DataVolume: vol, Env: moveKeepBlobs()})
 	repo := RandName("raw")
 	s.CreateRepo(t, repo, "raw", false, nil)
 	files := moveRawSeed(t, s, repo, "seed", 1500, 1024)

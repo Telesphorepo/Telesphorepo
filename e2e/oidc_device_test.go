@@ -172,7 +172,8 @@ func TestOIDCDeviceApproval(t *testing.T) {
 
 // TestOIDCDeviceApprovalStale: a provider that ignores prompt=login and max_age returns the old
 // auth_time of its own session, and the callback refuses the approval. The test signs in at
-// Keycloak first, then waits until that sign-in is more than 5 minutes old. t.Parallel lets the
+// Keycloak first, then waits until that sign-in is older than oidc.approval_max_age, which it
+// sets to 20 s. t.Parallel lets the
 // sequential tests of the zone run during the wait.
 func TestOIDCDeviceApprovalStale(t *testing.T) {
 	kc, s := startSSOServer(t)

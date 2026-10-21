@@ -254,11 +254,39 @@ func mintFrom(t *testing.T, s *Server, user, repo, from string) (int, []byte) {
 		map[string]any{"device_id": d.ID, "repo": repo, "nonce": nonce, "signature": d.Sign(nonce, repo)}, nil, xff(from))
 }
 
-func wantDenied(t *testing.T, what string, st int, b []byte, scope string) {
+// wantDenied checks that a request through the route policy got the refusal of the IP rule
+// guard: 403 with the code network.
+func wantDenied(t *testing.T, what string, st int, b []byte) {
 	t.Helper()
-	want := "your address is not allowed to " + scope + " this repository"
-	if st != http.StatusForbidden || !strings.Contains(string(b), want) {
-		t.Fatalf("%s: status %d, want 403 %q: %s", what, st, want, b)
+	if st != http.StatusForbidden || RefusalCode(b) != "network" {
+		t.Fatalf("%s: status %d, want 403 with the code network: %s", what, st, b)
+	}
+}
+
+// deniedCount counts the network.denied events of repo for scope from the address from.
+func deniedCount(t *testing.T, s *Server, repo, scope, from string) int {
+	t.Helper()
+	n := 0
+	for _, e := range auditEvents(t, s, "network.denied", repo) {
+		if e.IP == from && fmt.Sprint(e.Detail["scope"]) == scope {
+			n++
+		}
+	}
+	return n
+}
+
+// mintDenied mints from the address from and checks that the IP rule guard refused it: 403 and
+// one more network.denied event of the publish scope from that address. The mint routes answer
+// a refusal with its status and message only, so the audit event tells the guard refusal apart.
+func mintDenied(t *testing.T, s *Server, what, user, repo, from string) {
+	t.Helper()
+	before := deniedCount(t, s, repo, "publish", from)
+	st, b := mintFrom(t, s, user, repo, from)
+	if st != http.StatusForbidden {
+		t.Fatalf("%s: status %d, want 403: %s", what, st, b)
+	}
+	if after := deniedCount(t, s, repo, "publish", from); after != before+1 {
+		t.Fatalf("%s: %d network.denied publish events from %s, want %d", what, after, from, before+1)
 	}
 }
 
@@ -311,18 +339,18 @@ func TestIPRules(t *testing.T) {
 		t.Fatalf("GET from an allowed address: status %d", st)
 	}
 	st, b := apiHeaders(t, s, http.MethodGet, path, nil, s.AdminBasic(), xff("192.0.2.1"))
-	wantDenied(t, "GET from a refused address as admin", st, b, "read")
+	wantDenied(t, "GET from a refused address as admin", st, b)
 	st, b = apiHeaders(t, s, http.MethodGet, path, nil, s.AdminBasic(), nil)
-	wantDenied(t, "GET from the private peer (not listed)", st, b, "read")
+	wantDenied(t, "GET from the private peer (not listed)", st, b)
 	tree := "/api/repos/" + repo + "/tree?path=doc/"
 	st, b = apiHeaders(t, s, http.MethodGet, tree, nil, s.Admin(), xff("192.0.2.1"))
-	wantDenied(t, "tree from a refused address with the admin UI session", st, b, "read")
+	wantDenied(t, "tree from a refused address with the admin UI session", st, b)
 	if st, b := apiHeaders(t, s, http.MethodGet, tree, nil, s.Admin(), xff("198.51.100.4")); st != http.StatusOK {
 		t.Fatalf("tree from an allowed address: status %d: %s", st, b)
 	}
 	for _, p := range []string{"/api/repos/" + repo + "/assets", "/api/repos/" + repo + "/usage", "/api/repos/" + repo + "/status"} {
 		st, b := apiHeaders(t, s, http.MethodGet, p, nil, s.Admin(), xff("192.0.2.1"))
-		wantDenied(t, "GET "+p+" from a refused address", st, b, "read")
+		wantDenied(t, "GET "+p+" from a refused address", st, b)
 	}
 	// The repo record itself stays readable, so an admin can change the rules.
 	if st, b := apiHeaders(t, s, http.MethodGet, "/api/repos/"+repo, nil, s.Admin(), xff("192.0.2.1")); st != http.StatusOK {
@@ -355,21 +383,28 @@ func TestIPRules(t *testing.T) {
 	}
 
 	// Publish rules: minting a session, uploads and deletes.
-	st, b = mintFrom(t, s, w, repo, "192.0.2.1")
-	wantDenied(t, "mint a device session from a refused address", st, b, "publish")
+	mintDenied(t, s, "mint a device session from a refused address", w, repo, "192.0.2.1")
 	st, b = mintFrom(t, s, w, repo, "198.51.100.4")
 	sess := mustSession(t, "mint from an allowed address")(st, b)
 	st, b = apiHeaders(t, s, http.MethodPut, "/raw/"+repo+"/doc/two.txt", []byte("two"), sess.Auth(), xff("192.0.2.1"))
-	wantDenied(t, "PUT from a refused address with a session", st, b, "publish")
+	wantDenied(t, "PUT from a refused address with a session", st, b)
 	if st, b := apiHeaders(t, s, http.MethodPut, "/raw/"+repo+"/doc/two.txt", []byte("two"), sess.Auth(), xff("198.51.100.4")); st != http.StatusCreated {
 		t.Fatalf("PUT from an allowed address: status %d: %s", st, b)
 	}
 	st, b = apiHeaders(t, s, http.MethodPost, "/api/repos/"+repo+"/files/delete",
 		map[string][]string{"paths": {"doc/two.txt"}}, s.Admin(), xff("192.0.2.1"))
-	wantDenied(t, "admin delete from a refused address", st, b, "publish")
+	wantDenied(t, "admin delete from a refused address", st, b)
+	before := deniedCount(t, s, repo, "publish", "192.0.2.1")
 	st, b = apiHeaders(t, s, http.MethodPost, "/api/publish/sessions/manual",
 		map[string]string{"repo": repo}, s.TOTPProof(t, s.LoginTOTP(t, w), w), xff("192.0.2.1"))
-	wantDenied(t, "manual session from a refused address", st, b, "publish")
+	if st != http.StatusForbidden {
+		t.Fatalf("manual session from a refused address: status %d, want 403: %s", st, b)
+	}
+	// The mint routes answer a refusal with its status and message only; the audit event tells
+	// the guard refusal apart.
+	if after := deniedCount(t, s, repo, "publish", "192.0.2.1"); after != before+1 {
+		t.Fatalf("manual session from a refused address: %d network.denied publish events, want %d", after, before+1)
+	}
 
 	// Every refusal is in the audit log with the address and the scope.
 	events := auditEvents(t, s, "network.denied", repo)
@@ -486,7 +521,7 @@ func TestPresetIPLists(t *testing.T) {
 		t.Fatalf("GET from a GitHub Actions address: status %d, want 404 (allowed, no file)", st)
 	}
 	st, b := apiHeaders(t, s, http.MethodGet, "/raw/"+repo+"/missing", nil, nil, xff("203.0.113.7"))
-	wantDenied(t, "anonymous GET from outside the list", st, b, "read")
+	wantDenied(t, "anonymous GET from outside the list", st, b)
 
 	// The trusted proxies include the list cloudflare: a Cloudflare hop in the chain is skipped.
 	setTrustedProxies(t, s, []string{"private"})
@@ -608,8 +643,7 @@ func TestCustomIPLists(t *testing.T) {
 	if len(got.Publish) != 1 || got.Publish[0].Kind != "list" || got.Publish[0].Value != "runners" {
 		t.Fatalf("PUT ip-rules with a list: %+v", got)
 	}
-	st, b = mintFrom(t, s, w, repo, "203.0.113.5")
-	wantDenied(t, "mint from outside the list", st, b, "publish")
+	mintDenied(t, s, "mint from outside the list", w, repo, "203.0.113.5")
 	mustSession(t, "mint from a runner address")(mintFrom(t, s, w, repo, "192.0.2.11"))
 
 	// Reference it from the trusted proxies too.
@@ -760,6 +794,7 @@ func TestIPRangeParse(t *testing.T) {
 		}
 	})
 	t.Run("too large", func(t *testing.T) {
+		// One line more than MaxParseText (1 MiB, internal/netrules/parse.go) holds.
 		text := strings.Repeat("192.0.2.1\n", (1<<20)/10+1)
 		if st, b := s.API(t, http.MethodPost, "/api/ip-ranges/parse", map[string]any{"text": text}, s.Admin()); st != http.StatusBadRequest {
 			t.Fatalf("parse more than 1 MiB: status %d, want 400: %s", st, b)

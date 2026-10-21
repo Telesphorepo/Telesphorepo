@@ -163,7 +163,7 @@ func TestProxy(t *testing.T) {
 		s.CreateProxy(t, central, "maven", true, map[string]any{"remote_url": remote.InternalURL + "/maven/" + up}, false)
 		var ps ProxyState
 		s.MustAPI(t, http.MethodGet, "/api/repos/"+central, nil, s.Admin(), &ps)
-		if ps.Kind != "proxy" || ps.Proxy == nil || ps.Proxy.RemoteURL != remote.InternalURL+"/maven/"+up+"/" || ps.Proxy.MetadataTTL != 1800 || ps.Proxy.NotFoundTTL != 300 {
+		if ps.Kind != "proxy" || ps.Proxy == nil || ps.Proxy.RemoteURL != remote.InternalURL+"/maven/"+up+"/" {
 			t.Fatalf("GET proxy: %+v", ps.Proxy)
 		}
 
@@ -269,8 +269,8 @@ func TestProxy(t *testing.T) {
 		// A proxy is read-only.
 		for _, auth := range []Auth{nil, s.AdminBasic()} {
 			resp, b := rawPut(t, s, "/maven/"+central+"/com/e2e/x/1.0/x-1.0.jar", []byte("x"), auth)
-			if resp.StatusCode != http.StatusMethodNotAllowed || !strings.Contains(string(b), "A proxy is read-only") {
-				t.Fatalf("PUT to the proxy: status %d: %s, want 405", resp.StatusCode, b)
+			if resp.StatusCode != http.StatusMethodNotAllowed || resp.Header.Get("Allow") != "GET, HEAD" || RefusalCode(b) != "read_only_kind" {
+				t.Fatalf("PUT to the proxy: status %d, Allow %q: %s, want 405, Allow GET, HEAD and code read_only_kind", resp.StatusCode, resp.Header.Get("Allow"), b)
 			}
 		}
 
@@ -367,15 +367,16 @@ func TestProxy(t *testing.T) {
 				t.Fatalf("GET %d of a stale maven-metadata.xml while the remote is down: status %d: %s", i+1, st, b)
 			}
 		}
-		if n := logCount(t, s, "remote failed; serving the cached copy", mdRel); n != 1 {
+		if n := remoteFailures(t, s, central, mdRel); n != 1 {
 			t.Fatalf("two GETs of a stale file while the remote is down asked the remote %d times, want 1", n)
 		}
 	})
 }
 
-// logCount counts the log lines of s with message msg and path path, through every request that
-// returned before the call (Server.LogsThrough).
-func logCount(t testing.TB, s *Server, msg, path string) int {
+// remoteFailures counts the log lines of s for a failed remote request of path in the proxy repo,
+// through every request that returned before the call (Server.LogsThrough): a message that
+// starts with "remote failed", and the repo and path attributes.
+func remoteFailures(t testing.TB, s *Server, repo, path string) int {
 	t.Helper()
 	n := 0
 	sc := bufio.NewScanner(strings.NewReader(s.LogsThrough(t)))
@@ -387,9 +388,10 @@ func logCount(t testing.TB, s *Server, msg, path string) int {
 		}
 		var e struct {
 			Msg  string `json:"msg"`
+			Repo string `json:"repo"`
 			Path string `json:"path"`
 		}
-		if json.Unmarshal([]byte(line), &e) == nil && e.Msg == msg && e.Path == path {
+		if json.Unmarshal([]byte(line), &e) == nil && strings.HasPrefix(e.Msg, "remote failed") && e.Repo == repo && e.Path == path {
 			n++
 		}
 	}

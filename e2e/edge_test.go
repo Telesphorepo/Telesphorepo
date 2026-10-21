@@ -8,6 +8,9 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -67,8 +70,15 @@ func TestEdgeWorkerDownload(t *testing.T) {
 			t.Errorf("the zip has no telesphorepo-edge/%s; it has %v", name, zipNames(files))
 		}
 	}
-	if !strings.Contains(string(files["telesphorepo-edge/scripts/provision.ts"]), "wrangler login") {
-		t.Error("provision.ts does not name wrangler login")
+	// The provision script and the README are the files of edge/ in this tree.
+	for _, name := range []string{"scripts/provision.ts", "README.md"} {
+		want, err := os.ReadFile(filepath.Join(repoRoot(t), "edge", filepath.FromSlash(name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := files["telesphorepo-edge/"+name]; !bytes.Equal(got, want) {
+			t.Errorf("telesphorepo-edge/%s of the zip (%d bytes) differs from edge/%s (%d bytes)", name, len(got), name, len(want))
+		}
 	}
 
 	var pkg struct {
@@ -103,8 +113,12 @@ func TestEdgeWorkerDownload(t *testing.T) {
 	if cfg.Main != "dist/index.js" || !cfg.NoBundle || cfg.Define != nil {
 		t.Errorf("wrangler.jsonc main %q, no_bundle %v, define %v; want dist/index.js, true and no define", cfg.Main, cfg.NoBundle, cfg.Define)
 	}
-	if !slices.Contains(cfg.Routes, s.Alias+":8080/maven/*") || !slices.Contains(cfg.Routes, s.Alias+":8080/v2/*") {
-		t.Errorf("routes = %v, want the maven and docker routes of %s:8080", cfg.Routes, s.Alias)
+	base, err := url.Parse(s.InternalURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(cfg.Routes, base.Host+"/maven/*") || !slices.Contains(cfg.Routes, base.Host+"/v2/*") {
+		t.Errorf("routes = %v, want the maven and docker routes of %s", cfg.Routes, base.Host)
 	}
 	buckets := map[string]string{}
 	for _, b := range cfg.R2Buckets {

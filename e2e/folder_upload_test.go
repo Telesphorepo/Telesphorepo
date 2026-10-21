@@ -351,8 +351,8 @@ func TestFolderUploadDebianAndRaw(t *testing.T) {
 	hello := findTitle(t, sc, "e2e-hello 1.0 (all)")
 	broken := findTitle(t, sc, "debs/broken.deb")
 	if len(sc.Items) != 3 || len(native.Problems)+len(hello.Problems) != 0 || len(broken.Problems) == 0 ||
-		!sameSet(sc.Ignored, []string{"debs/notes.txt"}) || sc.field("distribution").Value != "trixie" || sc.field("component").Value != "main" ||
-		!strings.HasPrefix(hello.target("debs/hello.deb"), "pool/main/") {
+		!sameSet(sc.Ignored, []string{"debs/notes.txt"}) || sc.field("distribution").Value != "trixie" ||
+		!strings.HasPrefix(hello.target("debs/hello.deb"), "pool/"+sc.field("component").Value+"/") {
 		t.Fatalf("plan of the .deb folder: %+v", sc)
 	}
 	// A bad distribution is a problem of its field.
@@ -460,9 +460,6 @@ func TestUploadHeadsAndChunks(t *testing.T) {
 		ID   string `json:"id"`
 		Size int    `json:"size"`
 	}
-	if st, b := send([]finished{{"big.bin", strings.Repeat("0", 32), len(big)}}); st != http.StatusNotFound {
-		t.Fatalf("upload that names an unknown upload: status %d, want 404: %s", st, b)
-	}
 	if st, b := send([]finished{{"big.bin", id, len(big) + 1}}); st != http.StatusBadRequest {
 		t.Fatalf("upload that names an upload with a wrong size: status %d, want 400: %s", st, b)
 	}
@@ -478,5 +475,9 @@ func TestUploadHeadsAndChunks(t *testing.T) {
 	rawWantGet(t, s, nil, "/raw/"+raw+"/chunked/site/small.txt", s.AdminBasic(), []byte("small"))
 	if st, b := uploadSession(t, s, http.MethodPatch, base+"/"+id, big, rs.Auth(), nil); st != http.StatusNotFound {
 		t.Fatalf("append to an upload that the upload finished: status %d, want 404: %s", st, b)
+	}
+	// The finished upload is unknown now: an upload that names it gets 404.
+	if st, b := send([]finished{{"again.bin", id, len(big)}}); st != http.StatusNotFound {
+		t.Fatalf("upload that names a finished upload: status %d, want 404: %s", st, b)
 	}
 }

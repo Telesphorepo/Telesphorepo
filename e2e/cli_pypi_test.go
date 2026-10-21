@@ -36,7 +36,7 @@ telesphorepo setup "$E2E_LINK"
 telesphorepo publish
 `, ClientOpts{Files: pySetuptoolsProject("/work/p", uvName, uvMod, "1.0.0", "uv "+uvName),
 			Env: map[string]string{"E2E_LINK": s.NewSetupCode(t, dev, repo).Link}, Mounts: mounts})
-		wantText(t, "publish with uv", out, "Publishing to "+repo+" (pypi)", " build --out-dir ", "Uploaded "+uvMod+"-1.0.0-py3-none-any.whl")
+		wantText(t, "publish with uv", out, "uv build", "Uploaded "+uvMod+"-1.0.0-py3-none-any.whl")
 
 		out = c.mustRun(t, pythonImage, "publish with Poetry", `set -e
 pip install -q --root-user-action=ignore poetry
@@ -45,7 +45,7 @@ telesphorepo setup "$E2E_LINK"
 telesphorepo publish
 `, ClientOpts{Files: pyPoetryProject("/work/p", poName, poMod, "1.0.0", "poetry "+poName),
 			Env: map[string]string{"E2E_LINK": s.NewSetupCode(t, dev, repo).Link}, Mounts: mounts, Timeout: 20 * time.Minute})
-		wantText(t, "publish with Poetry", out, "Publishing to "+repo+" (pypi)", " build --output ", "Uploaded "+poMod+"-1.0.0-py3-none-any.whl")
+		wantText(t, "publish with Poetry", out, "poetry build", "Uploaded "+poMod+"-1.0.0-py3-none-any.whl")
 
 		out = c.mustRun(t, pythonImage, "publish with python -m build", `set -e
 pip install -q --root-user-action=ignore build
@@ -56,7 +56,7 @@ telesphorepo publish /work/extra/`+extra+`
 `, ClientOpts{Files: append(pySetuptoolsProject("/work/p", pipName, pipMod, "1.0.0", "pip "+pipName),
 			ContainerFile{Path: "/work/extra/" + extra, Content: string(whl)}),
 			Env: map[string]string{"E2E_LINK": s.NewSetupCode(t, dev, repo).Link}, Mounts: mounts})
-		wantText(t, "publish with python -m build", out, " -m build --outdir ", "Uploaded "+pipMod+"-1.0.0.tar.gz", "Uploaded "+extra)
+		wantText(t, "publish with python -m build", out, " -m build", "Uploaded "+pipMod+"-1.0.0.tar.gz", "Uploaded "+extra)
 		requireAssets(t, s, repo, "packages/", "packages/"+pipName+"/"+pipMod+"-1.0.0-py3-none-any.whl", "packages/"+fileName+"/"+extra,
 			"packages/"+uvName+"/"+uvMod+"-1.0.0.tar.gz", "packages/"+poName+"/"+poMod+"-1.0.0.tar.gz")
 

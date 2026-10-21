@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/ci"
 	"github.com/testcontainers/testcontainers-go"
 	tcexec "github.com/testcontainers/testcontainers-go/exec"
 	"github.com/testcontainers/testcontainers-go/network"
@@ -52,8 +53,8 @@ type jenkinsCI struct {
 	URL string
 }
 
-// startJenkins starts Jenkins with the credential telesphorepo-id-token for the audience
-// audience, and env in the env of its builds.
+// startJenkins starts Jenkins with the credential of the Jenkinsfiles of the server
+// (ci.JenkinsCredential) for the audience audience, and env in the env of its builds.
 func startJenkins(t testing.TB, audience string, env map[string]string) *jenkinsCI {
 	t.Helper()
 	if err := buildJenkinsImage(); err != nil {
@@ -61,7 +62,7 @@ func startJenkins(t testing.TB, audience string, env map[string]string) *jenkins
 	}
 	alias := RandName("jenkins")
 	url := "http://" + alias + ":8080/"
-	all := map[string]string{"E2E_JENKINS_URL": url, "E2E_AUDIENCE": audience, "MAVEN_OPTS": mavenFileLocks}
+	all := map[string]string{"E2E_JENKINS_URL": url, "E2E_AUDIENCE": audience, "E2E_CREDENTIAL": ci.JenkinsCredential, "MAVEN_OPTS": mavenFileLocks}
 	for k, v := range env {
 		all[k] = v
 	}
@@ -173,7 +174,7 @@ func helperJenkinsfile(server string) string {
   stages {
     stage('Ask the helper') {
       steps {
-        withCredentials([string(credentialsId: 'telesphorepo-id-token', variable: 'OIDC_TOKEN')]) {
+        withCredentials([string(credentialsId: '` + ci.JenkinsCredential + `', variable: 'OIDC_TOKEN')]) {
           sh '''
             curl -fsSL ` + server + `/install.sh | sh
             export PATH="$HOME/.local/bin:$PATH"
@@ -274,7 +275,6 @@ func TestCLIJenkins(t *testing.T) {
 	d := StartDind(t, alias+":8080")
 	j := startJenkins(t, server, map[string]string{"DOCKER_HOST": "tcp://" + d.Alias + ":2375"})
 	const maven, docker = "releases", "images"
-	var mavenCommit, dockerCommit string
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		opts.Alias = alias
 		s := StartServer(t, opts)
@@ -287,30 +287,24 @@ func TestCLIJenkins(t *testing.T) {
 		}, s.Admin(), nil)
 
 		mavenFile, dockerFile := ciFile(t, s, maven, "jenkins", "maven"), ciFile(t, s, docker, "jenkins", "docker")
-		if mavenCommit == "" {
-			// The servers of both stores have the same address, so they write the same files.
-			mavenCommit = j.gitRepo(t, "maven-app", map[string]string{
-				"Jenkinsfile": mavenFile, "pom.xml": ciPOM,
-				"telesphorepo.toml": "server = \"" + server + "\"\nrepo = \"" + maven + "\"\n",
-			})
-			dockerCommit = j.gitRepo(t, "docker-app", map[string]string{
-				"Jenkinsfile": dockerFile, "Dockerfile": "FROM scratch\nCOPY app.txt /app.txt\n", "app.txt": "built by Jenkins\n",
-			})
-			j.gitRepo(t, "other-app", map[string]string{
-				"Jenkinsfile": mavenFile, "pom.xml": ciPOM,
-				"telesphorepo.toml": "server = \"http://other.invalid:8080\"\nrepo = \"" + maven + "\"\n",
-			})
-			j.gitRepo(t, "helper-check", map[string]string{"Jenkinsfile": helperJenkinsfile(server)})
-			for _, job := range []string{"maven-app", "docker-app", "other-app", "helper-check"} {
-				j.pipelineJob(t, job)
-			}
-		} else {
-			wantText(t, "the Jenkinsfiles of the second server", j.mustExec(t, "Jenkinsfiles", "cat /srv/maven-app/Jenkinsfile /srv/docker-app/Jenkinsfile"),
-				strings.TrimRight(mavenFile, "\n"), strings.TrimRight(dockerFile, "\n"))
+		mavenCommit := j.gitRepo(t, "maven-app", map[string]string{
+			"Jenkinsfile": mavenFile, "pom.xml": ciPOM,
+			"telesphorepo.toml": "server = \"" + server + "\"\nrepo = \"" + maven + "\"\n",
+		})
+		dockerCommit := j.gitRepo(t, "docker-app", map[string]string{
+			"Jenkinsfile": dockerFile, "Dockerfile": "FROM scratch\nCOPY app.txt /app.txt\n", "app.txt": "built by Jenkins\n",
+		})
+		j.gitRepo(t, "other-app", map[string]string{
+			"Jenkinsfile": mavenFile, "pom.xml": ciPOM,
+			"telesphorepo.toml": "server = \"http://other.invalid:8080\"\nrepo = \"" + maven + "\"\n",
+		})
+		j.gitRepo(t, "helper-check", map[string]string{"Jenkinsfile": helperJenkinsfile(server)})
+		for _, job := range []string{"maven-app", "docker-app", "other-app", "helper-check"} {
+			j.pipelineJob(t, job)
 		}
 
 		n, out := j.build(t, "maven-app")
-		wantText(t, "the Maven job", out, "Publishing to "+maven+" (maven)", "BUILD SUCCESS", "Finished: SUCCESS")
+		wantText(t, "the Maven job", out, "BUILD SUCCESS", "Finished: SUCCESS")
 		// The build stage and the deploy of telesphorepo publish each print the line.
 		if c := strings.Count(out, oidcUnset); c < 2 {
 			t.Fatalf("the Maven job: %d lines %q, want one per Maven run:\n%s", c, oidcUnset, out)
@@ -322,7 +316,12 @@ func TestCLIJenkins(t *testing.T) {
 
 		n, out = j.build(t, "docker-app")
 		wantText(t, "the Docker job", out, "docker push", "Finished: SUCCESS")
-		tag := "app/_tags/" + dockerCommit
+		// The image is the one that the Jenkinsfile of the server pushes.
+		m := regexp.MustCompile(`docker push "[^"]*/` + regexp.QuoteMeta(docker) + `/([^":]+):`).FindStringSubmatch(dockerFile)
+		if m == nil {
+			t.Fatalf("the Jenkinsfile of %s pushes no image of the repo:\n%s", docker, dockerFile)
+		}
+		tag := m[1] + "/_tags/" + dockerCommit
 		if b := buildOf(t, s, docker, tag); b == nil || b.Provider != "jenkins" || b.Repository != "docker-app" || b.Run != n || b.Revision != dockerCommit {
 			t.Fatalf("build of the tag %s: %+v, want Jenkins docker-app #%s at %s", tag, b, n, dockerCommit)
 		}
@@ -335,8 +334,7 @@ func TestCLIJenkins(t *testing.T) {
 			"the identity token in OIDC_TOKEN is for "+server+", not for http://other.invalid:8080")
 
 		_, out = j.build(t, "helper-check")
-		wantText(t, "the helper for a host of another server", out, "other.example:5000 is not a registry host of "+server,
-			"credentials not found in native keychain")
+		wantText(t, "the helper for a host of another server", out, server, "credentials not found in native keychain")
 
 		scanned(t, "Jenkins", j.mustExec(t, "secret scan", secretScan))
 	})

@@ -302,7 +302,9 @@ func debCheckSecurity(t *testing.T, s *Server, tg *S3Target, repo string, wauth,
 	}
 }
 
-// debBomb returns a .deb whose control.tar.gz decompresses to well over 16 MiB.
+// debBomb returns a .deb whose control.tar.gz decompresses to 17 MiB, over the 16 MiB that the
+// server reads of a control archive (maxControlTar in internal/debian/parse.go; the server does
+// not expose it).
 func debBomb(t *testing.T) []byte {
 	t.Helper()
 	return goDeb(t,

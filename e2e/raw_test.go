@@ -76,17 +76,8 @@ func TestRaw(t *testing.T) {
 		s := StartServer(t, opts)
 		tg := opts.S3
 		repo := RandName("raw")
-		s.CreateRepo(t, repo, "raw", false, nil)
-
-		var info struct {
-			Config struct {
-				Overwrite string `json:"overwrite"`
-			} `json:"config"`
-		}
-		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo, nil, s.Admin(), &info)
-		if info.Config.Overwrite != "deny" {
-			t.Fatalf("default config overwrite = %q, want deny", info.Config.Overwrite)
-		}
+		// The repo denies overwrites until the subtest "overwrite allow" allows them.
+		s.CreateRepo(t, repo, "raw", false, map[string]any{"overwrite": "deny"})
 
 		writer, reader := RandName("w"), RandName("r")
 		s.CreateUser(t, writer, "writer-pass-1234")

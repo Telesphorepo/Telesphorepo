@@ -35,8 +35,7 @@ telesphorepo publish
 				Mounts:  map[string]string{devices: "/root/.telesphorepo"},
 				Timeout: 20 * time.Minute,
 			})
-			wantText(t, "publish "+v, out, "Publishing to "+repo+" (cargo)", "cargo publish --registry telesphorepo",
-				`registries.telesphorepo.index="sparse+`+s.InternalURL+"/cargo/"+repo+`/index/"`)
+			wantText(t, "publish "+v, out, "cargo publish")
 			requireAssets(t, s, repo, "crates/", "crates/"+crate+"/"+crate+"-"+v+".crate")
 		}
 

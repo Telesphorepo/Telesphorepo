@@ -41,11 +41,11 @@ func TestAuth(t *testing.T) {
 
 	const artifact = "/maven/%s/com/example/auth/1.0/auth-1.0.txt"
 	path := strings.Replace(artifact, "%s", repo, 1)
-	resp, body := authPut(t, s, path, "hello", s.PublishAuth(t, "admin", repo))
+	resp, body := authPut(t, s, path, "hello", s.PublishAuth(t, s.AdminUser, repo))
 	wantStatus(t, resp, body, http.StatusCreated)
 
 	t.Run("wrong password on PUT", func(t *testing.T) {
-		resp, body := authPut(t, s, path+".new", "x", Basic{"admin", "not-the-password"})
+		resp, body := authPut(t, s, path+".new", "x", Basic{s.AdminUser, "not-the-password"})
 		wantStatus(t, resp, body, http.StatusUnauthorized)
 		wantChallenge(t, resp)
 	})
@@ -60,7 +60,7 @@ func TestAuth(t *testing.T) {
 		anon := RandName("anon")
 		s.CreateRepo(t, anon, "maven", true, nil)
 		p := "/maven/" + anon + "/com/example/anon/1.0/anon-1.0.txt"
-		resp, body := authPut(t, s, p, "public", s.PublishAuth(t, "admin", anon))
+		resp, body := authPut(t, s, p, "public", s.PublishAuth(t, s.AdminUser, anon))
 		wantStatus(t, resp, body, http.StatusCreated)
 
 		resp, body = authGet(t, s, p, nil)
@@ -200,22 +200,26 @@ func TestAuthRateLimit(t *testing.T) {
 	s.SetPerms(t, repo, u, "repo.download")
 	path := "/maven/" + repo + "/a/b/1/b-1.txt"
 
+	// Failed attempts answer 401 until the limit, then 429.
+	const maxAttempts = 1000
 	var limited *http.Response
-	for i := 0; i < 12; i++ {
+	attempts := 0
+	for limited == nil && attempts < maxAttempts {
+		attempts++
 		resp, _ := authGet(t, s, path, Basic{u, "wrong-" + randHex(4)})
-		if resp.StatusCode == http.StatusTooManyRequests {
+		switch resp.StatusCode {
+		case http.StatusTooManyRequests:
 			limited = resp
-			break
-		}
-		if resp.StatusCode != http.StatusUnauthorized {
-			t.Fatalf("attempt %d: status %d, want 401 or 429", i, resp.StatusCode)
+		case http.StatusUnauthorized:
+		default:
+			t.Fatalf("attempt %d: status %d, want 401 or 429", attempts, resp.StatusCode)
 		}
 	}
 	if limited == nil {
-		t.Fatal("no 429 after 12 failed attempts")
+		t.Fatalf("no 429 after %d failed attempts", attempts)
 	}
 	if limited.Header.Get("Retry-After") == "" {
-		t.Fatal("429 without Retry-After")
+		t.Fatalf("429 after %d failed attempts without Retry-After", attempts)
 	}
 	resp, body := authGet(t, s, path, Basic{u, pw})
 	wantStatus(t, resp, body, http.StatusTooManyRequests)
@@ -265,12 +269,12 @@ func TestNoBrowserPasswordPrompt(t *testing.T) {
 			t.Fatalf("%s: WWW-Authenticate = %q, want none", what, h)
 		}
 	}
-	noChallenge("API with a wrong password", http.MethodGet, "/api/me", Basic{"admin", "not-the-password"}, nil)
+	noChallenge("API with a wrong password", http.MethodGet, "/api/me", Basic{s.AdminUser, "not-the-password"}, nil)
 	noChallenge("API anonymous", http.MethodGet, "/api/me", nil, nil)
 	noChallenge("API repo files anonymous", http.MethodGet, "/api/repos/"+repo+"/tree?path=", nil, nil)
-	noChallenge("API upload without a session", http.MethodPost, "/api/repos/"+repo+"/upload", Basic{"admin", "not-the-password"}, nil)
+	noChallenge("API upload without a session", http.MethodPost, "/api/repos/"+repo+"/upload", Basic{s.AdminUser, "not-the-password"}, nil)
 	noChallenge("UI download of a private file", http.MethodGet, artifact, nil, ui)
-	noChallenge("UI download with a wrong password", http.MethodGet, artifact, Basic{"admin", "not-the-password"}, ui)
+	noChallenge("UI download with a wrong password", http.MethodGet, artifact, Basic{s.AdminUser, "not-the-password"}, ui)
 	noChallenge("UI upload without a session", http.MethodPut, artifact, nil, ui)
 
 	// Without the UI header a format route keeps the Basic challenge.

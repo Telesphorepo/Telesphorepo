@@ -252,6 +252,8 @@ func TestDelete(t *testing.T) {
 		if opts.S3 == nil {
 			opts.DataVolume = NewDataVolume(t)
 		}
+		// The blob GC keeps an unused blob for a day, so every blob outlives this test.
+		opts.Env = map[string]string{"TR_BLOBS_GC_GRACE": "24h"}
 		s := StartServer(t, opts)
 		mvn, raw, other := RandName("mvn"), RandName("raw"), RandName("other")
 		s.CreateRepo(t, mvn, "maven", false, nil)
@@ -324,7 +326,7 @@ func TestDelete(t *testing.T) {
 			t.Fatalf("raw root after deleting dir/: %v", got)
 		}
 
-		// A delete leaves the blobs to the blob GC (its grace is an hour by default).
+		// A delete leaves the blobs to the blob GC, whose grace (a day here) is not over yet.
 		keys := storedKeys(t, opts)
 		for _, content := range []string{"x g/a/1.0/a-1.0.jar", "x g/b/1.0/b-1.0.jar", "raw dir/one.bin", "raw keep.bin"} {
 			if k := blobKey(sha256Hex([]byte(content))); !slices.Contains(keys, k) {
@@ -637,10 +639,25 @@ func TestDebianDeleteAndUpload(t *testing.T) {
 
 	debMustUpload(t, s, repo, pkgs.hello2, s.MintSession(t, w, repo).Auth(), "e2e-hello", "2.0", "all")
 	s.WaitDebianIndexed(t, repo)
+	unit := "dists/trixie/main/binary-" + pkgs.arch
+	// indexHashes is the SHA-256 of each index file of the unit's current generation.
+	indexHashes := func() []string {
+		var out []string
+		for _, n := range treeAll(t, s, repo, unit, 50, rauth) {
+			if n.Type == "file" {
+				out = append(out, n.SHA256)
+			}
+		}
+		if len(out) == 0 {
+			t.Fatalf("%s holds no index files", unit)
+		}
+		return out
+	}
+	previous := indexHashes()
 
 	mustDelete(t, s, repo, "path", nativePool, s.MintSession(t, w, repo).Auth(), 1)
 	s.WaitDebianIndexed(t, repo)
-	unit := "dists/trixie/main/binary-" + pkgs.arch
+	current := indexHashes()
 	st, packages := debGet(t, s, nil, "/debian/"+repo+"/"+unit+"/Packages", rauth)
 	if st != http.StatusOK || strings.Contains(string(packages), "Package: e2e-native") || !strings.Contains(string(packages), "Package: e2e-hello") {
 		t.Fatalf("Packages after the delete: status %d, want e2e-hello without e2e-native:\n%s", st, packages)
@@ -659,18 +676,16 @@ func TestDebianDeleteAndUpload(t *testing.T) {
 	}
 
 	// Three index generations of this unit were built (before 2.0, with 2.0, after the delete);
-	// by-hash keeps the current and the previous one: 2 files each.
-	byHash := treeAll(t, s, repo, unit+"/by-hash/SHA256", 50, rauth)
-	if len(byHash) != 4 {
-		t.Fatalf("%s/by-hash/SHA256 holds %d files, want 4 (current and previous generation): %v", unit, len(byHash), nodeNames(byHash))
+	// by-hash holds exactly the files of the current and the previous one.
+	want := slices.Concat(previous, current)
+	slices.Sort(want)
+	want = slices.Compact(want)
+	var byHash []string
+	for _, n := range treeAll(t, s, repo, unit+"/by-hash/SHA256", 50, rauth) {
+		byHash = append(byHash, n.Name)
 	}
-	var current string
-	for _, n := range treeAll(t, s, repo, unit, 50, rauth) {
-		if n.Name == "Packages" {
-			current = n.SHA256
-		}
-	}
-	if !slices.ContainsFunc(byHash, func(n treeNode) bool { return n.Name == current }) {
-		t.Fatalf("by-hash lacks the current Packages %s: %v", current, nodeNames(byHash))
+	slices.Sort(byHash)
+	if !slices.Equal(byHash, want) {
+		t.Fatalf("%s/by-hash/SHA256 holds %v, want the index files of the current and the previous generation %v", unit, byHash, want)
 	}
 }

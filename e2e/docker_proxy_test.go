@@ -124,13 +124,26 @@ func distributionRemote(t *testing.T) *proxyRemote {
 	if err != nil {
 		t.Fatal(err)
 	}
+	client := registryClient{base: ep, auth: func(r *http.Request) { r.SetBasicAuth(user, pass) }}
 	return &proxyRemote{
 		kind: "distribution", url: "http://" + alias + ":5000/", user: user, pass: pass,
-		client: registryClient{base: ep, auth: func(r *http.Request) { r.SetBasicAuth(user, pass) }},
+		client: client,
 		// The access log only (`... [time] "GET /v2/..."`): the registry also logs trace spans
-		// whose names hold the method and the path, in a batch some seconds later.
+		// whose names hold the method and the path, in a batch some seconds later. The engine
+		// delivers the output late, so the count first sends a marker request and waits for its
+		// line: the logs then hold the line of every request that returned before.
 		count: func(t *testing.T, method, prefix string) int {
-			return strings.Count(containerLogs(c), `] "`+method+" "+prefix)
+			t.Helper()
+			mark := "/v2/e2e-log-mark/" + RandName("m") + "/manifests/x"
+			client.do(t, http.MethodGet, mark, nil, nil)
+			logs := containerLogs(c)
+			for deadline := time.Now().Add(30 * time.Second); !strings.Contains(logs, `] "GET `+mark+" "); logs = containerLogs(c) {
+				if time.Now().After(deadline) {
+					t.Fatalf("the access log line of %s did not appear in the registry log in 30 s", mark)
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+			return strings.Count(logs, `] "`+method+" "+prefix)
 		},
 		stop: func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -204,9 +217,16 @@ func dockerProxyCase(t *testing.T, s *Server, d *Dind, rm *proxyRemote) {
 		heads := rm.count(t, http.MethodHead, "/v2/"+rm.prefix+"app/manifests/v1")
 		moved := tarImage(t, arch, rawRandom(t, 2048))
 		rm.client.pushImage(t, rm.prefix+"app", "v1", moved)
-		time.Sleep(1500 * time.Millisecond) // metadata_ttl is 1 s
-		if got := headDigest(t, s, nil, prx+"/app", "v1"); got != "sha256:"+moved.Hex {
-			t.Fatalf("after metadata_ttl the proxy serves %s for the moved tag, want sha256:%s", got, moved.Hex)
+		// metadata_ttl is 1 s: the proxy asks the remote again once it passed.
+		for deadline := time.Now().Add(30 * time.Second); ; {
+			got := headDigest(t, s, nil, prx+"/app", "v1")
+			if got == "sha256:"+moved.Hex {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("30 s after the tag moved the proxy serves %s for it, want sha256:%s", got, moved.Hex)
+			}
+			time.Sleep(200 * time.Millisecond)
 		}
 		if rm.count(t, http.MethodHead, "/v2/"+rm.prefix+"app/manifests/v1") <= heads {
 			t.Fatal("the proxy checked the tag again without a HEAD at the remote")
@@ -222,8 +242,9 @@ func dockerProxyCase(t *testing.T, s *Server, d *Dind, rm *proxyRemote) {
 		if cached("app/_manifests/sha256/" + v1.Hex) {
 			t.Fatal("the proxy keeps the manifest of the moved tag")
 		}
+		grace := dockerSetting(t, s, "docker.link_grace")
 		s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"docker.link_grace": "1s"}, s.Admin(), nil)
-		defer s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"docker.link_grace": "24h"}, s.Admin(), nil)
+		defer s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"docker.link_grace": grace}, s.Admin(), nil)
 		deadline := time.Now().Add(time.Minute)
 		for _, h := range v1.Order {
 			for cached("app/_blobs/sha256/" + h) {
@@ -245,7 +266,7 @@ func dockerProxyCase(t *testing.T, s *Server, d *Dind, rm *proxyRemote) {
 	if rm.denied != "" {
 		t.Run("denied name", func(t *testing.T) {
 			den := RandName("den")
-			s.CreateProxy(t, den, "docker", true, map[string]any{"remote_url": rm.denied, "username": rm.user, "password": rm.pass}, false)
+			s.CreateProxy(t, den, "docker", true, map[string]any{"remote_url": rm.denied, "username": rm.user, "password": rm.pass, "not_found_ttl": 3600}, false)
 			remoteGets := func() int { return rm.count(t, http.MethodGet, "/v2/"+rm.deniedPrefix+"app/manifests/v1") }
 			resp, body := ociDo(t, s, http.MethodGet, "/v2/"+den+"/app/manifests/v1", nil, nil, nil)
 			wantOCI(t, "a tag of a name that the remote denies", resp, body, http.StatusNotFound, "MANIFEST_UNKNOWN")
@@ -286,9 +307,7 @@ func dockerProxyCase(t *testing.T, s *Server, d *Dind, rm *proxyRemote) {
 		st, bearer, b := registryToken(t, s, s.AdminBasic(), "repository:"+prx+"/app:pull,push")
 		wantAPIStatus(t, "token for a push to the proxy", st, b, http.StatusOK)
 		resp, body := ociDo(t, s, http.MethodPost, "/v2/"+prx+"/app/blobs/uploads/", nil, bearer, nil)
-		if resp.StatusCode != http.StatusMethodNotAllowed || ociErrorCode(body) != "UNSUPPORTED" || !strings.Contains(string(body), "A proxy is read-only.") {
-			t.Fatalf("a push to the proxy: status %d: %s", resp.StatusCode, body)
-		}
+		wantOCI(t, "a push to the proxy", resp, body, http.StatusMethodNotAllowed, "UNSUPPORTED")
 	})
 
 	t.Run("group", func(t *testing.T) {
@@ -332,9 +351,7 @@ func dockerProxyCase(t *testing.T, s *Server, d *Dind, rm *proxyRemote) {
 		st, bearer, b := registryToken(t, s, s.AdminBasic(), "repository:"+grp+"/app:pull,push")
 		wantAPIStatus(t, "token for a push to the group", st, b, http.StatusOK)
 		resp, body = ociDo(t, s, http.MethodPost, "/v2/"+grp+"/app/blobs/uploads/", nil, bearer, nil)
-		if resp.StatusCode != http.StatusMethodNotAllowed || !strings.Contains(string(body), "A group is read-only.") {
-			t.Fatalf("a push to the group: status %d: %s", resp.StatusCode, body)
-		}
+		wantOCI(t, "a push to the group", resp, body, http.StatusMethodNotAllowed, "UNSUPPORTED")
 
 		resp, body = ociDo(t, s, http.MethodGet, "/v2/"+prx+"/app/tags/list", nil, nil, nil)
 		wantOCI(t, "tags list of the proxy", resp, body, http.StatusOK, "")
