@@ -96,6 +96,9 @@ func (m *mod) wrangler(s *settings.Snapshot, bundled bool) ([]byte, error) {
 		},
 		"triggers": map[string]any{"crons": []string{gapCron}},
 		"vars":     map[string]string{"PREFIX": storage.S3Prefix.Get(s)},
+		// Workers Logs: the runs of the fetch, the cron and the queue, with their console output,
+		// in the Cloudflare dashboard.
+		"observability": map[string]any{"enabled": true},
 	}
 	if bundled {
 		cfg["main"] = "dist/index.js"

@@ -2071,8 +2071,9 @@ pass is older than 24 hours: it merges the key-ordered lists of the home `blobs/
 
 **Deploy.** The server writes the Worker configuration for the settings: the routes
 `<base URL host><prefix>*` of each format with `Edge`, the bindings `HOME` and `R2_<HINT>` of
-each chosen region, the queue (producer `COPY`, consumer batches of 100, 10 retries), the cron and
-the var `PREFIX` (`s3.prefix`). `GET /api/edge/worker.zip` (the download of the Edge delivery
+each chosen region, the queue (producer `COPY`, consumer batches of 100, 10 retries), the cron,
+the var `PREFIX` (`s3.prefix`) and `observability` on (Workers Logs of the fetch, cron and queue
+runs in the Cloudflare dashboard). `GET /api/edge/worker.zip` (the download of the Edge delivery
 page) is the Worker folder, ready to run: the bundle `dist/index.js` that the build of the server
 made with `--define TELESPHOREPO_VERSION:"<server version>"` (`internal/edgedist`, see
 **Tooling**), `package.json` (wrangler at an exact version, the scripts `provision` and
