@@ -427,6 +427,9 @@ type Move struct {
 	Failed  int64          `json:"failed"`
 	Error   string         `json:"error"`
 	Target  map[string]any `json:"target"`
+	// TargetSettings are the target's storage settings by key, the secret as {set}.
+	TargetSettings map[string]any `json:"target_settings"`
+	DismissedAt    *string        `json:"dismissed_at"`
 }
 
 // MoveFailure is one row of GET /api/storage/moves/{id}/failures.

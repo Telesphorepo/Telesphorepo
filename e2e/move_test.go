@@ -4,12 +4,14 @@ package e2e
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"maps"
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -380,6 +382,123 @@ func TestStorageMoveFailure(t *testing.T) {
 	moveWantBlobs(t, "target", tg.Blobs(t), moveAssets(t, s, repo))
 	files["after/new.bin"] = body
 	moveWantRaw(t, s, repo, files)
+}
+
+// TestStorageMoveRetry fails a move with a blob missing in the source, then tries it again
+// through the retry route of the Storage page: the target settings come without the secret, a
+// retry with a changed setting keeps the sealed secret and finishes, the failed move is put
+// away, and a dismiss returns to no current move.
+func TestStorageMoveRetry(t *testing.T) {
+	t.Parallel()
+	tg := StartSeaweedFS(t)
+	vol := NewDataVolume(t)
+	s := StartServer(t, ServerOpts{DataVolume: vol})
+	admin := s.Admin()
+	repo := RandName("raw")
+	s.CreateRepo(t, repo, "raw", false, nil)
+	files := moveRawSeed(t, s, repo, "seed", 20, 4096)
+
+	lost := "seed/f00011.bin"
+	lostKey := blobKey(sha256Hex(files[lost]))
+	VolumeExec(t, vol, "set -e\nrm /data/blobs/"+lostKey+"\n")
+
+	m := s.StartMove(t, moveS3Patch(tg))
+	m = s.WaitMove(t, m.ID, moveWait)
+	if m.State != "failed" || m.Failed != 1 {
+		t.Fatalf("move with a missing source blob ended %+v, want failed with 1 failure", m)
+	}
+	moveWantStorage(t, s, "fs")
+
+	// The current move carries its target settings for the form, without the secret.
+	st, b := s.API(t, http.MethodGet, "/api/storage/moves/current", nil, admin)
+	if st != http.StatusOK {
+		t.Fatalf("GET current move: status %d: %s", st, b)
+	}
+	if bytes.Contains(b, []byte(tg.SecretKey)) {
+		t.Fatal("GET /api/storage/moves/current leaks the S3 secret access key")
+	}
+	var cur Move
+	if err := json.Unmarshal(b, &cur); err != nil {
+		t.Fatal(err)
+	}
+	ts := cur.TargetSettings
+	if cur.ID != m.ID || ts["storage"] != "s3" || ts["s3.bucket"] != tg.Bucket || ts["s3.access_key_id"] != tg.AccessKey {
+		t.Fatalf("current move %d target settings %v, want move %d to bucket %s", cur.ID, ts, m.ID, tg.Bucket)
+	}
+	if sec, _ := ts["s3.secret_access_key"].(map[string]any); sec == nil || sec["set"] != true || len(sec) != 1 {
+		t.Fatalf("target secret = %v, want {set: true}", ts["s3.secret_access_key"])
+	}
+
+	// The test of a retry probes the sealed target; a key of another group is refused.
+	var ok struct {
+		OK bool `json:"ok"`
+	}
+	s.MustAPI(t, http.MethodPost, fmt.Sprintf("/api/storage/moves/%d/test", m.ID), map[string]any{}, admin, &ok)
+	if !ok.OK {
+		t.Fatal("test of the retry target: ok false")
+	}
+	if st, b := s.API(t, http.MethodPost, fmt.Sprintf("/api/storage/moves/%d/retry", m.ID), map[string]any{"session_ttl": "5h"}, admin); st != http.StatusBadRequest {
+		t.Fatalf("retry with a key outside the storage group: status %d, want 400: %s", st, b)
+	}
+	// A password reaches neither route.
+	if st, b := s.API(t, http.MethodPost, fmt.Sprintf("/api/storage/moves/%d/retry", m.ID), map[string]any{}, s.AdminBasic()); st != http.StatusUnauthorized {
+		t.Fatalf("retry with the admin's password: status %d, want 401: %s", st, b)
+	}
+
+	// Restore the blob and try again with one changed setting; the secret stays the target's
+	// ("" keeps it), so the move can only finish with the sealed secret.
+	VolumeExec(t, vol, "set -e\ncp /restore.bin /data/blobs/"+lostKey+"\nchmod 0644 /data/blobs/"+lostKey+"\n",
+		ContainerFile{Path: "/restore.bin", Content: string(files[lost])})
+	st, b = s.API(t, http.MethodPost, fmt.Sprintf("/api/storage/moves/%d/retry", m.ID),
+		map[string]any{"s3.redirect": true, "s3.secret_access_key": ""}, admin)
+	if st != http.StatusAccepted {
+		t.Fatalf("retry: status %d, want 202: %s", st, b)
+	}
+	var retried struct {
+		Move *Move `json:"move"`
+	}
+	if err := json.Unmarshal(b, &retried); err != nil || retried.Move == nil || retried.Move.ID == m.ID {
+		t.Fatalf("retry answered %s, want a new move", b)
+	}
+	m2 := s.WaitMove(t, retried.Move.ID, moveWait)
+	moveWantDone(t, s, m2)
+	if m2.Skipped < int64(len(files)-1) {
+		t.Fatalf("retried move skipped %d, want >= %d (blobs the failed move copied)", m2.Skipped, len(files)-1)
+	}
+	moveWantStorage(t, s, "s3")
+	items, _ := listSettings(t, s)
+	if got := string(items["s3.redirect"].Value); got != "true" {
+		t.Fatalf("s3.redirect after the retry = %s, want true", got)
+	}
+	moveWantBlobs(t, "target", tg.Blobs(t), moveAssets(t, s, repo))
+	moveWantRaw(t, s, repo, files)
+
+	// The failed move is put away; the done one cannot be tried again.
+	if old := s.GetMove(t, m.ID); old.DismissedAt == nil {
+		t.Fatalf("failed move after the retry: %+v, want dismissed", old)
+	}
+	if ev := auditEvents(t, s, "storage.move.retry", ""); len(ev) != 1 || ev[0].Target != strconv.FormatInt(m.ID, 10) {
+		t.Fatalf("storage.move.retry events = %+v, want one for move %d", ev, m.ID)
+	}
+	if st, b := s.API(t, http.MethodPost, fmt.Sprintf("/api/storage/moves/%d/retry", m2.ID), map[string]any{}, admin); st != http.StatusConflict {
+		t.Fatalf("retry of a done move: status %d, want 409: %s", st, b)
+	}
+
+	// Dismiss returns the page to no move.
+	s.MustAPI(t, http.MethodGet, "/api/storage/moves/current", nil, admin, &cur)
+	if cur.ID != m2.ID {
+		t.Fatalf("current move = %d, want %d", cur.ID, m2.ID)
+	}
+	s.MustAPI(t, http.MethodPost, fmt.Sprintf("/api/storage/moves/%d/dismiss", m2.ID), nil, admin, &cur)
+	if cur.DismissedAt == nil {
+		t.Fatalf("dismissed move %+v, want dismissed_at", cur)
+	}
+	if st, b := s.API(t, http.MethodGet, "/api/storage/moves/current", nil, admin); st != http.StatusNotFound {
+		t.Fatalf("current move after the dismiss: status %d, want 404: %s", st, b)
+	}
+	if ev := auditEvents(t, s, "storage.move.dismiss", ""); len(ev) != 1 || ev[0].Target != strconv.FormatInt(m2.ID, 10) {
+		t.Fatalf("storage.move.dismiss events = %+v, want one for move %d", ev, m2.ID)
+	}
 }
 
 // TestStorageMoveRestart restarts the server while a move copies; the move resumes and

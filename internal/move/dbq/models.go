@@ -9,16 +9,17 @@ import (
 )
 
 type StorageMove struct {
-	ID         int64
-	Target     []byte
-	State      string
-	Cursor     int64
-	Total      int64
-	Copied     int64
-	Skipped    int64
-	Failed     int64
-	Error      string
-	StartedBy  sql.NullInt64
-	StartedAt  int64
-	FinishedAt sql.NullInt64
+	ID          int64
+	Target      []byte
+	State       string
+	Cursor      int64
+	Total       int64
+	Copied      int64
+	Skipped     int64
+	Failed      int64
+	Error       string
+	StartedBy   sql.NullInt64
+	StartedAt   int64
+	FinishedAt  sql.NullInt64
+	DismissedAt sql.NullInt64
 }

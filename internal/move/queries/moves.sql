@@ -12,17 +12,17 @@ RETURNING id;
 UPDATE storage_moves SET target = ? WHERE id = ?;
 
 -- name: GetMove :one
-SELECT id, target, state, cursor, total, copied, skipped, failed, error, started_by, started_at, finished_at
+SELECT id, target, state, cursor, total, copied, skipped, failed, error, started_by, started_at, finished_at, dismissed_at
 FROM storage_moves WHERE id = ?;
 
 -- The running move, through the storage_moves_copying partial index.
 -- name: GetCopyingMove :one
-SELECT id, target, state, cursor, total, copied, skipped, failed, error, started_by, started_at, finished_at
+SELECT id, target, state, cursor, total, copied, skipped, failed, error, started_by, started_at, finished_at, dismissed_at
 FROM storage_moves WHERE state = 'copying';
 
 -- The newest move, running or finished. max(id) is one probe at the end of the rowid tree.
 -- name: GetLatestMove :one
-SELECT id, target, state, cursor, total, copied, skipped, failed, error, started_by, started_at, finished_at
+SELECT id, target, state, cursor, total, copied, skipped, failed, error, started_by, started_at, finished_at, dismissed_at
 FROM storage_moves WHERE id = (SELECT max(id) FROM storage_moves);
 
 -- The copier saves its position and counters after each page. Only a copying move changes,
@@ -35,6 +35,11 @@ WHERE id = ? AND state = 'copying';
 -- name: FinishMove :execrows
 UPDATE storage_moves SET state = ?, error = ?, finished_at = ?
 WHERE id = ? AND state = 'copying';
+
+-- Puts an ended move away. Returns 0 rows when it copies or is already put away.
+-- name: DismissMove :execrows
+UPDATE storage_moves SET dismissed_at = ?
+WHERE id = ? AND state <> 'copying' AND dismissed_at IS NULL;
 
 -- A repeated failure of the same blob (a resumed page) replaces the reason.
 -- name: InsertMoveFailure :exec

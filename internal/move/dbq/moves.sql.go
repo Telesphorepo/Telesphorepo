@@ -58,6 +58,25 @@ func (q *Queries) CreateMove(ctx context.Context, arg CreateMoveParams) (int64, 
 	return id, err
 }
 
+const dismissMove = `-- name: DismissMove :execrows
+UPDATE storage_moves SET dismissed_at = ?
+WHERE id = ? AND state <> 'copying' AND dismissed_at IS NULL
+`
+
+type DismissMoveParams struct {
+	DismissedAt sql.NullInt64
+	ID          int64
+}
+
+// Puts an ended move away. Returns 0 rows when it copies or is already put away.
+func (q *Queries) DismissMove(ctx context.Context, arg DismissMoveParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, dismissMove, arg.DismissedAt, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const finishMove = `-- name: FinishMove :execrows
 UPDATE storage_moves SET state = ?, error = ?, finished_at = ?
 WHERE id = ? AND state = 'copying'
@@ -85,7 +104,7 @@ func (q *Queries) FinishMove(ctx context.Context, arg FinishMoveParams) (int64, 
 }
 
 const getCopyingMove = `-- name: GetCopyingMove :one
-SELECT id, target, state, cursor, total, copied, skipped, failed, error, started_by, started_at, finished_at
+SELECT id, target, state, cursor, total, copied, skipped, failed, error, started_by, started_at, finished_at, dismissed_at
 FROM storage_moves WHERE state = 'copying'
 `
 
@@ -106,12 +125,13 @@ func (q *Queries) GetCopyingMove(ctx context.Context) (StorageMove, error) {
 		&i.StartedBy,
 		&i.StartedAt,
 		&i.FinishedAt,
+		&i.DismissedAt,
 	)
 	return i, err
 }
 
 const getLatestMove = `-- name: GetLatestMove :one
-SELECT id, target, state, cursor, total, copied, skipped, failed, error, started_by, started_at, finished_at
+SELECT id, target, state, cursor, total, copied, skipped, failed, error, started_by, started_at, finished_at, dismissed_at
 FROM storage_moves WHERE id = (SELECT max(id) FROM storage_moves)
 `
 
@@ -132,12 +152,13 @@ func (q *Queries) GetLatestMove(ctx context.Context) (StorageMove, error) {
 		&i.StartedBy,
 		&i.StartedAt,
 		&i.FinishedAt,
+		&i.DismissedAt,
 	)
 	return i, err
 }
 
 const getMove = `-- name: GetMove :one
-SELECT id, target, state, cursor, total, copied, skipped, failed, error, started_by, started_at, finished_at
+SELECT id, target, state, cursor, total, copied, skipped, failed, error, started_by, started_at, finished_at, dismissed_at
 FROM storage_moves WHERE id = ?
 `
 
@@ -157,6 +178,7 @@ func (q *Queries) GetMove(ctx context.Context, id int64) (StorageMove, error) {
 		&i.StartedBy,
 		&i.StartedAt,
 		&i.FinishedAt,
+		&i.DismissedAt,
 	)
 	return i, err
 }

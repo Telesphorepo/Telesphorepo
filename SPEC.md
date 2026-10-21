@@ -493,7 +493,7 @@ Tables of the `storage` component (`internal/move/migrations`):
 
 | Table | Key / indexes | Notes |
 |---|---|---|
-| `storage_moves` | PK `id`, UNIQUE partial `storage_moves_copying (state) WHERE state = 'copying'`, idx `started_by` | `target` is the sealed JSON of the target storage settings (AAD `storage_moves:<id>`); `state` `copying`/`done`/`failed`/`cancelled`; `cursor` (last blob id done), `total` (the blob rows when the move started), `copied`, `skipped`, `failed`, `error` |
+| `storage_moves` | PK `id`, UNIQUE partial `storage_moves_copying (state) WHERE state = 'copying'`, idx `started_by` | `target` is the sealed JSON of the target storage settings (AAD `storage_moves:<id>`); `state` `copying`/`done`/`failed`/`cancelled`; `cursor` (last blob id done), `total` (the blob rows when the move started), `copied`, `skipped`, `failed`, `error`; `dismissed_at` (an admin put the ended move away) |
 | `storage_move_failures` | PK `(move_id, blob_id)` (WITHOUT ROWID) | `key` and `reason` of each blob the copier could not copy |
 
 Tables of the `network` component (`internal/netrules/migrations`):
@@ -948,10 +948,13 @@ transaction.
 | `PATCH /api/settings` | the permission of each key's group | `{key: value}`. Each key needs the permission of its group (403 otherwise). `null` resets a key; `""` for a secret means unchanged. The server runs the `Validate` of every touched group, then each `Apply`, then saves (see **Settings model**). Returns 400 `{error, fields}`, or 409 when an env-locked key gets a different value. Location changes must pass the probe; SSO connection changes must pass discovery. A location change that starts a storage move saves the other keys of the patch and returns 202 `{move: Move}`; 409 while a move runs. The settings service records one `settings.update` event that names the saved keys, never the values; a patch that saves no key records none |
 | `GET /api/backup` | `backup.manage` | `{job: {running, started_at, progress: {step, blobs, copied} | null, last_at, last_error}, next_at, backups: [{name, created_at, complete, version, storage, size, files, blobs_included, master_key_included}], error}`: the folders of `backup.dir`, newest first (`next_at` and the list are empty while backups are off). `size` is the database and the blobs it uses. `job` is the state of this process: `last_*` are lost at a restart. `error` says why the folder could not be read |
 | `POST /api/backup/run` | `backup.manage` | Starts a backup now: 202 with the `job`; 409 while one runs; 400 without `backup.dir` |
-| `GET /api/storage/moves/current` | `storage.manage` | The newest Move, running or ended; 404 when there has been none |
-| `GET /api/storage/moves/{id}` | `storage.manage` | `Move` = `{id, state, total, copied, skipped, failed, error, started_at, finished_at, target: {storage, endpoint?, bucket?, prefix?, fs_root?}}`. Never holds secrets |
-| `GET /api/storage/moves/{id}/failures?after=&limit=` | `storage.manage` | `{items: [{asset_id, key, reason}], next}` in asset id order |
+| `GET /api/storage/moves/current` | `storage.manage` | The newest Move, running or ended; 404 when there has been none or the newest one is dismissed |
+| `GET /api/storage/moves/{id}` | `storage.manage` | `Move` = `{id, state, total, copied, skipped, failed, error, started_at, finished_at, dismissed_at, target: {storage, endpoint?, bucket?, prefix?, fs_root?}, target_settings}`. `target_settings` are the storage settings the move switches to, by setting key (`storage`, `fs.root`, `s3.*` but `presign_ttl`), with `s3.secret_access_key` as `{set}`. Never holds secrets |
+| `GET /api/storage/moves/{id}/failures?after=&limit=` | `storage.manage` | `{items: [{blob_id, key, reason}], next}` in blob id order |
 | `DELETE /api/storage/moves/{id}` | `storage.manage` | Cancels the move and returns it; 409 when it has ended |
+| `POST /api/storage/moves/{id}/retry` | `storage.manage` | Tries the newest move again when it failed or was cancelled (409 otherwise). The body `{key: value}` holds storage settings that change the target (`{}` keeps it; a secret left out or `""` keeps the target's secret; a key of another group is 400). The server builds the settings PATCH that makes the sealed target the active storage, puts the body on top and saves it like `PATCH /api/settings`: 202 `{move}` with the new move, or 200 `{move: null}` when the settings saved at once; a refusal answers like the PATCH. The old move is dismissed. Records `storage.move.retry` |
+| `POST /api/storage/moves/{id}/test` | `storage.manage` | The same body as the retry; runs the storage `Validate` and the probe on the target a retry would move to, saves nothing. Answers like `POST /api/settings/storage/test` |
+| `POST /api/storage/moves/{id}/dismiss` | `storage.manage` | Dismisses an ended move and returns it; storage stays where it is. 409 while it copies. Records `storage.move.dismiss` |
 | `GET /api/edge/status` | `edge.manage` | `{enabled, mode: "on"\|"draining"\|"off", unfit, server_version, worker_version\|null, version_mismatch, gap_checked_at\|null, deploy_needed, deploy_reason, home: {hint, bucket, outbox, last_error}, backfill: {running, queued, total}, regions: [{hint, area, bucket, state: "filling"\|"ready"\|"waiting", pointers_written, pointers_total, blobs_missing\|null, outbox, last_error}]}`. `backfill.running` holds until the outbox wrote every pointer of the backfill (`home.ready`). The Worker version and the gap check come from `gap/state.json`; `waiting`: the Worker of the last gap check has no binding for the region, or its binding is a bucket whose `bucket.json` names another bucket; `deploy_needed` also holds when the `bucket.json` of its `HOME` names another bucket than the home bucket. The outbox counts come from the count of the outbox job: every 5 s while the page asks for the status at least every 30 s; after a longer pause the request asks for a count and waits for it up to a second. See **Edge delivery** |
 | `GET /api/edge/wrangler.jsonc` | `edge.manage` | The `wrangler.jsonc` of the Worker for the current settings, `text/plain`, `no-store`. 409 problem `edge-not-configured` when the settings cannot run edge delivery (storage fs, a base URL with a path, no home hint) |
 | `POST /api/nexus/sources` | `nexus.manage` | `{name, base_url, username, password}`; `name` matches the repo name pattern. Checks the connection. 201 `Source`. 400 for invalid input or refused credentials, 409 when the name exists, 502 when Nexus is unreachable |
@@ -1716,12 +1719,27 @@ A settings PATCH that points the server at another blob location while blobs exi
   not be copied"), and `Live` returns to the source. A later move skips the blobs already copied.
 - **Cancel.** `DELETE` marks the move `cancelled`, stops the copier and returns `Live` to the
   source.
+- **Retry.** `POST .../retry` starts a new move to the sealed target of a failed or cancelled
+  move, with changed settings on top, through the same settings save as a PATCH (`Validate`,
+  then the `Apply` hook: probe, start). The new move skips the blobs the target already holds.
+  The old move is dismissed.
+- **Dismiss.** `POST .../dismiss` sets `dismissed_at` of an ended move; `current` then answers
+  404. Storage does not change.
 - **Restart.** A shutdown leaves the move `copying`. At startup, before the server serves
   requests, the move continues from its cursor. If the settings already point at the target, the
   move is marked `done`. If the target cannot be opened or probed, the move fails with that
   error.
-- **UI.** The **Storage** page (`/#/settings/storage`) shows a progress bar while a move copies, a Cancel button, and the
-  failure list of a failed move.
+- **UI.** The **Storage** page (`/#/settings/storage`) is in one state at a time. Without a
+  move it shows the storage form. While a move copies it shows where the files go (the folder,
+  or the bucket with its folder or its root), that storage stays on the current place until
+  every file is copied, the progress and Cancel, and no form. A failed or cancelled move shows
+  that storage is still on the current place and nothing was lost, why it ended, the counts and
+  the failure list, with Try again (the retry with `{}`), Change the target (the form filled with
+  `target_settings`; the secret shows as set and stays the target's unless replaced; Save sends
+  the retry with the edits, Test connection the retry test) and Keep (dismiss). A done move shows
+  one success line, with Dismiss, over the form. The dialog of a save that changes the place
+  says where the files go, and when only the folder in the same bucket changes, that the files
+  at the old folder stay there.
 
 ## Backups
 
@@ -3361,7 +3379,7 @@ module (`audit.System`), the `telesphorepo-server user` commands as `cli` (`audi
 | core | `repo` | `file.upload`, `file.delete`, `grant.set` (`detail.old` and `detail.new`: the repository permission sets) |
 | core | `repositories` | `repo.create`, `repo.update`, `repo.delete`, `repo.delete.resume`, `repo.delete.clear` |
 | core | `settings` | `settings.update` (keys only, never values) |
-| storage | `storage` | `storage.move.start` (`detail.target` without secrets), `storage.move.cancel`, `storage.move.done`, `storage.move.failed` (`detail.error`) |
+| storage | `storage` | `storage.move.start` (`detail.target` without secrets), `storage.move.cancel`, `storage.move.done`, `storage.move.failed` (`detail.error`), `storage.move.retry` (`detail.changed`: the keys of the body; `detail.move`: the new move), `storage.move.dismiss` |
 | backup | `backup` | `backup.done` (`target` the backup name; `detail`: `dir`, `storage`, `blobs`, `copied`, `size`, `master_key_included`, `removed` (the folders retention removed), `removed_blobs`), `backup.failed` (`detail.error`). A scheduled run has the module as actor, Back up now the person |
 | network | `network` | `network.denied` (`detail.scope` is `read` or `publish`), `network.rules.update` (counts of read and publish rules only), `network.list.create`, `network.list.update` (`detail.renamed_from` after a rename), `network.list.delete`, `network.trusted.update` (`detail.lists`: the IP lists of the trusted proxies after a change) |
 | signing | `signing` | `signing.key.create` (`detail.imported`), `signing.key.delete`, `signing.key.bind` (a repo got its key: the repo, `target` the key name) |

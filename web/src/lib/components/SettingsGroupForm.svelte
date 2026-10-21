@@ -16,7 +16,8 @@
   without it the registry's label and help show. `errors` marks fields from outside the form (a
   connection test). `effects` lists the consequences of a pending PATCH body beyond the settings
   themselves (a storage move); when it returns lines, Save first asks in a confirm dialog that
-  lists every change. `before` renders at the top of the form and `extra` in the footer of the last section (or of section `extraAt`);
+  lists every change (`confirmText` names that dialog and its button). `send` replaces the PATCH
+  (Storage sends the retry of a move with the edits of its target). `before` renders at the top of the form and `extra` in the footer of the last section (or of section `extraAt`);
   both get a function that returns the PATCH body of the unsaved edits (Storage and Single sign-on
   use it for their connection tests).
 -->
@@ -74,6 +75,8 @@
     akaLabel,
     errors = {},
     effects,
+    confirmText,
+    send = api.settings.patch,
     onSaved,
     before,
     extra,
@@ -93,6 +96,10 @@
     errors?: Record<string, string>;
     /** Extra effects of a save, one line each, for the confirm dialog. */
     effects?: (patch: Record<string, unknown>) => string[];
+    /** The title and the confirm button of that dialog; "Save storage settings?" and "Save changes" by default. */
+    confirmText?: { title: string; label: string };
+    /** Sends the PATCH body; PATCH /api/settings by default (Storage sends the retry of a move). */
+    send?: (patch: Record<string, unknown>) => Promise<Settings | SettingsMoveStarted>;
     /** Called with the server's answer: the new settings, or {move} when a storage move started. */
     onSaved: (result: Settings | SettingsMoveStarted) => void;
     before?: Snippet<[Patch]>;
@@ -296,10 +303,11 @@
   async function save() {
     fieldErrors = {};
     try {
-      const result = await api.settings.patch(patchBody());
+      const result = await send(patchBody());
       draft = {};
       parts = {};
-      toast.success(`Saved ${label.toLowerCase()}`);
+      // A started move holds the location back, so nothing is saved yet: onSaved says so.
+      if (!("move" in result)) toast.success(`Saved ${label.toLowerCase()}`);
       onSaved(result);
     } catch (err) {
       const fields = err instanceof ApiError ? err.fields : undefined;
@@ -447,4 +455,10 @@
 
 <SaveBar {count} onDiscard={discard} onSave={saveFromBar} />
 
-<ConfirmDialog bind:open={confirming} title="Save {label.toLowerCase()}?" confirmLabel="Save changes" {changes} onConfirm={save} />
+<ConfirmDialog
+  bind:open={confirming}
+  title={confirmText?.title ?? `Save ${label.toLowerCase()}?`}
+  confirmLabel={confirmText?.label ?? "Save changes"}
+  {changes}
+  onConfirm={save}
+/>
