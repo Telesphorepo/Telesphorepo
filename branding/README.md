@@ -179,6 +179,14 @@ radial light behind it, and the wordmark in Paper to its right. The ticket is at
 wordmark cap height is 40, centered on the ticket middle. The gap from the ticket to the wordmark
 is 56.
 
+## Avatar
+
+`avatar.svg` is the flat mark on a square, for a profile picture. Its viewBox is `0 0 512 512`,
+filled with Carbon, and the mark is at x 80..432, y 146..366: the 64 × 40 grid at scale 5.5, 352
+wide (a whole multiple of 16). The corners of the ticket are 207.5 from the center, 81% of the
+radius of the inscribed circle, so a round crop keeps the whole ticket with room around it.
+`avatar-on-light.svg` is the same on Paper with Gold Deep. The T and the slots stay holes, so the
+square's color shows through them. The PNGs are rendered with sharp at 256, 512 and 1024.
 ## Clear space and minimum sizes
 
 - **Clear space:** keep 8 units (one fifth of the ticket height) clear on all sides of the mark and
@@ -199,6 +207,7 @@ is 56.
 | Inline in UI that sets its own color | `logo-mark-mono.svg` (`currentColor`) |
 | Name only | `wordmark.svg` (Carbon), `wordmark-on-dark.svg` (Paper) |
 | Raster mark | `png/logo-mark-*.png`, `png/logo-mark-on-light-*.png` (16 to 512 wide) |
+| Avatar (square: GitHub, Discord, social profiles) | `avatar.svg` (Carbon), `avatar-on-light.svg` (Paper); `png/avatar-{256,512,1024}.png`, `png/avatar-on-light-{256,512,1024}.png` |
 | Raster lockup | `png/lockup-horizontal@2x.png`, `@4x`, and the `-on-dark` pair (80 and 160 px tall) |
 | Website hero, sign-in page, empty states | `ticket-skeuomorphic.svg` (the felt ticket), `png/ticket-skeuomorphic.png` (720), `@2x` (1440) |
 | Social card | `png/og-image.png` (source `og-image.svg`) |
