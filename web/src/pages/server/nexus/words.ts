@@ -53,21 +53,3 @@ export function progressLine(s: NexusSync): string {
   const at = Math.min(s.repos_done + 1, Math.max(s.repo_count, 1));
   return `Copying ${s.current_repo} (${formatCount(at)} of ${formatCount(s.repo_count)}). ${sofar}`;
 }
-
-/** A length of time in words: "40 seconds", "6 minutes", "2 hours 5 minutes". */
-export function durationText(ms: number): string {
-  const sec = Math.max(0, Math.round(ms / 1000));
-  if (sec < 60) return count(sec, "second", "seconds");
-  const min = Math.round(sec / 60);
-  if (min < 60) return count(min, "minute", "minutes");
-  const h = Math.floor(min / 60);
-  const m = min % 60;
-  return m ? `${count(h, "hour", "hours")} ${count(m, "minute", "minutes")}` : count(h, "hour", "hours");
-}
-
-/** The sync interval after "every": "15 minutes", "hour", "2 hours". */
-export function everyText(seconds: number): string {
-  if (seconds % 3600 === 0) return seconds === 3600 ? "hour" : count(seconds / 3600, "hour", "hours");
-  if (seconds % 60 === 0) return seconds === 60 ? "minute" : count(seconds / 60, "minute", "minutes");
-  return count(seconds, "second", "seconds");
-}

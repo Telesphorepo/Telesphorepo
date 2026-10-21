@@ -27,6 +27,10 @@ type statusJSON struct {
 	WorkerVersion *string    `json:"worker_version"` // from gap/state.json; null before the first gap check
 	Mismatch      bool       `json:"version_mismatch"`
 	GapCheckedAt  *time.Time `json:"gap_checked_at"`
+	// GapCheckEvery is the interval of the Worker's gap check (its cron), BlobCheckEvery the
+	// interval of the server's count of the files of a filling region; both in seconds.
+	GapCheckEvery  int64 `json:"gap_check_every"`
+	BlobCheckEvery int64 `json:"blob_check_every"`
 	// GapPassStarted is the start of the Worker's copy pass that runs now (null between passes).
 	GapPassStarted *time.Time `json:"gap_pass_started"`
 	// DeployNeeded: a storage change or move, a region change, or a Worker of another version
@@ -75,7 +79,9 @@ type regionJSON struct {
 	// CopiesQueued the copies and deletes that the Worker's last finished pass queued for the
 	// region (null before one).
 	BlobsMissingSince *time.Time `json:"blobs_missing_since"`
-	CopiesQueued      *int64     `json:"copies_queued"`
+	// BlobsCheckedAt is the end of the last whole count (null before one).
+	BlobsCheckedAt *time.Time `json:"blobs_checked_at"`
+	CopiesQueued   *int64     `json:"copies_queued"`
 	Outbox            int64      `json:"outbox"` // pointer rows of the outbox, which may write this bucket
 	LastError         string     `json:"last_error"`
 }
@@ -91,7 +97,8 @@ func (m *mod) status(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	}
 	out := statusJSON{
 		Enabled: v.mode == modeOn, Mode: [...]string{"off", "on", "draining"}[v.mode], Unfit: unfit(snap),
-		ServerVersion: m.h.Version, DeployNeeded: p.home.DeployNeeded, DeployReason: p.home.Reason, WorkerMissing: m.workerMissing(),
+		ServerVersion: m.h.Version, GapCheckEvery: int64(gapEvery / time.Second), BlobCheckEvery: int64(checkEvery / time.Second),
+		DeployNeeded: p.home.DeployNeeded, DeployReason: p.home.Reason, WorkerMissing: m.workerMissing(),
 		Home:     homeJSON{Hint: HomeHint.Get(snap), Bucket: storage.S3Bucket.Get(snap), LastError: m.lastErr("home")},
 		Backfill: backfillJSON{Running: v.mode == modeOn && p.home.Started && !p.home.Ready, Queued: p.home.Queued, Total: p.home.Total},
 		Regions:  []regionJSON{},
@@ -128,6 +135,10 @@ func (m *mod) status(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		if rs.MissingSince != 0 {
 			t := time.Unix(rs.MissingSince, 0).UTC()
 			rj.BlobsMissingSince = &t
+		}
+		if rs.CheckedAt != 0 {
+			t := time.Unix(rs.CheckedAt, 0).UTC()
+			rj.BlobsCheckedAt = &t
 		}
 		if q, ok := g.copies(rs.Hint); ok {
 			rj.CopiesQueued = &q

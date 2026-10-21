@@ -1,6 +1,7 @@
 <!--
   One Nexus sync: its state, a row per repository with its progress, the log, and the files that
-  failed. It asks for progress every two seconds while the sync runs, gives each answer to
+  failed. It asks for progress every two seconds while the sync runs (a Live, with its LiveStatus
+  in the section header; the log reads its new lines at each refresh), gives each answer to
   onProgress, and calls onChanged when the sync ends. A click on a repository row opens
   `filterHref(repo)`, which shows the log of that repository; `filter` is the repository the log
   shows ("" for every repository). The parent keys it by id.
@@ -9,7 +10,10 @@
   import { untrack } from "svelte";
   import { api, type NexusSync, type NexusSyncRepo } from "$lib/api";
   import { Keyset, Resource, type TableSource } from "$lib/load.svelte";
-  import { formatCount, formatDateTime, formatRelative, formatSize } from "$lib/format";
+  import { clock, Live } from "$lib/live.svelte";
+  import { formatCount, formatDateTime, formatDuration, formatRelative, formatSize } from "$lib/format";
+  import LiveStatus from "$lib/components/LiveStatus.svelte";
+  import LiveValue from "$lib/components/LiveValue.svelte";
   import { Button } from "$lib/components/ui/button";
   import Cell from "$lib/components/Cell.svelte";
   import DataTable from "$lib/components/DataTable.svelte";
@@ -19,7 +23,7 @@
   import Section from "$lib/components/Section.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
   import SyncLog from "./SyncLog.svelte";
-  import { durationText, howText, syncState } from "./words";
+  import { howText, syncState } from "./words";
   import XIcon from "@lucide/svelte/icons/x";
 
   let {
@@ -68,19 +72,15 @@
     failedSeen = n;
   });
 
-  // Progress every two seconds, and a clock for "Last activity".
-  let now = $state(Date.now());
-  $effect(() => {
-    if (!running) return;
-    const timer = setInterval(() => {
-      now = Date.now();
-      api.nexus.getSync(syncId).then(
-        (s) => (sync.data = s),
-        () => {},
-      );
-    }, 2000);
-    return () => clearInterval(timer);
+  // Progress every two seconds while the sync runs; the log follows the same Live.
+  const live = new Live({
+    every: 2000,
+    while: () => running,
+    run: async () => {
+      sync.data = await api.nexus.getSync(syncId);
+    },
   });
+  const now = $derived(clock.now);
 
   const repos: TableSource<NexusSyncRepo> = {
     get items() {
@@ -96,12 +96,13 @@
   const stalled = (r: NexusSyncRepo) => r.state === "running" && !!r.active_at && now - new Date(r.active_at).getTime() > 120_000;
   const progressText = (r: { imported: number; bytes: number; checked: number }) =>
     `${formatCount(r.imported)} copied (${formatSize(r.bytes)}) of ${formatCount(r.checked)} checked`;
-  const tookText = (s: NexusSync) => (s.finished_at ? durationText(new Date(s.finished_at).getTime() - new Date(s.started_at).getTime()) : "");
+  const tookText = (s: NexusSync) => (s.finished_at ? formatDuration(new Date(s.finished_at).getTime() - new Date(s.started_at).getTime()) : "");
 
   const rowHref = (r: NexusSyncRepo) => filterHref(r.source_repo === filter ? null : r.source_repo);
 </script>
 
 {#snippet actions()}
+  <LiveStatus {live} />
   {#if sync.data}<StatusBadge tone={syncState[sync.data.state].tone}>{syncState[sync.data.state].word}</StatusBadge>{/if}
   {#if onClose}<Button variant="ghost" size="icon-sm" aria-label="Close the sync" onclick={onClose}><XIcon /></Button>{/if}
 {/snippet}
@@ -117,7 +118,7 @@
     <div class="flex flex-col gap-2">
       {#if s.error}<ErrorState inline error={s.error} />{/if}
       <p class="text-meta text-muted-foreground tabular-nums">
-        {howText(s)}. {progressText(s)}{#if s.failed > 0}, <span class="text-destructive">{formatCount(s.failed)} failed</span>{/if}.
+        {howText(s)}. <LiveValue value={s.checked}>{progressText(s)}</LiveValue>{#if s.failed > 0}, <span class="text-destructive">{formatCount(s.failed)} failed</span>{/if}.
         {#if s.finished_at}It took {tookText(s)}.{/if}
       </p>
     </div>
@@ -169,7 +170,7 @@
             {:else if !r.active_at}
               Nexus sent no page yet
             {:else if stalled(r)}
-              <span class="text-warning">No progress for {durationText(now - new Date(r.active_at).getTime())}</span>
+              <span class="text-warning">No progress for {formatDuration(now - new Date(r.active_at).getTime())}</span>
             {:else}
               <time datetime={r.active_at} title={formatDateTime(r.active_at)}>{formatRelative(r.active_at, now)}</time>
             {/if}
@@ -185,7 +186,7 @@
         {#if filter}<Button variant="ghost" size="sm" href={filterHref(null)}>All repositories</Button>{/if}
       </div>
       {#key filter}
-        <SyncLog id={syncId} repo={filter} {running} />
+        <SyncLog id={syncId} repo={filter} {running} refreshed={live.lastUpdated} />
       {/key}
     </div>
 

@@ -1,7 +1,7 @@
 <!--
   The log of one Nexus sync: a line per event, oldest first, in a box that scrolls on its own. It
   loads every line (of one Nexus repository with `repo`), then, while the sync runs, asks for the
-  new lines every two seconds. The box stays at the newest line unless the reader scrolled up.
+  new lines at each refresh of the sync (`refreshed`). The box stays at the newest line unless the reader scrolled up.
   The parent keys it by sync and repository.
 -->
 <script lang="ts">
@@ -14,7 +14,18 @@
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
   import ScrollTextIcon from "@lucide/svelte/icons/scroll-text";
 
-  let { id, repo, running }: { id: number; repo: string; running: boolean } = $props();
+  let {
+    id,
+    repo,
+    running,
+    refreshed,
+  }: {
+    id: number;
+    repo: string;
+    running: boolean;
+    /** The time of the sync's last refresh (`Live.lastUpdated`): each change reads the new lines. */
+    refreshed: number | null;
+  } = $props();
 
   const syncId = untrack(() => id);
   const only = untrack(() => repo) || undefined;
@@ -94,13 +105,13 @@
 
   load();
 
+  // At each refresh of the sync (its Live), read the new lines.
   $effect(() => {
-    if (!running) return;
-    const timer = setInterval(readNew, 2000);
-    return () => clearInterval(timer);
+    if (refreshed === null || !untrack(() => running)) return;
+    untrack(readNew);
   });
 
-  // The last lines (the finish line) come after the last poll: read them once when the sync ends.
+  // The last lines (the finish line) come after the last refresh: read them once when the sync ends.
   let was = untrack(() => running);
   $effect(() => {
     const now = running;

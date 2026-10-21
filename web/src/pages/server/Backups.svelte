@@ -2,13 +2,16 @@
   Backups (Manage backups permission): the backups in the backup folder, newest first, with Back up
   now; then the folder, the interval and how many to keep (the settings group "backup"), with a
   test that the server can write to the folder. While a backup runs, the list header shows its
-  progress and the page asks for it every two seconds.
+  progress and the page asks for it every two seconds (a Live, with its LiveStatus in that header).
 -->
 <script lang="ts">
   import { toast } from "svelte-sonner";
   import type { PageProps } from "$lib/router.svelte";
   import { api, errorMessage, type Backup, type BackupJob, type Settings, type SettingsMoveStarted } from "$lib/api";
   import { Resource, type TableSource } from "$lib/load.svelte";
+  import { Live } from "$lib/live.svelte";
+  import LiveStatus from "$lib/components/LiveStatus.svelte";
+  import LiveValue from "$lib/components/LiveValue.svelte";
   import { formatCount, formatDateTime, formatSize } from "$lib/format";
   import { Button } from "$lib/components/ui/button";
   import PageHeader from "$lib/components/PageHeader.svelte";
@@ -40,24 +43,25 @@
     get loading() {
       return overview.loading && !overview.data;
     },
+    // While a backup runs, LiveStatus says when a refresh fails.
     get error() {
-      return overview.error;
+      return live.active && overview.data ? "" : overview.error;
     },
     reload: overview.reload,
   };
 
   // While a backup runs, ask for its progress every two seconds; say how it ended.
-  $effect(() => {
-    if (!job?.running) return;
-    const timer = setInterval(async () => {
-      await overview.reload();
+  const live = new Live({
+    every: 2000,
+    while: () => !!job?.running,
+    run: async () => {
+      await overview.fetch();
       const now = overview.data?.job;
       if (now && !now.running) {
         if (now.last_error) toast.error(`The backup failed: ${now.last_error}`);
         else toast.success("Backed up the server");
       }
-    }, 2000);
-    return () => clearInterval(timer);
+    },
   });
 
   let starting = $state(false);
@@ -117,8 +121,12 @@
 >
   {#snippet actions()}
     {#if job?.running}
+      <LiveStatus {live} />
       <StatusBadge tone="info">
-        <span class="tabular-nums">{stepWord[job.progress?.step ?? "files"]}{job.progress?.copied ? ` · ${formatCount(job.progress.copied)} copied` : ""}</span>
+        <span class="tabular-nums"
+          >{stepWord[job.progress?.step ?? "files"]}{#if job.progress?.copied}
+            · <LiveValue value={job.progress.copied}>{formatCount(job.progress.copied)} copied</LiveValue>{/if}</span
+        >
       </StatusBadge>
     {:else if overview.data?.next_at}
       <span class="text-meta text-muted-foreground">Next backup <RelativeTime at={overview.data.next_at} /></span>

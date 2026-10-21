@@ -16,8 +16,8 @@ import (
 )
 
 // pageSize is the number of blobs the copier reads per page. It saves its cursor and counters
-// after each page, and at least every saveEvery within a page, so the progress shows while a slow
-// store takes a page for minutes.
+// after each page, and within a page when a blob is done and saveEvery has passed since the last
+// save, so the progress shows while a slow store takes a page for minutes.
 const (
 	pageSize  = 500
 	saveEvery = time.Second
@@ -52,6 +52,7 @@ func (s *Service) copy(ctx context.Context, r *run, c counters) {
 	rq, wq := dbq.New(s.db.R), dbq.New(s.db.W)
 	// save writes the cursor and counters; false when the move must stop (an error, or a cancel).
 	lastSave := time.Now()
+	s.saved.Store(r.id, lastSave.UnixMilli())
 	save := func() bool {
 		lastSave = time.Now()
 		n, err := wq.UpdateMoveProgress(ctx, dbq.UpdateMoveProgressParams{
@@ -63,6 +64,7 @@ func (s *Service) copy(ctx context.Context, r *run, c counters) {
 			}
 			return false
 		}
+		s.saved.Store(r.id, time.Now().UnixMilli())
 		return n > 0 // 0: cancelled
 	}
 	type result struct {

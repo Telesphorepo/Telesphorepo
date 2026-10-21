@@ -40,6 +40,12 @@ export class Resource<T> {
       if (seq === this.#seq) this.loading = false;
     }
   };
+
+  /** reload(), then throws the error of a failed request: the `run` of a Live (`lib/live.svelte.ts`). */
+  fetch = async () => {
+    await this.reload();
+    if (this.error) throw new Error(this.error);
+  };
 }
 
 /**
@@ -106,6 +112,12 @@ export class Keyset<T> {
 
   /** Loads the first page again (after a change, or to retry). */
   reload = () => this.#load(this.#fn({ limit: this.#limit }));
+
+  /** reload(), then throws the error of a failed request: the `run` of a Live (`lib/live.svelte.ts`). */
+  fetch = async () => {
+    await this.reload();
+    if (this.error) throw new Error(this.error);
+  };
 
   async #load(req: Promise<Page<T>>) {
     const seq = ++this.#seq;

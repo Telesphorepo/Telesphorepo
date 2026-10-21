@@ -11,9 +11,10 @@
   import { toast } from "svelte-sonner";
   import { api, errorMessage, type NexusMapping, type NexusSourceDetail, type NexusSourceRepo, type NexusSync, type ImportQuestion } from "$lib/api";
   import { Keyset, Resource, type TableSource } from "$lib/load.svelte";
+  import { clock, Live } from "$lib/live.svelte";
   import { Draft } from "$lib/unsaved.svelte";
   import { href, navigate, repoSettingsPath, router } from "$lib/router.svelte";
-  import { formatCount, formatRelative } from "$lib/format";
+  import { formatCount, formatDuration, formatEvery, formatRelative } from "$lib/format";
   import { count, someNames } from "$lib/words";
   import { cn } from "$lib/utils";
   import { Button } from "$lib/components/ui/button";
@@ -43,7 +44,7 @@
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import ShortFormDialog from "$lib/components/ShortFormDialog.svelte";
   import SyncDetail from "./SyncDetail.svelte";
-  import { durationText, everyText, howText, kindText, progressLine, sourceStatus, syncState } from "./words";
+  import { howText, kindText, progressLine, sourceStatus, syncState } from "./words";
   import ArrowRightLeftIcon from "@lucide/svelte/icons/arrow-right-left";
   import RefreshIcon from "@lucide/svelte/icons/refresh-cw";
   import HistoryIcon from "@lucide/svelte/icons/history";
@@ -77,29 +78,21 @@
   let live = $state<NexusSync | null>(null);
   const lastSync = $derived(live && d?.last_sync && live.id === d.last_sync.id ? live : (d?.last_sync ?? null));
 
-  // A clock for the relative times of the status line.
-  let now = $state(Date.now());
-  $effect(() => {
-    const t = setInterval(() => (now = Date.now()), 30_000);
-    return () => clearInterval(t);
-  });
+  // The clock of the relative times of the status line.
+  const now = $derived(clock.now);
 
-  const MAX_DELAY = 24 * 60 * 60 * 1000;
-
-  // When the next scheduled sync is due, read the source again, so a sync that starts shows.
-  $effect(() => {
-    const at = d?.next_sync_at;
-    if (!at || running) return;
-    const due = new Date(at).getTime();
-    let timer: ReturnType<typeof setTimeout>;
-    // A delay over 2^31-1 ms makes setTimeout fire at once, so a far-off time waits in steps of a day.
-    const arm = () => {
-      const ms = due - Date.now();
-      if (ms > MAX_DELAY) timer = setTimeout(arm, MAX_DELAY);
-      else timer = setTimeout(reloadAll, ms > 0 ? ms + 5000 : 30_000);
-    };
-    arm();
-    return () => clearTimeout(timer);
+  // When the next scheduled sync is due, read the source again (5 s after the time, then every
+  // 30 s until it starts), so a sync that starts shows. Reading the source asks Nexus for its
+  // repositories, so the page does not refresh it on a short timer.
+  new Live({
+    while: () => !!d?.next_sync_at && !running,
+    every: () => {
+      const due = d?.next_sync_at ? Date.parse(d.next_sync_at) - Date.now() : 0;
+      return due > 0 ? due + 5000 : 30_000;
+    },
+    run: async () => {
+      await Promise.all([source.fetch(), syncs.fetch()]);
+    },
   });
 
   // --- the repositories to copy: one list, in the order a save sets them up ---
@@ -433,7 +426,7 @@
 
   const lastFailed = $derived(d?.last_sync?.failed ?? 0);
   const syncHref = (s: NexusSync) => href(path, { sync: String(s.id) });
-  const tookText = (s: NexusSync) => (s.finished_at ? durationText(new Date(s.finished_at).getTime() - new Date(s.started_at).getTime()) : "");
+  const tookText = (s: NexusSync) => (s.finished_at ? formatDuration(new Date(s.finished_at).getTime() - new Date(s.started_at).getTime()) : "");
   const quietDanger = "hover:bg-destructive/10 hover:text-destructive";
   const link = "rounded-sm text-link underline-offset-4 hover:underline";
 
@@ -681,7 +674,7 @@
   <Section title="Syncs">
     {#if mirroring}
       <p class="mb-4 text-meta text-muted-foreground">
-        This server checks Nexus for new files every {everyText(d.sync_interval)}.
+        This server checks Nexus for new files every {formatEvery(d.sync_interval)}.
         <a class={link} href={href("/settings/general")}>Change the interval</a>
       </p>
     {/if}

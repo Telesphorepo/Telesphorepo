@@ -34,6 +34,36 @@ export function formatRelative(iso: string, now = Date.now()): string {
   return rtf.format(Math.round(v), "year");
 }
 
+const plural = (n: number, one: string, many: string) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
+
+/** A length of time in words: "40 seconds", "6 minutes", "2 hours 5 minutes". */
+export function formatDuration(ms: number): string {
+  const sec = Math.max(0, Math.round(ms / 1000));
+  if (sec < 60) return plural(sec, "second", "seconds");
+  const min = Math.round(sec / 60);
+  if (min < 60) return plural(min, "minute", "minutes");
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return m ? `${plural(h, "hour", "hours")} ${plural(m, "minute", "minutes")}` : plural(h, "hour", "hours");
+}
+
+/** A short length of time for a value that ticks: "4 s", "6 min", "2 h 5 min". */
+export function formatSpan(ms: number): string {
+  const sec = Math.max(0, Math.round(ms / 1000));
+  if (sec < 60) return `${sec} s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min} min`;
+  const h = Math.floor(min / 60);
+  return min % 60 ? `${h} h ${min % 60} min` : `${h} h`;
+}
+
+/** An interval after "every", from seconds: "3 seconds", "10 minutes", "hour", "2 hours". */
+export function formatEvery(seconds: number): string {
+  if (seconds >= 3600 && seconds % 3600 === 0) return seconds === 3600 ? "hour" : plural(seconds / 3600, "hour", "hours");
+  if (seconds >= 60 && seconds % 60 === 0) return seconds === 60 ? "minute" : plural(seconds / 60, "minute", "minutes");
+  return seconds === 1 ? "second" : plural(seconds, "second", "seconds");
+}
+
 const dtf = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 
 /** Local date and time, e.g. "14 Oct 2026, 09:12". */

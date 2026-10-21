@@ -7,7 +7,9 @@
   import type { PageProps } from "$lib/router.svelte";
   import { href, navigate } from "$lib/router.svelte";
   import { api, type NexusSource } from "$lib/api";
-  import { Keyset } from "$lib/load.svelte";
+  import { Keyset, type TableSource } from "$lib/load.svelte";
+  import { Live } from "$lib/live.svelte";
+  import LiveStatus from "$lib/components/LiveStatus.svelte";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import PageHeader from "$lib/components/PageHeader.svelte";
@@ -32,11 +34,27 @@
 
   // While a source syncs, its progress line in the table follows the sync.
   const syncing = $derived(sources.items.some((s) => s.status === "syncing"));
-  $effect(() => {
-    if (!syncing) return;
-    const timer = setInterval(() => sources.reload(), 3000);
-    return () => clearInterval(timer);
-  });
+  const live = new Live({ every: 3000, while: () => syncing, run: sources.fetch });
+  // While a sync runs, LiveStatus says when a refresh fails.
+  const source: TableSource<NexusSource> = {
+    get items() {
+      return sources.items;
+    },
+    get loading() {
+      return sources.loading && sources.items.length === 0;
+    },
+    get error() {
+      return live.active && sources.items.length ? "" : sources.error;
+    },
+    reload: sources.reload,
+    get hasMore() {
+      return sources.hasMore;
+    },
+    get loadingMore() {
+      return sources.loadingMore;
+    },
+    more: sources.more,
+  };
 
   let addOpen = $state(false);
   let name = $state("");
@@ -62,12 +80,12 @@
 </script>
 
 <PageHeader title="Nexus migration" description="Copy the repositories of a Nexus server, keep them in sync, then switch over when every build uses this server.">
-  {#snippet actions()}{#if sources.items.length}<Button onclick={startAdd}><PlusIcon />Add a Nexus server</Button>{/if}{/snippet}
+  {#snippet actions()}<LiveStatus {live} />{#if sources.items.length}<Button onclick={startAdd}><PlusIcon />Add a Nexus server</Button>{/if}{/snippet}
 </PageHeader>
 
 <Section>
 <DataTable
-  source={sources}
+  {source}
   caption="Nexus servers"
   key={(s) => s.id}
   href={open}
