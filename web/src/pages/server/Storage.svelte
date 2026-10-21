@@ -79,19 +79,19 @@
 
   const sections = [
     { title: "Location", keys: ["storage", "fs.root"] },
-    { title: "S3 bucket", keys: ["s3.endpoint", "s3.region", "s3.bucket", "s3.prefix", "s3.access_key_id", "s3.secret_access_key", "s3.path_style", "s3.redirect", "presign_ttl"] },
+    { title: "Bucket", keys: ["s3.endpoint", "s3.region", "s3.bucket", "s3.prefix", "s3.access_key_id", "s3.secret_access_key", "s3.path_style", "s3.redirect", "presign_ttl"] },
   ];
   const fields = {
     storage: { label: "Storage type", help: "When you change it, the server moves the existing files in the background." },
     "fs.root": { label: "Folder", help: "A relative path starts in the data folder." },
     "s3.endpoint": { label: "Address", help: "The address of the S3 API. For Cloudflare R2: https://<account id>.r2.cloudflarestorage.com, from the S3 API part of the bucket's settings, not a custom domain of the bucket. Leave it empty for AWS: the server then uses the AWS address of the region." },
-    "s3.region": { label: "Region", help: "Required for AWS, for example us-east-1. With an address and no region, the server uses auto." },
+    "s3.region": { label: "Region", help: "Leave it empty for R2: the server then uses auto. AWS needs its region, for example us-east-1." },
     "s3.bucket": { label: "Bucket" },
-    "s3.access_key_id": { label: "Access key ID" },
+    "s3.access_key_id": { label: "Access key ID", help: "For R2, make an API token with Object Read & Write on the bucket: Cloudflare shows its access key ID and secret access key once." },
     "s3.secret_access_key": { label: "Secret access key" },
     "s3.prefix": { label: "Folder in the bucket", help: "Leave it empty to keep the files at the top of the bucket." },
-    "s3.path_style": { label: "Path-style addresses", help: "MinIO and SeaweedFS need this. AWS and R2 do not." },
-    "s3.redirect": { label: "Download from the bucket", help: "Builds get files directly from the bucket, not through this server." },
+    "s3.path_style": { label: "Path-style addresses", help: "Leave it off for R2 and AWS. MinIO and SeaweedFS need it." },
+    "s3.redirect": { label: "Download from the bucket", help: "This server checks each download, then sends the build to a signed link of the bucket: the build gets the bytes from R2, not through this server. With R2, that egress costs nothing. To answer downloads near each build without this server, set up Edge delivery." },
     presign_ttl: { label: "Download link lifetime", help: "A signed link to a file in the bucket works for this time." },
   };
 

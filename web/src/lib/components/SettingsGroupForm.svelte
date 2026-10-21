@@ -173,7 +173,7 @@
   const listOf = (s: Setting) => String(current(s)).split("\n").filter(Boolean);
   // Plain words for the option values of select settings; a value without an entry shows as is.
   const optionWords: Record<string, Record<string, string>> = {
-    storage: { fs: "A folder on this server", s3: "An S3 bucket" },
+    storage: { fs: "A folder on this server", s3: "A Cloudflare R2 bucket, or another S3-compatible bucket" },
     "signin.password_login": { all: "Everyone", publishers: "Only people who publish; people who manage use single sign-on" },
     "log.level": { debug: "Debug", info: "Info", warn: "Warnings", error: "Errors" },
   };

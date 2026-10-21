@@ -136,7 +136,8 @@ release).
 To move the blobs to another store, change the storage on the **Settings** page. The server
 copies the existing blobs in the background. To move hosted repos from Nexus 3, add the Nexus
 server on the **Nexus** page. The server mirrors the repos you pick, and they stay read only. Click
-**Cut over** when you are ready to publish here.
+**Cut over** when you are ready to publish here. To move each project with a coding agent, use the
+skill in [`skills/`](skills/README.md).
 
 A password or an API token (a read token) only reads. To publish, a client needs a publish
 session. See **Publishing**.
