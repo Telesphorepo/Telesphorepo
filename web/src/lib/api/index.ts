@@ -295,6 +295,17 @@ export const api = {
     failures: (id: number, p?: T.PageParams) =>
       request<T.Page<T.MoveFailure>>("GET", `/api/storage/moves/${id}/failures`, { query: page(p) }),
     cancel: (id: number) => request<T.Move>("DELETE", `/api/storage/moves/${id}`),
+    /**
+     * Tries an ended move again: changes (storage settings; a key left out keeps the target's
+     * value, a secret left out keeps the target's secret) go on top of its target, and the result
+     * saves like a PATCH of the settings. A validation error is an ApiError with `fields`.
+     */
+    retry: (id: number, changes: T.SettingsPatch = {}) =>
+      request<T.MoveRetried>("POST", `/api/storage/moves/${id}/retry`, { body: changes }),
+    /** Checks the target that a retry with changes would move to, like the settings test. Saves nothing. */
+    test: (id: number, changes: T.SettingsPatch) => request<T.TestResult>("POST", `/api/storage/moves/${id}/test`, { body: changes }),
+    /** Puts an ended move away: the page then shows no move. 409 while it copies. */
+    dismiss: (id: number) => request<T.Move>("POST", `/api/storage/moves/${id}/dismiss`),
   },
 
   /** Edge delivery: the state of the Worker and the regional buckets, and its generated config. */

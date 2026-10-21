@@ -742,8 +742,17 @@ export type Move = {
   error: string;
   started_at: string;
   finished_at: string | null;
+  /** When an admin put the ended move away; GET /api/storage/moves/current then answers 404. */
+  dismissed_at: string | null;
   target: { storage: string; endpoint?: string; bucket?: string; prefix?: string; fs_root?: string };
+  /**
+   * The storage settings the move switches to, by setting key, in the form of GET /api/settings:
+   * the secret access key is {set}, never the secret.
+   */
+  target_settings: Record<string, unknown>;
 };
+/** POST /api/storage/moves/{id}/retry: the new move, or null when the settings saved at once. */
+export type MoveRetried = { move: Move | null };
 export type MoveFailure = { blob_id: number; key: string; reason: string };
 
 // --- Nexus ---

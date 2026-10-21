@@ -32,6 +32,11 @@ var (
 	ErrBusy = errors.New("a storage move is already running")
 	// ErrNotRunning means the move has already ended.
 	ErrNotRunning = errors.New("the storage move is not running")
+	// ErrCopying means the move still copies; only an ended move can be put away.
+	ErrCopying = errors.New("the storage move is still copying")
+	// ErrNoRetry means the move cannot be tried again: it is done, it still copies, or a newer
+	// move exists.
+	ErrNoRetry = errors.New("only the newest move that failed or was cancelled can be tried again")
 )
 
 // Move states.
@@ -53,7 +58,13 @@ type Move struct {
 	Error      string     `json:"error"`
 	StartedAt  time.Time  `json:"started_at"`
 	FinishedAt *time.Time `json:"finished_at"`
-	Target     Target     `json:"target"`
+	// DismissedAt is when an admin put the ended move away; the Storage page then shows no move.
+	DismissedAt *time.Time `json:"dismissed_at"`
+	Target      Target     `json:"target"`
+	// TargetSettings are the storage settings the move switches to, by setting key, in the form
+	// of GET /api/settings: the secret access key is settings.SecretValue ({set}), never the
+	// secret. The Storage page fills its form with them to change the target of a retry.
+	TargetSettings map[string]any `json:"target_settings"`
 }
 
 // Target describes where a move copies to, without credentials.
@@ -78,6 +89,22 @@ func target(cfg storage.Config) Target {
 		return Target{Storage: cfg.Backend, Endpoint: cfg.S3Endpoint, Bucket: cfg.S3Bucket, Prefix: cfg.S3Prefix}
 	}
 	return Target{Storage: cfg.Backend, FSRoot: cfg.FSRoot}
+}
+
+// targetSettings returns the location settings of cfg by setting key, without the secret.
+func targetSettings(cfg storage.Config) map[string]any {
+	return map[string]any{
+		storage.Backend.Name():           cfg.Backend,
+		storage.FSRoot.Name():            cfg.FSRoot,
+		storage.S3Endpoint.Name():        cfg.S3Endpoint,
+		storage.S3Region.Name():          cfg.S3Region,
+		storage.S3Bucket.Name():          cfg.S3Bucket,
+		storage.S3AccessKeyID.Name():     cfg.S3AccessKeyID,
+		storage.S3SecretAccessKey.Name(): settings.SecretValue{Set: cfg.S3SecretAccessKey != ""},
+		storage.S3Prefix.Name():          cfg.S3Prefix,
+		storage.S3PathStyle.Name():       cfg.S3PathStyle,
+		storage.S3Redirect.Name():        cfg.S3Redirect,
+	}
 }
 
 // SameLocation reports whether a and b address the same blobs: the same directory, or the same
@@ -267,10 +294,11 @@ func (s *Service) launch(r *run, cursor, copied, skipped, failed int64) {
 	})
 }
 
-// Current returns the newest move, running or finished, or ErrNotFound when there is none.
+// Current returns the newest move, running or finished, or ErrNotFound when there is none or an
+// admin put the newest one away (Dismiss).
 func (s *Service) Current(ctx context.Context) (*Move, error) {
 	row, err := dbq.New(s.db.R).GetLatestMove(ctx)
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && row.DismissedAt.Valid) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
@@ -345,6 +373,85 @@ func (s *Service) Cancel(ctx context.Context, id int64) (*Move, error) {
 	return s.Get(ctx, id)
 }
 
+// Dismiss puts ended move id away, so the Storage page shows no move; storage stays where it
+// is. It records storage.move.dismiss. ErrCopying while the move copies; a move already put away
+// is returned as it is.
+func (s *Service) Dismiss(ctx context.Context, id int64) (*Move, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row, err := dbq.New(s.db.R).GetMove(ctx, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if row.State == StateCopying {
+		return nil, ErrCopying
+	}
+	n, err := s.dismissRow(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if n > 0 {
+		_ = s.audit.Record(ctx, audit.Event{Action: ActionDismiss, Target: strconv.FormatInt(id, 10)})
+	}
+	return s.Get(ctx, id)
+}
+
+func (s *Service) dismissRow(ctx context.Context, id int64) (int64, error) {
+	return dbq.New(s.db.W).DismissMove(ctx, dbq.DismissMoveParams{
+		DismissedAt: sql.NullInt64{Int64: time.Now().Unix(), Valid: true}, ID: id,
+	})
+}
+
+// RetryPatch returns the settings PATCH that tries move id again: the storage settings that make
+// its sealed target the active storage, with changes (setting key to JSON value, as a PATCH of
+// the storage group; a key left out keeps the value of the target) on top. The PATCH goes
+// through settings.Service.Patch like any save, so a change of location starts a new move.
+// ErrNoRetry unless id is the newest move and it failed or was cancelled.
+func (s *Service) RetryPatch(ctx context.Context, id int64, changes map[string]json.RawMessage) (map[string]json.RawMessage, error) {
+	row, err := dbq.New(s.db.R).GetLatestMove(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if row.ID != id {
+		if _, err := s.Get(ctx, id); err != nil {
+			return nil, err
+		}
+		return nil, ErrNoRetry
+	}
+	if row.State != StateFailed && row.State != StateCancelled {
+		return nil, ErrNoRetry
+	}
+	dst, err := s.open(row)
+	if err != nil {
+		return nil, fmt.Errorf("read move target: %w", err)
+	}
+	patch := storagePatch(storage.ConfigView.Get(s.set.Current()), dst)
+	for k, v := range changes {
+		patch[k] = v
+	}
+	return patch, nil
+}
+
+// Retried records storage.move.retry for move id and puts it away: next is the move the retry
+// started, or nil when the settings saved at once (the server holds no files, or already uses
+// the target).
+func (s *Service) Retried(ctx context.Context, id int64, next *Move, changed []string) {
+	detail := map[string]any{"changed": changed}
+	if next != nil {
+		detail["move"] = next.ID
+	}
+	if _, err := s.dismissRow(ctx, id); err != nil {
+		s.log.Error("could not put the storage move away after the retry", "move", id, "error", err.Error())
+	}
+	_ = s.audit.Record(ctx, audit.Event{Action: ActionRetry, Target: strconv.FormatInt(id, 10), Detail: detail})
+}
+
 func aad(id int64) string { return "storage_moves:" + strconv.FormatInt(id, 10) }
 
 // open decrypts the sealed target of row.
@@ -369,8 +476,12 @@ func (s *Service) toMove(row dbq.StorageMove) *Move {
 		t := time.Unix(row.FinishedAt.Int64, 0).UTC()
 		m.FinishedAt = &t
 	}
+	if row.DismissedAt.Valid {
+		t := time.Unix(row.DismissedAt.Int64, 0).UTC()
+		m.DismissedAt = &t
+	}
 	if st, err := s.open(row); err == nil {
-		m.Target = target(st)
+		m.Target, m.TargetSettings = target(st), targetSettings(st)
 	}
 	return m
 }
