@@ -502,11 +502,15 @@ expires or when the server answers 401.
   as the `upload` of the format's descriptor allows (a format without it takes no uploads).
   `folder.ts` reads a folder, at most 500 files, only the ones that the `keep` globs take. It skips dot-folders and `node_modules`, and folders that no `keep` glob can match below, and reads sibling folders 8 at a time.
   `api.repos.uploadPlan` sends the list of files and the first bytes of the files that a `reads`
-  rule matches, and stores nothing; `PlanView` shows the plan (each item with the path of each
+  rule matches, and stores nothing; a new plan aborts the one in flight, and names the `heads` of
+  the last plan, so it sends only the first bytes of files added since (a 409 sends them all
+  again). `PlanView` shows the plan (each item with the path of each
   file and its problems, the files left out), and the form shows the plan's fields (a value the
   plan read from the files is fixed). An edit of a field plans again after 400 ms. The ticked
-  items then upload with `api.repos.upload` and progress, the fields first, each file with its
-  path in the upload as its multipart filename.
+  items then upload with progress: past 90 MB, `upload/send.ts` sends the largest files through
+  resumable uploads in 16 MiB chunks (`api.repos.startUpload`, `appendUpload`) until the rest fit
+  in one request; then `api.repos.upload` sends the fields first, the part `uploads` that names the
+  finished uploads, and each other file with its path in the upload as its multipart filename.
 - **Delete** (`pages/repo/FilesTab.svelte`): a person with Delete files deletes with the UI session,
   in a repository or in the cached files of a proxy.
   `delete/DeleteDialog.svelte` asks the server for the delete plan (`api.repos.deletePlan`)
