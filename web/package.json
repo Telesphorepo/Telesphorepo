@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --port 5173 --strictPort",
-    "build": "svelte-check --tsgo --tsconfig ./tsconfig.json && vite build"
+    "build": "svelte-check --tsconfig ./tsconfig.json && vite build"
   },
   "engines": {
     "node": ">=26"
@@ -17,7 +17,6 @@
     "@sveltejs/vite-plugin-svelte": "^7.3.1",
     "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^26.6.5",
-    "@typescript/native": "npm:typescript@^7.0.2",
     "bits-ui": "^2.20.0",
     "cn": "^0.5.0",
     "mode-watcher": "^1.1.0",

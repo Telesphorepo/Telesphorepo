@@ -3138,10 +3138,8 @@ module (`audit.System`), the `telesphorepo-server user` commands as `cli` (`audi
 ## Web UI
 
 Svelte 5 + Vite (no SvelteKit), Tailwind CSS v4, shadcn-svelte with the Maia style, TypeScript
-and bun. `bun run build` runs `svelte-check --tsgo` and `vite build` into `web/dist`, which the
-binary embeds. svelte-check type-checks with TypeScript 7 (`@typescript/native`, an alias of
-`typescript@7`) and loads TypeScript 6 (`typescript`) for the Svelte language tools; it writes the
-transpiled Svelte files to `web/.svelte-check`. Routing is hash-based (`/#/...`), so the URLs that the server and the clients print keep
+and bun. `bun run build` runs `svelte-check` and `vite build` into `web/dist`, which the binary
+embeds. Routing is hash-based (`/#/...`), so the URLs that the server and the clients print keep
 working. The UI is only a client of the JSON API and has no tests of its own. `web/index.html` holds one inline script that sets the theme before the first paint; a future Content-Security-Policy needs a hash for it. The page registry
 (`web/src/modules`), the folder layout, the components, the design rules and the steps to add a
 page are in `web/src/README.md`.
