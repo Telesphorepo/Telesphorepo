@@ -47,8 +47,8 @@ var (
 			}
 			return nil
 		}})
-	DeviceTTL = settings.Duration(&settings.Def{Key: "publish.device_ttl", Default: "2160h", Label: "Device lifetime",
-		Help: "An enrolled device key of the Telesphorepo CLI can start publish sessions for this time, for example 2160h (90 days). After this time, the developer must enroll the device again."})
+	DeviceTTL = settings.Duration(&settings.Def{Key: "publish.device_ttl", Default: "90d", Label: "Device lifetime",
+		Help: "An enrolled device key of the Telesphorepo CLI can start publish sessions for this time. After this time, the developer must enroll the device again."})
 )
 
 // Module returns the publish module: devices, setup codes, publish sessions (the token kind

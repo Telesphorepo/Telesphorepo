@@ -28,5 +28,5 @@ Telesphorepo."
 ## Agents without skills
 
 For an agent that does not load skills, paste a prompt from
-[Move your projects](https://docs.telesphorepo.com/move-projects/). Choose the ecosystem and the
+[Move your projects with an AI agent](https://docs.telesphorepo.com/move-projects-with-an-agent/). Choose the ecosystem and the
 scope there; each prompt follows the same steps as the skill.

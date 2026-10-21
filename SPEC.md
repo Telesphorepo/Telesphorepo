@@ -672,12 +672,12 @@ The `settings` package holds no feature rules and declares only the keys of the 
 |---|---|---|
 | general (core) | `settings.general` · General | `base_url`, `log.level`, `max_upload_size` (`2GiB`), `max_json_size` (`1MiB`), `cookie.secure`, `session_ttl` (`168h`), `index.debounce` (`2s`), `index.max_delay` (`30s`), `blobs.gc_grace` (`1h`), `upload.session_ttl` (`24h`), `tls.cert_file`, `tls.key_file` (its `Validate`: both or neither, and the pair loads) |
 | docker (docker) | `settings.general` · General | `docker.direct_uploads` (`false`; "Expose the origin IP for Docker uploads", see **Upload host**), `docker.upload_url` (`""`; empty or an http(s) URL of a scheme and a host only: the DNS-only name or address of the server that takes the upload bytes; required when `docker.direct_uploads` is on), `docker.link_grace` (`24h`, minimum `1s`) |
-| activity (audit) | `settings.general` · General | `audit.retention` (`8760h`, which is 365 days) |
+| activity (audit) | `settings.general` · General | `audit.retention` (365 days) |
 | storage (storage) | `storage.manage` · `/settings/storage` | `storage` (`fs`/`s3`), `fs.root` (default `blobs/` in the data dir), `s3.endpoint`, `s3.region`, `s3.bucket`, `s3.access_key_id`, `s3.secret_access_key`*, `s3.prefix`, `s3.path_style`, `s3.redirect`, `presign_ttl` |
 | backup (backup) | `backup.manage` · `/settings/backups` | `backup.dir` (an absolute path; `""` turns backups off; the default is `""` in a plain build and `/backups` in the image, see **Backups**), `backup.interval` (`24h`, minimum `1m`), `backup.keep` (type `int`, `7`, at most 1000). See **Backups** |
 | network (network) | `network.manage` · `/settings/proxy` | `trusted_proxies` (literal entries; the IP lists of the trusted proxies are rows, see **Network rules**) |
 | edge (edge) | `edge.manage` · `/settings/edge` | `edge.enabled` (`false`; needs `storage=s3` and a `base_url` without a path), `edge.home_hint` (`""`; one of `wnam enam weur eeur apac oc`, required when edge delivery is on), `edge.regions` (`[]`; entries `<hint>=<bucket>`, each hint once, not the home hint, not the home bucket), `edge.access_ttl` (`30s`, 0 to 5 min). Its `Validate` checks the rules across keys and at startup turns edge delivery off instead of stopping the server; `Test` probes the home bucket and every regional bucket; `Apply` marks a save, which ends "deploy needed" after a storage change. See **Edge delivery** |
-| publishing (publish) | `settings.general` · General | `publish.session_ttl` (`15m`, maximum `1h`), `publish.device_ttl` (`2160h`, which is 90 days) |
+| publishing (publish) | `settings.general` · General | `publish.session_ttl` (`15m`, maximum `1h`), `publish.device_ttl` (90 days) |
 | sso (sso) | `signin.manage` · `/settings/sign-in` | `oidc.issuer`, `oidc.client_id`, `oidc.client_secret`*, `oidc.redirect_url`, `oidc.scopes` (`openid profile email`), `oidc.session_ttl` (`12h`), `oidc.approval_max_age` (`5m`, 10 s to 1 h: the oldest sign-in that approves a device), `oidc.permission_claim` (`""`; dotted paths allowed), `oidc.permission_map` (type `map`, `{}`), `signin.password_login` (`all` or `publishers`, default `all`) |
 | nexus (nexus) | `nexus.manage` · General | `nexus.sync_interval` (`15m`, minimum `1m`) |
 
@@ -3233,7 +3233,7 @@ module (`audit.System`), the `telesphorepo-server user` commands as `cli` (`audi
 - Client IP addresses appear only in this table and its API. The only other API with an address
   is `GET /api/network/proxy-candidates` (`network.manage`), which lists the addresses of untrusted
   proxies, not of clients. The publish log has none. The access log still records the IP.
-- The setting `audit.retention` (default `8760h`) sets how long an event stays. A job deletes
+- The setting `audit.retention` (default 365 days) sets how long an event stays. A job deletes
   older events every hour.
 
 ## Web UI

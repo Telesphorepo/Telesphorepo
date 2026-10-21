@@ -2,7 +2,8 @@
   Network and proxy (Network permission): the trusted proxies only, in plain words. The server
   takes the visitor's address from X-Forwarded-For only when the connection comes from a trusted
   proxy: none, a proxy on this machine or network ("private" in the setting trusted_proxies),
-  Cloudflare (the IP list cloudflare, through /api/network/trusted-proxies) or custom addresses.
+  Cloudflare (the IP list cloudflare, through /api/network/trusted-proxies) or specific addresses
+  (each private one labeled as on this machine or network).
   Repository network limits live on each repository's Access tab and in Networks, not here.
   Proxies that sent forwarded headers without being trusted show as detected proxies, each with
   Trust. The Caddyfile is the recommended setup.
@@ -79,7 +80,7 @@
     if (setting && t && loaded) untrack(() => (draft = new Draft(split(v, t))));
   });
 
-  // "Other addresses" opens when it holds addresses, or when the user ticks it.
+  // "Specific addresses" opens when it holds addresses, or when the user ticks it.
   let customOpen = $state(false);
   const showCustom = $derived(customOpen || (draft?.value.custom.length ?? 0) > 0 || (draft?.value.lists.length ?? 0) > 0);
   function setCustom(on: boolean) {
@@ -99,13 +100,26 @@
     addCustom([c.address]);
   }
 
+  // isPrivate reports whether an address or range is in the ranges of "private" (loopback,
+  // RFC 1918, ULA, link-local), as internal/netrules has them: a Docker gateway such as 172.19.0.1
+  // is on this machine, not somewhere else.
+  function isPrivate(entry: string): boolean {
+    const a = entry.split("/")[0].toLowerCase();
+    const v4 = a.split(".").map(Number);
+    if (v4.length === 4 && v4.every((n) => Number.isInteger(n) && n >= 0 && n <= 255)) {
+      const [x, y] = v4;
+      return x === 127 || x === 10 || (x === 172 && y >= 16 && y <= 31) || (x === 192 && y === 168) || (x === 169 && y === 254);
+    }
+    return a === "::1" || /^f[cd][0-9a-f]{0,2}:/.test(a) || /^fe[89ab][0-9a-f]?:/.test(a);
+  }
+
   // The custom entries as table rows: addresses, then other network lists.
-  type Entry = { value: string; label: string; list: number };
+  type Entry = { value: string; label: string; list: number; where: string };
   const entries = $derived<Entry[]>(
     draft
       ? [
-          ...draft.value.custom.map((a) => ({ value: a, label: a, list: 0 })),
-          ...draft.value.lists.map((id) => ({ value: "list:" + id, label: `Network list ${listName(id)}`, list: id })),
+          ...draft.value.custom.map((a) => ({ value: a, label: a, list: 0, where: isPrivate(a) ? "This machine or your network" : "" })),
+          ...draft.value.lists.map((id) => ({ value: "list:" + id, label: `Network list ${listName(id)}`, list: id, where: "" })),
         ]
       : [],
   );
@@ -227,7 +241,7 @@
           {#snippet control()}<Checkbox id="{id}-local" checked={v.local} disabled={locked} onCheckedChange={(c) => (v.local = c === true)} />{/snippet}
           <LearnMore label="When not to choose this">
             Choose it only when nobody can reach the server's port without the proxy. With Docker port publishing or rootless Podman, every
-            outside connection looks private: trust the proxy's own address under Other addresses instead.
+            outside connection looks private: trust the proxy's own address under Specific addresses instead.
           </LearnMore>
         </OptionRow>
         <OptionRow
@@ -243,7 +257,11 @@
             />{/snippet}
           {#if envCloudflare}<p class="text-meta text-muted-foreground">Set by TR_TRUSTED_PROXIES.</p>{/if}
         </OptionRow>
-        <OptionRow id="{id}-custom" label="Other addresses" description="Choose this for a proxy at another address, such as a load balancer.">
+        <OptionRow
+          id="{id}-custom"
+          label="Specific addresses"
+          description="Choose this to trust only the addresses you list: the address your proxy's connections come from, such as the Docker gateway of this machine, or a load balancer."
+        >
           {#snippet control()}<Checkbox id="{id}-custom" checked={showCustom} disabled={locked} onCheckedChange={(c) => setCustom(c === true)} />{/snippet}
         </OptionRow>
       </div>
@@ -254,10 +272,15 @@
             source={entrySource}
             caption="Other trusted proxies"
             key={(e) => e.value}
-            columns={locked ? [{ label: "Address", grow: true }] : [{ label: "Address", grow: true }, { label: "", srLabel: "Remove" }]}
+            columns={[
+              { label: "Address", grow: true },
+              { label: "Where", hideOnPhone: true },
+              ...(locked ? [] : [{ label: "", srLabel: "Remove" }]),
+            ]}
           >
             {#snippet row(e)}
               <Cell grow text={e.label} copy={!e.list && e.value} copyLabel="Copy {e.label}" />
+              <Cell hideOnPhone muted text={e.where} />
               {#if !locked}
                 <Cell actions>
                   <Button variant="ghost" size="icon-sm" class={quietDanger} aria-label="Remove {e.label}" onclick={() => removeEntry(e)}><XIcon /></Button>
@@ -265,7 +288,7 @@
               {/if}
             {/snippet}
             {#snippet empty()}
-              <CompactEmpty icon={WaypointsIcon} title="Other addresses" state="None yet" text="Paste the addresses of your proxies below." />
+              <CompactEmpty icon={WaypointsIcon} title="Specific addresses" state="None yet" text="Paste the addresses of your proxies below." />
             {/snippet}
           </DataTable>
           {#if !locked}<RangePaste id="{id}-paste" label="Add proxy addresses" onAdd={addCustom} />{/if}

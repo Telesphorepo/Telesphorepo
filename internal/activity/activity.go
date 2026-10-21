@@ -23,8 +23,8 @@ import (
 const PermRead perm.ID = "activity.read"
 
 // Retention is the setting audit.retention.
-var Retention = settings.Duration(&settings.Def{Key: "audit.retention", Default: "8760h", Label: "Audit log retention",
-	Help: "The audit log keeps an event for this time, for example 8760h (365 days). A job deletes older events every hour."})
+var Retention = settings.Duration(&settings.Def{Key: "audit.retention", Default: "365d", Label: "Audit log retention",
+	Help: "The audit log keeps each event for this time. A job deletes older events every hour."})
 
 // Module returns the audit module.
 func Module() module.Module {
