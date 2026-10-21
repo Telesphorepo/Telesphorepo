@@ -1569,7 +1569,8 @@ answers carry no `Cache-Control`.
 
 **Resumable uploads (`Uploads`).** A publish session starts an upload in a repo, appends chunks at
 increasing offsets (`Append` needs the offset to equal the bytes received, else 416 with the bytes
-received), and finishes it with the SHA-256 (and optionally the size) of the whole file; the web
+received; a refused append, 416 or 404, still reads the body up to `max_upload_size`, so the
+client reads the answer before the connection closes), and finishes it with the SHA-256 (and optionally the size) of the whole file; the web
 UI upload, which cannot hash a large file in parts, finishes with the size alone. The bytes
 are in `$TR_DATA_DIR/tmp/uploads/<id>`; the row saves the count after each append, so an upload
 continues after a restart. Each append hashes its bytes as they arrive and saves the MD5, SHA-1

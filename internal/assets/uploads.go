@@ -197,7 +197,21 @@ func (u *Uploads) Status(ctx context.Context, id string, p *auth.Principal, repo
 // Append adds the bytes of body at offset to upload id. offset must equal the bytes received so
 // far (else a *RangeError); a negative offset appends at the end. The upload may not grow above max_upload_size (ErrTooLarge). It
 // returns the bytes received after the append.
+//
+// A refused append (a wrong offset or an unknown upload) still reads the body, up to
+// max_upload_size, before it returns. A client sends the whole chunk before it reads the
+// answer, and a server that closes the connection on an unread body resets it: the reset can
+// drop the answer that tells the client the offset to resume from.
 func (u *Uploads) Append(ctx context.Context, id string, p *auth.Principal, repo *repos.Repo, offset int64, body io.Reader) (int64, error) {
+	received, err := u.append(ctx, id, p, repo, offset, body)
+	var re *RangeError
+	if errors.As(err, &re) || errors.Is(err, ErrUploadUnknown) {
+		io.Copy(io.Discard, io.LimitReader(body, settings.MaxUploadSize.Get(u.set())+1))
+	}
+	return received, err
+}
+
+func (u *Uploads) append(ctx context.Context, id string, p *auth.Principal, repo *repos.Repo, offset int64, body io.Reader) (int64, error) {
 	unlock := u.lock(id)
 	defer unlock()
 	r, err := u.row(ctx, id, p, repo)
