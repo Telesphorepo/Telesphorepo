@@ -30,9 +30,13 @@ const (
 	ActionFailed = "backup.failed"
 )
 
+// defaultDir is the default of backup.dir: empty (backups off) in a plain build. The image build
+// sets it to /backups (-X), a folder of the image that belongs to the server's user.
+var defaultDir string
+
 // The settings of the group "backup".
 var (
-	Dir = settings.String(&settings.Def{Key: "backup.dir", Label: "Backup folder", Normalize: settings.Trim,
+	Dir = settings.String(&settings.Def{Key: "backup.dir", Default: defaultDir, Label: "Backup folder", Normalize: settings.Trim,
 		Help: "The server writes its backups into this folder, best on another disk. Leave it empty to turn backups off.",
 		Validate: func(v any) error {
 			if s := v.(string); s != "" && !filepath.IsAbs(s) {

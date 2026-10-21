@@ -28,7 +28,7 @@ empty repos, run the binary as `telesphorepo-server dev --empty` on a fresh data
 ## Run it in production
 
 ```sh
-docker run -d -p 8080:8080 -v telesphorepo-data:/data ghcr.io/telesphorepo/telesphorepo:latest
+docker run -d -p 8080:8080 -v telesphorepo-data:/data -v telesphorepo-backups:/backups ghcr.io/telesphorepo/telesphorepo:latest
 ```
 
 The image supports `linux/amd64` and `linux/arm64`. `:latest` is the newest release; `:main` is the newest green build of `main`, and `:sha-<commit>` pins one build. To build the image yourself, run
@@ -63,16 +63,17 @@ server is served over plain HTTP. A forced setting is read-only in the UI.
 
 ## Back up and restore
 
-Mount a backup volume and set its folder under **Settings > Server > Backups**; the server then
-writes a backup every 24 hours and keeps the newest 7 (both are settings there, next to
-**Back up now**). A backup holds the database, the master key and, with local disk storage, the
-stored files. Files in an S3 bucket stay in the bucket, so back up the bucket too; a key in
-`TR_MASTER_KEY` is not written, so keep it with the backups.
+The image backs itself up into `/backups` every 24 hours and keeps the newest 7. Mount a volume
+there, best on another disk:
 
 ```sh
 docker run -d -p 8080:8080 -v telesphorepo-data:/data -v telesphorepo-backups:/backups ghcr.io/telesphorepo/telesphorepo:latest
-# then set the backup folder to /backups in the UI, or start with -e TR_BACKUP_DIR=/backups
 ```
+
+The folder, the schedule and the number to keep are under **Settings > Server > Backups**, next to
+**Back up now**. A backup holds the database, the master key and, with local disk storage, the
+stored files. Files in an S3 bucket stay in the bucket, so back up the bucket too; a key in
+`TR_MASTER_KEY` is not written, so keep it with the backups.
 
 To back up from the command line, also while the server runs: `telesphorepo-server backup /backups`.
 To restore, stop the server and restore a backup folder into an empty data volume:
@@ -82,10 +83,7 @@ docker run --rm -v telesphorepo-backups:/backups -v telesphorepo-restored:/data 
   ghcr.io/telesphorepo/telesphorepo:latest restore /backups/20261020T201500.123Z
 ```
 
-Then start the server on `telesphorepo-restored`. The server's user (uid 65532 in the image)
-must be able to write the backup volume; give a new volume to it once with
-`docker run --rm -v telesphorepo-backups:/b alpine chown 65532:65532 /b`.
-
+Then start the server on `telesphorepo-restored`.
 ## Behind a reverse proxy
 
 Run Telesphorepo behind a reverse proxy that ends TLS. [Caddy](https://caddyserver.com) is the

@@ -114,17 +114,41 @@ func backupNow(t *testing.T, s *Server) string {
 	return ""
 }
 
-// startBackupServer starts a server with opts on its own data volume and a backup volume at
-// /backups, with backup.dir=/backups and backup.keep=2. It returns the server and the backup
-// volume.
+// startBackupServer starts a server with opts on its own data volume and a new backup volume at
+// /backups, as a person does: the image's default backup.dir is /backups, and the engine gives the
+// new volume the owner of the image's /backups, so nothing is set up by hand. It sets
+// backup.keep=2 and returns the server and the backup volume.
 func startBackupServer(t *testing.T, opts ServerOpts) (*Server, string) {
 	t.Helper()
 	bvol := NewDataVolume(t)
-	VolumeExec(t, bvol, "set -e\nchown 65532:65532 /data\n")
 	opts.DataVolume = NewDataVolume(t)
 	opts.Mounts = map[string]string{bvol: "/backups"}
 	s := StartServer(t, opts)
-	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"backup.dir": "/backups", "backup.keep": 2}, s.Admin(), nil)
+	var set struct {
+		Groups []struct {
+			Settings []struct {
+				Key    string `json:"key"`
+				Value  any    `json:"value"`
+				Source string `json:"source"`
+			} `json:"settings"`
+		} `json:"groups"`
+	}
+	s.MustAPI(t, http.MethodGet, "/api/settings", nil, s.Admin(), &set)
+	dir := false
+	for _, g := range set.Groups {
+		for _, it := range g.Settings {
+			if it.Key == "backup.dir" {
+				dir = it.Value == "/backups" && it.Source == "default"
+				if !dir {
+					t.Fatalf("the image's backup.dir: %+v, want /backups from the default", it)
+				}
+			}
+		}
+	}
+	if !dir {
+		t.Fatal("GET /api/settings has no backup.dir")
+	}
+	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"backup.keep": 2}, s.Admin(), nil)
 	return s, bvol
 }
 
