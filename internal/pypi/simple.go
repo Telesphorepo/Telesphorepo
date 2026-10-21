@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
+	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/pypi/dbq"
@@ -100,6 +101,7 @@ type meta struct {
 // model is a project page: the files and the versions of one project.
 type model struct {
 	name     string
+	display  string // a proxy page: the name the upstream JSON page gives; "" when it gives none
 	files    []mfile
 	versions []string
 }
@@ -108,6 +110,7 @@ type model struct {
 type mfile struct {
 	filename       string
 	href           string            // relative to the page, escaped, without a fragment
+	local          string            // a proxy page: the path the proxy stores the file at
 	hashes         map[string]string // e.g. "sha256" -> hex
 	size           int64             // -1: unknown (an HTML page of the remote)
 	requiresPython string
@@ -378,7 +381,7 @@ func (h *Handler) renderPage(ctx context.Context, r *http.Request, c *route.Call
 		})
 		return &d, err
 	case repos.KindProxy:
-		a, err := h.upstreamPage(ctx, r, c, repo, n)
+		a, err := h.upstreamPage(ctx, r, c.P, repo, n)
 		if err != nil || a == nil {
 			return nil, err
 		}
@@ -411,7 +414,7 @@ func (h *Handler) owner(ctx context.Context, r *http.Request, c *route.Call, gro
 			}
 			return err == nil, err
 		case repos.KindProxy:
-			a, err := h.upstreamPage(ctx, r, c, m, n)
+			a, err := h.upstreamPage(ctx, r, c.P, m, n)
 			return a != nil, err
 		}
 		return false, nil
@@ -448,13 +451,14 @@ func (h *Handler) remoteURL(repo *repos.Repo) string {
 }
 
 // upstreamPage returns the cached upstream page of project n of proxy repo, fetched again after
-// the repo's metadata_ttl; nil when the remote has no such project.
-func (h *Handler) upstreamPage(ctx context.Context, r *http.Request, c *route.Call, repo *repos.Repo, n string) (*assets.Asset, error) {
+// the repo's metadata_ttl; nil when the remote has no such project. r and who may be nil (a read
+// outside a request).
+func (h *Handler) upstreamPage(ctx context.Context, r *http.Request, who *auth.Principal, repo *repos.Repo, n string) (*assets.Asset, error) {
 	p, err := repopath.Parse(".simple/" + n)
 	if err != nil {
 		return nil, nil
 	}
-	return h.host.Reader.Resolve(ctx, r, c.P, repo, p)
+	return h.host.Reader.Resolve(ctx, r, who, repo, p)
 }
 
 // file returns the handler of the files under prefix ("packages/", "files/" or "remote/").

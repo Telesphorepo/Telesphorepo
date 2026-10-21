@@ -52,6 +52,7 @@ func Module() module.Module {
 				Builds:        h.Builds,
 				GroupVersions: format.GroupEach,
 				VersionOrder:  func(a, b format.Version) int { return -compareVersions(a.Version, b.Version) },
+				BuildOrder:    func(a, b format.Build) int { return -compareBuilds(a.Build, b.Build) },
 				Usage:         h.Usage,
 				ArtifactUsage: h.ArtifactUsage,
 				Tools:         tools(),

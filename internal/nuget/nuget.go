@@ -89,6 +89,7 @@ func Module() module.Module {
 				Versions:      h.Versions,
 				Builds:        h.Builds,
 				GroupVersions: format.GroupOwner,
+				GroupUnit:     groupUnit,
 				Usage:         h.Usage,
 				ArtifactUsage: h.ArtifactUsage,
 				Tools:         tools(),
@@ -231,4 +232,22 @@ func (h *Handler) routes(r *route.Router, _ format.Kit) {
 	r.Handle("PUT /nuget/{repo}/package/{$}", write, h.push)
 	r.Handle("DELETE /nuget/{repo}/package/{id}/{ver}", write, h.unlist)
 	r.Handle("POST /nuget/{repo}/package/{id}/{ver}", write, h.relist)
+}
+
+// groupUnit is the package id of a path (format.Spec.GroupUnit), lowercase: the files of
+// v3-flatcontainer/<id>/ and a proxy's cached version list and registration of the id, which a
+// group takes from the member that owns the id. The service index and registration pages: "".
+func groupUnit(p string) string {
+	rest, ok := strings.CutPrefix(p, flatDir)
+	if !ok {
+		if rest, ok = strings.CutPrefix(p, upstreamDir+"flat/"); !ok {
+			if rest, ok = strings.CutPrefix(p, upstreamDir+"registration/"); !ok {
+				return ""
+			}
+		}
+	}
+	if id, _, ok := strings.Cut(rest, "/"); ok && id != "" {
+		return strings.ToLower(id)
+	}
+	return ""
 }

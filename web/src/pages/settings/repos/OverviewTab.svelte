@@ -53,9 +53,9 @@
             ? v.join(", ") || "none"
             : JSON.stringify(v);
   const facts = $derived([
-    { label: "Files", value: formatCount(repo.file_count) },
-    { label: "Size", value: formatSize(repo.total_size) },
-    ...(repo.kind === "hosted"
+    { label: "Files", value: repo.counts_pending ? "Counting…" : formatCount(repo.file_count) },
+    { label: "Size", value: repo.counts_pending ? "Counting…" : formatSize(repo.total_size) },
+    ...(repo.kind !== "proxy" && !repo.counts_pending
       ? [{ label: "Last publish", value: repo.last_published_at ? formatRelative(repo.last_published_at) : "Never" }]
       : []),
     ...Object.entries(status?.data ?? {}).map(([k, v]) => ({ label: factLabel(k), value: factValue(v) })),

@@ -40,6 +40,7 @@ type Handler struct {
 	host   *module.Host
 	log    *slog.Logger
 	docs   *format.DocumentCache
+	lists  *listCache // parsed remote packuments of proxies
 }
 
 // Module returns the npm module: the npm format with proxies, groups, uploads, imports, demo data
@@ -47,7 +48,7 @@ type Handler struct {
 func Module() module.Module {
 	// A full packument of a big remote package runs to tens of MB: an entry may take a quarter
 	// of the cache, so it is rewritten once per change of the remote copy.
-	h := &Handler{docs: format.NewDocumentCache(2000, 256<<20, 64<<20)}
+	h := &Handler{docs: format.NewDocumentCache(2000, 256<<20, 64<<20), lists: newListCache()}
 	return module.Module{
 		ID: name, Title: "npm",
 		Register: func(x *module.Extender) {
@@ -73,6 +74,7 @@ func Module() module.Module {
 				Versions:      h.Versions,
 				Builds:        h.Builds,
 				GroupVersions: format.GroupOwner,
+				GroupUnit:     groupUnit,
 				Usage:         h.Usage,
 				ArtifactUsage: h.ArtifactUsage,
 				Tools:         tools(),
@@ -221,4 +223,20 @@ var ui = format.UIDescriptor{
 	SnippetTools:   map[string]string{"npm": "npm, pnpm, bun", "yarn": "Yarn", "telesphorepo": "Telesphorepo CLI"},
 	InstallHeading: "Install it",
 	BuildFiles:     []format.BuildFileLabel{{Extension: "tgz", Label: "Package tarball"}},
+}
+
+// groupUnit is the package of a path (format.Spec.GroupUnit): the name of a tarball
+// <name>/-/<file> and of a cached packument .packument/<form>/<name>, since a group serves both
+// from the member that owns the name.
+func groupUnit(p string) string {
+	if rest, ok := strings.CutPrefix(p, packumentDir); ok {
+		if _, pkg, ok := strings.Cut(rest, "/"); ok && validName(pkg) {
+			return pkg
+		}
+		return ""
+	}
+	if pkg, _, ok := splitFile(p); ok {
+		return pkg
+	}
+	return ""
 }

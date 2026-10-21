@@ -55,7 +55,7 @@
 {#if top}
   <dl class="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-4 gap-y-2 text-body">
     <dt class="text-muted-foreground">Files</dt>
-    <dd class="tabular-nums">{formatCount(r.file_count)}</dd>
+    <dd class="tabular-nums">{r.counts_pending ? "Counting…" : formatCount(r.file_count)}</dd>
     <dt class="text-muted-foreground">Size</dt>
     <dd class="tabular-nums"><FileSize bytes={r.total_size} /></dd>
     <dt class="text-muted-foreground">Last publish</dt>

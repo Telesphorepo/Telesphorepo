@@ -49,6 +49,8 @@ type Handler struct {
 	// docs keeps rendered index files: a hosted crate's by its revision, a proxy's by the SHA-256
 	// of the remote's file.
 	docs *format.DocumentCache
+	// parsed keeps the versions of proxy index files for Versions and Builds.
+	parsed parsedIndexes
 }
 
 // Module returns the Cargo module: the Cargo format with proxies, groups, uploads, imports, demo
@@ -83,6 +85,7 @@ func Module() module.Module {
 				Versions:      h.Versions,
 				Builds:        h.Builds,
 				GroupVersions: format.GroupOwner,
+				GroupUnit:     groupUnit,
 				Usage:         h.Usage,
 				ArtifactUsage: h.ArtifactUsage,
 				Tools:         tools(),
@@ -277,4 +280,18 @@ var ui = format.UIDescriptor{
 	ArtifactName:  map[string]string{"crate": "Crate"},
 	SnippetTools:  map[string]string{"cargo": "Cargo", "telesphorepo": "Telesphorepo CLI"},
 	BuildFiles:    []format.BuildFileLabel{{Extension: "crate", Classifier: "*", Label: "Crate"}},
+}
+
+// groupUnit is the crate of a path (format.Spec.GroupUnit), lowercase: a .crate file and a
+// proxy's cached index file .index/<index path>, which a group takes from the member that owns the
+// crate.
+func groupUnit(p string) string {
+	if rest, ok := strings.CutPrefix(p, ".index/"); ok {
+		name, _ := nameOfIndexPath(rest)
+		return name
+	}
+	if name, _, ok := parseCratePath(p); ok {
+		return strings.ToLower(name)
+	}
+	return ""
 }

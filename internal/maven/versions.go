@@ -168,7 +168,7 @@ func (h *Handler) readBuilds(ctx context.Context, repoID int64, dir, id, v strin
 		}
 		b.files = append(b.files, a)
 		b.classes = append(b.classes, format.BuildFile{Name: name, Path: a.Path, Size: a.Size, SHA256: a.SHA256,
-			Classifier: classifier, Extension: ext})
+			Classifier: classifier, Extension: ext, UpdatedAt: a.UpdatedAt})
 		if a.UpdatedAt.After(b.at) {
 			b.at = a.UpdatedAt
 		}
