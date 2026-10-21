@@ -448,6 +448,8 @@ export type Artifact = { path: string; title: string; name: string; kind: string
 export type Version = {
   version: string;
   kind: "release" | "snapshot";
+  /** The folder that holds every file of the version and no file of another (Maven: the version folder); absent when the version shares its folder (Debian). */
+  folder?: string;
   latest_build?: string;
   /** The format's name of the latest build for people ("Build 3"); empty: show latest_build. */
   latest_label?: string;

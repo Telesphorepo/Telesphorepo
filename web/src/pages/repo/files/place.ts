@@ -44,19 +44,18 @@ export const flowsHere = (p: Place | undefined) =>
   p?.kind === "artifact" || (p?.kind === "version" && p.version.kind === "snapshot" && p.version.builds_count > 1);
 
 /**
- * What a delete of a version removes. When every file of its builds lies in the folder named
- * after the version (Maven), the folder, with its checksum and signature files. Else (Debian
- * keeps every version of a package in one folder) the files of all its builds.
+ * What a delete of a version removes. A version with a folder of its own (`folder`, Maven) is that
+ * folder, with its checksum and signature files, and needs no request. Else (Debian keeps every
+ * version of a package in one folder) the files of all its builds, read 200 builds at a time.
  */
 export async function versionTarget(repo: string, artifact: Artifact, v: Version): Promise<DeleteTarget> {
+  if (v.folder) return { path: v.folder, dir: true };
   const files: string[] = [];
   let after: string | undefined;
   do {
-    const p = await api.repos.builds(repo, artifact.path, v.version, { after, limit: 100 });
+    const p = await api.repos.builds(repo, artifact.path, v.version, { after, limit: 200 });
     for (const b of p.items) files.push(...b.files.map((f) => f.path));
     after = p.next ?? undefined;
   } while (after);
-  const folder = artifact.path + v.version + "/";
-  if (files.length && files.every((f) => f.startsWith(folder))) return { path: folder, dir: true };
   return { path: artifact.path, dir: false, files, version: v.version };
 }

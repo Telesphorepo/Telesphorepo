@@ -66,7 +66,7 @@ func (h *Handler) Versions(ctx context.Context, repo *repos.Repo, p, after strin
 }
 
 // Builds lists the one build of version v of a package folder: its tarball.
-func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, v, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
+func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, v, build, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
 	art, pkg, ok := artifactOf(p)
 	if !ok || repo.Kind != repos.KindHosted {
 		return nil, nil, nil, "", nil
@@ -84,7 +84,7 @@ func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, v, after stri
 	}
 	at := time.Unix(r.PublishedAt, 0).UTC()
 	ver := &format.Version{Version: r.Version, Kind: format.VersionRelease, BuildsCount: 1, PublishedAt: at, CI: b}
-	if after != "" || limit < 1 {
+	if after != "" || limit < 1 || build != "" && build != r.Version {
 		return &art, ver, nil, "", nil
 	}
 	return &art, ver, []format.Build{{Build: r.Version, PublishedAt: at, CI: b, Files: []format.BuildFile{{

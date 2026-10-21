@@ -106,7 +106,7 @@ func (h *Handler) getVersion(ctx context.Context, repo *repos.Repo, lower, vers 
 }
 
 // Builds lists the one build of a version: its .crate.
-func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, vers, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
+func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, vers, build, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
 	art, lower, ok := artifactOf(p)
 	if !ok || repo.Kind != repos.KindHosted {
 		return nil, nil, nil, "", nil
@@ -120,7 +120,7 @@ func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, vers, after s
 	if err != nil {
 		return nil, nil, nil, "", err
 	}
-	if after != "" || limit < 1 {
+	if after != "" || limit < 1 || build != "" && build != r.version {
 		return &art, &s, []format.Build{}, "", nil
 	}
 	b := format.Build{Build: r.version, PublishedAt: r.at, CI: s.CI, Files: []format.BuildFile{{Name: path.Base(r.path), Path: r.path,

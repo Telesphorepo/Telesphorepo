@@ -40,6 +40,7 @@ type buildRecordJSON struct {
 type versionJSON struct {
 	Version     string           `json:"version"`
 	Kind        string           `json:"kind"`
+	Folder      string           `json:"folder"`
 	LatestBuild string           `json:"latest_build"`
 	LatestLabel string           `json:"latest_label"`
 	BuildsCount int              `json:"builds_count"`
@@ -236,6 +237,39 @@ func TestVersionsAndSnippets(t *testing.T) {
 		}
 		st, body := s.API(t, http.MethodGet, "/api/repos/"+repo+"/builds?path=com/acme/lib/", nil, read)
 		wantAPIStatus(t, "builds without a version", st, body, http.StatusBadRequest)
+	})
+
+	t.Run("build by id", func(t *testing.T) {
+		snap := "/api/repos/" + repo + "/builds?path=com/acme/lib/&version=1.2.0-SNAPSHOT"
+		// The oldest build, with after and limit, which the lookup does not use.
+		var one buildsJSON
+		s.MustAPI(t, http.MethodGet, snap+"&build=20261001.101010-1&limit=50&after=20261003.101010-3", nil, read, &one)
+		if one.Artifact == nil || one.Version == nil || one.Version.LatestBuild != "20261003.101010-3" || one.Version.BuildsCount != 3 ||
+			one.Version.Folder != "com/acme/lib/1.2.0-SNAPSHOT/" || one.Next != nil {
+			t.Fatalf("by id: %+v", one)
+		}
+		if len(one.Items) != 1 || one.Items[0].Build != "20261001.101010-1" || one.Items[0].Label != "Build 1" {
+			t.Fatalf("by id items = %+v", one.Items)
+		}
+		var files []string
+		for _, f := range one.Items[0].Files {
+			files = append(files, f.Path)
+		}
+		if !slices.Equal(files, []string{"com/acme/lib/1.2.0-SNAPSHOT/lib-1.2.0-20261001.101010-1.pom", "com/acme/lib/1.2.0-SNAPSHOT/lib-1.2.0-20261001.101010-1.jar"}) {
+			t.Fatalf("files of build 1 = %v", files)
+		}
+
+		var gone buildsJSON
+		s.MustAPI(t, http.MethodGet, snap+"&build=20261009.101010-9", nil, read, &gone)
+		if gone.Artifact == nil || gone.Version == nil || len(gone.Items) != 0 || gone.Next != nil {
+			t.Fatalf("a build that does not exist: %+v", gone)
+		}
+
+		var rel buildsJSON
+		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/builds?path=com/acme/lib/&version=1.1.0&build=1.1.0", nil, read, &rel)
+		if len(rel.Items) != 1 || rel.Items[0].Build != "1.1.0" || rel.Version == nil || rel.Version.Folder != "com/acme/lib/1.1.0/" {
+			t.Fatalf("release by id: %+v", rel)
+		}
 	})
 
 	snippets := func(t *testing.T, path, mode string) artifactSnippetsJSON {

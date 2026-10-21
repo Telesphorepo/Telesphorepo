@@ -132,7 +132,7 @@ func shortDigest(hex string) string { return hex[:min(12, len(hex))] }
 
 // builds lists the one build of tag of an image folder: the files of the manifest that the tag
 // names.
-func (f *Format) builds(ctx context.Context, repo *repos.Repo, folder, tag, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
+func (f *Format) builds(ctx context.Context, repo *repos.Repo, folder, tag, build, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
 	image, art, err := f.imageOf(ctx, repo, folder)
 	if err != nil || art == nil {
 		return nil, nil, nil, "", err
@@ -150,7 +150,7 @@ func (f *Format) builds(ctx context.Context, repo *repos.Repo, folder, tag, afte
 	}
 	at := time.Unix(t.UpdatedAt, 0).UTC()
 	ver := &format.Version{Version: tag, Kind: format.VersionRelease, LatestBuild: shortDigest(t.Digest), BuildsCount: 1, PublishedAt: at, CI: b}
-	if after != "" || limit <= 0 {
+	if after != "" || limit <= 0 || build != "" && build != ver.LatestBuild {
 		return art, ver, []format.Build{}, "", nil
 	}
 	files, err := f.manifestFiles(ctx, repo, image, t.Digest)

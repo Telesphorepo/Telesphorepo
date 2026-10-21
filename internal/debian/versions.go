@@ -152,8 +152,9 @@ func (h *Handler) Versions(ctx context.Context, repo *repos.Repo, p, after strin
 	return &art, out, "", nil
 }
 
-// Builds lists the builds of version name of a package folder of the pool.
-func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, name, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
+// Builds lists the builds of version name of a package folder of the pool. A non-empty build
+// keeps only that build.
+func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, name, build, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
 	art, component, pkg, ok := packageOf(p)
 	if !ok {
 		return nil, nil, nil, "", nil
@@ -173,7 +174,7 @@ func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, name, after s
 	}
 	var out []format.Build
 	for _, b := range versions[i].builds {
-		if after != "" && compareBuilds(b.id, after) >= 0 {
+		if build != "" && b.id != build || after != "" && compareBuilds(b.id, after) >= 0 {
 			continue
 		}
 		if len(out) == limit {

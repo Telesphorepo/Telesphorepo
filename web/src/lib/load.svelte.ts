@@ -78,6 +78,9 @@ export function listOf<T>(r: Resource<T[]>, filter?: (items: T[]) => T[]): Table
  * <DataTable>, which shows "Load more".
  *
  *   const devices = new Keyset((p) => api.devices.list(p));
+ *
+ * `first`, when given, is the first page already asked for (by a parent that shares it); a
+ * reload asks again.
  */
 export class Keyset<T> {
   items = $state<T[]>([]);
@@ -91,10 +94,10 @@ export class Keyset<T> {
   #fn: (p: PageParams) => Promise<Page<T>>;
   #limit: number;
 
-  constructor(fn: (p: PageParams) => Promise<Page<T>>, limit = 50) {
+  constructor(fn: (p: PageParams) => Promise<Page<T>>, limit = 50, first?: Promise<Page<T>>) {
     this.#fn = fn;
     this.#limit = limit;
-    this.reload();
+    this.#load(first ?? fn({ limit }));
   }
 
   get hasMore() {
@@ -102,12 +105,14 @@ export class Keyset<T> {
   }
 
   /** Loads the first page again (after a change, or to retry). */
-  reload = async () => {
+  reload = () => this.#load(this.#fn({ limit: this.#limit }));
+
+  async #load(req: Promise<Page<T>>) {
     const seq = ++this.#seq;
     this.loading = true;
     this.error = "";
     try {
-      const p = await this.#fn({ limit: this.#limit });
+      const p = await req;
       if (seq !== this.#seq) return;
       this.items = p.items;
       this.next = p.next;
@@ -116,7 +121,7 @@ export class Keyset<T> {
     } finally {
       if (seq === this.#seq) this.loading = false;
     }
-  };
+  }
 
   more = async () => {
     if (this.next === null || this.loadingMore) return;
