@@ -508,6 +508,26 @@ func (s *Service) draft(patch map[string]json.RawMessage, groups []*Group) (*Dra
 func (s *Service) Patch(ctx context.Context, patch map[string]json.RawMessage, userID int64) (*Applied, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.patch(ctx, patch, userID, nil)
+}
+
+// Fill saves value for key like Patch, but only while key holds its default: no stored value and
+// no environment variable. The settings.update event adds via to its detail ("first sign-in").
+// It reports whether it saved.
+func (s *Service) Fill(ctx context.Context, key string, value json.RawMessage, userID int64, via string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Current().Source(key) != SourceDefault {
+		return false, nil
+	}
+	if _, err := s.patch(ctx, map[string]json.RawMessage{key: value}, userID, map[string]any{"via": via}); err != nil {
+		return false, err
+	}
+	return s.Current().Source(key) == SourceStored, nil
+}
+
+// patch is Patch with extra facts for the detail of the event. Caller holds s.mu.
+func (s *Service) patch(ctx context.Context, patch map[string]json.RawMessage, userID int64, detail map[string]any) (*Applied, error) {
 	groups := s.touched(patch)
 	d, rows, changedKeys, err := s.draft(patch, groups)
 	if err != nil {
@@ -543,7 +563,7 @@ func (s *Service) Patch(ctx context.Context, patch map[string]json.RawMessage, u
 	if len(changedKeys) == 0 {
 		return applied, nil
 	}
-	return applied, s.write(ctx, rows, changedKeys, userID, true)
+	return applied, s.write(ctx, rows, changedKeys, userID, true, detail)
 }
 
 // Save applies patch like Patch, without the Apply hooks. An owner calls it to finish a change
@@ -562,7 +582,7 @@ func (s *Service) Save(ctx context.Context, patch map[string]json.RawMessage, us
 	if len(changedKeys) == 0 {
 		return nil
 	}
-	return s.write(ctx, rows, changedKeys, userID, false)
+	return s.write(ctx, rows, changedKeys, userID, false, nil)
 }
 
 // Test merges patch over the current values, runs the Validate (ModeChange) of group g and
@@ -581,9 +601,9 @@ func (s *Service) Test(ctx context.Context, g *Group, patch map[string]json.RawM
 }
 
 // write persists the changed keys of rows, reloads the snapshot and notifies subscribers. With
-// record, it writes one settings.update event that names the keys (never the values) in the same
-// transaction. Caller holds s.mu.
-func (s *Service) write(ctx context.Context, rows map[string]any, changedKeys []string, userID int64, record bool) error {
+// record, it writes one settings.update event that names the keys (never the values) and the facts
+// of detail in the same transaction. Caller holds s.mu.
+func (s *Service) write(ctx context.Context, rows map[string]any, changedKeys []string, userID int64, record bool, detail map[string]any) error {
 	var by sql.NullInt64
 	if userID > 0 {
 		by = sql.NullInt64{Int64: userID, Valid: true}
@@ -615,8 +635,9 @@ func (s *Service) write(ctx context.Context, rows map[string]any, changedKeys []
 		if !record || s.audit == nil {
 			return nil
 		}
-		return s.audit.RecordTx(ctx, tx, audit.Event{Action: audit.SettingsUpdate, Target: strings.Join(changedKeys, ","),
-			Detail: map[string]any{"keys": changedKeys}})
+		d := map[string]any{"keys": changedKeys}
+		maps.Copy(d, detail)
+		return s.audit.RecordTx(ctx, tx, audit.Event{Action: audit.SettingsUpdate, Target: strings.Join(changedKeys, ","), Detail: d})
 	})
 	if err != nil {
 		return fmt.Errorf("save settings: %w", err)

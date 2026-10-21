@@ -33,7 +33,7 @@ the checklist below. The sitemap and the Settings navigation come from
 | `lib/format.ts` | `formatSize`, `formatRelative`, `formatDateTime`, `formatCount`. |
 | `lib/words.ts` | `count` ("12 repositories"), `selectedText` ("12 selected"), `someNames` (the first five names "and 7 more"): the words of bulk actions. |
 | `lib/utils.ts` | `cn()`: joins classes; it knows that `text-title` … `text-meta` are font sizes, not colors. |
-| `lib/layouts/` | `AppShell` (top bar + container + Settings sidebar), `TopBar`, `AccountMenu`, `GlobalSearch`, `SettingsNav`, `UnsavedGuard` (the leave question). |
+| `lib/layouts/` | `AppShell` (top bar + container + Settings sidebar), `AddressNotice` (the server's address differs from the one in the browser), `TopBar`, `AccountMenu`, `GlobalSearch`, `SettingsNav`, `UnsavedGuard` (the leave question). |
 | `lib/components/` | The shared components (below). Pages build only from these and `ui/`. |
 | `lib/components/ui/` | shadcn-svelte primitives. Add more with `bunx shadcn-svelte@latest add <name>`. |
 | `lib/formats/` | `registry.svelte.ts` (`formats`: the UI descriptors of `GET /api/formats`, loaded once by `App.svelte`: titles, icons, config fields, upload rules, delete notes, file parts, remote presets, words) and `ConfigEditor` (a format's repo config as one field per entry of `config.fields`). Every format choice of the UI reads the descriptor; a format-specific component exists only as a named `formatParts` slot of the format's UI module. |
@@ -161,7 +161,11 @@ The repository page is the one exception: it checks the caller's permissions on 
   top of a page or a section: a switch shows that it is on, a method shows in its list, a private
   repository has a lock, the one row that needs attention has a badge. A state of the whole
   repository that holds back its uploads (an operation) is one muted line in the header
-  (`PageHeader` `status`), never an alert.
+  (`PageHeader` `status`), never an alert. The one notice of the whole app is `AddressNotice` at the
+  top of the container: a person who may change the general settings opened the app at an address
+  that is not `base_url` (not under the Vite dev server, not at a localhost address, not when an
+  environment variable sets it). "Use <address>" saves it; "Keep" hides it for that address in this
+  browser.
 - **Say it once** (principle 8). A fact shows in one place, as an icon or behavior where it can:
   a private repository has a lock and a credentials step, a public one has neither, and no text
   says that it is public.

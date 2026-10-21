@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/cookiejar"
 	"strings"
 	"testing"
 	"time"
@@ -126,6 +127,122 @@ func TestSettingsLiveUpdateAndEnvLock(t *testing.T) {
 	if st, b := s.API(t, http.MethodPatch, "/api/settings", map[string]any{"max_json_size": "lots"}, s.Admin()); st != http.StatusBadRequest {
 		t.Fatalf("invalid value: status %d, want 400: %s", st, b)
 	}
+}
+
+// signInAt signs user in through the UI sign-in routes (the password, then a TOTP code when the
+// server asks for one) with the Host header host and the headers hdr, and returns the session.
+func signInAt(t *testing.T, s *Server, user, host string, hdr map[string]string) *Session {
+	t.Helper()
+	jar, _ := cookiejar.New(nil)
+	sess := &Session{Jar: jar}
+	send := func(path string, body any) []byte {
+		t.Helper()
+		j, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := s.NewRequest(t, http.MethodPost, path, bytes.NewReader(j))
+		req.Header.Set("Content-Type", "application/json")
+		req.Host = host
+		for k, v := range hdr {
+			req.Header.Set(k, v)
+		}
+		resp, b := s.Do(t, req, sess)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST %s as %s at %s: status %d: %s", path, user, host, resp.StatusCode, b)
+		}
+		return b
+	}
+	var step struct {
+		SecondFactor bool `json:"second_factor"`
+	}
+	if err := json.Unmarshal(send("/api/auth/login", map[string]string{"username": user, "password": s.Password(t, user)}), &step); err != nil {
+		t.Fatal(err)
+	}
+	if step.SecondFactor {
+		send("/api/auth/login/second", map[string]string{"totp_code": s.TOTPCode(t, user)})
+	}
+	return sess
+}
+
+// TestBaseURLFromFirstSignIn: a server without base_url takes the address of the first full UI
+// sign-in of a person who may change the general settings, behind a trusted proxy with its
+// forwarded scheme, and records the change in the activity. A localhost address, a person without
+// the permission and a later sign-in from another address leave it alone.
+func TestBaseURLFromFirstSignIn(t *testing.T) {
+	t.Parallel()
+	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
+		env := map[string]string{"TR_BASE_URL": ""} // an empty override leaves base_url unset
+		for k, v := range opts.Env {
+			env[k] = v
+		}
+		opts.Env = env
+		s := StartServer(t, opts)
+		// The harness admin session signs in at the address of the port mapping; every sign-in of
+		// this test names its own Host instead.
+		s.EnrollTOTP(t, s.AdminUser)
+		baseURL := func(sess *Session) settingItem {
+			t.Helper()
+			var resp struct {
+				Groups []struct {
+					Settings []settingItem `json:"settings"`
+				} `json:"groups"`
+			}
+			s.MustAPI(t, http.MethodGet, "/api/settings", nil, sess, &resp)
+			for _, g := range resp.Groups {
+				for _, it := range g.Settings {
+					if it.Key == "base_url" {
+						return it
+					}
+				}
+			}
+			t.Fatal("GET /api/settings: no base_url")
+			return settingItem{}
+		}
+		unset := func(sess *Session, after string) {
+			t.Helper()
+			if got := baseURL(sess); string(got.Value) != `""` || got.Source != "default" {
+				t.Fatalf("base_url after %s: value %s source %q, want unset", after, got.Value, got.Source)
+			}
+		}
+
+		var admin *Session
+		for _, host := range []string{"localhost:8080", "127.0.0.1:8080", "[::1]:8080"} {
+			admin = signInAt(t, s, s.AdminUser, host, nil)
+			unset(admin, "a sign-in at "+host)
+		}
+
+		s.MustAPI(t, http.MethodPost, "/api/users", map[string]any{"username": "plain", "password": "plain-pass-1234", "permissions": []string{}}, admin, nil)
+		s.user("plain").pass = "plain-pass-1234"
+		signInAt(t, s, "plain", "plain.example.com", nil)
+		unset(admin, "a sign-in of a person without the general settings")
+
+		s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"trusted_proxies": []string{"private"}}, admin, nil)
+		https := map[string]string{"X-Forwarded-Proto": "https"}
+		signInAt(t, s, s.AdminUser, "repo.example.com", https)
+		got := baseURL(admin)
+		if string(got.Value) != `"https://repo.example.com"` || got.Source != "stored" {
+			t.Fatalf("base_url after the first sign-in at repo.example.com: value %s source %q, want https://repo.example.com, stored", got.Value, got.Source)
+		}
+
+		signInAt(t, s, s.AdminUser, "other.example.com", https)
+		if got := baseURL(admin); string(got.Value) != `"https://repo.example.com"` {
+			t.Fatalf("base_url after a later sign-in at other.example.com: %s, want https://repo.example.com", got.Value)
+		}
+
+		var events []auditEntry
+		for _, e := range auditEvents(t, s, "settings.update", "") {
+			if e.Target == "base_url" {
+				events = append(events, e)
+			}
+		}
+		if len(events) != 1 {
+			t.Fatalf("settings.update events of base_url: %+v, want one", events)
+		}
+		if e := events[0]; e.Actor != s.AdminUser || e.ActorUserID == nil || e.Detail["via"] != "first sign-in" {
+			t.Fatalf("settings.update of base_url: %+v, want the actor %s and via \"first sign-in\"", e, s.AdminUser)
+		}
+	})
 }
 
 // TestSettingsSurviveRestart checks that stored settings, a secret among them, come back from the

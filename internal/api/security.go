@@ -5,12 +5,18 @@ import (
 	"errors"
 	"math"
 	"net/http"
+	"net/netip"
+	"net/url"
+	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/route"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
+	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 )
 
 // registerSecurity mounts the two-step sign-in and the second-factor routes:
@@ -96,7 +102,45 @@ func (a *API) loginPassword(w http.ResponseWriter, r *http.Request, c *route.Cal
 		}{true, res.SecondFactor})
 		return
 	}
+	a.adoptBaseURL(r, res.Session)
 	httpx.WriteJSON(w, http.StatusOK, sessionAnswer{res.Session})
+}
+
+// adoptBaseURL saves base_url as the origin of r (httpx.Origin) when nothing set it yet (no stored
+// value, no environment variable) and v is the full session of a person who may change it. A
+// loopback host is not the public address (an SSH tunnel, a browser on the server itself). The
+// settings service validates and audits the change like a PATCH, with the person as the actor.
+func (a *API) adoptBaseURL(r *http.Request, v *auth.SessionView) {
+	def := settings.BaseURL.Def()
+	if v.SecondFactorRequired || !slices.Contains(v.Permissions, string(def.Group().Perm)) {
+		return
+	}
+	snap := a.settings.Current()
+	if settings.BaseURL.Get(snap) != "" || snap.Source(def.Key) != settings.SourceDefault {
+		return
+	}
+	origin := httpx.Origin(r.Context())
+	u, err := url.Parse(origin)
+	if err != nil || u.Hostname() == "" || loopbackHost(u.Hostname()) {
+		return
+	}
+	raw, err := json.Marshal(origin)
+	if err != nil {
+		return
+	}
+	ctx := audit.WithActor(r.Context(), audit.Actor{Kind: audit.ActorUser, UserID: v.ID, Name: v.Username, IP: httpx.ClientIP(r)})
+	if _, err := a.settings.Fill(ctx, def.Key, raw, v.ID, "first sign-in"); err != nil {
+		a.h.Log.Warn("set base_url from the first sign-in", "err", err.Error())
+	}
+}
+
+// loopbackHost reports whether host is localhost or a loopback or unspecified address.
+func loopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".localhost") {
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && (ip.Unmap().IsLoopback() || ip.IsUnspecified())
 }
 
 func (a *API) loginPasskey(w http.ResponseWriter, r *http.Request, c *route.Call) {
@@ -118,6 +162,7 @@ func (a *API) loginSecondFactor(w http.ResponseWriter, r *http.Request, c *route
 		failSecondFactor(w, r, err)
 		return
 	}
+	a.adoptBaseURL(r, v)
 	httpx.WriteJSON(w, http.StatusOK, sessionAnswer{v})
 }
 
