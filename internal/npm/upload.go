@@ -144,7 +144,8 @@ func importTarget(_ context.Context, _ *repos.Repo, it format.ImportItem) (repop
 }
 
 // importStore stores a tarball of a Nexus import with the dist-tags of its package at the source
-// that name its version. Without them, latest is the highest release (refresh).
+// that name its version. Without them, latest is the highest release (refresh). The dist-tags of
+// a package are read once per import run (it.Cache).
 func (h *Handler) importStore(ctx context.Context, repo *repos.Repo, it format.ImportItem, sp *assets.Spooled) (*assets.Result, error) {
 	r, err := sp.Reader()
 	if err != nil {
@@ -160,19 +161,31 @@ func (h *Handler) importStore(ctx context.Context, repo *repos.Repo, it format.I
 	}
 	tags := []string{}
 	if it.Fetch != nil {
-		if rc, _, err := it.Fetch(ctx, "-/package/"+n+"/dist-tags", http.Header{"Accept": {"application/json"}}); err == nil {
-			var m map[string]string
-			if json.NewDecoder(io.LimitReader(rc, 1<<20)).Decode(&m) == nil {
-				for t, tv := range m {
-					if tv == v && validTag(t) {
-						tags = append(tags, t)
-					}
+		got, err := it.Cache.Do(ctx, "npm-dist-tags:"+n, func() (any, error) { return sourceDistTags(ctx, it, n) })
+		if err == nil {
+			for t, tv := range got.(map[string]string) {
+				if tv == v && validTag(t) {
+					tags = append(tags, t)
 				}
 			}
-			rc.Close()
 		} else {
 			h.log.Warn("npm import: no dist-tags at the source", "package", n, "err", err)
 		}
 	}
 	return h.addVersion(ctx, repo, &publishMeta{name: n, version: v, manifest: manifest, tags: tags}, sp, nil, it.Origin())
+}
+
+// sourceDistTags reads the dist-tags of package name at the source of it; none when the answer
+// is not a JSON object of tags.
+func sourceDistTags(ctx context.Context, it format.ImportItem, name string) (map[string]string, error) {
+	rc, _, err := it.Fetch(ctx, "-/package/"+name+"/dist-tags", http.Header{"Accept": {"application/json"}})
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	var m map[string]string
+	if json.NewDecoder(io.LimitReader(rc, 1<<20)).Decode(&m) != nil {
+		return map[string]string{}, nil
+	}
+	return m, nil
 }

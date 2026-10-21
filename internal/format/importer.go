@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
@@ -106,6 +107,56 @@ type ImportItem struct {
 	// with the Importer's Header and the extra header, and returns its body and content type. It
 	// answers the source's authentication challenges (e.g. a registry's token exchange).
 	Fetch func(ctx context.Context, sourcePath string, header http.Header) (io.ReadCloser, string, error)
+	// Cache keeps what the items of one import run of a source repo share, e.g. the dist-tags of an
+	// npm package that every tarball of the package needs. Items run at the same time. nil keeps
+	// nothing.
+	Cache *RunCache
+}
+
+// RunCache keeps the values that the items of one import run share, so the source is asked once
+// per run. It is safe for concurrent use: callers of a key wait for the one call of fn. A failed
+// fn is not kept, so the next caller asks again.
+type RunCache struct {
+	mu sync.Mutex
+	m  map[string]*runEntry
+}
+
+type runEntry struct {
+	done chan struct{}
+	v    any
+	err  error
+}
+
+// NewRunCache returns an empty cache for one import run.
+func NewRunCache() *RunCache { return &RunCache{m: map[string]*runEntry{}} }
+
+// Do returns the value of key: the kept one, else the result of fn. A nil cache calls fn.
+func (c *RunCache) Do(ctx context.Context, key string, fn func() (any, error)) (any, error) {
+	if c == nil {
+		return fn()
+	}
+	c.mu.Lock()
+	e, ok := c.m[key]
+	if !ok {
+		e = &runEntry{done: make(chan struct{})}
+		c.m[key] = e
+		c.mu.Unlock()
+		e.v, e.err = fn()
+		if e.err != nil {
+			c.mu.Lock()
+			delete(c.m, key)
+			c.mu.Unlock()
+		}
+		close(e.done)
+		return e.v, e.err
+	}
+	c.mu.Unlock()
+	select {
+	case <-e.done:
+		return e.v, e.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // Origin is the origin of the item's file: an import with the source's dates.

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/blobs"
@@ -155,15 +156,15 @@ func (run *importRun) manifest(digest, contentType string, body []byte, b assets
 	if err != nil {
 		return err
 	}
-	for _, c := range m.Children() {
+	children := m.Children()
+	if err := run.blobs(children); err != nil {
+		return err
+	}
+	for _, c := range children {
 		if c.kind == "manifest" {
 			if err := run.childManifest(c.hex, depth); err != nil {
 				return err
 			}
-			continue
-		}
-		if err := run.blob(c.hex); err != nil {
-			return err
 		}
 	}
 	run.batch[mp] = true
@@ -201,40 +202,115 @@ func (run *importRun) childManifest(hex string, depth int) error {
 	return run.manifest(hex, ct, body, assets.Body{Spool: sp}, depth+1)
 }
 
-// blob adds the write of a link that the image lacks: from a blob that another image of the repo
-// links, else fetched from the source under max_upload_size.
-func (run *importRun) blob(hex string) error {
-	lp := linkPath(run.image, hex)
-	if ok, err := run.has(lp); err != nil || ok {
+// blobFetches is the number of blobs of one manifest that download from the source at once.
+const blobFetches = 6
+
+// blobs adds, in the order of cs, the writes of the links that the image lacks of the blob
+// children of cs: from a blob that another image of the repo links, else fetched from the source
+// under max_upload_size, blobFetches at a time.
+func (run *importRun) blobs(cs []child) error {
+	type link struct {
+		hex, path string
+		fetch     bool
+		sp        *assets.Spooled
+	}
+	var links []*link
+	for _, c := range cs {
+		if c.kind == "manifest" {
+			continue
+		}
+		lp := linkPath(run.image, c.hex)
+		if ok, err := run.has(lp); err != nil {
+			return err
+		} else if ok {
+			continue
+		}
+		l := &link{hex: c.hex, path: lp}
+		if _, err := run.f.q.RepoLinkOf(run.ctx, dbq.RepoLinkOfParams{RepoID: run.repo.ID, Digest: c.hex}); errors.Is(err, sql.ErrNoRows) {
+			l.fetch = true
+		} else if err != nil {
+			return err
+		}
+		links = append(links, l)
+	}
+
+	// The first failed fetch stops the others.
+	ctx, cancel := context.WithCancel(run.ctx)
+	defer cancel()
+	var mu sync.Mutex
+	var first error
+	var wg sync.WaitGroup
+	slots := make(chan struct{}, blobFetches)
+	for _, l := range links {
+		if !l.fetch {
+			continue
+		}
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-slots }()
+			sp, err := run.fetchBlob(ctx, l.hex)
+			mu.Lock()
+			defer mu.Unlock()
+			l.sp = sp
+			if err != nil && first == nil {
+				first = err
+				cancel()
+			}
+		}()
+	}
+	wg.Wait()
+	for _, l := range links {
+		if l.sp != nil {
+			run.spools = append(run.spools, l.sp)
+		}
+	}
+	if first != nil {
+		return first
+	}
+	if err := run.ctx.Err(); err != nil {
 		return err
 	}
-	body := assets.Body{Blob: hex}
-	if _, err := run.f.q.RepoLinkOf(run.ctx, dbq.RepoLinkOfParams{RepoID: run.repo.ID, Digest: hex}); errors.Is(err, sql.ErrNoRows) {
-		rc, _, err := run.it.Fetch(run.ctx, "v2/"+run.image+"/blobs/sha256:"+hex, nil)
-		if err != nil {
-			return fmt.Errorf("fetch the blob sha256:%s: %w", hex, err)
+	for _, l := range links {
+		body := assets.Body{Blob: l.hex}
+		if l.fetch {
+			body = assets.Body{Spool: l.sp}
 		}
-		limit := run.f.h.Assets.MaxUploadSize()
-		sp, err := run.f.h.Assets.Spool(rc, limit)
-		rc.Close()
-		if errors.Is(err, assets.ErrTooLarge) {
-			return fmt.Errorf("the blob sha256:%s is larger than the upload limit of %d bytes", hex, limit)
-		}
-		if err != nil {
-			return fmt.Errorf("fetch the blob sha256:%s: %w", hex, err)
-		}
-		run.spools = append(run.spools, sp)
-		if sp.SHA256 != hex {
-			return fmt.Errorf("the source sent other bytes for the blob sha256:%s", hex)
-		}
-		body = assets.Body{Spool: sp}
-	} else if err != nil {
-		return err
+		run.batch[l.path] = true
+		run.writes = append(run.writes, assets.Write{Repo: run.repo, Path: repopath.Path(l.path), Body: body,
+			Origin: run.origin, Meta: &writeMeta{kind: kindLink, batch: run.batch}})
 	}
-	run.batch[lp] = true
-	run.writes = append(run.writes, assets.Write{Repo: run.repo, Path: repopath.Path(lp), Body: body,
-		Origin: run.origin, Meta: &writeMeta{kind: kindLink, batch: run.batch}})
 	return nil
+}
+
+// fetchBlob downloads blob hex of the image from the source and spools it under max_upload_size;
+// the spool holds bytes with that digest.
+func (run *importRun) fetchBlob(ctx context.Context, hex string) (*assets.Spooled, error) {
+	rc, _, err := run.it.Fetch(ctx, "v2/"+run.image+"/blobs/sha256:"+hex, nil)
+	if err != nil {
+		return nil, fmt.Errorf("fetch the blob sha256:%s: %w", hex, err)
+	}
+	limit := run.f.h.Assets.MaxUploadSize()
+	sp, err := run.f.h.Assets.Spool(rc, limit)
+	rc.Close()
+	if errors.Is(err, assets.ErrTooLarge) {
+		return nil, fmt.Errorf("the blob sha256:%s is larger than the upload limit of %d bytes", hex, limit)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("fetch the blob sha256:%s: %w", hex, err)
+	}
+	if sp.SHA256 != hex {
+		sp.Close()
+		return nil, fmt.Errorf("the source sent other bytes for the blob sha256:%s", hex)
+	}
+	return sp, nil
 }
 
 // close removes the spools of the fetched blobs.

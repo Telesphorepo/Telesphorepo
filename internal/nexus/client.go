@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/proxy"
@@ -29,12 +30,19 @@ const maxProxyTTL = 30 * 24 * time.Hour
 // listTimeout bounds one repository list or asset page request.
 const listTimeout = 2 * time.Minute
 
+// downloadIdle is the longest a download body may send no bytes before the download fails, so a
+// Nexus that stalls in the middle of a body does not hold up the sync.
+const downloadIdle = time.Minute
+
 // transport is shared by every client: it bounds the wait for response headers, not the body,
-// so large downloads are not cut off.
+// so large downloads are not cut off (downloadIdle bounds a stalled body). It keeps enough idle
+// connections per host for the sync workers and the blob fetches of their Docker manifests.
 var transport = func() *http.Transport {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.ResponseHeaderTimeout = time.Minute
 	t.DialContext = (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	t.MaxIdleConnsPerHost = 64
+	t.MaxIdleConns = 128
 	return t
 }()
 
@@ -414,8 +422,55 @@ func (c *Client) Fetch(ctx context.Context, repo, p string, header http.Header) 
 
 // download GETs rawURL, a file of repo. It sends the newest challenge answer of repo while it
 // lives, else the credentials as HTTP Basic. A 401 with a challenge gets a new answer through
-// proxy.Answer, and the request goes again with it.
+// proxy.Answer, and the request goes again with it. A read of the body fails when Nexus sends no
+// bytes for downloadIdle.
 func (c *Client) download(ctx context.Context, repo, rawURL string, header http.Header) (io.ReadCloser, string, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	rc, ct, err := c.open(ctx, repo, rawURL, header)
+	if err != nil {
+		cancel()
+		return nil, "", err
+	}
+	return newIdleBody(rc, cancel), ct, nil
+}
+
+// idleBody is a download body that cancels its request when no bytes arrive for downloadIdle.
+type idleBody struct {
+	rc      io.ReadCloser
+	timer   *time.Timer
+	cancel  context.CancelFunc
+	stalled atomic.Bool
+}
+
+func newIdleBody(rc io.ReadCloser, cancel context.CancelFunc) *idleBody {
+	b := &idleBody{rc: rc, cancel: cancel}
+	b.timer = time.AfterFunc(downloadIdle, func() {
+		b.stalled.Store(true)
+		cancel()
+	})
+	return b
+}
+
+func (b *idleBody) Read(p []byte) (int, error) {
+	n, err := b.rc.Read(p)
+	if n > 0 {
+		b.timer.Reset(downloadIdle)
+	}
+	if err != nil && err != io.EOF && b.stalled.Load() {
+		err = &SourceError{Msg: fmt.Sprintf("download: Nexus sent no bytes for %s", downloadIdle)}
+	}
+	return n, err
+}
+
+func (b *idleBody) Close() error {
+	b.timer.Stop()
+	err := b.rc.Close()
+	b.cancel()
+	return err
+}
+
+// open is download without the idle bound of the body.
+func (c *Client) open(ctx context.Context, repo, rawURL string, header http.Header) (io.ReadCloser, string, error) {
 	c.mu.Lock()
 	ra, ok := c.auth[repo]
 	c.mu.Unlock()

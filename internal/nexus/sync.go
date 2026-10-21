@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -769,22 +771,49 @@ func (s *Service) runSync(ctx context.Context, st *runState) {
 	}
 }
 
-// countingReader counts the bytes read through it.
+// countingReader counts the bytes read through it. The downloads of one item (a Docker manifest
+// and its blobs) may run at the same time.
 type countingReader struct {
 	io.ReadCloser
-	n *int64
+	n *atomic.Int64
 }
 
 func (c countingReader) Read(p []byte) (int, error) {
 	n, err := c.ReadCloser.Read(p)
-	*c.n += int64(n)
+	c.n.Add(int64(n))
 	return n, err
 }
 
-// syncRepo syncs source repo r page by page from its saved continuation token. It returns the
-// repo's counters, and "" when the repo is done or ctx ended, else the reason the repo failed.
-// It writes a log line when the repo starts, for each page that imported a file, and when the
-// repo is done; a page's line goes in the transaction that saves the page.
+// syncWorkers is the number of assets of one repo that import at once. pagesAhead is the most
+// asset pages that the runner reads ahead of the oldest page that is not saved yet.
+const (
+	syncWorkers = 16
+	pagesAhead  = 8
+)
+
+// itemResult is what the import of one asset did, with the bytes its downloads read.
+type itemResult struct {
+	out  format.ImportOutcome
+	err  error
+	read int64
+}
+
+// pageRun is an asset page whose items import: results[i] gets the result of item i. err is set
+// for the page that Nexus did not give.
+type pageRun struct {
+	page    AssetPage
+	results []chan itemResult
+	err     error
+}
+
+// syncRepo syncs source repo r from its saved continuation token. A reader fetches the asset
+// pages one after the other, up to pagesAhead pages ahead, and hands each asset to syncWorkers
+// workers; this goroutine takes the results in page and item order and saves each page when it
+// and every page before it are done, so the saved token and counters cover a prefix of the walk
+// and a resume redoes only the pages after it. It returns the repo's counters, and "" when the
+// repo is done or ctx ended, else the reason the repo failed. It writes a log line when the repo
+// starts, for each page that imported a file, and when the repo is done; a page's line goes in
+// the transaction that saves the page.
 func (s *Service) syncRepo(ctx context.Context, cl *Client, log *slog.Logger, r dbq.NexusSyncRepo) (dbq.NexusSyncRepo, string) {
 	counts := r
 	target, err := s.repos.ByID(ctx, r.TargetRepoID)
@@ -814,36 +843,102 @@ func (s *Service) syncRepo(ctx context.Context, cl *Client, log *slog.Logger, r 
 	log = log.With("source_repo", r.SourceRepo, "target", target.Name)
 	log.Info("nexus: syncing repo", "continuation_saved", r.Continuation != "")
 
-	token := r.Continuation
+	// The reader and the workers stop when syncRepo returns; it waits for them, so no import of
+	// this repo runs after it.
+	runCtx, stop := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	defer func() {
+		stop()
+		wg.Wait()
+	}()
+	type job struct {
+		a   Asset
+		out chan<- itemResult
+	}
+	jobs := make(chan job)
+	pages := make(chan pageRun, pagesAhead)
+	cache := format.NewRunCache()
+	for range syncWorkers {
+		wg.Go(func() {
+			for j := range jobs {
+				var read atomic.Int64
+				out, err := s.importAsset(runCtx, cl, im, target, r.SourceRepo, cache, j.a, &read)
+				j.out <- itemResult{out: out, err: err, read: read.Load()}
+			}
+		})
+	}
+	wg.Go(func() {
+		defer close(jobs)
+		defer close(pages)
+		token := r.Continuation
+		for {
+			page, err := s.page(runCtx, cl, r.SyncID, r.SourceRepo, token)
+			pr := pageRun{page: page, err: err, results: make([]chan itemResult, len(page.Items))}
+			for i := range pr.results {
+				pr.results[i] = make(chan itemResult, 1)
+			}
+			select {
+			case pages <- pr:
+			case <-runCtx.Done():
+				return
+			}
+			if err != nil {
+				return
+			}
+			for i, a := range page.Items {
+				select {
+				case jobs <- job{a: a, out: pr.results[i]}:
+				case <-runCtx.Done():
+					return
+				}
+			}
+			if page.Next == "" {
+				return
+			}
+			token = page.Next
+		}
+	})
+
 	for {
-		page, err := s.page(ctx, cl, r.SyncID, r.SourceRepo, token)
-		if err != nil {
+		var pr pageRun
+		var ok bool
+		select {
+		case pr, ok = <-pages:
+		case <-ctx.Done():
+			return counts, ""
+		}
+		if !ok {
+			return counts, "" // the reader stops early only when ctx ended
+		}
+		if pr.err != nil {
 			if ctx.Err() != nil {
 				return counts, ""
 			}
-			return counts, err.Error()
+			return counts, pr.err.Error()
 		}
+		page := pr.page
 		var fails []dbq.InsertNexusSyncFailureParams
 		var pageImported, pageBytes int64
-		for _, a := range page.Items {
-			if ctx.Err() != nil {
+		for i, a := range page.Items {
+			var res itemResult
+			select {
+			case res = <-pr.results[i]:
+			case <-ctx.Done():
 				return counts, "" // the page is redone on resume
 			}
-			var read int64
-			out, err := s.importAsset(ctx, cl, im, target, r.SourceRepo, a, &read)
-			if err != nil {
+			if res.err != nil {
 				if ctx.Err() != nil {
 					return counts, ""
 				}
 				counts.Failed++
 				fails = append(fails, dbq.InsertNexusSyncFailureParams{
-					SyncID: r.SyncID, SourceRepo: r.SourceRepo, Path: a.Path, Reason: truncate(err.Error(), 1000)})
+					SyncID: r.SyncID, SourceRepo: r.SourceRepo, Path: a.Path, Reason: truncate(res.err.Error(), 1000)})
 				continue
 			}
-			switch out {
+			switch res.out {
 			case format.ImportImported:
 				pageImported++
-				pageBytes += read
+				pageBytes += res.read
 			case format.ImportSkipped:
 				counts.Skipped++
 			default:
@@ -895,7 +990,6 @@ func (s *Service) syncRepo(ctx context.Context, cl *Client, log *slog.Logger, r 
 				"ignored", counts.Ignored, "failed", counts.Failed)
 			return counts, ""
 		}
-		token = page.Next
 	}
 }
 
@@ -934,10 +1028,11 @@ func (s *Service) page(ctx context.Context, cl *Client, id int64, source, token 
 }
 
 // importAsset offers one Nexus asset to the target format through its importer (format.Importer
-// Run) and adds the bytes the download read to read. An asset whose target path already has its
-// SHA-256 is skipped without a download.
-func (s *Service) importAsset(ctx context.Context, cl *Client, im *format.Importer, target *repos.Repo, source string, a Asset, read *int64) (format.ImportOutcome, error) {
+// Run) and adds the bytes the downloads read to read. An asset whose target path already has its
+// SHA-256 is skipped without a download. cache is the cache of the repo's import run.
+func (s *Service) importAsset(ctx context.Context, cl *Client, im *format.Importer, target *repos.Repo, source string, cache *format.RunCache, a Asset, read *atomic.Int64) (format.ImportOutcome, error) {
 	item := format.ImportItem{
+		Cache:       cache,
 		Path:        a.Path,
 		Size:        a.Size,
 		SHA256:      a.SHA256,
