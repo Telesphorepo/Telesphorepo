@@ -8,30 +8,42 @@ You need:
 
 - a Telesphorepo server with `storage = s3` on Cloudflare R2 and a base URL without a path,
 - the base URL host on a Cloudflare zone, not behind Cloudflare Access,
-- [bun](https://bun.sh) and Node 26 or newer,
-- a Cloudflare API token with Workers Scripts edit, Workers Routes edit, R2 edit and Queues edit.
+- [bun](https://bun.sh) and Node 22 or newer,
+- a Cloudflare login with access to Workers, R2 and Queues of the account of the R2 buckets.
 
 ## Deploy
 
 1. In the web UI, open **Settings > Edge delivery**. Choose the home region and the regions to
    serve from, turn edge delivery on, and save.
-2. Download `wrangler.jsonc` from the same page and save it in this folder. When you deploy from
-   the release archive `telesphorepo-edge_<version>.tar.gz`, set `"main": "dist/index.js"` and
-   add `"no_bundle": true` in it.
-3. Run:
+2. In the Deploy section, download the edge Worker. The zip holds the Worker of your server's
+   version, built and ready (`dist/index.js`), with the `wrangler.jsonc` of your settings.
+3. Unpack it, and in the `telesphorepo-edge` folder run:
 
    ```sh
-   bun install
-   CLOUDFLARE_API_TOKEN=... bun run provision
+   bun install            # wrangler, at the version the Worker is built with
+   bunx wrangler login    # once: sign in to Cloudflare in the browser
+   bun run provision
    bun run deploy
    ```
 
 `provision` creates each regional bucket with its location hint, the copy queue and the event
-notification rule of the home bucket. It skips what exists, so you can run it again. Run it
-again after you change the regions, then deploy. Deploy the Worker of the same version for each
-server release: a Worker of another version sends every request to your server.
+notification rule of the home bucket. It skips what exists, so you can run it again. It asks
+nothing: when your login reaches several Cloudflare accounts, set `CLOUDFLARE_ACCOUNT_ID` to the
+account of the buckets (`CLOUDFLARE_ACCOUNT_ID=<id> bun run provision`, and the same for
+deploy). In CI, set `CLOUDFLARE_API_TOKEN` in place of the login, with Workers Scripts edit,
+Workers Routes edit, R2 edit and Queues edit.
 
-After you remove a region, deploy again, then delete its bucket in Cloudflare.
+After you change the regions, download the Worker again and run provision and deploy. For each
+server release, download the Worker again and deploy it: a Worker of another version sends every
+request to your server. After you remove a region, deploy again, then delete its bucket in
+Cloudflare.
+
+### From a checkout of the repository
+
+Open **Deploy from a checkout of the repository** in the Deploy section, save its
+`wrangler.jsonc` in this folder, and run the same four commands here. That `wrangler.jsonc`
+points at `src/index.ts`, and deploy bundles the Worker of your server's version from it. Check
+out the commit of your server's version first.
 
 ## Develop
 
@@ -40,3 +52,6 @@ bun install
 bunx tsc --noEmit    # type check
 bun run build        # bundle into dist/ (wrangler deploy --dry-run)
 ```
+
+`go tool task build` bundles the Worker into the server (`internal/edgedist`), which hands out the
+download; `go tool task release` also packs it as `telesphorepo-edge_<version>.tar.gz`.

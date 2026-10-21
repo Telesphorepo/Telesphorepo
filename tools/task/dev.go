@@ -17,7 +17,7 @@ const (
 	viteURL   = "http://localhost:5173"
 )
 
-// dev builds the CLI archive of this computer once, then runs the backend ("telesphorepo-server
+// dev builds the CLI archive of this computer and the edge Worker folder once, then runs the backend ("telesphorepo-server
 // dev") and Vite side by side, rebuilding and restarting the backend when Go sources,
 // go.mod/go.sum or a migration change.
 func dev(ctx context.Context) error {
@@ -33,6 +33,13 @@ func dev(ctx context.Context) error {
 
 	if err := cliArchives(ctx, gitVersion(ctx), hostTarget()); err != nil {
 		return err
+	}
+	// The dev backend is built without a version, so it is "dev", and so is its edge Worker.
+	if err := edgeWorker(ctx, "dev", false); err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		note("the edge Worker download is left out: %v", err)
 	}
 	step("building backend")
 	if err := goBuildDev(ctx, next); err != nil {

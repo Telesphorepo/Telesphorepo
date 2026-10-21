@@ -1,12 +1,15 @@
 <!--
   Edge delivery (Manage edge delivery permission): which Cloudflare R2 regions serve downloads, the
-  settings of the edge, and the generated wrangler.jsonc with the commands that deploy the Worker.
+  settings of the edge, and the steps that deploy the Worker: the download of the Worker folder
+  (with the generated wrangler.jsonc in it) and the commands to run there; the wrangler.jsonc for a
+  checkout of the repository behind a disclosure.
   One Draft holds the home region, the regions with their buckets, the on switch and the access
   lifetime; Save checks every bucket first (the Test of the settings group), asks before the server
   stops writing to a bucket, and then saves. While a region fills, the page asks for progress.
 -->
 <script lang="ts">
   import { toast } from "svelte-sonner";
+  import DownloadIcon from "@lucide/svelte/icons/download";
   import type { PageProps } from "$lib/router.svelte";
   import { api, errorMessage, type EdgeHint, type EdgeRegionState, type EdgeRegionStatus, type Setting, type SettingsPatch } from "$lib/api";
   import { Resource } from "$lib/load.svelte";
@@ -34,6 +37,7 @@
   import CodeSnippet from "$lib/components/CodeSnippet.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
+  import LearnMore from "$lib/components/LearnMore.svelte";
   import Loading from "$lib/components/Loading.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
 
@@ -393,31 +397,88 @@
       </FormGrid>
     </FormSection>
 
-    <Section title="Deploy" description="Save the file in the edge folder of the repository (or of the release archive) and run the two commands.">
+    <Section title="Deploy" description="Deploy the edge Worker to your Cloudflare account from a computer with bun.">
       {#snippet actions()}
         {#if needsDeploy || mismatch}<StatusBadge tone="warning">Deploy needed</StatusBadge>{/if}
       {/snippet}
       <div class="flex flex-col gap-6">
         {#if mismatch && st}
-          <p class="text-body">Deploy the Worker of this server version ({st.server_version}). Until then the Worker sends every request to the server.</p>
+          <p class="text-body">
+            Download the Worker of this server version ({st.server_version}) and deploy it. Until then the Worker sends every request to the server.
+          </p>
         {:else if needsDeploy}
-          <p class="text-body">The regions or the storage location changed. Run provision, then deploy.</p>
+          <p class="text-body">The regions or the storage location changed. Download the Worker again, then run provision and deploy.</p>
         {/if}
-        {#if wrangler.error && !wrangler.data}
-          <ErrorState error={wrangler.error} title="The wrangler.jsonc did not load" onRetry={wrangler.reload} inline />
-        {:else if wrangler.data}
-          <CodeBlock title="wrangler.jsonc" code={wrangler.data} />
-          <div>
-            <Button variant="outline" size="sm" href={api.edge.wranglerURL} download="wrangler.jsonc">Download wrangler.jsonc</Button>
-          </div>
-        {:else}
-          <Loading inline />
-        {/if}
-        <CodeSnippet label="Create the buckets, the queue and the notification rule" value="CLOUDFLARE_API_TOKEN=... bun run provision" />
-        <CodeSnippet label="Deploy the Worker" value="bun run deploy" />
+        <ol class="flex flex-col gap-5">
+          <li class="flex gap-3">
+            <span class="w-4 shrink-0 text-section text-muted-foreground tabular-nums">1</span>
+            <div class="flex min-w-0 grow flex-col gap-2">
+              <p class="text-label">Download the edge Worker</p>
+              {#if wrangler.error && !wrangler.data}
+                <ErrorState error={wrangler.error} title="The Worker configuration did not load" onRetry={wrangler.reload} inline />
+              {:else if st?.worker_missing}
+                <p class="text-meta text-muted-foreground">{st.worker_missing}</p>
+              {:else if wrangler.data}
+                <div>
+                  <Button variant="outline" size="sm" href={api.edge.workerURL} download>
+                    <DownloadIcon aria-hidden="true" />Download the edge Worker
+                  </Button>
+                </div>
+                <p class="text-meta text-muted-foreground">A zip of the Worker of this server version, with the wrangler.jsonc of these settings.</p>
+              {:else}
+                <Loading inline />
+              {/if}
+            </div>
+          </li>
+          <li class="flex gap-3">
+            <span class="w-4 shrink-0 text-section text-muted-foreground tabular-nums">2</span>
+            <div class="flex min-w-0 grow flex-col gap-2">
+              <p class="text-label">Unpack it, and open a terminal in the telesphorepo-edge folder</p>
+            </div>
+          </li>
+          <li class="flex gap-3">
+            <span class="w-4 shrink-0 text-section text-muted-foreground tabular-nums">3</span>
+            <div class="flex min-w-0 grow flex-col gap-2">
+              <CodeSnippet label="Install wrangler" value="bun install" />
+            </div>
+          </li>
+          <li class="flex gap-3">
+            <span class="w-4 shrink-0 text-section text-muted-foreground tabular-nums">4</span>
+            <div class="flex min-w-0 grow flex-col gap-2">
+              <CodeSnippet label="Sign in to Cloudflare" value="bunx wrangler login" />
+              <p class="text-meta text-muted-foreground">
+                In CI, set CLOUDFLARE_API_TOKEN instead, with edit access to Workers Scripts, Workers Routes, R2 and Queues.
+              </p>
+            </div>
+          </li>
+          <li class="flex gap-3">
+            <span class="w-4 shrink-0 text-section text-muted-foreground tabular-nums">5</span>
+            <div class="flex min-w-0 grow flex-col gap-2">
+              <CodeSnippet label="Create the regional buckets, the queue and the notification rule" value="bun run provision" />
+              <p class="text-meta text-muted-foreground">If your login reaches several Cloudflare accounts, set CLOUDFLARE_ACCOUNT_ID to the account of the buckets first.</p>
+            </div>
+          </li>
+          <li class="flex gap-3">
+            <span class="w-4 shrink-0 text-section text-muted-foreground tabular-nums">6</span>
+            <div class="flex min-w-0 grow flex-col gap-2">
+              <CodeSnippet label="Deploy the Worker" value="bun run deploy" />
+            </div>
+          </li>
+        </ol>
         <p class="text-meta text-muted-foreground">
-          The API token needs edit access to Workers Scripts, Workers Routes, R2 and Queues. Run provision again after a region change, and deploy for each release of the server.
+          After a region change, download the Worker again and run provision and deploy. For each server release, download the Worker again and run deploy: the download holds the Worker of this server version.
         </p>
+        {#if wrangler.data}
+          <LearnMore label="Deploy from a checkout of the repository">
+            <div class="flex flex-col gap-4">
+              <p>Save this wrangler.jsonc in the edge folder of the checkout, then run the same commands there. Deploy bundles the Worker from its sources.</p>
+              <CodeBlock title="wrangler.jsonc" code={wrangler.data} />
+              <div>
+                <Button variant="outline" size="sm" href={api.edge.wranglerURL} download="wrangler.jsonc">Download wrangler.jsonc</Button>
+              </div>
+            </div>
+          </LearnMore>
+        {/if}
       </div>
     </Section>
   </FormPage>

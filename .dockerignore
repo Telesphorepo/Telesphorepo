@@ -16,6 +16,8 @@ edge/dist
 edge/.wrangler
 internal/clidist/dist/*
 !internal/clidist/dist/.keep
+internal/edgedist/dist/*
+!internal/edgedist/dist/.keep
 e2e/testdata/out
 e2e/**/*.log
 **/*.test
