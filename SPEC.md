@@ -3872,13 +3872,14 @@ page are in `web/src/README.md`.
   in a `CodeBlock` with its download. Speed test (between Backfill and Settings, its own
   component `pages/server/edge/SpeedTest.svelte`): a select of the files of
   `GET /api/edge/speedtest` (repo, file name and size; "Another file" takes a path or a whole
-  address on this origin) and a select of where to read from: Nearest bucket (no headers), each
-  ready region, the home bucket and "Server, no Worker"; **Run** downloads the file once, **Run
-  all** once per choice in turn. A table shows each run: where it read from, who answered (the
-  region of `Telesphorepo-Edge`, else the server, or the Cloudflare cache by `CF-Cache-Status`),
-  whether the Worker took the choice (Taken, Pass refused, Region not read, Not used, Not seen), the
-  time to the first byte (its tooltip the `Server-Timing` of the Worker), the total time and the
-  speed, numbers right-aligned in tabular figures, with the fastest run marked. A line under it
+  address on this origin) and a select of the bucket: the home bucket and each ready region;
+  **Run** downloads the file once from that bucket, **Run all** once from each bucket in turn. A
+  run first sends a HEAD without a choice to learn the bucket the Worker picks for this browser.
+  The table has one row per bucket: the time to the first byte (its tooltip the `Server-Timing` of
+  the Worker), the total time and the speed, numbers right-aligned in tabular figures; the row of
+  the bucket the Worker picks is marked Nearest and the fastest Fastest, and a row says what
+  happened instead when the Worker did not read that bucket (served from another bucket, pass
+  refused, or went to the server). A line under it
   says the times are from this browser's location and names the Cloudflare data center of
   `CF-Ray`. The page takes a pass at the first run and keeps it in memory until 30 seconds before
   it expires. Opened at another address than the base URL, the section says to open the page at
@@ -3996,7 +3997,7 @@ CI runs on GitHub Actions with the built-in `GITHUB_TOKEN` and reads no reposito
 
 | Workflow | Runs | Does |
 |---|---|---|
-| `ci.yml` | Push to `main`, pull requests | `build` job: `go tool task build`, `go vet` for the `e2e`, `import`, `scale`, `clients` and `macos` tags, `go vet` and `go build` of `./cmd/telesphorepo` for `GOOS=darwin` and `GOOS=windows`, `bunx tsc --noEmit` and `bun run build` in `edge/`, `telesphorepo-server dbcheck`. The e2e jobs run on pull requests only: `e2e-core` on four machines at once, each `go tool task test --shard i/4`; `e2e-clients`, `go tool task test clients`; `e2e-github-actions` (pull requests of this repository; `id-token: write`), `TestCLIGitHubActions` with the job's real identity token. Each uploads its log on failure. `snapshot-image` job (push to `main` only, after `build`): multi-arch image with tags `main` and `sha-<short>`, version `main-<short sha>`. A newer push cancels the running pull request jobs |
+| `ci.yml` | Push to `main`, pull requests | `build` job: `go tool task build`, `go vet` for the `e2e`, `import`, `scale`, `clients` and `macos` tags, `go vet` and `go build` of `./cmd/telesphorepo` for `GOOS=darwin` and `GOOS=windows`, `bunx tsc --noEmit` and `bun run build` in `edge/`, `telesphorepo-server dbcheck`. The e2e jobs run on pull requests only, and only when the `changes` job finds a file outside `web/src/` that is not Markdown (the e2e tests drive the API and real clients, never the UI): `e2e-core` on four machines at once, each `go tool task test --shard i/4`; `e2e-clients`, `go tool task test clients`; `e2e-github-actions` (pull requests of this repository; `id-token: write`), `TestCLIGitHubActions` with the job's real identity token. Each uploads its log on failure. `snapshot-image` job (push to `main` only, after `build`): multi-arch image with tags `main` and `sha-<short>`, version `main-<short sha>`. A newer push cancels the running pull request jobs |
 | `e2e-extended.yml` | Manual (zone `import`, `scale` or `all`), weekly for `import` | `go tool task test <zone>` |
 | `release.yml` | Push of a `v*` tag | `binaries` job: `go tool task release`, then a GitHub Release with the archives and `SHA256SUMS`. `image` job: multi-arch image (`linux/amd64`, `linux/arm64`) pushed to `ghcr.io/telesphorepo/telesphorepo` with tags `X.Y.Z`, `X.Y` and `latest` (no `latest` for pre-releases). `macos` job on `macos-latest`: `go tool task build`, then the macOS zone (`go test -tags macos -run TestMacOS ./e2e/` with `E2E_SERVER_BIN`) |
 

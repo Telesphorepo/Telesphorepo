@@ -59,13 +59,34 @@ jobs:
       - name: Check the database
         run: bin/telesphorepo-server dbcheck
 
+  # Whether a pull request needs the e2e zones: not when it changes only the UI sources (web/src)
+  # and Markdown, because the e2e tests drive the server through its API and real clients, never
+  # the UI; the build job still type-checks and bundles the UI.
+  changes:
+    if: github.event_name == 'pull_request'
+    runs-on: blacksmith-4vcpu-ubuntu-2404 # one runner label per job; change it here to switch runner provider
+    timeout-minutes: 5
+    outputs:
+      e2e: ${{ steps.files.outputs.e2e }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: files
+        shell: bash
+        run: |
+          changed=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
+          echo "$changed"
+          if echo "$changed" | grep -qvE '^web/src/|\.md$'; then e2e=true; else e2e=false; fi
+          echo "e2e=$e2e" >> "$GITHUB_OUTPUT"
+
   # The e2e zones run on pull requests: a change reaches main through a pull request whose zones
   # passed, so a push to main only builds and publishes the image.
   # The core zone runs on four machines at once, each with a quarter of its tests
   # (go tool task test --shard).
   e2e-core:
-    needs: build
-    if: github.event_name == 'pull_request'
+    needs: [build, changes]
+    if: github.event_name == 'pull_request' && needs.changes.outputs.e2e == 'true'
     runs-on: blacksmith-8vcpu-ubuntu-2404 # one runner label per job; change it here to switch runner provider
     timeout-minutes: 45
     strategy:
@@ -97,8 +118,8 @@ jobs:
 
   # The clients zone: the CLI with the real build tools in containers.
   e2e-clients:
-    needs: build
-    if: github.event_name == 'pull_request'
+    needs: [build, changes]
+    if: github.event_name == 'pull_request' && needs.changes.outputs.e2e == 'true'
     runs-on: blacksmith-8vcpu-ubuntu-2404 # one runner label per job; change it here to switch runner provider
     timeout-minutes: 120
     steps:
@@ -127,8 +148,8 @@ jobs:
   # The CLI publishes from this job with the identity token of GitHub Actions (TestCLIGitHubActions).
   # A pull request from a fork gets no identity token, so the job runs only for this repository.
   e2e-github-actions:
-    needs: build
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    needs: [build, changes]
+    if: github.event_name == 'pull_request' && needs.changes.outputs.e2e == 'true' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: blacksmith-4vcpu-ubuntu-2404 # one runner label per job; change it here to switch runner provider
     timeout-minutes: 45
     permissions:
