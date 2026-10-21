@@ -1065,7 +1065,9 @@ archives with their SHA-256 and the commands to install one by hand.
   step; a step that a factor accepted is refused again), several passkeys (RP ID is the host of
   `base_url`, the one accepted origin is its scheme and host, a clone warning fails the check) and
   10 one-time recovery codes (80 bits each, argon2id-hashed). Recovery codes work only at
-  sign-in. Passkeys need `base_url`; without it the routes answer 409. TOTP secrets are sealed
+  sign-in. While `base_url` is empty, passkeys take the scheme and host by which the browser reached
+  the server (`httpx.Origin`; the trusted proxies decide the scheme), so the first admin of a new
+  server can add one before setting `base_url`; a passkey stays bound to that host. TOTP secrets are sealed
   with the settings key. Failed checks count against the `u:<username>` rate-limit key. SSO
   users have no second factor.
 - **Sign-in.** A person who needs the second factor (see **Permissions**) and has one sends the

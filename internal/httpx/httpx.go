@@ -80,17 +80,33 @@ func DecodeJSON(w http.ResponseWriter, r *http.Request, max int64, v any) bool {
 
 type clientKey struct{}
 
-// Client is what the server knows of the client of a request: its address, and whether it
-// reached the server over HTTPS (directly, or through a TLS-terminating proxy).
+// Client is what the server knows of the client of a request: its address, whether it
+// reached the server over HTTPS (directly, or through a TLS-terminating proxy), and the host
+// it asked for.
 type Client struct {
 	IP    netip.Addr
 	HTTPS bool
+	Host  string // r.Host, set by WithClient
 }
 
 // WithClient returns r with the resolved client attached (see internal/netrules, which resolves
 // it once per request from the TCP peer and the trusted proxies).
 func WithClient(r *http.Request, c Client) *http.Request {
+	c.Host = r.Host
 	return r.WithContext(context.WithValue(r.Context(), clientKey{}, c))
+}
+
+// Origin returns the scheme and host by which the client of the request of ctx reached the
+// server, e.g. "https://repo.example.com", or "" for a context without a resolved client.
+func Origin(ctx context.Context) string {
+	c, ok := ctx.Value(clientKey{}).(Client)
+	if !ok || c.Host == "" {
+		return ""
+	}
+	if c.HTTPS {
+		return "https://" + c.Host
+	}
+	return "http://" + c.Host
 }
 
 // PeerIP returns the address of the TCP peer of r.

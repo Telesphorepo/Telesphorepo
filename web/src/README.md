@@ -40,7 +40,7 @@ the checklist below. The sitemap and the Settings navigation come from
 | `lib/units.ts` | `splitSize`, `splitDuration`, `splitSeconds`: the number and unit that a form shows for a size or a duration; `joinSeconds` turns a number and a unit back into seconds. |
 | `lib/remotes.ts` | `normalizeRemote`, `remoteError`: the remote address of a proxy. The well-known remotes are `remote_presets` of the descriptor. |
 | `lib/network.ts` | `checkRange` and `rangeSize`: client-side checks of the addresses and CIDRs that network rules and trusted proxies hold. |
-| `lib/webauthn.ts`, `lib/qr.ts` | Passkey create/get in the browser; QR encoder for authenticator setup. |
+| `lib/webauthn.ts`, `lib/qr.ts` | Passkey create/get in the browser; the QR module matrix for authenticator setup (qrcode-generator). |
 
 ## Routes
 

@@ -49,7 +49,7 @@ download against `SHA256SUMS`, unpack it, and run `./telesphorepo-server serve`.
   provider, set a claim and map each value of it to permissions on the same page. A person who
   signs in with single sign-on approves a laptop for the CLI with a new sign-in at the
   provider; a local account approves it with a second factor.
-- **Passkeys:** they need the public URL (`base_url`) in Settings. Authenticator-app codes do not.
+- **Passkeys:** a passkey belongs to one host name. Until the public URL (`base_url`) is set, it takes the address in the browser, so set `base_url` to that same address. They need HTTPS (or `localhost`); authenticator-app codes do not.
 - **Environment variables:** none are required. Three are optional:
 
 | Variable | Default | |

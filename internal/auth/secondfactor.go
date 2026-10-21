@@ -24,6 +24,7 @@ import (
 	"github.com/pquerna/otp/totp"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
+	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 )
 
@@ -563,11 +564,18 @@ func (s *Service) webAuthnUser(ctx context.Context, userID int64) (*webUser, err
 	return u, nil
 }
 
-// webAuthn builds the relying party from the current base_url: the RP ID is its host name and
-// the accepted origin is its scheme and host. For localhost, the dev ports (Vite :5173 and the
-// server :8080) are accepted too; no other machine can serve a page from this machine's localhost.
-func (s *Service) webAuthn() (*webauthn.WebAuthn, error) {
+// webAuthn builds the relying party from the current base_url, or, while it is empty, from the
+// address by which the client of ctx reached the server (httpx.Origin: the trusted proxies
+// decide the scheme). So the first admin of a new server can add a passkey before setting
+// base_url. The RP ID is the host name and the accepted origin is the scheme and host; the
+// browser offers a passkey only to a page of its own origin. For localhost, the dev ports (Vite
+// :5173 and the server :8080) are accepted too; no other machine can serve a page from this
+// machine's localhost.
+func (s *Service) webAuthn(ctx context.Context) (*webauthn.WebAuthn, error) {
 	base := strings.TrimSpace(settings.BaseURL.Get(s.set()))
+	if base == "" {
+		base = httpx.Origin(ctx)
+	}
 	u, err := url.Parse(base)
 	if base == "" || err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
 		return nil, ErrPasskeysUnavailable
@@ -592,7 +600,7 @@ func (s *Service) webAuthn() (*webauthn.WebAuthn, error) {
 // BeginPasskeyRegistration starts registering a passkey. The answer is the options for
 // navigator.credentials.create().
 func (s *Service) BeginPasskeyRegistration(ctx context.Context, userID int64) (*protocol.CredentialCreation, error) {
-	wa, err := s.webAuthn()
+	wa, err := s.webAuthn(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -641,7 +649,7 @@ func (s *Service) FinishPasskeyRegistration(ctx context.Context, userID int64, n
 	if err := json.Unmarshal(row.Data, &sd); err != nil {
 		return nil, err
 	}
-	wa, err := s.webAuthn()
+	wa, err := s.webAuthn(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -673,7 +681,7 @@ func (s *Service) FinishPasskeyRegistration(ctx context.Context, userID int64, n
 // device approval or a manual publish session). The answer is the options for
 // navigator.credentials.get(); ErrNotFound when the user has no passkey.
 func (s *Service) BeginPasskeyAssertion(ctx context.Context, userID int64) (*protocol.CredentialAssertion, error) {
-	wa, err := s.webAuthn()
+	wa, err := s.webAuthn(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -719,7 +727,7 @@ func (s *Service) checkPasskey(ctx context.Context, userID int64, assertion json
 	if err := json.Unmarshal(row.Data, &sd); err != nil {
 		return false, err
 	}
-	wa, err := s.webAuthn()
+	wa, err := s.webAuthn(ctx)
 	if err != nil {
 		return false, err
 	}
