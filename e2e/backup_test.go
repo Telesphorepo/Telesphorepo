@@ -43,12 +43,12 @@ type backupEntry struct {
 
 // backupManifest is the part of backup.json that the tests read.
 type backupManifest struct {
-	Format        int                              `json:"format"`
-	Version       string                           `json:"version"`
-	Storage       string                           `json:"storage"`
-	BlobsIncluded bool                             `json:"blobs_included"`
-	S3            *struct{ Bucket, Prefix string } `json:"s3"`
-	Schema        map[string]string                `json:"schema"`
+	Format        int                                `json:"format"`
+	Version       string                             `json:"version"`
+	Storage       string                             `json:"storage"`
+	BlobsIncluded bool                               `json:"blobs_included"`
+	S3            *struct{ Bucket, Prefix string }   `json:"s3"`
+	Migrations    []struct{ Component, Name string } `json:"migrations"`
 	Counts        struct {
 		Repos int64 `json:"repos"`
 		Files int64 `json:"files"`
@@ -286,8 +286,11 @@ func backupRestoreFS(t *testing.T) {
 	// The folder: the database, the master key (owner only) and backup.json, which names the
 	// database's SHA-256.
 	m := readManifest(t, bvol, name)
+	core := slices.ContainsFunc(m.Migrations, func(x struct{ Component, Name string }) bool {
+		return x.Component == "core" && x.Name == "0001_init.sql"
+	})
 	if m.Format != 1 || m.Version == "" || m.Storage != "fs" || !m.BlobsIncluded || !m.MasterKeyIncluded ||
-		m.MasterKeySource != "file" || m.Schema["core"] == "" || m.Counts.Repos < 3 || m.Counts.Blobs < int64(len(before)) {
+		m.MasterKeySource != "file" || !core || m.Counts.Repos < 3 || m.Counts.Blobs < int64(len(before)) {
 		t.Fatalf("backup.json of %s: %+v", name, m)
 	}
 	ls := VolumeExec(t, bvol, "set -e\ncd /data/"+name+"\nls -1\nsha256sum telesphorepo.db\nstat -c 'mode %a' master.key telesphorepo.db\n")
@@ -413,6 +416,9 @@ func backupRestoreS3(t *testing.T) {
 	name := backupNow(t, s)
 
 	m := readManifest(t, bvol, name)
+	core := slices.ContainsFunc(m.Migrations, func(x struct{ Component, Name string }) bool {
+		return x.Component == "core" && x.Name == "0001_init.sql"
+	})
 	if m.Storage != "s3" || m.BlobsIncluded || m.S3 == nil || m.S3.Bucket != tg.Bucket || m.S3.Prefix != tg.Prefix || !m.MasterKeyIncluded {
 		t.Fatalf("backup.json of an S3 server: %+v", m)
 	}
