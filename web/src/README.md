@@ -499,7 +499,7 @@ expires or when the server answers 401.
 - **Upload** (`pages/repo/UploadView.svelte`, `/repo/:name/upload`): first `FreshFactor`, which
   mints the token with `api.publish.manualSession`. Then one `DropZone` takes files or a folder,
   as the `upload` of the format's descriptor allows (a format without it takes no uploads).
-  `folder.ts` reads a folder, at most 500 files, only the ones that the `keep` globs take.
+  `folder.ts` reads a folder, at most 500 files, only the ones that the `keep` globs take. It skips dot-folders and `node_modules`, and folders that no `keep` glob can match below, and reads sibling folders 8 at a time.
   `api.repos.uploadPlan` sends the list of files and the first bytes of the files that a `reads`
   rule matches, and stores nothing; `PlanView` shows the plan (each item with the path of each
   file and its problems, the files left out), and the form shows the plan's fields (a value the
