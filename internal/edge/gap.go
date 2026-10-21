@@ -16,19 +16,37 @@ type gapState struct {
 	Regions    map[string]bool
 	Markers    map[string]string // hint -> bucket
 	HomeBucket *string           // the bucket that the HOME binding names; nil when not recorded
-	read       time.Time         // when the server read it
+	// PassStarted is the start of the copy pass that runs (zero between passes); Copies holds, per
+	// region, the copies and deletes that its last finished pass queued.
+	PassStarted time.Time
+	Copies      map[string]int64
+	read        time.Time // when the server read it
 }
 
 // parseGap reads gap/state.json: {version, last_run, bindings: [hint], markers: {home, regions:
-// {hint: bucket}}, last_pass: {started, finished} | null, regions: {hint: {last_pass, queued}},
-// ...}, times in unix seconds. The time of the check is last_pass.finished, else last_run.
+// {hint: bucket}}, pass: {started, ...} | null, last_pass: {started, finished} | null, regions:
+// {hint: {last_pass, queued}}}, times in unix seconds. The time of the check is last_pass.finished, else last_run.
 func parseGap(b []byte) *gapState {
-	g := &gapState{Regions: map[string]bool{}}
+	g := &gapState{Regions: map[string]bool{}, Copies: map[string]int64{}}
 	var top map[string]json.RawMessage
 	if json.Unmarshal(b, &top) != nil {
 		return g
 	}
 	_ = json.Unmarshal(top["version"], &g.Version)
+	var pass map[string]json.RawMessage
+	if json.Unmarshal(top["pass"], &pass) == nil && pass != nil {
+		g.PassStarted = unixOf(pass["started"])
+	}
+	var regions map[string]struct {
+		Queued int64 `json:"queued"`
+	}
+	if json.Unmarshal(top["regions"], &regions) == nil {
+		for h, r := range regions {
+			if h = strings.ToLower(h); isHint(h) {
+				g.Copies[h] = r.Queued
+			}
+		}
+	}
 	var last map[string]json.RawMessage
 	if json.Unmarshal(top["last_pass"], &last) == nil && last != nil {
 		g.CheckedAt = unixOf(last["finished"])
@@ -66,4 +84,14 @@ func unixOf(raw json.RawMessage) time.Time {
 		return time.Time{}
 	}
 	return time.Unix(int64(n), 0).UTC()
+}
+
+// copies returns the copies and deletes that the last finished pass of g queued for hint; ok is
+// false before one (or for a nil g).
+func (g *gapState) copies(hint string) (int64, bool) {
+	if g == nil {
+		return 0, false
+	}
+	q, ok := g.Copies[hint]
+	return q, ok
 }

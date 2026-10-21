@@ -5,13 +5,29 @@
   checkout of the repository behind a disclosure.
   One Draft holds the home region, the regions with their buckets, the on switch and the access
   lifetime; Save checks every bucket first (the Test of the settings group), asks before the server
-  stops writing to a bucket, and then saves. While a region fills, the page asks for progress.
+  stops writing to a bucket, and then saves. While a region fills, the page asks for progress and
+  says what the region waits for. Check now makes the deployed Worker run its gap check at once
+  (POST /api/edge/check); the page runs it by itself when it opens and every 30 seconds while the
+  Worker has not reported this server's version.
 -->
 <script lang="ts">
+  import { untrack } from "svelte";
   import { toast } from "svelte-sonner";
   import DownloadIcon from "@lucide/svelte/icons/download";
+  import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
   import type { PageProps } from "$lib/router.svelte";
-  import { api, errorMessage, type EdgeHint, type EdgeRegionState, type EdgeRegionStatus, type Setting, type SettingsPatch } from "$lib/api";
+  import {
+    api,
+    ApiError,
+    errorMessage,
+    type EdgeCheck,
+    type EdgeHint,
+    type EdgeRegionState,
+    type EdgeRegionStatus,
+    type EdgeStatus,
+    type Setting,
+    type SettingsPatch,
+  } from "$lib/api";
   import { Resource } from "$lib/load.svelte";
   import { Draft } from "$lib/unsaved.svelte";
   import { formatCount } from "$lib/format";
@@ -213,6 +229,65 @@
   // Edge delivery turns on only once a deployed Worker has reported its version; turning it off
   // always works.
   const noWorker = $derived(!!status.data && !status.data.worker_version && !draft?.saved.enabled);
+
+  // Check now: the deployed Worker runs its gap check at once and reports its version. The server
+  // runs one check at a time, at most one every 10 seconds, and keeps what the last one found.
+  let checking = $state(false);
+  let checkError = $state("");
+  async function checkNow(manual: boolean) {
+    if (checking) return;
+    checking = true;
+    try {
+      await api.edge.check();
+      checkError = "";
+    } catch (e) {
+      // A check of another tab or person runs or ran just now: its result shows below.
+      if (!(e instanceof ApiError && e.status === 429)) checkError = errorMessage(e);
+      else if (manual) toast.info(errorMessage(e));
+    } finally {
+      checking = false;
+      await status.reload();
+    }
+  }
+
+  // While the Worker has not reported this server's version, check when the page opens and every
+  // 30 seconds, so the version shows within seconds of a deploy.
+  const autoCheck = $derived(!!status.data && status.data.check_unfit === "" && (!status.data.worker_version || status.data.version_mismatch));
+  $effect(() => {
+    if (!autoCheck) return;
+    untrack(() => void checkNow(false));
+    const timer = setInterval(() => untrack(() => void checkNow(false)), 30_000);
+    return () => clearInterval(timer);
+  });
+
+  const checkWord: Record<EdgeCheck["outcome"], string> = {
+    worker: "Worker answered",
+    refused: "Worker refused",
+    server: "Reached the server",
+    other: "Blocked",
+    unreachable: "No answer",
+    error: "Failed",
+  };
+  const checkTone = (c: EdgeCheck): Tone => (c.ok ? "success" : c.outcome === "unreachable" || c.outcome === "error" ? "danger" : "warning");
+
+  // What a filling region waits for, in words. "copying" is the state where the Worker's gap check
+  // copies the missing files; the row then shows the count, when it last changed and the pass.
+  function waitsFor(st: EdgeStatus, r: EdgeRegionStatus): { text: string; copying: boolean } {
+    const say = (text: string) => ({ text, copying: false });
+    if (st.mode !== "on") {
+      return say("The Worker copies files only while edge delivery is on, so the region stays at its files missing until you turn it on.");
+    }
+    if (!r.pointers_done) {
+      return say(r.outbox > 0 ? `Writing pointers: ${formatCount(r.outbox)} waiting.` : "Queueing pointers.");
+    }
+    if (!st.worker_version) return say("Waiting for the Worker's first gap check, which copies the files.");
+    if (st.version_mismatch) return say("Waiting for the Worker of this server version. Deploy it to copy the files.");
+    if (r.blobs_missing === null) return say("Counting the files in the region (every 2 minutes).");
+    if (r.blobs_missing > 0) {
+      return { text: "Copying files: the Worker copies the missing files from the home bucket at each gap check (every 10 minutes, or Check now).", copying: true };
+    }
+    return say("Every file is there. The region turns ready at the next count.");
+  }
 </script>
 
 <PageHeader title="Edge delivery" description="Serve downloads from Cloudflare R2 buckets near your clients." />
@@ -230,6 +305,17 @@
   <FormPage>
     {#if st}
       <Section title="Status">
+        {#snippet actions()}
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={checking || st.check_unfit !== ""}
+            title={st.check_unfit || "Make the deployed Worker run its gap check now"}
+            onclick={() => checkNow(true)}
+          >
+            <RefreshCwIcon aria-hidden="true" class={checking ? "animate-spin" : ""} />{checking ? "Checking" : "Check now"}
+          </Button>
+        {/snippet}
         <dl class="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3">
           <div>
             <dt class="text-meta text-muted-foreground">Edge delivery</dt>
@@ -250,7 +336,13 @@
               {st.worker_version ?? "Not seen yet"}
               {#if mismatch}<StatusBadge tone="warning">Server is {st.server_version}</StatusBadge>{/if}
             </dd>
-            {#if !st.worker_version}<p class="mt-1 text-meta text-muted-foreground">The Worker reports its version at its first gap check, within 10 minutes of a deploy.</p>{/if}
+            {#if !st.worker_version}
+              <p class="mt-1 text-meta text-muted-foreground">
+                The Worker reports at its first gap check (every 10 minutes).{st.check_unfit === ""
+                  ? " This page checks every 30 seconds until then; select Check now to check at once."
+                  : ""}
+              </p>
+            {/if}
           </div>
           <div>
             <dt class="text-meta text-muted-foreground">Last gap check</dt>
@@ -260,6 +352,24 @@
           <div>
             <dt class="text-meta text-muted-foreground">Home bucket</dt>
             <dd class="text-label">{st.home.bucket || "Not set"}</dd>
+          </div>
+          <div class="col-span-2">
+            <dt class="text-meta text-muted-foreground">Last check of the Worker</dt>
+            {#if checkError}
+              <dd class="text-body text-destructive">{checkError}</dd>
+            {:else if st.last_check}
+              {@const c = st.last_check}
+              <dd class="flex flex-col gap-1">
+                <span class="flex flex-wrap items-center gap-2 text-label">
+                  <StatusBadge tone={checkTone(c)}>{checkWord[c.outcome]}</StatusBadge>
+                  <span class="text-meta text-muted-foreground"><RelativeTime at={c.at} /></span>
+                </span>
+                <span class="text-body">{c.message}</span>
+              </dd>
+            {:else}
+              <dd class="text-label">{checking ? "Checking" : "Not yet"}</dd>
+              {#if st.check_unfit}<p class="mt-1 text-meta text-muted-foreground">{st.check_unfit}</p>{/if}
+            {/if}
           </div>
         </dl>
       </Section>
@@ -299,7 +409,7 @@
             { label: "Serve from it", srLabel: "Serve from this region" },
             { label: "Bucket", grow: true },
             { label: "State" },
-            { label: "Waiting", align: "right", hideOnPhone: true },
+            { label: "Pointers waiting", align: "right", hideOnPhone: true },
             { label: "Last error", grow: true, hideOnPhone: true },
           ]}
         >
@@ -342,12 +452,12 @@
               {#if isHome}
                 <StatusBadge tone={st?.home.last_error ? "danger" : "success"}>{st?.home.last_error ? "Error" : "Ready"}</StatusBadge>
               {:else if r}
-                <StatusBadge tone={stateTone[r.state]}>{stateWord[r.state]}</StatusBadge>
+                <StatusBadge tone={stateTone[r.state]}>{st && r.state === "filling" && waitsFor(st, r).copying ? "Copying files" : stateWord[r.state]}</StatusBadge>
               {:else}
                 <span class="text-muted-foreground">{stateWord.not_used}</span>
               {/if}
             </Cell>
-            <Cell num hideOnPhone>{formatCount(isHome ? (st?.home.outbox ?? 0) : (r?.outbox ?? 0))}</Cell>
+            <Cell num hideOnPhone>{formatCount(isHome ? (st?.home.pointers ?? 0) : (r?.outbox ?? 0))}</Cell>
             <Cell grow hideOnPhone>
               {#if rowErrors[a.hint]}
                 <span class="block truncate text-destructive" title={rowErrors[a.hint]}>{rowErrors[a.hint]}</span>
@@ -362,17 +472,42 @@
     </Section>
 
     {#if filling.length > 0}
-      <Section title="Backfill" description="The pointers and files that each new region receives before the Worker reads it.">
+      <Section
+        title="Backfill"
+        description="A region serves once the server has written its pointers and the Worker's gap check has copied its files."
+      >
         <DataTable
           source={fillingSource}
           caption="Regions that fill"
           key={(r) => r.hint}
-          columns={[{ label: "Region", grow: true }, { label: "Pointers written", align: "right" }, { label: "Files missing", align: "right" }]}
+          columns={[
+            { label: "Region", grow: true },
+            { label: "Pointers written", align: "right" },
+            { label: "Files missing", align: "right" },
+            { label: "Waiting for", grow: true },
+          ]}
         >
           {#snippet row(r)}
             <Cell grow strong text={areaText(r.hint)} />
             <Cell num>{formatCount(r.pointers_written)} of {formatCount(r.pointers_total)}</Cell>
-            <Cell num>{r.blobs_missing === null ? "Counting" : formatCount(r.blobs_missing)}</Cell>
+            <Cell num>{r.blobs_missing === null ? "Not counted yet" : formatCount(r.blobs_missing)}</Cell>
+            <Cell grow>
+              {#if st}
+                {@const w = waitsFor(st, r)}
+                <span class="flex flex-col gap-0.5">
+                  <span>{w.text}</span>
+                  {#if w.copying}
+                    <span class="text-meta text-muted-foreground">
+                      {formatCount(r.blobs_missing ?? 0)} missing{#if r.blobs_missing_since}, last changed <RelativeTime
+                          at={r.blobs_missing_since}
+                        />{/if}.
+                      {#if st.gap_pass_started}Copy pass started <RelativeTime at={st.gap_pass_started} />.{:else if r.copies_queued !== null}Its last
+                        copy pass queued {formatCount(r.copies_queued)} copies.{/if}
+                    </span>
+                  {/if}
+                </span>
+              {/if}
+            </Cell>
           {/snippet}
           {#snippet empty()}<CompactEmpty title="Backfill" state="Done" text="Every region has its pointers." />{/snippet}
         </DataTable>
@@ -386,7 +521,7 @@
           label="Edge delivery"
           help={lockHelp("edge.enabled") ??
             (noWorker
-              ? "Deploy the Worker first (Deploy, below). You can turn this on once the Worker has reported its version, within 10 minutes of the deploy."
+              ? "Deploy the Worker first (Deploy, below). You can turn this on once the Worker has reported its version: this page checks every 30 seconds."
               : "The Worker answers downloads that it can prove the server would answer the same way.")}
           disabled={locked("edge.enabled") || noWorker}
           bind:checked={draft.value.enabled}
@@ -477,7 +612,8 @@
             <div class="flex min-w-0 grow flex-col gap-2">
               <p class="text-label">Turn on Edge delivery under Settings above, and save</p>
               <p class="text-meta text-muted-foreground">
-                Only after the deploy: the switch turns on once the Worker has reported its version, within 10 minutes of the deploy.
+                Only after the deploy: the switch turns on once the Worker has reported its version. This page checks every 30 seconds; select
+                Check now under Status to check at once.
               </p>
             </div>
           </li>

@@ -66,13 +66,15 @@ type regionState struct {
 	Total   int64 `json:"total"`
 	// The blob check: the keys of the home blobs/ up to Verified are in the region. Pass is the
 	// last key of the running pass ("" between passes) and PassMissing what it found missing so
-	// far; Missing is the count of the last whole pass (nil before one).
-	Verified    string `json:"verified"`
-	Pass        string `json:"pass"`
-	PassMissing int64  `json:"pass_missing"`
-	Missing     *int64 `json:"missing"`
-	CheckedAt   int64  `json:"checked_at"`
-	GapAt       int64  `json:"gap_at"` // the last gap/request.json for this region
+	// far; Missing is the count of the last whole pass (nil before one), and MissingSince (unix
+	// seconds) the end of the pass that last changed it.
+	Verified     string `json:"verified"`
+	Pass         string `json:"pass"`
+	PassMissing  int64  `json:"pass_missing"`
+	Missing      *int64 `json:"missing"`
+	MissingSince int64  `json:"missing_since"`
+	CheckedAt    int64  `json:"checked_at"`
+	GapAt        int64  `json:"gap_at"` // the last gap/request.json for this region
 }
 
 // goneRegion is a removed region while its drain runs. Until is unix milliseconds, 0 while the
@@ -266,9 +268,16 @@ func (m *mod) step(ctx context.Context) (bool, error) {
 	}
 	v := m.cur.Load()
 	if v.mode != modeOn {
+		// The page turns edge delivery on only after the Worker has reported its version, so the
+		// Worker's state is read while off too, once the home location is chosen.
+		if HomeHint.Get(m.h.Settings.Current()) != "" {
+			if hb, err := m.gapHome(ctx); err == nil {
+				m.readGap(ctx, hb, false)
+			}
+		}
 		return false, nil
 	}
-	m.readGap(ctx, v)
+	m.readGap(ctx, v.home, false)
 	m.writeMarkers(ctx, v)
 	more, err := m.backfillHome(ctx, v)
 	if err != nil {
@@ -1108,6 +1117,9 @@ func (m *mod) checkBlobs(ctx context.Context, v *view, b *bucket, r *regionState
 		return true, m.saveRegion(ctx, r)
 	}
 	missing := r.PassMissing
+	if r.Missing == nil || *r.Missing != missing {
+		r.MissingSince = now
+	}
 	r.Missing, r.CheckedAt, r.Pass, r.PassMissing = &missing, now, "", 0
 	if missing == 0 {
 		r.Ready = true
@@ -1125,12 +1137,13 @@ func (m *mod) checkBlobs(ctx context.Context, v *view, b *bucket, r *regionState
 
 // --- the Worker's gap state ---
 
-// readGap reads gap/state.json at most once a minute.
-func (m *mod) readGap(ctx context.Context, v *view) {
-	if g, _ := m.gap.Load().(*gapState); g != nil && time.Since(g.read) < time.Minute {
+// readGap reads gap/state.json from the home bucket hb at most once a minute; force reads it now
+// (after a check of the Worker).
+func (m *mod) readGap(ctx context.Context, hb *bucket, force bool) {
+	if g, _ := m.gap.Load().(*gapState); !force && g != nil && time.Since(g.read) < time.Minute {
 		return
 	}
-	rc, _, err := v.home.st.Get(ctx, root+gapStateKey)
+	rc, _, err := hb.st.Get(ctx, root+gapStateKey)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			m.gap.Store(&gapState{Regions: map[string]bool{}, read: time.Now()})

@@ -23,6 +23,7 @@ import {
   repoObject,
   rights,
 } from "./access";
+import { CHECK_PATH, check } from "./check";
 import { copy } from "./copy";
 import { gap } from "./gap";
 import { immutable } from "./glob";
@@ -32,6 +33,9 @@ import { VERSION } from "./version";
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    // The check of the server: answered here, before passThroughOnException, so a failure never
+    // reaches the server's own answer on the path.
+    if (request.method === "GET" && new URL(request.url).pathname === CHECK_PATH) return check(request, env);
     if (request.method !== "GET" && request.method !== "HEAD") return forward(request);
     ctx.passThroughOnException();
     let answer: Response | null = null;

@@ -33,7 +33,8 @@ func versionLiteral(version string) string {
 func copyQueue(homeBucket string) string { return homeBucket + "-edge-copy" }
 
 // wrangler returns the wrangler.jsonc of the Worker for the settings of s: the routes (the base
-// URL host with the prefix of each format that the edge serves), the bucket bindings (HOME and
+// URL host with the prefix of each format that the edge serves, and the reserved path of the
+// check), the bucket bindings (HOME and
 // R2_<HINT> of each chosen region), the copy queue (binding COPY), the cron of the gap check and
 // the var PREFIX (s3.prefix). With bundled it is the config of the Worker folder of the download:
 // "main" is the bundle dist/index.js with "no_bundle", which the build defined to the server
@@ -78,6 +79,8 @@ func (m *mod) wrangler(s *settings.Snapshot, bundled bool) ([]byte, error) {
 			routes = append(routes, p)
 		}
 	}
+	// The reserved path of the check of the Worker (POST /api/edge/check).
+	routes = append(routes, host+checkPrefix+"*")
 	buckets := []r2{{Binding: "HOME", BucketName: home}}
 	for _, rc := range regionsOf(s) {
 		buckets = append(buckets, r2{Binding: binding(rc.Hint), BucketName: rc.Bucket})

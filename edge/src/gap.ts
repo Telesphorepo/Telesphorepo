@@ -4,6 +4,7 @@
 // order, merges the lists and queues a copy for each blob a region lacks (or holds with another
 // size) and a delete for each regional blob that the home bucket lacks. It saves its cursor in
 // gap/state.json and stops before 5,000 subrequests, and the next run goes on from the cursor.
+// The check of the server (check.ts) runs the same check at once, with a smaller budget.
 
 import { type Config, type CopyMessage, type Env, HINTS, bucket, edgeKey, keyPrefix, readConfig, readMarker } from "./access";
 import { VERSION } from "./version";
@@ -69,22 +70,49 @@ async function readState(env: Env): Promise<GapState> {
   return state;
 }
 
-// Budget counts the subrequests of a run.
+// Budget counts the subrequests of a run, up to max, and ends it at deadline (ms since the epoch).
 class Budget {
   used = 0;
-  // take counts n subrequests; false when they do not fit. last may use the reserve.
+
+  constructor(
+    private readonly max: number,
+    private readonly deadline: number,
+  ) {}
+
+  // take counts n subrequests; false when they do not fit or the time is up. last may use the
+  // reserve, and runs after the deadline.
   take(n = 1, last = false): boolean {
-    if (this.used + n > MAX_SUBREQUESTS - (last ? 0 : RESERVE)) return false;
+    if (this.used + n > this.max - (last ? 0 : RESERVE)) return false;
+    if (!last && Date.now() > this.deadline) return false;
     this.used += n;
     return true;
   }
 }
 
-// gap is the cron run. Every run reads the bucket.json of each binding and writes gap/state.json
-// when the version, the bindings or the buckets they name differ from the stored ones, so the
-// status page sees a deploy at the next run; a run that does a pass writes it with its cursor.
+// GapRun is what one run of the gap check did: "done" (a copy pass ended), "partial" (the pass
+// goes on at the next run), "none" (no pass was due) or "off" (no pass runs: config.json is off
+// or of another version, or the Worker has no copy queue).
+export type GapPass = "done" | "partial" | "none" | "off";
+
+// GapOptions bound a run: force runs a pass even when none is due; max is its subrequests and
+// deadline (ms since the epoch) when it stops listing.
+export interface GapOptions {
+  force: boolean;
+  max: number;
+  deadline: number;
+}
+
+// gap is the cron run.
 export async function gap(_controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
-  const budget = new Budget();
+  await runGap(env, { force: false, max: MAX_SUBREQUESTS, deadline: Infinity });
+}
+
+// runGap is one run of the gap check: the cron's, or the check of the server (check.ts). Every run
+// reads the bucket.json of each binding and writes gap/state.json when the version, the bindings
+// or the buckets they name differ from the stored ones, so the status page sees a deploy at the
+// next run; a run that does a pass writes it with its cursor.
+export async function runGap(env: Env, opts: GapOptions): Promise<GapPass> {
+  const budget = new Budget(opts.max, opts.deadline);
   budget.take(); // gap/state.json
   const state = await readState(env);
   const bindings = HINTS.filter((h) => bucket(env, "R2_" + h.toUpperCase()) !== null);
@@ -105,7 +133,7 @@ export async function gap(_controller: ScheduledController, env: Env, _ctx: Exec
       httpMetadata: { contentType: "application/json" },
     });
   };
-  let due = state.pass !== null || state.last_pass === null || now() - state.last_pass.finished > DAY;
+  let due = opts.force || state.pass !== null || state.last_pass === null || now() - state.last_pass.finished > DAY;
   if (!due && state.last_pass) {
     budget.take();
     const req = await env.HOME.head(edgeKey(env, "gap/request.json"));
@@ -118,14 +146,16 @@ export async function gap(_controller: ScheduledController, env: Env, _ctx: Exec
   }
   if (!config || !config.enabled || config.version !== VERSION || !env.COPY) {
     if (stale) await save();
-    return;
+    return due ? "off" : "none";
   }
-  await pass(env, config, state, env.COPY, budget);
+  const done = await pass(env, config, state, env.COPY, budget);
   state.last_run = now();
   await save();
+  return done ? "done" : "partial";
 }
 
-async function pass(env: Env, config: Config, state: GapState, q: Queue<CopyMessage>, budget: Budget): Promise<void> {
+// pass runs a gap pass from the cursor of state; true when every region is done.
+async function pass(env: Env, config: Config, state: GapState, q: Queue<CopyMessage>, budget: Budget): Promise<boolean> {
   const p = state.pass ?? { started: now(), cursor: {}, done: [], queued: {} };
   state.pass = p;
   const queue = new Sender(q, budget);
@@ -151,6 +181,7 @@ async function pass(env: Env, config: Config, state: GapState, q: Queue<CopyMess
     state.last_pass = { started: p.started, finished: now() };
     state.pass = null;
   }
+  return all;
 }
 
 // Sender batches queue messages, 100 per send.

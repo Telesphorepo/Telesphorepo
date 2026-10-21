@@ -331,6 +331,8 @@ export const api = {
   /** Edge delivery: the state of the Worker and the regional buckets, and its generated config. */
   edge: {
     status: () => request<T.EdgeStatus>("GET", "/api/edge/status"),
+    /** Makes the deployed Worker run its gap check now; 429 while a check runs or within 10 s of the last one. */
+    check: () => request<T.EdgeCheck>("POST", "/api/edge/check"),
     /** The wrangler.jsonc that the server builds from its settings, for a checkout of edge/. */
     wranglerConfig: () => requestText("/api/edge/wrangler.jsonc"),
     /** The address of the file, for a download link. */
