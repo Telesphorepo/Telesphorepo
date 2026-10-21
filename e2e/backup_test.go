@@ -416,9 +416,6 @@ func backupRestoreS3(t *testing.T) {
 	name := backupNow(t, s)
 
 	m := readManifest(t, bvol, name)
-	core := slices.ContainsFunc(m.Migrations, func(x struct{ Component, Name string }) bool {
-		return x.Component == "core" && x.Name == "0001_init.sql"
-	})
 	if m.Storage != "s3" || m.BlobsIncluded || m.S3 == nil || m.S3.Bucket != tg.Bucket || m.S3.Prefix != tg.Prefix || !m.MasterKeyIncluded {
 		t.Fatalf("backup.json of an S3 server: %+v", m)
 	}
