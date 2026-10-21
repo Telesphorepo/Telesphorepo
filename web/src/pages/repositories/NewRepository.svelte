@@ -314,7 +314,7 @@
                 bind:value={remoteURL}
               />
               {#if presets.length}
-                <div class="flex flex-wrap gap-2" role="group" aria-label="Well-known remotes">
+                <div class="mt-3 flex flex-wrap gap-2" role="group" aria-label="Well-known remotes">
                   {#each presets as p (p.url)}
                     <Button type="button" variant="outline" size="sm" onclick={() => (remoteURL = p.url)}>{p.label}</Button>
                   {/each}

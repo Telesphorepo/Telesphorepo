@@ -108,7 +108,7 @@
         bind:value={draft.value.url}
       />
       {#if presets.length}
-        <div class="flex flex-wrap gap-2" role="group" aria-label="Well-known remotes">
+        <div class="mt-3 flex flex-wrap gap-2" role="group" aria-label="Well-known remotes">
           {#each presets as p (p.url)}
             <Button type="button" variant="outline" size="sm" onclick={() => (draft.value.url = p.url)}>{p.label}</Button>
           {/each}
