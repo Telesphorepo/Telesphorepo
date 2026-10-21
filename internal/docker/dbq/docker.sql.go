@@ -192,7 +192,7 @@ type GetImageParams struct {
 	Image  string
 }
 
-// The rows of the OCI objects of docker repos (schema.sql). Only the hooks write them.
+// The rows of the OCI objects of docker repos (migrations/). Only the hooks write them.
 func (q *Queries) GetImage(ctx context.Context, arg GetImageParams) (DockerImage, error) {
 	row := q.db.QueryRowContext(ctx, getImage, arg.RepoID, arg.Image)
 	var i DockerImage

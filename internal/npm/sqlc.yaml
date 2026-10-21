@@ -1,9 +1,9 @@
 # npm module data layer: the kernel schema plus the npm_* tables. Run "go tool task gen" after
-# editing queries/ or schema.sql.
+# editing queries/ or migrations/.
 version: "2"
 sql:
   - engine: sqlite
-    schema: ["../db/schema.sql", "schema.sql"]
+    schema: ["../db/migrations", "migrations"]
     queries: queries
     gen:
       go:

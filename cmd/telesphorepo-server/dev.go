@@ -49,12 +49,13 @@ func devCmd(args []string) error {
 	ctx, stop := signalContext()
 	defer stop()
 	err = runDev(ctx, boot, st)
-	// The dev data dir is throwaway: start over when a schema file changed since it was created
+	// The dev data dir is throwaway: start over when its database does not fit the migrations of
+	// this build (an applied migration changed, it is from a newer build, or it has no migrations)
 	// or when the demo data of the first run was not finished.
 	var why string
 	switch {
-	case db.IsSchemaChanged(err):
-		why = fmt.Sprintf("the schema changed since %s was created (%v)", boot.DataDir, err)
+	case db.IsIncompatible(err):
+		why = fmt.Sprintf("the database of %s does not fit the migrations of this build (%v)", boot.DataDir, err)
 	case errors.Is(err, errDemoIncomplete):
 		why = errDemoIncomplete.Error()
 	}

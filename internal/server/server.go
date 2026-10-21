@@ -138,8 +138,8 @@ func Build() (*Built, error) {
 	return built, buildErr
 }
 
-// InitSchema creates the schema of the kernel and of every module with a schema, in start order
-// (db.DB.Init). A component whose schema text changed is a *db.ErrSchemaChanged.
+// InitSchema applies the migrations of the kernel and of every module with a schema, in start
+// order (db.DB.Init). A database that does not fit them is a db.IsIncompatible error.
 func InitSchema(ctx context.Context, d *db.DB) error {
 	comps, err := Components()
 	if err != nil {
@@ -169,7 +169,7 @@ func Components() ([]db.Component, error) {
 //
 //  1. Logger, data dirs, db.Open.
 //  2. Build: every module's Register, the settings groups, the format registry.
-//  3. The schema of the kernel and of each module, in start order (InitSchema).
+//  3. The migrations of the kernel and of each module, in start order (InitSchema).
 //  4. settings.Load (master key, stored settings, env overrides).
 //  5. The kernel services: live storage (swapped when the storage settings change), repos,
 //     audit, auth, assets, proxy, access, the job runner.

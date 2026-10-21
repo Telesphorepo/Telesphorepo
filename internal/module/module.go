@@ -128,7 +128,7 @@ type SeedFunc func(ctx context.Context, tx *sql.Tx, repo *repos.Repo, start, n i
 // Extender is the manifest of one module while Register runs.
 type Extender struct{ m *Manifest }
 
-// Schema declares the module's tables and queries. The component is named after the module.
+// Schema declares the module's migrations and queries. The component is named after the module.
 // At most one call.
 func (x *Extender) Schema(c db.Component) {
 	if x.m.Schema != nil {
