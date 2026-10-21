@@ -411,5 +411,7 @@ func (m *mod) routes(r *route.Router) {
 	r.Handle("GET /api/edge/wrangler.jsonc", route.UIPerm(PermManage), m.wranglerConfig)
 	r.Handle("GET /api/edge/worker.zip", route.UIPerm(PermManage), m.workerZip)
 	r.Handle("POST /api/edge/check", route.UIPerm(PermManage), m.check)
+	r.Handle("GET /api/edge/speedtest", route.UIPerm(PermManage), m.speedFiles)
+	r.Handle("POST /api/edge/speedtest", route.UIPerm(PermManage), m.speedPass)
 	r.Handle("GET "+checkPath, route.Public, m.checkAnswer)
 }

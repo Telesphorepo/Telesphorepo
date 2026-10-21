@@ -744,6 +744,12 @@ export type EdgeCheck = {
   message: string;
   worker_version?: string;
 };
+/** A file that the speed test suggests: an immutable file of a public repository; url is its download path. */
+export type EdgeSpeedFile = { repo: string; format: string; path: string; size: number; url: string };
+/** GET /api/edge/speedtest: base_url is the scheme and host of the base URL ("" when unset); unfit says why no pass can be issued. */
+export type EdgeSpeedFiles = { base_url: string; unfit: string; files: EdgeSpeedFile[] };
+/** POST /api/edge/speedtest: the pass that lets this browser pick the bucket of a download. */
+export type EdgeSpeedPass = { token: string; expires_at: string };
 
 // --- backups ---
 

@@ -53,7 +53,7 @@ async function take(env: Env, n: string): Promise<{ pass: boolean } | string> {
   return { pass: req.pass === true };
 }
 
-function hexBytes(s: string): Uint8Array | null {
+export function hexBytes(s: string): Uint8Array | null {
   if (!/^[0-9a-fA-F]*$/.test(s) || s.length % 2 !== 0) return null;
   const out = new Uint8Array(s.length / 2);
   for (let i = 0; i < out.length; i++) out[i] = parseInt(s.slice(i * 2, i * 2 + 2), 16);

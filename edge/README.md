@@ -46,6 +46,19 @@ server release, download the Worker again and deploy it: a Worker of another ver
 request to your server. After you remove a region, deploy again, then delete its bucket in
 Cloudflare.
 
+## Test the regions
+
+The **Speed test** on the Edge delivery page downloads a file through the Worker from the bucket
+you pick (a ready region, the home bucket, or your server with no Worker) and times it in your
+browser, so you can compare the regions from where you sit. Open the page at your base URL: the
+browser downloads from the address the page runs on. The page asks your server for a pass that
+works for 10 minutes and sends it with the download in `Telesphorepo-Edge-Pass`, with the bucket in
+`Telesphorepo-Edge-Region`. The Worker takes the choice only after its usual checks of the
+download, so a pass never lets anyone download more than they could without it. The answer says
+which bucket served it (`Telesphorepo-Edge: hit; region=<hint>`) and what became of the choice
+(`Telesphorepo-Edge-Override`). A Worker of another version than your server sends every download
+to your server, so download the Worker of your server's version and deploy it first.
+
 ### From a checkout of the repository
 
 Open **Deploy from a checkout of the repository** in the Deploy section, save its
