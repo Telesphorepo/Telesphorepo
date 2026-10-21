@@ -84,12 +84,21 @@
     return () => clearInterval(t);
   });
 
+  const MAX_DELAY = 24 * 60 * 60 * 1000;
+
   // When the next scheduled sync is due, read the source again, so a sync that starts shows.
   $effect(() => {
     const at = d?.next_sync_at;
     if (!at || running) return;
-    const ms = new Date(at).getTime() - Date.now();
-    const timer = setTimeout(reloadAll, ms > 0 ? ms + 5000 : 30_000);
+    const due = new Date(at).getTime();
+    let timer: ReturnType<typeof setTimeout>;
+    // A delay over 2^31-1 ms makes setTimeout fire at once, so a far-off time waits in steps of a day.
+    const arm = () => {
+      const ms = due - Date.now();
+      if (ms > MAX_DELAY) timer = setTimeout(arm, MAX_DELAY);
+      else timer = setTimeout(reloadAll, ms > 0 ? ms + 5000 : 30_000);
+    };
+    arm();
     return () => clearTimeout(timer);
   });
 

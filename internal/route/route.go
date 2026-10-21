@@ -5,7 +5,9 @@
 //
 // The router refuses a path that the module does not own: a module owns the JSON API under
 // /api/, the URL segment of each format it registers ("/maven/"), and the root prefixes it
-// claims (e.g. "/v2/" for an OCI registry). The kernel adds GET /healthz and the web UI.
+// claims (e.g. "/v2/" for an OCI registry). The kernel adds GET /healthz and the web UI. Every
+// route under /api/ sends its JSON answers gzip-compressed to a client that accepts gzip
+// (httpx.GzipJSON).
 package route
 
 import (
@@ -126,7 +128,7 @@ func (r *Router) Handle(pattern string, p Policy, h Handler) {
 		hh = http.NewCrossOriginProtection().Handler(hh)
 	}
 	if api {
-		r.mux.root.Handle(pattern, hh)
+		r.mux.root.Handle(pattern, httpx.GzipJSON(hh))
 		return
 	}
 	for prefix, owner := range r.mux.claims {

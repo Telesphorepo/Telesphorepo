@@ -2,7 +2,8 @@
 
 Svelte 5 + Vite (no SvelteKit), Tailwind CSS v4, shadcn-svelte (Maia style), TypeScript, bun.
 `bun run build` type-checks with `svelte-check` and writes `web/dist`, which the Go binary embeds
-(`web/embed.go`). `bun run dev` serves the UI on :5173 and proxies every other path to the backend
+(`web/embed.go`). The build also writes a `.br` and a `.gz` next to each text file of 1 KiB or more,
+which the server sends to a browser that accepts them (see **Web UI** in SPEC.md). `bun run dev` serves the UI on :5173 and proxies every other path to the backend
 on :8080. Run both with `go tool task dev`.
 
 The UI is only a client of the JSON API (`/api/...`). It has no tests of its own: e2e tests cover
@@ -499,7 +500,7 @@ expires or when the server answers 401.
 - **Upload** (`pages/repo/UploadView.svelte`, `/repo/:name/upload`): first `FreshFactor`, which
   mints the token with `api.publish.manualSession`. Then one `DropZone` takes files or a folder,
   as the `upload` of the format's descriptor allows (a format without it takes no uploads).
-  `folder.ts` reads a folder, at most 500 files, only the ones that the `keep` globs take.
+  `folder.ts` reads a folder, at most 500 files, only the ones that the `keep` globs take. It skips dot-folders and `node_modules`, and folders that no `keep` glob can match below, and reads sibling folders 8 at a time.
   `api.repos.uploadPlan` sends the list of files and the first bytes of the files that a `reads`
   rule matches, and stores nothing; `PlanView` shows the plan (each item with the path of each
   file and its problems, the files left out), and the form shows the plan's fields (a value the
