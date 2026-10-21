@@ -1,5 +1,5 @@
 <!--
-  Repository settings, Access (docs/design/information-architecture.md, "The repo Access tab"):
+  Repository settings, Access:
   People (each person with a permission here, once, with the phrase of their set), Download
   (Public, from where) and Publish (CI pipelines, from where; a hosted repository only, because
   nobody publishes to a group or a proxy). Each part shows only to a person with its permission:

@@ -1,4 +1,4 @@
-// The Finder-style views of Browse (docs/design/ideas.md): List (the default), Tree (folders that
+// The Finder-style views of Browse: List (the default), Tree (folders that
 // expand in place), Columns (Miller columns, for deep trees) and Cover Flow (the versions and builds
 // of one artifact, where time is the axis). Every view fills the same area, so a switch never moves
 // the layout around it. The chosen view is remembered per user, in this browser, for each place that offers a

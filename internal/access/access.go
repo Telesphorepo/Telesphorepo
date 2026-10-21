@@ -1,7 +1,7 @@
 // Package access is the policy engine of repo access (engine.go) and the access report built from
 // the same parts: who can download from a repo and who can publish to it, what blocks publishing
 // (the repo kind, an operation on the repo), and what each guard limits (e.g. the networks of the
-// network module), each said in one plain sentence (docs/design/information-architecture.md).
+// network module), each said in one plain sentence.
 //
 // The holders of the All repositories permission can download from and publish to every repo.
 // They are counted (admins), not listed, unless the caller asks for them; the sentences name

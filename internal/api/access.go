@@ -11,7 +11,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 )
 
-// Effective access (docs/design/information-architecture.md): who can download from and publish
+// Effective access: who can download from and publish
 // to each repo, and which repos a person can use.
 
 func (a *API) registerAccess(mux *route.Router) {

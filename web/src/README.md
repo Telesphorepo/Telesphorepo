@@ -10,8 +10,7 @@ The UI is only a client of the JSON API (`/api/...`). It has no tests of its own
 every API route it uses.
 
 This file is binding. Every page follows the layout, the components, the interaction rules and
-the checklist below. The sitemap and the Settings navigation come from
-`docs/design/information-architecture.md`; the principles from `docs/design/principles.md`.
+the checklist below.
 
 ## Structure
 
@@ -501,8 +500,7 @@ button takes the ranges of the checked text (Add addresses on the Access tab).
 - [ ] No `font-mono`, no `Sheet`, no `Skeleton`, no border accents, no all caps, no `max-w-` on
       a page block (`grep` before you finish).
 - [ ] Words follow the table below; buttons name the action; toasts reuse the verb.
-- [ ] Screenshots at 1440 and 390 wide, dark and light, in `docs/design/screenshots/`
-      (`<page>-<state>-<width>-<theme>.png`); it works at 390px with no sideways page scroll.
+- [ ] It works at 390px with no sideways page scroll.
 
 ## Uploads and deletes
 

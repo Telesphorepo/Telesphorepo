@@ -3452,7 +3452,7 @@ page are in `web/src/README.md`.
   signing module), `repoFields` (the control of a repo field on New repository, e.g.
   `signing_key`) and `formatParts` (a format's named parts of the file details: `maven-artifact`,
   `deb-package`). The router, the Settings sidebar (`nav`), the breadcrumbs and the pages of a
-  setup-only session (`setup`) read the registry. `web/src/lib/api/` is the one API client. The principles are in `docs/design/principles.md`, and the reason for each decision is in `docs/design/rationale.md`.
+  setup-only session (`setup`) read the registry. `web/src/lib/api/` is the one API client.
 
 - **Words and look.** The UI uses plain words, not jargon (the rename table is in
   `web/src/README.md`). `web/src/README.md` is binding for the UI code.
