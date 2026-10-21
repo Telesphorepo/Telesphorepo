@@ -102,7 +102,7 @@
 </script>
 
 {#snippet actions()}
-  <LiveStatus {live} />
+  {#if sync.data}<LiveStatus {live} />{/if}
   {#if sync.data}<StatusBadge tone={syncState[sync.data.state].tone}>{syncState[sync.data.state].word}</StatusBadge>{/if}
   {#if onClose}<Button variant="ghost" size="icon-sm" aria-label="Close the sync" onclick={onClose}><XIcon /></Button>{/if}
 {/snippet}

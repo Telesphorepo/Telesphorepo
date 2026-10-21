@@ -314,7 +314,8 @@
 </script>
 
 <PageHeader title="Edge delivery" description="Serve downloads from Cloudflare R2 buckets near your clients.">
-  {#snippet actions()}<LiveStatus {live} cadence={liveCadence} />{/snippet}
+  <!-- Before the first answer the page's own error state speaks; LiveStatus reports later refreshes. -->
+  {#snippet actions()}{#if status.data}<LiveStatus {live} cadence={liveCadence} />{/if}{/snippet}
 </PageHeader>
 
 {#if (status.loading && !status.data) || (settings.loading && !settings.data) || !draft}
