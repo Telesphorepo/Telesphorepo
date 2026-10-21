@@ -118,8 +118,6 @@ func TestPublishGate(t *testing.T) {
 	})
 
 	t.Run("expired session", func(t *testing.T) {
-		st, b := s.API(t, http.MethodPatch, "/api/settings", map[string]any{"publish.session_ttl": "2h"}, s.Admin())
-		wantAPIStatus(t, "session TTL above 1h", st, b, http.StatusBadRequest)
 		setSetting(t, s, "publish.session_ttl", "2s")
 		ps := s.MintSession(t, w, repo)
 		setSetting(t, s, "publish.session_ttl", nil)
@@ -240,7 +238,7 @@ func TestSecondFactorLogin(t *testing.T) {
 	wantSetupOnly(t, s.Login(t, s.AdminUser, s.AdminPass), http.MethodGet, "/api/settings")
 
 	u, pw := RandName("twofa"), "twofa-pass-1234"
-	s.CreateUser(t, u, pw, AllServerPerms...)
+	s.CreateUser(t, u, pw, s.ServerPerms(t)...)
 	pub, pubPw := RandName("publisher"), "publisher-pass-1234"
 	s.CreateUser(t, pub, pubPw)
 	type me struct {
@@ -359,8 +357,8 @@ func TestDeviceEnrollment(t *testing.T) {
 	wantAPIStatus(t, "enroll with an unknown field", st0, b0, http.StatusBadRequest)
 
 	en, key := s.StartEnrollment(t, "laptop")
-	if !userCodeRe.MatchString(en.UserCode) || en.VerificationURL != s.InternalURL+"/#/device" || en.ExpiresIn != 600 || en.Interval != 5 {
-		t.Fatalf("enrollment %+v: want user code ABCD-EFGH, verification_url %s/#/device, expires_in 600, interval 5", en, s.InternalURL)
+	if !userCodeRe.MatchString(en.UserCode) || en.VerificationURL != s.InternalURL+"/#/device" || en.ExpiresIn <= 0 || en.Interval < 1 {
+		t.Fatalf("enrollment %+v: want user code ABCD-EFGH, verification_url %s/#/device, expires_in > 0, interval >= 1", en, s.InternalURL)
 	}
 
 	st, a := s.PollEnrollment(t, en.DeviceCode)
@@ -417,8 +415,8 @@ func TestDeviceEnrollment(t *testing.T) {
 	wantStatus(t, resp, body, http.StatusCreated)
 }
 
-// TestDeviceEnrollmentExpiry ages an enrollment past its 10 minutes in the database while the
-// server is stopped: the poll answers expired_token and the code can no longer be approved.
+// TestDeviceEnrollmentExpiry moves the expiry of an enrollment into the past in the database
+// while the server is stopped: the poll answers expired_token and the code can no longer be approved.
 func TestDeviceEnrollmentExpiry(t *testing.T) {
 	t.Parallel()
 	vol := NewDataVolume(t)

@@ -29,6 +29,9 @@ const (
 	kcRealm            = "e2e"
 	kcClientID         = "telesphorepo"
 	kcClientSecret     = "e2e-telesphorepo-client-secret"
+	kcCIClientID       = "e2e-ci" // the client-credentials client of a CI pipeline
+	kcCIClientSecret   = "e2e-ci-client-secret"
+	kcCIAudience       = "telesphorepo-e2e-ci" // the audience its tokens carry
 	kcAdminGroup       = "repo-admins"
 	kcAlicePassword    = "alice-e2e-password"
 	kcBobPassword      = "bob-e2e-password"

@@ -19,6 +19,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Telesphorepo/Telesphorepo/internal/auth"
+	"github.com/Telesphorepo/Telesphorepo/internal/clidist"
 )
 
 // The server side of the Telesphorepo CLI that needs no external tool: setup codes and
@@ -44,6 +47,23 @@ type setupResult struct {
 	Repo     string `json:"repo"`
 	Format   string `json:"format"`
 	Kind     string `json:"kind"`
+}
+
+// newAuditEvents runs do and returns the events of the audit query q that do added.
+func newAuditEvents(t *testing.T, s *Server, q string, do func()) []auditEntry {
+	t.Helper()
+	seen := map[int64]bool{}
+	for _, e := range auditAll(t, s, q) {
+		seen[e.ID] = true
+	}
+	do()
+	var added []auditEntry
+	for _, e := range auditAll(t, s, q) {
+		if !seen[e.ID] {
+			added = append(added, e)
+		}
+	}
+	return added
 }
 
 // signText signs msg with key, as base64url without padding.
@@ -85,12 +105,14 @@ func TestSetupCodes(t *testing.T) {
 		wantAPIStatus(t, "a setup code without the second factor", st, b, http.StatusBadRequest)
 		st, b = s.API(t, http.MethodPost, "/api/publish/setup-codes", map[string]string{"repo": repo}, s.TOTPProof(t, s.LoginTOTP(t, reader), reader))
 		wantAPIStatus(t, "a setup code of a person who only downloads", st, b, http.StatusForbidden)
-		c := s.NewSetupCode(t, dev, repo)
-		if left := time.Until(c.ExpiresAt); left < 9*time.Minute || left > 11*time.Minute {
-			t.Fatalf("setup code expires at %s, want in 10 minutes", c.ExpiresAt)
+		var c SetupCode
+		es := newAuditEvents(t, s, "action=setup_code.create", func() { c = s.NewSetupCode(t, dev, repo) })
+		// A minute either way leaves room for the clock of the container.
+		if left := time.Until(c.ExpiresAt); left < auth.SetupCodeTTL-time.Minute || left > auth.SetupCodeTTL+time.Minute {
+			t.Fatalf("setup code expires at %s, want in %s", c.ExpiresAt, auth.SetupCodeTTL)
 		}
-		if es := auditAll(t, s, "action=setup_code.create"); len(es) != 1 || es[0].Repo != repo || es[0].Actor != dev {
-			t.Fatalf("audit setup_code.create: %+v, want one event of %s on %s", es, dev, repo)
+		if len(es) != 1 || es[0].Repo != repo || es[0].Actor != dev || es[0].Detail["expires_at"] != float64(c.ExpiresAt.Unix()) {
+			t.Fatalf("audit setup_code.create: %+v, want one new event of %s on %s that expires at %d", es, dev, repo, c.ExpiresAt.Unix())
 		}
 	})
 
@@ -102,8 +124,13 @@ func TestSetupCodes(t *testing.T) {
 	t.Run("a new device", func(t *testing.T) {
 		c := s.NewSetupCode(t, dev, repo)
 		body := map[string]any{"code": c.Code, "name": "laptop", "public_key": b64(pub)}
-		st, b := setup(body)
+		var st int
+		var b []byte
+		es := newAuditEvents(t, s, "action=device.setup", func() { st, b = setup(body) })
 		res := parse("set up with a new device", st, b)
+		if len(es) != 1 || es[0].Actor != dev || es[0].Detail["new"] != true {
+			t.Fatalf("audit device.setup: %+v, want one new event of %s with a new device", es, dev)
+		}
 		if res.User != dev || res.Repo != repo || res.Format != "maven" || res.Kind != "hosted" {
 			t.Fatalf("set up with a new device: %+v, want %s, %s, maven, hosted", res, dev, repo)
 		}
@@ -116,9 +143,6 @@ func TestSetupCodes(t *testing.T) {
 		p := wantProblem(t, "the setup code again", st, b, http.StatusUnauthorized, "setup-code-used")
 		if p.Remedy == nil || p.Remedy.Action != "open_url" || p.Remedy.URL != s.InternalURL+"/" {
 			t.Fatalf("the setup code again: remedy %+v, want open_url %s/", p.Remedy, s.InternalURL)
-		}
-		if es := auditAll(t, s, "action=device.setup"); len(es) != 1 || es[0].Actor != dev || es[0].Detail["new"] != true {
-			t.Fatalf("audit device.setup: %+v, want one event of %s with a new device", es, dev)
 		}
 	})
 	if d == nil {
@@ -242,6 +266,7 @@ func TestExchangeSession(t *testing.T) {
 		return signText(key, fmt.Sprintf("telesphorepo challenge v1\n%d\n%d", d.ID, ts))
 	}
 	now := time.Now().Unix()
+	yearAgo := time.Now().AddDate(-1, 0, 0).Unix()
 	_, otherKey, _ := ed25519.GenerateKey(rand.Reader)
 	for _, c := range []struct {
 		what string
@@ -249,7 +274,7 @@ func TestExchangeSession(t *testing.T) {
 	}{
 		{"no signature", map[string]any{"device_id": d.ID, "exchange": true}},
 		{"the signature of another key", map[string]any{"device_id": d.ID, "exchange": true, "ts": now, "signature": signTime(otherKey, now)}},
-		{"a time 10 minutes ago", map[string]any{"device_id": d.ID, "exchange": true, "ts": now - 600, "signature": signTime(d.Key, now-600)}},
+		{"a time a year ago", map[string]any{"device_id": d.ID, "exchange": true, "ts": yearAgo, "signature": signTime(d.Key, yearAgo)}},
 	} {
 		st, b := s.API(t, http.MethodPost, "/api/publish/challenge", c.body, nil)
 		wantAPIStatus(t, "a token exchange nonce with "+c.what, st, b, http.StatusUnauthorized)
@@ -307,7 +332,7 @@ func TestExchangeSession(t *testing.T) {
 	wantPublishRequired(t, resp, body)
 }
 
-// TestCLIDownloads: the server serves the six CLI archives of its build and their SHA256SUMS at
+// TestCLIDownloads: the server serves the CLI archives of its build and their SHA256SUMS at
 // /cli/, and writes its URL and the sums into the install scripts; a build without the archives
 // answers the problem no-cli-downloads.
 func TestCLIDownloads(t *testing.T) {
@@ -319,7 +344,7 @@ func TestCLIDownloads(t *testing.T) {
 		return s.Do(t, s.NewRequest(t, http.MethodGet, path, nil), nil)
 	}
 
-	resp, b := get(s, "/cli/SHA256SUMS")
+	resp, b := get(s, "/cli/"+clidist.SumsFile)
 	wantStatus(t, resp, b, http.StatusOK)
 	sums := map[string]string{}
 	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
@@ -334,8 +359,11 @@ func TestCLIDownloads(t *testing.T) {
 		names = append(names, n)
 	}
 	slices.Sort(names)
-	want := []string{"telesphorepo_darwin_amd64.tar.gz", "telesphorepo_darwin_arm64.tar.gz", "telesphorepo_linux_amd64.tar.gz",
-		"telesphorepo_linux_arm64.tar.gz", "telesphorepo_windows_amd64.zip", "telesphorepo_windows_arm64.zip"}
+	var want []string
+	for _, tg := range clidist.Targets {
+		want = append(want, clidist.Archive(tg.OS, tg.Arch))
+	}
+	slices.Sort(want)
 	if !slices.Equal(names, want) {
 		t.Fatalf("SHA256SUMS names %v, want %v", names, want)
 	}
@@ -368,19 +396,24 @@ func TestCLIDownloads(t *testing.T) {
 		t.Fatalf("an unknown CLI download: status %d, %s: %s, want a 404 problem document", resp.StatusCode, resp.Header.Get("Content-Type"), b)
 	}
 
-	resp, b = get(s, "/install.sh")
-	wantStatus(t, resp, b, http.StatusOK)
-	if !strings.Contains(string(b), "URL='"+s.InternalURL+"'") || !strings.Contains(string(b), cliArchiveName+") echo '"+sums[cliArchiveName]+"' ;;") {
-		t.Fatalf("install.sh does not name the URL %s and the sum of %s:\n%s", s.InternalURL, cliArchiveName, b)
-	}
-	resp, b = get(s, "/install.ps1")
-	wantStatus(t, resp, b, http.StatusOK)
-	if !strings.Contains(string(b), "$Url = '"+s.InternalURL+"'\r\n") || !strings.Contains(string(b), "'telesphorepo_windows_amd64.zip' = '"+sums["telesphorepo_windows_amd64.zip"]+"'") {
-		t.Fatalf("install.ps1 does not name the URL %s and the sums with Windows line ends:\n%s", s.InternalURL, b)
+	for _, script := range []string{"install.sh", "install.ps1"} {
+		resp, b = get(s, "/"+script)
+		wantStatus(t, resp, b, http.StatusOK)
+		if !strings.Contains(string(b), s.InternalURL) {
+			t.Fatalf("%s does not name the URL %s:\n%s", script, s.InternalURL, b)
+		}
+		for name, sum := range sums {
+			if !strings.Contains(string(b), sum) {
+				t.Fatalf("%s does not hold the sum of %s:\n%s", script, name, b)
+			}
+		}
+		if script == "install.ps1" && strings.Count(string(b), "\n") != strings.Count(string(b), "\r\n") {
+			t.Fatalf("install.ps1 has a line end that is not the Windows one:\n%s", b)
+		}
 	}
 
 	n := StartServer(t, ServerOpts{Files: []ContainerFile{ServerBinary(bare)}})
-	for _, p := range []string{"/cli/SHA256SUMS", "/cli/" + cliArchiveName, "/install.sh", "/install.ps1"} {
+	for _, p := range []string{"/cli/" + clidist.SumsFile, "/cli/" + cliArchiveName, "/install.sh", "/install.ps1"} {
 		resp, b := get(n, p)
 		if pr := wantProblem(t, "GET "+p+" of a build without CLI archives", resp.StatusCode, b, http.StatusNotFound, "no-cli-downloads"); pr.Title != "This build has no CLI downloads" {
 			t.Fatalf("GET %s of a build without CLI archives: title %q", p, pr.Title)

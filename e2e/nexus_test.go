@@ -277,6 +277,13 @@ const (
 // the test.
 const nexusRemoteURL = "https://repo1.maven.org/maven2/"
 
+// nexusMetadataMaxAge and nexusNotFoundTTL are the metadata age and the negative cache time of
+// the Nexus proxy, in minutes (the unit of Nexus); the proxy here has them in seconds.
+const (
+	nexusMetadataMaxAge = 60
+	nexusNotFoundTTL    = 10
+)
+
 // nexusRepoSet names the source repos of one subtest.
 type nexusRepoSet struct {
 	maven   string // hosted, anonymous read in Nexus
@@ -326,8 +333,8 @@ func (n *Nexus) createRepos(t *testing.T) nexusRepoSet {
 	n.mustAPI(t, http.MethodPost, "/service/rest/v1/repositories/maven/proxy", map[string]any{
 		"name": rs.proxy, "online": true,
 		"storage":       map[string]any{"blobStoreName": "default", "strictContentTypeValidation": true},
-		"proxy":         map[string]any{"remoteUrl": nexusRemoteURL, "contentMaxAge": -1, "metadataMaxAge": 60},
-		"negativeCache": map[string]any{"enabled": true, "timeToLive": 10},
+		"proxy":         map[string]any{"remoteUrl": nexusRemoteURL, "contentMaxAge": -1, "metadataMaxAge": nexusMetadataMaxAge},
+		"negativeCache": map[string]any{"enabled": true, "timeToLive": nexusNotFoundTTL},
 		"httpClient": map[string]any{"blocked": false, "autoBlock": true,
 			"authentication": map[string]any{"type": "username", "username": nexusRemoteUser, "password": nexusRemotePass}},
 		"maven": nexusMavenSettings,
@@ -740,13 +747,13 @@ func nexusWaitSync(t *testing.T, s *Server, syncID int64) *nexusSync {
 	return &sy
 }
 
-// nexusLogPage reads one page of a sync's log: lines after id after, at most limit, of repo
-// ("" for all). next is the cursor of the next page, "" at the end.
-func nexusLogPage(t *testing.T, s *Server, syncID, after int64, repo string, limit int) (lines []nexusLogLine, next string) {
+// nexusLogPage reads one page of a sync's log: lines after the cursor after ("" for the first
+// page), at most limit, of repo ("" for all). next is the cursor of the next page, "" at the end.
+func nexusLogPage(t *testing.T, s *Server, syncID int64, after, repo string, limit int) (lines []nexusLogLine, next string) {
 	t.Helper()
 	q := url.Values{"limit": {fmt.Sprint(limit)}}
-	if after > 0 {
-		q.Set("after", fmt.Sprint(after))
+	if after != "" {
+		q.Set("after", after)
 	}
 	if repo != "" {
 		q.Set("repo", repo)
@@ -766,34 +773,57 @@ func nexusLogPage(t *testing.T, s *Server, syncID, after int64, repo string, lim
 func nexusLog(t *testing.T, s *Server, syncID int64, repo string) []nexusLogLine {
 	t.Helper()
 	var all []nexusLogLine
-	var after int64
+	after := ""
 	for range 100 {
 		lines, next := nexusLogPage(t, s, syncID, after, repo, 200)
 		all = append(all, lines...)
 		if next == "" {
 			return all
 		}
-		if _, err := fmt.Sscan(next, &after); err != nil {
-			t.Fatalf("log of sync %d: cursor %q: %v", syncID, next, err)
-		}
+		after = next
 	}
 	t.Fatalf("log of sync %d: more than 100 pages", syncID)
 	return nil
 }
 
-// nexusWantLine requires a line of lines whose message contains want.
-func nexusWantLine(t *testing.T, lines []nexusLogLine, want string) {
+// Levels of the sync log lines: info for progress, error for a failure.
+const (
+	nexusLogLevelInfo  = "info"
+	nexusLogLevelError = "error"
+)
+
+// nexusWantSourceLines requires that the log of a clean sync begins and ends with a line of the
+// whole source (no source repo) at level info, and has at least min such lines in all.
+func nexusWantSourceLines(t *testing.T, what string, lines []nexusLogLine, min int) {
 	t.Helper()
-	if !slices.ContainsFunc(lines, func(l nexusLogLine) bool { return strings.Contains(l.Message, want) }) {
-		t.Fatalf("the sync log has no line with %q:\n%+v", want, lines)
+	var source []nexusLogLine
+	for _, l := range lines {
+		if l.SourceRepo == "" {
+			source = append(source, l)
+		}
+	}
+	if len(lines) == 0 || len(source) < min || lines[0].SourceRepo != "" || lines[len(lines)-1].SourceRepo != "" ||
+		lines[0].Level != nexusLogLevelInfo || lines[len(lines)-1].Level != nexusLogLevelInfo {
+		t.Fatalf("%s log: %+v, want at least %d lines of the source, the first and the last of them at level info", what, lines, min)
 	}
 }
 
-// nexusWantRepoLine fails unless the log has a line of repo that starts with want.
-func nexusWantRepoLine(t *testing.T, lines []nexusLogLine, repo, want string) {
+// nexusWantRepoLines requires that the log has at least min lines of repo and none of them at
+// level error (a clean walk of the repo).
+func nexusWantRepoLines(t *testing.T, what string, lines []nexusLogLine, repo string, min int) {
 	t.Helper()
-	if !slices.ContainsFunc(lines, func(l nexusLogLine) bool { return l.SourceRepo == repo && strings.HasPrefix(l.Message, want) }) {
-		t.Fatalf("the sync log has no line of %s that starts with %q:\n%+v", repo, want, lines)
+	n := 0
+	for _, l := range lines {
+		if l.SourceRepo != repo {
+			continue
+		}
+		if l.Level == nexusLogLevelError {
+			t.Fatalf("%s log: line %+v of %s at level error", what, l, repo)
+		}
+		n++
+	}
+	if n < min {
+		t.Fatalf("%s log: %d lines of %s, want at least %d:\n%+v", what, n, repo, min, lines)
 	}
 }
 
@@ -920,11 +950,25 @@ func nexusMavenBuild(t *testing.T, group, version, message string) (jar, pom []b
 	return build.ReadFile(t, "/work/lib/target/hello-"+version+".jar"), build.ReadFile(t, "/work/lib/pom.xml")
 }
 
-// nexusWantMirrorBlocked requires the 409 that an upload to a mirrored repo answers.
-func nexusWantMirrorBlocked(t *testing.T, what string, st int, body []byte) {
+// nexusWantMirrorBlocked requires the 409 that a mint for the mirrored repo answers: its detail
+// is the message of the repo's mirror operation (GET /api/repos/{name}).
+func nexusWantMirrorBlocked(t *testing.T, s *Server, what, repo string, st int, body []byte) {
 	t.Helper()
-	if st != http.StatusConflict || !strings.Contains(string(body), "after the switch-over from Nexus server") {
-		t.Fatalf("%s to a mirrored repo: status %d, want 409 naming the switch-over from Nexus: %s", what, st, body)
+	var info struct {
+		Operation *struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"operation"`
+	}
+	s.MustAPI(t, http.MethodGet, "/api/repos/"+repo, nil, s.Admin(), &info)
+	if info.Operation == nil || info.Operation.Type != "mirror" || info.Operation.Message == "" {
+		t.Fatalf("mirrored repo %s: operation %+v, want mirror with a message", repo, info.Operation)
+	}
+	var doc struct {
+		Detail string `json:"detail"`
+	}
+	if st != http.StatusConflict || json.Unmarshal(body, &doc) != nil || doc.Detail != info.Operation.Message {
+		t.Fatalf("%s to a mirrored repo: status %d, want 409 with the message %q of the mirror operation: %s", what, st, info.Operation.Message, body)
 	}
 }
 
@@ -966,8 +1010,25 @@ func TestNexus(t *testing.T) {
 		n.waitAssets(t, rs.raw, "dist/readme.txt", "dist/app.bin", "dist/config.json")
 
 		// A long sync interval keeps scheduled syncs out of the counters this test checks.
-		opts.Env = map[string]string{"TR_NEXUS_SYNC_INTERVAL": "12h"}
+		const syncInterval = 12 * time.Hour
+		opts.Env = map[string]string{"TR_NEXUS_SYNC_INTERVAL": syncInterval.String()}
 		s := StartServer(t, opts)
+
+		// The formats of this server that import each Nexus format.
+		var formats []struct {
+			ImportSources []string `json:"import_sources"`
+		}
+		s.MustAPI(t, http.MethodGet, "/api/formats", nil, s.Admin(), &formats)
+		imports := map[string]bool{}
+		for _, f := range formats {
+			for _, src := range f.ImportSources {
+				imports[src] = true
+			}
+		}
+		// The source repo rs.gems stands for a Nexus format that no format imports.
+		if imports["rubygems"] {
+			t.Fatalf("a format imports rubygems now: the test needs a Nexus format that none imports in place of rs.gems")
+		}
 
 		// The connection check refuses a wrong password.
 		if st, b := s.API(t, http.MethodPost, "/api/nexus/sources", map[string]any{
@@ -986,23 +1047,25 @@ func TestNexus(t *testing.T) {
 
 		// The source lists each Nexus repo with its format, its type, whether it can be copied
 		// and whether anyone can download it in Nexus.
+		// A repo can be copied when a format imports its Nexus format and it is online in Nexus.
 		for name, want := range map[string]struct {
-			format, typ       string
-			supported, public bool
+			format, typ     string
+			offline, public bool
 		}{
-			rs.maven: {"maven2", "hosted", true, true}, rs.maven2: {"maven2", "hosted", true, false},
-			rs.apt: {"apt", "hosted", true, false}, rs.raw: {"raw", "hosted", true, false},
-			rs.gems: {"rubygems", "hosted", false, false}, rs.proxy: {"maven2", "proxy", true, false},
-			rs.group: {"maven2", "group", true, false}, rs.offline: {"raw", "hosted", false, false},
+			rs.maven: {"maven2", "hosted", false, true}, rs.maven2: {"maven2", "hosted", false, false},
+			rs.apt: {"apt", "hosted", false, false}, rs.raw: {"raw", "hosted", false, false},
+			rs.gems: {"rubygems", "hosted", false, false}, rs.proxy: {"maven2", "proxy", false, false},
+			rs.group: {"maven2", "group", false, false}, rs.offline: {"raw", "hosted", true, false},
 		} {
 			r := got.repo(t, name)
-			if r.SourceFormat != want.format || r.Type != want.typ || r.Supported != want.supported || r.Public != want.public || r.Target != "" {
+			supported := imports[want.format] && !want.offline
+			if r.SourceFormat != want.format || r.Type != want.typ || r.Supported != supported || r.Public != want.public || r.Target != "" {
 				t.Fatalf("source repo %s: %+v, want format %s, type %s, supported %v, public %v, no target",
-					name, r, want.format, want.typ, want.supported, want.public)
+					name, r, want.format, want.typ, supported, want.public)
 			}
 		}
-		if r := got.repo(t, rs.offline); !r.Offline || !strings.Contains(r.Reason, "Offline in Nexus") {
-			t.Fatalf("offline source repo: %+v, want offline with the reason", r)
+		if r := got.repo(t, rs.offline); !r.Offline || r.Reason == "" {
+			t.Fatalf("offline source repo: %+v, want offline with a reason", r)
 		}
 		if r := got.repo(t, rs.apt); r.Facts["key_in_source"] != true || r.Facts["key_encrypted"] != true || r.Facts["distribution"] != nexusAptDist ||
 			!r.hasQuestion("signing_key", "choice", "default", "new", "source") || !r.hasQuestion("signing_passphrase", "secret") ||
@@ -1037,8 +1100,11 @@ func TestNexus(t *testing.T) {
 		if st, b := s.API(t, http.MethodPut, nexusSourcePath(src.ID)+"/repos", map[string]any{"repos": []map[string]any{
 			{"source_repo": rs.apt, "target": targets[rs.apt], "create": true, "anonymous_read": false,
 				"answers": map[string]string{"signing_key": "default", "signing_passphrase": rs.aptPass}},
-		}}, s.Admin()); st != http.StatusBadRequest || !strings.Contains(string(b), "choose the key of the Nexus repository") {
-			t.Fatalf("a save with the passphrase and the key default: status %d, want 400 that names the choice: %s", st, b)
+		}}, s.Admin()); st != http.StatusBadRequest {
+			t.Fatalf("a save with the passphrase and the key default: status %d, want 400: %s", st, b)
+		}
+		if st, b := s.API(t, http.MethodGet, "/api/repos/"+targets[rs.apt], nil, s.Admin()); st != http.StatusNotFound {
+			t.Fatalf("target %s after the refused save: status %d, want 404 (not created): %s", targets[rs.apt], st, b)
 		}
 		first := nexusSaveAndWait(t, s, src.ID, maps)
 		got = nexusGetSource(t, s, src.ID)
@@ -1050,7 +1116,7 @@ func TestNexus(t *testing.T) {
 		if got.Status != "up_to_date" || got.NextSyncAt == nil || got.LastSync == nil || got.LastSync.FinishedAt == nil {
 			t.Fatalf("source after the first sync: %+v, want up_to_date with the next sync", got)
 		}
-		if want := got.LastSync.FinishedAt.Add(12 * time.Hour); got.NextSyncAt.Sub(want).Abs() > 2*time.Second {
+		if want := got.LastSync.FinishedAt.Add(syncInterval); got.NextSyncAt.Sub(want).Abs() > 2*time.Second {
 			t.Fatalf("next_sync_at %s, want one interval after the end of the sync, %s", got.NextSyncAt, want)
 		}
 		for source, want := range map[string]struct {
@@ -1070,8 +1136,9 @@ func TestNexus(t *testing.T) {
 		// three members in the Nexus order.
 		prx := nexusRepoInfoOf(t, s, targets[rs.proxy])
 		if prx.Proxy == nil || prx.Proxy.RemoteURL != nexusRemoteURL || !prx.Proxy.HasCredentials ||
-			prx.Proxy.MetadataTTL != 3600 || prx.Proxy.NotFoundTTL != 600 {
-			t.Fatalf("proxy %s: %+v, want remote %s with credentials, metadata_ttl 3600, not_found_ttl 600", targets[rs.proxy], prx.Proxy, nexusRemoteURL)
+			prx.Proxy.MetadataTTL != nexusMetadataMaxAge*60 || prx.Proxy.NotFoundTTL != nexusNotFoundTTL*60 {
+			t.Fatalf("proxy %s: %+v, want remote %s with credentials, metadata_ttl %d, not_found_ttl %d", targets[rs.proxy], prx.Proxy,
+				nexusRemoteURL, nexusMetadataMaxAge*60, nexusNotFoundTTL*60)
 		}
 		grp := nexusRepoInfoOf(t, s, targets[rs.group])
 		var members []string
@@ -1105,18 +1172,19 @@ func TestNexus(t *testing.T) {
 			t.Fatalf("first sync of raw: %+v, want %d files imported, %d bytes", r, len(raws), rawBytes)
 		}
 
-		// The log: the start line, the lines of each repo, the proxy line and the finish line.
+		// The log: the start line and the finish line of the source with the line of the skipped
+		// proxy between them, and the start and the end line of each hosted repo. The proxy and
+		// the group copy no files, so they have no lines of their own.
+		if first.Trigger != "save" {
+			t.Fatalf("first sync: trigger %q, want save", first.Trigger)
+		}
 		log1 := nexusLog(t, s, first.ID, "")
-		if len(log1) == 0 || log1[0].Message != "Started after the repositories were saved." {
-			t.Fatalf("first sync log: %+v, want the save line first", log1)
-		}
-		nexusWantLine(t, log1, "Skipped 1 proxy")
+		nexusWantSourceLines(t, "first sync", log1, 3)
 		for _, repo := range []string{rs.maven, rs.maven2, rs.apt, rs.raw} {
-			nexusWantRepoLine(t, log1, repo, "Started.")
-			nexusWantRepoLine(t, log1, repo, "Done. Copied ")
+			nexusWantRepoLines(t, "first sync", log1, repo, 2)
 		}
-		if last := log1[len(log1)-1]; !strings.HasPrefix(last.Message, "Finished in ") {
-			t.Fatalf("first sync log: last line %+v, want the finish line", last)
+		if i := slices.IndexFunc(log1, func(l nexusLogLine) bool { return l.SourceRepo == rs.proxy || l.SourceRepo == rs.group }); i >= 0 {
+			t.Fatalf("first sync log: line %+v of the proxy or the group, want none", log1[i])
 		}
 
 		// An imported file has the Nexus blob dates.
@@ -1124,9 +1192,14 @@ func TestNexus(t *testing.T) {
 		nexusWantDates(t, s, targets[rs.apt], "pool/main/e/e2e-hello/e2e-hello_1.0_all.deb", n.asset(t, rs.apt, "e2e-hello_1.0_all.deb"))
 
 		// The apt repo signs with the Nexus key: Release.gpg verifies with the Nexus public key.
+		// The key of a new debian repo is the default key; the apt target has a key of its own.
 		s.WaitDebianIndexed(t, targets[rs.apt])
-		if info := nexusRepoInfoOf(t, s, targets[rs.apt]); info.Fields.SigningKey != "nexus-"+targets[rs.apt] || info.Config.Distribution != nexusAptDist {
-			t.Fatalf("apt target: signing key %q, distribution %q, want nexus-%s and %s", info.Fields.SigningKey, info.Config.Distribution, targets[rs.apt], nexusAptDist)
+		plain := RandName("deb")
+		s.CreateRepo(t, plain, "debian", false, nil)
+		defaultKey := nexusRepoInfoOf(t, s, plain).Fields.SigningKey
+		if info := nexusRepoInfoOf(t, s, targets[rs.apt]); info.Fields.SigningKey == "" || info.Fields.SigningKey == defaultKey || info.Config.Distribution != nexusAptDist {
+			t.Fatalf("apt target: signing key %q, distribution %q, want a key other than the default %q and %s",
+				info.Fields.SigningKey, info.Config.Distribution, defaultKey, nexusAptDist)
 		}
 		dists := "/debian/" + targets[rs.apt] + "/dists/" + nexusAptDist + "/"
 		release := getFollowS3(t, s, opts.S3, dists+"Release")
@@ -1180,7 +1253,12 @@ func TestNexus(t *testing.T) {
 				t.Fatalf("second sync of %s: previous_checked %d, want the first sync's checked %d", r.SourceRepo, r.PreviousChecked, first.repo(t, r.SourceRepo).Checked)
 			}
 		}
-		nexusWantLine(t, nexusLog(t, s, second.ID, ""), "Started by "+s.AdminUser+".")
+		// The start line of a sync started by hand names who started it.
+		log2 := nexusLog(t, s, second.ID, "")
+		nexusWantSourceLines(t, "second sync", log2, 2)
+		if !strings.Contains(log2[0].Message, s.AdminUser) {
+			t.Fatalf("second sync log: first line %+v, want it to name %s", log2[0], s.AdminUser)
+		}
 
 		nexusMavenResolve(t, s, targets[rs.maven], group, "1.1.0", message2)
 		s.WaitDebianIndexed(t, targets[rs.apt])
@@ -1217,18 +1295,21 @@ func TestNexus(t *testing.T) {
 		// A third sync with nothing new: each repo says so, and the log pages and filters.
 		third := nexusSyncNow(t, s, src.ID)
 		log3 := nexusLog(t, s, third.ID, "")
+		nexusWantSourceLines(t, "third sync", log3, 2)
 		for _, repo := range []string{rs.maven, rs.maven2, rs.apt, rs.raw} {
-			nexusWantRepoLine(t, log3, repo, "No new files.")
-			if r := third.repo(t, repo); r.Imported != 0 || r.PreviousChecked != second.repo(t, repo).Checked {
+			nexusWantRepoLines(t, "third sync", log3, repo, 2)
+			if r := third.repo(t, repo); r.Imported != 0 || r.Bytes != 0 || r.PreviousChecked != second.repo(t, repo).Checked {
 				t.Fatalf("third sync of %s: %+v, want nothing imported and previous_checked %d", repo, r, second.repo(t, repo).Checked)
 			}
 		}
-		nexusWantLine(t, log3, "No new files.")
-		head, next := nexusLogPage(t, s, third.ID, 0, "", 2)
+		if third.Imported != 0 || third.Bytes != 0 {
+			t.Fatalf("third sync: %+v, want nothing imported", third)
+		}
+		head, next := nexusLogPage(t, s, third.ID, "", "", 2)
 		if len(head) != 2 || next == "" || head[0].ID != log3[0].ID || head[1].ID != log3[1].ID {
 			t.Fatalf("log page of 2: %+v next %q, want the first 2 of %d lines and a cursor", head, next, len(log3))
 		}
-		rest, _ := nexusLogPage(t, s, third.ID, head[1].ID, "", 200)
+		rest, _ := nexusLogPage(t, s, third.ID, next, "", 200)
 		if len(rest) != len(log3)-2 || rest[0].ID != log3[2].ID {
 			t.Fatalf("log after line %d: %d lines, want %d starting at line %d", head[1].ID, len(rest), len(log3)-2, log3[2].ID)
 		}
@@ -1241,7 +1322,7 @@ func TestNexus(t *testing.T) {
 		// diverge.
 		for _, repo := range []string{targets[rs.maven], targets[rs.raw], targets[rs.apt]} {
 			st, b := s.Mint(t, s.device(t, s.AdminUser), repo)
-			nexusWantMirrorBlocked(t, "publish session for "+repo, st, b)
+			nexusWantMirrorBlocked(t, s, "publish session for "+repo, repo, st, b)
 		}
 
 		// Unpicking a repo stops its copy and unlocks it: an upload with a publish session works.

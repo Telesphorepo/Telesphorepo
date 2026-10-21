@@ -125,7 +125,7 @@ func lockRepo(t *testing.T, s *Server, repo string) {
 		} `json:"operation"`
 	}
 	s.MustAPI(t, http.MethodGet, "/api/repos/"+repo, nil, s.Admin(), &r)
-	if r.Operation == nil || r.Operation.Type != "mirror" || r.Operation.State != "held" || !strings.Contains(r.Operation.Message, "Uploads and deletes start after the switch-over from Nexus server ") {
+	if r.Operation == nil || r.Operation.Type != "mirror" || r.Operation.State != "held" {
 		t.Fatalf("repo %s after the Nexus mapping: operation %+v, want a held mirror", repo, r.Operation)
 	}
 }
@@ -303,8 +303,17 @@ func TestBulkPeople(t *testing.T) {
 
 	// A list with the caller gets 400 and changes nothing.
 	st, body := s.API(t, http.MethodPatch, "/api/users", map[string]any{"usernames": []string{u3, s.AdminUser}, "disabled": true}, s.Admin())
-	if st != http.StatusBadRequest || !strings.Contains(string(body), "You cannot disable your own account.") {
+	if st != http.StatusBadRequest {
 		t.Fatalf("disable a list with the caller: status %d, want 400: %s", st, body)
+	}
+	for _, u := range []string{u3, s.AdminUser} {
+		var got struct {
+			Disabled bool `json:"disabled"`
+		}
+		s.MustAPI(t, http.MethodGet, "/api/users/"+u, nil, s.Admin(), &got)
+		if got.Disabled {
+			t.Fatalf("%s is disabled after the refused list with the caller", u)
+		}
 	}
 	// An unknown name gets 404 and changes nothing.
 	apiWant(t, s, http.MethodPatch, "/api/users", map[string]any{"usernames": []string{u3, RandName("nobody")}, "disabled": true}, s.Admin(), http.StatusNotFound)

@@ -371,7 +371,7 @@ func testNupkg(t *testing.T, id, version string) []byte {
 // TestLargeUploadAndRepoGC uploads an 80 MiB file into a raw repo through a resumable upload in
 // three chunks, one of them sent again at a wrong offset (416). The checksum headers of the file
 // are the MD5, SHA-1 and SHA-256 of the whole file (the hashes carry over from append to append).
-// The S3 store holds it as a multipart upload of 5 parts of 16 MiB (from 64 MiB), and both stores
+// The S3 store holds it as a multipart upload of more than one part, and both stores
 // serve it back byte for byte. After a delete of the repo, the blob GC (TR_BLOBS_GC_GRACE=1s)
 // removes the object of every file of the repo.
 func TestLargeUploadAndRepoGC(t *testing.T) {
@@ -431,8 +431,11 @@ func TestLargeUploadAndRepoGC(t *testing.T) {
 			if err != nil {
 				t.Fatalf("head the object of the large file: %v", err)
 			}
-			if etag := strings.Trim(aws.ToString(o.ETag), `"`); !strings.HasSuffix(etag, "-5") {
-				t.Fatalf("the object of an 80 MiB file has ETag %q, want the ETag of a multipart upload of 5 parts", etag)
+			// The ETag of a multipart upload ends in "-<number of parts>".
+			etag := strings.Trim(aws.ToString(o.ETag), `"`)
+			i := strings.LastIndex(etag, "-")
+			if parts, err := strconv.Atoi(etag[i+1:]); i < 0 || err != nil || parts <= 1 {
+				t.Fatalf("the object of an 80 MiB file has ETag %q, want the ETag of a multipart upload of more than one part", etag)
 			}
 		}
 

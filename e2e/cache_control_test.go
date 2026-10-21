@@ -44,14 +44,15 @@ func TestCacheControl(t *testing.T) {
 		mavenPut(t, s, s.AdminUser, priv, privJar, privBody)
 		mavenPut(t, s, s.AdminUser, pub, pubJar, pubBody)
 
-		check := func(t *testing.T, what, path string, auth Auth, etag, want string) {
+		check := func(t *testing.T, what, path string, auth Auth, want string) {
 			t.Helper()
 			resp, body := s.Do(t, s.NewRequest(t, http.MethodHead, path, nil), auth)
-			if resp.StatusCode != http.StatusOK || resp.Header.Get("Cache-Control") != want {
-				t.Fatalf("HEAD %s: status %d, Cache-Control %q, want 200 and %q: %s", what, resp.StatusCode, resp.Header.Get("Cache-Control"), want, body)
+			etag := resp.Header.Get("ETag")
+			if resp.StatusCode != http.StatusOK || resp.Header.Get("Cache-Control") != want || etag == "" {
+				t.Fatalf("HEAD %s: status %d, Cache-Control %q, ETag %q, want 200, %q and an ETag: %s", what, resp.StatusCode, resp.Header.Get("Cache-Control"), etag, want, body)
 			}
 			req := s.NewRequest(t, http.MethodGet, path, nil)
-			req.Header.Set("If-None-Match", `"`+etag+`"`)
+			req.Header.Set("If-None-Match", etag)
 			resp, body = s.Do(t, req, auth)
 			if resp.StatusCode != http.StatusNotModified || resp.Header.Get("Cache-Control") != want {
 				t.Fatalf("conditional GET %s: status %d, Cache-Control %q, want 304 and %q: %s", what, resp.StatusCode, resp.Header.Get("Cache-Control"), want, body)
@@ -65,17 +66,16 @@ func TestCacheControl(t *testing.T) {
 				t.Fatalf("GET %s: status %d, Cache-Control %q, want 200 with %q or a 302 with no-store: %.200s", what, resp.StatusCode, resp.Header.Get("Cache-Control"), want, body)
 			}
 		}
-		privTag, pubTag := sha256Hex(privBody), sha256Hex(pubBody)
-		check(t, "a file of a private repo", "/maven/"+priv+"/"+privJar, reader, privTag, "private")
-		check(t, "a file of a public repo", "/maven/"+pub+"/"+pubJar, nil, pubTag, "")
-		check(t, "a private member's file through a public group", "/maven/"+mixed+"/"+privJar, reader, privTag, "private")
-		check(t, "a public member's file through a group with a private member", "/maven/"+mixed+"/"+pubJar, nil, pubTag, "private")
-		check(t, "a file of a group of public members", "/maven/"+open+"/"+pubJar, nil, pubTag, "")
+		check(t, "a file of a private repo", "/maven/"+priv+"/"+privJar, reader, "private")
+		check(t, "a file of a public repo", "/maven/"+pub+"/"+pubJar, nil, "")
+		check(t, "a private member's file through a public group", "/maven/"+mixed+"/"+privJar, reader, "private")
+		check(t, "a public member's file through a group with a private member", "/maven/"+mixed+"/"+pubJar, nil, "private")
+		check(t, "a file of a group of public members", "/maven/"+open+"/"+pubJar, nil, "")
 
 		// A read IP rule makes a public repo private: not every address reads it. The rule allows
 		// every address, so the test client reads.
 		putIPRules(t, s, pub, ipRules{Read: []ipRule{{Kind: "cidr", Value: "0.0.0.0/0"}, {Kind: "cidr", Value: "::/0"}}, Publish: []ipRule{}})
-		check(t, "a file of a public repo with a read IP rule", "/maven/"+pub+"/"+pubJar, nil, pubTag, "private")
-		check(t, "a file of a group whose public member has a read IP rule", "/maven/"+open+"/"+pubJar, nil, pubTag, "private")
+		check(t, "a file of a public repo with a read IP rule", "/maven/"+pub+"/"+pubJar, nil, "private")
+		check(t, "a file of a group whose public member has a read IP rule", "/maven/"+open+"/"+pubJar, nil, "private")
 	})
 }

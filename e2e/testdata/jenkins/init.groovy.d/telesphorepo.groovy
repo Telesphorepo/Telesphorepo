@@ -1,7 +1,7 @@
 // Runs at each start of the Jenkins of TestCLIJenkins. The Jenkins URL is E2E_JENKINS_URL, so the
 // issuer of the OpenID Connect Provider plugin is E2E_JENKINS_URL + "oidc" and each job URL starts
-// with it. The credential telesphorepo-id-token is the "OpenID Connect id token" that the
-// Jenkinsfiles of the server bind to OIDC_TOKEN, with the audience E2E_AUDIENCE (the server).
+// with it. The credential E2E_CREDENTIAL is the "OpenID Connect id token" that the Jenkinsfiles
+// of the server bind to OIDC_TOKEN, with the audience E2E_AUDIENCE (the server).
 import com.cloudbees.plugins.credentials.CredentialsScope
 import com.cloudbees.plugins.credentials.SystemCredentialsProvider
 import com.cloudbees.plugins.credentials.domains.Domain
@@ -20,9 +20,10 @@ def loc = JenkinsLocationConfiguration.get()
 loc.setUrl(System.getenv('E2E_JENKINS_URL'))
 loc.save()
 
+def id = System.getenv('E2E_CREDENTIAL')
 def store = SystemCredentialsProvider.getInstance().getStore()
-if (store.getCredentials(Domain.global()).every { it.id != 'telesphorepo-id-token' }) {
-    def c = new IdTokenStringCredentials(CredentialsScope.GLOBAL, 'telesphorepo-id-token', 'Telesphorepo')
+if (store.getCredentials(Domain.global()).every { it.id != id }) {
+    def c = new IdTokenStringCredentials(CredentialsScope.GLOBAL, id, 'Telesphorepo')
     c.setAudience(System.getenv('E2E_AUDIENCE'))
     store.addCredentials(Domain.global(), c)
 }

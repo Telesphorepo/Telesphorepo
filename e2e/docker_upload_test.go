@@ -65,6 +65,7 @@ func TestDockerUploadHost(t *testing.T) {
 		token := func() string { return PublishToken(t, s, "pusher", r) }
 		files, manifestHex := ociLayout(t, "/layout", rawRandom(t, 5<<20))
 
+		s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"docker.direct_uploads": false, "docker.upload_url": ""}, s.Admin(), nil)
 		var hosts map[string]string
 		s.MustAPI(t, http.MethodGet, "/docker/hosts", nil, nil, &hosts)
 		if hosts["registry"] != mainHost || len(hosts) != 1 {

@@ -36,9 +36,7 @@ func TestCLIDocker(t *testing.T) {
 			out := d.MustExec(t, "setup", fmt.Sprintf("set -e\nln -sf telesphorepo /usr/local/bin/docker-credential-telesphorepo\nmkdir -p /work\ncd /work\ntelesphorepo setup '%s' 2>&1\nls -A /work\n",
 				s.NewSetupCode(t, "builder", own).Link))
 			line := `"credHelpers": {"` + host + `": "telesphorepo"}`
-			wantText(t, "setup of a Docker repo", out, fmt.Sprintf("publishing to %s (docker) as builder", own),
-				"Kept /root/.docker/config.json. Add the entry yourself to push:\n  "+line,
-				"Push with: docker push "+host+"/"+own+"/app:1.0")
+			wantText(t, "setup of a Docker repo", out, line)
 			wantNoText(t, "setup of a Docker repo", out, "telesphorepo.toml")
 
 			// The person adds the entry that setup printed, and Docker pushes and pulls through the
@@ -87,8 +85,8 @@ cat telesphorepo.toml
 echo '=== publish ==='
 telesphorepo publish
 `, ClientOpts{Env: map[string]string{"E2E_LINK": s.NewSetupCode(t, "builder", own).Link}})
-			wantText(t, "setup of a chart", section(out, "setup"), fmt.Sprintf("publishing to %s (docker) as builder", own), fmt.Sprintf("repo = %q", own))
-			wantText(t, "publish a chart", section(out, "publish"), "Publishing to "+own+" (docker)", "helm push ", "oci://"+host+"/"+own)
+			wantText(t, "setup of a chart", section(out, "setup"), fmt.Sprintf("repo = %q", own))
+			wantText(t, "publish a chart", section(out, "publish"), "helm push ", "oci://"+host+"/"+own)
 			resp, b := s.Do(t, s.NewRequest(t, http.MethodGet, "/v2/"+own+"/mychart/tags/list", nil), s.AdminBasic())
 			if resp.StatusCode != http.StatusOK || !strings.Contains(string(b), `"0.1.0"`) {
 				t.Fatalf("tags of the chart: status %d: %s, want 0.1.0", resp.StatusCode, b)

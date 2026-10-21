@@ -186,7 +186,11 @@ func (p Policy) refuse(w http.ResponseWriter, r *http.Request, d access.Decision
 		p.Errors(w, r, d)
 		return
 	}
-	httpx.Error(w, r, d.Status, d.Message)
+	doc := httpx.Blank(d.Status, d.Message)
+	if d.Code != "" {
+		doc = doc.With(map[string]any{"code": d.Code})
+	}
+	httpx.WriteProblem(w, r, doc)
 }
 
 // needs returns the server permissions of the policy: Perm, or AnyPerm.

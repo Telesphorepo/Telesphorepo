@@ -17,13 +17,15 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/Telesphorepo/Telesphorepo/internal/clidist"
 )
 
 // Programs of this repo that the tests build on the host for Linux on the CPU of the test, to copy
 // into containers: the CLI, and server binaries of a given version, change log and CLI archives.
 
 // cliArchiveName is the name of the CLI archive of the test containers' OS and CPU on a server.
-var cliArchiveName = "telesphorepo_linux_" + runtime.GOARCH + ".tar.gz"
+var cliArchiveName = clidist.Archive("linux", runtime.GOARCH)
 
 // repoRoot is the root folder of this repo (the tests run in e2e/).
 func repoRoot(t testing.TB) string {
@@ -139,7 +141,7 @@ func BuildServerWith(t testing.TB, version, changes, cli string, files map[strin
 		archive := CLIArchive(t, cli)
 		sum := sha256.Sum256(archive)
 		overlay["internal/clidist/dist/"+cliArchiveName] = archive
-		overlay["internal/clidist/dist/SHA256SUMS"] = []byte(hex.EncodeToString(sum[:]) + "  " + cliArchiveName + "\n")
+		overlay["internal/clidist/dist/"+clidist.SumsFile] = []byte(hex.EncodeToString(sum[:]) + "  " + cliArchiveName + "\n")
 	}
 	return goBuild(t, "./cmd/telesphorepo-server", version, overlay)
 }

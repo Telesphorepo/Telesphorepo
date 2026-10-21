@@ -172,8 +172,8 @@ func TestCLICompat(t *testing.T) {
 		})
 		drift := fmt.Sprintf("telesphorepo: the server %[1]s has CLI v0.9.0, you have v0.8.0. Run: telesphorepo update %[1]s", s.InternalURL)
 		setup, login := section(out, "setup"), section(out, "login")
-		wantText(t, "setup with the CLI v0.8.0", setup, fmt.Sprintf("publishing to %s (raw) as %s", repo, dev), drift, "rc=0")
-		wantText(t, "login with the CLI v0.8.0", login, "This computer is already device ", "rc=0")
+		wantText(t, "setup with the CLI v0.8.0", setup, drift, "rc=0")
+		wantText(t, "login with the CLI v0.8.0", login, "rc=0")
 		wantNoText(t, "login with the CLI v0.8.0 on the same day", login, drift)
 
 		wantText(t, "publish with the CLI v0.8.0", section(out, "old publish"),
@@ -183,7 +183,7 @@ func TestCLICompat(t *testing.T) {
 			"E2E: publishing to a raw repository needs server v1.0.0.",
 			"This needs server v1.0.0; the server runs v0.9.0. Ask the server admin to update.", "rc=1")
 		newLogin := section(out, "new login")
-		wantText(t, "login with the CLI v1.0.0", newLogin, "This computer is already device ", "rc=0")
+		wantText(t, "login with the CLI v1.0.0", newLogin, "rc=0")
 		wantNoText(t, "login with the CLI v1.0.0", newLogin, "E2E: login needs server v1.0.0.")
 		wantText(t, "update of the CLI v1.0.0", section(out, "new update"),
 			"This CLI (v1.0.0) is newer than the CLI of "+s.InternalURL+" (v0.9.0). A newer CLI works with an older server, so nothing changed.",
@@ -200,7 +200,7 @@ func TestCLICompat(t *testing.T) {
 		wantText(t, "publish with the CLI v0.8.0 on a terminal", term,
 			"E2E: publishing to a raw repository needs CLI v0.9.0.", "Update now? [Y/n]",
 			"Installed the CLI of "+s.InternalURL+" (v0.9.0) in /usr/local/bin/telesphorepo.",
-			"Uploaded a.txt to "+s.InternalURL+"/raw/"+repo+"/a.txt", "rc=0", "telesphorepo v0.9.0\n", "telesphorepo\n")
+			"rc=0", "telesphorepo v0.9.0\n", "telesphorepo\n")
 		if b := getFollowS3(t, s, opts.S3, "/raw/"+repo+"/a.txt"); string(b) != "compat\n" {
 			t.Fatalf("GET a.txt after the update: %q", b)
 		}

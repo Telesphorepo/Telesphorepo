@@ -160,6 +160,8 @@ func TestCompressAPI(t *testing.T) {
 		if ce := plainResp.Header.Get("Content-Encoding"); ce != "" {
 			t.Fatalf("GET /api/formats without Accept-Encoding: Content-Encoding %q", ce)
 		}
+		// The server compresses an answer of 1 KiB or more (gzipMin in internal/httpx/compress.go;
+		// the server does not expose it).
 		if !json.Valid(plain) || len(plain) < 1024 {
 			t.Fatalf("GET /api/formats: %d bytes, want valid JSON of 1 KiB or more:\n%s", len(plain), plain)
 		}
@@ -186,7 +188,8 @@ func TestCompressAPI(t *testing.T) {
 			t.Fatalf("GET /api/formats with gzip;q=0: Content-Encoding %q", ce)
 		}
 
-		// A small answer stays plain: the refusal of an anonymous /api/me.
+		// An answer under gzipMin (1 KiB, internal/httpx/compress.go) stays plain: the refusal of
+		// an anonymous /api/me.
 		req, _ := http.NewRequest(http.MethodGet, s.URL+"/api/me", nil)
 		req.Header.Set("Accept-Encoding", "gzip")
 		r, err := plainClient.Do(req)

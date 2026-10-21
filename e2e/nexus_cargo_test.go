@@ -33,12 +33,16 @@ cargo publish --registry nx --no-verify
 	if code != 0 {
 		t.Fatalf("cargo publish to the Nexus cargo repo: exit %d\n%s", code, out)
 	}
+	// Nexus lists the two crates once it has stored them.
 	var paths []string
 	deadline := time.Now().Add(2 * time.Minute)
 	for {
 		paths = n.assetPaths(t, src)
-		if len(paths) >= 2 || time.Now().After(deadline) {
+		if len(paths) >= 2 {
 			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the Nexus cargo repo %s lists %d assets after 2 minutes, want the 2 crates: %v", src, len(paths), paths)
 		}
 		time.Sleep(2 * time.Second)
 	}

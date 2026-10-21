@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"net/url"
 	"strings"
 )
 
@@ -26,14 +27,17 @@ func pyNames() (string, string) {
 }
 
 // pyIndex is the simple index URL of repo on s for a client container, with user and pass in
-// the URL ("" for none). It is http, so pip needs PIP_TRUSTED_HOST=s.Alias: pip ignores an http
-// index on any host but localhost (SECURE_ORIGINS in pip/_internal/network/session.py).
+// the URL ("" for none). On an http server pip needs PIP_TRUSTED_HOST=s.Alias: pip ignores an
+// http index on any host but localhost (SECURE_ORIGINS in pip/_internal/network/session.py).
 func pyIndex(s *Server, repo, user, pass string) string {
-	host := s.Alias + ":8080"
-	if user != "" {
-		host = user + ":" + pass + "@" + host
+	u, err := url.Parse(s.InternalURL)
+	if err != nil {
+		panic(err)
 	}
-	return "http://" + host + "/pypi/" + repo + "/simple/"
+	if user != "" {
+		u.User = url.UserPassword(user, pass)
+	}
+	return u.JoinPath("pypi", repo, "simple").String() + "/"
 }
 
 // pySetuptoolsProject is a project at dir that python -m build, uv build and twine take: module

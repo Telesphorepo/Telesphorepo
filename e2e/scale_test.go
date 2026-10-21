@@ -40,7 +40,13 @@ func TestScale(t *testing.T) {
 			t.FailNow()
 		}
 	}
-	small, large := results[100_000], results[1_000_000]
+	small, okSmall := results[100_000]
+	large, okLarge := results[1_000_000]
+	if !okSmall || !okLarge {
+		// A -run filter on one size ran only that size; a failed size stopped the test above.
+		t.Logf("no comparison: it needs the results of both sizes (have 100000: %v, 1000000: %v)", okSmall, okLarge)
+		return
+	}
 	t.Logf("%-14s %12s %12s %12s", "operation", "p95 100k", "p95 1M", "limit")
 	for _, op := range scaleOps {
 		a, b := small[op], large[op]
@@ -59,12 +65,12 @@ func TestScale(t *testing.T) {
 // After it stops, a one-shot container of the same image runs "seed n" on the volume, and a
 // second server starts on the seeded volume for the measurements.
 func scaleRun(t *testing.T, n int) map[string]time.Duration {
-	vol := RandName("telesphorepo-scale")
+	vol := RandName(scaleVolumePrefix)
 	t.Cleanup(func() { removeVolume(t, vol) })
 
 	first := StartServer(t, ServerOpts{DataVolume: vol})
 	const user, pass = "scale", "scale-password-1"
-	first.CreateUser(t, user, pass, AllServerPerms...)
+	first.CreateUser(t, user, pass, first.ServerPerms(t)...)
 	auth := Basic{user, first.CreateToken(t, user, pass, "scale")}
 	terminate(t, first)
 
@@ -178,33 +184,12 @@ type scaleRepo struct {
 	Format string `json:"format"`
 }
 
-// scaleRepos lists every repo, following the next cursor when the list is paginated.
+// scaleRepos lists every repo that auth can see: GET /api/repos answers one array of all of them.
 func scaleRepos(t *testing.T, s *Server, auth Auth) []scaleRepo {
 	t.Helper()
 	var all []scaleRepo
-	after := ""
-	for {
-		st, b := s.API(t, http.MethodGet, "/api/repos?limit=100&after="+url.QueryEscape(after), nil, auth)
-		if st != http.StatusOK {
-			t.Fatalf("list repos: status %d: %s", st, b)
-		}
-		var rows []scaleRepo
-		if err := json.Unmarshal(b, &rows); err == nil {
-			return append(all, rows...)
-		}
-		var p struct {
-			Items []scaleRepo `json:"items"`
-			Next  *string     `json:"next"`
-		}
-		if err := json.Unmarshal(b, &p); err != nil {
-			t.Fatalf("decode repos %s: %v", b, err)
-		}
-		all = append(all, p.Items...)
-		if p.Next == nil || *p.Next == "" {
-			return all
-		}
-		after = *p.Next
-	}
+	s.MustAPI(t, http.MethodGet, "/api/repos", nil, auth, &all)
+	return all
 }
 
 // waitSettled waits until no repo reports pending background work in /api/repos/{name}/status,

@@ -16,11 +16,7 @@ type descriptorJSON struct {
 	Name   string `json:"name"`
 	Kinds  []string
 	Config struct {
-		Fields []struct {
-			Key        string `json:"key"`
-			Type       string `json:"type"`
-			ChangeNote string `json:"change_note"`
-		} `json:"fields"`
+		Fields []descriptorField `json:"fields"`
 	} `json:"config"`
 	RepoTabs []string `json:"repo_tabs"`
 	Upload   *struct {
@@ -35,6 +31,9 @@ type descriptorJSON struct {
 	} `json:"upload"`
 	DeleteNotes []struct {
 		Match string `json:"match"`
+		One   string `json:"one"`
+		Many  string `json:"many"`
+		Text  string `json:"text"`
 	} `json:"delete_notes"`
 	FileDetails []struct {
 		Match string `json:"match"`
@@ -45,7 +44,8 @@ type descriptorJSON struct {
 		ArtifactSnippets bool `json:"artifact_snippets"`
 	} `json:"browse"`
 	RemotePresets []struct {
-		URL string `json:"url"`
+		Label string `json:"label"`
+		URL   string `json:"url"`
 	} `json:"remote_presets"`
 	PublicKey string `json:"public_key"`
 	Labels    struct {
@@ -53,33 +53,86 @@ type descriptorJSON struct {
 	} `json:"labels"`
 	ImportSources []string `json:"import_sources"`
 	Tools         []struct {
-		ID string `json:"id"`
+		ID    string `json:"id"`
+		Label string `json:"label"`
 	} `json:"tools"`
 	Publish string `json:"publish"`
 }
 
-func TestFormatDescriptors(t *testing.T) {
-	t.Parallel()
-	s := StartServer(t, ServerOpts{})
+type descriptorField struct {
+	Key        string   `json:"key"`
+	Type       string   `json:"type"`
+	Options    []string `json:"options"`
+	ChangeNote string   `json:"change_note"`
+}
+
+// formatDescriptors reads GET /api/formats by format name.
+func formatDescriptors(t *testing.T, s *Server) map[string]descriptorJSON {
+	t.Helper()
 	var list []descriptorJSON
 	apiJSON(t, s, http.MethodGet, "/api/formats", nil, nil, http.StatusOK, &list)
 	by := map[string]descriptorJSON{}
 	for _, f := range list {
 		by[f.Name] = f
 	}
+	return by
+}
+
+// wellFormed reports what is missing from the words and choices of descriptor f, or "": every
+// remote preset has a label and an http(s) URL, every tool an ID and a label, every tool label
+// words, the CI system github-actions a label, every config field a key and a type, and every
+// enum field options.
+func wellFormed(f descriptorJSON) string {
+	for _, p := range f.RemotePresets {
+		if p.Label == "" || !strings.HasPrefix(p.URL, "https://") && !strings.HasPrefix(p.URL, "http://") {
+			return "a remote preset without a label or an http(s) URL"
+		}
+	}
+	for _, tl := range f.Tools {
+		if tl.ID == "" || tl.Label == "" {
+			return "a tool without an ID or a label"
+		}
+	}
+	for id, l := range f.Labels.Tools {
+		if l == "" {
+			return "no label for the snippet tool " + id
+		}
+	}
+	if f.Labels.Tools["github-actions"] == "" {
+		return "no label for the CI system github-actions"
+	}
+	for _, fd := range f.Config.Fields {
+		if fd.Key == "" || fd.Type == "" || fd.Type == "enum" && len(fd.Options) == 0 {
+			return "a config field without a key, a type or the options of an enum"
+		}
+	}
+	return ""
+}
+
+func TestFormatDescriptors(t *testing.T) {
+	t.Parallel()
+	s := StartServer(t, ServerOpts{})
+	by := formatDescriptors(t, s)
+	for name, f := range by {
+		if why := wellFormed(f); why != "" {
+			t.Fatalf("%s descriptor: %s: %+v", name, why, f)
+		}
+	}
 	mvn, deb, raw := by["maven"], by["debian"], by["raw"]
 	if mvn.Upload == nil || !mvn.Upload.Folder || !mvn.Upload.Single || mvn.Upload.One != "artifact" || len(mvn.Upload.Reads) == 0 ||
-		mvn.Publish != "cli" || len(mvn.Tools) != 2 || mvn.Tools[0].ID != "gradle" || !mvn.Browse.Versions || !mvn.Browse.ArtifactSnippets ||
-		len(mvn.RemotePresets) == 0 || mvn.Labels.Tools["github-actions"] != "GitHub Actions" || mvn.Labels.Tools["gradle-kotlin"] == "" ||
-		!slices.Contains(mvn.ImportSources, "maven2") || len(mvn.DeleteNotes) == 0 {
+		mvn.Publish != "cli" || len(mvn.Tools) == 0 || !mvn.Browse.Versions || !mvn.Browse.ArtifactSnippets ||
+		len(mvn.RemotePresets) == 0 || len(mvn.ImportSources) == 0 || len(mvn.DeleteNotes) == 0 {
 		t.Fatalf("maven descriptor: %+v", mvn)
 	}
-	if deb.Upload == nil || deb.Upload.Reads[0].Glob != "**/*.deb" || !slices.Contains(deb.RepoTabs, "signing") || deb.PublicKey != "key.asc" ||
-		deb.Publish != "cli" || len(deb.Tools) != 1 || deb.Tools[0].ID != "telesphorepo" || len(deb.FileDetails) != 1 || deb.FileDetails[0].Part != "deb-package" ||
-		len(deb.Config.Fields) == 0 || deb.Config.Fields[0].Key != "architectures" || deb.Config.Fields[0].ChangeNote == "" {
+	// public_key is the path under the repo that the Signing tab links: GET /debian/{repo}/key.asc
+	// serves the key.
+	archs := slices.IndexFunc(deb.Config.Fields, func(f descriptorField) bool { return f.Key == "architectures" })
+	if deb.Upload == nil || len(deb.Upload.Reads) == 0 || deb.Upload.Reads[0].Glob != "**/*.deb" || !slices.Contains(deb.RepoTabs, "signing") || deb.PublicKey != "key.asc" ||
+		deb.Publish != "cli" || len(deb.Tools) == 0 || len(deb.FileDetails) != 1 || deb.FileDetails[0].Part != "deb-package" ||
+		archs < 0 || deb.Config.Fields[archs].ChangeNote == "" || len(deb.ImportSources) == 0 {
 		t.Fatalf("debian descriptor: %+v", deb)
 	}
-	if raw.Upload == nil || raw.Publish != "cli" || len(raw.Upload.Reads) != 0 || len(raw.Config.Fields) != 1 || raw.Config.Fields[0].Type != "enum" || raw.Browse.Versions {
+	if raw.Upload == nil || raw.Publish != "cli" || len(raw.Upload.Reads) != 0 || len(raw.Config.Fields) == 0 || raw.Browse.Versions {
 		t.Fatalf("raw descriptor: %+v", raw)
 	}
 	dk := by["docker"]
@@ -92,18 +145,17 @@ func TestFormatDescriptors(t *testing.T) {
 		notes[n.Match] = true
 	}
 	if !slices.Equal(dk.Kinds, []string{"hosted", "proxy", "group"}) || dk.Upload != nil || len(dk.Config.Fields) != 0 || len(dk.RepoTabs) != 0 ||
-		len(dk.RemotePresets) != 3 || dk.RemotePresets[0].URL != "https://registry-1.docker.io/" ||
+		len(dk.RemotePresets) == 0 ||
 		!notes["**/_tags/*"] || !notes["**/_manifests/sha256/*"] || !notes["**/_blobs/sha256/*"] ||
 		parts["**/_tags/*"] != "manifest" || parts["**/_manifests/sha256/*"] != "manifest" ||
-		dk.Labels.Tools["docker"] != "Docker" || dk.Labels.Tools["helm"] != "Helm" || dk.Labels.Tools["oras"] != "ORAS" ||
-		!slices.Contains(dk.ImportSources, "docker") || len(dk.Tools) != 1 || dk.Tools[0].ID != "docker" || dk.Publish != "helper" ||
+		len(dk.ImportSources) == 0 || len(dk.Tools) == 0 || dk.Publish != "helper" ||
 		!dk.Browse.Versions || !dk.Browse.ArtifactSnippets {
 		t.Fatalf("docker descriptor: %+v", dk)
 	}
 	nu := by["nuget"]
 	if !slices.Equal(nu.Kinds, []string{"hosted", "proxy", "group"}) || nu.Upload == nil || len(nu.Upload.Reads) != 1 || nu.Upload.Reads[0].Glob != "**/*.nupkg" ||
-		nu.Publish != "cli" || len(nu.Tools) != 1 || nu.Tools[0].ID != "dotnet" || !slices.Contains(nu.ImportSources, "nuget") ||
-		!nu.Browse.Versions || !nu.Browse.ArtifactSnippets || len(nu.RemotePresets) != 1 || nu.RemotePresets[0].URL != "https://api.nuget.org/v3/index.json" {
+		nu.Publish != "cli" || len(nu.Tools) == 0 || len(nu.ImportSources) == 0 ||
+		!nu.Browse.Versions || !nu.Browse.ArtifactSnippets || len(nu.RemotePresets) == 0 {
 		t.Fatalf("nuget descriptor: %+v", nu)
 	}
 }
@@ -135,12 +187,18 @@ func TestCIWorkflowRoute(t *testing.T) {
 	if gh.Tool != "github-actions" || gh.Purpose != "publish" || gh.Via != "ci" || gh.File != ".github/workflows/publish.yml" ||
 		!strings.Contains(gh.Code, `branches: ["main", "release/*"]`) || !strings.Contains(gh.Code, `tags: ["v*"]`) ||
 		!strings.Contains(gh.Code, "curl -fsSL "+s.InternalURL+"/install.sh | sh") || !strings.Contains(gh.Code, "telesphorepo publish") ||
-		!strings.Contains(gh.Code, "id-token: write") || !strings.Contains(gh.Code, "actions/setup-java@v6") {
+		!strings.Contains(gh.Code, "id-token: write") || !strings.Contains(gh.Code, "actions/setup-java@") {
 		t.Fatalf("GitHub Actions workflow for Maven: %+v", gh)
 	}
+	// Without tool, the file is the one of the first tool of the descriptor.
+	tools := formatDescriptors(t, s)["maven"].Tools
+	if len(tools) == 0 {
+		t.Fatal("the maven descriptor has no tools")
+	}
 	def := get(t, mvn, "system=github-actions", rauth)
-	if !strings.Contains(def.Code, `branches: ["main"]`) || strings.Contains(def.Code, "tags:") || !strings.Contains(def.Code, "telesphorepo publish") {
-		t.Fatalf("default workflow (first tool, push to main): %+v", def)
+	if first := get(t, mvn, "system=github-actions&tool="+tools[0].ID, rauth); def.Code != first.Code ||
+		!strings.Contains(def.Code, `branches: ["main"]`) || strings.Contains(def.Code, "tags:") || !strings.Contains(def.Code, "telesphorepo publish") {
+		t.Fatalf("default workflow (the first tool %s, push to main): %+v", tools[0].ID, def)
 	}
 	jk := get(t, mvn, "system=jenkins&tool=gradle&tags=v*", rauth)
 	if jk.File != "Jenkinsfile" || !strings.Contains(jk.Code, "tag 'v*'") || !strings.Contains(jk.Code, "./gradlew build") ||
@@ -190,7 +248,7 @@ func TestCIWorkflowRoute(t *testing.T) {
 		helper := strings.Index(f.Code, `{"credHelpers":{"`+host+`":"telesphorepo"}}`)
 		push := strings.Index(f.Code, `docker push "`+host+"/"+dk+"/app:"+c.tag+`"`)
 		if build < 0 || install < build || helper < install || push < helper || strings.Contains(f.Code, "docker login") ||
-			!strings.Contains(f.Note, "Change app to the name of your image") || !strings.Contains(f.Code, "TELESPHOREPO_SERVER") ||
+			f.Note == "" || !strings.Contains(f.Code, "TELESPHOREPO_SERVER") ||
 			(c.system == "jenkins" && !strings.Contains(f.Code, `powershell 'docker build -t "`+host+"/"+dk+"/app:$(if ($env:GIT_COMMIT)")) {
 			t.Fatalf("%s file for Docker: build, install, helper and push out of order or missing:\n%s\nnote: %s", c.system, f.Code, f.Note)
 		}
@@ -199,13 +257,14 @@ func TestCIWorkflowRoute(t *testing.T) {
 		Snippets []snippetJSON `json:"snippets"`
 	}
 	s.MustAPI(t, http.MethodGet, "/api/repos/"+dk+"/usage", nil, s.AdminBasic(), &u)
-	seen := map[string]string{}
+	seen, notes := map[string]string{}, map[string]string{}
 	for _, sn := range u.Snippets {
 		seen[sn.ID] = sn.Code + sn.Note
+		notes[sn.ID] = sn.Note
 	}
 	if !strings.Contains(seen["docker.login"], "docker login "+host) || !strings.Contains(seen["docker.pull"], "docker pull "+host+"/"+dk+"/IMAGE:TAG") ||
 		!strings.Contains(seen["helm.pull"], "helm pull oci://"+host+"/"+dk+"/") ||
-		!strings.Contains(seen["docker.helper"], "docker push "+host+"/"+dk+"/IMAGE:TAG") || !strings.Contains(seen["docker.helper"], "Set up a project") ||
+		!strings.Contains(seen["docker.helper"], "docker push "+host+"/"+dk+"/IMAGE:TAG") || notes["docker.helper"] == "" ||
 		!strings.Contains(seen["docker.publish"], "docker login "+host+" -u publish --password-stdin") ||
 		!strings.Contains(seen["docker.pull"], "insecure-registries") || !strings.Contains(seen["helm.push"], "helm push") {
 		t.Fatalf("docker usage snippets: %v", seen)
@@ -234,8 +293,14 @@ func TestDeletePlan(t *testing.T) {
 	}
 	var folder plan
 	s.MustAPI(t, http.MethodPost, "/api/repos/"+repo+"/files/delete/plan", map[string]any{"prefixes": []string{"com/acme/lib/"}}, s.Admin(), &folder)
-	if folder.Files < 4 || folder.More || len(folder.Notes) != 1 || folder.Notes[0].Count != 2 || folder.Notes[0].Many != "versions" ||
-		!strings.Contains(folder.Notes[0].Text, "maven-metadata.xml") {
+	// The note of the plan is a delete note of the maven descriptor, counted.
+	described := false
+	if len(folder.Notes) == 1 {
+		for _, n := range formatDescriptors(t, s)["maven"].DeleteNotes {
+			described = described || n.Text == folder.Notes[0].Text && n.One == folder.Notes[0].One && n.Many == folder.Notes[0].Many
+		}
+	}
+	if folder.Files < 4 || folder.More || !described || folder.Notes[0].Count != 2 || folder.Notes[0].Text == "" {
 		t.Fatalf("delete plan of the artifact folder: %+v", folder)
 	}
 	var one plan

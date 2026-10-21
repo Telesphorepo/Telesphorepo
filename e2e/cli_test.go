@@ -29,7 +29,7 @@ func TestZeroConfigStartup(t *testing.T) {
 		SecondFactorRequired bool     `json:"second_factor_required"`
 	}
 	s.MustAPI(t, http.MethodGet, "/api/me", nil, sess, &me)
-	if me.Username != "admin" || strings.Join(me.Permissions, ",") != strings.Join(AllServerPerms, ",") || !me.SecondFactorRequired {
+	if me.Username != "admin" || strings.Join(me.Permissions, ",") != strings.Join(s.ServerPerms(t), ",") || !me.SecondFactorRequired {
 		t.Fatalf("/api/me = %+v, want admin with every server permission and second_factor_required", me)
 	}
 

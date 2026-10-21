@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/cookiejar"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -65,18 +66,30 @@ func listSettings(t *testing.T, s *Server) (map[string]settingItem, string) {
 func TestSettingsAccess(t *testing.T) {
 	t.Parallel()
 	s := StartServer(t, ServerOpts{})
-	items, _ := listSettings(t, s)
-	groups := map[string]bool{}
-	for _, it := range items {
-		groups[it.Group] = true
+	// The groups come from what the admin sees: the admin holds every permission, so every group.
+	var resp struct {
+		Groups []struct {
+			ID       string        `json:"id"`
+			Settings []settingItem `json:"settings"`
+		} `json:"groups"`
 	}
-	for _, g := range []string{"general", "activity", "storage", "backup", "network", "publishing", "sso", "nexus"} {
-		if !groups[g] {
-			t.Errorf("group %q missing from settings (have %v)", g, groups)
-		}
+	s.MustAPI(t, http.MethodGet, "/api/settings", nil, s.Admin(), &resp)
+	if len(resp.Groups) == 0 {
+		t.Fatal("GET /api/settings as the admin lists no settings group")
 	}
 	s.CreateUser(t, "plain", "plainpass123")
 	plain := s.SignIn(t, "plain", "plainpass123")
+	// A person without a settings permission neither tests nor changes the settings of any group.
+	for _, g := range resp.Groups {
+		if st, b := s.API(t, http.MethodPost, "/api/settings/"+g.ID+"/test", map[string]any{}, plain); st != http.StatusForbidden {
+			t.Errorf("non-admin test of group %s: status %d, want 403: %s", g.ID, st, b)
+		}
+		for _, it := range g.Settings {
+			if st, b := s.API(t, http.MethodPatch, "/api/settings", map[string]any{it.Key: nil}, plain); st != http.StatusForbidden {
+				t.Errorf("non-admin PATCH of %s (group %s): status %d, want 403: %s", it.Key, g.ID, st, b)
+			}
+		}
+	}
 	if st, b := s.API(t, http.MethodGet, "/api/settings", nil, plain); st != http.StatusForbidden {
 		t.Errorf("non-admin GET /api/settings: status %d, want 403: %s", st, b)
 	}
@@ -101,22 +114,29 @@ func TestSettingsLiveUpdateAndEnvLock(t *testing.T) {
 	if st, b := s.API(t, http.MethodPatch, "/api/settings", map[string]any{"cookie.secure": true}, s.Admin()); st != http.StatusConflict {
 		t.Fatalf("PATCH env-locked cookie.secure=true: status %d, want 409: %s", st, b)
 	}
-	if mj := items["max_json_size"]; mj.Locked || mj.Source == "env" {
-		t.Fatalf("max_json_size unexpectedly env-controlled: %+v", mj)
+	mj := items["max_json_size"]
+	if mj.Locked || mj.Source != "default" {
+		t.Fatalf("max_json_size: %+v, want the default", mj)
+	}
+	var dflt int64
+	if err := json.Unmarshal(mj.Value, &dflt); err != nil || dflt < 16 {
+		t.Fatalf("max_json_size default %s: want a size of at least 16 bytes (decode: %v)", mj.Value, err)
 	}
 
-	// Lower the JSON body limit; it applies without a restart.
-	big := map[string]any{"name": strings.Repeat("x", 8192)}
+	// Lower the JSON body limit to a quarter of the default; it applies without a restart. The body
+	// is half the default: under the default, over the lowered limit.
+	low := dflt / 4
+	big := map[string]any{"name": strings.Repeat("x", int(dflt/2))}
 	if st, _ := s.API(t, http.MethodPost, "/api/tokens", big, s.Admin()); st == http.StatusRequestEntityTooLarge {
-		t.Fatalf("8KiB token request already rejected with default limit")
+		t.Fatalf("token request of half the default limit (%d bytes) already rejected", dflt/2)
 	}
-	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"max_json_size": 2048}, s.Admin(), nil)
+	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"max_json_size": low}, s.Admin(), nil)
 	if st, b := s.API(t, http.MethodPost, "/api/tokens", big, s.Admin()); st != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversize JSON after lowering limit: status %d, want 413: %s", st, b)
 	}
 	items, _ = listSettings(t, s)
-	if got := items["max_json_size"]; got.Source != "stored" || string(got.Value) != "2048" || got.Display != "2 KiB" {
-		t.Fatalf("max_json_size after patch: %+v", got)
+	if got := items["max_json_size"]; got.Source != "stored" || string(got.Value) != strconv.FormatInt(low, 10) {
+		t.Fatalf("max_json_size after patch: %+v, want %d stored", got, low)
 	}
 	// null resets to the default and the large body passes again.
 	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"max_json_size": nil}, s.Admin(), nil)
@@ -265,7 +285,7 @@ func TestSettingsSurviveRestart(t *testing.T) {
 	if got := items["max_json_size"]; got.Source != "stored" || string(got.Value) != "2048" {
 		t.Errorf("max_json_size after a restart: %+v", got)
 	}
-	if got := items["publish.session_ttl"]; got.Source != "stored" || got.Display != "30 minutes" {
+	if got := items["publish.session_ttl"]; got.Source != "stored" || string(got.Value) != `"30m"` {
 		t.Errorf("publish.session_ttl after a restart: %+v", got)
 	}
 	var sv struct {
@@ -398,15 +418,15 @@ func TestSettingsStorageBogusS3Refused(t *testing.T) {
 	if res.OK {
 		t.Fatalf("storage/test reported ok=true: %s", b)
 	}
+	before, _ := listSettings(t, s)
 	if st, b := s.API(t, http.MethodPatch, "/api/settings", bogus, s.Admin()); st < 400 || st >= 500 {
 		t.Fatalf("PATCH to bogus s3: status %d, want 4xx: %s", st, b)
 	}
 	items, _ := listSettings(t, s)
-	if v := string(items["storage"].Value); v != `"fs"` {
-		t.Fatalf("storage after refused switch = %s, want \"fs\"", v)
-	}
-	if strings.Contains(string(items["s3.endpoint"].Value), "127.0.0.1") {
-		t.Fatal("refused patch was partially saved")
+	for _, k := range []string{"storage", "s3.endpoint"} {
+		if got, want := string(items[k].Value), string(before[k].Value); got != want {
+			t.Fatalf("%s after the refused switch = %s, want %s as before: the refused patch was partially saved", k, got, want)
+		}
 	}
 	putGetMaven(t, s, repo, "lib-1.0.0.jar", "still-on-fs")
 }

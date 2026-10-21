@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -108,9 +109,17 @@ func runMain(m *testing.M) int {
 // that is killed cannot, and rootless Podman has no Ryuk to do it, so the next run removes them.
 var e2eLabels = map[string]string{"telesphorepo.e2e": "1"}
 
-// leftoverVolume matches the volumes the harness names with RandName (NewDataVolume, the scale
-// test). The bare "telesphorepo-data" volume of a person's own server never matches.
-var leftoverVolume = regexp.MustCompile(`^telesphorepo-(data|scale)-[0-9a-f]{8}$`)
+// The prefixes of the volumes that the harness names with RandName: NewDataVolume and the scale
+// test.
+const (
+	dataVolumePrefix  = "telesphorepo-data"
+	scaleVolumePrefix = "telesphorepo-scale"
+)
+
+// leftoverVolume matches the volumes the harness names with RandName and a volume prefix. The bare
+// "telesphorepo-data" volume of a person's own server never matches.
+var leftoverVolume = regexp.MustCompile(`^(` + regexp.QuoteMeta(dataVolumePrefix) + `|` + regexp.QuoteMeta(scaleVolumePrefix) +
+	`)-[0-9a-f]{` + strconv.Itoa(2*randNameBytes) + `}$`)
 
 // sweepLeftovers removes the containers, networks and volumes that an earlier killed run left.
 func sweepLeftovers(ctx context.Context) {

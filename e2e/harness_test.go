@@ -301,7 +301,7 @@ const volumeToolImage = "curlimages/curl:8.16.0"
 // removed at test end, after the containers that use it.
 func NewDataVolume(t testing.TB) string {
 	t.Helper()
-	vol := RandName("telesphorepo-data")
+	vol := RandName(dataVolumePrefix)
 	t.Cleanup(func() {
 		if out, err := osexec.Command(Engine.CLI, "volume", "rm", "-f", vol).CombinedOutput(); err != nil {
 			t.Errorf("remove volume %s: %v\n%s", vol, err, out)
@@ -519,6 +519,16 @@ type Problem struct {
 	} `json:"remedy"`
 }
 
+// RefusalCode returns the refusal code of a refusal answer of the route policy: the member
+// "code" of the problem document under /api/, or of the {"error"} body on a format route.
+func RefusalCode(b []byte) string {
+	var r struct {
+		Code string `json:"code"`
+	}
+	_ = json.Unmarshal(b, &r)
+	return r.Code
+}
+
 // Auth decorates a request with credentials. nil means anonymous.
 type Auth interface{ apply(*http.Request) }
 
@@ -730,9 +740,46 @@ func (s *Server) SignIn(t testing.TB, user, pass string) *Session {
 	return sess
 }
 
-// AllServerPerms holds every server permission, in registry order (module start order). A person
-// with all of them is an administrator.
-var AllServerPerms = []string{"repositories.all", "people.manage", "settings.general", "activity.read", "storage.manage", "backup.manage", "network.manage", "signing.manage", "edge.manage", "signin.manage", "nexus.manage"}
+// ServerPerms returns every server permission of the registry of s (GET /api/permissions), in
+// registry order. A person with all of them is an administrator.
+func (s *Server) ServerPerms(t testing.TB) []string {
+	t.Helper()
+	return s.registryPerms(t, "server")
+}
+
+// RepoPerms returns every repository permission of the registry of s, in registry order: the
+// permissions that the All repositories permission holds on each repo.
+func (s *Server) RepoPerms(t testing.TB) []string {
+	t.Helper()
+	return s.registryPerms(t, "repo")
+}
+
+// registryPerms returns the permissions of the subsystems of scope in GET /api/permissions.
+func (s *Server) registryPerms(t testing.TB, scope string) []string {
+	t.Helper()
+	var reg struct {
+		Subsystems []struct {
+			Scope       string `json:"scope"`
+			Permissions []struct {
+				ID string `json:"id"`
+			} `json:"permissions"`
+		} `json:"subsystems"`
+	}
+	s.MustAPI(t, http.MethodGet, "/api/permissions", nil, nil, &reg)
+	var perms []string
+	for _, sub := range reg.Subsystems {
+		if sub.Scope != scope {
+			continue
+		}
+		for _, p := range sub.Permissions {
+			perms = append(perms, p.ID)
+		}
+	}
+	if len(perms) == 0 {
+		t.Fatalf("GET /api/permissions: no %s permission", scope)
+	}
+	return perms
+}
 
 // CreateUser creates a local user with the server permissions perms (none for a plain user).
 // The harness keeps the password, so the publish helpers can sign in as the user.
@@ -819,8 +866,11 @@ func (s *Server) DebianKey(t testing.TB, repo string, auth Auth) string {
 	return string(b)
 }
 
-// RandName returns prefix-<8 hex>, safe for repo, user and alias names.
-func RandName(prefix string) string { return prefix + "-" + randHex(4) }
+// randNameBytes is the number of random bytes of RandName.
+const randNameBytes = 4
+
+// RandName returns prefix-<hex of randNameBytes random bytes>, safe for repo, user and alias names.
+func RandName(prefix string) string { return prefix + "-" + randHex(randNameBytes) }
 
 func randHex(n int) string {
 	b := make([]byte, n)

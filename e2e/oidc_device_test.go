@@ -3,7 +3,6 @@
 package e2e
 
 import (
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/url"
@@ -20,17 +19,16 @@ const oidcDevicePath = "/api/auth/oidc/device"
 func startSSOServer(t *testing.T) (*Keycloak, *Server) {
 	t.Helper()
 	kc := newKeycloak(t)
-	permMap, _ := json.Marshal(map[string][]string{kcAdminGroup: AllServerPerms})
 	s := StartServer(t, ServerOpts{Env: map[string]string{
 		"TR_OIDC_ISSUER":           kc.Issuer,
 		"TR_OIDC_CLIENT_ID":        kcClientID,
 		"TR_OIDC_CLIENT_SECRET":    kcClientSecret,
 		"TR_OIDC_PERMISSION_CLAIM": "groups",
-		"TR_OIDC_PERMISSION_MAP":   string(permMap),
 	}})
 	redirect := s.URL + oidcCallbackPath
 	kc.Start(t, redirect)
-	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"oidc.redirect_url": redirect}, s.Admin(), nil)
+	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"oidc.redirect_url": redirect,
+		"oidc.permission_map": map[string][]string{kcAdminGroup: s.ServerPerms(t)}}, s.Admin(), nil)
 	return kc, s
 }
 
@@ -174,7 +172,8 @@ func TestOIDCDeviceApproval(t *testing.T) {
 
 // TestOIDCDeviceApprovalStale: a provider that ignores prompt=login and max_age returns the old
 // auth_time of its own session, and the callback refuses the approval. The test signs in at
-// Keycloak first, then waits until that sign-in is more than 5 minutes old. t.Parallel lets the
+// Keycloak first, then waits until that sign-in is older than oidc.approval_max_age, which it
+// sets to 20 s. t.Parallel lets the
 // sequential tests of the zone run during the wait.
 func TestOIDCDeviceApprovalStale(t *testing.T) {
 	kc, s := startSSOServer(t)

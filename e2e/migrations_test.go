@@ -5,6 +5,7 @@ package e2e
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -29,16 +30,12 @@ INSERT INTO e2e_probe (note) SELECT 'user ' || username FROM users;
 // TestMigrations: a real upgrade. The server of this tree writes a repo, a user, a grant and a
 // file; a newer build with one more core migration starts on the same data volume, applies only
 // that migration, logs it, and reads every row back; the new table holds the rows of the older
-// build. A build whose applied migration 0001 has another content refuses to start and names the
+// build. A build whose first applied core migration has another content refuses to start and names the
 // component and the file, and the older build refuses the database of the newer one. Neither
 // refusal changes the database: the newer build starts on it again.
 func TestMigrations(t *testing.T) {
 	t.Parallel()
-	const dir, initFile = "internal/db/migrations", "internal/db/migrations/0001_init.sql"
-	initial, err := os.ReadFile(filepath.Join(repoRoot(t), filepath.FromSlash(initFile)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	const dir = "internal/db/migrations"
 	// The probe is the version after the last core migration of this tree.
 	files, err := filepath.Glob(filepath.Join(repoRoot(t), filepath.FromSlash(dir), "*.sql"))
 	if err != nil {
@@ -49,6 +46,15 @@ func TestMigrations(t *testing.T) {
 		names = append(names, filepath.Base(f))
 	}
 	slices.Sort(names)
+	if len(names) == 0 {
+		t.Fatalf("no core migrations in %s", dir)
+	}
+	// The edited build changes the first core migration.
+	initFile := dir + "/" + names[0]
+	initial, err := os.ReadFile(filepath.Join(repoRoot(t), filepath.FromSlash(initFile)))
+	if err != nil {
+		t.Fatal(err)
+	}
 	version := fmt.Sprintf("%04d", len(names)+1)
 	probeName := version + "_e2e_probe.sql"
 	probeFile := dir + "/" + probeName
@@ -88,12 +94,10 @@ func TestMigrations(t *testing.T) {
 	}
 
 	second := StartServer(t, ServerOpts{DataVolume: vol, Files: []ContainerFile{ServerBinary(newer)}})
+	// The newer build applies the probe and nothing else: no core or module migration again.
 	logs := second.Logs(t)
-	if !strings.Contains(logs, `"msg":"applied migration","component":"core","migration":"`+probeName+`"`) {
-		t.Fatalf("the newer build did not log the migration %s:\n%s", probeName, logs)
-	}
-	if strings.Contains(logs, `"migration":"0001_init.sql"`) {
-		t.Fatalf("the newer build applied a migration 0001 again:\n%s", logs)
+	if applied := appliedMigrations(logs); len(applied) != 1 || applied[0] != "core/"+probeName {
+		t.Fatalf("the newer build applied %v, want only core/%s:\n%s", applied, probeName, logs)
 	}
 	readBack(second)
 	stopServer(t, second)
@@ -113,14 +117,32 @@ func TestMigrations(t *testing.T) {
 		}
 	}
 
-	wantRefusal(t, vol, edited, "the database applied the core migration 0001_init.sql, and that file has changed since; an applied migration must not change")
-	wantRefusal(t, vol, older, "the database is from a newer Telesphorepo (core migration "+version+"); run that version or newer")
+	wantRefusal(t, vol, edited, "core", names[0])
+	wantRefusal(t, vol, older, "core migration "+version)
 
 	third := StartServer(t, ServerOpts{DataVolume: vol, Files: []ContainerFile{ServerBinary(newer)}})
-	if logs := third.Logs(t); strings.Contains(logs, `"msg":"applied migration"`) {
-		t.Fatalf("the newer build applied a migration on its own database:\n%s", logs)
+	if logs := third.Logs(t); len(appliedMigrations(logs)) != 0 {
+		t.Fatalf("the newer build applied %v on its own database:\n%s", appliedMigrations(logs), logs)
 	}
 	readBack(third)
+}
+
+// appliedMigrations returns "component/file" of each "applied migration" record of the JSON
+// log lines in logs, in log order.
+func appliedMigrations(logs string) []string {
+	var out []string
+	for line := range strings.Lines(logs) {
+		var rec struct {
+			Msg       string `json:"msg"`
+			Component string `json:"component"`
+			Migration string `json:"migration"`
+		}
+		if json.Unmarshal([]byte(strings.TrimSpace(line)), &rec) != nil || rec.Msg != "applied migration" {
+			continue
+		}
+		out = append(out, rec.Component+"/"+rec.Migration)
+	}
+	return out
 }
 
 // dbColumn returns the first column of every row of query on d.
@@ -156,8 +178,8 @@ func stopServer(t *testing.T, s *Server) {
 }
 
 // wantRefusal runs "telesphorepo-server serve" of the binary bin on data volume vol and wants it to
-// exit with an error whose output holds want.
-func wantRefusal(t *testing.T, vol, bin, want string) {
+// exit with an error whose output names each of facts.
+func wantRefusal(t *testing.T, vol, bin string, facts ...string) {
 	t.Helper()
 	r := RunClientResult(t, ServerImage, ClientOpts{
 		NoShell: true,
@@ -165,7 +187,7 @@ func wantRefusal(t *testing.T, vol, bin, want string) {
 		Mounts:  map[string]string{vol: "/data"},
 		Timeout: 2 * time.Minute,
 	})
-	if r.ExitCode == 0 || !strings.Contains(r.Output, want) {
-		t.Fatalf("serve on the database: exit %d, want an error with %q:\n%s", r.ExitCode, want, r.Output)
+	if r.ExitCode == 0 || slices.ContainsFunc(facts, func(f string) bool { return !strings.Contains(r.Output, f) }) {
+		t.Fatalf("serve on the database: exit %d, want an error that names %q:\n%s", r.ExitCode, facts, r.Output)
 	}
 }

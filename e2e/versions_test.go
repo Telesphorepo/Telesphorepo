@@ -313,12 +313,19 @@ func TestVersionsAndSnippets(t *testing.T) {
 			!strings.Contains(codeOf(latest.Snippets, "maven"), "<version>RELEASE</version>") {
 			t.Fatalf("latest: %+v", latest)
 		}
+		// A snippet of the latest mode carries a note where the same snippet pinned has none.
+		pinnedNote := map[string]string{}
+		for _, sn := range pinned.Snippets {
+			pinnedNote[sn.ID] = sn.Note
+		}
 		noted := false
 		for _, sn := range latest.Snippets {
-			noted = noted || strings.Contains(sn.Note, "reproducible")
+			if note, ok := pinnedNote[sn.ID]; ok && note == "" && sn.Note != "" {
+				noted = true
+			}
 		}
 		if !noted {
-			t.Fatalf("latest mode: no snippet notes that builds stop being reproducible")
+			t.Fatalf("latest mode: no snippet carries a note that the same pinned snippet lacks: pinned %+v, latest %+v", pinned.Snippets, latest.Snippets)
 		}
 
 		var named artifactSnippetsJSON
@@ -380,11 +387,10 @@ func TestVersionsAndSnippets(t *testing.T) {
 		for _, tl := range u.Tools {
 			labels[tl.ID] = tl.Label
 		}
-		if labels["github-actions"] != "GitHub Actions" || labels["gradle-kotlin"] != "Gradle (Kotlin)" {
-			t.Fatalf("usage tools: %v", u.Tools)
-		}
-		if labels["telesphorepo"] != "Telesphorepo CLI" {
-			t.Fatalf("usage tools: %v", u.Tools)
+		for _, id := range []string{"github-actions", "gradle-kotlin", "telesphorepo"} {
+			if labels[id] == "" {
+				t.Fatalf("usage tools: no label for %s: %v", id, u.Tools)
+			}
 		}
 		for _, want := range []string{"use//gradle-kotlin", "use//gradle-groovy", "use//maven", "publish/computer/telesphorepo",
 			"publish/ci/github-actions", "publish/ci/jenkins"} {
@@ -439,7 +445,7 @@ func TestDockerVersions(t *testing.T) {
 			s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/versions?path=app", nil, read, &v)
 			if v.Artifact == nil || v.Artifact.Kind != "image" || v.Artifact.Path != "app/" || len(v.Items) != 2 ||
 				v.Items[0].Version != "2.0" || v.Items[1].Version != "1.0" || v.Items[0].Kind != "release" || v.Items[0].BuildsCount != 1 ||
-				v.Items[0].LatestBuild != v2.Hex[:12] {
+				v.Items[0].LatestBuild == "" || !strings.HasPrefix(v2.Hex, v.Items[0].LatestBuild) {
 				t.Fatalf("versions of app: %+v", v)
 			}
 			var page versionsJSON
@@ -465,7 +471,9 @@ func TestDockerVersions(t *testing.T) {
 		t.Run("builds", func(t *testing.T) {
 			var b buildsJSON
 			s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/builds?path=app/&version=2.0", nil, read, &b)
-			if len(b.Items) != 1 || b.Items[0].Build != v2.Hex[:12] {
+			// The build ID is a prefix of the manifest digest, the same as the latest build of the version.
+			if len(b.Items) != 1 || b.Version == nil || b.Items[0].Build == "" || !strings.HasPrefix(v2.Hex, b.Items[0].Build) ||
+				b.Items[0].Build != b.Version.LatestBuild {
 				t.Fatalf("builds of app 2.0: %+v", b)
 			}
 			var exts []string

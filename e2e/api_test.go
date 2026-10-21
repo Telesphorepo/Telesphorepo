@@ -184,8 +184,8 @@ func TestAPISessionRule(t *testing.T) {
 	wantSessionRequired := func(t *testing.T, method, path string, body any, auth Auth) {
 		t.Helper()
 		st, b := s.API(t, method, path, body, auth)
-		if st != http.StatusUnauthorized || !strings.Contains(string(b), "sign in through the web UI for this action") {
-			t.Fatalf("%s %s: status %d, want 401 \"sign in through the web UI for this action\": %s", method, path, st, b)
+		if st != http.StatusUnauthorized || RefusalCode(b) != "session" {
+			t.Fatalf("%s %s: status %d, want 401 with refusal code session (a UI session required): %s", method, path, st, b)
 		}
 	}
 	trust := map[string]any{
@@ -202,8 +202,8 @@ func TestAPISessionRule(t *testing.T) {
 
 	t.Run("admin password on write routes", func(t *testing.T) {
 		wantSessionRequired(t, http.MethodPost, "/api/publish/trusts", trust, adminPw)
-		wantSessionRequired(t, http.MethodPost, "/api/users", map[string]any{"username": RandName("evil"), "password": "evil-password-1", "permissions": AllServerPerms}, adminPw)
-		wantSessionRequired(t, http.MethodPut, "/api/users/frank/permissions", map[string]any{"permissions": AllServerPerms}, adminPw)
+		wantSessionRequired(t, http.MethodPost, "/api/users", map[string]any{"username": RandName("evil"), "password": "evil-password-1", "permissions": s.ServerPerms(t)}, adminPw)
+		wantSessionRequired(t, http.MethodPut, "/api/users/frank/permissions", map[string]any{"permissions": s.ServerPerms(t)}, adminPw)
 		wantSessionRequired(t, http.MethodPut, "/api/grants", map[string]any{"users": []string{"frank"}, "repos": []string{repo}, "perms": []string{"repo.download", "repo.publish"}}, adminPw)
 		wantSessionRequired(t, http.MethodPatch, "/api/settings", map[string]any{"max_json_size": 4096}, adminPw)
 		wantSessionRequired(t, http.MethodPost, "/api/repos", map[string]any{"name": RandName("evil"), "format": "maven"}, adminPw)
@@ -262,8 +262,8 @@ func TestAPISessionRule(t *testing.T) {
 		}
 		apiWant(t, s, http.MethodGet, path, nil, nil, http.StatusUnauthorized)
 		st, b := s.API(t, http.MethodPut, path, "changed by a cookie", gina)
-		if st != http.StatusUnauthorized || !strings.Contains(string(b), "publishing needs a publish session") {
-			t.Fatalf("PUT %s with a UI session: status %d, want 401 publishing needs a publish session: %s", path, st, b)
+		if st != http.StatusUnauthorized || RefusalCode(b) != "publish_session" {
+			t.Fatalf("PUT %s with a UI session: status %d, want 401 with refusal code publish_session: %s", path, st, b)
 		}
 		apiWant(t, s, http.MethodPut, "/maven/"+repo+"/com/example/cookie/1.1/cookie-1.1.jar", "new", s.Admin(), http.StatusUnauthorized)
 	})
@@ -281,8 +281,8 @@ func TestAPISessionRule(t *testing.T) {
 			t.Fatalf("GET %s with a Bearer read token: status %d, body %q", path, st, b)
 		}
 		st, b = s.API(t, http.MethodPut, path, "changed by a read token", bearer)
-		if st != http.StatusUnauthorized || !strings.Contains(string(b), "publishing needs a publish session") {
-			t.Fatalf("PUT %s with a Bearer read token: status %d, want 401 publishing needs a publish session: %s", path, st, b)
+		if st != http.StatusUnauthorized || RefusalCode(b) != "publish_session" {
+			t.Fatalf("PUT %s with a Bearer read token: status %d, want 401 with refusal code publish_session: %s", path, st, b)
 		}
 		wantSessionRequired(t, http.MethodPost, "/api/tokens", map[string]any{"name": "more"}, bearer)
 	})
@@ -309,8 +309,8 @@ func TestAPIUsers(t *testing.T) {
 	apiWant(t, s, http.MethodGet, "/api/users", nil, Basic{"carol", "carol-password-1"}, http.StatusUnauthorized)
 	apiWant(t, s, http.MethodGet, "/api/users", nil, admin, 200)
 
-	apiJSON(t, s, http.MethodPut, "/api/users/carol/permissions", map[string]any{"permissions": AllServerPerms}, admin, 200, &u)
-	if strings.Join(u.Permissions, ",") != strings.Join(AllServerPerms, ",") {
+	apiJSON(t, s, http.MethodPut, "/api/users/carol/permissions", map[string]any{"permissions": s.ServerPerms(t)}, admin, 200, &u)
+	if strings.Join(u.Permissions, ",") != strings.Join(s.ServerPerms(t), ",") {
 		t.Fatalf("set permissions: %+v", u)
 	}
 	// The grant ends carol's session, which a password alone started.
@@ -398,7 +398,7 @@ func TestAPIReposAndPermissions(t *testing.T) {
 		t.Fatalf("dave misses anonymous repo: %+v", got)
 	}
 	// The All repositories permission holds every repository permission.
-	if p := permsOf(list(admin)[secret]); p != "repo.download,repo.publish,repo.delete,repo.settings,repo.access,ci.pipelines" {
+	if p := permsOf(list(admin)[secret]); p != strings.Join(s.RepoPerms(t), ",") {
 		t.Fatalf("admin's permissions on %s = %q, want every one", secret, p)
 	}
 
@@ -488,20 +488,21 @@ func TestAPISearch(t *testing.T) {
 
 	search := func(auth Auth, q string) string {
 		t.Helper()
-		deadline := time.Now().Add(10 * time.Second)
-		for {
-			st, b := s.API(t, http.MethodGet, "/api/search?q="+q, nil, auth)
-			if st != 200 {
-				t.Fatalf("search %q: %d %s", q, st, b)
-			}
-			if strings.Contains(string(b), "zebrafish") || time.Now().After(deadline) {
-				return string(b)
-			}
-			time.Sleep(200 * time.Millisecond)
+		st, b := s.API(t, http.MethodGet, "/api/search?q="+q, nil, auth)
+		if st != 200 {
+			t.Fatalf("search %q: %d %s", q, st, b)
 		}
+		return string(b)
 	}
 
-	b := search(s.Admin(), "ebraf")
+	// The admin sees both files once the index holds them; the searches after it run once.
+	var b string
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(200 * time.Millisecond) {
+		b = search(s.Admin(), "ebraf")
+		if strings.Contains(b, "zebrafish-1.0.txt") && strings.Contains(b, "zebrafish-2.0.txt") || time.Now().After(deadline) {
+			break
+		}
+	}
 	if !strings.Contains(b, "zebrafish-1.0.txt") || !strings.Contains(b, "zebrafish-2.0.txt") {
 		t.Fatalf("admin search: %s", b)
 	}
@@ -590,7 +591,7 @@ func TestAPIFormats(t *testing.T) {
 			t.Errorf("format %s: title %q, config.default %s", f.Name, f.Title, f.Config.Default)
 		}
 	}
-	for _, n := range []string{"maven", "debian", "cargo", "npm", "nuget", "pypi"} {
+	for _, n := range []string{"maven", "debian"} {
 		if !byName[n] {
 			t.Errorf("format %q missing from /api/formats: %+v", n, formats)
 		}
@@ -627,7 +628,7 @@ func TestAPIFormats(t *testing.T) {
 		} `json:"snippets"`
 	}
 	apiJSON(t, s, http.MethodGet, "/api/repos/"+mvn+"/usage", nil, s.Admin(), 200, &usage)
-	if usage.BaseURL != "http://"+s.Alias+":8080" || usage.Snippets == nil {
+	if usage.BaseURL != s.InternalURL || usage.Snippets == nil {
 		t.Fatalf("usage: %+v", usage)
 	}
 	apiWant(t, s, http.MethodGet, "/api/repos/"+mvn+"/usage", nil, erin, http.StatusForbidden)

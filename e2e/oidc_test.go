@@ -158,7 +158,7 @@ func TestOIDC(t *testing.T) {
 	kc.Start(t, redirect)
 	// Saving oidc.redirect_url also proves the server reaches Keycloak's discovery document.
 	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"oidc.redirect_url": redirect,
-		"oidc.permission_claim": "groups", "oidc.permission_map": map[string][]string{kcAdminGroup: AllServerPerms}}, s.Admin(), nil)
+		"oidc.permission_claim": "groups", "oidc.permission_map": map[string][]string{kcAdminGroup: s.ServerPerms(t)}}, s.Admin(), nil)
 
 	t.Run("a map without a claim or with an unknown permission", func(t *testing.T) {
 		for _, bad := range []map[string]any{
@@ -190,7 +190,7 @@ func TestOIDC(t *testing.T) {
 			t.Fatal("no tr_session cookie after SSO login")
 		}
 		me := ssoMeOf(t, s, alice.Jar)
-		if me.Username != "alice" || strings.Join(me.Permissions, ",") != strings.Join(AllServerPerms, ",") || !me.PermissionsManaged ||
+		if me.Username != "alice" || strings.Join(me.Permissions, ",") != strings.Join(s.ServerPerms(t), ",") || !me.PermissionsManaged ||
 			me.Kind != "oidc" || me.Email != "alice@e2e.test" {
 			t.Fatalf("GET /api/me = %+v, want alice, every server permission, managed, kind oidc, alice@e2e.test", me)
 		}

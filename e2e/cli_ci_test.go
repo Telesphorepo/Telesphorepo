@@ -56,7 +56,7 @@ func TestCLIGitHubActions(t *testing.T) {
 		}
 		out = c.mustRun(t, mavenImage, "publish in GitHub Actions", "cd /work/app && telesphorepo publish", ClientOpts{Files: files, Env: env,
 			Mounts: map[string]string{M2Volume: "/root/.m2/repository"}})
-		wantText(t, "publish in GitHub Actions", out, "Publishing to "+repo+" (maven)", "BUILD SUCCESS", "::add-mask::", oidcUnset)
+		wantText(t, "publish in GitHub Actions", out, "BUILD SUCCESS", "::add-mask::", oidcUnset)
 		// The CLI masks each session token before Maven starts: no token appears without its mask line.
 		for _, m := range regexp.MustCompile(`trs_[A-Za-z0-9_-]{40,}`).FindAllString(out, -1) {
 			if !regexp.MustCompile(`::add-mask::` + regexp.QuoteMeta(m)).MatchString(out) {

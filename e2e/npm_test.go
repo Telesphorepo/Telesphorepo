@@ -86,7 +86,7 @@ if npm publish --force 2>/tmp/forced.log; then echo FORCED_ACCEPTED; else echo F
 		// npm refuses a version that the packument lists before it sends anything; --force skips
 		// that check, and the server answers 403.
 		npmWant(t, "npm publish", out, writer, "REPUBLISH_REFUSED", "You cannot publish over the previously published versions: 1.0.0",
-			"FORCED_REFUSED", "403", "version 1.0.0 of "+scoped+" already exists")
+			"FORCED_REFUSED", "403")
 
 		for _, name := range []string{plain, scoped, "@e2e%2f" + strings.TrimPrefix(scoped, "@e2e/")} {
 			resp, d := npmGet(t, s, repo, name, true, auth)
@@ -210,8 +210,8 @@ npm unpublish `+tools+`@1.1.0
 		kc := newKeycloak(t)
 		kc.Start(t, s.InternalURL+"/api/auth/oidc/callback")
 		s.MustAPI(t, http.MethodPost, "/api/publish/trusts", map[string]any{"name": RandName("ci"), "issuer": kc.Issuer,
-			"audience": "telesphorepo-e2e-ci", "claims": map[string][]string{"azp": {"e2e-ci"}}, "repos": []string{hosted}}, s.Admin(), nil)
-		form := url.Values{"grant_type": {"client_credentials"}, "client_id": {"e2e-ci"}, "client_secret": {"e2e-ci-client-secret"}}
+			"audience": kcCIAudience, "claims": map[string][]string{"azp": {kcCIClientID}}, "repos": []string{hosted}}, s.Admin(), nil)
+		form := url.Values{"grant_type": {"client_credentials"}, "client_id": {kcCIClientID}, "client_secret": {kcCIClientSecret}}
 		resp, err := kc.Client(nil).PostForm(kc.Issuer+"/protocol/openid-connect/token", form)
 		if err != nil {
 			t.Fatalf("CI token from keycloak: %v", err)

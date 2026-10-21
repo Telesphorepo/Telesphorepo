@@ -313,7 +313,7 @@ func backupRestoreFS(t *testing.T) {
 	core := slices.ContainsFunc(m.Migrations, func(x struct{ Component, Name string }) bool {
 		return x.Component == "core" && x.Name == "0001_init.sql"
 	})
-	if m.Format != 1 || m.Version == "" || m.Storage != "fs" || !m.BlobsIncluded || !m.MasterKeyIncluded ||
+	if m.Format < 1 || m.Version == "" || m.Storage != "fs" || !m.BlobsIncluded || !m.MasterKeyIncluded ||
 		m.MasterKeySource != "file" || !core || m.Counts.Repos < 3 || m.Counts.Blobs < int64(len(before)) {
 		t.Fatalf("backup.json of %s: %+v", name, m)
 	}
@@ -333,7 +333,7 @@ func backupRestoreFS(t *testing.T) {
 	// Restore into a new volume with the server binary, then start a server on it.
 	rvol := NewDataVolume(t)
 	code, out = runRestore(t, bvol, rvol, name)
-	if code != 0 || !strings.Contains(out, "Restored the backup "+name) || !strings.Contains(out, "master.key") {
+	if code != 0 || !strings.Contains(out, name) || !strings.Contains(out, "master.key") {
 		t.Fatalf("restore: exit %d\n%s", code, out)
 	}
 	if code, out := runRestore(t, bvol, rvol, name); code == 0 || !strings.Contains(out, "not empty") {
@@ -393,7 +393,7 @@ func backupRestoreFS(t *testing.T) {
 	}
 	second := backupNow(t, s)
 	const partial = "20200101T000000.000Z"
-	VolumeExec(t, bvol, "set -e\nmkdir /data/"+partial+"\necho partial > /data/"+partial+"/telesphorepo.db\ntouch -d '2020-01-01 00:00:00' /data/"+partial+"\nchown -R 65532:65532 /data/"+partial+"\n")
+	VolumeExec(t, bvol, "set -e\nmkdir /data/"+partial+"\necho partial > /data/"+partial+"/telesphorepo.db\ntouch -d '2020-01-01 00:00:00' /data/"+partial+"\nchown -R \"$(stat -c %u:%g /data)\" /data/"+partial+"\n")
 	o = backupList(t, s)
 	if i := slices.IndexFunc(o.Backups, func(b backupEntry) bool { return b.Name == partial }); i < 0 || o.Backups[i].Complete {
 		t.Fatalf("GET /api/backup with an incomplete folder: %+v, want %s listed as incomplete", o.Backups, partial)
@@ -407,7 +407,7 @@ func backupRestoreFS(t *testing.T) {
 	goneKey := blobKey(sha256Hex(gone))
 	fresh := blobKey(strings.Repeat("f", 64))
 	VolumeExec(t, bvol, "set -e\ntouch -d '2020-01-01 00:00:00' /data/"+goneKey+"\nmkdir -p /data/"+fresh[:strings.LastIndex(fresh, "/")]+
-		"\necho fresh > /data/"+fresh+"\nchown -R 65532:65532 /data/blobs\n")
+		"\necho fresh > /data/"+fresh+"\nchown -R \"$(stat -c %u:%g /data)\" /data/blobs\n")
 	third := backupNow(t, s)
 
 	var names []string
@@ -452,7 +452,7 @@ func backupRestoreS3(t *testing.T) {
 
 	rvol := NewDataVolume(t)
 	code, out := runRestore(t, bvol, rvol, name)
-	if code != 0 || !strings.Contains(out, "S3 bucket "+tg.Bucket) {
+	if code != 0 || !strings.Contains(out, tg.Bucket) {
 		t.Fatalf("restore of an S3 backup: exit %d, want it to name the bucket %s:\n%s", code, tg.Bucket, out)
 	}
 	r := restoredServer(t, s, ServerOpts{Storage: "s3", S3: tg, DataVolume: rvol})
