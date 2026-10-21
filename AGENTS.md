@@ -17,6 +17,7 @@ go tool task test all       # core, import, scale and clients one after the othe
 go tool task tag <ver>      # stamp the dev entries of changes.toml, commit, tag v<ver> (push it yourself)
 go tool task release [ver]  # cross-compiled archives + SHA256SUMS in bin/release
 go tool task gen            # run sqlc for every internal/**/sqlc.yaml
+go tool task migration db add_x  # the next migration internal/db/migrations/NNNN_add_x.sql (folder of the component)
 go tool task doctor         # show detected Go / bun / Node / Docker-Podman
 
 go build ./...
@@ -88,14 +89,20 @@ write gate, the device and OIDC routes or the change log. Run all zones before a
   never from the `settings` table.
 - **Write queries in `queries/*.sql`.** The kernel and each module with a schema keep their SQL
   in `queries/*.sql` next to a `sqlc.yaml`. Run `go tool task gen` after you change a query or a
-  `schema.sql`, and commit the generated `dbq/` package. Write a query by hand (`dbq/extra.go`)
+  migration, and commit the generated `dbq/` package. Write a query by hand (`dbq/extra.go`)
   only when sqlc cannot express it, such as FTS5 `MATCH` or a streaming `iter.Seq2` read.
   Register each hand-written query in the package `Extra` map so the plan guard
   (`db.CheckPlans`, run by `TestQueryPlans`) checks it. A query that must scan goes in the
   `Allow` map with a reason. Do not write inline SQL in services.
-- **Edit a schema in place.** Each component has one `schema.sql`. Change it in place and never
-  add a migration file. A changed schema text makes `dev` recreate its data dir and `serve`
-  refuse the old database.
+- **Change a schema with a migration.** Each component keeps its schema in
+  `migrations/NNNN_name.sql` (4 digits from `0001`, no gap; `go tool task migration <folder>
+  <name>` creates the next file). A migration is SQL only. `db.Init` runs each file once, in its
+  own transaction with foreign keys off and `PRAGMA foreign_key_check` before the commit, so it
+  may rebuild a table (create the new table, copy, drop the old one, rename; then recreate its
+  indexes and triggers). Until the first release (no `v*` tag yet), edit `0001_init.sql` in place:
+  `dev` recreates its data dir when an applied migration changed. Once a release has applied a
+  migration, never edit, rename or delete it: add the next file. `serve` refuses a database whose
+  applied migration changed, or that a newer build migrated.
 - **Keep dependencies few and mature.** Use the stdlib first: `crypto/*`, `crypto/hkdf`,
   `net/http` routing, `http.CrossOriginProtection` and `log/slog`. Explain any new module in the
   change, and don't run `go mod tidy` unless an import needs it.
@@ -155,8 +162,8 @@ write gate, the device and OIDC routes or the change log. Run all zones before a
 | Module setting | `x.Settings(&settings.Group{...})` in the module's `Register`; the group owns its keys, its permission, its page and its `Validate`, `Test` and `Apply` hooks |
 | Permission | `x.Permissions(perm.Subsystem{...}, perm.Def{...})` in the module's `Register`; the registry is `internal/perm` |
 | Audit action | `x.AuditActions(...)`; record with `h.Audit.Record(ctx, ...)` or `RecordTx`; the actor comes from the context (`internal/audit`) |
-| Core schema change | Edit `internal/db/schema.sql` in place |
-| Module schema change | Edit `internal/<module>/schema.sql` in place |
+| Core schema change | The next file of `internal/db/migrations` (before the first release: edit `0001_init.sql`); the runner is `internal/db/migrate.go` |
+| Module schema change | The next file of `internal/<module>/migrations` (before the first release: edit `0001_init.sql`) |
 | Query | `queries/*.sql` of the owner (`internal/db` or the module), then `go tool task gen` |
 | New module | `internal/<module>` + one line in `internal/modules/modules.go` (see below) |
 | Format contract | `internal/format/format.go` (`format.Spec`), `kit.go` (the standard routes) |
@@ -168,7 +175,7 @@ write gate, the device and OIDC routes or the change log. Run all zones before a
 | UI of a format | The descriptor (`format.Spec` fields and `UI`, `GET /api/formats`; `web/src/lib/formats/registry.svelte.ts`); a format-specific component only as a named `formatParts` slot in `web/src/modules/<format>/module.ts` |
 | File tree, deletes, manual upload | `internal/files` (tree), `internal/api/files.go`, `internal/api/pipeline.go` (repo delete, resumable uploads), `format.Spec.Upload`; UI in `web/src/pages/repo/` (`FilesTab`, `upload/`, `delete/`) |
 | Client IP, IP lists, repo IP rules | `internal/netrules` (module `network`: `lists.go`, `rules.go`, `clientip.go`, `module.go`), `web/src/pages/settings/repos/` (Access tab), `web/src/pages/server/IPLists.svelte`, `IPListPage.svelte`, `ReverseProxy.svelte` |
-| Docker / OCI registry | `internal/docker` (module `docker`: `routes.go` at `/v2/`, `token.go` the token endpoint `/docker/token`, `manifests.go`, `blobs.go`, `lists.go`, `referrers.go`, `hooks.go` (the rows of `schema.sql`), `links.go` the job `docker.links`, `proxy.go` the proxy (`Classify`, `RemoteAuth`, tags list) and group tags, `usage.go` and `tools.go` the snippets and the CI tool, `versions.go`, `api.go` `/api/docker/{name}/manifest`, `importer.go` the Nexus import, `demo.go`, `seed.go`); UI part `web/src/modules/docker/`; e2e in `e2e/docker_test.go`, `e2e/docker_proxy_test.go`, `e2e/nexus_docker_test.go` and `e2e/cli_docker_test.go` (clients zone), with `StartDind` and `Dind.CopyFile` in `e2e/clients_test.go` and the OCI helpers in `e2e/oci_test.go` |
+| Docker / OCI registry | `internal/docker` (module `docker`: `routes.go` at `/v2/`, `token.go` the token endpoint `/docker/token`, `manifests.go`, `blobs.go`, `lists.go`, `referrers.go`, `hooks.go` (the rows of `migrations/`), `links.go` the job `docker.links`, `proxy.go` the proxy (`Classify`, `RemoteAuth`, tags list) and group tags, `usage.go` and `tools.go` the snippets and the CI tool, `versions.go`, `api.go` `/api/docker/{name}/manifest`, `importer.go` the Nexus import, `demo.go`, `seed.go`); UI part `web/src/modules/docker/`; e2e in `e2e/docker_test.go`, `e2e/docker_proxy_test.go`, `e2e/nexus_docker_test.go` and `e2e/cli_docker_test.go` (clients zone), with `StartDind` and `Dind.CopyFile` in `e2e/clients_test.go` and the OCI helpers in `e2e/oci_test.go` |
 | Telesphorepo CLI and its Docker credential helper | `cmd/telesphorepo` (MIT, its own `LICENSE`; stdlib, `golang.org/x/sys`, `BurntSushi/toml` and the root package `changelog` only; imports no server package): `main.go` the commands and the error handling, `setup.go`, `publish.go`, `detect.go` the detection table (a new format adds a row), `upload.go` raw and Debian uploads, `login.go` login, logout and status, `update.go`, `compat.go` the change log check, `problem.go` problem documents and remedies, `client.go` the HTTP client, the device flow and the mints, `ci.go` the CI token, `project.go` `telesphorepo.toml`, `docker.go` the helper mode (program name `docker-credential-telesphorepo`), `identity.go`, `device.go`, `exchange.go`, `dockerconfig.go`, `acl_*.go`, `parent_*.go`, `tty_*.go`; built and embedded by `tools/task/cli.go`, released by `tools/task/release.go` |
 | Signing keys | `internal/signing/keys.go`, `internal/signing/module.go` (the repo field `signing_key`), `GET /debian/{repo}/key.asc` in `internal/debian`; UI in `web/src/pages/server/SigningKeys.svelte` and `web/src/modules/signing/` |
 | Upload plan and upload | `Plan` and `Store` of the format (`format.Spec.Upload`), e.g. `internal/maven/plan.go`; routes in `internal/api/files.go`; UI in `web/src/pages/repo/UploadView.svelte` and `upload/` |
@@ -202,7 +209,7 @@ It calls the `x.*` methods of the `Extender` to declare what the module adds: `S
    required module with `module.Use[T](h)`. Run background work as `x.Job` or `h.Go`.
 4. Register each route with a policy in `x.Routes`. A module registers only under `/api/`, under
    `/<format>/` of its formats and under its `RootPrefix`es.
-5. If the module has tables, add `schema.sql`, `queries/*.sql` and a `sqlc.yaml` (copy
+5. If the module has tables, add `migrations/0001_init.sql`, `queries/*.sql` and a `sqlc.yaml` (copy
    `internal/debian/sqlc.yaml`), and declare them with `x.Schema`. Run `go tool task gen`.
 6. Add `e2e/<module>_test.go` that uses a real client. Run its byte path on both stores (`ForEachStorage`) and the rest on the local disk (`OnLocalDisk`).
 7. Document the routes, tables and settings in `SPEC.md`.

@@ -13,27 +13,31 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
 )
 
+//go:embed migrations/*.sql
+var migrationsFS embed.FS
+
 //go:embed queries/*.sql
 var queriesFS embed.FS
 
-// Component is the schema and the queries of one owner: the kernel ("core") or a module (named
-// after its module ID). Init runs its schema once; the plan guard checks its queries.
+// Component is the migrations and the queries of one owner: the kernel ("core") or a module
+// (named after its module ID). Init applies each of its migrations once; the plan guard checks
+// its queries.
 type Component struct {
-	Name    string
-	Schema  string            // the whole schema of the component (its embedded schema.sql)
-	Queries fs.FS             // *.sql files with sqlc "-- name: X :kind" blocks at the root
-	Extra   map[string]string // hand-written query name -> SQL
-	Allow   map[string]string // query name -> why a scan or temp B-tree is acceptable
+	Name       string
+	Migrations fs.FS             // NNNN_name.sql files at the root (its embedded migrations/)
+	Queries    fs.FS             // *.sql files with sqlc "-- name: X :kind" blocks at the root
+	Extra      map[string]string // hand-written query name -> SQL
+	Allow      map[string]string // query name -> why a scan or temp B-tree is acceptable
 }
 
-// Core is the kernel component: schema.sql, the sqlc queries in queries/ and the hand-written
-// ones in dbq/extra.go.
+// Core is the kernel component: the migrations in migrations/, the sqlc queries in queries/ and
+// the hand-written ones in dbq/extra.go.
 func Core() Component {
 	return Component{
-		Name:    CoreComponent,
-		Schema:  coreSchema,
-		Queries: Sub(queriesFS, "queries"),
-		Extra:   dbq.Extra,
+		Name:       CoreComponent,
+		Migrations: Sub(migrationsFS, "migrations"),
+		Queries:    Sub(queriesFS, "queries"),
+		Extra:      dbq.Extra,
 		Allow: map[string]string{
 			"ListSettings":      "loads every stored setting at startup and after a settings write, never on a request path; at most one row per registered setting",
 			"HasUsers":          "EXISTS stops at the first row; startup check for the first admin",
@@ -46,17 +50,17 @@ var (
 	nameRE  = regexp.MustCompile(`^--\s*name:\s*(\w+)\s+:\w+`)
 	sqlcRE  = regexp.MustCompile(`sqlc\.(arg|narg|slice)\s*\([^)]*\)`)
 	indexRE = regexp.MustCompile(`\bINDEX (\S+)`)
-	// tableRE finds the tables that a schema creates.
-	tableRE = regexp.MustCompile(`(?i)\bCREATE\s+(?:VIRTUAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_]\w*)`)
+	// tableRE finds the tables that a schema creates or renames to.
+	tableRE = regexp.MustCompile(`(?i)\bCREATE\s+(?:VIRTUAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_]\w*)|\bALTER\s+TABLE\s+\w+\s+RENAME\s+TO\s+([A-Za-z_]\w*)`)
 	// writeRE finds the tables that a query writes.
 	writeRE = regexp.MustCompile(`(?i)\b(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|DELETE\s+FROM|UPDATE(?:\s+OR\s+\w+)?)\s+([A-Za-z_]\w*)`)
 )
 
-// tablesOf returns the names of the tables that schema creates, in lower case.
+// tablesOf returns the names of the tables that schema creates or renames to, in lower case.
 func tablesOf(schema string) map[string]bool {
 	out := map[string]bool{}
 	for _, m := range tableRE.FindAllStringSubmatch(schema, -1) {
-		out[strings.ToLower(m[1])] = true
+		out[strings.ToLower(m[1]+m[2])] = true
 	}
 	return out
 }
@@ -154,7 +158,11 @@ func CheckPlans(ctx context.Context, d *DB, sets []Component) error {
 		sort.Slice(qs, func(i, j int) bool { return qs[i].name < qs[j].name })
 
 		names := map[string]bool{}
-		own := tablesOf(set.Schema)
+		schema, err := set.schema()
+		if err != nil {
+			return err
+		}
+		own := tablesOf(schema)
 		for _, q := range qs {
 			label := set.Name + "." + q.name + " (" + q.origin + ")"
 			if prev, ok := seen[set.Name+"."+q.name]; ok {

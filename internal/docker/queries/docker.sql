@@ -1,4 +1,4 @@
--- The rows of the OCI objects of docker repos (schema.sql). Only the hooks write them.
+-- The rows of the OCI objects of docker repos (migrations/). Only the hooks write them.
 
 -- name: GetImage :one
 SELECT repo_id, image, full_name, manifests FROM docker_images WHERE repo_id = ? AND image = ?;

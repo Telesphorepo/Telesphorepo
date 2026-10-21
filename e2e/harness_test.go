@@ -302,10 +302,9 @@ func VolumeExec(t testing.TB, vol, script string, files ...ContainerFile) string
 	return out
 }
 
-// editDB runs one statement on the server database in data volume vol, while the server is
-// stopped: it copies the database out, edits it with SQLite in the test process and copies it
-// back with its owner and mode. The statement must change at least one row.
-func editDB(t testing.TB, vol, query string, args ...any) {
+// exportDB copies the server database out of data volume vol, while the server is stopped, into
+// a file of the test's temp folder (with its WAL beside it) and returns the path of the file.
+func exportDB(t testing.TB, vol string) string {
 	t.Helper()
 	const export = `set -e
 mkdir -p /out
@@ -331,7 +330,15 @@ if [ -f /data/telesphorepo.db-wal ]; then cp /data/telesphorepo.db-wal /out/wal;
 			t.Fatal(err)
 		}
 	}
+	return file
+}
 
+// editDB runs one statement on the server database in data volume vol, while the server is
+// stopped: it copies the database out (exportDB), edits it with SQLite in the test process and
+// copies it back with its owner and mode. The statement must change at least one row.
+func editDB(t testing.TB, vol, query string, args ...any) {
+	t.Helper()
+	file := exportDB(t, vol)
 	d, err := sql.Open("sqlite", file)
 	if err != nil {
 		t.Fatal(err)

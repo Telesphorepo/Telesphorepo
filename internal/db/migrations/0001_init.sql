@@ -1,6 +1,6 @@
--- Kernel schema. Each module with tables owns its own schema.sql; a module schema may reference
--- these tables, and this schema references no module table. db.Init runs each schema once and
--- keeps its fingerprint in schema_components. Times are unix seconds, booleans INTEGER 0/1.
+-- Kernel schema. Each module with tables owns its own migrations; a module schema may reference
+-- these tables, and this schema references no module table. db.Init applies each migration once
+-- and records it in schema_migrations. Times are unix seconds, booleans INTEGER 0/1.
 -- Every foreign-key child column has an index.
 
 -- kind 'oidc' users have password_hash '!' (never verifies), no tokens, no Basic auth and no

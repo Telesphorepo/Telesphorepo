@@ -10,6 +10,7 @@
 //	go tool task cli [version]  the six CLI archives that the server embeds (internal/clidist/dist)
 //	go tool task release [version]  cross-compiled archives and SHA256SUMS in bin/release
 //	go tool task gen           regenerate the sqlc data layer (every internal/**/sqlc.yaml)
+//	go tool task migration <folder> <name>  the next migration file of a component
 //	go tool task doctor         show what was detected
 package main
 
@@ -47,7 +48,9 @@ const usage = `Usage: go tool task <command>
                    plus SHA256SUMS; the version defaults to git describe (e.g. go tool task release 1.2.3).
                    A given version needs a changes.toml with no "dev" entry
   gen              regenerate the sqlc query code for every internal/**/sqlc.yaml
-  doctor          show detected tools (Go, bun/npm, Docker/Podman) and what is missing
+  migration <folder> <name>  create the next migration internal/<folder>/migrations/NNNN_<name>.sql
+                   of a component (folder db for the kernel; e.g. go tool task migration db add_repo_notes)
+  doctor         show detected tools (Go, bun/npm, Docker/Podman) and what is missing
 
 Data for dev/preview lives in ./.telesphorepo-dev (delete it to start over).
 `
@@ -152,6 +155,11 @@ func run(ctx context.Context, args []string) error {
 			return err
 		}
 		return gen(ctx)
+	case "migration":
+		if len(rest) != 2 {
+			return usageErr("migration takes two arguments, the folder of the component and the name (go tool task migration db add_repo_notes)")
+		}
+		return migration(rest[0], rest[1])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", verb, usage)
 		return exitError{2}

@@ -32,8 +32,8 @@ import (
 // component.
 const name = "debian"
 
-//go:embed schema.sql
-var schema string
+//go:embed migrations/*.sql
+var migrationsFS embed.FS
 
 //go:embed queries/*.sql
 var queriesFS embed.FS
@@ -60,9 +60,9 @@ func Module() module.Module {
 		ID: name, Title: "Debian (apt)", Requires: []string{"signing"},
 		Register: func(x *module.Extender) {
 			x.Schema(db.Component{
-				Schema:  schema,
-				Queries: db.Sub(queriesFS, "queries"),
-				Extra:   dbq.Extra,
+				Migrations: db.Sub(migrationsFS, "migrations"),
+				Queries:    db.Sub(queriesFS, "queries"),
+				Extra:      dbq.Extra,
 			})
 			x.Init(func(ctx context.Context, host *module.Host) error {
 				h.host = host

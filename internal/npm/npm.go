@@ -26,8 +26,8 @@ import (
 // component.
 const name = "npm"
 
-//go:embed schema.sql
-var schema string
+//go:embed migrations/*.sql
+var migrationsFS embed.FS
 
 //go:embed queries/*.sql
 var queriesFS embed.FS
@@ -49,7 +49,7 @@ func Module() module.Module {
 	return module.Module{
 		ID: name, Title: "npm",
 		Register: func(x *module.Extender) {
-			x.Schema(db.Component{Schema: schema, Queries: db.Sub(queriesFS, "queries")})
+			x.Schema(db.Component{Migrations: db.Sub(migrationsFS, "migrations"), Queries: db.Sub(queriesFS, "queries")})
 			x.Init(func(ctx context.Context, host *module.Host) error {
 				h.host, h.db, h.q = host, host.DB, dbq.New(host.DB.R)
 				h.assets, h.log = host.Assets, host.Log
