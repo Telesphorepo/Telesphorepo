@@ -38,6 +38,8 @@ func Open(ctx context.Context, file string) (*DB, error) {
 		"foreign_keys(ON)",
 		"busy_timeout(5000)",
 		"analysis_limit(1000)", // bounds the ANALYZE work of PRAGMA optimize on large tables
+		"cache_size(-65536)",   // a page cache of 64 MiB per connection
+		"mmap_size(268435456)", // reads map the first 256 MiB of the file (linux, darwin and windows builds of modernc allow up to 2 GiB)
 	}
 	q := url.Values{}
 	for _, p := range pragmas {
@@ -54,13 +56,17 @@ func Open(ctx context.Context, file string) (*DB, error) {
 		return nil, err
 	}
 	w.SetMaxOpenConns(1)
+	w.SetMaxIdleConns(1)
 
 	r, err := sql.Open("sqlite", "file:"+file+"?"+q.Encode())
 	if err != nil {
 		w.Close()
 		return nil, err
 	}
+	// Keep every reader open: a new connection runs the pragmas, parses the schema and starts
+	// with a cold page cache.
 	r.SetMaxOpenConns(8)
+	r.SetMaxIdleConns(8)
 	return &DB{W: w, R: r}, nil
 }
 

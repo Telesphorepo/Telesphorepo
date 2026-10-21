@@ -20,13 +20,24 @@ ON CONFLICT (repo_id, path) DO UPDATE SET backfill = 1;
 -- name: BackfillPending :one
 SELECT EXISTS (SELECT 1 FROM edge_outbox WHERE backfill = 1) AS pending;
 
--- The rows due at now, oldest first, through edge_outbox_due.
+-- The pointer rows due at now, oldest first, through edge_outbox_due.
 -- name: DueOutbox :many
 SELECT repo_id, path, sha256, due_at, attempts, seq, timed_out_at FROM edge_outbox
-WHERE due_at <= sqlc.arg(now) ORDER BY due_at LIMIT sqlc.arg(limit);
+WHERE due_at <= sqlc.arg(now) AND repo_id > 0 ORDER BY due_at LIMIT sqlc.arg(limit);
+
+-- The rows of the access objects and config.json due at now, oldest first, through
+-- edge_outbox_access: the worker writes them before the pointers.
+-- name: DueAccess :many
+SELECT repo_id, path, sha256, due_at, attempts, seq, timed_out_at FROM edge_outbox
+WHERE repo_id = 0 AND due_at <= sqlc.arg(now) ORDER BY due_at LIMIT sqlc.arg(limit);
 
 -- name: DeleteOutbox :execrows
 DELETE FROM edge_outbox WHERE repo_id = ? AND path = ? AND seq = ?;
+
+-- The row of a removed path whose pointers Removing deleted in every bucket of the current view.
+-- A row with a put of unknown outcome stays, for its second application.
+-- name: DropRemoved :exec
+DELETE FROM edge_outbox WHERE repo_id = ? AND path = ? AND timed_out_at = 0;
 
 -- A failed attempt: the next try and the error.
 -- name: RetryOutbox :execrows
@@ -42,6 +53,7 @@ UPDATE edge_outbox SET due_at = ?, timed_out_at = ? WHERE repo_id = ? AND path =
 -- name: ClearOutbox :exec
 DELETE FROM edge_outbox WHERE repo_id >= 0;
 
+-- The counts of the status page, while it is open.
 -- name: CountOutbox :one
 SELECT count(*) AS total, CAST(coalesce(sum(repo_id > 0), 0) AS INTEGER) AS pointers,
   CAST(coalesce(max(CASE WHEN attempts > 0 THEN error END), '') AS TEXT) AS last_error
@@ -94,6 +106,16 @@ SELECT perm FROM user_permissions WHERE user_id = ?;
 -- The repos where a user holds perm, through repo_permissions_user.
 -- name: ListEdgeUserGrants :many
 SELECT repo_id FROM repo_permissions WHERE user_id = ? AND perm = ?;
+
+-- The server permissions of the users in (after, last], through the user_permissions primary
+-- key: the reconcile reads them per page of users.
+-- name: ListEdgePermsIn :many
+SELECT user_id, perm FROM user_permissions WHERE user_id > sqlc.arg(after) AND user_id <= sqlc.arg(last);
+
+-- The repos where the users in (after, last] hold perm, through repo_permissions_user.
+-- name: ListEdgeGrantsIn :many
+SELECT user_id, repo_id FROM repo_permissions
+WHERE user_id > sqlc.arg(after) AND user_id <= sqlc.arg(last) AND perm = sqlc.arg(perm);
 
 -- name: ListEdgeTokens :many
 SELECT id, user_id, public_id, secret_hash, expires_at FROM api_tokens WHERE id > ? ORDER BY id LIMIT ?;

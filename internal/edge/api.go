@@ -64,7 +64,10 @@ func (m *mod) status(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	snap := m.h.Settings.Current()
 	v := m.cur.Load()
 	p := m.published()
-	counts, _ := m.counts.Load().(outboxCounts)
+	var counts outboxCounts
+	if v.mode == modeOn {
+		counts = m.askCounts(r.Context())
+	}
 	out := statusJSON{
 		Enabled: v.mode == modeOn, Mode: [...]string{"off", "on", "draining"}[v.mode], Unfit: unfit(snap),
 		ServerVersion: m.h.Version, DeployNeeded: p.home.DeployNeeded, DeployReason: p.home.Reason,

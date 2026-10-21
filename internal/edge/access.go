@@ -92,25 +92,27 @@ func (m *mod) userObject(ctx context.Context, id int64) (any, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
-	o, err := m.userObjectOf(ctx, u.ID, u.Disabled, u.Kind)
-	return o, err == nil, err
-}
-
-func (m *mod) userObjectOf(ctx context.Context, id int64, disabled bool, kind string) (userObject, error) {
 	perms, err := m.rq.ListEdgeUserPerms(ctx, id)
 	if err != nil {
-		return userObject{}, err
+		return nil, false, err
 	}
 	read, err := m.rq.ListEdgeUserGrants(ctx, dbq.ListEdgeUserGrantsParams{UserID: id, Perm: string(perm.RepoDownload)})
 	if err != nil {
-		return userObject{}, err
+		return nil, false, err
 	}
+	return userObjectOf(u.Disabled, u.Kind, perms, read), true, nil
+}
+
+// userObjectOf is the object of a user with its server permissions and the repos it holds
+// repo.download in.
+func userObjectOf(disabled bool, kind string, perms []string, read []int64) userObject {
+	read = slices.Clone(read)
 	slices.Sort(read)
 	if read == nil {
 		read = []int64{}
 	}
 	return userObject{Enabled: !disabled, Local: kind == auth.KindLocal,
-		All: perm.Current().AllRepos(perm.SetOfStrings(perms)), Read: slices.Compact(read)}, nil
+		All: perm.Current().AllRepos(perm.SetOfStrings(perms)), Read: slices.Compact(read)}
 }
 
 func (m *mod) tokenObject(ctx context.Context, publicID string) (any, bool, error) {
@@ -318,21 +320,38 @@ func (m *mod) allObjects(ctx context.Context) (map[string]string, error) {
 			}
 		}
 	}
+	// The users in pages of 500, each page with one read of its permissions and one of its grants.
 	for after := int64(0); ; {
 		rows, err := m.rq.ListEdgeUsers(ctx, dbq.ListEdgeUsersParams{ID: after, Limit: 500})
 		if err != nil {
 			return nil, err
 		}
-		for _, u := range rows {
-			o, err := m.userObjectOf(ctx, u.ID, u.Disabled, u.Kind)
-			if err != nil {
-				return nil, err
-			}
-			if err := add(userPrefix+strconv.FormatInt(u.ID, 10), o); err != nil {
-				return nil, err
-			}
-			after = u.ID
+		if len(rows) == 0 {
+			break
 		}
+		last := rows[len(rows)-1].ID
+		permRows, err := m.rq.ListEdgePermsIn(ctx, dbq.ListEdgePermsInParams{After: after, Last: last})
+		if err != nil {
+			return nil, err
+		}
+		grantRows, err := m.rq.ListEdgeGrantsIn(ctx, dbq.ListEdgeGrantsInParams{After: after, Last: last, Perm: string(perm.RepoDownload)})
+		if err != nil {
+			return nil, err
+		}
+		perms := map[int64][]string{}
+		for _, p := range permRows {
+			perms[p.UserID] = append(perms[p.UserID], p.Perm)
+		}
+		grants := map[int64][]int64{}
+		for _, g := range grantRows {
+			grants[g.UserID] = append(grants[g.UserID], g.RepoID)
+		}
+		for _, u := range rows {
+			if err := add(userPrefix+strconv.FormatInt(u.ID, 10), userObjectOf(u.Disabled, u.Kind, perms[u.ID], grants[u.ID])); err != nil {
+				return nil, err
+			}
+		}
+		after = last
 		if len(rows) < 500 {
 			break
 		}

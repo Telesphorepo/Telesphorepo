@@ -188,19 +188,25 @@ async function edge(request: Request, env: Env, ctx: ExecutionContext): Promise<
   if (!loaded) return null;
   const { config, objects } = loaded;
   if (!config.enabled || !config.homeReady || config.version !== VERSION) return null;
-  // The HOME binding must be the home bucket of config.json (its bucket.json).
-  if (config.homeBucket === "" || (await objects.bucketOf("HOME", env.HOME)) !== config.homeBucket) return null;
+  if (config.homeBucket === "") return null;
   const target = parseTarget(request.url, config.formats);
   if (!target) return null;
   const caller: Caller | null = await parseCaller(request, target.format.shape, config);
   if (!caller) return null;
-  const repo = await repoObject(objects, target.repo);
+  // The reads behind these checks do not depend on each other, so after a cache expiry they cost
+  // one far read, not one each.
+  const [homeBucket, repo, r, near] = await Promise.all([
+    objects.bucketOf("HOME", env.HOME),
+    repoObject(objects, target.repo),
+    rights(caller, objects),
+    nearest(request, env, config, objects),
+  ]);
+  // The HOME binding must be the home bucket of config.json (its bucket.json).
+  if (homeBucket !== config.homeBucket) return null;
   if (!repo || repo.format !== target.format.name || repo.guarded) return null;
-  const r: Rights | null = await rights(caller, objects);
   if (!r || !mayRead(r, repo, true)) return null;
 
   const imm = immutable(target.path, target.format.immutable, target.format.mutable);
-  const near = await nearest(request, env, config, objects);
   const home: Bucket = { hint: config.homeHint, r2: env.HOME };
   const at = imm ? near : home; // the bucket of the pointer
 

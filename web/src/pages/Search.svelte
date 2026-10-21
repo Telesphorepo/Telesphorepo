@@ -102,13 +102,23 @@
       <Table.Cell class="text-muted-foreground"><RelativeTime at={h.updated_at} /></Table.Cell>
     {/snippet}
     {#snippet empty()}
-      <EmptyState
-        icon={SearchIcon}
-        title="No files match"
-        description={repo ? `No path in ${repo} contains “${q}”.` : `No path contains “${q}”. Try a shorter part of the path.`}
-      >
-        {#if repo}<Button variant="outline" onclick={() => go(q, "")}>Search all repositories</Button>{/if}
-      </EmptyState>
+      {#if results?.hasMore}
+        <EmptyState
+          icon={SearchIcon}
+          title="No match so far"
+          description="The search read a part of the index and found no path with “{q}” in the repositories you can read."
+        >
+          <Button variant="outline" disabled={results.loadingMore} onclick={results.more}>Search further</Button>
+        </EmptyState>
+      {:else}
+        <EmptyState
+          icon={SearchIcon}
+          title="No files match"
+          description={repo ? `No path in ${repo} contains “${q}”.` : `No path contains “${q}”. Try a shorter part of the path.`}
+        >
+          {#if repo}<Button variant="outline" onclick={() => go(q, "")}>Search all repositories</Button>{/if}
+        </EmptyState>
+      {/if}
     {/snippet}
   </DataTable>
 {/if}

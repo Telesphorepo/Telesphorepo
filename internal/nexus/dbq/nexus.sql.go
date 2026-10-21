@@ -790,6 +790,41 @@ func (q *Queries) PreviousNexusChecked(ctx context.Context, arg PreviousNexusChe
 	return checked, err
 }
 
+const purgeNexusSourceRepos = `-- name: PurgeNexusSourceRepos :execrows
+DELETE FROM nexus_source_repos WHERE (source_id, source_repo) IN (SELECT x.source_id, x.source_repo FROM nexus_source_repos x WHERE x.target_repo_id = ?1 LIMIT ?2)
+`
+
+type PurgeNexusSourceReposParams struct {
+	RepoID int64
+	Limit  int64
+}
+
+func (q *Queries) PurgeNexusSourceRepos(ctx context.Context, arg PurgeNexusSourceReposParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, purgeNexusSourceRepos, arg.RepoID, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const purgeNexusSyncRepos = `-- name: PurgeNexusSyncRepos :execrows
+DELETE FROM nexus_sync_repos WHERE (sync_id, source_repo) IN (SELECT x.sync_id, x.source_repo FROM nexus_sync_repos x WHERE x.target_repo_id = ?1 LIMIT ?2)
+`
+
+type PurgeNexusSyncReposParams struct {
+	RepoID int64
+	Limit  int64
+}
+
+// A repo delete empties these tables batch by batch before its row goes (repos.Service.OnPurge).
+func (q *Queries) PurgeNexusSyncRepos(ctx context.Context, arg PurgeNexusSyncReposParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, purgeNexusSyncRepos, arg.RepoID, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const setNexusSourceCredentials = `-- name: SetNexusSourceCredentials :exec
 UPDATE nexus_sources SET base_url = ?, credentials = ? WHERE id = ?
 `

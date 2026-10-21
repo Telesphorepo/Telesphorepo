@@ -332,8 +332,17 @@ func (p *Pipeline) List(ctx context.Context, repoID int64, prefix, after string,
 	return out, next, nil
 }
 
+// searchScan is how many matches of the trigram index a search restricted to some repos reads
+// per page at most.
+const searchScan = 10000
+
 // Search: FTS5 trigram MATCH on assets_fts (q quoted as a phrase, len(q) >= 3), restricted to
 // repoIDs when non-nil, keyset on asset id > after. A non-nil empty repoIDs matches nothing.
+//
+// The index walks the matches of every repo in asset id order. A search restricted to repoIDs
+// reads at most searchScan of them per page and keeps those of its repos, so a caller who reads
+// few repos of a large server costs a bounded read per page: the page may hold fewer than limit
+// hits (even none) with a next cursor, the asset id the read reached. next is 0 at the end.
 func (p *Pipeline) Search(ctx context.Context, q string, repoIDs []int64, after int64, limit int) ([]SearchHit, int64, error) {
 	if utf8.RuneCountInString(q) < 3 || (repoIDs != nil && len(repoIDs) == 0) {
 		return nil, 0, nil
@@ -343,24 +352,39 @@ func (p *Pipeline) Search(ctx context.Context, q string, repoIDs []int64, after 
 	}
 	match := `"` + strings.ReplaceAll(q, `"`, `""`) + `"`
 	dq := dbq.New(p.db.R)
-	var rows []dbq.SearchAssetsRow
-	var err error
 	if repoIDs == nil {
-		rows, err = dq.SearchAssets(ctx, dbq.SearchAssetsParams{Match: match, After: after, Limit: int64(limit)})
-	} else {
-		rows, err = dq.SearchAssetsInRepos(ctx, dbq.SearchAssetsInReposParams{
-			Match: match, After: after, RepoIDs: repoIDs, Limit: int64(limit)})
+		rows, err := dq.SearchAssets(ctx, dbq.SearchAssetsParams{Match: match, After: after, Limit: int64(limit)})
+		if err != nil {
+			return nil, 0, err
+		}
+		out := make([]SearchHit, len(rows))
+		for i, r := range rows {
+			out[i] = SearchHit{Asset: fromRow(r.Asset), RepoName: r.RepoName}
+		}
+		var next int64
+		if len(out) == limit {
+			next = out[len(out)-1].Asset.ID
+		}
+		return out, next, nil
 	}
+	in := make(map[int64]bool, len(repoIDs))
+	for _, id := range repoIDs {
+		in[id] = true
+	}
+	scan := max(searchScan, int64(limit))
+	var out []SearchHit
+	read, last, err := dq.WalkSearchAssets(ctx, match, after, scan, func(r dbq.SearchAssetsRow) bool {
+		if in[r.Asset.RepoID] {
+			out = append(out, SearchHit{Asset: fromRow(r.Asset), RepoName: r.RepoName})
+		}
+		return len(out) < limit
+	})
 	if err != nil {
 		return nil, 0, err
 	}
-	out := make([]SearchHit, len(rows))
-	for i, r := range rows {
-		out[i] = SearchHit{Asset: fromRow(r.Asset), RepoName: r.RepoName}
-	}
 	var next int64
-	if len(out) == limit {
-		next = out[len(out)-1].Asset.ID
+	if len(out) == limit || read == scan {
+		next = last // a full page, or more matches may follow the window
 	}
 	return out, next, nil
 }

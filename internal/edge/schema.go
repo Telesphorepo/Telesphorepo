@@ -18,7 +18,7 @@ func component() db.Component {
 		Migrations: db.Sub(migrationsFS, "migrations"),
 		Queries:    db.Sub(queriesFS, "queries"),
 		Allow: map[string]string{
-			"CountOutbox":  "the outbox job counts its rows once per pass for the status page, never on a request path; the table holds only the objects not written yet",
+			"CountOutbox":  "the counter of the outbox job counts its rows for the status page, every 5 s only while the page polls it and never per request; the table holds only the objects not written yet",
 			"SumFileCount": "once per backfill start, for its progress; one row per repo",
 		},
 	}

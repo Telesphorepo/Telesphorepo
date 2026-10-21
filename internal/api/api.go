@@ -48,6 +48,8 @@ type API struct {
 	audit    *audit.Log
 	access   *access.Engine
 	formats  *format.Registry
+
+	deleteSlots chan struct{} // one value per running repo delete (startDelete)
 }
 
 // optimizeEvery is how often the core.optimize job refreshes the planner statistics.
@@ -57,7 +59,7 @@ const optimizeEvery = 6 * time.Hour
 // settings group "general", the token kind of read tokens and the job that keeps the planner
 // statistics fresh.
 func Module() module.Module {
-	a := &API{}
+	a := &API{deleteSlots: make(chan struct{}, deleteSlots)}
 	return module.Module{
 		ID: "core", Title: "Core",
 		Register: func(x *module.Extender) {
@@ -437,6 +439,15 @@ type operationJSON struct {
 	Error   string `json:"error"`
 }
 
+// toOperationJSON is op as JSON; nil for none.
+func (a *API) toOperationJSON(op *ops.Op) *operationJSON {
+	if op == nil {
+		return nil
+	}
+	return &operationJSON{ID: op.ID, Type: op.Type, Owner: op.Owner, State: op.State, Done: op.Done, Total: op.Total,
+		Message: a.ops.Message(op), Error: op.Error}
+}
+
 func (a *API) toRepoJSON(r *repos.Repo, perms perm.Set) repoJSON {
 	cfg := r.Config
 	if len(cfg) == 0 {
@@ -449,10 +460,7 @@ func (a *API) toRepoJSON(r *repos.Repo, perms perm.Set) repoJSON {
 	if out.Fields == nil {
 		out.Fields = map[string]json.RawMessage{}
 	}
-	if op := r.Op; op != nil {
-		out.Operation = &operationJSON{ID: op.ID, Type: op.Type, Owner: op.Owner, State: op.State, Done: op.Done, Total: op.Total,
-			Message: a.ops.Message(op), Error: op.Error}
-	}
+	out.Operation = a.toOperationJSON(r.Op)
 	if r.Kind == repos.KindGroup {
 		n := r.MemberCount
 		out.MemberCount = &n

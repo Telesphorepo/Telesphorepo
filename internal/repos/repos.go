@@ -85,6 +85,7 @@ type Service struct {
 	proxies map[int64]*Proxy  // repo id -> remote
 
 	onDelete []func(id int64)                      // set before the server serves
+	purges   []Purge                               // set before the server serves (OnPurge)
 	after    []func(ctx context.Context, n Notice) // set before the server serves (AfterChange)
 	fields   []Field                               // set before the server serves
 }
@@ -93,6 +94,47 @@ type Service struct {
 // what it keeps in memory about the repo, because the id can be used again. It runs before the
 // server serves.
 func (s *Service) OnDelete(fn func(id int64)) { s.onDelete = append(s.onDelete, fn) }
+
+// PurgeBatch is how many rows one call of a Purge deletes at most, in each of its statements.
+const PurgeBatch = 1000
+
+// Purge deletes one batch of a module's rows of repo id: at most PurgeBatch rows per statement,
+// each statement its own short write on the writer. It returns how many rows it deleted; 0 when
+// the module has no row of the repo left. Delete children before their parents, so a statement
+// cascades to no more rows than its batch holds.
+type Purge func(ctx context.Context, repoID int64) (int64, error)
+
+// OnPurge registers fn to empty the module's tables of a repo before its row is deleted, so the
+// final DELETE FROM repos cascades to almost nothing and never holds the writer for long. It runs
+// before the server serves.
+func (s *Service) OnPurge(fn Purge) { s.purges = append(s.purges, fn) }
+
+// purge empties the rows of repo id that its row delete would cascade to, batch by batch: it
+// nulls the repo of its audit events, then runs each module's Purge until it deletes no more.
+func (s *Service) purge(ctx context.Context, id int64) error {
+	q := dbq.New(s.db.W)
+	for {
+		n, err := q.ClearAuditRepo(ctx, dbq.ClearAuditRepoParams{RepoID: sql.NullInt64{Int64: id, Valid: true}, Limit: PurgeBatch})
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			break
+		}
+	}
+	for _, fn := range s.purges {
+		for {
+			n, err := fn(ctx, id)
+			if err != nil {
+				return err
+			}
+			if n == 0 {
+				break
+			}
+		}
+	}
+	return nil
+}
 
 // Notice is one committed change of repos: the repos that were created or updated (after the
 // change), or the repo whose row was deleted with the groups it was a member of.
@@ -598,17 +640,21 @@ func (s *Service) UpdateAll(ctx context.Context, names []string, p Patch) ([]*Re
 	return out, changed, nil
 }
 
-// DeleteRow deletes the repo row of id; the rows that reference it cascade, so a deleted member
-// leaves its groups. ErrNotFound when it does not exist.
+// DeleteRow deletes the repo row of id. It first empties the large tables that reference it in
+// batches (see purge); the rest cascades, so a deleted member leaves its groups. ErrNotFound when
+// it does not exist.
 func (s *Service) DeleteRow(ctx context.Context, id int64) error {
 	var gone *Repo
 	var groups []int64
+	r, err := byID(ctx, dbq.New(s.db.W), id)
+	if err != nil {
+		return err
+	}
 	if len(s.after) > 0 {
-		r, err := byID(ctx, dbq.New(s.db.W), id)
-		if err != nil {
-			return err
-		}
 		gone, groups = r, s.GroupsOf(id)
+	}
+	if err := s.purge(ctx, id); err != nil {
+		return err
 	}
 	n, err := dbq.New(s.db.W).DeleteRepo(ctx, id)
 	if err != nil {

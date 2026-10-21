@@ -56,7 +56,7 @@ WHERE repo_id = ?
 ORDER BY distribution, path;
 
 -- name: DeleteIndexFile :exec
-DELETE FROM deb_index_files WHERE repo_id = ? AND distribution = ? AND path = ?;
+DELETE FROM deb_index_files WHERE deb_index_files.repo_id = ? AND distribution = ? AND path = ?;
 
 -- The current hash of one index file: the generation a rebuild replaces.
 -- name: GetIndexFileSHA256 :one
@@ -67,4 +67,12 @@ SELECT sha256 FROM deb_index_files WHERE repo_id = ? AND distribution = ? AND pa
 -- name: DeletePackagesOfAsset :many
 DELETE FROM deb_packages WHERE asset_id = ?
 RETURNING distribution, component, architecture;
+
+
+-- A repo delete empties these tables batch by batch before its row goes (repos.Service.OnPurge).
+-- name: PurgeDebPackages :execrows
+DELETE FROM deb_packages WHERE id IN (SELECT x.id FROM deb_packages x WHERE x.repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
+
+-- name: PurgeDebIndexFiles :execrows
+DELETE FROM deb_index_files WHERE deb_index_files.repo_id = sqlc.arg(repo_id) AND (distribution, path) IN (SELECT x.distribution, x.path FROM deb_index_files x WHERE x.repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
 

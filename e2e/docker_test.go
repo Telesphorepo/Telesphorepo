@@ -320,6 +320,14 @@ docker push %[1]s:v1
 			}
 			putIPRules(t, s, pub, ipRules{Read: []ipRule{}, Publish: []ipRule{}})
 		})
+
+		// The delete empties the docker rows of the repo in batches before the repo row goes.
+		t.Run("repo delete", func(t *testing.T) {
+			deleteRepos(t, s, pub)
+			if code, out := d.Exec(t, fmt.Sprintf("docker rmi %s:v1 >/dev/null 2>&1; docker pull %s:v1 2>&1", pubImg, pubImg)); code == 0 {
+				t.Fatalf("pull from a deleted repo worked:\n%s", out)
+			}
+		})
 	})
 }
 

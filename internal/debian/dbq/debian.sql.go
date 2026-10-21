@@ -11,7 +11,7 @@ import (
 )
 
 const deleteIndexFile = `-- name: DeleteIndexFile :exec
-DELETE FROM deb_index_files WHERE repo_id = ? AND distribution = ? AND path = ?
+DELETE FROM deb_index_files WHERE deb_index_files.repo_id = ? AND distribution = ? AND path = ?
 `
 
 type DeleteIndexFileParams struct {
@@ -385,6 +385,41 @@ func (q *Queries) ListRepoIndexFiles(ctx context.Context, repoID int64) ([]ListR
 		return nil, err
 	}
 	return items, nil
+}
+
+const purgeDebIndexFiles = `-- name: PurgeDebIndexFiles :execrows
+DELETE FROM deb_index_files WHERE deb_index_files.repo_id = ?1 AND (distribution, path) IN (SELECT x.distribution, x.path FROM deb_index_files x WHERE x.repo_id = ?1 LIMIT ?2)
+`
+
+type PurgeDebIndexFilesParams struct {
+	RepoID int64
+	Limit  int64
+}
+
+func (q *Queries) PurgeDebIndexFiles(ctx context.Context, arg PurgeDebIndexFilesParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, purgeDebIndexFiles, arg.RepoID, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const purgeDebPackages = `-- name: PurgeDebPackages :execrows
+DELETE FROM deb_packages WHERE id IN (SELECT x.id FROM deb_packages x WHERE x.repo_id = ?1 LIMIT ?2)
+`
+
+type PurgeDebPackagesParams struct {
+	RepoID int64
+	Limit  int64
+}
+
+// A repo delete empties these tables batch by batch before its row goes (repos.Service.OnPurge).
+func (q *Queries) PurgeDebPackages(ctx context.Context, arg PurgeDebPackagesParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, purgeDebPackages, arg.RepoID, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const upsertIndexFile = `-- name: UpsertIndexFile :exec

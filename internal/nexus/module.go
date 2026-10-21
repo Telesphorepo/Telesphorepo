@@ -64,6 +64,7 @@ func Module() module.Module {
 				Defs: []*settings.Def{SyncInterval.Def()}})
 			x.Init(func(ctx context.Context, h *module.Host) error {
 				m.h = h
+				h.Repos.OnPurge(purge(h.DB.W)) // empties the module's rows of a repo in batches before the repo row goes
 				m.svc = New(h.DB, h.Settings, h.Repos, h.Assets, h.Ops, h.Formats, h.Audit, h.Log, h.Context(), h.Go)
 				m.svc.username = h.Auth.Username
 				return nil

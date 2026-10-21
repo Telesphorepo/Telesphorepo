@@ -77,4 +77,12 @@ RETURNING project;
 SELECT EXISTS (SELECT 1 FROM pypi_files WHERE repo_id = ? AND project = ?);
 
 -- name: DeleteProject :exec
-DELETE FROM pypi_projects WHERE repo_id = ? AND project = ?;
+DELETE FROM pypi_projects WHERE pypi_projects.repo_id = ? AND project = ?;
+
+-- A repo delete empties these tables batch by batch before its row goes (repos.Service.OnPurge).
+-- name: PurgePypiFiles :execrows
+DELETE FROM pypi_files WHERE id IN (SELECT x.id FROM pypi_files x WHERE x.repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
+
+-- name: PurgePypiProjects :execrows
+DELETE FROM pypi_projects WHERE pypi_projects.repo_id = sqlc.arg(repo_id) AND project IN (SELECT x.project FROM pypi_projects x WHERE x.repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
+

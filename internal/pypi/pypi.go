@@ -59,6 +59,7 @@ func Module() module.Module {
 			x.Schema(db.Component{Migrations: db.Sub(migrationsFS, "migrations"), Queries: db.Sub(queriesFS, "queries")})
 			x.Init(func(ctx context.Context, host *module.Host) error {
 				h.host, h.q, h.assets, h.log = host, dbq.New(host.DB.R), host.Assets, host.Log
+				host.Repos.OnPurge(purge(dbq.New(host.DB.W))) // empties the module's rows of a repo in batches before the repo row goes
 				return nil
 			})
 			x.Format(format.Spec{

@@ -12,6 +12,7 @@
   import { api, errorMessage, type Repo } from "$lib/api";
   import { Resource, listOf } from "$lib/load.svelte";
   import { count, someNames } from "$lib/words";
+  import { waitForDeletes } from "$lib/deletes";
   import { Button } from "$lib/components/ui/button";
   import PageHeader from "$lib/components/PageHeader.svelte";
   import RepoTable from "$lib/components/RepoTable.svelte";
@@ -69,8 +70,9 @@
     const list = names;
     try {
       const r = await api.repos.delete(list);
-      toast.success(`Deleted ${repoCount(r.deleted.length)}.`);
       picked = new Set();
+      await waitForDeletes(r.deleting.map((d) => d.name));
+      toast.success(`Deleted ${repoCount(r.deleting.length)}.`);
     } finally {
       await reloadKeepingPick();
     }

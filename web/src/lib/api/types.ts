@@ -333,8 +333,8 @@ export type NewRepo = {
   fields?: Record<string, unknown>;
 };
 export type RepoPatch = { description?: string; config?: RepoConfig; proxy?: ProxyInput; fields?: Record<string, unknown> };
-/** POST /api/repos/delete: the deleted repositories and how many files went with them. */
-export type ReposDeleted = { deleted: string[]; files: number };
+/** POST /api/repos/delete: the repositories whose delete started, each with its running delete operation. */
+export type ReposDeleted = { deleting: { name: string; operation: RepoOperation }[] };
 
 /** GET /api/repos/{name}/grants: a person's whole permission set on the repository. */
 export type Permission = { username: string; perms: PermId[] };

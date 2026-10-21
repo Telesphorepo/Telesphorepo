@@ -8,7 +8,7 @@ INSERT INTO npm_packages (repo_id, name, created, modified, rev) VALUES (?, ?, ?
 ON CONFLICT (repo_id, name) DO UPDATE SET modified = excluded.modified, rev = excluded.rev;
 
 -- name: DeletePackage :exec
-DELETE FROM npm_packages WHERE repo_id = ? AND name = ?;
+DELETE FROM npm_packages WHERE npm_packages.repo_id = ? AND name = ?;
 
 -- name: InsertVersion :exec
 INSERT INTO npm_versions (repo_id, name, version, sort_key, manifest, tarball, integrity, shasum, published_at, deprecated)
@@ -55,7 +55,7 @@ WHERE v.repo_id = ? AND v.name = ? AND v.version = ?;
 SELECT name, version FROM npm_versions WHERE repo_id = ? AND tarball = ?;
 
 -- name: DeleteVersion :exec
-DELETE FROM npm_versions WHERE repo_id = ? AND name = ? AND version = ?;
+DELETE FROM npm_versions WHERE npm_versions.repo_id = ? AND name = ? AND version = ?;
 
 -- name: SetDeprecated :exec
 UPDATE npm_versions SET deprecated = ? WHERE repo_id = ? AND name = ? AND version = ?;
@@ -68,7 +68,18 @@ INSERT INTO npm_tags (repo_id, name, tag, version) VALUES (?, ?, ?, ?)
 ON CONFLICT (repo_id, name, tag) DO UPDATE SET version = excluded.version;
 
 -- name: DeleteTag :exec
-DELETE FROM npm_tags WHERE repo_id = ? AND name = ? AND tag = ?;
+DELETE FROM npm_tags WHERE npm_tags.repo_id = ? AND name = ? AND tag = ?;
 
 -- name: DeleteTagsOfPackage :exec
-DELETE FROM npm_tags WHERE repo_id = ? AND name = ?;
+DELETE FROM npm_tags WHERE npm_tags.repo_id = ? AND name = ?;
+
+-- A repo delete empties these tables batch by batch before its row goes (repos.Service.OnPurge).
+-- name: PurgeNpmTags :execrows
+DELETE FROM npm_tags WHERE npm_tags.repo_id = sqlc.arg(repo_id) AND (name, tag) IN (SELECT x.name, x.tag FROM npm_tags x WHERE x.repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
+
+-- name: PurgeNpmVersions :execrows
+DELETE FROM npm_versions WHERE npm_versions.repo_id = sqlc.arg(repo_id) AND (name, version) IN (SELECT x.name, x.version FROM npm_versions x WHERE x.repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
+
+-- name: PurgeNpmPackages :execrows
+DELETE FROM npm_packages WHERE npm_packages.repo_id = sqlc.arg(repo_id) AND name IN (SELECT x.name FROM npm_packages x WHERE x.repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
+

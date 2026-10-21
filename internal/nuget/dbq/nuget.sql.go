@@ -567,6 +567,24 @@ func (q *Queries) ListVisibleVersions(ctx context.Context, arg ListVisibleVersio
 	return items, nil
 }
 
+const purgeNugetVersions = `-- name: PurgeNugetVersions :execrows
+DELETE FROM nuget_versions WHERE id IN (SELECT x.id FROM nuget_versions x WHERE x.repo_id = ?1 LIMIT ?2)
+`
+
+type PurgeNugetVersionsParams struct {
+	RepoID int64
+	Limit  int64
+}
+
+// A repo delete empties this table batch by batch before its row goes (repos.Service.OnPurge).
+func (q *Queries) PurgeNugetVersions(ctx context.Context, arg PurgeNugetVersionsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, purgeNugetVersions, arg.RepoID, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const setListed = `-- name: SetListed :execrows
 UPDATE nuget_versions SET listed = ? WHERE repo_id = ? AND lower_id = ? AND sort_key = ?
 `

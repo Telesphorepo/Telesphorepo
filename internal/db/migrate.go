@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -193,8 +194,8 @@ func (d *DB) migrate(ctx context.Context, c Component) error {
 // apply runs migration m of component and records it in one transaction. The transaction runs
 // on a connection of its own with foreign keys off, so a migration can rebuild a table (create
 // the new table, copy the rows, drop the old table, rename the new one) without the drop
-// deleting the rows that reference it. PRAGMA foreign_key_check runs before the commit: a row
-// that the migration leaves without its parent fails the migration.
+// deleting the rows that reference it. PRAGMA foreign_key_check runs before the commit, on the tables the migration touches and their
+// children: a row that the migration leaves without its parent fails the migration.
 func (d *DB) apply(ctx context.Context, component string, m migration) (err error) {
 	conn, err := d.W.Conn(ctx)
 	if err != nil {
@@ -217,7 +218,7 @@ func (d *DB) apply(ctx context.Context, component string, m migration) (err erro
 	if _, err := tx.ExecContext(ctx, m.sql); err != nil {
 		return fmt.Errorf("%s migration %s: %w", component, m.file, err)
 	}
-	if err := foreignKeyCheck(ctx, tx); err != nil {
+	if err := foreignKeyCheck(ctx, tx, touchedTables(m.sql)); err != nil {
 		return fmt.Errorf("%s migration %s: %w", component, m.file, err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations (component, version, name, checksum, applied_at) VALUES (?, ?, ?, ?, ?)`,
@@ -227,16 +228,72 @@ func (d *DB) apply(ctx context.Context, component string, m migration) (err erro
 	return tx.Commit()
 }
 
-// foreignKeyCheck fails when PRAGMA foreign_key_check finds a row whose parent is missing. The
-// error names up to 10 of them.
-func foreignKeyCheck(ctx context.Context, tx *sql.Tx) error {
-	rows, err := tx.QueryContext(ctx, `PRAGMA foreign_key_check`)
+// touchedRE finds the tables that a migration creates, alters, renames to, drops or writes.
+var touchedRE = regexp.MustCompile(`(?i)\b(?:CREATE\s+(?:VIRTUAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?|ALTER\s+TABLE\s+|RENAME\s+TO\s+|DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?|INSERT(?:\s+OR\s+\w+)?\s+INTO\s+|REPLACE\s+INTO\s+|DELETE\s+FROM\s+|UPDATE(?:\s+OR\s+\w+)?\s+)([A-Za-z_]\w*)`)
+
+// touchedTables returns the names of the tables that a migration changes, in lower case.
+func touchedTables(migration string) map[string]bool {
+	out := map[string]bool{}
+	for _, m := range touchedRE.FindAllStringSubmatch(migration, -1) {
+		out[strings.ToLower(m[1])] = true
+	}
+	return out
+}
+
+// foreignKeyCheck fails when PRAGMA foreign_key_check finds a row whose parent is missing. It
+// checks the touched tables and the tables whose foreign keys point at one of them, so a
+// migration costs the size of what it changes, not the size of the database. The error names up
+// to 10 of the rows.
+func foreignKeyCheck(ctx context.Context, tx *sql.Tx, touched map[string]bool) error {
+	rows, err := tx.QueryContext(ctx, `SELECT m.name, lower(p."table") FROM sqlite_schema m JOIN pragma_foreign_key_list(m.name) p
+		WHERE m.type = 'table' AND m.sql NOT LIKE 'CREATE VIRTUAL%'`)
+	if err != nil {
+		return err
+	}
+	check := map[string]bool{}
+	for rows.Next() {
+		var child, parent string
+		if err := rows.Scan(&child, &parent); err != nil {
+			rows.Close()
+			return err
+		}
+		if touched[strings.ToLower(child)] || touched[parent] {
+			check[child] = true
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	tables := make([]string, 0, len(check))
+	for t := range check {
+		tables = append(tables, t)
+	}
+	sort.Strings(tables)
+	var bad []string
+	for _, t := range tables {
+		if err := foreignKeyCheckTable(ctx, tx, t, &bad); err != nil {
+			return err
+		}
+		if len(bad) >= 10 {
+			break
+		}
+	}
+	if len(bad) > 0 {
+		return errors.New("foreign key check failed: " + strings.Join(bad, "; "))
+	}
+	return nil
+}
+
+// foreignKeyCheckTable runs PRAGMA foreign_key_check on one table and appends the rows that
+// miss their parent to bad, up to 10 in all.
+func foreignKeyCheckTable(ctx context.Context, tx *sql.Tx, table string, bad *[]string) error {
+	rows, err := tx.QueryContext(ctx, `PRAGMA foreign_key_check("`+strings.ReplaceAll(table, `"`, `""`)+`")`)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
-	var bad []string
-	for rows.Next() && len(bad) < 10 {
+	for rows.Next() && len(*bad) < 10 {
 		var table, parent string
 		var rowid sql.NullInt64
 		var fkid int64
@@ -247,13 +304,7 @@ func foreignKeyCheck(ctx context.Context, tx *sql.Tx) error {
 		if rowid.Valid {
 			row = fmt.Sprintf("%s rowid %d", table, rowid.Int64)
 		}
-		bad = append(bad, row+" references a missing "+parent+" row")
+		*bad = append(*bad, row+" references a missing "+parent+" row")
 	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	if len(bad) > 0 {
-		return errors.New("foreign key check failed: " + strings.Join(bad, "; "))
-	}
-	return nil
+	return rows.Err()
 }
