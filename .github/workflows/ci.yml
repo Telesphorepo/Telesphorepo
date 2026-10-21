@@ -59,10 +59,13 @@ jobs:
       - name: Check the database
         run: bin/telesphorepo-server dbcheck
 
+  # The e2e zones run on pull requests: a change reaches main through a pull request whose zones
+  # passed, so a push to main only builds and publishes the image.
   # The core zone runs on four machines at once, each with a quarter of its tests
   # (go tool task test --shard).
   e2e-core:
     needs: build
+    if: github.event_name == 'pull_request'
     runs-on: blacksmith-8vcpu-ubuntu-2404 # one runner label per job; change it here to switch runner provider
     timeout-minutes: 45
     strategy:
@@ -92,11 +95,40 @@ jobs:
           name: e2e-core-log-${{ matrix.shard }}
           path: e2e-core.log
 
+  # The clients zone: the CLI with the real build tools in containers.
+  e2e-clients:
+    needs: build
+    if: github.event_name == 'pull_request'
+    runs-on: blacksmith-8vcpu-ubuntu-2404 # one runner label per job; change it here to switch runner provider
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - uses: oven-sh/setup-bun@v2
+      - uses: useblacksmith/setup-docker-builder@v2
+        with:
+          cache-key: telesphorepo-image
+      - name: Run the clients e2e zone
+        shell: bash
+        run: go tool task test clients 2>&1 | tee e2e-clients.log
+      - name: Upload the test output
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-clients-log
+          path: e2e-clients.log
+
   # The CLI publishes from this job with the identity token of GitHub Actions (TestCLIGitHubActions).
   # A pull request from a fork gets no identity token, so the job runs only for this repository.
   e2e-github-actions:
     needs: build
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: blacksmith-4vcpu-ubuntu-2404 # one runner label per job; change it here to switch runner provider
     timeout-minutes: 45
     permissions:
@@ -127,11 +159,11 @@ jobs:
           name: e2e-github-actions-log
           path: e2e-github-actions.log
 
-  # Every green push to main publishes ghcr.io/telesphorepo/telesphorepo:main (moving) and
+  # Every push to main that builds publishes ghcr.io/telesphorepo/telesphorepo:main (moving) and
   # :sha-<short> (fixed). Version tags and latest come only from release.yml.
   snapshot-image:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: e2e-core
+    needs: build
     runs-on: blacksmith-4vcpu-ubuntu-2404 # one runner label per job; change it here to switch runner provider
     timeout-minutes: 60
     permissions:

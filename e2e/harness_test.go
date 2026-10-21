@@ -1266,7 +1266,9 @@ func RunClientResult(t testing.TB, image string, opts ClientOpts) *ClientResult 
 	var customizers []testcontainers.ContainerCustomizer
 	switch {
 	case !opts.NoShell:
-		customizers = append(customizers, testcontainers.WithEntrypoint("sh", "-c"), testcontainers.WithCmd(strings.Join(opts.Cmd, " ")))
+		// One stream: the container log does not keep the order of stdout and stderr, so a script's
+		// stderr goes to its stdout.
+		customizers = append(customizers, testcontainers.WithEntrypoint("sh", "-c"), testcontainers.WithCmd("exec 2>&1; "+strings.Join(opts.Cmd, " ")))
 	case len(opts.Cmd) > 0:
 		customizers = append(customizers, testcontainers.WithCmd(opts.Cmd...))
 	}
