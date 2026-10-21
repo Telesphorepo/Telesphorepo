@@ -12,7 +12,7 @@ import (
 // when the file has no markers.
 type gapState struct {
 	Version    string
-	CheckedAt  time.Time // zero before the first pass
+	CheckedAt  time.Time // the last run of the gap check; zero before the first
 	Regions    map[string]bool
 	Markers    map[string]string // hint -> bucket
 	HomeBucket *string           // the bucket that the HOME binding names; nil when not recorded
@@ -23,9 +23,10 @@ type gapState struct {
 	read        time.Time // when the server read it
 }
 
-// parseGap reads gap/state.json: {version, last_run, bindings: [hint], markers: {home, regions:
-// {hint: bucket}}, pass: {started, ...} | null, last_pass: {started, finished} | null, regions:
-// {hint: {last_pass, queued}}}, times in unix seconds. The time of the check is last_pass.finished, else last_run.
+// parseGap reads gap/state.json: {version, checked, last_run, bindings: [hint], markers: {home,
+// regions: {hint: bucket}}, pass: {started, ...} | null, last_pass: {started, finished} | null,
+// regions: {hint: {last_pass, queued}}}, times in unix seconds. The time of the check is checked
+// (every run writes it); a Worker that does not write it gives last_pass.finished, else last_run.
 func parseGap(b []byte) *gapState {
 	g := &gapState{Regions: map[string]bool{}, Copies: map[string]int64{}}
 	var top map[string]json.RawMessage
@@ -47,8 +48,9 @@ func parseGap(b []byte) *gapState {
 			}
 		}
 	}
+	g.CheckedAt = unixOf(top["checked"])
 	var last map[string]json.RawMessage
-	if json.Unmarshal(top["last_pass"], &last) == nil && last != nil {
+	if g.CheckedAt.IsZero() && json.Unmarshal(top["last_pass"], &last) == nil && last != nil {
 		g.CheckedAt = unixOf(last["finished"])
 	}
 	if g.CheckedAt.IsZero() {
