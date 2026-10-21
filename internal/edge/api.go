@@ -27,21 +27,28 @@ type statusJSON struct {
 	WorkerVersion *string    `json:"worker_version"` // from gap/state.json; null before the first gap check
 	Mismatch      bool       `json:"version_mismatch"`
 	GapCheckedAt  *time.Time `json:"gap_checked_at"`
+	// GapPassStarted is the start of the Worker's copy pass that runs now (null between passes).
+	GapPassStarted *time.Time `json:"gap_pass_started"`
 	// DeployNeeded: a storage change or move, a region change, or a Worker of another version
 	// asks for a new deploy. DeployReason names the storage change ("" otherwise).
 	DeployNeeded bool   `json:"deploy_needed"`
 	DeployReason string `json:"deploy_reason"`
 	// WorkerMissing says why GET /api/edge/worker.zip has no Worker of this build ("" when it has).
-	WorkerMissing string       `json:"worker_missing"`
-	Home          homeJSON     `json:"home"`
-	Backfill      backfillJSON `json:"backfill"`
-	Regions       []regionJSON `json:"regions"`
+	WorkerMissing string `json:"worker_missing"`
+	// CheckUnfit says why POST /api/edge/check cannot run ("" when it can); LastCheck is what the
+	// last check found (null before one).
+	CheckUnfit string       `json:"check_unfit"`
+	LastCheck  *checkResult `json:"last_check"`
+	Home       homeJSON     `json:"home"`
+	Backfill   backfillJSON `json:"backfill"`
+	Regions    []regionJSON `json:"regions"`
 }
 
 type homeJSON struct {
 	Hint      string `json:"hint"`
 	Bucket    string `json:"bucket"`
-	Outbox    int64  `json:"outbox"` // rows of the outbox: pointers and access objects
+	Outbox    int64  `json:"outbox"`   // rows of the outbox: pointers and access objects
+	Pointers  int64  `json:"pointers"` // the pointer rows of the outbox
 	LastError string `json:"last_error"`
 }
 
@@ -62,9 +69,15 @@ type regionJSON struct {
 	State           string `json:"state"`
 	PointersWritten int64  `json:"pointers_written"`
 	PointersTotal   int64  `json:"pointers_total"`
+	PointersDone    bool   `json:"pointers_done"` // every pointer of the region is written: the blob check runs
 	BlobsMissing    *int64 `json:"blobs_missing"`
-	Outbox          int64  `json:"outbox"` // pointer rows of the outbox, which may write this bucket
-	LastError       string `json:"last_error"`
+	// BlobsMissingSince is when the count of the blob check last changed (null before a count);
+	// CopiesQueued the copies and deletes that the Worker's last finished pass queued for the
+	// region (null before one).
+	BlobsMissingSince *time.Time `json:"blobs_missing_since"`
+	CopiesQueued      *int64     `json:"copies_queued"`
+	Outbox            int64      `json:"outbox"` // pointer rows of the outbox, which may write this bucket
+	LastError         string     `json:"last_error"`
 }
 
 // status answers the state of edge delivery for the Edge delivery page.
@@ -83,11 +96,13 @@ func (m *mod) status(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		Backfill: backfillJSON{Running: v.mode == modeOn && p.home.Started && !p.home.Ready, Queued: p.home.Queued, Total: p.home.Total},
 		Regions:  []regionJSON{},
 	}
+	_, out.CheckUnfit = checkBase(snap)
+	out.LastCheck = m.lastResult.Load()
 	if out.Unfit != "" && !Enabled.Get(snap) {
 		out.Unfit = ""
 	}
 	if v.mode == modeOn {
-		out.Home.Outbox = counts.Total
+		out.Home.Outbox, out.Home.Pointers = counts.Total, counts.Pointers
 		if out.Home.LastError == "" {
 			out.Home.LastError = counts.LastError
 		}
@@ -102,9 +117,21 @@ func (m *mod) status(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		t := g.CheckedAt
 		out.GapCheckedAt = &t
 	}
+	if g != nil && !g.PassStarted.IsZero() {
+		t := g.PassStarted
+		out.GapPassStarted = &t
+	}
 	for _, rs := range p.regions {
 		rj := regionJSON{Hint: rs.Hint, Area: hintAreas[rs.Hint], Bucket: rs.Bucket, State: "filling",
-			PointersWritten: rs.Written, PointersTotal: rs.Total, BlobsMissing: rs.Missing, LastError: m.lastErr(rs.Hint)}
+			PointersWritten: rs.Written, PointersTotal: rs.Total, PointersDone: rs.pointersDone(&p.home), BlobsMissing: rs.Missing,
+			LastError: m.lastErr(rs.Hint)}
+		if rs.MissingSince != 0 {
+			t := time.Unix(rs.MissingSince, 0).UTC()
+			rj.BlobsMissingSince = &t
+		}
+		if q, ok := g.copies(rs.Hint); ok {
+			rj.CopiesQueued = &q
+		}
 		if rs.ViaHome {
 			rj.PointersWritten, rj.PointersTotal = p.home.Queued, p.home.Total
 		}

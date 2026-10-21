@@ -23,6 +23,7 @@ const (
 	markerKey     = "bucket.json"
 	gapStateKey   = "gap/state.json"
 	gapRequestKey = "gap/request.json"
+	checkKey      = "check.json"
 	seenPrefix    = "seen/"
 	pointerPrefix = "p/"
 	accessPrefix  = "a/"

@@ -45,7 +45,8 @@ var ProblemNoWorker = httpx.DeclareProblem(httpx.Problem{Name: "no-edge-worker",
 
 // Module returns the edge module: the settings group edge, the permission edge.manage, the
 // pipeline watcher, the change notices of auth, repos, network, publish and storage, the jobs
-// edge.outbox, edge.backfill, edge.reconcile and edge.seen, and the routes of /api/edge/.
+// edge.outbox, edge.backfill, edge.reconcile and edge.seen, the routes of /api/edge/ and the
+// server's answer on the reserved path of the Worker check (/.well-known/telesphorepo-edge/).
 func Module() module.Module {
 	m := &mod{kick: make(chan struct{}, 1), akick: make(chan struct{}, 1), ctl: make(chan struct{}, 1),
 		countKick: make(chan struct{}, 1), sp: newSpacer(), errs: map[string]string{}, removedKeys: map[string]*view{},
@@ -67,6 +68,7 @@ func Module() module.Module {
 			x.Job(jobs.Job{Name: "edge.backfill", Run: m.runControl})
 			x.Job(jobs.Job{Name: "edge.reconcile", Every: 5 * time.Minute, Tick: m.reconcile})
 			x.Job(jobs.Job{Name: "edge.seen", Every: time.Minute, Tick: m.seen})
+			x.RootPrefix(checkPrefix)
 			x.Routes(m.routes)
 		},
 	}
@@ -109,6 +111,15 @@ type mod struct {
 
 	ttlMu sync.Mutex // guards ttl
 	ttl   ttlState
+
+	checkMu    sync.Mutex                   // one check of the Worker at a time; guards lastCheck
+	lastCheck  time.Time                    // when the last check started
+	lastResult atomic.Pointer[checkResult]  // what the last check found
+	pending    atomic.Pointer[pendingCheck] // the nonce of the check that runs
+
+	offMu   sync.Mutex // guards offHome and offLoc
+	offHome *bucket    // the home bucket of the storage settings while edge delivery is not on
+	offLoc  string     // location() of offHome
 }
 
 // outboxCounts are the rows of the outbox at its last count (At).
@@ -399,4 +410,6 @@ func (m *mod) routes(r *route.Router) {
 	r.Handle("GET /api/edge/status", route.UIPerm(PermManage), m.status)
 	r.Handle("GET /api/edge/wrangler.jsonc", route.UIPerm(PermManage), m.wranglerConfig)
 	r.Handle("GET /api/edge/worker.zip", route.UIPerm(PermManage), m.workerZip)
+	r.Handle("POST /api/edge/check", route.UIPerm(PermManage), m.check)
+	r.Handle("GET "+checkPath, route.Public, m.checkAnswer)
 }

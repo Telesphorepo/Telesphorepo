@@ -14,7 +14,7 @@ You need:
 ## Deploy
 
 1. In the web UI, open **Settings > Edge delivery**. Choose the home region and the regions to
-   serve from, turn edge delivery on, and save.
+   serve from, and save.
 2. In the Deploy section, download the edge Worker. The zip holds the Worker of your server's
    version, built and ready (`dist/index.js`), with the `wrangler.jsonc` of your settings.
 3. Unpack it, and in the `telesphorepo-edge` folder run:
@@ -32,6 +32,14 @@ nothing: when your login reaches several Cloudflare accounts, set `CLOUDFLARE_AC
 account of the buckets (`CLOUDFLARE_ACCOUNT_ID=<id> bun run provision`, and the same for
 deploy). In CI, set `CLOUDFLARE_API_TOKEN` in place of the login, with Workers Scripts edit,
 Workers Routes edit, R2 edit and Queues edit.
+
+Then turn edge delivery on in the web UI. The switch turns on once the Worker has reported its
+version: the Edge delivery page checks the Worker every 30 seconds until then, and you can select
+**Check now** to check at once. The check reaches the Worker through Cloudflare at
+`/.well-known/telesphorepo-edge/check` on your host, a route of the `wrangler.jsonc`. When it says
+that the request reached the server, the Worker is not deployed on that host or route: deploy it
+again. Regions fill while edge delivery is on: the server writes their pointers, and the Worker
+copies their files at each gap check (every 10 minutes, or Check now).
 
 After you change the regions, download the Worker again and run provision and deploy. For each
 server release, download the Worker again and deploy it: a Worker of another version sends every

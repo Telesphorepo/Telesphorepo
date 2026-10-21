@@ -682,8 +682,14 @@ export type EdgeRegionStatus = {
   /** Backfill progress while the region is filling. */
   pointers_written: number;
   pointers_total: number;
+  /** Every pointer of the region is written; the server then checks its files. */
+  pointers_done: boolean;
   /** Blobs of the home bucket that the region lacks; null before the count is known. */
   blobs_missing: number | null;
+  /** When the count of missing files last changed; null before a count. */
+  blobs_missing_since: string | null;
+  /** The copies and deletes that the Worker's last finished copy pass queued for the region; null before one. */
+  copies_queued: number | null;
   /** Pointers waiting in the outbox for this bucket. */
   outbox: number;
   last_error: string;
@@ -700,17 +706,37 @@ export type EdgeStatus = {
   worker_version: string | null;
   version_mismatch: boolean;
   gap_checked_at: string | null;
+  /** The start of the Worker's copy pass that runs now; null between passes. */
+  gap_pass_started: string | null;
   /** A storage or region change needs a new deploy. */
   deploy_needed: boolean;
   /** The storage change that asks for the deploy ("storage change", "storage move"); "" otherwise. */
   deploy_reason: string;
   /** Why this build has no edge Worker to download; "" when it has. */
   worker_missing: string;
-  home: { hint: EdgeHint | ""; bucket: string; outbox: number; last_error: string };
+  /** Why a check of the Worker cannot run (POST /api/edge/check); "" when it can. */
+  check_unfit: string;
+  /** What the last check of the Worker found; null before one. */
+  last_check: EdgeCheck | null;
+  /** outbox: every row of the outbox (pointers and access objects); pointers: its pointer rows. */
+  home: { hint: EdgeHint | ""; bucket: string; outbox: number; pointers: number; last_error: string };
   /** The backfill of every pointer after edge delivery starts. */
   backfill: { running: boolean; queued: number; total: number };
   /** One entry per chosen region. */
   regions: EdgeRegionStatus[];
+};
+/**
+ * POST /api/edge/check: worker (the Worker answered and ran its gap check), refused (the Worker
+ * refused the check), server (the request reached the server, not the Worker), other (something
+ * else answered), unreachable (no answer), error (the check request was not written).
+ */
+export type EdgeCheck = {
+  at: string;
+  outcome: "worker" | "refused" | "server" | "other" | "unreachable" | "error";
+  /** The Worker of the server's version answered and ran its gap check. */
+  ok: boolean;
+  message: string;
+  worker_version?: string;
 };
 
 // --- backups ---
