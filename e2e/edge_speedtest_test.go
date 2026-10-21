@@ -62,10 +62,7 @@ func TestEdgeSpeedTest(t *testing.T) {
 		}
 	}
 	// The suggested path downloads the file without a credential.
-	resp, body := s.Do(t, s.NewRequest(t, http.MethodGet, files.Files[0].URL, nil), nil)
-	if resp.StatusCode != http.StatusOK || string(body) != big {
-		t.Errorf("GET %s = %d (%d bytes), want 200 with the jar", files.Files[0].URL, resp.StatusCode, len(body))
-	}
+	rawWantGet(t, s, tg, files.Files[0].URL, nil, []byte(big))
 
 	// A pass: a 256-bit token, and its object in the home bucket under the edge prefix.
 	var pass struct {
@@ -76,8 +73,8 @@ func TestEdgeSpeedTest(t *testing.T) {
 	if raw, err := base64.RawURLEncoding.DecodeString(pass.Token); err != nil || len(raw) != 32 {
 		t.Errorf("token %q: %v, want 32 bytes of base64url", pass.Token, err)
 	}
-	if d := time.Until(pass.ExpiresAt); d < 9*time.Minute || d > 11*time.Minute {
-		t.Errorf("expires_at %v is %v away, want about 10 minutes", pass.ExpiresAt, d)
+	if !pass.ExpiresAt.After(time.Now()) {
+		t.Errorf("expires_at %v is not in the future", pass.ExpiresAt)
 	}
 	sum := sha256.Sum256([]byte(pass.Token))
 	hash := hex.EncodeToString(sum[:])

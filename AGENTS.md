@@ -24,8 +24,8 @@ Linux. Use bun, not npm.
 
 - Every change reaches `main` through a pull request. CI runs the build and the e2e zones on the
   pull request; a push to `main` publishes the `main` image, which production runs.
-- Never run the e2e zones locally. Build and vet, push the branch, and read CI's log when a job
-  fails. Start the import and scale zones by hand (`e2e-extended.yml`) for a change to the Nexus
+- Locally, run only the tests a change touches (`go tool task test -run 'TestX|TestY'`), never a
+  whole zone: CI runs the zones. Push the branch, and read CI's log when a job fails. Start the import and scale zones by hand (`e2e-extended.yml`) for a change to the Nexus
   import, a hot query or an index.
 - Update SPEC.md in the same change when behaviour, routes, tables or settings change.
 - For architectural work, write a short design in `docs/superpowers/specs/` and get it approved
