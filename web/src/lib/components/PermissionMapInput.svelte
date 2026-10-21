@@ -1,8 +1,8 @@
 <!--
   A map of a value of the provider's group field to server permissions (the setting
   oidc.permission_map): one row per group with the phrase of its permissions, Change and Remove,
-  and Add a group. Add and Change open a short form with the group and a PermissionPicker of the
-  server permissions, grouped by subsystem with their labels and help.
+  and Add a group. Add and Change open a short form with the group and its role
+  (ServerPermissionPicker: Member, Administrator, or Custom with one switch per permission).
 
     <PermissionMapInput id="map" value={map} onchange={(v) => (map = v)} />
 -->
@@ -12,8 +12,8 @@
   import CompactEmpty from "./CompactEmpty.svelte";
   import ShortFormDialog from "./ShortFormDialog.svelte";
   import FormField from "./FormField.svelte";
-  import PermissionPicker from "./PermissionPicker.svelte";
-  import { needsOf, pickerGroups, serverPhrase } from "$lib/permissions";
+  import ServerPermissionPicker from "./ServerPermissionPicker.svelte";
+  import { serverPhrase } from "$lib/permissions";
   import type { PermId } from "$lib/api";
   import UsersIcon from "@lucide/svelte/icons/users-round";
   import PlusIcon from "@lucide/svelte/icons/plus";
@@ -68,7 +68,7 @@
       {#each rows as [g, ps] (g)}
         <li class="flex h-row items-center gap-3 px-3 text-body">
           <span class="min-w-0 truncate font-medium" title={g}>{g}</span>
-          <span class="min-w-0 flex-1 truncate text-muted-foreground">{serverPhrase(ps) || "No permissions"}</span>
+          <span class="min-w-0 flex-1 truncate text-muted-foreground">{serverPhrase(ps) || "Member"}</span>
           <Button variant="ghost" size="sm" {disabled} onclick={() => edit(g)}>Change</Button>
           <Button variant="ghost" size="sm" class="hover:bg-destructive/10 hover:text-destructive" {disabled} onclick={() => remove(g)}>Remove</Button>
         </li>
@@ -93,6 +93,6 @@
     <Input id="{id}-group" autocomplete="off" spellcheck={false} bind:value={group} />
   </FormField>
   <FormField label="Server permissions">
-    <PermissionPicker id="{id}-perms" groups={pickerGroups("server")} needs={needsOf("server")} bind:value={perms} />
+    <ServerPermissionPicker id="{id}-perms" bind:value={perms} />
   </FormField>
 </ShortFormDialog>

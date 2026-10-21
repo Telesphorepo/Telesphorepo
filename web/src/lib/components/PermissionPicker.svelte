@@ -13,7 +13,6 @@
   import { Checkbox } from "$lib/components/ui/checkbox";
   import OptionRow from "./OptionRow.svelte";
   import type { PermissionInfo } from "$lib/permissions";
-  import { cn } from "$lib/utils";
 
   let {
     id,
@@ -21,7 +20,6 @@
     value = $bindable([]),
     needs = {},
     held,
-    columns = 1,
     onchange,
   }: {
     /** Prefix of the element ids, unique on the page. */
@@ -32,8 +30,6 @@
     needs?: Partial<Record<P, P[]>>;
     /** The permissions the person can change; undefined: every one. */
     held?: readonly P[];
-    /** Two columns on a page from 640px; one in a dialog. */
-    columns?: 1 | 2;
     onchange?: (value: P[]) => void;
   } = $props();
 
@@ -95,7 +91,7 @@
         >
         <Button variant="ghost" size="xs" disabled={!changeable.some((i) => value.includes(i.name))} onclick={() => all(g.items, false)}>None</Button>
       </div>
-      <div class={cn("-mx-3 grid", columns === 2 && "sm:grid-cols-2")}>
+      <div class="-mx-3 grid">
         {#each g.items as item (item.name)}
           {@const own = canChange(item.name)}
           <OptionRow
