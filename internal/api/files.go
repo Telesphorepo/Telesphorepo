@@ -39,7 +39,17 @@ func (a *API) tree(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		httpx.Error(w, r, http.StatusBadRequest, "invalid path")
 		return
 	}
-	items, next, err := a.files.Tree(r.Context(), repo, string(dir), q.Get("after"), httpx.Limit(r))
+	var items []files.Node
+	var next string
+	if repo.Kind == repos.KindGroup {
+		// A group lists the merged files of the members that the caller reads, as its reads serve them.
+		var members []*repos.Repo
+		if members, err = a.access.GroupMembers(r.Context(), r, c.P, repo); err == nil {
+			items, next, err = a.files.GroupTree(r.Context(), members, string(dir), q.Get("after"), httpx.Limit(r))
+		}
+	} else {
+		items, next, err = a.files.Tree(r.Context(), repo, string(dir), q.Get("after"), httpx.Limit(r))
+	}
 	if errors.Is(err, files.ErrInvalid) {
 		httpx.Error(w, r, http.StatusBadRequest, "invalid cursor")
 		return
@@ -531,10 +541,31 @@ func uploadReadFail(w http.ResponseWriter, r *http.Request, err error) {
 	}
 }
 
-// fileDetails returns one file with its details and its CI build record: ?path= -> File.
+// fileDetails returns one file with its details and its CI build record: ?path= -> File. In a
+// group it is the file of the first member that the caller reads and that stores it (the file a
+// group read serves when no member fetches from a remote), with that member in repo.
 func (a *API) fileDetails(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	repo := c.Repo
-	f, err := a.files.Details(r.Context(), repo, r.URL.Query().Get("path"))
+	p := r.URL.Query().Get("path")
+	var f *files.File
+	var err error
+	if repo.Kind == repos.KindGroup {
+		var members []*repos.Repo
+		if members, err = a.access.GroupMembers(r.Context(), r, c.P, repo); err == nil {
+			err = files.ErrNotFound
+			for _, m := range members {
+				if f, err = a.files.Details(r.Context(), m, p); err == nil {
+					f.Repo = m.Name
+					break
+				}
+				if !errors.Is(err, files.ErrNotFound) {
+					break
+				}
+			}
+		}
+	} else {
+		f, err = a.files.Details(r.Context(), repo, p)
+	}
 	switch {
 	case errors.Is(err, files.ErrInvalid):
 		httpx.Error(w, r, http.StatusBadRequest, "invalid path")

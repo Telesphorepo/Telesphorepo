@@ -33,6 +33,7 @@ type treeNode struct {
 	SHA256     string     `json:"sha256"`
 	UpdatedAt  *time.Time `json:"updated_at"`
 	UploadedBy string     `json:"uploaded_by"`
+	Repo       string     `json:"repo"` // a group: the member that serves the file
 }
 
 // treePage fetches one page of GET /api/repos/{repo}/tree.

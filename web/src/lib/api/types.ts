@@ -243,7 +243,8 @@ export type Format = {
 export type RepoKind = "hosted" | "proxy" | "group";
 
 /** One member of a group, in read order. */
-export type GroupMember = { name: string; format: string; kind: "hosted" | "proxy"; public: boolean };
+/** A member of a group; `permissions` are the caller's permissions on it. */
+export type GroupMember = { name: string; format: string; kind: "hosted" | "proxy"; public: boolean; permissions?: string[] };
 
 /** The remote of a proxy. It never holds the credentials. Times are in seconds. */
 export type RepoProxy = {
@@ -476,6 +477,8 @@ export type FileInfo = {
   updated_at: string;
   uploaded_by: string;
   build: BuildRecord | null;
+  /** A group: the member that serves the file. */
+  repo?: string;
 };
 
 export type VersionMode = "pinned" | "latest";
@@ -513,6 +516,8 @@ export type TreeEntry = {
   uploaded_by?: string;
   /** The CI build that published the file; absent for none. */
   build?: BuildRecord | null;
+  /** A file in the listing of a group: the member that serves it. */
+  repo?: string;
 };
 
 /** POST /api/repos/{name}/files/delete and /files/delete/plan: files by path, and folders by prefix (ending in "/"). */
