@@ -22,6 +22,7 @@
   import FileIcon from "@lucide/svelte/icons/file";
   import ChevronRightIcon from "@lucide/svelte/icons/chevron-right";
   import HistoryIcon from "@lucide/svelte/icons/history";
+  import MemberTag from "./MemberTag.svelte";
 
   let {
     repo,
@@ -162,6 +163,7 @@
       <FileIcon aria-hidden="true" class={cn("size-4 shrink-0", deepest ? "" : "text-muted-foreground")} />
     {/if}
     <span class="min-w-0 flex-1 truncate" title={e.name.length > 26 ? e.name : undefined}>{short(e)}</span>
+    <MemberTag repo={e.repo} class="max-w-20" />
     {#if e.type === "dir"}<ChevronRightIcon aria-hidden="true" class="size-4 shrink-0 opacity-60" />{/if}
   </a>
 {/snippet}

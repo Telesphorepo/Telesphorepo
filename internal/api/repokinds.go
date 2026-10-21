@@ -54,7 +54,8 @@ func timeOrNil(t time.Time) *time.Time {
 
 // writeRepo answers the repo JSON of repo for p, who holds perms on it, with the details of its
 // kind: the members of a group and the groups of a member (only those p can download from), and
-// the remote of a proxy (only for a holder of settings).
+// the remote of a proxy (only for a holder of settings). A group's counters are the sums of those
+// members' counters (a path that two members hold counts twice) and the newest of their publishes.
 func (a *API) writeRepo(w http.ResponseWriter, r *http.Request, status int, p *auth.Principal, repo *repos.Repo, perms perm.Set) {
 	ctx := r.Context()
 	out := a.toRepoJSON(repo, perms)
@@ -78,6 +79,12 @@ func (a *API) writeRepo(w http.ResponseWriter, r *http.Request, status int, p *a
 			}
 			if set.Has(perm.RepoDownload) {
 				out.Members = append(out.Members, memberJSON{m.Name, m.Format, m.Kind, m.AnonymousRead, set.Strings()})
+				// A group counts the files of the members that p reads, as its Files tab shows them.
+				out.FileCount += m.FileCount
+				out.TotalSize += m.TotalSize
+				if t := timeOrNil(m.LastPublishedAt); t != nil && (out.LastPublishedAt == nil || t.After(*out.LastPublishedAt)) {
+					out.LastPublishedAt = t
+				}
 			}
 		}
 	case repos.KindProxy:

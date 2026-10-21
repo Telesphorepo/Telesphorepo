@@ -246,12 +246,12 @@ func (h *Handler) readPackaging(ctx context.Context, repo *repos.Repo, p string)
 // latest.release and Maven's RELEASE (latest.integration and LATEST for a snapshot-only
 // artifact). A Gradle plugin marker gets a plugins { } block; a BOM an import of the platform; a
 // parent pom a <parent> block.
-func (h *Handler) ArtifactUsage(ctx context.Context, repo *repos.Repo, baseURL, p, v, mode string) (*format.ArtifactUsage, error) {
+func (h *Handler) ArtifactUsage(ctx context.Context, repo, from *repos.Repo, baseURL, p, v, mode string) (*format.ArtifactUsage, error) {
 	dir := strings.Trim(p, "/")
 	if dir == "" {
 		return nil, nil
 	}
-	if _, err := h.assets.Get(ctx, repo.ID, dir); err == nil {
+	if _, err := h.assets.Get(ctx, from.ID, dir); err == nil {
 		dir = path.Dir(dir) // a file: its folder
 	} else if !errors.Is(err, assets.ErrNotFound) {
 		return nil, err
@@ -264,7 +264,7 @@ func (h *Handler) ArtifactUsage(ctx context.Context, repo *repos.Repo, baseURL, 
 	if parent := path.Dir(strings.TrimSuffix(dir, "/")); parent != "." {
 		if art, _, id, ok := artifactOf(parent); ok {
 			v := path.Base(strings.TrimSuffix(dir, "/"))
-			bs, err := h.readBuilds(ctx, repo.ID, dir, id, v)
+			bs, err := h.readBuilds(ctx, from.ID, dir, id, v)
 			if err != nil {
 				return nil, err
 			}
@@ -278,14 +278,14 @@ func (h *Handler) ArtifactUsage(ctx context.Context, repo *repos.Repo, baseURL, 
 		return nil, nil
 	}
 	if version == "" {
-		v, err := h.latestVersion(ctx, repo, artDir)
+		v, err := h.latestVersion(ctx, from, artDir)
 		if err != nil || v == "" {
 			return nil, err
 		}
 		version = v
 	}
 	if art.Kind != "gradle-plugin" {
-		pk, dm, err := h.readPackaging(ctx, repo, artDir+version+"/"+id+"-"+version+".pom")
+		pk, dm, err := h.readPackaging(ctx, from, artDir+version+"/"+id+"-"+version+".pom")
 		if err != nil {
 			return nil, err
 		}

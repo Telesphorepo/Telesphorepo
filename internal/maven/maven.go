@@ -50,6 +50,8 @@ func Module() module.Module {
 				Merge:         &assets.Merger{Match: matchMerged, Merge: mergeParts},
 				Versions:      h.Versions,
 				Builds:        h.Builds,
+				GroupVersions: format.GroupEach,
+				VersionOrder:  func(a, b format.Version) int { return -compareVersions(a.Version, b.Version) },
 				Usage:         h.Usage,
 				ArtifactUsage: h.ArtifactUsage,
 				Tools:         tools(),

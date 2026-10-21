@@ -7,7 +7,8 @@ import { api, errorMessage, type TreeEntry, type Version } from "$lib/api";
 import { Keyset } from "$lib/load.svelte";
 import { baseName, compareVersions, parentOf, sideOf } from "../browse";
 
-export type Entry = { name: string; path: string; type: "dir" | "file"; size?: number };
+/** `repo` is the repository that serves a file of a group. */
+export type Entry = { name: string; path: string; type: "dir" | "file"; size?: number; repo?: string };
 
 export class Column {
   readonly folder: string;
@@ -28,7 +29,7 @@ export class Column {
         .then((b) => {
           if (b.version && b.items[0]) {
             this.version = b.version;
-            this.#build = b.items[0].files.map((f) => ({ name: f.name, path: f.path, type: "file" as const, size: f.size }));
+            this.#build = b.items[0].files.map((f) => ({ name: f.name, path: f.path, type: "file" as const, size: f.size, repo: b.version?.repo }));
           } else {
             this.#tree = new Keyset((p) => api.repos.tree(repo, folder, p), 100);
           }
@@ -69,7 +70,7 @@ export class Column {
         const of = e.type === "file" ? sideOf(e.path) : null;
         return !of || !paths.has(of);
       })
-      .map((e) => ({ name: e.name.replace(/\/$/, ""), path: e.path, type: e.type, size: e.type === "file" ? e.size : undefined }));
+      .map((e) => ({ name: e.name.replace(/\/$/, ""), path: e.path, type: e.type, size: e.type === "file" ? e.size : undefined, repo: e.repo }));
     const dirs = shown.filter((e) => e.type === "dir");
     const files = shown.filter((e) => e.type === "file");
     // The versions of an artifact: newest first.

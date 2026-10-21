@@ -456,6 +456,8 @@ export type Version = {
   builds_count: number;
   published_at: string;
   build: BuildRecord | null;
+  /** A group: the member that serves the version. */
+  repo?: string;
 };
 
 export type BuildFile = { name: string; path: string; size: number; sha256: string; classifier: string; extension: string };
@@ -503,6 +505,8 @@ export type Asset = {
   content_type: string;
   kind: string;
   updated_at: string;
+  /** A group: the member that serves the file. */
+  repo?: string;
 };
 
 /** One child of a folder in GET /api/repos/{name}/tree. Folders have only name, type and path. */

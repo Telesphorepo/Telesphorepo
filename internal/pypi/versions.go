@@ -71,8 +71,8 @@ func (h *Handler) versionFiles(ctx context.Context, repo *repos.Repo, project, k
 }
 
 // Versions lists the versions of a project folder, newest first.
-func (h *Handler) Versions(ctx context.Context, repo *repos.Repo, p, after string, limit int) (*format.Artifact, []format.Version, string, error) {
-	art, project, err := h.projectOf(ctx, repo, p)
+func (h *Handler) Versions(ctx context.Context, _, from *repos.Repo, p, after string, limit int) (*format.Artifact, []format.Version, string, error) {
+	art, project, err := h.projectOf(ctx, from, p)
 	if err != nil || art == nil {
 		return nil, nil, "", err
 	}
@@ -81,7 +81,7 @@ func (h *Handler) Versions(ctx context.Context, repo *repos.Repo, p, after strin
 	}
 	var rows []row
 	if after == "" {
-		rs, err := h.q.ListVersions(ctx, dbq.ListVersionsParams{RepoID: repo.ID, Project: project, Limit: int64(limit) + 1})
+		rs, err := h.q.ListVersions(ctx, dbq.ListVersionsParams{RepoID: from.ID, Project: project, Limit: int64(limit) + 1})
 		if err != nil {
 			return nil, nil, "", err
 		}
@@ -93,7 +93,7 @@ func (h *Handler) Versions(ctx context.Context, repo *repos.Repo, p, after strin
 		if err != nil {
 			return art, []format.Version{}, "", nil
 		}
-		rs, err := h.q.ListVersionsBefore(ctx, dbq.ListVersionsBeforeParams{RepoID: repo.ID, Project: project, SortKey: v.SortKey(), Limit: int64(limit) + 1})
+		rs, err := h.q.ListVersionsBefore(ctx, dbq.ListVersionsBeforeParams{RepoID: from.ID, Project: project, SortKey: v.SortKey(), Limit: int64(limit) + 1})
 		if err != nil {
 			return nil, nil, "", err
 		}
@@ -109,7 +109,7 @@ func (h *Handler) Versions(ctx context.Context, repo *repos.Repo, p, after strin
 	prov := h.host.Builds.Loader()
 	out := make([]format.Version, 0, len(rows))
 	for _, r := range rows {
-		_, at, build, err := h.versionFiles(ctx, repo, project, r.key)
+		_, at, build, err := h.versionFiles(ctx, from, project, r.key)
 		if err != nil {
 			return nil, nil, "", err
 		}
@@ -123,8 +123,8 @@ func (h *Handler) Versions(ctx context.Context, repo *repos.Repo, p, after strin
 }
 
 // Builds lists the one build of version v of a project folder: its files.
-func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, v, id, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
-	art, project, err := h.projectOf(ctx, repo, p)
+func (h *Handler) Builds(ctx context.Context, _, from *repos.Repo, p, v, id, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
+	art, project, err := h.projectOf(ctx, from, p)
 	if err != nil || art == nil {
 		return nil, nil, nil, "", err
 	}
@@ -132,7 +132,7 @@ func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, v, id, after 
 	if err != nil {
 		return nil, nil, nil, "", nil
 	}
-	files, at, build, err := h.versionFiles(ctx, repo, project, pv.SortKey())
+	files, at, build, err := h.versionFiles(ctx, from, project, pv.SortKey())
 	if err != nil || len(files) == 0 {
 		return nil, nil, nil, "", err
 	}

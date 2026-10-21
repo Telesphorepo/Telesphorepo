@@ -18,6 +18,7 @@
   import RelativeTime from "$lib/components/RelativeTime.svelte";
   import CoverFlow, { type Ticket } from "./CoverFlow.svelte";
   import BuildInline from "./BuildInline.svelte";
+  import MemberTag from "./MemberTag.svelte";
   import type { DeleteTarget } from "./FolderList.svelte";
   import { api, type Artifact, type Version } from "$lib/api";
   import { shortSha } from "../browse";
@@ -116,6 +117,7 @@
             <p class="flex flex-wrap items-center gap-2">
               <span class="text-section">{v.version}</span>
               {@render badges(v)}
+              <MemberTag repo={v.repo} />
             </p>
             <p class="flex flex-wrap items-center gap-x-3 gap-y-1 text-meta text-muted-foreground">
               <span>Published <RelativeTime at={v.published_at} /></span>
@@ -162,6 +164,7 @@
             ><Truncate text={v.version} /></a
           >
           {@render badges(v)}
+          <MemberTag repo={v.repo} />
         </span>
       </Cell>
       {#if anySnapshot}<Cell hideOnPhone muted class="whitespace-nowrap">{builds(v)}</Cell>{/if}

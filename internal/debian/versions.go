@@ -125,12 +125,12 @@ func (v *debVersion) summary(ctx context.Context, builds *ci.Loader) (*format.Ve
 }
 
 // Versions lists the versions of a package folder of the pool.
-func (h *Handler) Versions(ctx context.Context, repo *repos.Repo, p, after string, limit int) (*format.Artifact, []format.Version, string, error) {
+func (h *Handler) Versions(ctx context.Context, _, from *repos.Repo, p, after string, limit int) (*format.Artifact, []format.Version, string, error) {
 	art, component, pkg, ok := packageOf(p)
 	if !ok {
 		return nil, nil, "", nil
 	}
-	versions, err := h.readPackage(ctx, repo.ID, art, component, pkg)
+	versions, err := h.readPackage(ctx, from.ID, art, component, pkg)
 	if err != nil || len(versions) == 0 {
 		return nil, nil, "", err
 	}
@@ -154,12 +154,12 @@ func (h *Handler) Versions(ctx context.Context, repo *repos.Repo, p, after strin
 
 // Builds lists the builds of version name of a package folder of the pool. A non-empty build
 // keeps only that build.
-func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, name, build, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
+func (h *Handler) Builds(ctx context.Context, _, from *repos.Repo, p, name, build, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
 	art, component, pkg, ok := packageOf(p)
 	if !ok {
 		return nil, nil, nil, "", nil
 	}
-	versions, err := h.readPackage(ctx, repo.ID, art, component, pkg)
+	versions, err := h.readPackage(ctx, from.ID, art, component, pkg)
 	if err != nil {
 		return nil, nil, nil, "", err
 	}

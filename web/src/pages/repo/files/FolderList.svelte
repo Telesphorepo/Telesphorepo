@@ -7,8 +7,7 @@
   (files and folders mix) and delete them together; the parent holds the pick and shows its
   summary in the details column.
 
-  In a group the list is the merged folder of its members: a file names the member that serves
-  it, muted after its name, and its row opens the file in that member.
+  In a group a file names the repository that serves it, muted after its name.
 -->
 <script lang="ts" module>
   /**
@@ -34,6 +33,7 @@
   import FileSize from "$lib/components/FileSize.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
   import BuildInline from "./BuildInline.svelte";
+  import MemberTag from "./MemberTag.svelte";
   import type { TreeEntry as TreeNode } from "$lib/api";
   import { sideOf } from "../browse";
   import FolderIcon from "@lucide/svelte/icons/folder";
@@ -111,9 +111,7 @@
   });
 
   const label = (e: TreeNode) => e.name.replace(/\/$/, "");
-  // A group's file opens in the member that serves it; a folder stays in the group.
-  const open = (e: TreeNode) => href(filesPath(e.type === "file" && e.repo ? e.repo : repo.name, e.path));
-  const group = $derived(repo.kind === "group");
+  const open = (e: TreeNode) => href(filesPath(repo.name, e.path));
   const columns = $derived<Column[]>([
     { label: "Name", grow: true },
     { label: "Size", align: "right" },
@@ -155,11 +153,7 @@
           <FileIcon aria-hidden="true" class="size-4 shrink-0 text-muted-foreground" />
         {/if}
         <Truncate text={label(e)} />
-        {#if group && e.type === "file" && e.repo}
-          <span class="flex h-5 max-w-40 shrink-0 items-center rounded-sm bg-muted px-1.5 text-meta text-muted-foreground" title="Served by {e.repo}">
-            <span class="sr-only">from</span><span class="truncate">{e.repo}</span>
-          </span>
-        {/if}
+        <MemberTag repo={e.repo} />
       </a>
     </Cell>
     <Cell num>{#if e.size !== undefined}<FileSize bytes={e.size} />{/if}</Cell>
@@ -178,7 +172,7 @@
         state="None yet"
         text={repo.kind === "proxy"
           ? "The proxy keeps a file here after a build asks for it the first time."
-          : group
+          : repo.kind === "group"
             ? "The files of its repositories appear here, once one of them has files you can download."
             : canUpload
             ? "Publish with your build tool, or upload files here."

@@ -134,6 +134,8 @@ func Module() module.Module {
 				RemoteAuth:    f.remoteAuth,
 				Versions:      f.versions,
 				Builds:        f.builds,
+				GroupVersions: format.GroupEach,
+				VersionOrder:  versionOrder,
 				Usage:         f.usage,
 				ArtifactUsage: f.artifactUsage,
 				Tools:         []format.Tool{f.dockerTool()},

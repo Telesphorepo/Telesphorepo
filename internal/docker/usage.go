@@ -95,7 +95,7 @@ func joinNotes(a, b string) string {
 // tag or manifest file of one. version names a tag ("" for the newest). The pinned mode pulls the
 // digest that the tag names; the latest mode pulls the tag. A Helm chart pulls with helm, another
 // OCI artifact with oras.
-func (f *Format) artifactUsage(ctx context.Context, repo *repos.Repo, baseURL, p, version, mode string) (*format.ArtifactUsage, error) {
+func (f *Format) artifactUsage(ctx context.Context, repo, from *repos.Repo, baseURL, p, version, mode string) (*format.ArtifactUsage, error) {
 	folder, tag, digest := p, version, ""
 	if op, ok := parsePath(strings.TrimPrefix(p, "/")); ok {
 		folder = op.image + "/"
@@ -106,14 +106,14 @@ func (f *Format) artifactUsage(ctx context.Context, repo *repos.Repo, baseURL, p
 			digest = op.ref
 		}
 	}
-	image, art, err := f.imageOf(ctx, repo, folder)
+	image, art, err := f.imageOf(ctx, repo, from, folder)
 	if err != nil || art == nil {
 		return nil, err
 	}
 	switch {
 	case digest != "":
 		// A manifest file: the digest, and a tag that names it when there is one.
-		tags, err := f.q.SomeTagsOfDigest(ctx, dbq.SomeTagsOfDigestParams{RepoID: repo.ID, Image: image, Digest: digest, Limit: 1})
+		tags, err := f.q.SomeTagsOfDigest(ctx, dbq.SomeTagsOfDigestParams{RepoID: from.ID, Image: image, Digest: digest, Limit: 1})
 		if err != nil {
 			return nil, err
 		}
@@ -122,7 +122,7 @@ func (f *Format) artifactUsage(ctx context.Context, repo *repos.Repo, baseURL, p
 			tag = tags[0]
 		}
 	case tag == "":
-		rows, err := f.q.ListTagsRecent(ctx, dbq.ListTagsRecentParams{RepoID: repo.ID, Image: image, BeforeAt: math.MaxInt64, Limit: 1})
+		rows, err := f.q.ListTagsRecent(ctx, dbq.ListTagsRecentParams{RepoID: from.ID, Image: image, BeforeAt: math.MaxInt64, Limit: 1})
 		if err != nil {
 			return nil, err
 		}
@@ -131,7 +131,7 @@ func (f *Format) artifactUsage(ctx context.Context, repo *repos.Repo, baseURL, p
 		}
 		tag, digest = rows[0].Tag, rows[0].Digest
 	default:
-		t, err := f.q.GetTag(ctx, dbq.GetTagParams{RepoID: repo.ID, Image: image, Tag: tag})
+		t, err := f.q.GetTag(ctx, dbq.GetTagParams{RepoID: from.ID, Image: image, Tag: tag})
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}

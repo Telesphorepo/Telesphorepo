@@ -231,12 +231,12 @@ func (h *Handler) version(ctx context.Context, repoID int64, dir, id, v string, 
 }
 
 // Versions lists the versions of an artifact folder.
-func (h *Handler) Versions(ctx context.Context, repo *repos.Repo, p, after string, limit int) (*format.Artifact, []format.Version, string, error) {
+func (h *Handler) Versions(ctx context.Context, _, from *repos.Repo, p, after string, limit int) (*format.Artifact, []format.Version, string, error) {
 	art, _, id, ok := artifactOf(p)
 	if !ok {
 		return nil, nil, "", nil
 	}
-	names, err := h.childDirs(ctx, repo.ID, art.Path)
+	names, err := h.childDirs(ctx, from.ID, art.Path)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -250,7 +250,7 @@ func (h *Handler) Versions(ctx context.Context, repo *repos.Repo, p, after strin
 		if len(out) == limit {
 			return &art, out, out[len(out)-1].Version, nil
 		}
-		ver, _, err := h.version(ctx, repo.ID, art.Path+v+"/", id, v, prov)
+		ver, _, err := h.version(ctx, from.ID, art.Path+v+"/", id, v, prov)
 		if err != nil {
 			return nil, nil, "", err
 		}
@@ -266,13 +266,13 @@ func (h *Handler) Versions(ctx context.Context, repo *repos.Repo, p, after strin
 
 // Builds lists the builds of version v of an artifact folder: the files of the
 // version folder <artifact folder>/<v>/. A non-empty build keeps only that build.
-func (h *Handler) Builds(ctx context.Context, repo *repos.Repo, p, v, build, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
+func (h *Handler) Builds(ctx context.Context, _, from *repos.Repo, p, v, build, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
 	art, _, id, ok := artifactOf(p)
 	if !ok || v == "" || v == "." || v == ".." || strings.Contains(v, "/") {
 		return nil, nil, nil, "", nil
 	}
 	prov := h.host.Builds.Loader()
-	ver, bs, err := h.version(ctx, repo.ID, art.Path+v+"/", id, v, prov)
+	ver, bs, err := h.version(ctx, from.ID, art.Path+v+"/", id, v, prov)
 	if err != nil || ver == nil {
 		return nil, nil, nil, "", err
 	}

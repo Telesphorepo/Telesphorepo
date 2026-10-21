@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"slices"
 	"strconv"
@@ -337,7 +338,12 @@ func (a *API) artifactSnippets(w http.ResponseWriter, r *http.Request, c *route.
 	res := out{BaseURL: base, Mode: mode, Snippets: []format.Snippet{}}
 	f := a.formats.Get(repo.Format)
 	if f != nil && f.ArtifactUsage != nil && p != "" {
-		u, err := f.ArtifactUsage(r.Context(), repo, base, p, q.Get("version"), mode)
+		members, err := a.readMembers(r, c)
+		if err != nil {
+			route.Fail(w, r, err)
+			return
+		}
+		u, err := f.UsageOf(r.Context(), repo, members, base, p, q.Get("version"), mode)
 		if err != nil {
 			route.Fail(w, r, err)
 			return
@@ -365,6 +371,15 @@ func (a *API) versionedPath(w http.ResponseWriter, r *http.Request, c *route.Cal
 	return repo, a.formats.Get(repo.Format), p + "/", true
 }
 
+// readMembers returns the members of a group repo that the caller reads, in read order (as a group
+// read: access.Engine.GroupMembers); nil for another kind.
+func (a *API) readMembers(r *http.Request, c *route.Call) ([]*repos.Repo, error) {
+	if c.Repo.Kind != repos.KindGroup {
+		return nil, nil
+	}
+	return a.access.GroupMembers(r.Context(), r, c.P, c.Repo)
+}
+
 // versions lists the versions of an artifact folder, newest first (format.Spec Versions and Builds):
 // ?path=<artifact folder>&after=<version>&limit= -> {artifact, items: [Version], next}. artifact
 // is null when the folder is not an artifact or the format does not group versions.
@@ -380,7 +395,16 @@ func (a *API) versions(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	}
 	res := out{Items: []format.Version{}}
 	if v != nil && v.Versions != nil {
-		art, items, next, err := v.Versions(r.Context(), repo, p, r.URL.Query().Get("after"), httpx.Limit(r))
+		members, err := a.readMembers(r, c)
+		if err != nil {
+			route.Fail(w, r, err)
+			return
+		}
+		art, items, next, err := v.VersionsOf(r.Context(), repo, members, p, r.URL.Query().Get("after"), httpx.Limit(r))
+		if errors.Is(err, format.ErrCursor) {
+			httpx.Error(w, r, http.StatusBadRequest, "invalid cursor")
+			return
+		}
 		if err != nil {
 			route.Fail(w, r, err)
 			return
@@ -422,7 +446,12 @@ func (a *API) builds(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		after, limit = "", 1
 	}
 	if v != nil && v.Builds != nil {
-		art, ver, items, next, err := v.Builds(r.Context(), repo, p, q.Get("version"), build, after, limit)
+		members, err := a.readMembers(r, c)
+		if err != nil {
+			route.Fail(w, r, err)
+			return
+		}
+		art, ver, items, next, err := v.BuildsOf(r.Context(), repo, members, p, q.Get("version"), build, after, limit)
 		if err != nil {
 			route.Fail(w, r, err)
 			return

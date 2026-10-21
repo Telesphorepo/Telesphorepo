@@ -43,7 +43,7 @@ func setup(repo *repos.Repo, baseURL, snippetContext string) []format.Snippet {
 	if !repo.AnonymousRead {
 		code += "credential-provider = \"cargo:token\"\n"
 	}
-	note :="Put it in .cargo/config.toml of the project, or in ~/.cargo/config.toml for every project."
+	note := "Put it in .cargo/config.toml of the project, or in ~/.cargo/config.toml for every project."
 	if repo.Kind != repos.KindHosted {
 		code += "\n[source.crates-io]\nreplace-with = \"" + reg + "\"\n"
 		note = "Cargo then fetches every crate of crates.io through this repository. " + note
@@ -92,13 +92,13 @@ func tools() []format.Tool {
 // (crates/<name>/, with version v or "" for the newest) or a .crate file in it. The pinned mode
 // names the version as a Cargo requirement ("1.2.0" takes 1.2.0 and compatible updates); the
 // latest mode names "*".
-func (h *Handler) ArtifactUsage(ctx context.Context, repo *repos.Repo, baseURL, p, v, mode string) (*format.ArtifactUsage, error) {
-	if repo.Kind != repos.KindHosted {
+func (h *Handler) ArtifactUsage(ctx context.Context, repo, from *repos.Repo, baseURL, p, v, mode string) (*format.ArtifactUsage, error) {
+	if from.Kind != repos.KindHosted {
 		return nil, nil
 	}
 	p = strings.Trim(p, "/")
 	if n, vers, ok := parseCratePath(p); ok {
-		if _, err := h.host.Assets.Get(ctx, repo.ID, p); errors.Is(err, assets.ErrNotFound) {
+		if _, err := h.host.Assets.Get(ctx, from.ID, p); errors.Is(err, assets.ErrNotFound) {
 			return nil, nil
 		} else if err != nil {
 			return nil, err
@@ -111,13 +111,13 @@ func (h *Handler) ArtifactUsage(ctx context.Context, repo *repos.Repo, baseURL, 
 	}
 	var row versionRow
 	if v != "" {
-		r, found, err := h.getVersion(ctx, repo, lower, v)
+		r, found, err := h.getVersion(ctx, from, lower, v)
 		if err != nil || !found {
 			return nil, err
 		}
 		row = r
 	} else {
-		_, vs, _, err := h.Versions(ctx, repo, p, "", 50)
+		_, vs, _, err := h.Versions(ctx, repo, from, p, "", 50)
 		if err != nil || len(vs) == 0 {
 			return nil, err
 		}
@@ -128,7 +128,7 @@ func (h *Handler) ArtifactUsage(ctx context.Context, repo *repos.Repo, baseURL, 
 				break
 			}
 		}
-		r, found, err := h.getVersion(ctx, repo, lower, pick)
+		r, found, err := h.getVersion(ctx, from, lower, pick)
 		if err != nil || !found {
 			return nil, err
 		}
