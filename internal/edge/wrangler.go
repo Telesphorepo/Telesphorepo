@@ -18,12 +18,12 @@ const (
 	copyQueueBinding  = "COPY"
 )
 
-// gapCron is the cron trigger of the Worker's gap check, which runs every gapEvery. The status of
-// the Edge delivery page names gapEvery, so the page says when the next check is due.
-const (
-	gapCron  = "*/10 * * * *"
-	gapEvery = 10 * time.Minute
-)
+// gapEvery is how often the Worker's gap check runs (a whole number of minutes that divides an
+// hour); gapCron is its cron trigger. The status of the Edge delivery page names gapEvery, so the
+// page says when the next check is due.
+const gapEvery = 10 * time.Minute
+
+var gapCron = fmt.Sprintf("*/%d * * * *", int(gapEvery/time.Minute))
 
 // versionDefine is the global of the Worker that a build defines to the server version
 // (wrangler define): a Worker of another version passes every request to the server.
