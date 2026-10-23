@@ -6,13 +6,14 @@
   uses them. The workflow or Jenkinsfile step for the chosen repositories shows on the same page.
 
   A new pipeline is a setup of numbered steps that ends with Create; it can start from a
-  repository (`startRepo`) and return to `back` afterwards. An existing pipeline saves its edits
+  repository (`startRepo`; for a repository that still copies from Nexus, its rehearsal repository)
+  and return to `back` afterwards. An existing pipeline saves its edits
   from the SaveBar. The parent keys it by id (null: a new pipeline).
 -->
 <script lang="ts">
   import { untrack } from "svelte";
   import { toast } from "svelte-sonner";
-  import { api, errorMessage, type Trust, type TrustInput } from "$lib/api";
+  import { api, errorMessage, type Repo, type Trust, type TrustInput } from "$lib/api";
   import { Resource } from "$lib/load.svelte";
   import { Draft } from "$lib/unsaved.svelte";
   import { go, href, navigate } from "$lib/router.svelte";
@@ -91,9 +92,23 @@
     !!settings.data && !(settings.data.groups.flatMap((g) => g.settings).find((s) => s.key === "base_url")?.value ?? ""),
   );
   // A CI pipeline publishes, so it names only hosted repositories, and only those where the person holds CI pipelines.
+  // A rehearsal repository (Rehearse publishing of the Nexus migration) comes right before the repository it rehearses.
+  const rehearses = (r: Repo) => (typeof r.fields?.rehearsal_for === "string" ? r.fields.rehearsal_for : "");
   const sortedRepos = $derived(
-    (repos.data ?? []).filter((r) => r.kind === "hosted" && auth.canRepo(r.name, "ci.pipelines")).sort((a, b) => a.name.localeCompare(b.name)),
+    (repos.data ?? [])
+      .filter((r) => r.kind === "hosted" && auth.canRepo(r.name, "ci.pipelines"))
+      .sort((a, b) => {
+        const ka = rehearses(a) || a.name;
+        const kb = rehearses(b) || b.name;
+        return ka === kb ? Number(!rehearses(a)) - Number(!rehearses(b)) : ka.localeCompare(kb);
+      }),
   );
+  /** The rehearsal repository of a repository that still copies from Nexus, which a new pipeline publishes to first. */
+  const rehearsalOf = (name: string) => {
+    const r = repos.data?.find((x) => x.name === name);
+    if (r?.operation?.type !== "mirror") return null;
+    return repos.data?.find((x) => rehearses(x) === name && auth.canRepo(x.name, "ci.pipelines")) ?? null;
+  };
 
   type Value = {
     name: string;
@@ -168,7 +183,10 @@
     if (!isNew || preselected || !draft || !repos.data) return;
     preselected = true;
     const r = startRepo;
-    if (r && repos.data.some((x) => x.name === r)) untrack(() => draft && (draft.value.repos = [r]));
+    if (!r || !repos.data.some((x) => x.name === r)) return;
+    // A repository that still copies from Nexus takes no publishes: start with its rehearsal.
+    const first = untrack(() => rehearsalOf(r)?.name ?? r);
+    untrack(() => draft && (draft.value.repos = [first]));
   });
 
   const autoName = $derived.by(() => {
@@ -599,7 +617,11 @@
         {:else}
           <div class="grid gap-1 sm:grid-cols-2">
             {#each sortedRepos as r (r.name)}
-              <OptionRow id="{fid}-repo-{r.name}" label={r.name} description={formats.title(r.format)}>
+              <OptionRow
+                id="{fid}-repo-{r.name}"
+                label={r.name}
+                description={rehearses(r) ? `Rehearsal for ${rehearses(r)}: publish here first` : formats.title(r.format)}
+              >
                 {#snippet icon()}<FormatIcon format={r.format} />{/snippet}
                 {#snippet control()}
                   <Checkbox id="{fid}-repo-{r.name}" checked={v.repos.includes(r.name)} onCheckedChange={(on) => setRepo(r.name, on === true)} />

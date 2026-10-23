@@ -148,6 +148,13 @@ export const api = {
     resumeOperation: (name: string) => request<{ ok: boolean }>("POST", repo(name) + "/operation/resume"),
     /** All repositories: ends the failed operation of the repository; the repository keeps the files that are left. */
     clearOperation: (name: string) => request<void>("DELETE", repo(name) + "/operation"),
+    /** All repositories: gives the repository a new name; the old name stays as a redirect. 409 when the name is taken. */
+    rename: (name: string, to: string) => request<T.Repo>("POST", repo(name) + "/rename", { body: { name: to } }),
+    /** The old names that still answer for the repository, by name. */
+    redirects: (name: string) => request<T.RepoRedirect[]>("GET", repo(name) + "/redirects"),
+    /** All repositories: removes a redirect; the old name answers 404 and is free again. */
+    removeRedirect: (name: string, redirect: string) =>
+      request<void>("DELETE", repo(name) + "/redirects/" + encodeURIComponent(redirect)),
     status: (name: string) => request<T.RepoStatus>("GET", repo(name) + "/status"),
     /** The snippets of the repository: how to use it in a build and how to publish to it, with the labels of their tools. */
     usage: (name: string) => request<T.Usage>("GET", repo(name) + "/usage"),
@@ -368,6 +375,15 @@ export const api = {
       request<T.NexusSourceDetail>("PUT", `/api/nexus/sources/${id}/repos`, { body: { repos } }),
     sync: (id: number) => request<T.NexusSync>("POST", `/api/nexus/sources/${id}/sync`),
     cutOver: (id: number) => request<T.NexusSync>("POST", `/api/nexus/sources/${id}/cutover`),
+    /** Switches over the repository that Nexus repository `repo` copies into: its final sync. */
+    switchOver: (id: number, repo: string) =>
+      request<T.NexusSync>("POST", `/api/nexus/sources/${id}/repos/${encodeURIComponent(repo)}/switch-over`),
+    /** Creates the rehearsal repository of the repository that Nexus repository `repo` copies into. */
+    rehearse: (id: number, repo: string) =>
+      request<{ name: string }>("POST", `/api/nexus/sources/${id}/repos/${encodeURIComponent(repo)}/rehearsal`),
+    /** Starts to delete every file of a rehearsal repository; its operation shows the progress. */
+    emptyRehearsal: (name: string) =>
+      request<{ name: string; files: number }>("POST", `/api/nexus/rehearsals/${encodeURIComponent(name)}/empty`),
     syncs: (id: number, p?: T.PageParams) =>
       request<T.Page<T.NexusSync>>("GET", `/api/nexus/sources/${id}/syncs`, { query: page(p) }),
     getSync: (id: number) => request<T.NexusSync>("GET", `/api/nexus/syncs/${id}`),

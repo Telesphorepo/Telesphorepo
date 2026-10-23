@@ -475,6 +475,7 @@ Kernel tables (`internal/db/migrations`):
 | `api_tokens` | UNIQUE `public_id`, UNIQUE `(user_id, name)` | `secret_hash` = SHA-256(secret); optional `expires_at`; `last_used_at` written at most once per minute. These are **read tokens**: they never publish |
 | `sessions` | PK `id_hash` (WITHOUT ROWID), idx `expires_at`, idx `user_id` | `id_hash` = SHA-256(cookie value) |
 | `repos` | UNIQUE `name`, partial idx `repos_anonymous (id) WHERE anonymous_read = 1` | `format` is any registered format name (no CHECK); `kind` is `hosted` (default), `proxy` or `group`; `description` (at most 500 characters); `anonymous_read`; `config` JSON; the counters `file_count`, `total_size` and `last_published_at` (unix time, 0 for never). The values of module fields (`repos.Field`, e.g. `signing_key`) are rows of their module |
+| `repo_redirects` | PK `name` (WITHOUT ROWID), idx `repo_redirects_repo (repo_id, name)`; `repo_id` cascades | A name that answers for the repo `repo_id` (see **Repository redirects**): `created_at`, `last_used_at` (unix time of the last request through it, 0 for never; written with the download counters). A name is a repo or a redirect, never both |
 | `user_permissions` | PK `(user_id, perm)` (WITHOUT ROWID), idx `user_permissions_perm (perm, user_id)` | The server permissions of a person, as permission IDs (e.g. `people.manage`). No CHECK: every write checks the IDs against the permission registry, and a read skips an ID that no module registers. See **Permissions** |
 | `repo_permissions` | PK `(repo_id, user_id, perm)` (WITHOUT ROWID), idx `(user_id, perm)` | The repository permissions of a person on a repo, as permission IDs (e.g. `repo.publish`). No CHECK, as above. See **Permissions** |
 | `repo_group_members` | PK `(group_id, member_id)` (WITHOUT ROWID), UNIQUE `(group_id, position)`, idx `member_id` | The members of a group repo in read order (`position`). Both ids cascade with their repo, so a deleted member leaves its groups |
@@ -547,6 +548,8 @@ Tables of the `nexus` component (`internal/nexus/migrations`):
 | `nexus_sync_repos` | PK `(sync_id, source_repo)` (WITHOUT ROWID), idx `target_repo_id` | Copy of the hosted part of the mapping at sync start, with `continuation` (token of the next Nexus page), `checked` (files read from Nexus), `imported`/`skipped`/`ignored`/`failed`, `bytes` (bytes imported), `active_at` (when the runner saved the last page) and `state` `pending`/`running`/`done`/`failed`/`cancelled` |
 | `nexus_sync_failures` | PK `id`, UNIQUE `(sync_id, source_repo, path)`, idx `sync_id` | One row per source file that a sync did not import |
 | `nexus_sync_log` | PK `id`, idx `(sync_id, id)` | The log of a sync for the admin: `at`, `source_repo` (`''` for a line about the whole sync), `level` `info`/`warn`/`error`, `message` |
+| `nexus_switch_overs` | PK `(source_id, source_repo)` (WITHOUT ROWID), FK to the mapping row (cascade) | A mapped hosted repo that switched over: `sync_id` (its final sync), `failed` (the files that sync failed to import), `switched_at`. A mapped hosted repo without a row still copies |
+| `repo_rehearsals` | PK `repo_id`, idx `repo_rehearsals_for (for_repo_id)` | A rehearsal repo and the repo it rehearses (`for_repo_id`, a target of a Nexus source), `created_at`. Both cascade with their repo |
 
 Tables of the `debian` component (`internal/debian/migrations`):
 
@@ -799,7 +802,7 @@ The format routes use `route.FormatRead` and `route.FormatWrite` (see **Route po
 credentials or bad credentials get 401 with a Basic challenge, valid credentials without
 permission get 403, and an unknown repo gets 404 (401 for anonymous callers, so repo names don't
 leak). A write to a repo with an active operation gets 409 `{"error": <the operation's message>}`
-after the permission check. A mirrored repo is read only until cut-over. A write without an open publish
+after the permission check. A mirrored repo is read only until its switch-over. A write without an open publish
 session for that repo gets 401 with a Basic challenge and
 `{"error":"publishing needs a publish session: <base_url>/#/settings/tokens"}`. A device or manual
 session writes only while its user still holds `repo.publish` on the repo (else 403).
@@ -926,6 +929,8 @@ transaction.
 | `POST /api/repos/{name}/proxy/test` | `repo.settings` | Checks the remote of a proxy now: 200 `{ok: true}`, or a 502 problem document with the extension member `ok: false` and the reason as its detail. It records the result as the proxy's last answer or last error |
 | `PATCH /api/repos` | `repo.settings` on each repo | `{names: [...], anonymous_read: bool}`. The one way to make repos public or private: one repo update of every repo in one transaction. One `repo.update` event per repo whose value changed. 200 `{changed: n}` |
 | `POST /api/repos/delete` | `repositories.all` | `{names: [...]}`. Checks that every repo exists (404) and that none has an operation (409 `You cannot delete <name> now. <message>`); then nothing is deleted. Then every repo gets its `delete` operation in one transaction (409 that names the repo when one got an operation meanwhile; then none starts), and each delete runs as a task of the core module (see **Repo operations**). 202 `{deleting: [{name, operation}]}` in the order of names, each with its running operation. `GET /api/repos/{name}` shows the progress in `operation` (`done` of `total` files) until it answers 404; a failed delete keeps a failed `delete` operation. One `repo.delete` event per repo, with the number of files |
+| `POST /api/repos/{name}/rename` | `repositories.all` | `{name}` renames the repo (`repos.Service.Rename`) and returns the repo; `{name}` in the path may be the repo's own name or a redirect of it. The old name becomes a redirect (see **Repository redirects**). 400 for a name that `NameRE` or the format refuses, 409 for the name of another repo or of a redirect of another repo (the message names the repo it redirects to). A redirect of the same repo may be taken back: it goes, and the name the repo had becomes the redirect. One `repo.rename` event with `detail.renamed_from` |
+| `GET /api/repos/{name}/redirects` · `DELETE /api/repos/{name}/redirects/{redirect}` | any repository permission · `repositories.all` | GET lists the redirects of the repo by name: `[{name, created_at, last_used_at\|null}]`; `last_used_at` includes the uses of the last minute that are still in memory. DELETE removes one: 204, 404 when the repo has no such redirect. The name is free again and answers as any unknown repo. One `repo.redirect.remove` event with `detail.redirect` |
 | `POST /api/repos/{name}/operation/resume` · `DELETE /api/repos/{name}/operation` | `repositories.all` | Resume runs the failed operation of the repo again: 200 `{ok: true}` (a delete runs on as a task until the repo is gone). Clear ends it, and the repo keeps the files that are left: 204. 409 when the repo has no operation, when it has not failed, or when its type cannot resume or clear here (a Nexus mirror ends at the cut-over). Records `repo.delete.resume` or `repo.delete.clear` |
 | `GET /api/repos/{name}/grants` | `repo.access` | `[{username, perms: [...]}]` by username; `perms` are permission IDs in registry order |
 | `GET /api/repos/{name}/access?admins=1` | a repository permission that manages the repo (one with a second-factor need: `repo.delete`, `repo.settings`, `repo.access`, `ci.pipelines`) | The access report, built from the parts of `access.Engine.Decide`: `{repo, format, kind, people, download: {public, people, admins, guards, sentence, notes}, publish: {people, admins, ci, guards, blocked, sentence}}`. `people` are `{username, perms, via}` (`permission`; with `admins=1` the holders of `repositories.all` too, via `all_repos`). `guards` maps a guard name to `{restricted, summary, detail}`; the network guard's `detail` is `{any, lists: [{name, title}], cidrs: [{cidr, note}]}`. `blocked` is null, or `{code: "read_only_kind" \| "operation", message}`: a proxy or a group (it lists no publisher and no CI pipeline) or a locked repo. Each `sentence` says the answer in words, e.g. "2 people, only from 10.0.0.0/8." A blocked publish sentence is "nobody." followed by the message. `notes` are the sentences that modules add (`access.Engine.AddDownloadNote`): while edge delivery is on, "Downloads come from the edge." or "Downloads go to the server: read rules apply." |
@@ -989,7 +994,10 @@ transaction.
 | `PATCH /api/nexus/sources/{id}` | `nexus.manage` | `{base_url?, username?, password?}`. Checks the connection. Returns the `Source`. 409 after cut-over |
 | `PUT /api/nexus/sources/{id}/repos` | `nexus.manage` | `{repos: [Mapping]}` replaces the whole mapping and, when it holds a repo, starts a sync (`trigger: save`). Returns the `SourceDetail` with `running_sync_id`. 400 for an invalid mapping, 409 while a sync runs, after cut-over, or when a target already mirrors another source |
 | `POST /api/nexus/sources/{id}/sync` | `nexus.manage` | 202 `Sync` with its `repos` (`trigger: manual`). 400 without mapped repos, 409 while a sync runs or after cut-over |
-| `POST /api/nexus/sources/{id}/cutover` | `nexus.manage` | 202 `Sync` with `trigger: cutover`. 409 while a sync runs or after cut-over |
+| `POST /api/nexus/sources/{id}/cutover` | `nexus.manage` | Switch over everything: 202 `Sync` with `trigger: cutover` of every mapped hosted repo that still copies. 409 while a sync runs or after cut-over |
+| `POST /api/nexus/sources/{id}/repos/{repo}/switch-over` | `nexus.manage` | Switches over the repo that Nexus repo `{repo}` copies into: 202 `Sync` with `trigger: cutover` of the Nexus repos that copy into it. 400 for a proxy or a group, 404 for a repo that is not mapped, 409 while a sync runs, after cut-over, or when it switched over already |
+| `POST /api/nexus/sources/{id}/repos/{repo}/rehearsal` | `nexus.manage` | Creates the rehearsal repo of the repo that Nexus repo `{repo}` copies into: 201 `{name}`. 400 for a proxy or a group, 404 for a repo that is not mapped, 409 `{repo, rehearsal}` when the name is taken (`rehearsal` is true when that repo is its rehearsal already) |
+| `POST /api/nexus/rehearsals/{name}/empty` | `nexus.manage` | Starts the `empty` operation of rehearsal repo `{name}`: 202 `{name, files}` (the file count when it started). 400 for a repo that rehearses nothing, 404, 409 while the repo has an operation |
 | `GET /api/nexus/sources/{id}/syncs?after=<sync id>&limit=` | `nexus.manage` | `{items: [Sync without repos], next}`, newest first |
 | `GET /api/nexus/syncs/{id}` | `nexus.manage` | `Sync` with its `repos` |
 | `GET /api/nexus/syncs/{id}/failures?after=&limit=` | `nexus.manage` | `{items: [Failure], next}` in failure order |
@@ -1683,8 +1691,55 @@ of the operation type, in full sentences; repo JSON shows it as `operation`. A m
   of `repositories.all`.
 - **`mirror`** (nexus). `held` while a Nexus source mirrors a hosted repo; its reference is the
   source ID and its message is `Uploads and deletes start after the switch-over from Nexus server <name>.` Saving the mapping
-  begins it, and unmapping or the cut-over ends it. It cannot be resumed or cleared through the repo
+  begins it, and unmapping or the switch-over of the repo ends it. It cannot be resumed or cleared through the repo
   routes.
+- **`empty`** (nexus). `running` while the files of a rehearsal repo are deleted (see **Nexus
+  sources**, Rehearsal repositories); `done` and `total` count them. The repo stays. A server
+  stop leaves it `running`, and the nexus job continues it at startup. Resume and Stop and keep
+  the files work as for a delete.
+
+## Repository redirects
+
+A redirect is a repository name that answers for another repo (`repo_redirects`, kept by
+`repos.Service`). Every request to it, from every client and every route, is served by its repo
+exactly as if it named the repo, publishes included. It is not an HTTP redirect: Maven and Gradle
+follow one for downloads, but uploads, `npm publish`, `docker push` and apt do not.
+
+- **Rename.** `POST /api/repos/{name}/rename` (`repositories.all`, `repos.Service.Rename`) changes
+  `repos.name`, adds the old name as a redirect and runs the format's `OnRepoChange` with the old
+  and the new name (docker gives every image its new `full_name`, so the catalog lists it under
+  the new name), with one `repo.rename` event, in one transaction. So the bad first name of a
+  repository can stay as a redirect while everyone moves to the better one.
+- **One resolution.** `repos.Service.ByName` reads `repos` by its UNIQUE name first, then
+  `repo_redirects` by its key, then the repo by id. Every request that names a repo goes through
+  it: the repo step of every route policy (format routes, `/api/repos/{name}/...`), the mint routes
+  and the token exchange, the Docker token endpoint, grants, CI pipeline repositories, group
+  members, network rules (by the repo of the route) and the Activity filter. `ByOwnName` skips the
+  redirects (the edge objects); `RedirectTarget` reads one redirect without noting a use.
+- **Keys.** Everything the server keys by repo uses the repo id (assets, pointers, grants, rules,
+  sessions). The names that a credential carries resolve through `ByName` and match by id: each
+  scope of a core bearer token gets the id of the repo its name names when the token is verified
+  (`auth.Scope.RepoID`; the Worker reads the repo object of the scope's name), and the grant of a
+  setup code resolves its repo name, so a token issued before a rename keeps working through both
+  names. The edge object of a redirect names its
+  repo (see **Edge delivery**).
+- **Reserved.** A name is a repo or a redirect, never both: create and rename refuse the name of a
+  redirect of another repo (409, the message names its repo). A repo may take back a redirect of
+  its own: that redirect goes, and the name it had becomes one.
+- **Never a chain.** A redirect holds the repo id, so a later rename of its repo keeps it answering
+  for the repo under the new name.
+- **Permissions, network rules and visibility** are the repo's. **Activity records the name the
+  request used:** the route step, the mint routes and the Docker token endpoint put a redirect
+  that a request named in the context (`audit.WithRepoName`), and an event of that repo records it
+  as `repo`, with the repo's own name in `detail.redirect_to`.
+- **Last use.** `ByName` notes each use in memory and the download counters write it once a minute
+  (see **Download statistics**). `GET /api/repos/{name}/redirects` shows it.
+- **Remove the redirect.** `DELETE /api/repos/{name}/redirects/{redirect}` (`repositories.all`):
+  the name answers 404 from then on and is free for a new repo. A repo delete removes its
+  redirects.
+- **Debian.** apt refuses the update of a source whose `Release` changed its `Origin` or `Label`,
+  so a rebuild of a `Release` keeps the `Origin` and the `Label` of the current one; a new
+  distribution gets the repo's name.
 
 ## Debian indexing pipeline
 
@@ -1871,7 +1926,7 @@ region reads the same version; an immutable path has a pointer and a blob in eve
 | `config.json` | `{version, enabled, access_ttl (seconds), edge_key (base64url of the Ed25519 public key), formats: {name: {shape, prefix, immutable, mutable}}, home: {hint, bucket, ready}, regions: [{hint, binding, bucket, ready}]}`; `home.ready`: the outbox wrote every pointer of the backfill; `bucket`: the bucket that the `bucket.json` of the binding must name | home |
 | `bucket.json` | `{hint, bucket}` (`hint` is `home` or the region): the bucket names itself, so the Worker sees a binding to another bucket. The controller writes it into each bucket it uses (again after the wipe of a first start, and once per process start); a region becomes ready only after its `bucket.json` is written | home and each region |
 | `p/<repo id>/<sha256 hex of the path>` | `{repo, path, sha256, sha1, md5, size, ct, mod (unix), kind}`, or `{repo, path, pending: true}` while a write runs | home; also each region for an immutable path |
-| `a/repo/<name>` | `{id, format, kind, anon, private, guarded, members: [names]}`: `private` is `access.Engine.Private`, `guarded` is `access.Engine.Guarded` (a read IP rule, or a guard that is not a `ReadRestricter`) | home |
+| `a/repo/<name>` | `{id, format, kind, anon, private, guarded, members: [names]}`: `private` is `access.Engine.Private`, `guarded` is `access.Engine.Guarded` (a read IP rule, or a guard that is not a `ReadRestricter`). For a redirect name, `{redirect: <repo name>}`: the Worker reads the object of that repo next (one more read on a cache miss) and serves the request as one to that repo, whose name the scopes of a core bearer token carry; a redirect object that names another redirect sends the request to the server. A rename marks the object of the old name, the new name and every redirect of the repo; a repo delete and a removed redirect mark the redirect names | home |
 | `a/user/<id>` | `{enabled, local, all, read: [repo ids]}`: `all` is a server permission with `AllRepos`, `read` the repos with `repo.download` | home |
 | `a/token/<public id>` | `{id, user, hash (hex SHA-256 of the secret), exp (unix, 0 never)}`; an expired token has none | home |
 | `a/device/<id>` | `{user, exp}`; a revoked or expired device has none | home |
@@ -2268,8 +2323,9 @@ estimate, not a measurement).
 
 An admin adds a Sonatype Nexus 3 server as a **source** on the **Nexus** page
 (`internal/nexus`). The server mirrors the mapped Nexus repos with repeated syncs. A mirrored
-repo is read only. **Cut-over** ends the mirroring and makes the repos writable. Nexus is read
-only through its REST API.
+repo is read only. A **switch-over** of one repo ends its mirroring and makes it writable; the
+other repos keep copying. When every repo has switched over, the source is **cut over**. Nexus
+is read only through its REST API.
 
 Shapes in the routes above:
 
@@ -2277,12 +2333,16 @@ Shapes in the routes above:
 Source       = {id, name, base_url, state: "mirroring"|"cut_over", created_at, last_error, last_sync: Sync|null,
                 cutover_sync_id, cutover_failed,   (both 0 before cut-over)
                 status: "no_repos"|"syncing"|"up_to_date"|"failed"|"cut_over",
-                next_sync_at|null, running_sync_id (0: none), repo_count, sync_interval (seconds)}
+                next_sync_at|null, running_sync_id (0: none), repo_count, sync_interval (seconds),
+                copying, switched_over}                      (mapped hosted repos that copy, that switched over)
 SourceDetail = Source + {repos: [SourceRepo], nexus_error}
 SourceRepo   = {name, format, type, supported, reason, offline, public, target_format, target,
                 remote_url, remote_username,                 (a proxy)
                 members, members_known, target_members,      (a group)
-                questions: [Question], facts: {...}}         (from the plan of the target format)
+                questions: [Question], facts: {...},         (from the plan of the target format)
+                switch_over: SwitchOver|null,                (a mapped hosted repo; null while it copies)
+                rehearsals: [repo name]}                     (the rehearsal repos of the target)
+SwitchOver   = {sync_id, failed, switched_at}
 Question     = {key, label, help?, type: "choice"|"secret", options?: [{value, label}], required, default?}
 Mapping      = {source_repo, target, create, anonymous_read,
                 answers?: {key: value},                             (answers to the questions; a new target)
@@ -2421,11 +2481,16 @@ is unreachable.
   hosted target gets the operation `mirror` (state `held`, see **Repo operations**), whose message
   is `Uploads and deletes start after the switch-over from Nexus server <name>.`; a target with another operation cannot be
   mapped (400). A hosted target that leaves the mapping loses the operation and keeps its files.
+  A repo that switched over keeps its mapping whatever the save holds, so it never copies
+  again: an entry for it must name its target (else 400), and no other Nexus repo can map to that
+  target (400).
   Targets are created and changed through `repos.Service.Create` and `Update`. Targets that the request creates stay when its
   transaction fails. After the mapping, the save starts a sync with `trigger: save`.
 - **Sync.** A save, `POST .../sync` (`manual`), the scheduler (`schedule`) and the cut-over
   (`cutover`) start a sync. One sync runs per source (unique partial index). The sync copies the
-  hosted part of the mapping into `nexus_sync_repos`; proxies and groups have no files to copy.
+  hosted part of the mapping that has not switched over into `nexus_sync_repos` (the final sync
+  of one repo's switch-over: only the Nexus repos that copy into that repo); proxies and groups
+  have no files to copy.
   At the start the runner lists the Nexus repos once and fails each mapped repo that is offline.
   The repos sync one after the other. For each other repo it pages
   `GET /service/rest/v1/assets?repository=X` from the saved continuation token and offers each
@@ -2446,7 +2511,8 @@ is unreachable.
   `format.RunCache` (`ImportItem.Cache`) for what its items share.
 - **Log.** The runner writes a line for: the start ("Started after the repositories were
   saved.", "Started by sam.", "Scheduled sync started.", "Final sync before the switch-over
-  started by sam."), the proxies it skips, each repo's start or resume ("Started.", "Resumed
+  started by sam.", "Final sync before the switch-over of maven-releases started by sam."), the
+  proxies it skips, each repo's start or resume ("Started.", "Resumed
   after a restart."), each page that copied a file ("Checked 100, copied 12 (3.4 MiB)."), each
   repo's end ("Done. Copied ..., skipped ..., failed ..." or "No new files. ..."), each retry of
   a page (warn), each failed repo (error), and the end ("Finished in 6 minutes. 34 new files (2.1
@@ -2455,7 +2521,7 @@ is unreachable.
   password or a token. `GET .../log` reads the lines through `nexus_sync_log_sync`; the `repo`
   filter applies in Go.
 - **Retention.** A new sync deletes the syncs of its source after the newest 100, with their
-  repos, failures and log lines (cascade). The cut-over sync stays.
+  repos, failures and log lines (cascade). The switch-over syncs (`trigger: cutover`) stay.
 - **Scheduler.** It checks every `min(nexus.sync_interval, 1m)`. It reads the interval from the
   live settings. It starts a sync for each mirroring source whose `last_sync_at` is at or before
   now minus the interval, up to 100 per check; a source without a mapping does not start. Every
@@ -2464,26 +2530,49 @@ is unreachable.
   are in the failure list). It is `failed` when a whole repo failed and `cancelled` after
   `DELETE`. A shutdown leaves the sync `running`; it continues from the last saved page at the
   next start.
-- **Cut-over.** `POST .../cutover` runs one final sync with `trigger: cutover`. It succeeds when
-  no repo failed, also when some files failed. Then one transaction sets the sync `done`, sets the
-  source `cut_over`, empties its credentials, ends the `mirror` operation of the mapped hosted targets and
-  saves `cutover_sync_id` (the sync) and `cutover_failed` (its failed file count). The failed
-  files stay listed through `GET /api/nexus/syncs/{id}/failures`. If a repo failed (Nexus
-  unreachable, a listing error), the sync is `failed`, the source stays `mirroring`, and
-  `last_error` says `the switch-over stopped: ...; the source stays mirroring`. A cancelled
-  cut-over leaves the source mirroring. A restart continues an interrupted cut-over. After
-  cut-over, PATCH, PUT repos, sync and cut-over answer 409, and the sync history stays. Groups and
-  proxies need nothing more: they serve from this server already.
+- **Switch-over.** Each mapped hosted repo copies from Nexus until it switches over
+  (`nexus_switch_overs`; the source's `copying` and `switched_over` and each repo's
+  `switch_over` derive from it). `POST .../repos/{repo}/switch-over` runs a final sync with
+  `trigger: cutover` of the Nexus repos that copy into the target of `{repo}`; `POST .../cutover`
+  (Switch over everything) runs one of every hosted repo that still copies. The sync succeeds when
+  no repo failed, also when some files failed. Then one transaction sets the sync `done`, gives
+  each of its repos a switch-over row (the sync and the repo's failed file count) and ends the
+  `mirror` operation of its target, so publishes start there and later syncs skip it. When no
+  mapped hosted repo copies any more, the same transaction sets the source `cut_over`, empties
+  its credentials and saves `cutover_sync_id` (the sync) and `cutover_failed` (its failed file
+  count). The failed files stay listed through `GET /api/nexus/syncs/{id}/failures`. If a repo
+  failed (Nexus unreachable, a listing error), the sync is `failed`, nothing switches over, and
+  `last_error` says `the switch-over stopped: ...; nothing switched over, and they keep copying
+  from Nexus`. A cancelled switch-over changes nothing. A restart continues an interrupted
+  switch-over. A switched-over repo cannot copy again. After cut-over, PATCH, PUT repos, sync and
+  the switch-overs answer 409, and the sync history stays. Groups and proxies need no
+  switch-over: they serve from this server already.
+- **Rehearsal repositories.** `POST .../repos/{repo}/rehearsal` creates `<target>-rehearsal`
+  through `repos.Service.Create`: a private hosted repo of the target's format with its config
+  and field values, the description "Publish here first, to try the builds before the
+  switch-over.", and the repo field `rehearsal_for` (the target's name; `repo_rehearsals` holds
+  the ids, the module keeps them in memory). Only this route sets the field: a create or an update
+  through the API that names it is 400. Each person with `repo.publish` granted on the target
+  gets `repo.download` and `repo.publish` on the rehearsal. A taken name is 409 with `{repo,
+  rehearsal}`. **Empty it** (`POST /api/nexus/rehearsals/{name}/empty`) begins the operation
+  `empty` and runs the removal of the repo delete (`assets.Pipeline.Remove` with the prefix `""`,
+  the format's hooks included) as a task of the module, without the row delete: the settings,
+  the CI pipelines and the grants stay. **Delete** is the repository delete (`POST
+  /api/repos/delete`). The rehearsal's row goes with either repo (purge).
 - **Delete.** `DELETE .../sources/{id}` removes the source, its mapping, syncs, failures and
   log. The repos and their files stay.
 - **UI.** The admin-only **Nexus** pages (`/#/settings/nexus`, `/#/settings/nexus/{id}`). The
   list is a card per server: its name, status badge, address and number of repositories, and the
   next check; a syncing source shows its progress line instead. The source page has, top to bottom: the header (status badge and line, Sync now
-  or Cancel the sync, Switch over, Delete), Repositories to copy (one pick table of every Nexus repo
+  or Cancel the sync, Switch over everything, Delete), Repositories to copy (one pick table of every Nexus repo
   in the order a save sets them up: repos and proxies, then groups, then the repos this server
-  cannot copy, muted with their reason; a filter above 10 repos; Kind, State (Copied, New
-  repository, New proxy, New group, Stops copying, Members change, or Not copied), Name here, Who
-  can download, and the choice question of the target format (Debian: Signing key); a proxy
+  cannot copy, muted with their reason; a filter above 10 repos; Kind, State (Copying, Switched
+  over, Copied for a proxy or a group, New repository, New proxy, New group, Stops copying,
+  Members change, or Not copied), Name here (with its rehearsal repos under the name), Who
+  can download, and the choice question of the target format (Debian: Signing key); the row
+  actions of a copied repository: Switch over and Rehearse publishing, and of each rehearsal
+  repo: Empty it and Delete, each behind a confirm that lists its effects; a switched-over row
+  cannot be unpicked; a proxy
   shows its remote and a group the members it reads and leaves out, and picking a group picks its
   members; the secret questions and the remote credentials of the new repos below the table; one
   button "Copy N repositories" or "Save", with a sentence of what the save does, saves and opens
@@ -2496,6 +2585,10 @@ is unreachable.
   long it took, the new files and their size; the failed count as a badge when there are any; the
   state at the end) and the connection with the save bar. While a repo has the `mirror`
   operation, its page shows the operation's message under the header to the people who could upload or delete.
+  A rehearsal repo's header says what it rehearses ("Rehearsal for maven-releases", a link). A new
+  CI pipeline that starts from a repo that still copies from Nexus (`?repo=`) has its rehearsal
+  repo chosen in place of it, and the pipeline's repository list shows each rehearsal repo first,
+  right before the repo it rehearses.
 
 ## Group and proxy repositories
 
@@ -3522,7 +3615,7 @@ module (`audit.System`), the `telesphorepo-server user` commands as `cli` (`audi
 |---|---|---|
 | core | `people` | `signin.success` (`detail.method`), `signin.failed` (the actor is the tried username), `token.create`, `token.delete`, `user.create` (`detail.permissions`), `user.update` (password changed, disabled, second factors reset), `user.permissions` (`detail.old` and `detail.new`: the server permission sets; the actor kind is `sso` when single sign-on set them at a sign-in) |
 | core | `repo` | `file.upload`, `file.delete`, `grant.set` (`detail.old` and `detail.new`: the repository permission sets) |
-| core | `repositories` | `repo.create`, `repo.update`, `repo.delete`, `repo.delete.resume`, `repo.delete.clear` |
+| core | `repositories` | `repo.create`, `repo.update`, `repo.delete`, `repo.delete.resume`, `repo.delete.clear`, `repo.rename` (`detail.renamed_from`), `repo.redirect.remove` (`detail.redirect`) |
 | core | `settings` | `settings.update` (keys only, never values; `via: "first sign-in"` when the sign-in set `base_url`) |
 | storage | `storage` | `storage.move.start` (`detail.target` without secrets), `storage.move.cancel`, `storage.move.done`, `storage.move.failed` (`detail.error`), `storage.move.retry` (`detail.changed`: the keys of the body; `detail.move`: the new move), `storage.move.dismiss` |
 | backup | `backup` | `backup.done` (`target` the backup name; `detail`: `dir`, `storage`, `blobs`, `copied`, `size`, `master_key_included`, `removed` (the folders retention removed), `removed_blobs`), `backup.failed` (`detail.error`). A scheduled run has the module as actor, Back up now the person |
@@ -3532,7 +3625,7 @@ module (`audit.System`), the `telesphorepo-server user` commands as `cli` (`audi
 | publish | `people` | `device.approve`, `device.revoke` (by a person in the UI, or by the device itself with `detail.by` `device`) |
 | publish | `ci` | `ci.pipeline.create`, `ci.pipeline.update`, `ci.pipeline.delete` |
 | sso | `signin` | `sso.signin`, `sso.signin.failed` (`detail.reason`) |
-| nexus | `nexus` | `nexus.source.create`, `nexus.source.update`, `nexus.source.delete`, `nexus.mapping.save`, `nexus.sync.start` (a manual sync, or the sync after a mapping save), `nexus.sync.cancel`, `nexus.cutover` |
+| nexus | `nexus` | `nexus.source.create`, `nexus.source.update`, `nexus.source.delete`, `nexus.mapping.save`, `nexus.sync.start` (a manual sync, or the sync after a mapping save), `nexus.sync.cancel`, `nexus.cutover` (switch over everything), `nexus.repo.switchover` (`detail.source_repo`), `nexus.rehearsal.create` (`detail.for`, `detail.people`), `nexus.rehearsal.empty` (`detail.count`) |
 
 - Client IP addresses appear only in this table and its API. The only other API with an address
   is `GET /api/network/proxy-candidates` (`network.manage`), which lists the addresses of untrusted
@@ -3564,6 +3657,10 @@ The server counts the downloads of each repo per day (`internal/stats`, table `d
   day). The job `audit.downloads` writes the counters every minute in one transaction, one upsert
   per repo and day (a repo deleted since is skipped), and once more at shutdown; a failed write
   keeps the counts for the next one. A crash loses at most the last minute.
+- **Redirects.** The same counter keeps the last use of each repository redirect in memory
+  (`stats.Counter.UseRedirect`, which `repos.Service.ByName` calls through `OnRedirectUse`) and
+  the same flush writes it, one update of `repo_redirects.last_used_at` per used redirect, which
+  never moves back.
 - **Retention.** The setting `stats.retention` (default 400 days) of the group `activity`; the hourly
   job `audit.retention` deletes older days. A repo delete takes its rows (`ON DELETE CASCADE`).
 - **`GET /api/stats?days=`** (`activity.read`, 1 to 400, 30 by default) writes the pending counters
@@ -3861,7 +3958,10 @@ page are in `web/src/README.md`.
   cannot open goes to their first tab. The header shows the name with a lock for a private repo.
   **Delete** (`repositories.all`) is an action at the end of the header, on every tab; it opens a dialog that
   asks for the repo name.
-  - *Overview:* description and visibility.
+  - *Overview:* description and visibility; for a holder of `repositories.all` the name, whose
+    change asks first and says that the old name keeps working as a redirect; and Redirects, the
+    old names with their last use and Remove after a confirm that names what stops working (see
+    **Repository redirects**). An old name in the address opens the settings under the new name.
   - *Access:* three cards that answer from `GET /api/repos/{name}/access?admins=1` and the unsaved
     edits. **Who can download**: "Anyone" when public, else the count of people with Download and
     of administrators (holders of All repositories), with their avatars and names (the
@@ -4204,7 +4304,7 @@ permissions (409 on a change of them), a person outside the map signs in without
 map change replaces them at the next sign-in, and without a claim a sign-in changes nothing; a map
 without a claim or with an unknown or repository permission is 400. `TestRaw` uses a curl container.
 `TestAPIFormats` covers `/api/formats`, `/status` and `/usage`; `descriptor_test.go` covers the format descriptors (`TestFormatDescriptors`), the CI file route with branches and tags (`TestCIWorkflowRoute`) and the delete plan (`TestDeletePlan`). `TestQueryPlans` runs `dbcheck`
-inside a server container. `migrations_test.go` covers `TestMigrations`, a real upgrade with three builds of the server (`BuildServer`, `BuildServerWith` with an overlay): the tree writes a private raw repo, a user with `repo.download` on it and a file; a build with one more core migration (`0002_e2e_probe.sql`, a new table filled from `repos` and `users`) starts on the same data volume, logs `applied migration` for that file only, and the user reads the file and its grant back; the exported database holds both core rows of `schema_migrations` and the probe rows of the older data; a build whose `0001_init.sql` has another content refuses to start with the sentence that names `core` and the file; the tree refuses the database of the newer build ("core migration 0002"); then the newer build starts on it again and applies nothing. `files_test.go` covers `TestTree`, `TestDelete` (who may delete: `repo.delete` with a publish session or a UI session, file, prefix and Bearer deletes, blobs kept for the blob GC, repo delete and name reuse), `TestManualUploadMaven` (checksums, metadata order, `mvn` resolves the uploaded and the generated pom), `TestManualUploadRaw`, `TestRepoCounters` (`file_count`, `total_size` and `last_published_at` through uploads, a replace, a file delete and a folder delete) and `TestDebianDeleteAndUpload` (apt sees the package, then not; 4 by-hash files remain). `audit_test.go` covers `TestAudit`: events, filters, paging, no secret values, `activity.read` only, and no IP outside the audit log. `network_test.go` covers `TestClientIP` (with the default an `X-Forwarded-For` from the harness peer is ignored and the peer becomes a proxy candidate; trusting the candidate makes the header count and removes the candidate; `private`: a chain through a private hop, `CF-Connecting-IP` from a non-Cloudflare peer; an untrusted peer's header, an empty list, invalid entries, reset to the default). `TestIPRules` and `TestPresetIPLists` set `trusted_proxies` to `private` first, so `X-Forwarded-For` sets the client address, `TestIPRules` (validation; allowed and refused reads of the format route, tree, assets, usage and status; the repo record stays readable; search drops the repo; refused device and manual mints, PUT and admin delete, each audited with its IP and scope; empty lists lift the rule) and `TestPresetIPLists` (a second Telesphorepo server is the stub: startup fetch, a preset in read rules, a Cloudflare hop in the chain, a failed refresh that keeps the last good list, recovery, and stored lists after a restart without the stub) and `TestCustomIPLists` (create, edit, a rename that keeps the rules and the trusted proxies (by list id), use in rules and in the trusted proxies, delete while in use gives 409, an unknown list id gives 400) and `TestTrustedProxyEnvList` (`TR_TRUSTED_PROXIES` with `list:cloudflare` shows as `env_lists`) and `TestIPRangeParse` (the paste parser: one per line, comma, space, tab and `|` separated, CSV with a header row, tables, comments, labels, quotes, IPv6 and IPv4-mapped IPv6, an unmasked CIDR, duplicates, invalid lines with their numbers, the 1 MiB limit, `network.manage` only). `signing_keys_test.go` covers create, import of plain and encrypted keys, delete while in use gives 409, a per-repo key (the repo field `signing_key`; an unknown key, a key in the config and a key of a raw repo give 400) that `apt` installs from, a key change that signs again, and keys and bindings after a restart. `groups_test.go` covers `TestGroups`: a release and a snapshot member resolve through the group with `mvn` and Gradle, the merged `maven-metadata.xml` and its `.sha1`, the member order, a public group with a private member (anonymous and a reader), 405 for a PUT and 409 for a publish session, 400 for a member of another format, a nested group, an unknown name and no member, and a member delete. `groups_files_test.go` covers `TestGroupFiles`: a Maven group of a repository, a proxy of a second Telesphorepo server and a private repository, with a path in both the repository and the proxy; the group tree equals the union of the member trees at three folders and pages through it with limits 1, 3 and 200 without a gap or a duplicate, folders merge, the shared path comes from the repository with its `repo` and checksum (tree and file details), anonymous readers do not see the private member, a bad cursor is 400, and a delete (405), a publish session (409) and a PUT (405) are refused. `cache_control_test.go` covers
+inside a server container. `migrations_test.go` covers `TestMigrations`, a real upgrade with three builds of the server (`BuildServer`, `BuildServerWith` with an overlay): the tree writes a private raw repo, a user with `repo.download` on it and a file; a build with one more core migration (`0002_e2e_probe.sql`, a new table filled from `repos` and `users`) starts on the same data volume, logs `applied migration` for that file only, and the user reads the file and its grant back; the exported database holds both core rows of `schema_migrations` and the probe rows of the older data; a build whose `0001_init.sql` has another content refuses to start with the sentence that names `core` and the file; the tree refuses the database of the newer build ("core migration 0002"); then the newer build starts on it again and applies nothing. `files_test.go` covers `TestTree`, `TestDelete` (who may delete: `repo.delete` with a publish session or a UI session, file, prefix and Bearer deletes, blobs kept for the blob GC, repo delete and name reuse), `TestManualUploadMaven` (checksums, metadata order, `mvn` resolves the uploaded and the generated pom), `TestManualUploadRaw`, `TestRepoCounters` (`file_count`, `total_size` and `last_published_at` through uploads, a replace, a file delete and a folder delete) and `TestDebianDeleteAndUpload` (apt sees the package, then not; 4 by-hash files remain). `audit_test.go` covers `TestAudit`: events, filters, paging, no secret values, `activity.read` only, and no IP outside the audit log. `network_test.go` covers `TestClientIP` (with the default an `X-Forwarded-For` from the harness peer is ignored and the peer becomes a proxy candidate; trusting the candidate makes the header count and removes the candidate; `private`: a chain through a private hop, `CF-Connecting-IP` from a non-Cloudflare peer; an untrusted peer's header, an empty list, invalid entries, reset to the default). `TestIPRules` and `TestPresetIPLists` set `trusted_proxies` to `private` first, so `X-Forwarded-For` sets the client address, `TestIPRules` (validation; allowed and refused reads of the format route, tree, assets, usage and status; the repo record stays readable; search drops the repo; refused device and manual mints, PUT and admin delete, each audited with its IP and scope; empty lists lift the rule) and `TestPresetIPLists` (a second Telesphorepo server is the stub: startup fetch, a preset in read rules, a Cloudflare hop in the chain, a failed refresh that keeps the last good list, recovery, and stored lists after a restart without the stub) and `TestCustomIPLists` (create, edit, a rename that keeps the rules and the trusted proxies (by list id), use in rules and in the trusted proxies, delete while in use gives 409, an unknown list id gives 400) and `TestTrustedProxyEnvList` (`TR_TRUSTED_PROXIES` with `list:cloudflare` shows as `env_lists`) and `TestIPRangeParse` (the paste parser: one per line, comma, space, tab and `|` separated, CSV with a header row, tables, comments, labels, quotes, IPv6 and IPv4-mapped IPv6, an unmasked CIDR, duplicates, invalid lines with their numbers, the 1 MiB limit, `network.manage` only). `signing_keys_test.go` covers create, import of plain and encrypted keys, delete while in use gives 409, a per-repo key (the repo field `signing_key`; an unknown key, a key in the config and a key of a raw repo give 400) that `apt` installs from, a key change that signs again, and keys and bindings after a restart. `redirects_test.go` covers `TestRepoRedirects`: a Maven, an npm and a Docker repository renamed, then `mvn deploy`, `npm publish` and `docker push` (Docker in Docker) through the old name with a publish token minted through it, each landing in the renamed repository; the upload event records the old name with `redirect_to`; the redirect lists a last use; create and rename to a redirect's name or a repo's name give 409; a rename back takes the old name again; the catalog lists the images of before the rename under the new name; after Remove the redirect the old name answers 404 and a new repository takes it. `groups_test.go` covers `TestGroups`: a release and a snapshot member resolve through the group with `mvn` and Gradle, the merged `maven-metadata.xml` and its `.sha1`, the member order, a public group with a private member (anonymous and a reader), 405 for a PUT and 409 for a publish session, 400 for a member of another format, a nested group, an unknown name and no member, and a member delete. `groups_files_test.go` covers `TestGroupFiles`: a Maven group of a repository, a proxy of a second Telesphorepo server and a private repository, with a path in both the repository and the proxy; the group tree equals the union of the member trees at three folders and pages through it with limits 1, 3 and 200 without a gap or a duplicate, folders merge, the shared path comes from the repository with its `repo` and checksum (tree and file details), anonymous readers do not see the private member, a bad cursor is 400, and a delete (405), a publish session (409) and a PUT (405) are refused. `cache_control_test.go` covers
 `TestCacheControl`: HEAD, a 304 and a GET of a private Maven repo, of a public group with a
 private member (also for the public member's file) carry `Cache-Control: private`; a public repo
 and a group of public members carry none (an S3 redirect carries `no-store`); after a read IP rule
@@ -4446,7 +4546,12 @@ a maven2 group of the two hosted repos and the proxy. On each storage backend th
   then a third sync ("no new files" for each repo) and pages and filters its log;
 - checks that the mirrored repos refuse publish sessions, unpicks the raw repo and uploads to it,
   finds no password in any log line, cuts over and writes to the repos. After cut-over, sync
-  answers 409. No response holds the Nexus password.
+  answers 409. No response holds the Nexus password;
+- in the subtest `switch-over`, copies two raw repos, rehearses publishing to the first (a
+  publisher of the repo publishes to its rehearsal, empties it, publishes again; the rehearsal
+  is deleted at the end), switches over the first alone (uploads work there, the second still
+  refuses publish sessions, a new Nexus file reaches only the second, a save cannot move or drop
+  the switched-over repo), then switches over everything, which cuts the source over.
 
 `TestScale` (tag `scale`, `go tool task test scale`) seeds 100k and then 1M assets with `seed N`
 on a named volume. It starts a server on the volume and measures the p95 latency over 400 runs of

@@ -1382,5 +1382,7 @@ func TestNexus(t *testing.T) {
 		// A nuget repo, through a source of its own.
 		t.Run("nuget", func(t *testing.T) { nexusNuGet(t, n, s) })
 		t.Run("pypi", func(t *testing.T) { nexusPyPI(t, n, s) })
+		// A switch-over of one repository, rehearsal repositories, and the switch-over of everything.
+		t.Run("switch-over", func(t *testing.T) { nexusSwitchOver(t, n, s) })
 	})
 }

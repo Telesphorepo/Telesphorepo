@@ -301,9 +301,14 @@ func (h *Handler) buildRelease(ctx context.Context, repo *repos.Repo, dist strin
 		}
 	}
 
+	base := "dists/" + dist + "/"
+	origin, label, err := h.releaseNames(ctx, repo, base+"Release")
+	if err != nil {
+		return err
+	}
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "Origin: %s\nLabel: %s\nSuite: %s\nCodename: %s\nDate: %s\nArchitectures: %s\nComponents: %s\nAcquire-By-Hash: yes\n",
-		repo.Name, repo.Name, dist, dist, time.Now().UTC().Format(time.RFC1123Z),
+		origin, label, dist, dist, time.Now().UTC().Format(time.RFC1123Z),
 		strings.Join(architectures(repo), " "), strings.Join(comps, " "))
 	b.WriteString("MD5Sum:\n")
 	for _, f := range files {
@@ -315,8 +320,7 @@ func (h *Handler) buildRelease(ctx context.Context, repo *repos.Repo, dist strin
 	}
 	release := b.Bytes()
 
-	base := "dists/" + dist + "/"
-	ws := []assets.Write{{Repo: repo, Path: repopath.Path(base + "Release"), Body: assets.Body{Spool: blobs.Bytes(release)}, Origin: generated}}
+	ws :=[]assets.Write{{Repo: repo, Path: repopath.Path(base + "Release"), Body: assets.Body{Spool: blobs.Bytes(release)}, Origin: generated}}
 	signer := h.keys.Signer(signingKey(repo))
 	if signer == nil {
 		h.log.Error("the repo's signing key does not exist or is unusable; its Release is unsigned",
@@ -335,4 +339,39 @@ func (h *Handler) buildRelease(ctx context.Context, repo *repos.Repo, dist strin
 	}
 	_, err = h.assets.CommitAll(ctx, ws)
 	return err
+}
+
+// releaseHead is how much of the current Release releaseNames reads: Origin and Label are its
+// first lines.
+const releaseHead = 4 << 10
+
+// releaseNames returns the Origin and the Label of the Release at path: those of the Release
+// that the repo has there, else the repo name. apt refuses the update of a source whose Release
+// changed its Origin or Label, so a renamed repo keeps the ones its clients know.
+func (h *Handler) releaseNames(ctx context.Context, repo *repos.Repo, path string) (string, string, error) {
+	origin, label := repo.Name, repo.Name
+	a, err := h.assets.Get(ctx, repo.ID, path)
+	if errors.Is(err, assets.ErrNotFound) {
+		return origin, label, nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	rc, err := h.assets.Open(ctx, a)
+	if err != nil {
+		return "", "", err
+	}
+	defer rc.Close()
+	sc := bufio.NewScanner(io.LimitReader(rc, releaseHead))
+	for sc.Scan() {
+		k, v, ok := strings.Cut(sc.Text(), ": ")
+		switch {
+		case !ok || strings.HasPrefix(k, " "):
+		case k == "Origin" && v != "":
+			origin = v
+		case k == "Label" && v != "":
+			label = v
+		}
+	}
+	return origin, label, nil
 }

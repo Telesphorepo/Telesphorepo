@@ -41,6 +41,8 @@ const (
 	RepoDelete       = "repo.delete"
 	RepoDeleteResume = "repo.delete.resume" // a failed repo delete started again
 	RepoDeleteClear  = "repo.delete.clear"  // a failed repo delete ended; the repo stays
+	RepoRename       = "repo.rename"        // detail renamed_from; the old name is a redirect
+	RedirectRemove   = "repo.redirect.remove"
 	SettingsUpdate   = "settings.update"
 )
 
@@ -135,6 +137,21 @@ func CLI(ctx context.Context) context.Context {
 	return WithActor(ctx, Actor{Kind: ActorCLI, Name: "cli"})
 }
 
+type usedNameKey struct{}
+
+// usedName is the name that a request used for a repo: a redirect of it.
+type usedName struct {
+	id   int64
+	name string
+}
+
+// WithRepoName returns ctx with name, the redirect that a request used for repo id. An event of
+// that repo then records name as its repo, and the repo's own name in detail.redirect_to, so
+// Activity shows the name that the request used.
+func WithRepoName(ctx context.Context, id int64, name string) context.Context {
+	return context.WithValue(ctx, usedNameKey{}, usedName{id, name})
+}
+
 // Event is one audit row. Detail must never hold a secret value.
 type Event struct {
 	Action string
@@ -202,6 +219,9 @@ func (l *Log) row(ctx context.Context, e Event) (dbq.InsertAuditEventParams, err
 	}
 	if e.Repo != "" {
 		detail["repo"] = e.Repo
+		if u, ok := ctx.Value(usedNameKey{}).(usedName); ok && u.id == e.RepoID && u.name != e.Repo {
+			detail["repo"], detail["redirect_to"] = u.name, e.Repo
+		}
 	}
 	js, err := json.Marshal(detail)
 	if err != nil {

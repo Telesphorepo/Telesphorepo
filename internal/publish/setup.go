@@ -303,7 +303,7 @@ func (m *mod) createSetupCode(w http.ResponseWriter, r *http.Request, c *route.C
 	if !m.h.API.Decode(w, r, &in) {
 		return
 	}
-	if c.Proof != nil && c.Proof.Kind == "grant" && c.Proof.Data != SetupGrant(c.Repo.Name) {
+	if c.Proof != nil && c.Proof.Kind == "grant" && !m.grantFor(r.Context(), c.Proof.Data, c.Repo) {
 		httpx.Error(w, r, http.StatusUnauthorized, "the single sign-on confirmation is for another repository; sign in again")
 		return
 	}
@@ -320,6 +320,20 @@ func (m *mod) createSetupCode(w http.ResponseWriter, r *http.Request, c *route.C
 // SetupGrant is what the grant of a fresh SSO sign-in confirms when it makes a setup code for
 // repo (auth.Proof.Data).
 func SetupGrant(repo string) string { return "setup:" + repo }
+
+// grantFor reports whether the grant data names repo: by its name, or by a name that resolves
+// to it now (a redirect, after a rename).
+func (m *mod) grantFor(ctx context.Context, data string, repo *repos.Repo) bool {
+	name, ok := strings.CutPrefix(data, "setup:")
+	if !ok {
+		return false
+	}
+	if name == repo.Name {
+		return true
+	}
+	r, err := m.h.Repos.ByName(ctx, name)
+	return err == nil && r.ID == repo.ID
+}
 
 // setupDevice sets up a project with a setup code (no auth): {code, name, public_key} or {code,
 // device_id, nonce, signature} -> 200 {device_id, user, repo, format, kind}. A wrong, used or

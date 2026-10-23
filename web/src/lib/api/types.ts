@@ -307,6 +307,14 @@ export type Repo = {
   proxy?: RepoProxy;
 };
 
+/** An old name of a repository that still answers for it (GET /api/repos/{name}/redirects). */
+export type RepoRedirect = {
+  name: string;
+  created_at: string;
+  /** The last request through the name; null: never used. */
+  last_used_at: string | null;
+};
+
 /** The remote of a new proxy, or the changes to it. Send username and password together; username "" removes them. */
 export type ProxyInput = {
   remote_url?: string;
@@ -894,6 +902,10 @@ export type NexusSource = {
   repo_count: number;
   /** Seconds: the live nexus.sync_interval setting. */
   sync_interval: number;
+  /** Mapped hosted repositories that still copy from Nexus. */
+  copying: number;
+  /** Mapped hosted repositories that switched over: uploads go to them here. */
+  switched_over: number;
 };
 export type NexusSourceRepo = {
   name: string;
@@ -925,7 +937,13 @@ export type NexusSourceRepo = {
   questions: ImportQuestion[];
   /** What the target format read from the repository's settings, e.g. {key_in_source: true}. */
   facts: Record<string, unknown>;
+  /** A mapped hosted repository that switched over; null while it copies from Nexus. */
+  switch_over: NexusSwitchOver | null;
+  /** The rehearsal repositories of the repository here. */
+  rehearsals: string[];
 };
+/** The switch-over of one repository: its final sync and the files that sync did not copy. */
+export type NexusSwitchOver = { sync_id: number; failed: number; switched_at: string };
 /** A question of the target format of an import (format.Importer Plan). */
 export type ImportQuestion = {
   key: string;

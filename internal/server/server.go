@@ -425,6 +425,7 @@ func kernel(base context.Context, d *db.DB, boot *config.Boot, set *settings.Ser
 	reader.SetFetcher(proxy.New(rs, pipe, log.With("component", "proxy")))
 	downloads := stats.New(d)
 	reader.SetDownloads(downloads.Add)
+	rs.OnRedirectUse(downloads.UseRedirect)
 	ids := make([]string, len(b.Manifests))
 	for i, m := range b.Manifests {
 		ids[i] = m.Module.ID

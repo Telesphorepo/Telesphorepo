@@ -30,6 +30,14 @@ type NexusSourceRepo struct {
 	TargetRepoID int64
 }
 
+type NexusSwitchOver struct {
+	SourceID   int64
+	SourceRepo string
+	SyncID     int64
+	Failed     int64
+	SwitchedAt int64
+}
+
 type NexusSync struct {
 	ID         int64
 	SourceID   int64
@@ -56,4 +64,10 @@ type NexusSyncRepo struct {
 	ActiveAt     int64
 	State        string
 	Error        string
+}
+
+type RepoRehearsal struct {
+	RepoID    int64
+	ForRepoID int64
+	CreatedAt int64
 }

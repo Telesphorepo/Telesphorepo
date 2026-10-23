@@ -343,8 +343,16 @@ const isInt = (v: unknown): v is number => typeof v === "number" && Number.isSaf
 // exp is unix seconds; 0 (or none) never expires.
 const expOf = (v: unknown): number | null | undefined => (v === null || v === undefined || v === 0 ? null : isInt(v) ? v : undefined);
 
+// repoObject reads the repo object of name. The object of a redirect is {redirect: <repo name>}:
+// the Worker reads that repo's object, and the request is one to that repo (its name is the name
+// of the scopes of a core bearer token). A redirect never names another redirect.
 export async function repoObject(objects: Objects, name: string): Promise<RepoObject | null> {
-  const v = await objects.get("a/repo/" + name);
+  let v = await objects.get("a/repo/" + name);
+  if (isObj(v) && typeof v.redirect === "string") {
+    name = v.redirect;
+    v = await objects.get("a/repo/" + name);
+    if (isObj(v) && v.redirect !== undefined) return null;
+  }
   if (
     !isObj(v) || !isInt(v.id) || typeof v.format !== "string" || typeof v.kind !== "string" ||
     typeof v.anon !== "boolean" || typeof v.private !== "boolean" || typeof v.guarded !== "boolean"
@@ -394,6 +402,9 @@ const CRED_DEVICE = 32;
 interface BearerScope {
   repo: string;
   ops: number[];
+  // id is the repo that repo names now (through a redirect after a rename), set by resolveScopes;
+  // scopes match a repo by id.
+  id?: number;
 }
 
 // Caller is a credential that the edge checks. Its rows (the user, token and device objects) are
@@ -596,12 +607,23 @@ export async function rights(caller: Caller, objects: Objects): Promise<Rights |
   return null;
 }
 
+// resolveScopes sets the repo id of each scope of a core bearer token from the repo object of its
+// name, so a token issued before a rename of its repo still matches it, as on the server.
+export async function resolveScopes(r: Rights, objects: Objects): Promise<void> {
+  if (r.scopes === null) return;
+  await Promise.all(
+    r.scopes.map(async (s) => {
+      s.id = (await repoObject(objects, s.repo))?.id;
+    }),
+  );
+}
+
 // mayRead reports whether the credential reads repo with repo.download. withScopes checks the
 // scope of a core bearer token first (the repo of the request); a group member is checked
 // without scopes, against the rows of the credential behind the token (Principal.InGroup).
 export function mayRead(r: Rights, repo: RepoObject, withScopes: boolean): boolean {
   if (withScopes && r.scopes !== null) {
-    const sc = r.scopes.find((s) => s.repo === repo.name);
+    const sc = r.scopes.find((s) => s.id === repo.id);
     if (!sc || !sc.ops.includes(OP_READ)) return false;
   }
   return repo.anon || r.all || r.read.has(repo.id);

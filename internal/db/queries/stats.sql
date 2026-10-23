@@ -16,3 +16,8 @@ SELECT repo_id, day, downloads, bytes FROM download_stats WHERE day >= sqlc.arg(
 -- Retention: the days before a cutoff, through download_stats_day.
 -- name: DeleteOldDownloads :execrows
 DELETE FROM download_stats WHERE day < sqlc.arg(before);
+
+
+-- The last use of a redirect, written with the download counters. It never moves back.
+-- name: TouchRepoRedirect :exec
+UPDATE repo_redirects SET last_used_at = max(last_used_at, CAST(sqlc.arg(at) AS INTEGER)) WHERE name = sqlc.arg(name);

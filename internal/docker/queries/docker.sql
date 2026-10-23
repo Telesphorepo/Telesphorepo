@@ -141,3 +141,7 @@ DELETE FROM docker_manifests WHERE docker_manifests.repo_id = sqlc.arg(repo_id) 
 -- name: PurgeDockerImages :execrows
 DELETE FROM docker_images WHERE docker_images.repo_id = sqlc.arg(repo_id) AND image IN (SELECT x.image FROM docker_images x WHERE x.repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
 
+
+-- A rename of the repo: every image of it takes the new full name, through the primary key.
+-- name: RenameImages :exec
+UPDATE docker_images SET full_name = CAST(sqlc.arg(repo_name) AS TEXT) || '/' || image WHERE repo_id = sqlc.arg(repo_id);

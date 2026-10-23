@@ -15,6 +15,7 @@
   While the repository has an operation (a copy from Nexus that waits for the switch-over, a
   delete), the people who could upload or delete see its sentence as one muted line under the
   header. A failed operation is an alert with Resume and Stop for the holders of All repositories.
+  A rehearsal repository says after its name which repository it rehearses.
 -->
 <script lang="ts">
   import { api, ApiError, type Repo } from "$lib/api";
@@ -94,6 +95,8 @@
   const r = $derived(repo.data ?? null);
   const group = $derived(r?.kind === "group");
   const proxy = $derived(r?.kind === "proxy");
+  // A rehearsal repository (the Nexus migration's Rehearse publishing) names the repository it rehearses.
+  const rehearses = $derived(typeof r?.fields?.rehearsal_for === "string" ? r.fields.rehearsal_for : "");
   // The caller's permissions on the repository; a setup-only session uses none of them.
   const perms = $derived(r && auth.user && !auth.setupOnly ? (r.permissions ?? []) : []);
   // Settings shows to anyone who can open one of its tabs.
@@ -204,6 +207,11 @@
       {/if}
       <span class="text-body text-muted-foreground"><FormatBadge format={r.format} /></span>
       <RepoKindIcon kind={r.kind} iconClass="size-5" />
+      {#if rehearses}
+        <span class="text-meta text-muted-foreground">
+          Rehearsal for <a class="rounded-sm text-link underline-offset-4 hover:underline" href={href(repoPath(rehearses))}>{rehearses}</a>
+        </span>
+      {/if}
     {/snippet}
     {#snippet actions()}
       {#if canSettings}

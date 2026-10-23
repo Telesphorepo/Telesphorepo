@@ -32,7 +32,7 @@ export const formatWord = (id: string) => formats.importer(id)?.title ?? (id ? i
 /** "Maven, hosted"; "Debian, proxy"; "Maven, group". */
 export const kindText = (format: string, type: string) => (type ? `${formatWord(format)}, ${type}` : formatWord(format));
 
-/** How a sync started, for the history: "Saved", "Manual by sam", "Scheduled", "Final". */
+/** How a sync started, for the history: "Saved", "Manual by sam", "Scheduled", "Switch-over". */
 export function howText(s: NexusSync): string {
   switch (s.trigger) {
     case "save":
@@ -42,7 +42,7 @@ export function howText(s: NexusSync): string {
     case "schedule":
       return "Scheduled";
     case "cutover":
-      return "Final";
+      return "Switch-over";
   }
 }
 

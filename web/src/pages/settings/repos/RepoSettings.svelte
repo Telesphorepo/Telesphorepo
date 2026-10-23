@@ -60,6 +60,11 @@
   });
 
   const r = $derived(repo.data?.name === params.name ? repo.data : repo.data === null ? null : undefined);
+  // An old name of a repository (a redirect, after a rename) opens the settings under its name.
+  $effect(() => {
+    const d = repo.data;
+    if (!repo.loading && d && d.name !== params.name) navigate(repoSettingsPath(d.name, params.tab), { replace: true });
+  });
 
   // A group and a proxy have no format settings and no module tabs; a proxy has its Remote tab.
   const tabs = $derived.by(() => {

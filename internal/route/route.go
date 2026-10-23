@@ -153,7 +153,8 @@ func (r *Router) Handle(pattern string, p Policy, h Handler) {
 //  2. A request without a credential passes only when the policy is Anonymous or names a repo.
 //  3. The fresh second factor (FreshFactor).
 //  4. The server permission, or the repository permission SomeRepo on at least one repo.
-//  5. The repo: its name, then access.Engine.Decide. A format read of a repo that not everyone reads
+//  5. The repo: its name, or a redirect of it (repos.Service.ByName; the events of the request
+//     then record the redirect, audit.WithRepoName), then access.Engine.Decide. A format read of a repo that not everyone reads
 //     (access.Engine.Private) answers with Cache-Control: private, so a shared cache
 //     in front of the server does not keep it. A public repo gets no Cache-Control here. A format
 //     read keeps the members of a group that it reads for the request (repos.Remember).
@@ -266,7 +267,7 @@ func (m *Mux) enforce(p Policy, h Handler) http.HandlerFunc {
 			// A bearer token of another credential kind reads or reads metadata only with the open
 			// publish session of its scope; on a write or a delete, the engine answers from its scope.
 			if kindAtRepo && op != access.Write && op != access.Delete {
-				if sc := c.P.ScopeOf(repo.Name); sc == nil || sc.Open == nil {
+				if sc := c.P.ScopeOf(repo.ID); sc == nil || sc.Open == nil {
 					fail(kindRefusal(c.P))
 					return
 				}
@@ -277,6 +278,10 @@ func (m *Mux) enforce(p Policy, h Handler) http.HandlerFunc {
 				return
 			}
 			c.Repo, c.RepoPerms = repo, d.Perms
+			if repo.Name != name {
+				// The request named a redirect of the repo: its events record that name.
+				r = r.WithContext(audit.WithRepoName(r.Context(), repo.ID, name))
+			}
 			if rule.Format != "" && op == access.Read {
 				// A format read reads the members of a group once: here, and again in the read path.
 				r = r.WithContext(repos.Remember(r.Context()))

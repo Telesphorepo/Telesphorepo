@@ -50,16 +50,38 @@ func (m *mod) object(ctx context.Context, key string) ([]byte, bool, error) {
 	return b, true, err
 }
 
-// repoObject is the object of the repo name: none for a repo whose format the edge does not serve.
+// repoObject is the object of the repo name, or of the redirect name: none for a repo whose
+// format the edge does not serve.
 func (m *mod) repoObject(ctx context.Context, name string) (any, bool, error) {
-	repo, err := m.h.Repos.ByName(ctx, name)
+	repo, err := m.h.Repos.ByOwnName(ctx, name)
+	if errors.Is(err, repos.ErrNotFound) {
+		return m.redirectObject(ctx, name)
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return m.repoObjectOf(ctx, repo)
+}
+
+// redirectObject is the object of the redirect name: the name of its repo, whose object the
+// Worker reads next. None when name is no redirect or the edge does not serve its repo.
+func (m *mod) redirectObject(ctx context.Context, name string) (any, bool, error) {
+	repo, err := m.h.Repos.RedirectTarget(ctx, name)
 	if errors.Is(err, repos.ErrNotFound) {
 		return nil, false, nil
 	}
 	if err != nil {
 		return nil, false, err
 	}
-	return m.repoObjectOf(ctx, repo)
+	o, ok := m.redirectObjectOf(repo)
+	return o, ok, nil
+}
+
+func (m *mod) redirectObjectOf(repo *repos.Repo) (redirectObject, bool) {
+	if m.edgeOf(repo) == nil {
+		return redirectObject{}, false
+	}
+	return redirectObject{Redirect: repo.Name}, true
 }
 
 func (m *mod) repoObjectOf(ctx context.Context, repo *repos.Repo) (any, bool, error) {
@@ -177,6 +199,9 @@ func (m *mod) authChanged(ctx context.Context, c auth.Change) {
 // and its id can come back for a new repo.
 func (m *mod) reposChanged(ctx context.Context, n repos.Notice) {
 	var keys []string
+	for _, name := range n.Redirects {
+		keys = append(keys, repoPrefix+name)
+	}
 	add := func(id int64) {
 		if g, err := m.h.Repos.ByID(ctx, id); err == nil {
 			keys = append(keys, repoPrefix+g.Name)
@@ -309,7 +334,9 @@ func (m *mod) allObjects(ctx context.Context) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	byID := make(map[int64]*repos.Repo, len(all))
 	for _, r := range all {
+		byID[r.ID] = r
 		o, ok, err := m.repoObjectOf(ctx, r)
 		if err != nil {
 			return nil, err
@@ -319,6 +346,27 @@ func (m *mod) allObjects(ctx context.Context) (map[string]string, error) {
 				return nil, err
 			}
 		}
+	}
+	// The redirects in pages of 500. A redirect of a repo created after the list waits for the
+	// next reconcile; its notice marked it already.
+	for after := ""; ; {
+		page, next, err := m.h.Repos.RedirectPage(ctx, after, 500)
+		if err != nil {
+			return nil, err
+		}
+		for _, rd := range page {
+			if r := byID[rd.RepoID]; r != nil {
+				if o, ok := m.redirectObjectOf(r); ok {
+					if err := add(repoPrefix+rd.Name, o); err != nil {
+						return nil, err
+					}
+				}
+			}
+		}
+		if next == "" {
+			break
+		}
+		after = next
 	}
 	// The users in pages of 500, each page with one read of its permissions and one of its grants.
 	for after := int64(0); ; {

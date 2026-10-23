@@ -83,3 +83,18 @@ func (q *Queries) ListDownloadsSince(ctx context.Context, since int64) ([]Downlo
 	}
 	return items, nil
 }
+
+const touchRepoRedirect = `-- name: TouchRepoRedirect :exec
+UPDATE repo_redirects SET last_used_at = max(last_used_at, CAST(?1 AS INTEGER)) WHERE name = ?2
+`
+
+type TouchRepoRedirectParams struct {
+	At   int64
+	Name string
+}
+
+// The last use of a redirect, written with the download counters. It never moves back.
+func (q *Queries) TouchRepoRedirect(ctx context.Context, arg TouchRepoRedirectParams) error {
+	_, err := q.db.ExecContext(ctx, touchRepoRedirect, arg.At, arg.Name)
+	return err
+}

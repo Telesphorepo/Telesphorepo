@@ -83,6 +83,12 @@ type repoObject struct {
 	Members []string `json:"members"`
 }
 
+// redirectObject is a/repo/<name> of a redirect: Redirect is the name of its repo. The Worker
+// reads a/repo/<Redirect> next and answers the request as one to that repo.
+type redirectObject struct {
+	Redirect string `json:"redirect"`
+}
+
 // userObject is a/user/<id>. All: a server permission that gives every repository; Read: the
 // repos where the user holds repo.download.
 type userObject struct {

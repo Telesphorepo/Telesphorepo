@@ -12,7 +12,10 @@ import (
 // rejected the credentials; its message never holds them.
 func nexusFail(w http.ResponseWriter, r *http.Request, err error) {
 	var se *SourceError
+	var taken *TakenError
 	switch {
+	case errors.As(err, &taken):
+		httpx.WriteProblem(w, r, httpx.Blank(http.StatusConflict, taken.Error()).With(map[string]any{"repo": taken.Name, "rehearsal": taken.Rehearsal}))
 	case errors.As(err, &se) && se.Unauthorized():
 		httpx.Error(w, r, http.StatusBadRequest, se.Error())
 	case errors.As(err, &se):
@@ -22,7 +25,7 @@ func nexusFail(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, ErrNotFound):
 		httpx.Error(w, r, http.StatusNotFound, "not found")
 	case errors.Is(err, ErrExists), errors.Is(err, ErrRunning), errors.Is(err, ErrNotRunning),
-		errors.Is(err, ErrCutOver), errors.Is(err, ErrMapped):
+		errors.Is(err, ErrCutOver), errors.Is(err, ErrMapped), errors.Is(err, ErrSwitched), errors.Is(err, ErrBusy):
 		httpx.Error(w, r, http.StatusConflict, err.Error())
 	default:
 		route.Fail(w, r, err)
@@ -235,4 +238,48 @@ func (m *mod) cancelNexusSync(w http.ResponseWriter, r *http.Request, c *route.C
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, sy)
+}
+
+// switchOverNexusRepo starts the switch-over of the repository that Nexus repo {repo} copies
+// into: 202 with its final sync (trigger cutover). 409 when a sync runs, the repository switched
+// over already or the source is cut over.
+func (m *mod) switchOverNexusRepo(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	id, ok := route.PathID(w, r, "invalid id")
+	if !ok {
+		return
+	}
+	sy, err := m.svc.SwitchOverRepo(r.Context(), id, r.PathValue("repo"), c.P.UserID)
+	if err != nil {
+		nexusFail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusAccepted, sy)
+}
+
+// rehearseNexusRepo creates the rehearsal repository of the repository that Nexus repo {repo}
+// copies into: 201 {name}. 409 {repo, rehearsal} when the name is taken; rehearsal is true when
+// that repository is its rehearsal already.
+func (m *mod) rehearseNexusRepo(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	id, ok := route.PathID(w, r, "invalid id")
+	if !ok {
+		return
+	}
+	repo, err := m.svc.Rehearse(r.Context(), id, r.PathValue("repo"), c.P.UserID)
+	if err != nil {
+		nexusFail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusCreated, map[string]string{"name": repo.Name})
+}
+
+// emptyRehearsal starts to delete every file of rehearsal repository {name}: 202 {name, files}
+// with the file count when it started; the repository's operation shows the progress. 400 for a
+// repository that rehearses nothing, 409 while it has an operation.
+func (m *mod) emptyRehearsal(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	repo, err := m.svc.Empty(r.Context(), r.PathValue("name"), c.P.UserID)
+	if err != nil {
+		nexusFail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"name": repo.Name, "files": repo.FileCount})
 }

@@ -16,7 +16,16 @@ func purge(w dbq.DBTX) repos.Purge {
 			return q.PurgeNexusSyncRepos(ctx, dbq.PurgeNexusSyncReposParams{RepoID: repoID, Limit: repos.PurgeBatch})
 		},
 		func(ctx context.Context, repoID int64) (int64, error) {
+			return q.PurgeNexusSwitchOvers(ctx, dbq.PurgeNexusSwitchOversParams{RepoID: repoID, Limit: repos.PurgeBatch})
+		},
+		func(ctx context.Context, repoID int64) (int64, error) {
 			return q.PurgeNexusSourceRepos(ctx, dbq.PurgeNexusSourceReposParams{RepoID: repoID, Limit: repos.PurgeBatch})
+		},
+		func(ctx context.Context, repoID int64) (int64, error) {
+			return q.PurgeRepoRehearsals(ctx, repoID)
+		},
+		func(ctx context.Context, repoID int64) (int64, error) {
+			return q.PurgeRepoRehearsalsFor(ctx, dbq.PurgeRepoRehearsalsForParams{RepoID: repoID, Limit: repos.PurgeBatch})
 		},
 	}
 	return func(ctx context.Context, repoID int64) (int64, error) {

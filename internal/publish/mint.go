@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/access"
+	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/perm"
 	"github.com/Telesphorepo/Telesphorepo/internal/publish/dbq"
@@ -112,6 +113,7 @@ func (s *Service) Mint(ctx context.Context, r *http.Request, cred MintCred, repo
 // MintRoute is the mint of the routes POST /api/publish/sessions, /manual and /oidc: the repo
 // comes by name, and a CI token mints once.
 func (s *Service) MintRoute(ctx context.Context, r *http.Request, cred MintCred, repoName string) (*Minted, error) {
+	ctx = s.named(ctx, repoName)
 	return s.mintWith(ctx, r, cred, repoName, func(ctx context.Context) (*repos.Repo, error) { return s.repos.ByName(ctx, repoName) }, false)
 }
 
@@ -119,7 +121,17 @@ func (s *Service) MintRoute(ctx context.Context, r *http.Request, cred MintCred,
 // nonce mints one session per repo, and a later call with the same nonce and repo gets that
 // session and its token again while it is open.
 func (s *Service) Exchange(ctx context.Context, r *http.Request, proof *DeviceProof, repoName string) (*Minted, error) {
+	ctx = s.named(ctx, repoName)
 	return s.mintWith(ctx, r, MintCred{Device: proof}, repoName, func(ctx context.Context) (*repos.Repo, error) { return s.repos.ByName(ctx, repoName) }, true)
+}
+
+// named returns ctx with repoName when it is a redirect of a repo, so the events of the mint
+// record the name that the client used (audit.WithRepoName).
+func (s *Service) named(ctx context.Context, repoName string) context.Context {
+	if repo, err := s.repos.RedirectTarget(ctx, repoName); err == nil {
+		return audit.WithRepoName(ctx, repo.ID, repoName)
+	}
+	return ctx
 }
 
 // ParseDeviceProof reads a device proof "trx.<device id>.<nonce>.<signature>"

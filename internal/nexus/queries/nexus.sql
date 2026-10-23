@@ -45,9 +45,6 @@ DELETE FROM nexus_sources WHERE id = ?;
 SELECT source_id, source_repo, source_format, kind, target_repo_id
 FROM nexus_source_repos WHERE source_id = ? ORDER BY source_repo;
 
--- name: DeleteNexusSourceRepos :exec
-DELETE FROM nexus_source_repos WHERE source_id = ?;
-
 -- name: InsertNexusSourceRepo :exec
 INSERT INTO nexus_source_repos (source_id, source_repo, source_format, kind, target_repo_id) VALUES (?, ?, ?, ?, ?);
 
@@ -62,11 +59,12 @@ INSERT INTO nexus_syncs (source_id, state, trigger, started_by, started_at)
 VALUES (?, 'running', ?, ?, ?)
 RETURNING id;
 
--- Copies the source's mapped hosted repos into the sync's repos.
+-- Copies the source's mapped hosted repos that still copy (no switch-over) into the sync's repos.
 -- name: InsertNexusSyncRepos :execrows
 INSERT INTO nexus_sync_repos (sync_id, source_repo, source_format, target_repo_id)
-SELECT sqlc.arg(sync_id), source_repo, source_format, target_repo_id
-FROM nexus_source_repos WHERE source_id = sqlc.arg(source_id) AND kind = 'hosted';
+SELECT sqlc.arg(sync_id), m.source_repo, m.source_format, m.target_repo_id
+FROM nexus_source_repos m WHERE m.source_id = sqlc.arg(source_id) AND m.kind = 'hosted'
+  AND NOT EXISTS (SELECT 1 FROM nexus_switch_overs o WHERE o.source_id = m.source_id AND o.source_repo = m.source_repo);
 
 -- name: GetNexusSync :one
 SELECT s.id, s.source_id, s.state, s.trigger, s.started_by, s.started_at, s.finished_at, s.error,
@@ -160,6 +158,61 @@ ORDER BY id LIMIT sqlc.arg(limit);
 -- name: PurgeNexusSyncRepos :execrows
 DELETE FROM nexus_sync_repos WHERE (sync_id, source_repo) IN (SELECT x.sync_id, x.source_repo FROM nexus_sync_repos x WHERE x.target_repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
 
+-- name: PurgeNexusSwitchOvers :execrows
+DELETE FROM nexus_switch_overs WHERE (source_id, source_repo) IN (SELECT x.source_id, x.source_repo FROM nexus_source_repos x WHERE x.target_repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
+
 -- name: PurgeNexusSourceRepos :execrows
 DELETE FROM nexus_source_repos WHERE (source_id, source_repo) IN (SELECT x.source_id, x.source_repo FROM nexus_source_repos x WHERE x.target_repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
 
+
+-- The mapping row of one Nexus repo of a source.
+-- name: GetNexusSourceRepo :one
+SELECT source_id, source_repo, source_format, kind, target_repo_id
+FROM nexus_source_repos WHERE source_id = ? AND source_repo = ?;
+
+-- Removes the mapping of one Nexus repo of a source (a save keeps the switched-over ones).
+-- name: DeleteNexusSourceRepo :exec
+DELETE FROM nexus_source_repos WHERE source_id = ? AND source_repo = ?;
+
+-- Copies the source's mapped hosted repos that still copy and go into target into the sync's
+-- repos: the final sync of one repository's switch-over.
+-- name: InsertNexusSyncReposOfTarget :execrows
+INSERT INTO nexus_sync_repos (sync_id, source_repo, source_format, target_repo_id)
+SELECT sqlc.arg(sync_id), m.source_repo, m.source_format, m.target_repo_id
+FROM nexus_source_repos m
+WHERE m.source_id = sqlc.arg(source_id) AND m.kind = 'hosted' AND m.target_repo_id = sqlc.arg(target_repo_id)
+  AND NOT EXISTS (SELECT 1 FROM nexus_switch_overs o WHERE o.source_id = m.source_id AND o.source_repo = m.source_repo);
+
+-- The switch-overs of a source in source repo order (the primary key order).
+-- name: ListNexusSwitchOvers :many
+SELECT source_id, source_repo, sync_id, failed, switched_at
+FROM nexus_switch_overs WHERE source_id = ? ORDER BY source_repo;
+
+-- A repo that switched over again is left as it is.
+-- name: InsertNexusSwitchOver :exec
+INSERT INTO nexus_switch_overs (source_id, source_repo, sync_id, failed, switched_at) VALUES (?, ?, ?, ?, ?)
+ON CONFLICT (source_id, source_repo) DO NOTHING;
+
+-- The mapped hosted repos of a source that still copy from Nexus.
+-- name: CountCopyingNexusRepos :one
+SELECT COUNT(*) FROM nexus_source_repos m
+WHERE m.source_id = ? AND m.kind = 'hosted'
+  AND NOT EXISTS (SELECT 1 FROM nexus_switch_overs o WHERE o.source_id = m.source_id AND o.source_repo = m.source_repo);
+
+-- Every rehearsal repo, once at startup (the module keeps them in memory).
+-- name: ListRepoRehearsals :many
+SELECT repo_id, for_repo_id, created_at FROM repo_rehearsals ORDER BY repo_id;
+
+-- name: InsertRepoRehearsal :exec
+INSERT INTO repo_rehearsals (repo_id, for_repo_id, created_at) VALUES (?, ?, ?);
+
+-- A repo delete empties these rows before its row goes (repos.Service.OnPurge).
+-- name: PurgeRepoRehearsals :execrows
+DELETE FROM repo_rehearsals WHERE repo_id = ?;
+
+-- name: PurgeRepoRehearsalsFor :execrows
+DELETE FROM repo_rehearsals WHERE repo_id IN (SELECT x.repo_id FROM repo_rehearsals x WHERE x.for_repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
+
+-- The rehearsal repos of a repo, through repo_rehearsals_for.
+-- name: ListRehearsalsFor :many
+SELECT repo_id FROM repo_rehearsals WHERE for_repo_id = ? ORDER BY repo_id;

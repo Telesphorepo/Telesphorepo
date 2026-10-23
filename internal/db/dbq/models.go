@@ -156,6 +156,13 @@ type RepoProxy struct {
 	LastErrorAt int64
 }
 
+type RepoRedirect struct {
+	Name       string
+	RepoID     int64
+	CreatedAt  int64
+	LastUsedAt int64
+}
+
 type Session struct {
 	IDHash    []byte
 	UserID    int64

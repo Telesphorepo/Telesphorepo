@@ -10,6 +10,20 @@ import (
 	"database/sql"
 )
 
+const countCopyingNexusRepos = `-- name: CountCopyingNexusRepos :one
+SELECT COUNT(*) FROM nexus_source_repos m
+WHERE m.source_id = ? AND m.kind = 'hosted'
+  AND NOT EXISTS (SELECT 1 FROM nexus_switch_overs o WHERE o.source_id = m.source_id AND o.source_repo = m.source_repo)
+`
+
+// The mapped hosted repos of a source that still copy from Nexus.
+func (q *Queries) CountCopyingNexusRepos(ctx context.Context, sourceID int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countCopyingNexusRepos, sourceID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createNexusSource = `-- name: CreateNexusSource :one
 
 INSERT INTO nexus_sources (name, base_url, credentials, created_by, created_at)
@@ -97,12 +111,18 @@ func (q *Queries) DeleteNexusSource(ctx context.Context, id int64) error {
 	return err
 }
 
-const deleteNexusSourceRepos = `-- name: DeleteNexusSourceRepos :exec
-DELETE FROM nexus_source_repos WHERE source_id = ?
+const deleteNexusSourceRepo = `-- name: DeleteNexusSourceRepo :exec
+DELETE FROM nexus_source_repos WHERE source_id = ? AND source_repo = ?
 `
 
-func (q *Queries) DeleteNexusSourceRepos(ctx context.Context, sourceID int64) error {
-	_, err := q.db.ExecContext(ctx, deleteNexusSourceRepos, sourceID)
+type DeleteNexusSourceRepoParams struct {
+	SourceID   int64
+	SourceRepo string
+}
+
+// Removes the mapping of one Nexus repo of a source (a save keeps the switched-over ones).
+func (q *Queries) DeleteNexusSourceRepo(ctx context.Context, arg DeleteNexusSourceRepoParams) error {
+	_, err := q.db.ExecContext(ctx, deleteNexusSourceRepo, arg.SourceID, arg.SourceRepo)
 	return err
 }
 
@@ -229,6 +249,30 @@ func (q *Queries) GetNexusSourceByTarget(ctx context.Context, targetRepoID int64
 	return i, err
 }
 
+const getNexusSourceRepo = `-- name: GetNexusSourceRepo :one
+SELECT source_id, source_repo, source_format, kind, target_repo_id
+FROM nexus_source_repos WHERE source_id = ? AND source_repo = ?
+`
+
+type GetNexusSourceRepoParams struct {
+	SourceID   int64
+	SourceRepo string
+}
+
+// The mapping row of one Nexus repo of a source.
+func (q *Queries) GetNexusSourceRepo(ctx context.Context, arg GetNexusSourceRepoParams) (NexusSourceRepo, error) {
+	row := q.db.QueryRowContext(ctx, getNexusSourceRepo, arg.SourceID, arg.SourceRepo)
+	var i NexusSourceRepo
+	err := row.Scan(
+		&i.SourceID,
+		&i.SourceRepo,
+		&i.SourceFormat,
+		&i.Kind,
+		&i.TargetRepoID,
+	)
+	return i, err
+}
+
 const getNexusSync = `-- name: GetNexusSync :one
 SELECT s.id, s.source_id, s.state, s.trigger, s.started_by, s.started_at, s.finished_at, s.error,
   CAST(COALESCE(u.username, '') AS TEXT) AS started_by_name
@@ -309,6 +353,31 @@ func (q *Queries) InsertNexusSourceRepo(ctx context.Context, arg InsertNexusSour
 	return err
 }
 
+const insertNexusSwitchOver = `-- name: InsertNexusSwitchOver :exec
+INSERT INTO nexus_switch_overs (source_id, source_repo, sync_id, failed, switched_at) VALUES (?, ?, ?, ?, ?)
+ON CONFLICT (source_id, source_repo) DO NOTHING
+`
+
+type InsertNexusSwitchOverParams struct {
+	SourceID   int64
+	SourceRepo string
+	SyncID     int64
+	Failed     int64
+	SwitchedAt int64
+}
+
+// A repo that switched over again is left as it is.
+func (q *Queries) InsertNexusSwitchOver(ctx context.Context, arg InsertNexusSwitchOverParams) error {
+	_, err := q.db.ExecContext(ctx, insertNexusSwitchOver,
+		arg.SourceID,
+		arg.SourceRepo,
+		arg.SyncID,
+		arg.Failed,
+		arg.SwitchedAt,
+	)
+	return err
+}
+
 const insertNexusSyncFailure = `-- name: InsertNexusSyncFailure :exec
 INSERT INTO nexus_sync_failures (sync_id, source_repo, path, reason) VALUES (?, ?, ?, ?)
 ON CONFLICT (sync_id, source_repo, path) DO UPDATE SET reason = excluded.reason
@@ -357,8 +426,9 @@ func (q *Queries) InsertNexusSyncLog(ctx context.Context, arg InsertNexusSyncLog
 
 const insertNexusSyncRepos = `-- name: InsertNexusSyncRepos :execrows
 INSERT INTO nexus_sync_repos (sync_id, source_repo, source_format, target_repo_id)
-SELECT ?1, source_repo, source_format, target_repo_id
-FROM nexus_source_repos WHERE source_id = ?2 AND kind = 'hosted'
+SELECT ?1, m.source_repo, m.source_format, m.target_repo_id
+FROM nexus_source_repos m WHERE m.source_id = ?2 AND m.kind = 'hosted'
+  AND NOT EXISTS (SELECT 1 FROM nexus_switch_overs o WHERE o.source_id = m.source_id AND o.source_repo = m.source_repo)
 `
 
 type InsertNexusSyncReposParams struct {
@@ -366,13 +436,52 @@ type InsertNexusSyncReposParams struct {
 	SourceID int64
 }
 
-// Copies the source's mapped hosted repos into the sync's repos.
+// Copies the source's mapped hosted repos that still copy (no switch-over) into the sync's repos.
 func (q *Queries) InsertNexusSyncRepos(ctx context.Context, arg InsertNexusSyncReposParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, insertNexusSyncRepos, arg.SyncID, arg.SourceID)
 	if err != nil {
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const insertNexusSyncReposOfTarget = `-- name: InsertNexusSyncReposOfTarget :execrows
+INSERT INTO nexus_sync_repos (sync_id, source_repo, source_format, target_repo_id)
+SELECT ?1, m.source_repo, m.source_format, m.target_repo_id
+FROM nexus_source_repos m
+WHERE m.source_id = ?2 AND m.kind = 'hosted' AND m.target_repo_id = ?3
+  AND NOT EXISTS (SELECT 1 FROM nexus_switch_overs o WHERE o.source_id = m.source_id AND o.source_repo = m.source_repo)
+`
+
+type InsertNexusSyncReposOfTargetParams struct {
+	SyncID       int64
+	SourceID     int64
+	TargetRepoID int64
+}
+
+// Copies the source's mapped hosted repos that still copy and go into target into the sync's
+// repos: the final sync of one repository's switch-over.
+func (q *Queries) InsertNexusSyncReposOfTarget(ctx context.Context, arg InsertNexusSyncReposOfTargetParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, insertNexusSyncReposOfTarget, arg.SyncID, arg.SourceID, arg.TargetRepoID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const insertRepoRehearsal = `-- name: InsertRepoRehearsal :exec
+INSERT INTO repo_rehearsals (repo_id, for_repo_id, created_at) VALUES (?, ?, ?)
+`
+
+type InsertRepoRehearsalParams struct {
+	RepoID    int64
+	ForRepoID int64
+	CreatedAt int64
+}
+
+func (q *Queries) InsertRepoRehearsal(ctx context.Context, arg InsertRepoRehearsalParams) error {
+	_, err := q.db.ExecContext(ctx, insertRepoRehearsal, arg.RepoID, arg.ForRepoID, arg.CreatedAt)
+	return err
 }
 
 const listDueNexusSources = `-- name: ListDueNexusSources :many
@@ -478,6 +587,41 @@ func (q *Queries) ListNexusSources(ctx context.Context, arg ListNexusSourcesPara
 			&i.LastError,
 			&i.CutoverSyncID,
 			&i.CutoverFailed,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listNexusSwitchOvers = `-- name: ListNexusSwitchOvers :many
+SELECT source_id, source_repo, sync_id, failed, switched_at
+FROM nexus_switch_overs WHERE source_id = ? ORDER BY source_repo
+`
+
+// The switch-overs of a source in source repo order (the primary key order).
+func (q *Queries) ListNexusSwitchOvers(ctx context.Context, sourceID int64) ([]NexusSwitchOver, error) {
+	rows, err := q.db.QueryContext(ctx, listNexusSwitchOvers, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []NexusSwitchOver
+	for rows.Next() {
+		var i NexusSwitchOver
+		if err := rows.Scan(
+			&i.SourceID,
+			&i.SourceRepo,
+			&i.SyncID,
+			&i.Failed,
+			&i.SwitchedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -729,6 +873,62 @@ func (q *Queries) ListNexusSyncs(ctx context.Context, arg ListNexusSyncsParams) 
 	return items, nil
 }
 
+const listRehearsalsFor = `-- name: ListRehearsalsFor :many
+SELECT repo_id FROM repo_rehearsals WHERE for_repo_id = ? ORDER BY repo_id
+`
+
+// The rehearsal repos of a repo, through repo_rehearsals_for.
+func (q *Queries) ListRehearsalsFor(ctx context.Context, forRepoID int64) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, listRehearsalsFor, forRepoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var repo_id int64
+		if err := rows.Scan(&repo_id); err != nil {
+			return nil, err
+		}
+		items = append(items, repo_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRepoRehearsals = `-- name: ListRepoRehearsals :many
+SELECT repo_id, for_repo_id, created_at FROM repo_rehearsals ORDER BY repo_id
+`
+
+// Every rehearsal repo, once at startup (the module keeps them in memory).
+func (q *Queries) ListRepoRehearsals(ctx context.Context) ([]RepoRehearsal, error) {
+	rows, err := q.db.QueryContext(ctx, listRepoRehearsals)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RepoRehearsal
+	for rows.Next() {
+		var i RepoRehearsal
+		if err := rows.Scan(&i.RepoID, &i.ForRepoID, &i.CreatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRunningNexusSyncs = `-- name: ListRunningNexusSyncs :many
 SELECT id, source_id, state, trigger, started_by, started_at, finished_at, error
 FROM nexus_syncs WHERE state = 'running' ORDER BY source_id
@@ -807,6 +1007,23 @@ func (q *Queries) PurgeNexusSourceRepos(ctx context.Context, arg PurgeNexusSourc
 	return result.RowsAffected()
 }
 
+const purgeNexusSwitchOvers = `-- name: PurgeNexusSwitchOvers :execrows
+DELETE FROM nexus_switch_overs WHERE (source_id, source_repo) IN (SELECT x.source_id, x.source_repo FROM nexus_source_repos x WHERE x.target_repo_id = ?1 LIMIT ?2)
+`
+
+type PurgeNexusSwitchOversParams struct {
+	RepoID int64
+	Limit  int64
+}
+
+func (q *Queries) PurgeNexusSwitchOvers(ctx context.Context, arg PurgeNexusSwitchOversParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, purgeNexusSwitchOvers, arg.RepoID, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const purgeNexusSyncRepos = `-- name: PurgeNexusSyncRepos :execrows
 DELETE FROM nexus_sync_repos WHERE (sync_id, source_repo) IN (SELECT x.sync_id, x.source_repo FROM nexus_sync_repos x WHERE x.target_repo_id = ?1 LIMIT ?2)
 `
@@ -819,6 +1036,36 @@ type PurgeNexusSyncReposParams struct {
 // A repo delete empties these tables batch by batch before its row goes (repos.Service.OnPurge).
 func (q *Queries) PurgeNexusSyncRepos(ctx context.Context, arg PurgeNexusSyncReposParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, purgeNexusSyncRepos, arg.RepoID, arg.Limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const purgeRepoRehearsals = `-- name: PurgeRepoRehearsals :execrows
+DELETE FROM repo_rehearsals WHERE repo_id = ?
+`
+
+// A repo delete empties these rows before its row goes (repos.Service.OnPurge).
+func (q *Queries) PurgeRepoRehearsals(ctx context.Context, repoID int64) (int64, error) {
+	result, err := q.db.ExecContext(ctx, purgeRepoRehearsals, repoID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const purgeRepoRehearsalsFor = `-- name: PurgeRepoRehearsalsFor :execrows
+DELETE FROM repo_rehearsals WHERE repo_id IN (SELECT x.repo_id FROM repo_rehearsals x WHERE x.for_repo_id = ?1 LIMIT ?2)
+`
+
+type PurgeRepoRehearsalsForParams struct {
+	RepoID int64
+	Limit  int64
+}
+
+func (q *Queries) PurgeRepoRehearsalsFor(ctx context.Context, arg PurgeRepoRehearsalsForParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, purgeRepoRehearsalsFor, arg.RepoID, arg.Limit)
 	if err != nil {
 		return 0, err
 	}

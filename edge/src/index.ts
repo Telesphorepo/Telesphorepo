@@ -18,6 +18,7 @@ import {
   limited,
   loadConfig,
   mayRead,
+  resolveScopes,
   noteSeen,
   parseCaller,
   repoObject,
@@ -244,7 +245,9 @@ async function edge(request: Request, env: Env, ctx: ExecutionContext, override:
   // The HOME binding must be the home bucket of config.json (its bucket.json).
   if (homeBucket !== config.homeBucket) return null;
   if (!repo || repo.format !== target.format.name || repo.guarded) return null;
-  if (!r || !mayRead(r, repo, true)) return null;
+  if (!r) return null;
+  await resolveScopes(r, objects);
+  if (!mayRead(r, repo, true)) return null;
 
   // The speed test picks the bucket only now, after every check of the request.
   let near = nearestBucket;

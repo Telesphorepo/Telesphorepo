@@ -143,19 +143,22 @@ Then check the result:
 
 ## 6. Full switch-over: publishing
 
-Telesphorepo's copies of Nexus (the mirrored repositories) refuse uploads until the person runs the
-switch-over on the server. So you rehearse publishing on a test repository now, and the project
-moves to the real repository after the switch-over.
+Telesphorepo's copies of Nexus (the mirrored repositories) refuse uploads until the person switches
+that repository over on the server. Each repository switches over on its own, so this project's
+repository can switch over while the others keep copying from Nexus. Until then you rehearse
+publishing on its rehearsal repository, and the project moves to the real repository after the
+switch-over.
 
 1. Ask the person early, so they can do it while you work:
 
-   > I need a test repository for a publishing rehearsal. In Telesphorepo, open the
-   > **Repositories** page, click **New repository**, and make a hosted <format> repository named
-   > `<real name>-rehearsal`. Your account needs **Publish** on it; an admin has it. Then, for CI,
-   > open **Settings** › **People and CI** › **CI pipelines** (a server admin can do this) and add
-   > a CI pipeline for this project, or edit the one it has: <values>. Under the repositories it
-   > can publish to, choose `<real name>-rehearsal`, and also `<real name>` for after the
-   > switch-over. Tell me when it is done.
+   > I need a rehearsal repository for publishing. In Telesphorepo, open **Settings** › **Server**
+   > › **Nexus migration**, open the Nexus server, and in the row of `<real name>` open the
+   > actions menu and click **Rehearse publishing**. It makes `<real name>-rehearsal` with the same
+   > format and settings, and everyone who can publish to `<real name>` can publish to it. Then, for
+   > CI, open **Settings** › **People and CI** › **CI pipelines** (a server admin can do this) and
+   > add a CI pipeline for this project, or edit the one it has: <values>. Under the repositories it
+   > can publish to, choose `<real name>-rehearsal` (it comes first), and also `<real name>` for
+   > after the switch-over. Tell me when it is done.
 
    The values of the CI pipeline:
 
@@ -194,7 +197,12 @@ moves to the real repository after the switch-over.
    environment, and closes the session. The build files stay as they are.
 
    If it fails with a 403 or "no permission", the person's account lacks **Publish** on the
-   rehearsal repository. Ask the person to fix it, then run it again.
+   rehearsal repository (Rehearse publishing gives it only to the people who could publish to
+   `<real name>` then). Ask the person to fix it, then run it again.
+
+   To publish the same version again, ask the person to empty the rehearsal: in the same actions
+   menu on the Nexus server's page, **Empty it** deletes every file and keeps its settings, its CI
+   pipelines and who can publish.
 
 6. Check the published package: install or download it from the rehearsal repository in a new
    temporary folder outside the project, with an empty cache, as the ecosystem's section says.
@@ -206,9 +214,10 @@ moves to the real repository after the switch-over.
 8. Leave a short note for the switch-over day, in your report (and in the pull request text, if
    you write one):
 
-   > After the switch-over: set `repo` in `telesphorepo.toml` to `<real name>`, check that the CI
-   > pipeline lists `<real name>`, publish once, then delete the repository
-   > `<real name>-rehearsal`.
+   > Switch over `<real name>` on the Nexus server's page (its actions menu, **Switch over**; the
+   > other repositories keep copying). Then set `repo` in `telesphorepo.toml` to `<real name>`, check
+   > that the CI pipeline lists `<real name>`, publish once, and delete `<real name>-rehearsal`
+   > (the same menu, **Delete it**).
 
 ## CI
 

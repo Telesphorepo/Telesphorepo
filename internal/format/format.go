@@ -73,7 +73,8 @@ type Spec struct {
 	OnRemoved   func(ctx context.Context, tx *sql.Tx, repo *repos.Repo, removed []*assets.Asset, prefixes []repopath.Path) ([]repopath.Path, error)
 	AfterRemove func(ctx context.Context, repo *repos.Repo, removed []*assets.Asset)
 	// OnRepoChange runs in the transaction of every repo update (API and Nexus mapping), after the
-	// rows changed, with the repo before and after.
+	// rows changed, with the repo before and after; a rename (repos.Service.Rename) runs it too,
+	// with the old and the new name.
 	OnRepoChange func(ctx context.Context, tx *sql.Tx, old, new *repos.Repo) error
 
 	// Classify tells the proxy how to cache a path of proxy repo repo, whose remote is remote (the

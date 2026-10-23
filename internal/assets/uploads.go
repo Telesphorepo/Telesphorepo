@@ -131,7 +131,7 @@ func (u *Uploads) forget(id string) {
 // UploadOwner returns the user and the publish session of p in repo: a core bearer token counts with
 // the publish session of its scope of the repo (auth.Principal.For).
 func UploadOwner(p *auth.Principal, repo *repos.Repo) (user, session int64) {
-	p = p.For(repo.Name)
+	p = p.For(repo.ID)
 	if p == nil {
 		return 0, 0
 	}

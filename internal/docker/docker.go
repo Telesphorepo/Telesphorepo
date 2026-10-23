@@ -129,6 +129,7 @@ func Module() module.Module {
 				OnCommitted:   f.onCommitted,
 				AfterCommit:   f.afterCommit,
 				OnRemoved:     f.onRemoved,
+				OnRepoChange:  f.onRepoChange,
 				Classify:      f.classify,
 				ProxyProbe:    proxyProbe,
 				RemoteAuth:    f.remoteAuth,
