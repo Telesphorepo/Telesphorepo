@@ -62,7 +62,9 @@ export default {
 // reaches the origin without running the Worker again. x-real-ip and X-Forwarded-For carry the address that Cloudflare saw, never a value
 // from the client. The hop-by-hop headers stay on the client's hop: an Expect: 100-continue (mvn
 // sends it on every PUT) would make the origin send the subrequest an interim 100 Continue that
-// the subrequest does not expect.
+// the subrequest does not expect. A HEAD skips the zone's cache: the cache shares one entry between
+// GET and HEAD and sends a HEAD on a cold entry to the origin as a GET, whose answer on S3 storage is
+// a redirect to a URL presigned for GET alone, so the client's HEAD of that URL fails with 403.
 async function forward(request: Request): Promise<Response> {
   const headers = new Headers(request.headers);
   for (const h of HOP_BY_HOP) headers.delete(h);
@@ -86,6 +88,7 @@ async function forward(request: Request): Promise<Response> {
       headers,
       body: hasBody ? request.body : null,
       redirect: "manual",
+      cache: request.method === "HEAD" ? "no-store" : undefined,
     });
   } catch (err) {
     console.error("edge: origin fetch failed:", err instanceof Error ? err.message : String(err));
