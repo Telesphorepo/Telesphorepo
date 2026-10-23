@@ -146,5 +146,9 @@ INSERT INTO repo_redirects (name, repo_id, created_at) VALUES (?, ?, ?);
 -- name: DeleteRepoRedirect :execrows
 DELETE FROM repo_redirects WHERE name = ? AND repo_id = ?;
 
+-- A merge gives every redirect of a repo to the repo it merges into, through repo_redirects_repo.
+-- name: MoveRepoRedirects :execrows
+UPDATE repo_redirects SET repo_id = sqlc.arg(to_id) WHERE repo_id = sqlc.arg(from_id);
+
 -- name: RenameRepo :exec
 UPDATE repos SET name = ? WHERE id = ?;

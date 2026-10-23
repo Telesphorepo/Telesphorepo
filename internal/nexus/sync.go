@@ -78,6 +78,11 @@ type Sync struct {
 	ReposDone   int        `json:"repos_done"`
 	CurrentRepo string     `json:"current_repo"`
 	Repos       []SyncRepo `json:"repos,omitempty"`
+	// MergeID is the merge whose final sync this is (trigger cutover without a switch-over of its
+	// own), 0 for none; MergeFrom and MergeInto name its repos at the start of the merge.
+	MergeID   int64  `json:"merge_id"`
+	MergeFrom string `json:"merge_from"`
+	MergeInto string `json:"merge_into"`
 }
 
 // SyncRepo is one mapped hosted repo of a sync with its counters. Checked counts the files
@@ -274,6 +279,9 @@ func (s *Service) SwitchOverRepo(ctx context.Context, sourceID int64, sourceRepo
 	if err != nil {
 		return nil, err
 	}
+	if target.Op != nil && target.Op.Type == OpMerge {
+		return nil, fmt.Errorf("%w: %s", ErrBusy, s.ops.Message(target.Op))
+	}
 	id, err := s.startSync(ctx, sourceID, userID, TriggerCutover, target)
 	if err != nil {
 		return nil, err
@@ -305,6 +313,13 @@ func startLine(trigger, by string, target *repos.Repo) string {
 // startSync starts a sync of the mapped hosted repos of a source that still copy, or, with a
 // target, of those that copy into target (the final sync of one repository's switch-over).
 func (s *Service) startSync(ctx context.Context, sourceID, userID int64, trigger string, target *repos.Repo) (int64, error) {
+	return s.startSyncTx(ctx, sourceID, userID, trigger, target, "", nil)
+}
+
+// startSyncTx is startSync with the first log line line ("": startLine); bind, when set, runs in
+// the transaction that creates the sync, with its id (a merge records the final sync it waits
+// for before the sync can end).
+func (s *Service) startSyncTx(ctx context.Context, sourceID, userID int64, trigger string, target *repos.Repo, line string, bind func(q *dbq.Queries, id int64) error) (int64, error) {
 	s.mu.Lock()
 	started := s.started
 	s.mu.Unlock()
@@ -365,8 +380,16 @@ func (s *Service) startSync(ctx context.Context, sourceID, userID int64, trigger
 		if err != nil {
 			return err
 		}
-		if err := writeLog(ctx, q, id, "", LevelInfo, startLine(trigger, sy.StartedByName, target)); err != nil {
+		if line == "" {
+			line = startLine(trigger, sy.StartedByName, target)
+		}
+		if err := writeLog(ctx, q, id, "", LevelInfo, line); err != nil {
 			return err
+		}
+		if bind != nil {
+			if err := bind(q, id); err != nil {
+				return err
+			}
 		}
 		if target != nil {
 			return nil
@@ -424,6 +447,14 @@ func (s *Service) toSync(ctx context.Context, row dbq.GetNexusSyncRow, withRepos
 		sy.FinishedAt = &t
 	}
 	q := dbq.New(s.db.R)
+	if row.Trigger == TriggerCutover {
+		switch m, err := q.GetNexusMergeBySync(ctx, row.ID); {
+		case err == nil:
+			sy.MergeID, sy.MergeFrom, sy.MergeInto = m.ID, m.SourceName, m.TargetName
+		case !errors.Is(err, sql.ErrNoRows):
+			return nil, err
+		}
+	}
 	rs, err := q.ListNexusSyncRepos(ctx, row.ID)
 	if err != nil {
 		return nil, err
@@ -836,6 +867,9 @@ func (s *Service) runSync(ctx context.Context, st *runState) {
 		fail(fmt.Sprintf("the switch-over stopped: %d of %d repositories failed; nothing switched over, and they keep copying from Nexus", failedRepos, len(rs)))
 	case failedRepos > 0:
 		fail(fmt.Sprintf("%d of %d repositories failed", failedRepos, len(rs)))
+	case sy.Trigger == TriggerCutover && s.mergeWaits(context.WithoutCancel(ctx), id):
+		// The final sync of a merge: the merge copies its files, then switches the repo over.
+		end(SyncDone, "", finishedLine(started, imported, bytes)+" The merge goes on.")
 	case sy.Trigger == TriggerCutover:
 		cut, err := s.switchOver(context.WithoutCancel(ctx), id, sy.SourceID, failedFiles, finishedLine(started, imported, bytes))
 		if err != nil {

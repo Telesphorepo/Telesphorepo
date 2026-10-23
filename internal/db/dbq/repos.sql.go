@@ -787,6 +787,24 @@ func (q *Queries) MaxRebuildMark(ctx context.Context) (int64, error) {
 	return max_mark, err
 }
 
+const moveRepoRedirects = `-- name: MoveRepoRedirects :execrows
+UPDATE repo_redirects SET repo_id = ?1 WHERE repo_id = ?2
+`
+
+type MoveRepoRedirectsParams struct {
+	ToID   int64
+	FromID int64
+}
+
+// A merge gives every redirect of a repo to the repo it merges into, through repo_redirects_repo.
+func (q *Queries) MoveRepoRedirects(ctx context.Context, arg MoveRepoRedirectsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, moveRepoRedirects, arg.ToID, arg.FromID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const nextGroupWithMembers = `-- name: NextGroupWithMembers :one
 
 SELECT group_id FROM repo_group_members WHERE group_id > ? ORDER BY group_id LIMIT 1

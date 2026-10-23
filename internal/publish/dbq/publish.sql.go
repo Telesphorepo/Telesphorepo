@@ -105,6 +105,27 @@ func (q *Queries) CloseUserPublishSessions(ctx context.Context, arg CloseUserPub
 	return result.RowsAffected()
 }
 
+const copyTrustRepos = `-- name: CopyTrustRepos :execrows
+INSERT INTO publish_trust_repos (trust_id, repo_id)
+SELECT tr.trust_id, ?1 FROM publish_trust_repos tr WHERE tr.repo_id = ?2
+ON CONFLICT (trust_id, repo_id) DO NOTHING
+`
+
+type CopyTrustReposParams struct {
+	ToID   int64
+	FromID int64
+}
+
+// A merge adds repo to_id to every policy that lists repo from_id, through
+// publish_trust_repos_repo. A policy that lists both keeps one row.
+func (q *Queries) CopyTrustRepos(ctx context.Context, arg CopyTrustReposParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, copyTrustRepos, arg.ToID, arg.FromID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const createDevice = `-- name: CreateDevice :one
 
 INSERT INTO devices (user_id, name, public_key, created_at, expires_at)

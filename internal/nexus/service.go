@@ -94,6 +94,15 @@ type Service struct {
 
 	rehMu sync.RWMutex
 	reh   map[int64]int64 // rehearsal repo id -> the id of the repo it rehearses (repo_rehearsals)
+	moves map[int64]int64 // moving repo id -> the id of the repo it moves into (repo_moves)
+
+	publish pipelines // the CI pipelines that a merge gives to its target; set before the API serves
+}
+
+// pipelines is the part of the publish module that a merge uses.
+type pipelines interface {
+	PipelinesOf(ctx context.Context, repoID int64) ([]string, error)
+	AddPipelinesOf(ctx context.Context, from, to *repos.Repo) ([]string, error)
 }
 
 type publicCheck struct {
@@ -106,7 +115,7 @@ type publicCheck struct {
 func New(d *db.DB, set *settings.Service, rs *repos.Service, as *assets.Pipeline, os *ops.Service, formats *format.Registry,
 	au *audit.Log, log *slog.Logger, base context.Context, spawn func(name string, fn func(ctx context.Context))) *Service {
 	return &Service{db: d, settings: set, repos: rs, assets: as, ops: os, formats: formats, audit: au, log: log, base: base, spawn: spawn,
-		runs: map[int64]*runState{}, public: map[string]publicCheck{}, reh: map[int64]int64{}}
+		runs: map[int64]*runState{}, public: map[string]publicCheck{}, reh: map[int64]int64{}, moves: map[int64]int64{}}
 }
 
 // Source is a Nexus source as the API returns it. It never holds the credentials.
@@ -178,6 +187,10 @@ type SourceRepo struct {
 	SwitchOver *SwitchOver `json:"switch_over"`
 	// Rehearsals are the names of the rehearsal repos of the target, by creation.
 	Rehearsals []string `json:"rehearsals"`
+	// Moving are the names of the repos that projects move to from the target (Move), by
+	// creation; MergeID is a merge into the target that runs or failed (0 for none).
+	Moving  []string `json:"moving"`
+	MergeID int64    `json:"merge_id"`
 }
 
 // SwitchOver is the switch-over of one mapped hosted repo: its final sync, the files that sync
@@ -588,6 +601,7 @@ func (s *Service) Detail(ctx context.Context, id int64) (*SourceDetail, error) {
 	for i := range d.Repos {
 		r := &d.Repos[i]
 		r.Rehearsals = []string{}
+		r.Moving = []string{}
 		t := targets[r.Name]
 		if t == nil {
 			continue
@@ -596,6 +610,12 @@ func (s *Service) Detail(ctx context.Context, id int64) (*SourceDetail, error) {
 		r.SwitchOver = switched[r.Name]
 		if t.Kind == repos.KindHosted {
 			if r.Rehearsals, err = s.rehearsalsOf(ctx, t.ID); err != nil {
+				return nil, err
+			}
+			if r.Moving, err = s.movingInto(ctx, t.ID); err != nil {
+				return nil, err
+			}
+			if r.MergeID, err = s.activeMerge(ctx, t.ID); err != nil {
 				return nil, err
 			}
 		}

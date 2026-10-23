@@ -207,6 +207,77 @@ func (s *Service) Rename(ctx context.Context, name, to string) (*Repo, error) {
 	return next, nil
 }
 
+// Retire gives the names of repo from to repo into, in one transaction: from takes the name
+// tomb, which no repo or redirect holds, and its own name and each of its redirects become
+// redirects of into, so every request that names from is served by into from then on. The
+// format's OnRepoChange runs for the rename of from, from records one repo.rename event (detail
+// redirect_to names into), and inTx runs last in the same transaction (the caller's rows, e.g.
+// the delete operation of from). It returns from after the change. A merge retires its source
+// before the source's delete.
+func (s *Service) Retire(ctx context.Context, fromID, intoID int64, tomb string, inTx func(tx *sql.Tx) error) (*Repo, error) {
+	if !NameRE.MatchString(tomb) {
+		return nil, invalid("a name has 1 to 64 lower-case letters, digits, '.', '_' or '-', and starts with a letter or a digit")
+	}
+	var cur, next, into *Repo
+	var notice []string
+	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
+		q := dbq.New(tx)
+		var err error
+		if cur, err = s.counted(byID(ctx, q, fromID)); err != nil {
+			return err
+		}
+		if into, err = byID(ctx, q, intoID); err != nil {
+			return err
+		}
+		if cur.ID == into.ID {
+			return invalid("a repository cannot retire into itself")
+		}
+		if _, err := s.normalizeConfig(cur.Format, tomb, cur.Config); err != nil {
+			return err
+		}
+		if err := checkNotRedirect(ctx, q, tomb, 0); err != nil {
+			return err
+		}
+		rds, err := q.ListRepoRedirectsOf(ctx, cur.ID)
+		if err != nil {
+			return err
+		}
+		notice = notice[:0]
+		for _, rd := range rds {
+			notice = append(notice, rd.Name)
+		}
+		if _, err := q.MoveRepoRedirects(ctx, dbq.MoveRepoRedirectsParams{ToID: into.ID, FromID: cur.ID}); err != nil {
+			return err
+		}
+		if err := q.RenameRepo(ctx, dbq.RenameRepoParams{Name: tomb, ID: cur.ID}); isUnique(err) {
+			return ErrExists
+		} else if err != nil {
+			return err
+		}
+		if err := q.InsertRepoRedirect(ctx, dbq.InsertRepoRedirectParams{Name: cur.Name, RepoID: into.ID, CreatedAt: time.Now().Unix()}); err != nil {
+			return err
+		}
+		notice = append(notice, cur.Name)
+		n := *cur
+		n.Name = tomb
+		next = &n
+		if s.onChange != nil {
+			if err := s.onChange(ctx, tx, cur, next); err != nil {
+				return err
+			}
+		}
+		if err := s.record(ctx, tx, audit.RepoRename, next, map[string]any{"renamed_from": cur.Name, "redirect_to": into.Name}); err != nil {
+			return err
+		}
+		return inTx(tx)
+	})
+	if err != nil {
+		return nil, err
+	}
+	s.notify(ctx, Notice{Changed: []*Repo{next}, Redirects: notice})
+	return next, nil
+}
+
 // RemoveRedirect deletes the redirect redirect of the repo of name, with one repo.redirect.remove
 // event: the name is free again, and requests to it answer as for any unknown repo.
 func (s *Service) RemoveRedirect(ctx context.Context, name, redirect string) error {

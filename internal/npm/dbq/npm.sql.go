@@ -202,6 +202,54 @@ func (q *Queries) InsertVersion(ctx context.Context, arg InsertVersionParams) er
 	return err
 }
 
+const listRepoTagsAfter = `-- name: ListRepoTagsAfter :many
+SELECT name, tag, version FROM npm_tags
+WHERE repo_id = ?1 AND (name, tag) > (?2, ?3)
+ORDER BY name, tag LIMIT ?4
+`
+
+type ListRepoTagsAfterParams struct {
+	RepoID int64
+	Name   string
+	Tag    string
+	Limit  int64
+}
+
+type ListRepoTagsAfterRow struct {
+	Name    string
+	Tag     string
+	Version string
+}
+
+// A keyset page of every dist-tag of a repo by package and tag, through the primary key (a merge).
+func (q *Queries) ListRepoTagsAfter(ctx context.Context, arg ListRepoTagsAfterParams) ([]ListRepoTagsAfterRow, error) {
+	rows, err := q.db.QueryContext(ctx, listRepoTagsAfter,
+		arg.RepoID,
+		arg.Name,
+		arg.Tag,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRepoTagsAfterRow
+	for rows.Next() {
+		var i ListRepoTagsAfterRow
+		if err := rows.Scan(&i.Name, &i.Tag, &i.Version); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTags = `-- name: ListTags :many
 SELECT tag, version FROM npm_tags WHERE repo_id = ? AND name = ? ORDER BY tag
 `

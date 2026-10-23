@@ -77,6 +77,7 @@ class Auth {
   allows(access: Access, params: Params = {}): boolean {
     if (access === "any") return true;
     if (!this.user) return false;
+    if (Array.isArray(access)) return access.every((p) => this.can(p));
     switch (access) {
       case "user":
         return true;

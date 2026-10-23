@@ -25,7 +25,7 @@
   import Section from "$lib/components/Section.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
   import SyncLog from "./SyncLog.svelte";
-  import { howText, syncState } from "./words";
+  import { howText, mergeSyncText, syncState } from "./words";
   import XIcon from "@lucide/svelte/icons/x";
 
   let {
@@ -109,7 +109,7 @@
   {#if onClose}<Button variant="ghost" size="icon-sm" aria-label="Close the sync" onclick={onClose}><XIcon /></Button>{/if}
 {/snippet}
 
-<Section title={sync.data ? `${sync.data.trigger === "cutover" ? "Final sync" : "Sync"} of ${formatDateTime(sync.data.started_at)}` : "Sync"} {actions}>
+<Section title={sync.data ? (sync.data.merge_id ? `${mergeSyncText(sync.data)}, ${formatDateTime(sync.data.started_at)}` : `${sync.data.trigger === "cutover" ? "Final sync" : "Sync"} of ${formatDateTime(sync.data.started_at)}`) : "Sync"} {actions}>
 {#if sync.loading && !sync.data}
   <Loading rows={3} />
 {:else if sync.error && !sync.data}

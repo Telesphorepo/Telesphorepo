@@ -39,6 +39,7 @@ type nexusRepoState struct {
 	Target     string             `json:"target"`
 	SwitchOver *nexusSwitchOverOf `json:"switch_over"`
 	Rehearsals []string           `json:"rehearsals"`
+	Moving     []string           `json:"moving"`
 }
 
 // nexusSourceState is the part of GET /api/nexus/sources/{id} that the switch-over test reads.

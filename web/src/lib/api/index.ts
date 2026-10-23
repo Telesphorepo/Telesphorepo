@@ -381,6 +381,14 @@ export const api = {
     /** Creates the rehearsal repository of the repository that Nexus repository `repo` copies into. */
     rehearse: (id: number, repo: string) =>
       request<{ name: string }>("POST", `/api/nexus/sources/${id}/repos/${encodeURIComponent(repo)}/rehearsal`),
+    /** Creates the repository that projects move to from the one that Nexus repository `repo` copies into, and with `group` the group <name>-all of both. */
+    move: (id: number, repo: string, body: { name: string; group: boolean }) =>
+      request<{ name: string; group: string }>("POST", `/api/nexus/sources/${id}/repos/${encodeURIComponent(repo)}/move`, { body }),
+    /** What a merge of `from` into `into` would do (`into` empty: the repository `from` moves into). It reads every file of `from`. */
+    mergePlan: (from: string, into?: string) => request<T.NexusMergePlan>("GET", "/api/nexus/merges/plan", { query: { from, into } }),
+    /** Starts a merge; its operation holds both repositories until it ends. */
+    startMerge: (body: T.NexusMergeInput) => request<T.NexusMerge>("POST", "/api/nexus/merges", { body }),
+    merge: (id: number) => request<T.NexusMerge>("GET", `/api/nexus/merges/${id}`),
     /** Starts to delete every file of a rehearsal repository; its operation shows the progress. */
     emptyRehearsal: (name: string) =>
       request<{ name: string; files: number }>("POST", `/api/nexus/rehearsals/${encodeURIComponent(name)}/empty`),

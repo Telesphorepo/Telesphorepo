@@ -283,3 +283,68 @@ func (m *mod) emptyRehearsal(w http.ResponseWriter, r *http.Request, c *route.Ca
 	}
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"name": repo.Name, "files": repo.FileCount})
 }
+
+// moveNexusRepo creates the repository that projects move to from the repository that Nexus repo
+// {repo} copies into, and with {group: true} the group <name>-all of both: 201 {name, group}. 409
+// {repo} when a name is taken.
+func (m *mod) moveNexusRepo(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	id, ok := route.PathID(w, r, "invalid id")
+	if !ok {
+		return
+	}
+	var in MoveInput
+	if !m.h.API.Decode(w, r, &in) {
+		return
+	}
+	moved, err := m.svc.Move(r.Context(), id, r.PathValue("repo"), in, c.P.UserID)
+	if err != nil {
+		nexusFail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusCreated, moved)
+}
+
+// mergePlan returns the MergePlan of ?from= into ?into= (into empty: the repository that from
+// moves into). It reads every file of from.
+func (m *mod) mergePlan(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	q := r.URL.Query()
+	if q.Get("from") == "" {
+		httpx.Error(w, r, http.StatusBadRequest, "from is required")
+		return
+	}
+	p, err := m.svc.MergePlan(r.Context(), q.Get("from"), q.Get("into"))
+	if err != nil {
+		nexusFail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, p)
+}
+
+// startMerge begins a merge {from, into, keep, choices, otherwise}: 202 with the Merge. 400 for a
+// blocked file or a conflict without a choice, 409 while an operation holds either repository.
+func (m *mod) startMerge(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	var in MergeInput
+	if !m.h.API.Decode(w, r, &in) {
+		return
+	}
+	mg, err := m.svc.StartMerge(r.Context(), in, c.P.UserID)
+	if err != nil {
+		nexusFail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusAccepted, mg)
+}
+
+// getMerge returns merge {id}.
+func (m *mod) getMerge(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	id, ok := route.PathID(w, r, "invalid id")
+	if !ok {
+		return
+	}
+	mg, err := m.svc.Merge(r.Context(), id)
+	if err != nil {
+		nexusFail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, mg)
+}

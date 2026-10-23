@@ -14,7 +14,8 @@ import type { PageProps } from "$lib/router.svelte";
  * the permission on the repository `:name` itself), or a permission ID from GET /api/permissions
  * (a server permission, or a repository permission on at least one repository).
  */
-export type Access = "any" | "user" | "repositories" | "repo" | PermId;
+/** A permission ID needs that permission; a list of them needs every one (a Nexus merge). */
+export type Access = "any" | "user" | "repositories" | "repo" | PermId | PermId[];
 
 /** The sidebar groups, in display order: "account" is the Your account sidebar, the others the Settings sidebar. */
 export type NavGroup = "account" | "repositories" | "people" | "server";

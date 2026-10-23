@@ -51,6 +51,7 @@
   import PauseIcon from "@lucide/svelte/icons/circle-pause";
   import SearchXIcon from "@lucide/svelte/icons/search-x";
   import CompassIcon from "@lucide/svelte/icons/compass";
+  import MergeIcon from "@lucide/svelte/icons/git-merge";
 
   let { name, rest, query }: { name: string; rest: string; query: URLSearchParams } = $props();
 
@@ -97,6 +98,9 @@
   const proxy = $derived(r?.kind === "proxy");
   // A rehearsal repository (the Nexus migration's Rehearse publishing) names the repository it rehearses.
   const rehearses = $derived(typeof r?.fields?.rehearsal_for === "string" ? r.fields.rehearsal_for : "");
+  // A moving repository (Move it project by project) names the repository it merges into.
+  const movesInto = $derived(typeof r?.fields?.moves_into === "string" ? r.fields.moves_into : "");
+  const canMerge = $derived(!!movesInto && auth.can("nexus.manage") && auth.allRepos() && !r?.operation);
   // The caller's permissions on the repository; a setup-only session uses none of them.
   const perms = $derived(r && auth.user && !auth.setupOnly ? (r.permissions ?? []) : []);
   // Settings shows to anyone who can open one of its tabs.
@@ -212,8 +216,16 @@
           Rehearsal for <a class="rounded-sm text-link underline-offset-4 hover:underline" href={href(repoPath(rehearses))}>{rehearses}</a>
         </span>
       {/if}
+      {#if movesInto}
+        <span class="text-meta text-muted-foreground">
+          Moving into <a class="rounded-sm text-link underline-offset-4 hover:underline" href={href(repoPath(movesInto))}>{movesInto}</a>
+        </span>
+      {/if}
     {/snippet}
     {#snippet actions()}
+      {#if canMerge}
+        <Button variant="outline" href={href("/settings/nexus/merge", { from: r.name })}><MergeIcon />Merge into {movesInto}…</Button>
+      {/if}
       {#if canSettings}
         <Button variant="outline" href={href(repoSettingsPath(r.name))}><SettingsIcon />Settings</Button>
       {/if}
@@ -240,10 +252,16 @@
       </Alert.Description>
     </Alert.Root>
     <ConfirmDialog bind:open={resumeOpen} title="Resume the {r.operation.type}?" confirmLabel="Resume" destructive
-      changes={r.operation.type === "delete" ? ["Deletes the files that are left", "Deletes the repository"] : ["Runs the operation again"]}
+      changes={r.operation.type === "delete"
+        ? ["Deletes the files that are left", "Deletes the repository"]
+        : r.operation.type === "merge"
+          ? ["Runs a final sync from Nexus first when the repository still copies from it", "Copies the files that are not copied yet", "Then switches over and leaves the old name as a redirect"]
+          : ["Runs the operation again"]}
       onConfirm={resumeOperation} />
     <ConfirmDialog bind:open={clearOpen} title="Stop the {r.operation.type}?" confirmLabel="Stop the operation"
-      changes={["Ends the operation", "Keeps the repository with the files that are left"]}
+      changes={r.operation.type === "merge"
+        ? ["Ends the merge on both repositories", "Keeps the files copied so far", "The repository that copies from Nexus keeps copying", "The other repository keeps its files and takes uploads again"]
+        : ["Ends the operation", "Keeps the repository with the files that are left"]}
       onConfirm={clearOperation} />
   {/if}
 

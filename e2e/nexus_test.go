@@ -1384,5 +1384,9 @@ func TestNexus(t *testing.T) {
 		t.Run("pypi", func(t *testing.T) { nexusPyPI(t, n, s) })
 		// A switch-over of one repository, rehearsal repositories, and the switch-over of everything.
 		t.Run("switch-over", func(t *testing.T) { nexusSwitchOver(t, n, s) })
+		// A move project by project into a new repository, then its merges.
+		t.Run("gradual-move", func(t *testing.T) { nexusGradualMove(t, n, s) })
+		t.Run("merge-docker", func(t *testing.T) { nexusMergeDocker(t, n, s) })
+		t.Run("merge-npm", func(t *testing.T) { nexusMergeNpm(t, n, s) })
 	})
 }

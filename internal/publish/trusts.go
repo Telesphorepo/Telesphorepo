@@ -374,6 +374,53 @@ func (s *Service) Trusts(ctx context.Context, after string, limit int) ([]*Trust
 	return out, next, nil
 }
 
+// PipelinesOf returns the names of the CI pipelines that publish to repo id, sorted.
+func (s *Service) PipelinesOf(ctx context.Context, repoID int64) ([]string, error) {
+	rows, err := s.rq.ListRepoTrusts(ctx, repoID)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(rows))
+	for _, t := range rows {
+		names = append(names, t.Name)
+	}
+	slices.Sort(names)
+	return names, nil
+}
+
+// AddPipelinesOf adds repo to to every CI pipeline that publishes to repo from, so each of them
+// publishes to both, and records ci.pipeline.update for each pipeline that changed. It returns the
+// names of the pipelines of from. A merge gives the pipelines of its source to its target.
+func (s *Service) AddPipelinesOf(ctx context.Context, from, to *repos.Repo) ([]string, error) {
+	var names []string
+	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
+		q := dbq.New(tx)
+		rows, err := q.ListRepoTrusts(ctx, from.ID)
+		if err != nil {
+			return err
+		}
+		names = names[:0]
+		for _, t := range rows {
+			names = append(names, t.Name)
+		}
+		if len(rows) == 0 {
+			return nil
+		}
+		if _, err := q.CopyTrustRepos(ctx, dbq.CopyTrustReposParams{ToID: to.ID, FromID: from.ID}); err != nil {
+			return err
+		}
+		for _, t := range rows {
+			if err := s.audit.RecordTx(ctx, tx, audit.Event{Action: ActionPipelineUpdate, Target: t.Name,
+				Detail: map[string]any{"id": t.ID, "added_repo": to.Name, "from_repo": from.Name}}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	slices.Sort(names)
+	return names, err
+}
+
 // RepoPipelines returns the trust policies that list repo, each with what its claims allow in
 // the words of its CI provider (the CI pipelines of the access report).
 func (s *Service) RepoPipelines(ctx context.Context, repoID int64) ([]access.Pipeline, error) {

@@ -859,6 +859,10 @@ export type NexusSync = {
   repos_done: number;
   /** The repository that copies now; "" when none. */
   current_repo: string;
+  /** The merge whose final sync this is (trigger cutover), 0 for none; its repos at the start. */
+  merge_id: number;
+  merge_from: string;
+  merge_into: string;
   repos?: NexusSyncRepo[];
 };
 export type NexusSyncRepo = {
@@ -941,6 +945,99 @@ export type NexusSourceRepo = {
   switch_over: NexusSwitchOver | null;
   /** The rehearsal repositories of the repository here. */
   rehearsals: string[];
+  /** The repositories that projects move to from the repository here (Move it project by project). */
+  moving: string[];
+  /** A merge into the repository here that runs or failed; 0 for none. */
+  merge_id: number;
+};
+/**
+ * A path that both repositories hold with other bytes, where the format keeps a file fixed (a
+ * release, a Docker tag), or a label of the format (an npm dist-tag) with other values. `path` is
+ * the key of its choice ("label:<key>" for a label).
+ */
+export type NexusMergeConflict = {
+  kind: "file" | "label";
+  /** A label for people, e.g. "lib: dist-tag beta"; "" for a file. */
+  title: string;
+  value: string;
+  target_value: string;
+  path: string;
+  size: number;
+  sha256: string;
+  updated_at: string;
+  target_size: number;
+  target_sha256: string;
+  target_updated_at: string;
+};
+/** What a merge of `from` into `into` would do, from the files of both now (GET /api/nexus/merges/plan). */
+export type NexusMergePlan = {
+  from: string;
+  into: string;
+  format: string;
+  /** The Nexus server that copies into `into`. */
+  source_id: number;
+  source_name: string;
+  /** `into` still copies from Nexus: the merge runs a final sync first and switches it over after. */
+  copying: boolean;
+  files: number;
+  copy: number;
+  skip: number;
+  rebuild: number;
+  /** Labels of the format (npm dist-tags) that `into` takes from `from`, conflicts aside. */
+  labels: number;
+  /** The first 1000 conflicts by path; `conflict_count` counts them all. */
+  conflicts: NexusMergeConflict[];
+  conflict_count: number;
+  /** Files the format cannot take from another repository: a merge with any does not start. */
+  blocked: { path: string; reason: string }[];
+  blocked_count: number;
+  people: string[];
+  pipelines: string[];
+  groups: string[];
+  from_redirects: string[];
+  into_redirects: string[];
+  /** Why the merge cannot start now; "" when it can. */
+  busy: string;
+  /** A merge into `into` that runs or failed; 0 for none. */
+  merge_id: number;
+};
+export type NexusMergeChoice = "keep" | "take";
+export type NexusMergeInput = {
+  from: string;
+  into: string;
+  keep: "target" | "source";
+  choices: Record<string, NexusMergeChoice>;
+  otherwise: NexusMergeChoice | "";
+};
+/** A merge (GET /api/nexus/merges/{id}). */
+export type NexusMerge = {
+  id: number;
+  /** The names of the two repositories when the merge started. */
+  from: string;
+  into: string;
+  /** The merged repository's name now; "" when it is gone. */
+  name: string;
+  /** The name that answers for the merged repository after the merge. */
+  redirect: string;
+  keep: "target" | "source";
+  format: string;
+  source_id: number;
+  source_name: string;
+  state: "running" | "failed" | "done" | "stopped";
+  step: "sync" | "copy" | "access" | "switch" | "retire" | "rename" | "done";
+  error: string;
+  sync_id: number;
+  files: number;
+  done: number;
+  copied: number;
+  skipped: number;
+  rebuilt: number;
+  kept: number;
+  taken: number;
+  groups: string[];
+  started_by: string;
+  started_at: string;
+  finished_at: string | null;
 };
 /** The switch-over of one repository: its final sync and the files that sync did not copy. */
 export type NexusSwitchOver = { sync_id: number; failed: number; switched_at: string };

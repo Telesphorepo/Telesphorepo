@@ -3,8 +3,9 @@
   sync, Switch over everything, Delete); every Nexus repository in one pick table, in the order a save sets
   them up (repositories and proxies, then groups with their members, then what this server cannot
   copy), each row with its state after a save (a copied repository: copying or switched over, with
-  its rehearsal repositories after its name and its actions at the end: Switch over, Rehearse
-  publishing, and Empty it and Delete for a rehearsal), saved with one button that also starts a sync; the
+  its rehearsal and moving repositories after its name and its actions at the end: Switch over, Rehearse
+  publishing, Move it project by project, Empty it and Delete for a rehearsal, Merge into… for a
+  moving repository), saved with one button that also starts a sync; the
   running or chosen sync with its progress and log; the history of syncs; the connection, saved
   from the SaveBar. The parent keys it by id.
 -->
@@ -50,6 +51,7 @@
   import SaveBar from "$lib/components/SaveBar.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import ShortFormDialog from "$lib/components/ShortFormDialog.svelte";
+  import FormField from "$lib/components/FormField.svelte";
   import SyncDetail from "./SyncDetail.svelte";
   import { howText, kindText, progressLine, sourceStatus, syncState } from "./words";
   import ArrowRightLeftIcon from "@lucide/svelte/icons/arrow-right-left";
@@ -425,6 +427,31 @@
   /** The Nexus repositories that copy into the same repository here: a switch-over takes them together. */
   const sharing = (r: NexusSourceRepo) => all.filter((x) => x.target === r.target && copiesFiles(x) && !x.switch_over).map((x) => x.name);
 
+  // A merge deletes and renames a repository, so it needs All repositories too.
+  const canMerge = $derived(auth.can("nexus.manage") && auth.allRepos());
+
+  // --- Move it project by project: a new repository, and the group <target>-all of both ---
+  let moveOpen = $state(false);
+  let moveOf = $state<NexusSourceRepo | null>(null);
+  let moveName = $state("");
+  let moveGroup = $state(true);
+  function askMove(r: NexusSourceRepo) {
+    moveOf = r;
+    moveName = `${r.target}-new`;
+    moveGroup = true;
+    moveOpen = true;
+  }
+  async function move() {
+    const r = moveOf;
+    if (!r) return;
+    const made = await api.nexus.move(id, r.name, { name: moveName.trim(), group: moveGroup });
+    toast.success(made.group ? `Created ${made.name} and ${made.group}` : `Created ${made.name}`, {
+      description: `Projects publish to ${made.name} one by one${made.group ? `; builds read ${made.group}` : ""}.`,
+      action: { label: "Open", onClick: () => navigate(repoPath(made.name)) },
+    });
+    source.reload();
+  }
+
   type Act = { kind: "switch" | "rehearse"; r: NexusSourceRepo } | { kind: "empty" | "delete"; r: NexusSourceRepo; reh: string };
   let act = $state<Act | null>(null);
   let actOpen = $state(false);
@@ -565,7 +592,7 @@
   const repoColumns = $derived<Column[]>([
     { label: "Nexus repository", grow: true },
     { label: "Kind", hideOnPhone: true },
-    { label: "State", hideOnPhone: true },
+    { label: "State" },
     { label: "Name here" },
     { label: "Who can download", hideOnPhone: true },
     ...(hasChoice ? [{ label: choiceLabel, hideOnPhone: true }] : []),
@@ -615,7 +642,7 @@
       {kindText(r.format, r.type)}
     </span>
   </Cell>
-  <Cell hideOnPhone>
+  <Cell>
     {#if st}
       <span class="flex items-center gap-2 whitespace-nowrap">
         <StatusBadge tone={st.tone} title={st.title}>{st.word}</StatusBadge>
@@ -636,6 +663,12 @@
         {#each r.rehearsals as reh (reh)}
           <a class={cn(link, "min-w-0 truncate text-muted-foreground")} href={href(repoPath(reh))} title={reh}>rehearsal</a>
         {/each}
+        {#each r.moving as mv (mv)}
+          <a class={cn(link, "min-w-0 truncate text-muted-foreground")} href={href(repoPath(mv))} title="Projects move to {mv}">moving</a>
+        {/each}
+        {#if r.merge_id && canMerge}
+          <a class={cn(link, "min-w-0 truncate")} href={href(`/settings/nexus/merges/${r.merge_id}`)}>merge</a>
+        {/if}
       </span>
     {:else if o && isNew(r)}
       {#if editable}
@@ -667,16 +700,31 @@
     </Cell>
   {/if}
   <Cell actions>
-    {#if copiesFiles(r) && !removed.includes(r) && ((mirroring && !r.switch_over) || r.rehearsals.length > 0)}
+    {#if copiesFiles(r) && !removed.includes(r) && ((mirroring && !r.switch_over) || r.rehearsals.length > 0 || r.moving.length > 0)}
       <DropdownMenu.Root>
         <DropdownMenu.Trigger class={buttonVariants({ variant: "ghost", size: "icon-sm" })} aria-label="Actions for {r.target}"><EllipsisIcon /></DropdownMenu.Trigger>
         <DropdownMenu.Content align="end" class="min-w-56">
           {#if mirroring && !r.switch_over}
-            <DropdownMenu.Item disabled={running} onSelect={() => ask({ kind: "switch", r })}>Switch over{running ? " (when the sync ends)" : ""}</DropdownMenu.Item>
+            <DropdownMenu.Item disabled={running || !!r.merge_id} onSelect={() => ask({ kind: "switch", r })}>Switch over{running ? " (when the sync ends)" : ""}</DropdownMenu.Item>
             {#if r.rehearsals.length === 0}
               <DropdownMenu.Item onSelect={() => ask({ kind: "rehearse", r })}>Rehearse publishing</DropdownMenu.Item>
             {/if}
+            {#if r.moving.length === 0}
+              <DropdownMenu.Item onSelect={() => askMove(r)}>Move it project by project</DropdownMenu.Item>
+            {/if}
           {/if}
+          {#each r.moving as mv (mv)}
+            <DropdownMenu.Separator />
+            <DropdownMenu.Label class="text-xs font-normal text-muted-foreground">Projects move to {mv}</DropdownMenu.Label>
+            <DropdownMenu.Item onSelect={() => navigate(repoPath(mv))}>Open it</DropdownMenu.Item>
+            {#if !canMerge}
+              <DropdownMenu.Label class="text-xs font-normal text-muted-foreground">A merge needs All repositories too</DropdownMenu.Label>
+            {:else if r.merge_id}
+              <DropdownMenu.Item onSelect={() => navigate(`/settings/nexus/merges/${r.merge_id}`)}>Open the merge</DropdownMenu.Item>
+            {:else}
+              <DropdownMenu.Item onSelect={() => navigate("/settings/nexus/merge", { query: { from: mv, into: r.target } })}>Merge into {r.target}…</DropdownMenu.Item>
+            {/if}
+          {/each}
           {#each r.rehearsals as reh (reh)}
             <DropdownMenu.Separator />
             <DropdownMenu.Label class="text-xs font-normal text-muted-foreground">Rehearsal: {reh}</DropdownMenu.Label>
@@ -944,6 +992,28 @@
       changes={a.changes}
       onConfirm={a.run}
     />
+  {/if}
+
+  {#if moveOf}
+    {@const t = moveOf.target}
+    {@const name = moveName.trim()}
+    <ShortFormDialog
+      bind:open={moveOpen}
+      title="Move {t} project by project?"
+      description="Projects publish to a new repository one at a time, while {t} keeps copying from Nexus. When the last one has moved, merge the new repository into {t}."
+      submitLabel="Create {name || 'the repository'}"
+      canSubmit={nameRE.test(name) && name !== t}
+      onSubmit={move}
+    >
+      <FormField label="Name of the new repository" for="{fid}-move-name" hint="The people who publish to {t} can publish to it.">
+        <Input id="{fid}-move-name" autocomplete="off" spellcheck={false} bind:value={moveName} />
+      </FormField>
+      <OptionRow id="{fid}-move-group" label="Also create the group {t}-all" description="It reads {name || 'the new repository'} first, then {t}, so builds find packages from both while projects move.">
+        {#snippet control()}
+          <Checkbox id="{fid}-move-group" checked={moveGroup} onCheckedChange={(c) => (moveGroup = c === true)} />
+        {/snippet}
+      </OptionRow>
+    </ShortFormDialog>
   {/if}
 
   {#if membersOf}

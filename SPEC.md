@@ -163,7 +163,7 @@ it needs and leaves the others nil. The kernel gives it these parts:
 | `publish` | `internal/publish` | `audit` | Devices, publish sessions (`trs`), CI trust policies, the CI providers `github-actions` and `jenkins`, `/api/devices/...` and `/api/publish/...`, the subsystem `ci`, the settings group `publishing`, the `publish.session.*`, `device.*`, `setup_code.create` and `ci.pipeline.*` actions, job `publish.cleanup` (every minute), `/install.sh`, `/install.ps1` and `/cli/` (see **Install scripts and CLI downloads**); provides `*publish.Service` and `publish.Minter`; loads the publish sessions and devices of core bearer tokens and gives the access report its CI pipelines |
 | `edge` | `internal/edge` | `storage`, `network`, `publish` | Edge delivery (see **Edge delivery**): the subsystem `edge` with `edge.manage`, the settings group `edge`, `GET /api/edge/status`, `POST /api/edge/check`, `GET` and `POST /api/edge/speedtest`, `GET /api/edge/worker.zip` and `GET /api/edge/wrangler.jsonc`, the root prefix `/.well-known/telesphorepo-edge/` (the server's answer on the reserved path of the check), the pipeline watcher, jobs `edge.outbox`, `edge.backfill`, `edge.reconcile` (every 5 min) and `edge.seen` (every minute), the line of the access report that says where downloads come from |
 | `sso` | `internal/oidc` | `publish` | `/api/auth/oidc/...`, the subsystem `signin`, the settings group `sso` (its `Validate` with the startup guard and the claim map check, `Test` and `Apply`: the discovery check), the `sso.*` actions; tells auth when single sign-on manages permissions |
-| `nexus` | `internal/nexus` | | `/api/nexus/...`, the subsystem `nexus`, the settings group `nexus`, the `nexus.*` actions, the operation type `mirror`, job `nexus.scheduler` (resumes running syncs, then the schedule loop) |
+| `nexus` | `internal/nexus` | `publish` | `/api/nexus/...`, the subsystem `nexus`, the settings group `nexus`, the `nexus.*` actions, the operation types `mirror`, `empty` and `merge`, the repo fields `rehearsal_for` and `moves_into`, job `nexus.scheduler` (resumes running syncs, empties and merges, then the schedule loop); a merge gives the CI pipelines of `publish` to its target |
 | `maven` | `internal/maven` | | Format `maven` (publish category `cli`) with the tools `gradle` and `maven` (their CI steps) |
 | `debian` | `internal/debian` | `signing` | Format `debian` (publish category `cli`) with its schema, `Rebuild` and the tool `telesphorepo` |
 | `raw` | `internal/raw` | | Format `raw` (publish category `cli`) with the tool `telesphorepo` |
@@ -191,6 +191,7 @@ the fresh second factor (`Proof`), and the repos of `SomeRepo` (`Managed`). No h
 | `TokenHeader` | A token of a registered kind is read from this header too (e.g. `X-NuGet-ApiKey`; `Authorization` for a raw token) |
 | `FreshFactor` | The request carries a fresh second factor in `X-Telesphorepo-Proof` |
 | `Perm`, `AnyPerm` | A server permission ID the caller holds, or one of several |
+| `AllPerms` | Server permission IDs the caller holds every one of, on top of `Perm` and `AnyPerm` (`route.UIPerms(ids...)`: a UI session with all of them). `SomeRepo` does not stand in for them. A Nexus merge needs `nexus.manage` and `repositories.all` |
 | `SomeRepo` | A repository permission ID that passes in place of `Perm` when the caller holds it on at least one repo. The handler gets those repos in `Call.Managed` (`All`, or the repo IDs) |
 | `Repo` | `route.RepoRule{Name, Format, Op, Perm, AnyPerm, Ops, Pick}`: the repo the route acts on (default: the path value `{repo}`, else `{name}`), the format it must be of (another format is 404), the operation (`access.Meta`, `Read`, `Write`, `Delete`, `Manage`, `Mint`) and the repository permission it needs (or one of `AnyPerm`; none with `Meta` is any). With `Pick`, the operation and its permission are the entry of `Ops` (`route.RepoOp{Op, Perm}`) at the index `Pick(r)` returns, per request (an index outside `Ops` is 500); the router checks every entry at startup. The docker `DELETE /v2/...` route is the one user: an upload cancel is a `Write`, everything else a `Delete` |
 | `Errors` | The writer of a refusal; nil is `route.Refuse`: a problem document under `/api/` (see **Problem documents**), `{"error": "..."}` on a format route, each with the refusal code of the decision as the member `code` (e.g. `session`, `publish_session`, `network`, `read_only_kind`). A format with its own error JSON sets it |
@@ -231,7 +232,7 @@ The middleware runs in this order and writes the first refusal:
    factor: 403 `second_factor_required` (in dev mode a person without a factor passes); a wrong
    proof: 401 `second factor did not verify`; no proof: 400; a missing or used grant: 401. Failures
    count against the username like failed passwords.
-4. The server permission, or `SomeRepo` on at least one repo: 403 `permission required: <label>`
+4. The server permission, or `SomeRepo` on at least one repo: 403 `permission required: <label>`; then every permission of `AllPerms`: 403 `permission required: <label> and <label>`
    (e.g. `permission required: Manage signing keys, or Edit settings on a repository`).
 5. The repo: an unknown repo, or one of another format, is 404 (401 for anonymous on a private
    repo); then `access.Engine.Decide` (see **Access engine**). A format read (a `RepoRule` with
@@ -550,6 +551,9 @@ Tables of the `nexus` component (`internal/nexus/migrations`):
 | `nexus_sync_log` | PK `id`, idx `(sync_id, id)` | The log of a sync for the admin: `at`, `source_repo` (`''` for a line about the whole sync), `level` `info`/`warn`/`error`, `message` |
 | `nexus_switch_overs` | PK `(source_id, source_repo)` (WITHOUT ROWID), FK to the mapping row (cascade) | A mapped hosted repo that switched over: `sync_id` (its final sync), `failed` (the files that sync failed to import), `switched_at`. A mapped hosted repo without a row still copies |
 | `repo_rehearsals` | PK `repo_id`, idx `repo_rehearsals_for (for_repo_id)` | A rehearsal repo and the repo it rehearses (`for_repo_id`, a target of a Nexus source), `created_at`. Both cascade with their repo |
+| `repo_moves` | PK `repo_id`, idx `repo_moves_into (into_repo_id)` | A moving repo (Move it project by project) and the repo it merges into (`into_repo_id`, a target of a Nexus source), `created_at`. Both cascade with their repo |
+| `nexus_merges` | PK `id`, idx `nexus_merges_target (target_repo_id, id)`, idx `sync_id`, idx `started_by` | One merge of a source repo into a target (see **Nexus sources**, Gradual move): `source_repo_id` (no foreign key: the merge deletes it), `source_name` and `target_name` at the start, `keep` (`target` or `source`), `otherwise` (the choice of a conflict that no choice names), `state` (`running`, `failed`, `done`, `stopped`), `step`, `sync_id` (its final sync), `cursor` (the last source path copied), the counters `files`, `done`, `copied`, `skipped`, `rebuilt`, `kept`, `taken`, `error`, `started_by`, `started_at`, `finished_at`. Cascades with the target |
+| `nexus_merge_choices` | PK `(merge_id, path)` (WITHOUT ROWID) | The choice of one listed conflict of a merge: `take` 1 deletes the target's file and takes the source's, 0 keeps the target's |
 
 Tables of the `debian` component (`internal/debian/migrations`):
 
@@ -998,6 +1002,10 @@ transaction.
 | `POST /api/nexus/sources/{id}/repos/{repo}/switch-over` | `nexus.manage` | Switches over the repo that Nexus repo `{repo}` copies into: 202 `Sync` with `trigger: cutover` of the Nexus repos that copy into it. 400 for a proxy or a group, 404 for a repo that is not mapped, 409 while a sync runs, after cut-over, or when it switched over already |
 | `POST /api/nexus/sources/{id}/repos/{repo}/rehearsal` | `nexus.manage` | Creates the rehearsal repo of the repo that Nexus repo `{repo}` copies into: 201 `{name}`. 400 for a proxy or a group, 404 for a repo that is not mapped, 409 `{repo, rehearsal}` when the name is taken (`rehearsal` is true when that repo is its rehearsal already) |
 | `POST /api/nexus/rehearsals/{name}/empty` | `nexus.manage` | Starts the `empty` operation of rehearsal repo `{name}`: 202 `{name, files}` (the file count when it started). 400 for a repo that rehearses nothing, 404, 409 while the repo has an operation |
+| `POST /api/nexus/sources/{id}/repos/{repo}/move` | `nexus.manage` | `{name, group}`: creates the moving repo `name` of the repo that Nexus repo `{repo}` copies into, and with `group` the group `<target>-all`: 201 `{name, group}` (`group` "" for none). 400 for a proxy, a group or a bad name, 409 `{repo, rehearsal: false}` when a name is taken |
+| `GET /api/nexus/merges/plan?from=&into=` | `nexus.manage` and `repositories.all` | The `MergePlan` of a merge of `from` into `into` (`into` empty: the repo that `from` moves into). It reads every file of `from` and writes nothing. 400 when the two cannot merge, 404 |
+| `POST /api/nexus/merges` | `nexus.manage` and `repositories.all` | `{from, into, keep, choices, otherwise}`: starts a merge after the plan of now: 202 `Merge`. 400 for a blocked file or a conflict without a choice, 409 while an operation other than the target's `mirror` holds either repo |
+| `GET /api/nexus/merges/{id}` | `nexus.manage` and `repositories.all` | One `Merge` |
 | `GET /api/nexus/sources/{id}/syncs?after=<sync id>&limit=` | `nexus.manage` | `{items: [Sync without repos], next}`, newest first |
 | `GET /api/nexus/syncs/{id}` | `nexus.manage` | `Sync` with its `repos` |
 | `GET /api/nexus/syncs/{id}/failures?after=&limit=` | `nexus.manage` | `{items: [Failure], next}` in failure order |
@@ -1693,6 +1701,13 @@ of the operation type, in full sentences; repo JSON shows it as `operation`. A m
   source ID and its message is `Uploads and deletes start after the switch-over from Nexus server <name>.` Saving the mapping
   begins it, and unmapping or the switch-over of the repo ends it. It cannot be resumed or cleared through the repo
   routes.
+- **`merge`** (nexus). `running` on both repos of a merge while it runs (see **Nexus sources**,
+  Gradual move); its reference is the merge id, and `done` and `total` count the files of the
+  copy. The target's message is `<source> is being merged into this repository. Uploads start again
+  when the merge is done.`, the source's `This repository is being merged into <target>. Its name
+  answers for <target> when the merge is done.` A failure sets both `failed`; Resume (on either
+  repo) continues the merge, Stop and keep the files stops it. A server stop leaves them `running`,
+  and the nexus job continues the merge at startup.
 - **`empty`** (nexus). `running` while the files of a rehearsal repo are deleted (see **Nexus
   sources**, Rehearsal repositories); `done` and `total` count them. The repo stays. A server
   stop leaves it `running`, and the nexus job continues it at startup. Resume and Stop and keep
@@ -1710,6 +1725,10 @@ follow one for downloads, but uploads, `npm publish`, `docker push` and apt do n
   and the new name (docker gives every image its new `full_name`, so the catalog lists it under
   the new name), with one `repo.rename` event, in one transaction. So the bad first name of a
   repository can stay as a redirect while everyone moves to the better one.
+- **Merge.** `repos.Service.Retire` gives a repo's names to another repo: it renames the repo to a
+  name nobody uses, its name and its redirects become redirects of the other repo, the format's
+  `OnRepoChange` and one `repo.rename` event (`detail.redirect_to`) run, and the caller's rows go in
+  the same transaction. A Nexus merge retires its source this way before the source's delete.
 - **One resolution.** `repos.Service.ByName` reads `repos` by its UNIQUE name first, then
   `repo_redirects` by its key, then the repo by id. Every request that names a repo goes through
   it: the repo step of every route policy (format routes, `/api/repos/{name}/...`), the mint routes
@@ -2341,8 +2360,19 @@ SourceRepo   = {name, format, type, supported, reason, offline, public, target_f
                 members, members_known, target_members,      (a group)
                 questions: [Question], facts: {...},         (from the plan of the target format)
                 switch_over: SwitchOver|null,                (a mapped hosted repo; null while it copies)
-                rehearsals: [repo name]}                     (the rehearsal repos of the target)
+                rehearsals: [repo name],                     (the rehearsal repos of the target)
+                moving: [repo name], merge_id}               (its moving repos; a merge into it that runs or failed, 0: none)
 SwitchOver   = {sync_id, failed, switched_at}
+MergePlan    = {from, into, format, source_id, source_name, copying, files, copy, skip, rebuild, labels,
+                conflicts: [MergeConflict] (the first 1000 by path), conflict_count,
+                blocked: [{path, reason}] (the first 100), blocked_count,
+                people, pipelines, groups, from_redirects, into_redirects, busy, merge_id}
+MergeConflict = {kind: "file"|"label", title, value, target_value,    (a label: an npm dist-tag)
+                path (the key of its choice: a file's path, or "label:<key>"),
+                size, sha256, updated_at, target_size, target_sha256, target_updated_at}
+Merge        = {id, from, into, name (the merged repo now; "" when gone), redirect, keep, format,
+                source_id, source_name, state, step, error, sync_id, files, done, copied, skipped,
+                rebuilt, kept, taken, groups, started_by, started_at, finished_at|null}
 Question     = {key, label, help?, type: "choice"|"secret", options?: [{value, label}], required, default?}
 Mapping      = {source_repo, target, create, anonymous_read,
                 answers?: {key: value},                             (answers to the questions; a new target)
@@ -2351,7 +2381,8 @@ Mapping      = {source_repo, target, create, anonymous_read,
 Sync         = {id, source_id, state: "running"|"done"|"failed"|"cancelled",
                 trigger: "save"|"manual"|"schedule"|"cutover", started_by (user name, "" for the scheduler),
                 started_at, finished_at|null, error, checked, imported, skipped, ignored, failed, bytes,
-                repo_count, repos_done, current_repo, repos?: [SyncRepo]}
+                repo_count, repos_done, current_repo, repos?: [SyncRepo],
+                merge_id, merge_from, merge_into}   (the merge whose final sync it is: 0 and "" for none)
 SyncRepo     = {source_repo, source_format, target, state: "pending"|"running"|"done"|"failed"|"cancelled",
                 error, checked, imported, skipped, ignored, failed, bytes, active_at|null, previous_checked}
 Failure      = {source_repo, path, reason}
@@ -2559,6 +2590,89 @@ is unreachable.
   the format's hooks included) as a task of the module, without the row delete: the settings,
   the CI pipelines and the grants stay. **Delete** is the repository delete (`POST
   /api/repos/delete`). The rehearsal's row goes with either repo (purge).
+- **Gradual move.** For a repo that many projects publish to: the projects move one at a time to a
+  new repo while builds read both, and the new repo then merges into the Nexus copy.
+  - **Move it project by project** (`POST .../repos/{repo}/move`) creates the moving repo through
+    `repos.Service.Create`: a hosted repo of the target's format with its config, field values and
+    visibility, the description "Projects publish here while they move from <target>, one at a time.
+    Merge it into <target> when the last one has moved.", and the repo field `moves_into` (the
+    target's name; `repo_moves` holds the ids, the module keeps them in memory; only this route
+    sets it). Each person with `repo.publish` on the target gets `repo.download` and `repo.publish`
+    on it. With `group`, the group `<target>-all` reads the new repo first, then the target, with
+    the target's visibility; each person with a grant on the target gets `repo.download` on it.
+    Both names are checked before anything is created.
+  - **Plan.** `GET /api/nexus/merges/plan` walks every file of the source by path (keyset pages of
+    `assets`) and looks up the target's file at the same path (point lookups); it writes nothing.
+    A merge takes two hosted repos of one format; the target is a target of a Nexus source
+    (copying or switched over), the source is not. Each file of the source is **copy** (the target
+    has none, or the format's `Admit` takes the replace, e.g. a SNAPSHOT file), **skip** (the same
+    SHA-256), **conflict** (other bytes that `Admit` refuses with 409 or 403, e.g. a Maven release;
+    for a format whose `Importer` has `Store`, any other bytes), **rebuild** (a metadata or index
+    file: a format with `Importer.Store` builds its own indexes; for another format a file that its
+    group `Merge` matches is merged with the target's and its checksum files are written from the
+    result, and another metadata file is decided as an artifact), or **blocked** (with
+    `Importer.Store`, a path that `Target` does not map to itself; or another refusal of `Admit`).
+    A format's `format.Spec.Carry` changes this: with `Prepare`, its files go by their digests
+    even when its importer has `Store`, `Unit` keeps the files of one unit in one commit and
+    `Prepare` sets their `Meta`, `Pinned` makes a path that both hold with other bytes a conflict
+    although `Admit` replaces it, and `Labels`/`SetLabel` carry named values that are not files.
+    docker: each image commits as one unit (its links, manifests and tags, each marked an object of
+    that commit, so a manifest finds its blobs and child manifests and a tag its manifest), by
+    digest, so no bytes are copied; a tag that both hold with other digests is a conflict. npm: the
+    tarballs go through the import, and each dist-tag of the source is a label `<name> <tag>`:
+    for a package that the target does not have, or a tag that it lacks, the source's version
+    wins; a tag of a package in both with another version is a conflict (`label:<name> <tag>`).
+    Before the first file goes in, the merge saves which labels the target takes (as choices of
+    take), because the copy changes the target; after the copy (step `access`) it sets them
+    (`SetLabel`, through the format's package change, so the packument follows).
+    A merge with a blocked file does not start. The plan also lists the people with a grant on the
+    source, its CI pipelines, the groups that read it, the redirects of both, why it cannot start
+    now (`busy`: an operation other than the target's `mirror`) and a merge into the target that
+    runs or failed.
+  - **Start** (`POST /api/nexus/merges`) takes the plan of now again: every listed conflict needs a
+    choice in `choices` (`keep` the target's file; `take`: delete it there and take the source's),
+    or `otherwise` decides each conflict that `choices` does not name. One transaction stores the
+    merge (`nexus_merges`, `nexus_merge_choices`), ends the target's `mirror` operation and begins
+    the `merge` operation on both repos, so publishes to both answer 409 until it ends.
+  - **Steps.** Each step is saved before the next one starts, so a restart continues at the step
+    it was at:
+    1. `sync`: a final sync of the target (`trigger: cutover`, the Nexus repos that copy into it),
+       after a running sync of the source ends. The transaction that creates the sync saves its id
+       in the merge, and the runner ends that sync `done` without the switch-over ("... The merge
+       goes on."). Its first log line is "Final sync of the merge of <source> into <target>.", and every
+       sync of the API names the merge it belongs to (`merge_id`, `merge_from`, `merge_into`, through
+       `nexus_merges_sync`), so the Nexus page shows it as "Final sync of the merge into <target>",
+       never as a switch-over. A target that no longer copies skips the step.
+    2. `copy`: the files of the source after `cursor`, in path order: 100 files per `CommitAll` by
+       their digest (`Body.Blob`, source `import`, the source's dates, uploader and CI build), so no
+       bytes are copied; a format with `Importer.Store` takes each file through `Importer.Run` (it
+       reads the blob); a merged metadata file and its checksums are written one by one; a conflict
+       as its choice says (take: a `Remove` of the target's file first). The cursor and the counters
+       are saved after each commit and at least every second. While a merge is past its final sync,
+       the syncs of the source skip its target. A conflict that the plan did not list and that no
+       choice decides fails the merge.
+    3. `access`: each person's grants on the source are added to their grants on the target
+       (`auth.Service.SetPermissions`), each CI pipeline of the source also publishes to the target
+       (`publish.Service.AddPipelinesOf`, one `ci.pipeline.update` each), and each group that reads
+       the source but not the target reads the target in its place.
+    4. `switch`: one transaction gives each Nexus repo that copies into the target its switch-over
+       (the final sync and its failed file count) and cuts the source over when no mapped hosted
+       repo copies any more, as a switch-over does; its line goes to the final sync's log.
+    5. `retire`: `repos.Service.Retire` renames the source to `<name>.merged-<id>`, makes its name
+       and its redirects redirects of the target, and in the same transaction ends the source's
+       `merge` operation and begins its `delete` operation (owner `core`).
+    6. `rename` (keep `source`): `repos.Service.Rename` gives the target the source's name; the
+       target's old name becomes the redirect.
+    7. `done`: the target's operation ends and the merge is `done`; the run that retired the source
+       then deletes it as the repo delete does (after a restart, `core.ops` does). The group
+       `<target>-all` loses the source with its delete and keeps reading the target.
+  - **Failure.** A failed step sets the merge and both operations `failed` with the error. Before
+    the switch-over the target keeps copying from Nexus (its syncs include it again) and the source
+    keeps its files. **Resume** (`POST /api/repos/{name}/operation/resume` on either repo) runs the
+    merge again from its step; a merge that failed in `sync` or `copy` while the target still copies
+    runs a new final sync first, then copies the files after its cursor. **Stop**
+    (`DELETE /api/repos/{name}/operation`) ends both operations, gives a target that still copies
+    its `mirror` operation back and sets the merge `stopped`; the files copied so far stay.
 - **Delete.** `DELETE .../sources/{id}` removes the source, its mapping, syncs, failures and
   log. The repos and their files stay.
 - **UI.** The admin-only **Nexus** pages (`/#/settings/nexus`, `/#/settings/nexus/{id}`). The
@@ -2585,6 +2699,17 @@ is unreachable.
   long it took, the new files and their size; the failed count as a badge when there are any; the
   state at the end) and the connection with the save bar. While a repo has the `mirror`
   operation, its page shows the operation's message under the header to the people who could upload or delete.
+  The row actions also hold **Move it project by project** (a short form: the name, `<target>-new`
+  by default, and the group `<target>-all`), and per moving repo Open it and Merge into <target>…;
+  the moving repos show as a "moving" link after the target's name, a merge as a "merge" link. The
+  State column shows on a phone too, in the row's meta line. The **merge plan**
+  (`/#/settings/nexus/merge?from=&into=`): the counts of the files, the files the format cannot
+  take, the conflicts as a list with Keep or Take per row and Keep all, Take all; which name stays
+  (each choice says who changes what), what else changes, and Start the merge behind a confirm.
+  The **merge** (`/#/settings/nexus/merges/{id}`): its steps with the copy's progress, refreshed
+  every 2 s while it runs; a failed one with Resume and Stop; a done one says what changed and
+  gives the setup line of the merged repo (the Set up a project card). A moving repo's header says
+  "Moving into <target>" (a link) and, for a holder of `nexus.manage`, has Merge into <target>….
   A rehearsal repo's header says what it rehearses ("Rehearsal for maven-releases", a link). A new
   CI pipeline that starts from a repo that still copies from Nexus (`?repo=`) has its rehearsal
   repo chosen in place of it, and the pipeline's repository list shows each rehearsal repo first,
@@ -3625,7 +3750,7 @@ module (`audit.System`), the `telesphorepo-server user` commands as `cli` (`audi
 | publish | `people` | `device.approve`, `device.revoke` (by a person in the UI, or by the device itself with `detail.by` `device`) |
 | publish | `ci` | `ci.pipeline.create`, `ci.pipeline.update`, `ci.pipeline.delete` |
 | sso | `signin` | `sso.signin`, `sso.signin.failed` (`detail.reason`) |
-| nexus | `nexus` | `nexus.source.create`, `nexus.source.update`, `nexus.source.delete`, `nexus.mapping.save`, `nexus.sync.start` (a manual sync, or the sync after a mapping save), `nexus.sync.cancel`, `nexus.cutover` (switch over everything), `nexus.repo.switchover` (`detail.source_repo`), `nexus.rehearsal.create` (`detail.for`, `detail.people`), `nexus.rehearsal.empty` (`detail.count`) |
+| nexus | `nexus` | `nexus.source.create`, `nexus.source.update`, `nexus.source.delete`, `nexus.mapping.save`, `nexus.sync.start` (a manual sync, or the sync after a mapping save), `nexus.sync.cancel`, `nexus.cutover` (switch over everything), `nexus.repo.switchover` (`detail.source_repo`), `nexus.rehearsal.create` (`detail.for`, `detail.people`), `nexus.rehearsal.empty` (`detail.count`), `nexus.move.create` (`detail.into`, `detail.group`, `detail.people`), `nexus.merge.start`, `nexus.merge.done` (the counters), `nexus.merge.fail` (`detail.step`, `detail.error`), `nexus.merge.resume`, `nexus.merge.stop` (each with `detail.merge_id`) |
 
 - Client IP addresses appear only in this table and its API. The only other API with an address
   is `GET /api/network/proxy-candidates` (`network.manage`), which lists the addresses of untrusted
@@ -4551,7 +4676,20 @@ a maven2 group of the two hosted repos and the proxy. On each storage backend th
   publisher of the repo publishes to its rehearsal, empties it, publishes again; the rehearsal
   is deleted at the end), switches over the first alone (uploads work there, the second still
   refuses publish sessions, a new Nexus file reaches only the second, a save cannot move or drop
-  the switched-over repo), then switches over everything, which cuts the source over.
+  the switched-over repo), then switches over everything, which cuts the source over;
+- in the subtest `gradual-move`, moves a raw repo project by project (the moving repo and the group
+  `<target>-all`; a file published to the moving repo reads through the group), merges it with a
+  skipped file and a conflict taken from the moving repo, keeping the target's name (the old name
+  redirects, a publish through it lands in the target, the group reads the target); then moves a
+  second raw repo, whose merge fails while its Nexus repo is offline (the final sync fails),
+  resumes once the repo is online again and keeps the moving repo's name (the target's old name
+  redirects);
+- in the subtests `merge-docker` and `merge-npm`, merges a moving docker repo (skopeo pushes v1, a
+  tag that the copy holds with another digest, and v2; the plan lists the tag as the one conflict,
+  taken; crane pulls both tags through both names and the copy's old image by digest) and a moving
+  npm repo (`npm publish --tag beta`; the plan lists `latest` as a conflict, kept; after the merge
+  the packument through both names has `beta` and the copy's `latest`); each merge's final sync
+  names the merge.
 
 `TestScale` (tag `scale`, `go tool task test scale`) seeds 100k and then 1M assets with `seed N`
 on a named volume. It starts a server on the volume and measures the p95 latency over 400 runs of

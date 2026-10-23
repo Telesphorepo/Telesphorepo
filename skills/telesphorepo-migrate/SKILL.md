@@ -219,6 +219,35 @@ switch-over.
    > that the CI pipeline lists `<real name>`, publish once, and delete `<real name>-rehearsal`
    > (the same menu, **Delete it**).
 
+### A repository that many projects publish to: the gradual move
+
+When other projects still publish `<real name>` to Nexus, it cannot switch over for this project
+alone. Then the projects move one at a time to a new repository, and the new repository merges
+into `<real name>` when the last one has moved. Ask the person whether the moving repository
+exists already (its page says "Moving into `<real name>`"). If not:
+
+> In Telesphorepo, open **Settings** › **Server** › **Nexus migration**, open the Nexus server, and
+> in the row of `<real name>` open the actions menu and click **Move it project by project**. Keep
+> the name `<real name>-new` (or choose another) and the group `<real name>-all`. Everyone who can
+> publish to `<real name>` can publish to the new repository. Add `<real name>-new` to the CI
+> pipeline of this project. Tell me the name when it is done.
+
+Then:
+
+1. Point the downloads at the group `<real name>-all`: it reads the new repository first, then
+   `<real name>`, so the build finds what this project and the projects still on Nexus publish.
+2. Set `repo` in `telesphorepo.toml` to `<real name>-new` and do steps 2 to 7 above against it
+   (no rehearsal repository is needed: the new repository takes publishes at once).
+3. Leave this note for the day the last project has moved:
+
+   > Merge `<real name>-new` into `<real name>`: on the page of `<real name>-new`, **Merge into
+   > `<real name>`…** shows the plan (files to copy, files skipped, conflicts to choose, which name
+   > stays), then runs a final sync from Nexus, puts the files into `<real name>`, switches it over
+   > and deletes `<real name>-new`. The name that does not stay becomes a redirect, so every
+   > project keeps publishing and every build keeps reading, unchanged. Change `telesphorepo.toml`
+   > and the downloads to the name that stays when you like; the repository's settings show when a
+   > redirect was last used.
+
 ## CI
 
 The CLI uses the identity token of the CI job, so the job stores no secret for publishing. Mirror

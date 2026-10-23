@@ -34,16 +34,20 @@ const resumeEmpties = 100
 // ErrBusy is a repo that has an operation already.
 var ErrBusy = errors.New("the repository is busy")
 
-// TakenError is a rehearsal whose name is taken. Rehearsal is true when that repo is the
-// rehearsal of the same repo already.
+// TakenError is a rehearsal or a moving repo (Move) whose name is taken. Rehearsal is true when
+// that repo is the rehearsal of the same repo already.
 type TakenError struct {
 	Name      string
 	Rehearsal bool
+	Move      bool
 }
 
 func (e *TakenError) Error() string {
-	if e.Rehearsal {
+	switch {
+	case e.Rehearsal:
 		return "The rehearsal repository " + e.Name + " exists already."
+	case e.Move:
+		return "A repository named " + e.Name + " exists already. Choose another name."
 	}
 	return "A repository named " + e.Name + " exists already, and it rehearses nothing. Rename or delete it first."
 }
@@ -73,15 +77,17 @@ func (s *Service) rehearsalFor(id int64) int64 {
 	return s.reh[id]
 }
 
-// forgetRepo drops a deleted repo from memory: as a rehearsal, and as the repo of rehearsals
-// (their rows cascade with it).
+// forgetRepo drops a deleted repo from memory: as a rehearsal or a moving repo, and as the repo
+// of rehearsals or moving repos (their rows cascade with it).
 func (s *Service) forgetRepo(id int64) {
 	s.rehMu.Lock()
 	defer s.rehMu.Unlock()
-	delete(s.reh, id)
-	for r, f := range s.reh {
-		if f == id {
-			delete(s.reh, r)
+	for _, m := range []map[int64]int64{s.reh, s.moves} {
+		delete(m, id)
+		for r, f := range m {
+			if f == id {
+				delete(m, r)
+			}
 		}
 	}
 }

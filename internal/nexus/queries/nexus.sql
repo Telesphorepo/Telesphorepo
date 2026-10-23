@@ -59,12 +59,14 @@ INSERT INTO nexus_syncs (source_id, state, trigger, started_by, started_at)
 VALUES (?, 'running', ?, ?, ?)
 RETURNING id;
 
--- Copies the source's mapped hosted repos that still copy (no switch-over) into the sync's repos.
+-- Copies the source's mapped hosted repos that still copy (no switch-over) into the sync's repos,
+-- except those whose target a running merge copies into after its final sync.
 -- name: InsertNexusSyncRepos :execrows
 INSERT INTO nexus_sync_repos (sync_id, source_repo, source_format, target_repo_id)
 SELECT sqlc.arg(sync_id), m.source_repo, m.source_format, m.target_repo_id
 FROM nexus_source_repos m WHERE m.source_id = sqlc.arg(source_id) AND m.kind = 'hosted'
-  AND NOT EXISTS (SELECT 1 FROM nexus_switch_overs o WHERE o.source_id = m.source_id AND o.source_repo = m.source_repo);
+  AND NOT EXISTS (SELECT 1 FROM nexus_switch_overs o WHERE o.source_id = m.source_id AND o.source_repo = m.source_repo)
+  AND NOT EXISTS (SELECT 1 FROM nexus_merges g WHERE g.target_repo_id = m.target_repo_id AND g.state = 'running' AND g.step <> 'sync');
 
 -- name: GetNexusSync :one
 SELECT s.id, s.source_id, s.state, s.trigger, s.started_by, s.started_at, s.finished_at, s.error,
@@ -216,3 +218,81 @@ DELETE FROM repo_rehearsals WHERE repo_id IN (SELECT x.repo_id FROM repo_rehears
 -- The rehearsal repos of a repo, through repo_rehearsals_for.
 -- name: ListRehearsalsFor :many
 SELECT repo_id FROM repo_rehearsals WHERE for_repo_id = ? ORDER BY repo_id;
+
+-- The mapped repos of every source that copy into a target, each with whether it switched over,
+-- through nexus_source_repos_target.
+-- name: ListNexusTargetRepos :many
+SELECT m.source_id, m.source_repo, m.kind,
+  CAST(EXISTS (SELECT 1 FROM nexus_switch_overs o WHERE o.source_id = m.source_id AND o.source_repo = m.source_repo) AS INTEGER) AS switched
+FROM nexus_source_repos m WHERE m.target_repo_id = ? ORDER BY m.source_id, m.source_repo;
+
+-- Every moving repo, once at startup (the module keeps them in memory).
+-- name: ListRepoMoves :many
+SELECT repo_id, into_repo_id FROM repo_moves ORDER BY repo_id;
+
+-- name: InsertRepoMove :exec
+INSERT INTO repo_moves (repo_id, into_repo_id, created_at) VALUES (?, ?, ?);
+
+-- The moving repos of a repo, through repo_moves_into.
+-- name: ListMovesInto :many
+SELECT repo_id FROM repo_moves WHERE into_repo_id = ? ORDER BY repo_id;
+
+-- A repo delete empties these rows before its row goes (repos.Service.OnPurge).
+-- name: PurgeRepoMoves :execrows
+DELETE FROM repo_moves WHERE repo_id = ?;
+
+-- name: PurgeRepoMovesInto :execrows
+DELETE FROM repo_moves WHERE repo_id IN (SELECT x.repo_id FROM repo_moves x WHERE x.into_repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
+
+-- name: InsertNexusMerge :one
+INSERT INTO nexus_merges (target_repo_id, source_repo_id, source_name, target_name, keep, otherwise, state, step, files, started_by, started_at)
+VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)
+RETURNING id;
+
+-- name: InsertNexusMergeChoice :exec
+INSERT INTO nexus_merge_choices (merge_id, path, take) VALUES (?, ?, ?);
+
+-- A choice that the merge saves itself (a label that the target takes), unless one is saved.
+-- name: InsertNexusMergeChoiceIfNone :exec
+INSERT INTO nexus_merge_choices (merge_id, path, take) VALUES (?, ?, ?) ON CONFLICT (merge_id, path) DO NOTHING;
+
+-- The choice of one conflict of a merge, by the primary key.
+-- name: GetNexusMergeChoice :one
+SELECT take FROM nexus_merge_choices WHERE merge_id = ? AND path = ?;
+
+-- name: GetNexusMerge :one
+SELECT g.id, g.target_repo_id, g.source_repo_id, g.source_name, g.target_name, g.keep, g.otherwise, g.state, g.step,
+  g.sync_id, g.cursor, g.files, g.done, g.copied, g.skipped, g.rebuilt, g.kept, g.taken, g.error, g.started_by,
+  g.started_at, g.finished_at, CAST(COALESCE(u.username, '') AS TEXT) AS started_by_name
+FROM nexus_merges g LEFT JOIN users u ON u.id = g.started_by WHERE g.id = ?;
+
+-- The newest merges of a target, through nexus_merges_target.
+-- name: ListNexusMergesOf :many
+SELECT id, state FROM nexus_merges WHERE target_repo_id = ? ORDER BY id DESC LIMIT ?;
+
+-- The running merge that waits for the end of the final sync sync_id, through nexus_merges_sync.
+-- name: GetNexusMergeOfSync :one
+SELECT id FROM nexus_merges WHERE sync_id = ? AND state = 'running' AND step = 'sync' LIMIT 1;
+
+-- The merge whose final sync is sync_id, in any state, through nexus_merges_sync: a sync shows
+-- as part of its merge.
+-- name: GetNexusMergeBySync :one
+SELECT id, source_name, target_name FROM nexus_merges WHERE sync_id = ? ORDER BY id DESC LIMIT 1;
+
+-- name: SetNexusMergeStep :exec
+UPDATE nexus_merges SET step = ?, sync_id = ? WHERE id = ?;
+
+-- name: SetNexusMergeProgress :exec
+UPDATE nexus_merges SET cursor = ?, done = ?, copied = ?, skipped = ?, rebuilt = ?, kept = ?, taken = ? WHERE id = ?;
+
+-- name: SetNexusMergeState :exec
+UPDATE nexus_merges SET state = ?, error = ?, finished_at = ? WHERE id = ?;
+
+-- A repo delete empties these rows before its row goes (repos.Service.OnPurge), children first.
+-- name: PurgeNexusMergeChoices :execrows
+DELETE FROM nexus_merge_choices WHERE (merge_id, path) IN (
+  SELECT c.merge_id, c.path FROM nexus_merges g JOIN nexus_merge_choices c ON c.merge_id = g.id
+  WHERE g.target_repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
+
+-- name: PurgeNexusMerges :execrows
+DELETE FROM nexus_merges WHERE id IN (SELECT x.id FROM nexus_merges x WHERE x.target_repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));

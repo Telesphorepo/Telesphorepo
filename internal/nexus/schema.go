@@ -19,6 +19,7 @@ func component() db.Component {
 		Queries:    db.Sub(queriesFS, "queries"),
 		Allow: map[string]string{
 			"ListRepoRehearsals": "startup: loads every rehearsal repo once into memory; one row per rehearsal repo",
+			"ListRepoMoves":      "startup: loads every moving repo once into memory; one row per moving repo",
 		},
 	}
 }

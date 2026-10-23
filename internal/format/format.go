@@ -143,6 +143,8 @@ type Spec struct {
 	Upload *UploadSpec
 	// Importer takes files from another repository manager.
 	Importer *Importer
+	// Carry is what a merge of two hosted repos of the format needs (see Carry); nil: none.
+	Carry *Carry
 
 	// UI is what the web UI shows of the format (GET /api/formats).
 	UI UIDescriptor

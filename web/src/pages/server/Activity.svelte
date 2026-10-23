@@ -52,7 +52,7 @@
   // The icon of an area: the sidebar icon over the Settings page that one of its permissions
   // opens; an area of repository permissions takes the one over a repository's settings.
   function iconOf(perms: string[], scope: string): Area["icon"] {
-    const page = pages.find((p) => p.layout === "settings" && (perms.includes(p.access) || (scope === "repo" && p.access === "repo")));
+    const page = pages.find((p) => p.layout === "settings" && ((typeof p.access === "string" && perms.includes(p.access)) || (scope === "repo" && p.access === "repo")));
     return page ? navPlace(page.path)?.item.nav?.icon : undefined;
   }
 
