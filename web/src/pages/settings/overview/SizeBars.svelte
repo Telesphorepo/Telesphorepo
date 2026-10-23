@@ -3,8 +3,7 @@
   against the largest, and the size at its end (from 640px on one line; under it the bar sits under
   the name). With `href` the row is a link. One series, so one color (--chart-bar) and no legend;
   `note` is the row's tooltip (its share of the total and what the size is made of). The bar is
-  8px thick on a track of the muted fill, round at its end and square at the start, where every bar
-  begins.
+  8px thick on a track of the muted fill, round at both ends like its track.
 -->
 <script lang="ts">
   import { formatSize } from "$lib/format";
@@ -28,8 +27,8 @@
             <span class="min-w-0 truncate text-label">{r.name}</span>
           {/if}
         </span>
-        <span aria-hidden="true" class="col-span-2 col-start-1 row-start-2 h-2 overflow-hidden rounded-r-full bg-muted sm:col-span-1 sm:col-start-2 sm:row-start-1">
-          {#if r.size > 0}<span class="block h-full min-w-0.5 rounded-r-full bg-chart-bar" style:width="{(r.size / max) * 100}%"></span>{/if}
+        <span aria-hidden="true" class="col-span-2 col-start-1 row-start-2 h-2 overflow-hidden rounded-full bg-muted sm:col-span-1 sm:col-start-2 sm:row-start-1">
+          {#if r.size > 0}<span class="block h-full min-w-2 rounded-full bg-chart-bar" style:width="{(r.size / max) * 100}%"></span>{/if}
         </span>
         <span class="col-start-2 row-start-1 text-right text-body tabular-nums sm:col-start-3">{formatSize(r.size)}</span>
       </div>

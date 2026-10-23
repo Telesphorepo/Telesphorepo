@@ -2,7 +2,7 @@
   All settings, the administrator's home: about this server. The header names the server, its
   version and its public address (for a holder of the General settings); under it the actions
   people take most as doors (New repository, New account, New CI pipeline; each only for a person
-  who may). Then one row of equal stat tiles: the repositories (GET /api/repos) by kind, their
+  who may). Then one row of equal stat tiles, a figure and its label each: the repositories (GET /api/repos), their
   files and the stored size, and the people, the CI pipelines and the signing keys, each only for a
   person who can open its page, each a link to it. A holder of All repositories counts every
   repository; anyone else their repositories, the ones where they hold more than download, under
@@ -84,22 +84,10 @@
   // Without All repositories: the repositories where the person holds more than download.
   const mine = $derived((repos.data ?? []).filter((r) => allRepos || r.permissions.some((p) => p !== "repo.download")));
 
-  // The kinds, only when there is more than one: "10 hosted" under "10" says nothing new.
-  const kinds = $derived.by(() => {
-    const n = { hosted: 0, proxy: 0, group: 0 };
-    for (const r of mine) if (r.kind in n) n[r.kind as keyof typeof n]++;
-    const parts = [
-      n.hosted ? `${formatCount(n.hosted)} hosted` : "",
-      n.proxy ? count(n.proxy, "proxy", "proxies") : "",
-      n.group ? count(n.group, "group", "groups") : "",
-    ].filter(Boolean);
-    return parts.length > 1 ? parts.join(" · ") : "";
-  });
   // A group stores nothing of its own: its members hold the files it serves.
   const stores = $derived(mine.filter((r) => r.kind !== "group"));
   const files = $derived(stores.reduce((n, r) => n + r.file_count, 0));
   const stored = $derived(stores.reduce((n, r) => n + r.total_size, 0));
-  const cached = $derived(mine.filter((r) => r.kind === "proxy").reduce((n, r) => n + r.total_size, 0));
   const largest = $derived([...stores].filter((r) => r.total_size > 0).sort((a, b) => b.total_size - a.total_size).slice(0, 8));
   const share = (r: Repo) => (stored ? Math.round((r.total_size / stored) * 100) : 0);
   const repoHref = (r: Repo) => href(auth.managesRepo(r.name) ? repoSettingsPath(r.name) : repoPath(r.name));
@@ -108,8 +96,6 @@
   const people = opens("/settings/people") ? new Resource(() => every((p) => api.users.list(p))) : null;
   const pipelines = opens("/settings/ci-pipelines") ? new Resource(() => every((p) => api.publish.trusts.list(p))) : null;
   const keys = opens("/settings/signing-keys") ? new Resource(() => api.signingKeys.list()) : null;
-  const disabledPeople = $derived((people?.data ?? []).filter((u) => u.disabled).length);
-  const offPipelines = $derived((pipelines?.data ?? []).filter((t) => t.disabled).length);
   const others = !!(people || pipelines || keys);
 
   // --- recent activity ---
@@ -161,18 +147,18 @@
       <CompactEmpty icon={DatabaseIcon} text={canNewRepo ? "No repository yet." : "You manage no repository yet."} />
     {:else}
       <div class="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
-        <Stat label="Repositories" detail={kinds || undefined} href={opens("/settings/repositories") ? href("/settings/repositories") : undefined}>
+        <Stat label="Repositories" href={opens("/settings/repositories") ? href("/settings/repositories") : undefined}>
           {@render repoFigure(formatCount(mine.length))}
         </Stat>
         <Stat label="Files">{@render repoFigure(formatCount(files))}</Stat>
-        <Stat label="Stored" detail={cached ? `${formatSize(cached)} cached by proxies` : undefined}>{@render repoFigure(formatSize(stored))}</Stat>
+        <Stat label="Stored">{@render repoFigure(formatSize(stored))}</Stat>
         {#if people}
-          <Stat label="People" href={href("/settings/people")} detail={disabledPeople ? `${formatCount(disabledPeople)} disabled` : undefined}>
+          <Stat label="People" href={href("/settings/people")}>
             {@render figure(people)}
           </Stat>
         {/if}
         {#if pipelines}
-          <Stat label="CI pipelines" href={href("/settings/ci-pipelines")} detail={offPipelines ? `${formatCount(offPipelines)} turned off` : undefined}>
+          <Stat label="CI pipelines" href={href("/settings/ci-pipelines")}>
             {@render figure(pipelines)}
           </Stat>
         {/if}
