@@ -84,16 +84,16 @@
   // Without All repositories: the repositories where the person holds more than download.
   const mine = $derived((repos.data ?? []).filter((r) => allRepos || r.permissions.some((p) => p !== "repo.download")));
 
+  // The kinds, only when there is more than one: "10 hosted" under "10" says nothing new.
   const kinds = $derived.by(() => {
     const n = { hosted: 0, proxy: 0, group: 0 };
     for (const r of mine) if (r.kind in n) n[r.kind as keyof typeof n]++;
-    return [
+    const parts = [
       n.hosted ? `${formatCount(n.hosted)} hosted` : "",
       n.proxy ? count(n.proxy, "proxy", "proxies") : "",
       n.group ? count(n.group, "group", "groups") : "",
-    ]
-      .filter(Boolean)
-      .join(" · ");
+    ].filter(Boolean);
+    return parts.length > 1 ? parts.join(" · ") : "";
   });
   const files = $derived(mine.reduce((n, r) => n + r.file_count, 0));
   const stored = $derived(mine.reduce((n, r) => n + r.total_size, 0));
@@ -111,7 +111,6 @@
   const keys = opens("/settings/signing-keys") ? new Resource(() => api.signingKeys.list()) : null;
   const disabledPeople = $derived((people?.data ?? []).filter((u) => u.disabled).length);
   const offPipelines = $derived((pipelines?.data ?? []).filter((t) => t.disabled).length);
-  const signedRepos = $derived(new Set((keys?.data ?? []).flatMap((k) => k.repos)).size);
   const others = !!(people || pipelines || keys);
 
   // --- recent activity ---
@@ -179,7 +178,7 @@
           </Stat>
         {/if}
         {#if keys}
-          <Stat label="Signing keys" href={href("/settings/signing-keys")} detail={keys.data?.length ? `sign ${count(signedRepos, "repository", "repositories")}` : undefined}>
+          <Stat label="Signing keys" href={href("/settings/signing-keys")}>
             {@render figure(keys)}
           </Stat>
         {/if}
