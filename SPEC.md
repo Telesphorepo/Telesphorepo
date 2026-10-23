@@ -4045,12 +4045,12 @@ page are in `web/src/README.md`.
   no Settings in the top bar.
   - *All settings* (`overview`), the first item, above the groups: about this server. The name of
     the server, its version (`GET /api/changes`) and, for a holder of `settings.general`, its
-    public address; New repository, New account and New CI pipeline for a person who may. Then,
-    from `GET /api/repos`, the number of repositories by kind, the files, the stored size (and
-    what proxies cache) and the last publish; the stored size by format as bars; the five largest
-    repositories. Every repository for a holder of `repositories.all`, else "Your repositories"
-    (more than download). The number of people, CI pipelines and signing keys, each for a person
-    who can open its page and a link to it; for a holder of `activity.read` the downloads of the
+    public address; New repository, New account and New CI pipeline as doors for a person who
+    may. Then one row of stat tiles: from `GET /api/repos` the repositories by kind, the files and
+    the stored size (and what proxies cache), and the number of people, CI pipelines and signing
+    keys, each for a person who can open its page and a link to it. Every repository for a holder
+    of `repositories.all`, else "Your repositories" (more than download). Then the eight largest
+    repositories as size bars with their format's icon; for a holder of `activity.read` the downloads of the
     last 30 days (`GET /api/stats`: the total, the bytes served, a column per UTC day and the five
     most downloaded repositories) and the last five events of Activity. A person who can open no Settings page goes on to Your account.
   - *Your account* (`/#/account`, every signed-in person, from the avatar menu) has its own

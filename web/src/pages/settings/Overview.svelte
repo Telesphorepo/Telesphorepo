@@ -2,12 +2,12 @@
   All settings, the administrator's home: about this server. The header names the server, its
   version and its public address (for a holder of the General settings); under it the actions
   people take most as doors (New repository, New account, New CI pipeline; each only for a person
-  who may). Then
-  what the repositories hold (GET /api/repos): how many by kind, the files, the stored size and the
-  last publish; the size by format as bars, and the five largest repositories. A holder of All
-  repositories sees every repository; anyone else sees their repositories, the ones where they
-  hold more than download, and the page says so. Then the people, the CI pipelines and the
-  signing keys, each only for a person who can open its page, each a link to it; and for a holder
+  who may). Then one row of equal stat tiles: the repositories (GET /api/repos) by kind, their
+  files and the stored size, and the people, the CI pipelines and the signing keys, each only for a
+  person who can open its page, each a link to it. A holder of All repositories counts every
+  repository; anyone else their repositories, the ones where they hold more than download, under
+  the heading "Your repositories". Then where the space goes: the eight largest repositories as
+  bars, each with its format's icon. Then, for a holder
   of Activity the downloads of the last 30 days (GET /api/stats: the total, the bytes served, a
   column per day, the five most downloaded repositories) and the last five events. The sidebar lists the pages: this page does not repeat it.
   A person who opens no Settings page goes on to Your account, in place of this address.
@@ -29,17 +29,14 @@
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
   import StatusBadge from "$lib/components/StatusBadge.svelte";
   import FormatIcon from "$lib/components/FormatIcon.svelte";
-  import RepoKindIcon from "$lib/components/RepoKindIcon.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
   import Loading from "$lib/components/Loading.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
-  import { Separator } from "$lib/components/ui/separator";
   import Stat from "./overview/Stat.svelte";
   import SizeBars from "./overview/SizeBars.svelte";
   import DownloadBars from "./overview/DownloadBars.svelte";
   import DownloadIcon from "@lucide/svelte/icons/download";
   import NewAccountDialog from "../server/people/NewAccountDialog.svelte";
-  import PlusIcon from "@lucide/svelte/icons/plus";
   import DatabaseIcon from "@lucide/svelte/icons/database";
   import HistoryIcon from "@lucide/svelte/icons/history";
   import PackagePlusIcon from "@lucide/svelte/icons/package-plus";
@@ -101,26 +98,11 @@
   const files = $derived(mine.reduce((n, r) => n + r.file_count, 0));
   const stored = $derived(mine.reduce((n, r) => n + r.total_size, 0));
   const cached = $derived(mine.filter((r) => r.kind === "proxy").reduce((n, r) => n + r.total_size, 0));
-  const last = $derived(
-    mine.reduce<Repo | null>(
-      (best, r) => (r.last_published_at && (!best || r.last_published_at > best.last_published_at!) ? r : best),
-      null,
-    ),
-  );
 
   // A group stores nothing of its own: its members hold its files.
   const stores = $derived(mine.filter((r) => r.kind !== "group"));
-  const byFormat = $derived.by(() => {
-    const m = new Map<string, { format: string; size: number; repos: number }>();
-    for (const r of stores) {
-      const row = m.get(r.format) ?? { format: r.format, size: 0, repos: 0 };
-      row.size += r.total_size;
-      row.repos++;
-      m.set(r.format, row);
-    }
-    return [...m.values()].sort((a, b) => b.size - a.size || a.format.localeCompare(b.format));
-  });
-  const largest = $derived([...stores].filter((r) => r.total_size > 0).sort((a, b) => b.total_size - a.total_size).slice(0, 5));
+  const largest = $derived([...stores].filter((r) => r.total_size > 0).sort((a, b) => b.total_size - a.total_size).slice(0, 8));
+  const share = (r: Repo) => (stored ? Math.round((r.total_size / stored) * 100) : 0);
   const repoHref = (r: Repo) => href(auth.managesRepo(r.name) ? repoSettingsPath(r.name) : repoPath(r.name));
 
   // --- people, CI pipelines, signing keys: each only for a person who can open its page ---
@@ -173,33 +155,53 @@
     </DoorRow>
   {/if}
 
-  <!-- The figures: one card for a holder of All repositories; else "Your repositories" heads its own card. -->
-  {#if allRepos}
-    <Section>
-      {@render repoFigures()}
-      {#if others}<Separator class="my-6" />{@render otherFigures()}{/if}
-    </Section>
-  {:else}
-    <Section title="Your repositories">{@render repoFigures()}</Section>
-    {#if others}<Section>{@render otherFigures()}</Section>{/if}
-  {/if}
+  <!-- The figures: one row of equal tiles. Without All repositories the repository figures are the person's own. -->
+  <Section title={allRepos ? undefined : "Your repositories"} plain>
+    {#if repos.error && !repos.data}
+      <ErrorState error={repos.error} onRetry={repos.reload} />
+    {:else if repos.data && mine.length === 0}
+      <CompactEmpty icon={DatabaseIcon} text={canNewRepo ? "No repository yet." : "You manage no repository yet."} />
+    {:else}
+      <div class="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
+        <Stat label="Repositories" detail={kinds || undefined} href={opens("/settings/repositories") ? href("/settings/repositories") : undefined}>
+          {@render repoFigure(formatCount(mine.length))}
+        </Stat>
+        <Stat label="Files">{@render repoFigure(formatCount(files))}</Stat>
+        <Stat label="Stored" detail={cached ? `${formatSize(cached)} cached by proxies` : undefined}>{@render repoFigure(formatSize(stored))}</Stat>
+        {#if people}
+          <Stat label="People" href={href("/settings/people")} detail={disabledPeople ? `${formatCount(disabledPeople)} disabled` : undefined}>
+            {@render figure(people)}
+          </Stat>
+        {/if}
+        {#if pipelines}
+          <Stat label="CI pipelines" href={href("/settings/ci-pipelines")} detail={offPipelines ? `${formatCount(offPipelines)} turned off` : undefined}>
+            {@render figure(pipelines)}
+          </Stat>
+        {/if}
+        {#if keys}
+          <Stat label="Signing keys" href={href("/settings/signing-keys")} detail={keys.data?.length ? `sign ${count(signedRepos, "repository", "repositories")}` : undefined}>
+            {@render figure(keys)}
+          </Stat>
+        {/if}
+      </div>
+    {/if}
+  </Section>
+
   {#if largest.length}
-    <div class="mt-(--section-gap) grid gap-(--section-gap) {byFormat.length > 1 ? 'lg:grid-cols-2' : ''}">
-      {#if byFormat.length > 1}
-        <Section title="Size by format" class="mt-0">
-          <SizeBars rows={byFormat} />
-        </Section>
-      {/if}
-      <Section title="Largest repositories" class="mt-0">
-        <ItemList source={listOf(repos, () => largest)} caption="Largest repositories" key={(r) => r.name} href={repoHref}>
-          {#snippet leading(r)}<FormatIcon format={r.format} class="size-5" />{/snippet}
-          {#snippet title(r)}{r.name}{/snippet}
-          {#snippet badges(r)}<RepoKindIcon kind={r.kind} />{/snippet}
-          {#snippet meta(r)}{count(r.file_count, "file", "files")}{#if r.last_published_at}{" · published "}<RelativeTime at={r.last_published_at} />{/if}{/snippet}
-          {#snippet trailing(r)}<span class="text-body tabular-nums">{formatSize(r.total_size)}</span>{/snippet}
-        </ItemList>
-      </Section>
-    </div>
+    <!-- Where the space goes: one chart, a bar per repository with its format's icon. -->
+    <Section title="Largest repositories">
+      <SizeBars
+        label="Largest repositories"
+        rows={largest.map((r) => ({
+          key: r.name,
+          format: r.format,
+          name: r.name,
+          size: r.total_size,
+          href: repoHref(r),
+          note: `${r.name}: ${formatSize(r.total_size)}, ${share(r)}% of the stored size, ${count(r.file_count, "file", "files")}${r.last_published_at ? `, last published ${formatDateTime(r.last_published_at)}` : ""}`,
+        }))}
+      />
+    </Section>
   {/if}
 
   {#if downloads}
@@ -261,49 +263,9 @@
   {#if canNewAccount}<NewAccountDialog bind:open={newAccount} />{/if}
 {/if}
 
-{#snippet repoFigures()}
-  {#if repos.loading && !repos.data}
-    <Loading rows={2} />
-  {:else if repos.error && !repos.data}
-    <ErrorState error={repos.error} onRetry={repos.reload} />
-  {:else if mine.length === 0}
-    <CompactEmpty icon={DatabaseIcon} text={canNewRepo ? "No repository yet. Create one to publish to." : "You manage no repository yet."}>
-      {#if canNewRepo}<Button variant="outline" href={href("/settings/repositories/new")}><PlusIcon />New repository</Button>{/if}
-    </CompactEmpty>
-  {:else}
-    <div class="grid grid-cols-2 gap-6 lg:grid-cols-4">
-      <Stat label="Repositories" value={formatCount(mine.length)} detail={kinds} href={opens("/settings/repositories") ? href("/settings/repositories") : undefined} />
-      <Stat label="Files" value={formatCount(files)} />
-      <Stat label="Stored" value={formatSize(stored)} detail={cached ? `${formatSize(cached)} cached by proxies` : undefined} />
-      <Stat label="Last publish" detail={last ? `to ${last.name}` : undefined}>
-        {#if last}<span class="truncate" title={formatDateTime(last.last_published_at!)}><RelativeTime at={last.last_published_at} /></span>{:else}Never{/if}
-      </Stat>
-    </div>
-  {/if}
-{/snippet}
-
-{#snippet otherFigures()}
-  <div class="grid grid-cols-2 gap-6 lg:grid-cols-4">
-    {#if people}
-      <Stat label="People" href={href("/settings/people")} detail={disabledPeople ? `${formatCount(disabledPeople)} disabled` : undefined}>
-        {@render figure(people)}
-      </Stat>
-    {/if}
-    {#if pipelines}
-      <Stat label="CI pipelines" href={href("/settings/ci-pipelines")} detail={offPipelines ? `${formatCount(offPipelines)} turned off` : undefined}>
-        {@render figure(pipelines)}
-      </Stat>
-    {/if}
-    {#if keys}
-      <Stat
-        label="Signing keys"
-        href={href("/settings/signing-keys")}
-        detail={keys.data?.length ? `used by ${count(signedRepos, "repository", "repositories")}` : undefined}
-      >
-        {@render figure(keys)}
-      </Stat>
-    {/if}
-  </div>
+<!-- A figure of the repositories: Loading until GET /api/repos answers. -->
+{#snippet repoFigure(value: string)}
+  {#if repos.loading && !repos.data}<Loading inline label="Loading" />{:else}{value}{/if}
 {/snippet}
 
 <!-- A count that loads on its own: Loading, then the value, or the error with Try again. -->
