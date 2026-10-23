@@ -37,6 +37,14 @@ Linux. Use bun, not npm.
 
 - **Migrations are append-only.** Production runs `main`, so never edit, rename or delete a
   migration file that `main` holds: add the next one. `serve` refuses a changed migration.
+- **One migration per branch, and every migration is idempotent.** While a branch is in work it
+  may add small migrations where they fit. Before it merges, they are rolled into one file in
+  `internal/db/migrations` holding every schema change of the branch (a module's tables too).
+  Rolling them up changes migrations a dev database has applied, so delete the dev data folder
+  (`.telesphorepo-dev`) after it. Each statement can run twice: `CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`,
+  `DROP ... IF EXISTS`, `INSERT OR IGNORE`. SQLite has no conditional `ADD COLUMN` and a
+  migration is plain SQL (`internal/db/migrate.go`), so new fields go in a new table keyed by the
+  row they extend, never in an `ALTER TABLE ... ADD COLUMN`.
 - **Tests are e2e only, against real systems.** No unit tests, mocks or fakes: run the real tool
   or service in a container. A test calls `t.Parallel()`, starts its own server, and never
   hardcodes a fact the code owns (versions, defaults, registry lists, limits): read it from the

@@ -90,6 +90,13 @@ type Build struct {
 	CreatedAt  int64
 }
 
+type DownloadStat struct {
+	RepoID    int64
+	Day       int64
+	Downloads int64
+	Bytes     int64
+}
+
 type Rebuild struct {
 	RepoID   int64
 	Grp      string

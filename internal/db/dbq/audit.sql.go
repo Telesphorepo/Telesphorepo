@@ -49,6 +49,18 @@ func (q *Queries) DeleteOldAudit(ctx context.Context, arg DeleteOldAuditParams) 
 	return result.RowsAffected()
 }
 
+const firstAuditAt = `-- name: FirstAuditAt :one
+SELECT id FROM audit_events WHERE at >= ?1 ORDER BY at, id LIMIT 1
+`
+
+// The first event at or after a time, through audit_events_at: the id bound of a time filter.
+func (q *Queries) FirstAuditAt(ctx context.Context, at int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, firstAuditAt, at)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
 const insertAuditEvent = `-- name: InsertAuditEvent :exec
 
 INSERT INTO audit_events (at, actor_user_id, actor, action, repo_id, target, detail, ip)
@@ -83,17 +95,20 @@ func (q *Queries) InsertAuditEvent(ctx context.Context, arg InsertAuditEventPara
 
 const listAudit = `-- name: ListAudit :many
 SELECT id, at, actor_user_id, actor, action, repo_id, target, detail, ip FROM audit_events
-WHERE id < ?1 ORDER BY id DESC LIMIT ?2
+WHERE id < ?1 AND id >= ?2 ORDER BY id DESC LIMIT ?3
 `
 
 type ListAuditParams struct {
 	Before int64
+	Since  int64
 	Limit  int64
 }
 
-// Keyset pages newest first: ids below before. Each filter has its own index.
+// Keyset pages newest first: ids in [since, before). A time range of the Activity filter is an id
+// range (FirstAuditAt), so every filter keeps its keyset order. Each filter has its own index;
+// audit_events_actor (actor_user_id) holds the id as its rowid, so it serves (actor_user_id, id).
 func (q *Queries) ListAudit(ctx context.Context, arg ListAuditParams) ([]AuditEvent, error) {
-	rows, err := q.db.QueryContext(ctx, listAudit, arg.Before, arg.Limit)
+	rows, err := q.db.QueryContext(ctx, listAudit, arg.Before, arg.Since, arg.Limit)
 	if err != nil {
 		return nil, err
 	}
@@ -127,17 +142,234 @@ func (q *Queries) ListAudit(ctx context.Context, arg ListAuditParams) ([]AuditEv
 
 const listAuditByAction = `-- name: ListAuditByAction :many
 SELECT id, at, actor_user_id, actor, action, repo_id, target, detail, ip FROM audit_events
-WHERE action = ?1 AND id < ?2 ORDER BY id DESC LIMIT ?3
+WHERE action = ?1 AND id < ?2 AND id >= ?3 ORDER BY id DESC LIMIT ?4
 `
 
 type ListAuditByActionParams struct {
 	Action string
 	Before int64
+	Since  int64
 	Limit  int64
 }
 
 func (q *Queries) ListAuditByAction(ctx context.Context, arg ListAuditByActionParams) ([]AuditEvent, error) {
-	rows, err := q.db.QueryContext(ctx, listAuditByAction, arg.Action, arg.Before, arg.Limit)
+	rows, err := q.db.QueryContext(ctx, listAuditByAction,
+		arg.Action,
+		arg.Before,
+		arg.Since,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AuditEvent
+	for rows.Next() {
+		var i AuditEvent
+		if err := rows.Scan(
+			&i.ID,
+			&i.At,
+			&i.ActorUserID,
+			&i.Actor,
+			&i.Action,
+			&i.RepoID,
+			&i.Target,
+			&i.Detail,
+			&i.Ip,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAuditByActor = `-- name: ListAuditByActor :many
+SELECT id, at, actor_user_id, actor, action, repo_id, target, detail, ip FROM audit_events
+WHERE actor_user_id = ?1 AND id < ?2 AND id >= ?3 ORDER BY id DESC LIMIT ?4
+`
+
+type ListAuditByActorParams struct {
+	ActorUserID sql.NullInt64
+	Before      int64
+	Since       int64
+	Limit       int64
+}
+
+func (q *Queries) ListAuditByActor(ctx context.Context, arg ListAuditByActorParams) ([]AuditEvent, error) {
+	rows, err := q.db.QueryContext(ctx, listAuditByActor,
+		arg.ActorUserID,
+		arg.Before,
+		arg.Since,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AuditEvent
+	for rows.Next() {
+		var i AuditEvent
+		if err := rows.Scan(
+			&i.ID,
+			&i.At,
+			&i.ActorUserID,
+			&i.Actor,
+			&i.Action,
+			&i.RepoID,
+			&i.Target,
+			&i.Detail,
+			&i.Ip,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAuditByActorAction = `-- name: ListAuditByActorAction :many
+SELECT id, at, actor_user_id, actor, action, repo_id, target, detail, ip FROM audit_events
+WHERE actor_user_id = ?1 AND action = ?2 AND id < ?3 AND id >= ?4
+ORDER BY id DESC LIMIT ?5
+`
+
+type ListAuditByActorActionParams struct {
+	ActorUserID sql.NullInt64
+	Action      string
+	Before      int64
+	Since       int64
+	Limit       int64
+}
+
+func (q *Queries) ListAuditByActorAction(ctx context.Context, arg ListAuditByActorActionParams) ([]AuditEvent, error) {
+	rows, err := q.db.QueryContext(ctx, listAuditByActorAction,
+		arg.ActorUserID,
+		arg.Action,
+		arg.Before,
+		arg.Since,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AuditEvent
+	for rows.Next() {
+		var i AuditEvent
+		if err := rows.Scan(
+			&i.ID,
+			&i.At,
+			&i.ActorUserID,
+			&i.Actor,
+			&i.Action,
+			&i.RepoID,
+			&i.Target,
+			&i.Detail,
+			&i.Ip,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAuditByActorRepo = `-- name: ListAuditByActorRepo :many
+SELECT id, at, actor_user_id, actor, action, repo_id, target, detail, ip FROM audit_events
+WHERE actor_user_id = ?1 AND repo_id = ?2 AND id < ?3 AND id >= ?4
+ORDER BY id DESC LIMIT ?5
+`
+
+type ListAuditByActorRepoParams struct {
+	ActorUserID sql.NullInt64
+	RepoID      sql.NullInt64
+	Before      int64
+	Since       int64
+	Limit       int64
+}
+
+func (q *Queries) ListAuditByActorRepo(ctx context.Context, arg ListAuditByActorRepoParams) ([]AuditEvent, error) {
+	rows, err := q.db.QueryContext(ctx, listAuditByActorRepo,
+		arg.ActorUserID,
+		arg.RepoID,
+		arg.Before,
+		arg.Since,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AuditEvent
+	for rows.Next() {
+		var i AuditEvent
+		if err := rows.Scan(
+			&i.ID,
+			&i.At,
+			&i.ActorUserID,
+			&i.Actor,
+			&i.Action,
+			&i.RepoID,
+			&i.Target,
+			&i.Detail,
+			&i.Ip,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAuditByActorRepoAction = `-- name: ListAuditByActorRepoAction :many
+SELECT id, at, actor_user_id, actor, action, repo_id, target, detail, ip FROM audit_events
+WHERE actor_user_id = ?1 AND repo_id = ?2 AND action = ?3
+  AND id < ?4 AND id >= ?5 ORDER BY id DESC LIMIT ?6
+`
+
+type ListAuditByActorRepoActionParams struct {
+	ActorUserID sql.NullInt64
+	RepoID      sql.NullInt64
+	Action      string
+	Before      int64
+	Since       int64
+	Limit       int64
+}
+
+func (q *Queries) ListAuditByActorRepoAction(ctx context.Context, arg ListAuditByActorRepoActionParams) ([]AuditEvent, error) {
+	rows, err := q.db.QueryContext(ctx, listAuditByActorRepoAction,
+		arg.ActorUserID,
+		arg.RepoID,
+		arg.Action,
+		arg.Before,
+		arg.Since,
+		arg.Limit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -171,17 +403,23 @@ func (q *Queries) ListAuditByAction(ctx context.Context, arg ListAuditByActionPa
 
 const listAuditByRepo = `-- name: ListAuditByRepo :many
 SELECT id, at, actor_user_id, actor, action, repo_id, target, detail, ip FROM audit_events
-WHERE repo_id = ?1 AND id < ?2 ORDER BY id DESC LIMIT ?3
+WHERE repo_id = ?1 AND id < ?2 AND id >= ?3 ORDER BY id DESC LIMIT ?4
 `
 
 type ListAuditByRepoParams struct {
 	RepoID sql.NullInt64
 	Before int64
+	Since  int64
 	Limit  int64
 }
 
 func (q *Queries) ListAuditByRepo(ctx context.Context, arg ListAuditByRepoParams) ([]AuditEvent, error) {
-	rows, err := q.db.QueryContext(ctx, listAuditByRepo, arg.RepoID, arg.Before, arg.Limit)
+	rows, err := q.db.QueryContext(ctx, listAuditByRepo,
+		arg.RepoID,
+		arg.Before,
+		arg.Since,
+		arg.Limit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -215,14 +453,15 @@ func (q *Queries) ListAuditByRepo(ctx context.Context, arg ListAuditByRepoParams
 
 const listAuditByRepoAction = `-- name: ListAuditByRepoAction :many
 SELECT id, at, actor_user_id, actor, action, repo_id, target, detail, ip FROM audit_events
-WHERE repo_id = ?1 AND action = ?2 AND id < ?3
-ORDER BY id DESC LIMIT ?4
+WHERE repo_id = ?1 AND action = ?2 AND id < ?3 AND id >= ?4
+ORDER BY id DESC LIMIT ?5
 `
 
 type ListAuditByRepoActionParams struct {
 	RepoID sql.NullInt64
 	Action string
 	Before int64
+	Since  int64
 	Limit  int64
 }
 
@@ -232,6 +471,7 @@ func (q *Queries) ListAuditByRepoAction(ctx context.Context, arg ListAuditByRepo
 		arg.RepoID,
 		arg.Action,
 		arg.Before,
+		arg.Since,
 		arg.Limit,
 	)
 	if err != nil {

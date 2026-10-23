@@ -80,7 +80,7 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/signing` | Module `signing`. OpenPGP: key `Generate` and `Parse`, the `Keys` service (create, import, delete, one signer per key, the key of each repo), the repo field `signing_key`, clearsign/detach-sign (ProtonMail go-crypto). See **Signing keys** |
 | `internal/files` | The file tree and the details of one file. Writes and deletes go through the byte pipeline |
 | `internal/audit` | The audit log: the action registry (`Actions`), the actor in the context (`WithActor`, `System`, `CLI`), `Record` and `RecordTx`, the list query and `Cleanup`. See **Audit log** |
-| `internal/activity` | Module `audit`: `GET /api/audit`, `GET /api/audit/actions`, the permission `activity.read`, the settings group `activity` and the job `audit.retention` |
+| `internal/activity` | Module `audit`: `GET /api/audit`, `GET /api/audit/actions`, `GET /api/audit/people`, `GET /api/stats`, the permission `activity.read`, the settings group `activity` and the jobs `audit.retention` and `audit.downloads` |
 | `internal/netrules` | Module `network`: client IP resolution behind trusted proxies (the client address of every request), the IP lists (presets and custom lists) and the per-repo IP rules. See **Network rules** |
 | `internal/api` | Module `core`: sign-in, the account, people, read tokens (token kind `trp`), repos, grants, files, uploads, search, the settings API and `/api/formats`. The JSON API of every module is under `/api/`, wrapped in `http.CrossOriginProtection` |
 | `internal/httpx` | JSON helpers, the error answers (`Error`, the problem types of `DeclareProblem`, `WriteProblem`; see **Problem documents**), `StatusError` (an error with its HTTP status), `RepoPath` (the URL check of a `{path...}`, then `repopath.Parse`), `Limit` (default 50, max 200), `AcceptsEncoding` and `GzipJSON` (see **Compression** under the JSON API) |
@@ -154,8 +154,8 @@ it needs and leaves the others nil. The kernel gives it these parts:
 
 | ID | Package | Requires | Owns |
 |---|---|---|---|
-| `core` | `internal/api` | | Sign-in, `/api/me`, users, read tokens (`trp`), repos, grants, files, upload plans and uploads, delete plans, resumable uploads, repo operations, search, the settings API, `/api/formats` (the UI descriptors), the snippets and CI files of each repo, `/api/permissions`, the access report; the subsystems `repositories`, `people`, `settings` and `repo`; the kernel's audit actions; the settings group `general`; the operation type `delete`; jobs `core.optimize` (`PRAGMA optimize` every 6 h), `core.blob-gc`, `core.upload-sessions` (every 10 min), `core.rebuild` and `core.ops` |
-| `audit` | `internal/activity` | | `GET /api/audit`, `GET /api/audit/actions`, the subsystem `activity`, the settings group `activity`, job `audit.retention` (every hour) |
+| `core` | `internal/api` | | Sign-in, `/api/me`, users, read tokens (`trp`), repos, grants, files, upload plans and uploads, delete plans, resumable uploads, repo operations, search, the settings API, `/api/formats` (the UI descriptors), the server identity (`/api/identity`, the root prefix `/identity/`), the snippets and CI files of each repo, `/api/permissions`, the access report; the subsystems `repositories`, `people`, `settings` and `repo`; the kernel's audit actions; the settings group `general`; the operation type `delete`; jobs `core.optimize` (`PRAGMA optimize` every 6 h), `core.blob-gc`, `core.upload-sessions` (every 10 min), `core.rebuild` and `core.ops` |
+| `audit` | `internal/activity` | | `GET /api/audit`, `GET /api/audit/actions`, `GET /api/audit/people`, `GET /api/stats`, the subsystem `activity`, the settings group `activity`, jobs `audit.retention` (every hour: events and download days) and `audit.downloads` (writes the download counters every minute and at shutdown) |
 | `storage` | `internal/move` | | `/api/storage/moves/...`, the subsystem `storage`, the settings group `storage` (its `Validate`: the S3 rules; `Test`: the probe; `Apply`: refuse a change while a move runs, probe the new store, start the move), the `storage.move.*` actions, job `storage.resume` |
 | `backup` | `internal/backup` | | `GET /api/backup`, `POST /api/backup/run`, the subsystem `backup`, the settings group `backup` (its `Test`: the server writes a probe file into the folder), the `backup.*` actions, job `backup.schedule` (every minute: a backup when one is due). No table: the backup folder holds its state |
 | `network` | `internal/netrules` | | The client address, IP lists, repo IP rules (a repo guard and the networks of the access report), the IP lists of the trusted proxies (`/api/network/trusted-proxies`), the subsystem `network`, the settings group `network` (`trusted_proxies`; its `Validate` refuses a `list:` entry in a change), the `network.*` actions, job `network.presets` (every hour) |
@@ -491,7 +491,7 @@ Kernel tables (`internal/db/migrations`):
 | `user_passkeys` | PK `id`, UNIQUE `credential_id`, idx `user_id` | `credential` is the JSON of the `webauthn.Credential` (the public key, the sign count, the flags, the transports, the AAGUID); `credential_id` is its lookup key; `name`, `created_at`, `last_used_at` |
 | `user_recovery_codes` | PK `(user_id, code_hash)` (WITHOUT ROWID) | `code_hash` is argon2id PHC; `used_at` is set when the code is used |
 | `auth_challenges` | PK `id_hash` (WITHOUT ROWID), idx `expires_at`, `user_id` | Short-lived single-use state: `kind` is `login`, `totp_setup`, `webauthn_register`, `webauthn_assert` `device_grant` (an SSO grant: `user_id` set, `data` is the user code of a device approval or `setup:<repo>` for a setup code, 5 min) or `setup_code` (a setup code: `id_hash` is SHA-256 of `trsu_<32 random bytes, base64url>`, `user_id` the person who made it, `data` the repo id, 10 min; the first use deletes it); `data` holds the payload. A new challenge deletes up to 100 expired ones |
-| `audit_events` | PK `id`, idx `at`, idx `(repo_id, id)`, idx `(repo_id, action, id)`, idx `(action, id)`, idx `actor_user_id` | `at` unix time; `action` is a registered action ID; `actor` is a username, a CI subject, `cli`, the module ID of a job, `anonymous`, or the attempted username of a failed sign-in; `actor_user_id` and `repo_id` are SET NULL; `target`; `detail` is JSON and never holds a secret value; `ip` is the client address. This table is the only place that stores or shows an IP address. See **Audit log** |
+| `download_stats` | PK `(repo_id, day)` (WITHOUT ROWID), idx `day` | `day` is the Unix time of 00:00 UTC; `downloads`, `bytes`; `repo_id` CASCADE. See **Download statistics** | idx `(repo_id, id)`, idx `(repo_id, action, id)`, idx `(action, id)`, idx `actor_user_id` | `at` unix time; `action` is a registered action ID; `actor` is a username, a CI subject, `cli`, the module ID of a job, `anonymous`, or the attempted username of a failed sign-in; `actor_user_id` and `repo_id` are SET NULL; `target`; `detail` is JSON and never holds a secret value; `ip` is the client address. This table is the only place that stores or shows an IP address. See **Audit log** |
 
 Tables of the `storage` component (`internal/move/migrations`):
 
@@ -665,7 +665,9 @@ integer number of bytes. Input (API PATCH, env) is a number with an optional uni
 space and decimals (`512MiB`, `1.5 GiB`, `500MB`). A bare number is bytes. A `duration` is stored
 in Go syntax (`15m`, `2160h`). Input also accepts `15 minutes`, `90 days`, `365d`, `1h30m`; the
 units are `ns`, `us`, `ms`, `s`, `m`, `h`, `d` and `w`, in short or long form. A `map` is a JSON
-object of string to a list of strings (in the environment too). `GET /api/settings` gives each
+object of string to a list of strings (in the environment too). An `image` is the bytes of an image
+file, stored and set in the environment as standard base64; `GET /api/settings` gives it the value
+`{set}` and never the bytes, like a secret. `GET /api/settings` gives each
 size or duration item `display` (`2 GiB`, `90 days`, `1 hour 30 minutes`) and `default_display`. A
 size item shows the largest binary unit that gives a whole number, else one decimal.
 
@@ -690,9 +692,9 @@ The `settings` package holds no feature rules and declares only the keys of the 
 
 | Group (owner) | Permission · page | Keys |
 |---|---|---|
-| general (core) | `settings.general` · General | `base_url`, `log.level`, `max_upload_size` (`2GiB`), `max_json_size` (`1MiB`), `cookie.secure`, `session_ttl` (`168h`), `index.debounce` (`2s`), `index.max_delay` (`30s`), `blobs.gc_grace` (`1h`), `upload.session_ttl` (`24h`), `tls.cert_file`, `tls.key_file` (its `Validate`: both or neither, and the pair loads) |
+| general (core) | `settings.general` · General | `base_url`, `log.level`, `max_upload_size` (`2GiB`), `max_json_size` (`1MiB`), `cookie.secure`, `session_ttl` (`168h`), `index.debounce` (`2s`), `index.max_delay` (`30s`), `blobs.gc_grace` (`1h`), `upload.session_ttl` (`24h`), `tls.cert_file`, `tls.key_file` (its `Validate`: both or neither, and the pair loads), `server_name` (`""`: the UI says Telesphorepo; at most 64 characters, no control characters), `server_logo` (type `image`, none: a PNG, JPEG or WebP image, checked by its bytes, at most 256 KiB and 512 px on its long side; see **Server identity**) |
 | docker (docker) | `settings.general` · General | `docker.direct_uploads` (`false`; "Expose the origin IP for Docker uploads", see **Upload host**), `docker.upload_url` (`""`; empty or an http(s) URL of a scheme and a host only: the DNS-only name or address of the server that takes the upload bytes; required when `docker.direct_uploads` is on), `docker.link_grace` (`24h`, minimum `1s`) |
-| activity (audit) | `settings.general` · General | `audit.retention` (365 days) |
+| activity (audit) | `settings.general` · General | `audit.retention` (365 days), `stats.retention` (400 days) |
 | storage (storage) | `storage.manage` · `/settings/storage` | `storage` (`fs`/`s3`), `fs.root` (default `blobs/` in the data dir), `s3.endpoint`, `s3.region`, `s3.bucket`, `s3.access_key_id`, `s3.secret_access_key`*, `s3.prefix`, `s3.path_style`, `s3.redirect`, `presign_ttl` |
 | backup (backup) | `backup.manage` · `/settings/backups` | `backup.dir` (an absolute path; `""` turns backups off; the default is `""` in a plain build and `/backups` in the image, see **Backups**), `backup.interval` (`24h`, minimum `1m`), `backup.keep` (type `int`, `7`, at most 1000). See **Backups** |
 | network (network) | `network.manage` · `/settings/proxy` | `trusted_proxies` (literal entries; the IP lists of the trusted proxies are rows, see **Network rules**) |
@@ -915,6 +917,9 @@ transaction.
 | `PATCH /api/users` | `people.manage` | `{usernames: [...], disabled: bool}`. The one way to disable or enable people. 400 `You cannot disable your own account.` when the list holds the caller and `disabled` is true. 403 for a person whose permissions the caller does not all hold. 409 when no enabled person would keep `people.manage`. A disabled person's sessions end, and their password and read tokens stop working. One `user.update` event per person whose value changed. 200 `{changed: n}` |
 | `GET /api/permissions` | none | The permission registry: `{subsystems: [{id, scope: "server"|"repo", label, help, module, permissions: [{id, label, help, needs, second_factor, all_repos}]}]}`, subsystems in module start order and permissions in registration order. See **Permissions** |
 | `GET /api/changes?since=<version>` | none | `{version, changes: [{id?, version, scope, needs, summary}]}`: the version of the server, and the released entries of the embedded change log that are newer than `since`, in the order of the file. Without `since`, every released entry. 400 when `since` is not a release version (see **Change log**) |
+| `GET /api/identity` | none | The identity of the server (see **Server identity**): `{name, logo, customized}`. `name` is `server_name`, or `Telesphorepo` when it is empty; `logo` is the path of the logo with its version (`/identity/logo?v=<hash>`), or null; `customized` is true when either is set |
+| `GET /identity/logo` | none | The logo: its media type (`image/png`, `image/jpeg` or `image/webp`), the ETag of its SHA-256, `Cache-Control: public, no-cache`, `X-Content-Type-Options: nosniff` and a sandbox CSP; 304 for a matching `If-None-Match`; 404 without a logo |
+| `PUT /api/identity/logo` · `DELETE /api/identity/logo` | `settings.general` | PUT takes the image file as the body and saves it as `server_logo`; the type comes from the bytes, never from a header or a name (an SVG is 400), a body over 256 KiB is 413, an image over 512 px on its long side is 400 with `fields`. DELETE removes it. Each saves like `PATCH /api/settings` (one `settings.update` event; 409 when `TR_SERVER_LOGO` sets it) and answers the identity |
 | `GET /api/formats` | none | The UI descriptor of every format, in module order (see **Format UI descriptors**): `[{name, title, description, icon?, kind_icons?, kinds, config: {default, fields}, repo_fields, repo_tabs, upload, delete_notes, file_details, browse: {versions, artifact_snippets}, remote_presets, proxy_note?, public_key?, labels: {artifact_kinds, artifact_name, tools, install_heading?, build_files}, import_sources, tools: [{id, label, setup, project?}], setup}]` |
 | `GET /api/repos`, `GET /api/repos/{name}` · `POST /api/repos` · `PATCH /api/repos/{name}` | any/anon · `repositories.all` · `repo.settings` | The list shows the repos where the caller holds a permission, and the public ones. Repo JSON has `permissions`, the caller's repository permissions on the repo. Repo JSON has `file_count`, `total_size` and `last_published_at` (null before the first publish), read from the repo row (see `assets` in **Data model**). `format` must be a registered name. `description` (POST and PATCH) has at most 500 characters and no control characters except newline and tab. `config` must be a JSON object that the format validates (400 otherwise; an unknown format lists the available ones). An empty config becomes the format default. Repo JSON has `operation`: `{id, type, owner, state, done, total, message, error}` of the repo's active operation, or null (see **Repo operations**). Repo JSON has `fields`: the values of the module fields of the repo (e.g. `{signing_key: "default"}`; `{}` for a format without fields). POST and PATCH take `fields` too; POST gives a field without a value its default, and a field that does not apply to the format and kind is 400. `PATCH /api/repos/{name}` takes `{description?, config?, proxy?, fields?}` and is one repo update (`repos.Service.Update`): the whole new state is checked first, then saved in one transaction with the field values, the format's `OnRepoChange` and one `repo.update` event with the changed fields. Repo JSON has `kind`, and a group has `member_count`. POST takes `kind` (`hosted` default, `proxy`, `group`), `members: [names]` for a group, `proxy: {remote_url, username?, password?, metadata_ttl?, not_found_ttl?}` (seconds) for a proxy, and `force`. A new proxy's remote is checked first (see **Group and proxy repositories**): a 502 problem document when it does not answer, unless `force: true`. PATCH takes `proxy` with the same fields for a proxy; `username` and `password` together replace the credentials, `username: ""` removes them, and the password is never returned. `GET /api/repos/{name}` adds, for a group, `members: [{name, format, kind, public, permissions}]` (the members the caller can read, in order, each with the caller's repository permissions on it); for a hosted or proxy repo, `groups: [names]` (the groups it is in that the caller can read); for a proxy and a holder of `repo.settings`, `proxy: {remote_url, has_credentials, metadata_ttl, not_found_ttl, last_ok_at\|null, last_error, last_error_at\|null}` |
 | `PUT /api/repos/{name}/members` | `repo.settings` | `{members: [names]}` replaces the members of a group and their order; returns the repo. 400 for 0 or more than 50 members, a member of another format, a group, a name listed twice, an unknown name, or a repo that is not a group |
@@ -951,7 +956,7 @@ transaction.
 | `DELETE /api/signing-keys/{name}` | `signing.manage` | 204. 409 `{error, repos}` while repos use the key |
 | `GET /api/signing-keys/{name}/public.asc` | `signing.manage` | `application/pgp-keys`, saved as `<name>.asc` |
 | `GET /api/network/proxy-candidates` | `network.manage` | `[{address, last_seen, count, header}]`, newest first: the untrusted TCP peers that sent a forwarded header. See **Network rules** |
-| `GET /api/audit?after=&limit=&action=&repo=` | `activity.read` | `{items: [{id, at, actor, actor_user_id\|null, action, repo, target, detail, ip}], next}`, newest first. `repo` is a repo name |
+| `GET /api/audit?after=&limit=&action=&repo=&actor=&since=&until=` | `activity.read` | `{items: [{id, at, actor, actor_user_id\|null, action, repo, target, detail, ip}], next}`, newest first. `repo` is a repo name, `actor` a username, `since` and `until` RFC 3339 (see **Audit log**, Filters) |
 | `GET /api/audit/actions` | `activity.read` | `[{id, label, subsystem}]`: every action that a module registers, in module start order. The Activity filter reads it |
 | `GET /api/search?q=&repo=&after=&limit=` | any/anon | FTS5 trigram, `q` ≥ 3 chars, only repos where the caller holds `repo.download`. The index walks the matches of every repo in asset id order; a search restricted to some repos (a `repo`, or a caller who reads only some) reads at most 10,000 matches per page and keeps those of its repos, so a page can hold fewer than `limit` hits, even none, with a `next` cursor (the asset id the read reached). The Search page then offers Search further |
 | `GET /api/repos/{name}/status` | `repo.download` | `{pending}`: the units of the repo that wait for a rebuild of its indexes (`rebuilds`), the ones being rebuilt included; 0 for a format without a `Rebuild` |
@@ -1176,7 +1181,7 @@ archives with their SHA-256 and the commands to install one by hand.
   | `repositories` (server, core) | `repositories.all` | All repositories: create and delete repositories, and hold every repository permission on every repository (`AllRepos`) | | yes |
   | `people` (server, core) | `people.manage` | Manage people: create, disable and enable accounts, reset passwords, and give server permissions, only the ones they hold. Reset the password of, or disable, only a person whose permissions they all hold. See every device | | yes |
   | `settings` (server, core) | `settings.general` | General settings: the groups on Settings › General | | yes |
-  | `activity` (server, audit) | `activity.read` | Read the audit log: Settings › Activity, the audit log and the publish log | | yes |
+  | `activity` (server, audit) | `activity.read` | Read the audit log: Settings › Activity, the audit log, the publish log and the download statistics | | yes |
   | `storage` (server, storage) | `storage.manage` | Manage storage: Settings › Storage and the storage moves | | yes |
   | `backup` (server, backup) | `backup.manage` | Manage backups: Settings › Backups, Back up now and the list of backups | | yes |
   | `network` (server, network) | `network.manage` | Manage networks and proxy: Networks (IP lists) and Network and proxy (`trusted_proxies`) | | yes |
@@ -1483,11 +1488,11 @@ through `credHelpers` in `$DOCKER_CONFIG/config.json` (else `~/.docker/config.js
   of its scope.
 
 **UI pages.** The sign-in page (second step for a person who needs it), the approval page (`/#/device?code=`)
-and, under Settings: **Sign-in and security** (TOTP with a QR code, passkeys, recovery codes),
-**Devices**, **Tokens** (read tokens, and publish tokens with a new manual session), and for
-people who hold the permission **CI pipelines** (trust policies, started from GitHub Actions, Jenkins or another CI
+and, under Your account: **Sign-in and security** (TOTP with a QR code, passkeys, recovery codes),
+**Devices**, **Tokens** (read tokens, and publish tokens with a new manual session), and under
+Settings for people who hold the permission **CI pipelines** (trust policies, started from GitHub Actions, Jenkins or another CI
 system) and **Activity** (the publish log is its second tab). A setup-only session sees only Sign-in and security. The approval page shows when the code expires (10 minutes after the login command starts). A user with no second factor follows its link to
-`/#/settings/security?back=/device?code=<code>`; once a method is on, that page shows **Go back**,
+`/#/account/security?back=/device?code=<code>`; once a method is on, that page shows **Go back**,
 and the approval page looks the code up again. An SSO account sees **Sign in again with single
 sign-on to approve** in place of the second-factor form; back from the provider, the page approves
 at once, or shows the error. See **Web UI**.
@@ -2472,8 +2477,8 @@ is unreachable.
 - **Delete.** `DELETE .../sources/{id}` removes the source, its mapping, syncs, failures and
   log. The repos and their files stay.
 - **UI.** The admin-only **Nexus** pages (`/#/settings/nexus`, `/#/settings/nexus/{id}`). The
-  list shows Server, Status, Repositories, Last check and Next check; a syncing source shows its
-  progress line. The source page has, top to bottom: the header (status badge and line, Sync now
+  list is a card per server: its name, status badge, address and number of repositories, and the
+  next check; a syncing source shows its progress line instead. The source page has, top to bottom: the header (status badge and line, Sync now
   or Cancel the sync, Switch over, Delete), Repositories to copy (one pick table of every Nexus repo
   in the order a save sets them up: repos and proxies, then groups, then the repos this server
   cannot copy, muted with their reason; a filter above 10 repos; Kind, State (Copied, New
@@ -2484,9 +2489,12 @@ is unreachable.
   button "Copy N repositories" or "Save", with a sentence of what the save does, saves and opens
   the sync), the sync
   detail (per repo "copied (size) of checked", last activity, a bar with "about N%" when an
-  earlier walk exists, "No progress for N minutes" after two minutes; the log, which reads its new lines at each refresh of the sync
-  (every 2 s) and filters by a clicked repo; the failed files), the sync history (Started, How, Took, New
-  files, Size, Failed, State) and the connection with the save bar. While a repo has the `mirror`
+  earlier walk exists, "No progress for N minutes" after two minutes; the log, a list of its
+  lines (the message, then the time and the repo), which reads its new lines at each refresh of the sync
+  (every 2 s) and filters by a clicked repo; the failed files as a list: the path with a copy
+  button, then the repo and the reason), the sync history (a list: when it started, then how, how
+  long it took, the new files and their size; the failed count as a badge when there are any; the
+  state at the end) and the connection with the save bar. While a repo has the `mirror`
   operation, its page shows the operation's message under the header to the people who could upload or delete.
 
 ## Group and proxy repositories
@@ -3503,8 +3511,8 @@ binding into memory at start, and request paths and the indexers read that copy.
 
 `audit_events` records who did what. `GET /api/audit` needs `activity.read` and lists newest
 first. Every action is registered by its module (`Extender.AuditActions`) with a label and a
-permission subsystem; `GET /api/audit/actions` lists them, and the Activity filter groups them by
-subsystem. `audit.Log.Record` refuses an action that no module registered (it logs and returns
+permission subsystem; `GET /api/audit/actions` lists them, and the Activity filter picks the
+subsystem (its area) first, then one action of it. `audit.Log.Record` refuses an action that no module registered (it logs and returns
 the error). The route middleware puts the caller in the request context (`audit.WithActor`, with
 the client address); services record their own events with that actor, inside the transaction of
 the change when they have one (`RecordTx`). A job and an `Init` record as the system actor of its
@@ -3531,6 +3539,37 @@ module (`audit.System`), the `telesphorepo-server user` commands as `cli` (`audi
   proxies, not of clients. The publish log has none. The access log still records the IP.
 - The setting `audit.retention` (default 365 days) sets how long an event stays. A job deletes
   older events every hour.
+- **Filters.** `GET /api/audit` filters by `action`, `repo` (a name), `actor` (a username: it
+  filters on `actor_user_id`, so it finds people, not CI subjects or the names of failed sign-ins;
+  an unknown name gives an empty page) and `since` / `until` (RFC 3339: the events at or after
+  `since` and before `until`; another form is 400). A time becomes an id bound: the id of the first
+  event at or after it (`FirstAuditAt`, through `audit_events_at`), so every query keeps its keyset
+  order on `id` and gains only `id >= since`, and `until` lowers the `before` cursor. Each of the
+  eight combinations of actor, repo and action is its own query on its own index.
+  `audit_events_actor` is on `actor_user_id` and holds the id as its rowid, so it serves
+  `(actor_user_id, id)`. `GET /api/audit/people?q=` (`activity.read`) lists the enabled usernames
+  that start with `q`, for the person picker.
+
+## Download statistics
+
+The server counts the downloads of each repo per day (`internal/stats`, table `download_stats`).
+
+- **What counts.** One download per GET that gets a file's bytes from the read path: a 200 or a
+  206 of `Reader.ServeAsset` (on every format route; a 206 counts the bytes of its range), an S3
+  redirect (302, the file's size), a live proxy stream once it completed (`Live.End`), and a
+  merged group file (on the group). HEAD, 304, 404, refused and failed answers do not count, and
+  neither do downloads that the edge Worker answers from R2 without the server. A file counts on
+  the repo that stores it: a group member's file read through the group counts on the member.
+- **Cost.** The read path adds to a map under a mutex (`stats.Counter.Add`, keyed by repo and UTC
+  day). The job `audit.downloads` writes the counters every minute in one transaction, one upsert
+  per repo and day (a repo deleted since is skipped), and once more at shutdown; a failed write
+  keeps the counts for the next one. A crash loses at most the last minute.
+- **Retention.** The setting `stats.retention` (default 400 days) of the group `activity`; the hourly
+  job `audit.retention` deletes older days. A repo delete takes its rows (`ON DELETE CASCADE`).
+- **`GET /api/stats?days=`** (`activity.read`, 1 to 400, 30 by default) writes the pending counters
+  first, then answers `{days: [{day, downloads, bytes}], repos: [{name, format, downloads, bytes}],
+  downloads, bytes}`: every UTC day of the window (today last, `day` as `2026-10-22`) and the ten
+  repos with the most downloads.
 
 ## Web UI
 
@@ -3554,18 +3593,37 @@ page are in `web/src/README.md`.
   `repoTabs` (a repo settings tab that a format names in `repo_tabs`, e.g. the Signing tab of the
   signing module), `repoFields` (the control of a repo field on New repository, e.g.
   `signing_key`) and `formatParts` (a format's named parts of the file details: `maven-artifact`,
-  `deb-package`). The router, the Settings sidebar (`nav`), the breadcrumbs and the pages of a
+  `deb-package`). The router, the sidebars of Settings and Your account (`nav`), the breadcrumbs and the pages of a
   setup-only session (`setup`) read the registry. `web/src/lib/api/` is the one API client.
 
 - **Words and look.** The UI uses plain words, not jargon (the rename table is in
   `web/src/README.md`). `web/src/README.md` is binding for the UI code.
-- **One shell, one width.** Every page sits in one centered container, 1200 px wide at most, with
-  24 px side padding (16 px under 640 px). Browse and Settings use the same container. Tables use
-  the full width of the container. The page reserves its scrollbar gutter.
-- **Header.** The top bar is inside the container: logo and name (Home) on the left, a search
+- **One shell, one width.** Every page sits in one centered container, 1440 px wide at most, with
+  24 px side padding (16 px under 640 px). Browse and Settings use the same container, the
+  repository page included. Collections use the full width of the container (of the content
+  column in Settings). The page reserves its scrollbar gutter.
+- **Collections.** A collection is a list by default (`ItemList`): rows in one card, parted by thin
+  lines, each with the name and its badges, a muted line of one or two facts, and the state or
+  the actions at the end. A handful of things that each have more to say is a grid of cards
+  (`CardGrid`, columns of 300 px or more). A table (`DataTable`, one line per row, striped) is
+  only where people sort, compare columns or scan hundreds of rows. A row or a card shows the name,
+  the state, one or two facts and the action; the rest is on the thing's own page.
+- **Server identity.** The UI loads `GET /api/identity` once at start, with the formats. The
+  name shows in the top bar, on the sign-in page (its heading and the felt ticket), in the browser
+  tab (`<page> · <name>`), in Home's welcome and as the title of All settings; the logo replaces
+  the brand's mark in the top bar and heads the sign-in form at every width. Without a logo the
+  brand's mark shows. Under the container every page has one quiet line, "Powered by
+  Telesphorepo", whatever the identity; no setting turns it off. Settings › General has the
+  section Server identity first: the name saves with the form; the logo has its own control (a
+  preview, Upload logo or Replace logo, and Remove after a confirm), which applies at once through
+  `PUT` and `DELETE /api/identity/logo`.
+- **Header.** The top bar is inside the container: the server's mark and name (Home) on the left, a search
   field in the center (480 px at most), and on the right one **Sign in** button when the visitor is
-  signed out (hidden on `/#/login`), or **Settings** and the avatar menu when the visitor is signed
-  in. The search field holds the query only on the Search page. Sign out returns to Home. The page
+  signed out (hidden on `/#/login`), or **Settings** (for a person who can open an admin page)
+  and the avatar menu (Your account, Install the CLI, the theme, Sign out) when the visitor is
+  signed in. The search shows on the Browse pages only, not on Home (its own large field) and not
+  on the Settings and account pages; under 640 px it is an icon that opens the Search page. The
+  search field holds the query only on the Search page. Sign out returns to Home. The page
   `/#/login` is the only place to sign in.
 - **State on the thing.** No page opens with a status row or a summary banner. A switch shows that
   it is on. A method shows in its list. A private repository has a lock after its name, and a
@@ -3579,14 +3637,15 @@ page are in `web/src/README.md`.
   `base_url`. It reads `GET /api/settings` when the person signs in and after they leave
   Settings › General.
 - **Cards.** Each area of a page is a card (`Section`): a header with its title and its actions,
-  then its content. Every table is in a card too. Cards are 32 px apart on Browse pages and 28 px in Settings. A form card holds a
+  then its content. Every list, grid and table is in a card too. Cards are 32 px apart on Browse pages and 28 px in Settings. A form card holds a
   two-column grid: the label above each control, every control the width of its cell, and a long
   field across both cells. The grid is one column under 640 px. A setup is a row of numbered cards
   (`Step`).
 - **Type, spacing and states.** One sans-serif family for all text. Monospace is for code blocks
   and copy-paste snippets only. Body text is 15 px, help and facts 14 px, section titles 17 px and
   the page title 26 px. One spacing scale (4 px base) and one radius (8 px). A table row is 48 px
-  on Browse pages and 44 px in Settings, which are a little denser. Hover and
+  on Browse pages and 44 px in Settings, which are a little denser; a list row is at least as
+  tall. Hover and
   selected states fill the whole row or item. There is no left-border accent. Every page has
   loading, empty and error states.
 - **Loading.** The UI shows no skeletons. A loading area shows nothing for 300 ms, then a quiet
@@ -3616,15 +3675,37 @@ page are in `web/src/README.md`.
   (fetch and upload). The server never sends `WWW-Authenticate` for such a request or for a path
   under `/api`. Plain download links of format routes carry no such header and keep the
   challenge.
-- **Browse** (anyone; visitors see the anonymous-read repos). `/#/` is titled "Repositories", with
-  no subtitle. A toolbar holds a filter box, a format filter and **New repository** (`repositories.all`). A
-  list sorted by name has one row per repo, the same for every kind: the format icon, the name
-  (with a lock when the repo is private), the description on one line, and the format title and
-  the kind in plain words ("Hosted", "Proxy of a remote repository", "Group of 3 repositories").
-  Files, size and last publish show in Settings › Repositories and in the details of a repo's top
-  folder. On a phone the format and the kind move under the description. A click anywhere on a row
-  opens the repo. Search is `/#/search?q=&repo=`: the
-  top-bar field holds the query, and a select picks the repo.
+- **Home** (`/#/`, anyone). A short page centered in the container: one line of welcome
+  ("Welcome to <server name>") and a large search field (the top bar's search: files by path, with the `/` shortcut; the top bar has no search on Home), then
+  the doors, when at least two would show: large cards side by side (stacked on a phone), each a
+  bare icon, a title, one sentence and the whole card a link. **Publish** opens `/#/publish`, for a
+  signed-in person who can publish somewhere. **Browse** opens `/#/browse`. **Administer** opens
+  `/#/settings/overview`, only for a person who would see a card there. Each card is as wide as one
+  column of a three-column row, so two cards keep that width, centered. A visitor or a reader sees
+  no doors (the top bar has Sign in). Then the repositories of `GET /api/repos`, by name, for
+  everyone: a heading with "See all" (to `/#/browse`) at its end over up to six repository cards
+  (three on a phone), with no card around them. **Your repositories** are the repos whose
+  `permissions` go beyond `repo.download`; a person with none sees **Repositories**, the repos they
+  can see (a visitor: the anonymous-read ones). With no repo at all, the empty state of Browse.
+- **Browse** (`/#/browse`, anyone; visitors see the anonymous-read repos). A toolbar on one row
+  holds a filter box, a format select ("All formats" first, then each format present with its
+  icon) and **New repository** (`repositories.all`) at the end. The repos are cards sorted by name (three columns wide, two medium, one on
+  a phone), the same for every kind: the format icon, the name (with a lock when the repo is
+  private), the description up to two lines, and at the bottom the kind in plain words ("Hosted",
+  "Proxy of a remote repository", "Group of 3 repositories"). Files, size and last publish show in
+  Settings › Repositories and in the details of a repo's top folder. The whole card opens the repo.
+- **Publish** (`/#/publish`, signed in). The hosted repos the person holds `repo.publish` on (read
+  from `Repo.permissions` of `GET /api/repos`; a group is not listed, since its publishes go to a
+  hosted member) as the same cards, each opening its Publish view, a card per format when more than
+  one is present. With exactly one, the page replaces the history entry with `/#/repo/{name}/publish`; with none, it says to
+  ask an administrator for publish access.
+- **Search** is `/#/search?q=&repo=`: the top-bar field holds the query, and a repository picker
+  picks the repo. The hits are grouped in the browser: a card per repo, in it a row per folder
+  that holds hits (the folders under one parent fold into the parent's row, so an artifact is one
+  row with its version folders), each row with its folders and files as links; the checksum and
+  signature files (`.md5`, `.sha1`, `.sha256`, `.sha512`, `.asc`, `.sig`) of a hit fold into it.
+  The matched text is marked in each path, and a count says how many files the loaded pages hold
+  ("350+ files" while more pages wait). A row opens its folder, a link its folder or file.
 - **Repository page** (`/#/repo/{name}/...`). The header shows the name with a lock for a private
   repo, the format (icon and title) and the description. **Upload** and **Settings** show for users
   who may use them. A proxy shows its cached files and has no Upload and no Publish view. A group
@@ -3673,13 +3754,15 @@ page are in `web/src/README.md`.
     Set up a project card link to it. One tab per OS (Linux, macOS, Windows; without `os` the
     OS of the browser). **Install**: `curl -fsSL <base>/install.sh | sh` or
     `irm <base>/install.ps1 | iex` and what the script does with `PATH`. **Install by hand**: the
-    archives of the OS from `GET /cli/SHA256SUMS`, each with its CPU, its SHA-256 and a download
-    link; a row picks `cpu` (default `arm64` on macOS, else `amd64`), and below the table the
+    archives of the OS from `GET /cli/SHA256SUMS` as a list, each row the archive name, its CPU,
+    the start of its SHA-256 with a copy button, and a download link; a row picks `cpu` (default
+    `arm64` on macOS, else `amd64`), and below the list the
     commands that download that archive, check its SHA-256 (`sha256sum -c`, `shasum -a 256 -c`
     or `Get-FileHash`), unpack it into `~/.local/bin` or `%LOCALAPPDATA%\Programs\telesphorepo`
     and make the helper name. **Update**: `telesphorepo update`. A build without CLI archives
     (404 `no-cli-downloads`) shows one empty state in place of the cards.
-  - The devices lists and the approval page name no client. They show "Telesphorepo CLI".    **New CI pipeline** (`ci.pipelines`) opens
+  - The devices lists and the approval page name no client. They show "Telesphorepo CLI".
+  - **New CI pipeline** (`ci.pipelines`) on the Publish tab opens
     `/#/settings/ci-pipelines/new?repo={name}&back=/repo/{name}/publish`.
   - `upload?folder=`: a full page. It starts with the fresh second-factor check, then one drop
     zone takes files or a folder (as the format's `upload` allows), followed by the upload plan of
@@ -3692,6 +3775,10 @@ page are in `web/src/README.md`.
   least 22 rem, at most 36 rem, otherwise the window height minus 24 rem). The list keeps that
   height as its minimum on wide screens, so a switch does not move the details column or the
   toolbar.
+  - *List* shows a folder as a table (name, size, published, and who published it while the
+    details column is closed). The versions of an artifact are a list: each row the version with
+    Latest or Snapshot, then when it was published, its commit and its builds. A snapshot's
+    earlier builds are a list the same way, and the files of a build a table (name, kind, size).
   - *Tree* shows the whole repo as an expandable tree. A folder loads its children from `/tree` the
     first time it opens, a page at a time. Up and Down move, Right expands or steps in, Left folds
     or steps out, Home and End jump, Enter opens. A version folder shows the files of its latest
@@ -3730,10 +3817,26 @@ page are in `web/src/README.md`.
     its builds. Else (Debian) it removes the files of all its builds, read 200 builds a page.
   - A `?build=` in the address that the loaded pages of builds lack is read with `build=<id>` of
     `GET /api/repos/{name}/builds`, alongside the first page.
-- **Settings.** The sidebar is 220 px wide inside the container. Under 768 px it is a menu. All
-  paths are under `/#/settings/`.
-  - *Your account:* Overview (`account`), Sign-in and security (`security`), Devices (`devices`)
-    and Tokens (`tokens`: read tokens and publish tokens, two cards on one page).
+- **Settings and Your account.** Two areas with the same shell: a sidebar 240 px wide inside the
+  container, a menu under 768 px. Settings is the admin panel; its paths are under
+  `/#/settings/`, and `/#/settings` opens the overview. A person who can open no admin page sees
+  no Settings in the top bar.
+  - *All settings* (`overview`), the first item, above the groups: about this server. The name of
+    the server, its version (`GET /api/changes`) and, for a holder of `settings.general`, its
+    public address; New repository, New account and New CI pipeline for a person who may. Then,
+    from `GET /api/repos`, the number of repositories by kind, the files, the stored size (and
+    what proxies cache) and the last publish; the stored size by format as bars; the five largest
+    repositories. Every repository for a holder of `repositories.all`, else "Your repositories"
+    (more than download). The number of people, CI pipelines and signing keys, each for a person
+    who can open its page and a link to it; for a holder of `activity.read` the downloads of the
+    last 30 days (`GET /api/stats`: the total, the bytes served, a column per UTC day and the five
+    most downloaded repositories) and the last five events of Activity. A person who can open no Settings page goes on to Your account.
+  - *Your account* (`/#/account`, every signed-in person, from the avatar menu) has its own
+    sidebar with one group, Your account: Overview (`/#/account`), Sign-in and security
+    (`/#/account/security`), Devices (`/#/account/devices`) and Tokens (`/#/account/tokens`: read
+    tokens and publish tokens, two cards on one page). `/#/settings/account`,
+    `/#/settings/security`, `/#/settings/devices` and `/#/settings/tokens` open the same pages (the
+    server prints `/#/settings/tokens`).
   - The navigation shows each page only to a person who holds its permission (see **Auth
     model**, Permissions). A path the person cannot open shows "You cannot open this page".
   - *Repositories*: Repositories (`repositories`, `repositories/new`, `repositories/{name}/{tab}`):
@@ -3744,11 +3847,14 @@ page are in `web/src/README.md`.
     `ci-pipelines/{id}`) and Networks (`networks`, `networks/new`, `networks/list/{name}`).
   - *Server*: Sign-in options (`sign-in`), Signing keys (`signing-keys`,
     `signing-keys/new`), Storage (`storage`), Nexus migration (`nexus`, `nexus/{id}`), Network and
-    proxy (`proxy`), General (`general`) and Activity (`activity?view=&action=&repo=`: the audit log
-    and the publish log; the filter lists the actions of `GET /api/audit/actions`, grouped by
-    subsystem).
-  - Breadcrumbs follow the hierarchy: Settings, the group, the page. A sub-page of the first
-    item of a group does not repeat that item.
+    proxy (`proxy`), General (`general`) and Activity
+    (`activity?view=&area=&action=&repo=&actor=&when=&from=&to=`: the audit log and the publish
+    log; the audit log filters by one action of `GET /api/audit/actions`, picked by its area (the
+    subsystem) first, by a repository, by a person and by a range of days in the reader's time
+    zone (Today, Last 7 days, Last 30 days, or Custom from one day to another); the events show by
+    day).
+  - Breadcrumbs follow the hierarchy: Settings, the group, the page (Your account, the page on an
+    account page). A sub-page of the first item of a group does not repeat that item.
 - **Repository settings.** A page with the tabs Overview, Access, Format settings and Signing
   (Debian). Overview, Format settings, Signing and Remote need `repo.settings`; Access needs a permission
   that manages the repository (`repo.access`, `repo.settings`, `ci.pipelines`, ...). A person sees only the tabs they can open, and a link to a tab they
@@ -3756,16 +3862,24 @@ page are in `web/src/README.md`.
   **Delete** (`repositories.all`) is an action at the end of the header, on every tab; it opens a dialog that
   asks for the repo name.
   - *Overview:* description and visibility.
-  - *Access:* a People part (`repo.access`): each person with a grant once, with the phrase of their
-    set ("Download", "Download, publish", "Everything", or the list such as "Download, delete
-    files"). **Give access** opens the grant dialog: people found through `GET /api/people`, then
-    the permission picker. **Change** opens the picker for one person; the table takes a pick with
-    **Remove access** (asks first). These save at once through `PUT /api/grants`. A Download
-    part (the Public switch and from where) and a Publish part (CI pipelines and from where)
-    follow: the Public switch and the network rules show to a holder of `repo.settings`, the CI
-    pipelines to a holder of `ci.pipelines`, with thin dividers between the parts. **Add CI
-    pipeline**, **Add network list** and **Add addresses** each open a short form in a dialog. The
-    Public switch saves through `PATCH /api/repos`. Add CI pipeline adds existing pipelines, or
+  - *Access:* three cards that answer from `GET /api/repos/{name}/access?admins=1` and the unsaved
+    edits. **Who can download**: "Anyone" when public, else the count of people with Download and
+    of administrators (holders of All repositories), with their avatars and names (the
+    administrators behind one button); then from where ("From any network", "Only from GitHub
+    Actions"). **Who can publish**: the people with Publish, the enabled CI pipelines and the
+    administrators the same way, the CI pipelines as a list, then from where; while nobody can
+    publish it says "Nobody" and why (`publish.blocked`; a group or a proxy shows only that).
+    **People and permissions** (`repo.access`): each person with a grant once, with the phrase of
+    their set ("Download", "Download, publish", "Everything", or the list such as "Download,
+    delete files"), then the holders of All repositories, read-only with a badge. **Give access**
+    opens the grant dialog: people found through `GET /api/people`, then the permission picker,
+    side by side in a wide dialog. **Change** opens the picker for one person, **Remove** and a
+    pick with **Remove access** ask first. These save at once through `PUT /api/grants`. The
+    Public switch (in the download card's header) and **Change** of from where show to a holder
+    of `repo.settings`, Add CI pipeline and removing one to a holder of `ci.pipelines`. **Add CI
+    pipeline**, **Add network list** and **Add addresses** each open a short form in a dialog.
+    These edits save together from the save bar; the Public switch saves through
+    `PATCH /api/repos`. Add CI pipeline adds existing pipelines, or
     links to `/#/settings/ci-pipelines/new?repo={name}&back=/settings/repositories/{name}/access`.
     Each person links to their page, where the same access is also edited.
   - **Permission picker.** The grant dialog (Access tab, person page, bulk Give access) and the
@@ -3790,9 +3904,10 @@ page are in `web/src/README.md`.
     description, visibility. Debian adds architectures and the signing key. For a new key, the page
     calls `POST /api/signing-keys` and then `POST /api/repos`. If the second call fails, the page
     deletes the new key. **Create** is in the footer of the last card.
-- **People** (`people.manage`). The table shows each account with its avatar and role: "Administrator"
-  for a person with every server permission, else the phrase of the server permissions held, or
-  nothing. The sign-in method column shows only when someone uses single sign-on. A row opens the
+- **People** (`people.manage`). A list shows each account with its avatar, its name and its role as
+  a badge: "Administrator" for a person with every server permission, else the phrase of the
+  server permissions held, or none. Under the name: the email, the sign-in method (only when
+  someone uses single sign-on) and when the account was added. A row opens the
   person's page (`/#/settings/people/{name}`): an identity card (avatar, role, how the person
   signs in, a Disabled badge) with Reset password (only for a person whose permissions the caller
   all holds) and Disable account or Enable account; then the server permissions as a role:
@@ -3801,26 +3916,31 @@ page are in `web/src/README.md`.
   locked on, and one the caller does not hold cannot change. The role is saved from the save bar
   after a confirm through `PUT /api/users/{name}/permissions`; then the
   person's permissions on each repository. **Give access** opens the grant dialog with the
-  repositories and the picker. The repository table takes a pick, with **Change permissions** and
-  **Remove access** (asks first). Each repository action saves at once. A holder of `repositories.all`
+  repositories and the picker. The repository list shows each repository with the phrase of the
+  person's permissions under its name and **Change** and **Remove** (asks first) on its row; it
+  takes a pick, with **Change permissions** and **Remove access** (asks first). Each repository action saves at once. A holder of `repositories.all`
   reaches every repository, and the page says so. When single sign-on manages the permissions of an
   account, the role and its permissions show read-only ("Single sign-on manages these
   permissions"), with Open sign-in options for a holder of `signin.manage`. The
-  People table takes a pick of every row except your own: **Disable** asks first ("Disable 4
+  People list takes a pick of every row except your own: **Disable** asks first ("Disable 4
   people? They are signed out and cannot sign in."), **Enable** acts at once. **New account**
   opens a short form; after Create, the new person's page opens, where the permissions are set.
 - **Bulk actions.** Repositories (**Make public**, **Make private**, **Delete**), the List
   view of the Files tab (**Delete**, files and folders mixed), People, a person's repositories and
-  a repository's people take a pick (`DataTable` `bind:picked`). While rows are picked, a bar in
+  a repository's people take a pick (`bind:picked` of `DataTable` or `ItemList`). While rows are picked, a bar in
   place of the header row shows "12 selected", the actions, "Select all 50" and "Clear". Every
   delete asks first with the count and the first five names; a delete of more than one repository
   asks for the count. A toast says what changed.
-- **CI pipelines.** A table of the trust policies: the name, what the policy accepts (less what
-  the name says), the CI system and the repositories it can publish to. Only a pipeline that is
-  off has a badge ("Off"); the switch on its page shows the state.
+- **CI pipelines.** A card per trust policy: the name, the CI system with the GitHub repository or
+  Jenkins host (less what the name says), its conditions (branches, tags, the workflow file, jobs)
+  as ticket badges, and up to three of the repositories it can publish to ("and N more").
+  The card opens the pipeline. Only a pipeline that is off has a badge ("Off"); the switch on its
+  page shows the state.
 - **CI pipeline page.** A new pipeline has four steps: where the job runs (GitHub Actions,
   Jenkins, another CI system), which runs can publish, the repositories, and the publish step for
-  the workflow or Jenkinsfile. The page builds the claims from answers a developer knows.
+  the workflow or Jenkinsfile. An admission ticket beside the steps (above Create on a narrow
+  window) fills in as the form is filled: the CI system and the jobs it admits, and the
+  repositories it admits them to. The page builds the claims from answers a developer knows.
   GitHub Actions: the repository `owner/name` (`repository`), branches and tags (`ref`, as
   `refs/heads/<b>` and `refs/tags/<t>`) and an optional workflow file (`workflow_ref`
   `<repo>/.github/workflows/<file>@*`); issuer `https://token.actions.githubusercontent.com`.
@@ -3841,12 +3961,15 @@ page are in `web/src/README.md`.
   (only a `/settings/` or `/repo/` path) is where Create and Cancel return. When the `base_url`
   setting is empty and the pipeline has no audience of its own, the page warns that CI jobs
   cannot publish and links to General.
-- **Signing keys page.** A table with the fingerprint and the repos that use each key (as links), a
-  public key download and delete (turned off while a repo uses the key). The new-key page creates
+- **Signing keys page.** A card per key with the end of its fingerprint (copy takes all of it),
+  the repos that use it (as links), when it was added, a public key download and delete (turned
+  off while a repo uses the key). The new-key page creates
   an Ed25519 key or imports an armored key with its passphrase.
-- **Networks page.** Downloaded lists show size, last refresh, error and a Refresh button. Your own
-  lists show size and what uses them. **New network list** is the action of the "Your lists" card.
-  The list page edits name, title, description and addresses, shows where the list is used, and
+- **Networks page.** A card per list, in two grids. A downloaded list shows its number of ranges,
+  what uses it, its last refresh, a badge when the last refresh failed, and a Refresh button. Your
+  own lists show their number of ranges, what uses them and when they were added. **New network
+  list** is the action of the "Your lists" section. The list page edits name, title, description
+  and addresses (a list of one range per row, 200 at a time), lists where the list is used, and
   deletes. A downloaded list shows its ranges read-only.
 - **Pasted addresses.** The network list editor, the Access tab (the Add addresses dialog of each rule) and
   the Network and proxy page take addresses through one paste box (`RangePaste`). The box sends the
@@ -3858,9 +3981,8 @@ page are in `web/src/README.md`.
   and other addresses, a list with remove buttons and the paste box) through the settings PATCH,
   and the IP lists of the trusted proxies (Cloudflare, and any other list) through
   `PUT /api/network/trusted-proxies`. A list that `TR_TRUSTED_PROXIES` names shows checked and
-  cannot change. For each
-  proxy candidate it shows "Requests from <address> carry forwarded headers. Is this your reverse
-  proxy?" and **Trust this address**. A Caddyfile hint takes its host from `base_url`. A setting
+  cannot change. The proxy candidates are a list of detected proxies: each the address, then the
+  header, the number of requests and when it was last seen, and **Trust**. A Caddyfile hint takes its host from `base_url`. A setting
   that an environment variable sets shows a badge and cannot change.
 - **General page.** One form with a section per settings group whose page is empty (see **Settings
   model**), with the labels and help of the server, for the groups whose permission the person
@@ -3868,26 +3990,29 @@ page are in `web/src/README.md`.
   groups on their own pages; each group names its page.
 - **Storage page.** The location card and, for an S3 bucket, the bucket card, each with **Test** in
   its footer. A running storage move is a card with progress, when the copier last saved it (`progress_at`)
-  and **Cancel**.
+  and **Cancel**. An ended move with failed files lists them: the path with a copy button, then
+  the reason.
 - **Edge delivery page** (`/#/settings/edge`, `edge.manage`, Server group). Status: on, stopping
   or off (and why the settings cannot run it), the Worker version with a badge when it is not the
   server's (before the first report: the Worker reports at its first gap check),
   the last gap check with its cadence (`gap_check_every`: the next check, or how late it is), the home bucket, and the last check of the Worker (a badge of its outcome,
   when, and its message). **Check now** in the header runs `POST /api/edge/check`; the page runs it
   by itself when it opens and every 30 seconds while the Worker has not reported the server's
-  version (a 429 of another tab is silent). Regions: a select of the home region above a
-  table of the six R2 location hints, each row with its area, "Serve from this region", the bucket
-  (default `<home bucket>-<hint>`) and the state (not used, filling, copying files, ready, waiting
-  for a deploy), the pointers waiting in the outbox ("Pointers waiting") and the last error; the
-  home row shows "Home bucket". Save
-  runs the group's **Test** first; a failed probe shows on its row and nothing is saved. Clearing a
+  version (a 429 of another tab is silent). Regions: a card for each of the six R2 location
+  hints (the select of the home region is in Settings, with the on switch and the access lifetime): its area, the state as a badge (not used, filling,
+  copying files, ready, waiting for a deploy), the bucket (an input while the region serves,
+  default `<home bucket>-<hint>`), the pointers waiting in the outbox when there are any, the last
+  error, and a "Serve from it" switch at the bottom; the home region's card shows "Home bucket"
+  and has no switch. Save
+  runs the group's **Test** first; a failed probe shows on its card and nothing is saved. Clearing a
   saved region asks first ("The server stops writing to the bucket ... Deploy the Worker again,
-  then delete the bucket in Cloudflare"). Backfill shows the progress of each filling region,
-  refreshed every 3 seconds, and what it waits for: edge delivery off (the Worker copies files only
+  then delete the bucket in Cloudflare"). The card of a filling region shows its progress,
+  refreshed every 3 seconds (pointers written of the total with a bar, the files missing), and
+  what it waits for: edge delivery off (the Worker copies files only
   while it is on), pointers being written (with the count waiting), the Worker's first gap check,
   the Worker of the server version, the first count of its files, or "Copying files" with the
   files missing, when that count last changed, and the copy pass that runs (or what the last pass
-  queued); under it the cadence of the count (`blob_check_every`) and of the Worker's copy
+  queued); under the cards the cadence of the count (`blob_check_every`) and of the Worker's copy
   (`gap_check_every`). Settings: `edge.enabled` and `edge.access_ttl`. Deploy: numbered
   steps: download the edge Worker (the one button, `GET /api/edge/worker.zip`; in its place the
   `worker_missing` sentence of the status when the build has none), unpack it and open a terminal
@@ -3895,15 +4020,16 @@ page are in `web/src/README.md`.
   for CI), `bun run provision` (with `CLOUDFLARE_ACCOUNT_ID` for a login with several accounts)
   and `bun run deploy`, each a `CodeSnippet`; when to repeat them; "Deploy needed" after a
   storage, region or version change; and behind a `LearnMore` the `wrangler.jsonc` of a checkout
-  in a `CodeBlock` with its download. Speed test (between Backfill and Settings, its own
+  in a `CodeBlock` with its download. Speed test (between Regions and Settings, its own
   component `pages/server/edge/SpeedTest.svelte`): a select of the files of
   `GET /api/edge/speedtest` (repo, file name and size; "Another file" takes a path or a whole
   address on this origin) and a select of the bucket: the home bucket and each ready region;
   **Run** downloads the file once from that bucket, **Run all** once from each bucket in turn. A
   run first sends a HEAD without a choice to learn the bucket the Worker picks for this browser.
-  The table has one row per bucket: the time to the first byte (its tooltip the `Server-Timing` of
-  the Worker), the total time and the speed, numbers right-aligned in tabular figures; the row of
-  the bucket the Worker picks is marked Nearest and the fastest Fastest, and a row says what
+  The results are a list with one row per bucket, ranked fastest total first (the runs that went
+  elsewhere, failed or still run after them): the bucket, the time to the first byte (its tooltip
+  the `Server-Timing` of the Worker) and the total time under it, and the speed at the end, in
+  tabular figures; the row of the bucket the Worker picks is marked Nearest and the fastest Fastest, and a row says what
   happened instead when the Worker did not read that bucket (served from another bucket, pass
   refused, or went to the server). A line under it
   says the times are from this browser's location and names the Cloudflare data center of
@@ -3918,7 +4044,7 @@ page are in `web/src/README.md`.
   field also names its term at the provider (Issuer URL, Client ID). The page tests the saved
   settings when it opens and shows the result only when the test fails. **Test** checks the unsaved
   edits and marks the fields that are wrong.
-- **Nexus migration.** A table of Nexus servers with their status, repositories, last check and
+- **Nexus migration.** A card for each Nexus server with its status, address, repositories and
   next check. Adding a server opens a dialog. A server's page shows its status as a badge and a
   line next to its title, then the repositories to copy (one pick table: repositories and
   proxies, then the groups with their members, then what cannot be copied; a click on a row picks
@@ -3926,9 +4052,11 @@ page are in `web/src/README.md`.
   details) and the connection. Sync now or Cancel the sync, Switch over and **Delete** are in the
   header; while a sync runs, Delete says "Cancel the sync first".
 - **Your account.**
-  - *Overview:* the role ("Administrator" or the phrase of the server permissions) by the title. Then a card each for
-    the repositories you can use, your devices and your recent publishes. The "You can" column of
-    the repositories shows only when the rows differ.
+  - *Overview:* an identity card with the avatar, the name and the role ("Administrator", the
+    phrase of the server permissions, or "Member"). Then two columns (one under 1024px): a card
+    with the repositories you can use, and a card each for your devices and your recent publishes.
+    Each card lists at most five rows, with **See all** to the full list (Browse, Devices,
+    Tokens). What you can do in a repository shows under its name only when the rows differ.
   - *Sign-in and security:* a Sign-in card with one row, "Password" and **Change**; **Change**
     opens a dialog (a single sign-on account sees "Single sign-on" and a line that sends it to the
     identity provider). A Two-step verification card lists the methods: each app, each passkey and
@@ -3936,8 +4064,12 @@ page are in `web/src/README.md`.
     The rows are plain rows in the card, with thin dividers between them.
     Without a second step, this card comes before the Sign-in card. A Recovery codes card shows
     when a second step exists.
-  - *Devices:* a table in a card. An empty list is one row "Devices · None yet".
-  - *Tokens:* read tokens and publish tokens, each in a card.
+  - *Devices:* a list in a card: each device's name, then the client, when it was last used and
+    when it expires; its state as a badge and **Revoke**. A holder of `people.manage` sees every
+    person's devices, each with the person's avatar and name. An empty list is one row.
+  - *Tokens:* read tokens and publish tokens, each a list in a card: a read token's name, when it
+    expires and when it was last used, and **Revoke**; a publish token's repository, where it came
+    from, when it started and ends, and its state as a badge.
 - **Ticket moments.** A new publish token prints as a felt ticket with the repository, the end
   time and its number; ending the token punches the ticket. The device approval page shows the
   device as a ticket with the code on its stub; approving tears the stub off. Each animation takes
@@ -4222,7 +4354,7 @@ holder reaches its routes, anyone else gets 403), `TestPipelinesPermission` (the
 scope) and `TestPeoplePicker` (`GET /api/people`). `registries_test.go` covers
 `TestPermissionRegistry` (the shape of `GET /api/permissions`, the server permissions in module
 start order, 400 for an unknown ID or an ID of the other scope, grants read back as IDs),
-`TestAuditActions` (`GET /api/audit/actions` and the events that services record: read tokens, CI
+`TestAuditFilters` (`actor`, `since` and `until` alone and with `action` and `repo`, keyset order, a bad time is 400, `GET /api/audit/people`), `TestDownloadStats` (what counts: 200, 206 with its range bytes; not HEAD, 304, 404 or 401; the totals, the days and the top repos of `GET /api/stats` after its flush; a deleted repo leaves; `days` 400; `activity.read` and a UI session only), `TestAuditActions` (`GET /api/audit/actions` and the events that services record: read tokens, CI
 pipelines, the first-start signing key, the bind of a new Debian repo's key), `TestSettingsS3Endpoint` (an empty endpoint needs a
 region, `r2` is refused, an unknown group's test is 404) and `TestSSOStartupGuard` (SSO settings
 and `signin.password_login=publishers` saved with one master key; after a restart with another the
@@ -4354,7 +4486,8 @@ Where each part of the code lives, and the steps to add a module, a repo format 
 | Signing keys | `internal/signing/keys.go`, `internal/signing/module.go` (the repo field `signing_key`), `GET /debian/{repo}/key.asc` in `internal/debian`; UI in `web/src/pages/server/SigningKeys.svelte` and `web/src/modules/signing/` |
 | Upload plan and upload | `Plan` and `Store` of the format (`format.Spec.Upload`), e.g. `internal/maven/plan.go`; routes in `internal/api/files.go`; UI in `web/src/pages/repo/UploadView.svelte` and `upload/` |
 | Snippets, CI files | `Usage` and `Tools` of the format (`format.CLITool`, `format.CLISnippet`); `internal/ci/workflow.go` (the GitHub Actions, Jenkinsfile and Jenkins freestyle builders, each with the install step of the CLI) |
-| Audit log | `internal/audit` (registry, `Record`), `internal/activity` (module `audit`: `GET /api/audit`), `web/src/pages/server/Activity.svelte` |
+| Audit log | `internal/audit` (registry, `Record`), `internal/activity` (module `audit`: `GET /api/audit`), `web/src/pages/server/Activity.svelte` (its time ranges in `activity/range.ts`) |
+| Download statistics | `internal/stats` (the counters), `assets.Reader.SetDownloads` and the count calls of the read path, `internal/activity` (`GET /api/stats`, the jobs), `web/src/pages/settings/overview/DownloadBars.svelte` |
 | Edge delivery | `internal/edge` (module `edge`: `module.go` buckets and routes, `settings.go` the group `edge`, `objects.go` the R2 objects, `watcher.go` the pipeline watcher, `outbox.go` the job `edge.outbox`, `access.go` the access objects, the change notices and `edge.reconcile`, `control.go` the job `edge.backfill` (on, off, draining, regions, blob check), `gap.go` and `seen.go` what the Worker writes, `speedtest.go` the passes and files of the speed test, `wrangler.go`, `api.go` with the download `worker.zip`); `format.Spec.Edge` of each format; the Worker in `edge/` (`src/index.ts` fetch, `shapes.ts`, `glob.ts` the port of `format.Glob`, `access.ts`, `serve.ts`, `copy.ts` queue, `gap.ts` cron, `speedtest.ts` the pass of the speed test, `scripts/provision.ts`); the Worker folder that the server embeds (`internal/edgedist`) and the release archive, both from `tools/task/edge.go`; UI in `web/src/pages/server/EdgeDelivery.svelte` and `web/src/modules/edge/`; e2e of the Worker download in `e2e/edge_test.go`, none of the serving (local R2 differs from R2 in what the edge relies on) |
 | Backups and restore | `internal/backup` (module `backup`: `backup.go` one backup, `list.go` the list and the retention, `restore.go`, `offline.go` the source of the CLI, `module.go` settings, job and routes), the core queries in `internal/db/queries/backup.sql`, `db.VacuumInto` and `db.OpenReadOnly`, the commands in `cmd/telesphorepo-server/backup.go`, `web/src/pages/server/Backups.svelte` and `web/src/modules/backup/`; e2e in `e2e/backup_test.go` |
 | Storage move (FS ↔ S3) | `internal/move` (module `storage`: service, copier, `module.go`), `internal/storage/mirror.go`, `web/src/pages/server/Storage.svelte` |
@@ -4421,9 +4554,9 @@ and an importer plan. `maven` shows proxy, group, `Merge`, `Upload` and `Tools`.
 
 1. Create `web/src/pages/<area>/<Name>.svelte` with `let { params, query }: PageProps = $props();`.
 2. Add one `PageDef` to the owning module's `web/src/modules/<id>/module.ts`: `path`, lazy
-   `page`, `layout` (`app` or `settings`), `access` (`any`, `user`, `repositories`, `repo` or a
+   `page`, `layout` (`app`, `settings` or `account`), `access` (`any`, `user`, `repositories`, `repo` or a
    permission ID), `title`, and `setup` for a page of a setup-only session.
-3. For a Settings page, give it `nav` (group, label, icon, order).
+3. For a Settings or account page, give it `nav` (group, label, icon, order).
 4. Add the route to the table in `web/src/README.md`.
 5. Call the API through `api.*`. For a new server route, add a function and its type in
    `web/src/lib/api/`. A format module keeps the calls to its own routes in its own folder.

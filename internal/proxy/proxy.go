@@ -587,7 +587,7 @@ func (s *Service) store(ctx context.Context, repo *repos.Repo, p repopath.Path, 
 		live.Abort()
 		return nil, err
 	}
-	live.End()
+	live.End(r.Asset)
 	return r.Asset, nil
 }
 

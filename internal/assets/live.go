@@ -20,6 +20,7 @@ type Live struct {
 	w      http.ResponseWriter
 	rc     *http.ResponseController
 	header func(h http.Header)
+	count  func(repo, bytes int64) // the download counter of the reader; nil counts nothing
 
 	started bool   // the answer's headers went out
 	broken  bool   // the answer cannot complete: the client went away, or the fetch failed
@@ -38,7 +39,7 @@ func (rd *Reader) Live(w http.ResponseWriter, r *http.Request, header func(h htt
 			return nil
 		}
 	}
-	return &Live{w: w, rc: http.NewResponseController(w), header: header}
+	return &Live{w: w, rc: http.NewResponseController(w), header: header, count: rd.count}
 }
 
 // Begin sends the headers of the answer: 200 with ct, the remote's Last-Modified modified and the
@@ -88,13 +89,17 @@ func (l *Live) send() {
 	l.held = l.held[:0]
 }
 
-// End sends the held block after the commit: the answer is complete.
-func (l *Live) End() {
+// End sends the held block after the commit of a: the answer is complete, and it counts as a
+// download of a when the client took all of it.
+func (l *Live) End(a *Asset) {
 	if l == nil || !l.started {
 		return
 	}
 	l.send()
 	_ = l.rc.SetWriteDeadline(time.Time{})
+	if !l.broken && l.count != nil && a != nil {
+		l.count(a.RepoID, a.Size)
+	}
 }
 
 // Abort drops the held block: the answer that started is aborted (Done).

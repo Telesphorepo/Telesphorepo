@@ -82,6 +82,7 @@ func Module() module.Module {
 				return a.h.DB.Optimize(ctx)
 			}})
 			a.registerPipeline(x)
+			x.RootPrefix("/identity/") // the logo of the server
 			x.Routes(a.routes)
 		},
 	}
@@ -152,6 +153,7 @@ func (a *API) routes(mux *route.Router) {
 
 	a.registerAccess(mux)
 	a.registerRepoKinds(mux)
+	a.registerIdentity(mux)
 
 	mux.Handle("/api/", route.Public, func(w http.ResponseWriter, r *http.Request, _ *route.Call) {
 		httpx.Error(w, r, http.StatusNotFound, "not found")

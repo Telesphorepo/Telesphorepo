@@ -3,9 +3,12 @@ package settings
 import (
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/url"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/config"
 	"github.com/Telesphorepo/Telesphorepo/internal/perm"
@@ -60,7 +63,48 @@ var (
 		Help: "The path of a PEM file with the certificate chain of the server. With a key file too, the server serves HTTPS with HTTP/2 itself. A renewed file applies at the next connection. Turning TLS on or off applies at the next start."})
 	TLSKeyFile = String(&Def{Key: "tls.key_file", Label: "TLS key file", Normalize: Trim,
 		Help: "The path of the PEM file with the private key of the TLS certificate. Turning TLS on or off applies at the next start."})
+	ServerName = String(&Def{Key: "server_name", Label: "Server name", Normalize: Trim, Validate: validName,
+		Help: "The name that the top bar, the sign-in page and the browser tab show. Empty shows Telesphorepo."})
+	ServerLogo = Image(&Def{Key: "server_logo", Label: "Logo", Validate: validLogo,
+		Help: "A PNG, JPEG or WebP image of at most 256 KiB and 512 pixels on its long side, shown before the server name."})
 )
+
+// The limits of the server name and the logo.
+const (
+	MaxNameLength = 64
+	MaxLogoBytes  = 256 << 10
+	MaxLogoSide   = 512
+)
+
+// validName refuses a server name longer than MaxNameLength characters or with a control
+// character.
+func validName(v any) error {
+	s := v.(string)
+	if utf8.RuneCountInString(s) > MaxNameLength {
+		return fmt.Errorf("must be at most %d characters", MaxNameLength)
+	}
+	if strings.ContainsFunc(s, unicode.IsControl) {
+		return errors.New("must not hold control characters")
+	}
+	return nil
+}
+
+// validLogo refuses a logo that is not a PNG, JPEG or WebP image by its bytes, that is larger
+// than MaxLogoBytes, or that is more than MaxLogoSide pixels on its long side.
+func validLogo(v any) error {
+	b := v.([]byte)
+	if len(b) > MaxLogoBytes {
+		return fmt.Errorf("must be at most %d KiB", MaxLogoBytes>>10)
+	}
+	_, w, h, err := RasterImage(b)
+	if err != nil {
+		return err
+	}
+	if max(w, h) > MaxLogoSide {
+		return fmt.Errorf("must be at most %d pixels on its long side; this image is %d × %d", MaxLogoSide, w, h)
+	}
+	return nil
+}
 
 // validateGeneral checks the TLS files: both or neither, readable, and a pair that parses.
 func validateGeneral(d *Draft, _ Mode) error {
@@ -86,6 +130,7 @@ func General() *Group {
 	return &Group{ID: "general", Label: "General", Perm: perm.SettingsGeneral, Defs: []*Def{
 		BaseURL.Def(), LogLevel.Def(), MaxUploadSize.Def(), MaxJSONSize.Def(), CookieSecure.Def(), SessionTTL.Def(),
 		IndexDebounce.Def(), IndexMaxDelay.Def(), BlobsGCGrace.Def(), UploadSessionTTL.Def(), TLSCertFile.Def(), TLSKeyFile.Def(),
+		ServerName.Def(), ServerLogo.Def(),
 	}, Validate: validateGeneral}
 }
 
