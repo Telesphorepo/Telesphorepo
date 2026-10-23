@@ -122,7 +122,7 @@
 <AccessPart
   icon={NetworkIcon}
   title={rules.length ? `Only from ${whereFrom(rules, lists)}` : "From any network"}
-  help={rules.length ? `${whom} must come from one of these networks, for everyone, administrators too.` : `${whom} can come from anywhere.`}
+  help={rules.length ? `${whom} must come from one of these networks, for everyone, administrators too.` : `For ${whom.toLowerCase()}.`}
 >
   {#snippet actions()}
     {#if editable && editing}

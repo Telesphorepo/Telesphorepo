@@ -26,7 +26,7 @@
   import DatabaseIcon from "@lucide/svelte/icons/database";
   import LaptopIcon from "@lucide/svelte/icons/laptop";
   import UploadIcon from "@lucide/svelte/icons/upload";
-  import { cliName, deviceState, noDevices, tokenSource, tokenState } from "./words";
+  import { deviceState, noDevices, tokenSource, tokenState } from "./words";
 
   let {}: PageProps = $props();
 
@@ -108,7 +108,7 @@
       <ItemList source={listOf(devices, (d) => d.slice(0, SHOWN))} caption="Your devices" key={(d) => d.id} href={() => href("/account/devices")}>
         {#snippet leading()}<LaptopIcon class="size-5" />{/snippet}
         {#snippet title(d)}{d.name}{/snippet}
-        {#snippet meta(d)}{cliName} · {#if d.last_used_at}used <RelativeTime at={d.last_used_at} />{:else}never used{/if}{/snippet}
+        {#snippet meta(d)}{#if d.last_used_at}Used <RelativeTime at={d.last_used_at} />{:else}Never used{/if}{/snippet}
         {#snippet trailing(d)}
           {@const state = deviceState(d)}
           <StatusBadge tone={state.tone}>{state.word}</StatusBadge>
@@ -136,7 +136,7 @@
           <CompactEmpty
             icon={UploadIcon}
             text={canPublish && publishCount
-              ? "Each publish from your computer or from this site shows here."
+              ? "None yet."
               : "You cannot publish to a repository yet. Ask a person who manages its access for the Publish permission."}
           />
         {/snippet}

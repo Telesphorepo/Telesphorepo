@@ -48,7 +48,7 @@ func sourceSnippets(repo *repos.Repo, baseURL, snippetContext string) []format.S
 	url := baseURL + "/nuget/" + repo.Name + "/index.json"
 	note := "Put the file next to the solution. dotnet reads it for every project below it."
 	if !repo.AnonymousRead {
-		note += " Create a read token on Settings › Tokens. In CI, write %NUGET_USERNAME% and %NUGET_TOKEN% instead and set those variables."
+		note += " Create a read token on Your account › Tokens. In CI, write %NUGET_USERNAME% and %NUGET_TOKEN% instead and set those variables."
 	}
 	out := []format.Snippet{{ID: "nuget-config.source", Tool: "nuget-config", Purpose: format.SnippetUse, Context: snippetContext,
 		File: "nuget.config", Title: "nuget.config", Lang: "xml", Code: nugetConfig(repo, url), Note: note}}
@@ -57,7 +57,7 @@ func sourceSnippets(repo *repos.Repo, baseURL, snippetContext string) []format.S
 	if !repo.AnonymousRead {
 		cmd = format.ReadTokenPrompt + "\ndotnet nuget add source " + url + " --name " + repo.Name +
 			" \\\n  --username YOUR_USERNAME --password \"$READ_TOKEN\" --store-password-in-clear-text\n"
-		cmdNote += " Create a read token on Settings › Tokens. Enter it at the prompt."
+		cmdNote += " Create a read token on Your account › Tokens. Enter it at the prompt."
 	}
 	if strings.HasPrefix(url, "http://") {
 		cmdNote += " A source on plain http also needs allowInsecureConnections=\"true\" in nuget.config."
@@ -78,7 +78,7 @@ func (h *Handler) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
 }
 
 // ciNote goes under the CI files of the dotnet tool.
-const ciNote = "The CLI uses the job's identity token, so the job stores no secret. Commit telesphorepo.toml first: Set up a project on this tab writes it."
+const ciNote = "Commit telesphorepo.toml first: Set up a project on this tab writes it."
 
 // tools are the build tools that publish to NuGet repos: the Telesphorepo CLI packs with dotnet
 // and pushes. The CI job needs the .NET SDK.

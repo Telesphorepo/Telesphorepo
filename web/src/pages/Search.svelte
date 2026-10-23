@@ -157,7 +157,8 @@
       <div class="flex min-w-0 items-center gap-3">
         {#if format}<FormatIcon {format} class="size-5" />{/if}
         <h2 class="min-w-0 truncate text-section"><a href={href(filesPath(r.repo))} class="hover:underline">{r.repo}</a></h2>
-        <span class="shrink-0 text-meta text-muted-foreground">{count(r.files, "file", "files")}</span>
+        <!-- With one repository the count over the results says it. -->
+        {#if groups.repos.length > 1}<span class="shrink-0 text-meta text-muted-foreground">{count(r.files, "file", "files")}</span>{/if}
       </div>
       {#if !repo && groups.repos.length > 1}
         <div data-slot="header-actions" class="flex shrink-0">

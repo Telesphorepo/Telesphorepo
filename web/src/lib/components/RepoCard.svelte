@@ -1,7 +1,7 @@
 <!--
   A repository as a card (Home, Browse, Publish), the same fields in the same places whatever its
   kind: the format icon, the name with a lock after a private one, the description up to two lines,
-  and at the bottom the kind in plain words ("Hosted", "Group of 3 repositories"). The whole card is
+  and at the bottom the kind of a proxy or a group in plain words ("Group of 3 repositories"). The whole card is
   the link. No counts, sizes or times: Settings › Repositories (RepoTable) and the details of a
   repository's top folder show them.
 
@@ -19,7 +19,10 @@
   let { repo, href }: { repo: Repo; href: string } = $props();
 </script>
 
-<ItemCard title={repo.name} {href} titleClass="text-section">
+{#snippet kind()}<span>{kindPhrase(repo)}</span>{/snippet}
+
+<!-- A repository of your own is the default kind and says nothing; a proxy or a group says what it is. -->
+<ItemCard title={repo.name} {href} titleClass="text-section" actions={repo.kind === "hosted" ? undefined : kind}>
   {#snippet icon()}<FormatIcon format={repo.format} class="size-6" />{/snippet}
   {#snippet badges()}
     {#if !repo.anonymous_read}
@@ -29,5 +32,4 @@
     {/if}
   {/snippet}
   {#if repo.description}<p class="line-clamp-2 text-body" title={repo.description}>{repo.description}</p>{/if}
-  {#snippet actions()}<span>{kindPhrase(repo)}</span>{/snippet}
 </ItemCard>

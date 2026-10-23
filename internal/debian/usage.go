@@ -76,7 +76,7 @@ func aptAuth(url, repo, snippetContext string) format.Snippet {
 			"sudo install -m 600 /dev/null " + file + "\n" +
 			"printf 'machine %s login YOUR_USERNAME password %s\\n' " + url + " \"$READ_TOKEN\" \\\n" +
 			"  | sudo tee -a " + file + " > /dev/null\n",
-		Note: "Create a read token on Settings › Tokens. Enter it at the prompt."}
+		Note: "Create a read token on Your account › Tokens. Enter it at the prompt."}
 }
 
 // ArtifactUsage returns the snippets of one package. p is a package folder of the pool (with

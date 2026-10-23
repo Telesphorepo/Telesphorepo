@@ -141,7 +141,7 @@
       >
     {/snippet}
     {#snippet empty()}
-      <CompactEmpty icon={LayersIcon} title="Members" state="None" text="The group serves no files until you add a repository to it.">
+      <CompactEmpty icon={LayersIcon} text="None. The group serves no files until you add a repository to it.">
         {@render addButton()}
       </CompactEmpty>
     {/snippet}

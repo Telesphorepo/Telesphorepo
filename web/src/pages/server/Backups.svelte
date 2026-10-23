@@ -137,7 +137,7 @@
     {/if}
   {/snippet}
   {#if !dir && !settings.loading}
-    <CompactEmpty icon={ArchiveIcon} title="Backups" state="Off" text="Set a backup folder below to turn them on." />
+    <CompactEmpty icon={ArchiveIcon} text="Off until you set a backup folder below." />
   {:else}
     {#snippet marks(b: Backup)}
       {#if !b.complete}
@@ -148,7 +148,7 @@
       {/if}
     {/snippet}
     {#snippet none()}
-      <CompactEmpty icon={ArchiveIcon} title="Backups" state="None yet" text="The first backup runs within a minute, or now with Back up now." />
+      <CompactEmpty icon={ArchiveIcon} text="None yet. The first backup runs within a minute, or now with Back up now." />
     {/snippet}
     <!-- A handful of backups are cards; the number kept can be large, and many are a list. -->
     {#if source.items.length > 12}

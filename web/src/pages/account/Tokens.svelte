@@ -177,7 +177,7 @@
         >
       {/snippet}
       {#snippet empty()}
-        <CompactEmpty icon={KeyRoundIcon} text="None yet. Create one for each build or script that downloads.">
+        <CompactEmpty icon={KeyRoundIcon} text="None yet. Give each build or script its own.">
           <Button size="sm" variant="outline" onclick={startRead}><PlusIcon />New read token</Button>
         </CompactEmpty>
       {/snippet}
@@ -249,7 +249,7 @@
           icon={UploadIcon}
           text={noRepo
             ? "You cannot publish to a repository yet. Ask a person who manages its access for the Publish permission."
-            : "A token shows here each time you, the Telesphorepo CLI or this site publishes."}
+            : "None yet. The Telesphorepo CLI and this site create one for each publish."}
         >
           {#if writable.length}<Button variant="outline" size="sm" onclick={startPublish}><PlusIcon />New publish token</Button>{/if}
         </CompactEmpty>

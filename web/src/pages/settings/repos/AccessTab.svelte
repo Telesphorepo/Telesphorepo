@@ -249,7 +249,8 @@
     {#if admins.length}
       <li>
         <Button variant="ghost" size="sm" aria-expanded={open} onclick={() => (adminsOpen[which] = !open)}>
-          {open ? "Hide administrators" : adminCount(admins.length)}<ChevronDownIcon class="transition-transform {open ? 'rotate-180' : ''}" />
+          <!-- The title above counts them. -->
+          {open ? "Hide administrators" : "Show administrators"}<ChevronDownIcon class="transition-transform {open ? 'rotate-180' : ''}" />
         </Button>
       </li>
     {/if}
@@ -303,7 +304,8 @@
       <!-- A group or a proxy takes no publishes, so it has no pipelines and no networks for them. -->
       {#if blocked?.code !== "read_only_kind"}
         <Separator />
-        <AccessPart title="CI pipelines" help="A CI job publishes with the token of its CI system, without the account of a person.">
+        <!-- With no pipeline the empty row says what one is. -->
+        <AccessPart title="CI pipelines" help={ciNow.length ? "A CI job publishes with the token of its CI system, without the account of a person." : undefined}>
           {#snippet actions()}
             {#if canPipelines}<Button variant="outline" size="sm" onclick={() => (ciOpen = true)}><PlusIcon />Add CI pipeline</Button>{/if}
           {/snippet}

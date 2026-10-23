@@ -51,7 +51,7 @@ func setupSnippets(repo *repos.Repo, baseURL, snippetContext string) []format.Sn
 	}
 	pipNote := note
 	if private {
-		pipNote = strings.TrimSpace("Create a read token on Settings › Tokens. pip reads the credentials from the address. " + note)
+		pipNote = strings.TrimSpace("Create a read token on Your account › Tokens. pip reads the credentials from the address. " + note)
 	}
 	pipConfText := "[global]\nindex-url = " + pipURL + "\n"
 	// pip ignores an http index unless its host is trusted (or is localhost).
@@ -67,7 +67,7 @@ func setupSnippets(repo *repos.Repo, baseURL, snippetContext string) []format.Sn
 	if private {
 		env := uvEnvName(uvName)
 		out = add(out, "uv", "credentials", "", "Credentials", "sh", format.ReadTokenPrompt+"\nexport UV_INDEX_"+env+"_USERNAME=YOUR_USERNAME\nexport UV_INDEX_"+env+"_PASSWORD=\"$READ_TOKEN\"\n",
-			"Create a read token on Settings › Tokens. In CI, set UV_INDEX_"+env+"_USERNAME and UV_INDEX_"+env+"_PASSWORD as secrets.")
+			"Create a read token on Your account › Tokens. In CI, set UV_INDEX_"+env+"_USERNAME and UV_INDEX_"+env+"_PASSWORD as secrets.")
 	}
 	poetry := "poetry source add --priority=primary " + repo.Name + " " + index + "\n"
 	if private {
@@ -90,7 +90,7 @@ func (h *Handler) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
 }
 
 // ciNote goes under the CI files of the PyPI tools.
-const ciNote = "The CLI uses the job's identity token, so the job stores no secret. Commit telesphorepo.toml first: Set up a project on this tab writes it."
+const ciNote = "Commit telesphorepo.toml first: Set up a project on this tab writes it."
 
 // tools are the build tools that publish to PyPI repos: the CLI builds with them and uploads the
 // files.

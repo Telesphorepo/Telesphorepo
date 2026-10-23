@@ -527,7 +527,12 @@
             <span class="w-4 shrink-0 text-section text-muted-foreground tabular-nums">1</span>
             <div class="flex min-w-0 grow flex-col gap-2">
               <p class="text-label">Download the edge Worker</p>
-              {#if wrangler.error && !wrangler.data}
+              {#if wrangler.error && !wrangler.data && wrangler.error === st?.check_unfit}
+                <!-- The reason shows under Status. -->
+                <div>
+                  <Button variant="outline" size="sm" disabled><DownloadIcon aria-hidden="true" />Download the edge Worker</Button>
+                </div>
+              {:else if wrangler.error && !wrangler.data}
                 <ErrorState error={wrangler.error} title="The Worker configuration did not load" onRetry={wrangler.reload} inline />
               {:else if st?.worker_missing}
                 <p class="text-meta text-muted-foreground">{st.worker_missing}</p>
@@ -581,7 +586,7 @@
             <span class="w-4 shrink-0 text-section text-muted-foreground tabular-nums">7</span>
             <div class="flex min-w-0 grow flex-col gap-2">
               <p class="text-label">Turn on Edge delivery under Settings above, and save</p>
-              <p class="text-meta text-muted-foreground">The switch turns on once the Worker reports its version. Select Check now, under Status, to see it at once.</p>
+              <p class="text-meta text-muted-foreground">If you cannot turn it on yet, select Check now under Status.</p>
             </div>
           </li>
         </ol>

@@ -9,7 +9,9 @@
   on a sub-page (Settings › People and CI › CI pipelines › acme/app); on an account page Your
   account › item. `crumbs` replaces what
   follows the group when the page sits deeper (Settings › Repositories › maven › Access). A Browse
-  page shows breadcrumbs only when it passes `crumbs` (its whole trail).
+  page shows breadcrumbs only when it passes `crumbs` (its whole trail). The title names the page,
+  so the trail shows up to its parent (Settings › People and CI › CI pipelines over acme/app), and
+  not at all when no step of it is a link.
 
     <PageHeader title="Devices" description="Computers that publish with the publisher client of their build tool.">
       {#snippet actions()}<Button href={href("/device")}>Approve a device</Button>{/snippet}
@@ -50,10 +52,17 @@
     if (back) return [{ label: "Repositories", href: href("/browse") }, { label: back.label, href: back.href }, { label: title }];
     return [];
   });
+  // The title names the current page, so the trail ends at its parent; a trail with no link left
+  // (the first page of an area) shows nothing.
+  const shown = $derived.by((): Crumb[] => {
+    const last = trail.at(-1);
+    const steps = last && !last.href && last.label === title ? trail.slice(0, -1) : trail;
+    return steps.some((c) => c.href) ? steps : [];
+  });
 </script>
 
 <header class="mb-(--header-gap)">
-  {#if trail.length}<div class="mb-3"><Breadcrumbs items={trail} /></div>{/if}
+  {#if shown.length}<div class="mb-3"><Breadcrumbs items={shown} /></div>{/if}
   <div class="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
     <div class="min-w-0 grow basis-64">
       <div class="flex flex-wrap items-center gap-x-3 gap-y-2">

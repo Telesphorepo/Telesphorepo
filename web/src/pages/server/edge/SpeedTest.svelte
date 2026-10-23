@@ -262,7 +262,8 @@
     {@const data = files.data}
     <div class="flex flex-col gap-6">
       {#if data.unfit}
-        <p class="text-body">The speed test needs edge delivery set up: {data.unfit}.</p>
+        <!-- The reason shows under Status when it is the same one. -->
+        <p class="text-body">The speed test needs edge delivery set up{data.unfit === status.check_unfit ? "." : `: ${data.unfit}.`}</p>
       {:else if !onBase}
         <p class="text-body">
           Open this page at <a class="text-link underline-offset-4 hover:underline" href="{baseURL}/#/settings/edge">{baseURL}</a> to run the

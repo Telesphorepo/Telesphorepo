@@ -21,7 +21,7 @@
   import RelativeTime from "$lib/components/RelativeTime.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import LaptopIcon from "@lucide/svelte/icons/laptop";
-  import { cliName, deviceState, noDevices } from "./words";
+  import { deviceState, noDevices } from "./words";
 
   let {}: PageProps = $props();
 
@@ -58,7 +58,7 @@
     {/snippet}
     {#snippet title(d)}{d.name}{#if admin && d.username}<span class="text-muted-foreground"> · {d.username}</span>{/if}{/snippet}
     {#snippet meta(d)}
-      {cliName} · {#if d.last_used_at}used <RelativeTime at={d.last_used_at} />{:else}never used{/if}{#if !d.revoked_at}
+      {#if d.last_used_at}Used <RelativeTime at={d.last_used_at} />{:else}Never used{/if}{#if !d.revoked_at}
         · {new Date(d.expires_at) < new Date() ? "expired" : "expires"} <RelativeTime at={d.expires_at} />{/if}
     {/snippet}
     {#snippet trailing(d)}

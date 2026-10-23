@@ -204,7 +204,8 @@
   {/if}
 
   {#if downloads}
-    <Section title="Downloads" description="The last {statDays} days, by day in UTC.">
+    <!-- With no downloads the empty row names the span itself. -->
+    <Section title="Downloads" description={downloads.data?.downloads === 0 ? undefined : `The last ${statDays} days, by day in UTC.`}>
       {#if downloads.loading && !downloads.data}
         <Loading rows={3} />
       {:else if downloads.error && !downloads.data}

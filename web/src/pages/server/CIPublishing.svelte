@@ -48,7 +48,7 @@
       </ItemCard>
     {/snippet}
     {#snippet empty()}
-      <CompactEmpty icon={WorkflowIcon} text="Let GitHub Actions or Jenkins publish with no stored password, and see the build behind each file.">
+      <CompactEmpty icon={WorkflowIcon} text="None yet. Each file that a pipeline publishes links to the build that made it.">
         <Button variant="outline" href={newPipeline}><PlusIcon />New CI pipeline</Button>
       </CompactEmpty>
     {/snippet}

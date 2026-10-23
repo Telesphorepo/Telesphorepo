@@ -1,7 +1,6 @@
 <!--
-  One person (People). The identity card shows the avatar, the role (Administrator, the phrase of
-  the server permissions, or Member), how the person signs in and a disabled account, with the
-  account actions. Server permissions holds the role (ServerPermissionPicker: Member,
+  One person (People). The identity card shows the avatar, how the person signs in, the email and
+  a disabled account, with the account actions; the role shows once, in Server permissions. Server permissions holds the role (ServerPermissionPicker: Member,
   Administrator, or Custom with one switch per permission); the save bar saves it after a
   confirm. For an account whose permissions single sign-on manages, the section shows the role and
   the permissions read-only, with a link to Sign-in options for a person who can open it. The
@@ -19,7 +18,7 @@
   import { Keyset, Resource, type TableSource } from "$lib/load.svelte";
   import { href, repoPath, repoSettingsPath } from "$lib/router.svelte";
   import { auth } from "$lib/auth.svelte";
-  import { allReposPermissions, labelOf, repoPhrase, serverPhrase, serverRole, sortServerPermissions } from "$lib/permissions";
+  import { allReposPermissions, labelOf, repoPhrase, serverRole, sortServerPermissions } from "$lib/permissions";
   import { count, someNames } from "$lib/words";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
@@ -256,13 +255,12 @@
       <div class="flex min-w-0 grow basis-64 items-center gap-4">
         <UserAvatar name={u.username} size="lg" />
         <div class="min-w-0">
-          <p class="flex flex-wrap items-center gap-2 text-section">
-            {serverPhrase(u.permissions) || "Member"}
+          <!-- The role shows once, in Server permissions below. -->
+          <p class="flex flex-wrap items-center gap-2 text-label">
+            {sso ? "Signs in with single sign-on" : "Signs in with a password"}
             {#if u.disabled}<StatusBadge tone="warning">Disabled</StatusBadge>{/if}
           </p>
-          <p class="mt-1 truncate text-meta text-muted-foreground" title={u.email || undefined}>
-            {sso ? "Signs in with single sign-on" : "Signs in with a password"}{#if u.email} · {u.email}{/if}
-          </p>
+          {#if u.email}<p class="mt-1 truncate text-meta text-muted-foreground" title={u.email}>{u.email}</p>{/if}
         </div>
       </div>
       <div data-slot="header-actions" class="flex flex-wrap items-center gap-2">

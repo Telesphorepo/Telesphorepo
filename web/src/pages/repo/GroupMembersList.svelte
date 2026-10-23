@@ -41,7 +41,7 @@
     {/snippet}
     {#snippet meta(m)}{kindPhrase(m)}{/snippet}
     {#snippet empty()}
-      <CompactEmpty icon={LayersIcon} title="Members" state="None" text="The group serves no files until a person with Edit settings adds a repository to it.">
+      <CompactEmpty icon={LayersIcon} text="None. The group serves no files until a person with Edit settings adds a repository to it.">
         {#if repo.permissions?.includes("repo.settings")}
           <Button variant="outline" href={href(repoSettingsPath(repo.name))}>Add repositories</Button>
         {/if}

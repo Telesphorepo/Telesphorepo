@@ -1,8 +1,8 @@
 <!--
-  Where the page sits: a trail of links that ends with the current page. Settings pages get it from
-  PageHeader (Settings › Repositories › maven › Access); a Browse page passes its own trail to
-  PageHeader `crumbs`. Every step but the last is a link; a long step truncates and shows its
-  full text on hover.
+  Where the page sits: a trail of links. PageHeader ends it at the parent of the page, since the
+  title under it names the page (Settings › Repositories over the title maven); a Browse page
+  passes its own trail to PageHeader `crumbs`. A step with `href` is a link; a last step without
+  one is the current page. A long step truncates and shows its full text on hover.
 
     <Breadcrumbs items={[{ label: "Settings", href: "#/settings" }, { label: "Repositories", href: "#/settings/repositories" }, { label: "maven" }]} />
 
@@ -36,7 +36,7 @@
     {#each items as c, i (i)}
       {@const last = i === items.length - 1}
       <li class="flex min-w-0 items-center {path ? 'gap-1.5' : 'gap-1'}">
-        {#if c.href && !last}
+        {#if c.href && !(last && path)}
           <a
             href={c.href}
             title={c.label.length > 24 ? c.label : undefined}
@@ -45,7 +45,7 @@
           >
         {:else}
           <span
-            aria-current={last ? "page" : undefined}
+            aria-current={last && !c.href ? "page" : undefined}
             title={c.label.length > 24 ? c.label : undefined}
             class="block max-w-[16rem] truncate {last ? 'text-foreground' : ''} {last && path ? 'font-medium' : ''}">{c.label}</span
           >

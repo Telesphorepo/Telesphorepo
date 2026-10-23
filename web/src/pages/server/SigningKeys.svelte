@@ -114,7 +114,7 @@
       </ItemCard>
     {/snippet}
     {#snippet empty()}
-      <CompactEmpty icon={FileKeyIcon} text="None yet. A repository that signs its indexes needs a key, so clients can check them.">
+      <CompactEmpty icon={FileKeyIcon} text="None yet.">
         <Button variant="outline" href={newKey}><PlusIcon />New signing key</Button>
       </CompactEmpty>
     {/snippet}

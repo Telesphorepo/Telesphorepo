@@ -3913,8 +3913,8 @@ page are in `web/src/README.md`.
   holds a filter box, a format select ("All formats" first, then each format present with its
   icon) and **New repository** (`repositories.all`) at the end. The repos are cards sorted by name (three columns wide, two medium, one on
   a phone), the same for every kind: the format icon, the name (with a lock when the repo is
-  private), the description up to two lines, and at the bottom the kind in plain words ("Hosted",
-  "Proxy of a remote repository", "Group of 3 repositories"). Files, size and last publish show in
+  private), the description up to two lines, and at the bottom the kind of a proxy or a group in plain words
+  ("Proxy of a remote repository", "Group of 3 repositories"; a hosted repo has no such line). Files, size and last publish show in
   Settings › Repositories and in the details of a repo's top folder. The whole card opens the repo.
 - **Publish** (`/#/publish`, signed in). The hosted repos the person holds `repo.publish` on (read
   from `Repo.permissions` of `GET /api/repos`; a group is not listed, since its publishes go to a
@@ -4076,7 +4076,9 @@ page are in `web/src/README.md`.
     zone (Today, Last 7 days, Last 30 days, or Custom from one day to another); the events show by
     day).
   - Breadcrumbs follow the hierarchy: Settings, the group, the page (Your account, the page on an
-    account page). A sub-page of the first item of a group does not repeat that item.
+    account page), and end at the parent of the page, since the title under them names it. A
+    sub-page of the first item of a group does not repeat that item. A trail with no link left is
+    not shown.
 - **Repository settings.** A page with the tabs Overview, Access, Format settings and Signing
   (Debian). Overview, Format settings, Signing and Remote need `repo.settings`; Access needs a permission
   that manages the repository (`repo.access`, `repo.settings`, `ci.pipelines`, ...). A person sees only the tabs they can open, and a link to a tab they
@@ -4133,8 +4135,8 @@ page are in `web/src/README.md`.
   a badge: "Administrator" for a person with every server permission, else the phrase of the
   server permissions held, or none. Under the name: the email, the sign-in method (only when
   someone uses single sign-on) and when the account was added. A row opens the
-  person's page (`/#/settings/people/{name}`): an identity card (avatar, role, how the person
-  signs in, a Disabled badge) with Reset password (only for a person whose permissions the caller
+  person's page (`/#/settings/people/{name}`): an identity card (avatar, how the person signs in,
+  the email, a Disabled badge; the role shows only under Server permissions) with Reset password (only for a person whose permissions the caller
   all holds) and Disable account or Enable account; then the server permissions as a role:
   Member (none), Administrator (every one) or Custom, which lists one switch per server permission
   under the Settings sidebar group of its page. A permission that another switched-on one needs is

@@ -141,7 +141,7 @@ func (f *Format) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
 	if !repo.AnonymousRead {
 		curl = format.ReadTokenPrompt + "\n" + format.ReadTokenConfig + " | curl -fLO -K - " + u
 		wget = "wget --user YOUR_USERNAME --ask-password " + u
-		note = "Create a read token on Settings › Tokens; it works where a password does. Enter it at the prompt."
+		note = "Create a read token on Your account › Tokens; it works where a password does. Enter it at the prompt."
 	}
 	return []format.Snippet{
 		{ID: "curl.download", Tool: "curl", Purpose: format.SnippetUse, Context: format.SnippetRepo, Title: "Download a file", Lang: "sh", Code: curl + "\n", Note: note},

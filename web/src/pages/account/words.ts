@@ -15,7 +15,7 @@ export function deviceState(d: Device): { word: string; tone: Tone } {
 export const noDevices =
   "None yet. Run telesphorepo login in a terminal, then approve the code that it prints.";
 
-/** The one program that enrolls a device. */
+/** The one program that enrolls a device (the device ticket's printed line). */
 export const cliName = "Telesphorepo CLI";
 
 /** A publish token's state: Active (open), Ended (closed) or Expired. */

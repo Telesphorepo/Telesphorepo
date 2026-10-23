@@ -180,7 +180,7 @@
       {/if}
     {/snippet}
     {#snippet empty()}
-      <CompactEmpty icon={NetworkIcon} text={editable ? "Paste addresses below. An empty list allows no address." : "The first refresh fills the list."} />
+      <CompactEmpty icon={NetworkIcon} text={editable ? "An empty list allows no address." : "The first refresh fills the list."} />
     {/snippet}
   </ItemList>
 {/snippet}

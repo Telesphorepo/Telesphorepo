@@ -278,7 +278,7 @@
     {#if filtered}
       <CompactEmpty icon={FunnelXIcon} text="No event matches. Change or clear the filters to see more." />
     {:else}
-      <CompactEmpty icon={HistoryIcon} text="None yet. Sign-ins, uploads and changes show here as people use the server." />
+      <CompactEmpty icon={HistoryIcon} text="None yet." />
     {/if}
   {:else}
     {#each days as day (day.key)}
@@ -333,7 +333,7 @@
       <Cell num muted><RelativeTime at={s.created_at} /></Cell>
     {/snippet}
     {#snippet empty()}
-      <CompactEmpty icon={UploadIcon} text="None yet. A row shows here each time a device, a CI job or a person gets a publish token." />
+      <CompactEmpty icon={UploadIcon} text="None yet." />
     {/snippet}
   </DataTable>
 {/if}
