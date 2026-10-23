@@ -1,17 +1,17 @@
 <!--
-  Repository settings, Access: the answers to who can download and who can publish, as the server
-  and the unsaved edits say now, then every person with access.
+  Repository settings, Access: two cards, Download and Publish. Each person shows once, in the card
+  of their highest access, with what they hold beyond it as badges (Delete files, Edit settings,
+  Manage access, Manage CI pipelines).
 
-  - Who can download: Anyone (public), or the people with Download and the administrators (the
-    holders of All repositories, one row that opens to their names), then from where. The Public
-    switch sits in the card's header (Edit settings); Change opens the networks (Edit settings).
-  - Who can publish: the people with Publish, the CI pipelines (CI pipelines: Add CI pipeline,
-    remove one) and the administrators, then from where. When nobody can publish (a group or a
-    proxy, or an operation such as a Nexus copy), the card says why in place of the answer.
-  - People and permissions (Manage access): each person with a grant, with the phrase of their
-    set, Change and Remove; then the administrators, read-only with a badge. Give access finds
-    people and gives them a set in one short form. These changes apply at once; picked rows lose
-    their access after a confirm.
+  - Download: the Public switch (Edit settings) and Give access (Manage access) in the header; the
+    people whose grant has no Publish (while private, or when someone holds such a grant); then
+    from where (Change opens the networks; Edit settings).
+  - Publish: the people with Publish, then the holders of All repositories as one read-only row
+    ("2 administrators") that opens to their names; the CI pipelines (Add CI pipeline, remove one);
+    then from where. When nobody can publish (a group or a proxy, or an operation such as a Nexus
+    copy), the card says why in place of the pipelines and the networks.
+  - A person's Change and Remove (Manage access), Give access and the bulk pick apply at once;
+    picked rows lose their access after a confirm.
 
   The Public switch, the networks and the CI pipelines go into one draft, and the save bar saves
   it after a confirm that lists each change.
@@ -23,7 +23,7 @@
   import { Resource, type TableSource } from "$lib/load.svelte";
   import { Draft } from "$lib/unsaved.svelte";
   import { auth } from "$lib/auth.svelte";
-  import { repoPermissions, repoPhrase } from "$lib/permissions";
+  import { labelOf, repoPermissions, repoPhrase, sortRepoPermissions } from "$lib/permissions";
   import { href, repoSettingsPath } from "$lib/router.svelte";
   import { count as plural, someNames } from "$lib/words";
   import { Button } from "$lib/components/ui/button";
@@ -44,12 +44,10 @@
   import ChoiceDialog from "./ChoiceDialog.svelte";
   import GrantDialog from "./GrantDialog.svelte";
   import ConditionBadges from "../../server/ci/ConditionBadges.svelte";
-  import { and, changesOf, countOf, draftOf, pipelineConditions, pipelineFacts, pipelineHead, pipelineOf, type AccessDraft } from "./access";
+  import { changesOf, countOf, draftOf, pipelineConditions, pipelineFacts, pipelineHead, pipelineOf, type AccessDraft } from "./access";
   import UsersIcon from "@lucide/svelte/icons/users-round";
   import WorkflowIcon from "@lucide/svelte/icons/workflow";
-  import GlobeIcon from "@lucide/svelte/icons/globe";
-  import LockIcon from "@lucide/svelte/icons/lock";
-  import UploadIcon from "@lucide/svelte/icons/upload";
+  import ShieldCheckIcon from "@lucide/svelte/icons/shield-check";
   import BanIcon from "@lucide/svelte/icons/ban";
   import ChevronDownIcon from "@lucide/svelte/icons/chevron-down";
   import PlusIcon from "@lucide/svelte/icons/plus";
@@ -95,30 +93,17 @@
   });
 
   // --- who ---
-  const granted = (xs: AccessPerson[] | undefined) => (xs ?? []).filter((p) => p.via === "permission");
+  // Each person shows once: under Download when their highest access is download, else under
+  // Publish; the holders of All repositories hold everything, so they are one row under Publish.
   const admins = $derived((access.data?.download.people ?? []).filter((p) => p.via === "all_repos"));
-  const downloaders = $derived(granted(access.data?.download.people));
-  const publishers = $derived(granted(access.data?.publish.people));
+  const grants = $derived((access.data?.people ?? []).filter((p) => p.via === "permission"));
+  const canPublish = (p: AccessPerson) => p.perms.includes("repo.publish");
   const ciNow = $derived(d.ci.map((cid) => pipelines.get(cid) ?? { id: cid, rule: `CI pipeline ${cid}`, system: "other", issuer: "", disabled: false }));
   const peopleCount = (n: number) => plural(n, "person", "people");
   const adminCount = (n: number) => plural(n, "administrator", "administrators");
-
-  /** "3 people and 2 administrators", "Only administrators". */
-  function whoOf(parts: string[]): string {
-    if (!parts.length) return admins.length ? "Only administrators" : "Nobody";
-    if (admins.length) parts.push(adminCount(admins.length));
-    const s = and(parts);
-    return s[0].toUpperCase() + s.slice(1);
-  }
-  const downloadWho = $derived(d.public ? "Anyone" : whoOf(downloaders.length ? [peopleCount(downloaders.length)] : []));
-  const publishWho = $derived(
-    whoOf([
-      ...(publishers.length ? [peopleCount(publishers.length)] : []),
-      ...(ciNow.filter((p) => !p.disabled).length ? [plural(ciNow.filter((p) => !p.disabled).length, "CI pipeline", "CI pipelines")] : []),
-    ]),
-  );
-  // The administrators open in place, in each card on its own.
-  let adminsOpen = $state({ download: false, publish: false });
+  /** What a person holds beyond the access of their section, as short badges. */
+  const beyond = (p: AccessPerson, base: PermId[]) => sortRepoPermissions(p.perms.filter((x) => !base.includes(x))).map(labelOf);
+  let adminsOpen = $state(false);
 
   // --- rows ---
   const sourceOf = <T,>(items: () => T[]): TableSource<T> => ({
@@ -128,7 +113,13 @@
     loading: false,
     error: "",
   });
-  const people = sourceOf<AccessPerson>(() => [...(access.data?.people ?? []), ...admins]);
+  type Row = { key: string; person?: AccessPerson; admins?: true };
+  const downloadRows = sourceOf<Row>(() => grants.filter((p) => !canPublish(p)).map((p) => ({ key: p.username, person: p })));
+  const publishRows = sourceOf<Row>(() => [
+    ...grants.filter(canPublish).map((p) => ({ key: p.username, person: p })),
+    ...(admins.length ? [{ key: " admins", admins: true as const }] : []),
+    ...(adminsOpen ? admins.map((p) => ({ key: ` admin ${p.username}`, person: p })) : []),
+  ]);
   const ciRows = sourceOf<AccessPipeline>(() => ciNow);
   const addableCI = $derived(
     [...pipelines.values()]
@@ -143,9 +134,11 @@
 
   // --- the permissions of people: changes apply at once ---
   let picked = $state(new Set<string>());
+  let pickedPub = $state(new Set<string>());
 
   async function afterPeopleChange(names: string[]) {
     picked = new Set();
+    pickedPub = new Set();
     await access.reload();
     // A change of your own permissions changes what the Settings show you.
     if (auth.user && names.includes(auth.user.username)) await auth.load();
@@ -227,34 +220,44 @@
   }
 </script>
 
-<!-- People as avatars and names, then the administrators as one button that shows them. -->
-{#snippet faces(list: AccessPerson[], which: "download" | "publish")}
-  {@const shown = list.slice(0, 12)}
-  {@const open = adminsOpen[which]}
-  <ul class="flex flex-wrap items-center gap-2" aria-label="People">
-    {#each [...shown, ...(open ? admins : [])] as p (p.username + p.via)}
-      {@const link = personHref(p.username)}
-      <li>
-        <svelte:element
-          this={link ? "a" : "span"}
-          href={link}
-          title={p.via === "all_repos" ? "All repositories" : repoPhrase(p.perms)}
-          class="flex h-8 items-center gap-2 rounded-lg bg-muted pr-3 pl-1 text-body {link ? 'transition-colors hover:bg-hover' : ''}"
-        >
-          <UserAvatar name={p.username} size="sm" />{p.username}
-        </svelte:element>
-      </li>
-    {/each}
-    {#if list.length > shown.length}<li class="text-meta text-muted-foreground">and {list.length - shown.length} more</li>{/if}
-    {#if admins.length}
-      <li>
-        <Button variant="ghost" size="sm" aria-expanded={open} onclick={() => (adminsOpen[which] = !open)}>
-          <!-- The title above counts them. -->
-          {open ? "Hide administrators" : "Show administrators"}<ChevronDownIcon class="transition-transform {open ? 'rotate-180' : ''}" />
+<!-- The people of one section: each person once, with what they hold beyond the section's access as badges. -->
+{#snippet people(rows: TableSource<Row>, base: PermId[], which: "download" | "publish", emptyText: string)}
+  <ItemList
+    source={rows}
+    caption={which === "download" ? `People who download from ${repo.name}` : `People who publish to ${repo.name}`}
+    key={(r) => r.key}
+    href={(r) => (r.person ? personHref(r.person.username) : undefined)}
+    bind:picked={() => (which === "download" ? picked : pickedPub), (v) => (which === "download" ? (picked = v) : (pickedPub = v))}
+    pickable={(r) => canAccess && r.person?.via === "permission"}
+    pickLabel={(r) => r.person?.username ?? ""}
+  >
+    {#snippet leading(r)}
+      {#if r.person}<UserAvatar name={r.person.username} size="md" />{:else}<span class="flex size-8 items-center justify-center"><ShieldCheckIcon class="size-5" /></span>{/if}
+    {/snippet}
+    {#snippet title(r)}{r.person ? r.person.username : adminCount(admins.length)}{/snippet}
+    {#snippet badges(r)}
+      {#if r.person?.via === "permission"}
+        {#each beyond(r.person, base) as label (label)}<StatusBadge>{label}</StatusBadge>{/each}
+      {/if}
+    {/snippet}
+    {#snippet meta(r)}{#if r.admins}Every permission, through All repositories{/if}{/snippet}
+    {#snippet trailing(r)}
+      {#if r.admins}
+        <Button variant="ghost" size="sm" aria-expanded={adminsOpen} onclick={() => (adminsOpen = !adminsOpen)}>
+          {adminsOpen ? "Hide" : "Show"}<ChevronDownIcon class="transition-transform {adminsOpen ? 'rotate-180' : ''}" />
         </Button>
-      </li>
-    {/if}
-  </ul>
+      {:else if r.person?.via === "permission" && canAccess}
+        {@const p = r.person}
+        <Button variant="ghost" size="sm" aria-label="Change the permissions of {p.username}" onclick={() => edit(p)}>Change</Button>
+        <!-- On a phone a row has room for one action: Remove is in the pick and in Change there. -->
+        <Button variant="ghost" size="sm" class="hidden hover:bg-destructive/10 hover:text-destructive sm:inline-flex" aria-label="Remove the access of {p.username}" onclick={() => askRemove([p.username])}>Remove</Button>
+      {/if}
+    {/snippet}
+    {#snippet bulk()}
+      <Button variant="ghost" size="sm" class="hover:bg-destructive/10 hover:text-destructive" onclick={() => askRemove(which === "download" ? picked : pickedPub)}>Remove access</Button>
+    {/snippet}
+    {#snippet empty()}<CompactEmpty icon={UsersIcon} text={emptyText} />{/snippet}
+  </ItemList>
 {/snippet}
 
 {#if access.error && !access.data}
@@ -264,7 +267,7 @@
 {:else}
   {@const a = access.data}
   {@const blocked = a.publish.blocked}
-  <Section title="Who can download">
+  <Section title="Download" description={[d.public ? "No sign-in and no read token needed." : "People sign in, or use a read token in a build.", ...a.download.notes].join(" ")}>
     {#snippet actions()}
       {#if canSettings}
         <div class="flex h-8 items-center gap-3">
@@ -272,20 +275,24 @@
           <Switch id="{id}-public" bind:checked={draft.value.public} />
         </div>
       {/if}
+      {#if canAccess}<Button variant="outline" size="sm" onclick={() => (addOpen = true)}><PlusIcon />Give access</Button>{/if}
     {/snippet}
     <div class="flex flex-col gap-6">
-      <AccessPart
-        icon={d.public ? GlobeIcon : LockIcon}
-        title={downloadWho}
-        help={[d.public ? "No sign-in and no read token needed." : "They sign in, or use a read token in a build.", ...a.download.notes].join(" ")}
-      >
-        {#if !d.public && (downloaders.length || admins.length)}<div class="pl-8">{@render faces(downloaders, "download")}</div>{/if}
-      </AccessPart>
+      <!-- Public: anyone downloads, so the list shows only when someone holds a grant of download alone. -->
+      {#if !d.public || downloadRows.items.length}
+        {@render people(
+          downloadRows,
+          ["repo.download"],
+          "download",
+          publishRows.items.length ? "Only the people under Publish." : "Nobody yet. Give access to the people who download it.",
+        )}
+        <Separator />
+      {/if}
       <FromWhere id="{id}-read" repo={repo.name} verb="download" editable={canSettings} lists={lists.data} {listsError} saved={draft.saved.read} bind:rules={draft.value.read} />
     </div>
   </Section>
 
-  <Section title="Who can publish">
+  <Section title="Publish" description={blocked ? undefined : "People who publish can download too."}>
     {#snippet actions()}
       {#if blocked?.code === "operation" && auth.can("nexus.manage")}<Button variant="outline" size="sm" href={href("/settings/nexus")}>Open Nexus migration</Button>{/if}
     {/snippet}
@@ -293,16 +300,15 @@
       {#if blocked}
         <AccessPart
           icon={BanIcon}
-          title="Nobody"
-          help={blocked.code === "operation" ? `${blocked.message} The access below applies after that.` : blocked.message}
+          title="Nobody can publish now"
+          help={blocked.code === "operation" && publishRows.items.length ? `${blocked.message} The people below can publish after that.` : blocked.message}
         />
-      {:else}
-        <AccessPart icon={UploadIcon} title={publishWho} help={publishers.length || admins.length ? "People who publish can download too." : undefined}>
-          {#if publishers.length || admins.length}<div class="pl-8">{@render faces(publishers, "publish")}</div>{/if}
-        </AccessPart>
       {/if}
-      <!-- A group or a proxy takes no publishes, so it has no pipelines and no networks for them. -->
-      {#if blocked?.code !== "read_only_kind"}
+      {#if !blocked || publishRows.items.length}
+        {@render people(publishRows, ["repo.download", "repo.publish"], "publish", "Nobody yet. Give access to the people who publish here.")}
+      {/if}
+      <!-- While nothing can publish, the reason above takes the place of the pipelines and the networks. -->
+      {#if !blocked}
         <Separator />
         <!-- With no pipeline the empty row says what one is. -->
         <AccessPart title="CI pipelines" help={ciNow.length ? "A CI job publishes with the token of its CI system, without the account of a person." : undefined}>
@@ -345,41 +351,6 @@
       {/if}
     </div>
   </Section>
-
-  {#if canAccess}
-    <Section title="People and permissions" description="Each change here applies at once.">
-      {#snippet actions()}
-        <Button variant="outline" size="sm" onclick={() => (addOpen = true)}><PlusIcon />Give access</Button>
-      {/snippet}
-      <ItemList
-        source={people}
-        caption="People with access to {repo.name}"
-        key={(p) => p.username}
-        href={(p) => personHref(p.username)}
-        bind:picked
-        pickable={(p) => p.via === "permission"}
-        pickLabel={(p) => p.username}
-      >
-        {#snippet leading(p)}<UserAvatar name={p.username} size="md" />{/snippet}
-        {#snippet title(p)}{p.username}{/snippet}
-        {#snippet badges(p)}{#if p.via === "all_repos"}<StatusBadge title="Holds All repositories: change it on the person's page">All repositories</StatusBadge>{/if}{/snippet}
-        {#snippet meta(p)}{repoPhrase(p.perms)}{/snippet}
-        {#snippet trailing(p)}
-          {#if p.via === "permission"}
-            <Button variant="ghost" size="sm" aria-label="Change the permissions of {p.username}" onclick={() => edit(p)}>Change</Button>
-            <!-- On a phone a row has room for one action: Remove is in the pick and in Change there. -->
-            <Button variant="ghost" size="sm" class="hidden hover:bg-destructive/10 hover:text-destructive sm:inline-flex" aria-label="Remove the access of {p.username}" onclick={() => askRemove([p.username])}>Remove</Button>
-          {/if}
-        {/snippet}
-        {#snippet bulk()}
-          <Button variant="ghost" size="sm" class="hover:bg-destructive/10 hover:text-destructive" onclick={() => askRemove(picked)}>Remove access</Button>
-        {/snippet}
-        {#snippet empty()}
-          <CompactEmpty icon={UsersIcon} text="Give access to the people who download, publish or manage {repo.name}." />
-        {/snippet}
-      </ItemList>
-    </Section>
-  {/if}
 
   {#if canSettings && (d.read.length || d.publish.length)}
     <p class="mt-6 text-meta text-muted-foreground">

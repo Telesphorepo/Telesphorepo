@@ -4089,16 +4089,16 @@ page are in `web/src/README.md`.
     change asks first and says that the old name keeps working as a redirect; and Redirects, the
     old names with their last use and Remove after a confirm that names what stops working (see
     **Repository redirects**). An old name in the address opens the settings under the new name.
-  - *Access:* three cards that answer from `GET /api/repos/{name}/access?admins=1` and the unsaved
-    edits. **Who can download**: "Anyone" when public, else the count of people with Download and
-    of administrators (holders of All repositories), with their avatars and names (the
-    administrators behind one button); then from where ("From any network", "Only from GitHub
-    Actions"). **Who can publish**: the people with Publish, the enabled CI pipelines and the
-    administrators the same way, the CI pipelines as a list, then from where; while nobody can
-    publish it says "Nobody" and why (`publish.blocked`; a group or a proxy shows only that).
-    **People and permissions** (`repo.access`): each person with a grant once, with the phrase of
-    their set ("Download", "Download, publish", "Everything", or the list such as "Download,
-    delete files"), then the holders of All repositories, read-only with a badge. **Give access**
+  - *Access:* two cards, Download and Publish, that answer from
+    `GET /api/repos/{name}/access?admins=1` and the unsaved edits. Each person shows once, in the
+    card of their highest access, with what they hold beyond it as badges (Delete files, Edit
+    settings, Manage access, Manage CI pipelines). **Download**: the Public switch and **Give
+    access** in its header; the people whose grant has no Publish (while private, or when someone
+    holds such a grant on a public repository); then from where ("From any network", "Only from
+    GitHub Actions"). **Publish**: the people with Publish, then the holders of All repositories
+    as one read-only row ("2 administrators") that opens to their names; the CI pipelines; then
+    from where. While nobody can publish (`publish.blocked`: a group, a proxy or an operation),
+    the card says why in place of the CI pipelines and the networks. **Give access**
     opens the grant dialog: people found through `GET /api/people`, then the permission picker,
     side by side in a wide dialog. **Change** opens the picker for one person, **Remove** and a
     pick with **Remove access** ask first. These save at once through `PUT /api/grants`. The
@@ -4143,8 +4143,10 @@ page are in `web/src/README.md`.
   locked on, and one the caller does not hold cannot change. The role is saved from the save bar
   after a confirm through `PUT /api/users/{name}/permissions`; then the
   person's permissions on each repository. **Give access** opens the grant dialog with the
-  repositories and the picker. The repository list shows each repository with the phrase of the
-  person's permissions under its name and **Change** and **Remove** (asks first) on its row; it
+  repositories and the picker. The repository list shows each repository where the person holds a
+  grant, with the phrase of the person's permissions under its name, and one line under it counts
+  the public repositories they can also download from ("Can also download from the 8 public
+  repositories.", a link to Browse) and **Change** and **Remove** (asks first) on its row; it
   takes a pick, with **Change permissions** and **Remove access** (asks first). Each repository action saves at once. A holder of `repositories.all`
   reaches every repository, and the page says so. When single sign-on manages the permissions of an
   account, the role and its permissions show read-only ("Single sign-on manages these

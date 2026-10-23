@@ -4,12 +4,12 @@
   Administrator, or Custom with one switch per permission); the save bar saves it after a
   confirm. For an account whose permissions single sign-on manages, the section shows the role and
   the permissions read-only, with a link to Sign-in options for a person who can open it. The
-  Repositories card lists every repository the person can use, with the phrase of their
-  permissions there under its name. Give access opens a short form that gives the person
+  Repositories card lists the repositories where the person holds a grant, with the phrase of
+  their permissions there under its name, and one line under the list counts the public
+  repositories they can also download from. Give access opens a short form that gives the person
   permissions on many repositories at once; Change edits one repository and Remove takes its
   access after a confirm; picked rows get one set of permissions, or lose their access after a
-  confirm. A public repository shows because anyone
-  can download from it. Each change of repository permissions applies at once.
+  confirm. Each change of repository permissions applies at once.
 -->
 <script lang="ts">
   import { untrack } from "svelte";
@@ -99,12 +99,15 @@
   // The repositories the caller can give access to, for the Give access dialog.
   const repos = new Resource<Repo[]>(() => api.repos.list());
 
-  // A public repository without a grant shows with no permissions of its own.
-  type Row = { repo: string; format: string; public: boolean; perms: PermId[]; granted: boolean };
+  // Only the grants are rows; the public repositories without one are counted in one line under them.
+  type Row = { repo: string; format: string; public: boolean; perms: PermId[] };
   const rows = $derived(
     access.items
-      .filter((r) => r.via === "permission" || r.public)
-      .map((r): Row => ({ repo: r.repo, format: r.format, public: r.public, perms: r.perms ?? [], granted: r.via === "permission" })),
+      .filter((r) => r.via === "permission")
+      .map((r): Row => ({ repo: r.repo, format: r.format, public: r.public, perms: r.perms ?? [] })),
+  );
+  const publicOnly = $derived(
+    (repos.data ?? []).filter((r) => r.anonymous_read && r.kind !== "group" && !access.items.some((x) => x.repo === r.name && x.via === "permission")).length,
   );
   const source: TableSource<Row> = {
     get items() {
@@ -153,7 +156,7 @@
 
   // --- give access and change permissions ---
   let giveOpen = $state(false);
-  const granted = $derived(new Set(rows.filter((r) => r.granted).map((r) => r.repo)));
+  const granted = $derived(new Set(rows.map((r) => r.repo)));
   const choices = $derived(
     (repos.data ?? [])
       .filter((r) => !granted.has(r.name) && auth.canRepo(r.name, "repo.access"))
@@ -322,21 +325,17 @@
         {#snippet leading(r)}<FormatIcon format={r.format} class="size-5" />{/snippet}
         {#snippet title(r)}{r.repo}{/snippet}
         {#snippet badges(r)}{#if !r.public}<LockIcon class="size-3.5 text-muted-foreground" aria-label="Private" />{/if}{/snippet}
-        {#snippet meta(r)}{r.granted ? repoPhrase(r.perms) : "Download, because it is public"}{/snippet}
+        {#snippet meta(r)}{repoPhrase(r.perms)}{/snippet}
         {#snippet trailing(r)}
           {#if auth.canRepo(r.repo, "repo.access")}
-            <Button variant="ghost" size="sm" aria-label="Change the permissions of {person} on {r.repo}" onclick={() => openChange([r.repo], r.granted ? r.perms : ["repo.download"])}
-              >Change</Button
+            <Button variant="ghost" size="sm" aria-label="Change the permissions of {person} on {r.repo}" onclick={() => openChange([r.repo], r.perms)}>Change</Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              class="hover:bg-destructive/10 hover:text-destructive"
+              aria-label="Remove the access of {person} to {r.repo}"
+              onclick={() => askRemove([r.repo])}>Remove</Button
             >
-            {#if r.granted}
-              <Button
-                variant="ghost"
-                size="sm"
-                class="hover:bg-destructive/10 hover:text-destructive"
-                aria-label="Remove the access of {person} to {r.repo}"
-                onclick={() => askRemove([r.repo])}>Remove</Button
-              >
-            {/if}
           {/if}
         {/snippet}
         {#snippet bulk()}
@@ -344,9 +343,15 @@
           <Button variant="ghost" size="sm" class="hover:bg-destructive/10 hover:text-destructive" onclick={() => askRemove(pickedNames)}>Remove access</Button>
         {/snippet}
         {#snippet empty()}
-          <CompactEmpty icon={DatabaseIcon} text="No repository is public, and {person} has no access yet. Give {person} access to a repository." />
+          <CompactEmpty icon={DatabaseIcon} text="None yet. Give {person} access to a repository." />
         {/snippet}
       </ItemList>
+      {#if publicOnly}
+        <p class="mt-4 text-meta text-muted-foreground">
+          Can also download from the
+          <a class="text-link underline-offset-4 hover:underline" href={href("/browse")}>{publicOnly === 1 ? "1 public repository" : `${publicOnly} public repositories`}</a>.
+        </p>
+      {/if}
     {/if}
   </Section>
 
