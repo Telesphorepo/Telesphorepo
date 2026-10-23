@@ -79,7 +79,7 @@
   }
 </script>
 
-<PageHeader title="Nexus migration" description="Copy the repositories of a Nexus server, keep them in sync, then switch over when every build uses this server.">
+<PageHeader title="Nexus migration" description="Copy the repositories of a Nexus server, keep them in sync, and switch them over one at a time.">
   {#snippet actions()}<LiveStatus {live} />{#if sources.items.length}<Button onclick={startAdd}><PlusIcon />Add a Nexus server</Button>{/if}{/snippet}
 </PageHeader>
 

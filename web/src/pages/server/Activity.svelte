@@ -172,7 +172,7 @@
   }
 </script>
 
-<PageHeader title="Activity" description="What happened on the server, newest first." />
+<PageHeader title="Activity" description="Who did what on this server, and when." />
 
 <TabNav
   label="Activity"

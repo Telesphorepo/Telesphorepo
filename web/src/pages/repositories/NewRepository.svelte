@@ -218,7 +218,7 @@
   }
 </script>
 
-<PageHeader title="New repository" description="A repository holds one kind of package. Its name, format and kind stay fixed." />
+<PageHeader title="New repository" description="A repository holds one kind of package. Its format and kind stay fixed." />
 
 {#snippet submitRow()}
   <Button type="submit" disabled={!canCreate}>
