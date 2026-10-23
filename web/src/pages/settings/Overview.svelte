@@ -1,7 +1,8 @@
 <!--
   All settings, the administrator's home: about this server. The header names the server, its
-  version and its public address (for a holder of the General settings), with the actions people
-  take most (New repository, New account, New CI pipeline; each only for a person who may). Then
+  version and its public address (for a holder of the General settings); under it the actions
+  people take most as doors (New repository, New account, New CI pipeline; each only for a person
+  who may). Then
   what the repositories hold (GET /api/repos): how many by kind, the files, the stored size and the
   last publish; the size by format as bars, and the five largest repositories. A holder of All
   repositories sees every repository; anyone else sees their repositories, the ones where they
@@ -41,6 +42,11 @@
   import PlusIcon from "@lucide/svelte/icons/plus";
   import DatabaseIcon from "@lucide/svelte/icons/database";
   import HistoryIcon from "@lucide/svelte/icons/history";
+  import PackagePlusIcon from "@lucide/svelte/icons/package-plus";
+  import UserPlusIcon from "@lucide/svelte/icons/user-plus";
+  import WorkflowIcon from "@lucide/svelte/icons/workflow";
+  import DoorCard from "$lib/components/DoorCard.svelte";
+  import DoorRow from "$lib/components/DoorRow.svelte";
   import { adminNav, canOpen, pages } from "../../modules";
 
   let {}: PageProps = $props();
@@ -151,12 +157,21 @@
     {#snippet meta()}
       {#if version.data}<StatusBadge>{version.data}</StatusBadge>{/if}
     {/snippet}
-    {#snippet actions()}
-      {#if canNewRepo}<Button href={href("/settings/repositories/new")}><PlusIcon />New repository</Button>{/if}
-      {#if canNewAccount}<Button variant="outline" onclick={() => (newAccount = true)}><PlusIcon />New account</Button>{/if}
-      {#if canNewPipeline}<Button variant="outline" href={href("/settings/ci-pipelines/new")}><PlusIcon />New CI pipeline</Button>{/if}
-    {/snippet}
   </PageHeader>
+
+  {#if canNewRepo || canNewAccount || canNewPipeline}
+    <DoorRow label="Create">
+      {#if canNewRepo}
+        <DoorCard title="New repository" text="Hosted, a proxy of a remote repository, or a group of several." href={href("/settings/repositories/new")} icon={PackagePlusIcon} />
+      {/if}
+      {#if canNewAccount}
+        <DoorCard title="New account" text="A name and a first password; permissions come after." onclick={() => (newAccount = true)} icon={UserPlusIcon} />
+      {/if}
+      {#if canNewPipeline}
+        <DoorCard title="New CI pipeline" text="A GitHub Actions or Jenkins job publishes with no stored secret." href={href("/settings/ci-pipelines/new")} icon={WorkflowIcon} />
+      {/if}
+    </DoorRow>
+  {/if}
 
   <!-- The figures: one card for a holder of All repositories; else "Your repositories" heads its own card. -->
   {#if allRepos}
@@ -194,7 +209,7 @@
       {:else if downloads.error && !downloads.data}
         <ErrorState error={downloads.error} onRetry={downloads.reload} />
       {:else if downloads.data && downloads.data.downloads === 0}
-        <CompactEmpty icon={DownloadIcon} text="No downloads in the last {statDays} days. Each file that a client gets counts here." />
+        <CompactEmpty icon={DownloadIcon} text="No downloads in the last {statDays} days." />
       {:else if downloads.data}
         {@const st = downloads.data}
         <div class="grid gap-8 lg:grid-cols-2">
@@ -237,7 +252,7 @@
         {#snippet badges(e)}{#if refusals.has(e.action)}<StatusBadge tone="danger">Refused</StatusBadge>{/if}{/snippet}
         {#snippet meta(e)}{e.actor || "Someone"}{#if e.repo}{" · "}{e.repo}{/if}{" · "}<span title={formatDateTime(e.at)}><RelativeTime at={e.at} /></span>{/snippet}
         {#snippet empty()}
-          <CompactEmpty icon={HistoryIcon} text="None yet. Sign-ins, uploads and changes show here as people use the server." />
+          <CompactEmpty icon={HistoryIcon} text="Nothing has happened yet." />
         {/snippet}
       </ItemList>
     </Section>

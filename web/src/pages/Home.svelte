@@ -24,6 +24,8 @@
   import ErrorState from "$lib/components/ErrorState.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import GlobalSearch from "$lib/layouts/GlobalSearch.svelte";
+  import DoorCard from "$lib/components/DoorCard.svelte";
+  import DoorRow from "$lib/components/DoorRow.svelte";
   import { brand } from "$lib/brand.svelte";
   import { adminNav } from "../modules";
   import UploadIcon from "@lucide/svelte/icons/upload";
@@ -68,20 +70,9 @@
 </div>
 
 {#if doors.length > 0}
-  <!-- Each door is one column of a three-column row, so two doors keep that width, centered. -->
-  <nav aria-label="Start here" class="mb-(--section-gap) flex flex-col gap-4 md:flex-row md:justify-center">
-    {#each doors as d (d.title)}
-      {@const Icon = d.icon}
-      <a
-        href={d.href}
-        class="flex flex-col gap-3 rounded-lg bg-card p-6 text-card-foreground ring-1 ring-foreground/10 outline-none transition-colors hover:bg-hover focus-visible:ring-[3px] focus-visible:ring-ring/50 md:w-[calc((100%-2rem)/3)]"
-      >
-        <span aria-hidden="true" class="flex text-(--mark)"><Icon class="size-8" /></span>
-        <span class="text-section">{d.title}</span>
-        <span class="text-body text-muted-foreground">{d.text}</span>
-      </a>
-    {/each}
-  </nav>
+  <DoorRow label="Start here">
+    {#each doors as d (d.title)}<DoorCard {...d} />{/each}
+  </DoorRow>
 {/if}
 
 <!-- Its own block, so the section sits one gap under the search or the doors. -->
