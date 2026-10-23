@@ -1032,7 +1032,8 @@ export type NexusMerge = {
   state: "running" | "failed" | "done" | "stopped";
   step: "sync" | "copy" | "access" | "switch" | "retire" | "rename" | "done";
   error: string;
-  sync_id: number;
+  /** The final sync from Nexus; null when the target copied no more and needed none. */
+  sync_id: number | null;
   files: number;
   done: number;
   copied: number;

@@ -1004,7 +1004,7 @@ transaction.
 | `POST /api/nexus/sources/{id}/repos/{repo}/switch-over` | `nexus.manage` | Switches over the repo that Nexus repo `{repo}` copies into: 202 `Sync` with `trigger: cutover` of the Nexus repos that copy into it. 400 for a proxy or a group, 404 for a repo that is not mapped, 409 while a sync runs, after cut-over, or when it switched over already |
 | `POST /api/nexus/sources/{id}/repos/{repo}/rehearsal` | `nexus.manage` | Creates the rehearsal repo of the repo that Nexus repo `{repo}` copies into: 201 `{name}`. 400 for a proxy or a group, 404 for a repo that is not mapped, 409 `{repo, rehearsal}` when the name is taken (`rehearsal` is true when that repo is its rehearsal already) |
 | `POST /api/nexus/rehearsals/{name}/empty` | `nexus.manage` | Starts the `empty` operation of rehearsal repo `{name}`: 202 `{name, files}` (the file count when it started). 400 for a repo that rehearses nothing, 404, 409 while the repo has an operation |
-| `POST /api/nexus/sources/{id}/repos/{repo}/move` | `nexus.manage` | `{name, group}`: creates the moving repo `name` of the repo that Nexus repo `{repo}` copies into, and with `group` the group `<target>-all`: 201 `{name, group}` (`group` "" for none). 400 for a proxy, a group or a bad name, 409 `{repo, rehearsal: false}` when a name is taken |
+| `POST /api/nexus/sources/{id}/repos/{repo}/move` | `nexus.manage` | `{name, group}`: creates the moving repo `name` of the repo that Nexus repo `{repo}` copies into, and with `group` the group `<target>-all`: 201 `{name, group}` (`group` "" for none). 400 for a proxy, a group, a bad name or `group` on a format without groups, 409 `{repo, rehearsal: false}` when a name is taken |
 | `GET /api/nexus/merges/plan?from=&into=` | `nexus.manage` and `repositories.all` | The `MergePlan` of a merge of `from` into `into` (`into` empty: the repo that `from` moves into). It reads every file of `from` and writes nothing. 400 when the two cannot merge, 404 |
 | `POST /api/nexus/merges` | `nexus.manage` and `repositories.all` | `{from, into, keep, choices, otherwise}`: starts a merge after the plan of now: 202 `Merge`. 400 for a blocked file or a conflict without a choice, 409 while an operation other than the target's `mirror` holds either repo |
 | `GET /api/nexus/merges/{id}` | `nexus.manage` and `repositories.all` | One `Merge` |
@@ -2373,7 +2373,9 @@ MergeConflict = {kind: "file"|"label", title, value, target_value,    (a label: 
                 path (the key of its choice: a file's path, or "label:<key>"),
                 size, sha256, updated_at, target_size, target_sha256, target_updated_at}
 Merge        = {id, from, into, name (the merged repo now; "" when gone), redirect, keep, format,
-                source_id, source_name, state, step, error, sync_id, files, done, copied, skipped,
+                source_id, source_name, state, step, error,
+                sync_id|null (the final sync; null when the target copied no more),
+                files, done, copied, skipped,
                 rebuilt, kept, taken, groups, started_by, started_at, finished_at|null}
 Question     = {key, label, help?, type: "choice"|"secret", options?: [{value, label}], required, default?}
 Mapping      = {source_repo, target, create, anonymous_read,
@@ -2702,7 +2704,7 @@ is unreachable.
   state at the end) and the connection with the save bar. While a repo has the `mirror`
   operation, its page shows the operation's message under the header to the people who could upload or delete.
   The row actions also hold **Move it project by project** (a short form: the name, `<target>-new`
-  by default, and the group `<target>-all`), and per moving repo Open it and Merge into <target>…;
+  by default, and the group `<target>-all` when the format has groups), and per moving repo Open it and Merge into <target>…;
   the moving repos show as a "moving" link after the target's name, a merge as a "merge" link. The
   State column shows on a phone too, in the row's meta line. The **merge plan**
   (`/#/settings/nexus/merge?from=&into=`): the counts of the files, the files the format cannot

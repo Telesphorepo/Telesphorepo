@@ -18,6 +18,7 @@
   import { Draft } from "$lib/unsaved.svelte";
   import { href, navigate, repoPath, repoSettingsPath, router } from "$lib/router.svelte";
   import { auth } from "$lib/auth.svelte";
+  import { formats } from "$lib/formats/registry.svelte";
   import { waitForDeletes } from "$lib/deletes";
   import * as DropdownMenu from "$lib/components/ui/dropdown-menu";
   import { buttonVariants } from "$lib/components/ui/button";
@@ -430,21 +431,22 @@
   // A merge deletes and renames a repository, so it needs All repositories too.
   const canMerge = $derived(auth.can("nexus.manage") && auth.allRepos());
 
-  // --- Move it project by project: a new repository, and the group <target>-all of both ---
+  // --- Move it project by project: a new repository, and the group <target>-all of both when the format has groups ---
   let moveOpen = $state(false);
   let moveOf = $state<NexusSourceRepo | null>(null);
   let moveName = $state("");
   let moveGroup = $state(true);
+  const groupsOf = (r: NexusSourceRepo) => !!formats.get(r.target_format)?.kinds.includes("group");
   function askMove(r: NexusSourceRepo) {
     moveOf = r;
     moveName = `${r.target}-new`;
-    moveGroup = true;
+    moveGroup = groupsOf(r);
     moveOpen = true;
   }
   async function move() {
     const r = moveOf;
     if (!r) return;
-    const made = await api.nexus.move(id, r.name, { name: moveName.trim(), group: moveGroup });
+    const made = await api.nexus.move(id, r.name, { name: moveName.trim(), group: moveGroup && groupsOf(r) });
     toast.success(made.group ? `Created ${made.name} and ${made.group}` : `Created ${made.name}`, {
       description: `Projects publish to ${made.name} one by one${made.group ? `; builds read ${made.group}` : ""}.`,
       action: { label: "Open", onClick: () => navigate(repoPath(made.name)) },
@@ -1008,11 +1010,13 @@
       <FormField label="Name of the new repository" for="{fid}-move-name" hint="The people who publish to {t} can publish to it.">
         <Input id="{fid}-move-name" autocomplete="off" spellcheck={false} bind:value={moveName} />
       </FormField>
-      <OptionRow id="{fid}-move-group" label="Also create the group {t}-all" description="It reads {name || 'the new repository'} first, then {t}, so builds find packages from both while projects move.">
-        {#snippet control()}
-          <Checkbox id="{fid}-move-group" checked={moveGroup} onCheckedChange={(c) => (moveGroup = c === true)} />
-        {/snippet}
-      </OptionRow>
+      {#if groupsOf(moveOf)}
+        <OptionRow id="{fid}-move-group" label="Also create the group {t}-all" description="It reads {name || 'the new repository'} first, then {t}, so builds find packages from both while projects move.">
+          {#snippet control()}
+            <Checkbox id="{fid}-move-group" checked={moveGroup} onCheckedChange={(c) => (moveGroup = c === true)} />
+          {/snippet}
+        </OptionRow>
+      {/if}
     </ShortFormDialog>
   {/if}
 

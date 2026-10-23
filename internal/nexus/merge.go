@@ -168,7 +168,8 @@ type Merge struct {
 	State      string `json:"state"`
 	Step       string `json:"step"`
 	Error      string `json:"error"`
-	SyncID     int64  `json:"sync_id"`
+	// SyncID is the final sync from Nexus; null when the target copied no more and needed none.
+	SyncID *int64 `json:"sync_id"`
 	// Files is the source's file count at the start, Done the files walked; the rest split Done.
 	Files      int64      `json:"files"`
 	Done       int64      `json:"done"`
@@ -624,11 +625,14 @@ func (s *Service) Merge(ctx context.Context, id int64) (*Merge, error) {
 		return nil, err
 	}
 	out := &Merge{ID: row.ID, From: row.SourceName, Into: row.TargetName, Keep: row.Keep, State: row.State, Step: row.Step,
-		Error: row.Error, SyncID: row.SyncID, Files: row.Files, Done: row.Done, Copied: row.Copied, Skipped: row.Skipped,
+		Error: row.Error, Files: row.Files, Done: row.Done, Copied: row.Copied, Skipped: row.Skipped,
 		Rebuilt: row.Rebuilt, Kept: row.Kept, Taken: row.Taken, Groups: []string{}, StartedBy: row.StartedByName,
 		StartedAt: time.Unix(row.StartedAt, 0).UTC(), Redirect: row.SourceName}
 	if row.Keep == KeepSource {
 		out.Redirect = row.TargetName
+	}
+	if row.SyncID != 0 {
+		out.SyncID = &row.SyncID
 	}
 	if row.FinishedAt.Valid {
 		t := time.Unix(row.FinishedAt.Int64, 0).UTC()
@@ -679,7 +683,7 @@ func (s *Service) runMerge(ctx context.Context, id int64) {
 		next := ""
 		switch row.Step {
 		case stepSync:
-			next, err = s.mergeSync(ctx, row)
+			next, err = s.mergeSync(ctx, &row)
 		case stepCopy:
 			next, err = s.mergeCopy(ctx, row)
 		case stepAccess:
@@ -729,8 +733,9 @@ func sleep(ctx context.Context, d time.Duration) bool {
 
 // mergeSync runs the final sync of the target from Nexus (trigger cutover; the runner leaves the
 // switch-over to the merge) and waits for it. A sync of the source that runs already is waited
-// for first. A target that no longer copies goes on at once.
-func (s *Service) mergeSync(ctx context.Context, row dbq.GetNexusMergeRow) (string, error) {
+// for first. A target that no longer copies goes on at once. It records the sync in row, so the
+// step the runner writes next keeps it.
+func (s *Service) mergeSync(ctx context.Context, row *dbq.GetNexusMergeRow) (string, error) {
 	q := dbq.New(s.db.R)
 	for row.SyncID == 0 {
 		sourceID, copying, err := s.copyingInto(ctx, row.TargetRepoID)

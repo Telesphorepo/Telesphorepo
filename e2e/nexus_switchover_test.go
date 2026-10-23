@@ -106,7 +106,7 @@ func nexusWaitEmpty(t *testing.T, s *Server, repo string) {
 // nexusSwitchOver copies two raw repos from Nexus, rehearses publishing to the first (publish,
 // empty, publish again, delete), switches over the first while the second keeps syncing, then
 // switches over everything, which finishes the source.
-func nexusSwitchOver(t *testing.T, n *Nexus, s *Server) {
+func nexusSwitchOver(t *testing.T, n *Nexus, s *Server, tg *S3Target) {
 	srcA, fileA := nexusRawRepo(t, n, "src-swa")
 	srcB, fileB := nexusRawRepo(t, n, "src-swb")
 	source := nexusCreateSource(t, s, n)
@@ -219,9 +219,7 @@ func nexusSwitchOver(t *testing.T, n *Nexus, s *Server) {
 	if len(later.Repos) != 1 || later.repo(t, srcB).Imported != 1 {
 		t.Fatalf("sync after the switch-over of %s: repos %+v, want %s alone with its new file", srcA, later.Repos, srcB)
 	}
-	if resp, _ := s.Do(t, s.NewRequest(t, http.MethodGet, "/raw/"+tB+"/"+newB.path, nil), s.AdminBasic()); resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET the new file of %s from %s: status %d, want 200", srcB, tB, resp.StatusCode)
-	}
+	nexusGetRaw(t, s, tg, tB, newB.path, newB.data)
 	if resp, _ := s.Do(t, s.NewRequest(t, http.MethodGet, "/raw/"+tA+"/"+newA.path, nil), s.AdminBasic()); resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("GET the new Nexus file of %s from %s after its switch-over: status %d, want 404", srcA, tA, resp.StatusCode)
 	}
@@ -229,9 +227,7 @@ func nexusSwitchOver(t *testing.T, n *Nexus, s *Server) {
 		repo string
 		file nexusRawFile
 	}{{tA, fileA}, {tB, fileB}} {
-		if resp, _ := s.Do(t, s.NewRequest(t, http.MethodGet, "/raw/"+f.repo+"/"+f.file.path, nil), s.AdminBasic()); resp.StatusCode != http.StatusOK {
-			t.Fatalf("GET %s from %s: status %d, want 200", f.file.path, f.repo, resp.StatusCode)
-		}
+		nexusGetRaw(t, s, tg, f.repo, f.file.path, f.file.data)
 	}
 
 	// A switched-over repo cannot go back: a save without it keeps it, and a save that moves it

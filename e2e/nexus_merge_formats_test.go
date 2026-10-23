@@ -37,17 +37,20 @@ func nexusMergeDone(t *testing.T, s *Server, body map[string]any) nexusMerge {
 func nexusMergeSync(t *testing.T, s *Server, m nexusMerge, into string) {
 	t.Helper()
 	var full struct {
-		SyncID int64 `json:"sync_id"`
+		SyncID *int64 `json:"sync_id"`
 	}
 	s.MustAPI(t, http.MethodGet, fmt.Sprintf("/api/nexus/merges/%d", m.ID), nil, s.Admin(), &full)
+	if full.SyncID == nil {
+		t.Fatalf("merge %d of a target that copies from Nexus: sync_id null, want its final sync", m.ID)
+	}
 	var sy struct {
 		Trigger   string `json:"trigger"`
 		MergeID   int64  `json:"merge_id"`
 		MergeInto string `json:"merge_into"`
 	}
-	s.MustAPI(t, http.MethodGet, fmt.Sprintf("/api/nexus/syncs/%d", full.SyncID), nil, s.Admin(), &sy)
+	s.MustAPI(t, http.MethodGet, fmt.Sprintf("/api/nexus/syncs/%d", *full.SyncID), nil, s.Admin(), &sy)
 	if sy.MergeID != m.ID || sy.MergeInto != into {
-		t.Fatalf("final sync %d of merge %d: %+v, want it shown as the merge's into %s", full.SyncID, m.ID, sy, into)
+		t.Fatalf("final sync %d of merge %d: %+v, want it shown as the merge's into %s", *full.SyncID, m.ID, sy, into)
 	}
 }
 

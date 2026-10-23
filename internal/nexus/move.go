@@ -143,6 +143,13 @@ func (s *Service) Move(ctx context.Context, sourceID int64, sourceRepo string, i
 	}
 	group := ""
 	if in.Group {
+		if f := s.formats.Get(target.Format); f == nil || !f.Takes(repos.KindGroup) {
+			title := target.Format
+			if f != nil {
+				title = f.Title
+			}
+			return nil, fmt.Errorf("%w: %s repositories have no groups, so a move of %s cannot create the group %s", ErrInvalid, title, target.Name, target.Name+groupSuffix)
+		}
 		group = target.Name + groupSuffix
 		if !repos.NameRE.MatchString(group) {
 			return nil, fmt.Errorf("%w: %s is too long a name for a group", ErrInvalid, group)
