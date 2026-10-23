@@ -298,6 +298,8 @@ export type Repo = {
   last_published_at: string | null;
   /** A group: true while the server has not counted the files it serves to the caller yet (the counters are 0). */
   counts_pending?: boolean;
+  /** GET /api/repos only: the downloads of the last 30 days, written once a minute. */
+  downloads?: number;
   kind: RepoKind;
   /** A group: how many members it has. */
   member_count?: number;

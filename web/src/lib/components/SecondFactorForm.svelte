@@ -1,9 +1,13 @@
 <!--
-  Asks for one second-factor proof: a 6-digit code, a passkey, or (at sign-in) a recovery code.
-  onProof sends the proof; while it runs the form is busy, and when it throws the form shows the
-  error and lets the user try again. Used by the sign-in page and by <FreshFactor>.
+  Asks for one second-factor proof. A passkey comes first: its button leads, and at sign-in
+  (autoPasskey) the browser's passkey prompt opens as the form appears. Under it a 6-digit code from an authenticator app.
+  A recovery code is the last resort: a small link at the end, and the code field only once it is
+  chosen (or when nothing else works in this browser). onProof sends the proof; while it runs the
+  form is busy, and when it throws the form shows the error and lets the user try again. Used by
+  the sign-in page and by <FreshFactor>.
 -->
 <script lang="ts">
+  import { onMount } from "svelte";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import { Label } from "$lib/components/ui/label";
@@ -18,6 +22,7 @@
     actionLabel,
     passkeyOptions,
     onProof,
+    autoPasskey = false,
   }: {
     methods: SecondFactorMethod[];
     /** Names the action: "Sign in", "Approve device", "Create session". */
@@ -25,30 +30,34 @@
     /** Starts a passkey check (the sign-in and the fresh check use different routes). */
     passkeyOptions: () => Promise<PasskeyOptions>;
     onProof: (p: Proof) => Promise<unknown>;
+    /** Opens the passkey prompt as the form appears (the sign-in page, where it is the next step). */
+    autoPasskey?: boolean;
   } = $props();
 
   const id = $props.id();
   let code = $state("");
-  let recovery = $state(false);
+  let recoveryChosen = $state(false);
   let busy = $state(false);
   let error = $state("");
 
   const hasTOTP = $derived(methods.includes("totp"));
   const hasRecovery = $derived(methods.includes("recovery"));
   const hasPasskey = $derived(methods.includes("passkey") && passkeysSupported());
-  const useCode = $derived(hasTOTP || hasRecovery);
-  // Only recovery codes left: the code field takes one.
-  $effect(() => {
-    if (!hasTOTP && hasRecovery) recovery = true;
-  });
+  // The recovery field shows once chosen, or when it is the only way left in this browser.
+  const recovery = $derived(hasRecovery && (recoveryChosen || (!hasTOTP && !hasPasskey)));
+  const showCode = $derived(hasTOTP || recovery);
+  // What the person signs in with when nothing is lost.
+  const usual = $derived(hasPasskey && hasTOTP ? "passkey and app" : hasPasskey ? "passkey" : "app");
 
-  async function send(p: () => Promise<Proof>) {
+  async function send(p: () => Promise<Proof>, quiet = false) {
     busy = true;
     error = "";
     try {
       await onProof(await p());
     } catch (e) {
-      error = errorMessage(e);
+      // A prompt the browser would not open by itself (Safari wants a tap) or that the person
+      // closed says nothing: the button is right there.
+      if (!quiet) error = errorMessage(e);
     } finally {
       busy = false;
     }
@@ -62,52 +71,58 @@
     send(async () => (recovery ? { recovery_code: c } : { totp_code: c.replace(/\s/g, "") }));
   }
 
-  const passkey = () => send(async () => ({ passkey: await getPasskeyAssertion(await passkeyOptions()) }));
+  const passkey = (quiet = false) => send(async () => ({ passkey: await getPasskeyAssertion(await passkeyOptions()) }), quiet);
+
+  onMount(() => {
+    if (autoPasskey && hasPasskey) passkey(true);
+  });
 </script>
 
-<div class="flex flex-col gap-4">
-  {#if useCode}
+<div class="flex flex-col gap-5">
+  {#if hasPasskey && !recovery}
+    <Button size="lg" class="self-start" disabled={busy} onclick={() => passkey()}>
+      {#if busy}<Spinner />{:else}<KeyRoundIcon />{/if}
+      {actionLabel} with a passkey
+    </Button>
+  {/if}
+
+  {#if showCode}
     <form class="flex flex-col gap-2" onsubmit={submit}>
-      <Label for="{id}-code">{recovery ? "Recovery code" : "Code from your authenticator app"}</Label>
+      <Label for="{id}-code">{recovery ? "Recovery code" : hasPasskey ? "Or a code from your authenticator app" : "Code from your authenticator app"}</Label>
       <div class="flex flex-wrap gap-2">
-        <!-- svelte-ignore a11y_autofocus -->
         <Input
           id="{id}-code"
           bind:value={code}
-          autofocus
           autocomplete="one-time-code"
           inputmode={recovery ? "text" : "numeric"}
-          placeholder={recovery ? "xxxx-xxxx-xxxx" : "123 456"}
-          class="w-44 tracking-wider tabular-nums"
+          placeholder={recovery ? "xxxx-xxxx-xxxx-xxxx" : "123 456"}
+          class="w-48 tracking-wider tabular-nums"
           disabled={busy}
         />
-        <Button type="submit" disabled={busy || !code.trim()}>
-          {#if busy}<Spinner />{/if}
+        <Button type="submit" variant={hasPasskey && !recovery ? "outline" : "default"} disabled={busy || !code.trim()}>
+          {#if busy && !hasPasskey}<Spinner />{/if}
           {actionLabel}
         </Button>
       </div>
-      {#if hasTOTP && hasRecovery}
-        <button
-          type="button"
-          class="self-start text-sm text-link underline-offset-4 hover:underline"
-          onclick={() => {
-            recovery = !recovery;
-            code = "";
-          }}
-        >
-          {recovery ? "Use a code from your authenticator app" : "Use a recovery code"}
-        </button>
-      {/if}
     </form>
   {/if}
-  {#if hasPasskey}
-    <Button variant={useCode ? "outline" : "default"} class="self-start" disabled={busy} onclick={passkey}>
-      <KeyRoundIcon />
-      {useCode ? "Use a passkey" : `${actionLabel} with a passkey`}
-    </Button>
-  {/if}
-  {#if !useCode && !hasPasskey}
+
+  {#if !hasTOTP && !hasPasskey && !hasRecovery}
     <ErrorState inline error="This account has no two-step verification method that works in this browser." />
   {/if}
   {#if error}<ErrorState inline {error} />{/if}
+
+  {#if hasRecovery && (hasTOTP || hasPasskey)}
+    <button
+      type="button"
+      class="self-start text-meta text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+      onclick={() => {
+        recoveryChosen = !recoveryChosen;
+        code = "";
+        error = "";
+      }}
+    >
+      {recoveryChosen ? `Use your ${usual} instead` : `Lost your ${usual}? Use a recovery code`}
+    </button>
+  {/if}
 </div>

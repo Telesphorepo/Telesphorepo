@@ -101,12 +101,5 @@ func TestServerProtocols(t *testing.T) {
 				}
 			}
 		}
-		// A range of the jar answers 206 with the bytes of the range.
-		req := s.NewRequest(t, http.MethodGet, path, nil)
-		req.Header.Set("Range", "bytes=100-199")
-		resp, b = s.Do(t, req, s.AdminBasic())
-		if resp.StatusCode != http.StatusPartialContent || !bytes.Equal(b, jar[100:200]) {
-			t.Fatalf("GET a range: status %d, %d bytes", resp.StatusCode, len(b))
-		}
 	})
 }

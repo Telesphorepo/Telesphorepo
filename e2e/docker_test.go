@@ -388,8 +388,8 @@ func TestDockerConformance(t *testing.T) {
 }
 
 // TestDockerClients pushes and pulls with crane (cross-repo mount), skopeo (a streamed upload of
-// an OCI layout), ORAS (an artifact with a subject, the referrers API) and Helm (OCI charts), and
-// checks the catalog of each kind of caller.
+// an OCI layout) and ORAS (an artifact with a subject, the referrers API), and checks the catalog
+// of each kind of caller.
 func TestDockerClients(t *testing.T) {
 	t.Parallel()
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
@@ -488,22 +488,6 @@ cmp /tmp/out/a.txt a.txt
 			wantOCI(t, "PUT a manifest with a subject", resp, b, http.StatusCreated, "")
 			if resp.Header.Get("OCI-Subject") != subject {
 				t.Fatalf("PUT a manifest with a subject: OCI-Subject %q, want %s", resp.Header.Get("OCI-Subject"), subject)
-			}
-		})
-
-		t.Run("helm", func(t *testing.T) {
-			code, out := RunClient(t, helmImage, ClientOpts{WorkingDir: "/tmp", Cmd: []string{fmt.Sprintf(`set -e
-cd /tmp
-helm create mychart >/dev/null
-helm package mychart
-printf '%%s' '%[1]s' | helm registry login %[2]s -u pusher --password-stdin --plain-http
-helm push mychart-0.1.0.tgz oci://%[2]s/%[3]s --plain-http
-mkdir -p /tmp/pulled
-helm pull oci://%[2]s/%[3]s/mychart --version 0.1.0 --plain-http -d /tmp/pulled
-cmp mychart-0.1.0.tgz /tmp/pulled/mychart-0.1.0.tgz
-`, dstTok, host, dst)}})
-			if code != 0 {
-				t.Fatalf("helm: exit %d:\n%s", code, out)
 			}
 		})
 

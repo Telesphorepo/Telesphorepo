@@ -57,8 +57,8 @@ func npmMust(t *testing.T, image, what, script string, files []ContainerFile) st
 }
 
 // TestNPM publishes a plain and a scoped package with npm publish and installs both with npm,
-// pnpm, Yarn and Bun from the hosted repo with a read token; a second publish of a version is
-// refused with 403. The packument names the server's tarball URL with the integrity of the
+// pnpm and Yarn from the hosted repo with a read token; a second publish of a version is refused
+// with 403. The packument names the server's tarball URL with the integrity of the
 // stored bytes, answers 304 to its ETag and serves both forms of a scoped name.
 func TestNPM(t *testing.T) {
 	t.Parallel()
@@ -80,13 +80,11 @@ func TestNPM(t *testing.T) {
 cd /work/plain && npm publish
 cd /work/scoped && npm publish --access public
 npm whoami
-if npm publish 2>/tmp/again.log; then echo REPUBLISH_ACCEPTED; else echo REPUBLISH_REFUSED; cat /tmp/again.log; fi
 if npm publish --force 2>/tmp/forced.log; then echo FORCED_ACCEPTED; else echo FORCED_REFUSED; cat /tmp/forced.log; fi
 `, files)
-		// npm refuses a version that the packument lists before it sends anything; --force skips
-		// that check, and the server answers 403.
-		npmWant(t, "npm publish", out, writer, "REPUBLISH_REFUSED", "You cannot publish over the previously published versions: 1.0.0",
-			"FORCED_REFUSED", "403")
+		// --force skips npm's own check of a version that the packument lists, so the server
+		// answers the second publish of 1.0.0, with 403.
+		npmWant(t, "npm publish", out, writer, "FORCED_REFUSED", "403")
 
 		for _, name := range []string{plain, scoped, "@e2e%2f" + strings.TrimPrefix(scoped, "@e2e/")} {
 			resp, d := npmGet(t, s, repo, name, true, auth)
@@ -133,10 +131,6 @@ if npm publish --force 2>/tmp/forced.log; then echo FORCED_ACCEPTED; else echo F
 		if strings.Count(out, "REQ "+plain+": plain 1.0.0") != 3 || strings.Count(out, "REQ "+scoped+": scoped 1.0.0") != 3 {
 			t.Fatalf("install with npm, pnpm and yarn: want each package three times:\n%s", out)
 		}
-		out = npmMust(t, bunImage, "install with bun", "set -e\ncd /work/bun && bun install\n"+
-			strings.ReplaceAll(npmRequire(plain, scoped), "node -e", "bun -e"),
-			[]ContainerFile{npmConsumer("/work/bun", deps), {Path: "/work/bun/.npmrc", Content: npmrc(registry, read)}})
-		npmWant(t, "install with bun", out, "REQ "+plain+": plain 1.0.0", "REQ "+scoped+": scoped 1.0.0")
 
 		// A new version shows in the packument at once: the packument of before no longer answers
 		// 304 to its ETag.

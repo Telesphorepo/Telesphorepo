@@ -141,6 +141,25 @@ func (c *Counter) Since(ctx context.Context, day int64) ([]Row, error) {
 	return out, nil
 }
 
+// RecentDays is the window of Recent: the last 30 days, today included, the window of the
+// Downloads card of the settings Overview.
+const RecentDays = 30
+
+// Recent returns the written downloads of each repo over the last RecentDays days; a repo without
+// downloads has no entry. It reads the rows of ListDownloadsSince, at most one per repo and day.
+func (c *Counter) Recent(ctx context.Context) (map[int64]int64, error) {
+	first := DayOf(time.Now()) - (RecentDays-1)*int64(Day/time.Second)
+	rows, err := c.rq.ListDownloadsSince(ctx, first)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[int64]int64)
+	for _, r := range rows {
+		out[r.RepoID] += r.Downloads
+	}
+	return out, nil
+}
+
 // Cleanup deletes the days that started more than retention ago.
 func (c *Counter) Cleanup(ctx context.Context, retention time.Duration) error {
 	_, err := c.wq.DeleteOldDownloads(ctx, DayOf(time.Now().Add(-retention)))

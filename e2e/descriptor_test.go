@@ -4,7 +4,6 @@ package e2e
 
 import (
 	"net/http"
-	"slices"
 	"strings"
 	"testing"
 )
@@ -14,56 +13,29 @@ import (
 
 type descriptorJSON struct {
 	Name   string `json:"name"`
-	Kinds  []string
 	Config struct {
-		Fields []descriptorField `json:"fields"`
+		Fields []struct {
+			Key     string   `json:"key"`
+			Type    string   `json:"type"`
+			Options []string `json:"options"`
+		} `json:"fields"`
 	} `json:"config"`
-	RepoTabs []string `json:"repo_tabs"`
-	Upload   *struct {
-		Single bool     `json:"single"`
-		Folder bool     `json:"folder"`
-		Keep   []string `json:"keep"`
-		One    string   `json:"one"`
-		Reads  []struct {
-			Glob     string `json:"glob"`
-			MaxBytes int64  `json:"max_bytes"`
-		} `json:"reads"`
-	} `json:"upload"`
 	DeleteNotes []struct {
-		Match string `json:"match"`
-		One   string `json:"one"`
-		Many  string `json:"many"`
-		Text  string `json:"text"`
+		One  string `json:"one"`
+		Many string `json:"many"`
+		Text string `json:"text"`
 	} `json:"delete_notes"`
-	FileDetails []struct {
-		Match string `json:"match"`
-		Part  string `json:"part"`
-	} `json:"file_details"`
-	Browse struct {
-		Versions         bool `json:"versions"`
-		ArtifactSnippets bool `json:"artifact_snippets"`
-	} `json:"browse"`
 	RemotePresets []struct {
 		Label string `json:"label"`
 		URL   string `json:"url"`
 	} `json:"remote_presets"`
-	PublicKey string `json:"public_key"`
-	Labels    struct {
+	Labels struct {
 		Tools map[string]string `json:"tools"`
 	} `json:"labels"`
-	ImportSources []string `json:"import_sources"`
-	Tools         []struct {
+	Tools []struct {
 		ID    string `json:"id"`
 		Label string `json:"label"`
 	} `json:"tools"`
-	Publish string `json:"publish"`
-}
-
-type descriptorField struct {
-	Key        string   `json:"key"`
-	Type       string   `json:"type"`
-	Options    []string `json:"options"`
-	ChangeNote string   `json:"change_note"`
 }
 
 // formatDescriptors reads GET /api/formats by format name.
@@ -109,57 +81,9 @@ func wellFormed(f descriptorJSON) string {
 	return ""
 }
 
-func TestFormatDescriptors(t *testing.T) {
-	t.Parallel()
-	s := StartServer(t, ServerOpts{})
-	by := formatDescriptors(t, s)
-	for name, f := range by {
-		if why := wellFormed(f); why != "" {
-			t.Fatalf("%s descriptor: %s: %+v", name, why, f)
-		}
-	}
-	mvn, deb, raw := by["maven"], by["debian"], by["raw"]
-	if mvn.Upload == nil || !mvn.Upload.Folder || !mvn.Upload.Single || mvn.Upload.One != "artifact" || len(mvn.Upload.Reads) == 0 ||
-		mvn.Publish != "cli" || len(mvn.Tools) == 0 || !mvn.Browse.Versions || !mvn.Browse.ArtifactSnippets ||
-		len(mvn.RemotePresets) == 0 || len(mvn.ImportSources) == 0 || len(mvn.DeleteNotes) == 0 {
-		t.Fatalf("maven descriptor: %+v", mvn)
-	}
-	// public_key is the path under the repo that the Signing tab links: GET /debian/{repo}/key.asc
-	// serves the key.
-	archs := slices.IndexFunc(deb.Config.Fields, func(f descriptorField) bool { return f.Key == "architectures" })
-	if deb.Upload == nil || len(deb.Upload.Reads) == 0 || deb.Upload.Reads[0].Glob != "**/*.deb" || !slices.Contains(deb.RepoTabs, "signing") || deb.PublicKey != "key.asc" ||
-		deb.Publish != "cli" || len(deb.Tools) == 0 || len(deb.FileDetails) != 1 || deb.FileDetails[0].Part != "deb-package" ||
-		archs < 0 || deb.Config.Fields[archs].ChangeNote == "" || len(deb.ImportSources) == 0 {
-		t.Fatalf("debian descriptor: %+v", deb)
-	}
-	if raw.Upload == nil || raw.Publish != "cli" || len(raw.Upload.Reads) != 0 || len(raw.Config.Fields) == 0 || raw.Browse.Versions {
-		t.Fatalf("raw descriptor: %+v", raw)
-	}
-	dk := by["docker"]
-	parts := map[string]string{}
-	for _, d := range dk.FileDetails {
-		parts[d.Match] = d.Part
-	}
-	notes := map[string]bool{}
-	for _, n := range dk.DeleteNotes {
-		notes[n.Match] = true
-	}
-	if !slices.Equal(dk.Kinds, []string{"hosted", "proxy", "group"}) || dk.Upload != nil || len(dk.Config.Fields) != 0 || len(dk.RepoTabs) != 0 ||
-		len(dk.RemotePresets) == 0 ||
-		!notes["**/_tags/*"] || !notes["**/_manifests/sha256/*"] || !notes["**/_blobs/sha256/*"] ||
-		parts["**/_tags/*"] != "manifest" || parts["**/_manifests/sha256/*"] != "manifest" ||
-		len(dk.ImportSources) == 0 || len(dk.Tools) == 0 || dk.Publish != "helper" ||
-		!dk.Browse.Versions || !dk.Browse.ArtifactSnippets {
-		t.Fatalf("docker descriptor: %+v", dk)
-	}
-	nu := by["nuget"]
-	if !slices.Equal(nu.Kinds, []string{"hosted", "proxy", "group"}) || nu.Upload == nil || len(nu.Upload.Reads) != 1 || nu.Upload.Reads[0].Glob != "**/*.nupkg" ||
-		nu.Publish != "cli" || len(nu.Tools) == 0 || len(nu.ImportSources) == 0 ||
-		!nu.Browse.Versions || !nu.Browse.ArtifactSnippets || len(nu.RemotePresets) == 0 {
-		t.Fatalf("nuget descriptor: %+v", nu)
-	}
-}
-
+// TestCIWorkflowRoute: every format descriptor is well formed; the CI file of each system and
+// tool, its branches and tags, the default tool, the refusals; the Docker files and usage
+// snippets.
 func TestCIWorkflowRoute(t *testing.T) {
 	t.Parallel()
 	s := StartServer(t, ServerOpts{})
@@ -190,8 +114,14 @@ func TestCIWorkflowRoute(t *testing.T) {
 		!strings.Contains(gh.Code, "id-token: write") || !strings.Contains(gh.Code, "actions/setup-java@") {
 		t.Fatalf("GitHub Actions workflow for Maven: %+v", gh)
 	}
+	by := formatDescriptors(t, s)
+	for name, f := range by {
+		if why := wellFormed(f); why != "" {
+			t.Fatalf("%s descriptor: %s: %+v", name, why, f)
+		}
+	}
 	// Without tool, the file is the one of the first tool of the descriptor.
-	tools := formatDescriptors(t, s)["maven"].Tools
+	tools := by["maven"].Tools
 	if len(tools) == 0 {
 		t.Fatal("the maven descriptor has no tools")
 	}

@@ -601,8 +601,8 @@ for p in e2e-hello e2e-native; do
 done
 `
 
-// TestDebianDeleteAndUpload uploads a package through the web UI route, deletes one through the
-// API (apt no longer sees it) and checks the by-hash cleanup.
+// TestDebianDeleteAndUpload plans a folder of .debs and uploads a package through the web UI
+// route, deletes one through the API (apt no longer sees it) and checks the by-hash cleanup.
 func TestDebianDeleteAndUpload(t *testing.T) {
 	t.Parallel()
 	pkgs := buildDebPackages(t)
@@ -621,6 +621,28 @@ func TestDebianDeleteAndUpload(t *testing.T) {
 	rauth := Basic{reader, "reader-pass-1234"}
 
 	ps := s.MintSession(t, w, repo)
+	// The plan of a folder of .debs: a broken one has problems, a file that is not a .deb is
+	// ignored, and the open folder dists/trixie/ gives the distribution.
+	debs := []uploadPart{
+		{"debs/native.deb", pkgs.native},
+		{"debs/hello.deb", pkgs.hello1},
+		{"debs/broken.deb", []byte("not an ar archive")},
+		{"debs/notes.txt", []byte("x")},
+	}
+	sc := mustPlan(t, s, repo, ps.Auth(), planOpts{folder: "dists/trixie/", reads: readsDebs}, debs...)
+	native := findTitle(t, sc, "e2e-native 1.0 ("+pkgs.arch+")")
+	hello := findTitle(t, sc, "e2e-hello 1.0 (all)")
+	broken := findTitle(t, sc, "debs/broken.deb")
+	if len(sc.Items) != 3 || len(native.Problems)+len(hello.Problems) != 0 || len(broken.Problems) == 0 ||
+		!sameSet(sc.Ignored, []string{"debs/notes.txt"}) || sc.field("distribution").Value != "trixie" ||
+		!strings.HasPrefix(hello.target("debs/hello.deb"), "pool/"+sc.field("component").Value+"/") {
+		t.Fatalf("plan of the .deb folder: %+v", sc)
+	}
+	// A bad distribution is a problem of its field.
+	sc = mustPlan(t, s, repo, ps.Auth(), planOpts{fields: map[string]string{"distribution": "Bad Name"}, reads: readsDebs}, debs...)
+	if sc.field("distribution").Problem == "" {
+		t.Fatalf("plan with a bad distribution: %+v", sc)
+	}
 	if st, b := manualUpload(t, s, repo, ps.Auth(), map[string]string{"distribution": "trixie"}, uploadPart{"notes.txt", []byte("x")}); st != http.StatusBadRequest {
 		t.Fatalf("upload of a non-.deb file: status %d, want 400: %s", st, b)
 	}

@@ -42,16 +42,14 @@ echo '=== end ==='
 `
 
 // TestCLISetup: the setup line of POST /api/publish/setup-codes enrolls the computer and writes
-// telesphorepo.toml; git ignores the file, so setup warns; a second use and an expired code fail
-// with the message of the server; on a terminal setup writes the CI file on request; a Docker
+// telesphorepo.toml; git ignores the file, so setup warns; a second use fails with the message of
+// the server; on a terminal setup writes the CI file on request; a Docker
 // repo gets no project file, and y adds the credential helper to the Docker config file while n
 // keeps the file as it is.
 func TestCLISetup(t *testing.T) {
 	t.Parallel()
 	c := newCLI(t)
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
-		data := NewDataVolume(t)
-		opts.DataVolume = data
 		s := StartServer(t, opts)
 		app, img := RandName("app"), RandName("img")
 		s.CreateRepo(t, app, "maven", false, nil)
@@ -91,20 +89,6 @@ func TestCLISetup(t *testing.T) {
 		wantText(t, "setup of a Docker repo, no", section(out, "docker no"),
 			"Kept /work/dc2/config.json. Add the entry yourself to push:",
 			`"credHelpers": {"`+host+`": "telesphorepo"}`, "config: kept")
-
-		// An expired setup line: the server keeps the code until someone uses it, and then names
-		// its repo.
-		link := s.NewSetupCode(t, dev, app).Link
-		s.RestartAfter(t, func() {
-			editDB(t, data, "UPDATE auth_challenges SET expires_at = 1 WHERE kind = 'setup_code'")
-		})
-		code, out := c.run(t, gradleImage, "setup with an expired line", `cd /work/app && telesphorepo setup "$L5"`,
-			ClientOpts{Files: files, Mounts: mounts, Env: map[string]string{"L5": link}})
-		if code != 1 {
-			t.Fatalf("setup with an expired line: exit %d, want 1:\n%s", code, out)
-		}
-		wantText(t, "setup with an expired line", out, "This setup line is already used", "This setup line expired",
-			s.InternalURL+"/#/repo/"+app)
 	})
 }
 

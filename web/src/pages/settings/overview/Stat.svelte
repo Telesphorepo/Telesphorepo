@@ -1,11 +1,10 @@
 <!--
   One stat tile of the Settings overview: its own small card, the content centered, the value in
-  the title size with tabular figures, the label under it, and an optional muted line (what the
-  value is made of). Tiles sit in an equal-width grid that gives a row one height, and the content
+  the title size with tabular figures and the label under it, nothing more. Tiles sit in an equal-width grid that gives a row one height, and the content
   is centered in the tile both ways. With `href` the whole tile is the link (the label is the link for the keyboard) and fills
   under the pointer.
 
-    <Stat label="Repositories" value="17" detail="12 hosted · 3 proxies · 2 groups" href={href("/settings/repositories")} />
+    <Stat label="Repositories" value="17" href={href("/settings/repositories")} />
 
   `children` replace the value (Loading inline, an inline ErrorState).
 -->
@@ -16,14 +15,11 @@
   let {
     label,
     value,
-    detail,
     href,
     children,
   }: {
     label: string;
     value?: string;
-    /** One short phrase under the label. */
-    detail?: string;
     href?: string;
     children?: Snippet;
   } = $props();
@@ -42,6 +38,4 @@
     <a {href} class="max-w-full truncate text-label text-muted-foreground outline-none after:absolute after:inset-0 after:rounded-lg">{label}</a>
   {:else}
     <p class="max-w-full truncate text-label text-muted-foreground">{label}</p>
-  {/if}
-  {#if detail}<p class="max-w-full truncate text-meta text-muted-foreground" title={detail}>{detail}</p>{/if}
-</div>
+  {/if}</div>

@@ -50,6 +50,11 @@ Linux. Use bun, not npm.
   or service in a container. A test calls `t.Parallel()`, starts its own server, and never
   hardcodes a fact the code owns (versions, defaults, registry lists, limits): read it from the
   server or set it in the test.
+- **A test earns its place in the suite.** It checks behaviour a user or client relies on, or a
+  deliberate rule a later change could undo. A test written to chase a bug stays only when it
+  pins such a rule; otherwise delete it once the fix is in. Never test a library, the standard
+  library or a client tool's own behaviour, and look for a test that already covers the case
+  before adding one: extend it rather than start another server.
 - **Security model.** Every route is registered with a `route.Policy`; handlers never check
   credentials. Only a publish session writes to a format route; a password or read token only
   reads. API changes need a UI session (second factor). Read the client address only with

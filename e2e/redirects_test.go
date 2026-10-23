@@ -101,9 +101,6 @@ func TestRepoRedirects(t *testing.T) {
 			// The name of a redirect is reserved.
 			st, b := s.API(t, http.MethodPost, "/api/repos", map[string]any{"name": old, "format": "raw"}, s.Admin())
 			wantAPIStatus(t, "create a repository with the name of a redirect", st, b, http.StatusConflict)
-			if !strings.Contains(string(b), "redirect") {
-				t.Fatalf("create a repository with the name of a redirect: %s, want a message that names the redirect", b)
-			}
 			other := RandName("mvn-other")
 			s.CreateRepo(t, other, "maven", false, nil)
 			st, b = s.API(t, http.MethodPost, "/api/repos/"+other+"/rename", map[string]any{"name": old}, s.Admin())

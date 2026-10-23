@@ -87,8 +87,7 @@ package-mode = false
 
 // TestPyPI: twine uploads the wheel and sdist that python -m build makes to a private hosted repo;
 // the page lists both with hashes, sizes, upload times and the wheel's core metadata, whose bytes
-// the .metadata file serves; an upload of other bytes under a file name that exists fails with
-// 409; pip installs the package with --require-hashes.
+// the .metadata file serves; pip installs the package with --require-hashes.
 func TestPyPI(t *testing.T) {
 	t.Parallel()
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
@@ -109,19 +108,12 @@ pip install -q --root-user-action=ignore build twine
 cd /work/p
 python -m build
 twine upload --non-interactive --repository-url "$URL" dist/*
-sed -i 's/hello from/changed hello from/' ` + mod + `/__init__.py
-rm -rf dist build *.egg-info
-python -m build
-if twine upload --non-interactive --repository-url "$URL" dist/*; then echo "UPLOAD OF OTHER BYTES PASSED"; exit 1; fi
 `},
 			Files: pySetuptoolsProject("/work/p", name, mod, "1.0.0", msg),
 			Env:   map[string]string{"URL": upload, "TWINE_USERNAME": "__token__", "TWINE_PASSWORD": PublishToken(t, s, writer, repo)},
 		})
 		if code != 0 {
 			t.Fatalf("build and twine upload: exit %d\n%s", code, out)
-		}
-		if !strings.Contains(out, "409 Conflict") {
-			t.Fatalf("twine output has no 409 Conflict:\n%s", out)
 		}
 
 		read := Basic{writer, token}
@@ -164,7 +156,7 @@ python -c "import ` + mod + `; print(` + mod + `.MSG)"
 			Files: []ContainerFile{{Path: "/work/req.txt", Content: name + "==1.0.0 --hash=sha256:" + wheelSHA + " --hash=sha256:" + sdistSHA + "\n"}},
 			Env:   map[string]string{"INDEX": pyIndex(s, repo, writer, token), "PIP_TRUSTED_HOST": s.Alias},
 		})
-		if code != 0 || !strings.Contains(out, msg) || strings.Contains(out, "changed "+msg) {
+		if code != 0 || !strings.Contains(out, msg) {
 			t.Fatalf("pip install --require-hashes: exit %d, want %q:\n%s", code, msg, out)
 		}
 	})

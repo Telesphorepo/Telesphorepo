@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -659,6 +660,7 @@ func (s *Service) FinishPasskeyRegistration(ctx context.Context, userID int64, n
 	}
 	cred, err := wa.CreateCredential(u, sd, parsed)
 	if err != nil {
+		passkeyRejected(ctx, userID, "the new passkey did not verify", err)
 		return nil, bad
 	}
 	js, err := json.Marshal(cred)
@@ -706,22 +708,38 @@ func (s *Service) BeginPasskeyAssertion(ctx context.Context, userID int64) (*pro
 	return opts, nil
 }
 
+// passkeyRejected logs why a passkey did not verify (go-webauthn's details name the failed
+// check) and reports the check as failed.
+func passkeyRejected(ctx context.Context, userID int64, why string, err error) (bool, error) {
+	attrs := []any{"user_id", userID, "reason", why}
+	var pe *protocol.Error
+	if errors.As(err, &pe) {
+		attrs = append(attrs, "details", pe.Details, "info", pe.DevInfo)
+	} else if err != nil {
+		attrs = append(attrs, "err", err)
+	}
+	slog.WarnContext(ctx, "passkey rejected", attrs...)
+	return false, nil
+}
+
 // checkPasskey verifies an assertion against the ceremony its challenge names. The ceremony
-// is single use; a cloned-authenticator warning fails the check.
+// is single use. A signature counter that did not go up passes: a security key keeps separate
+// counters for its protocols (a phone may use the other one over NFC), so the counter is no proof
+// of a clone; the stored counter keeps its highest value.
 func (s *Service) checkPasskey(ctx context.Context, userID int64, assertion json.RawMessage) (bool, error) {
 	parsed, err := protocol.ParseCredentialRequestResponseBytes(assertion)
 	if err != nil {
-		return false, nil
+		return passkeyRejected(ctx, userID, "the browser's answer did not parse", err)
 	}
 	row, err := s.takeChallenge(ctx, chPasskeyAssert, ceremonyID(parsed.Response.CollectedClientData.Challenge))
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return passkeyRejected(ctx, userID, "no open passkey check has this challenge (expired or used)", nil)
 	}
 	if err != nil {
 		return false, err
 	}
 	if row.UserID.Int64 != userID {
-		return false, nil
+		return passkeyRejected(ctx, userID, "the passkey check belongs to another user", nil)
 	}
 	var sd webauthn.SessionData
 	if err := json.Unmarshal(row.Data, &sd); err != nil {
@@ -736,12 +754,13 @@ func (s *Service) checkPasskey(ctx context.Context, userID int64, assertion json
 		return false, err
 	}
 	cred, err := wa.ValidateLogin(u, sd, parsed)
-	if err != nil || cred.Authenticator.CloneWarning {
-		return false, nil
+	if err != nil {
+		return passkeyRejected(ctx, userID, "the assertion did not verify", err)
 	}
+	cred.Authenticator.CloneWarning = false
 	pk, err := s.wq.GetPasskeyByCredentialID(ctx, cred.ID)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && pk.UserID != userID) {
-		return false, nil
+		return passkeyRejected(ctx, userID, "the passkey is not on file for this user", err)
 	}
 	if err != nil {
 		return false, err

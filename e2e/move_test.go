@@ -332,67 +332,11 @@ func moveContent(t *testing.T, s *Server, pkgs *debPackages, patch map[string]an
 		map[string]string{blobKey(sha256Hex(body)): sha256Hex(body)})
 }
 
-// TestStorageMoveFailure removes one blob from the source: the move fails with that blob in
-// its failures and storage stays on the source. After the blob is restored, a second move
-// skips what the first one copied and finishes.
-func TestStorageMoveFailure(t *testing.T) {
-	t.Parallel()
-	tg := StartSeaweedFS(t)
-	vol := NewDataVolume(t)
-	s := StartServer(t, ServerOpts{DataVolume: vol, Env: moveKeepBlobs()})
-	repo := RandName("raw")
-	s.CreateRepo(t, repo, "raw", false, nil)
-	files := moveRawSeed(t, s, repo, "seed", 20, 4096)
-
-	lost := "seed/f00007.bin"
-	lostKey := blobKey(sha256Hex(files[lost]))
-	VolumeExec(t, vol, "set -e\nrm /data/blobs/"+lostKey+"\n")
-
-	m := s.StartMove(t, moveS3Patch(tg))
-	m = s.WaitMove(t, m.ID, moveWait)
-	if m.State != "failed" || m.Failed != 1 {
-		t.Fatalf("move with a missing source blob ended %+v, want failed with 1 failure", m)
-	}
-	fails := s.MoveFailures(t, m.ID)
-	if len(fails) != 1 || fails[0].Key != lostKey || fails[0].Reason == "" {
-		t.Fatalf("move failures = %+v, want one row for %s with a reason", fails, lostKey)
-	}
-	moveWantStorage(t, s, "fs")
-
-	// The server stays on the source store for reads and writes.
-	rest := map[string][]byte{}
-	for p, b := range files {
-		if p != lost {
-			rest[p] = b
-		}
-	}
-	moveWantRaw(t, s, repo, rest)
-	body := rawRandom(t, 4096)
-	if err := movePut(s, "/raw/"+repo+"/after/new.bin", body, PublishToken(t, s, s.AdminUser, repo)); err != nil {
-		t.Fatal(err)
-	}
-	newKey := blobKey(sha256Hex(body))
-	moveWantBlobs(t, "source (upload after the failed move)", FSBlobs(t, vol), map[string]string{newKey: sha256Hex(body)})
-
-	// Restore the blob and start again.
-	VolumeExec(t, vol, "set -e\ncp /restore.bin /data/blobs/"+lostKey+"\nchmod 0644 /data/blobs/"+lostKey+"\n",
-		ContainerFile{Path: "/restore.bin", Content: string(files[lost])})
-	m2 := s.StartMove(t, moveS3Patch(tg))
-	m2 = s.WaitMove(t, m2.ID, moveWait)
-	moveWantDone(t, s, m2)
-	if m2.Skipped < int64(len(files)-1) {
-		t.Fatalf("second move skipped %d, want >= %d (blobs the first move copied)", m2.Skipped, len(files)-1)
-	}
-	moveWantStorage(t, s, "s3")
-	moveWantBlobs(t, "target", tg.Blobs(t), moveAssets(t, s, repo))
-	files["after/new.bin"] = body
-	moveWantRaw(t, s, repo, files)
-}
-
-// TestStorageMoveRetry fails a move with a blob missing in the source, then tries it again
-// through the retry route of the Storage page: the target settings come without the secret, a
-// retry with a changed setting keeps the sealed secret and finishes, the failed move is put
-// away, and a dismiss returns to no current move.
+// TestStorageMoveRetry fails a move with a blob missing in the source: the move lists that blob
+// in its failures, storage stays on the source and a new upload lands there. Then it tries the
+// move again through the retry route of the Storage page: the target settings come without the
+// secret, a retry with a changed setting keeps the sealed secret, skips what the failed move
+// copied and finishes, the failed move is put away, and a dismiss returns to no current move.
 func TestStorageMoveRetry(t *testing.T) {
 	t.Parallel()
 	tg := StartSeaweedFS(t)
@@ -412,7 +356,19 @@ func TestStorageMoveRetry(t *testing.T) {
 	if m.State != "failed" || m.Failed != 1 {
 		t.Fatalf("move with a missing source blob ended %+v, want failed with 1 failure", m)
 	}
+	fails := s.MoveFailures(t, m.ID)
+	if len(fails) != 1 || fails[0].Key != lostKey || fails[0].Reason == "" {
+		t.Fatalf("move failures = %+v, want one row for %s with a reason", fails, lostKey)
+	}
 	moveWantStorage(t, s, "fs")
+
+	// The server stays on the source store: a new upload lands there.
+	newBody := rawRandom(t, 4096)
+	if err := movePut(s, "/raw/"+repo+"/after/new.bin", newBody, PublishToken(t, s, s.AdminUser, repo)); err != nil {
+		t.Fatal(err)
+	}
+	moveWantBlobs(t, "source (upload after the failed move)", FSBlobs(t, vol),
+		map[string]string{blobKey(sha256Hex(newBody)): sha256Hex(newBody)})
 
 	// The current move carries its target settings for the form, without the secret.
 	st, b := s.API(t, http.MethodGet, "/api/storage/moves/current", nil, admin)
@@ -489,6 +445,7 @@ func TestStorageMoveRetry(t *testing.T) {
 	moveWantBlobs(t, "target", tg.Blobs(t), moveAssets(t, s, repo))
 	// With s3.redirect on, a download answers 302 with a presigned URL on the target: the GET
 	// follows it at the host address of SeaweedFS.
+	files["after/new.bin"] = newBody
 	for p, body := range files {
 		rawWantGet(t, s, tg, "/raw/"+repo+"/"+p, s.AdminBasic(), body)
 	}

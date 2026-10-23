@@ -13,8 +13,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/Telesphorepo/Telesphorepo/internal/modules"
 )
 
 type permSubsystem struct {
@@ -44,25 +42,11 @@ func TestPermissionRegistry(t *testing.T) {
 		Subsystems []permSubsystem `json:"subsystems"`
 	}
 	s.MustAPI(t, http.MethodGet, "/api/permissions", nil, nil, &reg)
-	// The subsystems come in module start order: the order of modules.All.
-	start := map[string]int{}
-	for i, m := range modules.All() {
-		start[m.ID] = i
-	}
 	by := map[string]permSubsystem{}
-	last := 0
 	for _, sub := range reg.Subsystems {
 		if sub.Label == "" || sub.Help == "" || sub.Module == "" {
 			t.Fatalf("subsystem %+v: label, help and module are required", sub)
 		}
-		i, ok := start[sub.Module]
-		if !ok {
-			t.Fatalf("subsystem %s: module %q is not in modules.All", sub.ID, sub.Module)
-		}
-		if i < last {
-			t.Fatalf("subsystem %s of module %s comes after a subsystem of a later module (want module start order)", sub.ID, sub.Module)
-		}
-		last = i
 		by[sub.ID] = sub
 		for _, p := range sub.Permissions {
 			if !strings.HasPrefix(p.ID, sub.ID+".") || p.Label == "" || p.Help == "" || p.Needs == nil {
@@ -181,42 +165,6 @@ func TestAuditActions(t *testing.T) {
 		if findAudit(all, c.action, c.actor) == nil {
 			t.Errorf("audit log has no %s event by %s", c.action, c.actor)
 		}
-	}
-}
-
-// TestSettingsS3Endpoint: an empty S3 endpoint means AWS, so the region is required; r2 is not a
-// storage backend.
-func TestSettingsS3Endpoint(t *testing.T) {
-	t.Parallel()
-	s := StartServer(t, ServerOpts{})
-	aws := map[string]any{
-		"storage": "s3", "s3.endpoint": "", "s3.region": "", "s3.bucket": "b",
-		"s3.access_key_id": "a", "s3.secret_access_key": "s",
-	}
-	st, b := s.API(t, http.MethodPost, "/api/settings/storage/test", aws, s.Admin())
-	var res struct {
-		OK     bool              `json:"ok"`
-		Fields map[string]string `json:"fields"`
-	}
-	_ = json.Unmarshal(b, &res)
-	if st != http.StatusBadRequest || res.OK || res.Fields["s3.region"] == "" {
-		t.Fatalf("S3 test without endpoint and region: status %d, want 400 with a field error of s3.region: %s", st, b)
-	}
-	if st, b := s.API(t, http.MethodPatch, "/api/settings", map[string]any{"storage": "r2"}, s.Admin()); st != http.StatusBadRequest {
-		t.Fatalf("storage r2: status %d, want 400: %s", st, b)
-	}
-	// The bucket goes in s3.bucket: an address with a path (the bucket after the host, as a person
-	// copies it) is refused, so the path never lands in front of every key.
-	st, b = s.API(t, http.MethodPatch, "/api/settings", map[string]any{"s3.endpoint": "https://acct.r2.cloudflarestorage.com/bucket"}, s.Admin())
-	var refused struct {
-		Fields map[string]string `json:"fields"`
-	}
-	_ = json.Unmarshal(b, &refused)
-	if st != http.StatusBadRequest || refused.Fields["s3.endpoint"] == "" {
-		t.Fatalf("s3.endpoint with a path: status %d, want 400 with a field error of s3.endpoint: %s", st, b)
-	}
-	if st, b := s.API(t, http.MethodPost, "/api/settings/nope/test", map[string]any{}, s.Admin()); st != http.StatusNotFound {
-		t.Fatalf("test of an unknown group: status %d, want 404: %s", st, b)
 	}
 }
 

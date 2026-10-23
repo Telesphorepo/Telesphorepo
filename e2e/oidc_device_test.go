@@ -102,10 +102,17 @@ func approveWith(t testing.TB, s *Server, jar http.CookieJar, userCode, proof st
 }
 
 // TestOIDCDeviceApproval: an SSO admin approves a device after a new sign-in at Keycloak, then
-// publishes with the device.
+// publishes with the device. A provider that ignores prompt=login and max_age returns the old
+// auth_time of its own session, and the callback refuses the approval: the test signs in at
+// Keycloak first in a browser of its own, sets oidc.approval_max_age to 20 s, and at the end waits
+// until that sign-in is older than that.
 func TestOIDCDeviceApproval(t *testing.T) {
 	t.Parallel()
 	kc, s := startSSOServer(t)
+	// An approval takes a sign-in of at most oidc.approval_max_age; a short one keeps the wait short.
+	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"oidc.approval_max_age": "20s"}, s.Admin(), nil)
+	staleSignedIn := time.Now()
+	stale := kc.SignIn(t, s, "alice", kcAlicePassword)
 	alice := kc.SignIn(t, s, "alice", kcAlicePassword)
 	repo := RandName("sso-dev")
 	s.CreateRepo(t, repo, "raw", false, nil)
@@ -168,46 +175,35 @@ func TestOIDCDeviceApproval(t *testing.T) {
 			t.Fatalf("approve %s with the grant of %s: status %d, want 401: %s", en3.UserCode, en2.UserCode, st, b)
 		}
 	})
-}
 
-// TestOIDCDeviceApprovalStale: a provider that ignores prompt=login and max_age returns the old
-// auth_time of its own session, and the callback refuses the approval. The test signs in at
-// Keycloak first, then waits until that sign-in is older than oidc.approval_max_age, which it
-// sets to 20 s. t.Parallel lets the
-// sequential tests of the zone run during the wait.
-func TestOIDCDeviceApprovalStale(t *testing.T) {
-	kc, s := startSSOServer(t)
-	// An approval takes a sign-in of at most oidc.approval_max_age; a short one keeps the wait short.
-	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"oidc.approval_max_age": "20s"}, s.Admin(), nil)
-	signedIn := time.Now()
-	alice := kc.SignIn(t, s, "alice", kcAlicePassword)
+	// The browser of stale signed in at Keycloak once, at the start, and never again.
+	t.Run("stale sign-in", func(t *testing.T) {
+		time.Sleep(time.Until(staleSignedIn.Add(25 * time.Second)))
 
-	t.Parallel()
-	time.Sleep(time.Until(signedIn.Add(25 * time.Second)))
+		en, _ := s.StartEnrollment(t, "e2e alice stale laptop")
+		auth := kc.startDeviceSignIn(t, s, stale.Jar, en.UserCode)
+		q := auth.Query()
+		q.Del("prompt")
+		q.Del("max_age")
+		auth.RawQuery = q.Encode()
 
-	en, _ := s.StartEnrollment(t, "e2e alice stale laptop")
-	auth := kc.startDeviceSignIn(t, s, alice.Jar, en.UserCode)
-	q := auth.Query()
-	q.Del("prompt")
-	q.Del("max_age")
-	auth.RawQuery = q.Encode()
-
-	// Keycloak still has alice's session from the first sign-in, so without prompt=login it
-	// sends the browser straight back to the callback, with that sign-in's auth_time.
-	resp, err := kc.Client(alice.Jar).Get(auth.String())
-	if err != nil {
-		t.Fatalf("GET the authorization request without prompt and max_age: %v", err)
-	}
-	b, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.Request.URL.Path != oidcCallbackPath {
-		t.Fatalf("authorization request without prompt: ended at %s with status %d, want the server callback: %s", resp.Request.URL, resp.StatusCode, b)
-	}
-	a := approvalPage(t, &oidcResult{Resp: resp, Body: b})
-	if a.Error != "stale_sign_in" || a.Grant != "" || a.Code != en.UserCode {
-		t.Fatalf("callback sent the browser to code %q, error %q, grant set %v; want code %s and error stale_sign_in", a.Code, a.Error, a.Grant != "", en.UserCode)
-	}
-	if st, b := browserAPI(t, s, http.MethodGet, "/api/devices/enroll?user_code="+url.QueryEscape(en.UserCode), nil, alice.Jar); st != http.StatusOK {
-		t.Fatalf("look up the code after the refused approval: status %d, want 200 (still pending): %s", st, b)
-	}
+		// Keycloak still has the session of that sign-in, so without prompt=login it sends the
+		// browser straight back to the callback, with that sign-in's auth_time.
+		resp, err := kc.Client(stale.Jar).Get(auth.String())
+		if err != nil {
+			t.Fatalf("GET the authorization request without prompt and max_age: %v", err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.Request.URL.Path != oidcCallbackPath {
+			t.Fatalf("authorization request without prompt: ended at %s with status %d, want the server callback: %s", resp.Request.URL, resp.StatusCode, b)
+		}
+		a := approvalPage(t, &oidcResult{Resp: resp, Body: b})
+		if a.Error != "stale_sign_in" || a.Grant != "" || a.Code != en.UserCode {
+			t.Fatalf("callback sent the browser to code %q, error %q, grant set %v; want code %s and error stale_sign_in", a.Code, a.Error, a.Grant != "", en.UserCode)
+		}
+		if st, b := browserAPI(t, s, http.MethodGet, "/api/devices/enroll?user_code="+url.QueryEscape(en.UserCode), nil, stale.Jar); st != http.StatusOK {
+			t.Fatalf("look up the code after the refused approval: status %d, want 200 (still pending): %s", st, b)
+		}
+	})
 }

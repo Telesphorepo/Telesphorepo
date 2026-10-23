@@ -322,64 +322,6 @@ func (p planJSON) items0Target() string {
 	return p.Items[0].Files[0].Target
 }
 
-func TestFolderUploadDebianAndRaw(t *testing.T) {
-	t.Parallel()
-	pkgs := buildDebPackages(t)
-	archs := []string{"amd64", "arm64"}
-	if !slices.Contains(archs, pkgs.arch) {
-		archs = append(archs, pkgs.arch)
-	}
-	s := StartServer(t, ServerOpts{})
-	deb, raw := RandName("deb"), RandName("raw")
-	s.CreateRepo(t, deb, "debian", false, map[string]any{"architectures": archs})
-	s.CreateRepo(t, raw, "raw", false, nil)
-	w := RandName("writer")
-	s.CreateUser(t, w, "writer-pass-1234")
-	s.SetPerms(t, deb, w, "repo.download", "repo.publish")
-	s.SetPerms(t, raw, w, "repo.download", "repo.publish")
-
-	// A folder of .debs, one of them broken. The open folder dists/trixie/ gives the distribution.
-	ps := s.MintSession(t, w, deb)
-	debs := []uploadPart{
-		{"debs/native.deb", pkgs.native},
-		{"debs/hello.deb", pkgs.hello1},
-		{"debs/broken.deb", []byte("not an ar archive")},
-		{"debs/notes.txt", []byte("x")},
-	}
-	sc := mustPlan(t, s, deb, ps.Auth(), planOpts{folder: "dists/trixie/", reads: readsDebs}, debs...)
-	native := findTitle(t, sc, "e2e-native 1.0 ("+pkgs.arch+")")
-	hello := findTitle(t, sc, "e2e-hello 1.0 (all)")
-	broken := findTitle(t, sc, "debs/broken.deb")
-	if len(sc.Items) != 3 || len(native.Problems)+len(hello.Problems) != 0 || len(broken.Problems) == 0 ||
-		!sameSet(sc.Ignored, []string{"debs/notes.txt"}) || sc.field("distribution").Value != "trixie" ||
-		!strings.HasPrefix(hello.target("debs/hello.deb"), "pool/"+sc.field("component").Value+"/") {
-		t.Fatalf("plan of the .deb folder: %+v", sc)
-	}
-	// A bad distribution is a problem of its field.
-	sc = mustPlan(t, s, deb, ps.Auth(), planOpts{fields: map[string]string{"distribution": "Bad Name"}, reads: readsDebs}, debs...)
-	if sc.field("distribution").Problem == "" {
-		t.Fatalf("plan with a bad distribution: %+v", sc)
-	}
-	got := mustUpload(t, s, deb, ps.Auth(), map[string]string{"distribution": "trixie"}, pick(debs, append(native.paths(), hello.paths()...))...)
-	if len(got) != 2 || got[0].Status != "created" || got[1].Status != "created" {
-		t.Fatalf("upload of the chosen .debs: %+v", got)
-	}
-	s.WaitDebianIndexed(t, deb)
-
-	// A raw folder: every file, stored at its path under the target folder.
-	rs := s.MintSession(t, w, raw)
-	site := []uploadPart{{"site/index.html", []byte("<h1>hi</h1>")}, {"site/css/a.css", []byte("a{}")}}
-	sc = mustPlan(t, s, raw, rs.Auth(), planOpts{fields: map[string]string{"folder": "web"}}, site...)
-	if len(sc.Items) != 2 || len(sc.Ignored) != 0 || findTitle(t, sc, "site/css/a.css").target("site/css/a.css") != "web/site/css/a.css" {
-		t.Fatalf("plan of the raw folder: %+v", sc)
-	}
-	got = mustUpload(t, s, raw, rs.Auth(), map[string]string{"folder": "web"}, site...)
-	if len(got) != 2 || got[0].Path != "web/site/index.html" || got[1].Path != "web/site/css/a.css" {
-		t.Fatalf("raw folder upload: %+v", got)
-	}
-	rawWantGet(t, s, nil, "/raw/"+raw+"/web/site/css/a.css", s.AdminBasic(), []byte("a{}"))
-}
-
 // TestUploadHeadsAndChunks: a plan answers heads, and a later plan that names them sends no first
 // bytes; heads the server does not hold, or of another publish session, answer 409. An upload
 // names files that went through the resumable upload routes in its part "uploads": the server

@@ -930,7 +930,7 @@ transaction.
 | `GET /identity/logo` | none | The logo: its media type (`image/png`, `image/jpeg` or `image/webp`), the ETag of its SHA-256, `Cache-Control: public, no-cache`, `X-Content-Type-Options: nosniff` and a sandbox CSP; 304 for a matching `If-None-Match`; 404 without a logo |
 | `PUT /api/identity/logo` · `DELETE /api/identity/logo` | `settings.general` | PUT takes the image file as the body and saves it as `server_logo`; the type comes from the bytes, never from a header or a name (an SVG is 400), a body over 256 KiB is 413, an image over 512 px on its long side is 400 with `fields`. DELETE removes it. Each saves like `PATCH /api/settings` (one `settings.update` event; 409 when `TR_SERVER_LOGO` sets it) and answers the identity |
 | `GET /api/formats` | none | The UI descriptor of every format, in module order (see **Format UI descriptors**): `[{name, title, description, icon?, kind_icons?, kinds, config: {default, fields}, repo_fields, repo_tabs, upload, delete_notes, file_details, browse: {versions, artifact_snippets}, remote_presets, proxy_note?, public_key?, labels: {artifact_kinds, artifact_name, tools, install_heading?, build_files}, import_sources, tools: [{id, label, setup, project?}], setup}]` |
-| `GET /api/repos`, `GET /api/repos/{name}` · `POST /api/repos` · `PATCH /api/repos/{name}` | any/anon · `repositories.all` · `repo.settings` | The list shows the repos where the caller holds a permission, and the public ones. Repo JSON has `permissions`, the caller's repository permissions on the repo. Repo JSON has `file_count`, `total_size` and `last_published_at` (null before the first publish), read from the repo row (see `assets` in **Data model**); a group's counters count each file it serves to the caller once (see **Group counters**), with `counts_pending: true` and 0 and null while the server has not counted the caller's set of members yet. `format` must be a registered name. `description` (POST and PATCH) has at most 500 characters and no control characters except newline and tab. `config` must be a JSON object that the format validates (400 otherwise; an unknown format lists the available ones). An empty config becomes the format default. Repo JSON has `operation`: `{id, type, owner, state, done, total, message, error}` of the repo's active operation, or null (see **Repo operations**). Repo JSON has `fields`: the values of the module fields of the repo (e.g. `{signing_key: "default"}`; `{}` for a format without fields). POST and PATCH take `fields` too; POST gives a field without a value its default, and a field that does not apply to the format and kind is 400. `PATCH /api/repos/{name}` takes `{description?, config?, proxy?, fields?}` and is one repo update (`repos.Service.Update`): the whole new state is checked first, then saved in one transaction with the field values, the format's `OnRepoChange` and one `repo.update` event with the changed fields. Repo JSON has `kind`, and a group has `member_count`. POST takes `kind` (`hosted` default, `proxy`, `group`), `members: [names]` for a group, `proxy: {remote_url, username?, password?, metadata_ttl?, not_found_ttl?}` (seconds) for a proxy, and `force`. A new proxy's remote is checked first (see **Group and proxy repositories**): a 502 problem document when it does not answer, unless `force: true`. PATCH takes `proxy` with the same fields for a proxy; `username` and `password` together replace the credentials, `username: ""` removes them, and the password is never returned. `GET /api/repos/{name}` adds, for a group, `members: [{name, format, kind, public, permissions}]` (the members the caller can read, in order, each with the caller's repository permissions on it); for a hosted or proxy repo, `groups: [names]` (the groups it is in that the caller can read); for a proxy and a holder of `repo.settings`, `proxy: {remote_url, has_credentials, metadata_ttl, not_found_ttl, last_ok_at\|null, last_error, last_error_at\|null}` |
+| `GET /api/repos`, `GET /api/repos/{name}` · `POST /api/repos` · `PATCH /api/repos/{name}` | any/anon · `repositories.all` · `repo.settings` | The list shows the repos where the caller holds a permission, and the public ones. Repo JSON has `permissions`, the caller's repository permissions on the repo. Repo JSON has `file_count`, `total_size` and `last_published_at` (null before the first publish), read from the repo row (see `assets` in **Data model**); a group's counters count each file it serves to the caller once (see **Group counters**), with `counts_pending: true` and 0 and null while the server has not counted the caller's set of members yet. The list's Repo JSON has `downloads`: the downloads of the repo in the last 30 days, today included (UTC days, the window of the Overview's Downloads card), from one read of `download_stats` for every repo (`stats.Counter.Recent`); it lags the counters in memory by up to a minute (see **Download statistics**). `format` must be a registered name. `description` (POST and PATCH) has at most 500 characters and no control characters except newline and tab. `config` must be a JSON object that the format validates (400 otherwise; an unknown format lists the available ones). An empty config becomes the format default. Repo JSON has `operation`: `{id, type, owner, state, done, total, message, error}` of the repo's active operation, or null (see **Repo operations**). Repo JSON has `fields`: the values of the module fields of the repo (e.g. `{signing_key: "default"}`; `{}` for a format without fields). POST and PATCH take `fields` too; POST gives a field without a value its default, and a field that does not apply to the format and kind is 400. `PATCH /api/repos/{name}` takes `{description?, config?, proxy?, fields?}` and is one repo update (`repos.Service.Update`): the whole new state is checked first, then saved in one transaction with the field values, the format's `OnRepoChange` and one `repo.update` event with the changed fields. Repo JSON has `kind`, and a group has `member_count`. POST takes `kind` (`hosted` default, `proxy`, `group`), `members: [names]` for a group, `proxy: {remote_url, username?, password?, metadata_ttl?, not_found_ttl?}` (seconds) for a proxy, and `force`. A new proxy's remote is checked first (see **Group and proxy repositories**): a 502 problem document when it does not answer, unless `force: true`. PATCH takes `proxy` with the same fields for a proxy; `username` and `password` together replace the credentials, `username: ""` removes them, and the password is never returned. `GET /api/repos/{name}` adds, for a group, `members: [{name, format, kind, public, permissions}]` (the members the caller can read, in order, each with the caller's repository permissions on it); for a hosted or proxy repo, `groups: [names]` (the groups it is in that the caller can read); for a proxy and a holder of `repo.settings`, `proxy: {remote_url, has_credentials, metadata_ttl, not_found_ttl, last_ok_at\|null, last_error, last_error_at\|null}` |
 | `PUT /api/repos/{name}/members` | `repo.settings` | `{members: [names]}` replaces the members of a group and their order; returns the repo. 400 for 0 or more than 50 members, a member of another format, a group, a name listed twice, an unknown name, or a repo that is not a group |
 | `POST /api/repos/{name}/proxy/test` | `repo.settings` | Checks the remote of a proxy now: 200 `{ok: true}`, or a 502 problem document with the extension member `ok: false` and the reason as its detail. It records the result as the proxy's last answer or last error |
 | `PATCH /api/repos` | `repo.settings` on each repo | `{names: [...], anonymous_read: bool}`. The one way to make repos public or private: one repo update of every repo in one transaction. One `repo.update` event per repo whose value changed. 200 `{changed: n}` |
@@ -1136,7 +1136,10 @@ archives with their SHA-256 and the commands to install one by hand.
   changes them.
 - **Second factor.** A local user may register several TOTP factors (SHA-1, 6 digits, 30 s, +-1
   step; a step that a factor accepted is refused again), several passkeys (RP ID is the host of
-  `base_url`, the one accepted origin is its scheme and host, a clone warning fails the check) and
+  `base_url`, the one accepted origin is its scheme and host; a sign count that does not go up
+  passes, because a security key keeps one counter per protocol and a phone may use the other
+  over NFC, and the stored count keeps its highest value; the server logs `passkey rejected` with
+  go-webauthn's reason for every failed check) and
   10 one-time recovery codes (80 bits each, argon2id-hashed). Recovery codes work only at
   sign-in. While `base_url` is empty, passkeys take the scheme and host by which the browser reached
   the server (`httpx.Origin`; the trusted proxies decide the scheme), so the first admin of a new
@@ -1505,7 +1508,8 @@ through `credHelpers` in `$DOCKER_CONFIG/config.json` (else `~/.docker/config.js
   it reads what the device's user reads (a private base image too) and pushes through the session
   of its scope.
 
-**UI pages.** The sign-in page (second step for a person who needs it), the approval page (`/#/device?code=`)
+**UI pages.** The sign-in page (second step for a person who needs it: the passkey first, its prompt
+opening by itself, then a code from the app, and a recovery code only behind a link), the approval page (`/#/device?code=`)
 and, under Your account: **Sign-in and security** (TOTP with a QR code, passkeys, recovery codes),
 **Devices**, **Tokens** (read tokens, and publish tokens with a new manual session), and under
 Settings for people who hold the permission **CI pipelines** (trust policies, started from GitHub Actions, Jenkins or another CI
@@ -3842,6 +3846,9 @@ The server counts the downloads of each repo per day (`internal/stats`, table `d
   first, then answers `{days: [{day, downloads, bytes}], repos: [{name, format, downloads, bytes}],
   downloads, bytes}`: every UTC day of the window (today last, `day` as `2026-10-22`) and the ten
   repos with the most downloads.
+- **`GET /api/repos`** gives each repo it lists its `downloads` of the last 30 days, which Home
+  sorts by. It reads only the written rows (the same query as `GET /api/stats`, summed per repo),
+  so a download shows there after the next flush.
 
 ## Web UI
 
@@ -3954,17 +3961,20 @@ page are in `web/src/README.md`.
   signed-in person who can publish somewhere. **Browse** opens `/#/browse`. **Administer** opens
   `/#/settings/overview`, only for a person who would see a card there. Each card is as wide as one
   column of a three-column row, so two cards keep that width, centered. A visitor or a reader sees
-  no doors (the top bar has Sign in). Then the repositories of `GET /api/repos`, by name, for
-  everyone: a heading with "See all" (to `/#/browse`) at its end over up to six repository cards
-  (three on a phone), with no card around them. **Your repositories** are the repos whose
+  no doors (the top bar has Sign in). Then the repositories of `GET /api/repos`, by `downloads`
+  (the last 30 days) with the most first, then by name, for everyone: a heading with "See all" (to `/#/browse`) at its end over up to six repository cards
+  (three on a phone), with no card around them. A card holds the format icon, the name (with a
+  lock when the repo is private), the description up to two lines, and at the bottom the format,
+  with the kind of a proxy or a group ("Maven / Gradle · Group of 3 repositories"). **Your repositories** are the repos whose
   `permissions` go beyond `repo.download`; a person with none sees **Repositories**, the repos they
   can see (a visitor: the anonymous-read ones). With no repo at all, the empty state of Browse.
 - **Browse** (`/#/browse`, anyone; visitors see the anonymous-read repos). A toolbar on one row
   holds a filter box, a format select ("All formats" first, then each format present with its
-  icon) and **New repository** (`repositories.all`) at the end. The repos are cards sorted by name (three columns wide, two medium, one on
-  a phone), the same for every kind: the format icon, the name (with a lock when the repo is
-  private), the description up to two lines, and at the bottom the kind of a proxy or a group in plain words
-  ("Proxy of a remote repository", "Group of 3 repositories"; a hosted repo has no such line). Files, size and last publish show in
+  icon) and **New repository** (`repositories.all`) at the end. The repos are one compact table
+  sorted by name, a row each and the whole row a link: the format icon and the name (with a lock
+  when the repo is private), the format (only when more than one is listed), Proxy or Group (a
+  column only when one is listed), and the description on one line. On a phone a row stacks: the
+  name, then the kind and the description. Files, size and last publish show in
   Settings › Repositories and in the details of a repo's top folder; a group shows the files it
   serves to the reader (see **Group counters**), and "Counting…" until the server has counted
   them. In a group's Files tab a proxy's version or file that is not cached yet has a "Not cached"
@@ -4097,7 +4107,8 @@ page are in `web/src/README.md`.
   `/#/settings/`, and `/#/settings` opens the overview. A person who can open no admin page sees
   no Settings in the top bar.
   - *All settings* (`overview`), the first item, above the groups: about this server. The name of
-    the server, its version (`GET /api/changes`) and, for a holder of `settings.general`, its
+    the server, its version (`GET /api/changes`: a release as its tag, a build of `main` as Canary
+    and its commit, a local build as Development) and, for a holder of `settings.general`, its
     public address; New repository, New account and New CI pipeline as doors for a person who
     may. Then one row of stat tiles: from `GET /api/repos` the repositories (by kind when there is more than one), the files and
     the stored size (and what proxies cache), and the number of people, CI pipelines and signing
@@ -4470,7 +4481,7 @@ tools that people bring float (`e2e/images_test.go`): Maven (`maven:3`), Gradle,
 (`stable`), curl, Helm, Docker (`docker:dind`), crane, skopeo, the reference registry, Keycloak,
 Nexus, the install images (`buildpack-deps:curl`, Alpine), Node (`node:lts`, with pnpm and Yarn 4
 through corepack), Bun (`oven/bun`) and the newest ORAS release. The npm tests: `TestNPM` (npm
-publish of a plain and a scoped package, installs with npm, pnpm, Yarn and Bun, both stores),
+publish of a plain and a scoped package, installs with npm, pnpm and Yarn, both stores),
 `TestNPMRegistry` (a registry.npmjs.org proxy and a group, the pnpm binary that corepack's pnpm
 fetches through the proxy, the name rule, dist-tags, deprecate,
 unpublish with a device session and refused with a CI session minted from a Keycloak service
@@ -4485,12 +4496,12 @@ drives the browser flow with a cookie-jar HTTP client: a sign-in with the claim 
 permissions (409 on a change of them), a person outside the map signs in without permissions, a
 map change replaces them at the next sign-in, and without a claim a sign-in changes nothing; a map
 without a claim or with an unknown or repository permission is 400. `TestRaw` uses a curl container.
-`TestAPIFormats` covers `/api/formats`, `/status` and `/usage`; `descriptor_test.go` covers the format descriptors (`TestFormatDescriptors`), the CI file route with branches and tags (`TestCIWorkflowRoute`) and the delete plan (`TestDeletePlan`). `TestQueryPlans` runs `dbcheck`
-inside a server container. `migrations_test.go` covers `TestMigrations`, a real upgrade with three builds of the server (`BuildServer`, `BuildServerWith` with an overlay): the tree writes a private raw repo, a user with `repo.download` on it and a file; a build with one more core migration (`0002_e2e_probe.sql`, a new table filled from `repos` and `users`) starts on the same data volume, logs `applied migration` for that file only, and the user reads the file and its grant back; the exported database holds both core rows of `schema_migrations` and the probe rows of the older data; a build whose `0001_init.sql` has another content refuses to start with the sentence that names `core` and the file; the tree refuses the database of the newer build ("core migration 0002"); then the newer build starts on it again and applies nothing. `files_test.go` covers `TestTree`, `TestDelete` (who may delete: `repo.delete` with a publish session or a UI session, file, prefix and Bearer deletes, blobs kept for the blob GC, repo delete and name reuse), `TestManualUploadMaven` (checksums, metadata order, `mvn` resolves the uploaded and the generated pom), `TestManualUploadRaw`, `TestRepoCounters` (`file_count`, `total_size` and `last_published_at` through uploads, a replace, a file delete and a folder delete) and `TestDebianDeleteAndUpload` (apt sees the package, then not; 4 by-hash files remain). `audit_test.go` covers `TestAudit`: events, filters, paging, no secret values, `activity.read` only, and no IP outside the audit log. `network_test.go` covers `TestClientIP` (with the default an `X-Forwarded-For` from the harness peer is ignored and the peer becomes a proxy candidate; trusting the candidate makes the header count and removes the candidate; `private`: a chain through a private hop, `CF-Connecting-IP` from a non-Cloudflare peer; an untrusted peer's header, an empty list, invalid entries, reset to the default). `TestIPRules` and `TestPresetIPLists` set `trusted_proxies` to `private` first, so `X-Forwarded-For` sets the client address, `TestIPRules` (validation; allowed and refused reads of the format route, tree, assets, usage and status; the repo record stays readable; search drops the repo; refused device and manual mints, PUT and admin delete, each audited with its IP and scope; empty lists lift the rule) and `TestPresetIPLists` (a second Telesphorepo server is the stub: startup fetch, a preset in read rules, a Cloudflare hop in the chain, a failed refresh that keeps the last good list, recovery, and stored lists after a restart without the stub) and `TestCustomIPLists` (create, edit, a rename that keeps the rules and the trusted proxies (by list id), use in rules and in the trusted proxies, delete while in use gives 409, an unknown list id gives 400) and `TestTrustedProxyEnvList` (`TR_TRUSTED_PROXIES` with `list:cloudflare` shows as `env_lists`) and `TestIPRangeParse` (the paste parser: one per line, comma, space, tab and `|` separated, CSV with a header row, tables, comments, labels, quotes, IPv6 and IPv4-mapped IPv6, an unmasked CIDR, duplicates, invalid lines with their numbers, the 1 MiB limit, `network.manage` only). `signing_keys_test.go` covers create, import of plain and encrypted keys, delete while in use gives 409, a per-repo key (the repo field `signing_key`; an unknown key, a key in the config and a key of a raw repo give 400) that `apt` installs from, a key change that signs again, and keys and bindings after a restart. `redirects_test.go` covers `TestRepoRedirects`: a Maven, an npm and a Docker repository renamed, then `mvn deploy`, `npm publish` and `docker push` (Docker in Docker) through the old name with a publish token minted through it, each landing in the renamed repository; the upload event records the old name with `redirect_to`; the redirect lists a last use; create and rename to a redirect's name or a repo's name give 409; a rename back takes the old name again; the catalog lists the images of before the rename under the new name; after Remove the redirect the old name answers 404 and a new repository takes it. `groups_test.go` covers `TestGroups`: a release and a snapshot member resolve through the group with `mvn` and Gradle, the merged `maven-metadata.xml` and its `.sha1`, the member order, a public group with a private member (anonymous and a reader), 405 for a PUT and 409 for a publish session, 400 for a member of another format, a nested group, an unknown name and no member, and a member delete. `groups_files_test.go` covers `TestGroupFiles`: a Maven group of a repository, a proxy of a second Telesphorepo server and a private repository, with a path in both the repository and the proxy; the group tree equals the union of the member trees at three folders and pages through it with limits 1, 3 and 200 without a gap or a duplicate, folders merge, the shared path comes from the repository with its `repo` and checksum (tree and file details), anonymous readers do not see the private member, a bad cursor is 400, and a delete (405), a publish session (409) and a PUT (405) are refused. `cache_control_test.go` covers
+`TestAPIFormats` covers `/api/formats`, `/status` and `/usage`; `descriptor_test.go` covers the format descriptors (each one well formed) and the CI file route with branches and tags (`TestCIWorkflowRoute`), and the delete plan (`TestDeletePlan`). `TestQueryPlans` runs `dbcheck`
+inside a server container. `migrations_test.go` covers `TestMigrations`, a real upgrade with three builds of the server (`BuildServer`, `BuildServerWith` with an overlay): the tree writes a private raw repo, a user with `repo.download` on it and a file; a build with one more core migration (`0002_e2e_probe.sql`, a new table filled from `repos` and `users`) starts on the same data volume, logs `applied migration` for that file only, and the user reads the file and its grant back; the exported database holds both core rows of `schema_migrations` and the probe rows of the older data; a build whose `0001_init.sql` has another content refuses to start with the sentence that names `core` and the file; the tree refuses the database of the newer build ("core migration 0002"); then the newer build starts on it again and applies nothing. `files_test.go` covers `TestTree`, `TestDelete` (who may delete: `repo.delete` with a publish session or a UI session, file, prefix and Bearer deletes, blobs kept for the blob GC, repo delete and name reuse), `TestManualUploadMaven` (checksums, metadata order, `mvn` resolves the uploaded and the generated pom), `TestManualUploadRaw`, `TestRepoCounters` (`file_count`, `total_size` and `last_published_at` through uploads, a replace, a file delete and a folder delete) and `TestDebianDeleteAndUpload` (the plan of a folder of `.deb` files: a broken one has problems, another file is ignored, the open folder gives the distribution, a bad distribution is a problem of its field; apt sees the package, then not; 4 by-hash files remain). `audit_test.go` covers `TestAudit`: events, filters, paging, no secret values, `activity.read` only, and no IP outside the audit log. `network_test.go` covers `TestClientIP` (with the default an `X-Forwarded-For` from the harness peer is ignored and the peer becomes a proxy candidate; trusting the candidate makes the header count and removes the candidate; `private`: a chain through a private hop, `CF-Connecting-IP` from a non-Cloudflare peer; an untrusted peer's header, an empty list, invalid entries, reset to the default). `TestIPRules` and `TestPresetIPLists` set `trusted_proxies` to `private` first, so `X-Forwarded-For` sets the client address, `TestIPRules` (validation; allowed and refused reads of the format route, tree, assets, usage and status; the repo record stays readable; search drops the repo; refused device and manual mints, PUT and admin delete, each audited with its IP and scope; empty lists lift the rule) and `TestPresetIPLists` (a second Telesphorepo server is the stub: startup fetch, a preset in read rules, a Cloudflare hop in the chain, a failed refresh that keeps the last good list, recovery, and stored lists after a restart without the stub) and `TestCustomIPLists` (create, edit, a rename that keeps the rules and the trusted proxies (by list id), use in rules and in the trusted proxies, delete while in use gives 409, an unknown list id gives 400) and `TestTrustedProxyEnvList` (`TR_TRUSTED_PROXIES` with `list:cloudflare` shows as `env_lists`) and `TestIPRangeParse` (the paste parser: one per line, comma, space, tab and `|` separated, CSV with a header row, tables, comments, labels, quotes, IPv6 and IPv4-mapped IPv6, an unmasked CIDR, duplicates, invalid lines with their numbers, the 1 MiB limit, `network.manage` only). `signing_keys_test.go` covers create, import of plain and encrypted keys, delete while in use gives 409, a per-repo key (the repo field `signing_key`; an unknown key, a key in the config and a key of a raw repo give 400) that `apt` installs from, a key change that signs again, and keys and bindings after a restart. `redirects_test.go` covers `TestRepoRedirects`: a Maven, an npm and a Docker repository renamed, then `mvn deploy`, `npm publish` and `docker push` (Docker in Docker) through the old name with a publish token minted through it, each landing in the renamed repository; the upload event records the old name with `redirect_to`; the redirect lists a last use; create and rename to a redirect's name or a repo's name give 409; a rename back takes the old name again; the catalog lists the images of before the rename under the new name; after Remove the redirect the old name answers 404 and a new repository takes it. `groups_test.go` covers `TestGroups`: a release and a snapshot member resolve through the group with `mvn` and Gradle, the merged `maven-metadata.xml` and its `.sha1`, the member order, a public group with a private member (anonymous and a reader), 405 for a PUT and 409 for a publish session, 400 for a member of another format, a nested group, an unknown name and no member, and a member delete. `groups_files_test.go` covers `TestGroupFiles`: a Maven group of a repository, a proxy of a second Telesphorepo server and a private repository, with a path in both the repository and the proxy; the group tree equals the union of the member trees at three folders and pages through it with limits 1, 3 and 200 without a gap or a duplicate, folders merge, the shared path comes from the repository with its `repo` and checksum (tree and file details), anonymous readers do not see the private member, a bad cursor is 400, and a delete (405), a publish session (409) and a PUT (405) are refused. `cache_control_test.go` covers
 `TestCacheControl`: HEAD, a 304 and a GET of a private Maven repo, of a public group with a
 private member (also for the public member's file) carry `Cache-Control: private`; a public repo
 and a group of public members carry none (an S3 redirect carries `no-store`); after a read IP rule
-that allows every address, the public repo and the group of it carry `private`. `proxy_test.go` covers `TestProxy` with a second Telesphorepo server as the remote: `mvn` through the proxy and no remote request on the second resolve, the `metadata_ttl` recheck with a 304 and a changed file, a remembered 404, 405 for a PUT, a group where the hosted member wins over the proxy, remote credentials (with them, 502 without them), a Caddy container that redirects to another host and refuses a request that carries credentials, `apt-get` through a Debian proxy with the remote's key, and a stopped remote (cached file served, 502, `last_error`, and a stale `maven-metadata.xml` that serves twice with one remote attempt in the log). `TestProxyStream` (both stores) checks that the first GET of an uncached 24 MiB file streams (the remote's length, no `ETag` yet) with the remote's bytes, that a later GET serves the stored file, and that three concurrent GETs of another uncached file get its bytes with one remote GET. `TestNoBrowserPasswordPrompt` (in `auth_test.go`) checks that a 401 under `/api` or with `X-Telesphorepo-UI` has no `WWW-Authenticate`. `folder_upload_test.go` covers `TestFolderUploadMaven` (a Maven-layout tree with checksum, signature and stray files; a flat folder with two poms; a bad tree that gives 400; plans store nothing; checksums and metadata) `TestFolderUploadDebianAndRaw` and `TestUploadHeadsAndChunks` (a plan with held heads and no parts; 409 for unknown heads, the heads of another session and another size; an upload whose part `uploads` names a resumable upload: 404 unknown, 400 another size, 201 with a file of the request). `TestStorageMove*` run each server on a named data volume: fs to
+that allows every address, the public repo and the group of it carry `private`. `proxy_test.go` covers `TestProxy` with a second Telesphorepo server as the remote: `mvn` through the proxy and no remote request on the second resolve, the `metadata_ttl` recheck with a 304 and a changed file, a remembered 404, 405 for a PUT, a group where the hosted member wins over the proxy, remote credentials (with them, 502 without them), a Caddy container that redirects to another host and refuses a request that carries credentials, `apt-get` through a Debian proxy with the remote's key, and a stopped remote (cached file served, 502, `last_error`, and a stale `maven-metadata.xml` that serves twice with one remote attempt in the log). `TestProxyStream` (both stores) checks that the first GET of an uncached 24 MiB file streams (the remote's length, no `ETag` yet) with the remote's bytes, that a later GET serves the stored file, and that three concurrent GETs of another uncached file get its bytes with one remote GET. `TestNoBrowserPasswordPrompt` (in `auth_test.go`) checks that a 401 under `/api` or with `X-Telesphorepo-UI` has no `WWW-Authenticate`. `folder_upload_test.go` covers `TestFolderUploadMaven` (a Maven-layout tree with checksum, signature and stray files; a flat folder with two poms; a bad tree that gives 400; plans store nothing; checksums and metadata) and `TestUploadHeadsAndChunks` (a plan with held heads and no parts; 409 for unknown heads, the heads of another session and another size; an upload whose part `uploads` names a resumable upload: 404 unknown, 400 another size, 201 with a file of the request). `TestStorageMove*` run each server on a named data volume: fs to
 SeaweedFS and back with uploads during the move, a forced failure, a restart mid-move
 (`Server.Restart`) and a cancel. The restart and the cancel hold the move on a SeaweedFS of their own
 (`StartOwnSeaweedFS`): once the move has copied a blob, the test pauses that container, so the
@@ -4508,8 +4519,7 @@ the 409 of resume and clear.
 
 `pypi_test.go` covers PyPI with the official `python` image (twine, build and poetry installed
 with pip) and uv's image: `TestPyPI` (both stores: `python -m build` and twine upload, the JSON
-page and the `.metadata` bytes, the 409 of other bytes under an existing file name,
-`pip install --require-hashes`),
+page and the `.metadata` bytes, `pip install --require-hashes`),
 `TestPyPIProtocol` (negotiation, 406, 304, the 301s, the project list, the upload refusals, the
 version browser, deletes), `TestPyPIClients` (`uv publish`, `poetry publish`, `uv pip compile`
 reads the `.metadata` and not the wheel, uv and poetry install) and `TestPyPIProxyGroup` (a
@@ -4537,7 +4547,7 @@ OCI conformance suite (`conformance:v1.1.1`: pull, push, content discovery, cont
 `TestDockerClients`: `crane copy` mounts a layer from a public repo (201), a mount from a repo
 that the token does not read starts an upload (202); `skopeo copy` of an OCI layout; ORAS push,
 attach, discover (also with `--artifact-type`) and pull, the referrers filter header, an empty
-referrers index, `OCI-Subject` on a manifest PUT; Helm 4 package, push and pull of an OCI chart;
+referrers index, `OCI-Subject` on a manifest PUT;
 the catalog of a reader, of a publish session bearer and of anonymous, its `Link` and a bad `n`.
 `TestDockerGC`: a used layer cannot be deleted (409); after a delete by digest the tags go, and
 after `docker.link_grace=1s` and `TR_BLOBS_GC_GRACE=1s` the blobs of the deleted image leave the
@@ -4576,10 +4586,10 @@ back; `/docker/hosts` names the upload host, a POST on the upload host gets a re
 and the challenge there names its own realm, and ORAS (5 MB) and Helm 4 push to the upload host by
 name and pull through the proxy hostname. `TestDockerVersions` (`versions_test.go`): the versions (tags, newest first, keyset pages),
 the kinds image, helm-chart, the builds of an image and of an index (platform classifiers), the pinned and latest artifact snippets, the snippets of
-a tag file and of a chart, and `GET /api/docker/{name}/manifest`. `TestFormatDescriptors` and
-`TestCIWorkflowRoute` check the docker descriptor (publish category `helper`), the CI files (build,
+a tag file and of a chart, and `GET /api/docker/{name}/manifest`.
+`TestCIWorkflowRoute` checks the Docker CI files (build,
 the install step, the Docker config that names the credential helper, and the push in that order,
-with no `docker login`) and the usage snippets. `TestCIWorkflowRoute` also checks the install step
+with no `docker login`) and the usage snippets. It also checks the install step
 and `telesphorepo publish` of the GitHub Actions, Jenkinsfile and Jenkins freestyle files, and
 that a publish session of the repo reads its CI file. The shared OCI helpers
 (`oci_test.go`, tags `e2e` and `import`): `tarImage` (an image of tar layers that Docker unpacks),
@@ -4587,7 +4597,7 @@ that a publish session of the repo reads its CI file. The shared OCI helpers
 the registry API to any registry). `protocols_test.go` covers
 `TestServerProtocols` (fs): curl gets HTTP/2 with prior knowledge and HTTP/1.1, a server with
 `TR_TLS_CERT_FILE` and `TR_TLS_KEY_FILE` (`ServerOpts.TLS`) answers HTTPS with HTTP/2, and a Maven
-GET and HEAD carry `X-Checksum-SHA1`, `-MD5` and `-SHA256` of the file, and a range is 206. The
+GET and HEAD carry `X-Checksum-SHA1`, `-MD5` and `-SHA256` of the file. The
 harness has `ClientOpts.Privileged` and `NoShell` (the image's own entrypoint),
 `ContainerFile.HostPath`, `ServerOpts.Aliases`, `ServerOpts.TLS` and `Dind.CopyFile`.
 `build_test.go` (tags `e2e` and `clients`) builds programs of this repo on the host for Linux on
@@ -4634,13 +4644,14 @@ needed.
 `permissions_test.go` covers `TestServerPermissions` (one subtest per server permission: the
 holder reaches its routes, anyone else gets 403), `TestPipelinesPermission` (the CI pipeline
 scope) and `TestPeoplePicker` (`GET /api/people`). `registries_test.go` covers
-`TestPermissionRegistry` (the shape of `GET /api/permissions`, the server permissions in module
-start order, 400 for an unknown ID or an ID of the other scope, grants read back as IDs),
+`TestPermissionRegistry` (the shape of `GET /api/permissions`, 400 for an unknown ID or an ID of
+the other scope, grants read back as IDs),
 `TestAuditFilters` (`actor`, `since` and `until` alone and with `action` and `repo`, keyset order, a bad time is 400, `GET /api/audit/people`), `TestDownloadStats` (what counts: 200, 206 with its range bytes; not HEAD, 304, 404 or 401; the totals, the days and the top repos of `GET /api/stats` after its flush; a deleted repo leaves; `days` 400; `activity.read` and a UI session only), `TestAuditActions` (`GET /api/audit/actions` and the events that services record: read tokens, CI
-pipelines, the first-start signing key, the bind of a new Debian repo's key), `TestSettingsS3Endpoint` (an empty endpoint needs a
-region, `r2` is refused, an unknown group's test is 404) and `TestSSOStartupGuard` (SSO settings
+pipelines, the first-start signing key, the bind of a new Debian repo's key) and `TestSSOStartupGuard` (SSO settings
 and `signin.password_login=publishers` saved with one master key; after a restart with another the
 server starts with SSO off and password sign-in for all). `settings_test.go` has
+`TestSettingsStorageBogusS3Refused` (the test of an S3 store that does not answer is 400 and a
+switch to it saves nothing; an empty endpoint needs a region; an endpoint with a path is refused),
 `TestSettingsSurviveRestart` (a size, a duration and a secret setting come back from the database
 after `Server.Restart`, the secret shows only as set, and the stored size limit applies) and
 `TestBaseURLFromFirstSignIn` (no `base_url`: sign-ins at `localhost`, `127.0.0.1` and `[::1]` and
@@ -4655,18 +4666,18 @@ codes), approves it and mints a session. The harness enrolls 3 TOTP factors per 
 never wait 30 s for a new step. `publish_test.go` covers: `TestPublishGate` (a password or read
 token is refused; a session for another repo; lost permission; closed and expired sessions;
 replayed nonce; bad signature; revoked and expired devices; manual sessions),
-`TestSecondFactorLogin` (including the setup-only session), `TestDeviceEnrollment` (an unknown
-field is 400; the device has its name),
+`TestSecondFactorLogin` (including the setup-only session), `TestDeviceEnrollment` (the device
+has its name),
 and `TestDeviceEnrollmentExpiry` (ages the row with `editDB` on a data volume). The CI token
 exchange runs with the real CI systems in the clients zone (`TestCLIJenkins`,
 `TestCLIGitHubActions`). The Keycloak fixture of single sign-on is in `keycloak_test.go`.
 `oidc_device_test.go` covers `TestOIDCDeviceApproval` (a person who signs in with single sign-on approves a device after a new
 Keycloak sign-in, then publishes with it; the authorization request carries `prompt=login` and
-`max_age=0`; a missing grant, a grant for another code and a used grant get 401) and
-`TestOIDCDeviceApprovalStale`. That test sets `oidc.approval_max_age` to 20 s, signs in, calls
-`t.Parallel()` and waits 25 s while the other tests run. The test then removes
-`prompt` and `max_age` from the authorization request, as a provider that ignores them, and
-checks that the callback returns `error=stale_sign_in` and that the code stays pending.
+`max_age=0`; a missing grant, a grant for another code and a used grant get 401). The test sets
+`oidc.approval_max_age` to 20 s and first signs in once more in a browser of its own; at the end it
+waits until that sign-in is 25 s old, removes `prompt` and `max_age` from that browser's
+authorization request, as a provider that ignores them, and checks that the callback returns
+`error=stale_sign_in` and that the code stays pending.
 
 `cli_server_test.go` covers the server side of the CLI with no external tool:
 `TestSetupCodes` (a setup code needs the fresh second factor and `repo.publish`; it enrolls a new
@@ -4677,8 +4688,8 @@ device of another person gets 409 and leaves the code), `TestDeviceSelfRevoke` (
 audit event `by: device`), `TestExchangeSession` (the token exchange nonce needs a recent device
 signature and is kept on request; one session per repo per proof, the same session again; a
 format read takes the `trx.` proof as the Basic password or the Bearer value, a write does not)
-and `TestCLIDownloads` (the six archives, `SHA256SUMS`, the URL and sums in both install scripts;
-a server built without archives answers the problem `no-cli-downloads`).
+and `TestCLIDownloads` (the six archives, `SHA256SUMS`, the URL and sums in both install scripts,
+Windows line ends in `install.ps1`).
 
 **Clients zone.** Each test builds the CLI of this repo (`BuildCLI`), copies it into client
 containers at `/usr/local/bin/telesphorepo` with `docker-credential-telesphorepo` next to it, and
@@ -4689,7 +4700,7 @@ a match fails the test. A terminal comes from `script -qec`, which also types th
 
 | Test | Proves |
 |---|---|
-| `TestCLISetup` | In a git work tree that ignores the file: the setup line writes `telesphorepo.toml` and warns with the `.gitignore` rule; the line again prints `This setup line is already used`; on a terminal the answer `2` writes the GitHub Actions file; a Docker repo gets no project file, `y` adds the `credHelpers` entry and `n` keeps the Docker config file; an expired code (aged with `editDB`) names its repo |
+| `TestCLISetup` | In a git work tree that ignores the file: the setup line writes `telesphorepo.toml` and warns with the `.gitignore` rule; the line again prints `This setup line is already used`; on a terminal the answer `2` writes the GitHub Actions file; a Docker repo gets no project file, `y` adds the `credHelpers` entry and `n` keeps the Docker config file |
 | `TestCLILogin` | A teammate's `publish` with no device prints the code, which the test approves, and publishes; `status` names the server, the device, the hook and the project; `device.json` is 600 in a 700 folder; `logout` revokes the device, removes only the server's `credHelpers` entry and deletes the server folder |
 | `TestCLIDocker` | Docker in Docker after setup (the printed entry added to `config.json`) pushes and pulls with a device session; `get` answers only the server's hosts, `list` and `store`; `publish` of a Helm chart (`alpine/helm`); ORAS push and pull through the helper |
 | `TestCLIMaven` | `publish` with a pom that names another deployment target, with the newest Maven 3 and the newest Maven 4 (from the metadata of Maven Central); the mirror of the person's `settings.xml` (a proxy repo of Central) serves the plugins; `mvn` resolves both jars |

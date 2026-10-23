@@ -105,11 +105,10 @@
     <div>
       <h1 class="text-2xl font-semibold tracking-tight">Second step</h1>
       <p class="mt-2 text-sm text-muted-foreground">
-        Signing in as <span class="font-medium text-foreground">{username}</span>. Enter a code from your authenticator
-        app, or use a passkey.
+        Signing in as <span class="font-medium text-foreground">{username}</span>
       </p>
     </div>
-    <SecondFactorForm {methods} actionLabel="Sign in" passkeyOptions={api.auth.loginPasskeyOptions} onProof={second} />
+    <SecondFactorForm {methods} actionLabel="Sign in" passkeyOptions={api.auth.loginPasskeyOptions} onProof={second} autoPasskey />
     <Button
       variant="ghost"
       size="sm"
