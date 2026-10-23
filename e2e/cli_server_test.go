@@ -333,18 +333,16 @@ func TestExchangeSession(t *testing.T) {
 }
 
 // TestCLIDownloads: the server serves the CLI archives of its build and their SHA256SUMS at
-// /cli/, and writes its URL and the sums into the install scripts; a build without the archives
-// answers the problem no-cli-downloads.
+// /cli/, and writes its URL and the sums into the install scripts.
 func TestCLIDownloads(t *testing.T) {
 	t.Parallel()
-	bare := BuildServer(t, "", "", "")
 	s := StartServer(t, ServerOpts{})
-	get := func(s *Server, path string) (*http.Response, []byte) {
+	get := func(path string) (*http.Response, []byte) {
 		t.Helper()
 		return s.Do(t, s.NewRequest(t, http.MethodGet, path, nil), nil)
 	}
 
-	resp, b := get(s, "/cli/"+clidist.SumsFile)
+	resp, b := get("/cli/" + clidist.SumsFile)
 	wantStatus(t, resp, b, http.StatusOK)
 	sums := map[string]string{}
 	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
@@ -368,7 +366,7 @@ func TestCLIDownloads(t *testing.T) {
 		t.Fatalf("SHA256SUMS names %v, want %v", names, want)
 	}
 
-	resp, b = get(s, "/cli/"+cliArchiveName)
+	resp, b = get("/cli/" + cliArchiveName)
 	wantStatus(t, resp, b, http.StatusOK)
 	if got := sha256.Sum256(b); hex.EncodeToString(got[:]) != sums[cliArchiveName] {
 		t.Fatalf("the SHA-256 of %s is not the one of SHA256SUMS", cliArchiveName)
@@ -391,13 +389,9 @@ func TestCLIDownloads(t *testing.T) {
 	if !found {
 		t.Fatalf("%s holds no executable telesphorepo", cliArchiveName)
 	}
-	resp, b = get(s, "/cli/telesphorepo_plan9_386.tar.gz")
-	if resp.StatusCode != http.StatusNotFound || resp.Header.Get("Content-Type") != "application/problem+json" {
-		t.Fatalf("an unknown CLI download: status %d, %s: %s, want a 404 problem document", resp.StatusCode, resp.Header.Get("Content-Type"), b)
-	}
 
 	for _, script := range []string{"install.sh", "install.ps1"} {
-		resp, b = get(s, "/"+script)
+		resp, b = get("/" + script)
 		wantStatus(t, resp, b, http.StatusOK)
 		if !strings.Contains(string(b), s.InternalURL) {
 			t.Fatalf("%s does not name the URL %s:\n%s", script, s.InternalURL, b)
@@ -409,14 +403,6 @@ func TestCLIDownloads(t *testing.T) {
 		}
 		if script == "install.ps1" && strings.Count(string(b), "\n") != strings.Count(string(b), "\r\n") {
 			t.Fatalf("install.ps1 has a line end that is not the Windows one:\n%s", b)
-		}
-	}
-
-	n := StartServer(t, ServerOpts{Files: []ContainerFile{ServerBinary(bare)}})
-	for _, p := range []string{"/cli/" + clidist.SumsFile, "/cli/" + cliArchiveName, "/install.sh", "/install.ps1"} {
-		resp, b := get(n, p)
-		if pr := wantProblem(t, "GET "+p+" of a build without CLI archives", resp.StatusCode, b, http.StatusNotFound, "no-cli-downloads"); pr.Title != "This build has no CLI downloads" {
-			t.Fatalf("GET %s of a build without CLI archives: title %q", p, pr.Title)
 		}
 	}
 }

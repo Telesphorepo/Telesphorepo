@@ -399,6 +399,25 @@ func TestVersionsAndSnippets(t *testing.T) {
 			}
 		}
 	})
+
+	// A proxy of Maven Central and a group that holds it tell the build to use only them, with no
+	// mavenCentral() line; a hosted repo keeps the line.
+	t.Run("proxy snippets", func(t *testing.T) {
+		proxy, group := RandName("central"), RandName("all")
+		s.MustAPI(t, http.MethodPost, "/api/repos", map[string]any{"name": proxy, "format": "maven", "kind": "proxy",
+			"anonymous_read": true, "force": true, "proxy": map[string]any{"remote_url": "https://repo1.maven.org/maven2/"}}, s.Admin(), nil)
+		s.MustAPI(t, http.MethodPost, "/api/repos", map[string]any{"name": group, "format": "maven", "kind": "group",
+			"anonymous_read": false, "members": []string{repo, proxy}}, s.Admin(), nil)
+		for r, want := range map[string]bool{repo: true, proxy: false, group: false} {
+			st, body := s.API(t, http.MethodGet, "/api/repos/"+r+"/usage", nil, s.Admin())
+			if st != http.StatusOK {
+				t.Fatalf("usage of %s: status %d: %s", r, st, body)
+			}
+			if got := strings.Contains(string(body), "mavenCentral()"); got != want {
+				t.Fatalf("usage of %s names mavenCentral(): %v, want %v:\n%s", r, got, want, body)
+			}
+		}
+	})
 }
 
 // TestDockerVersions checks the versions (tags), builds (the manifest with its config and layers,

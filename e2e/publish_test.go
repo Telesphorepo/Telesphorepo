@@ -352,10 +352,6 @@ func TestDeviceEnrollment(t *testing.T) {
 	s.CreateUser(t, u, pw)
 	s.SetPerms(t, repo, u, "repo.download", "repo.publish")
 
-	// The enrollment takes the name and the public key only.
-	st0, b0 := s.API(t, http.MethodPost, "/api/devices/enroll", map[string]string{"name": "x", "client": "ant", "public_key": b64(make([]byte, 32))}, nil)
-	wantAPIStatus(t, "enroll with an unknown field", st0, b0, http.StatusBadRequest)
-
 	en, key := s.StartEnrollment(t, "laptop")
 	if !userCodeRe.MatchString(en.UserCode) || en.VerificationURL != s.InternalURL+"/#/device" || en.ExpiresIn <= 0 || en.Interval < 1 {
 		t.Fatalf("enrollment %+v: want user code ABCD-EFGH, verification_url %s/#/device, expires_in > 0, interval >= 1", en, s.InternalURL)

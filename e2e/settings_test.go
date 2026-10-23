@@ -394,6 +394,9 @@ func putGetMaven(t *testing.T, s *Server, repo, name, content string) {
 	}
 }
 
+// TestSettingsStorageBogusS3Refused: the storage test and a switch to an S3 store that does not
+// answer fail and leave the settings as they were; an empty endpoint needs a region, and an
+// endpoint with a path is refused.
 func TestSettingsStorageBogusS3Refused(t *testing.T) {
 	t.Parallel()
 	s := StartServer(t, ServerOpts{})
@@ -417,6 +420,30 @@ func TestSettingsStorageBogusS3Refused(t *testing.T) {
 	_ = json.Unmarshal(b, &res)
 	if res.OK {
 		t.Fatalf("storage/test reported ok=true: %s", b)
+	}
+	// An empty endpoint means AWS, so the region is required.
+	aws := map[string]any{
+		"storage": "s3", "s3.endpoint": "", "s3.region": "", "s3.bucket": "b",
+		"s3.access_key_id": "a", "s3.secret_access_key": "s",
+	}
+	st, b = s.API(t, http.MethodPost, "/api/settings/storage/test", aws, s.Admin())
+	var noRegion struct {
+		OK     bool              `json:"ok"`
+		Fields map[string]string `json:"fields"`
+	}
+	_ = json.Unmarshal(b, &noRegion)
+	if st != http.StatusBadRequest || noRegion.OK || noRegion.Fields["s3.region"] == "" {
+		t.Fatalf("S3 test without endpoint and region: status %d, want 400 with a field error of s3.region: %s", st, b)
+	}
+	// The bucket goes in s3.bucket: an address with a path (the bucket after the host, as a person
+	// copies it) is refused, so the path never lands in front of every key.
+	st, b = s.API(t, http.MethodPatch, "/api/settings", map[string]any{"s3.endpoint": "https://acct.r2.cloudflarestorage.com/bucket"}, s.Admin())
+	var withPath struct {
+		Fields map[string]string `json:"fields"`
+	}
+	_ = json.Unmarshal(b, &withPath)
+	if st != http.StatusBadRequest || withPath.Fields["s3.endpoint"] == "" {
+		t.Fatalf("s3.endpoint with a path: status %d, want 400 with a field error of s3.endpoint: %s", st, b)
 	}
 	before, _ := listSettings(t, s)
 	if st, b := s.API(t, http.MethodPatch, "/api/settings", bogus, s.Admin()); st < 400 || st >= 500 {

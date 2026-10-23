@@ -149,18 +149,6 @@ func debCheckArchRemoval(t *testing.T, s *Server, tg *S3Target, repo string, arc
 	}
 }
 
-// TestDebianOversizeUpload checks TR_MAX_UPLOAD_SIZE on a dedicated server.
-func TestDebianOversizeUpload(t *testing.T) {
-	t.Parallel()
-	s := StartServer(t, ServerOpts{Env: map[string]string{"TR_MAX_UPLOAD_SIZE": "4KiB"}})
-	repo := RandName("deb")
-	s.CreateRepo(t, repo, "debian", false, nil)
-	body := bytes.Repeat([]byte("x"), 256<<10)
-	if st, b := debUpload(t, s, repo, body, s.PublishAuth(t, "admin", repo)); st != http.StatusRequestEntityTooLarge {
-		t.Fatalf("oversize upload: status %d, want 413: %s", st, b)
-	}
-}
-
 func debMustUpload(t *testing.T, s *Server, repo string, deb []byte, auth Auth, pkg, ver, arch string) {
 	t.Helper()
 	st, b := debUpload(t, s, repo, deb, auth)

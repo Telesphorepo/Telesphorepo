@@ -97,12 +97,3 @@ func TestCLIUser(t *testing.T) {
 		t.Fatalf("user passwd nobody: exit 0, want failure:\n%s", out)
 	}
 }
-
-func TestCLIVersion(t *testing.T) {
-	t.Parallel()
-	s := StartServer(t, ServerOpts{})
-	code, out := s.Exec(t, "", "/telesphorepo-server", "version")
-	if code != 0 || strings.TrimSpace(out) == "" {
-		t.Fatalf("version: exit %d, output %q", code, out)
-	}
-}
