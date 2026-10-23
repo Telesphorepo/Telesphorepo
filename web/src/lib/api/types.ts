@@ -1156,6 +1156,8 @@ export type AuditEvent = {
   at: string;
   /** Username, session or subject that acted. */
   actor: string;
+  /** The person who acted; null when the server or a CI job acted. */
+  actor_user_id: number | null;
   action: string;
   repo: string;
   target: string;

@@ -32,6 +32,7 @@
   import StatusBadge from "$lib/components/StatusBadge.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
   import UserAvatar from "$lib/components/UserAvatar.svelte";
+  import Logo from "$lib/components/Logo.svelte";
   import FormatIcon from "$lib/components/FormatIcon.svelte";
   import RepoPicker from "$lib/components/RepoPicker.svelte";
   import PersonPicker from "$lib/components/PersonPicker.svelte";
@@ -284,7 +285,10 @@
       <section class="mt-8 first:mt-0" aria-label={day.label}>
         <h3 class="mb-3 text-xs font-medium text-muted-foreground">{day.label}</h3>
         <ItemList source={day.source} caption="Events of {day.label}" key={(e) => e.id}>
-          {#snippet leading(e)}<UserAvatar name={e.actor} size="md" />{/snippet}
+          {#snippet leading(e)}
+            <!-- A person has an avatar; the server itself (core, cli, a module) and a CI job show the mark. -->
+            {#if e.actor_user_id != null}<UserAvatar name={e.actor} size="md" />{:else}<span class="flex size-8 shrink-0 items-center"><Logo size={20} /></span>{/if}
+          {/snippet}
           {#snippet title(e)}
             {actionText(e.action)}
           {/snippet}
