@@ -5,9 +5,10 @@
   (to /browse) and Administer (to the Settings overview, for a person who would see a card there).
   Each door is one column of a three-column row, so two doors keep that width, centered; on a phone
   they stack. Under them the repositories (a heading over the cards, no card around them): Your
-  repositories, the first six by name where the person holds more than download, or, when there
-  are none, Repositories, the first six the person can see (three on a phone), with See all.
-  Both read GET /api/repos (each Repo.permissions), so a holder of All repositories counts too.
+  repositories, where the person holds more than download, or, when there are none, Repositories,
+  the ones the person can see: the first six (three on a phone) by downloads in the last 30 days,
+  most first, then by name, with See all. Both read GET /api/repos (each Repo.permissions and
+  Repo.downloads), so a holder of All repositories counts too.
 -->
 <script lang="ts">
   import type { Component } from "svelte";
@@ -38,13 +39,15 @@
 
   const repos = new Resource(() => api.repos.list());
 
-  const byName = $derived([...(repos.data ?? [])].sort((a, b) => a.name.localeCompare(b.name)));
-  const mine = $derived(byName.filter((r) => r.permissions.some((p) => p !== "repo.download")));
-  const cards = $derived((mine.length > 0 ? mine : byName).slice(0, 6));
+  const byDownloads = $derived(
+    [...(repos.data ?? [])].sort((a, b) => (b.downloads ?? 0) - (a.downloads ?? 0) || a.name.localeCompare(b.name)),
+  );
+  const mine = $derived(byDownloads.filter((r) => r.permissions.some((p) => p !== "repo.download")));
+  const cards = $derived((mine.length > 0 ? mine : byDownloads).slice(0, 6));
   const heading = $derived(mine.length > 0 ? "Your repositories" : "Repositories");
   // Until the list loads, the grants decide whether the Publish door shows.
   const publishes = $derived(
-    repos.data ? byName.some((r) => r.kind === "hosted" && r.permissions.includes("repo.publish")) : auth.canSomeRepo("repo.publish"),
+    repos.data ? byDownloads.some((r) => r.kind === "hosted" && r.permissions.includes("repo.publish")) : auth.canSomeRepo("repo.publish"),
   );
 
   type Door = { title: string; text: string; href: string; icon: Component<{ class?: string }> };

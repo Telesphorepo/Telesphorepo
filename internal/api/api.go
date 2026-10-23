@@ -430,8 +430,11 @@ type repoJSON struct {
 	TotalSize       int64      `json:"total_size"`
 	LastPublishedAt *time.Time `json:"last_published_at"`
 	CountsPending   bool       `json:"counts_pending,omitempty"`
-	Kind            string     `json:"kind"`                   // hosted, proxy or group
-	MemberCount     *int       `json:"member_count,omitempty"` // a group: how many members it has
+	// GET /api/repos: the downloads of the last stats.RecentDays days, as written by the last flush
+	// of the download counters (once a minute).
+	Downloads   *int64 `json:"downloads,omitempty"`
+	Kind        string `json:"kind"`                   // hosted, proxy or group
+	MemberCount *int   `json:"member_count,omitempty"` // a group: how many members it has
 	// GET of a repo (see repoDetail): a group's members, the groups of a member, a proxy's remote.
 	Members []memberJSON `json:"members,omitempty"`
 	Groups  []string     `json:"groups,omitempty"`
@@ -497,6 +500,12 @@ func (a *API) listRepos(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		route.Fail(w, r, err)
 		return
 	}
+	// One read of the download counters of the window for every repo.
+	recent, err := a.h.Downloads.Recent(ctx)
+	if err != nil {
+		route.Fail(w, r, err)
+		return
+	}
 	out := []repoJSON{}
 	for _, repo := range all {
 		perms, err := a.auth.RepoPerms(ctx, p, repo)
@@ -508,6 +517,8 @@ func (a *API) listRepos(w http.ResponseWriter, r *http.Request, c *route.Call) {
 			continue
 		}
 		j := a.toRepoJSON(repo, perms)
+		n := recent[repo.ID]
+		j.Downloads = &n
 		if repo.Kind == repos.KindGroup {
 			if err := a.groupCounters(r.WithContext(ctx), p, repo, &j); err != nil {
 				route.Fail(w, r, err)

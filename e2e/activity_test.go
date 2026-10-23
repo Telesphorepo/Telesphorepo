@@ -102,6 +102,31 @@ func TestDownloadStats(t *testing.T) {
 		t.Fatalf("top repos %+v: want %s (%d, %d bytes) then %s (%d, %d bytes)", st.Repos, pub, pubN, pubB, priv, privN, privB)
 	}
 
+	// The repository list carries the downloads of each repo it shows, to a visitor too; the
+	// stats read above wrote the counters.
+	listed := func(a Auth) map[string]*int64 {
+		var list []struct {
+			Name      string `json:"name"`
+			Downloads *int64 `json:"downloads"`
+		}
+		s.MustAPI(t, http.MethodGet, "/api/repos", nil, a, &list)
+		out := map[string]*int64{}
+		for _, r := range list {
+			out[r.Name] = r.Downloads
+		}
+		return out
+	}
+	anon := listed(nil)
+	if d := anon[pub]; d == nil || *d != pubN {
+		t.Fatalf("GET /api/repos as a visitor: %s has downloads %v, want %d", pub, d, pubN)
+	}
+	if _, ok := anon[priv]; ok {
+		t.Fatalf("GET /api/repos as a visitor lists the private %s", priv)
+	}
+	if d := listed(Basic{w, pw})[priv]; d == nil || *d != privN {
+		t.Fatalf("GET /api/repos as %s: %s has downloads %v, want %d", w, priv, d, privN)
+	}
+
 	// Later downloads add to the same day.
 	resp, body = authGet(t, s, "/raw/"+priv+"/z.bin", Basic{w, pw})
 	wantStatus(t, resp, body, http.StatusOK)
