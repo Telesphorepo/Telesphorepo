@@ -4104,8 +4104,7 @@ page are in `web/src/README.md`.
   `/#/settings/`, and `/#/settings` opens the overview. A person who can open no admin page sees
   no Settings in the top bar.
   - *All settings* (`overview`), the first item, above the groups: about this server. The name of
-    the server, its version (`GET /api/changes`) and, for a holder of `settings.general`, its
-    public address; New repository, New account and New CI pipeline as doors for a person who
+    the server and, for a holder of `settings.general`, its public address; New repository, New account and New CI pipeline as doors for a person who
     may. Then one row of stat tiles: from `GET /api/repos` the repositories (by kind when there is more than one), the files and
     the stored size (and what proxies cache), and the number of people, CI pipelines and signing
     keys, each for a person who can open its page and a link to it. Every repository for a holder

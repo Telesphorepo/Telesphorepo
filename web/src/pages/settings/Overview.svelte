@@ -1,6 +1,6 @@
 <!--
-  All settings, the administrator's home: about this server. The header names the server, its
-  version and its public address (for a holder of the General settings); under it the actions
+  All settings, the administrator's home: about this server. The header names the server and
+  its public address (for a holder of the General settings); under it the actions
   people take most as doors (New repository, New account, New CI pipeline; each only for a person
   who may). Then one row of equal stat tiles, a figure and its label each: the repositories (GET /api/repos), their
   files and the stored size, and the people, the CI pipelines and the signing keys, each only for a
@@ -72,7 +72,6 @@
   }
 
   // --- the server ---
-  const version = new Resource(async () => (await api.changes()).version);
   const settings = auth.can("settings.general") ? new Resource(() => api.settings.get()) : null;
   const baseURL = $derived(
     String(settings?.data?.groups.flatMap((g) => g.settings).find((s) => s.key === "base_url")?.value ?? ""),
@@ -119,11 +118,7 @@
 </script>
 
 {#if hasAdmin}
-  <PageHeader title={brand.name} description={baseURL || undefined} crumbs={[{ label: current.route?.title ?? "All settings" }]}>
-    {#snippet meta()}
-      {#if version.data}<StatusBadge>{version.data}</StatusBadge>{/if}
-    {/snippet}
-  </PageHeader>
+  <PageHeader title={brand.name} description={baseURL || undefined} crumbs={[{ label: current.route?.title ?? "All settings" }]} />
 
   {#if canNewRepo || canNewAccount || canNewPipeline}
     <DoorRow label="Create">
