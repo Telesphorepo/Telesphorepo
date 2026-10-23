@@ -1,5 +1,5 @@
 <!--
-  A repository as a card (Home, Browse, Publish), the same fields in the same places whatever its
+  A repository as a card (Home, Publish), the same fields in the same places whatever its
   kind: the format icon, the name with a lock after a private one, the description up to two lines,
   and at the bottom the format, with the kind of a proxy or a group in plain words ("Maven · Group
   of 3 repositories"), so every card ends on the same line with or without a description. The

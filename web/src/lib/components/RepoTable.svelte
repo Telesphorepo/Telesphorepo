@@ -1,6 +1,6 @@
 <!--
-  The table of repositories that people manage (Settings › Repositories; Browse shows them
-  as RepoCards): the name and the description on one line, the format and the last publish. A
+  The table of repositories that people manage (Settings › Repositories; Browse has its own
+  table): the name and the description on one line, the format and the last publish. A
   private repository has a lock after its name; a public one has no mark. A group or a proxy has
   its kind icon after the name. A group's last publish is that of the files it serves, and
   Counting… until the server has counted them. The files and the size of a repository are on its

@@ -3963,15 +3963,18 @@ page are in `web/src/README.md`.
   column of a three-column row, so two cards keep that width, centered. A visitor or a reader sees
   no doors (the top bar has Sign in). Then the repositories of `GET /api/repos`, by `downloads`
   (the last 30 days) with the most first, then by name, for everyone: a heading with "See all" (to `/#/browse`) at its end over up to six repository cards
-  (three on a phone), with no card around them. **Your repositories** are the repos whose
+  (three on a phone), with no card around them. A card holds the format icon, the name (with a
+  lock when the repo is private), the description up to two lines, and at the bottom the format,
+  with the kind of a proxy or a group ("Maven / Gradle · Group of 3 repositories"). **Your repositories** are the repos whose
   `permissions` go beyond `repo.download`; a person with none sees **Repositories**, the repos they
   can see (a visitor: the anonymous-read ones). With no repo at all, the empty state of Browse.
 - **Browse** (`/#/browse`, anyone; visitors see the anonymous-read repos). A toolbar on one row
   holds a filter box, a format select ("All formats" first, then each format present with its
-  icon) and **New repository** (`repositories.all`) at the end. The repos are cards sorted by name (three columns wide, two medium, one on
-  a phone), the same for every kind: the format icon, the name (with a lock when the repo is
-  private), the description up to two lines, and at the bottom the kind of a proxy or a group in plain words
-  ("Proxy of a remote repository", "Group of 3 repositories"; a hosted repo has no such line). Files, size and last publish show in
+  icon) and **New repository** (`repositories.all`) at the end. The repos are one compact table
+  sorted by name, a row each and the whole row a link: the format icon and the name (with a lock
+  when the repo is private), the format (only when more than one is listed), Proxy or Group (a
+  column only when one is listed), and the description on one line. On a phone a row stacks: the
+  name, then the kind and the description. Files, size and last publish show in
   Settings › Repositories and in the details of a repo's top folder; a group shows the files it
   serves to the reader (see **Group counters**), and "Counting…" until the server has counted
   them. In a group's Files tab a proxy's version or file that is not cached yet has a "Not cached"
