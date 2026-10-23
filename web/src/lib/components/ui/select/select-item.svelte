@@ -1,4 +1,5 @@
 <script lang="ts">
+	import type { Snippet } from "svelte";
 	import { Select as SelectPrimitive } from "bits-ui";
 	import CheckIcon from '@lucide/svelte/icons/check';
 	import { cn, type WithoutChild } from "$lib/utils.js";
@@ -8,9 +9,16 @@
 		class: className,
 		value,
 		label,
+		icon,
+		inset = false,
 		children: childrenProp,
 		...restProps
-	}: WithoutChild<SelectPrimitive.ItemProps> = $props();
+	}: WithoutChild<SelectPrimitive.ItemProps> & {
+		/** The choice's mark before its label: a FormatIcon, a small UserAvatar, a meaning icon. */
+		icon?: Snippet;
+		/** Keep the icon's space empty, so the label lines up with the items that have one ("All formats"). */
+		inset?: boolean;
+	} = $props();
 </script>
 
 <SelectPrimitive.Item
@@ -31,11 +39,16 @@
 				<CheckIcon class="pointer-events-none" />
 			{/if}
 		</span>
-		<span class="flex flex-1 gap-2 shrink-0 whitespace-nowrap">
+		<span class="flex min-w-0 flex-1 gap-2 whitespace-nowrap">
+			{#if icon}
+				<span class="flex min-w-4 shrink-0 items-center justify-center">{@render icon()}</span>
+			{:else if inset}
+				<span class="w-4 shrink-0" aria-hidden="true"></span>
+			{/if}
 			{#if childrenProp}
 				{@render childrenProp({ selected, highlighted })}
 			{:else}
-				{label || value}
+				<span class="truncate">{label || value}</span>
 			{/if}
 		</span>
 	{/snippet}

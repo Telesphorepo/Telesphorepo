@@ -42,6 +42,10 @@ type Policy struct {
 	Perm perm.ID
 	// AnyPerm passes a caller who holds one of these server permissions.
 	AnyPerm []perm.ID
+	// AllPerms passes only a caller who holds every one of these server permissions, on top of
+	// Perm and AnyPerm (e.g. a Nexus merge, which also deletes and renames a repository, needs
+	// nexus.manage and repositories.all). SomeRepo does not stand in for them.
+	AllPerms []perm.ID
 	// SomeRepo is a repository permission that passes in place of Perm and AnyPerm when the
 	// caller holds it on at least one repo, e.g. repo.settings to read the list of signing keys.
 	// The middleware puts those repos in Call.Managed.
@@ -214,6 +218,21 @@ func (p Policy) needs() []perm.ID {
 	return p.AnyPerm
 }
 
+// serverPerms reports whether the policy needs a server permission (Perm, AnyPerm, AllPerms or
+// SomeRepo).
+func (p Policy) serverPerms() bool { return len(p.needs()) > 0 || len(p.AllPerms) > 0 || p.SomeRepo != "" }
+
+// allMessage is the refusal message of a caller who lacks one of AllPerms, e.g. "permission
+// required: Manage the Nexus migration and All repositories".
+func (p Policy) allMessage() string {
+	g := perm.Current()
+	labels := make([]string, len(p.AllPerms))
+	for i, id := range p.AllPerms {
+		labels[i] = g.Label(id)
+	}
+	return "permission required: " + strings.Join(labels, " and ")
+}
+
 // permMessage is the refusal message of a caller without the server permission and without
 // SomeRepo, e.g. "permission required: Signing keys, or Edit settings on a repository".
 func (p Policy) permMessage() string {
@@ -251,6 +270,9 @@ var (
 
 // UIPerm needs a UI session of a holder of the server permission id.
 func UIPerm(id perm.ID) Policy { return Policy{Accept: auth.CredSession, Perm: id} }
+
+// UIPerms needs a UI session of a holder of every server permission of ids.
+func UIPerms(ids ...perm.ID) Policy { return Policy{Accept: auth.CredSession, AllPerms: ids} }
 
 // UIRepo needs a UI session of a holder of one of the repository permissions ids on repo
 // {name}, for op (access.Manage for a change of the repo, access.Meta to read its settings).

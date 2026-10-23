@@ -32,8 +32,10 @@ export const formatWord = (id: string) => formats.importer(id)?.title ?? (id ? i
 /** "Maven, hosted"; "Debian, proxy"; "Maven, group". */
 export const kindText = (format: string, type: string) => (type ? `${formatWord(format)}, ${type}` : formatWord(format));
 
-/** How a sync started, for the history: "Saved", "Manual by sam", "Scheduled", "Final". */
+/** How a sync started, for the history: "Saved", "Manual by sam", "Scheduled", "Switch-over",
+ * "Final sync of the merge into plex-snapshots". */
 export function howText(s: NexusSync): string {
+  if (s.merge_id) return mergeSyncText(s);
   switch (s.trigger) {
     case "save":
       return "Saved";
@@ -42,9 +44,12 @@ export function howText(s: NexusSync): string {
     case "schedule":
       return "Scheduled";
     case "cutover":
-      return "Final";
+      return "Switch-over";
   }
 }
+
+/** The final sync of a merge, in words: "Final sync of the merge into plex-snapshots". */
+export const mergeSyncText = (s: NexusSync) => `Final sync of the merge into ${s.merge_into}`;
 
 /** "Copying oasis-releases (4 of 11). 1,240 files, 84 MiB so far." */
 export function progressLine(s: NexusSync): string {

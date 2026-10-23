@@ -75,7 +75,7 @@
       {/each}
     </ul>
   {:else}
-    <CompactEmpty icon={UsersIcon} title="Groups" state="None yet" text="A person in a group listed here gets its permissions at each sign-in." />
+    <CompactEmpty icon={UsersIcon} text="None yet." />
   {/if}
   <div>
     <Button variant="outline" size="sm" {disabled} onclick={() => edit("")}><PlusIcon />Add a group</Button>

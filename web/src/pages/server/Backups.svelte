@@ -1,6 +1,6 @@
 <!--
-  Backups (Manage backups permission): the backups in the backup folder, newest first, with Back up
-  now; then the folder, the interval and how many to keep (the settings group "backup"), with a
+  Backups (Manage backups permission): the backups in the backup folder, newest first (cards, or a
+  list when there are more than 12), with Back up now; then the folder, the interval and how many to keep (the settings group "backup"), with a
   test that the server can write to the folder. While a backup runs, the list header shows its
   progress and the page asks for it every two seconds (a Live, with its LiveStatus in that header).
 -->
@@ -17,8 +17,9 @@
   import PageHeader from "$lib/components/PageHeader.svelte";
   import FormPage from "$lib/components/FormPage.svelte";
   import Section from "$lib/components/Section.svelte";
-  import DataTable from "$lib/components/DataTable.svelte";
-  import Cell from "$lib/components/Cell.svelte";
+  import ItemList from "$lib/components/ItemList.svelte";
+  import SourceGrid from "$lib/components/SourceGrid.svelte";
+  import ItemCard from "$lib/components/ItemCard.svelte";
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
   import StatusBadge from "$lib/components/StatusBadge.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
@@ -78,7 +79,9 @@
     }
   }
 
-  const stepWord = { files: "Copying files", database: "Copying the database", cleanup: "Removing old backups" } as const;
+  const files = (n: number) => `${formatCount(n)} ${n === 1 ? "file" : "files"}`;
+
+  const stepWord ={ files: "Copying files", database: "Copying the database", cleanup: "Removing old backups" } as const;
 
   const fields = {
     "backup.dir": { label: "Folder", help: "An absolute path, best on another disk. Leave it empty to turn backups off.", placeholder: "/mnt/backups" },
@@ -107,7 +110,7 @@
   }
 </script>
 
-<PageHeader title="Backups" description="Copies of this server in a folder, on a schedule.">
+<PageHeader title="Backups">
   {#snippet actions()}
     {#if dir}
       <Button onclick={backUpNow} disabled={starting || job?.running}>Back up now</Button>
@@ -116,7 +119,8 @@
 </PageHeader>
 
 <Section
-  title="Backups"
+  plain={!!dir && source.items.length <= 12}
+  title="Kept backups"
   description="A backup holds the database, the master key and the stored files of a folder store; files in an S3 bucket stay in the bucket, and a key set in TR_MASTER_KEY is not written."
 >
   {#snippet actions()}
@@ -133,39 +137,39 @@
     {/if}
   {/snippet}
   {#if !dir && !settings.loading}
-    <CompactEmpty icon={ArchiveIcon} title="Backups" state="Off" text="Set a backup folder below to turn them on." />
+    <CompactEmpty icon={ArchiveIcon} text="Off until you set a backup folder below." />
   {:else}
-    <DataTable
-      {source}
-      caption="Backups"
-      key={(b) => b.name}
-      columns={[
-        { label: "Backup", grow: true },
-        { label: "Version", hideOnPhone: true },
-        { label: "Files", align: "right", hideOnPhone: true },
-        { label: "Size", align: "right" },
-      ]}
-    >
-      {#snippet row(b)}
-        <Cell grow>
-          <span class="flex min-w-0 items-center gap-2">
-            <span class="truncate font-medium" title={b.name}>{formatDateTime(b.created_at)}</span>
-            {#if !b.complete}
-              <StatusBadge tone="warning" title="This backup did not finish. The next backup removes it.">Incomplete</StatusBadge>
-            {:else}
-              {#if !b.blobs_included}<StatusBadge title="The files of this backup stay in the S3 bucket.">Files in the bucket</StatusBadge>{/if}
-              {#if !b.master_key_included}<StatusBadge tone="warning" title="The server took its master key from TR_MASTER_KEY. Keep that key with the backup.">No master key</StatusBadge>{/if}
-            {/if}
-          </span>
-        </Cell>
-        <Cell hideOnPhone muted text={b.version} />
-        <Cell num hideOnPhone muted>{b.complete ? formatCount(b.files) : ""}</Cell>
-        <Cell num>{b.complete ? formatSize(b.size) : ""}</Cell>
-      {/snippet}
-      {#snippet empty()}
-        <CompactEmpty icon={ArchiveIcon} title="Backups" state="None yet" text="The first backup runs within a minute, or now with Back up now." />
-      {/snippet}
-    </DataTable>
+    {#snippet marks(b: Backup)}
+      {#if !b.complete}
+        <StatusBadge tone="warning" title="This backup did not finish. The next backup removes it.">Incomplete</StatusBadge>
+      {:else}
+        {#if !b.blobs_included}<StatusBadge title="The files of this backup stay in the S3 bucket.">Files in the bucket</StatusBadge>{/if}
+        {#if !b.master_key_included}<StatusBadge tone="warning" title="The server took its master key from TR_MASTER_KEY. Keep that key with the backup.">No master key</StatusBadge>{/if}
+      {/if}
+    {/snippet}
+    {#snippet none()}
+      <CompactEmpty icon={ArchiveIcon} text="None yet. The first backup runs within a minute, or now with Back up now." />
+    {/snippet}
+    <!-- A handful of backups are cards; the number kept can be large, and many are a list. -->
+    {#if source.items.length > 12}
+      <ItemList {source} caption="Backups" key={(b) => b.name} empty={none}>
+        {#snippet leading()}<ArchiveIcon class="size-5" />{/snippet}
+        {#snippet title(b)}<span title={b.name}>{formatDateTime(b.created_at)}</span>{/snippet}
+        {#snippet badges(b)}{@render marks(b)}{/snippet}
+        {#snippet meta(b)}<span class="tabular-nums">{b.complete ? `${files(b.files)} · ${formatSize(b.size)} · ` : ""}version {b.version}</span>{/snippet}
+      </ItemList>
+    {:else}
+      <SourceGrid {source} label="Backups" key={(b) => b.name} empty={none}>
+        {#snippet card(b)}
+          <ItemCard title={formatDateTime(b.created_at)}>
+            {#snippet icon()}<ArchiveIcon class="size-5" />{/snippet}
+            {#snippet badges()}{@render marks(b)}{/snippet}
+            {#if b.complete}<p class="tabular-nums">{files(b.files)} · {formatSize(b.size)}</p>{/if}
+            <p>Version {b.version}</p>
+          </ItemCard>
+        {/snippet}
+      </SourceGrid>
+    {/if}
     {#if overview.data?.error}
       <p class="mt-4 text-meta text-destructive text-pretty">{overview.data.error}</p>
     {:else if job && !job.running && job.last_error}

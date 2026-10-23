@@ -98,6 +98,9 @@ export const api = {
   /** The permission registry: every subsystem with its permissions (no credential needed). */
   permissions: () => request<T.PermissionRegistry>("GET", "/api/permissions"),
 
+  /** The version of the server and the released entries of its change log newer than since (every one without it). No credential needed. */
+  changes: (since?: string) => request<T.Changes>("GET", "/api/changes", { query: { since } }),
+
   /** The repository permissions of each pair of person and repository. */
   grants: {
     /**
@@ -111,6 +114,14 @@ export const api = {
 
   formats: {
     list: () => request<T.Format[]>("GET", "/api/formats"),
+  },
+
+  identity: {
+    get: () => request<T.Identity>("GET", "/api/identity"),
+    /** General settings: replaces the logo with a PNG, JPEG or WebP file. Answers the identity. */
+    putLogo: (file: Blob) => request<T.Identity>("PUT", "/api/identity/logo", { raw: file }),
+    /** General settings: removes the logo. Answers the identity. */
+    deleteLogo: () => request<T.Identity>("DELETE", "/api/identity/logo"),
   },
 
   repos: {
@@ -137,6 +148,13 @@ export const api = {
     resumeOperation: (name: string) => request<{ ok: boolean }>("POST", repo(name) + "/operation/resume"),
     /** All repositories: ends the failed operation of the repository; the repository keeps the files that are left. */
     clearOperation: (name: string) => request<void>("DELETE", repo(name) + "/operation"),
+    /** All repositories: gives the repository a new name; the old name stays as a redirect. 409 when the name is taken. */
+    rename: (name: string, to: string) => request<T.Repo>("POST", repo(name) + "/rename", { body: { name: to } }),
+    /** The old names that still answer for the repository, by name. */
+    redirects: (name: string) => request<T.RepoRedirect[]>("GET", repo(name) + "/redirects"),
+    /** All repositories: removes a redirect; the old name answers 404 and is free again. */
+    removeRedirect: (name: string, redirect: string) =>
+      request<void>("DELETE", repo(name) + "/redirects/" + encodeURIComponent(redirect)),
     status: (name: string) => request<T.RepoStatus>("GET", repo(name) + "/status"),
     /** The snippets of the repository: how to use it in a build and how to publish to it, with the labels of their tools. */
     usage: (name: string) => request<T.Usage>("GET", repo(name) + "/usage"),
@@ -357,6 +375,23 @@ export const api = {
       request<T.NexusSourceDetail>("PUT", `/api/nexus/sources/${id}/repos`, { body: { repos } }),
     sync: (id: number) => request<T.NexusSync>("POST", `/api/nexus/sources/${id}/sync`),
     cutOver: (id: number) => request<T.NexusSync>("POST", `/api/nexus/sources/${id}/cutover`),
+    /** Switches over the repository that Nexus repository `repo` copies into: its final sync. */
+    switchOver: (id: number, repo: string) =>
+      request<T.NexusSync>("POST", `/api/nexus/sources/${id}/repos/${encodeURIComponent(repo)}/switch-over`),
+    /** Creates the rehearsal repository of the repository that Nexus repository `repo` copies into. */
+    rehearse: (id: number, repo: string) =>
+      request<{ name: string }>("POST", `/api/nexus/sources/${id}/repos/${encodeURIComponent(repo)}/rehearsal`),
+    /** Creates the repository that projects move to from the one that Nexus repository `repo` copies into, and with `group` the group <name>-all of both. */
+    move: (id: number, repo: string, body: { name: string; group: boolean }) =>
+      request<{ name: string; group: string }>("POST", `/api/nexus/sources/${id}/repos/${encodeURIComponent(repo)}/move`, { body }),
+    /** What a merge of `from` into `into` would do (`into` empty: the repository `from` moves into). It reads every file of `from`. */
+    mergePlan: (from: string, into?: string) => request<T.NexusMergePlan>("GET", "/api/nexus/merges/plan", { query: { from, into } }),
+    /** Starts a merge; its operation holds both repositories until it ends. */
+    startMerge: (body: T.NexusMergeInput) => request<T.NexusMerge>("POST", "/api/nexus/merges", { body }),
+    merge: (id: number) => request<T.NexusMerge>("GET", `/api/nexus/merges/${id}`),
+    /** Starts to delete every file of a rehearsal repository; its operation shows the progress. */
+    emptyRehearsal: (name: string) =>
+      request<{ name: string; files: number }>("POST", `/api/nexus/rehearsals/${encodeURIComponent(name)}/empty`),
     syncs: (id: number, p?: T.PageParams) =>
       request<T.Page<T.NexusSync>>("GET", `/api/nexus/sources/${id}/syncs`, { query: page(p) }),
     getSync: (id: number) => request<T.NexusSync>("GET", `/api/nexus/syncs/${id}`),
@@ -433,6 +468,20 @@ export const api = {
   /** activity.read: the audit log, newest first. */
   audit: (filter: T.AuditFilter & T.PageParams = {}) =>
     request<T.Page<T.AuditEvent>>("GET", "/api/audit", {
-      query: { action: filter.action, repo: filter.repo, ...page(filter) },
+      query: {
+        action: filter.action,
+        repo: filter.repo,
+        actor: filter.actor,
+        since: filter.since,
+        until: filter.until,
+        ...page(filter),
+      },
     }),
+
+  /** activity.read: the people of the Activity filter whose username starts with q (at most 20 a page). */
+  auditPeople: (q: string, p?: T.PageParams) =>
+    request<T.Page<T.PersonName>>("GET", "/api/audit/people", { query: { q, ...page(p) } }),
+
+  /** activity.read: the downloads of the last days (today included; 30 by default) and the top repositories. */
+  stats: (days?: number) => request<T.DownloadStats>("GET", "/api/stats", { query: { days } }),
 };

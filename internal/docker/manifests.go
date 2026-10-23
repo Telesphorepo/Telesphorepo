@@ -202,7 +202,7 @@ func (f *Format) putManifest(w http.ResponseWriter, r *http.Request, c *route.Ca
 		}
 		tag = t.ref
 	}
-	origin := format.OriginOf(c.P.For(c.Repo.Name), assets.SourcePut)
+	origin := format.OriginOf(c.P.For(c.Repo.ID), assets.SourcePut)
 	mp := manifestPath(t.image, digest)
 	batch := map[string]bool{mp: true}
 	var ws []assets.Write
@@ -271,7 +271,7 @@ func (f *Format) deleteManifest(w http.ResponseWriter, r *http.Request, c *route
 		return
 	}
 	if _, err := f.h.Assets.Remove(r.Context(), assets.Removal{Repo: c.Repo, Paths: []repopath.Path{repopath.Path(p)},
-		Origin: format.OriginOf(c.P.For(c.Repo.Name), assets.SourcePut)}); err != nil {
+		Origin: format.OriginOf(c.P.For(c.Repo.ID), assets.SourcePut)}); err != nil {
 		fail(w, r, err)
 		return
 	}

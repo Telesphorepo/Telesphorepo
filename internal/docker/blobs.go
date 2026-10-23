@@ -81,7 +81,7 @@ func (f *Format) uploadLocation(r *http.Request, c *route.Call, t target, id str
 	if here && r.URL.Query().Get(stateParam) == "" {
 		return path, nil
 	}
-	p := c.P.For(c.Repo.Name)
+	p := c.P.For(c.Repo.ID)
 	if !p.Is(auth.CredPublish) || p.Publish == nil {
 		return path, nil
 	}
@@ -129,7 +129,7 @@ func blobCreated(w http.ResponseWriter, t target, hex string) {
 // (a mount).
 func (f *Format) commitLink(r *http.Request, c *route.Call, t target, hex string, body assets.Body) error {
 	_, err := f.h.Assets.Commit(r.Context(), assets.Write{Repo: c.Repo, Path: repopath.Path(linkPath(t.image, hex)), Body: body,
-		Origin: format.OriginOf(c.P.For(c.Repo.Name), assets.SourcePut), Meta: &writeMeta{kind: kindLink}})
+		Origin: format.OriginOf(c.P.For(c.Repo.ID), assets.SourcePut), Meta: &writeMeta{kind: kindLink}})
 	return err
 }
 

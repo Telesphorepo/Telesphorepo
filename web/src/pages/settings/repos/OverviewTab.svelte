@@ -1,5 +1,7 @@
 <!--
-  Repository settings, Overview. Every kind has its description, saved from the save bar.
+  Repository settings, Overview. Every kind has its description, saved from the save bar, and for
+  a holder of All repositories its name: a rename asks first and says that the old name keeps
+  working as a redirect. The old names show in their own card (RedirectsCard).
   A hosted repository: what it holds (files, size, last publish and the format's own facts) and the
   groups it is in.
   A proxy: its remote (address, last answer, "Test the remote"), how a build uses it, its cache
@@ -26,13 +28,30 @@
   import GroupsCard from "./GroupsCard.svelte";
   import GroupMembers from "./GroupMembers.svelte";
   import RemoteCard from "./RemoteCard.svelte";
+  import RedirectsCard from "./RedirectsCard.svelte";
+  import { Input } from "$lib/components/ui/input";
+  import { auth } from "$lib/auth.svelte";
+  import { navigate, repoSettingsPath } from "$lib/router.svelte";
 
   let { repo, onChanged }: { repo: Repo; onChanged: () => void } = $props();
 
   const id = $props.id();
   const max = 500;
   const memberNames = (r: Repo) => (r.members ?? []).map((m) => m.name);
-  const draft = new Draft({ description: untrack(() => repo.description), members: untrack(() => memberNames(repo)) });
+  const draft = new Draft({
+    name: untrack(() => repo.name),
+    description: untrack(() => repo.description),
+    members: untrack(() => memberNames(repo)),
+  });
+  // A holder of All repositories renames the repository here; its old name stays as a redirect.
+  const canRename = $derived(auth.can("repositories.all"));
+  const newName = $derived(draft.value.name.trim());
+  const renamed = $derived(newName !== draft.saved.name);
+  const nameError = $derived(
+    renamed && !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(newName)
+      ? "Use 1 to 64 lower-case letters, digits, '.', '_' or '-', starting with a letter or a digit."
+      : "",
+  );
   /* svelte-ignore state_referenced_locally */
   const status = repo.kind === "group" ? null : new Resource(() => api.repos.status(repo.name));
 
@@ -70,6 +89,13 @@
     const now = draft.value.members;
     const kept = (list: string[]) => list.filter((m) => was.includes(m) && now.includes(m)).join("\n");
     return [
+      ...(renamed
+        ? [
+            `Renames ${repo.name} to ${newName}`,
+            `${repo.name} keeps working as a redirect: builds and projects that use it reach ${newName}, publishes included`,
+            `Change them to ${newName} when you like; the redirect shows when it was last used`,
+          ]
+        : []),
       ...removed.map((m) => `Removes ${m}: builds that use ${repo.name} stop getting its files`),
       ...now.filter((m) => !was.includes(m)).map((m) => `Adds ${m}`),
       ...(kept(was) !== kept(now) ? ["Reads the members in the new order"] : []),
@@ -77,7 +103,8 @@
   });
 
   async function save() {
-    if (removed.length) {
+    if (nameError) throw new Error(nameError);
+    if (removed.length || renamed) {
       confirmOpen = true;
       return;
     }
@@ -94,7 +121,16 @@
     if (membersChanged) {
       members = memberNames(await api.repos.setMembers(repo.name, v.members));
     }
-    draft.commit({ description, members });
+    let name = draft.saved.name;
+    if (renamed) {
+      name = (await api.repos.rename(repo.name, newName)).name;
+    }
+    draft.commit({ name, description, members });
+    if (name !== repo.name) {
+      toast.success(`Renamed ${repo.name} to ${name}`);
+      navigate(repoSettingsPath(name, "overview"), { replace: true, force: true });
+      return;
+    }
     toast.success(`Saved ${repo.name}`);
     onChanged();
   }
@@ -102,9 +138,13 @@
 
 <FormSection title={repo.kind === "proxy" ? "Proxy" : repo.kind === "group" ? "Group" : "Repository"}>
   <FormGrid>
-    <FormRow label="Description" for="{id}-desc" help="The list of repositories shows this text after the name." full>
+    {#if canRename}
+      <FormRow label="Name" for="{id}-name" help="A new name keeps the old one working as a redirect." error={nameError}>
+        <Input id="{id}-name" bind:value={draft.value.name} autocomplete="off" spellcheck={false} aria-describedby="{id}-name-help" aria-invalid={nameError ? true : undefined} />
+      </FormRow>
+    {/if}
+    <FormRow label="Description" for="{id}-desc" help="One sentence on what it holds, for people who look for it." full length={draft.value.description.length} {max}>
       <Textarea id="{id}-desc" rows={3} maxlength={max} aria-describedby="{id}-desc-help {id}-desc-count" bind:value={draft.value.description} />
-      <p id="{id}-desc-count" class="text-right text-meta text-muted-foreground tabular-nums">{formatCount(draft.value.description.length)} of {max}</p>
     </FormRow>
   </FormGrid>
 </FormSection>
@@ -135,12 +175,14 @@
   {/if}
 {/if}
 
+<RedirectsCard {repo} />
+
 <SaveBar count={draft.count} onDiscard={draft.reset} onSave={save} />
 
 <ConfirmDialog
   bind:open={confirmOpen}
-  title="Save the members of {repo.name}?"
-  confirmLabel="Save members"
+  title={renamed ? `Rename ${repo.name} to ${newName}?` : `Save the members of ${repo.name}?`}
+  confirmLabel={renamed ? "Rename" : "Save members"}
   destructive
   {changes}
   onConfirm={write}

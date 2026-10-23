@@ -63,7 +63,8 @@
 
   let deleteOpen = $state(false);
   const deleteFiles = $derived(
-    (repos.data ?? []).filter((r) => picked.has(r.name)).reduce((n, r) => n + r.file_count, 0),
+    // A group's files are its members': deleting the group deletes none of them.
+    (repos.data ?? []).filter((r) => picked.has(r.name) && r.kind !== "group").reduce((n, r) => n + r.file_count, 0),
   );
 
   async function remove() {

@@ -14,13 +14,13 @@
   import { Input } from "$lib/components/ui/input";
   import PageHeader from "$lib/components/PageHeader.svelte";
   import Section from "$lib/components/Section.svelte";
-  import DataTable from "$lib/components/DataTable.svelte";
-  import Cell from "$lib/components/Cell.svelte";
+  import SourceGrid from "$lib/components/SourceGrid.svelte";
+  import ItemCard from "$lib/components/ItemCard.svelte";
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
   import StatusBadge from "$lib/components/StatusBadge.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
   import FormField from "$lib/components/FormField.svelte";
-  import { formatCount } from "$lib/format";
+  import { count } from "$lib/words";
   import { progressLine, sourceStatus } from "./nexus/words";
   import ShortFormDialog from "$lib/components/ShortFormDialog.svelte";
   import ArrowRightLeftIcon from "@lucide/svelte/icons/arrow-right-left";
@@ -32,7 +32,7 @@
   const sources = new Keyset((p) => api.nexus.list(p));
   const open = (s: NexusSource) => href(`/settings/nexus/${s.id}`);
 
-  // While a source syncs, its progress line in the table follows the sync.
+  // While a source syncs, the progress line of its card follows the sync.
   const syncing = $derived(sources.items.some((s) => s.status === "syncing"));
   const live = new Live({ every: 3000, while: () => syncing, run: sources.fetch });
   // While a sync runs, LiveStatus says when a refresh fails.
@@ -79,41 +79,26 @@
   }
 </script>
 
-<PageHeader title="Nexus migration" description="Copy the repositories of a Nexus server, keep them in sync, then switch over when every build uses this server.">
+<PageHeader title="Nexus migration" description="Copy the repositories of a Nexus server, keep them in sync, and switch them over one at a time.">
   {#snippet actions()}<LiveStatus {live} />{#if sources.items.length}<Button onclick={startAdd}><PlusIcon />Add a Nexus server</Button>{/if}{/snippet}
 </PageHeader>
 
-<Section>
-<DataTable
-  {source}
-  caption="Nexus servers"
-  key={(s) => s.id}
-  href={open}
-  columns={[
-    { label: "Server", grow: true },
-    { label: "Status" },
-    { label: "Repositories", align: "right", hideOnPhone: true },
-    { label: "Last check", align: "right", hideOnPhone: true },
-    { label: "Next check", align: "right", hideOnPhone: true },
-  ]}
->
-  {#snippet row(s)}
-    <Cell grow>
-      <span class="flex min-w-0 items-baseline gap-2">
-        <a href={open(s)} class="shrink-0 rounded-sm font-medium outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50">{s.name}</a>
-        <span class="min-w-0 truncate text-muted-foreground max-sm:hidden" title={s.base_url}>{s.base_url}</span>
-      </span>
-    </Cell>
-    <Cell>
-      <StatusBadge tone={sourceStatus[s.status].tone} title={s.status === "failed" ? s.last_error : undefined}>{sourceStatus[s.status].word}</StatusBadge>
-    </Cell>
-    <Cell num hideOnPhone>{formatCount(s.repo_count)}</Cell>
-    {#if s.status === "syncing" && s.last_sync}
-      <Cell num muted hideOnPhone text={progressLine(s.last_sync)} />
-    {:else}
-      <Cell num muted hideOnPhone><RelativeTime at={s.last_sync?.finished_at} empty="Not yet" /></Cell>
-    {/if}
-    <Cell num muted hideOnPhone><RelativeTime at={s.next_sync_at} empty="" /></Cell>
+<Section plain>
+<SourceGrid {source} label="Nexus servers" key={(s) => s.id}>
+  {#snippet card(s)}
+    <ItemCard title={s.name} href={open(s)}>
+      {#snippet icon()}<ArrowRightLeftIcon class="size-5" />{/snippet}
+      {#snippet badges()}
+        <StatusBadge tone={sourceStatus[s.status].tone} title={s.status === "failed" ? s.last_error : undefined}>{sourceStatus[s.status].word}</StatusBadge>
+      {/snippet}
+      <p class="truncate" title={s.base_url}>{s.base_url}</p>
+      <p class="tabular-nums">{count(s.repo_count, "repository", "repositories")}</p>
+      {#if s.status === "syncing" && s.last_sync}
+        <p class="truncate tabular-nums" title={progressLine(s.last_sync)}>{progressLine(s.last_sync)}</p>
+      {:else if s.next_sync_at}
+        <p>Next check <RelativeTime at={s.next_sync_at} /></p>
+      {/if}
+    </ItemCard>
   {/snippet}
   {#snippet empty()}
     <CompactEmpty
@@ -123,7 +108,7 @@
       <Button variant="outline" onclick={startAdd}><PlusIcon />Add a Nexus server</Button>
     </CompactEmpty>
   {/snippet}
-</DataTable>
+</SourceGrid>
 </Section>
 
 <ShortFormDialog

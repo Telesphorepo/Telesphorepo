@@ -11,6 +11,15 @@ export const nexus: ModuleUI = {
       page: () => import("../../pages/server/NexusMigration.svelte"),
       nav: { group: "server", label: "Nexus migration", icon: ArrowRightLeftIcon, order: 40 },
     },
+    // Before /settings/nexus/:id, which would take "merge" as an id.
+    {
+      path: "/settings/nexus/merge", layout: "settings", access: ["nexus.manage", "repositories.all"], title: "Merge",
+      page: () => import("../../pages/server/NexusMergePlan.svelte"),
+    },
+    {
+      path: "/settings/nexus/merges/:id", layout: "settings", access: ["nexus.manage", "repositories.all"], title: "Merge",
+      page: () => import("../../pages/server/NexusMerge.svelte"),
+    },
     {
       path: "/settings/nexus/:id", layout: "settings", access: "nexus.manage", title: "Nexus server",
       page: () => import("../../pages/server/NexusSource.svelte"),

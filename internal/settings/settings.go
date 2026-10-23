@@ -346,9 +346,10 @@ type Item struct {
 	Type    Type     `json:"type"`
 	Options []string `json:"options,omitempty"`
 	Secret  bool     `json:"secret"`
-	// Value is the effective value; for secrets it is SecretValue (never the secret itself).
+	// Value is the effective value; for a secret or an image it is SecretValue (never the secret
+	// or the bytes).
 	Value   any `json:"value"`
-	Default any `json:"default"` // nil for secrets
+	Default any `json:"default"` // nil for secrets and images
 	// Display and DefaultDisplay put a size or a duration in words ("512 MiB", "90 days").
 	Display        string `json:"display,omitempty"`
 	DefaultDisplay string `json:"default_display,omitempty"`
@@ -357,7 +358,7 @@ type Item struct {
 	Locked bool `json:"locked"`
 }
 
-// SecretValue is what Items reports for a secret setting.
+// SecretValue is what Items reports for a secret or an image setting.
 type SecretValue struct {
 	Set bool `json:"set"`
 }
@@ -372,16 +373,20 @@ func (s *Service) Items(g *Group) []Item {
 			Type: def.Type, Options: def.Options, Secret: def.Secret,
 			Source: snap.sources[def.idx], Locked: snap.sources[def.idx] == SourceEnv,
 		}
-		if def.Secret {
+		switch {
+		case def.Secret:
 			it.Value = SecretValue{Set: snap.values[def.idx] != ""}
-		} else {
+		case def.Type == TypeImage:
+			b, _ := snap.values[def.idx].([]byte)
+			it.Value = SecretValue{Set: len(b) > 0}
+		default:
 			it.Value = def.jsonValue(snap.values[def.idx])
 			if dv, err := def.parseText(s.defaultText(def)); err == nil {
 				it.Default = def.jsonValue(dv)
 			}
 		}
 		it.Display, it.DefaultDisplay = def.display(snap.values[def.idx]), ""
-		if def.Secret {
+		if def.Secret || def.Type == TypeImage {
 			it.Display = ""
 		} else if dv, err := def.parseText(s.defaultText(def)); err == nil {
 			it.DefaultDisplay = def.display(dv)
@@ -429,7 +434,7 @@ func (s *Service) candidate(snap *Snapshot, patch map[string]json.RawMessage) (m
 			ve.add(key, err.Error())
 			continue
 		}
-		if def.Secret && v == "" {
+		if b, isImage := v.([]byte); (def.Secret && v == "") || (isImage && len(b) == 0) {
 			if _, ok := rows[key]; ok {
 				delete(rows, key)
 				changed = append(changed, key)

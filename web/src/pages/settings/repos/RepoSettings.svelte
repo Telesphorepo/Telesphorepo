@@ -1,7 +1,7 @@
 <!--
   A repository's settings inside the Settings shell (route /settings/repositories/:name/:tab):
   the sidebar stays, "All repositories" stays open in it, and the breadcrumbs say where the page
-  sits (Settings › Repositories › maven › Access). The header names the repository; the tabs are
+  sits (Settings › Repositories). The header names the repository and the open tab shows which tab it is; the tabs are
   pages with their own address, so the back button returns to the previous tab. The tab bodies are
   the other files of this folder, and the repository tabs of the UI modules (web/src/modules) that
   the format names in repo_tabs (the Signing tab of the signing module). The tabs depend on the
@@ -60,6 +60,11 @@
   });
 
   const r = $derived(repo.data?.name === params.name ? repo.data : repo.data === null ? null : undefined);
+  // An old name of a repository (a redirect, after a rename) opens the settings under its name.
+  $effect(() => {
+    const d = repo.data;
+    if (!repo.loading && d && d.name !== params.name) navigate(repoSettingsPath(d.name, params.tab), { replace: true });
+  });
 
   // A group and a proxy have no format settings and no module tabs; a proxy has its Remote tab.
   const tabs = $derived.by(() => {
@@ -99,7 +104,7 @@
 {:else}
   <PageHeader
     title={r.name}
-    crumbs={[{ label: r.name, href: href(repoSettingsPath(r.name)) }, { label: open?.label ?? "Not found" }]}
+    crumbs={[]}
   >
     {#snippet meta()}
       {#if !r.anonymous_read}<LockIcon class="size-4 text-muted-foreground" aria-label="Private" />{/if}

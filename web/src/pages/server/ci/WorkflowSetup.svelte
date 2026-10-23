@@ -14,6 +14,7 @@
   import { formats } from "$lib/formats/registry.svelte";
   import * as Select from "$lib/components/ui/select";
   import FormGrid from "$lib/components/FormGrid.svelte";
+  import FormatIcon from "$lib/components/FormatIcon.svelte";
   import FormRow from "$lib/components/FormRow.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import Loading from "$lib/components/Loading.svelte";
@@ -21,7 +22,12 @@
   import SnippetBlock, { andList, mergeSame } from "../../repo/snippets/SnippetBlock.svelte";
   import { workflowFile, type GitHubJobs } from "./presets";
 
-  let { system, repos, github }: { system: "github" | "jenkins"; repos: string[]; github: GitHubJobs } = $props();
+  let {
+    system,
+    repos,
+    github,
+    formatOf,
+  }: { system: "github" | "jenkins"; repos: string[]; github: GitHubJobs; formatOf: (repo: string) => string | undefined } = $props();
 
   const fid = $props.id();
 
@@ -69,9 +75,16 @@
         {#if repos.length > 1}
           <FormRow label="Repository" for="{fid}-repo" help="Each repository needs its own publish step.">
             <Select.Root type="single" value={repo} onValueChange={(v) => (picked = v)}>
-              <Select.Trigger id="{fid}-repo" class="w-full" aria-describedby="{fid}-repo-help">{repo}</Select.Trigger>
+              <Select.Trigger id="{fid}-repo" class="w-full" aria-describedby="{fid}-repo-help">
+                {#snippet icon()}<FormatIcon format={formatOf(repo) ?? ""} />{/snippet}
+                <span class="truncate">{repo}</span>
+              </Select.Trigger>
               <Select.Content>
-                {#each repos as r (r)}<Select.Item value={r} label={r}>{r}</Select.Item>{/each}
+                {#each repos as r (r)}
+                  <Select.Item value={r} label={r}>
+                    {#snippet icon()}<FormatIcon format={formatOf(r) ?? ""} />{/snippet}
+                  </Select.Item>
+                {/each}
               </Select.Content>
             </Select.Root>
           </FormRow>

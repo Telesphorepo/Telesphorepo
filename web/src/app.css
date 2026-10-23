@@ -13,100 +13,144 @@
   card on the page background); --panel is the quiet fill inside one (code, help, details).
 */
 
+/*
+  The canvas (branding/README.md, Canvas colors): in light, a quiet warm tint of Paper; in dark, a
+  deep navy from Carbon. Text is a Carbon ink in light and Paper in dark. --card stays a clean
+  surface that lifts off the canvas; every grey of the UI (hover, stripe, panel, muted, borders)
+  takes the hue of its canvas, so nothing reads as a cold grey on a warm page.
+*/
 :root {
-	--background: oklch(1 0 0);
-	--foreground: oklch(0.148 0.004 228.8);
+	--background: oklch(0.97 0.011 85);
+	--foreground: oklch(0.17 0.02 272);
 	--card: oklch(1 0 0);
-	--card-foreground: oklch(0.148 0.004 228.8);
+	--card-foreground: oklch(0.17 0.02 272);
 	--popover: oklch(1 0 0);
-	--popover-foreground: oklch(0.148 0.004 228.8);
+	--popover-foreground: oklch(0.17 0.02 272);
 	/* Brand: ticket yellow #E9B546. Text on it is a dark umber ink. */
 	--primary: oklch(0.801 0.138 83);
 	--primary-foreground: oklch(0.29 0.055 70);
 	/* Readable link text on the page background (yellow alone is too light on white). */
 	--link: oklch(0.5 0.11 72);
-	--hover: oklch(0.955 0.006 197);
-	/* Zebra stripe of table rows: between the background and --hover. */
-	--stripe: oklch(0.982 0.002 197);
+	--hover: oklch(0.948 0.012 85);
+	/* Zebra stripe of table rows: between the card and --hover. */
+	--stripe: oklch(0.982 0.005 85);
 	--selected: oklch(0.945 0.055 88);
 	--selected-foreground: oklch(0.29 0.055 70);
 	/* The quiet panel fill: the details column, code blocks, the drop zone. */
-	--panel: oklch(0.978 0.003 197);
-	--secondary: oklch(0.967 0.001 286.375);
-	--secondary-foreground: oklch(0.21 0.006 285.885);
-	--muted: oklch(0.963 0.002 197.1);
-	/* Meta and help text: at least 4.5:1 on --background and on --panel. */
-	--muted-foreground: oklch(0.49 0.02 213.5);
-	--accent: oklch(0.963 0.002 197.1);
-	--accent-foreground: oklch(0.218 0.008 223.9);
-	--destructive: oklch(0.577 0.245 27.325);
+	--panel: oklch(0.975 0.008 85);
+	--secondary: oklch(0.955 0.01 85);
+	--secondary-foreground: oklch(0.21 0.02 272);
+	--muted: oklch(0.952 0.012 85);
+	/* Meta and help text: at least 4.5:1 on --background, --panel and --muted. */
+	--muted-foreground: oklch(0.47 0.022 75);
+	--accent: oklch(0.952 0.012 85);
+	--accent-foreground: oklch(0.21 0.02 272);
+	--destructive: oklch(0.56 0.235 27);
 	--success: oklch(0.52 0.13 155);
 	--warning: oklch(0.53 0.12 68);
-	--border: oklch(0.925 0.005 214.3);
-	--input: oklch(0.925 0.005 214.3);
-	--ring: oklch(0.723 0.014 214.4);
+	--border: oklch(0.905 0.012 85);
+	--input: oklch(0.9 0.013 85);
+	--ring: oklch(0.72 0.03 80);
 	--chart-1: oklch(0.905 0.182 98.111);
 	--chart-2: oklch(0.795 0.184 86.047);
 	--chart-3: oklch(0.681 0.162 75.834);
 	--chart-4: oklch(0.554 0.135 66.442);
 	--chart-5: oklch(0.476 0.114 61.907);
+	/* The one series of a bar chart (the size by format of the Settings overview): Gold Deep, 3.99:1 on the card. */
+	--chart-bar: #a8760f;
 	--radius: 0.5rem;
-	--sidebar: oklch(0.987 0.002 197.1);
-	--sidebar-foreground: oklch(0.148 0.004 228.8);
+	--sidebar: oklch(0.97 0.011 85);
+	--sidebar-foreground: oklch(0.17 0.02 272);
 	--sidebar-primary: oklch(0.801 0.138 83);
 	--sidebar-primary-foreground: oklch(0.29 0.055 70);
-	--sidebar-accent: oklch(0.963 0.002 197.1);
-	--sidebar-accent-foreground: oklch(0.218 0.008 223.9);
-	--sidebar-border: oklch(0.925 0.005 214.3);
-	--sidebar-ring: oklch(0.723 0.014 214.4);
-	--scrollbar-thumb: oklch(0.86 0.008 214);
-	--scrollbar-thumb-hover: oklch(0.74 0.012 214);
-	--scrollbar-thumb-active: oklch(0.62 0.016 214);
+	--sidebar-accent: oklch(0.952 0.012 85);
+	--sidebar-accent-foreground: oklch(0.21 0.02 272);
+	--sidebar-border: oklch(0.905 0.012 85);
+	--sidebar-ring: oklch(0.72 0.03 80);
+	--scrollbar-thumb: oklch(0.85 0.014 85);
+	--scrollbar-thumb-hover: oklch(0.74 0.018 85);
+	--scrollbar-thumb-active: oklch(0.62 0.02 80);
+	/*
+	  Ticket parts (branding/README.md, Ticket badge): the fill and the ink of a TicketBadge,
+	  neutral and gold, and the paper and the shadow of the admission ticket.
+	*/
+	--ticket: oklch(0.935 0.014 85);
+	--ticket-foreground: oklch(0.3 0.025 272);
+	--ticket-gold: oklch(0.9 0.075 86);
+	--ticket-gold-foreground: oklch(0.32 0.065 70);
+	--ticket-paper: oklch(0.988 0.012 88);
+	--ticket-shadow: oklch(0.2 0.03 272 / 0.08);
+	/* The mark's gold (branding/README.md, Colors): Gold Deep on light, Gold on dark. For the icons of Home's doors. */
+	--mark: #a8760f;
+	/* Avatars (UserAvatar): six soft hues around the brand gold, under one Carbon ink. */
+	--avatar-1: oklch(0.86 0.065 83);
+	--avatar-2: oklch(0.86 0.065 40);
+	--avatar-3: oklch(0.86 0.065 150);
+	--avatar-4: oklch(0.86 0.055 200);
+	--avatar-5: oklch(0.86 0.065 260);
+	--avatar-6: oklch(0.86 0.065 320);
+	--avatar-ink: oklch(0.27 0.05 272);
 }
 
 .dark {
-	--background: oklch(0.16 0.004 228.8);
-	--foreground: oklch(0.975 0.002 197.1);
-	--card: oklch(0.2 0.006 223.9);
-	--card-foreground: oklch(0.975 0.002 197.1);
-	--popover: oklch(0.21 0.007 223.9);
-	--popover-foreground: oklch(0.975 0.002 197.1);
+	--background: oklch(0.185 0.035 273);
+	--foreground: oklch(0.97 0.008 88);
+	--card: oklch(0.225 0.04 273);
+	--card-foreground: oklch(0.97 0.008 88);
+	--popover: oklch(0.24 0.04 273);
+	--popover-foreground: oklch(0.97 0.008 88);
 	--primary: oklch(0.801 0.138 83);
 	--primary-foreground: oklch(0.29 0.055 70);
 	--link: oklch(0.83 0.12 83);
-	--hover: oklch(0.235 0.008 223.9);
-	--stripe: oklch(0.192 0.006 223.9);
-	--selected: oklch(0.31 0.05 80);
+	--hover: oklch(0.27 0.042 273);
+	--stripe: oklch(0.245 0.04 273);
+	--selected: oklch(0.35 0.065 84);
 	--selected-foreground: oklch(0.96 0.03 88);
-	--panel: oklch(0.195 0.006 223.9);
-	--secondary: oklch(0.274 0.006 286.033);
-	--secondary-foreground: oklch(0.985 0 0);
-	--muted: oklch(0.26 0.009 216.9);
-	--muted-foreground: oklch(0.72 0.014 214.4);
-	--accent: oklch(0.26 0.009 216.9);
-	--accent-foreground: oklch(0.975 0.002 197.1);
+	--panel: oklch(0.205 0.036 273);
+	--secondary: oklch(0.28 0.04 273);
+	--secondary-foreground: oklch(0.97 0.008 88);
+	--muted: oklch(0.29 0.04 273);
+	--muted-foreground: oklch(0.76 0.03 270);
+	--accent: oklch(0.29 0.04 273);
+	--accent-foreground: oklch(0.97 0.008 88);
 	--destructive: oklch(0.704 0.191 22.216);
 	--success: oklch(0.75 0.14 155);
 	--warning: oklch(0.8 0.13 80);
-	--border: oklch(1 0 0 / 10%);
-	--input: oklch(1 0 0 / 15%);
-	--ring: oklch(0.56 0.021 213.5);
+	--border: oklch(0.9 0.04 273 / 11%);
+	--input: oklch(0.9 0.04 273 / 16%);
+	--ring: oklch(0.56 0.04 273);
 	--chart-1: oklch(0.905 0.182 98.111);
 	--chart-2: oklch(0.795 0.184 86.047);
 	--chart-3: oklch(0.681 0.162 75.834);
 	--chart-4: oklch(0.554 0.135 66.442);
 	--chart-5: oklch(0.476 0.114 61.907);
-	--sidebar: oklch(0.2 0.006 223.9);
-	--sidebar-foreground: oklch(0.975 0.002 197.1);
+	/* A gold one step darker than the mark's, inside the chart lightness band of a dark surface; over 3:1 on the card. */
+	--chart-bar: #b8862a;
+	--sidebar: oklch(0.185 0.035 273);
+	--sidebar-foreground: oklch(0.97 0.008 88);
 	--sidebar-primary: oklch(0.801 0.138 83);
 	--sidebar-primary-foreground: oklch(0.29 0.055 70);
-	--sidebar-accent: oklch(0.26 0.009 216.9);
-	--sidebar-accent-foreground: oklch(0.975 0.002 197.1);
-	--sidebar-border: oklch(1 0 0 / 10%);
-	--sidebar-ring: oklch(0.56 0.021 213.5);
-	--scrollbar-thumb: oklch(0.34 0.01 220);
-	--scrollbar-thumb-hover: oklch(0.46 0.014 220);
-	--scrollbar-thumb-active: oklch(0.52 0.016 220);
+	--sidebar-accent: oklch(0.29 0.04 273);
+	--sidebar-accent-foreground: oklch(0.97 0.008 88);
+	--sidebar-border: oklch(0.9 0.04 273 / 11%);
+	--sidebar-ring: oklch(0.56 0.04 273);
+	--scrollbar-thumb: oklch(0.34 0.04 273);
+	--scrollbar-thumb-hover: oklch(0.46 0.045 273);
+	--scrollbar-thumb-active: oklch(0.54 0.045 273);
+	--ticket: oklch(0.31 0.04 273);
+	--ticket-foreground: oklch(0.92 0.015 88);
+	--ticket-gold: oklch(0.38 0.075 80);
+	--ticket-gold-foreground: oklch(0.95 0.06 88);
+	--ticket-paper: oklch(0.25 0.042 273);
+	--ticket-shadow: oklch(0.08 0.03 273 / 0.45);
+	--mark: #e9b546;
+	--avatar-1: oklch(0.46 0.1 83);
+	--avatar-2: oklch(0.46 0.1 40);
+	--avatar-3: oklch(0.46 0.1 150);
+	--avatar-4: oklch(0.46 0.09 200);
+	--avatar-5: oklch(0.46 0.1 260);
+	--avatar-6: oklch(0.46 0.1 320);
+	--avatar-ink: oklch(0.97 0.02 88);
 }
 
 @theme inline {
@@ -142,6 +186,11 @@
 	--color-selected: var(--selected);
 	--color-selected-foreground: var(--selected-foreground);
 	--color-panel: var(--panel);
+	--color-ticket: var(--ticket);
+	--color-ticket-foreground: var(--ticket-foreground);
+	--color-ticket-gold: var(--ticket-gold);
+	--color-ticket-gold-foreground: var(--ticket-gold-foreground);
+	--color-ticket-paper: var(--ticket-paper);
 	--color-success: var(--success);
 	--color-warning: var(--warning);
 	--color-brand: oklch(0.801 0.138 83);
@@ -154,7 +203,7 @@
 		}
 	}
 	/* The page container. Every Settings page uses the full content column next to the sidebar. */
-	--container-page: 75rem;
+	--container-page: 90rem;
 	/* Table rows: one fixed height, a single line; the height comes from the layout (--row below). */
 	--spacing-row: var(--row);
 	--color-sidebar-ring: var(--sidebar-ring);
@@ -170,6 +219,7 @@
 	--color-chart-3: var(--chart-3);
 	--color-chart-2: var(--chart-2);
 	--color-chart-1: var(--chart-1);
+	--color-chart-bar: var(--chart-bar);
 	--color-ring: var(--ring);
 	--color-input: var(--input);
 	--color-border: var(--border);
@@ -287,4 +337,146 @@
 [data-slot="card"] [data-slot="compact-empty"] {
 	border-width: 0;
 	padding: 0;
+}
+
+/*
+  Edges. The text and the controls of a surface start and end on its content edge (24px in a
+  Section, 20px under 640px). A ghost or link button has its label 13px inside its box (12px of padding and a 1px border), so at the
+  end of a header or a row, or at the start of a card's actions, it reaches out by that much: its
+  label meets the edge and its hover fill lies in the padding.
+*/
+[data-slot="header-actions"] > :is([data-variant="ghost"], [data-variant="link"]):not([data-size^="icon"]):last-child,
+[data-slot="row-end"]:not(td *) > :is([data-variant="ghost"], [data-variant="link"]):not([data-size^="icon"]):last-child {
+	margin-right: calc(-0.75rem - 1px);
+}
+/* In a table cell the cell's own 12px padding is all the room there is: one pixel more scrolls the table. */
+td [data-slot="row-end"] > :is([data-variant="ghost"], [data-variant="link"]):not([data-size^="icon"]):last-child {
+	margin-right: -0.75rem;
+}
+[data-slot="card-actions"] > :is([data-variant="ghost"], [data-variant="link"]):not([data-size^="icon"]):first-child {
+	margin-left: calc(-0.75rem - 1px);
+}
+
+/*
+  Rows that fill (ItemList, DataTable) inside a card or a dialog: the fill reaches 12px into the
+  padding on every side and the text stays on the content edge, so a row's name lines up with the
+  section's title.
+*/
+:is([data-slot="card-content"], [data-slot="dialog-content"]) [data-slot="item-list"] {
+	margin: -0.75rem;
+}
+:is([data-slot="card-content"], [data-slot="dialog-content"]) [data-slot="data-table"] {
+	margin: -0.75rem;
+}
+
+/*
+  A list of OptionRows fills the same way: the list reaches 12px into the padding on both sides,
+  and at the top or the bottom of a card it reaches into the padding there too.
+*/
+:has(> [data-slot="option-row"]) {
+	margin-inline: -0.75rem;
+	/* A full-width list (a RadioGroup is w-full) would only move left: it widens by both margins. */
+	width: calc(100% + 1.5rem);
+}
+[data-slot="card-content"] > :has(> [data-slot="option-row"]):first-child {
+	margin-top: -0.75rem;
+}
+[data-slot="card-content"] > :has(> [data-slot="option-row"]):last-child {
+	margin-bottom: -0.75rem;
+}
+
+/*
+  A DataTable on a phone (under 640px): each row stacks. The row's name (the `grow` cell) is the
+  first line, and the other cells that show on a phone follow as one muted meta line, parted by
+  " · ", so nothing is cut off or runs into the next column. The column headings hide; a table
+  with bulk actions keeps its head row for the checkbox, its label and the selection bar.
+*/
+@media (width < 40rem) {
+	[data-slot="data-table"] :is(table, tbody) {
+		display: block;
+	}
+	[data-slot="data-table"] thead:not(:has([data-pick])) {
+		display: none;
+	}
+	[data-slot="data-table"] thead th:not(:has([data-pick])) {
+		display: none;
+	}
+	[data-slot="data-table"] tr[data-row] {
+		position: relative;
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		column-gap: 0;
+		row-gap: 0.125rem;
+		height: auto;
+		min-height: var(--row);
+		padding: 0.625rem 0.75rem;
+		border-radius: var(--radius);
+	}
+	[data-slot="data-table"] tr[data-row]:has(> [data-pick-cell]) {
+		padding-left: 2.5rem;
+	}
+	[data-slot="data-table"] tr[data-row] > td:not([class*="hidden"]) {
+		display: flex;
+		align-items: center;
+		min-width: 0;
+		max-width: 100%;
+		width: auto;
+		padding: 0;
+		border-radius: 0;
+		text-align: left;
+		overflow: hidden;
+		font-size: var(--text-meta);
+		line-height: var(--text-meta--line-height);
+		color: var(--muted-foreground);
+	}
+	[data-slot="data-table"] tr[data-row] > td:empty {
+		display: none;
+	}
+	[data-slot="data-table"] tr[data-row] > td[data-grow] {
+		flex: 1 0 100%;
+		max-width: 100%;
+		font-size: var(--text-body);
+		line-height: var(--text-body--line-height);
+		color: inherit;
+	}
+	[data-slot="data-table"] tr[data-row] > td[data-actions] {
+		margin-left: auto;
+		overflow: visible;
+	}
+	[data-slot="data-table"] tr[data-row] > td[data-pick-cell] {
+		position: absolute;
+		inset: 0 auto 0 0;
+		width: 2.5rem;
+	}
+	[data-slot="data-table"] tr[data-row] > td[data-pick-cell] > label {
+		height: 100%;
+	}
+	[data-slot="data-table"]
+		td[data-grow]
+		~ td:not([data-actions], [data-pick-cell], .max-sm\:hidden, .max-lg\:hidden, :empty)
+		~ td:not([data-actions], :empty)::before {
+		content: "·";
+		padding-inline: 0.375rem;
+	}
+}
+
+/* A header whose action is one short button (a ghost or small one: "See all") keeps it on the title's line on a phone. */
+[data-slot="card-header"]:has(> [data-slot="header-actions"] > :is([data-variant="ghost"], [data-size="sm"], [data-size="xs"]):only-child) {
+	flex-wrap: nowrap;
+}
+
+@media (width < 40rem) {
+	/* The head row of a stacked table with bulk actions: the checkbox, and a line across the whole table. */
+	[data-slot="data-table"] thead {
+		display: block;
+	}
+	[data-slot="data-table"] thead tr {
+		display: flex;
+	}
+	[data-slot="data-table"] thead th:has([data-pick]) {
+		display: flex;
+		align-items: center;
+		width: auto;
+	}
 }

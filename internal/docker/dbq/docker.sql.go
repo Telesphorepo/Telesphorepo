@@ -801,6 +801,21 @@ func (q *Queries) PurgeDockerTags(ctx context.Context, arg PurgeDockerTagsParams
 	return result.RowsAffected()
 }
 
+const renameImages = `-- name: RenameImages :exec
+UPDATE docker_images SET full_name = CAST(?1 AS TEXT) || '/' || image WHERE repo_id = ?2
+`
+
+type RenameImagesParams struct {
+	RepoName string
+	RepoID   int64
+}
+
+// A rename of the repo: every image of it takes the new full name, through the primary key.
+func (q *Queries) RenameImages(ctx context.Context, arg RenameImagesParams) error {
+	_, err := q.db.ExecContext(ctx, renameImages, arg.RepoName, arg.RepoID)
+	return err
+}
+
 const repoLinkOf = `-- name: RepoLinkOf :one
 SELECT image FROM docker_links WHERE repo_id = ? AND digest = ? LIMIT 1
 `

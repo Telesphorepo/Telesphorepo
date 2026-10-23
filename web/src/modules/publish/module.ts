@@ -11,7 +11,7 @@ export const publish: ModuleUI = {
     { path: "/install", layout: "app", access: "any", title: "Install the CLI", page: () => import("../../pages/InstallCLI.svelte") },
     { path: "/device", layout: "app", access: "user", title: "Approve a device", page: () => import("../../pages/DeviceApprove.svelte") },
     {
-      path: "/settings/devices", layout: "settings", access: "user", title: "Devices",
+      path: "/account/devices", layout: "account", access: "user", title: "Devices",
       page: () => import("../../pages/account/Devices.svelte"),
       nav: { group: "account", label: "Devices", icon: LaptopIcon, order: 30 },
     },
@@ -29,4 +29,5 @@ export const publish: ModuleUI = {
       page: () => import("../../pages/server/CIPublishingRule.svelte"),
     },
   ],
+  redirects: [{ path: "/settings/devices", to: () => "/account/devices" }],
 };

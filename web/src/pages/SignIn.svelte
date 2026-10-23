@@ -16,7 +16,9 @@
   import FormField from "$lib/components/FormField.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import SecondFactorForm from "$lib/components/SecondFactorForm.svelte";
-  import Logo from "$lib/components/Logo.svelte";
+  import ServerMark from "$lib/components/ServerMark.svelte";
+  import { brand } from "$lib/brand.svelte";
+  import FeltTicket from "$lib/components/FeltTicket.svelte";
   import ArrowLeftIcon from "@lucide/svelte/icons/arrow-left";
 
   let { query }: PageProps = $props();
@@ -90,8 +92,15 @@
   }
 </script>
 
-<div class="mx-auto flex w-full max-w-sm flex-col gap-6 pt-8 sm:pt-16">
-  <Logo size={40} />
+<!-- The front of the product: on a wide window the felt ticket stands beside the form (the brand
+     keeps the felt at 320px or more); on a narrower one the flat mark heads the form. A server
+     logo heads the form at every width. -->
+<div class="flex items-center justify-center gap-20 pt-8 sm:pt-16 lg:pt-24">
+<div class="hidden w-[24rem] shrink-0 lg:block">
+  <FeltTicket top="Admit one" bottom={brand.name} serial="No 000001" label="The {brand.name} ticket" />
+</div>
+<div class="flex w-full max-w-sm flex-col gap-6">
+  <span class={brand.logo ? undefined : "lg:hidden"}><ServerMark size={40} /></span>
   {#if methods}
     <div>
       <h1 class="text-2xl font-semibold tracking-tight">Second step</h1>
@@ -115,7 +124,7 @@
     </Button>
   {:else}
     <div>
-      <h1 class="text-2xl font-semibold tracking-tight">Sign in to Telesphorepo</h1>
+      <h1 class="text-2xl font-semibold tracking-tight">Sign in to {brand.name}</h1>
       {#if why}<p class="mt-2 text-sm text-muted-foreground">{why}</p>{/if}
     </div>
     {#if config?.oidc}
@@ -141,4 +150,5 @@
       </Button>
     </form>
   {/if}
+</div>
 </div>

@@ -54,7 +54,7 @@ func setup(repo *repos.Repo, baseURL, snippetContext string) []format.Snippet {
 		out = append(out, format.Snippet{ID: "cargo.credentials", Tool: "cargo", Purpose: format.SnippetUse, Context: snippetContext,
 			File: "~/.cargo/credentials.toml", Title: "~/.cargo/credentials.toml", Lang: "toml",
 			Code: "[registries." + reg + "]\ntoken = \"YOUR_READ_TOKEN\"\n",
-			Note: "Create a read token on Settings › Tokens. In CI, set " + tokenEnv(reg) + " instead. A private repository needs Cargo 1.74 or later."})
+			Note: "Create a read token on Your account › Tokens. In CI, set " + tokenEnv(reg) + " instead. A private repository needs Cargo 1.74 or later."})
 	}
 	return out
 }
@@ -74,7 +74,7 @@ func (h *Handler) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
 }
 
 // ciNote goes under the CI file of the Cargo tool.
-const ciNote = "The CLI uses the job's identity token, so the job stores no secret. Commit telesphorepo.toml first: Set up a project on this tab writes it."
+const ciNote = "Commit telesphorepo.toml first: Set up a project on this tab writes it."
 
 // tools are the build tools that publish to Cargo repos.
 func tools() []format.Tool {

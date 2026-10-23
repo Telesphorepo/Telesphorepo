@@ -40,6 +40,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/route"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
+	"github.com/Telesphorepo/Telesphorepo/internal/stats"
 	"github.com/Telesphorepo/Telesphorepo/internal/storage"
 	"github.com/Telesphorepo/Telesphorepo/web"
 )
@@ -422,6 +423,9 @@ func kernel(base context.Context, d *db.DB, boot *config.Boot, set *settings.Ser
 	reader := assets.NewReader(pipe, rs, engine, func() time.Duration { return storage.PresignTTL.Get(set.Current()) },
 		log.With("component", "assets"))
 	reader.SetFetcher(proxy.New(rs, pipe, log.With("component", "proxy")))
+	downloads := stats.New(d)
+	reader.SetDownloads(downloads.Add)
+	rs.OnRedirectUse(downloads.UseRedirect)
 	ids := make([]string, len(b.Manifests))
 	for i, m := range b.Manifests {
 		ids[i] = m.Module.ID
@@ -431,7 +435,7 @@ func kernel(base context.Context, d *db.DB, boot *config.Boot, set *settings.Ser
 		func(name string, fn func(context.Context)) { runner.Go("core", name, fn) }, b.Formats.RebuildRun)
 	return &module.Kernel{
 		Boot: boot, Dev: dev, Version: version, DB: d, Settings: set, Perms: b.Perms, Audit: au,
-		Jobs: runner, Storage: live, Blobs: bs, Assets: pipe, Reader: reader, Uploads: assets.NewUploads(d, set.Current),
+		Jobs: runner, Storage: live, Blobs: bs, Assets: pipe, Reader: reader, Downloads: downloads, Uploads: assets.NewUploads(d, set.Current),
 		Rebuilds: rq, Repos: rs, Ops: opsSvc, Auth: as, Formats: b.Formats, Access: engine,
 		CI: b.CI, Builds: ci.NewBuilds(d, b.CI),
 		API: &route.API{Settings: set.Current},

@@ -91,6 +91,13 @@ type Build struct {
 	CreatedAt  int64
 }
 
+type DownloadStat struct {
+	RepoID    int64
+	Day       int64
+	Downloads int64
+	Bytes     int64
+}
+
 type GroupCount struct {
 	ID              int64
 	GroupID         int64
@@ -163,6 +170,13 @@ type RepoProxy struct {
 	LastOkAt    int64
 	LastError   string
 	LastErrorAt int64
+}
+
+type RepoRedirect struct {
+	Name       string
+	RepoID     int64
+	CreatedAt  int64
+	LastUsedAt int64
 }
 
 type Session struct {

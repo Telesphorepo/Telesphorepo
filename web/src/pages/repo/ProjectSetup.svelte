@@ -119,7 +119,7 @@
   {:else if asking}
     <div class="flex flex-col items-start gap-4">
       {#if sso}
-        <p class="max-w-prose text-body">Your identity provider asks you to sign in again. Then this page shows the line.</p>
+        <p class="max-w-prose text-body">Sign in again at your identity provider to get the line.</p>
         <Button href={api.publish.ssoSetupURL(repo.name)}>Sign in again with single sign-on</Button>
       {:else}
         <FreshFactor actionLabel="Set up a project" onProof={create} back={repoPath(repo.name, "publish")} />

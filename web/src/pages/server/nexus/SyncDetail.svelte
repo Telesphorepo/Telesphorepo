@@ -17,13 +17,15 @@
   import { Button } from "$lib/components/ui/button";
   import Cell from "$lib/components/Cell.svelte";
   import DataTable from "$lib/components/DataTable.svelte";
+  import ItemList from "$lib/components/ItemList.svelte";
+  import CopyButton from "$lib/components/CopyButton.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import Loading from "$lib/components/Loading.svelte";
   import StatusBadge from "$lib/components/StatusBadge.svelte";
   import Section from "$lib/components/Section.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
   import SyncLog from "./SyncLog.svelte";
-  import { howText, syncState } from "./words";
+  import { howText, mergeSyncText, syncState } from "./words";
   import XIcon from "@lucide/svelte/icons/x";
 
   let {
@@ -107,7 +109,7 @@
   {#if onClose}<Button variant="ghost" size="icon-sm" aria-label="Close the sync" onclick={onClose}><XIcon /></Button>{/if}
 {/snippet}
 
-<Section title={sync.data ? `${sync.data.trigger === "cutover" ? "Final sync" : "Sync"} of ${formatDateTime(sync.data.started_at)}` : "Sync"} {actions}>
+<Section title={sync.data ? (sync.data.merge_id ? `${mergeSyncText(sync.data)}, ${formatDateTime(sync.data.started_at)}` : `${sync.data.trigger === "cutover" ? "Final sync" : "Sync"} of ${formatDateTime(sync.data.started_at)}`) : "Sync"} {actions}>
 {#if sync.loading && !sync.data}
   <Loading rows={3} />
 {:else if sync.error && !sync.data}
@@ -193,18 +195,11 @@
     {#if s.failed > 0}
       <div class="flex flex-col gap-2">
         <h3 class="text-label">Files that failed to copy</h3>
-        <DataTable
-          source={failures}
-          caption="Files that failed to copy"
-          key={(f) => f.source_repo + "/" + f.path}
-          columns={[{ label: "Nexus repository", hideOnPhone: true }, { label: "Path", grow: true }, { label: "Reason" }]}
-        >
-          {#snippet row(f)}
-            <Cell hideOnPhone muted text={f.source_repo} />
-            <Cell grow text={f.path} copy copyLabel="Copy the path" />
-            <Cell muted text={f.reason} />
-          {/snippet}
-        </DataTable>
+        <ItemList source={failures} caption="Files that failed to copy" key={(f) => f.source_repo + "/" + f.path}>
+          {#snippet title(f)}{f.path}{/snippet}
+          {#snippet meta(f)}{f.source_repo} · {f.reason}{/snippet}
+          {#snippet trailing(f)}<CopyButton value={f.path} label="Copy the path" />{/snippet}
+        </ItemList>
       </div>
     {/if}
   </div>

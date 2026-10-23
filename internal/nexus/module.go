@@ -2,6 +2,8 @@ package nexus
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -10,6 +12,8 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/module"
 	"github.com/Telesphorepo/Telesphorepo/internal/ops"
 	"github.com/Telesphorepo/Telesphorepo/internal/perm"
+	"github.com/Telesphorepo/Telesphorepo/internal/publish"
+	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/route"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 )
@@ -26,6 +30,16 @@ const (
 	ActionSyncStart    = "nexus.sync.start"
 	ActionSyncCancel   = "nexus.sync.cancel"
 	ActionCutover      = "nexus.cutover"
+	// ActionSwitchOverRepo is the start of the switch-over of one repository.
+	ActionSwitchOverRepo  = "nexus.repo.switchover"
+	ActionRehearsalCreate = "nexus.rehearsal.create"
+	ActionRehearsalEmpty  = "nexus.rehearsal.empty"
+	ActionMoveCreate      = "nexus.move.create"
+	ActionMergeStart      = "nexus.merge.start"
+	ActionMergeDone       = "nexus.merge.done"
+	ActionMergeFail       = "nexus.merge.fail"
+	ActionMergeResume     = "nexus.merge.resume"
+	ActionMergeStop       = "nexus.merge.stop"
 )
 
 // SyncInterval is the setting nexus.sync_interval.
@@ -43,7 +57,7 @@ var SyncInterval = settings.Duration(&settings.Def{Key: "nexus.sync_interval", D
 func Module() module.Module {
 	m := &mod{}
 	return module.Module{
-		ID: "nexus", Title: "Nexus migration",
+		ID: "nexus", Title: "Nexus migration", Requires: []string{"publish"},
 		Register: func(x *module.Extender) {
 			x.Schema(component())
 			x.Permissions(perm.Subsystem{ID: "nexus", Scope: perm.ScopeServer, Label: "Nexus migration",
@@ -57,9 +71,27 @@ func Module() module.Module {
 				audit.ActionDef{ID: ActionSyncStart, Label: "Nexus sync started", Subsystem: "nexus"},
 				audit.ActionDef{ID: ActionSyncCancel, Label: "Nexus sync cancelled", Subsystem: "nexus"},
 				audit.ActionDef{ID: ActionCutover, Label: "Nexus cut-over started", Subsystem: "nexus"},
+				audit.ActionDef{ID: ActionSwitchOverRepo, Label: "Nexus repository switch-over started", Subsystem: "nexus"},
+				audit.ActionDef{ID: ActionRehearsalCreate, Label: "Rehearsal repository created", Subsystem: "nexus"},
+				audit.ActionDef{ID: ActionRehearsalEmpty, Label: "Rehearsal repository emptied", Subsystem: "nexus"},
+				audit.ActionDef{ID: ActionMoveCreate, Label: "Repository created to move project by project", Subsystem: "nexus"},
+				audit.ActionDef{ID: ActionMergeStart, Label: "Merge started", Subsystem: "nexus"},
+				audit.ActionDef{ID: ActionMergeDone, Label: "Merge done", Subsystem: "nexus"},
+				audit.ActionDef{ID: ActionMergeFail, Label: "Merge failed", Subsystem: "nexus"},
+				audit.ActionDef{ID: ActionMergeResume, Label: "Merge resumed", Subsystem: "nexus"},
+				audit.ActionDef{ID: ActionMergeStop, Label: "Merge stopped", Subsystem: "nexus"},
 			)
 			x.OpType(ops.Type{ID: OpMirror, Label: "Mirrors a Nexus source",
 				Message: func(op *ops.Op) string { return m.svc.mirrorMessage(op) }})
+			x.OpType(ops.Type{ID: OpEmpty, Label: "Empties a rehearsal repository", Message: emptyMessage,
+				Resume: func(ctx context.Context, op *ops.Op) error { return m.svc.resumeEmpty(ctx, op) },
+				Clear:  func(ctx context.Context, op *ops.Op) error { return m.svc.clearEmpty(ctx, op) }})
+			x.OpType(ops.Type{ID: OpMerge, Label: "Merges a repository into another",
+				Message: func(op *ops.Op) string { return m.svc.mergeMessage(op) },
+				Resume:  func(ctx context.Context, op *ops.Op) error { return m.svc.resumeMerge(ctx, op) },
+				Clear:   func(ctx context.Context, op *ops.Op) error { return m.svc.clearMerge(ctx, op) }})
+			x.RepoField(m.rehearsalField())
+			x.RepoField(m.moveField())
 			x.Settings(&settings.Group{ID: "nexus", Label: "Nexus migration", Perm: PermManage,
 				Defs: []*settings.Def{SyncInterval.Def()}})
 			x.Init(func(ctx context.Context, h *module.Host) error {
@@ -67,12 +99,26 @@ func Module() module.Module {
 				h.Repos.OnPurge(purge(h.DB.W)) // empties the module's rows of a repo in batches before the repo row goes
 				m.svc = New(h.DB, h.Settings, h.Repos, h.Assets, h.Ops, h.Formats, h.Audit, h.Log, h.Context(), h.Go)
 				m.svc.username = h.Auth.Username
-				return nil
+				m.svc.auth = h.Auth
+				m.svc.publish = module.Use[*publish.Service](h)
+				h.Repos.OnDelete(m.svc.forgetRepo) // a rehearsal's or a move's row cascades with either repo; an id can be used again
+				if err := m.svc.loadRehearsals(ctx); err != nil {
+					return err
+				}
+				return m.svc.loadMoves(ctx)
 			})
 			x.Job(jobs.Job{
-				Name:  "nexus.scheduler",
-				Start: func(ctx context.Context) error { return m.svc.Resume(ctx) },
-				Run:   func(ctx context.Context) { m.svc.Schedule(ctx) },
+				Name: "nexus.scheduler",
+				Start: func(ctx context.Context) error {
+					if err := m.svc.Resume(ctx); err != nil {
+						return err
+					}
+					if err := m.svc.resumeEmpties(ctx); err != nil {
+						return err
+					}
+					return m.svc.resumeMerges(ctx)
+				},
+				Run: func(ctx context.Context) { m.svc.Schedule(ctx) },
 			})
 			x.Routes(m.routes)
 		},
@@ -98,6 +144,44 @@ func (m *mod) routes(r *route.Router) {
 	r.Handle("GET /api/nexus/syncs/{id}/failures", route.UIPerm(PermManage), m.nexusSyncFailures)
 	r.Handle("GET /api/nexus/syncs/{id}/log", route.UIPerm(PermManage), m.nexusSyncLog)
 	r.Handle("DELETE /api/nexus/syncs/{id}", route.UIPerm(PermManage), m.cancelNexusSync)
+	r.Handle("POST /api/nexus/sources/{id}/repos/{repo}/switch-over", route.UIPerm(PermManage), m.switchOverNexusRepo)
+	r.Handle("POST /api/nexus/sources/{id}/repos/{repo}/rehearsal", route.UIPerm(PermManage), m.rehearseNexusRepo)
+	r.Handle("POST /api/nexus/rehearsals/{name}/empty", route.UIPerm(PermManage), m.emptyRehearsal)
+	r.Handle("POST /api/nexus/sources/{id}/repos/{repo}/move", route.UIPerm(PermManage), m.moveNexusRepo)
+	// A merge deletes and renames a repository too, so its routes also need All repositories.
+	merge := route.UIPerms(PermManage, perm.RepositoriesAll)
+	r.Handle("GET /api/nexus/merges/plan", merge, m.mergePlan)
+	r.Handle("POST /api/nexus/merges", merge, m.startMerge)
+	r.Handle("GET /api/nexus/merges/{id}", merge, m.getMerge)
+}
+
+// rehearsalField is the repo field rehearsal_for. The service exists only after Init, and the
+// repo service calls the field only after it.
+func (m *mod) rehearsalField() repos.Field {
+	return repos.Field{Name: FieldRehearsalFor,
+		Applies: func(_, kind string) bool { return kind == repos.KindHosted },
+		Validate: func(ctx context.Context, repo *repos.Repo, raw json.RawMessage) (json.RawMessage, error) {
+			return m.svc.rehearsalField().Validate(ctx, repo, raw)
+		},
+		Save: func(ctx context.Context, tx *sql.Tx, repo *repos.Repo, v json.RawMessage) error {
+			return m.svc.rehearsalField().Save(ctx, tx, repo, v)
+		},
+		Load: func(repoID int64) json.RawMessage { return m.svc.rehearsalField().Load(repoID) },
+	}
+}
+
+// moveField is the repo field moves_into (see rehearsalField).
+func (m *mod) moveField() repos.Field {
+	return repos.Field{Name: FieldMovesInto,
+		Applies: func(_, kind string) bool { return kind == repos.KindHosted },
+		Validate: func(ctx context.Context, repo *repos.Repo, raw json.RawMessage) (json.RawMessage, error) {
+			return m.svc.moveField().Validate(ctx, repo, raw)
+		},
+		Save: func(ctx context.Context, tx *sql.Tx, repo *repos.Repo, v json.RawMessage) error {
+			return m.svc.moveField().Save(ctx, tx, repo, v)
+		},
+		Load: func(repoID int64) json.RawMessage { return m.svc.moveField().Load(repoID) },
+	}
 }
 
 // record writes an audit event of the nexus module with the actor of ctx.

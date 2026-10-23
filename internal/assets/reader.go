@@ -60,11 +60,25 @@ type Reader struct {
 	ttl    func() time.Duration // the presign lifetime of an S3 redirect
 	log    *slog.Logger
 	merged *mergeCache
+	count  func(repo, bytes int64) // counts a download (SetDownloads); nil counts nothing
 }
 
 // NewReader returns the read path. ttl returns the lifetime of a presigned S3 redirect.
 func NewReader(p *Pipeline, rs *repos.Service, e *access.Engine, ttl func() time.Duration, log *slog.Logger) *Reader {
 	return &Reader{p: p, repos: rs, access: e, ttl: ttl, log: log, merged: newMergeCache(mergedEntries, mergedBytes)}
+}
+
+// SetDownloads gives the reader the download counter: count(repo, bytes) runs once per GET that
+// gets a file's bytes (a 200, a 206 or an S3 redirect from ServeAsset, a live proxy stream once it
+// completed, a merged group file). HEAD, 304 and failed answers do not count. It runs before the
+// server serves.
+func (rd *Reader) SetDownloads(count func(repo, bytes int64)) { rd.count = count }
+
+// counted counts one download of bytes from repo.
+func (rd *Reader) counted(repo, bytes int64) {
+	if rd.count != nil {
+		rd.count(repo, bytes)
+	}
 }
 
 // SetFetcher gives the reader the proxy fetcher. It runs before the server serves.
@@ -422,6 +436,9 @@ func (rd *Reader) serveMerged(w http.ResponseWriter, r *http.Request, group *rep
 	if contentHeaders(w, r, ct, `"`+hex.EncodeToString(etag[:])+`"`, modified) {
 		return
 	}
+	if r.Method == http.MethodGet {
+		rd.counted(group.ID, int64(len(data)))
+	}
 	http.ServeContent(w, r, "", modified, bytes.NewReader(data))
 }
 
@@ -518,6 +535,7 @@ func (rd *Reader) ServeAsset(w http.ResponseWriter, r *http.Request, a *Asset, o
 			httpx.Error(w, r, http.StatusInternalServerError, "internal error")
 			return
 		} else if ok {
+			rd.counted(a.RepoID, a.Size)
 			h.Del("Last-Modified")
 			h.Set("Cache-Control", "no-store")
 			h.Set("Location", u)
@@ -537,6 +555,7 @@ func (rd *Reader) ServeAsset(w http.ResponseWriter, r *http.Request, a *Asset, o
 			return
 		}
 		defer body.Close()
+		rd.counted(a.RepoID, n)
 		h.Set("Content-Range", "bytes "+strconv.FormatInt(off, 10)+"-"+strconv.FormatInt(off+n-1, 10)+"/"+strconv.FormatInt(a.Size, 10))
 		h.Set("Content-Length", strconv.FormatInt(n, 10))
 		w.WriteHeader(http.StatusPartialContent)
@@ -551,6 +570,7 @@ func (rd *Reader) ServeAsset(w http.ResponseWriter, r *http.Request, a *Asset, o
 		return
 	}
 	defer body.Close()
+	rd.counted(a.RepoID, a.Size)
 	if rs, ok := body.(io.ReadSeeker); ok {
 		r.Header.Del("Range") // several ranges: the whole file serves
 		http.ServeContent(w, r, "", a.UpdatedAt, rs)

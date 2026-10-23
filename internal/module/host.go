@@ -23,34 +23,36 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/route"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
+	"github.com/Telesphorepo/Telesphorepo/internal/stats"
 	"github.com/Telesphorepo/Telesphorepo/internal/storage"
 )
 
 // Kernel is the set of services that the kernel builds before any module starts. Every module
 // gets the same Kernel.
 type Kernel struct {
-	Boot     *config.Boot
-	Dev      bool   // "telesphorepo-server dev"
-	Version  string // the stamped version of the server binary, changelog.Dev without a stamp
-	DB       *db.DB
-	Settings *settings.Service // the live settings: Current(), then a settings.Key or View
-	Perms    *perm.Registry
-	Audit    *audit.Log
-	Jobs     *jobs.Runner
-	Storage  *storage.Live
-	Blobs    *blobs.Store
-	Assets   *assets.Pipeline // Commit, CommitAll, Remove
-	Reader   *assets.Reader   // the read path of hosted, proxy and group repos
-	Uploads  *assets.Uploads  // resumable uploads
-	Rebuilds *rebuild.Queue
-	Repos    *repos.Service
-	Ops      *ops.Service
-	Auth     *auth.Service
-	Access   *access.Engine // repo access decisions and the access report
-	Formats  *format.Registry
-	CI       *ci.Registry // the CI providers
-	Builds   *ci.Builds   // the build records
-	API      *route.API   // the shared helpers of JSON API handlers
+	Boot      *config.Boot
+	Dev       bool   // "telesphorepo-server dev"
+	Version   string // the stamped version of the server binary, changelog.Dev without a stamp
+	DB        *db.DB
+	Settings  *settings.Service // the live settings: Current(), then a settings.Key or View
+	Perms     *perm.Registry
+	Audit     *audit.Log
+	Jobs      *jobs.Runner
+	Storage   *storage.Live
+	Blobs     *blobs.Store
+	Assets    *assets.Pipeline // Commit, CommitAll, Remove
+	Reader    *assets.Reader   // the read path of hosted, proxy and group repos
+	Downloads *stats.Counter   // the downloads of the read path per repo and day, written by the audit module
+	Uploads   *assets.Uploads  // resumable uploads
+	Rebuilds  *rebuild.Queue
+	Repos     *repos.Service
+	Ops       *ops.Service
+	Auth      *auth.Service
+	Access    *access.Engine // repo access decisions and the access report
+	Formats   *format.Registry
+	CI        *ci.Registry // the CI providers
+	Builds    *ci.Builds   // the build records
+	API       *route.API   // the shared helpers of JSON API handlers
 }
 
 // Host is what a module may use at runtime: the kernel services, a log tagged with the module

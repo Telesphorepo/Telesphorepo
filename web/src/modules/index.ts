@@ -1,9 +1,10 @@
 // The UI modules in the server's module start order (internal/modules/modules.go), and the
-// registry that the router, the Settings sidebar, the breadcrumbs, the setup-only allowlist, the
-// repository settings tabs, New repository and the file details read. A module without UI (raw)
-// has no entry.
+// registry that the router, the Settings and Your account sidebars, the breadcrumbs, the
+// setup-only allowlist, the repository settings tabs, New repository and the file details read. A
+// module without UI (raw) has no entry.
 
-import type { NavGroup, PageDef, RedirectDef, RepoFieldDef, RepoTabDef, ModuleUI } from "./types";
+import type { NavGroup, PageDef, RedirectDef, RepoFieldDef, RepoTabDef, ModuleUI, SidebarArea } from "./types";
+import { auth } from "$lib/auth.svelte";
 import { core } from "./core/module";
 import { audit } from "./audit/module";
 import { storage } from "./storage/module";
@@ -29,7 +30,7 @@ export const redirects: RedirectDef[] = modules.flatMap((m) => m.redirects ?? []
 /** The paths a setup-only session (no second factor yet) can open. */
 export const setupPaths: string[] = pages.filter((p) => p.setup).map((p) => p.path);
 
-/** One group of the Settings sidebar and its pages, in order. */
+/** One group of a sidebar and its pages, in order. */
 export type NavSection = { id: NavGroup; label: string; items: PageDef[] };
 
 const groupLabels: Record<NavGroup, string> = {
@@ -39,7 +40,7 @@ const groupLabels: Record<NavGroup, string> = {
   server: "Server",
 };
 
-/** The groups of the Settings sidebar, each with its pages in order. */
+/** Every sidebar group (Your account, then the groups of Settings), each with its pages in order. */
 export const navSections: NavSection[] = (Object.keys(groupLabels) as NavGroup[]).map((id) => ({
   id,
   label: groupLabels[id],
@@ -62,11 +63,26 @@ export const formatPart = (format: string, part: string) => {
   return undefined;
 };
 
-/** The groups of the Settings sidebar with the pages that `opens` lets the person open; a group without one is left out. */
-export const visibleNav = (opens: (p: PageDef) => boolean): NavSection[] =>
-  navSections.map((g) => ({ ...g, items: g.items.filter(opens) })).filter((g) => g.items.length > 0);
+/** The sidebar a group belongs to. */
+export const areaOf = (g: NavGroup): SidebarArea => (g === "account" ? "account" : "settings");
 
-/** The group and the sidebar page that a Settings path belongs to (the page is the longest prefix). */
+/** The groups of a sidebar with the pages that `opens` lets the person open; a group without one is left out. */
+export const visibleNav = (area: SidebarArea, opens: (p: PageDef) => boolean): NavSection[] =>
+  navSections
+    .filter((g) => areaOf(g.id) === area)
+    .map((g) => ({ ...g, items: g.items.filter(opens) }))
+    .filter((g) => g.items.length > 0);
+
+/** True when the signed-in person may open the page (a setup-only session: only its setup pages). */
+export const canOpen = (p: PageDef): boolean => auth.allows(p.access) && (!auth.setupOnly || !!p.setup);
+
+/**
+ * The groups of the Settings sidebar and overview with the pages the person may open. Empty: the
+ * person opens no admin page, and the top bar has no Settings.
+ */
+export const adminNav = (): NavSection[] => visibleNav("settings", canOpen);
+
+/** The group and the sidebar page that a Settings or account path belongs to (the page is the longest prefix). */
 export function navPlace(path: string): { group: NavSection; item: PageDef } | null {
   let best: { group: NavSection; item: PageDef } | null = null;
   for (const group of navSections)

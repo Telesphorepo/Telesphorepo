@@ -63,6 +63,12 @@ UPDATE npm_versions SET deprecated = ? WHERE repo_id = ? AND name = ? AND versio
 -- name: ListTags :many
 SELECT tag, version FROM npm_tags WHERE repo_id = ? AND name = ? ORDER BY tag;
 
+-- A keyset page of every dist-tag of a repo by package and tag, through the primary key (a merge).
+-- name: ListRepoTagsAfter :many
+SELECT name, tag, version FROM npm_tags
+WHERE repo_id = sqlc.arg(repo_id) AND (name, tag) > (sqlc.arg(name), sqlc.arg(tag))
+ORDER BY name, tag LIMIT sqlc.arg(limit);
+
 -- name: UpsertTag :exec
 INSERT INTO npm_tags (repo_id, name, tag, version) VALUES (?, ?, ?, ?)
 ON CONFLICT (repo_id, name, tag) DO UPDATE SET version = excluded.version;

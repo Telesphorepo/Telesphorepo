@@ -1,10 +1,11 @@
 <!--
-  The table of repositories that people manage (Settings › Repositories; Browse home lists them
-  with RepoList): name and description on one line,
-  format, files, size and last publish. A private repository has a lock after its name; a public
-  one has no mark. A group or a proxy has its kind icon after the name; a group counts each file it
-  serves once, and shows Counting… until the server has counted it. On a phone the format icon sits before the name. A
-  click anywhere on a row opens `href`. With `bind:picked` and a `bulk` snippet (All
+  The table of repositories that people manage (Settings › Repositories; Browse shows them
+  as RepoCards): the name and the description on one line, the format and the last publish. A
+  private repository has a lock after its name; a public one has no mark. A group or a proxy has
+  its kind icon after the name. A group's last publish is that of the files it serves, and
+  Counting… until the server has counted them. The files and the size of a repository are on its
+  Overview. On a phone the format icon sits before the name. A click anywhere on a row opens
+  `href`. With `bind:picked` and a `bulk` snippet (All
   repositories), every row gets a checkbox for bulk actions (DataTable).
 -->
 <script lang="ts">
@@ -14,11 +15,9 @@
   import Cell from "./Cell.svelte";
   import FormatBadge from "./FormatBadge.svelte";
   import FormatIcon from "./FormatIcon.svelte";
-  import FileSize from "./FileSize.svelte";
   import RelativeTime from "./RelativeTime.svelte";
   import type { Repo } from "$lib/api";
   import type { TableSource } from "$lib/load.svelte";
-  import { formatCount } from "$lib/format";
   import RepoKindIcon from "./RepoKindIcon.svelte";
   import LockIcon from "@lucide/svelte/icons/lock";
 
@@ -58,8 +57,6 @@
   columns={[
     { label: "Name", grow: true },
     { label: "Format", hideOnPhone: true },
-    { label: "Files", align: "right", hideOnPhone: true },
-    { label: "Size", align: "right", hideOnPhone: true },
     { label: "Last publish", align: "right" },
   ]}
 >
@@ -78,12 +75,8 @@
     <Table.Cell class="max-sm:hidden"><FormatBadge format={r.format} title={titles[r.format]} /></Table.Cell>
     {#if r.counts_pending}
       <!-- A group whose files the server has not counted for this reader yet. -->
-      <Cell num muted hideOnPhone>Counting…</Cell>
-      <Cell num hideOnPhone />
-      <Cell num muted />
+      <Cell num muted>Counting…</Cell>
     {:else}
-      <Cell num hideOnPhone>{formatCount(r.file_count)}</Cell>
-      <Cell num hideOnPhone><FileSize bytes={r.total_size} /></Cell>
       <Cell num muted><RelativeTime at={r.last_published_at} empty="Never" /></Cell>
     {/if}
   {/snippet}

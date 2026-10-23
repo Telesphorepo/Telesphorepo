@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/access"
+	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/perm"
@@ -221,6 +222,10 @@ func (f *Format) token(w http.ResponseWriter, r *http.Request, _ *route.Call) {
 		}
 	}
 
+	if pushAt >= 0 && all[pushAt].repo.Name != all[pushAt].scopeRequest.repo {
+		// The push names a redirect of the repo: the session event records that name.
+		ctx = audit.WithRepoName(ctx, all[pushAt].repo.ID, all[pushAt].scopeRequest.repo)
+	}
 	var session *auth.PublishSession
 	switch tr.kind {
 	case credCIToken:

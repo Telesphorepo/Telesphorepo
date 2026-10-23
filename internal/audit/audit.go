@@ -11,6 +11,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -40,6 +41,8 @@ const (
 	RepoDelete       = "repo.delete"
 	RepoDeleteResume = "repo.delete.resume" // a failed repo delete started again
 	RepoDeleteClear  = "repo.delete.clear"  // a failed repo delete ended; the repo stays
+	RepoRename       = "repo.rename"        // detail renamed_from; the old name is a redirect
+	RedirectRemove   = "repo.redirect.remove"
 	SettingsUpdate   = "settings.update"
 )
 
@@ -134,6 +137,21 @@ func CLI(ctx context.Context) context.Context {
 	return WithActor(ctx, Actor{Kind: ActorCLI, Name: "cli"})
 }
 
+type usedNameKey struct{}
+
+// usedName is the name that a request used for a repo: a redirect of it.
+type usedName struct {
+	id   int64
+	name string
+}
+
+// WithRepoName returns ctx with name, the redirect that a request used for repo id. An event of
+// that repo then records name as its repo, and the repo's own name in detail.redirect_to, so
+// Activity shows the name that the request used.
+func WithRepoName(ctx context.Context, id int64, name string) context.Context {
+	return context.WithValue(ctx, usedNameKey{}, usedName{id, name})
+}
+
 // Event is one audit row. Detail must never hold a secret value.
 type Event struct {
 	Action string
@@ -201,6 +219,9 @@ func (l *Log) row(ctx context.Context, e Event) (dbq.InsertAuditEventParams, err
 	}
 	if e.Repo != "" {
 		detail["repo"] = e.Repo
+		if u, ok := ctx.Value(usedNameKey{}).(usedName); ok && u.id == e.RepoID && u.name != e.Repo {
+			detail["repo"], detail["redirect_to"] = u.name, e.Repo
+		}
 	}
 	js, err := json.Marshal(detail)
 	if err != nil {
@@ -245,32 +266,76 @@ func (l *Log) RecordTx(ctx context.Context, tx *sql.Tx, e Event) error {
 	return l.wq.WithTx(tx).InsertAuditEvent(ctx, p)
 }
 
-// Filter narrows List. RepoID 0 and Action "" match everything.
+// Filter narrows List. RepoID 0, ActorUserID 0, Action "" and a zero Since or Until match
+// everything. ActorUserID is the person who acted (a CI subject or a failed sign-in name has
+// none). Since and Until bound the time: the events at or after Since and before Until.
 type Filter struct {
-	Action string
-	RepoID int64
+	Action      string
+	RepoID      int64
+	ActorUserID int64
+	Since       time.Time
+	Until       time.Time
+}
+
+// firstAt returns the id of the first event at or after t, or 0 when there is none.
+func (l *Log) firstAt(ctx context.Context, t time.Time) (int64, error) {
+	id, err := l.rq.FirstAuditAt(ctx, t.Unix())
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return id, err
 }
 
 // List returns a newest-first keyset page: ids below after (0: first page). next is the cursor
-// of the next page, 0 at the end.
+// of the next page, 0 at the end. A time bound becomes an id bound: the id of the first event at
+// or after the time (audit_events_at), so each filter keeps its keyset query.
 func (l *Log) List(ctx context.Context, f Filter, after int64, limit int) ([]Entry, int64, error) {
 	before := after
 	if before <= 0 {
 		before = math.MaxInt64
 	}
+	var since int64
+	if !f.Since.IsZero() {
+		id, err := l.firstAt(ctx, f.Since)
+		if err != nil {
+			return nil, 0, err
+		}
+		if id == 0 {
+			return []Entry{}, 0, nil // nothing happened since then
+		}
+		since = id
+	}
+	if !f.Until.IsZero() {
+		id, err := l.firstAt(ctx, f.Until)
+		if err != nil {
+			return nil, 0, err
+		}
+		if id != 0 {
+			before = min(before, id)
+		}
+	}
 	n := int64(limit)
 	repo := sql.NullInt64{Int64: f.RepoID, Valid: f.RepoID != 0}
+	actor := sql.NullInt64{Int64: f.ActorUserID, Valid: f.ActorUserID != 0}
 	var rows []dbq.AuditEvent
 	var err error
 	switch {
+	case f.ActorUserID != 0 && f.RepoID != 0 && f.Action != "":
+		rows, err = l.rq.ListAuditByActorRepoAction(ctx, dbq.ListAuditByActorRepoActionParams{ActorUserID: actor, RepoID: repo, Action: f.Action, Before: before, Since: since, Limit: n})
+	case f.ActorUserID != 0 && f.RepoID != 0:
+		rows, err = l.rq.ListAuditByActorRepo(ctx, dbq.ListAuditByActorRepoParams{ActorUserID: actor, RepoID: repo, Before: before, Since: since, Limit: n})
+	case f.ActorUserID != 0 && f.Action != "":
+		rows, err = l.rq.ListAuditByActorAction(ctx, dbq.ListAuditByActorActionParams{ActorUserID: actor, Action: f.Action, Before: before, Since: since, Limit: n})
+	case f.ActorUserID != 0:
+		rows, err = l.rq.ListAuditByActor(ctx, dbq.ListAuditByActorParams{ActorUserID: actor, Before: before, Since: since, Limit: n})
 	case f.RepoID != 0 && f.Action != "":
-		rows, err = l.rq.ListAuditByRepoAction(ctx, dbq.ListAuditByRepoActionParams{RepoID: repo, Before: before, Action: f.Action, Limit: n})
+		rows, err = l.rq.ListAuditByRepoAction(ctx, dbq.ListAuditByRepoActionParams{RepoID: repo, Before: before, Since: since, Action: f.Action, Limit: n})
 	case f.RepoID != 0:
-		rows, err = l.rq.ListAuditByRepo(ctx, dbq.ListAuditByRepoParams{RepoID: repo, Before: before, Limit: n})
+		rows, err = l.rq.ListAuditByRepo(ctx, dbq.ListAuditByRepoParams{RepoID: repo, Before: before, Since: since, Limit: n})
 	case f.Action != "":
-		rows, err = l.rq.ListAuditByAction(ctx, dbq.ListAuditByActionParams{Action: f.Action, Before: before, Limit: n})
+		rows, err = l.rq.ListAuditByAction(ctx, dbq.ListAuditByActionParams{Action: f.Action, Before: before, Since: since, Limit: n})
 	default:
-		rows, err = l.rq.ListAudit(ctx, dbq.ListAuditParams{Before: before, Limit: n})
+		rows, err = l.rq.ListAudit(ctx, dbq.ListAuditParams{Before: before, Since: since, Limit: n})
 	}
 	if err != nil {
 		return nil, 0, err

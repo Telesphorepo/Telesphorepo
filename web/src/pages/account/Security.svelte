@@ -1,7 +1,7 @@
 <!--
   Your account: Sign-in and security. Each area is a Section: how you sign in (the password row,
   whose Change opens a dialog), the second-step methods (authenticator apps and passkeys) as one
-  table, then the recovery codes. Without a second step, that section comes first. The second step
+  list, then the recovery codes. Without a second step, that section comes first. The second step
   also confirms a publish token and a device approval. A setup-only session sees only this page.
   With ?back=<UI path> (from a device approval), the page offers a way back once a second step is on.
 -->
@@ -21,8 +21,7 @@
   import PageHeader from "$lib/components/PageHeader.svelte";
   import Section from "$lib/components/Section.svelte";
   import FormField from "$lib/components/FormField.svelte";
-  import DataTable from "$lib/components/DataTable.svelte";
-  import Cell from "$lib/components/Cell.svelte";
+  import ItemList from "$lib/components/ItemList.svelte";
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
   import Loading from "$lib/components/Loading.svelte";
@@ -89,7 +88,7 @@
     toast.success("Changed your password");
   }
 
-  // --- methods: one table of authenticator apps and passkeys ---
+  // --- methods: one list of authenticator apps and passkeys ---
   type Method = { key: string; kind: "totp"; item: TOTPFactor } | { key: string; kind: "passkey"; item: Passkey };
   const methods: TableSource<Method> = {
     get items() {
@@ -283,40 +282,25 @@
       <div class="flex flex-col divide-y [&>div]:py-4 [&>div:first-child]:pt-0 [&>div:last-child]:pb-0">
         {#if count || factors.error}
           <div>
-            <DataTable
-              source={methods}
-              caption="Your second-step methods"
-              key={(m) => m.key}
-              columns={[
-                { label: "Name", grow: true },
-                { label: "Type", hideOnPhone: true },
-                { label: "Added", align: "right", hideOnPhone: true },
-                { label: "Last used", align: "right" },
-                { label: "", srLabel: "Actions" },
-              ]}
-            >
-              {#snippet row(m)}
-                <Cell grow strong text={m.item.name} />
-                <Cell hideOnPhone muted>
-                  <span class="inline-flex items-center gap-2">
-                    {#if m.kind === "totp"}<SmartphoneIcon class="size-4" />{:else}<KeyRoundIcon class="size-4" />{/if}{kindName(m)}
-                  </span>
-                </Cell>
-                <Cell num muted hideOnPhone><RelativeTime at={m.item.created_at} /></Cell>
-                <Cell num muted>
-                  {#if m.kind === "passkey"}<RelativeTime at={m.item.last_used_at} empty="Not yet" />{:else}<span title="Authenticator apps do not record a last use">—</span>{/if}
-                </Cell>
-                <Cell actions>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    class="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                    aria-label="Remove {m.item.name}"
-                    onclick={() => askRemove(m)}>Remove</Button
-                  >
-                </Cell>
+            <ItemList source={methods} caption="Your second-step methods" key={(m) => m.key}>
+              {#snippet leading(m)}
+                {#if m.kind === "totp"}<SmartphoneIcon class="size-5" />{:else}<KeyRoundIcon class="size-5" />{/if}
               {/snippet}
-            </DataTable>
+              {#snippet title(m)}{m.item.name}{/snippet}
+              {#snippet meta(m)}
+                {kindName(m)} · added <RelativeTime at={m.item.created_at} />{#if m.kind === "passkey"}
+                  · {#if m.item.last_used_at}used <RelativeTime at={m.item.last_used_at} />{:else}not used yet{/if}{/if}
+              {/snippet}
+              {#snippet trailing(m)}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  class="hover:bg-destructive/10 hover:text-destructive"
+                  aria-label="Remove {m.item.name}"
+                  onclick={() => askRemove(m)}>Remove</Button
+                >
+              {/snippet}
+            </ItemList>
           </div>
         {/if}
         {#if factors.data && !apps.length}

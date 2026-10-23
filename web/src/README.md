@@ -16,24 +16,27 @@ the checklist below.
 
 | Path | What it holds |
 |---|---|
-| `main.ts`, `App.svelte` | Mount; the shell: loads the user and the formats, matches the route, checks access, renders the page in `AppShell`. |
+| `main.ts`, `App.svelte` | Mount; the shell: loads the user, the formats and the server identity (`lib/brand.svelte.ts`: `brand.name`, `brand.logo` from `GET /api/identity`; every place that names the server reads it), matches the route, checks access, renders the page in `AppShell`. |
 | `modules/` | The UI of each server module (`<id>/module.ts`, one `ModuleUI`: pages with their sidebar items, redirects, repository settings tabs, repository field controls, format parts of the file details) and `index.ts`, the registry in the server's module start order. `types.ts` holds `PageDef`, `Access`, `RepoTabDef`, `RepoFieldDef`, `ModuleUI`. A module's own components sit next to its `module.ts` (the Signing tab, the signing key field, the Maven, Debian and Docker file parts), and so do the calls to a format module's own routes (`docker/api.ts`). |
 | `app.css` | Design tokens: colors (light and dark), the type scale, fonts, the one radius, the width scale, the control widths, the scrollbars. |
-| `pages/` | One component per route: `Home`, `Search`, `SignIn`, `DeviceApprove`; `repo/` (one page per repository), `settings/repos/` (a repository's settings: the shell, its tabs and the Access tab's parts), `account/`, `repositories/`, `server/` (sub-folders `ci/`, `ip-lists/`, `nexus/`, `people/` hold the parts of those pages). |
+| `pages/` | One component per route: `Home`, `Browse`, `Publish`, `Search`, `SignIn`, `DeviceApprove`; `repo/` (one page per repository), `settings/Overview` (the Settings overview; its parts `Stat`, `SizeBars` and `DownloadBars` in `settings/overview/`), `settings/repos/` (a repository's settings: the shell, its tabs and the Access tab's parts), `account/`, `repositories/`, `server/` (sub-folders `activity/`, `ci/`, `ip-lists/`, `nexus/`, `people/` hold the parts of those pages). |
 | `lib/api/` | The one API client: `client.ts` (fetch wrapper, `ApiError`, the `X-Telesphorepo-UI` header, the XHR upload with progress), `types.ts` (JSON shapes), `index.ts` (`api.*` for every route outside the routes of a format module). |
-| `lib/auth.svelte.ts` | `auth`: current user, sign in (two steps), sign out (returns to Browse home); the permission checks `can(perm)`, `canRepo(repo, perm)`, `managesRepo(repo)`, `allows(access, params)`. |
+| `lib/auth.svelte.ts` | `auth`: current user, sign in (two steps), sign out (returns to Home); the permission checks `can(perm)`, `canRepo(repo, perm)`, `managesRepo(repo)`, `allows(access, params)`. |
 | `lib/permissions.ts` | The permission registry of the server (`GET /api/permissions`, read by `auth.load()` before the first page): the server and repository permissions in registry order with their labels and help, the needs of each (`needsOf`), the picker groups, one per subsystem (`pickerGroups`), the role of a server set (`serverRole`: member, administrator or custom), and the phrases of a set: `repoPhrase` ("Download, publish", "Everything"), `serverPhrase` ("Administrator", "Manage people, manage storage") and `listPhrase` ("download, publish and delete files"). |
 | `lib/router.svelte.ts` | Hash router: `router`, `href()`, `navigate()`, `go()`, `isActive()`, `encodePath()`, `repoPath()`, `filesPath()`, `repoSettingsPath()`; the navigation guard hook. |
 | `lib/current.svelte.ts` | `current`: the matched page of the module registry and the pending redirect of the current address. |
-| `lib/crumbs.ts` | `Crumb` and `settingsTrail()`: the breadcrumbs of a Settings page, from the sidebar items of the module registry. |
+| `lib/crumbs.ts` | `Crumb` and `sidebarTrail()`: the breadcrumbs of a Settings or account page, from the sidebar items of the module registry (an item named like its group is that one step: Settings › Repositories; an account page starts at its group: Your account › Devices). |
+| `lib/fade.ts` | `fadeEdges`: the action of a row that scrolls sideways (the tabs), which fades the end where items are cut off. |
 | `lib/unsaved.svelte.ts` | `unsaved` (the unsaved-changes guard) and `Draft` (a form's edits and what is saved). |
 | `lib/view.svelte.ts` | `ViewChoice` and `viewLook`: List, Tree, Columns, Cover Flow, remembered per user. |
-| `lib/load.svelte.ts` | `Resource` (one request), `Keyset` (a paged list), `listOf()` and `TableSource` (what `DataTable` reads). `fetch()` of a `Resource` or a `Keyset` reloads and throws on an error: the `run` of a `Live`. |
+| `lib/load.svelte.ts` | `Resource` (one request), `Keyset` (a paged list), `listOf()` and `TableSource` (what `DataTable`, `ItemList` and `SourceGrid` read). `fetch()` of a `Resource` or a `Keyset` reloads and throws on an error: the `run` of a `Live`. |
+| `lib/pick.svelte.ts` | `Pick`: the bulk pick of `DataTable` and `ItemList` (the picked keys, the header checkbox, Shift+click ranges, Esc); `openRow` and `rowClick`: a click on a row that opens it, outside its controls. |
 | `lib/live.svelte.ts` | `Live` (a refresh on a timer: see **Live data**), `clock` (the time now, reactive each second), `pause` (a wait that holds while the tab is hidden or offline), `flash` (the action of `LiveValue`). |
 | `lib/format.ts` | `formatSize`, `formatRelative`, `formatDateTime`, `formatCount`, `formatDuration` ("6 minutes"), `formatSpan` ("6 min", for a value that ticks), `formatEvery` (an interval after "every": "3 seconds", "10 minutes"). |
-| `lib/words.ts` | `count` ("12 repositories"), `selectedText` ("12 selected"), `someNames` (the first five names "and 7 more"): the words of bulk actions; `kindPhrase` (the kind of a repository: "Hosted", "Proxy of a remote repository", "Group of 3 repositories"). |
+| `lib/words.ts` | `count` ("12 repositories"), `selectedText` ("12 selected"), `someNames` (the first five names "and 7 more"): the words of bulk actions; `kindPhrase` (the kind of a repository: "Hosted", "Proxy of a remote repository", "Group of 3 repositories"; a `RepoCard` shows it only for a proxy or a group). |
+| `lib/brand.ts` | `serverName`: the name of the server as the UI shows it (the heading of the Settings overview). |
 | `lib/utils.ts` | `cn()`: joins classes; it knows that `text-title` … `text-meta` are font sizes, not colors. |
-| `lib/layouts/` | `AppShell` (top bar + container + Settings sidebar), `AddressNotice` (the server's address differs from the one in the browser), `TopBar`, `AccountMenu`, `GlobalSearch`, `SettingsNav`, `UnsavedGuard` (the leave question). |
+| `lib/layouts/` | `AppShell` (top bar + container + the sidebar of Settings or Your account), `AddressNotice` (the server's address differs from the one in the browser), `TopBar`, `AccountMenu`, `GlobalSearch`, `SettingsNav` (the sidebar of either area), `UnsavedGuard` (the leave question). |
 | `lib/components/` | The shared components (below). Pages build only from these and `ui/`. |
 | `lib/components/ui/` | shadcn-svelte primitives. Add more with `bunx shadcn-svelte@latest add <name>`. |
 | `lib/formats/` | `registry.svelte.ts` (`formats`: the UI descriptors of `GET /api/formats`, loaded once by `App.svelte`: titles, icons, config fields, upload rules, delete notes, file parts, remote presets, words) and `ConfigEditor` (a format's repo config as one field per entry of `config.fields`). Every format choice of the UI reads the descriptor; a format-specific component exists only as a named `formatParts` slot of the format's UI module. |
@@ -52,47 +55,52 @@ server and the clients print keep working: `/#/device?code=ABCD-EFGH`, `/#/setti
 
 | Path | Page | Layout | Access | What it shows |
 |---|---|---|---|---|
-| `/` | `Home` | app | any | Repositories: one list sorted by name (`RepoList`), a row per repository with the same fields for every kind: format icon, name (a lock after a private one), description, and the format and kind in plain words ("Hosted", "Proxy of a remote repository", "Group of 3 repositories"). No counts or sizes: Settings › Repositories and the details of a repository's top folder show them. Filter box, format filter, New repository (All repositories). |
-| `/search?q=&repo=` | `Search` | app | any | Files whose path contains `q` (3+ characters). The top bar's search field holds `q`. |
-| `/login?next=&error=` | `SignIn` | app | any | The one place to sign in: single sign-on, password, then the second step. |
+| `/` | `Home` | app | any | The front door, a short page centered in the container: one line of welcome ("Welcome to <server name>"), the search field large (the top bar's search: files by path, 48px tall, with the "/" shortcut; the top bar shows no search field on Home), then, when at least two would show, the doors: large cards side by side (stacked on a phone), each a 32px bare icon, a title, one sentence, and the whole card a link. **Publish** ("Set up a project to publish to this server.") opens `/publish`, for a signed-in person who can publish somewhere. **Browse** ("Find a package and see how to use it.") opens `/browse`. **Administer** ("People, repositories, storage and the rest of the server.") opens `/settings/overview`, only for a person who would see at least one card there (`adminNav` of the module registry). Each card is as wide as one column of a three-column row, so two cards keep that width, centered. The Publish door shows from the grants (`auth.canSomeRepo`) until the list loads, then from the list. A visitor or a reader sees no doors: Browse alone says no more than the repositories under it, and the top bar has Sign in. Then the repositories (`GET /api/repos`, for everyone), by name, as a `plain` `Section` (a heading with "See all" at its end, opening `/browse`, over the cards): up to six `RepoCard`s (three on a phone). **Your repositories** are the ones whose `permissions` go beyond download; a person with none sees **Repositories**, the ones they can see (a visitor: the public ones). Loading, error and the empty states of Browse as any list. |
+| `/browse` | `Browse` | app | any | Repositories, made for scanning: a toolbar on one row: the filter box, a format select ("All formats" first, then each format present with its icon; only with two or more formats), and New repository (All repositories) at the end; the repositories as `RepoCard`s in a `CardGrid` (three columns wide, two medium, one on a phone). The same empty and error states as any list. |
+| `/publish` | `Publish` | app | user | The first step of publishing: the hosted repositories the person can publish to (`repo.publish` in each `Repo.permissions` of `GET /api/repos`; a group is not listed, since publishing to a group is publishing to one of its hosted members) as `RepoCard`s that open their Publish tab, a `Section` per format when more than one is present. With exactly one, the page replaces the history entry with its Publish tab (`/repo/:name/publish`). With none, an `EmptyState` says to ask an administrator for publish access. |
+| `/search?q=&repo=` | `Search` | app | any | Files whose path contains `q` (3+ characters), 200 hits a page, grouped in the browser (`search/hits.ts`): a toolbar with a `RepoPicker` (`repo`) and the count of the loaded pages ("350+ files in 118 folders", "+" while more pages wait); then a card per repository (its format icon, name and file count, and "Search only <name>" when several show), in it a row per folder that holds hits, parted by thin lines. The folders under one parent fold into the parent's row when there are two of them, or one and files of the parent's own, so an artifact is one row: the folder path (parents muted, the last step strong), its folders and files as links on the line under it (16 folders and 6 files, then "N more"; a file's size and its checksums in its tooltip), and "N folders · N files · modified" at the end. The checksum and signature files of a hit (`.md5`, `.sha1`, `.sha256`, `.sha512`, `.asc`, `.sig`) fold into it. The matched text is marked (`search/Highlight`) in every path. A row opens its folder in the Files tab; a link its folder or file. Load more adds the next page to the same groups. The top bar's search field holds `q`. |
+| `/login?next=&error=` | `SignIn` | app | any | The one place to sign in: single sign-on, password, then the second step. From 1024px the felt ticket ("Admit one") stands left of the form; under it the flat mark heads the form. |
 | `/device?code=&grant=&error=` | `DeviceApprove` | app | user | Look up a device code, check the device, approve it with a fresh second factor. A single sign-on account signs in again at its identity provider instead; the server returns with `grant` (the page approves at once) or `error`. |
-| `/repo/:name` | `repo/RepoPage` | app | any | The repository header and the Files tab at the top folder. A group has the tabs too, read-only (the header says "Read-only: this group serves its members' files" where Upload would be): Files is the Files tab of a hosted repository of its format, with every view, the artifact and version pages and the file details, because the server answers the tree, the versions, the builds, the files and the snippets of a group from its members; a file or a version shows the member that serves it (`files/MemberTag` after its name, "Served by" in the details), Use lists its members first, and Publish shows to a person who publishes to one of its hosted members. While an operation holds the repository, the people who could upload or delete see its sentence as one muted line under the header (`PageHeader` `status`). A proxy has Files (its cached files) and Use, and no publish or upload. |
+| `/repo/:name` | `repo/RepoPage` | app | any | The repository header and the Files tab at the top folder. A rehearsal repository (the repo field `rehearsal_for`) says "Rehearsal for <name>" after its format, the name a link. A moving repository (the repo field `moves_into`) says "Moving into <name>", and for a holder of `nexus.manage` has Merge into <name>… in the header actions (it opens the merge plan). A group has the tabs too, read-only (the header says "Read-only: this group serves its members' files" where Upload would be): Files is the Files tab of a hosted repository of its format, with every view, the artifact and version pages and the file details, because the server answers the tree, the versions, the builds, the files and the snippets of a group from its members; a file or a version shows the member that serves it (`files/MemberTag` after its name, "Served by" in the details), Use lists its members first, and Publish shows to a person who publishes to one of its hosted members. While an operation holds the repository, the people who could upload or delete see its sentence as one muted line under the header (`PageHeader` `status`). A proxy has Files (its cached files) and Use, and no publish or upload. |
 | `/repo/:name/files/<path>?version=&build=` | `repo/RepoPage` | app | any | Files tab: one panel (a card) with a toolbar (the folder path, Show details, the view) over the open folder. A folder (`path` ends with `/`) or a selected file. `version` names a version of the artifact folder (a Debian package keeps every version in one folder); `build` a chosen build, read by its id (`api.repos.build`) when the loaded pages of builds lack it. The first page of a plain folder is asked for together with its place (`placeOf` in `files/place.ts`), and the List view and the details column share it. The details column always shows on wide screens: the selected file, or else the open folder (repository, folder, artifact or version). |
 | `/repo/:name/use` | `repo/RepoPage` | app | any | Use this repository: the address and the snippets for a build; a private repository adds a read-token step. |
 | `/repo/:name/publish?to=` | `repo/RepoPage` | app | any (Publish on the repository; a group: on one of its hosted members) | Publish to this repository: from your computer, from CI, by hand. A group (`repo/GroupPublish`) first has a select of the hosted members the person publishes to (`to`, the first by default), then that member's Publish view. The Set up a project card (`repo/ProjectSetup`, with Install the CLI in its header) comes first: a fresh second factor, then the install and setup line for the OS (a single sign-on account returns with `?setup_grant=`), then `telesphorepo publish` or the native command (`publish` of the descriptor); the snippets stay behind "Set it up by hand". |
 | `/setup/:code` | `Setup` | app | any | A setup link: run the install line in a terminal in the project folder. The code stays in the address fragment and the page calls no API. |
-| `/install?os=&cpu=` | `InstallCLI` | app | any | Install the CLI: a tab per operating system (`os`: `linux`, `darwin`, `windows`; the browser's own when absent). Install (the one-line install of `/install.sh` or `/install.ps1`, and what it does with `PATH`), Install by hand (the archives of the system from `GET /cli/SHA256SUMS` with CPU, SHA-256 and Download; a row picks `cpu`, and the commands that download, check and unpack that archive follow it), Update (`telesphorepo update`). A build without CLI archives shows one empty state. The account menu and the Set up a project card of the Publish tab link to it. |
+| `/install?os=&cpu=` | `InstallCLI` | app | any | Install the CLI: a tab per operating system (`os`: `linux`, `darwin`, `windows`; the browser's own when absent). Install (the one-line install of `/install.sh` or `/install.ps1`, and what it does with `PATH`), Install by hand (the archives of the system from `GET /cli/SHA256SUMS` as an `ItemList`: the archive name, then CPU · the start of the SHA-256 with copy, and Download; a row picks `cpu`, and the commands that download, check and unpack that archive follow it), Update (`telesphorepo update`). A build without CLI archives shows one empty state. The account menu and the Set up a project card of the Publish tab link to it. |
 | `/repo/:name/upload?folder=` | `repo/RepoPage` | app | any (Publish on the repository, a password account) | Upload files or a folder. |
-| **Settings › Your account** | | | | |
-| `/settings/account` | `account/Overview` | settings | user | Overview: one identity card (avatar, name, role), then your repositories, your devices and your recent publishes. |
-| `/settings/security` | `account/Security` | settings | user | Sign-in and security: password, authenticator apps, passkeys, recovery codes. The only page of a setup-only session. |
-| `/settings/devices` | `account/Devices` | settings | user | Devices (holders of People see every user's). |
-| `/settings/tokens` | `account/Tokens` | settings | user | Tokens: read tokens and publish tokens, one page with two sections. |
+| `/settings/overview` | `settings/Overview` | settings | user | All settings, the administrator's home and the sidebar's first item, above the groups: about this server, not a second sidebar. The header: the server's name (`serverName`), its version as a badge (`GET /api/changes`), the public address under it (`base_url`, for a holder of `settings.general`), and, under the header, the actions people take most as doors (`DoorCard`), each only for a person who may: New repository, New account (the short form of People), New CI pipeline. Then one row of stat tiles (`overview/Stat`: each its own small card, centered across, the value in the title size, the label under it and one muted phrase, centered in the tile both ways; 6 columns from 1280px, 3 from 768px, else 2): Repositories (by kind when there is more than one; a link to Settings › Repositories), Files, Stored (with the part that proxies cache), from `GET /api/repos`; People (and how many are disabled), CI pipelines (and how many are off) and Signing keys, each only for a person who can open its page and a link to it. A person without All repositories sees their repositories (more than download) under the heading "Your repositories". Then Largest repositories (`overview/SizeBars`: the eight largest, each its format icon, name, a bar against the largest in `--chart-bar` on a muted track and the size; a tooltip with the share, the files and the last publish; a row opens the repository's settings, or its files without a settings tab). Then, for a holder of `activity.read`, Downloads ("The last 30 days, by day in UTC.", `GET /api/stats`): two `Stat`s (Downloads, Served), `overview/DownloadBars` (a column per day in `--chart-bar`, at most 24px wide with a 2px gap, round at the top; a hairline baseline and one at the top tick; a tooltip of the day under the pointer or the arrow keys; a hidden table for screen readers) and beside it from 1024px Most downloaded (an `ItemList` of five: format icon, name, bytes served, the count); no downloads is one `CompactEmpty`. Then Recent activity (an `ItemList` of the last five events, no address; See all opens Activity). Loading, error with Try again and the empty state per card. With no Settings page to open, the page replaces the address with `/account`. |
+| **Your account** | | | | |
+| `/account` | `account/Overview` | account | user | Overview (its sidebar label, under the group Your account): one identity card (avatar, name, role), then two columns (one under 1024px): your repositories, and your devices over your recent publishes, each a `Section` with an `ItemList` of at most five rows and "See all" (`/browse`, Devices, Tokens). |
+| `/account/security?back=` | `account/Security` | account | user | Sign-in and security: password; the second-step methods as one `ItemList` (icon by type, name, added · last used, Remove); recovery codes. The only page of a setup-only session. |
+| `/account/devices` | `account/Devices` | account | user | Devices as an `ItemList`: name, last used · expires, state badge, Revoke (the page description names the CLI, so no row repeats it). Holders of People see every user's, each with the person's avatar and name. |
+| `/account/tokens` | `account/Tokens` | account | user | Tokens: read tokens and publish tokens, one page with two sections, each an `ItemList` (a read token: name, expires · last used, Revoke; a publish token: repository, from · started · ends, state badge). |
 | **Settings › Repositories** | | | | |
 | `/settings/repositories` | `repositories/AllRepositories` | settings | repositories | Repositories: every one for a holder of All repositories, else the ones where the person holds more than download. A row opens its settings (or its files when no tab opens). Picked rows (Edit settings): Make public, Make private; Delete (All repositories). |
 | `/settings/repositories/new` | `repositories/NewRepository` | settings | repositories.all | First choice: a repository, a proxy of a remote repository, or a group of repositories; each offers the formats that take it (`kinds` of `GET /api/formats`). A repository: name, format, description, visibility, the format's options (`config.fields`), and a section per repository field of the format with the control of its UI module (the signing key). A proxy: the remote address (the `remote_presets` of the format as quick choices) and optional credentials; the server checks the remote, and "Create anyway" creates it when the remote does not answer. A group: its members, hosted repositories first, with the order as numbers. A proxy or a group then opens its settings Overview. |
-| `/settings/repositories/:name/:tab` | `settings/repos/RepoSettings` | settings | repo | A repository's settings. Each tab shows only with its permission: Overview, Format settings and Remote need Edit settings, a module tab its `access` (the Signing tab: Edit settings); Access needs Manage access, Edit settings or CI pipelines, and shows People (Manage access), Public and From where (Edit settings), CI pipelines (CI pipelines). A tab the person cannot open goes to the first one they can. Hosted: `overview` (description, contents, its groups), `access`, `format` (the fields of `config.fields`), and the tabs of the UI modules that the format names in `repo_tabs` (`signing`). Proxy: `overview` (remote with Test the remote, use snippets, cache, its groups), `access` (download only), `remote` (address, credentials, the two times). Group: `overview` (use snippets, members with Move up, Move down, Remove and Add repositories, saved from the save bar), `access` (download only). Delete is a header action (All repositories); Open files is one too, except for a group. Breadcrumbs: Settings › Repositories › maven › Access. |
+| `/settings/repositories/:name/:tab` | `settings/repos/RepoSettings` | settings | repo | A repository's settings. Each tab shows only with its permission: Overview, Format settings and Remote need Edit settings, a module tab its `access` (the Signing tab: Edit settings); Access needs Manage access, Edit settings or CI pipelines, and answers from the saved state and the unsaved edits: two cards, each person in one of them only, by their highest access, with what they hold beyond it as badges (Delete files, Edit settings, Manage access): **Download** (the Public switch and Give access (Manage access) in its header; the people whose grant has no Publish, with Change, Remove from 640px and the pick, while private or when someone holds such a grant; then from where: "From any network" or "Only from …", Change opens the networks; the switch and Change need Edit settings) and **Publish** (the people with Publish the same way, then the holders of All repositories as one read-only row, "2 administrators", that opens to their names; the CI pipelines, each row the CI system and its repository, and from 768px the conditions as `TicketBadge`s, with Add CI pipeline and remove for CI pipelines; then from where; while nothing can publish, why, in place of the CI pipelines and the networks). A tab the person cannot open goes to the first one they can. Every kind's `overview` starts with the description, and for a holder of All repositories the name: a new name asks first and says that the old name keeps working as a redirect; it ends with Redirects (`RedirectsCard`, only while the repository has old names: an `ItemList` of each old name with "Used 3 minutes ago" or "Not used for 40 days", and Remove (All repositories) after a confirm that names what stops working and the last use). An old name in the address opens the settings under the repository's name. Hosted: `overview` (description, contents, its groups), `access`, `format` (the fields of `config.fields`), and the tabs of the UI modules that the format names in `repo_tabs` (`signing`). Proxy: `overview` (remote with Test the remote, use snippets, cache, its groups), `access` (download only), `remote` (address, credentials, the two times). Group: `overview` (use snippets, members with Move up, Move down, Remove and Add repositories, saved from the save bar), `access` (download only). Delete is a header action (All repositories); Open files is one too, except for a group. Breadcrumbs: Settings › Repositories (the title names the repository and the open tab the tab). |
 | **Settings › People and CI** | | | | |
-| `/settings/people` | `server/People` | settings | people.manage | Every account with its role: Administrator (every server permission), the phrase of its server permissions, or nothing. New account opens a short form (name and password); the person's page then opens. A row opens the person. Picked rows (not your own): Disable, Enable. |
-| `/settings/people/:name` | `server/people/Person` | settings | people.manage | One person: the identity card (avatar, role, sign-in) with the account actions; Server permissions as a role (`ServerPermissionPicker`: Member, Administrator, or Custom with one switch per permission; saved from the save bar after a confirm; read-only with Open sign-in options when single sign-on manages them); the person's permissions on each repository. Give access opens a short form for many repositories; Change edits one; picked rows: Change permissions, Remove access. Each repository change applies at once. |
-| `/settings/ci-pipelines` | `server/CIPublishing` | settings | ci.pipelines | CI pipelines: name, what each accepts, CI system, the repositories it can publish to. A row opens the pipeline. |
-| `/settings/ci-pipelines/new?repo=&back=` | `server/CIPublishingRule` | settings | ci.pipelines | A new pipeline in four steps: where the job runs; which runs (GitHub repository, branches, tags, workflow file; or Jenkins address and jobs; the token conditions behind a secondary action); repositories; the workflow or Jenkinsfile step. `repo` starts chosen; Create and Cancel return to `back` when it is a `/settings/` path. |
-| `/settings/ci-pipelines/:id` | `server/CIPublishingRule` | settings | ci.pipelines | Edit, turn off or delete a pipeline. |
-| `/settings/networks` | `server/IPLists` | settings | network.manage | Networks (IP lists): downloaded lists and your own lists; each shows the repositories that use it. |
+| `/settings/people` | `server/People` | settings | people.manage | Every account as an `ItemList` row: avatar, name, its role as a badge (Administrator for every server permission, the phrase of its server permissions, or none), meta: email · signs in with (when it differs) · added. New account opens a short form (name and password); the person's page then opens. A row opens the person. Picked rows (not your own): Disable, Enable. |
+| `/settings/people/:name` | `server/people/Person` | settings | people.manage | One person: the identity card (avatar, sign-in, email; the role shows once, in Server permissions) with the account actions; Server permissions as a role (`ServerPermissionPicker`: Member, Administrator, or Custom with one switch per permission; saved from the save bar after a confirm; read-only with Open sign-in options when single sign-on manages them); the repositories where the person holds a grant as an `ItemList` (format icon, name, the permission phrase as meta, Change and Remove), then one muted line, "Can also download from the N public repositories." (a link to Browse). Give access opens a short form for many repositories; Change edits one; picked rows: Change permissions, Remove access. Each repository change applies at once. |
+| `/settings/ci-pipelines` | `server/CIPublishing` | settings | ci.pipelines | CI pipelines as a `CardGrid`: each card the name (Off when turned off), the CI system with the GitHub repository or Jenkins host (when the name does not say it), the conditions as `TicketBadge`s (`ci/ConditionBadges`: branches, tags, the workflow file, jobs; four, then "and N more"; "Every branch and tag" in the warning color), and up to three of the repositories it publishes to ("and N more"). The card opens the pipeline. |
+| `/settings/ci-pipelines/new?repo=&back=` | `server/CIPublishingRule` | settings | ci.pipelines | A new pipeline in four steps: where the job runs; which runs (GitHub repository, branches, tags, workflow file; or Jenkins address and jobs; the token conditions behind a secondary action); repositories (each with its `FormatIcon`; a rehearsal repository right before the repository it rehearses, "Rehearsal for <name>: publish here first"); the workflow or Jenkinsfile step. The admission ticket (`ci/AdmissionTicket`) fills in as the form is filled: from 1280px it sticks beside the steps, under it it sits above Create. `repo` starts chosen (a repository that still copies from Nexus: its rehearsal repository in its place); Create and Cancel return to `back` when it is a `/settings/` path. |
+| `/settings/ci-pipelines/:id` | `server/CIPublishingRule` | settings | ci.pipelines | Edit, turn off or delete a pipeline, with the same admission ticket (after the form under 1280px). |
+| `/settings/networks` | `server/IPLists` | settings | network.manage | Networks (IP lists): two `CardGrid`s, downloaded lists (with Refresh) and your own lists; each card the title, "N ranges · used by …" and when it was refreshed or added, and opens the list. |
 | `/settings/networks/new` | `server/IPListPage` | settings | network.manage | A new list: name, title, description, addresses pasted with `RangePaste`. |
-| `/settings/networks/list/:name` | `server/IPListPage` | settings | network.manage | Edit, rename or delete your own list; a downloaded list's ranges and Refresh. |
+| `/settings/networks/list/:name` | `server/IPListPage` | settings | network.manage | Edit, rename or delete your own list; a downloaded list's ranges and Refresh. The ranges are a paged `ItemList` of one line each (200 at a time, with copy, and Remove on your own list); "Used by" is an `ItemList` of what uses the list. |
 | **Settings › Server** | | | | |
 | `/settings/sign-in` | `server/SingleSignOn` | settings | signin.manage | Sign-in options in three steps: connect the provider (with Test), permissions from the provider (the group field and the groups, each with its server permissions as a role in a `ServerPermissionPicker`: `PermissionMapInput`), and how people sign in (password sign-in for everyone or for people who publish). |
-| `/settings/signing-keys` | `server/SigningKeys` | settings | signing.manage | Signing keys: fingerprint, the repositories that use each key, public key download, delete. |
+| `/settings/signing-keys` | `server/SigningKeys` | settings | signing.manage | Signing keys as a `CardGrid`, with two keys or more a repository select over it ("All repositories", then each repository that uses a key, with its `FormatIcon`) that keeps the keys of that repository: each card the name, the last 16 characters of the fingerprint (copy takes all of it), the repositories that use the key, when it was added, Public key (download) and Delete. |
 | `/settings/signing-keys/new` | `server/NewSigningKey` | settings | signing.manage | Create an Ed25519 key or import an armored key. |
-| `/settings/storage` | `server/Storage` | settings | storage.manage | One state at a time: the storage settings with the connection test; a running move (where the files go, where storage is now, the progress and when the server last saved it, Cancel; no form); a failed or cancelled move (storage is still where it was, why the move ended, the failed files, Try again, Change the target with the form filled from the target, Keep); or a done move's success line over the form. |
-| `/settings/backups` | `server/Backups` | settings | backup.manage | Backups: the backups in the backup folder, newest first (time, version, files, size; Incomplete, Files in the bucket, No master key), Back up now, the progress of a running backup or the time of the next one, the error of a failed one, and one sentence on what a backup holds; then the folder, the interval and how many to keep (`SettingsGroupForm`) with Test the folder. |
-| `/settings/nexus` | `server/NexusMigration` | settings | nexus.manage | Nexus servers with status, repositories, last check and next check; Add a Nexus server. |
-| `/settings/nexus/:id?sync=&repo=` | `server/NexusSource` | settings | nexus.manage | The status and its line; Sync now or Cancel the sync, Switch over, Delete. Repositories to copy (one pick table in set-up order: repositories and proxies, then groups with their members, then the ones this server cannot copy; each row with its state; picking a group picks its members; "Copy N repositories" saves and starts the sync); the running or chosen sync with its progress, its log (`repo` filters it) and its failed files; the syncs (a row opens its details); the connection. |
-| `/settings/edge` | `server/EdgeDelivery` | settings | edge.manage | Edge delivery: the status (Worker version, last gap check, home bucket, the last check of the Worker) with **Check now** (`POST /api/edge/check`; the page runs it on open and every 30 s while the Worker has not reported the server's version), the six R2 regions as a table (Serve from it, bucket, state, pointers waiting, last error) with the home region select, the backfill progress while a region fills with what it waits for in words, the Speed test (`edge/SpeedTest.svelte`: a file of `GET /api/edge/speedtest` or a pasted path, and where to read from: the nearest bucket, a ready region, the home bucket or the server; Run and Run all download it with a pass of `POST /api/edge/speedtest` and the region headers, and a table shows who answered, whether the Worker took the choice, first byte, total and speed, the fastest marked; only at the base URL), the on switch and the access lifetime, and the Deploy section as numbered steps: the download of the edge Worker (`/api/edge/worker.zip`), unpack, then `bun install`, `bunx wrangler login`, `bun run provision` and `bun run deploy` (`CodeSnippet`s), when to repeat them, and the `wrangler.jsonc` of a checkout (`CodeBlock`) behind a `LearnMore`. One `Draft` and one `SaveBar`: Save checks the buckets first and asks before the server stops writing to one. |
-| `/settings/proxy` | `server/ReverseProxy` | settings | network.manage | Network and proxy: the trusted proxies (none, this machine or network, the Cloudflare list, specific addresses) and the detected proxies. |
-| `/settings/general` | `server/General` | settings | settings.general | The settings groups with no page of their own (public URL, upload limits, logs, index and upload timing, publishing lifetimes, retention, the Nexus sync interval): one form, a section per group, with the server's labels and help. |
-| `/settings/activity?view=&action=&repo=` | `server/Activity` | settings | activity.read | Events (the audit log, filtered by what happened, from `GET /api/audit/actions` grouped by subsystem, and by repository) and Publish tokens (the publish log). |
+| `/settings/storage` | `server/Storage` | settings | storage.manage | One state at a time: the storage settings with the connection test; a running move (where the files go, where storage is now, the progress and when the server last saved it, Cancel; no form); a failed or cancelled move (storage is still where it was, why the move ended, the failed files as an `ItemList` (the path with a copy button, the reason), Try again, Change the target with the form filled from the target, Keep); or a done move's success line over the form. |
+| `/settings/backups` | `server/Backups` | settings | backup.manage | Backups: the backups in the backup folder, newest first, as `ItemCard`s in a `SourceGrid` (an `ItemList` when there are more than 12): the time, the files and size, the version, and the badges Incomplete, Files in the bucket, No master key; Back up now, the progress of a running backup or the time of the next one, the error of a failed one, and one sentence on what a backup holds; then the folder, the interval and how many to keep (`SettingsGroupForm`) with Test the folder. |
+| `/settings/nexus` | `server/NexusMigration` | settings | nexus.manage | Nexus servers as `ItemCard`s in a `SourceGrid` (each opens its page): the name, the status badge, the address, the repositories, and the next check or, while it syncs, its progress line; Add a Nexus server. |
+| `/settings/nexus/:id?sync=&repo=` | `server/NexusSource` | settings | nexus.manage | The status and its line; Sync now or Cancel the sync, Switch over everything, Delete. Repositories to copy (one pick table in set-up order: repositories and proxies, then groups with their members, then the ones this server cannot copy; each row with its state, which shows on a phone too (in the stacked row's meta line): a copied repository is Copying or Switched over, with the files its final sync did not copy as a link to that sync; its rehearsal repositories as a "rehearsal" link after its name, its moving repositories as a "moving" link, a merge into it as a "merge" link; a row actions menu (Switch over, Rehearse publishing, Move it project by project, per rehearsal Open it, Empty it, Delete it, and per moving repository Open it and Merge into <name>…, which shows only to a holder of All repositories too; a sync that is the final sync of a merge reads "Final sync of the merge into <name>" in the history and its details), each behind a confirm that lists its effects (Move it project by project is a short form: the name and the group `<name>-all`); a switched-over row cannot be unpicked; picking a group picks its members; "Copy N repositories" saves and starts the sync); the running or chosen sync with its progress (its repositories stay a `DataTable`), its log (an `ItemList` of the lines; `repo` filters it) and its failed files (an `ItemList`); the syncs (an `ItemList`: when it started, how · took · new files · size, a warning badge with the failed count, the state; a row opens its details); the connection. |
+| `/settings/nexus/merge?from=&into=` | `server/NexusMergePlan` (`nexus/MergePlanView`) | settings | nexus.manage and repositories.all | The plan of a merge of `from` into `into` (`into` empty: the repository `from` moves into), one level under the Nexus server (Nexus migration › the server › Merge `from`): the counts of the files (copied by reference, skipped, rebuilt by the format, conflicts, blocked); the files the format cannot take (an `ItemList`; Start stays off); the conflicts as an `ItemList` (a label, an npm dist-tag, shows its title and both values; a file the path with copy, both sizes, dates and checksum starts, a compact `Segmented` Keep or Take per row; Keep all and Take all in the header, which also decide the conflicts past the first 1000); which name stays (two `OptionRow`s, each saying who changes what); what else changes (the final sync and the switch-over, the people, CI pipelines and groups that move, the delete of `from`, uploads waiting meanwhile); Start the merge, behind a confirm, opens the merge. The page is listed before `/settings/nexus/:id`. |
+| `/settings/nexus/merges/:id` | `server/NexusMerge` (`nexus/MergeView`) | settings | nexus.manage and repositories.all | One merge: the state badge and who started it, a `LiveStatus` (every 2 s while it runs); its steps as an `ItemList` (done, running, failed or later; the copy with its counters and a progress bar); a failed one with Resume and Stop (All repositories; the repository operation routes); a done one says what changed (the merged repository, the redirect, the groups) and gives the setup line of the merged repository (`nexus/MergeSetup`, the Set up a project card of `repo/ProjectSetup`). |
+| `/settings/edge` | `server/EdgeDelivery` | settings | edge.manage | Edge delivery: the status (On, Stopping or Off as the badge after its title; the Worker version, the last gap check with the next one, the home bucket, the last check of the Worker) with **Check now** (`POST /api/edge/check`; the page runs it on open and every 30 s while the Worker has not reported the server's version), the six R2 regions as `ItemCard`s in a `CardGrid` under a `plain` heading (the area, the state badge, the bucket (when it has one), pointers waiting when there are any, the last error, the Serve from it switch at the bottom; a filling region's card holds its progress and what it waits for in words, and the cadences sit under the grid), the Speed test (`edge/SpeedTest.svelte`: a file of `GET /api/edge/speedtest` or a pasted path, and where to read from: the nearest bucket, a ready region, the home bucket or the server; Run and Run all download it with a pass of `POST /api/edge/speedtest` and the region headers, and a ranked `ItemList`, fastest first, shows each bucket with whether the Worker took the choice, first byte · total, and the speed, the nearest and the fastest marked; only at the base URL), the settings (the on switch, the home region select and the access lifetime), and the Deploy section as numbered steps: the download of the edge Worker (`/api/edge/worker.zip`), unpack, then `bun install`, `bunx wrangler login`, `bun run provision` and `bun run deploy` (`CodeSnippet`s), when to repeat them, and the `wrangler.jsonc` of a checkout (`CodeBlock`) behind a `LearnMore`. One `Draft` and one `SaveBar`: Save checks the buckets first and asks before the server stops writing to one. |
+| `/settings/proxy` | `server/ReverseProxy` | settings | network.manage | Network and proxy: the trusted proxies (none, this machine or network, the Cloudflare list, specific addresses, an `ItemList` of the other trusted proxies) and the detected proxies (an `ItemList`: the address, then header · requests · last seen, and Trust). |
+| `/settings/general` | `server/General` | settings | settings.general | The settings groups with no page of their own (public URL, upload limits, logs, index and upload timing, publishing lifetimes, retention, the Nexus sync interval): one form, a section per group, with the server's labels and help. Server identity comes first: the name saves with the form; the logo (`general/LogoField`, the `control` of its field) is its own action that applies at once: a preview, Upload logo or Replace logo, and Remove after a confirm. |
+| `/settings/activity?view=&area=&action=&repo=&actor=&when=&from=&to=` | `server/Activity` | settings | activity.read | Events (the audit log) and Publish tokens (the publish log: a table of Who, Repository, State, Started). Events: a toolbar with the area (`area`, a subsystem of `GET /api/audit/actions`, with the sidebar icon of the Settings page its permissions open), then, once an area is picked, what happened in it (`action`, its short list), a `RepoPicker` (`repo`), a `PersonPicker` (`actor`, from `GET /api/audit/people`) and the time (`when`: Any time, Today, Last 7 days, Last 30 days, Custom; Custom adds two date fields, `from` and `to`, both days included, and starts at the last 7 days; `activity/range.ts` turns them into `since` and `until` in the reader's time zone). The log filters by one action, so an area alone shows its actions as buttons in place of the events. The active filters show under the toolbar as `FilterChip`s with Clear filters. The events show by day (Today, Yesterday, then the date), each day an `ItemList`: the person's `UserAvatar`, what happened (a refusal with a Refused badge), then the person · the repository with its format icon · the facts in words (`activity/details.ts`: "with a password", "Public", "from Download to Everything", "12 files"; a key without words shows as its name and value), and at the end the `RelativeTime` (the full time in its tooltip) over the address (hidden under 640px). |
 
 A sub-page with a `:name` or `:id` keys its content by the parameter (`{#key}` in the page file),
 so the form starts again when the parameter changes. A network list opens at
@@ -102,13 +110,15 @@ repository called "new"), so no repository name collides with `/settings/reposit
 those links with `repoSettingsPath(name, tab)`.
 
 Redirects (`redirects` of a `ModuleUI`, paths like pages; the query is kept): `/settings` →
-`/settings/account`.
+`/settings/overview` (which goes on to `/account` for a person who sees no card there);
+`/settings/account`, `/settings/security`, `/settings/devices` and `/settings/tokens` → the same
+page under `/account` (the server prints `/#/settings/tokens` when a publish needs a publish session).
 
 Access is checked in `App.svelte` with `auth.allows`, never in a page: `user` sends a signed-out
 visitor to `/login?next=<path>`; a permission ID (`people.manage`, `storage.manage`, ...; a repository
-permission such as `ci.pipelines` on at least one repository) or `repositories`, `repo` (see `Access` in
+permission such as `ci.pipelines` on at least one repository; a list of them needs every one, as the merge pages need `nexus.manage` and `repositories.all`) or `repositories`, `repo` (see `Access` in
 `modules/types.ts`) shows "You cannot open this page" to a
-person without it; and a setup-only session (no second factor yet) goes to the first page with `setup` (`/settings/security`).
+person without it; and a setup-only session (no second factor yet) goes to the first page with `setup` (`/account/security`).
 The repository page is the one exception: it checks the caller's permissions on that repository
 (`repo.permissions`), because only the repository knows them.
 
@@ -117,8 +127,9 @@ The repository page is the one exception: it checks the caller's permissions on 
 1. Create `pages/<area>/<Name>.svelte` with `let { params, query }: PageProps = $props();`.
 2. Add one `PageDef` to the `pages` of the owning module's `modules/<id>/module.ts` (a new module
    UI also gets a line in `modules/index.ts`, in the server's start order): `path`, lazy `page`,
-   `layout`, `access`, `title`, and `setup: true` for a page of a setup-only session.
-3. For a Settings page, give it `nav` (its group, label, icon and order in the group). A sub-page
+   `layout` (`app`, `settings` for an admin page, `account` for a page of Your account), `access`,
+   `title`, and `setup: true` for a page of a setup-only session.
+3. For a Settings or account page, give it `nav` (its group, `account` for an account page; label, icon and order in the group). A sub-page
    (`/settings/networks/new`, `/settings/ci-pipelines/:id`) needs no nav item: its parent item
    stays open because `isActive` matches the prefix, and its breadcrumbs end with the item and
    the page title.
@@ -129,29 +140,47 @@ The repository page is the one exception: it checks the caller's permissions on 
 ## Layout
 
 - **One container.** `AppShell` puts every page in one centered container: `max-w-page`
-  (1200px), side padding 24px (`sm:px-6`), 16px under 640px (`px-4`). Pages never set their own
-  page width and never add side padding.
-- **Top bar**, inside the same container: logo and name (Browse home) left; search centered (max
-  480px); right: one **Sign in** button when signed out (hidden on `/login`), or **Settings** and
-  the avatar menu (Your account, Install the CLI, theme, Sign out) when signed in. Under 640px the search is an icon
-  that opens `/search`.
-- **Settings.** A 220px sidebar inside the container, 40px gap, then the content column. Four
-  groups from the sitemap: "Your account", "Repositories", "People and CI", "Server". Each item
-  shows only to a person with the permission of its route, and a group without items is hidden
-  (`visibleNav` of the module registry). Each group has a heading; groups are 24px apart with no line; every
-  item has an icon and is 32px tall. The sidebar sticks under the top bar and scrolls on its own
-  when the window is short. Under 768px the sidebar is a menu that the top bar's menu button
-  opens. Every Settings page keeps this shell, a repository's settings included.
-- **One content width.** Every Settings page uses the whole content column next to the sidebar:
+  (1440px, `--container-page`), side padding 24px (`sm:px-6`), 16px under 640px (`px-4`). Every
+  page uses it, the repository page included; the Browse pages (Home, Browse, a repository) use
+  the whole container. Pages never set their own page width and never add side padding.
+- **Top bar**, inside the same container: the server's mark (`ServerMark`: its logo, or the brand's mark) and name (Home) left; search centered (max
+  480px); right: one **Sign in** button when signed out (hidden on `/login`), or **Settings** (for
+  a person who can open an admin page: `adminNav` is not empty) and the avatar menu (Your account,
+  Install the CLI, theme, Sign out) when signed in. Under 640px the search is an icon that opens
+  `/search`. The search shows on Browse pages only: Home has its own large search field, and the
+  Settings and account pages have none.
+- **Settings and Your account.** Two areas with the same shell: a 240px sidebar inside the
+  container, 40px gap, then the content column (about 1110px on a wide window). Settings is the
+  admin panel: "All settings" is the first item, above the groups "Repositories", "People and
+  CI", "Server". Your account (`/account`) has its own sidebar with one group, "Your account"
+  (Overview, Sign-in and security, Devices, Tokens). Each item shows only to a person with the
+  permission of its route, and a group without items is hidden (`visibleNav` of the module
+  registry). Each group has a heading; groups are 24px apart with no line; every item has an icon
+  and is 32px tall. The sidebar sticks under the top bar and scrolls on its own when the window is
+  short. Under 768px the sidebar is a menu that the top bar's menu button opens. Every Settings
+  and account page keeps this shell, a repository's settings included.
+- **One content width.** Every Settings and account page uses the whole content column next to the sidebar:
   the page header, sections, tables and forms start and end at the same edges on every page.
-  Pages never set a `max-w-*` on a block of their own.
+  Pages never set a `max-w-*` on a block of their own. A page whose content is a few cards does
+  not stretch one card across the column: the cards flow in a `CardGrid`.
+- **Collections.** A collection is an `ItemList` by default: rows of two lines (the name with its
+  badges, then one or two facts) in its `Section`'s card. A handful of things that each have a
+  little more to say (keys, pipelines, regions, backups) is a `CardGrid` of `ItemCard`s. A
+  `DataTable` only where people sort, compare columns, or scan hundreds of rows of the same shape
+  (the Files tab, Settings › Repositories, the publish log). A row or a card shows what decides and acts
+  (the name, the state, one or two facts, the action), not every field the API returns; the rest
+  is on the thing's own page.
 - **Logical containers** (principle 12). Each area of a page is a `Section`: a card with its
   title (and the area's actions at the header's end), 24px padding (20px on a phone), and 32px
   between cards on a Browse page, 28px in Settings. Inside a card, a form is a two-column `FormGrid`; a thin `<Separator />` may part
   sub-groups of one card. Never a line between cards.
-- **Breadcrumbs** sit above the title of every Settings page (`PageHeader` builds them):
-  Settings › group › item, then deeper steps on a sub-page (Settings › People and CI › CI
-  pipelines › acme/app). The last step is the current page. They are the way up; there is no
+- **Footer.** Under the container, every page has one quiet line, "Powered by Telesphorepo"
+  (`text-meta`, centered), with the default identity and a custom one alike.
+- **Breadcrumbs** sit above the title of every Settings and account page (`PageHeader` builds
+  them): Settings › group › item, then deeper steps on a sub-page (Settings › People and CI › CI
+  pipelines over the title acme/app); Your account over an account page. The trail ends at the
+  parent of the page, since the title under it names the page, and a trail with no link left (the
+  first page of an area) is not shown. They are the way up; there is no
   "back" link, and the browser's back button returns to the previous view (every view has its own
   address).
 - **No near-miss lines.** The page header, tabs and sections are separated by space and type,
@@ -184,8 +213,15 @@ The repository page is the one exception: it checks the caller's permissions on 
   is 14px. Numbers in tables and checksums use `tabular-nums`. Sentence case everywhere; never all
   caps.
 - **Contrast.** `--muted-foreground` (meta and help text) is at least 4.5:1 on `--background`,
-  `--panel` and `--muted` in both themes (light 6.2 / 5.8 / 5.6, dark 7.8 / 7.4 / 6.3). So are
-  `--success`, `--warning` and `--destructive` on the panel.
+  `--panel` and `--muted` in both themes (light 6.27 / 6.37 / 5.95, dark 8.69 / 8.35 / 6.59; on a
+  card 6.84 light, 7.98 dark). So are `--success`, `--warning` and `--destructive` on the panel
+  (light 4.80 / 5.05 / 4.78, dark 8.55 / 9.50 / 6.21). The ink of a `TicketBadge` is at least 8.7:1
+  on both tones and the initials of a `UserAvatar` at least 6:1 on every hue.
+- **Canvas.** The page background (`--background`) is a quiet warm tint of the brand's Paper in
+  light and a deep navy from Carbon in dark; text is a Carbon ink in light and Paper in dark. A
+  card (`--card`) is a clean surface that lifts off it: white in light, a lighter navy in dark.
+  Every quiet fill (`--hover`, `--stripe`, `--panel`, `--muted`, `--border`, `--input`, the
+  scrollbars) takes the hue of its canvas. See **Canvas colors** in `branding/README.md`.
 - **Monospace** (Geist Mono) only inside `CodeBlock` and `CodeSnippet`, and in the JSON editor
   of format settings (an editable code block). Nowhere else: not for names, paths, checksums,
   labels, badges, codes or input values.
@@ -199,6 +235,14 @@ The repository page is the one exception: it checks the caller's permissions on 
   its control and from the control to its help (`FormRow`). Buttons in a row `gap-2`; toolbar to
   table `--toolbar-gap` (20 / 16px, `Toolbar` does it). Do not add other margins between these
   blocks.
+- **Edges.** Inside a card every line of text and every control starts and ends on the content
+  edge, the title's edge (`app.css`, Edges). Rows that fill on hover or when chosen (`ItemList`,
+  `DataTable`, a list of `OptionRow`s) reach 12px into the card's padding, so their text stays on
+  that edge and their fill sits 12px inside the card on every side. A ghost or link button at the
+  end of a header (`Section`, `Step`, `PageHeader` actions) or a row, or at the start of an
+  `ItemCard`'s actions, reaches out by its 13px inset, so its label meets the edge. A grid of
+  cards sits in a `plain` `Section`, never in a card. Pages never add padding or margins to line
+  things up: the shared parts do it.
 - **Control width.** Every text control fills its cell of the form grid, so every text control
   in a grid has one width. That covers an input, a select, a `ListInput`, a `SecretInput`, and a
   number with its unit (`UnitInput`: one control, the unit is a menu at its end). A field that
@@ -206,27 +250,59 @@ The repository page is the one exception: it checks the caller's permissions on 
   control in a page. Only a control that sizes itself sits at the start of its cell with
   `width="auto"`: a switch (`SwitchRow`), a checkbox, a button. The values `wide`, `medium` and
   `short` are deprecated and render the full width.
-- **Rows.** A table row is one line, `h-row` (`--row`: 48px on a Browse page, 44px in Settings);
-  its heading row is `--row-head` (40 / 36px). Zebra stripes use `--stripe` (between the
-  background and `--hover`), so a stripe and a hover never look the same.
+- **Rows.** A `DataTable` row is one line, `h-row` (`--row`: 48px on a Browse page, 44px in
+  Settings); its heading row is `--row-head` (40 / 36px). Zebra stripes use `--stripe` (between
+  the background and `--hover`), so a stripe and a hover never look the same. An `ItemList` row is
+  at least `h-row`, has two lines when it has a meta line, and has no stripes: thin lines part
+  the rows.
 - **Scrollbars.** The page and every inner scroll area use the themed scrollbar from `app.css`:
   a rounded thumb (`--scrollbar-thumb`) that darkens in light and lightens in dark under the
   pointer (`--scrollbar-thumb-hover`, `--scrollbar-thumb-active`), on a track that is the surface
   itself. Do not style scrollbars in a component.
 - **Radius.** One radius, `--radius` (8px). Every `rounded-*` step resolves to it. `rounded-full`
-  only for avatars, dots and progress bars.
+  only for avatars, dots and progress bars. The one other shape is the ticket's: `TicketBadge`
+  has the corners and notches of the mark at its 24px height (3px corners, 4px notches).
 - **Color.** Use the tokens: `bg-background`, `text-foreground`, `text-muted-foreground`,
   `border`, `bg-card` (the surface of a `Section`), `bg-panel` (quiet fill: details column, code,
   drop zone, help), `bg-hover`,
   `bg-stripe`, `bg-selected` + `text-selected-foreground`, `bg-primary` (brand yellow; main
-  buttons), `text-link` (links in text), `text-destructive`, `text-success`, `text-warning`. No
-  raw colors. Formats have no tint: their icon is the mark.
+  buttons), `text-link` (links in text), `text-destructive`, `text-success`, `text-warning`, `bg-chart-bar` (the one series of a bar chart: Gold Deep in light, a gold in the chart lightness band in dark, at least 3:1 on the card). The
+  ticket parts have their own: `bg-ticket` + `text-ticket-foreground` and `bg-ticket-gold` +
+  `text-ticket-gold-foreground` (`TicketBadge`), `bg-ticket-paper` and `--ticket-shadow` (the admission ticket), and
+  `--avatar-1..6` with `--avatar-ink` (`UserAvatar`); only those components use them. No raw
+  colors. Formats have no tint: their icon is the mark.
+- **Ticket motifs.** A ticket shape (a `TicketBadge`, a `Perforation`, the admission ticket) marks
+  only what admits or is admitted: CI pipelines and their conditions (a branch, a tag, a workflow
+  file, a job, the CI system), publish tokens. Nowhere else, and never as decoration: a state is a
+  `StatusBadge`, sub-groups part with a `Separator`, a list is not a row of tickets. The brand
+  illustrations follow their own rules: the outlined ticket of `EmptyState`, the stub of a
+  `UserAvatar`, the `FeltTicket` of the ticket moments and the sign-in page.
 - **States.** Hover and selected fill the whole element: `bg-hover` under the pointer,
   `bg-selected` for the open or chosen element (sidebar item, tab, selected table row).
 - **`cn()`** knows the type scale: `cn("text-meta", "text-muted-foreground")` keeps both classes.
 - **Icons** (principle 9) mark meaning: a format, a lock, a state. An icon sits bare, in the text
   color of where it is, never in a colored or tinted square beside a heading or a row. A format's
-  icon comes from its plugin (`FormatIcon`), never from Lucide.
+  icon comes from its plugin (`FormatIcon`), never from Lucide. Sizes: 20px at the start of an
+  `ItemList` row and in an `ItemCard`, 24px for the format of a `RepoCard`, 32px for the doors of
+  Home.
+- **Icons in a select.** A choice of a format or a repository shows its `FormatIcon`, a choice of
+  a person a small `UserAvatar`, and a state its meaning icon where the UI has one (the lock of
+  Private); plain values (units, numbers, words) and the "All …" row show none. The icon goes in
+  the `icon` snippet of `Select.Item` (a 16px slot before the label), and in the `icon` snippet of
+  `Select.Trigger` for the chosen item, at the same place. In a list whose items have icons, a row
+  without one (`All formats`, `Another file`, `Public`) passes `inset`, so every label starts on
+  one line. A trigger with no chosen icon shows the label alone.
+
+  ```svelte
+  {#snippet chosenIcon()}<FormatIcon {format} />{/snippet}
+  <Select.Trigger aria-label="Format" icon={format ? chosenIcon : undefined}>…</Select.Trigger>
+  <Select.Content>
+    <Select.Item value="" label="All formats" inset />
+    {#each present as f (f)}
+      <Select.Item value={f} label={formats.title(f)}>{#snippet icon()}<FormatIcon format={f} />{/snippet}</Select.Item>
+    {/each}
+  </Select.Content>
+  ```
 - **Loading** (principle 11). No skeletons. `Loading` shows nothing for 300 ms, then a quiet
   spinner and "Loading" in the space the content will take. A reload keeps the current content on
   screen: test `loading && !data`. Switching views keeps the same area.
@@ -235,20 +311,26 @@ The repository page is the one exception: it checks the caller's permissions on 
 
 | Component | Use |
 |---|---|
-| `PageHeader` | `title`, `description?` (one sentence), `crumbs?`, snippets `meta?` (badges next to the title), `status?` (one muted line under the title: an icon and one sentence, for a state with no other place on the page; the repository page uses it while an operation holds the repository), `actions?`. The page's only h1, with the breadcrumbs above it. On a Settings page the breadcrumbs come from the sidebar (Settings › group › item › title); `crumbs` replaces the steps after the group when the page sits deeper (`[{label: "maven", href}, {label: "Access"}]`). A Browse page shows breadcrumbs only when it passes `crumbs` (its whole trail). `back` is deprecated: use `crumbs`. |
+| `PageHeader` | `title`, `description?` (one sentence), `crumbs?`, snippets `meta?` (badges next to the title), `status?` (one muted line under the title: an icon and one sentence, for a state with no other place on the page; the repository page uses it while an operation holds the repository), `actions?`. The page's only h1, with the breadcrumbs above it. On a Settings page the breadcrumbs come from the sidebar (Settings › group › item), ending at the parent of the page because the h1 names it; `crumbs` replaces the steps after the group when the page sits deeper (`[{label: "maven", href}, {label: "Access"}]`). A Browse page shows breadcrumbs only when it passes `crumbs` (its whole trail). `back` is deprecated: use `crumbs`. |
 | `Breadcrumbs` | `items: Crumb[]` (`{label, href?}`; the last is the current page), `path?`, `label?` (the accessible name). `PageHeader` renders it; use it directly only outside a page header. `path` is the look of a place inside a repository (the Files tab's folder path, in the toolbar of its panel): body text after a folder icon, slashes between the steps, so it never reads as a second page trail. |
-| `Toolbar` | The row above a table: filters as children, the main action in `end`. |
-| `DataTable` | Every table, at the full content width: `source` (a `Keyset`, or `listOf(resource)`), `columns` (`{label, srLabel?, align?: "right", grow?, hideOnPhone?}`), `caption`, `key`, `href?` (whole-row click), `selected?`, snippets `row(item)` (the cells, as `Cell`s) and `empty?` (a `CompactEmpty`). Zebra stripes, one fixed row height (`h-row`, one line), rounded row ends, a fill on the whole row under the pointer, the selected fill on the `selected` row. Loading (`Loading` in the space of four rows, after 300 ms; a reload keeps the current rows) and error (a row with Try again) show under the headings; an empty table is never drawn: `empty` shows in its place, without column headings. A `Keyset` gets "Load more". Bulk actions: `bind:picked` (a `Set` of row keys), `pickable?(item)`, `pickLabel?(item)` (the checkbox's name) and snippet `bulk` (the actions). Each row then gets a checkbox in a first column, a 40px hit target over the full row height; a row that is not pickable has an empty cell. The header checkbox picks every pickable loaded row and clears them on the next click ("Select the 50 rows shown" for a keyset). While rows are picked, a bar of the header's height lies over the headings: "12 selected", the `bulk` actions, "Select all 50", "Clear". Shift+click picks a range; Esc clears the pick when no dialog is open. `pickOnRow` (a table without `href`): a click anywhere on a pickable row, outside its controls, toggles its checkbox. `pickOff`: the checkboxes show, turned off. `selectAllLabel`: the text of the "Select all" button. `picked` is not `selected`. After an action, reload the table, empty `picked` and say what changed in a toast. |
+| `Toolbar` | The row above a collection: filters as children, the main action in `end`. |
+| `ItemList` | The default for a collection: `source` (a `Keyset`, or `listOf(resource)`), `caption`, `key`, `href?` (whole-row click; the title is the link), `selected?`, snippets `leading?(item)` (a 20px icon or an avatar), `title(item)` (the name: one line that truncates; put no link in it), `badges?(item)` (after the title), `meta?(item)` (the muted line under it: one or two facts joined by " · "), `trailing?(item)` (a state badge, a switch, the row's actions), `empty?` (a `CompactEmpty`), `emptyText?`. Rows in the `Section`'s card, parted by thin lines, no column headings, no stripes, at least `h-row` tall. Loading, error with Try again, empty and "Load more" as `DataTable`. Bulk actions with the API of `DataTable` (`bind:picked`, `pickable?`, `pickLabel?`, `pickOnRow?`, `pickOff?`, `selectAllLabel?`, snippet `bulk`): a checkbox at the start of each row, and a head row with the checkbox that picks every loaded row ("Select all 5 rows"; none for a single pickable row), over which the selection bar lies while rows are picked. Inside a card the rows reach 12px into its padding (see Edges). |
+| `CardGrid` | `label?` (accessible name), `max?` (the most columns), `class?`; `ItemCard`s as children. A grid whose columns are at least 300px, 16px apart, one column on a phone. For a handful of things that each have a little more to say than a row. |
+| `ItemCard` | `title` (up to two lines), `href?` (the whole card is the link), `titleClass?`, snippets `icon?` (bare, 20px), `badges?` (after the title), `actions?` (the row at the bottom: the card's actions, or a closing fact); up to three fact lines as children, each a `<p>` with a short phrase (never a label and a value). Its own frame, so it reads inside a `Section` too; cards of a row are as tall as the tallest, their bottom rows aligned. Buttons in `actions` keep their own click. |
+| `SourceGrid` | `source`, `label`, `key`, `max?`, snippets `card(item)` (an `ItemCard`) and `empty?`, `emptyText?`, `class?`. A `CardGrid` over a source, with the loading, error, empty and "Load more" states of `ItemList`; the empty state sits in a card, since the grid's `plain` Section has none. |
+| `PickBar`, `PickBox`, `SourceError`, `SourceMore` | The shared parts of `DataTable` and `ItemList` (the selection bar, a pick checkbox, the error with Try again, the trailing error and "Load more"). Pages use the collections, not these. |
+| `DataTable` | A table, for rows of one shape that people sort, compare by column or scan by the hundred, at the full content width: `source` (a `Keyset`, or `listOf(resource)`), `columns` (`{label, srLabel?, align?: "right", grow?, hideOnPhone?}`), `caption`, `key`, `href?` (whole-row click), `selected?`, snippets `row(item)` (the cells, as `Cell`s) and `empty?` (a `CompactEmpty`). Zebra stripes, one fixed row height (`h-row`, one line), rounded row ends, a fill on the whole row under the pointer, the selected fill on the `selected` row. Under 640px a row stacks (`app.css`): the `grow` cell (the name) on the first line, the other cells that show on a phone as one muted meta line parted by " · ", and no column headings, so nothing is cut off or overlaps. Loading (`Loading` in the space of four rows, after 300 ms; a reload keeps the current rows) and error (a row with Try again) show under the headings; an empty table is never drawn: `empty` shows in its place, without column headings. A `Keyset` gets "Load more". Bulk actions: `bind:picked` (a `Set` of row keys), `pickable?(item)`, `pickLabel?(item)` (the checkbox's name) and snippet `bulk` (the actions). Each row then gets a checkbox in a first column, a 40px hit target over the full row height; a row that is not pickable has an empty cell. The header checkbox picks every pickable loaded row and clears them on the next click ("Select all 5 rows", or "Select the 50 rows shown" for a keyset with more to load; a table with one pickable row has none). While rows are picked, a bar of the header's height lies over the headings: "12 selected", the `bulk` actions, "Select all 50", "Clear". Shift+click picks a range; Esc clears the pick when no dialog is open. `pickOnRow` (a table without `href`): a click anywhere on a pickable row, outside its controls, toggles its checkbox. `pickOff`: the checkboxes show, turned off. `selectAllLabel`: the text of the "Select all" button. `picked` is not `selected`. After an action, reload the table, empty `picked` and say what changed in a toast. |
 | `Cell` | One cell of a `DataTable` row: `text?` (one line that truncates, full value in a tooltip), `copy?` (`true` or the value to copy: a copy button that shows on row hover), `copyLabel?`, `grow?` (the column that takes the free width, at least 10rem), `num?` (numbers, sizes, times: right-aligned, tabular numerals), `actions?` (the row's buttons, right-aligned), `strong?` (the row's name), `muted?`, `hideOnPhone?`. Children for anything else (a badge, a `RelativeTime`). Use `Table.Cell` only for a control that `Cell` does not cover, and keep it one line. |
 | `Truncate` | `text`, `copy?`, `copyLabel?`, `class?`: one line that never wraps; "…" and a tooltip when it is cut (a path breaks after its slashes in the tooltip); an optional copy button. `Cell text` uses it; use it directly for a long value outside a table. |
-| `RepoList` | `repos`, `href`. The list of Browse home, for a visitor who looks for one repository: one card, a row per repository (the whole row is the link) with the same fields in the same places for every kind: the format icon, the name (`text-section`) with a lock after a private one, the description on one line under it, and at the end the format title and the kind in plain words (`kindPhrase` in `lib/words.ts`). Under 640px the format and the kind move under the description. No counts, sizes or times. |
-| `RepoTable` | The repositories table for the people who manage them (Settings › Repositories): name, a lock after a private one, the kind icon after a group or a proxy, and the description on one line; format, files (a group: its number of repositories), size, last publish. On a phone the format icon, the name and the last publish. |
+| `DoorCard`, `DoorRow` | `DoorCard`: `title`, `text` (one sentence the title does not say), `icon`, and `href` (a link) or `onclick` (a button). A door: a large card with a 32px icon in the mark's gold (`--mark`). `DoorRow` (`label`) holds them, each one column of a three-column row, centered, stacked on a phone. The places to start: Home's Publish, Browse and Administer, and the admin home's New repository, New account and New CI pipeline. A page's own action stays a button in its header. |
+| `RepoCard` | `repo`, `href`. A repository as an `ItemCard` (Home, Browse, Publish), the same fields in the same places for every kind: the format icon (24px), the name (`text-section`) with a lock after a private one, the description up to two lines, and at the bottom the kind of a proxy or a group in plain words (`kindPhrase` in `lib/words.ts`; a hosted repository, the default, has no such line). The whole card is the link. No counts, sizes or times. Put them in a `CardGrid`. |
+| `RepoTable` | The repositories table for the people who manage them (Settings › Repositories): name, a lock after a private one, the kind icon after a group or a proxy, and the description on one line; format, last publish (files and size are on the repository's Overview). On a phone the format icon, the name and the last publish. |
 | `RepoKindIcon` | `kind`, `iconClass?`, `class?`. The mark of a group (layers) or a proxy (cloud download), with the word "Group" or "Proxy" for screen readers; nothing for a hosted repository. |
-| `Section` | `title?`, `description?` (one sentence), snippets `actions?` (the area's actions at the header's end; on a phone they wrap under the title) and `footer?` (a submit row), `class?`. One logical area of a page on its own surface (a shadcn `Card`): 24px padding, `--section-gap` to the next section. A page with a table or a list puts it in a `Section` too. |
+| `Section` | `title?`, `description?` (one sentence), snippets `badges?` (after the title: the state of the whole area, such as On or Off on Edge delivery's Status), `actions?` (the area's actions at the header's end; on a phone they wrap under the title, except one short button such as "See all", which stays on the title's line) and `footer?` (a submit row), `class?`. One logical area of a page on its own surface (a shadcn `Card`): 24px padding, `--section-gap` to the next section. A page with a table or a list puts it in a `Section` too: the section stays the card. `plain` drops the card for an area whose content is a `CardGrid` (Home's repositories, the regions of Edge delivery), so no card sits inside a card: the heading with its actions at the end on one line (also on a phone), 16px over the grid, the same `--section-gap`. |
 | `FormPage` | The body of a form page. It sets no width: every Settings page uses the full content column. |
 | `FormSection` | `title?`, `description?`, snippets `actions?` and `footer?` (the submit row). A `Section` that holds a form: put one `FormGrid` in it, or two with a `<Separator />` between sub-groups. |
 | `FormGrid` | The one form grid: holds `FormRow` and `SwitchRow` in two columns (`sm:grid-cols-2`), 24px apart; one column under 640px. Each label sits above its control and every control fills its cell, so there is no label column. |
-| `FormRow` | `label`, `for`, `help?` (one sentence; id `{for}-help` for `aria-describedby`), snippet `more?` (longer help behind "Learn more"; it opens under the whole row), `aka?` + `akaLabel?` (the technical name: "In your provider: Client ID"), `full?` (span both columns), `width?` (leave it out: the whole cell; `"auto"` only for a switch, a checkbox or a button), `error?`, snippet `badge?`. The label above, the control, then the help, so the controls of a grid row line up. |
+| `FormRow` | `label`, `for`, `help?` (one sentence; id `{for}-help` for `aria-describedby`), snippet `more?` (longer help behind "Learn more"; it opens under the whole row), `aka?` + `akaLabel?` (the technical name: "In your provider: Client ID"), `full?` (span both columns), `width?` (leave it out: the whole cell; `"auto"` only for a switch, a checkbox or a button), `error?`, snippet `badge?`, `length?` + `max?` (a text control with a limit: "12 of 500" at the end of the help line, id `{for}-count`; point `aria-describedby` at it too). The label above, the control, then the help, so the controls of a grid row line up. |
 | `UnitInput` | `id`, `bind:num`, `bind:unit`, `units` (`SIZE_UNITS`, `DURATION_UNITS` or `{value, label}[]`), `label?` (names the unit menu), `placeholder?`, `disabled?`, `invalid?`, `describedby?`, `onchange?`. A number and its unit as one control of the full control width; the unit is a menu at its end. Never two controls side by side. |
 | `LearnMore` | `label?` ("Learn more"), `bind:open?`; the longer help is the child. A quiet disclosure for help that does not fit one sentence, anywhere outside a `FormRow` (which has `more`). The panel takes the full width of its column, like the controls around it. |
 | `SaveBar` | `count` (unsaved changes; 0 hides it), `onSave` (async; an error shows in the bar), `onDiscard`, `saveLabel?`. "2 unsaved changes · Discard · Save", sticky at the bottom of the window over the content column, only while there are changes. Ctrl+S (⌘S) saves. While it shows, leaving the page asks first. Put it last on the page. Pair it with a `Draft`. |
@@ -259,12 +341,12 @@ The repository page is the one exception: it checks the caller's permissions on 
 | `FormField` | `label`, `for`, `hint?`, `error?`; the control is the child. Only inside a dialog (`ShortFormDialog`), where the form grid does not fit; a page uses `FormGrid`. |
 | `ConnectionTest` | `onTest`, `testing?`, `result?` (`{ok, text}`), `label?` ("Test connection"), `disabled?`. The **Test** action of a connection to another system, where the connection is configured (the header or the footer of its `Section` or `Step`). The result shows beside the button, only after a test: a check and what answered, or the error and the next step. |
 | `Step` | `n`, `title`, `description?`, `done?`, snippets `actions?` and `footer?`. One numbered step of a setup, as a `Section` whose title starts with its number; a done step shows a check in place of the number. |
-| `CompactEmpty` | `icon?`, `title?`, `state?`, `text`; children are the one action. An empty list or a feature that is not set up, as one row: a plain icon, "Passkey · Not set up", one sentence, one action. Pass it as `DataTable` `empty`. Inside a card it is a plain row; outside a card it has a dashed frame. Several rows in one card are parted by thin dividers, never a frame each. |
+| `CompactEmpty` | `icon?`, `title?`, `state?`, `text`; children are the one action. An empty list or a feature that is not set up, as one row: a plain icon, "Passkey · Not set up", one sentence, one action. Pass it as the `empty` of an `ItemList`, a `SourceGrid` or a `DataTable`. Inside a card it is a plain row; outside a card it has a dashed frame. Several rows in one card are parted by thin dividers, never a frame each. |
 | `FeltTicket` | `top`, `bottom`, `serial`, `label`, `moment` (`none`, `print`, `punch`, `tear`). The brand felt ticket with printed lines, for the ticket moments only, at 320px wide or more. |
 | `ConfirmDialog` | `bind:open`, `title` (a question), `description?`, `changes: string[]`, `confirmLabel`, `destructive?`, `typeToConfirm?` (a field; the confirm button stays off until it holds this text: the name of the one thing, or the action of a bulk delete, "delete 12 repositories"; never a bare count), `onConfirm` (async; errors stay in the dialog). A bulk delete names the count and the first five names (`someNames` in `lib/words.ts`): "Delete 12 repositories? oasis, plex, scissors, enginehub, worldedit and 7 more." |
-| `ShortFormDialog` | `bind:open`, `title`, `description?`, `submitLabel`, `canSubmit?`, `onSubmit` (async); at most five `FormField`s as children. |
+| `ShortFormDialog` | `bind:open`, `title`, `description?`, `submitLabel`, `canSubmit?`, `onSubmit` (async), `wide?` (768px in place of 512px, for lists of choices that each have a line of help: the grant dialog, whose finder and permissions stand side by side from 768px); at most five `FormField`s as children. |
 | `DetailsColumn` | `title`, `onClose`, snippet `actions?`: the details of the selected row in a 360px column right of the table. On the Files tab the column always shows (the selected file, or else the open folder); Close hides it until the person selects a file or clicks "Show details". |
-| `TabNav` | Tabs that are pages (each tab has its own address): `label`, `items: {label, href, active, icon?}[]`. The open tab fills like a sidebar item; no line under the row; `--tabs-gap` to the content. |
+| `TabNav` | Tabs that are pages (each tab has its own address): `label`, `items: {label, href, active, icon?}[]`. The open tab fills like a sidebar item; no line under the row; `--tabs-gap` to the content. On a narrow screen the row scrolls sideways with no scrollbar, the open tab in view, and the end where tabs are cut off fades (`fadeEdges` in `lib/fade.ts`). |
 | `CodeBlock` | `code`, `title?`, `diff?`, snippet `actions?` (at the end of the title row): multi-line code with a copy button (monospace). With `diff` (diff lines, each after its mark: `+` added, a space for context) it shows the change to a file the reader has: added lines marked and filled, context muted; copy takes the added lines only, and a selection never takes the marks. `repo/snippets/SnippetBlock` shows a CI file this way, with Add to a workflow / New workflow. |
 | `Segmented` | `bind:value`, `options` (`{value, label, title?}[]`), `label`, `compact?`: two or three short choices as one segmented control (a radio group); arrow keys move. It fills its cell; `compact` is as wide as its labels, for the title row of a `CodeBlock`. |
 | `CodeSnippet` | `value`, `label?`, `secret?`: one line to copy: a command, a token, an address (monospace). |
@@ -273,14 +355,19 @@ The repository page is the one exception: it checks the caller's permissions on 
 | `ViewSwitcher` | `bind:value`, `views` (`"list"`, `"tree"`, `"columns"`, `"coverflow"`), `label?`. The choice of view as one segmented control with icons and labels (icons only under 640px); arrow keys move. Hold the value in a `ViewChoice` (`lib/view.svelte.ts`), which remembers it per user. Offer only views that carry meaning: Tree (folders that expand in place) and Columns for deep trees, Cover Flow only for the versions and builds of one artifact (time is the axis). There is no Icons view. Every view renders in the same area: a switch never changes the layout around it. |
 | `FormatIcon` | `format`, `kind?`, `label?`, `class?`. The format plugin's own SVG icon (from `GET /api/formats`), one color, 16px by default: the Maven feather, the Debian swirl, the raw file; `kind="gradle-plugin"` gives the Gradle elephant. Its space is reserved before the formats load. |
 | `FormatBadge` | `format`, `title?`. The format's icon and title, inline, with no box and no tint. |
-| `EmptyState` | `title`, `description?`, `icon?`; children are the action that fills it. A whole page or result that has nothing to show; a list uses `CompactEmpty`. |
+| `RepoPicker` | `repos` (`{name, format}[]`), `value` ("" for all), `onchange(name)`, `label?`, `allLabel?` ("All repositories"), `class?`. One repository or all of them for a filter (Search, Activity): a field with the chosen repository's `FormatIcon` that filters the menu as you type (a bits-ui `Combobox` with the `Select` items), each repository with its icon. A name from the address that is not in `repos` still shows as the choice. |
+| `PersonPicker` | `search(q)` (a page of `{username}`: `api.auditPeople`), `value` ("" for everyone), `onchange(name)`, `label?`, `allLabel?` ("Everyone"), `class?`. One person or everyone for a filter (Activity): the `RepoPicker` field with the chosen person's `UserAvatar`, which asks the server for the names that start with what you type; each person in the menu with a small `UserAvatar`. A name from the address that the search does not return still shows as the choice. | `label`, `kind?` (the muted word before it: "Repository"), snippet `icon?`, `onremove`. One active filter of a list as a small removable chip; a row of them sits under the filter controls, with Clear filters at its end. |
+| `EmptyState` | `title`, `description?`, `icon?`; children are the action that fills it. A whole page or result that has nothing to show; a list uses `CompactEmpty`. Its picture is the brand's empty ticket: flat, in outline, in the muted ink, its stub torn off along the perforation; `icon` (24px, what is missing) sits where the T would be. |
+| `TicketBadge` | `tone?` (`neutral`, `gold`), `icon?` (14px, the kind of value), `stub?` (a word or a number after the perforation), `title?`, the label as child. A short value on a small flat ticket: notched ends, the label, a dashed perforation and the stub (blank without `stub`), 24px tall like a `StatusBadge`. Only for what admits or is admitted (see Ticket motifs): conditions are neutral, the CI system on the admission ticket is gold. |
+| `Perforation` | `vertical?`, `class?` (the color of the slots; the canvas by default, so they read as holes). The mark's slot column as a row (or a column) of rounded slots: the line where a ticket shape tears in two. Only inside a ticket shape. |
+| `UserAvatar` | `name`, `size?` (`sm` 24px, `md` 32px for the rows of a list and the account menu, `lg` 40px for an identity card). The avatar generated from the username: one of six hues, a corner cut off at 45 degrees in a darker shade, the initials; the same name gives the same avatar everywhere. Hidden from screen readers: the name is always beside it. |
 | `ErrorState` | `error`, `title?`, `onRetry?`, `inline?` (one line in a form, a dialog or a table). |
-| `Loading` | `rows?` (the height to reserve, in table rows of `--row`; 4), `inline?` (one line in a form, a dialog or a row), `label?`. The one loading state: nothing for 300 ms, then a quiet spinner and "Loading" in the reserved space. Show it for `loading && !data`, so a reload keeps the current content. `DataTable` uses it. |
+| `Loading` | `rows?` (the height to reserve, in table rows of `--row`; 4), `inline?` (one line in a form, a dialog or a row), `label?`. The one loading state: nothing for 300 ms, then a quiet spinner and "Loading" in the reserved space. Show it for `loading && !data`, so a reload keeps the current content. `DataTable`, `ItemList` and `SourceGrid` use it. |
 | `FreshFactor` | `actionLabel`, `onProof(proof)`: the fresh second-factor check, inline in a page. |
 | `SecondFactorPrompt` | The same in a short dialog, before an action started from a button. |
 | `SecondFactorForm` | The code or passkey form inside the two above and the sign-in page. |
 | `SettingsGroupForm` | Registry settings rendered by type (a size or duration is a `UnitInput`, see `lib/units.ts`), saved from its `SaveBar`. When `effects` lists further effects of a save (a storage move), Save first asks in a confirm that lists every change. `sections` make it `FormSection`s (with `steps`, numbered `Step`s), so it is the whole form of a page (General, Storage, Sign-in options). Every field is a `FormRow` / `SwitchRow`; a list is a `ListInput`, a secret a `SecretInput`. `fields` gives a key a plain label, help, `aka` and placeholder; `errors` marks fields from a connection test; `before` / `extra` get the unsaved edits (`extra` renders under the last section: a connection test). |
-| `OptionRow` | `id`, `label`, `description?`, snippet `control` (a `Checkbox` or a `RadioGroup.Item`), `children?` (a field or a note under the description): one choice in a list. A click anywhere on the control, the title or the description toggles it once; the title stays the one label of the control. `children` sit outside that hit target. The row fills when chosen. |
+| `OptionRow` | `id`, `label`, `description?`, snippet `control` (a `Checkbox` or a `RadioGroup.Item`), snippet `icon?` (a bare 16px icon before the label: a repository's `FormatIcon`), `children?` (a field or a note under the description): one choice in a list. A click anywhere on the control, the title or the description toggles it once; the title stays the one label of the control. `children` sit outside that hit target. Four looks, so a click shows its result at once under the pointer: at rest no fill; under the pointer `--hover`; chosen (`data-state="checked"` on the control) `--selected` with the check, a little deeper under the pointer; a disabled control muted, with no fill, no hover and the not-allowed cursor (say why in `description`). |
 | `PermissionPicker` | `id`, `groups` (`{title, help?, items}[]`: `pickerGroups("server")` or `pickerGroups("repo")`), `bind:value`, `needs?` (`needsOf(scope)`: each permission and the permissions it needs), `held?` (the permissions the person can change; others are off), `onchange?`. Permissions as checkboxes in groups, one per subsystem, each with its title and help, All and None, and one line of help per checkbox. A check also checks what the permission needs, a clear also clears what needs it, and the help line says why. Always checkboxes, no presets. The grant dialog (`settings/repos/GrantDialog`) uses it for repository permissions. |
 | `ServerPermissionPicker` | `id`, `bind:value` (server permission IDs), `held?` (the permissions the person can change), `readonly?`, `onchange?`. The server permissions as a role: three radio cards, Member (none), Administrator (every one) and Custom (side by side from a 36rem container, stacked in a dialog or on a phone). Member and Administrator set the value at once. Custom lists one row per permission (its sidebar icon, label, one line of help, a switch at the right) under the Settings sidebar group of the page it opens ("Other" for one without a page); All repositories also names the repository permissions it holds. A permission that a switched-on one needs is on and locked ("Needed by …"); one outside `held` is off with why, and so are Administrator and Member when they would change such a permission. `readonly` shows the role and the permissions held. The person page and `PermissionMapInput` use it. |
 | `VisibilityChoice` | `bind:anonymous`: Private or Public (new repository, repository Overview). |
@@ -289,31 +376,60 @@ The repository page is the one exception: it checks the caller's permissions on 
 | `RangePaste` | `id`, `label?`, `disabled?`, `onAdd?(ranges)`, `onReplace?(ranges)`, `buttons?`, `bind:found?`: paste addresses and ranges in any format. See below. |
 | `LiveStatus` | `live`, `verb?` ("Updated"), `cadence?` (the sentence of how often; "Refreshes every 3 seconds" by default). The state of a `Live`: a small dot and "Updated 4 s ago" (ticking); the dot pulses while a refresh runs (not under reduced motion). The tooltip says how often it refreshes and why the last refresh failed; a click refreshes now. When refreshes fail or the browser is offline it says "Not updated for 2 min · trying again in 20 s" in the warning color. It shows only while the `Live` is active. See **Live data**. |
 | `LiveValue` | `value`; the text is the child (or `value`). A number that a `Live` refreshes: a brief faint brand tint behind it when it changes, nothing under reduced motion. |
-| `Cadence` | `what` ("The Worker checks"), `noun` ("check"), `every` (seconds, from the server), `last?`, `next?`, `class?`. The cadence of a slower process outside the page, as meta text where its value is: "The Worker checks every 10 minutes. Next check in about 7 min." A next time more than one interval past reads "The check is 14 min late." in the warning color. |
+| `Cadence` | `noun` ("gap check"), `every` (seconds, from the server), `last?`, `next?`, `class?`. When a slower process outside the page runs next, as a meta value where the value it moves is: "Next gap check in about 7 min", the interval in its tooltip ("Every 10 minutes"); before a first run, "Every 10 minutes". A next time more than one interval past reads "Gap check 14 min late" in the warning color. |
+| `ServerMark` | `size?`: the server's logo at that height (at most four times as wide), or the brand's `Logo` without one. |
 | `FileSize`, `RelativeTime`, `QR`, `Logo`, `CopyButton` | Small parts. |
 
 ### Examples
 
-A list page:
+A list page: the collection is an `ItemList` in its `Section`:
 
 ```svelte
 <script lang="ts">
-  const lists = new Resource(() => api.ipLists.list());
-  const open = (l: IPList) => href(`/settings/networks/list/${encodeURIComponent(l.name)}`);
+  const devices = new Keyset((p) => api.devices.list(p));
 </script>
 
-<PageHeader title="Networks" description="Named address ranges that repositories allow downloads and publishes from.">
-  {#snippet actions()}<Button href={href("/settings/networks/new")}><PlusIcon />New network list</Button>{/snippet}
-</PageHeader>
+<PageHeader title="Devices" description="The computers and CI jobs that are signed in as you." />
 
-<DataTable source={listOf(lists)} caption="Network lists" key={(l) => l.name} href={open}
-  columns={[{ label: "List", grow: true }, { label: "Used by", hideOnPhone: true }, { label: "Ranges", align: "right" }]}>
-  {#snippet row(l)}
-    <Cell grow strong text={l.title} />
-    <Cell hideOnPhone muted text={l.repos.join(", ")} />
-    <Cell num>{formatCount(l.count)}</Cell>
+<Section title="Devices">
+  <ItemList source={devices} caption="Devices" key={(d) => d.id}>
+    {#snippet leading(d)}<LaptopIcon class="size-5" />{/snippet}
+    {#snippet title(d)}{d.name}{/snippet}
+    {#snippet meta(d)}{clientOf(d)} · used <RelativeTime at={d.last_used_at} />{/snippet}
+    {#snippet trailing(d)}<Button variant="ghost" size="sm" onclick={() => revoke(d)}>Revoke</Button>{/snippet}
+    {#snippet empty()}<CompactEmpty icon={LaptopIcon} title="Devices" state="None yet" text="A device signs in with telesphorepo login." />{/snippet}
+  </ItemList>
+</Section>
+```
+
+A handful of rich things: a `CardGrid` (or a `SourceGrid` over a source) of `ItemCard`s:
+
+```svelte
+<Section plain title="Signing keys">
+  {#snippet actions()}<Button href={href("/settings/signing-keys/new")}><PlusIcon />New signing key</Button>{/snippet}
+  <SourceGrid source={listOf(keys)} label="Signing keys" key={(k) => k.name}>
+    {#snippet card(k)}
+      <ItemCard title={k.name}>
+        {#snippet icon()}<KeyRoundIcon class="size-5" />{/snippet}
+        <p>…{k.fingerprint.slice(-16)}</p>
+        <p>Used by {k.repos.join(", ")}</p>
+        {#snippet actions()}<Button variant="ghost" size="sm" onclick={() => remove(k)}>Delete</Button>{/snippet}
+      </ItemCard>
+    {/snippet}
+  </SourceGrid>
+</Section>
+```
+
+A table, where people compare and sort (Settings › Repositories, the publish log):
+
+```svelte
+<DataTable source={events} caption="Events" key={(e) => e.id}
+  columns={[{ label: "What", grow: true }, { label: "Who" }, { label: "When", align: "right" }]}>
+  {#snippet row(e)}
+    <Cell grow strong text={e.title} />
+    <Cell muted text={e.actor} />
+    <Cell num muted><RelativeTime at={e.at} /></Cell>
   {/snippet}
-  {#snippet empty()}<CompactEmpty title="Network lists" state="None yet" text="A list names address ranges once, for many repositories." />{/snippet}
 </DataTable>
 ```
 
@@ -333,8 +449,9 @@ Every text control fills its cell; a size is one `UnitInput`; a long value spans
 
 <FormSection title="Repository">
   <FormGrid>
-    <FormRow label="Description" for="desc" help="Shown in the list of repositories." full>
-      <Input id="desc" bind:value={draft.value.description} aria-describedby="desc-help" />
+    <FormRow label="Description" for="desc" help="One sentence on what it holds, for people who look for it." full
+      length={draft.value.description.length} max={500}>
+      <Textarea id="desc" rows={3} maxlength={500} bind:value={draft.value.description} aria-describedby="desc-help desc-count" />
     </FormRow>
     <FormRow label="Largest upload" for="max" help="Uploads above this size are refused.">
       <UnitInput id="max" bind:num={draft.value.max} bind:unit={draft.value.unit} units={SIZE_UNITS} describedby="max-help" />
@@ -355,11 +472,11 @@ shows on the thing itself, never in a summary above it:
 ```svelte
 <Section title="Passkeys">
   {#snippet actions()}<Button variant="outline" onclick={add}><PlusIcon />Add passkey</Button>{/snippet}
-  <DataTable source={listOf(passkeys)} ...>
+  <ItemList source={listOf(passkeys)} ...>
     {#snippet empty()}
       <CompactEmpty icon={KeyRoundIcon} title="Passkey" state="Not set up" text="Sign in with your fingerprint." />
     {/snippet}
-  </DataTable>
+  </ItemList>
 </Section>
 ```
 
@@ -385,7 +502,7 @@ A list with a choice of view (Browse):
 <Toolbar>
   {#snippet end()}<ViewSwitcher bind:value={view.value} views={view.views} label="Show versions as" />{/snippet}
 </Toolbar>
-{#if view.value === "list"}<DataTable ... />{:else}<!-- the Cover Flow of felt tickets, built with the Browse pages -->{/if}
+{#if view.value === "list"}<ItemList ... />{:else}<!-- the Cover Flow of felt tickets, built with the Browse pages -->{/if}
 ```
 
 `ViewChoice` stores the choice in this browser under the signed-in user's name, per place
@@ -448,7 +565,7 @@ that does not move waits for a slower process. Every such page does it the same 
 | Updated 4 s ago; Updated just now | Last refreshed at 14:02:11; Live |
 | Refreshes every 3 seconds (tooltip); Click to refresh now | Polling, auto-refresh on |
 | Not updated for 2 min · trying again in 20 s; Offline · not updated for 2 min | Stale, connection lost, error icon alone |
-| The Worker checks every 10 minutes. Next check in about 7 min. | Cron, next tick, ETA |
+| Next gap check in about 7 min (tooltip: Every 10 minutes) | The Worker checks every 10 minutes; cron, next tick, ETA |
 | Progress saved 12 s ago | Heartbeat, last write |
 
 ## Interaction rules
@@ -467,12 +584,14 @@ that does not move waits for a slower process. Every such page does it the same 
   upload.
 - **No side sheets.** The only sheet is the Settings menu under 768px.
 - **Details of a selected row** show in a `DetailsColumn` inside the page, never in an overlay.
-- **Rows are clickable anywhere** when they open something (`DataTable` `href`). Put the same link
-  on the row's name for the keyboard. Buttons inside a row keep their own click.
-- **One line per row.** A long value truncates (`Cell text`) with its full text in a tooltip and,
-  for a value people paste elsewhere (a path, a checksum, an address), a copy button (`copy`).
-  Never let a cell wrap to a second line, and never put a description under a name in a row: put
-  it after the name, muted, on the same line.
+- **Rows and cards are clickable anywhere** when they open something (`href` of a `DataTable`, an
+  `ItemList` or an `ItemCard`). `ItemList` and `ItemCard` make the title the link for the keyboard;
+  in a `DataTable`, put the same link on the row's name. Buttons inside keep their own click.
+- **One line per table row.** In a `DataTable`, a long value truncates (`Cell text`) with its full
+  text in a tooltip (on a phone the row stacks into the name and a meta line) and, for a value people paste elsewhere (a path, a checksum, an address), a
+  copy button (`copy`). Never let a cell wrap to a second line, and never put a description under
+  a name in a table row: put it after the name, muted, on the same line. An `ItemList` row has two
+  lines by design: the title, then its meta line, each one line that truncates.
 - **Confirm what changes.** Every action that removes data or changes access asks with
   `ConfirmDialog` and lists the effects, one line each. A form the user fills in and submits is its
   own confirmation. The confirm button names the action ("Delete 14 files"); the toast uses the
@@ -484,7 +603,7 @@ that does not move waits for a slower process. Every such page does it the same 
 - **Ticket moments** (principle 6). Creating a publish token prints a `FeltTicket`; ending it
   punches it; approving a device tears its stub. Each takes under 400 ms, never blocks work, and
   shows its end state at once under `prefers-reduced-motion`.
-- **A secret shows once**, in a `bg-panel` block above the table with `CodeSnippet secret` and a
+- **A secret shows once**, in a `bg-panel` block above the list with `CodeSnippet secret` and a
   Done button.
 - **Sign in** happens only on `/login`. Other pages never show their own Sign in button: a page
   that needs a user has `access: "user"` and the shell sends the visitor to `/login?next=`.
@@ -497,13 +616,21 @@ that does not move waits for a slower process. Every such page does it the same 
 - Monospace outside `CodeBlock`, `CodeSnippet` and the JSON editor (`font-mono` anywhere else).
 - Side sheets (`Sheet`) for anything but the mobile Settings menu.
 - Left, right or bottom border accents for a state: active, selected or hover is a fill.
-- Subtitles for decoration. A description says what the page is for in one sentence, or is left
-  out. No eyebrow labels, no all-caps labels.
+- Subtitles for decoration, and text that states the obvious: what the title already says, what
+  anyone sees by looking (a log is newest first, People lists people), or what everyone knows. A
+  description tells the reader one thing they could not see or would not know (a format cannot
+  change later; approve only if the code matches), or the page has none. No eyebrow labels, no
+  all-caps labels.
 - A second Sign in button.
 - A page width, a container, a `max-w-*` on a page block, or side padding set by a page.
 - A control sized by a page (`w-44`, `max-w-sm` on an input or a select in a form), two controls
   for one value (a number and a separate unit select), a bare checkbox for a yes/no setting.
 - A table row of two lines, a table without `DataTable`, a number column aligned left.
+- A `DataTable` for a collection that nobody sorts or compares by column; a list or a grid of cards
+  built by hand instead of `ItemList` or `CardGrid`.
+- A card that is a table in disguise (label and value pairs), and a card or a row that shows every
+  field the API returns.
+- A "dashboard" of numbers nobody acts on.
 - A "back" link, and a Save button at the end of a long settings form (the `SaveBar` saves).
 - Raw colors, other radii, spacing outside the 4px scale, margins between blocks other than the
   ones in Tokens.
@@ -522,16 +649,21 @@ that does not move waits for a slower process. Every such page does it the same 
 
 - [ ] The page is a `PageDef` of its module and in the table above; a Settings page has `nav` with an icon
       in its sitemap group, and its breadcrumbs read right (check a sub-page too).
-- [ ] `PageHeader` with a title; a description only if it says something the title does not.
+- [ ] `PageHeader` with a title; a description only if it tells the reader something they could
+      not see on the page or would not already know.
 - [ ] No status row and no summary banner: state shows on the thing itself.
 - [ ] Each area is a `Section` (a card); a connection has its `ConnectionTest` where it is
       configured.
 - [ ] The page uses the whole content column; its left and right edges match every other
       Settings page (compare two screenshots).
-- [ ] Tables use `DataTable` with `Cell`s: zebra stripes, one line per row, long values
-      truncated with a tooltip (and `copy` where people paste them), numbers and times right
-      with `num`, one `grow` column, secondary columns `hideOnPhone`. An empty list is a
-      `CompactEmpty` row.
+- [ ] Each collection has the right shape: an `ItemList` by default (the name and its badges,
+      one meta line of one or two facts, the state or the actions at the end); a `CardGrid` of
+      `ItemCard`s for a handful of rich things (up to three short fact lines, no label and value
+      pairs); a `DataTable` only where people sort, compare columns or scan hundreds of rows.
+- [ ] A `DataTable` uses `Cell`s: zebra stripes, one line per row, long values truncated with a
+      tooltip (and `copy` where people paste them), numbers and times right with `num`, one
+      `grow` column, secondary columns `hideOnPhone`.
+- [ ] An empty collection is a `CompactEmpty` row (the `empty` of the collection).
 - [ ] Forms use `FormSection` + `FormGrid` with `FormRow` / `SwitchRow`; labels sit above their
       controls and every text control fills its cell (no `width`, no size classes); a number with a unit is a
       `UnitInput`; lists are `ListInput`; secrets are `SecretInput`; help is one sentence, more

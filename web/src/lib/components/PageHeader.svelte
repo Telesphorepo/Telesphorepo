@@ -6,9 +6,12 @@
   whose uploads wait for the switch-over from Nexus).
 
   On a Settings page the breadcrumbs come from the sidebar: Settings › group › item, then the title
-  on a sub-page (Settings › People and CI › CI pipelines › acme/app). `crumbs` replaces what
+  on a sub-page (Settings › People and CI › CI pipelines › acme/app); on an account page Your
+  account › item. `crumbs` replaces what
   follows the group when the page sits deeper (Settings › Repositories › maven › Access). A Browse
-  page shows breadcrumbs only when it passes `crumbs` (its whole trail).
+  page shows breadcrumbs only when it passes `crumbs` (its whole trail). The title names the page,
+  so the trail shows up to its parent (Settings › People and CI › CI pipelines over acme/app), and
+  not at all when no step of it is a link.
 
     <PageHeader title="Devices" description="Computers that publish with the publisher client of their build tool.">
       {#snippet actions()}<Button href={href("/device")}>Approve a device</Button>{/snippet}
@@ -17,7 +20,7 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
   import Breadcrumbs from "./Breadcrumbs.svelte";
-  import { settingsTrail, type Crumb } from "$lib/crumbs";
+  import { sidebarTrail, type Crumb } from "$lib/crumbs";
   import { current } from "$lib/current.svelte";
   import { href, router } from "$lib/router.svelte";
 
@@ -44,15 +47,22 @@
   } = $props();
 
   const trail = $derived.by((): Crumb[] => {
-    if (current.route?.layout === "settings") return settingsTrail(router.path, title, crumbs);
+    if (current.route && current.route.layout !== "app") return sidebarTrail(router.path, title, crumbs);
     if (crumbs) return crumbs;
-    if (back) return [{ label: "Repositories", href: href("/") }, { label: back.label, href: back.href }, { label: title }];
+    if (back) return [{ label: "Repositories", href: href("/browse") }, { label: back.label, href: back.href }, { label: title }];
     return [];
+  });
+  // The title names the current page, so the trail ends at its parent; a trail with no link left
+  // (the first page of an area) shows nothing.
+  const shown = $derived.by((): Crumb[] => {
+    const last = trail.at(-1);
+    const steps = last && !last.href && last.label === title ? trail.slice(0, -1) : trail;
+    return steps.some((c) => c.href) ? steps : [];
   });
 </script>
 
 <header class="mb-(--header-gap)">
-  {#if trail.length}<div class="mb-3"><Breadcrumbs items={trail} /></div>{/if}
+  {#if shown.length}<div class="mb-3"><Breadcrumbs items={shown} /></div>{/if}
   <div class="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
     <div class="min-w-0 grow basis-64">
       <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
@@ -66,6 +76,6 @@
         </p>
       {/if}
     </div>
-    {#if actions}<div class="flex shrink-0 flex-wrap items-center gap-2">{@render actions()}</div>{/if}
+    {#if actions}<div data-slot="header-actions" class="flex max-w-full shrink-0 flex-wrap items-center gap-2">{@render actions()}</div>{/if}
   </div>
 </header>

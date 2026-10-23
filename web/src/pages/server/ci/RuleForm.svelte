@@ -6,13 +6,14 @@
   uses them. The workflow or Jenkinsfile step for the chosen repositories shows on the same page.
 
   A new pipeline is a setup of numbered steps that ends with Create; it can start from a
-  repository (`startRepo`) and return to `back` afterwards. An existing pipeline saves its edits
+  repository (`startRepo`; for a repository that still copies from Nexus, its rehearsal repository)
+  and return to `back` afterwards. An existing pipeline saves its edits
   from the SaveBar. The parent keys it by id (null: a new pipeline).
 -->
 <script lang="ts">
   import { untrack } from "svelte";
   import { toast } from "svelte-sonner";
-  import { api, errorMessage, type Trust, type TrustInput } from "$lib/api";
+  import { api, errorMessage, type Repo, type Trust, type TrustInput } from "$lib/api";
   import { Resource } from "$lib/load.svelte";
   import { Draft } from "$lib/unsaved.svelte";
   import { go, href, navigate } from "$lib/router.svelte";
@@ -42,6 +43,8 @@
   import Area from "./Area.svelte";
   import OptionRow from "$lib/components/OptionRow.svelte";
   import WorkflowSetup from "./WorkflowSetup.svelte";
+  import AdmissionTicket from "./AdmissionTicket.svelte";
+  import FormatIcon from "$lib/components/FormatIcon.svelte";
   import {
     conditionField,
     conditionsOf,
@@ -89,9 +92,23 @@
     !!settings.data && !(settings.data.groups.flatMap((g) => g.settings).find((s) => s.key === "base_url")?.value ?? ""),
   );
   // A CI pipeline publishes, so it names only hosted repositories, and only those where the person holds CI pipelines.
+  // A rehearsal repository (Rehearse publishing of the Nexus migration) comes right before the repository it rehearses.
+  const rehearses = (r: Repo) => (typeof r.fields?.rehearsal_for === "string" ? r.fields.rehearsal_for : "");
   const sortedRepos = $derived(
-    (repos.data ?? []).filter((r) => r.kind === "hosted" && auth.canRepo(r.name, "ci.pipelines")).sort((a, b) => a.name.localeCompare(b.name)),
+    (repos.data ?? [])
+      .filter((r) => r.kind === "hosted" && auth.canRepo(r.name, "ci.pipelines"))
+      .sort((a, b) => {
+        const ka = rehearses(a) || a.name;
+        const kb = rehearses(b) || b.name;
+        return ka === kb ? Number(!rehearses(a)) - Number(!rehearses(b)) : ka.localeCompare(kb);
+      }),
   );
+  /** The rehearsal repository of a repository that still copies from Nexus, which a new pipeline publishes to first. */
+  const rehearsalOf = (name: string) => {
+    const r = repos.data?.find((x) => x.name === name);
+    if (r?.operation?.type !== "mirror") return null;
+    return repos.data?.find((x) => rehearses(x) === name && auth.canRepo(x.name, "ci.pipelines")) ?? null;
+  };
 
   type Value = {
     name: string;
@@ -166,7 +183,10 @@
     if (!isNew || preselected || !draft || !repos.data) return;
     preselected = true;
     const r = startRepo;
-    if (r && repos.data.some((x) => x.name === r)) untrack(() => draft && (draft.value.repos = [r]));
+    if (!r || !repos.data.some((x) => x.name === r)) return;
+    // A repository that still copies from Nexus takes no publishes: start with its rehearsal.
+    const first = untrack(() => rehearsalOf(r)?.name ?? r);
+    untrack(() => draft && (draft.value.repos = [first]));
   });
 
   const autoName = $derived.by(() => {
@@ -378,7 +398,7 @@
   </PageHeader>
 
   {#snippet nameField()}
-    <FormRow label="Name" for="{fid}-name" help="Lists and Activity show this name.">
+    <FormRow label="Name" for="{fid}-name" help="Name it after what it publishes, such as acme/app releases.">
       <Input id="{fid}-name" aria-describedby="{fid}-name-help" bind:value={v.name} oninput={() => (nameTouched = true)} />
     </FormRow>
     {#if !isNew}
@@ -386,7 +406,20 @@
     {/if}
   {/snippet}
 
+  {#snippet ticket()}
+    <AdmissionTicket
+      system={v.system}
+      {hand}
+      gh={v.gh}
+      jk={v.jk}
+      accepts={accepts(v, hand)}
+      repos={v.repos}
+      formatOf={(r) => repos.data?.find((x) => x.name === r)?.format}
+    />
+  {/snippet}
+
   {#snippet createRow()}
+    <div class="mb-4 w-full xl:hidden">{@render ticket()}</div>
     <Button type="submit" disabled={busy}>
       {#if busy}<Spinner />{/if}
       Create CI pipeline
@@ -395,6 +428,9 @@
     {#if error}<div class="w-full"><ErrorState inline {error} /></div>{/if}
   {/snippet}
 
+  <!-- The admission ticket sits beside the steps on a wide window, sticky under the top bar; on a
+       narrower one it sits above Create (a new pipeline) or after the form. -->
+  <div class="grid grid-cols-[minmax(0,1fr)] items-start gap-x-6 xl:grid-cols-[minmax(0,1fr)_22rem]">
   <FormPage>
     {#if noBaseURL && !accepts(v, hand).audience}
       <Alert.Root class="mb-6">
@@ -565,8 +601,7 @@
         {/if}
       </Area>
 
-      <Area n={isNew ? 3 : undefined} title="Repositories it can publish to">
-        {#snippet footer()}{#if isNew && steps === 3}{@render createRow()}{/if}{/snippet}
+      <Area n={isNew ? 3 : undefined} title="Repositories it can publish to" footer={isNew && steps === 3 ? createRow : undefined}>
         {#if repos.loading && !repos.data}
           <Loading rows={3} />
         {:else if repos.error && !repos.data}
@@ -582,7 +617,12 @@
         {:else}
           <div class="grid gap-1 sm:grid-cols-2">
             {#each sortedRepos as r (r.name)}
-              <OptionRow id="{fid}-repo-{r.name}" label={r.name} description={formats.title(r.format)}>
+              <OptionRow
+                id="{fid}-repo-{r.name}"
+                label={r.name}
+                description={rehearses(r) ? `Rehearsal for ${rehearses(r)}: publish here first` : formats.title(r.format)}
+              >
+                {#snippet icon()}<FormatIcon format={r.format} />{/snippet}
                 {#snippet control()}
                   <Checkbox id="{fid}-repo-{r.name}" checked={v.repos.includes(r.name)} onCheckedChange={(on) => setRepo(r.name, on === true)} />
                 {/snippet}
@@ -596,13 +636,16 @@
         <Area
           n={isNew ? 4 : undefined}
           title={v.system === "github" ? "Add the workflow to your repository" : "Add the Jenkinsfile to your repository"}
+          footer={isNew ? createRow : undefined}
         >
-          {#snippet footer()}{#if isNew}{@render createRow()}{/if}{/snippet}
-          <WorkflowSetup system={v.system} repos={v.repos} github={v.gh} />
+          <WorkflowSetup system={v.system} repos={v.repos} github={v.gh} formatOf={(r) => repos.data?.find((x) => x.name === r)?.format} />
         </Area>
       {/if}
     </form>
+    {#if !isNew}<div class="mt-(--section-gap) xl:hidden">{@render ticket()}</div>{/if}
   </FormPage>
+  <aside class="sticky top-20 hidden xl:block" aria-label="Preview">{@render ticket()}</aside>
+  </div>
 
   {#if !isNew}<SaveBar count={changes} onDiscard={discard} onSave={save} />{/if}
 

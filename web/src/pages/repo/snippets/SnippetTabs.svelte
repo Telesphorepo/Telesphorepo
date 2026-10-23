@@ -11,6 +11,7 @@
 -->
 <script lang="ts">
   import * as Tabs from "$lib/components/ui/tabs";
+  import { fadeEdges } from "$lib/fade";
   import SnippetBlock, { andList, mergeSame } from "./SnippetBlock.svelte";
   import type { Snippet, ToolLabel } from "$lib/api";
 
@@ -68,7 +69,8 @@
   {@render blocks(ids[0])}
 {:else if ids.length > 1}
   <Tabs.Root {value} onValueChange={choose}>
-    <div class="-mx-1 overflow-x-auto px-1 pb-1">
+    <!-- The row scrolls on a narrow screen, with no scrollbar and a fade where tabs are cut off; its 4px reach keeps the focus ring in view. -->
+    <div use:fadeEdges class="-mx-1 overflow-x-auto px-1 py-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       <Tabs.List aria-label={label} class={fill ? "w-full" : undefined}>
         {#each ids as c (c)}
           <Tabs.Trigger value={c} class={fill ? "min-w-0 flex-auto px-2" : "px-3"}>{labelOf(c)}</Tabs.Trigger>

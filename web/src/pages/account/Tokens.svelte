@@ -13,14 +13,12 @@
   import { auth } from "$lib/auth.svelte";
   import { api, type Proof, type PublishSession, type Token } from "$lib/api";
   import { Keyset, Resource, listOf } from "$lib/load.svelte";
-  import * as Table from "$lib/components/ui/table";
   import * as Select from "$lib/components/ui/select";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import PageHeader from "$lib/components/PageHeader.svelte";
   import Section from "$lib/components/Section.svelte";
-  import DataTable from "$lib/components/DataTable.svelte";
-  import Cell from "$lib/components/Cell.svelte";
+  import ItemList from "$lib/components/ItemList.svelte";
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
   import FeltTicket from "$lib/components/FeltTicket.svelte";
   import StatusBadge from "$lib/components/StatusBadge.svelte";
@@ -34,6 +32,7 @@
   import KeyRoundIcon from "@lucide/svelte/icons/key-round";
   import UploadIcon from "@lucide/svelte/icons/upload";
   import PlusIcon from "@lucide/svelte/icons/plus";
+  import FormatIcon from "$lib/components/FormatIcon.svelte";
   import { tokenSource, tokenState } from "./words";
 
   let {}: PageProps = $props();
@@ -86,6 +85,7 @@
   let chooseOpen = $state(false);
   let factorOpen = $state(false);
   let chosen = $state("");
+  const chosenFormat = $derived(writable.find((r) => r.name === chosen)?.format);
   let created = $state<PublishSession | null>(null);
   let ended = $state(false);
   let endOpen = $state(false);
@@ -158,42 +158,30 @@
         <div><Button variant="outline" onclick={() => (createdRead = null)}>Done</Button></div>
       </div>
     {/if}
-    <DataTable
-      source={listOf(tokens)}
-      caption="Read tokens"
-      key={(t) => t.id}
-      columns={[
-        { label: "Name", grow: true },
-        { label: "Created", align: "right", hideOnPhone: true },
-        { label: "Expires", align: "right" },
-        { label: "Last used", align: "right", hideOnPhone: true },
-        { label: "", srLabel: "Actions" },
-      ]}
-    >
-      {#snippet row(t)}
-        <Cell grow strong text={t.name} />
-        <Cell num muted hideOnPhone><RelativeTime at={t.created_at} /></Cell>
-        <Cell num muted><RelativeTime at={t.expires_at} empty="Never" /></Cell>
-        <Cell num muted hideOnPhone><RelativeTime at={t.last_used_at} empty="Never" /></Cell>
-        <Cell actions>
-          <Button
-            variant="ghost"
-            size="sm"
-            class="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-            aria-label="Revoke {t.name}"
-            onclick={() => {
-              revoking = t;
-              revokeOpen = true;
-            }}>Revoke</Button
-          >
-        </Cell>
+    <ItemList source={listOf(tokens)} caption="Read tokens" key={(t) => t.id}>
+      {#snippet title(t)}{t.name}{/snippet}
+      {#snippet meta(t)}
+        {#if !t.expires_at}never expires{:else}{new Date(t.expires_at) < new Date() ? "expired" : "expires"} <RelativeTime at={t.expires_at} />{/if}
+        · {#if t.last_used_at}used <RelativeTime at={t.last_used_at} />{:else}never used{/if}
+      {/snippet}
+      {#snippet trailing(t)}
+        <Button
+          variant="ghost"
+          size="sm"
+          class="hover:bg-destructive/10 hover:text-destructive"
+          aria-label="Revoke {t.name}"
+          onclick={() => {
+            revoking = t;
+            revokeOpen = true;
+          }}>Revoke</Button
+        >
       {/snippet}
       {#snippet empty()}
-        <CompactEmpty icon={KeyRoundIcon} text="None yet. Create one for each build or script that downloads.">
+        <CompactEmpty icon={KeyRoundIcon} text="None yet. Give each build or script its own.">
           <Button size="sm" variant="outline" onclick={startRead}><PlusIcon />New read token</Button>
         </CompactEmpty>
       {/snippet}
-    </DataTable>
+    </ItemList>
   {/if}
 </Section>
 
@@ -240,46 +228,33 @@
             </p>
             <div class="flex flex-wrap gap-2">
               <Button variant="outline" onclick={done}>Done</Button>
-              <Button variant="ghost" class="text-muted-foreground hover:bg-destructive/10 hover:text-destructive" onclick={() => (endOpen = true)}>End it now</Button>
+              <Button variant="ghost" class="hover:bg-destructive/10 hover:text-destructive" onclick={() => (endOpen = true)}>End it now</Button>
             </div>
           {/if}
         </div>
       </div>
     {/if}
-    <DataTable
-      source={sessions}
-      caption="Your publish tokens"
-      key={(s) => s.id}
-      href={(s) => href(repoPath(s.repo))}
-      columns={[
-        { label: "Repository", grow: true },
-        { label: "From", hideOnPhone: true },
-        { label: "Started", align: "right", hideOnPhone: true },
-        { label: "Ends", align: "right", hideOnPhone: true },
-        { label: "Status" },
-      ]}
-    >
-      {#snippet row(s)}
+    <ItemList source={sessions} caption="Your publish tokens" key={(s) => s.id} href={(s) => href(repoPath(s.repo))}>
+      {#snippet title(s)}{s.repo}{/snippet}
+      {#snippet meta(s)}
+        {tokenSource(s)} · started <RelativeTime at={s.created_at} /> · {s.state === "open" ? "ends" : "ended"}
+        <RelativeTime at={s.closed_at ?? s.expires_at} />
+      {/snippet}
+      {#snippet trailing(s)}
         {@const st = tokenState(s)}
-        <Table.Cell class="w-full max-w-0 min-w-40">
-          <a href={href(repoPath(s.repo))} class="block truncate rounded-sm font-medium outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50">{s.repo}</a>
-        </Table.Cell>
-        <Cell hideOnPhone muted text={tokenSource(s)} />
-        <Cell num muted hideOnPhone><RelativeTime at={s.created_at} /></Cell>
-        <Cell num muted hideOnPhone><RelativeTime at={s.closed_at ?? s.expires_at} /></Cell>
-        <Cell><StatusBadge tone={st.tone}>{st.word}</StatusBadge></Cell>
+        <StatusBadge tone={st.tone}>{st.word}</StatusBadge>
       {/snippet}
       {#snippet empty()}
         <CompactEmpty
           icon={UploadIcon}
           text={noRepo
             ? "You cannot publish to a repository yet. Ask a person who manages its access for the Publish permission."
-            : "A token shows here each time you, the Telesphorepo CLI or this site publishes."}
+            : "None yet. The Telesphorepo CLI and this site create one for each publish."}
         >
           {#if writable.length}<Button variant="outline" size="sm" onclick={startPublish}><PlusIcon />New publish token</Button>{/if}
         </CompactEmpty>
       {/snippet}
-    </DataTable>
+    </ItemList>
   {/if}
 </Section>
 
@@ -301,6 +276,8 @@
   onConfirm={revoke}
 />
 
+{#snippet chosenIcon()}<FormatIcon format={chosenFormat ?? ""} />{/snippet}
+
 <ShortFormDialog
   bind:open={chooseOpen}
   title="New publish token"
@@ -311,12 +288,14 @@
 >
   <FormField label="Repository" for="token-repo">
     <Select.Root type="single" bind:value={chosen}>
-      <Select.Trigger id="token-repo" class="w-full">
+      <Select.Trigger id="token-repo" class="w-full" icon={chosenFormat ? chosenIcon : undefined}>
         <span class="truncate">{chosen || "Choose a repository"}</span>
       </Select.Trigger>
       <Select.Content>
         {#each writable as r (r.name)}
-          <Select.Item value={r.name} label={r.name} />
+          <Select.Item value={r.name} label={r.name}>
+            {#snippet icon()}<FormatIcon format={r.format} />{/snippet}
+          </Select.Item>
         {/each}
       </Select.Content>
     </Select.Root>

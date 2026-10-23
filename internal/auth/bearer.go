@@ -34,7 +34,11 @@ const (
 // session of the repo that Write and Delete need. Only the publish session of the bearer's own
 // credential can be a scope session.
 type Scope struct {
-	Repo    string
+	Repo string
+	// RepoID is the repo that Repo names now, resolved through redirects when the token is
+	// verified (0: no repo of the name). Scopes match a repo by id, so a token keeps working
+	// after a rename of its repo.
+	RepoID  int64
 	Ops     []Op
 	Session int64
 	// Open is the publish session of Session, loaded again on each request (nil without one).
@@ -44,10 +48,10 @@ type Scope struct {
 // Allows reports whether the scope holds op.
 func (s *Scope) Allows(op Op) bool { return slices.Contains(s.Ops, op) }
 
-// ScopeOf returns the scope of p for repo, or nil.
-func (p *Principal) ScopeOf(repo string) *Scope {
+// ScopeOf returns the scope of p for the repo id, or nil.
+func (p *Principal) ScopeOf(repo int64) *Scope {
 	for i := range p.Scopes {
-		if p.Scopes[i].Repo == repo {
+		if p.Scopes[i].RepoID != 0 && p.Scopes[i].RepoID == repo {
 			return &p.Scopes[i]
 		}
 	}
@@ -57,7 +61,7 @@ func (p *Principal) ScopeOf(repo string) *Scope {
 // For returns the principal that the access engine uses for repo: for a core bearer token whose
 // scope of repo has an open publish session, a copy that carries that session (CredPublish);
 // else p.
-func (p *Principal) For(repo string) *Principal {
+func (p *Principal) For(repo int64) *Principal {
 	if p == nil || p.Scopes == nil {
 		return p
 	}
@@ -75,7 +79,7 @@ func (p *Principal) For(repo string) *Principal {
 // of the credential behind the token (the same as that credential over HTTP Basic); else p. The
 // copy only reads members of a group that the token reads: the engine never sees it for any
 // other request.
-func (p *Principal) InGroup(group string) *Principal {
+func (p *Principal) InGroup(group int64) *Principal {
 	if p == nil || p.Scopes == nil {
 		return p
 	}
@@ -280,6 +284,15 @@ func (s *Service) verifyBearer(ctx context.Context, tok, upload string) (*Princi
 	p.Scopes = []Scope{}
 	for _, sc := range pl.Scopes {
 		x := Scope{Repo: sc.Repo, Ops: sc.Ops, Session: sc.Session}
+		// The scope names the repo as it was named at issue: a redirect of it now resolves to it.
+		repo, err := s.repos.ByName(ctx, sc.Repo)
+		switch {
+		case errors.Is(err, repos.ErrNotFound):
+		case err != nil:
+			return nil, err
+		default:
+			x.RepoID = repo.ID
+		}
 		if sc.Session != 0 {
 			var open *PublishSession
 			switch {
@@ -297,14 +310,7 @@ func (s *Service) verifyBearer(ctx context.Context, tok, upload string) (*Princi
 			default:
 				return nil, ErrBadCredentials
 			}
-			repo, err := s.repos.ByName(ctx, sc.Repo)
-			if errors.Is(err, repos.ErrNotFound) {
-				return nil, ErrBadCredentials
-			}
-			if err != nil {
-				return nil, err
-			}
-			if repo.ID != open.RepoID {
+			if x.RepoID == 0 || x.RepoID != open.RepoID {
 				return nil, ErrBadCredentials
 			}
 			x.Open = open

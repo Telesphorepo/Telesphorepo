@@ -48,7 +48,7 @@
 {:else}
   <Step n={1} title="Create a read token">
     {#snippet actions()}
-      <Button variant="outline" href={href("/settings/tokens")}><KeyRoundIcon />Create a read token</Button>
+      <Button variant="outline" href={href("/account/tokens")}><KeyRoundIcon />Open Tokens</Button>
     {/snippet}
     <p class="text-body text-muted-foreground">Your build signs in with your username and a read token.</p>
   </Step>

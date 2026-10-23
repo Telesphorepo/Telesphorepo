@@ -204,28 +204,41 @@ export function conditionsOf(system: System, claims: Record<string, string[]>): 
 export function ciSystemTitle(issuer: string): string {
   const s = systemOf(issuer);
   if (s !== "other") return systemTitle[s];
-  try {
-    return new URL(issuer).host || issuer;
-  } catch {
-    return issuer;
-  }
+  return hostOf(issuer) || issuer;
 }
 
-const list = (xs: string[]) => (xs.length <= 1 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
+/** One condition of a pipeline as the cards and rows show it: a TicketBadge with the icon of its kind. */
+export type ConditionItem = { kind: "branch" | "tag" | "workflow" | "job" | "condition"; value: string; label: string };
 
-/** What a pipeline accepts, in a few words: "acme/app, branch main, release.yml". */
-export function acceptsText(t: Pick<Trust, "issuer" | "audience" | "jwks" | "claims">): string {
+/**
+ * Who a pipeline admits and on which conditions: the GitHub repository with its branches, tags
+ * and workflow file (`every` when it takes every branch and tag), the Jenkins host with its jobs,
+ * or each value of the token conditions.
+ */
+export function admitsOf(t: Pick<Trust, "issuer" | "audience" | "jwks" | "claims">): { who: string; items: ConditionItem[]; every: boolean } {
   const g = readGitHub(t);
   if (g) {
-    const parts = [g.repo];
-    if (g.branches.length) parts.push(`${g.branches.length === 1 ? "branch" : "branches"} ${list(g.branches)}`);
-    if (g.tags.length) parts.push(`${g.tags.length === 1 ? "tag" : "tags"} ${list(g.tags)}`);
-    if (!g.branches.length && !g.tags.length) parts.push("every branch and tag");
-    if (g.workflow) parts.push(g.workflow);
-    return parts.join(", ");
+    const items: ConditionItem[] = [
+      ...g.branches.map((value) => ({ kind: "branch" as const, value, label: "Branch" })),
+      ...g.tags.map((value) => ({ kind: "tag" as const, value, label: "Tag" })),
+    ];
+    if (g.workflow) items.push({ kind: "workflow", value: g.workflow, label: "Workflow file" });
+    return { who: g.repo, items, every: !g.branches.length && !g.tags.length };
   }
   const j = readJenkins(t);
-  if (j) return list(j.jobs);
-  const n = Object.keys(t.claims).length;
-  return `${n} ${n === 1 ? "condition" : "conditions"}`;
+  if (j) return { who: hostOf(j.url), items: j.jobs.map((value) => ({ kind: "job", value, label: "Job" })), every: false };
+  const system = systemOf(t.issuer);
+  const items = conditionsOf(system, t.claims).flatMap((c) =>
+    c.values.map((value) => ({ kind: "condition" as const, value, label: conditionField(system, c.key).label })),
+  );
+  return { who: "", items, every: false };
+}
+
+/** The host of an address, or the text itself when it is not one. */
+export function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
 }

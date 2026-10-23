@@ -1,5 +1,5 @@
 <!--
-  The shell: loads the user and the formats, matches the hash route against the pages of the UI
+  The shell: loads the user, the formats and the server's identity (name and logo), matches the hash route against the pages of the UI
   modules, checks access (auth.allows), and renders the page inside the app shell. Pages never check the route access themselves (a repository page
   checks the caller's permissions on that repository).
 -->
@@ -12,6 +12,7 @@
   import { navigate, router, type PageProps } from "$lib/router.svelte";
   import type { PageDef } from "./modules/types";
   import { formats } from "$lib/formats/registry.svelte";
+  import { brand } from "$lib/brand.svelte";
   import { current } from "$lib/current.svelte";
   import { setupPaths } from "./modules";
   import AppShell from "$lib/layouts/AppShell.svelte";
@@ -25,6 +26,7 @@
 
   auth.load();
   formats.load();
+  brand.load();
 
   const matched = $derived(current.match);
 
@@ -49,7 +51,7 @@
   });
 
   $effect(() => {
-    document.title = matched ? `${matched.route.title} · Telesphorepo` : "Telesphorepo";
+    document.title = matched ? `${matched.route.title} · ${brand.name}` : brand.name;
   });
 
   // A signed-in person without the permission of the route.
@@ -78,13 +80,13 @@
 <UnsavedGuard />
 
 <Tooltip.Provider delayDuration={400}>
-  {#if auth.ready}
-    <AppShell settings={matched?.route.layout === "settings"}>
+  {#if auth.ready && brand.ready}
+    <AppShell sidebar={matched && matched.route.layout !== "app" ? matched.route.layout : undefined}>
       {#if current.redirect}
         <Loading rows={4} />
       {:else if !matched}
         <EmptyState icon={CompassIcon} title="This page does not exist" description="Check the address, or start from the repositories.">
-          <Button href="#/">Open repositories</Button>
+          <Button href="#/browse">Open repositories</Button>
         </EmptyState>
       {:else if forbidden}
         <EmptyState icon={ShieldIcon} title="You cannot open this page" description="It needs a permission that you do not hold. Ask an administrator if you need it." />

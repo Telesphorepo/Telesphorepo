@@ -40,7 +40,7 @@ func (s *snippets) setup() {
 	note := "npm, pnpm and bun read the .npmrc of the project."
 	if s.private() {
 		npmrc += "//" + strings.TrimPrefix(strings.TrimPrefix(s.registry, "https://"), "http://") + ":_authToken=${NPM_TOKEN}\n"
-		note += " Create a read token on Settings › Tokens and set NPM_TOKEN to it."
+		note += " Create a read token on Your account › Tokens and set NPM_TOKEN to it."
 	}
 	if s.repo.Kind == repos.KindHosted {
 		note += " This repository holds your own packages only: to install public packages through the same URL, use a group of it and a proxy of registry.npmjs.org."
@@ -135,7 +135,7 @@ func (h *Handler) ArtifactUsage(ctx context.Context, repo, from *repos.Repo, bas
 }
 
 // ciNote goes under the CI files of the npm tools.
-const ciNote = "The CLI uses the job's identity token, so the job stores no secret. Commit telesphorepo.toml first: Set up a project on this tab writes it."
+const ciNote = "Commit telesphorepo.toml first: Set up a project on this tab writes it."
 
 // tools are the package managers that publish to npm repos, each through telesphorepo publish.
 func tools() []format.Tool {

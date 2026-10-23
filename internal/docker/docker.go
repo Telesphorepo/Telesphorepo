@@ -129,6 +129,7 @@ func Module() module.Module {
 				OnCommitted:   f.onCommitted,
 				AfterCommit:   f.afterCommit,
 				OnRemoved:     f.onRemoved,
+				OnRepoChange:  f.onRepoChange,
 				Classify:      f.classify,
 				ProxyProbe:    proxyProbe,
 				RemoteAuth:    f.remoteAuth,
@@ -141,6 +142,7 @@ func Module() module.Module {
 				Tools:         []format.Tool{f.dockerTool()},
 				Publish:       format.PublishHelper,
 				Importer:      f.importer(),
+				Carry:         carry(),
 				UI:            ui,
 				// Tags (_tags/) match no immutable glob, so they are mutable.
 				Edge: &format.EdgeSpec{Shape: format.EdgeOCI, Immutable: []string{"**/_manifests/sha256/*", "**/_blobs/sha256/*"}},

@@ -127,3 +127,28 @@ SELECT DISTINCT repo_id, grp FROM rebuilds ORDER BY repo_id, grp;
 -- Startup: the newest mark, so the rebuild clock never goes back.
 -- name: MaxRebuildMark :one
 SELECT CAST(COALESCE(MAX(marked_at), 0) AS INTEGER) AS max_mark FROM rebuilds;
+-- Repository redirects (internal/repos): a name that answers for a repo. Resolving a name reads
+-- repos first (GetRepoByName), then this point lookup by the key.
+-- name: GetRepoRedirect :one
+SELECT name, repo_id, created_at, last_used_at FROM repo_redirects WHERE name = ?;
+
+-- The redirects of one repo by name, through repo_redirects_repo.
+-- name: ListRepoRedirectsOf :many
+SELECT name, repo_id, created_at, last_used_at FROM repo_redirects WHERE repo_id = ? ORDER BY name;
+
+-- Keyset page of every redirect by name (the edge reconcile).
+-- name: ListRepoRedirects :many
+SELECT name, repo_id FROM repo_redirects WHERE name > sqlc.arg(after) ORDER BY name LIMIT sqlc.arg(limit);
+
+-- name: InsertRepoRedirect :exec
+INSERT INTO repo_redirects (name, repo_id, created_at) VALUES (?, ?, ?);
+
+-- name: DeleteRepoRedirect :execrows
+DELETE FROM repo_redirects WHERE name = ? AND repo_id = ?;
+
+-- A merge gives every redirect of a repo to the repo it merges into, through repo_redirects_repo.
+-- name: MoveRepoRedirects :execrows
+UPDATE repo_redirects SET repo_id = sqlc.arg(to_id) WHERE repo_id = sqlc.arg(from_id);
+
+-- name: RenameRepo :exec
+UPDATE repos SET name = ? WHERE id = ?;

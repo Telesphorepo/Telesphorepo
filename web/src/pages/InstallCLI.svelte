@@ -10,14 +10,14 @@
   import { href } from "$lib/router.svelte";
   import { api, ApiError, type CLIArchive } from "$lib/api";
   import { Resource, listOf } from "$lib/load.svelte";
-  import { buttonVariants } from "$lib/components/ui/button";
+  import { Button } from "$lib/components/ui/button";
   import PageHeader from "$lib/components/PageHeader.svelte";
   import TabNav from "$lib/components/TabNav.svelte";
   import Section from "$lib/components/Section.svelte";
   import CodeSnippet from "$lib/components/CodeSnippet.svelte";
   import CodeBlock from "$lib/components/CodeBlock.svelte";
-  import DataTable from "$lib/components/DataTable.svelte";
-  import Cell from "$lib/components/Cell.svelte";
+  import ItemList from "$lib/components/ItemList.svelte";
+  import CopyButton from "$lib/components/CopyButton.svelte";
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
@@ -128,33 +128,29 @@
 
   <Section title="Install by hand" description="Pick the archive for your computer, check its SHA-256 and unpack it, if you would rather not run a script.">
     <div class="flex flex-col gap-6">
-      <DataTable
+      <ItemList
         source={listOf(archives, ofOS)}
         caption="CLI archives"
         key={(a) => a.name}
         href={(a) => href("/install", { os, cpu: a.arch })}
         selected={(a) => a.arch === cpu}
-        columns={[
-          { label: "Archive", grow: true },
-          { label: "CPU" },
-          { label: "SHA-256", hideOnPhone: true },
-          { label: "", srLabel: "Download" },
-        ]}
       >
-        {#snippet row(a)}
-          <Cell grow strong>
-            <a href={href("/install", { os, cpu: a.arch })} class="block truncate outline-none focus-visible:underline">{a.name}</a>
-          </Cell>
-          <Cell muted text={cpuLabel(a)} />
-          <Cell hideOnPhone muted class="tabular-nums" text={a.sha256} copy copyLabel="SHA-256 of {a.name}" />
-          <Cell actions>
-            <a href={a.url} download={a.name} class={buttonVariants({ variant: "ghost", size: "sm" })}><DownloadIcon />Download</a>
-          </Cell>
+        {#snippet leading()}<PackageIcon class="size-5" />{/snippet}
+        {#snippet title(a)}{a.name}{/snippet}
+        {#snippet meta(a)}
+          <span class="flex min-w-0 items-center gap-1">
+            <span class="shrink-0">{cpuLabel(a)} ·</span>
+            <span class="truncate tabular-nums" title={a.sha256}>SHA-256 {a.sha256.slice(0, 16)}…</span>
+            <CopyButton value={a.sha256} label="Copy the SHA-256 of {a.name}" size="icon-xs" />
+          </span>
+        {/snippet}
+        {#snippet trailing(a)}
+          <Button variant="ghost" size="sm" href={a.url} download={a.name}><DownloadIcon />Download</Button>
         {/snippet}
         {#snippet empty()}
           <CompactEmpty icon={PackageIcon} title="Archives" state="None for this system" text="This server was built without a CLI for this operating system." />
         {/snippet}
-      </DataTable>
+      </ItemList>
       {#if chosen}
         <div class="flex flex-col gap-3">
           <CodeBlock title={windows ? `PowerShell, for ${chosen.name}` : `Terminal, for ${chosen.name}`} code={commands} />

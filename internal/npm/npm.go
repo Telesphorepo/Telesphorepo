@@ -81,6 +81,7 @@ func Module() module.Module {
 				Publish:       format.PublishCLI,
 				Upload:        h.uploadSpec(),
 				Importer:      &format.Importer{Sources: []string{"npm"}, Target: importTarget, Store: h.importStore},
+				Carry:         h.carry(),
 				UI:            ui,
 				Edge:          &format.EdgeSpec{Shape: format.EdgeStandard, Immutable: []string{"**/-/*.tgz"}},
 			})

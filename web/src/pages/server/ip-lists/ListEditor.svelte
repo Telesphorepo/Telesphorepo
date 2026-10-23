@@ -23,8 +23,8 @@
   import FormSection from "$lib/components/FormSection.svelte";
   import FormGrid from "$lib/components/FormGrid.svelte";
   import FormRow from "$lib/components/FormRow.svelte";
-  import DataTable from "$lib/components/DataTable.svelte";
-  import Cell from "$lib/components/Cell.svelte";
+  import ItemList from "$lib/components/ItemList.svelte";
+  import CopyButton from "$lib/components/CopyButton.svelte";
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import Loading from "$lib/components/Loading.svelte";
@@ -36,6 +36,7 @@
   import { Paged } from "./paged.svelte";
   import NetworkIcon from "@lucide/svelte/icons/network";
   import DatabaseIcon from "@lucide/svelte/icons/database";
+  import WaypointsIcon from "@lucide/svelte/icons/waypoints";
   import RefreshIcon from "@lucide/svelte/icons/refresh-cw";
   import XIcon from "@lucide/svelte/icons/x";
 
@@ -135,13 +136,13 @@
   }
 
   // What uses the list: a row per repository and rule, and the trusted proxies.
-  type Use = { key: string; label: string; href: string; scope: string };
+  type Use = { key: string; label: string; href: string; scope: string; proxy: boolean };
   const uses = $derived.by((): Use[] => {
     const u = list.data?.used_by;
     if (!u) return [];
     return [
-      ...u.repos.map((r) => ({ key: r.repo + r.scope, label: r.repo, href: repoAccessHref(r.repo), scope: r.scope === "read" ? "Downloads" : "Publishes" })),
-      ...(u.trusted_proxies ? [{ key: "proxy", label: "Network and proxy", href: href("/settings/proxy"), scope: "Trusted proxies" }] : []),
+      ...u.repos.map((r) => ({ key: r.repo + r.scope, label: r.repo, href: repoAccessHref(r.repo), scope: r.scope === "read" ? "Downloads" : "Publishes", proxy: false })),
+      ...(u.trusted_proxies ? [{ key: "proxy", label: "Network and proxy", href: href("/settings/proxy"), scope: "Trusted proxies", proxy: true }] : []),
     ];
   });
   const usesSource: TableSource<Use> = {
@@ -151,45 +152,37 @@
     loading: false,
     error: "",
   };
-  const link = "rounded-sm font-medium text-link outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50";
   const quietDanger = "hover:bg-destructive/10 hover:text-destructive";
 </script>
 
 {#snippet usedBy()}
   <Section title="Used by">
-    <DataTable source={usesSource} caption="What uses this list" key={(u) => u.key} href={(u) => u.href} columns={[{ label: "Where", grow: true }, { label: "Allows" }]}>
-      {#snippet row(u)}
-        <Cell grow><a href={u.href} class={link}>{u.label}</a></Cell>
-        <Cell muted text={u.scope} />
-      {/snippet}
+    <ItemList source={usesSource} caption="What uses this list" key={(u) => u.key} href={(u) => u.href}>
+      {#snippet leading(u)}{#if u.proxy}<WaypointsIcon class="size-5" />{:else}<DatabaseIcon class="size-5" />{/if}{/snippet}
+      {#snippet title(u)}{u.label}{/snippet}
+      {#snippet meta(u)}{u.scope}{/snippet}
       {#snippet empty()}
         <CompactEmpty icon={DatabaseIcon} text="Choose this list under From where on a repository's Access tab.">
           <Button variant="outline" size="sm" href={href("/settings/repositories")}>All repositories</Button>
         </CompactEmpty>
       {/snippet}
-    </DataTable>
+    </ItemList>
   </Section>
 {/snippet}
 
-{#snippet rangeTable(editable: boolean)}
-  <DataTable
-    source={ranges}
-    caption="Address ranges"
-    key={(r) => r}
-    columns={editable ? [{ label: "Address range", grow: true }, { label: "", srLabel: "Remove" }] : [{ label: "Address range", grow: true }]}
-  >
-    {#snippet row(r)}
-      <Cell grow text={r} copy copyLabel="Copy {r}" />
+{#snippet rangeList(editable: boolean)}
+  <ItemList source={ranges} caption="Address ranges" key={(r) => r}>
+    {#snippet title(r)}<span class="tabular-nums">{r}</span>{/snippet}
+    {#snippet trailing(r)}
+      <CopyButton value={r} label="Copy {r}" />
       {#if editable}
-        <Cell actions>
-          <Button variant="ghost" size="icon-sm" class={quietDanger} aria-label="Remove {r}" onclick={() => removeRange(r)}><XIcon /></Button>
-        </Cell>
+        <Button variant="ghost" size="icon-sm" class={quietDanger} aria-label="Remove {r}" onclick={() => removeRange(r)}><XIcon /></Button>
       {/if}
     {/snippet}
     {#snippet empty()}
-      <CompactEmpty icon={NetworkIcon} text={editable ? "Paste addresses below. An empty list allows no address." : "The first refresh fills the list."} />
+      <CompactEmpty icon={NetworkIcon} text={editable ? "An empty list allows no address." : "The first refresh fills the list."} />
     {/snippet}
-  </DataTable>
+  </ItemList>
 {/snippet}
 
 {#if list.loading && list.data === undefined}
@@ -216,7 +209,7 @@
       </span>
     {/snippet}
     {#if l.error || refreshError}<div class="mb-4"><ErrorState inline error="The last refresh failed: {refreshError || l.error}" /></div>{/if}
-    {@render rangeTable(false)}
+    {@render rangeList(false)}
   </Section>
   {@render usedBy()}{:else if draft}
   {@const v = draft.value}
@@ -242,7 +235,7 @@
             <Input id="{id}-name" spellcheck={false} aria-describedby="{id}-name-help" aria-invalid={nameError ? true : undefined} bind:value={v.name} />
             {#snippet more()}Use lowercase letters, digits, dots, dashes and underscores. When you rename the list, every repository that uses it uses the new name.{/snippet}
           </FormRow>
-          <FormRow label="Title" for="{id}-title" help="Lists show this title, or the name when the title is empty.">
+          <FormRow label="Title" for="{id}-title" help="A readable name, such as Berlin office. Leave it empty to use the name.">
             <Input id="{id}-title" aria-describedby="{id}-title-help" bind:value={v.title} />
           </FormRow>
           <FormRow label="Description" for="{id}-desc" help="Say what the addresses are, for example the office in Berlin.">
@@ -256,7 +249,7 @@
           {#if v.ranges.length}<Button variant="ghost" size="sm" class={quietDanger} onclick={() => (v.ranges = [])}>Remove all</Button>{/if}
         {/snippet}
         <div class="flex flex-col gap-6">
-          {@render rangeTable(true)}
+          {@render rangeList(true)}
           <RangePaste id="{id}-paste" label="Add addresses" onAdd={addRanges} onReplace={v.ranges.length ? (r) => (v.ranges = r) : undefined} />
         </div>
         {#snippet footer()}

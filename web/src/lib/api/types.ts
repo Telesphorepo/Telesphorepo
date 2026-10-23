@@ -309,6 +309,14 @@ export type Repo = {
   proxy?: RepoProxy;
 };
 
+/** An old name of a repository that still answers for it (GET /api/repos/{name}/redirects). */
+export type RepoRedirect = {
+  name: string;
+  created_at: string;
+  /** The last request through the name; null: never used. */
+  last_used_at: string | null;
+};
+
 /** The remote of a new proxy, or the changes to it. Send username and password together; username "" removes them. */
 export type ProxyInput = {
   remote_url?: string;
@@ -642,7 +650,10 @@ export type SearchHit = {
 
 // --- settings ---
 
-export type SettingType = "string" | "bool" | "int" | "size" | "duration" | "list" | "map";
+/** An image (the server logo) reports only whether it is set, like a secret; its own route changes it. */
+export type SettingType = "string" | "bool" | "int" | "size" | "duration" | "list" | "map" | "image";
+/** GET /api/identity: the name of the server, the URL of its logo, and whether either is set. */
+export type Identity = { name: string; logo: string | null; customized: boolean };
 export type SettingSource = "stored" | "env" | "default";
 /** A secret's value is never sent: only whether it is set. */
 export type SecretValue = { set: boolean };
@@ -854,6 +865,10 @@ export type NexusSync = {
   repos_done: number;
   /** The repository that copies now; "" when none. */
   current_repo: string;
+  /** The merge whose final sync this is (trigger cutover), 0 for none; its repos at the start. */
+  merge_id: number;
+  merge_from: string;
+  merge_into: string;
   repos?: NexusSyncRepo[];
 };
 export type NexusSyncRepo = {
@@ -897,6 +912,10 @@ export type NexusSource = {
   repo_count: number;
   /** Seconds: the live nexus.sync_interval setting. */
   sync_interval: number;
+  /** Mapped hosted repositories that still copy from Nexus. */
+  copying: number;
+  /** Mapped hosted repositories that switched over: uploads go to them here. */
+  switched_over: number;
 };
 export type NexusSourceRepo = {
   name: string;
@@ -928,7 +947,107 @@ export type NexusSourceRepo = {
   questions: ImportQuestion[];
   /** What the target format read from the repository's settings, e.g. {key_in_source: true}. */
   facts: Record<string, unknown>;
+  /** A mapped hosted repository that switched over; null while it copies from Nexus. */
+  switch_over: NexusSwitchOver | null;
+  /** The rehearsal repositories of the repository here. */
+  rehearsals: string[];
+  /** The repositories that projects move to from the repository here (Move it project by project). */
+  moving: string[];
+  /** A merge into the repository here that runs or failed; 0 for none. */
+  merge_id: number;
 };
+/**
+ * A path that both repositories hold with other bytes, where the format keeps a file fixed (a
+ * release, a Docker tag), or a label of the format (an npm dist-tag) with other values. `path` is
+ * the key of its choice ("label:<key>" for a label).
+ */
+export type NexusMergeConflict = {
+  kind: "file" | "label";
+  /** A label for people, e.g. "lib: dist-tag beta"; "" for a file. */
+  title: string;
+  value: string;
+  target_value: string;
+  path: string;
+  size: number;
+  sha256: string;
+  updated_at: string;
+  target_size: number;
+  target_sha256: string;
+  target_updated_at: string;
+};
+/** What a merge of `from` into `into` would do, from the files of both now (GET /api/nexus/merges/plan). */
+export type NexusMergePlan = {
+  from: string;
+  into: string;
+  format: string;
+  /** The Nexus server that copies into `into`. */
+  source_id: number;
+  source_name: string;
+  /** `into` still copies from Nexus: the merge runs a final sync first and switches it over after. */
+  copying: boolean;
+  files: number;
+  copy: number;
+  skip: number;
+  rebuild: number;
+  /** Labels of the format (npm dist-tags) that `into` takes from `from`, conflicts aside. */
+  labels: number;
+  /** The first 1000 conflicts by path; `conflict_count` counts them all. */
+  conflicts: NexusMergeConflict[];
+  conflict_count: number;
+  /** Files the format cannot take from another repository: a merge with any does not start. */
+  blocked: { path: string; reason: string }[];
+  blocked_count: number;
+  people: string[];
+  pipelines: string[];
+  groups: string[];
+  from_redirects: string[];
+  into_redirects: string[];
+  /** Why the merge cannot start now; "" when it can. */
+  busy: string;
+  /** A merge into `into` that runs or failed; 0 for none. */
+  merge_id: number;
+};
+export type NexusMergeChoice = "keep" | "take";
+export type NexusMergeInput = {
+  from: string;
+  into: string;
+  keep: "target" | "source";
+  choices: Record<string, NexusMergeChoice>;
+  otherwise: NexusMergeChoice | "";
+};
+/** A merge (GET /api/nexus/merges/{id}). */
+export type NexusMerge = {
+  id: number;
+  /** The names of the two repositories when the merge started. */
+  from: string;
+  into: string;
+  /** The merged repository's name now; "" when it is gone. */
+  name: string;
+  /** The name that answers for the merged repository after the merge. */
+  redirect: string;
+  keep: "target" | "source";
+  format: string;
+  source_id: number;
+  source_name: string;
+  state: "running" | "failed" | "done" | "stopped";
+  step: "sync" | "copy" | "access" | "switch" | "retire" | "rename" | "done";
+  error: string;
+  /** The final sync from Nexus; null when the target copied no more and needed none. */
+  sync_id: number | null;
+  files: number;
+  done: number;
+  copied: number;
+  skipped: number;
+  rebuilt: number;
+  kept: number;
+  taken: number;
+  groups: string[];
+  started_by: string;
+  started_at: string;
+  finished_at: string | null;
+};
+/** The switch-over of one repository: its final sync and the files that sync did not copy. */
+export type NexusSwitchOver = { sync_id: number; failed: number; switched_at: string };
 /** A question of the target format of an import (format.Importer Plan). */
 export type ImportQuestion = {
   key: string;
@@ -1044,6 +1163,8 @@ export type AuditEvent = {
   at: string;
   /** Username, session or subject that acted. */
   actor: string;
+  /** The person who acted; null when the server or a CI job acted. */
+  actor_user_id: number | null;
   action: string;
   repo: string;
   target: string;
@@ -1051,9 +1172,25 @@ export type AuditEvent = {
   detail: Record<string, unknown> | null;
   ip: string;
 };
-export type AuditFilter = { action?: string; repo?: string };
+/**
+ * GET /api/audit filters: action, repo (a name), actor (a username: the person who acted), since
+ * and until (RFC 3339: the events at or after since and before until).
+ */
+export type AuditFilter = { action?: string; repo?: string; actor?: string; since?: string; until?: string };
+/** GET /api/stats: the downloads of each day of the window (UTC days, oldest first) and the top repositories. */
+export type DownloadStats = {
+  days: { day: string; downloads: number; bytes: number }[];
+  repos: { name: string; format: string; downloads: number; bytes: number }[];
+  downloads: number;
+  bytes: number;
+};
 /** GET /api/audit/actions: an action of the audit log with its label and permission subsystem. */
 export type AuditAction = { id: string; label: string; subsystem: string };
+
+/** One released entry of the change log: what changed in a scope, and which side (needs) must be new. */
+export type ChangeEntry = { id?: string; version: string; scope: string; needs: string; summary: string };
+/** GET /api/changes: the version of the server and the entries of its change log. */
+export type Changes = { version: string; changes: ChangeEntry[] };
 /** GET and PUT /api/network/trusted-proxies: the IP lists that the trusted proxies include. */
 export type TrustedProxyLists = {
   lists: { id: number; name: string }[];

@@ -15,6 +15,7 @@ import (
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
+	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/db"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/nexus/dbq"
@@ -31,6 +32,7 @@ var (
 	ErrNotRunning = errors.New("the sync is not running")
 	ErrCutOver    = errors.New("the source is cut over")
 	ErrMapped     = errors.New("the source mirrors repos; cut over first or remove its repos")
+	ErrSwitched   = errors.New("the repository has switched over; it no longer copies from Nexus")
 )
 
 // Source states (nexus_sources.state).
@@ -76,6 +78,7 @@ type Service struct {
 	audit    *audit.Log
 	log      *slog.Logger
 	username func(ctx context.Context, id int64) (string, error) // set before the API serves
+	auth     *auth.Service                                       // the grants of rehearsal repos; set before the API serves
 
 	// spawn runs a sync as a task of the nexus module, so the server waits for it before the
 	// database closes; base is the module's context.
@@ -88,6 +91,18 @@ type Service struct {
 
 	pubMu  sync.Mutex
 	public map[string]publicCheck // "<source id>/<repo>" -> the last anonymous check
+
+	rehMu sync.RWMutex
+	reh   map[int64]int64 // rehearsal repo id -> the id of the repo it rehearses (repo_rehearsals)
+	moves map[int64]int64 // moving repo id -> the id of the repo it moves into (repo_moves)
+
+	publish pipelines // the CI pipelines that a merge gives to its target; set before the API serves
+}
+
+// pipelines is the part of the publish module that a merge uses.
+type pipelines interface {
+	PipelinesOf(ctx context.Context, repoID int64) ([]string, error)
+	AddPipelinesOf(ctx context.Context, from, to *repos.Repo) ([]string, error)
 }
 
 type publicCheck struct {
@@ -100,7 +115,7 @@ type publicCheck struct {
 func New(d *db.DB, set *settings.Service, rs *repos.Service, as *assets.Pipeline, os *ops.Service, formats *format.Registry,
 	au *audit.Log, log *slog.Logger, base context.Context, spawn func(name string, fn func(ctx context.Context))) *Service {
 	return &Service{db: d, settings: set, repos: rs, assets: as, ops: os, formats: formats, audit: au, log: log, base: base, spawn: spawn,
-		runs: map[int64]*runState{}, public: map[string]publicCheck{}}
+		runs: map[int64]*runState{}, public: map[string]publicCheck{}, reh: map[int64]int64{}, moves: map[int64]int64{}}
 }
 
 // Source is a Nexus source as the API returns it. It never holds the credentials.
@@ -125,6 +140,10 @@ type Source struct {
 	RunningSyncID int64 `json:"running_sync_id"`
 	// RepoCount is the number of mapped repos (hosted, proxy and group).
 	RepoCount int `json:"repo_count"`
+	// Copying is the number of mapped hosted repos that still copy from Nexus, SwitchedOver the
+	// number that switched over. The source is cut over when none copies any more.
+	Copying      int `json:"copying"`
+	SwitchedOver int `json:"switched_over"`
 	// SyncInterval is the live nexus.sync_interval in seconds.
 	SyncInterval int64 `json:"sync_interval"`
 }
@@ -163,6 +182,23 @@ type SourceRepo struct {
 	// Facts what it read from the repo's settings (format.Importer Plan).
 	Questions []format.Question `json:"questions"`
 	Facts     map[string]any    `json:"facts"`
+	// SwitchOver is the switch-over of a mapped hosted repo; nil while it copies from Nexus (and
+	// for a repo that is not mapped, a proxy or a group).
+	SwitchOver *SwitchOver `json:"switch_over"`
+	// Rehearsals are the names of the rehearsal repos of the target, by creation.
+	Rehearsals []string `json:"rehearsals"`
+	// Moving are the names of the repos that projects move to from the target (Move), by
+	// creation; MergeID is a merge into the target that runs or failed (0 for none).
+	Moving  []string `json:"moving"`
+	MergeID int64    `json:"merge_id"`
+}
+
+// SwitchOver is the switch-over of one mapped hosted repo: its final sync, the files that sync
+// failed to import (GET /api/nexus/syncs/{id}/failures lists them) and when it switched over.
+type SwitchOver struct {
+	SyncID     int64     `json:"sync_id"`
+	Failed     int64     `json:"failed"`
+	SwitchedAt time.Time `json:"switched_at"`
 }
 
 // Mapping maps one Nexus repo to a target repo. With Create, a missing target is created: a
@@ -411,6 +447,17 @@ func (s *Service) toSource(ctx context.Context, row dbq.NexusSource) (*Source, e
 		return nil, err
 	}
 	src.RepoCount = len(mapped)
+	switched, err := q.ListNexusSwitchOvers(ctx, row.ID)
+	if err != nil {
+		return nil, err
+	}
+	src.SwitchedOver = len(switched)
+	for _, m := range mapped {
+		if m.Kind == TypeHosted {
+			src.Copying++
+		}
+	}
+	src.Copying -= len(switched)
 	// One sync runs at a time per source, so a running sync is the newest one.
 	if src.LastSync != nil && src.LastSync.State == SyncRunning {
 		src.RunningSyncID = src.LastSync.ID
@@ -547,13 +594,31 @@ func (s *Service) Detail(ctx context.Context, id int64) (*SourceDetail, error) {
 			Supported: reason == "", Reason: reason, TargetFormat: tf, Members: []string{}, TargetMembers: []string{},
 			Questions: []format.Question{}, Facts: map[string]any{}})
 	}
+	switched, err := s.switchOvers(ctx, id)
+	if err != nil {
+		return nil, err
+	}
 	for i := range d.Repos {
 		r := &d.Repos[i]
+		r.Rehearsals = []string{}
+		r.Moving = []string{}
 		t := targets[r.Name]
 		if t == nil {
 			continue
 		}
 		r.Target = t.Name
+		r.SwitchOver = switched[r.Name]
+		if t.Kind == repos.KindHosted {
+			if r.Rehearsals, err = s.rehearsalsOf(ctx, t.ID); err != nil {
+				return nil, err
+			}
+			if r.Moving, err = s.movingInto(ctx, t.ID); err != nil {
+				return nil, err
+			}
+			if r.MergeID, err = s.activeMerge(ctx, t.ID); err != nil {
+				return nil, err
+			}
+		}
 		if t.Kind == repos.KindGroup {
 			members, err := s.repos.MemberRepos(ctx, t)
 			if err != nil {
@@ -681,7 +746,8 @@ func (p *plan) fields() map[string]json.RawMessage {
 // when the new mapping holds a repo. It checks every mapping against the Nexus server, creates
 // the missing targets that ask for it (hosted repos, proxies with the Nexus remote, groups of
 // the picked members), locks the new hosted targets (uploads answer 409) and unlocks the
-// targets it no longer maps. A target mirrors at most one source. userID 0 means unknown.
+// targets it no longer maps. A target mirrors at most one source. A repo that switched over
+// keeps its mapping and stays unlocked, whatever maps holds. userID 0 means unknown.
 func (s *Service) SetRepos(ctx context.Context, id, userID int64, maps []Mapping) (*SourceDetail, error) {
 	seen := map[string]bool{}
 	for _, m := range maps {
@@ -718,10 +784,31 @@ func (s *Service) SetRepos(ctx context.Context, id, userID int64, maps []Mapping
 	for _, r := range src {
 		byName[r.Name] = r
 	}
+	// A switched-over repo keeps its mapping whatever the save holds: it cannot copy again.
+	kept, err := s.switchedMappings(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	keptTargets := map[int64]string{} // target repo id -> target name
+	targetOf := map[string]string{}   // source repo -> target name
+	for name, k := range kept {
+		t, err := s.repos.ByID(ctx, k.TargetRepoID)
+		if err != nil {
+			return nil, err
+		}
+		keptTargets[t.ID], targetOf[name] = t.Name, t.Name
+		seen[name] = true
+	}
 
 	// Check every mapping before creating any repo.
 	plans := make([]plan, 0, len(maps))
 	for _, m := range maps {
+		if _, ok := kept[m.SourceRepo]; ok {
+			if targetOf[m.SourceRepo] != m.Target {
+				return nil, fmt.Errorf("%w: %s has switched over into %s; it keeps that repository", ErrInvalid, m.SourceRepo, targetOf[m.SourceRepo])
+			}
+			continue
+		}
 		r, ok := byName[m.SourceRepo]
 		if !ok {
 			return nil, fmt.Errorf("%w: Nexus has no repo %q", ErrInvalid, m.SourceRepo)
@@ -739,6 +826,9 @@ func (s *Service) SetRepos(ctx context.Context, id, userID int64, maps []Mapping
 			}
 			if _, ok := s.accepts(t.Format, r.Format); !ok {
 				return nil, fmt.Errorf("%w: target repo %q (%s) cannot import %s content", ErrInvalid, t.Name, t.Format, r.Format)
+			}
+			if name, ok := keptTargets[t.ID]; ok {
+				return nil, fmt.Errorf("%w: %s has switched over; copy the Nexus repository %s into another repository", ErrInvalid, name, r.Name)
 			}
 			if other, err := q.GetNexusSourceByTarget(ctx, t.ID); err == nil && other.ID != id {
 				return nil, fmt.Errorf("%w: target repo %q already mirrors Nexus source %s", ErrInvalid, t.Name, other.Name)
@@ -783,7 +873,6 @@ func (s *Service) SetRepos(ctx context.Context, id, userID int64, maps []Mapping
 
 	// Create the hosted and proxy targets first: the groups name them.
 	created := map[string]*repos.Repo{}
-	targetOf := map[string]string{} // source repo -> target name
 	for i := range plans {
 		p := &plans[i]
 		targetOf[p.src.Name] = p.m.Target
@@ -830,12 +919,26 @@ func (s *Service) SetRepos(ctx context.Context, id, userID int64, maps []Mapping
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		old, err := q.ListNexusSourceRepos(ctx, id)
+		all, err := q.ListNexusSourceRepos(ctx, id)
 		if err != nil {
 			return err
 		}
-		if err := q.DeleteNexusSourceRepos(ctx, id); err != nil {
+		now, err := q.ListNexusSwitchOvers(ctx, id)
+		if err != nil {
 			return err
+		}
+		if len(now) != len(kept) {
+			return fmt.Errorf("%w: a repository switched over meanwhile; load the page again", ErrInvalid)
+		}
+		var old []dbq.NexusSourceRepo
+		for _, o := range all {
+			if _, ok := kept[o.SourceRepo]; ok {
+				continue
+			}
+			old = append(old, o)
+			if err := q.DeleteNexusSourceRepo(ctx, dbq.DeleteNexusSourceRepoParams{SourceID: id, SourceRepo: o.SourceRepo}); err != nil {
+				return err
+			}
 		}
 		keep := map[int64]bool{}
 		for _, p := range plans {
@@ -876,7 +979,7 @@ func (s *Service) SetRepos(ctx context.Context, id, userID int64, maps []Mapping
 	}
 	s.record(ctx, ActionMappingSave, row.Name, map[string]any{"id": id, "repos": targets})
 	if len(plans) > 0 {
-		syncID, err := s.startSync(ctx, id, userID, TriggerSave)
+		syncID, err := s.startSync(ctx, id, userID, TriggerSave, nil)
 		if err != nil {
 			return nil, err
 		}

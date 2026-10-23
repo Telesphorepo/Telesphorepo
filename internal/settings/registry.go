@@ -1,7 +1,9 @@
 package settings
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,10 +18,11 @@ import (
 
 // Type is a setting's value type. The value a Key returns: string -> string, bool -> bool,
 // int -> int64, size -> int64 (bytes), duration -> time.Duration, list -> []string,
-// map -> map[string][]string.
+// map -> map[string][]string, image -> []byte.
 // The JSON form of a duration is its text ("15m"). Input of a size or a duration accepts
 // friendly forms ("512MiB", "1.5 GiB", "90 days"). A map is a JSON object of string to a list of
-// strings, in the environment too.
+// strings, in the environment too. An image is the bytes of an image file, in standard base64 in
+// its JSON form and in the environment; GET /api/settings reports only whether it is set.
 type Type string
 
 const (
@@ -30,6 +33,7 @@ const (
 	TypeDuration Type = "duration"
 	TypeList     Type = "list"
 	TypeMap      Type = "map"
+	TypeImage    Type = "image"
 )
 
 // Def describes one setting. Its environment override is TR_<KEY upper-cased, dots -> '_'>.
@@ -100,6 +104,9 @@ func List(d *Def) Key[[]string] { d.Type = TypeList; return Key[[]string]{d} }
 
 // Map declares a map setting: string keys to lists of strings.
 func Map(d *Def) Key[map[string][]string] { d.Type = TypeMap; return Key[map[string][]string]{d} }
+
+// Image declares an image setting: the bytes of an image file, which its Validate checks.
+func Image(d *Def) Key[[]byte] { d.Type = TypeImage; return Key[[]byte]{d} }
 
 // Mode is when a group's Validate runs.
 type Mode int
@@ -311,6 +318,12 @@ func (d *Def) parseText(s string) (any, error) {
 			return d.check(map[string][]string(nil))
 		}
 		return d.decodeJSON(json.RawMessage(s))
+	case TypeImage:
+		b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(s))
+		if err != nil {
+			return nil, errors.New("must be standard base64")
+		}
+		v = b
 	}
 	return d.check(v)
 }
@@ -388,6 +401,12 @@ func (d *Def) decodeJSON(raw json.RawMessage) (any, error) {
 			m = nil
 		}
 		v = m
+	case TypeImage:
+		var b []byte
+		if err := json.Unmarshal(raw, &b); err != nil {
+			return nil, errors.New("must be a string of standard base64")
+		}
+		v = b
 	}
 	return d.check(v)
 }
@@ -413,6 +432,10 @@ func (d *Def) check(v any) (any, error) {
 	case TypeList:
 		if l := v.([]string); len(l) == 0 {
 			v = []string(nil)
+		}
+	case TypeImage:
+		if b := v.([]byte); len(b) == 0 {
+			return []byte(nil), nil // no image: nothing to validate
 		}
 	}
 	if len(d.Options) > 0 {
@@ -455,6 +478,9 @@ func equal(a, b any) bool {
 	case map[string][]string:
 		y, _ := b.(map[string][]string)
 		return maps.EqualFunc(x, y, slices.Equal[[]string])
+	case []byte:
+		y, _ := b.([]byte)
+		return bytes.Equal(x, y)
 	}
 	return a == b
 }

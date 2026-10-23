@@ -1,19 +1,27 @@
 <!--
   One Nexus server, top to bottom: the header (the status and its line, Sync now or Cancel the
-  sync, Switch over, Delete); every Nexus repository in one pick table, in the order a save sets
+  sync, Switch over everything, Delete); every Nexus repository in one pick table, in the order a save sets
   them up (repositories and proxies, then groups with their members, then what this server cannot
-  copy), each row with its state after a save, saved with one button that also starts a sync; the
+  copy), each row with its state after a save (a copied repository: copying or switched over, with
+  its rehearsal and moving repositories after its name and its actions at the end: Switch over, Rehearse
+  publishing, Move it project by project, Empty it and Delete for a rehearsal, Merge into… for a
+  moving repository), saved with one button that also starts a sync; the
   running or chosen sync with its progress and log; the history of syncs; the connection, saved
   from the SaveBar. The parent keys it by id.
 -->
 <script lang="ts">
   import { untrack } from "svelte";
   import { toast } from "svelte-sonner";
-  import { api, errorMessage, type NexusMapping, type NexusSourceDetail, type NexusSourceRepo, type NexusSync, type ImportQuestion } from "$lib/api";
+  import { api, ApiError, errorMessage, type NexusMapping, type NexusSourceDetail, type NexusSourceRepo, type NexusSync, type ImportQuestion } from "$lib/api";
   import { Keyset, Resource, type TableSource } from "$lib/load.svelte";
   import { clock, Live } from "$lib/live.svelte";
   import { Draft } from "$lib/unsaved.svelte";
-  import { href, navigate, repoSettingsPath, router } from "$lib/router.svelte";
+  import { href, navigate, repoPath, repoSettingsPath, router } from "$lib/router.svelte";
+  import { auth } from "$lib/auth.svelte";
+  import { formats } from "$lib/formats/registry.svelte";
+  import { waitForDeletes } from "$lib/deletes";
+  import * as DropdownMenu from "$lib/components/ui/dropdown-menu";
+  import { buttonVariants } from "$lib/components/ui/button";
   import { formatCount, formatDuration, formatEvery, formatRelative } from "$lib/format";
   import { count, someNames } from "$lib/words";
   import { cn } from "$lib/utils";
@@ -33,6 +41,7 @@
   import FormRow from "$lib/components/FormRow.svelte";
   import DataTable, { type Column } from "$lib/components/DataTable.svelte";
   import Cell from "$lib/components/Cell.svelte";
+  import ItemList from "$lib/components/ItemList.svelte";
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import Loading from "$lib/components/Loading.svelte";
@@ -43,12 +52,15 @@
   import SaveBar from "$lib/components/SaveBar.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import ShortFormDialog from "$lib/components/ShortFormDialog.svelte";
+  import FormField from "$lib/components/FormField.svelte";
   import SyncDetail from "./SyncDetail.svelte";
   import { howText, kindText, progressLine, sourceStatus, syncState } from "./words";
   import ArrowRightLeftIcon from "@lucide/svelte/icons/arrow-right-left";
   import RefreshIcon from "@lucide/svelte/icons/refresh-cw";
   import HistoryIcon from "@lucide/svelte/icons/history";
   import SearchIcon from "@lucide/svelte/icons/search";
+  import LockIcon from "@lucide/svelte/icons/lock";
+  import EllipsisIcon from "@lucide/svelte/icons/ellipsis";
 
   let { id, sync }: { id: number; sync: number | null } = $props();
 
@@ -105,6 +117,8 @@
   const all = $derived(d?.repos ?? []);
   const byName = $derived(new Map(all.map((r) => [r.name, r])));
   const isGroup = (r: NexusSourceRepo) => r.type === "group";
+  /** A copied repository that switched over: it keeps its mapping and cannot be unpicked. */
+  const switchedNames = $derived(new Set(all.filter((r) => r.switch_over).map((r) => r.name)));
   /** Repositories and proxies first, then the groups that read them, then what this server cannot copy. */
   const ordered = $derived([
     ...all.filter((r) => r.supported && !isGroup(r)),
@@ -160,7 +174,7 @@
   /** The repositories that can be members of a group whose members Nexus does not show. */
   const candidates = (g: NexusSourceRepo) => all.filter((r) => memberOK(r.name) && r.target_format === g.target_format);
   const groupPickable = (g: NexusSourceRepo) => g.supported && (g.members_known ? g.members.some(memberOK) : candidates(g).length > 0);
-  const pickable = (r: NexusSourceRepo) => (isGroup(r) ? groupPickable(r) : r.supported);
+  const pickable = (r: NexusSourceRepo) => !r.switch_over && (isGroup(r) ? groupPickable(r) : r.supported);
 
   // Picking a group picks its members, since a save sets them up first. A group whose last picked
   // member is unpicked leaves the pick.
@@ -172,16 +186,17 @@
         if (g.members_known && next.has(g.name) && !seenPick.has(g.name)) for (const m of g.members) if (memberOK(m)) next.add(m);
       }
       for (const g of groupRows) if (g.members_known && next.has(g.name) && groupMembers(g, next).length === 0) next.delete(g.name);
+      for (const n of switchedNames) next.add(n);
       seenPick = next;
       if (next.size !== cur.size || [...next].some((n) => !cur.has(n))) picked = next;
     });
   });
 
   const same = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
-  const pickedRows = $derived(ordered.filter((r) => r.supported && picked.has(r.name)));
+  const pickedRows = $derived(ordered.filter((r) => r.supported && !r.switch_over && picked.has(r.name)));
   const added = $derived(pickedRows.filter((r) => !r.target));
   // A copied repository that Nexus no longer lists cannot stay in the mapping.
-  const removed = $derived(all.filter((r) => r.target && !(r.supported && picked.has(r.name))));
+  const removed = $derived(all.filter((r) => r.target && !r.switch_over && !(r.supported && picked.has(r.name))));
   const membersChanged = $derived(groupRows.filter((g) => g.target && picked.has(g.name) && !same(groupMembers(g), g.target_members)));
   const dirty = $derived(added.length > 0 || removed.length > 0 || membersChanged.length > 0);
 
@@ -220,6 +235,8 @@
     if (r.target && !(r.supported && picked.has(r.name))) return { word: "Stops copying", tone: "warning", title: `Saving stops copying it. ${r.target} keeps its files.` };
     if (r.target && isGroup(r) && !same(groupMembers(r), r.target_members))
       return { word: "Members change", tone: "warning", title: `Saving sets the members of ${r.target}.` };
+    if (r.target && r.switch_over) return { word: "Switched over", tone: "success", title: `Uploads go to ${r.target} on this server.` };
+    if (r.target && copiesFiles(r)) return { word: "Copying", tone: "info", title: `Copies into ${r.target} until it switches over` };
     if (r.target) return { word: "Copied", tone: "success", title: `Copies into ${r.target}` };
     if (!r.supported || !picked.has(r.name)) return null;
     const what = isGroup(r) ? "group" : r.type === "proxy" ? "proxy" : "repository";
@@ -403,6 +420,141 @@
     navigate("/settings/nexus", { force: true });
   }
 
+  // --- one copied repository: its switch-over and its rehearsal repositories ---
+  /** A copied repository of files (not a proxy or a group): it copies until it switches over. */
+  function copiesFiles(r: NexusSourceRepo): boolean {
+    return !!r.target && r.type !== "proxy" && r.type !== "group";
+  }
+  /** The Nexus repositories that copy into the same repository here: a switch-over takes them together. */
+  const sharing = (r: NexusSourceRepo) => all.filter((x) => x.target === r.target && copiesFiles(x) && !x.switch_over).map((x) => x.name);
+
+  // A merge deletes and renames a repository, so it needs All repositories too.
+  const canMerge = $derived(auth.can("nexus.manage") && auth.allRepos());
+
+  // --- Move it project by project: a new repository, and the group <target>-all of both when the format has groups ---
+  let moveOpen = $state(false);
+  let moveOf = $state<NexusSourceRepo | null>(null);
+  let moveName = $state("");
+  let moveGroup = $state(true);
+  const groupsOf = (r: NexusSourceRepo) => !!formats.get(r.target_format)?.kinds.includes("group");
+  function askMove(r: NexusSourceRepo) {
+    moveOf = r;
+    moveName = `${r.target}-new`;
+    moveGroup = groupsOf(r);
+    moveOpen = true;
+  }
+  async function move() {
+    const r = moveOf;
+    if (!r) return;
+    const made = await api.nexus.move(id, r.name, { name: moveName.trim(), group: moveGroup && groupsOf(r) });
+    toast.success(made.group ? `Created ${made.name} and ${made.group}` : `Created ${made.name}`, {
+      description: `Projects publish to ${made.name} one by one${made.group ? `; builds read ${made.group}` : ""}.`,
+      action: { label: "Open", onClick: () => navigate(repoPath(made.name)) },
+    });
+    source.reload();
+  }
+
+  type Act = { kind: "switch" | "rehearse"; r: NexusSourceRepo } | { kind: "empty" | "delete"; r: NexusSourceRepo; reh: string };
+  let act = $state<Act | null>(null);
+  let actOpen = $state(false);
+  function ask(a: Act) {
+    act = a;
+    actOpen = true;
+  }
+
+  async function switchOne(r: NexusSourceRepo) {
+    const s = await api.nexus.switchOver(id, r.name);
+    toast.success(`Started the switch-over of ${r.target}`);
+    live = null;
+    navigate(path, { query: { sync: String(s.id) }, replace: true });
+    reloadAll();
+  }
+
+  async function rehearse(r: NexusSourceRepo) {
+    try {
+      const made = await api.nexus.rehearse(id, r.name);
+      toast.success(`Created ${made.name}`, { action: { label: "Open", onClick: () => navigate(repoPath(made.name)) } });
+    } catch (e) {
+      // The name is taken by the rehearsal of this repository already: offer it.
+      const p = e instanceof ApiError ? (e.problem as { repo?: unknown; rehearsal?: unknown } | undefined) : undefined;
+      if (!(p?.rehearsal === true && typeof p.repo === "string")) throw e;
+      const name = p.repo;
+      toast.info(`${name} rehearses ${r.target} already`, { action: { label: "Open", onClick: () => navigate(repoPath(name)) } });
+    }
+    source.reload();
+  }
+
+  async function emptyOne(reh: string) {
+    await api.nexus.emptyRehearsal(reh);
+    toast.success(`Emptying ${reh}`, { description: "Its settings, CI pipelines and who can publish stay." });
+  }
+
+  async function deleteOne(reh: string) {
+    await api.repos.delete([reh]);
+    actOpen = false;
+    await waitForDeletes([reh]);
+    toast.success(`Deleted the repository ${reh}`);
+    source.reload();
+  }
+
+  /** The confirm of the chosen action: its title, what it does, and the action. */
+  const actDialog = $derived.by(() => {
+    const a = act;
+    if (!a || !d) return null;
+    const t = a.r.target;
+    switch (a.kind) {
+      case "switch": {
+        const names = sharing(a.r);
+        const last = d.copying <= names.length;
+        return {
+          title: `Switch over ${t}?`,
+          label: "Run the final sync and switch over",
+          destructive: true,
+          changes: [
+            `Make sure every build that publishes to ${t} publishes to this server before you continue`,
+            `Runs a final sync of ${someNames(names)} into ${t}`,
+            `Allows uploads to ${t} on this server`,
+            `Stops copying ${t} from Nexus, for good`,
+            "Keeps files here that were deleted in Nexus",
+            last
+              ? "Finishes the switch-over from this Nexus server, and deletes its saved password"
+              : d.copying - names.length === 1 ? "Keeps copying the other repository from Nexus" : `Keeps copying the other ${formatCount(d.copying - names.length)} repositories from Nexus`,
+          ],
+          run: () => switchOne(a.r),
+        };
+      }
+      case "rehearse":
+        return {
+          title: `Rehearse publishing to ${t}?`,
+          label: `Create ${t}-rehearsal`,
+          destructive: false,
+          changes: [
+            `Creates the private repository ${t}-rehearsal with the format settings of ${t}`,
+            `Lets the people who publish to ${t} publish to it`,
+            `Changes nothing in ${t}, which keeps copying from Nexus`,
+          ],
+          run: () => rehearse(a.r),
+        };
+      case "empty":
+        return {
+          title: `Empty ${a.reh}?`,
+          label: `Empty ${a.reh}`,
+          destructive: true,
+          changes: [`Deletes every file of ${a.reh}`, "Keeps its settings, its CI pipelines and who can publish", `Changes nothing in ${t}`],
+          run: () => emptyOne(a.reh),
+        };
+      case "delete":
+        return {
+          title: `Delete the repository ${a.reh}?`,
+          label: "Delete repository",
+          destructive: true,
+          type: a.reh,
+          changes: [`Deletes ${a.reh} with every file, its settings and who can publish`, `Changes nothing in ${t}`],
+          run: () => deleteOne(a.reh),
+        };
+    }
+  });
+
   /** The line next to the status badge. */
   const statusLine = $derived.by(() => {
     if (!d) return "";
@@ -442,21 +594,24 @@
   const repoColumns = $derived<Column[]>([
     { label: "Nexus repository", grow: true },
     { label: "Kind", hideOnPhone: true },
-    { label: "State", hideOnPhone: true },
+    { label: "State" },
     { label: "Name here" },
     { label: "Who can download", hideOnPhone: true },
     ...(hasChoice ? [{ label: choiceLabel, hideOnPhone: true }] : []),
+    { label: "", srLabel: "Actions", align: "right" },
   ]);
 </script>
 
+{#snippet lockIcon()}<LockIcon class="size-4 text-muted-foreground" />{/snippet}
+
 {#snippet who(r: NexusSourceRepo, o: Opt)}
   <Select.Root type="single" value={o.anon ? "anyone" : "access"} onValueChange={(v) => (o.anon = v === "anyone")}>
-    <Select.Trigger size="sm" class="w-32" aria-label="Who can download {r.name}">
+    <Select.Trigger size="sm" class="w-36" aria-label="Who can download {r.name}" icon={o.anon ? undefined : lockIcon}>
       <span class="truncate">{o.anon ? "Public" : "Private"}</span>
     </Select.Trigger>
     <Select.Content>
-      <Select.Item value="anyone" label="Public" />
-      <Select.Item value="access" label="Private" />
+      <Select.Item value="anyone" label="Public" inset />
+      <Select.Item value="access" label="Private" icon={lockIcon} />
     </Select.Content>
   </Select.Root>
 {/snippet}
@@ -489,16 +644,34 @@
       {kindText(r.format, r.type)}
     </span>
   </Cell>
-  <Cell hideOnPhone>
+  <Cell>
     {#if st}
-      <StatusBadge tone={st.tone} title={st.title}>{st.word}</StatusBadge>
+      <span class="flex items-center gap-2 whitespace-nowrap">
+        <StatusBadge tone={st.tone} title={st.title}>{st.word}</StatusBadge>
+        {#if r.switch_over && r.switch_over.failed > 0}
+          <a class={cn(link, "text-meta")} href={href(path, { sync: String(r.switch_over.sync_id) })} title="The files the final sync did not copy">
+            {formatCount(r.switch_over.failed)} not copied
+          </a>
+        {/if}
+      </span>
     {:else if r.supported}
       <span class="text-muted-foreground">Not copied</span>
     {/if}
   </Cell>
   <Cell>
     {#if r.target}
-      <a class={cn(link, removed.includes(r) && "text-muted-foreground line-through")} href={href(repoSettingsPath(r.target))}>{r.target}</a>
+      <span class="flex min-w-0 items-baseline gap-2">
+        <a class={cn(link, "shrink-0", removed.includes(r) && "text-muted-foreground line-through")} href={href(repoSettingsPath(r.target))}>{r.target}</a>
+        {#each r.rehearsals as reh (reh)}
+          <a class={cn(link, "min-w-0 truncate text-muted-foreground")} href={href(repoPath(reh))} title={reh}>rehearsal</a>
+        {/each}
+        {#each r.moving as mv (mv)}
+          <a class={cn(link, "min-w-0 truncate text-muted-foreground")} href={href(repoPath(mv))} title="Projects move to {mv}">moving</a>
+        {/each}
+        {#if r.merge_id && canMerge}
+          <a class={cn(link, "min-w-0 truncate")} href={href(`/settings/nexus/merges/${r.merge_id}`)}>merge</a>
+        {/if}
+      </span>
     {:else if o && isNew(r)}
       {#if editable}
         <Input class="h-8 w-48 max-sm:w-36" aria-label="Name here for {r.name}" autocomplete="off" spellcheck={false} bind:value={o.target} />
@@ -528,6 +701,45 @@
       {/if}
     </Cell>
   {/if}
+  <Cell actions>
+    {#if copiesFiles(r) && !removed.includes(r) && ((mirroring && !r.switch_over) || r.rehearsals.length > 0 || r.moving.length > 0)}
+      <DropdownMenu.Root>
+        <DropdownMenu.Trigger class={buttonVariants({ variant: "ghost", size: "icon-sm" })} aria-label="Actions for {r.target}"><EllipsisIcon /></DropdownMenu.Trigger>
+        <DropdownMenu.Content align="end" class="min-w-56">
+          {#if mirroring && !r.switch_over}
+            <DropdownMenu.Item disabled={running || !!r.merge_id} onSelect={() => ask({ kind: "switch", r })}>Switch over{running ? " (when the sync ends)" : ""}</DropdownMenu.Item>
+            {#if r.rehearsals.length === 0}
+              <DropdownMenu.Item onSelect={() => ask({ kind: "rehearse", r })}>Rehearse publishing</DropdownMenu.Item>
+            {/if}
+            {#if r.moving.length === 0}
+              <DropdownMenu.Item onSelect={() => askMove(r)}>Move it project by project</DropdownMenu.Item>
+            {/if}
+          {/if}
+          {#each r.moving as mv (mv)}
+            <DropdownMenu.Separator />
+            <DropdownMenu.Label class="text-xs font-normal text-muted-foreground">Projects move to {mv}</DropdownMenu.Label>
+            <DropdownMenu.Item onSelect={() => navigate(repoPath(mv))}>Open it</DropdownMenu.Item>
+            {#if !canMerge}
+              <DropdownMenu.Label class="text-xs font-normal text-muted-foreground">A merge needs All repositories too</DropdownMenu.Label>
+            {:else if r.merge_id}
+              <DropdownMenu.Item onSelect={() => navigate(`/settings/nexus/merges/${r.merge_id}`)}>Open the merge</DropdownMenu.Item>
+            {:else}
+              <DropdownMenu.Item onSelect={() => navigate("/settings/nexus/merge", { query: { from: mv, into: r.target } })}>Merge into {r.target}…</DropdownMenu.Item>
+            {/if}
+          {/each}
+          {#each r.rehearsals as reh (reh)}
+            <DropdownMenu.Separator />
+            <DropdownMenu.Label class="text-xs font-normal text-muted-foreground">Rehearsal: {reh}</DropdownMenu.Label>
+            <DropdownMenu.Item onSelect={() => navigate(repoPath(reh))}>Open it</DropdownMenu.Item>
+            <DropdownMenu.Item variant="destructive" onSelect={() => ask({ kind: "empty", r, reh })}>Empty it</DropdownMenu.Item>
+            {#if auth.can("repositories.all")}
+              <DropdownMenu.Item variant="destructive" onSelect={() => ask({ kind: "delete", r, reh })}>Delete it</DropdownMenu.Item>
+            {/if}
+          {/each}
+        </DropdownMenu.Content>
+      </DropdownMenu.Root>
+    {/if}
+  </Cell>
 {/snippet}
 
 {#snippet repoFooter()}
@@ -572,7 +784,7 @@
             Sync now
           </Button>
         {/if}
-        <Button variant="outline" disabled={running || d.repo_count === 0} onclick={() => (switchOpen = true)}>Switch over</Button>
+        <Button variant="outline" disabled={running || d.repo_count === 0} onclick={() => (switchOpen = true)}>Switch over everything</Button>
       {/if}
       <Button variant="ghost" class={quietDanger} aria-disabled={running} title={running ? "Cancel the sync first" : undefined} onclick={askDelete}>Delete</Button>
     {/snippet}
@@ -684,40 +896,22 @@
         <a class={link} href={href(path, { sync: String(d.cutover_sync_id) })}>Show them</a>
       </p>
     {/if}
-    <DataTable
-      source={syncs}
-      caption="Syncs"
-      key={(s) => s.id}
-      href={syncHref}
-      selected={(s) => s.id === shown}
-      columns={[
-        { label: "Started", grow: true },
-        { label: "How", hideOnPhone: true },
-        { label: "Took", align: "right", hideOnPhone: true },
-        { label: "New files", align: "right" },
-        { label: "Size", align: "right", hideOnPhone: true },
-        { label: "Failed", align: "right" },
-        { label: "State" },
-      ]}
-    >
-      {#snippet row(s)}
-        <Cell grow>
-          <a href={syncHref(s)} class="rounded-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"><RelativeTime at={s.started_at} /></a>
-        </Cell>
-        <Cell hideOnPhone muted text={howText(s)} />
-        <Cell num muted hideOnPhone>{tookText(s)}</Cell>
-        <Cell num>{formatCount(s.imported)}</Cell>
-        <Cell num muted hideOnPhone><FileSize bytes={s.bytes} /></Cell>
-        <Cell num class={s.failed > 0 ? "text-destructive" : "text-muted-foreground"}>{formatCount(s.failed)}</Cell>
-        <Cell><StatusBadge tone={syncState[s.state].tone}>{syncState[s.state].word}</StatusBadge></Cell>
+    <ItemList source={syncs} caption="Syncs" key={(s) => s.id} href={syncHref} selected={(s) => s.id === shown}>
+      {#snippet title(s)}Started <RelativeTime at={s.started_at} />{/snippet}
+      {#snippet badges(s)}
+        {#if s.failed > 0}<StatusBadge tone="warning">{formatCount(s.failed)} failed</StatusBadge>{/if}
       {/snippet}
+      {#snippet meta(s)}
+        <span class="tabular-nums">{[howText(s), tookText(s) && `took ${tookText(s)}`, count(s.imported, "new file", "new files")].filter(Boolean).join(" · ")} · <FileSize bytes={s.bytes} /></span>
+      {/snippet}
+      {#snippet trailing(s)}<StatusBadge tone={syncState[s.state].tone}>{syncState[s.state].word}</StatusBadge>{/snippet}
       {#snippet empty()}
         <CompactEmpty
           icon={HistoryIcon}
           text={mirroring ? "No sync yet. Pick repositories above and save them to start the first sync." : "This Nexus server never synced."}
         />
       {/snippet}
-    </DataTable>
+    </ItemList>
   </Section>
 
   {#if mirroring}
@@ -766,13 +960,13 @@
 
   <ConfirmDialog
     bind:open={switchOpen}
-    title="Switch over from {d.name}?"
+    title="Switch over everything from {d.name}?"
     confirmLabel="Run the final sync and switch over"
     destructive
     changes={[
       "Make sure every build uses this server before you continue",
-      "Runs a final sync of every picked repository",
-      "Allows uploads to the copied repositories on this server",
+      `Runs a final sync of the ${count(d.copying, "repository that still copies", "repositories that still copy")}`,
+      "Allows uploads to them on this server",
       "Stops copying from Nexus, and deletes the saved Nexus password",
       "Keeps files here that were deleted in Nexus",
       ...(lastFailed > 0 ? [`Leaves out ${formatCount(lastFailed)} files that failed in the last sync`] : []),
@@ -788,6 +982,43 @@
     changes={["Deletes the Nexus server, its sync history and its saved password", "Keeps the copied repositories and their files"]}
     onConfirm={remove}
   />
+
+  {#if actDialog}
+    {@const a = actDialog}
+    <ConfirmDialog
+      bind:open={actOpen}
+      title={a.title}
+      confirmLabel={a.label}
+      destructive={a.destructive}
+      typeToConfirm={"type" in a ? a.type : undefined}
+      changes={a.changes}
+      onConfirm={a.run}
+    />
+  {/if}
+
+  {#if moveOf}
+    {@const t = moveOf.target}
+    {@const name = moveName.trim()}
+    <ShortFormDialog
+      bind:open={moveOpen}
+      title="Move {t} project by project?"
+      description="Projects publish to a new repository one at a time, while {t} keeps copying from Nexus. When the last one has moved, merge the new repository into {t}."
+      submitLabel="Create {name || 'the repository'}"
+      canSubmit={nameRE.test(name) && name !== t}
+      onSubmit={move}
+    >
+      <FormField label="Name of the new repository" for="{fid}-move-name" hint="The people who publish to {t} can publish to it.">
+        <Input id="{fid}-move-name" autocomplete="off" spellcheck={false} bind:value={moveName} />
+      </FormField>
+      {#if groupsOf(moveOf)}
+        <OptionRow id="{fid}-move-group" label="Also create the group {t}-all" description="It reads {name || 'the new repository'} first, then {t}, so builds find packages from both while projects move.">
+          {#snippet control()}
+            <Checkbox id="{fid}-move-group" checked={moveGroup} onCheckedChange={(c) => (moveGroup = c === true)} />
+          {/snippet}
+        </OptionRow>
+      {/if}
+    </ShortFormDialog>
+  {/if}
 
   {#if membersOf}
     {@const g = membersOf}

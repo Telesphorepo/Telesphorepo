@@ -12,7 +12,8 @@
   between sections. Without `sections` the form is one card.
   With `steps`, the sections are numbered Steps of a setup. `fields` gives a setting a plain label,
   one line of help, `aka` (its technical name, after `akaLabel`), a placeholder, or `permissionMap`
-  (a map of permission IDs edits as groups with a PermissionPicker);
+  (a map of permission IDs edits as groups with a PermissionPicker), or `control` (the control of a
+  setting that its own route changes at once, such as the logo; it stays out of the draft);
   without it the registry's label and help show. `errors` marks fields from outside the form (a
   connection test). `effects` lists the consequences of a pending PATCH body beyond the settings
   themselves (a storage move); when it returns lines, Save first asks in a confirm dialog that
@@ -22,6 +23,8 @@
   use it for their connection tests).
 -->
 <script lang="ts" module>
+  import type { Snippet } from "svelte";
+  import type { Setting } from "$lib/api";
   import type { ControlWidth } from "./FormRow.svelte";
 
   /** A map setting's value: the values of one key by key ("admins" → ["repo.read", ...]). */
@@ -36,15 +39,19 @@
     placeholder?: string;
     /** A map setting of permission IDs: edit it as groups with a PermissionPicker (PermissionMapInput). */
     permissionMap?: boolean;
+    /**
+     * The control of a setting that its own route changes at once, outside the draft (the logo, an
+     * image setting): it gets the setting and the id of the label.
+     */
+    control?: Snippet<[Setting, string]>;
     /** @deprecated Every text control has the full control width; leave it out. */
     width?: ControlWidth;
   };
 </script>
 
 <script lang="ts">
-  import type { Snippet } from "svelte";
   import { toast } from "svelte-sonner";
-  import { api, ApiError, errorMessage, type Setting, type Settings, type SettingsMoveStarted } from "$lib/api";
+  import { api, ApiError, errorMessage, type Settings, type SettingsMoveStarted } from "$lib/api";
   import { Input } from "$lib/components/ui/input";
   import { Textarea } from "$lib/components/ui/textarea";
   import * as Select from "$lib/components/ui/select";
@@ -338,7 +345,11 @@
     <SwitchRow {id} label={labelOf(s)} {help} checked={current(s) === true} disabled={ro} onCheckedChange={(v) => edit(s, v)} badge={lock} />
   {:else}
     <FormRow label={labelOf(s)} for={id} {help} aka={look.aka} {akaLabel} error={err} badge={lock} full={s.type === "map"}>
-      {#if s.secret}
+      {#if look.control}
+        {@render look.control(s, id)}
+      {:else if s.type === "image"}
+        <p {id} class="text-body">{isSet(s) ? "Set" : "Not set"}</p>
+      {:else if s.secret}
         <SecretInput
           {id}
           set={isSet(s)}

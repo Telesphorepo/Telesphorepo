@@ -271,7 +271,7 @@
 <div class="flex flex-col gap-4 lg:flex-row lg:items-start">
   <Card.Root class="min-w-0 flex-1 gap-0 py-0">
     <!-- The panel's toolbar: where in the repository, then how to show it. -->
-    <div class="flex flex-wrap items-center gap-x-4 gap-y-2 border-b px-4 py-2 sm:px-5">
+    <div class="flex flex-wrap items-center gap-x-4 gap-y-2 border-b px-5 py-2 sm:px-6">
       <div class="min-w-0 flex-1 basis-48 py-1.5"><Breadcrumbs path label="Folder" items={crumbs} /></div>
       <div class="ml-auto flex items-center gap-2">
         {#if !details}
@@ -309,7 +309,6 @@
               earlier={query.get("earlier") === "1"}
               flow={view.value === "coverflow"}
               selected={file}
-              compact={details}
               {canWrite}
               onDelete={askDelete}
               onList={showList}

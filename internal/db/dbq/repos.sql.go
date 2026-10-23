@@ -112,6 +112,23 @@ func (q *Queries) DeleteRepoOp(ctx context.Context, arg DeleteRepoOpParams) (int
 	return result.RowsAffected()
 }
 
+const deleteRepoRedirect = `-- name: DeleteRepoRedirect :execrows
+DELETE FROM repo_redirects WHERE name = ? AND repo_id = ?
+`
+
+type DeleteRepoRedirectParams struct {
+	Name   string
+	RepoID int64
+}
+
+func (q *Queries) DeleteRepoRedirect(ctx context.Context, arg DeleteRepoRedirectParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteRepoRedirect, arg.Name, arg.RepoID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const getRepoByID = `-- name: GetRepoByID :one
 SELECT r.id, r.name, r.format, r.kind, r.anonymous_read, r.config, r.created_at, r.description,
   r.file_count, r.total_size, r.last_published_at,
@@ -270,6 +287,24 @@ func (q *Queries) GetRepoOp(ctx context.Context, repoID int64) (RepoOp, error) {
 	return i, err
 }
 
+const getRepoRedirect = `-- name: GetRepoRedirect :one
+SELECT name, repo_id, created_at, last_used_at FROM repo_redirects WHERE name = ?
+`
+
+// Repository redirects (internal/repos): a name that answers for a repo. Resolving a name reads
+// repos first (GetRepoByName), then this point lookup by the key.
+func (q *Queries) GetRepoRedirect(ctx context.Context, name string) (RepoRedirect, error) {
+	row := q.db.QueryRowContext(ctx, getRepoRedirect, name)
+	var i RepoRedirect
+	err := row.Scan(
+		&i.Name,
+		&i.RepoID,
+		&i.CreatedAt,
+		&i.LastUsedAt,
+	)
+	return i, err
+}
+
 const hasRebuild = `-- name: HasRebuild :one
 SELECT EXISTS (SELECT 1 FROM rebuilds WHERE repo_id = ? AND grp = ?)
 `
@@ -357,6 +392,21 @@ func (q *Queries) InsertRepoOp(ctx context.Context, arg InsertRepoOpParams) (int
 	var id int64
 	err := row.Scan(&id)
 	return id, err
+}
+
+const insertRepoRedirect = `-- name: InsertRepoRedirect :exec
+INSERT INTO repo_redirects (name, repo_id, created_at) VALUES (?, ?, ?)
+`
+
+type InsertRepoRedirectParams struct {
+	Name      string
+	RepoID    int64
+	CreatedAt int64
+}
+
+func (q *Queries) InsertRepoRedirect(ctx context.Context, arg InsertRepoRedirectParams) error {
+	_, err := q.db.ExecContext(ctx, insertRepoRedirect, arg.Name, arg.RepoID, arg.CreatedAt)
+	return err
 }
 
 const listGroupMembers = `-- name: ListGroupMembers :many
@@ -486,6 +536,77 @@ func (q *Queries) ListRebuildUnits(ctx context.Context, arg ListRebuildUnitsPara
 			return nil, err
 		}
 		items = append(items, unit)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRepoRedirects = `-- name: ListRepoRedirects :many
+SELECT name, repo_id FROM repo_redirects WHERE name > ?1 ORDER BY name LIMIT ?2
+`
+
+type ListRepoRedirectsParams struct {
+	After string
+	Limit int64
+}
+
+type ListRepoRedirectsRow struct {
+	Name   string
+	RepoID int64
+}
+
+// Keyset page of every redirect by name (the edge reconcile).
+func (q *Queries) ListRepoRedirects(ctx context.Context, arg ListRepoRedirectsParams) ([]ListRepoRedirectsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listRepoRedirects, arg.After, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRepoRedirectsRow
+	for rows.Next() {
+		var i ListRepoRedirectsRow
+		if err := rows.Scan(&i.Name, &i.RepoID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRepoRedirectsOf = `-- name: ListRepoRedirectsOf :many
+SELECT name, repo_id, created_at, last_used_at FROM repo_redirects WHERE repo_id = ? ORDER BY name
+`
+
+// The redirects of one repo by name, through repo_redirects_repo.
+func (q *Queries) ListRepoRedirectsOf(ctx context.Context, repoID int64) ([]RepoRedirect, error) {
+	rows, err := q.db.QueryContext(ctx, listRepoRedirectsOf, repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RepoRedirect
+	for rows.Next() {
+		var i RepoRedirect
+		if err := rows.Scan(
+			&i.Name,
+			&i.RepoID,
+			&i.CreatedAt,
+			&i.LastUsedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -666,6 +787,24 @@ func (q *Queries) MaxRebuildMark(ctx context.Context) (int64, error) {
 	return max_mark, err
 }
 
+const moveRepoRedirects = `-- name: MoveRepoRedirects :execrows
+UPDATE repo_redirects SET repo_id = ?1 WHERE repo_id = ?2
+`
+
+type MoveRepoRedirectsParams struct {
+	ToID   int64
+	FromID int64
+}
+
+// A merge gives every redirect of a repo to the repo it merges into, through repo_redirects_repo.
+func (q *Queries) MoveRepoRedirects(ctx context.Context, arg MoveRepoRedirectsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, moveRepoRedirects, arg.ToID, arg.FromID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const nextGroupWithMembers = `-- name: NextGroupWithMembers :one
 
 SELECT group_id FROM repo_group_members WHERE group_id > ? ORDER BY group_id LIMIT 1
@@ -679,6 +818,20 @@ func (q *Queries) NextGroupWithMembers(ctx context.Context, groupID int64) (int6
 	var group_id int64
 	err := row.Scan(&group_id)
 	return group_id, err
+}
+
+const renameRepo = `-- name: RenameRepo :exec
+UPDATE repos SET name = ? WHERE id = ?
+`
+
+type RenameRepoParams struct {
+	Name string
+	ID   int64
+}
+
+func (q *Queries) RenameRepo(ctx context.Context, arg RenameRepoParams) error {
+	_, err := q.db.ExecContext(ctx, renameRepo, arg.Name, arg.ID)
+	return err
 }
 
 const setProxyError = `-- name: SetProxyError :exec

@@ -1382,5 +1382,12 @@ func TestNexus(t *testing.T) {
 		// A nuget repo, through a source of its own.
 		t.Run("nuget", func(t *testing.T) { nexusNuGet(t, n, s) })
 		t.Run("pypi", func(t *testing.T) { nexusPyPI(t, n, s) })
+		// A switch-over of one repository, rehearsal repositories, and the switch-over of everything.
+		t.Run("switch-over", func(t *testing.T) { nexusSwitchOver(t, n, s, opts.S3) })
+		// A move project by project into a new repository, then its merges.
+		t.Run("gradual-move", func(t *testing.T) { nexusGradualMove(t, n, s, opts.S3) })
+		t.Run("gradual-move-group", func(t *testing.T) { nexusGradualMoveGroup(t, n, s, opts.S3, groupPath, jar1, pom1) })
+		t.Run("merge-docker", func(t *testing.T) { nexusMergeDocker(t, n, s) })
+		t.Run("merge-npm", func(t *testing.T) { nexusMergeNpm(t, n, s) })
 	})
 }

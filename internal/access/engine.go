@@ -192,7 +192,7 @@ func (e *Engine) GroupMembers(ctx context.Context, r *http.Request, p *auth.Prin
 	if err != nil {
 		return nil, err
 	}
-	q := p.InGroup(group.Name)
+	q := p.InGroup(group.ID)
 	if ctx, err = e.auth.WithGrants(ctx, q); err != nil {
 		return nil, err
 	}
@@ -266,7 +266,7 @@ var errInternal error = internalError{}
 
 func (e *Engine) decide(ctx context.Context, r *http.Request, p *auth.Principal, repo *repos.Repo, op Op, need []perm.ID) Decision {
 	if p != nil && p.Scopes != nil {
-		sc := p.ScopeOf(repo.Name)
+		sc := p.ScopeOf(repo.ID)
 		check := op
 		if check == Meta {
 			check = Read
@@ -274,7 +274,7 @@ func (e *Engine) decide(ctx context.Context, r *http.Request, p *auth.Principal,
 		if sc == nil || !sc.Allows(check) {
 			return e.scopeRefusal(ctx, r, p, sc, repo, op)
 		}
-		p = p.For(repo.Name)
+		p = p.For(repo.ID)
 	}
 	set, err := e.RepoPerms(ctx, p, repo)
 	if err != nil {

@@ -2,8 +2,8 @@
   A cell of a DataTable row. Every cell is one line (the row has one fixed height), so a long value
   truncates: pass it as `text` and it ends in "…" with the full value in a tooltip, and `copy` adds
   a copy button that shows on row hover. `grow` marks the column that takes the free width (one per
-  table; its header column has `grow` too). The grow column keeps at least 10rem; on a narrow screen
-  the table scrolls sideways inside its box, never the page. `num` is a number or a time:
+  table; its header column has `grow` too). The grow column keeps at least 10rem; under 640px the row
+  stacks (DataTable), the grow cell on its first line. `num` is a number or a time:
   right-aligned, tabular numerals.
 
     <Cell grow strong text={repo.name} />
@@ -52,6 +52,8 @@
 </script>
 
 <Table.Cell
+  data-grow={grow || undefined}
+  data-actions={actions || undefined}
   class={cn(
     grow ? "w-full max-w-0 min-w-40" : text ? "max-w-80" : "",
     (num || actions) && "text-right",
@@ -66,7 +68,7 @@
   {#if text !== undefined}
     <Truncate {text} {copy} {copyLabel} />
   {:else if actions}
-    <div class="flex items-center justify-end gap-1">{@render children?.()}</div>
+    <div data-slot="row-end" class="flex items-center justify-end gap-1">{@render children?.()}</div>
   {:else}
     {@render children?.()}
   {/if}

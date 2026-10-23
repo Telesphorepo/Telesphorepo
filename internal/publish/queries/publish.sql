@@ -101,6 +101,13 @@ DELETE FROM publish_trust_repos WHERE trust_id = ?;
 -- name: InsertTrustRepo :exec
 INSERT INTO publish_trust_repos (trust_id, repo_id) VALUES (?, ?);
 
+-- A merge adds repo to_id to every policy that lists repo from_id, through
+-- publish_trust_repos_repo. A policy that lists both keeps one row.
+-- name: CopyTrustRepos :execrows
+INSERT INTO publish_trust_repos (trust_id, repo_id)
+SELECT tr.trust_id, sqlc.arg(to_id) FROM publish_trust_repos tr WHERE tr.repo_id = sqlc.arg(from_id)
+ON CONFLICT (trust_id, repo_id) DO NOTHING;
+
 -- The repos of a policy in repo id order (the primary key order).
 -- name: ListTrustRepos :many
 SELECT r.id, r.name FROM publish_trust_repos tr JOIN repos r ON r.id = tr.repo_id

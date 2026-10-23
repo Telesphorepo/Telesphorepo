@@ -146,7 +146,7 @@ func (s *snippets) gradleRepos(plugins bool) {
 			gp := "~/.gradle/gradle.properties"
 			s.add(client, "credentials", gp, gp, "properties",
 				s.name+"Username=YOUR_USERNAME\n"+s.name+"Password=YOUR_READ_TOKEN\n",
-				"Create a read token on Settings › Tokens. In CI, set ORG_GRADLE_PROJECT_"+s.name+"Username and ORG_GRADLE_PROJECT_"+s.name+"Password instead.")
+				"Create a read token on Your account › Tokens. In CI, set ORG_GRADLE_PROJECT_"+s.name+"Username and ORG_GRADLE_PROJECT_"+s.name+"Password instead.")
 		}
 	}
 }
@@ -171,7 +171,7 @@ func (s *snippets) mavenCredentials() {
 	}
 	s.add("maven", "credentials", "~/.m2/settings.xml", "~/.m2/settings.xml", "xml", "<settings>\n  <servers>\n    <server>\n      <id>"+s.repo.Name+
 		"</id>\n      <username>YOUR_USERNAME</username>\n      <password>YOUR_READ_TOKEN</password>\n    </server>\n  </servers>\n</settings>\n",
-		"Create a read token on Settings › Tokens. In CI, write ${env.REPO_USERNAME} and ${env.REPO_TOKEN} instead and set those variables.")
+		"Create a read token on Your account › Tokens. In CI, write ${env.REPO_USERNAME} and ${env.REPO_TOKEN} instead and set those variables.")
 }
 
 // Usage returns the repo snippets: how to use the repo in Gradle (Kotlin and Groovy) and
@@ -187,7 +187,7 @@ func (h *Handler) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
 }
 
 // ciNote goes under the CI files of the Gradle and Maven tools.
-const ciNote = "The CLI uses the job's identity token, so the job stores no secret. Commit telesphorepo.toml first: Set up a project on this tab writes it."
+const ciNote = "Commit telesphorepo.toml first: Set up a project on this tab writes it."
 
 // tools are the build tools that publish to Maven repos. Their CI jobs need Java. The CLI
 // requests the GitHub Actions identity token itself; on Jenkins it reads the one in OIDC_TOKEN.

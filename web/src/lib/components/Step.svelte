@@ -34,7 +34,7 @@
   } = $props();
 </script>
 
-<Card.Root class="mt-6 text-body first:mt-0 max-sm:[--card-spacing:--spacing(5)]" role="group" aria-label="Step {n}: {title}">
+<Card.Root class="mt-(--section-gap) text-body first:mt-0 max-sm:[--card-spacing:--spacing(5)]" role="group" aria-label="Step {n}: {title}">
   <Card.Header class="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
     <div class="flex min-w-0 grow basis-56 items-start gap-3">
       <span class="flex h-6 min-w-4 shrink-0 items-center text-section text-muted-foreground tabular-nums">
@@ -45,7 +45,7 @@
         {#if description}<p class="mt-1 text-meta text-muted-foreground">{description}</p>{/if}
       </div>
     </div>
-    {#if actions}<div class="flex shrink-0 flex-wrap items-center gap-2">{@render actions()}</div>{/if}
+    {#if actions}<div data-slot="header-actions" class="flex shrink-0 flex-wrap items-center gap-2">{@render actions()}</div>{/if}
   </Card.Header>
   <Card.Content class="min-w-0">{@render children()}</Card.Content>
   {#if footer}<Card.Footer class="flex-wrap gap-2">{@render footer()}</Card.Footer>{/if}

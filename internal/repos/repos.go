@@ -1,7 +1,7 @@
-// Package repos manages repository records. The format of a repo and its config are checked by a
-// Validator that the server builds from the format registry. Create and Update are the only ways
-// a repo record changes: each validates the whole new state first, then saves it in one
-// transaction with the format's change hook and one audit event.
+// Package repos manages repository records and their redirects. The format of a repo and its
+// config are checked by a Validator that the server builds from the format registry. Create,
+// Update and Rename are the only ways a repo record changes: each validates the whole new state
+// first, then saves it in one transaction with the format's change hook and one audit event.
 package repos
 
 import (
@@ -88,6 +88,8 @@ type Service struct {
 	purges   []Purge                               // set before the server serves (OnPurge)
 	after    []func(ctx context.Context, n Notice) // set before the server serves (AfterChange)
 	fields   []Field                               // set before the server serves
+
+	onRedirect func(name string) // set before the server serves (OnRedirectUse)
 }
 
 // OnDelete registers fn to run after a repo row is deleted, with the repo's id: a module drops
@@ -142,10 +144,13 @@ type Notice struct {
 	Changed []*Repo
 	Deleted *Repo
 	Groups  []int64 // the groups that Deleted left
+	// Redirects are the redirect names that the change added or removed (a deleted repo's too),
+	// or that now answer for a new name of their repo (a rename).
+	Redirects []string
 }
 
-// AfterChange registers fn to run after each committed Create, Update, UpdateAll and DeleteRow
-// that changed a repo. fn runs on the request that made the change and must be quick (the edge
+// AfterChange registers fn to run after each committed Create, Update, UpdateAll, Rename,
+// RemoveRedirect and DeleteRow that changed a repo or a redirect. fn runs on the request that made the change and must be quick (the edge
 // module marks its access objects). It runs before the server serves.
 func (s *Service) AfterChange(fn func(ctx context.Context, n Notice)) { s.after = append(s.after, fn) }
 
@@ -199,7 +204,8 @@ func fromRow(r row, err error) (*Repo, error) {
 	return out, nil
 }
 
-func byName(ctx context.Context, q *dbq.Queries, name string) (*Repo, error) {
+// byOwnName reads the repo whose own name is name; a redirect is not one (see byName).
+func byOwnName(ctx context.Context, q *dbq.Queries, name string) (*Repo, error) {
 	return fromRow(q.GetRepoByName(ctx, name))
 }
 
@@ -208,9 +214,20 @@ func byID(ctx context.Context, q *dbq.Queries, id int64) (*Repo, error) {
 	return fromRow(row(r), err)
 }
 
-// ByName is an indexed point lookup (used on every request).
+// ByName is an indexed point lookup (used on every request): the repo of that name, else the
+// repo that the redirect name answers for. A lookup through a redirect notes its use (see
+// OnRedirectUse).
 func (s *Service) ByName(ctx context.Context, name string) (*Repo, error) {
-	return s.counted(byName(ctx, dbq.New(s.db.R), name))
+	r, err := byName(ctx, dbq.New(s.db.R), name)
+	if err == nil && r.Name != name && s.onRedirect != nil {
+		s.onRedirect(name)
+	}
+	return s.counted(r, err)
+}
+
+// ByOwnName is the repo whose own name is name, never through a redirect.
+func (s *Service) ByOwnName(ctx context.Context, name string) (*Repo, error) {
+	return s.counted(byOwnName(ctx, dbq.New(s.db.R), name))
 }
 
 func (s *Service) ByID(ctx context.Context, id int64) (*Repo, error) {
@@ -361,6 +378,9 @@ func (s *Service) Create(ctx context.Context, in Create) (*Repo, error) {
 	err = s.db.Tx(ctx, func(tx *sql.Tx) error {
 		q := dbq.New(tx)
 		now := time.Now().Unix()
+		if err := checkNotRedirect(ctx, q, in.Name, 0); err != nil {
+			return err
+		}
 		id, err := q.CreateRepo(ctx, dbq.CreateRepoParams{Name: in.Name, Format: in.Format, Kind: in.Kind,
 			AnonymousRead: in.AnonymousRead, Config: string(cfg), Description: description, CreatedAt: now})
 		if isUnique(err) {
@@ -650,8 +670,16 @@ func (s *Service) DeleteRow(ctx context.Context, id int64) error {
 	if err != nil {
 		return err
 	}
+	var redirects []string
 	if len(s.after) > 0 {
 		gone, groups = r, s.GroupsOf(id)
+		rds, err := s.Redirects(ctx, id)
+		if err != nil {
+			return err
+		}
+		for _, rd := range rds {
+			redirects = append(redirects, rd.Name)
+		}
 	}
 	if err := s.purge(ctx, id); err != nil {
 		return err
@@ -670,7 +698,7 @@ func (s *Service) DeleteRow(ctx context.Context, id int64) error {
 		fn(id)
 	}
 	if gone != nil {
-		s.notify(ctx, Notice{Deleted: gone, Groups: groups})
+		s.notify(ctx, Notice{Deleted: gone, Groups: groups, Redirects: redirects})
 	}
 	return nil
 }

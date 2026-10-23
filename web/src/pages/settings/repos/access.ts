@@ -3,6 +3,7 @@
 // the draft: the tab changes it at once.
 
 import type { AccessGuards, AccessNetworks, AccessPipeline, IPList, IPRule, RepoAccess, Trust } from "$lib/api";
+import { jenkinsJob, type ConditionItem } from "../../server/ci/presets";
 
 /** What the Access tab saves from its save bar. ci: the ids of the CI pipelines that list the repo. */
 export type AccessDraft = {
@@ -66,6 +67,23 @@ export function pipelineFacts(p: AccessPipeline): string {
   return parts.join(" · ");
 }
 
+/** The CI system and the repositories of a pipeline, for the meta line of its row: "GitHub Actions · acme/app". */
+export function pipelineHead(p: AccessPipeline): string {
+  const parts: string[] = [p.system === "github-actions" ? "GitHub Actions" : p.system === "jenkins" ? "Jenkins" : hostOf(p.issuer)];
+  if (p.repositories?.length) parts.push(and(p.repositories));
+  return parts.join(" · ");
+}
+
+/** The conditions of a pipeline, for the TicketBadges of its row: branches, tags, workflow files, then jobs. */
+export function pipelineConditions(p: AccessPipeline): ConditionItem[] {
+  return [
+    ...(p.branches ?? []).map((value) => ({ kind: "branch" as const, value, label: "Branch" })),
+    ...(p.tags ?? []).map((value) => ({ kind: "tag" as const, value, label: "Tag" })),
+    ...(p.workflows ?? []).map((w) => ({ kind: "workflow" as const, value: w.split("/").pop() ?? w, label: "Workflow file" })),
+    ...(p.repositories?.length ? [] : (p.subjects ?? [])).map((s) => ({ kind: "job" as const, value: jenkinsJob(s), label: "Job" })),
+  ];
+}
+
 function hostOf(url: string): string {
   try {
     return new URL(url).host;
@@ -88,7 +106,14 @@ export function networkNames(rules: IPRule[], lists: IPList[] | undefined): stri
   return out;
 }
 
-const sameRules = (a: IPRule[], b: IPRule[]) =>
+/** Where requests may come from, in words: "any network", "GitHub Actions and 10.0.0.0/8", "4 networks". */
+export function whereFrom(rules: IPRule[], lists: IPList[] | undefined): string {
+  const n = networkNames(rules, lists);
+  if (!n.length) return "any network";
+  return n.length > 2 ? `${n.length} networks` : and(n);
+}
+
+const sameRules =(a: IPRule[], b: IPRule[]) =>
   JSON.stringify(a.map((r) => [r.kind, r.value, r.note])) === JSON.stringify(b.map((r) => [r.kind, r.value, r.note]));
 
 /** Each unsaved change, one per line, in the words of the confirm dialog. */

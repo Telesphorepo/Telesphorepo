@@ -31,6 +31,7 @@
 </script>
 
 <aside
+  data-slot="details-column"
   aria-label="Details of {title}"
   class="order-first flex w-full shrink-0 flex-col rounded-lg bg-panel lg:sticky lg:top-22 lg:order-none lg:max-h-[calc(100svh-7rem)] lg:w-[360px] lg:overflow-y-auto"
 >

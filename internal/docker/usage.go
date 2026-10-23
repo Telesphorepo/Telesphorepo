@@ -40,7 +40,7 @@ func (f *Format) usage(repo *repos.Repo, baseURL string) []format.Snippet {
 	if !repo.AnonymousRead {
 		out = append(out, format.Snippet{ID: "docker.login", Tool: "docker", Purpose: format.SnippetUse, Context: format.SnippetRepo,
 			Title: "Log in", Lang: "sh", Code: format.ReadTokenPrompt + "\nprintf '%s' \"$READ_TOKEN\" | docker login " + host + " -u YOUR_USERNAME --password-stdin\n",
-			Note: "Create a read token on Settings › Tokens. Enter it at the prompt."})
+			Note: "Create a read token on Your account › Tokens. Enter it at the prompt."})
 	}
 	out = append(out,
 		format.Snippet{ID: "docker.pull", Tool: "docker", Purpose: format.SnippetUse, Context: format.SnippetRepo,
@@ -153,7 +153,7 @@ func (f *Format) artifactUsage(ctx context.Context, repo, from *repos.Repo, base
 	if !repo.AnonymousRead {
 		out = append(out, format.Snippet{ID: "docker.login", Tool: "docker", Purpose: format.SnippetUse, Context: format.SnippetArtifact,
 			Title: "Log in", Lang: "sh", Code: format.ReadTokenPrompt + "\nprintf '%s' \"$READ_TOKEN\" | docker login " + host + " -u YOUR_USERNAME --password-stdin\n",
-			Note: "Create a read token on Settings › Tokens. Enter it at the prompt. Helm and ORAS read the same login."})
+			Note: "Create a read token on Your account › Tokens. Enter it at the prompt. Helm and ORAS read the same login."})
 	}
 	pinned := mode == format.VersionPinned
 	switch art.Kind {

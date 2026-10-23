@@ -76,7 +76,7 @@
 {:else if methods.length === 0}
   <div class="flex flex-col items-start gap-3 text-sm">
     <p>This action needs two-step verification, and you have not set it up yet.</p>
-    <Button href={href("/settings/security", { back })} onclick={onSetup}>Set up two-step verification</Button>
+    <Button href={href("/account/security", { back })} onclick={onSetup}>Set up two-step verification</Button>
     {#if dev}
       <p class="text-muted-foreground">Dev mode makes two-step verification optional.</p>
       <Button variant="outline" disabled={devBusy} onclick={withoutFactor}>

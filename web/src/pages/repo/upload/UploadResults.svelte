@@ -17,7 +17,7 @@
 </script>
 
 {#if !files.length}
-  <EmptyState title="Nothing was stored" description="The server answered without any files." />
+  <EmptyState title="Nothing was stored" />
 {:else}
   <ul class="flex max-h-72 flex-col divide-y overflow-y-auto rounded-lg border">
     {#each main as f (f.path)}
