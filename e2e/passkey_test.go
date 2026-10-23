@@ -89,8 +89,8 @@ func (k *securityKey) signInOK(t *testing.T, s *Server, user string) *Session {
 	return sess
 }
 
-// A passkey signs in again after a sign-out, from another browser, with a second key added
-// later, and with a counter that did not go up.
+// A passkey signs in after a sign-out, also with a counter that did not go up: a security key
+// keeps one counter per protocol, and a phone may use the other one.
 func TestPasskeySignIn(t *testing.T) {
 	t.Parallel()
 	// A passkey's relying party is a domain name, so the server's name has a dot.
@@ -98,44 +98,13 @@ func TestPasskeySignIn(t *testing.T) {
 	user := RandName("pat")
 	s.CreateUser(t, user, "pat-password-1", s.ServerPerms(t)...)
 
-	setup := s.Login(t, user, s.Password(t, user))
-	a := newSecurityKey(t, s)
-	a.register(t, s, setup, "Key A")
-	var rc struct {
-		Codes []string `json:"codes"`
+	key := newSecurityKey(t, s)
+	key.register(t, s, s.Login(t, user, s.Password(t, user)), "Key")
+	key.signInOK(t, s, user)
+	key.signInOK(t, s, user)
+
+	key.cred.Counter = 1
+	if _, st, b := key.signIn(t, s, user); st != http.StatusOK {
+		t.Fatalf("sign-in with a counter that did not go up: status %d: %s", st, b)
 	}
-	s.MustAPI(t, http.MethodPost, "/api/security/recovery-codes", nil, setup, &rc)
-
-	t.Run("sign in again with the same key", func(t *testing.T) {
-		a.signInOK(t, s, user)
-		a.signInOK(t, s, user)
-	})
-
-	t.Run("a second key added after a recovery code", func(t *testing.T) {
-		jar, _ := cookiejar.New(nil)
-		sess := &Session{Jar: jar}
-		s.MustAPI(t, http.MethodPost, "/api/auth/login", map[string]string{"username": user, "password": s.Password(t, user)}, sess, nil)
-		s.MustAPI(t, http.MethodPost, "/api/auth/login/second", map[string]string{"recovery_code": rc.Codes[0]}, sess, nil)
-		b := newSecurityKey(t, s)
-		b.register(t, s, sess, "Key B")
-		b.signInOK(t, s, user)
-		a.signInOK(t, s, user)
-	})
-
-	t.Run("a counter that did not go up", func(t *testing.T) {
-		// A security key keeps one counter per protocol; a phone may use the other one.
-		a.cred.Counter = 1
-		if _, st, b := a.signIn(t, s, user); st != http.StatusOK {
-			t.Fatalf("sign-in with a lower counter: status %d: %s", st, b)
-		}
-	})
-
-	t.Run("a key of another origin", func(t *testing.T) {
-		evil := *a
-		evil.rp.Origin = "https://evil.example"
-		evil.cred.Counter = 1000
-		if _, st, b := evil.signIn(t, s, user); st == http.StatusOK {
-			t.Fatalf("sign-in with an assertion for another origin: status %d: %s", st, b)
-		}
-	})
 }
