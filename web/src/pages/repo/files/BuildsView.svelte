@@ -15,6 +15,7 @@
   import { filesPath, href, navigate } from "$lib/router.svelte";
   import { Button } from "$lib/components/ui/button";
   import DataTable from "$lib/components/DataTable.svelte";
+  import ItemList from "$lib/components/ItemList.svelte";
   import Cell from "$lib/components/Cell.svelte";
   import Truncate from "$lib/components/Truncate.svelte";
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
@@ -30,6 +31,7 @@
   import { formats } from "$lib/formats/registry.svelte";
   import { buildInline, buildLabel, parentOf, shortSha } from "../browse";
   import { formatCount, formatDateTime } from "$lib/format";
+  import { count } from "$lib/words";
   import { cn } from "$lib/utils";
   import { viewBox } from "./area";
   import FileIcon from "@lucide/svelte/icons/file";
@@ -48,7 +50,6 @@
     earlier: earlierAsked = false,
     flow,
     selected,
-    compact,
     canWrite,
     onDelete,
     onList,
@@ -65,7 +66,6 @@
     flow: boolean;
     /** The file whose details show. */
     selected: string;
-    compact: boolean;
     canWrite: boolean;
     onDelete: (t: DeleteTarget) => void;
     /** Shows the chosen build's files: switches to the List view. */
@@ -222,35 +222,19 @@
     </div>
     {#if earlier}
       <div class="mb-8">
-        <DataTable
-          source={others}
-          caption="Builds of {version.version}"
-          key={(b) => b.id}
-          href={buildHref}
-          selected={(b) => b.id === shown?.id}
-          columns={[
-            { label: "Build", grow: true },
-            { label: "Commit", hideOnPhone: true },
-            { label: "Files", align: "right", hideOnPhone: true },
-            { label: "Published", align: "right" },
-          ]}
-        >
-          {#snippet row(b)}
-            <Cell grow>
-              <span class="flex min-w-0 items-center gap-2">
-                <PackageIcon aria-hidden="true" class="size-4 shrink-0 text-muted-foreground" />
-                <a href={buildHref(b)} class="flex min-w-0 rounded-sm font-medium outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
-                  ><Truncate text={buildLabel(b.id, b.label)} /></a
-                >
-                {#if b.label}<span class="min-w-0 truncate text-muted-foreground max-sm:hidden">{b.id}</span>{/if}
-                {#if latest(b)}<StatusBadge tone="success">Latest</StatusBadge>{/if}
-              </span>
-            </Cell>
-            <Cell hideOnPhone muted><BuildInline p={b.build} /></Cell>
-            <Cell num muted hideOnPhone>{b.files.length}</Cell>
-            <Cell num muted><RelativeTime at={b.published_at} /></Cell>
+        <ItemList source={others} caption="Builds of {version.version}" key={(b) => b.id} href={buildHref} selected={(b) => b.id === shown?.id}>
+          {#snippet leading()}<PackageIcon class="size-5" />{/snippet}
+          {#snippet title(b)}{buildLabel(b.id, b.label)}{/snippet}
+          {#snippet badges(b)}{#if latest(b)}<StatusBadge tone="success">Latest</StatusBadge>{/if}{/snippet}
+          {#snippet meta(b)}
+            <span class="flex min-w-0 items-center gap-1.5">
+              <span class="shrink-0">Published <RelativeTime at={b.published_at} /></span>
+              {#if b.build}<span aria-hidden="true">·</span><BuildInline p={b.build} />{/if}
+              <span aria-hidden="true">·</span><span class="shrink-0">{count(b.files.length, "file", "files")}</span>
+              {#if b.label}<span aria-hidden="true" class="max-sm:hidden">·</span><span class="min-w-0 truncate max-sm:hidden">{b.id}</span>{/if}
+            </span>
           {/snippet}
-        </DataTable>
+        </ItemList>
       </div>
       <h3 class="mb-2 text-label">Files of {buildInline(shown.id, shown.label)}</h3>
     {/if}
@@ -264,7 +248,7 @@
     selected={(f) => f.path === selected}
     columns={[
       { label: "Name", grow: true },
-      ...(compact ? [] : [{ label: "Kind", hideOnPhone: true }]),
+      { label: "Kind", hideOnPhone: true },
       { label: "Size", align: "right" as const },
       ...(canWrite ? [{ label: "", srLabel: "Actions" }] : []),
     ]}
@@ -281,7 +265,7 @@
           <MemberTag repo={version.repo} />
         </a>
       </Cell>
-      {#if !compact}<Cell hideOnPhone muted text={kindOf(f)} />{/if}
+      <Cell hideOnPhone muted text={kindOf(f)} />
       <Cell num><FileSize bytes={f.size} /></Cell>
       {#if canWrite}
         <Cell actions>

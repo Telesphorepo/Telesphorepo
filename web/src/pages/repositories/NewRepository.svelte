@@ -56,6 +56,7 @@
   // The server's rule for names (repos.NameRE).
   const nameRE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
   const maxMembers = 50;
+  const maxDescription = 500;
 
   const formats = new Resource(() => api.formats.list());
   // The repositories a group can read; loaded when the person chooses a group.
@@ -264,8 +265,8 @@
           <FormRow label="Name" for="{id}-name" help="Builds and clients use the name in the address of the repository." error={nameError || undefined}>
             <Input id="{id}-name" spellcheck={false} aria-describedby="{id}-name-help" aria-invalid={nameError ? true : undefined} bind:value={name} />
           </FormRow>
-          <FormRow label="Description" for="{id}-desc" help="The list of repositories shows this text after the name.">
-            <Input id="{id}-desc" maxlength={500} aria-describedby="{id}-desc-help" bind:value={description} />
+          <FormRow label="Description" for="{id}-desc" help="One sentence on what it holds, for people who look for it." length={description.length} max={maxDescription}>
+            <Input id="{id}-desc" maxlength={maxDescription} aria-describedby="{id}-desc-help {id}-desc-count" bind:value={description} />
           </FormRow>
         </FormGrid>
       </FormSection>

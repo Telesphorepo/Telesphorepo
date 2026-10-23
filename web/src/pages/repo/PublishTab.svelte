@@ -75,7 +75,7 @@
         {#if canUpload}
           <Button variant="outline" href={href(repoPath(repo.name, "upload"))} disabled={locked}><UploadIcon />Upload files</Button>
         {/if}
-        <Button variant="outline" href={href("/settings/tokens")}><KeyRoundIcon />Publish tokens</Button>
+        <Button variant="outline" href={href("/account/tokens")}><KeyRoundIcon />Publish tokens</Button>
       {/snippet}
       <SnippetTabs snippets={hand} {tools} label="Tool" />
     </Section>

@@ -14,11 +14,10 @@
   import { auth } from "$lib/auth.svelte";
   import { Button } from "$lib/components/ui/button";
   import Section from "$lib/components/Section.svelte";
-  import DataTable from "$lib/components/DataTable.svelte";
-  import Cell from "$lib/components/Cell.svelte";
+  import ItemList from "$lib/components/ItemList.svelte";
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
-  import RepoKindIcon from "$lib/components/RepoKindIcon.svelte";
-  import Truncate from "$lib/components/Truncate.svelte";
+  import FormatIcon from "$lib/components/FormatIcon.svelte";
+  import { kindPhrase } from "$lib/words";
   import ChoiceDialog from "./ChoiceDialog.svelte";
   import PlusIcon from "@lucide/svelte/icons/plus";
   import ArrowUpIcon from "@lucide/svelte/icons/arrow-up";
@@ -57,6 +56,8 @@
     })),
   );
   const source = $derived<TableSource<Row>>({ items: rows, loading: false, error: "" });
+  const shadowText = "This proxy comes before a repository of your own, so the remote can shadow your files. Move it down.";
+  const privateText = "Only people with access to this repository get its files through the group.";
 
   function move(i: number, by: -1 | 1) {
     const next = [...members];
@@ -99,62 +100,52 @@
 {/snippet}
 
 <Section title="Members" description="The group reads its members in this order. The first member that has a file serves it." actions={members.length ? addButton : undefined}>
-  <DataTable
-    {source}
-    caption="Members of {repo.name}"
-    key={(r) => r.name}
-    href={(r) => href(repoPath(r.name))}
-    columns={[
-      { label: "Order", align: "right", hideOnPhone: true },
-      { label: "Repository", grow: true },
-      { label: "", srLabel: "Actions" },
-    ]}
-  >
-    {#snippet row(r)}
-      <Cell num hideOnPhone>{r.n}</Cell>
-      <Cell grow>
-        <span class="flex min-w-0 items-center gap-1.5">
-          <a href={href(repoPath(r.name))} class="shrink-0 rounded-sm font-medium outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50">{r.name}</a>
-          {#if info.get(r.name)?.public === false}
-            <span class="flex shrink-0 text-muted-foreground" title="Private"><LockIcon aria-hidden="true" class="size-3.5" /><span class="sr-only">Private</span></span>
-          {/if}
-          <RepoKindIcon kind={info.get(r.name)?.kind} />
-          {#if r.shadows}
-            <span class="flex min-w-0 items-center gap-1.5 pl-1.5 text-warning" title="This proxy comes before a repository of your own, so the remote can shadow your files. Move it down.">
-              <TriangleAlertIcon aria-hidden="true" class="size-3.5 shrink-0" />
-              <span class="min-w-0 max-sm:hidden"><Truncate text="This proxy comes before a repository of your own, so the remote can shadow your files. Move it down." /></span>
-            </span>
-          {:else if r.privateNote}
-            <span class="min-w-0 pl-1.5 text-muted-foreground max-sm:hidden">
-              <Truncate text="Only people with access to this repository get its files through the group." />
-            </span>
-          {/if}
+  <ItemList {source} caption="Members of {repo.name}" key={(r) => r.name} href={(r) => href(repoPath(r.name))}>
+    {#snippet leading(r)}
+      <span class="flex items-center gap-3">
+        <span class="w-5 text-right text-label tabular-nums" title="Read order">{r.n}</span>
+        <FormatIcon format={repo.format} class="size-5" />
+      </span>
+    {/snippet}
+    {#snippet title(r)}{r.name}{/snippet}
+    {#snippet badges(r)}
+      {#if info.get(r.name)?.public === false}
+        <span class="flex text-muted-foreground" title="Private"><LockIcon aria-hidden="true" class="size-3.5" /><span class="sr-only">Private</span></span>
+      {/if}
+    {/snippet}
+    {#snippet meta(r)}
+      {@const kind = info.get(r.name)?.kind}
+      {#if r.shadows}
+        <span class="flex min-w-0 items-center gap-1.5 text-warning" title={shadowText}>
+          <TriangleAlertIcon aria-hidden="true" class="size-3.5 shrink-0" /><span class="truncate">{shadowText}</span>
         </span>
-      </Cell>
-      <Cell actions>
-        <Button variant="ghost" size="icon-sm" aria-label="Move {r.name} up" title="Move up" disabled={r.n === 1} onclick={() => move(r.n - 1, -1)}>
-          <ArrowUpIcon />
-        </Button>
-        <Button variant="ghost" size="icon-sm" aria-label="Move {r.name} down" title="Move down" disabled={r.n === members.length} onclick={() => move(r.n - 1, 1)}>
-          <ArrowDownIcon />
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          class="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-          aria-label="Remove {r.name} from the group"
-          title={members.length === 1 ? "A group needs at least one repository. Add another one first." : undefined}
-          disabled={members.length === 1}
-          onclick={() => remove(r.name)}><XIcon class="sm:hidden" /><span class="max-sm:hidden">Remove</span></Button
-        >
-      </Cell>
+      {:else}
+        <span title={r.privateNote ? privateText : undefined}>{[kind && kindPhrase({ kind }), r.privateNote && privateText].filter(Boolean).join(" · ")}</span>
+      {/if}
+    {/snippet}
+    {#snippet trailing(r)}
+      <Button variant="ghost" size="icon-sm" aria-label="Move {r.name} up" title="Move up" disabled={r.n === 1} onclick={() => move(r.n - 1, -1)}>
+        <ArrowUpIcon />
+      </Button>
+      <Button variant="ghost" size="icon-sm" aria-label="Move {r.name} down" title="Move down" disabled={r.n === members.length} onclick={() => move(r.n - 1, 1)}>
+        <ArrowDownIcon />
+      </Button>
+      <Button
+        variant="ghost"
+        size="sm"
+        class="hover:bg-destructive/10 hover:text-destructive"
+        aria-label="Remove {r.name} from the group"
+        title={members.length === 1 ? "A group needs at least one repository. Add another one first." : undefined}
+        disabled={members.length === 1}
+        onclick={() => remove(r.name)}><XIcon class="sm:hidden" /><span class="max-sm:hidden">Remove</span></Button
+      >
     {/snippet}
     {#snippet empty()}
       <CompactEmpty icon={LayersIcon} title="Members" state="None" text="The group serves no files until you add a repository to it.">
         {@render addButton()}
       </CompactEmpty>
     {/snippet}
-  </DataTable>
+  </ItemList>
 </Section>
 
 <ChoiceDialog

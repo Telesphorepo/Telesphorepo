@@ -15,14 +15,14 @@
   import { api, ApiError, errorMessage, type ProxyCandidate, type Setting, type TrustedProxyLists } from "$lib/api";
   import { Resource, listOf } from "$lib/load.svelte";
   import { Draft } from "$lib/unsaved.svelte";
-  import { formatCount } from "$lib/format";
+  import { count } from "$lib/words";
   import { Button } from "$lib/components/ui/button";
   import { Checkbox } from "$lib/components/ui/checkbox";
   import PageHeader from "$lib/components/PageHeader.svelte";
   import FormPage from "$lib/components/FormPage.svelte";
   import FormSection from "$lib/components/FormSection.svelte";
-  import DataTable from "$lib/components/DataTable.svelte";
-  import Cell from "$lib/components/Cell.svelte";
+  import ItemList from "$lib/components/ItemList.svelte";
+  import CopyButton from "$lib/components/CopyButton.svelte";
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
   import RangePaste from "$lib/components/RangePaste.svelte";
   import OptionRow from "$lib/components/OptionRow.svelte";
@@ -113,7 +113,7 @@
     return a === "::1" || /^f[cd][0-9a-f]{0,2}:/.test(a) || /^fe[89ab][0-9a-f]?:/.test(a);
   }
 
-  // The custom entries as table rows: addresses, then other network lists.
+  // The custom entries as list rows: addresses, then other network lists.
   type Entry = { value: string; label: string; list: number; where: string };
   const entries = $derived<Entry[]>(
     draft
@@ -195,33 +195,19 @@
   <FormPage>
     {#if detected.length}
       <FormSection title="Detected proxies" description="These addresses sent forwarded headers, but the server does not trust them. Trust one only if it is your proxy.">
-        <DataTable
-          source={listOf(candidates)}
-          caption="Detected proxies"
-          key={(c) => c.address}
-          columns={[
-            { label: "Address", grow: true },
-            { label: "Header", hideOnPhone: true },
-            { label: "Requests", align: "right", hideOnPhone: true },
-            { label: "Last seen", align: "right" },
-            { label: "", srLabel: "Actions" },
-          ]}
-        >
-          {#snippet row(c)}
+        <ItemList source={listOf(candidates)} caption="Detected proxies" key={(c) => c.address}>
+          {#snippet title(c)}<span class="tabular-nums">{c.address}</span>{/snippet}
+          {#snippet meta(c)}{c.header} · {count(c.count, "request", "requests")} · last seen <RelativeTime at={c.last_seen} />{/snippet}
+          {#snippet trailing(c)}
             {@const added = v.custom.includes(c.address)}
-            <Cell grow strong text={c.address} copy copyLabel="Copy {c.address}" />
-            <Cell hideOnPhone muted text={c.header} />
-            <Cell num hideOnPhone>{formatCount(c.count)}</Cell>
-            <Cell num muted><RelativeTime at={c.last_seen} /></Cell>
-            <Cell actions>
-              {#if locked}
-                <span class="text-muted-foreground">Add it to {setting.env}</span>
-              {:else}
-                <Button variant="outline" size="sm" disabled={added} onclick={() => trust(c)}>{added ? "Added" : "Trust"}</Button>
-              {/if}
-            </Cell>
+            <CopyButton value={c.address} label="Copy {c.address}" />
+            {#if locked}
+              <span class="text-meta text-muted-foreground">Add it to {setting.env}</span>
+            {:else}
+              <Button variant="outline" size="sm" disabled={added} onclick={() => trust(c)}>{added ? "Added" : "Trust"}</Button>
+            {/if}
           {/snippet}
-        </DataTable>
+        </ItemList>
       </FormSection>
     {/if}
 
@@ -268,29 +254,19 @@
 
       {#if showCustom}
         <div class="mt-6 flex flex-col gap-6">
-          <DataTable
-            source={entrySource}
-            caption="Other trusted proxies"
-            key={(e) => e.value}
-            columns={[
-              { label: "Address", grow: true },
-              { label: "Where", hideOnPhone: true },
-              ...(locked ? [] : [{ label: "", srLabel: "Remove" }]),
-            ]}
-          >
-            {#snippet row(e)}
-              <Cell grow text={e.label} copy={!e.list && e.value} copyLabel="Copy {e.label}" />
-              <Cell hideOnPhone muted text={e.where} />
+          <ItemList source={entrySource} caption="Other trusted proxies" key={(e) => e.value}>
+            {#snippet title(e)}<span class="tabular-nums">{e.label}</span>{/snippet}
+            {#snippet meta(e)}{e.where}{/snippet}
+            {#snippet trailing(e)}
+              {#if !e.list}<CopyButton value={e.value} label="Copy {e.label}" />{/if}
               {#if !locked}
-                <Cell actions>
-                  <Button variant="ghost" size="icon-sm" class={quietDanger} aria-label="Remove {e.label}" onclick={() => removeEntry(e)}><XIcon /></Button>
-                </Cell>
+                <Button variant="ghost" size="icon-sm" class={quietDanger} aria-label="Remove {e.label}" onclick={() => removeEntry(e)}><XIcon /></Button>
               {/if}
             {/snippet}
             {#snippet empty()}
               <CompactEmpty icon={WaypointsIcon} title="Specific addresses" state="None yet" text="Paste the addresses of your proxies below." />
             {/snippet}
-          </DataTable>
+          </ItemList>
           {#if !locked}<RangePaste id="{id}-paste" label="Add proxy addresses" onAdd={addCustom} />{/if}
         </div>
       {/if}

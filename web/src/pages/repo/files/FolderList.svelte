@@ -173,10 +173,10 @@
         text={repo.kind === "proxy"
           ? "The proxy keeps a file here after a build asks for it the first time."
           : repo.kind === "group"
-            ? "The files of its repositories appear here, once one of them has files you can download."
+            ? "None of its repositories has a file you can download yet."
             : canUpload
             ? "Publish with your build tool, or upload files here."
-            : "Files appear here when someone publishes to this repository."}
+            : "Nobody has published to this repository yet."}
       >
         {#if canUpload}<Button variant="outline" href={href(repoPath(repo.name, "upload"))}><UploadIcon />Upload</Button>{/if}
       </CompactEmpty>

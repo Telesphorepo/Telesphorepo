@@ -636,7 +636,10 @@ export type SearchHit = {
 
 // --- settings ---
 
-export type SettingType = "string" | "bool" | "int" | "size" | "duration" | "list" | "map";
+/** An image (the server logo) reports only whether it is set, like a secret; its own route changes it. */
+export type SettingType = "string" | "bool" | "int" | "size" | "duration" | "list" | "map" | "image";
+/** GET /api/identity: the name of the server, the URL of its logo, and whether either is set. */
+export type Identity = { name: string; logo: string | null; customized: boolean };
 export type SettingSource = "stored" | "env" | "default";
 /** A secret's value is never sent: only whether it is set. */
 export type SecretValue = { set: boolean };
@@ -1045,9 +1048,25 @@ export type AuditEvent = {
   detail: Record<string, unknown> | null;
   ip: string;
 };
-export type AuditFilter = { action?: string; repo?: string };
+/**
+ * GET /api/audit filters: action, repo (a name), actor (a username: the person who acted), since
+ * and until (RFC 3339: the events at or after since and before until).
+ */
+export type AuditFilter = { action?: string; repo?: string; actor?: string; since?: string; until?: string };
+/** GET /api/stats: the downloads of each day of the window (UTC days, oldest first) and the top repositories. */
+export type DownloadStats = {
+  days: { day: string; downloads: number; bytes: number }[];
+  repos: { name: string; format: string; downloads: number; bytes: number }[];
+  downloads: number;
+  bytes: number;
+};
 /** GET /api/audit/actions: an action of the audit log with its label and permission subsystem. */
 export type AuditAction = { id: string; label: string; subsystem: string };
+
+/** One released entry of the change log: what changed in a scope, and which side (needs) must be new. */
+export type ChangeEntry = { id?: string; version: string; scope: string; needs: string; summary: string };
+/** GET /api/changes: the version of the server and the entries of its change log. */
+export type Changes = { version: string; changes: ChangeEntry[] };
 /** GET and PUT /api/network/trusted-proxies: the IP lists that the trusted proxies include. */
 export type TrustedProxyLists = {
   lists: { id: number; name: string }[];

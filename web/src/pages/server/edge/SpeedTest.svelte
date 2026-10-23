@@ -4,7 +4,7 @@
   that lets the Worker take the choice from the headers Telesphorepo-Edge-Region and
   Telesphorepo-Edge-Pass; the answer says which bucket served (Telesphorepo-Edge) and whether the
   Worker took the choice (Telesphorepo-Edge-Override). Run tests one bucket, Run all every bucket one
-  after another. The table has one row per bucket and marks Nearest, the bucket the Worker picks for
+  after another. The results are a list with one row per bucket, fastest first, and mark Nearest, the bucket the Worker picks for
   this browser when nothing is chosen (from a HEAD without a choice), and Fastest. A row says more
   only when the Worker did not read the bucket asked for. The browser downloads from the address it
   runs on, so the test runs only when the page is open at the base URL, where the Worker's routes are.
@@ -21,12 +21,12 @@
   import Section from "$lib/components/Section.svelte";
   import FormGrid from "$lib/components/FormGrid.svelte";
   import FormRow from "$lib/components/FormRow.svelte";
-  import DataTable from "$lib/components/DataTable.svelte";
-  import Cell from "$lib/components/Cell.svelte";
+  import ItemList from "$lib/components/ItemList.svelte";
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
   import StatusBadge, { type Tone } from "$lib/components/StatusBadge.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import Loading from "$lib/components/Loading.svelte";
+  import FormatIcon from "$lib/components/FormatIcon.svelte";
 
   let { status }: { status: EdgeStatus } = $props();
 
@@ -55,6 +55,7 @@
   $effect(() => {
     if (fileChoice === "" && files.data) fileChoice = files.data.files[0]?.url ?? OTHER;
   });
+  const chosenFile = $derived(files.data?.files.find((f) => f.url === fileChoice));
   const fileLabel = (url: string) => {
     const f = files.data?.files.find((x) => x.url === url);
     return f ? `${f.repo}/${f.path.split("/").pop()} · ${formatSize(f.size)}` : "Another file";
@@ -218,9 +219,14 @@
     }
   }
 
+  // The results ranked: the buckets that the Worker read, fastest total first; then the runs that
+  // went elsewhere, failed or still run, in the order they ran.
+  const timed = (r: Result) => !r.running && !r.error && !r.other && r.total !== undefined;
+  const ranked = $derived([...results.filter(timed).sort((a, b) => a.total! - b.total!), ...results.filter((r) => !timed(r))]);
+  const rankOf = (r: Result) => (timed(r) ? ranked.indexOf(r) + 1 : 0);
   const source = {
     get items() {
-      return results;
+      return ranked;
     },
     loading: false,
     error: "",
@@ -235,6 +241,8 @@
     return "";
   });
 </script>
+
+{#snippet fileIcon()}<FormatIcon format={chosenFile?.format ?? ""} />{/snippet}
 
 {#snippet runButtons()}
   <Button disabled={running || !target} onclick={() => target && run([target])}>{running ? "Running" : "Run"}</Button>
@@ -271,14 +279,16 @@
               : "No public repository has a file that the Worker serves from every region. Enter a path."}
           >
             <Select.Root type="single" value={fileChoice} onValueChange={(v) => (fileChoice = v)} disabled={running}>
-              <Select.Trigger id="speed-file" class="w-full" aria-describedby="speed-file-help">
+              <Select.Trigger id="speed-file" class="w-full" aria-describedby="speed-file-help" icon={chosenFile ? fileIcon : undefined}>
                 <span class="truncate">{fileChoice ? fileLabel(fileChoice) : "Choose a file"}</span>
               </Select.Trigger>
               <Select.Content>
                 {#each data.files as f (f.url)}
-                  <Select.Item value={f.url} label={fileLabel(f.url)}>{fileLabel(f.url)}</Select.Item>
+                  <Select.Item value={f.url} label={fileLabel(f.url)}>
+                    {#snippet icon()}<FormatIcon format={f.format} />{/snippet}
+                  </Select.Item>
                 {/each}
-                <Select.Item value={OTHER} label="Another file">Another file</Select.Item>
+                <Select.Item value={OTHER} label="Another file" inset />
               </Select.Content>
             </Select.Root>
           </FormRow>
@@ -307,36 +317,34 @@
         </FormGrid>
 
         <div class="flex flex-col gap-3">
-          <DataTable
-            {source}
-            caption="Speed test results"
-            key={(r) => r.key}
-            columns={[
-              { label: "Bucket", grow: true },
-              { label: "First byte", align: "right", hideOnPhone: true },
-              { label: "Total", align: "right" },
-              { label: "Speed", align: "right", hideOnPhone: true },
-            ]}
-          >
-            {#snippet row(r)}
-              <Cell grow>
-                <span class="flex min-w-0 flex-wrap items-center gap-2">
-                  <span class="truncate font-medium">{r.label}</span>
-                  {#if r.key === nearest}<StatusBadge tone="neutral" title="The bucket the Worker picks for this browser when nothing is chosen.">Nearest</StatusBadge>{/if}
-                  {#if r.key === fastest}<StatusBadge tone="success">Fastest</StatusBadge>{/if}
-                  {#if r.other}<StatusBadge tone={r.other.tone} title={r.other.title}>{r.other.word}</StatusBadge>{/if}
-                  {#if r.error}<span class="text-meta text-destructive">{r.error}</span>{/if}
-                  {#if r.running}<span class="flex items-center gap-2 text-meta text-muted-foreground"><Spinner class="size-3.5" />Downloading</span>{/if}
-                </span>
-              </Cell>
-              <Cell num hideOnPhone><span title={r.timing}>{r.ttfb === undefined ? "" : ms(r.ttfb)}</span></Cell>
-              <Cell num><span class={r.key === fastest ? "font-medium text-success" : ""}>{r.total === undefined ? "" : ms(r.total)}</span></Cell>
-              <Cell num hideOnPhone>{r.speed === undefined ? "" : `${formatSize(Math.round(r.speed))}/s`}</Cell>
+          <ItemList {source} caption="Speed test results, fastest first" key={(r) => r.key}>
+            {#snippet leading(r)}
+              <span class="w-5 text-center text-label tabular-nums">{rankOf(r) || ""}</span>
+            {/snippet}
+            {#snippet title(r)}{r.label}{/snippet}
+            {#snippet badges(r)}
+              {#if r.key === nearest}<StatusBadge tone="neutral" title="The bucket the Worker picks for this browser when nothing is chosen.">Nearest</StatusBadge>{/if}
+              {#if r.key === fastest}<StatusBadge tone="success">Fastest</StatusBadge>{/if}
+              {#if r.other}<StatusBadge tone={r.other.tone} title={r.other.title}>{r.other.word}</StatusBadge>{/if}
+            {/snippet}
+            {#snippet meta(r)}
+              {#if r.running}
+                <span class="inline-flex items-center gap-2"><Spinner class="size-3.5" />Downloading</span>
+              {:else if r.error}
+                <span class="text-destructive" title={r.error}>{r.error}</span>
+              {:else if r.ttfb !== undefined && r.total !== undefined}
+                <span class="tabular-nums" title={r.timing}>First byte {ms(r.ttfb)} · total {ms(r.total)}</span>
+              {/if}
+            {/snippet}
+            {#snippet trailing(r)}
+              {#if r.speed !== undefined}
+                <span class={r.key === fastest ? "text-label text-success tabular-nums" : "text-body tabular-nums"}>{formatSize(Math.round(r.speed))}/s</span>
+              {/if}
             {/snippet}
             {#snippet empty()}
               <CompactEmpty icon={GaugeIcon} title="Speed test" state="Not run yet" text="Run reads the file from one bucket; Run all reads it from every bucket in turn." />
             {/snippet}
-          </DataTable>
+          </ItemList>
           {#if results.length > 0}
             <p class="text-meta text-muted-foreground">
               Times are from this browser's location{colo ? `, through Cloudflare's ${colo} data center` : ""}. Each run downloads the whole file again,

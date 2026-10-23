@@ -70,6 +70,8 @@ export type Query = Record<string, string | number | boolean | null | undefined>
 export type RequestOptions = {
   /** JSON body. */
   body?: unknown;
+  /** A file sent as the body as it is, with its own type (the server logo). */
+  raw?: Blob;
   query?: Query;
   /** A publish session token, sent as a Bearer credential instead of the session cookie. */
   token?: string;
@@ -94,6 +96,9 @@ export async function request<T = void>(method: string, url: string, opts: Reque
   if (opts.body !== undefined) {
     headers["Content-Type"] = "application/json";
     body = JSON.stringify(opts.body);
+  } else if (opts.raw) {
+    headers["Content-Type"] = opts.raw.type || "application/octet-stream";
+    body = opts.raw;
   }
   if (opts.token) headers.Authorization = "Bearer " + opts.token;
   if (opts.proof) headers["X-Telesphorepo-Proof"] = opts.proof;

@@ -1,6 +1,6 @@
 <!--
   Repository names as links to each repository's Access tab, on one line that truncates (the full
-  list in a tooltip). The CI pipelines and Networks tables use it for "Can publish to" and "Used by".
+  list in a tooltip). The signing key cards use it for "Used by".
 -->
 <script lang="ts">
   import { repoAccessHref } from "./access";

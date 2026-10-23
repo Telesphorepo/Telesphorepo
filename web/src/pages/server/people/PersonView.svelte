@@ -4,10 +4,12 @@
   account actions. Server permissions holds the role (ServerPermissionPicker: Member,
   Administrator, or Custom with one switch per permission); the save bar saves it after a
   confirm. For an account whose permissions single sign-on manages, the section shows the role and
-  the permissions read-only, with a link to Sign-in options for a person who can open it. The Repositories card lists every repository the person can use, with
-  the phrase of their permissions there. Give access opens a short form that gives the person
-  permissions on many repositories at once; Change edits one repository; picked rows get one set
-  of permissions, or lose their access after a confirm. A public repository shows because anyone
+  the permissions read-only, with a link to Sign-in options for a person who can open it. The
+  Repositories card lists every repository the person can use, with the phrase of their
+  permissions there under its name. Give access opens a short form that gives the person
+  permissions on many repositories at once; Change edits one repository and Remove takes its
+  access after a confirm; picked rows get one set of permissions, or lose their access after a
+  confirm. A public repository shows because anyone
   can download from it. Each change of repository permissions applies at once.
 -->
 <script lang="ts">
@@ -24,8 +26,7 @@
   import PageHeader from "$lib/components/PageHeader.svelte";
   import Section from "$lib/components/Section.svelte";
   import FormSection from "$lib/components/FormSection.svelte";
-  import DataTable from "$lib/components/DataTable.svelte";
-  import Cell from "$lib/components/Cell.svelte";
+  import ItemList from "$lib/components/ItemList.svelte";
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
@@ -141,8 +142,11 @@
   }
 
   let removeOpen = $state(false);
+  // The repositories of the open Remove question: one row's, or the picked ones.
+  let removing = $state<string[]>([]);
+  const askRemove = (names: string[]) => ((removing = names), (removeOpen = true));
   async function removeAccess() {
-    const names = pickedNames;
+    const names = removing;
     await api.grants.set([person], names, []);
     toast.success(`Removed the access of ${person} to ${repoCount(names.length)}.`);
     await afterChange();
@@ -261,7 +265,7 @@
           </p>
         </div>
       </div>
-      <div class="flex flex-wrap items-center gap-2">
+      <div data-slot="header-actions" class="flex flex-wrap items-center gap-2">
         {#if !sso}
           <Button
             variant="outline"
@@ -308,40 +312,43 @@
     {:else if u.disabled}
       <CompactEmpty icon={UserXIcon} text="A disabled account cannot use any repository. Enable the account to restore its access." />
     {:else}
-      <DataTable
+      <ItemList
         {source}
         caption="Repositories {person} can use"
         key={(r) => r.repo}
-        columns={[{ label: "Repository", class: "w-64 min-w-64 max-sm:min-w-0" }, { label: "Permissions", grow: true }, { label: "", srLabel: "Actions" }]}
+        href={(r) => repoHref(r.repo)}
         bind:picked
         pickable={(r) => auth.canRepo(r.repo, "repo.access")}
         pickLabel={(r) => r.repo}
       >
-        {#snippet row(r)}
-          <Cell strong class="w-64 max-w-64 min-w-64 max-sm:min-w-20">
-            <span class="flex min-w-0 items-center gap-2">
-              {#if r.format}<FormatIcon format={r.format} class="shrink-0 text-muted-foreground" />{/if}
-              <a class="truncate underline-offset-4 hover:underline" href={repoHref(r.repo)}>{r.repo}</a>
-              {#if !r.public}<LockIcon class="size-3.5 shrink-0 text-muted-foreground" aria-label="Private" />{/if}
-            </span>
-          </Cell>
-          <Cell grow muted text={r.granted ? repoPhrase(r.perms) : "Download, because it is public"} />
-          <Cell actions>
-            {#if auth.canRepo(r.repo, "repo.access")}
-              <Button variant="ghost" size="sm" aria-label="Change the permissions of {person} on {r.repo}" onclick={() => openChange([r.repo], r.granted ? r.perms : ["repo.download"])}
-                >Change</Button
+        {#snippet leading(r)}<FormatIcon format={r.format} class="size-5" />{/snippet}
+        {#snippet title(r)}{r.repo}{/snippet}
+        {#snippet badges(r)}{#if !r.public}<LockIcon class="size-3.5 text-muted-foreground" aria-label="Private" />{/if}{/snippet}
+        {#snippet meta(r)}{r.granted ? repoPhrase(r.perms) : "Download, because it is public"}{/snippet}
+        {#snippet trailing(r)}
+          {#if auth.canRepo(r.repo, "repo.access")}
+            <Button variant="ghost" size="sm" aria-label="Change the permissions of {person} on {r.repo}" onclick={() => openChange([r.repo], r.granted ? r.perms : ["repo.download"])}
+              >Change</Button
+            >
+            {#if r.granted}
+              <Button
+                variant="ghost"
+                size="sm"
+                class="hover:bg-destructive/10 hover:text-destructive"
+                aria-label="Remove the access of {person} to {r.repo}"
+                onclick={() => askRemove([r.repo])}>Remove</Button
               >
             {/if}
-          </Cell>
+          {/if}
         {/snippet}
         {#snippet bulk()}
           <Button variant="outline" size="sm" onclick={() => openChange(pickedNames, ["repo.download"])}>Change permissions</Button>
-          <Button variant="ghost" size="sm" class="hover:bg-destructive/10 hover:text-destructive" onclick={() => (removeOpen = true)}>Remove access</Button>
+          <Button variant="ghost" size="sm" class="hover:bg-destructive/10 hover:text-destructive" onclick={() => askRemove(pickedNames)}>Remove access</Button>
         {/snippet}
         {#snippet empty()}
           <CompactEmpty icon={DatabaseIcon} text="No repository is public, and {person} has no access yet. Give {person} access to a repository." />
         {/snippet}
-      </DataTable>
+      </ItemList>
     {/if}
   </Section>
 
@@ -368,12 +375,12 @@
 
 <ConfirmDialog
   bind:open={removeOpen}
-  title="Remove the access of {person} to {repoCount(pickedNames.length)}?"
-  description="{someNames(pickedNames)}."
-  confirmLabel="Remove access to {repoCount(pickedNames.length)}"
+  title="Remove the access of {person} to {repoCount(removing.length)}?"
+  description="{someNames(removing)}."
+  confirmLabel="Remove access to {repoCount(removing.length)}"
   destructive
   changes={[
-    `${person} loses every permission on ${pickedNames.length === 1 ? "this repository" : "these repositories"}, but can still download from a public one`,
+    `${person} loses every permission on ${removing.length === 1 ? "this repository" : "these repositories"}, but can still download from a public one`,
     `The read tokens of ${person} lose this access too`,
   ]}
   onConfirm={removeAccess}

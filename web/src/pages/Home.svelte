@@ -1,100 +1,110 @@
 <!--
-  Browse home: every repository the visitor can download from, as one calm list sorted by name
-  (RepoList): the format icon, the name, the description, the format and the kind in plain words.
-  A filter box and a format filter narrow it in the browser (the list is never paged). People with
-  All repositories create a repository from the toolbar.
+  Home, the front door: one line of welcome, the search field large (the top bar's search: files by
+  path), then, when at least two would show, a door for each of the people who open the app, each a
+  large card that is a link: Publish (to /publish, for a person who can publish somewhere), Browse
+  (to /browse) and Administer (to the Settings overview, for a person who would see a card there).
+  Each door is one column of a three-column row, so two doors keep that width, centered; on a phone
+  they stack. Under them the repositories (a heading over the cards, no card around them): Your
+  repositories, the first six by name where the person holds more than download, or, when there
+  are none, Repositories, the first six the person can see (three on a phone), with See all.
+  Both read GET /api/repos (each Repo.permissions), so a holder of All repositories counts too.
 -->
 <script lang="ts">
+  import type { Component } from "svelte";
   import type { PageProps } from "$lib/router.svelte";
   import { href, repoPath } from "$lib/router.svelte";
   import { auth } from "$lib/auth.svelte";
-  import { api, type Repo } from "$lib/api";
+  import { api } from "$lib/api";
   import { Resource } from "$lib/load.svelte";
-  import { formats } from "$lib/formats/registry.svelte";
-  import * as InputGroup from "$lib/components/ui/input-group";
-  import * as Select from "$lib/components/ui/select";
   import { Button } from "$lib/components/ui/button";
-  import PageHeader from "$lib/components/PageHeader.svelte";
-  import Toolbar from "$lib/components/Toolbar.svelte";
-  import RepoList from "$lib/components/RepoList.svelte";
+  import Section from "$lib/components/Section.svelte";
+  import CardGrid from "$lib/components/CardGrid.svelte";
+  import RepoCard from "$lib/components/RepoCard.svelte";
   import Loading from "$lib/components/Loading.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
-  import CompactEmpty from "$lib/components/CompactEmpty.svelte";
+  import GlobalSearch from "$lib/layouts/GlobalSearch.svelte";
+  import { brand } from "$lib/brand.svelte";
+  import { adminNav } from "../modules";
+  import UploadIcon from "@lucide/svelte/icons/upload";
+  import CompassIcon from "@lucide/svelte/icons/compass";
+  import SettingsIcon from "@lucide/svelte/icons/settings";
   import DatabaseIcon from "@lucide/svelte/icons/database";
-  import SearchIcon from "@lucide/svelte/icons/search";
-  import SearchXIcon from "@lucide/svelte/icons/search-x";
   import PlusIcon from "@lucide/svelte/icons/plus";
 
   let {}: PageProps = $props();
 
   const repos = new Resource(() => api.repos.list());
-  formats.load();
 
-  let filter = $state("");
-  let format = $state("");
-  const anyFormat = "*";
+  const byName = $derived([...(repos.data ?? [])].sort((a, b) => a.name.localeCompare(b.name)));
+  const mine = $derived(byName.filter((r) => r.permissions.some((p) => p !== "repo.download")));
+  const cards = $derived((mine.length > 0 ? mine : byName).slice(0, 6));
+  const heading = $derived(mine.length > 0 ? "Your repositories" : "Repositories");
+  // Until the list loads, the grants decide whether the Publish door shows.
+  const publishes = $derived(
+    repos.data ? byName.some((r) => r.kind === "hosted" && r.permissions.includes("repo.publish")) : auth.canSomeRepo("repo.publish"),
+  );
 
-  const all = $derived([...(repos.data ?? [])].sort((a, b) => a.name.localeCompare(b.name)));
-  const present = $derived([...new Set(all.map((r) => r.format))].sort((a, b) => formats.title(a).localeCompare(formats.title(b))));
-  const filtered = $derived(filter.trim() !== "" || format !== "");
-
-  const matches = (r: Repo) => {
-    const f = filter.trim().toLowerCase();
-    return (!format || r.format === format) && (!f || r.name.toLowerCase().includes(f) || r.description.toLowerCase().includes(f));
-  };
-  const shown = $derived(all.filter(matches));
-
-  const clear = () => {
-    filter = "";
-    format = "";
-  };
-  const newRepo = href("/settings/repositories/new");
+  type Door = { title: string; text: string; href: string; icon: Component<{ class?: string }> };
+  const doors = $derived.by(() => {
+    const list: Door[] = [];
+    if (auth.user && publishes) list.push({ title: "Publish", text: "Set up a project to publish to this server.", href: href("/publish"), icon: UploadIcon });
+    list.push({ title: "Browse", text: "Find a package and see how to use it.", href: href("/browse"), icon: CompassIcon });
+    if (adminNav().length > 0)
+      list.push({
+        title: "Administer",
+        text: "People, repositories, storage and the rest of the server.",
+        href: href("/settings/overview"),
+        icon: SettingsIcon,
+      });
+    // A lone Browse door says no more than the repositories under it.
+    return list.length > 1 ? list : [];
+  });
 </script>
 
-<PageHeader title="Repositories" />
+<div class="mb-(--header-gap) flex flex-col items-center gap-6 text-center">
+  <h1 class="text-title">Welcome to {brand.name}</h1>
+  <GlobalSearch large />
+</div>
 
-{#if all.length > 0}
-  <Toolbar>
-    <InputGroup.Root class="sm:w-72">
-      <InputGroup.Addon><SearchIcon /></InputGroup.Addon>
-      <InputGroup.Input bind:value={filter} type="search" placeholder="Filter by name or description" aria-label="Filter repositories" />
-    </InputGroup.Root>
-    {#if present.length > 1}
-      <Select.Root type="single" value={format || anyFormat} onValueChange={(v) => (format = v === anyFormat ? "" : v)}>
-        <Select.Trigger class="w-full sm:w-56" aria-label="Format">
-          <span class="truncate">{format ? formats.title(format) : "All formats"}</span>
-        </Select.Trigger>
-        <Select.Content>
-          <Select.Item value={anyFormat} label="All formats" />
-          {#each present as f (f)}
-            <Select.Item value={f} label={formats.title(f)} />
-          {/each}
-        </Select.Content>
-      </Select.Root>
-    {/if}
-    {#snippet end()}
-      {#if auth.can("repositories.all")}<Button href={newRepo}><PlusIcon />New repository</Button>{/if}
-    {/snippet}
-  </Toolbar>
+{#if doors.length > 0}
+  <!-- Each door is one column of a three-column row, so two doors keep that width, centered. -->
+  <nav aria-label="Start here" class="mb-(--section-gap) flex flex-col gap-4 md:flex-row md:justify-center">
+    {#each doors as d (d.title)}
+      {@const Icon = d.icon}
+      <a
+        href={d.href}
+        class="flex flex-col gap-3 rounded-lg bg-card p-6 text-card-foreground ring-1 ring-foreground/10 outline-none transition-colors hover:bg-hover focus-visible:ring-[3px] focus-visible:ring-ring/50 md:w-[calc((100%-2rem)/3)]"
+      >
+        <span aria-hidden="true" class="flex text-(--mark)"><Icon class="size-8" /></span>
+        <span class="text-section">{d.title}</span>
+        <span class="text-body text-muted-foreground">{d.text}</span>
+      </a>
+    {/each}
+  </nav>
 {/if}
 
-{#if repos.loading && !repos.data}
-  <Loading rows={5} />
-{:else if repos.error && !repos.data}
-  <ErrorState error={repos.error} title="The repositories did not load" onRetry={repos.reload} />
-{:else if shown.length > 0}
-  <RepoList repos={shown} href={(r) => href(repoPath(r.name))} />
-{:else if filtered && all.length > 0}
-  <CompactEmpty icon={SearchXIcon} title="No repository matches" text="Change the filter, or clear it to see every repository.">
-    <Button variant="outline" onclick={clear}>Clear the filter</Button>
-  </CompactEmpty>
-{:else if auth.can("repositories.all")}
-  <EmptyState icon={DatabaseIcon} title="No repositories yet" description="A repository holds the packages of one format.">
-    <Button href={newRepo}><PlusIcon />New repository</Button>
-  </EmptyState>
-{:else if auth.user}
-  <EmptyState icon={DatabaseIcon} title="No repositories to show" description="You do not have access to a repository yet. Ask an administrator for access." />
-{:else}
-  <EmptyState icon={DatabaseIcon} title="No public repositories" description="Sign in to see the private repositories that you have access to." />
-{/if}
+<!-- Its own block, so the section sits one gap under the search or the doors. -->
+<div>
+  {#if repos.loading && !repos.data}
+    <Loading rows={5} />
+  {:else if repos.error && !repos.data}
+    <ErrorState error={repos.error} title="The repositories did not load" onRetry={repos.reload} />
+  {:else if cards.length > 0}
+    <Section title={heading} plain>
+      {#snippet actions()}<Button variant="ghost" href={href("/browse")}>See all</Button>{/snippet}
+      <!-- Three cards on a phone, six from 640px. -->
+      <CardGrid label={heading} max={3} class="max-sm:[&>:nth-child(n+4)]:hidden">
+        {#each cards as r (r.name)}<RepoCard repo={r} href={href(repoPath(r.name))} />{/each}
+      </CardGrid>
+    </Section>
+  {:else if auth.can("repositories.all")}
+    <EmptyState icon={DatabaseIcon} title="No repositories yet" description="A repository holds the packages of one format.">
+      <Button href={href("/settings/repositories/new")}><PlusIcon />New repository</Button>
+    </EmptyState>
+  {:else if auth.user}
+    <EmptyState icon={DatabaseIcon} title="No repositories to show" description="You do not have access to a repository yet. Ask an administrator for access." />
+  {:else}
+    <EmptyState icon={DatabaseIcon} title="No public repositories" description="Sign in to see the private repositories that you have access to." />
+  {/if}
+</div>

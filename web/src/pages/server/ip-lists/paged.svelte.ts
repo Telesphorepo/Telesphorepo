@@ -1,7 +1,7 @@
 import type { TableSource } from "$lib/load.svelte";
 
 /**
- * A DataTable source over a list that the page already holds: the first `step` rows, and "Load
+ * A list source (ItemList) over a list that the page already holds: the first `step` rows, and "Load
  * more" for the next. A downloaded network list holds thousands of ranges.
  */
 export class Paged<T> implements TableSource<T> {

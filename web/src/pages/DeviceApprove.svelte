@@ -128,7 +128,7 @@
         <p class="text-body text-muted-foreground">
           {approved.name} can now publish as {auth.user?.username}. Go back to your terminal: telesphorepo login finishes by itself.
         </p>
-        <div><Button variant="outline" href={href("/settings/devices")}>Open your devices</Button></div>
+        <div><Button variant="outline" href={href("/account/devices")}>Open your devices</Button></div>
       </div>
     </div>
   {:else}
@@ -185,7 +185,7 @@
         <div class="mt-8">
           {#if sso}
             <div class="flex flex-col items-start gap-3 text-sm">
-              <p>Your identity provider asks you to sign in again. Then this page approves the device.</p>
+              <p>Sign in again at your identity provider to approve the device.</p>
               <Button href={api.devices.ssoApproveURL(pending.user_code)} disabled={ssoBusy}>
                 {#if ssoBusy}<Spinner />{/if}
                 Sign in again with single sign-on to approve

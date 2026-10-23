@@ -98,6 +98,9 @@ export const api = {
   /** The permission registry: every subsystem with its permissions (no credential needed). */
   permissions: () => request<T.PermissionRegistry>("GET", "/api/permissions"),
 
+  /** The version of the server and the released entries of its change log newer than since (every one without it). No credential needed. */
+  changes: (since?: string) => request<T.Changes>("GET", "/api/changes", { query: { since } }),
+
   /** The repository permissions of each pair of person and repository. */
   grants: {
     /**
@@ -111,6 +114,14 @@ export const api = {
 
   formats: {
     list: () => request<T.Format[]>("GET", "/api/formats"),
+  },
+
+  identity: {
+    get: () => request<T.Identity>("GET", "/api/identity"),
+    /** General settings: replaces the logo with a PNG, JPEG or WebP file. Answers the identity. */
+    putLogo: (file: Blob) => request<T.Identity>("PUT", "/api/identity/logo", { raw: file }),
+    /** General settings: removes the logo. Answers the identity. */
+    deleteLogo: () => request<T.Identity>("DELETE", "/api/identity/logo"),
   },
 
   repos: {
@@ -433,6 +444,20 @@ export const api = {
   /** activity.read: the audit log, newest first. */
   audit: (filter: T.AuditFilter & T.PageParams = {}) =>
     request<T.Page<T.AuditEvent>>("GET", "/api/audit", {
-      query: { action: filter.action, repo: filter.repo, ...page(filter) },
+      query: {
+        action: filter.action,
+        repo: filter.repo,
+        actor: filter.actor,
+        since: filter.since,
+        until: filter.until,
+        ...page(filter),
+      },
     }),
+
+  /** activity.read: the people of the Activity filter whose username starts with q (at most 20 a page). */
+  auditPeople: (q: string, p?: T.PageParams) =>
+    request<T.Page<T.PersonName>>("GET", "/api/audit/people", { query: { q, ...page(p) } }),
+
+  /** activity.read: the downloads of the last days (today included; 30 by default) and the top repositories. */
+  stats: (days?: number) => request<T.DownloadStats>("GET", "/api/stats", { query: { days } }),
 };

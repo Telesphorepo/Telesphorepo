@@ -6,7 +6,8 @@
   whose uploads wait for the switch-over from Nexus).
 
   On a Settings page the breadcrumbs come from the sidebar: Settings › group › item, then the title
-  on a sub-page (Settings › People and CI › CI pipelines › acme/app). `crumbs` replaces what
+  on a sub-page (Settings › People and CI › CI pipelines › acme/app); on an account page Your
+  account › item. `crumbs` replaces what
   follows the group when the page sits deeper (Settings › Repositories › maven › Access). A Browse
   page shows breadcrumbs only when it passes `crumbs` (its whole trail).
 
@@ -17,7 +18,7 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
   import Breadcrumbs from "./Breadcrumbs.svelte";
-  import { settingsTrail, type Crumb } from "$lib/crumbs";
+  import { sidebarTrail, type Crumb } from "$lib/crumbs";
   import { current } from "$lib/current.svelte";
   import { href, router } from "$lib/router.svelte";
 
@@ -44,9 +45,9 @@
   } = $props();
 
   const trail = $derived.by((): Crumb[] => {
-    if (current.route?.layout === "settings") return settingsTrail(router.path, title, crumbs);
+    if (current.route && current.route.layout !== "app") return sidebarTrail(router.path, title, crumbs);
     if (crumbs) return crumbs;
-    if (back) return [{ label: "Repositories", href: href("/") }, { label: back.label, href: back.href }, { label: title }];
+    if (back) return [{ label: "Repositories", href: href("/browse") }, { label: back.label, href: back.href }, { label: title }];
     return [];
   });
 </script>
@@ -66,6 +67,6 @@
         </p>
       {/if}
     </div>
-    {#if actions}<div class="flex shrink-0 flex-wrap items-center gap-2">{@render actions()}</div>{/if}
+    {#if actions}<div data-slot="header-actions" class="flex max-w-full shrink-0 flex-wrap items-center gap-2">{@render actions()}</div>{/if}
   </div>
 </header>

@@ -15,7 +15,7 @@
 {#if auth.user}
   <DropdownMenu.Root>
     <DropdownMenu.Trigger class={buttonVariants({ variant: "ghost", size: "icon" })} aria-label="Account menu">
-      <UserAvatar name={auth.user.username} />
+      <UserAvatar name={auth.user.username} size="md" />
     </DropdownMenu.Trigger>
     <DropdownMenu.Content align="end" class="w-60">
       <DropdownMenu.Label class="flex flex-col gap-1 font-normal">
@@ -23,7 +23,7 @@
         <span class="truncate text-xs text-muted-foreground">{serverPhrase(auth.user.permissions) || "Member"}</span>
       </DropdownMenu.Label>
       <DropdownMenu.Separator />
-      <DropdownMenu.Item onSelect={() => navigate("/settings/account")}><UserIcon />Your account</DropdownMenu.Item>
+      <DropdownMenu.Item onSelect={() => navigate("/account")}><UserIcon />Your account</DropdownMenu.Item>
       <DropdownMenu.Item onSelect={() => navigate("/install")}><TerminalIcon />Install the CLI</DropdownMenu.Item>
       <DropdownMenu.Separator />
       <DropdownMenu.Label class="text-xs font-normal text-muted-foreground">Theme</DropdownMenu.Label>

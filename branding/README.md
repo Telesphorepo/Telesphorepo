@@ -6,8 +6,8 @@ tiers:
 
 - The **flat mark** is for small and functional sizes: the favicon, the app header, docs and
   lockups. Use it at 32 px and below without exception.
-- The **felt ticket** is for large hero uses: the website hero, the sign-in page, empty states
-  and the social (OG) image. It has the same geometry as the flat mark, at 10x, made of matte gold
+- The **felt ticket** is for large hero uses: the website hero, the sign-in page, the ticket
+  moments of the app and the social (OG) image. It has the same geometry as the flat mark, at 10x, made of matte gold
   wool felt with the T pressed into it.
 
 ## Colors
@@ -20,6 +20,18 @@ tiers:
 | Paper | `#F5F1E6` | The wordmark on Carbon. |
 
 Gold is 1.88:1 on white, which is too low for a graphic. On a light background, use Gold Deep.
+
+The UI derives its colors from these four (`web/src/app.css`; see **Canvas colors** and the parts
+below). They are UI colors, not brand colors: the mark stays Gold, Gold Deep, Carbon and Paper.
+
+| Name | Light | Dark | Use |
+|---|---|---|---|
+| Canvas | `oklch(0.97 0.011 85)` `#F8F5ED`, Paper lightened | `oklch(0.185 0.035 273)` `#0E1122`, Carbon deepened | The page background (`--background`). |
+| Ink | `oklch(0.17 0.02 272)` `#0C0F18`, Carbon darkened | `oklch(0.97 0.008 88)`, Paper | Text (`--foreground`). |
+| Ticket paper | `oklch(0.988 0.012 88)` | `oklch(0.25 0.042 273)` | The admission ticket of a CI pipeline (`--ticket-paper`). |
+| Ticket | `oklch(0.935 0.014 85)` / ink `oklch(0.3 0.025 272)` | `oklch(0.31 0.04 273)` / ink `oklch(0.92 0.015 88)` | A neutral TicketBadge (`--ticket`, `--ticket-foreground`). |
+| Ticket gold | `oklch(0.9 0.075 86)` / ink `oklch(0.32 0.065 70)` | `oklch(0.38 0.075 80)` / ink `oklch(0.95 0.06 88)` | A gold TicketBadge (`--ticket-gold`, `--ticket-gold-foreground`). |
+| Avatar hues | six at L 0.86, C 0.065: hues 83, 40, 150, 200, 260, 320 | six at L 0.46, C 0.1, same hues | People's avatars (`--avatar-1..6`), under `--avatar-ink` (Carbon `oklch(0.27 0.05 272)` in light, Paper `oklch(0.97 0.02 88)` in dark). |
 
 The felt ticket also uses these internal tones. Do not use them as brand colors.
 
@@ -179,7 +191,7 @@ radial light behind it, and the wordmark in Paper to its right. The ticket is at
 wordmark cap height is 40, centered on the ticket middle. The gap from the ticket to the wordmark
 is 56.
 
-## Avatar
+## Profile picture
 
 `avatar.svg` is the flat mark on a square, for a profile picture. Its viewBox is `0 0 512 512`,
 filled with Carbon, and the mark is at x 80..432, y 146..366: the 64 × 40 grid at scale 5.5, 352
@@ -187,6 +199,81 @@ wide (a whole multiple of 16). The corners of the ticket are 207.5 from the cent
 radius of the inscribed circle, so a round crop keeps the whole ticket with room around it.
 `avatar-on-light.svg` is the same on Paper with Gold Deep. The T and the slots stay holes, so the
 square's color shows through them. The PNGs are rendered with sharp at 256, 512 and 1024.
+
+## Canvas colors
+
+The UI sits on a canvas made from the brand: in light, a quiet warm tint of Paper; in dark, a deep
+navy from Carbon. A card (`--card`) is white in light and a lighter navy in dark, so it lifts off
+the canvas. Every quiet fill (hover, stripe, panel, muted, borders, inputs, scrollbars) takes the
+hue of its canvas: warm greys in light (hue 85), navy greys in dark (hue 273), so no cold grey
+sits on a warm page. Meta text (`--muted-foreground`, a warm grey in light and a blue grey in dark)
+keeps at least 4.5:1 on the canvas, the panel and the muted fill; the measured ratios are in
+`web/src/README.md` (Contrast).
+
+## Avatars
+
+A person's avatar in the UI (`UserAvatar`) is generated from the username, so it needs no upload
+and the same person looks the same on every page. On a 40-unit circle:
+
+- The fill is one of six hues (`--avatar-1..6`): gold, terracotta, sage, teal, blue and plum, soft
+  in light and deep in dark, all at one lightness so no person looks louder than another.
+- One corner is cut off along a 45-degree line, the angle of the T's stem, and filled with the
+  ink at 20%. The cut starts 14, 18 or 22 units from the corner along both edges, so it never
+  reaches the initials in the middle.
+- The initials (the first two letters, or the first letters of two parts of a name like
+  `jonas.berg`) sit in the middle in `--avatar-ink`, at least 6:1 on every hue.
+
+An FNV-1a hash of the username picks the hue, the corner and the depth of the cut. The avatar
+comes in three sizes: 24 px, 32 px (the rows of a list, the account menu) and 40 px (an identity
+card). The initials are 9, 11 and 13 px, so they keep the same clear space to the cut at every
+size.
+
+## Ticket badge
+
+`TicketBadge` puts a short label on a small flat ticket: a value that admits or is admitted (a
+branch `main`, a tag `v*`, a workflow file `release.yml`, a Jenkins job, the CI system). It follows
+the mark at the height of a line of body text (24 px):
+
+- A semicircular notch in each short end, of 1/6 of its height (4 px; the mark's is 1/8, which
+  does not read this small). The corners are 1/8 of its height (3 px).
+- An optional 14 px icon of the kind, the label (13 px, medium), then a dashed perforation (2.5 px
+  dashes, 2 px gaps, the ink at 45%) and the stub: a short blank end as on the mark, or a word or
+  a number.
+- Two tones: neutral (`--ticket`) for conditions, gold (`--ticket-gold`) for the one thing that
+  names the ticket (the CI system on the admission ticket). The ink is at least 8.7:1 on both, in
+  both themes.
+
+The notches are cut with a CSS mask, so the badge has no outline and stays crisp at every zoom.
+
+## Perforation
+
+`Perforation` is the slot column of the mark as a divider: slots 2 × 4 units with gaps of 2, at
+1.5 px a unit (6 × 3 px slots, 3 px gaps), turned along the row, as many whole slots as fit. It
+parts the two halves of a ticket shape, where the ticket would tear. It is not a general divider.
+
+## Admission ticket
+
+The New and Edit CI pipeline page shows the pipeline as a ticket that fills in while the form is
+filled: "Admits", the CI system as a gold ticket badge, the GitHub repository or Jenkins host, and
+the conditions as ticket badges; a perforation with a notch of 10 px in each side; then "To" and
+the repositories with their format icons. The paper is `--ticket-paper` with a 1 px border that
+runs round the notches, and a soft shadow lifts it off the canvas.
+
+## Empty states
+
+An empty page or result (`EmptyState`) shows the ticket drawn flat in outline: the panel with its
+left notch, the six perforation slots, and the stub torn off along them, dropped 3 units and
+turned 7 degrees. It is drawn in the muted ink (`--muted-foreground`) at 70%, 1.5 px lines, 108 px
+wide. The icon of what is missing (a lock, a compass) sits where the T would be; without one the
+ticket is blank. This is an illustration, not the mark: the mark itself is never drawn in outline.
+
+## Where a ticket motif goes
+
+A ticket motif (a ticket badge, a perforation, the admission ticket) marks only what admits or is
+admitted: CI pipelines and their conditions, publish tokens. It is never decoration elsewhere: a
+state is a status badge, and sub-groups part with a plain separator. Empty states and avatars use
+the ticket as an illustration of the brand, and the felt ticket keeps its own rules below.
+
 ## Clear space and minimum sizes
 
 - **Clear space:** keep 8 units (one fifth of the ticket height) clear on all sides of the mark and
@@ -209,7 +296,8 @@ square's color shows through them. The PNGs are rendered with sharp at 256, 512 
 | Raster mark | `png/logo-mark-*.png`, `png/logo-mark-on-light-*.png` (16 to 512 wide) |
 | Avatar (square: GitHub, Discord, social profiles) | `avatar.svg` (Carbon), `avatar-on-light.svg` (Paper); `png/avatar-{256,512,1024}.png`, `png/avatar-on-light-{256,512,1024}.png` |
 | Raster lockup | `png/lockup-horizontal@2x.png`, `@4x`, and the `-on-dark` pair (80 and 160 px tall) |
-| Website hero, sign-in page, empty states | `ticket-skeuomorphic.svg` (the felt ticket), `png/ticket-skeuomorphic.png` (720), `@2x` (1440) |
+| Website hero, sign-in page | `ticket-skeuomorphic.svg` (the felt ticket), `png/ticket-skeuomorphic.png` (720), `@2x` (1440) |
+| Empty states in the app | The flat outlined ticket of `EmptyState` (see **Empty states**) |
 | Social card | `png/og-image.png` (source `og-image.svg`) |
 
 The rule: use the flat mark at 32 px and below. Use the felt ticket only for large hero uses.

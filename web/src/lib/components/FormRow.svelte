@@ -15,7 +15,8 @@
   `{for}-help`: point the control's aria-describedby at it. `more` is longer help behind a "Learn
   more" disclosure. `aka` is the technical name of the value, after `akaLabel` ("Also called"; the
   Sign-in options page says "In your provider"). `badge` sits next to the label (e.g. "Set by
-  TR_LISTEN").
+  TR_LISTEN"). `length` and `max` count the characters of a text control at the end of the help
+  line, with the id `{for}-count`.
 -->
 <script lang="ts" module>
   /**
@@ -32,6 +33,7 @@
   import ErrorState from "./ErrorState.svelte";
   import LearnMore from "./LearnMore.svelte";
   import { cn } from "$lib/utils";
+  import { formatCount } from "$lib/format";
 
   let {
     label,
@@ -44,6 +46,8 @@
     error,
     badge,
     more,
+    length,
+    max,
     children,
   }: {
     label: string;
@@ -60,10 +64,14 @@
     badge?: Snippet;
     /** Longer help, behind "Learn more". */
     more?: Snippet;
+    /** The characters in the control, with `max`: the counter at the end of the help line. */
+    length?: number;
+    max?: number;
     children: Snippet;
   } = $props();
 
   const uid = $props.id();
+  const counted = $derived(max !== undefined);
   let open = $state(false);
   const reduce = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
 </script>
@@ -75,13 +83,16 @@
     {#if badge}<span class="-my-0.5 flex">{@render badge()}</span>{/if}
   </div>
   <div class={width === "auto" ? "flex min-h-9 items-center" : "w-full"}>{@render children()}</div>
-  {#if help || more || aka}
+  {#if help || more || aka || counted}
     <div class="flex flex-col gap-0.5 text-meta text-muted-foreground">
-      {#if help || more}
-        <p>
-          {#if help}<span id={id ? `${id}-help` : undefined}>{help}</span>{/if}
-          {#if more}<LearnMore bind:open toggleOnly controls="{uid}-more" />{/if}
-        </p>
+      {#if help || more || counted}
+        <div class="flex items-start justify-between gap-4">
+          <p>
+            {#if help}<span id={id ? `${id}-help` : undefined}>{help}</span>{/if}
+            {#if more}<LearnMore bind:open toggleOnly controls="{uid}-more" />{/if}
+          </p>
+          {#if counted}<p id={id ? `${id}-count` : undefined} class="shrink-0 tabular-nums">{formatCount(length ?? 0)} of {formatCount(max ?? 0)}</p>{/if}
+        </div>
       {/if}
       {#if aka}<p>{akaLabel}: <span class="text-foreground">{aka}</span></p>{/if}
     </div>

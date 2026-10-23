@@ -386,7 +386,7 @@
 <PageHeader
   title="Upload to {repo.name}"
   crumbs={[
-    { label: "Repositories", href: href("/") },
+    { label: "Repositories", href: href("/browse") },
     { label: repo.name, href: href(filesPath(repo.name, folder)) },
     { label: "Upload" },
   ]}

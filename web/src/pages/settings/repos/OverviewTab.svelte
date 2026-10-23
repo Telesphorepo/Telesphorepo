@@ -102,9 +102,8 @@
 
 <FormSection title={repo.kind === "proxy" ? "Proxy" : repo.kind === "group" ? "Group" : "Repository"}>
   <FormGrid>
-    <FormRow label="Description" for="{id}-desc" help="The list of repositories shows this text after the name." full>
+    <FormRow label="Description" for="{id}-desc" help="One sentence on what it holds, for people who look for it." full length={draft.value.description.length} {max}>
       <Textarea id="{id}-desc" rows={3} maxlength={max} aria-describedby="{id}-desc-help {id}-desc-count" bind:value={draft.value.description} />
-      <p id="{id}-desc-count" class="text-right text-meta text-muted-foreground tabular-nums">{formatCount(draft.value.description.length)} of {max}</p>
     </FormRow>
   </FormGrid>
 </FormSection>

@@ -144,8 +144,10 @@
   const canSubmit = $derived(ids.length > 0 && (!!targets || perms.length > 0));
 </script>
 
-<ShortFormDialog bind:open {title} {description} submitLabel={submitLabel(ids.length, perms)} {canSubmit} onSubmit={() => onGive(ids, perms)}>
+<ShortFormDialog wide bind:open {title} {description} submitLabel={submitLabel(ids.length, perms)} {canSubmit} onSubmit={() => onGive(ids, perms)}>
+  <div class={targets ? "" : "grid items-start gap-x-8 gap-y-6 md:grid-cols-2"}>
   {#if !targets}
+    <div class="flex min-w-0 flex-col gap-4">
     {#if search}
       <FormField label="Find a {noun[0]}" for="{id}-filter" hint="Type the start of the name.">
         <Input id="{id}-filter" type="search" autocomplete="off" spellcheck={false} bind:value={filter} />
@@ -170,7 +172,7 @@
           {/if}
           <Button class={search ? "ml-auto" : ""} variant="ghost" size="xs" disabled={!chosen.length} onclick={selectNone}>Select none</Button>
         </div>
-        <div class="-mx-3 flex max-h-56 flex-col overflow-y-auto" role="group" aria-label={noun[1]}>
+        <div class="-mx-3 flex max-h-56 flex-col overflow-y-auto md:max-h-96" role="group" aria-label={noun[1]}>
           {#if searchError}
             <ErrorState inline error={searchError} />
           {/if}
@@ -190,6 +192,10 @@
         </div>
       </div>
     {/if}
+    </div>
   {/if}
-  <PermissionPicker id="{id}-perms" groups={pickerGroups("repo")} needs={needsOf("repo")} held={heldNow} bind:value={perms} />
+  <div class="flex min-w-0 flex-col gap-4">
+    <PermissionPicker id="{id}-perms" groups={pickerGroups("repo")} needs={needsOf("repo")} held={heldNow} bind:value={perms} />
+  </div>
+  </div>
 </ShortFormDialog>

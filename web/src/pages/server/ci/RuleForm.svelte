@@ -42,6 +42,8 @@
   import Area from "./Area.svelte";
   import OptionRow from "$lib/components/OptionRow.svelte";
   import WorkflowSetup from "./WorkflowSetup.svelte";
+  import AdmissionTicket from "./AdmissionTicket.svelte";
+  import FormatIcon from "$lib/components/FormatIcon.svelte";
   import {
     conditionField,
     conditionsOf,
@@ -378,7 +380,7 @@
   </PageHeader>
 
   {#snippet nameField()}
-    <FormRow label="Name" for="{fid}-name" help="Lists and Activity show this name.">
+    <FormRow label="Name" for="{fid}-name" help="Name it after what it publishes, such as acme/app releases.">
       <Input id="{fid}-name" aria-describedby="{fid}-name-help" bind:value={v.name} oninput={() => (nameTouched = true)} />
     </FormRow>
     {#if !isNew}
@@ -386,7 +388,20 @@
     {/if}
   {/snippet}
 
+  {#snippet ticket()}
+    <AdmissionTicket
+      system={v.system}
+      {hand}
+      gh={v.gh}
+      jk={v.jk}
+      accepts={accepts(v, hand)}
+      repos={v.repos}
+      formatOf={(r) => repos.data?.find((x) => x.name === r)?.format}
+    />
+  {/snippet}
+
   {#snippet createRow()}
+    <div class="mb-4 w-full xl:hidden">{@render ticket()}</div>
     <Button type="submit" disabled={busy}>
       {#if busy}<Spinner />{/if}
       Create CI pipeline
@@ -395,6 +410,9 @@
     {#if error}<div class="w-full"><ErrorState inline {error} /></div>{/if}
   {/snippet}
 
+  <!-- The admission ticket sits beside the steps on a wide window, sticky under the top bar; on a
+       narrower one it sits above Create (a new pipeline) or after the form. -->
+  <div class="grid grid-cols-[minmax(0,1fr)] items-start gap-x-6 xl:grid-cols-[minmax(0,1fr)_22rem]">
   <FormPage>
     {#if noBaseURL && !accepts(v, hand).audience}
       <Alert.Root class="mb-6">
@@ -565,8 +583,7 @@
         {/if}
       </Area>
 
-      <Area n={isNew ? 3 : undefined} title="Repositories it can publish to">
-        {#snippet footer()}{#if isNew && steps === 3}{@render createRow()}{/if}{/snippet}
+      <Area n={isNew ? 3 : undefined} title="Repositories it can publish to" footer={isNew && steps === 3 ? createRow : undefined}>
         {#if repos.loading && !repos.data}
           <Loading rows={3} />
         {:else if repos.error && !repos.data}
@@ -583,6 +600,7 @@
           <div class="grid gap-1 sm:grid-cols-2">
             {#each sortedRepos as r (r.name)}
               <OptionRow id="{fid}-repo-{r.name}" label={r.name} description={formats.title(r.format)}>
+                {#snippet icon()}<FormatIcon format={r.format} />{/snippet}
                 {#snippet control()}
                   <Checkbox id="{fid}-repo-{r.name}" checked={v.repos.includes(r.name)} onCheckedChange={(on) => setRepo(r.name, on === true)} />
                 {/snippet}
@@ -596,13 +614,16 @@
         <Area
           n={isNew ? 4 : undefined}
           title={v.system === "github" ? "Add the workflow to your repository" : "Add the Jenkinsfile to your repository"}
+          footer={isNew ? createRow : undefined}
         >
-          {#snippet footer()}{#if isNew}{@render createRow()}{/if}{/snippet}
-          <WorkflowSetup system={v.system} repos={v.repos} github={v.gh} />
+          <WorkflowSetup system={v.system} repos={v.repos} github={v.gh} formatOf={(r) => repos.data?.find((x) => x.name === r)?.format} />
         </Area>
       {/if}
     </form>
+    {#if !isNew}<div class="mt-(--section-gap) xl:hidden">{@render ticket()}</div>{/if}
   </FormPage>
+  <aside class="sticky top-20 hidden xl:block" aria-label="Preview">{@render ticket()}</aside>
+  </div>
 
   {#if !isNew}<SaveBar count={changes} onDiscard={discard} onSave={save} />{/if}
 

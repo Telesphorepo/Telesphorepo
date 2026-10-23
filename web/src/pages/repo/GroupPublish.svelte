@@ -17,6 +17,7 @@
   import ErrorState from "$lib/components/ErrorState.svelte";
   import Loading from "$lib/components/Loading.svelte";
   import RepoKindIcon from "$lib/components/RepoKindIcon.svelte";
+  import FormatIcon from "$lib/components/FormatIcon.svelte";
   import PublishTab from "./PublishTab.svelte";
 
   let { group, targets, query }: { group: Repo; targets: GroupMember[]; query: URLSearchParams } = $props();
@@ -40,11 +41,13 @@
     <FormRow label="Publish to" for="publish-to" help="A group serves the files of its repositories. Publish to one of them.">
       <Select.Root type="single" value={to} onValueChange={choose}>
         <Select.Trigger id="publish-to" class="w-full" aria-describedby="publish-to-help">
+          {#snippet icon()}<FormatIcon format={group.format} />{/snippet}
           <span class="truncate">{to}</span>
         </Select.Trigger>
         <Select.Content>
           {#each targets as m (m.name)}
             <Select.Item value={m.name} label={m.name}>
+              {#snippet icon()}<FormatIcon format={group.format} />{/snippet}
               <span class="truncate">{m.name}</span>
               <RepoKindIcon kind={m.kind} />
             </Select.Item>

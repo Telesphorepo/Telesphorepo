@@ -8,10 +8,10 @@
   import { href, repoPath, repoSettingsPath } from "$lib/router.svelte";
   import { Button } from "$lib/components/ui/button";
   import Section from "$lib/components/Section.svelte";
-  import DataTable from "$lib/components/DataTable.svelte";
-  import Cell from "$lib/components/Cell.svelte";
+  import ItemList from "$lib/components/ItemList.svelte";
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
-  import RepoKindIcon from "$lib/components/RepoKindIcon.svelte";
+  import FormatIcon from "$lib/components/FormatIcon.svelte";
+  import { kindPhrase } from "$lib/words";
   import LockIcon from "@lucide/svelte/icons/lock";
   import LayersIcon from "@lucide/svelte/icons/layers";
 
@@ -26,28 +26,20 @@
 </script>
 
 <Section title="Members" description="The group reads these repositories in this order. The first one that has a file serves it.">
-  <DataTable
-    {source}
-    caption="Members of {repo.name}"
-    key={(m) => m.name}
-    href={(m) => href(repoPath(m.name))}
-    columns={[
-      { label: "Order", align: "right" },
-      { label: "Repository", grow: true },
-    ]}
-  >
-    {#snippet row(m)}
-      <Cell num>{m.n}</Cell>
-      <Cell grow>
-        <span class="flex min-w-0 items-center gap-1.5">
-          <a href={href(repoPath(m.name))} class="truncate rounded-sm font-medium outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50">{m.name}</a>
-          {#if !m.public}
-            <span class="flex shrink-0 text-muted-foreground" title="Private: only people with access get its files"><LockIcon aria-hidden="true" class="size-3.5" /><span class="sr-only">Private</span></span>
-          {/if}
-          <RepoKindIcon kind={m.kind} />
-        </span>
-      </Cell>
+  <ItemList {source} caption="Members of {repo.name}" key={(m) => m.name} href={(m) => href(repoPath(m.name))}>
+    {#snippet leading(m)}
+      <span class="flex items-center gap-3">
+        <span class="w-5 text-right text-label tabular-nums" title="Read order">{m.n}</span>
+        <FormatIcon format={m.format} class="size-5" />
+      </span>
     {/snippet}
+    {#snippet title(m)}{m.name}{/snippet}
+    {#snippet badges(m)}
+      {#if !m.public}
+        <span class="flex text-muted-foreground" title="Private: only people with access get its files"><LockIcon aria-hidden="true" class="size-3.5" /><span class="sr-only">Private</span></span>
+      {/if}
+    {/snippet}
+    {#snippet meta(m)}{kindPhrase(m)}{/snippet}
     {#snippet empty()}
       <CompactEmpty icon={LayersIcon} title="Members" state="None" text="The group serves no files until a person with Edit settings adds a repository to it.">
         {#if repo.permissions?.includes("repo.settings")}
@@ -55,5 +47,5 @@
         {/if}
       </CompactEmpty>
     {/snippet}
-  </DataTable>
+  </ItemList>
 </Section>

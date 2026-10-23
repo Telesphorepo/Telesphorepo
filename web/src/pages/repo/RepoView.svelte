@@ -165,7 +165,7 @@
       ? `No repository named ${name} exists, or you do not have access to it. Ask an administrator for access.`
       : `No public repository is named ${name}. Sign in if it is private.`}
   >
-    <Button variant="outline" href={href("/")}>Show all repositories</Button>
+    <Button variant="outline" href={href("/browse")}>Show all repositories</Button>
   </EmptyState>
 {:else if view.kind === "upload"}
   {#if canUpload}
@@ -195,7 +195,7 @@
   <PageHeader
     title={r.name}
     description={r.description || undefined}
-    crumbs={[{ label: "Repositories", href: href("/") }, { label: r.name }]}
+    crumbs={[{ label: "Repositories", href: href("/browse") }, { label: r.name }]}
     status={paused ? pausedLine : undefined}
   >
     {#snippet meta()}

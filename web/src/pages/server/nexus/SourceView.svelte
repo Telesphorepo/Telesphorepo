@@ -33,6 +33,7 @@
   import FormRow from "$lib/components/FormRow.svelte";
   import DataTable, { type Column } from "$lib/components/DataTable.svelte";
   import Cell from "$lib/components/Cell.svelte";
+  import ItemList from "$lib/components/ItemList.svelte";
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import Loading from "$lib/components/Loading.svelte";
@@ -49,6 +50,7 @@
   import RefreshIcon from "@lucide/svelte/icons/refresh-cw";
   import HistoryIcon from "@lucide/svelte/icons/history";
   import SearchIcon from "@lucide/svelte/icons/search";
+  import LockIcon from "@lucide/svelte/icons/lock";
 
   let { id, sync }: { id: number; sync: number | null } = $props();
 
@@ -449,14 +451,16 @@
   ]);
 </script>
 
+{#snippet lockIcon()}<LockIcon class="size-4 text-muted-foreground" />{/snippet}
+
 {#snippet who(r: NexusSourceRepo, o: Opt)}
   <Select.Root type="single" value={o.anon ? "anyone" : "access"} onValueChange={(v) => (o.anon = v === "anyone")}>
-    <Select.Trigger size="sm" class="w-32" aria-label="Who can download {r.name}">
+    <Select.Trigger size="sm" class="w-36" aria-label="Who can download {r.name}" icon={o.anon ? undefined : lockIcon}>
       <span class="truncate">{o.anon ? "Public" : "Private"}</span>
     </Select.Trigger>
     <Select.Content>
-      <Select.Item value="anyone" label="Public" />
-      <Select.Item value="access" label="Private" />
+      <Select.Item value="anyone" label="Public" inset />
+      <Select.Item value="access" label="Private" icon={lockIcon} />
     </Select.Content>
   </Select.Root>
 {/snippet}
@@ -684,40 +688,22 @@
         <a class={link} href={href(path, { sync: String(d.cutover_sync_id) })}>Show them</a>
       </p>
     {/if}
-    <DataTable
-      source={syncs}
-      caption="Syncs"
-      key={(s) => s.id}
-      href={syncHref}
-      selected={(s) => s.id === shown}
-      columns={[
-        { label: "Started", grow: true },
-        { label: "How", hideOnPhone: true },
-        { label: "Took", align: "right", hideOnPhone: true },
-        { label: "New files", align: "right" },
-        { label: "Size", align: "right", hideOnPhone: true },
-        { label: "Failed", align: "right" },
-        { label: "State" },
-      ]}
-    >
-      {#snippet row(s)}
-        <Cell grow>
-          <a href={syncHref(s)} class="rounded-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"><RelativeTime at={s.started_at} /></a>
-        </Cell>
-        <Cell hideOnPhone muted text={howText(s)} />
-        <Cell num muted hideOnPhone>{tookText(s)}</Cell>
-        <Cell num>{formatCount(s.imported)}</Cell>
-        <Cell num muted hideOnPhone><FileSize bytes={s.bytes} /></Cell>
-        <Cell num class={s.failed > 0 ? "text-destructive" : "text-muted-foreground"}>{formatCount(s.failed)}</Cell>
-        <Cell><StatusBadge tone={syncState[s.state].tone}>{syncState[s.state].word}</StatusBadge></Cell>
+    <ItemList source={syncs} caption="Syncs" key={(s) => s.id} href={syncHref} selected={(s) => s.id === shown}>
+      {#snippet title(s)}Started <RelativeTime at={s.started_at} />{/snippet}
+      {#snippet badges(s)}
+        {#if s.failed > 0}<StatusBadge tone="warning">{formatCount(s.failed)} failed</StatusBadge>{/if}
       {/snippet}
+      {#snippet meta(s)}
+        <span class="tabular-nums">{[howText(s), tookText(s) && `took ${tookText(s)}`, count(s.imported, "new file", "new files")].filter(Boolean).join(" · ")} · <FileSize bytes={s.bytes} /></span>
+      {/snippet}
+      {#snippet trailing(s)}<StatusBadge tone={syncState[s.state].tone}>{syncState[s.state].word}</StatusBadge>{/snippet}
       {#snippet empty()}
         <CompactEmpty
           icon={HistoryIcon}
           text={mirroring ? "No sync yet. Pick repositories above and save them to start the first sync." : "This Nexus server never synced."}
         />
       {/snippet}
-    </DataTable>
+    </ItemList>
   </Section>
 
   {#if mirroring}

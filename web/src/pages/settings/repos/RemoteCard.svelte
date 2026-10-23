@@ -50,7 +50,7 @@
       {:else if p.last_ok_at}
         <p class="text-body text-muted-foreground">Last answered <RelativeTime at={p.last_ok_at} /></p>
       {:else}
-        <p class="text-body text-muted-foreground">The server has not asked the remote for a file yet.</p>
+        <p class="text-body text-muted-foreground">No build has asked for a file yet.</p>
       {/if}
       {#if formats.get(repo.format)?.proxy_note}
         <p class="text-body text-muted-foreground">{formats.get(repo.format)?.proxy_note}</p>

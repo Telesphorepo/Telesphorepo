@@ -5,8 +5,9 @@
   checkout of the repository behind a disclosure.
   One Draft holds the home region, the regions with their buckets, the on switch and the access
   lifetime; Save checks every bucket first (the Test of the settings group), asks before the server
-  stops writing to a bucket, and then saves. While a region fills, the page asks for progress and
-  says what the region waits for, with the cadence of the count and of the Worker's gap check (from
+  stops writing to a bucket, and then saves. Each region is a card with its state, its Serve from
+  it switch and its bucket. While a region fills, the page asks for progress and its card shows
+  the progress and what the region waits for, with the cadence of the count and of the Worker's gap check (from
   the status). Check now makes the deployed Worker run its gap check at once (POST
   /api/edge/check); the page runs it by itself when it opens and every 30 seconds while the Worker
   has not reported this server's version. One Live does both, with its LiveStatus in the header.
@@ -31,13 +32,14 @@
   import { Resource } from "$lib/load.svelte";
   import { Draft } from "$lib/unsaved.svelte";
   import { formatCount, formatEvery } from "$lib/format";
+  import { count } from "$lib/words";
   import { Live } from "$lib/live.svelte";
   import LiveStatus from "$lib/components/LiveStatus.svelte";
   import LiveValue from "$lib/components/LiveValue.svelte";
   import Cadence from "$lib/components/Cadence.svelte";
   import { DURATION_UNITS, splitDuration } from "$lib/units";
   import { Button } from "$lib/components/ui/button";
-  import { Checkbox } from "$lib/components/ui/checkbox";
+  import { Switch } from "$lib/components/ui/switch";
   import { Input } from "$lib/components/ui/input";
   import * as Select from "$lib/components/ui/select";
   import PageHeader from "$lib/components/PageHeader.svelte";
@@ -50,9 +52,8 @@
   import Section from "$lib/components/Section.svelte";
   import SaveBar from "$lib/components/SaveBar.svelte";
   import StatusBadge, { type Tone } from "$lib/components/StatusBadge.svelte";
-  import DataTable from "$lib/components/DataTable.svelte";
-  import Cell from "$lib/components/Cell.svelte";
-  import CompactEmpty from "$lib/components/CompactEmpty.svelte";
+  import CardGrid from "$lib/components/CardGrid.svelte";
+  import ItemCard from "$lib/components/ItemCard.svelte";
   import CodeBlock from "$lib/components/CodeBlock.svelte";
   import CodeSnippet from "$lib/components/CodeSnippet.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
@@ -130,7 +131,7 @@
   const stateWord: Record<EdgeRegionState, string> = { not_used: "Not used", filling: "Filling", ready: "Ready", waiting: "Waiting for a deploy" };
   const stateTone: Record<EdgeRegionState, Tone> = { not_used: "neutral", filling: "info", ready: "success", waiting: "warning" };
 
-  // Chosen regions are listed as "hint=bucket", in the order of the table.
+  // Chosen regions are listed as "hint=bucket", in the order of the cards.
   const regionList = (f: Form) =>
     AREAS.filter((a) => a.hint !== f.home && f.regions[a.hint].on).map((a) => `${a.hint}=${f.regions[a.hint].bucket.trim()}`);
 
@@ -205,23 +206,6 @@
   }
 
   const filling = $derived((status.data?.regions ?? []).filter((r) => r.state === "filling"));
-
-  const fillingSource = {
-    get items() {
-      return filling;
-    },
-    loading: false,
-    error: "",
-    reload: () => status.reload(),
-  };
-  const regionsSource = {
-    get items() {
-      return AREAS;
-    },
-    loading: false,
-    error: "",
-    reload: () => status.reload(),
-  };
 
   const needsDeploy = $derived(provisionNeeded || status.data?.deploy_needed === true);
   const mismatch = $derived(status.data?.version_mismatch === true);
@@ -298,16 +282,16 @@
   function waitsFor(st: EdgeStatus, r: EdgeRegionStatus): { text: string; copying: boolean } {
     const say = (text: string) => ({ text, copying: false });
     if (st.mode !== "on") {
-      return say("The Worker copies files only while edge delivery is on, so the region stays at its files missing until you turn it on.");
+      return say("Turn on edge delivery to copy the files.");
     }
     if (!r.pointers_done) {
       return say(r.outbox > 0 ? `Writing pointers: ${formatCount(r.outbox)} waiting.` : "Queueing pointers.");
     }
-    if (!st.worker_version) return say("Waiting for the Worker's first gap check, which copies the files.");
+    if (!st.worker_version) return say("Waiting for the Worker's first gap check.");
     if (st.version_mismatch) return say("Waiting for the Worker of this server version. Deploy it to copy the files.");
     if (r.blobs_missing === null) return say("Counting the files in the region.");
     if (r.blobs_missing > 0) {
-      return { text: "Copying files: the Worker copies the missing files from the home bucket at each gap check, or at Check now.", copying: true };
+      return { text: "Copying the missing files from the home bucket at each gap check.", copying: true };
     }
     return say("Every file is there. The region turns ready at the next count.");
   }
@@ -331,6 +315,15 @@
   <FormPage>
     {#if st}
       <Section title="Status">
+        {#snippet badges()}
+          {#if st.mode === "on"}
+            <StatusBadge tone="success">On</StatusBadge>
+          {:else if st.mode === "draining"}
+            <StatusBadge tone="warning">Stopping</StatusBadge>
+          {:else}
+            <StatusBadge tone="neutral">Off</StatusBadge>
+          {/if}
+        {/snippet}
         {#snippet actions()}
           <Button
             variant="outline"
@@ -342,213 +335,132 @@
             <RefreshCwIcon aria-hidden="true" class={checking ? "animate-spin" : ""} />{checking ? "Checking" : "Check now"}
           </Button>
         {/snippet}
-        <dl class="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3">
-          <div>
-            <dt class="text-meta text-muted-foreground">Edge delivery</dt>
-            <dd class="text-label">
-              {#if st.mode === "on"}
-                <StatusBadge tone="success">On</StatusBadge>
-              {:else if st.mode === "draining"}
-                <StatusBadge tone="warning">Stopping</StatusBadge>
-              {:else}
-                <StatusBadge tone="neutral">Off</StatusBadge>
-              {/if}
-            </dd>
-            {#if st.unfit}<p class="mt-1 text-meta text-muted-foreground">{st.unfit}</p>{/if}
-          </div>
-          <div>
+        {#if st.unfit}<p class="mb-6 text-body text-warning">{st.unfit}</p>{/if}
+        <dl class="grid grid-cols-2 gap-x-6 gap-y-5 sm:grid-cols-3">
+          <div class="min-w-0">
             <dt class="text-meta text-muted-foreground">Worker version</dt>
             <dd class="flex flex-wrap items-center gap-2 text-label">
-              {st.worker_version ?? "Not seen yet"}
+              {st.worker_version ?? "None reported"}
               {#if mismatch}<StatusBadge tone="warning">Server is {st.server_version}</StatusBadge>{/if}
             </dd>
-            {#if !st.worker_version}
-              <p class="mt-1 text-meta text-muted-foreground">
-                The Worker reports at its first gap check.{st.check_unfit === ""
-                  ? ` This page checks it every ${formatEvery(CHECK_EVERY / 1000)} until then; select Check now to check at once.`
-                  : ""}
-              </p>
-            {/if}
           </div>
-          <div>
+          <div class="min-w-0">
             <dt class="text-meta text-muted-foreground">Last gap check</dt>
             <dd class="text-label"><RelativeTime at={st.gap_checked_at} empty="Not yet" /></dd>
-            <Cadence class="mt-1" what="The Worker checks" noun="check" every={st.gap_check_every} last={st.gap_checked_at} />
+            {#if st.gap_checked_at}<dd><Cadence noun="gap check" every={st.gap_check_every} last={st.gap_checked_at} /></dd>{/if}
           </div>
-          <div>
+          <div class="col-span-2 min-w-0 sm:col-span-1">
             <dt class="text-meta text-muted-foreground">Home bucket</dt>
-            <dd class="text-label">{st.home.bucket || "Not set"}</dd>
+            <dd class="truncate text-label" title={st.home.bucket || undefined}>{st.home.bucket || "Not set"}</dd>
           </div>
-          <div class="col-span-2">
+          <div class="col-span-full min-w-0">
             <dt class="text-meta text-muted-foreground">Last check of the Worker</dt>
             {#if checkError}
               <dd class="text-body text-destructive">{checkError}</dd>
             {:else if st.last_check}
               {@const c = st.last_check}
-              <dd class="flex flex-col gap-1">
-                <span class="flex flex-wrap items-center gap-2 text-label">
-                  <StatusBadge tone={checkTone(c)}>{checkWord[c.outcome]}</StatusBadge>
-                  <span class="text-meta text-muted-foreground"><RelativeTime at={c.at} /></span>
-                </span>
-                <span class="text-body">{c.message}</span>
+              <dd class="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <StatusBadge tone={checkTone(c)}>{checkWord[c.outcome]}</StatusBadge>
+                <span class="text-meta text-muted-foreground"><RelativeTime at={c.at} /></span>
               </dd>
+              <dd class="mt-1 text-body">{c.message}</dd>
             {:else}
               <dd class="text-label">{checking ? "Checking" : "Not yet"}</dd>
-              {#if st.check_unfit}<p class="mt-1 text-meta text-muted-foreground">{st.check_unfit}</p>{/if}
+              {#if st.check_unfit}<dd class="text-meta text-muted-foreground">{st.check_unfit}</dd>{/if}
             {/if}
           </div>
         </dl>
       </Section>
     {/if}
 
-    <Section title="Regions" description="The home bucket is the S3 storage of the server. Each region you add holds a copy of every file.">
-      <div class="flex flex-col gap-6">
-        <FormGrid>
-          <FormRow label="Home region" for="edge-home" help="Where the home bucket lives. Files that can change (metadata, tags, raw files) are read from here.">
-            <Select.Root
-              type="single"
-              disabled={locked("edge.home_hint")}
-              value={draft.value.home}
-              onValueChange={(v) => (draft!.value.home = v)}
-            >
-              <Select.Trigger id="edge-home" class="w-full" aria-describedby="edge-home-help">
-                <span class="truncate">{draft.value.home ? areaText(draft.value.home) : "Choose a region"}</span>
-              </Select.Trigger>
-              <Select.Content>
-                {#each AREAS as a (a.hint)}
-                  <Select.Item value={a.hint} label={areaText(a.hint)}>{areaText(a.hint)}</Select.Item>
-                {/each}
-              </Select.Content>
-            </Select.Root>
-          </FormRow>
-        </FormGrid>
-        {#if lockHelp("edge.home_hint") || lockHelp("edge.regions")}
-          <p class="text-meta text-muted-foreground">{lockHelp("edge.home_hint") ?? lockHelp("edge.regions")}</p>
-        {/if}
-
-        <DataTable
-          source={regionsSource}
-          caption="Regions"
-          key={(a) => a.hint}
-          columns={[
-            { label: "Region", grow: true },
-            { label: "Serve from it", srLabel: "Serve from this region" },
-            { label: "Bucket", grow: true },
-            { label: "State" },
-            { label: "Pointers waiting", align: "right", hideOnPhone: true },
-            { label: "Last error", grow: true, hideOnPhone: true },
-          ]}
-        >
-          {#snippet row(a)}
-            {@const isHome = a.hint === draft!.value.home}
+    <Section plain title="Regions" description="The home bucket is the S3 storage of the server. Each region you add holds a copy of every file.">
+      <div class="flex flex-col gap-4">
+        <CardGrid label="Regions" max={3}>
+          {#each AREAS as a (a.hint)}
+            {@const isHome = a.hint === draft.value.home}
             {@const r = statusOf(a.hint)}
-            {@const edit = draft!.value.regions[a.hint]}
-            <Cell grow strong text={areaText(a.hint)} />
-            <Cell>
+            {@const edit = draft.value.regions[a.hint]}
+            {@const err = rowErrors[a.hint] || (isHome ? st?.home.last_error : r?.last_error)}
+            {@const waiting = isHome ? (st?.home.pointers ?? 0) : (r?.outbox ?? 0)}
+            <ItemCard title={areaText(a.hint)}>
+              {#snippet badges()}
+                {#if isHome}
+                  <StatusBadge tone={st?.home.last_error ? "danger" : "success"}>{st?.home.last_error ? "Error" : "Ready"}</StatusBadge>
+                {:else if r}
+                  <StatusBadge tone={stateTone[r.state]}>{st && r.state === "filling" && waitsFor(st, r).copying ? "Copying files" : stateWord[r.state]}</StatusBadge>
+                {:else}
+                  <StatusBadge tone={stateTone.not_used}>{stateWord.not_used}</StatusBadge>
+                {/if}
+              {/snippet}
               {#if isHome}
-                <span class="text-muted-foreground">Home bucket</span>
-              {:else}
-                <Checkbox
-                  id="edge-region-{a.hint}"
-                  aria-label="Serve from {areaText(a.hint)}"
-                  disabled={locked("edge.regions")}
-                  checked={edit.on}
-                  onCheckedChange={(on) => {
-                    edit.on = on === true;
-                    if (edit.on && !edit.bucket.trim()) edit.bucket = bucketFor(a.hint);
-                  }}
-                />
-              {/if}
-            </Cell>
-            <Cell grow>
-              {#if isHome}
-                <span class="block truncate">{st?.home.bucket || homeBucket}</span>
-              {:else}
+                <p class="truncate">Home bucket {st?.home.bucket || homeBucket}</p>
+              {:else if edit.on}
                 <Input
                   id="edge-bucket-{a.hint}"
                   aria-label="Bucket for {areaText(a.hint)}"
-                  class="h-8"
-                  disabled={!edit.on || locked("edge.regions")}
+                  class="my-1 h-8"
+                  disabled={locked("edge.regions")}
                   bind:value={edit.bucket}
-                  aria-invalid={rowErrors[a.hint] ? true : undefined}
+                  aria-invalid={err ? true : undefined}
                 />
+              {:else if edit.bucket || bucketFor(a.hint)}
+                <p class="truncate">Bucket {edit.bucket || bucketFor(a.hint)}</p>
               {/if}
-            </Cell>
-            <Cell>
-              {#if isHome}
-                <StatusBadge tone={st?.home.last_error ? "danger" : "success"}>{st?.home.last_error ? "Error" : "Ready"}</StatusBadge>
-              {:else if r}
-                <StatusBadge tone={stateTone[r.state]}>{st && r.state === "filling" && waitsFor(st, r).copying ? "Copying files" : stateWord[r.state]}</StatusBadge>
-              {:else}
-                <span class="text-muted-foreground">{stateWord.not_used}</span>
-              {/if}
-            </Cell>
-            <Cell num hideOnPhone>{formatCount(isHome ? (st?.home.pointers ?? 0) : (r?.outbox ?? 0))}</Cell>
-            <Cell grow hideOnPhone>
-              {#if rowErrors[a.hint]}
-                <span class="block truncate text-destructive" title={rowErrors[a.hint]}>{rowErrors[a.hint]}</span>
-              {:else}
-                {@const err = isHome ? st?.home.last_error : r?.last_error}
-                <span class="block truncate text-muted-foreground" title={err}>{err ?? ""}</span>
-              {/if}
-            </Cell>
-          {/snippet}
-        </DataTable>
-      </div>
-    </Section>
-
-    {#if filling.length > 0}
-      <Section
-        title="Backfill"
-        description="A region serves once the server has written its pointers and the Worker's gap check has copied its files."
-      >
-        <DataTable
-          source={fillingSource}
-          caption="Regions that fill"
-          key={(r) => r.hint}
-          columns={[
-            { label: "Region", grow: true },
-            { label: "Pointers written", align: "right" },
-            { label: "Files missing", align: "right" },
-            { label: "Waiting for", grow: true },
-          ]}
-        >
-          {#snippet row(r)}
-            <Cell grow strong text={areaText(r.hint)} />
-            <Cell num><LiveValue value={r.pointers_written}>{formatCount(r.pointers_written)}</LiveValue> of {formatCount(r.pointers_total)}</Cell>
-            <Cell num>{#if r.blobs_missing === null}Not counted yet{:else}<LiveValue value={r.blobs_missing}>{formatCount(r.blobs_missing)}</LiveValue>{/if}</Cell>
-            <Cell grow>
-              {#if st}
+              <!-- A filling region that writes its pointers says how many wait in its progress. -->
+              {#if waiting > 0 && !(r?.state === "filling" && !r.pointers_done)}<p class="tabular-nums">{count(waiting, "pointer", "pointers")} waiting</p>{/if}
+              {#if err}<p class="line-clamp-2 text-destructive" title={err}>{err}</p>{/if}
+              {#if st && r && r.state === "filling"}
                 {@const w = waitsFor(st, r)}
-                <span class="flex flex-col gap-0.5">
-                  <span>{w.text}</span>
+                {@const pct = r.pointers_total > 0 ? Math.min(100, Math.round((r.pointers_written / r.pointers_total) * 100)) : 0}
+                <div class="mt-2 flex flex-col gap-1.5">
+                  <div class="flex items-baseline justify-between gap-3 tabular-nums">
+                    <span>Pointers <LiveValue value={r.pointers_written}>{formatCount(r.pointers_written)}</LiveValue> of {formatCount(r.pointers_total)}</span>
+                    <span>{#if r.blobs_missing === null}Not counted yet{:else}<LiveValue value={r.blobs_missing}>{formatCount(r.blobs_missing)}</LiveValue> missing{/if}</span>
+                  </div>
+                  <div class="h-1.5 w-full overflow-hidden rounded-full bg-muted" role="progressbar" aria-label="Pointers written to {areaText(a.hint)}" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}>
+                    <div class="h-full rounded-full bg-primary transition-[width]" style="width: {pct}%"></div>
+                  </div>
+                  <p class="text-pretty text-foreground">{w.text}</p>
                   {#if w.copying}
-                    <span class="text-meta text-muted-foreground">
-                      {formatCount(r.blobs_missing ?? 0)} missing{#if r.blobs_missing_since}, last changed <RelativeTime
-                          at={r.blobs_missing_since}
-                        />{/if}.
-                      {#if st.gap_pass_started}Copy pass started <RelativeTime at={st.gap_pass_started} />.{:else if r.copies_queued !== null}Its last
-                        copy pass queued {formatCount(r.copies_queued)} copies.{/if}
-                    </span>
+                    <p class="text-pretty">
+                      {#if r.blobs_missing_since}Last changed <RelativeTime at={r.blobs_missing_since} />.{/if}
+                      {#if st.gap_pass_started}Copy pass started <RelativeTime at={st.gap_pass_started} />.{:else if r.copies_queued !== null}Its last copy pass
+                        queued {formatCount(r.copies_queued)} copies.{/if}
+                    </p>
                   {/if}
-                </span>
+                </div>
               {/if}
-            </Cell>
-          {/snippet}
-          {#snippet empty()}<CompactEmpty title="Backfill" state="Done" text="Every region has its pointers." />{/snippet}
-        </DataTable>
-        {#if st && (counting.length > 0 || copying)}
-          <div class="mt-4 flex flex-col gap-1">
+              {#snippet actions()}
+                {#if !isHome}
+                  <Switch
+                    id="edge-region-{a.hint}"
+                    aria-label="Serve from {areaText(a.hint)}"
+                    disabled={locked("edge.regions")}
+                    checked={edit.on}
+                    onCheckedChange={(on) => {
+                      edit.on = on;
+                      if (edit.on && !edit.bucket.trim()) edit.bucket = bucketFor(a.hint);
+                    }}
+                  />
+                  <label for="edge-region-{a.hint}" class="text-body {edit.on ? 'text-foreground' : ''}">Serve from it</label>
+                {/if}
+              {/snippet}
+            </ItemCard>
+          {/each}
+        </CardGrid>
+        {#if st && filling.length > 0}
+          <div class="flex flex-col gap-1">
+            <p class="text-meta text-muted-foreground">A region serves once it has its pointers and a copy of every file.</p>
             {#if counting.length > 0}
-              <Cadence what="The server counts the missing files of a region" noun="count" every={st.blob_check_every} last={countedAt} />
+              <Cadence noun="count of missing files" every={st.blob_check_every} last={countedAt} />
             {/if}
             {#if copying}
-              <Cadence what="The Worker copies them at its gap check" noun="check" every={st.gap_check_every} last={st.gap_checked_at} />
+              <Cadence noun="gap check" every={st.gap_check_every} last={st.gap_checked_at} />
             {/if}
           </div>
         {/if}
-      </Section>
-    {/if}
+      </div>
+    </Section>
 
     {#if st}<SpeedTest status={st} />{/if}
 
@@ -559,11 +471,28 @@
           label="Edge delivery"
           help={lockHelp("edge.enabled") ??
             (noWorker
-              ? `Deploy the Worker first (Deploy, below). You can turn this on once the Worker has reported its version: this page checks every ${formatEvery(CHECK_EVERY / 1000)}.`
-              : "The Worker answers downloads that it can prove the server would answer the same way.")}
+              ? "Deploy the Worker first (Deploy, below). It turns on once the Worker reports its version."
+              : "Clients download from the nearest region. What only the server can answer still goes to the server.")}
           disabled={locked("edge.enabled") || noWorker}
           bind:checked={draft.value.enabled}
         />
+        <FormRow label="Home region" for="edge-home" help="Where the home bucket lives. Files that can change (metadata, tags, raw files) are read from here.">
+          <Select.Root
+            type="single"
+            disabled={locked("edge.home_hint")}
+            value={draft.value.home}
+            onValueChange={(v) => (draft!.value.home = v)}
+          >
+            <Select.Trigger id="edge-home" class="w-full" aria-describedby="edge-home-help">
+              <span class="truncate">{draft.value.home ? areaText(draft.value.home) : "Choose a region"}</span>
+            </Select.Trigger>
+            <Select.Content>
+              {#each AREAS as a (a.hint)}
+                <Select.Item value={a.hint} label={areaText(a.hint)}>{areaText(a.hint)}</Select.Item>
+              {/each}
+            </Select.Content>
+          </Select.Root>
+        </FormRow>
         <FormRow label="Access lifetime" for="edge-ttl" help="How long a Worker keeps a token, a grant or a repository's visibility before it asks again. 0 asks every time.">
           <UnitInput
             id="edge-ttl"
@@ -576,6 +505,9 @@
           />
         </FormRow>
       </FormGrid>
+      {#if lockHelp("edge.home_hint") || lockHelp("edge.regions")}
+        <p class="mt-6 text-meta text-muted-foreground">{lockHelp("edge.home_hint") ?? lockHelp("edge.regions")}</p>
+      {/if}
     </FormSection>
 
     <Section title="Deploy" description="Deploy the edge Worker to your Cloudflare account from a computer with bun.">
@@ -649,10 +581,7 @@
             <span class="w-4 shrink-0 text-section text-muted-foreground tabular-nums">7</span>
             <div class="flex min-w-0 grow flex-col gap-2">
               <p class="text-label">Turn on Edge delivery under Settings above, and save</p>
-              <p class="text-meta text-muted-foreground">
-                Only after the deploy: the switch turns on once the Worker has reported its version. This page checks every
-                {formatEvery(CHECK_EVERY / 1000)}; select Check now under Status to check at once.
-              </p>
+              <p class="text-meta text-muted-foreground">The switch turns on once the Worker reports its version. Select Check now, under Status, to see it at once.</p>
             </div>
           </li>
         </ol>

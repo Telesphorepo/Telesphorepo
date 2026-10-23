@@ -1,4 +1,5 @@
 <script lang="ts">
+	import type { Snippet } from "svelte";
 	import { Select as SelectPrimitive } from "bits-ui";
 	import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
 	import { cn, type WithoutChild } from "$lib/utils.js";
@@ -7,10 +8,13 @@
 		ref = $bindable(null),
 		class: className,
 		children,
+		icon,
 		size = "default",
 		...restProps
 	}: WithoutChild<SelectPrimitive.TriggerProps> & {
 		size?: "sm" | "default";
+		/** The chosen item's icon, in the place where the items show theirs. */
+		icon?: Snippet;
 	} = $props();
 </script>
 
@@ -24,6 +28,13 @@
 	)}
 	{...restProps}
 >
-	{@render children?.()}
+	{#if icon}
+		<span class="flex min-w-0 items-center gap-2">
+			<span class="flex min-w-4 shrink-0 items-center justify-center">{@render icon()}</span>
+			{@render children?.()}
+		</span>
+	{:else}
+		{@render children?.()}
+	{/if}
 	<ChevronDownIcon class="text-muted-foreground size-4 pointer-events-none" />
 </SelectPrimitive.Trigger>

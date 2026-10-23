@@ -3,13 +3,14 @@
   of a repository's settings, Activity). The open tab fills its whole item, as in the sidebar. No
   line runs under the row: space separates the tabs from their content, so no rule in the content
   nearly meets a line of the sidebar. On a narrow screen the row scrolls sideways without a
-  scrollbar, and the open tab scrolls into view.
+  scrollbar, the open tab scrolls into view, and the edge where tabs are cut off fades out.
 
     <TabNav label="Repository" items={[{ label: "Files", href: href(base), active: true, icon: FolderIcon }, ...]} />
 -->
 <script lang="ts">
   import type { Component } from "svelte";
   import { cn } from "$lib/utils";
+  import { fadeEdges } from "$lib/fade";
 
   let {
     label,
@@ -34,6 +35,7 @@
 <nav
   bind:this={row}
   aria-label={label}
+  use:fadeEdges
   class="-mx-1 mb-(--tabs-gap) flex gap-1 overflow-x-auto px-1 py-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
 >
   {#each items as t (t.href)}

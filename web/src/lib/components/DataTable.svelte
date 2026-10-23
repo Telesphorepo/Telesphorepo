@@ -1,8 +1,12 @@
 <!--
-  Every table. It takes the full content width. Rows have zebra stripes and one fixed height (a
+  Every table: for rows of one shape that people compare by column, sort or scan by the hundred (a
+  collection is an ItemList otherwise). It takes the full content width. Rows have zebra stripes and one fixed height (a
   single line, `h-row`: 48px on Browse pages, 44px in Settings): cells never wrap, a long value truncates with a tooltip (Cell `text`). Hover
   fills the whole row; the `selected` row has the selected fill. Numbers and times are
-  right-aligned with tabular numerals (column `align: "right"`, Cell `num`).
+  right-aligned with tabular numerals (column `align: "right"`, Cell `num`). Under 640px a row
+  stacks (app.css): the `grow` cell on the first line, the other cells that show on a phone as a
+  muted meta line parted by " · ", and the column headings hide. Inside a card or a dialog the
+  table reaches 12px into the padding, so its text lines up with the title.
 
   Loading and error show in the table body, under the column headings. Loading shows nothing for
   300 ms, then a quiet indicator in the space of four rows (Loading); a reload keeps the current rows
@@ -62,15 +66,13 @@
 <script lang="ts" generics="T, K extends string | number">
   import type { Snippet } from "svelte";
   import * as Table from "$lib/components/ui/table";
-  import { Button } from "$lib/components/ui/button";
-  import { Checkbox } from "$lib/components/ui/checkbox";
-  import { Spinner } from "$lib/components/ui/spinner";
-  import ErrorState from "./ErrorState.svelte";
   import Loading from "./Loading.svelte";
+  import PickBar from "./PickBar.svelte";
+  import PickBox from "./PickBox.svelte";
+  import SourceError from "./SourceError.svelte";
+  import SourceMore from "./SourceMore.svelte";
   import type { TableSource } from "$lib/load.svelte";
-  import { go } from "$lib/router.svelte";
-  import { formatCount } from "$lib/format";
-  import { selectedText } from "$lib/words";
+  import { Pick, openRow } from "$lib/pick.svelte";
   import { cn } from "$lib/utils";
 
   let {
@@ -121,86 +123,20 @@
     bulk?: Snippet;
   } = $props();
 
-  // --- the pick ---
-
-  const picking = $derived(bulk !== undefined);
+  const pick = new Pick<T, K>({
+    on: () => bulk !== undefined,
+    items: () => source.items,
+    key: (item) => key(item),
+    pickable: (item) => pickable?.(item) ?? true,
+    more: () => !!source.hasMore,
+    get: () => picked,
+    set: (v) => (picked = v),
+  });
   // A table that picks rows has a taller heading row, so the selection bar that lies over it has
   // room above and below its buttons; the row keeps its height when the bar shows, so nothing moves.
-  const headH = $derived(picking ? "h-11" : "h-(--row-head)");
-  const canPick = (item: T) => pickable?.(item) ?? true;
-  const pickableRows = $derived(picking ? source.items.filter(canPick) : []);
-  const allPicked = $derived(pickableRows.length > 0 && pickableRows.every((r) => picked.has(key(r))));
-  const barOn = $derived(picking && picked.size > 0);
-  const span = $derived(columns.length + (picking ? 1 : 0));
-  const allLabel = $derived(
-    source.more
-      ? `Select the ${formatCount(pickableRows.length)} rows shown`
-      : `Select all ${formatCount(pickableRows.length)} rows`,
-  );
-
-  // The last checkbox clicked, and whether Shift was down when the click started.
-  let last: K | null = null;
-  let shift = false;
-
-  function pickAll() {
-    picked = new Set(pickableRows.map(key));
-  }
-  function clearPick() {
-    picked = new Set();
-    last = null;
-  }
-  function toggle(item: T, on: boolean) {
-    const k = key(item);
-    const rows = pickableRows;
-    const next = new Set(picked);
-    const from = shift && last !== null ? rows.findIndex((r) => key(r) === last) : -1;
-    const to = rows.findIndex((r) => key(r) === k);
-    const range = from >= 0 && to >= 0 ? rows.slice(Math.min(from, to), Math.max(from, to) + 1) : [item];
-    for (const r of range) {
-      if (on) next.add(key(r));
-      else next.delete(key(r));
-    }
-    last = k;
-    picked = next;
-  }
-
-  const inPickCell = (t: EventTarget | null) => t instanceof Element && !!t.closest("[data-pick]");
-  function onPointerDown(e: PointerEvent) {
-    if (picking) shift = e.shiftKey;
-  }
-  function onMouseDown(e: MouseEvent) {
-    // Shift+click on a checkbox picks a range; it must not select the text between the rows.
-    if (picking && e.shiftKey && inPickCell(e.target)) e.preventDefault();
-  }
-  function onKeyDown(e: KeyboardEvent) {
-    if (!picking) return;
-    shift = e.shiftKey;
-    if (e.key !== "Escape" || !barOn || e.defaultPrevented) return;
-    if (document.querySelector("[role=dialog], [role=alertdialog]")) return;
-    clearPick();
-  }
-
-  const controls = "a, button, input, select, textarea, label, [role=checkbox], [role=switch], [role=menuitem], [role=combobox], [role=radio]";
-  const rowPicks = $derived(picking && pickOnRow && !href && !pickOff);
-
-  function pickRow(e: MouseEvent, item: T) {
-    if (e.defaultPrevented || e.button !== 0 || !canPick(item)) return;
-    if ((e.target as HTMLElement | null)?.closest(controls)) return;
-    if (window.getSelection()?.toString()) return;
-    shift = e.shiftKey;
-    toggle(item, !picked.has(key(item)));
-  }
-
-  function open(e: MouseEvent, item: T) {
-    const to = href?.(item);
-    if (!to || e.defaultPrevented || e.button !== 0) return;
-    const t = e.target as HTMLElement | null;
-    if (t?.closest(controls)) return;
-    if (window.getSelection()?.toString()) return;
-    if (e.metaKey || e.ctrlKey) window.open(to, "_blank");
-    else if (to.startsWith("#/")) go(to);
-    else window.location.href = to;
-  }
+  const headH = $derived(pick.on ? "h-11" : "h-(--row-head)");
+  const span = $derived(columns.length + (pick.on ? 1 : 0));
+  const rowPicks = $derived(pick.on && pickOnRow && !href && !pickOff);
 
   // One row look: a single line of fixed height, rounded ends like the sidebar items, stripes on
   // every second row, and a fill under the pointer.
@@ -208,43 +144,29 @@
     "group/row h-row border-0 even:bg-stripe hover:bg-hover data-[state=selected]:bg-selected [&>td]:py-0 [&>td:first-child]:rounded-l-lg [&>td:last-child]:rounded-r-lg";
 </script>
 
-<svelte:window onpointerdown={onPointerDown} onmousedown={onMouseDown} onkeydown={onKeyDown} />
+<svelte:window onpointerdown={pick.onpointerdown} onmousedown={pick.onmousedown} onkeydown={pick.onkeydown} />
 
 {#if !source.loading && !source.error && source.items.length === 0}
   <div data-slot="table-empty">{#if empty}{@render empty()}{:else}<p class="py-3 text-body text-muted-foreground">{emptyText}</p>{/if}</div>
 {:else}
+  <div data-slot="data-table">
   <Table.Root class="text-body">
     <Table.Caption class="sr-only">{caption}</Table.Caption>
     <Table.Header class="[&_tr]:border-b">
       <!-- The selection bar lies over the column headings, which keep their space, so the columns do not move. -->
       <Table.Row class="relative border-b hover:bg-transparent">
-        {#if picking}
+        {#if pick.on}
           <Table.Head class={cn("w-10 min-w-10 p-0", headH)}>
-            <label data-pick class="flex h-full w-10 cursor-pointer items-center justify-center select-none">
-              <Checkbox
-                checked={allPicked}
-                indeterminate={barOn && !allPicked}
-                disabled={pickOff || pickableRows.length === 0}
-                aria-label={allLabel}
-                onCheckedChange={(v) => (v ? pickAll() : clearPick())}
-              />
-            </label>
-            {#if barOn}
-              <div role="toolbar" aria-label="Actions for the selected rows" class="absolute inset-y-0 right-0 left-10 flex items-center gap-2 overflow-x-auto pr-1 text-body font-normal text-foreground [scrollbar-width:none] max-sm:[mask-image:linear-gradient(to_right,black_85%,transparent)]">
-                <span class="shrink-0 font-medium tabular-nums">{selectedText(picked.size)}</span>
-                {@render bulk?.()}
-                <span class="ml-auto flex shrink-0 items-center gap-1">
-                  {#if !allPicked && !pickOff}<Button variant="ghost" size="sm" onclick={pickAll}>{selectAllLabel ?? `Select all ${formatCount(pickableRows.length)}`}</Button>{/if}
-                  {#if !pickOff}<Button variant="ghost" size="sm" onclick={clearPick}>Clear</Button>{/if}
-                </span>
-              </div>
-            {/if}
+            {#if pick.head || pick.bar}<PickBox {pick} {pickOff} class="h-full cursor-pointer" />{/if}
+            <!-- A stacked table on a phone has no column headings, so the head checkbox names itself. -->
+            {#if pick.head && !pick.bar}<span aria-hidden="true" class="hidden text-xs font-medium text-muted-foreground max-sm:inline">{pick.allLabel}</span>{/if}
+            {#if pick.bar}<PickBar {pick} {bulk} {pickOff} {selectAllLabel} class="absolute inset-y-0 right-0 left-10" />{/if}
           </Table.Head>
         {/if}
         {#each columns as c, i (i)}
           <Table.Head
-            aria-hidden={barOn ? "true" : undefined}
-            class={cn(headH, "text-xs font-medium text-muted-foreground", c.align === "right" && "text-right", c.grow && "w-full", c.hideOnPhone && "max-sm:hidden", barOn && "invisible", c.class)}
+            aria-hidden={pick.bar ? "true" : undefined}
+            class={cn(headH, "text-xs font-medium text-muted-foreground", c.align === "right" && "text-right", c.grow && "w-full", c.hideOnPhone && "max-sm:hidden", pick.bar && "invisible", c.class)}
           >
             {#if c.label}{c.label}{:else if c.srLabel}<span class="sr-only">{c.srLabel}</span>{/if}
           </Table.Head>
@@ -258,34 +180,22 @@
         </Table.Row>
       {:else if source.error && source.items.length === 0}
         <Table.Row class="border-0 hover:bg-transparent">
-          <Table.Cell colspan={span} class="py-4 whitespace-normal">
-            <div class="flex flex-wrap items-center gap-3">
-              <ErrorState inline error={source.error} />
-              {#if source.reload}<Button variant="outline" size="sm" onclick={source.reload}>Try again</Button>{/if}
-            </div>
-          </Table.Cell>
+          <Table.Cell colspan={span} class="py-4 whitespace-normal"><SourceError {source} /></Table.Cell>
         </Table.Row>
       {:else}
         {#each source.items as item (key(item))}
           {@const on = selected?.(item) ?? false}
           <Table.Row
+            data-row
             data-state={on ? "selected" : undefined}
             aria-selected={selected ? on : undefined}
-            class={cn(rowClass, (href || (rowPicks && canPick(item))) && "cursor-pointer")}
-            onclick={href ? (e: MouseEvent) => open(e, item) : rowPicks ? (e: MouseEvent) => pickRow(e, item) : undefined}
+            class={cn(rowClass, (href || (rowPicks && pick.can(item))) && "cursor-pointer")}
+            onclick={href ? (e: MouseEvent) => openRow(e, href(item)) : rowPicks ? (e: MouseEvent) => pick.pickRow(e, item) : undefined}
           >
-            {#if picking}
-              <Table.Cell class="w-10 min-w-10 p-0">
-                {#if canPick(item)}
-                  {@const k = key(item)}
-                  <label data-pick class={cn("flex h-row w-10 items-center justify-center select-none", !pickOff && "cursor-pointer")}>
-                    <Checkbox
-                      disabled={pickOff}
-                      checked={picked.has(k)}
-                      aria-label="Select {pickLabel ? pickLabel(item) : String(k)}"
-                      onCheckedChange={(v) => toggle(item, v === true)}
-                    />
-                  </label>
+            {#if pick.on}
+              <Table.Cell data-pick-cell class="w-10 min-w-10 p-0">
+                {#if pick.can(item)}
+                  <PickBox {pick} {item} {pickOff} label="Select {pickLabel ? pickLabel(item) : String(key(item))}" class="h-row" />
                 {/if}
               </Table.Cell>
             {/if}
@@ -295,16 +205,7 @@
       {/if}
     </Table.Body>
   </Table.Root>
-{/if}
-
-{#if source.items.length > 0 && source.error}
-  <div class="mt-3"><ErrorState inline error={source.error} /></div>
-{/if}
-{#if source.hasMore && source.items.length > 0 && source.more}
-  <div class="mt-4 flex justify-center">
-    <Button variant="outline" size="sm" disabled={source.loadingMore} onclick={source.more}>
-      {#if source.loadingMore}<Spinner />{/if}
-      Load more
-    </Button>
   </div>
 {/if}
+
+<SourceMore {source} />

@@ -1,6 +1,8 @@
 <!--
   Your account: devices, the computers that publish with the Telesphorepo CLI
-  with their own key. People with the People permission see the devices of every user.
+  with their own key, as a list: the name, the client, when it was last used and when it expires,
+  its state and Revoke. People with the People permission see the devices of every user, each
+  with the person's avatar and name.
 -->
 <script lang="ts">
   import { toast } from "svelte-sonner";
@@ -12,8 +14,8 @@
   import { Button } from "$lib/components/ui/button";
   import PageHeader from "$lib/components/PageHeader.svelte";
   import Section from "$lib/components/Section.svelte";
-  import DataTable, { type Column } from "$lib/components/DataTable.svelte";
-  import Cell from "$lib/components/Cell.svelte";
+  import ItemList from "$lib/components/ItemList.svelte";
+  import UserAvatar from "$lib/components/UserAvatar.svelte";
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
   import StatusBadge from "$lib/components/StatusBadge.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
@@ -36,16 +38,6 @@
     toast.success(`Revoked the device ${target.name}`);
     await devices.reload();
   }
-
-  const columns = $derived<Column[]>([
-    { label: "Device", grow: true },
-    ...(admin ? [{ label: "Person", hideOnPhone: true }] : []),
-    { label: "Client", hideOnPhone: true },
-    { label: "Last used", align: "right" as const },
-    { label: "Works until", align: "right" as const, hideOnPhone: true },
-    { label: "Status" },
-    { label: "", srLabel: "Actions" },
-  ]);
 </script>
 
 <PageHeader
@@ -60,36 +52,37 @@
 </PageHeader>
 
 <Section>
-  <DataTable source={devices} {columns} caption="Devices" key={(d) => d.id}>
-    {#snippet row(d)}
+  <ItemList source={devices} caption="Devices" key={(d) => d.id}>
+    {#snippet leading(d)}
+      {#if admin && d.username}<UserAvatar name={d.username} size="md" />{:else if admin}<span class="flex size-8 items-center justify-center"><LaptopIcon class="size-5" /></span>{:else}<LaptopIcon class="size-5" />{/if}
+    {/snippet}
+    {#snippet title(d)}{d.name}{#if admin && d.username}<span class="text-muted-foreground"> · {d.username}</span>{/if}{/snippet}
+    {#snippet meta(d)}
+      {cliName} · {#if d.last_used_at}used <RelativeTime at={d.last_used_at} />{:else}never used{/if}{#if !d.revoked_at}
+        · {new Date(d.expires_at) < new Date() ? "expired" : "expires"} <RelativeTime at={d.expires_at} />{/if}
+    {/snippet}
+    {#snippet trailing(d)}
       {@const state = deviceState(d)}
-      <Cell grow strong text={d.name} />
-      {#if admin}<Cell hideOnPhone text={d.username ?? ""} />{/if}
-      <Cell hideOnPhone muted>{cliName}</Cell>
-      <Cell num muted><RelativeTime at={d.last_used_at} empty="Never" /></Cell>
-      <Cell num muted hideOnPhone>{#if d.revoked_at}<span>—</span>{:else}<RelativeTime at={d.expires_at} />{/if}</Cell>
-      <Cell><StatusBadge tone={state.tone}>{state.word}</StatusBadge></Cell>
-      <Cell actions>
-        {#if !d.revoked_at}
-          <Button
-            variant="ghost"
-            size="sm"
-            class="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-            aria-label="Revoke {d.name}"
-            onclick={() => {
-              target = d;
-              open = true;
-            }}>Revoke</Button
-          >
-        {/if}
-      </Cell>
+      <StatusBadge tone={state.tone}>{state.word}</StatusBadge>
+      {#if !d.revoked_at}
+        <Button
+          variant="ghost"
+          size="sm"
+          class="hover:bg-destructive/10 hover:text-destructive"
+          aria-label="Revoke {d.name}"
+          onclick={() => {
+            target = d;
+            open = true;
+          }}>Revoke</Button
+        >
+      {/if}
     {/snippet}
     {#snippet empty()}
       <CompactEmpty icon={LaptopIcon} text={noDevices}>
         <Button variant="outline" size="sm" href={href("/device")}>Approve a device</Button>
       </CompactEmpty>
     {/snippet}
-  </DataTable>
+  </ItemList>
 </Section>
 
 <ConfirmDialog

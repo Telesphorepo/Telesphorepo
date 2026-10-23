@@ -28,8 +28,8 @@
   import Section from "$lib/components/Section.svelte";
   import StatusBadge from "$lib/components/StatusBadge.svelte";
   import ConnectionTest, { type TestResult as ConnectionResult } from "$lib/components/ConnectionTest.svelte";
-  import DataTable from "$lib/components/DataTable.svelte";
-  import Cell from "$lib/components/Cell.svelte";
+  import ItemList from "$lib/components/ItemList.svelte";
+  import CopyButton from "$lib/components/CopyButton.svelte";
   import Loading from "$lib/components/Loading.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
@@ -386,12 +386,11 @@
     <p class="mt-3 text-meta text-muted-foreground">Try again copies only the files the target does not hold yet.</p>
     {#if failures}
       <div class="mt-6">
-        <DataTable source={failures} caption="Files that could not be copied" key={(f) => f.blob_id} columns={[{ label: "File", grow: true }, { label: "Reason" }]}>
-          {#snippet row(f)}
-            <Cell grow text={f.key} copy copyLabel="Copy the path" />
-            <Cell muted text={f.reason} />
-          {/snippet}
-        </DataTable>
+        <ItemList source={failures} caption="Files that could not be copied" key={(f) => f.blob_id}>
+          {#snippet title(f)}{f.key}{/snippet}
+          {#snippet meta(f)}{f.reason}{/snippet}
+          {#snippet trailing(f)}<CopyButton value={f.key} label="Copy the path" />{/snippet}
+        </ItemList>
       </div>
     {/if}
   </Section>

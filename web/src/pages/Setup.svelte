@@ -28,7 +28,7 @@
 <PageHeader title="Set up a project" description="Run one line in a terminal. It signs this computer in and sets up the project." />
 
 <FormPage>
-  <Step n={1} title="Run this line in a terminal in the project folder" description="It works once and ends 10 minutes after it was made. The code stays in this address: the server never receives it from this page." last>
+  <Step n={1} title="Run this line in a terminal in the project folder" description="It works once and ends 10 minutes after it was made. The code stays in your browser: the server never receives it." last>
     <div class="flex flex-col gap-4">
       <Segmented
         bind:value={os}
