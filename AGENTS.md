@@ -37,9 +37,10 @@ Linux. Use bun, not npm.
 
 - **Migrations are append-only.** Production runs `main`, so never edit, rename or delete a
   migration file that `main` holds: add the next one. `serve` refuses a changed migration.
-- **One migration per branch, and every migration is idempotent.** While a branch is in work it
-  may add small migrations where they fit. Before it merges, they are rolled into one file in
-  `internal/db/migrations` holding every schema change of the branch (a module's tables too).
+- **One migration per subsystem per branch, and every migration is idempotent.** While a branch
+  is in work it may add small migrations where they fit. Before it merges, they are rolled into
+  one file per component whose schema the branch changes (the kernel's `internal/db/migrations`,
+  a module's own `migrations`): a module writes only the tables its own migrations create.
   Rolling them up changes migrations a dev database has applied, so delete the dev data folder
   (`.telesphorepo-dev`) after it. Each statement can run twice: `CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`,
   `DROP ... IF EXISTS`, `INSERT OR IGNORE`. SQLite has no conditional `ADD COLUMN` and a
