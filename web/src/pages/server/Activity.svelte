@@ -172,7 +172,7 @@
   }
 </script>
 
-<PageHeader title="Activity" description="Who did what on this server, and when." />
+<PageHeader title="Activity" />
 
 <TabNav
   label="Activity"

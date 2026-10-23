@@ -70,7 +70,7 @@
   }
 </script>
 
-<PageHeader title="People" description="Everyone who can sign in, and the repositories each person can use.">
+<PageHeader title="People">
   {#snippet actions()}<Button onclick={startCreate}><PlusIcon />New account</Button>{/snippet}
 </PageHeader>
 

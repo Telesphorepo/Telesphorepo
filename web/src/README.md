@@ -613,8 +613,11 @@ that does not move waits for a slower process. Every such page does it the same 
 - Monospace outside `CodeBlock`, `CodeSnippet` and the JSON editor (`font-mono` anywhere else).
 - Side sheets (`Sheet`) for anything but the mobile Settings menu.
 - Left, right or bottom border accents for a state: active, selected or hover is a fill.
-- Subtitles for decoration. A description says what the page is for in one sentence, or is left
-  out. No eyebrow labels, no all-caps labels.
+- Subtitles for decoration, and text that states the obvious: what the title already says, what
+  anyone sees by looking (a log is newest first, People lists people), or what everyone knows. A
+  description tells the reader one thing they could not see or would not know (a format cannot
+  change later; approve only if the code matches), or the page has none. No eyebrow labels, no
+  all-caps labels.
 - A second Sign in button.
 - A page width, a container, a `max-w-*` on a page block, or side padding set by a page.
 - A control sized by a page (`w-44`, `max-w-sm` on an input or a select in a form), two controls
@@ -643,7 +646,8 @@ that does not move waits for a slower process. Every such page does it the same 
 
 - [ ] The page is a `PageDef` of its module and in the table above; a Settings page has `nav` with an icon
       in its sitemap group, and its breadcrumbs read right (check a sub-page too).
-- [ ] `PageHeader` with a title; a description only if it says something the title does not.
+- [ ] `PageHeader` with a title; a description only if it tells the reader something they could
+      not see on the page or would not already know.
 - [ ] No status row and no summary banner: state shows on the thing itself.
 - [ ] Each area is a `Section` (a card); a connection has its `ConnectionTest` where it is
       configured.

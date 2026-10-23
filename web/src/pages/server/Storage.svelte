@@ -282,7 +282,7 @@
   };
 </script>
 
-<PageHeader title="Storage" description="Where the server keeps the files of every repository." />
+<PageHeader title="Storage" />
 
 {#snippet formFor(list: Setting[], retrying: boolean)}
   <FormPage>

@@ -156,7 +156,7 @@
   }
 </script>
 
-<PageHeader title="Sign-in options" description="How people sign in: with single sign-on, a password, or both." />
+<PageHeader title="Sign-in options" />
 
 {#if settings.loading && !settings.data}
   <Loading rows={6} />

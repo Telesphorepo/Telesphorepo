@@ -110,7 +110,7 @@
   }
 </script>
 
-<PageHeader title="Backups" description="Copies of this server in a folder, on a schedule.">
+<PageHeader title="Backups">
   {#snippet actions()}
     {#if dir}
       <Button onclick={backUpNow} disabled={starting || job?.running}>Back up now</Button>

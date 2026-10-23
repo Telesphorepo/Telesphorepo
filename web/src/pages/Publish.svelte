@@ -57,7 +57,7 @@
     description="You cannot publish to any repository yet. Ask an administrator for publish access."
   />
 {:else if targets.length > 1}
-  <PageHeader title="Publish" description="Choose the repository that your project publishes to." />
+  <PageHeader title="Publish" />
   {#if byFormat.length > 1}
     {#each byFormat as g (g.format)}
       <Section plain title={formats.title(g.format)}>{@render grid(g.repos, formats.title(g.format))}</Section>
