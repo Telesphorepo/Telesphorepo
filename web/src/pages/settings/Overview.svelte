@@ -1,6 +1,6 @@
 <!--
-  All settings, the administrator's home: about this server. The header names the server and
-  its public address (for a holder of the General settings); under it the actions
+  All settings, the administrator's home: about this server. The header names the server, its
+  version (a release's tag, Canary and the commit for a build of main) and its public address (for a holder of the General settings); under it the actions
   people take most as doors (New repository, New account, New CI pipeline; each only for a person
   who may). Then one row of equal stat tiles, a figure and its label each: the repositories (GET /api/repos), their
   files and the stored size, and the people, the CI pipelines and the signing keys, each only for a
@@ -21,7 +21,7 @@
   import { api, type Page, type PageParams, type Repo } from "$lib/api";
   import { Resource, listOf } from "$lib/load.svelte";
   import { formatCount, formatDateTime, formatSize } from "$lib/format";
-  import { count } from "$lib/words";
+  import { count, versionName } from "$lib/words";
   import { Button } from "$lib/components/ui/button";
   import PageHeader from "$lib/components/PageHeader.svelte";
   import Section from "$lib/components/Section.svelte";
@@ -77,6 +77,8 @@
     String(settings?.data?.groups.flatMap((g) => g.settings).find((s) => s.key === "base_url")?.value ?? ""),
   );
 
+  const version = new Resource(async () => (await api.changes()).version);
+
   // --- the repositories ---
   const repos = new Resource(() => api.repos.list());
   const allRepos = $derived(auth.allRepos());
@@ -118,7 +120,16 @@
 </script>
 
 {#if hasAdmin}
-  <PageHeader title={brand.name} description={baseURL || undefined} crumbs={[{ label: current.route?.title ?? "All settings" }]} />
+  <PageHeader title={brand.name} description={baseURL || undefined} crumbs={[{ label: current.route?.title ?? "All settings" }]}>
+    {#snippet meta()}
+      {#if version.data}
+        {@const v = versionName(version.data)}
+        <StatusBadge>
+          {v.name}{#if v.commit}<span class="font-mono text-muted-foreground" title="Built from commit {v.commit} of main">{v.commit}</span>{/if}
+        </StatusBadge>
+      {/if}
+    {/snippet}
+  </PageHeader>
 
   {#if canNewRepo || canNewAccount || canNewPipeline}
     <DoorRow label="Create">

@@ -16,6 +16,18 @@ export function kindPhrase(r: { kind: string; member_count?: number }): string {
   return "Hosted";
 }
 
+/**
+ * A server version as people read it. A release is its tag ("v1.4.0"); a build of main
+ * ("main-bebe7ef", the image CI publishes on each push) is Canary with its commit; a local build
+ * ("dev") is Development.
+ */
+export function versionName(v: string): { name: string; commit?: string } {
+  const main = /^main-([0-9a-f]{7,40})$/.exec(v);
+  if (main) return { name: "Canary", commit: main[1] };
+  if (v === "dev") return { name: "Development" };
+  return { name: v };
+}
+
 /** The text of the selection bar: "1 selected", "12 selected". */
 export const selectedText = (n: number) => `${formatCount(n)} selected`;
 
