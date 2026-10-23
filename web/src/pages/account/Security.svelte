@@ -353,7 +353,7 @@
 >
   {#if setup}
     <div class="flex flex-wrap items-start gap-5">
-      <QR text={setup.otpauth_url} px={168} />
+      <QR text={setup.otpauth_url} />
       <div class="flex min-w-0 flex-1 basis-48 flex-col gap-3">
         <CodeSnippet label="Or enter this key by hand" value={setup.secret} />
         <a class="text-body text-link underline-offset-4 hover:underline" href={setup.otpauth_url}>Open the setup link on the device with the app</a>
