@@ -164,7 +164,7 @@ func (h *Handler) indexOf(ctx context.Context, r *http.Request, p *auth.Principa
 		key := format.DocumentKey("hosted", strconv.FormatInt(repo.ID, 10), crate, strconv.FormatInt(n.Rev, 10))
 		return &indexDoc{key: key, build: func() ([]byte, error) { return h.renderIndex(ctx, repo.ID, crate) }}, nil
 	case repos.KindProxy:
-		a, err := h.host.Reader.Resolve(ctx, r, p, repo, repopath.Path(".index/"+indexPath(crate)))
+		a, err := h.proxyIndex(ctx, r, p, repo, crate)
 		if err != nil || a == nil {
 			return nil, err
 		}
@@ -186,6 +186,13 @@ func (h *Handler) indexOf(ctx context.Context, r *http.Request, p *auth.Principa
 		return d, nil
 	}
 	return nil, nil
+}
+
+// proxyIndex returns the remote's index file of crate (lowercase) that a proxy caches under
+// .index/: the cached file, or the one the remote sends now when it is stale or missing. nil when
+// the remote has no such crate.
+func (h *Handler) proxyIndex(ctx context.Context, r *http.Request, p *auth.Principal, repo *repos.Repo, crate string) (*assets.Asset, error) {
+	return h.host.Reader.Resolve(ctx, r, p, repo, repopath.Path(".index/"+indexPath(crate)))
 }
 
 // renderIndex renders the index file of crate (lowercase) of a hosted repo from its rows, one

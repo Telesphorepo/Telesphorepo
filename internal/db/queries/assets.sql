@@ -4,15 +4,15 @@
 -- Indexed point lookup on (repo_id, path), used by every download.
 -- name: GetAsset :one
 SELECT id, repo_id, path, blob_id, size, sha256, content_type, kind, uploaded_by, created_at, updated_at,
-  build_id, checked_at, remote_etag, md5, sha1
+  build_id, checked_at, remote_etag, md5, sha1, unit
 FROM assets WHERE repo_id = ? AND path = ?;
 
 -- Path and kind never change on update (the FTS triggers rely on it). created_at changes only on
 -- insert.
 -- name: UpsertAsset :one
 INSERT INTO assets (repo_id, path, blob_id, size, sha256, content_type, kind, uploaded_by, created_at, updated_at,
-  build_id, checked_at, remote_etag, md5, sha1)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  build_id, checked_at, remote_etag, md5, sha1, unit)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (repo_id, path) DO UPDATE SET blob_id = excluded.blob_id, size = excluded.size, sha256 = excluded.sha256,
   content_type = excluded.content_type, updated_at = excluded.updated_at, uploaded_by = excluded.uploaded_by,
   build_id = excluded.build_id, checked_at = excluded.checked_at, remote_etag = excluded.remote_etag,
@@ -33,28 +33,28 @@ DELETE FROM assets WHERE repo_id = ? AND path = ?;
 -- tighter of the prefix and the cursor. The *Range forms add the prefix's upper bound.
 -- name: ListAssetsFrom :many
 SELECT id, repo_id, path, blob_id, size, sha256, content_type, kind, uploaded_by, created_at, updated_at,
-  build_id, checked_at, remote_etag, md5, sha1
+  build_id, checked_at, remote_etag, md5, sha1, unit
 FROM assets
 WHERE repo_id = sqlc.arg(repo_id) AND path >= sqlc.arg(lower)
 ORDER BY path LIMIT sqlc.arg(limit);
 
 -- name: ListAssetsAfter :many
 SELECT id, repo_id, path, blob_id, size, sha256, content_type, kind, uploaded_by, created_at, updated_at,
-  build_id, checked_at, remote_etag, md5, sha1
+  build_id, checked_at, remote_etag, md5, sha1, unit
 FROM assets
 WHERE repo_id = sqlc.arg(repo_id) AND path > sqlc.arg(lower)
 ORDER BY path LIMIT sqlc.arg(limit);
 
 -- name: ListAssetsFromRange :many
 SELECT id, repo_id, path, blob_id, size, sha256, content_type, kind, uploaded_by, created_at, updated_at,
-  build_id, checked_at, remote_etag, md5, sha1
+  build_id, checked_at, remote_etag, md5, sha1, unit
 FROM assets
 WHERE repo_id = sqlc.arg(repo_id) AND path >= sqlc.arg(lower) AND path < sqlc.arg(upper)
 ORDER BY path LIMIT sqlc.arg(limit);
 
 -- name: ListAssetsAfterRange :many
 SELECT id, repo_id, path, blob_id, size, sha256, content_type, kind, uploaded_by, created_at, updated_at,
-  build_id, checked_at, remote_etag, md5, sha1
+  build_id, checked_at, remote_etag, md5, sha1, unit
 FROM assets
 WHERE repo_id = sqlc.arg(repo_id) AND path > sqlc.arg(lower) AND path < sqlc.arg(upper)
 ORDER BY path LIMIT sqlc.arg(limit);
@@ -63,7 +63,7 @@ ORDER BY path LIMIT sqlc.arg(limit);
 -- manifest digest.
 -- name: ListAssetsByBlob :many
 SELECT id, repo_id, path, blob_id, size, sha256, content_type, kind, uploaded_by, created_at, updated_at,
-  build_id, checked_at, remote_etag, md5, sha1
+  build_id, checked_at, remote_etag, md5, sha1, unit
 FROM assets
 WHERE blob_id = ? AND repo_id = ?
 LIMIT ?;

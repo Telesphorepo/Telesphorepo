@@ -44,7 +44,22 @@ type Hooks struct {
 	// credentials as HTTP Basic on every request. With RemoteAuth, the credentials go out only in
 	// the answer to a challenge.
 	RemoteAuth func(ctx context.Context, remote *repos.Proxy, challenge http.Header) (http.Header, error)
+	// Unit names the part of a repo that a group serves from one member (the asset's unit): a
+	// package whose files a group takes from the member that owns its name. "" (and nil): a group
+	// serves the path from the first member that has it.
+	Unit func(path string) string
 }
+
+// unitOf is the unit of path (Unit).
+func (h *Hooks) unitOf(path string) string {
+	if h == nil || h.Unit == nil {
+		return ""
+	}
+	return h.Unit(path)
+}
+
+// UnitOf is the unit of path in a repo of format (Hooks.Unit).
+func (p *Pipeline) UnitOf(format, path string) string { return p.Hooks(format).unitOf(path) }
 
 // Watcher sees every commit and remove of every format and every writer (format routes, uploads,
 // imports, proxy fetches, generated files), unlike Hooks, which belong to one format. A module

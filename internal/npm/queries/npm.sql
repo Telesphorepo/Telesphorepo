@@ -46,7 +46,7 @@ LIMIT ?;
 
 -- One version with its tarball asset.
 -- name: GetVersionFile :one
-SELECT v.version, v.tarball, v.published_at, a.size, a.sha256, a.build_id
+SELECT v.version, v.tarball, v.published_at, a.size, a.sha256, a.build_id, a.updated_at
 FROM npm_versions v JOIN assets a ON a.repo_id = v.repo_id AND a.path = v.tarball
 WHERE v.repo_id = ? AND v.name = ? AND v.version = ?;
 

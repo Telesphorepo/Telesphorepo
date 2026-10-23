@@ -95,12 +95,11 @@
     ].filter(Boolean);
     return parts.length > 1 ? parts.join(" · ") : "";
   });
-  const files = $derived(mine.reduce((n, r) => n + r.file_count, 0));
-  const stored = $derived(mine.reduce((n, r) => n + r.total_size, 0));
-  const cached = $derived(mine.filter((r) => r.kind === "proxy").reduce((n, r) => n + r.total_size, 0));
-
-  // A group stores nothing of its own: its members hold its files.
+  // A group stores nothing of its own: its members hold the files it serves.
   const stores = $derived(mine.filter((r) => r.kind !== "group"));
+  const files = $derived(stores.reduce((n, r) => n + r.file_count, 0));
+  const stored = $derived(stores.reduce((n, r) => n + r.total_size, 0));
+  const cached = $derived(mine.filter((r) => r.kind === "proxy").reduce((n, r) => n + r.total_size, 0));
   const largest = $derived([...stores].filter((r) => r.total_size > 0).sort((a, b) => b.total_size - a.total_size).slice(0, 8));
   const share = (r: Repo) => (stored ? Math.round((r.total_size / stored) * 100) : 0);
   const repoHref = (r: Repo) => href(auth.managesRepo(r.name) ? repoSettingsPath(r.name) : repoPath(r.name));

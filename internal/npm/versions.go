@@ -12,9 +12,10 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/version"
 )
 
-// Versions and builds (format.Spec Versions and Builds) of a package of a hosted repo, read from
-// npm_versions. An artifact folder is <name>/ (<scope>/<name>/ for a scoped name). Every version is
-// a release with one build: its tarball. Versions page newest first by sort_key.
+// Versions and builds (format.Spec Versions and Builds) of a package: of a hosted repo read from
+// npm_versions, of a proxy from its remote packument (remote.go). An artifact folder is <name>/
+// (<scope>/<name>/ for a scoped name). Every version is a release with one build: its tarball.
+// Versions page newest first by sort key.
 
 // artifactOf returns the artifact of folder p (with a trailing slash), or ok=false.
 func artifactOf(p string) (format.Artifact, string, bool) {
@@ -28,7 +29,12 @@ func artifactOf(p string) (format.Artifact, string, bool) {
 // Versions lists the versions of a package folder, newest first.
 func (h *Handler) Versions(ctx context.Context, _, from *repos.Repo, p, after string, limit int) (*format.Artifact, []format.Version, string, error) {
 	art, pkg, ok := artifactOf(p)
-	if !ok || from.Kind != repos.KindHosted {
+	switch {
+	case !ok:
+		return nil, nil, "", nil
+	case from.Kind == repos.KindProxy:
+		return h.proxyVersions(ctx, from, art, pkg, after, limit)
+	case from.Kind != repos.KindHosted:
 		return nil, nil, "", nil
 	}
 	if _, err := packageOf(ctx, h.q, from.ID, pkg); err != nil {
@@ -68,7 +74,12 @@ func (h *Handler) Versions(ctx context.Context, _, from *repos.Repo, p, after st
 // Builds lists the one build of version v of a package folder: its tarball.
 func (h *Handler) Builds(ctx context.Context, _, from *repos.Repo, p, v, build, after string, limit int) (*format.Artifact, *format.Version, []format.Build, string, error) {
 	art, pkg, ok := artifactOf(p)
-	if !ok || from.Kind != repos.KindHosted {
+	switch {
+	case !ok:
+		return nil, nil, nil, "", nil
+	case from.Kind == repos.KindProxy:
+		return h.proxyBuilds(ctx, from, art, pkg, v, build, after, limit)
+	case from.Kind != repos.KindHosted:
 		return nil, nil, nil, "", nil
 	}
 	r, err := h.q.GetVersionFile(ctx, dbq.GetVersionFileParams{RepoID: from.ID, Name: pkg, Version: v})
@@ -88,5 +99,6 @@ func (h *Handler) Builds(ctx context.Context, _, from *repos.Repo, p, v, build, 
 		return &art, ver, nil, "", nil
 	}
 	return &art, ver, []format.Build{{Build: r.Version, PublishedAt: at, CI: b, Files: []format.BuildFile{{
-		Name: path.Base(r.Tarball), Path: r.Tarball, Size: r.Size, SHA256: r.Sha256, Extension: "tgz"}}}}, "", nil
+		Name: path.Base(r.Tarball), Path: r.Tarball, Size: r.Size, SHA256: r.Sha256, Extension: "tgz",
+		UpdatedAt: time.Unix(r.UpdatedAt, 0).UTC()}}}}, "", nil
 }

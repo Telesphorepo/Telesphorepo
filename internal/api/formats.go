@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/ci"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
@@ -345,7 +347,7 @@ func (a *API) artifactSnippets(w http.ResponseWriter, r *http.Request, c *route.
 		}
 		u, err := f.UsageOf(r.Context(), repo, members, base, p, q.Get("version"), mode)
 		if err != nil {
-			route.Fail(w, r, err)
+			failVersions(w, r, err)
 			return
 		}
 		if u != nil {
@@ -380,6 +382,25 @@ func (a *API) readMembers(r *http.Request, c *route.Call) ([]*repos.Repo, error)
 	return a.access.GroupMembers(r.Context(), r, c.P, c.Repo)
 }
 
+// stores reports whether member m stores the file at path (format.Stores).
+func (a *API) stores(ctx context.Context, m *repos.Repo, path string) (bool, error) {
+	_, err := a.assets.Get(ctx, m.ID, path)
+	if errors.Is(err, assets.ErrNotFound) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// failVersions answers an error of the versions, builds and snippets routes: 502 when a proxy's
+// remote did not answer for a document that it has no copy of.
+func failVersions(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, assets.ErrRemoteFailed) {
+		httpx.Error(w, r, http.StatusBadGateway, "The remote repository did not answer.")
+		return
+	}
+	route.Fail(w, r, err)
+}
+
 // versions lists the versions of an artifact folder, newest first (format.Spec Versions and Builds):
 // ?path=<artifact folder>&after=<version>&limit= -> {artifact, items: [Version], next}. artifact
 // is null when the folder is not an artifact or the format does not group versions.
@@ -406,7 +427,7 @@ func (a *API) versions(w http.ResponseWriter, r *http.Request, c *route.Call) {
 			return
 		}
 		if err != nil {
-			route.Fail(w, r, err)
+			failVersions(w, r, err)
 			return
 		}
 		if art != nil {
@@ -451,9 +472,9 @@ func (a *API) builds(w http.ResponseWriter, r *http.Request, c *route.Call) {
 			route.Fail(w, r, err)
 			return
 		}
-		art, ver, items, next, err := v.BuildsOf(r.Context(), repo, members, p, q.Get("version"), build, after, limit)
+		art, ver, items, next, err := v.BuildsOf(r.Context(), repo, members, a.stores, p, q.Get("version"), build, after, limit)
 		if err != nil {
-			route.Fail(w, r, err)
+			failVersions(w, r, err)
 			return
 		}
 		if art != nil && ver != nil {

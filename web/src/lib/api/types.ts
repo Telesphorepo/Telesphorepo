@@ -296,6 +296,8 @@ export type Repo = {
   total_size: number;
   /** When a file was last published; null before the first publish. */
   last_published_at: string | null;
+  /** A group: true while the server has not counted the files it serves to the caller yet (the counters are 0). */
+  counts_pending?: boolean;
   kind: RepoKind;
   /** A group: how many members it has. */
   member_count?: number;
@@ -462,15 +464,19 @@ export type Version = {
   /** The format's name of the latest build for people ("Build 3"); empty: show latest_build. */
   latest_label?: string;
   builds_count: number;
-  published_at: string;
+  /** null when the version has no date (a proxy's version whose remote document names none). */
+  published_at: string | null;
   build: BuildRecord | null;
   /** A group: the member that serves the version. */
   repo?: string;
+  /** A proxy's version that its remote lists and whose files the proxy has not cached yet. */
+  remote?: boolean;
 };
 
-export type BuildFile = { name: string; path: string; size: number; sha256: string; classifier: string; extension: string };
+/** A file of a build. repo: in a group, the member that serves it. remote: a proxy's file not cached yet (size 0 and sha256 empty when the remote document names neither). */
+export type BuildFile = { name: string; path: string; size: number; sha256: string; classifier: string; extension: string; repo?: string; remote?: boolean };
 /** A build of a version; label is the format's name for it for people, empty to show the id. */
-export type Build = { id: string; label?: string; files: BuildFile[]; published_at: string; build: BuildRecord | null };
+export type Build = { id: string; label?: string; files: BuildFile[]; published_at: string | null; build: BuildRecord | null };
 
 /** GET /api/repos/{name}/versions: artifact is null for a folder that is not an artifact. */
 export type Versions = Page<Version> & { artifact: Artifact | null };

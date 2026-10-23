@@ -2,8 +2,10 @@
   The table of repositories that people manage (Settings › Repositories; Browse shows them
   as RepoCards): the name and the description on one line, the format and the last publish. A
   private repository has a lock after its name; a public one has no mark. A group or a proxy has
-  its kind icon after the name. The files and the size of a repository are on its Overview. On a
-  phone the format icon sits before the name. A click anywhere on a row opens `href`. With `bind:picked` and a `bulk` snippet (All
+  its kind icon after the name. A group's last publish is that of the files it serves, and
+  Counting… until the server has counted them. The files and the size of a repository are on its
+  Overview. On a phone the format icon sits before the name. A click anywhere on a row opens
+  `href`. With `bind:picked` and a `bulk` snippet (All
   repositories), every row gets a checkbox for bulk actions (DataTable).
 -->
 <script lang="ts">
@@ -71,9 +73,9 @@
       </span>
     </Table.Cell>
     <Table.Cell class="max-sm:hidden"><FormatBadge format={r.format} title={titles[r.format]} /></Table.Cell>
-    {#if r.kind === "group"}
-      <!-- A group publishes nothing of its own. -->
-      <Cell num muted />
+    {#if r.counts_pending}
+      <!-- A group whose files the server has not counted for this reader yet. -->
+      <Cell num muted>Counting…</Cell>
     {:else}
       <Cell num muted><RelativeTime at={r.last_published_at} empty="Never" /></Cell>
     {/if}

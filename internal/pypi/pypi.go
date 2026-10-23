@@ -47,6 +47,7 @@ type Handler struct {
 	assets *assets.Pipeline
 	log    *slog.Logger
 	docs   *format.DocumentCache // rendered project pages: hosted ones by revision, proxy ones by upstream page
+	models modelCache            // the models of proxy pages that Versions and Builds read
 }
 
 // Module returns the PyPI module: the format with proxies, groups, the legacy upload, web UI
@@ -77,6 +78,7 @@ func Module() module.Module {
 				Versions:      h.Versions,
 				Builds:        h.Builds,
 				GroupVersions: format.GroupOwner,
+				GroupUnit:     groupUnit,
 				Usage:         h.Usage,
 				ArtifactUsage: h.ArtifactUsage,
 				Tools:         tools(),
@@ -325,4 +327,20 @@ var ui = format.UIDescriptor{
 		{Extension: "tar.gz", Label: "Source distribution"},
 		{Extension: "zip", Label: "Source distribution (zip)"},
 	},
+}
+
+// groupUnit is the project of a path (format.Spec.GroupUnit): a hosted file packages/<project>/...
+// and a proxy's cached project page .simple/<project>, which a group takes from the member that
+// owns the project. A proxy's files/ and remote/ files serve path by path: "".
+func groupUnit(p string) string {
+	if rest, ok := strings.CutPrefix(p, "packages/"); ok {
+		if proj, _, ok := strings.Cut(rest, "/"); ok && proj != "" {
+			return normalize(proj)
+		}
+		return ""
+	}
+	if rest, ok := strings.CutPrefix(p, ".simple/"); ok && rest != "" && !strings.Contains(rest, "/") {
+		return normalize(rest)
+	}
+	return ""
 }

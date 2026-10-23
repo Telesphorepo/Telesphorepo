@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"net/url"
+	"path"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -118,12 +120,45 @@ func tools() []format.Tool {
 	}
 }
 
-// ArtifactUsage returns the snippets of one project of a hosted repo. p is the project folder
-// packages/<project>/ or a file in it. The pinned mode names version v (a file: its version; none:
-// the newest release, else the newest version); the latest mode names none.
+// ArtifactUsage returns the snippets of one project of a hosted repo or a proxy. p is the project
+// folder packages/<project>/ or a file of the project (a proxy's under files/ or remote/). The
+// pinned mode names version v (a file: its version; none: the newest release, else the newest
+// version); the latest mode names none.
 func (h *Handler) ArtifactUsage(ctx context.Context, repo, from *repos.Repo, baseURL, p, v, mode string) (*format.ArtifactUsage, error) {
 	p = strings.Trim(p, "/")
 	dir := p
+	if from.Kind == repos.KindProxy {
+		file := strings.HasPrefix(p, "files/") || strings.HasPrefix(p, "remote/")
+		if file {
+			d, err := parseFilename(path.Base(p))
+			if err != nil {
+				return nil, nil
+			}
+			dir, v = "packages/"+normalize(d.name), d.version.String()
+		}
+		art, vs, err := h.proxyProject(ctx, from, dir+"/")
+		if err != nil || art == nil {
+			return nil, err
+		}
+		if file && !slices.ContainsFunc(vs, func(x *proxyVersion) bool {
+			return slices.ContainsFunc(x.files, func(f mfile) bool { return f.local == p })
+		}) {
+			return nil, nil
+		}
+		if v == "" {
+			if len(vs) == 0 {
+				return nil, nil
+			}
+			v = vs[0].version
+			for _, x := range vs {
+				if pv, err := version.ParsePEP440(x.version); err == nil && !pv.Prerelease() {
+					v = x.version
+					break
+				}
+			}
+		}
+		return artifactSnippets(repo, baseURL, art, v, mode), nil
+	}
 	if segs := strings.Split(p, "/"); len(segs) == 3 && segs[0] == "packages" {
 		row, err := h.q.GetFile(ctx, dbq.GetFileParams{RepoID: from.ID, Filename: segs[2]})
 		switch {
@@ -151,6 +186,11 @@ func (h *Handler) ArtifactUsage(ctx context.Context, repo, from *repos.Repo, bas
 			}
 		}
 	}
+	return artifactSnippets(repo, baseURL, art, v, mode), nil
+}
+
+// artifactSnippets returns the snippets of project art at version v in mode, for repo.
+func artifactSnippets(repo *repos.Repo, baseURL string, art *format.Artifact, v, mode string) *format.ArtifactUsage {
 	if mode != format.VersionLatest {
 		mode = format.VersionPinned
 	}
@@ -167,7 +207,7 @@ func (h *Handler) ArtifactUsage(ctx context.Context, repo, from *repos.Repo, bas
 		out = append(out, format.Snippet{ID: s.tool + ".install", Tool: s.tool, Purpose: format.SnippetUse, Context: format.SnippetArtifact,
 			Title: "Install " + art.Title, Lang: "sh", Code: s.code, Note: note})
 	}
-	return &format.ArtifactUsage{Artifact: *art, Version: v, Mode: mode, Snippets: order(out)}, nil
+	return &format.ArtifactUsage{Artifact: *art, Version: v, Mode: mode, Snippets: order(out)}
 }
 
 // order puts the snippets of each tool together, in the order the tools first appear.

@@ -118,9 +118,9 @@
     builds.items.map((b) => ({
       key: b.id,
       top: buildLabel(b.id, b.label),
-      bottom: day.format(new Date(b.published_at)),
+      bottom: b.published_at ? day.format(new Date(b.published_at)) : "",
       serial: b.build?.revision ? shortSha(b.build.revision) : version.version,
-      label: `${buildLabel(b.id, b.label)} of ${version.version}, published ${formatDateTime(b.published_at)}`,
+      label: `${buildLabel(b.id, b.label)} of ${version.version}${b.published_at ? `, published ${formatDateTime(b.published_at)}` : ""}`,
     })),
   );
   const byKey = $derived(new Map(builds.items.map((b) => [b.id, b])));
@@ -178,7 +178,7 @@
     <span class="text-label">{buildLabel(b.id, b.label)}</span>
     {#if latest(b)}<StatusBadge tone="success" title="The build a snapshot dependency resolves to">Latest</StatusBadge>{/if}
     <span class="flex flex-wrap items-center gap-x-3 gap-y-1 text-meta text-muted-foreground">
-      <span>Published <RelativeTime at={b.published_at} /></span>
+      {#if b.published_at}<span>Published <RelativeTime at={b.published_at} /></span>{/if}
       <BuildInline p={b.build} />
     </span>
   </p>
@@ -228,9 +228,9 @@
           {#snippet badges(b)}{#if latest(b)}<StatusBadge tone="success">Latest</StatusBadge>{/if}{/snippet}
           {#snippet meta(b)}
             <span class="flex min-w-0 items-center gap-1.5">
-              <span class="shrink-0">Published <RelativeTime at={b.published_at} /></span>
-              {#if b.build}<span aria-hidden="true">·</span><BuildInline p={b.build} />{/if}
-              <span aria-hidden="true">·</span><span class="shrink-0">{count(b.files.length, "file", "files")}</span>
+              {#if b.published_at}<span class="shrink-0">Published <RelativeTime at={b.published_at} /></span><span aria-hidden="true">·</span>{/if}
+              {#if b.build}<BuildInline p={b.build} /><span aria-hidden="true">·</span>{/if}
+              <span class="shrink-0">{count(b.files.length, "file", "files")}</span>
               {#if b.label}<span aria-hidden="true" class="max-sm:hidden">·</span><span class="min-w-0 truncate max-sm:hidden">{b.id}</span>{/if}
             </span>
           {/snippet}
@@ -262,11 +262,12 @@
         >
           <FileIcon aria-hidden="true" class="size-4 shrink-0 text-muted-foreground" />
           <Truncate text={f.name} />
-          <MemberTag repo={version.repo} />
+          {#if f.remote}<StatusBadge title="The proxy fetches this file from its remote on the first download">Not cached</StatusBadge>{/if}
+          <MemberTag repo={f.repo ?? version.repo} />
         </a>
       </Cell>
       <Cell hideOnPhone muted text={kindOf(f)} />
-      <Cell num><FileSize bytes={f.size} /></Cell>
+      <Cell num>{#if f.remote && !f.size}<span class="text-muted-foreground">Unknown</span>{:else}<FileSize bytes={f.size} />{/if}</Cell>
       {#if canWrite}
         <Cell actions>
           <Button

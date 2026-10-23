@@ -148,11 +148,7 @@ func (h *Handler) flatIndex(w http.ResponseWriter, r *http.Request, c *route.Cal
 	}
 	if owner.Kind == repos.KindProxy {
 		// The remote's list holds no URL: it serves as the remote wrote it.
-		if _, err := h.upstreamOf(ctx, r, c.P, owner); err != nil {
-			h.fail(w, r, err)
-			return
-		}
-		a, err := h.remoteDoc(ctx, r, c.P, owner, upstreamDir+"flat/"+lid+"/index.json")
+		a, err := h.proxyFlat(ctx, r, c.P, owner, lid)
 		if err != nil || a == nil {
 			h.fail(w, r, errOr(err))
 			return

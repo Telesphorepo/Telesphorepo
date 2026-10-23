@@ -115,9 +115,19 @@ type Spec struct {
 	// member that has the artifact, the member that assets.Reader.Owner picks for the package
 	// name (npm, PyPI, Cargo, NuGet).
 	GroupVersions string
+	// GroupUnit names the package of a path for a format whose group serves every file of a
+	// package from the member that owns the name (GroupOwner): the asset's unit, which the
+	// counters of a group read (a group counts the files of a unit from the first member that
+	// has a file of it). "" for a path that a group serves from the first member that has the
+	// path. nil: every path is "".
+	GroupUnit func(path string) string
 	// VersionOrder orders two versions of one artifact as Versions lists them: negative when a
 	// comes first. GroupEach needs it.
 	VersionOrder func(a, b Version) int
+	// BuildOrder orders two builds of one version as Builds lists them (by Build id): negative
+	// when a comes first. A GroupEach group sorts the union of the members' builds of a version
+	// with a Folder by it; nil keeps the builds in member order.
+	BuildOrder func(a, b Build) int
 
 	// Usage returns the repo-level snippets of a repo (UI and "telesphorepo-server dev"): how to use the
 	// repo in a build (Purpose "use") and how to publish to it from a computer and by hand
@@ -226,7 +236,7 @@ func (s *Spec) Takes(kind string) bool { return slices.Contains(s.Kinds, kind) }
 // Hooks returns the asset hooks of the format.
 func (s *Spec) hooks() *assets.Hooks {
 	return &assets.Hooks{Describe: s.Describe, Admit: s.Admit, OnCommitted: s.OnCommitted, AfterCommit: s.AfterCommit,
-		OnRemoved: s.OnRemoved, AfterRemove: s.AfterRemove, Classify: s.Classify, Merge: s.Merge, RemoteAuth: s.RemoteAuth}
+		OnRemoved: s.OnRemoved, AfterRemove: s.AfterRemove, Classify: s.Classify, Merge: s.Merge, RemoteAuth: s.RemoteAuth, Unit: s.GroupUnit}
 }
 
 // Version modes of ArtifactUsage.
@@ -278,6 +288,35 @@ type Version struct {
 	PublishedAt time.Time `json:"published_at"`
 	CI          *ci.Build `json:"build"`
 	Repo        string    `json:"repo,omitempty"` // a group: the member that serves the version
+	// Remote is a version of a proxy that its remote's document lists and whose files the proxy
+	// has not cached yet: the first download fetches them.
+	Remote bool `json:"remote,omitempty"`
+}
+
+// MarshalJSON writes a zero PublishedAt (a proxy's version whose remote document has no date) as
+// null.
+func (v Version) MarshalJSON() ([]byte, error) {
+	type plain Version
+	return json.Marshal(struct {
+		plain
+		PublishedAt *time.Time `json:"published_at"`
+	}{plain(v), timeOrNil(v.PublishedAt)})
+}
+
+// MarshalJSON writes a zero PublishedAt as null (see Version.MarshalJSON).
+func (b Build) MarshalJSON() ([]byte, error) {
+	type plain Build
+	return json.Marshal(struct {
+		plain
+		PublishedAt *time.Time `json:"published_at"`
+	}{plain(b), timeOrNil(b.PublishedAt)})
+}
+
+func timeOrNil(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	return &t
 }
 
 // Build is one build of a version: its id (a snapshot's "20261014.103000-3", a release's
@@ -293,14 +332,20 @@ type Build struct {
 }
 
 // BuildFile is one file of a build. Classifier and Extension are the format's split of its name
-// (e.g. "sources" and "jar"); Classifier is "" for the main file.
+// (e.g. "sources" and "jar"); Classifier is "" for the main file. Repo is, in a group, the member
+// that serves the file. Remote is a file of a proxy that it has not cached yet: Size and SHA256
+// are the remote document's (0 and "" when it does not name them). UpdatedAt is when the stored
+// file was last written (zero for a Remote file); a group merge of builds reads it.
 type BuildFile struct {
-	Name       string `json:"name"`
-	Path       string `json:"path"`
-	Size       int64  `json:"size"`
-	SHA256     string `json:"sha256"`
-	Classifier string `json:"classifier"`
-	Extension  string `json:"extension"`
+	Name       string    `json:"name"`
+	Path       string    `json:"path"`
+	Size       int64     `json:"size"`
+	SHA256     string    `json:"sha256"`
+	Classifier string    `json:"classifier"`
+	Extension  string    `json:"extension"`
+	Repo       string    `json:"repo,omitempty"`
+	Remote     bool      `json:"remote,omitempty"`
+	UpdatedAt  time.Time `json:"-"`
 }
 
 // OriginOf returns who writes the files of a request by p with source s: the user, and the CI

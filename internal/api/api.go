@@ -50,6 +50,7 @@ type API struct {
 	access      *access.Engine
 	formats     *format.Registry
 	heads       *heldHeads
+	counts      *groupCounts
 	deleteSlots chan struct{} // one value per running repo delete (startDelete)
 }
 
@@ -61,6 +62,7 @@ const optimizeEvery = 6 * time.Hour
 // statistics fresh.
 func Module() module.Module {
 	a := &API{deleteSlots: make(chan struct{}, deleteSlots)}
+	a.counts = newGroupCounts(a)
 	return module.Module{
 		ID: "core", Title: "Core",
 		Register: func(x *module.Extender) {
@@ -83,6 +85,7 @@ func Module() module.Module {
 			}})
 			a.registerPipeline(x)
 			x.RootPrefix("/identity/") // the logo of the server
+			a.counts.register(x)
 			x.Routes(a.routes)
 		},
 	}
@@ -420,9 +423,13 @@ type repoJSON struct {
 	Permissions []string                   `json:"permissions"` // the caller's repository permissions
 	Operation   *operationJSON             `json:"operation"`   // the active operation; null for none
 	// The repo counters: every asset row counts. LastPublishedAt is null before the first publish.
+	// A group counts each file it serves to the caller once (groupCounters); CountsPending is true
+	// while the job core.group-counts has not counted the caller's members yet (the counters are
+	// 0 and null then).
 	FileCount       int64      `json:"file_count"`
 	TotalSize       int64      `json:"total_size"`
 	LastPublishedAt *time.Time `json:"last_published_at"`
+	CountsPending   bool       `json:"counts_pending,omitempty"`
 	Kind            string     `json:"kind"`                   // hosted, proxy or group
 	MemberCount     *int       `json:"member_count,omitempty"` // a group: how many members it has
 	// GET of a repo (see repoDetail): a group's members, the groups of a member, a proxy's remote.
@@ -500,7 +507,14 @@ func (a *API) listRepos(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		if perms.Empty() {
 			continue
 		}
-		out = append(out, a.toRepoJSON(repo, perms))
+		j := a.toRepoJSON(repo, perms)
+		if repo.Kind == repos.KindGroup {
+			if err := a.groupCounters(r.WithContext(ctx), p, repo, &j); err != nil {
+				route.Fail(w, r, err)
+				return
+			}
+		}
+		out = append(out, j)
 	}
 	httpx.WriteJSON(w, http.StatusOK, out)
 }

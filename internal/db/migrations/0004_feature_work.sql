@@ -1,4 +1,4 @@
--- 0003_feature_work.sql. db.Init runs this file once, in one transaction with foreign keys off and
+-- 0004_feature_work.sql. db.Init runs this file once, in one transaction with foreign keys off and
 -- checked before the commit. Every statement can run twice. Once a release has applied it, never
 -- change it: add the next migration instead.
 

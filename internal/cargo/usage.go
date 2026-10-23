@@ -88,22 +88,24 @@ func tools() []format.Tool {
 		}}}
 }
 
-// ArtifactUsage returns the snippets of one crate of a hosted repo. p is the crate folder
+// ArtifactUsage returns the snippets of one crate of a hosted repo or a proxy. p is the crate folder
 // (crates/<name>/, with version v or "" for the newest) or a .crate file in it. The pinned mode
 // names the version as a Cargo requirement ("1.2.0" takes 1.2.0 and compatible updates); the
 // latest mode names "*".
 func (h *Handler) ArtifactUsage(ctx context.Context, repo, from *repos.Repo, baseURL, p, v, mode string) (*format.ArtifactUsage, error) {
-	if from.Kind != repos.KindHosted {
+	if from.Kind != repos.KindHosted && from.Kind != repos.KindProxy {
 		return nil, nil
 	}
 	p = strings.Trim(p, "/")
 	if n, vers, ok := parseCratePath(p); ok {
-		if _, err := h.host.Assets.Get(ctx, from.ID, p); errors.Is(err, assets.ErrNotFound) {
-			return nil, nil
-		} else if err != nil {
-			return nil, err
+		if from.Kind == repos.KindHosted {
+			if _, err := h.host.Assets.Get(ctx, from.ID, p); errors.Is(err, assets.ErrNotFound) {
+				return nil, nil
+			} else if err != nil {
+				return nil, err
+			}
 		}
-		p, v = "crates/"+n, vers
+		p, v = "crates/"+n, vers // a proxy's version comes from its index file, cached or not
 	}
 	art, lower, ok := artifactOf(p)
 	if !ok {

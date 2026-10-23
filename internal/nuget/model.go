@@ -472,12 +472,19 @@ func (h *Handler) owner(ctx context.Context, r *http.Request, p *auth.Principal,
 		if m.Kind != repos.KindProxy {
 			return h.hostedHas(ctx, m.ID, lid)
 		}
-		if _, err := h.upstreamOf(ctx, r, p, m); err != nil {
-			return false, err
-		}
-		a, err := h.remoteDoc(ctx, r, p, m, upstreamDir+"flat/"+lid+"/index.json")
+		a, err := h.proxyFlat(ctx, r, p, m, lid)
 		return a != nil, err
 	})
+}
+
+// proxyFlat returns the cached version list of package lid of proxy repo (the flat container
+// index.json of its remote, fetched again after the repo's metadata_ttl): nil when the remote
+// does not have the package.
+func (h *Handler) proxyFlat(ctx context.Context, r *http.Request, p *auth.Principal, repo *repos.Repo, lid string) (*assets.Asset, error) {
+	if _, err := h.upstreamOf(ctx, r, p, repo); err != nil {
+		return nil, err
+	}
+	return h.remoteDoc(ctx, r, p, repo, upstreamDir+"flat/"+lid+"/index.json")
 }
 
 // isRemoteFailed reports whether err is a proxy remote that failed with nothing cached.
