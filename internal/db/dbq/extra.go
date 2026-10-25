@@ -13,7 +13,9 @@ import (
 // Extra maps each hand-written query name to its SQL.
 var Extra = map[string]string{
 	"SearchAssets":      searchAssets,
-	"SearchTrigramRows": searchTrigramRows,
+	"SearchSegments":    searchSegments,
+	"SearchTrigramRows": trigramRows,
+	"SearchSegmentRows": segmentRows,
 	"ListMigrations":    listMigrations,
 
 	"ListReposIn":            listReposIn,
@@ -114,25 +116,62 @@ func (q *Queries) repoRows(ctx context.Context, query string, args []any) ([]Get
 	return out, rows.Err()
 }
 
-// The search index assets_search keys each path by repo_id << SearchShift | asset id, so the
-// matches of one repo sit together in rowid order and every query here is a seek in the trigram
-// index (sqlc cannot reference rowid or "assets_search MATCH"). ?1 is the FTS5 query: the
-// search text as a phrase, or the rarest trigrams of a longer text (assets.Search), whose rows
-// the substring check keeps: ?N is the text that the path must hold, ” for none.
+// The search indexes key each path by repo_id << SearchShift | asset id, so the matches of one
+// repo sit together in rowid order and every query here is a seek (sqlc cannot reference rowid or
+// "MATCH"): assets_search holds the trigrams of the path, assets_segments its segments (the words
+// between the separators). ?1 is the FTS5 query (assets.Search picks the index and the query),
+// whose rows the substring check keeps: ?2 is the text that the path must hold, ” for none.
 const SearchShift = 40
 
-const searchFrom = `FROM assets_search f JOIN assets a ON a.id = (f.rowid & 1099511627775)`
+// SearchIndex is the index a search reads.
+type SearchIndex int
 
-const searchHolds = `(?2 = '' OR instr(lower(a.path), lower(?2)) > 0)`
+const (
+	SearchTrigrams SearchIndex = iota // assets_search
+	SearchSegments                    // assets_segments
+)
 
-const searchAssets = `SELECT a.id, a.repo_id, a.path, a.blob_id, a.size, a.sha256, a.content_type, a.kind,
+func (x SearchIndex) table() string {
+	if x == SearchSegments {
+		return "assets_segments"
+	}
+	return "assets_search"
+}
+
+// searchAssetsIn is a page of the matches in index table after the key ?3, at most ?4 (-1: all).
+func searchAssetsIn(table string) string {
+	return `SELECT a.id, a.repo_id, a.path, a.blob_id, a.size, a.sha256, a.content_type, a.kind,
   a.uploaded_by, a.created_at, a.updated_at, a.build_id, a.md5, a.sha1, r.name, f.rowid
-` + searchFrom + ` JOIN repos r ON r.id = a.repo_id
-WHERE assets_search MATCH ?1 AND ` + searchHolds + ` AND f.rowid > ?3 ORDER BY f.rowid LIMIT ?4`
+FROM ` + table + ` f JOIN assets a ON a.id = (f.rowid & 1099511627775) JOIN repos r ON r.id = a.repo_id
+WHERE ` + table + ` MATCH ?1 AND (?2 = '' OR instr(lower(a.path), lower(?2)) > 0) AND f.rowid > ?3 ORDER BY f.rowid LIMIT ?4`
+}
 
-// searchTrigramRows counts the paths that hold the trigram ?1 (an FTS5 query), up to ?2: a probe
-// that reads at most ?2 rows of its doclist.
-const searchTrigramRows = `SELECT count(*) FROM (SELECT 1 FROM assets_search WHERE assets_search MATCH ?1 LIMIT ?2)`
+// searchRowsIn counts the paths of index table that match ?1, up to ?2: a probe that reads at most
+// ?2 rows of its doclist.
+func searchRowsIn(table string) string {
+	return `SELECT count(*) FROM (SELECT 1 FROM ` + table + ` WHERE ` + table + ` MATCH ?1 LIMIT ?2)`
+}
+
+var (
+	searchAssets   = searchAssetsIn("assets_search")
+	searchSegments = searchAssetsIn("assets_segments")
+	trigramRows    = searchRowsIn("assets_search")
+	segmentRows    = searchRowsIn("assets_segments")
+)
+
+func (x SearchIndex) assets() string {
+	if x == SearchSegments {
+		return searchSegments
+	}
+	return searchAssets
+}
+
+func (x SearchIndex) rows() string {
+	if x == SearchSegments {
+		return segmentRows
+	}
+	return trigramRows
+}
 
 // SearchAssetsRow is one search hit: the asset, its repo's name and its key in the index.
 type SearchAssetsRow struct {
@@ -141,29 +180,25 @@ type SearchAssetsRow struct {
 	Key      int64
 }
 
-// SearchAssets returns the matches of match whose path holds text ("" for any) after the key
-// after, at most limit, in key order: a repo's matches together.
-func (q *Queries) SearchAssets(ctx context.Context, match, text string, after, limit int64) ([]SearchAssetsRow, error) {
-	rows, err := q.db.QueryContext(ctx, searchAssets, match, text, after, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+// SearchAssets returns the matches of match in index x whose path holds text ("" for any) after
+// the key after, at most limit, in key order: a repo's matches together.
+func (q *Queries) SearchAssets(ctx context.Context, x SearchIndex, match, text string, after, limit int64) ([]SearchAssetsRow, error) {
 	var items []SearchAssetsRow
-	for rows.Next() {
-		i, err := scanSearchRow(rows)
-		if err != nil {
-			return nil, err
-		}
+	err := q.walkSearch(ctx, x, match, text, after, limit, func(i SearchAssetsRow) bool {
 		items = append(items, i)
-	}
-	return items, rows.Err()
+		return true
+	})
+	return items, err
 }
 
-// WalkSearchAssets gives the matches of match whose path holds text ("" for any) after the key
-// after, in key order, to fn until fn returns false or the matches end.
-func (q *Queries) WalkSearchAssets(ctx context.Context, match, text string, after int64, fn func(SearchAssetsRow) bool) error {
-	rows, err := q.db.QueryContext(ctx, searchAssets, match, text, after, -1)
+// WalkSearchAssets gives the matches of match in index x whose path holds text ("" for any) after
+// the key after, in key order, to fn until fn returns false or the matches end.
+func (q *Queries) WalkSearchAssets(ctx context.Context, x SearchIndex, match, text string, after int64, fn func(SearchAssetsRow) bool) error {
+	return q.walkSearch(ctx, x, match, text, after, -1, fn)
+}
+
+func (q *Queries) walkSearch(ctx context.Context, x SearchIndex, match, text string, after, limit int64, fn func(SearchAssetsRow) bool) error {
+	rows, err := q.db.QueryContext(ctx, x.assets(), match, text, after, limit)
 	if err != nil {
 		return err
 	}
@@ -180,10 +215,10 @@ func (q *Queries) WalkSearchAssets(ctx context.Context, match, text string, afte
 	return rows.Err()
 }
 
-// SearchTrigramRows counts the indexed paths that match the trigram query t, up to limit.
-func (q *Queries) SearchTrigramRows(ctx context.Context, t string, limit int64) (int64, error) {
+// SearchRows counts the paths of index x that match the FTS5 query m, up to limit.
+func (q *Queries) SearchRows(ctx context.Context, x SearchIndex, m string, limit int64) (int64, error) {
 	var n int64
-	err := q.db.QueryRowContext(ctx, searchTrigramRows, t, limit).Scan(&n)
+	err := q.db.QueryRowContext(ctx, x.rows(), m, limit).Scan(&n)
 	return n, err
 }
 func scanSearchRow(rows *sql.Rows) (SearchAssetsRow, error) {

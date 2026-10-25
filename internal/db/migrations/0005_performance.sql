@@ -20,6 +20,20 @@ CREATE TRIGGER IF NOT EXISTS assets_search_ad AFTER DELETE ON assets WHEN old.ki
   DELETE FROM assets_search WHERE rowid = (old.repo_id << 40) | old.id;
 END;
 
+-- The segments of each path (the words between its separators: lib100, 8, jar), keyed like
+-- assets_search. A search whose text holds a whole segment that few paths hold reads that
+-- segment's rows, which stay few at any size, where every trigram of a long text grows with the
+-- files stored.
+CREATE VIRTUAL TABLE IF NOT EXISTS assets_segments USING fts5(path, tokenize='unicode61', content='', contentless_delete=1);
+INSERT OR REPLACE INTO assets_segments(rowid, path) SELECT (repo_id << 40) | id, path FROM assets WHERE kind <> 'index';
+
+CREATE TRIGGER IF NOT EXISTS assets_segments_ai AFTER INSERT ON assets WHEN new.kind <> 'index' BEGIN
+  INSERT INTO assets_segments(rowid, path) VALUES ((new.repo_id << 40) | new.id, new.path);
+END;
+CREATE TRIGGER IF NOT EXISTS assets_segments_ad AFTER DELETE ON assets WHEN old.kind <> 'index' BEGIN
+  DELETE FROM assets_segments WHERE rowid = (old.repo_id << 40) | old.id;
+END;
+
 
 -- The rows of group_counts that the job core.group-counts is still counting. The triggers keep
 -- such a row from its start, while the job counts the members' files in a read snapshot; the job

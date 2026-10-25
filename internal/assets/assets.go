@@ -345,28 +345,35 @@ type SearchCount struct {
 	Matches int64
 }
 
-// searchRarest is how many of the rarest trigrams of a longer text the index matches, and
-// searchProbe how many paths of each trigram a search counts to rank them: a rare trigram counts
-// under it, a common one stops there.
+// searchRarest is how many of the rarest trigrams of a longer text the trigram index matches,
+// searchRarestSegments how many of its rarest whole segments the segment index matches, and
+// searchProbe how many paths of each a search counts to rank them: a rare one counts under it, a
+// common one stops there.
 const (
-	searchRarest = 3
-	searchProbe  = 1000
+	searchRarest         = 3
+	searchRarestSegments = 2
+	searchProbe          = 1000
 )
 
-// search is one search of the index: the FTS5 query, the text that a path must hold ("" when
-// the query is exact), and the repos it may answer (nil: every repo).
+// search is one search: the index it reads, the FTS5 query, the text that a path must hold (""
+// when the query is exact), and the repos it may answer (nil: every repo).
 type search struct {
+	index       dbq.SearchIndex
 	match, text string
 	in          map[int64]bool
 }
 
 // newSearch returns the search of q in repoIDs; ok is false when nothing can match: q is shorter
-// than 3 characters, repoIDs is empty and not nil, or a trigram of q is in no path. A text of 3
-// characters, or one with a character outside ASCII (the index folds case its own way), is one
-// phrase. A longer text with a rare trigram (one that fewer than searchProbe paths hold) matches
-// its searchRarest rarest trigrams and keeps the paths that hold the text: its cost follows those
-// few rows, not the text's common trigrams. A text whose trigrams are all common is one phrase,
-// the most selective query left. The probes read at most searchProbe rows each.
+// than 3 characters, repoIDs is empty and not nil, or a segment or a trigram of q is in no path.
+// The probes read at most searchProbe rows each, and the search picks the most selective query:
+//   - a whole segment inside q (every segment but one that q starts or ends inside of) that fewer
+//     than searchProbe paths hold: the segment index matches q's searchRarestSegments rarest
+//     segments and keeps the paths that hold q, so a filename or a path reads the rows of its
+//     rarest segment, which stay few at any size;
+//   - else a trigram of q that fewer than searchProbe paths hold: the trigram index matches q's
+//     searchRarest rarest trigrams and keeps the paths that hold q;
+//   - else (q of 3 characters, with a character outside ASCII, or of common pieces only) q as one
+//     phrase of the trigram index.
 func newSearch(ctx context.Context, dq *dbq.Queries, q string, repoIDs []int64) (search, bool, error) {
 	if utf8.RuneCountInString(q) < 3 || (repoIDs != nil && len(repoIDs) == 0) {
 		return search{}, false, nil
@@ -383,41 +390,85 @@ func newSearch(ctx context.Context, dq *dbq.Queries, q string, repoIDs []int64) 
 		s.match = quote(q)
 		return s, true, nil
 	}
-	type trigram struct {
+	type piece struct {
 		t    string
 		rows int64
 	}
-	var tris []trigram
-	lower := strings.ToLower(q)
-	seen := map[string]bool{}
-	for i := 0; i+3 <= len(lower); i++ {
-		t := lower[i : i+3]
-		if seen[t] {
-			continue
+	// rank probes the pieces of q in index x, rarest first; ok is false when one is in no path.
+	rank := func(x dbq.SearchIndex, pieces []string) ([]piece, bool, error) {
+		var out []piece
+		seen := map[string]bool{}
+		for _, t := range pieces {
+			if seen[t] {
+				continue
+			}
+			seen[t] = true
+			n, err := dq.SearchRows(ctx, x, quote(t), searchProbe)
+			if err != nil || n == 0 {
+				return nil, false, err // no path holds it, so none holds q
+			}
+			out = append(out, piece{t, n})
 		}
-		seen[t] = true
-		n, err := dq.SearchTrigramRows(ctx, quote(t), searchProbe)
-		if err != nil {
+		slices.SortStableFunc(out, func(a, b piece) int { return cmp.Compare(a.rows, b.rows) })
+		return out, true, nil
+	}
+	and := func(ps []piece, n int) string {
+		var parts []string
+		for _, p := range ps[:min(n, len(ps))] {
+			parts = append(parts, quote(p.t))
+		}
+		return strings.Join(parts, " AND ")
+	}
+	if segs := wholeSegments(q); len(segs) > 0 {
+		ranked, ok, err := rank(dbq.SearchSegments, segs)
+		if err != nil || !ok {
 			return search{}, false, err
 		}
-		if n == 0 {
-			return search{}, false, nil // no path holds it, so none holds q
+		if ranked[0].rows < searchProbe {
+			s.index, s.match, s.text = dbq.SearchSegments, and(ranked, searchRarestSegments), q
+			return s, true, nil
 		}
-		tris = append(tris, trigram{t, n})
 	}
-	slices.SortFunc(tris, func(a, b trigram) int { return cmp.Compare(a.rows, b.rows) })
-	if tris[0].rows >= searchProbe {
+	lower := strings.ToLower(q)
+	var tris []string
+	for i := 0; i+3 <= len(lower); i++ {
+		tris = append(tris, lower[i:i+3])
+	}
+	ranked, ok, err := rank(dbq.SearchTrigrams, tris)
+	if err != nil || !ok {
+		return search{}, false, err
+	}
+	if ranked[0].rows >= searchProbe {
 		s.match = quote(q)
 		return s, true, nil
 	}
-	var parts []string
-	for _, t := range tris[:min(searchRarest, len(tris))] {
-		parts = append(parts, quote(t.t))
-	}
-	s.match, s.text = strings.Join(parts, " AND "), q
+	s.match, s.text = and(ranked, searchRarest), q
 	return s, true, nil
 }
 
+// wholeSegments returns the segments of q (ASCII) that are whole in every path that holds q, in
+// lower case: the runs of letters and digits, but a first one that q starts inside of and a last
+// one that q ends inside of. The segment index splits a path the same way (unicode61).
+func wholeSegments(q string) []string {
+	word := func(c byte) bool { return c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
+	var segs []string
+	start := -1
+	for i := 0; i <= len(q); i++ {
+		if i < len(q) && word(q[i]) {
+			if start < 0 {
+				start = i
+			}
+			continue
+		}
+		if start >= 0 {
+			if start > 0 && i < len(q) {
+				segs = append(segs, strings.ToLower(q[start:i]))
+			}
+			start = -1
+		}
+	}
+	return segs
+}
 func isASCII(s string) bool {
 	for i := range len(s) {
 		if s[i] >= utf8.RuneSelf {
@@ -448,7 +499,7 @@ func (p *Pipeline) Search(ctx context.Context, q string, repoIDs []int64, after 
 	var out []SearchHit
 	for len(out) <= limit {
 		want := int64(limit + 1 - len(out))
-		rows, err := dq.SearchAssets(ctx, s.match, s.text, after, want)
+		rows, err := dq.SearchAssets(ctx, s.index, s.match, s.text, after, want)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -493,7 +544,7 @@ func (p *Pipeline) SearchFirst(ctx context.Context, q string, repoIDs []int64, l
 	for after := int64(0); after >= 0; {
 		from := after
 		after = -1
-		err := dq.WalkSearchAssets(ctx, s.match, s.text, from, func(r dbq.SearchAssetsRow) bool {
+		err := dq.WalkSearchAssets(ctx, s.index, s.match, s.text, from, func(r dbq.SearchAssetsRow) bool {
 			repo := r.Asset.RepoID
 			if s.in != nil && !s.in[repo] {
 				after = repoEnd(repo)
