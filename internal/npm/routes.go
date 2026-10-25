@@ -144,38 +144,24 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	}
 }
 
-// versionManifest answers GET <name>/<version or dist-tag>: the manifest of that version from the
-// full packument, as registry.npmjs.org does. pnpm, run through corepack, fetches its own binary
-// package this way from the registry of the project.
+// versionManifest answers GET <name>/<version or dist-tag>: the manifest of that version as the
+// full packument lists it, as registry.npmjs.org does, read without the rest of the packument and
+// kept in the document cache. pnpm, run through corepack, fetches its own binary package this way
+// from the registry of the project.
 func (h *Handler) versionManifest(w http.ResponseWriter, r *http.Request, c *route.Call, pkg, ref string) {
 	s, err := h.resolve(r.Context(), r, c.P, c.Repo, pkg, false)
 	if err != nil {
 		h.failRead(w, r, err)
 		return
 	}
-	body, err := h.document(r.Context(), s, pkg, h.urlBase(r, c.Repo), false)
-	if err != nil {
-		h.failRead(w, r, err)
-		return
-	}
-	var doc struct {
-		Tags     map[string]string          `json:"dist-tags"`
-		Versions map[string]json.RawMessage `json:"versions"`
-	}
-	if err := json.Unmarshal(body, &doc); err != nil {
-		h.failRead(w, r, err)
-		return
-	}
-	v := ref
-	if tv, ok := doc.Tags[ref]; ok {
-		v = tv
-	}
-	m, ok := doc.Versions[v]
-	if !ok {
+	key, build := h.versionOf(r.Context(), s, pkg, ref, h.urlBase(r, c.Repo))
+	err = h.docs.Serve(w, r, "application/json", key, build)
+	switch {
+	case errors.Is(err, errNoVersion):
 		httpx.Error(w, r, http.StatusNotFound, "version "+ref+" of "+pkg+" not found")
-		return
+	case err != nil:
+		h.failRead(w, r, err)
 	}
-	format.WriteDocument(w, r, "application/json", format.NewDocument(m))
 }
 
 // packument answers the full or the abbreviated packument of name (?write=true is the same).
@@ -230,7 +216,7 @@ func (h *Handler) getTags(w http.ResponseWriter, r *http.Request, c *route.Call,
 		h.failRead(w, r, err)
 		return
 	}
-	tags, err := h.distTagsOf(r.Context(), s, pkg)
+	tags, err := h.distTagsOf(r.Context(), s)
 	if err != nil {
 		h.failRead(w, r, err)
 		return

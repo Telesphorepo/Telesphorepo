@@ -18,6 +18,10 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 -- name: GetVersionTarball :one
 SELECT tarball FROM npm_versions WHERE repo_id = ? AND name = ? AND version = ?;
 
+-- One version with its manifest, through the primary key: the manifest of GET <name>/<version>.
+-- name: GetVersion :one
+SELECT tarball, integrity, shasum, deprecated, manifest FROM npm_versions WHERE repo_id = ? AND name = ? AND version = ?;
+
 -- Every version of a package in SemVer order, through npm_versions_sort.
 -- name: ListVersions :many
 SELECT version, sort_key, manifest, tarball, integrity, shasum, published_at, deprecated
@@ -62,6 +66,10 @@ UPDATE npm_versions SET deprecated = ? WHERE repo_id = ? AND name = ? AND versio
 
 -- name: ListTags :many
 SELECT tag, version FROM npm_tags WHERE repo_id = ? AND name = ? ORDER BY tag;
+
+-- The version of one dist-tag, through the primary key.
+-- name: GetTag :one
+SELECT version FROM npm_tags WHERE repo_id = ? AND name = ? AND tag = ?;
 
 -- A keyset page of every dist-tag of a repo by package and tag, through the primary key (a merge).
 -- name: ListRepoTagsAfter :many

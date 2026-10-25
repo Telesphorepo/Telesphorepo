@@ -92,6 +92,56 @@ func (q *Queries) GetPackage(ctx context.Context, arg GetPackageParams) (GetPack
 	return i, err
 }
 
+const getTag = `-- name: GetTag :one
+SELECT version FROM npm_tags WHERE repo_id = ? AND name = ? AND tag = ?
+`
+
+type GetTagParams struct {
+	RepoID int64
+	Name   string
+	Tag    string
+}
+
+// The version of one dist-tag, through the primary key.
+func (q *Queries) GetTag(ctx context.Context, arg GetTagParams) (string, error) {
+	row := q.db.QueryRowContext(ctx, getTag, arg.RepoID, arg.Name, arg.Tag)
+	var version string
+	err := row.Scan(&version)
+	return version, err
+}
+
+const getVersion = `-- name: GetVersion :one
+SELECT tarball, integrity, shasum, deprecated, manifest FROM npm_versions WHERE repo_id = ? AND name = ? AND version = ?
+`
+
+type GetVersionParams struct {
+	RepoID  int64
+	Name    string
+	Version string
+}
+
+type GetVersionRow struct {
+	Tarball    string
+	Integrity  string
+	Shasum     string
+	Deprecated string
+	Manifest   string
+}
+
+// One version with its manifest, through the primary key: the manifest of GET <name>/<version>.
+func (q *Queries) GetVersion(ctx context.Context, arg GetVersionParams) (GetVersionRow, error) {
+	row := q.db.QueryRowContext(ctx, getVersion, arg.RepoID, arg.Name, arg.Version)
+	var i GetVersionRow
+	err := row.Scan(
+		&i.Tarball,
+		&i.Integrity,
+		&i.Shasum,
+		&i.Deprecated,
+		&i.Manifest,
+	)
+	return i, err
+}
+
 const getVersionFile = `-- name: GetVersionFile :one
 SELECT v.version, v.tarball, v.published_at, a.size, a.sha256, a.build_id, a.updated_at
 FROM npm_versions v JOIN assets a ON a.repo_id = v.repo_id AND a.path = v.tarball

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"path"
@@ -17,6 +18,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/npm/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/repopath"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
+	"github.com/Telesphorepo/Telesphorepo/internal/version"
 )
 
 // abbreviatedType is the content type of the abbreviated packument (npm's install metadata).
@@ -89,14 +91,10 @@ func (d *hosted) render(name, urlBase string, abbreviated bool) ([]byte, error) 
 	var latest map[string]json.RawMessage
 	tags := d.distTags()
 	for _, v := range d.versions {
-		var m map[string]json.RawMessage
-		if err := json.Unmarshal([]byte(v.Manifest), &m); err != nil {
+		m, err := storedManifest(dbq.GetVersionRow{Tarball: v.Tarball, Integrity: v.Integrity, Shasum: v.Shasum,
+			Deprecated: v.Deprecated, Manifest: v.Manifest}, urlBase)
+		if err != nil {
 			return nil, err
-		}
-		m["dist"], _ = json.Marshal(map[string]string{"integrity": v.Integrity, "shasum": v.Shasum, "tarball": urlBase + "/" + v.Tarball})
-		delete(m, "deprecated")
-		if v.Deprecated != "" {
-			m["deprecated"], _ = json.Marshal(v.Deprecated)
 		}
 		if v.Version == tags["latest"] {
 			latest = m
@@ -117,6 +115,48 @@ func (d *hosted) render(name, urlBase string, abbreviated bool) ([]byte, error) 
 		}
 	}
 	return json.Marshal(doc)
+}
+
+// storedManifest is the manifest of a stored version as the full packument lists it: dist with the
+// tarball URL under urlBase, and the deprecation of the row.
+func storedManifest(v dbq.GetVersionRow, urlBase string) (map[string]json.RawMessage, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(v.Manifest), &m); err != nil {
+		return nil, err
+	}
+	m["dist"], _ = json.Marshal(map[string]string{"integrity": v.Integrity, "shasum": v.Shasum, "tarball": urlBase + "/" + v.Tarball})
+	delete(m, "deprecated")
+	if v.Deprecated != "" {
+		m["deprecated"], _ = json.Marshal(v.Deprecated)
+	}
+	return m, nil
+}
+
+// errNoVersion is a version or dist-tag that the package does not have.
+var errNoVersion = errors.New("no such version")
+
+// version renders the manifest of version or dist-tag ref of the package from its two rows; a
+// dist-tag wins over a version of the same name.
+func (d *hosted) version(ctx context.Context, q *dbq.Queries, ref, urlBase string) ([]byte, error) {
+	v := ref
+	switch tv, err := q.GetTag(ctx, dbq.GetTagParams{RepoID: d.repoID, Name: d.name, Tag: ref}); {
+	case err == nil:
+		v = tv
+	case !errors.Is(err, sql.ErrNoRows):
+		return nil, err
+	}
+	row, err := q.GetVersion(ctx, dbq.GetVersionParams{RepoID: d.repoID, Name: d.name, Version: v})
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errNoVersion
+	}
+	if err != nil {
+		return nil, err
+	}
+	m, err := storedManifest(row, urlBase)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(m)
 }
 
 // pick returns the fields of m that keep names.
@@ -145,25 +185,138 @@ func rewriteRemote(body []byte, name, urlBase string) ([]byte, error) {
 		}
 	}
 	for v, m := range versions {
-		var dist map[string]json.RawMessage
-		var tarball string
-		if json.Unmarshal(m["dist"], &dist) != nil || json.Unmarshal(dist["tarball"], &tarball) != nil {
+		if !rewriteVersion(m, name, urlBase) {
 			delete(versions, v)
-			continue
 		}
-		file, ok := remoteFile(name, tarball)
-		if !ok {
-			delete(versions, v)
-			continue
-		}
-		dist["tarball"], _ = json.Marshal(urlBase + "/" + name + "/-/" + file)
-		delete(dist, "attestations")
-		m["dist"], _ = json.Marshal(dist)
 	}
 	if versions != nil {
 		doc["versions"], _ = json.Marshal(versions)
 	}
 	return json.Marshal(doc)
+}
+
+// rewriteVersion turns the manifest m of a version of a remote packument into this repo's, as
+// rewriteRemote does; false for a version whose tarball URL has no .tgz file name.
+func rewriteVersion(m map[string]json.RawMessage, name, urlBase string) bool {
+	var dist map[string]json.RawMessage
+	var tarball string
+	if json.Unmarshal(m["dist"], &dist) != nil || json.Unmarshal(dist["tarball"], &tarball) != nil {
+		return false
+	}
+	file, ok := remoteFile(name, tarball)
+	if !ok {
+		return false
+	}
+	dist["tarball"], _ = json.Marshal(urlBase + "/" + name + "/-/" + file)
+	delete(dist, "attestations")
+	m["dist"], _ = json.Marshal(dist)
+	return true
+}
+
+// maxKey is the longest key of a remote packument that a scan reads.
+const maxKey = 64 << 10
+
+// scanDoc reads the packument that open opens as a stream and calls fn with each top-level key;
+// fn reads its value (raw or skip) and returns stop=true to end the read there.
+func scanDoc(open func() (io.ReadCloser, error), fn func(s *scanner, key string) (bool, error)) error {
+	rc, err := open()
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	s := newScanner(rc)
+	err = s.members(maxKey, func(key string) (bool, error) { return fn(s, key) })
+	if errors.Is(err, errSyntax) {
+		return errors.New("the remote packument is not valid JSON")
+	}
+	return err
+}
+
+// remoteManifest renders the manifest of version or dist-tag ref of package name from the full
+// remote packument that open opens (values up to limit bytes), reading the document only up to
+// that version. A dist-tag wins over a version of the same name; npm refuses a dist-tag that is a
+// SemVer version, so a ref that is one is read without the tags. When the versions come before
+// the tags and ref is a tag, a second read finds its version.
+func remoteManifest(open func() (io.ReadCloser, error), limit int, name, ref, urlBase string) ([]byte, error) {
+	want := "" // the version to read; "" until the tags are read
+	if _, err := version.ParseSemVer(ref); err == nil {
+		want = ref
+	}
+	var found, cand json.RawMessage                         // the manifest of want; of ref, read before the tags
+	tagsRead, versionsRead, tagsLate := false, false, false // tagsLate: the tags came after the versions
+	readVersions := func(s *scanner) error {
+		versionsRead = true
+		if c, err := s.peek(); err != nil || c != '{' {
+			return s.skip()
+		}
+		return s.members(maxKey, func(k string) (bool, error) {
+			var err error
+			switch {
+			case want != "" && k == want:
+				found, err = s.raw(limit)
+				return true, err
+			case want == "" && k == ref:
+				cand, err = s.raw(limit)
+				return false, err
+			}
+			return false, s.skip()
+		})
+	}
+	err := scanDoc(open, func(s *scanner, key string) (bool, error) {
+		switch key {
+		case "dist-tags":
+			raw, err := s.raw(limit)
+			if err != nil {
+				return false, err
+			}
+			var tags map[string]string
+			if err := json.Unmarshal(raw, &tags); err != nil {
+				return false, errors.New("the remote packument has invalid dist-tags")
+			}
+			tagsRead, tagsLate = true, versionsRead
+			if want == "" {
+				want = ref
+				if tv, ok := tags[ref]; ok {
+					want = tv
+				}
+				if versionsRead && want == ref {
+					found = cand
+				}
+			}
+			return versionsRead, nil
+		case "versions":
+			if err := readVersions(s); err != nil {
+				return false, err
+			}
+			// A found version ends the read inside the versions; else, with want known, the
+			// version is missing.
+			return found != nil || want != "", nil
+		}
+		return false, s.skip()
+	})
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case !tagsRead && want == "":
+		found = cand // no dist-tags: ref names a version
+	case found == nil && tagsLate && want != ref:
+		// The versions came before the tags: read them again for the version of the tag.
+		err = scanDoc(open, func(s *scanner, key string) (bool, error) {
+			if key != "versions" {
+				return false, s.skip()
+			}
+			return true, readVersions(s)
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	var m map[string]json.RawMessage
+	if found == nil || json.Unmarshal(found, &m) != nil || m == nil || !rewriteVersion(m, name, urlBase) {
+		return nil, errNoVersion
+	}
+	return json.Marshal(m)
 }
 
 // remoteFile returns the file name of the remote tarball URL of a version of name, the file of
@@ -273,32 +426,49 @@ func (h *Handler) documentOf(ctx context.Context, s *source, name, urlBase strin
 	}
 }
 
-// document renders the packument of s for urlBase, through the document cache.
-func (h *Handler) document(ctx context.Context, s *source, name, urlBase string, abbreviated bool) ([]byte, error) {
-	d, err := h.docs.Render(h.documentOf(ctx, s, name, urlBase, abbreviated))
-	return d.Body, err
+// versionOf returns the cache key of the manifest of version or dist-tag ref of s for urlBase and
+// its build: a hosted package's key holds its revision, a proxy's the SHA-256 of the cached full
+// remote packument. The build reads that one version (errNoVersion when s has none).
+func (h *Handler) versionOf(ctx context.Context, s *source, name, ref, urlBase string) (string, func() ([]byte, error)) {
+	if s.hosted != nil {
+		key := format.DocumentKey("hosted-version", name, s.hosted.pkg.Rev, ref, urlBase, s.repo.Name)
+		return key, func() ([]byte, error) { return s.hosted.version(ctx, h.q, ref, urlBase) }
+	}
+	key := format.DocumentKey("remote-version", name, s.remote.SHA256, ref, urlBase)
+	open := func() (io.ReadCloser, error) { return h.assets.Open(ctx, s.remote) }
+	return key, func() ([]byte, error) { return remoteManifest(open, int(h.assets.MaxUploadSize()), name, ref, urlBase) }
 }
 
-// distTagsOf returns the dist-tags of the source s.
-func (h *Handler) distTagsOf(ctx context.Context, s *source, name string) (map[string]string, error) {
+// distTagsOf returns the dist-tags of the source s: a hosted package's rows, or the dist-tags of
+// the cached remote packument, read up to them.
+func (h *Handler) distTagsOf(ctx context.Context, s *source) (map[string]string, error) {
 	if s.hosted != nil {
-		if err := s.hosted.load(ctx, h.q); err != nil {
+		var err error
+		if s.hosted.tags, err = h.q.ListTags(ctx, dbq.ListTagsParams{RepoID: s.hosted.repoID, Name: s.hosted.name}); err != nil {
 			return nil, err
 		}
 		return s.hosted.distTags(), nil
 	}
-	body, err := h.document(ctx, s, name, "", true)
+	tags := map[string]string{}
+	open := func() (io.ReadCloser, error) { return h.assets.Open(ctx, s.remote) }
+	err := scanDoc(open, func(sc *scanner, key string) (bool, error) {
+		if key != "dist-tags" {
+			return false, sc.skip()
+		}
+		raw, err := sc.raw(int(h.assets.MaxUploadSize()))
+		if err != nil {
+			return false, err
+		}
+		if json.Unmarshal(raw, &tags) != nil {
+			return false, errors.New("the remote packument has invalid dist-tags")
+		}
+		return true, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	var doc struct {
-		Tags map[string]string `json:"dist-tags"`
+	if tags == nil {
+		tags = map[string]string{}
 	}
-	if err := json.Unmarshal(body, &doc); err != nil {
-		return nil, err
-	}
-	if doc.Tags == nil {
-		doc.Tags = map[string]string{}
-	}
-	return doc.Tags, nil
+	return tags, nil
 }

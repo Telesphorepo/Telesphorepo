@@ -270,6 +270,17 @@ func TestPyPIProtocol(t *testing.T) {
 		if resp.StatusCode != http.StatusOK || json.Unmarshal(b, &index) != nil || len(index.Projects) != 1 || index.Projects[0].Name != name {
 			t.Fatalf("project list: status %d: %s", resp.StatusCode, b)
 		}
+		indexETag := resp.Header.Get("ETag")
+		indexAgain := func() int {
+			req := s.NewRequest(t, http.MethodGet, "/pypi/"+repo+"/simple/", nil)
+			req.Header.Set("Accept", "application/vnd.pypi.simple.v1+json")
+			req.Header.Set("If-None-Match", indexETag)
+			resp, _ := s.Do(t, req, read)
+			return resp.StatusCode
+		}
+		if st := indexAgain(); indexETag == "" || st != http.StatusNotModified {
+			t.Fatalf("project list with If-None-Match %s: status %d, want 304", indexETag, st)
+		}
 		if resp, b := get("/pypi/"+repo+"/simple/", "text/html", read); resp.StatusCode != http.StatusOK || !strings.Contains(string(b), `href="`+name+`/"`) {
 			t.Fatalf("HTML project list: status %d:\n%s", resp.StatusCode, b)
 		}
@@ -308,6 +319,9 @@ func TestPyPIProtocol(t *testing.T) {
 		}
 		if resp, b := get("/pypi/"+repo+"/simple/", "application/vnd.pypi.simple.v1+json", read); !strings.Contains(string(b), `"projects":[]`) {
 			t.Fatalf("project list after the delete: status %d: %s", resp.StatusCode, b)
+		}
+		if st := indexAgain(); st != http.StatusOK {
+			t.Fatalf("project list after the delete, with the ETag of before: status %d, want 200", st)
 		}
 
 		// The project comes back with an upload, and each new file shows on the page at once: the
