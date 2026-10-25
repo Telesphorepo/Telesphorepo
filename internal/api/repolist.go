@@ -3,6 +3,7 @@ package api
 import (
 	"cmp"
 	"context"
+	"errors"
 	"net/http"
 	"slices"
 	"strings"
@@ -60,8 +61,11 @@ func (a *API) listRepos(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	p, ctx, q := c.P, r.Context(), r.URL.Query()
 	var want perm.Set
 	if s := strings.TrimSpace(q.Get("perm")); s != "" {
+		// A filter names permissions to look for, not a set to give: the needs between them do not
+		// apply (perm=repo.publish keeps the repos where the caller publishes).
 		var err error
-		if want, err = perm.Current().Parse(perm.ScopeRepo, strings.Split(s, ",")); err != nil {
+		var needs *perm.NeedsError
+		if want, err = perm.Current().Parse(perm.ScopeRepo, strings.Split(s, ",")); err != nil && !errors.As(err, &needs) {
 			httpx.Error(w, r, http.StatusBadRequest, err.Error())
 			return
 		}
