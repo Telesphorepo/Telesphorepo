@@ -7,6 +7,7 @@
 // The check of the server (check.ts) runs the same check at once, with a smaller budget.
 
 import { type Config, type CopyMessage, type Env, HINTS, bucket, edgeKey, keyPrefix, readConfig, readMarker } from "./access";
+import { FEATURES } from "./features";
 import { VERSION } from "./version";
 
 const MAX_SUBREQUESTS = 5000;
@@ -18,7 +19,8 @@ const SEND_BATCH = 100;
 
 // GapState is gap/state.json. Times are unix seconds.
 interface GapState {
-  version: string; // the Worker version that wrote it
+  version: string; // the build of the Worker that wrote it
+  features: readonly string[]; // the features that Worker implements
   checked: number; // the last run of the gap check, with or without a pass
   last_run: number; // the last run that did a pass
   bindings: string[]; // the hints of the regional buckets that this Worker has a binding for
@@ -37,7 +39,7 @@ const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object
 const isStrs = (v: unknown): v is string[] => Array.isArray(v) && v.every((s) => typeof s === "string");
 
 async function readState(env: Env): Promise<GapState> {
-  const state: GapState = { version: "", checked: 0, last_run: 0, bindings: [], markers: { home: "", regions: {} }, pass: null, last_pass: null, regions: {} };
+  const state: GapState = { version: "", features: [], checked: 0, last_run: 0, bindings: [], markers: { home: "", regions: {} }, pass: null, last_pass: null, regions: {} };
   const obj = await env.HOME.get(edgeKey(env, "gap/state.json"));
   if (!obj) return state;
   let v: unknown;
@@ -93,7 +95,7 @@ class Budget {
 
 // GapRun is what one run of the gap check did: "done" (a copy pass ended), "partial" (the pass
 // goes on at the next run), "none" (no pass was due) or "off" (no pass runs: config.json is off
-// or of another version, or the Worker has no copy queue).
+// or requires a feature that this Worker lacks, or the Worker has no copy queue).
 export type GapPass = "done" | "partial" | "none" | "off";
 
 // GapOptions bound a run: force runs a pass even when none is due; max is its subrequests and
@@ -111,7 +113,7 @@ export async function gap(_controller: ScheduledController, env: Env, _ctx: Exec
 
 // runGap is one run of the gap check: the cron's, or the check of the server (check.ts). Every run
 // reads the bucket.json of each binding and writes gap/state.json with the time of the run
-// (checked), its version, bindings and the buckets they name, so the status page sees every run
+// (checked), its build and features, bindings and the buckets they name, so the status page sees every run
 // and a deploy at once; a run that does a pass writes it with its cursor.
 export async function runGap(env: Env, opts: GapOptions): Promise<GapPass> {
   const budget = new Budget(opts.max, opts.deadline);
@@ -124,6 +126,7 @@ export async function runGap(env: Env, opts: GapOptions): Promise<GapPass> {
   for (const h of bindings) markers.regions[h] = await readMarker(env, bucket(env, "R2_" + h.toUpperCase())!);
   state.checked = now();
   state.version = VERSION;
+  state.features = FEATURES;
   state.bindings = bindings;
   state.markers = markers;
   const save = async () => {
@@ -143,7 +146,7 @@ export async function runGap(env: Env, opts: GapOptions): Promise<GapPass> {
     budget.take();
     config = await readConfig(env);
   }
-  if (!config || !config.enabled || config.version !== VERSION || !env.COPY) {
+  if (!config || !config.enabled || !config.serves || !env.COPY) {
     await save();
     return due ? "off" : "none";
   }

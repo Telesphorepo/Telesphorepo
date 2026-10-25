@@ -208,7 +208,7 @@
   const filling = $derived((status.data?.regions ?? []).filter((r) => r.state === "filling"));
 
   const needsDeploy = $derived(provisionNeeded || status.data?.deploy_needed === true);
-  const mismatch = $derived(status.data?.version_mismatch === true);
+  const outdated = $derived(status.data?.worker_outdated ?? "");
   // Edge delivery turns on only once a deployed Worker has reported its version; turning it off
   // always works.
   const noWorker = $derived(!!status.data && !status.data.worker_version && !draft?.saved.enabled);
@@ -234,11 +234,11 @@
   }
 
   // One Live keeps the page current. While a region fills, it asks for the status every 3 seconds.
-  // While the Worker has not reported this server's version, it checks the Worker when the page
-  // opens and every 30 seconds, so the version shows within seconds of a deploy.
+  // While no Worker has reported, or the one that did is outdated, it checks the Worker when the
+  // page opens and every 30 seconds, so a deploy shows within seconds.
   const FILL_EVERY = 3000;
   const CHECK_EVERY = 30_000;
-  const autoCheck = $derived(!!status.data && status.data.check_unfit === "" && (!status.data.worker_version || status.data.version_mismatch));
+  const autoCheck = $derived(!!status.data && status.data.check_unfit === "" && (!status.data.worker_version || status.data.worker_outdated !== ""));
   let autoAt = 0;
   const live = new Live({
     now: true,
@@ -288,7 +288,7 @@
       return say(r.outbox > 0 ? `Writing pointers: ${formatCount(r.outbox)} waiting.` : "Queueing pointers.");
     }
     if (!st.worker_version) return say("Waiting for the Worker's first gap check.");
-    if (st.version_mismatch) return say("Waiting for the Worker of this server version. Deploy it to copy the files.");
+    if (st.worker_outdated) return say("Waiting for a Worker that this server can use. Deploy it to copy the files.");
     if (r.blobs_missing === null) return say("Counting the files in the region.");
     if (r.blobs_missing > 0) {
       return { text: "Copying the missing files from the home bucket at each gap check.", copying: true };
@@ -338,10 +338,10 @@
         {#if st.unfit}<p class="mb-6 text-body text-warning">{st.unfit}</p>{/if}
         <dl class="grid grid-cols-2 gap-x-6 gap-y-5 sm:grid-cols-3">
           <div class="min-w-0">
-            <dt class="text-meta text-muted-foreground">Worker version</dt>
+            <dt class="text-meta text-muted-foreground">Worker build</dt>
             <dd class="flex flex-wrap items-center gap-2 text-label">
               {st.worker_version ?? "None reported"}
-              {#if mismatch}<StatusBadge tone="warning">Server is {st.server_version}</StatusBadge>{/if}
+              {#if outdated}<StatusBadge tone="warning">Outdated</StatusBadge>{/if}
             </dd>
           </div>
           <div class="min-w-0">
@@ -512,13 +512,11 @@
 
     <Section title="Deploy" description="Deploy the edge Worker to your Cloudflare account from a computer with bun.">
       {#snippet actions()}
-        {#if needsDeploy || mismatch}<StatusBadge tone="warning">Deploy needed</StatusBadge>{/if}
+        {#if needsDeploy}<StatusBadge tone="warning">Deploy needed</StatusBadge>{/if}
       {/snippet}
       <div class="flex flex-col gap-6">
-        {#if mismatch && st}
-          <p class="text-body">
-            Download the Worker of this server version ({st.server_version}) and deploy it. Until then the Worker sends every request to the server.
-          </p>
+        {#if outdated}
+          <p class="text-body">{outdated} Download the Worker and deploy it.</p>
         {:else if needsDeploy}
           <p class="text-body">The regions or the storage location changed. Download the Worker again, then run provision and deploy.</p>
         {/if}

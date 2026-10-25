@@ -268,7 +268,7 @@ func (m *mod) step(ctx context.Context) (bool, error) {
 	}
 	v := m.cur.Load()
 	if v.mode != modeOn {
-		// The page turns edge delivery on only after the Worker has reported its version, so the
+		// The page turns edge delivery on only after the Worker has reported, so the
 		// Worker's state is read while off too, once the home location is chosen.
 		if HomeHint.Get(m.h.Settings.Current()) != "" {
 			if hb, err := m.gapHome(ctx); err == nil {
@@ -833,7 +833,7 @@ func (m *mod) configJSON(enabled bool, ttl time.Duration) []byte {
 	if v := m.cur.Load(); v.home != nil {
 		hb = v.home.name
 	}
-	o := configObject{Version: m.h.Version, Enabled: enabled, AccessTTL: ttlSeconds(ttl),
+	o := configObject{ServerVersion: m.h.Version, Requires: featureNames(m.requires()), Enabled: enabled, AccessTTL: ttlSeconds(ttl),
 		EdgeKey: encodeKey(m.h.Auth.EdgePublicKey()), Formats: formatsObject(m.h.Formats),
 		Home: homeObject{Hint: HomeHint.Get(snap), Bucket: hb, Ready: p.home.Ready}, Regions: []regionObject{}}
 	for _, r := range p.regions {

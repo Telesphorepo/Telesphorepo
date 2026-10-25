@@ -22,19 +22,21 @@ type statusJSON struct {
 	Enabled bool   `json:"enabled"`
 	Mode    string `json:"mode"`
 	// Unfit says why the settings cannot run edge delivery ("" when they can).
-	Unfit         string     `json:"unfit"`
-	ServerVersion string     `json:"server_version"`
-	WorkerVersion *string    `json:"worker_version"` // from gap/state.json; null before the first gap check
-	Mismatch      bool       `json:"version_mismatch"`
-	GapCheckedAt  *time.Time `json:"gap_checked_at"`
+	Unfit         string  `json:"unfit"`
+	ServerVersion string  `json:"server_version"`
+	WorkerVersion *string `json:"worker_version"` // the Worker's build, from gap/state.json; null before the first gap check
+	// WorkerOutdated says why the deployed Worker sends every request to the server ("" when it
+	// serves): it lacks a feature that config.json requires (features.go).
+	WorkerOutdated string     `json:"worker_outdated"`
+	GapCheckedAt   *time.Time `json:"gap_checked_at"`
 	// GapCheckEvery is the interval of the Worker's gap check (its cron), BlobCheckEvery the
 	// interval of the server's count of the files of a filling region; both in seconds.
 	GapCheckEvery  int64 `json:"gap_check_every"`
 	BlobCheckEvery int64 `json:"blob_check_every"`
 	// GapPassStarted is the start of the Worker's copy pass that runs now (null between passes).
 	GapPassStarted *time.Time `json:"gap_pass_started"`
-	// DeployNeeded: a storage change or move, a region change, or a Worker of another version
-	// asks for a new deploy. DeployReason names the storage change ("" otherwise).
+	// DeployNeeded: a storage change or move, a region change, or an outdated Worker asks for a
+	// new deploy. DeployReason names the storage change ("" otherwise).
 	DeployNeeded bool   `json:"deploy_needed"`
 	DeployReason string `json:"deploy_reason"`
 	// WorkerMissing says why GET /api/edge/worker.zip has no Worker of this build ("" when it has).
@@ -82,8 +84,8 @@ type regionJSON struct {
 	// BlobsCheckedAt is the end of the last whole count (null before one).
 	BlobsCheckedAt *time.Time `json:"blobs_checked_at"`
 	CopiesQueued   *int64     `json:"copies_queued"`
-	Outbox            int64      `json:"outbox"` // pointer rows of the outbox, which may write this bucket
-	LastError         string     `json:"last_error"`
+	Outbox         int64      `json:"outbox"` // pointer rows of the outbox, which may write this bucket
+	LastError      string     `json:"last_error"`
 }
 
 // status answers the state of edge delivery for the Edge delivery page.
@@ -118,7 +120,7 @@ func (m *mod) status(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	if g != nil && g.Version != "" {
 		ver := g.Version
 		out.WorkerVersion = &ver
-		out.Mismatch = ver != m.h.Version
+		out.WorkerOutdated = m.outdated(ver, g.Features, g.Reported)
 	}
 	if g != nil && !g.CheckedAt.IsZero() {
 		t := g.CheckedAt
@@ -170,7 +172,7 @@ func (m *mod) status(w http.ResponseWriter, r *http.Request, c *route.Call) {
 			}
 		}
 	}
-	out.DeployNeeded = out.DeployNeeded || out.Mismatch
+	out.DeployNeeded = out.DeployNeeded || out.WorkerOutdated != ""
 	httpx.WriteJSON(w, http.StatusOK, out)
 }
 

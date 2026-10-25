@@ -190,8 +190,9 @@ The repository page is the one exception: it checks the caller's permissions on 
   top of a page or a section: a switch shows that it is on, a method shows in its list, a private
   repository has a lock, the one row that needs attention has a badge. A state of the whole
   repository that holds back its uploads (an operation) is one muted line in the header
-  (`PageHeader` `status`), never an alert. The one notice of the whole app is `AddressNotice` at the
-  top of the container: a person who may change the general settings opened the app at an address
+  (`PageHeader` `status`), never an alert. The app has two notices. `EdgeNotice` sits under the
+  header of Settings › Overview while the edge Worker needs a deploy, for a person who can open
+  Edge delivery: it says why and links to the page. `AddressNotice` sits at the top of the container: a person who may change the general settings opened the app at an address
   that is not `base_url` (not under the Vite dev server, not at a localhost address, not when an
   environment variable sets it). "Use <address>" saves it; "Keep" hides it for that address in this
   browser.

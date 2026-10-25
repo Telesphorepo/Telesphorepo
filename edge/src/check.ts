@@ -3,10 +3,11 @@
 // sends GET /.well-known/telesphorepo-edge/check?n=<nonce> to its own base URL, which reaches this
 // Worker on its route. The Worker runs the check only for the nonce of check.json before exp,
 // deletes check.json first so the nonce works once, runs the gap check at once (a pass when pass
-// is set) and answers with its version. Every other request on the path is refused here; none goes
+// is set) and answers with its build and features. Every other request on the path is refused here; none goes
 // to the server, whose own answer on the path says that no Worker is on the route.
 
 import { type Env, edgeKey } from "./access";
+import { FEATURES } from "./features";
 import { runGap } from "./gap";
 import { VERSION } from "./version";
 
@@ -61,7 +62,7 @@ export function hexBytes(s: string): Uint8Array | null {
 }
 
 function answer(status: number, body: Record<string, unknown>): Response {
-  return new Response(JSON.stringify({ answered_by: "worker", version: VERSION, ...body }), {
+  return new Response(JSON.stringify({ answered_by: "worker", version: VERSION, features: FEATURES, ...body }), {
     status,
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store", "Telesphorepo-Edge-Check": "worker" },
   });

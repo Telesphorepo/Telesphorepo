@@ -2,6 +2,8 @@
 // HEAD and 304 (section 5 of the edge spec). An answer that the origin gives differently (416)
 // returns null, and the request goes to the origin.
 
+import { knows } from "./features";
+
 export interface Pointer {
   repo: number;
   path: string;
@@ -18,11 +20,12 @@ const isInt = (v: unknown): v is number => typeof v === "number" && Number.isSaf
 const optStr = (v: unknown): string | null => (v === undefined || v === null ? "" : typeof v === "string" ? v : null);
 
 // parsePointer reads a pointer object: a Pointer, "pending" while a replacement runs, or null
-// when it is malformed.
+// when it is malformed. A pointer with a need that this Worker lacks is pending: the server
+// answers it.
 export function parsePointer(v: unknown): Pointer | "pending" | null {
   if (typeof v !== "object" || v === null || Array.isArray(v)) return null;
   const o = v as Record<string, unknown>;
-  if (o.pending === true) return "pending";
+  if (o.pending === true || !knows(o.needs)) return "pending";
   const sha1 = optStr(o.sha1), md5 = optStr(o.md5), kind = optStr(o.kind);
   if (
     !isInt(o.repo) || typeof o.path !== "string" || typeof o.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(o.sha256) ||

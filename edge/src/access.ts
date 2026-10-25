@@ -2,6 +2,7 @@
 // spec). Every function here answers "the edge may serve" or "the origin decides": a credential
 // that the edge does not check, or that fails a check, sends the request to the origin.
 
+import { knows } from "./features";
 import { VERSION } from "./version";
 
 export interface Env {
@@ -74,7 +75,9 @@ export interface Region {
 }
 
 export interface Config {
-  version: string;
+  serverVersion: string; // for the Telesphorepo-Version header
+  // serves: the Worker implements every feature that config.json requires (features.ts).
+  serves: boolean;
   enabled: boolean;
   ttl: number; // access_ttl in seconds
   edgeKey: Uint8Array | null;
@@ -143,12 +146,14 @@ function b64urlStrict(s: string): Uint8Array | null {
 }
 
 export function parseConfig(v: unknown): Config | null {
-  if (!isObj(v) || typeof v.version !== "string") return null;
+  if (!isObj(v)) return null;
   const ttl = parseDuration(v.access_ttl);
   const formats: FormatConfig[] = [];
   if (isObj(v.formats)) {
+    // A format of a shape or with a need that this Worker does not know is left out: the server
+    // answers its requests.
     for (const [name, f] of Object.entries(v.formats)) {
-      if (!isObj(f) || (f.shape !== "standard" && f.shape !== "oci") || typeof f.prefix !== "string") continue;
+      if (!isObj(f) || (f.shape !== "standard" && f.shape !== "oci") || typeof f.prefix !== "string" || !knows(f.needs)) continue;
       if (!f.prefix.startsWith("/") || !f.prefix.endsWith("/")) continue;
       formats.push({
         name,
@@ -168,7 +173,8 @@ export function parseConfig(v: unknown): Config | null {
     }
   }
   return {
-    version: v.version,
+    serverVersion: typeof v.server_version === "string" ? v.server_version : "",
+    serves: knows(v.requires),
     enabled: v.enabled === true,
     ttl: Number.isFinite(ttl) ? Math.min(ttl, 300) : 0,
     edgeKey: decodeKey(v.edge_key),
@@ -342,19 +348,22 @@ interface DeviceObject {
 const isInt = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v);
 // exp is unix seconds; 0 (or none) never expires.
 const expOf = (v: unknown): number | null | undefined => (v === null || v === undefined || v === 0 ? null : isInt(v) ? v : undefined);
+// readable: an access object that this Worker can read, so it holds no need that the Worker lacks.
+// Any other object is one the server decides on, as an absent one is.
+const readable = (v: unknown): v is Record<string, unknown> => isObj(v) && knows(v.needs);
 
 // repoObject reads the repo object of name. The object of a redirect is {redirect: <repo name>}:
 // the Worker reads that repo's object, and the request is one to that repo (its name is the name
 // of the scopes of a core bearer token). A redirect never names another redirect.
 export async function repoObject(objects: Objects, name: string): Promise<RepoObject | null> {
   let v = await objects.get("a/repo/" + name);
-  if (isObj(v) && typeof v.redirect === "string") {
+  if (readable(v) && typeof v.redirect === "string") {
     name = v.redirect;
     v = await objects.get("a/repo/" + name);
     if (isObj(v) && v.redirect !== undefined) return null;
   }
   if (
-    !isObj(v) || !isInt(v.id) || typeof v.format !== "string" || typeof v.kind !== "string" ||
+    !readable(v) || !isInt(v.id) || typeof v.format !== "string" || typeof v.kind !== "string" ||
     typeof v.anon !== "boolean" || typeof v.private !== "boolean" || typeof v.guarded !== "boolean"
   ) {
     return null;
@@ -366,7 +375,7 @@ export async function repoObject(objects: Objects, name: string): Promise<RepoOb
 
 async function userObject(objects: Objects, id: number): Promise<UserObject | null> {
   const v = await objects.get("a/user/" + id);
-  if (!isObj(v) || typeof v.enabled !== "boolean" || typeof v.local !== "boolean" || typeof v.all !== "boolean") return null;
+  if (!readable(v) || typeof v.enabled !== "boolean" || typeof v.local !== "boolean" || typeof v.all !== "boolean") return null;
   const read = v.read === undefined || v.read === null ? [] : v.read;
   if (!Array.isArray(read) || !read.every(isInt)) return null;
   return { enabled: v.enabled, local: v.local, all: v.all, read: read as number[] };
@@ -375,14 +384,14 @@ async function userObject(objects: Objects, id: number): Promise<UserObject | nu
 async function tokenObject(objects: Objects, publicID: string): Promise<TokenObject | null> {
   const v = await objects.get("a/token/" + publicID);
   const exp = isObj(v) ? expOf(v.exp) : undefined;
-  if (!isObj(v) || !isInt(v.id) || !isInt(v.user) || typeof v.hash !== "string" || exp === undefined) return null;
+  if (!readable(v) || !isInt(v.id) || !isInt(v.user) || typeof v.hash !== "string" || exp === undefined) return null;
   return { id: v.id, user: v.user, hash: v.hash, exp };
 }
 
 async function deviceObject(objects: Objects, id: number): Promise<DeviceObject | null> {
   const v = await objects.get("a/device/" + id);
   const exp = isObj(v) ? expOf(v.exp) : undefined;
-  if (!isObj(v) || !isInt(v.user) || exp === undefined) return null;
+  if (!readable(v) || !isInt(v.user) || exp === undefined) return null;
   return { user: v.user, exp };
 }
 

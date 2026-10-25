@@ -68,12 +68,14 @@ type pendingCheck struct {
 
 // workerAnswer is the JSON of the Worker's answer on the reserved path. Pass is "done" (a copy
 // pass ended), "partial" (it goes on at the next run), "none" (no pass was due) or "off" (no pass
-// runs: config.json is off or of another version, or the Worker has no copy queue).
+// runs: config.json is off or requires a feature that the Worker lacks, or the Worker has no copy
+// queue).
 type workerAnswer struct {
-	Version string `json:"version"`
-	Ran     bool   `json:"ran"`
-	Pass    string `json:"pass"`
-	Error   string `json:"error"`
+	Version  string   `json:"version"`
+	Features []string `json:"features"` // nil: a Worker that reports no features
+	Ran      bool     `json:"ran"`
+	Pass     string   `json:"pass"`
+	Error    string   `json:"error"`
 }
 
 // checkClient sends the request of the check; it follows no redirect.
@@ -189,9 +191,9 @@ func (m *mod) runCheck(ctx context.Context, base *url.URL) checkResult {
 				reason = "HTTP " + strconv.Itoa(resp.StatusCode)
 			}
 			res.Message = fmt.Sprintf("The Worker %s on %s refused the check: %s.", a.Version, base.Host, reason)
-		case a.Version != m.h.Version:
+		case m.outdated(a.Version, a.Features, a.Features != nil) != "":
 			res.Outcome = "worker"
-			res.Message = fmt.Sprintf("The Worker on %s is %s, and this server is %s. Download the Worker of this server version and deploy it.", base.Host, a.Version, m.h.Version)
+			res.Message = m.outdated(a.Version, a.Features, a.Features != nil) + " Download the Worker (Deploy, below) and deploy it."
 		default:
 			res.Outcome, res.OK = "worker", true
 			res.Message = fmt.Sprintf("The Worker %s answered on %s and ran its gap check", a.Version, base.Host) + passText[a.Pass]

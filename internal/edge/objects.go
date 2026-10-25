@@ -113,15 +113,17 @@ type deviceObject struct {
 	Exp  int64 `json:"exp"`
 }
 
-// configObject is config.json.
+// configObject is config.json. Requires names the features that a Worker must implement to serve
+// (features.go); ServerVersion is for the Telesphorepo-Version header only.
 type configObject struct {
-	Version   string                  `json:"version"`
-	Enabled   bool                    `json:"enabled"`
-	AccessTTL int64                   `json:"access_ttl"` // seconds
-	EdgeKey   string                  `json:"edge_key"`   // base64url (no padding) of the raw Ed25519 public key
-	Formats   map[string]formatObject `json:"formats"`
-	Home      homeObject              `json:"home"`
-	Regions   []regionObject          `json:"regions"`
+	ServerVersion string                  `json:"server_version"`
+	Requires      []string                `json:"requires"`
+	Enabled       bool                    `json:"enabled"`
+	AccessTTL     int64                   `json:"access_ttl"` // seconds
+	EdgeKey       string                  `json:"edge_key"`   // base64url (no padding) of the raw Ed25519 public key
+	Formats       map[string]formatObject `json:"formats"`
+	Home          homeObject              `json:"home"`
+	Regions       []regionObject          `json:"regions"`
 }
 
 type formatObject struct {

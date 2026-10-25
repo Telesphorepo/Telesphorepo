@@ -31,7 +31,6 @@ import { immutable } from "./glob";
 import { type Pointer, parsePointer, serve } from "./serve";
 import { OVERRIDE_HEADER, PASS_HEADER, REGION_HEADER, type Override, parseOverride, passValid } from "./speedtest";
 import { parseTarget } from "./shapes";
-import { VERSION } from "./version";
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -230,7 +229,7 @@ async function edge(request: Request, env: Env, ctx: ExecutionContext, override:
   const loaded = await loadConfig(env, url.origin);
   if (!loaded) return null;
   const { config, objects } = loaded;
-  if (!config.enabled || !config.homeReady || config.version !== VERSION) return null;
+  if (!config.enabled || !config.homeReady || !config.serves) return null;
   if (config.homeBucket === "") return null;
   const target = parseTarget(request.url, config.formats);
   if (!target) return null;
@@ -287,7 +286,7 @@ async function edge(request: Request, env: Env, ctx: ExecutionContext, override:
   let blobRead: { ms: number; hint: string } | null = null;
   const answer = await serve(request, p, {
     private: repo.private,
-    version: config.version,
+    version: config.serverVersion,
     oci: target.format.shape === "oci",
     pointerHint: at.hint,
     blob: async (range) => {

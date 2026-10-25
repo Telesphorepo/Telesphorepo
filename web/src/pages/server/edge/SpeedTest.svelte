@@ -234,9 +234,7 @@
 
   const workerNote = $derived.by(() => {
     if (!status.worker_version) return "No Worker has reported yet. Deploy it (Deploy, below) to test the regions.";
-    if (status.version_mismatch) {
-      return `The deployed Worker is ${status.worker_version} and this server is ${status.server_version}. Until you download the Worker of this version and deploy it (Deploy, below), the Worker sends every download to the server.`;
-    }
+    if (status.worker_outdated) return `${status.worker_outdated} Deploy it again (Deploy, below) to test the regions.`;
     if (status.mode !== "on") return "Edge delivery is off, so the Worker sends every download to the server.";
     return "";
   });

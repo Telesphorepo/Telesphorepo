@@ -41,9 +41,9 @@ that the request reached the server, the Worker is not deployed on that host or 
 again. Regions fill while edge delivery is on: the server writes their pointers, and the Worker
 copies their files at each gap check (every 10 minutes, or Check now).
 
-After you change the regions, download the Worker again and run provision and deploy. For each
-server release, download the Worker again and deploy it: a Worker of another version sends every
-request to your server. After you remove a region, deploy again, then delete its bucket in
+After you change the regions, download the Worker again and run provision and deploy. When Settings
+› Overview says the Worker is outdated, download it again and deploy it: until then it sends every
+request to your server. Other server releases need no deploy. After you remove a region, deploy again, then delete its bucket in
 Cloudflare.
 
 ## Test the regions
@@ -56,8 +56,8 @@ works for 10 minutes and sends it with the download in `Telesphorepo-Edge-Pass`,
 `Telesphorepo-Edge-Region`. The Worker takes the choice only after its usual checks of the
 download, so a pass never lets anyone download more than they could without it. The answer says
 which bucket served it (`Telesphorepo-Edge: hit; region=<hint>`) and what became of the choice
-(`Telesphorepo-Edge-Override`). A Worker of another version than your server sends every download
-to your server, so download the Worker of your server's version and deploy it first.
+(`Telesphorepo-Edge-Override`). An outdated Worker sends every download to your server, so deploy it
+again first.
 
 ### From a checkout of the repository
 

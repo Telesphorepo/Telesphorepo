@@ -26,7 +26,7 @@ const gapEvery = 10 * time.Minute
 var gapCron = fmt.Sprintf("*/%d * * * *", int(gapEvery/time.Minute))
 
 // versionDefine is the global of the Worker that a build defines to the server version
-// (wrangler define): a Worker of another version passes every request to the server.
+// (wrangler define): the build that the Worker reports.
 const versionDefine = "TELESPHOREPO_VERSION"
 
 // versionLiteral is the define value of version: a JavaScript string literal.
@@ -114,7 +114,7 @@ func (m *mod) wrangler(s *settings.Snapshot, bundled bool) ([]byte, error) {
 		cfg["main"] = "dist/index.js"
 		cfg["no_bundle"] = true
 	} else {
-		// The Worker's VERSION: it serves only while config.json carries the same version.
+		// The Worker's VERSION: the build that it reports.
 		cfg["define"] = map[string]string{versionDefine: versionLiteral(m.h.Version)}
 	}
 	var body bytes.Buffer

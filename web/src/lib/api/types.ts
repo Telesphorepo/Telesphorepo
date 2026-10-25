@@ -727,9 +727,10 @@ export type EdgeStatus = {
   /** Why the settings cannot run edge delivery while it is switched on; "" when they can. */
   unfit: string;
   server_version: string;
-  /** The version the Worker reported at its last gap check; null before the first check. */
+  /** The build the Worker reported at its last gap check; null before the first check. */
   worker_version: string | null;
-  version_mismatch: boolean;
+  /** Why the deployed Worker sends every request to the server (it lacks a feature this server needs); "" when it serves. */
+  worker_outdated: string;
   gap_checked_at: string | null;
   /** Seconds: the interval of the Worker's gap check (its cron). */
   gap_check_every: number;
@@ -737,7 +738,7 @@ export type EdgeStatus = {
   blob_check_every: number;
   /** The start of the Worker's copy pass that runs now; null between passes. */
   gap_pass_started: string | null;
-  /** A storage or region change needs a new deploy. */
+  /** A storage or region change, or an outdated Worker, needs a new deploy. */
   deploy_needed: boolean;
   /** The storage change that asks for the deploy ("storage change", "storage move"); "" otherwise. */
   deploy_reason: string;

@@ -25,7 +25,7 @@ const edgeDir = "edge"
 const edgeDist = "internal/edgedist/dist"
 
 // edgeVersionDefine is the global that the bundle of the Worker defines to the server version
-// (wrangler --define), so a Worker of another version passes every request to the server.
+// (wrangler --define): the build that the Worker reports.
 const edgeVersionDefine = "TELESPHOREPO_VERSION"
 
 // edgeDevScripts are the scripts of edge/package.json that need the sources; the Worker folder

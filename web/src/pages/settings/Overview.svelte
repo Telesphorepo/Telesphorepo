@@ -1,6 +1,7 @@
 <!--
   All settings, the administrator's home: about this server. The header names the server, its
-  version (a release's tag, Canary and the commit for a build of main) and its public address (for a holder of the General settings); under it the actions
+  version (a release's tag, Canary and the commit for a build of main) and its public address (for a holder of the General settings); under it, for a
+  person who can open Edge delivery, the notice that the edge Worker needs a deploy (EdgeNotice); then the actions
   people take most as doors (New repository, New account, New CI pipeline; each only for a person
   who may). Then one row of equal stat tiles, a figure and its label each: the repositories (GET /api/repos), their
   files and the stored size, and the people, the CI pipelines and the signing keys, each only for a
@@ -35,6 +36,7 @@
   import Stat from "./overview/Stat.svelte";
   import SizeBars from "./overview/SizeBars.svelte";
   import DownloadBars from "./overview/DownloadBars.svelte";
+  import EdgeNotice from "./overview/EdgeNotice.svelte";
   import DownloadIcon from "@lucide/svelte/icons/download";
   import NewAccountDialog from "../server/people/NewAccountDialog.svelte";
   import DatabaseIcon from "@lucide/svelte/icons/database";
@@ -130,6 +132,8 @@
       {/if}
     {/snippet}
   </PageHeader>
+
+  {#if opens("/settings/edge")}<EdgeNotice />{/if}
 
   {#if canNewRepo || canNewAccount || canNewPipeline}
     <DoorRow label="Create">

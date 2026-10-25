@@ -987,7 +987,7 @@ transaction.
 | `POST /api/storage/moves/{id}/retry` | `storage.manage` | Tries the newest move again when it failed or was cancelled (409 otherwise). The body `{key: value}` holds storage settings that change the target (`{}` keeps it; a secret left out or `""` keeps the target's secret; a key of another group is 400). The server builds the settings PATCH that makes the sealed target the active storage, puts the body on top and saves it like `PATCH /api/settings`: 202 `{move}` with the new move, or 200 `{move: null}` when the settings saved at once; a refusal answers like the PATCH. The old move is dismissed. Records `storage.move.retry` |
 | `POST /api/storage/moves/{id}/test` | `storage.manage` | The same body as the retry; runs the storage `Validate` and the probe on the target a retry would move to, saves nothing. Answers like `POST /api/settings/storage/test` |
 | `POST /api/storage/moves/{id}/dismiss` | `storage.manage` | Dismisses an ended move and returns it; storage stays where it is. 409 while it copies. Records `storage.move.dismiss` |
-| `GET /api/edge/status` | `edge.manage` | `{enabled, mode: "on"\|"draining"\|"off", unfit, server_version, worker_version\|null, version_mismatch, gap_checked_at\|null, gap_check_every, blob_check_every, deploy_needed, deploy_reason, worker_missing, check_unfit, last_check\|null, home: {hint, bucket, outbox, pointers, last_error}, backfill: {running, queued, total}, regions: [{hint, area, bucket, state: "filling"\|"ready"\|"waiting", pointers_written, pointers_total, pointers_done, blobs_missing\|null, blobs_checked_at\|null, outbox, last_error}]}`. `gap_check_every` is the interval of the Worker's gap check (its cron, 600 s) and `blob_check_every` the interval of the server's count of the files of a filling region (120 s), in seconds; `blobs_checked_at` is the end of the region's last whole count. `home.outbox` counts every outbox row, `home.pointers` and each region's `outbox` the pointer rows; `pointers_done`: every pointer of the region is written, so the blob check runs. `check_unfit` says why `POST /api/edge/check` cannot run (`""` when it can); `last_check` is the answer of the last check since the server started. `backfill.running` holds until the outbox wrote every pointer of the backfill (`home.ready`). The Worker version and the gap check come from `gap/state.json`; `waiting`: the Worker of the last gap check has no binding for the region, or its binding is a bucket whose `bucket.json` names another bucket; `deploy_needed` also holds when the `bucket.json` of its `HOME` names another bucket than the home bucket. The outbox counts come from the count of the outbox job: every 5 s while the page asks for the status at least every 30 s; after a longer pause the request asks for a count and waits for it up to a second. `worker_missing` is the detail of the `no-edge-worker` problem of `GET /api/edge/worker.zip`, `""` when the build holds the Worker of the server's version. See **Edge delivery** |
+| `GET /api/edge/status` | `edge.manage` | `{enabled, mode: "on"\|"draining"\|"off", unfit, server_version, worker_version\|null, worker_outdated, gap_checked_at\|null, gap_check_every, blob_check_every, deploy_needed, deploy_reason, worker_missing, check_unfit, last_check\|null, home: {hint, bucket, outbox, pointers, last_error}, backfill: {running, queued, total}, regions: [{hint, area, bucket, state: "filling"\|"ready"\|"waiting", pointers_written, pointers_total, pointers_done, blobs_missing\|null, blobs_checked_at\|null, outbox, last_error}]}`. `gap_check_every` is the interval of the Worker's gap check (its cron, 600 s) and `blob_check_every` the interval of the server's count of the files of a filling region (120 s), in seconds; `blobs_checked_at` is the end of the region's last whole count. `home.outbox` counts every outbox row, `home.pointers` and each region's `outbox` the pointer rows; `pointers_done`: every pointer of the region is written, so the blob check runs. `check_unfit` says why `POST /api/edge/check` cannot run (`""` when it can); `last_check` is the answer of the last check since the server started. `backfill.running` holds until the outbox wrote every pointer of the backfill (`home.ready`). The Worker's build (`worker_version`), its features and the gap check come from `gap/state.json`; `worker_outdated` says why the deployed Worker sends every request to the server (`""` when it serves; see **The contract**), and then `deploy_needed` holds; `waiting`: the Worker of the last gap check has no binding for the region, or its binding is a bucket whose `bucket.json` names another bucket; `deploy_needed` also holds when the `bucket.json` of its `HOME` names another bucket than the home bucket. The outbox counts come from the count of the outbox job: every 5 s while the page asks for the status at least every 30 s; after a longer pause the request asks for a count and waits for it up to a second. `worker_missing` is the detail of the `no-edge-worker` problem of `GET /api/edge/worker.zip`, `""` when the build holds the Worker of the server's version. See **Edge delivery** |
 | `POST /api/edge/check` | `edge.manage` | Check now: the deployed Worker runs its gap check at once (see **The check of the Worker** under **Edge delivery**). 200 `{at, outcome: "worker"\|"refused"\|"server"\|"other"\|"unreachable"\|"error", ok, message, worker_version?}`; `ok` when the Worker of the server's version answered and ran the check. 409 problem `edge-not-configured` without storage s3 or without a base URL without a path; 429 problem `edge-check-busy` (with `Retry-After`) while a check runs or within 10 s of the start of the last one. No audit event: the check changes nothing on the server, and the page runs it every 30 s while the Worker has not reported this server's version |
 | `GET /.well-known/telesphorepo-edge/check?n=<nonce>` | public | The reserved path of the check. On the server it answers that the request reached the origin: `Telesphorepo-Edge-Check: server`, 200 `{answered_by: "server"}` for the nonce of the check that runs, else 403. The Worker answers the same path on its route (see **Edge delivery**) |
 | `GET /api/edge/speedtest` | `edge.manage` | The files of the speed test (see **The speed test** under **Edge delivery**): `{base_url, unfit, files: [{repo, format, path, size, url}]}`. `base_url` is the scheme and host of the base URL (`""` when unset); `unfit` says why no pass can be issued (as `check_unfit`). `files`: the immutable files of the public, unguarded hosted and proxy repos whose format has `Edge` (the first 16 such repos, the first 500 files of each in path order), the two largest of each repo, at most 8, largest first; `url` is the download path in the URL shape of the format (`/<format>/<repo>/<path>`; on `oci` the blob or the manifest by digest) |
@@ -1948,7 +1948,7 @@ region reads the same version; an immutable path has a pointer and a blob in eve
 
 | Key | Content | Buckets |
 |---|---|---|
-| `config.json` | `{version, enabled, access_ttl (seconds), edge_key (base64url of the Ed25519 public key), formats: {name: {shape, prefix, immutable, mutable}}, home: {hint, bucket, ready}, regions: [{hint, binding, bucket, ready}]}`; `home.ready`: the outbox wrote every pointer of the backfill; `bucket`: the bucket that the `bucket.json` of the binding must name | home |
+| `config.json` | `{server_version, requires: [features], enabled, access_ttl (seconds), edge_key (base64url of the Ed25519 public key), formats: {name: {shape, prefix, immutable, mutable}}, home: {hint, bucket, ready}, regions: [{hint, binding, bucket, ready}]}`; `home.ready`: the outbox wrote every pointer of the backfill; `bucket`: the bucket that the `bucket.json` of the binding must name | home |
 | `bucket.json` | `{hint, bucket}` (`hint` is `home` or the region): the bucket names itself, so the Worker sees a binding to another bucket. The controller writes it into each bucket it uses (again after the wipe of a first start, and once per process start); a region becomes ready only after its `bucket.json` is written | home and each region |
 | `p/<repo id>/<sha256 hex of the path>` | `{repo, path, sha256, sha1, md5, size, ct, mod (unix), kind}`, or `{repo, path, pending: true}` while a write runs | home; also each region for an immutable path |
 | `a/repo/<name>` | `{id, format, kind, anon, private, guarded, members: [names]}`: `private` is `access.Engine.Private`, `guarded` is `access.Engine.Guarded` (a read IP rule, or a guard that is not a `ReadRestricter`). For a redirect name, `{redirect: <repo name>}`: the Worker reads the object of that repo next (one more read on a cache miss) and serves the request as one to that repo, whose name the scopes of a core bearer token carry; a redirect object that names another redirect sends the request to the server. A rename marks the object of the old name, the new name and every redirect of the repo; a repo delete and a removed redirect mark the redirect names | home |
@@ -1956,7 +1956,7 @@ region reads the same version; an immutable path has a pointer and a blob in eve
 | `a/token/<public id>` | `{id, user, hash (hex SHA-256 of the secret), exp (unix, 0 never)}`; an expired token has none | home |
 | `a/device/<id>` | `{user, exp}`; a revoked or expired device has none | home |
 | `seen/<isolate>-<unix ms>.json` | The Worker: `{version, tokens: [{id, at}]}`, the read tokens that one isolate checked itself, written 20 seconds after the first of them (at most one file per isolate in 20 seconds, each file a new key) | home |
-| `gap/state.json` | The Worker's gap check: `{version, checked, last_run, bindings: [hints], markers: {home, regions: {hint: bucket}}, pass, last_pass: {started, finished}, regions}`; `markers` holds the bucket that the `bucket.json` of each binding names (`""` for none); every run reads them and writes the file with `checked`, the time of the run (one small put per run), so the status's last gap check is the last run, with or without a copy pass. A gap pass skips a region whose binding names another bucket | home |
+| `gap/state.json` | The Worker's gap check: `{version (the Worker's build), features, checked, last_run, bindings: [hints], markers: {home, regions: {hint: bucket}}, pass, last_pass: {started, finished}, regions}`; `markers` holds the bucket that the `bucket.json` of each binding names (`""` for none); every run reads them and writes the file with `checked`, the time of the run (one small put per run), so the status's last gap check is the last run, with or without a copy pass. A gap pass skips a region whose binding names another bucket | home |
 | `gap/request.json` | The server asks for a gap pass: `{at, regions}` | home |
 | `check.json` | The server's check of the Worker: `{hash (hex SHA-256 of the one-time nonce), exp (unix, 30 s after the write), pass}`; `pass`: run a copy pass now (edge delivery is on and a region is not ready). The Worker deletes it when it takes it; the server deletes it after the check | home |
 | `speedtest/<hex>.json` | A pass of the speed test: `{hash, exp}`; `hash` is the hex SHA-256 of the token (the `<hex>` of the key), `exp` unix seconds, 10 minutes after the write. The server writes it (`POST /api/edge/speedtest`) and deletes it a minute after `exp`, at a later pass | home |
@@ -2071,8 +2071,9 @@ mode of that moment, so an `enabled: true` never lands after the off switch.
   secret of the storage settings, so this needs the same access key ID there; without it the
   module logs that the drain cannot go on and drops it. A move to
   `storage=fs` turns edge delivery off.
-- **The Worker's state.** The controller reads `gap/state.json` at most once a minute: the Worker
-  version (a mismatch is "Deploy the Worker of this server version"), the regions that the
+- **The Worker's state.** The controller reads `gap/state.json` at most once a minute: the Worker's
+  build and features (one that lacks a feature of `requires`, or reports no features, is outdated:
+  see **The contract**), the regions that the
   Worker has a binding for (a chosen region without one is `waiting`), the start of the copy pass
   that runs and the copies that each region's last pass queued. While edge delivery is not on it
   reads the file from the S3 bucket of the storage settings once `edge.home_hint` is set, so the
@@ -2089,9 +2090,9 @@ writes) answers it. The Worker answers that path itself and never passes it to t
 for the nonce of `check.json` (a constant-time compare of its SHA-256) before `exp` it deletes
 `check.json`, so the nonce works once, runs the gap check (the cron's function, with at most 1,000
 subrequests and 20 s of listing; a pass when `pass` is set, else when one is due; a pass that does
-not end goes on at the next cron run), and answers 200 `{answered_by: "worker", version, ran: true,
+not end goes on at the next cron run), and answers 200 `{answered_by: "worker", version, features, ran: true,
 pass: "done"|"partial"|"none"|"off"}`; any other request there is 403 `{answered_by: "worker",
-version, ran: false, error}`. Both carry `Telesphorepo-Edge-Check: worker`. When the request
+version, features, ran: false, error}`. Both carry `Telesphorepo-Edge-Check: worker`. When the request
 reaches the server, its own handler of the path answers with `Telesphorepo-Edge-Check: server`
 (200 only for the nonce of the check that runs, else 403), and the check says "The request reached
 the server, not the Worker: the Worker is not deployed on <host>, or not on this route". Another
@@ -2153,10 +2154,7 @@ files a minute, and a token is lost only when the runtime ends the `waitUntil` b
 server:
 
 1. `config.json` says `enabled` and `home.ready`, the `bucket.json` of `HOME` names
-   `home.bucket`, and the `version` of `config.json` is the Worker's (the build of the server
-   bundles the Worker of its download with `--define TELESPHOREPO_VERSION` to its version, and
-   the `wrangler.jsonc` of a checkout defines it to the server version; a build without it is
-   `dev`, like the server).
+   `home.bucket`, and the Worker implements every feature of `requires` (see **The contract**).
 2. The URL parses with the format's shape and the repopath rules; a path with an encoded `/`, `\`
    or NUL, or with an empty, `.` or `..` segment, goes to the server, and so do uploads, tags
    lists, referrers, `/v2/`, the catalog, `key.asc` and a request with the query parameter
@@ -2197,7 +2195,7 @@ bucket.
 **The answer** sets what `Reader.ServeAsset` sets on a streamed answer, from the pointer: the
 checksum headers, `Content-Type`, `ETag`, `Last-Modified`, nosniff, the sandbox CSP,
 `Content-Disposition: attachment` except for `text/plain`, `Accept-Ranges`,
-`Telesphorepo-Version` (from `config.json`), `Cache-Control: private` when the repo object is
+`Telesphorepo-Version` (`server_version` of `config.json`), `Cache-Control: private` when the repo object is
 private, and on `oci` `Docker-Content-Digest` and `Docker-Distribution-API-Version`. A matching
 `If-None-Match` is 304; HEAD answers from the pointer; one range (`If-Range` absent or the exact
 ETag) is 206 from a ranged R2 read; several ranges or another `If-Range` serve the whole file; a
@@ -2225,8 +2223,8 @@ a gap pass when `gap/request.json` is at least as new as the start of the last p
 pass is older than 24 hours: it merges the key-ordered lists of the home `blobs/` and each region
 (1000 keys per list), queues copies and deletes 100 per batch, keeps its cursor in
 `gap/state.json` and stops before 5,000 subrequests. A pass runs only while `config.json` says
-`enabled` with the Worker's version and the Worker has its queue, so a region keeps its missing
-files while edge delivery is off. Every run (and every check) writes the Worker version, bindings
+`enabled`, requires no feature that the Worker lacks, and the Worker has its queue, so a region keeps its missing
+files while edge delivery is off. Every run (and every check) writes the Worker's build and features, bindings
 and markers to `gap/state.json` when they changed.
 
 **Deploy.** The server writes the Worker configuration for the settings: the routes
@@ -2240,10 +2238,40 @@ made with `--define TELESPHOREPO_VERSION:"<server version>"` (`internal/edgedist
 **Tooling**), `package.json` (wrangler at an exact version, the scripts `provision` and
 `deploy`), `bun.lock`, `scripts/provision.ts`, the README and the `wrangler.jsonc` with
 `"main": "dist/index.js"` and `"no_bundle": true`. The server refuses the download when its build
-holds no Worker, or one of another version, so a deploy from it is always a Worker of the
-server's version. `GET /api/edge/wrangler.jsonc` is the configuration for a checkout of `edge/`:
-`"main": "src/index.ts"` and the `define` of `TELESPHOREPO_VERSION` to the server version, so
-`bun run deploy` bundles a Worker of that version.
+holds no Worker, or one built with another server version, so a deploy from it always has every
+feature that the server uses. `GET /api/edge/wrangler.jsonc` is the configuration for a checkout of `edge/`:
+`"main": "src/index.ts"` and the `define` of `TELESPHOREPO_VERSION` to the server version, the
+build that the Worker reports.
+
+**The contract.** The Worker serves by the features it implements, never by the server version,
+so a server release needs no Worker deploy unless it uses a feature that the deployed Worker
+lacks. The contract is the objects under `edge/v1/` and what their fields mean:
+
+- **Tolerant readers.** Both sides ignore a field they do not know. A field added later has a
+  default that means the behavior from before it.
+- **Features.** A feature is a name for one thing that a Worker must implement to read what the
+  server writes. The Worker's build lists those it implements (`edge/src/features.ts`); the list
+  only grows. The server's are `workerFeature`s (`internal/edge/features.go`), each with the text
+  that ends "this server needs it to ...". There are none yet.
+- **`requires`** of `config.json` names the features that the server uses now and that every
+  request needs. A Worker that lacks one passes every request to the server and runs no copy
+  pass.
+- **`needs`** of an object (an access object, a pointer, a format of `config.json`) names the
+  features that reading it takes. A Worker that lacks one passes the requests that read the
+  object to the server (a pointer counts as pending, a format as one the Worker does not serve)
+  and serves the rest. A format of a shape that the Worker does not know counts the same. A field
+  that restricts access, which an older Worker would ignore and so serve what it must not, is
+  always a need, so an older Worker fails closed.
+- **A change** to what the server writes for the Worker, or to how the Worker reads it: additive
+  with a default that keeps the old behavior needs nothing else; a meaning an older Worker would
+  get wrong is a new feature, named in `requires` or in the objects' `needs` only while the server
+  uses it; renamed keys, moved paths or a field whose old meaning changes move the objects to
+  `edge/v2/`, where an older Worker finds no `config.json` and passes every request to the
+  server.
+- **Outdated.** The status's `worker_outdated` says why the deployed Worker sends every request to
+  the server: it lacks a feature of `requires`, or it reports no features (it cannot read
+  `config.json`). Then `deploy_needed` is true, the check says so, and Settings › Overview shows
+  the notice for a person who can open Edge delivery.
 
 In the folder the operator runs `bun install`, `bunx wrangler login` (once), `bun run provision`
 and `bun run deploy`. Wrangler's OAuth login asks for its default scopes, which include
@@ -2309,11 +2337,11 @@ one-write-per-second key limit. The edge serves a valid read token from such an 
 page probes every bucket first. The admin downloads the edge Worker from the Deploy section,
 unpacks it, and in its `telesphorepo-edge` folder runs `bun install`, `bunx wrangler login`,
 `bun run provision` and `bun run deploy`, then turns `edge.enabled` on (the page keeps its switch off
-until the deployed Worker has reported its version; the page runs the check of the Worker when it
-opens and every 30 s until then, and **Check now** runs it at once). After each region change
+until the deployed Worker has reported its build; the page runs the check of the Worker when it
+opens and every 30 s until then or while the Worker is outdated, and **Check now** runs it at once). After each region change
 the admin downloads the Worker again (its `wrangler.jsonc` has the new bindings) and runs
-provision and deploy; for each server release, downloads it again (the bundle is that version)
-and runs deploy. The server backfills the pointers and the gap check copies the blobs; a region
+provision and deploy; after a server release that the Worker is outdated for (Settings › Overview
+says so), downloads it again and runs deploy. The server backfills the pointers and the gap check copies the blobs; a region
 serves when the page says ready. A removed region needs a deploy and a manual bucket delete in
 Cloudflare. Download snippets for private repos use a read token, never a password.
 
@@ -4287,8 +4315,8 @@ page are in `web/src/README.md`.
   and **Cancel**. An ended move with failed files lists them: the path with a copy button, then
   the reason.
 - **Edge delivery page** (`/#/settings/edge`, `edge.manage`, Server group). Status: on, stopping
-  or off (and why the settings cannot run it), the Worker version with a badge when it is not the
-  server's (before the first report: the Worker reports at its first gap check),
+  or off (and why the settings cannot run it), the Worker build with an Outdated badge when the Worker lacks a feature of the
+  server (before the first report: the Worker reports at its first gap check),
   the last gap check with its cadence (`gap_check_every`: the next check, or how late it is), the home bucket, and the last check of the Worker (a badge of its outcome,
   when, and its message). **Check now** in the header runs `POST /api/edge/check`; the page runs it
   by itself when it opens and every 30 seconds while the Worker has not reported the server's
@@ -4329,7 +4357,7 @@ page are in `web/src/README.md`.
   says the times are from this browser's location and names the Cloudflare data center of
   `CF-Ray`. The page takes a pass at the first run and keeps it in memory until 30 seconds before
   it expires. Opened at another address than the base URL, the section says to open the page at
-  the base URL and offers no run; without a Worker report, with a Worker of another version, or
+  the base URL and offers no run; without a Worker report, with an outdated Worker, or
   with edge delivery off it says first what the downloads will do. The access
   tab of a repo shows the download notes under the Download section.
 - **Sign-in options page.** Three numbered cards: connect your provider (with **Test** in its
