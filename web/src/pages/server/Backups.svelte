@@ -80,6 +80,8 @@
   }
 
   const files = (n: number) => `${formatCount(n)} ${n === 1 ? "file" : "files"}`;
+  // What a backup holds: with a folder store the database and the files, with S3 the database.
+  const holds = (b: Backup) => (b.blobs_included ? `${files(b.files)} · ${formatSize(b.size)}` : `Database · ${formatSize(b.database_size)}`);
 
   const stepWord ={ files: "Copying files", database: "Copying the database", cleanup: "Removing old backups" } as const;
 
@@ -121,7 +123,7 @@
 <Section
   plain={!!dir && source.items.length <= 12}
   title="Kept backups"
-  description="A backup holds the database, the master key and the stored files of a folder store; files in an S3 bucket stay in the bucket, and a key set in TR_MASTER_KEY is not written."
+  description="A backup holds the database and the master key, and with a folder store the stored files."
 >
   {#snippet actions()}
     {#if job?.running}
@@ -143,7 +145,6 @@
       {#if !b.complete}
         <StatusBadge tone="warning" title="This backup did not finish. The next backup removes it.">Incomplete</StatusBadge>
       {:else}
-        {#if !b.blobs_included}<StatusBadge title="The files of this backup stay in the S3 bucket.">Files in the bucket</StatusBadge>{/if}
         {#if !b.master_key_included}<StatusBadge tone="warning" title="The server took its master key from TR_MASTER_KEY. Keep that key with the backup.">No master key</StatusBadge>{/if}
       {/if}
     {/snippet}
@@ -156,7 +157,7 @@
         {#snippet leading()}<ArchiveIcon class="size-5" />{/snippet}
         {#snippet title(b)}<span title={b.name}>{formatDateTime(b.created_at)}</span>{/snippet}
         {#snippet badges(b)}{@render marks(b)}{/snippet}
-        {#snippet meta(b)}<span class="tabular-nums">{b.complete ? `${files(b.files)} · ${formatSize(b.size)} · ` : ""}version {b.version}</span>{/snippet}
+        {#snippet meta(b)}<span class="tabular-nums">{b.complete ? `${holds(b)} · ` : ""}version {b.version}</span>{/snippet}
       </ItemList>
     {:else}
       <SourceGrid {source} label="Backups" key={(b) => b.name} empty={none}>
@@ -164,7 +165,7 @@
           <ItemCard title={formatDateTime(b.created_at)}>
             {#snippet icon()}<ArchiveIcon class="size-5" />{/snippet}
             {#snippet badges()}{@render marks(b)}{/snippet}
-            {#if b.complete}<p class="tabular-nums">{files(b.files)} · {formatSize(b.size)}</p>{/if}
+            {#if b.complete}<p class="tabular-nums">{holds(b)}</p>{/if}
             <p>Version {b.version}</p>
           </ItemCard>
         {/snippet}

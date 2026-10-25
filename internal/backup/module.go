@@ -288,7 +288,10 @@ type Listed struct {
 	Version   string    `json:"version"`
 	Storage   string    `json:"storage"`
 	// Size is the database and the files it uses: what a restore brings back.
-	Size              int64 `json:"size"`
+	Size int64 `json:"size"`
+	// DatabaseSize is the database file of the backup: all that it holds when its files stay in
+	// the S3 bucket.
+	DatabaseSize      int64 `json:"database_size"`
 	Files             int64 `json:"files"`
 	BlobsIncluded     bool  `json:"blobs_included"`
 	MasterKeyIncluded bool  `json:"master_key_included"`
@@ -315,7 +318,7 @@ func (m *mod) get(w http.ResponseWriter, r *http.Request, _ *route.Call) {
 		for _, e := range entries {
 			l := Listed{Name: e.Name, CreatedAt: e.CreatedAt, Complete: e.Complete}
 			if mf := e.Manifest; mf != nil {
-				l.Version, l.Storage, l.Size, l.Files = mf.Version, mf.Storage, mf.Size(), mf.Counts.Files
+				l.Version, l.Storage, l.Size, l.DatabaseSize, l.Files = mf.Version, mf.Storage, mf.Size(), mf.Database.Size, mf.Counts.Files
 				l.BlobsIncluded, l.MasterKeyIncluded = mf.BlobsIncluded, mf.MasterKeyIncluded
 			}
 			out.Backups = append(out.Backups, l)

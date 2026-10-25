@@ -58,7 +58,7 @@ var (
 			return nil
 		}})
 	S3PathStyle = settings.Bool(&settings.Def{Key: "s3.path_style", Default: "false", Label: "S3 path-style addressing",
-		Help: "SeaweedFS and MinIO need path-style addresses. R2 and AWS do not."})
+		Help: "SeaweedFS needs path-style addresses. R2 and AWS do not."})
 	S3Redirect = settings.Bool(&settings.Def{Key: "s3.redirect", Default: "true", Label: "Redirect downloads to S3",
 		Help: "When this is on, a GET download answers 302 with a presigned URL. When it is off, the server streams the file."})
 	PresignTTL = settings.Duration(&settings.Def{Key: "presign_ttl", Default: "5m", Label: "Presigned URL lifetime",

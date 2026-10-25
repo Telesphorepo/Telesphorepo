@@ -2,8 +2,8 @@
 // <backup dir>/<UTC time>/ with telesphorepo.db (SQLite VACUUM INTO of the live database),
 // master.key (when the data dir has one) and backup.json, written last: a folder without
 // backup.json is incomplete. With fs storage the blobs go into <backup dir>/blobs/, one shared
-// content-addressed folder for every backup (a blob never changes); with S3 storage the blobs
-// stay in the bucket. The module "backup" runs it on a schedule and on demand; the server
+// content-addressed folder for every backup (a blob never changes); with S3 storage a restore
+// reads the blobs from the bucket. The module "backup" runs it on a schedule and on demand; the server
 // commands "backup" and "restore" run it from the command line.
 package backup
 

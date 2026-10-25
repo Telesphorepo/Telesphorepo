@@ -134,7 +134,7 @@
     "s3.access_key_id": { label: "Access key ID", help: "For R2, make an API token with Object Read & Write on the bucket: Cloudflare shows its access key ID and secret access key once." },
     "s3.secret_access_key": { label: "Secret access key" },
     "s3.prefix": { label: "Folder in the bucket", help: "Leave it empty to keep the files at the root of the bucket. A server that already has files in the bucket keeps this as it is: a new folder copies every file again." },
-    "s3.path_style": { label: "Path-style addresses", help: "Leave it off for R2 and AWS. MinIO and SeaweedFS need it." },
+    "s3.path_style": { label: "Path-style addresses", help: "Leave it off for R2 and AWS. SeaweedFS needs it." },
     "s3.redirect": { label: "Download from the bucket", help: "This server checks each download, then sends the build to a signed link of the bucket: the build gets the bytes from R2, not through this server. With R2, that egress costs nothing. To answer downloads near each build without this server, set up Edge delivery." },
     presign_ttl: { label: "Download link lifetime", help: "A signed link to a file in the bucket works for this time." },
   };

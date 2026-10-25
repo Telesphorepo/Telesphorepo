@@ -797,6 +797,8 @@ export type Backup = {
   storage: string;
   /** The database and the files it uses: what a restore brings back. */
   size: number;
+  /** The database file: all that the backup holds when its files stay in the S3 bucket. */
+  database_size: number;
   files: number;
   blobs_included: boolean;
   master_key_included: boolean;
