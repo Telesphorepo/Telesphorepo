@@ -42,7 +42,7 @@ const deleteOldDownloads = `-- name: DeleteOldDownloads :execrows
 DELETE FROM download_stats WHERE day < ?1
 `
 
-// Retention: the days before a cutoff, through download_stats_day.
+// Retention: the days before a cutoff, through download_stats_window.
 func (q *Queries) DeleteOldDownloads(ctx context.Context, before int64) (int64, error) {
 	result, err := q.db.ExecContext(ctx, deleteOldDownloads, before)
 	if err != nil {
@@ -55,7 +55,7 @@ const listDownloadsSince = `-- name: ListDownloadsSince :many
 SELECT repo_id, day, downloads, bytes FROM download_stats WHERE day >= ?1 ORDER BY day
 `
 
-// The rows of the days from since on, through download_stats_day: at most one per repo and day.
+// The rows of the days from since on, through download_stats_window: at most one per repo and day.
 func (q *Queries) ListDownloadsSince(ctx context.Context, since int64) ([]DownloadStat, error) {
 	rows, err := q.db.QueryContext(ctx, listDownloadsSince, since)
 	if err != nil {
@@ -68,6 +68,93 @@ func (q *Queries) ListDownloadsSince(ctx context.Context, since int64) ([]Downlo
 		if err := rows.Scan(
 			&i.RepoID,
 			&i.Day,
+			&i.Downloads,
+			&i.Bytes,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const sumDownloadsByDay = `-- name: SumDownloadsByDay :many
+SELECT day, CAST(SUM(downloads) AS INTEGER) AS downloads, CAST(SUM(bytes) AS INTEGER) AS bytes
+FROM download_stats WHERE day >= ?1 GROUP BY day ORDER BY day
+`
+
+type SumDownloadsByDayRow struct {
+	Day       int64
+	Downloads int64
+	Bytes     int64
+}
+
+// The downloads of each day from since on, through download_stats_window (covering, in day order).
+func (q *Queries) SumDownloadsByDay(ctx context.Context, since int64) ([]SumDownloadsByDayRow, error) {
+	rows, err := q.db.QueryContext(ctx, sumDownloadsByDay, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SumDownloadsByDayRow
+	for rows.Next() {
+		var i SumDownloadsByDayRow
+		if err := rows.Scan(&i.Day, &i.Downloads, &i.Bytes); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const topDownloadRepos = `-- name: TopDownloadRepos :many
+SELECT r.name, r.format, t.downloads, t.bytes FROM (
+  SELECT repo_id, CAST(SUM(downloads) AS INTEGER) AS downloads, CAST(SUM(bytes) AS INTEGER) AS bytes
+  FROM download_stats WHERE day >= ?1
+  GROUP BY repo_id ORDER BY 2 DESC, 3 DESC, repo_id LIMIT ?2
+) t JOIN repos r ON r.id = t.repo_id
+ORDER BY t.downloads DESC, t.bytes DESC, r.id
+`
+
+type TopDownloadReposParams struct {
+	Since int64
+	N     int64
+}
+
+type TopDownloadReposRow struct {
+	Name      string
+	Format    string
+	Downloads int64
+	Bytes     int64
+}
+
+// The repos with the most downloads from since on (then the most bytes, then the oldest repo), most
+// first: the window is summed per repo from download_stats_window alone, and only the top ones are
+// joined to repos.
+func (q *Queries) TopDownloadRepos(ctx context.Context, arg TopDownloadReposParams) ([]TopDownloadReposRow, error) {
+	rows, err := q.db.QueryContext(ctx, topDownloadRepos, arg.Since, arg.N)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []TopDownloadReposRow
+	for rows.Next() {
+		var i TopDownloadReposRow
+		if err := rows.Scan(
+			&i.Name,
+			&i.Format,
 			&i.Downloads,
 			&i.Bytes,
 		); err != nil {

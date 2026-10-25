@@ -6,11 +6,9 @@
 package activity
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -213,7 +211,7 @@ func downloads(h *module.Host, w http.ResponseWriter, r *http.Request) {
 	}
 	today := stats.DayOf(time.Now())
 	first := today - int64(days-1)*int64(stats.Day/time.Second)
-	rows, err := h.Downloads.Since(ctx, first)
+	rows, err := h.Downloads.Days(ctx, first)
 	if err != nil {
 		route.Fail(w, r, err)
 		return
@@ -222,53 +220,22 @@ func downloads(h *module.Host, w http.ResponseWriter, r *http.Request) {
 	for i := range out.Days {
 		out.Days[i].Day = time.Unix(first, 0).UTC().AddDate(0, 0, i).Format(time.DateOnly)
 	}
-	per := map[int64]*RepoStats{}
-	var order []int64
 	for _, row := range rows {
 		i := int((row.Day - first) / int64(stats.Day/time.Second))
 		if i < 0 || i >= days {
 			continue
 		}
-		out.Days[i].Downloads += row.Downloads
-		out.Days[i].Bytes += row.Bytes
+		out.Days[i].Downloads, out.Days[i].Bytes = row.Downloads, row.Bytes
 		out.Downloads += row.Downloads
 		out.Bytes += row.Bytes
-		p := per[row.RepoID]
-		if p == nil {
-			p = &RepoStats{}
-			per[row.RepoID] = p
-			order = append(order, row.RepoID)
-		}
-		p.Downloads += row.Downloads
-		p.Bytes += row.Bytes
 	}
-	// The most downloads first (then the most bytes, then the oldest repo); only the top ones need
-	// their names.
-	slices.SortFunc(order, func(a, b int64) int {
-		pa, pb := per[a], per[b]
-		if c := cmp.Compare(pb.Downloads, pa.Downloads); c != 0 {
-			return c
-		}
-		if c := cmp.Compare(pb.Bytes, pa.Bytes); c != 0 {
-			return c
-		}
-		return cmp.Compare(a, b)
-	})
-	for _, id := range order {
-		if len(out.Repos) == topRepos {
-			break
-		}
-		repo, err := h.Repos.ByID(ctx, id)
-		if errors.Is(err, repos.ErrNotFound) {
-			continue // deleted since the read: its rows went with it
-		}
-		if err != nil {
-			route.Fail(w, r, err)
-			return
-		}
-		p := per[id]
-		p.Name, p.Format = repo.Name, repo.Format
-		out.Repos = append(out.Repos, *p)
+	top, err := h.Downloads.Top(ctx, first, topRepos)
+	if err != nil {
+		route.Fail(w, r, err)
+		return
+	}
+	for _, t := range top {
+		out.Repos = append(out.Repos, RepoStats{Name: t.Name, Format: t.Format, Downloads: t.Downloads, Bytes: t.Bytes})
 	}
 	httpx.WriteJSON(w, http.StatusOK, out)
 }

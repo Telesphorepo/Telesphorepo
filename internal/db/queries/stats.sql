@@ -9,11 +9,27 @@ ON CONFLICT (repo_id, day) DO UPDATE SET
   downloads = download_stats.downloads + excluded.downloads,
   bytes = download_stats.bytes + excluded.bytes;
 
--- The rows of the days from since on, through download_stats_day: at most one per repo and day.
+-- The rows of the days from since on, through download_stats_window: at most one per repo and day.
 -- name: ListDownloadsSince :many
 SELECT repo_id, day, downloads, bytes FROM download_stats WHERE day >= sqlc.arg(since) ORDER BY day;
 
--- Retention: the days before a cutoff, through download_stats_day.
+-- The downloads of each day from since on, through download_stats_window (covering, in day order).
+-- name: SumDownloadsByDay :many
+SELECT day, CAST(SUM(downloads) AS INTEGER) AS downloads, CAST(SUM(bytes) AS INTEGER) AS bytes
+FROM download_stats WHERE day >= sqlc.arg(since) GROUP BY day ORDER BY day;
+
+-- The repos with the most downloads from since on (then the most bytes, then the oldest repo), most
+-- first: the window is summed per repo from download_stats_window alone, and only the top ones are
+-- joined to repos.
+-- name: TopDownloadRepos :many
+SELECT r.name, r.format, t.downloads, t.bytes FROM (
+  SELECT repo_id, CAST(SUM(downloads) AS INTEGER) AS downloads, CAST(SUM(bytes) AS INTEGER) AS bytes
+  FROM download_stats WHERE day >= sqlc.arg(since)
+  GROUP BY repo_id ORDER BY 2 DESC, 3 DESC, repo_id LIMIT sqlc.arg(n)
+) t JOIN repos r ON r.id = t.repo_id
+ORDER BY t.downloads DESC, t.bytes DESC, r.id;
+
+-- Retention: the days before a cutoff, through download_stats_window.
 -- name: DeleteOldDownloads :execrows
 DELETE FROM download_stats WHERE day < sqlc.arg(before);
 

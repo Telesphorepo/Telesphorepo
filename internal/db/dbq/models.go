@@ -39,7 +39,7 @@ type Asset struct {
 	Unit        sql.NullString
 }
 
-type AssetsFt struct {
+type AssetsSearch struct {
 	Path string
 }
 

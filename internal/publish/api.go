@@ -491,41 +491,23 @@ func (m *mod) trustInScope(w http.ResponseWriter, r *http.Request, s pipelineSco
 }
 
 // listTrusts returns a keyset page of the policies by name that the caller may see:
-// ?after=<name>&limit=. It walks the pages of all policies until its page is full.
+// ?after=<name>&limit=. A holder of All repositories reads a page of all policies; anyone else a
+// page of the policies whose repos all lie where they hold the CI pipelines permission.
 func (m *mod) listTrusts(w http.ResponseWriter, r *http.Request, c *route.Call) {
-	_, scope, ok := m.pipelines(w, r, c)
-	if !ok {
-		return
-	}
 	limit := httpx.Limit(r)
 	after := r.URL.Query().Get("after")
-	out := []*Trust{}
-	for {
-		items, next, err := m.svc.Trusts(r.Context(), after, limit)
-		if err != nil {
-			publishFail(w, r, err)
-			return
+	var ids []int64
+	if !c.Managed.All {
+		for id := range c.Managed.IDs {
+			ids = append(ids, id)
 		}
-		for i, t := range items {
-			if !scope.covers(t.Repos) {
-				continue
-			}
-			out = append(out, t)
-			if len(out) == limit {
-				more := ""
-				if i < len(items)-1 || next != "" {
-					more = t.Name
-				}
-				httpx.WriteJSON(w, http.StatusOK, route.Page[*Trust]{Items: out, Next: route.Cursor(more)})
-				return
-			}
-		}
-		if next == "" {
-			httpx.WriteJSON(w, http.StatusOK, route.Page[*Trust]{Items: out, Next: nil})
-			return
-		}
-		after = next
 	}
+	items, next, err := m.svc.Trusts(r.Context(), c.Managed.All, ids, after, limit)
+	if err != nil {
+		publishFail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, route.Page[*Trust]{Items: items, Next: route.Cursor(next)})
 }
 
 // createTrust stores a policy: {name, issuer, audience, claims, jwks, repos, disabled} -> 201.

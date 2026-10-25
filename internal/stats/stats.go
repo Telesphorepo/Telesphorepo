@@ -120,23 +120,45 @@ func (c *Counter) Flush(ctx context.Context) error {
 	return err
 }
 
-// Row is the downloads of one repo on one day.
-type Row struct {
-	RepoID    int64
+// DayRow is the downloads of every repo on one day.
+type DayRow struct {
 	Day       int64
 	Downloads int64
 	Bytes     int64
 }
 
-// Since returns the written rows of the days from day on, oldest day first.
-func (c *Counter) Since(ctx context.Context, day int64) ([]Row, error) {
-	rows, err := c.rq.ListDownloadsSince(ctx, day)
+// TopRow is the downloads of one repo over a window.
+type TopRow struct {
+	Name      string
+	Format    string
+	Downloads int64
+	Bytes     int64
+}
+
+// Days returns the written downloads of each day from day on that has any, oldest first. SQL sums
+// them from download_stats_window.
+func (c *Counter) Days(ctx context.Context, day int64) ([]DayRow, error) {
+	rows, err := c.rq.SumDownloadsByDay(ctx, day)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]Row, len(rows))
+	out := make([]DayRow, len(rows))
 	for i, r := range rows {
-		out[i] = Row{RepoID: r.RepoID, Day: r.Day, Downloads: r.Downloads, Bytes: r.Bytes}
+		out[i] = DayRow{Day: r.Day, Downloads: r.Downloads, Bytes: r.Bytes}
+	}
+	return out, nil
+}
+
+// Top returns the n repos with the most written downloads from day on, most first (then the most
+// bytes, then the oldest repo).
+func (c *Counter) Top(ctx context.Context, day int64, n int) ([]TopRow, error) {
+	rows, err := c.rq.TopDownloadRepos(ctx, dbq.TopDownloadReposParams{Since: day, N: int64(n)})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]TopRow, len(rows))
+	for i, r := range rows {
+		out[i] = TopRow{Name: r.Name, Format: r.Format, Downloads: r.Downloads, Bytes: r.Bytes}
 	}
 	return out, nil
 }
