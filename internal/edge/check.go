@@ -72,7 +72,7 @@ type pendingCheck struct {
 // queue).
 type workerAnswer struct {
 	Version  string   `json:"version"`
-	Features []string `json:"features"` // nil: a Worker that reports no features
+	Features []string `json:"features"`
 	Ran      bool     `json:"ran"`
 	Pass     string   `json:"pass"`
 	Error    string   `json:"error"`
@@ -191,9 +191,9 @@ func (m *mod) runCheck(ctx context.Context, base *url.URL) checkResult {
 				reason = "HTTP " + strconv.Itoa(resp.StatusCode)
 			}
 			res.Message = fmt.Sprintf("The Worker %s on %s refused the check: %s.", a.Version, base.Host, reason)
-		case m.outdated(a.Version, a.Features, a.Features != nil) != "":
+		case m.outdated(a.Features) != "":
 			res.Outcome = "worker"
-			res.Message = m.outdated(a.Version, a.Features, a.Features != nil) + " Download the Worker (Deploy, below) and deploy it."
+			res.Message = m.outdated(a.Features) + " Download the Worker (Deploy, below) and deploy it."
 		default:
 			res.Outcome, res.OK = "worker", true
 			res.Message = fmt.Sprintf("The Worker %s answered on %s and ran its gap check", a.Version, base.Host) + passText[a.Pass]

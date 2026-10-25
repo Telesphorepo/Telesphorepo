@@ -120,7 +120,7 @@ func (m *mod) status(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	if g != nil && g.Version != "" {
 		ver := g.Version
 		out.WorkerVersion = &ver
-		out.WorkerOutdated = m.outdated(ver, g.Features, g.Reported)
+		out.WorkerOutdated = m.outdated(g.Features)
 	}
 	if g != nil && !g.CheckedAt.IsZero() {
 		t := g.CheckedAt

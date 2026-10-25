@@ -2072,7 +2072,7 @@ mode of that moment, so an `enabled: true` never lands after the off switch.
   module logs that the drain cannot go on and drops it. A move to
   `storage=fs` turns edge delivery off.
 - **The Worker's state.** The controller reads `gap/state.json` at most once a minute: the Worker's
-  build and features (one that lacks a feature of `requires`, or reports no features, is outdated:
+  build and features (one that lacks a feature of `requires` is outdated:
   see **The contract**), the regions that the
   Worker has a binding for (a chosen region without one is `waiting`), the start of the copy pass
   that runs and the copies that each region's last pass queued. While edge delivery is not on it
@@ -2269,8 +2269,7 @@ lacks. The contract is the objects under `edge/v1/` and what their fields mean:
   `edge/v2/`, where an older Worker finds no `config.json` and passes every request to the
   server.
 - **Outdated.** The status's `worker_outdated` says why the deployed Worker sends every request to
-  the server: it lacks a feature of `requires`, or it reports no features (it cannot read
-  `config.json`). Then `deploy_needed` is true, the check says so, and Settings › Overview shows
+  the server: it lacks a feature of `requires`. Then `deploy_needed` is true, the check says so, and Settings › Overview shows
   the notice for a person who can open Edge delivery.
 
 In the folder the operator runs `bun install`, `bunx wrangler login` (once), `bun run provision`

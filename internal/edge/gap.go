@@ -7,14 +7,12 @@ import (
 )
 
 // gapState is what the server reads of gap/state.json, which the Worker's gap check writes: the
-// Worker's build and features (Reported is false when the file names no features), when the
-// check last finished a pass, the regions that the Worker has a binding
+// Worker's build and features, when the check last ran, the regions that the Worker has a binding
 // for, and the bucket that the bucket.json of each binding names ("" for none). Markers is nil
 // when the file has no markers.
 type gapState struct {
 	Version    string
 	Features   []string
-	Reported   bool
 	CheckedAt  time.Time // the last run of the gap check; zero before the first
 	Regions    map[string]bool
 	Markers    map[string]string // hint -> bucket
@@ -28,8 +26,8 @@ type gapState struct {
 
 // parseGap reads gap/state.json: {version, features, checked, last_run, bindings: [hint], markers: {home,
 // regions: {hint: bucket}}, pass: {started, ...} | null, last_pass: {started, finished} | null,
-// regions: {hint: {last_pass, queued}}}, times in unix seconds. The time of the check is checked
-// (every run writes it); a Worker that does not write it gives last_pass.finished, else last_run.
+// regions: {hint: {last_pass, queued}}}, times in unix seconds. The time of the check is checked,
+// which every run writes.
 func parseGap(b []byte) *gapState {
 	g := &gapState{Regions: map[string]bool{}, Copies: map[string]int64{}}
 	var top map[string]json.RawMessage
@@ -37,7 +35,7 @@ func parseGap(b []byte) *gapState {
 		return g
 	}
 	_ = json.Unmarshal(top["version"], &g.Version)
-	g.Reported = json.Unmarshal(top["features"], &g.Features) == nil && g.Features != nil
+	_ = json.Unmarshal(top["features"], &g.Features)
 	var pass map[string]json.RawMessage
 	if json.Unmarshal(top["pass"], &pass) == nil && pass != nil {
 		g.PassStarted = unixOf(pass["started"])
@@ -53,13 +51,6 @@ func parseGap(b []byte) *gapState {
 		}
 	}
 	g.CheckedAt = unixOf(top["checked"])
-	var last map[string]json.RawMessage
-	if g.CheckedAt.IsZero() && json.Unmarshal(top["last_pass"], &last) == nil && last != nil {
-		g.CheckedAt = unixOf(last["finished"])
-	}
-	if g.CheckedAt.IsZero() {
-		g.CheckedAt = unixOf(top["last_run"])
-	}
 	var markers struct {
 		Home    *string           `json:"home"`
 		Regions map[string]string `json:"regions"`

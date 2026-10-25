@@ -1,7 +1,6 @@
 package edge
 
 import (
-	"fmt"
 	"slices"
 	"strings"
 )
@@ -31,12 +30,8 @@ func featureNames(fs []workerFeature) []string {
 }
 
 // outdated says why the deployed Worker sends every request to the server, or "" when it serves:
-// build and features are what it reported, reported is false for a Worker that reported no
-// features (one built before the contract, which does not read config.json).
-func (m *mod) outdated(build string, features []string, reported bool) string {
-	if !reported {
-		return fmt.Sprintf("The deployed Worker (%s) cannot read this server's edge objects and sends every request to the server.", build)
-	}
+// features are the ones it reported.
+func (m *mod) outdated(features []string) string {
 	var lacks []string
 	for _, f := range m.requires() {
 		if !slices.Contains(features, f.Name) {
