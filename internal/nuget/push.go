@@ -186,9 +186,13 @@ func (h *Handler) onCommitted(ctx context.Context, tx *sql.Tx, w *assets.Write, 
 
 // bumpPackage moves the revision of package lid of a hosted repo on, so its documents render
 // anew: the package row gets a revision above every earlier one, also above the revision of a
-// package of the same id that was removed before.
+// package of the same id that was removed before. It writes the newest listed version of each
+// search variant of the package anew.
 func bumpPackage(ctx context.Context, q *dbq.Queries, repoID int64, lid string) error {
-	return q.UpsertPackage(ctx, dbq.UpsertPackageParams{RepoID: repoID, LowerID: lid, Rev: time.Now().UnixNano()})
+	if err := q.UpsertPackage(ctx, dbq.UpsertPackageParams{RepoID: repoID, LowerID: lid, Rev: time.Now().UnixNano()}); err != nil {
+		return err
+	}
+	return q.SetPackageLatest(ctx, dbq.SetPackageLatestParams{RepoID: repoID, LowerID: lid})
 }
 
 func b2i(b bool) int64 {

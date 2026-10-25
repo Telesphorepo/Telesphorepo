@@ -187,56 +187,27 @@ func (q *Queries) InsertVersion(ctx context.Context, arg InsertVersionParams) er
 	return err
 }
 
-const latestVisibleVersion = `-- name: LatestVisibleVersion :one
-SELECT sort_key FROM nuget_versions
-WHERE repo_id = ? AND lower_id = ? AND listed = 1 AND prerelease <= ? AND semver2 <= ?
-ORDER BY sort_key DESC
-LIMIT 1
-`
-
-type LatestVisibleVersionParams struct {
-	RepoID     int64
-	LowerID    string
-	Prerelease int64
-	Semver2    int64
-}
-
-// The newest version of a package that a search shows: listed, a prerelease only with prerelease
-// 1 and a SemVer 2.0 version only with semver2 1. It walks the UNIQUE index from the newest
-// version and stops at the first match.
-func (q *Queries) LatestVisibleVersion(ctx context.Context, arg LatestVisibleVersionParams) (string, error) {
-	row := q.db.QueryRowContext(ctx, latestVisibleVersion,
-		arg.RepoID,
-		arg.LowerID,
-		arg.Prerelease,
-		arg.Semver2,
-	)
-	var sort_key string
-	err := row.Scan(&sort_key)
-	return sort_key, err
-}
-
-const listPackageIDs = `-- name: ListPackageIDs :many
-SELECT lower_id FROM nuget_packages
-WHERE repo_id = ? AND lower_id >= ? AND lower_id < ?
-ORDER BY lower_id
+const listRegVersionNames = `-- name: ListRegVersionNames :many
+SELECT version FROM nuget_versions
+WHERE repo_id = ? AND lower_id = ? AND semver2 <= ?
+ORDER BY sort_key
 LIMIT ?
 `
 
-type ListPackageIDsParams struct {
-	RepoID    int64
-	LowerID   string
-	LowerID_2 string
-	Limit     int64
+type ListRegVersionNamesParams struct {
+	RepoID  int64
+	LowerID string
+	Semver2 int64
+	Limit   int64
 }
 
-// The package ids of a repo from a lower bound (inclusive) below an upper bound, in id order:
-// the search of a hosted repo pages them.
-func (q *Queries) ListPackageIDs(ctx context.Context, arg ListPackageIDsParams) ([]string, error) {
-	rows, err := q.db.QueryContext(ctx, listPackageIDs,
+// The versions of one package that a registration variant shows, oldest first, without their
+// metadata: the page bounds of a paged index.
+func (q *Queries) ListRegVersionNames(ctx context.Context, arg ListRegVersionNamesParams) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listRegVersionNames,
 		arg.RepoID,
 		arg.LowerID,
-		arg.LowerID_2,
+		arg.Semver2,
 		arg.Limit,
 	)
 	if err != nil {
@@ -245,11 +216,172 @@ func (q *Queries) ListPackageIDs(ctx context.Context, arg ListPackageIDsParams) 
 	defer rows.Close()
 	var items []string
 	for rows.Next() {
-		var lower_id string
-		if err := rows.Scan(&lower_id); err != nil {
+		var version string
+		if err := rows.Scan(&version); err != nil {
 			return nil, err
 		}
-		items = append(items, lower_id)
+		items = append(items, version)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRegVersions = `-- name: ListRegVersions :many
+SELECT v.package_id, v.version, v.normalized, v.sort_key, v.semver2, v.prerelease, v.listed, v.meta,
+  v.nupkg_path, v.published_at, a.size, a.sha256, a.updated_at, a.build_id
+FROM nuget_versions v JOIN assets a ON a.id = v.asset_id
+WHERE v.repo_id = ? AND v.lower_id = ? AND v.semver2 <= ?
+ORDER BY v.sort_key
+LIMIT ?
+`
+
+type ListRegVersionsParams struct {
+	RepoID  int64
+	LowerID string
+	Semver2 int64
+	Limit   int64
+}
+
+type ListRegVersionsRow struct {
+	PackageID   string
+	Version     string
+	Normalized  string
+	SortKey     string
+	Semver2     int64
+	Prerelease  int64
+	Listed      int64
+	Meta        string
+	NupkgPath   string
+	PublishedAt int64
+	Size        int64
+	Sha256      string
+	UpdatedAt   int64
+	BuildID     sql.NullInt64
+}
+
+// The versions of one package that a registration variant shows (semver2 1: SemVer 2.0 ones
+// too), oldest first: an index that inlines its leaves.
+func (q *Queries) ListRegVersions(ctx context.Context, arg ListRegVersionsParams) ([]ListRegVersionsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listRegVersions,
+		arg.RepoID,
+		arg.LowerID,
+		arg.Semver2,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRegVersionsRow
+	for rows.Next() {
+		var i ListRegVersionsRow
+		if err := rows.Scan(
+			&i.PackageID,
+			&i.Version,
+			&i.Normalized,
+			&i.SortKey,
+			&i.Semver2,
+			&i.Prerelease,
+			&i.Listed,
+			&i.Meta,
+			&i.NupkgPath,
+			&i.PublishedAt,
+			&i.Size,
+			&i.Sha256,
+			&i.UpdatedAt,
+			&i.BuildID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRegVersionsBetween = `-- name: ListRegVersionsBetween :many
+SELECT v.package_id, v.version, v.normalized, v.sort_key, v.semver2, v.prerelease, v.listed, v.meta,
+  v.nupkg_path, v.published_at, a.size, a.sha256, a.updated_at, a.build_id
+FROM nuget_versions v JOIN assets a ON a.id = v.asset_id
+WHERE v.repo_id = ?1 AND v.lower_id = ?2 AND v.semver2 <= ?3
+  AND v.sort_key >= ?4 AND v.sort_key <= ?5
+ORDER BY v.sort_key
+LIMIT ?6
+`
+
+type ListRegVersionsBetweenParams struct {
+	RepoID  int64
+	LowerID string
+	Semver2 int64
+	Lower   string
+	Upper   string
+	Limit   int64
+}
+
+type ListRegVersionsBetweenRow struct {
+	PackageID   string
+	Version     string
+	Normalized  string
+	SortKey     string
+	Semver2     int64
+	Prerelease  int64
+	Listed      int64
+	Meta        string
+	NupkgPath   string
+	PublishedAt int64
+	Size        int64
+	Sha256      string
+	UpdatedAt   int64
+	BuildID     sql.NullInt64
+}
+
+// The versions of one package that a registration variant shows from a sort key through another,
+// oldest first: one page of a paged registration.
+func (q *Queries) ListRegVersionsBetween(ctx context.Context, arg ListRegVersionsBetweenParams) ([]ListRegVersionsBetweenRow, error) {
+	rows, err := q.db.QueryContext(ctx, listRegVersionsBetween,
+		arg.RepoID,
+		arg.LowerID,
+		arg.Semver2,
+		arg.Lower,
+		arg.Upper,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRegVersionsBetweenRow
+	for rows.Next() {
+		var i ListRegVersionsBetweenRow
+		if err := rows.Scan(
+			&i.PackageID,
+			&i.Version,
+			&i.Normalized,
+			&i.SortKey,
+			&i.Semver2,
+			&i.Prerelease,
+			&i.Listed,
+			&i.Meta,
+			&i.NupkgPath,
+			&i.PublishedAt,
+			&i.Size,
+			&i.Sha256,
+			&i.UpdatedAt,
+			&i.BuildID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -517,19 +649,67 @@ func (q *Queries) ListVersionsDesc(ctx context.Context, arg ListVersionsDescPara
 	return items, nil
 }
 
+const listVisibleReleases = `-- name: ListVisibleReleases :many
+SELECT version, normalized FROM nuget_versions
+WHERE repo_id = ? AND lower_id = ? AND listed = 1 AND prerelease = 0 AND semver2 <= ?
+ORDER BY sort_key
+LIMIT ?
+`
+
+type ListVisibleReleasesParams struct {
+	RepoID  int64
+	LowerID string
+	Semver2 int64
+	Limit   int64
+}
+
+type ListVisibleReleasesRow struct {
+	Version    string
+	Normalized string
+}
+
+// The versions of a package that a search without prereleases shows, oldest first, through the
+// partial index of the listed releases.
+func (q *Queries) ListVisibleReleases(ctx context.Context, arg ListVisibleReleasesParams) ([]ListVisibleReleasesRow, error) {
+	rows, err := q.db.QueryContext(ctx, listVisibleReleases,
+		arg.RepoID,
+		arg.LowerID,
+		arg.Semver2,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListVisibleReleasesRow
+	for rows.Next() {
+		var i ListVisibleReleasesRow
+		if err := rows.Scan(&i.Version, &i.Normalized); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listVisibleVersions = `-- name: ListVisibleVersions :many
 SELECT version, normalized FROM nuget_versions
-WHERE repo_id = ? AND lower_id = ? AND listed = 1 AND prerelease <= ? AND semver2 <= ?
+WHERE repo_id = ? AND lower_id = ? AND listed = 1 AND semver2 <= ?
 ORDER BY sort_key
 LIMIT ?
 `
 
 type ListVisibleVersionsParams struct {
-	RepoID     int64
-	LowerID    string
-	Prerelease int64
-	Semver2    int64
-	Limit      int64
+	RepoID  int64
+	LowerID string
+	Semver2 int64
+	Limit   int64
 }
 
 type ListVisibleVersionsRow struct {
@@ -537,12 +717,12 @@ type ListVisibleVersionsRow struct {
 	Normalized string
 }
 
-// The versions of a package that a search shows, oldest first, without their metadata.
+// The versions of a package that a search with prereleases shows, oldest first, without their
+// metadata.
 func (q *Queries) ListVisibleVersions(ctx context.Context, arg ListVisibleVersionsParams) ([]ListVisibleVersionsRow, error) {
 	rows, err := q.db.QueryContext(ctx, listVisibleVersions,
 		arg.RepoID,
 		arg.LowerID,
-		arg.Prerelease,
 		arg.Semver2,
 		arg.Limit,
 	)
@@ -608,6 +788,36 @@ func (q *Queries) SetListed(ctx context.Context, arg SetListedParams) (int64, er
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const setPackageLatest = `-- name: SetPackageLatest :exec
+INSERT INTO nuget_package_latest (package, release, release2, pre, pre2)
+SELECT p.id,
+  (SELECT v.sort_key FROM nuget_versions v WHERE v.repo_id = p.repo_id AND v.lower_id = p.lower_id
+    AND v.listed = 1 AND v.prerelease = 0 AND v.semver2 = 0 ORDER BY v.sort_key DESC LIMIT 1),
+  (SELECT v.sort_key FROM nuget_versions v WHERE v.repo_id = p.repo_id AND v.lower_id = p.lower_id
+    AND v.listed = 1 AND v.prerelease = 0 ORDER BY v.sort_key DESC LIMIT 1),
+  (SELECT v.sort_key FROM nuget_versions v WHERE v.repo_id = p.repo_id AND v.lower_id = p.lower_id
+    AND v.listed = 1 AND v.semver2 = 0 ORDER BY v.sort_key DESC LIMIT 1),
+  (SELECT v.sort_key FROM nuget_versions v WHERE v.repo_id = p.repo_id AND v.lower_id = p.lower_id
+    AND v.listed = 1 ORDER BY v.sort_key DESC LIMIT 1)
+FROM nuget_packages p
+WHERE p.repo_id = ? AND p.lower_id = ?
+ON CONFLICT (package) DO UPDATE SET release = excluded.release, release2 = excluded.release2,
+  pre = excluded.pre, pre2 = excluded.pre2
+`
+
+type SetPackageLatestParams struct {
+	RepoID  int64
+	LowerID string
+}
+
+// Writes the newest listed version of each search variant of a package (nuget_package_latest),
+// with each move of its rev. Each one walks the UNIQUE index from the newest version and stops at
+// the first match.
+func (q *Queries) SetPackageLatest(ctx context.Context, arg SetPackageLatestParams) error {
+	_, err := q.db.ExecContext(ctx, setPackageLatest, arg.RepoID, arg.LowerID)
+	return err
 }
 
 const upsertPackage = `-- name: UpsertPackage :exec

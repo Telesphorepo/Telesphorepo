@@ -161,7 +161,7 @@ func (h *Handler) usageModel(ctx context.Context, repo *repos.Repo, lid string) 
 	src, err := h.source(ctx, nil, nil, repo, lid)
 	if err == nil {
 		var m *model
-		if m, err = src.load(); err == nil {
+		if m, err = src.load(part{}); err == nil {
 			return m, nil
 		}
 	}

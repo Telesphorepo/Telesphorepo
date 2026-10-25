@@ -48,12 +48,18 @@ type versionRow = dbq.GetVersionRow
 // hostedModel reads the versions of package lid of a hosted repo: nil when it has none.
 func (h *Handler) hostedModel(ctx context.Context, repoID int64, lid string) (*model, error) {
 	rows, err := h.q.ListVersions(ctx, dbq.ListVersionsParams{RepoID: repoID, LowerID: lid, Limit: maxVersions})
-	if err != nil || len(rows) == 0 {
+	if err != nil {
 		return nil, err
 	}
+	return modelOf(len(rows), func(i int) versionRow { return versionRow(rows[i]) }), nil
+}
+
+// modelOf is the model of n version rows, oldest first (row(i) is the i-th): nil without a row
+// that reads.
+func modelOf(n int, row func(i int) versionRow) *model {
 	m := &model{}
-	for _, r := range rows {
-		l, err := leafOfRow(versionRow(r))
+	for i := range n {
+		l, err := leafOfRow(row(i))
 		if err != nil {
 			continue
 		}
@@ -61,7 +67,77 @@ func (h *Handler) hostedModel(ctx context.Context, repoID int64, lid string) (*m
 		m.leaves = append(m.leaves, l)
 	}
 	if len(m.leaves) == 0 {
-		return nil, nil
+		return nil
+	}
+	return m
+}
+
+// part is the part of a package's registration that a document renders: the index, one page
+// (lower and upper, lowered) or one leaf (lower, the lowered version).
+type part struct {
+	doc          string // "index", "page" or "leaf"
+	semver2      bool
+	lower, upper string
+}
+
+// hostedPart reads the versions of package lid of a hosted repo that the registration document
+// p renders: errNotFound when there are none. An index that inlines its leaves reads them; a paged
+// index reads only the versions, for the page bounds; a page reads its versions and a leaf its
+// version.
+func (h *Handler) hostedPart(ctx context.Context, repoID int64, lid string, p part) (*model, error) {
+	sv2 := b2i(p.semver2)
+	var m *model
+	switch p.doc {
+	case "index":
+		rows, err := h.q.ListRegVersions(ctx, dbq.ListRegVersionsParams{RepoID: repoID, LowerID: lid, Semver2: sv2, Limit: inlineMax + 1})
+		if err != nil {
+			return nil, err
+		}
+		if len(rows) <= inlineMax {
+			m = modelOf(len(rows), func(i int) versionRow { return versionRow(rows[i]) })
+			break
+		}
+		names, err := h.q.ListRegVersionNames(ctx, dbq.ListRegVersionNamesParams{RepoID: repoID, LowerID: lid, Semver2: sv2, Limit: maxVersions})
+		if err != nil {
+			return nil, err
+		}
+		m = &model{id: lid}
+		for _, n := range names {
+			if v, err := version.ParseNuGet(n); err == nil {
+				m.leaves = append(m.leaves, leaf{ver: v})
+			}
+		}
+	case "page":
+		lower, err1 := version.ParseNuGet(p.lower)
+		upper, err2 := version.ParseNuGet(p.upper)
+		if err1 != nil || err2 != nil {
+			return nil, errNotFound
+		}
+		// A page holds pageSize versions, or every version of an index that inlines them.
+		rows, err := h.q.ListRegVersionsBetween(ctx, dbq.ListRegVersionsBetweenParams{RepoID: repoID, LowerID: lid, Semver2: sv2,
+			Lower: lower.SortKey(), Upper: upper.SortKey(), Limit: inlineMax + 1})
+		if err != nil {
+			return nil, err
+		}
+		if len(rows) <= inlineMax {
+			m = modelOf(len(rows), func(i int) versionRow { return versionRow(rows[i]) })
+		}
+	case "leaf":
+		v, err := version.ParseNuGet(p.lower)
+		if err != nil {
+			return nil, errNotFound
+		}
+		row, err := h.q.GetVersion(ctx, dbq.GetVersionParams{RepoID: repoID, LowerID: lid, SortKey: v.SortKey()})
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, errNotFound
+		}
+		if err != nil {
+			return nil, err
+		}
+		m = modelOf(1, func(int) versionRow { return row })
+	}
+	if m == nil || len(m.leaves) == 0 {
+		return nil, errNotFound
 	}
 	return m, nil
 }
@@ -85,10 +161,11 @@ var errNotFound = errors.New("not found")
 
 // pkgSource is how a document of one package of one repo renders: key names what the model comes
 // from (the revision of a hosted package, the SHA-256s of the remote documents of a proxy), load
-// reads the model. Only load reads the rows or the documents.
+// reads the model of a part of the registration: in a hosted repo the versions that the part
+// renders, in a proxy every version. Only load reads the rows or the documents.
 type pkgSource struct {
 	key  []string
-	load func() (*model, error)
+	load func(p part) (*model, error)
 }
 
 // source returns the pkgSource of package lid in repo (hosted or proxy); errNotFound when repo
@@ -100,12 +177,8 @@ func (h *Handler) source(ctx context.Context, r *http.Request, p *auth.Principal
 		if err != nil {
 			return nil, err
 		}
-		return &pkgSource{key: []string{"hosted", strconv.FormatInt(repo.ID, 10), rev}, load: func() (*model, error) {
-			m, err := h.hostedModel(ctx, repo.ID, lid)
-			if err == nil && m == nil {
-				err = errNotFound
-			}
-			return m, err
+		return &pkgSource{key: []string{"hosted", strconv.FormatInt(repo.ID, 10), rev}, load: func(p part) (*model, error) {
+			return h.hostedPart(ctx, repo.ID, lid, p)
 		}}, nil
 	}
 	up, err := h.upstreamOf(ctx, r, p, repo)
@@ -154,7 +227,7 @@ func (h *Handler) source(ctx context.Context, r *http.Request, p *auth.Principal
 		key = append(key, a.SHA256)
 		pages[ref] = a
 	}
-	return &pkgSource{key: key, load: func() (*model, error) {
+	return &pkgSource{key: key, load: func(part) (*model, error) {
 		body, err := h.readDoc(ctx, idx)
 		if err != nil {
 			return nil, err

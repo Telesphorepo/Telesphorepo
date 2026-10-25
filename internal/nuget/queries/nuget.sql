@@ -35,19 +35,38 @@ WHERE repo_id = ? AND lower_id = ?
 ORDER BY sort_key
 LIMIT ?;
 
--- The newest version of a package that a search shows: listed, a prerelease only with prerelease
--- 1 and a SemVer 2.0 version only with semver2 1. It walks the UNIQUE index from the newest
--- version and stops at the first match.
--- name: LatestVisibleVersion :one
-SELECT sort_key FROM nuget_versions
-WHERE repo_id = ? AND lower_id = ? AND listed = 1 AND prerelease <= ? AND semver2 <= ?
-ORDER BY sort_key DESC
-LIMIT 1;
+-- Writes the newest listed version of each search variant of a package (nuget_package_latest),
+-- with each move of its rev. Each one walks the UNIQUE index from the newest version and stops at
+-- the first match.
+-- name: SetPackageLatest :exec
+INSERT INTO nuget_package_latest (package, release, release2, pre, pre2)
+SELECT p.id,
+  (SELECT v.sort_key FROM nuget_versions v WHERE v.repo_id = p.repo_id AND v.lower_id = p.lower_id
+    AND v.listed = 1 AND v.prerelease = 0 AND v.semver2 = 0 ORDER BY v.sort_key DESC LIMIT 1),
+  (SELECT v.sort_key FROM nuget_versions v WHERE v.repo_id = p.repo_id AND v.lower_id = p.lower_id
+    AND v.listed = 1 AND v.prerelease = 0 ORDER BY v.sort_key DESC LIMIT 1),
+  (SELECT v.sort_key FROM nuget_versions v WHERE v.repo_id = p.repo_id AND v.lower_id = p.lower_id
+    AND v.listed = 1 AND v.semver2 = 0 ORDER BY v.sort_key DESC LIMIT 1),
+  (SELECT v.sort_key FROM nuget_versions v WHERE v.repo_id = p.repo_id AND v.lower_id = p.lower_id
+    AND v.listed = 1 ORDER BY v.sort_key DESC LIMIT 1)
+FROM nuget_packages p
+WHERE p.repo_id = ? AND p.lower_id = ?
+ON CONFLICT (package) DO UPDATE SET release = excluded.release, release2 = excluded.release2,
+  pre = excluded.pre, pre2 = excluded.pre2;
 
--- The versions of a package that a search shows, oldest first, without their metadata.
+-- The versions of a package that a search with prereleases shows, oldest first, without their
+-- metadata.
 -- name: ListVisibleVersions :many
 SELECT version, normalized FROM nuget_versions
-WHERE repo_id = ? AND lower_id = ? AND listed = 1 AND prerelease <= ? AND semver2 <= ?
+WHERE repo_id = ? AND lower_id = ? AND listed = 1 AND semver2 <= ?
+ORDER BY sort_key
+LIMIT ?;
+
+-- The versions of a package that a search without prereleases shows, oldest first, through the
+-- partial index of the listed releases.
+-- name: ListVisibleReleases :many
+SELECT version, normalized FROM nuget_versions
+WHERE repo_id = ? AND lower_id = ? AND listed = 1 AND prerelease = 0 AND semver2 <= ?
 ORDER BY sort_key
 LIMIT ?;
 
@@ -79,6 +98,35 @@ WHERE v.repo_id = ? AND v.lower_id = ? AND v.sort_key < ?
 ORDER BY v.sort_key DESC
 LIMIT ?;
 
+-- The versions of one package that a registration variant shows (semver2 1: SemVer 2.0 ones
+-- too), oldest first: an index that inlines its leaves.
+-- name: ListRegVersions :many
+SELECT v.package_id, v.version, v.normalized, v.sort_key, v.semver2, v.prerelease, v.listed, v.meta,
+  v.nupkg_path, v.published_at, a.size, a.sha256, a.updated_at, a.build_id
+FROM nuget_versions v JOIN assets a ON a.id = v.asset_id
+WHERE v.repo_id = ? AND v.lower_id = ? AND v.semver2 <= ?
+ORDER BY v.sort_key
+LIMIT ?;
+
+-- The versions of one package that a registration variant shows, oldest first, without their
+-- metadata: the page bounds of a paged index.
+-- name: ListRegVersionNames :many
+SELECT version FROM nuget_versions
+WHERE repo_id = ? AND lower_id = ? AND semver2 <= ?
+ORDER BY sort_key
+LIMIT ?;
+
+-- The versions of one package that a registration variant shows from a sort key through another,
+-- oldest first: one page of a paged registration.
+-- name: ListRegVersionsBetween :many
+SELECT v.package_id, v.version, v.normalized, v.sort_key, v.semver2, v.prerelease, v.listed, v.meta,
+  v.nupkg_path, v.published_at, a.size, a.sha256, a.updated_at, a.build_id
+FROM nuget_versions v JOIN assets a ON a.id = v.asset_id
+WHERE v.repo_id = sqlc.arg(repo_id) AND v.lower_id = sqlc.arg(lower_id) AND v.semver2 <= sqlc.arg(semver2)
+  AND v.sort_key >= sqlc.arg(lower) AND v.sort_key <= sqlc.arg(upper)
+ORDER BY v.sort_key
+LIMIT sqlc.arg(limit);
+
 -- One version of a package.
 -- name: GetVersion :one
 SELECT v.package_id, v.version, v.normalized, v.sort_key, v.semver2, v.prerelease, v.listed, v.meta,
@@ -94,13 +142,6 @@ SELECT 1 FROM nuget_versions WHERE repo_id = ? AND lower_id = ? LIMIT 1;
 -- name: SetListed :execrows
 UPDATE nuget_versions SET listed = ? WHERE repo_id = ? AND lower_id = ? AND sort_key = ?;
 
--- The package ids of a repo from a lower bound (inclusive) below an upper bound, in id order:
--- the search of a hosted repo pages them.
--- name: ListPackageIDs :many
-SELECT lower_id FROM nuget_packages
-WHERE repo_id = ? AND lower_id >= ? AND lower_id < ?
-ORDER BY lower_id
-LIMIT ?;
 
 -- A repo delete empties this table batch by batch before its row goes (repos.Service.OnPurge).
 -- name: PurgeNugetVersions :execrows
