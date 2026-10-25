@@ -370,8 +370,8 @@ func Remember(ctx context.Context) context.Context {
 	return context.WithValue(ctx, memoKey{}, &memo{members: map[int64][]*Repo{}})
 }
 
-// MemberRepos returns the member repos of group in read order: the members from memory, each
-// repo an indexed point lookup, or the memo of the request (Remember).
+// MemberRepos returns the member repos of group in read order: the members from memory, their
+// repos in one query of their ids, or the memo of the request (Remember).
 func (s *Service) MemberRepos(ctx context.Context, group *Repo) ([]*Repo, error) {
 	m, _ := ctx.Value(memoKey{}).(*memo)
 	if m != nil {
@@ -383,16 +383,19 @@ func (s *Service) MemberRepos(ctx context.Context, group *Repo) ([]*Repo, error)
 		}
 	}
 	ids := s.Members(group.ID)
+	found, err := s.rows(dbq.New(s.db.R).ListReposByIDs(ctx, ids))
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[int64]*Repo, len(found))
+	for _, r := range found {
+		byID[r.ID] = r
+	}
 	out := make([]*Repo, 0, len(ids))
 	for _, id := range ids {
-		r, err := s.ByID(ctx, id)
-		if errors.Is(err, ErrNotFound) {
-			continue // deleted after the copy was read
+		if r, ok := byID[id]; ok { // a member deleted after the copy was read is gone
+			out = append(out, r)
 		}
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, r)
 	}
 	if m != nil {
 		m.mu.Lock()

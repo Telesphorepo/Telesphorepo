@@ -1,6 +1,6 @@
 <!--
   Repositories: every repository for a holder of All repositories; for anyone else the repositories
-  where they hold more than download and publish (auth.listsRepo). A row opens its settings, or its files when the person can
+  where they hold a permission that manages it (GET /api/repos?perm=, 100 a page with Load more). A row opens its settings, or its files when the person can
   open no settings tab. Pick rows (Edit settings) to make them public or private at once, or (All
   repositories) to delete them after a confirm; more than one asks you to type the count.
 -->
@@ -10,7 +10,8 @@
   import { href, repoPath, repoSettingsPath } from "$lib/router.svelte";
   import { auth } from "$lib/auth.svelte";
   import { api, errorMessage, type Repo } from "$lib/api";
-  import { Resource, listOf } from "$lib/load.svelte";
+  import { Keyset, Resource } from "$lib/load.svelte";
+  import { managingRepoPermissions } from "$lib/permissions";
   import { count, someNames } from "$lib/words";
   import { waitForDeletes } from "$lib/deletes";
   import { Button } from "$lib/components/ui/button";
@@ -24,11 +25,9 @@
 
   let {}: PageProps = $props();
 
-  const repos = new Resource(() => api.repos.list());
+  const repos = new Keyset((p) => api.repos.list({ perm: managingRepoPermissions() }, p), 100);
   const formats = new Resource(() => api.formats.list());
   const titles = $derived(Object.fromEntries((formats.data ?? []).map((f) => [f.name, f.title])));
-  // GET /api/repos also lists the public repositories and those with download or publish only.
-  const source = listOf(repos, (items) => items.filter((r) => auth.listsRepo(r.name)).sort((a, b) => a.name.localeCompare(b.name)));
   const rowHref = (r: Repo) => href(auth.managesRepo(r.name) ? repoSettingsPath(r.name) : repoPath(r.name));
   const canCreate = $derived(auth.can("repositories.all"));
   const newRepo = href("/settings/repositories/new");
@@ -42,7 +41,7 @@
   /** Keeps only the picked names that still exist after a reload. */
   async function reloadKeepingPick() {
     await repos.reload();
-    const left = new Set((repos.data ?? []).map((r) => r.name));
+    const left = new Set(repos.items.map((r) => r.name));
     picked = new Set([...picked].filter((n) => left.has(n)));
   }
 
@@ -64,7 +63,7 @@
   let deleteOpen = $state(false);
   const deleteFiles = $derived(
     // A group's files are its members': deleting the group deletes none of them.
-    (repos.data ?? []).filter((r) => picked.has(r.name) && r.kind !== "group").reduce((n, r) => n + r.file_count, 0),
+    repos.items.filter((r) => picked.has(r.name) && r.kind !== "group").reduce((n, r) => n + r.file_count, 0),
   );
 
   async function remove() {
@@ -85,7 +84,7 @@
 </PageHeader>
 
 <Section>
-  <RepoTable {source} {titles} href={rowHref} bind:picked pickable={(r) => auth.canRepo(r.name, "repo.settings")}>
+  <RepoTable source={repos} {titles} href={rowHref} bind:picked pickable={(r) => auth.canRepo(r.name, "repo.settings")}>
     {#snippet bulk()}
       <Button variant="outline" size="sm" disabled={busy} onclick={() => setPublic(true)}>Make public</Button>
       <Button variant="outline" size="sm" disabled={busy} onclick={() => setPublic(false)}>Make private</Button>

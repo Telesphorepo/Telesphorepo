@@ -8,6 +8,7 @@ package dbq
 import (
 	"context"
 	"database/sql"
+	"strings"
 )
 
 const clearRebuild = `-- name: ClearRebuild :exec
@@ -305,6 +306,30 @@ func (q *Queries) GetRepoRedirect(ctx context.Context, name string) (RepoRedirec
 	return i, err
 }
 
+const getRepoTotals = `-- name: GetRepoTotals :one
+SELECT repos, files, bytes, public FROM repo_totals WHERE id = 1
+`
+
+type GetRepoTotalsRow struct {
+	Repos  int64
+	Files  int64
+	Bytes  int64
+	Public int64
+}
+
+// The totals of every repo (repo_totals, kept by triggers).
+func (q *Queries) GetRepoTotals(ctx context.Context) (GetRepoTotalsRow, error) {
+	row := q.db.QueryRowContext(ctx, getRepoTotals)
+	var i GetRepoTotalsRow
+	err := row.Scan(
+		&i.Repos,
+		&i.Files,
+		&i.Bytes,
+		&i.Public,
+	)
+	return i, err
+}
+
 const hasRebuild = `-- name: HasRebuild :one
 SELECT EXISTS (SELECT 1 FROM rebuilds WHERE repo_id = ? AND grp = ?)
 `
@@ -409,6 +434,280 @@ func (q *Queries) InsertRepoRedirect(ctx context.Context, arg InsertRepoRedirect
 	return err
 }
 
+const listAnonymousRepos = `-- name: ListAnonymousRepos :many
+SELECT r.id, r.name, r.format, r.kind, r.anonymous_read, r.config, r.created_at, r.description,
+  r.file_count, r.total_size, r.last_published_at,
+  o.id AS op_id, o.type AS op_type, o.owner AS op_owner, o.ref AS op_ref, o.state AS op_state, o.done AS op_done,
+  o.total AS op_total, o.error AS op_error, o.started_by AS op_started_by, o.started_at AS op_started_at,
+  o.updated_at AS op_updated_at
+FROM repos r LEFT JOIN repo_ops o ON o.repo_id = r.id
+WHERE r.anonymous_read = 1 AND r.name >= ?1 AND r.name < ?2
+  AND (CAST(?3 AS TEXT) = '' OR r.kind = ?3)
+ORDER BY r.name LIMIT ?4
+`
+
+type ListAnonymousReposParams struct {
+	From  string
+	To    string
+	Kind  string
+	Limit int64
+}
+
+type ListAnonymousReposRow struct {
+	ID              int64
+	Name            string
+	Format          string
+	Kind            string
+	AnonymousRead   bool
+	Config          string
+	CreatedAt       int64
+	Description     string
+	FileCount       int64
+	TotalSize       int64
+	LastPublishedAt int64
+	OpID            sql.NullInt64
+	OpType          sql.NullString
+	OpOwner         sql.NullString
+	OpRef           sql.NullString
+	OpState         sql.NullString
+	OpDone          sql.NullInt64
+	OpTotal         sql.NullInt64
+	OpError         sql.NullString
+	OpStartedBy     sql.NullInt64
+	OpStartedAt     sql.NullInt64
+	OpUpdatedAt     sql.NullInt64
+}
+
+// The public repos, through repos_anonymous_name.
+func (q *Queries) ListAnonymousRepos(ctx context.Context, arg ListAnonymousReposParams) ([]ListAnonymousReposRow, error) {
+	rows, err := q.db.QueryContext(ctx, listAnonymousRepos,
+		arg.From,
+		arg.To,
+		arg.Kind,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListAnonymousReposRow
+	for rows.Next() {
+		var i ListAnonymousReposRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Format,
+			&i.Kind,
+			&i.AnonymousRead,
+			&i.Config,
+			&i.CreatedAt,
+			&i.Description,
+			&i.FileCount,
+			&i.TotalSize,
+			&i.LastPublishedAt,
+			&i.OpID,
+			&i.OpType,
+			&i.OpOwner,
+			&i.OpRef,
+			&i.OpState,
+			&i.OpDone,
+			&i.OpTotal,
+			&i.OpError,
+			&i.OpStartedBy,
+			&i.OpStartedAt,
+			&i.OpUpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAnonymousReposByPublished = `-- name: ListAnonymousReposByPublished :many
+SELECT r.id, r.name, r.format, r.kind, r.anonymous_read, r.config, r.created_at, r.description,
+  r.file_count, r.total_size, r.last_published_at,
+  o.id AS op_id, o.type AS op_type, o.owner AS op_owner, o.ref AS op_ref, o.state AS op_state, o.done AS op_done,
+  o.total AS op_total, o.error AS op_error, o.started_by AS op_started_by, o.started_at AS op_started_at,
+  o.updated_at AS op_updated_at
+FROM repos r LEFT JOIN repo_ops o ON o.repo_id = r.id
+WHERE r.anonymous_read = 1 ORDER BY r.last_published_at DESC, r.id DESC LIMIT ?1
+`
+
+type ListAnonymousReposByPublishedRow struct {
+	ID              int64
+	Name            string
+	Format          string
+	Kind            string
+	AnonymousRead   bool
+	Config          string
+	CreatedAt       int64
+	Description     string
+	FileCount       int64
+	TotalSize       int64
+	LastPublishedAt int64
+	OpID            sql.NullInt64
+	OpType          sql.NullString
+	OpOwner         sql.NullString
+	OpRef           sql.NullString
+	OpState         sql.NullString
+	OpDone          sql.NullInt64
+	OpTotal         sql.NullInt64
+	OpError         sql.NullString
+	OpStartedBy     sql.NullInt64
+	OpStartedAt     sql.NullInt64
+	OpUpdatedAt     sql.NullInt64
+}
+
+func (q *Queries) ListAnonymousReposByPublished(ctx context.Context, limit int64) ([]ListAnonymousReposByPublishedRow, error) {
+	rows, err := q.db.QueryContext(ctx, listAnonymousReposByPublished, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListAnonymousReposByPublishedRow
+	for rows.Next() {
+		var i ListAnonymousReposByPublishedRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Format,
+			&i.Kind,
+			&i.AnonymousRead,
+			&i.Config,
+			&i.CreatedAt,
+			&i.Description,
+			&i.FileCount,
+			&i.TotalSize,
+			&i.LastPublishedAt,
+			&i.OpID,
+			&i.OpType,
+			&i.OpOwner,
+			&i.OpRef,
+			&i.OpState,
+			&i.OpDone,
+			&i.OpTotal,
+			&i.OpError,
+			&i.OpStartedBy,
+			&i.OpStartedAt,
+			&i.OpUpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAnonymousReposOfFormat = `-- name: ListAnonymousReposOfFormat :many
+SELECT r.id, r.name, r.format, r.kind, r.anonymous_read, r.config, r.created_at, r.description,
+  r.file_count, r.total_size, r.last_published_at,
+  o.id AS op_id, o.type AS op_type, o.owner AS op_owner, o.ref AS op_ref, o.state AS op_state, o.done AS op_done,
+  o.total AS op_total, o.error AS op_error, o.started_by AS op_started_by, o.started_at AS op_started_at,
+  o.updated_at AS op_updated_at
+FROM repos r LEFT JOIN repo_ops o ON o.repo_id = r.id
+WHERE r.anonymous_read = 1 AND r.format = ?1 AND r.name >= ?2 AND r.name < ?3
+  AND (CAST(?4 AS TEXT) = '' OR r.kind = ?4)
+ORDER BY r.name LIMIT ?5
+`
+
+type ListAnonymousReposOfFormatParams struct {
+	Format string
+	From   string
+	To     string
+	Kind   string
+	Limit  int64
+}
+
+type ListAnonymousReposOfFormatRow struct {
+	ID              int64
+	Name            string
+	Format          string
+	Kind            string
+	AnonymousRead   bool
+	Config          string
+	CreatedAt       int64
+	Description     string
+	FileCount       int64
+	TotalSize       int64
+	LastPublishedAt int64
+	OpID            sql.NullInt64
+	OpType          sql.NullString
+	OpOwner         sql.NullString
+	OpRef           sql.NullString
+	OpState         sql.NullString
+	OpDone          sql.NullInt64
+	OpTotal         sql.NullInt64
+	OpError         sql.NullString
+	OpStartedBy     sql.NullInt64
+	OpStartedAt     sql.NullInt64
+	OpUpdatedAt     sql.NullInt64
+}
+
+func (q *Queries) ListAnonymousReposOfFormat(ctx context.Context, arg ListAnonymousReposOfFormatParams) ([]ListAnonymousReposOfFormatRow, error) {
+	rows, err := q.db.QueryContext(ctx, listAnonymousReposOfFormat,
+		arg.Format,
+		arg.From,
+		arg.To,
+		arg.Kind,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListAnonymousReposOfFormatRow
+	for rows.Next() {
+		var i ListAnonymousReposOfFormatRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Format,
+			&i.Kind,
+			&i.AnonymousRead,
+			&i.Config,
+			&i.CreatedAt,
+			&i.Description,
+			&i.FileCount,
+			&i.TotalSize,
+			&i.LastPublishedAt,
+			&i.OpID,
+			&i.OpType,
+			&i.OpOwner,
+			&i.OpRef,
+			&i.OpState,
+			&i.OpDone,
+			&i.OpTotal,
+			&i.OpError,
+			&i.OpStartedBy,
+			&i.OpStartedAt,
+			&i.OpUpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listGroupMembers = `-- name: ListGroupMembers :many
 SELECT member_id FROM repo_group_members WHERE group_id = ? ORDER BY position
 `
@@ -426,6 +725,88 @@ func (q *Queries) ListGroupMembers(ctx context.Context, groupID int64) ([]int64,
 			return nil, err
 		}
 		items = append(items, member_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listLargestRepos = `-- name: ListLargestRepos :many
+SELECT r.id, r.name, r.format, r.kind, r.anonymous_read, r.config, r.created_at, r.description,
+  r.file_count, r.total_size, r.last_published_at,
+  o.id AS op_id, o.type AS op_type, o.owner AS op_owner, o.ref AS op_ref, o.state AS op_state, o.done AS op_done,
+  o.total AS op_total, o.error AS op_error, o.started_by AS op_started_by, o.started_at AS op_started_at,
+  o.updated_at AS op_updated_at
+FROM repos r LEFT JOIN repo_ops o ON o.repo_id = r.id
+WHERE r.total_size > 0 ORDER BY r.total_size DESC, r.id DESC LIMIT ?1
+`
+
+type ListLargestReposRow struct {
+	ID              int64
+	Name            string
+	Format          string
+	Kind            string
+	AnonymousRead   bool
+	Config          string
+	CreatedAt       int64
+	Description     string
+	FileCount       int64
+	TotalSize       int64
+	LastPublishedAt int64
+	OpID            sql.NullInt64
+	OpType          sql.NullString
+	OpOwner         sql.NullString
+	OpRef           sql.NullString
+	OpState         sql.NullString
+	OpDone          sql.NullInt64
+	OpTotal         sql.NullInt64
+	OpError         sql.NullString
+	OpStartedBy     sql.NullInt64
+	OpStartedAt     sql.NullInt64
+	OpUpdatedAt     sql.NullInt64
+}
+
+// The largest repos that store something, through repos_size.
+func (q *Queries) ListLargestRepos(ctx context.Context, limit int64) ([]ListLargestReposRow, error) {
+	rows, err := q.db.QueryContext(ctx, listLargestRepos, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListLargestReposRow
+	for rows.Next() {
+		var i ListLargestReposRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Format,
+			&i.Kind,
+			&i.AnonymousRead,
+			&i.Config,
+			&i.CreatedAt,
+			&i.Description,
+			&i.FileCount,
+			&i.TotalSize,
+			&i.LastPublishedAt,
+			&i.OpID,
+			&i.OpType,
+			&i.OpOwner,
+			&i.OpRef,
+			&i.OpState,
+			&i.OpDone,
+			&i.OpTotal,
+			&i.OpError,
+			&i.OpStartedBy,
+			&i.OpStartedAt,
+			&i.OpUpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -704,6 +1085,462 @@ func (q *Queries) ListRepos(ctx context.Context, arg ListReposParams) ([]ListRep
 	return items, nil
 }
 
+const listReposByPublished = `-- name: ListReposByPublished :many
+SELECT r.id, r.name, r.format, r.kind, r.anonymous_read, r.config, r.created_at, r.description,
+  r.file_count, r.total_size, r.last_published_at,
+  o.id AS op_id, o.type AS op_type, o.owner AS op_owner, o.ref AS op_ref, o.state AS op_state, o.done AS op_done,
+  o.total AS op_total, o.error AS op_error, o.started_by AS op_started_by, o.started_at AS op_started_at,
+  o.updated_at AS op_updated_at
+FROM repos r LEFT JOIN repo_ops o ON o.repo_id = r.id
+ORDER BY r.last_published_at DESC, r.id DESC LIMIT ?1
+`
+
+type ListReposByPublishedRow struct {
+	ID              int64
+	Name            string
+	Format          string
+	Kind            string
+	AnonymousRead   bool
+	Config          string
+	CreatedAt       int64
+	Description     string
+	FileCount       int64
+	TotalSize       int64
+	LastPublishedAt int64
+	OpID            sql.NullInt64
+	OpType          sql.NullString
+	OpOwner         sql.NullString
+	OpRef           sql.NullString
+	OpState         sql.NullString
+	OpDone          sql.NullInt64
+	OpTotal         sql.NullInt64
+	OpError         sql.NullString
+	OpStartedBy     sql.NullInt64
+	OpStartedAt     sql.NullInt64
+	OpUpdatedAt     sql.NullInt64
+}
+
+// The newest publishes first, through repos_published.
+func (q *Queries) ListReposByPublished(ctx context.Context, limit int64) ([]ListReposByPublishedRow, error) {
+	rows, err := q.db.QueryContext(ctx, listReposByPublished, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListReposByPublishedRow
+	for rows.Next() {
+		var i ListReposByPublishedRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Format,
+			&i.Kind,
+			&i.AnonymousRead,
+			&i.Config,
+			&i.CreatedAt,
+			&i.Description,
+			&i.FileCount,
+			&i.TotalSize,
+			&i.LastPublishedAt,
+			&i.OpID,
+			&i.OpType,
+			&i.OpOwner,
+			&i.OpRef,
+			&i.OpState,
+			&i.OpDone,
+			&i.OpTotal,
+			&i.OpError,
+			&i.OpStartedBy,
+			&i.OpStartedAt,
+			&i.OpUpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listReposInRange = `-- name: ListReposInRange :many
+
+SELECT r.id, r.name, r.format, r.kind, r.anonymous_read, r.config, r.created_at, r.description,
+  r.file_count, r.total_size, r.last_published_at,
+  o.id AS op_id, o.type AS op_type, o.owner AS op_owner, o.ref AS op_ref, o.state AS op_state, o.done AS op_done,
+  o.total AS op_total, o.error AS op_error, o.started_by AS op_started_by, o.started_at AS op_started_at,
+  o.updated_at AS op_updated_at
+FROM repos r LEFT JOIN repo_ops o ON o.repo_id = r.id
+WHERE r.name >= ?1 AND r.name < ?2 ORDER BY r.name LIMIT ?3
+`
+
+type ListReposInRangeParams struct {
+	From  string
+	To    string
+	Limit int64
+}
+
+type ListReposInRangeRow struct {
+	ID              int64
+	Name            string
+	Format          string
+	Kind            string
+	AnonymousRead   bool
+	Config          string
+	CreatedAt       int64
+	Description     string
+	FileCount       int64
+	TotalSize       int64
+	LastPublishedAt int64
+	OpID            sql.NullInt64
+	OpType          sql.NullString
+	OpOwner         sql.NullString
+	OpRef           sql.NullString
+	OpState         sql.NullString
+	OpDone          sql.NullInt64
+	OpTotal         sql.NullInt64
+	OpError         sql.NullString
+	OpStartedBy     sql.NullInt64
+	OpStartedAt     sql.NullInt64
+	OpUpdatedAt     sql.NullInt64
+}
+
+// The lists of GET /api/repos (internal/repos list.go). A page by name is the names in
+// [from, to): the keyset cursor and a name prefix in one range of an index (migration
+// 0006_repo_lists.sql). kind ” and format ” match every repo. The lists of the repos of a
+// caller's grants are in dbq/extra.go (sqlc numbers the parameters after a slice wrongly).
+func (q *Queries) ListReposInRange(ctx context.Context, arg ListReposInRangeParams) ([]ListReposInRangeRow, error) {
+	rows, err := q.db.QueryContext(ctx, listReposInRange, arg.From, arg.To, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListReposInRangeRow
+	for rows.Next() {
+		var i ListReposInRangeRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Format,
+			&i.Kind,
+			&i.AnonymousRead,
+			&i.Config,
+			&i.CreatedAt,
+			&i.Description,
+			&i.FileCount,
+			&i.TotalSize,
+			&i.LastPublishedAt,
+			&i.OpID,
+			&i.OpType,
+			&i.OpOwner,
+			&i.OpRef,
+			&i.OpState,
+			&i.OpDone,
+			&i.OpTotal,
+			&i.OpError,
+			&i.OpStartedBy,
+			&i.OpStartedAt,
+			&i.OpUpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listReposNamed = `-- name: ListReposNamed :many
+SELECT r.id, r.name, r.format, r.kind, r.anonymous_read, r.config, r.created_at, r.description,
+  r.file_count, r.total_size, r.last_published_at,
+  o.id AS op_id, o.type AS op_type, o.owner AS op_owner, o.ref AS op_ref, o.state AS op_state, o.done AS op_done,
+  o.total AS op_total, o.error AS op_error, o.started_by AS op_started_by, o.started_at AS op_started_at,
+  o.updated_at AS op_updated_at
+FROM repos r LEFT JOIN repo_ops o ON o.repo_id = r.id
+WHERE r.name IN (/*SLICE:names*/?)
+`
+
+type ListReposNamedRow struct {
+	ID              int64
+	Name            string
+	Format          string
+	Kind            string
+	AnonymousRead   bool
+	Config          string
+	CreatedAt       int64
+	Description     string
+	FileCount       int64
+	TotalSize       int64
+	LastPublishedAt int64
+	OpID            sql.NullInt64
+	OpType          sql.NullString
+	OpOwner         sql.NullString
+	OpRef           sql.NullString
+	OpState         sql.NullString
+	OpDone          sql.NullInt64
+	OpTotal         sql.NullInt64
+	OpError         sql.NullString
+	OpStartedBy     sql.NullInt64
+	OpStartedAt     sql.NullInt64
+	OpUpdatedAt     sql.NullInt64
+}
+
+// The repos of the names, through the UNIQUE name (at most a page of names).
+func (q *Queries) ListReposNamed(ctx context.Context, names []string) ([]ListReposNamedRow, error) {
+	query := listReposNamed
+	var queryParams []interface{}
+	if len(names) > 0 {
+		for _, v := range names {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:names*/?", strings.Repeat(",?", len(names))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:names*/?", "NULL", 1)
+	}
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListReposNamedRow
+	for rows.Next() {
+		var i ListReposNamedRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Format,
+			&i.Kind,
+			&i.AnonymousRead,
+			&i.Config,
+			&i.CreatedAt,
+			&i.Description,
+			&i.FileCount,
+			&i.TotalSize,
+			&i.LastPublishedAt,
+			&i.OpID,
+			&i.OpType,
+			&i.OpOwner,
+			&i.OpRef,
+			&i.OpState,
+			&i.OpDone,
+			&i.OpTotal,
+			&i.OpError,
+			&i.OpStartedBy,
+			&i.OpStartedAt,
+			&i.OpUpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listReposOfFormat = `-- name: ListReposOfFormat :many
+SELECT r.id, r.name, r.format, r.kind, r.anonymous_read, r.config, r.created_at, r.description,
+  r.file_count, r.total_size, r.last_published_at,
+  o.id AS op_id, o.type AS op_type, o.owner AS op_owner, o.ref AS op_ref, o.state AS op_state, o.done AS op_done,
+  o.total AS op_total, o.error AS op_error, o.started_by AS op_started_by, o.started_at AS op_started_at,
+  o.updated_at AS op_updated_at
+FROM repos r LEFT JOIN repo_ops o ON o.repo_id = r.id
+WHERE r.format = ?1 AND r.name >= ?2 AND r.name < ?3
+  AND (CAST(?4 AS TEXT) = '' OR r.kind = ?4)
+ORDER BY r.name LIMIT ?5
+`
+
+type ListReposOfFormatParams struct {
+	Format string
+	From   string
+	To     string
+	Kind   string
+	Limit  int64
+}
+
+type ListReposOfFormatRow struct {
+	ID              int64
+	Name            string
+	Format          string
+	Kind            string
+	AnonymousRead   bool
+	Config          string
+	CreatedAt       int64
+	Description     string
+	FileCount       int64
+	TotalSize       int64
+	LastPublishedAt int64
+	OpID            sql.NullInt64
+	OpType          sql.NullString
+	OpOwner         sql.NullString
+	OpRef           sql.NullString
+	OpState         sql.NullString
+	OpDone          sql.NullInt64
+	OpTotal         sql.NullInt64
+	OpError         sql.NullString
+	OpStartedBy     sql.NullInt64
+	OpStartedAt     sql.NullInt64
+	OpUpdatedAt     sql.NullInt64
+}
+
+func (q *Queries) ListReposOfFormat(ctx context.Context, arg ListReposOfFormatParams) ([]ListReposOfFormatRow, error) {
+	rows, err := q.db.QueryContext(ctx, listReposOfFormat,
+		arg.Format,
+		arg.From,
+		arg.To,
+		arg.Kind,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListReposOfFormatRow
+	for rows.Next() {
+		var i ListReposOfFormatRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Format,
+			&i.Kind,
+			&i.AnonymousRead,
+			&i.Config,
+			&i.CreatedAt,
+			&i.Description,
+			&i.FileCount,
+			&i.TotalSize,
+			&i.LastPublishedAt,
+			&i.OpID,
+			&i.OpType,
+			&i.OpOwner,
+			&i.OpRef,
+			&i.OpState,
+			&i.OpDone,
+			&i.OpTotal,
+			&i.OpError,
+			&i.OpStartedBy,
+			&i.OpStartedAt,
+			&i.OpUpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listReposOfKind = `-- name: ListReposOfKind :many
+SELECT r.id, r.name, r.format, r.kind, r.anonymous_read, r.config, r.created_at, r.description,
+  r.file_count, r.total_size, r.last_published_at,
+  o.id AS op_id, o.type AS op_type, o.owner AS op_owner, o.ref AS op_ref, o.state AS op_state, o.done AS op_done,
+  o.total AS op_total, o.error AS op_error, o.started_by AS op_started_by, o.started_at AS op_started_at,
+  o.updated_at AS op_updated_at
+FROM repos r LEFT JOIN repo_ops o ON o.repo_id = r.id
+WHERE r.kind = ?1 AND r.name >= ?2 AND r.name < ?3 ORDER BY r.name LIMIT ?4
+`
+
+type ListReposOfKindParams struct {
+	Kind  string
+	From  string
+	To    string
+	Limit int64
+}
+
+type ListReposOfKindRow struct {
+	ID              int64
+	Name            string
+	Format          string
+	Kind            string
+	AnonymousRead   bool
+	Config          string
+	CreatedAt       int64
+	Description     string
+	FileCount       int64
+	TotalSize       int64
+	LastPublishedAt int64
+	OpID            sql.NullInt64
+	OpType          sql.NullString
+	OpOwner         sql.NullString
+	OpRef           sql.NullString
+	OpState         sql.NullString
+	OpDone          sql.NullInt64
+	OpTotal         sql.NullInt64
+	OpError         sql.NullString
+	OpStartedBy     sql.NullInt64
+	OpStartedAt     sql.NullInt64
+	OpUpdatedAt     sql.NullInt64
+}
+
+func (q *Queries) ListReposOfKind(ctx context.Context, arg ListReposOfKindParams) ([]ListReposOfKindRow, error) {
+	rows, err := q.db.QueryContext(ctx, listReposOfKind,
+		arg.Kind,
+		arg.From,
+		arg.To,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListReposOfKindRow
+	for rows.Next() {
+		var i ListReposOfKindRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Format,
+			&i.Kind,
+			&i.AnonymousRead,
+			&i.Config,
+			&i.CreatedAt,
+			&i.Description,
+			&i.FileCount,
+			&i.TotalSize,
+			&i.LastPublishedAt,
+			&i.OpID,
+			&i.OpType,
+			&i.OpOwner,
+			&i.OpRef,
+			&i.OpState,
+			&i.OpDone,
+			&i.OpTotal,
+			&i.OpError,
+			&i.OpStartedBy,
+			&i.OpStartedAt,
+			&i.OpUpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRunningRepoOps = `-- name: ListRunningRepoOps :many
 SELECT id, repo_id, type, owner, ref, state, done, total, error, started_by, started_at, updated_at
 FROM repo_ops WHERE type = ? AND state = 'running' LIMIT ?
@@ -903,6 +1740,36 @@ func (q *Queries) SetRepoOpState(ctx context.Context, arg SetRepoOpStateParams) 
 		arg.ID,
 	)
 	return err
+}
+
+const sumReposIn = `-- name: SumReposIn :one
+SELECT count(*) AS repos, CAST(coalesce(sum(file_count), 0) AS INTEGER) AS files,
+  CAST(coalesce(sum(total_size), 0) AS INTEGER) AS bytes
+FROM repos WHERE id IN (/*SLICE:ids*/?)
+`
+
+type SumReposInRow struct {
+	Repos int64
+	Files int64
+	Bytes int64
+}
+
+// The totals of the repos of a caller's grants.
+func (q *Queries) SumReposIn(ctx context.Context, ids []int64) (SumReposInRow, error) {
+	query := sumReposIn
+	var queryParams []interface{}
+	if len(ids) > 0 {
+		for _, v := range ids {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:ids*/?", strings.Repeat(",?", len(ids))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:ids*/?", "NULL", 1)
+	}
+	row := q.db.QueryRowContext(ctx, query, queryParams...)
+	var i SumReposInRow
+	err := row.Scan(&i.Repos, &i.Files, &i.Bytes)
+	return i, err
 }
 
 const updateProxy = `-- name: UpdateProxy :exec

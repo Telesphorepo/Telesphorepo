@@ -14,7 +14,8 @@
   import { untrack } from "svelte";
   import { toast } from "svelte-sonner";
   import { api, errorMessage, type Repo, type Trust, type TrustInput } from "$lib/api";
-  import { Resource } from "$lib/load.svelte";
+  import { Keyset, RepoFormats, Resource } from "$lib/load.svelte";
+  import SourceMore from "$lib/components/SourceMore.svelte";
   import { Draft } from "$lib/unsaved.svelte";
   import { go, href, navigate } from "$lib/router.svelte";
   import { auth } from "$lib/auth.svelte";
@@ -83,7 +84,13 @@
   const returnTo = untrack(() => (back && /^\/(settings|repo)\/[^/]/.test(back) && !back.includes("//") ? back : null));
 
   const rule = new Resource<Trust | null>(() => (id === null ? Promise.resolve(null) : api.publish.trusts.get(id)));
-  const repos = new Resource(() => api.repos.list());
+  // The hosted repositories where the person holds CI pipelines, 200 a page (GET /api/repos?perm=&kind=).
+  const repos = new Keyset((p) => api.repos.list({ perm: ["ci.pipelines"], kind: "hosted" }, p), 200);
+  // The formats of the chosen repositories, also of those on a page not loaded yet.
+  const repoFormats = new RepoFormats();
+  $effect(() => repoFormats.add(repos.items));
+  const formatOf = (name: string) => repoFormats.format(name) || undefined;
+  $effect(() => repoFormats.want(draft?.value.repos ?? []));
   // A pipeline without its own audience checks tokens against the public address of the server.
   // The settings need one of General, Sign-in options, Storage or Network; without them the page skips the check.
   const readsSettings = (["general", "signin", "storage", "network"] as const).some((p) => auth.can(p));
@@ -95,20 +102,25 @@
   // A rehearsal repository (Rehearse publishing of the Nexus migration) comes right before the repository it rehearses.
   const rehearses = (r: Repo) => (typeof r.fields?.rehearsal_for === "string" ? r.fields.rehearsal_for : "");
   const sortedRepos = $derived(
-    (repos.data ?? [])
-      .filter((r) => r.kind === "hosted" && auth.canRepo(r.name, "ci.pipelines"))
-      .sort((a, b) => {
+    [...repos.items].sort((a, b) => {
         const ka = rehearses(a) || a.name;
         const kb = rehearses(b) || b.name;
         return ka === kb ? Number(!rehearses(a)) - Number(!rehearses(b)) : ka.localeCompare(kb);
       }),
   );
-  /** The rehearsal repository of a repository that still copies from Nexus, which a new pipeline publishes to first. */
-  const rehearsalOf = (name: string) => {
-    const r = repos.data?.find((x) => x.name === name);
-    if (r?.operation?.type !== "mirror") return null;
-    return repos.data?.find((x) => rehearses(x) === name && auth.canRepo(x.name, "ci.pipelines")) ?? null;
-  };
+  /**
+   * The rehearsal repository (<name>-rehearsal) of a repository that still copies from Nexus,
+   * which a new pipeline publishes to first; the repository itself otherwise; null when the person
+   * cannot choose it.
+   */
+  async function firstTarget(name: string): Promise<string | null> {
+    const found = await api.repos.named([name, name + "-rehearsal"]);
+    const r = found.find((x) => x.name === name);
+    if (!r || r.kind !== "hosted" || !auth.canRepo(name, "ci.pipelines")) return null;
+    if (r.operation?.type !== "mirror") return name;
+    const h = found.find((x) => rehearses(x) === name && auth.canRepo(x.name, "ci.pipelines"));
+    return h?.name ?? name;
+  }
 
   type Value = {
     name: string;
@@ -180,13 +192,15 @@
   // A new pipeline that starts from a repository has it chosen.
   let preselected = false;
   $effect(() => {
-    if (!isNew || preselected || !draft || !repos.data) return;
+    if (!isNew || preselected || !draft) return;
     preselected = true;
     const r = startRepo;
-    if (!r || !repos.data.some((x) => x.name === r)) return;
+    if (!r) return;
     // A repository that still copies from Nexus takes no publishes: start with its rehearsal.
-    const first = untrack(() => rehearsalOf(r)?.name ?? r);
-    untrack(() => draft && (draft.value.repos = [first]));
+    firstTarget(r).then(
+      (first) => first && untrack(() => draft && draft.value.repos.length === 0 && (draft.value.repos = [first])),
+      () => {},
+    );
   });
 
   const autoName = $derived.by(() => {
@@ -414,7 +428,7 @@
       jk={v.jk}
       accepts={accepts(v, hand)}
       repos={v.repos}
-      formatOf={(r) => repos.data?.find((x) => x.name === r)?.format}
+      {formatOf}
     />
   {/snippet}
 
@@ -602,9 +616,9 @@
       </Area>
 
       <Area n={isNew ? 3 : undefined} title="Repositories it can publish to" footer={isNew && steps === 3 ? createRow : undefined}>
-        {#if repos.loading && !repos.data}
+        {#if repos.loading && repos.items.length === 0}
           <Loading rows={3} />
-        {:else if repos.error && !repos.data}
+        {:else if repos.error && repos.items.length === 0}
           <ErrorState error={repos.error} title="The repositories did not load" onRetry={repos.reload} />
         {:else if sortedRepos.length === 0}
           {#if auth.can("repositories.all")}
@@ -629,6 +643,7 @@
               </OptionRow>
             {/each}
           </div>
+          <SourceMore source={repos} />
         {/if}
       </Area>
 
@@ -638,7 +653,7 @@
           title={v.system === "github" ? "Add the workflow to your repository" : "Add the Jenkinsfile to your repository"}
           footer={isNew ? createRow : undefined}
         >
-          <WorkflowSetup system={v.system} repos={v.repos} github={v.gh} formatOf={(r) => repos.data?.find((x) => x.name === r)?.format} />
+          <WorkflowSetup system={v.system} repos={v.repos} github={v.gh} {formatOf} />
         </Area>
       {/if}
     </form>

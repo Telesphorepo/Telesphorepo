@@ -366,6 +366,7 @@ func first(s []string) string {
 type UserRepo struct {
 	Repo   string   `json:"repo"`
 	Format string   `json:"format"`
+	Kind   string   `json:"kind"`
 	Public bool     `json:"public"`
 	Perms  []string `json:"perms"`
 	Via    string   `json:"via"`
@@ -416,7 +417,7 @@ func (e *Engine) User(ctx context.Context, u *auth.User, after string, limit int
 			return nil, "", err
 		}
 		for i, r := range page {
-			ur := UserRepo{Repo: r.Name, Format: r.Format, Public: r.AnonymousRead}
+			ur := UserRepo{Repo: r.Name, Format: r.Format, Kind: r.Kind, Public: r.AnonymousRead}
 			var set perm.Set
 			switch {
 			case allRepos:

@@ -200,6 +200,14 @@ type RepoRedirect struct {
 	LastUsedAt int64
 }
 
+type RepoTotal struct {
+	ID     int64
+	Repos  int64
+	Files  int64
+	Bytes  int64
+	Public int64
+}
+
 type Session struct {
 	IDHash    []byte
 	UserID    int64

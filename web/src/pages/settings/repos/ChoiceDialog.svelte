@@ -2,7 +2,8 @@
   A short form of the Access tab that adds existing things to a repository: a CI pipeline or a
   network list. The dialog is the wide one (768px), since each row has a line of help. Each thing
   is a checkbox row, a 4px gap between rows; the submit button names how many it adds. A link
-  under the rows creates a new one on its own page. The parent adds the chosen ids to its draft,
+  under the rows creates a new one on its own page. With `more` (a paged source of the items),
+  "Load more" under the rows asks for the next page. The parent adds the chosen ids to its draft,
   and the page's save bar saves them.
 
     <ChoiceDialog bind:open title="Add CI pipelines to maven" noun={["CI pipeline", "CI pipelines"]}
@@ -22,6 +23,8 @@
   import OptionRow from "$lib/components/OptionRow.svelte";
   import Loading from "$lib/components/Loading.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
+  import SourceMore from "$lib/components/SourceMore.svelte";
+  import type { TableSource } from "$lib/load.svelte";
   import PlusIcon from "@lucide/svelte/icons/plus";
 
   let {
@@ -35,6 +38,7 @@
     none,
     newLabel,
     newHref,
+    more,
     onAdd,
   }: {
     open?: boolean;
@@ -51,6 +55,8 @@
     newLabel: string;
     /** The page that creates a new one; undefined when the person cannot create one. */
     newHref?: string;
+    /** The paged source that `items` come from: its next page. */
+    more?: TableSource<unknown>;
     onAdd: (ids: string[]) => void;
   } = $props();
 
@@ -79,6 +85,7 @@
           {/snippet}
         </OptionRow>
       {/each}
+      {#if more}<SourceMore source={more} />{/if}
     </div>
   {:else}
     <p class="text-body text-muted-foreground">{none}</p>

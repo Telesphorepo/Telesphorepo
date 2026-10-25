@@ -40,6 +40,19 @@ func (s *Service) WithGrants(ctx context.Context, p *Principal) (context.Context
 	return context.WithValue(ctx, grantsKey{}, &grants{user: p.UserID, sets: sets}), nil
 }
 
+// Granted returns the granted repository permissions of p's user by repo id that ctx holds
+// (WithGrants), or nil when it holds none: for anonymous, for a holder of all repositories, and
+// for a ctx that WithGrants did not make.
+func Granted(ctx context.Context, p *Principal) map[int64]perm.Set {
+	if p == nil || p.UserID == 0 {
+		return nil
+	}
+	if g, ok := ctx.Value(grantsKey{}).(*grants); ok && g.user == p.UserID {
+		return g.sets
+	}
+	return nil
+}
+
 // RepoPerms returns what p may do on repo: the repository permissions of p's grants, every one
 // for a holder of a permission that gives all repositories (repositories.all), and
 // repo.download for anyone on a repo with anonymous read. The grants come from ctx when it holds

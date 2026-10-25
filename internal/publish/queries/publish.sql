@@ -275,3 +275,14 @@ DELETE FROM publish_oidc_seen WHERE publish_oidc_seen.repo_id = sqlc.arg(repo_id
 -- name: PurgePublishSessions :execrows
 DELETE FROM publish_sessions WHERE id IN (SELECT x.id FROM publish_sessions x WHERE x.repo_id = sqlc.arg(repo_id) LIMIT sqlc.arg(limit));
 
+
+-- Counts the policies up to a cap, for the Settings overview.
+-- name: CountTrustsUpTo :one
+SELECT count(*) FROM (SELECT 1 FROM publish_trusts LIMIT sqlc.arg(cap));
+
+-- Counts the policies whose every repo is among ids: the candidates through
+-- publish_trust_repos_repo, each with the count of its repos through the primary key.
+-- name: CountTrustsWithin :one
+SELECT count(*) FROM (SELECT tr.trust_id FROM publish_trust_repos tr WHERE tr.repo_id IN (sqlc.slice(ids))
+  GROUP BY tr.trust_id
+  HAVING count(*) = (SELECT count(*) FROM publish_trust_repos x WHERE x.trust_id = tr.trust_id));

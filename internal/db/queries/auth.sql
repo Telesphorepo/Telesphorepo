@@ -173,3 +173,8 @@ DELETE FROM repo_permissions WHERE repo_id = ? AND user_id = ?;
 -- name: ListPermissions :many
 SELECT u.username, p.perm FROM repo_permissions p JOIN users u ON u.id = p.user_id
 WHERE p.repo_id = ?;
+
+-- Counts the accounts up to a cap, for the Settings overview ("10,000+").
+-- name: CountUsersUpTo :one
+SELECT count(*) FROM (SELECT 1 FROM users LIMIT sqlc.arg(cap));
+

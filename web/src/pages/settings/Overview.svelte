@@ -3,9 +3,10 @@
   version (a release's tag, Canary and the commit for a build of main) and its public address (for a holder of the General settings); under it, for a
   person who can open Edge delivery, the notice that the edge Worker needs a deploy (EdgeNotice); then the actions
   people take most as doors (New repository, New account, New CI pipeline; each only for a person
-  who may). Then one row of equal stat tiles, a figure and its label each: the repositories (GET /api/repos), their
-  files and the stored size, and the people, the CI pipelines and the signing keys, each only for a
-  person who can open its page, each a link to it. A holder of All repositories counts every
+  who may). Then one row of equal stat tiles, a figure and its label each: the repositories, their
+  files and the stored size (GET /api/overview: counters the server keeps), and the people
+  (GET /api/overview), the CI pipelines (GET /api/publish/trusts/count) and the signing keys, each
+  only for a person who can open its page, each a link to it; a count that stopped says "10,000+". A holder of All repositories counts every
   repository; anyone else their repositories, the ones where they hold more than download, under
   the heading "Your repositories". Then where the space goes: the eight largest repositories as
   bars, each with its format's icon. Then, for a holder
@@ -18,7 +19,7 @@
   import { href, navigate, repoPath, repoSettingsPath } from "$lib/router.svelte";
   import { auth } from "$lib/auth.svelte";
   import { brand } from "$lib/brand.svelte";
-  import { api, type Page, type PageParams, type Repo } from "$lib/api";
+  import { api, type Count, type Repo } from "$lib/api";
   import { Resource, listOf } from "$lib/load.svelte";
   import { formatCount, formatDateTime, formatSize } from "$lib/format";
   import { count, noun, versionName } from "$lib/words";
@@ -60,18 +61,6 @@
     return !!p && canOpen(p);
   };
 
-  /** Every item of a paged list, 200 a page. */
-  async function every<T>(fn: (p: PageParams) => Promise<Page<T>>): Promise<T[]> {
-    const out: T[] = [];
-    let after: string | undefined;
-    do {
-      const p = await fn({ after, limit: 200 });
-      out.push(...p.items);
-      after = p.next ?? undefined;
-    } while (after);
-    return out;
-  }
-
   // --- the server ---
   const settings = auth.can("settings.general") ? new Resource(() => api.settings.get()) : null;
   const baseURL = $derived(
@@ -80,26 +69,23 @@
 
   const version = new Resource(async () => (await api.changes()).version);
 
-  // --- the repositories ---
-  const repos = new Resource(() => api.repos.list());
+  // --- the repositories, and the people for a holder of People ---
+  const overview = new Resource(() => api.overview());
   const allRepos = $derived(auth.allRepos());
-  // Without All repositories: the repositories where the person holds more than download.
-  const mine = $derived((repos.data ?? []).filter((r) => allRepos || r.permissions.some((p) => p !== "repo.download")));
-
-  // A group stores nothing of its own: its members hold the files it serves.
-  const stores = $derived(mine.filter((r) => r.kind !== "group"));
-  const files = $derived(stores.reduce((n, r) => n + r.file_count, 0));
-  const stored = $derived(stores.reduce((n, r) => n + r.total_size, 0));
-  const largest = $derived([...stores].filter((r) => r.total_size > 0).sort((a, b) => b.total_size - a.total_size).slice(0, 8));
+  const figures = $derived(overview.data?.repos);
+  const files = $derived(figures?.files ?? 0);
+  const stored = $derived(figures?.size ?? 0);
+  const largest = $derived(overview.data?.largest ?? []);
   const share = (r: Repo) => (stored ? Math.round((r.total_size / stored) * 100) : 0);
   const repoHref = (r: Repo) => href(auth.managesRepo(r.name) ? repoSettingsPath(r.name) : repoPath(r.name));
 
   // --- people, CI pipelines, signing keys: each only for a person who can open its page ---
-  const people = opens("/settings/people") ? new Resource(() => every((p) => api.users.list(p))) : null;
-  const pipelines = opens("/settings/ci-pipelines") ? new Resource(() => every((p) => api.publish.trusts.list(p))) : null;
-  const keys = opens("/settings/signing-keys") ? new Resource(() => api.signingKeys.list()) : null;
+  const people = opens("/settings/people");
+  const pipelines = opens("/settings/ci-pipelines") ? new Resource(() => api.publish.trusts.count()) : null;
+  const keys = opens("/settings/signing-keys") ? new Resource(async (): Promise<Count> => ({ count: (await api.signingKeys.list()).length, more: false })) : null;
   const others = !!(people || pipelines || keys);
-
+  /** "1,204", "10,000+". */
+  const countText = (c: Count) => formatCount(c.count) + (c.more ? "+" : "");
   // --- recent activity ---
   const activity = opens("/settings/activity");
   const events = activity ? new Resource(async () => (await api.audit({ limit: 5 })).items) : null;
@@ -111,7 +97,6 @@
   const statDays = 30;
   const downloads = activity ? new Resource(() => api.stats()) : null;
   const topDownloads = $derived((downloads?.data?.repos ?? []).filter((r) => r.downloads > 0).slice(0, 5));
-  const repoOf = (name: string) => repos.data?.find((r) => r.name === name);
 
   // --- quick actions ---
   const canNewRepo = opens("/settings/repositories/new");
@@ -150,29 +135,29 @@
 
   <!-- The figures: one row of equal tiles. Without All repositories the repository figures are the person's own. -->
   <Section title={allRepos ? undefined : "Your repositories"} plain>
-    {#if repos.error && !repos.data}
-      <ErrorState error={repos.error} onRetry={repos.reload} />
-    {:else if repos.data && mine.length === 0}
+    {#if overview.error && !overview.data}
+      <ErrorState error={overview.error} onRetry={overview.reload} />
+    {:else if figures && figures.count === 0}
       <CompactEmpty icon={DatabaseIcon} text={canNewRepo ? "No repository yet." : "You manage no repository yet."} />
     {:else}
       <div class="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
-        <Stat label={noun(repos.data ? mine.length : 2, "Repository", "Repositories")} href={opens("/settings/repositories") ? href("/settings/repositories") : undefined}>
-          {@render repoFigure(formatCount(mine.length))}
+        <Stat label={noun(figures ? figures.count : 2, "Repository", "Repositories")} href={opens("/settings/repositories") ? href("/settings/repositories") : undefined}>
+          {@render repoFigure(formatCount(figures?.count ?? 0))}
         </Stat>
-        <Stat label={noun(repos.data ? files : 2, "File", "Files")}>{@render repoFigure(formatCount(files))}</Stat>
+        <Stat label={noun(figures ? files : 2, "File", "Files")}>{@render repoFigure(formatCount(files))}</Stat>
         <Stat label="Stored">{@render repoFigure(formatSize(stored))}</Stat>
         {#if people}
-          <Stat label={noun(people.data?.length ?? 2, "Person", "People")} href={href("/settings/people")}>
-            {@render figure(people)}
+          <Stat label={noun(overview.data?.people?.count ?? 2, "Person", "People")} href={href("/settings/people")}>
+            {#if overview.data?.people}{countText(overview.data.people)}{:else}{@render repoFigure("")}{/if}
           </Stat>
         {/if}
         {#if pipelines}
-          <Stat label={noun(pipelines.data?.length ?? 2, "CI pipeline", "CI pipelines")} href={href("/settings/ci-pipelines")}>
+          <Stat label={noun(pipelines.data?.count ?? 2, "CI pipeline", "CI pipelines")} href={href("/settings/ci-pipelines")}>
             {@render figure(pipelines)}
           </Stat>
         {/if}
         {#if keys}
-          <Stat label={noun(keys.data?.length ?? 2, "Signing key", "Signing keys")} href={href("/settings/signing-keys")}>
+          <Stat label={noun(keys.data?.count ?? 2, "Signing key", "Signing keys")} href={href("/settings/signing-keys")}>
             {@render figure(keys)}
           </Stat>
         {/if}
@@ -222,10 +207,7 @@
               source={{ items: topDownloads, loading: false, error: "" }}
               caption="Most downloaded repositories"
               key={(r) => r.name}
-              href={(r) => {
-                const repo = repoOf(r.name);
-                return repo ? repoHref(repo) : href(repoPath(r.name));
-              }}
+              href={(r) => href(auth.managesRepo(r.name) ? repoSettingsPath(r.name) : repoPath(r.name))}
             >
               {#snippet leading(r)}<FormatIcon format={r.format} class="size-5" />{/snippet}
               {#snippet title(r)}{r.name}{/snippet}
@@ -257,18 +239,18 @@
   {#if canNewAccount}<NewAccountDialog bind:open={newAccount} />{/if}
 {/if}
 
-<!-- A figure of the repositories: Loading until GET /api/repos answers. -->
+<!-- A figure of GET /api/overview: Loading until it answers. -->
 {#snippet repoFigure(value: string)}
-  {#if repos.loading && !repos.data}<Loading inline label="Loading" />{:else}{value}{/if}
+  {#if overview.loading && !overview.data}<Loading inline label="Loading" />{:else}{value}{/if}
 {/snippet}
 
 <!-- A count that loads on its own: Loading, then the value, or the error with Try again. -->
-{#snippet figure(r: Resource<unknown[]>)}
+{#snippet figure(r: Resource<Count>)}
   {#if r.loading && r.data === undefined}
     <Loading inline label="Loading" />
   {:else if r.error && r.data === undefined}
     <ErrorState inline error={r.error} onRetry={r.reload} />
   {:else if r.data !== undefined}
-    {formatCount(r.data.length)}
+    {countText(r.data)}
   {/if}
 {/snippet}

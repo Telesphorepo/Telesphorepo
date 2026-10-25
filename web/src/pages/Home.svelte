@@ -6,9 +6,9 @@
   Each door is one column of a three-column row, so two doors keep that width, centered; on a phone
   they stack. Under them the repositories (a heading over the cards, no card around them): Your
   repositories, where the person holds more than download, or, when there are none, Repositories,
-  the ones the person can see: the first six (three on a phone) by downloads in the last 30 days,
-  most first, then by name, with See all. Both read GET /api/repos (each Repo.permissions and
-  Repo.downloads), so a holder of All repositories counts too.
+  the ones the person can see: the six (three on a phone) published last, with See all. Each is one
+  call of at most six repositories (GET /api/repos?sort=published), so a holder of All repositories
+  counts too. The Publish door shows from the person's grants (auth.canSomeRepo).
 -->
 <script lang="ts">
   import type { Component } from "svelte";
@@ -17,6 +17,7 @@
   import { auth } from "$lib/auth.svelte";
   import { api } from "$lib/api";
   import { Resource } from "$lib/load.svelte";
+  import { repoPermissions } from "$lib/permissions";
   import { Button } from "$lib/components/ui/button";
   import Section from "$lib/components/Section.svelte";
   import CardGrid from "$lib/components/CardGrid.svelte";
@@ -37,18 +38,19 @@
 
   let {}: PageProps = $props();
 
-  const repos = new Resource(() => api.repos.list());
-
-  const byDownloads = $derived(
-    [...(repos.data ?? [])].sort((a, b) => (b.downloads ?? 0) - (a.downloads ?? 0) || a.name.localeCompare(b.name)),
-  );
-  const mine = $derived(byDownloads.filter((r) => r.permissions.some((p) => p !== "repo.download")));
-  const cards = $derived((mine.length > 0 ? mine : byDownloads).slice(0, 6));
-  const heading = $derived(mine.length > 0 ? "Your repositories" : "Repositories");
-  // Until the list loads, the grants decide whether the Publish door shows.
-  const publishes = $derived(
-    repos.data ? byDownloads.some((r) => r.kind === "hosted" && r.permissions.includes("repo.publish")) : auth.canSomeRepo("repo.publish"),
-  );
+  // Your repositories: the six published last where the person holds more than download; with
+  // none, the six published last of the ones they can see.
+  const repos = new Resource(async () => {
+    if (auth.user) {
+      const beyond = repoPermissions().map((p) => p.name).filter((p) => p !== "repo.download");
+      const mine = (await api.repos.recent(6, beyond)).items;
+      if (mine.length > 0) return { mine: true, cards: mine };
+    }
+    return { mine: false, cards: (await api.repos.recent(6)).items };
+  });
+  const cards = $derived(repos.data?.cards ?? []);
+  const heading = $derived(repos.data?.mine ? "Your repositories" : "Repositories");
+  const publishes = $derived(auth.canSomeRepo("repo.publish"));
 
   type Door = { title: string; text: string; href: string; icon: Component<{ class?: string }> };
   const doors = $derived.by(() => {

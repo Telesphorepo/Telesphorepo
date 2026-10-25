@@ -105,13 +105,15 @@ func TestDownloadStats(t *testing.T) {
 	// The repository list carries the downloads of each repo it shows, to a visitor too; the
 	// stats read above wrote the counters.
 	listed := func(a Auth) map[string]*int64 {
-		var list []struct {
-			Name      string `json:"name"`
-			Downloads *int64 `json:"downloads"`
+		var list struct {
+			Items []struct {
+				Name      string `json:"name"`
+				Downloads *int64 `json:"downloads"`
+			} `json:"items"`
 		}
-		s.MustAPI(t, http.MethodGet, "/api/repos", nil, a, &list)
+		s.MustAPI(t, http.MethodGet, "/api/repos?name="+pub+"&name="+priv, nil, a, &list)
 		out := map[string]*int64{}
-		for _, r := range list {
+		for _, r := range list.Items {
 			out[r.Name] = r.Downloads
 		}
 		return out

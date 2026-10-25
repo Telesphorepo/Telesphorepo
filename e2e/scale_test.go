@@ -29,7 +29,7 @@ const (
 	scaleFloor   = 2 * time.Millisecond
 )
 
-var scaleOps = []string{"maven-get", "asset-page", "search-rare", "search-common", "token-auth"}
+var scaleOps = []string{"maven-get", "asset-page", "search-rare", "search-common", "token-auth", "repo-page"}
 
 func TestScale(t *testing.T) {
 	t.Parallel()
@@ -127,6 +127,7 @@ func scaleRun(t *testing.T, n int) map[string]time.Duration {
 	searchRare := get("/api/search?limit=50&q="+url.QueryEscape(sample.Path), nil, http.StatusOK)
 	searchCommon := get("/api/search?limit=50&q="+url.QueryEscape(common), nil, http.StatusOK)
 	tokenAuth := get("/api/me", nil, http.StatusOK)
+	repoPage := get("/api/repos?limit=50", nil, http.StatusOK)
 
 	// Each asset-page sample fetches the page after the previous one.
 	cursor := ""
@@ -155,6 +156,7 @@ func scaleRun(t *testing.T, n int) map[string]time.Duration {
 		"search-rare":   p95(t, searchRare),
 		"search-common": p95(t, searchCommon),
 		"token-auth":    p95(t, tokenAuth),
+		"repo-page":     p95(t, repoPage),
 	}
 	for _, op := range scaleOps {
 		t.Logf("seed %d: %-14s p95 %s", n, op, out[op])
@@ -184,12 +186,23 @@ type scaleRepo struct {
 	Format string `json:"format"`
 }
 
-// scaleRepos lists every repo that auth can see: GET /api/repos answers one array of all of them.
+// scaleRepos lists every repo that auth can see, page by page of GET /api/repos.
 func scaleRepos(t *testing.T, s *Server, auth Auth) []scaleRepo {
 	t.Helper()
 	var all []scaleRepo
-	s.MustAPI(t, http.MethodGet, "/api/repos", nil, auth, &all)
-	return all
+	after := ""
+	for {
+		var page struct {
+			Items []scaleRepo `json:"items"`
+			Next  *string     `json:"next"`
+		}
+		s.MustAPI(t, http.MethodGet, "/api/repos?limit=200&after="+url.QueryEscape(after), nil, auth, &page)
+		all = append(all, page.Items...)
+		if page.Next == nil {
+			return all
+		}
+		after = *page.Next
+	}
 }
 
 // waitSettled waits until no repo reports pending background work in /api/repos/{name}/status,
