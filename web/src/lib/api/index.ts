@@ -127,8 +127,21 @@ export const api = {
   },
 
   repos: {
-    /** Every repo the caller can read (anonymous: the anonymous-read ones). Not paged. */
-    list: () => request<T.Repo[]>("GET", "/api/repos"),
+    /**
+     * A keyset page by name of the repositories the caller can see (a visitor: the public ones),
+     * narrowed on the server: `q` a name prefix, `format`, `kind`, `perm` (the caller holds one of
+     * them). Items have no `config`; GET of one repository has it.
+     */
+    list: (f: T.RepoFilter = {}, p?: T.PageParams) =>
+      request<T.Page<T.Repo>>("GET", "/api/repos", { query: { q: f.q, format: f.format, kind: f.kind, perm: f.perm?.join(","), ...page(p) } }),
+    /** The limit repositories (at most 50) published last that the caller sees, where they hold one of perm. */
+    recent: (limit: number, perm?: T.PermId[]) =>
+      request<T.Page<T.Repo>>("GET", "/api/repos", { query: { sort: "published", limit, perm: perm?.join(",") } }),
+    /** The repositories of names that the caller sees (at most 200), by name. */
+    named: async (names: string[]) =>
+      names.length === 0
+        ? []
+        : (await request<T.Page<T.Repo>>("GET", "/api/repos?" + names.map((n) => "name=" + enc(n)).join("&"))).items,
     get: (name: string) => request<T.Repo>("GET", repo(name)),
     create: (r: T.NewRepo) => request<T.Repo>("POST", "/api/repos", { body: r }),
     update: (name: string, patch: T.RepoPatch) => request<T.Repo>("PATCH", repo(name), { body: patch }),
@@ -457,6 +470,8 @@ export const api = {
     log: (p?: T.PageParams) => request<T.Page<T.SessionInfo>>("GET", "/api/publish/log", { query: page(p) }),
     trusts: {
       list: (p?: T.PageParams) => request<T.Page<T.Trust>>("GET", "/api/publish/trusts", { query: page(p) }),
+      /** How many CI pipelines the caller manages (a count of every one stops at 10,000: more). */
+      count: () => request<T.Count>("GET", "/api/publish/trusts/count"),
       get: (id: number) => request<T.Trust>("GET", `/api/publish/trusts/${id}`),
       create: (t: T.TrustInput) => request<T.Trust>("POST", "/api/publish/trusts", { body: t }),
       update: (id: number, t: T.TrustInput) => request<T.Trust>("PATCH", `/api/publish/trusts/${id}`, { body: t }),
@@ -485,5 +500,7 @@ export const api = {
     request<T.Page<T.PersonName>>("GET", "/api/audit/people", { query: { q, ...page(p) } }),
 
   /** activity.read: the downloads of the last days (today included; 30 by default) and the top repositories. */
+  /** The figures of the Settings overview, each a counter or a bounded count. */
+  overview: () => request<T.Overview>("GET", "/api/overview"),
   stats: (days?: number) => request<T.DownloadStats>("GET", "/api/stats", { query: { days } }),
 };

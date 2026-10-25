@@ -1,18 +1,21 @@
 <!--
-  Browse: every repository the visitor can download from, sorted by name, as one table to scan
-  down: the format icon, the name with a lock after a private one, the format, the kind of a proxy
-  or a group, and the description on one line. The Format column shows only with two or more
-  formats, the Kind column only when a proxy or a group is listed. A click anywhere on a row opens
-  the repository. A filter box and a format select ("All formats" first, then each format present
-  with its icon) narrow it in the browser (the list is never paged). People with All repositories
-  create a repository from the toolbar.
+  Browse: the repositories the visitor can download from, by name, as one table to scan down: the
+  format icon, the name with a lock after a private one, the format, the kind of a proxy or a
+  group, and the description on one line. The server pages the list (GET /api/repos, 100 a page)
+  and the next page loads on its own as the end of the table comes into view. The filter box (the
+  start of the name, 250 ms after the last key) and the format select ("All formats" first, then
+  each format of the server with its icon) ask the server again. The Format column shows with two
+  or more formats on the server, the Kind column once a proxy or a group is listed. A click
+  anywhere on a row opens the repository. People with All repositories create a repository from
+  the toolbar.
 -->
 <script lang="ts">
+  import { untrack } from "svelte";
   import type { PageProps } from "$lib/router.svelte";
   import { href, repoPath } from "$lib/router.svelte";
   import { auth } from "$lib/auth.svelte";
   import { api, type Repo } from "$lib/api";
-  import { Resource, type TableSource } from "$lib/load.svelte";
+  import { Keyset } from "$lib/load.svelte";
   import { formats } from "$lib/formats/registry.svelte";
   import * as Select from "$lib/components/ui/select";
   import * as InputGroup from "$lib/components/ui/input-group";
@@ -22,6 +25,7 @@
   import Toolbar from "$lib/components/Toolbar.svelte";
   import Section from "$lib/components/Section.svelte";
   import DataTable, { type Column } from "$lib/components/DataTable.svelte";
+  import SourceMore from "$lib/components/SourceMore.svelte";
   import Cell from "$lib/components/Cell.svelte";
   import FormatIcon from "$lib/components/FormatIcon.svelte";
   import Loading from "$lib/components/Loading.svelte";
@@ -36,34 +40,37 @@
 
   let {}: PageProps = $props();
 
-  const repos = new Resource(() => api.repos.list());
   formats.load();
 
   let filter = $state("");
   let format = $state("");
   const allFormats = "*";
 
-  const all = $derived([...(repos.data ?? [])].sort((a, b) => a.name.localeCompare(b.name)));
-  const present = $derived([...new Set(all.map((r) => r.format))].sort((a, b) => formats.title(a).localeCompare(formats.title(b))));
-  const filtered = $derived(filter.trim() !== "" || format !== "");
-
-  const matches = (r: Repo) => {
+  // The filter asks the server 250 ms after the last key; the format at once.
+  let prefix = $state("");
+  $effect(() => {
     const f = filter.trim().toLowerCase();
-    return (!format || r.format === format) && (!f || r.name.toLowerCase().includes(f) || r.description.toLowerCase().includes(f));
-  };
-  const shown = $derived(all.filter(matches));
-  // The page shows loading and errors itself; the table only draws the rows.
-  const source: TableSource<Repo> = {
-    get items() {
-      return shown;
-    },
-    loading: false,
-    error: "",
-  };
+    const t = setTimeout(() => (prefix = f), 250);
+    return () => clearTimeout(t);
+  });
+  let repos = $state<Keyset<Repo>>(untrack(() => new Keyset((p) => api.repos.list({}, p), 100)));
+  let first = true;
+  $effect(() => {
+    const q = prefix;
+    const fm = format;
+    if (first) {
+      first = false;
+      return;
+    }
+    repos = untrack(() => new Keyset((p) => api.repos.list({ q, format: fm || undefined }, p), 100));
+  });
+
+  const present = $derived([...formats.list].map((f) => f.name).sort((a, b) => formats.title(a).localeCompare(formats.title(b))));
+  const filtered = $derived(prefix !== "" || format !== "");
 
   // A column that would say the same thing on every row is left out.
   const formatColumn = $derived(present.length > 1);
-  const kindColumn = $derived(all.some((r) => r.kind !== "hosted"));
+  const kindColumn = $derived(repos.items.some((r) => r.kind !== "hosted"));
   const columns: Column[] = $derived([
     { label: "Name" },
     ...(formatColumn ? [{ label: "Format", hideOnPhone: true }] : []),
@@ -71,6 +78,11 @@
     { label: "Description", class: "w-full" },
   ]);
   const rowHref = (r: Repo) => href(repoPath(r.name));
+  // The toolbar shows once the server has a repository for the person, also while a filter finds none.
+  let any = $state(false);
+  $effect(() => {
+    if (repos.items.length > 0) any = true;
+  });
 
   const clear = () => {
     filter = "";
@@ -83,11 +95,11 @@
 
 <PageHeader title="Repositories" />
 
-{#if all.length > 0}
+{#if any || filtered}
   <Toolbar>
     <InputGroup.Root class="sm:w-72">
       <InputGroup.Addon><SearchIcon /></InputGroup.Addon>
-      <InputGroup.Input bind:value={filter} type="search" placeholder="Filter by name or description" aria-label="Filter repositories" />
+      <InputGroup.Input bind:value={filter} type="search" placeholder="Filter by name" aria-label="Filter repositories by the start of the name" />
     </InputGroup.Root>
     {#if present.length > 1}
       <Select.Root type="single" value={format || allFormats} onValueChange={(v) => (format = v === allFormats ? "" : v)}>
@@ -110,13 +122,13 @@
   </Toolbar>
 {/if}
 
-{#if repos.loading && !repos.data}
+{#if repos.loading && repos.items.length === 0}
   <Loading rows={5} />
-{:else if repos.error && !repos.data}
+{:else if repos.error && repos.items.length === 0}
   <ErrorState error={repos.error} title="The repositories did not load" onRetry={repos.reload} />
-{:else if shown.length > 0}
+{:else if repos.items.length > 0}
   <Section>
-    <DataTable {source} {columns} caption="Repositories" key={(r) => r.name} href={rowHref}>
+    <DataTable source={{ items: repos.items, loading: false, error: "" }} {columns} caption="Repositories" key={(r) => r.name} href={rowHref}>
       {#snippet row(r)}
         <!-- The name never truncates; on a phone it is the row's first line (data-grow) and the other cells its meta line. -->
         <Table.Cell data-grow>
@@ -136,8 +148,9 @@
         {#if r.description}<Cell muted text={r.description} class="w-full max-w-0 max-sm:flex-[1_1_8rem]" />{:else}<Table.Cell class="w-full" />{/if}
       {/snippet}
     </DataTable>
+    <SourceMore source={repos} auto />
   </Section>
-{:else if filtered && all.length > 0}
+{:else if filtered}
   <CompactEmpty icon={SearchXIcon} title="No repository matches" text="Change the filter, or clear it to see every repository.">
     <Button variant="outline" onclick={clear}>Clear the filter</Button>
   </CompactEmpty>

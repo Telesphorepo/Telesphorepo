@@ -99,8 +99,8 @@
 
   // --- repositories ---
   const access = new Keyset<UserRepoAccess>((p) => api.users.access(person, p));
-  // The repositories the caller can give access to, for the Give access dialog.
-  const repos = new Resource<Repo[]>(() => api.repos.list());
+  // The public repositories that are not groups, for the line under the grants.
+  const overview = new Resource(() => api.overview());
 
   // Only the grants are rows; the public repositories without one are counted in one line under them.
   type Row = { repo: string; format: string; public: boolean; perms: PermId[] };
@@ -110,7 +110,7 @@
       .map((r): Row => ({ repo: r.repo, format: r.format, public: r.public, perms: r.perms ?? [] })),
   );
   const publicOnly = $derived(
-    (repos.data ?? []).filter((r) => r.anonymous_read && r.kind !== "group" && !access.items.some((x) => x.repo === r.name && x.via === "permission")).length,
+    Math.max(0, (overview.data?.public_repos ?? 0) - access.items.filter((x) => x.via === "permission" && x.public && x.kind !== "group").length),
   );
   const source: TableSource<Row> = {
     get items() {
@@ -160,12 +160,13 @@
   // --- give access and change permissions ---
   let giveOpen = $state(false);
   const granted = $derived(new Set(rows.map((r) => r.repo)));
-  const choices = $derived(
-    (repos.data ?? [])
-      .filter((r) => !granted.has(r.name) && auth.canRepo(r.name, "repo.access"))
-      .sort((a, b) => a.name.localeCompare(b.name))
-      .map((r) => ({ id: r.name, label: r.name, detail: r.anonymous_read ? "Public: anyone can download" : undefined })),
-  );
+  // The repositories where the caller holds Manage access whose name starts with q (GET /api/repos?perm=repo.access).
+  const findRepos = async (q: string) =>
+    (await api.repos.list({ q, perm: ["repo.access"] }, { limit: 50 })).items.map((r) => ({
+      id: r.name,
+      label: r.name,
+      detail: r.anonymous_read ? "Public: anyone can download" : undefined,
+    }));
   async function give(names: string[], perms: PermId[]) {
     await api.grants.set([person], names, perms);
     toast.success(`Gave ${person} access to ${repoCount(names.length)}: ${repoPhrase(perms)}.`);
@@ -397,9 +398,8 @@
   bind:open={giveOpen}
   title="Give {person} access"
   noun={["repository", "repositories"]}
-  items={choices}
-  loading={repos.loading && !repos.data}
-  error={repos.error ? `The repositories did not load: ${repos.error}` : ""}
+  search={findRepos}
+  exclude={[...granted]}
   none="{person} has access to every repository that you manage already."
   {held}
   submitLabel={(n) => (n ? `Give access to ${repoCount(n)}` : "Give access")}

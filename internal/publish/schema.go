@@ -17,5 +17,8 @@ func component() db.Component {
 	return db.Component{
 		Migrations: db.Sub(migrationsFS, "migrations"),
 		Queries:    db.Sub(queriesFS, "queries"),
+		Allow: map[string]string{
+			"CountTrustsUpTo": "a bounded count: it stops at its cap (the Settings overview says 10,000+)",
+		},
 	}
 }

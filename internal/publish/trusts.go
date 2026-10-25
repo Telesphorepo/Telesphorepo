@@ -804,3 +804,20 @@ func (s *Service) reused(ctx context.Context, seen [32]byte, repo *repos.Repo) (
 	return &Minted{ID: p.Publish.ID, Repo: repo.Name, Format: repo.Format, Kind: repo.Kind, RepoID: repo.ID,
 		Subject: p.Publish.Subject, Via: ViaOIDC, Reused: true, Session: p.Publish}, nil
 }
+
+// trustCountCap is where the count of every pipeline stops (the Settings overview: "10,000+").
+const trustCountCap = 10000
+
+// CountTrusts counts the pipelines of a scope: every one (all, up to trustCountCap; more is true
+// past it), or those whose every repo is among ids.
+func (s *Service) CountTrusts(ctx context.Context, all bool, ids []int64) (n int64, more bool, err error) {
+	if all {
+		n, err = s.rq.CountTrustsUpTo(ctx, trustCountCap+1)
+		return min(n, trustCountCap), n > trustCountCap, err
+	}
+	if len(ids) == 0 {
+		return 0, false, nil
+	}
+	n, err = s.rq.CountTrustsWithin(ctx, ids)
+	return n, false, err
+}

@@ -138,6 +138,7 @@ func (m *mod) routes(r *route.Router) {
 
 	pipelines := route.Policy{Accept: auth.CredSession, SomeRepo: PermPipelines}
 	r.Handle("GET /api/publish/trusts", pipelines, m.listTrusts)
+	r.Handle("GET /api/publish/trusts/count", pipelines, m.countTrusts)
 	r.Handle("POST /api/publish/trusts", pipelines, m.createTrust)
 	r.Handle("GET /api/publish/trusts/{id}", pipelines, m.getTrust)
 	r.Handle("PATCH /api/publish/trusts/{id}", pipelines, m.updateTrust)
@@ -526,6 +527,21 @@ func (m *mod) listTrusts(w http.ResponseWriter, r *http.Request, c *route.Call) 
 		}
 		after = next
 	}
+}
+
+// countTrusts answers {count, more}: the CI pipelines in the caller's scope, each of whose repos
+// the caller holds CI pipelines on; a count of every pipeline stops at 10,000 (more).
+func (m *mod) countTrusts(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	ids := make([]int64, 0, len(c.Managed.IDs))
+	for id := range c.Managed.IDs {
+		ids = append(ids, id)
+	}
+	n, more, err := m.svc.CountTrusts(r.Context(), c.Managed.All, ids)
+	if err != nil {
+		publishFail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"count": n, "more": more})
 }
 
 // createTrust stores a policy: {name, issuer, audience, claims, jwks, repos, disabled} -> 201.

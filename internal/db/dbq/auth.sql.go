@@ -40,6 +40,18 @@ func (q *Queries) AddUserPerm(ctx context.Context, arg AddUserPermParams) error 
 	return err
 }
 
+const countUsersUpTo = `-- name: CountUsersUpTo :one
+SELECT count(*) FROM (SELECT 1 FROM users LIMIT ?1)
+`
+
+// Counts the accounts up to a cap, for the Settings overview ("10,000+").
+func (q *Queries) CountUsersUpTo(ctx context.Context, cap int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countUsersUpTo, cap)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createOIDCUser = `-- name: CreateOIDCUser :one
 INSERT INTO users (username, password_hash, disabled, password_changed_at, created_at, kind, oidc_issuer, oidc_subject, email)
 VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?)

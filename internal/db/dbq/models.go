@@ -39,7 +39,7 @@ type Asset struct {
 	Unit        sql.NullString
 }
 
-type AssetsFt struct {
+type AssetsSearch struct {
 	Path string
 }
 
@@ -177,6 +177,14 @@ type RepoRedirect struct {
 	RepoID     int64
 	CreatedAt  int64
 	LastUsedAt int64
+}
+
+type RepoTotal struct {
+	ID     int64
+	Repos  int64
+	Files  int64
+	Bytes  int64
+	Public int64
 }
 
 type Session struct {

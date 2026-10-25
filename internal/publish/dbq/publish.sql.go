@@ -8,6 +8,7 @@ package dbq
 import (
 	"context"
 	"database/sql"
+	"strings"
 )
 
 const approveEnrollment = `-- name: ApproveEnrollment :execrows
@@ -124,6 +125,43 @@ func (q *Queries) CopyTrustRepos(ctx context.Context, arg CopyTrustReposParams) 
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const countTrustsUpTo = `-- name: CountTrustsUpTo :one
+SELECT count(*) FROM (SELECT 1 FROM publish_trusts LIMIT ?1)
+`
+
+// Counts the policies up to a cap, for the Settings overview.
+func (q *Queries) CountTrustsUpTo(ctx context.Context, cap int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countTrustsUpTo, cap)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countTrustsWithin = `-- name: CountTrustsWithin :one
+SELECT count(*) FROM (SELECT tr.trust_id FROM publish_trust_repos tr WHERE tr.repo_id IN (/*SLICE:ids*/?)
+  GROUP BY tr.trust_id
+  HAVING count(*) = (SELECT count(*) FROM publish_trust_repos x WHERE x.trust_id = tr.trust_id))
+`
+
+// Counts the policies whose every repo is among ids: the candidates through
+// publish_trust_repos_repo, each with the count of its repos through the primary key.
+func (q *Queries) CountTrustsWithin(ctx context.Context, ids []int64) (int64, error) {
+	query := countTrustsWithin
+	var queryParams []interface{}
+	if len(ids) > 0 {
+		for _, v := range ids {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:ids*/?", strings.Repeat(",?", len(ids))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:ids*/?", "NULL", 1)
+	}
+	row := q.db.QueryRowContext(ctx, query, queryParams...)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
 }
 
 const createDevice = `-- name: CreateDevice :one

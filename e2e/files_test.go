@@ -362,12 +362,14 @@ type repoCounters struct {
 // countersOf returns the counters of repo from the repo list (GET /api/repos).
 func countersOf(t *testing.T, s *Server, repo string) repoCounters {
 	t.Helper()
-	var list []struct {
-		Name string `json:"name"`
-		repoCounters
+	var list struct {
+		Items []struct {
+			Name string `json:"name"`
+			repoCounters
+		} `json:"items"`
 	}
-	s.MustAPI(t, http.MethodGet, "/api/repos", nil, s.Admin(), &list)
-	for _, r := range list {
+	s.MustAPI(t, http.MethodGet, "/api/repos?name="+repo, nil, s.Admin(), &list)
+	for _, r := range list.Items {
 		if r.Name == repo {
 			return r.repoCounters
 		}

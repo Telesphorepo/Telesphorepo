@@ -352,18 +352,14 @@ func TestAPIReposAndPermissions(t *testing.T) {
 		if st != 200 {
 			t.Fatalf("list repos: %d %s", st, b)
 		}
-		var rows []repoRow
-		if err := json.Unmarshal(b, &rows); err != nil {
-			var w struct {
-				Items []repoRow `json:"items"`
-			}
-			if err2 := json.Unmarshal(b, &w); err2 != nil {
-				t.Fatalf("decode repos %s: %v", b, err)
-			}
-			rows = w.Items
+		var w struct {
+			Items []repoRow `json:"items"`
+		}
+		if err := json.Unmarshal(b, &w); err != nil {
+			t.Fatalf("decode repos %s: %v", b, err)
 		}
 		m := map[string]repoRow{}
-		for _, r := range rows {
+		for _, r := range w.Items {
 			m[r.Name] = r
 		}
 		return m
@@ -406,6 +402,82 @@ func TestAPIReposAndPermissions(t *testing.T) {
 	s.SetPerms(t, priv, "dave", "repo.download", "repo.publish")
 	if p := permsOf(list(dave)[priv]); p != "repo.download,repo.publish" {
 		t.Fatalf("after upgrade permissions = %q", p)
+	}
+
+	// The list is keyset pages by name that merge the public repos and the caller's grants, each
+	// repo once; the filters narrow it on the server.
+	type listPage struct {
+		Items []struct {
+			Name   string          `json:"name"`
+			Config json.RawMessage `json:"config"`
+		} `json:"items"`
+		Next *string `json:"next"`
+	}
+	names := func(auth Auth, query string) []string {
+		t.Helper()
+		var out []string
+		after := ""
+		for {
+			var p listPage
+			apiJSON(t, s, http.MethodGet, "/api/repos?"+query+"&limit=1&after="+url.QueryEscape(after), nil, auth, 200, &p)
+			for _, it := range p.Items {
+				if it.Config != nil {
+					t.Fatalf("GET /api/repos?%s: %s has its config in the list", query, it.Name)
+				}
+				out = append(out, it.Name)
+			}
+			if p.Next == nil {
+				return out
+			}
+			after = *p.Next
+		}
+	}
+	want := []string{pub, priv, deb}
+	slices.Sort(want)
+	if got := names(dave, ""); !slices.Equal(got, want) {
+		t.Fatalf("dave's pages of one: %v, want %v", got, want)
+	}
+	if got := names(dave, "q="+priv[:len(priv)-1]); !slices.Equal(got, []string{priv}) {
+		t.Fatalf("dave's repos that start with %s: %v", priv[:len(priv)-1], got)
+	}
+	if got := names(dave, "format=debian"); !slices.Equal(got, []string{deb}) {
+		t.Fatalf("dave's debian repos: %v", got)
+	}
+	publishes := []string{priv, deb}
+	slices.Sort(publishes)
+	if got := names(dave, "perm=repo.publish"); !slices.Equal(got, publishes) {
+		t.Fatalf("dave's repos with publish: %v, want %v", got, publishes)
+	}
+	if got := names(nil, "name="+secret+"&name="+pub); !slices.Equal(got, []string{pub}) {
+		t.Fatalf("a visitor's lookup of %s and %s: %v", secret, pub, got)
+	}
+	var recent listPage
+	apiJSON(t, s, http.MethodGet, "/api/repos?sort=published&perm=repo.publish&limit=6", nil, dave, 200, &recent)
+	if len(recent.Items) != 2 || recent.Next != nil {
+		t.Fatalf("dave's repos with publish, last published first: %+v", recent)
+	}
+	apiWant(t, s, http.MethodGet, "/api/repos?sort=published&q=x", nil, dave, http.StatusBadRequest)
+	apiWant(t, s, http.MethodGet, "/api/repos?perm=bogus", nil, dave, http.StatusBadRequest)
+
+	// The Settings overview counts the repos where the caller holds more than download; the
+	// people only for a holder of people.manage.
+	type overview struct {
+		Repos struct {
+			All   bool  `json:"all"`
+			Count int64 `json:"count"`
+		} `json:"repos"`
+		People *struct {
+			Count int64 `json:"count"`
+		} `json:"people"`
+	}
+	var ov overview
+	apiJSON(t, s, http.MethodGet, "/api/overview", nil, daveUI, 200, &ov)
+	if ov.Repos.All || ov.Repos.Count != 2 || ov.People != nil {
+		t.Fatalf("dave's overview: %+v", ov)
+	}
+	apiJSON(t, s, http.MethodGet, "/api/overview", nil, admin, 200, &ov)
+	if !ov.Repos.All || ov.Repos.Count < 4 || ov.People == nil || ov.People.Count < 2 {
+		t.Fatalf("the admin's overview: %+v", ov)
 	}
 
 	apiWant(t, s, http.MethodPut, "/api/grants", map[string]any{"users": []string{"dave"}, "repos": []string{priv}, "perms": []string{}}, admin, http.StatusOK)
