@@ -53,9 +53,13 @@ export class Pick<T, K> {
     this.#o = o;
   }
 
-  /** The collection has bulk actions: every row gets a checkbox. */
-  readonly on = $derived.by(() => this.#o.on());
-  readonly rows = $derived.by(() => (this.on ? this.#o.items().filter((r) => this.can(r)) : []));
+  readonly #pickable = $derived.by(() => this.#o.items().filter((r) => this.can(r)));
+  /**
+   * The collection has bulk actions and a loaded row to pick: every row gets the checkbox column
+   * (a row that is not pickable an empty cell). With no row to pick there is no column.
+   */
+  readonly on = $derived.by(() => this.#o.on() && this.#pickable.length > 0);
+  readonly rows = $derived.by(() => (this.on ? this.#pickable : []));
   readonly all = $derived.by(() => this.rows.length > 0 && this.rows.every((r) => this.#o.get().has(this.#o.key(r))));
   /** Rows are picked: the selection bar shows. */
   readonly bar = $derived.by(() => this.on && this.#o.get().size > 0);

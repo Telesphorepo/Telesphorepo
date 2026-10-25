@@ -28,7 +28,8 @@
 
   Bulk actions: pass `bind:picked` (a Set of row keys), `pickable?` (default: every row) and a
   `bulk` snippet with the actions. Each row then gets a checkbox in a first column, 40px wide over
-  the full row height; a row that is not pickable has an empty cell there. A click on the rest of
+  the full row height; a row that is not pickable has an empty cell there, and a table with no
+  pickable row has no checkbox column. A click on the rest of
   the row still opens the row. Shift+click on a checkbox picks the range from the last checkbox
   clicked. The header checkbox picks every pickable row that is loaded and clears them on the next
   click (a keyset table says "Select the 50 rows shown"). While rows are picked, a bar takes the

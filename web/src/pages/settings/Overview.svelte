@@ -21,7 +21,7 @@
   import { api, type Page, type PageParams, type Repo } from "$lib/api";
   import { Resource, listOf } from "$lib/load.svelte";
   import { formatCount, formatDateTime, formatSize } from "$lib/format";
-  import { count, versionName } from "$lib/words";
+  import { count, noun, versionName } from "$lib/words";
   import { Button } from "$lib/components/ui/button";
   import PageHeader from "$lib/components/PageHeader.svelte";
   import Section from "$lib/components/Section.svelte";
@@ -156,23 +156,23 @@
       <CompactEmpty icon={DatabaseIcon} text={canNewRepo ? "No repository yet." : "You manage no repository yet."} />
     {:else}
       <div class="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
-        <Stat label="Repositories" href={opens("/settings/repositories") ? href("/settings/repositories") : undefined}>
+        <Stat label={noun(repos.data ? mine.length : 2, "Repository", "Repositories")} href={opens("/settings/repositories") ? href("/settings/repositories") : undefined}>
           {@render repoFigure(formatCount(mine.length))}
         </Stat>
-        <Stat label="Files">{@render repoFigure(formatCount(files))}</Stat>
+        <Stat label={noun(repos.data ? files : 2, "File", "Files")}>{@render repoFigure(formatCount(files))}</Stat>
         <Stat label="Stored">{@render repoFigure(formatSize(stored))}</Stat>
         {#if people}
-          <Stat label="People" href={href("/settings/people")}>
+          <Stat label={noun(people.data?.length ?? 2, "Person", "People")} href={href("/settings/people")}>
             {@render figure(people)}
           </Stat>
         {/if}
         {#if pipelines}
-          <Stat label="CI pipelines" href={href("/settings/ci-pipelines")}>
+          <Stat label={noun(pipelines.data?.length ?? 2, "CI pipeline", "CI pipelines")} href={href("/settings/ci-pipelines")}>
             {@render figure(pipelines)}
           </Stat>
         {/if}
         {#if keys}
-          <Stat label="Signing keys" href={href("/settings/signing-keys")}>
+          <Stat label={noun(keys.data?.length ?? 2, "Signing key", "Signing keys")} href={href("/settings/signing-keys")}>
             {@render figure(keys)}
           </Stat>
         {/if}
@@ -211,7 +211,7 @@
         <div class="grid gap-8 lg:grid-cols-2">
           <div class="flex min-w-0 flex-col gap-6">
             <div class="grid grid-cols-2 gap-6">
-              <Stat label="Downloads" value={formatCount(st.downloads)} />
+              <Stat label={noun(st.downloads, "Download", "Downloads")} value={formatCount(st.downloads)} />
               <Stat label="Served" value={formatSize(st.bytes)} />
             </div>
             <DownloadBars days={st.days} />

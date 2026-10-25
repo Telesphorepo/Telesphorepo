@@ -862,11 +862,15 @@ func (s *Service) runSync(ctx context.Context, st *runState) {
 		}
 	}
 	started := time.Unix(sy.StartedAt, 0)
+	failed := fmt.Sprintf("%d of %d repositories failed", failedRepos, len(rs))
+	if len(rs) == 1 {
+		failed = "the repository failed"
+	}
 	switch {
 	case failedRepos > 0 && sy.Trigger == TriggerCutover:
-		fail(fmt.Sprintf("the switch-over stopped: %d of %d repositories failed; nothing switched over, and they keep copying from Nexus", failedRepos, len(rs)))
+		fail("the switch-over stopped: " + failed + "; nothing switched over, and the copy from Nexus goes on")
 	case failedRepos > 0:
-		fail(fmt.Sprintf("%d of %d repositories failed", failedRepos, len(rs)))
+		fail(failed)
 	case sy.Trigger == TriggerCutover && s.mergeWaits(context.WithoutCancel(ctx), id):
 		// The final sync of a merge: the merge copies its files, then switches the repo over.
 		end(SyncDone, "", finishedLine(started, imported, bytes)+" The merge goes on.")

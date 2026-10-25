@@ -5,6 +5,8 @@ import { formatCount } from "$lib/format";
 
 /** A count and its noun: count(1, "file", "files") is "1 file", count(12, ...) is "12 files". */
 export const count = (n: number, one: string, many: string) => `${formatCount(n)} ${n === 1 ? one : many}`;
+/** The noun alone for n things, e.g. the label under a figure: noun(1, "Person", "People") is "Person". */
+export const noun = (n: number, one: string, many: string) => (n === 1 ? one : many);
 
 /**
  * The kind of a repository in plain words: "Hosted", "Proxy of a remote repository", "Group of 3
