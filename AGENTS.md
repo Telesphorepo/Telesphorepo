@@ -24,11 +24,19 @@ Linux. Use bun, not npm.
 
 - Every change reaches `main` through a pull request. CI runs the build and the e2e zones on the
   pull request; a push to `main` publishes the `main` image, which production runs.
-- Tests cost time locally and money in CI, so run each once. Locally, run only the tests a change
-  touches (`go tool task test -run 'TestX|TestY'`), once, when the change is finished, never after
-  every edit and never a whole zone. Do not run locally what the push you are about to make runs
-  in CI. Read CI's log when a job fails. Start the import and scale zones by hand (`e2e-extended.yml`) for a change to the Nexus
-  import, a hot query or an index.
+- **Tests run locally; CI runs once.** CI runs on Blacksmith, which bills every run, so a pull
+  request's CI is the last check of a finished branch, not a place to find bugs. The e2e tests run
+  here on Podman (start it with `podman machine start` when it is stopped; it may keep running).
+- **A test run follows a commit.** Finish the change, commit it, then run the tests it touches,
+  once (`go tool task test -run 'TestX|TestY'`). A failure: fix it, commit, and run the failed
+  tests once more. Never run tests after each edit, and never in a loop while code changes.
+- **Before the push, the zones the branch touches pass here:** the core zone for a change to the
+  server or the UI (`go tool task test`), the clients zone for the CLI, the scale zone
+  (`go tool task test scale`) for a hot query, an index or a request path, the import zone
+  (`go tool task test import`) for the Nexus import. Never start `e2e-extended.yml` on GitHub.
+- **Push a pull request once, when it is done.** Every push to an open pull request runs its whole
+  CI again: batch the fixes into one push. When CI fails anyway, read its log, reproduce the
+  failure here, and push the fix only after it passes here.
 - Update SPEC.md in the same change when behaviour, routes, tables or settings change.
 - For architectural work, write a short design in `docs/superpowers/specs/` and get it approved
   first; delete it when done and keep what stays true in SPEC.md.
@@ -52,9 +60,9 @@ it does on an empty server. That was the promise from the first commit (the scal
 - **Design from the property, not the query.** When a feature seems to need a whole set (counts,
   ordering, grouping), find the index or the counter that makes it a seek before writing it; a
   design that grows with the data needs the user's explicit yes, with the measured cost.
-- **A change to a hot query, an index or a request path runs the scale zone** (`e2e-extended.yml`)
-  before it merges, and a new request path that a client hits often gets an operation in
-  `e2e/scale_test.go`.
+- **A change to a hot query, an index or a request path runs the scale zone here**
+  (`go tool task test scale`) before it merges, and a new request path that a client hits often
+  gets an operation in `e2e/scale_test.go`.
 
 ## Rules the code will not tell you
 

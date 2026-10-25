@@ -345,8 +345,13 @@ type SearchCount struct {
 	Matches int64
 }
 
-// searchRarest is how many of the rarest trigrams of a longer text the index matches.
-const searchRarest = 3
+// searchRarest is how many of the rarest trigrams of a longer text the index matches, and
+// searchProbe how many paths of each trigram a search counts to rank them: a rare trigram counts
+// under it, a common one stops there.
+const (
+	searchRarest = 3
+	searchProbe  = 1000
+)
 
 // search is one search of the index: the FTS5 query, the text that a path must hold ("" when
 // the query is exact), and the repos it may answer (nil: every repo).
@@ -358,9 +363,10 @@ type search struct {
 // newSearch returns the search of q in repoIDs; ok is false when nothing can match: q is shorter
 // than 3 characters, repoIDs is empty and not nil, or a trigram of q is in no path. A text of 3
 // characters, or one with a character outside ASCII (the index folds case its own way), is one
-// phrase. A longer text matches its searchRarest rarest trigrams (the vocabulary of the index
-// counts each) and keeps the paths that hold it: a phrase of many trigrams would walk the rows of
-// its most common ones, which grow with every file stored.
+// phrase. A longer text with a rare trigram (one that fewer than searchProbe paths hold) matches
+// its searchRarest rarest trigrams and keeps the paths that hold the text: its cost follows those
+// few rows, not the text's common trigrams. A text whose trigrams are all common is one phrase,
+// the most selective query left. The probes read at most searchProbe rows each.
 func newSearch(ctx context.Context, dq *dbq.Queries, q string, repoIDs []int64) (search, bool, error) {
 	if utf8.RuneCountInString(q) < 3 || (repoIDs != nil && len(repoIDs) == 0) {
 		return search{}, false, nil
@@ -390,7 +396,7 @@ func newSearch(ctx context.Context, dq *dbq.Queries, q string, repoIDs []int64) 
 			continue
 		}
 		seen[t] = true
-		n, err := dq.SearchTrigramRows(ctx, t)
+		n, err := dq.SearchTrigramRows(ctx, quote(t), searchProbe)
 		if err != nil {
 			return search{}, false, err
 		}
@@ -400,6 +406,10 @@ func newSearch(ctx context.Context, dq *dbq.Queries, q string, repoIDs []int64) 
 		tris = append(tris, trigram{t, n})
 	}
 	slices.SortFunc(tris, func(a, b trigram) int { return cmp.Compare(a.rows, b.rows) })
+	if tris[0].rows >= searchProbe {
+		s.match = quote(q)
+		return s, true, nil
+	}
 	var parts []string
 	for _, t := range tris[:min(searchRarest, len(tris))] {
 		parts = append(parts, quote(t.t))
@@ -463,31 +473,58 @@ func (p *Pipeline) Search(ctx context.Context, q string, repoIDs []int64, after 
 	return out, next, nil
 }
 
-// SearchCounts returns the matches of q in each repo of repoIDs (nil: every repo) that has some,
-// in key order, each counted up to SearchCountCap. It seeks from one repo with matches to the
-// next, so its cost follows the repos that match, not the files.
-func (p *Pipeline) SearchCounts(ctx context.Context, q string, repoIDs []int64) ([]SearchCount, error) {
+// SearchFirst returns the first page of a search (Search after 0) and the matches of each repo of
+// repoIDs (nil: every repo) that has some, in key order, each counted up to SearchCountCap, from
+// one walk of the matches: a repo is skipped with one seek past its end once its count stops and
+// the page is full, or when it is not in repoIDs. A rare text costs one walk of its few matches,
+// a common one a seek and SearchCountCap rows a repo, at any number of files.
+func (p *Pipeline) SearchFirst(ctx context.Context, q string, repoIDs []int64, limit int) ([]SearchHit, int64, []SearchCount, error) {
 	dq := dbq.New(p.db.R)
 	s, ok, err := newSearch(ctx, dq, q, repoIDs)
 	if err != nil || !ok {
-		return nil, err
+		return nil, 0, nil, err
 	}
-	var out []SearchCount
-	for after := int64(0); ; {
-		key, ok, err := dq.NextSearchMatch(ctx, s.match, s.text, after)
-		if err != nil || !ok {
-			return out, err
-		}
-		repo := key >> dbq.SearchShift
-		if s.in == nil || s.in[repo] {
-			n, err := dq.CountSearchMatches(ctx, s.match, s.text, repo<<dbq.SearchShift, repoEnd(repo)+1, SearchCountCap)
-			if err != nil {
-				return nil, err
+	if limit <= 0 {
+		limit = 50
+	}
+	// One hit more than limit says whether a next page exists.
+	var hits []SearchHit
+	var counts []SearchCount
+	for after := int64(0); after >= 0; {
+		from := after
+		after = -1
+		err := dq.WalkSearchAssets(ctx, s.match, s.text, from, func(r dbq.SearchAssetsRow) bool {
+			repo := r.Asset.RepoID
+			if s.in != nil && !s.in[repo] {
+				after = repoEnd(repo)
+				return false
 			}
-			out = append(out, SearchCount{RepoID: repo, Matches: n})
+			if n := len(counts); n == 0 || counts[n-1].RepoID != repo {
+				counts = append(counts, SearchCount{RepoID: repo})
+			}
+			c := &counts[len(counts)-1]
+			if len(hits) <= limit {
+				hits = append(hits, SearchHit{Asset: fromRow(r.Asset), RepoName: r.RepoName, Key: r.Key})
+			}
+			if c.Matches < SearchCountCap {
+				c.Matches++
+			}
+			if c.Matches >= SearchCountCap && len(hits) > limit {
+				after = repoEnd(repo)
+				return false
+			}
+			return true
+		})
+		if err != nil {
+			return nil, 0, nil, err
 		}
-		after = repoEnd(repo)
 	}
+	var next int64
+	if len(hits) > limit {
+		hits = hits[:limit]
+		next = hits[limit-1].Key
+	}
+	return hits, next, counts, nil
 }
 
 // Seek returns the first asset of repo whose path is >= lower (> lower when !inclusive) and

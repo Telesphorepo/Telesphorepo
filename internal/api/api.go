@@ -733,7 +733,15 @@ func (a *API) search(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		httpx.WriteJSON(w, http.StatusOK, empty)
 		return
 	}
-	hits, next, err := a.assets.Search(ctx, q, ids, after, httpx.Limit(r))
+	// The first page and the counts come from one walk of the matches; a later page is one seek.
+	var hits []assets.SearchHit
+	var next int64
+	var counts []assets.SearchCount
+	if first {
+		hits, next, counts, err = a.assets.SearchFirst(ctx, q, ids, httpx.Limit(r))
+	} else {
+		hits, next, err = a.assets.Search(ctx, q, ids, after, httpx.Limit(r))
+	}
 	if err != nil {
 		route.Fail(w, r, err)
 		return
@@ -747,11 +755,6 @@ func (a *API) search(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		out.Next = route.Cursor(strconv.FormatInt(next, 10))
 	}
 	if first {
-		counts, err := a.assets.SearchCounts(ctx, q, ids)
-		if err != nil {
-			route.Fail(w, r, err)
-			return
-		}
 		repos := make([]searchRepoJSON, 0, len(counts))
 		for _, n := range counts {
 			repo, err := a.repos.ByID(ctx, n.RepoID)

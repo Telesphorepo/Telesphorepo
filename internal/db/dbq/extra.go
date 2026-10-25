@@ -6,18 +6,15 @@ package dbq
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"strconv"
 	"strings"
 )
 
 // Extra maps each hand-written query name to its SQL.
 var Extra = map[string]string{
-	"SearchAssets":       searchAssets,
-	"NextSearchMatch":    nextSearchMatch,
-	"CountSearchMatches": countSearchMatches,
-	"SearchTrigramRows":  searchTrigramRows,
-	"ListMigrations":     listMigrations,
+	"SearchAssets":      searchAssets,
+	"SearchTrigramRows": searchTrigramRows,
+	"ListMigrations":    listMigrations,
 
 	"ListReposIn":            listReposIn,
 	"ListReposByIDs":         listReposByIDs,
@@ -133,16 +130,9 @@ const searchAssets = `SELECT a.id, a.repo_id, a.path, a.blob_id, a.size, a.sha25
 ` + searchFrom + ` JOIN repos r ON r.id = a.repo_id
 WHERE assets_search MATCH ?1 AND ` + searchHolds + ` AND f.rowid > ?3 ORDER BY f.rowid LIMIT ?4`
 
-// nextSearchMatch is the key of the first match after a key; no row at the end.
-const nextSearchMatch = `SELECT f.rowid ` + searchFrom + `
-WHERE assets_search MATCH ?1 AND ` + searchHolds + ` AND f.rowid > ?3 ORDER BY f.rowid LIMIT 1`
-
-// countSearchMatches counts the matches with a key in [?3, ?4), up to ?5.
-const countSearchMatches = `SELECT count(*) FROM (SELECT 1 ` + searchFrom + `
-WHERE assets_search MATCH ?1 AND ` + searchHolds + ` AND f.rowid >= ?3 AND f.rowid < ?4 LIMIT ?5)`
-
-// searchTrigramRows is how many paths hold the trigram ?1, from the vocabulary of the index.
-const searchTrigramRows = `SELECT doc FROM assets_search_vocab WHERE term = ?1`
+// searchTrigramRows counts the paths that hold the trigram ?1 (an FTS5 query), up to ?2: a probe
+// that reads at most ?2 rows of its doclist.
+const searchTrigramRows = `SELECT count(*) FROM (SELECT 1 FROM assets_search WHERE assets_search MATCH ?1 LIMIT ?2)`
 
 // SearchAssetsRow is one search hit: the asset, its repo's name and its key in the index.
 type SearchAssetsRow struct {
@@ -170,30 +160,30 @@ func (q *Queries) SearchAssets(ctx context.Context, match, text string, after, l
 	return items, rows.Err()
 }
 
-// NextSearchMatch returns the key of the first match of match and text after the key after; ok
-// is false at the end.
-func (q *Queries) NextSearchMatch(ctx context.Context, match, text string, after int64) (key int64, ok bool, err error) {
-	err = q.db.QueryRowContext(ctx, nextSearchMatch, match, text, after).Scan(&key)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, false, nil
+// WalkSearchAssets gives the matches of match whose path holds text ("" for any) after the key
+// after, in key order, to fn until fn returns false or the matches end.
+func (q *Queries) WalkSearchAssets(ctx context.Context, match, text string, after int64, fn func(SearchAssetsRow) bool) error {
+	rows, err := q.db.QueryContext(ctx, searchAssets, match, text, after, -1)
+	if err != nil {
+		return err
 	}
-	return key, err == nil, err
+	defer rows.Close()
+	for rows.Next() {
+		i, err := scanSearchRow(rows)
+		if err != nil {
+			return err
+		}
+		if !fn(i) {
+			return nil
+		}
+	}
+	return rows.Err()
 }
 
-// CountSearchMatches counts the matches of match and text with a key in [from, to), up to limit.
-func (q *Queries) CountSearchMatches(ctx context.Context, match, text string, from, to, limit int64) (int64, error) {
+// SearchTrigramRows counts the indexed paths that match the trigram query t, up to limit.
+func (q *Queries) SearchTrigramRows(ctx context.Context, t string, limit int64) (int64, error) {
 	var n int64
-	err := q.db.QueryRowContext(ctx, countSearchMatches, match, text, from, to, limit).Scan(&n)
-	return n, err
-}
-
-// SearchTrigramRows returns how many indexed paths hold the trigram t (0 for none).
-func (q *Queries) SearchTrigramRows(ctx context.Context, t string) (int64, error) {
-	var n int64
-	err := q.db.QueryRowContext(ctx, searchTrigramRows, t).Scan(&n)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, nil
-	}
+	err := q.db.QueryRowContext(ctx, searchTrigramRows, t, limit).Scan(&n)
 	return n, err
 }
 func scanSearchRow(rows *sql.Rows) (SearchAssetsRow, error) {

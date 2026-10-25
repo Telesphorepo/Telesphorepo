@@ -19,9 +19,7 @@ END;
 CREATE TRIGGER IF NOT EXISTS assets_search_ad AFTER DELETE ON assets WHEN old.kind <> 'index' BEGIN
   DELETE FROM assets_search WHERE rowid = (old.repo_id << 40) | old.id;
 END;
--- How many paths hold each trigram: a search of a longer text matches its rarest trigrams and
--- checks the substring, so its cost follows its rarest trigram, not the text's common ones.
-CREATE VIRTUAL TABLE IF NOT EXISTS assets_search_vocab USING fts5vocab(assets_search, row);
+
 
 -- The rows of group_counts that the job core.group-counts is still counting. The triggers keep
 -- such a row from its start, while the job counts the members' files in a read snapshot; the job
