@@ -9,7 +9,7 @@
   (search/hits.ts): a card per repository with its count of matches, and in it a row per folder
   that holds hits (an artifact folder takes in its version folders), with its folders and files as
   links; the checksums and signatures of a file fold into it. The matched text is marked in every
-  path. The first page counts the matches of every repository (up to 10,000 each, "10,000+"): the toolbar shows the total, and
+  path. The first page counts the matches of every repository (up to 1,000 each, "1,000+"): the toolbar shows the total, and
   with several repositories a line under it names each with its count, a link to search only it.
 -->
 <script lang="ts">
@@ -71,7 +71,7 @@
   const groups = $derived(groupHits(results?.items ?? []));
   const total = $derived(counts.reduce((n, c) => n + c.matches, 0));
   const totalMore = $derived(counts.some((c) => c.more));
-  /** "1,008 files", "10,000+ files": a count that stopped is at least that many. */
+  /** "208 files", "1,000+ files": a count that stopped is at least that many. */
   const files = (n: number, more: boolean) => (more ? `${formatCount(n)}+ files` : count(n, "file", "files"));
   const formatOf = (name: string) => counts.find((c) => c.name === name)?.format ?? "";
   const filesOf = (name: string, loaded: number) => {
