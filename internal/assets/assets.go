@@ -366,10 +366,10 @@ type search struct {
 // newSearch returns the search of q in repoIDs; ok is false when nothing can match: q is shorter
 // than 3 characters, repoIDs is empty and not nil, or a segment or a trigram of q is in no path.
 // The probes read at most searchProbe rows each, and the search picks the most selective query:
-//   - a whole segment inside q (every segment but one that q starts or ends inside of) that fewer
-//     than searchProbe paths hold: the segment index matches q's searchRarestSegments rarest
-//     segments and keeps the paths that hold q, so a filename or a path reads the rows of its
-//     rarest segment, which stay few at any size;
+//   - a segment of q (a component between its slashes, the last one as a prefix) that fewer than
+//     searchProbe paths hold: the segment index matches q's searchRarestSegments rarest segments
+//     and keeps the paths that hold q, so a path or a file name after a slash reads the rows of
+//     its rarest segment, which stay few at any size;
 //   - else a trigram of q that fewer than searchProbe paths hold: the trigram index matches q's
 //     searchRarest rarest trigrams and keeps the paths that hold q;
 //   - else (q of 3 characters, with a character outside ASCII, or of common pieces only) q as one
@@ -394,7 +394,8 @@ func newSearch(ctx context.Context, dq *dbq.Queries, q string, repoIDs []int64) 
 		t    string
 		rows int64
 	}
-	// rank probes the pieces of q in index x, rarest first; ok is false when one is in no path.
+	// rank probes the FTS5 queries of q's pieces in index x, rarest first; ok is false when one
+	// matches no path.
 	rank := func(x dbq.SearchIndex, pieces []string) ([]piece, bool, error) {
 		var out []piece
 		seen := map[string]bool{}
@@ -403,7 +404,7 @@ func newSearch(ctx context.Context, dq *dbq.Queries, q string, repoIDs []int64) 
 				continue
 			}
 			seen[t] = true
-			n, err := dq.SearchRows(ctx, x, quote(t), searchProbe)
+			n, err := dq.SearchRows(ctx, x, t, searchProbe)
 			if err != nil || n == 0 {
 				return nil, false, err // no path holds it, so none holds q
 			}
@@ -415,11 +416,11 @@ func newSearch(ctx context.Context, dq *dbq.Queries, q string, repoIDs []int64) 
 	and := func(ps []piece, n int) string {
 		var parts []string
 		for _, p := range ps[:min(n, len(ps))] {
-			parts = append(parts, quote(p.t))
+			parts = append(parts, p.t)
 		}
 		return strings.Join(parts, " AND ")
 	}
-	if segs := wholeSegments(q); len(segs) > 0 {
+	if segs := segmentQueries(q, quote); len(segs) > 0 {
 		ranked, ok, err := rank(dbq.SearchSegments, segs)
 		if err != nil || !ok {
 			return search{}, false, err
@@ -432,7 +433,7 @@ func newSearch(ctx context.Context, dq *dbq.Queries, q string, repoIDs []int64) 
 	lower := strings.ToLower(q)
 	var tris []string
 	for i := 0; i+3 <= len(lower); i++ {
-		tris = append(tris, lower[i:i+3])
+		tris = append(tris, quote(lower[i:i+3]))
 	}
 	ranked, ok, err := rank(dbq.SearchTrigrams, tris)
 	if err != nil || !ok {
@@ -446,28 +447,38 @@ func newSearch(ctx context.Context, dq *dbq.Queries, q string, repoIDs []int64) 
 	return s, true, nil
 }
 
-// wholeSegments returns the segments of q (ASCII) that are whole in every path that holds q, in
-// lower case: the runs of letters and digits, but a first one that q starts inside of and a last
-// one that q ends inside of. The segment index splits a path the same way (unicode61).
-func wholeSegments(q string) []string {
-	word := func(c byte) bool { return c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
-	var segs []string
-	start := -1
-	for i := 0; i <= len(q); i++ {
-		if i < len(q) && word(q[i]) {
-			if start < 0 {
-				start = i
-			}
-			continue
-		}
-		if start >= 0 {
-			if start > 0 && i < len(q) {
-				segs = append(segs, strings.ToLower(q[start:i]))
-			}
-			start = -1
+// segmentChars are the characters of a segment of the segment index: letters, digits and every
+// ASCII punctuation mark but the slash and the quotes (the tokenchars of assets_segments).
+const segmentChars = ".-_+~@!$%&()=,;:#[]{}^`|<>?*\\"
+
+// segmentQueries returns the FTS5 queries of the segment index that every path holding q matches,
+// in lower case: each segment of q (the components between its slashes) that q holds whole, and
+// its last segment as a prefix, since q may end inside a path's segment. A first segment that q
+// starts inside of matches nothing whole, so it is left out. None when q has a character that the
+// index splits on but that q does not show as a slash (a quote, a space).
+func segmentQueries(q string, quote func(string) string) []string {
+	for i := range len(q) {
+		c := q[i]
+		if c != '/' && !(c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || strings.IndexByte(segmentChars, c) >= 0) {
+			return nil
 		}
 	}
-	return segs
+	parts := strings.Split(strings.ToLower(q), "/")
+	if len(parts) < 2 {
+		return nil // q lies inside one segment
+	}
+	var out []string
+	for i, s := range parts {
+		switch {
+		case s == "" || i == 0:
+			// the first segment, which q may start inside of, and the empty ones around a slash
+		case i == len(parts)-1:
+			out = append(out, quote(s)+"*")
+		default:
+			out = append(out, quote(s))
+		}
+	}
+	return out
 }
 func isASCII(s string) bool {
 	for i := range len(s) {
