@@ -86,14 +86,21 @@ func (a *API) logo(w http.ResponseWriter, r *http.Request, _ *route.Call) {
 	format.WriteDocument(w, r, l.contentType, l.doc)
 }
 
+// logoDrain is how much of a logo that is too large the server reads before it answers 413.
+const logoDrain = 16 << 20
+
 // putLogo replaces the logo with the request body: the bytes of a PNG, JPEG or WebP image of at
 // most settings.MaxLogoBytes. The type comes from the bytes, never from a header or a file name.
 // The settings service saves it like a PATCH of server_logo, with one settings.update event.
 // Answers the identity.
 func (a *API) putLogo(w http.ResponseWriter, r *http.Request, c *route.Call) {
-	b, err := io.ReadAll(http.MaxBytesReader(w, r.Body, settings.MaxLogoBytes))
+	body := r.Body
+	b, err := io.ReadAll(http.MaxBytesReader(w, body, settings.MaxLogoBytes))
 	var tooBig *http.MaxBytesError
 	if errors.As(err, &tooBig) {
+		// The rest of a body up to logoDrain is read before the answer, so the client has sent it
+		// all and reads the 413; a larger one is cut off when the server closes the connection.
+		_, _ = io.CopyN(io.Discard, body, logoDrain)
 		httpx.Error(w, r, http.StatusRequestEntityTooLarge, fmt.Sprintf("the logo must be at most %d KiB", settings.MaxLogoBytes>>10))
 		return
 	}
