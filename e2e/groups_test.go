@@ -206,6 +206,16 @@ func TestGroups(t *testing.T) {
 		s.MustAPI(t, http.MethodPut, "/api/repos/"+ord+"/members", map[string]any{"members": []string{b, a}}, s.Admin(), nil)
 		rawWantGet(t, s, opts.S3, "/maven/"+ord+"/"+file, nil, []byte("from b"))
 
+		// The merge reads a member's maven-metadata.xml in the charset it declares (the Gradle
+		// Plugin Portal writes US-ASCII).
+		orderMD := "com/e2e/order/maven-metadata.xml"
+		mavenPut(t, s, writer, a, orderMD, []byte("<?xml version='1.0' encoding='US-ASCII'?>\n<metadata><groupId>com.e2e</groupId><artifactId>order</artifactId><versioning><versions><version>2.0</version></versions></versioning></metadata>\n"))
+		mavenPut(t, s, writer, b, orderMD, []byte(`<?xml version="1.0" encoding="UTF-8"?>`+"\n<metadata><groupId>com.e2e</groupId><artifactId>order</artifactId><versioning><versions><version>1.0</version></versions></versioning></metadata>\n"))
+		st, md = rawGet(t, s, opts.S3, "/maven/"+ord+"/"+orderMD, nil)
+		if st != http.StatusOK || !strings.Contains(string(md), "<version>1.0</version>") || !strings.Contains(string(md), "<release>2.0</release>") {
+			t.Fatalf("GET the merged %s: status %d, want both members' versions and release 2.0:\n%s", orderMD, st, md)
+		}
+
 		// A public group with a private member: the member's files only for people who can read it.
 		pub, priv := RandName("pub"), RandName("priv")
 		s.CreateRepo(t, pub, "maven", true, nil)

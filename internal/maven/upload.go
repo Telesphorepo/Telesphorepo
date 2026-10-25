@@ -1,6 +1,7 @@
 package maven
 
 import (
+	"bytes"
 	"context"
 	"encoding/xml"
 	"errors"
@@ -133,7 +134,7 @@ func (h *Handler) readMetadata(ctx context.Context, repo *repos.Repo, mdPath str
 	if err != nil {
 		return md, false, fmt.Errorf("read %s: %w", mdPath, err)
 	}
-	if xml.Unmarshal(b, &md) != nil {
+	if decodeXML(bytes.NewReader(b), &md) != nil {
 		return md, false, assets.Refuse(http.StatusConflict, "%s is not valid XML; fix or delete it first", mdPath)
 	}
 	return md, true, nil

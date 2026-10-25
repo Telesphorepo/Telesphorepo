@@ -1,6 +1,7 @@
 package maven
 
 import (
+	"bytes"
 	"context"
 	"encoding/xml"
 	"errors"
@@ -138,7 +139,7 @@ func mergeParts(_ context.Context, _ repopath.Path, parts [][]byte) ([]byte, err
 	var all []groupMetadata
 	for _, b := range parts {
 		var m groupMetadata
-		if xml.Unmarshal(b, &m) == nil {
+		if decodeXML(bytes.NewReader(b), &m) == nil {
 			all = append(all, m)
 		}
 	}

@@ -2,7 +2,6 @@ package maven
 
 import (
 	"context"
-	"encoding/xml"
 	"errors"
 	"io"
 	"path"
@@ -230,7 +229,7 @@ func (h *Handler) readPackaging(ctx context.Context, repo *repos.Repo, p string)
 		Packaging string    `xml:"packaging"`
 		DM        *struct{} `xml:"dependencyManagement"`
 	}
-	if xml.NewDecoder(io.LimitReader(body, maxPOMBytes)).Decode(&pom) != nil {
+	if decodeXML(io.LimitReader(body, maxPOMBytes), &pom) != nil {
 		return "jar", false, nil
 	}
 	pk := strings.TrimSpace(pom.Packaging)

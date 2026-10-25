@@ -3,7 +3,6 @@ package maven
 import (
 	"bytes"
 	"context"
-	"encoding/xml"
 	"path"
 	"slices"
 	"strings"
@@ -74,7 +73,7 @@ func readPOM(f format.PlanFile) (pomXML, error) {
 	if f.Head == nil || f.Truncated() {
 		return p, format.BadUpload("the pom could not be read")
 	}
-	if err := xml.NewDecoder(bytes.NewReader(f.Head)).Decode(&p); err != nil {
+	if err := decodeXML(bytes.NewReader(f.Head), &p); err != nil {
 		return p, format.BadUpload("the pom is not valid XML: %v", err)
 	}
 	p.GroupID, p.ArtifactID, p.Version = strings.TrimSpace(p.GroupID), strings.TrimSpace(p.ArtifactID), strings.TrimSpace(p.Version)

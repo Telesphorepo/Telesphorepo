@@ -2769,7 +2769,8 @@ are dropped from memory, and the server logs the repo ids.
   each member file's SHA-256, so its checksum files and the next request reuse them until a member
   file changes.
 - Maven's `Merger`: an artifact-level (or group-level) `maven-metadata.xml` merges over the
-  readable members that have it: the union of the versions in Maven order, the newest `latest`,
+  readable members that have it, each read in the charset its XML declaration names (the Gradle
+  Plugin Portal declares US-ASCII; a member file that does not parse is left out): the union of the versions in Maven order, the newest `latest`,
   `release` and `lastUpdated`, and the union of the plugins by prefix. Its `.md5`, `.sha1`,
   `.sha256` and `.sha512` are computed from the merged bytes. With one such member, that member's
   own files serve (a checksum file it lacks is computed from its file). A version-level file (under
