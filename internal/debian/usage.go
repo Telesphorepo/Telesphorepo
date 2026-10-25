@@ -6,13 +6,37 @@ import (
 	"errors"
 	"fmt"
 	"path"
-	"slices"
 	"strings"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
+
+// usageVersion returns the version of package r that the usage of a package folder names:
+// version v, else the newest version whose newest build is a release, else the newest version;
+// nil when there is none.
+func (h *Handler) usageVersion(ctx context.Context, r pkgRef, v string) (*debVersion, error) {
+	if v != "" {
+		return h.versionOf(ctx, r, v)
+	}
+	var first *debVersion
+	for below := top; ; {
+		page, err := h.versionsPage(ctx, r, below, 100)
+		if err != nil || len(page) == 0 {
+			return first, err
+		}
+		if first == nil {
+			first = page[0]
+		}
+		for _, x := range page {
+			if x.stamp == "" {
+				return x, nil
+			}
+		}
+		below = page[len(page)-1].key
+	}
+}
 
 // Usage returns the apt setup (key, source, read credentials for a private repo) and the publish
 // command of the Telesphorepo CLI. The core adds the CI files of the tool telesphorepo. The dist
@@ -111,24 +135,13 @@ func (h *Handler) ArtifactUsage(ctx context.Context, repo, from *repos.Repo, bas
 		if !ok {
 			return nil, nil
 		}
-		versions, err := h.readPackage(ctx, from.ID, a, comp, pkg)
-		if err != nil || len(versions) == 0 {
+		ver, err := h.usageVersion(ctx, refOf(from, a, comp, pkg), v)
+		if err != nil || ver == nil {
 			return nil, err
 		}
-		i := slices.IndexFunc(versions, func(x *debVersion) bool {
-			if v != "" {
-				return x.name == v
-			}
-			return x.builds[0].stamp == ""
-		})
-		if i < 0 && v != "" {
-			return nil, nil
-		}
-		i = max(i, 0)
-		newest := versions[i].builds[0]
-		art, dist, component, version = a, newest.dist, comp, versions[i].name
-		if newest.stamp == "" {
-			pin = newest.id
+		art, dist, component, version = a, ver.dist, comp, ver.name
+		if ver.stamp == "" {
+			pin = ver.newest
 		}
 	}
 	if mode != format.VersionLatest {

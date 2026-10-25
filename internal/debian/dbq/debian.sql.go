@@ -7,7 +7,6 @@ package dbq
 
 import (
 	"context"
-	"database/sql"
 )
 
 const deleteIndexFile = `-- name: DeleteIndexFile :exec
@@ -163,10 +162,11 @@ func (q *Queries) GetPackageSHA256(ctx context.Context, arg GetPackageSHA256Para
 	return sha256, err
 }
 
-const insertPackage = `-- name: InsertPackage :exec
+const insertPackage = `-- name: InsertPackage :one
 INSERT INTO deb_packages (repo_id, distribution, component, architecture, package, version, asset_id,
   filename, size, md5, sha1, sha256, control, created_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+RETURNING id
 `
 
 type InsertPackageParams struct {
@@ -186,8 +186,8 @@ type InsertPackageParams struct {
 	CreatedAt    int64
 }
 
-func (q *Queries) InsertPackage(ctx context.Context, arg InsertPackageParams) error {
-	_, err := q.db.ExecContext(ctx, insertPackage,
+func (q *Queries) InsertPackage(ctx context.Context, arg InsertPackageParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, insertPackage,
 		arg.RepoID,
 		arg.Distribution,
 		arg.Component,
@@ -202,6 +202,37 @@ func (q *Queries) InsertPackage(ctx context.Context, arg InsertPackageParams) er
 		arg.Sha256,
 		arg.Control,
 		arg.CreatedAt,
+	)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
+const insertPackageOrder = `-- name: InsertPackageOrder :exec
+INSERT INTO deb_package_order (package_id, repo_id, folder, component, package, name_key, build_key)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+`
+
+type InsertPackageOrderParams struct {
+	PackageID int64
+	RepoID    int64
+	Folder    string
+	Component string
+	Package   string
+	NameKey   []byte
+	BuildKey  []byte
+}
+
+// The order keys of a deb_packages row (order.go).
+func (q *Queries) InsertPackageOrder(ctx context.Context, arg InsertPackageOrderParams) error {
+	_, err := q.db.ExecContext(ctx, insertPackageOrder,
+		arg.PackageID,
+		arg.RepoID,
+		arg.Folder,
+		arg.Component,
+		arg.Package,
+		arg.NameKey,
+		arg.BuildKey,
 	)
 	return err
 }
@@ -301,71 +332,6 @@ func (q *Queries) ListPackageComponents(ctx context.Context, repoID int64) ([]Li
 	return items, nil
 }
 
-const listPackageFiles = `-- name: ListPackageFiles :many
-SELECT p.distribution, p.architecture, p.version, p.filename, p.size, p.sha256,
-  a.updated_at, a.build_id
-FROM deb_packages p JOIN assets a ON a.id = p.asset_id
-WHERE p.repo_id = ? AND p.component = ? AND p.package = ?
-LIMIT ?
-`
-
-type ListPackageFilesParams struct {
-	RepoID    int64
-	Component string
-	Package   string
-	Limit     int64
-}
-
-type ListPackageFilesRow struct {
-	Distribution string
-	Architecture string
-	Version      string
-	Filename     string
-	Size         int64
-	Sha256       string
-	UpdatedAt    int64
-	BuildID      sql.NullInt64
-}
-
-// The .deb files of one package in one component, with the time and the publish session of
-// each file, through deb_packages_package. A file in several distributions has one row for each.
-func (q *Queries) ListPackageFiles(ctx context.Context, arg ListPackageFilesParams) ([]ListPackageFilesRow, error) {
-	rows, err := q.db.QueryContext(ctx, listPackageFiles,
-		arg.RepoID,
-		arg.Component,
-		arg.Package,
-		arg.Limit,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListPackageFilesRow
-	for rows.Next() {
-		var i ListPackageFilesRow
-		if err := rows.Scan(
-			&i.Distribution,
-			&i.Architecture,
-			&i.Version,
-			&i.Filename,
-			&i.Size,
-			&i.Sha256,
-			&i.UpdatedAt,
-			&i.BuildID,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const listRepoIndexFiles = `-- name: ListRepoIndexFiles :many
 SELECT distribution, path FROM deb_index_files
 WHERE repo_id = ?
@@ -398,6 +364,30 @@ func (q *Queries) ListRepoIndexFiles(ctx context.Context, repoID int64) ([]ListR
 		return nil, err
 	}
 	return items, nil
+}
+
+const packageHasFiles = `-- name: PackageHasFiles :one
+SELECT EXISTS (SELECT 1 FROM deb_package_order WHERE repo_id = ? AND folder = ? AND component = ? AND package = ?)
+`
+
+type PackageHasFilesParams struct {
+	RepoID    int64
+	Folder    string
+	Component string
+	Package   string
+}
+
+// Whether a package folder has a file, through deb_package_order_page.
+func (q *Queries) PackageHasFiles(ctx context.Context, arg PackageHasFilesParams) (bool, error) {
+	row := q.db.QueryRowContext(ctx, packageHasFiles,
+		arg.RepoID,
+		arg.Folder,
+		arg.Component,
+		arg.Package,
+	)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const purgeDebIndexFiles = `-- name: PurgeDebIndexFiles :execrows

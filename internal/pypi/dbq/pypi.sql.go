@@ -10,6 +10,22 @@ import (
 	"database/sql"
 )
 
+const bumpIndex = `-- name: BumpIndex :exec
+INSERT INTO pypi_index_revs (repo_id, rev) VALUES (?1, CAST(?2 AS INTEGER))
+ON CONFLICT (repo_id) DO UPDATE SET rev = max(pypi_index_revs.rev + 1, excluded.rev)
+`
+
+type BumpIndexParams struct {
+	RepoID int64
+	At     int64
+}
+
+// Moves the revision of the project list of a repo on: rev becomes max(rev + 1, at).
+func (q *Queries) BumpIndex(ctx context.Context, arg BumpIndexParams) error {
+	_, err := q.db.ExecContext(ctx, bumpIndex, arg.RepoID, arg.At)
+	return err
+}
+
 const bumpProject = `-- name: BumpProject :exec
 UPDATE pypi_projects SET rev = max(rev + 1, CAST(?1 AS INTEGER))
 WHERE repo_id = ?2 AND project = ?3
@@ -124,6 +140,18 @@ func (q *Queries) GetFile(ctx context.Context, arg GetFileParams) (GetFileRow, e
 	var i GetFileRow
 	err := row.Scan(&i.Project, &i.Version, &i.Filename)
 	return i, err
+}
+
+const getIndexRev = `-- name: GetIndexRev :one
+SELECT rev FROM pypi_index_revs WHERE repo_id = ?
+`
+
+// The revision of the project list of a repo, through the primary key.
+func (q *Queries) GetIndexRev(ctx context.Context, repoID int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, getIndexRev, repoID)
+	var rev int64
+	err := row.Scan(&rev)
+	return rev, err
 }
 
 const getProject = `-- name: GetProject :one

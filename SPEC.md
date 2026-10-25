@@ -572,7 +572,8 @@ Tables of the `debian` component (`internal/debian/migrations`):
 
 | Table | Key / indexes | Notes |
 |---|---|---|
-| `deb_packages` | UNIQUE `(repo_id, distribution, component, architecture, package, version)`, idx `asset_id`, idx `deb_packages_sha256 (repo_id, distribution, component, sha256)`, idx `deb_packages_package (repo_id, component, package)` | Also the streaming index for `Packages`. The SHA-256 index finds a package an import already holds. The package index reads the versions and builds of a package. `asset_id` cascades with the pool file |
+| `deb_packages` | UNIQUE `(repo_id, distribution, component, architecture, package, version)`, idx `asset_id`, idx `deb_packages_sha256 (repo_id, distribution, component, sha256)` | Also the streaming index for `Packages`. The SHA-256 index finds a package an import already holds. `asset_id` cascades with the pool file |
+| `deb_package_order` | PK `package_id` (cascades with its `deb_packages` row), idx `deb_package_order_page (repo_id, folder, component, package, name_key, build_key)` | One row per `deb_packages` row, written with it: `folder` (of the file, e.g. `pool/main/h/hello/`) and two byte keys whose byte order is the order of the Versions and Builds pages (`internal/debian/order.go`): `name_key` the version the row is a build of in `dpkg --compare-versions` order, `build_key` the build by stamp, then in dpkg order. The SQL functions `deb_name_key` and `deb_build_key` compute them in a migration |
 | `deb_index_files` | PK `(repo_id, distribution, path)` (WITHOUT ROWID) | Sizes and hashes; `Release` is built from these rows |
 
 Tables of the `npm` component (`internal/npm/migrations`). Every `repo_id` cascades. Rows exist for
@@ -593,13 +594,14 @@ Tables of the `nuget` component (`internal/nuget/migrations`):
 | `nuget_package_latest` | PK `package` → `nuget_packages(id)` ON DELETE CASCADE | The `sort_key` of the newest listed version of the package per search variant, NULL when it has none: `release` (no prerelease, no SemVer 2.0), `release2` (no prerelease), `pre` (no SemVer 2.0), `pre2` (any). Written with each move of the package's `rev` |
 | `nuget_packages_search` | FTS5 trigram on `lower_id`, contentless with deletes, rowid `repo_id << 40 \| id` | Kept in sync by triggers on `nuget_packages`; the substring search of package ids. A repo's packages are one rowid range |
 
-Tables of the `pypi` component (`internal/pypi/migrations`). Only hosted repos have rows; the
-hooks write them in the transaction of the asset change (see **PyPI**):
+Tables of the `pypi` component (`internal/pypi/migrations`). Only hosted repos have project and
+file rows; the hooks write the rows in the transaction of the asset change (see **PyPI**):
 
 | Table | Key / indexes | Notes |
 |---|---|---|
 | `pypi_projects` | PK `(repo_id, project)` (WITHOUT ROWID) | `project` is the normalised name, `display_name` the `Name` of the newest upload's metadata, `rev` the revision of the project page (`max(rev + 1, unix ns)` on each stored or removed file and removed `.metadata`); the row goes with the project's last file |
 | `pypi_files` | PK `id`, UNIQUE `(repo_id, filename)`, idx `pypi_files_project (repo_id, project, sort_key)`, idx `asset_id` | One row per wheel or sdist: `version` (PEP 440 normal form), `sort_key` (`version.PEP440.SortKey`), `path`, `sha256`, `size`, `requires_python`, `metadata_sha256` (`''` without a `.metadata`), `uploaded_at`. `asset_id` cascades with the file |
+| `pypi_index_revs` | PK `repo_id` (cascades) | `rev`, the revision of the project list of a hosted repo or a proxy (`max(rev + 1, unix ns)` when a project comes, goes or changes its display name, or a proxy caches its first page of a project or removes one); a repo without a row is at 0 |
 
 Tables of the `docker` component (`internal/docker/migrations`). Every column `repo_id` cascades;
 digests are the hex of a SHA-256. Only the hooks of the format write them, in the transaction of
@@ -2920,7 +2922,7 @@ proxy stores its upstream pages at `.simple/<project>` and its files at `files/<
 `/remote/{path...}` serve them (`Range`, S3 redirects and the edge as every asset).
 
 **Pages.** `GET /pypi/{repo}/simple/` (the project list) and `GET /pypi/{repo}/simple/{project}/`
-are rendered per request; they are never stored at their URL. A name that is not normalised, or
+are rendered documents; they are never stored at their URL. A name that is not normalised, or
 that lacks the trailing slash, is 301 to the normalised page. The `Accept` header picks the form
 (PEP 691): `application/vnd.pypi.simple.v1+json` (also `...latest+json`), `...v1+html` (also
 `...latest+html`) or `text/html`, the highest `q` winning and the server order (JSON, HTML,
@@ -2957,6 +2959,13 @@ the page, and the last file drops the project. Each change moves the project's `
 rendered pages of a hosted project are kept in the module's `format.DocumentCache` (1,024
 entries, 64 MiB, 8 MiB each) keyed by the form, the repo, the project and `rev`, so a page renders
 once per change and a new or removed file shows at once.
+
+**Project list.** The rendered list is kept in a second `format.DocumentCache` (256 entries,
+64 MiB, 32 MiB each) keyed by the form and the `pypi_index_revs` revision of the repo; a group's
+key holds the ids and revisions of the members the caller reads, in member order. A request costs a
+point lookup per repo, and an `If-None-Match` that names the key's `ETag` is 304 without a build.
+A build reads a hosted repo's `pypi_projects` in key order, a proxy's `.simple/` assets in path
+order, and merges a group's sorted member lists (a name once, from the first member that has it).
 
 **Proxy** (default remote `https://pypi.org/`). The config field `files` (default
 `https://files.pythonhosted.org/`, checked with `proxy.FilesURL`) is the host the remote serves its
@@ -3381,8 +3390,13 @@ own URL.
     like of the latest version). Both send `Vary: Accept`, a strong `ETag` and 304
     (`format.WriteDocument`); `?write=true` is the same. `dist.tarball` is absolute under
     `route.API.BaseURL` (the base_url setting, else the request's scheme and host).
-  - `GET <name>/<version or dist-tag>`: the manifest of that version from the full packument
-    (`application/json`, strong `ETag`), 404 for a version the package does not have. pnpm 11+
+  - `GET <name>/<version or dist-tag>`: the manifest of that version as the full packument lists
+    it (`application/json`, strong `ETag`, 304), 404 for a version the package does not have; a
+    dist-tag wins over a version of the same name. It reads only that version: a hosted package
+    its tag and version rows, a proxy its cached full packument as a stream up to that version
+    (a ref that is a SemVer version skips the tags, since npm refuses such a tag; a second read
+    when the versions come before the tags). The manifest is kept in the document cache, keyed by
+    the package `rev` or the SHA-256 of the cached packument, the ref and the base URL. pnpm 11+
     run through corepack fetches its binary package (`@pnpm/exe.<os>-<arch>`) this way from the
     registry of the project's `.npmrc`, without credentials on plain HTTP.
   - `GET <name>/-/<file>`: the tarball through the read path.
@@ -3403,7 +3417,9 @@ own URL.
     the operation from the URL (`Ops` and `Pick`), so a CI session cannot unpublish.
   - `GET /-/package/<name>/dist-tags`, `PUT .../dist-tags/<tag>` (body: the version as a JSON
     string, `repo.publish`, 201) and `DELETE .../dist-tags/<tag>` (`repo.publish`; `latest` is
-    refused with 400). A tag is up to 64 URL-safe characters and not a version.
+    refused with 400). A tag is up to 64 URL-safe characters and not a version. The `GET` reads
+    a hosted package's `npm_tags` rows, a proxy's cached abbreviated packument as a stream up to
+    its `dist-tags`.
   - `GET /-/whoami` (`{"username"}` of the credential, 401 without one) and `GET /-/ping` (`{}`).
   - `POST /-/v1/login` and `PUT /-/user/<user>` answer 401 "npm login is not used with
     Telesphorepo. To install, put a read token in .npmrc (see the repo page). To publish, run
@@ -4172,7 +4188,7 @@ page are in `web/src/README.md`.
     snippets of an artifact folder without a version use its newest release, else its newest
     snapshot: one seek of `maven_versions_latest` each. On the first start with these tables,
     the module's start indexes the files that the Maven repos hold already, then serves.
-  - *Debian:* the format reads `deb_packages`, through the index `deb_packages_package`. An artifact
+  - *Debian:* the format reads `deb_packages` through the order keys of `deb_package_order`. An artifact
     folder is `pool/<component>/<prefix>/<package>/`; its versions are those of the package of that
     name in that component whose files lie in the folder. `Artifact.Kind` is `package`. A Debian
     version `<base>~SNAPSHOT<sep><stamp>` (`<sep>` one of `.`, `+`, `~`, `-`; `<stamp>` 8 to 14
@@ -4181,7 +4197,10 @@ page are in `web/src/README.md`.
     are its `.deb` files, one per architecture: `classifier` is the architecture, `extension` is
     `deb`. Versions sort by Debian version order (the `dpkg --compare-versions` rules: epoch,
     upstream, revision, and `~` before anything), so `3.0~SNAPSHOT` sorts before `3.0`. Builds sort
-    by stamp, newest first. One request reads at most 20,000 rows of a package.
+    by stamp, newest first; a build without a stamp sorts below the stamped builds of its version.
+    A page of versions seeks from one version to the next through `deb_package_order_page` and
+    reads the files of each version's newest build and counts its builds (index entries only); a
+    page of builds reads the rows of its builds and stops after the page.
   - `published_at` is the newest update time of the build's files, and `build` is the CI build
     record of its main file (else of any file); null when none.
   - Snippets of a Debian package: the apt setup for the distribution and component of the package,

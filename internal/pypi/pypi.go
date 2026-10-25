@@ -12,6 +12,7 @@ import (
 	"database/sql"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -42,18 +43,19 @@ var queriesFS embed.FS
 
 // Handler serves the PyPI format.
 type Handler struct {
-	host   *module.Host
-	q      *dbq.Queries // on the reader pool
-	assets *assets.Pipeline
-	log    *slog.Logger
-	docs   *format.DocumentCache // rendered project pages: hosted ones by revision, proxy ones by upstream page
-	models modelCache            // the models of proxy pages that Versions and Builds read
+	host    *module.Host
+	q       *dbq.Queries // on the reader pool
+	assets  *assets.Pipeline
+	log     *slog.Logger
+	docs    *format.DocumentCache // rendered project pages: hosted ones by revision, proxy ones by upstream page
+	indexes *format.DocumentCache // rendered project lists (/simple/) by the revisions of their repos
+	models  modelCache            // the models of proxy pages that Versions and Builds read
 }
 
 // Module returns the PyPI module: the format with proxies, groups, the legacy upload, web UI
 // uploads, imports, demo data and seeds.
 func Module() module.Module {
-	h := &Handler{docs: format.NewDocumentCache(1024, 64<<20, 8<<20)}
+	h := &Handler{docs: format.NewDocumentCache(1024, 64<<20, 8<<20), indexes: format.NewDocumentCache(256, 64<<20, 32<<20)}
 	return module.Module{
 		ID: name, Title: "Python (PyPI)",
 		Register: func(x *module.Extender) {
@@ -211,14 +213,18 @@ func admit(_ context.Context, w *assets.Write, existing *assets.Asset) (assets.D
 }
 
 // onCommitted writes the project and the file row of a stored distribution file, in the
-// transaction of the write.
-func (h *Handler) onCommitted(ctx context.Context, tx *sql.Tx, w *assets.Write, a *assets.Asset, _ *assets.Asset) error {
+// transaction of the write. A proxy's first cached page of a project moves the revision of its
+// project list on.
+func (h *Handler) onCommitted(ctx context.Context, tx *sql.Tx, w *assets.Write, a *assets.Asset, prev *assets.Asset) error {
+	q := dbq.New(tx)
 	m, ok := w.Meta.(*distMeta)
 	if !ok {
+		if prev == nil && strings.HasPrefix(a.Path, ".simple/") {
+			return q.BumpIndex(ctx, dbq.BumpIndexParams{RepoID: w.Repo.ID, At: time.Now().UnixNano()})
+		}
 		return nil
 	}
-	q := dbq.New(tx)
-	if err := q.UpsertProject(ctx, dbq.UpsertProjectParams{RepoID: w.Repo.ID, Project: m.project, DisplayName: m.display, Rev: time.Now().UnixNano()}); err != nil {
+	if err := upsertProject(ctx, q, w.Repo.ID, m.project, m.display); err != nil {
 		return err
 	}
 	return q.InsertFile(ctx, dbq.InsertFileParams{RepoID: w.Repo.ID, Project: m.project, Version: m.md.version.String(),
@@ -226,14 +232,35 @@ func (h *Handler) onCommitted(ctx context.Context, tx *sql.Tx, w *assets.Write, 
 		RequiresPython: m.md.requiresPython, MetadataSha256: m.metaSHA, UploadedAt: a.CreatedAt.Unix()})
 }
 
+// upsertProject records project with its display name and moves its revision on; a new project
+// or a new display name also moves the revision of the project list on.
+func upsertProject(ctx context.Context, q *dbq.Queries, repoID int64, project, display string) error {
+	now := time.Now().UnixNano()
+	switch old, err := q.GetProject(ctx, dbq.GetProjectParams{RepoID: repoID, Project: project}); {
+	case errors.Is(err, sql.ErrNoRows) || err == nil && old != display:
+		if err := q.BumpIndex(ctx, dbq.BumpIndexParams{RepoID: repoID, At: now}); err != nil {
+			return err
+		}
+	case err != nil:
+		return err
+	}
+	return q.UpsertProject(ctx, dbq.UpsertProjectParams{RepoID: repoID, Project: project, DisplayName: display, Rev: now})
+}
+
 // onRemoved runs in the transaction of a remove: it deletes the file rows of removed distribution
 // files (their .metadata follows), stops advertising a removed .metadata, deletes a project
-// without files and moves the revision of a project with files left on. A remove of the whole repo does not call it.
+// without files and moves the revision of a project with files left on. A deleted project, and a
+// removed cached page of a proxy, move the revision of the project list on. A remove of the whole
+// repo does not call it.
 func (h *Handler) onRemoved(ctx context.Context, tx *sql.Tx, repo *repos.Repo, removed []*assets.Asset, _ []repopath.Path) ([]repopath.Path, error) {
 	q := dbq.New(tx)
 	var follow []repopath.Path
 	projects := map[string]bool{}
+	listChanged := false
 	for _, a := range removed {
+		if strings.HasPrefix(a.Path, ".simple/") {
+			listChanged = true
+		}
 		if !strings.HasPrefix(a.Path, "packages/") {
 			continue
 		}
@@ -265,10 +292,16 @@ func (h *Handler) onRemoved(ctx context.Context, tx *sql.Tx, repo *repos.Repo, r
 		}
 		if !has {
 			err = q.DeleteProject(ctx, dbq.DeleteProjectParams{RepoID: repo.ID, Project: p})
+			listChanged = true
 		} else {
 			err = q.BumpProject(ctx, dbq.BumpProjectParams{At: time.Now().UnixNano(), RepoID: repo.ID, Project: p})
 		}
 		if err != nil {
+			return nil, err
+		}
+	}
+	if listChanged {
+		if err := q.BumpIndex(ctx, dbq.BumpIndexParams{RepoID: repo.ID, At: time.Now().UnixNano()}); err != nil {
 			return nil, err
 		}
 	}
