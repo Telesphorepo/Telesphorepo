@@ -70,7 +70,7 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/proxy` | Fetches the files of proxy repos from their remotes (the `assets.Fetcher` of the read path), stores them through `Commit` with source `proxy`, answers a remote's 401 challenge through the format's `RemoteAuth`, and remembers remote 404s; `proxy.Answer` is the answer of the registry token protocol (also for the Nexus client), `proxy.Send` a request to a remote as a fetch sends it (e.g. a remote tags list) |
 | `internal/format` | The format contract: `Spec` (every optional capability is a field that is nil when the format lacks it), the `Registry` (`All`, `Get`, `Hooks`, `RebuildRun`, `OnRepoChange`, `ValidateConfig`, `SupportsKind`, `Importer`), `Kit` and `Standard` (the default routes), `Importer.Run` (the shared import of one source file), and the rendered documents: `WriteDocument` (a `Document`, a body with its strong `ETag`, answered with 304 on `If-None-Match` and `Vary`; `NewDocument` gives an uncached body the SHA-256 of the body) and `DocumentCache` (an LRU of rendered documents, bounded in entries, in bytes and per entry, keyed by `DocumentKey` of what the body depends on: a revision of the rows or the SHA-256s of the sources, and the base URL). A cached document's ETag is the SHA-256 of its key, so `DocumentCache.Serve` answers a matching `If-None-Match` with 304 before it looks up or builds the body; absolute URLs in a document start at `route.API.BaseURL` |
 | `internal/version` | The version schemes of the package formats, with no outside module: `semver.go` (SemVer 2.0 for npm and Cargo; `CleanSemVer` is npm's loose clean of a package.json version), `pep440.go` (PEP 440: normal form and order), `nuget.go` (NuGet: normal form, order, `IsSemVer2`). Each version has a `SortKey`, a string whose byte order is the scheme's order, for the `sort_key` columns that keyset paging reads |
-| `internal/maven` | Module and format `maven`: the standard routes, release immutability (`Admit`), the content types, the merge of `maven-metadata.xml` in a group, the metadata after a delete (`AfterRemove`), web UI uploads with checksums and metadata |
+| `internal/maven` | Module and format `maven`: the standard routes, release immutability (`Admit`), the content types, the version and build rows (`OnCommitted`, `OnRemoved`), the merge of `maven-metadata.xml` in a group, the metadata after a delete (`AfterRemove`), web UI uploads with checksums and metadata. Owns its tables and queries (`queries/`, `dbq/`) |
 | `internal/debian` | Module and format `debian`: `.deb` upload/parse through `Commit`, the package rows (`OnCommitted`, `OnRemoved`), the index rebuild (`Rebuild`), `/debian/{repo}/key.asc`, the plan of a Nexus apt import (distribution and signing key). Owns its tables, queries (`queries/`, `dbq/`) and architecture config; binds a signing key per repo (`SigningKey`) |
 | `internal/raw` | Module and format `raw`: plain files at `/raw/{repo}/{path...}` (the standard routes) with an `overwrite` policy (`Admit`) |
 | `internal/cargo` | Module and format `cargo`: the Cargo sparse index (`index/`), the `.crate` files (`crates/`) and the publish and yank API (`api/v1/`) for hosted, proxy and group repos; owns its tables and queries. See **Cargo registry** |
@@ -557,6 +557,16 @@ Tables of the `nexus` component (`internal/nexus/migrations`):
 | `repo_moves` | PK `repo_id`, idx `repo_moves_into (into_repo_id)` | A moving repo (Move it project by project) and the repo it merges into (`into_repo_id`, a target of a Nexus source), `created_at`. Both cascade with their repo |
 | `nexus_merges` | PK `id`, idx `nexus_merges_target (target_repo_id, id)`, idx `sync_id`, idx `started_by` | One merge of a source repo into a target (see **Nexus sources**, Gradual move): `source_repo_id` (no foreign key: the merge deletes it), `source_name` and `target_name` at the start, `keep` (`target` or `source`), `otherwise` (the choice of a conflict that no choice names), `state` (`running`, `failed`, `done`, `stopped`), `step`, `sync_id` (its final sync), `cursor` (the last source path copied), the counters `files`, `done`, `copied`, `skipped`, `rebuilt`, `kept`, `taken`, `error`, `started_by`, `started_at`, `finished_at`. Cascades with the target |
 | `nexus_merge_choices` | PK `(merge_id, path)` (WITHOUT ROWID) | The choice of one listed conflict of a merge: `take` 1 deletes the target's file and takes the source's, 0 keeps the target's |
+
+Tables of the `maven` component (`internal/maven/migrations`). Every `repo_id` cascades. Hosted
+and proxy repos have rows (a proxy lists the versions it has cached); the hooks write them in the
+transaction of the asset change (see **Versions and builds**):
+
+| Table | Key / indexes | Notes |
+|---|---|---|
+| `maven_versions` | PK `(repo_id, folder, sort_key)` (WITHOUT ROWID), idx `maven_versions_latest (repo_id, folder, snapshot, sort_key)` | One row per version folder with a build: `folder` the artifact folder, `sort_key` the version's key (byte order is Maven order), `version`, `snapshot` (1 for a `-SNAPSHOT`), `builds` (its rows in `maven_builds`); the row goes with its last build |
+| `maven_builds` | PK `(repo_id, folder, sort_key)` (WITHOUT ROWID) | One row per build of a version folder: `folder` the version folder, `sort_key` the build's key (byte order is build order), `build` the id (the version, `<yyyyMMdd.HHmmss>-<n>` or `SNAPSHOT`); the row goes with its last file |
+| `maven_index_pending` | PK `one` | One row while the files that the Maven repos held before these tables are not indexed yet; the module's start indexes them and deletes it |
 
 Tables of the `debian` component (`internal/debian/migrations`):
 
@@ -3543,14 +3553,20 @@ the capabilities of the repo's `format.Spec` that are set.
   - `each` (Maven, Docker; a group read serves each path or tag from the first member that has
     it): a k-way merge of the members' pages in `format.Spec.VersionOrder`. Each member reads one
     page of `limit` versions from its own cursor; the group cursor is base64url JSON of the
-    member cursors by repo id and the members that have no more. A version comes out while every
-    member that has more still holds a version it read, so no unread version sorts before it. A
-    version that an earlier member has, in its page or by a lookup of its `Builds` (limit 1),
-    comes from that member; the later member's copy is left out. A page costs one `Versions` call
-    per member that has more and at most one `Builds` lookup per earlier member and version.
-    A version with a `folder` (Maven: its files serve path by path) that later members hold too
-    is the union of their builds (below), so its `builds_count`, `latest_build` and
-    `published_at` are the union's.
+    member cursors by repo id (the last version taken from each member, also from one that has
+    no more) and the members that have no more. A version comes out while every member that has
+    more still holds a version it read, so no unread version sorts before it. A version that an
+    earlier member has comes from that member; the later member's copy is left out. With
+    `format.Spec.VersionsByName` (Maven: the order is that of the version strings, so a version
+    sorts at one place in every member) the pages and cursors say which members have a version:
+    an earlier member holds it in its page or took it last on an earlier page, a later member
+    holds it in its page. Without it (Docker orders tags by date) a member that does not hold the
+    version in its page is asked by a lookup of its `Builds` (limit 1). A page costs one
+    `Versions` call per member that has more, and without `VersionsByName` at most one `Builds`
+    lookup per other member and version. A version with a `folder` (Maven: its files serve path
+    by path) that later members hold too is the union of their builds (below), so its
+    `builds_count`, `latest_build` and `published_at` are the union's; the union reads every
+    build of the version in each member that holds it.
   - `owner` (npm, PyPI, Cargo, NuGet; a group read serves every version of a package from the
     member that owns the name): the versions of the owner, with its own cursor. The owner is the
     member that `assets.Reader.Owner` picks for a group read: the first member whose `Versions`
@@ -3566,10 +3582,11 @@ the capabilities of the repo's `format.Spec` that are set.
     the SHA-256 of the cached copy.
   - The builds of a version are what a group read serves for it, and each file names in `repo`
     the member that serves it: in an `owner` group the owner's builds (a proxy's files not cached
-    yet have `remote: true`); in an `each` group, for a version with a `folder`, the union of the
-    builds of every member that has the version: a build id once, a path once from the first
-    member that has it, sorted in `format.Spec.BuildOrder`, a build's `published_at` the newest
-    of its files; for a version without a `folder` (a Docker tag, which one path names), the
+    yet have `remote: true`); in an `each` group, for a version with a `folder`, the page of the
+    first member that has the version when no later member has it (a `Builds` lookup in each),
+    else the union of the builds of every member that has it: a build id once, a path once from
+    the first member that has it, sorted in `format.Spec.BuildOrder`, a build's `published_at`
+    the newest of its files; for a version without a `folder` (a Docker tag, which one path names), the
     builds of the first member that has it, each file named by the first member that stores its
     path. The artifact snippets are those of the owner (`owner`), else of the first member that
     answers for the path, built for the group.
@@ -3632,9 +3649,9 @@ the capabilities of the repo's `format.Spec` that are set.
   meanwhile. Each removes the files batch by batch, empties the rows of the repo in batches, then
   deletes the repo row. The UI waits for each repo to answer 404 and shows the progress in a toast. The name can be used again afterwards.
 - **`format.Spec.OnRemoved` and `AfterRemove`.** `OnRemoved(ctx, tx, repo, removed, prefixes)` runs in
-  the transaction of each batch, before the rows go, with the folders of the removal; Debian and
-  Docker use it (see **Debian indexing
-  pipeline**). Maven's `AfterRemove` writes the artifact's `maven-metadata.xml` again (and the
+  the transaction of each batch, before the rows go, with the folders of the removal; Debian,
+  Docker and Maven use it (see **Debian indexing
+  pipeline**, **Versions and builds**). Maven's `AfterRemove` writes the artifact's `maven-metadata.xml` again (and the
   checksum files it has), with the version folders that still hold files, so a deleted version
   leaves the metadata. An artifact without a `maven-metadata.xml` stays without one.
 - **`format.Spec.Upload`.** `Plan(ctx, repo, PlanInput{Files, Fields, Folder})` works out what an
@@ -4139,10 +4156,22 @@ page are in `web/src/README.md`.
   For Maven, the version folder (`com/acme/lib/1.0/`) also opens that version: its parent is the
   artifact folder and its name the version. `?build=` keeps a chosen build in the address.
   - *Maven:* an artifact folder is `<group path>/<artifactId>/` with one folder per version. A
-    `-SNAPSHOT` version has timestamped builds (`20261014.103000-3`); a release has one build.
-    The snippets of an artifact folder without a version use its newest release with files, else
-    its newest snapshot: the version folders are walked newest first up to the first release with
-    files, and of the snapshots above it only the newest one with files has its builds read.
+    `-SNAPSHOT` version has timestamped builds (`20261014.103000-3`) and the build `SNAPSHOT` of
+    its files without a timestamp; a release has one build. The format reads `maven_versions` and
+    `maven_builds`, which its hooks keep in the transaction of every write and remove: a file
+    `<artifactId>-<version>[-<classifier>].<ext>` (or the timestamped name of a snapshot build;
+    not a checksum or a signature) records its build and its version, and the remove of the last
+    file of a build deletes the build, and of the last build its version. A page of versions or
+    builds is one seek past its cursor, plus one range read of the files of each build on it (the
+    newest build of each version), at any number of versions, builds or files. Versions sort in
+    Maven order by a stored key: numbers numerically; trailing zeros and `ga`, `final`, `release`
+    count as nothing (`1.0.Final` is `1`); `alpha`/`a`, `beta`/`b`, `milestone`/`m`, `rc`/`cr`
+    and `snapshot` sort before the end of a version, `sp` and other qualifiers (alphabetically)
+    after it, numbers after every qualifier; versions equal in that order sort by their strings
+    (`1` before `1.0`). Builds sort by timestamp and number, the build `SNAPSHOT` last. The
+    snippets of an artifact folder without a version use its newest release, else its newest
+    snapshot: one seek of `maven_versions_latest` each. On the first start with these tables,
+    the module's start indexes the files that the Maven repos hold already, then serves.
   - *Debian:* the format reads `deb_packages`, through the index `deb_packages_package`. An artifact
     folder is `pool/<component>/<prefix>/<package>/`; its versions are those of the package of that
     name in that component whose files lie in the folder. `Artifact.Kind` is `package`. A Debian
@@ -4911,7 +4940,7 @@ the format lacks.
   job builds.
 - **Proxy and group:** `Kinds` with `proxy` needs `Classify` and `ProxyProbe`; `RemoteAuth`
   answers a remote's token challenge. `Kinds` with `group` can set `Merge`, and with `Versions`
-  needs `GroupVersions` (`each` with `VersionOrder` and, for versions with a folder, `BuildOrder`; or `owner` with `GroupUnit`, the package of a path, and `Versions` and `Builds` that answer for a proxy from its remote's document).
+  needs `GroupVersions` (`each` with `VersionOrder`, `VersionsByName` when that order reads only the version string, and, for versions with a folder, `BuildOrder`; or `owner` with `GroupUnit`, the package of a path, and `Versions` and `Builds` that answer for a proxy from its remote's document).
 - **Web UI:** `Description`, `Config.Fields`, `UI` (the descriptor), `Versions` and `Builds`,
   `Usage`, `ArtifactUsage` and `Tools` (snippets and CI steps), `Publish` (`cli` or `helper`), `Upload` (`Plan` and
   `Store`), `SigningKey` and `RepoTabs`. The web UI reads the descriptor and names no format.

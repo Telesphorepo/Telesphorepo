@@ -418,6 +418,30 @@ func TestVersionsAndSnippets(t *testing.T) {
 			}
 		}
 	})
+
+	// A delete takes its builds and versions along: the newest snapshot build and the 1.1.0 folder.
+	t.Run("after a delete", func(t *testing.T) {
+		build3 := lib + "1.2.0-SNAPSHOT/lib-1.2.0-20261003.101010-3"
+		s.MustAPI(t, http.MethodPost, "/api/repos/"+repo+"/files/delete", map[string][]string{
+			"paths":    {build3 + ".pom", build3 + ".jar", build3 + ".jar.md5", build3 + "-sources.jar"},
+			"prefixes": {lib + "1.1.0/"},
+		}, s.Admin(), nil)
+		var v versionsJSON
+		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/versions?path=com/acme/lib", nil, read, &v)
+		var got []string
+		for _, it := range v.Items {
+			got = append(got, it.Version)
+		}
+		if !slices.Equal(got, []string{"1.2.0-SNAPSHOT", "1.0.0"}) {
+			t.Fatalf("versions after a delete = %v", got)
+		}
+		if snap := v.Items[0]; snap.BuildsCount != 2 || snap.LatestBuild != "20261002.101010-2" {
+			t.Fatalf("snapshot after a delete = %+v", snap)
+		}
+		if pinned := snippets(t, "com/acme/lib", ""); pinned.Version != "1.0.0" {
+			t.Fatalf("snippets after a delete: version %q, want 1.0.0", pinned.Version)
+		}
+	})
 }
 
 // TestDockerVersions checks the versions (tags), builds (the manifest with its config and layers,

@@ -6,6 +6,7 @@ package maven
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -13,16 +14,25 @@ import (
 	"strings"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
+	"github.com/Telesphorepo/Telesphorepo/internal/db"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
+	"github.com/Telesphorepo/Telesphorepo/internal/maven/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/module"
 	"github.com/Telesphorepo/Telesphorepo/internal/repopath"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 )
 
+//go:embed migrations/*.sql
+var migrationsFS embed.FS
+
+//go:embed queries/*.sql
+var queriesFS embed.FS
+
 // Handler serves the Maven format.
 type Handler struct {
 	assets *assets.Pipeline
 	host   *module.Host
+	q      *dbq.Queries // on the reader pool
 }
 
 // Module returns the Maven module: the Maven format with proxies, groups, uploads, imports,
@@ -32,34 +42,39 @@ func Module() module.Module {
 	return module.Module{
 		ID: "maven", Title: "Maven / Gradle",
 		Register: func(x *module.Extender) {
+			x.Schema(db.Component{Migrations: db.Sub(migrationsFS, "migrations"), Queries: db.Sub(queriesFS, "queries")})
 			x.Init(func(ctx context.Context, host *module.Host) error {
-				h.assets, h.host = host.Assets, host
-				return nil
+				h.assets, h.host, h.q = host.Assets, host, dbq.New(host.DB.R)
+				host.Repos.OnPurge(purge(dbq.New(host.DB.W))) // empties the module's rows of a repo in batches before the repo row goes
+				return h.indexExisting(ctx)
 			})
 			x.Format(format.Spec{
 				Name: "maven", Title: "Maven / Gradle",
 				Description: "Java libraries and Gradle plugins, for Maven and Gradle builds.",
 				Icon:        icon, KindIcons: map[string][]byte{"gradle-plugin": gradleIcon},
-				Kinds:         []string{repos.KindHosted, repos.KindProxy, repos.KindGroup},
-				Config:        format.ConfigSpec{Default: json.RawMessage(`{}`), Validate: validateConfig},
-				Describe:      describe,
-				Admit:         admit,
-				AfterRemove:   h.afterRemove,
-				Classify:      classify,
-				ProxyProbe:    func(json.RawMessage) string { return "" },
-				Merge:         &assets.Merger{Match: matchMerged, Merge: mergeParts},
-				Versions:      h.Versions,
-				Builds:        h.Builds,
-				GroupVersions: format.GroupEach,
-				VersionOrder:  func(a, b format.Version) int { return -compareVersions(a.Version, b.Version) },
-				BuildOrder:    func(a, b format.Build) int { return -compareBuilds(a.Build, b.Build) },
-				Usage:         h.Usage,
-				ArtifactUsage: h.ArtifactUsage,
-				Tools:         tools(),
-				Publish:       format.PublishCLI,
-				Upload:        h.uploadSpec(),
-				Importer:      &format.Importer{Sources: []string{"maven2"}, Target: format.SourcePath},
-				UI:            ui,
+				Kinds:          []string{repos.KindHosted, repos.KindProxy, repos.KindGroup},
+				Config:         format.ConfigSpec{Default: json.RawMessage(`{}`), Validate: validateConfig},
+				Describe:       describe,
+				Admit:          admit,
+				OnCommitted:    h.onCommitted,
+				OnRemoved:      h.onRemoved,
+				AfterRemove:    h.afterRemove,
+				Classify:       classify,
+				ProxyProbe:     func(json.RawMessage) string { return "" },
+				Merge:          &assets.Merger{Match: matchMerged, Merge: mergeParts},
+				Versions:       h.Versions,
+				Builds:         h.Builds,
+				GroupVersions:  format.GroupEach,
+				VersionOrder:   func(a, b format.Version) int { return -compareVersions(a.Version, b.Version) },
+				VersionsByName: true,
+				BuildOrder:     func(a, b format.Build) int { return -compareBuilds(a.Build, b.Build) },
+				Usage:          h.Usage,
+				ArtifactUsage:  h.ArtifactUsage,
+				Tools:          tools(),
+				Publish:        format.PublishCLI,
+				Upload:         h.uploadSpec(),
+				Importer:       &format.Importer{Sources: []string{"maven2"}, Target: format.SourcePath},
+				UI:             ui,
 				// The mutable globs are the paths of mutable: metadata and snapshot files.
 				Edge: &format.EdgeSpec{Shape: format.EdgeStandard, Immutable: []string{"**/*"},
 					Mutable: []string{"**/maven-metadata.xml*", "**/*-SNAPSHOT/*"}},
