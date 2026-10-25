@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -85,11 +86,61 @@ func checkPeopleHolder(ctx context.Context, q *dbq.Queries) error {
 	return nil
 }
 
+// ErrLastAdmin refuses a change that leaves no enabled administrator (a person with every
+// server permission) where there was one.
+var ErrLastAdmin = errors.New("the only administrator must stay an administrator: make another person an administrator first")
+
+// enabledAdmins returns the enabled people who hold every server permission: id to username.
+func enabledAdmins(ctx context.Context, q *dbq.Queries) (map[int64]string, error) {
+	var in map[int64]string
+	for _, p := range perm.Current().AllServer().Strings() {
+		rows, err := q.ListPermHolders(ctx, p)
+		if err != nil {
+			return nil, err
+		}
+		next := make(map[int64]string, len(rows))
+		for _, r := range rows {
+			if _, ok := in[r.ID]; in == nil || ok {
+				next[r.ID] = r.Username
+			}
+		}
+		if in = next; len(in) == 0 {
+			break
+		}
+	}
+	return in, nil
+}
+
+// keepAdmin runs change and returns ErrLastAdmin when it leaves no enabled administrator where
+// there was one before. A server with none (a module added a permission that nobody holds yet)
+// refuses nothing.
+func keepAdmin(ctx context.Context, q *dbq.Queries, change func() error) error {
+	before, err := enabledAdmins(ctx, q)
+	if err != nil {
+		return err
+	}
+	if err := change(); err != nil {
+		return err
+	}
+	if len(before) == 0 {
+		return nil
+	}
+	after, err := enabledAdmins(ctx, q)
+	if err != nil {
+		return err
+	}
+	if len(after) == 0 {
+		return ErrLastAdmin
+	}
+	return nil
+}
+
 // SetUserPerms replaces the server permissions of username with ids and returns the old set. It
 // checks ids against the permission registry (an unknown ID or a broken need is an error). A
 // user who needed no second factor before and needs one now loses their sessions, so a session
 // that a password alone started never holds the new permissions. It returns ErrLastPeople when
-// the change leaves no enabled person with people.manage, and records user.permissions.
+// the change leaves no enabled person with people.manage, ErrLastAdmin when it takes the last
+// enabled administrator's role, and records user.permissions.
 func (s *Service) SetUserPerms(ctx context.Context, username string, ids []string) (old, perms perm.Set, err error) {
 	if perms, err = perm.Current().Parse(perm.ScopeServer, ids); err != nil {
 		return perm.Set{}, perm.Set{}, err
@@ -117,10 +168,12 @@ func (s *Service) SetUserPerms(ctx context.Context, username string, ids []strin
 		if err != nil {
 			return err
 		}
-		if err := q.DeleteUserPerms(ctx, r.ID); err != nil {
-			return err
-		}
-		if err := addUserPerms(ctx, q, r.ID, perms); err != nil {
+		if err := keepAdmin(ctx, q, func() error {
+			if err := q.DeleteUserPerms(ctx, r.ID); err != nil {
+				return err
+			}
+			return addUserPerms(ctx, q, r.ID, perms)
+		}); err != nil {
 			return err
 		}
 		if err := checkPeopleHolder(ctx, q); err != nil {
@@ -162,6 +215,20 @@ func (s *Service) mark(u *User) *User {
 	return u
 }
 
+// Admins returns the usernames of the enabled administrators, sorted.
+func (s *Service) Admins(ctx context.Context) ([]string, error) {
+	admins, err := enabledAdmins(ctx, s.rq)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(admins))
+	for _, name := range admins {
+		out = append(out, name)
+	}
+	slices.Sort(out)
+	return out, nil
+}
+
 func getUserByID(ctx context.Context, q *dbq.Queries, id int64) (*User, error) {
 	r, err := q.GetUserByID(ctx, id)
 	if err != nil {
@@ -198,6 +265,10 @@ func (s *Service) SetDisabled(ctx context.Context, names []string, disabled bool
 	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
 		changed, ids = changed[:0], ids[:0]
 		q := s.wq.WithTx(tx)
+		before, err := enabledAdmins(ctx, q)
+		if err != nil {
+			return err
+		}
 		var all []*User
 		for _, name := range names {
 			r, err := q.GetUserByUsername(ctx, name)
@@ -227,10 +298,17 @@ func (s *Service) SetDisabled(ctx context.Context, names []string, disabled bool
 				ids = append(ids, u.ID)
 			}
 		}
-		if disabled {
-			return checkPeopleHolder(ctx, q)
+		if !disabled {
+			return nil
 		}
-		return nil
+		if len(before) > 0 {
+			if after, err := enabledAdmins(ctx, q); err != nil {
+				return err
+			} else if len(after) == 0 {
+				return ErrLastAdmin
+			}
+		}
+		return checkPeopleHolder(ctx, q)
 	})
 	if err != nil {
 		return nil, err
@@ -379,14 +457,17 @@ func (s *Service) syncManaged(ctx context.Context, tx *sql.Tx, q *dbq.Queries, i
 	if _, err := tx.ExecContext(ctx, "SAVEPOINT sso_permissions"); err != nil {
 		return err
 	}
-	if err := q.DeleteUserPerms(ctx, id); err != nil {
-		return err
+	err = keepAdmin(ctx, q, func() error {
+		if err := q.DeleteUserPerms(ctx, id); err != nil {
+			return err
+		}
+		return addUserPerms(ctx, q, id, perms)
+	})
+	if err == nil {
+		err = checkPeopleHolder(ctx, q)
 	}
-	if err := addUserPerms(ctx, q, id, perms); err != nil {
-		return err
-	}
-	if err := checkPeopleHolder(ctx, q); errors.Is(err, ErrLastPeople) {
-		slog.WarnContext(ctx, "single sign-on: the permissions from the provider would leave nobody with people.manage; the old permissions stay",
+	if errors.Is(err, ErrLastPeople) || errors.Is(err, ErrLastAdmin) {
+		slog.WarnContext(ctx, "single sign-on: the permissions from the provider would leave no administrator or nobody with people.manage; the old permissions stay",
 			"username", u.Username)
 		_, err := tx.ExecContext(ctx, "ROLLBACK TO sso_permissions")
 		return err

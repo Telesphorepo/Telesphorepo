@@ -398,7 +398,7 @@
   </PageHeader>
 
   {#snippet nameField()}
-    <FormRow label="Name" for="{fid}-name" help="Name it after what it publishes, such as acme/app releases.">
+    <FormRow label="Name" for="{fid}-name" help={isNew ? "How the pipeline shows in lists and the activity log. It follows the GitHub repository or the Jenkins job until you type one." : "How the pipeline shows in lists and the activity log."}>
       <Input id="{fid}-name" aria-describedby="{fid}-name-help" bind:value={v.name} oninput={() => (nameTouched = true)} />
     </FormRow>
     {#if !isNew}

@@ -42,7 +42,7 @@ func Fail(w http.ResponseWriter, r *http.Request, err error) {
 		httpx.Error(w, r, http.StatusBadRequest, err.Error())
 	case errors.Is(err, auth.ErrNotHeld):
 		httpx.Error(w, r, http.StatusForbidden, err.Error())
-	case errors.Is(err, auth.ErrLastPeople), errors.Is(err, auth.ErrManaged):
+	case errors.Is(err, auth.ErrLastPeople), errors.Is(err, auth.ErrLastAdmin), errors.Is(err, auth.ErrManaged):
 		httpx.Error(w, r, http.StatusConflict, err.Error())
 	case errors.As(err, new(*repos.MissingError)):
 		httpx.Error(w, r, http.StatusNotFound, err.Error())

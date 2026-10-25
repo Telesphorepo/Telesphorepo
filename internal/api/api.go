@@ -105,6 +105,7 @@ func (a *API) routes(mux *route.Router) {
 	mux.Handle("GET /api/users", route.UIPerm(perm.PeopleManage), a.listUsers)
 	mux.Handle("POST /api/users", route.UIPerm(perm.PeopleManage), a.createUser)
 	mux.Handle("PATCH /api/users", route.UIPerm(perm.PeopleManage), a.setUsersDisabled)
+	mux.Handle("GET /api/administrators", route.UIPerm(perm.PeopleManage), a.administrators)
 	mux.Handle("GET /api/users/{username}", route.UIPerm(perm.PeopleManage), a.getUser)
 	mux.Handle("PATCH /api/users/{username}", route.UI, a.updateUser)
 	mux.Handle("PUT /api/users/{username}/permissions", route.UIPerm(perm.PeopleManage), a.setUserPermissions)
@@ -263,6 +264,17 @@ func (a *API) listUsers(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		us = []*auth.User{}
 	}
 	httpx.WriteJSON(w, http.StatusOK, route.Page[*auth.User]{Items: us, Next: route.Cursor(next)})
+}
+
+// administrators answers {usernames}: the enabled people who hold every server permission. The
+// UI keeps the only one from losing that role; the server refuses it too (auth.ErrLastAdmin).
+func (a *API) administrators(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	names, err := a.auth.Admins(r.Context())
+	if err != nil {
+		route.Fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string][]string{"usernames": names})
 }
 
 // getUser returns one account by name (people): the person page of the UI.

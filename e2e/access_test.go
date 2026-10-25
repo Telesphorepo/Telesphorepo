@@ -465,8 +465,9 @@ func TestAccessPermission(t *testing.T) {
 	}
 }
 
-// TestLastPeople: the server keeps at least one enabled person with the people permission, and a
-// person with people changes only the permissions they hold.
+// TestLastPeople: the server keeps at least one enabled person with the people permission and
+// the only enabled administrator's role, and a person with people changes only the permissions
+// they hold.
 func TestLastPeople(t *testing.T) {
 	t.Parallel()
 	s := StartServer(t, ServerOpts{})
@@ -508,6 +509,28 @@ func TestLastPeople(t *testing.T) {
 	s.MustAPI(t, http.MethodPut, "/api/users/"+boss+"/permissions", map[string]any{"permissions": []string{}}, s.Admin(), nil)
 	st, b = s.API(t, http.MethodPut, "/api/users/"+s.AdminUser+"/permissions", map[string]any{"permissions": allBut("people.manage")}, s.Admin())
 	wantAPIStatus(t, "remove people while the other holder is disabled", st, b, http.StatusConflict)
+
+	// The only enabled administrator keeps every server permission, also one that is not people;
+	// with a second administrator either can give the role up.
+	admins := func() []string {
+		var out struct {
+			Usernames []string `json:"usernames"`
+		}
+		s.MustAPI(t, http.MethodGet, "/api/administrators", nil, s.Admin(), &out)
+		return out.Usernames
+	}
+	if got := admins(); !slices.Equal(got, []string{s.AdminUser}) {
+		t.Fatalf("administrators = %v, want [%s]", got, s.AdminUser)
+	}
+	st, b = s.API(t, http.MethodPut, "/api/users/"+s.AdminUser+"/permissions", map[string]any{"permissions": allBut("storage.manage")}, s.Admin())
+	wantAPIStatus(t, "take a permission from the only administrator", st, b, http.StatusConflict)
+	second := RandName("second")
+	s.CreateUser(t, second, "second-password-1", s.ServerPerms(t)...)
+	if got := admins(); len(got) != 2 {
+		t.Fatalf("administrators = %v, want two", got)
+	}
+	st, b = s.API(t, http.MethodPut, "/api/users/"+second+"/permissions", map[string]any{"permissions": allBut("storage.manage")}, s.Admin())
+	wantAPIStatus(t, "take a permission from one of two administrators", st, b, http.StatusOK)
 
 	// One user.permissions event per change, with the old and the new set.
 	var found bool

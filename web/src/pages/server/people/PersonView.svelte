@@ -62,6 +62,9 @@
   });
   const u = $derived(user.data);
   const self = $derived(person === auth.user?.username);
+  // The only enabled administrator keeps the role and stays enabled; the server refuses it too.
+  const admins = new Resource(() => api.users.administrators());
+  const onlyAdmin = $derived(admins.data?.length === 1 && admins.data[0] === person);
   const sso = $derived(u?.kind === "oidc");
   const allRepos = $derived(allReposPermissions().some((p) => !!u?.permissions?.includes(p)));
   // The server permissions of the caller: they give and remove only these.
@@ -91,7 +94,7 @@
     user.data = next;
     toast.success(`Saved the server permissions of ${person}`);
     if (self) await auth.load();
-    await access.reload();
+    await Promise.all([access.reload(), admins.reload()]);
   }
 
   // --- repositories ---
@@ -140,7 +143,7 @@
   async function afterChange() {
     picked = new Set();
     if (self) await auth.load();
-    await access.reload();
+    await Promise.all([access.reload(), admins.reload()]);
   }
 
   let removeOpen = $state(false);
@@ -223,7 +226,7 @@
     await t.run();
     toast.success(t.done);
     // The state decides which repositories the person can use.
-    await Promise.all([user.reload(), afterChange()]);
+    await Promise.all([user.reload(), admins.reload(), afterChange()]);
   }
 
   let pwOpen = $state(false);
@@ -234,6 +237,7 @@
   }
 
   const notYou = "Another person with People can do this.";
+  const onlyAdminText = "The only administrator stays enabled. Make another person an administrator first.";
   const notCovered = "You can do this only for a person whose permissions you all hold.";
 </script>
 
@@ -283,8 +287,8 @@
             variant="ghost"
             size="sm"
             class="hover:bg-destructive/10 hover:text-destructive"
-            disabled={self}
-            title={self ? notYou : undefined}
+            disabled={self || onlyAdmin}
+            title={self ? notYou : onlyAdmin ? onlyAdminText : undefined}
             onclick={() => ask("disable")}>Disable account</Button
           >
         {/if}
@@ -301,7 +305,7 @@
     {#snippet actions()}
       {#if u.permissions_managed && auth.can("signin.manage")}<Button variant="outline" size="sm" href={href("/settings/sign-in")}>Open sign-in options</Button>{/if}
     {/snippet}
-    <ServerPermissionPicker id="{id}-server" readonly={u.permissions_managed} held={mine} bind:value={serverValue} />
+    <ServerPermissionPicker id="{id}-server" readonly={u.permissions_managed} held={mine} keepAdmin={onlyAdmin} bind:value={serverValue} />
   </FormSection>
 
   <Section title="Repositories">

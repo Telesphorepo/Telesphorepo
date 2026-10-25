@@ -8,7 +8,8 @@
   permission that gives all repositories says what that holds. A permission that a switched-on
   one needs is on and locked ("Needed by Manage people"). A permission outside `held` cannot
   change, because the server lets a person give and remove only the permissions they hold; so
-  Administrator needs every missing one held, and Member every present one.
+  Administrator needs every missing one held, and Member every present one. With `keepAdmin`
+  (the only enabled administrator) Member and Custom are off and say why.
 
   `readonly` shows the role and, for Custom, the permissions held, without controls. The cards
   stack in a narrow container (a dialog, a phone) and sit side by side from 36rem.
@@ -30,6 +31,7 @@
     value = $bindable([]),
     held,
     readonly = false,
+    keepAdmin = false,
     onchange,
   }: {
     /** Prefix of the element ids, unique on the page. */
@@ -39,6 +41,8 @@
     held?: readonly PermId[];
     /** Show the role and the permissions without controls. */
     readonly?: boolean;
+    /** The person is the only enabled administrator: Member and Custom are off. */
+    keepAdmin?: boolean;
     onchange?: (value: PermId[]) => void;
   } = $props();
 
@@ -84,12 +88,17 @@
   const canAdmin = $derived(all.every((p) => value.includes(p) || canChange(p)));
   const canMember = $derived(value.every(canChange));
 
+  const onlyAdminText = "The only administrator stays one. Make another person an administrator first.";
   const roles = $derived([
     {
       value: "member" as const,
       label: "Member",
-      text: canMember ? "No server permissions. Uses only the repositories they are given." : "You cannot remove a permission that you do not hold.",
-      disabled: !canMember,
+      text: keepAdmin
+        ? onlyAdminText
+        : canMember
+          ? "No server permissions. Uses only the repositories they are given."
+          : "You cannot remove a permission that you do not hold.",
+      disabled: keepAdmin || !canMember,
     },
     {
       value: "administrator" as const,
@@ -97,7 +106,12 @@
       text: canAdmin ? "Every server permission: manages the whole server." : "You do not hold every server permission, so you cannot give them all.",
       disabled: !canAdmin,
     },
-    { value: "custom" as const, label: "Custom", text: "Manages only the parts of the server that you pick.", disabled: false },
+    {
+      value: "custom" as const,
+      label: "Custom",
+      text: keepAdmin ? onlyAdminText : "Manages only the parts of the server that you pick.",
+      disabled: keepAdmin,
+    },
   ]);
 
   function set(next: Set<PermId>) {

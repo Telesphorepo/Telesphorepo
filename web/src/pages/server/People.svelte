@@ -5,7 +5,8 @@
   the person's page (/settings/people/:name), where the account, its server permissions and its
   permissions on each repository change. New account opens a short form; after Create, the new
   person's page opens to set the permissions. Single sign-on accounts appear after their first
-  sign-in. Pick rows (not your own) to disable people (after a confirm) or enable them at once.
+  sign-in. Pick rows (not your own, not the only administrator's) to disable people (after a
+  confirm) or enable them at once.
 -->
 <script lang="ts">
   import { toast } from "svelte-sonner";
@@ -14,7 +15,7 @@
   import { auth } from "$lib/auth.svelte";
   import { serverPhrase } from "$lib/permissions";
   import { api, errorMessage, type User } from "$lib/api";
-  import { Keyset } from "$lib/load.svelte";
+  import { Keyset, Resource } from "$lib/load.svelte";
   import { count, someNames } from "$lib/words";
   import { Button } from "$lib/components/ui/button";
   import PageHeader from "$lib/components/PageHeader.svelte";
@@ -32,6 +33,8 @@
   let {}: PageProps = $props();
 
   const users = new Keyset((p) => api.users.list(p));
+  // The only enabled administrator cannot be disabled; the server refuses it too.
+  const admins = new Resource(() => api.users.administrators());
   const personPath = (name: string) => `/settings/people/${encodeURIComponent(name)}`;
   const rowHref = (u: User) => href(personPath(u.username));
   // How people sign in shows only when it differs between them.
@@ -54,7 +57,7 @@
       toast.success(disabled ? `${count(list.length, "person is", "people are")} now disabled.` : `${count(list.length, "person can", "people can")} sign in again.`);
       picked = new Set();
     } finally {
-      await users.reload();
+      await Promise.all([users.reload(), admins.reload()]);
     }
   }
 
@@ -81,7 +84,7 @@
     key={(u) => u.id}
     href={rowHref}
     bind:picked
-    pickable={(u) => u.username !== auth.user?.username}
+    pickable={(u) => u.username !== auth.user?.username && !(admins.data?.length === 1 && admins.data[0] === u.username)}
     pickLabel={(u) => u.username}
   >
     {#snippet leading(u)}<UserAvatar name={u.username} size="md" />{/snippet}

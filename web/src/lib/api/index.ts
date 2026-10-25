@@ -71,6 +71,8 @@ export const api = {
     list: (p?: T.PageParams) => request<T.Page<T.User>>("GET", "/api/users", { query: page(p) }),
     /** People: one account; 404 when no account has the name. */
     get: (username: string) => request<T.User>("GET", `/api/users/${enc(username)}`),
+    /** People: the usernames of the enabled administrators (every server permission). */
+    administrators: async () => (await request<{ usernames: string[] }>("GET", "/api/administrators")).usernames,
     /** People: the repositories one person can use, by repository name. */
     access: (username: string, p?: T.PageParams) =>
       request<T.UserAccess>("GET", `/api/users/${enc(username)}/access`, { query: page(p) }),
