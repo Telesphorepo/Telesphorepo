@@ -15,7 +15,8 @@ export type Crumb = { label: string; href?: string };
  */
 export function sidebarTrail(path: string, title: string, tail?: Crumb[]): Crumb[] {
   const place = navPlace(path);
-  const settings: Crumb = { label: "Settings", href: href("/settings") };
+  // The address of All settings itself, so its own page knows the step is itself.
+  const settings: Crumb = { label: "Settings", href: href("/settings/overview") };
   if (!place) return [settings, ...(tail ?? [{ label: title }])];
   const area = areaOf(place.group.id);
   // The group links to the first item that the person may open.

@@ -17,7 +17,6 @@
   import type { PageProps } from "$lib/router.svelte";
   import { href, navigate, repoPath, repoSettingsPath } from "$lib/router.svelte";
   import { auth } from "$lib/auth.svelte";
-  import { current } from "$lib/current.svelte";
   import { brand } from "$lib/brand.svelte";
   import { api, type Page, type PageParams, type Repo } from "$lib/api";
   import { Resource, listOf } from "$lib/load.svelte";
@@ -122,7 +121,7 @@
 </script>
 
 {#if hasAdmin}
-  <PageHeader title={brand.name} description={baseURL || undefined} crumbs={[{ label: current.route?.title ?? "All settings" }]}>
+  <PageHeader title={brand.name} description={baseURL || undefined}>
     {#snippet meta()}
       {#if version.data}
         {@const v = versionName(version.data)}
