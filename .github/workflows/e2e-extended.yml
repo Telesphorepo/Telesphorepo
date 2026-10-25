@@ -8,8 +8,6 @@ on:
         type: choice
         options: [import, scale, all]
         default: import
-  schedule:
-    - cron: "0 4 * * 1" # weekly, Monday 04:00 UTC: import zone
 
 permissions:
   contents: read
