@@ -27,7 +27,8 @@ const (
 var ErrCursor = errors.New("invalid cursor")
 
 // groupCursor is the cursor of a page of a group's versions: per member (by repo id) the cursor
-// of its own Versions, and the members that have no more versions.
+// of its own Versions (the last version the merge took from it, also of a member that has no
+// more), and the members that have no more versions.
 type groupCursor struct {
 	After map[string]string `json:"a,omitempty"`
 	Done  []int64           `json:"d,omitempty"`
@@ -111,19 +112,42 @@ func (s *Spec) owner(ctx context.Context, repo *repos.Repo, members []*repos.Rep
 // memberPage is the page of one member in a merge of versions.
 type memberPage struct {
 	m     *repos.Repo
+	from  string // the member's cursor in the group cursor
 	after string // the member's cursor of items
 	items []Version
 	more  bool // the member has versions after items
 	pos   int  // the items taken by the merge
 }
 
+// last is the last version that the merge took from the member: its cursor.
+func (pg *memberPage) last() string {
+	if pg.pos > 0 {
+		return pg.items[pg.pos-1].Version
+	}
+	return pg.after
+}
+
+// holds reports whether the member's page holds version v.
+func (pg *memberPage) holds(v string) bool {
+	for _, x := range pg.items {
+		if x.Version == v {
+			return true
+		}
+	}
+	return false
+}
+
 // mergeVersions is a k-way merge of the versions of the members in VersionOrder. Each member
 // reads pages of limit versions from its own cursor. A version comes out while every member that
 // has more still holds a version it read, so no unread version of a member sorts before it; a
-// member that has taken all it read reads its next page. A version that an earlier member has (in
-// its page, or by a lookup of its Builds) is that member's, and leaves the list of the later one.
-// A page costs one Versions call per member that has more (one more for each page a member
-// takes up), and at most one Builds lookup per earlier member and version.
+// member that has taken all it read reads its next page. A version that an earlier member has is
+// that member's, and leaves the list of the later one. With VersionsByName a version sorts at one
+// place in every member, so the merge takes the versions of all members in one order: an earlier
+// member that has the version holds it in its page or took it last on an earlier page (its
+// cursor), and a later member that has it holds it in its page. Otherwise a member that does not
+// hold it in its page is asked by a lookup of its Builds. A page costs one Versions call per
+// member that has more (one more for each page a member takes up), and without VersionsByName at
+// most one Builds lookup per other member and version.
 func (s *Spec) mergeVersions(ctx context.Context, repo *repos.Repo, members []*repos.Repo, p, after string, limit int) (*Artifact, []Version, string, error) {
 	cur, err := decodeCursor(after)
 	if err != nil {
@@ -146,11 +170,12 @@ func (s *Spec) mergeVersions(ctx context.Context, repo *repos.Repo, members []*r
 	}
 	pages := make([]*memberPage, len(members))
 	for i, m := range members {
-		pages[i] = &memberPage{m: m}
+		from := cur.After[strconv.FormatInt(m.ID, 10)]
+		pages[i] = &memberPage{m: m, from: from, after: from}
 		if cur.done(m.ID) {
 			continue
 		}
-		if err := read(pages[i], cur.After[strconv.FormatInt(m.ID, 10)]); err != nil {
+		if err := read(pages[i], from); err != nil {
 			return nil, nil, "", err
 		}
 	}
@@ -214,17 +239,12 @@ func (s *Spec) mergeVersions(ctx context.Context, repo *repos.Repo, members []*r
 	next := &groupCursor{After: map[string]string{}}
 	open := false
 	for _, pg := range pages {
-		key := strconv.FormatInt(pg.m.ID, 10)
-		switch {
-		case pg.pos == len(pg.items) && !pg.more:
+		if last := pg.last(); last != "" {
+			next.After[strconv.FormatInt(pg.m.ID, 10)] = last
+		}
+		if pg.pos == len(pg.items) && !pg.more {
 			next.Done = append(next.Done, pg.m.ID)
-		case pg.pos > 0:
-			next.After[key] = pg.items[pg.pos-1].Version
-			open = true
-		default:
-			if pg.after != "" {
-				next.After[key] = pg.after
-			}
+		} else {
 			open = true
 		}
 	}
@@ -234,23 +254,16 @@ func (s *Spec) mergeVersions(ctx context.Context, repo *repos.Repo, members []*r
 	return art, out, next.encode(), nil
 }
 
-// earlierHas reports whether one of the earlier members has version v: in the page it read, or
-// else by a lookup of the version's Builds.
+// earlierHas reports whether one of the earlier members has version v: in the page it read, as
+// its cursor (VersionsByName), or else by a lookup of the version's Builds.
 func (s *Spec) earlierHas(ctx context.Context, repo *repos.Repo, earlier []*memberPage, p, v string) (bool, error) {
 	for _, pg := range earlier {
-		found := false
-		for _, x := range pg.items {
-			if x.Version == v {
-				found = true
-				break
-			}
-		}
-		if !found {
-			_, ver, _, _, err := s.Builds(ctx, repo, pg.m, p, v, "", "", 1)
-			if err != nil {
+		found := pg.holds(v) || s.VersionsByName && pg.from == v
+		if !found && !s.VersionsByName {
+			var err error
+			if found, err = s.hasVersion(ctx, repo, pg.m, p, v); err != nil {
 				return false, err
 			}
-			found = ver != nil
 		}
 		if found {
 			return true, nil
@@ -259,30 +272,30 @@ func (s *Spec) earlierHas(ctx context.Context, repo *repos.Repo, earlier []*memb
 	return false, nil
 }
 
-// laterHolders returns the members of pages that have version v: in the page they read, or else by
-// a lookup of the version's Builds.
+// laterHolders returns the members of pages that have version v: in the page they read, or else
+// (without VersionsByName) by a lookup of the version's Builds.
 func (s *Spec) laterHolders(ctx context.Context, repo *repos.Repo, pages []*memberPage, p, v string) ([]*repos.Repo, error) {
 	var out []*repos.Repo
 	for _, pg := range pages {
-		found := false
-		for _, x := range pg.items {
-			if x.Version == v {
-				found = true
-				break
-			}
-		}
-		if !found {
-			_, ver, _, _, err := s.Builds(ctx, repo, pg.m, p, v, "", "", 1)
-			if err != nil {
+		found := pg.holds(v)
+		if !found && !s.VersionsByName {
+			var err error
+			if found, err = s.hasVersion(ctx, repo, pg.m, p, v); err != nil {
 				return nil, err
 			}
-			found = ver != nil
 		}
 		if found {
 			out = append(out, pg.m)
 		}
 	}
 	return out, nil
+}
+
+// hasVersion reports whether member m has version v of the artifact at p: a lookup of its Builds
+// (limit 1).
+func (s *Spec) hasVersion(ctx context.Context, repo, m *repos.Repo, p, v string) (bool, error) {
+	_, ver, _, _, err := s.Builds(ctx, repo, m, p, v, "", "", 1)
+	return ver != nil, err
 }
 
 // buildsPage is the number of builds that one Builds call of a union reads.
@@ -424,7 +437,8 @@ type Stores func(ctx context.Context, m *repos.Repo, path string) (bool, error)
 // it:
 //   - GroupOwner: the builds of the owner of the artifact; every file is the owner's.
 //   - GroupEach, a version with a Folder (its files serve path by path): the union of the builds
-//     of every member that has the version (see union).
+//     of every member that has the version (see union), found by a lookup in each later member;
+//     the page of the first member that has it when no later member does.
 //   - GroupEach, a version without a Folder (one path names it, e.g. a Docker tag): the builds of
 //     the first member that has the version; each file names the first member that stores its
 //     path (stores), else that member.
@@ -462,19 +476,36 @@ func (s *Spec) BuildsOf(ctx context.Context, repo *repos.Repo, members []*repos.
 		if art == nil || ver == nil {
 			continue
 		}
-		if ver.Folder != "" {
-			u, err := s.union(ctx, repo, members[i:], p, version)
-			if err != nil || u == nil {
-				return nil, nil, nil, "", err
+		folder := ver.Folder != ""
+		if folder {
+			var later []*repos.Repo
+			for _, x := range members[i+1:] {
+				has, err := s.hasVersion(ctx, repo, x, p, version)
+				if err != nil {
+					return nil, nil, nil, "", err
+				}
+				if has {
+					later = append(later, x)
+				}
 			}
-			items, next := u.page(s.BuildOrder, build, after, limit)
-			return u.art, u.ver, items, next, nil
+			if len(later) > 0 {
+				u, err := s.union(ctx, repo, append([]*repos.Repo{m}, later...), p, version)
+				if err != nil || u == nil {
+					return nil, nil, nil, "", err
+				}
+				items, next := u.page(s.BuildOrder, build, after, limit)
+				return u.art, u.ver, items, next, nil
+			}
+			// The only member that has the version serves its files: its own page.
 		}
 		ver.Repo = m.Name
 		for i := range items {
 			for j := range items[i].Files {
 				f := &items[i].Files[j]
 				f.Repo = m.Name
+				if folder {
+					continue
+				}
 				for _, x := range members {
 					ok, err := stores(ctx, x, f.Path)
 					if err != nil {

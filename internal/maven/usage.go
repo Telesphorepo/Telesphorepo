@@ -261,13 +261,13 @@ func (h *Handler) ArtifactUsage(ctx context.Context, repo, from *repos.Repo, bas
 	version := ""
 	artDir := dir
 	if parent := path.Dir(strings.TrimSuffix(dir, "/")); parent != "." {
-		if art, _, id, ok := artifactOf(parent); ok {
+		if art, _, _, ok := artifactOf(parent); ok {
 			v := path.Base(strings.TrimSuffix(dir, "/"))
-			bs, err := h.readBuilds(ctx, from.ID, dir, id, v)
+			has, err := h.hasVersion(ctx, from.ID, art.Path, v)
 			if err != nil {
 				return nil, err
 			}
-			if len(bs.builds) > 0 {
+			if has {
 				artDir, version = art.Path, v
 			}
 		}
