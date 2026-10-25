@@ -7,7 +7,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/db/dbq"
 )
 
-// The lists of GET /api/repos. Each one reads one index (migration 0006_repo_lists.sql): every
+// The lists of GET /api/repos. Each one reads one index (migration 0005_performance.sql): every
 // repo, the public repos (anonymous read), or the repos of a caller's grants (a lookup per id).
 // A caller merges the lists it may see.
 

@@ -1211,7 +1211,7 @@ type ListReposInRangeRow struct {
 
 // The lists of GET /api/repos (internal/repos list.go). A page by name is the names in
 // [from, to): the keyset cursor and a name prefix in one range of an index (migration
-// 0006_repo_lists.sql). kind ” and format ” match every repo. The lists of the repos of a
+// 0005_performance.sql). kind ” and format ” match every repo. The lists of the repos of a
 // caller's grants are in dbq/extra.go (sqlc numbers the parameters after a slice wrongly).
 func (q *Queries) ListReposInRange(ctx context.Context, arg ListReposInRangeParams) ([]ListReposInRangeRow, error) {
 	rows, err := q.db.QueryContext(ctx, listReposInRange, arg.From, arg.To, arg.Limit)
