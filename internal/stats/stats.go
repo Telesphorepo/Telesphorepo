@@ -8,6 +8,7 @@ package stats
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"sync"
 	"time"
 
@@ -86,12 +87,15 @@ func (c *Counter) Flush(ctx context.Context) error {
 	batch, used := c.pending, c.used
 	if len(batch) == 0 && len(used) == 0 {
 		c.mu.Unlock()
-		return nil
+		return c.roll(ctx)
 	}
 	c.pending, c.used = map[key]count{}, map[string]int64{}
 	c.mu.Unlock()
 	err := c.db.Tx(ctx, func(tx *sql.Tx) error {
 		q := c.wq.WithTx(tx)
+		if err := rollWindow(ctx, q); err != nil {
+			return err
+		}
 		for k, n := range batch {
 			if err := q.AddDownloads(ctx, dbq.AddDownloadsParams{RepoID: k.repo, Day: k.day, Downloads: n.downloads, Bytes: n.bytes}); err != nil {
 				return err
@@ -120,6 +124,57 @@ func (c *Counter) Flush(ctx context.Context) error {
 	return err
 }
 
+// RecentDays is the length of the download window: the last 30 UTC days, today included. The
+// window is kept in download_window_days and download_window_repos (see the migration): the
+// triggers of download_stats add every written row to them in the transaction of the write.
+const RecentDays = 30
+
+// windowFirst is the first day of the window now.
+func windowFirst() int64 { return DayOf(time.Now()) - (RecentDays-1)*int64(Day/time.Second) }
+
+// roll moves the window to today when a day has left it, in one transaction.
+func (c *Counter) roll(ctx context.Context) error {
+	first, err := c.rq.GetWindowFirst(ctx)
+	if err != nil {
+		return err
+	}
+	if first >= windowFirst() {
+		return nil
+	}
+	return c.db.Tx(ctx, func(tx *sql.Tx) error { return rollWindow(ctx, c.wq.WithTx(tx)) })
+}
+
+// rollWindow subtracts each day that has left the window from the totals, reading only the rows of
+// that day, and moves the first day of the window to today's.
+func rollWindow(ctx context.Context, q *dbq.Queries) error {
+	first, err := q.GetWindowFirst(ctx)
+	if err != nil {
+		return err
+	}
+	want := windowFirst()
+	if first >= want {
+		return nil
+	}
+	for day := first; day < want; day += int64(Day / time.Second) {
+		rows, err := q.ListDownloadsOfDay(ctx, day)
+		if err != nil {
+			return err
+		}
+		for _, r := range rows {
+			if err := q.SubWindowRepo(ctx, dbq.SubWindowRepoParams{Downloads: r.Downloads, Bytes: r.Bytes, RepoID: r.RepoID}); err != nil {
+				return err
+			}
+			if err := q.DeleteEmptyWindowRepo(ctx, r.RepoID); err != nil {
+				return err
+			}
+		}
+	}
+	if err := q.DeleteWindowDaysBefore(ctx, want); err != nil {
+		return err
+	}
+	return q.SetWindowFirst(ctx, want)
+}
+
 // DayRow is the downloads of every repo on one day.
 type DayRow struct {
 	Day       int64
@@ -127,7 +182,7 @@ type DayRow struct {
 	Bytes     int64
 }
 
-// TopRow is the downloads of one repo over a window.
+// TopRow is the downloads of one repo over the window.
 type TopRow struct {
 	Name      string
 	Format    string
@@ -135,10 +190,10 @@ type TopRow struct {
 	Bytes     int64
 }
 
-// Days returns the written downloads of each day from day on that has any, oldest first. SQL sums
-// them from download_stats_window.
-func (c *Counter) Days(ctx context.Context, day int64) ([]DayRow, error) {
-	rows, err := c.rq.SumDownloadsByDay(ctx, day)
+// Days returns the written downloads of each day of the window that has any, oldest first: a seek
+// of at most RecentDays rows.
+func (c *Counter) Days(ctx context.Context) ([]DayRow, error) {
+	rows, err := c.rq.ListWindowDays(ctx, windowFirst())
 	if err != nil {
 		return nil, err
 	}
@@ -149,10 +204,10 @@ func (c *Counter) Days(ctx context.Context, day int64) ([]DayRow, error) {
 	return out, nil
 }
 
-// Top returns the n repos with the most written downloads from day on, most first (then the most
-// bytes, then the oldest repo).
-func (c *Counter) Top(ctx context.Context, day int64, n int) ([]TopRow, error) {
-	rows, err := c.rq.TopDownloadRepos(ctx, dbq.TopDownloadReposParams{Since: day, N: int64(n)})
+// Top returns the n repos with the most written downloads in the window, most first (then the most
+// bytes, then the oldest repo): the first rows of an index.
+func (c *Counter) Top(ctx context.Context, n int) ([]TopRow, error) {
+	rows, err := c.rq.TopWindowRepos(ctx, int64(n))
 	if err != nil {
 		return nil, err
 	}
@@ -163,21 +218,21 @@ func (c *Counter) Top(ctx context.Context, day int64, n int) ([]TopRow, error) {
 	return out, nil
 }
 
-// RecentDays is the window of Recent: the last 30 days, today included, the window of the
-// Downloads card of the settings Overview.
-const RecentDays = 30
-
-// Recent returns the written downloads of each repo over the last RecentDays days; a repo without
-// downloads has no entry. It reads the rows of ListDownloadsSince, at most one per repo and day.
-func (c *Counter) Recent(ctx context.Context) (map[int64]int64, error) {
-	first := DayOf(time.Now()) - (RecentDays-1)*int64(Day/time.Second)
-	rows, err := c.rq.ListDownloadsSince(ctx, first)
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[int64]int64)
-	for _, r := range rows {
-		out[r.RepoID] += r.Downloads
+// Recent returns the written downloads of the repos ids over the window, one seek per repo; a repo
+// without downloads has no entry.
+func (c *Counter) Recent(ctx context.Context, ids []int64) (map[int64]int64, error) {
+	out := make(map[int64]int64, len(ids))
+	for _, id := range ids {
+		n, err := c.rq.GetWindowRepoDownloads(ctx, id)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if n > 0 {
+			out[id] = n
+		}
 	}
 	return out, nil
 }

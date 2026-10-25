@@ -38,11 +38,20 @@ func (q *Queries) AddDownloads(ctx context.Context, arg AddDownloadsParams) erro
 	return err
 }
 
+const deleteEmptyWindowRepo = `-- name: DeleteEmptyWindowRepo :exec
+DELETE FROM download_window_repos WHERE repo_id = ?1 AND downloads <= 0
+`
+
+func (q *Queries) DeleteEmptyWindowRepo(ctx context.Context, repoID int64) error {
+	_, err := q.db.ExecContext(ctx, deleteEmptyWindowRepo, repoID)
+	return err
+}
+
 const deleteOldDownloads = `-- name: DeleteOldDownloads :execrows
 DELETE FROM download_stats WHERE day < ?1
 `
 
-// Retention: the days before a cutoff, through download_stats_window.
+// Retention: the days before a cutoff, through download_stats_day.
 func (q *Queries) DeleteOldDownloads(ctx context.Context, before int64) (int64, error) {
 	result, err := q.db.ExecContext(ctx, deleteOldDownloads, before)
 	if err != nil {
@@ -51,26 +60,63 @@ func (q *Queries) DeleteOldDownloads(ctx context.Context, before int64) (int64, 
 	return result.RowsAffected()
 }
 
-const listDownloadsSince = `-- name: ListDownloadsSince :many
-SELECT repo_id, day, downloads, bytes FROM download_stats WHERE day >= ?1 ORDER BY day
+const deleteWindowDaysBefore = `-- name: DeleteWindowDaysBefore :exec
+DELETE FROM download_window_days WHERE day < ?1
 `
 
-// The rows of the days from since on, through download_stats_window: at most one per repo and day.
-func (q *Queries) ListDownloadsSince(ctx context.Context, since int64) ([]DownloadStat, error) {
-	rows, err := q.db.QueryContext(ctx, listDownloadsSince, since)
+func (q *Queries) DeleteWindowDaysBefore(ctx context.Context, before int64) error {
+	_, err := q.db.ExecContext(ctx, deleteWindowDaysBefore, before)
+	return err
+}
+
+const getWindowFirst = `-- name: GetWindowFirst :one
+
+SELECT first_day FROM download_window_state WHERE id = 1
+`
+
+// The window of the last 30 days is kept in three tables (see the triggers of download_stats): the
+// totals of each day, the totals of each repo, and the first day of the window.
+// The first day of the window.
+func (q *Queries) GetWindowFirst(ctx context.Context) (int64, error) {
+	row := q.db.QueryRowContext(ctx, getWindowFirst)
+	var first_day int64
+	err := row.Scan(&first_day)
+	return first_day, err
+}
+
+const getWindowRepoDownloads = `-- name: GetWindowRepoDownloads :one
+SELECT downloads FROM download_window_repos WHERE repo_id = ?1
+`
+
+// The downloads of one repo in the window; no row for none.
+func (q *Queries) GetWindowRepoDownloads(ctx context.Context, repoID int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, getWindowRepoDownloads, repoID)
+	var downloads int64
+	err := row.Scan(&downloads)
+	return downloads, err
+}
+
+const listDownloadsOfDay = `-- name: ListDownloadsOfDay :many
+SELECT repo_id, downloads, bytes FROM download_stats WHERE day = ?1
+`
+
+type ListDownloadsOfDayRow struct {
+	RepoID    int64
+	Downloads int64
+	Bytes     int64
+}
+
+// The rows of one day, through download_stats_day: at most one per repo.
+func (q *Queries) ListDownloadsOfDay(ctx context.Context, day int64) ([]ListDownloadsOfDayRow, error) {
+	rows, err := q.db.QueryContext(ctx, listDownloadsOfDay, day)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []DownloadStat
+	var items []ListDownloadsOfDayRow
 	for rows.Next() {
-		var i DownloadStat
-		if err := rows.Scan(
-			&i.RepoID,
-			&i.Day,
-			&i.Downloads,
-			&i.Bytes,
-		); err != nil {
+		var i ListDownloadsOfDayRow
+		if err := rows.Scan(&i.RepoID, &i.Downloads, &i.Bytes); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -84,27 +130,20 @@ func (q *Queries) ListDownloadsSince(ctx context.Context, since int64) ([]Downlo
 	return items, nil
 }
 
-const sumDownloadsByDay = `-- name: SumDownloadsByDay :many
-SELECT day, CAST(SUM(downloads) AS INTEGER) AS downloads, CAST(SUM(bytes) AS INTEGER) AS bytes
-FROM download_stats WHERE day >= ?1 GROUP BY day ORDER BY day
+const listWindowDays = `-- name: ListWindowDays :many
+SELECT day, downloads, bytes FROM download_window_days WHERE day >= ?1 ORDER BY day
 `
 
-type SumDownloadsByDayRow struct {
-	Day       int64
-	Downloads int64
-	Bytes     int64
-}
-
-// The downloads of each day from since on, through download_stats_window (covering, in day order).
-func (q *Queries) SumDownloadsByDay(ctx context.Context, since int64) ([]SumDownloadsByDayRow, error) {
-	rows, err := q.db.QueryContext(ctx, sumDownloadsByDay, since)
+// The totals of the days from since on, through the primary key: at most one row per day.
+func (q *Queries) ListWindowDays(ctx context.Context, since int64) ([]DownloadWindowDay, error) {
+	rows, err := q.db.QueryContext(ctx, listWindowDays, since)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []SumDownloadsByDayRow
+	var items []DownloadWindowDay
 	for rows.Next() {
-		var i SumDownloadsByDayRow
+		var i DownloadWindowDay
 		if err := rows.Scan(&i.Day, &i.Downloads, &i.Bytes); err != nil {
 			return nil, err
 		}
@@ -119,39 +158,58 @@ func (q *Queries) SumDownloadsByDay(ctx context.Context, since int64) ([]SumDown
 	return items, nil
 }
 
-const topDownloadRepos = `-- name: TopDownloadRepos :many
-SELECT r.name, r.format, t.downloads, t.bytes FROM (
-  SELECT repo_id, CAST(SUM(downloads) AS INTEGER) AS downloads, CAST(SUM(bytes) AS INTEGER) AS bytes
-  FROM download_stats WHERE day >= ?1
-  GROUP BY repo_id ORDER BY 2 DESC, 3 DESC, repo_id LIMIT ?2
-) t JOIN repos r ON r.id = t.repo_id
-ORDER BY t.downloads DESC, t.bytes DESC, r.id
+const setWindowFirst = `-- name: SetWindowFirst :exec
+UPDATE download_window_state SET first_day = ?1 WHERE id = 1
 `
 
-type TopDownloadReposParams struct {
-	Since int64
-	N     int64
+func (q *Queries) SetWindowFirst(ctx context.Context, firstDay int64) error {
+	_, err := q.db.ExecContext(ctx, setWindowFirst, firstDay)
+	return err
 }
 
-type TopDownloadReposRow struct {
+const subWindowRepo = `-- name: SubWindowRepo :exec
+UPDATE download_window_repos SET downloads = downloads - ?1, bytes = bytes - ?2
+WHERE repo_id = ?3
+`
+
+type SubWindowRepoParams struct {
+	Downloads int64
+	Bytes     int64
+	RepoID    int64
+}
+
+// A day that left the window: its repo rows are subtracted one by one, the repo rows left empty are
+// deleted, and the day rows before the window go.
+func (q *Queries) SubWindowRepo(ctx context.Context, arg SubWindowRepoParams) error {
+	_, err := q.db.ExecContext(ctx, subWindowRepo, arg.Downloads, arg.Bytes, arg.RepoID)
+	return err
+}
+
+const topWindowRepos = `-- name: TopWindowRepos :many
+SELECT r.name, r.format, w.downloads, w.bytes
+FROM download_window_repos w JOIN repos r ON r.id = w.repo_id
+WHERE w.downloads > 0
+ORDER BY w.downloads DESC, w.bytes DESC, w.repo_id LIMIT ?1
+`
+
+type TopWindowReposRow struct {
 	Name      string
 	Format    string
 	Downloads int64
 	Bytes     int64
 }
 
-// The repos with the most downloads from since on (then the most bytes, then the oldest repo), most
-// first: the window is summed per repo from download_stats_window alone, and only the top ones are
-// joined to repos.
-func (q *Queries) TopDownloadRepos(ctx context.Context, arg TopDownloadReposParams) ([]TopDownloadReposRow, error) {
-	rows, err := q.db.QueryContext(ctx, topDownloadRepos, arg.Since, arg.N)
+// The repos with the most downloads in the window (then the most bytes, then the oldest repo), most
+// first, through download_window_repos_top.
+func (q *Queries) TopWindowRepos(ctx context.Context, n int64) ([]TopWindowReposRow, error) {
+	rows, err := q.db.QueryContext(ctx, topWindowRepos, n)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []TopDownloadReposRow
+	var items []TopWindowReposRow
 	for rows.Next() {
-		var i TopDownloadReposRow
+		var i TopWindowReposRow
 		if err := rows.Scan(
 			&i.Name,
 			&i.Format,

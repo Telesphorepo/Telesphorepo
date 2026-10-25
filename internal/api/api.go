@@ -512,8 +512,12 @@ func (a *API) listRepos(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		route.Fail(w, r, err)
 		return
 	}
-	// One read of the download counters of the window for every repo.
-	recent, err := a.h.Downloads.Recent(ctx)
+	// The download counters of the window, one seek per repo.
+	ids := make([]int64, len(all))
+	for i, repo := range all {
+		ids[i] = repo.ID
+	}
+	recent, err := a.h.Downloads.Recent(ctx, ids)
 	if err != nil {
 		route.Fail(w, r, err)
 		return

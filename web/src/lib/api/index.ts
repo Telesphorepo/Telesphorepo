@@ -484,6 +484,6 @@ export const api = {
   auditPeople: (q: string, p?: T.PageParams) =>
     request<T.Page<T.PersonName>>("GET", "/api/audit/people", { query: { q, ...page(p) } }),
 
-  /** activity.read: the downloads of the last days (today included; 30 by default) and the top repositories. */
-  stats: (days?: number) => request<T.DownloadStats>("GET", "/api/stats", { query: { days } }),
+  /** activity.read: the downloads of the last 30 days (today included) and the top repositories. */
+  stats: () => request<T.DownloadStats>("GET", "/api/stats"),
 };

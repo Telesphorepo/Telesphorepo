@@ -9,7 +9,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -39,12 +38,8 @@ var StatsRetention = settings.Duration(&settings.Def{Key: "stats.retention", Def
 // flushEvery is how often the download counters are written.
 const flushEvery = time.Minute
 
-// Stats windows: GET /api/stats?days= takes 1 to maxDays days, 30 by default.
-const (
-	defaultDays = 30
-	maxDays     = 400
-	topRepos    = 10
-)
+// topRepos is how many repos GET /api/stats lists.
+const topRepos = 10
 
 // Module returns the audit module.
 func Module() module.Module {
@@ -191,27 +186,19 @@ type Stats struct {
 	Bytes     int64       `json:"bytes"`
 }
 
-// downloads answers GET /api/stats?days=: the downloads of the last days (today and the days
-// before it, in UTC) per day and the top repositories. It writes the pending counters first, so
-// the answer holds every download served before the request.
+// downloads answers GET /api/stats: the downloads of the last stats.RecentDays days (today and the
+// days before it, in UTC) per day and the top repositories, read from the totals the server keeps
+// for that window. It writes the pending counters first, so the answer holds every download served
+// before the request.
 func downloads(h *module.Host, w http.ResponseWriter, r *http.Request) {
-	days := defaultDays
-	if v := r.URL.Query().Get("days"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 || n > maxDays {
-			httpx.Error(w, r, http.StatusBadRequest, "days must be a number from 1 to "+strconv.Itoa(maxDays))
-			return
-		}
-		days = n
-	}
 	ctx := r.Context()
 	if err := h.Downloads.Flush(ctx); err != nil {
 		route.Fail(w, r, err)
 		return
 	}
-	today := stats.DayOf(time.Now())
-	first := today - int64(days-1)*int64(stats.Day/time.Second)
-	rows, err := h.Downloads.Days(ctx, first)
+	days := stats.RecentDays
+	first := stats.DayOf(time.Now()) - int64(days-1)*int64(stats.Day/time.Second)
+	rows, err := h.Downloads.Days(ctx)
 	if err != nil {
 		route.Fail(w, r, err)
 		return
@@ -229,7 +216,7 @@ func downloads(h *module.Host, w http.ResponseWriter, r *http.Request) {
 		out.Downloads += row.Downloads
 		out.Bytes += row.Bytes
 	}
-	top, err := h.Downloads.Top(ctx, first, topRepos)
+	top, err := h.Downloads.Top(ctx, topRepos)
 	if err != nil {
 		route.Fail(w, r, err)
 		return

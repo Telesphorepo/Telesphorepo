@@ -43,7 +43,6 @@ func Core() Component {
 			"HasUsers":           "EXISTS stops at the first row; startup check for the first admin",
 			"ListRebuildGroups":  "startup: picks up every pending rebuild once per start; the rebuilds table holds only units not built yet",
 			"CountRepoTotals":    "a backup counts the repos of its database copy once per backup, never on a request path; one row per repo",
-			"TopDownloadRepos":   "sums the window per repo from download_stats_window alone and keeps the top n in a bounded sorter; one index row per repo and day of the window, one request of the Downloads card",
 			"ListReposVisibleTo": "merges one page of the public repos (repos_anonymous_name) with the sorted grants of one user (a seek through repo_permissions_user), never the repos in between",
 			"ListMigrations":     "a backup records the applied migrations of its database copy once per backup; one row per migration",
 		},
