@@ -33,6 +33,29 @@ Linux. Use bun, not npm.
 - For architectural work, write a short design in `docs/superpowers/specs/` and get it approved
   first; delete it when done and keep what stays true in SPEC.md.
 
+## Performance is a feature
+
+A request costs the same at 1,000,000 files, thousands of repositories and hundreds of people as
+it does on an empty server. That was the promise from the first commit (the scale test: search
+3.38 ms at 100k assets, 3.39 ms at 1M), and every change keeps it.
+
+- **The cost of a request follows its answer, never the data around it.** A page of 200 costs a
+  page of 200; a count is a maintained counter or a bounded one ("10,000+"). Never read every row
+  of a table, a repository or a package to answer one page, sort or filter a whole set in Go or in
+  the browser, loop one query per row (N+1), or skip rows the caller cannot see one query at a
+  time. Shape the index so the answer is a seek: search keys its trigram index by repository
+  (`repo_id << 40 | id`) for exactly this.
+- **The plan guard is the floor, not the bar.** It catches a full scan or a temp B-tree in SQL; it
+  cannot see a Go loop over pages, a per-row lookup, or a UI that walks every page of a list.
+  Check those by reading the code path, and measure: time it on the dev server's data
+  (`.telesphorepo-dev`; `admin-password.txt` signs in) before and after, and say the numbers.
+- **Design from the property, not the query.** When a feature seems to need a whole set (counts,
+  ordering, grouping), find the index or the counter that makes it a seek before writing it; a
+  design that grows with the data needs the user's explicit yes, with the measured cost.
+- **A change to a hot query, an index or a request path runs the scale zone** (`e2e-extended.yml`)
+  before it merges, and a new request path that a client hits often gets an operation in
+  `e2e/scale_test.go`.
+
 ## Rules the code will not tell you
 
 - **Migrations are append-only.** Production runs `main`, so never edit, rename or delete a
