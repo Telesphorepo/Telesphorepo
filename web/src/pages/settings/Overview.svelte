@@ -109,7 +109,7 @@
 
   // --- downloads of the last 30 days, for a holder of Activity ---
   const statDays = 30;
-  const downloads = activity ? new Resource(() => api.stats(statDays)) : null;
+  const downloads = activity ? new Resource(() => api.stats()) : null;
   const topDownloads = $derived((downloads?.data?.repos ?? []).filter((r) => r.downloads > 0).slice(0, 5));
   const repoOf = (name: string) => repos.data?.find((r) => r.name === name);
 

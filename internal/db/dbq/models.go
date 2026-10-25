@@ -98,6 +98,23 @@ type DownloadStat struct {
 	Bytes     int64
 }
 
+type DownloadWindowDay struct {
+	Day       int64
+	Downloads int64
+	Bytes     int64
+}
+
+type DownloadWindowRepo struct {
+	RepoID    int64
+	Downloads int64
+	Bytes     int64
+}
+
+type DownloadWindowState struct {
+	ID       int64
+	FirstDay int64
+}
+
 type GroupCount struct {
 	ID              int64
 	GroupID         int64

@@ -353,9 +353,17 @@ func (s *Service) GetTrust(ctx context.Context, id int64) (*Trust, error) {
 }
 
 // Trusts returns a keyset page of the policies by name: names after after ("" first page).
-// next is the cursor of the next page, "" at the end.
-func (s *Service) Trusts(ctx context.Context, after string, limit int) ([]*Trust, string, error) {
-	rows, err := s.rq.ListTrusts(ctx, dbq.ListTrustsParams{After: after, Limit: int64(limit)})
+// next is the cursor of the next page, "" at the end. With all false only the policies that list at
+// least one repo and only repos among repoIDs are returned.
+func (s *Service) Trusts(ctx context.Context, all bool, repoIDs []int64, after string, limit int) ([]*Trust, string, error) {
+	var rows []dbq.PublishTrust
+	var err error
+	switch {
+	case all:
+		rows, err = s.rq.ListTrusts(ctx, dbq.ListTrustsParams{After: after, Limit: int64(limit)})
+	case len(repoIDs) > 0:
+		rows, err = s.rq.ListTrustsInRepos(ctx, dbq.ListTrustsInReposParams{After: after, RepoIds: repoIDs, Limit: int64(limit)})
+	}
 	if err != nil {
 		return nil, "", err
 	}

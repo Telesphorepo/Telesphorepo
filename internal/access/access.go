@@ -400,10 +400,18 @@ func (e *Engine) User(ctx context.Context, u *auth.User, after string, limit int
 			return nil, "", err
 		}
 	}
-	// Walk the repos by name until the page is full; a page of repos the user cannot use is
-	// skipped, so the walk is bounded by the number of repos.
+	// A holder of All repositories pages through every repo. Anyone else pages through the repos
+	// they hold a grant on and the public ones, so a repo they cannot use is never read. A repo of
+	// a grant that holds no known permission is skipped, so the page reads on until it is full.
 	for {
-		page, next, err := e.repos.Page(ctx, after, limit)
+		var page []*repos.Repo
+		var next string
+		var err error
+		if allRepos {
+			page, next, err = e.repos.Page(ctx, after, limit)
+		} else {
+			page, next, err = e.repos.PageVisibleTo(ctx, u.ID, after, limit)
+		}
 		if err != nil {
 			return nil, "", err
 		}
