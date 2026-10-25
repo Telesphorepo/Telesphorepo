@@ -10,6 +10,45 @@ import (
 	"database/sql"
 )
 
+const addGroupCount = `-- name: AddGroupCount :execrows
+UPDATE group_counts SET file_count = file_count + ?1, total_size = total_size + ?2,
+  last_published_at = max(last_published_at, CAST(?3 AS INTEGER))
+WHERE id = ?4
+`
+
+type AddGroupCountParams struct {
+	FileCount       int64
+	TotalSize       int64
+	LastPublishedAt int64
+	ID              int64
+}
+
+// Adds the count of the snapshot to what the triggers added since.
+func (q *Queries) AddGroupCount(ctx context.Context, arg AddGroupCountParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, addGroupCount,
+		arg.FileCount,
+		arg.TotalSize,
+		arg.LastPublishedAt,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const countGroupCountMembers = `-- name: CountGroupCountMembers :one
+SELECT CAST(count(*) AS INTEGER) FROM group_count_members WHERE count_id = ?
+`
+
+// The members of a row: the first read of the count's snapshot.
+func (q *Queries) CountGroupCountMembers(ctx context.Context, countID int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countGroupCountMembers, countID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const countGroupPaths = `-- name: CountGroupPaths :one
 SELECT CAST(count(*) AS INTEGER) AS files, CAST(coalesce(sum(a.size), 0) AS INTEGER) AS size,
   CAST(coalesce(max(CASE WHEN a.kind <> 'index' THEN a.updated_at END), 0) AS INTEGER) AS newest
@@ -27,8 +66,8 @@ type CountGroupPathsRow struct {
 }
 
 // The files of the members of a count that a group serves path by path (unit ”), each from the
-// first member that has its path. It reads every such file of the members once: the count runs
-// in the background, once per group and set of members.
+// first member that has its path. It reads every such file of the members once, in a read
+// snapshot: the count runs in the background, once per group and set of members.
 func (q *Queries) CountGroupPaths(ctx context.Context, countID int64) (CountGroupPathsRow, error) {
 	row := q.db.QueryRowContext(ctx, countGroupPaths, countID)
 	var i CountGroupPathsRow
@@ -61,6 +100,24 @@ func (q *Queries) CountGroupUnits(ctx context.Context, countID int64) (CountGrou
 	return i, err
 }
 
+const deleteGroupCount = `-- name: DeleteGroupCount :exec
+DELETE FROM group_counts WHERE id = ?
+`
+
+func (q *Queries) DeleteGroupCount(ctx context.Context, id int64) error {
+	_, err := q.db.ExecContext(ctx, deleteGroupCount, id)
+	return err
+}
+
+const deleteGroupCountPending = `-- name: DeleteGroupCountPending :exec
+DELETE FROM group_count_pending WHERE count_id = ?
+`
+
+func (q *Queries) DeleteGroupCountPending(ctx context.Context, countID int64) error {
+	_, err := q.db.ExecContext(ctx, deleteGroupCountPending, countID)
+	return err
+}
+
 const deleteGroupCountsOfMember = `-- name: DeleteGroupCountsOfMember :exec
 DELETE FROM group_counts WHERE id IN (SELECT count_id FROM group_count_members WHERE member_id = ?)
 `
@@ -71,9 +128,34 @@ func (q *Queries) DeleteGroupCountsOfMember(ctx context.Context, memberID int64)
 	return err
 }
 
+const findGroupCount = `-- name: FindGroupCount :one
+SELECT id, CAST(EXISTS (SELECT 1 FROM group_count_pending p WHERE p.count_id = group_counts.id) AS INTEGER) AS pending
+FROM group_counts WHERE group_id = ? AND members = ?
+`
+
+type FindGroupCountParams struct {
+	GroupID int64
+	Members string
+}
+
+type FindGroupCountRow struct {
+	ID      int64
+	Pending int64
+}
+
+// The row of a group for a set of members, counted or not, and whether the job still counts it.
+func (q *Queries) FindGroupCount(ctx context.Context, arg FindGroupCountParams) (FindGroupCountRow, error) {
+	row := q.db.QueryRowContext(ctx, findGroupCount, arg.GroupID, arg.Members)
+	var i FindGroupCountRow
+	err := row.Scan(&i.ID, &i.Pending)
+	return i, err
+}
+
 const getGroupCount = `-- name: GetGroupCount :one
 
-SELECT file_count, total_size, last_published_at FROM group_counts WHERE group_id = ? AND members = ?
+SELECT file_count, total_size, last_published_at FROM group_counts
+WHERE group_id = ? AND members = ?
+  AND NOT EXISTS (SELECT 1 FROM group_count_pending p WHERE p.count_id = group_counts.id)
 `
 
 type GetGroupCountParams struct {
@@ -87,9 +169,10 @@ type GetGroupCountRow struct {
 	LastPublishedAt int64
 }
 
-// The counters of group repos (internal/groupcount): group_counts and group_count_members. The
-// triggers of migration 0003 keep a counted row.
-// The counters of a group for a set of members, through UNIQUE (group_id, members).
+// The counters of group repos (internal/api/groupcounts.go): group_counts, group_count_members
+// and group_count_pending. The triggers of migration 0003 keep a row from its insert on.
+// The counters of a group for a set of members, through UNIQUE (group_id, members), once the job
+// has counted them (no group_count_pending entry).
 func (q *Queries) GetGroupCount(ctx context.Context, arg GetGroupCountParams) (GetGroupCountRow, error) {
 	row := q.db.QueryRowContext(ctx, getGroupCount, arg.GroupID, arg.Members)
 	var i GetGroupCountRow
@@ -125,6 +208,15 @@ type InsertGroupCountMemberParams struct {
 
 func (q *Queries) InsertGroupCountMember(ctx context.Context, arg InsertGroupCountMemberParams) error {
 	_, err := q.db.ExecContext(ctx, insertGroupCountMember, arg.CountID, arg.Position, arg.MemberID)
+	return err
+}
+
+const insertGroupCountPending = `-- name: InsertGroupCountPending :exec
+INSERT INTO group_count_pending (count_id) VALUES (?)
+`
+
+func (q *Queries) InsertGroupCountPending(ctx context.Context, countID int64) error {
+	_, err := q.db.ExecContext(ctx, insertGroupCountPending, countID)
 	return err
 }
 
@@ -169,6 +261,19 @@ func (q *Queries) ListUnsetUnits(ctx context.Context, limit int64) ([]ListUnsetU
 	return items, nil
 }
 
+const resetGroupCount = `-- name: ResetGroupCount :execrows
+UPDATE group_counts SET file_count = 0, total_size = 0, last_published_at = 0 WHERE id = ?
+`
+
+// Sets the counters of a pending row to zero: from here on they hold what the triggers add.
+func (q *Queries) ResetGroupCount(ctx context.Context, id int64) (int64, error) {
+	result, err := q.db.ExecContext(ctx, resetGroupCount, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const setAssetUnit = `-- name: SetAssetUnit :exec
 UPDATE assets SET unit = ? WHERE id = ?
 `
@@ -180,26 +285,5 @@ type SetAssetUnitParams struct {
 
 func (q *Queries) SetAssetUnit(ctx context.Context, arg SetAssetUnitParams) error {
 	_, err := q.db.ExecContext(ctx, setAssetUnit, arg.Unit, arg.ID)
-	return err
-}
-
-const setGroupCount = `-- name: SetGroupCount :exec
-UPDATE group_counts SET file_count = ?, total_size = ?, last_published_at = ? WHERE id = ?
-`
-
-type SetGroupCountParams struct {
-	FileCount       int64
-	TotalSize       int64
-	LastPublishedAt int64
-	ID              int64
-}
-
-func (q *Queries) SetGroupCount(ctx context.Context, arg SetGroupCountParams) error {
-	_, err := q.db.ExecContext(ctx, setGroupCount,
-		arg.FileCount,
-		arg.TotalSize,
-		arg.LastPublishedAt,
-		arg.ID,
-	)
 	return err
 }

@@ -23,8 +23,8 @@ import (
 // (a package of npm, PyPI, Cargo, NuGet) from the first member that has a file of the unit, as a
 // group read takes it. The counters depend on the members that the reader reads, so each group
 // keeps one row of group_counts per set of members that a reader asked for. The job
-// core.group-counts counts a row in one transaction; the triggers of the assets table keep it in
-// the transaction of every write after that. A request reads its row with one indexed lookup.
+// core.group-counts counts a row in a read snapshot (count); the triggers of the assets table
+// keep it in the transaction of every write. A request reads its row with one indexed lookup.
 
 const (
 	unitBatch  = 500             // asset rows whose unit one transaction of the backfill sets
@@ -205,21 +205,40 @@ func (g *groupCounts) countAll(ctx context.Context) error {
 	return nil
 }
 
-// count counts the row of group and the members ids, unless it exists, in one transaction: no
-// asset write lands between the count and the triggers that keep it.
+// errCountGone ends a count whose row a change of the group's members deleted.
+var errCountGone = errors.New("the group's members changed")
+
+// count counts the row of group and the members ids, unless it is counted. Three short write
+// transactions hold SQLite's writer; the count itself reads a snapshot and holds none:
+//
+//  1. Insert the row, its members and its group_count_pending entry. From here on the triggers
+//     add the change of every asset write to the row.
+//  2. Holding the writer, set the row's counters to zero and open the read snapshot. No write
+//     commits between the two, so from the snapshot on the row holds exactly the changes of the
+//     writes that the snapshot does not see.
+//  3. Count the members' files in the snapshot, then add the count to the row and delete its
+//     pending entry: the row then counts the files as they are now.
+//
+// A change of the members deletes the row on the way (and its pending entry with it); the count
+// then ends, and the job counts the new set. A row left pending (an error, a stop) is counted
+// again from the start.
 func (g *groupCounts) count(ctx context.Context, group int64, ids []int64) error {
 	key := membersKey(ids)
-	return g.a.h.DB.Tx(ctx, func(tx *sql.Tx) error {
+	var id int64
+	err := g.a.h.DB.Tx(ctx, func(tx *sql.Tx) error {
 		q := dbq.New(tx)
-		_, err := q.GetGroupCount(ctx, dbq.GetGroupCountParams{GroupID: group, Members: key})
+		row, err := q.FindGroupCount(ctx, dbq.FindGroupCountParams{GroupID: group, Members: key})
 		switch {
-		case err == nil:
+		case err == nil && row.Pending == 0:
 			return nil
+		case err == nil:
+			if err := q.DeleteGroupCount(ctx, row.ID); err != nil {
+				return err
+			}
 		case !errors.Is(err, sql.ErrNoRows):
 			return err
 		}
-		id, err := q.InsertGroupCount(ctx, dbq.InsertGroupCountParams{GroupID: group, Members: key})
-		if err != nil {
+		if id, err = q.InsertGroupCount(ctx, dbq.InsertGroupCountParams{GroupID: group, Members: key}); err != nil {
 			return err
 		}
 		for i, m := range ids {
@@ -227,16 +246,69 @@ func (g *groupCounts) count(ctx context.Context, group int64, ids []int64) error
 				return err
 			}
 		}
-		paths, err := q.CountGroupPaths(ctx, id)
+		return q.InsertGroupCountPending(ctx, id)
+	})
+	if err != nil || id == 0 {
+		return err
+	}
+
+	// The reader connection is taken before the writer, so the writer never waits for a reader.
+	conn, err := g.a.h.DB.R.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	var snap *sql.Tx
+	err = g.a.h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		n, err := dbq.New(tx).ResetGroupCount(ctx, id)
 		if err != nil {
 			return err
 		}
-		units, err := q.CountGroupUnits(ctx, id)
+		if n == 0 {
+			return errCountGone
+		}
+		if snap, err = conn.BeginTx(ctx, nil); err != nil {
+			return err
+		}
+		// The first read fixes the snapshot, before this transaction commits.
+		members, err := dbq.New(snap).CountGroupCountMembers(ctx, id)
 		if err != nil {
 			return err
 		}
-		return q.SetGroupCount(ctx, dbq.SetGroupCountParams{FileCount: paths.Files + units.Files, TotalSize: paths.Size + units.Size,
+		if members != int64(len(ids)) {
+			return errCountGone
+		}
+		return nil
+	})
+	if err != nil {
+		if snap != nil {
+			snap.Rollback()
+		}
+		if errors.Is(err, errCountGone) {
+			return nil
+		}
+		return err
+	}
+	q := dbq.New(snap)
+	paths, err := q.CountGroupPaths(ctx, id)
+	if err != nil {
+		snap.Rollback()
+		return err
+	}
+	units, err := q.CountGroupUnits(ctx, id)
+	snap.Rollback()
+	if err != nil {
+		return err
+	}
+
+	return g.a.h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		q := dbq.New(tx)
+		n, err := q.AddGroupCount(ctx, dbq.AddGroupCountParams{FileCount: paths.Files + units.Files, TotalSize: paths.Size + units.Size,
 			LastPublishedAt: max(paths.Newest, units.Newest), ID: id})
+		if err != nil || n == 0 {
+			return err
+		}
+		return q.DeleteGroupCountPending(ctx, id)
 	})
 }
 

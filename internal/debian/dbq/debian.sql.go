@@ -254,9 +254,20 @@ func (q *Queries) ListIndexFiles(ctx context.Context, arg ListIndexFilesParams) 
 }
 
 const listPackageComponents = `-- name: ListPackageComponents :many
-SELECT DISTINCT distribution, component FROM deb_packages
-WHERE repo_id = ?
-ORDER BY distribution, component
+WITH RECURSIVE pairs(distribution, component) AS (
+  SELECT f.distribution, f.component FROM (
+    SELECT s.distribution, s.component FROM deb_packages s WHERE s.repo_id = ?1
+    ORDER BY s.distribution, s.component LIMIT 1) f
+  UNION ALL
+  SELECT d.distribution, d.component FROM pairs p JOIN deb_packages d ON d.id = coalesce(
+    (SELECT x.id FROM deb_packages x
+     WHERE x.repo_id = ?1 AND x.distribution = p.distribution AND x.component > p.component
+     ORDER BY x.distribution, x.component LIMIT 1),
+    (SELECT y.id FROM deb_packages y
+     WHERE y.repo_id = ?1 AND y.distribution > p.distribution
+     ORDER BY y.distribution, y.component LIMIT 1))
+)
+SELECT CAST(distribution AS TEXT) AS distribution, CAST(component AS TEXT) AS component FROM pairs
 `
 
 type ListPackageComponentsRow struct {
@@ -264,7 +275,9 @@ type ListPackageComponentsRow struct {
 	Component    string
 }
 
-// The (distribution, component) pairs of a repo that hold packages, in UNIQUE index order.
+// The (distribution, component) pairs of a repo that hold packages, in UNIQUE index order: one
+// seek of the UNIQUE index per pair, past every package of the pair before it, so the read costs
+// the pairs and not the packages.
 func (q *Queries) ListPackageComponents(ctx context.Context, repoID int64) ([]ListPackageComponentsRow, error) {
 	rows, err := q.db.QueryContext(ctx, listPackageComponents, repoID)
 	if err != nil {

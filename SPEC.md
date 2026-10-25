@@ -486,6 +486,7 @@ Kernel tables (`internal/db/migrations`):
 | `assets` | UNIQUE `(repo_id, path)`, idx `uploaded_by`, idx `assets_blob (blob_id, repo_id)`, partial idx `assets_build (build_id) WHERE build_id IS NOT NULL`, partial idx `assets_unit (repo_id, unit) WHERE unit <> ''`, partial idx `assets_unit_unset (repo_id) WHERE unit IS NULL` | Every stored file: a path that points to a blob (`blob_id`; `size`, `sha256`, `md5` and `sha1` are the blob's, copied, so a download reads no other row); `content_type` from the format's `Describe`; `kind` is `artifact`, `metadata` or `index`; `build_id` is the CI build record that wrote the file (SET NULL). Only the byte pipeline writes rows; triggers keep `blobs.refs` on every insert, delete and change of `blob_id`. A cached file of a proxy has `checked_at` (when the remote last confirmed it) and `remote_etag`; a hosted file keeps 0 and `''`. Triggers keep the repo counters in the transaction of each write: an insert adds 1 and its size, a replace adds the size change, a delete subtracts. Every asset row counts (artifacts, metadata, checksums and Debian index files). `last_published_at` is the newest `updated_at` of an insert or replace that is not an `index` row; a delete never lowers it. `unit` is the part of the repo that a group serves from one member (`format.Spec.GroupUnit`, set on insert): the package of a file of npm, PyPI, Cargo or NuGet that a group takes from the member that owns the name, `''` for a file that a group serves path by path; NULL until the job `core.group-counts` sets it (a row of the seed command) |
 | `group_counts` | UNIQUE `(group_id, members)` | The counters of a group for one set of members that a reader reads: `members` is their ids in read order, comma-separated; `file_count`, `total_size`, `last_published_at`. See **Group counters** |
 | `group_count_members` | PK `(count_id, position)` (WITHOUT ROWID), idx `(member_id, count_id)` | The members of a row of `group_counts` in read order; both ids cascade |
+| `group_count_pending` | PK `count_id` | A row of `group_counts` that the job is still counting (cascades); a reader never reads such a row. See **Group counters** |
 | `assets_search` | FTS5 trigram on `path`, contentless with deletes | The rowid is `repo_id << 40 \| id`, so the matches of one repo sit together in rowid order and a search page is one seek (see `GET /api/search`). Kept in sync by triggers; `index` rows are not indexed |
 | `repo_ops` | PK `id`, UNIQUE `repo_id` (cascades), idx `started_by`, partial idx `repo_ops_running (type) WHERE state = 'running'` | At most one operation per repo; an ended operation's row is deleted. `type` (a registered type: `delete`, `mirror`), `owner` (the module), `ref` (the owner's reference, e.g. the Nexus source ID), `state` `running`/`held`/`failed`, `done`, `total`, `error`, `started_by`, `started_at`, `updated_at` |
 | `upload_sessions` | PK `id` (WITHOUT ROWID), idx `repo_id`, `user_id`, `expires_at` | A resumable upload: `id` (32 lowercase hex), `repo_id` and `user_id` cascade, `publish_session_id` (the session that started it; no foreign key: the table belongs to the publish module), `received`, `created_at`, `updated_at`, `expires_at`. The bytes are in `$TR_DATA_DIR/tmp/uploads/<id>` |
@@ -1798,7 +1799,10 @@ follow one for downloads, but uploads, `npm publish`, `docker push` and apt do n
    configured one) and the removed ones. The rebuild builds the added ones and, for a unit whose
    architecture is no longer configured, removes its index files (with their by-hash files) and
    its `deb_index_files` rows; then each `Release` is rebuilt. A change of `signing_key` marks one
-   unit of each distribution, so each `Release` is signed again.
+   unit of each distribution, so each `Release` is signed again. The marks are written in the
+   transaction of the repo update; the (distribution, component) pairs come from one seek of the
+   UNIQUE index of `deb_packages` per pair (`ListPackageComponents`), so the update costs the
+   pairs, not the packages.
 8. **By-hash cleanup.** After each `Packages` rebuild, the server keeps the current and the
    previous generation of `by-hash/` files for that index and removes the rest (source
    `generated`).
@@ -3568,7 +3572,8 @@ the capabilities of the repo's `format.Spec` that are set.
     answers for the path, built for the group.
   - In an `each` group a proxy member gives what it has cached: a version that only its remote
     holds shows once the proxy has cached it.
-- **Group counters** (`internal/api/groupcounts.go`, migration `0003_group_counts.sql`). A group's
+- **Group counters** (`internal/api/groupcounts.go`, migrations `0003_group_counts.sql` and
+  `0006_group_count_pending.sql`). A group's
   `file_count`, `total_size` and `last_published_at` (`GET /api/repos/{name}`, `GET /api/repos`)
   count each file it serves to the caller once, from the members the caller reads
   (`access.Engine.GroupMembers`): a file whose `unit` is `''` from the first member that has its
@@ -3580,14 +3585,25 @@ the capabilities of the repo's `format.Spec` that are set.
   non-index file it serves; a delete never lowers it.
   - Each group keeps one row of `group_counts` per set of members that a reader asked for (the
     key is the member ids in read order). A request reads its row with one indexed lookup; the
-    list of repositories does that once per group. A set without a row answers
+    list of repositories does that once per group. A set without a counted row answers
     `counts_pending: true` (0 and null) and asks the job for it.
   - The job `core.group-counts` first sets the `unit` of every asset row that has none (500 per
     transaction) and deletes the rows of the groups of those repos; then it counts the full set
-    of members of every group and every set that a reader asked for, each that has no row yet.
-    It counts a row in one write transaction with two queries over the members' files
-    (`CountGroupPaths`, `CountGroupUnits`), so no write lands between the count and the triggers.
-    It runs at start, after every repo change (`repos.Service.AfterChange`), when a reader asks
+    of members of every group and every set that a reader asked for, each that has no counted
+    row yet. The count never holds SQLite's writer for longer than a few small statements, at
+    any number of files:
+    1. One write transaction inserts the row, its members and its `group_count_pending` entry.
+       From here on the triggers add the change of every asset write to the row.
+    2. One write transaction sets the row's counters to zero and, before it commits, opens a read
+       snapshot on a reader connection (its first read). No write commits between the two, so
+       from then on the row holds exactly the changes of the writes that the snapshot does not
+       see.
+    3. Two queries over the members' files (`CountGroupPaths`, `CountGroupUnits`) count the
+       snapshot, holding no writer; publishes go on meanwhile.
+    4. One write transaction adds the count to the row (`last_published_at` takes the larger)
+       and deletes the pending entry: the row counts the files as they are now.
+    A change of the members on the way deletes the row and ends the count; a row left pending (an
+    error, a stop) is deleted and counted again from the start. It runs at start, after every repo change (`repos.Service.AfterChange`), when a reader asks
     for a set, and every 5 minutes.
   - Triggers on `assets` keep every counted row in the transaction of each insert, replace and
     delete of a member's file, with indexed lookups only (`(repo_id, path)`, `assets_unit`,

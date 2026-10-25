@@ -32,11 +32,24 @@ INSERT INTO deb_packages (repo_id, distribution, component, architecture, packag
   filename, size, md5, sha1, sha256, control, created_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
--- The (distribution, component) pairs of a repo that hold packages, in UNIQUE index order.
+-- The (distribution, component) pairs of a repo that hold packages, in UNIQUE index order: one
+-- seek of the UNIQUE index per pair, past every package of the pair before it, so the read costs
+-- the pairs and not the packages.
 -- name: ListPackageComponents :many
-SELECT DISTINCT distribution, component FROM deb_packages
-WHERE repo_id = ?
-ORDER BY distribution, component;
+WITH RECURSIVE pairs(distribution, component) AS (
+  SELECT f.distribution, f.component FROM (
+    SELECT s.distribution, s.component FROM deb_packages s WHERE s.repo_id = sqlc.arg(repo_id)
+    ORDER BY s.distribution, s.component LIMIT 1) f
+  UNION ALL
+  SELECT d.distribution, d.component FROM pairs p JOIN deb_packages d ON d.id = coalesce(
+    (SELECT x.id FROM deb_packages x
+     WHERE x.repo_id = sqlc.arg(repo_id) AND x.distribution = p.distribution AND x.component > p.component
+     ORDER BY x.distribution, x.component LIMIT 1),
+    (SELECT y.id FROM deb_packages y
+     WHERE y.repo_id = sqlc.arg(repo_id) AND y.distribution > p.distribution
+     ORDER BY y.distribution, y.component LIMIT 1))
+)
+SELECT CAST(distribution AS TEXT) AS distribution, CAST(component AS TEXT) AS component FROM pairs;
 
 -- name: UpsertIndexFile :exec
 INSERT INTO deb_index_files (repo_id, distribution, path, size, md5, sha256, updated_at)
