@@ -19,11 +19,8 @@
   line, with the id `{for}-count`.
 -->
 <script lang="ts" module>
-  /**
-   * "full" (the default): the whole cell. "auto": a control that sizes itself.
-   * @deprecated "wide", "medium" and "short" render as "full"; leave `width` out instead.
-   */
-  export type ControlWidth = "full" | "auto" | "wide" | "medium" | "short";
+  /** "full" (the default): the whole cell. "auto": a control that sizes itself. */
+  export type ControlWidth = "full" | "auto";
 </script>
 
 <script lang="ts">

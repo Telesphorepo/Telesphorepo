@@ -25,7 +25,6 @@
 <script lang="ts" module>
   import type { Snippet } from "svelte";
   import type { Setting } from "$lib/api";
-  import type { ControlWidth } from "./FormRow.svelte";
 
   /** A map setting's value: the values of one key by key ("admins" → ["repo.read", ...]). */
   export type GroupMap = Record<string, string[]>;
@@ -44,8 +43,6 @@
      * image setting): it gets the setting and the id of the label.
      */
     control?: Snippet<[Setting, string]>;
-    /** @deprecated Every text control has the full control width; leave it out. */
-    width?: ControlWidth;
   };
 </script>
 

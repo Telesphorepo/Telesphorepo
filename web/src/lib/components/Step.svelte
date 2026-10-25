@@ -26,8 +26,6 @@
     title: string;
     description?: string;
     done?: boolean;
-    /** @deprecated Steps are cards; there is no line to the next step. */
-    last?: boolean;
     actions?: Snippet;
     footer?: Snippet;
     children: Snippet;

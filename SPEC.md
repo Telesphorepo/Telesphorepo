@@ -3900,7 +3900,7 @@ page are in `web/src/README.md`.
   `repoTabs` (a repo settings tab that a format names in `repo_tabs`, e.g. the Signing tab of the
   signing module), `repoFields` (the control of a repo field on New repository, e.g.
   `signing_key`) and `formatParts` (a format's named parts of the file details: `maven-artifact`,
-  `deb-package`). The router, the sidebars of Settings and Your account (`nav`), the breadcrumbs and the pages of a
+  `deb-package`). The router, the sidebars of Settings and Your account (`nav`), the way back of a page and the pages of a
   setup-only session (`setup`) read the registry. `web/src/lib/api/` is the one API client.
 
 - **Words and look.** The UI uses plain words, not jargon (the rename table is in
@@ -4030,7 +4030,7 @@ page are in `web/src/README.md`.
   repository shows to a person who holds `repo.publish` on one of its hosted members: a select of
   those members (the first by default, the choice in `?to=<member>`), then that member's Publish
   view. One page loads the repo once and switches between these views:
-  - `files/<path>`: breadcrumbs and one of the views below, with a details column for the selected
+  - `files/<path>`: the folder path and one of the views below, with a details column for the selected
     file or artifact (SHA-256, checksum links, the CI build, a curl and wget download, and the part
     of the format's UI module that the first matching `file_details` entry names: the artifact
     snippets of a pom or a jar, of a `.deb`). Delete shows to a person who holds `repo.delete` and
@@ -4167,10 +4167,9 @@ page are in `web/src/README.md`.
     subsystem) first, by a repository, by a person and by a range of days in the reader's time
     zone (Today, Last 7 days, Last 30 days, or Custom from one day to another); the events show by
     day).
-  - Breadcrumbs follow the hierarchy: Settings, the group, the page (Your account, the page on an
-    account page), and end at the parent of the page, since the title under them names it. A
-    sub-page of the first item of a group does not repeat that item. A trail with no link left is
-    not shown.
+  - A page one level down has one link above its title, "← <parent>", to the page one level up
+    (CI pipelines over a CI pipeline, Repositories over a repository's settings). A page of the
+    sidebar has none: the sidebar is the way to it. There are no breadcrumbs.
 - **Repository settings.** A page with the tabs Overview, Access, Format settings and Signing
   (Debian). Overview, Format settings, Signing and Remote need `repo.settings`; Access needs a permission
   that manages the repository (`repo.access`, `repo.settings`, `ci.pipelines`, ...). A person sees only the tabs they can open, and a link to a tab they

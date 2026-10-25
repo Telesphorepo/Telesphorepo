@@ -25,7 +25,7 @@ the checklist below.
 | `lib/permissions.ts` | The permission registry of the server (`GET /api/permissions`, read by `auth.load()` before the first page): the server and repository permissions in registry order with their labels and help, the needs of each (`needsOf`), the picker groups, one per subsystem (`pickerGroups`), the role of a server set (`serverRole`: member, administrator or custom), and the phrases of a set: `repoPhrase` ("Download, publish", "Everything"), `serverPhrase` ("Administrator", "Manage people, manage storage") and `listPhrase` ("download, publish and delete files"). |
 | `lib/router.svelte.ts` | Hash router: `router`, `href()`, `navigate()`, `go()`, `isActive()`, `encodePath()`, `repoPath()`, `filesPath()`, `repoSettingsPath()`; the navigation guard hook. |
 | `lib/current.svelte.ts` | `current`: the matched page of the module registry and the pending redirect of the current address. |
-| `lib/crumbs.ts` | `Crumb` and `sidebarTrail()`: the breadcrumbs of a Settings or account page, from the sidebar items of the module registry (an item named like its group is that one step: Settings › Repositories; an account page starts at its group: Your account › Devices). |
+| `lib/crumbs.ts` | `Crumb` and `sidebarTrail()`: the trail of a Settings or account page that the way back of `PageHeader` reads its parent from, from the sidebar items of the module registry (an item named like its group is that one step: Settings › Repositories; an account page starts at its group: Your account › Devices). |
 | `lib/fade.ts` | `fadeEdges`: the action of a row that scrolls sideways (the tabs), which fades the end where items are cut off. |
 | `lib/unsaved.svelte.ts` | `unsaved` (the unsaved-changes guard) and `Draft` (a form's edits and what is saved). |
 | `lib/view.svelte.ts` | `ViewChoice` and `viewLook`: List, Tree, Columns, Cover Flow, remembered per user. |
@@ -77,7 +77,7 @@ server and the clients print keep working: `/#/device?code=ABCD-EFGH`, `/#/setti
 | **Settings › Repositories** | | | | |
 | `/settings/repositories` | `repositories/AllRepositories` | settings | repositories | Repositories: every one for a holder of All repositories, else the ones where the person holds more than download. A row opens its settings (or its files when no tab opens). Picked rows (Edit settings): Make public, Make private; Delete (All repositories). |
 | `/settings/repositories/new` | `repositories/NewRepository` | settings | repositories.all | First choice: a repository, a proxy of a remote repository, or a group of repositories; each offers the formats that take it (`kinds` of `GET /api/formats`). A repository: name, format, description, visibility, the format's options (`config.fields`), and a section per repository field of the format with the control of its UI module (the signing key). A proxy: the remote address (the `remote_presets` of the format as quick choices) and optional credentials; the server checks the remote, and "Create anyway" creates it when the remote does not answer. A group: its members, hosted repositories first, with the order as numbers. A proxy or a group then opens its settings Overview. |
-| `/settings/repositories/:name/:tab` | `settings/repos/RepoSettings` | settings | repo | A repository's settings. Each tab shows only with its permission: Overview, Format settings and Remote need Edit settings, a module tab its `access` (the Signing tab: Edit settings); Access needs Manage access, Edit settings or CI pipelines, and answers from the saved state and the unsaved edits: two cards, each person in one of them only, by their highest access, with what they hold beyond it as badges (Delete files, Edit settings, Manage access): **Download** (the Public switch and Give access (Manage access) in its header; the people whose grant has no Publish, with Change, Remove from 640px and the pick, while private or when someone holds such a grant; then from where: "From any network" or "Only from …", Change opens the networks; the switch and Change need Edit settings) and **Publish** (the people with Publish the same way, then the holders of All repositories as one read-only row, "2 administrators", that opens to their names; the CI pipelines, each row the CI system and its repository, and from 768px the conditions as `TicketBadge`s, with Add CI pipeline and remove for CI pipelines; then from where; while nothing can publish, why, in place of the CI pipelines and the networks). A tab the person cannot open goes to the first one they can. Every kind's `overview` starts with the description, and for a holder of All repositories the name: a new name asks first and says that the old name keeps working as a redirect; it ends with Redirects (`RedirectsCard`, only while the repository has old names: an `ItemList` of each old name with "Used 3 minutes ago" or "Not used for 40 days", and Remove (All repositories) after a confirm that names what stops working and the last use). An old name in the address opens the settings under the repository's name. Hosted: `overview` (description, contents, its groups), `access`, `format` (the fields of `config.fields`), and the tabs of the UI modules that the format names in `repo_tabs` (`signing`). Proxy: `overview` (remote with Test the remote, use snippets, cache, its groups), `access` (download only), `remote` (address, credentials, the two times). Group: `overview` (use snippets, members with Move up, Move down, Remove and Add repositories, saved from the save bar), `access` (download only). Delete is a header action (All repositories); Open files is one too, except for a group. Breadcrumbs: Settings › Repositories (the title names the repository and the open tab the tab). |
+| `/settings/repositories/:name/:tab` | `settings/repos/RepoSettings` | settings | repo | A repository's settings. Each tab shows only with its permission: Overview, Format settings and Remote need Edit settings, a module tab its `access` (the Signing tab: Edit settings); Access needs Manage access, Edit settings or CI pipelines, and answers from the saved state and the unsaved edits: two cards, each person in one of them only, by their highest access, with what they hold beyond it as badges (Delete files, Edit settings, Manage access): **Download** (the Public switch and Give access (Manage access) in its header; the people whose grant has no Publish, with Change, Remove from 640px and the pick, while private or when someone holds such a grant; then from where: "From any network" or "Only from …", Change opens the networks; the switch and Change need Edit settings) and **Publish** (the people with Publish the same way, then the holders of All repositories as one read-only row, "2 administrators", that opens to their names; the CI pipelines, each row the CI system and its repository, and from 768px the conditions as `TicketBadge`s, with Add CI pipeline and remove for CI pipelines; then from where; while nothing can publish, why, in place of the CI pipelines and the networks). A tab the person cannot open goes to the first one they can. Every kind's `overview` starts with the description, and for a holder of All repositories the name: a new name asks first and says that the old name keeps working as a redirect; it ends with Redirects (`RedirectsCard`, only while the repository has old names: an `ItemList` of each old name with "Used 3 minutes ago" or "Not used for 40 days", and Remove (All repositories) after a confirm that names what stops working and the last use). An old name in the address opens the settings under the repository's name. Hosted: `overview` (description, contents, its groups), `access`, `format` (the fields of `config.fields`), and the tabs of the UI modules that the format names in `repo_tabs` (`signing`). Proxy: `overview` (remote with Test the remote, use snippets, cache, its groups), `access` (download only), `remote` (address, credentials, the two times). Group: `overview` (use snippets, members with Move up, Move down, Remove and Add repositories, saved from the save bar), `access` (download only). Delete is a header action (All repositories); Open files is one too, except for a group. The way back: Repositories, on every tab. |
 | **Settings › People and CI** | | | | |
 | `/settings/people` | `server/People` | settings | people.manage | Every account as an `ItemList` row: avatar, name, its role as a badge (Administrator for every server permission, the phrase of its server permissions, or none), meta: email · signs in with (when it differs) · added. New account opens a short form (name and password); the person's page then opens. A row opens the person. Picked rows (not your own): Disable, Enable. |
 | `/settings/people/:name` | `server/people/Person` | settings | people.manage | One person: the identity card (avatar, sign-in, email; the role shows once, in Server permissions) with the account actions; Server permissions as a role (`ServerPermissionPicker`: Member, Administrator, or Custom with one switch per permission; saved from the save bar after a confirm; read-only with Open sign-in options when single sign-on manages them); the repositories where the person holds a grant as an `ItemList` (format icon, name, the permission phrase as meta, Change and Remove), then one muted line, "Can also download from the N public repositories." (a link to Browse). Give access opens a short form for many repositories; Change edits one; picked rows: Change permissions, Remove access. Each repository change applies at once. |
@@ -131,8 +131,7 @@ The repository page is the one exception: it checks the caller's permissions on 
    `title`, and `setup: true` for a page of a setup-only session.
 3. For a Settings or account page, give it `nav` (its group, `account` for an account page; label, icon and order in the group). A sub-page
    (`/settings/networks/new`, `/settings/ci-pipelines/:id`) needs no nav item: its parent item
-   stays open because `isActive` matches the prefix, and its breadcrumbs end with the item and
-   the page title.
+   stays open because `isActive` matches the prefix, and its way back is the item.
 4. Add the route to the table above.
 5. Call the API through `api.*` (`lib/api/index.ts`). A new server route gets a function
    and its types there first. A format module keeps the calls to its own routes in its own folder.
@@ -176,13 +175,11 @@ The repository page is the one exception: it checks the caller's permissions on 
   sub-groups of one card. Never a line between cards.
 - **Footer.** Under the container, every page has one quiet line, "Powered by Telesphorepo"
   (`text-meta`, centered), with the default identity and a custom one alike.
-- **Breadcrumbs** sit above the title of every Settings and account page (`PageHeader` builds
-  them): Settings › group › item, then deeper steps on a sub-page (Settings › People and CI › CI
-  pipelines over the title acme/app); Your account over an account page. The trail ends at the
-  parent of the page, since the title under it names the page, and a trail with no link left (the
-  first page of an area) is not shown. They are the way up; there is no
-  "back" link, and the browser's back button returns to the previous view (every view has its own
-  address).
+- **The way back** sits above the title of every page one level down (`PageHeader` builds it):
+  one link, "← <parent>", to the page one level up (CI pipelines over the title acme/app,
+  Repositories over a repository). A page of the sidebar has none: the sidebar is the way
+  to it. There are no breadcrumbs, and the browser's back button returns to the previous view
+  (every view has its own address).
 - **No near-miss lines.** The page header, tabs and sections are separated by space and type,
   never by a full-width rule: a rule in the content nearly aligns with something in the sidebar
   and looks wrong. Lines stay inside a component (a table header, a card, a dialog).
@@ -228,7 +225,7 @@ The repository page is the one exception: it checks the caller's permissions on 
   labels, badges, codes or input values.
 - **Spacing.** Tailwind's 4px scale only. Browse pages (home, a repository, search) are airier
   than Settings pages, which stay a little denser: `AppShell` sets `data-layout` on the container
-  and `app.css` sets the variables below for each layout (Browse / Settings). Breadcrumbs to title
+  and `app.css` sets the variables below for each layout (Browse / Settings). The way back to title
   12px; page header to content `--header-gap` (40 / 32px, `PageHeader` does it); tabs to content
   `--tabs-gap` (32 / 24px, `TabNav`). Between sections: `--section-gap` (32 / 28px, `Section` does
   it). Inside a section: 24px padding (20px under 640px), 24px from the header to the content and
@@ -249,8 +246,7 @@ The repository page is the one exception: it checks the caller's permissions on 
   number with its unit (`UnitInput`: one control, the unit is a menu at its end). A field that
   needs the whole width spans both columns (`FormRow full`). Do not pass `width` and do not size a
   control in a page. Only a control that sizes itself sits at the start of its cell with
-  `width="auto"`: a switch (`SwitchRow`), a checkbox, a button. The values `wide`, `medium` and
-  `short` are deprecated and render the full width.
+  `width="auto"`: a switch (`SwitchRow`), a checkbox, a button.
 - **Rows.** A `DataTable` row is one line, `h-row` (`--row`: 48px on a Browse page, 44px in
   Settings); its heading row is `--row-head` (40 / 36px). Zebra stripes use `--stripe` (between
   the background and `--hover`), so a stripe and a hover never look the same. An `ItemList` row is
@@ -312,8 +308,8 @@ The repository page is the one exception: it checks the caller's permissions on 
 
 | Component | Use |
 |---|---|
-| `PageHeader` | `title`, `description?` (one sentence), `crumbs?`, snippets `meta?` (badges next to the title), `status?` (one muted line under the title: an icon and one sentence, for a state with no other place on the page; the repository page uses it while an operation holds the repository), `actions?`. The page's only h1, with the breadcrumbs above it. On a Settings page the breadcrumbs come from the sidebar (Settings › group › item), ending at the parent of the page because the h1 names it; `crumbs` replaces the steps after the group when the page sits deeper (`[{label: "maven", href}, {label: "Access"}]`). A Browse page shows breadcrumbs only when it passes `crumbs` (its whole trail). `back` is deprecated: use `crumbs`. |
-| `Breadcrumbs` | `items: Crumb[]` (`{label, href?}`; the last is the current page), `path?`, `label?` (the accessible name). `PageHeader` renders it; use it directly only outside a page header. `path` is the look of a place inside a repository (the Files tab's folder path, in the toolbar of its panel): body text after a folder icon, slashes between the steps, so it never reads as a second page trail. |
+| `PageHeader` | `title`, `description?` (one sentence), `crumbs?`, snippets `meta?` (badges next to the title), `status?` (one muted line under the title: an icon and one sentence, for a state with no other place on the page; the repository page uses it while an operation holds the repository), `actions?`. The page's only h1, with the way back above it: "← <parent>", the last step of the page's trail that links elsewhere. On a Settings page the trail comes from the sidebar (Settings › group › item); `crumbs` replaces the steps after the group when the page sits deeper (`[{label: "maven", href}, {label: "Access"}]`). A Browse page passes `crumbs` (its whole trail). A page of the sidebar shows no way back. |
+| `Breadcrumbs` | `items: Crumb[]` (`{label, href?}`; the last is the current folder), `label?` (the accessible name). A place inside a repository: the Files tab's folder path, in the toolbar of its panel: body text after a folder icon, slashes between the steps. |
 | `Toolbar` | The row above a collection: filters as children, the main action in `end`. |
 | `ItemList` | The default for a collection: `source` (a `Keyset`, or `listOf(resource)`), `caption`, `key`, `href?` (whole-row click; the title is the link), `selected?`, snippets `leading?(item)` (a 20px icon or an avatar), `title(item)` (the name: one line that truncates; put no link in it), `badges?(item)` (after the title), `meta?(item)` (the muted line under it: one or two facts joined by " · "), `trailing?(item)` (a state badge, a switch, the row's actions), `empty?` (a `CompactEmpty`), `emptyText?`. Rows in the `Section`'s card, parted by thin lines, no column headings, no stripes, at least `h-row` tall. Loading, error with Try again, empty and "Load more" as `DataTable`. Bulk actions with the API of `DataTable` (`bind:picked`, `pickable?`, `pickLabel?`, `pickOnRow?`, `pickOff?`, `selectAllLabel?`, snippet `bulk`): a checkbox at the start of each row, and a head row with the checkbox that picks every loaded row ("Select all 5 rows"; none for a single pickable row), over which the selection bar lies while rows are picked. Inside a card the rows reach 12px into its padding (see Edges). |
 | `CardGrid` | `label?` (accessible name), `max?` (the most columns), `class?`; `ItemCard`s as children. A grid whose columns are at least 300px, 16px apart, one column on a phone. For a handful of things that each have a little more to say than a row. |
@@ -572,15 +568,15 @@ that does not move waits for a slower process. Every such page does it the same 
 ## Interaction rules
 
 - **Navigation.** Every view has its own address, so the browser's back and forward buttons move
-  between views. The way up is the breadcrumbs; a page never has a "back" link that goes
-  somewhere else. Repository settings, like every Settings page, keep the Settings shell.
+  between views. The way up is the way back of `PageHeader`, to the page one level up; it never
+  goes somewhere else. Repository settings, like every Settings page, keep the Settings shell.
 - **Unsaved changes.** A page that edits saved values holds them in a `Draft` and shows a
   `SaveBar`; it appears only with changes ("2 unsaved changes · Discard · Save"). While it shows,
   leaving the view asks "Leave this page?" (an in-app link, the back button, `navigate()`), and
   closing or reloading the tab gets the browser's prompt. After a save, `draft.commit()` so the
   bar goes away. Navigate after a save only once the draft is clean, or pass `{ force: true }`.
 - **Centered dialogs only for confirmations (`ConfirmDialog`) and short forms (`ShortFormDialog`,
-  at most five fields).** A longer flow is a page of its own, one level down in the breadcrumbs:
+  at most five fields).** A longer flow is a page of its own, one level down, with its way back:
   create a repository, edit a CI pipeline, edit a network list, create or import a signing key,
   upload.
 - **No side sheets.** The only sheet is the Settings menu under 768px.
@@ -649,7 +645,7 @@ that does not move waits for a slower process. Every such page does it the same 
 ## Checklist for every page
 
 - [ ] The page is a `PageDef` of its module and in the table above; a Settings page has `nav` with an icon
-      in its sitemap group, and its breadcrumbs read right (check a sub-page too).
+      in its sitemap group, and its way back reads right (check a sub-page too).
 - [ ] `PageHeader` with a title; a description only if it tells the reader something they could
       not see on the page or would not already know.
 - [ ] No status row and no summary banner: state shows on the thing itself.

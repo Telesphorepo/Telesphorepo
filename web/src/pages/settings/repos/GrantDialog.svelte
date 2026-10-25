@@ -172,7 +172,7 @@
           {/if}
           <Button class={search ? "ml-auto" : ""} variant="ghost" size="xs" disabled={!chosen.length} onclick={selectNone}>Select none</Button>
         </div>
-        <div class="-mx-3 flex max-h-56 flex-col overflow-y-auto md:max-h-96" role="group" aria-label={noun[1]}>
+        <div class="-mx-3 flex max-h-56 flex-col gap-1 overflow-y-auto md:max-h-96" role="group" aria-label={noun[1]}>
           {#if searchError}
             <ErrorState inline error={searchError} />
           {/if}

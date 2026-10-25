@@ -1,17 +1,17 @@
 <!--
-  The top of every page: the breadcrumbs, the title (the page's only h1), an optional one-line
+  The top of every page: the way back, the title (the page's only h1), an optional one-line
   description that says what the page is for, and actions on the right. `meta` sits next to the
   title (badges such as the format and visibility of a repository). `status` is one muted line under
   them: an icon and one sentence about a state that has no other place on the page (a repository
   whose uploads wait for the switch-over from Nexus).
 
-  On a Settings page the breadcrumbs come from the sidebar: Settings › group › item, then the title
-  on a sub-page (Settings › People and CI › CI pipelines › acme/app); on an account page Your
-  account › item. `crumbs` replaces what
-  follows the group when the page sits deeper (Settings › Repositories › maven › Access). A Browse
-  page shows breadcrumbs only when it passes `crumbs` (its whole trail). The title names the page,
-  so the trail shows up to its parent (Settings › People and CI › CI pipelines over acme/app), and
-  not at all when no step of it is a link.
+  The way back is one link above the title, "← <parent>": the page one level up. The level comes
+  from the page's trail. On a Settings page the trail comes from the sidebar (Settings › group ›
+  item, then the title on a sub-page: CI pipelines over acme/app); on an account page Your
+  account › item. `crumbs` replaces what follows the group when the page sits deeper (a repository's
+  settings pass none: Repositories over maven). A Browse page passes `crumbs` (its whole
+  trail: Repositories over maven). A page of the sidebar has no way back: the sidebar is the way
+  to it.
 
     <PageHeader title="Devices" description="Computers that publish with the publisher client of their build tool.">
       {#snippet actions()}<Button href={href("/device")}>Approve a device</Button>{/snippet}
@@ -19,8 +19,9 @@
 -->
 <script lang="ts">
   import type { Snippet } from "svelte";
-  import Breadcrumbs from "./Breadcrumbs.svelte";
+  import ArrowLeftIcon from "@lucide/svelte/icons/arrow-left";
   import { sidebarTrail, type Crumb } from "$lib/crumbs";
+  import { navPlace } from "../../modules";
   import { current } from "$lib/current.svelte";
   import { href, router } from "$lib/router.svelte";
 
@@ -28,7 +29,6 @@
     title,
     description,
     crumbs,
-    back,
     meta,
     status,
     actions,
@@ -38,8 +38,6 @@
     description?: string;
     /** Settings: the trail after the group. Browse: the whole trail. The last step is this page. */
     crumbs?: Crumb[];
-    /** @deprecated Pass `crumbs`. A Browse sub-page's parent; it shows as the breadcrumb before the title. */
-    back?: { href: string; label: string };
     meta?: Snippet;
     /** One muted line under the title: an icon and one sentence. */
     status?: Snippet;
@@ -48,21 +46,27 @@
 
   const trail = $derived.by((): Crumb[] => {
     if (current.route && current.route.layout !== "app") return sidebarTrail(router.path, title, crumbs);
-    if (crumbs) return crumbs;
-    if (back) return [{ label: "Repositories", href: href("/browse") }, { label: back.label, href: back.href }, { label: title }];
-    return [];
+    return crumbs ?? [];
   });
-  // The title names the current page, so the trail ends at its parent; a trail with no link left
-  // (the first page of an area) shows nothing.
-  const shown = $derived.by((): Crumb[] => {
-    const last = trail.at(-1);
-    const steps = last && !last.href && last.label === title ? trail.slice(0, -1) : trail;
-    return steps.some((c) => c.href) ? steps : [];
+  // The way back is the page's parent: the last step of the trail that links somewhere else. A page
+  // of the sidebar has none, since the sidebar is the way to it.
+  const inSidebar = $derived(!!current.route && current.route.layout !== "app" && !crumbs && navPlace(router.path)?.item.path === router.path);
+  const parent = $derived.by((): Crumb | null => {
+    if (inSidebar) return null;
+    const here = href(router.path);
+    return [...trail].reverse().find((c) => !!c.href && c.href !== here) ?? null;
   });
 </script>
 
 <header class="mb-(--header-gap)">
-  {#if shown.length}<div class="mb-3"><Breadcrumbs items={shown} /></div>{/if}
+  {#if parent}
+    <a
+      href={parent.href}
+      class="-mx-1 mb-3 inline-flex max-w-full items-center gap-1 rounded-sm px-1 text-meta text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50"
+    >
+      <ArrowLeftIcon aria-hidden="true" class="size-3.5 shrink-0" /><span class="truncate">{parent.label}</span>
+    </a>
+  {/if}
   <div class="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
     <div class="min-w-0 grow basis-64">
       <div class="flex flex-wrap items-center gap-x-3 gap-y-2">

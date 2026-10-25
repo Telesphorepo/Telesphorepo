@@ -1,6 +1,7 @@
 <!--
   A short form of the Access tab that adds existing things to a repository: a CI pipeline or a
-  network list. Each thing is a checkbox row; the submit button names how many it adds. A link
+  network list. The dialog is the wide one (768px), since each row has a line of help. Each thing
+  is a checkbox row, a 4px gap between rows; the submit button names how many it adds. A link
   under the rows creates a new one on its own page. The parent adds the chosen ids to its draft,
   and the page's save bar saves them.
 
@@ -63,13 +64,14 @@
   const submitLabel = $derived(chosen.length === 0 ? "Add" : `Add ${chosen.length} ${chosen.length === 1 ? noun[0] : noun[1]}`);
 </script>
 
-<ShortFormDialog bind:open {title} {description} {submitLabel} canSubmit={chosen.length > 0} onSubmit={() => onAdd(chosen)}>
+<ShortFormDialog bind:open wide {title} {description} {submitLabel} canSubmit={chosen.length > 0} onSubmit={() => onAdd(chosen)}>
   {#if loading && !items.length}
     <Loading rows={3} />
   {:else if error}
     <ErrorState inline {error} />
   {:else if items.length}
-    <div class="-mx-3 flex max-h-80 flex-col overflow-y-auto" role="group" aria-label={noun[1]}>
+    <!-- A gap between the rows keeps the fills of two chosen rows apart. -->
+    <div class="-mx-3 flex max-h-[min(28rem,55dvh)] flex-col gap-1 overflow-y-auto" role="group" aria-label={noun[1]}>
       {#each items as item (item.id)}
         <OptionRow id="{id}-{item.id}" label={item.label} description={item.detail}>
           {#snippet control()}

@@ -91,7 +91,7 @@
         >
         <Button variant="ghost" size="xs" disabled={!changeable.some((i) => value.includes(i.name))} onclick={() => all(g.items, false)}>None</Button>
       </div>
-      <div class="-mx-3 grid">
+      <div class="-mx-3 grid gap-1">
         {#each g.items as item (item.name)}
           {@const own = canChange(item.name)}
           <OptionRow

@@ -1,7 +1,6 @@
 <!--
   A repository's settings inside the Settings shell (route /settings/repositories/:name/:tab):
-  the sidebar stays, "All repositories" stays open in it, and the breadcrumbs say where the page
-  sits (Settings › Repositories). The header names the repository and the open tab shows which tab it is; the tabs are
+  the sidebar stays, "All repositories" stays open in it, and the way back is Repositories. The header names the repository and the open tab shows which tab it is; the tabs are
   pages with their own address, so the back button returns to the previous tab. The tab bodies are
   the other files of this folder, and the repository tabs of the UI modules (web/src/modules) that
   the format names in repo_tabs (the Signing tab of the signing module). The tabs depend on the

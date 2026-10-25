@@ -15,6 +15,8 @@
       {#snippet control()}<RadioGroup.Item id="v-private" value="private" />{/snippet}
     </OptionRow>
 
+  A list of rows keeps a 4px gap between them (`gap-1`), so the fills of two chosen rows stay apart.
+
   `icon` sits before the label, bare (a repository's FormatIcon). `children` render under the description, outside the hit target: a field, a note or a "Learn
   more" that belongs to the choice.
 -->

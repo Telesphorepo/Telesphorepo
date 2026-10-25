@@ -132,7 +132,7 @@
       </div>
     </div>
   {:else}
-    <Step n={1} title="Enter the code from your terminal" done={!!pending} last={!pending}>
+    <Step n={1} title="Enter the code from your terminal" done={!!pending}>
       <form onsubmit={submit}>
         <FormGrid>
           <FormRow label="Code" for="device-code" help="The code has eight letters and digits." error={lookupError}>
@@ -163,7 +163,7 @@
     </Step>
 
     {#if pending}
-      <Step n={2} title="Check the device, then confirm it is you" description="The device can publish to the repositories that you can publish to, until you revoke it." last>
+      <Step n={2} title="Check the device, then confirm it is you" description="The device can publish to the repositories that you can publish to, until you revoke it.">
         <div class="flex flex-col gap-x-8 gap-y-6 sm:flex-row sm:items-center">
           <div class="w-full max-w-[20rem] shrink-0">
             <FeltTicket
