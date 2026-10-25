@@ -53,6 +53,25 @@ func (q *Queries) DeleteVersionsOfAsset(ctx context.Context, assetID int64) ([]s
 	return items, nil
 }
 
+const getNewestRelease = `-- name: GetNewestRelease :one
+SELECT l.release2 FROM nuget_packages p JOIN nuget_package_latest l ON l.package = p.id
+WHERE p.repo_id = ? AND p.lower_id = ?
+`
+
+type GetNewestReleaseParams struct {
+	RepoID  int64
+	LowerID string
+}
+
+// The newest listed release of a package (nuget_package_latest), NULL when it has none: the
+// version of the artifact snippets.
+func (q *Queries) GetNewestRelease(ctx context.Context, arg GetNewestReleaseParams) (sql.NullString, error) {
+	row := q.db.QueryRowContext(ctx, getNewestRelease, arg.RepoID, arg.LowerID)
+	var release2 sql.NullString
+	err := row.Scan(&release2)
+	return release2, err
+}
+
 const getPackageRev = `-- name: GetPackageRev :one
 SELECT rev FROM nuget_packages WHERE repo_id = ? AND lower_id = ?
 `
@@ -419,77 +438,6 @@ func (q *Queries) ListVersionNames(ctx context.Context, arg ListVersionNamesPara
 			return nil, err
 		}
 		items = append(items, normalized)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listVersions = `-- name: ListVersions :many
-SELECT v.package_id, v.version, v.normalized, v.sort_key, v.semver2, v.prerelease, v.listed, v.meta,
-  v.nupkg_path, v.published_at, a.size, a.sha256, a.updated_at, a.build_id
-FROM nuget_versions v JOIN assets a ON a.id = v.asset_id
-WHERE v.repo_id = ? AND v.lower_id = ?
-ORDER BY v.sort_key
-LIMIT ?
-`
-
-type ListVersionsParams struct {
-	RepoID  int64
-	LowerID string
-	Limit   int64
-}
-
-type ListVersionsRow struct {
-	PackageID   string
-	Version     string
-	Normalized  string
-	SortKey     string
-	Semver2     int64
-	Prerelease  int64
-	Listed      int64
-	Meta        string
-	NupkgPath   string
-	PublishedAt int64
-	Size        int64
-	Sha256      string
-	UpdatedAt   int64
-	BuildID     sql.NullInt64
-}
-
-// The versions of one package, oldest first, with the time and the publish session of each file.
-func (q *Queries) ListVersions(ctx context.Context, arg ListVersionsParams) ([]ListVersionsRow, error) {
-	rows, err := q.db.QueryContext(ctx, listVersions, arg.RepoID, arg.LowerID, arg.Limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListVersionsRow
-	for rows.Next() {
-		var i ListVersionsRow
-		if err := rows.Scan(
-			&i.PackageID,
-			&i.Version,
-			&i.Normalized,
-			&i.SortKey,
-			&i.Semver2,
-			&i.Prerelease,
-			&i.Listed,
-			&i.Meta,
-			&i.NupkgPath,
-			&i.PublishedAt,
-			&i.Size,
-			&i.Sha256,
-			&i.UpdatedAt,
-			&i.BuildID,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err

@@ -45,15 +45,6 @@ type model struct {
 // versionRow is one version of a hosted package with its file.
 type versionRow = dbq.GetVersionRow
 
-// hostedModel reads the versions of package lid of a hosted repo: nil when it has none.
-func (h *Handler) hostedModel(ctx context.Context, repoID int64, lid string) (*model, error) {
-	rows, err := h.q.ListVersions(ctx, dbq.ListVersionsParams{RepoID: repoID, LowerID: lid, Limit: maxVersions})
-	if err != nil {
-		return nil, err
-	}
-	return modelOf(len(rows), func(i int) versionRow { return versionRow(rows[i]) }), nil
-}
-
 // modelOf is the model of n version rows, oldest first (row(i) is the i-th): nil without a row
 // that reads.
 func modelOf(n int, row func(i int) versionRow) *model {

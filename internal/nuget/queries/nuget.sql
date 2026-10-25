@@ -28,6 +28,12 @@ SELECT rev FROM nuget_packages WHERE repo_id = ? AND lower_id = ?;
 -- name: DeletePackage :exec
 DELETE FROM nuget_packages WHERE repo_id = ? AND lower_id = ?;
 
+-- The newest listed release of a package (nuget_package_latest), NULL when it has none: the
+-- version of the artifact snippets.
+-- name: GetNewestRelease :one
+SELECT l.release2 FROM nuget_packages p JOIN nuget_package_latest l ON l.package = p.id
+WHERE p.repo_id = ? AND p.lower_id = ?;
+
 -- The versions of one package, oldest first, without their metadata: the flat version list.
 -- name: ListVersionNames :many
 SELECT normalized FROM nuget_versions
@@ -68,15 +74,6 @@ LIMIT ?;
 SELECT version, normalized FROM nuget_versions
 WHERE repo_id = ? AND lower_id = ? AND listed = 1 AND prerelease = 0 AND semver2 <= ?
 ORDER BY sort_key
-LIMIT ?;
-
--- The versions of one package, oldest first, with the time and the publish session of each file.
--- name: ListVersions :many
-SELECT v.package_id, v.version, v.normalized, v.sort_key, v.semver2, v.prerelease, v.listed, v.meta,
-  v.nupkg_path, v.published_at, a.size, a.sha256, a.updated_at, a.build_id
-FROM nuget_versions v JOIN assets a ON a.id = v.asset_id
-WHERE v.repo_id = ? AND v.lower_id = ?
-ORDER BY v.sort_key
 LIMIT ?;
 
 -- The versions of one package, newest first: the first page of the version browser.

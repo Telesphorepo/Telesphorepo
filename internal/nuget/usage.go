@@ -2,12 +2,15 @@ package nuget
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/ci"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
+	"github.com/Telesphorepo/Telesphorepo/internal/nuget/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
+	"github.com/Telesphorepo/Telesphorepo/internal/version"
 )
 
 // Snippets of the NuGet format (format.Spec Usage and ArtifactUsage). dotnet reads a private
@@ -97,8 +100,8 @@ func tools() []format.Tool {
 // ArtifactUsage returns the snippets of one package of a hosted or proxy repo; a proxy reads the
 // registration of its remote. p is the package folder v3-flatcontainer/<id>/, a version folder
 // in it or a file of a version. The pinned mode names the version of the path, else the newest
-// listed release (the newest listed version when there is none); the latest mode lets NuGet take
-// the newest version (Version="*").
+// listed release (the newest version when there is none); the latest mode lets NuGet take the
+// newest version (Version="*").
 func (h *Handler) ArtifactUsage(ctx context.Context, repo, from *repos.Repo, baseURL, p, v, mode string) (*format.ArtifactUsage, error) {
 	if from.Kind != repos.KindHosted && from.Kind != repos.KindProxy {
 		return nil, nil
@@ -111,10 +114,89 @@ func (h *Handler) ArtifactUsage(ctx context.Context, repo, from *repos.Repo, bas
 	if len(segs) >= 3 && v == "" {
 		v = segs[2]
 	}
-	m, err := h.usageModel(ctx, from, lid)
-	if err != nil || m == nil {
+	id, pick, err := h.usagePick(ctx, from, lid, v)
+	if err != nil || pick == nil {
 		return nil, err
 	}
+	if mode != format.VersionLatest {
+		mode = format.VersionPinned
+	}
+	ver := pick.ver.Normalized()
+	add, ref, note := "dotnet add package "+id+" --version "+ver+"\n", "<ItemGroup>\n  <PackageReference Include=\""+id+"\" Version=\""+ver+"\" />\n</ItemGroup>\n", ""
+	if mode == format.VersionLatest {
+		add = "dotnet add package " + id + "\n"
+		ref = "<ItemGroup>\n  <PackageReference Include=\"" + id + "\" Version=\"*\" />\n</ItemGroup>\n"
+		note = "Each restore takes the newest version at that moment, so builds are not reproducible. Pin a version for releases."
+	}
+	out := sourceSnippets(repo, baseURL, format.SnippetArtifact)
+	out = append(out,
+		format.Snippet{ID: "dotnet.add", Tool: "dotnet", Purpose: format.SnippetUse, Context: format.SnippetArtifact,
+			Title: "Add " + id, Lang: "sh", Code: add, Note: note},
+		format.Snippet{ID: "msbuild.reference", Tool: "msbuild", Purpose: format.SnippetUse, Context: format.SnippetArtifact,
+			File: "*.csproj", Title: "Project file", Lang: "xml", Code: ref, Note: note})
+	return &format.ArtifactUsage{Artifact: artifactOf(lid, id), Version: ver, Mode: mode, Snippets: out}, nil
+}
+
+// usagePick returns the package id as the newest version writes it, and the version of the
+// snippets: version v, else the newest listed release, else the newest version. A hosted repo
+// reads them with seeks (the newest version, nuget_package_latest, the version picked); a proxy
+// reads the registration of its remote. pick is nil when the repo does not have the package or
+// version v.
+func (h *Handler) usagePick(ctx context.Context, repo *repos.Repo, lid, v string) (id string, pick *leaf, err error) {
+	if repo.Kind == repos.KindProxy {
+		m, err := h.proxyModel(ctx, repo, lid)
+		if err != nil || m == nil {
+			return "", nil, err
+		}
+		return m.id, m.pick(v), nil
+	}
+	newest, err := h.q.ListVersionsDesc(ctx, dbq.ListVersionsDescParams{RepoID: repo.ID, LowerID: lid, Limit: 1})
+	if err != nil || len(newest) == 0 {
+		return "", nil, err
+	}
+	top, err := leafOfRow(versionRow(newest[0]))
+	if err != nil {
+		return "", nil, nil
+	}
+	var key string
+	if v != "" {
+		pv, err := version.ParseNuGet(v)
+		if err != nil {
+			return top.id, nil, nil
+		}
+		key = pv.SortKey()
+	} else {
+		rel, err := h.q.GetNewestRelease(ctx, dbq.GetNewestReleaseParams{RepoID: repo.ID, LowerID: lid})
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return "", nil, err
+		}
+		if !rel.Valid {
+			return top.id, &top, nil
+		}
+		key = rel.String
+	}
+	l := top
+	if key != newest[0].SortKey {
+		row, err := h.q.GetVersion(ctx, dbq.GetVersionParams{RepoID: repo.ID, LowerID: lid, SortKey: key})
+		if errors.Is(err, sql.ErrNoRows) {
+			return top.id, nil, nil
+		}
+		if err != nil {
+			return "", nil, err
+		}
+		if l, err = leafOfRow(versionRow(row)); err != nil {
+			return top.id, nil, nil
+		}
+	}
+	if v != "" && !strings.EqualFold(l.ver.Normalized(), v) {
+		return top.id, nil, nil
+	}
+	return top.id, &l, nil
+}
+
+// pick returns the leaf of version v, else the newest listed release, else the newest version;
+// nil when v is not a version of m.
+func (m *model) pick(v string) *leaf {
 	var pick *leaf
 	for i := len(m.leaves) - 1; i >= 0; i-- {
 		l := &m.leaves[i]
@@ -127,37 +209,15 @@ func (h *Handler) ArtifactUsage(ctx context.Context, repo, from *repos.Repo, bas
 			pick = l
 		}
 	}
-	if pick == nil && v != "" {
-		return nil, nil
-	}
-	if pick == nil {
+	if pick == nil && v == "" {
 		pick = &m.leaves[len(m.leaves)-1]
 	}
-	if mode != format.VersionLatest {
-		mode = format.VersionPinned
-	}
-	ver := pick.ver.Normalized()
-	add, ref, note := "dotnet add package "+m.id+" --version "+ver+"\n", "<ItemGroup>\n  <PackageReference Include=\""+m.id+"\" Version=\""+ver+"\" />\n</ItemGroup>\n", ""
-	if mode == format.VersionLatest {
-		add = "dotnet add package " + m.id + "\n"
-		ref = "<ItemGroup>\n  <PackageReference Include=\"" + m.id + "\" Version=\"*\" />\n</ItemGroup>\n"
-		note = "Each restore takes the newest version at that moment, so builds are not reproducible. Pin a version for releases."
-	}
-	out := sourceSnippets(repo, baseURL, format.SnippetArtifact)
-	out = append(out,
-		format.Snippet{ID: "dotnet.add", Tool: "dotnet", Purpose: format.SnippetUse, Context: format.SnippetArtifact,
-			Title: "Add " + m.id, Lang: "sh", Code: add, Note: note},
-		format.Snippet{ID: "msbuild.reference", Tool: "msbuild", Purpose: format.SnippetUse, Context: format.SnippetArtifact,
-			File: "*.csproj", Title: "Project file", Lang: "xml", Code: ref, Note: note})
-	return &format.ArtifactUsage{Artifact: artifactOf(lid, m.id), Version: ver, Mode: mode, Snippets: out}, nil
+	return pick
 }
 
-// usageModel reads the model of package lid of a hosted repo or of the registration of a
-// proxy's remote: nil when the repo does not have the package.
-func (h *Handler) usageModel(ctx context.Context, repo *repos.Repo, lid string) (*model, error) {
-	if repo.Kind != repos.KindProxy {
-		return h.hostedModel(ctx, repo.ID, lid)
-	}
+// proxyModel reads the model of package lid from the registration of a proxy's remote: nil when
+// the remote does not have the package.
+func (h *Handler) proxyModel(ctx context.Context, repo *repos.Repo, lid string) (*model, error) {
 	src, err := h.source(ctx, nil, nil, repo, lid)
 	if err == nil {
 		var m *model
