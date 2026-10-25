@@ -3,16 +3,20 @@
   (query.get("repo")). The top bar's search field holds the query; under 640px, where the top bar
   has no field, the page shows one.
 
-  The hits are grouped (search/hits.ts): a card per repository, and in it a row per folder that
-  holds hits (an artifact folder takes in its version folders), with its folders and files as
+  The hits come a repository at a time, in the order the repository stored them, so a card is
+  whole before the next one starts; the next page loads on its own as the end of the results
+  comes into view. They are grouped
+  (search/hits.ts): a card per repository with its count of matches, and in it a row per folder
+  that holds hits (an artifact folder takes in its version folders), with its folders and files as
   links; the checksums and signatures of a file fold into it. The matched text is marked in every
-  path. Load more adds the next page to the same groups.
+  path. The first page counts the matches of every repository (up to 10,000 each, "10,000+"): the toolbar shows the total, and
+  with several repositories a line under it names each with its count, a link to search only it.
 -->
 <script lang="ts">
   import { untrack } from "svelte";
   import type { PageProps } from "$lib/router.svelte";
   import { filesPath, href, navigate } from "$lib/router.svelte";
-  import { api, type SearchHit } from "$lib/api";
+  import { api, type SearchHit, type SearchRepo } from "$lib/api";
   import { Keyset, Resource } from "$lib/load.svelte";
   import { openRow } from "$lib/pick.svelte";
   import { formatCount, formatSize } from "$lib/format";
@@ -50,22 +54,38 @@
   const formatOf = (name: string) => searchable.find((r) => r.name === name)?.format ?? "";
 
   let results = $state<Keyset<SearchHit> | null>(null);
+  // The matches of each repository, from the first page.
+  let counts = $state<SearchRepo[]>([]);
   $effect(() => {
     const term = q;
     const inRepo = repo;
-    results = term.length < minLength ? null : untrack(() => new Keyset((p) => api.search(term, { repo: inRepo || undefined, ...p }), 200));
+    counts = [];
+    results =
+      term.length < minLength
+        ? null
+        : untrack(
+            () =>
+              new Keyset(async (p) => {
+                const page = await api.search(term, { repo: inRepo || undefined, ...p });
+                if (page.repos && term === q && inRepo === repo) counts = page.repos;
+                return page;
+              }, 200),
+          );
   });
   const groups = $derived(groupHits(results?.items ?? []));
+  const total = $derived(counts.reduce((n, c) => n + c.matches, 0));
+  const totalMore = $derived(counts.some((c) => c.more));
+  /** "1,008 files", "10,000+ files": a count that stopped is at least that many. */
+  const files = (n: number, more: boolean) => (more ? `${formatCount(n)}+ files` : count(n, "file", "files"));
+  const filesOf = (name: string, loaded: number) => {
+    const c = counts.find((x) => x.name === name);
+    return c ? files(c.matches, c.more) : count(loaded, "file", "files");
+  };
 
-  /** "38 files in 7 folders", "200+ files in 12 folders · 3 repositories": "+" while more pages wait. */
-  const countText = $derived.by(() => {
-    if (!results || groups.files === 0) return "";
-    const more = results.hasMore ? "+" : "";
-    const files = `${formatCount(groups.files)}${more} ${groups.files === 1 && !more ? "file" : "files"}`;
-    const folders = count(groups.folders, "folder", "folders");
-    const inRepos = groups.repos.length > 1 ? ` · ${count(groups.repos.length, "repository", "repositories")}` : "";
-    return `${files} in ${folders}${inRepos}`;
-  });
+  /** "5,444 files", "11,008+ files in 2 repositories". */
+  const countText = $derived(
+    total === 0 ? "" : `${files(total, totalMore)}${counts.length > 1 ? ` in ${count(counts.length, "repository", "repositories")}` : ""}`,
+  );
 
   let draft = $state("");
   $effect(() => {
@@ -158,9 +178,9 @@
         {#if format}<FormatIcon {format} class="size-5" />{/if}
         <h2 class="min-w-0 truncate text-section"><a href={href(filesPath(r.repo))} class="hover:underline">{r.repo}</a></h2>
         <!-- With one repository the count over the results says it. -->
-        {#if groups.repos.length > 1}<span class="shrink-0 text-meta text-muted-foreground">{count(r.files, "file", "files")}</span>{/if}
+        {#if counts.length > 1}<span class="shrink-0 text-meta text-muted-foreground">{filesOf(r.repo, r.files)}</span>{/if}
       </div>
-      {#if !repo && groups.repos.length > 1}
+      {#if !repo && counts.length > 1}
         <div data-slot="header-actions" class="flex shrink-0">
           <Button variant="ghost" size="sm" onclick={() => go(q, r.repo)}>Search only {r.repo}</Button>
         </div>
@@ -191,25 +211,24 @@
   {:else if results.error && results.items.length === 0}
     <Section><SourceError source={results} /></Section>
   {:else if results.items.length === 0}
-    {#if results.hasMore}
-      <EmptyState
-        icon={SearchIcon}
-        title="No match so far"
-        description="The search read a part of the index and found no path with “{q}” in the repositories you can read."
-      >
-        <Button variant="outline" disabled={results.loadingMore} onclick={results.more}>Search further</Button>
-      </EmptyState>
-    {:else}
-      <EmptyState
-        icon={SearchIcon}
-        title="No files match"
-        description={repo ? `No path in ${repo} contains “${q}”.` : `No path contains “${q}”. Try a shorter part of the path.`}
-      >
-        {#if repo}<Button variant="outline" onclick={() => go(q, "")}>Search all repositories</Button>{/if}
-      </EmptyState>
-    {/if}
+    <EmptyState
+      icon={SearchIcon}
+      title="No files match"
+      description={repo ? `No path in ${repo} contains “${q}”.` : `No path contains “${q}”. Try a shorter part of the path.`}
+    >
+      {#if repo}<Button variant="outline" onclick={() => go(q, "")}>Search all repositories</Button>{/if}
+    </EmptyState>
   {:else}
+    {#if !repo && counts.length > 1}
+      <nav aria-label="Repositories with matches" class="mb-6 flex flex-wrap items-center gap-x-4 gap-y-1 text-meta text-muted-foreground">
+        {#each counts as c (c.name)}
+          <button type="button" class="flex items-center gap-1.5 rounded-sm outline-none hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50" title="Search only {c.name}" onclick={() => go(q, c.name)}>
+            <FormatIcon format={c.format} class="size-3.5" /><span class="text-foreground">{c.name}</span><span class="tabular-nums">{formatCount(c.matches)}{c.more ? "+" : ""}</span>
+          </button>
+        {/each}
+      </nav>
+    {/if}
     {#each groups.repos as r (r.repo)}{@render repoCard(r)}{/each}
-    <SourceMore source={results} />
+    <SourceMore source={results} auto />
   {/if}
 {/if}

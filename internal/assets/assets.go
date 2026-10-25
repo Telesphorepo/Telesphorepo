@@ -75,6 +75,7 @@ type Asset struct {
 type SearchHit struct {
 	Asset    *Asset
 	RepoName string
+	Key      int64 // its key in the search index: the cursor of the page after it
 }
 
 // Pipeline writes, removes and reads assets.
@@ -332,61 +333,103 @@ func (p *Pipeline) List(ctx context.Context, repoID int64, prefix, after string,
 	return out, next, nil
 }
 
-// searchScan is how many matches of the trigram index a search restricted to some repos reads
-// per page at most.
-const searchScan = 10000
+// SearchCountCap is the most matches that a search counts in one repo: a count of SearchCountCap
+// means at least that many.
+const SearchCountCap = 10000
 
-// Search: FTS5 trigram MATCH on assets_fts (q quoted as a phrase, len(q) >= 3), restricted to
-// repoIDs when non-nil, keyset on asset id > after. A non-nil empty repoIDs matches nothing.
-//
-// The index walks the matches of every repo in asset id order. A search restricted to repoIDs
-// reads at most searchScan of them per page and keeps those of its repos, so a caller who reads
-// few repos of a large server costs a bounded read per page: the page may hold fewer than limit
-// hits (even none) with a next cursor, the asset id the read reached. next is 0 at the end.
-func (p *Pipeline) Search(ctx context.Context, q string, repoIDs []int64, after int64, limit int) ([]SearchHit, int64, error) {
+// SearchCount is the matches of one repo, up to SearchCountCap.
+type SearchCount struct {
+	RepoID  int64
+	Matches int64
+}
+
+// searchMatch returns the FTS5 query of q (quoted as a phrase) and the set of repoIDs (nil for
+// nil, every repo); ok is false when nothing can match: q is shorter than 3 characters, or repoIDs
+// is empty and not nil.
+func searchMatch(q string, repoIDs []int64) (match string, in map[int64]bool, ok bool) {
 	if utf8.RuneCountInString(q) < 3 || (repoIDs != nil && len(repoIDs) == 0) {
+		return "", nil, false
+	}
+	if repoIDs != nil {
+		in = make(map[int64]bool, len(repoIDs))
+		for _, id := range repoIDs {
+			in[id] = true
+		}
+	}
+	return `"` + strings.ReplaceAll(q, `"`, `""`) + `"`, in, true
+}
+
+// repoEnd is the last key of repo in the search index: the cursor that skips the rest of it.
+func repoEnd(repo int64) int64 { return (repo+1)<<dbq.SearchShift - 1 }
+
+// Search: FTS5 trigram MATCH on assets_search, restricted to repoIDs when non-nil, a page of
+// limit hits after the key after (0 for the first page). The index keys a path by its repo, so
+// the hits of one repo come together, in the order they were stored, and a page is one seek past
+// after; a repo that is not in repoIDs is one seek past its end. next is the key of the last hit,
+// 0 at the end.
+func (p *Pipeline) Search(ctx context.Context, q string, repoIDs []int64, after int64, limit int) ([]SearchHit, int64, error) {
+	match, in, ok := searchMatch(q, repoIDs)
+	if !ok {
 		return nil, 0, nil
 	}
 	if limit <= 0 {
 		limit = 50
 	}
-	match := `"` + strings.ReplaceAll(q, `"`, `""`) + `"`
 	dq := dbq.New(p.db.R)
-	if repoIDs == nil {
-		rows, err := dq.SearchAssets(ctx, dbq.SearchAssetsParams{Match: match, After: after, Limit: int64(limit)})
+	// One hit more than limit says whether a next page exists.
+	var out []SearchHit
+	for len(out) <= limit {
+		want := int64(limit + 1 - len(out))
+		rows, err := dq.SearchAssets(ctx, match, after, want)
 		if err != nil {
 			return nil, 0, err
 		}
-		out := make([]SearchHit, len(rows))
-		for i, r := range rows {
-			out[i] = SearchHit{Asset: fromRow(r.Asset), RepoName: r.RepoName}
+		skipped := false
+		for _, r := range rows {
+			if in != nil && !in[r.Asset.RepoID] {
+				after, skipped = repoEnd(r.Asset.RepoID), true
+				break
+			}
+			out = append(out, SearchHit{Asset: fromRow(r.Asset), RepoName: r.RepoName, Key: r.Key})
+			after = r.Key
 		}
-		var next int64
-		if len(out) == limit {
-			next = out[len(out)-1].Asset.ID
+		if !skipped && int64(len(rows)) < want {
+			break // the end of the matches
 		}
-		return out, next, nil
-	}
-	in := make(map[int64]bool, len(repoIDs))
-	for _, id := range repoIDs {
-		in[id] = true
-	}
-	scan := max(searchScan, int64(limit))
-	var out []SearchHit
-	read, last, err := dq.WalkSearchAssets(ctx, match, after, scan, func(r dbq.SearchAssetsRow) bool {
-		if in[r.Asset.RepoID] {
-			out = append(out, SearchHit{Asset: fromRow(r.Asset), RepoName: r.RepoName})
-		}
-		return len(out) < limit
-	})
-	if err != nil {
-		return nil, 0, err
 	}
 	var next int64
-	if len(out) == limit || read == scan {
-		next = last // a full page, or more matches may follow the window
+	if len(out) > limit {
+		out = out[:limit]
+		next = out[limit-1].Key
 	}
 	return out, next, nil
+}
+
+// SearchCounts returns the matches of q in each repo of repoIDs (nil: every repo) that has some,
+// in key order, each counted up to SearchCountCap. It seeks from one repo with matches to the
+// next, so its cost follows the repos that match, not the files.
+func (p *Pipeline) SearchCounts(ctx context.Context, q string, repoIDs []int64) ([]SearchCount, error) {
+	match, in, ok := searchMatch(q, repoIDs)
+	if !ok {
+		return nil, nil
+	}
+	dq := dbq.New(p.db.R)
+	var out []SearchCount
+	for after := int64(0); ; {
+		key, ok, err := dq.NextSearchMatch(ctx, match, after)
+		if err != nil || !ok {
+			return out, err
+		}
+		repo := key >> dbq.SearchShift
+		if in == nil || in[repo] {
+			n, err := dq.CountSearchMatches(ctx, match, repo<<dbq.SearchShift, repoEnd(repo)+1, SearchCountCap)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, SearchCount{RepoID: repo, Matches: n})
+		}
+		after = repoEnd(repo)
+	}
 }
 
 // Seek returns the first asset of repo whose path is >= lower (> lower when !inclusive) and

@@ -6,70 +6,44 @@ package dbq
 import (
 	"context"
 	"database/sql"
+	"errors"
 )
 
 // Extra maps each hand-written query name to its SQL.
 var Extra = map[string]string{
-	"SearchAssets":   searchAssets,
-	"ListMigrations": listMigrations,
+	"SearchAssets":       searchAssets,
+	"NextSearchMatch":    nextSearchMatch,
+	"CountSearchMatches": countSearchMatches,
+	"ListMigrations":     listMigrations,
 }
 
-// The FTS5 trigram search walks assets_fts in rowid order, which is the keyset order, so no
-// sort is needed: sqlc cannot reference rowid or "assets_fts MATCH", and its fallback sorts
-// with a temp B-tree.
-const searchSelect = `SELECT a.id, a.repo_id, a.path, a.blob_id, a.size, a.sha256, a.content_type, a.kind,
-  a.uploaded_by, a.created_at, a.updated_at, a.build_id, a.md5, a.sha1, r.name
-FROM assets_fts f JOIN assets a ON a.id = f.rowid JOIN repos r ON r.id = a.repo_id
-WHERE assets_fts MATCH ? AND f.rowid > ?`
+// The search index assets_search keys each path by repo_id << SearchShift | asset id, so the
+// matches of one repo sit together in rowid order and every query here is a seek in the trigram
+// index (sqlc cannot reference rowid or "assets_search MATCH").
+const SearchShift = 40
 
-const searchAssets = searchSelect + `
-ORDER BY f.rowid LIMIT ?`
+const searchAssets = `SELECT a.id, a.repo_id, a.path, a.blob_id, a.size, a.sha256, a.content_type, a.kind,
+  a.uploaded_by, a.created_at, a.updated_at, a.build_id, a.md5, a.sha1, r.name, f.rowid
+FROM assets_search f JOIN assets a ON a.id = (f.rowid & 1099511627775) JOIN repos r ON r.id = a.repo_id
+WHERE assets_search MATCH ?1 AND f.rowid > ?2 ORDER BY f.rowid LIMIT ?3`
 
-// SearchAssetsRow is one search hit: the asset and its repo's name.
+// nextSearchMatch is the key of the first match after a key; no row at the end.
+const nextSearchMatch = `SELECT rowid FROM assets_search WHERE assets_search MATCH ?1 AND rowid > ?2 ORDER BY rowid LIMIT 1`
+
+// countSearchMatches counts the matches with a key in [?2, ?3), up to ?4.
+const countSearchMatches = `SELECT count(*) FROM (SELECT 1 FROM assets_search WHERE assets_search MATCH ?1 AND rowid >= ?2 AND rowid < ?3 LIMIT ?4)`
+
+// SearchAssetsRow is one search hit: the asset, its repo's name and its key in the index.
 type SearchAssetsRow struct {
 	Asset    Asset
 	RepoName string
+	Key      int64
 }
 
-type SearchAssetsParams struct {
-	Match string // an FTS5 query, e.g. the search text quoted as a phrase
-	After int64  // asset id of the last hit of the previous page; 0 for the first page
-	Limit int64
-}
-
-// SearchAssets returns assets whose path matches, across every repo, in asset id order.
-func (q *Queries) SearchAssets(ctx context.Context, arg SearchAssetsParams) ([]SearchAssetsRow, error) {
-	return q.searchArgs(ctx, searchAssets, arg.Match, arg.After, arg.Limit)
-}
-
-// WalkSearchAssets reads the matches of SearchAssets after the asset id after, in asset id
-// order, at most limit of them, and gives each to fn until fn returns false. It returns how many
-// it read and the asset id of the last one (0 for none). A search restricted to some repos
-// filters in fn: it reads a bounded window of the index, however few of its matches are in
-// those repos.
-func (q *Queries) WalkSearchAssets(ctx context.Context, match string, after, limit int64, fn func(SearchAssetsRow) bool) (int64, int64, error) {
+// SearchAssets returns the matches of match after the key after, at most limit, in key order: a
+// repo's matches together.
+func (q *Queries) SearchAssets(ctx context.Context, match string, after, limit int64) ([]SearchAssetsRow, error) {
 	rows, err := q.db.QueryContext(ctx, searchAssets, match, after, limit)
-	if err != nil {
-		return 0, 0, err
-	}
-	defer rows.Close()
-	var read, last int64
-	for rows.Next() {
-		i, err := scanSearchRow(rows)
-		if err != nil {
-			return read, last, err
-		}
-		read++
-		last = i.Asset.ID
-		if !fn(i) {
-			break
-		}
-	}
-	return read, last, rows.Err()
-}
-
-func (q *Queries) searchArgs(ctx context.Context, query string, args ...any) ([]SearchAssetsRow, error) {
-	rows, err := q.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -82,17 +56,30 @@ func (q *Queries) searchArgs(ctx context.Context, query string, args ...any) ([]
 		}
 		items = append(items, i)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
+	return items, rows.Err()
 }
 
+// NextSearchMatch returns the key of the first match of match after the key after; ok is false
+// at the end.
+func (q *Queries) NextSearchMatch(ctx context.Context, match string, after int64) (key int64, ok bool, err error) {
+	err = q.db.QueryRowContext(ctx, nextSearchMatch, match, after).Scan(&key)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	return key, err == nil, err
+}
+
+// CountSearchMatches counts the matches of match with a key in [from, to), up to limit.
+func (q *Queries) CountSearchMatches(ctx context.Context, match string, from, to, limit int64) (int64, error) {
+	var n int64
+	err := q.db.QueryRowContext(ctx, countSearchMatches, match, from, to, limit).Scan(&n)
+	return n, err
+}
 func scanSearchRow(rows *sql.Rows) (SearchAssetsRow, error) {
 	var i SearchAssetsRow
 	a := &i.Asset
 	err := rows.Scan(&a.ID, &a.RepoID, &a.Path, &a.BlobID, &a.Size, &a.Sha256, &a.ContentType, &a.Kind,
-		&a.UploadedBy, &a.CreatedAt, &a.UpdatedAt, &a.BuildID, &a.Md5, &a.Sha1, &i.RepoName)
+		&a.UploadedBy, &a.CreatedAt, &a.UpdatedAt, &a.BuildID, &a.Md5, &a.Sha1, &i.RepoName, &i.Key)
 	return i, err
 }
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -515,6 +516,69 @@ func TestAPISearch(t *testing.T) {
 		t.Fatalf("anonymous search sees private repos: %s", b)
 	}
 	apiWant(t, s, http.MethodGet, "/api/search?q=ab", nil, s.Admin(), http.StatusBadRequest)
+
+	// Files put into the two repos in turn come back a repo at a time (open was created first),
+	// each in the order it stored them, over full pages; the first page counts the matches of each
+	// repo.
+	for _, v := range []string{"3.0", "4.0"} {
+		apiMavenPut(t, s, hidden, "com/acme/zebrafish/"+v+"/zebrafish-"+v+".txt", "c")
+		apiMavenPut(t, s, open, "com/acme/zebrafish/"+v+"/zebrafish-"+v+".txt", "d")
+	}
+	type hit struct{ Repo, Path string }
+	type searchPage struct {
+		Items []hit   `json:"items"`
+		Next  *string `json:"next"`
+		Repos *[]struct {
+			Name    string `json:"name"`
+			Matches int64  `json:"matches"`
+		} `json:"repos"`
+	}
+	walk := func(auth Auth) ([]hit, map[string]int64) {
+		t.Helper()
+		var hits []hit
+		counts := map[string]int64{}
+		after := ""
+		for i := 0; ; i++ {
+			var p searchPage
+			apiJSON(t, s, http.MethodGet, "/api/search?q=ebraf&limit=2"+after, nil, auth, 200, &p)
+			if (i == 0) != (p.Repos != nil) {
+				t.Fatalf("page %d: repos %v, want them on the first page only", i, p.Repos)
+			}
+			if p.Repos != nil {
+				for _, r := range *p.Repos {
+					counts[r.Name] = r.Matches
+				}
+			}
+			if p.Next != nil && len(p.Items) != 2 {
+				t.Fatalf("page %d: %d hits with a next cursor, want a full page", i, len(p.Items))
+			}
+			hits = append(hits, p.Items...)
+			if p.Next == nil {
+				return hits, counts
+			}
+			after = "&after=" + url.QueryEscape(*p.Next)
+		}
+	}
+	paths := func(repo string, versions ...string) []hit {
+		out := []hit{}
+		for _, v := range versions {
+			out = append(out, hit{repo, "com/acme/zebrafish/" + v + "/zebrafish-" + v + ".txt"})
+		}
+		return out
+	}
+	want := append(paths(open, "1.0", "3.0", "4.0"), paths(hidden, "2.0", "3.0", "4.0")...)
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(200 * time.Millisecond) {
+		got, counts := walk(s.Admin())
+		if slices.Equal(got, want) && counts[open] == 3 && counts[hidden] == 3 && len(counts) == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("admin search = %v with counts %v, want %v with 3 each", got, counts, want)
+		}
+	}
+	if got, counts := walk(erin); !slices.Equal(got, paths(open, "1.0", "3.0", "4.0")) || len(counts) != 1 || counts[open] != 3 {
+		t.Fatalf("erin search = %v with counts %v, want the 3 files of %s", got, counts, open)
+	}
 }
 
 func TestAPIErrors(t *testing.T) {

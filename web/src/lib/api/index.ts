@@ -263,9 +263,9 @@ export const api = {
   },
 
 
-  /** Substring search over paths (q needs 3+ characters), optionally in one repo. */
+  /** Substring search over paths (q needs 3+ characters), optionally in one repo: a repository's hits together, by path. */
   search: (q: string, opts: { repo?: string } & T.PageParams = {}) =>
-    request<T.Page<T.SearchHit>>("GET", "/api/search", { query: { q, repo: opts.repo, ...page(opts) } }),
+    request<T.SearchPage>("GET", "/api/search", { query: { q, repo: opts.repo, ...page(opts) } }),
 
   settings: {
     get: () => request<T.Settings>("GET", "/api/settings"),

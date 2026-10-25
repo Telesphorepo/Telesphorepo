@@ -649,6 +649,10 @@ export type SearchHit = {
   kind: string;
   updated_at: string;
 };
+/** The matches of one repository; `more`: at least `matches`, the count stopped there. */
+export type SearchRepo = { name: string; format: string; matches: number; more: boolean };
+/** A page of GET /api/search: a repository's hits together; the first page also has `repos`, in the same order. */
+export type SearchPage = Page<SearchHit> & { repos?: SearchRepo[] };
 
 // --- settings ---
 

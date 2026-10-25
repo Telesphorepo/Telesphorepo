@@ -695,6 +695,22 @@ type hitJSON struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// searchJSON is a page of GET /api/search. Repos (the first page only) is the matches of each
+// repo, by name.
+type searchJSON struct {
+	Items []hitJSON         `json:"items"`
+	Next  *string           `json:"next"`
+	Repos *[]searchRepoJSON `json:"repos,omitempty"`
+}
+
+// searchRepoJSON is the matches of one repo; More: at least Matches (the count stopped there).
+type searchRepoJSON struct {
+	Name    string `json:"name"`
+	Format  string `json:"format"`
+	Matches int64  `json:"matches"`
+	More    bool   `json:"more"`
+}
+
 func (a *API) search(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	p := c.P
 	ctx, qs := r.Context(), r.URL.Query()
@@ -704,14 +720,18 @@ func (a *API) search(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		return
 	}
 	var after int64
-	if s := qs.Get("after"); s != "" {
+	first := qs.Get("after") == ""
+	if !first {
 		var err error
-		if after, err = strconv.ParseInt(s, 10, 64); err != nil || after < 0 {
+		if after, err = strconv.ParseInt(qs.Get("after"), 10, 64); err != nil || after <= 0 {
 			httpx.Error(w, r, http.StatusBadRequest, "invalid cursor")
 			return
 		}
 	}
-	empty := route.Page[hitJSON]{Items: []hitJSON{}}
+	empty := searchJSON{Items: []hitJSON{}}
+	if first {
+		empty.Repos = &[]searchRepoJSON{}
+	}
 
 	ids, isAll, err := a.auth.DownloadableRepoIDs(ctx, p)
 	if err != nil {
@@ -760,13 +780,30 @@ func (a *API) search(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		route.Fail(w, r, err)
 		return
 	}
-	out := route.Page[hitJSON]{Items: make([]hitJSON, 0, len(hits))}
+	out := searchJSON{Items: make([]hitJSON, 0, len(hits))}
 	for _, h := range hits {
 		x := h.Asset
 		out.Items = append(out.Items, hitJSON{h.RepoName, x.Path, x.Size, x.SHA256, x.Kind, x.UpdatedAt})
 	}
 	if next > 0 {
 		out.Next = route.Cursor(strconv.FormatInt(next, 10))
+	}
+	if first {
+		counts, err := a.assets.SearchCounts(ctx, q, ids)
+		if err != nil {
+			route.Fail(w, r, err)
+			return
+		}
+		repos := make([]searchRepoJSON, 0, len(counts))
+		for _, n := range counts {
+			repo, err := a.repos.ByID(ctx, n.RepoID)
+			if err != nil {
+				route.Fail(w, r, err)
+				return
+			}
+			repos = append(repos, searchRepoJSON{repo.Name, repo.Format, n.Matches, n.Matches >= assets.SearchCountCap})
+		}
+		out.Repos = &repos
 	}
 	httpx.WriteJSON(w, http.StatusOK, out)
 }
