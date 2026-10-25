@@ -3027,7 +3027,7 @@ catch-alls and parses the raw path (an encoded `/`, `\` or NUL is 400). Every `/
 | Route | Policy | Serves |
 |---|---|---|
 | `GET /v2/` | none (the handler reads the credential) | No `Authorization`: 401 with the challenge. A credential that `Identify` accepts (a core bearer too): 200 `{}`; a bad one: 401 |
-| `GET /v2/_catalog?n=&last=` | password, read token, publish session, device, bearer, anonymous | The images (`{"repositories": [...]}`, by full name) of the repos that the credential behind the request downloads, without the repos a guard refuses. Bearer scopes do not limit it: anonymous and a bearer without a credential see the public repos, a publish session also its own repo, a password, a read token or a device the grants of its user. A full page adds `Link: </v2/_catalog?n=&last=>; rel="next"` |
+| `GET /v2/_catalog?n=&last=` | password, read token, publish session, device, bearer, anonymous | The images (`{"repositories": [...]}`, by full name) of the repos that the credential behind the request downloads, without the repos a guard refuses. Bearer scopes do not limit it: anonymous and a bearer without a credential see the public repos, a publish session also its own repo, a password, a read token or a device the grants of its user. A full page adds `Link: </v2/_catalog?n=&last=>; rel="next"`. A page reads only rows the caller lists: it walks the caller's repos that hold an image in name order (`ReposWithImages`) and reads each one's images through the primary key, one seek per repo it lists from; a holder of all repositories walks `docker_images_full` and seeks past each repo a guard refuses |
 | `GET, HEAD /v2/<name>/manifests/<tag\|digest>` | `FormatRead` + bearer | The stored bytes and media type (`Accept` is ignored), `Docker-Content-Digest`, `Content-Length`, `ETag`; never redirected. 404 `MANIFEST_UNKNOWN`, also for a reference that is neither a digest nor a valid tag |
 | `GET, HEAD /v2/<name>/blobs/<digest>` | `FormatRead` + bearer | The link of the image, with ranges; a GET may redirect to S3. 404 `BLOB_UNKNOWN` |
 | `GET /v2/<name>/tags/list?n=&last=` | `FormatRead` + bearer | `{"name","tags"}` in tag order after `last`; `n` absent is 1000, above 10000 is 10000, 0 is an empty list; a bad `n` is 400 `PAGINATION_NUMBER_INVALID`. A full page adds `Link`. An image without rows is 404 `NAME_UNKNOWN`. A proxy lists the remote's tags; a group merges the tags of its readable members (see **Proxies and groups**) |
@@ -3671,7 +3671,9 @@ the capabilities of the repo's `format.Spec` that are set.
 
 `internal/netrules` resolves the client address, keeps the IP lists and checks the IP rules of
 each repo. Request paths read in-memory snapshots only. The database holds the lists and the
-rules.
+rules. The ranges of each IP list, the CIDRs of each rule scope and the trusted proxies are
+compiled into sorted, merged address ranges when they change, so checking an address is a binary
+search at any list size.
 
 **Client IP and scheme.** The network module resolves the client once per request
 (`Extender.ResolveClient`): its address and its scheme. The server attaches them to the request

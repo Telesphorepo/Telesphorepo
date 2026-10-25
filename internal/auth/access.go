@@ -88,8 +88,13 @@ func (s *Service) DownloadableRepoIDs(ctx context.Context, p *Principal) ([]int6
 		return nil, false, err
 	}
 	ids := anon
+	seen := make(map[int64]bool, len(anon))
+	for _, id := range anon {
+		seen[id] = true
+	}
 	for _, g := range rows {
-		if perm.ID(g.Perm) == perm.RepoDownload && !slices.Contains(ids, g.RepoID) {
+		if perm.ID(g.Perm) == perm.RepoDownload && !seen[g.RepoID] {
+			seen[g.RepoID] = true
 			ids = append(ids, g.RepoID)
 		}
 	}

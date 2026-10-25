@@ -17,6 +17,16 @@ DELETE FROM docker_images WHERE docker_images.repo_id = ? AND image = ? AND mani
 -- name: ListCatalog :many
 SELECT repo_id, full_name FROM docker_images WHERE full_name > sqlc.arg(after) ORDER BY full_name LIMIT sqlc.arg(limit);
 
+-- The repos of ids that hold an image, through the primary keys of repos and docker_images.
+-- name: ReposWithImages :many
+SELECT id, name FROM repos WHERE id IN (sqlc.slice(ids))
+  AND EXISTS (SELECT 1 FROM docker_images i WHERE i.repo_id = repos.id);
+
+-- A keyset page of the images of a repo by name, through the primary key.
+-- name: ListRepoImages :many
+SELECT full_name FROM docker_images WHERE repo_id = sqlc.arg(repo_id) AND image > sqlc.arg(after)
+ORDER BY image LIMIT sqlc.arg(limit);
+
 -- name: GetManifest :one
 SELECT repo_id, image, digest, media_type, artifact_type, config_type, subject, size, total_size, platforms, annotations, created_at
 FROM docker_manifests WHERE repo_id = ? AND image = ? AND digest = ?;
