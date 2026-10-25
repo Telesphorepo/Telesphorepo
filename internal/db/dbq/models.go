@@ -39,7 +39,7 @@ type Asset struct {
 	Unit        sql.NullString
 }
 
-type AssetsFt struct {
+type AssetsSearch struct {
 	Path string
 }
 
@@ -111,6 +111,10 @@ type GroupCountMember struct {
 	CountID  int64
 	Position int64
 	MemberID int64
+}
+
+type GroupCountPending struct {
+	CountID int64
 }
 
 type Rebuild struct {
