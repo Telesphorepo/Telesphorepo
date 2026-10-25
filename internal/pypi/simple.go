@@ -9,7 +9,6 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -248,19 +247,55 @@ func (h *Handler) toIndex(w http.ResponseWriter, r *http.Request, c *route.Call)
 }
 
 // index answers the project list: the projects of a hosted repo, the projects a proxy has
-// cached, the union of the members of a group.
+// cached, the union of the members of a group. The rendered list is kept per form and per
+// revision of its repo (pypi_index_revs), for a group per the revisions of the members the
+// caller reads, so a repeat request costs a lookup per repo, and a matching If-None-Match a 304.
 func (h *Handler) index(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	f, ok := negotiate(r)
 	if !ok {
 		notAcceptable(w, r)
 		return
 	}
-	list, err := h.projects(r.Context(), r, c, c.Repo)
+	ctx := r.Context()
+	revs, err := h.indexRevs(ctx, r, c, c.Repo)
 	if err != nil {
 		route.Fail(w, r, err)
 		return
 	}
-	format.WriteDocument(w, r, f.contentType(), format.NewDocument(renderIndex(list, f)), "Accept")
+	key := format.DocumentKey("index", strconv.Itoa(int(f)), revs)
+	err = h.indexes.Serve(w, r, f.contentType(), key, func() ([]byte, error) {
+		list, err := h.projects(ctx, r, c, c.Repo)
+		if err != nil {
+			return nil, err
+		}
+		return renderIndex(list, f), nil
+	}, "Accept")
+	if err != nil {
+		route.Fail(w, r, err)
+	}
+}
+
+// indexRevs names the state of the project list of repo: "<id>:<rev>" for a hosted repo or a
+// proxy, the ids and revisions of the members the caller reads, in member order, for a group.
+func (h *Handler) indexRevs(ctx context.Context, r *http.Request, c *route.Call, repo *repos.Repo) (string, error) {
+	if repo.Kind != repos.KindGroup {
+		rev, err := h.q.GetIndexRev(ctx, repo.ID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return "", err
+		}
+		return strconv.FormatInt(repo.ID, 10) + ":" + strconv.FormatInt(rev, 10), nil
+	}
+	members, err := h.host.Access.GroupMembers(ctx, r, c.P, repo)
+	if err != nil {
+		return "", err
+	}
+	parts := make([]string, len(members))
+	for i, m := range members {
+		if parts[i], err = h.indexRevs(ctx, r, c, m); err != nil {
+			return "", err
+		}
+	}
+	return strconv.FormatInt(repo.ID, 10) + "(" + strings.Join(parts, ",") + ")", nil
 }
 
 // projects returns the project list of repo, sorted by name.
@@ -298,22 +333,37 @@ func (h *Handler) projects(ctx context.Context, r *http.Request, c *route.Call, 
 	if err != nil {
 		return nil, err
 	}
-	seen := map[string]bool{}
-	var out []project
-	for _, m := range members {
-		list, err := h.projects(ctx, r, c, m)
-		if err != nil {
+	lists := make([][]project, len(members))
+	for i, m := range members {
+		if lists[i], err = h.projects(ctx, r, c, m); err != nil {
 			return nil, err
 		}
-		for _, p := range list {
-			if !seen[p.name] {
-				seen[p.name] = true
-				out = append(out, p)
+	}
+	return mergeProjects(lists), nil
+}
+
+// mergeProjects merges lists sorted by name into one sorted list with each name once: the entry
+// of the first list that has the name.
+func mergeProjects(lists [][]project) []project {
+	var out []project
+	for {
+		best := -1
+		for i, l := range lists {
+			if len(l) > 0 && (best < 0 || l[0].name < lists[best][0].name) {
+				best = i
+			}
+		}
+		if best < 0 {
+			return out
+		}
+		p := lists[best][0]
+		out = append(out, p)
+		for i, l := range lists {
+			if len(l) > 0 && l[0].name == p.name {
+				lists[i] = l[1:]
 			}
 		}
 	}
-	slices.SortFunc(out, func(a, b project) int { return strings.Compare(a.name, b.name) })
-	return out, nil
 }
 
 func notAcceptable(w http.ResponseWriter, r *http.Request) {

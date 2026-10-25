@@ -274,6 +274,25 @@ func (s *Service) Page(ctx context.Context, after string, limit int) ([]*Repo, s
 	return out, next, nil
 }
 
+// PageVisibleTo returns a keyset page of repos by name, like Page, of the repos that user holds a
+// grant on and the public ones. It reads one page of each side, never the repos in between.
+func (s *Service) PageVisibleTo(ctx context.Context, userID int64, after string, limit int) ([]*Repo, string, error) {
+	rows, err := dbq.New(s.db.R).ListReposVisibleTo(ctx, dbq.ListReposVisibleToParams{After: after, Limit: int64(limit), UserID: userID})
+	if err != nil {
+		return nil, "", err
+	}
+	out := make([]*Repo, 0, len(rows))
+	for _, r := range rows {
+		repo, _ := s.counted(fromRow(row(r), nil))
+		out = append(out, repo)
+	}
+	next := ""
+	if limit > 0 && len(rows) == limit {
+		next = rows[len(rows)-1].Name
+	}
+	return out, next, nil
+}
+
 // normalizeConfig checks that cfg is empty or a JSON object, then runs the format's validation,
 // which must return a JSON object.
 func (s *Service) normalizeConfig(format, name string, cfg json.RawMessage) (json.RawMessage, error) {

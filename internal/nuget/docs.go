@@ -94,9 +94,9 @@ func (h *Handler) fail(w http.ResponseWriter, r *http.Request, err error) {
 }
 
 // document renders a document of package lid for the repo of the request: from the repo, or in
-// a group from the member that owns the name. parts name the document for the cache; build
-// renders it from the model.
-func (h *Handler) document(w http.ResponseWriter, r *http.Request, c *route.Call, lid string, parts []string, build func(m *model) ([]byte, error)) {
+// a group from the member that owns the name. p names the document for the cache and the
+// versions to read; build renders it from the model.
+func (h *Handler) document(w http.ResponseWriter, r *http.Request, c *route.Call, lid string, p part, build func(m *model) ([]byte, error)) {
 	ctx := r.Context()
 	owner, err := h.owner(ctx, r, c.P, c.Repo, lid)
 	if err != nil {
@@ -112,9 +112,9 @@ func (h *Handler) document(w http.ResponseWriter, r *http.Request, c *route.Call
 		h.fail(w, r, err)
 		return
 	}
-	key := append(append([]string{h.repoBase(r, c.Repo), lid}, parts...), src.key...)
+	key := append([]string{h.repoBase(r, c.Repo), lid, p.doc, strconv.FormatBool(p.semver2), p.lower, p.upper}, src.key...)
 	err = h.docs.Serve(w, r, jsonType, format.DocumentKey(key...), func() ([]byte, error) {
-		m, err := src.load()
+		m, err := src.load(p)
 		if err != nil {
 			return nil, err
 		}
@@ -241,7 +241,7 @@ func (h *Handler) registrationIndex(w http.ResponseWriter, r *http.Request, c *r
 		return
 	}
 	u, semver2 := h.variant(r, c)
-	h.document(w, r, c, lid, []string{"index", strconv.FormatBool(semver2)}, func(m *model) ([]byte, error) {
+	h.document(w, r, c, lid, part{doc: "index", semver2: semver2}, func(m *model) ([]byte, error) {
 		return m.renderIndex(u, semver2)
 	})
 }
@@ -260,7 +260,7 @@ func (h *Handler) registrationPage(w http.ResponseWriter, r *http.Request, c *ro
 		return
 	}
 	u, semver2 := h.variant(r, c)
-	h.document(w, r, c, lid, []string{"page", strconv.FormatBool(semver2), lower, upper}, func(m *model) ([]byte, error) {
+	h.document(w, r, c, lid, part{doc: "page", semver2: semver2, lower: lower, upper: upper}, func(m *model) ([]byte, error) {
 		return m.renderPageDoc(u, semver2, lower, upper)
 	})
 }
@@ -277,7 +277,7 @@ func (h *Handler) registrationLeaf(w http.ResponseWriter, r *http.Request, c *ro
 		return
 	}
 	u, semver2 := h.variant(r, c)
-	h.document(w, r, c, lid, []string{"leaf", strconv.FormatBool(semver2), lver}, func(m *model) ([]byte, error) {
+	h.document(w, r, c, lid, part{doc: "leaf", semver2: semver2, lower: lver}, func(m *model) ([]byte, error) {
 		return m.renderLeafDoc(u, semver2, lver)
 	})
 }

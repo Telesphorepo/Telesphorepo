@@ -117,6 +117,7 @@ func (a *API) routes(mux *route.Router) {
 
 	mux.Handle("GET /api/repos", route.Policy{Accept: auth.CredPassword | auth.CredReadToken | auth.CredSession, Anonymous: true}, a.listRepos)
 	mux.Handle("POST /api/repos", route.UIPerm(perm.RepositoriesAll), a.createRepo)
+	mux.Handle("GET /api/overview", route.UI, a.overview)
 	mux.Handle("PATCH /api/repos", route.UI, a.setReposPublic)
 	mux.Handle("POST /api/repos/delete", route.UIPerm(perm.RepositoriesAll), a.deleteRepos)
 	mux.Handle("GET /api/repos/{name}", route.Policy{Accept: auth.CredPassword | auth.CredReadToken | auth.CredSession, Anonymous: true,
@@ -429,7 +430,7 @@ type repoJSON struct {
 	Format        string          `json:"format"`
 	Description   string          `json:"description"`
 	AnonymousRead bool            `json:"anonymous_read"`
-	Config        json.RawMessage `json:"config"`
+	Config        json.RawMessage `json:"config,omitempty"` // GET /api/repos/{name}; a list leaves it out
 	// Fields are the values of the module fields of the repo (repos.Field), e.g. signing_key.
 	Fields      map[string]json.RawMessage `json:"fields"`
 	Permissions []string                   `json:"permissions"` // the caller's repository permissions
@@ -443,7 +444,7 @@ type repoJSON struct {
 	LastPublishedAt *time.Time `json:"last_published_at"`
 	CountsPending   bool       `json:"counts_pending,omitempty"`
 	// GET /api/repos: the downloads of the last stats.RecentDays days, as written by the last flush
-	// of the download counters (once a minute).
+	// of the download counters (once a minute), read for the repos of the page only.
 	Downloads   *int64 `json:"downloads,omitempty"`
 	Kind        string `json:"kind"`                   // hosted, proxy or group
 	MemberCount *int   `json:"member_count,omitempty"` // a group: how many members it has
@@ -497,49 +498,6 @@ func (a *API) toRepoJSON(r *repos.Repo, perms perm.Set) repoJSON {
 		out.LastPublishedAt = &t
 	}
 	return out
-}
-
-func (a *API) listRepos(w http.ResponseWriter, r *http.Request, c *route.Call) {
-	p := c.P
-	ctx := r.Context()
-	all, err := a.repos.List(ctx)
-	if err != nil {
-		route.Fail(w, r, err)
-		return
-	}
-	// One query reads the caller's grants on every repo; a repo without a permission is left out.
-	if ctx, err = a.auth.WithGrants(ctx, p); err != nil {
-		route.Fail(w, r, err)
-		return
-	}
-	// One read of the download counters of the window for every repo.
-	recent, err := a.h.Downloads.Recent(ctx)
-	if err != nil {
-		route.Fail(w, r, err)
-		return
-	}
-	out := []repoJSON{}
-	for _, repo := range all {
-		perms, err := a.auth.RepoPerms(ctx, p, repo)
-		if err != nil {
-			route.Fail(w, r, err)
-			return
-		}
-		if perms.Empty() {
-			continue
-		}
-		j := a.toRepoJSON(repo, perms)
-		n := recent[repo.ID]
-		j.Downloads = &n
-		if repo.Kind == repos.KindGroup {
-			if err := a.groupCounters(r.WithContext(ctx), p, repo, &j); err != nil {
-				route.Fail(w, r, err)
-				return
-			}
-		}
-		out = append(out, j)
-	}
-	httpx.WriteJSON(w, http.StatusOK, out)
 }
 
 func (a *API) createRepo(w http.ResponseWriter, r *http.Request, c *route.Call) {
@@ -775,7 +733,15 @@ func (a *API) search(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		httpx.WriteJSON(w, http.StatusOK, empty)
 		return
 	}
-	hits, next, err := a.assets.Search(ctx, q, ids, after, httpx.Limit(r))
+	// The first page and the counts come from one walk of the matches; a later page is one seek.
+	var hits []assets.SearchHit
+	var next int64
+	var counts []assets.SearchCount
+	if first {
+		hits, next, counts, err = a.assets.SearchFirst(ctx, q, ids, httpx.Limit(r))
+	} else {
+		hits, next, err = a.assets.Search(ctx, q, ids, after, httpx.Limit(r))
+	}
 	if err != nil {
 		route.Fail(w, r, err)
 		return
@@ -789,11 +755,6 @@ func (a *API) search(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		out.Next = route.Cursor(strconv.FormatInt(next, 10))
 	}
 	if first {
-		counts, err := a.assets.SearchCounts(ctx, q, ids)
-		if err != nil {
-			route.Fail(w, r, err)
-			return
-		}
 		repos := make([]searchRepoJSON, 0, len(counts))
 		for _, n := range counts {
 			repo, err := a.repos.ByID(ctx, n.RepoID)

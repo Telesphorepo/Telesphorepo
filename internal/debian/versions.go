@@ -1,6 +1,7 @@
 package debian
 
 import (
+	"bytes"
 	"context"
 	"path"
 	"regexp"
@@ -12,18 +13,16 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/debian/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
-	"pault.ag/go/debian/version"
 )
 
-// Versions and builds (format.Spec Versions and Builds) of a Debian package, read from deb_packages. An
-// artifact folder is pool/<component>/<prefix>/<package>/: the versions are those of the
-// package of that name in that component whose files lie in the folder. A Debian version
-// <base>~SNAPSHOT<sep><stamp> (sep one of . + ~ -, stamp 8 to 14 digits, yyyyMMdd[HHmmss]) is a
-// build of the snapshot version <base>~SNAPSHOT; any other version is a release with one build.
-// The files of a build are its .deb files, one for each architecture. One indexed read
-// (deb_packages_package) loads at most maxPackageRows rows of the package.
-
-const maxPackageRows = 20000
+// Versions and builds (format.Spec Versions and Builds) of a Debian package, read from
+// deb_packages through the order keys of deb_package_order (order.go). An artifact folder is
+// pool/<component>/<prefix>/<package>/: the versions are those of the package of that name in
+// that component whose files lie in the folder. A Debian version <base>~SNAPSHOT<sep><stamp> (sep
+// one of . + ~ -, stamp 8 to 14 digits, yyyyMMdd[HHmmss]) is a build of the snapshot version
+// <base>~SNAPSHOT; any other version is a release with one build. The files of a build are its
+// .deb files, one for each architecture. A page of versions seeks from one version to the next
+// and reads the files of each one's newest build; a page of builds reads the files of its builds.
 
 var snapshotRE = regexp.MustCompile(`^(.+~SNAPSHOT)[.+~-]([0-9]{8,14})$`)
 
@@ -46,82 +45,79 @@ func packageOf(dir string) (format.Artifact, string, string, bool) {
 	return format.Artifact{Path: strings.Join(segs, "/") + "/", Title: segs[3], Name: segs[3], Kind: "package"}, segs[1], segs[3], true
 }
 
-// debBuild is one Debian version of a package: its .deb files.
-type debBuild struct {
-	id    string // the Debian version, e.g. 3.0~SNAPSHOT.20261014211855
-	stamp string // "" for a release
-	dist  string // a distribution that holds it
-	files []format.BuildFile
-	at    time.Time
-	build int64 // the CI build record; 0 = none
+// pkgRef is a package folder of a repo: the rows that a page reads.
+type pkgRef struct {
+	repoID                     int64
+	folder, component, pkgName string
 }
 
-// debVersion is the builds of one version, newest first.
+// top is above every order key.
+var top = []byte{0xff}
+
+// debVersion is one version of a package with its newest build.
 type debVersion struct {
 	name   string
-	builds []*debBuild
+	key    []byte
+	builds int
+	newest string    // the Debian version of the newest build
+	stamp  string    // its stamp; "" for a release
+	dist   string    // a distribution that holds it
+	at     time.Time // the newest time of its files
+	build  int64     // its CI build record; 0 = none
 }
 
-// readPackage groups the .deb files of the package in artifact folder art into versions, newest
-// first.
-func (h *Handler) readPackage(ctx context.Context, repoID int64, art format.Artifact, component, pkg string) ([]*debVersion, error) {
-	rows, err := h.q.ListPackageFiles(ctx, dbq.ListPackageFilesParams{RepoID: repoID, Component: component, Package: pkg, Limit: maxPackageRows})
+// versionsPage returns up to limit versions of package r below the name key below, newest first.
+func (h *Handler) versionsPage(ctx context.Context, r pkgRef, below []byte, limit int) ([]*debVersion, error) {
+	rows, err := h.q.VersionsPage(ctx, dbq.VersionsPageParams{RepoID: r.repoID, Folder: r.folder, Component: r.component,
+		Package: r.pkgName, Below: below, Limit: int64(limit)})
 	if err != nil {
 		return nil, err
 	}
-	builds := map[string]*debBuild{}
-	seen := map[string]bool{} // a file in several distributions counts once
-	for _, r := range rows {
-		rest, ok := strings.CutPrefix(r.Filename, art.Path)
-		if !ok || strings.Contains(rest, "/") || seen[r.Filename] {
-			continue
-		}
-		seen[r.Filename] = true
-		b := builds[r.Version]
-		if b == nil {
-			_, stamp := splitSnapshot(r.Version)
-			b = &debBuild{id: r.Version, stamp: stamp, dist: r.Distribution}
-			builds[r.Version] = b
-		}
-		b.files = append(b.files, format.BuildFile{Name: rest, Path: r.Filename, Size: r.Size, SHA256: r.Sha256,
-			Classifier: r.Architecture, Extension: strings.TrimPrefix(path.Ext(rest), ".")})
-		if at := time.Unix(r.UpdatedAt, 0).UTC(); at.After(b.at) {
-			b.at = at
-		}
-		if r.BuildID.Valid && b.build == 0 {
-			b.build = r.BuildID.Int64
-		}
-	}
-	byName := map[string]*debVersion{}
+	byKey := map[string]*debVersion{}
 	var out []*debVersion
-	for _, b := range builds {
-		slices.SortFunc(b.files, func(x, y format.BuildFile) int { return strings.Compare(x.Classifier, y.Classifier) })
-		name, _ := splitSnapshot(b.id)
-		v := byName[name]
+	for _, row := range rows {
+		v := byKey[string(row.NameKey)]
 		if v == nil {
-			v = &debVersion{name: name}
-			byName[name] = v
+			name, stamp := splitSnapshot(row.Version)
+			v = &debVersion{name: name, key: row.NameKey, builds: int(row.Builds), newest: row.Version, stamp: stamp, dist: row.Distribution}
+			byKey[string(row.NameKey)] = v
 			out = append(out, v)
 		}
-		v.builds = append(v.builds, b)
+		if at := time.Unix(row.UpdatedAt, 0).UTC(); at.After(v.at) {
+			v.at = at
+		}
+		if row.BuildID.Valid && v.build == 0 {
+			v.build = row.BuildID.Int64
+		}
 	}
-	for _, v := range out {
-		slices.SortFunc(v.builds, func(x, y *debBuild) int { return -compareBuilds(x.id, y.id) })
-	}
-	slices.SortFunc(out, func(x, y *debVersion) int { return -compareVersions(x.name, y.name) })
+	slices.SortFunc(out, func(x, y *debVersion) int { return bytes.Compare(y.key, x.key) })
 	return out, nil
+}
+
+// versionOf returns version name of package r, or nil.
+func (h *Handler) versionOf(ctx context.Context, r pkgRef, name string) (*debVersion, error) {
+	k := keyOfName(name)
+	vs, err := h.versionsPage(ctx, r, append(slices.Clip(k), 0), 1)
+	if err != nil || len(vs) == 0 || !bytes.Equal(vs[0].key, k) {
+		return nil, err
+	}
+	return vs[0], nil
 }
 
 // summary is the format.Version of v.
 func (v *debVersion) summary(ctx context.Context, builds *ci.Loader) (*format.Version, error) {
-	newest := v.builds[0]
-	out := &format.Version{Version: v.name, Kind: format.VersionRelease, BuildsCount: len(v.builds), PublishedAt: newest.at}
-	if newest.stamp != "" {
-		out.Kind, out.LatestBuild = format.VersionSnapshot, newest.id
+	out := &format.Version{Version: v.name, Kind: format.VersionRelease, BuildsCount: v.builds, PublishedAt: v.at}
+	if v.stamp != "" {
+		out.Kind, out.LatestBuild = format.VersionSnapshot, v.newest
 	}
 	var err error
-	out.CI, err = builds.Get(ctx, newest.build)
+	out.CI, err = builds.Get(ctx, v.build)
 	return out, err
+}
+
+// refOf returns the package folder p of repo.
+func refOf(repo *repos.Repo, art format.Artifact, component, pkg string) pkgRef {
+	return pkgRef{repoID: repo.ID, folder: art.Path, component: component, pkgName: pkg}
 }
 
 // Versions lists the versions of a package folder of the pool.
@@ -130,16 +126,28 @@ func (h *Handler) Versions(ctx context.Context, _, from *repos.Repo, p, after st
 	if !ok {
 		return nil, nil, "", nil
 	}
-	versions, err := h.readPackage(ctx, from.ID, art, component, pkg)
-	if err != nil || len(versions) == 0 {
+	ref := refOf(from, art, component, pkg)
+	below := top
+	if after != "" {
+		below = keyOfName(after)
+	}
+	versions, err := h.versionsPage(ctx, ref, below, max(limit, 0)+1)
+	if err != nil {
 		return nil, nil, "", err
+	}
+	if len(versions) == 0 {
+		if after == "" {
+			return nil, nil, "", nil
+		}
+		has, err := h.q.PackageHasFiles(ctx, dbq.PackageHasFilesParams{RepoID: ref.repoID, Folder: ref.folder, Component: component, Package: pkg})
+		if err != nil || !has {
+			return nil, nil, "", err
+		}
+		return &art, nil, "", nil
 	}
 	prov := h.host.Builds.Loader()
 	var out []format.Version
 	for _, v := range versions {
-		if after != "" && compareVersions(v.name, after) >= 0 {
-			continue // on an earlier page
-		}
 		if len(out) == limit {
 			return &art, out, out[len(out)-1].Version, nil
 		}
@@ -159,57 +167,82 @@ func (h *Handler) Builds(ctx context.Context, _, from *repos.Repo, p, name, buil
 	if !ok {
 		return nil, nil, nil, "", nil
 	}
-	versions, err := h.readPackage(ctx, from.ID, art, component, pkg)
-	if err != nil {
+	ref := refOf(from, art, component, pkg)
+	v, err := h.versionOf(ctx, ref, name)
+	if err != nil || v == nil {
 		return nil, nil, nil, "", err
-	}
-	i := slices.IndexFunc(versions, func(v *debVersion) bool { return v.name == name })
-	if i < 0 {
-		return nil, nil, nil, "", nil
 	}
 	prov := h.host.Builds.Loader()
-	ver, err := versions[i].summary(ctx, prov)
+	ver, err := v.summary(ctx, prov)
 	if err != nil {
 		return nil, nil, nil, "", err
 	}
+	if limit < 1 {
+		return &art, ver, nil, "", nil
+	}
+	below := top
+	if after != "" {
+		below = buildKey(after)
+	}
+	var only []byte
+	if build != "" {
+		only = buildKey(build)
+		if b := append(slices.Clip(only), 0); bytes.Compare(b, below) < 0 {
+			below = b
+		}
+	}
 	var out []format.Build
-	for _, b := range versions[i].builds {
-		if build != "" && b.id != build || after != "" && compareBuilds(b.id, after) >= 0 {
-			continue
+	var key []byte            // the build key of the last build of out
+	var buildID int64         // its CI build record
+	seen := map[string]bool{} // its files: a file in several distributions counts once
+	finish := func() error {
+		if len(out) == 0 {
+			return nil
 		}
-		if len(out) == limit {
-			return &art, ver, out, out[len(out)-1].Build, nil
-		}
-		pv, err := prov.Get(ctx, b.build)
+		b := &out[len(out)-1]
+		slices.SortFunc(b.Files, func(x, y format.BuildFile) int { return strings.Compare(x.Classifier, y.Classifier) })
+		var err error
+		b.CI, err = prov.Get(ctx, buildID)
+		return err
+	}
+	for r, err := range h.q.StreamBuilds(ctx, dbq.StreamBuildsParams{RepoID: ref.repoID, Folder: ref.folder, Component: component,
+		Package: pkg, NameKey: v.key, Below: below}) {
 		if err != nil {
 			return nil, nil, nil, "", err
 		}
-		out = append(out, format.Build{Build: b.id, Files: slices.Clone(b.files), PublishedAt: b.at, CI: pv})
-	}
-	return &art, ver, out, "", nil
-}
-
-// compareBuilds orders two builds (Debian versions) of one version: by stamp, a stamp of 8
-// digits read as midnight; Debian version order breaks a tie.
-func compareBuilds(a, b string) int {
-	_, sa := splitSnapshot(a)
-	_, sb := splitSnapshot(b)
-	pad := func(s string) string { return s + strings.Repeat("0", 14-len(s)) }
-	if sa != "" && sb != "" {
-		if c := strings.Compare(pad(sa), pad(sb)); c != 0 {
-			return c
+		if !bytes.Equal(r.BuildKey, key) {
+			if only != nil && !bytes.Equal(r.BuildKey, only) {
+				break
+			}
+			if len(out) == limit {
+				if err := finish(); err != nil {
+					return nil, nil, nil, "", err
+				}
+				return &art, ver, out, out[len(out)-1].Build, nil
+			}
+			if err := finish(); err != nil {
+				return nil, nil, nil, "", err
+			}
+			out = append(out, format.Build{Build: r.Version})
+			key, buildID, seen = r.BuildKey, 0, map[string]bool{}
+		}
+		if seen[r.Filename] {
+			continue
+		}
+		seen[r.Filename] = true
+		b := &out[len(out)-1]
+		rest := strings.TrimPrefix(r.Filename, art.Path)
+		b.Files = append(b.Files, format.BuildFile{Name: rest, Path: r.Filename, Size: r.Size, SHA256: r.Sha256,
+			Classifier: r.Architecture, Extension: strings.TrimPrefix(path.Ext(rest), ".")})
+		if at := time.Unix(r.UpdatedAt, 0).UTC(); at.After(b.PublishedAt) {
+			b.PublishedAt = at
+		}
+		if r.BuildID.Valid && buildID == 0 {
+			buildID = r.BuildID.Int64
 		}
 	}
-	return compareVersions(a, b)
-}
-
-// compareVersions orders two Debian versions as dpkg --compare-versions does. A version that
-// does not parse sorts by its bytes.
-func compareVersions(a, b string) int {
-	va, errA := version.Parse(a)
-	vb, errB := version.Parse(b)
-	if errA != nil || errB != nil {
-		return strings.Compare(a, b)
+	if err := finish(); err != nil {
+		return nil, nil, nil, "", err
 	}
-	return version.Compare(va, vb)
+	return &art, ver, out, "", nil
 }

@@ -14,7 +14,7 @@
   import type { PageProps } from "$lib/router.svelte";
   import { href, navigate, router } from "$lib/router.svelte";
   import { api, type AuditEvent, type SessionInfo } from "$lib/api";
-  import { Keyset, Resource } from "$lib/load.svelte";
+  import { Keyset, RepoFormats, Resource } from "$lib/load.svelte";
   import { subsystems } from "$lib/permissions";
   import { navPlace, pages } from "../../modules";
   import { detailFacts } from "./activity/details";
@@ -83,13 +83,15 @@
   const to = $derived(when === "custom" ? (query.get("to") ?? "") : "");
   const filtered = $derived(action !== "" || repo !== "" || actor !== "" || when !== "");
 
-  const repos = new Resource(() => api.repos.list());
-  const formatOf = (name: string) => repos.data?.find((r) => r.name === name)?.format ?? "";
+  // The format icons of the repositories the events and the filter name, read for those names only.
+  const repoFormats = new RepoFormats();
+  const formatOf = (name: string) => repoFormats.format(name);
 
   const events = new Keyset((p) =>
     api.audit({ action: action || undefined, repo: repo || undefined, actor: actor || undefined, ...bounds(when, from, to), ...p }),
   );
   const sessions = new Keyset((p) => api.publish.log(p));
+  $effect(() => repoFormats.want([repo, ...events.items.map((e) => e.repo ?? "")]));
 
   // A filter change loads the first page again; the first run is the page's own load.
   let first = true;
@@ -216,7 +218,7 @@
         </Select.Content>
       </Select.Root>
     {/if}
-    <RepoPicker repos={repos.data ?? []} value={repo} onchange={(r) => setFilter({ repo: r })} />
+    <RepoPicker value={repo} format={formatOf(repo) || undefined} onchange={(r) => setFilter({ repo: r })} />
     <PersonPicker search={(q) => api.auditPeople(q)} value={actor} onchange={(a) => setFilter({ actor: a })} />
     <Select.Root type="single" value={when || "any"} onValueChange={pickWhen}>
       <Select.Trigger class="w-full sm:w-44" aria-label="When">

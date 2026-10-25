@@ -63,6 +63,10 @@ func Module() module.Module {
 				Migrations: db.Sub(migrationsFS, "migrations"),
 				Queries:    db.Sub(queriesFS, "queries"),
 				Extra:      dbq.Extra,
+				Allow: map[string]string{
+					"ListPackageComponents": "its SCAN steps read its own recursive CTE, one row per (distribution, component); every read of deb_packages is an index seek",
+					"VersionsPage":          "the scans are of its own CTEs (the names of one page, at most its limit, and that page); every table read is a seek of deb_package_order_page or a primary key",
+				},
 			})
 			x.Init(func(ctx context.Context, host *module.Host) error {
 				h.host = host

@@ -23,7 +23,8 @@
   import { auth } from "$lib/auth.svelte";
   import { href, navigate, repoPath, repoSettingsPath } from "$lib/router.svelte";
   import { api, ApiError, errorMessage, type NewRepo, type Repo, type RepoConfig, type RepoKind } from "$lib/api";
-  import { Resource } from "$lib/load.svelte";
+  import { Keyset, Resource, chain, type TableSource } from "$lib/load.svelte";
+  import SourceMore from "$lib/components/SourceMore.svelte";
   import { normalizeRemote, remoteError } from "$lib/remotes";
   import { repoField } from "../../modules";
   import type { RepoFieldState } from "../../modules/types";
@@ -59,8 +60,11 @@
   const maxDescription = 500;
 
   const formats = new Resource(() => api.formats.list());
-  // The repositories a group can read; loaded when the person chooses a group.
-  const repos = new Resource(() => api.repos.list(), { lazy: true });
+  // The repositories a group of the format can read: the hosted ones, then the proxies, each by
+  // name (GET /api/repos?format=&kind=); read when the person chooses a group, again for a new format.
+  let repos = $state.raw<TableSource<Repo> | null>(null);
+  let reposOf = "";
+  const byKind = (f: string, kind: RepoKind) => new Keyset((p) => api.repos.list({ format: f, kind }, p), 100);
 
   const kindChoices: { kind: RepoKind; label: string; description: string; icon: typeof PackageIcon }[] = [
     { kind: "hosted", label: "A repository", description: "You publish your own packages here.", icon: PackageIcon },
@@ -110,7 +114,10 @@
     }
   });
   $effect(() => {
-    if (kind === "group" && !repos.data && !repos.loading && !repos.error) repos.reload();
+    if (kind === "group" && formatName && reposOf !== formatName) {
+      reposOf = formatName;
+      repos = chain(byKind(formatName, "hosted"), byKind(formatName, "proxy"));
+    }
   });
 
   const format = $derived(kindFormats.find((f) => f.name === formatName));
@@ -123,14 +130,13 @@
   const lastSection = $derived(fieldDefs.length ? "field" : options ? "options" : "visibility");
 
   // The repositories a group of this format can read: hosted ones first, then proxies, each by name.
-  const rank = (r: Repo) => (r.kind === "proxy" ? 1 : 0);
-  const candidates = $derived(
-    (repos.data ?? [])
-      .filter((r) => r.format === formatName && (r.kind ?? "hosted") !== "group")
-      .sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name)),
+  const candidates = $derived(repos?.items ?? []);
+  // The kind of each chosen repository, for the read order.
+  let chosenKinds = $state<Record<string, RepoKind>>({});
+  // The members in read order: hosted repositories first, then proxies, each by name.
+  const members = $derived(
+    [...chosen].sort((a, b) => Number(chosenKinds[a] === "proxy") - Number(chosenKinds[b] === "proxy") || a.localeCompare(b)),
   );
-  // The members in read order: the order of the list, so hosted repositories come first.
-  const members = $derived(candidates.filter((r) => chosen.includes(r.name)).map((r) => r.name));
 
   const nameError = $derived(
     name && !nameRE.test(name) ? "Use lowercase letters, digits, dots, dashes and underscores, and start with a letter or a digit." : "",
@@ -155,8 +161,9 @@
     remoteFailed = false;
   }
 
-  function toggleMember(n: string, on: boolean) {
-    chosen = on ? [...chosen, n] : chosen.filter((x) => x !== n);
+  function toggleMember(r: Repo, on: boolean) {
+    if (on) chosenKinds = { ...chosenKinds, [r.name]: r.kind };
+    chosen = on ? [...chosen, r.name] : chosen.filter((x) => x !== r.name);
   }
 
   async function create(e: SubmitEvent) {
@@ -332,9 +339,9 @@
         </FormSection>
       {:else if kind === "group"}
         <FormSection title="Members" description="The group reads these repositories in this order. You can change the order in the group's settings.">
-          {#if repos.loading && !repos.data}
+          {#if !repos || (repos.loading && candidates.length === 0)}
             <Loading rows={3} />
-          {:else if repos.error && !repos.data}
+          {:else if repos.error && candidates.length === 0}
             <ErrorState error={repos.error} title="The repositories did not load" onRetry={repos.reload} />
           {:else if candidates.length}
             <div class="flex flex-col gap-1" role="group" aria-label="Members">
@@ -343,7 +350,7 @@
                 <OptionRow id="{id}-member-{r.name}" label={r.name} description={r.description || undefined}>
                   {#snippet control()}
                     <span class="flex items-center gap-3">
-                      <Checkbox id="{id}-member-{r.name}" checked={n > 0} onCheckedChange={(v) => toggleMember(r.name, v === true)} />
+                      <Checkbox id="{id}-member-{r.name}" checked={n > 0} onCheckedChange={(v) => toggleMember(r, v === true)} />
                       <span class="w-5 text-right text-label tabular-nums" aria-hidden="true">{n || ""}</span>
                       <RepoKindIcon kind={r.kind} iconClass="size-4" />
                     </span>
@@ -351,6 +358,7 @@
                 </OptionRow>
               {/each}
             </div>
+            <SourceMore source={repos} />
             {#if members.length > maxMembers}
               <p class="mt-4 text-meta text-destructive">A group reads at most {maxMembers} repositories. Remove {members.length - maxMembers}.</p>
             {/if}

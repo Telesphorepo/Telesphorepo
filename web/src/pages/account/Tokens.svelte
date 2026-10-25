@@ -13,7 +13,6 @@
   import { auth } from "$lib/auth.svelte";
   import { api, type Proof, type PublishSession, type Token } from "$lib/api";
   import { Keyset, Resource, listOf } from "$lib/load.svelte";
-  import * as Select from "$lib/components/ui/select";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
   import PageHeader from "$lib/components/PageHeader.svelte";
@@ -32,7 +31,7 @@
   import KeyRoundIcon from "@lucide/svelte/icons/key-round";
   import UploadIcon from "@lucide/svelte/icons/upload";
   import PlusIcon from "@lucide/svelte/icons/plus";
-  import FormatIcon from "$lib/components/FormatIcon.svelte";
+  import RepoPicker from "$lib/components/RepoPicker.svelte";
   import { tokenSource, tokenState } from "./words";
 
   let {}: PageProps = $props();
@@ -72,26 +71,19 @@
   }
 
   // --- publish tokens: choose the repository, then confirm with the second step ---
-  const repos = new Resource(() => api.repos.list());
   const sessions = new Keyset((p) => api.publish.sessions(p));
-
-  const writable = $derived(
-    (repos.data ?? [])
-      // Publish tokens are for hosted repositories: nobody publishes to a group or a proxy.
-      .filter((r) => r.kind === "hosted" && r.permissions?.includes("repo.publish"))
-      .sort((a, b) => a.name.localeCompare(b.name)),
-  );
+  // From the grants: the dialog finds the repositories (hosted ones: nobody publishes to a group or a proxy).
+  const canPublish = $derived(auth.canSomeRepo("repo.publish"));
 
   let chooseOpen = $state(false);
   let factorOpen = $state(false);
   let chosen = $state("");
-  const chosenFormat = $derived(writable.find((r) => r.name === chosen)?.format);
   let created = $state<PublishSession | null>(null);
   let ended = $state(false);
   let endOpen = $state(false);
 
   function startPublish() {
-    chosen = writable[0]?.name ?? "";
+    chosen = "";
     chooseOpen = true;
   }
 
@@ -136,7 +128,7 @@
   }
 
   const until = (at: string) => new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  const noRepo = $derived(!!repos.data && writable.length === 0);
+  const noRepo = $derived(!canPublish);
 </script>
 
 <PageHeader title="Tokens" />
@@ -187,7 +179,7 @@
 
 <Section title="Publish tokens" description="A script publishes to one repository for a short time with a publish token.">
   {#snippet actions()}
-    {#if !sso && sessions.items.length && writable.length}<Button variant="outline" size="sm" onclick={startPublish}><PlusIcon />New publish token</Button>{/if}
+    {#if !sso && sessions.items.length && canPublish}<Button variant="outline" size="sm" onclick={startPublish}><PlusIcon />New publish token</Button>{/if}
   {/snippet}
   {#if sso}
     <CompactEmpty
@@ -251,7 +243,7 @@
             ? "You cannot publish to a repository yet. Ask a person who manages its access for the Publish permission."
             : "None yet. The Telesphorepo CLI and this site create one for each publish."}
         >
-          {#if writable.length}<Button variant="outline" size="sm" onclick={startPublish}><PlusIcon />New publish token</Button>{/if}
+          {#if canPublish}<Button variant="outline" size="sm" onclick={startPublish}><PlusIcon />New publish token</Button>{/if}
         </CompactEmpty>
       {/snippet}
     </ItemList>
@@ -276,8 +268,6 @@
   onConfirm={revoke}
 />
 
-{#snippet chosenIcon()}<FormatIcon format={chosenFormat ?? ""} />{/snippet}
-
 <ShortFormDialog
   bind:open={chooseOpen}
   title="New publish token"
@@ -287,18 +277,7 @@
   onSubmit={choose}
 >
   <FormField label="Repository" for="token-repo">
-    <Select.Root type="single" bind:value={chosen}>
-      <Select.Trigger id="token-repo" class="w-full" icon={chosenFormat ? chosenIcon : undefined}>
-        <span class="truncate">{chosen || "Choose a repository"}</span>
-      </Select.Trigger>
-      <Select.Content>
-        {#each writable as r (r.name)}
-          <Select.Item value={r.name} label={r.name}>
-            {#snippet icon()}<FormatIcon format={r.format} />{/snippet}
-          </Select.Item>
-        {/each}
-      </Select.Content>
-    </Select.Root>
+    <RepoPicker id="token-repo" class="sm:w-full" value={chosen} all={false} filter={{ perm: ["repo.publish"], kind: "hosted" }} onchange={(r) => (chosen = r)} />
   </FormField>
 </ShortFormDialog>
 

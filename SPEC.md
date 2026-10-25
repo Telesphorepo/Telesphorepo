@@ -70,7 +70,7 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/proxy` | Fetches the files of proxy repos from their remotes (the `assets.Fetcher` of the read path), stores them through `Commit` with source `proxy`, answers a remote's 401 challenge through the format's `RemoteAuth`, and remembers remote 404s; `proxy.Answer` is the answer of the registry token protocol (also for the Nexus client), `proxy.Send` a request to a remote as a fetch sends it (e.g. a remote tags list) |
 | `internal/format` | The format contract: `Spec` (every optional capability is a field that is nil when the format lacks it), the `Registry` (`All`, `Get`, `Hooks`, `RebuildRun`, `OnRepoChange`, `ValidateConfig`, `SupportsKind`, `Importer`), `Kit` and `Standard` (the default routes), `Importer.Run` (the shared import of one source file), and the rendered documents: `WriteDocument` (a `Document`, a body with its strong `ETag`, answered with 304 on `If-None-Match` and `Vary`; `NewDocument` gives an uncached body the SHA-256 of the body) and `DocumentCache` (an LRU of rendered documents, bounded in entries, in bytes and per entry, keyed by `DocumentKey` of what the body depends on: a revision of the rows or the SHA-256s of the sources, and the base URL). A cached document's ETag is the SHA-256 of its key, so `DocumentCache.Serve` answers a matching `If-None-Match` with 304 before it looks up or builds the body; absolute URLs in a document start at `route.API.BaseURL` |
 | `internal/version` | The version schemes of the package formats, with no outside module: `semver.go` (SemVer 2.0 for npm and Cargo; `CleanSemVer` is npm's loose clean of a package.json version), `pep440.go` (PEP 440: normal form and order), `nuget.go` (NuGet: normal form, order, `IsSemVer2`). Each version has a `SortKey`, a string whose byte order is the scheme's order, for the `sort_key` columns that keyset paging reads |
-| `internal/maven` | Module and format `maven`: the standard routes, release immutability (`Admit`), the content types, the merge of `maven-metadata.xml` in a group, the metadata after a delete (`AfterRemove`), web UI uploads with checksums and metadata |
+| `internal/maven` | Module and format `maven`: the standard routes, release immutability (`Admit`), the content types, the version and build rows (`OnCommitted`, `OnRemoved`), the merge of `maven-metadata.xml` in a group, the metadata after a delete (`AfterRemove`), web UI uploads with checksums and metadata. Owns its tables and queries (`queries/`, `dbq/`) |
 | `internal/debian` | Module and format `debian`: `.deb` upload/parse through `Commit`, the package rows (`OnCommitted`, `OnRemoved`), the index rebuild (`Rebuild`), `/debian/{repo}/key.asc`, the plan of a Nexus apt import (distribution and signing key). Owns its tables, queries (`queries/`, `dbq/`) and architecture config; binds a signing key per repo (`SigningKey`) |
 | `internal/raw` | Module and format `raw`: plain files at `/raw/{repo}/{path...}` (the standard routes) with an `overwrite` policy (`Admit`) |
 | `internal/cargo` | Module and format `cargo`: the Cargo sparse index (`index/`), the `.crate` files (`crates/`) and the publish and yank API (`api/v1/`) for hosted, proxy and group repos; owns its tables and queries. See **Cargo registry** |
@@ -475,7 +475,8 @@ Kernel tables (`internal/db/migrations`):
 | `users` | PK `id`, UNIQUE `username`, UNIQUE `users_oidc (oidc_issuer, oidc_subject)` where `oidc_subject` is set | argon2id PHC hash (`!` for SSO users, never verifies), `disabled`, `password_changed_at`, `kind` (`local`/`oidc`), `email` |
 | `api_tokens` | UNIQUE `public_id`, UNIQUE `(user_id, name)` | `secret_hash` = SHA-256(secret); optional `expires_at`; `last_used_at` written at most once per minute. These are **read tokens**: they never publish |
 | `sessions` | PK `id_hash` (WITHOUT ROWID), idx `expires_at`, idx `user_id` | `id_hash` = SHA-256(cookie value) |
-| `repos` | UNIQUE `name`, partial idx `repos_anonymous (id) WHERE anonymous_read = 1` | `format` is any registered format name (no CHECK); `kind` is `hosted` (default), `proxy` or `group`; `description` (at most 500 characters); `anonymous_read`; `config` JSON; the counters `file_count`, `total_size` and `last_published_at` (unix time, 0 for never). The values of module fields (`repos.Field`, e.g. `signing_key`) are rows of their module |
+| `repos` | UNIQUE `name`, idx `(format, name)`, `(kind, name)`, `(last_published_at, id)`, `(total_size, id)`; partial idx `WHERE anonymous_read = 1`: `repos_anonymous (id)`, `(name)`, `(format, name)`, `(last_published_at, id)` | `format` is any registered format name (no CHECK); `kind` is `hosted` (default), `proxy` or `group`; `description` (at most 500 characters); `anonymous_read`; `config` JSON; the counters `file_count`, `total_size` and `last_published_at` (unix time, 0 for never). The values of module fields (`repos.Field`, e.g. `signing_key`) are rows of their module. Each list of `GET /api/repos` reads one of the indexes (see **Repository lists**) |
+| `repo_totals` | PK `id` (always 1) | One row: `repos` (how many), `files` and `bytes` (the repo counters summed; a group's are 0) and `public` (the public repos that are not groups). Triggers on `repos` keep it in the transaction of every insert, delete and change of `file_count`, `total_size` or `anonymous_read`, so the counter updates of the assets triggers move it too. `GET /api/overview` reads it |
 | `repo_redirects` | PK `name` (WITHOUT ROWID), idx `repo_redirects_repo (repo_id, name)`; `repo_id` cascades | A name that answers for the repo `repo_id` (see **Repository redirects**): `created_at`, `last_used_at` (unix time of the last request through it, 0 for never; written with the download counters). A name is a repo or a redirect, never both |
 | `user_permissions` | PK `(user_id, perm)` (WITHOUT ROWID), idx `user_permissions_perm (perm, user_id)` | The server permissions of a person, as permission IDs (e.g. `people.manage`). No CHECK: every write checks the IDs against the permission registry, and a read skips an ID that no module registers. See **Permissions** |
 | `repo_permissions` | PK `(repo_id, user_id, perm)` (WITHOUT ROWID), idx `(user_id, perm)` | The repository permissions of a person on a repo, as permission IDs (e.g. `repo.publish`). No CHECK, as above. See **Permissions** |
@@ -486,7 +487,9 @@ Kernel tables (`internal/db/migrations`):
 | `assets` | UNIQUE `(repo_id, path)`, idx `uploaded_by`, idx `assets_blob (blob_id, repo_id)`, partial idx `assets_build (build_id) WHERE build_id IS NOT NULL`, partial idx `assets_unit (repo_id, unit) WHERE unit <> ''`, partial idx `assets_unit_unset (repo_id) WHERE unit IS NULL` | Every stored file: a path that points to a blob (`blob_id`; `size`, `sha256`, `md5` and `sha1` are the blob's, copied, so a download reads no other row); `content_type` from the format's `Describe`; `kind` is `artifact`, `metadata` or `index`; `build_id` is the CI build record that wrote the file (SET NULL). Only the byte pipeline writes rows; triggers keep `blobs.refs` on every insert, delete and change of `blob_id`. A cached file of a proxy has `checked_at` (when the remote last confirmed it) and `remote_etag`; a hosted file keeps 0 and `''`. Triggers keep the repo counters in the transaction of each write: an insert adds 1 and its size, a replace adds the size change, a delete subtracts. Every asset row counts (artifacts, metadata, checksums and Debian index files). `last_published_at` is the newest `updated_at` of an insert or replace that is not an `index` row; a delete never lowers it. `unit` is the part of the repo that a group serves from one member (`format.Spec.GroupUnit`, set on insert): the package of a file of npm, PyPI, Cargo or NuGet that a group takes from the member that owns the name, `''` for a file that a group serves path by path; NULL until the job `core.group-counts` sets it (a row of the seed command) |
 | `group_counts` | UNIQUE `(group_id, members)` | The counters of a group for one set of members that a reader reads: `members` is their ids in read order, comma-separated; `file_count`, `total_size`, `last_published_at`. See **Group counters** |
 | `group_count_members` | PK `(count_id, position)` (WITHOUT ROWID), idx `(member_id, count_id)` | The members of a row of `group_counts` in read order; both ids cascade |
+| `group_count_pending` | PK `count_id` | A row of `group_counts` that the job is still counting (cascades); a reader never reads such a row. See **Group counters** |
 | `assets_search` | FTS5 trigram on `path`, contentless with deletes | The rowid is `repo_id << 40 \| id`, so the matches of one repo sit together in rowid order and a search page is one seek (see `GET /api/search`). Kept in sync by triggers; `index` rows are not indexed |
+| `assets_segments` | FTS5 unicode61 on `path` (every ASCII punctuation mark but `/` and the quotes is part of a segment), contentless with deletes | The segments of each path (its components between the slashes), keyed like `assets_search`; a search with a rare whole segment reads it (see `GET /api/search`). Kept in sync by triggers; `index` rows are not indexed |
 | `repo_ops` | PK `id`, UNIQUE `repo_id` (cascades), idx `started_by`, partial idx `repo_ops_running (type) WHERE state = 'running'` | At most one operation per repo; an ended operation's row is deleted. `type` (a registered type: `delete`, `mirror`), `owner` (the module), `ref` (the owner's reference, e.g. the Nexus source ID), `state` `running`/`held`/`failed`, `done`, `total`, `error`, `started_by`, `started_at`, `updated_at` |
 | `upload_sessions` | PK `id` (WITHOUT ROWID), idx `repo_id`, `user_id`, `expires_at` | A resumable upload: `id` (32 lowercase hex), `repo_id` and `user_id` cascade, `publish_session_id` (the session that started it; no foreign key: the table belongs to the publish module), `received`, `created_at`, `updated_at`, `expires_at`. The bytes are in `$TR_DATA_DIR/tmp/uploads/<id>` |
 | `rebuilds` | PK `(repo_id, grp, unit)` (WITHOUT ROWID); `repo_id` cascades | The durable rebuild queue: a unit of a group of a repo that its format builds again (Debian: `grp` is the distribution, `unit` is `component/arch`). `marked_at` in unix ns |
@@ -495,7 +498,11 @@ Kernel tables (`internal/db/migrations`):
 | `user_passkeys` | PK `id`, UNIQUE `credential_id`, idx `user_id` | `credential` is the JSON of the `webauthn.Credential` (the public key, the sign count, the flags, the transports, the AAGUID); `credential_id` is its lookup key; `name`, `created_at`, `last_used_at` |
 | `user_recovery_codes` | PK `(user_id, code_hash)` (WITHOUT ROWID) | `code_hash` is argon2id PHC; `used_at` is set when the code is used |
 | `auth_challenges` | PK `id_hash` (WITHOUT ROWID), idx `expires_at`, `user_id` | Short-lived single-use state: `kind` is `login`, `totp_setup`, `webauthn_register`, `webauthn_assert` `device_grant` (an SSO grant: `user_id` set, `data` is the user code of a device approval or `setup:<repo>` for a setup code, 5 min) or `setup_code` (a setup code: `id_hash` is SHA-256 of `trsu_<32 random bytes, base64url>`, `user_id` the person who made it, `data` the repo id, 10 min; the first use deletes it); `data` holds the payload. A new challenge deletes up to 100 expired ones |
-| `download_stats` | PK `(repo_id, day)` (WITHOUT ROWID), idx `day` | `day` is the Unix time of 00:00 UTC; `downloads`, `bytes`; `repo_id` CASCADE. See **Download statistics** | idx `(repo_id, id)`, idx `(repo_id, action, id)`, idx `(action, id)`, idx `actor_user_id` | `at` unix time; `action` is a registered action ID; `actor` is a username, a CI subject, `cli`, the module ID of a job, `anonymous`, or the attempted username of a failed sign-in; `actor_user_id` and `repo_id` are SET NULL; `target`; `detail` is JSON and never holds a secret value; `ip` is the client address. This table is the only place that stores or shows an IP address. See **Audit log** |
+| `download_stats` | PK `(repo_id, day)` (WITHOUT ROWID), idx `day` | `day` is the Unix time of 00:00 UTC; `downloads`, `bytes`; `repo_id` CASCADE. See **Download statistics** |
+| `audit_events` | idx `(repo_id, id)`, idx `(repo_id, action, id)`, idx `(action, id)`, idx `actor_user_id` | `at` unix time; `action` is a registered action ID; `actor` is a username, a CI subject, `cli`, the module ID of a job, `anonymous`, or the attempted username of a failed sign-in; `actor_user_id` and `repo_id` are SET NULL; `target`; `detail` is JSON and never holds a secret value; `ip` is the client address. This table is the only place that stores or shows an IP address. See **Audit log** |
+| `download_window_state` | PK `id` (always 1) | `first_day`: the first UTC day of the download window (the last 30 days, today included). See **Download statistics** |
+| `download_window_days` | PK `day` | The downloads and bytes of each day of the window, kept by the triggers of `download_stats` |
+| `download_window_repos` | PK `repo_id`, idx `download_window_repos_top (downloads DESC, bytes DESC, repo_id)` | The downloads and bytes of each repo in the window, kept by the triggers of `download_stats`; `repo_id` CASCADE |
 
 Tables of the `storage` component (`internal/move/migrations`):
 
@@ -557,11 +564,22 @@ Tables of the `nexus` component (`internal/nexus/migrations`):
 | `nexus_merges` | PK `id`, idx `nexus_merges_target (target_repo_id, id)`, idx `sync_id`, idx `started_by` | One merge of a source repo into a target (see **Nexus sources**, Gradual move): `source_repo_id` (no foreign key: the merge deletes it), `source_name` and `target_name` at the start, `keep` (`target` or `source`), `otherwise` (the choice of a conflict that no choice names), `state` (`running`, `failed`, `done`, `stopped`), `step`, `sync_id` (its final sync), `cursor` (the last source path copied), the counters `files`, `done`, `copied`, `skipped`, `rebuilt`, `kept`, `taken`, `error`, `started_by`, `started_at`, `finished_at`. Cascades with the target |
 | `nexus_merge_choices` | PK `(merge_id, path)` (WITHOUT ROWID) | The choice of one listed conflict of a merge: `take` 1 deletes the target's file and takes the source's, 0 keeps the target's |
 
+Tables of the `maven` component (`internal/maven/migrations`). Every `repo_id` cascades. Hosted
+and proxy repos have rows (a proxy lists the versions it has cached); the hooks write them in the
+transaction of the asset change (see **Versions and builds**):
+
+| Table | Key / indexes | Notes |
+|---|---|---|
+| `maven_versions` | PK `(repo_id, folder, sort_key)` (WITHOUT ROWID), idx `maven_versions_latest (repo_id, folder, snapshot, sort_key)` | One row per version folder with a build: `folder` the artifact folder, `sort_key` the version's key (byte order is Maven order), `version`, `snapshot` (1 for a `-SNAPSHOT`), `builds` (its rows in `maven_builds`); the row goes with its last build |
+| `maven_builds` | PK `(repo_id, folder, sort_key)` (WITHOUT ROWID) | One row per build of a version folder: `folder` the version folder, `sort_key` the build's key (byte order is build order), `build` the id (the version, `<yyyyMMdd.HHmmss>-<n>` or `SNAPSHOT`); the row goes with its last file |
+| `maven_index_pending` | PK `one` | One row while the files that the Maven repos held before these tables are not indexed yet; the module's start indexes them and deletes it |
+
 Tables of the `debian` component (`internal/debian/migrations`):
 
 | Table | Key / indexes | Notes |
 |---|---|---|
-| `deb_packages` | UNIQUE `(repo_id, distribution, component, architecture, package, version)`, idx `asset_id`, idx `deb_packages_sha256 (repo_id, distribution, component, sha256)`, idx `deb_packages_package (repo_id, component, package)` | Also the streaming index for `Packages`. The SHA-256 index finds a package an import already holds. The package index reads the versions and builds of a package. `asset_id` cascades with the pool file |
+| `deb_packages` | UNIQUE `(repo_id, distribution, component, architecture, package, version)`, idx `asset_id`, idx `deb_packages_sha256 (repo_id, distribution, component, sha256)` | Also the streaming index for `Packages`. The SHA-256 index finds a package an import already holds. `asset_id` cascades with the pool file |
+| `deb_package_order` | PK `package_id` (cascades with its `deb_packages` row), idx `deb_package_order_page (repo_id, folder, component, package, name_key, build_key)` | One row per `deb_packages` row, written with it: `folder` (of the file, e.g. `pool/main/h/hello/`) and two byte keys whose byte order is the order of the Versions and Builds pages (`internal/debian/order.go`): `name_key` the version the row is a build of in `dpkg --compare-versions` order, `build_key` the build by stamp, then in dpkg order. The SQL functions `deb_name_key` and `deb_build_key` compute them in a migration |
 | `deb_index_files` | PK `(repo_id, distribution, path)` (WITHOUT ROWID) | Sizes and hashes; `Release` is built from these rows |
 
 Tables of the `npm` component (`internal/npm/migrations`). Every `repo_id` cascades. Rows exist for
@@ -577,17 +595,19 @@ Tables of the `nuget` component (`internal/nuget/migrations`):
 
 | Table | Key / indexes | Notes |
 |---|---|---|
-| `nuget_versions` | UNIQUE `(repo_id, lower_id, sort_key)`, idx `nuget_versions_asset (asset_id)` | One row per package version of a hosted repo: `package_id` as the package writes it, `version` (normalised, with metadata), `normalized` (the identity), `sort_key` (`version.NuGet.SortKey`), `semver2`, `prerelease`, `listed`, `meta` (JSON of the `.nuspec` fields), `nupkg_path`, `published_at`. Written in the commit of the `.nupkg`, deleted in its remove; `asset_id` cascades with the `.nupkg`. The UNIQUE index reads a package's versions in order |
+| `nuget_versions` | UNIQUE `(repo_id, lower_id, sort_key)`, idx `nuget_versions_asset (asset_id)`, partial idx `nuget_versions_releases (repo_id, lower_id, sort_key) WHERE listed = 1 AND prerelease = 0` | One row per package version of a hosted repo: `package_id` as the package writes it, `version` (normalised, with metadata), `normalized` (the identity), `sort_key` (`version.NuGet.SortKey`), `semver2`, `prerelease`, `listed`, `meta` (JSON of the `.nuspec` fields), `nupkg_path`, `published_at`. Written in the commit of the `.nupkg`, deleted in its remove; `asset_id` cascades with the `.nupkg`. The UNIQUE index reads a package's versions in order; the partial index its listed releases |
 | `nuget_packages` | PK `id`, UNIQUE `(repo_id, lower_id)` | One row per package of a hosted repo with a version: `lower_id` and `rev`, the revision of the package's documents: `max(rev + 1, unix ns)` on each push, removal, unlist and relist, so a package removed and pushed again never reuses one. The row goes with the last version. The UNIQUE index pages the package ids of the search |
-| `nuget_packages_fts` | FTS5 trigram on `lower_id` | Kept in sync by triggers; the substring search of package ids |
+| `nuget_package_latest` | PK `package` → `nuget_packages(id)` ON DELETE CASCADE | The `sort_key` of the newest listed version of the package per search variant, NULL when it has none: `release` (no prerelease, no SemVer 2.0), `release2` (no prerelease), `pre` (no SemVer 2.0), `pre2` (any). Written with each move of the package's `rev` |
+| `nuget_packages_search` | FTS5 trigram on `lower_id`, contentless with deletes, rowid `repo_id << 40 \| id` | Kept in sync by triggers on `nuget_packages`; the substring search of package ids. A repo's packages are one rowid range |
 
-Tables of the `pypi` component (`internal/pypi/migrations`). Only hosted repos have rows; the
-hooks write them in the transaction of the asset change (see **PyPI**):
+Tables of the `pypi` component (`internal/pypi/migrations`). Only hosted repos have project and
+file rows; the hooks write the rows in the transaction of the asset change (see **PyPI**):
 
 | Table | Key / indexes | Notes |
 |---|---|---|
 | `pypi_projects` | PK `(repo_id, project)` (WITHOUT ROWID) | `project` is the normalised name, `display_name` the `Name` of the newest upload's metadata, `rev` the revision of the project page (`max(rev + 1, unix ns)` on each stored or removed file and removed `.metadata`); the row goes with the project's last file |
 | `pypi_files` | PK `id`, UNIQUE `(repo_id, filename)`, idx `pypi_files_project (repo_id, project, sort_key)`, idx `asset_id` | One row per wheel or sdist: `version` (PEP 440 normal form), `sort_key` (`version.PEP440.SortKey`), `path`, `sha256`, `size`, `requires_python`, `metadata_sha256` (`''` without a `.metadata`), `uploaded_at`. `asset_id` cascades with the file |
+| `pypi_index_revs` | PK `repo_id` (cascades) | `rev`, the revision of the project list of a hosted repo or a proxy (`max(rev + 1, unix ns)` when a project comes, goes or changes its display name, or a proxy caches its first page of a project or removes one); a repo without a row is at 0 |
 
 Tables of the `docker` component (`internal/docker/migrations`). Every column `repo_id` cascades;
 digests are the hex of a SHA-256. Only the hooks of the format write them, in the transaction of
@@ -918,7 +938,7 @@ transaction.
 | `GET /api/auth/oidc/login` | none | 404 when SSO is off, 503 when discovery fails. Stores state/nonce/PKCE verifier in memory (10 min, single use, keyed by SHA-256(state)), sets `tr_oidc` (HttpOnly, SameSite=Lax, Path `/api/auth/oidc`, 600 s), 302 to the IdP |
 | `GET /api/auth/oidc/device?code=` | UI session of an SSO account | 404 when SSO is off. Starts a new sign-in that approves the device of `code` (see **Publishing**). It stores the state like `login`, plus the user id and the user code, and sends `prompt=login` and `max_age=0`. 302 `/#/device?code=` without an error when there is no UI session or the code is unknown, expired or used (the page says why), and with `error=not_sso` for a local account or `sso_failed` when discovery fails |
 | `GET /api/auth/oidc/callback` | none | 400 for missing/mismatched/unknown/reused/expired state, state from before an issuer or client change, or missing `code`; 503 on discovery failure. Verifies the ID token (signature, issuer, audience, expiry, nonce). Success: upsert user, set its server permissions when `oidc.permission_claim` is set, session with `oidc.session_ttl`, 302 `/`. Failure: 302 `/#/login?error=` `username_conflict` \| `invalid_username` \| `account_disabled` \| `sso_failed`. For a sign-in that `device` started, it starts no session and checks the same token, then that the token's issuer and `sub` belong to the account that started it, and that `auth_time` is present and at most 5 minutes old. Success: 302 `/#/device?code=<code>&grant=<grant>`. Failure: 302 `/#/device?code=<code>&error=` `wrong_account` \| `no_auth_time` \| `stale_sign_in` (the provider ignored `prompt=login`) \| `account_disabled` \| `sso_failed` |
-| `GET /api/me` | password, read token, UI session (setup-only too) | The session view, the same shape as `session` of a finished sign-in: `{id, username, kind, email, disabled, created_at, permissions, permissions_managed, all_repos, repo_permissions, second_factor_required}`. User JSON elsewhere is `{id, username, permissions, permissions_managed, disabled, kind, email, created_at}`: `permissions` lists the server permissions, `kind` is `local`/`oidc`, `email` is `""` when unset. `repo_permissions: {repo: [perms]}` is always present: every repo where the person has a grant, `repo.download` included (`{}` for none, and for a holder of `repositories.all`, whose `all_repos` is true). `second_factor_required` is true only for a setup-only UI session. `permissions_managed` is true for an SSO account while `oidc.permission_claim` is set: single sign-on sets its server permissions at each sign-in (see **Single sign-on**) |
+| `GET /api/me` | password, read token, UI session (setup-only too) | The session view, the same shape as `session` of a finished sign-in: `{id, username, kind, email, disabled, created_at, permissions, permissions_managed, all_repos, repo_permissions, second_factor_required}`. User JSON elsewhere is `{id, username, permissions, permissions_managed, disabled, kind, email, created_at}`: `permissions` lists the server permissions, `kind` is `local`/`oidc`, `email` is `""` when unset. `repo_permissions: {repo: [perms]}` is always present (one query of the person's grants joined to `repos`): every repo where the person has a grant, `repo.download` included (`{}` for none, and for a holder of `repositories.all`, whose `all_repos` is true). `second_factor_required` is true only for a setup-only UI session. `permissions_managed` is true for an SSO account while `oidc.permission_claim` is set: single sign-on sets its server permissions at each sign-in (see **Single sign-on**) |
 | `GET /api/tokens` · `POST /api/tokens`, `DELETE /api/tokens/{id}` | any credential · UI session | **Read tokens.** The token is shown once. A token cannot mint tokens. POST is 403 for SSO users |
 | `GET/POST /api/users`, `GET/PATCH /api/users/{username}` | `people.manage` (a UI session may change its own password) | The user list is paginated. `GET /api/users/{username}` returns one account (User JSON), 404 when no account has the name. POST takes `{username, password, permissions}`; the caller gives only server permissions they hold (403). PATCH takes `{password}`; the caller changes the password of another person only when they hold every permission of that person (403) |
 | `GET /api/administrators` | `people.manage` | `{usernames: [...]}`: the enabled people who hold every server permission, sorted. The UI keeps the only one from losing the role or being disabled |
@@ -931,7 +951,8 @@ transaction.
 | `GET /identity/logo` | none | The logo: its media type (`image/png`, `image/jpeg` or `image/webp`), the ETag of its SHA-256, `Cache-Control: public, no-cache`, `X-Content-Type-Options: nosniff` and a sandbox CSP; 304 for a matching `If-None-Match`; 404 without a logo |
 | `PUT /api/identity/logo` · `DELETE /api/identity/logo` | `settings.general` | PUT takes the image file as the body and saves it as `server_logo`; the type comes from the bytes, never from a header or a name (an SVG is 400), a body over 256 KiB is 413, an image over 512 px on its long side is 400 with `fields`. DELETE removes it. Each saves like `PATCH /api/settings` (one `settings.update` event; 409 when `TR_SERVER_LOGO` sets it) and answers the identity |
 | `GET /api/formats` | none | The UI descriptor of every format, in module order (see **Format UI descriptors**): `[{name, title, description, icon?, kind_icons?, kinds, config: {default, fields}, repo_fields, repo_tabs, upload, delete_notes, file_details, browse: {versions, artifact_snippets}, remote_presets, proxy_note?, public_key?, labels: {artifact_kinds, artifact_name, tools, install_heading?, build_files}, import_sources, tools: [{id, label, setup, project?}], setup}]` |
-| `GET /api/repos`, `GET /api/repos/{name}` · `POST /api/repos` · `PATCH /api/repos/{name}` | any/anon · `repositories.all` · `repo.settings` | The list shows the repos where the caller holds a permission, and the public ones. Repo JSON has `permissions`, the caller's repository permissions on the repo. Repo JSON has `file_count`, `total_size` and `last_published_at` (null before the first publish), read from the repo row (see `assets` in **Data model**); a group's counters count each file it serves to the caller once (see **Group counters**), with `counts_pending: true` and 0 and null while the server has not counted the caller's set of members yet. The list's Repo JSON has `downloads`: the downloads of the repo in the last 30 days, today included (UTC days, the window of the Overview's Downloads card), from one read of `download_stats` for every repo (`stats.Counter.Recent`); it lags the counters in memory by up to a minute (see **Download statistics**). `format` must be a registered name. `description` (POST and PATCH) has at most 500 characters and no control characters except newline and tab. `config` must be a JSON object that the format validates (400 otherwise; an unknown format lists the available ones). An empty config becomes the format default. Repo JSON has `operation`: `{id, type, owner, state, done, total, message, error}` of the repo's active operation, or null (see **Repo operations**). Repo JSON has `fields`: the values of the module fields of the repo (e.g. `{signing_key: "default"}`; `{}` for a format without fields). POST and PATCH take `fields` too; POST gives a field without a value its default, and a field that does not apply to the format and kind is 400. `PATCH /api/repos/{name}` takes `{description?, config?, proxy?, fields?}` and is one repo update (`repos.Service.Update`): the whole new state is checked first, then saved in one transaction with the field values, the format's `OnRepoChange` and one `repo.update` event with the changed fields. Repo JSON has `kind`, and a group has `member_count`. POST takes `kind` (`hosted` default, `proxy`, `group`), `members: [names]` for a group, `proxy: {remote_url, username?, password?, metadata_ttl?, not_found_ttl?}` (seconds) for a proxy, and `force`. A new proxy's remote is checked first (see **Group and proxy repositories**): a 502 problem document when it does not answer, unless `force: true`. PATCH takes `proxy` with the same fields for a proxy; `username` and `password` together replace the credentials, `username: ""` removes them, and the password is never returned. `GET /api/repos/{name}` adds, for a group, `members: [{name, format, kind, public, permissions}]` (the members the caller can read, in order, each with the caller's repository permissions on it); for a hosted or proxy repo, `groups: [names]` (the groups it is in that the caller can read); for a proxy and a holder of `repo.settings`, `proxy: {remote_url, has_credentials, metadata_ttl, not_found_ttl, last_ok_at\|null, last_error, last_error_at\|null}` |
+| `GET /api/repos`, `GET /api/repos/{name}` · `POST /api/repos` · `PATCH /api/repos/{name}` | any/anon · `repositories.all` · `repo.settings` | The list is `{items: [Repo], next}`, a keyset page by name (`?after=<name>&limit=`, 50 by default, at most 200) of the repos where the caller holds a permission and the public ones (see **Repository lists**). `?q=` keeps the names that start with it, `?format=` one format, `?kind=` one kind (400 for another word), `?perm=a,b` the repos where the caller holds one of those repository permissions (400 for an unknown one). `?sort=published` answers the `limit` repos (at most 50) published last, newest first, with `perm` only (400 with `after`, `q`, `format` or `kind`) and `next` null. `?name=a&name=b` (at most 200) answers those of the repos that the caller sees, by name, `next` null. A list item has no `config`. Repo JSON has `permissions`, the caller's repository permissions on the repo. Repo JSON has `file_count`, `total_size` and `last_published_at` (null before the first publish), read from the repo row (see `assets` in **Data model**); a group's counters count each file it serves to the caller once (see **Group counters**), with `counts_pending: true` and 0 and null while the server has not counted the caller's set of members yet. A list item has `downloads`: the downloads of the repo in the last 30 days, today included (UTC days, the window of the Overview's Downloads card), read for the repos of the page only (one seek of the `download_stats` key per repo); it lags the counters in memory by up to a minute (see **Download statistics**). `format` must be a registered name. `description` (POST and PATCH) has at most 500 characters and no control characters except newline and tab. `config` must be a JSON object that the format validates (400 otherwise; an unknown format lists the available ones). An empty config becomes the format default. Repo JSON has `operation`: `{id, type, owner, state, done, total, message, error}` of the repo's active operation, or null (see **Repo operations**). Repo JSON has `fields`: the values of the module fields of the repo (e.g. `{signing_key: "default"}`; `{}` for a format without fields). POST and PATCH take `fields` too; POST gives a field without a value its default, and a field that does not apply to the format and kind is 400. `PATCH /api/repos/{name}` takes `{description?, config?, proxy?, fields?}` and is one repo update (`repos.Service.Update`): the whole new state is checked first, then saved in one transaction with the field values, the format's `OnRepoChange` and one `repo.update` event with the changed fields. Repo JSON has `kind`, and a group has `member_count`. POST takes `kind` (`hosted` default, `proxy`, `group`), `members: [names]` for a group, `proxy: {remote_url, username?, password?, metadata_ttl?, not_found_ttl?}` (seconds) for a proxy, and `force`. A new proxy's remote is checked first (see **Group and proxy repositories**): a 502 problem document when it does not answer, unless `force: true`. PATCH takes `proxy` with the same fields for a proxy; `username` and `password` together replace the credentials, `username: ""` removes them, and the password is never returned. `GET /api/repos/{name}` adds, for a group, `members: [{name, format, kind, public, permissions}]` (the members the caller can read, in order, each with the caller's repository permissions on it); for a hosted or proxy repo, `groups: [names]` (the groups it is in that the caller can read); for a proxy and a holder of `repo.settings`, `proxy: {remote_url, has_credentials, metadata_ttl, not_found_ttl, last_ok_at\|null, last_error, last_error_at\|null}` |
+| `GET /api/overview` | a UI session | The figures of the Settings overview, each a counter or a bounded query: `{repos: {all, count, files, size}, largest: [Repo], public_repos, people?: {count, more}}`. `repos` totals every repo for a holder of `repositories.all` (`all: true`, from `repo_totals`), else the repos where the caller holds a repository permission other than `repo.download` (one lookup per grant). `largest` is up to eight of those repos that store something, the largest first (`repos (total_size, id)`). `public_repos` counts the public repos that are not groups (`repo_totals`). `people` (a holder of `people.manage`) counts the accounts up to 10,000 (`more: true` past it) |
 | `PUT /api/repos/{name}/members` | `repo.settings` | `{members: [names]}` replaces the members of a group and their order; returns the repo. 400 for 0 or more than 50 members, a member of another format, a group, a name listed twice, an unknown name, or a repo that is not a group |
 | `POST /api/repos/{name}/proxy/test` | `repo.settings` | Checks the remote of a proxy now: 200 `{ok: true}`, or a 502 problem document with the extension member `ok: false` and the reason as its detail. It records the result as the proxy's last answer or last error |
 | `PATCH /api/repos` | `repo.settings` on each repo | `{names: [...], anonymous_read: bool}`. The one way to make repos public or private: one repo update of every repo in one transaction. One `repo.update` event per repo whose value changed. 200 `{changed: n}` |
@@ -941,7 +962,7 @@ transaction.
 | `POST /api/repos/{name}/operation/resume` · `DELETE /api/repos/{name}/operation` | `repositories.all` | Resume runs the failed operation of the repo again: 200 `{ok: true}` (a delete runs on as a task until the repo is gone). Clear ends it, and the repo keeps the files that are left: 204. 409 when the repo has no operation, when it has not failed, or when its type cannot resume or clear here (a Nexus mirror ends at the cut-over). Records `repo.delete.resume` or `repo.delete.clear` |
 | `GET /api/repos/{name}/grants` | `repo.access` | `[{username, perms: [...]}]` by username; `perms` are permission IDs in registry order |
 | `GET /api/repos/{name}/access?admins=1` | a repository permission that manages the repo (one with a second-factor need: `repo.delete`, `repo.settings`, `repo.access`, `ci.pipelines`) | The access report, built from the parts of `access.Engine.Decide`: `{repo, format, kind, people, download: {public, people, admins, guards, sentence, notes}, publish: {people, admins, ci, guards, blocked, sentence}}`. `people` are `{username, perms, via}` (`permission`; with `admins=1` the holders of `repositories.all` too, via `all_repos`). `guards` maps a guard name to `{restricted, summary, detail}`; the network guard's `detail` is `{any, lists: [{name, title}], cidrs: [{cidr, note}]}`. `blocked` is null, or `{code: "read_only_kind" \| "operation", message}`: a proxy or a group (it lists no publisher and no CI pipeline) or a locked repo. Each `sentence` says the answer in words, e.g. "2 people, only from 10.0.0.0/8." A blocked publish sentence is "nobody." followed by the message. `notes` are the sentences that modules add (`access.Engine.AddDownloadNote`): while edge delivery is on, "Downloads come from the edge." or "Downloads go to the server: read rules apply." |
-| `GET /api/users/{username}/access` · `GET /api/me/access` | `people.manage` · password, read token or UI session | `{username, permissions, disabled, kind, can_publish, items: [{repo, format, public, perms, via}], next}`, a keyset page by repo name. On a proxy or a group a person holds no `repo.publish` and no `ci.pipelines` |
+| `GET /api/users/{username}/access` · `GET /api/me/access` | `people.manage` · password, read token or UI session | `{username, permissions, disabled, kind, can_publish, items: [{repo, format, public, perms, via}], next}`, a keyset page by repo name: with `repositories.all` of every repo, otherwise of the repos with a grant of the person and the public ones, read as one page of each side (`repos_anonymous_name` and the person's grants), never the repos in between. On a proxy or a group a person holds no `repo.publish` and no `ci.pipelines` |
 | `PUT /api/grants` | `repo.access` on each repo | `{users: [...], repos: [...], perms: [...]}`. Sets the repository permission set of every pair of user and repo, at most 1000 pairs; `perms: []` removes the pairs. 400 for an unknown permission ID, a server permission, or a permission without one it needs (e.g. `repo.publish` without `repo.download`, `ci.pipelines` without `repo.publish`); 404 for an unknown user or repo. 403 when the caller adds or removes a permission they do not hold on that repo. The auth service records one `grant.set` event with `{old, new}` per pair whose set changed, in the transaction. 200 `{changed: n}` |
 | `GET /api/repos/{name}/assets?prefix=&after=&limit=` | `repo.download` | `{items: [{path, size, sha256, content_type, kind, updated_at, repo?}], next}`, ordered by path; the prefix is a range scan. A group merges the pages of the members that the caller reads, each read from the same cursor: a path comes from the first member that has it, named in `repo` |
 | `GET /api/repos/{name}/tree?path=&after=&limit=` | `repo.download` | `{items: [{name, type: "dir"\|"file", path, size?, sha256?, updated_at?, uploaded_by?, build?}], next}`. `build` is the CI build record that wrote the file (see **CI providers and build records**). `path` is a folder (`""` or ending in `/`). A folder item's `path` and the `next` cursor end in `/`. `uploaded_by` is a username. A group answers the merged listing of its members (see **Files, uploads and deletes**), and each file item has `repo`, the member that serves it |
@@ -970,7 +991,7 @@ transaction.
 | `GET /api/network/proxy-candidates` | `network.manage` | `[{address, last_seen, count, header}]`, newest first: the untrusted TCP peers that sent a forwarded header. See **Network rules** |
 | `GET /api/audit?after=&limit=&action=&repo=&actor=&since=&until=` | `activity.read` | `{items: [{id, at, actor, actor_user_id\|null, action, repo, target, detail, ip}], next}`, newest first. `repo` is a repo name, `actor` a username, `since` and `until` RFC 3339 (see **Audit log**, Filters) |
 | `GET /api/audit/actions` | `activity.read` | `[{id, label, subsystem}]`: every action that a module registers, in module start order. The Activity filter reads it |
-| `GET /api/search?q=&repo=&after=&limit=` | any/anon | FTS5 trigram (`assets_search`), `q` ≥ 3 chars, only repos where the caller holds `repo.download` and that its guards let it read. `{items: [{repo, path, size, sha256, kind, updated_at}], next, repos?}`: the hits of one repo come together, in the order the repo stored them, and the repos in the order they were created. A page is one seek past `after` (the index key of the last hit), and a repo that the caller cannot read is one seek past its end, so every page is full until the end and costs the same at any size. The first page (no `after`) has `repos: [{name, format, matches, more}]`: each repo with matches, in the same order, its matches counted up to 10,000 (`more`: the count stopped there); the count seeks from one repo with matches to the next |
+| `GET /api/search?q=&repo=&after=&limit=` | any/anon | FTS5 trigram (`assets_search`), `q` ≥ 3 chars, only repos where the caller holds `repo.download` and that its guards let it read. `{items: [{repo, path, size, sha256, kind, updated_at}], next, repos?}`: the hits of one repo come together, in the order the repo stored them, and the repos in the order they were created. A page is one seek past `after` (the index key of the last hit), and a repo that the caller cannot read is one seek past its end, so every page is full until the end and costs the same at any size. The first page (no `after`) has `repos: [{name, format, matches, more}]`: each repo with matches, in the same order, its matches counted up to 1,000 (`more`: the count stopped there); the count seeks from one repo with matches to the next. Each piece of `q` is first counted up to 1,000 paths (a probe that reads at most that). A segment of `q` (a component between its slashes: whole in the middle, the last one as a prefix; not the first, which `q` may start inside of) that fewer than 100 paths hold (its probe counts up to 100) picks the segment index (`assets_segments`): it matches the 2 rarest such segments and keeps the paths that hold `q`, so a path, or a file name after a slash, reads the rows of its rarest segment at any size. Else a trigram of `q` that fewer than 1,000 paths hold picks the trigram index: its 3 rarest trigrams, and the paths that hold `q`. Else (`q` of 3 characters, with a character outside ASCII, or of common pieces only) `q` is one trigram phrase. The first page and the counts come from one walk of the matches |
 | `GET /api/repos/{name}/status` | `repo.download` | `{pending}`: the units of the repo that wait for a rebuild of its indexes (`rebuilds`), the ones being rebuilt included; 0 for a format without a `Rebuild` |
 | `GET /api/repos/{name}/usage` | `repo.download` | `{base_url, tools: [{id, label}], snippets: [Snippet]}`: the format's `Usage` (use, a computer and by hand), then for a hosted repo the CI file of each of the format's tools for GitHub Actions and Jenkins (default trigger). A proxy or a group gets no publish snippets. `Snippet` = `{id, tool, purpose: "use"\|"publish", context: "repo"\|"artifact", via?: "computer"\|"ci"\|"hand", file?, title, lang, code, note?}`. `tools` names each tool of the snippets with its label (the format's `SnippetTools`, the CI provider titles). `base_url` is the `base_url` setting, else the request scheme and host |
 | `GET /api/repos/{name}/ci?system=github-actions\|jenkins&tool=&branches=&tags=` | `repo.download` | The CI file that publishes to a hosted repo (one `Snippet`; the whole file in `code`, and for `github-actions` and `jenkins` the change to an existing file in `diff`), built by `internal/ci/workflow.go` from the `PublishSteps` of the tool (a tool of the format; default the first). `branches` and `tags` are comma-separated names or globs (letters, digits and `. _ / * -`, at most 20 each): the GitHub Actions trigger (default: a push to `main`), and a `when { anyOf { branch; tag } }` on the Jenkins publish stage (none by default). 400 for another system, an unknown tool, a bad pattern, or a proxy or a group |
@@ -1272,7 +1293,8 @@ Routes (`{items, next}` lists are keyset, `?after=&limit=`):
 | `GET /api/publish/sessions` | password, read token or UI session | The caller's own sessions |
 | `DELETE /api/publish/sessions/{id}` | the session's own token | 204. The token is the Basic password or a Bearer token. Another token, an ended session or none gets 401 |
 | `GET /api/publish/log` | `activity.read` | Every session, newest first |
-| `GET, POST /api/publish/trusts` · `GET, PATCH, DELETE /api/publish/trusts/{id}` | `ci.pipelines` on a repo | Trust policies (CI pipelines). A holder of `repositories.all` sees and changes every one. Anyone else sees and changes only the policies whose repos all hold `ci.pipelines` for them: the list leaves the others out, and a policy outside that scope answers 404. A new or changed `repos` list outside that scope answers 403. 403 when the caller holds `ci.pipelines` on no repo. A create, a change and a delete record `ci.pipeline.create`, `ci.pipeline.update` and `ci.pipeline.delete`. The list is keyset by name |
+| `GET, POST /api/publish/trusts` · `GET, PATCH, DELETE /api/publish/trusts/{id}` | `ci.pipelines` on a repo | Trust policies (CI pipelines). A holder of `repositories.all` sees and changes every one. Anyone else sees and changes only the policies whose repos all hold `ci.pipelines` for them: the list leaves the others out, and a policy outside that scope answers 404. A new or changed `repos` list outside that scope answers 403. 403 when the caller holds `ci.pipelines` on no repo. A create, a change and a delete record `ci.pipeline.create`, `ci.pipeline.update` and `ci.pipeline.delete`. The list is keyset by name: one query of the policies that list a repo of the caller's scope and no repo outside it, never a walk of all policies |
+| `GET /api/publish/trusts/count` | `ci.pipelines` on a repo | `{count, more}`: the CI pipelines in the caller's scope of the list above. A holder of `repositories.all` gets a bounded count of every one, which stops at 10,000 (`more: true`); anyone else the pipelines whose every repo they hold `ci.pipelines` on, counted from the pipelines of those repos (`publish_trust_repos_repo`). The Settings overview shows it |
 
 Shapes:
 
@@ -1798,7 +1820,10 @@ follow one for downloads, but uploads, `npm publish`, `docker push` and apt do n
    configured one) and the removed ones. The rebuild builds the added ones and, for a unit whose
    architecture is no longer configured, removes its index files (with their by-hash files) and
    its `deb_index_files` rows; then each `Release` is rebuilt. A change of `signing_key` marks one
-   unit of each distribution, so each `Release` is signed again.
+   unit of each distribution, so each `Release` is signed again. The marks are written in the
+   transaction of the repo update; the (distribution, component) pairs come from one seek of the
+   UNIQUE index of `deb_packages` per pair (`ListPackageComponents`), so the update costs the
+   pairs, not the packages.
 8. **By-hash cleanup.** After each `Packages` rebuild, the server keeps the current and the
    previous generation of `by-hash/` files for that index and removes the rest (source
    `generated`).
@@ -2905,7 +2930,7 @@ proxy stores its upstream pages at `.simple/<project>` and its files at `files/<
 `/remote/{path...}` serve them (`Range`, S3 redirects and the edge as every asset).
 
 **Pages.** `GET /pypi/{repo}/simple/` (the project list) and `GET /pypi/{repo}/simple/{project}/`
-are rendered per request; they are never stored at their URL. A name that is not normalised, or
+are rendered documents; they are never stored at their URL. A name that is not normalised, or
 that lacks the trailing slash, is 301 to the normalised page. The `Accept` header picks the form
 (PEP 691): `application/vnd.pypi.simple.v1+json` (also `...latest+json`), `...v1+html` (also
 `...latest+html`) or `text/html`, the highest `q` winning and the server order (JSON, HTML,
@@ -2942,6 +2967,13 @@ the page, and the last file drops the project. Each change moves the project's `
 rendered pages of a hosted project are kept in the module's `format.DocumentCache` (1,024
 entries, 64 MiB, 8 MiB each) keyed by the form, the repo, the project and `rev`, so a page renders
 once per change and a new or removed file shows at once.
+
+**Project list.** The rendered list is kept in a second `format.DocumentCache` (256 entries,
+64 MiB, 32 MiB each) keyed by the form and the `pypi_index_revs` revision of the repo; a group's
+key holds the ids and revisions of the members the caller reads, in member order. A request costs a
+point lookup per repo, and an `If-None-Match` that names the key's `ETag` is 304 without a build.
+A build reads a hosted repo's `pypi_projects` in key order, a proxy's `.simple/` assets in path
+order, and merges a group's sorted member lists (a name once, from the first member that has it).
 
 **Proxy** (default remote `https://pypi.org/`). The config field `files` (default
 `https://files.pythonhosted.org/`, checked with `proxy.FilesURL`) is the host the remote serves its
@@ -3027,7 +3059,7 @@ catch-alls and parses the raw path (an encoded `/`, `\` or NUL is 400). Every `/
 | Route | Policy | Serves |
 |---|---|---|
 | `GET /v2/` | none (the handler reads the credential) | No `Authorization`: 401 with the challenge. A credential that `Identify` accepts (a core bearer too): 200 `{}`; a bad one: 401 |
-| `GET /v2/_catalog?n=&last=` | password, read token, publish session, device, bearer, anonymous | The images (`{"repositories": [...]}`, by full name) of the repos that the credential behind the request downloads, without the repos a guard refuses. Bearer scopes do not limit it: anonymous and a bearer without a credential see the public repos, a publish session also its own repo, a password, a read token or a device the grants of its user. A full page adds `Link: </v2/_catalog?n=&last=>; rel="next"` |
+| `GET /v2/_catalog?n=&last=` | password, read token, publish session, device, bearer, anonymous | The images (`{"repositories": [...]}`, by full name) of the repos that the credential behind the request downloads, without the repos a guard refuses. Bearer scopes do not limit it: anonymous and a bearer without a credential see the public repos, a publish session also its own repo, a password, a read token or a device the grants of its user. A full page adds `Link: </v2/_catalog?n=&last=>; rel="next"`. A page reads only rows the caller lists: it walks the caller's repos that hold an image in name order (`ReposWithImages`) and reads each one's images through the primary key, one seek per repo it lists from; a holder of all repositories walks `docker_images_full` and seeks past each repo a guard refuses |
 | `GET, HEAD /v2/<name>/manifests/<tag\|digest>` | `FormatRead` + bearer | The stored bytes and media type (`Accept` is ignored), `Docker-Content-Digest`, `Content-Length`, `ETag`; never redirected. 404 `MANIFEST_UNKNOWN`, also for a reference that is neither a digest nor a valid tag |
 | `GET, HEAD /v2/<name>/blobs/<digest>` | `FormatRead` + bearer | The link of the image, with ranges; a GET may redirect to S3. 404 `BLOB_UNKNOWN` |
 | `GET /v2/<name>/tags/list?n=&last=` | `FormatRead` + bearer | `{"name","tags"}` in tag order after `last`; `n` absent is 1000, above 10000 is 10000, 0 is an empty list; a bad `n` is 400 `PAGINATION_NUMBER_INVALID`. A full page adds `Link`. An image without rows is 404 `NAME_UNKNOWN`. A proxy lists the remote's tags; a group merges the tags of its readable members (see **Proxies and groups**) |
@@ -3366,8 +3398,13 @@ own URL.
     like of the latest version). Both send `Vary: Accept`, a strong `ETag` and 304
     (`format.WriteDocument`); `?write=true` is the same. `dist.tarball` is absolute under
     `route.API.BaseURL` (the base_url setting, else the request's scheme and host).
-  - `GET <name>/<version or dist-tag>`: the manifest of that version from the full packument
-    (`application/json`, strong `ETag`), 404 for a version the package does not have. pnpm 11+
+  - `GET <name>/<version or dist-tag>`: the manifest of that version as the full packument lists
+    it (`application/json`, strong `ETag`, 304), 404 for a version the package does not have; a
+    dist-tag wins over a version of the same name. It reads only that version: a hosted package
+    its tag and version rows, a proxy its cached full packument as a stream up to that version
+    (a ref that is a SemVer version skips the tags, since npm refuses such a tag; a second read
+    when the versions come before the tags). The manifest is kept in the document cache, keyed by
+    the package `rev` or the SHA-256 of the cached packument, the ref and the base URL. pnpm 11+
     run through corepack fetches its binary package (`@pnpm/exe.<os>-<arch>`) this way from the
     registry of the project's `.npmrc`, without credentials on plain HTTP.
   - `GET <name>/-/<file>`: the tarball through the read path.
@@ -3388,7 +3425,9 @@ own URL.
     the operation from the URL (`Ops` and `Pick`), so a CI session cannot unpublish.
   - `GET /-/package/<name>/dist-tags`, `PUT .../dist-tags/<tag>` (body: the version as a JSON
     string, `repo.publish`, 201) and `DELETE .../dist-tags/<tag>` (`repo.publish`; `latest` is
-    refused with 400). A tag is up to 64 URL-safe characters and not a version.
+    refused with 400). A tag is up to 64 URL-safe characters and not a version. The `GET` reads
+    a hosted package's `npm_tags` rows, a proxy's cached abbreviated packument as a stream up to
+    its `dist-tags`.
   - `GET /-/whoami` (`{"username"}` of the credential, 401 without one) and `GET /-/ping` (`{}`).
   - `POST /-/v1/login` and `PUT /-/user/<user>` answer 401 "npm login is not used with
     Telesphorepo. To install, put a read token in .npmrc (see the repo page). To publish, run
@@ -3449,7 +3488,9 @@ and the registrations are kept in a `format.DocumentCache` (1,024 entries, 64 Mi
 keyed by the URL of the repo, the document, and the `rev` of the package's `nuget_packages` row
 (hosted) or the SHA-256s of the cached service index, registration index and pages (proxy). A
 request reads one package row, or resolves the cached remote documents without reading them, and
-renders only when the key is new; an `If-None-Match` of the key's ETag answers 304 at once. The
+renders only when the key is new. A hosted render reads only what the document holds: an index of
+up to 128 versions those versions, a paged index the version strings for its page bounds, a page
+its versions, a leaf its version; an `If-None-Match` of the key's ETag answers 304 at once. The
 proxy parses the service index once per change of its cached copy.
 
 **Routes** (`route.FormatRead` for reads; push, unlist and relist `route.FormatWrite` with
@@ -3463,9 +3504,9 @@ before the `Authorization` of the source's read credentials):
 | `GET /nuget/{repo}/v3-flatcontainer/{id}/index.json` | `{"versions": [...]}`: every version, unlisted ones too, lowered and normalised, oldest first. A proxy serves its remote's list as the remote wrote it |
 | `GET /nuget/{repo}/v3-flatcontainer/{id}/{version}/{file}` | The `.nupkg` or the `.nuspec` (`Reader.ServeAsset`, S3 redirect as for every file) |
 | `GET /nuget/{repo}/registration/{id}/index.json` (and `registration-semver1/`) | The registration index: up to 128 versions inlined in one page (`#page/<lower>/<upper>`, with `parent`), more in pages of 64 that the index names. Each leaf has the catalog entry inline (`id`, `version`, `listed`, `published` (`1900-01-01T00:00:00+00:00` when unlisted), `packageContent`, `dependencyGroups` with each dependency's `registration`, and the `.nuspec` fields), `packageContent` of this repo's flat container and `registration` |
-| `GET /nuget/{repo}/registration/{id}/page/{lower}/{upper}.json` | One page of a paged registration |
+| `GET /nuget/{repo}/registration/{id}/page/{lower}/{upper}.json` | One page of a paged registration; a hosted repo answers the versions from `lower` through `upper`, up to 128 (more: 404) |
 | `GET /nuget/{repo}/registration/{id}/{version}.json` | One registration leaf |
-| `GET /nuget/{repo}/query?q=&skip=&take=&prerelease=&semVerLevel=` | The packages of a hosted repo (a group: the union of its hosted members that the caller reads, the first member wins an id) whose id holds `q` (3 or more characters: the trigram index `nuget_packages_fts`, at most 10,000 ids per repo; 1 or 2 characters: a prefix of the id; empty: every id), in id order, `skip` at most 3,000 and `take` at most 1,000 (20 by default). Unlisted versions, prerelease versions without `prerelease=true` and SemVer 2.0 versions without `semVerLevel=2.0.0` are left out. Per id the search reads the newest visible version only (a package without one does not count); the metadata of the newest version and the list of visible versions are read only for the packages of the answered page. A proxy answers no package |
+| `GET /nuget/{repo}/query?q=&skip=&take=&prerelease=&semVerLevel=` | The packages of a hosted repo (a group: its hosted members that the caller reads, in order, each leaving out the ids that a member before it has) whose id holds `q` (3 or more characters: the trigram index `nuget_packages_search`, in the order of the index, so a repo's packages in the order they first came in; 1 or 2 characters: a prefix of the id, in id order; empty: every id, in id order), `skip` at most 3,000 and `take` at most 1,000 (20 by default). A package shows with its newest listed version that the client takes (`nuget_package_latest`: prerelease versions only with `prerelease=true`, SemVer 2.0 versions only with `semVerLevel=2.0.0`); a package without one does not count. A page reads at most `skip + take` packages; `totalHits` counts up to 10,000. The metadata of the newest version and the list of visible versions are read only for the packages of the answered page (the releases through `nuget_versions_releases`). A proxy answers no package |
 | `PUT /nuget/{repo}/package` (and `.../package/`) | Push: the first part of `multipart/form-data` (or a body that is the `.nupkg`) is the package; the id and the version come from its root `.nuspec`, matched by local name. With `?upload=<id>&sha256=<hex>[&size=<n>]` and no body, the file of a resumable upload of the same publish session (`/api/repos/{name}/uploads`) is the package, and the push finishes the upload: 404 for an unknown upload, 400 when the bytes do not match (the upload is deleted). 201; 409 for a version that the repo has (also with the same bytes, so `--skip-duplicate` skips it); 400 for a package that does not read (no zip, no or several root `.nuspec`, a bad id or version); 413 above `max_upload_size` |
 | `DELETE /nuget/{repo}/package/{id}/{version}` · `POST` the same | Unlist and relist (`listed` of the row, audit `nuget.unlist` and `nuget.relist`); 200, 404 for a version the repo lacks. dotnet restores an unlisted version by its exact version |
 
@@ -3536,14 +3577,20 @@ the capabilities of the repo's `format.Spec` that are set.
   - `each` (Maven, Docker; a group read serves each path or tag from the first member that has
     it): a k-way merge of the members' pages in `format.Spec.VersionOrder`. Each member reads one
     page of `limit` versions from its own cursor; the group cursor is base64url JSON of the
-    member cursors by repo id and the members that have no more. A version comes out while every
-    member that has more still holds a version it read, so no unread version sorts before it. A
-    version that an earlier member has, in its page or by a lookup of its `Builds` (limit 1),
-    comes from that member; the later member's copy is left out. A page costs one `Versions` call
-    per member that has more and at most one `Builds` lookup per earlier member and version.
-    A version with a `folder` (Maven: its files serve path by path) that later members hold too
-    is the union of their builds (below), so its `builds_count`, `latest_build` and
-    `published_at` are the union's.
+    member cursors by repo id (the last version taken from each member, also from one that has
+    no more) and the members that have no more. A version comes out while every member that has
+    more still holds a version it read, so no unread version sorts before it. A version that an
+    earlier member has comes from that member; the later member's copy is left out. With
+    `format.Spec.VersionsByName` (Maven: the order is that of the version strings, so a version
+    sorts at one place in every member) the pages and cursors say which members have a version:
+    an earlier member holds it in its page or took it last on an earlier page, a later member
+    holds it in its page. Without it (Docker orders tags by date) a member that does not hold the
+    version in its page is asked by a lookup of its `Builds` (limit 1). A page costs one
+    `Versions` call per member that has more, and without `VersionsByName` at most one `Builds`
+    lookup per other member and version. A version with a `folder` (Maven: its files serve path
+    by path) that later members hold too is the union of their builds (below), so its
+    `builds_count`, `latest_build` and `published_at` are the union's; the union reads every
+    build of the version in each member that holds it.
   - `owner` (npm, PyPI, Cargo, NuGet; a group read serves every version of a package from the
     member that owns the name): the versions of the owner, with its own cursor. The owner is the
     member that `assets.Reader.Owner` picks for a group read: the first member whose `Versions`
@@ -3559,16 +3606,29 @@ the capabilities of the repo's `format.Spec` that are set.
     the SHA-256 of the cached copy.
   - The builds of a version are what a group read serves for it, and each file names in `repo`
     the member that serves it: in an `owner` group the owner's builds (a proxy's files not cached
-    yet have `remote: true`); in an `each` group, for a version with a `folder`, the union of the
-    builds of every member that has the version: a build id once, a path once from the first
-    member that has it, sorted in `format.Spec.BuildOrder`, a build's `published_at` the newest
-    of its files; for a version without a `folder` (a Docker tag, which one path names), the
+    yet have `remote: true`); in an `each` group, for a version with a `folder`, the page of the
+    first member that has the version when no later member has it (a `Builds` lookup in each),
+    else the union of the builds of every member that has it: a build id once, a path once from
+    the first member that has it, sorted in `format.Spec.BuildOrder`, a build's `published_at`
+    the newest of its files; for a version without a `folder` (a Docker tag, which one path names), the
     builds of the first member that has it, each file named by the first member that stores its
     path. The artifact snippets are those of the owner (`owner`), else of the first member that
     answers for the path, built for the group.
   - In an `each` group a proxy member gives what it has cached: a version that only its remote
     holds shows once the proxy has cached it.
-- **Group counters** (`internal/api/groupcounts.go`, migration `0003_group_counts.sql`). A group's
+- **Repository lists** (`internal/api/repolist.go`, `internal/repos/list.go`, migration
+  `0005_performance.sql`). A request reads only its answer. A holder of `repositories.all` sees
+  every repo: a page is one range of one index (`name`, `(format, name)` or `(kind, name)`, the
+  cursor and the `q` prefix as `[from, to)`). Anyone else sees the public repos (the partial
+  indexes `WHERE anonymous_read = 1`) and the repos of their grants (one rowid lookup per grant,
+  the grants that `auth.Service.WithGrants` reads once per request); `perm` keeps the grants that
+  hold one of its permissions, and the public repos only when it names `repo.download`. Each list
+  reads up to `limit + 1` repos and the merge keeps the first `limit`, a repo once, so it holds
+  every name before the next page. `sort=published` merges the same lists from
+  `(last_published_at, id)`. Per page the server reads the downloads of the page's repos, and a
+  group's counters (its members in one query of their ids); a list item has no config.
+- **Group counters** (`internal/api/groupcounts.go`, migrations `0003_group_counts.sql` and
+  `0005_performance.sql`). A group's
   `file_count`, `total_size` and `last_published_at` (`GET /api/repos/{name}`, `GET /api/repos`)
   count each file it serves to the caller once, from the members the caller reads
   (`access.Engine.GroupMembers`): a file whose `unit` is `''` from the first member that has its
@@ -3580,14 +3640,25 @@ the capabilities of the repo's `format.Spec` that are set.
   non-index file it serves; a delete never lowers it.
   - Each group keeps one row of `group_counts` per set of members that a reader asked for (the
     key is the member ids in read order). A request reads its row with one indexed lookup; the
-    list of repositories does that once per group. A set without a row answers
+    list of repositories does that once per group. A set without a counted row answers
     `counts_pending: true` (0 and null) and asks the job for it.
   - The job `core.group-counts` first sets the `unit` of every asset row that has none (500 per
     transaction) and deletes the rows of the groups of those repos; then it counts the full set
-    of members of every group and every set that a reader asked for, each that has no row yet.
-    It counts a row in one write transaction with two queries over the members' files
-    (`CountGroupPaths`, `CountGroupUnits`), so no write lands between the count and the triggers.
-    It runs at start, after every repo change (`repos.Service.AfterChange`), when a reader asks
+    of members of every group and every set that a reader asked for, each that has no counted
+    row yet. The count never holds SQLite's writer for longer than a few small statements, at
+    any number of files:
+    1. One write transaction inserts the row, its members and its `group_count_pending` entry.
+       From here on the triggers add the change of every asset write to the row.
+    2. One write transaction sets the row's counters to zero and, before it commits, opens a read
+       snapshot on a reader connection (its first read). No write commits between the two, so
+       from then on the row holds exactly the changes of the writes that the snapshot does not
+       see.
+    3. Two queries over the members' files (`CountGroupPaths`, `CountGroupUnits`) count the
+       snapshot, holding no writer; publishes go on meanwhile.
+    4. One write transaction adds the count to the row (`last_published_at` takes the larger)
+       and deletes the pending entry: the row counts the files as they are now.
+    A change of the members on the way deletes the row and ends the count; a row left pending (an
+    error, a stop) is deleted and counted again from the start. It runs at start, after every repo change (`repos.Service.AfterChange`), when a reader asks
     for a set, and every 5 minutes.
   - Triggers on `assets` keep every counted row in the transaction of each insert, replace and
     delete of a member's file, with indexed lookups only (`(repo_id, path)`, `assets_unit`,
@@ -3613,9 +3684,9 @@ the capabilities of the repo's `format.Spec` that are set.
   meanwhile. Each removes the files batch by batch, empties the rows of the repo in batches, then
   deletes the repo row. The UI waits for each repo to answer 404 and shows the progress in a toast. The name can be used again afterwards.
 - **`format.Spec.OnRemoved` and `AfterRemove`.** `OnRemoved(ctx, tx, repo, removed, prefixes)` runs in
-  the transaction of each batch, before the rows go, with the folders of the removal; Debian and
-  Docker use it (see **Debian indexing
-  pipeline**). Maven's `AfterRemove` writes the artifact's `maven-metadata.xml` again (and the
+  the transaction of each batch, before the rows go, with the folders of the removal; Debian,
+  Docker and Maven use it (see **Debian indexing
+  pipeline**, **Versions and builds**). Maven's `AfterRemove` writes the artifact's `maven-metadata.xml` again (and the
   checksum files it has), with the version folders that still hold files, so a deleted version
   leaves the metadata. An artifact without a `maven-metadata.xml` stays without one.
 - **`format.Spec.Upload`.** `Plan(ctx, repo, PlanInput{Files, Fields, Folder})` works out what an
@@ -3671,7 +3742,9 @@ the capabilities of the repo's `format.Spec` that are set.
 
 `internal/netrules` resolves the client address, keeps the IP lists and checks the IP rules of
 each repo. Request paths read in-memory snapshots only. The database holds the lists and the
-rules.
+rules. The ranges of each IP list, the CIDRs of each rule scope and the trusted proxies are
+compiled into sorted, merged address ranges when they change, so checking an address is a binary
+search at any list size.
 
 **Client IP and scheme.** The network module resolves the client once per request
 (`Extender.ResolveClient`): its address and its scheme. The server attaches them to the request
@@ -3872,13 +3945,23 @@ The server counts the downloads of each repo per day (`internal/stats`, table `d
   never moves back.
 - **Retention.** The setting `stats.retention` (default 400 days) of the group `activity`; the hourly
   job `audit.retention` deletes older days. A repo delete takes its rows (`ON DELETE CASCADE`).
-- **`GET /api/stats?days=`** (`activity.read`, 1 to 400, 30 by default) writes the pending counters
-  first, then answers `{days: [{day, downloads, bytes}], repos: [{name, format, downloads, bytes}],
-  downloads, bytes}`: every UTC day of the window (today last, `day` as `2026-10-22`) and the ten
-  repos with the most downloads.
-- **`GET /api/repos`** gives each repo it lists its `downloads` of the last 30 days, which Home
-  sorts by. It reads only the written rows (the same query as `GET /api/stats`, summed per repo),
-  so a download shows there after the next flush.
+- **The window.** The last 30 UTC days, today included (`stats.RecentDays`), are kept as totals:
+  `download_window_days` (a row per day), `download_window_repos` (a row per repo, index
+  `download_window_repos_top (downloads DESC, bytes DESC, repo_id)`) and `download_window_state`
+  (the first day of the window). Triggers of `download_stats` add each written row of the window to
+  both totals and subtract a deleted one, in the transaction of the write, so the totals are exact
+  across restarts and crashes, and a repo delete or a retention delete leaves them. The flush moves
+  the window to today (`stats.rollWindow`, in its own transaction): for each day that left it, it
+  reads only that day's rows through `download_stats_day`, subtracts them from the repo totals and
+  deletes the day rows before the window.
+- **`GET /api/stats`** (`activity.read`) writes the pending counters first, then answers
+  `{days: [{day, downloads, bytes}], repos: [{name, format, downloads, bytes}], downloads, bytes}`
+  for the window: every UTC day of it (today last, `day` as `2026-10-22`; 30 rows read) and the ten
+  repos with the most downloads (the first ten rows of `download_window_repos_top`, joined to
+  `repos`). It takes no parameters.
+- **`GET /api/repos`** gives each repo of its page its `downloads` of the window:
+  one seek of `download_window_repos` per repo (`stats.Counter.Recent(ctx, ids)`), so a download
+  shows there after the next flush.
 
 ## Web UI
 
@@ -3988,34 +4071,37 @@ page are in `web/src/README.md`.
   ("Welcome to <server name>") and a large search field (the top bar's search: files by path, with the `/` shortcut; the top bar has no search on Home), then
   the doors, when at least two would show: large cards side by side (stacked on a phone), each a
   bare icon, a title, one sentence and the whole card a link. **Publish** opens `/#/publish`, for a
-  signed-in person who can publish somewhere. **Browse** opens `/#/browse`. **Administer** opens
+  signed-in person who holds `repo.publish` somewhere (from the grants of `GET /api/me`). **Browse** opens `/#/browse`. **Administer** opens
   `/#/settings/overview`, only for a person who would see a card there. Each card is as wide as one
   column of a three-column row, so two cards keep that width, centered. A visitor or a reader sees
-  no doors (the top bar has Sign in). Then the repositories of `GET /api/repos`, by `downloads`
-  (the last 30 days) with the most first, then by name, for everyone: a heading with "See all" (to `/#/browse`) at its end over up to six repository cards
+  no doors (the top bar has Sign in). Then, for everyone, the six repositories published last
+  (`GET /api/repos?sort=published&limit=6`): a heading with "See all" (to `/#/browse`) at its end over up to six repository cards
   (three on a phone), with no card around them. A card holds the format icon, the name (with a
   lock when the repo is private), the description up to two lines, and at the bottom the format,
-  with the kind of a proxy or a group ("Maven / Gradle · Group of 3 repositories"). **Your repositories** are the repos whose
-  `permissions` go beyond `repo.download`; a person with none sees **Repositories**, the repos they
-  can see (a visitor: the anonymous-read ones). With no repo at all, the empty state of Browse.
+  with the kind of a proxy or a group ("Maven / Gradle · Group of 3 repositories"). **Your repositories** are the repos where the
+  person holds a permission beyond `repo.download` (`perm=` every other repository permission); a
+  person with none sees **Repositories**, the repos they can see (a visitor: the anonymous-read
+  ones), a second call. With no repo at all, the empty state of Browse.
 - **Browse** (`/#/browse`, anyone; visitors see the anonymous-read repos). A toolbar on one row
-  holds a filter box, a format select ("All formats" first, then each format present with its
-  icon) and **New repository** (`repositories.all`) at the end. The repos are one compact table
-  sorted by name, a row each and the whole row a link: the format icon and the name (with a lock
-  when the repo is private), the format (only when more than one is listed), Proxy or Group (a
-  column only when one is listed), and the description on one line. On a phone a row stacks: the
+  holds a filter box (the start of the name, `q`, 250 ms after the last key), a format select ("All
+  formats" first, then each format of the server with its icon; `format`) and **New repository**
+  (`repositories.all`) at the end; each asks the server again. The repos are one compact table
+  sorted by name, 100 a page of `GET /api/repos`, the next page loading as the end comes into view, a row each and the whole row a link: the format icon and the name (with a lock
+  when the repo is private), the format (only when the server has more than one), Proxy or Group (a
+  column once one is listed), and the description on one line. On a phone a row stacks: the
   name, then the kind and the description. Files, size and last publish show in
   Settings › Repositories and in the details of a repo's top folder; a group shows the files it
   serves to the reader (see **Group counters**), and "Counting…" until the server has counted
   them. In a group's Files tab a proxy's version or file that is not cached yet has a "Not cached"
   badge, and every file of a build names the member that serves it. The whole card opens the repo.
-- **Publish** (`/#/publish`, signed in). The hosted repos the person holds `repo.publish` on (read
-  from `Repo.permissions` of `GET /api/repos`; a group is not listed, since its publishes go to a
-  hosted member) as the same cards, each opening its Publish view, a card per format when more than
-  one is present. With exactly one, the page replaces the history entry with `/#/repo/{name}/publish`; with none, it says to
+- **Publish** (`/#/publish`, signed in). The hosted repos the person holds `repo.publish` on
+  (`GET /api/repos?perm=repo.publish&kind=hosted`, 200 a page with Load more; a group is not
+  listed, since its publishes go to a hosted member) as the same cards, each opening its Publish view, a card per format when more than
+  one is present. With exactly one (and no next page), the page replaces the history entry with `/#/repo/{name}/publish`; with none, it says to
   ask an administrator for publish access.
 - **Search** is `/#/search?q=&repo=`: the top-bar field holds the query, and a repository picker
-  picks the repo. The hits are grouped in the browser: a card per repo, in it a row per folder
+  picks the repo (`RepoPicker`: the server's repos whose name starts with what you type, 20 at a
+  time, groups left out). The hits are grouped in the browser: a card per repo, in it a row per folder
   that holds hits (the folders under one parent fold into the parent's row, so an artifact is one
   row with its version folders), each row with its folders and files as links; the checksum and
   signature files (`.md5`, `.sha1`, `.sha256`, `.sha512`, `.asc`, `.sig`) of a hit fold into it.
@@ -4108,11 +4194,23 @@ page are in `web/src/README.md`.
   For Maven, the version folder (`com/acme/lib/1.0/`) also opens that version: its parent is the
   artifact folder and its name the version. `?build=` keeps a chosen build in the address.
   - *Maven:* an artifact folder is `<group path>/<artifactId>/` with one folder per version. A
-    `-SNAPSHOT` version has timestamped builds (`20261014.103000-3`); a release has one build.
-    The snippets of an artifact folder without a version use its newest release with files, else
-    its newest snapshot: the version folders are walked newest first up to the first release with
-    files, and of the snapshots above it only the newest one with files has its builds read.
-  - *Debian:* the format reads `deb_packages`, through the index `deb_packages_package`. An artifact
+    `-SNAPSHOT` version has timestamped builds (`20261014.103000-3`) and the build `SNAPSHOT` of
+    its files without a timestamp; a release has one build. The format reads `maven_versions` and
+    `maven_builds`, which its hooks keep in the transaction of every write and remove: a file
+    `<artifactId>-<version>[-<classifier>].<ext>` (or the timestamped name of a snapshot build;
+    not a checksum or a signature) records its build and its version, and the remove of the last
+    file of a build deletes the build, and of the last build its version. A page of versions or
+    builds is one seek past its cursor, plus one range read of the files of each build on it (the
+    newest build of each version), at any number of versions, builds or files. Versions sort in
+    Maven order by a stored key: numbers numerically; trailing zeros and `ga`, `final`, `release`
+    count as nothing (`1.0.Final` is `1`); `alpha`/`a`, `beta`/`b`, `milestone`/`m`, `rc`/`cr`
+    and `snapshot` sort before the end of a version, `sp` and other qualifiers (alphabetically)
+    after it, numbers after every qualifier; versions equal in that order sort by their strings
+    (`1` before `1.0`). Builds sort by timestamp and number, the build `SNAPSHOT` last. The
+    snippets of an artifact folder without a version use its newest release, else its newest
+    snapshot: one seek of `maven_versions_latest` each. On the first start with these tables,
+    the module's start indexes the files that the Maven repos hold already, then serves.
+  - *Debian:* the format reads `deb_packages` through the order keys of `deb_package_order`. An artifact
     folder is `pool/<component>/<prefix>/<package>/`; its versions are those of the package of that
     name in that component whose files lie in the folder. `Artifact.Kind` is `package`. A Debian
     version `<base>~SNAPSHOT<sep><stamp>` (`<sep>` one of `.`, `+`, `~`, `-`; `<stamp>` 8 to 14
@@ -4121,7 +4219,10 @@ page are in `web/src/README.md`.
     are its `.deb` files, one per architecture: `classifier` is the architecture, `extension` is
     `deb`. Versions sort by Debian version order (the `dpkg --compare-versions` rules: epoch,
     upstream, revision, and `~` before anything), so `3.0~SNAPSHOT` sorts before `3.0`. Builds sort
-    by stamp, newest first. One request reads at most 20,000 rows of a package.
+    by stamp, newest first; a build without a stamp sorts below the stamped builds of its version.
+    A page of versions seeks from one version to the next through `deb_package_order_page` and
+    reads the files of each version's newest build and counts its builds (index entries only); a
+    page of builds reads the rows of its builds and stops after the page.
   - `published_at` is the newest update time of the build's files, and `build` is the CI build
     record of its main file (else of any file); null when none.
   - Snippets of a Debian package: the apt setup for the distribution and component of the package,
@@ -4140,11 +4241,12 @@ page are in `web/src/README.md`.
     the server, its version (`GET /api/changes`: a release as its tag, a build of `main` as Canary
     and its commit, a local build as Development) and, for a holder of `settings.general`, its
     public address; New repository, New account and New CI pipeline as doors for a person who
-    may. Then one row of stat tiles: from `GET /api/repos` the repositories (by kind when there is more than one), the files and
-    the stored size (and what proxies cache), and the number of people, CI pipelines and signing
-    keys, each for a person who can open its page and a link to it. Every repository for a holder
+    may. Then one row of stat tiles: from `GET /api/overview` the repositories, the files, the
+    stored size and the number of people, from `GET /api/publish/trusts/count` the CI pipelines,
+    and the signing keys, each for a person who can open its page and a link to it; a count that
+    stopped reads "10,000+". Every repository for a holder
     of `repositories.all`, else "Your repositories" (more than download). Then the eight largest
-    repositories as size bars with their format's icon; for a holder of `activity.read` the downloads of the
+    repositories (`largest` of `GET /api/overview`) as size bars with their format's icon; for a holder of `activity.read` the downloads of the
     last 30 days (`GET /api/stats`: the total, the bytes served, a column per UTC day and the five
     most downloaded repositories) and the last five events of Activity. A person who can open no Settings page goes on to Your account.
   - *Your account* (`/#/account`, every signed-in person, from the avatar menu) has its own
@@ -4478,7 +4580,7 @@ CI runs on GitHub Actions with the built-in `GITHUB_TOKEN` and reads no reposito
 | Workflow | Runs | Does |
 |---|---|---|
 | `ci.yml` | Push to `main`, pull requests | `build` job: `go tool task build`, `go vet` for the `e2e`, `import`, `scale`, `clients` and `macos` tags, `go vet` and `go build` of `./cmd/telesphorepo` for `GOOS=darwin` and `GOOS=windows`, `bunx tsc --noEmit` and `bun run build` in `edge/`, `telesphorepo-server dbcheck`. The e2e jobs run on pull requests only, and only when the `changes` job finds a file outside `web/src/` that is not Markdown (the e2e tests drive the API and real clients, never the UI): `e2e-core` on four machines at once, each `go tool task test --shard i/4`; `e2e-clients`, `go tool task test clients`; `e2e-github-actions` (pull requests of this repository; `id-token: write`), `TestCLIGitHubActions` with the job's real identity token. Each uploads its log on failure. `snapshot-image` job (push to `main` only, after `build`): multi-arch image with tags `main` and `sha-<short>`, version `main-<short sha>`. A newer push cancels the running pull request jobs |
-| `e2e-extended.yml` | Manual (zone `import`, `scale` or `all`), weekly for `import` | `go tool task test <zone>` |
+| `e2e-extended.yml` | Manual only (zone `import`, `scale` or `all`); the zones run locally before a push (AGENTS.md) | `go tool task test <zone>` |
 | `release.yml` | Push of a `v*` tag | `binaries` job: `go tool task release`, then a GitHub Release with the archives and `SHA256SUMS`. `image` job: multi-arch image (`linux/amd64`, `linux/arm64`) pushed to `ghcr.io/telesphorepo/telesphorepo` with tags `X.Y.Z`, `X.Y` and `latest` (no `latest` for pre-releases). `macos` job on `macos-latest`: `go tool task build`, then the macOS zone (`go test -tags macos -run TestMacOS ./e2e/` with `E2E_SERVER_BIN`) |
 
 The Dockerfile builds the UI, the six CLI archives (`go tool task cli`) and the Go binary on the build platform and cross-compiles with
@@ -4820,6 +4922,7 @@ Where each part of the code lives, and the steps to add a module, a repo format 
 | UI page | `web/src/pages/**/*.svelte` (`repo/`, `account/`, `repositories/`, `server/`, `settings/repos/`); its `PageDef` (path, access, Settings nav) in the owning module's `web/src/modules/<id>/module.ts`; API calls in `web/src/lib/api/` (a format module's own routes in its own folder). See `web/src/README.md` |
 | UI of a format | The descriptor (`format.Spec` fields and `UI`, `GET /api/formats`; `web/src/lib/formats/registry.svelte.ts`); a format-specific component only as a named `formatParts` slot in `web/src/modules/<format>/module.ts` |
 | File tree, deletes, manual upload | `internal/files` (tree), `internal/api/files.go`, `internal/api/pipeline.go` (repo delete, resumable uploads), `format.Spec.Upload`; UI in `web/src/pages/repo/` (`FilesTab`, `upload/`, `delete/`) |
+| Repository lists, Settings overview figures | `internal/api/repolist.go` (`GET /api/repos`, `GET /api/overview`), `internal/repos/list.go` (one index per list), the grant lists in `internal/db/dbq/extra.go`, `repo_totals` in migration `0005_performance.sql`; UI: `RepoPicker`, `chain` and `RepoFormats` in `web/src/lib/load.svelte.ts` |
 | Client IP, IP lists, repo IP rules | `internal/netrules` (module `network`: `lists.go`, `rules.go`, `clientip.go`, `module.go`), `web/src/pages/settings/repos/` (Access tab), `web/src/pages/server/IPLists.svelte`, `IPListPage.svelte`, `ReverseProxy.svelte` |
 | Docker / OCI registry | `internal/docker` (module `docker`: `routes.go` at `/v2/`, `token.go` the token endpoint `/docker/token`, `manifests.go`, `blobs.go`, `lists.go`, `referrers.go`, `hooks.go` (the rows of `migrations/`), `links.go` the job `docker.links`, `proxy.go` the proxy (`Classify`, `RemoteAuth`, tags list) and group tags, `usage.go` and `tools.go` the snippets and the CI tool, `versions.go`, `api.go` `/api/docker/{name}/manifest`, `importer.go` the Nexus import, `demo.go`, `seed.go`); UI part `web/src/modules/docker/`; e2e in `e2e/docker_test.go`, `e2e/docker_proxy_test.go`, `e2e/nexus_docker_test.go` and `e2e/cli_docker_test.go` (clients zone), with `StartDind` and `Dind.CopyFile` in `e2e/clients_test.go` and the OCI helpers in `e2e/oci_test.go` |
 | Telesphorepo CLI and its Docker credential helper | `cmd/telesphorepo` (MIT, its own `LICENSE`; stdlib, `golang.org/x/sys`, `BurntSushi/toml` and the root package `changelog` only; imports no server package): `main.go` the commands and the error handling, `setup.go`, `publish.go`, `detect.go` the detection table (a new format adds a row), `upload.go` raw and Debian uploads, `login.go` login, logout and status, `update.go`, `compat.go` the change log check, `problem.go` problem documents and remedies, `client.go` the HTTP client, the device flow and the mints, `ci.go` the CI token, `project.go` `telesphorepo.toml`, `docker.go` the helper mode (program name `docker-credential-telesphorepo`), `identity.go`, `device.go`, `exchange.go`, `dockerconfig.go`, `acl_*.go`, `parent_*.go`, `tty_*.go`; built and embedded by `tools/task/cli.go`, released by `tools/task/release.go` |
@@ -4880,7 +4983,7 @@ the format lacks.
   job builds.
 - **Proxy and group:** `Kinds` with `proxy` needs `Classify` and `ProxyProbe`; `RemoteAuth`
   answers a remote's token challenge. `Kinds` with `group` can set `Merge`, and with `Versions`
-  needs `GroupVersions` (`each` with `VersionOrder` and, for versions with a folder, `BuildOrder`; or `owner` with `GroupUnit`, the package of a path, and `Versions` and `Builds` that answer for a proxy from its remote's document).
+  needs `GroupVersions` (`each` with `VersionOrder`, `VersionsByName` when that order reads only the version string, and, for versions with a folder, `BuildOrder`; or `owner` with `GroupUnit`, the package of a path, and `Versions` and `Builds` that answer for a proxy from its remote's document).
 - **Web UI:** `Description`, `Config.Fields`, `UI` (the descriptor), `Versions` and `Builds`,
   `Usage`, `ArtifactUsage` and `Tools` (snippets and CI steps), `Publish` (`cli` or `helper`), `Upload` (`Plan` and
   `Store`), `SigningKey` and `RepoTabs`. The web UI reads the descriptor and names no format.

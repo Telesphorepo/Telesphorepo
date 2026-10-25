@@ -11,7 +11,7 @@
   import { auth } from "$lib/auth.svelte";
   import { href, repoPath, repoSettingsPath } from "$lib/router.svelte";
   import { api, type SigningKey } from "$lib/api";
-  import { Resource, listOf } from "$lib/load.svelte";
+  import { RepoFormats, Resource, listOf } from "$lib/load.svelte";
   import { groupFingerprint } from "$lib/format";
   import { Button } from "$lib/components/ui/button";
   import * as Select from "$lib/components/ui/select";
@@ -34,12 +34,13 @@
   let {}: PageProps = $props();
 
   const keys = new Resource(() => api.signingKeys.list());
-  // The repositories that use a key, for the filter; their formats come from the list of repositories.
-  const repos = new Resource(() => api.repos.list());
-  const formatOf = (name: string) => repos.data?.find((r) => r.name === name)?.format ?? "";
+  // The repositories that use a key, for the filter; their formats are read for those names only.
+  const repoFormats = new RepoFormats();
+  const formatOf = (name: string) => repoFormats.format(name);
   const ALL = "*";
   let repoFilter = $state(ALL);
   const used = $derived([...new Set((keys.data ?? []).flatMap((k) => k.repos))].sort((a, b) => a.localeCompare(b)));
+  $effect(() => repoFormats.want(used));
   const source = listOf(keys, (list) => (repoFilter === ALL ? list : list.filter((k) => k.repos.includes(repoFilter))));
   const newKey = href("/settings/signing-keys/new");
   const signingTab = (r: string) => href(auth.canRepo(r, "repo.settings") ? repoSettingsPath(r, "signing") : repoPath(r));

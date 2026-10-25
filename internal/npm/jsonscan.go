@@ -136,6 +136,97 @@ func (s *scanner) raw(limit int) (json.RawMessage, error) {
 	}
 }
 
+// skip reads one value without keeping it. It checks the nesting and the strings, not the
+// numbers and literals.
+func (s *scanner) skip() error {
+	if _, err := s.peek(); err != nil {
+		return err
+	}
+	depth := 0
+	for {
+		c, err := s.r.ReadByte()
+		if err != nil {
+			return errSyntax
+		}
+		switch {
+		case c == '"':
+			if err := s.skipString(); err != nil {
+				return err
+			}
+			if depth == 0 {
+				return nil
+			}
+			continue
+		case c == '{' || c == '[':
+			depth++
+		case c == '}' || c == ']':
+			depth--
+			if depth == 0 {
+				return nil
+			}
+			if depth < 0 {
+				return errSyntax
+			}
+		}
+		if depth == 0 {
+			n, err := s.r.Peek(1)
+			if err != nil || bytes.ContainsAny(n, ",}] \t\r\n") {
+				return nil
+			}
+		}
+	}
+}
+
+// skipString reads the rest of a string after its opening quote, a buffer at a time: a quote
+// ends it unless an odd number of backslashes comes before it.
+func (s *scanner) skipString() error {
+	run := 0 // the backslashes right before the next chunk
+	for {
+		chunk, err := s.r.ReadSlice('"')
+		if err != nil && err != bufio.ErrBufferFull {
+			return errSyntax
+		}
+		body := chunk
+		if err == nil {
+			body = chunk[:len(chunk)-1]
+		}
+		n := len(body) - len(bytes.TrimRight(body, `\`))
+		if n == len(body) {
+			n += run
+		}
+		if err == bufio.ErrBufferFull {
+			run = n
+			continue
+		}
+		if n%2 == 0 {
+			return nil
+		}
+		run = 0
+	}
+}
+
+// members reads an object and calls fn with each key; fn reads the value of the key (raw or
+// skip). fn returns stop=true to end the read there.
+func (s *scanner) members(keyLimit int, fn func(key string) (stop bool, err error)) error {
+	if err := s.expect('{'); err != nil {
+		return err
+	}
+	for first := true; ; first = false {
+		more, err := s.more(first, '}')
+		if err != nil || !more {
+			return err
+		}
+		k, err := s.key(keyLimit)
+		if err != nil {
+			return err
+		}
+		stop, err := fn(k)
+		if err != nil || stop {
+			return err
+		}
+	}
+}
+
 func valid(b []byte) (json.RawMessage, error) {
 	if !json.Valid(b) {
 		return nil, errSyntax

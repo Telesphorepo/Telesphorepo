@@ -124,6 +124,10 @@ type Spec struct {
 	// VersionOrder orders two versions of one artifact as Versions lists them: negative when a
 	// comes first. GroupEach needs it.
 	VersionOrder func(a, b Version) int
+	// VersionsByName says that VersionOrder orders by the version string alone, so a version sorts
+	// at the same place in every member (Maven; Docker orders tags by date). A GroupEach merge then
+	// knows from the members' pages and cursors which members hold a version, without a lookup.
+	VersionsByName bool
 	// BuildOrder orders two builds of one version as Builds lists them (by Build id): negative
 	// when a comes first. A GroupEach group sorts the union of the members' builds of a version
 	// with a Folder by it; nil keeps the builds in member order.

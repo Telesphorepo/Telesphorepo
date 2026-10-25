@@ -7,6 +7,7 @@ package dbq
 
 import (
 	"context"
+	"strings"
 )
 
 const addImageManifests = `-- name: AddImageManifests :exec
@@ -541,6 +542,41 @@ func (q *Queries) ListRefs(ctx context.Context, arg ListRefsParams) ([]ListRefsR
 	return items, nil
 }
 
+const listRepoImages = `-- name: ListRepoImages :many
+SELECT full_name FROM docker_images WHERE repo_id = ?1 AND image > ?2
+ORDER BY image LIMIT ?3
+`
+
+type ListRepoImagesParams struct {
+	RepoID int64
+	After  string
+	Limit  int64
+}
+
+// A keyset page of the images of a repo by name, through the primary key.
+func (q *Queries) ListRepoImages(ctx context.Context, arg ListRepoImagesParams) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listRepoImages, arg.RepoID, arg.After, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var full_name string
+		if err := rows.Scan(&full_name); err != nil {
+			return nil, err
+		}
+		items = append(items, full_name)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTags = `-- name: ListTags :many
 SELECT tag FROM docker_tags WHERE repo_id = ?1 AND image = ?2 AND tag > ?3
 ORDER BY tag LIMIT ?4
@@ -831,6 +867,50 @@ func (q *Queries) RepoLinkOf(ctx context.Context, arg RepoLinkOfParams) (string,
 	var image string
 	err := row.Scan(&image)
 	return image, err
+}
+
+const reposWithImages = `-- name: ReposWithImages :many
+SELECT id, name FROM repos WHERE id IN (/*SLICE:ids*/?)
+  AND EXISTS (SELECT 1 FROM docker_images i WHERE i.repo_id = repos.id)
+`
+
+type ReposWithImagesRow struct {
+	ID   int64
+	Name string
+}
+
+// The repos of ids that hold an image, through the primary keys of repos and docker_images.
+func (q *Queries) ReposWithImages(ctx context.Context, ids []int64) ([]ReposWithImagesRow, error) {
+	query := reposWithImages
+	var queryParams []interface{}
+	if len(ids) > 0 {
+		for _, v := range ids {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:ids*/?", strings.Repeat(",?", len(ids))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:ids*/?", "NULL", 1)
+	}
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ReposWithImagesRow
+	for rows.Next() {
+		var i ReposWithImagesRow
+		if err := rows.Scan(&i.ID, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const someTagsOfDigest = `-- name: SomeTagsOfDigest :many

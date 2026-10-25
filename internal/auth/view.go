@@ -45,16 +45,18 @@ func (s *Service) View(ctx context.Context, userID int64, setupOnly bool) (*Sess
 	if v.AllRepos {
 		return v, nil
 	}
-	sets, err := s.UserRepoPerms(ctx, userID)
+	rows, err := s.rq.ListUserGrantsNamed(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
-	for id, set := range sets {
-		repo, err := s.repos.ByID(ctx, id)
-		if err != nil {
-			continue // deleted after the grants were read
+	sets := map[string]perm.Set{}
+	for _, g := range rows {
+		sets[g.Name] = sets[g.Name].Union(perm.SetOf(perm.ID(g.Perm)).Of(perm.ScopeRepo))
+	}
+	for name, set := range sets {
+		if !set.Empty() {
+			v.RepoPermissions[name] = set.Strings()
 		}
-		v.RepoPermissions[repo.Name] = set.Strings()
 	}
 	return v, nil
 }

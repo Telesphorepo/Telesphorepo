@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -180,19 +181,25 @@ func (h *Handler) admit(ctx context.Context, w *assets.Write, existing *assets.A
 	return assets.Store, nil
 }
 
-// onCommitted writes the package of a stored .deb and marks its units for a rebuild, in the
-// transaction of the write (format.Spec OnCommitted). An arch:all package marks every
-// configured architecture.
+// onCommitted writes the package of a stored .deb with its order keys and marks its units for a
+// rebuild, in the transaction of the write (format.Spec OnCommitted). An arch:all package marks
+// every configured architecture.
 func (h *Handler) onCommitted(ctx context.Context, tx *sql.Tx, w *assets.Write, a *assets.Asset, _ *assets.Asset) error {
 	m, ok := w.Meta.(*debMeta)
 	if !ok {
 		return nil
 	}
 	info, sp := m.info, m.sp
-	if err := dbq.New(tx).InsertPackage(ctx, dbq.InsertPackageParams{RepoID: w.Repo.ID, Distribution: m.dist, Component: m.comp,
+	q := dbq.New(tx)
+	id, err := q.InsertPackage(ctx, dbq.InsertPackageParams{RepoID: w.Repo.ID, Distribution: m.dist, Component: m.comp,
 		Architecture: info.Architecture, Package: info.Package, Version: info.Version, AssetID: a.ID,
 		Filename: a.Path, Size: sp.Size, Md5: sp.MD5, Sha1: sp.SHA1, Sha256: sp.SHA256,
-		Control: info.Control, CreatedAt: time.Now().Unix()}); err != nil {
+		Control: info.Control, CreatedAt: time.Now().Unix()})
+	if err != nil {
+		return err
+	}
+	if err := q.InsertPackageOrder(ctx, dbq.InsertPackageOrderParams{PackageID: id, RepoID: w.Repo.ID, Folder: path.Dir(a.Path) + "/",
+		Component: m.comp, Package: info.Package, NameKey: nameKey(info.Version), BuildKey: buildKey(info.Version)}); err != nil {
 		return err
 	}
 	archs := []string{info.Architecture}

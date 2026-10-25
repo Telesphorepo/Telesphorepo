@@ -65,20 +65,22 @@ type repoRules struct {
 
 // matcher is one compiled allow-list.
 type matcher struct {
-	prefixes []netip.Prefix
-	lists    []int64
-	empty    bool
+	cidrs *ipSet
+	lists []int64
+	empty bool
 }
 
 func compile(list []rule) matcher {
 	m := matcher{empty: len(list) == 0}
+	var prefixes []netip.Prefix
 	for _, r := range list {
 		if r.listID != 0 {
 			m.lists = append(m.lists, r.listID)
 		} else if p, err := netip.ParsePrefix(r.cidr); err == nil {
-			m.prefixes = append(m.prefixes, p)
+			prefixes = append(prefixes, p)
 		}
 	}
+	m.cidrs = newIPSet(prefixes)
 	return m
 }
 
@@ -306,11 +308,11 @@ func (s *Service) allows(m matcher, a netip.Addr) bool {
 		return false
 	}
 	a = a.Unmap()
-	if contains(m.prefixes, a) {
+	if m.cidrs.contains(a) {
 		return true
 	}
 	for _, l := range m.lists {
-		if contains(s.listRanges(l), a) {
+		if s.listSet(l).contains(a) {
 			return true
 		}
 	}

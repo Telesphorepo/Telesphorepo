@@ -39,11 +39,14 @@ func Core() Component {
 		Queries:    Sub(queriesFS, "queries"),
 		Extra:      dbq.Extra,
 		Allow: map[string]string{
-			"ListSettings":      "loads every stored setting at startup and after a settings write, never on a request path; at most one row per registered setting",
-			"HasUsers":          "EXISTS stops at the first row; startup check for the first admin",
-			"ListRebuildGroups": "startup: picks up every pending rebuild once per start; the rebuilds table holds only units not built yet",
-			"CountRepoTotals":   "a backup counts the repos of its database copy once per backup, never on a request path; one row per repo",
-			"ListMigrations":    "a backup records the applied migrations of its database copy once per backup; one row per migration",
+			"ListSettings":         "loads every stored setting at startup and after a settings write, never on a request path; at most one row per registered setting",
+			"HasUsers":             "EXISTS stops at the first row; startup check for the first admin",
+			"ListRebuildGroups":    "startup: picks up every pending rebuild once per start; the rebuilds table holds only units not built yet",
+			"CountRepoTotals":      "a backup counts the repos of its database copy once per backup, never on a request path; one row per repo",
+			"ListMigrations":       "a backup records the applied migrations of its database copy once per backup; one row per migration",
+			"CountUsersUpTo":       "a bounded count: it stops at its cap (the Settings overview says 10,000+)",
+			"ListReposByPublished": "reads the first LIMIT rows of repos_published in order (at most 50), never the rest of the index",
+			"ListReposVisibleTo":   "merges one page of the public repos (repos_anonymous_name) with the sorted grants of one user (a seek through repo_permissions_user), never the repos in between",
 		},
 	}
 }

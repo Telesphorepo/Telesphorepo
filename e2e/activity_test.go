@@ -75,20 +75,20 @@ func TestDownloadStats(t *testing.T) {
 		t.Fatalf("anonymous GET of a private file: status %d: %s", resp.StatusCode, body)
 	}
 
-	// The read writes the counters first, so it holds every download served before it. Two days,
-	// so a test that runs over midnight UTC still finds them.
+	// The read writes the counters first, so it holds every download served before it. The window
+	// holds today and the days before it, so a test that runs over midnight UTC still finds them.
 	var st downloadStats
-	s.MustAPI(t, http.MethodGet, "/api/stats?days=2", nil, s.Admin(), &st)
+	s.MustAPI(t, http.MethodGet, "/api/stats", nil, s.Admin(), &st)
 	pubN, pubB := int64(5), int64(3*len(x)+len(y)+10)
 	privN, privB := int64(2), int64(2*len(z))
 	if st.Downloads != pubN+privN || st.Bytes != pubB+privB {
 		t.Fatalf("stats totals %d downloads, %d bytes; want %d, %d: %+v", st.Downloads, st.Bytes, pubN+privN, pubB+privB, st)
 	}
-	if len(st.Days) != 2 {
-		t.Fatalf("?days=2 gave %d days: %+v", len(st.Days), st.Days)
+	if len(st.Days) < 2 {
+		t.Fatalf("the window has %d days: %+v", len(st.Days), st.Days)
 	}
-	if today := time.Now().UTC().Format(time.DateOnly); st.Days[1].Day != today {
-		t.Fatalf("the last day is %s, want today %s", st.Days[1].Day, today)
+	if today := time.Now().UTC().Format(time.DateOnly); st.Days[len(st.Days)-1].Day != today {
+		t.Fatalf("the last day is %s, want today %s", st.Days[len(st.Days)-1].Day, today)
 	}
 	var perDay int64
 	for _, d := range st.Days {
@@ -105,13 +105,15 @@ func TestDownloadStats(t *testing.T) {
 	// The repository list carries the downloads of each repo it shows, to a visitor too; the
 	// stats read above wrote the counters.
 	listed := func(a Auth) map[string]*int64 {
-		var list []struct {
-			Name      string `json:"name"`
-			Downloads *int64 `json:"downloads"`
+		var list struct {
+			Items []struct {
+				Name      string `json:"name"`
+				Downloads *int64 `json:"downloads"`
+			} `json:"items"`
 		}
-		s.MustAPI(t, http.MethodGet, "/api/repos", nil, a, &list)
+		s.MustAPI(t, http.MethodGet, "/api/repos?name="+pub+"&name="+priv, nil, a, &list)
 		out := map[string]*int64{}
-		for _, r := range list {
+		for _, r := range list.Items {
 			out[r.Name] = r.Downloads
 		}
 		return out
@@ -130,27 +132,17 @@ func TestDownloadStats(t *testing.T) {
 	// Later downloads add to the same day.
 	resp, body = authGet(t, s, "/raw/"+priv+"/z.bin", Basic{w, pw})
 	wantStatus(t, resp, body, http.StatusOK)
-	s.MustAPI(t, http.MethodGet, "/api/stats?days=2", nil, s.Admin(), &st)
+	s.MustAPI(t, http.MethodGet, "/api/stats", nil, s.Admin(), &st)
 	if st.Downloads != pubN+privN+1 {
 		t.Fatalf("after one more download: %d downloads, want %d", st.Downloads, pubN+privN+1)
 	}
-	s.MustAPI(t, http.MethodGet, "/api/stats", nil, s.Admin(), &st)
-	if len(st.Days) < 2 || st.Downloads != pubN+privN+1 {
-		t.Fatalf("default window: %d days, %d downloads", len(st.Days), st.Downloads)
-	}
-
 	// A deleted repo leaves the statistics.
 	deleteRepos(t, s, priv)
-	s.MustAPI(t, http.MethodGet, "/api/stats?days=2", nil, s.Admin(), &st)
+	s.MustAPI(t, http.MethodGet, "/api/stats", nil, s.Admin(), &st)
 	if len(st.Repos) != 1 || st.Repos[0].Name != pub || st.Downloads != pubN {
 		t.Fatalf("after the delete of %s: %+v", priv, st)
 	}
 
-	for _, q := range []string{"days=0", "days=abc", "days=-1"} {
-		if code, b := s.API(t, http.MethodGet, "/api/stats?"+q, nil, s.Admin()); code != http.StatusBadRequest {
-			t.Fatalf("GET /api/stats?%s: status %d, want 400: %s", q, code, b)
-		}
-	}
 	// activity.read only, with a UI session.
 	if code, b := s.API(t, http.MethodGet, "/api/stats", nil, s.SignIn(t, w, pw)); code != http.StatusForbidden {
 		t.Fatalf("GET /api/stats without activity.read: status %d, want 403: %s", code, b)

@@ -17,17 +17,8 @@ type trustedSet struct {
 	snap       *settings.Snapshot
 	lists      *map[int64]*listState
 	rows       *[]int64
-	prefixes   []netip.Prefix
-	cloudflare []netip.Prefix // the ranges of the list "cloudflare" when the trusted proxies include it, else nil
-}
-
-func contains(ps []netip.Prefix, a netip.Addr) bool {
-	for _, p := range ps {
-		if p.Contains(a) {
-			return true
-		}
-	}
-	return false
+	trusted    *ipSet
+	cloudflare *ipSet // the ranges of the list "cloudflare" when the trusted proxies include it, else nil
 }
 
 // trustedNow returns the trusted set: the literal entries of trusted_proxies, and the ranges of
@@ -39,31 +30,33 @@ func (s *Service) trustedNow() *trustedSet {
 		return t
 	}
 	t := &trustedSet{snap: snap, lists: lists, rows: rows}
+	var prefixes []netip.Prefix
 	for _, id := range slices.Concat(*rows, s.envLists) {
 		st := (*lists)[id]
 		if st == nil {
 			continue
 		}
 		if st.name == PresetCloudflare {
-			t.cloudflare = st.ranges
+			t.cloudflare = st.set
 		}
-		t.prefixes = append(t.prefixes, st.ranges...)
+		prefixes = append(prefixes, st.ranges...)
 	}
 	for _, e := range TrustedProxies.Get(snap) {
 		if e == Private {
-			t.prefixes = append(t.prefixes, privateRanges...)
+			prefixes = append(prefixes, privateRanges...)
 			continue
 		}
 		if strings.HasPrefix(e, TrustedProxyList) {
 			continue // resolved once at startup (envLists)
 		}
 		if p, err := netip.ParsePrefix(e); err == nil {
-			t.prefixes = append(t.prefixes, p.Masked())
+			prefixes = append(prefixes, p.Masked())
 		} else if a, err := netip.ParseAddr(e); err == nil {
 			a = a.Unmap()
-			t.prefixes = append(t.prefixes, netip.PrefixFrom(a, a.BitLen()))
+			prefixes = append(prefixes, netip.PrefixFrom(a, a.BitLen()))
 		}
 	}
+	t.trusted = newIPSet(prefixes)
 	s.trusted.Store(t)
 	return t
 }
@@ -137,7 +130,7 @@ func (s *Service) clientIP(r *http.Request) (netip.Addr, bool) {
 	if !peer.IsValid() {
 		return peer, false
 	}
-	if !contains(t.prefixes, peer) {
+	if !t.trusted.contains(peer) {
 		s.noteCandidate(peer, r.Header)
 		return peer, false
 	}
@@ -155,11 +148,11 @@ func (s *Service) clientIP(r *http.Request) (netip.Addr, bool) {
 			break
 		}
 		client = a
-		if !contains(t.prefixes, a) {
+		if !t.trusted.contains(a) {
 			return a, true
 		}
 	}
-	if contains(t.cloudflare, client) {
+	if t.cloudflare.contains(client) {
 		if a, ok := parseHop(r.Header.Get("CF-Connecting-IP")); ok {
 			return a, true
 		}
@@ -225,7 +218,7 @@ func (s *Service) ProxyCandidates() []Candidate {
 	s.candMu.Lock()
 	out := make([]Candidate, 0, len(s.cands))
 	for a, c := range s.cands {
-		if contains(t.prefixes, a) {
+		if t.trusted.contains(a) {
 			delete(s.cands, a)
 			continue
 		}

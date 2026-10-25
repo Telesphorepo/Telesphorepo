@@ -64,6 +64,7 @@ export type Me = User & {
 export type UserRepoAccess = {
   repo: string;
   format: string;
+  kind: RepoKind;
   public: boolean;
   perms: PermId[];
   via: "all_repos" | "permission" | "public";
@@ -283,7 +284,8 @@ export type Repo = {
   format: string;
   description: string;
   anonymous_read: boolean;
-  config: RepoConfig;
+  /** GET of one repository only; a list leaves it out. */
+  config?: RepoConfig;
   /** The values of the module fields of the repository, e.g. {signing_key: "default"}. */
   fields: Record<string, unknown>;
   /** The caller's repository permissions on it; [] for a visitor of a public repository. */
@@ -309,6 +311,24 @@ export type Repo = {
   groups?: string[];
   /** A proxy: its remote. */
   proxy?: RepoProxy;
+};
+
+/** What GET /api/repos keeps: a name prefix, a format, a kind, the repositories where the caller holds one of perm. */
+export type RepoFilter = { q?: string; format?: string; kind?: RepoKind; perm?: PermId[] };
+
+/** A bounded count: `more` when it stopped at 10,000. */
+export type Count = { count: number; more: boolean };
+
+/** GET /api/overview. */
+export type Overview = {
+  /** Every repository for a holder of All repositories (`all`), else the ones where the caller holds more than download. */
+  repos: { all: boolean; count: number; files: number; size: number };
+  /** The largest of those repositories (up to 8) that store something. */
+  largest: Repo[];
+  /** The public repositories that are not groups. */
+  public_repos: number;
+  /** A holder of Manage people: the accounts. */
+  people?: Count;
 };
 
 /** An old name of a repository that still answers for it (GET /api/repos/{name}/redirects). */

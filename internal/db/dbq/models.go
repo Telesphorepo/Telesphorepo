@@ -39,7 +39,7 @@ type Asset struct {
 	Unit        sql.NullString
 }
 
-type AssetsFt struct {
+type AssetsSearch struct {
 	Path string
 }
 
@@ -98,6 +98,23 @@ type DownloadStat struct {
 	Bytes     int64
 }
 
+type DownloadWindowDay struct {
+	Day       int64
+	Downloads int64
+	Bytes     int64
+}
+
+type DownloadWindowRepo struct {
+	RepoID    int64
+	Downloads int64
+	Bytes     int64
+}
+
+type DownloadWindowState struct {
+	ID       int64
+	FirstDay int64
+}
+
 type GroupCount struct {
 	ID              int64
 	GroupID         int64
@@ -111,6 +128,10 @@ type GroupCountMember struct {
 	CountID  int64
 	Position int64
 	MemberID int64
+}
+
+type GroupCountPending struct {
+	CountID int64
 }
 
 type Rebuild struct {
@@ -177,6 +198,14 @@ type RepoRedirect struct {
 	RepoID     int64
 	CreatedAt  int64
 	LastUsedAt int64
+}
+
+type RepoTotal struct {
+	ID     int64
+	Repos  int64
+	Files  int64
+	Bytes  int64
+	Public int64
 }
 
 type Session struct {

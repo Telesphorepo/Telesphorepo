@@ -152,3 +152,109 @@ UPDATE repo_redirects SET repo_id = sqlc.arg(to_id) WHERE repo_id = sqlc.arg(fro
 
 -- name: RenameRepo :exec
 UPDATE repos SET name = ? WHERE id = ?;
+-- The lists of GET /api/repos (internal/repos list.go). A page by name is the names in
+-- [from, to): the keyset cursor and a name prefix in one range of an index (migration
+-- 0005_performance.sql). kind '' and format '' match every repo. The lists of the repos of a
+-- caller's grants are in dbq/extra.go (sqlc numbers the parameters after a slice wrongly).
+
+-- name: ListReposInRange :many
+SELECT r.id, r.name, r.format, r.kind, r.anonymous_read, r.config, r.created_at, r.description,
+  r.file_count, r.total_size, r.last_published_at,
+  o.id AS op_id, o.type AS op_type, o.owner AS op_owner, o.ref AS op_ref, o.state AS op_state, o.done AS op_done,
+  o.total AS op_total, o.error AS op_error, o.started_by AS op_started_by, o.started_at AS op_started_at,
+  o.updated_at AS op_updated_at
+FROM repos r LEFT JOIN repo_ops o ON o.repo_id = r.id
+WHERE r.name >= sqlc.arg(from) AND r.name < sqlc.arg(to) ORDER BY r.name LIMIT sqlc.arg(limit);
+
+-- name: ListReposOfFormat :many
+SELECT r.id, r.name, r.format, r.kind, r.anonymous_read, r.config, r.created_at, r.description,
+  r.file_count, r.total_size, r.last_published_at,
+  o.id AS op_id, o.type AS op_type, o.owner AS op_owner, o.ref AS op_ref, o.state AS op_state, o.done AS op_done,
+  o.total AS op_total, o.error AS op_error, o.started_by AS op_started_by, o.started_at AS op_started_at,
+  o.updated_at AS op_updated_at
+FROM repos r LEFT JOIN repo_ops o ON o.repo_id = r.id
+WHERE r.format = sqlc.arg(format) AND r.name >= sqlc.arg(from) AND r.name < sqlc.arg(to)
+  AND (CAST(sqlc.arg(kind) AS TEXT) = '' OR r.kind = sqlc.arg(kind))
+ORDER BY r.name LIMIT sqlc.arg(limit);
+
+-- name: ListReposOfKind :many
+SELECT r.id, r.name, r.format, r.kind, r.anonymous_read, r.config, r.created_at, r.description,
+  r.file_count, r.total_size, r.last_published_at,
+  o.id AS op_id, o.type AS op_type, o.owner AS op_owner, o.ref AS op_ref, o.state AS op_state, o.done AS op_done,
+  o.total AS op_total, o.error AS op_error, o.started_by AS op_started_by, o.started_at AS op_started_at,
+  o.updated_at AS op_updated_at
+FROM repos r LEFT JOIN repo_ops o ON o.repo_id = r.id
+WHERE r.kind = sqlc.arg(kind) AND r.name >= sqlc.arg(from) AND r.name < sqlc.arg(to) ORDER BY r.name LIMIT sqlc.arg(limit);
+
+-- The public repos, through repos_anonymous_name.
+-- name: ListAnonymousRepos :many
+SELECT r.id, r.name, r.format, r.kind, r.anonymous_read, r.config, r.created_at, r.description,
+  r.file_count, r.total_size, r.last_published_at,
+  o.id AS op_id, o.type AS op_type, o.owner AS op_owner, o.ref AS op_ref, o.state AS op_state, o.done AS op_done,
+  o.total AS op_total, o.error AS op_error, o.started_by AS op_started_by, o.started_at AS op_started_at,
+  o.updated_at AS op_updated_at
+FROM repos r LEFT JOIN repo_ops o ON o.repo_id = r.id
+WHERE r.anonymous_read = 1 AND r.name >= sqlc.arg(from) AND r.name < sqlc.arg(to)
+  AND (CAST(sqlc.arg(kind) AS TEXT) = '' OR r.kind = sqlc.arg(kind))
+ORDER BY r.name LIMIT sqlc.arg(limit);
+
+-- name: ListAnonymousReposOfFormat :many
+SELECT r.id, r.name, r.format, r.kind, r.anonymous_read, r.config, r.created_at, r.description,
+  r.file_count, r.total_size, r.last_published_at,
+  o.id AS op_id, o.type AS op_type, o.owner AS op_owner, o.ref AS op_ref, o.state AS op_state, o.done AS op_done,
+  o.total AS op_total, o.error AS op_error, o.started_by AS op_started_by, o.started_at AS op_started_at,
+  o.updated_at AS op_updated_at
+FROM repos r LEFT JOIN repo_ops o ON o.repo_id = r.id
+WHERE r.anonymous_read = 1 AND r.format = sqlc.arg(format) AND r.name >= sqlc.arg(from) AND r.name < sqlc.arg(to)
+  AND (CAST(sqlc.arg(kind) AS TEXT) = '' OR r.kind = sqlc.arg(kind))
+ORDER BY r.name LIMIT sqlc.arg(limit);
+
+-- The newest publishes first, through repos_published.
+-- name: ListReposByPublished :many
+SELECT r.id, r.name, r.format, r.kind, r.anonymous_read, r.config, r.created_at, r.description,
+  r.file_count, r.total_size, r.last_published_at,
+  o.id AS op_id, o.type AS op_type, o.owner AS op_owner, o.ref AS op_ref, o.state AS op_state, o.done AS op_done,
+  o.total AS op_total, o.error AS op_error, o.started_by AS op_started_by, o.started_at AS op_started_at,
+  o.updated_at AS op_updated_at
+FROM repos r LEFT JOIN repo_ops o ON o.repo_id = r.id
+ORDER BY r.last_published_at DESC, r.id DESC LIMIT sqlc.arg(limit);
+
+-- name: ListAnonymousReposByPublished :many
+SELECT r.id, r.name, r.format, r.kind, r.anonymous_read, r.config, r.created_at, r.description,
+  r.file_count, r.total_size, r.last_published_at,
+  o.id AS op_id, o.type AS op_type, o.owner AS op_owner, o.ref AS op_ref, o.state AS op_state, o.done AS op_done,
+  o.total AS op_total, o.error AS op_error, o.started_by AS op_started_by, o.started_at AS op_started_at,
+  o.updated_at AS op_updated_at
+FROM repos r LEFT JOIN repo_ops o ON o.repo_id = r.id
+WHERE r.anonymous_read = 1 ORDER BY r.last_published_at DESC, r.id DESC LIMIT sqlc.arg(limit);
+
+-- The repos of the names, through the UNIQUE name (at most a page of names).
+-- name: ListReposNamed :many
+SELECT r.id, r.name, r.format, r.kind, r.anonymous_read, r.config, r.created_at, r.description,
+  r.file_count, r.total_size, r.last_published_at,
+  o.id AS op_id, o.type AS op_type, o.owner AS op_owner, o.ref AS op_ref, o.state AS op_state, o.done AS op_done,
+  o.total AS op_total, o.error AS op_error, o.started_by AS op_started_by, o.started_at AS op_started_at,
+  o.updated_at AS op_updated_at
+FROM repos r LEFT JOIN repo_ops o ON o.repo_id = r.id
+WHERE r.name IN (sqlc.slice(names));
+
+-- The largest repos that store something, through repos_size.
+-- name: ListLargestRepos :many
+SELECT r.id, r.name, r.format, r.kind, r.anonymous_read, r.config, r.created_at, r.description,
+  r.file_count, r.total_size, r.last_published_at,
+  o.id AS op_id, o.type AS op_type, o.owner AS op_owner, o.ref AS op_ref, o.state AS op_state, o.done AS op_done,
+  o.total AS op_total, o.error AS op_error, o.started_by AS op_started_by, o.started_at AS op_started_at,
+  o.updated_at AS op_updated_at
+FROM repos r LEFT JOIN repo_ops o ON o.repo_id = r.id
+WHERE r.total_size > 0 ORDER BY r.total_size DESC, r.id DESC LIMIT sqlc.arg(limit);
+
+-- The totals of every repo (repo_totals, kept by triggers).
+-- name: GetRepoTotals :one
+SELECT repos, files, bytes, public FROM repo_totals WHERE id = 1;
+
+-- The totals of the repos of a caller's grants.
+-- name: SumReposIn :one
+SELECT count(*) AS repos, CAST(coalesce(sum(file_count), 0) AS INTEGER) AS files,
+  CAST(coalesce(sum(total_size), 0) AS INTEGER) AS bytes
+FROM repos WHERE id IN (sqlc.slice(ids));
+

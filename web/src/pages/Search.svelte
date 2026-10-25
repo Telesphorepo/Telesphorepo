@@ -9,7 +9,7 @@
   (search/hits.ts): a card per repository with its count of matches, and in it a row per folder
   that holds hits (an artifact folder takes in its version folders), with its folders and files as
   links; the checksums and signatures of a file fold into it. The matched text is marked in every
-  path. The first page counts the matches of every repository (up to 10,000 each, "10,000+"): the toolbar shows the total, and
+  path. The first page counts the matches of every repository (up to 1,000 each, "1,000+"): the toolbar shows the total, and
   with several repositories a line under it names each with its count, a link to search only it.
 -->
 <script lang="ts">
@@ -17,7 +17,7 @@
   import type { PageProps } from "$lib/router.svelte";
   import { filesPath, href, navigate } from "$lib/router.svelte";
   import { api, type SearchHit, type SearchRepo } from "$lib/api";
-  import { Keyset, Resource } from "$lib/load.svelte";
+  import { Keyset } from "$lib/load.svelte";
   import { openRow } from "$lib/pick.svelte";
   import { formatCount, formatSize } from "$lib/format";
   import { count } from "$lib/words";
@@ -48,10 +48,6 @@
   const q = $derived((query.get("q") ?? "").trim());
   const repo = $derived(query.get("repo") ?? "");
 
-  const repos = new Resource(() => api.repos.list());
-  // A group has no files of its own, so search does not offer it.
-  const searchable = $derived((repos.data ?? []).filter((r) => r.kind !== "group"));
-  const formatOf = (name: string) => searchable.find((r) => r.name === name)?.format ?? "";
 
   let results = $state<Keyset<SearchHit> | null>(null);
   // The matches of each repository, from the first page.
@@ -75,8 +71,9 @@
   const groups = $derived(groupHits(results?.items ?? []));
   const total = $derived(counts.reduce((n, c) => n + c.matches, 0));
   const totalMore = $derived(counts.some((c) => c.more));
-  /** "1,008 files", "10,000+ files": a count that stopped is at least that many. */
+  /** "208 files", "1,000+ files": a count that stopped is at least that many. */
   const files = (n: number, more: boolean) => (more ? `${formatCount(n)}+ files` : count(n, "file", "files"));
+  const formatOf = (name: string) => counts.find((c) => c.name === name)?.format ?? "";
   const filesOf = (name: string, loaded: number) => {
     const c = counts.find((x) => x.name === name);
     return c ? files(c.matches, c.more) : count(loaded, "file", "files");
@@ -200,7 +197,8 @@
   />
 {:else}
   <Toolbar>
-    <RepoPicker repos={searchable} value={repo} onchange={(r) => go(q, r)} />
+    <!-- A group has no files of its own, so search does not offer it. -->
+    <RepoPicker value={repo} format={formatOf(repo) || undefined} keep={(r) => r.kind !== "group"} onchange={(r) => go(q, r)} />
     {#snippet end()}
       {#if countText}<p class="text-meta text-muted-foreground" aria-live="polite">{countText}</p>{/if}
     {/snippet}

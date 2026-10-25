@@ -11,6 +11,15 @@ ON CONFLICT (repo_id, project) DO UPDATE SET display_name = excluded.display_nam
 UPDATE pypi_projects SET rev = max(rev + 1, CAST(sqlc.arg(at) AS INTEGER))
 WHERE repo_id = sqlc.arg(repo_id) AND project = sqlc.arg(project);
 
+-- Moves the revision of the project list of a repo on: rev becomes max(rev + 1, at).
+-- name: BumpIndex :exec
+INSERT INTO pypi_index_revs (repo_id, rev) VALUES (sqlc.arg(repo_id), CAST(sqlc.arg(at) AS INTEGER))
+ON CONFLICT (repo_id) DO UPDATE SET rev = max(pypi_index_revs.rev + 1, excluded.rev);
+
+-- The revision of the project list of a repo, through the primary key.
+-- name: GetIndexRev :one
+SELECT rev FROM pypi_index_revs WHERE repo_id = ?;
+
 -- The revision of a project of a hosted repo, through the primary key.
 -- name: GetProjectRev :one
 SELECT rev FROM pypi_projects WHERE repo_id = ? AND project = ?;

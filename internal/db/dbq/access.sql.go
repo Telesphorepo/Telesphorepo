@@ -7,6 +7,7 @@ package dbq
 
 import (
 	"context"
+	"database/sql"
 )
 
 const listRepoGrants = `-- name: ListRepoGrants :many
@@ -58,6 +59,108 @@ func (q *Queries) ListRepoGrants(ctx context.Context, repoID int64) ([]ListRepoG
 	return items, nil
 }
 
+const listReposVisibleTo = `-- name: ListReposVisibleTo :many
+SELECT r.id, r.name, r.format, r.kind, r.anonymous_read, r.config, r.created_at, r.description,
+  r.file_count, r.total_size, r.last_published_at,
+  o.id AS op_id, o.type AS op_type, o.owner AS op_owner, o.ref AS op_ref, o.state AS op_state, o.done AS op_done,
+  o.total AS op_total, o.error AS op_error, o.started_by AS op_started_by, o.started_at AS op_started_at,
+  o.updated_at AS op_updated_at
+FROM (
+  SELECT pub.id FROM (
+    SELECT x.id FROM repos x WHERE x.anonymous_read = 1 AND x.name > ?1 ORDER BY x.name LIMIT ?2
+  ) pub
+  UNION
+  SELECT own.id FROM (
+    SELECT y.id FROM repos y WHERE y.name > ?1
+      AND y.id IN (SELECT g.repo_id FROM repo_permissions g WHERE g.user_id = ?3)
+    ORDER BY y.name LIMIT ?2
+  ) own
+) v
+JOIN repos r ON r.id = v.id LEFT JOIN repo_ops o ON o.repo_id = r.id
+ORDER BY r.name LIMIT ?2
+`
+
+type ListReposVisibleToParams struct {
+	After  string
+	Limit  int64
+	UserID int64
+}
+
+type ListReposVisibleToRow struct {
+	ID              int64
+	Name            string
+	Format          string
+	Kind            string
+	AnonymousRead   bool
+	Config          string
+	CreatedAt       int64
+	Description     string
+	FileCount       int64
+	TotalSize       int64
+	LastPublishedAt int64
+	OpID            sql.NullInt64
+	OpType          sql.NullString
+	OpOwner         sql.NullString
+	OpRef           sql.NullString
+	OpState         sql.NullString
+	OpDone          sql.NullInt64
+	OpTotal         sql.NullInt64
+	OpError         sql.NullString
+	OpStartedBy     sql.NullInt64
+	OpStartedAt     sql.NullInt64
+	OpUpdatedAt     sql.NullInt64
+}
+
+// A keyset page by name of the repos a user can see: the repos they hold a grant on and the public
+// ones. Each side reads at most one page after the cursor (the public side in name order through
+// repos_anonymous_name, the grant side from the user's own grants), and the page is the first
+// rows of the two merged. The columns are those of ListRepos.
+func (q *Queries) ListReposVisibleTo(ctx context.Context, arg ListReposVisibleToParams) ([]ListReposVisibleToRow, error) {
+	rows, err := q.db.QueryContext(ctx, listReposVisibleTo, arg.After, arg.Limit, arg.UserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListReposVisibleToRow
+	for rows.Next() {
+		var i ListReposVisibleToRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Format,
+			&i.Kind,
+			&i.AnonymousRead,
+			&i.Config,
+			&i.CreatedAt,
+			&i.Description,
+			&i.FileCount,
+			&i.TotalSize,
+			&i.LastPublishedAt,
+			&i.OpID,
+			&i.OpType,
+			&i.OpOwner,
+			&i.OpRef,
+			&i.OpState,
+			&i.OpDone,
+			&i.OpTotal,
+			&i.OpError,
+			&i.OpStartedBy,
+			&i.OpStartedAt,
+			&i.OpUpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listUserGrants = `-- name: ListUserGrants :many
 SELECT p.repo_id, p.perm FROM repo_permissions p WHERE p.user_id = ?
 `
@@ -79,6 +182,40 @@ func (q *Queries) ListUserGrants(ctx context.Context, userID int64) ([]ListUserG
 	for rows.Next() {
 		var i ListUserGrantsRow
 		if err := rows.Scan(&i.RepoID, &i.Perm); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUserGrantsNamed = `-- name: ListUserGrantsNamed :many
+SELECT r.name, p.perm FROM repo_permissions p JOIN repos r ON r.id = p.repo_id WHERE p.user_id = ?
+`
+
+type ListUserGrantsNamedRow struct {
+	Name string
+	Perm string
+}
+
+// The grants of one user with the names of their repos, one row per permission, through
+// repo_permissions_user and the repos primary key.
+func (q *Queries) ListUserGrantsNamed(ctx context.Context, userID int64) ([]ListUserGrantsNamedRow, error) {
+	rows, err := q.db.QueryContext(ctx, listUserGrantsNamed, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUserGrantsNamedRow
+	for rows.Next() {
+		var i ListUserGrantsNamedRow
+		if err := rows.Scan(&i.Name, &i.Perm); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

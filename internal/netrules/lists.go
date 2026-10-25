@@ -97,7 +97,8 @@ type listState struct {
 	title, desc string
 	source      string
 	ranges      []netip.Prefix
-	fetchedAt   int64 // unix; 0: never (presets)
+	set         *ipSet // ranges compiled for lookup; storeList sets it
+	fetchedAt   int64  // unix; 0: never (presets)
 	err         string
 	createdAt   int64
 }
@@ -354,16 +355,17 @@ func (s *Service) Exists(name string) bool { return (*s.lists.Load())[name] != n
 // listByID returns list id (nil when it does not exist).
 func (s *Service) listByID(id int64) *listState { return (*s.ids.Load())[id] }
 
-// listRanges returns the current ranges of list id (nil when it does not exist).
-func (s *Service) listRanges(id int64) []netip.Prefix {
+// listSet returns the compiled ranges of list id (nil when it does not exist).
+func (s *Service) listSet(id int64) *ipSet {
 	if st := s.listByID(id); st != nil {
-		return st.ranges
+		return st.set
 	}
 	return nil
 }
 
-// storeList applies change to a copy of the snapshot and publishes it with its id index. Caller
-// holds listsMu.
+// storeList applies change to a copy of the snapshot and publishes it with its id index. Every
+// state that change added compiles its ranges (a change stores a new state, never edits one).
+// Caller holds listsMu.
 func (s *Service) storeList(change func(m map[string]*listState)) {
 	old := *s.lists.Load()
 	m := make(map[string]*listState, len(old)+1)
@@ -372,7 +374,10 @@ func (s *Service) storeList(change func(m map[string]*listState)) {
 	}
 	change(m)
 	ids := make(map[int64]*listState, len(m))
-	for _, v := range m {
+	for k, v := range m {
+		if old[k] != v {
+			v.set = newIPSet(v.ranges)
+		}
 		ids[v.id] = v
 	}
 	s.lists.Store(&m)

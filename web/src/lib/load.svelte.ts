@@ -1,7 +1,8 @@
 // Request state for pages. Every request shows loading, error and data states, so pages hold
 // one of these per request instead of their own flags.
 
-import { errorMessage, type Page, type PageParams } from "$lib/api";
+import { untrack } from "svelte";
+import { api, errorMessage, type Page, type PageParams } from "$lib/api";
 
 /**
  * One request and its state. Create it in a component's script; it loads at once.
@@ -77,6 +78,65 @@ export function listOf<T>(r: Resource<T[]>, filter?: (items: T[]) => T[]): Table
     },
     reload: r.reload,
   };
+}
+
+/**
+ * Two keyset lists as one source: every page of `a`, then the pages of `b` (the hosted
+ * repositories of a format, then its proxies).
+ */
+export function chain<T>(a: Keyset<T>, b: Keyset<T>): TableSource<T> {
+  return {
+    get items() {
+      return a.hasMore ? a.items : [...a.items, ...b.items];
+    },
+    get loading() {
+      return a.loading || (!a.hasMore && b.loading && b.items.length === 0 && a.items.length === 0);
+    },
+    get error() {
+      return a.error || (a.hasMore ? "" : b.error);
+    },
+    reload: () => Promise.all([a.reload(), b.reload()]),
+    get hasMore() {
+      return a.hasMore || b.hasMore;
+    },
+    get loadingMore() {
+      return a.loadingMore || b.loadingMore;
+    },
+    more: () => (a.hasMore ? a.more() : b.more()),
+  };
+}
+
+/**
+ * The format of each repository a page names (activity events, the repositories of signing keys
+ * and CI pipelines), read for the names it does not know yet (GET /api/repos?name=), a page at a
+ * time. Call want() with the names in an $effect; format() is "" until a name is known.
+ */
+export class RepoFormats {
+  #known = $state<Record<string, string>>({});
+  #asked = new Set<string>();
+
+  want(names: readonly string[]) {
+    const ask = [...new Set(names)].filter((n) => n && !this.#asked.has(n));
+    for (const n of ask) this.#asked.add(n);
+    for (let i = 0; i < ask.length; i += 200) {
+      const part = ask.slice(i, i + 200);
+      api.repos.named(part).then(
+        (rs) => (this.#known = { ...this.#known, ...Object.fromEntries(rs.map((r) => [r.name, r.format])) }),
+        () => part.forEach((n) => this.#asked.delete(n)),
+      );
+    }
+  }
+
+  /** Remembers formats the page has read already. */
+  add(repos: readonly { name: string; format: string }[]) {
+    for (const r of repos) this.#asked.add(r.name);
+    const add = repos.filter((r) => untrack(() => this.#known[r.name]) !== r.format);
+    if (add.length) this.#known = { ...this.#known, ...Object.fromEntries(add.map((r) => [r.name, r.format])) };
+  }
+
+  format(name: string): string {
+    return this.#known[name] ?? "";
+  }
 }
 
 /**

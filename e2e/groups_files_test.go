@@ -548,14 +548,16 @@ func groupCounters(t *testing.T, s *Server, repo string, auth Auth) (files, size
 		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo, nil, auth, &r)
 		if !r.CountsPending {
 			// The list of repositories answers the same counters.
-			var all []struct {
-				Name          string `json:"name"`
-				FileCount     int64  `json:"file_count"`
-				TotalSize     int64  `json:"total_size"`
-				CountsPending bool   `json:"counts_pending"`
+			var all struct {
+				Items []struct {
+					Name          string `json:"name"`
+					FileCount     int64  `json:"file_count"`
+					TotalSize     int64  `json:"total_size"`
+					CountsPending bool   `json:"counts_pending"`
+				} `json:"items"`
 			}
-			s.MustAPI(t, http.MethodGet, "/api/repos", nil, auth, &all)
-			for _, x := range all {
+			s.MustAPI(t, http.MethodGet, "/api/repos?name="+repo, nil, auth, &all)
+			for _, x := range all.Items {
 				if x.Name == repo && (x.CountsPending || x.FileCount != r.FileCount || x.TotalSize != r.TotalSize) {
 					t.Fatalf("the list of repositories has %+v for %s, GET of the repo %+v", x, repo, r)
 				}

@@ -353,9 +353,17 @@ func (s *Service) GetTrust(ctx context.Context, id int64) (*Trust, error) {
 }
 
 // Trusts returns a keyset page of the policies by name: names after after ("" first page).
-// next is the cursor of the next page, "" at the end.
-func (s *Service) Trusts(ctx context.Context, after string, limit int) ([]*Trust, string, error) {
-	rows, err := s.rq.ListTrusts(ctx, dbq.ListTrustsParams{After: after, Limit: int64(limit)})
+// next is the cursor of the next page, "" at the end. With all false only the policies that list at
+// least one repo and only repos among repoIDs are returned.
+func (s *Service) Trusts(ctx context.Context, all bool, repoIDs []int64, after string, limit int) ([]*Trust, string, error) {
+	var rows []dbq.PublishTrust
+	var err error
+	switch {
+	case all:
+		rows, err = s.rq.ListTrusts(ctx, dbq.ListTrustsParams{After: after, Limit: int64(limit)})
+	case len(repoIDs) > 0:
+		rows, err = s.rq.ListTrustsInRepos(ctx, dbq.ListTrustsInReposParams{After: after, RepoIds: repoIDs, Limit: int64(limit)})
+	}
 	if err != nil {
 		return nil, "", err
 	}
@@ -803,4 +811,21 @@ func (s *Service) reused(ctx context.Context, seen [32]byte, repo *repos.Repo) (
 	}
 	return &Minted{ID: p.Publish.ID, Repo: repo.Name, Format: repo.Format, Kind: repo.Kind, RepoID: repo.ID,
 		Subject: p.Publish.Subject, Via: ViaOIDC, Reused: true, Session: p.Publish}, nil
+}
+
+// trustCountCap is where the count of every pipeline stops (the Settings overview: "10,000+").
+const trustCountCap = 10000
+
+// CountTrusts counts the pipelines of a scope: every one (all, up to trustCountCap; more is true
+// past it), or those whose every repo is among ids.
+func (s *Service) CountTrusts(ctx context.Context, all bool, ids []int64) (n int64, more bool, err error) {
+	if all {
+		n, err = s.rq.CountTrustsUpTo(ctx, trustCountCap+1)
+		return min(n, trustCountCap), n > trustCountCap, err
+	}
+	if len(ids) == 0 {
+		return 0, false, nil
+	}
+	n, err = s.rq.CountTrustsWithin(ctx, ids)
+	return n, false, err
 }
