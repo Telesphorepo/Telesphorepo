@@ -67,7 +67,80 @@ var (
 		Help: "The name that the top bar, the sign-in page and the browser tab show. Empty shows Telesphorepo."})
 	ServerLogo = Image(&Def{Key: "server_logo", Label: "Logo", Validate: validLogo,
 		Help: "A PNG, JPEG or WebP image of at most 256 KiB and 512 pixels on its long side, shown before the server name."})
+	RepoDomains = List(&Def{Key: "repo_domains", Label: "Repository domains",
+		Help: "Domains that each serve the files of one repository at their root, each as <domain>=<repository>, for example updater.example.com=releases. A domain only reads: GET and HEAD, with the same access as the repository's own address. Point the domain at this server first (DNS and the reverse proxy). Docker repositories cannot have one.",
+		Normalize: normalizeDomains, Validate: validDomains})
 )
+
+// normalizeDomains puts each line of repo_domains in the form host=repo: lower case, without
+// spaces around the parts, without a trailing dot on the host.
+func normalizeDomains(v any) any {
+	l, _ := v.([]string)
+	out := make([]string, 0, len(l))
+	for _, e := range l {
+		h, r, _ := strings.Cut(strings.ToLower(strings.TrimSpace(e)), "=")
+		out = append(out, strings.TrimSuffix(strings.TrimSpace(h), ".")+"="+strings.TrimSpace(r))
+	}
+	return out
+}
+
+// validDomains checks the form of repo_domains: each line a DNS name, "=", a repo name, and each
+// domain once. Whether the repo exists and suits a domain is checked when the setting is saved
+// (the server adds that check to the group).
+func validDomains(v any) error {
+	seen := map[string]bool{}
+	for _, e := range v.([]string) {
+		h, r, _ := strings.Cut(e, "=")
+		switch {
+		case r == "":
+			return fmt.Errorf("%q: write it as <domain>=<repository>", e)
+		case !DNSName(h):
+			return fmt.Errorf("%q: %s is not a domain name (letters, digits and hyphens in dot-separated labels, no port)", e, h)
+		case seen[h]:
+			return fmt.Errorf("%s is listed twice", h)
+		}
+		seen[h] = true
+	}
+	return nil
+}
+
+// DNSName reports whether s is a lower-case DNS host name of at least two labels: no port, no
+// IP address, each label 1 to 63 letters, digits and hyphens without a hyphen at either end.
+func DNSName(s string) bool {
+	if len(s) == 0 || len(s) > 253 {
+		return false
+	}
+	labels := strings.Split(s, ".")
+	if len(labels) < 2 {
+		return false
+	}
+	for _, l := range labels {
+		if len(l) == 0 || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(l); i++ {
+			if c := l[i]; !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+				return false
+			}
+		}
+	}
+	// The last label of a name is never all digits: that is an IPv4 address.
+	return strings.ContainsFunc(labels[len(labels)-1], func(r rune) bool { return r < '0' || r > '9' })
+}
+
+// domainsView is repo_domains as a map of domain to repo name, built once per snapshot.
+var domainsView = NewView(func(s *Snapshot) map[string]string {
+	out := map[string]string{}
+	for _, e := range RepoDomains.Get(s) {
+		if h, r, ok := strings.Cut(e, "="); ok && h != "" && r != "" {
+			out[h] = r
+		}
+	}
+	return out
+})
+
+// DomainsOf returns repo_domains of s: domain -> repo name. The caller must not change the map.
+func DomainsOf(s *Snapshot) map[string]string { return domainsView.Get(s) }
 
 // The limits of the server name and the logo.
 const (
@@ -128,7 +201,7 @@ func validateGeneral(d *Draft, _ Mode) error {
 // settings.general on Settings > General.
 func General() *Group {
 	return &Group{ID: "general", Label: "General", Perm: perm.SettingsGeneral, Defs: []*Def{
-		BaseURL.Def(), LogLevel.Def(), MaxUploadSize.Def(), MaxJSONSize.Def(), CookieSecure.Def(), SessionTTL.Def(),
+		BaseURL.Def(), RepoDomains.Def(), LogLevel.Def(), MaxUploadSize.Def(), MaxJSONSize.Def(), CookieSecure.Def(), SessionTTL.Def(),
 		IndexDebounce.Def(), IndexMaxDelay.Def(), BlobsGCGrace.Def(), UploadSessionTTL.Def(), TLSCertFile.Def(), TLSKeyFile.Def(),
 		ServerName.Def(), ServerLogo.Def(),
 	}, Validate: validateGeneral}

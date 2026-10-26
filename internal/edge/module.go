@@ -10,8 +10,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"maps"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -70,6 +72,8 @@ func Module() module.Module {
 			x.Job(jobs.Job{Name: "edge.reconcile", Every: 5 * time.Minute, Tick: m.reconcile})
 			x.Job(jobs.Job{Name: "edge.seen", Every: time.Minute, Tick: m.seen})
 			x.RootPrefix(checkPrefix)
+			// The Worker answers the check on every route, a repo domain's too.
+			x.DomainPath(checkPrefix)
 			x.Routes(m.routes)
 		},
 	}
@@ -239,6 +243,18 @@ type view struct {
 	gone     []*bucket // the removed regions whose drain runs: the pre-steps only
 	until    time.Time // modeDrain: the pre-steps run until then; zero while the off switch is not written
 	ttl      time.Duration
+	domains  string // the repo domains that config.json lists (domainsKey)
+}
+
+// domainsKey is the repo domains of s (module.Kernel.RepoDomains) as one string: a change of it
+// writes config.json.
+func (m *mod) domainsKey(s *settings.Snapshot) string {
+	d := m.h.RepoDomains(s)
+	lines := make([]string, 0, len(d))
+	for _, host := range slices.Sorted(maps.Keys(d)) {
+		lines = append(lines, host+"="+d[host])
+	}
+	return strings.Join(lines, "\n")
 }
 
 // all returns the home bucket and the regions: the buckets that the outbox writes.

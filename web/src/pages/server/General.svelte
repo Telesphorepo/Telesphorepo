@@ -58,6 +58,6 @@
   <CompactEmpty icon={SlidersIcon} text="This server has no general settings." />
 {:else}
   <FormPage>
-    <SettingsGroupForm settings={all} label="General settings" {sections} fields={{ server_logo: { control: logo } }} onSaved={saved} />
+    <SettingsGroupForm settings={all} label="General settings" {sections} fields={{ server_logo: { control: logo }, repo_domains: { placeholder: "updater.example.com=releases, then Enter" } }} onSaved={saved} />
   </FormPage>
 {/if}

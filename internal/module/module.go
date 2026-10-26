@@ -86,6 +86,8 @@ type Manifest struct {
 	Guards        []access.Guard
 	CIProviders   []ci.Provider
 	ResolveClient func(r *http.Request) httpx.Client
+	Hosts         []func(s *settings.Snapshot) string
+	DomainPaths   []string
 	TokenKinds    []TokenKind
 	Demo          *DemoData
 	Seed          SeedFunc
@@ -204,6 +206,15 @@ func (x *Extender) ResolveClient(fn func(r *http.Request) httpx.Client) {
 	}
 	x.m.ResolveClient = fn
 }
+
+// Host adds a host that the server answers for besides the host of base_url and the loopback
+// names: fn returns it for the settings s, in lower case without a port, or "" for none (e.g. the
+// host of docker.upload_url). A request to any other host gets 421 once base_url is set.
+func (x *Extender) Host(fn func(s *settings.Snapshot) string) { x.m.Hosts = append(x.m.Hosts, fn) }
+
+// DomainPath keeps the routes of prefix, a root prefix of the module (RootPrefix), on a repo
+// domain (the setting repo_domains), where every other path is a file of the domain's repo.
+func (x *Extender) DomainPath(prefix string) { x.m.DomainPaths = append(x.m.DomainPaths, prefix) }
 
 // TokenKind registers the verifier of the tokens with prefix p (see auth.Verifier).
 func (x *Extender) TokenKind(p token.Prefix, v auth.Verifier) {

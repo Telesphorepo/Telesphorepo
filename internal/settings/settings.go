@@ -491,11 +491,13 @@ func (s *Service) draft(patch map[string]json.RawMessage, groups []*Group) (*Dra
 	s.withDegraded(next, skip)
 	d := newDraft(next, cur)
 	for _, g := range groups {
-		if g.Validate == nil {
-			continue
+		if g.Validate != nil {
+			if err := g.Validate(d, ModeChange); err != nil {
+				return nil, nil, nil, &ValidationError{Message: err.Error(), Fields: d.fields}
+			}
 		}
-		if err := g.Validate(d, ModeChange); err != nil {
-			return nil, nil, nil, &ValidationError{Message: err.Error(), Fields: d.fields}
+		for _, fn := range g.checks {
+			fn(d)
 		}
 	}
 	if d.Failed() {

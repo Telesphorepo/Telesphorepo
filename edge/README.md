@@ -7,7 +7,10 @@ server would give the same answer, and it passes every other request to your ser
 You need:
 
 - a Telesphorepo server with `storage = s3` on Cloudflare R2 and a base URL without a path,
-- the base URL host on a Cloudflare zone, not behind Cloudflare Access,
+- the base URL host on a Cloudflare zone of the account of the R2 buckets, not behind Cloudflare
+  Access, and each repository domain (Settings › General) on a zone of that account too: a route
+  must be on a zone of the Worker's account, so take the route of a domain elsewhere out of the
+  `wrangler.jsonc`, and the server serves that domain itself,
 - [bun](https://bun.sh) and Node 22 or newer,
 - a Cloudflare login with access to Workers, R2 and Queues of the account of the R2 buckets.
 
@@ -41,7 +44,8 @@ that the request reached the server, the Worker is not deployed on that host or 
 again. Regions fill while edge delivery is on: the server writes their pointers, and the Worker
 copies their files at each gap check (every 10 minutes, or Check now).
 
-After you change the regions, download the Worker again and run provision and deploy. When Settings
+After you change the regions, download the Worker again and run provision and deploy. After you
+add or remove a repository domain, download it again and deploy. When Settings
 › Overview says the Worker is outdated, download it again and deploy it: until then it sends every
 request to your server. Other server releases need no deploy. After you remove a region, deploy again, then delete its bucket in
 Cloudflare.

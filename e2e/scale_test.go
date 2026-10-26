@@ -58,6 +58,10 @@ const (
 // The bootstrap admin of every data folder. Its read token authenticates every request.
 const scaleAdmin, scalePass = "admin", "scale-admin-password-1"
 
+// scaleDomain is the repo domain of the first seeded maven repo (the seed names its repos
+// seed-<format>-<nn>), set by the environment of every measured server.
+const scaleDomain, scaleDomainRepo = "maven.scale.example", "seed-maven-00"
+
 // scaleServer is one server of the comparison.
 type scaleServer struct {
 	name   string // "100k", "1M" or "A/A" (the copy of the 100k data)
@@ -102,7 +106,8 @@ func TestScale(t *testing.T) {
 		t.Fatalf("copy the 100k data for the A/A control: %v", err)
 	}
 
-	env := []string{"TR_BOOTSTRAP_ADMIN_USER=" + scaleAdmin, "TR_BOOTSTRAP_ADMIN_PASSWORD=" + scalePass}
+	env := []string{"TR_BOOTSTRAP_ADMIN_USER=" + scaleAdmin, "TR_BOOTSTRAP_ADMIN_PASSWORD=" + scalePass,
+		"TR_REPO_DOMAINS=" + scaleDomain + "=" + scaleDomainRepo}
 	if serverCPUs != nil {
 		// The Go runtime of each server sizes itself to its own CPUs, not to the client's that it
 		// starts on.
@@ -136,8 +141,8 @@ func TestScale(t *testing.T) {
 			break
 		}
 	}
-	if mvn == "" {
-		t.Fatal("seed created no maven repo")
+	if mvn != scaleDomainRepo {
+		t.Fatalf("the first maven repo is %q, want %s", mvn, scaleDomainRepo)
 	}
 	var page struct {
 		Items []struct {
@@ -162,6 +167,9 @@ func TestScale(t *testing.T) {
 		{name: "maven-get", path: func(*scaleServer) string { return "/maven/" + mvn + "/" + sample.Path },
 			// The seeded rows have no blobs: a matching If-None-Match answers 304 from the row alone.
 			hdr: map[string]string{"If-None-Match": `"` + sample.SHA256 + `"`}, ok: []int{http.StatusNotModified}},
+		// The same file through the repo domain: the host check, the rewrite, the same route.
+		{name: "domain-get", path: func(*scaleServer) string { return "/" + sample.Path },
+			hdr: map[string]string{"Host": scaleDomain, "If-None-Match": `"` + sample.SHA256 + `"`}, ok: []int{http.StatusNotModified}},
 		{name: "asset-page", ok: []int{http.StatusOK},
 			path: func(s *scaleServer) string {
 				return "/api/repos/" + mvn + "/assets?limit=100&after=" + url.QueryEscape(s.cursor)
@@ -188,10 +196,19 @@ func TestScale(t *testing.T) {
 		{name: "repo-page", path: func(*scaleServer) string { return "/api/repos?limit=50" }, ok: []int{http.StatusOK}},
 	}
 	for _, s := range servers {
-		if _, _, err := scaleDo(s, ops[0], false); err != nil {
-			t.Fatalf("sample %s at %s: %v", sample.Path, s.name, err)
+		for _, op := range ops[:2] { // maven-get and domain-get: 304 for the sample
+			if _, _, err := scaleDo(s, op, false); err != nil {
+				t.Fatalf("%s of the sample %s at %s: %v", op.name, sample.Path, s.name, err)
+			}
 		}
-		for _, q := range []string{ops[2].path(s), ops[4].path(s)} {
+		// The 304 of domain-get comes from the repo-domain rewrite only while the host check
+		// runs: base_url (TR_BASE_URL of the native server) is set, so another host gets 421.
+		other := scaleOp{path: func(*scaleServer) string { return "/" + sample.Path },
+			hdr: map[string]string{"Host": "other.scale.example"}, ok: []int{http.StatusMisdirectedRequest}}
+		if _, _, err := scaleDo(s, other, false); err != nil {
+			t.Fatalf("a host that is no repo domain at %s: %v", s.name, err)
+		}
+		for _, q := range []string{ops[3].path(s), ops[5].path(s)} { // search-rare and search-shared
 			if b := scaleGet(t, s, q); !strings.Contains(string(b), sample.Path) {
 				t.Fatalf("%s at %s does not find %q: %s", q, s.name, sample.Path, b)
 			}
@@ -405,6 +422,10 @@ func scaleDo(s *scaleServer, op scaleOp, next bool) (int64, []byte, error) {
 	}
 	req.SetBasicAuth(scaleAdmin, s.token)
 	for k, v := range op.hdr {
+		if k == "Host" {
+			req.Host = v
+			continue
+		}
 		req.Header.Set(k, v)
 	}
 	start := scaleNow()

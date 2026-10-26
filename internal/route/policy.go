@@ -57,7 +57,8 @@ type Policy struct {
 	// OCI error JSON) sets it.
 	Errors ErrorWriter
 	// Challenge sets the WWW-Authenticate header of a 401. nil: a Basic challenge on a route
-	// outside /api/, none under /api/ and none for a request of the web UI (auth.UIHeader).
+	// outside /api/, none under /api/ and none for a request of the web UI (auth.UIHeader) unless
+	// it came to a repo domain (OnRepoDomain), where no web UI runs.
 	Challenge Challenger
 }
 
@@ -175,7 +176,7 @@ func BasicChallenge(w http.ResponseWriter, _ *http.Request, _ access.Decision) {
 // refuse writes the refusal d: the challenge of a 401, the Allow header of a write to a
 // read-only repo, then the ErrorWriter, or Refuse without one.
 func (p Policy) refuse(w http.ResponseWriter, r *http.Request, d access.Decision) {
-	if d.Status == http.StatusUnauthorized && r.Header.Get(auth.UIHeader) != "1" {
+	if d.Status == http.StatusUnauthorized && (r.Header.Get(auth.UIHeader) != "1" || OnRepoDomain(r)) {
 		switch {
 		case p.Challenge != nil:
 			p.Challenge(w, r, d)

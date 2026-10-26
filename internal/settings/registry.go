@@ -143,6 +143,20 @@ type Group struct {
 	Test func(ctx context.Context, d *Draft) error
 	// Apply runs before a PATCH of the group saves. It may take the change over (Applied).
 	Apply func(ctx context.Context, c *ApplyCall) (*Applied, error)
+
+	checks []func(d *Draft) // AddCheck
+}
+
+// AddCheck adds a check of a change of group id that needs services outside the owner module
+// (e.g. that a repo named by a setting exists). It runs after the group's Validate on every PATCH
+// and test of the group (ModeChange), never at startup, and records field errors with d.Fail.
+// Call it before the server serves.
+func (s *Service) AddCheck(id string, fn func(d *Draft)) {
+	g := s.reg.byID[id]
+	if g == nil {
+		panic("settings: AddCheck of unknown group " + id)
+	}
+	g.checks = append(g.checks, fn)
 }
 
 // Draft is a set of values that a group's Validate or Test checks.

@@ -176,7 +176,8 @@ func Components() ([]db.Component, error) {
 //     audit, auth, assets, proxy, access, the job runner.
 //  6. Each module's Init, in start order; an error stops startup. Then the token kinds, the
 //     guards of the access engine and the jobs of every module.
-//  7. The routes of every module on one route table, plus GET /healthz and the web UI.
+//  7. The routes of every module on one route table, plus GET /healthz and the web UI, behind
+//     the host check (hosts.ServeHTTP: repo domains, 421 for a host the server does not answer).
 //  8. Options.Init, then the bootstrap admin when there are no users.
 //  9. The Start of every job, in start order; an error stops startup.
 //  10. Listen; then the Run and Tick loops of every job.
@@ -316,6 +317,17 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 		io.WriteString(w, "ok\n")
 	}))
 	mux.Kernel("/", web.Handler())
+	var extraHosts []func(*settings.Snapshot) string
+	var domainPaths []string
+	for _, m := range b.Manifests {
+		extraHosts = append(extraHosts, m.Hosts...)
+		domainPaths = append(domainPaths, m.DomainPaths...)
+	}
+	hostCheck := newHosts(set, k.Repos, b.Formats, mux, extraHosts, domainPaths)
+	set.AddCheck("general", hostCheck.checkDomains)
+	k.RepoDomains = hostCheck.domains
+	hostCheck.warnShadowed(log, set.Current())
+	set.Subscribe(func(_, new *settings.Snapshot) { hostCheck.warnShadowed(log, new) })
 
 	if opts.Init != nil {
 		s := &Services{Boot: boot, Settings: set, Auth: k.Auth, Repos: k.Repos, DB: d, Assets: k.Assets,
@@ -333,7 +345,7 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 	}
 	srv := &http.Server{
 		Addr:              boot.Listen,
-		Handler:           versionHeader(version, resolveClient(resolve, accessLog(log, mux.Handler()))), // the client first, then the log
+		Handler:           versionHeader(version, resolveClient(resolve, accessLog(log, hostCheck))), // the client first, then the log, then the host
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    64 << 10,

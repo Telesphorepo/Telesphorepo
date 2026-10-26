@@ -1,5 +1,6 @@
 // The edge Worker of Telesphorepo: it answers a GET or HEAD of a format route only when it can
 // prove that the origin would give the same answer, and passes every other request to the origin.
+// A request on a repo domain (config.json `domains`) reads the format route of the domain's repo.
 // It never refuses: every 4xx comes from the origin. It answers 502 itself only when it cannot
 // reach the origin.
 
@@ -30,7 +31,7 @@ import { gap } from "./gap";
 import { immutable, immutableBy } from "./glob";
 import { type Pointer, parsePointer, serve } from "./serve";
 import { OVERRIDE_HEADER, PASS_HEADER, REGION_HEADER, type Override, parseOverride, passValid } from "./speedtest";
-import { parseTarget } from "./shapes";
+import { parseTarget, rawPath } from "./shapes";
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -231,7 +232,11 @@ async function edge(request: Request, env: Env, ctx: ExecutionContext, override:
   const { config, objects } = loaded;
   if (!config.enabled || !config.homeReady || !config.serves) return null;
   if (config.homeBucket === "") return null;
-  const target = parseTarget(request.url, config.formats);
+  let routed: string | null = request.url;
+  const domain = config.domains.get(url.hostname.toLowerCase());
+  if (domain !== undefined) routed = await onDomain(request.url, domain, config, objects);
+  if (!routed) return null;
+  const target = parseTarget(routed, config.formats);
   if (!target) return null;
   const caller: Caller | null = await parseCaller(request, target.format.shape, config);
   if (!caller) return null;
@@ -315,6 +320,20 @@ async function edge(request: Request, env: Env, ctx: ExecutionContext, override:
     answer.headers.set("Server-Timing", timing.join(", "));
   }
   return answer;
+}
+
+// onDomain maps a request on the repo domain of repo name to the format route of its repo, as the
+// server does: path P of the domain is /<format>/<repo>P, its escaping kept. null when the server
+// answers: "/", a repo whose object this Worker cannot read, or a format that the edge does not
+// serve under /<format>/.
+async function onDomain(requestURL: string, name: string, config: Config, objects: Objects): Promise<string | null> {
+  const raw = rawPath(requestURL);
+  if (raw === "/") return null;
+  const repo = await repoObject(objects, name);
+  if (!repo) return null;
+  const f = config.formats.find((x) => x.name === repo.format);
+  if (!f || f.shape !== "standard" || f.prefix !== "/" + repo.format + "/") return null;
+  return new URL(requestURL).origin + f.prefix + encodeURIComponent(repo.name) + raw;
 }
 
 // groupPointer walks the members of a group in order, like assets.Reader.Resolve, and returns the
