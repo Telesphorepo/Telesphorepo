@@ -257,6 +257,16 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 	// write outlives the database.
 	defer k.Auth.Wait()
 	defer k.Jobs.Stop()
+	// The repo domains answer before any Init: the edge module reads them when it starts on its
+	// saved state.
+	var extraHosts []func(*settings.Snapshot) string
+	var domainPaths []string
+	for _, m := range b.Manifests {
+		extraHosts = append(extraHosts, m.Hosts...)
+		domainPaths = append(domainPaths, m.DomainPaths...)
+	}
+	hostCheck := newHosts(set, k.Repos, b.Formats, extraHosts, domainPaths)
+	k.RepoDomains = hostCheck.domains
 	shared := module.NewShared()
 	hosts := make([]*module.Host, len(b.Manifests))
 	for i, m := range b.Manifests {
@@ -317,15 +327,8 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 		io.WriteString(w, "ok\n")
 	}))
 	mux.Kernel("/", web.Handler())
-	var extraHosts []func(*settings.Snapshot) string
-	var domainPaths []string
-	for _, m := range b.Manifests {
-		extraHosts = append(extraHosts, m.Hosts...)
-		domainPaths = append(domainPaths, m.DomainPaths...)
-	}
-	hostCheck := newHosts(set, k.Repos, b.Formats, mux, extraHosts, domainPaths)
+	hostCheck.attach(mux)
 	set.AddCheck("general", hostCheck.checkDomains)
-	k.RepoDomains = hostCheck.domains
 	hostCheck.warnShadowed(log, set.Current())
 	set.Subscribe(func(_, new *settings.Snapshot) { hostCheck.warnShadowed(log, new) })
 
