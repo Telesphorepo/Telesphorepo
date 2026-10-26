@@ -46,9 +46,11 @@ type hosts struct {
 // lines whose domain is a host of the server itself (module.Kernel.RepoDomains).
 func (h *hosts) domains(s *settings.Snapshot) map[string]string { return h.served.Get(s) }
 
-func newHosts(set *settings.Service, rs *repos.Service, formats *format.Registry, mux *route.Mux,
+// newHosts returns the host check without its route table: domains answers before the modules'
+// Init, which reads it (the edge module at startup); attach gives it the route table.
+func newHosts(set *settings.Service, rs *repos.Service, formats *format.Registry,
 	extra []func(*settings.Snapshot) string, paths []string) *hosts {
-	h := &hosts{set: set, repos: rs, formats: formats, mux: mux, next: mux.Handler()}
+	h := &hosts{set: set, repos: rs, formats: formats}
 	h.view = settings.NewView(func(s *settings.Snapshot) *hostSet {
 		hs := &hostSet{own: map[string]bool{}, paths: paths}
 		base := settings.BaseURL.Get(s)
@@ -78,6 +80,11 @@ func newHosts(set *settings.Service, rs *repos.Service, formats *format.Registry
 		return out
 	})
 	return h
+}
+
+// attach gives the host check the route table that it serves and that its checks read.
+func (h *hosts) attach(mux *route.Mux) {
+	h.mux, h.next = mux, mux.Handler()
 }
 
 // shadowed returns the lines of repo_domains in s whose domain is a host of the server itself

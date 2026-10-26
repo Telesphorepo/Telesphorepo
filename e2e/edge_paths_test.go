@@ -206,6 +206,16 @@ func TestEdgePathRules(t *testing.T) {
 		return reflect.DeepEqual(a, [][]any{{"**", true}}) && reflect.DeepEqual(b, [][]any{{"**", false}}), fmt.Sprintf("%v and %v", a, b)
 	})
 
+	// A restart with edge delivery on starts the module on its saved state, before the routes.
+	s.Restart(t)
+	var st struct {
+		Mode string `json:"mode"`
+	}
+	s.MustAPI(t, http.MethodGet, "/api/edge/status", nil, s.Admin(), &st)
+	if st.Mode != "on" {
+		t.Fatalf("edge mode after a restart = %q, want on", st.Mode)
+	}
+
 	// latest.json becomes replaceable while the builds stay.
 	s.MustAPI(t, http.MethodPatch, "/api/repos/"+name, map[string]any{"config": map[string]any{
 		"overwrite": "deny", "rules": []map[string]string{{"match": "latest.json", "overwrite": "allow"}},
