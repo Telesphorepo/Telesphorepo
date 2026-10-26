@@ -349,8 +349,10 @@ type SearchCount struct {
 // searchRarestSegments how many of its rarest segments the segment index matches, and
 // searchProbe and segmentProbe how many paths of a trigram and of a segment a search counts to
 // rank them: a rare one counts under it, a common one stops there. A file name has a few paths at
-// any size, so segmentProbe is small enough that a common segment stops at it on every server,
-// and the probes cost the same at any size.
+// any size, so segmentProbe is small enough that a common segment stops at it on every server.
+// When every segment of q reaches segmentProbe (a directory, or a file name that many repos
+// share), they are counted again up to searchProbe, so a segment of a few hundred paths still
+// picks the segment index once the server grows; each probe reads at most its bound at any size.
 const (
 	searchRarest         = 3
 	searchRarestSegments = 2
@@ -370,9 +372,10 @@ type search struct {
 // than 3 characters, repoIDs is empty and not nil, or a segment or a trigram of q is in no path.
 // The probes read at most searchProbe rows each, and the search picks the most selective query:
 //   - a segment of q (a component between its slashes, the last one as a prefix) that fewer than
-//     segmentProbe paths hold: the segment index matches q's searchRarestSegments rarest segments
-//     and keeps the paths that hold q, so a path or a file name after a slash reads the rows of
-//     its rarest segment, which stay few at any size;
+//     segmentProbe paths hold, or, when every segment reaches segmentProbe, fewer than
+//     searchProbe: the segment index matches q's searchRarestSegments rarest segments and keeps
+//     the paths that hold q, so a path, a directory or a file name after a slash reads the rows
+//     of its rarest segment;
 //   - else a trigram of q that fewer than searchProbe paths hold: the trigram index matches q's
 //     searchRarest rarest trigrams and keeps the paths that hold q;
 //   - else (q of 3 characters, with a character outside ASCII, or of common pieces only) q as one
@@ -398,8 +401,9 @@ func newSearch(ctx context.Context, dq *dbq.Queries, q string, repoIDs []int64) 
 		rows int64
 	}
 	// rank probes the FTS5 queries of q's pieces in index x, each up to probe paths, rarest first;
-	// ok is false when one matches no path.
-	rank := func(x dbq.SearchIndex, pieces []string, probe int64) ([]piece, bool, error) {
+	// ok is false when one matches no path. With fewest, each probe after the first stops at the
+	// fewest paths a piece holds so far: a piece that holds more is not the rarest.
+	rank := func(x dbq.SearchIndex, pieces []string, probe int64, fewest bool) ([]piece, bool, error) {
 		var out []piece
 		seen := map[string]bool{}
 		for _, t := range pieces {
@@ -412,6 +416,9 @@ func newSearch(ctx context.Context, dq *dbq.Queries, q string, repoIDs []int64) 
 				return nil, false, err // no path holds it, so none holds q
 			}
 			out = append(out, piece{t, n})
+			if fewest {
+				probe = n
+			}
 		}
 		slices.SortStableFunc(out, func(a, b piece) int { return cmp.Compare(a.rows, b.rows) })
 		return out, true, nil
@@ -424,11 +431,20 @@ func newSearch(ctx context.Context, dq *dbq.Queries, q string, repoIDs []int64) 
 		return strings.Join(parts, " AND ")
 	}
 	if segs := segmentQueries(q, quote); len(segs) > 0 {
-		ranked, ok, err := rank(dbq.SearchSegments, segs, segmentProbe)
+		ranked, ok, err := rank(dbq.SearchSegments, segs, segmentProbe, false)
 		if err != nil || !ok {
 			return search{}, false, err
 		}
-		if ranked[0].rows < segmentProbe {
+		if ranked[0].rows >= segmentProbe {
+			// Every segment reaches segmentProbe: count them again up to searchProbe, the
+			// deepest first (the rarest, in a path), each up to the fewest paths so far.
+			deep := slices.Clone(segs)
+			slices.Reverse(deep)
+			if ranked, ok, err = rank(dbq.SearchSegments, deep, searchProbe, true); err != nil || !ok {
+				return search{}, false, err
+			}
+		}
+		if ranked[0].rows < searchProbe {
 			s.index, s.match, s.text = dbq.SearchSegments, and(ranked, searchRarestSegments), q
 			return s, true, nil
 		}
@@ -438,7 +454,7 @@ func newSearch(ctx context.Context, dq *dbq.Queries, q string, repoIDs []int64) 
 	for i := 0; i+3 <= len(lower); i++ {
 		tris = append(tris, quote(lower[i:i+3]))
 	}
-	ranked, ok, err := rank(dbq.SearchTrigrams, tris, searchProbe)
+	ranked, ok, err := rank(dbq.SearchTrigrams, tris, searchProbe, false)
 	if err != nil || !ok {
 		return search{}, false, err
 	}
