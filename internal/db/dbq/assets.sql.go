@@ -658,6 +658,20 @@ func (q *Queries) SetAssetTimes(ctx context.Context, arg SetAssetTimesParams) er
 	return err
 }
 
+const setUploadExpiry = `-- name: SetUploadExpiry :exec
+UPDATE upload_sessions SET expires_at = ? WHERE id = ?
+`
+
+type SetUploadExpiryParams struct {
+	ExpiresAt int64
+	ID        string
+}
+
+func (q *Queries) SetUploadExpiry(ctx context.Context, arg SetUploadExpiryParams) error {
+	_, err := q.db.ExecContext(ctx, setUploadExpiry, arg.ExpiresAt, arg.ID)
+	return err
+}
+
 const setUploadReceived = `-- name: SetUploadReceived :exec
 UPDATE upload_sessions SET received = ?, updated_at = ?, expires_at = ? WHERE id = ?
 `

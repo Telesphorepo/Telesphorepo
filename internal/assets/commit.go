@@ -74,6 +74,8 @@ type Write struct {
 	Origin      Origin
 	Locks       []string // extra lock keys in the repo, e.g. a Debian package identity
 	Meta        any      // format data for Admit and OnCommitted, e.g. a parsed .deb control
+	// Precondition is checked against the file at the path before Admit; nil: none.
+	Precondition *Precondition
 }
 
 // Status is what a write did.
@@ -109,7 +111,9 @@ func (p *Pipeline) Commit(ctx context.Context, w Write) (*Result, error) {
 //
 //  1. It takes the path locks and the extra Locks (sorted), and reads each existing asset.
 //  2. Describe fills an empty ContentType or Kind; a path that Describe refuses is a 400.
-//  3. Admit decides each write: Store, Keep or a *Refusal. The watchers get Replacing with the
+//  3. The Precondition of each write is checked against its existing asset: a false one fails
+//     the whole commit with a *PreconditionError (412).
+//     Admit decides each write: Store, Keep or a *Refusal. The watchers get Replacing with the
 //     assets that the stored writes replace, and Creating with the paths that they create; an
 //     error fails the commit.
 //  4. It takes the digest locks of the writes that store, after the path locks, and makes sure
@@ -231,6 +235,9 @@ func (p *Pipeline) admit(ctx context.Context, repo *repos.Repo, ws []Write) ([]*
 		}
 		existing, err := get(ctx, q, repo.ID, string(w.Path))
 		if err != nil && !errors.Is(err, ErrNotFound) {
+			return nil, nil, err
+		}
+		if err := w.Precondition.check(w.Path, existing); err != nil {
 			return nil, nil, err
 		}
 		decision := Store

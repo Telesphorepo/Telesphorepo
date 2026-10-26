@@ -123,13 +123,123 @@ func unwrapPath(err error) error {
 	return err
 }
 
-// uploadRaw uploads each FILE into the folder path of the project file of a raw repo: a PUT of the
-// file, or the resumable upload routes for a large file.
+// putFlags are the flags of a raw publish.
+type putFlags struct {
+	ifMatch string  // --if-match: "*" or the SHA-256 in lower-case hex; "": none
+	ifNew   bool    // --if-new
+	into    *string // --into: the folder of this run in place of the project's path
+}
+
+// set reports whether a flag is given.
+func (pf putFlags) set() bool { return pf.ifMatch != "" || pf.ifNew || pf.into != nil }
+
+// conditional reports whether the flags send a precondition.
+func (pf putFlags) conditional() bool { return pf.ifMatch != "" || pf.ifNew }
+
+// header is the precondition header of each PUT and finish.
+func (pf putFlags) header() map[string]string {
+	switch {
+	case pf.ifMatch == "*":
+		return map[string]string{"If-Match": "*"}
+	case pf.ifMatch != "":
+		return map[string]string{"If-Match": `"` + pf.ifMatch + `"`}
+	case pf.ifNew:
+		return map[string]string{"If-None-Match": "*"}
+	}
+	return nil
+}
+
+// parsePutFlags reads --if-match ETAG, --if-new and --into FOLDER of the publish arguments and
+// returns them with the FILE arguments.
+func parsePutFlags(args []string) (putFlags, []string, error) {
+	var pf putFlags
+	var files []string
+	value := func(i *int, name string) (string, bool) {
+		a := args[*i]
+		if v, ok := strings.CutPrefix(a, name+"="); ok {
+			return v, true
+		}
+		if a == name && *i+1 < len(args) {
+			*i++
+			return args[*i], true
+		}
+		return "", false
+	}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if v, ok := value(&i, "--if-match"); ok {
+			etag := strings.ToLower(strings.Trim(strings.TrimSpace(v), `"`))
+			if etag != "*" && (len(etag) != sha256.Size*2 || strings.Trim(etag, "0123456789abcdef") != "") {
+				return pf, nil, fmt.Errorf(`--if-match takes * or the SHA-256 of the file on the server (its ETag), not %q`, v)
+			}
+			pf.ifMatch = etag
+			continue
+		}
+		if v, ok := value(&i, "--into"); ok {
+			pf.into = &v
+			continue
+		}
+		switch {
+		case a == "--if-new":
+			pf.ifNew = true
+		case strings.HasPrefix(a, "-") && a != "-":
+			return pf, nil, usage("publish")
+		default:
+			files = append(files, a)
+		}
+	}
+	if pf.ifMatch != "" && pf.ifNew {
+		return pf, nil, errors.New("give --if-match or --if-new, not both")
+	}
+	if pf.ifMatch != "" && len(files) != 1 {
+		return pf, nil, errors.New("--if-match names the file on the server that one FILE replaces: give one FILE")
+	}
+	return pf, files, nil
+}
+
+// conditionalPut is the change log entry of the preconditions of a raw publish.
+const conditionalPut = "conditional-put"
+
+// changedError is a raw publish whose precondition the server found false (412).
+type changedError struct {
+	dest string
+	etag *string // the ETag of the file on the server now; nil: none
+}
+
+func (e *changedError) Error() string {
+	now := "it holds no file now"
+	if e.etag != nil {
+		now = "now " + *e.etag
+	}
+	return fmt.Sprintf("%s changed on the server (%s); read it again and publish again.", e.dest, now)
+}
+
+// changed returns a *changedError for a 412 of the server on dest, else err.
+func changed(dest string, err error) error {
+	var pe *problemError
+	if errors.As(err, &pe) && pe.p.Status == http.StatusPreconditionFailed {
+		return &changedError{dest: dest, etag: pe.p.ETag}
+	}
+	return err
+}
+
+// uploadRaw uploads each FILE into the folder path of the project file of a raw repo (--into
+// FOLDER in its place): a PUT of the file, or the resumable upload routes for a large file. The
+// precondition of --if-match or --if-new goes on the PUT and on the finish of an upload.
 func uploadRaw(j *job) error {
 	if err := openFiles(j.files); err != nil {
 		return err
 	}
-	folder := strings.Trim(strings.ReplaceAll(j.p.Path, `\`, "/"), "/")
+	if j.put.conditional() && j.cp != nil {
+		if err := j.cp.needs(conditionalPut); err != nil {
+			return err
+		}
+	}
+	folder := j.p.Path
+	if j.put.into != nil {
+		folder = *j.put.into
+	}
+	folder = strings.Trim(strings.ReplaceAll(folder, `\`, "/"), "/")
 	// The files upload at the same time, so two of them may not go to one path.
 	from := map[string]string{}
 	for _, f := range j.files {
@@ -149,14 +259,14 @@ func uploadRaw(j *job) error {
 			err = j.resumable(f, st.Size(), func(id string, q url.Values) error {
 				q.Set("path", dest)
 				_, err := j.c.call(j.ctx, request{method: http.MethodPut, path: "/api/repos/" + url.PathEscape(j.p.Repo) + "/uploads/" + url.PathEscape(id) + "?" + q.Encode(),
-					token: j.s.Token, timeout: -1})
+					token: j.s.Token, timeout: -1, header: j.put.header()})
 				return err
 			})
 		} else {
-			err = j.putFile(f, st.Size(), "/raw/"+url.PathEscape(j.p.Repo)+"/"+escapePath(dest), nil)
+			err = j.putFile(f, st.Size(), "/raw/"+url.PathEscape(j.p.Repo)+"/"+escapePath(dest), j.put.header(), nil)
 		}
 		if err != nil {
-			return "", err
+			return "", changed(dest, err)
 		}
 		return fmt.Sprintf("Uploaded %s to %s/raw/%s/%s", f, j.c.id.base(), j.p.Repo, dest), nil
 	})
@@ -192,7 +302,7 @@ func uploadDebian(j *job) error {
 				return err
 			})
 		} else {
-			err = j.putFile(f, st.Size(), p, &out)
+			err = j.putFile(f, st.Size(), p, nil, &out)
 		}
 		if err != nil {
 			return "", err
@@ -201,8 +311,8 @@ func uploadDebian(j *job) error {
 	})
 }
 
-// putFile sends the file f of size bytes with PUT to p.
-func (j *job) putFile(f string, size int64, p string, out any) error {
+// putFile sends the file f of size bytes with PUT to p, with the extra headers header.
+func (j *job) putFile(f string, size int64, p string, header map[string]string, out any) error {
 	in, err := os.Open(f)
 	if err != nil {
 		return err
@@ -210,7 +320,7 @@ func (j *job) putFile(f string, size int64, p string, out any) error {
 	defer in.Close()
 	fmt.Fprintf(os.Stderr, "PUT %s%s\n", j.c.id.base(), p)
 	_, err = j.c.call(j.ctx, request{method: http.MethodPut, path: p, body: in, size: size,
-		ctype: "application/octet-stream", token: j.s.Token, out: out, timeout: -1})
+		ctype: "application/octet-stream", token: j.s.Token, header: header, out: out, timeout: -1})
 	return err
 }
 

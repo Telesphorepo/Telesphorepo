@@ -212,11 +212,12 @@ func (c *client) answerError(resp *http.Response, b []byte) error {
 			return &problemError{p: p, server: c.id.base(), version: c.serverVersion()}
 		}
 		var e struct {
-			Error string `json:"error"`
+			Error string  `json:"error"`
+			ETag  *string `json:"etag"`
 		}
 		if json.Unmarshal(b, &e) == nil && e.Error != "" {
 			return &problemError{p: problem{Type: "about:blank", Title: http.StatusText(resp.StatusCode), Detail: e.Error,
-				Status: resp.StatusCode}, server: c.id.base(), version: c.serverVersion()}
+				Status: resp.StatusCode, ETag: e.ETag}, server: c.id.base(), version: c.serverVersion()}
 		}
 	}
 	return c.genericError(resp)

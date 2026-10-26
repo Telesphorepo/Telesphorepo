@@ -373,13 +373,19 @@ func (a *API) appendUpload(w http.ResponseWriter, r *http.Request, c *route.Call
 }
 
 // finishUpload ends upload {id} with ?path=<path>&sha256=<hex>[&size=<n>] and commits it at the
-// path with source "put": the answers of a format PUT (201, 200, or the format's refusal), 400
-// when the bytes do not match the digest or the size (the upload is deleted).
+// path with source "put" and the precondition of its headers: the answers of a format PUT (201,
+// 200, 412, or the format's refusal), 400 when the bytes do not match the digest or the size (the
+// upload is deleted). After a 412 the upload stays for assets.PreconditionHold at most.
 func (a *API) finishUpload(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	q := r.URL.Query()
 	p, err := repopath.Parse(q.Get("path"))
 	if err != nil {
 		httpx.Error(w, r, http.StatusBadRequest, "invalid path")
+		return
+	}
+	pc, err := format.PreconditionOf(r)
+	if err != nil {
+		httpx.Error(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
 	digest := strings.ToLower(q.Get("sha256"))
@@ -394,15 +400,18 @@ func (a *API) finishUpload(w http.ResponseWriter, r *http.Request, c *route.Call
 			return
 		}
 	}
-	sp, err := a.uploads.Finish(r.Context(), r.PathValue("id"), c.P, c.Repo, digest, size)
+	var res *assets.Result
+	err = a.uploads.FinishCommit(r.Context(), r.PathValue("id"), c.P, c.Repo, digest, size, func(sp *assets.Spooled) error {
+		var err error
+		res, err = a.assets.Commit(r.Context(), assets.Write{Repo: c.Repo, Path: p, Body: assets.Body{Spool: sp},
+			Origin: format.OriginOf(c.P, assets.SourcePut), Precondition: pc})
+		return err
+	})
 	if err != nil {
 		uploadFail(w, r, err)
 		return
 	}
-	defer sp.Close()
-	res, err := a.assets.Commit(r.Context(), assets.Write{Repo: c.Repo, Path: p, Body: assets.Body{Spool: sp},
-		Origin: format.OriginOf(c.P, assets.SourcePut)})
-	format.WriteResult(w, r, res, err)
+	format.WriteResult(w, r, res, nil)
 }
 
 // cancelUpload deletes upload {id} and its bytes: 204.

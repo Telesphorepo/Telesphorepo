@@ -35,6 +35,9 @@ import (
 var olderPaths = map[string]bool{
 	// A large .nupkg goes in one push to a server whose push takes no resumable upload.
 	nugetResumable: true,
+	// A raw publish without --if-match and --if-new sends no precondition, which every server
+	// takes; with one, the CLI stops (compat.needs).
+	conditionalPut: true,
 }
 
 // changesState is changes.json.
@@ -247,6 +250,24 @@ func (cp *compat) older(id string) bool {
 		}
 	}
 	return false
+}
+
+// needs stops a run that has no older path of the entry id of olderPaths: a *compatError with
+// the summary of the entry when the server runs a release older than it (compat.older), else nil.
+func (cp *compat) needs(id string) error {
+	if !cp.older(id) {
+		return nil
+	}
+	all, err := changelog.Embedded()
+	if err != nil {
+		return nil
+	}
+	for _, ch := range all {
+		if ch.ID == id {
+			return &compatError{server: cp.id.base(), summaries: []string{ch.Summary}, need: ch.Version, running: cp.state.ServerVersion}
+		}
+	}
+	return nil
 }
 
 // drift tells the person once a day per server that the server has a newer CLI: on a terminal

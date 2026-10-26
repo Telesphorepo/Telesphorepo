@@ -12,11 +12,10 @@ import (
 // publish publishes the project of the current folder, or the FILE arguments to a raw or Debian
 // repo: it finds telesphorepo.toml, mints one session for its repo, runs the row of the repo's
 // format, and closes the session at exit, also on Ctrl-C.
-func publish(ctx context.Context, files []string) error {
-	for _, f := range files {
-		if strings.HasPrefix(f, "-") && f != "-" {
-			return usage("publish")
-		}
+func publish(ctx context.Context, args []string) error {
+	put, files, err := parsePutFlags(args)
+	if err != nil {
+		return err
 	}
 	p, err := findProject(".")
 	if err != nil {
@@ -74,6 +73,9 @@ func publish(ctx context.Context, files []string) error {
 	if !r.takesFiles() && !r.files && len(files) > 0 {
 		return fmt.Errorf("telesphorepo publish runs the %s build of %s and takes no FILE arguments; they are for raw, Debian, NuGet and PyPI repositories", r.title, p.dir)
 	}
+	if put.set() && s.Format != "raw" {
+		return fmt.Errorf("--if-match, --if-new and --into are for raw repositories; %s is a %s repository", s.Repo, s.Format)
+	}
 
 	tmp, err := os.MkdirTemp("", "telesphorepo-")
 	if err != nil {
@@ -83,7 +85,7 @@ func publish(ctx context.Context, files []string) error {
 	if err := restrictDir(tmp); err != nil {
 		return err
 	}
-	j := &job{ctx: ctx, c: c, cp: cp, p: p, s: s, tmp: tmp, files: files}
+	j := &job{ctx: ctx, c: c, cp: cp, p: p, s: s, tmp: tmp, files: files, put: put}
 	err = r.run(j)
 	var ee *exitError
 	if errors.As(err, &ee) && time.Now().After(s.ExpiresAt) {

@@ -113,6 +113,9 @@ FROM upload_sessions WHERE id = ?;
 -- name: SetUploadReceived :exec
 UPDATE upload_sessions SET received = ?, updated_at = ?, expires_at = ? WHERE id = ?;
 
+-- name: SetUploadExpiry :exec
+UPDATE upload_sessions SET expires_at = ? WHERE id = ?;
+
 -- name: DeleteUploadSession :exec
 DELETE FROM upload_sessions WHERE id = ?;
 

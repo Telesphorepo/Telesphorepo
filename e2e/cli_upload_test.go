@@ -18,7 +18,8 @@ func cliBigUpload(t testing.TB) int64 {
 }
 
 // TestCLIUpload: publish FILE uploads files into the folder "path" of a raw repo (a large file
-// through the resumable upload routes, in more than one chunk) and .deb packages to the
+// through the resumable upload routes, in more than one chunk; --into, --if-new and --if-match,
+// whose false precondition exits 3) and .deb packages to the
 // distribution and component of a Debian repo (a large package through the resumable upload
 // routes as well), which apt then installs.
 func TestCLIUpload(t *testing.T) {
@@ -29,7 +30,7 @@ func TestCLIUpload(t *testing.T) {
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		raw, deb := RandName("files"), RandName("apt")
-		s.CreateRepo(t, raw, "raw", false, nil)
+		s.CreateRepo(t, raw, "raw", false, map[string]any{"overwrite": "allow"})
 		s.CreateRepo(t, deb, "debian", true, nil)
 		dev := RandName("dev")
 		s.CreateUser(t, dev, "dev-pass-1234")
@@ -48,6 +49,23 @@ echo "big sha256: $(sha256sum big.bin | cut -d ' ' -f 1)"
 echo '=== raw publish ==='
 telesphorepo publish small.txt big.bin
 rm big.bin
+echo '=== conditional publish ==='
+printf '{"build":1}\n' > latest.json
+telesphorepo publish --if-new --into v1 latest.json
+set +e
+telesphorepo publish --if-new --into v1 latest.json
+echo "if-new again: exit $?"
+set -e
+first=$(sha256sum latest.json | cut -d ' ' -f 1)
+printf '{"build":2}\n' > latest.json
+echo "second sha256: $(sha256sum latest.json | cut -d ' ' -f 1)"
+telesphorepo publish --into=v1 --if-match "$first" latest.json
+set +e
+telesphorepo publish --into v1 --if-match "\"$first\"" latest.json
+echo "stale if-match: exit $?"
+telesphorepo publish --if-match "$first" latest.json small.txt
+echo "if-match with two files: exit $?"
+set -e
 mkdir -p /work/deb
 cd /work/deb
 echo '=== deb setup ==='
@@ -86,6 +104,22 @@ rm /tmp/e2e-big.deb
 		b := getFollowS3(t, s, opts.S3, "/raw/"+raw+"/dist/big.bin")
 		if sum := sha256.Sum256(b); hex.EncodeToString(sum[:]) != m[1] {
 			t.Fatalf("GET big.bin: %d bytes, want the file of SHA-256 %s", len(b), m[1])
+		}
+
+		// --into writes to its folder; --if-new and a stale --if-match exit 3 with the ETag of the
+		// file now, and --if-match takes one FILE.
+		cond := section(out, "conditional publish")
+		second := regexp.MustCompile(`second sha256: ([0-9a-f]{64})`).FindStringSubmatch(cond)
+		if second == nil {
+			t.Fatalf("no SHA-256 of the second latest.json in the output:\n%s", cond)
+		}
+		first := sha256.Sum256([]byte("{\"build\":1}\n"))
+		wantText(t, "conditional publish", cond, "Uploaded latest.json to "+s.InternalURL+"/raw/"+raw+"/v1/latest.json",
+			`v1/latest.json changed on the server (now "`+hex.EncodeToString(first[:])+`"); read it again and publish again.`, "if-new again: exit 3",
+			`v1/latest.json changed on the server (now "`+second[1]+`")`, "stale if-match: exit 3",
+			"--if-match names the file on the server that one FILE replaces", "if-match with two files: exit 1")
+		if b := getFollowS3(t, s, opts.S3, "/raw/"+raw+"/v1/latest.json"); string(b) != "{\"build\":2}\n" {
+			t.Fatalf("GET v1/latest.json: %q, want the second build", b)
 		}
 
 		// Setup names the distribution and the component that it wrote into the project file.
