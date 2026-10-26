@@ -13,6 +13,10 @@ CREATE TABLE IF NOT EXISTS edge_paths (
   PRIMARY KEY (repo_id, rules)
 ) STRICT, WITHOUT ROWID;
 
+-- The pointer rows with a put of unknown outcome: no region becomes ready and no walk of their
+-- repo ends while one is left.
+CREATE INDEX IF NOT EXISTS edge_outbox_timed_out ON edge_outbox(repo_id) WHERE timed_out_at > 0;
+
 -- The reclass walk of a repo (job edge.reclass). filled is the rule list that the regional
 -- pointers follow: every path it makes immutable has its regional pointers ('' before a walk: the
 -- format's globs). walking is the rule list of the walk that runs ('' for none) and cursor the
