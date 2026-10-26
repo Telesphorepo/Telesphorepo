@@ -457,14 +457,15 @@ func (m *mod) runOne(ctx context.Context, trigger string) {
 		st.Error = why
 	} else {
 		g, _ := m.gap.Load().(*gapState)
-		if g != nil && g.Version != "" && m.outdated(g.Features) != "" {
-			st.OutdatedTried = p.hash()
-		}
+		outdated := g != nil && g.Version != "" && m.outdated(g.Features) != ""
 		r := &deployRun{m: m, p: p, c: &cfClient{base: cfAPI, token: CloudflareToken.Get(snap)}, prev: prev.Zones}
 		err := r.run(ctx)
 		st.Changed = r.changed
 		if r.routed {
 			st.Deployed, st.Zones = p.hash(), r.zoneList()
+			if outdated {
+				st.OutdatedTried = st.Deployed
+			}
 		}
 		var se *stepError
 		switch {
