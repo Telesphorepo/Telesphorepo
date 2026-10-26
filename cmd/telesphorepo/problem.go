@@ -31,6 +31,7 @@ type problem struct {
 	Status   int     `json:"status"`
 	Remedy   *remedy `json:"remedy"`
 	Received *int64  `json:"received"` // a resumable upload: the bytes that the server holds
+	ETag     *string `json:"etag"`     // a failed precondition: the ETag of the file now (nil: none)
 }
 
 // remedy is what the CLI can do about a problem.

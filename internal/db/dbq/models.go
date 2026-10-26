@@ -43,6 +43,10 @@ type AssetsSearch struct {
 	Path string
 }
 
+type AssetsSegment struct {
+	Path string
+}
+
 type AuditEvent struct {
 	ID          int64
 	At          int64

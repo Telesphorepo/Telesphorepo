@@ -80,6 +80,15 @@ its repository, and runs the publish command of the project with the token in th
            each wheel and sdist
 A Docker repository publishes with docker push and the credential helper.
 
+A raw publish takes three flags:
+  telesphorepo publish --into builds/42 app.jar                 (this folder in place of "path")
+  telesphorepo publish --if-new --into builds/42 app.jar        (only when the path holds no file)
+  telesphorepo publish --if-match 3f2a...c9 --into v1 latest.json (only over the file of this ETag)
+--if-match takes the ETag of a GET of the file (its SHA-256, with or without quotes), or * for
+any file, and one FILE. When the server holds another file than the flag says, the CLI stores
+nothing, names the ETag of the file now and exits with code 3: read the file again and publish
+again.
+
 In CI the CLI mints the session with the identity token of the job: GitHub Actions (the job
 needs permissions: id-token: write) or OIDC_TOKEN (Jenkins). On a computer without a device of
 the server, it first asks a person to approve the computer in the browser.
@@ -207,10 +216,14 @@ func handle(ctx context.Context, cmd string, err error) (code int, again bool) {
 	var ee *exitError
 	var ce *compatError
 	var pe *problemError
+	var che *changedError
 	switch {
 	case errors.As(err, &ue):
 		fmt.Fprint(os.Stderr, helps[ue.cmd])
 		return 2, false
+	case errors.As(err, &che):
+		fmt.Fprintln(os.Stderr, che.Error())
+		return 3, false
 	case errors.As(err, &ee):
 		if ee.name != "" {
 			fmt.Fprintln(os.Stderr, "telesphorepo: "+ee.Error())

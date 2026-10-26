@@ -171,6 +171,7 @@ type job struct {
 	s     *session
 	tmp   string
 	files []string
+	put   putFlags // the flags of a raw publish
 }
 
 // env is the environment of a child process of the job: the session token as

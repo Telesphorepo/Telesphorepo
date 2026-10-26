@@ -7,10 +7,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -67,6 +69,44 @@ func rawWantStatus(t *testing.T, resp *http.Response, body []byte, want int) {
 	t.Helper()
 	if resp.StatusCode != want {
 		t.Fatalf("%s %s: status %d, want %d: %s", resp.Request.Method, resp.Request.URL.Path, resp.StatusCode, want, body)
+	}
+}
+
+// rawPutIf PUTs body to path with the extra headers h.
+func rawPutIf(t *testing.T, s *Server, path string, body []byte, auth Auth, h map[string]string) (*http.Response, []byte) {
+	t.Helper()
+	req := s.NewRequest(t, http.MethodPut, path, bytes.NewReader(body))
+	for k, v := range h {
+		req.Header.Set(k, v)
+	}
+	return s.Do(t, req, auth)
+}
+
+// rawETag is the ETag of a file of bytes b: its SHA-256 in quotes.
+func rawETag(b []byte) string {
+	sum := sha256.Sum256(b)
+	return `"` + hex.EncodeToString(sum[:]) + `"`
+}
+
+// rawWantPrecondition checks a 412 of a format route for file of repo: the error names the file,
+// the code is precondition_failed and etag is etag ("": null).
+func rawWantPrecondition(t *testing.T, resp *http.Response, body []byte, repo, file, etag string) {
+	t.Helper()
+	rawWantStatus(t, resp, body, http.StatusPreconditionFailed)
+	var out struct {
+		Error string  `json:"error"`
+		Code  string  `json:"code"`
+		ETag  *string `json:"etag"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("412 of %s/%s: %v: %s", repo, file, err, body)
+	}
+	got := ""
+	if out.ETag != nil {
+		got = *out.ETag
+	}
+	if !strings.HasPrefix(out.Error, file+" changed: ") || out.Code != "precondition_failed" || got != etag || (etag == "") != (out.ETag == nil) {
+		t.Fatalf("412 of %s/%s: %s, want the error %q..., the code precondition_failed and the etag %q", repo, file, body, file+" changed: ", etag)
 	}
 }
 
@@ -163,6 +203,10 @@ func TestRaw(t *testing.T) {
 			rawWantStatus(t, resp, body, http.StatusOK)
 			resp, body = rawPut(t, s, path, []byte("different bytes"), writerAuth)
 			rawWantStatus(t, resp, body, http.StatusConflict)
+			// The precondition comes before the overwrite policy: an If-Match that names the
+			// file does not let other bytes replace it.
+			resp, body = rawPutIf(t, s, path, []byte("different bytes"), writerAuth, map[string]string{"If-Match": rawETag(data)})
+			rawWantStatus(t, resp, body, http.StatusConflict)
 			rawWantGet(t, s, tg, path, readerAuth, data)
 		})
 
@@ -183,6 +227,102 @@ func TestRaw(t *testing.T) {
 			rawWantGet(t, s, tg, path, readerAuth, next)
 			resp, body = rawPut(t, s, path, next, writerAuth)
 			rawWantStatus(t, resp, body, http.StatusOK)
+		})
+
+		t.Run("conditional put", func(t *testing.T) {
+			cond := RandName("rawcond")
+			s.CreateRepo(t, cond, "raw", false, map[string]any{"overwrite": "allow"})
+			s.SetPerms(t, cond, writer, "repo.download", "repo.publish")
+			sessions := [2]Basic{s.PublishAuth(t, writer, cond), s.PublishAuth(t, writer, cond)}
+			latest := "/raw/" + cond + "/v1/latest.json"
+			v0 := []byte(`{"build":0}`)
+
+			// If-None-Match: * creates the file, then refuses a write of any bytes, the same too.
+			resp, body := rawPutIf(t, s, latest, v0, sessions[0], map[string]string{"If-None-Match": "*"})
+			rawWantStatus(t, resp, body, http.StatusCreated)
+			if got := resp.Header.Get("ETag"); got != rawETag(v0) {
+				t.Fatalf("PUT If-None-Match: ETag %q, want %q", got, rawETag(v0))
+			}
+			resp, body = rawPutIf(t, s, latest, v0, sessions[0], map[string]string{"If-None-Match": "*"})
+			rawWantPrecondition(t, resp, body, cond, "v1/latest.json", rawETag(v0))
+			// If-Match on a path without a file: 412 with the etag null.
+			resp, body = rawPutIf(t, s, "/raw/"+cond+"/v1/none.json", v0, sessions[0], map[string]string{"If-Match": rawETag(v0)})
+			rawWantPrecondition(t, resp, body, cond, "v1/none.json", "")
+			resp, body = rawPutIf(t, s, "/raw/"+cond+"/v1/none.json", v0, sessions[0], map[string]string{"If-Match": "*"})
+			rawWantPrecondition(t, resp, body, cond, "v1/none.json", "")
+			// A condition that a write does not take is 400, never ignored.
+			for _, h := range []map[string]string{
+				{"If-None-Match": rawETag(v0)},
+				{"If-Unmodified-Since": time.Now().UTC().Format(http.TimeFormat)},
+				{"If-Match": "W/" + rawETag(v0)},
+				{"If-Match": "*, " + rawETag(v0)},
+			} {
+				resp, body = rawPutIf(t, s, latest, v0, sessions[0], h)
+				rawWantStatus(t, resp, body, http.StatusBadRequest)
+			}
+
+			// Two publish sessions race If-Match from the same ETag: in each round one write
+			// stores, and the other is 412 with the ETag of the winner.
+			cur, last := rawETag(v0), v0
+			for round := 1; round <= 20; round++ {
+				var wg sync.WaitGroup
+				var codes [2]int
+				var etags [2]string
+				var errs [2]error
+				bodies := [2][]byte{}
+				for i := range sessions {
+					bodies[i] = []byte(fmt.Sprintf(`{"build":%d,"by":%d}`, round, i))
+					req := s.NewRequest(t, http.MethodPut, latest, bytes.NewReader(bodies[i]))
+					req.Header.Set("If-Match", cur)
+					sessions[i].apply(req)
+					wg.Go(func() {
+						resp, err := s.HTTPClient(sessions[i]).Do(req)
+						if err != nil {
+							errs[i] = err
+							return
+						}
+						defer resp.Body.Close()
+						var out struct {
+							ETag *string `json:"etag"`
+						}
+						codes[i], etags[i] = resp.StatusCode, resp.Header.Get("ETag")
+						if resp.StatusCode == http.StatusPreconditionFailed {
+							if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || out.ETag == nil {
+								errs[i] = fmt.Errorf("412 without an etag: %v", err)
+								return
+							}
+							etags[i] = *out.ETag
+						}
+					})
+				}
+				wg.Wait()
+				for _, err := range errs {
+					if err != nil {
+						t.Fatalf("round %d: %v", round, err)
+					}
+				}
+				win := 0
+				if codes[1] == http.StatusOK {
+					win = 1
+				}
+				lose := 1 - win
+				if codes[win] != http.StatusOK || codes[lose] != http.StatusPreconditionFailed {
+					t.Fatalf("round %d: statuses %v, want one 200 and one 412", round, codes)
+				}
+				if etags[win] != rawETag(bodies[win]) || etags[lose] != etags[win] {
+					t.Fatalf("round %d: winner ETag %q (want %q), loser's etag %q, want the winner's", round, etags[win], rawETag(bodies[win]), etags[lose])
+				}
+				cur, last = etags[win], bodies[win]
+			}
+			rawWantGet(t, s, tg, latest, Basic{writer, "writer-pass-1234"}, last)
+
+			// If-Match that names the file: the write stores, and answers the new ETag.
+			next := []byte(`{"build":21}`)
+			resp, body = rawPutIf(t, s, latest, next, sessions[1], map[string]string{"If-Match": `"` + strings.Repeat("0", 64) + `", ` + cur})
+			rawWantStatus(t, resp, body, http.StatusOK)
+			if got := resp.Header.Get("ETag"); got != rawETag(next) {
+				t.Fatalf("PUT If-Match list: ETag %q, want %q", got, rawETag(next))
+			}
 		})
 
 		t.Run("wrong format is 404", func(t *testing.T) {

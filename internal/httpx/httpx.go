@@ -49,6 +49,13 @@ type StatusError interface {
 	HTTPStatus() int
 }
 
+// ProblemError is an error that carries its whole problem document, e.g. a failed precondition
+// with the ETag of the file. route.Fail writes the document.
+type ProblemError interface {
+	error
+	Problem() Doc
+}
+
 // Error writes the error msg with status in the form of the route of r (see WriteProblem): a
 // problem document of type "about:blank" with the status text as its title and msg as its
 // detail. A 429 is the problem rate-limited.

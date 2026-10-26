@@ -271,13 +271,67 @@ func (u *Uploads) append(ctx context.Context, id string, p *auth.Principal, repo
 func (u *Uploads) Finish(ctx context.Context, id string, p *auth.Principal, repo *repos.Repo, sha256 string, size int64) (*Spooled, error) {
 	unlock := u.lock(id)
 	defer unlock()
-	r, err := u.row(ctx, id, p, repo)
+	sp, _, err := u.body(ctx, id, p, repo, sha256, size)
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(u.file(id), os.O_RDWR, 0)
-	if err != nil {
+	if err := u.end(ctx, id); err != nil {
+		sp.Close()
 		return nil, err
+	}
+	return sp, nil
+}
+
+// PreconditionHold is how long at most an upload stays after a finish that a precondition refused.
+const PreconditionHold = 15 * time.Minute
+
+// FinishCommit ends upload id as Finish does and passes the body to commit, under the lock of the
+// upload; the upload ends after commit. When commit fails with a *PreconditionError, the upload
+// stays with its bytes, so the client can finish it again with other headers, and expires at the
+// earlier of its expiry and PreconditionHold from now (core.upload-sessions deletes it then).
+func (u *Uploads) FinishCommit(ctx context.Context, id string, p *auth.Principal, repo *repos.Repo, sha256 string, size int64, commit func(*Spooled) error) error {
+	unlock := u.lock(id)
+	defer unlock()
+	sp, expires, err := u.body(ctx, id, p, repo, sha256, size)
+	if err != nil {
+		return err
+	}
+	err = commit(sp)
+	var pe *PreconditionError
+	if errors.As(err, &pe) {
+		// The bytes stay: close the file without removing it.
+		sp.File.Close()
+		until := min(expires, time.Now().Add(PreconditionHold).Unix())
+		if serr := dbq.New(u.db.W).SetUploadExpiry(context.WithoutCancel(ctx), dbq.SetUploadExpiryParams{ExpiresAt: until, ID: id}); serr != nil {
+			return serr
+		}
+		return err
+	}
+	if eerr := u.end(ctx, id); eerr != nil && err == nil {
+		err = eerr
+	}
+	sp.Close()
+	return err
+}
+
+// body returns the body of upload id and its expiry, under the lock of the upload: it drops the
+// bytes past the count, takes the hashes from the saved state and checks sha256 and size. A
+// mismatch deletes the upload and returns ErrDigest.
+func (u *Uploads) body(ctx context.Context, id string, p *auth.Principal, repo *repos.Repo, sha256 string, size int64) (*Spooled, int64, error) {
+	r, err := u.row(ctx, id, p, repo)
+	if err != nil {
+		return nil, 0, err
+	}
+	f, err := os.OpenFile(u.file(id), os.O_RDWR, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		// A stop after a commit adopted the file and before the row went.
+		if err := u.drop(ctx, id); err != nil {
+			return nil, 0, err
+		}
+		return nil, 0, ErrUploadUnknown
+	}
+	if err != nil {
+		return nil, 0, err
 	}
 	// Bytes past received are from an append that did not finish.
 	h, err := func() (*blobs.Hasher, error) {
@@ -288,20 +342,25 @@ func (u *Uploads) Finish(ctx context.Context, id string, p *auth.Principal, repo
 	}()
 	if err != nil {
 		f.Close()
-		return nil, err
+		return nil, 0, err
 	}
 	sp := h.Spooled(f)
-	if err := dbq.New(u.db.W).DeleteUploadSession(context.WithoutCancel(ctx), id); err != nil {
+	if (sha256 != "" && sp.SHA256 != sha256) || (size >= 0 && sp.Size != size) {
+		err := u.end(ctx, id)
 		sp.Close()
-		return nil, err
+		return nil, 0, errors.Join(ErrDigest, err)
+	}
+	return sp, r.ExpiresAt, nil
+}
+
+// end deletes the row and the hash state of upload id; the bytes go with the close of its body.
+func (u *Uploads) end(ctx context.Context, id string) error {
+	if err := dbq.New(u.db.W).DeleteUploadSession(context.WithoutCancel(ctx), id); err != nil {
+		return err
 	}
 	u.forget(id)
 	os.Remove(u.hashFile(id))
-	if (sha256 != "" && sp.SHA256 != sha256) || (size >= 0 && sp.Size != size) {
-		sp.Close()
-		return nil, ErrDigest
-	}
-	return sp, nil
+	return nil
 }
 
 // Cancel deletes upload id and its bytes.

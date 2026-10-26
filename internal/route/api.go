@@ -37,7 +37,10 @@ func (a *API) BaseURL(r *http.Request) string {
 
 // Fail maps a kernel error to its status code without leaking internals.
 func Fail(w http.ResponseWriter, r *http.Request, err error) {
+	var pe httpx.ProblemError
 	switch {
+	case errors.As(err, &pe):
+		httpx.WriteProblem(w, r, pe.Problem())
 	case errors.Is(err, auth.ErrInvalid), errors.Is(err, repos.ErrInvalid), errors.Is(err, perm.ErrUnknown), errors.As(err, new(*perm.NeedsError)):
 		httpx.Error(w, r, http.StatusBadRequest, err.Error())
 	case errors.Is(err, auth.ErrNotHeld):

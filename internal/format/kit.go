@@ -34,12 +34,19 @@ func (k Kit) Get(w http.ResponseWriter, r *http.Request, c *route.Call) {
 }
 
 // Put stores the body of the request at its {path...} in repo c.Repo through Commit with source
-// "put": 201 when the file is new, 200 when it replaced a file or has the same bytes, the
-// refusal of the format (400, 404 or 409), or 413 above max_upload_size.
+// "put" and the precondition of its headers (PreconditionOf): 201 when the file is new, 200 when
+// it replaced a file or has the same bytes, 400 for a precondition that a write does not take,
+// 412 when the precondition is false, the refusal of the format (400, 404 or 409), or 413 above
+// max_upload_size.
 func (k Kit) Put(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	p, err := httpx.RepoPath(r, "path")
 	if err != nil {
 		httpx.Error(w, r, http.StatusBadRequest, "invalid path")
+		return
+	}
+	pc, err := PreconditionOf(r)
+	if err != nil {
+		httpx.Error(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
 	sp, ok := k.SpoolBody(w, r)
@@ -48,7 +55,7 @@ func (k Kit) Put(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	}
 	defer sp.Close()
 	res, err := k.Assets.Commit(r.Context(), assets.Write{Repo: c.Repo, Path: p, Body: assets.Body{Spool: sp},
-		Origin: OriginOf(c.P, assets.SourcePut)})
+		Origin: OriginOf(c.P, assets.SourcePut), Precondition: pc})
 	WriteResult(w, r, res, err)
 }
 
@@ -77,11 +84,14 @@ func (k Kit) SpoolBody(w http.ResponseWriter, r *http.Request) (*assets.Spooled,
 }
 
 // WriteResult answers a single-file write: 201 for a new file, 200 for a replaced or unchanged
-// one, the status of a refusal, else 500.
+// one, with the ETag of the file that the path holds now; the status of a refusal, else 500.
 func WriteResult(w http.ResponseWriter, r *http.Request, res *assets.Result, err error) {
 	if err != nil {
 		route.Fail(w, r, err)
 		return
+	}
+	if res.Asset != nil {
+		w.Header().Set("ETag", `"`+res.Asset.SHA256+`"`)
 	}
 	if res.Status == assets.Created {
 		w.WriteHeader(http.StatusCreated)

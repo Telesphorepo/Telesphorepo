@@ -171,7 +171,8 @@ func uploadSession(t *testing.T, s *Server, method, path string, body []byte, au
 
 // TestUploadSessions uploads a file in chunks through a resumable upload: a wrong offset answers
 // 416 with the bytes received, the upload survives a restart, a wrong digest deletes the upload,
-// and a finished upload is a file of a raw and of a Maven repo. Only the publish session that
+// and a finished upload is a file of a raw and of a Maven repo. A finish with a false precondition
+// is 412 and keeps the upload; a Maven PUT takes a precondition too. Only the publish session that
 // started an upload continues it. A Debian repo refuses a finished upload at a path (400); its
 // upload route of a distribution finishes the upload of a .deb.
 func TestUploadSessions(t *testing.T) {
@@ -250,6 +251,36 @@ func TestUploadSessions(t *testing.T) {
 	}
 	rawWantGet(t, s, nil, "/raw/"+raw+"/big/file.bin", s.AdminBasic(), body)
 
+	// The precondition of a finish is checked at the commit: a stale If-Match is 412 with the
+	// ETag of the file, and the upload stays, so the same upload finishes after a re-read.
+	s.MustAPI(t, http.MethodPatch, "/api/repos/"+raw, map[string]any{"config": map[string]any{"overwrite": "allow"}}, s.Admin(), nil)
+	next := rawRandom(t, 200<<10)
+	id = start(base, auth)
+	if st, b := uploadSession(t, s, http.MethodPatch, base+"/"+id, next, auth, nil); st != http.StatusAccepted {
+		t.Fatalf("append: status %d: %s", st, b)
+	}
+	q = "?path=big/file.bin&sha256=" + sha256Hex(next)
+	st, b := uploadSession(t, s, http.MethodPut, base+"/"+id+q, nil, auth, map[string]string{"If-Match": rawETag(next)})
+	var problem struct {
+		Type string  `json:"type"`
+		ETag *string `json:"etag"`
+	}
+	if st != http.StatusPreconditionFailed || json.Unmarshal(b, &problem) != nil || problem.Type != "urn:telesphorepo:problem:precondition-failed" ||
+		problem.ETag == nil || *problem.ETag != rawETag(body) {
+		t.Fatalf("finish with a stale If-Match: status %d: %s, want 412 precondition-failed with the etag %s", st, b, rawETag(body))
+	}
+	rawWantGet(t, s, nil, "/raw/"+raw+"/big/file.bin", s.AdminBasic(), body)
+	req := s.NewRequest(t, http.MethodPut, base+"/"+id+q, nil)
+	req.Header.Set("If-Match", *problem.ETag)
+	resp, b := s.Do(t, req, auth)
+	if resp.StatusCode != http.StatusOK || resp.Header.Get("ETag") != rawETag(next) {
+		t.Fatalf("finish again with the ETag of the 412: status %d, ETag %q, want 200 with %s: %s", resp.StatusCode, resp.Header.Get("ETag"), rawETag(next), b)
+	}
+	rawWantGet(t, s, nil, "/raw/"+raw+"/big/file.bin", s.AdminBasic(), next)
+	if st, b := uploadSession(t, s, http.MethodPut, base+"/"+id+q, nil, auth, nil); st != http.StatusNotFound {
+		t.Fatalf("finish a finished upload again: status %d, want 404: %s", st, b)
+	}
+
 	// The same into a Maven repo, at a release path.
 	mauth := s.PublishAuth(t, s.AdminUser, mvn)
 	mbase := "/api/repos/" + mvn + "/uploads"
@@ -272,6 +303,12 @@ func TestUploadSessions(t *testing.T) {
 	if st, b := uploadSession(t, s, http.MethodPut, mbase+"/"+id+"?path="+jar+"&sha256="+sha256Hex(other), nil, mauth, nil); st != http.StatusConflict {
 		t.Fatalf("finish other bytes at a release path: status %d, want 409: %s", st, b)
 	}
+	// A Maven PUT takes the precondition too: If-None-Match: * on the stored jar is 412 with its
+	// ETag, and an If-Match that names it does not let other bytes replace a release (409).
+	resp, b = rawPutIf(t, s, "/maven/"+mvn+"/"+jar, body, mauth, map[string]string{"If-None-Match": "*"})
+	rawWantPrecondition(t, resp, b, mvn, jar, rawETag(body))
+	resp, b = rawPutIf(t, s, "/maven/"+mvn+"/"+jar, other, mauth, map[string]string{"If-Match": rawETag(body)})
+	rawWantStatus(t, resp, b, http.StatusConflict)
 	// A cancelled upload is gone.
 	id = start(mbase, mauth)
 	if st, b := uploadSession(t, s, http.MethodDelete, mbase+"/"+id, nil, mauth, nil); st != http.StatusNoContent {
