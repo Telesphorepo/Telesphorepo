@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/edge/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
 	"github.com/Telesphorepo/Telesphorepo/internal/jobs"
@@ -47,12 +48,12 @@ var ProblemNoWorker = httpx.DeclareProblem(httpx.Problem{Name: "no-edge-worker",
 
 // Module returns the edge module: the settings group edge, the permission edge.manage, the
 // pipeline watcher, the change notices of auth, repos, network, publish and storage, the jobs
-// edge.outbox, edge.backfill, edge.reclass, edge.reconcile and edge.seen, the routes of /api/edge/ and the
+// edge.outbox, edge.backfill, edge.reclass, edge.reconcile, edge.seen and edge.deploy, the audit action edge.deploy, the routes of /api/edge/ and the
 // server's answer on the reserved path of the Worker check (/.well-known/telesphorepo-edge/).
 func Module() module.Module {
 	m := &mod{kick: make(chan struct{}, 1), akick: make(chan struct{}, 1), ctl: make(chan struct{}, 1),
 		countKick: make(chan struct{}, 1), sp: newSpacer(), errs: map[string]string{}, removedKeys: map[string]*view{},
-		marked: map[string]bool{}, cls: newClasses()}
+		marked: map[string]bool{}, cls: newClasses(), dep: newDeployer()}
 	m.cur.Store(&view{})
 	counted := make(chan struct{})
 	m.counted.Store(&counted)
@@ -62,7 +63,8 @@ func Module() module.Module {
 			x.Schema(component())
 			x.Permissions(perm.Subsystem{ID: "edge", Scope: perm.ScopeServer, Label: "Edge delivery",
 				Help: "Downloads from Cloudflare's edge: the regions, the Worker configuration and its status."},
-				perm.Def{ID: PermManage, Label: "Manage edge delivery", Help: "Turn edge delivery on or off, choose its regions, and read its status and the Worker configuration.", SecondFactor: true})
+				perm.Def{ID: PermManage, Label: "Manage edge delivery", Help: "Turn edge delivery on or off, choose its regions, deploy the Worker, and read its status and the Worker configuration.", SecondFactor: true})
+			x.AuditActions(audit.ActionDef{ID: ActionDeploy, Label: "Edge Worker deployed", Subsystem: "edge"})
 			x.Settings(&settings.Group{ID: "edge", Label: "Edge delivery", Perm: PermManage, Page: "/settings/edge",
 				Defs: defs(), Validate: m.validate, Test: m.test, Apply: m.apply})
 			x.Init(m.init)
@@ -71,6 +73,7 @@ func Module() module.Module {
 			x.Job(jobs.Job{Name: "edge.reclass", Run: m.runReclass})
 			x.Job(jobs.Job{Name: "edge.reconcile", Every: 5 * time.Minute, Tick: m.reconcile})
 			x.Job(jobs.Job{Name: "edge.seen", Every: time.Minute, Tick: m.seen})
+			x.Job(jobs.Job{Name: "edge.deploy", Run: m.runDeployJob})
 			x.RootPrefix(checkPrefix)
 			// The Worker answers the check on every route, a repo domain's too.
 			x.DomainPath(checkPrefix)
@@ -126,6 +129,8 @@ type mod struct {
 	offMu   sync.Mutex // guards offHome and offLoc
 	offHome *bucket    // the home bucket of the storage settings while edge delivery is not on
 	offLoc  string     // location() of offHome
+
+	dep *deployer // the deploys of the Worker from the server (deploy.go)
 }
 
 // outboxCounts are the rows of the outbox at its last count (At).
@@ -143,6 +148,9 @@ func (m *mod) init(ctx context.Context, h *module.Host) error {
 	m.counts.Store(outboxCounts{})
 	m.gap.Store((*gapState)(nil))
 	if err := m.loadState(ctx); err != nil {
+		return err
+	}
+	if err := m.loadDeploy(ctx); err != nil {
 		return err
 	}
 	if err := m.startView(ctx); err != nil {
@@ -182,6 +190,7 @@ func (m *mod) settingsChanged(old, new *settings.Snapshot) {
 		m.locChanged.Store(true)
 	}
 	m.signal()
+	m.kickDeploy()
 }
 
 // moveStarted runs when a storage move starts copying: the home bucket changes, so edge
@@ -429,6 +438,7 @@ func (m *mod) routes(r *route.Router) {
 	r.Handle("GET /api/edge/wrangler.jsonc", route.UIPerm(PermManage), m.wranglerConfig)
 	r.Handle("GET /api/edge/worker.zip", route.UIPerm(PermManage), m.workerZip)
 	r.Handle("POST /api/edge/check", route.UIPerm(PermManage), m.check)
+	r.Handle("POST /api/edge/deploy", route.UIPerm(PermManage), m.deployNow)
 	r.Handle("GET /api/edge/speedtest", route.UIPerm(PermManage), m.speedFiles)
 	r.Handle("POST /api/edge/speedtest", route.UIPerm(PermManage), m.speedPass)
 	r.Handle("GET "+checkPath, route.Public, m.checkAnswer)

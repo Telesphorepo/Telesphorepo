@@ -366,6 +366,8 @@ export const api = {
     status: () => request<T.EdgeStatus>("GET", "/api/edge/status"),
     /** Makes the deployed Worker run its gap check now; 429 while a check runs or within 10 s of the last one. */
     check: () => request<T.EdgeCheck>("POST", "/api/edge/check"),
+    /** Starts a deploy of the Worker to Cloudflare with the token of the settings; 409 while one runs or when the settings cannot deploy. */
+    deploy: () => request<T.EdgeDeploy>("POST", "/api/edge/deploy"),
     /** Files to download in the speed test, and the base URL the test runs on. */
     speedFiles: () => request<T.EdgeSpeedFiles>("GET", "/api/edge/speedtest"),
     /** A pass of the speed test: for 10 minutes the Worker reads a download from the bucket that this browser names. */

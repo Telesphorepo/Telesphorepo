@@ -1052,7 +1052,13 @@ type OwnSeaweedFS struct {
 // gateway is unpaused, then removed, at test end.
 func StartOwnSeaweedFS(t testing.TB) *OwnSeaweedFS {
 	t.Helper()
-	alias := RandName(seaweedAlias)
+	return StartOwnSeaweedFSAt(t, RandName(seaweedAlias))
+}
+
+// StartOwnSeaweedFSAt is StartOwnSeaweedFS with the network alias alias: a test that needs the S3
+// endpoint to have a certain host (the host of an R2 endpoint) names it.
+func StartOwnSeaweedFSAt(t testing.TB, alias string) *OwnSeaweedFS {
+	t.Helper()
 	c, host, err := runSeaweed(context.Background(), alias)
 	registerCleanup(t, c, "seaweedfs "+alias)
 	if err != nil {

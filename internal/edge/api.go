@@ -48,6 +48,8 @@ type statusJSON struct {
 	Home       homeJSON     `json:"home"`
 	Backfill   backfillJSON `json:"backfill"`
 	Regions    []regionJSON `json:"regions"`
+	// Deploy is the deploy of the Worker from the server (deploy.go).
+	Deploy deployJSON `json:"deploy"`
 }
 
 type homeJSON struct {
@@ -104,6 +106,7 @@ func (m *mod) status(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		Home:     homeJSON{Hint: HomeHint.Get(snap), Bucket: storage.S3Bucket.Get(snap), LastError: m.lastErr("home")},
 		Backfill: backfillJSON{Running: v.mode == modeOn && p.home.Started && !p.home.Ready, Queued: p.home.Queued, Total: p.home.Total},
 		Regions:  []regionJSON{},
+		Deploy:   m.deployStatus(snap),
 	}
 	_, out.CheckUnfit = checkBase(snap)
 	out.LastCheck = m.lastResult.Load()

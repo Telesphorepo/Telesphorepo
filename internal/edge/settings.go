@@ -77,11 +77,16 @@ var (
 			}
 			return nil
 		}})
+	CloudflareToken = settings.String(&settings.Def{Key: "edge.cloudflare_token", Secret: true, Label: "Cloudflare API token",
+		Normalize: settings.Trim,
+		Help:      "An API token of the Cloudflare account of the R2 buckets. With it, the server deploys the edge Worker itself: the regional buckets, the copy queue, its notification rule, the Worker, its cron and its routes. It needs Account: Workers Scripts Edit, Workers R2 Storage Edit and Queues Edit, and Zone: Workers Routes Edit and Zone Read on the zone of each route host."})
+	AutoDeploy = settings.Bool(&settings.Def{Key: "edge.auto_deploy", Default: "true", Label: "Deploy on its own",
+		Help: "With a Cloudflare API token, the server deploys the Worker again when the regions, the repository domains, the storage location or the server version change, or when the deployed Worker is outdated."})
 )
 
 // defs returns the definitions of the group, in display order.
 func defs() []*settings.Def {
-	return []*settings.Def{Enabled.Def(), HomeHint.Def(), Regions.Def(), AccessTTL.Def()}
+	return []*settings.Def{Enabled.Def(), HomeHint.Def(), Regions.Def(), AccessTTL.Def(), CloudflareToken.Def(), AutoDeploy.Def()}
 }
 
 // regionCfg is one chosen region: its hint and its bucket.
@@ -199,7 +204,9 @@ func regionConfig(home storage.Config, bucket string) storage.Config {
 
 // test probes the home bucket and every regional bucket of the draft
 // (POST /api/settings/edge/test). A failed regional probe names its row under
-// "edge.regions.<hint>", and every failure is also in "edge.regions" or "edge.enabled".
+// "edge.regions.<hint>", and every failure is also in "edge.regions" or "edge.enabled". With a
+// Cloudflare API token and an R2 endpoint, a regional bucket that does not exist passes: the
+// deploy from the server creates it.
 func (m *mod) test(ctx context.Context, d *settings.Draft) error {
 	cfg := storage.ConfigView.Get(d.Next)
 	if cfg.Backend != "s3" {
@@ -214,8 +221,13 @@ func (m *mod) test(ctx context.Context, d *settings.Draft) error {
 		msgs = append(msgs, msg)
 	}
 	var regionMsgs []string
+	account, _, _ := r2Account(cfg.S3Endpoint)
+	creates := CloudflareToken.Get(d.Next) != "" && account != ""
 	for _, r := range regionsOf(d.Next) {
 		if err := probe(ctx, regionConfig(cfg, r.Bucket)); err != nil {
+			if creates && noSuchBucket(err) {
+				continue // the deploy from the server creates it
+			}
 			msg := r.Hint + " (" + r.Bucket + "): " + err.Error()
 			fields[Regions.Name()+"."+r.Hint] = msg
 			regionMsgs = append(regionMsgs, msg)
@@ -229,6 +241,12 @@ func (m *mod) test(ctx context.Context, d *settings.Draft) error {
 		return &settings.HookError{Status: http.StatusBadRequest, Message: "edge test failed: " + strings.Join(msgs, "; "), Fields: fields}
 	}
 	return nil
+}
+
+// noSuchBucket reports whether err is the S3 answer for a bucket that does not exist.
+func noSuchBucket(err error) bool {
+	var ae interface{ ErrorCode() string }
+	return errors.As(err, &ae) && ae.ErrorCode() == "NoSuchBucket"
 }
 
 // probe opens the store of cfg and writes, reads and deletes a probe object.

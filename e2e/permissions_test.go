@@ -70,6 +70,7 @@ func TestServerPermissions(t *testing.T) {
 			{http.MethodGet, "/api/edge/status", none, []int{http.StatusOK}},
 			// The server runs on the local disk, so the download answers edge-not-configured.
 			{http.MethodGet, "/api/edge/worker.zip", none, []int{http.StatusConflict}},
+			{http.MethodPost, "/api/edge/deploy", none, []int{http.StatusConflict}},
 			{http.MethodPatch, "/api/settings", func() any { return map[string]any{"edge.access_ttl": "45s"} }, []int{http.StatusOK}},
 		}, true},
 		{"nexus.manage", []permRoute{
