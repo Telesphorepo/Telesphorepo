@@ -1,11 +1,11 @@
 <!--
   Edge delivery (Manage edge delivery permission): which Cloudflare R2 regions serve downloads, the
-  settings of the edge, and the deploy of the Worker: with a Cloudflare API token the server deploys
-  it (Deploy now, POST /api/edge/deploy; the last deploy shows with its failed step, Cloudflare's
-  error and what it changed), and on its own while "Deploy on its own" is on; without a token, the
-  download of the Worker folder (with the generated wrangler.jsonc in it) and the commands to run
-  there, which go behind a disclosure once a token is set; the wrangler.jsonc for a checkout of the
-  repository behind a disclosure.
+  settings of the edge, and the deploy of the Worker in one of two ways, picked with a segmented
+  control: From this server, with a Cloudflare API token (Deploy now, POST /api/edge/deploy; the
+  last deploy shows with its failed step, Cloudflare's error and what it changed; and on its own
+  while "Deploy on its own" is on), or From a computer: the download of the Worker folder (with the
+  generated wrangler.jsonc in it) and the commands to run there; the wrangler.jsonc for a checkout
+  of the repository behind a disclosure.
   One Draft holds the home region, the regions with their buckets, the on switch, the access
   lifetime, the token and the auto-deploy switch; Save checks every bucket first (the Test of the settings group), asks before the server
   stops writing to a bucket, and then saves. Each region is a card with its state, its Serve from
@@ -55,6 +55,7 @@
   import SwitchRow from "$lib/components/SwitchRow.svelte";
   import UnitInput from "$lib/components/UnitInput.svelte";
   import SecretInput from "$lib/components/SecretInput.svelte";
+  import Segmented from "$lib/components/Segmented.svelte";
   import Section from "$lib/components/Section.svelte";
   import SaveBar from "$lib/components/SaveBar.svelte";
   import StatusBadge, { type Tone } from "$lib/components/StatusBadge.svelte";
@@ -222,6 +223,18 @@
 
   const needsDeploy = $derived(provisionNeeded || status.data?.deploy_needed === true);
   const outdated = $derived(status.data?.worker_outdated ?? "");
+  // How the Worker is deployed: from this server with a token, or from a computer with wrangler.
+  // Until the person picks, the page shows the way in use: a token set is the server; a Worker
+  // that reports without one was deployed from a computer.
+  type DeployWay = "server" | "computer";
+  let pickedWay = $state<DeployWay | null>(null);
+  const deployWay = $derived<DeployWay>(
+    pickedWay ?? (status.data?.deploy.token_set ? "server" : status.data?.worker_version ? "computer" : "server"),
+  );
+  const DEPLOY_WAYS = [
+    { value: "server", label: "From this server", title: "With a Cloudflare API token" },
+    { value: "computer", label: "From a computer", title: "Download the Worker and deploy it with wrangler" },
+  ];
   // Edge delivery turns on only once a deployed Worker has reported its version; turning it off
   // always works.
   const noWorker = $derived(!!status.data && !status.data.worker_version && !draft?.saved.enabled);
@@ -570,7 +583,7 @@
 
     {@const dep = st?.deploy}
     {@const tokenSet = dep?.token_set === true && draft.value.token !== null}
-    <Section title="Deploy" description="Deploy the edge Worker to your Cloudflare account, from this server with an API token or from a computer with bun.">
+    <Section title="Deploy" description="Deploy the edge Worker to your Cloudflare account in one of two ways.">
       {#snippet badges()}
         {#if deploying}
           <StatusBadge tone="info">Deploying</StatusBadge>
@@ -579,7 +592,7 @@
         {/if}
       {/snippet}
       {#snippet actions()}
-        {#if dep?.token_set}
+        {#if deployWay === "server" && dep?.token_set}
           <Button
             variant="outline"
             size="sm"
@@ -592,95 +605,123 @@
         {/if}
       {/snippet}
       <div class="flex flex-col gap-6">
+        <div class="flex flex-col gap-2">
+          <Segmented bind:value={() => deployWay, (v) => (pickedWay = v as DeployWay)} options={DEPLOY_WAYS} label="How to deploy" />
+          <p class="text-meta text-muted-foreground">
+            {#if deployWay === "server"}
+              The server creates the regional buckets, the queue and its notification rule, uploads the Worker and sets its routes, with an API token of your
+              Cloudflare account. It deploys again on its own when something changes.
+            {:else}
+              You download the Worker and run wrangler in its folder. Run provision and deploy again after a region change, and deploy the Worker of each server
+              release.
+            {/if}
+          </p>
+        </div>
+
         {#if outdated}
-          <p class="text-body">{outdated} {tokenSet ? "Deploy it again." : "Download the Worker and deploy it."}</p>
-        {:else if needsDeploy && !tokenSet}
+          <p class="text-body">
+            {outdated}
+            {deployWay === "server" ? (tokenSet ? "Deploy it again." : "Set a token to deploy it.") : "Download the Worker and deploy it."}
+          </p>
+        {:else if needsDeploy && deployWay === "computer"}
           <p class="text-body">The regions or the storage location changed. Download the Worker again, then run provision and deploy.</p>
         {/if}
 
-        {#if dep && dep.token_set}
-          <div class="flex flex-col gap-1">
-            <p class="text-meta text-muted-foreground">Last deploy from the server</p>
-            {#if deploying}
-              <p class="text-body">{dep.step ? `${STEP_WORDS[dep.step]}…` : "Starting…"}</p>
-            {:else if deployError}
-              <p class="text-body text-destructive">{deployError}</p>
-            {:else if dep.last_at}
-              <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-                <StatusBadge tone={dep.last_ok ? "success" : "danger"}>{dep.last_ok ? "Deployed" : "Failed"}</StatusBadge>
-                <span class="text-meta text-muted-foreground"><RelativeTime at={dep.last_at} /></span>
-              </div>
-              {#if !dep.last_ok}
-                {#if dep.step}<p class="mt-1 text-label">Failed at: {STEP_WORDS[dep.step]}</p>{/if}
-                <p class="text-body break-words whitespace-pre-wrap text-destructive">{dep.last_error}</p>
-                {#if dep.last_call && dep.last_call.errors.some((e) => e.code)}
-                  <p class="text-meta text-muted-foreground">
-                    Cloudflare answered {dep.last_call.method} {dep.last_call.path} with HTTP {dep.last_call.status}, error {dep.last_call.errors
-                      .filter((e) => e.code)
-                      .map((e) => e.code)
-                      .join(", ")}.
-                  </p>
-                {/if}
-                {#if dep.next_at}<p class="text-meta text-muted-foreground">Tries again on its own <RelativeTime at={dep.next_at} />.</p>{/if}
-              {/if}
-              {#if dep.changed.length > 0}
-                <ul class="mt-1 list-disc pl-5 text-meta text-muted-foreground">
-                  {#each dep.changed as line, i (i)}<li>{line}</li>{/each}
-                </ul>
-              {/if}
-            {:else}
-              <p class="text-label">Not yet</p>
-            {/if}
-            {#if dep.unfit && !deploying}<p class="text-meta text-warning">{dep.unfit}</p>{/if}
-          </div>
-        {/if}
-
-        <FormGrid>
-          <FormRow
-            label="Cloudflare API token"
-            for="edge-token"
-            help={lockHelp("edge.cloudflare_token") ?? "With a token of the account of the R2 buckets, the server deploys the Worker itself."}
-          >
-            <SecretInput
-              id="edge-token"
-              set={dep?.token_set === true}
-              change={draft.value.token}
-              onchange={(v) => (draft!.value.token = v)}
-              disabled={locked("edge.cloudflare_token")}
-              describedby="edge-token-help"
-            />
-            {#snippet more()}
-              <p>
-                In the Cloudflare account of the R2 buckets, open Manage account › Account API tokens, select Create Token, then Custom, and add two permission policies:
-              </p>
-              {#each TOKEN_POLICIES as policy (policy.scope)}
-                <p class="mt-2">{policy.scope}</p>
-                <ul class="mt-1 list-disc pl-5">
-                  {#each policy.permissions as p (p)}<li>{p}</li>{/each}
-                </ul>
-              {/each}
-              <p class="mt-2">
-                Workers Admin, not Editor: the first deploy creates the Worker. In place of All Domains, the domains of the base URL host and of each repository domain
-                will do. The server reads the account from the S3 endpoint of the storage settings.
-              </p>
-            {/snippet}
-          </FormRow>
-          <SwitchRow
-            id="edge-auto"
-            label="Deploy on its own"
-            help={lockHelp("edge.auto_deploy") ??
-              "Deploys again after a change of the regions, the repository domains, the storage location or the server version, and when the Worker is outdated."}
-            disabled={locked("edge.auto_deploy") || !tokenSet}
-            bind:checked={draft.value.auto}
-          />
-        </FormGrid>
-
-        {#if tokenSet}
-          <LearnMore label="Deploy from a computer with bun instead">
-            {@render manualSteps()}
-          </LearnMore>
-        {:else}
+        {#if deployWay === "computer"}
+          {#if dep?.token_set}
+            <p class="text-body">
+              This server has a Cloudflare API token, so it still deploys the Worker itself. To deploy only from a computer, remove the token under From this server.
+            </p>
+          {/if}
           {@render manualSteps()}
+        {:else}
+          {#if dep && dep.token_set}
+            <div class="flex flex-col gap-1">
+              <p class="text-meta text-muted-foreground">Last deploy from the server</p>
+              {#if deploying}
+                <p class="text-body">{dep.step ? `${STEP_WORDS[dep.step]}…` : "Starting…"}</p>
+              {:else if deployError}
+                <p class="text-body text-destructive">{deployError}</p>
+              {:else if dep.last_at}
+                <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <StatusBadge tone={dep.last_ok ? "success" : "danger"}>{dep.last_ok ? "Deployed" : "Failed"}</StatusBadge>
+                  <span class="text-meta text-muted-foreground"><RelativeTime at={dep.last_at} /></span>
+                </div>
+                {#if !dep.last_ok}
+                  {#if dep.step}<p class="mt-1 text-label">Failed at: {STEP_WORDS[dep.step]}</p>{/if}
+                  <p class="text-body break-words whitespace-pre-wrap text-destructive">{dep.last_error}</p>
+                  {#if dep.last_call && dep.last_call.errors.some((e) => e.code)}
+                    <p class="text-meta text-muted-foreground">
+                      Cloudflare answered {dep.last_call.method} {dep.last_call.path} with HTTP {dep.last_call.status}, error {dep.last_call.errors
+                        .filter((e) => e.code)
+                        .map((e) => e.code)
+                        .join(", ")}.
+                    </p>
+                  {/if}
+                  {#if dep.next_at}<p class="text-meta text-muted-foreground">Tries again on its own <RelativeTime at={dep.next_at} />.</p>{/if}
+                {/if}
+                {#if dep.changed.length > 0}
+                  <ul class="mt-1 list-disc pl-5 text-meta text-muted-foreground">
+                    {#each dep.changed as line, i (i)}<li>{line}</li>{/each}
+                  </ul>
+                {/if}
+              {:else}
+                <p class="text-label">Not yet</p>
+              {/if}
+              {#if dep.unfit && !deploying}<p class="text-meta text-warning">{dep.unfit}</p>{/if}
+            </div>
+          {/if}
+
+          <ol class="flex flex-col gap-5">
+            <li class="flex gap-3">
+              <span class="w-4 shrink-0 text-section text-muted-foreground tabular-nums">1</span>
+              <div class="flex min-w-0 grow flex-col gap-2 text-body text-muted-foreground">
+                <p class="text-label text-foreground">Create an API token in Cloudflare</p>
+                <p>
+                  In the Cloudflare account of the R2 buckets, open Manage account › Account API tokens, select Create Token, then Custom, and add two permission
+                  policies:
+                </p>
+                <div>{@render tokenPolicies()}</div>
+                <p>
+                  Workers needs Admin, not Editor: the first deploy creates the Worker. In place of All Domains, the domains of the base URL host and of each repository
+                  domain will do. The server reads the account from the S3 endpoint of the storage settings.
+                </p>
+              </div>
+            </li>
+            <li class="flex gap-3">
+              <span class="w-4 shrink-0 text-section text-muted-foreground tabular-nums">2</span>
+              <div class="flex min-w-0 grow flex-col gap-2">
+                <p class="text-label">Paste the token here and save</p>
+                <FormGrid>
+                  <FormRow label="Cloudflare API token" for="edge-token" help={lockHelp("edge.cloudflare_token")}>
+                    <SecretInput
+                      id="edge-token"
+                      set={dep?.token_set === true}
+                      change={draft.value.token}
+                      onchange={(v) => (draft!.value.token = v)}
+                      disabled={locked("edge.cloudflare_token")}
+                      describedby="edge-token-help"
+                    />
+                  </FormRow>
+                  <SwitchRow
+                    id="edge-auto"
+                    label="Deploy on its own"
+                    help={lockHelp("edge.auto_deploy") ??
+                      "Deploys again after a change of the regions, the repository domains, the storage location or the server version, and when the Worker is outdated."}
+                    disabled={locked("edge.auto_deploy") || !tokenSet}
+                    bind:checked={draft.value.auto}
+                  />
+                </FormGrid>
+              </div>
+            </li>
+            <li class="flex gap-3">
+              <span class="w-4 shrink-0 text-section text-muted-foreground tabular-nums">3</span>
+              <div class="flex min-w-0 grow flex-col gap-2">
+                <p class="text-label">Select Deploy now</p>
+                <p class="text-meta text-muted-foreground">Find it at the top of this section once the token is saved.</p>
+              </div>
+            </li>
+          </ol>
         {/if}
       </div>
     </Section>
@@ -688,6 +729,15 @@
 
   <SaveBar count={draft.count} onSave={save} onDiscard={discard} />
 {/if}
+
+{#snippet tokenPolicies()}
+  {#each TOKEN_POLICIES as policy (policy.scope)}
+    <p class="mt-2">{policy.scope}</p>
+    <ul class="mt-1 list-disc pl-5">
+      {#each policy.permissions as p (p)}<li>{p}</li>{/each}
+    </ul>
+  {/each}
+{/snippet}
 
 {#snippet manualSteps()}
   {@const st = status.data}
@@ -735,8 +785,9 @@
         <div class="flex min-w-0 grow flex-col gap-2">
           <CodeSnippet label="Sign in to Cloudflare" value="bunx wrangler login" />
           <p class="text-meta text-muted-foreground">
-            In CI, set CLOUDFLARE_API_TOKEN instead, a token with the permissions of the token above.
+            In CI, set CLOUDFLARE_API_TOKEN instead, an account API token with these permission policies:
           </p>
+          {@render tokenPolicies()}
         </div>
       </li>
       <li class="flex gap-3">

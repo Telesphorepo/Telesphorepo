@@ -4634,18 +4634,23 @@ page are in `web/src/README.md`.
   files missing, when that count last changed, and the copy pass that runs (or what the last pass
   queued); under the cards the cadence of the count (`blob_check_every`) and of the Worker's copy
   (`gap_check_every`). Settings: `edge.enabled` and `edge.access_ttl`. Deploy: a "Deploying" or
-  "Deploy needed" badge; with a token, **Deploy now** in the header (`POST /api/edge/deploy`;
-  disabled with the `unfit` sentence as its tooltip, or until a changed token is saved) and the
-  last deploy from the server: the step that runs while it runs (the page asks for the status
-  every 2 seconds then), else Deployed or Failed with when, the failed step in words, the error,
-  Cloudflare's call and codes, when the job tries again, and what the deploy changed; the
-  `unfit` sentence. The token (`SecretInput`, its permissions behind the row's Learn more) and
-  "Deploy on its own" (`edge.auto_deploy`, off without a token) are fields of the page's Draft.
-  With a token the steps for a computer with bun go behind a `LearnMore`; without, they show: numbered
-  steps: download the edge Worker (the one button, `GET /api/edge/worker.zip`; in its place the
+  "Deploy needed" badge, and a `Segmented` choice of the way, **From this server** or **From a
+  computer**, with one line on what each means; only the chosen way shows. Until the person
+  picks, the page shows the way in use: From this server when a token is set, From a computer
+  when a Worker reports without one, else From this server. From this server: **Deploy now** in
+  the header once a token is saved (`POST /api/edge/deploy`; disabled with the `unfit` sentence as
+  its tooltip, or until a changed token is saved); the last deploy from the server: the step that
+  runs while it runs (the page asks for the status every 2 seconds then), else Deployed or Failed
+  with when, the failed step in words, the error, Cloudflare's call and codes, when the job tries
+  again, and what the deploy changed; the `unfit` sentence; then numbered steps: create the API
+  token in Cloudflare (where, and the two permission policies), paste it and save (the token, a
+  `SecretInput`, and "Deploy on its own", `edge.auto_deploy`, off without a token, both fields of
+  the page's Draft), select Deploy now. From a computer, with a token set, a line says that the
+  server still deploys on its own until the token is removed; then numbered steps: download the
+  edge Worker (the one button, `GET /api/edge/worker.zip`; in its place the
   `worker_missing` sentence of the status when the build has none), unpack it and open a terminal
   in `telesphorepo-edge`, then `bun install`, `bunx wrangler login` (with `CLOUDFLARE_API_TOKEN`
-  for CI), `bun run provision` (with `CLOUDFLARE_ACCOUNT_ID` for a login with several accounts)
+  and the same permission policies for CI), `bun run provision` (with `CLOUDFLARE_ACCOUNT_ID` for a login with several accounts)
   and `bun run deploy`, each a `CodeSnippet`; when to repeat them; "Deploy needed" after a
   storage, region or version change; and behind a `LearnMore` the `wrangler.jsonc` of a checkout
   in a `CodeBlock` with its download. Speed test (between Regions and Settings, its own
