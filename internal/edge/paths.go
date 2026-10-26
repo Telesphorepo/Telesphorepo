@@ -176,6 +176,12 @@ func (m *mod) loadClasses(ctx context.Context, repoID int64) (*repoClasses, erro
 		return nil, err
 	}
 	rc.epoch, rc.filled, rc.walking, rc.cursor = st.Epoch, st.Filled, st.Walking, st.Cursor
+	if rc.walking != "" {
+		// The walk that runs writes under its rules: they count as used in its epoch.
+		if s, ok := rc.sets[rc.walking]; !ok || s.epoch < rc.epoch {
+			rc.sets[rc.walking] = classSet{rules: decodeRules(rc.walking), epoch: rc.epoch}
+		}
+	}
 	c.repos[repoID] = rc
 	return rc, nil
 }
@@ -386,17 +392,22 @@ func (m *mod) reclassStep(ctx context.Context, id int64) (bool, error) {
 			rc.mu.Unlock()
 			return false, nil
 		}
-		rc.epoch++
-		rc.walking, rc.cursor = curKey, ""
-		err := m.saveReclass(ctx, id, rc)
-		if err == nil {
-			err = m.q.UpsertEdgePaths(ctx, dbq.UpsertEdgePathsParams{RepoID: id, Rules: curKey, Epoch: rc.epoch})
-		}
+		// The walk state and the record of its rules commit together, and rc changes only after:
+		// a walk never runs under rules that are not recorded.
+		next := rc.epoch + 1
+		err := m.h.DB.Tx(ctx, func(tx *sql.Tx) error {
+			q := dbq.New(tx)
+			if err := q.PutReclass(ctx, dbq.PutReclassParams{RepoID: id, Epoch: next, Filled: rc.filled, Walking: curKey}); err != nil {
+				return err
+			}
+			return q.UpsertEdgePaths(ctx, dbq.UpsertEdgePathsParams{RepoID: id, Rules: curKey, Epoch: next})
+		})
 		if err != nil {
 			rc.mu.Unlock()
 			return false, err
 		}
-		rc.sets[curKey] = classSet{rules: cur, epoch: rc.epoch}
+		rc.epoch, rc.walking, rc.cursor = next, curKey, ""
+		rc.sets[curKey] = classSet{rules: cur, epoch: next}
 		m.h.Log.Info("edge reclass: the regional pointers of a repository follow its new rules", "repo", repo.Name)
 	}
 	walking, epoch, cursor := rc.walking, rc.epoch, rc.cursor
@@ -464,7 +475,9 @@ func (m *mod) reclassStep(ctx context.Context, id int64) (bool, error) {
 			return err
 		}
 		body := pointerOf(a)
-		return parallel(len(v.regions)+1, v.regions, func(b *bucket) error { return m.put(ctx, b, key, body) })
+		return parallel(len(v.regions)+1, v.regions, func(b *bucket) error {
+			return m.putUnknown(ctx, id, j.path, m.put(ctx, b, key, body))
+		})
 	}); err != nil {
 		return false, err
 	}
@@ -491,7 +504,14 @@ func (m *mod) reclassStep(ctx context.Context, id int64) (bool, error) {
 		time.AfterFunc(time.Minute, func() { m.queueClasses(id) })
 		return false, nil
 	}
-	if err := m.q.PruneEdgePaths(ctx, dbq.PruneEdgePathsParams{RepoID: id, Epoch: epoch}); err != nil {
+	// The prune and the end of the walk commit together; rc follows only after.
+	if err := m.h.DB.Tx(ctx, func(tx *sql.Tx) error {
+		q := dbq.New(tx)
+		if err := q.PruneEdgePaths(ctx, dbq.PruneEdgePathsParams{RepoID: id, Epoch: epoch}); err != nil {
+			return err
+		}
+		return q.PutReclass(ctx, dbq.PutReclassParams{RepoID: id, Epoch: epoch, Filled: walking})
+	}); err != nil {
 		return false, err
 	}
 	for k, s := range rc.sets {
@@ -500,9 +520,6 @@ func (m *mod) reclassStep(ctx context.Context, id int64) (bool, error) {
 		}
 	}
 	rc.filled, rc.walking, rc.cursor = walking, "", ""
-	if err := m.saveReclass(ctx, id, rc); err != nil {
-		return false, err
-	}
 	m.h.Log.Info("edge reclass done", "repo", repo.Name)
 	return true, nil // the rules may have changed during the walk
 }

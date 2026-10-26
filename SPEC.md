@@ -552,7 +552,7 @@ row outlives a deleted repo and still deletes its pointers (see **Edge delivery*
 
 | Table | Key / indexes | Notes |
 |---|---|---|
-| `edge_outbox` | PK `(repo_id, path)` (WITHOUT ROWID), idx `edge_outbox_due (due_at)`, partial idx `edge_outbox_backfill (repo_id) WHERE backfill = 1`, partial idx `edge_outbox_access (repo_id, due_at) WHERE repo_id = 0` (the access objects in due order) | One row per dirty object. `repo_id` > 0: `path` is an asset path whose pointer the outbox writes or deletes; `repo_id` 0: `path` is the key of an access object or `config.json`. `sha256` is the digest of the commit that wrote the row (`''`: apply the current state); `due_at` (unix ms), `attempts`, `seq` (raised by each new row of the key, so the worker drops only the row it read), `timed_out_at` (unix ms of a put with an unknown outcome, 0 for none), `error`, `backfill` (1: the backfill of every pointer queued the row; a later row of the key keeps it) |
+| `edge_outbox` | PK `(repo_id, path)` (WITHOUT ROWID), idx `edge_outbox_due (due_at)`, partial idx `edge_outbox_backfill (repo_id) WHERE backfill = 1`, partial idx `edge_outbox_access (repo_id, due_at) WHERE repo_id = 0` (the access objects in due order), partial idx `edge_outbox_timed_out (repo_id) WHERE timed_out_at > 0` (the rows of a put of unknown outcome) | One row per dirty object. `repo_id` > 0: `path` is an asset path whose pointer the outbox writes or deletes; `repo_id` 0: `path` is the key of an access object or `config.json`. `sha256` is the digest of the commit that wrote the row (`''`: apply the current state); `due_at` (unix ms), `attempts`, `seq` (raised by each new row of the key, so the worker drops only the row it read), `timed_out_at` (unix ms of a put with an unknown outcome, 0 for none), `error`, `backfill` (1: the backfill of every pointer queued the row; a later row of the key keeps it) |
 | `edge_written` | PK `key` (WITHOUT ROWID) | The access objects and `config.json` in the home bucket: the key under `edge/v1/`, the hex SHA-256 of the JSON written, `written_at` |
 | `edge_paths` | PK `(repo_id, rules)` (WITHOUT ROWID) | For a repo of a format with `EdgeSpec.Paths`: each rule list (`rules`, JSON `[[glob, immutable], ...]`) under which a regional pointer of the repo was written since the last reclass walk ended, with `epoch`, the walk epoch of its last such write (see **Path classes** under **Edge delivery**) |
 | `edge_reclass` | PK `repo_id` | The reclass walk of such a repo: `epoch` (raised at each walk start), `filled` (the rule list that the regional pointers follow; `''` for the format's globs), `walking` (the rule list of the walk that runs, `''` for none) and `cursor` (the last path it did) |
@@ -2070,12 +2070,14 @@ the format's globs, under which every raw path was mutable), or a recorded list 
 one. It runs while edge delivery is on; a repo change notice queues the repo, and the job queues
 every such repo at its start and when edge delivery turns on, so the first start of a server
 version that classifies a format per repo walks each repo whose rules make a path immutable. A walk
-raises the repo's epoch, records the rules it walks with, and reads the repo's assets by path in
+raises the repo's epoch and records the rules it walks with, in one transaction (a walk that runs
+after a restart counts its rules as used in its epoch), and reads the repo's assets by path in
 pages of 500 (the cursor in `edge_reclass`, so it resumes after a restart). Under each path lock it
 puts the regional pointers of a path that its rules make immutable and the `filled` rules did not,
 and deletes the pointers in every bucket but home (the regions and the gone regions) of a path that
 its rules make mutable and the `filled` rules or a recorded list made immutable. At the end it drops
-the recorded lists that no write used since it began (epoch below its own) and sets `filled`; while
+the recorded lists that no write used since it began (epoch below its own) and sets `filled`, in
+one transaction; while
 a pointer row of the repo has a put of unknown outcome it waits a minute first, since that put may
 still land. A first start, which wipes every bucket, clears both tables and sets `filled` of each
 repo to its current rules, which the backfill writes. A repo delete drops its rows.
@@ -2108,7 +2110,11 @@ repo to its current rules, which the backfill writes. A repo delete drops its ro
    commit is written again, which leaves the same state. A failed row retries with a backoff up
    to 5 minutes. Writes to one key are spaced by a second (R2 takes one write per second per key),
    the wait outside the lock; a 429 of a pre-step retries for up to 2 s. A put that timed out has
-   an unknown outcome: the row stays and the state is applied once more a minute later.
+   an unknown outcome: the row stays, marked (`timed_out_at`), and the state is applied once more a
+   minute later. A pointer put of a region fill or of the reclass walk that times out gets such a
+   marked row for its path too (`MarkTimedOut`), whose applications write or delete the pointer in
+   every bucket of the view, a filling region included. While any marked row is left, no region
+   becomes ready (`AnyTimedOut`) and no walk of its repo ends (`RepoTimedOut`).
 
 A failed pre-step fails the commit or the remove batch. `Touched` (after `SetTimes`) marks the
 path dirty. Until a pointer lands, the Worker finds none, or a pending one, and passes.
@@ -2148,8 +2154,8 @@ mode of that moment, so an `enabled: true` never lands after the off switch.
   pointer of every immutable path, under the path lock, and the server writes `gap/request.json`
   so the Worker's gap check copies the blobs. When the pointers are done, the server compares the
   home `blobs/` and the regional `blobs/` in key order (a resumable cursor, up to 50 pages of
-  1000 keys per step, every 2 minutes); a pass that finds every blob marks the region ready and
-  rewrites `config.json`. Missing blobs ask for a gap pass again, at most every 30 minutes. A
+  1000 keys per step, every 2 minutes); a pass that finds every blob, with no outbox row of a put
+  of unknown outcome left, marks the region ready and rewrites `config.json`. Missing blobs ask for a gap pass again, at most every 30 minutes. A
   removed region that was never ready leaves `config.json` and gets no writes from then on. A
   removed ready region (a hint taken out of `edge.regions`, or the old bucket of a hint that got
   a new one) is gone: `config.json` is written without it first, then the pre-steps (`{pending}`

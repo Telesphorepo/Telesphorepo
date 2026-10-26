@@ -1045,7 +1045,7 @@ func (m *mod) backfillRegion(ctx context.Context, v *view, b *bucket, r *regionS
 					return err
 				}
 			}
-			return m.put(ctx, b, key, pointerOf(cur))
+			return m.putUnknown(ctx, a.RepoID, a.Path, m.put(ctx, b, key, pointerOf(cur)))
 		}); err != nil {
 			return false, err
 		}
@@ -1137,6 +1137,14 @@ func (m *mod) checkBlobs(ctx context.Context, v *view, b *bucket, r *regionState
 	}
 	r.Missing, r.CheckedAt, r.Pass, r.PassMissing = &missing, now, "", 0
 	if missing == 0 {
+		// A pointer put of unknown outcome may still land in the region: it becomes ready after
+		// the second application of that row, at a later pass.
+		if timedOut, err := m.rq.AnyTimedOut(ctx); err != nil || timedOut {
+			if err != nil {
+				return false, err
+			}
+			return false, m.saveRegion(ctx, r)
+		}
 		r.Ready = true
 		if err := m.saveRegion(ctx, r); err != nil {
 			return false, err
