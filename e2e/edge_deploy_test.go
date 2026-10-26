@@ -169,7 +169,9 @@ func TestEdgeDeployRefusedToken(t *testing.T) {
 	t.Parallel()
 	account := randHex(16)
 	tg := StartOwnSeaweedFSAt(t, account+".r2.cloudflarestorage.com")
-	s := StartServer(t, ServerOpts{Storage: "s3", S3: tg.S3Target})
+	// A Worker route names no port, so the deploy needs a base URL without one.
+	alias := RandName("repo")
+	s := StartServer(t, ServerOpts{Storage: "s3", S3: tg.S3Target, Alias: alias, Env: map[string]string{"TR_BASE_URL": "http://" + alias}})
 	const token = "invalid-token-for-e2e"
 	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{
 		"edge.home_hint": "weur", "edge.cloudflare_token": token, "edge.auto_deploy": false,
