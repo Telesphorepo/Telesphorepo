@@ -11,10 +11,38 @@ You need:
   Access, and each repository domain (Settings › General) on a zone of that account too: a route
   must be on a zone of the Worker's account, so take the route of a domain elsewhere out of the
   `wrangler.jsonc`, and the server serves that domain itself,
-- [bun](https://bun.sh) and Node 22 or newer,
-- a Cloudflare login with access to Workers, R2 and Queues of the account of the R2 buckets.
+- for a deploy from the server, a Cloudflare API token; for a deploy from your computer, [bun](https://bun.sh),
+  Node 22 or newer and a Cloudflare login with access to Workers, R2 and Queues of the account of
+  the R2 buckets.
 
-## Deploy
+## Deploy from the server
+
+The server can deploy the Worker itself, with no computer in between:
+
+1. In the Cloudflare dashboard, create a custom API token (My Profile › API Tokens, or Manage
+   Account › Account API Tokens) with these permissions, for the account of the R2 buckets and
+   the zone of the base URL host and of each repository domain:
+   - Account › Workers Scripts › Edit
+   - Account › Workers R2 Storage › Edit
+   - Account › Queues › Edit
+   - Zone › Workers Routes › Edit
+   - Zone › Zone › Read
+2. In **Settings › Edge delivery**, choose the home region and the regions to serve from, set the
+   token in the Deploy section, and save.
+3. Select **Deploy now**.
+
+The server reads the account from the S3 endpoint of its storage settings
+(`https://<account ID>.r2.cloudflarestorage.com`). It creates each missing regional bucket, the
+copy queue and the notification rule of the home bucket, uploads the Worker of its own version,
+makes it the consumer of the queue, sets its cron and its routes, turns off its workers.dev
+address, and checks it. Each step skips what is already right. It never takes over a route or a
+queue of another Worker: it stops and names it. With **Deploy on its own** on, the server deploys
+again 10 seconds after a change of the regions, the repository domains or the storage location,
+after an upgrade, and when the deployed Worker is outdated. A failure shows on the page with its
+step, Cloudflare's error code and message, and what to do; the server tries again after 1 minute,
+then longer, up to an hour.
+
+## Deploy from your computer
 
 1. In the web UI, open **Settings > Edge delivery**. Choose the home region and the regions to
    serve from, and save.

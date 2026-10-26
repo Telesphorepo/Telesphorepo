@@ -780,6 +780,34 @@ export type EdgeStatus = {
   backfill: { running: boolean; queued: number; total: number };
   /** One entry per chosen region. */
   regions: EdgeRegionStatus[];
+  deploy: EdgeDeploy;
+};
+/** The steps of a deploy of the Worker from the server, in order. */
+export type EdgeDeployStep = "verify" | "zones" | "buckets" | "queue" | "notification" | "upload" | "consumer" | "triggers" | "routes" | "check";
+/** The deploy of the Worker from the server (part of GET /api/edge/status, and the answer of POST /api/edge/deploy). */
+export type EdgeDeploy = {
+  token_set: boolean;
+  /** edge.auto_deploy is on and a token is set. */
+  auto: boolean;
+  running: boolean;
+  /** The step that runs, or the step of the last deploy that failed; "" after a success. */
+  step: EdgeDeployStep | "";
+  /** Why a deploy cannot start now; "" when it can. */
+  unfit: string;
+  /** The hash of the wanted state of the settings, and of the last deploy that set its routes. */
+  wanted: string;
+  deployed: string;
+  /** A token is set and the wanted state differs from the deployed one. */
+  needed: boolean;
+  last_at: string | null;
+  last_ok: boolean;
+  last_error: string;
+  /** The Cloudflare call of the last failure. */
+  last_call: { method: string; path: string; status: number; errors: { code: number; message: string }[]; transport?: string } | null;
+  /** What the last deploy changed in Cloudflare. */
+  changed: string[];
+  /** When the server tries again on its own after a failure. */
+  next_at: string | null;
 };
 /**
  * POST /api/edge/check: worker (the Worker answered and ran its gap check), refused (the Worker

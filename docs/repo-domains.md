@@ -60,12 +60,16 @@ domain.
 
 ## Edge delivery
 
-With edge delivery on, the Worker serves the domain too. After you add or remove a domain, open
-**Settings › Edge delivery**, download the Worker again (or the `wrangler.jsonc`), and run
-`bun run deploy`: the configuration has a route `<domain>/*` for each domain. Until the route is
-deployed, the server serves the domain itself. A Worker of a release without repository domains
+With edge delivery on, the Worker serves the domain too: its configuration has a route
+`<domain>/*` for each domain. With a Cloudflare API token in **Settings › Edge delivery** and
+**Deploy on its own** on, the server deploys the new routes itself 10 seconds after you add or
+remove a domain (or select **Deploy now**), and deletes the route of a removed domain. Without a
+token, download the Worker again (or the `wrangler.jsonc`) and run `bun run deploy`. Until the
+route is deployed, the server serves the domain itself. A Worker of a release without repository domains
 sends every request to the server while a domain is listed, and the page says why.
 
 A Worker route must be on a zone of the Cloudflare account of the Worker. A domain whose zone is in
 another Cloudflare account, or not on Cloudflare, gets no edge: take its route out of
-`wrangler.jsonc` before you deploy, and the server serves that domain itself.
+`wrangler.jsonc` before you deploy, and the server serves that domain itself. The deploy from the
+server stops at such a domain and names it and the account of its zone; deploy from a computer
+then.

@@ -76,25 +76,7 @@ func (m *mod) wrangler(s *settings.Snapshot, bundled bool) ([]byte, error) {
 		MaxRetries      int    `json:"max_retries"`
 		MaxBatchTimeout int    `json:"max_batch_timeout"`
 	}
-	routes := []string{}
-	seen := map[string]bool{}
-	for _, f := range m.h.Formats.All() {
-		if f.Edge == nil {
-			continue
-		}
-		p := host + f.Edge.Prefix(f.Name) + "*"
-		if !seen[p] {
-			seen[p] = true
-			routes = append(routes, p)
-		}
-	}
-	// The reserved path of the check of the Worker (POST /api/edge/check).
-	routes = append(routes, host+checkPrefix+"*")
-	// Each repo domain, whole: every path of it is a file of its repo.
-	domains := slices.Sorted(maps.Keys(m.h.RepoDomains(s)))
-	for _, d := range domains {
-		routes = append(routes, d+"/*")
-	}
+	routes, domains := m.routePatterns(s, host)
 	buckets := []r2{{Binding: "HOME", BucketName: home}}
 	for _, rc := range regionsOf(s) {
 		buckets = append(buckets, r2{Binding: binding(rc.Hint), BucketName: rc.Bucket})
@@ -156,4 +138,30 @@ func (m *mod) wrangler(s *settings.Snapshot, bundled bool) ([]byte, error) {
 	}
 	out.Write(body.Bytes())
 	return out.Bytes(), nil
+}
+
+// routePatterns returns the route patterns of the Worker for the settings s and the base URL host: the
+// prefix of each format that the edge serves, the reserved path of the check, and each repo
+// domain whole; and the repo domains, sorted.
+func (m *mod) routePatterns(s *settings.Snapshot, host string) ([]string, []string) {
+	routes := []string{}
+	seen := map[string]bool{}
+	for _, f := range m.h.Formats.All() {
+		if f.Edge == nil {
+			continue
+		}
+		p := host + f.Edge.Prefix(f.Name) + "*"
+		if !seen[p] {
+			seen[p] = true
+			routes = append(routes, p)
+		}
+	}
+	// The reserved path of the check of the Worker (POST /api/edge/check).
+	routes = append(routes, host+checkPrefix+"*")
+	// Each repo domain, whole: every path of it is a file of its repo.
+	domains := slices.Sorted(maps.Keys(m.h.RepoDomains(s)))
+	for _, d := range domains {
+		routes = append(routes, d+"/*")
+	}
+	return routes, domains
 }
