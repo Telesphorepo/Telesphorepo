@@ -125,7 +125,8 @@ func (m *mod) wrangler(s *settings.Snapshot, bundled bool) ([]byte, error) {
 	out.WriteString("//   bunx wrangler login\n")
 	out.WriteString("//   bun run provision\n")
 	out.WriteString("//   bun run deploy\n")
-	out.WriteString("// In CI, set CLOUDFLARE_API_TOKEN (Workers Scripts and Routes edit, R2 edit, Queues edit) in\n")
+	out.WriteString("// In CI, set CLOUDFLARE_API_TOKEN (Workers Admin, Workers R2 Storage Edit, Queues Edit, and\n")
+	out.WriteString("// Workers Routes Edit and Zone Read on the zones of the routes) in\n")
 	out.WriteString("// place of the login. Run provision and deploy again after a region change, and deploy the\n")
 	if bundled {
 		out.WriteString("// Worker of each server release: download it again from Settings > Edge delivery.\n")

@@ -102,15 +102,17 @@ var stepText = map[string]string{
 	stepCheck:        "Check the Worker",
 }
 
+// stepPerm is the permission that each step needs, as Cloudflare's token form names it: the scope of
+// its policy, then the category › name: level.
 var stepPerm = map[string]string{
-	stepZones:        "Zone › Zone › Read on the zone of each route host",
-	stepBuckets:      "Account › Workers R2 Storage › Edit",
-	stepQueue:        "Account › Queues › Edit",
-	stepNotification: "Account › Workers R2 Storage › Edit",
-	stepUpload:       "Account › Workers Scripts › Edit",
-	stepConsumer:     "Account › Queues › Edit",
-	stepTriggers:     "Account › Workers Scripts › Edit",
-	stepRoutes:       "Zone › Workers Routes › Edit on the zone of each route host",
+	stepZones:        "DNS & Zones › Zone: Read, in a policy of All Domains or the domain of each route host",
+	stepBuckets:      "Developer Platform › Workers R2 Storage: Edit, in a policy of the Entire Account",
+	stepQueue:        "Developer Platform › Queues: Edit, in a policy of the Entire Account",
+	stepNotification: "Developer Platform › Workers R2 Storage: Edit, in a policy of the Entire Account",
+	stepUpload:       "Developer Platform › Workers: Admin (Editor cannot create the Worker), in a policy of the Entire Account",
+	stepConsumer:     "Developer Platform › Queues: Edit, in a policy of the Entire Account",
+	stepTriggers:     "Developer Platform › Workers: Admin, in a policy of the Entire Account",
+	stepRoutes:       "Developer Platform › Workers Routes: Edit, in a policy of All Domains or the domain of each route host",
 }
 
 // r2HostRE is the host of an R2 S3 endpoint: the account, and a jurisdiction.
@@ -684,7 +686,7 @@ func (r *deployRun) findZones(ctx context.Context) error {
 				}
 			}
 			msg += " Move the zone into this account, or deploy from a computer with the route of " + host +
-				" taken out of wrangler.jsonc: the server then serves that host itself. If the zone is in this account, give the token Zone › Zone › Read on it."
+				" taken out of wrangler.jsonc: the server then serves that host itself. If the zone is in this account, give the token DNS & Zones › Zone: Read in a policy of All Domains or of that domain."
 			return &stepError{step: stepZones, msg: msg}
 		}
 		if found.Status != "" && found.Status != "active" {

@@ -2419,9 +2419,12 @@ account is the subdomain of `s3.endpoint` (`<account>.r2.cloudflarestorage.com`,
 `fedramp` or `us` host of a jurisdiction, whose calls and bindings carry that jurisdiction:
 the `cf-r2-jurisdiction` header and the binding's `jurisdiction`); another endpoint refuses the
 deploy with that reason, as does a base URL host with a port (a route names no port). The token
-needs Account › Workers Scripts › Edit, Account › Workers R2 Storage › Edit, Account › Queues ›
-Edit, and on the zone of each route host Zone › Workers Routes › Edit and Zone › Zone › Read
-(Cloudflare's API reference names Edit "Write"). The steps, each reading first and changing only
+is an account API token (Manage account › Account API tokens, Custom) with two policies, named as
+Cloudflare's token form names them: the Entire Account with Developer Platform › Workers: Admin
+(Editor cannot create a Worker, and the first deploy creates it), Workers R2 Storage: Edit and
+Queues: Edit; and All Domains, or the domain of each route host, with Developer Platform ›
+Workers Routes: Edit and DNS & Zones › Zone: Read (Cloudflare's API reference names Edit
+"Write"). The UI, the setting's help and a permission refusal of each step name them so. The steps, each reading first and changing only
 what differs:
 
 | Step | Calls |
@@ -2492,7 +2495,7 @@ and `bun run deploy`. Wrangler's OAuth login asks for its default scopes, which 
 `workers:write`, `workers_scripts:write`, `workers_routes:write`, `zone:read` and `queues:write`;
 R2 has no scope of its own there, and Cloudflare's R2 guides run `r2 bucket create`, `r2 bucket
 notification create` and `queues create` after a plain `wrangler login`. In CI,
-`CLOUDFLARE_API_TOKEN` (Workers Scripts and Routes edit, R2 edit, Queues edit) takes the place of
+`CLOUDFLARE_API_TOKEN` (a token with the permissions of the server's deploy) takes the place of
 the login; wrangler reads it itself. `scripts/provision.ts` first runs `wrangler whoami --json`:
 without a login or a token it stops with "Sign in first: bunx wrangler login". Provision runs
 wrangler without a terminal, and wrangler cannot ask which account to use, so when the login

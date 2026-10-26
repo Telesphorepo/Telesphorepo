@@ -19,14 +19,16 @@ You need:
 
 The server can deploy the Worker itself, with no computer in between:
 
-1. In the Cloudflare dashboard, create a custom API token (My Profile › API Tokens, or Manage
-   Account › Account API Tokens) with these permissions, for the account of the R2 buckets and
-   the zone of the base URL host and of each repository domain:
-   - Account › Workers Scripts › Edit
-   - Account › Workers R2 Storage › Edit
-   - Account › Queues › Edit
-   - Zone › Workers Routes › Edit
-   - Zone › Zone › Read
+1. In the Cloudflare dashboard, open the account of the R2 buckets, go to **Manage account ›
+   Account API tokens**, select **Create Token**, then **Custom**, and add two permission
+   policies:
+   - **Entire Account:** Developer Platform › Workers: **Admin**, Developer Platform › Workers R2
+     Storage: **Edit**, Developer Platform › Queues: **Edit**
+   - **All Domains** (or the domains of the base URL host and of each repository domain):
+     Developer Platform › Workers Routes: **Edit**, DNS & Zones › Zone: **Read**
+
+   Workers needs Admin, not Editor: Editor cannot create a Worker, and the first deploy creates
+   it. Cloudflare's "Edit Cloudflare Workers" template lacks Queues, so start from Custom.
 2. In **Settings › Edge delivery**, choose the home region and the regions to serve from, set the
    token in the Deploy section, and save.
 3. Select **Deploy now**.
@@ -61,8 +63,8 @@ then longer, up to an hour.
 notification rule of the home bucket. It skips what exists, so you can run it again. It asks
 nothing: when your login reaches several Cloudflare accounts, set `CLOUDFLARE_ACCOUNT_ID` to the
 account of the buckets (`CLOUDFLARE_ACCOUNT_ID=<id> bun run provision`, and the same for
-deploy). In CI, set `CLOUDFLARE_API_TOKEN` in place of the login, with Workers Scripts edit,
-Workers Routes edit, R2 edit and Queues edit.
+deploy). In CI, set `CLOUDFLARE_API_TOKEN` in place of the login, a token with the permissions of
+**Deploy from the server**.
 
 Then turn edge delivery on in the web UI. The switch turns on once the Worker has reported its
 version: the Edge delivery page checks the Worker every 30 seconds until then, and you can select

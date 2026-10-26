@@ -12,7 +12,8 @@
 // It runs again safely: it skips what exists. Run it after a region change, then `bun run deploy`.
 //
 // It runs wrangler as you are signed in: sign in once with `bunx wrangler login`. In CI, set
-// CLOUDFLARE_API_TOKEN (Workers Scripts and Routes edit, R2 edit, Queues edit) instead. It asks
+// CLOUDFLARE_API_TOKEN (Workers Admin, Workers R2 Storage Edit, Queues Edit, and Workers Routes
+// Edit and Zone Read on the zones of the routes) instead. It asks
 // nothing, so when your login reaches several accounts it needs CLOUDFLARE_ACCOUNT_ID (or
 // "account_id" in wrangler.jsonc).
 //

@@ -79,7 +79,7 @@ var (
 		}})
 	CloudflareToken = settings.String(&settings.Def{Key: "edge.cloudflare_token", Secret: true, Label: "Cloudflare API token",
 		Normalize: settings.Trim,
-		Help:      "An API token of the Cloudflare account of the R2 buckets. With it, the server deploys the edge Worker itself: the regional buckets, the copy queue, its notification rule, the Worker, its cron and its routes. It needs Account: Workers Scripts Edit, Workers R2 Storage Edit and Queues Edit, and Zone: Workers Routes Edit and Zone Read on the zone of each route host."})
+		Help:      "An API token of the Cloudflare account of the R2 buckets. With it, the server deploys the edge Worker itself: the regional buckets, the copy queue, its notification rule, the Worker, its cron and its routes. Create it in Manage account › Account API tokens (Create Token, then Custom) with a policy of the Entire Account holding Developer Platform › Workers: Admin, Workers R2 Storage: Edit and Queues: Edit, and a policy of All Domains (or the domain of each route host) holding Developer Platform › Workers Routes: Edit and DNS & Zones › Zone: Read."})
 	AutoDeploy = settings.Bool(&settings.Def{Key: "edge.auto_deploy", Default: "true", Label: "Deploy on its own",
 		Help: "With a Cloudflare API token, the server deploys the Worker again when the regions, the repository domains, the storage location or the server version change, or when the deployed Worker is outdated."})
 )

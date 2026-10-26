@@ -260,13 +260,14 @@
     routes: "Set the routes",
     check: "Check the Worker",
   };
-  // The permissions of the token, as Cloudflare's token form names them.
-  const TOKEN_PERMISSIONS = [
-    "Account › Workers Scripts › Edit",
-    "Account › Workers R2 Storage › Edit",
-    "Account › Queues › Edit",
-    "Zone › Workers Routes › Edit",
-    "Zone › Zone › Read",
+  // The permission policies of the token, as Cloudflare's token form names them: the scope, then
+  // each permission as its category › name: level.
+  const TOKEN_POLICIES = [
+    {
+      scope: "Entire Account",
+      permissions: ["Developer Platform › Workers: Admin", "Developer Platform › Workers R2 Storage: Edit", "Developer Platform › Queues: Edit"],
+    },
+    { scope: "All Domains", permissions: ["Developer Platform › Workers Routes: Edit", "DNS & Zones › Zone: Read"] },
   ];
   let deployError = $state("");
   let deployStarting = $state(false);
@@ -649,13 +650,18 @@
               describedby="edge-token-help"
             />
             {#snippet more()}
-              <p>Create a custom API token in the Cloudflare dashboard (My Profile › API Tokens, or Manage Account › Account API Tokens) with these permissions:</p>
-              <ul class="mt-2 list-disc pl-5">
-                {#each TOKEN_PERMISSIONS as p (p)}<li>{p}</li>{/each}
-              </ul>
+              <p>
+                In the Cloudflare account of the R2 buckets, open Manage account › Account API tokens, select Create Token, then Custom, and add two permission policies:
+              </p>
+              {#each TOKEN_POLICIES as policy (policy.scope)}
+                <p class="mt-2">{policy.scope}</p>
+                <ul class="mt-1 list-disc pl-5">
+                  {#each policy.permissions as p (p)}<li>{p}</li>{/each}
+                </ul>
+              {/each}
               <p class="mt-2">
-                Include the account of the R2 buckets, and the zone of the base URL host and of each repository domain. The server reads the account from the S3 endpoint
-                of the storage settings.
+                Workers Admin, not Editor: the first deploy creates the Worker. In place of All Domains, the domains of the base URL host and of each repository domain
+                will do. The server reads the account from the S3 endpoint of the storage settings.
               </p>
             {/snippet}
           </FormRow>
@@ -729,7 +735,7 @@
         <div class="flex min-w-0 grow flex-col gap-2">
           <CodeSnippet label="Sign in to Cloudflare" value="bunx wrangler login" />
           <p class="text-meta text-muted-foreground">
-            In CI, set CLOUDFLARE_API_TOKEN instead, with edit access to Workers Scripts, Workers Routes, R2 and Queues.
+            In CI, set CLOUDFLARE_API_TOKEN instead, a token with the permissions of the token above.
           </p>
         </div>
       </li>
