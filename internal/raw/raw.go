@@ -212,7 +212,7 @@ func (f *Format) uploadSpec() *format.UploadSpec {
 		Hint:   "Any files, or a folder with its subfolders.",
 		One:    "file",
 		Many:   "files",
-		Note:   "A file with the same name is replaced when the repository allows it.",
+		Note:   "A file with the same name is replaced where the repository's rules allow it.",
 		Empty:  "The folder has no files.",
 		Fields: uploadFields,
 		Plan:   f.Plan,
@@ -251,8 +251,8 @@ func (f *Format) Plan(ctx context.Context, repo *repos.Repo, in format.PlanInput
 	return plan, nil
 }
 
-// Store stores the files of a plan in one commit, at their targets, under the repo's overwrite
-// policy.
+// Store stores the files of a plan in one commit, at their targets, under the overwrite policy
+// of each path.
 func (f *Format) Store(ctx context.Context, repo *repos.Repo, plan *format.Plan, files map[string]*assets.Spooled, o assets.Origin) ([]*assets.Result, error) {
 	var ws []assets.Write
 	for _, it := range plan.Items {
