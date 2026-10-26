@@ -27,9 +27,44 @@ const (
 	OverwriteAllow = "allow" // a re-upload replaces the file
 )
 
-// Config is the repo config of a raw repo.
+// maxRules is the most overwrite rules a raw repo takes.
+const maxRules = 100
+
+// Config is the repo config of a raw repo: the overwrite policy of each path is that of the first
+// rule whose glob matches it, else Overwrite.
 type Config struct {
 	Overwrite string `json:"overwrite"`
+	Rules     []Rule `json:"rules,omitempty"`
+}
+
+// Rule is one overwrite rule: the policy of the paths that Match (a format.Glob).
+type Rule struct {
+	Match     string `json:"match"`
+	Overwrite string `json:"overwrite"`
+}
+
+// policy is the overwrite policy of path p.
+func (c Config) policy(p string) string {
+	for _, r := range c.Rules {
+		if format.Glob(r.Match, p) {
+			return r.Overwrite
+		}
+	}
+	return c.Overwrite
+}
+
+// edgePaths classifies the paths of repo for the edge: a path whose policy is deny never changes
+// (identical bytes are kept, other bytes refused), so its copies can serve from every region.
+func edgePaths(repo *repos.Repo) []format.EdgeRule {
+	c, err := repoConfig(repo)
+	if err != nil {
+		return []format.EdgeRule{{Match: "**", Immutable: false}}
+	}
+	out := make([]format.EdgeRule, 0, len(c.Rules)+1)
+	for _, r := range c.Rules {
+		out = append(out, format.EdgeRule{Match: r.Match, Immutable: r.Overwrite != OverwriteAllow})
+	}
+	return append(out, format.EdgeRule{Match: "**", Immutable: c.Overwrite != OverwriteAllow})
 }
 
 // Format is the raw format of the module.
@@ -53,7 +88,10 @@ func Module() module.Module {
 				Config: format.ConfigSpec{Default: json.RawMessage(`{"overwrite":"deny"}`), Validate: validateConfig,
 					Fields: []format.Field{{Key: "overwrite", Label: "Replace files", Type: format.FieldEnum,
 						Options: []string{OverwriteDeny, OverwriteAllow}, Default: json.RawMessage(`"deny"`),
-						Help: "deny keeps a stored file: an upload of other bytes to its path fails. allow replaces it."}}},
+						Help: "deny keeps a stored file: an upload of other bytes to its path fails, the same bytes succeed. allow replaces it. Deleting a file is not replacing it: a person who may delete still can."},
+						{Key: "rules", Label: "Rules by path", Type: format.FieldRules, ValueKey: "overwrite",
+							Options: []string{OverwriteDeny, OverwriteAllow}, Placeholder: "builds/**",
+							Help: "The first rule whose pattern matches a path decides for it; a path that no rule matches follows Replace files. * is any name, ** any depth: builds/** deny with latest.json allow keeps every build and lets latest.json move."}}},
 				Describe: describe,
 				Admit:    admit,
 				Usage:    f.Usage,
@@ -62,8 +100,8 @@ func Module() module.Module {
 				Upload:   f.uploadSpec(),
 				Importer: &format.Importer{Sources: []string{"raw"}, Target: format.SourcePath},
 				UI:       format.UIDescriptor{SnippetTools: map[string]string{"curl": "curl", "wget": "wget", "telesphorepo": "Telesphorepo CLI"}},
-				// Every path is mutable: the overwrite config can change at any time.
-				Edge: &format.EdgeSpec{Shape: format.EdgeStandard},
+				// A path under deny never changes, so it serves from the regions.
+				Edge: &format.EdgeSpec{Shape: format.EdgeStandard, Paths: edgePaths},
 			})
 			x.Demo(module.DemoData{
 				Repos: []module.DemoRepo{{Name: "raw", Description: "Documentation sites, release archives and build logs", Public: true}},
@@ -74,7 +112,9 @@ func Module() module.Module {
 	}
 }
 
-// validateConfig accepts {"overwrite": "allow"|"deny"}; a missing overwrite is "deny".
+// validateConfig accepts {"overwrite": "allow"|"deny", "rules": [{"match", "overwrite"}]}; a
+// missing overwrite is "deny". A rule needs a glob that format.ValidGlob takes and a policy; an
+// error names the rule by its number from 1.
 func validateConfig(raw json.RawMessage) (json.RawMessage, error) {
 	var c Config
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -88,6 +128,17 @@ func validateConfig(raw json.RawMessage) (json.RawMessage, error) {
 	case OverwriteDeny, OverwriteAllow:
 	default:
 		return nil, fmt.Errorf("overwrite must be %q or %q", OverwriteAllow, OverwriteDeny)
+	}
+	if len(c.Rules) > maxRules {
+		return nil, fmt.Errorf("at most %d rules", maxRules)
+	}
+	for i, r := range c.Rules {
+		if err := format.ValidGlob(r.Match); err != nil {
+			return nil, fmt.Errorf("rule %d (%q): %v", i+1, r.Match, err)
+		}
+		if r.Overwrite != OverwriteDeny && r.Overwrite != OverwriteAllow {
+			return nil, fmt.Errorf("rule %d (%s): overwrite must be %q or %q", i+1, r.Match, OverwriteAllow, OverwriteDeny)
+		}
 	}
 	return json.Marshal(c)
 }
@@ -112,8 +163,8 @@ func describe(p repopath.Path) (assets.Describe, bool) {
 	return assets.Describe{ContentType: ct, Kind: assets.KindArtifact}, true
 }
 
-// admit applies the repo's overwrite policy: identical bytes are kept, different bytes replace
-// the file only when the repo allows overwrite (409 otherwise).
+// admit applies the overwrite policy of the path: identical bytes are kept, different bytes
+// replace the file only when the policy allows overwrite (409 otherwise).
 func admit(_ context.Context, w *assets.Write, existing *assets.Asset) (assets.Decision, error) {
 	if existing == nil {
 		return assets.Store, nil
@@ -125,7 +176,7 @@ func admit(_ context.Context, w *assets.Write, existing *assets.Asset) (assets.D
 	if err != nil {
 		return 0, fmt.Errorf("bad repo config: %w", err)
 	}
-	if c.Overwrite != OverwriteAllow {
+	if c.policy(string(w.Path)) != OverwriteAllow {
 		return 0, assets.Refuse(http.StatusConflict, "%s: file exists and the repo does not allow overwrite", w.Path)
 	}
 	return assets.Store, nil

@@ -81,6 +81,10 @@ type repoObject struct {
 	Private bool     `json:"private"`
 	Guarded bool     `json:"guarded"`
 	Members []string `json:"members"`
+	// Paths classifies the repo's paths in place of the format's globs, for a format with
+	// EdgeSpec.Paths: [[glob, immutable], ...], the first match decides. An older Worker ignores it
+	// and reads every pointer of the repo from the home bucket, which holds them all.
+	Paths [][]any `json:"paths,omitempty"`
 }
 
 // redirectObject is a/repo/<name> of a redirect: Redirect is the name of its repo. The Worker

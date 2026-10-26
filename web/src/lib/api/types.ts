@@ -150,8 +150,10 @@ export type FormatField = {
   key: string;
   label: string;
   help?: string;
-  type: "string" | "bool" | "list" | "enum" | "secret";
+  type: "string" | "bool" | "list" | "enum" | "secret" | "rules";
   options?: string[];
+  /** A rules field: the key of the value (one of options) in each row {match, <value_key>}. */
+  value_key?: string;
   required?: boolean;
   default?: unknown;
   /** An example value that the empty control shows. */

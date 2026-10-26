@@ -373,7 +373,8 @@ func (m *mod) delay(ctx context.Context, r dbq.DueOutboxRow, due, timedOut int64
 // applyPointer writes the pointer of a row under the path lock, from the asset row read again
 // under the lock: the pointer of the asset (home, and every region for an immutable path) when it
 // exists with the row's digest (or the row has none); a delete in every bucket when the asset is
-// gone or gets no pointer. drop: the asset has another digest, whose commit has its own row.
+// gone or gets no pointer. A mutable path that a recorded rule list made immutable loses its
+// regional pointers (paths.go). drop: the asset has another digest, whose commit has its own row.
 func (m *mod) applyPointer(ctx context.Context, v *view, r dbq.DueOutboxRow) (drop bool, err error) {
 	unlock := m.h.Assets.Lock(r.RepoID, r.Path)
 	defer unlock()
@@ -400,8 +401,22 @@ func (m *mod) applyPointer(ctx context.Context, v *view, r dbq.DueOutboxRow) (dr
 	if err := m.put(ctx, v.home, key, body); err != nil {
 		return false, err
 	}
-	if !es.IsImmutable(a.Path) {
-		return false, nil
+	rules, perRepo := m.pathRules(repo)
+	if !m.immutable(repo, a.Path) {
+		if !perRepo {
+			return false, nil
+		}
+		// Mutable now, immutable under rules of an earlier regional pointer: delete it.
+		old, err := m.oldImmutable(ctx, repo, a.Path)
+		if err != nil || !old {
+			return false, err
+		}
+		return false, parallel(len(v.regions)+1, v.regions, func(b *bucket) error { return m.del(ctx, b, key) })
+	}
+	if perRepo {
+		if err := m.record(ctx, repo.ID, rules); err != nil {
+			return false, err
+		}
 	}
 	return false, parallel(len(v.regions)+1, v.regions, func(b *bucket) error { return m.put(ctx, b, key, body) })
 }

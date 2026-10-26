@@ -178,6 +178,28 @@ type EdgeSpec struct {
 	// path that the format's Merge merges must be mutable.
 	Immutable []string
 	Mutable   []string
+	// Paths classifies the paths of one repo in place of Immutable and Mutable, for a format whose
+	// repo config decides what can change: an ordered list whose first matching rule decides, the
+	// last one "**". nil: the globs above. The edge module writes it into the repo object, so the
+	// Worker classifies the repo's paths the same way.
+	Paths func(repo *repos.Repo) []EdgeRule
+}
+
+// EdgeRule is one rule of EdgeSpec.Paths: the paths that Match (a Glob) are immutable or not.
+type EdgeRule struct {
+	Match     string
+	Immutable bool
+}
+
+// ImmutableBy reports whether p is immutable under rules: the first rule whose glob matches
+// decides; no match is mutable.
+func ImmutableBy(rules []EdgeRule, p string) bool {
+	for _, r := range rules {
+		if Glob(r.Match, p) {
+			return r.Immutable
+		}
+	}
+	return false
 }
 
 // Edge URL shapes (EdgeSpec.Shape).

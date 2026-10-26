@@ -1,6 +1,7 @@
 // The globs of the format descriptors (GET /api/formats), matched like the server matches them
 // (internal/format Glob): "*" is any run of characters except "/", "?" one character except "/",
-// and "**/" any number of folders, none included. Matching is case-sensitive.
+// "**/" any number of folders, none included, and a last segment "**" any rest of the path.
+// Matching is case-sensitive.
 
 const cache = new Map<string, RegExp>();
 
@@ -9,6 +10,10 @@ function regexOf(glob: string): RegExp {
   if (re) return re;
   let s = "^";
   for (let i = 0; i < glob.length; ) {
+    if (i + 2 === glob.length && glob.startsWith("**", i) && (i === 0 || glob[i - 1] === "/")) {
+      s += "[\\s\\S]+";
+      break;
+    }
     if (glob.startsWith("**/", i)) {
       s += "(?:[^/]*/)*";
       i += 3;

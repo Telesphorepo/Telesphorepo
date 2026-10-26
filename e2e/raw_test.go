@@ -325,6 +325,53 @@ func TestRaw(t *testing.T) {
 			}
 		})
 
+		t.Run("path rules", func(t *testing.T) {
+			name := RandName("rawrules")
+			// The repo replaces files, except under builds/, which keeps every build at any depth.
+			s.CreateRepo(t, name, "raw", false, map[string]any{"overwrite": "allow", "rules": []map[string]string{
+				{"match": "builds/**", "overwrite": "deny"}, {"match": "latest.json", "overwrite": "allow"},
+			}})
+			s.SetPerms(t, name, writer, "repo.download", "repo.publish")
+			pub := s.PublishAuth(t, writer, name)
+			build, latest := "/raw/"+name+"/builds/7/linux/app.jar", "/raw/"+name+"/latest.json"
+			jar := rawRandom(t, 4<<10)
+			resp, body := rawPut(t, s, build, jar, pub)
+			rawWantStatus(t, resp, body, http.StatusCreated)
+			resp, body = rawPut(t, s, build, jar, pub)
+			rawWantStatus(t, resp, body, http.StatusOK)
+			resp, body = rawPut(t, s, build, []byte("other bytes"), pub)
+			rawWantStatus(t, resp, body, http.StatusConflict)
+			for i, v := range []string{`{"build":6}`, `{"build":7}`} {
+				resp, body = rawPut(t, s, latest, []byte(v), pub)
+				rawWantStatus(t, resp, body, []int{http.StatusCreated, http.StatusOK}[i])
+			}
+			rawWantGet(t, s, tg, latest, Basic{writer, "writer-pass-1234"}, []byte(`{"build":7}`))
+			rawWantGet(t, s, tg, build, Basic{writer, "writer-pass-1234"}, jar)
+
+			// A rule written wrong is refused with its number.
+			for _, bad := range []map[string]string{{"match": "/builds/**", "overwrite": "deny"}, {"match": "a//b", "overwrite": "deny"}, {"match": "x", "overwrite": "never"}} {
+				st, b := s.API(t, http.MethodPatch, "/api/repos/"+name, map[string]any{"config": map[string]any{"overwrite": "allow", "rules": []map[string]string{{"match": "ok/**", "overwrite": "deny"}, bad}}}, s.Admin())
+				if st != http.StatusBadRequest || !strings.Contains(string(b), "rule 2") {
+					t.Fatalf("PATCH rule %v: status %d, want 400 naming rule 2: %s", bad, st, b)
+				}
+			}
+			many := make([]map[string]string, 101)
+			for i := range many {
+				many[i] = map[string]string{"match": fmt.Sprintf("r%d/**", i), "overwrite": "deny"}
+			}
+			if st, b := s.API(t, http.MethodPatch, "/api/repos/"+name, map[string]any{"config": map[string]any{"overwrite": "allow", "rules": many}}, s.Admin()); st != http.StatusBadRequest {
+				t.Fatalf("PATCH 101 rules: status %d, want 400: %s", st, b)
+			}
+
+			// A change of the rules applies to the next write.
+			s.MustAPI(t, http.MethodPatch, "/api/repos/"+name, map[string]any{"config": map[string]any{"overwrite": "allow"}}, s.Admin(), nil)
+			resp, body = rawPut(t, s, build, []byte("other bytes"), pub)
+			rawWantStatus(t, resp, body, http.StatusOK)
+			s.MustAPI(t, http.MethodPatch, "/api/repos/"+name, map[string]any{"config": map[string]any{"overwrite": "allow", "rules": []map[string]string{{"match": "**", "overwrite": "deny"}}}}, s.Admin(), nil)
+			resp, body = rawPut(t, s, latest, []byte(`{"build":8}`), pub)
+			rawWantStatus(t, resp, body, http.StatusConflict)
+		})
+
 		t.Run("wrong format is 404", func(t *testing.T) {
 			mvn := RandName("mvn")
 			s.CreateRepo(t, mvn, "maven", false, nil)

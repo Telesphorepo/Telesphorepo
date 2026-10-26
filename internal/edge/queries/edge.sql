@@ -137,3 +137,43 @@ SELECT id, repo_id, path, sha256 FROM assets WHERE id > ? ORDER BY id LIMIT ?;
 
 -- name: SumFileCount :one
 SELECT CAST(coalesce(sum(file_count), 0) AS INTEGER) FROM repos;
+
+-- The path classes of a repo --------------------------------------------------------------------
+
+-- The rule lists of a repo's regional pointers, through the primary key.
+-- name: ListEdgePaths :many
+SELECT rules, epoch FROM edge_paths WHERE repo_id = ?;
+
+-- name: UpsertEdgePaths :exec
+INSERT INTO edge_paths (repo_id, rules, epoch) VALUES (?, ?, ?)
+ON CONFLICT (repo_id, rules) DO UPDATE SET epoch = excluded.epoch;
+
+-- The rule lists that no write used since the walk of epoch began.
+-- name: PruneEdgePaths :exec
+DELETE FROM edge_paths WHERE repo_id = ? AND epoch < ?;
+
+-- name: DeleteEdgePaths :exec
+DELETE FROM edge_paths WHERE repo_id = ?;
+
+-- name: GetReclass :one
+SELECT epoch, filled, walking, cursor FROM edge_reclass WHERE repo_id = ?;
+
+-- name: PutReclass :exec
+INSERT INTO edge_reclass (repo_id, epoch, filled, walking, cursor) VALUES (?, ?, ?, ?, ?)
+ON CONFLICT (repo_id) DO UPDATE SET epoch = excluded.epoch, filled = excluded.filled,
+  walking = excluded.walking, cursor = excluded.cursor;
+
+-- name: DeleteReclass :exec
+DELETE FROM edge_reclass WHERE repo_id = ?;
+
+-- Every row, at a first start (through the primary keys).
+-- name: ClearEdgePaths :exec
+DELETE FROM edge_paths WHERE repo_id >= 0;
+
+-- name: ClearReclass :exec
+DELETE FROM edge_reclass WHERE repo_id >= 0;
+
+-- Whether a pointer row of the repo has a put of unknown outcome, through the primary key: a walk
+-- ends only without one, since such a put may still land.
+-- name: RepoTimedOut :one
+SELECT EXISTS (SELECT 1 FROM edge_outbox WHERE repo_id = ? AND timed_out_at > 0) AS timed_out;
