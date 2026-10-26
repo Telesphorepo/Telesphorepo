@@ -88,7 +88,7 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/containerengine` | Docker/Podman detection for tooling and e2e; not linked into the server |
 | `web/` | Svelte 5 + Vite UI (Tailwind CSS v4, shadcn-svelte Maia style), embedded via `web/embed.go` (`go:embed all:dist`). See **Web UI** |
 | `tools/task` | `go tool task`: dev, build, preview, test, cli, release, gen and doctor |
-| `e2e/` | End-to-end suite in four zones (tags `e2e`, `import`, `scale`, `clients`) using testcontainers, and the macOS zone (tag `macos`) of `release.yml` |
+| `e2e/` | End-to-end suite: three zones with testcontainers (tags `e2e`, `import`, `clients`), the scale zone (tag `scale`) and the macOS zone (tag `macos`) of `release.yml`, which run the server as a process of the computer |
 
 ## Modules
 
@@ -4566,9 +4566,10 @@ project and file rows per unit. Then it runs
 | `go tool task preview` | Builds, then runs `bin/telesphorepo-server dev` on :8080 |
 | `go tool task test [go test args]` | Runs the core zone: `go test -tags e2e ./e2e/... -count=1 -v`, 60 min timeout |
 | `go tool task test import [go test args]` | Runs the import zone: `-tags import`, 45 min timeout. It starts a Nexus container |
-| `go tool task test scale [go test args]` | Runs `TestScale` (`-tags scale`, 60 min timeout) |
+| `go tool task test scale [go test args]` | Runs `TestScale` (`-tags scale`, 90 min timeout) with no container engine, and prints the verdict of the run that the test writes to the file of `E2E_SCALE_VERDICT`: `PASS` exits 0, `FAIL` exits as the failed test does, `NOISY` exits 3 and `INCONCLUSIVE` exits 4. It takes no `--shard` |
 | `go tool task test clients [go test args]` | Runs the clients zone: `-tags clients`, 120 min timeout. It builds the CLI of this repo on the host and runs it in containers with the real tools |
-| `go tool task test [zone] --shard i/n [go test args]` | Runs every n-th top-level test of the zone, by name, from the i-th (`go test -list`, then one `-run`); `TestMain` skips its setup while listing | Runs core, import, scale and clients one after the other. It runs every zone, lists the failed zones and exits non-zero if any failed |
+| `go tool task test [zone] --shard i/n [go test args]` | Runs every n-th top-level test of the zone, by name, from the i-th (`go test -list`, then one `-run`); `TestMain` skips its setup while listing |
+| `go tool task test all [go test args]` | Runs core, import and clients one after the other (not scale, which runs alone). It runs every zone, lists the failed zones and exits non-zero if any failed |
 | `go tool task release [version]` | Builds the UI and the six CLI archives that the server embeds once. Then it cross-compiles each program whose package exists: the CLI (`./cmd/telesphorepo`, with its own `LICENSE`; the install scripts make its second name `docker-credential-telesphorepo`) and the server (`./cmd/telesphorepo-server`) for linux, darwin and windows on amd64 and arm64 (`CGO_ENABLED=0`, `-trimpath`, `-X main.version`). Each binary goes into `bin/release/<program>_<version>_<os>_<arch>.tar.gz` (`.zip` on Windows) with `LICENSE` and `README.md`. With `edge/`, it bundles the edge Worker folder once (as `go tool task edge`; it needs bun), embeds it in the server, and packs the same folder into `telesphorepo-edge_<version>.tar.gz`: `dist/`, `package.json`, `bun.lock`, `README.md` and `scripts/provision.ts`. The command writes `SHA256SUMS` of every archive. The version defaults to `git describe`. A version given as the argument must be a release version, and `changes.toml` must have no `dev` entry (see **Change log**) |
 | `go tool task tag <version>` | Makes a release. It needs a clean work tree and a new tag. It writes `v<version>` into each `dev` entry of `changes.toml`, commits the file as `Release v<version>`, and creates the annotated tag `v<version>`. It pushes nothing. The tagged commit holds the stamped change log, so `release.yml` and every image build embed the same entries |
 | `go tool task gen` | Runs `go tool sqlc generate` for every `internal/**/sqlc.yaml` |
@@ -4580,7 +4581,7 @@ CI runs on GitHub Actions with the built-in `GITHUB_TOKEN` and reads no reposito
 | Workflow | Runs | Does |
 |---|---|---|
 | `ci.yml` | Push to `main`, pull requests | `build` job: `go tool task build`, `go vet` for the `e2e`, `import`, `scale`, `clients` and `macos` tags, `go vet` and `go build` of `./cmd/telesphorepo` for `GOOS=darwin` and `GOOS=windows`, `bunx tsc --noEmit` and `bun run build` in `edge/`, `telesphorepo-server dbcheck`. The e2e jobs run on pull requests only, and only when the `changes` job finds a file outside `web/src/` that is not Markdown (the e2e tests drive the API and real clients, never the UI): `e2e-core` on four machines at once, each `go tool task test --shard i/4`; `e2e-clients`, `go tool task test clients`; `e2e-github-actions` (pull requests of this repository; `id-token: write`), `TestCLIGitHubActions` with the job's real identity token. Each uploads its log on failure. `snapshot-image` job (push to `main` only, after `build`): multi-arch image with tags `main` and `sha-<short>`, version `main-<short sha>`. A newer push cancels the running pull request jobs |
-| `e2e-extended.yml` | Manual only (zone `import`, `scale` or `all`); the zones run locally before a push (AGENTS.md) | `go tool task test <zone>` |
+| `e2e-extended.yml` | Manual only (zone `import` or `all`); the zones run locally before a push (AGENTS.md). The scale zone never runs in CI: a shared runner is not a quiet machine | `go tool task test <zone>` |
 | `release.yml` | Push of a `v*` tag | `binaries` job: `go tool task release`, then a GitHub Release with the archives and `SHA256SUMS`. `image` job: multi-arch image (`linux/amd64`, `linux/arm64`) pushed to `ghcr.io/telesphorepo/telesphorepo` with tags `X.Y.Z`, `X.Y` and `latest` (no `latest` for pre-releases). `macos` job on `macos-latest`: `go tool task build`, then the macOS zone (`go test -tags macos -run TestMacOS ./e2e/` with `E2E_SERVER_BIN`) |
 
 The Dockerfile builds the UI, the six CLI archives (`go tool task cli`) and the Go binary on the build platform and cross-compiles with
@@ -4738,17 +4739,19 @@ or no CLI archives) and `CLIArchive`. They read their changes through `go build 
 tree on disk stays as it is. `ServerBinary` puts such a server in place of the image's.
 
 **Zones.** A build tag picks the zone, so a run starts only the containers it needs. The harness
-and the client helpers (`harness_test.go`, `main_test.go`, `clients_test.go`) carry every tag.
-Each test removes its containers when it ends. Every container and the run network carry the
-label `telesphorepo.e2e`, and each run first removes what a killed run left: labelled containers
-and networks, and the `telesphorepo-data-*` and `telesphorepo-scale-*` volumes.
+and the client helpers (`harness_test.go`, `main_test.go`, `clients_test.go`) carry the tags of
+the container zones (`e2e`, `import`, `clients`). The scale and macOS zones run the server binary
+as a process of the computer and share `native_test.go` (tags `scale` and `macos`). Each test
+removes its containers when it ends. Every container and the run network carry the label
+`telesphorepo.e2e`, and each run first removes what a killed run left: labelled containers and
+networks, and the `telesphorepo-data-*` volumes.
 | Zone | Tag | Command | Contents |
 |---|---|---|---|
 | core | `e2e` | `go tool task test` | Formats (the Docker registry with Docker in Docker too), auth, API, settings, storage move, query plans, the listener protocols |
 | import | `import` | `go tool task test import` | `TestNexus`, with the import of a Nexus docker hosted repo (`nexus_docker_test.go`: the Docker Bearer Token Realm on and `forceBasicAuth` off, so every download answers a Bearer challenge; skopeo pushes an image and a multi-platform index; the sync imports both tags and ignores the blobs; crane pulls both by tag and by digest; a second sync imports nothing) and of a Nexus nuget hosted repo (`nexus_nuget_test.go`: a package of `dotnet pack` uploaded to Nexus, imported, then restored and run with dotnet) |
-| scale | `scale` | `go tool task test scale` | `TestScale` |
+| scale | `scale` | `go tool task test scale` | `TestScale`, with no container engine, alone on a quiet machine |
 | clients | `clients` | `go tool task test clients` | The Telesphorepo CLI with the real tools: `TestCLISetup`, `TestCLILogin`, `TestCLIDocker`, `TestCLIMaven`, `TestCLIGradle`, `TestCLIJenkins`, `TestCLIGitHubActions`, `TestCLIUpload`, `TestCLINuGet`, `TestCLICompat` and `TestInstall` (`e2e/cli_*_test.go`). It needs Go on the host to build the CLI and the internet for Maven Central, Gradle, the Maven 4 download and the Jenkins plugins |
-| all | all tags | `go tool task test all` | Every zone |
+| all | `e2e`, `import`, `clients` | `go tool task test all` | Every zone but scale |
 
 **Admin and user calls.** The API changes state only through a UI session, so the suite signs in
 the way the web UI does. `s.Admin()` is the bootstrap admin's UI session: on first use the
@@ -4890,11 +4893,42 @@ a maven2 group of the two hosted repos and the proxy. On each storage backend th
   the packument through both names has `beta` and the copy's `latest`); each merge's final sync
   names the merge.
 
-`TestScale` (tag `scale`, `go tool task test scale`) seeds 100k and then 1M assets with `seed N`
-on a named volume. It starts a server on the volume and measures the p95 latency over 400 runs of
-each operation: Maven GET with `If-None-Match`, an asset list walk, a rare search, a common
-search and token auth (`/api/me`). An operation fails when its p95 at 1M exceeds
-`max(2 x p95 at 100k, p95 at 100k + 2 ms)`.
+`TestScale` (tag `scale`, `go tool task test scale`) needs no container engine. It refuses to
+start while containers with the label `telesphorepo.e2e` or `telesphorepo-server` processes run.
+It builds the server for the computer it runs on (`E2E_SERVER_BIN` names a built one instead) and
+makes two data folders in the temp folder of the computer: on each, a first server creates the
+bootstrap admin and a read token, then `seed N` adds 100k or 1M assets. `seed` numbers the rows
+of each repo from 0 and makes each path from its number, so the 100k paths of a repo are paths of
+the same repo at 1M. A copy of the 100k folder is the A/A control: a server of its own on a file
+of its own (its own SQLite page caches and its own pages in the OS file cache, as the other two
+have). The three servers run at once.
+
+- **CPUs.** On Windows (`GetLogicalProcessorInformationEx`) and Linux
+  (`/sys/devices/system/cpu/*/cache`) the servers run on the CPUs of the L3 cache domain with the
+  largest cache (on a CPU with one 3D V-Cache die, that die) and the test process, the client, on
+  every other CPU; with one L3 domain the client gets the last quarter of its cores.
+  `E2E_SCALE_CPUS` (`0-15`, `0,2,4-7`) sets the CPUs of the servers. `GOMAXPROCS` of each server
+  is the size of its set. The test prints both sets. macOS has no CPU affinity API: the test says
+  so and runs unpinned.
+- **Clock.** On Windows the requests are timed with `QueryPerformanceCounter`: Go's monotonic
+  clock there moves once per timer tick (0.5 ms to 15.6 ms). Elsewhere with Go's clock.
+- **Operations.** Maven GET with `If-None-Match` (304), an asset list walk (`limit=100`, each
+  request the next page), a rare search (the full sample path), a common search (its extension),
+  token auth (`/api/me`) and the repo list (`limit=50`). The sample path is a path of the first
+  Maven repo at 100k, checked at every server, so both sizes answer the same request.
+- **Warm-up.** For each operation, a burst of 32 concurrent streams per server (more than the
+  reader connections, each of which has its own page cache), then blocks of 50 requests per
+  server until two consecutive block medians of every server agree within 5%, at most 20 blocks.
+- **Measurement.** 20 blocks of 75 rounds; each round sends every operation in a random order,
+  and each operation to the three servers in a random order. Per block the ratio of medians
+  1M/100k and A/A/100k; per operation the median of the 20 block ratios with a 95% bootstrap
+  interval (10,000 resamples). The table shows the median and p95 of every request at each
+  server, both ratios with their intervals, the limit and the verdict.
+- **Verdicts.** The limit is `max(2, (median at 100k + 2 ms) / median at 100k)`. FAIL: the
+  interval of 1M/100k lies above the limit; PASS: below it; INCONCLUSIVE: it holds the limit (a
+  FAIL whose warm-up did not settle is INCONCLUSIVE). When an A/A interval leaves 0.8 to 1.25 the
+  run is NOISY and judges nothing: the machine was not quiet. The run is NOISY, else FAIL when an
+  operation fails, else INCONCLUSIVE when one is, else PASS. Only FAIL fails the test.
 
 ## Code map and recipes
 
