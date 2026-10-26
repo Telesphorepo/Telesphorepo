@@ -89,15 +89,15 @@ func preview(ctx context.Context) error {
 var testZones = map[string][]string{
 	"core":    {"-tags", "e2e", "-timeout", "60m"},
 	"import":  {"-tags", "import", "-timeout", "45m"},
-	"scale":   {"-tags", "scale", "-run", "TestScale", "-timeout", "60m"},
+	"scale":   {"-tags", "scale", "-run", "TestScale", "-timeout", "90m"},
 	"clients": {"-tags", "clients", "-timeout", "120m"},
 }
 
 // test runs e2e zones with the detected container engine. An optional first argument picks
 // the zone ("import", "scale", "clients" or "all"; the default is core); then "--shard i/n"
 // runs only every n-th top-level test of the zone from the i-th on (CI runs a zone on n
-// machines at once); the remaining args pass to go test. "all" runs core, import, scale and
-// clients one after the other and fails if any fails.
+// machines at once); the remaining args pass to go test. "all" runs core, import and clients
+// one after the other and fails if any fails. The scale zone runs alone and needs no engine.
 func test(ctx context.Context, args []string) error {
 	if _, err := checkGo(); err != nil {
 		return err
@@ -105,10 +105,12 @@ func test(ctx context.Context, args []string) error {
 	zones := []string{"core"}
 	if len(args) > 0 {
 		switch args[0] {
-		case "import", "scale", "clients":
+		case "scale":
+			return testScale(ctx, args[1:])
+		case "import", "clients":
 			zones, args = []string{args[0]}, args[1:]
 		case "all":
-			zones, args = []string{"core", "import", "scale", "clients"}, args[1:]
+			zones, args = []string{"core", "import", "clients"}, args[1:]
 		}
 	}
 	shard, shards := 0, 0
@@ -154,6 +156,55 @@ func test(ctx context.Context, args []string) error {
 		out.line(red("✗ ") + "failed zones: " + strings.Join(failed, ", "))
 	}
 	return last
+}
+
+// testScale runs the scale zone (TestScale) and prints the verdict of the run, which the test
+// writes to the file of E2E_SCALE_VERDICT. FAIL fails as the test does; NOISY exits 3 and
+// INCONCLUSIVE exits 4, so neither reads as a pass nor as a regression.
+func testScale(ctx context.Context, args []string) error {
+	if len(args) > 1 && args[0] == "--shard" {
+		return usageErr("the scale zone has one test: it takes no --shard")
+	}
+	f, err := os.CreateTemp("", "telesphorepo-scale-verdict-")
+	if err != nil {
+		return err
+	}
+	verdictFile := f.Name()
+	f.Close()
+	defer os.Remove(verdictFile)
+
+	argv := append([]string{"go", "test"}, testZones["scale"]...)
+	argv = append(argv, "./e2e/...", "-count=1", "-v")
+	argv = append(argv, args...)
+	step("zone scale: %s", strings.Join(argv, " "))
+	runErr := runStep(ctx, ".", []string{"E2E_SCALE_VERDICT=" + verdictFile}, argv...)
+	if ctx.Err() != nil {
+		return exitError{130}
+	}
+	b, _ := os.ReadFile(verdictFile)
+	verdict, detail, _ := strings.Cut(strings.TrimSpace(string(b)), "\n")
+	switch verdict {
+	case "PASS":
+		out.line(green("✓ ") + "scale: " + bold("PASS") + dim("  "+detail))
+	case "FAIL":
+		out.line(red("✗ ") + "scale: " + bold("FAIL") + "  " + detail)
+	case "NOISY":
+		out.line(yellow("! ") + "scale: " + bold("NOISY") + "  " + detail)
+		if runErr == nil {
+			return exitError{3}
+		}
+	case "INCONCLUSIVE":
+		out.line(yellow("? ") + "scale: " + bold("INCONCLUSIVE") + "  " + detail)
+		if runErr == nil {
+			return exitError{4}
+		}
+	default:
+		out.line(red("✗ ") + "scale: no verdict (the test stopped before it measured)")
+	}
+	if runErr != nil {
+		return childExit(runErr)
+	}
+	return nil
 }
 
 // shardRun returns the -run pattern of shard i of n of a zone: its top-level tests by name

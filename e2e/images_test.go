@@ -1,4 +1,4 @@
-//go:build e2e || import || scale || clients
+//go:build e2e || import || clients
 
 package e2e
 

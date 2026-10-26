@@ -30,6 +30,7 @@ Linux. Use bun, not npm.
 - **A test run follows a commit.** Finish the change, commit it, then run the tests it touches,
   once (`go tool task test -run 'TestX|TestY'`). A failure: fix it, commit, and run the failed
   tests once more. Never run tests after each edit, and never in a loop while code changes.
+  One test run at a time on a machine: never two zones, or two agents' runs, at once.
 - **Before the push, the zones the branch touches pass here:** the core zone for a change to the
   server or the UI (`go tool task test`), the clients zone for the CLI, the scale zone
   (`go tool task test scale`) for a hot query, an index or a request path, the import zone
@@ -63,6 +64,21 @@ it does on an empty server. That was the promise from the first commit (the scal
 - **A change to a hot query, an index or a request path runs the scale zone here**
   (`go tool task test scale`) before it merges, and a new request path that a client hits often
   gets an operation in `e2e/scale_test.go`.
+- **The scale zone runs alone, on a quiet machine, locally.** Never in CI and never from a
+  subagent: the person or the main agent runs it with nothing else running (no other test run,
+  build, container or `telesphorepo-server`; it refuses to start beside e2e containers or another
+  server). It runs native servers
+  pinned to their own CPUs and compares the same requests at 100k and 1M, with an A/A control of
+  two copies of the 100k data. Its verdict, per operation and for the run:
+  - **PASS**: the 95% interval of the ratio 1M/100k lies below the limit (2x, or +2 ms for a fast
+    request).
+  - **FAIL** (the test fails): the interval lies above the limit. That is a regression: find it
+    in the code path (query plans, timings at each size), not in the machine.
+  - **INCONCLUSIVE** (exit 4): the interval holds the limit. Not a regression; run the zone once
+    more, and if it stays there, measure that operation by hand at both sizes.
+  - **NOISY** (exit 3): the A/A ratio left 0.8 to 1.25, so the machine disturbed the run and it
+    judges nothing. Close what runs and rerun on a quiet machine; never chase a regression from
+    a NOISY run.
 
 ## Rules the code will not tell you
 
