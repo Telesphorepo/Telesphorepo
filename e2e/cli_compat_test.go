@@ -48,7 +48,8 @@ func init() { olderPaths["e2e-login"] = true }
 // compatProxyConf is the Caddy reverse proxy of TestCLICompat. /mixed/ is a rolling upgrade
 // behind one proxy: the archive of the CLI comes from the newer server %[3]s, every other path
 // from the server %[1]s, so SHA256SUMS names the hash of another archive. /down/ proxies to the
-// host %[4]s, which does not run, so Caddy answers 502 itself.
+// host %[4]s, which does not run, so Caddy answers 502 itself. Each upstream gets its own host,
+// the host of its base URL.
 const compatProxyConf = `{
 	admin off
 	auto_https off
@@ -56,10 +57,14 @@ const compatProxyConf = `{
 :8080 {
 	handle_path /mixed/* {
 		handle /cli/%[2]s {
-			reverse_proxy %[3]s:8080
+			reverse_proxy %[3]s:8080 {
+				header_up Host {upstream_hostport}
+			}
 		}
 		handle {
-			reverse_proxy %[1]s:8080
+			reverse_proxy %[1]s:8080 {
+				header_up Host {upstream_hostport}
+			}
 		}
 	}
 	handle_path /down/* {

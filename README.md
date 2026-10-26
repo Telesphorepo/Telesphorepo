@@ -112,7 +112,10 @@ Or set the list yourself, for example `TR_TRUSTED_PROXIES=10.89.0.5`.
   gateway address. Trust the proxy's own address, not `private`, so that a client cannot forge
   its address.
 - **Cloudflare:** put `list:cloudflare` in `trusted_proxies`. On the Network and proxy page, tick the network list Cloudflare. The server then trusts Cloudflare's published ranges, which it refreshes daily. If Caddy sits between Cloudflare and the server, list Caddy's address and `list:cloudflare`.
-- Set `base_url` in Settings to the public URL.
+- Set `base_url` in Settings to the public URL. From then on the server answers only for its host,
+  `localhost`, `127.0.0.1`, `::1` and the Docker upload host; a request with another `Host` gets
+  `421 Misdirected Request` (`/healthz` answers on every host). To serve one repository at the
+  root of a domain of its own, see [Repository domains](docs/repo-domains.md).
 
 An admin can limit who may download from or publish to each repo by address. Open the repo settings, then the **Access** tab, and set **From where**. Ranges can be addresses, CIDRs, or network lists. The server has the lists **GitHub Actions** and **Cloudflare**. Admins add their own under **Settings > People and CI > Networks** and paste the addresses in any format. An empty rule means no limit.
 

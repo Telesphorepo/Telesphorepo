@@ -4,7 +4,8 @@
 // that reading it takes. A Worker that lacks one passes to the server: every request for
 // `requires`, the requests that read the object for `needs`. The list only grows.
 
-export const FEATURES: readonly string[] = [];
+// repo-domains: a request on a host of config.json `domains` reads the format route of its repo.
+export const FEATURES: readonly string[] = ["repo-domains"];
 
 const known = new Set(FEATURES);
 

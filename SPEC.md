@@ -37,7 +37,7 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `cmd/telesphorepo-server` | The server binary `telesphorepo-server`: `serve` (default), `dev`, `user add/passwd/reset-2fa`, `backup`, `restore`, `version`, `help`; hidden `dbcheck` and `seed`. `cmd/telesphorepo` is the name of the publishing client |
 | `changes.go` (package `telesphorepo` at the repo root) | Embeds `changes.toml`, the change log (`ChangesTOML`). It imports nothing |
 | `changelog` | Reads the change log (`Parse`, `Embedded`, `Since`, `Stamp`) and compares release versions (`ParseVersion`, `Version.Compare`). It imports only the stdlib, `github.com/BurntSushi/toml` and the root package, so the server and the CLI both use it. See **Change log** |
-| `internal/server` | Builds the kernel and runs the module lifecycle (see **Modules**): logger, DB, schemas, settings, live storage, kernel services, module `Init`, routes, bootstrap admin, jobs, client address, access log |
+| `internal/server` | Builds the kernel and runs the module lifecycle (see **Modules**): logger, DB, schemas, settings, live storage, kernel services, module `Init`, routes, bootstrap admin, jobs, client address, access log, the host check (`hosts.go`: repo domains and 421, see **Hosts and repo domains**) |
 | `internal/module` | The module contract: `Module`, `Extender` (the manifest calls), `Manifest`, `Host` with `Provide` and `Use` |
 | `internal/modules` | `modules.go`: the one list of modules in start order. The only file that names them |
 | `internal/jobs` | The job runner: one context and wait group per module, `Start`, `Run` and `Tick` of every job, on-demand tasks (`Go`), stop in reverse module order |
@@ -63,7 +63,7 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/oidc` | Module `sso`: OIDC sign-in for any person at the provider, the server permissions from a claim (`oidc.permission_claim`, `oidc.permission_map`), and the SSO confirmations of a device approval and of a setup code: `/api/auth/oidc/login`, `/device`, `/setup` and `/callback` (go-oidc + x/oauth2, PKCE S256); owner hooks of the `sso` settings group |
 | `internal/publish` | Module `publish`: device enrollment, setup codes, nonces, trust policies, the CI token exchange, the CI providers `github-actions` and `jenkins`, the token kind `trs` of publish sessions, the device proof of format reads, the publish API, the cleanup job, and the install scripts and downloads of the Telesphorepo CLI |
 | `internal/edge` | Module `edge`: the R2 objects that the edge Worker reads (pointers, access objects, `config.json`), the pipeline watcher and the outbox that keep them, the regions, `wrangler.jsonc`, the Worker download, `/api/edge/...`. See **Edge delivery** |
-| `edge/` | The edge Worker (TypeScript, bun, wrangler at an exact version): `fetch` (serve or pass), `queue` (blob copies) and `scheduled` (the gap check); `scripts/provision.ts`; `test/` holds the fixture of the `edge` e2e zone. See **Edge delivery** |
+| `edge/` | The edge Worker (TypeScript, bun, wrangler at an exact version): `fetch` (serve or pass), `queue` (blob copies) and `scheduled` (the gap check); `scripts/provision.ts`. No e2e zone runs the Worker; see **Edge delivery** |
 | `internal/clidist` | The CLI archives that the server embeds (`go:embed all:dist`) and serves at `/cli/`: `Targets`, `Archive`, `FS`, `Sums`. `go tool task build`, `dev`, `cli` and `release` write them |
 | `internal/edgedist` | The edge Worker folder that the server embeds (`go:embed all:dist`) and hands out at `GET /api/edge/worker.zip`: `telesphorepo-edge.zip` (the bundle, `package.json`, `bun.lock`, `README.md`, `scripts/provision.ts`, all under `telesphorepo-edge/`) and `VERSION`, read by `Zip`. `go tool task build`, `dev`, `edge` and `release` write them |
 | `internal/repos` | Repos, their kind, their active operation (`Repo.Op`) and per-format JSON config. `Create` and `Update` (a `Patch`) are the only changes of a repo record: each checks the whole new state first, then saves it in one transaction with the format's `OnRepoChange` and one audit event. A `Validator` (the format registry) checks the config and a `KindCheck` the kind. Modules drop what they keep about a deleted repo with `OnDelete`. A module adds repo values that it keeps in its own tables as fields (`repos.Field`, `AddField`): `Create` and `Update` validate and save them in the same transaction, and `Repo.Fields` holds them. Keeps the group members and the proxy remotes in memory (see **Group and proxy repositories**) |
@@ -114,6 +114,8 @@ type assertion.
 | `RepoGuard(access.Guard)` | An extra rule of the access engine (the IP rules): `Name`, `Check`, `Describe` (the access report), `Refused` (search) |
 | `CIProvider(ci.Provider)` | A CI system whose tokens make build records and whose trust policies the access report describes |
 | `ResolveClient(fn)` | The client address and scheme of every request; at most one module |
+| `Host(fn)` | A host that the server answers for besides the base URL host and the loopback names, from the settings (the host of `docker.upload_url`); see **Hosts and repo domains** |
+| `DomainPath(prefix)` | A root prefix of the module that keeps its routes on a repo domain (`/.well-known/telesphorepo-edge/`) |
 | `TokenKind(prefix, verifier)` | A token kind (`trp`, `trs`) |
 | `Demo(module.DemoData)`, `Seed(module.SeedFunc)` | The dev demo data and the rows of `telesphorepo-server seed` of the module's one format |
 
@@ -179,7 +181,35 @@ it needs and leaves the others nil. The kernel gives it these parts:
 under `/api/`, under `/<name>/` of each format it registers, and under its root prefixes. Any
 other path, or a prefix that two modules claim, panics at startup. The kernel adds `GET /healthz`
 and the web UI at `/`. Every route under `/api/`, and every route that accepts a UI session, is
-wrapped in `http.CrossOriginProtection`.
+wrapped in `http.CrossOriginProtection`. The table notes the first segment of each GET route
+`/<segment>/{repo}/...` (`Mux.RepoRooted`): the formats that a repo domain can serve.
+
+**Hosts and repo domains.** The handler chain is the version header, the client (`ResolveClient`),
+the access log, then the host check (`internal/server/hosts.go`), then the route table, so the
+access log records a refused request too. The host check reads `r.Host` (port, IPv6 brackets and
+a trailing dot dropped, lower case; never `X-Forwarded-Host`) against views of the settings
+snapshot, so it costs a map lookup:
+
+1. A host of `repo_domains`: repo-domain mode (below).
+2. `base_url` is empty: served (setup and the first sign-in need any host).
+3. The base URL host, a host of a module (`Extender.Host`: the host of `docker.upload_url`), or a
+   loopback name (`localhost`, `127.0.0.1`, `::1`): served.
+4. `GET` or `HEAD /healthz`: served on any host.
+5. Anything else: 421 `text/plain` "This server does not answer for this host.", nothing logged
+   beyond the access log line.
+
+Repo-domain mode reads only: another method is 405 with `Allow: GET, HEAD` and
+`{"error": "this domain only reads; publish at the base URL of the server"}`. A path under a
+`DomainPath` prefix keeps its own route. `/` is 404 `{"error":"not found"}`; so is any path when
+the repo (`repos.Service.ByName`, so the old name of a renamed repo works through its redirect) is
+gone or of a format that `RepoRooted` does not hold. A path that the route table would clean
+(`//`, `.`, `..`) is a 301 to its clean form on the domain. Any other path `P` is the request
+`/<format>/<repo>P` (the repo's own name) on the same route and policy, `URL.Path` and
+`URL.RawPath` rewritten with the escaping kept, so `httpx.RepoPath` checks it as on the base URL.
+The request carries `route.WithRepoDomain`: its policy reads no `tr_session` cookie, and a 401
+always carries the Basic challenge (also with `X-Telesphorepo-UI: 1`). A `Location` of the answer
+under `/<format>/<repo>/` (a PyPI index redirect) becomes the same path on the domain. No web UI
+page is served on a domain.
 
 **Route policy.** A module registers each route with `Router.Handle(pattern, route.Policy,
 handler)`; the handler gets a `route.Call` with the caller (`P`), the repo (`Repo`, `RepoPerms`) and
@@ -723,6 +753,9 @@ key of it, the UI `Page` that edits it (`""` shows it on Settings › General), 
 - `Test(ctx, draft)`: a check against the outside world (`POST /api/settings/{group}/test`).
 - `Apply(ctx, call)`: runs before a PATCH of the group saves. It may take the change over: it holds
   keys back and answers the PATCH itself (the storage module answers 202 `{move}`).
+- `Service.AddCheck(group, fn)`: a check of a change that needs services outside the owner (the
+  server checks the repos of `repo_domains`). It runs after the group's `Validate` on every PATCH
+  and test (`ModeChange`), never at startup, and fails fields with `draft.Fail`.
 
 The owner declares a typed handle next to each definition (`settings.String`, `Bool`, `Size`,
 `Duration`, `List`, `Map`, giving a `settings.Key[T]`), and services read `Key.Get(snapshot)` or a
@@ -731,7 +764,7 @@ The `settings` package holds no feature rules and declares only the keys of the 
 
 | Group (owner) | Permission · page | Keys |
 |---|---|---|
-| general (core) | `settings.general` · General | `base_url`, `log.level`, `max_upload_size` (`2GiB`), `max_json_size` (`1MiB`), `cookie.secure`, `session_ttl` (`168h`), `index.debounce` (`2s`), `index.max_delay` (`30s`), `blobs.gc_grace` (`1h`), `upload.session_ttl` (`24h`), `tls.cert_file`, `tls.key_file` (its `Validate`: both or neither, and the pair loads), `server_name` (`""`: the UI says Telesphorepo; at most 64 characters, no control characters), `server_logo` (type `image`, none: a PNG, JPEG or WebP image, checked by its bytes, at most 256 KiB and 512 px on its long side; see **Server identity**) |
+| general (core) | `settings.general` · General | `base_url`, `repo_domains` (`[]`; entries `<domain>=<repo>`, see **Repo domains** below), `log.level`, `max_upload_size` (`2GiB`), `max_json_size` (`1MiB`), `cookie.secure`, `session_ttl` (`168h`), `index.debounce` (`2s`), `index.max_delay` (`30s`), `blobs.gc_grace` (`1h`), `upload.session_ttl` (`24h`), `tls.cert_file`, `tls.key_file` (its `Validate`: both or neither, and the pair loads), `server_name` (`""`: the UI says Telesphorepo; at most 64 characters, no control characters), `server_logo` (type `image`, none: a PNG, JPEG or WebP image, checked by its bytes, at most 256 KiB and 512 px on its long side; see **Server identity**) |
 | docker (docker) | `settings.general` · General | `docker.direct_uploads` (`false`; "Expose the origin IP for Docker uploads", see **Upload host**), `docker.upload_url` (`""`; empty or an http(s) URL of a scheme and a host only: the DNS-only name or address of the server that takes the upload bytes; required when `docker.direct_uploads` is on), `docker.link_grace` (`24h`, minimum `1s`) |
 | activity (audit) | `settings.general` · General | `audit.retention` (365 days), `stats.retention` (400 days) |
 | storage (storage) | `storage.manage` · `/settings/storage` | `storage` (`fs`/`s3`), `fs.root` (default `blobs/` in the data dir), `s3.endpoint`, `s3.region`, `s3.bucket`, `s3.access_key_id`, `s3.secret_access_key`*, `s3.prefix`, `s3.path_style`, `s3.redirect`, `presign_ttl` |
@@ -766,7 +799,18 @@ The `settings` package holds no feature rules and declares only the keys of the 
   holds its default, so a later sign-in from another address changes nothing. The settings.update
   event has that person as its actor and the detail `{keys: ["base_url"], via: "first sign-in"}`.
   A single sign-on sign-in does not set it. The web UI then offers the address in the browser when
-  it differs (see **Web UI**).
+  it differs (see **Web UI**). Once it is set, a request to another host gets 421 (see **Hosts and
+  repo domains**).
+- **Repo domains.** `repo_domains` lists `<domain>=<repo>` lines (normalized to lower case, the
+  spaces around the parts and a trailing dot of the domain dropped). The definition refuses a line
+  without a repo, a domain that is no DNS name of two or more labels (a port, an IP address,
+  `localhost`), and a domain listed twice. The server's check (`AddCheck` on `general`) refuses a
+  domain that is a host the server answers for itself (the base URL host, a module host, a
+  loopback name), and, for each line that the change adds or points at another repo, a repo that
+  does not exist (a redirect name counts) or whose format has no GET route under
+  `/<format>/{repo}/` (Docker, rooted at `/v2/`). A line that the change leaves alone is not
+  checked again, so a deleted repo does not block other general settings; its domain answers 404.
+  `settings.DomainsOf(snapshot)` is the map domain → repo name, a view of the snapshot.
 - **Storage rules.** `storage` is `fs` or `s3`. With `s3` the bucket, the access key ID and the
   secret are required. An empty `s3.endpoint` means AWS: the store uses the AWS endpoint of
   `s3.region`, so the region is required then. A set endpoint must be an http(s) URL; with an
@@ -813,7 +857,7 @@ signed-in browser downloads from a private repo without a Basic prompt. A **writ
 
 | Route | Auth | Behaviour |
 |---|---|---|
-| `GET /healthz` | none | `ok` when the DB answers |
+| `GET /healthz` | none | `ok` when the DB answers; on any host (see **Hosts and repo domains**) |
 | `GET, HEAD, PUT /maven/{repo}/{path...}` | read / write | PUT: 201 new, 200 overwrite or identical retry, 409 changed release, 413 over `max_upload_size`; `If-Match` and `If-None-Match: *` as for raw. Mutable paths are `maven-metadata.xml*` and anything under a `-SNAPSHOT` dir. GET on S3 with `s3.redirect` answers 302 to a presigned URL. HEAD is never redirected |
 | `PUT, POST /debian/{repo}/upload/{dist}/{component}` | write | Raw `.deb` body. 201 `{package,version,architecture,filename,sha256}`, 200 identical, 409 conflict. With `?upload=<id>&sha256=<hex>[&size=<n>]` and no body, it finishes the resumable upload `<id>` of the same publish session (`/api/repos/{name}/uploads`) and adds its file: the same answers, 404 for an unknown, expired or foreign upload, 400 when the bytes do not match (the upload is deleted) |
 | `GET, HEAD /debian/{repo}/{path...}` | read | `dists/...` and `pool/...` through the read path |
@@ -1145,7 +1189,7 @@ archives with their SHA-256 and the commands to install one by hand.
 |---|---|---|
 | Password | argon2id (64 MiB, t=3, p=2), at most 4 hashes at once; successful Basic checks are cached for 10 min under an HMAC key | Sign-in (`POST /api/auth/login`). As Basic auth: format reads, and the `/api/` GET routes that need no permission |
 | Read token `trp_<12hex>_<secret>` | SHA-256(secret), looked up by id, constant-time compare | Basic password (any username) or `Authorization: Bearer`: format reads, and the `/api/` GET routes that need no permission |
-| Session `tr_session` | SHA-256(id), absolute `session_ttl` | `/api/`, and format reads (GET and HEAD) for downloads in the browser. The only credential for permission routes and for routes that change state on `/api/`; it never writes to a format route. HttpOnly, SameSite=Strict, Secure per `cookie.secure`. The session of a person who holds `delete` may also delete files (see **Files, uploads and deletes**) |
+| Session `tr_session` | SHA-256(id), absolute `session_ttl` | `/api/`, and format reads (GET and HEAD) for downloads in the browser; never on a repo domain, where the policy does not read the cookie (see **Hosts and repo domains**). The only credential for permission routes and for routes that change state on `/api/`; it never writes to a format route. HttpOnly, SameSite=Strict, Secure per `cookie.secure`. The session of a person who holds `delete` may also delete files (see **Files, uploads and deletes**) |
 | Publish session `trs_<12hex>_<secret>` | SHA-256(secret) in `publish_sessions`, constant-time compare | Basic password (any username) or `Authorization: Bearer` on format routes of its one repo, `/api/publish/...`, and the upload and delete routes of its repo. The only credential that writes to a format route |
 | Device (`auth.CredDevice`) | The enrolled device key; a device proof `trx.<device id>.<nonce>.<signature>` over a token exchange nonce, as the Basic password or the Bearer value of a format read, or inside a core bearer token of a format's token exchange (the Docker credential helper) | Format reads (GET and HEAD) with the grants of the device's user, and writes through the publish session that the device minted for the repo (the bearer scope) |
 
@@ -2017,7 +2061,7 @@ region reads the same version; an immutable path has a pointer and a blob in eve
 
 | Key | Content | Buckets |
 |---|---|---|
-| `config.json` | `{server_version, requires: [features], enabled, access_ttl (seconds), edge_key (base64url of the Ed25519 public key), formats: {name: {shape, prefix, immutable, mutable}}, home: {hint, bucket, ready}, regions: [{hint, binding, bucket, ready}]}`; `home.ready`: the outbox wrote every pointer of the backfill; `bucket`: the bucket that the `bucket.json` of the binding must name | home |
+| `config.json` | `{server_version, requires: [features], enabled, access_ttl (seconds), edge_key (base64url of the Ed25519 public key), formats: {name: {shape, prefix, immutable, mutable}}, home: {hint, bucket, ready}, regions: [{hint, binding, bucket, ready}], domains: {host: repo}}`; `home.ready`: the outbox wrote every pointer of the backfill; `bucket`: the bucket that the `bucket.json` of the binding must name; `domains`: `repo_domains` (the repo name or a redirect name, as listed); a change of `repo_domains` or of `edge.access_ttl` writes it again | home |
 | `bucket.json` | `{hint, bucket}` (`hint` is `home` or the region): the bucket names itself, so the Worker sees a binding to another bucket. The controller writes it into each bucket it uses (again after the wipe of a first start, and once per process start); a region becomes ready only after its `bucket.json` is written | home and each region |
 | `p/<repo id>/<sha256 hex of the path>` | `{repo, path, sha256, sha1, md5, size, ct, mod (unix), kind}`, or `{repo, path, pending: true}` while a write runs | home; also each region for an immutable path |
 | `a/repo/<name>` | `{id, format, kind, anon, private, guarded, members: [names], paths?: [[glob, immutable], ...]}`: `paths` (a hosted or proxy repo of a format with `EdgeSpec.Paths`) classifies the repo's paths in place of the format's globs, the first match deciding; `private` is `access.Engine.Private`, `guarded` is `access.Engine.Guarded` (a read IP rule, or a guard that is not a `ReadRestricter`). For a redirect name, `{redirect: <repo name>}`: the Worker reads the object of that repo next (one more read on a cache miss) and serves the request as one to that repo, whose name the scopes of a core bearer token carry; a redirect object that names another redirect sends the request to the server. A rename marks the object of the old name, the new name and every redirect of the repo; a repo delete and a removed redirect mark the redirect names | home |
@@ -2258,6 +2302,11 @@ server:
 
 1. `config.json` says `enabled` and `home.ready`, the `bucket.json` of `HOME` names
    `home.bucket`, and the Worker implements every feature of `requires` (see **The contract**).
+   A request on a host of `domains` reads first the repo object of its repo (a redirect object
+   leads to its repo): path `P` (raw, escaping kept) is then `/<format>/<repo>P` with the repo's
+   own name, when the format of `config.json` has the shape `standard` and the prefix
+   `/<format>/`; `/`, a missing repo object and another format go to the server. The check path
+   is answered before any of this, on every host.
 2. The URL parses with the format's shape and the repopath rules; a path with an encoded `/`, `\`
    or NUL, or with an empty, `.` or `..` segment, goes to the server, and so do uploads, tags
    lists, referrers, `/v2/`, the catalog, `key.asc` and a request with the query parameter
@@ -2313,8 +2362,9 @@ client; with `list:cloudflare` in the trusted proxies the server sees the real c
 the hop-by-hop headers (`Connection`, `Keep-Alive`, `Proxy-Connection`, `TE`, `Trailer`,
 `Transfer-Encoding`, `Upgrade`) and `Expect`, so a client's `Expect: 100-continue` (mvn sends it
 on each PUT) stays on the client's hop. A deployed
-Worker runs on routes of the zone of the base URL host and forwards with a same-zone fetch. A GET
-or HEAD also calls `passThroughOnException`.
+Worker runs on routes of the zone of the base URL host (and of each repo domain) and forwards
+with a same-zone fetch of the request URL, so a request on a repo domain reaches the server with
+its own host. A GET or HEAD also calls `passThroughOnException`.
 
 **Copies.** An R2 event notification rule of the home bucket (prefix `[s3.prefix/]blobs/`,
 `object-create` and `object-delete`) sends to the queue `<home bucket>-edge-copy`. The consumer
@@ -2332,8 +2382,8 @@ files while edge delivery is off. Every run (and every check) writes the Worker'
 and markers to `gap/state.json` when they changed.
 
 **Deploy.** The server writes the Worker configuration for the settings: the routes
-`<base URL host><prefix>*` of each format with `Edge` and `<base URL host>/.well-known/telesphorepo-edge/*`
-(the check), the bindings `HOME` and `R2_<HINT>` of
+`<base URL host><prefix>*` of each format with `Edge`, `<base URL host>/.well-known/telesphorepo-edge/*`
+(the check) and `<domain>/*` of each repo domain, the bindings `HOME` and `R2_<HINT>` of
 each chosen region, the queue (producer `COPY`, consumer batches of 100, 10 retries), the cron,
 the var `PREFIX` (`s3.prefix`) and `observability` on (Workers Logs of the fetch, cron and queue
 runs in the Cloudflare dashboard). `GET /api/edge/worker.zip` (the download of the Edge delivery
@@ -2345,7 +2395,9 @@ made with `--define TELESPHOREPO_VERSION:"<server version>"` (`internal/edgedist
 holds no Worker, or one built with another server version, so a deploy from it always has every
 feature that the server uses. `GET /api/edge/wrangler.jsonc` is the configuration for a checkout of `edge/`:
 `"main": "src/index.ts"` and the `define` of `TELESPHOREPO_VERSION` to the server version, the
-build that the Worker reports.
+build that the Worker reports. With a repo domain listed, its header says that a route must be on a
+zone of the Cloudflare account of the Worker: a domain whose zone is elsewhere gets no edge (its
+route is taken out, and the server serves it).
 
 **The contract.** The Worker serves by the features it implements, never by the server version,
 so a server release needs no Worker deploy unless it uses a feature that the deployed Worker
@@ -2356,7 +2408,9 @@ lacks. The contract is the objects under `edge/v1/` and what their fields mean:
 - **Features.** A feature is a name for one thing that a Worker must implement to read what the
   server writes. The Worker's build lists those it implements (`edge/src/features.ts`); the list
   only grows. The server's are `workerFeature`s (`internal/edge/features.go`), each with the text
-  that ends "this server needs it to ...". There are none yet.
+  that ends "this server needs it to ...". `repo-domains` ("serve the repository domains"):
+  `config.json` names it in `requires` while `repo_domains` lists a domain, since an older Worker
+  on a domain route would read `/raw/x/...` of the domain as repo `x`.
 - **`requires`** of `config.json` names the features that the server uses now and that every
   request needs. A Worker that lacks one passes every request to the server and runs no copy
   pass.
@@ -2389,7 +2443,8 @@ reaches several accounts and neither `CLOUDFLARE_ACCOUNT_ID` nor `account_id` in
 `wrangler.jsonc` names one, provision stops, names `CLOUDFLARE_ACCOUNT_ID` and lists the accounts;
 an account ID that the login cannot reach stops it too. Then it creates each regional bucket with
 its location hint, the queue and the notification rule, skipping what exists; it refuses a config
-with a custom domain, routes on several hosts or a route outside the zone it names.
+with a custom domain or a route outside the zone it names. Routes on several hosts (the base URL
+host and the repo domains) are fine, each on the zone of its own host.
 `go tool task release` adds the same folder as `telesphorepo-edge_<version>.tar.gz`.
 
 **Revocation speed.** The Cache API keeps an object per data center and `cache.delete` purges only
@@ -4855,8 +4910,8 @@ setup-only session, the second step, and a grant that ends a password-only sessi
 `edge_test.go` covers `TestEdgeWorkerDownload`: on SeaweedFS with a home region and one region,
 `GET /api/edge/worker.zip` holds `dist/index.js`, `package.json` (wrangler at an exact version,
 `provision` and `deploy`), `bun.lock`, `README.md`, `scripts/provision.ts` and a
-`wrangler.jsonc` with `"main": "dist/index.js"`, `"no_bundle": true`, the routes and the buckets
-of the settings; the `wrangler.jsonc` of a checkout has the same routes with `src/index.ts` and
+`wrangler.jsonc` with `"main": "dist/index.js"`, `"no_bundle": true`, the routes (a repo domain
+as `<domain>/*`) and the buckets of the settings; the `wrangler.jsonc` of a checkout has the same routes with `src/index.ts` and
 the define; a server on the local disk answers 409 `edge-not-configured`. No Cloudflare account is
 needed. `edge_paths_test.go` covers `TestEdgePathRules`: edge delivery on, on a SeaweedFS home
 bucket and a regional bucket with no Worker in front, and the test reads both buckets. The
@@ -4883,7 +4938,16 @@ after `Server.Restart`, the secret shows only as set, and the stored size limit 
 of a person without `settings.general` leave it unset; the admin's sign-in with `Host:
 repo.example.com` and `X-Forwarded-Proto: https` behind a trusted proxy saves
 `https://repo.example.com` with one settings.update event of the admin with `via: "first
-sign-in"`; a later sign-in at another host changes nothing).
+sign-in"`; a later sign-in at another host gets 421 and changes nothing).
+`repo_domains_test.go` covers `TestRepoDomains`: with `Host: <domain>` a public raw repo serves
+its files at the root (`latest.json` as `application/json`, HEAD), a missing path is 404
+`{"error":"not found"}`, `/` and `/index.html` are 404 without a page, an unclean path is a 301 on
+the domain, PUT is 405 with `Allow: GET, HEAD`; a private repo answers 401 with the Basic
+challenge, ignores a valid UI session (which reads on the base URL) and serves with a read token
+as the Basic password and as `Bearer`; a Maven repo serves a jar, also after a rename through its
+old name; the setting refuses a Docker repo, a missing repo, the Docker upload host, a port and
+`localhost`; an unknown host is 421 `text/plain` (the UI too), `/healthz` answers there, and the
+base URL host and the loopback names answer as before.
 
 **Publishing tests.** Every publish in the suite uses a publish session. The harness helper
 `PublishToken(t, s, user, repo)` enrolls a device the real way (the test computes the TOTP
@@ -4986,8 +5050,9 @@ a maven2 group of the two hosted repos and the proxy. On each storage backend th
 
 `TestScale` (tag `scale`, `go tool task test scale`) seeds 100k and then 1M assets with `seed N`
 on a named volume. It starts a server on the volume and measures the p95 latency over 400 runs of
-each operation: Maven GET with `If-None-Match`, an asset list walk, a rare search, a common
-search and token auth (`/api/me`). An operation fails when its p95 at 1M exceeds
+each operation: Maven GET with `If-None-Match`, the same GET through a repo domain (the server
+starts with `TR_REPO_DOMAINS` for `seed-maven-00`), an asset list walk, a rare search, a common
+search, token auth (`/api/me`) and the repo page. An operation fails when its p95 at 1M exceeds
 `max(2 x p95 at 100k, p95 at 100k + 2 ms)`.
 
 ## Code map and recipes
@@ -5001,6 +5066,7 @@ Where each part of the code lives, and the steps to add a module, a repo format 
 | Wiring and startup order | `internal/server/server.go` (kernel, module lifecycle); the module list in `internal/modules/modules.go` |
 | Module contract | `internal/module` (`Module`, `Extender`, `Host`, `Use`); jobs in `internal/jobs`; routes and policies in `internal/route` |
 | Core setting | `internal/settings/general.go` (the `general` group) |
+| Host check, repo domains, 421 | `internal/server/hosts.go` (the handler and the check of `repo_domains`); `route.WithRepoDomain` and the cookie rule in `internal/route`; a module's extra host is `x.Host(...)` |
 | Module setting | `x.Settings(&settings.Group{...})` in the module's `Register`; the group owns its keys, its permission, its page and its `Validate`, `Test` and `Apply` hooks |
 | Permission | `x.Permissions(perm.Subsystem{...}, perm.Def{...})` in the module's `Register`; the registry is `internal/perm` |
 | Audit action | `x.AuditActions(...)`; record with `h.Audit.Record(ctx, ...)` or `RecordTx`; the actor comes from the context (`internal/audit`) |

@@ -128,6 +128,9 @@ type configObject struct {
 	Formats       map[string]formatObject `json:"formats"`
 	Home          homeObject              `json:"home"`
 	Regions       []regionObject          `json:"regions"`
+	// Domains are the repo domains (repo_domains): host -> repo name (or a redirect of one). The
+	// Worker reads a request on such a host as /<format>/<repo><path>.
+	Domains map[string]string `json:"domains"`
 }
 
 type formatObject struct {

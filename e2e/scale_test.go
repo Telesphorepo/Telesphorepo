@@ -29,7 +29,11 @@ const (
 	scaleFloor   = 2 * time.Millisecond
 )
 
-var scaleOps = []string{"maven-get", "asset-page", "search-rare", "search-common", "token-auth", "repo-page"}
+var scaleOps = []string{"maven-get", "domain-get", "asset-page", "search-rare", "search-common", "token-auth", "repo-page"}
+
+// scaleDomain is the repo domain of the first seeded maven repo (the seed names its repos
+// seed-<format>-<nn>), set by the environment of the measured server.
+const scaleDomain, scaleDomainRepo = "maven.scale.example", "seed-maven-00"
 
 func TestScale(t *testing.T) {
 	t.Parallel()
@@ -76,7 +80,7 @@ func scaleRun(t *testing.T, n int) map[string]time.Duration {
 
 	runSeed(t, vol, n)
 
-	s := StartServer(t, ServerOpts{DataVolume: vol})
+	s := StartServer(t, ServerOpts{DataVolume: vol, Env: map[string]string{"TR_REPO_DOMAINS": scaleDomain + "=" + scaleDomainRepo}})
 	repos := scaleRepos(t, s, auth)
 	waitSettled(t, s, auth, repos)
 
@@ -87,8 +91,8 @@ func scaleRun(t *testing.T, n int) map[string]time.Duration {
 			break
 		}
 	}
-	if mvn == "" {
-		t.Fatalf("seed %d created no maven repo: %+v", n, repos)
+	if mvn != scaleDomainRepo {
+		t.Fatalf("seed %d: the first maven repo is %q, want %s: %+v", n, mvn, scaleDomainRepo, repos)
 	}
 	var page struct {
 		Items []struct {
@@ -112,6 +116,10 @@ func scaleRun(t *testing.T, n int) map[string]time.Duration {
 		return func(t *testing.T) []byte {
 			req := s.NewRequest(t, http.MethodGet, p, nil)
 			for k, v := range hdr {
+				if k == "Host" {
+					req.Host = v
+					continue
+				}
 				req.Header.Set(k, v)
 			}
 			resp, b := s.Do(t, req, auth)
@@ -123,6 +131,9 @@ func scaleRun(t *testing.T, n int) map[string]time.Duration {
 	}
 	// The seeded rows have no blobs: a matching If-None-Match answers 304 from the row alone.
 	mavenGet := get("/maven/"+mvn+"/"+sample.Path, map[string]string{"If-None-Match": `"` + sample.SHA256 + `"`},
+		http.StatusNotModified, http.StatusOK)
+	// The same file through the repo domain: the host check, the rewrite, the same route.
+	domainGet := get("/"+sample.Path, map[string]string{"Host": scaleDomain, "If-None-Match": `"` + sample.SHA256 + `"`},
 		http.StatusNotModified, http.StatusOK)
 	searchRare := get("/api/search?limit=50&q="+url.QueryEscape(sample.Path), nil, http.StatusOK)
 	searchCommon := get("/api/search?limit=50&q="+url.QueryEscape(common), nil, http.StatusOK)
@@ -152,6 +163,7 @@ func scaleRun(t *testing.T, n int) map[string]time.Duration {
 
 	out := map[string]time.Duration{
 		"maven-get":     p95(t, mavenGet),
+		"domain-get":    p95(t, domainGet),
 		"asset-page":    p95(t, assetPage),
 		"search-rare":   p95(t, searchRare),
 		"search-common": p95(t, searchCommon),

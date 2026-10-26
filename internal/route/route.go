@@ -11,6 +11,7 @@
 package route
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -28,6 +29,7 @@ import (
 type Mux struct {
 	root   *http.ServeMux
 	claims map[string]string // owned prefix -> module ID
+	rooted map[string]bool   // the first path segments of routes "/<segment>/{repo}/..." (RepoRooted)
 	auth   *auth.Service
 	access *access.Engine
 	repos  *repos.Service
@@ -35,8 +37,23 @@ type Mux struct {
 
 // NewMux returns an empty route table whose policies use the kernel services a, e and rs.
 func NewMux(a *auth.Service, e *access.Engine, rs *repos.Service) *Mux {
-	return &Mux{root: http.NewServeMux(), claims: map[string]string{}, auth: a, access: e, repos: rs}
+	return &Mux{root: http.NewServeMux(), claims: map[string]string{}, rooted: map[string]bool{}, auth: a, access: e, repos: rs}
 }
+
+// RepoRooted reports whether a GET route of the table starts with "/<segment>/{repo}/", e.g. the
+// routes of a format mounted under its name. Read it after every route is registered.
+func (m *Mux) RepoRooted(segment string) bool { return m.rooted[segment] }
+
+type domainKey struct{}
+
+// WithRepoDomain marks r as a request that came to a repo domain (setting repo_domains). The
+// policy of its route then reads no UI session cookie, and a 401 always carries the challenge.
+func WithRepoDomain(r *http.Request) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), domainKey{}, true))
+}
+
+// OnRepoDomain reports whether r came to a repo domain (WithRepoDomain).
+func OnRepoDomain(r *http.Request) bool { v, _ := r.Context().Value(domainKey{}).(bool); return v }
 
 // Claim gives prefix (a path that starts with "/", e.g. "/maven/" or "/install.sh") to module. It
 // panics when another module claimed it, when it lies under /api/, or when one claim holds the
@@ -133,6 +150,9 @@ func (r *Router) Handle(pattern string, p Policy, h Handler) {
 	}
 	for prefix, owner := range r.mux.claims {
 		if owner == r.module && strings.HasPrefix(path, prefix) {
+			if seg, rest, ok := strings.Cut(strings.TrimPrefix(path, "/"), "/"); ok && read && strings.HasPrefix(rest, "{repo}/") {
+				r.mux.rooted[seg] = true
+			}
 			r.mux.root.Handle(pattern, hh)
 			return
 		}
@@ -149,7 +169,8 @@ func (r *Router) Handle(pattern string, p Policy, h Handler) {
 //     read token goes on to the repo step, which answers that publishing needs a publish session.
 //     A core bearer token is checked by the kind of its credential. On a repo route that accepts
 //     publish sessions, a bearer of another kind goes on to the repo step, which lets it pass
-//     only with the open publish session of its scope for the repo.
+//     only with the open publish session of its scope for the repo. A request to a repo domain
+//     (OnRepoDomain) has no UI session: the cookie is not read.
 //  2. A request without a credential passes only when the policy is Anonymous or names a repo.
 //  3. The fresh second factor (FreshFactor).
 //  4. The server permission, or the repository permission SomeRepo on at least one repo; then
@@ -176,8 +197,10 @@ func (m *Mux) enforce(p Policy, h Handler) http.HandlerFunc {
 			}
 		}
 		if p.Accept != 0 || p.Bearer || p.TokenHeader != "" {
+			// No UI session on a repo domain: the browser holds the cookie for the base URL host only.
+			cookie := p.Accept&(auth.CredSession|auth.CredSetupSession) != 0 && !OnRepoDomain(r)
 			pr, err := m.auth.Identify(r, auth.Read{
-				Cookie: p.Accept&(auth.CredSession|auth.CredSetupSession) != 0, Bearer: p.Bearer, TokenHeader: p.TokenHeader,
+				Cookie: cookie, Bearer: p.Bearer, TokenHeader: p.TokenHeader,
 				Device: p.Accept&auth.CredDevice != 0, URLToken: p.URLToken,
 			})
 			if err != nil {

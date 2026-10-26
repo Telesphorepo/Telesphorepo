@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
@@ -40,8 +42,8 @@ func versionLiteral(version string) string {
 func copyQueue(homeBucket string) string { return homeBucket + "-edge-copy" }
 
 // wrangler returns the wrangler.jsonc of the Worker for the settings of s: the routes (the base
-// URL host with the prefix of each format that the edge serves, and the reserved path of the
-// check), the bucket bindings (HOME and
+// URL host with the prefix of each format that the edge serves, the reserved path of the
+// check, and each repo domain whole), the bucket bindings (HOME and
 // R2_<HINT> of each chosen region), the copy queue (binding COPY), the cron of the gap check and
 // the var PREFIX (s3.prefix). With bundled it is the config of the Worker folder of the download:
 // "main" is the bundle dist/index.js with "no_bundle", which the build defined to the server
@@ -88,6 +90,11 @@ func (m *mod) wrangler(s *settings.Snapshot, bundled bool) ([]byte, error) {
 	}
 	// The reserved path of the check of the Worker (POST /api/edge/check).
 	routes = append(routes, host+checkPrefix+"*")
+	// Each repo domain, whole: every path of it is a file of its repo.
+	domains := slices.Sorted(maps.Keys(settings.DomainsOf(s)))
+	for _, d := range domains {
+		routes = append(routes, d+"/*")
+	}
 	buckets := []r2{{Binding: "HOME", BucketName: home}}
 	for _, rc := range regionsOf(s) {
 		buckets = append(buckets, r2{Binding: binding(rc.Hint), BucketName: rc.Bucket})
@@ -142,6 +149,10 @@ func (m *mod) wrangler(s *settings.Snapshot, bundled bool) ([]byte, error) {
 		out.WriteString("// Worker of each server release: download it again from Settings > Edge delivery.\n")
 	} else {
 		out.WriteString("// Worker of each server release.\n")
+	}
+	if len(domains) > 0 {
+		out.WriteString("// A route must be on a zone of the Cloudflare account of the Worker: a repository domain whose\n")
+		out.WriteString("// zone is in another account gets no edge. Take its route out here, and the server serves it.\n")
 	}
 	out.Write(body.Bytes())
 	return out.Bytes(), nil

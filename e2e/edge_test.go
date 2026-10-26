@@ -18,15 +18,18 @@ import (
 
 // TestEdgeWorkerDownload downloads the edge Worker folder (GET /api/edge/worker.zip) of a server
 // on S3 with a home region and one region: the zip holds the bundle, package.json, the provision
-// script and the server's wrangler.jsonc for the bundle, with the routes and buckets of the
-// settings. No Cloudflare account is needed.
+// script and the server's wrangler.jsonc for the bundle, with the routes (a repo domain whole)
+// and buckets of the settings. No Cloudflare account is needed.
 func TestEdgeWorkerDownload(t *testing.T) {
 	t.Parallel()
 	tg := StartSeaweedFS(t)
 	s := StartServer(t, ServerOpts{Storage: "s3", S3: tg})
 	region := tg.Bucket + "-enam"
+	updates := RandName("updates")
+	s.CreateRepo(t, updates, "raw", true, nil)
+	domain := updates + ".example.com"
 	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{
-		"edge.home_hint": "weur", "edge.regions": []string{"enam=" + region},
+		"edge.home_hint": "weur", "edge.regions": []string{"enam=" + region}, "repo_domains": []string{domain + "=" + updates},
 	}, s.Admin(), nil)
 
 	var st struct {
@@ -119,6 +122,9 @@ func TestEdgeWorkerDownload(t *testing.T) {
 	}
 	if !slices.Contains(cfg.Routes, base.Host+"/maven/*") || !slices.Contains(cfg.Routes, base.Host+"/v2/*") {
 		t.Errorf("routes = %v, want the maven and docker routes of %s", cfg.Routes, base.Host)
+	}
+	if !slices.Contains(cfg.Routes, domain+"/*") {
+		t.Errorf("routes = %v, want the whole repo domain %s", cfg.Routes, domain)
 	}
 	buckets := map[string]string{}
 	for _, b := range cfg.R2Buckets {

@@ -88,6 +88,8 @@ export interface Config {
   homeReady: boolean;
   homeBucket: string; // the bucket that the bucket.json of HOME must name
   regions: Region[];
+  // domains: the repo domains, host (lower case) -> the name of its repo or of a redirect of it.
+  domains: Map<string, string>;
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -172,6 +174,12 @@ export function parseConfig(v: unknown): Config | null {
       }
     }
   }
+  const domains = new Map<string, string>();
+  if (isObj(v.domains)) {
+    for (const [host, repo] of Object.entries(v.domains)) {
+      if (typeof repo === "string" && repo !== "") domains.set(host.toLowerCase(), repo);
+    }
+  }
   return {
     serverVersion: typeof v.server_version === "string" ? v.server_version : "",
     serves: knows(v.requires),
@@ -183,6 +191,7 @@ export function parseConfig(v: unknown): Config | null {
     homeBucket: isObj(v.home) && typeof v.home.bucket === "string" ? v.home.bucket : "",
     homeReady: isObj(v.home) && v.home.ready === true,
     regions,
+    domains,
   };
 }
 

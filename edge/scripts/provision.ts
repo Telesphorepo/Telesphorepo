@@ -17,7 +17,8 @@
 // "account_id" in wrangler.jsonc).
 //
 // It refuses a config whose routes are not on the zone of their host, because a cross-zone
-// fetch from the Worker would reach the origin without the client address.
+// fetch from the Worker would reach the origin without the client address. The zone of every
+// route must be in the Cloudflare account of the Worker; wrangler deploy refuses one that is not.
 
 export {};
 
@@ -138,21 +139,19 @@ async function main(): Promise<void> {
   }
   checkLogin(process.env.CLOUDFLARE_ACCOUNT_ID || (typeof cfg.account_id === "string" ? cfg.account_id : ""));
 
-  // Same zone: every route is a zone route on one host. A plain pattern (what the server writes)
-  // is a route of the zone of its own host, which wrangler finds; a route object that names its
-  // zone must name the zone of its host.
+  // Same zone: every route is a zone route of its own host (the base URL host, or a repository
+  // domain). A plain pattern (what the server writes) is a route of the zone of its host, which
+  // wrangler finds in the account; a route object that names its zone must name the zone of its
+  // host.
   const routes = Array.isArray(cfg.routes) ? (cfg.routes as (Route | string)[]) : [];
   if (routes.length === 0) fail("the config has no routes.");
-  let host = "";
   for (const entry of routes) {
     const r: Route = typeof entry === "string" ? { pattern: entry } : entry;
     if (typeof r !== "object" || r === null || typeof r.pattern !== "string") {
-      fail("each route needs a pattern on the base URL host.");
+      fail("each route needs a pattern.");
     }
     if (r.custom_domain === true) fail(`route ${r.pattern} is a custom domain; the Worker must run on a route of the zone.`);
     const h = r.pattern.replace(/^https?:\/\//, "").split("/")[0].toLowerCase();
-    if (host === "") host = h;
-    if (h !== host) fail(`route ${r.pattern} is on host ${h}, not ${host}: every route must be on the base URL host.`);
     if (typeof r.zone_name === "string") {
       const zone = r.zone_name.toLowerCase();
       if (h !== zone && !h.endsWith("." + zone)) {

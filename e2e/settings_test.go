@@ -187,8 +187,8 @@ func signInAt(t *testing.T, s *Server, user, host string, hdr map[string]string)
 
 // TestBaseURLFromFirstSignIn: a server without base_url takes the address of the first full UI
 // sign-in of a person who may change the general settings, behind a trusted proxy with its
-// forwarded scheme, and records the change in the activity. A localhost address, a person without
-// the permission and a later sign-in from another address leave it alone.
+// forwarded scheme, and records the change in the activity. A localhost address and a person
+// without the permission leave it alone; once it is set, another address gets 421.
 func TestBaseURLFromFirstSignIn(t *testing.T) {
 	t.Parallel()
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
@@ -248,7 +248,14 @@ func TestBaseURLFromFirstSignIn(t *testing.T) {
 			t.Fatalf("base_url after the first sign-in at repo.example.com: value %s source %q, want https://repo.example.com, stored", got.Value, got.Source)
 		}
 
-		signInAt(t, s, s.AdminUser, "other.example.com", https)
+		// With base_url set, another host gets 421 and no sign-in.
+		req := s.NewRequest(t, http.MethodPost, "/api/auth/login", strings.NewReader(`{"username":"`+s.AdminUser+`","password":"`+s.AdminPass+`"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Forwarded-Proto", "https")
+		req.Host = "other.example.com"
+		if resp, b := s.Do(t, req, nil); resp.StatusCode != http.StatusMisdirectedRequest {
+			t.Fatalf("a later sign-in at other.example.com: status %d, want 421: %s", resp.StatusCode, b)
+		}
 		if got := baseURL(admin); string(got.Value) != `"https://repo.example.com"` {
 			t.Fatalf("base_url after a later sign-in at other.example.com: %s, want https://repo.example.com", got.Value)
 		}

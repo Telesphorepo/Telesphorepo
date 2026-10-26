@@ -96,7 +96,7 @@ type Format struct {
 }
 
 // Module returns the Docker module: the format docker (hosted, proxy and group repos), its routes
-// at /v2/, /docker/ and /api/docker/, the settings docker.direct_uploads, docker.upload_url and docker.link_grace, the
+// at /v2/, /docker/ and /api/docker/, the settings docker.direct_uploads, docker.upload_url (whose host the server answers for) and docker.link_grace, the
 // job docker.links, the Nexus importer, the demo data and the seed. The native tools push
 // through the credential helper of the Telesphorepo CLI (format.PublishHelper).
 func Module() module.Module {
@@ -116,6 +116,13 @@ func Module() module.Module {
 				return nil
 			})
 			x.RootPrefix("/v2/")
+			// The upload host answers as the main host (ORAS and Helm push to it by name).
+			x.Host(func(s *settings.Snapshot) string {
+				if u, ok := urlOf(UploadURL.Get(s)); ok {
+					return strings.ToLower(u.Hostname())
+				}
+				return ""
+			})
 			x.Routes(f.apiRoutes)
 			x.Format(format.Spec{
 				Name: name, Title: "Docker", Icon: icon,
