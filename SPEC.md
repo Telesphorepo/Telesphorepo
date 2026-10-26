@@ -190,7 +190,13 @@ access log records a refused request too. The host check reads `r.Host` (port, I
 a trailing dot dropped, lower case; never `X-Forwarded-Host`) against views of the settings
 snapshot, so it costs a map lookup:
 
-1. A host of `repo_domains`: repo-domain mode (below).
+1. A host of `repo_domains` that is no host of the server itself: repo-domain mode (below). A
+   line whose domain is the base URL host, a module host or a loopback name never takes that
+   host over, wherever the setting came from (a save refuses such a line, but `TR_REPO_DOMAINS`
+   or a later change of `base_url` or `docker.upload_url` can make one): the server answers the
+   host as itself and logs the line at warn level once per settings snapshot (at startup and
+   after each change). `module.Kernel.RepoDomains` is this list without those lines, and the
+   edge module writes its `config.json` `domains`, its `requires` and its Worker routes from it.
 2. `base_url` is empty: served (setup and the first sign-in need any host).
 3. The base URL host, a host of a module (`Extender.Host`: the host of `docker.upload_url`), or a
    loopback name (`localhost`, `127.0.0.1`, `::1`): served.
@@ -2061,7 +2067,7 @@ region reads the same version; an immutable path has a pointer and a blob in eve
 
 | Key | Content | Buckets |
 |---|---|---|
-| `config.json` | `{server_version, requires: [features], enabled, access_ttl (seconds), edge_key (base64url of the Ed25519 public key), formats: {name: {shape, prefix, immutable, mutable}}, home: {hint, bucket, ready}, regions: [{hint, binding, bucket, ready}], domains: {host: repo}}`; `home.ready`: the outbox wrote every pointer of the backfill; `bucket`: the bucket that the `bucket.json` of the binding must name; `domains`: `repo_domains` (the repo name or a redirect name, as listed); a change of `repo_domains` or of `edge.access_ttl` writes it again | home |
+| `config.json` | `{server_version, requires: [features], enabled, access_ttl (seconds), edge_key (base64url of the Ed25519 public key), formats: {name: {shape, prefix, immutable, mutable}}, home: {hint, bucket, ready}, regions: [{hint, binding, bucket, ready}], domains: {host: repo}}`; `home.ready`: the outbox wrote every pointer of the backfill; `bucket`: the bucket that the `bucket.json` of the binding must name; `domains`: `module.Kernel.RepoDomains`, the lines of `repo_domains` without those that name a host of the server (the repo name or a redirect name, as listed); a change of that list or of `edge.access_ttl` writes it again | home |
 | `bucket.json` | `{hint, bucket}` (`hint` is `home` or the region): the bucket names itself, so the Worker sees a binding to another bucket. The controller writes it into each bucket it uses (again after the wipe of a first start, and once per process start); a region becomes ready only after its `bucket.json` is written | home and each region |
 | `p/<repo id>/<sha256 hex of the path>` | `{repo, path, sha256, sha1, md5, size, ct, mod (unix), kind}`, or `{repo, path, pending: true}` while a write runs | home; also each region for an immutable path |
 | `a/repo/<name>` | `{id, format, kind, anon, private, guarded, members: [names], paths?: [[glob, immutable], ...]}`: `paths` (a hosted or proxy repo of a format with `EdgeSpec.Paths`) classifies the repo's paths in place of the format's globs, the first match deciding; `private` is `access.Engine.Private`, `guarded` is `access.Engine.Guarded` (a read IP rule, or a guard that is not a `ReadRestricter`). For a redirect name, `{redirect: <repo name>}`: the Worker reads the object of that repo next (one more read on a cache miss) and serves the request as one to that repo, whose name the scopes of a core bearer token carry; a redirect object that names another redirect sends the request to the server. A rename marks the object of the old name, the new name and every redirect of the repo; a repo delete and a removed redirect mark the redirect names | home |
@@ -4952,7 +4958,8 @@ the domain, PUT is 405 with `Allow: GET, HEAD`; a private repo answers 401 with 
 challenge, ignores a valid UI session (which reads on the base URL) and serves with a read token
 as the Basic password and as `Bearer`; a Maven repo serves a jar, also after a rename through its
 old name; the setting refuses a Docker repo, a missing repo, the Docker upload host, a port and
-`localhost`; an unknown host is 421 `text/plain` (the UI too), `/healthz` answers there, and the
+`localhost`; a second server whose `TR_REPO_DOMAINS` names its own base URL host still serves the
+UI and the API there and logs the line; an unknown host is 421 `text/plain` (the UI too), `/healthz` answers there, and the
 base URL host and the loopback names answer as before.
 
 **Publishing tests.** Every publish in the suite uses a publish session. The harness helper

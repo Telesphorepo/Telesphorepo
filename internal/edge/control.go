@@ -528,7 +528,7 @@ func (m *mod) stateView(ctx context.Context, snap *settings.Snapshot, cfg storag
 	if err != nil {
 		return nil, err
 	}
-	v := &view{mode: modeOn, location: loc, home: hb, ttl: AccessTTL.Get(snap), domains: domainsKey(snap)}
+	v := &view{mode: modeOn, location: loc, home: hb, ttl: AccessTTL.Get(snap), domains: m.domainsKey(snap)}
 	for _, h := range Hints {
 		if r := m.regions[h]; r != nil {
 			b, err := m.openRegion(ctx, cfg, regionCfg{Hint: h, Bucket: r.Bucket})
@@ -625,7 +625,7 @@ func (m *mod) firstStart(ctx context.Context, snap *settings.Snapshot, cfg stora
 			}
 		}
 	}
-	v := &view{mode: modeOn, location: loc, home: hb, regions: buckets[1:], ttl: AccessTTL.Get(snap), domains: domainsKey(snap)}
+	v := &view{mode: modeOn, location: loc, home: hb, regions: buckets[1:], ttl: AccessTTL.Get(snap), domains: m.domainsKey(snap)}
 	for _, b := range v.regions {
 		r := &regionState{Hint: b.label, Bucket: b.name, Cleared: true, ViaHome: true}
 		m.regions[b.label] = r
@@ -683,7 +683,7 @@ func (m *mod) wipe(ctx context.Context, b *bucket, prefix string) error {
 func (m *mod) syncRegions(ctx context.Context, v *view, snap *settings.Snapshot) error {
 	want := regionsOf(snap)
 	cfg := storage.ConfigView.Get(snap)
-	changed := v.ttl != AccessTTL.Get(snap) || v.domains != domainsKey(snap)
+	changed := v.ttl != AccessTTL.Get(snap) || v.domains != m.domainsKey(snap)
 	homeChanged := false
 	retire := func(r *regionState) {
 		if r.Ready {
@@ -773,7 +773,7 @@ func (m *mod) syncRegions(ctx context.Context, v *view, snap *settings.Snapshot)
 		goneBuckets = append(goneBuckets, b)
 	}
 	// The gone buckets are in the pre-steps from now, before config.json drops them.
-	nv := &view{mode: modeOn, location: v.location, home: v.home, regions: next, gone: goneBuckets, ttl: AccessTTL.Get(snap), domains: domainsKey(snap)}
+	nv := &view{mode: modeOn, location: v.location, home: v.home, regions: next, gone: goneBuckets, ttl: AccessTTL.Get(snap), domains: m.domainsKey(snap)}
 	m.cur.Store(nv)
 	if err := m.putConfig(ctx, pending); err != nil {
 		return err
@@ -840,7 +840,7 @@ func (m *mod) configJSON(enabled bool, ttl time.Duration) []byte {
 	o := configObject{ServerVersion: m.h.Version, Requires: featureNames(m.requires()), Enabled: enabled, AccessTTL: ttlSeconds(ttl),
 		EdgeKey: encodeKey(m.h.Auth.EdgePublicKey()), Formats: formatsObject(m.h.Formats),
 		Home: homeObject{Hint: HomeHint.Get(snap), Bucket: hb, Ready: p.home.Ready}, Regions: []regionObject{},
-		Domains: settings.DomainsOf(snap)}
+		Domains: m.h.RepoDomains(snap)}
 	for _, r := range p.regions {
 		o.Regions = append(o.Regions, regionObject{Hint: r.Hint, Binding: binding(r.Hint), Bucket: r.Bucket, Ready: r.Ready})
 	}

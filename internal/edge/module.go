@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -245,8 +246,16 @@ type view struct {
 	domains  string // the repo domains that config.json lists (domainsKey)
 }
 
-// domainsKey is repo_domains of s as one string: a change of it writes config.json.
-func domainsKey(s *settings.Snapshot) string { return strings.Join(settings.RepoDomains.Get(s), "\n") }
+// domainsKey is the repo domains of s (module.Kernel.RepoDomains) as one string: a change of it
+// writes config.json.
+func (m *mod) domainsKey(s *settings.Snapshot) string {
+	d := m.h.RepoDomains(s)
+	lines := make([]string, 0, len(d))
+	for _, host := range slices.Sorted(maps.Keys(d)) {
+		lines = append(lines, host+"="+d[host])
+	}
+	return strings.Join(lines, "\n")
+}
 
 // all returns the home bucket and the regions: the buckets that the outbox writes.
 func (v *view) all() []*bucket {

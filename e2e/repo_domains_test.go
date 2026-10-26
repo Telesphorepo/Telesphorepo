@@ -13,7 +13,8 @@ import (
 // TestRepoDomains: a repo domain (repo_domains) serves the files of its repo at its root, only
 // reads, keeps the access of the repo without the UI session cookie, follows a rename of its repo,
 // and serves a Maven repo the same way; the setting refuses a Docker repo and an address of the
-// server itself. A host that the server does not answer for gets 421, except /healthz.
+// server itself. A line of TR_REPO_DOMAINS that names the base URL host never takes it over. A
+// host that the server does not answer for gets 421, except /healthz.
 func TestRepoDomains(t *testing.T) {
 	t.Parallel()
 	s := StartServer(t, ServerOpts{})
@@ -177,6 +178,29 @@ func TestRepoDomains(t *testing.T) {
 		// The domains that the refused changes named still answer as before.
 		resp, b := at(pubHost, http.MethodGet, "/v1/latest.json", nil)
 		want("the domain after the refused changes", resp, b, http.StatusOK)
+	})
+
+	// A line set by the environment, which no save checks, that names the base URL host: the
+	// server's own host wins, and the log names the line.
+	t.Run("the base URL host in TR_REPO_DOMAINS", func(t *testing.T) {
+		alias := RandName("repo") + ".test"
+		line := alias + "=" + RandName("files")
+		o := StartServer(t, ServerOpts{Alias: alias, Env: map[string]string{"TR_REPO_DOMAINS": line}})
+		req := o.NewRequest(t, http.MethodGet, "/", nil)
+		req.Host = alias + ":8080"
+		resp, b := o.Do(t, req, nil)
+		if resp.StatusCode != http.StatusOK || !strings.Contains(strings.ToLower(string(b)), "<html") {
+			t.Fatalf("the UI at the base URL host: status %d: %.200s", resp.StatusCode, b)
+		}
+		req = o.NewRequest(t, http.MethodGet, "/api/me", nil)
+		req.Host = alias + ":8080"
+		resp, b = o.Do(t, req, o.AdminBasic())
+		if resp.StatusCode != http.StatusOK || !strings.Contains(string(b), o.AdminUser) {
+			t.Fatalf("the API at the base URL host: status %d: %s", resp.StatusCode, b)
+		}
+		if logs := o.Logs(t); !strings.Contains(logs, "repo_domains") || !strings.Contains(logs, line) {
+			t.Fatalf("the log names no skipped line %s:\n%s", line, tail(logs, 2000))
+		}
 	})
 
 	t.Run("other hosts", func(t *testing.T) {

@@ -325,6 +325,9 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 	}
 	hostCheck := newHosts(set, k.Repos, b.Formats, mux, extraHosts, domainPaths)
 	set.AddCheck("general", hostCheck.checkDomains)
+	k.RepoDomains = hostCheck.domains
+	hostCheck.warnShadowed(log, set.Current())
+	set.Subscribe(func(_, new *settings.Snapshot) { hostCheck.warnShadowed(log, new) })
 
 	if opts.Init != nil {
 		s := &Services{Boot: boot, Settings: set, Auth: k.Auth, Repos: k.Repos, DB: d, Assets: k.Assets,

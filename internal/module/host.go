@@ -53,6 +53,10 @@ type Kernel struct {
 	CI        *ci.Registry // the CI providers
 	Builds    *ci.Builds   // the build records
 	API       *route.API   // the shared helpers of JSON API handlers
+	// RepoDomains returns the repo domains that the server serves for the settings s: domain ->
+	// repo name, the lines of repo_domains without those whose domain is a host of the server
+	// itself. Set before the server serves; call it at runtime, not in Init. Do not change the map.
+	RepoDomains func(s *settings.Snapshot) map[string]string
 }
 
 // Host is what a module may use at runtime: the kernel services, a log tagged with the module

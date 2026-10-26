@@ -91,7 +91,7 @@ func (m *mod) wrangler(s *settings.Snapshot, bundled bool) ([]byte, error) {
 	// The reserved path of the check of the Worker (POST /api/edge/check).
 	routes = append(routes, host+checkPrefix+"*")
 	// Each repo domain, whole: every path of it is a file of its repo.
-	domains := slices.Sorted(maps.Keys(settings.DomainsOf(s)))
+	domains := slices.Sorted(maps.Keys(m.h.RepoDomains(s)))
 	for _, d := range domains {
 		routes = append(routes, d+"/*")
 	}

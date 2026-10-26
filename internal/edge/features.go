@@ -3,8 +3,6 @@ package edge
 import (
 	"slices"
 	"strings"
-
-	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 )
 
 // The edge contract (SPEC.md "Edge delivery", The contract): the Worker serves by the features it
@@ -26,7 +24,7 @@ var featureRepoDomains = workerFeature{Name: "repo-domains", Text: "serve the re
 // server writes that a Worker must implement to serve at all. A feature that only some objects
 // use goes in their `needs`, not here. repo-domains while a repo domain is listed.
 func (m *mod) requires() []workerFeature {
-	if len(settings.DomainsOf(m.h.Settings.Current())) > 0 {
+	if len(m.h.RepoDomains(m.h.Settings.Current())) > 0 {
 		return []workerFeature{featureRepoDomains}
 	}
 	return nil

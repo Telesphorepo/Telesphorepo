@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -37,8 +38,13 @@ type hosts struct {
 	formats *format.Registry
 	mux     *route.Mux
 	view    *settings.View[*hostSet]
+	served  *settings.View[map[string]string] // repo_domains without the hosts of the server (domains)
 	next    http.Handler
 }
+
+// domains returns the repo domains of s that the host check serves: repo_domains without the
+// lines whose domain is a host of the server itself (module.Kernel.RepoDomains).
+func (h *hosts) domains(s *settings.Snapshot) map[string]string { return h.served.Get(s) }
 
 func newHosts(set *settings.Service, rs *repos.Service, formats *format.Registry, mux *route.Mux,
 	extra []func(*settings.Snapshot) string, paths []string) *hosts {
@@ -61,7 +67,41 @@ func newHosts(set *settings.Service, rs *repos.Service, formats *format.Registry
 		}
 		return hs
 	})
+	h.served = settings.NewView(func(s *settings.Snapshot) map[string]string {
+		own := h.view.Get(s).own
+		out := map[string]string{}
+		for host, name := range settings.DomainsOf(s) {
+			if !own[host] {
+				out[host] = name
+			}
+		}
+		return out
+	})
 	return h
+}
+
+// shadowed returns the lines of repo_domains in s whose domain is a host of the server itself
+// (the base URL host, a module host, a loopback name), which the host check skips.
+func (h *hosts) shadowed(s *settings.Snapshot) []string {
+	own := h.view.Get(s).own
+	domains := settings.DomainsOf(s)
+	var out []string
+	for _, host := range sortedKeys(domains) {
+		if own[host] {
+			out = append(out, host+"="+domains[host])
+		}
+	}
+	return out
+}
+
+// warnShadowed logs, at warn level, each line of repo_domains in s that the host check skips.
+// It runs at startup and after every settings change, so once per snapshot. A save of the
+// general settings refuses such a line, so it comes from TR_REPO_DOMAINS or from a later change
+// of another host (an override of base_url, docker.upload_url).
+func (h *hosts) warnShadowed(log *slog.Logger, s *settings.Snapshot) {
+	for _, line := range h.shadowed(s) {
+		log.Warn("repo_domains: this domain is a host of the server itself, which answers it as itself; take the line out", "line", line)
+	}
 }
 
 // hostOf is the host of a Host header: lower case, without the port, the brackets of an IPv6
@@ -77,7 +117,8 @@ func hostOf(h string) string {
 
 // ServeHTTP checks the Host of the request (never X-Forwarded-Host):
 //
-//  1. a repo domain (repo_domains): the request reads the domain's repo (domain);
+//  1. a repo domain (repo_domains) that is no host of the server itself: the request reads the
+//     domain's repo (domain);
 //  2. base_url is empty: every host is served (setup and the first sign-in need it);
 //  3. the base URL host, a host of a module (the Docker upload host) or a loopback name: served;
 //  4. GET /healthz: answered on any host, for container and load balancer health checks;
@@ -87,11 +128,13 @@ func hostOf(h string) string {
 func (h *hosts) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	snap := h.set.Current()
 	host := hostOf(r.Host)
-	if name, ok := settings.DomainsOf(snap)[host]; ok {
-		h.domain(w, r, name, h.view.Get(snap).paths)
+	hs := h.view.Get(snap)
+	// A line of repo_domains that names a host of the server itself never takes it over
+	// (warnShadowed logs it): the server's own host wins.
+	if name, ok := h.domains(snap)[host]; ok {
+		h.domain(w, r, name, hs.paths)
 		return
 	}
-	hs := h.view.Get(snap)
 	if hs.open || hs.own[host] || (r.URL.Path == "/healthz" && (r.Method == http.MethodGet || r.Method == http.MethodHead)) {
 		h.next.ServeHTTP(w, r)
 		return
