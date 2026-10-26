@@ -1,6 +1,8 @@
 <!--
   The repo-config editor of a format: one FormRow (or SwitchRow) per field of the format's
-  descriptor (config.fields), by field type: a text input, a ListInput, a select, a switch. Keys of
+  descriptor (config.fields), by field type: a text input, a ListInput, a select, a switch, a
+  RulesInput (a "rules" field: rows of a glob and one of the field's options, saved as
+  [{match, <value_key>}], a row without a glob left out). Keys of
   the config that no field names are kept as they are. onChange gets the new config, or null
   while a required field is empty. Wrap it in {#key format + name} so its state starts again when
   the format or the repo changes; put it in a FormGrid.
@@ -15,6 +17,7 @@
   import FormRow from "$lib/components/FormRow.svelte";
   import SwitchRow from "$lib/components/SwitchRow.svelte";
   import ListInput from "$lib/components/ListInput.svelte";
+  import RulesInput from "$lib/components/RulesInput.svelte";
 
   let { fields, value, onChange }: { fields: FormatField[]; value: RepoConfig; onChange: (v: RepoConfig | null) => void } = $props();
 
@@ -26,10 +29,28 @@
   const list = (k: string) => (Array.isArray(config[k]) ? (config[k] as string[]) : []);
   const missing = (f: FormatField) => !!f.required && (f.type === "list" ? list(f.key).length === 0 : text(f.key).trim() === "");
 
+  type Rule = Record<string, string>;
+  // The rows of each rules field as edited, rows without a glob included; the config holds the rest.
+  let rows = $state<Record<string, Rule[]>>(
+    untrack(() =>
+      Object.fromEntries(fields.filter((f) => f.type === "rules").map((f) => [f.key, Array.isArray(value[f.key]) ? (value[f.key] as Rule[]) : []])),
+    ),
+  );
+
   function set(f: FormatField, v: unknown) {
     const next = { ...config };
     if ((f.type === "string" || f.type === "secret") && v === "" && !f.required) delete next[f.key];
     else next[f.key] = v;
+    config = next;
+    onChange(fields.some(missing) ? null : next);
+  }
+
+  function setRules(f: FormatField, v: Rule[]) {
+    rows = { ...rows, [f.key]: v };
+    const kept = v.filter((r) => (r.match ?? "").trim() !== "").map((r) => ({ ...r, match: r.match.trim() }));
+    if (kept.length > 0) return set(f, kept);
+    const next = { ...config };
+    delete next[f.key];
     config = next;
     onChange(fields.some(missing) ? null : next);
   }
@@ -52,6 +73,16 @@
           invalid={!!err}
           label={f.label.toLowerCase()}
           onchange={(v) => set(f, v)}
+        />
+      {:else if f.type === "rules"}
+        <RulesInput
+          id={fid}
+          value={rows[f.key] ?? []}
+          options={f.options ?? []}
+          valueKey={f.value_key ?? "value"}
+          placeholder={f.placeholder}
+          describedby={f.help ? `${fid}-help` : undefined}
+          onchange={(v) => setRules(f, v)}
         />
       {:else if f.type === "enum"}
         <Select.Root type="single" value={text(f.key)} onValueChange={(v) => set(f, v)}>

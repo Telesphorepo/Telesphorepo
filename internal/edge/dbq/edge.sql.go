@@ -10,6 +10,19 @@ import (
 	"database/sql"
 )
 
+const anyTimedOut = `-- name: AnyTimedOut :one
+SELECT EXISTS (SELECT 1 FROM edge_outbox WHERE timed_out_at > 0) AS timed_out
+`
+
+// Whether any pointer row has a put of unknown outcome, through edge_outbox_timed_out: a region
+// becomes ready only without one.
+func (q *Queries) AnyTimedOut(ctx context.Context) (bool, error) {
+	row := q.db.QueryRowContext(ctx, anyTimedOut)
+	var timed_out bool
+	err := row.Scan(&timed_out)
+	return timed_out, err
+}
+
 const backfillPending = `-- name: BackfillPending :one
 SELECT EXISTS (SELECT 1 FROM edge_outbox WHERE backfill = 1) AS pending
 `
@@ -22,6 +35,16 @@ func (q *Queries) BackfillPending(ctx context.Context) (bool, error) {
 	return pending, err
 }
 
+const clearEdgePaths = `-- name: ClearEdgePaths :exec
+DELETE FROM edge_paths WHERE repo_id >= 0
+`
+
+// Every row, at a first start (through the primary keys).
+func (q *Queries) ClearEdgePaths(ctx context.Context) error {
+	_, err := q.db.ExecContext(ctx, clearEdgePaths)
+	return err
+}
+
 const clearOutbox = `-- name: ClearOutbox :exec
 DELETE FROM edge_outbox WHERE repo_id >= 0
 `
@@ -29,6 +52,15 @@ DELETE FROM edge_outbox WHERE repo_id >= 0
 // Every row, when edge delivery stops (through the primary key).
 func (q *Queries) ClearOutbox(ctx context.Context) error {
 	_, err := q.db.ExecContext(ctx, clearOutbox)
+	return err
+}
+
+const clearReclass = `-- name: ClearReclass :exec
+DELETE FROM edge_reclass WHERE repo_id >= 0
+`
+
+func (q *Queries) ClearReclass(ctx context.Context) error {
+	_, err := q.db.ExecContext(ctx, clearReclass)
 	return err
 }
 
@@ -89,6 +121,15 @@ func (q *Queries) DelayOutbox(ctx context.Context, arg DelayOutboxParams) (int64
 	return result.RowsAffected()
 }
 
+const deleteEdgePaths = `-- name: DeleteEdgePaths :exec
+DELETE FROM edge_paths WHERE repo_id = ?
+`
+
+func (q *Queries) DeleteEdgePaths(ctx context.Context, repoID int64) error {
+	_, err := q.db.ExecContext(ctx, deleteEdgePaths, repoID)
+	return err
+}
+
 const deleteOutbox = `-- name: DeleteOutbox :execrows
 DELETE FROM edge_outbox WHERE repo_id = ? AND path = ? AND seq = ?
 `
@@ -105,6 +146,15 @@ func (q *Queries) DeleteOutbox(ctx context.Context, arg DeleteOutboxParams) (int
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const deleteReclass = `-- name: DeleteReclass :exec
+DELETE FROM edge_reclass WHERE repo_id = ?
+`
+
+func (q *Queries) DeleteReclass(ctx context.Context, repoID int64) error {
+	_, err := q.db.ExecContext(ctx, deleteReclass, repoID)
+	return err
 }
 
 const deleteState = `-- name: DeleteState :exec
@@ -311,6 +361,29 @@ func (q *Queries) GetEdgeUser(ctx context.Context, id int64) (GetEdgeUserRow, er
 	return i, err
 }
 
+const getReclass = `-- name: GetReclass :one
+SELECT epoch, filled, walking, cursor FROM edge_reclass WHERE repo_id = ?
+`
+
+type GetReclassRow struct {
+	Epoch   int64
+	Filled  string
+	Walking string
+	Cursor  string
+}
+
+func (q *Queries) GetReclass(ctx context.Context, repoID int64) (GetReclassRow, error) {
+	row := q.db.QueryRowContext(ctx, getReclass, repoID)
+	var i GetReclassRow
+	err := row.Scan(
+		&i.Epoch,
+		&i.Filled,
+		&i.Walking,
+		&i.Cursor,
+	)
+	return i, err
+}
+
 const getState = `-- name: GetState :one
 
 SELECT value FROM edge_state WHERE key = ?
@@ -478,6 +551,41 @@ func (q *Queries) ListEdgeGrantsIn(ctx context.Context, arg ListEdgeGrantsInPara
 	for rows.Next() {
 		var i ListEdgeGrantsInRow
 		if err := rows.Scan(&i.UserID, &i.RepoID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listEdgePaths = `-- name: ListEdgePaths :many
+
+SELECT rules, epoch FROM edge_paths WHERE repo_id = ?
+`
+
+type ListEdgePathsRow struct {
+	Rules string
+	Epoch int64
+}
+
+// The path classes of a repo --------------------------------------------------------------------
+// The rule lists of a repo's regional pointers, through the primary key.
+func (q *Queries) ListEdgePaths(ctx context.Context, repoID int64) ([]ListEdgePathsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listEdgePaths, repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListEdgePathsRow
+	for rows.Next() {
+		var i ListEdgePathsRow
+		if err := rows.Scan(&i.Rules, &i.Epoch); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -712,6 +820,71 @@ func (q *Queries) ListWritten(ctx context.Context, arg ListWrittenParams) ([]Lis
 	return items, nil
 }
 
+const markTimedOut = `-- name: MarkTimedOut :exec
+INSERT INTO edge_outbox (repo_id, path, sha256, due_at, timed_out_at) VALUES (?, ?, '', ?, ?)
+ON CONFLICT (repo_id, path) DO UPDATE SET sha256 = '', due_at = excluded.due_at,
+  timed_out_at = excluded.timed_out_at, attempts = 0, seq = edge_outbox.seq + 1, error = ''
+`
+
+type MarkTimedOutParams struct {
+	RepoID     int64
+	Path       string
+	DueAt      int64
+	TimedOutAt int64
+}
+
+// A put of the pointer outside the outbox (a region fill, the reclass walk) timed out: the row
+// applies the current state now and once more a minute later.
+func (q *Queries) MarkTimedOut(ctx context.Context, arg MarkTimedOutParams) error {
+	_, err := q.db.ExecContext(ctx, markTimedOut,
+		arg.RepoID,
+		arg.Path,
+		arg.DueAt,
+		arg.TimedOutAt,
+	)
+	return err
+}
+
+const pruneEdgePaths = `-- name: PruneEdgePaths :exec
+DELETE FROM edge_paths WHERE repo_id = ? AND epoch < ?
+`
+
+type PruneEdgePathsParams struct {
+	RepoID int64
+	Epoch  int64
+}
+
+// The rule lists that no write used since the walk of epoch began.
+func (q *Queries) PruneEdgePaths(ctx context.Context, arg PruneEdgePathsParams) error {
+	_, err := q.db.ExecContext(ctx, pruneEdgePaths, arg.RepoID, arg.Epoch)
+	return err
+}
+
+const putReclass = `-- name: PutReclass :exec
+INSERT INTO edge_reclass (repo_id, epoch, filled, walking, cursor) VALUES (?, ?, ?, ?, ?)
+ON CONFLICT (repo_id) DO UPDATE SET epoch = excluded.epoch, filled = excluded.filled,
+  walking = excluded.walking, cursor = excluded.cursor
+`
+
+type PutReclassParams struct {
+	RepoID  int64
+	Epoch   int64
+	Filled  string
+	Walking string
+	Cursor  string
+}
+
+func (q *Queries) PutReclass(ctx context.Context, arg PutReclassParams) error {
+	_, err := q.db.ExecContext(ctx, putReclass,
+		arg.RepoID,
+		arg.Epoch,
+		arg.Filled,
+		arg.Walking,
+		arg.Cursor,
+	)
+	return err
+}
+
 const putState = `-- name: PutState :exec
 INSERT INTO edge_state (key, value) VALUES (?, ?)
 ON CONFLICT (key) DO UPDATE SET value = excluded.value
@@ -725,6 +898,19 @@ type PutStateParams struct {
 func (q *Queries) PutState(ctx context.Context, arg PutStateParams) error {
 	_, err := q.db.ExecContext(ctx, putState, arg.Key, arg.Value)
 	return err
+}
+
+const repoTimedOut = `-- name: RepoTimedOut :one
+SELECT EXISTS (SELECT 1 FROM edge_outbox WHERE repo_id = ? AND timed_out_at > 0) AS timed_out
+`
+
+// Whether a pointer row of the repo has a put of unknown outcome, through edge_outbox_timed_out: a walk
+// ends only without one, since such a put may still land.
+func (q *Queries) RepoTimedOut(ctx context.Context, repoID int64) (bool, error) {
+	row := q.db.QueryRowContext(ctx, repoTimedOut, repoID)
+	var timed_out bool
+	err := row.Scan(&timed_out)
+	return timed_out, err
 }
 
 const retryOutbox = `-- name: RetryOutbox :execrows
@@ -766,6 +952,22 @@ func (q *Queries) SumFileCount(ctx context.Context) (int64, error) {
 	var column_1 int64
 	err := row.Scan(&column_1)
 	return column_1, err
+}
+
+const upsertEdgePaths = `-- name: UpsertEdgePaths :exec
+INSERT INTO edge_paths (repo_id, rules, epoch) VALUES (?, ?, ?)
+ON CONFLICT (repo_id, rules) DO UPDATE SET epoch = excluded.epoch
+`
+
+type UpsertEdgePathsParams struct {
+	RepoID int64
+	Rules  string
+	Epoch  int64
+}
+
+func (q *Queries) UpsertEdgePaths(ctx context.Context, arg UpsertEdgePathsParams) error {
+	_, err := q.db.ExecContext(ctx, upsertEdgePaths, arg.RepoID, arg.Rules, arg.Epoch)
+	return err
 }
 
 const upsertOutbox = `-- name: UpsertOutbox :exec

@@ -31,6 +31,18 @@ WHERE due_at <= sqlc.arg(now) AND repo_id > 0 ORDER BY due_at LIMIT sqlc.arg(lim
 SELECT repo_id, path, sha256, due_at, attempts, seq, timed_out_at FROM edge_outbox
 WHERE repo_id = 0 AND due_at <= sqlc.arg(now) ORDER BY due_at LIMIT sqlc.arg(limit);
 
+-- A put of the pointer outside the outbox (a region fill, the reclass walk) timed out: the row
+-- applies the current state now and once more a minute later.
+-- name: MarkTimedOut :exec
+INSERT INTO edge_outbox (repo_id, path, sha256, due_at, timed_out_at) VALUES (?, ?, '', ?, ?)
+ON CONFLICT (repo_id, path) DO UPDATE SET sha256 = '', due_at = excluded.due_at,
+  timed_out_at = excluded.timed_out_at, attempts = 0, seq = edge_outbox.seq + 1, error = '';
+
+-- Whether any pointer row has a put of unknown outcome, through edge_outbox_timed_out: a region
+-- becomes ready only without one.
+-- name: AnyTimedOut :one
+SELECT EXISTS (SELECT 1 FROM edge_outbox WHERE timed_out_at > 0) AS timed_out;
+
 -- name: DeleteOutbox :execrows
 DELETE FROM edge_outbox WHERE repo_id = ? AND path = ? AND seq = ?;
 
@@ -137,3 +149,43 @@ SELECT id, repo_id, path, sha256 FROM assets WHERE id > ? ORDER BY id LIMIT ?;
 
 -- name: SumFileCount :one
 SELECT CAST(coalesce(sum(file_count), 0) AS INTEGER) FROM repos;
+
+-- The path classes of a repo --------------------------------------------------------------------
+
+-- The rule lists of a repo's regional pointers, through the primary key.
+-- name: ListEdgePaths :many
+SELECT rules, epoch FROM edge_paths WHERE repo_id = ?;
+
+-- name: UpsertEdgePaths :exec
+INSERT INTO edge_paths (repo_id, rules, epoch) VALUES (?, ?, ?)
+ON CONFLICT (repo_id, rules) DO UPDATE SET epoch = excluded.epoch;
+
+-- The rule lists that no write used since the walk of epoch began.
+-- name: PruneEdgePaths :exec
+DELETE FROM edge_paths WHERE repo_id = ? AND epoch < ?;
+
+-- name: DeleteEdgePaths :exec
+DELETE FROM edge_paths WHERE repo_id = ?;
+
+-- name: GetReclass :one
+SELECT epoch, filled, walking, cursor FROM edge_reclass WHERE repo_id = ?;
+
+-- name: PutReclass :exec
+INSERT INTO edge_reclass (repo_id, epoch, filled, walking, cursor) VALUES (?, ?, ?, ?, ?)
+ON CONFLICT (repo_id) DO UPDATE SET epoch = excluded.epoch, filled = excluded.filled,
+  walking = excluded.walking, cursor = excluded.cursor;
+
+-- name: DeleteReclass :exec
+DELETE FROM edge_reclass WHERE repo_id = ?;
+
+-- Every row, at a first start (through the primary keys).
+-- name: ClearEdgePaths :exec
+DELETE FROM edge_paths WHERE repo_id >= 0;
+
+-- name: ClearReclass :exec
+DELETE FROM edge_reclass WHERE repo_id >= 0;
+
+-- Whether a pointer row of the repo has a put of unknown outcome, through edge_outbox_timed_out: a walk
+-- ends only without one, since such a put may still land.
+-- name: RepoTimedOut :one
+SELECT EXISTS (SELECT 1 FROM edge_outbox WHERE repo_id = ? AND timed_out_at > 0) AS timed_out;

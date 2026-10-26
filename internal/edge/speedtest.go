@@ -139,8 +139,9 @@ func (m *mod) speedFiles(w http.ResponseWriter, r *http.Request, c *route.Call) 
 			return
 		}
 		var picks []speedFileJSON
+		immutable := m.classOf(repo)
 		for _, a := range list {
-			if !e.IsImmutable(a.Path) {
+			if !immutable(a.Path) {
 				continue
 			}
 			if u := downloadURL(e, repo, a.Path); u != "" {

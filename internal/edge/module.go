@@ -45,12 +45,12 @@ var ProblemNoWorker = httpx.DeclareProblem(httpx.Problem{Name: "no-edge-worker",
 
 // Module returns the edge module: the settings group edge, the permission edge.manage, the
 // pipeline watcher, the change notices of auth, repos, network, publish and storage, the jobs
-// edge.outbox, edge.backfill, edge.reconcile and edge.seen, the routes of /api/edge/ and the
+// edge.outbox, edge.backfill, edge.reclass, edge.reconcile and edge.seen, the routes of /api/edge/ and the
 // server's answer on the reserved path of the Worker check (/.well-known/telesphorepo-edge/).
 func Module() module.Module {
 	m := &mod{kick: make(chan struct{}, 1), akick: make(chan struct{}, 1), ctl: make(chan struct{}, 1),
 		countKick: make(chan struct{}, 1), sp: newSpacer(), errs: map[string]string{}, removedKeys: map[string]*view{},
-		marked: map[string]bool{}}
+		marked: map[string]bool{}, cls: newClasses()}
 	m.cur.Store(&view{})
 	counted := make(chan struct{})
 	m.counted.Store(&counted)
@@ -66,6 +66,7 @@ func Module() module.Module {
 			x.Init(m.init)
 			x.Job(jobs.Job{Name: "edge.outbox", Run: m.runOutbox})
 			x.Job(jobs.Job{Name: "edge.backfill", Run: m.runControl})
+			x.Job(jobs.Job{Name: "edge.reclass", Run: m.runReclass})
 			x.Job(jobs.Job{Name: "edge.reconcile", Every: 5 * time.Minute, Tick: m.reconcile})
 			x.Job(jobs.Job{Name: "edge.seen", Every: time.Minute, Tick: m.seen})
 			x.RootPrefix(checkPrefix)
@@ -81,6 +82,7 @@ type mod struct {
 	moves *move.Service
 
 	cur   atomic.Pointer[view] // the buckets that the watcher and the outbox write now
+	cls   *classes             // the path classes of the repos of a format with EdgeSpec.Paths
 	kick  chan struct{}        // wakes the outbox
 	akick chan struct{}        // an access object was marked: the outbox reads them before its next pointer
 	ctl   chan struct{}        // wakes the controller (edge.backfill)

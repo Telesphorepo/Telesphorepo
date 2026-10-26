@@ -2,6 +2,7 @@ package format
 
 import (
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strings"
 	"sync"
@@ -14,8 +15,12 @@ type Field struct {
 	Key      string          `json:"key"`
 	Label    string          `json:"label"`
 	Help     string          `json:"help,omitempty"`
-	Type     string          `json:"type"` // "string", "bool", "list", "enum" or "secret"
+	Type     string          `json:"type"` // "string", "bool", "list", "enum", "secret" or "rules"
 	Options  []string        `json:"options,omitempty"`
+	// ValueKey is the key of the value in each row of a "rules" field: the value is a list of
+	// {"match": <glob>, <ValueKey>: <one of Options>}, and the first row whose glob matches a
+	// path decides for it.
+	ValueKey string `json:"value_key,omitempty"`
 	Required bool            `json:"required,omitempty"`
 	Default  json.RawMessage `json:"default,omitempty"`
 	// Placeholder is an example value that the empty control shows.
@@ -32,7 +37,37 @@ const (
 	FieldList   = "list"
 	FieldEnum   = "enum"
 	FieldSecret = "secret"
+	FieldRules  = "rules"
 )
+
+// MaxGlob is the longest glob that ValidGlob takes: the longest repo path.
+const MaxGlob = 1024
+
+// ValidGlob checks a glob that a person wrote (a rule of a repo config): a relative path pattern
+// of at most MaxGlob bytes, without an empty, "." or ".." segment and without control characters.
+func ValidGlob(g string) error {
+	switch {
+	case g == "":
+		return fmt.Errorf("the glob is empty")
+	case len(g) > MaxGlob:
+		return fmt.Errorf("the glob is longer than %d bytes", MaxGlob)
+	case !utf8.ValidString(g):
+		return fmt.Errorf("the glob is not UTF-8")
+	case strings.HasPrefix(g, "/"):
+		return fmt.Errorf("the glob starts with /; write it relative to the repository")
+	}
+	for _, r := range g {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("the glob holds a control character")
+		}
+	}
+	for _, seg := range strings.Split(g, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return fmt.Errorf("the glob has an empty, . or .. segment")
+		}
+	}
+	return nil
+}
 
 // UIDescriptor is what the web UI shows of a format beyond its specs: the words and the choices
 // that differ from format to format, so no shared UI code names a format.
@@ -95,8 +130,9 @@ type RemotePreset struct {
 }
 
 // Glob reports whether the repo path p matches pattern: "*" matches any run of characters
-// except "/", "?" one character except "/", and "**/" any number of folders (none included).
-// Matching is case-sensitive.
+// except "/", "?" one character except "/", "**/" any number of folders (none included), and a
+// last segment "**" any rest of the path (so "builds/**" matches every file under builds/, and
+// "**" every path). Matching is case-sensitive.
 func Glob(pattern, p string) bool {
 	return globRE(pattern).MatchString(p)
 }
@@ -110,6 +146,10 @@ func globRE(pattern string) *regexp.Regexp {
 	var b strings.Builder
 	b.WriteString("^")
 	for i := 0; i < len(pattern); {
+		if pattern[i:] == "**" && (i == 0 || pattern[i-1] == '/') {
+			b.WriteString("(?s:.+)")
+			break
+		}
 		if strings.HasPrefix(pattern[i:], "**/") {
 			b.WriteString("(?:[^/]*/)*")
 			i += 3

@@ -1,5 +1,6 @@
 // An exact port of format.Glob (internal/format/ui.go): "*" matches any run of characters
-// except "/", "?" one character except "/", and "**/" any number of folders (none included).
+// except "/", "?" one character except "/", "**/" any number of folders (none included), and a
+// last segment "**" any rest of the path.
 // Matching is case-sensitive. The pattern compiles to a regular expression as in Go; the "u" flag
 // makes "[^/]" match one code point, as Go's regexp matches one rune.
 
@@ -14,6 +15,11 @@ function compile(pattern: string): RegExp {
   let src = "^";
   const cps = Array.from(pattern);
   for (let i = 0; i < cps.length; ) {
+    // A last segment "**" matches any rest of the path.
+    if (cps[i] === "*" && cps[i + 1] === "*" && i + 2 === cps.length && (i === 0 || cps[i - 1] === "/")) {
+      src += "[\\s\\S]+";
+      break;
+    }
     if (cps[i] === "*" && cps[i + 1] === "*" && cps[i + 2] === "/") {
       src += "(?:[^/]*/)*";
       i += 3;
@@ -41,4 +47,11 @@ export function glob(pattern: string, p: string): boolean {
 // immutable reports whether p matches an immutable glob and no mutable glob.
 export function immutable(p: string, imm: readonly string[], mut: readonly string[]): boolean {
   return imm.some((g) => glob(g, p)) && !mut.some((g) => glob(g, p));
+}
+
+// immutableBy reports whether p is immutable under the rules of a repo object (format.ImmutableBy):
+// the first rule whose glob matches decides; no match is mutable.
+export function immutableBy(p: string, rules: readonly (readonly [string, boolean])[]): boolean {
+  for (const [g, imm] of rules) if (glob(g, p)) return imm;
+  return false;
 }

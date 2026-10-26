@@ -17,7 +17,8 @@ type descriptorJSON struct {
 		Fields []struct {
 			Key     string   `json:"key"`
 			Type    string   `json:"type"`
-			Options []string `json:"options"`
+			Options  []string `json:"options"`
+			ValueKey string   `json:"value_key"`
 		} `json:"fields"`
 	} `json:"config"`
 	DeleteNotes []struct {
@@ -52,8 +53,8 @@ func formatDescriptors(t *testing.T, s *Server) map[string]descriptorJSON {
 
 // wellFormed reports what is missing from the words and choices of descriptor f, or "": every
 // remote preset has a label and an http(s) URL, every tool an ID and a label, every tool label
-// words, the CI system github-actions a label, every config field a key and a type, and every
-// enum field options.
+// words, the CI system github-actions a label, every config field a key and a type, every enum
+// field options, and every rules field options and the key of its value.
 func wellFormed(f descriptorJSON) string {
 	for _, p := range f.RemotePresets {
 		if p.Label == "" || !strings.HasPrefix(p.URL, "https://") && !strings.HasPrefix(p.URL, "http://") {
@@ -76,6 +77,9 @@ func wellFormed(f descriptorJSON) string {
 	for _, fd := range f.Config.Fields {
 		if fd.Key == "" || fd.Type == "" || fd.Type == "enum" && len(fd.Options) == 0 {
 			return "a config field without a key, a type or the options of an enum"
+		}
+		if fd.Type == "rules" && (len(fd.Options) == 0 || fd.ValueKey == "") {
+			return "a rules field without the options or the key of its value"
 		}
 	}
 	return ""

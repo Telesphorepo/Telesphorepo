@@ -102,6 +102,11 @@ func (m *mod) repoObjectOf(ctx context.Context, repo *repos.Repo) (any, bool, er
 		for _, mb := range members {
 			o.Members = append(o.Members, mb.Name)
 		}
+	} else if rules, ok := m.pathRules(repo); ok {
+		o.Paths = make([][]any, len(rules))
+		for i, r := range rules {
+			o.Paths[i] = []any{r.Match, r.Immutable}
+		}
 	}
 	return o, true, nil
 }
@@ -207,13 +212,18 @@ func (m *mod) reposChanged(ctx context.Context, n repos.Notice) {
 			keys = append(keys, repoPrefix+g.Name)
 		}
 	}
+	var walk []int64
 	for _, r := range n.Changed {
 		keys = append(keys, repoPrefix+r.Name)
 		for _, g := range m.h.Repos.GroupsOf(r.ID) {
 			add(g)
 		}
+		if _, ok := m.pathRules(r); ok {
+			walk = append(walk, r.ID) // its rules may have changed
+		}
 	}
 	if n.Deleted != nil {
+		walk = append(walk, n.Deleted.ID) // the walk job forgets its classes
 		keys = append(keys, repoPrefix+n.Deleted.Name)
 		for _, g := range n.Groups {
 			add(g)
@@ -225,6 +235,7 @@ func (m *mod) reposChanged(ctx context.Context, n repos.Notice) {
 		keys = append(keys, users...)
 	}
 	m.mark(ctx, keys...)
+	m.queueClasses(walk...)
 }
 
 // rulesChanged marks the repo whose IP rules changed and its groups.

@@ -324,6 +324,9 @@ export interface RepoObject {
   private: boolean;
   guarded: boolean;
   members: string[];
+  // paths classifies the repo's paths in place of the format's globs: [glob, immutable], the
+  // first match decides. null: the format's globs.
+  paths: [string, boolean][] | null;
 }
 
 interface UserObject {
@@ -370,8 +373,13 @@ export async function repoObject(objects: Objects, name: string): Promise<RepoOb
   }
   const members = v.members === undefined || v.members === null ? [] : v.members;
   if (!isStrs(members)) return null;
-  return { id: v.id, name, format: v.format, kind: v.kind, anon: v.anon, private: v.private, guarded: v.guarded, members };
+  const paths = v.paths === undefined || v.paths === null ? null : v.paths;
+  if (paths !== null && !isRules(paths)) return null;
+  return { id: v.id, name, format: v.format, kind: v.kind, anon: v.anon, private: v.private, guarded: v.guarded, members, paths };
 }
+
+const isRules = (v: unknown): v is [string, boolean][] =>
+  Array.isArray(v) && v.every((r) => Array.isArray(r) && r.length === 2 && typeof r[0] === "string" && typeof r[1] === "boolean");
 
 async function userObject(objects: Objects, id: number): Promise<UserObject | null> {
   const v = await objects.get("a/user/" + id);

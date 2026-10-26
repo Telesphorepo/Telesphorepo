@@ -355,13 +355,31 @@ func (m *mod) process(ctx context.Context, v *view, r dbq.DueOutboxRow) bool {
 	}
 	if !drop && r.TimedOutAt > 0 {
 		// R2 reads do not wait for earlier writes, so a put that timed out may still land: apply
-		// the final state once more a minute after it.
+		// the final state once more a minute after it. The row stays marked until then, so no
+		// region becomes ready and no walk ends before (AnyTimedOut, RepoTimedOut).
 		if again := r.TimedOutAt + recheckAfter.Milliseconds(); now < again {
-			m.delay(ctx, r, again, 0)
+			m.delay(ctx, r, again, r.TimedOutAt)
 			return false
 		}
 	}
 	return true
+}
+
+// putUnknown passes on err, the result of a put of the pointer of path in repo outside the outbox
+// (a region fill, the reclass walk). A put that timed out has an unknown outcome and may land
+// later, over a pending pointer or after a remove: the path gets an outbox row marked timed out,
+// which applies the current state in every bucket now and again a minute later. Until that row
+// goes, no region becomes ready and no walk of the repo ends.
+func (m *mod) putUnknown(ctx context.Context, repoID int64, path string, err error) error {
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	now := nowMS()
+	if qerr := m.q.MarkTimedOut(context.WithoutCancel(ctx), dbq.MarkTimedOutParams{RepoID: repoID, Path: path, DueAt: now, TimedOutAt: now}); qerr != nil {
+		m.h.Log.Error("edge outbox update failed", "error", qerr.Error())
+	}
+	m.wake()
+	return err
 }
 
 func (m *mod) delay(ctx context.Context, r dbq.DueOutboxRow, due, timedOut int64) {
@@ -373,7 +391,8 @@ func (m *mod) delay(ctx context.Context, r dbq.DueOutboxRow, due, timedOut int64
 // applyPointer writes the pointer of a row under the path lock, from the asset row read again
 // under the lock: the pointer of the asset (home, and every region for an immutable path) when it
 // exists with the row's digest (or the row has none); a delete in every bucket when the asset is
-// gone or gets no pointer. drop: the asset has another digest, whose commit has its own row.
+// gone or gets no pointer. A mutable path that a recorded rule list made immutable loses its
+// regional pointers (paths.go). drop: the asset has another digest, whose commit has its own row.
 func (m *mod) applyPointer(ctx context.Context, v *view, r dbq.DueOutboxRow) (drop bool, err error) {
 	unlock := m.h.Assets.Lock(r.RepoID, r.Path)
 	defer unlock()
@@ -400,8 +419,22 @@ func (m *mod) applyPointer(ctx context.Context, v *view, r dbq.DueOutboxRow) (dr
 	if err := m.put(ctx, v.home, key, body); err != nil {
 		return false, err
 	}
-	if !es.IsImmutable(a.Path) {
-		return false, nil
+	rules, perRepo := m.pathRules(repo)
+	if !m.immutable(repo, a.Path) {
+		if !perRepo {
+			return false, nil
+		}
+		// Mutable now, immutable under rules of an earlier regional pointer: delete it.
+		old, err := m.oldImmutable(ctx, repo, a.Path)
+		if err != nil || !old {
+			return false, err
+		}
+		return false, parallel(len(v.regions)+1, v.regions, func(b *bucket) error { return m.del(ctx, b, key) })
+	}
+	if perRepo {
+		if err := m.record(ctx, repo.ID, rules); err != nil {
+			return false, err
+		}
 	}
 	return false, parallel(len(v.regions)+1, v.regions, func(b *bucket) error { return m.put(ctx, b, key, body) })
 }

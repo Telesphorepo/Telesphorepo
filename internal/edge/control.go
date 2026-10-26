@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/edge/dbq"
+	"github.com/Telesphorepo/Telesphorepo/internal/format"
 	"github.com/Telesphorepo/Telesphorepo/internal/repos"
 	"github.com/Telesphorepo/Telesphorepo/internal/settings"
 	"github.com/Telesphorepo/Telesphorepo/internal/storage"
@@ -610,6 +611,9 @@ func (m *mod) firstStart(ctx context.Context, snap *settings.Snapshot, cfg stora
 	if err := m.q.ClearOutbox(ctx); err != nil {
 		return err
 	}
+	if err := m.resetClasses(ctx); err != nil {
+		return err
+	}
 	total, err := m.rq.SumFileCount(ctx)
 	if err != nil {
 		return err
@@ -1012,17 +1016,23 @@ func (m *mod) backfillRegion(ctx context.Context, v *view, b *bucket, r *regionS
 		if err != nil {
 			return false, err
 		}
-		var todo []dbq.ListEdgeAssetsRow
+		type fill struct {
+			a     dbq.ListEdgeAssetsRow
+			rules []format.EdgeRule // the rules that make it immutable; nil for the format's globs
+		}
+		var todo []fill
 		for _, a := range rows {
 			repo := cache.get(ctx, m.h.Repos, a.RepoID)
 			if repo == nil {
 				continue
 			}
-			if es := m.edgeOf(repo); es != nil && es.IsImmutable(a.Path) && m.eligible(repo, a.Path) {
-				todo = append(todo, a)
+			if m.immutable(repo, a.Path) && m.eligible(repo, a.Path) {
+				rules, _ := m.pathRules(repo)
+				todo = append(todo, fill{a, rules})
 			}
 		}
-		if err := parallel(16, todo, func(a dbq.ListEdgeAssetsRow) error {
+		if err := parallel(16, todo, func(f fill) error {
+			a := f.a
 			key := pointerKey(a.RepoID, a.Path)
 			unlock := m.h.Assets.Lock(a.RepoID, a.Path)
 			defer unlock()
@@ -1030,7 +1040,12 @@ func (m *mod) backfillRegion(ctx context.Context, v *view, b *bucket, r *regionS
 			if err != nil {
 				return nil // removed: no pointer
 			}
-			return m.put(ctx, b, key, pointerOf(cur))
+			if f.rules != nil {
+				if err := m.record(ctx, a.RepoID, f.rules); err != nil {
+					return err
+				}
+			}
+			return m.putUnknown(ctx, a.RepoID, a.Path, m.put(ctx, b, key, pointerOf(cur)))
 		}); err != nil {
 			return false, err
 		}
@@ -1122,6 +1137,14 @@ func (m *mod) checkBlobs(ctx context.Context, v *view, b *bucket, r *regionState
 	}
 	r.Missing, r.CheckedAt, r.Pass, r.PassMissing = &missing, now, "", 0
 	if missing == 0 {
+		// A pointer put of unknown outcome may still land in the region: it becomes ready after
+		// the second application of that row, at a later pass.
+		if timedOut, err := m.rq.AnyTimedOut(ctx); err != nil || timedOut {
+			if err != nil {
+				return false, err
+			}
+			return false, m.saveRegion(ctx, r)
+		}
 		r.Ready = true
 		if err := m.saveRegion(ctx, r); err != nil {
 			return false, err

@@ -72,7 +72,7 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/version` | The version schemes of the package formats, with no outside module: `semver.go` (SemVer 2.0 for npm and Cargo; `CleanSemVer` is npm's loose clean of a package.json version), `pep440.go` (PEP 440: normal form and order), `nuget.go` (NuGet: normal form, order, `IsSemVer2`). Each version has a `SortKey`, a string whose byte order is the scheme's order, for the `sort_key` columns that keyset paging reads |
 | `internal/maven` | Module and format `maven`: the standard routes, release immutability (`Admit`), the content types, the version and build rows (`OnCommitted`, `OnRemoved`), the merge of `maven-metadata.xml` in a group, the metadata after a delete (`AfterRemove`), web UI uploads with checksums and metadata. Owns its tables and queries (`queries/`, `dbq/`) |
 | `internal/debian` | Module and format `debian`: `.deb` upload/parse through `Commit`, the package rows (`OnCommitted`, `OnRemoved`), the index rebuild (`Rebuild`), `/debian/{repo}/key.asc`, the plan of a Nexus apt import (distribution and signing key). Owns its tables, queries (`queries/`, `dbq/`) and architecture config; binds a signing key per repo (`SigningKey`) |
-| `internal/raw` | Module and format `raw`: plain files at `/raw/{repo}/{path...}` (the standard routes) with an `overwrite` policy (`Admit`) |
+| `internal/raw` | Module and format `raw`: plain files at `/raw/{repo}/{path...}` (the standard routes) with an `overwrite` policy per path (`Admit`: the first matching rule, else the repo-wide one), which also classifies the paths for the edge (`EdgeSpec.Paths`: `deny` is immutable) |
 | `internal/cargo` | Module and format `cargo`: the Cargo sparse index (`index/`), the `.crate` files (`crates/`) and the publish and yank API (`api/v1/`) for hosted, proxy and group repos; owns its tables and queries. See **Cargo registry** |
 | `internal/npm` | Module and format `npm`: the registry API at `/npm/{repo}/` (one route per method that parses the rest of the path), tarballs through `Commit`, the version rows (`OnCommitted`, `OnRemoved`), packuments rendered per request, the streaming publish body, the Nexus `npm` importer and web UI uploads of `.tgz` files. See **npm registry** |
 | `internal/nuget` | Module and format `nuget`: the NuGet V3 protocol at `/nuget/{repo}/` (see **NuGet repositories**): push, unlist and relist, the flat container, the registrations and the search rendered per request, the proxy of a NuGet V3 remote and the group name rule. Owns its table and queries (`queries/`, `dbq/`) |
@@ -148,9 +148,11 @@ it needs and leaves the others nil. The kernel gives it these parts:
   (`Settings`), permissions, audit actions and repo operation types.
 - The web UI: the descriptor in `format.Spec` (see **Format UI descriptors**), and a named
   `formatParts` slot in the UI module of the format for a part that only the format can draw.
-- Edge delivery: `Edge` (`format.EdgeSpec{Shape, Immutable, Mutable}`): the URL shape that the
-  Worker parses (`standard` or `oci`) and the globs of the paths that never change. A format
-  without it gets no Worker route (see **Edge delivery**).
+- Edge delivery: `Edge` (`format.EdgeSpec{Shape, Immutable, Mutable, Paths}`): the URL shape that
+  the Worker parses (`standard` or `oci`) and the globs of the paths that never change, or `Paths`,
+  the rules of one repo (`[]format.EdgeRule{Match, Immutable}`, the first match decides, the last
+  `**`) for a format whose repo config decides what can change (raw). A format without it gets no
+  Worker route (see **Edge delivery**).
 
 | ID | Package | Requires | Owns |
 |---|---|---|---|
@@ -161,7 +163,7 @@ it needs and leaves the others nil. The kernel gives it these parts:
 | `network` | `internal/netrules` | | The client address, IP lists, repo IP rules (a repo guard and the networks of the access report), the IP lists of the trusted proxies (`/api/network/trusted-proxies`), the subsystem `network`, the settings group `network` (`trusted_proxies`; its `Validate` refuses a `list:` entry in a change), the `network.*` actions, job `network.presets` (every hour) |
 | `signing` | `internal/signing` | | Signing keys and `/api/signing-keys/...`, the repo field `signing_key` (for the hosted repos of the formats with `SigningKey`), the subsystem `signing`, the `signing.key.*` actions; provides `*signing.Keys` |
 | `publish` | `internal/publish` | `audit` | Devices, publish sessions (`trs`), CI trust policies, the CI providers `github-actions` and `jenkins`, `/api/devices/...` and `/api/publish/...`, the subsystem `ci`, the settings group `publishing`, the `publish.session.*`, `device.*`, `setup_code.create` and `ci.pipeline.*` actions, job `publish.cleanup` (every minute), `/install.sh`, `/install.ps1` and `/cli/` (see **Install scripts and CLI downloads**); provides `*publish.Service` and `publish.Minter`; loads the publish sessions and devices of core bearer tokens and gives the access report its CI pipelines |
-| `edge` | `internal/edge` | `storage`, `network`, `publish` | Edge delivery (see **Edge delivery**): the subsystem `edge` with `edge.manage`, the settings group `edge`, `GET /api/edge/status`, `POST /api/edge/check`, `GET` and `POST /api/edge/speedtest`, `GET /api/edge/worker.zip` and `GET /api/edge/wrangler.jsonc`, the root prefix `/.well-known/telesphorepo-edge/` (the server's answer on the reserved path of the check), the pipeline watcher, jobs `edge.outbox`, `edge.backfill`, `edge.reconcile` (every 5 min) and `edge.seen` (every minute), the line of the access report that says where downloads come from |
+| `edge` | `internal/edge` | `storage`, `network`, `publish` | Edge delivery (see **Edge delivery**): the subsystem `edge` with `edge.manage`, the settings group `edge`, `GET /api/edge/status`, `POST /api/edge/check`, `GET` and `POST /api/edge/speedtest`, `GET /api/edge/worker.zip` and `GET /api/edge/wrangler.jsonc`, the root prefix `/.well-known/telesphorepo-edge/` (the server's answer on the reserved path of the check), the pipeline watcher, jobs `edge.outbox`, `edge.backfill`, `edge.reclass`, `edge.reconcile` (every 5 min) and `edge.seen` (every minute), the line of the access report that says where downloads come from |
 | `sso` | `internal/oidc` | `publish` | `/api/auth/oidc/...`, the subsystem `signin`, the settings group `sso` (its `Validate` with the startup guard and the claim map check, `Test` and `Apply`: the discovery check), the `sso.*` actions; tells auth when single sign-on manages permissions |
 | `nexus` | `internal/nexus` | `publish` | `/api/nexus/...`, the subsystem `nexus`, the settings group `nexus`, the `nexus.*` actions, the operation types `mirror`, `empty` and `merge`, the repo fields `rehearsal_for` and `moves_into`, job `nexus.scheduler` (resumes running syncs, empties and merges, then the schedule loop); a merge gives the CI pipelines of `publish` to its target |
 | `maven` | `internal/maven` | | Format `maven` (publish category `cli`) with the tools `gradle` and `maven` (their CI steps) |
@@ -363,8 +365,11 @@ exchange nonce (nonce, signature, a usable device). It records no use of the tok
 **Format UI descriptors.** `GET /api/formats` answers, for each format, everything the web UI
 shows or chooses per format, so no shared UI code names a format. It comes from the
 `format.Spec`: `Description`; `Config.Fields` (the repo config form: `{key, label, help, type:
-string|bool|list|enum|secret, options, required, default, placeholder, change_note}`; a change of
-a field with a `change_note` asks first and lists the note); `RepoTabs` and the module repo fields;
+string|bool|list|enum|secret|rules, options, value_key, required, default, placeholder,
+change_note}`; a `rules` field is an ordered list of `{match: <glob>, <value_key>: <one of
+options>}`, the first rule that matches a path deciding, which the UI edits as rows of a glob and a
+select (`RulesInput`); a change of a field with a `change_note` asks first and lists the note);
+`RepoTabs` and the module repo fields;
 `Upload` (`single`, `folder`, `accept`, `hint`, `keep` (the globs of the files of a folder that the
 browser sends), `one` and `many` (the words for an item), `note`, `ignored`, `empty`, `fields`,
 `reads` (the globs and `max_bytes` of the files whose first bytes a plan reads)); `Tools` (the
@@ -380,8 +385,11 @@ text}`: the delete plan counts the files of a delete that the glob matches), `fi
 `SnippetTools`, then the titles of the CI providers), `install_heading`, `build_files` (`{extension,
 classifier, label}`: the words for the files of a build, the first match wins; `*` is any, a
 classifier `""` none)). A glob is a repo path pattern: `*` is any run of characters except `/`, `?`
-one character except `/`, `**/` any number of folders; matching is case-sensitive
-(`format.Glob`, and `lib/glob.ts` in the UI).
+one character except `/`, `**/` any number of folders, a last segment `**` any rest of the path
+(`builds/**` is every file under `builds/`, `**` every path); matching is case-sensitive
+(`format.Glob`, `lib/glob.ts` in the UI and `edge/src/glob.ts` in the Worker). A glob that a person
+writes (a rule) passes `format.ValidGlob`: at most 1024 bytes, relative, no empty, `.` or `..`
+segment, no control character.
 
 **Snippets and CI files.** A `format.Snippet` is `{id, tool, purpose, context, via, file, title,
 lang, code, diff, note}`. `diff` is set on a GitHub Actions workflow and a Jenkinsfile: what a
@@ -544,8 +552,10 @@ row outlives a deleted repo and still deletes its pointers (see **Edge delivery*
 
 | Table | Key / indexes | Notes |
 |---|---|---|
-| `edge_outbox` | PK `(repo_id, path)` (WITHOUT ROWID), idx `edge_outbox_due (due_at)`, partial idx `edge_outbox_backfill (repo_id) WHERE backfill = 1`, partial idx `edge_outbox_access (repo_id, due_at) WHERE repo_id = 0` (the access objects in due order) | One row per dirty object. `repo_id` > 0: `path` is an asset path whose pointer the outbox writes or deletes; `repo_id` 0: `path` is the key of an access object or `config.json`. `sha256` is the digest of the commit that wrote the row (`''`: apply the current state); `due_at` (unix ms), `attempts`, `seq` (raised by each new row of the key, so the worker drops only the row it read), `timed_out_at` (unix ms of a put with an unknown outcome, 0 for none), `error`, `backfill` (1: the backfill of every pointer queued the row; a later row of the key keeps it) |
+| `edge_outbox` | PK `(repo_id, path)` (WITHOUT ROWID), idx `edge_outbox_due (due_at)`, partial idx `edge_outbox_backfill (repo_id) WHERE backfill = 1`, partial idx `edge_outbox_access (repo_id, due_at) WHERE repo_id = 0` (the access objects in due order), partial idx `edge_outbox_timed_out (repo_id) WHERE timed_out_at > 0` (the rows of a put of unknown outcome) | One row per dirty object. `repo_id` > 0: `path` is an asset path whose pointer the outbox writes or deletes; `repo_id` 0: `path` is the key of an access object or `config.json`. `sha256` is the digest of the commit that wrote the row (`''`: apply the current state); `due_at` (unix ms), `attempts`, `seq` (raised by each new row of the key, so the worker drops only the row it read), `timed_out_at` (unix ms of a put with an unknown outcome, 0 for none), `error`, `backfill` (1: the backfill of every pointer queued the row; a later row of the key keeps it) |
 | `edge_written` | PK `key` (WITHOUT ROWID) | The access objects and `config.json` in the home bucket: the key under `edge/v1/`, the hex SHA-256 of the JSON written, `written_at` |
+| `edge_paths` | PK `(repo_id, rules)` (WITHOUT ROWID) | For a repo of a format with `EdgeSpec.Paths`: each rule list (`rules`, JSON `[[glob, immutable], ...]`) under which a regional pointer of the repo was written since the last reclass walk ended, with `epoch`, the walk epoch of its last such write (see **Path classes** under **Edge delivery**) |
+| `edge_reclass` | PK `repo_id` | The reclass walk of such a repo: `epoch` (raised at each walk start), `filled` (the rule list that the regional pointers follow; `''` for the format's globs), `walking` (the rule list of the walk that runs, `''` for none) and `cursor` (the last path it did) |
 | `edge_state` | PK `key` (WITHOUT ROWID) | JSON state: `home` (the location fingerprint, without the secret, that the objects were written for, the backfill cursor and counts, home ready, deploy needed and its reason, the gone regions with the end of their drain, and the drain that runs: its end, the old home location without its secret, its regional buckets and the cache time of its off switch), `region:<hint>` (bucket, ready, cleared, the backfill cursor, the blob check cursor and the blobs missing) and `ttl` (the `access_ttl` of the last `config.json` written, and until when a Worker can still hold an earlier one) |
 
 Tables of the `nexus` component (`internal/nexus/migrations`):
@@ -807,7 +817,7 @@ signed-in browser downloads from a private repo without a Basic prompt. A **writ
 | `GET, HEAD, PUT /maven/{repo}/{path...}` | read / write | PUT: 201 new, 200 overwrite or identical retry, 409 changed release, 413 over `max_upload_size`; `If-Match` and `If-None-Match: *` as for raw. Mutable paths are `maven-metadata.xml*` and anything under a `-SNAPSHOT` dir. GET on S3 with `s3.redirect` answers 302 to a presigned URL. HEAD is never redirected |
 | `PUT, POST /debian/{repo}/upload/{dist}/{component}` | write | Raw `.deb` body. 201 `{package,version,architecture,filename,sha256}`, 200 identical, 409 conflict. With `?upload=<id>&sha256=<hex>[&size=<n>]` and no body, it finishes the resumable upload `<id>` of the same publish session (`/api/repos/{name}/uploads`) and adds its file: the same answers, 404 for an unknown, expired or foreign upload, 400 when the bytes do not match (the upload is deleted) |
 | `GET, HEAD /debian/{repo}/{path...}` | read | `dists/...` and `pool/...` through the read path |
-| `GET, HEAD, PUT /raw/{repo}/{path...}` | read / write | PUT: 201 new path; 200 identical bytes (any policy) or a replace when `overwrite` is `allow`; 409 different bytes when `overwrite` is `deny` (default); 413 over `max_upload_size`. `If-None-Match: *`, `If-Match: *` and `If-Match: "<sha256>", ...` make the write conditional: 412 `{error, code: "precondition_failed", etag}` when false, 400 for another condition (see **Preconditions** under **Byte pipeline**); the precondition comes before the overwrite policy. A stored PUT answers `ETag: "<sha256>"`. Repo config: `{"overwrite":"deny"}` or `{"overwrite":"allow"}`. S3 redirect as for Maven |
+| `GET, HEAD, PUT /raw/{repo}/{path...}` | read / write | PUT: 201 new path; 200 identical bytes (any policy) or a replace when the path's policy is `allow`; 409 different bytes when it is `deny`; 413 over `max_upload_size`. The policy of a path is the `overwrite` of the first rule whose glob matches it, else the repo-wide `overwrite` (`deny` by default); a delete is not an overwrite, so `deny` never stops a person with `repo.delete`. `If-None-Match: *`, `If-Match: *` and `If-Match: "<sha256>", ...` make the write conditional: 412 `{error, code: "precondition_failed", etag}` when false, 400 for another condition (see **Preconditions** under **Byte pipeline**); the precondition comes before the overwrite policy. A stored PUT answers `ETag: "<sha256>"`. Repo config: `{"overwrite": "deny"|"allow", "rules": [{"match": "<glob>", "overwrite": "deny"|"allow"}]}`, `rules` optional, at most 100; a rule with a bad glob or policy is 400 naming it (`rule 2 ("/x"): ...`, counted from 1). A rule change applies to the next write. S3 redirect as for Maven |
 | `GET, HEAD /debian/{repo}/key.asc` | read | The armored public signing key of the repo (its repo field `signing_key`). Same read gate as the repo's other files |
 | `/v2/...`, `GET, POST /docker/token`, `GET /docker/hosts` | see **Docker registry** | The OCI registry of the docker format |
 | `GET, HEAD, PUT, DELETE /npm/{repo}/...` | see **npm registry** | The npm registry API of the npm format |
@@ -1982,7 +1992,7 @@ Workers Paid plan), and client URLs do not change: the Worker runs on routes of 
 Two rules shape the design:
 
 - **Consistency before latency.** A path that can change (Maven metadata and snapshots, Debian
-  `dists/` outside `by-hash/`, Docker tags, every raw path) has its pointer in the home bucket only,
+  `dists/` outside `by-hash/`, Docker tags, a raw path under `allow`) has its pointer in the home bucket only,
   so every region reads the same current version. An immutable path has a pointer and a blob in
   every region.
 - **Warm everywhere from the first request.** The server writes every pointer, and the copy Worker
@@ -2010,7 +2020,7 @@ region reads the same version; an immutable path has a pointer and a blob in eve
 | `config.json` | `{server_version, requires: [features], enabled, access_ttl (seconds), edge_key (base64url of the Ed25519 public key), formats: {name: {shape, prefix, immutable, mutable}}, home: {hint, bucket, ready}, regions: [{hint, binding, bucket, ready}]}`; `home.ready`: the outbox wrote every pointer of the backfill; `bucket`: the bucket that the `bucket.json` of the binding must name | home |
 | `bucket.json` | `{hint, bucket}` (`hint` is `home` or the region): the bucket names itself, so the Worker sees a binding to another bucket. The controller writes it into each bucket it uses (again after the wipe of a first start, and once per process start); a region becomes ready only after its `bucket.json` is written | home and each region |
 | `p/<repo id>/<sha256 hex of the path>` | `{repo, path, sha256, sha1, md5, size, ct, mod (unix), kind}`, or `{repo, path, pending: true}` while a write runs | home; also each region for an immutable path |
-| `a/repo/<name>` | `{id, format, kind, anon, private, guarded, members: [names]}`: `private` is `access.Engine.Private`, `guarded` is `access.Engine.Guarded` (a read IP rule, or a guard that is not a `ReadRestricter`). For a redirect name, `{redirect: <repo name>}`: the Worker reads the object of that repo next (one more read on a cache miss) and serves the request as one to that repo, whose name the scopes of a core bearer token carry; a redirect object that names another redirect sends the request to the server. A rename marks the object of the old name, the new name and every redirect of the repo; a repo delete and a removed redirect mark the redirect names | home |
+| `a/repo/<name>` | `{id, format, kind, anon, private, guarded, members: [names], paths?: [[glob, immutable], ...]}`: `paths` (a hosted or proxy repo of a format with `EdgeSpec.Paths`) classifies the repo's paths in place of the format's globs, the first match deciding; `private` is `access.Engine.Private`, `guarded` is `access.Engine.Guarded` (a read IP rule, or a guard that is not a `ReadRestricter`). For a redirect name, `{redirect: <repo name>}`: the Worker reads the object of that repo next (one more read on a cache miss) and serves the request as one to that repo, whose name the scopes of a core bearer token carry; a redirect object that names another redirect sends the request to the server. A rename marks the object of the old name, the new name and every redirect of the repo; a repo delete and a removed redirect mark the redirect names | home |
 | `a/user/<id>` | `{enabled, local, all, read: [repo ids]}`: `all` is a server permission with `AllRepos`, `read` the repos with `repo.download` | home |
 | `a/token/<public id>` | `{id, user, hash (hex SHA-256 of the secret), exp (unix, 0 never)}`; an expired token has none | home |
 | `a/device/<id>` | `{user, exp}`; a revoked or expired device has none | home |
@@ -2035,13 +2045,49 @@ matches an `Immutable` glob and no `Mutable` glob. maven: immutable `**/*`, muta
 `**/_blobs/sha256/*` (tags are mutable); npm: immutable `**/-/*.tgz` (packuments are rendered
 per request and have no pointer, so the Worker sends them to the server); nuget: immutable
 `v3-flatcontainer/*/*/*.nupkg` and `v3-flatcontainer/*/*/*.nuspec` (the documents are rendered per
-request and have no pointer); raw: every path is mutable. A proxy gets a pointer only for a path whose `Classify` class is not `Changing`. A group has no pointers of its own.
+request and have no pointer); raw: `Paths`, a path is immutable when its overwrite policy is `deny`
+(its first matching rule, else the repo-wide `overwrite`), so a repo under the default `deny`
+serves every path from the regions. A proxy gets a pointer only for a path whose `Classify` class is not `Changing`. A group has no pointers of its own.
+
+**Path classes** (`internal/edge/paths.go`). A format with `EdgeSpec.Paths` classifies each repo
+by its config, and the repo object carries the rules (`paths`); the Worker uses them in place of
+the format's globs, and an older Worker ignores them and reads every pointer of the repo from the
+home bucket, which holds them all. A rule change can make an immutable path mutable while a Worker
+holds the old repo object for up to `edge.access_ttl`, and a mutable replace changes only the home
+pointer. So the module keeps one invariant, with no time bound: a regional pointer that is not
+pending holds the bytes of the asset now. Every write of a regional pointer (the outbox, a region
+fill, the walk) first records its rule list in `edge_paths`, under the path lock that it holds
+through the put. The pre-steps (`Replacing`, `Creating`, `Removing`) treat a path as immutable when
+the current rules or any recorded list say so: a replace puts `{pending}` in every bucket, regional
+ones too, and a remove deletes there. The outbox writes regional pointers by the current rules
+only, and deletes the regional pointers of a mutable path that a recorded list makes immutable. So
+a Worker with any repo object, old or new, reads the current pointer, a pending one, or none, and
+the last two go to the server. A group read whose member has `paths` goes to the server.
+
+The job `edge.reclass` walks a repo whose regional pointers do not follow its rules: its rules
+differ from the `filled` ones of `edge_reclass` in what they make immutable (a repo without a row:
+the format's globs, under which every raw path was mutable), or a recorded list is not its current
+one. It runs while edge delivery is on; a repo change notice queues the repo, and the job queues
+every such repo at its start and when edge delivery turns on, so the first start of a server
+version that classifies a format per repo walks each repo whose rules make a path immutable. A walk
+raises the repo's epoch and records the rules it walks with, in one transaction (a walk that runs
+after a restart counts its rules as used in its epoch), and reads the repo's assets by path in
+pages of 500 (the cursor in `edge_reclass`, so it resumes after a restart). Under each path lock it
+puts the regional pointers of a path that its rules make immutable and the `filled` rules did not,
+and deletes the pointers in every bucket but home (the regions and the gone regions) of a path that
+its rules make mutable and the `filled` rules or a recorded list made immutable. At the end it drops
+the recorded lists that no write used since it began (epoch below its own) and sets `filled`, in
+one transaction; while
+a pointer row of the repo has a put of unknown outcome it waits a minute first, since that put may
+still land. A first start, which wipes every bucket, clears both tables and sets `filled` of each
+repo to its current rules, which the backfill writes. A repo delete drops its rows.
 
 **The pointers.** The module's pipeline watcher (see **Byte pipeline**) and the outbox
 (`edge_outbox`) keep them:
 
 1. `Replacing` writes a dirty outbox row (empty digest) in its own transaction, then puts
-   `{pending}` in every bucket for an immutable path, or deletes the home pointer of a mutable one.
+   `{pending}` in every bucket for an immutable path (for a format with `Paths`, immutable under the
+   current rules or a recorded list, see **Path classes**), or deletes the home pointer of a mutable one.
    `Creating` does the same for a new immutable path of a repo that is a member of a group: the
    Worker skips a group member without a pointer, so until the new pointer lands the group read
    goes to the server and never serves a later member's copy.
@@ -2064,7 +2110,11 @@ request and have no pointer); raw: every path is mutable. A proxy gets a pointer
    commit is written again, which leaves the same state. A failed row retries with a backoff up
    to 5 minutes. Writes to one key are spaced by a second (R2 takes one write per second per key),
    the wait outside the lock; a 429 of a pre-step retries for up to 2 s. A put that timed out has
-   an unknown outcome: the row stays and the state is applied once more a minute later.
+   an unknown outcome: the row stays, marked (`timed_out_at`), and the state is applied once more a
+   minute later. A pointer put of a region fill or of the reclass walk that times out gets such a
+   marked row for its path too (`MarkTimedOut`), whose applications write or delete the pointer in
+   every bucket of the view, a filling region included. While any marked row is left, no region
+   becomes ready (`AnyTimedOut`) and no walk of its repo ends (`RepoTimedOut`).
 
 A failed pre-step fails the commit or the remove batch. `Touched` (after `SetTimes`) marks the
 path dirty. Until a pointer lands, the Worker finds none, or a pending one, and passes.
@@ -2104,8 +2154,8 @@ mode of that moment, so an `enabled: true` never lands after the off switch.
   pointer of every immutable path, under the path lock, and the server writes `gap/request.json`
   so the Worker's gap check copies the blobs. When the pointers are done, the server compares the
   home `blobs/` and the regional `blobs/` in key order (a resumable cursor, up to 50 pages of
-  1000 keys per step, every 2 minutes); a pass that finds every blob marks the region ready and
-  rewrites `config.json`. Missing blobs ask for a gap pass again, at most every 30 minutes. A
+  1000 keys per step, every 2 minutes); a pass that finds every blob, with no outbox row of a put
+  of unknown outcome left, marks the region ready and rewrites `config.json`. Missing blobs ask for a gap pass again, at most every 30 minutes. A
   removed region that was never ready leaves `config.json` and gets no writes from then on. A
   removed ready region (a hint taken out of `edge.regions`, or the old bucket of a hint that got
   a new one) is gone: `config.json` is written without it first, then the pre-steps (`{pending}`
@@ -2247,8 +2297,9 @@ behind it.
 `bucket` (read through isolate memory and the Cache API like `config.json`), or the home bucket, by great-circle
 distance from `request.cf` to a fixed point per hint (`wnam` San Francisco, `enam` Ashburn,
 `weur` London, `eeur` Warsaw, `apac` Singapore, `oc` Sydney; the home bucket at
-`edge.home_hint`); without coordinates the home bucket. An immutable path reads its pointer in
-that bucket, a mutable path in the home bucket; the blob is read in that bucket, then in the home
+`edge.home_hint`); without coordinates the home bucket. An immutable path (by the repo object's
+`paths` when it has them, else the format's globs of `config.json`) reads its pointer in that
+bucket, a mutable path in the home bucket; the blob is read in that bucket, then in the home
 bucket.
 
 **The answer** sets what `Reader.ServeAsset` sets on a streamed answer, from the pointer: the
@@ -2524,7 +2575,7 @@ is unreachable.
   same bytes) or `ignored` (not a file of this format).
   - maven (`maven2`): every file at its path, under the format's `Admit`. Identical bytes are
     skipped; a different release file fails; `maven-metadata.xml*` and SNAPSHOT files are replaced.
-  - raw (`raw`): every file at its path. Different bytes fail when the repo denies overwrite.
+  - raw (`raw`): every file at its path. Different bytes fail where the path's policy denies overwrite.
   - debian (`apt`): `pool/**/*.deb` through the Debian commit into component `main` of the repo
     config's `distribution`; the target of a package that the distribution holds already is its
     pool file, so it is skipped without a download. Other files are ignored. A target without
@@ -3767,8 +3818,8 @@ the capabilities of the repo's `format.Spec` that are set.
     `main`), through the normal ingest. The plan reads the first 1 MiB of each `.deb` for its
     control data and names its pool path; a package whose control data lies past it is checked
     when the whole file arrives. Other files are left out; one that does not parse is a problem.
-  - **Raw.** The field `folder` (first value: the open folder), under the repo's overwrite
-    policy. Each file is one item, stored at `folder/<relative path>`.
+  - **Raw.** The field `folder` (first value: the open folder), under the overwrite policy of
+    each path. Each file is one item, stored at `folder/<relative path>`.
 
 ## Network rules
 
@@ -4664,7 +4715,10 @@ and checks the preconditions of a PUT: `If-None-Match: *` creates and then is 41
 `If-Match` on a missing path is 412 with `etag` null, the conditions a write does not take are 400,
 two publish sessions race `If-Match` on one file from the same ETag for 20 rounds (one 200 and one
 412 with the winner's ETag each round), and an `If-Match` that names a file of a `deny` repo still
-gets 409 for other bytes.
+gets 409 for other bytes. Its path rules: in a repo under `allow`, `builds/**` under `deny` keeps a
+build three folders deep (409 for other bytes, 200 for the same) while `latest.json` is replaced; a
+bad glob or policy is 400 naming the rule, 101 rules are 400, and a `PATCH` of the rules applies to
+the next write.
 `TestAPIFormats` covers `/api/formats`, `/status` and `/usage`; `descriptor_test.go` covers the format descriptors (each one well formed) and the CI file route with branches and tags (`TestCIWorkflowRoute`), and the delete plan (`TestDeletePlan`). `TestQueryPlans` runs `dbcheck`
 inside a server container. `migrations_test.go` covers `TestMigrations`, a real upgrade with three builds of the server (`BuildServer`, `BuildServerWith` with an overlay): the tree writes a private raw repo, a user with `repo.download` on it and a file; a build with one more core migration (`0002_e2e_probe.sql`, a new table filled from `repos` and `users`) starts on the same data volume, logs `applied migration` for that file only, and the user reads the file and its grant back; the exported database holds both core rows of `schema_migrations` and the probe rows of the older data; a build whose `0001_init.sql` has another content refuses to start with the sentence that names `core` and the file; the tree refuses the database of the newer build ("core migration 0002"); then the newer build starts on it again and applies nothing. `files_test.go` covers `TestTree`, `TestDelete` (who may delete: `repo.delete` with a publish session or a UI session, file, prefix and Bearer deletes, blobs kept for the blob GC, repo delete and name reuse), `TestManualUploadMaven` (checksums, metadata order, `mvn` resolves the uploaded and the generated pom), `TestManualUploadRaw`, `TestRepoCounters` (`file_count`, `total_size` and `last_published_at` through uploads, a replace, a file delete and a folder delete) and `TestDebianDeleteAndUpload` (the plan of a folder of `.deb` files: a broken one has problems, another file is ignored, the open folder gives the distribution, a bad distribution is a problem of its field; apt sees the package, then not; 4 by-hash files remain). `audit_test.go` covers `TestAudit`: events, filters, paging, no secret values, `activity.read` only, and no IP outside the audit log. `network_test.go` covers `TestClientIP` (with the default an `X-Forwarded-For` from the harness peer is ignored and the peer becomes a proxy candidate; trusting the candidate makes the header count and removes the candidate; `private`: a chain through a private hop, `CF-Connecting-IP` from a non-Cloudflare peer; an untrusted peer's header, an empty list, invalid entries, reset to the default). `TestIPRules` and `TestPresetIPLists` set `trusted_proxies` to `private` first, so `X-Forwarded-For` sets the client address, `TestIPRules` (validation; allowed and refused reads of the format route, tree, assets, usage and status; the repo record stays readable; search drops the repo; refused device and manual mints, PUT and admin delete, each audited with its IP and scope; empty lists lift the rule) and `TestPresetIPLists` (a second Telesphorepo server is the stub: startup fetch, a preset in read rules, a Cloudflare hop in the chain, a failed refresh that keeps the last good list, recovery, and stored lists after a restart without the stub) and `TestCustomIPLists` (create, edit, a rename that keeps the rules and the trusted proxies (by list id), use in rules and in the trusted proxies, delete while in use gives 409, an unknown list id gives 400) and `TestTrustedProxyEnvList` (`TR_TRUSTED_PROXIES` with `list:cloudflare` shows as `env_lists`) and `TestIPRangeParse` (the paste parser: one per line, comma, space, tab and `|` separated, CSV with a header row, tables, comments, labels, quotes, IPv6 and IPv4-mapped IPv6, an unmasked CIDR, duplicates, invalid lines with their numbers, the 1 MiB limit, `network.manage` only). `signing_keys_test.go` covers create, import of plain and encrypted keys, delete while in use gives 409, a per-repo key (the repo field `signing_key`; an unknown key, a key in the config and a key of a raw repo give 400) that `apt` installs from, a key change that signs again, and keys and bindings after a restart. `redirects_test.go` covers `TestRepoRedirects`: a Maven, an npm and a Docker repository renamed, then `mvn deploy`, `npm publish` and `docker push` (Docker in Docker) through the old name with a publish token minted through it, each landing in the renamed repository; the upload event records the old name with `redirect_to`; the redirect lists a last use; create and rename to a redirect's name or a repo's name give 409; a rename back takes the old name again; the catalog lists the images of before the rename under the new name; after Remove the redirect the old name answers 404 and a new repository takes it. `groups_test.go` covers `TestGroups`: a release and a snapshot member resolve through the group with `mvn` and Gradle, the merged `maven-metadata.xml` and its `.sha1`, the member order, a public group with a private member (anonymous and a reader), 405 for a PUT and 409 for a publish session, 400 for a member of another format, a nested group, an unknown name and no member, and a member delete. `groups_files_test.go` covers `TestGroupFiles`: a Maven group of a repository, a proxy of a second Telesphorepo server and a private repository, with a path in both the repository and the proxy; the group tree equals the union of the member trees at three folders and pages through it with limits 1, 3 and 200 without a gap or a duplicate, folders merge, the shared path comes from the repository with its `repo` and checksum (tree and file details), anonymous readers do not see the private member, a bad cursor is 400, and a delete (405), a publish session (409) and a PUT (405) are refused. `cache_control_test.go` covers
 `TestCacheControl`: HEAD, a 304 and a GET of a private Maven repo, of a public group with a
@@ -4813,7 +4867,14 @@ setup-only session, the second step, and a grant that ends a password-only sessi
 `wrangler.jsonc` with `"main": "dist/index.js"`, `"no_bundle": true`, the routes and the buckets
 of the settings; the `wrangler.jsonc` of a checkout has the same routes with `src/index.ts` and
 the define; a server on the local disk answers 409 `edge-not-configured`. No Cloudflare account is
-needed.
+needed. `edge_paths_test.go` covers `TestEdgePathRules`: edge delivery on, on a SeaweedFS home
+bucket and a regional bucket with no Worker in front, and the test reads both buckets. The
+pointers of a raw repo under `deny` are in both, of one under `allow` in home only, and each repo
+object carries its `paths`. A rule that makes `latest.json` replaceable, then a replace while two
+readers watch both buckets: no read after the commit sees the old pointer outside `{pending}`, the
+regional pointer goes and the repo object carries the new rules. A repo turned `deny` gets its
+regional pointer from the walk. While edge delivery drains (only the pre-steps write), a replace of
+a path that the rules no longer keep makes its pointer pending in home and in the region.
 `permissions_test.go` covers `TestServerPermissions` (one subtest per server permission: the
 holder reaches its routes, anyone else gets 403), `TestPipelinesPermission` (the CI pipeline
 scope) and `TestPeoplePicker` (`GET /api/people`). `registries_test.go` covers
@@ -5006,7 +5067,7 @@ Where each part of the code lives, and the steps to add a module, a repo format 
 | Snippets, CI files | `Usage` and `Tools` of the format (`format.CLITool`, `format.CLISnippet`); `internal/ci/workflow.go` (the GitHub Actions, Jenkinsfile and Jenkins freestyle builders, each with the install step of the CLI) |
 | Audit log | `internal/audit` (registry, `Record`), `internal/activity` (module `audit`: `GET /api/audit`), `web/src/pages/server/Activity.svelte` (its time ranges in `activity/range.ts`) |
 | Download statistics | `internal/stats` (the counters), `assets.Reader.SetDownloads` and the count calls of the read path, `internal/activity` (`GET /api/stats`, the jobs), `web/src/pages/settings/overview/DownloadBars.svelte` |
-| Edge delivery | `internal/edge` (module `edge`: `module.go` buckets and routes, `settings.go` the group `edge`, `objects.go` the R2 objects, `watcher.go` the pipeline watcher, `outbox.go` the job `edge.outbox`, `access.go` the access objects, the change notices and `edge.reconcile`, `control.go` the job `edge.backfill` (on, off, draining, regions, blob check), `gap.go` and `seen.go` what the Worker writes, `speedtest.go` the passes and files of the speed test, `wrangler.go`, `api.go` with the download `worker.zip`); `format.Spec.Edge` of each format; the Worker in `edge/` (`src/index.ts` fetch, `shapes.ts`, `glob.ts` the port of `format.Glob`, `access.ts`, `serve.ts`, `copy.ts` queue, `gap.ts` cron, `speedtest.ts` the pass of the speed test, `scripts/provision.ts`); the Worker folder that the server embeds (`internal/edgedist`) and the release archive, both from `tools/task/edge.go`; UI in `web/src/pages/server/EdgeDelivery.svelte` and `web/src/modules/edge/`; e2e of the Worker download in `e2e/edge_test.go`, none of the serving (local R2 differs from R2 in what the edge relies on) |
+| Edge delivery | `internal/edge` (module `edge`: `module.go` buckets and routes, `settings.go` the group `edge`, `objects.go` the R2 objects, `watcher.go` the pipeline watcher, `outbox.go` the job `edge.outbox`, `access.go` the access objects, the change notices and `edge.reconcile`, `control.go` the job `edge.backfill` (on, off, draining, regions, blob check), `paths.go` the path classes of a format with `EdgeSpec.Paths` and the job `edge.reclass`, `gap.go` and `seen.go` what the Worker writes, `speedtest.go` the passes and files of the speed test, `wrangler.go`, `api.go` with the download `worker.zip`); `format.Spec.Edge` of each format; the Worker in `edge/` (`src/index.ts` fetch, `shapes.ts`, `glob.ts` the port of `format.Glob`, `access.ts`, `serve.ts`, `copy.ts` queue, `gap.ts` cron, `speedtest.ts` the pass of the speed test, `scripts/provision.ts`); the Worker folder that the server embeds (`internal/edgedist`) and the release archive, both from `tools/task/edge.go`; UI in `web/src/pages/server/EdgeDelivery.svelte` and `web/src/modules/edge/`; e2e of the Worker download in `e2e/edge_test.go` and of the pointers of path rules in `e2e/edge_paths_test.go`, none of the serving (local R2 differs from R2 in what the edge relies on) |
 | Backups and restore | `internal/backup` (module `backup`: `backup.go` one backup, `list.go` the list and the retention, `restore.go`, `offline.go` the source of the CLI, `module.go` settings, job and routes), the core queries in `internal/db/queries/backup.sql`, `db.VacuumInto` and `db.OpenReadOnly`, the commands in `cmd/telesphorepo-server/backup.go`, `web/src/pages/server/Backups.svelte` and `web/src/modules/backup/`; e2e in `e2e/backup_test.go` |
 | Storage move (FS ↔ S3) | `internal/move` (module `storage`: service, copier, `module.go`), `internal/storage/mirror.go`, `web/src/pages/server/Storage.svelte` |
 | Single sign-on | `internal/oidc` (module `sso`: sign-in, the permission map, device approval), `web/src/pages/server/SingleSignOn.svelte` |

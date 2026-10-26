@@ -77,13 +77,17 @@ func (w watcher) Replacing(ctx context.Context, repo *repos.Repo, prev []*assets
 	if !v.writing() || es == nil {
 		return nil
 	}
+	guard, err := m.guardOf(ctx, repo)
+	if err != nil {
+		return err
+	}
 	var paths, pending, gone []string
 	for _, a := range prev {
 		if !m.eligible(repo, a.Path) {
 			continue
 		}
 		paths = append(paths, a.Path)
-		if es.IsImmutable(a.Path) {
+		if guard(a.Path) {
 			pending = append(pending, a.Path)
 		} else {
 			gone = append(gone, pointerKey(repo.ID, a.Path))
@@ -126,9 +130,13 @@ func (w watcher) Creating(ctx context.Context, repo *repos.Repo, paths []string)
 	if !v.writing() || es == nil || len(m.h.Repos.GroupsOf(repo.ID)) == 0 {
 		return nil
 	}
+	guard, err := m.guardOf(ctx, repo)
+	if err != nil {
+		return err
+	}
 	var pending []string
 	for _, p := range paths {
-		if es.IsImmutable(p) && m.eligible(repo, p) {
+		if guard(p) && m.eligible(repo, p) {
 			pending = append(pending, p)
 		}
 	}
@@ -185,6 +193,10 @@ func (w watcher) Removing(ctx context.Context, repo *repos.Repo, paths []string)
 	if !v.writing() || es == nil || len(paths) == 0 {
 		return nil
 	}
+	guard, err := m.guardOf(ctx, repo)
+	if err != nil {
+		return err
+	}
 	if v.mode == modeOn {
 		if err := m.dirty(ctx, repo.ID, paths); err != nil {
 			return err
@@ -194,11 +206,11 @@ func (w watcher) Removing(ctx context.Context, repo *repos.Repo, paths []string)
 	var immutable []string
 	for i, p := range paths {
 		all[i] = pointerKey(repo.ID, p)
-		if es.IsImmutable(p) {
+		if guard(p) {
 			immutable = append(immutable, all[i])
 		}
 	}
-	err := parallel(8, v.pre(), func(b *bucket) error {
+	err = parallel(8, v.pre(), func(b *bucket) error {
 		keys := all
 		if b != v.home {
 			keys = immutable

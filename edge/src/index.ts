@@ -27,7 +27,7 @@ import {
 import { CHECK_PATH, check } from "./check";
 import { copy } from "./copy";
 import { gap } from "./gap";
-import { immutable } from "./glob";
+import { immutable, immutableBy } from "./glob";
 import { type Pointer, parsePointer, serve } from "./serve";
 import { OVERRIDE_HEADER, PASS_HEADER, REGION_HEADER, type Override, parseOverride, passValid } from "./speedtest";
 import { parseTarget } from "./shapes";
@@ -267,7 +267,10 @@ async function edge(request: Request, env: Env, ctx: ExecutionContext, override:
     }
   }
 
-  const imm = immutable(target.path, target.format.immutable, target.format.mutable);
+  // A repo object with paths classifies its own paths (the overwrite rules of raw).
+  const imm = repo.paths
+    ? immutableBy(target.path, repo.paths)
+    : immutable(target.path, target.format.immutable, target.format.mutable);
   const home: Bucket = { hint: config.homeHint, r2: env.HOME };
   const at = imm ? near : home; // the bucket of the pointer
 
@@ -334,7 +337,8 @@ async function groupPointer(
   const members = await limited(group.members, 6, (name) => repoObject(objects, name));
   const readable: RepoObject[] = [];
   for (const m of members) {
-    if (!m || m.format !== format || m.kind === "group" || m.guarded) return null;
+    // A member that classifies its own paths may keep the path in another bucket.
+    if (!m || m.format !== format || m.kind === "group" || m.guarded || m.paths) return null;
     if (mayRead(r, m, false)) readable.push(m);
   }
   const lookups = await limited(readable, 6, (m) => pointer(env, at.r2, m, path));
