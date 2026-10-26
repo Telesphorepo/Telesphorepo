@@ -158,6 +158,10 @@ func TestScale(t *testing.T) {
 	if base := []rune(path.Base(sample.Path)); len([]rune(common)) < 3 && len(base) >= 3 {
 		common = string(base[:3])
 	}
+	// shared is the artifact folder of the sample (com/example/libN/). Every seeded Maven repo
+	// holds it with a version per 1,000 rows, so its rarest segment (libN) holds fewer than the
+	// first probe of a search counts to at 100k, and more at 1M: the second probe decides there.
+	shared := path.Dir(path.Dir(sample.Path)) + "/"
 
 	ops := []scaleOp{
 		{name: "maven-get", path: func(*scaleServer) string { return "/maven/" + mvn + "/" + sample.Path },
@@ -187,6 +191,7 @@ func TestScale(t *testing.T) {
 			}},
 		{name: "search-rare", path: func(*scaleServer) string { return "/api/search?limit=50&q=" + url.QueryEscape(sample.Path) }, ok: []int{http.StatusOK}},
 		{name: "search-common", path: func(*scaleServer) string { return "/api/search?limit=50&q=" + url.QueryEscape(common) }, ok: []int{http.StatusOK}},
+		{name: "search-shared", path: func(*scaleServer) string { return "/api/search?limit=50&q=" + url.QueryEscape(shared) }, ok: []int{http.StatusOK}},
 		{name: "token-auth", path: func(*scaleServer) string { return "/api/me" }, ok: []int{http.StatusOK}},
 		{name: "repo-page", path: func(*scaleServer) string { return "/api/repos?limit=50" }, ok: []int{http.StatusOK}},
 	}
@@ -203,11 +208,13 @@ func TestScale(t *testing.T) {
 		if _, _, err := scaleDo(s, other, false); err != nil {
 			t.Fatalf("a host that is no repo domain at %s: %v", s.name, err)
 		}
-		if b := scaleGet(t, s, "/api/search?limit=50&q="+url.QueryEscape(sample.Path)); !strings.Contains(string(b), sample.Path) {
-			t.Fatalf("search for %q at %s does not find it: %s", sample.Path, s.name, b)
+		for _, q := range []string{ops[3].path(s), ops[5].path(s)} { // search-rare and search-shared
+			if b := scaleGet(t, s, q); !strings.Contains(string(b), sample.Path) {
+				t.Fatalf("%s at %s does not find %q: %s", q, s.name, sample.Path, b)
+			}
 		}
 	}
-	t.Logf("maven repo %s, sample %s at every size, common term %q", mvn, sample.Path, common)
+	t.Logf("maven repo %s, sample %s at every size, common term %q, shared folder %q", mvn, sample.Path, common, shared)
 
 	// Warm-up. Go compiles ahead of time, so there is no JIT to warm; what the first requests pay
 	// for is cold state: the page cache of each SQLite reader connection, the OS file cache and
