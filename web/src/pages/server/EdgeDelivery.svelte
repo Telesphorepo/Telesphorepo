@@ -278,9 +278,13 @@
   const TOKEN_POLICIES = [
     {
       scope: "Entire Account",
-      permissions: ["Developer Platform › Workers: Admin", "Developer Platform › Workers R2 Storage: Edit", "Developer Platform › Queues: Edit"],
+      permissions: [
+        "Developer Platform › Workers: Admin (Editor cannot create the Worker)",
+        "Developer Platform › Workers R2 Storage: Edit",
+        "Developer Platform › Queues: Edit",
+      ],
     },
-    { scope: "All Domains", permissions: ["Developer Platform › Workers Routes: Edit", "DNS & Zones › Zone: Read"] },
+    { scope: "All Domains, or the domains of the routes", permissions: ["Developer Platform › Workers Routes: Edit", "DNS & Zones › Zone: Read"] },
   ];
   let deployError = $state("");
   let deployStarting = $state(false);
@@ -605,18 +609,7 @@
         {/if}
       {/snippet}
       <div class="flex flex-col gap-6">
-        <div class="flex flex-col gap-2">
-          <Segmented bind:value={() => deployWay, (v) => (pickedWay = v as DeployWay)} options={DEPLOY_WAYS} label="How to deploy" />
-          <p class="text-meta text-muted-foreground">
-            {#if deployWay === "server"}
-              The server creates the regional buckets, the queue and its notification rule, uploads the Worker and sets its routes, with an API token of your
-              Cloudflare account. It deploys again on its own when something changes.
-            {:else}
-              You download the Worker and run wrangler in its folder. Run provision and deploy again after a region change, and deploy the Worker of each server
-              release.
-            {/if}
-          </p>
-        </div>
+        <Segmented bind:value={() => deployWay, (v) => (pickedWay = v as DeployWay)} options={DEPLOY_WAYS} label="How to deploy" compact />
 
         {#if outdated}
           <p class="text-body">
@@ -672,56 +665,36 @@
             </div>
           {/if}
 
-          <ol class="flex flex-col gap-5">
-            <li class="flex gap-3">
-              <span class="w-4 shrink-0 text-section text-muted-foreground tabular-nums">1</span>
-              <div class="flex min-w-0 grow flex-col gap-2 text-body text-muted-foreground">
-                <p class="text-label text-foreground">Create an API token in Cloudflare</p>
-                <p>
-                  In the Cloudflare account of the R2 buckets, open Manage account › Account API tokens, select Create Token, then Custom, and add two permission
-                  policies:
-                </p>
-                <div>{@render tokenPolicies()}</div>
-                <p>
-                  Workers needs Admin, not Editor: the first deploy creates the Worker. In place of All Domains, the domains of the base URL host and of each repository
-                  domain will do. The server reads the account from the S3 endpoint of the storage settings.
-                </p>
-              </div>
-            </li>
-            <li class="flex gap-3">
-              <span class="w-4 shrink-0 text-section text-muted-foreground tabular-nums">2</span>
-              <div class="flex min-w-0 grow flex-col gap-2">
-                <p class="text-label">Paste the token here and save</p>
-                <FormGrid>
-                  <FormRow label="Cloudflare API token" for="edge-token" help={lockHelp("edge.cloudflare_token")}>
-                    <SecretInput
-                      id="edge-token"
-                      set={dep?.token_set === true}
-                      change={draft.value.token}
-                      onchange={(v) => (draft!.value.token = v)}
-                      disabled={locked("edge.cloudflare_token")}
-                      describedby="edge-token-help"
-                    />
-                  </FormRow>
-                  <SwitchRow
-                    id="edge-auto"
-                    label="Deploy on its own"
-                    help={lockHelp("edge.auto_deploy") ??
-                      "Deploys again after a change of the regions, the repository domains, the storage location or the server version, and when the Worker is outdated."}
-                    disabled={locked("edge.auto_deploy") || !tokenSet}
-                    bind:checked={draft.value.auto}
-                  />
-                </FormGrid>
-              </div>
-            </li>
-            <li class="flex gap-3">
-              <span class="w-4 shrink-0 text-section text-muted-foreground tabular-nums">3</span>
-              <div class="flex min-w-0 grow flex-col gap-2">
-                <p class="text-label">Select Deploy now</p>
-                <p class="text-meta text-muted-foreground">Find it at the top of this section once the token is saved.</p>
-              </div>
-            </li>
-          </ol>
+          {#if dep?.token_set}
+            {@render tokenFields()}
+          {:else}
+            <ol class="flex flex-col gap-5">
+              <li class="flex gap-3">
+                <span class="w-4 shrink-0 text-section text-muted-foreground tabular-nums">1</span>
+                <div class="flex min-w-0 grow flex-col gap-2 text-body text-muted-foreground">
+                  <p class="text-label text-foreground">Create an API token in Cloudflare</p>
+                  <p>In the account of the R2 buckets: Manage account › Account API tokens › Create Token › Custom, with two policies.</p>
+                  <div class="grid gap-x-6 gap-y-2 sm:grid-cols-2">{@render tokenPolicies()}</div>
+                </div>
+              </li>
+              <li class="flex gap-3">
+                <span class="w-4 shrink-0 text-section text-muted-foreground tabular-nums">2</span>
+                <div class="flex min-w-0 grow flex-col gap-2">
+                  <p class="text-label">Paste the token here and save</p>
+                  {@render tokenFields()}
+                </div>
+              </li>
+              <li class="flex gap-3">
+                <span class="w-4 shrink-0 text-section text-muted-foreground tabular-nums">3</span>
+                <div class="flex min-w-0 grow flex-col gap-2">
+                  <p class="text-label">Deploy</p>
+                  <div>
+                    <Button variant="outline" size="sm" disabled title="Save the token first"><UploadCloudIcon aria-hidden="true" />Deploy now</Button>
+                  </div>
+                </div>
+              </li>
+            </ol>
+          {/if}
         {/if}
       </div>
     </Section>
@@ -732,11 +705,39 @@
 
 {#snippet tokenPolicies()}
   {#each TOKEN_POLICIES as policy (policy.scope)}
-    <p class="mt-2">{policy.scope}</p>
-    <ul class="mt-1 list-disc pl-5">
-      {#each policy.permissions as p (p)}<li>{p}</li>{/each}
-    </ul>
+    <div>
+      <p class="text-label text-foreground">{policy.scope}</p>
+      <ul class="mt-1 list-disc pl-5">
+        {#each policy.permissions as p (p)}<li>{p}</li>{/each}
+      </ul>
+    </div>
   {/each}
+{/snippet}
+
+{#snippet tokenFields()}
+  {@const dep = status.data?.deploy}
+  {@const tokenSet = dep?.token_set === true && draft?.value.token !== null}
+  {#if draft}
+    <FormGrid>
+      <FormRow label="Cloudflare API token" for="edge-token" help={lockHelp("edge.cloudflare_token")}>
+        <SecretInput
+          id="edge-token"
+          set={dep?.token_set === true}
+          change={draft.value.token}
+          onchange={(v) => (draft!.value.token = v)}
+          disabled={locked("edge.cloudflare_token")}
+          describedby="edge-token-help"
+        />
+      </FormRow>
+      <SwitchRow
+        id="edge-auto"
+        label="Deploy on its own"
+        help={lockHelp("edge.auto_deploy") ?? "After a change of the regions, the repository domains, the storage location or the server version."}
+        disabled={locked("edge.auto_deploy") || !tokenSet}
+        bind:checked={draft.value.auto}
+      />
+    </FormGrid>
+  {/if}
 {/snippet}
 
 {#snippet manualSteps()}
@@ -784,10 +785,6 @@
         <span class="w-4 shrink-0 text-section text-muted-foreground tabular-nums">4</span>
         <div class="flex min-w-0 grow flex-col gap-2">
           <CodeSnippet label="Sign in to Cloudflare" value="bunx wrangler login" />
-          <p class="text-meta text-muted-foreground">
-            In CI, set CLOUDFLARE_API_TOKEN instead, an account API token with these permission policies:
-          </p>
-          {@render tokenPolicies()}
         </div>
       </li>
       <li class="flex gap-3">
