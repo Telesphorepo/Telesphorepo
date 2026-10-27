@@ -168,7 +168,7 @@ func warmMaven(ctx context.Context) error {
 	var err error
 	for attempt := 1; attempt <= 3; attempt++ {
 		ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-		out, err = osexec.CommandContext(ctx, Engine.CLI, "run", "--rm", "--label", "telesphorepo.e2e=1",
+		out, err = osexec.CommandContext(ctx, Engine.CLI, "run", "--rm", "--label", "telesphorepo.e2e=1", "--log-driver", "json-file",
 			"-v", M2Volume+":/root/.m2/repository", "-e", "MAVEN_OPTS="+mavenFileLocks,
 			mavenImage, "sh", "-c", script.String()).CombinedOutput()
 		cancel()
