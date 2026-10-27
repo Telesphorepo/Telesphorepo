@@ -29,7 +29,7 @@ Set up a project once, with the line from the Publish tab of the repository:
 
 Then publish, in the project folder:
   telesphorepo publish
-  telesphorepo publish dist/app.zip        (raw, Debian, Arch and NuGet repositories)
+  telesphorepo publish dist/app.zip        (raw, Debian, Arch, RPM and NuGet repositories)
 
 Commands:
   setup LINK          set up the project of this folder from a setup line
@@ -63,6 +63,7 @@ The device name defaults to the host name of the computer.
   telesphorepo publish dist/app.zip build/app.tar.gz   (a raw repository)
   telesphorepo publish build/hello_1.0_amd64.deb       (a Debian repository)
   telesphorepo publish hello-1.0-1-x86_64.pkg.tar.zst  (an Arch repository)
+  telesphorepo publish hello-1.0-1.x86_64.rpm          (an RPM repository)
   telesphorepo publish bin/Release/Acme.Lib.1.0.0.nupkg (a NuGet repository)
   telesphorepo publish dist/app-1.0-py3-none-any.whl   (a PyPI repository, without a build)
 
@@ -77,6 +78,7 @@ its repository, and runs the publish command of the project with the token in th
   raw      uploads each FILE into the folder "path" of telesphorepo.toml
   Debian   uploads each .deb to "dist" and "component" of telesphorepo.toml
   Arch     uploads each .pkg.tar.zst; the server reads its name, version and architecture
+  RPM      uploads each .rpm; the server reads its name, version and architecture, and signs it
   .NET     dotnet pack -c Release, then pushes each package; with FILEs it pushes those .nupkg
   Python   poetry build ([tool.poetry]), uv build (uv.lock) or python -m build, then uploads
            each wheel and sdist

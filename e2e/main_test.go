@@ -19,6 +19,7 @@ import (
 	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/ProtonMail/go-crypto/openpgp/armor"
 	"github.com/ProtonMail/go-crypto/openpgp/packet"
+	"github.com/moby/moby/api/types/container"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/network"
 
@@ -108,6 +109,19 @@ func runMain(m *testing.M) int {
 // e2eLabels marks every container and network of a run. Tests remove their own at the end; a run
 // that is killed cannot, and rootless Podman has no Ryuk to do it, so the next run removes them.
 var e2eLabels = map[string]string{"telesphorepo.e2e": "1"}
+
+// e2eContainer is the option every container of a run starts with: e2eLabels, and a log kept in a
+// file (json-file; Podman's k8s-file). Podman's default log driver, journald, drops a unit's lines
+// past 10,000 in 30 s, and all containers of a rootless run share one unit, so a full zone lost
+// the log lines that tests wait for and read.
+var e2eContainer testcontainers.CustomizeRequestOption = func(req *testcontainers.GenericContainerRequest) error {
+	if err := testcontainers.WithLabels(e2eLabels)(req); err != nil {
+		return err
+	}
+	return testcontainers.WithHostConfigModifier(func(hc *container.HostConfig) {
+		hc.LogConfig = container.LogConfig{Type: "json-file"}
+	})(req)
+}
 
 // dataVolumePrefix is the prefix of the volumes that NewDataVolume names with RandName.
 const dataVolumePrefix = "telesphorepo-data"

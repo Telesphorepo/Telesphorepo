@@ -247,7 +247,7 @@ func startClient(t testing.TB, image string, opts ClientOpts) *clientRun {
 		mounts = append(mounts, testcontainers.VolumeMount(vol, testcontainers.ContainerMountTarget(target)))
 	}
 	c, err := testcontainers.Run(context.Background(), image,
-		testcontainers.WithLabels(e2eLabels),
+		e2eContainer,
 		testcontainers.WithEntrypoint("sh", "-c"),
 		// One stream: the container log does not keep the order of stdout and stderr.
 		testcontainers.WithCmd("exec 2>&1; "+strings.Join(opts.Cmd, " ")),

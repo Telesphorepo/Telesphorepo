@@ -67,7 +67,7 @@ func startJenkins(t testing.TB, audience string, env map[string]string) *jenkins
 		all[k] = v
 	}
 	c, err := testcontainers.Run(context.Background(), jenkinsImage,
-		testcontainers.WithLabels(e2eLabels),
+		e2eContainer,
 		testcontainers.WithEnv(all),
 		testcontainers.WithMounts(testcontainers.VolumeMount(M2Volume, "/root/.m2/repository")),
 		network.WithNetwork([]string{alias}, TestNetwork),

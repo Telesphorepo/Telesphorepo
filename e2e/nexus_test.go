@@ -54,7 +54,7 @@ func StartNexus(t *testing.T) *Nexus {
 	ctx := context.Background()
 	alias := RandName("nexus")
 	c, err := runContainer(ctx, nexusImage,
-		testcontainers.WithLabels(e2eLabels),
+		e2eContainer,
 		testcontainers.WithEnv(map[string]string{
 			"INSTALL4J_ADD_VM_PARAMS": "-Xms1g -Xmx1g -XX:MaxDirectMemorySize=1g -Djava.util.prefs.userRoot=/nexus-data/javaprefs",
 		}),
@@ -1382,6 +1382,7 @@ func TestNexus(t *testing.T) {
 		// A nuget repo, through a source of its own.
 		t.Run("nuget", func(t *testing.T) { nexusNuGet(t, n, s) })
 		t.Run("pypi", func(t *testing.T) { nexusPyPI(t, n, s) })
+		t.Run("yum", func(t *testing.T) { nexusYum(t, n, s) })
 		// A switch-over of one repository, rehearsal repositories, and the switch-over of everything.
 		t.Run("switch-over", func(t *testing.T) { nexusSwitchOver(t, n, s, opts.S3) })
 		// A move project by project into a new repository, then its merges.

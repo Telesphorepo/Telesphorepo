@@ -312,14 +312,19 @@ func uploadDebian(j *job) error {
 }
 
 // uploadArch uploads each FILE (a .pkg.tar.zst, .pkg.tar.xz or .pkg.tar.gz) to the Arch repo of the
-// project file: a PUT of the file, or for a large file the resumable upload routes, which the
-// upload route then finishes. The server reads the name, version and architecture from the
-// package, signs it, and rebuilds the indexes once after the last upload.
-func uploadArch(j *job) error {
+// project file, and uploadRPM each .rpm to the RPM repo: a PUT of the file, or for a large file the
+// resumable upload routes, which the upload route then finishes. The server reads the name,
+// version and architecture from the package, signs it, and rebuilds the indexes once after the
+// last upload.
+func uploadArch(j *job) error { return uploadPackages(j, "arch") }
+
+func uploadRPM(j *job) error { return uploadPackages(j, "rpm") }
+
+func uploadPackages(j *job, format string) error {
 	if err := openFiles(j.files); err != nil {
 		return err
 	}
-	p := "/arch/" + url.PathEscape(j.p.Repo) + "/upload"
+	p := "/" + format + "/" + url.PathEscape(j.p.Repo) + "/upload"
 	return j.uploadEach(j.files, func(j *job, f string) (string, error) {
 		st, err := os.Stat(f)
 		if err != nil {

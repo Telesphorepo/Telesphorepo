@@ -108,6 +108,7 @@ func (kc *Keycloak) Start(t testing.TB, redirectURI string) {
 		network.WithNetwork([]string{kc.Alias}, TestNetwork),
 		testcontainers.WithWaitStrategyAndDeadline(3*time.Minute, wait.ForHTTP("/realms/"+kcRealm+"/.well-known/openid-configuration").
 			WithPort(portSpec).WithStartupTimeout(3*time.Minute)),
+		e2eContainer,
 	)
 	registerCleanup(t, c, "keycloak "+kc.Alias)
 	if err != nil {

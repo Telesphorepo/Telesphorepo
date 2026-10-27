@@ -170,6 +170,15 @@ func (s *Signer) SignSHA256State(state []byte) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
+// SigningKeyID returns the key ID of the key that SignSHA256State signs with, 0 when there is none.
+func (s *Signer) SigningKeyID() uint64 {
+	k, ok := s.entity.SigningKey(time.Now())
+	if !ok || k.PrivateKey == nil {
+		return 0
+	}
+	return k.PrivateKey.KeyId
+}
+
 // PublicKeyArmored returns the armored public key block.
 func (s *Signer) PublicKeyArmored() []byte { return s.pub }
 

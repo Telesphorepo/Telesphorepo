@@ -132,7 +132,7 @@ func StartServer(t testing.TB, opts ServerOpts) *Server {
 	}
 
 	c, err := runContainer(ctx, ServerImage,
-		testcontainers.WithLabels(e2eLabels),
+		e2eContainer,
 		testcontainers.WithEnv(env),
 		testcontainers.WithExposedPorts("8080/tcp"),
 		testcontainers.WithFiles(files...),
@@ -1007,7 +1007,7 @@ func runSeaweed(ctx context.Context, alias string) (*testcontainers.DockerContai
 	}
 	s3conf := fmt.Sprintf(`{"identities":[{"name":"e2e","credentials":[{"accessKey":%q,"secretKey":%q}],"actions":["Admin","Read","Write","List","Tagging"]}]}`, seaweedAccess, seaweedSecret)
 	c, err := runContainer(ctx, img,
-		testcontainers.WithLabels(e2eLabels),
+		e2eContainer,
 		// Each test bucket is a SeaweedFS collection, and a collection grows 7 volumes on its first
 		// write. The default of 8 volumes (of 30 GB each) runs out after a few buckets, and later
 		// writes answer 500 "no free volumes left". Small volumes and a high limit fit a whole run.
@@ -1296,7 +1296,7 @@ func RunClientResult(t testing.TB, image string, opts ClientOpts) *ClientResult 
 		}),
 		testcontainers.WithWaitStrategyAndDeadline(opts.Timeout, wait.ForExit()),
 	)
-	c, err := testcontainers.Run(ctx, image, append(customizers, testcontainers.WithLabels(e2eLabels))...)
+	c, err := testcontainers.Run(ctx, image, append(customizers, e2eContainer)...)
 	registerCleanup(t, c, "client "+image)
 	if err != nil {
 		out := ""

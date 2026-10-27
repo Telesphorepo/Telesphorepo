@@ -37,7 +37,9 @@ type formatJSON struct {
 	RemotePresets []format.RemotePreset `json:"remote_presets"`
 	ProxyNote     string                `json:"proxy_note,omitempty"`
 	PublicKey     string                `json:"public_key,omitempty"`
-	Labels        labelsJSON            `json:"labels"`
+	KeyChange     string                `json:"key_change,omitempty"`
+	KeyNote       string                `json:"key_note,omitempty"`
+	Labels       labelsJSON            `json:"labels"`
 	ImportSources []string              `json:"import_sources"`
 	Tools         []toolJSON            `json:"tools"`
 	// Publish is the publish category: "cli" (telesphorepo publish in the project folder) or
@@ -111,7 +113,7 @@ func (a *API) formatOf(f *format.Spec) formatJSON {
 		RepoFields:  map[string][]string{},
 		RepoTabs:    nonNil(f.RepoTabs),
 		DeleteNotes: f.UI.DeleteNotes, FileDetails: f.UI.FileDetails, RemotePresets: f.UI.RemotePresets,
-		ProxyNote: f.UI.ProxyNote, PublicKey: f.UI.PublicKey,
+		ProxyNote: f.UI.ProxyNote, PublicKey: f.UI.PublicKey, KeyChange: f.UI.KeyChange, KeyNote: f.UI.KeyNote,
 		Browse: browseJSON{Versions: f.Versions != nil, ArtifactSnippets: f.ArtifactUsage != nil},
 		Labels: labelsJSON{ArtifactKinds: f.UI.ArtifactKinds, ArtifactName: f.UI.ArtifactName, Tools: a.toolLabels(f),
 			InstallHeading: f.UI.InstallHeading, BuildFiles: f.UI.BuildFiles},

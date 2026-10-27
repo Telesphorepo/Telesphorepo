@@ -50,7 +50,7 @@ func registryHost(s *Server) string { return s.Alias + ":8080" }
 func startCaddy(t *testing.T, conf, what string, aliases ...string) {
 	t.Helper()
 	c, err := runContainer(context.Background(), caddyImage,
-		testcontainers.WithLabels(e2eLabels),
+		e2eContainer,
 		testcontainers.WithFiles(testcontainers.ContainerFile{Reader: strings.NewReader(conf), ContainerFilePath: "/etc/caddy/Caddyfile", FileMode: 0o644}),
 		testcontainers.WithExposedPorts("8080/tcp"),
 		network.WithNetwork(aliases, TestNetwork),
@@ -168,7 +168,7 @@ func warmMaven(ctx context.Context) error {
 	var err error
 	for attempt := 1; attempt <= 3; attempt++ {
 		ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-		out, err = osexec.CommandContext(ctx, Engine.CLI, "run", "--rm", "--label", "telesphorepo.e2e=1",
+		out, err = osexec.CommandContext(ctx, Engine.CLI, "run", "--rm", "--label", "telesphorepo.e2e=1", "--log-driver", "json-file",
 			"-v", M2Volume+":/root/.m2/repository", "-e", "MAVEN_OPTS="+mavenFileLocks,
 			mavenImage, "sh", "-c", script.String()).CombinedOutput()
 		cancel()
@@ -325,7 +325,7 @@ func StartDindArgs(t testing.TB, args ...string) *Dind {
 	t.Helper()
 	alias := RandName("dind")
 	c, err := testcontainers.Run(context.Background(), dindImage,
-		testcontainers.WithLabels(e2eLabels),
+		e2eContainer,
 		testcontainers.WithEnv(map[string]string{"DOCKER_TLS_CERTDIR": ""}),
 		testcontainers.WithCmd(args...),
 		testcontainers.WithHostConfigModifier(func(hc *container.HostConfig) { hc.Privileged = true }),

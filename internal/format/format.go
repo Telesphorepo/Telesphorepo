@@ -76,6 +76,10 @@ type Spec struct {
 	// rows changed, with the repo before and after; a rename (repos.Service.Rename) runs it too,
 	// with the old and the new name.
 	OnRepoChange func(ctx context.Context, tx *sql.Tx, old, new *repos.Repo) error
+	// OnRepoCreate runs in the transaction of a repo create (API and Nexus mapping), after the
+	// rows were written, e.g. to mark the first build of an index that clients need before the
+	// first upload.
+	OnRepoCreate func(ctx context.Context, tx *sql.Tx, repo *repos.Repo) error
 
 	// Classify tells the proxy how to cache a path of proxy repo repo, whose remote is remote (the
 	// repo config is repo.Config); ok=false refuses the path (404).
@@ -501,6 +505,14 @@ func (r *Registry) RebuildRun(name string) rebuild.Run {
 func (r *Registry) OnRepoChange(ctx context.Context, tx *sql.Tx, old, new *repos.Repo) error {
 	if s := r.byName[new.Format]; s != nil && s.OnRepoChange != nil {
 		return s.OnRepoChange(ctx, tx, old, new)
+	}
+	return nil
+}
+
+// OnRepoCreate runs the OnRepoCreate of the format of repo (repos.Service.SetCreateHook).
+func (r *Registry) OnRepoCreate(ctx context.Context, tx *sql.Tx, repo *repos.Repo) error {
+	if s := r.byName[repo.Format]; s != nil && s.OnRepoCreate != nil {
+		return s.OnRepoCreate(ctx, tx, repo)
 	}
 	return nil
 }

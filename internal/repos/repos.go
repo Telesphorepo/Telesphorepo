@@ -70,6 +70,10 @@ type KindCheck func(format, kind string) error
 // format's OnRepoChange.
 type ChangeHook func(ctx context.Context, tx *sql.Tx, old, new *Repo) error
 
+// CreateHook runs inside the transaction of a repo create, after the rows were written: the
+// format's OnRepoCreate.
+type CreateHook func(ctx context.Context, tx *sql.Tx, repo *Repo) error
+
 type Service struct {
 	db       *db.DB
 	validate Validator
@@ -77,6 +81,7 @@ type Service struct {
 	seal     Sealer
 	audit    *audit.Log
 	onChange ChangeHook
+	onCreate CreateHook
 
 	// The in-memory copy of the group members and the proxy remotes (see kinds.go). Request
 	// paths read it; every change writes the database first and then this copy.
@@ -166,6 +171,10 @@ func (s *Service) SetAudit(a *audit.Log) { s.audit = a }
 // SetChangeHook sets the hook that every update runs in its transaction (the format's
 // OnRepoChange).
 func (s *Service) SetChangeHook(fn ChangeHook) { s.onChange = fn }
+
+// SetCreateHook sets the hook that every create runs in its transaction (the format's
+// OnRepoCreate).
+func (s *Service) SetCreateHook(fn CreateHook) { s.onCreate = fn }
 
 // New returns the repo service. validate checks formats and configs in Create and Update, and
 // kinds the kind of a new proxy or group; with a nil validate (offline commands that only read
@@ -429,6 +438,11 @@ func (s *Service) Create(ctx context.Context, in Create) (*Repo, error) {
 				return err
 			}
 			detail["remote_url"] = in.Proxy.RemoteURL
+		}
+		if s.onCreate != nil {
+			if err := s.onCreate(ctx, tx, repo); err != nil {
+				return err
+			}
 		}
 		return s.record(ctx, tx, audit.RepoCreate, repo, detail)
 	})

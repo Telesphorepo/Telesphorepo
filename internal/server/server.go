@@ -420,6 +420,7 @@ func kernel(base context.Context, d *db.DB, boot *config.Boot, set *settings.Ser
 	rs.SetSealer(set) // proxy credentials are sealed with the master key
 	rs.SetAudit(au)
 	rs.SetChangeHook(b.Formats.OnRepoChange)
+	rs.SetCreateHook(b.Formats.OnRepoCreate)
 	if bad, err := rs.Load(base); err != nil {
 		return nil, err
 	} else if len(bad) > 0 {

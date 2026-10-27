@@ -135,6 +135,7 @@ func debProxyApt(t *testing.T, s *Server, repo, key string) string {
 func TestProxy(t *testing.T) {
 	t.Parallel()
 	debs := buildDebPackages(t)
+	rpms := buildRPMPackages(t)
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		// The remote is a second server on the fs store, so its access log shows each request
 		// the proxy makes.
@@ -360,6 +361,22 @@ func TestProxy(t *testing.T) {
 		pm.MustExec(t, "pacman through the proxy", "pacman -Sy --noconfirm e2e-proxied && pacman -Q e2e-proxied")
 		if resp, _ := s.Do(t, s.NewRequest(t, http.MethodGet, "/arch/"+archProxy+"/key.asc", nil), nil); resp.StatusCode != http.StatusNotFound {
 			t.Fatalf("GET the key of an Arch proxy: status %d, want 404", resp.StatusCode)
+		}
+
+		// RPM: dnf installs through the proxy with the remote repo's key; the proxy has none.
+		upRPM := RandName("upstream-rpm")
+		remote.CreateRepo(t, upRPM, "rpm", true, nil)
+		remote.SetPerms(t, upRPM, uploader, "repo.download", "repo.publish")
+		rpmMustUpload(t, remote, upRPM, rpms.data, remote.PublishAuth(t, uploader, upRPM), "e2e-data", "1.0.0-1", "noarch")
+		remote.WaitDebianIndexed(t, upRPM)
+		rpmProxy := RandName("rpm-proxy")
+		s.CreateProxy(t, rpmProxy, "rpm", true, map[string]any{"remote_url": remote.InternalURL + "/rpm/" + upRPM + "/"}, false)
+		dn := StartDnf(t, fedoraImage)
+		dn.Trust(t, rpmProxy, remote.RPMKey(t, upRPM, nil))
+		dn.AddRepo(t, rpmProxy, rpmBaseURL(s, rpmProxy), "", "")
+		dn.MustExec(t, "dnf through the proxy", "dnf -y install e2e-data && e2e-data")
+		if resp, _ := s.Do(t, s.NewRequest(t, http.MethodGet, "/rpm/"+rpmProxy+"/key.asc", nil), nil); resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("GET the key of an RPM proxy: status %d, want 404", resp.StatusCode)
 		}
 
 		// The remote stops: a cached file still serves, an uncached one answers 502, and the

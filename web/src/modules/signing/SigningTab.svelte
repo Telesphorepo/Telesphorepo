@@ -3,8 +3,10 @@
   the key that signs the indexes of this repository. Clients check the indexes with its public
   key, which the format serves at the path public_key of its descriptor. The person with Edit
   settings picks another key, or with Signing keys creates a new one for this repository; the
-  server then signs the indexes of this repository again. The change form is its own
-  confirmation step: it asks before it changes the key.
+  server then signs the indexes of this repository again (and for a format whose descriptor has
+  key_change, more: an RPM repo writes every package again, which the confirmation names with the
+  repository's size). The change form is its own confirmation step: it asks before it changes the
+  key. The format's key_note says which keys its clients can check.
 -->
 <script lang="ts">
   import { toast } from "svelte-sonner";
@@ -14,7 +16,7 @@
   import { Resource } from "$lib/load.svelte";
   import { href } from "$lib/router.svelte";
   import { auth } from "$lib/auth.svelte";
-  import { groupFingerprint } from "$lib/format";
+  import { formatSize, groupFingerprint } from "$lib/format";
   import { Button } from "$lib/components/ui/button";
   import FormSection from "$lib/components/FormSection.svelte";
   import FormGrid from "$lib/components/FormGrid.svelte";
@@ -36,6 +38,11 @@
   const currentName = $derived(typeof repo.fields.signing_key === "string" ? repo.fields.signing_key : "");
   const current = $derived(keys.data?.find((k) => k.name === currentName));
   const keyPath = $derived(formats.get(repo.format)?.public_key ?? "");
+  const keyNote = $derived(formats.get(repo.format)?.key_note ?? "");
+  // A format whose key change rewrites more than the indexes says what, with the repo's size.
+  const keyChange = $derived(
+    (formats.get(repo.format)?.key_change ?? "").replaceAll("{repo}", repo.name).replaceAll("{size}", formatSize(repo.total_size)),
+  );
   const keyURL = $derived(
     keyPath ? `${(usage.data?.base_url || location.origin).replace(/\/+$/, "")}/${repo.format}/${encodeURIComponent(repo.name)}/${keyPath}` : "",
   );
@@ -68,7 +75,7 @@
       <div class="mb-6"><ErrorState inline error="{currentName} cannot sign: {current.error}" /></div>
     {/if}
     <FormGrid>
-      <FormRow label="Key" for="{id}-name" help={current ? (sharedWith.length ? `This key also signs ${sharedWith.join(", ")}.` : `This key signs only ${repo.name}.`) : undefined}>
+      <FormRow label="Key" for="{id}-name" help={[current ? (sharedWith.length ? `This key also signs ${sharedWith.join(", ")}.` : `This key signs only ${repo.name}.`) : "", keyNote].filter(Boolean).join(" ") || undefined}>
         <div id="{id}-name" class="flex min-h-9 items-center text-body font-medium">{currentName}</div>
       </FormRow>
       {#if current}
@@ -105,6 +112,7 @@
   changes={[
     ...(choice.mode === "new" ? [`Creates the signing key ${target}`] : []),
     `Signs the indexes of ${repo.name} again with ${target}`,
+    ...(keyChange ? [keyChange] : []),
     `Clients refuse the indexes until each machine trusts the new public key${keyURL ? ` from ${keyURL}` : ""}`,
     `Other repositories keep their keys`,
   ]}
