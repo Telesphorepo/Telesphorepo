@@ -267,6 +267,7 @@ func (m *mod) closeView() { m.cur.Store(&view{}) }
 func (m *mod) step(ctx context.Context) (bool, error) {
 	m.stMu.Lock()
 	defer m.stMu.Unlock()
+	m.checkToken(ctx)
 	if err := m.sync(ctx); err != nil {
 		return false, err
 	}

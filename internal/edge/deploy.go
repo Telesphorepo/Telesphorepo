@@ -460,7 +460,7 @@ func (m *mod) runOne(ctx context.Context, trigger string) {
 	} else {
 		g, _ := m.gap.Load().(*gapState)
 		outdated := g != nil && g.Version != "" && m.outdated(g.Features) != ""
-		r := &deployRun{m: m, p: p, c: &cfClient{base: cfAPI, token: CloudflareToken.Get(snap)}, prev: prev.Zones}
+		r := &deployRun{m: m, p: p, c: &cfClient{base: cfAPI, token: CloudflareToken.Get(snap)}, prev: prev.Zones, tok: m.tokenNow(ctx, snap)}
 		err := r.run(ctx)
 		st.Changed = r.changed
 		if r.routed {
@@ -530,7 +530,8 @@ type deployRun struct {
 	zones   map[string]zoneRef // route host -> its zone
 	queueID string
 	changed []string
-	routed  bool // the routes match the wanted ones
+	routed  bool       // the routes match the wanted ones
+	tok     *tokenJSON // the check of the token at the start of the deploy (nil without one)
 }
 
 // acct is the path of the account.
@@ -562,7 +563,9 @@ func (r *deployRun) fail(step, what string, err error) error {
 	case ce.Status == http.StatusUnauthorized:
 		msg += " Cloudflare does not accept the token: set a valid API token under Edge delivery."
 	case ce.Status == http.StatusForbidden || ce.has(10000):
-		if p := stepPerm[step]; p != "" {
+		if miss := tokenMissing(r.tok, step); len(miss) > 0 {
+			msg += " The token lacks " + strings.Join(miss, ", and ") + ". Edit the token in the Cloudflare dashboard, add it, and deploy again."
+		} else if p := stepPerm[step]; p != "" {
 			msg += " The token lacks a permission: this step needs " + p + ". Edit the token in the Cloudflare dashboard, add it, and deploy again."
 		} else {
 			msg += " The token lacks a permission for this call."

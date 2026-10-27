@@ -5,7 +5,9 @@
   last deploy shows with its failed step, Cloudflare's error and what it changed; and on its own
   while "Deploy on its own" is on), or From a computer: the download of the Worker folder (with the
   generated wrangler.jsonc in it) and the commands to run there; the wrangler.jsonc for a checkout
-  of the repository behind a disclosure.
+  of the repository behind a disclosure. Under From this server, Token shows the server's last check
+  of the token: each permission of the deploy and of the pointer cache present, missing, or not
+  provable, and the read permission that a full check needs when the token lacks it.
   One Draft holds the home region, the regions with their buckets, the on switch, the access
   lifetime, the token and the auto-deploy switch; Save checks every bucket first (the Test of the settings group), asks before the server
   stops writing to a bucket, and then saves. Each region is a card with its state, its Serve from
@@ -31,6 +33,8 @@
     type EdgeRegionState,
     type EdgeRegionStatus,
     type EdgeStatus,
+    type EdgeToken,
+    type EdgeTokenPermission,
     type Setting,
     type SettingsPatch,
   } from "$lib/api";
@@ -282,6 +286,7 @@
         "Developer Platform › Workers: Admin (Editor cannot create the Worker)",
         "Developer Platform › Workers R2 Storage: Edit",
         "Developer Platform › Queues: Edit",
+        "Account & Billing › Account API Tokens: Read (for the full check of the token)",
       ],
     },
     {
@@ -293,6 +298,16 @@
       ],
     },
   ];
+  // The check of the token: each permission present, missing, or not provable.
+  const PERM_WORD: Record<EdgeTokenPermission["state"], string> = { present: "Present", missing: "Missing", unproven: "Not provable" };
+  const PERM_TONE: Record<EdgeTokenPermission["state"], Tone> = { present: "success", missing: "danger", unproven: "warning" };
+  function tokenVerdict(t: EdgeToken): { word: string; tone: Tone } {
+    if (t.problem) return { word: "Not usable", tone: "danger" };
+    const needed = t.permissions.filter((p) => !p.optional);
+    if (needed.some((p) => p.state === "missing")) return { word: "Missing permissions", tone: "danger" };
+    if (needed.some((p) => p.state === "unproven")) return { word: "Partly checked", tone: "warning" };
+    return { word: "Ready to deploy", tone: "success" };
+  }
   let deployError = $state("");
   let deployStarting = $state(false);
   const deploying = $derived(deployStarting || status.data?.deploy.running === true);
@@ -684,6 +699,8 @@
             </div>
           {/if}
 
+          {#if st?.token}{@render tokenCheck(st.token)}{/if}
+
           {#if dep?.token_set}
             {@render tokenFields()}
           {:else}
@@ -731,6 +748,42 @@
       </ul>
     </div>
   {/each}
+{/snippet}
+
+{#snippet tokenCheck(t: EdgeToken)}
+  <div class="flex flex-col gap-1">
+    <p class="text-meta text-muted-foreground">Token</p>
+    {#if !t.checked_at}
+      <p class="text-label">{t.running ? "Checking" : "Not checked yet"}</p>
+    {:else}
+      {@const v = tokenVerdict(t)}
+      <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <StatusBadge tone={v.tone}>{v.word}</StatusBadge>
+        <span class="text-meta text-muted-foreground">Checked <RelativeTime at={t.checked_at} />{t.running ? ", checking again" : ""}</span>
+      </div>
+      {#if t.problem}<p class="text-body text-destructive">{t.problem}</p>{/if}
+      {#if t.expires_on}<p class="text-meta text-muted-foreground">Expires <RelativeTime at={t.expires_on} />.</p>{/if}
+      {#if t.permissions.length > 0}
+        <ul class="mt-1 flex flex-col gap-2">
+          {#each t.permissions as p (p.key)}
+            <li class="flex min-w-0 flex-col gap-0.5">
+              <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <StatusBadge tone={p.optional && p.state !== "present" ? "neutral" : PERM_TONE[p.state]}>{PERM_WORD[p.state]}</StatusBadge>
+                <span class="text-label">{p.name}</span>
+                {#if p.optional}<span class="text-meta text-muted-foreground">Optional, for the pointer cache</span>{/if}
+              </div>
+              {#if p.state !== "present"}<p class="text-meta break-words text-muted-foreground">{p.why}</p>{/if}
+            </li>
+          {/each}
+        </ul>
+      {/if}
+      {#if t.read_missing}
+        <p class="mt-1 text-body">Add {t.read_missing} for a full check.</p>
+      {:else if t.exact_why && !t.problem}
+        <p class="mt-1 text-meta break-words text-muted-foreground">{t.exact_why}</p>
+      {/if}
+    {/if}
+  </div>
 {/snippet}
 
 {#snippet tokenFields()}

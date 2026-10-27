@@ -79,7 +79,7 @@ var (
 		}})
 	CloudflareToken = settings.String(&settings.Def{Key: "edge.cloudflare_token", Secret: true, Label: "Cloudflare API token",
 		Normalize: settings.Trim,
-		Help:      "An API token of the Cloudflare account of the R2 buckets. With it, the server deploys the edge Worker itself: the regional buckets, the copy queue, its notification rule, the Worker, its cron and its routes. Create it in Manage account › Account API tokens (Create Token, then Custom) with a policy of the Entire Account holding Developer Platform › Workers: Admin, Workers R2 Storage: Edit and Queues: Edit, and a policy of All Domains (or the domain of each route host) holding Developer Platform › Workers Routes: Edit and DNS & Zones › Zone: Read. Add Cache & Performance › Cache: Purge to that policy and the Worker caches the pointers of the files that cannot change: the server purges a cached pointer by its tag before it replaces or removes its file, once it has seen such a purge remove a probe entry on every route host. Without it the Worker reads every pointer in R2."})
+		Help:      "An API token of the Cloudflare account of the R2 buckets. With it, the server deploys the edge Worker itself: the regional buckets, the copy queue, its notification rule, the Worker, its cron and its routes. Create it in Manage account › Account API tokens (Create Token, then Custom) with a policy of the Entire Account holding Developer Platform › Workers: Admin, Workers R2 Storage: Edit and Queues: Edit, and a policy of All Domains (or the domain of each route host) holding Developer Platform › Workers Routes: Edit and DNS & Zones › Zone: Read. Add Cache & Performance › Cache: Purge to that policy and the Worker caches the pointers of the files that cannot change: the server purges a cached pointer by its tag before it replaces or removes its file, once it has seen such a purge remove a probe entry on every route host. Without it the Worker reads every pointer in R2. The server checks the token's permissions on save, at start, every hour and before each deploy, and the Edge delivery page lists what is missing. With Account & Billing › Account API Tokens: Read in the Entire Account policy (User › API Tokens: Read for a user token) the check reads the token's own policies; without it the check shows only what harmless reads prove."})
 	AutoDeploy = settings.Bool(&settings.Def{Key: "edge.auto_deploy", Default: "true", Label: "Deploy on its own",
 		Help: "With a Cloudflare API token, the server deploys the Worker again when the regions, the repository domains, the storage location or the server version change, or when the deployed Worker is outdated."})
 )
@@ -236,6 +236,30 @@ func (m *mod) test(ctx context.Context, d *settings.Draft) error {
 	if len(regionMsgs) > 0 {
 		fields[Regions.Name()] = strings.Join(regionMsgs, "; ")
 		msgs = append(msgs, regionMsgs...)
+	}
+	// A new token is checked before it is saved: refused when Cloudflare refuses it or when it lacks
+	// a permission of the deploy.
+	if t := CloudflareToken.Get(d.Next); t != "" && t != CloudflareToken.Get(m.h.Settings.Current()) && account != "" {
+		in := m.tokenInputOf(d.Next)
+		res, done := m.tokenCheck(ctx, in)
+		m.keepToken(in.key, res, done)
+		var lacks []string
+		for _, p := range res.Permissions {
+			if !p.Optional && p.State == permMissing {
+				lacks = append(lacks, p.Name)
+			}
+		}
+		msg := ""
+		switch {
+		case done && res.Problem != "":
+			msg = res.Problem
+		case len(lacks) > 0:
+			msg = "The token lacks " + strings.Join(lacks, ", ") + ", which the deploy needs. Add them to the token in Cloudflare and save again."
+		}
+		if msg != "" {
+			fields[CloudflareToken.Name()] = msg
+			msgs = append(msgs, msg)
+		}
 	}
 	if len(msgs) > 0 {
 		return &settings.HookError{Status: http.StatusBadRequest, Message: "edge test failed: " + strings.Join(msgs, "; "), Fields: fields}

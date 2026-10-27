@@ -789,6 +789,28 @@ export type EdgeStatus = {
   deploy: EdgeDeploy;
   /** The Worker's cache of the pointers of files that cannot change, while edge delivery is on. ttl in seconds; why: why it is off ("" before the first check). */
   pointer_cache: { on: boolean; ttl: number; why: string };
+  /** The last check of the Cloudflare API token's permissions; null without a token or an R2 endpoint. */
+  token: EdgeToken | null;
+};
+/** One permission of the token check: present, missing, or unproven (a read went through, or the check could not tell). */
+export type EdgeTokenPermission = { key: string; name: string; optional: boolean; state: "present" | "missing" | "unproven"; why: string };
+/** The check of the Cloudflare API token (part of GET /api/edge/status). */
+export type EdgeToken = {
+  /** null before the first check of this token. */
+  checked_at: string | null;
+  running: boolean;
+  /** account or user; "" when Cloudflare took the token as neither. */
+  kind: "account" | "user" | "";
+  /** The token's own policies were read. */
+  exact: boolean;
+  /** The permission that the exact check lacks; "" when it ran or failed for another reason. */
+  read_missing: string;
+  /** Why the exact check did not run; "" when it ran. */
+  exact_why: string;
+  /** The token itself fails (refused, disabled, expired, no answer); "" otherwise. */
+  problem: string;
+  expires_on: string | null;
+  permissions: EdgeTokenPermission[];
 };
 /** The steps of a deploy of the Worker from the server, in order. */
 export type EdgeDeployStep = "verify" | "zones" | "buckets" | "queue" | "notification" | "upload" | "consumer" | "triggers" | "routes" | "check";

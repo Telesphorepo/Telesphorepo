@@ -23,7 +23,8 @@ The server can deploy the Worker itself, with no computer in between:
    Account API tokens**, select **Create Token**, then **Custom**, and add two permission
    policies:
    - **Entire Account:** Developer Platform › Workers: **Admin**, Developer Platform › Workers R2
-     Storage: **Edit**, Developer Platform › Queues: **Edit**
+     Storage: **Edit**, Developer Platform › Queues: **Edit**, and for the full check of the token,
+     Account & Billing › Account API Tokens: **Read**
    - **All Domains** (or the domains of the base URL host and of each repository domain):
      Developer Platform › Workers Routes: **Edit**, DNS & Zones › Zone: **Read**, and to cache
      pointers at the edge, Cache & Performance › Cache: **Purge**
@@ -35,6 +36,12 @@ The server can deploy the Worker itself, with no computer in between:
    cache on only after it saw a tag purge remove a probe entry that the Worker cached on each of
    your hosts; without the permission, or when the purge did not remove the probe, the Worker reads
    every pointer in R2. The Edge delivery page says whether the pointer cache is on, and why not.
+
+   The server checks the token when you save it (it refuses a token that Cloudflare refuses or
+   that lacks a permission of the deploy), at start, every hour and before each deploy, and the
+   Deploy section lists each permission as present, missing or not provable. With Account API
+   Tokens: Read the server reads the token's own policies and knows exactly what is missing;
+   without it, only harmless reads, which show read access but cannot prove Edit.
 2. In **Settings › Edge delivery**, choose the home region and the regions to serve from, set the
    token in the Deploy section, and save.
 3. Select **Deploy now**.

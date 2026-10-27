@@ -2720,7 +2720,9 @@ Cloudflare's token form names them: the Entire Account with Developer Platform �
 Queues: Edit; and All Domains, or the domain of each route host, with Developer Platform ›
 Workers Routes: Edit and DNS & Zones › Zone: Read (Cloudflare's API reference names Edit
 "Write"), and Cache & Performance › Cache: Purge for the pointer cache (**The pointer cache**), which the
-deploy does not need. The UI, the setting's help and a permission refusal of each step name them so. The steps, each reading first and changing only
+deploy does not need. Account & Billing › Account API Tokens: Read in the Entire Account policy (User
+› API Tokens: Read for a user token) lets the check of the token (below) read the token's own
+policies; the deploy does not need it. The UI, the setting's help and a permission refusal of each step name them so. The steps, each reading first and changing only
 what differs:
 
 | Step | Calls |
@@ -2738,7 +2740,8 @@ what differs:
 
 A failure names the step in words, the call (method and path with the IDs, never the token), the
 HTTP status, Cloudflare's `errors[].code` and `message` with their `error_chain`, and what to do: a
-401 says the token is invalid; a 403 (or error 10000) names the permission of the step; a zone
+401 says the token is invalid; a 403 (or error 10000) names the permission of the step, or the
+permission that the check of the token at the start of the deploy found missing, with why; a zone
 outside the account names the host and the same-account rule; a 429 waits for its `Retry-After`
 (up to 2 minutes, three times; longer, the job waits that long); a 5xx or no answer is sent again
 twice for a call that is not a `POST`. Each call has a 30 s timeout (2 minutes for the upload), a
@@ -2754,6 +2757,40 @@ start: when the wanted hash differs from the deployed one (a region, a domain, t
 location, a new server version) or the Worker of the last gap check is outdated (once per wanted
 state). A failure waits 1 minute, doubling to 1 hour; a settings change drops the wait. A removed
 region's bucket stays (delete it in Cloudflare). Every deploy records `edge.deploy`.
+
+**The check of the token** (`internal/edge/token.go`). With a token and an R2 endpoint, the server
+checks which permissions of the deploy and of the pointer cache the token holds: on a save of a new
+token (the group's Test, which refuses a token that Cloudflare refuses, that is disabled or
+expired, or that lacks a required permission), at start, every hour (10 minutes after a check
+that got no answer), when the token, the account or the route hosts change (the controller's
+step), and at the start of each deploy. The last result lives in memory and is `token` of
+`GET /api/edge/status` (`null` without a token): `{checked_at, running, kind (account|user),
+exact, read_missing, exact_why, problem, expires_on, permissions: [{key, name, optional, state
+(present|missing|unproven), why}]}`.
+
+- *Verify.* The verify (the calls of the `verify` step) answers the token's `id` and whether it is an account
+  or a user token; a refusal of both, or a status other than `active`, is the `problem`.
+- *Exact check.* `GET /accounts/{account}/tokens/{id}` (account token) or `GET /user/tokens/{id}`
+  (user token) answers the token's `status`, `expires_on`, `not_before` and `policies`. A
+  permission is present when an `allow` policy holds one of its permission groups, matched by ID
+  (Cloudflare calls the names cosmetic), on a resource that covers it, and no `deny` policy holding
+  it covers the same resource (Cloudflare checks a deny first). An account permission needs
+  `com.cloudflare.api.account.<account>` (or `.*`) with `"*"`; a zone permission needs, on the
+  zone of every route host, `com.cloudflare.api.account.zone.<zone>` or `.zone.*` with `"*"`, or
+  either nested under the account key. The groups: Workers Scripts Write
+  (`e086da7e2179491d91ee5f35b3ca210a`) for Workers: Admin, Workers R2 Storage Write
+  (`bf7481a1826f439697cb59a20b22293e`), Queues Write (`366f57075ffc42689627bcf8242a1b6d`), Workers
+  Routes Write (`28f4b596e7d643029c524985477ae49a`), Zone Read
+  (`c8fed203ed3043cba015a93ad1616f1f`) and Cache Purge (`e17beae8b8cb423a99b1730f21238bed`). A
+  refused read of the details (401, 403 or error 10000) names the read permission as
+  `read_missing`, and the page asks to add it for a full check.
+- *Probes.* Without the exact check, for a permission that it finds missing (a group this server
+  does not know, such as a Workers role, may grant it), and always for Cache: Purge: a list of the
+  Workers scripts, of the R2 buckets and of the queues, the deploy's lookup of the zone of each route
+  host, a list of the routes of each zone, and a purge of an unused tag on each zone. A refused read
+  is `missing`; a read that went through is `unproven` ("read access seen, Edit not provable"); the
+  zone lookups prove Zone: Read and a purge proves Cache: Purge (`present`). An exact `missing`
+  whose read went through turns `unproven`. The proof of the pointer cache stays as it is.
 
 **The contract.** The Worker serves by the features it implements, never by the server version,
 so a server release needs no Worker deploy unless it uses a feature that the deployed Worker
@@ -5023,7 +5060,12 @@ page are in `web/src/README.md`.
   its tooltip, or until a changed token is saved); the last deploy from the server: the step that
   runs while it runs (the page asks for the status every 2 seconds then), else Deployed or Failed
   with when, the failed step in words, the error, Cloudflare's call and codes, when the job tries
-  again, and what the deploy changed; the `unfit` sentence; and the token (a `SecretInput`) and
+  again, and what the deploy changed; the `unfit` sentence; Token, the last check of the token
+  (**The check of the token**): a verdict badge (Ready to deploy, Partly checked, Missing
+  permissions, Not usable) with when it ran, the token's problem and expiry, each permission by its
+  name in Cloudflare's token form as Present, Missing or Not provable (the optional Cache: Purge
+  in a neutral tone) with why unless present, and "Add <read permission> for a full check" when the
+  token cannot read its own policies; and the token (a `SecretInput`) and
   "Deploy on its own" (`edge.auto_deploy`, off without a token), both fields of the page's Draft.
   While no token is saved, those fields are step 2 of three numbered steps: create the API token
   in Cloudflare (where, and the two permission policies side by side), paste it and save, and
@@ -5611,7 +5653,7 @@ Where each part of the code lives, and the steps to add a module, a repo format 
 | Download statistics | `internal/stats` (the counters), `assets.Reader.SetDownloads` and the count calls of the read path, `internal/activity` (`GET /api/stats`, the jobs), `web/src/pages/settings/overview/DownloadBars.svelte` |
 | Arch Linux (pacman) | `internal/arch` (module `arch`: `arch.go` the routes, `ServedPath` and `Classify`, `pkg.go` the parse of a package and its `desc`, `upload.go` the ingest, `Admit`, `OnCommitted` and the web UI upload, `index.go` the rebuild (indexes, `fill`, `sign`), `delete.go`, `order.go` the version key, `versions.go`, `usage.go` the snippets and the package details, `api.go`, `demo.go`, `seed.go`); `pacmanPath` in `edge/src/shapes.ts`; UI part `web/src/modules/arch/`; e2e in `e2e/arch_test.go`, `e2e/arch_helpers_test.go` (nfpm builds, the `Pacman` container), the Arch proxy in `TestProxy` and the CLI in `TestCLIUpload` |
 | RPM (dnf) | `internal/rpm` (module `rpm`: `rpm.go` the routes, `Classify` and the create and change hooks, `header.go` the header format, `pkg.go` the read of a package, `render.go` its repodata parts, `sign.go` and `assemble.go` the signed file, `upload.go` the ingest, `Admit` and `OnCommitted`, `repodata.go` the XML, `index.go` the rebuild (repodata, `sign`), `delete.go`, `order.go` the version key, `versions.go`, `usage.go` the snippets, `api.go`, `importer.go` the Nexus yum import, `writer.go` the packages of the demo, `demo.go`, `seed.go`); UI part `web/src/modules/rpm/`; e2e in `e2e/rpm_test.go`, `e2e/rpm_helpers_test.go` (nfpm builds, the `Dnf` container, `goRPM`), the RPM proxy in `TestProxy`, the CLI in `TestCLIUpload` and `e2e/nexus_yum_test.go` |
-| Edge delivery | `internal/edge` (module `edge`: `module.go` buckets and routes, `settings.go` the group `edge`, `objects.go` the R2 objects, `watcher.go` the pipeline watcher, `outbox.go` the job `edge.outbox`, `access.go` the access objects, the change notices and `edge.reconcile`, `control.go` the job `edge.backfill` (on, off, draining, regions, blob check), `paths.go` the path classes of a format with `EdgeSpec.Paths` and the job `edge.reclass`, `gap.go` and `seen.go` what the Worker writes, `speedtest.go` the passes and files of the speed test, `deploy.go` the deploy from the server and the job `edge.deploy`, `cloudflare.go` its client of the Cloudflare API, `wrangler.go`, `api.go` with the download `worker.zip`); `format.Spec.Edge` of each format; the Worker in `edge/` (`src/index.ts` fetch, `shapes.ts`, `glob.ts` the port of `format.Glob`, `access.ts`, `serve.ts`, `copy.ts` queue, `gap.ts` cron, `speedtest.ts` the pass of the speed test, `scripts/provision.ts`); the Worker folder that the server embeds (`internal/edgedist`) and the release archive, both from `tools/task/edge.go`; UI in `web/src/pages/server/EdgeDelivery.svelte` and `web/src/modules/edge/`; e2e of the Worker download in `e2e/edge_test.go` and of the pointers of path rules in `e2e/edge_paths_test.go`, of the deploy from the server without a Cloudflare account in `e2e/edge_deploy_test.go`, none of the serving (local R2 differs from R2 in what the edge relies on) |
+| Edge delivery | `internal/edge` (module `edge`: `module.go` buckets and routes, `settings.go` the group `edge`, `objects.go` the R2 objects, `watcher.go` the pipeline watcher, `outbox.go` the job `edge.outbox`, `access.go` the access objects, the change notices and `edge.reconcile`, `control.go` the job `edge.backfill` (on, off, draining, regions, blob check), `paths.go` the path classes of a format with `EdgeSpec.Paths` and the job `edge.reclass`, `gap.go` and `seen.go` what the Worker writes, `speedtest.go` the passes and files of the speed test, `deploy.go` the deploy from the server and the job `edge.deploy`, `cloudflare.go` its client of the Cloudflare API, `token.go` the check of the token's permissions, `wrangler.go`, `api.go` with the download `worker.zip`); `format.Spec.Edge` of each format; the Worker in `edge/` (`src/index.ts` fetch, `shapes.ts`, `glob.ts` the port of `format.Glob`, `access.ts`, `serve.ts`, `copy.ts` queue, `gap.ts` cron, `speedtest.ts` the pass of the speed test, `scripts/provision.ts`); the Worker folder that the server embeds (`internal/edgedist`) and the release archive, both from `tools/task/edge.go`; UI in `web/src/pages/server/EdgeDelivery.svelte` and `web/src/modules/edge/`; e2e of the Worker download in `e2e/edge_test.go` and of the pointers of path rules in `e2e/edge_paths_test.go`, of the deploy from the server without a Cloudflare account in `e2e/edge_deploy_test.go`, none of the serving (local R2 differs from R2 in what the edge relies on) |
 | Backups and restore | `internal/backup` (module `backup`: `backup.go` one backup, `list.go` the list and the retention, `restore.go`, `offline.go` the source of the CLI, `module.go` settings, job and routes), the core queries in `internal/db/queries/backup.sql`, `db.VacuumInto` and `db.OpenReadOnly`, the commands in `cmd/telesphorepo-server/backup.go`, `web/src/pages/server/Backups.svelte` and `web/src/modules/backup/`; e2e in `e2e/backup_test.go` |
 | Storage move (FS ↔ S3) | `internal/move` (module `storage`: service, copier, `module.go`), `internal/storage/mirror.go`, `web/src/pages/server/Storage.svelte` |
 | Single sign-on | `internal/oidc` (module `sso`: sign-in, the permission map, device approval), `web/src/pages/server/SingleSignOn.svelte` |
