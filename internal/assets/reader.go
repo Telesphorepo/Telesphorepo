@@ -502,7 +502,8 @@ func checksumHeaders(w http.ResponseWriter, sha256, sha1, md5 string) {
 }
 
 // ServeAsset answers a GET or HEAD of a with its checksum headers. A GET redirects to a presigned
-// URL of the blob when the store has one (s3.redirect) and opts allows it: the URL signs the
+// URL of the blob when the store has one (s3.redirect), opts allows it and the request has no
+// If-Modified-Since: the URL signs the
 // response content type and disposition of a, so each path of a shared blob gets its own.
 // Otherwise it streams the blob. A request for one byte range answers 206 with that range on
 // every store.
@@ -522,7 +523,10 @@ func (rd *Reader) ServeAsset(w http.ResponseWriter, r *http.Request, a *Asset, o
 	}
 	key := blobs.Key(a.SHA256)
 	st := rd.p.blobs.Storage()
-	if !opts.NoRedirect {
+	// A GET with If-Modified-Since that gets here has a file newer than the client's copy. The store
+	// would judge the same header by the blob's date, which is older when the path holds bytes it
+	// held before (a pacman index back to an earlier state), and answer 304: so it streams.
+	if !opts.NoRedirect && r.Header.Get("If-Modified-Since") == "" {
 		// The presigned URL ends in the blob key, so the disposition names the file: else a
 		// browser saves the download under the SHA-256.
 		kind := "attachment"
