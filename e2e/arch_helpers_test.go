@@ -169,7 +169,7 @@ LocalFileSigLevel = Optional
 func StartPacman(t testing.TB) *Pacman {
 	t.Helper()
 	c, err := testcontainers.Run(context.Background(), archImage,
-		testcontainers.WithLabels(e2eLabels),
+		e2eContainer,
 		testcontainers.WithEntrypoint("sleep", "infinity"),
 		network.WithNetwork(nil, TestNetwork),
 		testcontainers.WithWaitStrategyAndDeadline(2*time.Minute, wait.ForExec([]string{"true"})),

@@ -5206,7 +5206,9 @@ the container zones (`e2e`, `import`, `clients`). The scale and macOS zones run 
 as a process of the computer and share `native_test.go` (tags `scale` and `macos`). Each test
 removes its containers when it ends. Every container and the run network carry the label
 `telesphorepo.e2e`, and each run first removes what a killed run left: labelled containers and
-networks, and the `telesphorepo-data-*` volumes.
+networks, and the `telesphorepo-data-*` volumes. Every container logs to a file (`json-file`, Podman's
+`k8s-file`): journald, Podman's default, drops a unit's lines past 10,000 in 30 s, and the tests read
+the server's access log.
 | Zone | Tag | Command | Contents |
 |---|---|---|---|
 | core | `e2e` | `go tool task test` | Formats (the Docker registry with Docker in Docker too), auth, API, settings, storage move, query plans, the listener protocols |

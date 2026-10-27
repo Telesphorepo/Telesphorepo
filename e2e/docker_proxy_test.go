@@ -105,7 +105,7 @@ func distributionRemote(t *testing.T) *proxyRemote {
 	}
 	alias := RandName("reg")
 	c, err := runContainer(ctx, distributionImage,
-		testcontainers.WithLabels(e2eLabels),
+		e2eContainer,
 		testcontainers.WithEnv(map[string]string{
 			"REGISTRY_AUTH": "htpasswd", "REGISTRY_AUTH_HTPASSWD_REALM": "e2e", "REGISTRY_AUTH_HTPASSWD_PATH": "/auth/htpasswd",
 		}),

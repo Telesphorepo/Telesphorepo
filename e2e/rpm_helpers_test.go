@@ -237,7 +237,7 @@ type Dnf struct{ c testcontainers.Container }
 func StartDnf(t testing.TB, image string) *Dnf {
 	t.Helper()
 	c, err := testcontainers.Run(context.Background(), image,
-		testcontainers.WithLabels(e2eLabels),
+		e2eContainer,
 		testcontainers.WithEntrypoint("sleep", "infinity"),
 		network.WithNetwork(nil, TestNetwork),
 		testcontainers.WithWaitStrategyAndDeadline(2*time.Minute, wait.ForExec([]string{"true"})),

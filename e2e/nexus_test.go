@@ -54,7 +54,7 @@ func StartNexus(t *testing.T) *Nexus {
 	ctx := context.Background()
 	alias := RandName("nexus")
 	c, err := runContainer(ctx, nexusImage,
-		testcontainers.WithLabels(e2eLabels),
+		e2eContainer,
 		testcontainers.WithEnv(map[string]string{
 			"INSTALL4J_ADD_VM_PARAMS": "-Xms1g -Xmx1g -XX:MaxDirectMemorySize=1g -Djava.util.prefs.userRoot=/nexus-data/javaprefs",
 		}),
