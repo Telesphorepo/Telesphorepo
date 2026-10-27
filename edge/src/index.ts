@@ -227,7 +227,17 @@ async function chosen(env: Env, config: Config, objects: Objects, region: string
 async function edge(request: Request, env: Env, ctx: ExecutionContext, override: Override | null, note: Note): Promise<Response | null> {
   const url = new URL(request.url);
   if (url.searchParams.has("_state")) return null; // a Docker upload token
+  // The time of each step up to the answer, for Server-Timing. Date.now() moves only across I/O,
+  // so each step measures its reads.
+  const steps: string[] = [];
+  let mark = Date.now();
+  const step = (name: string) => {
+    const now = Date.now();
+    steps.push(`${name};dur=${now - mark}`);
+    mark = now;
+  };
   const loaded = await loadConfig(env, url.origin);
+  step("config");
   if (!loaded) return null;
   const { config, objects } = loaded;
   if (!config.enabled || !config.homeReady || !config.serves) return null;
@@ -240,6 +250,7 @@ async function edge(request: Request, env: Env, ctx: ExecutionContext, override:
   if (!target) return null;
   const caller: Caller | null = await parseCaller(request, target.format.shape, config);
   if (!caller) return null;
+  step("caller");
   // The reads behind these checks do not depend on each other, so after a cache expiry they cost
   // one far read, not one each.
   const [homeBucket, repo, r, nearestBucket, passOK] = await Promise.all([
@@ -249,11 +260,13 @@ async function edge(request: Request, env: Env, ctx: ExecutionContext, override:
     nearest(request, env, config, objects),
     override ? passValid(env, override.pass) : Promise.resolve(false),
   ]);
+  step("checks");
   // The HOME binding must be the home bucket of config.json (its bucket.json).
   if (homeBucket !== config.homeBucket) return null;
   if (!repo || repo.format !== target.format.name || repo.guarded) return null;
   if (!r) return null;
   await resolveScopes(r, objects);
+  step("scopes");
   if (!mayRead(r, repo, true)) return null;
   // A hosted repo of the pacman shape answers pacman's URLs from where it keeps the files.
   if (target.format.shape === "pacman" && repo.kind === "hosted") target.path = pacmanPath(target.repo, target.path);
@@ -291,6 +304,7 @@ async function edge(request: Request, env: Env, ctx: ExecutionContext, override:
   }
   if (!found) return null;
   const pointerMs = Date.now() - started;
+  step("pointer");
 
   const p = found.pointer;
   let blobRead: { ms: number; hint: string } | null = null;
@@ -313,13 +327,17 @@ async function edge(request: Request, env: Env, ctx: ExecutionContext, override:
     },
   });
   if (answer && r.seen) noteSeen(env, ctx, r.seen);
-  if (answer && picked && override) {
+  if (!answer) return null;
+  // The time to the headers of each bucket read; the body streams after.
+  const read = blobRead as { ms: number; hint: string } | null;
+  if (picked && override) {
     note.override = "applied; region=" + override.region;
-    // The time to the headers of each bucket read; the body streams after.
-    const read = blobRead as { ms: number; hint: string } | null;
     const timing = [`pointer;dur=${pointerMs};desc="${at.hint}"`];
     if (read) timing.push(`blob;dur=${read.ms};desc="${read.hint}"`);
     answer.headers.set("Server-Timing", timing.join(", "));
+  } else {
+    if (read) steps.push(`blob;dur=${read.ms};desc="${read.hint}"`);
+    answer.headers.set("Server-Timing", steps.join(", "));
   }
   return answer;
 }
