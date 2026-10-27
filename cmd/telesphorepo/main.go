@@ -88,7 +88,7 @@ A raw publish takes three flags:
   telesphorepo publish --into builds/42 app.jar                 (this folder in place of "path")
   telesphorepo publish --if-new --into builds/42 app.jar        (only when the path holds no file)
   telesphorepo publish --if-match 3f2a...c9 --into v1 latest.json (only over the file of this ETag)
---if-match takes the ETag of a GET of the file (its SHA-256, with or without quotes), or * for
+--if-match takes the ETag of a GET of the file (its SHA-256, with or without quotes or W/), or * for
 any file, and one FILE. When the server holds another file than the flag says, the CLI stores
 nothing, names the ETag of the file now and exits with code 3: read the file again and publish
 again.

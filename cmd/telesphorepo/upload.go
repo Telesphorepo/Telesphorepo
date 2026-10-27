@@ -168,7 +168,9 @@ func parsePutFlags(args []string) (putFlags, []string, error) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if v, ok := value(&i, "--if-match"); ok {
-			etag := strings.ToLower(strings.Trim(strings.TrimSpace(v), `"`))
+			// A proxy that compresses the file (Cloudflare does for JSON) sends the ETag weak, as
+			// W/"<sha256>"; the hash is the same.
+			etag := strings.ToLower(strings.Trim(strings.TrimPrefix(strings.TrimSpace(v), "W/"), `"`))
 			if etag != "*" && (len(etag) != sha256.Size*2 || strings.Trim(etag, "0123456789abcdef") != "") {
 				return pf, nil, fmt.Errorf(`--if-match takes * or the SHA-256 of the file on the server (its ETag), not %q`, v)
 			}

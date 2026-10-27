@@ -311,7 +311,9 @@ func runMaven(j *job) error {
 
 // gradleInit is the init script of "gradle publish": each project that applies maven-publish gets
 // the repository telesphorepo, with the URL and the credentials from the env. It touches no other
-// repository. A build in which no project applies maven-publish stops with the plugin line.
+// repository. A build in which no project applies maven-publish stops with the plugin line. Gradle
+// runs the script in every build of the run, buildSrc and included builds too, so only the root
+// build (no parent) checks.
 const gradleInit = `import org.gradle.api.publish.PublishingExtension
 
 val telesphorepoUrl: String = System.getenv("TELESPHOREPO_MAVEN_URL")
@@ -335,7 +337,7 @@ allprojects {
 }
 
 gradle.projectsEvaluated {
-    if (!telesphorepoPublishing) {
+    if (gradle.parent == null && !telesphorepoPublishing) {
         throw GradleException("No project of this build applies maven-publish, so it has nothing to publish. Add the plugin to the build file: plugins { ` + "`maven-publish`" + ` } (Kotlin) or plugins { id 'maven-publish' } (Groovy)")
     }
 }
