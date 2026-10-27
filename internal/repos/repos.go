@@ -679,10 +679,11 @@ func (s *Service) UpdateAll(ctx context.Context, names []string, p Patch) ([]*Re
 	return out, changed, nil
 }
 
-// DeleteRow deletes the repo row of id. It first empties the large tables that reference it in
-// batches (see purge); the rest cascades, so a deleted member leaves its groups. ErrNotFound when
-// it does not exist.
-func (s *Service) DeleteRow(ctx context.Context, id int64) error {
+// DeleteRow deletes the repo row of id and records repo.delete with files, the number of files the
+// delete removed, in the same transaction: once the repo answers 404, its event is in the log. It
+// first empties the large tables that reference it in batches (see purge); the rest cascades, so a
+// deleted member leaves its groups. ErrNotFound when it does not exist.
+func (s *Service) DeleteRow(ctx context.Context, id int64, files int) error {
 	var gone *Repo
 	var groups []int64
 	r, err := byID(ctx, dbq.New(s.db.W), id)
@@ -703,12 +704,23 @@ func (s *Service) DeleteRow(ctx context.Context, id int64) error {
 	if err := s.purge(ctx, id); err != nil {
 		return err
 	}
-	n, err := dbq.New(s.db.W).DeleteRepo(ctx, id)
+	err = s.db.Tx(ctx, func(tx *sql.Tx) error {
+		n, err := dbq.New(tx).DeleteRepo(ctx, id)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrNotFound
+		}
+		if s.audit == nil {
+			return nil
+		}
+		// The repo row is gone, so the event keeps only its name.
+		return s.audit.RecordTx(ctx, tx, audit.Event{Action: audit.RepoDelete, Repo: r.Name, Target: r.Name,
+			Detail: map[string]any{"count": files}})
+	})
 	if err != nil {
 		return err
-	}
-	if n == 0 {
-		return ErrNotFound
 	}
 	if err := s.forget(ctx, id); err != nil {
 		return err

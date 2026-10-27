@@ -188,7 +188,7 @@ func (a *API) runDelete(ctx context.Context, repo *repos.Repo, op *ops.Op) {
 			_ = a.ops.Progress(work, op.ID, int64(done), max(total, int64(done)))
 		}})
 	if err == nil && ctx.Err() == nil {
-		err = a.repos.DeleteRow(ctx, repo.ID)
+		err = a.repos.DeleteRow(ctx, repo.ID, n)
 	}
 	if err == nil && ctx.Err() != nil {
 		err = ctx.Err()
@@ -200,10 +200,7 @@ func (a *API) runDelete(ctx context.Context, repo *repos.Repo, op *ops.Op) {
 		}
 		a.h.Log.Error("delete repo", "repo", repo.Name, "err", err)
 		_ = a.ops.Fail(work, op.ID, err)
-		return
 	}
-	// The repo row is gone, so the event keeps only its name.
-	_ = a.audit.Record(work, audit.Event{Action: audit.RepoDelete, Repo: repo.Name, Target: repo.Name, Detail: map[string]any{"count": n}})
 }
 
 // resumeDelete sets a failed repo delete running again and starts it as a task (ops.Type Resume).

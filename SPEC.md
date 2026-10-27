@@ -1834,7 +1834,7 @@ of the operation type, in full sentences; repo JSON shows it as `operation`. A m
   rows of a repo registers (`Repos.OnPurge`; one batch of at most 1000 rows per statement, children
   first: docker, npm, pypi, debian, arch, cargo, nuget, publish sessions and Nexus mappings) until it
   deletes nothing. Then it deletes the repo row (the operation and the few rows left go with it)
-  and records `repo.delete`. A failure sets `failed` with the error and keeps the operation; a
+  and records `repo.delete` in the same transaction, so a repo that answers 404 has its event. A failure sets `failed` with the error and keeps the operation; a
   server stop leaves it `running`, and the job `core.ops` continues running deletes at startup.
   `POST /api/repos/{name}/operation/resume` starts a failed delete again; `DELETE /api/repos/{name}/operation` ends it and the repo keeps the files that are
   left. The repo page shows a failed operation with Resume and "Stop and keep the files" to a holder
