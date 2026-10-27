@@ -56,7 +56,7 @@ const (
 	purgeRecheck = time.Hour
 	purgeRetry   = 10 * time.Minute
 	// purgePerm is the permission that the pointer cache needs, as Cloudflare's token form names it.
-	purgePerm = "Caching › Cache Purge: Purge, in a policy of All Domains or the domain of each route host"
+	purgePerm = "Cache & Performance › Cache: Purge, in a policy of All Domains or the domain of each route host"
 )
 
 // pointerGen is a generation of the pointer cache.

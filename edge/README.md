@@ -26,7 +26,7 @@ The server can deploy the Worker itself, with no computer in between:
      Storage: **Edit**, Developer Platform › Queues: **Edit**
    - **All Domains** (or the domains of the base URL host and of each repository domain):
      Developer Platform › Workers Routes: **Edit**, DNS & Zones › Zone: **Read**, and to cache
-     pointers at the edge, Caching › Cache Purge: **Purge**
+     pointers at the edge, Cache & Performance › Cache: **Purge**
 
    Workers needs Admin, not Editor: Editor cannot create a Worker, and the first deploy creates
    it. Cloudflare's "Edit Cloudflare Workers" template lacks Queues, so start from Custom. With

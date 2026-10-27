@@ -289,7 +289,7 @@
       permissions: [
         "Developer Platform › Workers Routes: Edit",
         "DNS & Zones › Zone: Read",
-        "Caching › Cache Purge: Purge (to cache pointers at the edge)",
+        "Cache & Performance › Cache: Purge (to cache pointers at the edge)",
       ],
     },
   ];

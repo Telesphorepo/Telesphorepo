@@ -2642,7 +2642,7 @@ still be there and the second must be gone. The Worker runs the probe at
 `probe/<hex SHA-256 of the nonce>.json` (`{exp, op: "put"|"match", entries: [{key, tag}]}`) to the
 home bucket, and the Worker takes it (deletes it) and answers `{answered_by: "worker", ran,
 results}` with `Telesphorepo-Edge-Check: worker`; the server deletes the object after the request.
-Without a token, with a token that lacks Caching › Cache Purge: Purge, with a Worker that does not
+Without a token, with a token that lacks Cache & Performance › Cache: Purge, with a Worker that does not
 run the probe, or when the purge did not remove the probe entry, the Worker reads every pointer in
 R2 and the Edge delivery page says why (`pointer_cache` of `GET /api/edge/status`: `{on, ttl,
 why}`). A purge that Cloudflare refuses (401, 403, error 10000) turns the cache off and writes
@@ -2719,7 +2719,7 @@ Cloudflare's token form names them: the Entire Account with Developer Platform �
 (Editor cannot create a Worker, and the first deploy creates it), Workers R2 Storage: Edit and
 Queues: Edit; and All Domains, or the domain of each route host, with Developer Platform ›
 Workers Routes: Edit and DNS & Zones › Zone: Read (Cloudflare's API reference names Edit
-"Write"), and Caching › Cache Purge: Purge for the pointer cache (**The pointer cache**), which the
+"Write"), and Cache & Performance › Cache: Purge for the pointer cache (**The pointer cache**), which the
 deploy does not need. The UI, the setting's help and a permission refusal of each step name them so. The steps, each reading first and changing only
 what differs:
 
