@@ -426,7 +426,8 @@ func status(ctx context.Context, args []string) error {
 	if len(p.When) == 0 {
 		return nil
 	}
-	if !found {
+	// A Debian repo takes only FILEs, so a project marker in its folder names no version.
+	if !found || p.Dist != "" || p.Component != "" {
 		var to []string
 		for _, w := range p.When {
 			repo := w.Repo

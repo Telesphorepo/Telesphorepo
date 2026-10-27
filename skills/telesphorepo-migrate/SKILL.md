@@ -169,6 +169,11 @@ switch-over.
                     jobs = the full job name, such as team/app
    ```
 
+   These values are all the server checks. When the publish steps go into a workflow the project
+   has, such as `build.yml`, that file is the workflow file. A GitHub environment on the job changes
+   nothing. List every repository the job publishes to. Send the values as they are; do not
+   describe token claims to the person.
+
 2. Remove the Nexus publishing from the project and its CI, as the ecosystem's section says: the
    publish addresses, the publish credentials and the publish steps. Keep the build steps that make
    the artifacts. List the CI secrets that are no longer used, so the person can delete them.
@@ -186,6 +191,25 @@ switch-over.
    that `telesphorepo publish FILE` uploads into), and `dist` and `component` for a Debian
    repository (default `stable` and `main`). Check `git check-ignore telesphorepo.toml`: if git
    ignores it, CI does not see it; tell the person.
+
+   When the project sends some versions to another repository (Maven snapshots to a snapshots
+   repository, Debian dev builds to a dev repository), keep that split with a rule, never with a
+   file to edit at release time. The CLI reads the version, prints it with the repository it
+   picked, and the first rule that matches decides:
+
+   ```toml
+   [[when]]
+   version = "*-SNAPSHOT"
+   repo = "maven-snapshots-rehearsal"
+   ```
+
+   A rule may set `repo`, `path`, `dist` and `component`; `*` in `version` is any text. Raw files
+   have no version: `telesphorepo publish --version V` gives one. `telesphorepo status` shows the
+   version and the repository it picks.
+
+   One `telesphorepo.toml` names one repository. When one git repository publishes to two, such as
+   jars and a `.deb`, put a second `telesphorepo.toml` in the folder of the second (for a `.deb`, the
+   folder of the module that builds it) and publish from each folder.
 
    Docker images need no `telesphorepo.toml`; a Helm chart does.
 
@@ -313,7 +337,8 @@ then runs the build, the install line, `export PATH="$HOME/.local/bin:$PATH"` an
 `telesphorepo publish` in one shell step.
 
 If the project is in a subfolder of the git repository, put `cd <subfolder>` before
-`telesphorepo publish`. If a CI job downloads from a private repository, give its build step the
+`telesphorepo publish` (in GitHub Actions, `working-directory: <subfolder>` on the step). A
+project with a `telesphorepo.toml` in two folders gets one publish step per folder. If a CI job downloads from a private repository, give its build step the
 read token variables from CI secrets.
 
 ## Ecosystems
@@ -356,7 +381,12 @@ they target this Nexus. In Gradle, remove the Nexus repository from `publishing 
 } }`: `gradle publish` publishes to every repository listed there. Keep the `maven-publish` plugin,
 the publications, `group` and `version`; a Gradle project needs them. `telesphorepo publish` runs
 `mvn deploy` (or `./mvnw`) with the repository as the target, or `gradle publish` (or `./gradlew`)
-with an init script that adds the repository to each project that applies `maven-publish`.
+with an init script that adds the repository to each project that applies `maven-publish`; a
+build with `buildSrc` or included builds is fine. A repository URL that the build picks by the
+version (`if (version.endsWith("SNAPSHOT")) snapshots else releases`) becomes a `[[when]]` rule in
+`telesphorepo.toml`. A Gradle task of the project that uploads to Nexus itself, such as one that
+posts a `.deb`, goes: keep the task that builds the file, and publish the file with
+`telesphorepo publish <file>` from a folder whose `telesphorepo.toml` names the repository.
 
 CI: GitHub Actions toolchain `actions/setup-java@v6` with `distribution: temurin` and
 `java-version: 21` (use the project's Java version); no build step. Jenkins build stage:
@@ -613,7 +643,9 @@ For `curl`, pass the credentials on stdin, never as an argument:
 
 Publishing: remove `curl -u` uploads to Nexus and their passwords. `telesphorepo publish <file>`
 uploads files: for raw into the folder `path` of `telesphorepo.toml`, for Debian each `.deb` into
-`dist` and `component`.
+`dist` and `component`. Dev builds that go to their own Debian repository (a version with `~`
+sorts before its release, so apt must not see it in the release repository) get a rule on the
+`.deb`'s own version, such as `version = "*~SNAPSHOT*"`, `repo = "<name>-dev"`.
 
 CI: no toolchain; the publish step is `telesphorepo publish <files>`.
 
