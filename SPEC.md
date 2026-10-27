@@ -6,10 +6,10 @@ guide for people who run the server.
 
 ## Purpose
 
-A self-hosted repository for Maven repos (including Gradle plugins), Debian (apt) repos, NuGet
-repos and raw file repos. Each format is a module (see **Modules**), and a new format is one more module: the
+A self-hosted repository for Maven repos (including Gradle plugins), Debian (apt) repos, Arch
+Linux (pacman) repos, NuGet repos and raw file repos. Each format is a module (see **Modules**), and a new format is one more module: the
 core names no format. A repo is **hosted** (it stores what is published to it), a
-**proxy** (Maven and Debian: it fetches files from a remote repository and keeps them) or a
+**proxy** (Maven, Debian and Arch: it fetches files from a remote repository and keeps them) or a
 **group** (Maven: one address for the files of several repos). It ships as one Go binary with the
 web UI embedded. Metadata is in SQLite and blobs are on the local filesystem or in any
 S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with the Nexus API.
@@ -71,6 +71,7 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/format` | The format contract: `Spec` (every optional capability is a field that is nil when the format lacks it), the `Registry` (`All`, `Get`, `Hooks`, `RebuildRun`, `OnRepoChange`, `ValidateConfig`, `SupportsKind`, `Importer`), `Kit` and `Standard` (the default routes), `Importer.Run` (the shared import of one source file), and the rendered documents: `WriteDocument` (a `Document`, a body with its strong `ETag`, answered with 304 on `If-None-Match` and `Vary`; `NewDocument` gives an uncached body the SHA-256 of the body) and `DocumentCache` (an LRU of rendered documents, bounded in entries, in bytes and per entry, keyed by `DocumentKey` of what the body depends on: a revision of the rows or the SHA-256s of the sources, and the base URL). A cached document's ETag is the SHA-256 of its key, so `DocumentCache.Serve` answers a matching `If-None-Match` with 304 before it looks up or builds the body; absolute URLs in a document start at `route.API.BaseURL` |
 | `internal/version` | The version schemes of the package formats, with no outside module: `semver.go` (SemVer 2.0 for npm and Cargo; `CleanSemVer` is npm's loose clean of a package.json version), `pep440.go` (PEP 440: normal form and order), `nuget.go` (NuGet: normal form, order, `IsSemVer2`). Each version has a `SortKey`, a string whose byte order is the scheme's order, for the `sort_key` columns that keyset paging reads |
 | `internal/maven` | Module and format `maven`: the standard routes, release immutability (`Admit`), the content types, the version and build rows (`OnCommitted`, `OnRemoved`), the merge of `maven-metadata.xml` in a group, the metadata after a delete (`AfterRemove`), web UI uploads with checksums and metadata. Owns its tables and queries (`queries/`, `dbq/`) |
+| `internal/arch` | Module and format `arch`: the upload of `.pkg.tar.zst`, `.xz` and `.gz` packages through `Commit` (`.PKGINFO` and the file list), the server's signature of each package, the package rows and index entries (`OnCommitted`, `OnRemoved`), the indexes `<repo>.db` and `<repo>.files` of each architecture (`Rebuild`), the mapping of pacman's URLs (`ServedPath`), `/arch/{repo}/key.asc`, `GET /api/arch/{name}/package`. Owns its tables, queries (`queries/`, `dbq/`) and architecture config; binds a signing key per repo (`SigningKey`) |
 | `internal/debian` | Module and format `debian`: `.deb` upload/parse through `Commit`, the package rows (`OnCommitted`, `OnRemoved`), the index rebuild (`Rebuild`), `/debian/{repo}/key.asc`, the plan of a Nexus apt import (distribution and signing key). Owns its tables, queries (`queries/`, `dbq/`) and architecture config; binds a signing key per repo (`SigningKey`) |
 | `internal/raw` | Module and format `raw`: plain files at `/raw/{repo}/{path...}` (the standard routes) with an `overwrite` policy per path (`Admit`: the first matching rule, else the repo-wide one), which also classifies the paths for the edge (`EdgeSpec.Paths`: `deny` is immutable) |
 | `internal/cargo` | Module and format `cargo`: the Cargo sparse index (`index/`), the `.crate` files (`crates/`) and the publish and yank API (`api/v1/`) for hosted, proxy and group repos; owns its tables and queries. See **Cargo registry** |
@@ -170,6 +171,7 @@ it needs and leaves the others nil. The kernel gives it these parts:
 | `nexus` | `internal/nexus` | `publish` | `/api/nexus/...`, the subsystem `nexus`, the settings group `nexus`, the `nexus.*` actions, the operation types `mirror`, `empty` and `merge`, the repo fields `rehearsal_for` and `moves_into`, job `nexus.scheduler` (resumes running syncs, empties and merges, then the schedule loop); a merge gives the CI pipelines of `publish` to its target |
 | `maven` | `internal/maven` | | Format `maven` (publish category `cli`) with the tools `gradle` and `maven` (their CI steps) |
 | `debian` | `internal/debian` | `signing` | Format `debian` (publish category `cli`) with its schema, `Rebuild` and the tool `telesphorepo` |
+| `arch` | `internal/arch` | `signing` | Format `arch` (publish category `cli`) with its schema, `Rebuild`, the route `GET /api/arch/{name}/package` and the tool `telesphorepo` |
 | `raw` | `internal/raw` | | Format `raw` (publish category `cli`) with the tool `telesphorepo` |
 | `nuget` | `internal/nuget` | | Format `nuget` (hosted, proxy and group repos; publish category `cli`) with its schema, the tool `dotnet`, the audit actions `nuget.unlist` and `nuget.relist`, the Nexus importer of `nuget`, demo data and seed |
 | `docker` | `internal/docker` | `network`, `publish` | Format `docker` (an OCI registry: hosted, proxy and group repos) with its schema; the root prefix `/v2/`, `/docker/` (the token endpoint) and `GET /api/docker/{name}/manifest`; the settings group `docker`; job `docker.links`; the publish category `helper` (the native tools push through the credential helper of the CLI, see **Publishing**); the Nexus importer of `docker`; demo data and seed (see **Docker registry**) |
@@ -448,7 +450,7 @@ sh`, which adds the CLI to `$GITHUB_PATH`) and keeps `permissions: id-token: wri
 inside `withCredentials` of `OIDC_TOKEN`, with `install.sh` on a Unix agent and `install.ps1` on
 a Windows agent (`isUnix()`); a freestyle step with `install.sh`. The CLI reads the identity token
 of the job itself, so no CI file fetches or prints a token. The publish of the Maven tools and of
-the tool `telesphorepo` (`format.CLITool`, Debian and Raw) is `telesphorepo publish`; Docker
+the tool `telesphorepo` (`format.CLITool`, Debian, Arch and Raw) is `telesphorepo publish`; Docker
 pushes with `docker push` through a Docker config of its own that names the credential helper of
 the CLI for the registry host, with `TELESPHOREPO_SERVER=<base_url>` in the env of the publish, so
 the helper knows the server of the identity token. `format.CISnippet` builds the file of a tool for a system
@@ -476,7 +478,7 @@ and the database closes. No worker runs after the database closes.
 Each schema component has its own migrations: `internal/db/migrations` for the kernel
 (component `core`), and `internal/<module>/migrations` for each module with tables
 (`Extender.Schema`; the component is named after the module: `storage`, `network`, `signing`,
-`publish`, `edge`, `nexus`, `debian`, `docker`, `cargo`, `npm`, `nuget`, `pypi`). A module schema
+`publish`, `edge`, `nexus`, `debian`, `arch`, `docker`, `cargo`, `npm`, `nuget`, `pypi`). A module schema
 may reference the kernel tables and the tables of the modules it requires; the kernel schema
 references no module table. All tables are `STRICT`. Tables with a natural key are also
 `WITHOUT ROWID`. Every foreign-key child column has an index. SQLite runs `PRAGMA optimize` at
@@ -536,7 +538,7 @@ Kernel tables (`internal/db/migrations`):
 | `assets_segments` | FTS5 unicode61 on `path` (every ASCII punctuation mark but `/` and the quotes is part of a segment), contentless with deletes | The segments of each path (its components between the slashes), keyed like `assets_search`; a search with a rare whole segment reads it (see `GET /api/search`). Kept in sync by triggers; `index` rows are not indexed |
 | `repo_ops` | PK `id`, UNIQUE `repo_id` (cascades), idx `started_by`, partial idx `repo_ops_running (type) WHERE state = 'running'` | At most one operation per repo; an ended operation's row is deleted. `type` (a registered type: `delete`, `mirror`), `owner` (the module), `ref` (the owner's reference, e.g. the Nexus source ID), `state` `running`/`held`/`failed`, `done`, `total`, `error`, `started_by`, `started_at`, `updated_at` |
 | `upload_sessions` | PK `id` (WITHOUT ROWID), idx `repo_id`, `user_id`, `expires_at` | A resumable upload: `id` (32 lowercase hex), `repo_id` and `user_id` cascade, `publish_session_id` (the session that started it; no foreign key: the table belongs to the publish module), `received`, `created_at`, `updated_at`, `expires_at`. The bytes are in `$TR_DATA_DIR/tmp/uploads/<id>` |
-| `rebuilds` | PK `(repo_id, grp, unit)` (WITHOUT ROWID); `repo_id` cascades | The durable rebuild queue: a unit of a group of a repo that its format builds again (Debian: `grp` is the distribution, `unit` is `component/arch`). `marked_at` in unix ns |
+| `rebuilds` | PK `(repo_id, grp, unit)` (WITHOUT ROWID); `repo_id` cascades | The durable rebuild queue: a unit of a group of a repo that its format builds again (Debian: `grp` is the distribution, `unit` is `component/arch`; Arch: `grp` is an architecture with `unit` `db` or `fill`, or `sign` with `unit` `packages`). `marked_at` in unix ns |
 | `settings` | PK `key` (WITHOUT ROWID), idx `updated_by` | JSON value, or base64(nonce‖AES-GCM ciphertext) when the setting's definition is secret (`settings.Def.Secret`); `updated_by` |
 | `user_totp` | PK `id`, idx `user_id` | `secret` is sealed (AAD `user_totp:<id>`); `last_step` is the last accepted 30 s step of this factor (0 for none) |
 | `user_passkeys` | PK `id`, UNIQUE `credential_id`, idx `user_id` | `credential` is the JSON of the `webauthn.Credential` (the public key, the sign count, the flags, the transports, the AAGUID); `credential_id` is its lookup key; `name`, `created_at`, `last_used_at` |
@@ -627,6 +629,14 @@ Tables of the `debian` component (`internal/debian/migrations`):
 | `deb_packages` | UNIQUE `(repo_id, distribution, component, architecture, package, version)`, idx `asset_id`, idx `deb_packages_sha256 (repo_id, distribution, component, sha256)` | Also the streaming index for `Packages`. The SHA-256 index finds a package an import already holds. `asset_id` cascades with the pool file |
 | `deb_package_order` | PK `package_id` (cascades with its `deb_packages` row), idx `deb_package_order_page (repo_id, folder, component, package, name_key, build_key)` | One row per `deb_packages` row, written with it: `folder` (of the file, e.g. `pool/main/h/hello/`) and two byte keys whose byte order is the order of the Versions and Builds pages (`internal/debian/order.go`): `name_key` the version the row is a build of in `dpkg --compare-versions` order, `build_key` the build by stamp, then in dpkg order. The SQL functions `deb_name_key` and `deb_build_key` compute them in a migration |
 | `deb_index_files` | PK `(repo_id, distribution, path)` (WITHOUT ROWID) | Sizes and hashes; `Release` is built from these rows |
+
+Tables of the `arch` component (`internal/arch/migrations`). Every `repo_id` cascades.
+
+| Table | Key / indexes | Notes |
+|---|---|---|
+| `arch_packages` | UNIQUE `(repo_id, name, version, arch)`, idx `asset_id`, idx `arch_packages_order (repo_id, name, vkey)`, idx `arch_packages_arch (repo_id, arch, name, vkey)` | One row per stored package: `version` (`[epoch:]pkgver-pkgrel`), `arch` (an architecture of the repo, or `any`), `vkey` (the order key of the version, `internal/arch/order.go`; the SQL function `arch_version_key` computes it), `asset_id` (the pool file; cascades), `filename`, `size`, `sha256`, `sig_state` (the SHA-256 state after the file's bytes, from which the package is signed again without reading it) and `desc` (its `desc` entry). The order index pages the versions of a package; the arch index finds the newest package of a name in an architecture |
+| `arch_package_files` | PK `package_id` (cascades) | The `files` entry of the package in `<repo>.files` |
+| `arch_db_entries` | PK `(repo_id, arch, name)` (WITHOUT ROWID), idx `package_id` (cascades) | The entries of the index of each architecture: the package that a name installs there |
 
 Tables of the `npm` component (`internal/npm/migrations`). Every `repo_id` cascades. Rows exist for
 hosted repos only; the commit of a tarball writes them and its removal deletes them (see **npm
@@ -720,6 +730,7 @@ at once.
 Debian pool path: `pool/{component}/{prefix}/{source}/{package}_{version-without-epoch}_{arch}.deb`.
 The `{prefix}` is the first letter of the source name, or `lib` plus the 4th letter for `lib*`
 sources.
+Arch pool path: `pool/{name}/{name}-{version}-{arch}.pkg.tar.{zst|xz|gz}` with the server's signature at `<path>.sig`; the indexes of an architecture are `{arch}/index.db`, `index.db.sig`, `index.files` and `index.files.sig`.
 
 ## Settings model
 
@@ -846,7 +857,7 @@ The `settings` package holds no feature rules and declares only the keys of the 
   stored value is logged and ignored. A `TR_*` variable that matches no setting or boot variable
   (`TR_E2E_*` and `TR_ENGINE` excepted) is logged as a warning by name and ignored.
   `TR_E2E_PRESET_BASE_URL` is a test variable (see **Network rules**).
-- **Signing keys.** Debian repos sign their indexes with the signing key of their repo field
+- **Signing keys.** Debian and Arch repos sign their indexes (Arch also its packages) with the signing key of their repo field
   `signing_key` (see **Signing keys**). No setting holds a key.
 - **Lost master key.** Without the master key the secret settings cannot be decrypted and must be
   entered again.
@@ -869,6 +880,10 @@ signed-in browser downloads from a private repo without a Basic prompt. A **writ
 | `GET, HEAD /debian/{repo}/{path...}` | read | `dists/...` and `pool/...` through the read path |
 | `GET, HEAD, PUT /raw/{repo}/{path...}` | read / write | PUT: 201 new path; 200 identical bytes (any policy) or a replace when the path's policy is `allow`; 409 different bytes when it is `deny`; 413 over `max_upload_size`. The policy of a path is the `overwrite` of the first rule whose glob matches it, else the repo-wide `overwrite` (`deny` by default); a delete is not an overwrite, so `deny` never stops a person with `repo.delete`. `If-None-Match: *`, `If-Match: *` and `If-Match: "<sha256>", ...` make the write conditional: 412 `{error, code: "precondition_failed", etag}` when false, 400 for another condition (see **Preconditions** under **Byte pipeline**); the precondition comes before the overwrite policy. A stored PUT answers `ETag: "<sha256>"`. Repo config: `{"overwrite": "deny"|"allow", "rules": [{"match": "<glob>", "overwrite": "deny"|"allow"}]}`, `rules` optional, at most 100; a rule with a bad glob or policy is 400 naming it (`rule 2 ("/x"): ...`, counted from 1). A rule change applies to the next write. S3 redirect as for Maven |
 | `GET, HEAD /debian/{repo}/key.asc` | read | The armored public signing key of the repo (its repo field `signing_key`). Same read gate as the repo's other files |
+| `PUT, POST /arch/{repo}/upload` | write | A `.pkg.tar.zst`, `.xz` or `.gz` body. 201 `{package,version,architecture,filename,sha256}`, 200 identical, 409 the same version with other bytes, 400 a file that is not a package, a bad `.PKGINFO`, a package past the parse limits or an architecture the repo does not list. `?upload=<id>&sha256=<hex>[&size=<n>]` without a body finishes a resumable upload as for Debian |
+| `GET, HEAD /arch/{repo}/{path...}` | read | Through the read path. On a hosted repo `{arch}/<seg>.db`, `.db.sig`, `.files` and `.files.sig`, where `<seg>` is the repo name the URL used, are the files `{arch}/index.*`, and `{arch}/<package file>[.sig]` of that architecture or `any` is `pool/<name>/<file>` (see **Arch Linux (pacman)**). A proxy serves its remote's paths as they are |
+| `GET, HEAD /arch/{repo}/key.asc` | read | The armored public signing key of the repo, as for Debian |
+| `GET /api/arch/{name}/package?path=` | `repo.download` (password, read token, UI session, anonymous on a public repo) | The index entry of a package file of an Arch repo: `{name, version, architecture, fields: {DESC: [..], DEPENDS: [..], ...}}`. Another path is 400; a path without a package is 404 |
 | `/v2/...`, `GET, POST /docker/token`, `GET /docker/hosts` | see **Docker registry** | The OCI registry of the docker format |
 | `GET, HEAD, PUT, DELETE /npm/{repo}/...` | see **npm registry** | The npm registry API of the npm format |
 | `/nuget/{repo}/...` | see **NuGet repositories** | The NuGet V3 resources of the nuget format |
@@ -878,10 +893,10 @@ signed-in browser downloads from a private repo without a Basic prompt. A **writ
 | `/` | none | Embedded UI, hash-routed (see **Web UI**). `/assets/...` has `Cache-Control: public, max-age=31536000, immutable`; `index.html` and a path without a file extension (the SPA fallback to `index.html`) have `no-cache`; another path with an extension that is not a file is 404 |
 
 A read of a proxy or a group repo on a format route follows **Group and proxy repositories**. A
-write (Maven PUT, Debian upload, manual upload, upload plan) to a proxy or a group answers 405 with
+write (Maven PUT, Debian or Arch upload, manual upload, upload plan) to a proxy or a group answers 405 with
 `Allow: GET, HEAD` and "A proxy is read-only." or "A group is read-only. Publish to one of its
 repositories." to a caller who can read the repo; any other caller gets the usual refusal.
-`GET /debian/{proxy}/key.asc` answers 404: a Debian proxy has no key of its own.
+`GET /debian/{proxy}/key.asc` and `GET /arch/{proxy}/key.asc` answer 404: a proxy has no key of its own.
 
 The format routes use `route.FormatRead` and `route.FormatWrite` (see **Route policy** and
 **Access engine**): anonymous read is allowed when `anonymous_read` is on. Otherwise no
@@ -1127,6 +1142,7 @@ is written to it with `sudo tee -a FILE > /dev/null`.
 | Maven | URL `HOST/maven/{repo}` in `<repositories>`. Reads of a private repo need `~/.m2/settings.xml` `<server>` with the same `<id>`. Deploys: `telesphorepo publish`. Maven 3.8.1+ blocks `http://` on non-localhost hosts |
 | Gradle | `maven { url = uri("HOST/maven/{repo}") }` in `repositories` of the build file to consume dependencies (Gradle ignores the repositories of the settings file when the build file declares its own), and in `pluginManagement.repositories` of the settings file to consume plugins; add `credentials(PasswordCredentials::class)` with a read token in `~/.gradle/gradle.properties` to read a private repo. Publishes: `telesphorepo publish` (a project that applies `maven-publish`). `isAllowInsecureProtocol = true` only for plain http |
 | apt | Key: `curl -fsSL HOST/debian/{repo}/key.asc -o /etc/apt/keyrings/telesphorepo.asc`. Source: `deb [signed-by=/etc/apt/keyrings/telesphorepo.asc] HOST/debian/{repo} {dist} {component}`. For a private repo, the `curl` command reads `USER:READ_TOKEN` from a config on stdin, and `/etc/apt/auth.conf.d/{repo}.conf` holds `machine HOST/debian/{repo} login USER password TOKEN` (mode 600) |
+| pacman | Key: `curl -fsSL HOST/arch/{repo}/key.asc -o /tmp/{repo}.asc`, `sudo pacman-key --add /tmp/{repo}.asc`, `sudo pacman-key --lsign-key <fingerprint>`. `/etc/pacman.conf`: `[{repo}]`, `SigLevel = Required`, `Server = HOST/arch/$repo/$arch`. A private repo's section holds `Include = /etc/pacman.d/{repo}-server`, a file of mode 600 with `Server = https://USER:READ_TOKEN@host/arch/$repo/$arch` (pacman sends the user information as HTTP Basic). A proxy of an Arch mirror is the first `Server = HOST/arch/{proxy}/$repo/os/$arch` of `/etc/pacman.d/mirrorlist` |
 | Upload `.deb` | `telesphorepo publish x.deb` (with `dist` and `component` in `telesphorepo.toml`). Indexes rebuild after `index.debounce`; poll `GET /api/repos/{repo}/status` for `pending: 0` |
 | Docker | Pull: `docker pull <host>/{repo}/IMAGE:TAG`; a private repo needs `docker login <host>` with a read token. Push: the setup line of the Publish tab adds the credential helper of the CLI to the Docker config once, then `docker push <host>/{repo}/IMAGE:TAG` with no `docker login`. Helm and ORAS use the same helper (see **Docker registry** and **Publishing**) |
 | NuGet | Source `HOST/nuget/{repo}/index.json` in `nuget.config` (`allowInsecureConnections="true"` for plain http); a private repo adds `packageSourceCredentials` with the user and a read token as `ClearTextPassword` (dotnet sends them after the first 401). Publishes: `telesphorepo publish` in a .NET project, or `dotnet nuget push` with a publish session as the API key |
@@ -1524,6 +1540,7 @@ file. A row is one entry of a table in `cmd/telesphorepo/detect.go`; a new forma
 | Docker (Helm chart) | `Chart.yaml` | `helm` | `helm package <dir> -d <tmp>/chart`, then `helm push <chart>.tgz oci://<host>/<repo> --registry-config <tmp>/config.json` (the upload host when the server has one; `--plain-http` for an `http://` server) | The registry config names `credHelpers` `telesphorepo` for the Docker hosts; the helper answers `TELESPHOREPO_TOKEN` for the hosts of `TELESPHOREPO_DOCKER_HOSTS` |
 | raw | none | the CLI | `PUT /raw/<repo>/<path>/<file name>` for each FILE (`--into FOLDER` in place of `path`); a file of 64 MiB or more goes through `POST /api/repos/{name}/uploads`, `PATCH` chunks of 16 MiB (a failed chunk is sent again from the `received` of the server), and `PUT ...?path=&sha256=&size=`. `--if-new` sends `If-None-Match: *` and `--if-match ETAG` (`*` or the SHA-256, with or without quotes; one FILE only) `If-Match`, on the PUT and on the finish | Bearer session token |
 | NuGet | `*.csproj`, `*.fsproj`, `*.sln`, `*.slnx` | `dotnet` | `dotnet pack -c Release -o <tmp>/nupkg` (no token in its env), then for each `.nupkg` but `*.symbols.nupkg` `PUT /nuget/<repo>/package` with the package as the first part of `multipart/form-data`; a package of 64 MiB or more goes through the resumable routes as for raw, and `PUT /nuget/<repo>/package?upload=<id>&sha256=&size=` finishes it (a server older than the change log entry `nuget-resumable-push` gets the one push). With FILE arguments: a push of each FILE, no build, also in a folder without a project | `X-NuGet-ApiKey: <session token>` |
+| Arch | none | the CLI | `PUT /arch/<repo>/upload` for each FILE; a file of 64 MiB or more goes through the resumable routes as for raw, and `PUT /arch/<repo>/upload?upload=<id>&sha256=&size=` finishes it. It prints `Uploaded <name> <version> (<arch>) to <repo>` | Bearer session token |
 | Debian | none | the CLI | `PUT /debian/<repo>/upload/<dist>/<component>` for each FILE; a file of 64 MiB or more goes through the resumable routes as for raw, and `PUT /debian/<repo>/upload/<dist>/<component>?upload=<id>&sha256=&size=` finishes it | Bearer session token |
 | Cargo | `Cargo.toml` | `cargo` | `cargo publish --registry telesphorepo --config 'registries.telesphorepo.index="sparse+<base>/cargo/<repo>/index/"' --config 'registries.telesphorepo.credential-provider="cargo:token"'` | `CARGO_REGISTRIES_TELESPHOREPO_TOKEN` in the env of cargo; cargo sends it as a raw `Authorization` header |
 | npm | `package.json` | by lockfile: `pnpm-lock.yaml` pnpm; `yarn.lock` with `.yarnrc.yml` yarn; `bun.lock` (or `bun.lockb`) bun; else npm, each on the `PATH` | `npm publish --registry <base>/npm/<repo>/`, `pnpm publish --registry ... --no-git-checks`, `yarn npm publish` or `bun publish --registry ...`; the package manager packs | npm and pnpm: `npm_config_userconfig=<tmp>/npmrc` with the registry and `//<host>/npm/<repo>/:_authToken=${TELESPHOREPO_TOKEN}`. bun: `NPM_CONFIG_TOKEN`. yarn: `YARN_NPM_PUBLISH_REGISTRY`, `YARN_NPM_AUTH_TOKEN` and, for an `http://` server, `YARN_UNSAFE_HTTP_WHITELIST`. `setup` offers the CI file of the tool of the lockfile |
@@ -1721,8 +1738,10 @@ sandbox`, `Content-Disposition: attachment` except for `text/plain`; it answers 
 proxy file answers 302 to a presigned URL that signs `response-content-type` and
 `response-content-disposition` from the asset row, so each path of a shared blob keeps its own
 content type; the disposition (`attachment`, or `inline` for `text/plain`) carries the base name
-of the path as `filename`, since the presigned URL ends in the SHA-256; the 302 carries `ETag` and `Cache-Control: no-store`. HEAD, merged files and every
-request without `s3.redirect` stream. The route step sets `Cache-Control: private` on every format
+of the path as `filename`, since the presigned URL ends in the SHA-256; the 302 carries `ETag` and `Cache-Control: no-store`. HEAD, merged files, a GET with
+`If-Modified-Since` (the store would judge it by the blob's date, which is older when a path holds
+bytes it held before, and answer 304 to a changed file) and every request without `s3.redirect`
+stream. The route step sets `Cache-Control: private` on every format
 read of a repo that not everyone reads (see **Route policy**); a public repo's
 answers carry no `Cache-Control`.
 
@@ -1813,7 +1832,7 @@ of the operation type, in full sentences; repo JSON shows it as `operation`. A m
   what the row delete would cascade to in short writes: it sets `audit_events.repo_id` to NULL in
   batches of 1000 through `audit_events_repo`, and runs the `repos.Purge` that each module with
   rows of a repo registers (`Repos.OnPurge`; one batch of at most 1000 rows per statement, children
-  first: docker, npm, pypi, debian, cargo, nuget, publish sessions and Nexus mappings) until it
+  first: docker, npm, pypi, debian, arch, cargo, nuget, publish sessions and Nexus mappings) until it
   deletes nothing. Then it deletes the repo row (the operation and the few rows left go with it)
   and records `repo.delete`. A failure sets `failed` with the error and keeps the operation; a
   server stop leaves it `running`, and the job `core.ops` continues running deletes at startup.
@@ -1923,6 +1942,57 @@ follow one for downloads, but uploads, `npm publish`, `docker push` and apt do n
 9. **Delete.** The format's `OnRemoved` deletes the `deb_packages` rows of each removed pool file and
    marks the affected units. During a repo delete the module's `repos.Purge` deletes the package
    and index rows in batches before the repo row goes.
+
+## Arch Linux (pacman)
+
+`internal/arch`, format `arch`, hosted and proxy repos. pacman installs from
+`Server = HOST/arch/$repo/$arch` under the section `[<repo>]`.
+
+1. **Upload.** `PUT|POST /arch/{repo}/upload` (or the web UI upload) spools the file. One pass
+   reads it: the raw bytes feed a SHA-256 whose state the row keeps (`sig_state`), the
+   decompressed stream (zstd, xz or gzip, told by its first bytes) is read as tar: `.PKGINFO`
+   (at most 1 MiB) is parsed, every other entry not starting with `.` goes into the file list
+   (sorted, once each; folders end in `/`). Limits: 200,000 entries, 64 MiB of paths, and
+   decompressed bytes at most 100 times the file or 1 GiB, whichever is more; past one, 400.
+2. **Validation.** `pkgname` (`^[a-z0-9@_+][a-z0-9@._+-]{0,127}$`), `pkgver` (`[epoch:]pkgver-pkgrel`),
+   `arch` (`any` or one of the repo's `architectures`, default `x86_64, aarch64`), `pkgtype` empty,
+   `pkg`, `split` or `debug`. The config validates `architectures`: a non-empty list of distinct
+   names matching `^[a-z0-9_]{1,32}$`, not `any` or `pool`; `signing_key` in the config is 400.
+3. **Commit.** The file name comes from `.PKGINFO`: `<name>-<version>-<arch>.pkg.tar.<ext>` in
+   `pool/<name>/`. One `CommitAll` writes the package (extra lock `arch:<name>/<version>/<arch>`)
+   and its signature `.sig`, made from the hash state with the repo's key. `Admit` keeps the same
+   version with the same bytes (200) and refuses other bytes (409); a signature that is there
+   stays. `OnCommitted` writes the `arch_packages` and `arch_package_files` rows and, for the
+   package's architecture (every configured one for `any`), takes the `arch_db_entries` entry of
+   the name when its version is newer, or the same version for the architecture itself over
+   `any`; it marks each architecture whose entry changed.
+4. **Indexes.** The rebuild of an architecture streams its entries in name order and writes
+   `index.db` (a folder `<name>-<version>/` with `desc` per entry) and `index.files` (`desc` and
+   `files`), each a tar in one gzip stream, with binary detached signatures, in one commit. The
+   `desc` entry has repo-add's fields in its order, without `%PGPSIG%` (pacman fetches the `.sig`
+   beside each package). A rebuild costs the package names of one architecture, not their
+   versions, once per debounced batch; measured at 10,000 names: 40 ms for the db (672 KB) and
+   83 ms for the files index (1.7 MB). A request for an index reads a stored file.
+5. **URLs.** A hosted repo answers `{arch}/<seg>.db`, `.db.sig`, `.files` and `.files.sig` with
+   `{arch}/index.*`, where `<seg>` is the repo name the request used, so a section named before a
+   rename keeps working through the redirect; and `{arch}/<file>[.sig]` of a package of that
+   architecture or `any` with `pool/<name>/<file>`, the name being the file name without its last
+   three `-` parts. `arch.ServedPath` maps on the server, `pacmanPath` in the edge Worker.
+6. **Architectures.** An added architecture is marked `fill`: its rebuild writes its entries from
+   the packages of that architecture and `any` (the newest of each name), then the index. A removed
+   architecture's rebuild deletes its entries and its `{arch}/` index files; its packages stay in
+   `pool/`.
+7. **Signing.** A change of `signing_key` marks `sign`: its rebuild writes every `.sig` again from
+   the saved hash states, 500 packages a commit, then marks every architecture's index.
+8. **Delete.** `OnRemoved` deletes the rows of each removed package, removes its `.sig` with it, and
+   gives each entry that named it to the newest package of the name left in that architecture or
+   `any` (or drops it), and marks those architectures. Deleting a `.sig` alone while its package
+   stays is 400. An index file that someone deletes comes back with the next change of its
+   architecture. A repo delete purges the entries, then the packages, in batches. Every version
+   stays until someone deletes it; the index lists the newest of each name, and an older one
+   installs with `pacman -U` of its pool URL.
+9. **No groups.** pacman.conf lists several repositories itself and takes a name from the first
+   section that has it; a group would need a merged index, signed again on every member's change.
 
 ## Storage move
 
@@ -2089,10 +2159,12 @@ the repo object, and a repo delete marks every user object. User and device IDs 
 
 **Formats.** A format opts in with `format.Spec.Edge`: the shape (`standard`:
 `/<format>/<repo>/<path>`; `oci`: `/v2/<repo>/<image>/manifests/<ref>` and
-`/v2/<repo>/<image>/blobs/sha256:<hex>`) and `format.Glob` patterns. A path is immutable when it
+`/v2/<repo>/<image>/blobs/sha256:<hex>`; `pacman`: `standard`, then a hosted repo's path mapped by
+`pacmanPath` in `edge/src/shapes.ts`, the rule of `arch.ServedPath`) and `format.Glob` patterns. A path is immutable when it
 matches an `Immutable` glob and no `Mutable` glob. maven: immutable `**/*`, mutable
 `**/maven-metadata.xml*` and `**/*-SNAPSHOT/*`; debian: immutable `pool/**/*` and
-`dists/**/by-hash/**/*`; docker (`oci`): immutable `**/_manifests/sha256/*` and
+`dists/**/by-hash/**/*`; arch (`pacman`): immutable `**/*.pkg.tar.*`, mutable `**/*.sig` (a key
+change signs every package again); docker (`oci`): immutable `**/_manifests/sha256/*` and
 `**/_blobs/sha256/*` (tags are mutable); npm: immutable `**/-/*.tgz` (packuments are rendered
 per request and have no pointer, so the Worker sends them to the server); nuget: immutable
 `v3-flatcontainer/*/*/*.nupkg` and `v3-flatcontainer/*/*/*.nuspec` (the documents are rendered per
@@ -2524,7 +2596,9 @@ the local one, so `edge.access_ttl` (default 30 s, 0 to 5 min) is the bound.
 - *Formats.* maven: releases from the regions, `maven-metadata.xml*` and snapshots through the home
   pointer; checksum files are assets and serve like any file. debian: `pool/**` and `by-hash/**`
   from the regions, `Release`, `InRelease` and `Packages*` through the home pointer (apt with
-  `Acquire-By-Hash` reads the indexes by hash, so most bytes come from the region). docker:
+  `Acquire-By-Hash` reads the indexes by hash, so most bytes come from the region). arch: packages from
+  the regions, the indexes and signatures through the home pointer; a Worker that does not know the
+  shape `pacman` leaves the format out, and the server answers it. docker:
   manifests by digest and blobs from the regions, manifests by tag through the home pointer; a pull
   still gets its token from the server (`/v2/` and `/docker/token`) once, and a CI identity pull
   carries an anonymous bearer, so the edge serves it only on an anonymous-read repo. A cached proxy
@@ -2974,7 +3048,7 @@ is unreachable.
 
 ## Group and proxy repositories
 
-A format takes proxy repos when its `format.Spec.Kinds` lists `proxy` (Maven, Debian, Docker, npm,
+A format takes proxy repos when its `format.Spec.Kinds` lists `proxy` (Maven, Debian, Arch, Docker, npm,
 PyPI, Cargo, NuGet; it then sets `Classify` and `ProxyProbe`) and group repos when it lists `group`
 (Maven, Docker, npm, PyPI, Cargo, NuGet). npm, PyPI, Cargo and NuGet render their group documents
 themselves: the first member that has a package owns its name (`assets.Reader.Owner`, see each
@@ -3035,7 +3109,7 @@ are dropped from memory, and the server logs the repo ids.
 
 - The remote URL is http or https, has no user, query or fragment, and ends with `/`. A new proxy
   checks its remote once: a GET of the format's probe (`format.Spec.ProxyProbe`: the root for
-  Maven, `dists/<distribution>/InRelease` for Debian, with `stable` when the config names no
+  Maven and Arch, `dists/<distribution>/InRelease` for Debian, with `stable` when the config names no
   `distribution`, `/v2/` for Docker). The root passes with any answer except 401, 403, 407 and 5xx;
   a probe file must exist. A format with `RemoteAuth` answers a 401 challenge of the check too; a
   token realm that refuses the credentials fails the check ("the remote refused the username and
@@ -3052,7 +3126,8 @@ are dropped from memory, and the server logs the repo ids.
   which `Unchanged(head, cached)` is true only sets `checked_at`, else a GET). Maven
   `maven-metadata.xml*` and files under a `-SNAPSHOT` folder change, the rest is immutable;
   Debian `pool/**` and `dists/**/by-hash/**` are immutable, the rest of `dists/**` changes, other
-  paths are refused (404). Docker: see **Docker registry**.
+  paths are refused (404). Arch: a package file and its `.sig` are immutable, every other path changes.
+  Docker: see **Docker registry**.
 - A read goes through the usual gate. A cached file that is immutable, or changing and checked
   within `metadata_ttl`, serves from storage (with the presigned redirect on S3). Otherwise the
   server fetches the remote path, with `If-None-Match` (the stored ETag) and
@@ -3106,6 +3181,10 @@ are dropped from memory, and the server logs the repo ids.
   holds the credentials.
 - A Debian proxy serves the remote's files unchanged: no indexer, no signature of its own.
   Clients keep the remote archive's key. Its apt snippet has no key step and no `signed-by`.
+- An Arch proxy serves the remote's paths unchanged (no mapping of pacman's URLs): a proxy of an Arch
+  mirror is `Server = HOST/arch/<proxy>/$repo/os/$arch`, a proxy of a Telesphorepo Arch repo
+  `Server = HOST/arch/<proxy>/$arch` under the remote repo's section name. pacman checks the
+  remote's signatures with the keys it trusts for the remote (e.g. `archlinux-keyring`).
 - Deleting files of a proxy (Files tab, admin) works; the next request fetches them again.
 
 ## PyPI
@@ -3879,7 +3958,7 @@ the capabilities of the repo's `format.Spec` that are set.
   meanwhile. Each removes the files batch by batch, empties the rows of the repo in batches, then
   deletes the repo row. The UI waits for each repo to answer 404 and shows the progress in a toast. The name can be used again afterwards.
 - **`format.Spec.OnRemoved` and `AfterRemove`.** `OnRemoved(ctx, tx, repo, removed, prefixes)` runs in
-  the transaction of each batch, before the rows go, with the folders of the removal; Debian,
+  the transaction of each batch, before the rows go, with the folders of the removal; Debian, Arch,
   Docker and Maven use it (see **Debian indexing
   pipeline**, **Versions and builds**). Maven's `AfterRemove` writes the artifact's `maven-metadata.xml` again (and the
   checksum files it has), with the version folders that still hold files, so a deleted version
@@ -3930,6 +4009,9 @@ the capabilities of the repo's `format.Spec` that are set.
     `main`), through the normal ingest. The plan reads the first 1 MiB of each `.deb` for its
     control data and names its pool path; a package whose control data lies past it is checked
     when the whole file arrives. Other files are left out; one that does not parse is a problem.
+  - **Arch.** `.pkg.tar.zst`, `.xz` and `.gz` files through the normal ingest; no field. The plan
+    reads the first 1 MiB of each for `.PKGINFO` and names its pool path; a package whose `.PKGINFO`
+    lies past it (nfpm writes it after the files) is checked when the whole file arrives.
   - **Raw.** The field `folder` (first value: the open folder), under the overwrite policy of
     each path. Each file is one item, stored at `folder/<relative path>`.
 
@@ -4062,17 +4144,23 @@ binding into memory at start, and request paths and the indexers read that copy.
   use it publish indexes without a signature.
 - **Create or import.** An admin creates an Ed25519 key, or imports an armored private key. An
   encrypted key needs its passphrase. The stored copy has no passphrase.
-- **Use.** A format with `format.Spec.SigningKey` (its module requires `signing`; Debian) binds
+- **Use.** A format with `format.Spec.SigningKey` (its module requires `signing`; Debian and Arch) binds
   each of its hosted repos to a key: the repo field `signing_key` (a `repos.Field`, default
   `default`), a row of `repo_signing_keys` with a foreign key to the key. A proxy and a group
   sign nothing, so they have no `signing_key`; one in `fields` gives 400. `POST /api/repos` and
   `PATCH /api/repos/{name}` take it in `fields`; an unknown key gives 400. A bind records
   `signing.key.bind`. The key is not a config key: a config with `signing_key` gives 400.
-- **Public key.** `GET|HEAD /debian/{repo}/key.asc` returns the armored public key of the repo's
+- **Public key.** `GET|HEAD /debian/{repo}/key.asc` and `/arch/{repo}/key.asc` return the armored public key of the repo's
   key. It follows the read rules of the repo: anyone for a public repo, credentials for a private
   repo.
 - **Change of key.** When a repo changes its key, only that repo is signed again: every `Release`,
-  `InRelease` and `Release.gpg` of the repo is written again.
+  `InRelease` and `Release.gpg` of the repo is written again; an Arch repo signs every package
+  again from its saved hash state (no package is read), then every index.
+- **Arch.** Packages are signed with `Signer.SignSHA256State`: a binary OpenPGP version 4
+  signature (SHA-256) made from the SHA-256 state saved at the upload. A version 6 key cannot sign
+  that way (its signature hashes a salt first), and GnuPG in pacman reads no version 6 signature:
+  a repo bound to one logs the error and leaves its packages unsigned, as for a missing key. The
+  indexes have binary detached signatures (`DetachSignBinary`).
 - **Delete.** `DELETE /api/signing-keys/{name}` checks the use inside the write transaction. It
   answers 409 `{error, repos}` while a repo uses the key; the foreign key (`ON DELETE RESTRICT`)
   refuses it too.
@@ -4248,8 +4336,8 @@ page are in `web/src/README.md`.
   Nexus sync). A repository delete follows its operation in a toast the same way.
 - **Icons.** An icon marks a meaning (format, lock, state) and sits bare, never in a tinted square.
   Each format supplies its own SVG (`format.Spec.Icon`, returned by `GET /api/formats`):
-  the Maven feather, the Gradle elephant for Gradle plugins, the Debian swirl and a file glyph for
-  raw. The UI reserves the icon's space before the format list loads.
+  the Maven feather, the Gradle elephant for Gradle plugins, the Debian swirl, a peak for Arch
+  (not the Arch Linux logo) and a file glyph for raw. The UI reserves the icon's space before the format list loads.
 - **Dialogs and pages.** An action that does not need to stay on screen opens a dialog: change
   password, add a person, add a Nexus server, create a token, delete a repository (the dialog asks
   for the repository name). A card never holds a lone action button. A flow with several sections
@@ -4419,12 +4507,23 @@ page are in `web/src/README.md`.
     A page of versions seeks from one version to the next through `deb_package_order_page` and
     reads the files of each version's newest build and counts its builds (index entries only); a
     page of builds reads the rows of its builds and stops after the page.
+  - *Arch:* the format reads `arch_packages` through `arch_packages_order`. An artifact folder is
+    `pool/<name>/`; `Artifact.Kind` is `package`. A version is the full pacman version
+    (`[epoch:]pkgver-pkgrel`) with one build, whose files are its packages, one per architecture
+    (`classifier` the architecture, `extension` the compression, e.g. `pkg.tar.zst`). Versions sort
+    in pacman's order (`vercmp`: epoch, pkgver, pkgrel, each by `rpmvercmp`, so `1.0a` < `1.0` <
+    `1.0+git1` < `1.0.1`); the byte key disagrees with `vercmp` only where `vercmp` is not
+    transitive, a part that ends in separators against letters after separators (`1a.`,
+    `1a.b`). A page of versions seeks from one version to the next.
   - `published_at` is the newest update time of the build's files, and `build` is the CI build
     record of its main file (else of any file); null when none.
   - Snippets of a Debian package: the apt setup for the distribution and component of the package,
     then the install. A release and a build (a `.deb` file) are pinned
     (`apt-get install urn=3.0~SNAPSHOT.20261014211855`); a snapshot version and the latest mode
     install `urn` without a version, so apt takes the newest.
+  - Snippets of an Arch package: the pacman setup (key, section, credentials of a private repo),
+    then `sudo pacman -Syu <name>` (latest), or the download of the version's file and its `.sig`
+    and `sudo pacman -U` of it (pinned).
   - A delete of a version removes its `folder` when it has one (Maven, NuGet), with no request for
     its builds. Else (Debian) it removes the files of all its builds, read 200 builds a page.
   - A `?build=` in the address that the loaded pages of builds lack is read with `build=<id>` of
@@ -4471,7 +4570,7 @@ page are in `web/src/README.md`.
     (CI pipelines over a CI pipeline, Repositories over a repository's settings). A page of the
     sidebar has none: the sidebar is the way to it. There are no breadcrumbs.
 - **Repository settings.** A page with the tabs Overview, Access, Format settings and Signing
-  (Debian). Overview, Format settings, Signing and Remote need `repo.settings`; Access needs a permission
+  (Debian, Arch). Overview, Format settings, Signing and Remote need `repo.settings`; Access needs a permission
   that manages the repository (`repo.access`, `repo.settings`, `ci.pipelines`, ...). A person sees only the tabs they can open, and a link to a tab they
   cannot open goes to their first tab. The header shows the name with a lock for a private repo.
   **Delete** (`repositories.all`) is an action at the end of the header, on every tab; it opens a dialog that
@@ -4519,7 +4618,7 @@ page are in `web/src/README.md`.
     it. A proxy asks for the remote address (with the well-known remotes as choices) and optional
     credentials, and offers **Create anyway** when the check of the remote fails. A group picks its
     members, hosted first. A repository asks for name, format (with the format icon),
-    description, visibility. Debian adds architectures and the signing key. For a new key, the page
+    description, visibility. Debian and Arch add architectures and the signing key. For a new key, the page
     calls `POST /api/signing-keys` and then `POST /api/repos`. If the second call fails, the page
     deletes the new key. **Create** is in the footer of the last card.
 - **People** (`people.manage`). A list shows each account with its avatar, its name and its role as
@@ -4740,6 +4839,7 @@ timestamps follow them.
 | `maven` | anonymous read | About 150,000 files. 400 groupIds of 2 to 4 segments from word lists (e.g. `io.northwind.billing.cli`), 3 to 60 artifacts each (a few groups are large), 1 to 40 versions each (most have few). Each version has a valid pom, jar and sources jar (minimal zips), sometimes a javadoc jar and Gradle `.module`, and real `.md5`/`.sha1`/`.sha256` files. Each artifact has a `maven-metadata.xml` with `latest` and `release`. Some artifacts end in a `-SNAPSHOT` with timestamped files and version metadata. 30 Gradle plugins have their `<id>.gradle.plugin` marker artifacts |
 | `internal` | private | About 2,000 files of the same shape. `lena` reads it; `jonas` writes it |
 | `debian` | anonymous read | About 300 binary packages from about 100 sources, 1 to 5 versions each, as real `.deb` files for `amd64` and `arm64` or `all`. They go through the format's upload pipeline into `stable/main`, so the indexes and signed `Release` files are valid |
+| `arch` | anonymous read | Four packages written by the module, two or three versions each (one with an epoch), for `x86_64` and `aarch64` or `any`, through the format's upload pipeline, so the indexes and signatures are valid |
 | `npm` | anonymous read | About 40 packages (a third under `@acme`), 1 to 6 versions each, some ending in a `-beta.1`, as real tarballs through the format's upload step |
 | `nuget` | anonymous read | About 120 `.nupkg` files: 20 `Contoso.*` packages, some with `.Abstractions`, `.Testing` and `.AspNetCore` packages that depend on them, 1 to 6 versions each (some prereleases), pushed through the format's push |
 | `pypi` | anonymous read | 40 projects (`<company>-<word>`), 1 to 6 versions each, each version an sdist and a pure-Python wheel built by the module, stored through the upload pipeline with their `.metadata` |
@@ -4760,7 +4860,8 @@ migrations of every component to a temporary database and runs the plan guard. `
 `TR_DATA_DIR`. For the format of every module with a seed (`Extender.Seed`), it creates the repos
 `seed-<format>-00` to `seed-<format>-09` (anonymous read, default config) and splits N rows
 evenly over all of them in transactions of 10,000. Each format inserts its own rows: maven
-and raw insert asset rows, debian inserts one package and its asset row per unit, pypi one sdist with its
+and raw insert asset rows, debian inserts one package and its asset row per unit, arch one package with its asset, file
+list and index entries (half `any`), pypi one sdist with its
 project and file rows per unit. Then it runs
 `ANALYZE`. It is safe to run again.
 
@@ -4813,13 +4914,13 @@ second again. The containers that share the Maven cache volume lock it with file
 build with `E2E_SKIP_BUILD=1`, or override the image with `E2E_IMAGE`). It runs real `mvn`,
 `gradle` and `apt` clients in containers against the server. A test whose subject is the store
 runs on `fs` and on SeaweedFS S3 (`ForEachStorage`, `E2E_SEAWEEDFS_IMAGE`): the byte path of each
-format (`TestMaven`, `TestRaw`, `TestDebian`, `TestDockerRegistry`, `TestNPM`), the presigned redirects and
+format (`TestMaven`, `TestRaw`, `TestDebian`, `TestArch`, `TestDockerRegistry`, `TestNPM`), the presigned redirects and
 their cache headers (`TestCacheControl`, `TestBulkRepos`, `TestBulkFiles`), deletes (`TestDelete`),
 the blob GC (`TestBlobDedupeAndGC`, `TestDockerGC`), the uploads of the CLI (`TestCLIUpload`) and
 the Nexus import. Every other test runs once, on `fs` (`OnLocalDisk`). The engine
 comes from `internal/containerengine`; `TR_ENGINE=docker|podman` forces one. The images of the
 tools that people bring float (`e2e/images_test.go`): Maven (`maven:3`), Gradle, Debian
-(`stable`), curl, Helm, Docker (`docker:dind`), crane, skopeo, the reference registry, Keycloak,
+(`stable`), Arch Linux (`archlinux:latest`), nfpm (`goreleaser/nfpm`), curl, Helm, Docker (`docker:dind`), crane, skopeo, the reference registry, Keycloak,
 Nexus, the install images (`buildpack-deps:curl`, Alpine), Node (`node:lts`, with pnpm and Yarn 4
 through corepack), Bun (`oven/bun`) and the newest ORAS release. The npm tests: `TestNPM` (npm
 publish of a plain and a scoped package, installs with npm, pnpm and Yarn, both stores),
@@ -4850,7 +4951,7 @@ inside a server container. `migrations_test.go` covers `TestMigrations`, a real 
 `TestCacheControl`: HEAD, a 304 and a GET of a private Maven repo, of a public group with a
 private member (also for the public member's file) carry `Cache-Control: private`; a public repo
 and a group of public members carry none (an S3 redirect carries `no-store`); after a read IP rule
-that allows every address, the public repo and the group of it carry `private`. `proxy_test.go` covers `TestProxy` with a second Telesphorepo server as the remote: `mvn` through the proxy and no remote request on the second resolve, the `metadata_ttl` recheck with a 304 and a changed file, a remembered 404, 405 for a PUT, a group where the hosted member wins over the proxy, remote credentials (with them, 502 without them), a Caddy container that redirects to another host and refuses a request that carries credentials, `apt-get` through a Debian proxy with the remote's key, and a stopped remote (cached file served, 502, `last_error`, and a stale `maven-metadata.xml` that serves twice with one remote attempt in the log). `TestProxyStream` (both stores) checks that the first GET of an uncached 24 MiB file streams (the remote's length, no `ETag` yet) with the remote's bytes, that a later GET serves the stored file, and that three concurrent GETs of another uncached file get its bytes with one remote GET. `TestNoBrowserPasswordPrompt` (in `auth_test.go`) checks that a 401 under `/api` or with `X-Telesphorepo-UI` has no `WWW-Authenticate`. `folder_upload_test.go` covers `TestFolderUploadMaven` (a Maven-layout tree with checksum, signature and stray files; a flat folder with two poms; a bad tree that gives 400; plans store nothing; checksums and metadata) and `TestUploadHeadsAndChunks` (a plan with held heads and no parts; 409 for unknown heads, the heads of another session and another size; an upload whose part `uploads` names a resumable upload: 404 unknown, 400 another size, 201 with a file of the request). `TestStorageMove*` run each server on a named data volume: fs to
+that allows every address, the public repo and the group of it carry `private`. `proxy_test.go` covers `TestProxy` with a second Telesphorepo server as the remote: `mvn` through the proxy and no remote request on the second resolve, the `metadata_ttl` recheck with a 304 and a changed file, a remembered 404, 405 for a PUT, a group where the hosted member wins over the proxy, remote credentials (with them, 502 without them), a Caddy container that redirects to another host and refuses a request that carries credentials, `apt-get` through a Debian proxy with the remote's key, `pacman` through an Arch proxy with the remote's key, and a stopped remote (cached file served, 502, `last_error`, and a stale `maven-metadata.xml` that serves twice with one remote attempt in the log). `arch_test.go` covers `TestArch` (both stores: pacman in `archlinux:latest` installs nfpm packages from a private repo with `SigLevel = Required`, upgrades, `pacman -F`, `pacman -U` of an older version's pool URL, a lone `.sig` delete refused, the older version back after the newer one's delete, the old section name after a rename), `TestArchRules` (400 for an unlisted architecture, a version without pkgrel, a file that is not a package and a decompression bomb; an `any` package in an added architecture's index, a removed architecture's index gone; the Versions order against `vercmp` on every pair of hard versions) and `TestArchSigning` (pacman refuses an untrusted key; after a change to an imported RSA key a client that trusts only the old key refuses the repo, and one that trusts the new key installs). `TestProxyStream` (both stores) checks that the first GET of an uncached 24 MiB file streams (the remote's length, no `ETag` yet) with the remote's bytes, that a later GET serves the stored file, and that three concurrent GETs of another uncached file get its bytes with one remote GET. `TestNoBrowserPasswordPrompt` (in `auth_test.go`) checks that a 401 under `/api` or with `X-Telesphorepo-UI` has no `WWW-Authenticate`. `folder_upload_test.go` covers `TestFolderUploadMaven` (a Maven-layout tree with checksum, signature and stray files; a flat folder with two poms; a bad tree that gives 400; plans store nothing; checksums and metadata) and `TestUploadHeadsAndChunks` (a plan with held heads and no parts; 409 for unknown heads, the heads of another session and another size; an upload whose part `uploads` names a resumable upload: 404 unknown, 400 another size, 201 with a file of the request). `TestStorageMove*` run each server on a named data volume: fs to
 SeaweedFS and back with uploads during the move, a forced failure, a restart mid-move
 (`Server.Restart`) and a cancel. The restart and the cancel hold the move on a SeaweedFS of their own
 (`StartOwnSeaweedFS`): once the move has copied a blob, the test pauses that container, so the
@@ -5213,11 +5314,12 @@ Where each part of the code lives, and the steps to add a module, a repo format 
 | Client IP, IP lists, repo IP rules | `internal/netrules` (module `network`: `lists.go`, `rules.go`, `clientip.go`, `module.go`), `web/src/pages/settings/repos/` (Access tab), `web/src/pages/server/IPLists.svelte`, `IPListPage.svelte`, `ReverseProxy.svelte` |
 | Docker / OCI registry | `internal/docker` (module `docker`: `routes.go` at `/v2/`, `token.go` the token endpoint `/docker/token`, `manifests.go`, `blobs.go`, `lists.go`, `referrers.go`, `hooks.go` (the rows of `migrations/`), `links.go` the job `docker.links`, `proxy.go` the proxy (`Classify`, `RemoteAuth`, tags list) and group tags, `usage.go` and `tools.go` the snippets and the CI tool, `versions.go`, `api.go` `/api/docker/{name}/manifest`, `importer.go` the Nexus import, `demo.go`, `seed.go`); UI part `web/src/modules/docker/`; e2e in `e2e/docker_test.go`, `e2e/docker_proxy_test.go`, `e2e/nexus_docker_test.go` and `e2e/cli_docker_test.go` (clients zone), with `StartDind` and `Dind.CopyFile` in `e2e/clients_test.go` and the OCI helpers in `e2e/oci_test.go` |
 | Telesphorepo CLI and its Docker credential helper | `cmd/telesphorepo` (MIT, its own `LICENSE`; stdlib, `golang.org/x/sys`, `BurntSushi/toml` and the root package `changelog` only; imports no server package): `main.go` the commands and the error handling, `setup.go`, `publish.go`, `detect.go` the detection table (a new format adds a row), `upload.go` raw and Debian uploads, `login.go` login, logout and status, `update.go`, `compat.go` the change log check, `problem.go` problem documents and remedies, `client.go` the HTTP client, the device flow and the mints, `ci.go` the CI token, `project.go` `telesphorepo.toml`, `docker.go` the helper mode (program name `docker-credential-telesphorepo`), `identity.go`, `device.go`, `exchange.go`, `dockerconfig.go`, `acl_*.go`, `parent_*.go`, `tty_*.go`; built and embedded by `tools/task/cli.go`, released by `tools/task/release.go` |
-| Signing keys | `internal/signing/keys.go`, `internal/signing/module.go` (the repo field `signing_key`), `GET /debian/{repo}/key.asc` in `internal/debian`; UI in `web/src/pages/server/SigningKeys.svelte` and `web/src/modules/signing/` |
+| Signing keys | `internal/signing/keys.go`, `internal/signing/module.go` (the repo field `signing_key`), `internal/signing/signing.go` (`SignSHA256State`, `DetachSignBinary`), `GET /debian/{repo}/key.asc` in `internal/debian` and `/arch/{repo}/key.asc` in `internal/arch`; UI in `web/src/pages/server/SigningKeys.svelte` and `web/src/modules/signing/` |
 | Upload plan and upload | `Plan` and `Store` of the format (`format.Spec.Upload`), e.g. `internal/maven/plan.go`; routes in `internal/api/files.go`; UI in `web/src/pages/repo/UploadView.svelte` and `upload/` |
 | Snippets, CI files | `Usage` and `Tools` of the format (`format.CLITool`, `format.CLISnippet`); `internal/ci/workflow.go` (the GitHub Actions, Jenkinsfile and Jenkins freestyle builders, each with the install step of the CLI) |
 | Audit log | `internal/audit` (registry, `Record`), `internal/activity` (module `audit`: `GET /api/audit`), `web/src/pages/server/Activity.svelte` (its time ranges in `activity/range.ts`) |
 | Download statistics | `internal/stats` (the counters), `assets.Reader.SetDownloads` and the count calls of the read path, `internal/activity` (`GET /api/stats`, the jobs), `web/src/pages/settings/overview/DownloadBars.svelte` |
+| Arch Linux (pacman) | `internal/arch` (module `arch`: `arch.go` the routes, `ServedPath` and `Classify`, `pkg.go` the parse of a package and its `desc`, `upload.go` the ingest, `Admit`, `OnCommitted` and the web UI upload, `index.go` the rebuild (indexes, `fill`, `sign`), `delete.go`, `order.go` the version key, `versions.go`, `usage.go` the snippets and the package details, `api.go`, `demo.go`, `seed.go`); `pacmanPath` in `edge/src/shapes.ts`; UI part `web/src/modules/arch/`; e2e in `e2e/arch_test.go`, `e2e/arch_helpers_test.go` (nfpm builds, the `Pacman` container), the Arch proxy in `TestProxy` and the CLI in `TestCLIUpload` |
 | Edge delivery | `internal/edge` (module `edge`: `module.go` buckets and routes, `settings.go` the group `edge`, `objects.go` the R2 objects, `watcher.go` the pipeline watcher, `outbox.go` the job `edge.outbox`, `access.go` the access objects, the change notices and `edge.reconcile`, `control.go` the job `edge.backfill` (on, off, draining, regions, blob check), `paths.go` the path classes of a format with `EdgeSpec.Paths` and the job `edge.reclass`, `gap.go` and `seen.go` what the Worker writes, `speedtest.go` the passes and files of the speed test, `deploy.go` the deploy from the server and the job `edge.deploy`, `cloudflare.go` its client of the Cloudflare API, `wrangler.go`, `api.go` with the download `worker.zip`); `format.Spec.Edge` of each format; the Worker in `edge/` (`src/index.ts` fetch, `shapes.ts`, `glob.ts` the port of `format.Glob`, `access.ts`, `serve.ts`, `copy.ts` queue, `gap.ts` cron, `speedtest.ts` the pass of the speed test, `scripts/provision.ts`); the Worker folder that the server embeds (`internal/edgedist`) and the release archive, both from `tools/task/edge.go`; UI in `web/src/pages/server/EdgeDelivery.svelte` and `web/src/modules/edge/`; e2e of the Worker download in `e2e/edge_test.go` and of the pointers of path rules in `e2e/edge_paths_test.go`, of the deploy from the server without a Cloudflare account in `e2e/edge_deploy_test.go`, none of the serving (local R2 differs from R2 in what the edge relies on) |
 | Backups and restore | `internal/backup` (module `backup`: `backup.go` one backup, `list.go` the list and the retention, `restore.go`, `offline.go` the source of the CLI, `module.go` settings, job and routes), the core queries in `internal/db/queries/backup.sql`, `db.VacuumInto` and `db.OpenReadOnly`, the commands in `cmd/telesphorepo-server/backup.go`, `web/src/pages/server/Backups.svelte` and `web/src/modules/backup/`; e2e in `e2e/backup_test.go` |
 | Storage move (FS ↔ S3) | `internal/move` (module `storage`: service, copier, `module.go`), `internal/storage/mirror.go`, `web/src/pages/server/Storage.svelte` |
@@ -5279,7 +5381,8 @@ the format lacks.
 - **Import:** `Importer` (`Sources`, `Target`, `Store`, `Plan`): the Nexus import offers each
   source file to the format.
 
-`raw` (`internal/raw`) is the smallest example. `debian` shows a schema, a repo field, `Rebuild`
+`raw` (`internal/raw`) is the smallest example. `arch` shows a read route that maps pacman's
+URLs to stored paths, with the same rule in the edge Worker (`EdgePacman`). `debian` shows a schema, a repo field, `Rebuild`
 and an importer plan. `maven` shows proxy, group, `Merge`, `Upload` and `Tools`.
 
 ### Adding a UI page

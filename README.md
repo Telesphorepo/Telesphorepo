@@ -1,9 +1,10 @@
 # Telesphorepo
 
 A small self-hosted package repository for Maven and Gradle artifacts, npm packages, Python
-packages, Rust crates, NuGet packages, container images and Helm charts (OCI), Debian packages and
-raw files. Each format has hosted repos; every format but raw also takes proxies of a public
-registry, and every format but raw and Debian takes groups that put several repos behind one URL.
+packages, Rust crates, NuGet packages, container images and Helm charts (OCI), Debian packages,
+Arch Linux packages and raw files. Each format has hosted repos; every format but raw also takes
+proxies of a public registry, and every format but raw, Debian and Arch takes groups that put
+several repos behind one URL.
 It is a single Go binary with a web UI, and
 stores files on local disk or in any S3-compatible bucket.
 
@@ -18,9 +19,9 @@ go tool task dev
 
 Open **http://localhost:5173**. The startup banner prints the admin username and password and
 some client snippets. The first run fills the instance with the same demo data each time, before the
-server starts: about 150,000 Maven files, and npm, Python, Rust, NuGet and Debian packages, raw
+server starts: about 150,000 Maven files, and npm, Python, Rust, NuGet, Debian and Arch packages, raw
 files and container images, in the public repos `maven`, `npm`, `pypi`, `crates`, `nuget`,
-`debian`, `raw` and `docker`, a
+`debian`, `arch`, `raw` and `docker`, a
 private Maven repo `internal`, and five demo users (their passwords are in the banner). To start with
 empty repos, run the binary as `telesphorepo-server dev --empty` on a fresh data dir. Data lives in
 `.telesphorepo-dev/`; delete it to start over. Press Ctrl+C to stop. The dev server does not enforce the second factor.
@@ -41,7 +42,7 @@ download against `SHA256SUMS`, unpack it, and run `./telesphorepo-server serve`.
 - **Admin password:** on first start the server prints a generated `admin` password once to
   the container log (`docker logs <container>`).
 - **Configuration:** sign in, then set up storage (local disk or S3/R2), the public URL, and
-  the rest on the **Settings** page. The server creates a Debian signing key named `default` on the first start. Changes apply without a restart, and
+  the rest on the **Settings** page. The server creates a signing key named `default` for Debian and Arch repos on the first start. Changes apply without a restart, and
   secrets are stored encrypted.
 - **Single sign-on:** people can sign in through an OIDC provider (Keycloak, Entra, Google...).
   Set the issuer and the client under **Settings > Server > Sign-in options**, and register
@@ -213,7 +214,7 @@ environment. The build files stay as they are.
 | PyPI | `pyproject.toml`, `setup.py` | `poetry build`, `uv build` or `python -m build`, then uploads each file |
 | Cargo | `Cargo.toml` | `cargo publish` |
 | Docker | `Chart.yaml` | `helm package`, then `helm push` |
-| Raw, Debian | the files you name | uploads them: `telesphorepo publish build/app.zip` |
+| Raw, Debian, Arch | the files you name | uploads them: `telesphorepo publish build/app.zip` |
 
 A teammate who clones the project runs `telesphorepo publish` and approves the computer in the
 browser once.
@@ -264,6 +265,15 @@ echo "deb [signed-by=/etc/apt/keyrings/telesphorepo.asc] https://packages.exampl
   | sudo tee /etc/apt/sources.list.d/telesphorepo.list
 ```
 
+pacman (the server signs every package and index with the repo's key):
+
+```sh
+curl -fsSL https://packages.example.com/arch/arch/key.asc -o /tmp/arch.asc
+sudo pacman-key --add /tmp/arch.asc && sudo pacman-key --lsign-key <fingerprint on the repo page>
+printf '\n[arch]\nSigLevel = Required\nServer = https://packages.example.com/arch/$repo/$arch\n' \
+  | sudo tee -a /etc/pacman.conf
+```
+
 dotnet reads the source `https://packages.example.com/nuget/nuget/index.json` from `nuget.config`
 (the repo page shows the file, with the credentials of a private repo).
 
@@ -282,7 +292,7 @@ server sends their layer uploads to the upload address. ORAS and Helm 4 push to 
 address by name. A docker repo can also be a proxy of another registry
 (Docker Hub, GHCR, Quay) or a group.
 
-The repo page in the UI shows the snippets for each repo. Gradle, private apt repos, the API and
+The repo page in the UI shows the snippets for each repo. Gradle, private apt and pacman repos, the API and
 everything else: [SPEC.md](SPEC.md).
 
 ## License
