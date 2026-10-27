@@ -246,7 +246,7 @@ func StartDnf(t testing.TB, image string) *Dnf {
 		t.Fatalf("start the dnf container %s: %v", image, err)
 	}
 	d := &Dnf{c: c}
-	d.MustExec(t, "remove the distribution's repositories", "find /etc/yum.repos.d -name '*.repo' -delete")
+	d.MustExec(t, "remove the distribution's repositories", "rm -f /etc/yum.repos.d/*.repo")
 	return d
 }
 
