@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/testcontainers/testcontainers-go"
 )
 
 // The images of the tools that people bring (Maven, Gradle, Docker, Helm, Jenkins, Keycloak,
@@ -23,9 +25,20 @@ import (
 // floating image that it pulled.
 
 var (
-	floatingMu   sync.Mutex
-	floatingRefs []string
+	floatingMu    sync.Mutex
+	floatingRefs  []string
+	floatingAmd64 = map[string]bool{}
 )
+
+// floatingAmd64Image registers ref as a floating image that runs as linux/amd64 on every host
+// (with runAmd64): Arch Linux has no arm64 build, and the dnf clients install the x86_64 test
+// packages. An arm64 host runs it emulated.
+func floatingAmd64Image(ref string) string {
+	floatingMu.Lock()
+	floatingAmd64[ref] = true
+	floatingMu.Unlock()
+	return floatingImage(ref)
+}
 
 // floatingImage registers ref as a floating image of this zone and returns it. The files of a
 // zone register their images in package variables, so a run pulls only the images of its zone.
@@ -35,6 +48,12 @@ func floatingImage(ref string) string {
 	floatingRefs = append(floatingRefs, ref)
 	return ref
 }
+
+// runAmd64 runs a container of a floatingAmd64Image as linux/amd64.
+var runAmd64 = testcontainers.CustomizeRequestOption(func(r *testcontainers.GenericContainerRequest) error {
+	r.ImagePlatform = "linux/amd64"
+	return nil
+})
 
 // pullFloating pulls every floating image of this zone, four at a time, and prints the version
 // of each.
@@ -62,7 +81,11 @@ func pullFloating(ctx context.Context) error {
 			if hubCurrent(ctx, ref) {
 				return
 			}
-			if out, err := osexec.CommandContext(ctx, Engine.CLI, "pull", "-q", ref).CombinedOutput(); err != nil {
+			args := []string{"pull", "-q", ref}
+			if floatingAmd64[ref] {
+				args = []string{"pull", "-q", "--platform", "linux/amd64", ref}
+			}
+			if out, err := osexec.CommandContext(ctx, Engine.CLI, args...).CombinedOutput(); err != nil {
 				errs[i] = fmt.Errorf("pull %s: %w\n%s", ref, err, out)
 			}
 		})

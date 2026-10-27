@@ -25,7 +25,7 @@ import (
 )
 
 // The Arch Linux client.
-var archImage = floatingImage("docker.io/library/archlinux:latest")
+var archImage = floatingAmd64Image("docker.io/library/archlinux:latest")
 
 // nfpmBuildScript builds the test packages with nfpm into /out: e2e-anchor 1.0.0-1 and 1.1.0-1
 // for x86_64, a 1.0.0-1 with other bytes, and e2e-data 1.0.0-1 for any.
@@ -171,6 +171,7 @@ func StartPacman(t testing.TB) *Pacman {
 	c, err := testcontainers.Run(context.Background(), archImage,
 		e2eContainer,
 		testcontainers.WithEntrypoint("sleep", "infinity"),
+		runAmd64,
 		network.WithNetwork(nil, TestNetwork),
 		testcontainers.WithWaitStrategyAndDeadline(2*time.Minute, wait.ForExec([]string{"true"})),
 	)
