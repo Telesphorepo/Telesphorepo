@@ -12,6 +12,13 @@ import (
 	"time"
 )
 
+// The RHEL-family dnf clients: dnf4 with rpm's own OpenPGP code, rpm 4.16 on Rocky 9 and 4.14 on
+// Rocky 8, which checks only RSA signatures.
+var (
+	rocky9Image = floatingImage("docker.io/rockylinux/rockylinux:9")
+	rocky8Image = floatingImage("docker.io/rockylinux/rockylinux:8")
+)
+
 // TestRPM: dnf on Fedora (dnf5) and Rocky 9 (dnf4) installs packages that nfpm built from a
 // private RPM repo with gpgcheck and repo_gpgcheck, so every package and the repodata are signed
 // by the server; upgrades to a newer version, finds a file through the filelists, downgrades to

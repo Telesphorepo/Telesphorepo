@@ -24,13 +24,8 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// The dnf clients: Fedora (dnf5, rpm with Sequoia) and the RHEL family (dnf4, rpm's own OpenPGP
-// code: rpm 4.16 on Rocky 9, 4.14 on Rocky 8, which checks only RSA signatures).
-var (
-	fedoraImage = floatingImage("registry.fedoraproject.org/fedora:latest")
-	rocky9Image = floatingImage("docker.io/rockylinux/rockylinux:9")
-	rocky8Image = floatingImage("docker.io/rockylinux/rockylinux:8")
-)
+// The dnf client of every zone: Fedora (dnf5, rpm with Sequoia).
+var fedoraImage = floatingImage("registry.fedoraproject.org/fedora:latest")
 
 // nfpmRPMScript builds the RPM test packages with nfpm into /out, as Anchor's release does:
 // e2e-anchor 1.0.0-1 and 1.1.0-1 for x86_64, a 1.0.0-1 with other bytes, and e2e-data 1.0.0-1
@@ -212,10 +207,16 @@ func rpmMustUpload(t testing.TB, s *Server, repo string, pkg []byte, auth Auth, 
 		ver = version
 	}
 	want := fmt.Sprintf("Packages/%s/%s-%s.%s.rpm", name, name, ver, arch)
-	if res.Package != name || res.Version != version || res.Architecture != arch || res.Filename != want || res.SHA256 == archSum(pkg) {
+	if res.Package != name || res.Version != version || res.Architecture != arch || res.Filename != want || res.SHA256 == rpmSum(pkg) {
 		t.Fatalf("upload response %+v does not match %s %s %s (filename %s, a signed file)", res, name, version, arch, want)
 	}
 	return res
+}
+
+// rpmSum is the hex SHA-256 of b.
+func rpmSum(b []byte) string {
+	s := sha256.Sum256(b)
+	return hex.EncodeToString(s[:])
 }
 
 // RPMKey returns the armored public signing key of RPM repo at /rpm/{repo}/key.asc.

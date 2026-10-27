@@ -1,4 +1,4 @@
-//go:build e2e || import || clients
+//go:build e2e || clients
 
 package e2e
 
@@ -24,11 +24,8 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// The Arch Linux client and the packager of Arch packages that Anchor's release uses.
-var (
-	archImage = floatingImage("docker.io/library/archlinux:latest")
-	nfpmImage = floatingImage("docker.io/goreleaser/nfpm:latest")
-)
+// The Arch Linux client.
+var archImage = floatingImage("docker.io/library/archlinux:latest")
 
 // nfpmBuildScript builds the test packages with nfpm into /out: e2e-anchor 1.0.0-1 and 1.1.0-1
 // for x86_64, a 1.0.0-1 with other bytes, and e2e-data 1.0.0-1 for any.
