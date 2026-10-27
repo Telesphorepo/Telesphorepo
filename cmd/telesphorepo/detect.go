@@ -54,6 +54,7 @@ var rows = []row{
 	{format: "raw", kind: "files", title: "Files", ciTool: "telesphorepo", run: uploadRaw},
 	{format: "debian", kind: "packages", title: "Debian packages", ciTool: "telesphorepo", run: uploadDebian},
 	{format: "arch", kind: "packages", title: "Arch Linux packages", ciTool: "telesphorepo", run: uploadArch},
+	{format: "rpm", kind: "packages", title: "RPM packages", ciTool: "telesphorepo", run: uploadRPM},
 	{format: "cargo", kind: "cargo", title: "Cargo", markers: []string{"Cargo.toml"}, ciTool: "cargo",
 		run: runCargo, preview: func(string) string { return "cargo publish --registry telesphorepo" }},
 	{format: "npm", kind: "npm", title: "npm package", markers: []string{"package.json"}, ciTool: "npm", ciToolOf: npmTool,

@@ -28,15 +28,18 @@ func TestCLIUpload(t *testing.T) {
 	bigSize := cliBigUpload(t)
 	debs := buildDebPackages(t)
 	archPkgs := buildArchPackages(t)
+	rpmPkgs := buildRPMPackages(t)
+	bigRPM := goRPM{name: "e2e-bigrpm", version: "1.0", release: "1", arch: "noarch", epoch: -1, payload: int(bigSize)}.bytes(t)
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
-		raw, deb, arch := RandName("files"), RandName("apt"), RandName("pacman")
+		raw, deb, arch, rpmRepo := RandName("files"), RandName("apt"), RandName("pacman"), RandName("dnf")
 		s.CreateRepo(t, raw, "raw", false, map[string]any{"overwrite": "allow"})
 		s.CreateRepo(t, deb, "debian", true, nil)
 		s.CreateRepo(t, arch, "arch", true, nil)
+		s.CreateRepo(t, rpmRepo, "rpm", true, nil)
 		dev := RandName("dev")
 		s.CreateUser(t, dev, "dev-pass-1234")
-		for _, r := range []string{raw, deb, arch} {
+		for _, r := range []string{raw, deb, arch, rpmRepo} {
 			s.SetPerms(t, r, dev, "repo.download", "repo.publish")
 		}
 		out := c.mustRun(t, debImage, "publish files", `set -e
@@ -99,11 +102,22 @@ head -c $BIG_SIZE /dev/urandom > /tmp/bigpkg/usr/share/e2e-bigpkg/blob
 tar -C /tmp/bigpkg -czf /tmp/e2e-bigpkg-1.0-1-any.pkg.tar.gz .PKGINFO usr
 echo '=== big arch publish ==='
 telesphorepo publish /tmp/e2e-bigpkg-1.0-1-any.pkg.tar.gz
+mkdir -p /work/rpm
+cd /work/rpm
+echo '=== rpm setup ==='
+telesphorepo setup "$RPM_LINK"
+echo '=== rpm publish ==='
+telesphorepo publish /work/pkgs/e2e-anchor-1.0.0-1.x86_64.rpm
+echo '=== big rpm publish ==='
+telesphorepo publish /work/pkgs/e2e-bigrpm-1.0-1.noarch.rpm
 `, ClientOpts{
 			Files: []ContainerFile{{Path: "/work/pkgs/hello-1.0.deb", Content: string(debs.hello1)}, {Path: "/work/pkgs/native.deb", Content: string(debs.native)},
-				{Path: "/work/pkgs/e2e-anchor-1.0.0-1-x86_64.pkg.tar.zst", Content: string(archPkgs.anchor10)}},
+				{Path: "/work/pkgs/e2e-anchor-1.0.0-1-x86_64.pkg.tar.zst", Content: string(archPkgs.anchor10)},
+				{Path: "/work/pkgs/e2e-anchor-1.0.0-1.x86_64.rpm", Content: string(rpmPkgs.anchor10)},
+				{Path: "/work/pkgs/e2e-bigrpm-1.0-1.noarch.rpm", Content: string(bigRPM)}},
 			Env: map[string]string{"RAW_LINK": s.NewSetupCode(t, dev, raw).Link, "DEB_LINK": s.NewSetupCode(t, dev, deb).Link,
-				"ARCH_LINK": s.NewSetupCode(t, dev, arch).Link, "BIG_SIZE": strconv.FormatInt(bigSize, 10)},
+				"ARCH_LINK": s.NewSetupCode(t, dev, arch).Link, "RPM_LINK": s.NewSetupCode(t, dev, rpmRepo).Link,
+				"BIG_SIZE": strconv.FormatInt(bigSize, 10)},
 		})
 
 		base := s.InternalURL + "/raw/" + raw + "/dist/"
@@ -163,5 +177,14 @@ telesphorepo publish /tmp/e2e-bigpkg-1.0-1-any.pkg.tar.gz
 		p.Trust(t, s.ArchKey(t, arch, nil))
 		p.AddRepo(t, arch, archServer(s, "", ""))
 		wantText(t, "pacman install", p.MustExec(t, "pacman install", "pacman -Sy --noconfirm e2e-anchor e2e-bigpkg && e2e-anchor"), "anchor 1.0.0")
+
+		wantText(t, "publish an RPM package", section(out, "rpm publish"), "Uploaded e2e-anchor 1.0.0-1 (x86_64) to "+rpmRepo)
+		wantText(t, "publish a large RPM package", section(out, "big rpm publish"), "Uploading /work/pkgs/e2e-bigrpm-1.0-1.noarch.rpm (", "in chunks of",
+			"Uploaded e2e-bigrpm 1.0-1 (noarch) to "+rpmRepo)
+		s.WaitDebianIndexed(t, rpmRepo)
+		d := StartDnf(t, fedoraImage)
+		d.Trust(t, rpmRepo, s.RPMKey(t, rpmRepo, nil))
+		d.AddRepo(t, rpmRepo, rpmBaseURL(s, rpmRepo), "", "")
+		wantText(t, "dnf install", d.MustExec(t, "dnf install", "dnf -y install e2e-anchor && e2e-anchor && dnf -q repoquery e2e-bigrpm"), "anchor 1.0.0", "e2e-bigrpm-0:1.0-1.noarch")
 	})
 }

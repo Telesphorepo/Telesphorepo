@@ -83,6 +83,12 @@ type UIDescriptor struct {
 	// PublicKey is the path under the repo where the format serves the public signing key of a
 	// hosted repo ("" for none), e.g. "key.asc".
 	PublicKey string
+	// KeyChange is one more line of the confirmation of a signing key change, for a format whose
+	// key change costs more than signing the indexes again; "{repo}" and "{size}" (the repo's
+	// file bytes) are filled in.
+	KeyChange string
+	// KeyNote is one sentence about the keys that the format's clients can check.
+	KeyNote string
 	// ArtifactKinds are the words for the Kind of an Artifact, e.g. "bom" -> "Bill of materials".
 	ArtifactKinds map[string]string
 	// ArtifactName is the word for the title of an Artifact of each kind, e.g. "Coordinates",

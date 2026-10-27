@@ -220,6 +220,10 @@ export type Format = {
   proxy_note?: string;
   /** The path under a hosted repo where the format serves its public signing key. */
   public_key?: string;
+  /** One more line of the confirmation of a key change, with {repo} and {size}. */
+  key_change?: string;
+  /** One sentence about the keys that the format's clients can check. */
+  key_note?: string;
   labels: {
     /** Artifact kind -> its words, e.g. "bom" -> "Bill of materials". */
     artifact_kinds: Record<string, string>;

@@ -22,6 +22,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/publish"
 	"github.com/Telesphorepo/Telesphorepo/internal/pypi"
 	"github.com/Telesphorepo/Telesphorepo/internal/raw"
+	"github.com/Telesphorepo/Telesphorepo/internal/rpm"
 	"github.com/Telesphorepo/Telesphorepo/internal/signing"
 )
 
@@ -42,6 +43,7 @@ func All() []module.Module {
 		maven.Module(),
 		debian.Module(),
 		arch.Module(),
+		rpm.Module(),
 		raw.Module(),
 		docker.Module(),
 		cargo.Module(),

@@ -26,6 +26,11 @@ type Importer struct {
 	// index that the format builds itself). A file whose target already has the source's
 	// SHA-256 is skipped without a download.
 	Target func(ctx context.Context, repo *repos.Repo, it ImportItem) (path repopath.Path, ok bool, err error)
+	// Present returns the stored file that holds the source file's bytes in another form, for a
+	// format that stores a file other than it received (an RPM package with the repo's
+	// signature): a non-nil asset skips the file without a download. nil: only the target's
+	// SHA-256 decides.
+	Present func(ctx context.Context, repo *repos.Repo, it ImportItem) (*assets.Asset, error)
 	// Store stores a downloaded file (e.g. a .deb through the format's own pipeline step); nil:
 	// Commit at the target path with source "import". Its result Unchanged counts as skipped.
 	Store func(ctx context.Context, repo *repos.Repo, it ImportItem, sp *assets.Spooled) (*assets.Result, error)
@@ -174,7 +179,8 @@ const (
 )
 
 // Run imports item into repo: the target path (ignored when the format does not take the file),
-// the skip of a file that is at the target with the same SHA-256 (it gets the source's dates),
+// the skip of a file that is at the target with the same SHA-256 or that Present finds (it gets
+// the source's dates),
 // the download under max_upload_size with the source checksum checked, then Store or Commit. An
 // error fails this item only.
 func (im *Importer) Run(ctx context.Context, p *assets.Pipeline, repo *repos.Repo, it ImportItem) (ImportOutcome, error) {
@@ -192,6 +198,15 @@ func (im *Importer) Run(ctx context.Context, p *assets.Pipeline, repo *repos.Rep
 			return ImportSkipped, p.SetTimes(ctx, repo, a, it.CreatedAt, it.UpdatedAt)
 		case err != nil && !errors.Is(err, assets.ErrNotFound):
 			return "", err
+		}
+		if im.Present != nil {
+			a, err := im.Present(ctx, repo, it)
+			if err != nil {
+				return "", err
+			}
+			if a != nil {
+				return ImportSkipped, p.SetTimes(ctx, repo, a, it.CreatedAt, it.UpdatedAt)
+			}
 		}
 	}
 	sp, err := download(ctx, p, it)

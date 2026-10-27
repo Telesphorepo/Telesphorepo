@@ -194,6 +194,9 @@ func TestScale(t *testing.T) {
 		{name: "search-shared", path: func(*scaleServer) string { return "/api/search?limit=50&q=" + url.QueryEscape(shared) }, ok: []int{http.StatusOK}},
 		{name: "token-auth", path: func(*scaleServer) string { return "/api/me" }, ok: []int{http.StatusOK}},
 		{name: "repo-page", path: func(*scaleServer) string { return "/api/repos?limit=50" }, ok: []int{http.StatusOK}},
+		// The versions of an RPM package: the seek of rpm_packages_order (seed names its packages
+		// seedpkg<n>, so the first ones are at every size).
+		{name: "rpm-versions", path: func(*scaleServer) string { return "/api/repos/seed-rpm-00/versions?limit=20&path=Packages/seedpkg1/" }, ok: []int{http.StatusOK}},
 	}
 	for _, s := range servers {
 		for _, op := range ops[:2] { // maven-get and domain-get: 304 for the sample
