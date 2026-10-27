@@ -90,7 +90,7 @@ func readPackage(r io.Reader) (*pkgInfo, error) {
 	if _, err := io.ReadFull(cr, lead); err != nil || !bytes.Equal(lead[:4], leadMagic) {
 		return nil, badPkg("not an RPM package")
 	}
-	sig, sigRaw, err := readHeader(cr, maxSigDataSize)
+	sig, sigRaw, err := readHeader(cr, maxSigIndex, maxSigDataSize)
 	if err != nil {
 		return nil, badPkg("signature header: " + err.Error())
 	}
@@ -98,7 +98,7 @@ func readPackage(r io.Reader) (*pkgInfo, error) {
 		return nil, badPkg("the file ends after its signature header")
 	}
 	start := cr.n
-	hdr, hdrRaw, err := readHeader(cr, maxHeaderData)
+	hdr, hdrRaw, err := readHeader(cr, maxIndexCount, maxHeaderData)
 	if err != nil {
 		return nil, badPkg(err.Error())
 	}

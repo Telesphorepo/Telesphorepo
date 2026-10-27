@@ -47,21 +47,27 @@ func fileIdentity(file string) (name, version, release, arch string, ok bool) {
 	return base[:k], base[k+1:], release, arch, true
 }
 
-// importTarget takes every binary .rpm of a Nexus yum repo, at the path that its file name gives
-// under Packages/; a source package and every other file (the repodata) is ignored.
+// importTarget takes every .rpm of a Nexus yum repo but source packages (.src.rpm, .nosrc.rpm)
+// and Nexus's repodata. The store reads the identity from the package; the target is the path
+// that rpm's file name <name>-<version>-<release>.<arch>.rpm gives, or for a file named otherwise
+// Packages/<file>, which holds nothing (the file is downloaded, and a package the repo has from
+// the same bytes counts as skipped).
 func (h *Handler) importTarget(_ context.Context, _ *repos.Repo, it format.ImportItem) (repopath.Path, bool, error) {
 	file := it.Path[strings.LastIndexByte(it.Path, '/')+1:]
-	n, v, r, a, ok := fileIdentity(file)
-	if !ok || a == "src" || a == "nosrc" || !nameRE.MatchString(n) {
+	if !strings.HasSuffix(file, ".rpm") || strings.HasSuffix(file, ".src.rpm") || strings.HasSuffix(file, ".nosrc.rpm") ||
+		strings.Contains("/"+it.Path, "/repodata/") {
 		return "", false, nil
 	}
-	p, err := repopath.Parse("Packages/" + n + "/" + n + "-" + v + "-" + r + "." + a + ".rpm")
+	target := "Packages/" + file
+	if n, v, r, a, ok := fileIdentity(file); ok && nameRE.MatchString(n) {
+		target = "Packages/" + n + "/" + n + "-" + v + "-" + r + "." + a + ".rpm"
+	}
+	p, err := repopath.Parse(target)
 	if err != nil {
-		return "", false, nil
+		return "", false, fmt.Errorf("the file name %q is not a path of this repository", file)
 	}
 	return p, true, nil
 }
-
 // importPresent finds the stored package that was made from the source file's bytes: the file is
 // skipped without a download, though the repo keeps it with its own signature.
 func (h *Handler) importPresent(ctx context.Context, repo *repos.Repo, it format.ImportItem) (*assets.Asset, error) {

@@ -52,7 +52,7 @@ type pkgMeta struct {
 type resignMeta struct {
 	id          int64
 	headerStart int64
-	from        string // the SHA-256 of the file it was made from
+	from        string // the SHA-256 of the file it was made from, the row's
 }
 
 // upload adds the package of the request to the repo: the body, or with
@@ -283,7 +283,12 @@ func (h *Handler) onCommitted(ctx context.Context, tx *sql.Tx, w *assets.Write, 
 	q := dbq.New(tx)
 	switch m := w.Meta.(type) {
 	case *resignMeta:
-		return q.UpdateStored(ctx, dbq.UpdateStoredParams{AssetID: a.ID, Size: a.Size, Sha256: a.SHA256, HeaderStart: m.headerStart, ID: m.id})
+		if err := q.UpdateStored(ctx, dbq.UpdateStoredParams{AssetID: a.ID, Size: a.Size, Sha256: a.SHA256, HeaderStart: m.headerStart, ID: m.id}); err != nil {
+			return err
+		}
+		// Each batch of a key change brings the repodata after it, so dnf finds the new
+		// checksums one debounce after the batch, not after the whole run.
+		return h.rebuilds.MarkTx(ctx, tx, w.Repo.ID, groupRepodata, unitIndex)
 	case *pkgMeta:
 		info := m.info
 		id, err := q.InsertPackage(ctx, dbq.InsertPackageParams{RepoID: w.Repo.ID, Name: info.Name, Epoch: info.Epoch,

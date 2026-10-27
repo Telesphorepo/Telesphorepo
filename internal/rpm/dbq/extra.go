@@ -69,7 +69,7 @@ func (q *Queries) StreamIndex(ctx context.Context, repoID int64) iter.Seq2[*Inde
 
 // A page of the packages of a repo after (name, vkey, id), through rpm_packages_order (whose
 // entries end with the rowid): the signatures of a key change.
-const signPage = `SELECT id, name, vkey, filename, format, hdr_state, header_start, size FROM rpm_packages
+const signPage = `SELECT id, name, vkey, filename, format, hdr_state, header_start, size, sha256 FROM rpm_packages
 WHERE repo_id = ?1 AND (name, vkey, id) > (?2, ?3, ?4)
 ORDER BY name, vkey, id LIMIT ?5`
 
@@ -83,6 +83,7 @@ type SignRow struct {
 	HdrState    []byte
 	HeaderStart int64
 	Size        int64
+	Sha256      string
 }
 
 // SignPage returns up to limit packages of repoID after the key (name, vkey, id).
@@ -95,7 +96,7 @@ func (q *Queries) SignPage(ctx context.Context, repoID int64, name string, vkey 
 	var out []SignRow
 	for rows.Next() {
 		var r SignRow
-		if err := rows.Scan(&r.ID, &r.Name, &r.Vkey, &r.Filename, &r.Format, &r.HdrState, &r.HeaderStart, &r.Size); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &r.Vkey, &r.Filename, &r.Format, &r.HdrState, &r.HeaderStart, &r.Size, &r.Sha256); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

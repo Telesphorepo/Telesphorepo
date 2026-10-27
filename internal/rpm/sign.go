@@ -59,3 +59,18 @@ func signedSigHeader(sigh *header, format int, sig []byte) ([]byte, error) {
 	b := h.encode(tagHeaderSignatures)
 	return append(b, make([]byte, pad8(len(b)))...), nil
 }
+
+// signedBy reports whether the signature header sigh holds a header signature by the key keyID.
+func signedBy(sigh *header, keyID uint64) bool {
+	for _, tag := range []uint32{sigTagRSA, sigTagDSA} {
+		e, ok := sigh.get(tag)
+		if !ok {
+			continue
+		}
+		p, err := packet.Read(bytes.NewReader(e.Data))
+		if s, isSig := p.(*packet.Signature); err == nil && isSig && s.IssuerKeyId != nil && *s.IssuerKeyId == keyID {
+			return true
+		}
+	}
+	return false
+}

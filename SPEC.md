@@ -2023,7 +2023,8 @@ stored path of each file is its URL path: dnf reads each package's path from the
    file and reads the 96-byte lead, the signature header and the header (rpm's
    `lib/header.cc` layout: magic, index, data, the region tag and its trailer), never the payload:
    the file list is in the header. The header holds at most 32 MiB of data and 200,000 files;
-   the signature header 64 MiB. The header must match the SHA-256 digest of the signature header.
+   the signature header 32 entries and 64 MiB, as rpm reads it. The buffer of a header grows as
+   its bytes arrive, so a header that claims more than the file holds costs only the file. The header must match the SHA-256 digest of the signature header.
 2. **Validation.** `NAME` (`^[A-Za-z0-9_+][A-Za-z0-9._+-]{0,127}$`), `VERSION` and `RELEASE`
    (`^[A-Za-z0-9._+~^]{1,128}$`), `ARCH` (`^[a-z0-9_]{1,32}$`). A source package (`SOURCEPACKAGE`,
    arch `src` or `nosrc`) is 400, and so is a package without a payload digest (`PAYLOADSHA256`,
@@ -2069,8 +2070,11 @@ stored path of each file is its URL path: dnf reads each package's path from the
    `repomd.xml` is 404, and takes an empty signed repodata.
 7. **Key change.** A change of `signing_key` marks `sign`: its rebuild writes every package again
    with a signature by the new key (from `hdr_state`, the header and payload copied from the stored
-   file), 500 packages or 1 GiB a commit in the order of `rpm_packages_order`, then marks the
-   repodata. A package deleted or written again since its page was read stays as it is. The cost
+   file), 500 packages or 1 GiB a commit in the order of `rpm_packages_order`, and each commit
+   marks the repodata, so dnf finds the new checksums one debounce after each batch. A package
+   deleted or written again since its page was read stays as it is (its row's SHA-256 is checked
+   against the stored file under the path lock), and so does one that the new key signed already
+   (a run that an error broke off starts again from the first package). The cost
    is the bytes of the repo, and edge delivery copies each package to its regions again, so the
    Signing tab names the repo's size in its confirmation.
 8. **Delete.** `OnRemoved` deletes the rows of each removed package and marks the repodata; so does
@@ -2885,10 +2889,13 @@ is unreachable.
     answers it with `proxy.Answer` and the source's credentials and keeps the newest token of each
     Nexus repo while it lives. A Nexus docker proxy becomes a docker proxy with the Nexus remote
     URL.
-  - rpm (`yum`): every `**/*.rpm` that is not a source package, at `Packages/<name>/<file>` by its
-    file name, through the RPM upload (signed with the target's key); Nexus's repodata is ignored.
-    The target stores other bytes than Nexus has, so `Importer.Present` finds the package made
-    from the same uploaded bytes (`upload_sha256`) and the file is skipped without a download. A
+  - rpm (`yum`): every `**/*.rpm` but a source package (`.src.rpm`, `.nosrc.rpm`), through the RPM
+    upload (signed with the target's key, at the path of the identity in its header); Nexus's
+    repodata is ignored. The target stores other bytes than Nexus has, so for a file named as rpm
+    names it (`<name>-<version>-<release>.<arch>.rpm`) `Importer.Present` finds the package made
+    from the same uploaded bytes (`upload_sha256`) and the file is skipped without a download; a
+    file named otherwise is downloaded, and a package the repo has from the same bytes counts as
+    skipped. A
     Nexus repo with `repodataDepth` above 0 keeps several trees; they go into the one repodata of
     the target, and the same bytes under two paths import once.
   - nuget (`nuget`): an asset `<id>/<version>` (a Nexus nuget hosted repo) or

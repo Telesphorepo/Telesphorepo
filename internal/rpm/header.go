@@ -22,6 +22,7 @@ const (
 	entrySize      = 16
 	regionSize     = 16 // the region trailer, REGION_TAG_COUNT
 	maxIndexCount  = 0xffff
+	maxSigIndex    = 32 // rpm reads at most 32 entries of a signature header
 	maxSigDataSize = 64 << 20
 )
 
@@ -75,7 +76,7 @@ func (e errBadHeader) Error() string { return "invalid RPM header: " + string(e)
 // readHeader reads one header from r: the intro, the index and the data, at most maxData bytes of
 // data. It returns the header and its bytes from the magic on (what the header's digests and
 // signatures cover).
-func readHeader(r io.Reader, maxData int) (*header, []byte, error) {
+func readHeader(r io.Reader, maxIndex uint32, maxData int) (*header, []byte, error) {
 	intro := make([]byte, headerIntro)
 	if _, err := io.ReadFull(r, intro); err != nil {
 		return nil, nil, errBadHeader("the file ends inside a header")
@@ -85,17 +86,21 @@ func readHeader(r io.Reader, maxData int) (*header, []byte, error) {
 	}
 	il := binary.BigEndian.Uint32(intro[8:])
 	dl := binary.BigEndian.Uint32(intro[12:])
-	if il < 1 || il > maxIndexCount {
+	if il < 1 || il > maxIndex {
 		return nil, nil, errBadHeader(fmt.Sprintf("index count %d", il))
 	}
 	if int64(dl) > int64(maxData) {
 		return nil, nil, errBadHeader(fmt.Sprintf("the header holds %d bytes of data, more than the limit of %d", dl, maxData))
 	}
-	raw := make([]byte, headerIntro+int(il)*entrySize+int(dl))
-	copy(raw, intro)
-	if _, err := io.ReadFull(r, raw[headerIntro:]); err != nil {
+	// The buffer grows as the bytes arrive, so a header that claims more than the file holds
+	// costs only what the file holds.
+	var buf bytes.Buffer
+	buf.Write(intro)
+	want := int64(il)*entrySize + int64(dl)
+	if n, _ := io.CopyN(&buf, r, want); n != want {
 		return nil, nil, errBadHeader("the file ends inside a header")
 	}
+	raw := buf.Bytes()
 	h, err := parseHeader(raw)
 	if err != nil {
 		return nil, nil, err

@@ -288,6 +288,9 @@ func (h *Handler) resigned(ctx context.Context, repo *repos.Repo, r dbq.SignRow,
 	} else if err != nil {
 		return nil, err
 	}
+	if a.SHA256 != r.Sha256 {
+		return nil, nil // another package holds the path now: a delete and an upload since the page
+	}
 	rc, err := h.assets.Open(ctx, a)
 	if err != nil {
 		return nil, err
@@ -298,13 +301,18 @@ func (h *Handler) resigned(ctx context.Context, repo *repos.Repo, r dbq.SignRow,
 	if _, err := io.ReadFull(br, lead); err != nil {
 		return nil, err
 	}
-	sig, sigRaw, err := readHeader(br, maxSigDataSize)
+	sig, sigRaw, err := readHeader(br, maxSigIndex, maxSigDataSize)
 	if err != nil {
 		return nil, err
 	}
 	pad := pad8(len(sigRaw))
 	if int64(leadSize+len(sigRaw)+pad) != r.HeaderStart {
 		return nil, errors.New("the stored package " + r.Filename + " does not match its row")
+	}
+	// A package that the new key signed already (a run that an error broke off and the queue
+	// runs again) stays as it is.
+	if id := s.SigningKeyID(); id != 0 && signedBy(sig, id) {
+		return nil, nil
 	}
 	if _, err := io.CopyN(io.Discard, br, int64(pad)); err != nil {
 		return nil, err
@@ -333,5 +341,5 @@ func (h *Handler) resigned(ctx context.Context, repo *repos.Repo, r dbq.SignRow,
 	o.UserID, o.BuildID, o.Created, o.Updated = a.UploadedBy, a.BuildID, a.CreatedAt, a.UpdatedAt
 	return &assets.Write{Repo: repo, Path: repopath.Path(r.Filename), Body: assets.Body{Spool: sp},
 		ContentType: rpmContentType, Kind: assets.KindArtifact, Origin: o,
-		Meta: &resignMeta{id: r.ID, headerStart: int64(leadSize + len(sigh)), from: a.SHA256}}, nil
+		Meta: &resignMeta{id: r.ID, headerStart: int64(leadSize + len(sigh)), from: r.Sha256}}, nil
 }
