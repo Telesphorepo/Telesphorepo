@@ -335,7 +335,7 @@
             />
           </div>
         </div>
-        <div class="min-h-0 flex-1 overflow-y-auto p-2">
+        <div class="min-h-0 flex-1 overflow-y-auto [scrollbar-gutter:stable] p-2">
           {#if searchError}
             <div class="p-2"><ErrorState inline error={searchError} /></div>
           {/if}
@@ -428,7 +428,7 @@
               <Button variant="outline" size="xs" disabled={!chosen.length} onclick={applyAll}>Apply to all</Button>
             </div>
             {#if expanded === ""}
-              <div id="{id}-defaults" class="max-h-64 overflow-y-auto px-4 pb-3">
+              <div id="{id}-defaults" class="max-h-64 overflow-y-auto [scrollbar-gutter:stable] px-4 pb-3">
                 <PermissionPicker
                   id="{id}-defaults-perms"
                   groups={pickerGroups("repo")}
@@ -440,7 +440,7 @@
             {/if}
           </div>
         </div>
-        <div class="min-h-0 flex-1 overflow-y-auto p-2" bind:this={listEl}>
+        <div class="min-h-0 flex-1 overflow-y-auto [scrollbar-gutter:stable] p-2" bind:this={listEl}>
           {#if !chosen.length}
             <div
               class={cn(

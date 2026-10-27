@@ -69,7 +69,7 @@
 </script>
 
 <Dialog.Root bind:open={() => open, (v) => { if (!busy) open = v; }}>
-  <Dialog.Content class="max-h-[calc(100dvh-2rem)] overflow-y-auto {full ? 'sm:max-w-6xl' : wide ? 'sm:max-w-3xl' : 'sm:max-w-lg'}">
+  <Dialog.Content class="max-h-[calc(100dvh-2rem)] overflow-y-auto [scrollbar-gutter:stable] {full ? 'sm:max-w-6xl' : wide ? 'sm:max-w-3xl' : 'sm:max-w-lg'}">
     <Dialog.Header>
       <Dialog.Title>{title}</Dialog.Title>
       {#if description}<Dialog.Description>{description}</Dialog.Description>{/if}
