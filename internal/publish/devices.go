@@ -252,39 +252,44 @@ func (s *Service) Approve(ctx context.Context, r *http.Request, p *auth.Principa
 	}, nil
 }
 
-// Poll answers the device's poll: the device id once approved (once only), else
-// ErrAuthorizationPending, ErrSlowDown or ErrExpiredToken. An unknown device code, one already
-// answered and an expired one all get ErrExpiredToken.
-func (s *Service) Poll(ctx context.Context, deviceCode string) (int64, error) {
+// Poll answers the device's poll: the device id and the user name of its owner once approved
+// (once only), else ErrAuthorizationPending, ErrSlowDown or ErrExpiredToken. An unknown device
+// code, one already answered and an expired one all get ErrExpiredToken. Only the holder of the
+// device code learns the owner.
+func (s *Service) Poll(ctx context.Context, deviceCode string) (int64, string, error) {
 	h := hashBytes([]byte(deviceCode))
 	now := time.Now().Unix()
 	e, err := s.rq.GetEnrollmentByDeviceCode(ctx, h)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && e.ExpiresAt <= now) {
-		return 0, ErrExpiredToken
+		return 0, "", ErrExpiredToken
 	}
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	n, err := s.wq.TouchEnrollmentPoll(ctx, dbq.TouchEnrollmentPollParams{
 		Now: now, DeviceCodeHash: h, MinPolledAt: now - int64(pollInterval/time.Second) + 1,
 	})
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	if n == 0 {
-		return 0, ErrSlowDown
+		return 0, "", ErrSlowDown
 	}
 	if !e.DeviceID.Valid {
-		return 0, ErrAuthorizationPending
+		return 0, "", ErrAuthorizationPending
 	}
 	id, err := s.wq.TakeApprovedEnrollment(ctx, h)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, ErrExpiredToken
+		return 0, "", ErrExpiredToken
 	}
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
-	return id.Int64, nil
+	d, err := s.rq.GetDevice(ctx, id.Int64)
+	if err != nil {
+		return 0, "", err
+	}
+	return d.ID, d.Username, nil
 }
 
 // UserDevices returns a newest-first keyset page of a user's devices: ids below after (0: first

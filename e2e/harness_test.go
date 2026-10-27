@@ -1488,10 +1488,11 @@ func (s *Server) StartEnrollment(t testing.TB, name string) (Enrollment, ed25519
 	return en, priv
 }
 
-// PollAnswer is the answer of POST /api/devices/enroll/poll: a device id, or a problem document
-// whose detail is an RFC 8628 error code.
+// PollAnswer is the answer of POST /api/devices/enroll/poll: a device id and the user name of its
+// owner, or a problem document whose detail is an RFC 8628 error code.
 type PollAnswer struct {
 	DeviceID int64  `json:"device_id"`
+	User     string `json:"user"`
 	Error    string `json:"detail"`
 }
 

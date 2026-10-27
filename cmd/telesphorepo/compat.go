@@ -149,7 +149,7 @@ func (cp *compat) save() {
 		err = writeOwnerOnly(filepath.Join(cp.dir, "changes.json"), append(b, '\n'))
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		warn("%v", err)
 	}
 }
 
@@ -285,8 +285,8 @@ func (cp *compat) drift(ctx context.Context) {
 	cp.state.DriftNotice = today
 	cp.save()
 	if cp.helper || !interactive() {
-		fmt.Fprintf(os.Stderr, "telesphorepo: the server %s has CLI %s, you have %s. Run: telesphorepo update %s\n",
-			cp.id.base(), cp.state.ServerVersion, version, cp.id.base())
+		warn("telesphorepo: the server %s has CLI %s, you have %s. Run: %s",
+			cp.id.base(), errp.bold(cp.state.ServerVersion), version, errp.code("telesphorepo update "+cp.id.base()))
 		return
 	}
 	if confirm(fmt.Sprintf("The server has CLI %s, you have %s. Update now?", cp.state.ServerVersion, version), true) {

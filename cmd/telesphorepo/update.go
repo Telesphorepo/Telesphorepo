@@ -110,11 +110,11 @@ func update(ctx context.Context, id identity) error {
 		if mine, err2 := changelog.ParseVersion(version); err2 == nil {
 			switch mine.Compare(s) {
 			case 1:
-				fmt.Fprintf(os.Stderr, "This CLI (%s) is newer than the CLI of %s (%s). A newer CLI works with an older server, so nothing changed.\n",
-					version, id.base(), serverVersion)
+				done("This CLI (%s) is newer than the CLI of %s (%s). A newer CLI works with an older server, so nothing changed.",
+					errp.bold(version), id.base(), serverVersion)
 				return nil
 			case 0:
-				fmt.Fprintf(os.Stderr, "This CLI is the CLI of %s (%s).\n", id.base(), version)
+				done("This CLI is the CLI of %s (%s).", id.base(), errp.bold(version))
 				return nil
 			}
 		}
@@ -151,7 +151,8 @@ func update(ctx context.Context, id identity) error {
 	tmp := filepath.Join(dir, "."+cliName()+".new")
 	_ = os.Remove(tmp)
 	if err := os.WriteFile(tmp, bin, 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "Cannot write into %s (%v). Install the CLI of the server with:\n  %s\n", dir, unwrapPath(err), installLine(id))
+		fail("Cannot write into %s (%v). Install the CLI of the server with:", dir, unwrapPath(err))
+		codeLine(installLine(id))
 		return &exitError{code: 1}
 	}
 	if runtime.GOOS == "windows" {
@@ -170,9 +171,10 @@ func update(ctx context.Context, id identity) error {
 	}
 	updated = true
 	if err := relinkHelper(exe); err != nil {
-		fmt.Fprintf(os.Stderr, "Cannot make %s again (%v). Docker pushes need it: run the install line\n  %s\n", helperFile(), err, installLine(id))
+		warn("Cannot make %s again (%v). Docker pushes need it: run the install line", helperFile(), err)
+		codeLine(installLine(id))
 	}
-	fmt.Fprintf(os.Stderr, "Installed the CLI of %s (%s) in %s.\n", id.base(), serverVersion, exe)
+	done("Installed the CLI of %s (%s) in %s.", id.base(), errp.bold(serverVersion), errp.dim(exe))
 	return nil
 }
 

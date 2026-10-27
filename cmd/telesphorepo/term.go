@@ -27,7 +27,7 @@ func readLine() (string, bool) {
 // ask prints question on stderr and reads the answer. def is the answer of an empty line and of
 // the end of the input.
 func ask(question, def string) string {
-	fmt.Fprint(os.Stderr, question)
+	fmt.Fprint(os.Stderr, styleQuestion(question))
 	s, ok := readLine()
 	if s = strings.TrimSpace(s); !ok || s == "" {
 		return def
@@ -57,9 +57,9 @@ func confirm(question string, yes bool) bool {
 // choose asks the person to pick one of options by its number and returns its index. Each option
 // is a line; the answer of an empty line is def.
 func choose(question string, options []string, def int) int {
-	fmt.Fprintln(os.Stderr, question)
+	fmt.Fprintln(os.Stderr, errp.bold(question))
 	for i, o := range options {
-		fmt.Fprintf(os.Stderr, "  %d) %s\n", i+1, o)
+		fmt.Fprintf(os.Stderr, "  %s %s\n", errp.wrap("1;36", fmt.Sprintf("%d)", i+1)), o)
 	}
 	for {
 		s := ask(fmt.Sprintf("Number [%d]: ", def+1), "")
@@ -70,8 +70,23 @@ func choose(question string, options []string, def int) int {
 		if _, err := fmt.Sscanf(s, "%d", &n); err == nil && n >= 1 && n <= len(options) {
 			return n - 1
 		}
-		fmt.Fprintf(os.Stderr, "Enter a number from 1 to %d.\n", len(options))
+		warn("Enter a number from 1 to %d.", len(options))
 	}
+}
+
+// styleQuestion makes the question of a prompt bold and its closing hint ("[Y/n] ",
+// "[stable]: ") dim. Without style it is the question as is.
+func styleQuestion(q string) string {
+	if !errp {
+		return q
+	}
+	body := strings.TrimRight(q, " ")
+	tail := q[len(body):]
+	i := strings.LastIndex(body, " [")
+	if i < 0 || !strings.HasSuffix(strings.TrimSuffix(body, ":"), "]") {
+		return errp.bold(body) + tail
+	}
+	return errp.bold(body[:i]) + " " + errp.dim(body[i+1:]) + tail
 }
 
 // openBrowser opens url in the default browser. It returns false when this computer has no

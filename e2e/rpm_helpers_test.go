@@ -25,7 +25,7 @@ import (
 )
 
 // The dnf client of every zone: Fedora (dnf5, rpm with Sequoia).
-var fedoraImage = floatingImage("registry.fedoraproject.org/fedora:latest")
+var fedoraImage = floatingAmd64Image("registry.fedoraproject.org/fedora:latest")
 
 // nfpmRPMScript builds the RPM test packages with nfpm into /out, as Anchor's release does:
 // e2e-anchor 1.0.0-1 and 1.1.0-1 for x86_64, a 1.0.0-1 with other bytes, and e2e-data 1.0.0-1
@@ -238,6 +238,7 @@ func StartDnf(t testing.TB, image string) *Dnf {
 	t.Helper()
 	c, err := testcontainers.Run(context.Background(), image,
 		e2eContainer,
+		runAmd64,
 		testcontainers.WithEntrypoint("sleep", "infinity"),
 		network.WithNetwork(nil, TestNetwork),
 		testcontainers.WithWaitStrategyAndDeadline(2*time.Minute, wait.ForExec([]string{"true"})),

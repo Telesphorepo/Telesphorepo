@@ -111,17 +111,18 @@ func writeProject(p *project) (bool, error) {
 	if old, err := readProject(f); err == nil {
 		diff := p.changes(old)
 		if len(diff) == 0 {
-			fmt.Fprintf(os.Stderr, "%s is up to date.\n", f)
+			done("%s is up to date.", f)
 			return true, nil
 		}
-		fmt.Fprintf(os.Stderr, "%s has other values:\n%s\n", f, strings.Join(diff, "\n"))
+		warn("%s has other values:", f)
+		fmt.Fprintln(os.Stderr, strings.Join(diff, "\n"))
 		if !confirm("Replace them?", false) {
-			fmt.Fprintf(os.Stderr, "Kept %s.\n", f)
+			note("Kept %s.", f)
 			return false, nil
 		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		if _, statErr := os.Stat(f); statErr == nil {
-			fmt.Fprintf(os.Stderr, "%v\n", err)
+			warn("%v", err)
 			if !confirm("Replace the file?", false) {
 				return false, nil
 			}
@@ -134,7 +135,7 @@ func writeProject(p *project) (bool, error) {
 	if err := os.WriteFile(f, b, 0o644); err != nil {
 		return false, fmt.Errorf("cannot write %s: %w", f, err)
 	}
-	fmt.Fprintf(os.Stderr, "Wrote %s. Commit it, so teammates and CI publish to the same repo.\n", f)
+	done("Wrote %s. Commit it, so teammates and CI publish to the same repo.", errp.bold(f))
 	return true, nil
 }
 
@@ -152,8 +153,8 @@ func gitIgnored(dir string) {
 	}
 	// The form is "<source>:<line>:<pattern>\t<path>".
 	rule, _, _ := strings.Cut(line, "\t")
-	fmt.Fprintf(os.Stderr, "Warning: git ignores %s (%s), so CI and teammates do not see it.\n", projectFileName, rule)
-	fmt.Fprintf(os.Stderr, "Remove that line, or add the file with: git add -f %s\n", projectFileName)
+	warn("Warning: git ignores %s (%s), so CI and teammates do not see it.", projectFileName, rule)
+	cmdHint("Remove that line, or add the file with: ", "git add -f "+projectFileName)
 }
 
 // gitRoot is the top folder of the git work tree of dir, or dir outside one.

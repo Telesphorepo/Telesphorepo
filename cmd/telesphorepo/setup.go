@@ -74,7 +74,7 @@ func setup(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "publishing to %s (%s) as %s\n", res.Repo, res.Format, res.User)
+	done("publishing to %s (%s) as %s", errp.bold(res.Repo), res.Format, errp.bold(res.User))
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -163,11 +163,12 @@ func setupDevice(ctx context.Context, c *client, code, name string) (*setupResul
 		if d, err = newDevice(c.id, res.DeviceID, key); err != nil {
 			return nil, nil, err
 		}
+		d.User = res.User
 		f, err := d.save(dir)
 		if err != nil {
 			return nil, nil, err
 		}
-		fmt.Fprintf(os.Stderr, "This computer is device %d of %s. Its key is in %s\n", d.DeviceID, c.id.base(), f)
+		done("This computer is device %d of %s. Its key is in %s", d.DeviceID, c.id.base(), errp.dim(f))
 	}
 	saveRegistryHosts(ctx, c, dir)
 	return &res, d, nil
@@ -201,7 +202,7 @@ func setupProject(id identity, res *setupResult, r row, dir string, kind bool) e
 			p.Dist = ask(fmt.Sprintf("Distribution of the packages [%s]: ", dist), dist)
 			p.Component = ask(fmt.Sprintf("Component of the packages [%s]: ", comp), comp)
 		} else {
-			fmt.Fprintf(os.Stderr, "Packages go to distribution %s, component %s. Change dist and component in %s to change that.\n", dist, comp, projectFileName)
+			note("Packages go to distribution %s, component %s. Change dist and component in %s to change that.", dist, comp, projectFileName)
 		}
 	}
 	if _, err := writeProject(p); err != nil {
@@ -210,9 +211,9 @@ func setupProject(id identity, res *setupResult, r row, dir string, kind bool) e
 	gitIgnored(dir)
 	switch {
 	case r.takesFiles():
-		fmt.Fprintln(os.Stderr, "Publish with: telesphorepo publish FILE...")
+		cmdHint("Publish with: ", "telesphorepo publish FILE...")
 	default:
-		fmt.Fprintln(os.Stderr, "Publish with: telesphorepo publish")
+		cmdHint("Publish with: ", "telesphorepo publish")
 	}
 	return nil
 }
@@ -237,18 +238,20 @@ func setupHook(c *client, h helperFormat, repo string) error {
 		return err
 	}
 	line := credHelpersLine(hosts)
-	fmt.Fprintf(os.Stderr, "%s gets the token from the credential helper of the CLI with this entry in %s:\n  %s\n", h.tool, cfg, line)
+	fmt.Fprintf(os.Stderr, "%s gets the token from the credential helper of the CLI with this entry in %s:\n", h.tool, errp.dim(cfg))
+	codeLine(line)
 	if confirm(fmt.Sprintf("Add the credential helper to %s?", cfg), false) {
 		if _, err := addCredHelpers(hosts); err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "Added it to %s.\n", cfg)
+		done("Added it to %s.", cfg)
 	} else {
-		fmt.Fprintf(os.Stderr, "Kept %s. Add the entry yourself to push:\n  %s\n", cfg, line)
+		warn("Kept %s. Add the entry yourself to push:", cfg)
+		codeLine(line)
 	}
-	fmt.Fprintf(os.Stderr, "Push with: %s\n", h.command(hosts[0], repo))
+	cmdHint("Push with: ", h.command(hosts[0], repo))
 	if len(hosts) > 1 {
-		fmt.Fprintf(os.Stderr, "Helm 4 and ORAS push to the upload host: helm push CHART.tgz oci://%s/%s\n", hosts[1], repo)
+		cmdHint("Helm 4 and ORAS push to the upload host: ", fmt.Sprintf("helm push CHART.tgz oci://%s/%s", hosts[1], repo))
 	}
 	return nil
 }
@@ -273,7 +276,7 @@ type ciSnippet struct {
 // file first; a change to a file that exists needs a yes.
 func setupCI(ctx context.Context, c *client, d *deviceFile, repo, tool, dir string) error {
 	if tool == "" {
-		fmt.Fprintln(os.Stderr, "The server has no CI file for this project. In CI, install the CLI and run telesphorepo publish.")
+		note("The server has no CI file for this project. In CI, install the CLI and run telesphorepo publish.")
 		return nil
 	}
 	labels := make([]string, len(ciSystems))
@@ -297,24 +300,25 @@ func setupCI(ctx context.Context, c *client, d *deviceFile, repo, tool, dir stri
 	}
 	defer func() {
 		if sn.Note != "" {
-			fmt.Fprintln(os.Stderr, sn.Note)
+			note("%s", sn.Note)
 		}
 	}()
 	if sn.File == "" {
-		fmt.Fprintf(os.Stderr, "Paste this into the shell build step of the job:\n\n%s\n", sn.Code)
+		step("Paste this into the shell build step of the job:")
+		fmt.Fprintf(os.Stderr, "\n%s\n", errp.code(sn.Code))
 		return nil
 	}
 	root := gitRoot(dir)
 	target := filepath.Join(root, filepath.FromSlash(sn.File))
-	fmt.Fprintf(os.Stderr, "--- %s ---\n%s--- end ---\n", target, sn.Code)
+	fmt.Fprintf(os.Stderr, "%s\n%s%s\n", errp.dim("--- ")+errp.bold(target)+errp.dim(" ---"), sn.Code, errp.dim("--- end ---"))
 	old, err := os.ReadFile(target)
 	switch {
 	case err == nil && bytes.Equal(old, []byte(sn.Code)):
-		fmt.Fprintf(os.Stderr, "%s is up to date.\n", target)
+		done("%s is up to date.", target)
 		return nil
 	case err == nil:
 		if !confirm(fmt.Sprintf("%s exists. Replace it?", target), false) {
-			fmt.Fprintf(os.Stderr, "Kept %s.\n", target)
+			note("Kept %s.", target)
 			return nil
 		}
 	case !errors.Is(err, fs.ErrNotExist):
@@ -326,9 +330,9 @@ func setupCI(ctx context.Context, c *client, d *deviceFile, repo, tool, dir stri
 	if err := os.WriteFile(target, []byte(sn.Code), 0o644); err != nil {
 		return fmt.Errorf("cannot write %s: %w", target, unwrapPath(err))
 	}
-	fmt.Fprintf(os.Stderr, "Wrote %s.\n", target)
+	done("Wrote %s.", errp.bold(target))
 	if rel, err := filepath.Rel(root, dir); err == nil && rel != "." {
-		fmt.Fprintf(os.Stderr, "The CI job runs in the top folder of the repository: put cd %s before telesphorepo publish.\n", filepath.ToSlash(rel))
+		warn("The CI job runs in the top folder of the repository: put %s before %s.", errp.code("cd "+filepath.ToSlash(rel)), errp.code("telesphorepo publish"))
 	}
 	return nil
 }

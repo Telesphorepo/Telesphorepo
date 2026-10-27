@@ -4,7 +4,8 @@
   ticket with the code on its stub) and confirm it is you. A local account confirms with a fresh
   second factor. A single sign-on account signs in again at its identity provider; the server then
   returns here with a single-use grant (&grant=) and the page approves at once, or with an error
-  code (&error=). Approving tears the stub.
+  code (&error=). Approving tears the stub. The device belongs to the account that approves it, so the
+  second step names it and offers to sign in as someone else (sign out, then back to this code).
 -->
 <script lang="ts">
   import { untrack } from "svelte";
@@ -92,6 +93,11 @@
     await api.devices.approve(pending.user_code, proof);
     approved = pending;
     pending = null;
+  }
+
+  // Signs out, then the sign-in page comes back to this code.
+  function switchAccount() {
+    auth.signOut(`/device?code=${code}`);
   }
 
   async function approveSSO(g: string) {
@@ -182,7 +188,14 @@
             <dd><RelativeTime at={pending.expires_at} /></dd>
           </dl>
         </div>
-        <div class="mt-8">
+        <!-- The device belongs to whoever approves it: say who, and offer the other account. -->
+        <p class="mt-8 text-body">
+          You approve as <strong class="font-semibold">{auth.user?.username}</strong>.
+          <button type="button" class="text-link underline-offset-4 hover:underline" onclick={switchAccount}>
+            Not {auth.user?.username}? Sign in as someone else
+          </button>
+        </p>
+        <div class="mt-4">
           {#if sso}
             <div class="flex flex-col items-start gap-3 text-sm">
               <p>Sign in again at your identity provider to approve the device.</p>

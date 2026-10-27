@@ -159,34 +159,80 @@ func pairsIn(w http.ResponseWriter, r *http.Request, users, repoNames []string) 
 	return us, rs, true
 }
 
+// grantGroup is one part of a permissions body: every pair of Users and Repos gets Perms.
+type grantGroup struct {
+	Users []string `json:"users"`
+	Repos []string `json:"repos"`
+	Perms []string `json:"perms"`
+}
+
 // setPermissions sets the repository permission set of every pair of users and repos:
-// {users, repos, perms} -> 200 {changed: n}. perms [] removes the pairs. The caller holds
-// repo.access on every repo (403) and adds or removes only permissions they hold there (403).
-// An unknown permission ID or a permission without one it needs answers 400. An unknown user or
-// repo answers 404 and changes nothing. The auth service records one grant.set event per pair
-// whose set changed, with the old and the new set.
+// {users, repos, perms} -> 200 {changed: n}, or several sets at once:
+// {groups: [{users, repos, perms}, ...]}, applied in one transaction. perms [] removes the pairs.
+// Each group holds 1 to maxBulk users and repos, the groups together at most maxBulk pairs, and
+// no pair is in two groups (400). The caller holds repo.access on every repo (403) and adds or
+// removes only permissions they hold there (403). An unknown permission ID or a permission
+// without one it needs answers 400. An unknown user or repo answers 404. Any refusal changes
+// nothing. The auth service records one grant.set event per pair whose set changed, with the old
+// and the new set.
 func (a *API) setPermissions(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	p := c.P
 	var in struct {
-		Users []string `json:"users"`
-		Repos []string `json:"repos"`
-		Perms []string `json:"perms"`
+		grantGroup
+		Groups []grantGroup `json:"groups"`
 	}
 	if !a.kit.Decode(w, r, &in) {
 		return
 	}
-	users, names, ok := pairsIn(w, r, in.Users, in.Repos)
-	if !ok {
+	groups := in.Groups
+	if len(groups) == 0 {
+		groups = []grantGroup{in.grantGroup}
+	} else if in.Users != nil || in.Repos != nil || in.Perms != nil {
+		httpx.Error(w, r, http.StatusBadRequest, "give groups or users, repos and perms, not both")
 		return
 	}
-	if _, err := perm.Current().Parse(perm.ScopeRepo, in.Perms); err != nil {
-		httpx.Error(w, r, http.StatusBadRequest, err.Error())
+	if len(groups) > maxBulk {
+		httpx.Error(w, r, http.StatusBadRequest, "give at most "+strconv.Itoa(maxBulk)+" groups")
 		return
+	}
+	parts := make([]auth.GrantGroup, 0, len(groups))
+	var names []string // every repo, once
+	seenRepo := map[string]bool{}
+	seenPair := map[[2]string]bool{}
+	for _, g := range groups {
+		users, rs, ok := pairsIn(w, r, g.Users, g.Repos)
+		if !ok {
+			return
+		}
+		if len(seenPair)+len(users)*len(rs) > maxBulk {
+			httpx.Error(w, r, http.StatusBadRequest, "give at most "+strconv.Itoa(maxBulk)+" pairs of user and repository")
+			return
+		}
+		for _, u := range users {
+			for _, n := range rs {
+				if seenPair[[2]string{u, n}] {
+					httpx.Error(w, r, http.StatusBadRequest, "give each pair of user and repository in one group: "+u+" on "+n)
+					return
+				}
+				seenPair[[2]string{u, n}] = true
+			}
+		}
+		for _, n := range rs {
+			if !seenRepo[n] {
+				seenRepo[n] = true
+				names = append(names, n)
+			}
+		}
+		if _, err := perm.Current().Parse(perm.ScopeRepo, g.Perms); err != nil {
+			httpx.Error(w, r, http.StatusBadRequest, err.Error())
+			return
+		}
+		parts = append(parts, auth.GrantGroup{Users: users, Repos: rs, Perms: g.Perms})
 	}
 	if !a.canEach(w, r, p, names, perm.RepoAccess) {
 		return
 	}
-	changed, err := a.auth.SetPermissions(r.Context(), p, users, names, in.Perms)
+	changed, err := a.auth.SetGroups(r.Context(), p, parts)
 	if errors.Is(err, auth.ErrNotHeld) {
 		httpx.Error(w, r, http.StatusForbidden, err.Error())
 		return

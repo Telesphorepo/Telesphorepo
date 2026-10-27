@@ -112,6 +112,12 @@ export const api = {
      */
     set: (users: string[], repos: string[], perms: T.PermId[]) =>
       request<T.Changed>("PUT", "/api/grants", { body: { users, repos, perms } }),
+    /**
+     * Several sets at once, in one transaction: each group sets its own permissions on every pair
+     * of its users and repositories. The checks of `set` apply to every group; a refusal changes
+     * nothing. At most 1000 pairs in all, and each pair in one group only.
+     */
+    setGroups: (groups: T.GrantGroup[]) => request<T.Changed>("PUT", "/api/grants", { body: { groups } }),
   },
 
   formats: {

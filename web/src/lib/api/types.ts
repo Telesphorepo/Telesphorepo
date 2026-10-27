@@ -113,6 +113,8 @@ export type UserPatch = { password: string };
 
 /** PATCH /api/repos, PATCH /api/users, PUT /api/grants: how many items changed. */
 export type Changed = { changed: number };
+/** One part of PUT /api/grants: every pair of its users and repos gets perms ([] removes the pair). */
+export type GrantGroup = { users: string[]; repos: string[]; perms: PermId[] };
 
 // --- read tokens ---
 

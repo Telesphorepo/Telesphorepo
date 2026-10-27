@@ -1056,7 +1056,7 @@ transaction.
 | `GET /api/repos/{name}/grants` | `repo.access` | `[{username, perms: [...]}]` by username; `perms` are permission IDs in registry order |
 | `GET /api/repos/{name}/access?admins=1` | a repository permission that manages the repo (one with a second-factor need: `repo.delete`, `repo.settings`, `repo.access`, `ci.pipelines`) | The access report, built from the parts of `access.Engine.Decide`: `{repo, format, kind, people, download: {public, people, admins, guards, sentence, notes}, publish: {people, admins, ci, guards, blocked, sentence}}`. `people` are `{username, perms, via}` (`permission`; with `admins=1` the holders of `repositories.all` too, via `all_repos`). `guards` maps a guard name to `{restricted, summary, detail}`; the network guard's `detail` is `{any, lists: [{name, title}], cidrs: [{cidr, note}]}`. `blocked` is null, or `{code: "read_only_kind" \| "operation", message}`: a proxy or a group (it lists no publisher and no CI pipeline) or a locked repo. Each `sentence` says the answer in words, e.g. "2 people, only from 10.0.0.0/8." A blocked publish sentence is "nobody." followed by the message. `notes` are the sentences that modules add (`access.Engine.AddDownloadNote`): while edge delivery is on, "Downloads come from the edge." or "Downloads go to the server: read rules apply." |
 | `GET /api/users/{username}/access` · `GET /api/me/access` | `people.manage` · password, read token or UI session | `{username, permissions, disabled, kind, can_publish, items: [{repo, format, public, perms, via}], next}`, a keyset page by repo name: with `repositories.all` of every repo, otherwise of the repos with a grant of the person and the public ones, read as one page of each side (`repos_anonymous_name` and the person's grants), never the repos in between. On a proxy or a group a person holds no `repo.publish` and no `ci.pipelines` |
-| `PUT /api/grants` | `repo.access` on each repo | `{users: [...], repos: [...], perms: [...]}`. Sets the repository permission set of every pair of user and repo, at most 1000 pairs; `perms: []` removes the pairs. 400 for an unknown permission ID, a server permission, or a permission without one it needs (e.g. `repo.publish` without `repo.download`, `ci.pipelines` without `repo.publish`); 404 for an unknown user or repo. 403 when the caller adds or removes a permission they do not hold on that repo. The auth service records one `grant.set` event with `{old, new}` per pair whose set changed, in the transaction. 200 `{changed: n}` |
+| `PUT /api/grants` | `repo.access` on each repo | `{users: [...], repos: [...], perms: [...]}`, or several sets at once: `{groups: [{users, repos, perms}, ...]}` (not both shapes in one body). Sets the repository permission set of every pair of user and repo of each group, every group in one transaction, at most 1000 pairs in all; a pair in two groups is 400. `perms: []` removes the pairs. Every group is checked as one request is, and any refusal changes nothing. 400 for an unknown permission ID, a server permission, or a permission without one it needs (e.g. `repo.publish` without `repo.download`, `ci.pipelines` without `repo.publish`); 404 for an unknown user or repo. 403 when the caller adds or removes a permission they do not hold on that repo. The auth service records one `grant.set` event with `{old, new}` per pair whose set changed, in the transaction. 200 `{changed: n}` |
 | `GET /api/repos/{name}/assets?prefix=&after=&limit=` | `repo.download` | `{items: [{path, size, sha256, content_type, kind, updated_at, repo?}], next}`, ordered by path; the prefix is a range scan. A group merges the pages of the members that the caller reads, each read from the same cursor: a path comes from the first member that has it, named in `repo` |
 | `GET /api/repos/{name}/tree?path=&after=&limit=` | `repo.download` | `{items: [{name, type: "dir"\|"file", path, size?, sha256?, updated_at?, uploaded_by?, build?}], next}`. `build` is the CI build record that wrote the file (see **CI providers and build records**). `path` is a folder (`""` or ending in `/`). A folder item's `path` and the `next` cursor end in `/`. `uploaded_by` is a username. A group answers the merged listing of its members (see **Files, uploads and deletes**), and each file item has `repo`, the member that serves it |
 | `GET /api/repos/{name}/file?path=` | `repo.download` | One file with its details: `{name, path, size, sha256, content_type, kind, created_at, updated_at, uploaded_by, build}`. 404 when the path holds no file. `build` is the CI build record, or null. A group answers the file of the first member in read order that the caller reads and that stores it, with `repo`, that member |
@@ -1372,7 +1372,7 @@ Routes (`{items, next}` lists are keyset, `?after=&limit=`):
 | Method & path | Auth | Notes |
 |---|---|---|
 | `POST /api/devices/enroll` | none | `{name, public_key}` (`public_key` is the raw 32-byte key, base64url, no padding). Returns `{device_code, user_code: "ABCD-EFGH", verification_url: "<base_url>/#/device", expires_in: 600, interval: 5}`. `verification_url` uses the request URL when `base_url` is empty. Each IP gets a burst of 10, then 1 per 30 s (429) |
-| `POST /api/devices/enroll/poll` | none | `{device_code}`. 200 `{device_id}` once approved (single use). 400, a problem document with the detail `authorization_pending`, `slow_down` or `expired_token`. `slow_down` answers a poll less than 4 s after the last. An unknown or used code gets `expired_token` |
+| `POST /api/devices/enroll/poll` | none | `{device_code}`. 200 `{device_id, user}` once approved (single use); `user` is the user name of the account that approved the device, which only the holder of the device code learns (the CLI names its account after it). 400, a problem document with the detail `authorization_pending`, `slow_down` or `expired_token`. `slow_down` answers a poll less than 4 s after the last. An unknown or used code gets `expired_token` |
 | `GET /api/devices/enroll?user_code=` | UI session or password | `{user_code, name, expires_at}`; 404 for an unknown or expired code |
 | `POST /api/devices/approve` | UI session and a fresh factor (`X-Telesphorepo-Proof`) | `{user_code}`. A local account proves with `totp <code>` or `passkey <assertion>`, an SSO account with `grant <grant>` of a fresh SSO sign-in for this code. 201 Device. 401 for a wrong second factor, or for a missing, used, expired or other grant (another user or code), 404 unknown or expired code, 409 used code, 403 `second_factor_required` |
 | `GET /api/devices` | password, read token or UI session | Own devices; a holder of `people.manage` sees all devices, with `username`. Newest first, `{items, next}`. A device is `{id, user_id, username?, name, created_at, expires_at, last_used_at, revoked_at, state}` |
@@ -1407,11 +1407,13 @@ refuse read tokens and publish session tokens. A `trs_` token never reaches the 
 also not for an admin user.
 
 **Device flow** (RFC 8628 style):
-1. The CLI creates an Ed25519 key pair, stores it in `~/.telesphorepo/<server>/device.json` (`<server>` is the host, with `_<port>` when the port is not the default, and `_<base path>` when the server has one)
-   (owner only) and calls `enroll`. It prints `Open <verification_url>?code=<USER-CODE> and
+1. The CLI creates an Ed25519 key pair and calls `enroll` (once approved it stores the key in `~/.telesphorepo/<server>/accounts/<user>/device.json`, owner only; see **CLI**: Files).
+   It prints `Open <verification_url>?code=<USER-CODE> and
    approve code <USER-CODE>`.
 2. The user opens the page, signs in, checks the name of the device of the Telesphorepo CLI, and
-   approves. A local account
+   approves. The device belongs to the account that approves it: the page says "You approve as
+   <user>" and offers "Not <user>? Sign in as someone else", which signs out and returns to the
+   same `/#/device?code=` after the sign-in. A local account
    approves with a fresh TOTP code or passkey check. An SSO account selects **Sign in again with
    single sign-on to approve**: `GET /api/auth/oidc/device?code=` asks the provider for a new
    sign-in (`prompt=login`, `max_age=0`). The callback checks that the provider signed in the same
@@ -1423,7 +1425,7 @@ also not for an admin user.
    ignores `prompt=login` returns an old `auth_time`; the page then shows `stale_sign_in` and names
    that cause. The approval writes the same rows and audit events as the local path: `device.approve`
    for the approval, and `publish.session.create` when the device mints a session.
-3. The client polls until it gets `device_id`. An enrollment code expires after 10 min.
+3. The client polls until it gets `device_id` and `user`. An enrollment code expires after 10 min.
 4. A device lives `publish.device_ttl` unless revoked. The client then enrolls again.
 
 **Minting from a device.** `signature` is the Ed25519 signature (base64url, no padding) over the
@@ -1535,13 +1537,24 @@ canonical URL of the server and follows no redirect. No command takes a token as
 the CLI never prints a CI token, a session token or a setup code; in GitHub Actions it prints
 `::add-mask::` for each token before a child starts. Every command has an example-led `--help`.
 
+**Output.** The CLI talks to the person on stderr and prints results (the help, the version) on
+stdout; the output of a build tool that it runs passes through untouched. On a terminal that
+takes ANSI escapes it styles both streams (`cmd/telesphorepo/style.go`): bold headings, a cyan →
+before a step, a green ✓ before a result, a yellow ! before a warning, a red ✗ line for an error
+with what to do on a → line below it, dim paths and details, highlighted commands to copy, and
+numbered prompts with a dim default. `NO_COLOR` (any value) or `TERM=dumb` turns style off,
+`FORCE_COLOR` or `CLICOLOR_FORCE` (not `0`) turns it on; on Windows the CLI enables the escapes
+of the console. Without style the text is plain and the same word for word, so pipes, CI logs
+and scripts read the same lines (the e2e tests set `NO_COLOR`). The Docker credential helper
+mode prints nothing but its protocol on stdout.
+
 | Command | Does |
 |---|---|
 | `setup LINK [--name NAME]` | Reads the server from the link and the code from its fragment (`#/setup/trsu_...`). With a device that the server accepts (`POST /api/publish/challenge`), it sends `POST /api/devices/setup` with `{code, device_id, nonce, signature}`; else with `{code, name, public_key}` of a new Ed25519 key (name: the host name), and saves the device file. It refreshes `hosts.json` (`GET /docker/hosts`) and prints `publishing to <repo> (<format>) as <user>`. A format of the publish category: the folder must hold a marker of the format (else the CLI names the markers and stops); the CLI writes `telesphorepo.toml` there (a file with other values: it shows the change and asks y/N), with `kind` when the folder has several marker kinds (it asks on a terminal, else stops and lists them), `path` for raw (asked on a terminal) and `dist` and `component` for Debian (asked, default `stable` and `main`). Then `git check-ignore -v` warns when git ignores the file and names the matching line. The helper category (Docker): no project file; it shows the `credHelpers` entry of the server's Docker hosts, asks "Add the credential helper to `$DOCKER_CONFIG/config.json`? [y/N]", edits the file on yes (else prints the entry), and prints `docker push <host>/<repo>/app:1.0`. A Docker repo set up in a folder with `Chart.yaml` also gets the project file. On a terminal it then offers a CI file (none, GitHub Actions, Jenkinsfile, Jenkins freestyle): it mints a session, reads `GET /api/repos/{name}/ci?system=&tool=` with it, shows the file, writes it at the top of the git work tree (a file that exists and differs needs y), and closes the session. A freestyle job gets the build step to paste |
 | `publish [FILE...]` (raw: `--into FOLDER`, `--if-new`, `--if-match ETAG`; see the raw row of **Detection**) | Walks up from the current folder to the nearest `telesphorepo.toml`. With none it stops: on a computer it names the Publish tab, in CI it says to commit the file. It mints one session for the repo: in CI (`CI`, `GITHUB_ACTIONS`, `JENKINS_URL` or `JENKINS_HOME`) with the identity token of the job (GitHub Actions `ACTIONS_ID_TOKEN_REQUEST_URL` and `_TOKEN` with the canonical server URL as the audience, then `OIDC_TOKEN`) through `POST /api/publish/sessions/oidc`, with `revision`: the commit of the job (`GIT_COMMIT`, then `GITHUB_SHA`, then `git rev-parse HEAD` in the project folder, when it is a commit hash). The CLI sends an `OIDC_TOKEN` only when its `aud` claim (read without a check of the signature) holds the canonical URL of the server of the project file, with or without a trailing slash; else it stops and names both URLs, because a project file of an unchecked branch could name another server; on a computer with the device proof through `POST /api/publish/challenge` and `POST /api/publish/sessions` (the challenge also shows whether the server accepts the device; a device that it refuses, or none, runs the device flow first, inline, then mints). FILE uploads (raw, Debian, PyPI and NuGet, also the files of a PyPI or .NET build) run 4 at a time; the `Uploaded` and `Pushed` lines come in the order of the files, the first failure cancels the uploads that run and starts no other, and the files after it that were uploaded get their line all the same. Two raw FILE arguments with one file name stop the command. It runs the row of the repo's format (the detection table below) and closes the session with `DELETE /api/publish/sessions/{id}` at exit, also on Ctrl-C. A child's exit code passes through; a child that outlives the session gets a line that names `publish.session_ttl`. A repo of the helper category stops with the native command and the hook |
-| `login SERVER [--name NAME]` | The device flow alone: an Ed25519 key, `POST /api/devices/enroll`, `Open <verification_url>?code=<CODE> and approve code <CODE>` (the browser opens on a terminal), the poll at `interval` (`slow_down` adds 5 s). It saves `device.json` and `hosts.json`. A device that the server accepts stays |
-| `logout [SERVER]` | Revokes the device with `DELETE /api/devices/self` (a Challenge nonce, the signature over `"telesphorepo revoke v1\n" + nonce + "\n" + device_id`), removes the `credHelpers` entries `"telesphorepo"` of the server's hosts and keeps every other entry, and deletes `~/.telesphorepo/<server>/`. Without SERVER: the server of the project when this computer has its device, else the one enrolled server |
-| `status` | Each enrolled server: the device, whether the server accepts it, the `credHelpers` entries. The current folder: the project file and the command that `publish` runs. It prints no secret |
+| `login [SERVER] [--name NAME]` | The device flow alone: an Ed25519 key, `POST /api/devices/enroll`, `Open <verification_url>?code=<CODE> and approve code <CODE>` (the browser opens on a terminal), the poll at `interval` (`slow_down` adds 5 s). It saves the device as the account of the user of the poll answer (`accounts/<user>/device.json`), makes it the active account and refreshes `hosts.json`. A user who has an account on the computer already gets the new device in its place, and the CLI revokes the old one (`DELETE /api/devices/self`, when the server still accepts it); an account whose user the CLI does not know and that the server refuses goes too. Without SERVER: the server of the project, else the one enrolled server. With no account of the server, or without a terminal, a device that the server accepts stays (`This computer is already device <id> of <server>`); else the device flow runs. With accounts on a terminal it lists them (the active one marked) and asks (`choose`): `Keep <user>` (`Log in again as <user>` when the server refuses its device), `Switch to <user>` for each other account (it writes `active`), or `Log in as another account` (the device flow; the person signs in to the browser as that account) |
+| `logout [SERVER]` | Logs out the active account: revokes its device with `DELETE /api/devices/self` (a Challenge nonce, the signature over `"telesphorepo revoke v1\n" + nonce + "\n" + device_id`) and deletes its folder. When other accounts of the server remain, one becomes active (on a terminal the person picks it, else the first by name) and the CLI prints `<user> is now the active account of <server>.` The last account also removes the `credHelpers` entries `"telesphorepo"` of the server's hosts (every other entry stays) and deletes `~/.telesphorepo/<server>/`. Without SERVER: the server of the project when this computer has its device, else the one enrolled server |
+| `status` | Each enrolled server: each account (`* <user> (active)` for the active one) with its device id, its creation time and whether the server accepts it, then the `credHelpers` entries. The current folder: the project file and the command that `publish` runs. It prints no secret |
 | `update [SERVER]` | Installs the CLI of the server (the server of the project, else SERVER, else the one enrolled server): `GET /cli/SHA256SUMS` and `GET /cli/telesphorepo_<os>_<arch>.<ext>`, the SHA-256 check, a new file next to the running binary, then a rename into place (on Windows the running file first becomes `telesphorepo.exe.old`; every start deletes such a `.old` file). It makes `docker-credential-telesphorepo` again: a symbolic link, a hard link on Windows, a copy when a link fails. A folder that is not writable gets its name and the install line. A CLI that is the same as or newer than the server's changes nothing |
 | `version`, `help [command]` | The version (`-X main.version`); the help |
 | `docker-credential-telesphorepo get\|store\|erase\|list` | The Docker helper protocol (below). The same binary under a second name, which the install script makes |
@@ -1607,16 +1620,26 @@ through `credHelpers` in `$DOCKER_CONFIG/config.json` (else `~/.docker/config.js
 | `get` | the registry host (`host[:port]`) | In this order: `{"ServerURL", "Username": "telesphorepo", "Secret": "<session token>"}` when `TELESPHOREPO_TOKEN` is set and the host is one of `TELESPHOREPO_DOCKER_HOSTS` (a child of `publish`); `{..., "Username": "telesphorepo-device", "Secret": "trx.<device id>.<nonce>.<signature>"}` for a host of an enrolled device: a nonce of `POST /api/publish/challenge` with `exchange: true` (the request carries `ts` and the device signature over it), and the device signature over the nonce for the repo `*` (base64url, no padding); in a CI job with no device, `{..., "Username": "telesphorepo-ci@<commit>", "Secret": "<identity token of the job>"}` (`telesphorepo-ci` when the job has no commit), which `/docker/token` mints from; the token endpoint takes the commit after `telesphorepo-ci@` as the revision of the mint. The server of the token is `TELESPHOREPO_SERVER` (the Docker CI files set it) when the host is its host or one of its `GET /docker/hosts` (another host: the reason on stderr and no credential), else the server of the project file when its host is the registry host, else `https://<host>`. GitHub Actions gets that server as the audience; an `OIDC_TOKEN` whose `aud` does not hold it gets no credential. Else, or on a 4xx from the challenge (a device that is unknown, revoked or expired): `credentials not found in native keychain` and exit 1, so Docker reads anonymously; the reason goes to stderr. Each `get` sends the challenge, so a revoked device stops at once. The process that runs the helper (its id and start time) keeps its nonce in `exchange.json` and sends it as `nonce`, so it gets the same nonce while the nonce is valid: Helm and ORAS run `get` for each token, and all token requests of one push get the same publish session |
 | `store` | Docker's credentials | Exit 1: "docker-credential-telesphorepo keeps no passwords. Run: telesphorepo login <server URL>" |
 | `erase` | the registry host | Keeps the device (`docker logout`) and says to run `telesphorepo logout` |
-| `list` | `unused` | `{"<host>": "telesphorepo-device", ...}` for each host of each enrolled device |
+| `list` | `unused` | `{"<host>": "telesphorepo-device", ...}` for each host of each enrolled server |
 | `version`, `help [command]` | | The version; the help |
 
-- **Files.** `~/.telesphorepo/<server>/device.json` (one per computer and server) is
-  `{"server": "<canonical URL>", "device_id": n, "private_key": "<base64 PKCS#8>", "public_key":
-  "<base64 raw 32 bytes>", "created_at": "<RFC 3339>"}`, the only secret file. `hosts.json` next
-  to it holds `{"hosts": [...]}` of `GET /docker/hosts`. `exchange.json` next to it holds the token
+- **Files.** A server folder `~/.telesphorepo/<server>/` holds the accounts of the computer on
+  that server, each the device of one user: `accounts/<user>/device.json` is `{"server":
+  "<canonical URL>", "user": "<user>", "device_id": n, "private_key": "<base64 PKCS#8>",
+  "public_key": "<base64 raw 32 bytes>", "created_at": "<RFC 3339>"}`, the only secret file, and
+  `active` holds the user name of the active account. Every command that signs with a device
+  (`publish`, `setup`, `get` of the Docker helper, the token exchange) uses the active account;
+  without a valid `active` it is the first account by name. A folder of an older CLI holds one
+  device in `<server>/device.json` (no `user`, no `accounts/`): that is the one account, shown as
+  "device <id>". A device whose user the CLI does not know (a server that does not name it) on a
+  computer without accounts is kept that way too. A second account first moves that file into
+  `accounts/<user>/` (`accounts/device-<id>/` when the user is unknown) with a rename, so a crash
+  never loses the key. `hosts.json` in the server folder holds `{"hosts": [...]}` of `GET
+  /docker/hosts`. `exchange.json` next to each device file holds the token
   exchange nonce of each process that ran `get`: `{"nonces": [{"pid": n, "start": "<start time of
-  the process>", "nonce": "...", "expires_at": "<RFC 3339>"}]}`; a save drops the expired nonces.
-  `changes.json` is the change log cache. A file that is missing or not valid is empty, and a
+  the process>", "nonce": "...", "expires_at": "<RFC 3339>"}]}`; a save drops the expired nonces,
+  and a new device of the account drops the file.
+  `changes.json` in the server folder is the change log cache. A file that is missing or not valid is empty, and a
   failed write goes to stderr. The CLI writes each file through a temporary file and a rename: mode
   600 in a 700 folder on Linux and macOS, an ACL with the current user as the only entry on
   Windows. A device file that another user can open (a mode bit of group or others, an ACL entry of
@@ -4728,8 +4751,8 @@ page are in `web/src/README.md`.
     as one read-only row ("2 administrators") that opens to their names; the CI pipelines; then
     from where. While nobody can publish (`publish.blocked`: a group, a proxy or an operation),
     the card says why in place of the CI pipelines and the networks. **Give access**
-    opens the grant dialog: people found through `GET /api/people`, then the permission picker,
-    side by side in a wide dialog. **Change** opens the picker for one person, **Remove** and a
+    opens the grant dialog (see **Grant dialog** below) with people found through
+    `GET /api/people`. **Change** opens the picker for one person, **Remove** and a
     pick with **Remove access** ask first. These save at once through `PUT /api/grants`. The
     Public switch (in the download card's header) and **Change** of from where show to a holder
     of `repo.settings`, Add CI pipeline and removing one to a holder of `ci.pipelines`. **Add CI
@@ -4738,6 +4761,22 @@ page are in `web/src/README.md`.
     `PATCH /api/repos`. Add CI pipeline adds existing pipelines, or
     links to `/#/settings/ci-pipelines/new?repo={name}&back=/settings/repositories/{name}/access`.
     Each person links to their page, where the same access is also edited.
+  - **Grant dialog.** Give access (Access tab, person page) is one dialog of nearly the window's
+    width with two columns of one fixed height, each scrolling on its own (stacked on a phone).
+    Left, **Available**: a field that finds people or repositories by the start of the name, a
+    page at a time from the server (an empty field shows the first page; Show more reads the
+    next), so it costs the same on any server. A row adds with a click, Enter, its **+** or a drag
+    (HTML drag and drop) into the right column; **Add all shown** adds every row of the results.
+    A row never moves: an added row stays in place with a check, and one that holds access
+    already says "Has access". Right, **Giving access**: the added ones in the order they were
+    added, the newest at the bottom, scrolled into view and briefly tinted (not under reduced
+    motion); the whole column takes a drop. On top, **Permissions for new items** (Download at
+    first, editable) and **Apply to all**. Each added one is a card with its name and its
+    permissions at a glance (their labels, or "No access" in the warning color); a click opens
+    its own picker, one card at a time, and × removes it. The submit stays off while one has no
+    permission, and the column says which. The dialog groups the added ones by identical sets and
+    saves them in one `PUT /api/grants` with `groups`. Change permissions (one person or a pick)
+    is the picker alone, one set for every target.
   - **Permission picker.** The grant dialog (Access tab, person page, bulk Give access) and the
     person page use one picker, read from `GET /api/permissions`: one group of checkboxes per
     subsystem, each with the subsystem's label and help, **All** and **None**, and one help line
@@ -4772,7 +4811,7 @@ page are in `web/src/README.md`.
   locked on, and one the caller does not hold cannot change. The role is saved from the save bar
   after a confirm through `PUT /api/users/{name}/permissions`; then the
   person's permissions on each repository. **Give access** opens the grant dialog with the
-  repositories and the picker. The repository list shows each repository where the person holds a
+  repositories where the caller holds `repo.access` (`GET /api/repos?perm=repo.access&q=`). The repository list shows each repository where the person holds a
   grant, with the phrase of the person's permissions under its name, and one line under it counts
   the public repositories they can also download from ("Can also download from the 8 public
   repositories.", a link to Browse) and **Change** and **Remove** (asks first) on its row; it
@@ -5230,7 +5269,8 @@ second factor gets a UI session through `EnrollTOTP` and `LoginTOTP`. `TestAPISe
 
 **Permission tests.** `access_test.go` covers `TestEffectiveAccess`, `TestRepoSettingsPermission`
 (`repo.settings` on one repo edits it and gets 403 on another), `TestAccessPermission` (`repo.access` gives
-and removes only held permissions; 400 for a set that breaks the dependency rules),
+and removes only held permissions; 400 for a set that breaks the dependency rules; a request of
+several groups applies them all, or none when one is refused; 400 for a pair in two groups),
 `TestLastPeople` (409 when the last enabled holder of `people.manage` would lose it; `people.manage` acts only
 on people it covers) and `TestSecondFactorRule` (who signs in with the password alone, the
 setup-only session, the second step, and a grant that ends a password-only session).
@@ -5295,7 +5335,7 @@ never wait 30 s for a new step. `publish_test.go` covers: `TestPublishGate` (a p
 token is refused; a session for another repo; lost permission; closed and expired sessions;
 replayed nonce; bad signature; revoked and expired devices; manual sessions),
 `TestSecondFactorLogin` (including the setup-only session), `TestDeviceEnrollment` (the device
-has its name),
+has its name; the poll names its owner),
 and `TestDeviceEnrollmentExpiry` (ages the row with `editDB` on a data volume). The CI token
 exchange runs with the real CI systems in the clients zone (`TestCLIJenkins`,
 `TestCLIGitHubActions`). The Keycloak fixture of single sign-on is in `keycloak_test.go`.
@@ -5329,7 +5369,7 @@ a match fails the test. A terminal comes from `script -qec`, which also types th
 | Test | Proves |
 |---|---|
 | `TestCLISetup` | In a git work tree that ignores the file: the setup line writes `telesphorepo.toml` and warns with the `.gitignore` rule; the line again prints `This setup line is already used`; on a terminal the answer `2` writes the GitHub Actions file; a Docker repo gets no project file, `y` adds the `credHelpers` entry and `n` keeps the Docker config file |
-| `TestCLILogin` | A teammate's `publish` with no device prints the code, which the test approves, and publishes; `status` names the server, the device, the hook and the project; `device.json` is 600 in a 700 folder; `logout` revokes the device, removes only the server's `credHelpers` entry and deletes the server folder |
+| `TestCLILogin` | A teammate's `publish` with no device prints the code, which the test approves, and publishes; `login` on a terminal adds a second account of the same server (the menu, then the device flow approved as another user); the files are 600 in 700 folders; `status` names the server, both accounts with their devices (the active one marked), the hook and the project; a publish acts as the active account (the second account publishes to a repo that only it may publish to), and after a switch from the menu of `login` the other account cannot; `logout` revokes the active account's device and leaves the other active; the last `logout` removes only the server's `credHelpers` entry and deletes the server folder |
 | `TestCLIDocker` | Docker in Docker after setup (the printed entry added to `config.json`) pushes and pulls with a device session; `get` answers only the server's hosts, `list` and `store`; `publish` of a Helm chart (`alpine/helm`); ORAS push and pull through the helper |
 | `TestCLIMaven` | `publish` with a pom that names another deployment target, with the newest Maven 3 and the newest Maven 4 (from the metadata of Maven Central); the mirror of the person's `settings.xml` (a proxy repo of Central) serves the plugins; `mvn` resolves both jars |
 | `TestCLIGradle` | `publish` of a library (Kotlin DSL) and a Gradle plugin (Groovy DSL); the build's own repository on another host (a Caddy that refuses credentials) gets none; a clean build applies the plugin and loads the library; a build with no `maven-publish` gets the message |

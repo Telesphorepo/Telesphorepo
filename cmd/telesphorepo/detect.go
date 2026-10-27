@@ -232,7 +232,14 @@ func fileExists(p string) bool {
 // the CLI. A command that ends with a non-zero exit code is an *exitError. Ctrl-C reaches the
 // child from the terminal; when the CLI itself is stopped, it stops the child too.
 func (j *job) runTool(argv []string, env []string) error {
-	fmt.Fprintln(os.Stderr, "$ "+strings.Join(argv, " "))
+	line := strings.Join(argv, " ")
+	if errp {
+		// The output of the tool passes through untouched, between a blank line and the line
+		// of the command before it, and a ✓ line after it.
+		fmt.Fprintf(os.Stderr, "\n%s%s%s\n", errp.mark("→", "36"), errp.dim("$ "), errp.wrap("1;36", line))
+	} else {
+		fmt.Fprintln(os.Stderr, "$ "+line)
+	}
 	cmd := exec.CommandContext(j.ctx, argv[0], argv[1:]...)
 	cmd.Dir = j.p.dir
 	cmd.Env = env
@@ -245,6 +252,10 @@ func (j *job) runTool(argv []string, env []string) error {
 	var ee *exec.ExitError
 	switch {
 	case err == nil:
+		if errp {
+			done("%s finished", filepath.Base(argv[0]))
+			fmt.Fprintln(os.Stderr)
+		}
 		return nil
 	case errors.As(err, &ee):
 		code := ee.ExitCode()

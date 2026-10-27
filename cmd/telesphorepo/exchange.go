@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// exchangeFile is exchange.json next to the device file: the token exchange nonces that the
+// exchangeFile is exchange.json next to the device file of an account: the token exchange nonces that the
 // helper gave, one per process that ran it, e.g.
 //
 //	{"nonces": [{"pid": 4242, "start": "1787000000123", "nonce": "<nonce>",

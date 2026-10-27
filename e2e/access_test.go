@@ -381,7 +381,8 @@ func TestRepoSettingsPermission(t *testing.T) {
 }
 
 // TestAccessPermission: a person with access on a repository gives and removes only the
-// permissions they hold there; the dependency rules hold for everybody.
+// permissions they hold there; the dependency rules hold for everybody; a request of several
+// groups applies every group or none.
 func TestAccessPermission(t *testing.T) {
 	t.Parallel()
 	s := StartServer(t, ServerOpts{})
@@ -444,6 +445,54 @@ func TestAccessPermission(t *testing.T) {
 			t.Fatalf("p still holds %v after the removal", x.Perms)
 		}
 	}
+
+	// Several sets in one request: each group gets its own, all in one transaction. On third mgr
+	// holds Manage access but not Publish.
+	third := RandName("third")
+	s.CreateRepo(t, third, "raw", false, nil)
+	s.SetPerms(t, third, mgr, "repo.download", "repo.access")
+	grantsOf := func(repo string) map[string]string {
+		t.Helper()
+		var rows []struct {
+			Username string   `json:"username"`
+			Perms    []string `json:"perms"`
+		}
+		s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/grants", nil, sess, &rows)
+		out := map[string]string{}
+		for _, x := range rows {
+			out[x.Username] = strings.Join(x.Perms, ",")
+		}
+		return out
+	}
+	groups := func(gs ...map[string]any) (int, []byte) {
+		t.Helper()
+		return s.API(t, http.MethodPut, "/api/grants", map[string]any{"groups": gs}, sess)
+	}
+	group := func(user, repo string, perms ...string) map[string]any {
+		return map[string]any{"users": []string{user}, "repos": []string{repo}, "perms": nonNil(perms)}
+	}
+	var changed struct {
+		Changed int `json:"changed"`
+	}
+	s.MustAPI(t, http.MethodPut, "/api/grants", map[string]any{"groups": []map[string]any{
+		group(p, repo, "repo.download", "repo.publish"),
+		group(p, third, "repo.download"),
+	}}, sess, &changed)
+	if changed.Changed != 2 {
+		t.Fatalf("two groups: changed %d, want 2", changed.Changed)
+	}
+	if g, h := grantsOf(repo)[p], grantsOf(third)[p]; g != "repo.download,repo.publish" || h != "repo.download" {
+		t.Fatalf("after two groups: p holds %q on %s and %q on %s, want download and publish, then download", g, repo, h, third)
+	}
+	// One group refused (publish on third, which mgr does not hold): nothing changes.
+	st, b = groups(group(p, repo, "repo.download"), group(p, third, "repo.download", "repo.publish"))
+	wantAPIStatus(t, "two groups, one with a permission mgr does not hold", st, b, http.StatusForbidden)
+	if g, h := grantsOf(repo)[p], grantsOf(third)[p]; g != "repo.download,repo.publish" || h != "repo.download" {
+		t.Fatalf("after a refused request: p holds %q on %s and %q on %s, want no change", g, repo, h, third)
+	}
+	// A pair in two groups is refused.
+	st, b = groups(group(p, repo, "repo.download"), group(p, repo, "repo.download", "repo.publish"))
+	wantAPIStatus(t, "a pair in two groups", st, b, http.StatusBadRequest)
 
 	// The registry rules: repo.publish needs repo.download and ci.pipelines needs repo.publish;
 	// an unknown ID and a server permission are refused.

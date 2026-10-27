@@ -11,7 +11,8 @@
     then from where. When nobody can publish (a group or a proxy, or an operation such as a Nexus
     copy), the card says why in place of the pipelines and the networks.
   - A person's Change and Remove (Manage access), Give access and the bulk pick apply at once;
-    picked rows lose their access after a confirm.
+    picked rows lose their access after a confirm. Give access (the grant dialog) gives each
+    chosen person their own permissions in one request.
 
   The Public switch, the networks and the CI pipelines go into one draft, and the save bar saves
   it after a confirm that lists each change.
@@ -42,7 +43,7 @@
   import AccessPart from "./AccessPart.svelte";
   import FromWhere from "./FromWhere.svelte";
   import ChoiceDialog from "./ChoiceDialog.svelte";
-  import GrantDialog from "./GrantDialog.svelte";
+  import GrantDialog, { bySet, type GrantItem } from "./GrantDialog.svelte";
   import ConditionBadges from "../../server/ci/ConditionBadges.svelte";
   import { changesOf, countOf, draftOf, pipelineConditions, pipelineFacts, pipelineHead, pipelineOf, type AccessDraft } from "./access";
   import UsersIcon from "@lucide/svelte/icons/users-round";
@@ -162,17 +163,24 @@
   let addOpen = $state(false);
   // Search leaves out the people listed here: a grant or All repositories.
   const listed = $derived([...(access.data?.people ?? []), ...admins].map((p) => p.username));
-  const findPeople = async (q: string) => (await api.people.search(q, { limit: 20 })).items.map((p) => ({ id: p.username, label: p.username }));
-  async function give(names: string[], perms: PermId[]) {
-    await api.grants.set(names, [repo.name], perms);
-    toast.success(`Gave ${peopleCount(names.length)} access to ${repo.name}: ${repoPhrase(perms)}.`);
+  async function findPeople(q: string, after?: string) {
+    const page = await api.people.search(q, { after, limit: 20 });
+    return { next: page.next, items: page.items.map((p) => ({ id: p.username, label: p.username })) };
+  }
+  async function give(items: GrantItem[]) {
+    const names = items.map((i) => i.id);
+    const groups = bySet(items);
+    await api.grants.setGroups(groups.map((g) => ({ users: g.ids, repos: [repo.name], perms: g.perms })));
+    toast.success(`Gave ${peopleCount(names.length)} access to ${repo.name}${groups.length === 1 ? `: ${repoPhrase(groups[0].perms)}` : ""}.`);
     await afterPeopleChange(names);
   }
 
   let editing = $state<AccessPerson | null>(null);
   let editOpen = $state(false);
   const edit = (p: AccessPerson) => ((editing = p), (editOpen = true));
-  async function change(names: string[], perms: PermId[]) {
+  async function change(items: GrantItem[]) {
+    const names = items.map((i) => i.id);
+    const perms = items[0]?.perms ?? [];
     await api.grants.set(names, [repo.name], perms);
     toast.success(perms.length ? `Changed the permissions of ${names[0]} on ${repo.name}.` : `Removed the access of ${names[0]} to ${repo.name}.`);
     await afterPeopleChange(names);
@@ -388,7 +396,9 @@
   {held}
   submitLabel={(n) => (n ? `Give ${peopleCount(n)} access` : "Give access")}
   onGive={give}
-/>
+>
+  {#snippet leading(c)}<UserAvatar name={c.id} size="sm" />{/snippet}
+</GrantDialog>
 
 <GrantDialog
   bind:open={editOpen}

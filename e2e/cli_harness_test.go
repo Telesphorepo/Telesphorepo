@@ -88,15 +88,16 @@ type cli struct{ bin string }
 // newCLI builds the CLI of this repo (a dev build).
 func newCLI(t testing.TB) *cli { return &cli{bin: BuildCLI(t, "", "", nil)} }
 
-// opts returns opts that run script with the CLI at cliPath, as root with HOME=/root (opts can
-// set others). The secret scan also covers each volume of opts.Mounts other than the build
-// caches.
+// opts returns opts that run script with the CLI at cliPath, as root with HOME=/root and
+// NO_COLOR=1 (opts can set others): the lines under script(1) have a terminal, and NO_COLOR keeps
+// them the plain text that the tests match. The secret scan also covers each volume of
+// opts.Mounts other than the build caches.
 func (c *cli) opts(script string, opts ClientOpts) ClientOpts {
 	opts.Files = append(append([]ContainerFile{}, opts.Files...),
 		ContainerFile{HostPath: c.bin, Path: cliPath, Mode: 0o755},
 		ContainerFile{Path: "/e2e/run.sh", Content: cliScript(script)})
 	opts.Cmd = []string{"sh /e2e/run.sh"}
-	env := map[string]string{"HOME": "/root"}
+	env := map[string]string{"HOME": "/root", "NO_COLOR": "1"}
 	for k, v := range opts.Env {
 		env[k] = v
 	}

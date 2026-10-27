@@ -107,7 +107,7 @@ func pushNupkg(j *job, p, f string) error {
 		pw.CloseWithError(err)
 	}()
 	defer pr.Close()
-	fmt.Fprintf(os.Stderr, "PUT %s%s (%s)\n", j.c.id.base(), p, filepath.Base(f))
+	note("PUT %s%s (%s)", j.c.id.base(), p, filepath.Base(f))
 	_, err = j.c.call(j.ctx, request{method: http.MethodPut, path: p, body: pr, size: -1, ctype: mw.FormDataContentType(),
 		header: map[string]string{nugetAPIKey: j.s.Token}, timeout: -1})
 	return err

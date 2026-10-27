@@ -34,9 +34,9 @@ Then publish, in the project folder:
 Commands:
   setup LINK          set up the project of this folder from a setup line
   publish [FILE...]   publish the project of this folder, or upload FILEs
-  login SERVER        approve this computer as a device of SERVER
-  logout [SERVER]     revoke the device of this computer and remove its files
-  status              show the devices of this computer and the project of this folder
+  login [SERVER]      approve this computer as a device of SERVER, or switch accounts
+  logout [SERVER]     revoke the device of the active account and remove its files
+  status              show the accounts of this computer and the project of this folder
   update [SERVER]     install the CLI of the server
   version             print the version
   help [command]      show the help of a command
@@ -97,29 +97,42 @@ In CI the CLI mints the session with the identity token of the job: GitHub Actio
 needs permissions: id-token: write) or OIDC_TOKEN (Jenkins). On a computer without a device of
 the server, it first asks a person to approve the computer in the browser.
 `,
-	"login": `Approve this computer as a device of a server, with no project:
+	"login": `Approve this computer as a device of a server, or switch the account it uses:
 
   telesphorepo login https://repo.example.com
   telesphorepo login https://repo.example.com --name "build box"
+  telesphorepo login                 (the server of this folder, or the one server)
 
-The CLI prints a link and a code. Open the link, sign in and approve the code. The CLI saves the
-device key in ~/.telesphorepo/<server>/device.json (only you can read it). A computer that is a
-device of the server already keeps its device.
+The CLI prints a link and a code. Open the link, sign in and approve the code: the device
+belongs to the account that approves it. The CLI saves the device key in
+~/.telesphorepo/<server>/accounts/<user>/device.json (only you can read it).
+
+One computer can hold several accounts of one server, say an administrator and a publisher. One
+of them is active: publish, setup and the Docker credential helper use it. With accounts on the
+server, login on a terminal lists them and asks:
+  Keep alice                  the active account stays
+  Switch to bob               bob becomes the active account
+  Log in as another account   approve a new code; sign in to the browser as that account (the
+                              approval page offers "Sign in as someone else")
+Without a terminal a computer that has a device of the server keeps it.
 `,
-	"logout": `Revoke the device of this computer on a server and delete its files:
+	"logout": `Log out the active account of a server: revoke its device and delete its files:
 
   telesphorepo logout
   telesphorepo logout https://repo.example.com
 
-The CLI revokes the device on the server, removes the credential helper entries of the server
-from the Docker config file, and deletes ~/.telesphorepo/<server>/. Without SERVER it acts on
-the server of the project of this folder, else on the one server of this computer.
+The CLI revokes the device of the active account on the server and deletes its key. When other
+accounts of the server remain, one of them becomes active (on a terminal you pick it). The last
+account also removes the credential helper entries of the server from the Docker config file and
+deletes ~/.telesphorepo/<server>/. Without SERVER it acts on the server of the project of this
+folder, else on the one server of this computer.
 `,
-	"status": `Show the devices of this computer and the project of this folder:
+	"status": `Show the accounts of this computer and the project of this folder:
 
   telesphorepo status
 
-For each server: the device, whether the server accepts it, and the credential helper entries.
+For each server: each account with its device and whether the server accepts it (* marks the
+active one), and the credential helper entries.
 For this folder: telesphorepo.toml and the command that telesphorepo publish runs. It prints no
 secret.
 `,
@@ -150,15 +163,15 @@ func main() {
 // run runs the command of args and returns the exit code.
 func run(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, overview)
+		renderHelp(os.Stderr, errp, overview)
 		return 2
 	}
 	cmd, rest := args[0], args[1:]
 	if cmd == "help" || cmd == "--help" || cmd == "-h" {
 		if len(rest) > 0 && helps[rest[0]] != "" {
-			fmt.Print(helps[rest[0]])
+			renderHelp(os.Stdout, out, helps[rest[0]])
 		} else {
-			fmt.Print(overview)
+			renderHelp(os.Stdout, out, overview)
 		}
 		return 0
 	}
@@ -168,12 +181,14 @@ func run(args []string) int {
 	}
 	f := commands[cmd]
 	if f == nil {
-		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", cmd, overview)
+		failLine(os.Stderr, fmt.Sprintf("unknown command %q", cmd))
+		fmt.Fprintln(os.Stderr)
+		renderHelp(os.Stderr, errp, overview)
 		return 2
 	}
 	for _, a := range rest {
 		if a == "--help" || a == "-h" {
-			fmt.Print(helps[cmd])
+			renderHelp(os.Stdout, out, helps[cmd])
 			return 0
 		}
 	}
@@ -223,18 +238,18 @@ func handle(ctx context.Context, cmd string, err error) (code int, again bool) {
 	var che *changedError
 	switch {
 	case errors.As(err, &ue):
-		fmt.Fprint(os.Stderr, helps[ue.cmd])
+		renderHelp(os.Stderr, errp, helps[ue.cmd])
 		return 2, false
 	case errors.As(err, &che):
-		fmt.Fprintln(os.Stderr, che.Error())
+		failLine(os.Stderr, che.Error())
 		return 3, false
 	case errors.As(err, &ee):
 		if ee.name != "" {
-			fmt.Fprintln(os.Stderr, "telesphorepo: "+ee.Error())
+			failLine(os.Stderr, "telesphorepo: "+ee.Error())
 		}
 		return ee.code, false
 	case errors.Is(err, context.Canceled):
-		fmt.Fprintln(os.Stderr, "telesphorepo: stopped")
+		failLine(os.Stderr, "telesphorepo: stopped")
 		return 130, false
 	case errors.As(err, &ce):
 		return compatStop(ctx, cmd, ce), false
@@ -280,7 +295,7 @@ func report(err error) {
 		reportCompat(err)
 		return
 	}
-	fmt.Fprintln(os.Stderr, "telesphorepo: "+err.Error())
+	failLine(os.Stderr, "telesphorepo: "+err.Error())
 }
 
 // reportCompat prints a compatError: the summaries of the entries, then what the person does.
@@ -290,15 +305,21 @@ func reportCompat(err error) {
 		report(err)
 		return
 	}
-	for _, s := range ce.summaries {
-		fmt.Fprintln(os.Stderr, s)
-	}
+	printSummaries(ce)
 	id, _ := parseIdentity(ce.server)
 	if ce.cli {
-		fmt.Fprintf(os.Stderr, "This needs CLI %s; you have %s. Install the CLI of the server:\n  %s\n", ce.need, ce.running, installLine(id))
+		fmt.Fprintf(os.Stderr, "This needs CLI %s; you have %s. Install the CLI of the server:\n", errp.bold(ce.need), ce.running)
+		codeLine(installLine(id))
 		return
 	}
-	fmt.Fprintf(os.Stderr, "This needs server %s; the server runs %s. Ask the server admin to update.\n", ce.need, ce.running)
+	fmt.Fprintf(os.Stderr, "This needs server %s; the server runs %s. Ask the server admin to update.\n", errp.bold(ce.need), ce.running)
+}
+
+// printSummaries prints the summaries of the change log entries that stop the command.
+func printSummaries(ce *compatError) {
+	for _, s := range ce.summaries {
+		fail("%s", s)
+	}
 }
 
 // compatStop handles an entry of the change log that stops the command cmd. For an entry that
@@ -309,12 +330,11 @@ func compatStop(ctx context.Context, cmd string, ce *compatError) int {
 		reportCompat(ce)
 		return 1
 	}
-	for _, s := range ce.summaries {
-		fmt.Fprintln(os.Stderr, s)
-	}
+	printSummaries(ce)
 	id, err := parseIdentity(ce.server)
 	if err != nil || !confirm("Update now?", true) {
-		fmt.Fprintf(os.Stderr, "Install the CLI of the server:\n  %s\n", installLine(id))
+		fmt.Fprintln(os.Stderr, "Install the CLI of the server:")
+		codeLine(installLine(id))
 		return 1
 	}
 	exe, err := os.Executable()

@@ -124,15 +124,16 @@ class Auth {
     return session;
   }
 
-  /** Signs out and returns to Browse. */
-  async signOut() {
+  /** Signs out and returns to Home, or with `next` (a UI path) to the sign-in page, which opens `next` after. */
+  async signOut(next?: string) {
     try {
       await api.auth.logout();
     } catch {
       /* the session is gone either way */
     }
     this.user = null;
-    navigate("/");
+    if (next) navigate("/login", { query: { next }, replace: true });
+    else navigate("/");
   }
 }
 
