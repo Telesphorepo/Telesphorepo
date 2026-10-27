@@ -98,8 +98,9 @@ func TestRPM(t *testing.T) {
 	})
 }
 
-// TestRPMRules: the checks of an upload, the repodata of a new repo before its first upload, a
-// file name that a package of another epoch holds, and rpm's version order.
+// TestRPMRules: the checks of an upload, the repodata of a new repo before its first upload and
+// after the delete of its repomd.xml, a file name that a package of another epoch holds, and rpm's
+// version order.
 func TestRPMRules(t *testing.T) {
 	t.Parallel()
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
@@ -111,6 +112,12 @@ func TestRPMRules(t *testing.T) {
 		d.Trust(t, repo, s.RPMKey(t, repo, nil))
 		d.AddRepo(t, repo, rpmBaseURL(s, repo), "", "")
 		d.MustExec(t, "dnf makecache of a repo without packages", "dnf makecache")
+		// A deleted repomd.xml comes back: dnf fails every command on a repo it cannot load.
+		mustDelete(t, s, repo, "path", "repodata/repomd.xml", s.Admin(), 1)
+		s.WaitDebianIndexed(t, repo)
+		if st, _ := rawGet(t, s, nil, "/rpm/"+repo+"/repodata/repomd.xml", nil); st != http.StatusOK {
+			t.Fatalf("GET repomd.xml after its delete: status %d, want 200", st)
+		}
 
 		auth := s.PublishAuth(t, s.AdminUser, repo)
 		for what, pkg := range map[string]goRPM{

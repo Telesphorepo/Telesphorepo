@@ -73,7 +73,15 @@ func (h *Handler) newStream(typ string, entry func(io.Writer, *indexRow) error) 
 // still finds them, and removes older ones. The cost is the packages of the repo, once per
 // debounced batch; a request for the repodata reads a stored file.
 func (h *Handler) buildRepodata(ctx context.Context, repo *repos.Repo) error {
-	count, err := h.q.CountPackages(ctx, repo.ID)
+	// One read transaction, so the count in each document's head is the number of entries that
+	// follow, while uploads go on.
+	rtx, err := h.db.R.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return err
+	}
+	defer rtx.Rollback()
+	rq := dbq.New(rtx)
+	count, err := rq.CountPackages(ctx, repo.ID)
 	if err != nil {
 		return err
 	}
@@ -101,7 +109,7 @@ func (h *Handler) buildRepodata(ctx context.Context, repo *repos.Repo) error {
 			return err
 		}
 	}
-	for r, err := range h.q.StreamIndex(ctx, repo.ID) {
+	for r, err := range rq.StreamIndex(ctx, repo.ID) {
 		if err != nil {
 			return err
 		}
@@ -112,6 +120,7 @@ func (h *Handler) buildRepodata(ctx context.Context, repo *repos.Repo) error {
 			}
 		}
 	}
+	rtx.Rollback()
 	now := time.Now().Unix()
 	var ds []repomdData
 	var ws []assets.Write
