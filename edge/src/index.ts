@@ -227,18 +227,20 @@ async function chosen(env: Env, config: Config, objects: Objects, region: string
 async function edge(request: Request, env: Env, ctx: ExecutionContext, override: Override | null, note: Note): Promise<Response | null> {
   const url = new URL(request.url);
   if (url.searchParams.has("_state")) return null; // a Docker upload token
-  // The time of each step up to the answer, for Server-Timing. Date.now() moves only across I/O,
-  // so each step measures its reads.
+  // The time of each step up to the answer, for Server-Timing, with where its held reads were
+  // answered so far (memory, Cache API, R2). Date.now() moves only across I/O, so each step
+  // measures its reads.
   const steps: string[] = [];
   let mark = Date.now();
+  const loaded = await loadConfig(env, url.origin);
   const step = (name: string) => {
     const now = Date.now();
-    steps.push(`${name};dur=${now - mark}`);
+    const t = loaded!.objects.tally;
+    steps.push(`${name};dur=${now - mark};desc="mem ${t.mem} cache ${t.cache} r2 ${t.r2}"`);
     mark = now;
   };
-  const loaded = await loadConfig(env, url.origin);
-  step("config");
   if (!loaded) return null;
+  step("config");
   const { config, objects } = loaded;
   if (!config.enabled || !config.homeReady || !config.serves) return null;
   if (config.homeBucket === "") return null;

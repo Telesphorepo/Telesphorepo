@@ -215,6 +215,13 @@ interface Held {
 }
 
 const memory = new Map<string, Held>();
+
+// Tally counts where the held reads of one request were answered, for Server-Timing.
+export interface Tally {
+  mem: number;
+  cache: number;
+  r2: number;
+}
 const MAX_MEMORY = 20000;
 
 // held reads the object key of r2 (the home bucket unless binding names another) through the
@@ -227,13 +234,17 @@ async function held(
   base: string,
   key: string,
   ttlOf: (v: unknown) => number,
+  tally: Tally,
   binding = "HOME",
   r2: R2Bucket = env.HOME,
 ): Promise<unknown> {
   const now = Date.now();
   const id = binding === "HOME" ? key : "@" + binding + "/" + key;
   const m = memory.get(id);
-  if (m && m.expires > now) return m.value;
+  if (m && m.expires > now) {
+    tally.mem++;
+    return m.value;
+  }
   if (m) memory.delete(id);
   const cacheKey = new Request(base + id);
   try {
@@ -275,16 +286,17 @@ export class Objects {
     private readonly env: Env,
     private readonly base: string,
     private readonly ttl: number,
+    readonly tally: Tally,
   ) {}
 
   get(key: string): Promise<unknown> {
-    return held(this.env, this.base, key, () => this.ttl);
+    return held(this.env, this.base, key, () => this.ttl, this.tally);
   }
 
   // bucketOf returns the bucket that the bucket.json of binding r2 names, "" when it has none:
   // the server writes it into every bucket it uses, so a binding to another bucket is seen.
   async bucketOf(binding: string, r2: R2Bucket): Promise<string> {
-    return markerBucket(await held(this.env, this.base, "bucket.json", () => this.ttl, binding, r2));
+    return markerBucket(await held(this.env, this.base, "bucket.json", () => this.ttl, this.tally, binding, r2));
   }
 }
 
@@ -315,10 +327,11 @@ function hold(key: string, h: Held): void {
 // of the request URL: the Cache API keys live under it.
 export async function loadConfig(env: Env, origin: string): Promise<{ config: Config; objects: Objects } | null> {
   const base = origin + "/.telesphorepo-edge/" + keyPrefix(env) + "v1/";
-  const raw = await held(env, base, "config.json", (v) => parseConfig(v)?.ttl ?? 0);
+  const tally: Tally = { mem: 0, cache: 0, r2: 0 };
+  const raw = await held(env, base, "config.json", (v) => parseConfig(v)?.ttl ?? 0, tally);
   const config = parseConfig(raw);
   if (!config) return null;
-  return { config, objects: new Objects(env, base, config.ttl) };
+  return { config, objects: new Objects(env, base, config.ttl, tally) };
 }
 
 // ---------------------------------------------------------------------------------------------
