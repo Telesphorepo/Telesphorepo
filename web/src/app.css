@@ -286,6 +286,14 @@
 		/* Pages with and without a scrollbar keep the same width. */
 		scrollbar-gutter: stable;
 	}
+	/*
+	  A dialog locks the page with overflow: hidden on body (bits-ui). Where the viewport then drops
+	  its gutter (Chrome on macOS), the root makes up for it by --lock-gutter, so the page does not
+	  shift ($lib/gutter.ts).
+	*/
+	html:has(> body[style*="overflow: hidden"]) {
+		padding-right: var(--lock-gutter, 0px);
+	}
 
 	/*
 	  Scrollbars, on the page and on inner scroll areas: a rounded thumb from the palette that darkens

@@ -197,7 +197,9 @@ The repository page is the one exception: it checks the caller's permissions on 
   a private repository has a lock and a credentials step, a public one has neither, and no text
   says that it is public.
 - **The root reserves its scrollbar gutter** (`scrollbar-gutter: stable`), so a page with a
-  scrollbar and one without have the same width.
+  scrollbar and one without have the same width. An open dialog keeps it too: where the viewport
+  drops its gutter under the dialog's scroll lock (Chrome on macOS), the root is padded by
+  `--lock-gutter` (`$lib/gutter.ts`, measured once in `main.ts`).
 
 ## Tokens (`app.css`)
 
