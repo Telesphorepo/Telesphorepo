@@ -193,7 +193,8 @@ func (m *mod) enrollDevice(w http.ResponseWriter, r *http.Request, c *route.Call
 	httpx.WriteJSON(w, http.StatusOK, e)
 }
 
-// pollDevice answers the device's poll (no auth): {device_code} -> {device_id}, or 400 with
+// pollDevice answers the device's poll (no auth): {device_code} -> {device_id, user} (user: the
+// owner's user name; only the holder of the device code learns it), or 400 with
 // {"error": "authorization_pending" | "slow_down" | "expired_token"}.
 func (m *mod) pollDevice(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	var in struct {
@@ -202,14 +203,15 @@ func (m *mod) pollDevice(w http.ResponseWriter, r *http.Request, c *route.Call) 
 	if !m.h.API.Decode(w, r, &in) {
 		return
 	}
-	id, err := m.svc.Poll(r.Context(), in.DeviceCode)
+	id, user, err := m.svc.Poll(r.Context(), in.DeviceCode)
 	if err != nil {
 		publishFail(w, r, err)
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, struct {
-		DeviceID int64 `json:"device_id"`
-	}{id})
+		DeviceID int64  `json:"device_id"`
+		User     string `json:"user"`
+	}{id, user})
 }
 
 // pendingEnrollment returns {user_code, name, expires_at} for the approval page:

@@ -1,5 +1,6 @@
 <!--
   A centered dialog with a short form: at most five fields. A longer flow is a page of its own.
+  `wide` is 768px, `full` nearly the window's width (the grant dialog's two columns).
   Enter submits. onSubmit runs while the dialog stays open with a spinner; if it throws, the
   dialog shows the error and stays open; when it resolves, the dialog closes.
 
@@ -24,6 +25,7 @@
     canSubmit = true,
     destructive = false,
     wide = false,
+    full = false,
     onSubmit,
     children,
   }: {
@@ -36,6 +38,8 @@
     destructive?: boolean;
     /** 768px wide in place of 512px: for choices that each have a line of help (the grant dialog). */
     wide?: boolean;
+    /** Nearly the window's width (1152px at most): for two lists side by side (Give access). */
+    full?: boolean;
     onSubmit: () => unknown | Promise<unknown>;
     /** The fields, each a <FormField>. */
     children: Snippet;
@@ -65,7 +69,7 @@
 </script>
 
 <Dialog.Root bind:open={() => open, (v) => { if (!busy) open = v; }}>
-  <Dialog.Content class="max-h-[calc(100dvh-2rem)] overflow-y-auto {wide ? 'sm:max-w-3xl' : 'sm:max-w-lg'}">
+  <Dialog.Content class="max-h-[calc(100dvh-2rem)] overflow-y-auto {full ? 'sm:max-w-6xl' : wide ? 'sm:max-w-3xl' : 'sm:max-w-lg'}">
     <Dialog.Header>
       <Dialog.Title>{title}</Dialog.Title>
       {#if description}<Dialog.Description>{description}</Dialog.Description>{/if}

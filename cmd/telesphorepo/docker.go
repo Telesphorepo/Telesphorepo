@@ -53,8 +53,8 @@ var dockerHelps = map[string]string{
 
   echo repo.example.com | docker-credential-telesphorepo get
 
-With a device of the server, the answer is a proof signed by the device key, which the registry
-turns into a publish session. A process that runs "get" again gets the same proof while it is
+With a device of the server, the answer is a proof signed by the device key of the active account
+(telesphorepo login switches it), which the registry turns into a publish session. A process that runs "get" again gets the same proof while it is
 valid (exchange.json next to the device file), so all token requests of one push use one
 session. In a CI job with no device, the answer is the identity token of the job, for the server
 in TELESPHOREPO_SERVER (the Docker CI files of the server set it). The token must name that
@@ -124,9 +124,9 @@ func readServerURL(in io.Reader) (string, error) {
 	return s, nil
 }
 
-// deviceFor returns the enrolled device that serves the registry host serverURL, and its folder.
-// It checks the identity of the server: the host and port of serverURL must be those of the
-// server, or a host of its hosts.json.
+// deviceFor returns the device of the active account of the server that serves the registry host
+// serverURL, and the server folder. It checks the identity of the server: the host and port of
+// serverURL must be those of the server, or a host of its hosts.json.
 func deviceFor(serverURL string) (*deviceFile, string, error) {
 	ds, dirs, err := enrolledDevices()
 	if err != nil {
@@ -169,9 +169,9 @@ func dockerGet(in io.Reader, out io.Writer) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	d, dir, err := deviceFor(serverURL)
+	d, _, err := deviceFor(serverURL)
 	if err == nil {
-		secret, err := deviceSecret(ctx, d, dir)
+		secret, err := deviceSecret(ctx, d)
 		if err != nil {
 			return err
 		}
@@ -259,10 +259,10 @@ func registryServer(ctx context.Context, serverURL string) (string, error) {
 }
 
 // deviceSecret returns the token exchange proof of device d. The process that runs the helper
-// gets the same token exchange nonce on each "get" while the nonce is valid (exchange.json), and
-// the server checks the device on each "get". A device that the server does not accept answers
-// errNotFound, with the reason on stderr.
-func deviceSecret(ctx context.Context, d *deviceFile, dir string) (string, error) {
+// gets the same token exchange nonce on each "get" while the nonce is valid (exchange.json of the
+// account), and the server checks the device on each "get". A device that the server does not
+// accept answers errNotFound, with the reason on stderr.
+func deviceSecret(ctx context.Context, d *deviceFile) (string, error) {
 	c := newClient(d.id)
 	cp := attach(c, true)
 	defer cp.drift(ctx)
@@ -271,7 +271,7 @@ func deviceSecret(ctx context.Context, d *deviceFile, dir string) (string, error
 		return "", err
 	}
 	parent := currentParent()
-	keep := loadExchange(dir).nonceOf(parent, time.Now())
+	keep := loadExchange(d.dir).nonceOf(parent, time.Now())
 	nonce, expires, err := c.challenge(ctx, d, true, keep)
 	if refused(err) {
 		fmt.Fprintf(os.Stderr, "%s does not accept device %d (%s). Run: telesphorepo login %s\n",
@@ -284,14 +284,15 @@ func deviceSecret(ctx context.Context, d *deviceFile, dir string) (string, error
 	if nonce != keep {
 		// Without the file the next "get" of this process asks for a new nonce; the credential
 		// still works.
-		if err := saveExchange(dir, parent, nonce, expires); err != nil {
+		if err := saveExchange(d.dir, parent, nonce, expires); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 		}
 	}
 	return exchangeSecret(d, nonce), nil
 }
 
-// dockerList answers Docker's "list": every host of every enrolled device, with the user name.
+// dockerList answers Docker's "list": every host of every server of this computer, with the user
+// name.
 func dockerList(out io.Writer) error {
 	ds, dirs, err := enrolledDevices()
 	if err != nil {

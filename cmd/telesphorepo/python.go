@@ -191,7 +191,7 @@ func (j *job) postDist(f, name string, size int64, p string, out any) error {
 	}
 	all := b.Bytes()
 	body := io.MultiReader(bytes.NewReader(all[:head]), in, bytes.NewReader(all[head:]))
-	fmt.Fprintf(os.Stderr, "POST %s%s (%s, %s bytes)\n", j.c.id.base(), p, name, strconv.FormatInt(size, 10))
+	note("POST %s%s (%s, %s bytes)", j.c.id.base(), p, name, strconv.FormatInt(size, 10))
 	_, err = j.c.call(j.ctx, request{method: http.MethodPost, path: p, body: body, size: int64(len(all)) + size,
 		ctype: mw.FormDataContentType(), token: j.s.Token, out: out, timeout: -1})
 	return err

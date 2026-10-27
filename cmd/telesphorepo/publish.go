@@ -35,11 +35,11 @@ func publish(ctx context.Context, args []string) error {
 	}
 	defer func() {
 		if err := c.closeSession(s); err != nil {
-			fmt.Fprintf(os.Stderr, "Cannot close publish session %d (%v); it ends at %s.\n", s.ID, err, s.ExpiresAt.Local().Format(time.TimeOnly))
+			warn("Cannot close publish session %d (%v); it ends at %s.", s.ID, err, s.ExpiresAt.Local().Format(time.TimeOnly))
 		}
 	}()
 	mask(os.Stdout, s.Token)
-	fmt.Fprintf(os.Stderr, "Publishing to %s (%s) on %s, session %d.\n", s.Repo, s.Format, p.id.base(), s.ID)
+	step("Publishing to %s (%s) on %s%s", errp.bold(s.Repo), s.Format, p.id.base(), errp.dim(fmt.Sprintf(", session %d.", s.ID)))
 	if err := cp.check(ctx, "publish/"+s.Format); err != nil {
 		return err
 	}
@@ -89,7 +89,7 @@ func publish(ctx context.Context, args []string) error {
 	err = r.run(j)
 	var ee *exitError
 	if errors.As(err, &ee) && time.Now().After(s.ExpiresAt) {
-		fmt.Fprintf(os.Stderr, "Publish session %d ended at %s (the server setting publish.session_ttl), before %s did. Uploads after that time fail.\n",
+		warn("Publish session %d ended at %s (the server setting publish.session_ttl), before %s did. Uploads after that time fail.",
 			s.ID, s.ExpiresAt.Local().Format(time.TimeOnly), ee.name)
 	}
 	return err
@@ -141,7 +141,7 @@ func mint(ctx context.Context, c *client, repo, dir string) (*session, error) {
 		}
 		deviceRefused(c, d, err)
 	}
-	fmt.Fprintf(os.Stderr, "This computer has no device of %s yet.\n", c.id.base())
+	step("This computer has no device of %s yet.", c.id.base())
 	if d, err = loginDevice(ctx, c, deviceName()); err != nil {
 		return nil, err
 	}
@@ -154,11 +154,13 @@ func helperStop(c *client, h helperFormat, repo string) error {
 	dir, _ := serverDir(c.id)
 	hosts := dockerHosts(c.id, dir)
 	cfg, _ := dockerConfigPath()
-	fmt.Fprintf(os.Stderr, "%s publishes to %s with its own command:\n  %s\n", h.tool, repo, h.command(hosts[0], repo))
+	fmt.Fprintf(os.Stderr, "%s publishes to %s with its own command:\n", h.tool, errp.bold(repo))
+	codeLine(h.command(hosts[0], repo))
 	if currentCredHelpers()[hosts[0]] == helperName {
-		fmt.Fprintf(os.Stderr, "The credential helper of the CLI in %s gives it the token.\n", cfg)
+		done("The credential helper of the CLI in %s gives it the token.", errp.dim(cfg))
 	} else {
-		fmt.Fprintf(os.Stderr, "Add the credential helper of the CLI to %s first (the setup line does it):\n  %s\n", cfg, credHelpersLine(hosts))
+		warn("Add the credential helper of the CLI to %s first (the setup line does it):", cfg)
+		codeLine(credHelpersLine(hosts))
 	}
 	return &exitError{code: 1}
 }

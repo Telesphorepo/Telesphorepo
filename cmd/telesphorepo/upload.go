@@ -38,12 +38,12 @@ func (j *job) uploadEach(files []string, up func(j *job, f string) (string, erro
 	wj := *j
 	wj.ctx = ctx
 	var (
-		mu      sync.Mutex
-		first   error
-		lines   = make([]string, len(files))
-		done    = make([]bool, len(files))
-		printed int
-		wg      sync.WaitGroup
+		mu       sync.Mutex
+		first    error
+		lines    = make([]string, len(files))
+		finished = make([]bool, len(files))
+		printed  int
+		wg       sync.WaitGroup
 	)
 	next := make(chan int)
 	for range min(uploadWorkers, len(files)) {
@@ -56,9 +56,9 @@ func (j *job) uploadEach(files []string, up func(j *job, f string) (string, erro
 					first = err
 					cancel()
 				case err == nil:
-					lines[i], done[i] = line, true
-					for printed < len(files) && done[printed] {
-						fmt.Fprintln(os.Stderr, lines[printed])
+					lines[i], finished[i] = line, true
+					for printed < len(files) && finished[printed] {
+						done("%s", lines[printed])
 						printed++
 					}
 				}
@@ -78,8 +78,8 @@ feed:
 	wg.Wait()
 	// After a failure, the files after it that were uploaded all the same.
 	for i := printed; i < len(files); i++ {
-		if done[i] {
-			fmt.Fprintln(os.Stderr, lines[i])
+		if finished[i] {
+			done("%s", lines[i])
 		}
 	}
 	if first == nil {
@@ -358,7 +358,7 @@ func (j *job) putFile(f string, size int64, p string, header map[string]string, 
 		return err
 	}
 	defer in.Close()
-	fmt.Fprintf(os.Stderr, "PUT %s%s\n", j.c.id.base(), p)
+	note("PUT %s%s", j.c.id.base(), p)
 	_, err = j.c.call(j.ctx, request{method: http.MethodPut, path: p, body: in, size: size,
 		ctype: "application/octet-stream", token: j.s.Token, header: header, out: out, timeout: -1})
 	return err
@@ -386,7 +386,7 @@ func (j *job) resumable(f string, size int64, finish func(id string, q url.Value
 		return err
 	}
 	at := base + "/" + url.PathEscape(up.ID)
-	fmt.Fprintf(os.Stderr, "Uploading %s (%d bytes) in chunks of %d MiB\n", f, size, chunkSize>>20)
+	step("Uploading %s (%d bytes) in chunks of %d MiB", f, size, chunkSize>>20)
 	done := false
 	defer func() {
 		if !done {
@@ -421,7 +421,7 @@ func (j *job) resumable(f string, size int64, finish func(id string, q url.Value
 		if tries++; tries >= chunkTries {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "The chunk at byte %d failed (%v); sending it again.\n", offset, err)
+		warn("The chunk at byte %d failed (%v); sending it again.", offset, err)
 	}
 	if err := finish(up.ID, url.Values{"sha256": {sum}, "size": {strconv.FormatInt(size, 10)}}); err != nil {
 		return err

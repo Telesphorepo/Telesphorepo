@@ -6,8 +6,9 @@
   the permissions read-only, with a link to Sign-in options for a person who can open it. The
   Repositories card lists the repositories where the person holds a grant, with the phrase of
   their permissions there under its name, and one line under the list counts the public
-  repositories they can also download from. Give access opens a short form that gives the person
-  permissions on many repositories at once; Change edits one repository and Remove takes its
+  repositories they can also download from. Give access opens the grant dialog: the repositories
+  the caller manages access of on the left, the ones it gives on the right, each with its own
+  permissions, saved in one request; Change edits one repository and Remove takes its
   access after a confirm; picked rows get one set of permissions, or lose their access after a
   confirm. Each change of repository permissions applies at once.
 -->
@@ -38,7 +39,7 @@
   import ShortFormDialog from "$lib/components/ShortFormDialog.svelte";
   import SaveBar from "$lib/components/SaveBar.svelte";
   import ServerPermissionPicker from "$lib/components/ServerPermissionPicker.svelte";
-  import GrantDialog from "../../settings/repos/GrantDialog.svelte";
+  import GrantDialog, { bySet, type GrantItem } from "../../settings/repos/GrantDialog.svelte";
   import PlusIcon from "@lucide/svelte/icons/plus";
   import LockIcon from "@lucide/svelte/icons/lock";
   import DatabaseIcon from "@lucide/svelte/icons/database";
@@ -161,15 +162,19 @@
   let giveOpen = $state(false);
   const granted = $derived(new Set(rows.map((r) => r.repo)));
   // The repositories where the caller holds Manage access whose name starts with q (GET /api/repos?perm=repo.access).
-  const findRepos = async (q: string) =>
-    (await api.repos.list({ q, perm: ["repo.access"] }, { limit: 50 })).items.map((r) => ({
-      id: r.name,
-      label: r.name,
-      detail: r.anonymous_read ? "Public: anyone can download" : undefined,
-    }));
-  async function give(names: string[], perms: PermId[]) {
-    await api.grants.set([person], names, perms);
-    toast.success(`Gave ${person} access to ${repoCount(names.length)}: ${repoPhrase(perms)}.`);
+  const formatOf = new Map<string, string>();
+  async function findRepos(q: string, after?: string) {
+    const page = await api.repos.list({ q, perm: ["repo.access"] }, { after, limit: 50 });
+    for (const r of page.items) formatOf.set(r.name, r.format);
+    return {
+      next: page.next,
+      items: page.items.map((r) => ({ id: r.name, label: r.name, detail: r.anonymous_read ? "Public: anyone can download" : undefined })),
+    };
+  }
+  async function give(items: GrantItem[]) {
+    const groups = bySet(items);
+    await api.grants.setGroups(groups.map((g) => ({ users: [person], repos: g.ids, perms: g.perms })));
+    toast.success(`Gave ${person} access to ${repoCount(items.length)}${groups.length === 1 ? `: ${repoPhrase(groups[0].perms)}` : ""}.`);
     await afterChange();
   }
 
@@ -181,7 +186,9 @@
     changeStart = start;
     changeOpen = true;
   }
-  async function change(names: string[], perms: PermId[]) {
+  async function change(items: GrantItem[]) {
+    const names = items.map((i) => i.id);
+    const perms = items[0]?.perms ?? [];
     await api.grants.set([person], names, perms);
     toast.success(
       perms.length
@@ -400,11 +407,13 @@
   noun={["repository", "repositories"]}
   search={findRepos}
   exclude={[...granted]}
-  none="{person} has access to every repository that you manage already."
+  none="You manage the access of no repository."
   {held}
   submitLabel={(n) => (n ? `Give access to ${repoCount(n)}` : "Give access")}
   onGive={give}
-/>
+>
+  {#snippet leading(c)}{#if formatOf.get(c.id)}<FormatIcon format={formatOf.get(c.id) ?? ""} />{/if}{/snippet}
+</GrantDialog>
 
 <GrantDialog
   bind:open={changeOpen}

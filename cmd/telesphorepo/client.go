@@ -109,7 +109,7 @@ func (c *client) call(ctx context.Context, k request) (http.Header, error) {
 	var pe *problemError
 	if errors.As(err, &pe) && pe.p.Remedy != nil && pe.p.Remedy.Action == remedyRetry && k.body == nil {
 		wait := time.Duration(min(max(pe.p.Remedy.After, 1), 60)) * time.Second
-		fmt.Fprintf(os.Stderr, "%s Trying again in %s.\n", pe.p.Title, wait)
+		warn("%s Trying again in %s.", pe.p.Title, wait)
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -279,7 +279,7 @@ type enrollment struct {
 
 // enroll runs the device flow: it makes an Ed25519 key, asks the server for a code, prints the
 // approval link (and opens it in the browser on a terminal), waits until a person approves the
-// code, and returns the device file. It does not save it.
+// code, and returns the device file with the user who approved it. It does not save it.
 func (c *client) enroll(ctx context.Context, name string) (*deviceFile, error) {
 	pub, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -312,7 +312,8 @@ func (c *client) enroll(ctx context.Context, name string) (*deviceFile, error) {
 		case <-time.After(interval):
 		}
 		var poll struct {
-			DeviceID int64 `json:"device_id"`
+			DeviceID int64  `json:"device_id"`
+			User     string `json:"user"` // the owner; an older server does not name it
 		}
 		_, err := c.call(ctx, request{method: http.MethodPost, path: "/api/devices/enroll/poll",
 			json: map[string]string{"device_code": e.DeviceCode}, out: &poll})
@@ -323,7 +324,11 @@ func (c *client) enroll(ctx context.Context, name string) (*deviceFile, error) {
 		}
 		switch {
 		case err == nil:
-			return newDevice(c.id, poll.DeviceID, key)
+			d, err := newDevice(c.id, poll.DeviceID, key)
+			if d != nil {
+				d.User = poll.User
+			}
+			return d, err
 		case code == "authorization_pending":
 		case code == "slow_down":
 			interval += 5 * time.Second

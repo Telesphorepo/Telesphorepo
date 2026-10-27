@@ -68,19 +68,28 @@ func (e *problemError) name() string {
 
 // render prints the problem as the server wrote it, title and detail, and then what its remedy
 // says. The remedies that run something (update_cli, login) are offered by the caller of render
-// (offerRemedy); render only prints.
+// (offerRemedy); render only prints. On a styled stderr the title is a red ✗ line and the remedy
+// a "→" line with its command highlighted.
 func (e *problemError) render(w io.Writer) {
-	fmt.Fprintln(w, e.p.Title)
+	p := paint(false)
+	if w == os.Stderr {
+		p = errp
+	}
+	fmt.Fprintln(w, p.mark("✗", "31;1")+p.wrap("1;31", e.p.Title))
 	if e.p.Detail != "" && e.p.Detail != e.p.Title {
-		fmt.Fprintln(w, e.p.Detail)
+		fmt.Fprintln(w, p.indent()+e.p.Detail)
 	}
 	r := e.p.Remedy
 	if r == nil {
 		return
 	}
+	// hint prints a remedy line: label, then cmd highlighted.
+	hint := func(label, cmd, end string) {
+		fmt.Fprintln(w, p.mark("→", "36")+label+p.wrap("1;36", cmd)+end)
+	}
 	switch r.Action {
 	case remedyUpdateCLI:
-		fmt.Fprintf(w, "Update the CLI: telesphorepo update %s\n", e.server)
+		hint("Update the CLI: ", "telesphorepo update "+e.server, "")
 	case remedyUpdateServer:
 		v := r.Version
 		if v == "" {
@@ -90,31 +99,31 @@ func (e *problemError) render(w io.Writer) {
 		if e.version != "" {
 			running = " (it runs " + e.version + ")"
 		}
-		fmt.Fprintf(w, "Ask the admin of %s to update the server%s to %s.\n", e.server, running, v)
+		fmt.Fprintf(w, "%sAsk the admin of %s to update the server%s to %s.\n", p.mark("→", "36"), e.server, running, p.bold(v))
 	case remedyLogin:
-		fmt.Fprintf(w, "Approve this computer again: telesphorepo login %s\n", e.server)
+		hint("Approve this computer again: ", "telesphorepo login "+e.server, "")
 	case remedySetup:
 		if r.URL != "" {
-			fmt.Fprintf(w, "Copy a setup line from the Publish tab: %s\n", r.URL)
+			hint("Copy a setup line from the Publish tab: ", r.URL, "")
 		}
 	case remedyRetry:
 		if r.After > 0 {
-			fmt.Fprintf(w, "Try again in %d seconds.\n", r.After)
+			fmt.Fprintf(w, "%sTry again in %d seconds.\n", p.mark("→", "36"), r.After)
 		}
 	case remedyOpenURL:
 		if r.URL != "" {
-			fmt.Fprintln(w, r.URL)
+			hint("", r.URL, "")
 			if isTerminal(os.Stdout) && isTerminal(os.Stdin) {
 				openBrowser(r.URL)
 			}
 		}
 	case remedyFixProject:
 		if r.File != "" {
-			fmt.Fprintf(w, "Fix %s.\n", r.File)
+			hint("Fix ", r.File, ".")
 		}
 	default:
 		if r.URL != "" {
-			fmt.Fprintln(w, r.URL)
+			hint("", r.URL, "")
 		}
 	}
 }

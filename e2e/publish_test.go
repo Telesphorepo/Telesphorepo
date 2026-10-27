@@ -383,8 +383,9 @@ func TestDeviceEnrollment(t *testing.T) {
 
 	time.Sleep(time.Duration(en.Interval) * time.Second)
 	st, a = s.PollEnrollment(t, en.DeviceCode)
-	if st != http.StatusOK || a.DeviceID == 0 {
-		t.Fatalf("poll after approval: status %d, answer %+v, want 200 with device_id", st, a)
+	// Only the holder of the device code learns the owner: the CLI names its account after it.
+	if st != http.StatusOK || a.DeviceID == 0 || a.User != u {
+		t.Fatalf("poll after approval: status %d, answer %+v, want 200 with device_id and user %s", st, a, u)
 	}
 	// The device code answers once.
 	time.Sleep(time.Duration(en.Interval) * time.Second)
