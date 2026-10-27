@@ -93,6 +93,16 @@ any file, and one FILE. When the server holds another file than the flag says, t
 nothing, names the ETag of the file now and exits with code 3: read the file again and publish
 again.
 
+Rules in telesphorepo.toml pick the repository by version. The first rule whose version glob
+matches (* is any run of characters) overrides repo, path, dist or component:
+  [[when]]
+  version = "*-SNAPSHOT"
+  repo = "snapshots"
+The version is --version VERSION, else that of each FILE (.deb, .rpm, .pkg.tar.*, .nupkg, .whl),
+else that of the project: Gradle and Maven ask the build; npm, Cargo, Python, Helm and .NET read
+package.json, Cargo.toml, pyproject.toml, Chart.yaml and <Version> of the project file. FILEs of
+several repositories publish with a session for each.
+
 In CI the CLI mints the session with the identity token of the job: GitHub Actions (the job
 needs permissions: id-token: write) or OIDC_TOKEN (Jenkins). On a computer without a device of
 the server, it first asks a person to approve the computer in the browser.
@@ -133,8 +143,8 @@ folder, else on the one server of this computer.
 
 For each server: each account with its device and whether the server accepts it (* marks the
 active one), and the credential helper entries.
-For this folder: telesphorepo.toml and the command that telesphorepo publish runs. It prints no
-secret.
+For this folder: telesphorepo.toml, the command that telesphorepo publish runs and, with rules,
+the version and the repository it picks. It prints no secret.
 `,
 	"update": `Install the CLI of the server:
 

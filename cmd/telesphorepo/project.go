@@ -24,7 +24,8 @@ const projectFileName = "telesphorepo.toml"
 //
 // kind picks the marker kind when the folder has several (e.g. "gradle"). path is the folder of
 // a raw repo that "publish FILE" uploads into; dist and component are the distribution and the
-// component of a Debian repo.
+// component of a Debian repo. Each [[when]] rule overrides repo, path, dist or component for a
+// version that matches its glob; the first rule that matches wins (see rules.go).
 type project struct {
 	Server    string `toml:"server"`
 	Repo      string `toml:"repo"`
@@ -32,6 +33,7 @@ type project struct {
 	Path      string `toml:"path,omitempty"`
 	Dist      string `toml:"dist,omitempty"`
 	Component string `toml:"component,omitempty"`
+	When      []rule `toml:"when,omitempty"`
 
 	dir  string   // the folder of the file
 	file string   // the path of the file
@@ -76,6 +78,11 @@ func readProject(f string) (*project, error) {
 	if p.id, err = parseIdentity(p.Server); err != nil {
 		return nil, fmt.Errorf("%s: %w", f, err)
 	}
+	for i, w := range p.When {
+		if w.Version == "" || w.Repo == "" && w.Path == "" && w.Dist == "" && w.Component == "" {
+			return nil, fmt.Errorf(`%s: rule %d of [[when]] needs version and at least one of repo, path, dist and component, for example version = "*-SNAPSHOT" and repo = "snapshots"`, f, i+1)
+		}
+	}
 	return p, nil
 }
 
@@ -103,12 +110,14 @@ func (p *project) changes(old *project) []string {
 	return out
 }
 
-// writeProject writes p as telesphorepo.toml in its folder. A file that exists with other values
-// is replaced only when the person says yes. It returns false when it kept the old file.
+// writeProject writes p as telesphorepo.toml in its folder, with the [[when]] rules of the file
+// that exists. A file that exists with other values is replaced only when the person says yes.
+// It returns false when it kept the old file.
 func writeProject(p *project) (bool, error) {
 	f := filepath.Join(p.dir, projectFileName)
 	p.file = f
 	if old, err := readProject(f); err == nil {
+		p.When = old.When
 		diff := p.changes(old)
 		if len(diff) == 0 {
 			done("%s is up to date.", f)

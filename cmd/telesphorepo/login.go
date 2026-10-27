@@ -423,5 +423,30 @@ func status(ctx context.Context, args []string) error {
 	case !found:
 		fmt.Printf("  no project marker in %s; telesphorepo publish FILE uploads files to a raw, Arch or RPM repo\n", p.dir)
 	}
+	if len(p.When) == 0 {
+		return nil
+	}
+	if !found {
+		var to []string
+		for _, w := range p.When {
+			repo := w.Repo
+			if repo == "" {
+				repo = p.Repo
+			}
+			to = append(to, w.Version+" to "+repo)
+		}
+		fmt.Printf("  the version of each FILE picks its repo: %s, else %s\n", strings.Join(to, ", "), p.Repo)
+		return nil
+	}
+	v, where, err := projectVersion(ctx, p)
+	if err == nil && v == "" {
+		err = noVersion(p, where)
+	}
+	if err != nil {
+		fmt.Printf("  %s\n", out.red(err.Error()))
+		return nil
+	}
+	_, line := p.route(v)
+	fmt.Printf("  %s\n", line)
 	return nil
 }

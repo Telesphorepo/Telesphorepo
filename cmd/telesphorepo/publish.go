@@ -10,9 +10,14 @@ import (
 )
 
 // publish publishes the project of the current folder, or the FILE arguments to a raw, Debian, Arch or RPM
-// repo: it finds telesphorepo.toml, mints one session for its repo, runs the row of the repo's
-// format, and closes the session at exit, also on Ctrl-C.
+// repo: it finds telesphorepo.toml, picks the repo by the version when the file has [[when]]
+// rules (for FILE arguments by the version of each file), and publishes to each repo with a
+// session of its own.
 func publish(ctx context.Context, args []string) error {
+	version, args, err := versionFlag(args)
+	if err != nil {
+		return err
+	}
 	put, files, err := parsePutFlags(args)
 	if err != nil {
 		return err
@@ -24,11 +29,47 @@ func publish(ctx context.Context, args []string) error {
 	if p == nil {
 		return noProject()
 	}
+	targets, err := routes(ctx, p, files, version)
+	if err != nil {
+		return err
+	}
 	c := newClient(p.id)
 	cp := attach(c, false)
 	if err := cp.check(ctx, "publish"); err != nil {
 		return err
 	}
+	for _, t := range targets {
+		if err := publishTo(ctx, c, cp, t.p, t.files, put); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// versionFlag takes --version VERSION out of the publish arguments.
+func versionFlag(args []string) (string, []string, error) {
+	var v string
+	var rest []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch s, ok := strings.CutPrefix(a, "--version="); {
+		case ok:
+			v = s
+		case a == "--version" && i+1 < len(args):
+			i++
+			v = args[i]
+		case a == "--version":
+			return "", nil, usage("publish")
+		default:
+			rest = append(rest, a)
+		}
+	}
+	return v, rest, nil
+}
+
+// publishTo mints a session for the repo of p, runs the row of the repo's format with the FILE
+// arguments files, and closes the session at its end, also on Ctrl-C.
+func publishTo(ctx context.Context, c *client, cp *compat, p *project, files []string, put putFlags) error {
 	s, err := mint(ctx, c, p.Repo, p.dir)
 	if err != nil {
 		return err
