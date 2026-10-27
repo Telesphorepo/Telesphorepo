@@ -63,7 +63,9 @@ type tokenPerm struct {
 }
 
 var tokenPerms = []tokenPerm{
-	{key: "workers", name: "Developer Platform › Workers: Admin", groups: map[string]string{"e086da7e2179491d91ee5f35b3ca210a": "Workers Scripts Write"}},
+	// Workers Admin is the role the form offers; Workers Scripts Write is the permission it replaces.
+	{key: "workers", name: "Developer Platform › Workers: Admin", groups: map[string]string{
+		"98d78cd2433d4c3687191bc0244ef948": "Workers Admin", "e086da7e2179491d91ee5f35b3ca210a": "Workers Scripts Write"}},
 	{key: "r2", name: "Developer Platform › Workers R2 Storage: Edit", groups: map[string]string{"bf7481a1826f439697cb59a20b22293e": "Workers R2 Storage Write"}},
 	{key: "queues", name: "Developer Platform › Queues: Edit", groups: map[string]string{"366f57075ffc42689627bcf8242a1b6d": "Queues Write"}},
 	{key: "routes", name: "Developer Platform › Workers Routes: Edit", zone: true, groups: map[string]string{"28f4b596e7d643029c524985477ae49a": "Workers Routes Write"}},

@@ -2777,8 +2777,9 @@ exact, read_missing, exact_why, problem, expires_on, permissions: [{key, name, o
   it covers the same resource (Cloudflare checks a deny first). An account permission needs
   `com.cloudflare.api.account.<account>` (or `.*`) with `"*"`; a zone permission needs, on the
   zone of every route host, `com.cloudflare.api.account.zone.<zone>` or `.zone.*` with `"*"`, or
-  either nested under the account key. The groups: Workers Scripts Write
-  (`e086da7e2179491d91ee5f35b3ca210a`) for Workers: Admin, Workers R2 Storage Write
+  either nested under the account key. The groups: Workers Admin
+  (`98d78cd2433d4c3687191bc0244ef948`), or the Workers Scripts Write it replaces
+  (`e086da7e2179491d91ee5f35b3ca210a`), for Workers: Admin, Workers R2 Storage Write
   (`bf7481a1826f439697cb59a20b22293e`), Queues Write (`366f57075ffc42689627bcf8242a1b6d`), Workers
   Routes Write (`28f4b596e7d643029c524985477ae49a`), Zone Read
   (`c8fed203ed3043cba015a93ad1616f1f`) and Cache Purge (`e17beae8b8cb423a99b1730f21238bed`). A
