@@ -20,8 +20,9 @@ func cliBigUpload(t testing.TB) int64 {
 // TestCLIUpload: publish FILE uploads files into the folder "path" of a raw repo (a large file
 // through the resumable upload routes, in more than one chunk; --into, --if-new and --if-match,
 // whose false precondition exits 3) and .deb packages to the
-// distribution and component of a Debian repo, and .pkg.tar.* packages to an Arch repo (a large
-// package through the resumable upload routes as well), which apt and pacman then install.
+// distribution and component of a Debian repo, .pkg.tar.* packages to an Arch repo and .rpm
+// packages to an RPM repo (a large package of each through the resumable upload routes as well),
+// which apt, pacman and dnf then install.
 func TestCLIUpload(t *testing.T) {
 	t.Parallel()
 	c := newCLI(t)

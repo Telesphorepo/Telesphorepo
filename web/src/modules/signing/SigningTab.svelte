@@ -3,8 +3,10 @@
   the key that signs the indexes of this repository. Clients check the indexes with its public
   key, which the format serves at the path public_key of its descriptor. The person with Edit
   settings picks another key, or with Signing keys creates a new one for this repository; the
-  server then signs the indexes of this repository again. The change form is its own
-  confirmation step: it asks before it changes the key.
+  server then signs the indexes of this repository again (and for a format whose descriptor has
+  key_change, more: an RPM repo writes every package again, which the confirmation names with the
+  repository's size). The change form is its own confirmation step: it asks before it changes the
+  key. The format's key_note says which keys its clients can check.
 -->
 <script lang="ts">
   import { toast } from "svelte-sonner";

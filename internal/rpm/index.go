@@ -319,7 +319,10 @@ func (h *Handler) resigned(ctx context.Context, repo *repos.Repo, r dbq.SignRow,
 		out.remove()
 		return nil, err
 	}
+	// The file keeps who uploaded it, its CI build and its dates: only its signature changes.
+	o := generated
+	o.UserID, o.BuildID, o.Created, o.Updated = a.UploadedBy, a.BuildID, a.CreatedAt, a.UpdatedAt
 	return &assets.Write{Repo: repo, Path: repopath.Path(r.Filename), Body: assets.Body{Spool: sp},
-		ContentType: rpmContentType, Kind: assets.KindArtifact, Origin: generated,
+		ContentType: rpmContentType, Kind: assets.KindArtifact, Origin: o,
 		Meta: &resignMeta{id: r.ID, headerStart: int64(leadSize + len(sigh)), from: a.SHA256}}, nil
 }

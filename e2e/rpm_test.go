@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestRPM: dnf on Fedora (dnf5) and Rocky 9 (dnf4) installs packages that nfpm built from a
@@ -173,6 +174,25 @@ func TestRPMRules(t *testing.T) {
 	})
 }
 
+// rpmUpdatedAt returns the updated_at of the file p of repo.
+func rpmUpdatedAt(t *testing.T, s *Server, repo, p string) time.Time {
+	t.Helper()
+	var page struct {
+		Items []struct {
+			Path      string    `json:"path"`
+			UpdatedAt time.Time `json:"updated_at"`
+		} `json:"items"`
+	}
+	s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/assets?limit=10&prefix="+p, nil, s.Admin(), &page)
+	for _, it := range page.Items {
+		if strings.TrimPrefix(it.Path, "/") == p {
+			return it.UpdatedAt
+		}
+	}
+	t.Fatalf("%s has no %s: %+v", repo, p, page.Items)
+	return time.Time{}
+}
+
 // evr0 is the version v with its epoch, 0 when it has none, as rpm.vercmp compares full EVRs.
 func evr0(v string) string {
 	if strings.Contains(v, ":") {
@@ -182,7 +202,7 @@ func evr0(v string) string {
 }
 
 // TestRPMSigning: after the repo's key changes to an imported RSA key, every package and the
-// repodata are signed again: a client that trusts only the old key refuses the repo, a fresh one
+// repodata are signed again, each package keeping the time of its upload: a client that trusts only the old key refuses the repo, a fresh one
 // that trusts the new key installs from it, and so does Rocky 8, whose rpm checks only RSA keys.
 func TestRPMSigning(t *testing.T) {
 	t.Parallel()
@@ -194,6 +214,7 @@ func TestRPMSigning(t *testing.T) {
 		before := rpmMustUpload(t, s, repo, pkgs.anchor10, s.PublishAuth(t, s.AdminUser, repo), "e2e-anchor", "1.0.0-1", "x86_64")
 		s.WaitDebianIndexed(t, repo)
 		oldKey := s.RPMKey(t, repo, nil)
+		updated := rpmUpdatedAt(t, s, repo, before.Filename)
 
 		d := StartDnf(t, fedoraImage)
 		d.Trust(t, repo, oldKey)
@@ -211,6 +232,9 @@ func TestRPMSigning(t *testing.T) {
 		}
 		if st, b := debGet(t, s, opts.S3, "/rpm/"+repo+"/"+before.Filename, nil); st != http.StatusOK || archSum(b) == before.SHA256 {
 			t.Fatalf("GET the package after the key change: status %d, the same file as before: %v", st, archSum(b) == before.SHA256)
+		}
+		if got := rpmUpdatedAt(t, s, repo, before.Filename); !got.Equal(updated) {
+			t.Fatalf("the package signed again shows the time %s, want its upload's %s", got, updated)
 		}
 		if code, out := d.Exec(t, "dnf -y reinstall --refresh e2e-anchor"); code == 0 {
 			t.Fatalf("dnf took repodata signed with a key it does not trust:\n%s", out)
