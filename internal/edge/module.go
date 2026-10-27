@@ -121,6 +121,10 @@ type mod struct {
 	ttlMu sync.Mutex // guards ttl
 	ttl   ttlState
 
+	ptrMu sync.Mutex   // guards ptr
+	ptr   pointerState // the generations of the pointer cache (purge.go)
+	gate  purgeGate    // whether the token can purge cached pointers
+
 	checkMu    sync.Mutex                   // one check of the Worker at a time; guards lastCheck
 	lastCheck  time.Time                    // when the last check started
 	lastResult atomic.Pointer[checkResult]  // what the last check found

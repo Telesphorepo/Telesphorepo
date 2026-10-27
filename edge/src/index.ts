@@ -16,6 +16,7 @@ import {
   blobKey,
   bucket,
   edgeKey,
+  keyPrefix,
   limited,
   loadConfig,
   mayRead,
@@ -136,6 +137,7 @@ function distance(a: [number, number], b: [number, number]): number {
 
 interface Bucket {
   hint: string;
+  name: string; // the bucket that its bucket.json names
   r2: R2Bucket;
 }
 
@@ -143,7 +145,7 @@ interface Bucket {
 // bucket, or the home bucket. A binding to another bucket (a hint moved to a new bucket before a
 // deploy) is skipped. Without the client's coordinates it returns the home bucket.
 async function nearest(request: Request, env: Env, config: Config, objects: Objects): Promise<Bucket> {
-  const home: Bucket = { hint: config.homeHint, r2: env.HOME };
+  const home: Bucket = { hint: config.homeHint, name: config.homeBucket, r2: env.HOME };
   const cf = request.cf as { latitude?: string; longitude?: string } | undefined;
   const lat = parseFloat(cf?.latitude ?? ""), lon = parseFloat(cf?.longitude ?? "");
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return home;
@@ -158,7 +160,7 @@ async function nearest(request: Request, env: Env, config: Config, objects: Obje
   }
   near.sort((a, b) => a.d - b.d);
   for (const n of near) {
-    if ((await objects.bucketOf(n.r.binding, n.r2)) === n.r.bucket) return { hint: n.r.hint, r2: n.r2 };
+    if ((await objects.bucketOf(n.r.binding, n.r2)) === n.r.bucket) return { hint: n.r.hint, name: n.r.bucket, r2: n.r2 };
   }
   return home;
 }
@@ -171,25 +173,80 @@ async function sha256Hex(s: string): Promise<string> {
   return Array.from(new Uint8Array(d), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-type Lookup = { kind: "none" } | { kind: "pending" } | { kind: "bad" } | { kind: "hit"; pointer: Pointer };
+type Lookup = { kind: "none" } | { kind: "pending" } | { kind: "bad" } | { kind: "hit"; pointer: Pointer; cached: boolean };
 
-// pointer reads the pointer of path in repo from b. A pointer of another repo or path is "bad":
-// the request goes to the origin.
-async function pointer(env: Env, b: R2Bucket, repo: RepoObject, path: string): Promise<Lookup> {
-  const obj = await b.get(edgeKey(env, `p/${repo.id}/${await sha256Hex(path)}`));
-  if (!obj) return { kind: "none" };
-  let v: unknown;
-  try {
-    v = JSON.parse(await obj.text());
-  } catch {
-    return { kind: "bad" };
-  }
+// PointerCache is the Cache API of the pointers of immutable paths on one request: base is the
+// key prefix of the request's host and of the generation of config.json, ttl the max age.
+interface PointerCache {
+  base: string;
+  ttl: number;
+  ctx: ExecutionContext;
+}
+
+// PUT_WINDOW_MS bounds the time from the start of an R2 read of a pointer to its put into the
+// cache. The server purges a pointer it made unusable 2 s after the change, so a copy read before
+// the change and put after the purge cannot happen.
+const PUT_WINDOW_MS = 1000;
+
+// pointerCache returns the pointer cache of a request on host: config.json names a generation and
+// the host among those whose copies the server purges; null otherwise. Only the Cache API holds a
+// pointer, never the isolate memory, which a purge cannot reach.
+function pointerCache(env: Env, config: Config, host: string, ctx: ExecutionContext): PointerCache | null {
+  const pc = config.pointerCache;
+  if (!pc || !pc.hosts.has(host)) return null;
+  return { base: `https://${host}/.telesphorepo-edge/${keyPrefix(env)}v1/pointers/${pc.gen}/`, ttl: pc.ttl, ctx };
+}
+
+// lookup reads a pointer object of path in repo. A pointer of another repo or path is "bad": the
+// request goes to the origin.
+function lookup(v: unknown, repo: RepoObject, path: string, cached: boolean): Lookup {
   const p = parsePointer(v);
   if (p === "pending") {
     return typeof v === "object" && v !== null && (v as { repo?: unknown }).repo === repo.id ? { kind: "pending" } : { kind: "bad" };
   }
   if (!p || p.repo !== repo.id || p.path !== path) return { kind: "bad" };
-  return { kind: "hit", pointer: p };
+  return { kind: "hit", pointer: p, cached };
+}
+
+// pointer reads the pointer of path in repo from bucket b. With cache (an immutable path of a
+// single repo), a pointer that serves is kept in the Cache API under b's name: the server purges
+// that copy before any change of the pointer, so the copy always holds the bytes of the asset now.
+// A missing or pending pointer is never kept, so its R2 read follows every new pointer.
+async function pointer(env: Env, b: Bucket, repo: RepoObject, path: string, cache: PointerCache | null): Promise<Lookup> {
+  const key = `p/${repo.id}/${await sha256Hex(path)}`;
+  const cacheKey = cache ? new Request(cache.base + b.name + "/" + key) : null;
+  if (cacheKey) {
+    try {
+      const hit = await caches.default.match(cacheKey);
+      const expires = Number(hit?.headers.get("x-edge-expires"));
+      if (hit && Number.isFinite(expires) && expires > Date.now()) {
+        const l = lookup(JSON.parse(await hit.text()), repo, path, true);
+        if (l.kind === "hit") return l;
+      }
+    } catch {
+      // A Cache API failure reads the bucket.
+    }
+  }
+  const started = Date.now();
+  const obj = await b.r2.get(edgeKey(env, key));
+  if (!obj) return { kind: "none" };
+  const text = await obj.text();
+  let v: unknown;
+  try {
+    v = JSON.parse(text);
+  } catch {
+    return { kind: "bad" };
+  }
+  const l = lookup(v, repo, path, false);
+  if (cache && cacheKey && l.kind === "hit" && Date.now() - started <= PUT_WINDOW_MS) {
+    const headers = new Headers({
+      "Cache-Control": "max-age=" + cache.ttl,
+      "Content-Type": "application/json",
+      "x-edge-expires": String(Date.now() + cache.ttl * 1000),
+    });
+    cache.ctx.waitUntil(caches.default.put(cacheKey, new Response(text, { headers })).catch(() => {}));
+  }
+  return l;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -214,11 +271,11 @@ function marked(res: Response, value: string): Response {
 // chosen returns the bucket that the speed test names: "home", or a ready region whose binding's
 // bucket.json names the region's bucket; null when the Worker does not read it.
 async function chosen(env: Env, config: Config, objects: Objects, region: string): Promise<Bucket | null> {
-  if (region === "home") return { hint: config.homeHint, r2: env.HOME };
+  if (region === "home") return { hint: config.homeHint, name: config.homeBucket, r2: env.HOME };
   const r = config.regions.find((x) => x.hint === region);
   const r2 = r?.ready && r.bucket !== "" ? bucket(env, r.binding) : null;
   if (!r || !r2) return null;
-  return (await objects.bucketOf(r.binding, r2)) === r.bucket ? { hint: r.hint, r2 } : null;
+  return (await objects.bucketOf(r.binding, r2)) === r.bucket ? { hint: r.hint, name: r.bucket, r2 } : null;
 }
 
 // edge answers the request at the edge, or returns null when the origin must answer. override is
@@ -233,10 +290,10 @@ async function edge(request: Request, env: Env, ctx: ExecutionContext, override:
   const steps: string[] = [];
   let mark = Date.now();
   const loaded = await loadConfig(env, url.origin);
-  const step = (name: string) => {
+  const step = (name: string, desc?: string) => {
     const now = Date.now();
     const t = loaded!.objects.tally;
-    steps.push(`${name};dur=${now - mark};desc="mem ${t.mem} cache ${t.cache} r2 ${t.r2}"`);
+    steps.push(`${name};dur=${now - mark};desc="${desc ?? `mem ${t.mem} cache ${t.cache} r2 ${t.r2}`}"`);
     mark = now;
   };
   if (!loaded) return null;
@@ -293,20 +350,24 @@ async function edge(request: Request, env: Env, ctx: ExecutionContext, override:
   const imm = repo.paths
     ? immutableBy(target.path, repo.paths)
     : immutable(target.path, target.format.immutable, target.format.mutable);
-  const home: Bucket = { hint: config.homeHint, r2: env.HOME };
+  const home: Bucket = { hint: config.homeHint, name: config.homeBucket, r2: env.HOME };
   const at = imm ? near : home; // the bucket of the pointer
 
   const started = Date.now();
   let found: { repo: RepoObject; pointer: Pointer } | null;
+  let fromCache = false;
   if (repo.kind === "group") {
     found = await groupPointer(env, objects, r, repo, target.format.name, target.path, imm, at);
   } else {
-    const l = await pointer(env, at.r2, repo, target.path);
+    // A mutable path reads its pointer in R2 every time.
+    const cache = imm ? pointerCache(env, config, url.hostname.toLowerCase(), ctx) : null;
+    const l = await pointer(env, at, repo, target.path, cache);
     found = l.kind === "hit" ? { repo, pointer: l.pointer } : null;
+    fromCache = l.kind === "hit" && l.cached;
   }
   if (!found) return null;
   const pointerMs = Date.now() - started;
-  step("pointer");
+  step("pointer", fromCache ? "cache" : "r2");
 
   const p = found.pointer;
   let blobRead: { ms: number; hint: string } | null = null;
@@ -382,7 +443,9 @@ async function groupPointer(
     if (!m || m.format !== format || m.kind === "group" || m.guarded || m.paths) return null;
     if (mayRead(r, m, false)) readable.push(m);
   }
-  const lookups = await limited(readable, 6, (m) => pointer(env, at.r2, m, path));
+  // Read in R2, never through the pointer cache: a member answers only while every earlier member
+  // has no pointer, and a cache holds no absence.
+  const lookups = await limited(readable, 6, (m) => pointer(env, at, m, path, null));
   for (let i = 0; i < readable.length; i++) {
     const l = lookups[i];
     switch (l.kind) {

@@ -460,12 +460,20 @@ func (m *mod) reclassStep(ctx context.Context, id int64) (bool, error) {
 			far = append(far, b)
 		}
 	}
+	var delMu sync.Mutex
+	var deleted []string // the keys whose regional pointers the walk deleted: purged after the page
 	if err := parallel(16, jobs, func(j job) error {
 		key := pointerKey(id, j.path)
 		unlock := m.h.Assets.Lock(id, j.path)
 		defer unlock()
 		if !j.put {
-			return parallel(len(far)+1, far, func(b *bucket) error { return m.del(ctx, b, key) })
+			if err := parallel(len(far)+1, far, func(b *bucket) error { return m.del(ctx, b, key) }); err != nil {
+				return err
+			}
+			delMu.Lock()
+			deleted = append(deleted, key)
+			delMu.Unlock()
+			return nil
 		}
 		a, err := m.h.Assets.Get(ctx, id, j.path)
 		if errors.Is(err, assets.ErrNotFound) {
@@ -479,6 +487,11 @@ func (m *mod) reclassStep(ctx context.Context, id int64) (bool, error) {
 			return m.putUnknown(ctx, id, j.path, m.put(ctx, b, key, body))
 		})
 	}); err != nil {
+		return false, err
+	}
+	// A later replace of a path that is mutable now changes only its home pointer, so the regional
+	// copies go before the walk moves on: the walk ends only after its last page.
+	if err := m.purgePointers(ctx, far, deleted, time.Now()); err != nil {
 		return false, err
 	}
 

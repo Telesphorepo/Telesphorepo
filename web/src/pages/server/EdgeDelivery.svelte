@@ -284,7 +284,14 @@
         "Developer Platform › Queues: Edit",
       ],
     },
-    { scope: "All Domains, or the domains of the routes", permissions: ["Developer Platform › Workers Routes: Edit", "DNS & Zones › Zone: Read"] },
+    {
+      scope: "All Domains, or the domains of the routes",
+      permissions: [
+        "Developer Platform › Workers Routes: Edit",
+        "DNS & Zones › Zone: Read",
+        "Caching › Cache Purge: Purge (to cache pointers at the edge)",
+      ],
+    },
   ];
   let deployError = $state("");
   let deployStarting = $state(false);
@@ -428,6 +435,18 @@
             <dt class="text-meta text-muted-foreground">Home bucket</dt>
             <dd class="truncate text-label" title={st.home.bucket || undefined}>{st.home.bucket || "Not set"}</dd>
           </div>
+          {#if st.mode === "on"}
+            <div class="col-span-full min-w-0">
+              <dt class="text-meta text-muted-foreground">Pointer cache</dt>
+              {#if st.pointer_cache.on}
+                <dd class="text-label">On</dd>
+                <dd class="text-meta text-muted-foreground">The server purges a pointer's cached copies before its file is replaced or removed.</dd>
+              {:else}
+                <dd class="text-label">Off</dd>
+                <dd class="text-meta text-muted-foreground">{st.pointer_cache.why || "Checking the token's purge permission."}</dd>
+              {/if}
+            </div>
+          {/if}
           <div class="col-span-full min-w-0">
             <dt class="text-meta text-muted-foreground">Last check of the Worker</dt>
             {#if checkError}

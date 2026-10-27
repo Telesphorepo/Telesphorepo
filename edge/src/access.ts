@@ -90,6 +90,9 @@ export interface Config {
   regions: Region[];
   // domains: the repo domains, host (lower case) -> the name of its repo or of a redirect of it.
   domains: Map<string, string>;
+  // pointerCache: the pointers of immutable paths are cached for ttl seconds under generation gen,
+  // on the hosts (lower case) whose copies the server purges; null: every pointer read goes to R2.
+  pointerCache: { ttl: number; gen: number; hosts: Set<string> } | null;
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -180,6 +183,11 @@ export function parseConfig(v: unknown): Config | null {
       if (typeof repo === "string" && repo !== "") domains.set(host.toLowerCase(), repo);
     }
   }
+  let pointerCache: Config["pointerCache"] = null;
+  const pc = v.pointer_cache;
+  if (isObj(pc) && isInt(pc.ttl) && pc.ttl >= 1 && isInt(pc.gen) && isStrs(pc.hosts)) {
+    pointerCache = { ttl: pc.ttl, gen: pc.gen, hosts: new Set(pc.hosts.map((h) => h.toLowerCase())) };
+  }
   return {
     serverVersion: typeof v.server_version === "string" ? v.server_version : "",
     serves: knows(v.requires),
@@ -192,6 +200,7 @@ export function parseConfig(v: unknown): Config | null {
     homeReady: isObj(v.home) && v.home.ready === true,
     regions,
     domains,
+    pointerCache,
   };
 }
 
@@ -253,11 +262,13 @@ async function held(
     if (hit && Number.isFinite(expires) && expires > now) {
       const value = hit.headers.get("x-edge-absent") === "1" ? null : parse(await hit.text());
       hold(id, { value, expires });
+      tally.cache++;
       return value;
     }
   } catch {
     // A Cache API failure reads the bucket.
   }
+  tally.r2++;
   const obj = await r2.get(edgeKey(env, key));
   const text = obj ? await obj.text() : null;
   const value = text === null ? null : parse(text);

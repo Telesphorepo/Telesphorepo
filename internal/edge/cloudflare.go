@@ -130,11 +130,12 @@ type cfRequest struct {
 	body   []byte
 	ctype  string // the Content-Type of body; "" with a body is application/json
 	upload bool   // the longer timeout
+	again  bool   // a POST that may be sent again (a purge)
 }
 
 // idempotent reports whether a call may be sent again after a server error or no answer: a
 // POST that creates something may have created it.
-func (r *cfRequest) idempotent() bool { return r.method != http.MethodPost }
+func (r *cfRequest) idempotent() bool { return r.method != http.MethodPost || r.again }
 
 // do sends req and decodes the result into out (nil to drop it). It waits out a 429 for its
 // Retry-After (at most cfMaxRetryAfter, three times), and sends an idempotent call again twice

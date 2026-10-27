@@ -50,6 +50,8 @@ type statusJSON struct {
 	Regions    []regionJSON `json:"regions"`
 	// Deploy is the deploy of the Worker from the server (deploy.go).
 	Deploy deployJSON `json:"deploy"`
+	// PointerCache is the Worker's cache of the pointers of immutable paths (purge.go).
+	PointerCache pointerCacheJSON `json:"pointer_cache"`
 }
 
 type homeJSON struct {
@@ -107,6 +109,9 @@ func (m *mod) status(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		Backfill: backfillJSON{Running: v.mode == modeOn && p.home.Started && !p.home.Ready, Queued: p.home.Queued, Total: p.home.Total},
 		Regions:  []regionJSON{},
 		Deploy:   m.deployStatus(snap),
+	}
+	if v.mode == modeOn {
+		out.PointerCache = m.pointerCacheStatus()
 	}
 	_, out.CheckUnfit = checkBase(snap)
 	out.LastCheck = m.lastResult.Load()

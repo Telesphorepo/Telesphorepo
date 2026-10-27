@@ -666,35 +666,44 @@ func (r *deployRun) lookupZone(ctx context.Context, name, account string) (*cfZo
 func (r *deployRun) findZones(ctx context.Context) error {
 	r.zones = map[string]zoneRef{}
 	for _, host := range r.hosts() {
-		var found *cfZone
+		z, err := r.zoneOf(ctx, host)
+		if err != nil {
+			return err
+		}
+		r.zones[host] = z
+	}
+	return nil
+}
+
+// zoneOf finds the zone of host in the account, walking up its labels.
+func (r *deployRun) zoneOf(ctx context.Context, host string) (zoneRef, error) {
+	var found *cfZone
+	for _, name := range zoneNames(host) {
+		z, err := r.lookupZone(ctx, name, r.p.Account)
+		if err != nil {
+			return zoneRef{}, r.fail(stepZones, "Finding the zone of "+host+" failed", err)
+		}
+		if z != nil {
+			found = z
+			break
+		}
+	}
+	if found == nil {
+		msg := fmt.Sprintf("No zone of the Cloudflare account %s holds %s. A Worker route must be on a zone of the same Cloudflare account as the Worker (the account of the R2 buckets).", r.p.Account, host)
 		for _, name := range zoneNames(host) {
-			z, err := r.lookupZone(ctx, name, r.p.Account)
-			if err != nil {
-				return r.fail(stepZones, "Finding the zone of "+host+" failed", err)
-			}
-			if z != nil {
-				found = z
+			if z, err := r.lookupZone(ctx, name, ""); err == nil && z != nil {
+				msg += fmt.Sprintf(" The zone %s is in the account %s (%s).", z.Name, z.Account.Name, z.Account.ID)
 				break
 			}
 		}
-		if found == nil {
-			msg := fmt.Sprintf("No zone of the Cloudflare account %s holds %s. A Worker route must be on a zone of the same Cloudflare account as the Worker (the account of the R2 buckets).", r.p.Account, host)
-			for _, name := range zoneNames(host) {
-				if z, err := r.lookupZone(ctx, name, ""); err == nil && z != nil {
-					msg += fmt.Sprintf(" The zone %s is in the account %s (%s).", z.Name, z.Account.Name, z.Account.ID)
-					break
-				}
-			}
-			msg += " Move the zone into this account, or deploy from a computer with the route of " + host +
-				" taken out of wrangler.jsonc: the server then serves that host itself. If the zone is in this account, give the token DNS & Zones › Zone: Read in a policy of All Domains or of that domain."
-			return &stepError{step: stepZones, msg: msg}
-		}
-		if found.Status != "" && found.Status != "active" {
-			return &stepError{step: stepZones, msg: fmt.Sprintf("The zone %s of %s is %s in Cloudflare, so a Worker route on it runs nothing. Finish the setup of the zone in Cloudflare, then deploy again.", found.Name, host, found.Status)}
-		}
-		r.zones[host] = zoneRef{ID: found.ID, Name: found.Name}
+		msg += " Move the zone into this account, or deploy from a computer with the route of " + host +
+			" taken out of wrangler.jsonc: the server then serves that host itself. If the zone is in this account, give the token DNS & Zones › Zone: Read in a policy of All Domains or of that domain."
+		return zoneRef{}, &stepError{step: stepZones, msg: msg}
 	}
-	return nil
+	if found.Status != "" && found.Status != "active" {
+		return zoneRef{}, &stepError{step: stepZones, msg: fmt.Sprintf("The zone %s of %s is %s in Cloudflare, so a Worker route on it runs nothing. Finish the setup of the zone in Cloudflare, then deploy again.", found.Name, host, found.Status)}
+	}
+	return zoneRef{ID: found.ID, Name: found.Name}, nil
 }
 
 // hosts returns the hosts of the routes, sorted.

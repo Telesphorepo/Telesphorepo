@@ -429,7 +429,10 @@ func (m *mod) applyPointer(ctx context.Context, v *view, r dbq.DueOutboxRow) (dr
 		if err != nil || !old {
 			return false, err
 		}
-		return false, parallel(len(v.regions)+1, v.regions, func(b *bucket) error { return m.del(ctx, b, key) })
+		if err := parallel(len(v.regions)+1, v.regions, func(b *bucket) error { return m.del(ctx, b, key) }); err != nil {
+			return false, err
+		}
+		return false, m.purgePointers(ctx, v.regions, []string{key}, time.Now())
 	}
 	if perRepo {
 		if err := m.record(ctx, repo.ID, rules); err != nil {
@@ -439,9 +442,13 @@ func (m *mod) applyPointer(ctx context.Context, v *view, r dbq.DueOutboxRow) (dr
 	return false, parallel(len(v.regions)+1, v.regions, func(b *bucket) error { return m.put(ctx, b, key, body) })
 }
 
-// deleteEverywhere deletes key in the home bucket and in every region.
+// deleteEverywhere deletes key in the home bucket and in every region, then purges its cached
+// copies.
 func (m *mod) deleteEverywhere(ctx context.Context, v *view, key string) error {
-	return parallel(len(v.regions)+1, v.all(), func(b *bucket) error { return m.del(ctx, b, key) })
+	if err := parallel(len(v.regions)+1, v.all(), func(b *bucket) error { return m.del(ctx, b, key) }); err != nil {
+		return err
+	}
+	return m.purgePointers(ctx, v.all(), []string{key}, time.Now())
 }
 
 // applyObject writes the access object or config.json of key to the home bucket when its JSON
@@ -473,6 +480,10 @@ func (m *mod) write(ctx context.Context, v *view, key string, body []byte, force
 			return err
 		}
 	}
+	var gen int64
+	if key == configKey {
+		gen = m.pointersWriting(ctx, body, v.home)
+	}
 	err := m.put(ctx, v.home, key, body)
 	if key == configKey {
 		var c struct {
@@ -480,6 +491,7 @@ func (m *mod) write(ctx context.Context, v *view, key string, body []byte, force
 		}
 		_ = json.Unmarshal(body, &c)
 		m.notePublished(ctx, c.AccessTTL, err == nil)
+		m.pointersPublished(ctx, gen, err == nil)
 	}
 	if err != nil {
 		return err

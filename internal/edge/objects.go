@@ -131,6 +131,17 @@ type configObject struct {
 	// Domains are the repo domains (repo_domains): host -> repo name (or a redirect of one). The
 	// Worker reads a request on such a host as /<format>/<repo><path>.
 	Domains map[string]string `json:"domains"`
+	// PointerCache turns on the Worker's cache of the pointers of immutable paths (purge.go); nil
+	// while the server cannot purge, and an older Worker ignores it.
+	PointerCache *pointerCacheObject `json:"pointer_cache,omitempty"`
+}
+
+// pointerCacheObject is pointer_cache of config.json: the Worker keeps a pointer that serves for
+// TTL seconds under generation Gen, on a request to one of Hosts.
+type pointerCacheObject struct {
+	TTL   int64    `json:"ttl"`
+	Gen   int64    `json:"gen"`
+	Hosts []string `json:"hosts"`
 }
 
 type formatObject struct {

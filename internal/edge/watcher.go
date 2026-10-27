@@ -14,7 +14,8 @@ import (
 
 // watcher is the pipeline watcher of the module (assets.Watcher). Before a replacement or a
 // remove it makes the old pointers unusable in every bucket, under the path locks, after a dirty
-// outbox row in its own transaction. In the commit and remove transactions it queues the final
+// outbox row in its own transaction, and purges the Workers' cached copies of the immutable ones
+// (purge.go). In the commit and remove transactions it queues the final
 // state, or drops the dirty row of a removed path whose pointers are deleted already. A failed
 // pre-step fails the commit or the remove batch.
 type watcher struct{ m *mod }
@@ -116,7 +117,15 @@ func (w watcher) Replacing(ctx context.Context, repo *repos.Repo, prev []*assets
 	}); err != nil {
 		return err
 	}
-	return retry429(ctx, func() error { return m.del(ctx, v.home, gone...) })
+	changed := time.Now()
+	if err := retry429(ctx, func() error { return m.del(ctx, v.home, gone...) }); err != nil {
+		return err
+	}
+	keys := make([]string, len(pending))
+	for i, p := range pending {
+		keys[i] = pointerKey(repo.ID, p)
+	}
+	return m.purgePointers(ctx, v.pre(), keys, changed)
 }
 
 // Creating puts {pending} in every bucket for a new immutable path of a repo that is a member of a
@@ -217,6 +226,9 @@ func (w watcher) Removing(ctx context.Context, repo *repos.Repo, paths []string)
 		}
 		return retry429(ctx, func() error { return m.del(ctx, b, keys...) })
 	})
+	if err == nil {
+		err = m.purgePointers(ctx, v.pre(), immutable, time.Now())
+	}
 	if err == nil && v.mode == modeOn {
 		m.cleared(v, all)
 	}

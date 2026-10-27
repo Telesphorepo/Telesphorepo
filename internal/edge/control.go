@@ -168,6 +168,9 @@ func (m *mod) loadState(ctx context.Context) error {
 			return fmt.Errorf("edge cache time state: %w", err)
 		}
 	}
+	if err := m.loadPointers(ctx); err != nil {
+		return err
+	}
 	m.publish()
 	return nil
 }
@@ -279,6 +282,7 @@ func (m *mod) step(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	m.readGap(ctx, v.home, false)
+	m.checkPurge(ctx)
 	m.writeMarkers(ctx, v)
 	more, err := m.backfillHome(ctx, v)
 	if err != nil {
@@ -843,6 +847,9 @@ func (m *mod) configJSON(enabled bool, ttl time.Duration) []byte {
 		Domains: m.h.RepoDomains(snap)}
 	for _, r := range p.regions {
 		o.Regions = append(o.Regions, regionObject{Hint: r.Hint, Binding: binding(r.Hint), Bucket: r.Bucket, Ready: r.Ready})
+	}
+	if enabled {
+		o.PointerCache = m.pointerCacheOf(&o, m.cur.Load().home)
 	}
 	b, _ := json.Marshal(o)
 	return b

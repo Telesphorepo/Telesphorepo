@@ -2295,7 +2295,7 @@ region reads the same version; an immutable path has a pointer and a blob in eve
 
 | Key | Content | Buckets |
 |---|---|---|
-| `config.json` | `{server_version, requires: [features], enabled, access_ttl (seconds), edge_key (base64url of the Ed25519 public key), formats: {name: {shape, prefix, immutable, mutable}}, home: {hint, bucket, ready}, regions: [{hint, binding, bucket, ready}], domains: {host: repo}}`; `home.ready`: the outbox wrote every pointer of the backfill; `bucket`: the bucket that the `bucket.json` of the binding must name; `domains`: `module.Kernel.RepoDomains`, the lines of `repo_domains` without those that name a host of the server (the repo name or a redirect name, as listed); a change of that list or of `edge.access_ttl` writes it again | home |
+| `config.json` | `{server_version, requires: [features], enabled, access_ttl (seconds), edge_key (base64url of the Ed25519 public key), formats: {name: {shape, prefix, immutable, mutable}}, home: {hint, bucket, ready}, regions: [{hint, binding, bucket, ready}], domains: {host: repo}}`; `home.ready`: the outbox wrote every pointer of the backfill; `bucket`: the bucket that the `bucket.json` of the binding must name; `domains`: `module.Kernel.RepoDomains`, the lines of `repo_domains` without those that name a host of the server (the repo name or a redirect name, as listed); `pointer_cache` (absent while the pointer cache is off): `{ttl (seconds), gen, hosts}`, see **The pointer cache**; a change of that list or of `edge.access_ttl` writes it again | home |
 | `bucket.json` | `{hint, bucket}` (`hint` is `home` or the region): the bucket names itself, so the Worker sees a binding to another bucket. The controller writes it into each bucket it uses (again after the wipe of a first start, and once per process start); a region becomes ready only after its `bucket.json` is written | home and each region |
 | `p/<repo id>/<sha256 hex of the path>` | `{repo, path, sha256, sha1, md5, size, ct, mod (unix), kind}`, or `{repo, path, pending: true}` while a write runs | home; also each region for an immutable path |
 | `a/repo/<name>` | `{id, format, kind, anon, private, guarded, members: [names], paths?: [[glob, immutable], ...]}`: `paths` (a hosted or proxy repo of a format with `EdgeSpec.Paths`) classifies the repo's paths in place of the format's globs, the first match deciding; `private` is `access.Engine.Private`, `guarded` is `access.Engine.Guarded` (a read IP rule, or a guard that is not a `ReadRestricter`). For a redirect name, `{redirect: <repo name>}`: the Worker reads the object of that repo next (one more read on a cache miss) and serves the request as one to that repo, whose name the scopes of a core bearer token carry; a redirect object that names another redirect sends the request to the server. A rename marks the object of the old name, the new name and every redirect of the repo; a repo delete and a removed redirect mark the redirect names | home |
@@ -2341,7 +2341,7 @@ pending holds the bytes of the asset now. Every write of a regional pointer (the
 fill, the walk) first records its rule list in `edge_paths`, under the path lock that it holds
 through the put. The pre-steps (`Replacing`, `Creating`, `Removing`) treat a path as immutable when
 the current rules or any recorded list say so: a replace puts `{pending}` in every bucket, regional
-ones too, and a remove deletes there. The outbox writes regional pointers by the current rules
+ones too, and a remove deletes there; both purge the cached copies (**The pointer cache**). The outbox writes regional pointers by the current rules
 only, and deletes the regional pointers of a mutable path that a recorded list makes immutable. So
 a Worker with any repo object, old or new, reads the current pointer, a pending one, or none, and
 the last two go to the server. A group read whose member has `paths` goes to the server.
@@ -2357,7 +2357,8 @@ after a restart counts its rules as used in its epoch), and reads the repo's ass
 pages of 500 (the cursor in `edge_reclass`, so it resumes after a restart). Under each path lock it
 puts the regional pointers of a path that its rules make immutable and the `filled` rules did not,
 and deletes the pointers in every bucket but home (the regions and the gone regions) of a path that
-its rules make mutable and the `filled` rules or a recorded list made immutable. At the end it drops
+its rules make mutable and the `filled` rules or a recorded list made immutable, and purges their
+cached copies before the next page. At the end it drops
 the recorded lists that no write used since it began (epoch below its own) and sets `filled`, in
 one transaction; while
 a pointer row of the repo has a put of unknown outcome it waits a minute first, since that put may
@@ -2369,12 +2370,13 @@ repo to its current rules, which the backfill writes. A repo delete drops its ro
 
 1. `Replacing` writes a dirty outbox row (empty digest) in its own transaction, then puts
    `{pending}` in every bucket for an immutable path (for a format with `Paths`, immutable under the
-   current rules or a recorded list, see **Path classes**), or deletes the home pointer of a mutable one.
+   current rules or a recorded list, see **Path classes**), or deletes the home pointer of a mutable one,
+   then purges the cached copies of the immutable ones (**The pointer cache**).
    `Creating` does the same for a new immutable path of a repo that is a member of a group: the
    Worker skips a group member without a pointer, so until the new pointer lands the group read
    goes to the server and never serves a later member's copy.
 2. `Removing` writes dirty rows, then deletes the pointer keys of the batch with one `DeleteMany`
-   per bucket.
+   per bucket, then purges the cached copies of the immutable ones.
 3. `Committed` upserts the final rows in the commit transaction. `Removed`, in the remove
    transaction, deletes the dirty row of each removed path whose pointers `Removing` deleted in
    every bucket of the view that is still current (a row with a put of unknown outcome stays);
@@ -2386,8 +2388,9 @@ repo to its current rules, which the backfill writes. A repo delete drops its ro
    marked access object goes out before the next pointer row, so a revocation never waits behind
    a large import. A row is never handed out twice at once. A worker takes `Pipeline.Lock(repo,
    path)`, reads the asset row again, and puts the home pointer and then the regional ones
-   (immutable paths), deletes the pointer in every bucket when the asset is gone, or drops the row
-   when the asset has another digest. A row is deleted only after every write of it succeeded,
+   (immutable paths), deletes the pointer in every bucket when the asset is gone (and the regional
+   pointers of a path that only a recorded rule list made immutable), purging the cached copies of
+   each delete, or drops the row when the asset has another digest. A row is deleted only after every write of it succeeded,
    in transactions of up to 128 rows, at most 200 ms after its writes; a row whose delete did not
    commit is written again, which leaves the same state. A failed row retries with a backoff up
    to 5 minutes. Writes to one key are spaced by a second (R2 takes one write per second per key),
@@ -2589,6 +2592,50 @@ distance from `request.cf` to a fixed point per hint (`wnam` San Francisco, `ena
 bucket, a mutable path in the home bucket; the blob is read in that bucket, then in the home
 bucket.
 
+**The pointer cache** (`internal/edge/purge.go`). While `config.json` carries `pointer_cache`, the
+Worker reads the pointer of an immutable path of a single repo through the Cache API, on a
+request whose host is in `hosts`: the key is
+`https://<host>/.telesphorepo-edge/[s3.prefix/]v1/pointers/<gen>/<bucket>/<pointer key>`, where
+`<bucket>` names the bucket that held the pointer, and the copy carries `max-age=<ttl>`. It keeps
+only a pointer that serves, never a missing or pending one, never in isolate memory (a purge
+cannot reach it), and only when the R2 read started at most 1 s before the put. A group's member
+pointers and a mutable path's pointer are read in R2 every time. `Server-Timing` of an edge answer
+names the step `pointer` with `desc="cache"` or `desc="r2"`.
+
+The server keeps the invariant of **Path classes** for the copies: every write that makes an
+immutable pointer unusable or deletes it (`Replacing`, `Removing`, the outbox's deletes, the
+reclass walk's regional deletes) purges its copies, 2 s after the change returned, with
+`POST /zones/{zone}/purge_cache {"files": [...]}` on the zone of each host (100 URLs per call,
+4 calls at once, a 429 waits for its `Retry-After`), before the commit or the remove goes on; a
+failed purge fails the step as a failed put does, and the outbox tries its row again. The 2 s
+cover the Worker's 1 s window, so a copy read before the change lands before the purge. A put of a
+new pointer needs no purge: it replaces a pending or missing one, which no copy holds.
+
+A generation (`gen`) names the TTL, the key prefix, the hosts and the buckets the Worker reads
+pointers from (the home bucket and the ready regions); the row `pointers` of `edge_state` keeps
+every generation that a Worker may still read. A write of `config.json` reuses the current
+generation when they are the same, else names the next one, recorded before the put. After a put
+that succeeded, every other generation lives until no Worker holds an earlier `config.json` (the
+drain's `HoldUntil`) plus 5 s; the purges cover the hosts and buckets of every live generation, so
+a gone region or a removed domain is purged until then, and a generation is never named again, so
+a host or a bucket that comes back (a region added again, edge delivery on again) never serves an
+older copy.
+
+The server sets `pointer_cache` (TTL 1 hour, every route host: the base URL host and each repo
+domain) only while edge delivery is on and the check of the token passed: with
+`edge.cloudflare_token` set, the controller finds the zone of each route host (as the deploy's
+`zones` step) and purges one URL that nothing caches on each zone, again every hour, after 10
+minutes when it failed, and at once when the token or the hosts change. Without a token, or with a
+token that lacks Caching › Cache Purge: Purge, the Worker reads every pointer in R2 and the Edge
+delivery page says why (`pointer_cache` of `GET /api/edge/status`: `{on, ttl, why}`). A purge that
+Cloudflare refuses (401, 403, error 10000) turns the cache off and writes `config.json` again; until
+the generations of the earlier `config.json` end (`edge.access_ttl` plus 5 s), a replace or remove
+of an immutable file fails. The TTL bounds only a purge that Cloudflare took but did not apply (a
+200 says it was received); a pointer costs one R2 read per data center and hour. An older Worker
+ignores `pointer_cache` and reads every pointer in R2. A date change of an import (`Touched`)
+rewrites a pointer with the same bytes and is not purged: a copy can answer with the earlier
+`Last-Modified` for up to the TTL.
+
 **The answer** sets what `Reader.ServeAsset` sets on a streamed answer, from the pointer: the
 checksum headers, `Content-Type`, `ETag`, `Last-Modified`, nosniff, the sandbox CSP,
 `Content-Disposition: attachment` except for `text/plain`, `Accept-Ranges`,
@@ -2655,7 +2702,8 @@ Cloudflare's token form names them: the Entire Account with Developer Platform �
 (Editor cannot create a Worker, and the first deploy creates it), Workers R2 Storage: Edit and
 Queues: Edit; and All Domains, or the domain of each route host, with Developer Platform ›
 Workers Routes: Edit and DNS & Zones › Zone: Read (Cloudflare's API reference names Edit
-"Write"). The UI, the setting's help and a permission refusal of each step name them so. The steps, each reading first and changing only
+"Write"), and Caching › Cache Purge: Purge for the pointer cache (**The pointer cache**), which the
+deploy does not need. The UI, the setting's help and a permission refusal of each step name them so. The steps, each reading first and changing only
 what differs:
 
 | Step | Calls |
@@ -2744,7 +2792,7 @@ the local one, so `edge.access_ttl` (default 30 s, 0 to 5 min) is the bound.
 | Change | Reaches the edge | What a stale edge can serve meanwhile |
 |---|---|---|
 | Read token deleted or expired; user disabled; grant removed; repo made private; device revoked; IP read rule added | within `edge.access_ttl` plus the write (the outbox writes within a second); within 5 minutes plus the TTL after a server crash in that second | Downloads of that repo to that credential, from a data center that cached the object |
-| File deleted or replaced | at once (the pointer is deleted or pending before the commit) | nothing |
+| File deleted or replaced | at once (the pointer is deleted or pending, and its cached copies purged, before the commit) | nothing |
 | Edge turned off | within `edge.access_ttl` | downloads that the server would also allow |
 
 **Other rules.**
@@ -2815,8 +2863,12 @@ estimate, not a measurement).
 - Queues: 1 M operations a month included, then $0.40 per million; a message costs a write, a read
   and a delete per 64 KB, and each retry a read; 5,000 messages per second per queue, batches of
   100, 15 minutes wall time per consumer run.
-- Operations: a download reads one pointer (one per member for a group), one blob, and 0 to 3
-  access objects on a Cache API miss. A stored file puts one home pointer, and one per region for
+- Operations: a download reads one pointer (one per member for a group; none for an immutable path
+  of a single repo whose pointer the Cache API holds), one blob, and 0 to 3 access objects on a
+  Cache API miss. With the pointer cache on, each replace or remove of an immutable file purges one
+  URL per route host, bucket and live generation; Cloudflare limits single-file purges per account
+  (800 URLs a second on Free, 1,500 on Pro and Business, 100 URLs per call), and a call over the
+  limit waits for its `Retry-After`. A stored file puts one home pointer, and one per region for
   an immutable path (a replacement adds a `{pending}` put per bucket). A new blob costs one queue
   message and one put per region. The idle cron costs one class B read per run. A far-bucket read
   takes roughly 100 to 300 ms against a few ms from a near bucket (an estimate).

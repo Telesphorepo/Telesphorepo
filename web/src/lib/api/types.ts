@@ -787,6 +787,8 @@ export type EdgeStatus = {
   /** One entry per chosen region. */
   regions: EdgeRegionStatus[];
   deploy: EdgeDeploy;
+  /** The Worker's cache of the pointers of files that cannot change, while edge delivery is on. ttl in seconds; why: why it is off ("" before the first check). */
+  pointer_cache: { on: boolean; ttl: number; why: string };
 };
 /** The steps of a deploy of the Worker from the server, in order. */
 export type EdgeDeployStep = "verify" | "zones" | "buckets" | "queue" | "notification" | "upload" | "consumer" | "triggers" | "routes" | "check";

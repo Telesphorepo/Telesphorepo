@@ -25,10 +25,14 @@ The server can deploy the Worker itself, with no computer in between:
    - **Entire Account:** Developer Platform › Workers: **Admin**, Developer Platform › Workers R2
      Storage: **Edit**, Developer Platform › Queues: **Edit**
    - **All Domains** (or the domains of the base URL host and of each repository domain):
-     Developer Platform › Workers Routes: **Edit**, DNS & Zones › Zone: **Read**
+     Developer Platform › Workers Routes: **Edit**, DNS & Zones › Zone: **Read**, and to cache
+     pointers at the edge, Caching › Cache Purge: **Purge**
 
    Workers needs Admin, not Editor: Editor cannot create a Worker, and the first deploy creates
-   it. Cloudflare's "Edit Cloudflare Workers" template lacks Queues, so start from Custom.
+   it. Cloudflare's "Edit Cloudflare Workers" template lacks Queues, so start from Custom. With
+   Cache Purge, the Worker caches the pointer of each file that cannot change for an hour, and the
+   server purges that copy before it replaces or removes the file; without it, the Worker reads
+   every pointer in R2. The Edge delivery page says whether the pointer cache is on, and why not.
 2. In **Settings › Edge delivery**, choose the home region and the regions to serve from, set the
    token in the Deploy section, and save.
 3. Select **Deploy now**.
