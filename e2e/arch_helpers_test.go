@@ -214,7 +214,7 @@ func (p *Pacman) MustExec(t testing.TB, what, script string) string {
 func (p *Pacman) Trust(t testing.TB, key string) {
 	t.Helper()
 	f := "/tmp/key-" + randHex(4) + ".asc"
-	p.MustExec(t, "trust a key", fmt.Sprintf("cat > %s <<'EOF'\n%sEOF\npacman-key --add %s && pacman-key --lsign-key %s", f, key, f, archFingerprint(t, key)))
+	p.MustExec(t, "trust a key", fmt.Sprintf("cat > %s <<'EOF'\n%s\nEOF\npacman-key --add %s && pacman-key --lsign-key %s", f, key, f, archFingerprint(t, key)))
 }
 
 // AddRepo appends the section [section] with SigLevel Required and server, the Server line as
