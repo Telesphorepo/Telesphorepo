@@ -61,7 +61,7 @@ export async function limited<T, R>(items: readonly T[], n: number, fn: (t: T) =
 
 export interface FormatConfig {
   name: string;
-  shape: "standard" | "oci";
+  shape: "standard" | "oci" | "pacman";
   prefix: string;
   immutable: string[];
   mutable: string[];
@@ -155,7 +155,7 @@ export function parseConfig(v: unknown): Config | null {
     // A format of a shape or with a need that this Worker does not know is left out: the server
     // answers its requests.
     for (const [name, f] of Object.entries(v.formats)) {
-      if (!isObj(f) || (f.shape !== "standard" && f.shape !== "oci") || typeof f.prefix !== "string" || !knows(f.needs)) continue;
+      if (!isObj(f) || (f.shape !== "standard" && f.shape !== "oci" && f.shape !== "pacman") || typeof f.prefix !== "string" || !knows(f.needs)) continue;
       if (!f.prefix.startsWith("/") || !f.prefix.endsWith("/")) continue;
       formats.push({
         name,
@@ -472,7 +472,7 @@ function hasSessionCookie(h: Headers): boolean {
 
 // parseCaller reads the credential of a request. null: the origin decides (a credential the edge
 // does not check, or one that already fails a check).
-export async function parseCaller(request: Request, shape: "standard" | "oci", config: Config): Promise<Caller | null> {
+export async function parseCaller(request: Request, shape: FormatConfig["shape"], config: Config): Promise<Caller | null> {
   const h = request.headers;
   if (hasSessionCookie(h)) return null;
   const auth = h.get("Authorization");

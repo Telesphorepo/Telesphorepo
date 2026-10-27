@@ -5,6 +5,7 @@ package modules
 import (
 	"github.com/Telesphorepo/Telesphorepo/internal/activity"
 	"github.com/Telesphorepo/Telesphorepo/internal/api"
+	"github.com/Telesphorepo/Telesphorepo/internal/arch"
 	"github.com/Telesphorepo/Telesphorepo/internal/backup"
 	"github.com/Telesphorepo/Telesphorepo/internal/cargo"
 	"github.com/Telesphorepo/Telesphorepo/internal/debian"
@@ -40,6 +41,7 @@ func All() []module.Module {
 		nexus.Module(),
 		maven.Module(),
 		debian.Module(),
+		arch.Module(),
 		raw.Module(),
 		docker.Module(),
 		cargo.Module(),

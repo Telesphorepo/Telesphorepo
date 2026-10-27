@@ -143,8 +143,37 @@ export function parseTarget(url: string, formats: readonly FormatConfig[]): Targ
   for (const f of formats) {
     if (!raw.startsWith(f.prefix)) continue;
     const rest = raw.slice(f.prefix.length);
-    const t = f.shape === "oci" ? parseOCI(rest) : parseStandard(rest);
+    const t = f.shape === "oci" ? parseOCI(rest) : parseStandard(rest); // pacman parses as standard
     return t ? { format: f, repo: t.repo, path: t.path } : null;
   }
   return null;
+}
+
+const pacmanArchRE = /^[a-z0-9_]{1,32}$/;
+const pacmanNameRE = /^[a-z0-9@_+][a-z0-9@._+-]{0,127}$/;
+
+// pacmanPath maps a path of a hosted repo of the pacman shape, reached through the repo name seg,
+// to the path that holds its file, as internal/arch ServedPath does: <arch>/<seg>.db, .db.sig,
+// .files and .files.sig are <arch>/index.db, ...; a package file
+// <name>-<pkgver>-<pkgrel>-<parch>.pkg.tar.<ext>[.sig] of parch <arch> or any is
+// pool/<name>/<file>. Every other path is itself.
+export function pacmanPath(seg: string, path: string): string {
+  const slash = path.indexOf("/");
+  if (slash < 0) return path;
+  const arch = path.slice(0, slash);
+  const file = path.slice(slash + 1);
+  if (file.includes("/") || !pacmanArchRE.test(arch) || arch === "pool") return path;
+  for (const suffix of [".db", ".db.sig", ".files", ".files.sig"]) {
+    if (file === seg + suffix) return arch + "/index" + suffix;
+  }
+  const base = file.endsWith(".sig") ? file.slice(0, -4) : file;
+  const i = base.indexOf(".pkg.tar.");
+  const ext = i > 0 ? base.slice(i + ".pkg.tar.".length) : "";
+  if (i <= 0 || ext === "" || ext.includes(".") || ext.includes("/")) return path;
+  const parts = base.slice(0, i).split("-");
+  if (parts.length < 4) return path;
+  const name = parts.slice(0, parts.length - 3).join("-");
+  const parch = parts[parts.length - 1];
+  if (!pacmanNameRE.test(name) || !pacmanArchRE.test(parch)) return path;
+  return parch === arch || parch === "any" ? "pool/" + name + "/" + file : path;
 }

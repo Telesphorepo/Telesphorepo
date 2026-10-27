@@ -31,7 +31,7 @@ import { gap } from "./gap";
 import { immutable, immutableBy } from "./glob";
 import { type Pointer, parsePointer, serve } from "./serve";
 import { OVERRIDE_HEADER, PASS_HEADER, REGION_HEADER, type Override, parseOverride, passValid } from "./speedtest";
-import { parseTarget, rawPath } from "./shapes";
+import { pacmanPath, parseTarget, rawPath } from "./shapes";
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -255,6 +255,8 @@ async function edge(request: Request, env: Env, ctx: ExecutionContext, override:
   if (!r) return null;
   await resolveScopes(r, objects);
   if (!mayRead(r, repo, true)) return null;
+  // A hosted repo of the pacman shape answers pacman's URLs from where it keeps the files.
+  if (target.format.shape === "pacman" && repo.kind === "hosted") target.path = pacmanPath(target.repo, target.path);
 
   // The speed test picks the bucket only now, after every check of the request.
   let near = nearestBucket;
@@ -332,7 +334,7 @@ async function onDomain(requestURL: string, name: string, config: Config, object
   const repo = await repoObject(objects, name);
   if (!repo) return null;
   const f = config.formats.find((x) => x.name === repo.format);
-  if (!f || f.shape !== "standard" || f.prefix !== "/" + repo.format + "/") return null;
+  if (!f || f.shape === "oci" || f.prefix !== "/" + repo.format + "/") return null;
   return new URL(requestURL).origin + f.prefix + encodeURIComponent(repo.name) + raw;
 }
 

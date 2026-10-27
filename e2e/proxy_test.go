@@ -345,6 +345,23 @@ func TestProxy(t *testing.T) {
 			t.Fatalf("GET the key of a Debian proxy: status %d, want 404", resp.StatusCode)
 		}
 
+		// Arch: pacman installs through the proxy, with the remote repo's key and its section name.
+		upArch := RandName("upstream-arch")
+		remote.CreateRepo(t, upArch, "arch", true, nil)
+		remote.SetPerms(t, upArch, uploader, "repo.download", "repo.publish")
+		archMustUpload(t, remote, upArch, goArchPkg(t, "e2e-proxied", "1.0-1", "any", map[string]int64{"usr/share/e2e-proxied/data": 1}),
+			remote.PublishAuth(t, uploader, upArch), "e2e-proxied", "1.0-1", "any")
+		remote.WaitDebianIndexed(t, upArch)
+		archProxy := RandName("arch-proxy")
+		s.CreateProxy(t, archProxy, "arch", true, map[string]any{"remote_url": remote.InternalURL + "/arch/" + upArch}, false)
+		pm := StartPacman(t)
+		pm.Trust(t, remote.ArchKey(t, upArch, nil))
+		pm.AddRepo(t, upArch, "http://"+s.Alias+":8080/arch/"+archProxy+"/$arch")
+		pm.MustExec(t, "pacman through the proxy", "pacman -Sy --noconfirm e2e-proxied && pacman -Q e2e-proxied")
+		if resp, _ := s.Do(t, s.NewRequest(t, http.MethodGet, "/arch/"+archProxy+"/key.asc", nil), nil); resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("GET the key of an Arch proxy: status %d, want 404", resp.StatusCode)
+		}
+
 		// The remote stops: a cached file still serves, an uncached one answers 502, and the
 		// proxy records the error.
 		if err := remote.Stop(context.Background(), nil); err != nil {

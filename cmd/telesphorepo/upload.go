@@ -311,6 +311,41 @@ func uploadDebian(j *job) error {
 	})
 }
 
+// uploadArch uploads each FILE (a .pkg.tar.zst, .pkg.tar.xz or .pkg.tar.gz) to the Arch repo of the
+// project file: a PUT of the file, or for a large file the resumable upload routes, which the
+// upload route then finishes. The server reads the name, version and architecture from the
+// package, signs it, and rebuilds the indexes once after the last upload.
+func uploadArch(j *job) error {
+	if err := openFiles(j.files); err != nil {
+		return err
+	}
+	p := "/arch/" + url.PathEscape(j.p.Repo) + "/upload"
+	return j.uploadEach(j.files, func(j *job, f string) (string, error) {
+		st, err := os.Stat(f)
+		if err != nil {
+			return "", err
+		}
+		var out struct {
+			Package      string `json:"package"`
+			Version      string `json:"version"`
+			Architecture string `json:"architecture"`
+		}
+		if st.Size() >= resumableFrom {
+			err = j.resumable(f, st.Size(), func(id string, q url.Values) error {
+				q.Set("upload", id)
+				_, err := j.c.call(j.ctx, request{method: http.MethodPut, path: p + "?" + q.Encode(), token: j.s.Token, out: &out, timeout: -1})
+				return err
+			})
+		} else {
+			err = j.putFile(f, st.Size(), p, nil, &out)
+		}
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Uploaded %s %s (%s) to %s", out.Package, out.Version, out.Architecture, j.p.Repo), nil
+	})
+}
+
 // putFile sends the file f of size bytes with PUT to p, with the extra headers header.
 func (j *job) putFile(f string, size int64, p string, header map[string]string, out any) error {
 	in, err := os.Open(f)

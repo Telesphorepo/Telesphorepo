@@ -20,21 +20,23 @@ func cliBigUpload(t testing.TB) int64 {
 // TestCLIUpload: publish FILE uploads files into the folder "path" of a raw repo (a large file
 // through the resumable upload routes, in more than one chunk; --into, --if-new and --if-match,
 // whose false precondition exits 3) and .deb packages to the
-// distribution and component of a Debian repo (a large package through the resumable upload
-// routes as well), which apt then installs.
+// distribution and component of a Debian repo, and .pkg.tar.* packages to an Arch repo (a large
+// package through the resumable upload routes as well), which apt and pacman then install.
 func TestCLIUpload(t *testing.T) {
 	t.Parallel()
 	c := newCLI(t)
 	bigSize := cliBigUpload(t)
 	debs := buildDebPackages(t)
+	archPkgs := buildArchPackages(t)
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
-		raw, deb := RandName("files"), RandName("apt")
+		raw, deb, arch := RandName("files"), RandName("apt"), RandName("pacman")
 		s.CreateRepo(t, raw, "raw", false, map[string]any{"overwrite": "allow"})
 		s.CreateRepo(t, deb, "debian", true, nil)
+		s.CreateRepo(t, arch, "arch", true, nil)
 		dev := RandName("dev")
 		s.CreateUser(t, dev, "dev-pass-1234")
-		for _, r := range []string{raw, deb} {
+		for _, r := range []string{raw, deb, arch} {
 			s.SetPerms(t, r, dev, "repo.download", "repo.publish")
 		}
 		out := c.mustRun(t, debImage, "publish files", `set -e
@@ -85,10 +87,23 @@ rm -rf /tmp/big
 echo '=== big deb publish ==='
 telesphorepo publish /tmp/e2e-big.deb
 rm /tmp/e2e-big.deb
+mkdir -p /work/arch
+cd /work/arch
+echo '=== arch setup ==='
+telesphorepo setup "$ARCH_LINK"
+echo '=== arch publish ==='
+telesphorepo publish /work/pkgs/e2e-anchor-1.0.0-1-x86_64.pkg.tar.zst
+mkdir -p /tmp/bigpkg/usr/share/e2e-bigpkg
+printf 'pkgname = e2e-bigpkg\npkgver = 1.0-1\npkgdesc = big\narch = any\nsize = %s\n' $BIG_SIZE > /tmp/bigpkg/.PKGINFO
+head -c $BIG_SIZE /dev/urandom > /tmp/bigpkg/usr/share/e2e-bigpkg/blob
+tar -C /tmp/bigpkg -czf /tmp/e2e-bigpkg-1.0-1-any.pkg.tar.gz .PKGINFO usr
+echo '=== big arch publish ==='
+telesphorepo publish /tmp/e2e-bigpkg-1.0-1-any.pkg.tar.gz
 `, ClientOpts{
-			Files: []ContainerFile{{Path: "/work/pkgs/hello-1.0.deb", Content: string(debs.hello1)}, {Path: "/work/pkgs/native.deb", Content: string(debs.native)}},
+			Files: []ContainerFile{{Path: "/work/pkgs/hello-1.0.deb", Content: string(debs.hello1)}, {Path: "/work/pkgs/native.deb", Content: string(debs.native)},
+				{Path: "/work/pkgs/e2e-anchor-1.0.0-1-x86_64.pkg.tar.zst", Content: string(archPkgs.anchor10)}},
 			Env: map[string]string{"RAW_LINK": s.NewSetupCode(t, dev, raw).Link, "DEB_LINK": s.NewSetupCode(t, dev, deb).Link,
-				"BIG_SIZE": strconv.FormatInt(bigSize, 10)},
+				"ARCH_LINK": s.NewSetupCode(t, dev, arch).Link, "BIG_SIZE": strconv.FormatInt(bigSize, 10)},
 		})
 
 		base := s.InternalURL + "/raw/" + raw + "/dist/"
@@ -139,5 +154,14 @@ rm /tmp/e2e-big.deb
 		s.WaitDebianIndexed(t, deb)
 		apt := debAptInstall(t, s, deb, s.AdminUser, s.AdminPass, s.DebianKey(t, deb, nil))
 		wantText(t, "apt install", apt, "RESULT: hello 1.0", "NATIVE: native "+debs.arch)
+
+		wantText(t, "publish an Arch package", section(out, "arch publish"), "Uploaded e2e-anchor 1.0.0-1 (x86_64) to "+arch)
+		wantText(t, "publish a large Arch package", section(out, "big arch publish"), "Uploading /tmp/e2e-bigpkg-1.0-1-any.pkg.tar.gz (", "in chunks of",
+			"Uploaded e2e-bigpkg 1.0-1 (any) to "+arch)
+		s.WaitDebianIndexed(t, arch)
+		p := StartPacman(t)
+		p.Trust(t, s.ArchKey(t, arch, nil))
+		p.AddRepo(t, arch, archServer(s, "", ""))
+		wantText(t, "pacman install", p.MustExec(t, "pacman install", "pacman -Sy --noconfirm e2e-anchor e2e-bigpkg && e2e-anchor"), "anchor 1.0.0")
 	})
 }
