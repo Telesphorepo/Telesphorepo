@@ -22,7 +22,8 @@
   const fields = $derived(format?.config.fields ?? []);
   const current = $derived(repo.config ?? {});
 
-  // undefined: no edit; null: a required field is empty. `round` restarts the editor.
+  // undefined: no edit; null: a required field is empty. `round` restarts the editor on Discard, and
+  // a new config of the repo (the reload after a save) restarts it with that config.
   let config = $state<RepoConfig | null | undefined>(undefined);
   let round = $state(0);
   let confirming = $state(false);
@@ -74,8 +75,8 @@
     if (!config) return;
     await api.repos.update(repo.name, { config });
     toast.success(`Saved the format settings of ${repo.name}`);
+    // The editor keeps the saved values until the reload brings the repo's config, which restarts it.
     config = undefined;
-    round++;
     onChanged();
   }
 </script>
@@ -85,7 +86,7 @@
 {:else}
   <FormSection title="{formats.title(repo.format)} options">
     <FormGrid>
-      {#key `${repo.format}/${repo.name}/${round}`}
+      {#key `${repo.format}/${repo.name}/${round}/${JSON.stringify(current)}`}
         <ConfigEditor {fields} value={current} onChange={(v) => (config = v)} />
       {/key}
     </FormGrid>
