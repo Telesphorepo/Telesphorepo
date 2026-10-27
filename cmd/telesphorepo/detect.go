@@ -53,6 +53,7 @@ var rows = []row{
 		run: runHelm, preview: func(string) string { return "helm package, then helm push" }},
 	{format: "raw", kind: "files", title: "Files", ciTool: "telesphorepo", run: uploadRaw},
 	{format: "debian", kind: "packages", title: "Debian packages", ciTool: "telesphorepo", run: uploadDebian},
+	{format: "arch", kind: "packages", title: "Arch Linux packages", ciTool: "telesphorepo", run: uploadArch},
 	{format: "cargo", kind: "cargo", title: "Cargo", markers: []string{"Cargo.toml"}, ciTool: "cargo",
 		run: runCargo, preview: func(string) string { return "cargo publish --registry telesphorepo" }},
 	{format: "npm", kind: "npm", title: "npm package", markers: []string{"package.json"}, ciTool: "npm", ciToolOf: npmTool,

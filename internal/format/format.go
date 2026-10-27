@@ -170,7 +170,7 @@ type Spec struct {
 
 // EdgeSpec is how the edge Worker reads a format's URLs and which of its paths can change.
 type EdgeSpec struct {
-	// Shape is how a URL names a repo and an asset path: EdgeStandard or EdgeOCI.
+	// Shape is how a URL names a repo and an asset path: EdgeStandard, EdgeOCI or EdgePacman.
 	Shape string
 	// Immutable and Mutable are Glob patterns of asset paths. A path is immutable when it matches
 	// an Immutable pattern and no Mutable pattern; every other path is mutable. The pointer of an
@@ -208,6 +208,9 @@ const (
 	EdgeStandard = "standard"
 	// EdgeOCI is /v2/<repo>/<image>/manifests/<ref> and /v2/<repo>/<image>/blobs/sha256:<hex>.
 	EdgeOCI = "oci"
+	// EdgePacman is /<format>/<repo>/<path> like EdgeStandard, where a hosted repo answers
+	// pacman's <arch>/<repo>.db and <arch>/<package file> from other paths (arch.ServedPath).
+	EdgePacman = "pacman"
 )
 
 // Prefix is the URL prefix of the format's Worker route: "/v2/" for EdgeOCI, else "/<name>/".
@@ -450,8 +453,8 @@ func check(s *Spec) error {
 		return fmt.Errorf("Rebuild needs Run")
 	case s.Publish != "" && s.Publish != PublishCLI && s.Publish != PublishHelper:
 		return fmt.Errorf("Publish must be %q or %q", PublishCLI, PublishHelper)
-	case s.Edge != nil && s.Edge.Shape != EdgeStandard && s.Edge.Shape != EdgeOCI:
-		return fmt.Errorf("Edge.Shape must be %q or %q", EdgeStandard, EdgeOCI)
+	case s.Edge != nil && s.Edge.Shape != EdgeStandard && s.Edge.Shape != EdgeOCI && s.Edge.Shape != EdgePacman:
+		return fmt.Errorf("Edge.Shape must be %q, %q or %q", EdgeStandard, EdgeOCI, EdgePacman)
 	}
 	if s.Edge != nil {
 		for _, g := range slices.Concat(s.Edge.Immutable, s.Edge.Mutable) {

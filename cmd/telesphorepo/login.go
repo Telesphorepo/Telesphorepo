@@ -277,7 +277,7 @@ func status(ctx context.Context, args []string) error {
 	case p.Dist != "" || p.Component != "":
 		fmt.Printf("  Debian: telesphorepo publish FILE.deb uploads to %s/%s\n", p.Dist, p.Component)
 	case !found:
-		fmt.Printf("  no project marker in %s; telesphorepo publish FILE uploads files to a raw repo\n", p.dir)
+		fmt.Printf("  no project marker in %s; telesphorepo publish FILE uploads files to a raw or Arch repo\n", p.dir)
 	}
 	return nil
 }

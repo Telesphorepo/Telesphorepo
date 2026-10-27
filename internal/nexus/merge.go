@@ -1354,7 +1354,7 @@ func (s *Service) deleteRetired(ctx context.Context, repo *repos.Repo, op *ops.O
 			_ = s.ops.Progress(ctx, op.ID, int64(done), max(total, int64(done)))
 		}})
 	if err == nil {
-		err = s.repos.DeleteRow(ctx, repo.ID)
+		err = s.repos.DeleteRow(ctx, repo.ID, n)
 	}
 	if err != nil {
 		if s.base.Err() != nil {
@@ -1362,9 +1362,7 @@ func (s *Service) deleteRetired(ctx context.Context, repo *repos.Repo, op *ops.O
 		}
 		s.log.Error("nexus: delete the merged repo", "repo", repo.Name, "error", err.Error())
 		_ = s.ops.Fail(ctx, op.ID, err)
-		return
 	}
-	_ = s.audit.Record(ctx, audit.Event{Action: audit.RepoDelete, Repo: repo.Name, Target: repo.Name, Detail: map[string]any{"count": n}})
 }
 
 // failMerge sets merge row failed with err, and the merge operations of its repos with it.

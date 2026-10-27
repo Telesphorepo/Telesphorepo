@@ -5,6 +5,8 @@ package signing
 import (
 	"bytes"
 	"crypto"
+	"crypto/sha256"
+	"encoding"
 	"errors"
 	"fmt"
 	"io"
@@ -123,6 +125,49 @@ func (s *Signer) ClearSign(w io.Writer, data []byte) error {
 // DetachSign writes an armored detached signature (Release.gpg).
 func (s *Signer) DetachSign(w io.Writer, data []byte) error {
 	return openpgp.ArmoredDetachSign(w, s.entity, bytes.NewReader(data), s.cfg)
+}
+
+// DetachSignBinary writes a binary detached signature of data (pacman's <repo>.db.sig).
+func (s *Signer) DetachSignBinary(w io.Writer, data io.Reader) error {
+	return openpgp.DetachSign(w, s.entity, data, s.cfg)
+}
+
+// ErrNotV4 is a key whose signatures cannot be made from a saved hash state: a version 6
+// signature hashes a salt before the data.
+var ErrNotV4 = errors.New("the signing key is not an OpenPGP version 4 key")
+
+// SignSHA256State returns a binary detached signature (SHA-256) of the bytes whose SHA-256 state
+// is state (the encoding.BinaryMarshaler form of a crypto/sha256 hash after them), so a file is
+// signed again without reading it. It needs a version 4 key (ErrNotV4).
+func (s *Signer) SignSHA256State(state []byte) ([]byte, error) {
+	k, ok := s.entity.SigningKey(time.Now())
+	if !ok || k.PrivateKey == nil {
+		return nil, errors.New("the signing key has no usable signing key")
+	}
+	if k.PrivateKey.Version != 4 {
+		return nil, ErrNotV4
+	}
+	h := sha256.New()
+	if err := h.(encoding.BinaryUnmarshaler).UnmarshalBinary(state); err != nil {
+		return nil, fmt.Errorf("hash state: %w", err)
+	}
+	sig := &packet.Signature{
+		Version:           4,
+		SigType:           packet.SigTypeBinary,
+		PubKeyAlgo:        k.PrivateKey.PubKeyAlgo,
+		Hash:              crypto.SHA256,
+		CreationTime:      time.Now(),
+		IssuerKeyId:       &k.PrivateKey.KeyId,
+		IssuerFingerprint: k.PrivateKey.Fingerprint,
+	}
+	if err := sig.Sign(h, k.PrivateKey, &packet.Config{DefaultHash: crypto.SHA256}); err != nil {
+		return nil, err
+	}
+	var out bytes.Buffer
+	if err := sig.Serialize(&out); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
 }
 
 // PublicKeyArmored returns the armored public key block.
