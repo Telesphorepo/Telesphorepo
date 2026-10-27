@@ -59,6 +59,9 @@ func pullFloating(ctx context.Context) error {
 			defer func() { <-slots }()
 			ctx, cancel := context.WithTimeout(ctx, 20*time.Minute)
 			defer cancel()
+			if hubCurrent(ctx, ref) {
+				return
+			}
 			if out, err := osexec.CommandContext(ctx, Engine.CLI, "pull", "-q", ref).CombinedOutput(); err != nil {
 				errs[i] = fmt.Errorf("pull %s: %w\n%s", ref, err, out)
 			}
@@ -74,6 +77,90 @@ func pullFloating(ctx context.Context) error {
 		fmt.Fprintf(os.Stderr, "e2e: image %s: %s\n", ref, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// hubCurrent reports whether ref is a Docker Hub image whose local copy is the tag's current
+// manifest. Docker Hub counts every manifest GET against its anonymous limit (100 an hour), and a
+// pull of an image that did not change still makes one, so a few runs in an hour used the limit
+// up. A HEAD of the manifest is not counted: when its digest is one of the local image's repo
+// digests, the pull is skipped. Any other registry, or any error, answers false and the image is
+// pulled.
+func hubCurrent(ctx context.Context, ref string) bool {
+	repo, tag, ok := hubRef(ref)
+	if !ok {
+		return false
+	}
+	out, err := osexec.CommandContext(ctx, Engine.CLI, "image", "inspect", "--format",
+		`{{range .RepoDigests}}{{println .}}{{end}}`, ref).Output()
+	if err != nil {
+		return false // not here yet
+	}
+	tokReq, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		"https://auth.docker.io/token?service=registry.docker.io&scope=repository:"+repo+":pull", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(tokReq)
+	if err != nil {
+		return false
+	}
+	var tok struct {
+		Token string `json:"token"`
+	}
+	err = json.NewDecoder(resp.Body).Decode(&tok)
+	resp.Body.Close()
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return false
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, "https://registry-1.docker.io/v2/"+repo+"/manifests/"+tag, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Accept", strings.Join([]string{
+		"application/vnd.oci.image.index.v1+json",
+		"application/vnd.docker.distribution.manifest.list.v2+json",
+		"application/vnd.oci.image.manifest.v1+json",
+		"application/vnd.docker.distribution.manifest.v2+json",
+	}, ", "))
+	head, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	head.Body.Close()
+	digest := head.Header.Get("Docker-Content-Digest")
+	if head.StatusCode != http.StatusOK || digest == "" {
+		return false
+	}
+	for line := range strings.Lines(string(out)) {
+		if strings.HasSuffix(strings.TrimSpace(line), "@"+digest) {
+			return true
+		}
+	}
+	return false
+}
+
+// hubRef splits a Docker Hub image reference into its repository (library/ for an official
+// image) and tag. ok is false for another registry or a reference by digest.
+func hubRef(ref string) (repo, tag string, ok bool) {
+	if strings.Contains(ref, "@") {
+		return "", "", false
+	}
+	name := ref
+	if first, rest, found := strings.Cut(ref, "/"); found && (strings.ContainsAny(first, ".:") || first == "localhost") {
+		if first != "docker.io" {
+			return "", "", false
+		}
+		name = rest
+	}
+	tag = "latest"
+	if i := strings.LastIndexByte(name, ':'); i > strings.LastIndexByte(name, '/') {
+		name, tag = name[:i], name[i+1:]
+	}
+	if !strings.Contains(name, "/") {
+		name = "library/" + name
+	}
+	return name, tag, true
 }
 
 var stableTagRE = regexp.MustCompile(`^v(\d+)\.(\d+)\.(\d+)$`)

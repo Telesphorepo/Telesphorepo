@@ -5069,7 +5069,9 @@ fetches through the proxy, the name rule, dist-tags, deprecate,
 unpublish with a device session and refused with a CI session minted from a Keycloak service
 account), `TestCLINPM` (clients zone: setup and publish with each package manager) and the npm part
 of `TestNexus`. Each file registers its images with `floatingImage`, and each run pulls the images of
-its zone again before the tests and prints the version of each. `TestInstall` runs the newest PowerShell release from GitHub on Debian, because Microsoft's PowerShell images no longer follow the releases. `TestCLIMaven` takes the newest
+its zone again before the tests and prints the version of each. A Docker Hub image whose local copy
+already has the tag's current digest (a HEAD of the manifest, which Docker Hub does not count against
+its anonymous limit of 100 pulls an hour) is not pulled. `TestInstall` runs the newest PowerShell release from GitHub on Debian, because Microsoft's PowerShell images no longer follow the releases. `TestCLIMaven` takes the newest
 Maven 4 from Maven Central, and `TestCLIJenkins` builds its Jenkins with `--pull` (Jenkins `lts`)
 and fetches the newest plugins once a day. The infrastructure of the tests stays pinned:
 SeaweedFS, Caddy, the OCI conformance suite and the curl of the volume tool. `TestOIDC` runs a
