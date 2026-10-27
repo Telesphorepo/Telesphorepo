@@ -26,7 +26,7 @@ import {
   repoObject,
   rights,
 } from "./access";
-import { CHECK_PATH, check } from "./check";
+import { CHECK_PATH, PROBE_PATH, check, probe } from "./check";
 import { copy } from "./copy";
 import { gap } from "./gap";
 import { immutable, immutableBy } from "./glob";
@@ -39,6 +39,7 @@ export default {
     // The check of the server: answered here, before passThroughOnException, so a failure never
     // reaches the server's own answer on the path.
     if (request.method === "GET" && new URL(request.url).pathname === CHECK_PATH) return check(request, env);
+    if (request.method === "GET" && new URL(request.url).pathname === PROBE_PATH) return probe(request, env);
     if (request.method !== "GET" && request.method !== "HEAD") return forward(request);
     ctx.passThroughOnException();
     const override = parseOverride(request.headers);
@@ -176,25 +177,49 @@ async function sha256Hex(s: string): Promise<string> {
 type Lookup = { kind: "none" } | { kind: "pending" } | { kind: "bad" } | { kind: "hit"; pointer: Pointer; cached: boolean };
 
 // PointerCache is the Cache API of the pointers of immutable paths on one request: base is the
-// key prefix of the request's host and of the generation of config.json, ttl the max age.
+// key prefix of the request's host and of the generation of config.json, gen the generation and
+// ttl the max age.
 interface PointerCache {
   base: string;
+  gen: number;
   ttl: number;
   ctx: ExecutionContext;
 }
 
-// PUT_WINDOW_MS bounds the time from the start of an R2 read of a pointer to its put into the
-// cache. The server purges a pointer it made unusable 2 s after the change, so a copy read before
-// the change and put after the purge cannot happen.
+// PUT_WINDOW_MS bounds the time from the start of an R2 read of a pointer to the end of its put
+// into the cache; a put that ends later is deleted again. The server purges a pointer it made
+// unusable 2 s after the change, so every copy read before the change is in the cache, or gone,
+// before the purge.
 const PUT_WINDOW_MS = 1000;
 
 // pointerCache returns the pointer cache of a request on host: config.json names a generation and
-// the host among those whose copies the server purges; null otherwise. Only the Cache API holds a
+// the host among those whose zones the server purges; null otherwise. Only the Cache API holds a
 // pointer, never the isolate memory, which a purge cannot reach.
 function pointerCache(env: Env, config: Config, host: string, ctx: ExecutionContext): PointerCache | null {
   const pc = config.pointerCache;
   if (!pc || !pc.hosts.has(host)) return null;
-  return { base: `https://${host}/.telesphorepo-edge/${keyPrefix(env)}v1/pointers/${pc.gen}/`, ttl: pc.ttl, ctx };
+  return { base: `https://${host}/.telesphorepo-edge/${keyPrefix(env)}v1/pointers/${pc.gen}/`, gen: pc.gen, ttl: pc.ttl, ctx };
+}
+
+// pointerTag is the Cache-Tag of the cached pointer key of bucket in generation gen: the tag that
+// the server purges (pointerTag of internal/edge/purge.go).
+const pointerTag = (gen: number, bucket: string, key: string) => `tp/${gen}/${bucket}/${key}`;
+
+// putTagged puts body under key with max age ttl and Cache-Tag tag, and deletes it again in this
+// data center when the put ended more than PUT_WINDOW_MS after started.
+async function putTagged(key: Request, body: string, ttl: number, tag: string, started: number): Promise<void> {
+  const headers = new Headers({
+    "Cache-Control": "max-age=" + ttl,
+    "Cache-Tag": tag,
+    "Content-Type": "application/json",
+    "x-edge-expires": String(Date.now() + ttl * 1000),
+  });
+  try {
+    await caches.default.put(key, new Response(body, { headers }));
+    if (Date.now() - started > PUT_WINDOW_MS) await caches.default.delete(key);
+  } catch {
+    // Not cached: the next request reads R2.
+  }
 }
 
 // lookup reads a pointer object of path in repo. A pointer of another repo or path is "bad": the
@@ -239,12 +264,7 @@ async function pointer(env: Env, b: Bucket, repo: RepoObject, path: string, cach
   }
   const l = lookup(v, repo, path, false);
   if (cache && cacheKey && l.kind === "hit" && Date.now() - started <= PUT_WINDOW_MS) {
-    const headers = new Headers({
-      "Cache-Control": "max-age=" + cache.ttl,
-      "Content-Type": "application/json",
-      "x-edge-expires": String(Date.now() + cache.ttl * 1000),
-    });
-    cache.ctx.waitUntil(caches.default.put(cacheKey, new Response(text, { headers })).catch(() => {}));
+    cache.ctx.waitUntil(putTagged(cacheKey, text, cache.ttl, pointerTag(cache.gen, b.name, key), started));
   }
   return l;
 }

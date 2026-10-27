@@ -1,13 +1,20 @@
 package edge
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -21,10 +28,11 @@ import (
 
 // The pointer cache. The Worker keeps the pointer of an immutable path of a single repo in the
 // Cache API of the data center, keyed by the request's host, a generation, the bucket and the
-// pointer key. Before a pre-step or the outbox lets a change of such a pointer stand, the server
-// purges every copy of it (Cloudflare's purge by URL, on the zone of each host), so a copy that the
-// Worker reads always holds the bytes of the asset now. config.json turns the cache on
-// (pointer_cache) only while the Cloudflare API token can purge on the zone of every route host.
+// pointer key, with a Cache-Tag of the generation, the bucket and the pointer key (Cloudflare purges
+// Cache API entries by tag, not by URL). Before a pre-step or the outbox lets a change of such a
+// pointer stand, the server purges that tag on the zone of every host, so a copy that the Worker
+// reads always holds the bytes of the asset now. config.json turns the cache on (pointer_cache)
+// only after the server saw, on every route host, a tag purge remove an entry of the Cache API.
 //
 // A generation names the hosts and the buckets whose copies the server purges. A change of them,
 // or a config.json without the cache, starts a new generation: the Worker never reads the copies
@@ -37,13 +45,14 @@ const (
 	// bounds a purge that Cloudflare took but did not apply, and costs one R2 read per pointer, data
 	// center and hour.
 	pointerTTL = time.Hour
-	// purgeDelay is the wait from a change of pointers to their purge. The Worker puts a copy only
-	// within 1 s of the start of its R2 read (PUT_WINDOW_MS of edge/src/index.ts), so a copy read
-	// before the change lands before the purge.
+	// purgeDelay is the wait from a change of pointers to their purge. The Worker keeps a copy only
+	// when its put ended within 1 s of the start of its R2 read (PUT_WINDOW_MS of
+	// edge/src/index.ts), so every copy read before the change is in the cache, or deleted, before
+	// the purge.
 	purgeDelay = 2 * time.Second
-	// purgeBatch is the most URLs that one purge call takes.
+	// purgeBatch is the most tags that one purge call takes.
 	purgeBatch = 100
-	// The check of the token's purge permission: again after an hour, or 10 minutes after a failure.
+	// The proof that the pointer cache works: again after an hour, or 10 minutes after a failure.
 	purgeRecheck = time.Hour
 	purgeRetry   = 10 * time.Minute
 	// purgePerm is the permission that the pointer cache needs, as Cloudflare's token form names it.
@@ -73,7 +82,7 @@ type pointerState struct {
 	Gens []pointerGen `json:"gens"`
 }
 
-// purgeGate is the last check of the token's purge permission.
+// purgeGate is the last proof that the pointer cache works (purgeProof).
 type purgeGate struct {
 	mu    sync.Mutex
 	key   string             // the hash of the token and the route hosts it was checked for
@@ -81,6 +90,8 @@ type purgeGate struct {
 	ok    bool
 	why   string // why the pointer cache is off; "" while it is on
 	at    time.Time
+	// running: a proof runs (purgeProof).
+	running bool
 }
 
 // loadPointers reads the row "pointers".
@@ -244,29 +255,41 @@ func (m *mod) liveGens(ctx context.Context) []pointerGen {
 	return slices.Clone(live)
 }
 
+// pointerTag is the Cache-Tag of the cached pointer key of bucket in generation gen (pointerTag of
+// edge/src/index.ts). It names no host: a purge of the tag on a zone reaches the copies of every
+// host of that zone.
+func pointerTag(gen int64, bucket, key string) string {
+	return "tp/" + strconv.FormatInt(gen, 10) + "/" + bucket + "/" + key
+}
+
 // purgePointers purges the cached copies of the pointer keys of bs, of every generation that a
 // Worker may still read, once purgeDelay passed since changed (when the last change of the keys
-// returned). A purge that fails fails the caller: a pre-step fails its commit or remove, the
-// outbox tries the row again. A refusal of the token turns the pointer cache off.
+// returned): a purge by Cache-Tag on the zone of each host of those generations. A purge that
+// fails fails the caller: a pre-step fails its commit or remove, the outbox tries the row again. A
+// refusal of the token turns the pointer cache off.
 func (m *mod) purgePointers(ctx context.Context, bs []*bucket, keys []string, changed time.Time) error {
 	if len(keys) == 0 {
 		return nil
 	}
-	byHost := map[string][]string{}
+	var tags []string
+	hosts := map[string]bool{}
 	for _, g := range m.liveGens(ctx) {
-		base := "/.telesphorepo-edge/" + g.Prefix + "v1/pointers/" + strconv.FormatInt(g.Gen, 10) + "/"
+		n := len(tags)
 		for _, b := range bs {
 			if !slices.Contains(g.Buckets, b.name) {
 				continue
 			}
+			for _, k := range keys {
+				tags = append(tags, pointerTag(g.Gen, b.name, k))
+			}
+		}
+		if len(tags) > n {
 			for _, h := range g.Hosts {
-				for _, k := range keys {
-					byHost[h] = append(byHost[h], "https://"+h+base+b.name+"/"+k)
-				}
+				hosts[h] = true
 			}
 		}
 	}
-	if len(byHost) == 0 {
+	if len(tags) == 0 {
 		return nil
 	}
 	select {
@@ -280,27 +303,23 @@ func (m *mod) purgePointers(ctx context.Context, bs []*bucket, keys []string, ch
 		return errors.New("purge the cached pointers: no Cloudflare API token is set, and Workers may still read cached pointers until their config.json without the cache expires")
 	}
 	c := &cfClient{base: cfAPI, token: token}
-	zones, err := m.zonesOf(ctx, c, snap, slices.Sorted(maps.Keys(byHost)))
+	zones, err := m.zonesOf(ctx, c, snap, slices.Sorted(maps.Keys(hosts)))
 	if err != nil {
 		return fmt.Errorf("purge the cached pointers: %w", err)
 	}
 	type batch struct {
-		zone  zoneRef
-		files []string
-	}
-	byZone := map[zoneRef][]string{}
-	for h, urls := range byHost {
-		byZone[zones[h]] = append(byZone[zones[h]], urls...)
+		zone zoneRef
+		tags []string
 	}
 	var batches []batch
-	for z, urls := range byZone {
-		for len(urls) > 0 {
-			n := min(purgeBatch, len(urls))
-			batches = append(batches, batch{z, urls[:n]})
-			urls = urls[n:]
+	for _, z := range distinctZones(zones) {
+		for rest := tags; len(rest) > 0; {
+			n := min(purgeBatch, len(rest))
+			batches = append(batches, batch{z, rest[:n]})
+			rest = rest[n:]
 		}
 	}
-	err = parallel(4, batches, func(b batch) error { return purgeFiles(ctx, c, b.zone, b.files) })
+	err = parallel(4, batches, func(b batch) error { return purgeTags(ctx, c, b.zone, b.tags) })
 	if err != nil {
 		m.purgeRefused(ctx, err)
 		return fmt.Errorf("purge the cached pointers: %w", err)
@@ -308,9 +327,21 @@ func (m *mod) purgePointers(ctx context.Context, bs []*bucket, keys []string, ch
 	return nil
 }
 
-// purgeFiles purges the cached URLs files on zone.
-func purgeFiles(ctx context.Context, c *cfClient, zone zoneRef, files []string) error {
-	b, _ := json.Marshal(map[string]any{"files": files})
+// distinctZones returns the zones of zones, each once, sorted by name.
+func distinctZones(zones map[string]zoneRef) []zoneRef {
+	var out []zoneRef
+	for _, z := range zones {
+		if !slices.Contains(out, z) {
+			out = append(out, z)
+		}
+	}
+	slices.SortFunc(out, func(a, b zoneRef) int { return strings.Compare(a.Name, b.Name) })
+	return out
+}
+
+// purgeTags purges the cached entries with one of tags on zone.
+func purgeTags(ctx context.Context, c *cfClient, zone zoneRef, tags []string) error {
+	b, _ := json.Marshal(map[string]any{"tags": tags})
 	_, err := c.do(ctx, cfRequest{method: http.MethodPost, path: "/zones/" + seg(zone.ID) + "/purge_cache", body: b, again: true}, nil)
 	return err
 }
@@ -378,9 +409,9 @@ func refusedWhy(ce *callError) string {
 	return "The API token lacks " + purgePerm + " (" + ce.Error() + "), so the server cannot purge cached pointers: the Worker reads every pointer in R2."
 }
 
-// checkPurge checks, while edge delivery is on, that the token can purge on the zone of every
-// route host, and writes config.json again when the answer turns the pointer cache on or off. It
-// purges one URL that nothing caches on each zone. The caller holds stMu.
+// checkPurge starts, while edge delivery is on, the proof that the pointer cache works when it is
+// due (purgeProof); when its answer turns the pointer cache on or off, config.json is written
+// again.
 func (m *mod) checkPurge(ctx context.Context) {
 	snap := m.h.Settings.Current()
 	token := CloudflareToken.Get(snap)
@@ -392,54 +423,163 @@ func (m *mod) checkPurge(ctx context.Context) {
 	if g.ok {
 		every = purgeRecheck
 	}
-	due := g.key != key || time.Since(g.at) >= every
+	due := !g.running && (g.key != key || time.Since(g.at) >= every)
 	was := g.ok && g.key == key
+	if due {
+		g.running = true
+	}
 	g.mu.Unlock()
 	if !due {
 		return
 	}
-	ok, why := m.probePurge(ctx, snap, token, hosts)
-	if ctx.Err() != nil {
-		return
-	}
-	g.mu.Lock()
-	g.key, g.ok, g.why, g.at = key, ok, why, time.Now()
-	g.mu.Unlock()
-	if ok != was {
-		if err := m.putConfig(ctx, false); err != nil {
-			m.h.Log.Warn("edge: writing config.json failed", "error", err.Error())
+	home := m.cur.Load().home
+	m.h.Go("edge.purge-proof", func(ctx context.Context) {
+		ok, why := m.purgeProof(ctx, snap, home, token, hosts)
+		g.mu.Lock()
+		g.running = false
+		if ctx.Err() == nil {
+			g.key, g.ok, g.why, g.at = key, ok, why, time.Now()
 		}
-	}
+		g.mu.Unlock()
+		if ctx.Err() == nil && ok != was {
+			m.mark(ctx, configKey)
+		}
+	})
 }
 
-// probePurge reports whether token can purge on the zone of every host, or why not.
-func (m *mod) probePurge(ctx context.Context, snap *settings.Snapshot, token string, hosts []string) (bool, string) {
+// purgeProof reports whether the pointer cache works on every route host, or why not: the token
+// purges by tag on the zone of each host (a purge of an unused tag), and on each host a tag purge
+// removes an entry that the Worker put into the Cache API while a control entry without a purge
+// stays.
+func (m *mod) purgeProof(ctx context.Context, snap *settings.Snapshot, home *bucket, token string, hosts []string) (bool, string) {
 	if token == "" {
 		return false, "Set a Cloudflare API token with " + purgePerm + " to cache pointers at the edge: until then the Worker reads every pointer in R2."
 	}
-	if len(hosts) == 0 {
-		return false, "The base URL does not suit edge delivery."
+	if len(hosts) == 0 || home == nil {
+		return false, "Edge delivery is not on."
 	}
 	c := &cfClient{base: cfAPI, token: token}
 	zones, err := m.zonesOf(ctx, c, snap, hosts)
 	if err != nil {
 		return false, "The zones of the routes are not known, so the server cannot purge cached pointers: " + c.redact(err.Error())
 	}
-	done := map[zoneRef]bool{}
-	for _, h := range hosts {
-		z := zones[h]
-		if done[z] {
-			continue
-		}
-		done[z] = true
-		if err := purgeFiles(ctx, c, z, []string{"https://" + h + "/.telesphorepo-edge/probe"}); err != nil {
+	for _, z := range distinctZones(zones) {
+		if err := purgeTags(ctx, c, z, []string{"tp-probe/" + randomHex()}); err != nil {
 			if ce := asCall(err); ce != nil && (ce.Status == http.StatusUnauthorized || ce.Status == http.StatusForbidden || ce.has(10000)) {
 				return false, refusedWhy(ce)
 			}
 			return false, "The check of the purge permission on the zone " + z.Name + " failed: " + c.redact(err.Error())
 		}
 	}
+	scheme := "https"
+	if u, err := url.Parse(settings.BaseURL.Get(snap)); err == nil && u.Scheme != "" {
+		scheme = u.Scheme
+	}
+	for _, h := range hosts {
+		if why := m.cacheProof(ctx, c, home, scheme, h, zones[h]); why != "" {
+			return false, why
+		}
+	}
 	return true, ""
+}
+
+// probeSettle is how long the proof waits after its purge before it asks the Worker again.
+const probeSettle = 5 * time.Second
+
+// cacheProof makes the Worker on host put two entries with fresh tags into the Cache API, purges
+// the tag of the second on zone, waits probeSettle and asks which entries are left: the first
+// (the control) must be, the second must not. It returns why the proof failed, or "".
+func (m *mod) cacheProof(ctx context.Context, c *cfClient, home *bucket, scheme, host string, zone zoneRef) string {
+	type entry struct {
+		Key string `json:"key"`
+		Tag string `json:"tag"`
+	}
+	entries := []entry{{randomHex(), "tp-probe/" + randomHex()}, {randomHex(), "tp-probe/" + randomHex()}}
+	if got, why := m.askProbe(ctx, home, scheme, host, "put", entries); why != "" {
+		return why
+	} else if len(got) != 2 {
+		return "The Worker on " + host + " answered the probe of the pointer cache with " + strconv.Itoa(len(got)) + " results, not 2."
+	}
+	if err := purgeTags(ctx, c, zone, []string{entries[1].Tag}); err != nil {
+		if ce := asCall(err); ce != nil && (ce.Status == http.StatusUnauthorized || ce.Status == http.StatusForbidden || ce.has(10000)) {
+			return refusedWhy(ce)
+		}
+		return "The purge of the probe entry on the zone " + zone.Name + " failed: " + c.redact(err.Error())
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err().Error()
+	case <-time.After(probeSettle):
+	}
+	got, why := m.askProbe(ctx, home, scheme, host, "match", entries)
+	switch {
+	case why != "":
+		return why
+	case len(got) != 2 || !got[0]:
+		return "The Cache API on " + host + " did not keep the control entry of the probe, so the server cannot prove that a purge removes a cached pointer: the Worker reads every pointer in R2."
+	case got[1]:
+		return fmt.Sprintf("A purge by Cache-Tag on the zone %s did not remove the probe entry on %s within %s: the Worker reads every pointer in R2.", zone.Name, host, probeSettle)
+	}
+	return ""
+}
+
+// askProbe writes probe/<hex SHA-256 of a fresh nonce>.json with op and entries to the home
+// bucket and asks the Worker on host to run it (edge/src/check.ts). It returns the Worker's
+// results, or why it gave none.
+func (m *mod) askProbe(ctx context.Context, home *bucket, scheme, host, op string, entries any) ([]bool, string) {
+	raw := make([]byte, 32)
+	rand.Read(raw)
+	nonce := base64.RawURLEncoding.EncodeToString(raw)
+	sum := sha256.Sum256([]byte(nonce))
+	key := root + "probe/" + hex.EncodeToString(sum[:]) + ".json"
+	body, _ := json.Marshal(map[string]any{"exp": time.Now().Add(checkTTL).Unix(), "op": op, "entries": entries})
+	pctx, cancel := context.WithTimeout(ctx, opTimeout)
+	err := home.st.Put(pctx, key, bytes.NewReader(body), int64(len(body)), "application/json")
+	cancel()
+	if err != nil {
+		return nil, "Writing the probe of the pointer cache to the home bucket failed: " + errText(err)
+	}
+	defer func() {
+		// The Worker deletes it when it takes it; else it goes here.
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), opTimeout)
+		defer cancel()
+		_ = home.st.Delete(dctx, key)
+	}()
+	u := url.URL{Scheme: scheme, Host: host, Path: probePath, RawQuery: "n=" + nonce}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, "No probe request to " + host + ": " + err.Error()
+	}
+	req.Header.Set("Cache-Control", "no-store")
+	resp, err := checkClient.Do(req)
+	if err != nil {
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err // the URL holds the nonce
+		}
+		return nil, "No answer from " + host + " to the probe of the pointer cache: " + err.Error()
+	}
+	defer resp.Body.Close()
+	var a struct {
+		Ran     bool   `json:"ran"`
+		Error   string `json:"error"`
+		Results []bool `json:"results"`
+	}
+	_ = json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&a)
+	if resp.Header.Get(checkHeader) != "worker" || resp.StatusCode != http.StatusOK || !a.Ran {
+		detail := a.Error
+		if detail == "" {
+			detail = "HTTP " + strconv.Itoa(resp.StatusCode)
+		}
+		return nil, "The Worker on " + host + " did not run the probe of the pointer cache (" + detail + "): deploy the Worker of this server version."
+	}
+	return a.Results, ""
+}
+
+func randomHex() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 // pointerCacheJSON is pointer_cache of GET /api/edge/status.

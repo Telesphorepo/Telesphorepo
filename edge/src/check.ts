@@ -54,6 +54,50 @@ async function take(env: Env, n: string): Promise<{ pass: boolean } | string> {
   return { pass: req.pass === true };
 }
 
+// The probe of the pointer cache. Before the server turns the pointer cache on, it proves on each
+// route host that a purge by Cache-Tag removes an entry of the Cache API: it writes
+// probe/<hex SHA-256 of a one-time nonce>.json = {exp, op, entries: [{key, tag}]} to the home bucket
+// and sends GET /.well-known/telesphorepo-edge/probe?n=<nonce> to the host. With op "put" the
+// Worker puts each entry into the Cache API of its data center with its Cache-Tag; with op "match"
+// it answers which entries are still there. The probe object goes when the Worker takes it.
+
+export const PROBE_PATH = "/.well-known/telesphorepo-edge/probe";
+
+export async function probe(request: Request, env: Env): Promise<Response> {
+  try {
+    const url = new URL(request.url);
+    const n = url.searchParams.get("n") ?? "";
+    if (n === "" || n.length > 128) return answer(403, { ran: false, error: "no nonce" });
+    const hash = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(n))), (b) =>
+      b.toString(16).padStart(2, "0"),
+    ).join("");
+    const key = edgeKey(env, `probe/${hash}.json`);
+    const obj = await env.HOME.get(key);
+    if (!obj) return answer(403, { ran: false, error: "no probe is waiting" });
+    await env.HOME.delete(key);
+    const v = JSON.parse(await obj.text()) as { exp?: unknown; op?: unknown; entries?: unknown };
+    if (typeof v.exp !== "number" || Math.floor(Date.now() / 1000) > v.exp) return answer(403, { ran: false, error: "the probe expired" });
+    if ((v.op !== "put" && v.op !== "match") || !Array.isArray(v.entries)) return answer(403, { ran: false, error: "the probe does not parse" });
+    const results: boolean[] = [];
+    for (const e of v.entries as { key?: unknown; tag?: unknown }[]) {
+      if (typeof e.key !== "string" || !/^[0-9a-f]{32}$/.test(e.key) || typeof e.tag !== "string" || !/^tp-probe\/[0-9a-f]{32}$/.test(e.tag)) {
+        return answer(403, { ran: false, error: "the probe does not parse" });
+      }
+      const req = new Request(`${url.origin}/.telesphorepo-edge/probe/${e.key}`);
+      if (v.op === "put") {
+        await caches.default.put(req, new Response("probe", { headers: { "Cache-Control": "max-age=300", "Cache-Tag": e.tag } }));
+        results.push(true);
+      } else {
+        results.push((await caches.default.match(req)) !== undefined);
+      }
+    }
+    return answer(200, { ran: true, results });
+  } catch (err) {
+    console.error("edge: probe failed:", err instanceof Error ? err.message : String(err));
+    return answer(500, { ran: false, error: "the probe failed" });
+  }
+}
+
 export function hexBytes(s: string): Uint8Array | null {
   if (!/^[0-9a-fA-F]*$/.test(s) || s.length % 2 !== 0) return null;
   const out = new Uint8Array(s.length / 2);

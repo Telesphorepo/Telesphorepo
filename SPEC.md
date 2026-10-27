@@ -2306,6 +2306,7 @@ region reads the same version; an immutable path has a pointer and a blob in eve
 | `gap/state.json` | The Worker's gap check: `{version (the Worker's build), features, checked, last_run, bindings: [hints], markers: {home, regions: {hint: bucket}}, pass, last_pass: {started, finished}, regions}`; `markers` holds the bucket that the `bucket.json` of each binding names (`""` for none); every run reads them and writes the file with `checked`, the time of the run (one small put per run), so the status's last gap check is the last run, with or without a copy pass. A gap pass skips a region whose binding names another bucket | home |
 | `gap/request.json` | The server asks for a gap pass: `{at, regions}` | home |
 | `check.json` | The server's check of the Worker: `{hash (hex SHA-256 of the one-time nonce), exp (unix, 30 s after the write), pass}`; `pass`: run a copy pass now (edge delivery is on and a region is not ready). The Worker deletes it when it takes it; the server deletes it after the check | home |
+| `probe/<hex>.json` | The proof of the pointer cache: `{exp, op, entries: [{key, tag}]}`; `<hex>` is the hex SHA-256 of a one-time nonce. The server writes it before each request of the proof; the Worker deletes it when it takes it, the server after the request (**The pointer cache**) | home |
 | `speedtest/<hex>.json` | A pass of the speed test: `{hash, exp}`; `hash` is the hex SHA-256 of the token (the `<hex>` of the key), `exp` unix seconds, 10 minutes after the write. The server writes it (`POST /api/edge/speedtest`) and deletes it a minute after `exp`, at a later pass | home |
 | `copy/<hint>/<hex>.json` | The copy Worker: the multipart upload of a large copy, so a retried message resumes it | home |
 
@@ -2596,20 +2597,28 @@ bucket.
 Worker reads the pointer of an immutable path of a single repo through the Cache API, on a
 request whose host is in `hosts`: the key is
 `https://<host>/.telesphorepo-edge/[s3.prefix/]v1/pointers/<gen>/<bucket>/<pointer key>`, where
-`<bucket>` names the bucket that held the pointer, and the copy carries `max-age=<ttl>`. It keeps
-only a pointer that serves, never a missing or pending one, never in isolate memory (a purge
-cannot reach it), and only when the R2 read started at most 1 s before the put. A group's member
-pointers and a mutable path's pointer are read in R2 every time. `Server-Timing` of an edge answer
-names the step `pointer` with `desc="cache"` or `desc="r2"`.
+`<bucket>` names the bucket that held the pointer; the copy carries `max-age=<ttl>` and
+`Cache-Tag: tp/<gen>/<bucket>/<pointer key>`. Cloudflare purges Cache API entries by tag (or
+everything), not by URL, and a tag must be printable ASCII without spaces or commas, at most 1,024
+characters in a purge call; bucket names and pointer keys keep it so. The Worker keeps only a
+pointer that serves, never a missing or pending one, never in isolate memory (a purge cannot reach
+it), and only when its put ended at most 1 s after the R2 read started: it awaits the put and
+deletes the copy in its data center again when the put ended later. A group's member pointers and a
+mutable path's pointer are read in R2 every time. `Server-Timing` of an edge answer names the step
+`pointer` with `desc="cache"` or `desc="r2"`.
 
 The server keeps the invariant of **Path classes** for the copies: every write that makes an
 immutable pointer unusable or deletes it (`Replacing`, `Removing`, the outbox's deletes, the
-reclass walk's regional deletes) purges its copies, 2 s after the change returned, with
-`POST /zones/{zone}/purge_cache {"files": [...]}` on the zone of each host (100 URLs per call,
-4 calls at once, a 429 waits for its `Retry-After`), before the commit or the remove goes on; a
-failed purge fails the step as a failed put does, and the outbox tries its row again. The 2 s
-cover the Worker's 1 s window, so a copy read before the change lands before the purge. A put of a
-new pointer needs no purge: it replaces a pending or missing one, which no copy holds.
+reclass walk's regional deletes) purges the tags of its keys, 2 s after the change returned, with
+`POST /zones/{zone}/purge_cache {"tags": [...]}` on the zone of every host of the live generations
+(100 tags per call, 4 calls at once, a 429 waits for its `Retry-After`), before the commit or the
+remove goes on; a failed purge fails the step as a failed put does, and the outbox tries its row
+again. A tag names no host, so one purge per zone reaches the copies of every host on it. The 2 s
+cover the Worker's 1 s window, so every copy read before the change is in the cache, or deleted,
+before the purge. What stays assumed: a purge that Cloudflare answered with 200 has removed the
+entry in every data center by the time the commit goes on (Cloudflare's 200 says the purge was
+received; the proof below waits 5 s and checks one data center). A put of a new pointer needs no
+purge: it replaces a pending or missing one, which no copy holds.
 
 A generation (`gen`) names the TTL, the key prefix, the hosts and the buckets the Worker reads
 pointers from (the home bucket and the ready regions); the row `pointers` of `edge_state` keeps
@@ -2622,16 +2631,24 @@ a host or a bucket that comes back (a region added again, edge delivery on again
 older copy.
 
 The server sets `pointer_cache` (TTL 1 hour, every route host: the base URL host and each repo
-domain) only while edge delivery is on and the check of the token passed: with
-`edge.cloudflare_token` set, the controller finds the zone of each route host (as the deploy's
-`zones` step) and purges one URL that nothing caches on each zone, again every hour, after 10
-minutes when it failed, and at once when the token or the hosts change. Without a token, or with a
-token that lacks Caching › Cache Purge: Purge, the Worker reads every pointer in R2 and the Edge
-delivery page says why (`pointer_cache` of `GET /api/edge/status`: `{on, ttl, why}`). A purge that
-Cloudflare refuses (401, 403, error 10000) turns the cache off and writes `config.json` again; until
-the generations of the earlier `config.json` end (`edge.access_ttl` plus 5 s), a replace or remove
-of an immutable file fails. The TTL bounds only a purge that Cloudflare took but did not apply (a
-200 says it was received); a pointer costs one R2 read per data center and hour. An older Worker
+domain) only while edge delivery is on and its proof passed. The proof runs while edge delivery is
+on with `edge.cloudflare_token` set, in the background, again every hour, after 10 minutes when it
+failed, and at once when the token or the hosts change: it finds the zone of each route host (as
+the deploy's `zones` step), purges an unused tag on each zone (the permission), then on each host
+asks the Worker to put two entries with fresh tags into the Cache API, purges the tag of the
+second, waits 5 s and asks again: the first (the control, so a cache that keeps nothing fails) must
+still be there and the second must be gone. The Worker runs the probe at
+`/.well-known/telesphorepo-edge/probe?n=<nonce>`, on the route of the check: the server writes
+`probe/<hex SHA-256 of the nonce>.json` (`{exp, op: "put"|"match", entries: [{key, tag}]}`) to the
+home bucket, and the Worker takes it (deletes it) and answers `{answered_by: "worker", ran,
+results}` with `Telesphorepo-Edge-Check: worker`; the server deletes the object after the request.
+Without a token, with a token that lacks Caching › Cache Purge: Purge, with a Worker that does not
+run the probe, or when the purge did not remove the probe entry, the Worker reads every pointer in
+R2 and the Edge delivery page says why (`pointer_cache` of `GET /api/edge/status`: `{on, ttl,
+why}`). A purge that Cloudflare refuses (401, 403, error 10000) turns the cache off and writes
+`config.json` again; until the generations of the earlier `config.json` end (`edge.access_ttl` plus
+5 s), a replace or remove of an immutable file fails. The TTL bounds only a purge that Cloudflare
+took but did not apply; a pointer costs one R2 read per data center and hour. An older Worker
 ignores `pointer_cache` and reads every pointer in R2. A date change of an import (`Touched`)
 rewrites a pointer with the same bytes and is not purged: a copy can answer with the earlier
 `Last-Modified` for up to the TTL.
@@ -2866,9 +2883,10 @@ estimate, not a measurement).
 - Operations: a download reads one pointer (one per member for a group; none for an immutable path
   of a single repo whose pointer the Cache API holds), one blob, and 0 to 3 access objects on a
   Cache API miss. With the pointer cache on, each replace or remove of an immutable file purges one
-  URL per route host, bucket and live generation; Cloudflare limits single-file purges per account
-  (800 URLs a second on Free, 1,500 on Pro and Business, 100 URLs per call), and a call over the
-  limit waits for its `Retry-After`. A stored file puts one home pointer, and one per region for
+  tag per bucket and live generation, in one call per zone for each 100 tags; Cloudflare limits tag
+  purges per account (5 calls a minute on Free with a burst of 25, 5 a second on Pro, 10 on
+  Business, 50 on Enterprise), and a call over the limit waits for its `Retry-After`, so a large
+  remove on Free takes minutes per thousand files. A stored file puts one home pointer, and one per region for
   an immutable path (a replacement adds a `{pending}` put per bucket). A new blob costs one queue
   message and one put per region. The idle cron costs one class B read per run. A far-bucket read
   takes roughly 100 to 300 ms against a few ms from a near bucket (an estimate).

@@ -443,7 +443,7 @@
                 <dd class="text-meta text-muted-foreground">The server purges a pointer's cached copies before its file is replaced or removed.</dd>
               {:else}
                 <dd class="text-label">Off</dd>
-                <dd class="text-meta text-muted-foreground">{st.pointer_cache.why || "Checking the token's purge permission."}</dd>
+                <dd class="text-meta text-muted-foreground">{st.pointer_cache.why || "Checking that a purge removes a cached pointer."}</dd>
               {/if}
             </div>
           {/if}

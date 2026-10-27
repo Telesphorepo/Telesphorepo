@@ -34,6 +34,8 @@ import (
 const (
 	checkPrefix = "/.well-known/telesphorepo-edge/"
 	checkPath   = checkPrefix + "check"
+	// probePath is where the Worker runs the probe of the pointer cache (purge.go).
+	probePath = checkPrefix + "probe"
 	// checkHeader names who answered the reserved path: "worker" or "server".
 	checkHeader = "Telesphorepo-Edge-Check"
 	// checkTTL is how long check.json is valid; checkWait bounds the request (the Worker runs its
