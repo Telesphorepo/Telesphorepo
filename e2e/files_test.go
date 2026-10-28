@@ -326,15 +326,15 @@ func TestDelete(t *testing.T) {
 			t.Fatalf("raw root after deleting dir/: %v", got)
 		}
 
-		// A delete that takes longer than delete.wait (0s: every one) answers 202 and goes on in the
+		// A delete that takes longer than delete.wait (1ns: every one) answers 202 and goes on in the
 		// background; its state is readable by id on its own repo only.
-		s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"delete.wait": "0s"}, s.Admin(), nil)
+		s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"delete.wait": "1ns"}, s.Admin(), nil)
 		var started struct {
 			ID string `json:"id"`
 		}
 		st, b := s.API(t, http.MethodPost, "/api/repos/"+raw+"/files/delete", map[string][]string{"paths": {"keep.bin"}}, rps.Auth())
 		if st != http.StatusAccepted || json.Unmarshal(b, &started) != nil || started.ID == "" {
-			t.Fatalf("delete with delete.wait 0s: status %d, want 202 with an id: %s", st, b)
+			t.Fatalf("delete with delete.wait 1ns: status %d, want 202 with an id: %s", st, b)
 		}
 		var state struct {
 			State   string `json:"state"`

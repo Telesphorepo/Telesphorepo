@@ -121,12 +121,6 @@ func (a *API) deleteFiles(w http.ResponseWriter, r *http.Request, c *route.Call)
 		n, err := a.assets.Remove(rctx, rm)
 		a.fileDeletes.finish(t, n, err)
 	})
-	accepted := func() { httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"id": t.id, "deleted": t.deleted.Load()}) }
-	wait := settings.DeleteWait.Get(a.settings.Current())
-	if wait <= 0 {
-		accepted()
-		return
-	}
 	select {
 	case <-t.done:
 		if t.err != nil {
@@ -134,8 +128,8 @@ func (a *API) deleteFiles(w http.ResponseWriter, r *http.Request, c *route.Call)
 			return
 		}
 		httpx.WriteJSON(w, http.StatusOK, map[string]int64{"deleted": t.deleted.Load()})
-	case <-time.After(wait):
-		accepted()
+	case <-time.After(settings.DeleteWait.Get(a.settings.Current())):
+		httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"id": t.id, "deleted": t.deleted.Load()})
 	case <-r.Context().Done():
 	}
 }
