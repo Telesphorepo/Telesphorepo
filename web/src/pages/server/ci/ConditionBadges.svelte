@@ -2,7 +2,7 @@
   The conditions of a CI pipeline as TicketBadges, each with the icon of its kind (a branch, a
   tag, a workflow file, a Jenkins job, a token condition), on one line that wraps. `max` shows the
   first ones and "and N more". A pipeline that takes every branch and tag says so in the warning
-  color. The CI pipeline cards, the admission ticket and the CI pipeline rows of a repository's
+  color. The CI pipelines table, the admission ticket and the CI pipeline rows of a repository's
   Access tab use it.
 -->
 <script lang="ts" module>

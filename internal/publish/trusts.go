@@ -352,17 +352,18 @@ func (s *Service) GetTrust(ctx context.Context, id int64) (*Trust, error) {
 	return s.toTrust(ctx, t)
 }
 
-// Trusts returns a keyset page of the policies by name: names after after ("" first page).
-// next is the cursor of the next page, "" at the end. With all false only the policies that list at
-// least one repo and only repos among repoIDs are returned.
-func (s *Service) Trusts(ctx context.Context, all bool, repoIDs []int64, after string, limit int) ([]*Trust, string, error) {
+// Trusts returns a keyset page of the policies by name: the names after after ("" first page)
+// that start with prefix. next is the cursor of the next page, "" at the end. With all false only
+// the policies that list at least one repo and only repos among repoIDs are returned.
+func (s *Service) Trusts(ctx context.Context, all bool, repoIDs []int64, prefix, after string, limit int) ([]*Trust, string, error) {
+	lower, upper := trustNameRange(prefix, after)
 	var rows []dbq.PublishTrust
 	var err error
 	switch {
 	case all:
-		rows, err = s.rq.ListTrusts(ctx, dbq.ListTrustsParams{After: after, Limit: int64(limit)})
+		rows, err = s.rq.ListTrusts(ctx, dbq.ListTrustsParams{Lower: lower, Upper: upper, Limit: int64(limit)})
 	case len(repoIDs) > 0:
-		rows, err = s.rq.ListTrustsInRepos(ctx, dbq.ListTrustsInReposParams{After: after, RepoIds: repoIDs, Limit: int64(limit)})
+		rows, err = s.rq.ListTrustsInRepos(ctx, dbq.ListTrustsInReposParams{Lower: lower, Upper: upper, RepoIds: repoIDs, Limit: int64(limit)})
 	}
 	if err != nil {
 		return nil, "", err
@@ -380,6 +381,24 @@ func (s *Service) Trusts(ctx context.Context, all bool, repoIDs []int64, after s
 		next = rows[len(rows)-1].Name
 	}
 	return out, next, nil
+}
+
+// trustNameRange is the range [lower, upper) of the policy names after after that start with
+// prefix, under SQLite's byte-wise order. A name is valid UTF-8 (the JSON of the API), so no byte
+// of it is 0xF5 or above.
+func trustNameRange(prefix, after string) (lower, upper string) {
+	lower, upper = prefix, "\xf5"
+	if c := after + "\x00"; after != "" && c > lower {
+		lower = c
+	}
+	b := []byte(prefix)
+	for i := len(b) - 1; i >= 0; i-- {
+		if b[i] < 0xf5 {
+			b[i]++
+			return lower, string(b[:i+1])
+		}
+	}
+	return lower, upper
 }
 
 // PipelinesOf returns the names of the CI pipelines that publish to repo id, sorted.

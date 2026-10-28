@@ -23,11 +23,13 @@ SELECT id, username, disabled, kind, email, created_at,
   CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = users.id), '') AS TEXT) AS perms
 FROM users WHERE id = ?;
 
+-- A keyset page of the accounts whose username is in [lower, upper): the cursor and a name prefix
+-- in one range of the username index.
 -- name: ListUsers :many
 SELECT id, username, disabled, kind, email, created_at,
   CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = users.id), '') AS TEXT) AS perms
 FROM users
-WHERE username > sqlc.arg(after) ORDER BY username LIMIT sqlc.arg(limit);
+WHERE username >= sqlc.arg(lower) AND username < sqlc.arg(upper) ORDER BY username LIMIT sqlc.arg(limit);
 
 -- The enabled people whose username is in [lower, upper), for a person picker.
 -- name: ListPeople :many

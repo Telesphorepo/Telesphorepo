@@ -234,6 +234,29 @@ export function admitsOf(t: Pick<Trust, "issuer" | "audience" | "jwks" | "claims
   return { who: "", items, every: false };
 }
 
+/**
+ * The subject of a CI token in words, as parts to show apart: a GitHub subject
+ * "repo:acme/app:ref:refs/heads/main" → ["acme/app", "branch main"], a Jenkins job address
+ * "https://ci.example.com/job/team/job/app/" → ["ci.example.com", "job team/app"]; any other
+ * subject is one part, as it is.
+ */
+export function subjectParts(subject: string): string[] {
+  const gh = /^repo:([^:/]+\/[^:]+)(?::(.*))?$/.exec(subject);
+  if (gh) {
+    const [, repo, rest = ""] = gh;
+    if (rest.startsWith("ref:refs/heads/")) return [repo, `branch ${rest.slice(15)}`];
+    if (rest.startsWith("ref:refs/tags/")) return [repo, `tag ${rest.slice(14)}`];
+    if (rest.startsWith("environment:")) return [repo, `environment ${rest.slice(12)}`];
+    if (rest === "pull_request") return [repo, "pull request"];
+    return rest ? [repo, rest] : [repo];
+  }
+  if (/^https?:\/\/[^/]+\/.*job\//i.test(subject)) {
+    const job = jenkinsJob(subject);
+    if (job) return [hostOf(jenkinsURL(subject)), `job ${job}`];
+  }
+  return [subject];
+}
+
 /** The host of an address, or the text itself when it is not one. */
 export function hostOf(url: string): string {
   try {

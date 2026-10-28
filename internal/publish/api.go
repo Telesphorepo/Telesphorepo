@@ -494,7 +494,7 @@ func (m *mod) trustInScope(w http.ResponseWriter, r *http.Request, s pipelineSco
 }
 
 // listTrusts returns a keyset page of the policies by name that the caller may see:
-// ?after=<name>&limit=. A holder of All repositories reads a page of all policies; anyone else a
+// ?q=<start of the name>&after=<name>&limit=. A holder of All repositories reads a page of all policies; anyone else a
 // page of the policies whose repos all lie where they hold the CI pipelines permission.
 func (m *mod) listTrusts(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	limit := httpx.Limit(r)
@@ -505,7 +505,7 @@ func (m *mod) listTrusts(w http.ResponseWriter, r *http.Request, c *route.Call) 
 			ids = append(ids, id)
 		}
 	}
-	items, next, err := m.svc.Trusts(r.Context(), c.Managed.All, ids, after, limit)
+	items, next, err := m.svc.Trusts(r.Context(), c.Managed.All, ids, strings.TrimSpace(r.URL.Query().Get("q")), after, limit)
 	if err != nil {
 		publishFail(w, r, err)
 		return

@@ -237,9 +237,12 @@ func getUserByID(ctx context.Context, q *dbq.Queries, id int64) (*User, error) {
 	return newUser(r.ID, r.Username, r.Perms, r.Disabled, r.Kind, r.Email, r.CreatedAt), nil
 }
 
-func (s *Service) ListUsers(ctx context.Context, after string, limit int) ([]*User, string, error) {
+// ListUsers returns a keyset page of the accounts whose username starts with prefix, after the
+// name after ("" for the first page). next is "" at the end.
+func (s *Service) ListUsers(ctx context.Context, prefix, after string, limit int) ([]*User, string, error) {
 	limit = min(max(limit, 1), 200)
-	rows, err := s.rq.ListUsers(ctx, dbq.ListUsersParams{After: after, Limit: int64(limit + 1)})
+	lower, upper := nameRange(prefix, after)
+	rows, err := s.rq.ListUsers(ctx, dbq.ListUsersParams{Lower: lower, Upper: upper, Limit: int64(limit + 1)})
 	if err != nil {
 		return nil, "", err
 	}
@@ -528,21 +531,27 @@ func (s *Service) Covers(ctx context.Context, by *Principal, target *User) (bool
 	return true, nil
 }
 
-// People returns a keyset page of the enabled usernames that start with prefix, after the name
-// after ("" for the first page). next is "" at the end. The range has one lower bound: the
-// tighter of the prefix and the cursor.
-func (s *Service) People(ctx context.Context, prefix, after string, limit int) ([]string, string, error) {
-	limit = min(max(limit, 1), 20)
-	lower := prefix
+// nameRange is the range [lower, upper) of the usernames after after that start with prefix. The
+// range has one lower bound: the tighter of the prefix and the cursor.
+func nameRange(prefix, after string) (lower, upper string) {
+	lower = prefix
 	if c := after + "\x00"; after != "" && c > lower {
 		lower = c
 	}
-	upper := "\x7f" // above every username (they are ASCII)
+	upper = "\x7f" // above every username (they are ASCII)
 	if prefix != "" {
 		b := []byte(prefix)
 		b[len(b)-1]++
 		upper = string(b)
 	}
+	return lower, upper
+}
+
+// People returns a keyset page of the enabled usernames that start with prefix, after the name
+// after ("" for the first page). next is "" at the end.
+func (s *Service) People(ctx context.Context, prefix, after string, limit int) ([]string, string, error) {
+	limit = min(max(limit, 1), 20)
+	lower, upper := nameRange(prefix, after)
 	rows, err := s.rq.ListPeople(ctx, dbq.ListPeopleParams{Lower: lower, Upper: upper, Limit: int64(limit + 1)})
 	if err != nil {
 		return nil, "", err

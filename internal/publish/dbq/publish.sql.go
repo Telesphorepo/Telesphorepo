@@ -1052,17 +1052,19 @@ func (q *Queries) ListTrustRepos(ctx context.Context, trustID int64) ([]ListTrus
 
 const listTrusts = `-- name: ListTrusts :many
 SELECT id, name, issuer, audience, claims, jwks, created_by, created_at, disabled
-FROM publish_trusts WHERE name > ?1 ORDER BY name LIMIT ?2
+FROM publish_trusts WHERE name >= ?1 AND name < ?2 ORDER BY name LIMIT ?3
 `
 
 type ListTrustsParams struct {
-	After string
+	Lower string
+	Upper string
 	Limit int64
 }
 
-// Keyset page by name (pass "" for the first page).
+// A keyset page by name of the policies whose name is in [lower, upper): the cursor and a name
+// prefix in one range of the name index.
 func (q *Queries) ListTrusts(ctx context.Context, arg ListTrustsParams) ([]PublishTrust, error) {
-	rows, err := q.db.QueryContext(ctx, listTrusts, arg.After, arg.Limit)
+	rows, err := q.db.QueryContext(ctx, listTrusts, arg.Lower, arg.Upper, arg.Limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1096,26 +1098,28 @@ func (q *Queries) ListTrusts(ctx context.Context, arg ListTrustsParams) ([]Publi
 
 const listTrustsInRepos = `-- name: ListTrustsInRepos :many
 SELECT id, name, issuer, audience, claims, jwks, created_by, created_at, disabled
-FROM publish_trusts WHERE name > ?1 AND id IN (
+FROM publish_trusts WHERE name >= ?1 AND name < ?2 AND id IN (
   SELECT tr.trust_id FROM publish_trust_repos tr WHERE tr.repo_id IN (/*SLICE:repo_ids*/?)
   GROUP BY tr.trust_id
   HAVING count(*) = (SELECT count(*) FROM publish_trust_repos y WHERE y.trust_id = tr.trust_id)
-) ORDER BY name LIMIT ?3
+) ORDER BY name LIMIT ?4
 `
 
 type ListTrustsInReposParams struct {
-	After   string
+	Lower   string
+	Upper   string
 	RepoIds []int64
 	Limit   int64
 }
 
-// A keyset page by name of the policies whose repos all lie in a set of repos, at least one: the
-// policies that list a repo of the set, through publish_trust_repos_repo, kept when every repo they
-// list is in the set.
+// A keyset page by name, in [lower, upper), of the policies whose repos all lie in a set of repos,
+// at least one: the policies that list a repo of the set, through publish_trust_repos_repo, kept
+// when every repo they list is in the set.
 func (q *Queries) ListTrustsInRepos(ctx context.Context, arg ListTrustsInReposParams) ([]PublishTrust, error) {
 	query := listTrustsInRepos
 	var queryParams []interface{}
-	queryParams = append(queryParams, arg.After)
+	queryParams = append(queryParams, arg.Lower)
+	queryParams = append(queryParams, arg.Upper)
 	if len(arg.RepoIds) > 0 {
 		for _, v := range arg.RepoIds {
 			queryParams = append(queryParams, v)

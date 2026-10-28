@@ -1,12 +1,13 @@
 <!--
-  The search field of the top bar. Enter opens the Search page with the query; "/" anywhere
-  focuses the field. On the Search page the field shows the current query, so the page needs no
-  second search box; on any other page it is empty. `large` is the big field of Home: the same
-  search, taller and at most 672px wide. Home has no top bar field, so "/" focuses the large one.
+  The search field of the top bar. Enter opens the Search page with the query; Ctrl+K (⌘K on a
+  Mac) anywhere focuses the field, also from another field, and the field shows the key of the
+  platform. On the Search page the field shows the current query, so the page needs no second
+  search box; on any other page it is empty. `large` is the big field of Home: the same search,
+  taller and at most 672px wide. Home has no top bar field, so Ctrl+K focuses the large one.
 -->
 <script lang="ts">
   import * as InputGroup from "$lib/components/ui/input-group";
-  import { Kbd } from "$lib/components/ui/kbd";
+  import { Kbd, KbdGroup } from "$lib/components/ui/kbd";
   import SearchIcon from "@lucide/svelte/icons/search";
   import { navigate, router } from "$lib/router.svelte";
   import { cn } from "$lib/utils";
@@ -15,6 +16,9 @@
 
   let input = $state<HTMLInputElement | null>(null);
   let q = $state("");
+
+  const platform = (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData?.platform || navigator.platform || navigator.userAgent;
+  const mac = /mac|iphone|ipad/i.test(platform);
 
   $effect(() => {
     // Elsewhere the field is empty, so it never shows a search the page is not about.
@@ -28,11 +32,10 @@
   }
 
   function onkeydown(e: KeyboardEvent) {
-    if (e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey) return;
-    const t = e.target as HTMLElement | null;
-    if (t && (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName))) return;
+    if (e.key.toLowerCase() !== "k" || e.altKey || e.shiftKey || (mac ? !e.metaKey || e.ctrlKey : !e.ctrlKey || e.metaKey)) return;
     e.preventDefault();
     input?.focus();
+    input?.select();
   }
 </script>
 
@@ -47,7 +50,10 @@
       type="search"
       placeholder={large ? "Search files by path" : "Search files"}
       aria-label="Search files"
+      aria-keyshortcuts={mac ? "Meta+K" : "Control+K"}
     />
-    <InputGroup.Addon align="inline-end"><Kbd>/</Kbd></InputGroup.Addon>
+    <InputGroup.Addon align="inline-end">
+      <KbdGroup aria-hidden="true">{#if mac}<Kbd>⌘</Kbd><Kbd>K</Kbd>{:else}<Kbd>Ctrl</Kbd><Kbd>K</Kbd>{/if}</KbdGroup>
+    </InputGroup.Addon>
   </InputGroup.Root>
 </form>

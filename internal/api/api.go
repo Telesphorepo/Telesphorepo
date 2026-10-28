@@ -256,7 +256,8 @@ func (a *API) deleteToken(w http.ResponseWriter, r *http.Request, c *route.Call)
 // --- users ---
 
 func (a *API) listUsers(w http.ResponseWriter, r *http.Request, c *route.Call) {
-	us, next, err := a.auth.ListUsers(r.Context(), r.URL.Query().Get("after"), httpx.Limit(r))
+	q := r.URL.Query()
+	us, next, err := a.auth.ListUsers(r.Context(), strings.ToLower(strings.TrimSpace(q.Get("q"))), q.Get("after"), httpx.Limit(r))
 	if err != nil {
 		route.Fail(w, r, err)
 		return

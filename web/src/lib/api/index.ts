@@ -67,8 +67,8 @@ export const api = {
   },
 
   users: {
-    /** People: every account. */
-    list: (p?: T.PageParams) => request<T.Page<T.User>>("GET", "/api/users", { query: page(p) }),
+    /** People: every account, or the ones whose username starts with q. */
+    list: (p?: T.PageParams, q?: string) => request<T.Page<T.User>>("GET", "/api/users", { query: { q, ...page(p) } }),
     /** People: one account; 404 when no account has the name. */
     get: (username: string) => request<T.User>("GET", `/api/users/${enc(username)}`),
     /** People: the usernames of the enabled administrators (every server permission). */
@@ -171,8 +171,11 @@ export const api = {
     clearOperation: (name: string) => request<void>("DELETE", repo(name) + "/operation"),
     /** All repositories: gives the repository a new name; the old name stays as a redirect. 409 when the name is taken. */
     rename: (name: string, to: string) => request<T.Repo>("POST", repo(name) + "/rename", { body: { name: to } }),
-    /** The old names that still answer for the repository, by name. */
+    /** The other names that answer for the repository, by name. */
     redirects: (name: string) => request<T.RepoRedirect[]>("GET", repo(name) + "/redirects"),
+    /** All repositories: makes another name answer for the repository. 409 when a repository or a redirect holds it. */
+    addRedirect: (name: string, redirect: string) =>
+      request<T.RepoRedirect>("POST", repo(name) + "/redirects", { body: { name: redirect } }),
     /** All repositories: removes a redirect; the old name answers 404 and is free again. */
     removeRedirect: (name: string, redirect: string) =>
       request<void>("DELETE", repo(name) + "/redirects/" + encodeURIComponent(redirect)),
@@ -477,7 +480,8 @@ export const api = {
     /** Activity: every session, newest first. */
     log: (p?: T.PageParams) => request<T.Page<T.SessionInfo>>("GET", "/api/publish/log", { query: page(p) }),
     trusts: {
-      list: (p?: T.PageParams) => request<T.Page<T.Trust>>("GET", "/api/publish/trusts", { query: page(p) }),
+      /** The CI pipelines the caller manages, or the ones whose name starts with q. */
+      list: (p?: T.PageParams, q?: string) => request<T.Page<T.Trust>>("GET", "/api/publish/trusts", { query: { q, ...page(p) } }),
       /** How many CI pipelines the caller manages (a count of every one stops at 10,000: more). */
       count: () => request<T.Count>("GET", "/api/publish/trusts/count"),
       get: (id: number) => request<T.Trust>("GET", `/api/publish/trusts/${id}`),

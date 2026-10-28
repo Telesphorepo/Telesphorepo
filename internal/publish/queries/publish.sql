@@ -86,17 +86,18 @@ WHERE id = ?;
 SELECT id, name, issuer, audience, claims, jwks, created_by, created_at, disabled
 FROM publish_trusts WHERE id = ?;
 
--- Keyset page by name (pass "" for the first page).
+-- A keyset page by name of the policies whose name is in [lower, upper): the cursor and a name
+-- prefix in one range of the name index.
 -- name: ListTrusts :many
 SELECT id, name, issuer, audience, claims, jwks, created_by, created_at, disabled
-FROM publish_trusts WHERE name > sqlc.arg(after) ORDER BY name LIMIT sqlc.arg(limit);
+FROM publish_trusts WHERE name >= sqlc.arg(lower) AND name < sqlc.arg(upper) ORDER BY name LIMIT sqlc.arg(limit);
 
--- A keyset page by name of the policies whose repos all lie in a set of repos, at least one: the
--- policies that list a repo of the set, through publish_trust_repos_repo, kept when every repo they
--- list is in the set.
+-- A keyset page by name, in [lower, upper), of the policies whose repos all lie in a set of repos,
+-- at least one: the policies that list a repo of the set, through publish_trust_repos_repo, kept
+-- when every repo they list is in the set.
 -- name: ListTrustsInRepos :many
 SELECT id, name, issuer, audience, claims, jwks, created_by, created_at, disabled
-FROM publish_trusts WHERE name > sqlc.arg(after) AND id IN (
+FROM publish_trusts WHERE name >= sqlc.arg(lower) AND name < sqlc.arg(upper) AND id IN (
   SELECT tr.trust_id FROM publish_trust_repos tr WHERE tr.repo_id IN (sqlc.slice(repo_ids))
   GROUP BY tr.trust_id
   HAVING count(*) = (SELECT count(*) FROM publish_trust_repos y WHERE y.trust_id = tr.trust_id)

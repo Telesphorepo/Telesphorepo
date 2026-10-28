@@ -1033,7 +1033,7 @@ transaction.
 | `GET /api/auth/oidc/callback` | none | 400 for missing/mismatched/unknown/reused/expired state, state from before an issuer or client change, or missing `code`; 503 on discovery failure. Verifies the ID token (signature, issuer, audience, expiry, nonce). Success: upsert user, set its server permissions when `oidc.permission_claim` is set, session with `oidc.session_ttl`, 302 `/`. Failure: 302 `/#/login?error=` `username_conflict` \| `invalid_username` \| `account_disabled` \| `sso_failed`. For a sign-in that `device` started, it starts no session and checks the same token, then that the token's issuer and `sub` belong to the account that started it, and that `auth_time` is present and at most 5 minutes old. Success: 302 `/#/device?code=<code>&grant=<grant>`. Failure: 302 `/#/device?code=<code>&error=` `wrong_account` \| `no_auth_time` \| `stale_sign_in` (the provider ignored `prompt=login`) \| `account_disabled` \| `sso_failed` |
 | `GET /api/me` | password, read token, UI session (setup-only too) | The session view, the same shape as `session` of a finished sign-in: `{id, username, kind, email, disabled, created_at, permissions, permissions_managed, all_repos, repo_permissions, second_factor_required}`. User JSON elsewhere is `{id, username, permissions, permissions_managed, disabled, kind, email, created_at}`: `permissions` lists the server permissions, `kind` is `local`/`oidc`, `email` is `""` when unset. `repo_permissions: {repo: [perms]}` is always present (one query of the person's grants joined to `repos`): every repo where the person has a grant, `repo.download` included (`{}` for none, and for a holder of `repositories.all`, whose `all_repos` is true). `second_factor_required` is true only for a setup-only UI session. `permissions_managed` is true for an SSO account while `oidc.permission_claim` is set: single sign-on sets its server permissions at each sign-in (see **Single sign-on**) |
 | `GET /api/tokens` · `POST /api/tokens`, `DELETE /api/tokens/{id}` | any credential · UI session | **Read tokens.** The token is shown once. A token cannot mint tokens. POST is 403 for SSO users |
-| `GET/POST /api/users`, `GET/PATCH /api/users/{username}` | `people.manage` (a UI session may change its own password) | The user list is paginated. `GET /api/users/{username}` returns one account (User JSON), 404 when no account has the name. POST takes `{username, password, permissions}`; the caller gives only server permissions they hold (403). PATCH takes `{password}`; the caller changes the password of another person only when they hold every permission of that person (403) |
+| `GET/POST /api/users`, `GET/PATCH /api/users/{username}` | `people.manage` (a UI session may change its own password) | The user list is keyset by username; `?q=` keeps the usernames that start with it, one range of the username index with the cursor. `GET /api/users/{username}` returns one account (User JSON), 404 when no account has the name. POST takes `{username, password, permissions}`; the caller gives only server permissions they hold (403). PATCH takes `{password}`; the caller changes the password of another person only when they hold every permission of that person (403) |
 | `GET /api/administrators` | `people.manage` | `{usernames: [...]}`: the enabled people who hold every server permission, sorted. The UI keeps the only one from losing the role or being disabled |
 | `PUT /api/users/{username}/permissions` | `people.manage` | `{permissions: [...]}` (server permission IDs) replaces the server permissions and returns the User. 400 for an unknown ID, a repository permission or a broken need. The caller adds or removes only permissions they hold (403). 409 when no enabled person would keep `people.manage`, 409 when the change takes a server permission from the only enabled administrator (a server where nobody holds every server permission refuses nothing here), and 409 `single sign-on manages the permissions of this person` for an account whose permissions single sign-on manages. One `user.permissions` event with `{old, new}` |
 | `GET /api/people?q=&after=&limit=` | `people.manage`, or `repo.access` on a repo | `{items: [{username}], next}`: the enabled usernames that start with `q`, at most 20 per page. The UI draws the avatar from the username |
@@ -1051,7 +1051,7 @@ transaction.
 | `PATCH /api/repos` | `repo.settings` on each repo | `{names: [...], anonymous_read: bool}`. The one way to make repos public or private: one repo update of every repo in one transaction. One `repo.update` event per repo whose value changed. 200 `{changed: n}` |
 | `POST /api/repos/delete` | `repositories.all` | `{names: [...]}`. Checks that every repo exists (404) and that none has an operation (409 `You cannot delete <name> now. <message>`); then nothing is deleted. Then every repo gets its `delete` operation in one transaction (409 that names the repo when one got an operation meanwhile; then none starts), and each delete runs as a task of the core module (see **Repo operations**). 202 `{deleting: [{name, operation}]}` in the order of names, each with its running operation. `GET /api/repos/{name}` shows the progress in `operation` (`done` of `total` files) until it answers 404; a failed delete keeps a failed `delete` operation. One `repo.delete` event per repo, with the number of files |
 | `POST /api/repos/{name}/rename` | `repositories.all` | `{name}` renames the repo (`repos.Service.Rename`) and returns the repo; `{name}` in the path may be the repo's own name or a redirect of it. The old name becomes a redirect (see **Repository redirects**). 400 for a name that `NameRE` or the format refuses, 409 for the name of another repo or of a redirect of another repo (the message names the repo it redirects to). A redirect of the same repo may be taken back: it goes, and the name the repo had becomes the redirect. One `repo.rename` event with `detail.renamed_from` |
-| `GET /api/repos/{name}/redirects` · `DELETE /api/repos/{name}/redirects/{redirect}` | any repository permission · `repositories.all` | GET lists the redirects of the repo by name: `[{name, created_at, last_used_at\|null}]`; `last_used_at` includes the uses of the last minute that are still in memory. DELETE removes one: 204, 404 when the repo has no such redirect. The name is free again and answers as any unknown repo. One `repo.redirect.remove` event with `detail.redirect` |
+| `GET /api/repos/{name}/redirects` · `POST /api/repos/{name}/redirects` · `DELETE /api/repos/{name}/redirects/{redirect}` | any repository permission · `repositories.all` · `repositories.all` | GET lists the redirects of the repo by name: `[{name, created_at, last_used_at\|null}]`; `last_used_at` includes the uses of the last minute that are still in memory. POST `{name}` adds one: 201 with the redirect, 400 for a bad name, 409 when a repo or a redirect holds the name; one `repo.redirect.add` event with `detail.redirect`. DELETE removes one: 204, 404 when the repo has no such redirect. The name is free again and answers as any unknown repo. One `repo.redirect.remove` event with `detail.redirect` |
 | `POST /api/repos/{name}/operation/resume` · `DELETE /api/repos/{name}/operation` | `repositories.all` | Resume runs the failed operation of the repo again: 200 `{ok: true}` (a delete runs on as a task until the repo is gone). Clear ends it, and the repo keeps the files that are left: 204. 409 when the repo has no operation, when it has not failed, or when its type cannot resume or clear here (a Nexus mirror ends at the cut-over). Records `repo.delete.resume` or `repo.delete.clear` |
 | `GET /api/repos/{name}/grants` | `repo.access` | `[{username, perms: [...]}]` by username; `perms` are permission IDs in registry order |
 | `GET /api/repos/{name}/access?admins=1` | a repository permission that manages the repo (one with a second-factor need: `repo.delete`, `repo.settings`, `repo.access`, `ci.pipelines`) | The access report, built from the parts of `access.Engine.Decide`: `{repo, format, kind, people, download: {public, people, admins, guards, sentence, notes}, publish: {people, admins, ci, guards, blocked, sentence}}`. `people` are `{username, perms, via}` (`permission`; with `admins=1` the holders of `repositories.all` too, via `all_repos`). `guards` maps a guard name to `{restricted, summary, detail}`; the network guard's `detail` is `{any, lists: [{name, title}], cidrs: [{cidr, note}]}`. `blocked` is null, or `{code: "read_only_kind" \| "operation", message}`: a proxy or a group (it lists no publisher and no CI pipeline) or a locked repo. Each `sentence` says the answer in words, e.g. "2 people, only from 10.0.0.0/8." A blocked publish sentence is "nobody." followed by the message. `notes` are the sentences that modules add (`access.Engine.AddDownloadNote`): while edge delivery is on, "Downloads come from the edge." or "Downloads go to the server: read rules apply." |
@@ -1389,7 +1389,7 @@ Routes (`{items, next}` lists are keyset, `?after=&limit=`):
 | `GET /api/publish/sessions` | password, read token or UI session | The caller's own sessions |
 | `DELETE /api/publish/sessions/{id}` | the session's own token | 204. The token is the Basic password or a Bearer token. Another token, an ended session or none gets 401 |
 | `GET /api/publish/log` | `activity.read` | Every session, newest first |
-| `GET, POST /api/publish/trusts` · `GET, PATCH, DELETE /api/publish/trusts/{id}` | `ci.pipelines` on a repo | Trust policies (CI pipelines). A holder of `repositories.all` sees and changes every one. Anyone else sees and changes only the policies whose repos all hold `ci.pipelines` for them: the list leaves the others out, and a policy outside that scope answers 404. A new or changed `repos` list outside that scope answers 403. 403 when the caller holds `ci.pipelines` on no repo. A create, a change and a delete record `ci.pipeline.create`, `ci.pipeline.update` and `ci.pipeline.delete`. The list is keyset by name: one query of the policies that list a repo of the caller's scope and no repo outside it, never a walk of all policies |
+| `GET, POST /api/publish/trusts` · `GET, PATCH, DELETE /api/publish/trusts/{id}` | `ci.pipelines` on a repo | Trust policies (CI pipelines). A holder of `repositories.all` sees and changes every one. Anyone else sees and changes only the policies whose repos all hold `ci.pipelines` for them: the list leaves the others out, and a policy outside that scope answers 404. A new or changed `repos` list outside that scope answers 403. 403 when the caller holds `ci.pipelines` on no repo. A create, a change and a delete record `ci.pipeline.create`, `ci.pipeline.update` and `ci.pipeline.delete`. The list is keyset by name: one query of the policies that list a repo of the caller's scope and no repo outside it, never a walk of all policies. `?q=` keeps the names that start with it (case-sensitive), one range of the name index with the cursor |
 | `GET /api/publish/trusts/count` | `ci.pipelines` on a repo | `{count, more}`: the CI pipelines in the caller's scope of the list above. A holder of `repositories.all` gets a bounded count of every one, which stops at 10,000 (`more: true`); anyone else the pipelines whose every repo they hold `ci.pipelines` on, counted from the pipelines of those repos (`publish_trust_repos_repo`). The Settings overview shows it |
 
 Shapes:
@@ -1946,6 +1946,11 @@ follow one for downloads, but uploads, `npm publish`, `docker push` and apt do n
   name nobody uses, its name and its redirects become redirects of the other repo, the format's
   `OnRepoChange` and one `repo.rename` event (`detail.redirect_to`) run, and the caller's rows go in
   the same transaction. A Nexus merge retires its source this way before the source's delete.
+- **Add a redirect.** `POST /api/repos/{name}/redirects` `{name}` (`repositories.all`,
+  `repos.Service.AddRedirect`) makes another name answer for the repo without a rename, with one
+  `repo.redirect.add` event (`detail.redirect`), in one transaction: 201 with the redirect. The name
+  follows the rule of a repo name and the format's (400); the name of a repo or of a redirect,
+  of this repo or another, is refused (409). The edge objects of the name update as for a rename.
 - **One resolution.** `repos.Service.ByName` reads `repos` by its UNIQUE name first, then
   `repo_redirects` by its key, then the repo by id. Every request that names a repo goes through
   it: the repo step of every route policy (format routes, `/api/repos/{name}/...`), the mint routes
@@ -3080,9 +3085,11 @@ is unreachable.
 - **Repo list.** The client reads `/service/rest/v1/repositorySettings`, or
   `/service/rest/v1/repositories` when that is refused (then group members and the apt key pair
   are unknown). A repo is `supported` when the importer of a format takes its format and this server has its
-  kind: hosted for every format, proxy and group where `format.Spec.Kinds` lists them. A repo that Nexus marks `"online": false` is not supported, with the
-  reason "Offline in Nexus. Bring it online in Nexus to copy it." A sync fails a mapped repo that
-  went offline with the same words.
+  kind: hosted for every format, proxy and group where `format.Spec.Kinds` lists them. A repo that Nexus marks `"online": false` and that is not mapped is not supported, with the
+  reason "Offline in Nexus". A mapped repo that goes offline stays supported (`offline: true`) and
+  keeps its mapping: an offline repo is frozen, since Nexus takes no uploads to it, so every sync
+  (a final sync too) skips it with the log line "Offline in Nexus, so the sync skips it." and a
+  switch-over or a merge goes on with the files copied so far.
 - **What Nexus gives** (checked against `sonatype/nexus3:3.96.4` with an admin account).
   `repositorySettings` returns every repo with its settings in one call, so the server makes one
   call and no call per repo.
@@ -3131,7 +3138,8 @@ is unreachable.
   hosted part of the mapping that has not switched over into `nexus_sync_repos` (the final sync
   of one repo's switch-over: only the Nexus repos that copy into that repo); proxies and groups
   have no files to copy.
-  At the start the runner lists the Nexus repos once and fails each mapped repo that is offline.
+  At the start the runner lists the Nexus repos once and marks each mapped repo that is offline
+  done without copying.
   The repos sync one after the other. For each other repo it pages
   `GET /service/rest/v1/assets?repository=X` from the saved continuation token and offers each
   asset to the importer of the target format. Nexus sets the page size and takes no page size
@@ -3289,8 +3297,9 @@ is unreachable.
   next check; a syncing source shows its progress line instead. The source page has, top to bottom: the header (status badge and line, Sync now
   or Cancel the sync, Switch over everything, Delete), Repositories to copy (one pick table of every Nexus repo
   in the order a save sets them up: repos and proxies, then groups, then the repos this server
-  cannot copy, muted with their reason; a filter above 10 repos; Kind, State (Copying, Switched
-  over, Copied for a proxy or a group, New repository, New proxy, New group, Stops copying,
+  cannot copy, muted with their reason; a filter above 10 repos; Kind, State (Copying, Offline
+  in Nexus for a copying repo that syncs skip, Switched over whether or not Nexus has it
+  offline, Copied for a proxy or a group, New repository, New proxy, New group, Stops copying,
   Members change, or Not copied), Name here (with its rehearsal repos under the name), Who
   can download, and the choice question of the target format (Debian: Signing key); the row
   actions of a copied repository: Switch over and Rehearse publishing, and of each rehearsal
@@ -4476,7 +4485,7 @@ module (`audit.System`), the `telesphorepo-server user` commands as `cli` (`audi
 |---|---|---|
 | core | `people` | `signin.success` (`detail.method`), `signin.failed` (the actor is the tried username), `token.create`, `token.delete`, `user.create` (`detail.permissions`), `user.update` (password changed, disabled, second factors reset), `user.permissions` (`detail.old` and `detail.new`: the server permission sets; the actor kind is `sso` when single sign-on set them at a sign-in) |
 | core | `repo` | `file.upload`, `file.delete`, `grant.set` (`detail.old` and `detail.new`: the repository permission sets) |
-| core | `repositories` | `repo.create`, `repo.update`, `repo.delete`, `repo.delete.resume`, `repo.delete.clear`, `repo.rename` (`detail.renamed_from`), `repo.redirect.remove` (`detail.redirect`) |
+| core | `repositories` | `repo.create`, `repo.update`, `repo.delete`, `repo.delete.resume`, `repo.delete.clear`, `repo.rename` (`detail.renamed_from`), `repo.redirect.add` (`detail.redirect`), `repo.redirect.remove` (`detail.redirect`) |
 | core | `settings` | `settings.update` (keys only, never values; `via: "first sign-in"` when the sign-in set `base_url`) |
 | edge | `edge` | `edge.deploy` (`target` `telesphorepo-edge`; `detail.ok`, `detail.trigger` `manual` or `auto`, `detail.version`, `detail.changed`: what the deploy changed in Cloudflare; on a failure `detail.step` and `detail.error`). Deploy now has the person as actor, the job `edge.deploy` the module |
 | storage | `storage` | `storage.move.start` (`detail.target` without secrets), `storage.move.cancel`, `storage.move.done`, `storage.move.failed` (`detail.error`), `storage.move.retry` (`detail.changed`: the keys of the body; `detail.move`: the new move), `storage.move.dismiss` |
@@ -4648,7 +4657,7 @@ page are in `web/src/README.md`.
   under `/api`. Plain download links of format routes carry no such header and keep the
   challenge.
 - **Home** (`/#/`, anyone). A short page centered in the container: one line of welcome
-  ("Welcome to <server name>") and a large search field (the top bar's search: files by path, with the `/` shortcut; the top bar has no search on Home), then
+  ("Welcome to <server name>") and a large search field (the top bar's search: files by path, with the Ctrl+K shortcut, ⌘K on a Mac; the top bar has no search on Home), then
   the doors, when at least two would show: large cards side by side (stacked on a phone), each a
   bare icon, a title, one sentence and the whole card a link. **Publish** opens `/#/publish`, for a
   signed-in person who holds `repo.publish` somewhere (from the grants of `GET /api/me`). **Browse** opens `/#/browse`. **Administer** opens
@@ -4944,7 +4953,8 @@ page are in `web/src/README.md`.
 - **People** (`people.manage`). A list shows each account with its avatar, its name and its role as
   a badge: "Administrator" for a person with every server permission, else the phrase of the
   server permissions held, or none. Under the name: the email, the sign-in method (only when
-  someone uses single sign-on) and when the account was added. A row opens the
+  someone uses single sign-on) and when the account was added. A search field over the list keeps
+  the people whose name starts with what is typed (`GET /api/users?q=`). A row opens the
   person's page (`/#/settings/people/{name}`): an identity card (avatar, how the person signs in,
   the email, a Disabled badge; the role shows only under Server permissions) with Reset password (only for a person whose permissions the caller
   all holds) and Disable account or Enable account; then the server permissions as a role:
@@ -5564,9 +5574,9 @@ a maven2 group of the two hosted repos and the proxy. On each storage backend th
   `<target>-all`; a file published to the moving repo reads through the group), merges it with a
   skipped file and a conflict taken from the moving repo, keeping the target's name (the old name
   redirects, a publish through it lands in the target, the group reads the target); then moves a
-  second raw repo, whose merge fails while its Nexus repo is offline (the final sync fails),
-  resumes once the repo is online again and keeps the moving repo's name (the target's old name
-  redirects);
+  second raw repo, whose merge fails while Nexus lacks its repo (the final sync fails), resumes
+  once the repo is back but offline (the final sync skips it) and keeps the moving repo's name
+  (the target's old name redirects);
 - in the subtests `merge-docker` and `merge-npm`, merges a moving docker repo (skopeo pushes v1, a
   tag that the copy holds with another digest, and v2; the plan lists the tag as the one conflict,
   taken; crane pulls both tags through both names and the copy's old image by digest) and a moving

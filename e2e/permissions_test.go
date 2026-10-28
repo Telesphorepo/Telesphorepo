@@ -171,7 +171,8 @@ func TestPipelinesPermission(t *testing.T) {
 
 	// The admin's pipelines: one in scope, one outside it.
 	var inScope, outside struct {
-		ID int64 `json:"id"`
+		ID   int64  `json:"id"`
+		Name string `json:"name"`
 	}
 	s.MustAPI(t, http.MethodPost, "/api/publish/trusts", policy(mine), s.Admin(), &inScope)
 	s.MustAPI(t, http.MethodPost, "/api/publish/trusts", policy(mine, other), s.Admin(), &outside)
@@ -192,6 +193,25 @@ func TestPipelinesPermission(t *testing.T) {
 	s.MustAPI(t, http.MethodGet, "/api/publish/trusts?limit=200", nil, s.Admin(), &list)
 	if len(list.Items) != 3 {
 		t.Fatalf("GET /api/publish/trusts as the admin: %d pipelines, want 3", len(list.Items))
+	}
+	// ?q= keeps the names that start with it, in the caller's scope only.
+	for _, c := range []struct {
+		who  Auth
+		q    string
+		want []int64
+	}{
+		{sess, inScope.Name, []int64{inScope.ID}},
+		{sess, outside.Name, nil},
+		{s.Admin(), outside.Name, []int64{outside.ID}},
+	} {
+		s.MustAPI(t, http.MethodGet, "/api/publish/trusts?q="+c.q, nil, c.who, &list)
+		var got []int64
+		for _, it := range list.Items {
+			got = append(got, it.ID)
+		}
+		if !slices.Equal(got, c.want) {
+			t.Fatalf("GET /api/publish/trusts?q=%s: ids %v, want %v", c.q, got, c.want)
+		}
 	}
 
 	// A pipeline outside the scope answers 404 to every route.
@@ -234,7 +254,7 @@ func TestPipelinesPermission(t *testing.T) {
 }
 
 // TestPeoplePicker: GET /api/people lists enabled usernames by prefix, in keyset pages, to a person
-// with people or with access on a repository.
+// with people or with access on a repository; GET /api/users takes the same prefix.
 func TestPeoplePicker(t *testing.T) {
 	t.Parallel()
 	s := StartServer(t, ServerOpts{})
@@ -298,6 +318,26 @@ func TestPeoplePicker(t *testing.T) {
 	}
 	if !slices.Equal(all, []string{anna, anton, bert}) {
 		t.Fatalf("pages of /api/people?q=%s: %v, want [%s %s %s]", base, all, anna, anton, bert)
+	}
+
+	// The People list takes the same prefix, a disabled account included, in keyset pages.
+	var users []string
+	after = ""
+	for range 10 {
+		var p page
+		path := "/api/users?limit=2&q=" + base + "-an"
+		if after != "" {
+			path += "&after=" + after
+		}
+		s.MustAPI(t, http.MethodGet, path, nil, s.Admin(), &p)
+		users = append(users, names(p)...)
+		if p.Next == nil {
+			break
+		}
+		after = *p.Next
+	}
+	if !slices.Equal(users, []string{gone, anna, anton}) {
+		t.Fatalf("pages of /api/users?q=%s-an: %v, want [%s %s %s]", base, users, gone, anna, anton)
 	}
 
 	st, b := s.API(t, http.MethodGet, "/api/people?q="+base, nil, s.SignIn(t, plain, "plain-password-1"))

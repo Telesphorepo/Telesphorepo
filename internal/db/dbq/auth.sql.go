@@ -839,11 +839,12 @@ const listUsers = `-- name: ListUsers :many
 SELECT id, username, disabled, kind, email, created_at,
   CAST(coalesce((SELECT group_concat(perm) FROM user_permissions up WHERE up.user_id = users.id), '') AS TEXT) AS perms
 FROM users
-WHERE username > ?1 ORDER BY username LIMIT ?2
+WHERE username >= ?1 AND username < ?2 ORDER BY username LIMIT ?3
 `
 
 type ListUsersParams struct {
-	After string
+	Lower string
+	Upper string
 	Limit int64
 }
 
@@ -857,8 +858,10 @@ type ListUsersRow struct {
 	Perms     string
 }
 
+// A keyset page of the accounts whose username is in [lower, upper): the cursor and a name prefix
+// in one range of the username index.
 func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]ListUsersRow, error) {
-	rows, err := q.db.QueryContext(ctx, listUsers, arg.After, arg.Limit)
+	rows, err := q.db.QueryContext(ctx, listUsers, arg.Lower, arg.Upper, arg.Limit)
 	if err != nil {
 		return nil, err
 	}

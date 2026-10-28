@@ -7,17 +7,24 @@
   included, in the reader's time zone); the active filters show as chips. The events are grouped by day, each a list
   of who did what, the facts in words, and when; this is the only page that shows IP addresses.
   Publish tokens (?view=publishing) lists every publish token that a device, a CI job or a person
-  got (the publish log).
+  got (the publish log), newest first: an icon of where it came from (a CI pipeline, a device, the
+  person), who in words, the repository and, for a CI job, its run in short ("acme/app · branch
+  main", the whole token subject in the tooltip), and at the end its state ("Active until 14:05",
+  "Expired 2 hours ago", "Closed 5 minutes ago") over when it was issued.
 -->
 <script lang="ts">
   import { untrack, type Component } from "svelte";
   import type { PageProps } from "$lib/router.svelte";
   import { href, navigate, router } from "$lib/router.svelte";
-  import { api, type AuditEvent, type SessionInfo } from "$lib/api";
+  import { api, type AuditEvent } from "$lib/api";
   import { Keyset, RepoFormats, Resource } from "$lib/load.svelte";
+  import { formatDateTime } from "$lib/format";
   import { subsystems } from "$lib/permissions";
   import { navPlace, pages } from "../../modules";
   import { detailFacts } from "./activity/details";
+  import { subjectParts } from "./ci/presets";
+  import WorkflowIcon from "@lucide/svelte/icons/workflow";
+  import LaptopIcon from "@lucide/svelte/icons/laptop";
   import FunnelXIcon from "@lucide/svelte/icons/funnel-x";
   import * as Select from "$lib/components/ui/select";
   import { Button } from "$lib/components/ui/button";
@@ -25,9 +32,7 @@
   import TabNav from "$lib/components/TabNav.svelte";
   import Section from "$lib/components/Section.svelte";
   import Toolbar from "$lib/components/Toolbar.svelte";
-  import DataTable from "$lib/components/DataTable.svelte";
   import ItemList from "$lib/components/ItemList.svelte";
-  import Cell from "$lib/components/Cell.svelte";
   import CompactEmpty from "$lib/components/CompactEmpty.svelte";
   import StatusBadge from "$lib/components/StatusBadge.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
@@ -91,7 +96,7 @@
     api.audit({ action: action || undefined, repo: repo || undefined, actor: actor || undefined, ...bounds(when, from, to), ...p }),
   );
   const sessions = new Keyset((p) => api.publish.log(p));
-  $effect(() => repoFormats.want([repo, ...events.items.map((e) => e.repo ?? "")]));
+  $effect(() => repoFormats.want([repo, ...events.items.map((e) => e.repo ?? ""), ...sessions.items.map((s) => s.repo)]));
 
   // A filter change loads the first page again; the first run is the page's own load.
   let first = true;
@@ -167,11 +172,10 @@
     return out;
   });
 
-  function who(s: SessionInfo): string {
-    if (s.via === "oidc") return `${s.trust_name ?? "a deleted pipeline"}: ${s.subject}`;
-    if (s.via === "device") return `${s.username ?? "a deleted account"} on ${s.device_name ?? "a deleted device"}`;
-    return s.username ?? "a deleted account";
-  }
+  // The end of an open token: the time of day, with the date when it is not today.
+  const timeOnly = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" });
+  const dayAndTime = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const until = (iso: string) => (dayKey(iso) === dayKey(new Date().toISOString()) ? timeOnly : dayAndTime).format(new Date(iso));
 </script>
 
 <PageHeader title="Activity" />
@@ -315,28 +319,38 @@
     <SourceMore source={events} />
   {/if}
 {:else}
-  <DataTable
-    source={sessions}
-    caption="Publish tokens"
-    key={(s) => s.id}
-    columns={[
-      { label: "Who", grow: true },
-      { label: "Repository" },
-      { label: "State" },
-      { label: "Started", align: "right" },
-    ]}
-  >
-    {#snippet row(s)}
-      <Cell grow strong text={who(s)} />
-      <Cell text={s.repo} />
-      <Cell>
-        {#if s.state === "open"}<StatusBadge tone="success">Open</StatusBadge>{:else}<StatusBadge>{s.state.charAt(0).toUpperCase() + s.state.slice(1)}</StatusBadge>{/if}
-      </Cell>
-      <Cell num muted><RelativeTime at={s.created_at} /></Cell>
+  <ItemList source={sessions} caption="Publish tokens" key={(s) => s.id}>
+    {#snippet leading(s)}
+      {#if s.via === "oidc"}<span class="flex size-8 items-center justify-center"><WorkflowIcon class="size-5" /></span>
+      {:else if s.via === "device"}<span class="flex size-8 items-center justify-center"><LaptopIcon class="size-5" /></span>
+      {:else if s.username}<UserAvatar name={s.username} size="md" />
+      {:else}<span class="flex size-8 items-center justify-center"><UploadIcon class="size-5" /></span>{/if}
+    {/snippet}
+    {#snippet title(s)}
+      {#if s.via === "oidc"}{s.trust_name ?? "A deleted pipeline"}<span class="font-normal text-muted-foreground">{" (CI pipeline)"}</span>
+      {:else if s.via === "device"}{s.username ?? "A deleted account"}<span class="font-normal text-muted-foreground">{" on "}</span>{s.device_name ?? "a deleted device"}
+      {:else}{s.username ?? "A deleted account"}{/if}
+    {/snippet}
+    {#snippet meta(s)}
+      <span class="inline-flex items-baseline gap-1"
+        >{#if formatOf(s.repo)}<FormatIcon format={formatOf(s.repo)} class="size-3.5 self-center" />{/if}{s.repo}</span
+      >{#if s.via === "oidc" && s.subject}<span aria-hidden="true">{" · "}</span><span title={s.subject}>{#each subjectParts(s.subject) as part, i (i)}{#if i}{" · "}{/if}{part}{/each}</span>{/if}
+    {/snippet}
+    {#snippet trailing(s)}
+      <div class="flex flex-col items-end gap-0.5 text-right">
+        {#if s.state === "open"}
+          <StatusBadge tone="success" title={formatDateTime(s.expires_at)}>Active until {until(s.expires_at)}</StatusBadge>
+        {:else if s.state === "expired"}
+          <StatusBadge>Expired&nbsp;<RelativeTime at={s.expires_at} /></StatusBadge>
+        {:else}
+          <StatusBadge>Closed&nbsp;<RelativeTime at={s.closed_at ?? s.expires_at} /></StatusBadge>
+        {/if}
+        <span class="text-meta text-muted-foreground tabular-nums">Issued <RelativeTime at={s.created_at} /></span>
+      </div>
     {/snippet}
     {#snippet empty()}
       <CompactEmpty icon={UploadIcon} text="None yet." />
     {/snippet}
-  </DataTable>
+  </ItemList>
 {/if}
 </Section>
