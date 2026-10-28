@@ -42,6 +42,7 @@ const (
 	RepoDeleteResume = "repo.delete.resume" // a failed repo delete started again
 	RepoDeleteClear  = "repo.delete.clear"  // a failed repo delete ended; the repo stays
 	RepoRename       = "repo.rename"        // detail renamed_from; the old name is a redirect
+	RedirectAdd      = "repo.redirect.add"  // detail redirect
 	RedirectRemove   = "repo.redirect.remove"
 	SettingsUpdate   = "settings.update"
 )

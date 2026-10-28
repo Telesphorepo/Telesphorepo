@@ -1,7 +1,7 @@
 <!--
   Repository settings, Overview. Every kind has its description, saved from the save bar, and for
   a holder of All repositories its name: a rename asks first and says that the old name keeps
-  working as a redirect. The old names show in their own card (RedirectsCard).
+  working as a redirect. The redirects show in their own card (RedirectsCard).
   A hosted repository: what it holds (files, size, last publish and the format's own facts) and the
   groups it is in.
   A proxy: its remote (address, last answer, "Test the remote"), how a build uses it, its cache

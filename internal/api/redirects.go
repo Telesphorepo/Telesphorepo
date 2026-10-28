@@ -14,6 +14,7 @@ import (
 func (a *API) registerRedirects(mux *route.Router) {
 	mux.Handle("POST /api/repos/{name}/rename", route.UIPerm(perm.RepositoriesAll), a.renameRepo)
 	mux.Handle("GET /api/repos/{name}/redirects", route.UIRepo(access.Meta), a.listRedirects)
+	mux.Handle("POST /api/repos/{name}/redirects", route.UIPerm(perm.RepositoriesAll), a.addRedirect)
 	mux.Handle("DELETE /api/repos/{name}/redirects/{redirect}", route.UIPerm(perm.RepositoriesAll), a.removeRedirect)
 }
 
@@ -62,6 +63,23 @@ func (a *API) listRedirects(w http.ResponseWriter, r *http.Request, c *route.Cal
 		}
 	}
 	httpx.WriteJSON(w, http.StatusOK, out)
+}
+
+// addRedirect makes another name answer for repo {name}: {name} -> 201 with the redirect. 400 for
+// a bad name, 409 when a repo or a redirect holds it.
+func (a *API) addRedirect(w http.ResponseWriter, r *http.Request, _ *route.Call) {
+	var in struct {
+		Name string `json:"name"`
+	}
+	if !a.kit.Decode(w, r, &in) {
+		return
+	}
+	rd, err := a.repos.AddRedirect(r.Context(), r.PathValue("name"), in.Name)
+	if err != nil {
+		route.Fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusCreated, redirectJSON{Name: rd.Name, CreatedAt: rd.CreatedAt.UTC()})
 }
 
 // removeRedirect deletes the redirect {redirect} of repo {name} -> 204. The name is free again;

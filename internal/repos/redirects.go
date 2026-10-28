@@ -14,8 +14,9 @@ import (
 // A redirect is a repository name that answers for another repo: every lookup by name
 // (ByName) finds the repo of the name first, then the repo that a redirect of the name points
 // at, both by index. A request through a redirect is served by its repo exactly as if it named
-// the repo. A rename leaves the old name as a redirect. A redirect holds the id of its repo, so it
-// follows the repo through later renames and never points at another redirect. A name is a repo
+// the repo. A rename leaves the old name as a redirect; AddRedirect adds one without a rename. A
+// redirect holds the id of its repo, so it follows the repo through later renames and never
+// points at another redirect. A name is a repo
 // or a redirect, never both: Create and Rename refuse the name of a redirect of another repo.
 
 // Redirect is a name that answers for the repo RepoID.
@@ -276,6 +277,60 @@ func (s *Service) Retire(ctx context.Context, fromID, intoID int64, tomb string,
 	}
 	s.notify(ctx, Notice{Changed: []*Repo{next}, Redirects: notice})
 	return next, nil
+}
+
+// takenError refuses a new redirect whose name a repo or a redirect of the same repo holds. It
+// matches ErrExists and answers 409.
+type takenError struct{ msg string }
+
+func (e *takenError) Error() string        { return e.msg }
+func (e *takenError) Is(target error) bool { return target == ErrExists }
+func (e *takenError) HTTPStatus() int      { return http.StatusConflict }
+
+// AddRedirect makes redirect a name that answers for the repo of name (its own name or a redirect
+// of it), with one repo.redirect.add event. The name follows the rule of a repo name and the
+// format's; the name of a repo or of a redirect is refused (ErrExists, *RedirectedError).
+func (s *Service) AddRedirect(ctx context.Context, name, redirect string) (Redirect, error) {
+	if !NameRE.MatchString(redirect) {
+		return Redirect{}, invalid("a name has 1 to 64 lower-case letters, digits, '.', '_' or '-', and starts with a letter or a digit")
+	}
+	var out Redirect
+	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
+		q := dbq.New(tx)
+		repo, err := byName(ctx, q, name)
+		if err != nil {
+			return err
+		}
+		if _, err := s.normalizeConfig(repo.Format, redirect, repo.Config); err != nil {
+			return err
+		}
+		if _, err := byOwnName(ctx, q, redirect); err == nil {
+			return &takenError{redirect + " is a repository"}
+		} else if !errors.Is(err, ErrNotFound) {
+			return err
+		}
+		if rd, err := q.GetRepoRedirect(ctx, redirect); err == nil && rd.RepoID == repo.ID {
+			return &takenError{redirect + " is already a redirect to " + repo.Name}
+		} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if err := checkNotRedirect(ctx, q, redirect, repo.ID); err != nil {
+			return err
+		}
+		now := time.Now().Unix()
+		if err := q.InsertRepoRedirect(ctx, dbq.InsertRepoRedirectParams{Name: redirect, RepoID: repo.ID, CreatedAt: now}); isUnique(err) {
+			return ErrExists
+		} else if err != nil {
+			return err
+		}
+		out = redirectOf(redirect, repo.ID, now, 0)
+		return s.record(ctx, tx, audit.RedirectAdd, repo, map[string]any{"redirect": redirect})
+	})
+	if err != nil {
+		return Redirect{}, err
+	}
+	s.notify(ctx, Notice{Redirects: []string{redirect}})
+	return out, nil
 }
 
 // RemoveRedirect deletes the redirect redirect of the repo of name, with one repo.redirect.remove

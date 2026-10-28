@@ -42,7 +42,8 @@ func redirectsOf(t *testing.T, s *Server, repo string) []redirectJSON {
 // old name with the real client (mvn deploy, npm publish, docker push), minting the publish token
 // through the old name too: every file lands in the renamed repository, and Activity records the
 // old name. A redirect's name is reserved, a repository takes its own old name back, and after
-// Remove the redirect the old name answers 404 and a new repository can take it.
+// Remove the redirect the old name answers 404 and a new repository can take it. A redirect added
+// without a rename serves downloads at once, and the name of a repo or a redirect is refused.
 func TestRepoRedirects(t *testing.T) {
 	t.Parallel()
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
@@ -124,6 +125,31 @@ func TestRepoRedirects(t *testing.T) {
 			if resp := mavenHead(t, s, "/maven/"+old+"/"+jar, s.AdminBasic()); resp.StatusCode != http.StatusNotFound {
 				t.Fatalf("HEAD the jar in the new repository of the old name: status %d, want 404", resp.StatusCode)
 			}
+
+			// Add a redirect without a rename: the new name serves the repository at once.
+			extra := RandName("mvn-extra")
+			var added redirectJSON
+			s.MustAPI(t, http.MethodPost, "/api/repos/"+renamed+"/redirects", map[string]any{"name": extra}, s.Admin(), &added)
+			if added.Name != extra || added.CreatedAt == "" || added.LastUsedAt != nil {
+				t.Fatalf("add the redirect %s: the answer is %+v", extra, added)
+			}
+			if resp := mavenHead(t, s, "/maven/"+extra+"/"+jar, Basic{writer, pass}); resp.StatusCode != http.StatusOK {
+				t.Fatalf("HEAD the jar through the added redirect: status %d", resp.StatusCode)
+			}
+			if rds := redirectsOf(t, s, renamed); len(rds) != 1 || rds[0].Name != extra {
+				t.Fatalf("redirects after the add: %+v, want %s", rds, extra)
+			}
+			if evs := auditAll(t, s, "action=repo.redirect.add&repo="+renamed); len(evs) != 1 || evs[0].Detail["redirect"] != extra {
+				t.Fatalf("repo.redirect.add events of %s: %+v, want one with redirect %s", renamed, evs, extra)
+			}
+			st, b = s.API(t, http.MethodPost, "/api/repos/"+renamed+"/redirects", map[string]any{"name": extra}, s.Admin())
+			wantAPIStatus(t, "add the same redirect again", st, b, http.StatusConflict)
+			st, b = s.API(t, http.MethodPost, "/api/repos/"+other+"/redirects", map[string]any{"name": extra}, s.Admin())
+			wantAPIStatus(t, "add a redirect of another repository", st, b, http.StatusConflict)
+			st, b = s.API(t, http.MethodPost, "/api/repos/"+renamed+"/redirects", map[string]any{"name": old}, s.Admin())
+			wantAPIStatus(t, "add a redirect with the name of a repository", st, b, http.StatusConflict)
+			st, b = s.API(t, http.MethodPost, "/api/repos/"+renamed+"/redirects", map[string]any{"name": "Bad Name"}, s.Admin())
+			wantAPIStatus(t, "add a redirect with a bad name", st, b, http.StatusBadRequest)
 		})
 
 		t.Run("npm", func(t *testing.T) {

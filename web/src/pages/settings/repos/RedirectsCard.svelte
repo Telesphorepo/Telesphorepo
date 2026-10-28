@@ -1,8 +1,8 @@
 <!--
-  The Overview card of a repository with old names (redirects): every request to an old name
-  reaches this repository, publishes included. Each row says when a request last used the name;
-  Remove (All repositories) asks first, names what stops working and frees the name. The card
-  shows only while the repository has redirects.
+  The Overview card of a repository's redirects: other names that answer for it, publishes
+  included. A rename leaves the old name here; Add redirect (All repositories) adds one directly in
+  a short form. Each row says when a request last used the name; Remove (All repositories) asks
+  first, names what stops working and frees the name.
 -->
 <script lang="ts">
   import { toast } from "svelte-sonner";
@@ -11,15 +11,21 @@
   import { auth } from "$lib/auth.svelte";
   import { formatRelative } from "$lib/format";
   import { Button } from "$lib/components/ui/button";
+  import { Input } from "$lib/components/ui/input";
   import Section from "$lib/components/Section.svelte";
   import ItemList from "$lib/components/ItemList.svelte";
+  import CompactEmpty from "$lib/components/CompactEmpty.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
+  import ShortFormDialog from "$lib/components/ShortFormDialog.svelte";
+  import FormField from "$lib/components/FormField.svelte";
   import SignpostIcon from "@lucide/svelte/icons/signpost";
+  import PlusIcon from "@lucide/svelte/icons/plus";
 
   let { repo }: { repo: Repo } = $props();
 
   /* svelte-ignore state_referenced_locally */
   const redirects = new Resource(() => api.repos.redirects(repo.name));
+  const canEdit = $derived(auth.can("repositories.all"));
 
   const DAY = 86_400_000;
   // "Used 3 minutes ago" for a name in use; "Not used for 40 days" after a week without a request.
@@ -28,6 +34,18 @@
     const days = Math.floor((now - Date.parse(since)) / DAY);
     if (days >= 7) return `Not used for ${days.toLocaleString()} days`;
     return rd.last_used_at ? `Used ${formatRelative(rd.last_used_at, now)}` : "Not used yet";
+  }
+
+  let addOpen = $state(false);
+  let newName = $state("");
+  function startAdd() {
+    newName = "";
+    addOpen = true;
+  }
+  async function add() {
+    const rd = await api.repos.addRedirect(repo.name, newName.trim());
+    toast.success(`${rd.name} now answers for ${repo.name}`);
+    await redirects.reload();
   }
 
   let removing = $state<RepoRedirect | null>(null);
@@ -50,28 +68,51 @@
   }
 </script>
 
-{#if redirects.data?.length || redirects.error}
-  <Section title="Redirects" description="Old names of {repo.name}. Every request to one of them reaches this repository.">
-    <ItemList source={listOf(redirects)} caption="Redirects to {repo.name}" key={(rd) => rd.name}>
-      {#snippet leading()}<SignpostIcon class="size-5" />{/snippet}
-      {#snippet title(rd)}{rd.name}{/snippet}
-      {#snippet meta(rd)}{used(rd)} · redirect since {formatRelative(rd.created_at)}{/snippet}
-      {#snippet trailing(rd)}
-        {#if auth.can("repositories.all")}
-          <Button
-            variant="ghost"
-            size="sm"
-            class="hover:bg-destructive/10 hover:text-destructive"
-            onclick={() => {
-              removing = rd;
-              confirmOpen = true;
-            }}>Remove</Button
-          >
-        {/if}
-      {/snippet}
-    </ItemList>
-  </Section>
-{/if}
+<Section
+  title="Redirects"
+  description="Other names of {repo.name}. Builds, downloads and publishes through one of them reach this repository."
+>
+  {#snippet actions()}
+    {#if canEdit && redirects.data?.length}
+      <Button variant="outline" size="sm" onclick={startAdd}><PlusIcon />Add redirect</Button>
+    {/if}
+  {/snippet}
+  <ItemList source={listOf(redirects)} caption="Redirects to {repo.name}" key={(rd) => rd.name}>
+    {#snippet leading()}<SignpostIcon class="size-5" />{/snippet}
+    {#snippet title(rd)}{rd.name}{/snippet}
+    {#snippet meta(rd)}{used(rd)} · redirect since {formatRelative(rd.created_at)}{/snippet}
+    {#snippet trailing(rd)}
+      {#if canEdit}
+        <Button
+          variant="ghost"
+          size="sm"
+          class="hover:bg-destructive/10 hover:text-destructive"
+          onclick={() => {
+            removing = rd;
+            confirmOpen = true;
+          }}>Remove</Button
+        >
+      {/if}
+    {/snippet}
+    {#snippet empty()}
+      <CompactEmpty icon={SignpostIcon} text="None yet. A rename leaves the old name here.">
+        {#if canEdit}<Button size="sm" variant="outline" onclick={startAdd}><PlusIcon />Add redirect</Button>{/if}
+      </CompactEmpty>
+    {/snippet}
+  </ItemList>
+</Section>
+
+<ShortFormDialog
+  bind:open={addOpen}
+  title="Add a redirect to {repo.name}"
+  submitLabel="Add redirect"
+  canSubmit={!!newName.trim()}
+  onSubmit={add}
+>
+  <FormField label="Name" for="redirect-name" hint="Enter a name that no repository or redirect holds.">
+    <Input id="redirect-name" bind:value={newName} autocomplete="off" />
+  </FormField>
+</ShortFormDialog>
 
 <ConfirmDialog
   bind:open={confirmOpen}

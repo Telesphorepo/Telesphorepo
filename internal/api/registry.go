@@ -53,6 +53,7 @@ func register(x *module.Extender) {
 		audit.ActionDef{ID: audit.RepoDeleteResume, Label: "Repository delete resumed", Subsystem: "repositories"},
 		audit.ActionDef{ID: audit.RepoDeleteClear, Label: "Repository delete cleared", Subsystem: "repositories"},
 		audit.ActionDef{ID: audit.RepoRename, Label: "Repository renamed", Subsystem: "repositories"},
+		audit.ActionDef{ID: audit.RedirectAdd, Label: "Repository redirect added", Subsystem: "repositories"},
 		audit.ActionDef{ID: audit.RedirectRemove, Label: "Repository redirect removed", Subsystem: "repositories"},
 		audit.ActionDef{ID: audit.SettingsUpdate, Label: "Settings changed", Subsystem: "settings"},
 	)
