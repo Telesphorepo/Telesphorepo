@@ -232,10 +232,12 @@
 
   /** The state of a row after a save, or null for a row that is not copied. */
   function stateOf(r: NexusSourceRepo): { word: string; tone: Tone; title: string } | null {
+    if (r.target && r.switch_over) return { word: "Switched over", tone: "success", title: `Uploads go to ${r.target} on this server.` };
     if (r.target && !(r.supported && picked.has(r.name))) return { word: "Stops copying", tone: "warning", title: `Saving stops copying it. ${r.target} keeps its files.` };
     if (r.target && isGroup(r) && !same(groupMembers(r), r.target_members))
       return { word: "Members change", tone: "warning", title: `Saving sets the members of ${r.target}.` };
-    if (r.target && r.switch_over) return { word: "Switched over", tone: "success", title: `Uploads go to ${r.target} on this server.` };
+    if (r.target && copiesFiles(r) && r.offline)
+      return { word: "Offline in Nexus", tone: "neutral", title: `Syncs skip it while Nexus has it offline. Switch it over to take uploads in ${r.target}.` };
     if (r.target && copiesFiles(r)) return { word: "Copying", tone: "info", title: `Copies into ${r.target} until it switches over` };
     if (r.target) return { word: "Copied", tone: "success", title: `Copies into ${r.target}` };
     if (!r.supported || !picked.has(r.name)) return null;
@@ -427,6 +429,8 @@
   }
   /** The Nexus repositories that copy into the same repository here: a switch-over takes them together. */
   const sharing = (r: NexusSourceRepo) => all.filter((x) => x.target === r.target && copiesFiles(x) && !x.switch_over).map((x) => x.name);
+  /** The repositories that still copy but that Nexus has offline: syncs skip them. */
+  const offlineCopying = $derived(all.filter((r) => copiesFiles(r) && !r.switch_over && r.offline).map((r) => r.name));
 
   // A merge deletes and renames a repository, so it needs All repositories too.
   const canMerge = $derived(auth.can("nexus.manage") && auth.allRepos());
@@ -506,13 +510,16 @@
       case "switch": {
         const names = sharing(a.r);
         const last = d.copying <= names.length;
+        const offline = names.filter((n) => byName.get(n)?.offline);
+        const online = names.filter((n) => !offline.includes(n));
         return {
           title: `Switch over ${t}?`,
           label: "Run the final sync and switch over",
           destructive: true,
           changes: [
             `Make sure every build that publishes to ${t} publishes to this server before you continue`,
-            `Runs a final sync of ${someNames(names)} into ${t}`,
+            ...(online.length ? [`Runs a final sync of ${someNames(online)} into ${t}`] : []),
+            ...(offline.length ? [`Copies nothing more from ${someNames(offline)}: Nexus has it offline, so files added there after the last sync stay there`] : []),
             `Allows uploads to ${t} on this server`,
             `Stops copying ${t} from Nexus, for good`,
             "Keeps files here that were deleted in Nexus",
@@ -967,6 +974,7 @@
       "Make sure every build uses this server before you continue",
       `Runs a final sync of the ${count(d.copying, "repository that still copies", "repositories that still copy")}`,
       "Allows uploads to them on this server",
+      ...(offlineCopying.length ? [`Copies nothing more from ${someNames(offlineCopying)}: Nexus has it offline, so files added there after the last sync stay there`] : []),
       "Stops copying from Nexus, and deletes the saved Nexus password",
       "Keeps files here that were deleted in Nexus",
       ...(lastFailed > 0 ? [`Leaves out ${formatCount(lastFailed)} files that failed in the last sync`] : []),

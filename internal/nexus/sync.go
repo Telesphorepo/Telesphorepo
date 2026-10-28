@@ -808,7 +808,7 @@ func (s *Service) runSync(ctx context.Context, st *runState) {
 		}
 		return
 	}
-	// A repo that Nexus marks offline cannot download its files, so it fails at once.
+	// A repo that Nexus marks offline cannot download its files, so the sync skips it.
 	online := map[string]bool{}
 	if listed, err := cl.Repositories(ctx); err == nil {
 		for _, r := range listed {
@@ -833,13 +833,22 @@ func (s *Service) runSync(ctx context.Context, st *runState) {
 		case SyncCancelled:
 			continue
 		}
-		var msg string
-		var c dbq.NexusSyncRepo
 		if on, ok := online[r.SourceRepo]; ok && !on {
-			c, msg = r, offlineReason
-		} else {
-			c, msg = s.syncRepo(ctx, cl, log, r)
+			// An offline repo is frozen: Nexus takes no uploads to it, so the files copied so far are
+			// all of it. The sync skips it, and a switch-over or a merge goes on without it.
+			if err := s.db.Tx(context.WithoutCancel(ctx), func(tx *sql.Tx) error {
+				q := dbq.New(tx)
+				if err := q.SetNexusSyncRepoState(ctx, dbq.SetNexusSyncRepoStateParams{
+					State: SyncDone, Error: "", SyncID: id, SourceRepo: r.SourceRepo}); err != nil {
+					return err
+				}
+				return writeLog(ctx, q, id, r.SourceRepo, LevelInfo, offlineSkipped)
+			}); err != nil {
+				log.Error("nexus: cannot save repo state", "source_repo", r.SourceRepo, "error", err.Error())
+			}
+			continue
 		}
+		c, msg := s.syncRepo(ctx, cl, log, r)
 		if stopped() {
 			return
 		}

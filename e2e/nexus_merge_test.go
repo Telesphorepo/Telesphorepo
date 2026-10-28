@@ -102,8 +102,9 @@ func nexusSetOnline(t *testing.T, n *Nexus, name string, online bool) {
 // (raw has no groups) and creates nothing, then the moving repo, a publish to it, then a merge
 // with a skipped file and a conflict taken from the moving repo, keeping the target's name (the
 // moving repo's name redirects; a publish through it lands in the target). A second move merges
-// while its Nexus repo is offline: the final sync fails, the merge fails before the switch-over,
-// and a resume after the repo is online again finishes it, keeping the moving repo's name.
+// while Nexus lacks its repo: the final sync fails, the merge fails before the switch-over, and a
+// resume after the repo is back, offline, finishes it (the final sync skips an offline repo),
+// keeping the moving repo's name.
 func nexusGradualMove(t *testing.T, n *Nexus, s *Server, tg *S3Target) {
 	src, first := nexusRawRepo(t, n, "src-gm")
 	same := nexusRawFile{"dist/same.txt", []byte("the same bytes " + randHex(8))}
@@ -217,10 +218,10 @@ func nexusGradualMove(t *testing.T, n *Nexus, s *Server, tg *S3Target) {
 	if resp, b := rawPut(t, s, "/raw/"+moving2+"/"+own.path, own.data, s.PublishAuth(t, s.AdminUser, moving2)); resp.StatusCode != http.StatusCreated {
 		t.Fatalf("PUT to %s: status %d, want 201: %s", moving2, resp.StatusCode, b)
 	}
-	nexusSetOnline(t, n, src2, false)
+	n.mustAPI(t, http.MethodDelete, "/service/rest/v1/repositories/"+src2, nil, nil)
 	s.MustAPI(t, http.MethodPost, "/api/nexus/merges", map[string]any{"from": moving2, "into": target2, "keep": "source"}, s.Admin(), &m)
 	if m = nexusWaitMerge(t, s, m.ID); m.State != "failed" || m.Step != "sync" || !strings.Contains(m.Error, "final sync") {
-		t.Fatalf("merge while %s is offline: %+v, want failed in its final sync", src2, m)
+		t.Fatalf("merge while Nexus lacks %s: %+v, want failed in its final sync", src2, m)
 	}
 	var opInfo nexusRepoOp
 	s.MustAPI(t, http.MethodGet, "/api/repos/"+moving2, nil, s.Admin(), &opInfo)
@@ -230,7 +231,14 @@ func nexusGradualMove(t *testing.T, n *Nexus, s *Server, tg *S3Target) {
 	if r := nexusState(t, s, source2.ID).repo(t, src2); r.SwitchOver != nil {
 		t.Fatalf("%s after the failed merge: %+v, want it still copying", src2, r)
 	}
-	nexusSetOnline(t, n, src2, true)
+	// The repo is back but offline: the final sync skips it, and the resumed merge finishes.
+	n.mustAPI(t, http.MethodPost, "/service/rest/v1/repositories/raw/hosted", map[string]any{
+		"name": src2, "online": true, "storage": nexusStorage,
+		"raw": map[string]any{"contentDisposition": "ATTACHMENT"},
+	}, nil)
+	n.uploadRaw(t, src2, first2)
+	n.waitAssets(t, src2, first2.path)
+	nexusSetOnline(t, n, src2, false)
 	if st, b := s.API(t, http.MethodPost, "/api/repos/"+moving2+"/operation/resume", nil, s.Admin()); st != http.StatusOK {
 		t.Fatalf("resume the merge: status %d, want 200: %s", st, b)
 	}

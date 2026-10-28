@@ -57,8 +57,13 @@ const (
 	TypeGroup  = "group"
 )
 
-// offlineReason is the reason a repo that Nexus marks offline cannot be copied.
-const offlineReason = "Offline in Nexus. Bring it online in Nexus to copy it."
+// offlineReason is the reason a repo that Nexus marks offline cannot start copying: its files do
+// not download. A mapped repo that goes offline keeps its mapping, and syncs skip it
+// (offlineSkipped).
+const (
+	offlineReason  = "Offline in Nexus"
+	offlineSkipped = "Offline in Nexus, so the sync skips it."
+)
 
 // publicTTL is how long the result of an anonymous check of a Nexus repo is kept.
 const publicTTL = 5 * time.Minute
@@ -262,8 +267,9 @@ func (s *Service) accepts(name, sourceFormat string) (*format.Importer, bool) {
 }
 
 // support returns the format that takes Nexus repo r, and why r cannot be copied ("" when it
-// can).
-func (s *Service) support(r Repository) (targetFormat, reason string) {
+// can). mapped is whether r is in the mapping already: an offline repo cannot start copying, but
+// a mapped one stays.
+func (s *Service) support(r Repository, mapped bool) (targetFormat, reason string) {
 	f := s.formats.Importer(r.Format)
 	if f == nil {
 		return "", "This server does not take " + r.Format + " repositories."
@@ -281,7 +287,7 @@ func (s *Service) support(r Repository) (targetFormat, reason string) {
 	default:
 		return f.Name, "This server cannot copy a Nexus " + r.Type + " repository."
 	}
-	if !r.Online {
+	if !r.Online && !mapped {
 		return f.Name, offlineReason
 	}
 	return f.Name, ""
@@ -560,7 +566,7 @@ func (s *Service) Detail(ctx context.Context, id int64) (*SourceDetail, error) {
 	seen := make(map[string]bool, len(listed))
 	for _, r := range listed {
 		seen[r.Name] = true
-		tf, reason := s.support(r)
+		tf, reason := s.support(r, targets[r.Name] != nil)
 		sr := SourceRepo{Name: r.Name, Format: r.Format, Type: r.Type, Supported: reason == "", Reason: reason,
 			Offline: !r.Online, TargetFormat: tf, RemoteURL: r.RemoteURL, RemoteUsername: r.RemoteUsername,
 			Members: r.Members, MembersKnown: r.MembersKnown, TargetMembers: []string{},
@@ -586,7 +592,7 @@ func (s *Service) Detail(ctx context.Context, id int64) (*SourceDetail, error) {
 		if seen[m.SourceRepo] {
 			continue
 		}
-		tf, reason := s.support(Repository{Format: m.SourceFormat, Type: m.Kind, Online: true})
+		tf, reason := s.support(Repository{Format: m.SourceFormat, Type: m.Kind, Online: true}, true)
 		if d.NexusError == "" {
 			reason = "Nexus no longer lists this repository."
 		}
@@ -784,6 +790,14 @@ func (s *Service) SetRepos(ctx context.Context, id, userID int64, maps []Mapping
 	for _, r := range src {
 		byName[r.Name] = r
 	}
+	current, err := q.ListNexusSourceRepos(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	mappedNow := make(map[string]bool, len(current))
+	for _, m := range current {
+		mappedNow[m.SourceRepo] = true
+	}
 	// A switched-over repo keeps its mapping whatever the save holds: it cannot copy again.
 	kept, err := s.switchedMappings(ctx, id)
 	if err != nil {
@@ -813,7 +827,7 @@ func (s *Service) SetRepos(ctx context.Context, id, userID int64, maps []Mapping
 		if !ok {
 			return nil, fmt.Errorf("%w: Nexus has no repo %q", ErrInvalid, m.SourceRepo)
 		}
-		if _, reason := s.support(r); reason != "" {
+		if _, reason := s.support(r, mappedNow[r.Name]); reason != "" {
 			return nil, fmt.Errorf("%w: %s: %s", ErrInvalid, r.Name, reason)
 		}
 		p := plan{m: m, src: r}
