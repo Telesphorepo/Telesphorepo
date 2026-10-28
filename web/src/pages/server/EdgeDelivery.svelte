@@ -456,6 +456,11 @@
               {#if st.pointer_cache.on}
                 <dd class="text-label">On</dd>
                 <dd class="text-meta text-muted-foreground">The server purges a pointer's cached copies before its file is replaced or removed.</dd>
+                {#if st.pointer_cache.limited_until}
+                  <dd class="text-meta text-warning">
+                    Cloudflare limits purges: replaces and deletes wait, and go on <RelativeTime at={st.pointer_cache.limited_until} />.
+                  </dd>
+                {/if}
               {:else}
                 <dd class="text-label">Off</dd>
                 <dd class="text-meta text-muted-foreground">{st.pointer_cache.why || "Checking that a purge removes a cached pointer."}</dd>

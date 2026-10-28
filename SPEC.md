@@ -792,7 +792,7 @@ The `settings` package holds no feature rules and declares only the keys of the 
 
 | Group (owner) | Permission · page | Keys |
 |---|---|---|
-| general (core) | `settings.general` · General | `base_url`, `repo_domains` (`[]`; entries `<domain>=<repo>`, see **Repo domains** below), `log.level`, `max_upload_size` (`2GiB`), `max_json_size` (`1MiB`), `cookie.secure`, `session_ttl` (`168h`), `index.debounce` (`2s`), `index.max_delay` (`30s`), `blobs.gc_grace` (`1h`), `upload.session_ttl` (`24h`), `tls.cert_file`, `tls.key_file` (its `Validate`: both or neither, and the pair loads), `server_name` (`""`: the UI says Telesphorepo; at most 64 characters, no control characters), `server_logo` (type `image`, none: a PNG, JPEG or WebP image, checked by its bytes, at most 256 KiB and 512 px on its long side; see **Server identity**) |
+| general (core) | `settings.general` · General | `base_url`, `repo_domains` (`[]`; entries `<domain>=<repo>`, see **Repo domains** below), `log.level`, `max_upload_size` (`2GiB`), `max_json_size` (`1MiB`), `cookie.secure`, `session_ttl` (`168h`), `index.debounce` (`2s`), `index.max_delay` (`30s`), `blobs.gc_grace` (`1h`), `upload.session_ttl` (`24h`), `delete.wait` (`2s`; see the files delete route), `tls.cert_file`, `tls.key_file` (its `Validate`: both or neither, and the pair loads), `server_name` (`""`: the UI says Telesphorepo; at most 64 characters, no control characters), `server_logo` (type `image`, none: a PNG, JPEG or WebP image, checked by its bytes, at most 256 KiB and 512 px on its long side; see **Server identity**) |
 | docker (docker) | `settings.general` · General | `docker.direct_uploads` (`false`; "Expose the origin IP for Docker uploads", see **Upload host**), `docker.upload_url` (`""`; empty or an http(s) URL of a scheme and a host only: the DNS-only name or address of the server that takes the upload bytes; required when `docker.direct_uploads` is on), `docker.link_grace` (`24h`, minimum `1s`) |
 | activity (audit) | `settings.general` · General | `audit.retention` (365 days), `stats.retention` (400 days) |
 | storage (storage) | `storage.manage` · `/settings/storage` | `storage` (`fs`/`s3`), `fs.root` (default `blobs/` in the data dir), `s3.endpoint`, `s3.region`, `s3.bucket`, `s3.access_key_id`, `s3.secret_access_key`*, `s3.prefix`, `s3.path_style`, `s3.redirect`, `presign_ttl` |
@@ -953,7 +953,7 @@ with no credential. The routes that take no credential or their own token are th
 `Authorization: Bearer <token>`. A publish session token reaches only the routes whose policy
 accepts it: `DELETE /api/publish/sessions/{id}`, `POST /api/repos/{name}/upload`,
 `POST /api/repos/{name}/upload/plan`, the resumable upload routes `/api/repos/{name}/uploads...` and
-`POST /api/repos/{name}/files/delete` and `.../files/delete/plan`, and only for its own repo. Every other `/api` route answers it with 403. Errors are problem documents (see **Problem
+`POST /api/repos/{name}/files/delete`, `.../files/delete/plan` and `GET .../files/delete/{id}`, and only for its own repo. Every other `/api` route answers it with 403. Errors are problem documents (see **Problem
 documents**), with the extension member `fields` for settings validation. Bodies are capped at
 `max_json_size`. Lists are `{items, next}` with `?after=&limit=`.
 
@@ -1061,7 +1061,8 @@ transaction.
 | `GET /api/repos/{name}/tree?path=&after=&limit=` | `repo.download` | `{items: [{name, type: "dir"\|"file", path, size?, sha256?, updated_at?, uploaded_by?, build?}], next}`. `build` is the CI build record that wrote the file (see **CI providers and build records**). `path` is a folder (`""` or ending in `/`). A folder item's `path` and the `next` cursor end in `/`. `uploaded_by` is a username. A group answers the merged listing of its members (see **Files, uploads and deletes**), and each file item has `repo`, the member that serves it |
 | `GET /api/repos/{name}/file?path=` | `repo.download` | One file with its details: `{name, path, size, sha256, content_type, kind, created_at, updated_at, uploaded_by, build}`. 404 when the path holds no file. `build` is the CI build record, or null. A group answers the file of the first member in read order that the caller reads and that stores it, with `repo`, that member |
 | `POST /api/repos/{name}/files/delete/plan` | as the delete | `{paths?, prefixes?}` as the delete. Deletes nothing. 200 `{files, more, notes: [{text, count, one, many}]}`: the files that exist (a folder walk reads at most 100,000 files; `more` says it stopped), and for each `delete_notes` entry of the format the count of the files its glob matches (entries without a match are left out). It walks `assets` by the `(repo_id, path)` index |
-| `POST /api/repos/{name}/files/delete` | `repo.delete`, with a UI session or a device or manual publish session of the repo | `{paths?: [...], prefixes?: [...]}`: files and folders, 1 to 1000 items together. 400 with the first bad path or prefix; then nothing is deleted. 200 `{deleted: n}`, the number of files. A file that is gone already counts as done; an empty folder adds 0. 409 on a repo with an operation. 401 for a password or a read token; 403 without `repo.delete` (a CI session never deletes). One `file.delete` event per file and per folder that lost files |
+| `POST /api/repos/{name}/files/delete` | `repo.delete`, with a UI session or a device or manual publish session of the repo | `{paths?: [...], prefixes?: [...]}`: files and folders, 1 to 1000 items together. 400 with the first bad path or prefix; then nothing is deleted. 200 `{deleted: n}`, the number of files, when the delete ends within `delete.wait` (`2s`); else 202 `{id, deleted}` (the files deleted so far) and the delete goes on in the background (`0s` sends every delete there). A file that is gone already counts as done; an empty folder adds 0. 409 on a repo with an operation; 429 while the repo runs 4 deletes of files. 401 for a password or a read token; 403 without `repo.delete` (a CI session never deletes). One `file.delete` event per file and per folder that lost files |
+| `GET /api/repos/{name}/files/delete/{id}` | as the delete | The state of a delete that answered 202: `{state: running\|done\|failed, deleted, error}`. The deletes live in memory: 404 for an unknown id, one of another repo, one that ended more than 10 minutes ago, and every one after a restart. A server stop ends a running delete between two remove batches (each batch is one transaction), so each file is deleted or kept; the UI says to delete again |
 | `POST /api/repos/{name}/upload/plan` | publish session of the repo | What an upload of files would store; stores nothing. Multipart: the part `plan` first, `{fields, folder, files: [{path, size}], heads?}` (1 to 500 files, paths relative to the drop), then one part per listed file that a `reads` rule of the format matches, its `filename` the path, holding at most the rule's `max_bytes` from the start of the file. 200 `Plan` = `{items: [{title, files: [{path, target}], facts?, problems}], ignored: [paths], fields: [{key, label, help?, type, ..., value, read?, problem?}], heads}`. The server holds the parts it read under `heads` (32 hex; `""` when it holds none) for 30 minutes after the last use, for the same publish session and repo, at most 1 GiB of every held set together (the least recently used set goes first): a plan that names `heads` needs no part of a file that the set holds at the same size, and the server adds its new parts to the set. Such a plan that lacks the first bytes of a file the format reads answers 409 `plan-heads-gone`, and the client sends them again. 400 for an unknown field, a bad path, a head that no rule reads or that is longer than it allows. See **Files, uploads and deletes** |
 | `POST /api/repos/{name}/upload` | publish session of the repo | Multipart: the fields first, then the text part `uploads` (optional), a JSON list `[{path, id, size}]` of files that went through the resumable upload routes with the same publish session, then the files, each with its relative path as its `filename`. The server finishes each named upload with its size (no digest; 404 for an unknown upload, 400 for another size, which deletes it) and takes it as the file at its path. The files and the finished uploads together may not exceed `max_upload_size`. The server runs the format's `Upload.Plan` on the files (the first bytes of each file that a `reads` rule matches): 400 when a field or an item has a problem or no item takes a file. Then `Upload.Store` commits the files of the items through the byte pipeline (source `ui`; checksums and metadata with source `generated`). 201 `{files: [{path, status: "created"\|"replaced"\|"unchanged", size, sha256, generated?}]}`. 400 or 409 for a refusal of the format |
 | `POST /api/repos/{name}/uploads` | publish session of the repo | Starts a resumable upload: 201 `{id, received: 0, expires_at}` |
@@ -2615,10 +2616,15 @@ mutable path's pointer are read in R2 every time. `Server-Timing` of an edge ans
 The server keeps the invariant of **Path classes** for the copies: every write that makes an
 immutable pointer unusable or deletes it (`Replacing`, `Removing`, the outbox's deletes, the
 reclass walk's regional deletes) purges the tags of its keys, 2 s after the change returned, with
-`POST /zones/{zone}/purge_cache {"tags": [...]}` on the zone of every host of the live generations
-(100 tags per call, 4 calls at once, a 429 waits for its `Retry-After`), before the commit or the
-remove goes on; a failed purge fails the step as a failed put does, and the outbox tries its row
-again. A tag names no host, so one purge per zone reaches the copies of every host on it. The 2 s
+`POST /zones/{zone}/purge_cache {"tags": [...]}` on the zone of every host of the live generations,
+before the commit or the remove goes on; a failed purge fails the step as a failed put does, and
+the outbox tries its row again. Every purge goes through one queue: Cloudflare limits tag purges
+per account (Free: 5 requests a minute, a burst of 25; Pro 5 a second; Business 10 a second), so
+the queue sends the due tags of every waiting step together, 100 tags per call, one call after
+the other, and a remove batch and the index rewrites it causes share calls. A 429 pauses the whole
+queue for its `Retry-After` and fails no step: the tags go in the next call, and each step waits
+until its own tags are purged. A tag names no host, so one purge per zone reaches the copies of
+every host on it. Each call logs its tag count, and each 429 its wait, at debug level. The 2 s
 cover the Worker's 1 s window, so every copy read before the change is in the cache, or deleted,
 before the purge. What stays assumed: a purge that Cloudflare answered with 200 has removed the
 entry in every data center by the time the commit goes on (Cloudflare's 200 says the purge was
@@ -2650,7 +2656,8 @@ results}` with `Telesphorepo-Edge-Check: worker`; the server deletes the object 
 Without a token, with a token that lacks Cache & Performance › Cache: Purge, with a Worker that does not
 run the probe, or when the purge did not remove the probe entry, the Worker reads every pointer in
 R2 and the Edge delivery page says why (`pointer_cache` of `GET /api/edge/status`: `{on, ttl,
-why}`). A purge that Cloudflare refuses (401, 403, error 10000) turns the cache off and writes
+why, limited_until}`; `limited_until` is when the queue goes on after a 429, null while none
+waits, and the page says that replaces and deletes wait until then). A purge that Cloudflare refuses (401, 403, error 10000) turns the cache off and writes
 `config.json` again; until the generations of the earlier `config.json` end (`edge.access_ttl` plus
 5 s), a replace or remove of an immutable file fails. The TTL bounds only a purge that Cloudflare
 took but did not apply; a pointer costs one R2 read per data center and hour. An older Worker
@@ -4980,11 +4987,11 @@ page are in `web/src/README.md`.
   place of the header row shows "12 selected", the actions, "Select all 50" and "Clear". Every
   delete asks first with the count and the first five names; a delete of more than one repository
   asks for the count. A toast says what changed.
-- **CI pipelines.** A card per trust policy: the name, the CI system with the GitHub repository or
-  Jenkins host (less what the name says), its conditions (branches, tags, the workflow file, jobs)
-  as ticket badges, and up to three of the repositories it can publish to ("and N more").
-  The card opens the pipeline. Only a pipeline that is off has a badge ("Off"); the switch on its
-  page shows the state.
+- **CI pipelines.** A table row per trust policy: the name, the CI system with the GitHub
+  repository or Jenkins host (less what the name says), its conditions (branches, tags, the
+  workflow file, jobs) as ticket badges, and up to three of the repositories it can publish to
+  ("and N more"), with a search by the start of the name (`?q=`). The row opens the pipeline.
+  Only a pipeline that is off has a badge ("Off"); the switch on its page shows the state.
 - **CI pipeline page.** A new pipeline has four steps: where the job runs (GitHub Actions,
   Jenkins, another CI system), which runs can publish, the repositories, and the publish step for
   the workflow or Jenkinsfile. An admission ticket beside the steps (above Create on a narrow

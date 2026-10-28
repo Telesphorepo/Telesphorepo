@@ -213,6 +213,8 @@ export const api = {
      */
     deleteFiles: (name: string, target: T.FilesDelete, token?: string) =>
       request<T.DeleteResult>("POST", repo(name) + "/files/delete", { body: target, token }),
+    /** The state of a delete of files that answered 202. */
+    deleteStatus: (name: string, id: string) => request<T.DeleteStatus>("GET", repo(name) + "/files/delete/" + encodeURIComponent(id)),
     /** What a delete of files and folders removes, with the delete notes of the format. Deletes nothing. */
     deletePlan: (name: string, target: T.FilesDelete) => request<T.DeletePlan>("POST", repo(name) + "/files/delete/plan", { body: target }),
     /**

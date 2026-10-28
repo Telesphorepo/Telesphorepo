@@ -572,8 +572,13 @@ export type TreeEntry = {
 
 /** POST /api/repos/{name}/files/delete and /files/delete/plan: files by path, and folders by prefix (ending in "/"). */
 export type FilesDelete = { paths?: string[]; prefixes?: string[] };
-/** POST /api/repos/{name}/files/delete: how many files the server removed. */
-export type DeleteResult = { deleted: number };
+/**
+ * POST /api/repos/{name}/files/delete: how many files the server removed. With id (202) the delete
+ * goes on in the background, and deleted counts the files removed so far.
+ */
+export type DeleteResult = { deleted: number; id?: string };
+/** GET /api/repos/{name}/files/delete/{id}: a delete of files that answered 202. */
+export type DeleteStatus = { state: "running" | "done" | "failed"; deleted: number; error: string };
 /**
  * POST /api/repos/{name}/files/delete/plan: how many files a delete removes (more: the folders hold
  * more than the plan counted), and for each delete note of the format the count of files it matches.
@@ -788,7 +793,8 @@ export type EdgeStatus = {
   regions: EdgeRegionStatus[];
   deploy: EdgeDeploy;
   /** The Worker's cache of the pointers of files that cannot change, while edge delivery is on. ttl in seconds; why: why it is off ("" before the first check). */
-  pointer_cache: { on: boolean; ttl: number; why: string };
+  /** limited_until: when the purges go on after Cloudflare answered 429; null while none waits. */
+  pointer_cache: { on: boolean; ttl: number; why: string; limited_until: string | null };
   /** The last check of the Cloudflare API token's permissions; null without a token or an R2 endpoint. */
   token: EdgeToken | null;
 };

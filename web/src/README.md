@@ -711,8 +711,11 @@ expires or when the server answers 401.
   shows "3 selected" and the size of the picked files, and Delete removes them all after one
   confirm. A version delete (`versionTarget` in `files/place.ts`) removes the version's `folder`, with no request, or
   the files of all its builds when the version has no folder of its own (Debian). Every delete
-  calls `POST /api/repos/{name}/files/delete` (`api.repos.deleteFiles`), at most 1000 paths and
-  prefixes in one request.
+  goes through `deleteFiles` of `lib/deletes.ts`: the confirm closes at once, and the delete runs
+  behind a loading toast with the count so far, also after the page changes. It calls
+  `POST /api/repos/{name}/files/delete` with at most 1000 paths and prefixes a request; a request
+  that answers 202 goes on in the background, and the toast asks `GET .../files/delete/{id}` every
+  second until it ends.
 
 ## Words
 

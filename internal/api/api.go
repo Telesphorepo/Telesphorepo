@@ -52,6 +52,7 @@ type API struct {
 	heads       *heldHeads
 	counts      *groupCounts
 	deleteSlots chan struct{} // one value per running repo delete (startDelete)
+	fileDeletes fileDeletes   // the deletes of files that answered 202 (deleteFiles)
 }
 
 // optimizeEvery is how often the core.optimize job refreshes the planner statistics.
@@ -139,6 +140,7 @@ func (a *API) routes(mux *route.Router) {
 	del := route.Policy{Accept: auth.CredSession | auth.CredPublish, Repo: &route.RepoRule{Op: access.Delete, Perm: perm.RepoDelete}}
 	mux.Handle("POST /api/repos/{name}/files/delete", del, a.deleteFiles)
 	mux.Handle("POST /api/repos/{name}/files/delete/plan", del, a.deletePlan)
+	mux.Handle("GET /api/repos/{name}/files/delete/{id}", del, a.deleteStatus)
 	upload := route.Policy{Accept: auth.CredPublish, Repo: &route.RepoRule{Op: access.Write, Perm: perm.RepoPublish}}
 	mux.Handle("POST /api/repos/{name}/upload", upload, a.upload)
 	mux.Handle("POST /api/repos/{name}/upload/plan", upload, a.uploadPlan)

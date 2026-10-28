@@ -1,6 +1,9 @@
 package api
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -10,6 +13,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/files"
@@ -66,9 +72,10 @@ func (a *API) tree(w http.ResponseWriter, r *http.Request, c *route.Call) {
 
 // deleteFiles deletes files (paths) and folders (prefixes) of the repo through the delete
 // pipeline, for a person who holds delete there, with a UI session or a publish session for the
-// repo: {paths, prefixes} -> 200 {deleted: <file count>}. The two lists hold 1 to 1000 items
-// together. A bad path or prefix answers 400 and deletes nothing. A file that is gone already
-// counts as done. One audit event goes to each file and each folder that lost files.
+// repo: {paths, prefixes} -> 200 {deleted: <file count>} when it ends within delete.wait, else 202
+// {id, deleted} and it goes on in the background (deleteStatus). The two lists hold 1 to 1000
+// items together. A bad path or prefix answers 400 and deletes nothing. A file that is gone
+// already counts as done. One audit event goes to each file and each folder that lost files.
 func (a *API) deleteFiles(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	repo := c.Repo
 	var in struct {
@@ -101,12 +108,131 @@ func (a *API) deleteFiles(w http.ResponseWriter, r *http.Request, c *route.Call)
 			rm.Prefixes = append(rm.Prefixes, dir)
 		}
 	}
-	n, err := a.assets.Remove(r.Context(), rm)
-	if err != nil {
-		route.Fail(w, r, err)
+	t, ok := a.fileDeletes.start(repo.ID)
+	if !ok {
+		httpx.Error(w, r, http.StatusTooManyRequests, "this repository runs "+strconv.Itoa(maxRepoDeletes)+" deletes of files already; try again when one ends")
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]int{"deleted": n})
+	rm.Progress = func(n int) { t.deleted.Store(int64(n)) }
+	// The task keeps the request's values (the actor of the audit events) without its cancel;
+	// Remove stops between two batches when the server stops.
+	rctx := context.WithoutCancel(r.Context())
+	a.h.Go("files delete", func(context.Context) {
+		n, err := a.assets.Remove(rctx, rm)
+		a.fileDeletes.finish(t, n, err)
+	})
+	accepted := func() { httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"id": t.id, "deleted": t.deleted.Load()}) }
+	wait := settings.DeleteWait.Get(a.settings.Current())
+	if wait <= 0 {
+		accepted()
+		return
+	}
+	select {
+	case <-t.done:
+		if t.err != nil {
+			route.Fail(w, r, t.err)
+			return
+		}
+		httpx.WriteJSON(w, http.StatusOK, map[string]int64{"deleted": t.deleted.Load()})
+	case <-time.After(wait):
+		accepted()
+	case <-r.Context().Done():
+	}
+}
+
+// deleteStatus answers the state of the delete of files {id} of the repo that answered 202:
+// {state: running|done|failed, deleted, error}. 404 for an unknown id, one of another repo, and
+// one that ended more than deleteKeep ago or before the server started.
+func (a *API) deleteStatus(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	t := a.fileDeletes.get(r.PathValue("id"), c.Repo.ID)
+	if t == nil {
+		httpx.Error(w, r, http.StatusNotFound, "no such delete of files; the server may have restarted")
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, t.status())
+}
+
+const (
+	// deleteKeep is how long the state of a finished delete stays readable.
+	deleteKeep = 10 * time.Minute
+	// maxRepoDeletes is the most deletes of files that run at once on one repo.
+	maxRepoDeletes = 4
+)
+
+// fileDeletes are the deletes of files that run or ended within deleteKeep, in memory.
+type fileDeletes struct {
+	mu   sync.Mutex
+	byID map[string]*fileDelete
+}
+
+// fileDelete is one delete of files: done closes when it ends, with deleted and err set.
+type fileDelete struct {
+	id      string
+	repoID  int64
+	deleted atomic.Int64
+	done    chan struct{}
+	err     error
+	ended   time.Time
+}
+
+func (d *fileDeletes) start(repoID int64) (*fileDelete, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.byID == nil {
+		d.byID = map[string]*fileDelete{}
+	}
+	running := 0
+	for id, t := range d.byID {
+		select {
+		case <-t.done:
+			if time.Since(t.ended) > deleteKeep {
+				delete(d.byID, id)
+			}
+		default:
+			if t.repoID == repoID {
+				running++
+			}
+		}
+	}
+	if running >= maxRepoDeletes {
+		return nil, false
+	}
+	b := make([]byte, 12)
+	rand.Read(b)
+	t := &fileDelete{id: hex.EncodeToString(b), repoID: repoID, done: make(chan struct{})}
+	d.byID[t.id] = t
+	return t, true
+}
+
+func (d *fileDeletes) finish(t *fileDelete, n int, err error) {
+	d.mu.Lock()
+	t.deleted.Store(int64(n))
+	t.err, t.ended = err, time.Now()
+	d.mu.Unlock()
+	close(t.done)
+}
+
+func (d *fileDeletes) get(id string, repoID int64) *fileDelete {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	t := d.byID[id]
+	if t == nil || t.repoID != repoID {
+		return nil
+	}
+	return t
+}
+
+func (t *fileDelete) status() map[string]any {
+	out := map[string]any{"state": "running", "deleted": t.deleted.Load(), "error": ""}
+	select {
+	case <-t.done:
+		out["state"] = "done"
+		if t.err != nil {
+			out["state"], out["error"] = "failed", t.err.Error()
+		}
+	default:
+	}
+	return out
 }
 
 // maxDeleteScan is the most files a delete plan walks under the folders of a delete.

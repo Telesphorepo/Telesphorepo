@@ -264,9 +264,10 @@ func pointerTag(gen int64, bucket, key string) string {
 
 // purgePointers purges the cached copies of the pointer keys of bs, of every generation that a
 // Worker may still read, once purgeDelay passed since changed (when the last change of the keys
-// returned): a purge by Cache-Tag on the zone of each host of those generations. A purge that
-// fails fails the caller: a pre-step fails its commit or remove, the outbox tries the row again. A
-// refusal of the token turns the pointer cache off.
+// returned): a purge by Cache-Tag on the zone of each host of those generations, sent by the purge
+// queue together with the tags of every other caller that waits (purgeQueue). It returns when the
+// tags are purged. A purge that fails fails the caller: a pre-step fails its commit or remove, the
+// outbox tries the row again. A refusal of the token turns the pointer cache off.
 func (m *mod) purgePointers(ctx context.Context, bs []*bucket, keys []string, changed time.Time) error {
 	if len(keys) == 0 {
 		return nil
@@ -292,39 +293,184 @@ func (m *mod) purgePointers(ctx context.Context, bs []*bucket, keys []string, ch
 	if len(tags) == 0 {
 		return nil
 	}
+	r := &purgeReq{due: changed.Add(purgeDelay), tags: tags, hosts: hosts, done: make(chan error, 1)}
+	m.pq.add(m, r)
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(time.Until(changed.Add(purgeDelay))):
+		return ctx.Err() // the tags stay queued; a purge of them later is harmless
+	case err := <-r.done:
+		return err
+	}
+}
+
+// purgeQueue sends every tag purge of the pointer cache. Cloudflare limits tag purges per account
+// (on Free 5 requests a minute, a burst of 25) and takes up to 100 tags a request, so the queue
+// packs the due tags of every waiting caller into as few requests as it can, one after the other,
+// and a 429 pauses the whole queue for its Retry-After without failing anyone.
+type purgeQueue struct {
+	mu      sync.Mutex
+	waiting []*purgeReq
+	running bool      // a flush loop runs (flushPurges)
+	paused  time.Time // after a 429: no purge before then
+}
+
+// purgeReq is the tags of one purgePointers call: due when they may be purged, the hosts whose
+// zones they are purged on, done gets the result once.
+type purgeReq struct {
+	due   time.Time
+	tags  []string
+	hosts map[string]bool
+	done  chan error
+}
+
+func (q *purgeQueue) add(m *mod, r *purgeReq) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.waiting = append(q.waiting, r)
+	if !q.running {
+		q.running = true
+		m.h.Go("edge.purge", m.flushPurges)
+	}
+}
+
+// pausedUntil is the end of the pause of a 429; zero while the queue does not wait for one.
+func (q *purgeQueue) pausedUntil() time.Time {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if time.Now().Before(q.paused) && len(q.waiting) > 0 {
+		return q.paused
+	}
+	return time.Time{}
+}
+
+// flushPurges runs while tags wait: it sleeps until the first is due (and any 429 pause is over),
+// takes every due request and purges their tags. It ends when the queue is empty, and fails the
+// waiting requests when the server stops.
+func (m *mod) flushPurges(ctx context.Context) {
+	q := &m.pq
+	for {
+		q.mu.Lock()
+		if len(q.waiting) == 0 {
+			q.running = false
+			q.mu.Unlock()
+			return
+		}
+		next := q.waiting[0].due
+		for _, r := range q.waiting {
+			if r.due.Before(next) {
+				next = r.due
+			}
+		}
+		if q.paused.After(next) {
+			next = q.paused
+		}
+		q.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			q.mu.Lock()
+			for _, r := range q.waiting {
+				r.done <- fmt.Errorf("purge the cached pointers: %w", ctx.Err())
+			}
+			q.waiting, q.running = nil, false
+			q.mu.Unlock()
+			return
+		case <-time.After(time.Until(next)):
+		}
+		now := time.Now()
+		q.mu.Lock()
+		var due, later []*purgeReq
+		for _, r := range q.waiting {
+			if r.due.After(now) {
+				later = append(later, r)
+			} else {
+				due = append(due, r)
+			}
+		}
+		q.waiting = later
+		q.mu.Unlock()
+		back, wait := m.sendPurges(ctx, due)
+		q.mu.Lock()
+		q.waiting = append(q.waiting, back...)
+		if wait > 0 {
+			q.paused = time.Now().Add(wait)
+		}
+		q.mu.Unlock()
+	}
+}
+
+// sendPurges purges the tags of rs on the zones of their hosts, 100 tags a request, and answers
+// each request that is done. It returns the requests a 429 left unpurged, and its Retry-After.
+func (m *mod) sendPurges(ctx context.Context, rs []*purgeReq) ([]*purgeReq, time.Duration) {
+	fail := func(rs []*purgeReq, err error) {
+		for _, r := range rs {
+			r.done <- err
+		}
 	}
 	snap := m.h.Settings.Current()
 	token := CloudflareToken.Get(snap)
 	if token == "" {
-		return errors.New("purge the cached pointers: no Cloudflare API token is set, and Workers may still read cached pointers until their config.json without the cache expires")
+		fail(rs, errors.New("purge the cached pointers: no Cloudflare API token is set, and Workers may still read cached pointers until their config.json without the cache expires"))
+		return nil, 0
+	}
+	hosts := map[string]bool{}
+	seen := map[string]bool{}
+	var tags []string
+	for _, r := range rs {
+		maps.Copy(hosts, r.hosts)
+		for _, t := range r.tags {
+			if !seen[t] {
+				seen[t] = true
+				tags = append(tags, t)
+			}
+		}
 	}
 	c := &cfClient{base: cfAPI, token: token}
 	zones, err := m.zonesOf(ctx, c, snap, slices.Sorted(maps.Keys(hosts)))
 	if err != nil {
-		return fmt.Errorf("purge the cached pointers: %w", err)
+		fail(rs, fmt.Errorf("purge the cached pointers: %w", err))
+		return nil, 0
 	}
-	type batch struct {
-		zone zoneRef
-		tags []string
+	// A tag is purged once every zone took it. Requests whose tags are all purged are done.
+	left := map[string]int{}
+	zs := distinctZones(zones)
+	for _, t := range tags {
+		left[t] = len(zs)
 	}
-	var batches []batch
-	for _, z := range distinctZones(zones) {
+	settle := func(err error) (back []*purgeReq) {
+		for _, r := range rs {
+			if !slices.ContainsFunc(r.tags, func(t string) bool { return left[t] > 0 }) {
+				r.done <- nil
+			} else if err != nil {
+				r.done <- err
+			} else {
+				back = append(back, r)
+			}
+		}
+		return back
+	}
+	for _, z := range zs {
 		for rest := tags; len(rest) > 0; {
 			n := min(purgeBatch, len(rest))
-			batches = append(batches, batch{z, rest[:n]})
+			err := purgeTags(ctx, c, z, rest[:n])
+			if ce := asCall(err); ce != nil && ce.Status == http.StatusTooManyRequests {
+				wait := time.Duration(ce.RetryAfter) * time.Second
+				m.h.Log.Debug("edge: purge rate-limited", "zone", z.Name, "wait", wait.String())
+				return settle(nil), wait
+			}
+			if err != nil {
+				m.purgeRefused(ctx, err)
+				settle(fmt.Errorf("purge the cached pointers: %w", err))
+				return nil, 0
+			}
+			m.h.Log.Debug("edge: purged cached pointers", "zone", z.Name, "tags", n)
+			for _, t := range rest[:n] {
+				left[t]--
+			}
 			rest = rest[n:]
 		}
 	}
-	err = parallel(4, batches, func(b batch) error { return purgeTags(ctx, c, b.zone, b.tags) })
-	if err != nil {
-		m.purgeRefused(ctx, err)
-		return fmt.Errorf("purge the cached pointers: %w", err)
-	}
-	return nil
+	settle(nil)
+	return nil, 0
 }
 
 // distinctZones returns the zones of zones, each once, sorted by name.
@@ -342,7 +488,7 @@ func distinctZones(zones map[string]zoneRef) []zoneRef {
 // purgeTags purges the cached entries with one of tags on zone.
 func purgeTags(ctx context.Context, c *cfClient, zone zoneRef, tags []string) error {
 	b, _ := json.Marshal(map[string]any{"tags": tags})
-	_, err := c.do(ctx, cfRequest{method: http.MethodPost, path: "/zones/" + seg(zone.ID) + "/purge_cache", body: b, again: true}, nil)
+	_, err := c.do(ctx, cfRequest{method: http.MethodPost, path: "/zones/" + seg(zone.ID) + "/purge_cache", body: b, again: true, own429: true}, nil)
 	return err
 }
 
@@ -587,6 +733,8 @@ type pointerCacheJSON struct {
 	On  bool   `json:"on"`
 	TTL int64  `json:"ttl"` // seconds
 	Why string `json:"why"` // why it is off ("" while on, and before the first check)
+	// LimitedUntil is when the purges go on after Cloudflare answered 429; nil while none waits.
+	LimitedUntil *time.Time `json:"limited_until"`
 }
 
 func (m *mod) pointerCacheStatus() pointerCacheJSON {
@@ -599,5 +747,10 @@ func (m *mod) pointerCacheStatus() pointerCacheJSON {
 	if on {
 		why = ""
 	}
-	return pointerCacheJSON{On: on, TTL: ttlSeconds(pointerTTL), Why: why}
+	out := pointerCacheJSON{On: on, TTL: ttlSeconds(pointerTTL), Why: why}
+	if t := m.pq.pausedUntil(); !t.IsZero() {
+		t = t.UTC()
+		out.LimitedUntil = &t
+	}
+	return out
 }

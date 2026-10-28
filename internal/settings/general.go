@@ -59,6 +59,8 @@ var (
 		Help: "The server deletes stored content that no file uses after this time. Content that a new upload needs within this time is not stored again."})
 	UploadSessionTTL = Duration(&Def{Key: "upload.session_ttl", Default: "24h", Label: "Resumable upload lifetime",
 		Help: "The server deletes a resumable upload that received no data for this time."})
+	DeleteWait = Duration(&Def{Key: "delete.wait", Default: "2s", Label: "Background delete after",
+		Help: "A delete of files that takes longer than this goes on in the background, and its progress shows in a notice. 0s sends every delete to the background."})
 	TLSCertFile = String(&Def{Key: "tls.cert_file", Label: "TLS certificate file", Normalize: Trim,
 		Help: "The path of a PEM file with the certificate chain of the server. With a key file too, the server serves HTTPS with HTTP/2 itself. A renewed file applies at the next connection. Turning TLS on or off applies at the next start."})
 	TLSKeyFile = String(&Def{Key: "tls.key_file", Label: "TLS key file", Normalize: Trim,
@@ -202,7 +204,7 @@ func validateGeneral(d *Draft, _ Mode) error {
 func General() *Group {
 	return &Group{ID: "general", Label: "General", Perm: perm.SettingsGeneral, Defs: []*Def{
 		BaseURL.Def(), RepoDomains.Def(), LogLevel.Def(), MaxUploadSize.Def(), MaxJSONSize.Def(), CookieSecure.Def(), SessionTTL.Def(),
-		IndexDebounce.Def(), IndexMaxDelay.Def(), BlobsGCGrace.Def(), UploadSessionTTL.Def(), TLSCertFile.Def(), TLSKeyFile.Def(),
+		IndexDebounce.Def(), IndexMaxDelay.Def(), BlobsGCGrace.Def(), UploadSessionTTL.Def(), DeleteWait.Def(), TLSCertFile.Def(), TLSKeyFile.Def(),
 		ServerName.Def(), ServerLogo.Def(),
 	}, Validate: validateGeneral}
 }

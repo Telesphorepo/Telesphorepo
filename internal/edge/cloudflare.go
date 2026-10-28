@@ -131,6 +131,9 @@ type cfRequest struct {
 	ctype  string // the Content-Type of body; "" with a body is application/json
 	upload bool   // the longer timeout
 	again  bool   // a POST that may be sent again (a purge)
+	// own429: a 429 returns at once with its Retry-After in callError.RetryAfter, and the caller
+	// waits (the purge queue pauses every purge for it).
+	own429 bool
 }
 
 // idempotent reports whether a call may be sent again after a server error or no answer: a
@@ -158,6 +161,9 @@ func (c *cfClient) do(ctx context.Context, req cfRequest, out any) (*cfEnvelope,
 		last = err
 		ce := asCall(err)
 		switch {
+		case ce != nil && ce.Status == http.StatusTooManyRequests && req.own429:
+			ce.RetryAfter = max(1, int((wait+time.Second-1)/time.Second))
+			return env, last
 		case ce != nil && ce.Status == http.StatusTooManyRequests && rateRetries < 3 && wait <= cfMaxRetryAfter:
 			rateRetries++
 		case ce != nil && (ce.Status >= 500 || ce.Transport != "") && req.idempotent() && serverRetries < 2 && ctx.Err() == nil:

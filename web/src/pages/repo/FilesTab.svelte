@@ -24,6 +24,7 @@
   import { untrack } from "svelte";
   import { toast } from "svelte-sonner";
   import { api, errorMessage, type Repo } from "$lib/api";
+  import { deleteFiles } from "$lib/deletes";
   import { count, selectedText, someNames } from "$lib/words";
   import FileSize from "$lib/components/FileSize.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
@@ -218,20 +219,31 @@
     "Clients that still need these files get “not found”",
   ]);
 
-  async function deleteTargets(ts: DeleteTarget[]) {
+  // Whether the tab is still on screen when a delete in the background ends.
+  let mounted = true;
+  $effect(() => () => {
+    mounted = false;
+  });
+
+  // The confirm closes at once; the delete goes on behind its toast, also after the page changes.
+  function deleteTargets(ts: DeleteTarget[]) {
     if (ts.length === 0) return;
     const paths = ts.flatMap((t) => t.files ?? (t.dir ? [] : [t.path]));
     const prefixes = ts.filter((t) => t.dir).map((t) => t.path);
-    // The server takes at most 1000 paths and prefixes in one request.
-    const batch = 1000;
-    let n = 0;
-    for (let i = 0; i < paths.length + prefixes.length; i += batch) {
-      const ps = paths.slice(i, i + batch);
-      const xs = prefixes.slice(Math.max(0, i - paths.length), Math.max(0, i + batch - paths.length));
-      n += (await api.repos.deleteFiles(repo.name, { paths: ps.length ? ps : undefined, prefixes: xs.length ? xs : undefined })).deleted;
-    }
-    toast.success(`Deleted ${count(n, "file", "files")}.`);
     picked = new Set();
+    deleteFiles(repo.name, { paths, prefixes }).then(
+      (n) => {
+        toast.success(`Deleted ${count(n, "file", "files")}.`);
+        if (mounted) afterDelete(ts, paths, prefixes);
+      },
+      (e) => {
+        toast.error(errorMessage(e));
+        if (mounted) place.reload();
+      },
+    );
+  }
+
+  function afterDelete(ts: DeleteTarget[], paths: string[], prefixes: string[]) {
     version++;
     const gone = prefixes.filter((p) => folder.startsWith(p)).sort((a, b) => a.length - b.length)[0];
     if (gone !== undefined) {
@@ -256,7 +268,7 @@
   }
 
   async function runDelete() {
-    if (deleting) await deleteTargets([deleting]);
+    if (deleting) deleteTargets([deleting]);
   }
 </script>
 

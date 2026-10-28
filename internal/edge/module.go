@@ -124,6 +124,7 @@ type mod struct {
 	ptrMu sync.Mutex   // guards ptr
 	ptr   pointerState // the generations of the pointer cache (purge.go)
 	gate  purgeGate    // whether the token can purge cached pointers
+	pq    purgeQueue   // the tag purges that wait (purge.go)
 	tok   tokenGate    // the last check of the token's permissions (token.go)
 
 	checkMu    sync.Mutex                   // one check of the Worker at a time; guards lastCheck

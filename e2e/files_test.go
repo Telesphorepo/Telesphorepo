@@ -326,6 +326,46 @@ func TestDelete(t *testing.T) {
 			t.Fatalf("raw root after deleting dir/: %v", got)
 		}
 
+		// A delete that takes longer than delete.wait (0s: every one) answers 202 and goes on in the
+		// background; its state is readable by id on its own repo only.
+		s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"delete.wait": "0s"}, s.Admin(), nil)
+		var started struct {
+			ID string `json:"id"`
+		}
+		st, b := s.API(t, http.MethodPost, "/api/repos/"+raw+"/files/delete", map[string][]string{"paths": {"keep.bin"}}, rps.Auth())
+		if st != http.StatusAccepted || json.Unmarshal(b, &started) != nil || started.ID == "" {
+			t.Fatalf("delete with delete.wait 0s: status %d, want 202 with an id: %s", st, b)
+		}
+		var state struct {
+			State   string `json:"state"`
+			Deleted int    `json:"deleted"`
+		}
+		for end := time.Now().Add(30 * time.Second); ; {
+			s.MustAPI(t, http.MethodGet, "/api/repos/"+raw+"/files/delete/"+started.ID, nil, rps.Auth(), &state)
+			if state.State != "running" {
+				break
+			}
+			if time.Now().After(end) {
+				t.Fatalf("the delete in the background still runs after 30 s: %+v", state)
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if state.State != "done" || state.Deleted != 1 {
+			t.Fatalf("delete in the background: %+v, want done with 1 file", state)
+		}
+		if got := nodeNames(treeAll(t, s, raw, "", 50, s.Admin())); len(got) != 0 {
+			t.Fatalf("raw root after the delete in the background: %v", got)
+		}
+		for _, p := range []string{"/api/repos/" + raw + "/files/delete/no-such-id", "/api/repos/" + mvn + "/files/delete/" + started.ID} {
+			auth := rps.Auth()
+			if strings.Contains(p, mvn) {
+				auth = ps.Auth()
+			}
+			if st, b := s.API(t, http.MethodGet, p, nil, auth); st != http.StatusNotFound {
+				t.Fatalf("GET %s: status %d, want 404: %s", p, st, b)
+			}
+		}
+
 		// A delete leaves the blobs to the blob GC, whose grace (a day here) is not over yet.
 		keys := storedKeys(t, opts)
 		for _, content := range []string{"x g/a/1.0/a-1.0.jar", "x g/b/1.0/b-1.0.jar", "raw dir/one.bin", "raw keep.bin"} {
