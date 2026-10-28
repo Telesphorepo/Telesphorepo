@@ -22,7 +22,7 @@
 </script>
 
 <!-- A repository of your own is the default kind and says nothing more; a proxy or a group says what it is. -->
-{#snippet kind()}<span>{formats.title(repo.format)}{#if repo.kind !== "hosted"} · {kindPhrase(repo)}{/if}</span>{/snippet}
+{#snippet kind()}<span>{formats.title(repo.format)}{#if repo.kind !== "hosted"}{" · "}{kindPhrase(repo)}{/if}</span>{/snippet}
 
 <ItemCard title={repo.name} {href} titleClass="text-section" actions={kind}>
   {#snippet icon()}<FormatIcon format={repo.format} class="size-6" />{/snippet}

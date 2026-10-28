@@ -45,7 +45,7 @@
       {#if failing}
         <p class="flex items-start gap-1.5 text-body text-destructive">
           <TriangleAlertIcon aria-hidden="true" class="mt-0.5 size-4 shrink-0" />
-          <span>{p.last_error}{#if p.last_error_at}<span class="text-muted-foreground"> · <RelativeTime at={p.last_error_at} /></span>{/if}</span>
+          <span>{p.last_error}{#if p.last_error_at}<span class="text-muted-foreground">{" · "}<RelativeTime at={p.last_error_at} /></span>{/if}</span>
         </p>
       {:else if p.last_ok_at}
         <p class="text-body text-muted-foreground">Last answered <RelativeTime at={p.last_ok_at} /></p>

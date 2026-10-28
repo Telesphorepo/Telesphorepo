@@ -47,7 +47,7 @@
     {#if version.kind === "snapshot"}
       <dt class="text-muted-foreground">Builds</dt>
       <dd>
-        {formatCount(version.builds_count)}{#if version.latest_build}<span class="text-muted-foreground"> · latest is {buildInline(version.latest_build, version.latest_label)}</span>{/if}
+        {formatCount(version.builds_count)}{#if version.latest_build}<span class="text-muted-foreground">{" · "}latest is {buildInline(version.latest_build, version.latest_label)}</span>{/if}
       </dd>
     {/if}
   {/if}

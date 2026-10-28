@@ -140,7 +140,7 @@
     {#snippet title(l)}<span class={tone(l)} title={l.message}>{l.message}</span>{/snippet}
     {#snippet meta(l)}
       <time class="tabular-nums" datetime={l.at} title={formatDateTime(l.at)}>{timeOf.format(new Date(l.at))}</time>{#if l.source_repo}
-        · {l.source_repo}{/if}
+        {" · "}{l.source_repo}{/if}
     {/snippet}
     {#snippet empty()}
       <CompactEmpty icon={ScrollTextIcon} text={only ? "The log has no lines about this repository yet." : "The log has no lines yet."} />

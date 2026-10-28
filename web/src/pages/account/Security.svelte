@@ -289,7 +289,7 @@
               {#snippet title(m)}{m.item.name}{/snippet}
               {#snippet meta(m)}
                 {kindName(m)} · added <RelativeTime at={m.item.created_at} />{#if m.kind === "passkey"}
-                  · {#if m.item.last_used_at}used <RelativeTime at={m.item.last_used_at} />{:else}not used yet{/if}{/if}
+                  {" · "}{#if m.item.last_used_at}used <RelativeTime at={m.item.last_used_at} />{:else}not used yet{/if}{/if}
               {/snippet}
               {#snippet trailing(m)}
                 <Button

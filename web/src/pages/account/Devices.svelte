@@ -56,10 +56,10 @@
     {#snippet leading(d)}
       {#if admin && d.username}<UserAvatar name={d.username} size="md" />{:else if admin}<span class="flex size-8 items-center justify-center"><LaptopIcon class="size-5" /></span>{:else}<LaptopIcon class="size-5" />{/if}
     {/snippet}
-    {#snippet title(d)}{d.name}{#if admin && d.username}<span class="text-muted-foreground"> · {d.username}</span>{/if}{/snippet}
+    {#snippet title(d)}{d.name}{#if admin && d.username}<span class="text-muted-foreground">{" · "}{d.username}</span>{/if}{/snippet}
     {#snippet meta(d)}
       {#if d.last_used_at}Used <RelativeTime at={d.last_used_at} />{:else}Never used{/if}{#if !d.revoked_at}
-        · {new Date(d.expires_at) < new Date() ? "expired" : "expires"} <RelativeTime at={d.expires_at} />{/if}
+        {" · "}{new Date(d.expires_at) < new Date() ? "expired" : "expires"} <RelativeTime at={d.expires_at} />{/if}
     {/snippet}
     {#snippet trailing(d)}
       {@const state = deviceState(d)}

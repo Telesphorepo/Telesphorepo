@@ -131,7 +131,7 @@
       <StatusBadge tone="info">
         <span class="tabular-nums"
           >{stepWord[job.progress?.step ?? "files"]}{#if job.progress?.copied}
-            · <LiveValue value={job.progress.copied}>{formatCount(job.progress.copied)} copied</LiveValue>{/if}</span
+            {" · "}<LiveValue value={job.progress.copied}>{formatCount(job.progress.copied)} copied</LiveValue>{/if}</span
         >
       </StatusBadge>
     {:else if overview.data?.next_at}
