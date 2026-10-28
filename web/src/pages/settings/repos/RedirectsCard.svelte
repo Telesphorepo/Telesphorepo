@@ -1,7 +1,7 @@
 <!--
   The Overview card of a repository's redirects: other names that answer for it, publishes
-  included. A rename leaves the old name here; Add redirect (All repositories) adds one directly in
-  a short form. Each row says when a request last used the name; Remove (All repositories) asks
+  included. After a rename the old name shows here; with All repositories, Add redirect opens a
+  short form to add one without a rename. Each row says when a request last used the name; Remove (All repositories) asks
   first, names what stops working and frees the name.
 -->
 <script lang="ts">
@@ -70,7 +70,7 @@
 
 <Section
   title="Redirects"
-  description="Other names of {repo.name}. Builds, downloads and publishes through one of them reach this repository."
+  description="Other names of {repo.name}. Use one anywhere you would use {repo.name}: to download, to publish, in a build."
 >
   {#snippet actions()}
     {#if canEdit && redirects.data?.length}
@@ -95,7 +95,7 @@
       {/if}
     {/snippet}
     {#snippet empty()}
-      <CompactEmpty icon={SignpostIcon} text="None yet. A rename leaves the old name here.">
+      <CompactEmpty icon={SignpostIcon} text="None yet. When you rename the repository, its old name stays here as a redirect.">
         {#if canEdit}<Button size="sm" variant="outline" onclick={startAdd}><PlusIcon />Add redirect</Button>{/if}
       </CompactEmpty>
     {/snippet}
@@ -109,7 +109,7 @@
   canSubmit={!!newName.trim()}
   onSubmit={add}
 >
-  <FormField label="Name" for="redirect-name" hint="Enter a name that no repository or redirect holds.">
+  <FormField label="Name" for="redirect-name" hint="Enter a name that is not a repository or a redirect yet.">
     <Input id="redirect-name" bind:value={newName} autocomplete="off" />
   </FormField>
 </ShortFormDialog>
