@@ -113,10 +113,13 @@
     else if (top + el.offsetHeight > box.scrollTop + box.clientHeight) box.scrollTop = top + el.offsetHeight - box.clientHeight + 4;
   }
 
-  // The selected row comes into view once its folder has loaded.
+  // The selected row comes into view once its folder has loaded, once per selection: a page that
+  // loads below while the reader scrolls leaves the box where it is.
+  let revealed = "";
   $effect(() => {
     const key = selected;
-    if (!rows.some((r) => r.key === key)) return;
+    if (key === revealed || !rows.some((r) => r.key === key)) return;
+    revealed = key;
     tick().then(() => reveal(key));
   });
 
