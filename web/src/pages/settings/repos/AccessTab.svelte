@@ -46,6 +46,7 @@
   import ListIcon from "@lucide/svelte/icons/list";
   import NetworkIcon from "@lucide/svelte/icons/network";
   import WorkflowIcon from "@lucide/svelte/icons/workflow";
+  import ShieldCheckIcon from "@lucide/svelte/icons/shield-check";
   import PlusIcon from "@lucide/svelte/icons/plus";
   import XIcon from "@lucide/svelte/icons/x";
 
@@ -342,9 +343,17 @@
   const publishFind = $derived(canAccess && canPipelines && !blocked ? "Find a person or a CI pipeline" : canAccess ? "Find a person" : "Find a CI pipeline");
 </script>
 
-<!-- One list of a card: each row its name, its kind muted at the end, and × where the viewer may remove it. -->
+<!-- One list of a card: each row an icon of its kind (an avatar for a person), its name, an address's
+     label on the line under it, its kind muted at the end, and × where the viewer may remove it. -->
 {#snippet who(rows: TableSource<Row>, caption: string)}
   <ItemList source={rows} {caption} key={(r) => r.key} href={(r) => r.link}>
+    {#snippet leading(r)}
+      {#if r.rule?.kind === "cidr"}<NetworkIcon class="size-5" />
+      {:else if r.rule}<ListIcon class="size-5" />
+      {:else if r.key.startsWith("ci:")}<WorkflowIcon class="size-5" />
+      {:else if r.admins}<ShieldCheckIcon class="size-5" />
+      {:else}<UserAvatar name={r.title} size="sm" />{/if}
+    {/snippet}
     {#snippet title(r)}
       {#if r.rule?.kind === "cidr"}
         <span class="font-mono">{r.title}</span>
@@ -355,20 +364,24 @@
       {/if}
     {/snippet}
     {#snippet badges(r)}{#if r.off}<StatusBadge>Off</StatusBadge>{/if}{/snippet}
-    {#snippet trailing(r)}
+    {#snippet meta(r)}
       {#if r.rule?.kind === "cidr" && canSettings}
         {@const rule = r.rule}
         <Input
-          class="h-8 w-28 border-transparent bg-transparent text-right text-meta shadow-none hover:border-input focus-visible:border-input sm:w-40"
+          class="-ml-2 h-7 w-full border-transparent bg-transparent px-2 text-meta shadow-none hover:border-input focus-visible:border-input"
           placeholder="Add a label"
           aria-label="Label of {rule.value}"
           autocomplete="off"
+          maxlength={200}
           value={rule.note}
           onchange={(e) => relabel(rule, e.currentTarget)}
         />
-      {:else if r.rule?.kind === "cidr"}
-        <span class="text-meta text-muted-foreground">{r.rule.note}</span>
-      {:else}
+      {:else if r.rule?.kind === "cidr" && r.rule.note}
+        <span class="block whitespace-normal break-words">{r.rule.note}</span>
+      {/if}
+    {/snippet}
+    {#snippet trailing(r)}
+      {#if r.rule?.kind !== "cidr"}
         <span class="text-meta text-muted-foreground">{r.kind}</span>
       {/if}
       {#if r.admins && rows === publishRows}
