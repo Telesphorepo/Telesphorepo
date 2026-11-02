@@ -4,7 +4,7 @@
 # plain build sets them to the host, so it builds for the host.
 
 # The UI is platform independent: build it once on the build platform.
-FROM --platform=$BUILDPLATFORM oven/bun:1.4.3-alpine AS web
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.4-alpine AS web
 WORKDIR /src/web
 COPY web/package.json web/bun.lock ./
 RUN --mount=type=cache,target=/root/.bun/install/cache bun install --frozen-lockfile
@@ -12,7 +12,7 @@ COPY web/ ./
 RUN bun run build
 
 # Go cross-compiles, so this stage runs on the build platform and never under QEMU.
-FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine3.24 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine3.24 AS build
 ARG VERSION=dev
 ARG TARGETOS
 ARG TARGETARCH
