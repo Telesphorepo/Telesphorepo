@@ -113,6 +113,21 @@ FROM tree_entries t JOIN assets a ON a.id = t.asset_id
 WHERE t.repo_id = sqlc.arg(repo_id) AND t.parent = sqlc.arg(parent) AND t.kind = 1 AND t.sort_key >= sqlc.arg(lower)
 ORDER BY t.sort_key LIMIT sqlc.arg(limit);
 
+-- name: ListTreeFilesDesc :many
+SELECT t.sort_key, a.id, a.path, a.size, a.sha256, a.uploaded_by, a.updated_at, a.build_id
+FROM tree_entries t JOIN assets a ON a.id = t.asset_id
+WHERE t.repo_id = sqlc.arg(repo_id) AND t.parent = sqlc.arg(parent) AND t.kind = 1 AND t.sort_key < sqlc.arg(upper)
+ORDER BY t.sort_key DESC LIMIT sqlc.arg(limit);
+
+-- The last key of a kind of children of a folder: one seek.
+-- name: LastTreeKey :one
+SELECT sort_key FROM tree_entries
+WHERE repo_id = sqlc.arg(repo_id) AND parent = sqlc.arg(parent) AND kind = sqlc.arg(kind)
+ORDER BY sort_key DESC LIMIT 1;
+
+-- name: HasTreeFile :one
+SELECT EXISTS (SELECT 1 FROM tree_entries WHERE repo_id = ? AND parent = ? AND kind = 1 AND sort_key = ?);
+
 -- Content-addressed blobs (internal/blobs).
 
 -- name: GetBlob :one

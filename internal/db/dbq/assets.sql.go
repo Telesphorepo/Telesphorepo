@@ -245,6 +245,23 @@ func (q *Queries) GetUploadSession(ctx context.Context, id string) (UploadSessio
 	return i, err
 }
 
+const hasTreeFile = `-- name: HasTreeFile :one
+SELECT EXISTS (SELECT 1 FROM tree_entries WHERE repo_id = ? AND parent = ? AND kind = 1 AND sort_key = ?)
+`
+
+type HasTreeFileParams struct {
+	RepoID  int64
+	Parent  string
+	SortKey []byte
+}
+
+func (q *Queries) HasTreeFile(ctx context.Context, arg HasTreeFileParams) (bool, error) {
+	row := q.db.QueryRowContext(ctx, hasTreeFile, arg.RepoID, arg.Parent, arg.SortKey)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const insertBlob = `-- name: InsertBlob :one
 INSERT INTO blobs (sha256, size, refs, unreferenced_at, created_at, md5, sha1) VALUES (?, ?, 0, ?, ?, ?, ?)
 RETURNING id
@@ -303,6 +320,26 @@ func (q *Queries) InsertUploadSession(ctx context.Context, arg InsertUploadSessi
 		arg.ExpiresAt,
 	)
 	return err
+}
+
+const lastTreeKey = `-- name: LastTreeKey :one
+SELECT sort_key FROM tree_entries
+WHERE repo_id = ?1 AND parent = ?2 AND kind = ?3
+ORDER BY sort_key DESC LIMIT 1
+`
+
+type LastTreeKeyParams struct {
+	RepoID int64
+	Parent string
+	Kind   int64
+}
+
+// The last key of a kind of children of a folder: one seek.
+func (q *Queries) LastTreeKey(ctx context.Context, arg LastTreeKeyParams) ([]byte, error) {
+	row := q.db.QueryRowContext(ctx, lastTreeKey, arg.RepoID, arg.Parent, arg.Kind)
+	var sort_key []byte
+	err := row.Scan(&sort_key)
+	return sort_key, err
 }
 
 const listAssetsAfter = `-- name: ListAssetsAfter :many
@@ -716,6 +753,68 @@ func (q *Queries) ListTreeFiles(ctx context.Context, arg ListTreeFilesParams) ([
 	var items []ListTreeFilesRow
 	for rows.Next() {
 		var i ListTreeFilesRow
+		if err := rows.Scan(
+			&i.SortKey,
+			&i.ID,
+			&i.Path,
+			&i.Size,
+			&i.Sha256,
+			&i.UploadedBy,
+			&i.UpdatedAt,
+			&i.BuildID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTreeFilesDesc = `-- name: ListTreeFilesDesc :many
+SELECT t.sort_key, a.id, a.path, a.size, a.sha256, a.uploaded_by, a.updated_at, a.build_id
+FROM tree_entries t JOIN assets a ON a.id = t.asset_id
+WHERE t.repo_id = ?1 AND t.parent = ?2 AND t.kind = 1 AND t.sort_key < ?3
+ORDER BY t.sort_key DESC LIMIT ?4
+`
+
+type ListTreeFilesDescParams struct {
+	RepoID int64
+	Parent string
+	Upper  []byte
+	Limit  int64
+}
+
+type ListTreeFilesDescRow struct {
+	SortKey    []byte
+	ID         int64
+	Path       string
+	Size       int64
+	Sha256     string
+	UploadedBy sql.NullInt64
+	UpdatedAt  int64
+	BuildID    sql.NullInt64
+}
+
+func (q *Queries) ListTreeFilesDesc(ctx context.Context, arg ListTreeFilesDescParams) ([]ListTreeFilesDescRow, error) {
+	rows, err := q.db.QueryContext(ctx, listTreeFilesDesc,
+		arg.RepoID,
+		arg.Parent,
+		arg.Upper,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListTreeFilesDescRow
+	for rows.Next() {
+		var i ListTreeFilesDescRow
 		if err := rows.Scan(
 			&i.SortKey,
 			&i.ID,

@@ -12,22 +12,22 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/repopath"
 )
 
-// tree_entries holds the children of each folder of a repo, keyed by repopath.FolderKey or
-// repopath.FileKey of their names, so a page of a folder is one range of its primary key. The pipeline writes it in the
+// tree_entries holds the children of each folder of a repo, keyed by repopath.NameKey of their
+// names, so a page of a folder is one range of its primary key. The pipeline writes it in the
 // transaction of every asset insert and delete; the repo row's delete takes it with it.
 
 // treeAdd records file p, asset assetID, in tree_entries. A file that has its row (a replace)
 // changes nothing; a new one adds its row and counts one more file in each folder on its path.
 func treeAdd(ctx context.Context, q *dbq.Queries, repoID, assetID int64, p string) error {
 	dir, name := splitPath(p)
-	n, err := q.AddTreeFile(ctx, dbq.AddTreeFileParams{RepoID: repoID, Parent: dir, SortKey: repopath.FileKey(name), Name: name,
+	n, err := q.AddTreeFile(ctx, dbq.AddTreeFileParams{RepoID: repoID, Parent: dir, SortKey: repopath.NameKey(name), Name: name,
 		AssetID: sql.NullInt64{Int64: assetID, Valid: true}})
 	if err != nil || n == 0 {
 		return err
 	}
 	for parent, folder := range foldersOf(dir) {
 		if err := q.AddTreeFolderFile(ctx, dbq.AddTreeFolderFileParams{RepoID: repoID, Parent: parent,
-			SortKey: repopath.FolderKey(folder), Name: folder}); err != nil {
+			SortKey: repopath.NameKey(folder), Name: folder}); err != nil {
 			return err
 		}
 	}
@@ -38,12 +38,12 @@ func treeAdd(ctx context.Context, q *dbq.Queries, repoID, assetID int64, p strin
 // on its path; a folder without files goes.
 func treeRemove(ctx context.Context, q *dbq.Queries, repoID int64, p string) error {
 	dir, name := splitPath(p)
-	n, err := q.DeleteTreeFile(ctx, dbq.DeleteTreeFileParams{RepoID: repoID, Parent: dir, SortKey: repopath.FileKey(name)})
+	n, err := q.DeleteTreeFile(ctx, dbq.DeleteTreeFileParams{RepoID: repoID, Parent: dir, SortKey: repopath.NameKey(name)})
 	if err != nil || n == 0 {
 		return err
 	}
 	for parent, folder := range foldersOf(dir) {
-		key := repopath.FolderKey(folder)
+		key := repopath.NameKey(folder)
 		files, err := q.DropTreeFolderFile(ctx, dbq.DropTreeFolderFileParams{RepoID: repoID, Parent: parent, SortKey: key})
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
@@ -85,13 +85,13 @@ func foldersOf(dir string) func(yield func(parent, name string) bool) {
 
 // TreeFolder is a sub-folder in a page of a folder.
 type TreeFolder struct {
-	Key  []byte // repopath.FolderKey(Name)
+	Key  []byte // repopath.NameKey(Name)
 	Name string
 }
 
 // TreeFile is a file in a page of a folder.
 type TreeFile struct {
-	Key   []byte // repopath.FileKey of its name
+	Key   []byte // repopath.NameKey of its name
 	Asset *Asset // ID, RepoID, Path, Size, SHA256, UploadedBy, UpdatedAt and BuildID
 }
 
@@ -102,11 +102,7 @@ func (p *Pipeline) TreeFolders(ctx context.Context, repoID int64, dir string, af
 	q := dbq.New(p.db.R)
 	var out []TreeFolder
 	if desc {
-		upper := after
-		if upper == nil {
-			upper = []byte{0xFF} // above every folder key: one starts with a tag
-		}
-		rows, err := q.ListTreeFoldersDesc(ctx, dbq.ListTreeFoldersDescParams{RepoID: repoID, Parent: dir, Upper: upper, Limit: int64(limit)})
+		rows, err := q.ListTreeFoldersDesc(ctx, dbq.ListTreeFoldersDescParams{RepoID: repoID, Parent: dir, Upper: upperBefore(after), Limit: int64(limit)})
 		for _, r := range rows {
 			out = append(out, TreeFolder{Key: r.SortKey, Name: r.Name})
 		}
@@ -119,11 +115,22 @@ func (p *Pipeline) TreeFolders(ctx context.Context, repoID int64, dir string, af
 	return out, err
 }
 
-// TreeFiles returns up to limit files of folder dir of repo in key order, after the key after
-// (from the first when nil): one range of the primary key of tree_entries and a lookup of each
-// file's asset row.
-func (p *Pipeline) TreeFiles(ctx context.Context, repoID int64, dir string, after []byte, limit int) ([]TreeFile, error) {
-	rows, err := dbq.New(p.db.R).ListTreeFiles(ctx, dbq.ListTreeFilesParams{RepoID: repoID, Parent: dir, Lower: lowerAfter(after), Limit: int64(limit)})
+// TreeFiles returns up to limit files of folder dir of repo in key order (descending when desc),
+// after the key after (from the first when nil): one range of the primary key of tree_entries and
+// a lookup of each file's asset row.
+func (p *Pipeline) TreeFiles(ctx context.Context, repoID int64, dir string, after []byte, desc bool, limit int) ([]TreeFile, error) {
+	q := dbq.New(p.db.R)
+	var rows []dbq.ListTreeFilesRow
+	var err error
+	if desc {
+		var d []dbq.ListTreeFilesDescRow
+		d, err = q.ListTreeFilesDesc(ctx, dbq.ListTreeFilesDescParams{RepoID: repoID, Parent: dir, Upper: upperBefore(after), Limit: int64(limit)})
+		for _, r := range d {
+			rows = append(rows, dbq.ListTreeFilesRow(r))
+		}
+	} else {
+		rows, err = q.ListTreeFiles(ctx, dbq.ListTreeFilesParams{RepoID: repoID, Parent: dir, Lower: lowerAfter(after), Limit: int64(limit)})
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -135,15 +142,28 @@ func (p *Pipeline) TreeFiles(ctx context.Context, repoID int64, dir string, afte
 	return out, nil
 }
 
-// VersionFolders reports whether folder dir of repo has sub-folders, and whether the name of
-// every one starts with a digit (the versions of an artifact). One seek: the versions sort before
-// every other folder, so the last folder is a version only when every folder is.
-func (p *Pipeline) VersionFolders(ctx context.Context, repoID int64, dir string) (has, digits bool, err error) {
-	last, err := p.TreeFolders(ctx, repoID, dir, nil, true, 1)
-	if err != nil || len(last) == 0 {
+// VersionNames reports whether folder dir of repo has children of a kind (the files when file,
+// else the sub-folders), and whether the name of every one starts with a digit (the versions of
+// an artifact, or files named for them). One seek: the versions sort before every other name, so
+// the last child is a version only when every child is.
+func (p *Pipeline) VersionNames(ctx context.Context, repoID int64, dir string, file bool) (has, digits bool, err error) {
+	kind := int64(0)
+	if file {
+		kind = 1
+	}
+	last, err := dbq.New(p.db.R).LastTreeKey(ctx, dbq.LastTreeKeyParams{RepoID: repoID, Parent: dir, Kind: kind})
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
 		return false, false, err
 	}
-	return true, repopath.IsVersionKey(last[0].Key), nil
+	return true, repopath.IsVersionKey(last), nil
+}
+
+// HasTreeFile reports whether folder dir of repo holds a file named name: one seek.
+func (p *Pipeline) HasTreeFile(ctx context.Context, repoID int64, dir, name string) (bool, error) {
+	return dbq.New(p.db.R).HasTreeFile(ctx, dbq.HasTreeFileParams{RepoID: repoID, Parent: dir, SortKey: repopath.NameKey(name)})
 }
 
 // lowerAfter returns the smallest key after key, the key with a 0 byte appended; the empty key
@@ -153,4 +173,13 @@ func lowerAfter(key []byte) []byte {
 		return []byte{}
 	}
 	return append(slices.Clip(key), 0x00)
+}
+
+// upperBefore returns the bound of a descending page: key itself (the page takes the keys below
+// it), or a key above every name key (each starts with a tag below 0xFF) for nil.
+func upperBefore(key []byte) []byte {
+	if key == nil {
+		return []byte{0xFF}
+	}
+	return key
 }

@@ -5,7 +5,7 @@
 
 import { api, errorMessage, type TreeEntry, type Version } from "$lib/api";
 import { Keyset } from "$lib/load.svelte";
-import { baseName, parentOf, sideOf } from "../browse";
+import { baseName, parentOf } from "../browse";
 
 /** `repo` is the repository that serves a file of a group. */
 export type Entry = { name: string; path: string; type: "dir" | "file"; size?: number; repo?: string };
@@ -64,12 +64,8 @@ export class Column {
   get entries(): Entry[] {
     if (this.#build) return this.#build;
     const items = this.#tree?.items ?? [];
-    const paths = new Set(items.map((e) => e.path));
     return items
-      .filter((e) => {
-        const of = e.type === "file" ? sideOf(e.path) : null;
-        return !of || !paths.has(of);
-      })
+      .filter((e) => !e.side_of)
       .map((e) => ({ name: e.name.replace(/\/$/, ""), path: e.path, type: e.type, size: e.type === "file" ? e.size : undefined, repo: e.repo }));
   }
 }

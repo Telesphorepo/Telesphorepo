@@ -6,14 +6,6 @@ import type { BuildRecord } from "$lib/api";
 /** The link of b with rel, if the provider made one. */
 export const buildLink = (b: BuildRecord, rel: string) => b.links.find((l) => l.rel === rel);
 
-const sideExt = /\.(md5|sha1|sha256|sha512|asc|sig)$/;
-
-/** A checksum or signature of another file: a.jar.sha1 → "a.jar"; null for any other name. */
-export function sideOf(path: string): string | null {
-  const m = path.match(sideExt);
-  return m ? path.slice(0, -m[0].length) : null;
-}
-
 /** The label of a checksum or signature file next to its file: "SHA-1". */
 export function sideLabel(path: string): string {
   const ext = path.slice(path.lastIndexOf(".") + 1);

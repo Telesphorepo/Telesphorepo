@@ -36,7 +36,6 @@
   import BuildInline from "./BuildInline.svelte";
   import MemberTag from "./MemberTag.svelte";
   import type { TreeEntry as TreeNode } from "$lib/api";
-  import { sideOf } from "../browse";
   import FolderIcon from "@lucide/svelte/icons/folder";
   import FileIcon from "@lucide/svelte/icons/file";
   import FolderOpenIcon from "@lucide/svelte/icons/folder-open";
@@ -76,14 +75,8 @@
   /* svelte-ignore state_referenced_locally */
   const list = new Keyset<TreeNode>((p) => api.repos.tree(repo.name, folder, p), FOLDER_PAGE, first);
 
-  // A checksum or signature whose file is listed is not a row of its own.
-  const rows = $derived.by(() => {
-    const paths = new Set(list.items.map((e) => e.path));
-    return list.items.filter((e) => {
-      const of = e.type === "file" ? sideOf(e.path) : null;
-      return !of || !paths.has(of);
-    });
-  });
+  // A checksum or signature of a file in the folder is not a row of its own.
+  const rows = $derived(list.items.filter((e) => !e.side_of));
   const source: TableSource<TreeNode> = {
     get items() {
       return rows;

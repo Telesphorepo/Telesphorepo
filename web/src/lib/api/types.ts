@@ -566,6 +566,8 @@ export type TreeEntry = {
   build?: BuildRecord | null;
   /** A file in the listing of a group: the member that serves it. */
   repo?: string;
+  /** A checksum or signature whose file is in the same folder: that file's name. */
+  side_of?: string;
 };
 
 /** POST /api/repos/{name}/files/delete and /files/delete/plan: files by path, and folders by prefix (ending in "/"). */

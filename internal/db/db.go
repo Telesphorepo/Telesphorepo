@@ -20,12 +20,12 @@ import (
 // CoreComponent is the name of the kernel's schema component.
 const CoreComponent = "core"
 
-// The SQL functions tree_folder_key(name) and tree_file_key(name) are repopath.FolderKey and
-// repopath.FileKey, for the migration that fills tree_entries from assets. Every connection of
-// this process has them.
+// The SQL functions tree_folder_key(name) and tree_file_key(name) are both repopath.NameKey, for
+// the core migrations that fill tree_entries from assets and key its files (0006 calls both).
+// Every connection of this process has them.
 func init() {
-	registerNameKey("tree_folder_key", repopath.FolderKey)
-	registerNameKey("tree_file_key", repopath.FileKey)
+	registerNameKey("tree_folder_key", repopath.NameKey)
+	registerNameKey("tree_file_key", repopath.NameKey)
 }
 
 func registerNameKey(fn string, key func(string) []byte) {

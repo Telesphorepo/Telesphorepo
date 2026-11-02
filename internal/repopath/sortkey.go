@@ -1,10 +1,10 @@
 package repopath
 
-// The tags that start a folder key: a name that starts with a digit (a version) sorts before
-// every other name, as a digit does in byte order.
+// The tags that start a name key: a name that starts with a digit (a version) sorts before every
+// other name, as a digit does in byte order.
 const (
-	folderVersion = 0x01
-	folderText    = 0x02
+	nameVersion = 0x01
+	nameText    = 0x02
 )
 
 // The tags of the parts of a version key. A number is above a text, and the end of a name lies
@@ -15,23 +15,20 @@ const (
 	keyNum  = 0x03
 )
 
-// FileKey returns the key that orders the files of one folder: the bytes of the name, so a side
-// file follows its file ("x.jar" < "x.jar.sha1").
-func FileKey(name string) []byte { return []byte(name) }
-
-// FolderKey returns the key that orders the sub-folders of one folder. A name that starts with an
-// ASCII digit is a version: the tag folderVersion and its version key, so the keys compare as the
-// versions do ("1.2" < "1.10", "1.0-SNAPSHOT" < "1.0"). Any other name is the tag folderText and
-// its bytes ("acme" < "acme-b"). The versions come first.
-func FolderKey(name string) []byte {
+// NameKey returns the key that orders the children of one folder, the folders among themselves
+// and the files among themselves. A name that starts with an ASCII digit is a version: the tag
+// nameVersion and its version key, so the keys compare as the versions do ("1.2" < "1.10",
+// "1.0-SNAPSHOT" < "1.0"). Any other name is the tag nameText and its bytes ("acme" < "acme-b").
+// The versions come first.
+func NameKey(name string) []byte {
 	if name != "" && name[0] >= '0' && name[0] <= '9' {
-		return appendVersionKey([]byte{folderVersion}, name)
+		return appendVersionKey([]byte{nameVersion}, name)
 	}
-	return append([]byte{folderText}, name...)
+	return append([]byte{nameText}, name...)
 }
 
-// IsVersionKey reports whether folder key is the key of a name that starts with a digit.
-func IsVersionKey(key []byte) bool { return len(key) > 0 && key[0] == folderVersion }
+// IsVersionKey reports whether name key is the key of a name that starts with a digit.
+func IsVersionKey(key []byte) bool { return len(key) > 0 && key[0] == nameVersion }
 
 // appendVersionKey appends the version key of name. The name splits into parts at ".", "-", "+"
 // and "_", and the parts compare in turn: two numbers by value ("1.2" < "1.10"), two texts by

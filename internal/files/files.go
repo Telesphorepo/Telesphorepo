@@ -50,8 +50,11 @@ type Node struct {
 	// Repo is the member that serves the file, in the listing of a group; absent elsewhere and
 	// on a folder.
 	Repo string `json:"repo,omitempty"`
+	// SideOf is the name of the file that this checksum or signature belongs to ("a.jar" for
+	// a.jar.sha1), when that file is in the same folder; absent elsewhere.
+	SideOf string `json:"side_of,omitempty"`
 
-	key []byte // repopath.FolderKey or FileKey of Name: the order of a group's merge
+	key []byte // repopath.NameKey of Name: the order of a group's merge
 }
 
 // File is one file with its details (GET /api/repos/{name}/file).
@@ -64,8 +67,8 @@ type File struct {
 	Kind        string    `json:"kind"` // "artifact", "metadata" or "index"
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
-	UploadedBy  string    `json:"uploaded_by"` // username; "" when unknown or imported
-	Build       *ci.Build `json:"build"`       // the CI build record; null when none
+	UploadedBy  string    `json:"uploaded_by"`    // username; "" when unknown or imported
+	Build       *ci.Build `json:"build"`          // the CI build record; null when none
 	Repo        string    `json:"repo,omitempty"` // a group: the member that serves the file
 }
 
@@ -111,10 +114,7 @@ func parseCursor(after string) (cursor, error) {
 	if _, err := repopath.Parse(name); err != nil || strings.Contains(name, "/") {
 		return cursor{}, ErrInvalid
 	}
-	if folder {
-		return cursor{key: repopath.FolderKey(name)}, nil
-	}
-	return cursor{file: true, key: repopath.FileKey(name)}, nil
+	return cursor{file: !folder, key: repopath.NameKey(name)}, nil
 }
 
 // cursorOf returns the cursor that a page ending with n hands on: its name, with "/" for a folder.
@@ -125,22 +125,39 @@ func cursorOf(n Node) string {
 	return n.Name
 }
 
+// order is the direction of each kind of children of a folder: newest first when the name of
+// every child of the kind starts with a digit.
+type order struct{ foldersDesc, filesDesc bool }
+
+// versionNames reads which kinds of children of folder dir of repo have names that all start
+// with a digit; has reports whether the folder holds a child of each kind. Two seeks.
+func (s *Service) versionNames(ctx context.Context, repoID int64, dir string) (hasFolders, foldersDigits, hasFiles, filesDigits bool, err error) {
+	if hasFolders, foldersDigits, err = s.assets.VersionNames(ctx, repoID, dir, false); err != nil {
+		return
+	}
+	hasFiles, filesDigits, err = s.assets.VersionNames(ctx, repoID, dir, true)
+	return
+}
+
 // Tree returns up to limit direct children of folder dir ("" or "a/b/") after the cursor after
-// (a child name; a folder's name ends in "/"): the folders in the order of repopath.FolderKey
-// (versions first, "1.2" before "1.10", then the other names by their bytes), then the files by
-// their bytes. When the name of every folder starts with a digit, the folders come newest first.
-// A page is one seek for that rule and one range of the index per kind, however large the folder
-// is. next is the cursor of the next page, "" at the end.
+// (a child name; a folder's name ends in "/"): the folders, then the files, each kind in the
+// order of repopath.NameKey (versions first, "1.2" before "1.10", then the other names by their
+// bytes). When the name of every folder starts with a digit, the folders come newest first, and
+// the same for the files. A checksum or signature whose file is in the folder names it in
+// SideOf. A page is two seeks for the order, one range of the index per kind and one seek per
+// checksum or signature on it, however large the folder is. next is the cursor of the next page,
+// "" at the end.
 func (s *Service) Tree(ctx context.Context, repo *repos.Repo, dir, after string, limit int) ([]Node, string, error) {
 	c, err := parseCursor(after)
 	if err != nil {
 		return nil, "", err
 	}
-	has, digits, err := s.assets.VersionFolders(ctx, repo.ID, dir)
+	hasFolders, foldersDigits, hasFiles, filesDigits, err := s.versionNames(ctx, repo.ID, dir)
 	if err != nil {
 		return nil, "", err
 	}
-	out, err := s.page(ctx, repo, dir, c, has && digits, limit+1)
+	o := order{foldersDesc: hasFolders && foldersDigits, filesDesc: hasFiles && filesDigits}
+	out, err := s.page(ctx, repo, dir, c, o, limit+1)
 	if err != nil {
 		return nil, "", err
 	}
@@ -149,16 +166,59 @@ func (s *Service) Tree(ctx context.Context, repo *repos.Repo, dir, after string,
 		out = out[:limit]
 		next = cursorOf(out[limit-1])
 	}
+	if err := s.markSides(ctx, []*repos.Repo{repo}, dir, out); err != nil {
+		return nil, "", err
+	}
 	return out, next, nil
 }
 
-// page returns up to n children of folder dir of repo after c: the folders (newest first when
-// desc), then the files.
-func (s *Service) page(ctx context.Context, repo *repos.Repo, dir string, c cursor, desc bool, n int) ([]Node, error) {
+// sideExts are the extensions of a checksum or signature of another file.
+var sideExts = []string{".md5", ".sha1", ".sha256", ".sha512", ".asc", ".sig"}
+
+// sideBase returns the name of the file that checksum or signature name belongs to
+// ("a.jar.sha1" gives "a.jar"); "" for any other name.
+func sideBase(name string) string {
+	for _, ext := range sideExts {
+		if base, ok := strings.CutSuffix(name, ext); ok && base != "" {
+			return base
+		}
+	}
+	return ""
+}
+
+// markSides sets SideOf of each checksum or signature among nodes whose file is in folder dir of
+// one of repos: one seek per such file and repo, until one holds it.
+func (s *Service) markSides(ctx context.Context, repos []*repos.Repo, dir string, nodes []Node) error {
+	for i := range nodes {
+		n := &nodes[i]
+		base := ""
+		if n.Type == "file" {
+			base = sideBase(n.Name)
+		}
+		if base == "" {
+			continue
+		}
+		for _, r := range repos {
+			ok, err := s.assets.HasTreeFile(ctx, r.ID, dir, base)
+			if err != nil {
+				return err
+			}
+			if ok {
+				n.SideOf = base
+				break
+			}
+		}
+	}
+	return nil
+}
+
+// page returns up to n children of folder dir of repo after c: the folders, then the files, each
+// in the direction of o.
+func (s *Service) page(ctx context.Context, repo *repos.Repo, dir string, c cursor, o order, n int) ([]Node, error) {
 	var out []Node
 	fileAfter := c.key
 	if !c.file {
-		folders, err := s.assets.TreeFolders(ctx, repo.ID, dir, c.key, desc, n)
+		folders, err := s.assets.TreeFolders(ctx, repo.ID, dir, c.key, o.foldersDesc, n)
 		if err != nil {
 			return nil, err
 		}
@@ -170,7 +230,7 @@ func (s *Service) page(ctx context.Context, repo *repos.Repo, dir string, c curs
 	if len(out) >= n {
 		return out, nil
 	}
-	files, err := s.assets.TreeFiles(ctx, repo.ID, dir, fileAfter, n-len(out))
+	files, err := s.assets.TreeFiles(ctx, repo.ID, dir, fileAfter, o.filesDesc, n-len(out))
 	if err != nil {
 		return nil, err
 	}
@@ -200,31 +260,35 @@ func (s *Service) page(ctx context.Context, repo *repos.Repo, dir string, c curs
 }
 
 // GroupTree is Tree for a group: the merged children of folder dir in the members the reader
-// may read, in read order. The folders come newest first when the name of every folder of every
-// member starts with a digit (one seek per member). Each member is read from the same cursor,
-// limit+1 children, and the pages merge in the order of Tree. A folder that several members hold
-// is one entry; a file that several members hold comes from the first of them, the one the group
-// serves, and names it in Repo. The first limit entries of the merge are exactly the first limit
-// of the union: a member holds every one of its entries below the limit-th in its own page. next
-// is the cursor of the last entry while any entry follows it in the union, "" at the end.
+// may read, in read order. Each kind comes newest first when the name of every child of that
+// kind in every member starts with a digit (two seeks per member). Each member is read from the
+// same cursor, limit+1 children, and the pages merge in the order of Tree. A folder that several
+// members hold is one entry; a file that several members hold comes from the first of them, the
+// one the group serves, and names it in Repo. A checksum or signature names its file in SideOf
+// when any member holds that file. The first limit entries of the merge are exactly the first
+// limit of the union: a member holds every one of its entries below the limit-th in its own
+// page. next is the cursor of the last entry while any entry follows it in the union, "" at the
+// end.
 func (s *Service) GroupTree(ctx context.Context, members []*repos.Repo, dir, after string, limit int) ([]Node, string, error) {
 	c, err := parseCursor(after)
 	if err != nil {
 		return nil, "", err
 	}
-	anyFolder, allDigits := false, true
+	anyFolder, foldersDigits, anyFile, filesDigits := false, true, false, true
 	for _, m := range members {
-		has, digits, err := s.assets.VersionFolders(ctx, m.ID, dir)
+		hasFolders, fd, hasFiles, fi, err := s.versionNames(ctx, m.ID, dir)
 		if err != nil {
 			return nil, "", err
 		}
-		anyFolder = anyFolder || has
-		allDigits = allDigits && (!has || digits)
+		anyFolder = anyFolder || hasFolders
+		foldersDigits = foldersDigits && (!hasFolders || fd)
+		anyFile = anyFile || hasFiles
+		filesDigits = filesDigits && (!hasFiles || fi)
 	}
-	desc := anyFolder && allDigits
+	o := order{foldersDesc: anyFolder && foldersDigits, filesDesc: anyFile && filesDigits}
 	var all []Node
 	for _, m := range members {
-		page, err := s.page(ctx, m, dir, c, desc, limit+1)
+		page, err := s.page(ctx, m, dir, c, o, limit+1)
 		if err != nil {
 			return nil, "", err
 		}
@@ -237,26 +301,30 @@ func (s *Service) GroupTree(ctx context.Context, members []*repos.Repo, dir, aft
 	}
 	// A stable sort keeps the members' read order among the copies of one path, and the first
 	// copy is the one the group serves.
-	slices.SortStableFunc(all, func(a, b Node) int { return compareNodes(a, b, desc) })
+	slices.SortStableFunc(all, func(a, b Node) int { return compareNodes(a, b, o) })
 	out := slices.CompactFunc(all, func(a, b Node) bool { return a.Type == b.Type && bytes.Equal(a.key, b.key) })
 	next := ""
 	if len(out) > limit {
 		out = out[:limit]
 		next = cursorOf(out[limit-1])
 	}
+	if err := s.markSides(ctx, members, dir, out); err != nil {
+		return nil, "", err
+	}
 	return out, next, nil
 }
 
-// compareNodes orders two children of one folder as Tree lists them: folders (descending keys
-// when desc), then files.
-func compareNodes(a, b Node, desc bool) int {
-	switch {
-	case a.Type == b.Type && a.Type == "dir" && desc:
-		return bytes.Compare(b.key, a.key)
-	case a.Type == b.Type:
-		return bytes.Compare(a.key, b.key)
-	case a.Type == "dir":
-		return -1
+// compareNodes orders two children of one folder as Tree lists them: folders, then files, each
+// kind in the direction of o.
+func compareNodes(a, b Node, o order) int {
+	if a.Type != b.Type {
+		if a.Type == "dir" {
+			return -1
+		}
+		return 1
 	}
-	return 1
+	if desc := (a.Type == "dir" && o.foldersDesc) || (a.Type == "file" && o.filesDesc); desc {
+		return bytes.Compare(b.key, a.key)
+	}
+	return bytes.Compare(a.key, b.key)
 }

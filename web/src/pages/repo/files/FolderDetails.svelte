@@ -12,7 +12,6 @@
   import Loading from "$lib/components/Loading.svelte";
   import FileSize from "$lib/components/FileSize.svelte";
   import RelativeTime from "$lib/components/RelativeTime.svelte";
-  import { sideOf } from "../browse";
   import { formatCount } from "$lib/format";
 
   let {
@@ -38,11 +37,7 @@
   const held = $derived.by(() => {
     const page = kids?.data;
     if (!page) return null;
-    const paths = new Set(page.items.map((e) => e.path));
-    const shown = page.items.filter((e) => {
-      const of = e.type === "file" ? sideOf(e.path) : null;
-      return !of || !paths.has(of);
-    });
+    const shown = page.items.filter((e) => !e.side_of);
     const files = shown.filter((e) => e.type === "file");
     const last = files.reduce<string>((m, f) => (f.updated_at && f.updated_at > m ? f.updated_at : m), "");
     return { folders: shown.length - files.length, files: files.length, last, more: page.next !== null };

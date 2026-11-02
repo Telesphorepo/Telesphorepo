@@ -33,7 +33,8 @@ type treeNode struct {
 	SHA256     string     `json:"sha256"`
 	UpdatedAt  *time.Time `json:"updated_at"`
 	UploadedBy string     `json:"uploaded_by"`
-	Repo       string     `json:"repo"` // a group: the member that serves the file
+	Repo       string     `json:"repo"`    // a group: the member that serves the file
+	SideOf     string     `json:"side_of"` // a checksum or signature: its file in the folder
 }
 
 // treePage fetches one page of GET /api/repos/{repo}/tree.
@@ -198,6 +199,15 @@ func TestTree(t *testing.T) {
 	for i := 1; i <= 12; i++ {
 		files = append(files, fmt.Sprintf("com/acme/many/v%02d/a.txt", i), fmt.Sprintf("com/acme/many/v%02d/b.txt", i))
 	}
+	// Builds named by number: folders and files whose names all start with a digit, a checksum
+	// of a file and one whose file is missing.
+	for _, n := range []string{"16", "9", "100"} {
+		files = append(files, "com/acme-b/builds/"+n+"/f.txt", "com/acme-b/builds/"+n+".json")
+	}
+	files = append(files, "com/acme-b/builds/100.json.sha1", "com/acme-b/builds/7.json.sha1")
+	// Files of both kinds of names, with checksums and signatures.
+	files = append(files, "com/acme-b/mixed/2.0.jar", "com/acme-b/mixed/2.0.jar.sha1", "com/acme-b/mixed/readme.txt",
+		"com/acme-b/mixed/x.jar", "com/acme-b/mixed/x.jar.asc", "com/acme-b/mixed/lone.txt.md5")
 	ps := s.MintSession(t, w, repo)
 	for _, f := range files {
 		resp, body := authPut(t, s, "/maven/"+repo+"/"+f, "content of "+f, ps.Auth())
@@ -222,8 +232,9 @@ func TestTree(t *testing.T) {
 	if got := nodeNames(items); !slices.Equal(got, []string{"dir:other", "dir:ver"}) || next != nil {
 		t.Fatalf("com/acme page 2: %v next %v, want [dir:other dir:ver] and no next", got, next)
 	}
-	// Folders whose names all start with a digit list newest first, then the files by name; the
-	// same order on every page size, across the turn from folders to files.
+	// Folders whose names all start with a digit list newest first, then the files, ascending as
+	// not every file name starts with a digit; the same order on every page size, across the turn
+	// from folders to files.
 	wantVer := []string{"dir:2.0", "dir:1.10", "dir:1.2", "dir:1.0", "dir:1.0-SNAPSHOT", "file:1.0.txt", "file:a-1.10.txt", "file:a-1.2.txt"}
 	for _, limit := range []int{1, 3, 50} {
 		if got := nodeNames(treeAll(t, s, repo, "com/acme/ver/", limit, rauth)); !slices.Equal(got, wantVer) {
@@ -237,6 +248,39 @@ func TestTree(t *testing.T) {
 	many := treeAll(t, s, repo, "com/acme/many", 5, rauth)
 	if len(many) != 12 || many[0].Name != "v01" || many[11].Name != "v12" || many[3].Path != "com/acme/many/v04/" {
 		t.Fatalf("com/acme/many: %v", nodeNames(many))
+	}
+
+	// Files whose names all start with a digit list newest first too, after the folders. A
+	// checksum or signature names its file in side_of when that file is in the folder, on any
+	// page.
+	sided := func(nodes []treeNode) []string {
+		out := nodeNames(nodes)
+		for i, n := range nodes {
+			if n.SideOf != "" {
+				out[i] += ">" + n.SideOf
+			}
+		}
+		return out
+	}
+	wantBuilds := []string{"dir:100", "dir:16", "dir:9", "file:100.json", "file:100.json.sha1>100.json", "file:16.json", "file:9.json", "file:7.json.sha1"}
+	// A mixed folder keeps its files ascending: the versions first, a checksum of a version
+	// before its file.
+	wantMixed := []string{"file:2.0.jar.sha1>2.0.jar", "file:2.0.jar", "file:lone.txt.md5", "file:readme.txt", "file:x.jar", "file:x.jar.asc>x.jar"}
+	for _, limit := range []int{1, 3, 50} {
+		if got := sided(treeAll(t, s, repo, "com/acme-b/builds/", limit, rauth)); !slices.Equal(got, wantBuilds) {
+			t.Fatalf("com/acme-b/builds, limit %d: %v, want %v", limit, got, wantBuilds)
+		}
+		if got := sided(treeAll(t, s, repo, "com/acme-b/mixed/", limit, rauth)); !slices.Equal(got, wantMixed) {
+			t.Fatalf("com/acme-b/mixed, limit %d: %v, want %v", limit, got, wantMixed)
+		}
+	}
+	items, next = treePage(t, s, repo, "com/acme-b/builds/", "9/", 1, rauth)
+	if got := nodeNames(items); !slices.Equal(got, []string{"file:100.json"}) || next == nil || *next != "100.json" {
+		t.Fatalf("com/acme-b/builds after the last folder: %v next %v, want [file:100.json] next 100.json", got, next)
+	}
+	items, _ = treePage(t, s, repo, "com/acme-b/builds/", "100.json.sha1", 1, rauth)
+	if got := nodeNames(items); !slices.Equal(got, []string{"file:16.json"}) {
+		t.Fatalf("com/acme-b/builds after 100.json.sha1: %v, want [file:16.json]", got)
 	}
 
 	// Files carry size, checksum, time and the uploader's name.
