@@ -226,6 +226,16 @@ type Setting struct {
 	UpdatedBy sql.NullInt64
 }
 
+type TreeEntry struct {
+	RepoID  int64
+	Parent  string
+	Kind    int64
+	SortKey []byte
+	Name    string
+	Files   int64
+	AssetID sql.NullInt64
+}
+
 type UploadSession struct {
 	ID               string
 	RepoID           int64

@@ -238,7 +238,7 @@ func (m *mod) reposChanged(ctx context.Context, n repos.Notice) {
 	m.queueClasses(walk...)
 }
 
-// rulesChanged marks the repo whose IP rules changed and its groups.
+// rulesChanged marks the repo whose allowed networks changed and its groups.
 func (m *mod) rulesChanged(ctx context.Context, repoID int64) {
 	r, err := m.h.Repos.ByID(ctx, repoID)
 	if err != nil {

@@ -227,7 +227,7 @@ func (m *mod) downloadNote(ctx context.Context, repo *repos.Repo) (string, error
 		}
 	}
 	if guarded {
-		return "Downloads go to the server: read rules apply.", nil
+		return "Downloads go to the server, which checks the allowed networks.", nil
 	}
 	return "Downloads come from the edge.", nil
 }

@@ -76,7 +76,7 @@
   const actionText = (a: string) => actions.data?.find((x) => x.id === a)?.label ?? a;
   const areaOfAction = (a: string) => areas.find((x) => x.actions.some((y) => y.id === a));
   // Refusals show in red.
-  const refusals = new Set(["signin.failed", "sso.signin.failed", "network.denied"]);
+  const refusals = new Set(["signin.failed", "sso.signin.failed"]);
 
   const view = $derived(query.get("view") === "publishing" ? "publishing" : "events");
   const action = $derived(query.get("action") ?? "");

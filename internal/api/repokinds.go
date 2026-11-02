@@ -60,7 +60,7 @@ func (a *API) writeRepo(w http.ResponseWriter, r *http.Request, status int, p *a
 	ctx := r.Context()
 	out := a.toRepoJSON(repo, perms)
 	readable := func(x *repos.Repo) (bool, error) {
-		set, err := a.auth.RepoPerms(ctx, p, x)
+		set, err := a.access.RepoPerms(ctx, p, x)
 		return set.Has(perm.RepoDownload), err
 	}
 	switch repo.Kind {
@@ -72,7 +72,7 @@ func (a *API) writeRepo(w http.ResponseWriter, r *http.Request, status int, p *a
 		}
 		out.Members = []memberJSON{}
 		for _, m := range members {
-			set, err := a.auth.RepoPerms(ctx, p, m)
+			set, err := a.access.RepoPerms(ctx, p, m)
 			if err != nil {
 				route.Fail(w, r, err)
 				return

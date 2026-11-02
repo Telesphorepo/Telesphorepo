@@ -174,8 +174,8 @@ func Components() ([]db.Component, error) {
 //  4. settings.Load (master key, stored settings, env overrides).
 //  5. The kernel services: live storage (swapped when the storage settings change), repos,
 //     audit, auth, assets, proxy, access, the job runner.
-//  6. Each module's Init, in start order; an error stops startup. Then the token kinds, the
-//     guards of the access engine and the jobs of every module.
+//  6. Each module's Init, in start order; an error stops startup. Then the token kinds and the jobs
+//     of every module.
 //  7. The routes of every module on one route table, plus GET /healthz and the web UI, behind
 //     the host check (hosts.ServeHTTP: repo domains, 421 for a host the server does not answer).
 //  8. Options.Init, then the bootstrap admin when there are no users.
@@ -287,9 +287,7 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 		for _, t := range m.TokenKinds {
 			k.Auth.AddTokenKind(t.Prefix, t.Verify)
 		}
-		for _, g := range m.Guards {
-			k.Access.AddGuard(g)
-		}
+
 		for _, j := range m.Jobs {
 			k.Jobs.Add(m.Module.ID, j)
 		}
@@ -435,7 +433,7 @@ func kernel(base context.Context, d *db.DB, boot *config.Boot, set *settings.Ser
 	bs := blobs.New(d, live)
 	pipe := assets.New(base, d, bs, set.Current, au)
 	pipe.SetHooks(b.Formats.Hooks)
-	engine := access.New(d, rs, as, au, set.Current, opsSvc)
+	engine := access.New(d, rs, as, set.Current, opsSvc)
 	reader := assets.NewReader(pipe, rs, engine, func() time.Duration { return storage.PresignTTL.Get(set.Current()) },
 		log.With("component", "assets"))
 	reader.SetFetcher(proxy.New(rs, pipe, log.With("component", "proxy")))

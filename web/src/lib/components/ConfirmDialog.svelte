@@ -30,6 +30,7 @@
     confirmLabel,
     destructive = false,
     typeToConfirm,
+    disabled = false,
     onConfirm,
     children,
   }: {
@@ -42,6 +43,8 @@
     destructive?: boolean;
     /** The text the user types before the confirm button turns on, e.g. a count or a name. */
     typeToConfirm?: string;
+    /** Keeps the confirm button off, e.g. until a choice in children is made. */
+    disabled?: boolean;
     onConfirm: () => unknown | Promise<unknown>;
     /** Extra content, e.g. a note under the changes. */
     children?: Snippet;
@@ -61,7 +64,7 @@
   });
 
   async function confirm() {
-    if (!typedOk) return;
+    if (!typedOk || disabled) return;
     busy = true;
     error = "";
     try {
@@ -110,7 +113,7 @@
     {#if error}<ErrorState inline {error} />{/if}
     <AlertDialog.Footer>
       <AlertDialog.Cancel disabled={busy}>Cancel</AlertDialog.Cancel>
-      <Button variant={destructive ? "destructive" : "default"} disabled={busy || !typedOk} onclick={confirm}>
+      <Button variant={destructive ? "destructive" : "default"} disabled={busy || !typedOk || disabled} onclick={confirm}>
         {#if busy}<Spinner />{/if}
         {confirmLabel}
       </Button>

@@ -1,8 +1,9 @@
 <!--
-  List view of a plain folder: folders first, then files, one dense line each (name, size, when and
-  by whom it was published). Checksum and signature files are not rows: they are attributes of
-  their file, shown in its details. A click on a row opens the folder or shows the file's details.
-  Pages load by key ("Load more"); the first page comes from the parent (`first`), which asks for
+  List view of a plain folder: the rows in the server's order (folders, then files), one dense line
+  each (name, size, when and by whom it was published). Checksum and signature files are not rows:
+  they are attributes of their file, shown in its details. A click on a row opens the folder or
+  shows the file's details. The next page loads by key as the end of the rows comes into view;
+  the first page comes from the parent (`first`), which asks for
   it together with the folder's place and shares it with the details column. The parent keys it by folder. People who can delete pick rows
   (files and folders mix) and delete them together; the parent holds the pick and shows its
   summary in the details column.
@@ -75,14 +76,13 @@
   /* svelte-ignore state_referenced_locally */
   const list = new Keyset<TreeNode>((p) => api.repos.tree(repo.name, folder, p), FOLDER_PAGE, first);
 
-  // Folders first; a checksum or signature whose file is listed is not a row of its own.
+  // A checksum or signature whose file is listed is not a row of its own.
   const rows = $derived.by(() => {
     const paths = new Set(list.items.map((e) => e.path));
-    const shown = list.items.filter((e) => {
+    return list.items.filter((e) => {
       const of = e.type === "file" ? sideOf(e.path) : null;
       return !of || !paths.has(of);
     });
-    return shown.sort((a, b) => (a.type === b.type ? 0 : a.type === "dir" ? -1 : 1));
   });
   const source: TableSource<TreeNode> = {
     get items() {
@@ -139,6 +139,7 @@
   bind:picked
   pickLabel={label}
   bulk={canWrite ? bulkActions : undefined}
+  auto
 >
   {#snippet row(e)}
     <Cell grow>

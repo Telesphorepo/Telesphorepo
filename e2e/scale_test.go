@@ -69,6 +69,25 @@ type scaleServer struct {
 	client *http.Client
 	token  string
 	cursor string // the asset-page walk
+	tree   string // the tree-page walk
+}
+
+// walkNext is the next of a walk of keyset pages whose cursor at is: the next page after each
+// request, the first again after the last.
+func walkNext(at func(s *scaleServer) *string) func(s *scaleServer, body []byte) error {
+	return func(s *scaleServer, body []byte) error {
+		var p struct {
+			Next *string `json:"next"`
+		}
+		if err := json.Unmarshal(body, &p); err != nil {
+			return err
+		}
+		*at(s) = ""
+		if p.Next != nil {
+			*at(s) = *p.Next
+		}
+		return nil
+	}
 }
 
 // scaleOp is one request path. path gives the path and query of the next request to s; next,
@@ -176,19 +195,7 @@ func TestScale(t *testing.T) {
 			},
 			// Each request reads the page after the previous one, and the walk starts again
 			// after the last page.
-			next: func(s *scaleServer, body []byte) error {
-				var p struct {
-					Next *string `json:"next"`
-				}
-				if err := json.Unmarshal(body, &p); err != nil {
-					return err
-				}
-				s.cursor = ""
-				if p.Next != nil {
-					s.cursor = *p.Next
-				}
-				return nil
-			}},
+			next: walkNext(func(s *scaleServer) *string { return &s.cursor })},
 		{name: "search-rare", path: func(*scaleServer) string { return "/api/search?limit=50&q=" + url.QueryEscape(sample.Path) }, ok: []int{http.StatusOK}},
 		{name: "search-common", path: func(*scaleServer) string { return "/api/search?limit=50&q=" + url.QueryEscape(common) }, ok: []int{http.StatusOK}},
 		{name: "search-shared", path: func(*scaleServer) string { return "/api/search?limit=50&q=" + url.QueryEscape(shared) }, ok: []int{http.StatusOK}},
@@ -197,6 +204,13 @@ func TestScale(t *testing.T) {
 		// The versions of an RPM package: the seek of rpm_packages_order (seed names its packages
 		// seedpkg<n>, so the first ones are at every size).
 		{name: "rpm-versions", path: func(*scaleServer) string { return "/api/repos/seed-rpm-00/versions?limit=20&path=Packages/seedpkg1/" }, ok: []int{http.StatusOK}},
+		// The artifact folders of the sample's group (com/example/: lib0 to lib999), a page of the
+		// tree after the previous one.
+		{name: "tree-page", ok: []int{http.StatusOK},
+			path: func(s *scaleServer) string {
+				return "/api/repos/" + mvn + "/tree?limit=100&path=" + url.QueryEscape(path.Dir(path.Dir(shared))+"/") + "&after=" + url.QueryEscape(s.tree)
+			},
+			next: walkNext(func(s *scaleServer) *string { return &s.tree })},
 	}
 	for _, s := range servers {
 		for _, op := range ops[:2] { // maven-get and domain-get: 304 for the sample

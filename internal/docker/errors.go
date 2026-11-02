@@ -124,11 +124,7 @@ func decisionError(d access.Decision) *ociError {
 	if d.Status == http.StatusInternalServerError {
 		msg = "internal error"
 	}
-	e := ociErr(d.Status, code, msg)
-	if len(d.Detail) > 0 {
-		e.detail = d.Detail
-	}
-	return e
+	return ociErr(d.Status, code, msg)
 }
 
 // refuse is the route.ErrorWriter of the /v2/ routes.

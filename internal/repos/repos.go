@@ -82,6 +82,7 @@ type Service struct {
 	audit    *audit.Log
 	onChange ChangeHook
 	onCreate CreateHook
+	checks   []ChangeHook // set before the server serves (CheckChange)
 
 	// The in-memory copy of the group members and the proxy remotes (see kinds.go). Request
 	// paths read it; every change writes the database first and then this copy.
@@ -171,6 +172,12 @@ func (s *Service) SetAudit(a *audit.Log) { s.audit = a }
 // SetChangeHook sets the hook that every update runs in its transaction (the format's
 // OnRepoChange).
 func (s *Service) SetChangeHook(fn ChangeHook) { s.onChange = fn }
+
+// CheckChange registers fn to run inside the transaction of every repo update, before the rows
+// change: a module refuses a change that breaks its rules (an error that wraps ErrInvalid
+// answers 400), e.g. the network module refuses to make public a repo with allowed networks. It
+// runs before the server serves.
+func (s *Service) CheckChange(fn ChangeHook) { s.checks = append(s.checks, fn) }
 
 // SetCreateHook sets the hook that every create runs in its transaction (the format's
 // OnRepoCreate).
@@ -576,6 +583,11 @@ func (s *Service) plan(ctx context.Context, q *dbq.Queries, cur *Repo, p Patch) 
 func (s *Service) save(ctx context.Context, tx *sql.Tx, c *changes) error {
 	q := dbq.New(tx)
 	n := c.new
+	for _, check := range s.checks {
+		if err := check(ctx, tx, c.old, c.new); err != nil {
+			return err
+		}
+	}
 	if err := q.UpdateRepo(ctx, dbq.UpdateRepoParams{Config: string(n.Config), Description: n.Description,
 		AnonymousRead: n.AnonymousRead, ID: n.ID}); err != nil {
 		return err

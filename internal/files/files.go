@@ -3,6 +3,7 @@
 package files
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"path"
@@ -49,6 +50,8 @@ type Node struct {
 	// Repo is the member that serves the file, in the listing of a group; absent elsewhere and
 	// on a folder.
 	Repo string `json:"repo,omitempty"`
+
+	key []byte // repopath.FolderKey or FileKey of Name: the order of a group's merge
 }
 
 // File is one file with its details (GET /api/repos/{name}/file).
@@ -92,69 +95,26 @@ func (s *Service) Details(ctx context.Context, repo *repos.Repo, p string) (*Fil
 	return f, nil
 }
 
-// Tree returns up to limit direct children of folder dir ("" or "a/b/") in path order, after
-// the cursor after (a child name; a folder's name ends in "/"). Each child costs one indexed
-// seek on (repo_id, path): after a folder the next seek starts past every path under it, so a
-// page costs limit+1 seeks however large the folder is. next is the cursor of the next page,
-// "" at the end.
-func (s *Service) Tree(ctx context.Context, repo *repos.Repo, dir, after string, limit int) ([]Node, string, error) {
-	upper, _ := assets.PrefixEnd(dir) // "" for the root: no upper bound
-	lower, inclusive := dir, true
-	if after != "" {
-		name := strings.TrimSuffix(after, "/")
-		if _, err := repopath.Parse(name); err != nil || strings.Contains(name, "/") {
-			return nil, "", ErrInvalid
-		}
-		if strings.HasSuffix(after, "/") {
-			lower, _ = assets.PrefixEnd(dir + name + "/")
-		} else {
-			lower, inclusive = dir+name, false
-		}
+// cursor is the position after which a page of a folder starts: a child's kind and key. The
+// zero cursor is the start of the folder.
+type cursor struct {
+	file bool
+	key  []byte // nil at the start
+}
+
+// parseCursor reads the cursor after: a child's name, with "/" for a folder; "" for the start.
+func parseCursor(after string) (cursor, error) {
+	if after == "" {
+		return cursor{}, nil
 	}
-	users := map[int64]string{}
-	builds := s.builds.Loader()
-	var out []Node
-	for len(out) <= limit {
-		a, err := s.assets.Seek(ctx, repo.ID, lower, inclusive, upper)
-		if err != nil {
-			return nil, "", err
-		}
-		if a == nil || !strings.HasPrefix(a.Path, dir) {
-			break
-		}
-		rest := a.Path[len(dir):]
-		if i := strings.IndexByte(rest, '/'); i >= 0 {
-			name := rest[:i]
-			out = append(out, Node{Name: name, Type: "dir", Path: dir + name + "/"})
-			lower, _ = assets.PrefixEnd(dir + name + "/")
-			inclusive = true
-			continue
-		}
-		n := Node{Name: rest, Type: "file", Path: a.Path, SHA256: a.SHA256}
-		size, at := a.Size, a.UpdatedAt
-		n.Size, n.UpdatedAt = &size, &at
-		if a.UploadedBy != 0 {
-			name, ok := users[a.UploadedBy]
-			if !ok {
-				if name, err = s.auth.Username(ctx, a.UploadedBy); err != nil {
-					return nil, "", err
-				}
-				users[a.UploadedBy] = name
-			}
-			n.UploadedBy = name
-		}
-		if n.Build, err = builds.Get(ctx, a.BuildID); err != nil {
-			return nil, "", err
-		}
-		out = append(out, n)
-		lower, inclusive = a.Path, false
+	name, folder := strings.CutSuffix(after, "/")
+	if _, err := repopath.Parse(name); err != nil || strings.Contains(name, "/") {
+		return cursor{}, ErrInvalid
 	}
-	next := ""
-	if len(out) > limit {
-		out = out[:limit]
-		next = cursorOf(out[limit-1])
+	if folder {
+		return cursor{key: repopath.FolderKey(name)}, nil
 	}
-	return out, next, nil
+	return cursor{file: true, key: repopath.FileKey(name)}, nil
 }
 
 // cursorOf returns the cursor that a page ending with n hands on: its name, with "/" for a folder.
@@ -165,42 +125,138 @@ func cursorOf(n Node) string {
 	return n.Name
 }
 
-// GroupTree is Tree for a group: the merged children of folder dir in the members the reader
-// may read, in read order. Each member is read with the same cursor and limit, and the pages are
-// merged by path. A folder that several members hold is one entry; a file that several members
-// hold comes from the first of them, the one the group serves, and names it in Repo. The first
-// limit entries of the merge are exactly the first limit of the union: a member holds every one
-// of its entries below the limit-th in its own page. next is the last path returned while any
-// entry follows it in the union, "" at the end. A page costs at most limit+1 seeks per member.
-func (s *Service) GroupTree(ctx context.Context, members []*repos.Repo, dir, after string, limit int) ([]Node, string, error) {
-	byPath := map[string]int{}
+// Tree returns up to limit direct children of folder dir ("" or "a/b/") after the cursor after
+// (a child name; a folder's name ends in "/"): the folders in the order of repopath.FolderKey
+// (versions first, "1.2" before "1.10", then the other names by their bytes), then the files by
+// their bytes. When the name of every folder starts with a digit, the folders come newest first.
+// A page is one seek for that rule and one range of the index per kind, however large the folder
+// is. next is the cursor of the next page, "" at the end.
+func (s *Service) Tree(ctx context.Context, repo *repos.Repo, dir, after string, limit int) ([]Node, string, error) {
+	c, err := parseCursor(after)
+	if err != nil {
+		return nil, "", err
+	}
+	has, digits, err := s.assets.VersionFolders(ctx, repo.ID, dir)
+	if err != nil {
+		return nil, "", err
+	}
+	out, err := s.page(ctx, repo, dir, c, has && digits, limit+1)
+	if err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(out) > limit {
+		out = out[:limit]
+		next = cursorOf(out[limit-1])
+	}
+	return out, next, nil
+}
+
+// page returns up to n children of folder dir of repo after c: the folders (newest first when
+// desc), then the files.
+func (s *Service) page(ctx context.Context, repo *repos.Repo, dir string, c cursor, desc bool, n int) ([]Node, error) {
 	var out []Node
-	more := false
+	fileAfter := c.key
+	if !c.file {
+		folders, err := s.assets.TreeFolders(ctx, repo.ID, dir, c.key, desc, n)
+		if err != nil {
+			return nil, err
+		}
+		for _, f := range folders {
+			out = append(out, Node{Name: f.Name, Type: "dir", Path: dir + f.Name + "/", key: f.Key})
+		}
+		fileAfter = nil
+	}
+	if len(out) >= n {
+		return out, nil
+	}
+	files, err := s.assets.TreeFiles(ctx, repo.ID, dir, fileAfter, n-len(out))
+	if err != nil {
+		return nil, err
+	}
+	users := map[int64]string{}
+	builds := s.builds.Loader()
+	for _, f := range files {
+		a := f.Asset
+		node := Node{Name: a.Path[len(dir):], Type: "file", Path: a.Path, SHA256: a.SHA256, key: f.Key}
+		size, at := a.Size, a.UpdatedAt
+		node.Size, node.UpdatedAt = &size, &at
+		if a.UploadedBy != 0 {
+			name, ok := users[a.UploadedBy]
+			if !ok {
+				if name, err = s.auth.Username(ctx, a.UploadedBy); err != nil {
+					return nil, err
+				}
+				users[a.UploadedBy] = name
+			}
+			node.UploadedBy = name
+		}
+		if node.Build, err = builds.Get(ctx, a.BuildID); err != nil {
+			return nil, err
+		}
+		out = append(out, node)
+	}
+	return out, nil
+}
+
+// GroupTree is Tree for a group: the merged children of folder dir in the members the reader
+// may read, in read order. The folders come newest first when the name of every folder of every
+// member starts with a digit (one seek per member). Each member is read from the same cursor,
+// limit+1 children, and the pages merge in the order of Tree. A folder that several members hold
+// is one entry; a file that several members hold comes from the first of them, the one the group
+// serves, and names it in Repo. The first limit entries of the merge are exactly the first limit
+// of the union: a member holds every one of its entries below the limit-th in its own page. next
+// is the cursor of the last entry while any entry follows it in the union, "" at the end.
+func (s *Service) GroupTree(ctx context.Context, members []*repos.Repo, dir, after string, limit int) ([]Node, string, error) {
+	c, err := parseCursor(after)
+	if err != nil {
+		return nil, "", err
+	}
+	anyFolder, allDigits := false, true
 	for _, m := range members {
-		page, next, err := s.Tree(ctx, m, dir, after, limit)
+		has, digits, err := s.assets.VersionFolders(ctx, m.ID, dir)
 		if err != nil {
 			return nil, "", err
 		}
-		more = more || next != ""
+		anyFolder = anyFolder || has
+		allDigits = allDigits && (!has || digits)
+	}
+	desc := anyFolder && allDigits
+	var all []Node
+	for _, m := range members {
+		page, err := s.page(ctx, m, dir, c, desc, limit+1)
+		if err != nil {
+			return nil, "", err
+		}
 		for _, n := range page {
-			if _, seen := byPath[n.Path]; seen {
-				continue // an earlier member holds the folder, or serves the file
-			}
 			if n.Type == "file" {
 				n.Repo = m.Name
 			}
-			byPath[n.Path] = len(out)
-			out = append(out, n)
+			all = append(all, n)
 		}
 	}
-	// Every path shares the prefix dir, so path order is the order of Tree.
-	slices.SortFunc(out, func(a, b Node) int { return strings.Compare(a.Path, b.Path) })
-	if len(out) > limit {
-		out, more = out[:limit], true
-	}
+	// A stable sort keeps the members' read order among the copies of one path, and the first
+	// copy is the one the group serves.
+	slices.SortStableFunc(all, func(a, b Node) int { return compareNodes(a, b, desc) })
+	out := slices.CompactFunc(all, func(a, b Node) bool { return a.Type == b.Type && bytes.Equal(a.key, b.key) })
 	next := ""
-	if more && len(out) > 0 {
-		next = cursorOf(out[len(out)-1])
+	if len(out) > limit {
+		out = out[:limit]
+		next = cursorOf(out[limit-1])
 	}
 	return out, next, nil
+}
+
+// compareNodes orders two children of one folder as Tree lists them: folders (descending keys
+// when desc), then files.
+func compareNodes(a, b Node, desc bool) int {
+	switch {
+	case a.Type == b.Type && a.Type == "dir" && desc:
+		return bytes.Compare(b.key, a.key)
+	case a.Type == b.Type:
+		return bytes.Compare(a.key, b.key)
+	case a.Type == "dir":
+		return -1
+	}
+	return 1
 }

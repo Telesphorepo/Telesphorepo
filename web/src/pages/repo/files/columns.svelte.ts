@@ -1,11 +1,11 @@
 // One column of the Columns view, or one open folder of the Tree view: the children of one folder. A plain folder lists its tree
-// (folders first, checksum and signature files left out, version folders newest first). A version
+// in the server's order (folders, then files; version folders newest first), checksum and signature files left out. A version
 // folder (its parent is the artifact, its name the version) lists the files of its latest build
 // and how many earlier builds it has, so a snapshot with many builds stays one short column.
 
 import { api, errorMessage, type TreeEntry, type Version } from "$lib/api";
 import { Keyset } from "$lib/load.svelte";
-import { baseName, compareVersions, parentOf, sideOf } from "../browse";
+import { baseName, parentOf, sideOf } from "../browse";
 
 /** `repo` is the repository that serves a file of a group. */
 export type Entry = { name: string; path: string; type: "dir" | "file"; size?: number; repo?: string };
@@ -65,16 +65,11 @@ export class Column {
     if (this.#build) return this.#build;
     const items = this.#tree?.items ?? [];
     const paths = new Set(items.map((e) => e.path));
-    const shown = items
+    return items
       .filter((e) => {
         const of = e.type === "file" ? sideOf(e.path) : null;
         return !of || !paths.has(of);
       })
       .map((e) => ({ name: e.name.replace(/\/$/, ""), path: e.path, type: e.type, size: e.type === "file" ? e.size : undefined, repo: e.repo }));
-    const dirs = shown.filter((e) => e.type === "dir");
-    const files = shown.filter((e) => e.type === "file");
-    // The versions of an artifact: newest first.
-    if (dirs.length && dirs.every((d) => /^\d/.test(d.name))) dirs.sort((a, b) => compareVersions(b.name, a.name));
-    return [...dirs, ...files];
   }
 }

@@ -5,7 +5,6 @@ package e2e
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -15,8 +14,8 @@ import (
 	"time"
 )
 
-// Network rules: the client address behind trusted proxies, per-repo IP rules for
-// read and publish, and the IP range presets.
+// Network rules: the client address behind trusted proxies, the allowed networks of the repos,
+// and the IP lists.
 //
 // The test process reaches a server through the engine's port mapping, so the server's TCP peer
 // is a private address (the bridge gateway or loopback). The default trusted_proxies trusts no
@@ -220,7 +219,47 @@ func TestClientIP(t *testing.T) {
 			t.Fatalf("trusted_proxies %q: status %d, want 400: %s", bad, st, b)
 		}
 	}
+	// whoami echoes the address the server reads, with the range to allow for it: an IPv4
+	// address as its /32, an IPv6 address as its /64.
 	setTrustedProxies(t, s, []string{"private"})
+	type whoami struct {
+		IP     string   `json:"ip"`
+		CIDR   string   `json:"cidr"`
+		Probes []string `json:"probes"`
+	}
+	who := func(from string) whoami {
+		t.Helper()
+		var w whoami
+		st, b := apiHeaders(t, s, http.MethodGet, "/api/network/whoami", nil, nil, xff(from))
+		if st != http.StatusOK || json.Unmarshal(b, &w) != nil {
+			t.Fatalf("whoami from %s: status %d: %s", from, st, b)
+		}
+		return w
+	}
+	if w := who("203.0.113.7"); w.IP != "203.0.113.7" || w.CIDR != "203.0.113.7/32" || len(w.Probes) != 0 {
+		t.Fatalf("whoami from an IPv4 address: %+v", w)
+	}
+	if w := who("2001:db8:1:2:3:4:5:6"); w.IP != "2001:db8:1:2:3:4:5:6" || w.CIDR != "2001:db8:1:2::/64" {
+		t.Fatalf("whoami from an IPv6 address: %+v", w)
+	}
+	// The probe hosts: an IPv4-only and an IPv6-only host name, or none.
+	for _, bad := range [][]string{{"v4.example.test"}, {"https://v4.example.test", "v6.example.test"}, {"v4.example.test", "v4.example.test"}} {
+		if st, b := s.API(t, http.MethodPatch, "/api/settings", map[string]any{"network.probe_hosts": bad}, s.Admin()); st != http.StatusBadRequest {
+			t.Fatalf("network.probe_hosts %q: status %d, want 400: %s", bad, st, b)
+		}
+	}
+	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"network.probe_hosts": []string{"v4.example.test", "v6.example.test"}}, s.Admin(), nil)
+	if w := who("203.0.113.7"); len(w.Probes) != 2 || !strings.HasSuffix(w.Probes[0], "://v4.example.test/api/network/whoami") ||
+		!strings.HasSuffix(w.Probes[1], "://v6.example.test/api/network/whoami") {
+		t.Fatalf("whoami probes: %+v", w.Probes)
+	}
+	// The server answers on a probe host as on its own.
+	req := s.NewRequest(t, http.MethodGet, "/api/network/whoami", nil)
+	req.Host = "v6.example.test"
+	if resp, b := s.Do(t, req, nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("whoami on a probe host: status %d: %s", resp.StatusCode, b)
+	}
+	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"network.probe_hosts": []string{}}, s.Admin(), nil)
 	setTrustedProxies(t, s, nil) // back to the default: no proxy
 	if ip := signInIP(t, s, xff("203.0.113.10")); ip != peer {
 		t.Fatalf("after reset to the default: audit ip %q, want the peer %s", ip, peer)
@@ -233,9 +272,9 @@ type ipRule struct {
 	Note  string `json:"note"`
 }
 
+// ipRules are the allowed networks of a repo (GET and PUT /api/repos/{name}/ip-rules).
 type ipRules struct {
-	Read    []ipRule `json:"read"`
-	Publish []ipRule `json:"publish"`
+	Read []ipRule `json:"read"`
 }
 
 func putIPRules(t *testing.T, s *Server, repo string, in ipRules) ipRules {
@@ -245,32 +284,11 @@ func putIPRules(t *testing.T, s *Server, repo string, in ipRules) ipRules {
 	return out
 }
 
-// mintFrom mints a device session of user for repo with the given client address.
-func mintFrom(t *testing.T, s *Server, user, repo, from string) (int, []byte) {
-	t.Helper()
-	d := s.device(t, user)
-	nonce := s.Challenge(t, d.ID)
-	return apiHeaders(t, s, http.MethodPost, "/api/publish/sessions",
-		map[string]any{"device_id": d.ID, "repo": repo, "nonce": nonce, "signature": d.Sign(nonce, repo)}, nil, xff(from))
-}
-
-// wantDenied checks that a request got the refusal of the IP rule guard: 403 with the code
-// network.
-func wantDenied(t *testing.T, what string, st int, b []byte) {
-	t.Helper()
-	if st != http.StatusForbidden || RefusalCode(b) != "network" {
-		t.Fatalf("%s: status %d, want 403 with the code network: %s", what, st, b)
-	}
-}
-
-// mintDenied mints from the address from and checks that the IP rule guard refused it.
-func mintDenied(t *testing.T, s *Server, what, user, repo, from string) {
-	t.Helper()
-	st, b := mintFrom(t, s, user, repo, from)
-	wantDenied(t, what, st, b)
-}
-
-func TestIPRules(t *testing.T) {
+// TestAllowedNetworks: a restricted repo is read by a credential that grants download from any
+// address, and by anyone whose address is in its allowed networks; an address never takes access
+// away. The networks reach the format routes, the repo read routes, a group's members, the repo
+// lists and search. A public repo takes no networks.
+func TestAllowedNetworks(t *testing.T) {
 	t.Parallel()
 	s := StartServer(t, ServerOpts{})
 	setTrustedProxies(t, s, []string{"private"})
@@ -279,71 +297,96 @@ func TestIPRules(t *testing.T) {
 	w := RandName("writer")
 	s.CreateUser(t, w, "writer-pass-1234")
 	s.SetPerms(t, repo, w, "repo.download", "repo.publish")
-	body := []byte("ip rules " + randHex(8))
+	body := []byte("allowed networks " + randHex(8))
 	if st, b := s.API(t, http.MethodPut, "/raw/"+repo+"/doc/file.txt", body, s.PublishAuth(t, w, repo)); st != http.StatusCreated {
-		t.Fatalf("PUT before any rule: status %d: %s", st, b)
+		t.Fatalf("PUT the file: status %d: %s", st, b)
 	}
 
-	// Validation.
+	// Validation and the stored form.
 	for _, bad := range []ipRules{
 		{Read: []ipRule{{Kind: "cidr", Value: "not-a-cidr"}}},
 		{Read: []ipRule{{Kind: "list", Value: "nowhere"}}},
 		{Read: []ipRule{{Kind: "preset", Value: "github-actions"}}},
-		{Publish: []ipRule{{Kind: "dns", Value: "example.com"}}},
 		{Read: []ipRule{{Kind: "cidr", Value: "203.0.113.0/24"}, {Kind: "cidr", Value: "203.0.113.9/24"}}},
 	} {
 		if st, b := s.API(t, http.MethodPut, "/api/repos/"+repo+"/ip-rules", bad, s.Admin()); st != http.StatusBadRequest {
 			t.Fatalf("PUT ip-rules %+v: status %d, want 400: %s", bad, st, b)
 		}
 	}
-	got := putIPRules(t, s, repo, ipRules{
-		Read:    []ipRule{{Kind: "cidr", Value: "203.0.113.9/24", Note: "office"}, {Kind: "cidr", Value: "198.51.100.4"}},
-		Publish: []ipRule{{Kind: "cidr", Value: "198.51.100.0/24", Note: "CI"}},
-	})
-	if len(got.Read) != 2 || got.Read[0].Value != "203.0.113.0/24" || got.Read[0].Note != "office" || got.Read[1].Value != "198.51.100.4/32" ||
-		len(got.Publish) != 1 || got.Publish[0].Value != "198.51.100.0/24" {
+	got := putIPRules(t, s, repo, ipRules{Read: []ipRule{{Kind: "cidr", Value: "203.0.113.9/24", Note: "office"}, {Kind: "cidr", Value: "198.51.100.4"}}})
+	if len(got.Read) != 2 || got.Read[0].Value != "203.0.113.0/24" || got.Read[0].Note != "office" || got.Read[1].Value != "198.51.100.4/32" {
 		t.Fatalf("PUT ip-rules answer: %+v", got)
 	}
 	var read ipRules
 	s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/ip-rules", nil, s.Admin(), &read)
-	if len(read.Read) != 2 || len(read.Publish) != 1 {
+	if len(read.Read) != 2 {
 		t.Fatalf("GET ip-rules: %+v", read)
 	}
 	if st, _ := s.API(t, http.MethodGet, "/api/repos/"+repo+"/ip-rules", nil, s.SignIn(t, w, "writer-pass-1234")); st != http.StatusForbidden {
-		t.Fatalf("GET ip-rules as a non-admin: status %d, want 403", st)
+		t.Fatalf("GET ip-rules without settings: status %d, want 403", st)
 	}
 
-	// Read rules: format route and repo read API, for the admin too.
+	// An allowed address reads without a credential: the format route and the repo read routes.
 	path := "/raw/" + repo + "/doc/file.txt"
-	if st, b := apiHeaders(t, s, http.MethodGet, path, nil, s.AdminBasic(), xff("203.0.113.5")); st != http.StatusOK || !bytes.Equal(b, body) {
-		t.Fatalf("GET from an allowed address: status %d", st)
+	if st, b := apiHeaders(t, s, http.MethodGet, path, nil, nil, xff("203.0.113.5")); st != http.StatusOK || !bytes.Equal(b, body) {
+		t.Fatalf("anonymous GET from an allowed address: status %d", st)
 	}
-	st, b := apiHeaders(t, s, http.MethodGet, path, nil, s.AdminBasic(), xff("192.0.2.1"))
-	wantDenied(t, "GET from a refused address as admin", st, b)
-	st, b = apiHeaders(t, s, http.MethodGet, path, nil, s.AdminBasic(), nil)
-	wantDenied(t, "GET from the private peer (not listed)", st, b)
-	tree := "/api/repos/" + repo + "/tree?path=doc/"
-	st, b = apiHeaders(t, s, http.MethodGet, tree, nil, s.Admin(), xff("192.0.2.1"))
-	wantDenied(t, "tree from a refused address with the admin UI session", st, b)
-	if st, b := apiHeaders(t, s, http.MethodGet, tree, nil, s.Admin(), xff("198.51.100.4")); st != http.StatusOK {
-		t.Fatalf("tree from an allowed address: status %d: %s", st, b)
+	for _, p := range []string{"/api/repos/" + repo + "/tree?path=doc/", "/api/repos/" + repo + "/assets", "/api/repos/" + repo} {
+		if st, b := apiHeaders(t, s, http.MethodGet, p, nil, nil, xff("198.51.100.4")); st != http.StatusOK {
+			t.Fatalf("anonymous GET %s from an allowed address: status %d: %s", p, st, b)
+		}
 	}
-	for _, p := range []string{"/api/repos/" + repo + "/assets", "/api/repos/" + repo + "/usage", "/api/repos/" + repo + "/status"} {
-		st, b := apiHeaders(t, s, http.MethodGet, p, nil, s.Admin(), xff("192.0.2.1"))
-		wantDenied(t, "GET "+p+" from a refused address", st, b)
+	// Elsewhere, a visitor signs in; a credential reads from any address.
+	if st, b := apiHeaders(t, s, http.MethodGet, path, nil, nil, xff("192.0.2.1")); st != http.StatusUnauthorized {
+		t.Fatalf("anonymous GET from another address: status %d, want 401: %s", st, b)
 	}
-	// The repo record itself stays readable, so an admin can change the rules.
-	if st, b := apiHeaders(t, s, http.MethodGet, "/api/repos/"+repo, nil, s.Admin(), xff("192.0.2.1")); st != http.StatusOK {
-		t.Fatalf("GET the repo record from a refused address: status %d: %s", st, b)
+	if st, _ := apiHeaders(t, s, http.MethodGet, path, nil, Basic{w, "writer-pass-1234"}, xff("192.0.2.1")); st != http.StatusOK {
+		t.Fatalf("GET with a password from another address: status %d, want 200", st)
 	}
-	// Search leaves the repo out for a refused address.
+	if st, _ := apiHeaders(t, s, http.MethodGet, path, nil, s.AdminBasic(), nil); st != http.StatusOK {
+		t.Fatalf("admin GET from the private peer: status %d, want 200", st)
+	}
+	// Publishing needs a publish session wherever it comes from.
+	if st, b := apiHeaders(t, s, http.MethodPut, "/raw/"+repo+"/doc/two.txt", []byte("two"), s.PublishAuth(t, w, repo), xff("192.0.2.1")); st != http.StatusCreated {
+		t.Fatalf("PUT with a publish session from another address: status %d: %s", st, b)
+	}
+	if st, _ := apiHeaders(t, s, http.MethodPut, "/raw/"+repo+"/doc/three.txt", []byte("three"), nil, xff("203.0.113.5")); st != http.StatusUnauthorized {
+		t.Fatalf("anonymous PUT from an allowed address: status %d, want 401", st)
+	}
+
+	// The repo lists and search show the repo to a visitor at an allowed address only.
+	listed := func(from string) bool {
+		t.Helper()
+		var page struct {
+			Items []struct {
+				Name string `json:"name"`
+			} `json:"items"`
+		}
+		st, b := apiHeaders(t, s, http.MethodGet, "/api/repos?limit=200", nil, nil, xff(from))
+		if st != http.StatusOK || json.Unmarshal(b, &page) != nil {
+			t.Fatalf("GET /api/repos from %s: status %d: %s", from, st, b)
+		}
+		for _, it := range page.Items {
+			if it.Name == repo {
+				return true
+			}
+		}
+		return false
+	}
+	if !listed("203.0.113.5") {
+		t.Fatalf("GET /api/repos from an allowed address does not list %s", repo)
+	}
+	if listed("192.0.2.1") {
+		t.Fatalf("GET /api/repos from another address lists %s", repo)
+	}
 	searchHits := func(from string) int {
+		t.Helper()
 		var page struct {
 			Items []struct {
 				Repo string `json:"repo"`
 			} `json:"items"`
 		}
-		st, b := apiHeaders(t, s, http.MethodGet, "/api/search?q=file.txt", nil, s.Admin(), xff(from))
+		st, b := apiHeaders(t, s, http.MethodGet, "/api/search?q=file.txt", nil, nil, xff(from))
 		if st != http.StatusOK || json.Unmarshal(b, &page) != nil {
 			t.Fatalf("search from %s: status %d: %s", from, st, b)
 		}
@@ -356,44 +399,45 @@ func TestIPRules(t *testing.T) {
 		return n
 	}
 	if n := searchHits("203.0.113.5"); n != 1 {
-		t.Fatalf("search from an allowed address: %d hits in %s, want 1", n, repo)
+		t.Fatalf("anonymous search from an allowed address: %d hits in %s, want 1", n, repo)
 	}
 	if n := searchHits("192.0.2.1"); n != 0 {
-		t.Fatalf("search from a refused address: %d hits in %s, want 0", n, repo)
+		t.Fatalf("anonymous search from another address: %d hits in %s, want 0", n, repo)
 	}
 
-	// Publish rules: minting a session, uploads and deletes.
-	mintDenied(t, s, "mint a device session from a refused address", w, repo, "192.0.2.1")
-	st, b = mintFrom(t, s, w, repo, "198.51.100.4")
-	sess := mustSession(t, "mint from an allowed address")(st, b)
-	st, b = apiHeaders(t, s, http.MethodPut, "/raw/"+repo+"/doc/two.txt", []byte("two"), sess.Auth(), xff("192.0.2.1"))
-	wantDenied(t, "PUT from a refused address with a session", st, b)
-	if st, b := apiHeaders(t, s, http.MethodPut, "/raw/"+repo+"/doc/two.txt", []byte("two"), sess.Auth(), xff("198.51.100.4")); st != http.StatusCreated {
-		t.Fatalf("PUT from an allowed address: status %d: %s", st, b)
+	// A group's networks reach its members: a visitor at the group's address reads a private
+	// member through the group, though the member has no networks of its own.
+	member, group := RandName("mem"), RandName("grp")
+	s.CreateRepo(t, member, "maven", false, nil)
+	s.SetPerms(t, member, w, "repo.download", "repo.publish")
+	jar := "com/acme/net/1.0/net-1.0.jar"
+	mavenPut(t, s, w, member, jar, []byte("jar "+randHex(8)))
+	s.CreateGroup(t, group, "maven", false, []string{member})
+	putIPRules(t, s, group, ipRules{Read: []ipRule{{Kind: "cidr", Value: "203.0.113.0/24"}}})
+	if st, b := apiHeaders(t, s, http.MethodGet, "/maven/"+group+"/"+jar, nil, nil, xff("203.0.113.5")); st != http.StatusOK {
+		t.Fatalf("anonymous GET of a member's file through the group from its network: status %d: %s", st, b)
 	}
-	st, b = apiHeaders(t, s, http.MethodPost, "/api/repos/"+repo+"/files/delete",
-		map[string][]string{"paths": {"doc/two.txt"}}, s.Admin(), xff("192.0.2.1"))
-	wantDenied(t, "admin delete from a refused address", st, b)
-	st, b = apiHeaders(t, s, http.MethodPost, "/api/publish/sessions/manual",
-		map[string]string{"repo": repo}, s.TOTPProof(t, s.LoginTOTP(t, w), w), xff("192.0.2.1"))
-	wantDenied(t, "manual session from a refused address", st, b)
-
-	// Every refusal is in the audit log with the address and the scope.
-	events := auditEvents(t, s, "network.denied", repo)
-	scopes := map[string]bool{}
-	for _, e := range events {
-		if e.IP == "192.0.2.1" {
-			scopes[fmt.Sprint(e.Detail["scope"])] = true
-		}
+	if st, _ := apiHeaders(t, s, http.MethodGet, "/maven/"+member+"/"+jar, nil, nil, xff("203.0.113.5")); st != http.StatusUnauthorized {
+		t.Fatalf("anonymous GET of the member itself from the group's network: status %d, want 401", st)
 	}
-	if !scopes["read"] || !scopes["publish"] {
-		t.Fatalf("network.denied events of %s: %+v, want read and publish refusals from 192.0.2.1", repo, events)
+	if st, _ := apiHeaders(t, s, http.MethodGet, "/maven/"+group+"/"+jar, nil, nil, xff("192.0.2.1")); st != http.StatusUnauthorized {
+		t.Fatalf("anonymous GET through the group from another address: status %d, want 401", st)
 	}
 
-	// Empty lists lift the restriction.
-	putIPRules(t, s, repo, ipRules{Read: []ipRule{}, Publish: []ipRule{}})
-	if st, _ := apiHeaders(t, s, http.MethodGet, path, nil, s.AdminBasic(), xff("192.0.2.1")); st != http.StatusOK {
-		t.Fatalf("GET after the rules were cleared: status %d", st)
+	// A public repo takes no networks, and a repo with networks is not made public.
+	open := RandName("open")
+	s.CreateRepo(t, open, "raw", true, nil)
+	if st, b := s.API(t, http.MethodPut, "/api/repos/"+open+"/ip-rules", ipRules{Read: []ipRule{{Kind: "cidr", Value: "10.0.0.0/8"}}}, s.Admin()); st != http.StatusBadRequest {
+		t.Fatalf("networks on a public repo: status %d, want 400: %s", st, b)
+	}
+	if st, b := s.API(t, http.MethodPatch, "/api/repos", map[string]any{"names": []string{repo}, "anonymous_read": true}, s.Admin()); st != http.StatusBadRequest {
+		t.Fatalf("make a repo with networks public: status %d, want 400: %s", st, b)
+	}
+
+	// Without networks, a visitor at the old address signs in again.
+	putIPRules(t, s, repo, ipRules{Read: []ipRule{}})
+	if st, _ := apiHeaders(t, s, http.MethodGet, path, nil, nil, xff("203.0.113.5")); st != http.StatusUnauthorized {
+		t.Fatalf("anonymous GET after the networks were cleared: status %d, want 401", st)
 	}
 }
 
@@ -409,11 +453,8 @@ type ipListJSON struct {
 	FetchedAt   *time.Time `json:"fetched_at"`
 	Error       string     `json:"error"`
 	UsedBy      struct {
-		Repos []struct {
-			Repo  string `json:"repo"`
-			Scope string `json:"scope"`
-		} `json:"repos"`
-		TrustedProxies bool `json:"trusted_proxies"`
+		Repos          []string `json:"repos"`
+		TrustedProxies bool     `json:"trusted_proxies"`
 	} `json:"used_by"`
 }
 
@@ -485,15 +526,17 @@ func TestPresetIPLists(t *testing.T) {
 		t.Fatalf("DELETE a preset list: status %d, want 400: %s", st, b)
 	}
 
-	// A preset in a repo's read rules.
+	// A preset in a repo's allowed networks.
 	repo := RandName("raw")
-	s.CreateRepo(t, repo, "raw", true, nil)
+	s.CreateRepo(t, repo, "raw", false, nil)
 	putIPRules(t, s, repo, ipRules{Read: []ipRule{{Kind: "list", Value: "github-actions"}}})
 	if st, _ := apiHeaders(t, s, http.MethodGet, "/raw/"+repo+"/missing", nil, nil, xff("198.51.100.7")); st != http.StatusNotFound {
 		t.Fatalf("GET from a GitHub Actions address: status %d, want 404 (allowed, no file)", st)
 	}
 	st, b := apiHeaders(t, s, http.MethodGet, "/raw/"+repo+"/missing", nil, nil, xff("203.0.113.7"))
-	wantDenied(t, "anonymous GET from outside the list", st, b)
+	if st != http.StatusUnauthorized {
+		t.Fatalf("anonymous GET from outside the list: status %d, want 401: %s", st, b)
+	}
 
 	// The trusted proxies include the list cloudflare: a Cloudflare hop in the chain is skipped.
 	setTrustedProxies(t, s, []string{"private"})
@@ -552,7 +595,7 @@ func TestPresetIPLists(t *testing.T) {
 	}
 }
 
-// TestCustomIPLists covers the custom lists: create, edit, reference from repo rules and the
+// TestCustomIPLists covers the custom lists: create, edit, reference from allowed networks and the
 // trusted proxies (by list id), a rename that keeps every reference, and delete refused while in
 // use.
 func TestCustomIPLists(t *testing.T) {
@@ -605,23 +648,31 @@ func TestCustomIPLists(t *testing.T) {
 		t.Fatalf("PUT an unknown list: status %d, want 404", st)
 	}
 
-	// Reference the list from a repo's publish rules: only its addresses mint.
+	// Reference the list from a repo's allowed networks: its addresses read without signing in.
 	repo := RandName("raw")
 	s.CreateRepo(t, repo, "raw", false, nil)
 	w := RandName("writer")
 	s.CreateUser(t, w, "writer-pass-1234")
 	s.SetPerms(t, repo, w, "repo.download", "repo.publish")
-	got := putIPRules(t, s, repo, ipRules{Publish: []ipRule{{Kind: "list", Value: "runners", Note: "CI"}}})
-	if len(got.Publish) != 1 || got.Publish[0].Kind != "list" || got.Publish[0].Value != "runners" {
+	got := putIPRules(t, s, repo, ipRules{Read: []ipRule{{Kind: "list", Value: "runners", Note: "CI"}}})
+	if len(got.Read) != 1 || got.Read[0].Kind != "list" || got.Read[0].Value != "runners" {
 		t.Fatalf("PUT ip-rules with a list: %+v", got)
 	}
-	mintDenied(t, s, "mint from outside the list", w, repo, "203.0.113.5")
-	mustSession(t, "mint from a runner address")(mintFrom(t, s, w, repo, "192.0.2.11"))
+	readFrom := func(from string) int {
+		st, _ := apiHeaders(t, s, http.MethodGet, "/raw/"+repo+"/missing", nil, nil, xff(from))
+		return st
+	}
+	if st := readFrom("203.0.113.5"); st != http.StatusUnauthorized {
+		t.Fatalf("anonymous GET from outside the list: status %d, want 401", st)
+	}
+	if st := readFrom("192.0.2.11"); st != http.StatusNotFound {
+		t.Fatalf("anonymous GET from a runner address: status %d, want 404 (allowed, no file)", st)
+	}
 
 	// Reference it from the trusted proxies too.
 	setTrustedLists(t, s, "runners")
 	l := getIPList(t, s, "runners")
-	if len(l.UsedBy.Repos) != 1 || l.UsedBy.Repos[0].Repo != repo || l.UsedBy.Repos[0].Scope != "publish" || !l.UsedBy.TrustedProxies {
+	if !slices.Equal(l.UsedBy.Repos, []string{repo}) || !l.UsedBy.TrustedProxies {
 		t.Fatalf("runners used_by: %+v", l.UsedBy)
 	}
 
@@ -631,14 +682,14 @@ func TestCustomIPLists(t *testing.T) {
 		t.Fatalf("delete a list in use: status %d, want 409 naming %s: %s", st, repo, b)
 	}
 
-	// A rename keeps the repo rules and the trusted proxies: they name the list by its id.
+	// A rename keeps the allowed networks and the trusted proxies: they name the list by its id.
 	s.MustAPI(t, http.MethodPut, "/api/ip-lists/runners", map[string]any{"name": "ci-runners"}, s.Admin(), nil)
 	if st, _ := s.API(t, http.MethodGet, "/api/ip-lists/runners", nil, s.Admin()); st != http.StatusNotFound {
 		t.Fatalf("GET the old name after a rename: status %d, want 404", st)
 	}
 	var rules ipRules
 	s.MustAPI(t, http.MethodGet, "/api/repos/"+repo+"/ip-rules", nil, s.Admin(), &rules)
-	if len(rules.Publish) != 1 || rules.Publish[0].Value != "ci-runners" || rules.Publish[0].Note != "CI" {
+	if len(rules.Read) != 1 || rules.Read[0].Value != "ci-runners" || rules.Read[0].Note != "CI" {
 		t.Fatalf("ip-rules after the rename: %+v", rules)
 	}
 	var trusted trustedLists
@@ -646,10 +697,12 @@ func TestCustomIPLists(t *testing.T) {
 	if len(trusted.Lists) != 1 || trusted.Lists[0].Name != "ci-runners" || len(trusted.EnvLists) != 0 {
 		t.Fatalf("trusted proxies after the rename: %+v, want the list ci-runners", trusted)
 	}
-	mustSession(t, "mint from a runner address after the rename")(mintFrom(t, s, w, repo, "192.0.2.10"))
+	if st := readFrom("192.0.2.10"); st != http.StatusNotFound {
+		t.Fatalf("anonymous GET from a runner address after the rename: status %d, want 404", st)
+	}
 
-	// Without the repo rules, the trusted proxies still use it.
-	putIPRules(t, s, repo, ipRules{Read: []ipRule{}, Publish: []ipRule{}})
+	// Without the allowed networks, the trusted proxies still use it.
+	putIPRules(t, s, repo, ipRules{Read: []ipRule{}})
 	st, b = s.API(t, http.MethodDelete, "/api/ip-lists/ci-runners", nil, s.Admin())
 	if st != http.StatusConflict || !strings.Contains(string(b), "trusted proxies") {
 		t.Fatalf("delete a list of the trusted proxies: status %d, want 409 naming the trusted proxies: %s", st, b)
@@ -667,7 +720,7 @@ func TestCustomIPLists(t *testing.T) {
 		t.Fatal("GET /api/ip-lists still lists the deleted list")
 	}
 	if st, b := s.API(t, http.MethodPut, "/api/repos/"+repo+"/ip-rules", ipRules{Read: []ipRule{{Kind: "list", Value: "ci-runners"}}}, s.Admin()); st != http.StatusBadRequest {
-		t.Fatalf("a rule naming a deleted list: status %d, want 400: %s", st, b)
+		t.Fatalf("a network naming a deleted list: status %d, want 400: %s", st, b)
 	}
 
 	// Only network, or settings on a repo; a publisher holds neither.

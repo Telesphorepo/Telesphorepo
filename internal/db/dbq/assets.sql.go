@@ -11,6 +11,59 @@ import (
 	"strings"
 )
 
+const addTreeFile = `-- name: AddTreeFile :execrows
+INSERT INTO tree_entries (repo_id, parent, kind, sort_key, name, files, asset_id)
+VALUES (?, ?, 1, ?, ?, 0, ?)
+ON CONFLICT (repo_id, parent, kind, sort_key) DO NOTHING
+`
+
+type AddTreeFileParams struct {
+	RepoID  int64
+	Parent  string
+	SortKey []byte
+	Name    string
+	AssetID sql.NullInt64
+}
+
+// The children of each folder (tree_entries), written with each asset insert and delete. A file
+// row is new when AddTreeFile inserts it; only then do its folders count one more file.
+func (q *Queries) AddTreeFile(ctx context.Context, arg AddTreeFileParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, addTreeFile,
+		arg.RepoID,
+		arg.Parent,
+		arg.SortKey,
+		arg.Name,
+		arg.AssetID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const addTreeFolderFile = `-- name: AddTreeFolderFile :exec
+INSERT INTO tree_entries (repo_id, parent, kind, sort_key, name, files)
+VALUES (?, ?, 0, ?, ?, 1)
+ON CONFLICT (repo_id, parent, kind, sort_key) DO UPDATE SET files = files + 1
+`
+
+type AddTreeFolderFileParams struct {
+	RepoID  int64
+	Parent  string
+	SortKey []byte
+	Name    string
+}
+
+func (q *Queries) AddTreeFolderFile(ctx context.Context, arg AddTreeFolderFileParams) error {
+	_, err := q.db.ExecContext(ctx, addTreeFolderFile,
+		arg.RepoID,
+		arg.Parent,
+		arg.SortKey,
+		arg.Name,
+	)
+	return err
+}
+
 const deleteAsset = `-- name: DeleteAsset :execrows
 DELETE FROM assets WHERE repo_id = ? AND path = ?
 `
@@ -26,6 +79,39 @@ func (q *Queries) DeleteAsset(ctx context.Context, arg DeleteAssetParams) (int64
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const deleteTreeFile = `-- name: DeleteTreeFile :execrows
+DELETE FROM tree_entries WHERE repo_id = ? AND parent = ? AND kind = 1 AND sort_key = ?
+`
+
+type DeleteTreeFileParams struct {
+	RepoID  int64
+	Parent  string
+	SortKey []byte
+}
+
+func (q *Queries) DeleteTreeFile(ctx context.Context, arg DeleteTreeFileParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteTreeFile, arg.RepoID, arg.Parent, arg.SortKey)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const deleteTreeFolder = `-- name: DeleteTreeFolder :exec
+DELETE FROM tree_entries WHERE repo_id = ? AND parent = ? AND kind = 0 AND sort_key = ?
+`
+
+type DeleteTreeFolderParams struct {
+	RepoID  int64
+	Parent  string
+	SortKey []byte
+}
+
+func (q *Queries) DeleteTreeFolder(ctx context.Context, arg DeleteTreeFolderParams) error {
+	_, err := q.db.ExecContext(ctx, deleteTreeFolder, arg.RepoID, arg.Parent, arg.SortKey)
+	return err
 }
 
 const deleteUnreferencedBlob = `-- name: DeleteUnreferencedBlob :execrows
@@ -48,6 +134,25 @@ DELETE FROM upload_sessions WHERE id = ?
 func (q *Queries) DeleteUploadSession(ctx context.Context, id string) error {
 	_, err := q.db.ExecContext(ctx, deleteUploadSession, id)
 	return err
+}
+
+const dropTreeFolderFile = `-- name: DropTreeFolderFile :one
+UPDATE tree_entries SET files = files - 1
+WHERE repo_id = ? AND parent = ? AND kind = 0 AND sort_key = ?
+RETURNING files
+`
+
+type DropTreeFolderFileParams struct {
+	RepoID  int64
+	Parent  string
+	SortKey []byte
+}
+
+func (q *Queries) DropTreeFolderFile(ctx context.Context, arg DropTreeFolderFileParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, dropTreeFolderFile, arg.RepoID, arg.Parent, arg.SortKey)
+	var files int64
+	err := row.Scan(&files)
+	return files, err
 }
 
 const getAsset = `-- name: GetAsset :one
@@ -562,6 +667,162 @@ func (q *Queries) ListExpiredUploads(ctx context.Context, arg ListExpiredUploads
 			return nil, err
 		}
 		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTreeFiles = `-- name: ListTreeFiles :many
+SELECT t.sort_key, a.id, a.path, a.size, a.sha256, a.uploaded_by, a.updated_at, a.build_id
+FROM tree_entries t JOIN assets a ON a.id = t.asset_id
+WHERE t.repo_id = ?1 AND t.parent = ?2 AND t.kind = 1 AND t.sort_key >= ?3
+ORDER BY t.sort_key LIMIT ?4
+`
+
+type ListTreeFilesParams struct {
+	RepoID int64
+	Parent string
+	Lower  []byte
+	Limit  int64
+}
+
+type ListTreeFilesRow struct {
+	SortKey    []byte
+	ID         int64
+	Path       string
+	Size       int64
+	Sha256     string
+	UploadedBy sql.NullInt64
+	UpdatedAt  int64
+	BuildID    sql.NullInt64
+}
+
+func (q *Queries) ListTreeFiles(ctx context.Context, arg ListTreeFilesParams) ([]ListTreeFilesRow, error) {
+	rows, err := q.db.QueryContext(ctx, listTreeFiles,
+		arg.RepoID,
+		arg.Parent,
+		arg.Lower,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListTreeFilesRow
+	for rows.Next() {
+		var i ListTreeFilesRow
+		if err := rows.Scan(
+			&i.SortKey,
+			&i.ID,
+			&i.Path,
+			&i.Size,
+			&i.Sha256,
+			&i.UploadedBy,
+			&i.UpdatedAt,
+			&i.BuildID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTreeFolders = `-- name: ListTreeFolders :many
+SELECT sort_key, name FROM tree_entries
+WHERE repo_id = ?1 AND parent = ?2 AND kind = 0 AND sort_key >= ?3
+ORDER BY sort_key LIMIT ?4
+`
+
+type ListTreeFoldersParams struct {
+	RepoID int64
+	Parent string
+	Lower  []byte
+	Limit  int64
+}
+
+type ListTreeFoldersRow struct {
+	SortKey []byte
+	Name    string
+}
+
+// Pages of the children of a folder: one range of the primary key each. A cursor's key with a 0
+// byte appended is the smallest key after it.
+func (q *Queries) ListTreeFolders(ctx context.Context, arg ListTreeFoldersParams) ([]ListTreeFoldersRow, error) {
+	rows, err := q.db.QueryContext(ctx, listTreeFolders,
+		arg.RepoID,
+		arg.Parent,
+		arg.Lower,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListTreeFoldersRow
+	for rows.Next() {
+		var i ListTreeFoldersRow
+		if err := rows.Scan(&i.SortKey, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTreeFoldersDesc = `-- name: ListTreeFoldersDesc :many
+SELECT sort_key, name FROM tree_entries
+WHERE repo_id = ?1 AND parent = ?2 AND kind = 0 AND sort_key < ?3
+ORDER BY sort_key DESC LIMIT ?4
+`
+
+type ListTreeFoldersDescParams struct {
+	RepoID int64
+	Parent string
+	Upper  []byte
+	Limit  int64
+}
+
+type ListTreeFoldersDescRow struct {
+	SortKey []byte
+	Name    string
+}
+
+func (q *Queries) ListTreeFoldersDesc(ctx context.Context, arg ListTreeFoldersDescParams) ([]ListTreeFoldersDescRow, error) {
+	rows, err := q.db.QueryContext(ctx, listTreeFoldersDesc,
+		arg.RepoID,
+		arg.Parent,
+		arg.Upper,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListTreeFoldersDescRow
+	for rows.Next() {
+		var i ListTreeFoldersDescRow
+		if err := rows.Scan(&i.SortKey, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err

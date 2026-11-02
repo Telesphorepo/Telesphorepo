@@ -401,8 +401,7 @@ func (m *mod) closeSession(w http.ResponseWriter, r *http.Request, c *route.Call
 
 // mintRoute mints a session for the repo name with cred and answers 201 with the session and its
 // token. A mint that the access engine refuses answers its status, message and refusal code
-// (route.Refuse: 405 with Allow for a proxy or a group; the network guard has recorded its audit
-// event).
+// (route.Refuse: 405 with Allow for a proxy or a group).
 func (m *mod) mintRoute(w http.ResponseWriter, r *http.Request, cred MintCred, name string) {
 	mt, err := m.svc.MintRoute(r.Context(), r, cred, name)
 	var refused *RefusedError

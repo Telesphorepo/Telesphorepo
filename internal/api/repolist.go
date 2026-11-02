@@ -19,7 +19,8 @@ import (
 // The list of repositories (GET /api/repos) and the figures of the Settings overview
 // (GET /api/overview). A request reads only its answer: a keyset page merges at most three lists,
 // each one range of an index (repos.Service list.go): every repo for a holder of all
-// repositories, else the public repos and the repos of the caller's grants (a lookup per grant).
+// repositories, else the public repos and the repos of the caller's grants and of the allowed
+// networks that hold the client address (a lookup per repo).
 
 // maxPublished is the most repos of a list by last publish (?sort=published).
 const maxPublished = 50
@@ -29,11 +30,12 @@ const maxPublished = 50
 type visible struct {
 	all       bool    // a holder of all repositories
 	anonymous bool    // the public repos count
-	ids       []int64 // the repos of the caller's grants that count
+	ids       []int64 // the repos of the caller's grants and allowed networks that count
 }
 
 // visibleTo returns what p sees of the repos where p holds a permission of want (empty: any
-// permission), and ctx with p's grants (auth.Service.WithGrants).
+// permission), and ctx with p's grants (auth.Service.WithGrants). The allowed networks that hold
+// the client address count for download (access.Engine.NetworkRepos, one lookup).
 func (a *API) visibleTo(ctx context.Context, p *auth.Principal, want perm.Set) (context.Context, visible, error) {
 	if p != nil && perm.Current().AllRepos(p.Perms) {
 		return ctx, visible{all: true}, nil
@@ -48,7 +50,10 @@ func (a *API) visibleTo(ctx context.Context, p *auth.Principal, want perm.Set) (
 			v.ids = append(v.ids, id)
 		}
 	}
-	slices.Sort(v.ids)
+	if v.anonymous {
+		v.ids = append(v.ids, a.access.NetworkRepos(ctx)...)
+	}
+	v.ids = slices.Compact(slices.Sorted(slices.Values(v.ids)))
 	return ctx, v, nil
 }
 
@@ -209,7 +214,7 @@ func (a *API) repoItems(r *http.Request, p *auth.Principal, page []*repos.Repo) 
 	}
 	out := make([]repoJSON, 0, len(page))
 	for _, repo := range page {
-		perms, err := a.auth.RepoPerms(ctx, p, repo)
+		perms, err := a.access.RepoPerms(ctx, p, repo)
 		if err != nil {
 			return nil, err
 		}

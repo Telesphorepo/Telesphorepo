@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/netip"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -56,6 +57,47 @@ var TrustedProxies = settings.List(&settings.Def{Key: "trusted_proxies", Label: 
 		}
 		return nil
 	}})
+
+// hostRE is a host name of network.probe_hosts: lower case, no scheme, port or path.
+var hostRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
+
+// ProbeHosts is the setting network.probe_hosts: an IPv4-only and an IPv6-only host name of this
+// server. A browser reaches the server over one family; the Access tab asks
+// GET /api/network/whoami on both hosts to learn the address of each. The server answers on them
+// as on the host of base_url.
+var ProbeHosts = settings.List(&settings.Def{Key: "network.probe_hosts", Label: "Address probe hosts",
+	Help: "Two host names of this server, one with only an IPv4 address (A record) and one with only an IPv6 address (AAAA record), for example v4.repo.example.com and v6.repo.example.com. With them, choose Add my address on a repository's Access tab to add both addresses of your network. They must reach this server the way the base URL does, through the same proxy.",
+	Normalize: func(v any) any {
+		l := v.([]string)
+		out := make([]string, 0, len(l))
+		for _, s := range l {
+			out = append(out, strings.TrimSuffix(strings.ToLower(strings.TrimSpace(s)), "."))
+		}
+		return out
+	},
+	Validate: func(v any) error {
+		l := v.([]string)
+		if len(l) != 0 && len(l) != 2 {
+			return fmt.Errorf("give two host names, an IPv4-only and an IPv6-only one, or none")
+		}
+		for _, s := range l {
+			if !hostRE.MatchString(s) || len(s) > 253 {
+				return fmt.Errorf("%q is not a host name (no scheme, port or path)", s)
+			}
+		}
+		if len(l) == 2 && l[0] == l[1] {
+			return fmt.Errorf("the two host names must differ")
+		}
+		return nil
+	}})
+
+// probeHost returns probe host i of s, or "".
+func probeHost(s *settings.Snapshot, i int) string {
+	if l := ProbeHosts.Get(s); i < len(l) {
+		return l[i]
+	}
+	return ""
+}
 
 // validate refuses a change of trusted_proxies with a "list:<name>" entry: an IP list joins the
 // trusted proxies as a row (PUT /api/network/trusted-proxies). Only TR_TRUSTED_PROXIES may name

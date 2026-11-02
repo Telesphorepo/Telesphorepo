@@ -733,6 +733,9 @@ func SeedTx(ctx context.Context, tx *sql.Tx, repoID int64, rows []SeedRow) ([]*A
 		if err != nil {
 			return nil, err
 		}
+		if err := treeAdd(ctx, q, repoID, a.ID, r.Path); err != nil {
+			return nil, err
+		}
 		out = append(out, &Asset{ID: a.ID, RepoID: repoID, Path: r.Path, BlobID: id, Size: r.Size, SHA256: r.SHA256,
 			ContentType: r.ContentType, Kind: r.Kind})
 	}

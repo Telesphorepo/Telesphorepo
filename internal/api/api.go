@@ -138,7 +138,12 @@ func (a *API) routes(mux *route.Router) {
 	mux.Handle("GET /api/repos/{name}/versions", route.RepoRead(), a.versions)
 	mux.Handle("GET /api/repos/{name}/builds", route.RepoRead(), a.builds)
 	del := route.Policy{Accept: auth.CredSession | auth.CredPublish, Repo: &route.RepoRule{Op: access.Delete, Perm: perm.RepoDelete}}
-	mux.Handle("POST /api/repos/{name}/files/delete", del, a.deleteFiles)
+	// On a group the delete reads the group and deletes in the members it names, each deciding.
+	delFiles := del
+	delFiles.Repo = &route.RepoRule{Op: access.Delete, Perm: perm.RepoDelete, Group: &route.RepoOp{Op: access.Read, Perm: perm.RepoDownload}}
+	mux.Handle("POST /api/repos/{name}/files/delete", delFiles, a.deleteFiles)
+	mux.Handle("POST /api/repos/{name}/files/holders", route.Policy{Accept: auth.CredSession,
+		Repo: &route.RepoRule{Op: access.Read, Perm: perm.RepoDownload}}, a.fileHolders)
 	mux.Handle("POST /api/repos/{name}/files/delete/plan", del, a.deletePlan)
 	mux.Handle("GET /api/repos/{name}/files/delete/{id}", del, a.deleteStatus)
 	upload := route.Policy{Accept: auth.CredPublish, Repo: &route.RepoRule{Op: access.Write, Perm: perm.RepoPublish}}
@@ -699,6 +704,13 @@ func (a *API) search(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		route.Fail(w, r, err)
 		return
 	}
+	if !isAll {
+		// The repos whose allowed networks hold the client address: one lookup of the network
+		// module's index.
+		if more := a.access.NetworkRepos(ctx); len(more) > 0 {
+			ids = slices.Compact(slices.Sorted(slices.Values(append(ids, more...))))
+		}
+	}
 	if name := qs.Get("repo"); name != "" {
 		repo, err := a.repos.ByName(ctx, name)
 		if errors.Is(err, repos.ErrNotFound) {
@@ -714,22 +726,7 @@ func (a *API) search(w http.ResponseWriter, r *http.Request, c *route.Call) {
 		}
 		ids, isAll = []int64{repo.ID}, false
 	}
-	// Repos whose guards (the read rules of the network module) refuse the caller drop out of
-	// the results.
-	if denied := a.access.RefusedRepos(r); len(denied) > 0 {
-		if isAll {
-			all, err := a.repos.List(ctx)
-			if err != nil {
-				route.Fail(w, r, err)
-				return
-			}
-			ids, isAll = make([]int64, 0, len(all)), false
-			for _, repo := range all {
-				ids = append(ids, repo.ID)
-			}
-		}
-		ids = slices.DeleteFunc(ids, func(id int64) bool { return denied[id] })
-	}
+
 	if isAll {
 		ids = nil
 	} else if len(ids) == 0 {

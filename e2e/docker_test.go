@@ -333,16 +333,16 @@ docker push %[1]s:v1
 			d.MustExec(t, "pull one platform", fmt.Sprintf("set -e\ndocker pull --platform linux/arm64 %s:multi\n", img))
 		})
 
-		t.Run("read IP rule", func(t *testing.T) {
-			putIPRules(t, s, pub, ipRules{Read: []ipRule{{Kind: "cidr", Value: "203.0.113.0/24"}}})
-			code, out := d.Exec(t, fmt.Sprintf("docker logout %s >/dev/null 2>&1; docker rmi %s:v1 >/dev/null 2>&1; docker pull %s:v1 2>&1", host, pubImg, pubImg))
+		t.Run("allowed networks", func(t *testing.T) {
+			// Every address is allowed: docker pulls the restricted repo without signing in, through
+			// the token endpoint and the registry routes.
+			putIPRules(t, s, priv, ipRules{Read: []ipRule{{Kind: "cidr", Value: "0.0.0.0/0"}, {Kind: "cidr", Value: "::/0"}}})
+			d.MustExec(t, "anonymous pull through the allowed networks", fmt.Sprintf("set -e\ndocker logout %s >/dev/null 2>&1 || true\ndocker rmi %s:v1 >/dev/null 2>&1 || true\ndocker pull %s:v1\n", host, img, img))
+			putIPRules(t, s, priv, ipRules{Read: []ipRule{}})
+			code, out := d.Exec(t, fmt.Sprintf("docker rmi %s:v1 >/dev/null 2>&1; docker pull %s:v1 2>&1", img, img))
 			if code == 0 {
-				t.Fatalf("pull from an address the read rule refuses: exit %d:\n%s", code, out)
+				t.Fatalf("anonymous pull of a restricted repo without allowed networks: exit %d:\n%s", code, out)
 			}
-			if len(auditEvents(t, s, "network.denied", pub)) == 0 {
-				t.Fatal("no network.denied event for the refused pull")
-			}
-			putIPRules(t, s, pub, ipRules{Read: []ipRule{}, Publish: []ipRule{}})
 		})
 
 		// The delete empties the docker rows of the repo in batches before the repo row goes.

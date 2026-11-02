@@ -75,39 +75,32 @@ func (a *API) tree(w http.ResponseWriter, r *http.Request, c *route.Call) {
 // repo: {paths, prefixes} -> 200 {deleted: <file count>} when it ends within delete.wait, else 202
 // {id, deleted} and it goes on in the background (deleteStatus). The two lists hold 1 to 1000
 // items together. A bad path or prefix answers 400 and deletes nothing. A file that is gone
-// already counts as done. One audit event goes to each file and each folder that lost files.
+// already counts as done. One audit event goes to each file and each folder that lost files. On a
+// group, members names the members to delete in (deleteInMembers).
 func (a *API) deleteFiles(w http.ResponseWriter, r *http.Request, c *route.Call) {
 	repo := c.Repo
 	var in struct {
 		Paths    []string `json:"paths"`
 		Prefixes []string `json:"prefixes"`
+		Members  []string `json:"members"`
 	}
 	if !a.kit.Decode(w, r, &in) {
 		return
 	}
-	if n := len(in.Paths) + len(in.Prefixes); n == 0 || n > maxBulk {
-		httpx.Error(w, r, http.StatusBadRequest, "paths and prefixes must hold 1 to "+strconv.Itoa(maxBulk)+" items together")
+	rm, ok := removalOf(w, r, in.Paths, in.Prefixes)
+	if !ok {
 		return
 	}
-	rm := assets.Removal{Repo: repo, Origin: format.OriginOf(c.P, assets.SourceUI)}
-	for _, f := range in.Paths {
-		p, err := repopath.Parse(f)
-		if err != nil {
-			httpx.Error(w, r, http.StatusBadRequest, "invalid path "+strconv.Quote(clipName(f)))
-			return
-		}
-		rm.Paths = append(rm.Paths, p)
+	rm.Origin = format.OriginOf(c.P, assets.SourceUI)
+	if repo.Kind == repos.KindGroup {
+		a.deleteInMembers(w, r, c, rm, in.Members)
+		return
 	}
-	for _, prefix := range in.Prefixes {
-		dir, err := repopath.Folder(prefix)
-		if err != nil || dir == "" {
-			httpx.Error(w, r, http.StatusBadRequest, "invalid prefix "+strconv.Quote(clipName(prefix)))
-			return
-		}
-		if !slices.Contains(rm.Prefixes, dir) {
-			rm.Prefixes = append(rm.Prefixes, dir)
-		}
+	if len(in.Members) > 0 {
+		httpx.Error(w, r, http.StatusBadRequest, "members names the repositories of a group; "+repo.Name+" is not a group")
+		return
 	}
+	rm.Repo = repo
 	t, ok := a.fileDeletes.start(repo.ID)
 	if !ok {
 		httpx.Error(w, r, http.StatusTooManyRequests, "this repository runs "+strconv.Itoa(maxRepoDeletes)+" deletes of files already; try again when one ends")
@@ -132,6 +125,36 @@ func (a *API) deleteFiles(w http.ResponseWriter, r *http.Request, c *route.Call)
 		httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"id": t.id, "deleted": t.deleted.Load()})
 	case <-r.Context().Done():
 	}
+}
+
+// removalOf checks the files (paths) and folders (prefixes) of a delete: 1 to maxBulk items
+// together, each a valid path, a folder never the top. It answers 400 and returns ok=false for a
+// bad one. The removal names no repo yet.
+func removalOf(w http.ResponseWriter, r *http.Request, paths, prefixes []string) (assets.Removal, bool) {
+	var rm assets.Removal
+	if n := len(paths) + len(prefixes); n == 0 || n > maxBulk {
+		httpx.Error(w, r, http.StatusBadRequest, "paths and prefixes must hold 1 to "+strconv.Itoa(maxBulk)+" items together")
+		return rm, false
+	}
+	for _, f := range paths {
+		p, err := repopath.Parse(f)
+		if err != nil {
+			httpx.Error(w, r, http.StatusBadRequest, "invalid path "+strconv.Quote(clipName(f)))
+			return rm, false
+		}
+		rm.Paths = append(rm.Paths, p)
+	}
+	for _, prefix := range prefixes {
+		dir, err := repopath.Folder(prefix)
+		if err != nil || dir == "" {
+			httpx.Error(w, r, http.StatusBadRequest, "invalid prefix "+strconv.Quote(clipName(prefix)))
+			return rm, false
+		}
+		if !slices.Contains(rm.Prefixes, dir) {
+			rm.Prefixes = append(rm.Prefixes, dir)
+		}
+	}
+	return rm, true
 }
 
 // deleteStatus answers the state of the delete of files {id} of the repo that answered 202:
@@ -204,6 +227,13 @@ func (d *fileDeletes) finish(t *fileDelete, n int, err error) {
 	t.err, t.ended = err, time.Now()
 	d.mu.Unlock()
 	close(t.done)
+}
+
+// drop forgets t, a delete that start reserved and that never ran.
+func (d *fileDeletes) drop(t *fileDelete) {
+	d.mu.Lock()
+	delete(d.byID, t.id)
+	d.mu.Unlock()
 }
 
 func (d *fileDeletes) get(id string, repoID int64) *fileDelete {

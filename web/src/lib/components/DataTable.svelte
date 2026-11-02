@@ -12,7 +12,7 @@
   300 ms, then a quiet indicator in the space of four rows (Loading); a reload keeps the current rows
   on screen. An empty table is never drawn: `empty` (a CompactEmpty) shows in its place, without
   column headings. Inside a Section the card is the surface, so the row drops its dashed frame. A keyset source gets "Load more"
-  under it. With `href`, a click anywhere on a row opens it (put the same link on the row's name,
+  under it; with `auto` the next page loads as the end of the rows comes into view. With `href`, a click anywhere on a row opens it (put the same link on the row's name,
   so the keyboard reaches it); controls inside the row keep their own click.
 
     const devices = new Keyset((p) => api.devices.list(p));
@@ -93,6 +93,7 @@
     pickOff = false,
     selectAllLabel,
     bulk,
+    auto = false,
   }: {
     source: TableSource<T>;
     columns: Column[];
@@ -122,6 +123,8 @@
     selectAllLabel?: string;
     /** The bulk actions in the selection bar. With it, every row gets a checkbox. */
     bulk?: Snippet;
+    /** Load the next page of a keyset source as the end of the rows comes into view, not on "Load more". */
+    auto?: boolean;
   } = $props();
 
   const pick = new Pick<T, K>({
@@ -209,4 +212,4 @@
   </div>
 {/if}
 
-<SourceMore {source} />
+<SourceMore {source} {auto} />

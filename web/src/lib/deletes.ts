@@ -1,7 +1,8 @@
 // A repository delete runs on the server after POST /api/repos/delete answers 202: the
 // repository keeps its delete operation, which counts the files removed, until it is gone. A
 // delete of files that takes more than 2 s answers 202 too, and goes on in the background
-// (POST /api/repos/{name}/files/delete, then GET .../files/delete/{id}).
+// (POST /api/repos/{name}/files/delete, then GET .../files/delete/{id}). A delete in a group
+// answers per member, and each member's delete that goes on is asked about at that member.
 
 import { toast } from "svelte-sonner";
 import { api, ApiError, errorMessage, type FilesDelete } from "$lib/api";
@@ -64,49 +65,88 @@ export async function waitForDeletes(names: readonly string[]): Promise<void> {
  * restarted during a delete it throws, saying to delete again.
  */
 export async function deleteFiles(repo: string, target: FilesDelete): Promise<number> {
-  const paths = target.paths ?? [];
-  const prefixes = target.prefixes ?? [];
   const id = toast.loading("Deleting…");
-  const batch = 1000;
   let n = 0;
   try {
-    for (let i = 0; i < paths.length + prefixes.length; i += batch) {
-      const ps = paths.slice(i, i + batch);
-      const xs = prefixes.slice(Math.max(0, i - paths.length), Math.max(0, i + batch - paths.length));
-      const res = await api.repos.deleteFiles(repo, { paths: ps.length ? ps : undefined, prefixes: xs.length ? xs : undefined });
-      if (!res.id) {
-        n += res.deleted;
-        continue;
-      }
-      let updated = Date.now();
-      let failures = 0;
-      for (;;) {
-        let st;
-        try {
-          st = await api.repos.deleteStatus(repo, res.id);
-          updated = Date.now();
-          failures = 0;
-        } catch (e) {
-          if (e instanceof ApiError && e.status === 404)
-            throw new Error(`The server restarted during the delete, after ${count(n, "file", "files")}. Delete again to remove the files that are left.`);
-          if (e instanceof ApiError && e.status < 500) throw e;
-          failures++;
-          const wait = Math.min(pollEvery * 2 ** failures, maxBackoff);
-          toast.loading(`Deleting: not updated for ${formatSpan(Date.now() - updated)}, trying again in ${formatSpan(wait)}`, { id, description: errorMessage(e) });
-          await pause(wait);
-          continue;
-        }
-        if (st.state === "failed") throw new Error(`The delete stopped after ${count(n + st.deleted, "file", "files")}: ${st.error}`);
-        if (st.state === "done") {
-          n += st.deleted;
-          break;
-        }
-        toast.loading(`Deleting: ${count(n + st.deleted, "file", "files")} so far`, { id, description: undefined });
-        await pause(pollEvery);
-      }
+    for (const part of batches(target)) {
+      const res = await api.repos.deleteFiles(repo, part);
+      n += res.id ? await waitForFileDelete(repo, res.id, n, id) : res.deleted;
     }
   } finally {
     toast.dismiss(id);
   }
   return n;
+}
+
+/** One delete in a group: the files and folders, and the members to delete them in. */
+export type GroupDelete = { target: FilesDelete; members: string[] };
+
+/**
+ * Deletes files and folders of group in its members, one request per delete and 1000 items a
+ * request, with the count of deleted files in one loading toast, as deleteFiles does. Returns how
+ * many files it deleted, and the members that kept their files with the reason.
+ */
+export async function deleteGroupFiles(group: string, deletes: GroupDelete[]): Promise<{ deleted: number; kept: { repo: string; reason?: string }[] }> {
+  const id = toast.loading("Deleting…");
+  let n = 0;
+  const kept = new Map<string, string | undefined>();
+  try {
+    for (const d of deletes) {
+      for (const part of batches(d.target)) {
+        const res = await api.repos.deleteGroupFiles(group, part, d.members);
+        for (const k of res.kept) kept.set(k.repo, k.reason);
+        for (const r of res.repos) {
+          if (r.error) throw new Error(`The delete in ${r.repo} stopped after ${count(n + r.deleted, "file", "files")}: ${r.error}`);
+          n += r.id ? await waitForFileDelete(r.repo, r.id, n, id) : r.deleted;
+        }
+      }
+    }
+  } finally {
+    toast.dismiss(id);
+  }
+  return { deleted: n, kept: [...kept].map(([repo, reason]) => ({ repo, reason })) };
+}
+
+/** The items of target, 1000 a request (the most the server takes). */
+function batches(target: FilesDelete): FilesDelete[] {
+  const paths = target.paths ?? [];
+  const prefixes = target.prefixes ?? [];
+  const batch = 1000;
+  const out: FilesDelete[] = [];
+  for (let i = 0; i < paths.length + prefixes.length; i += batch) {
+    const ps = paths.slice(i, i + batch);
+    const xs = prefixes.slice(Math.max(0, i - paths.length), Math.max(0, i + batch - paths.length));
+    out.push({ paths: ps.length ? ps : undefined, prefixes: xs.length ? xs : undefined });
+  }
+  return out;
+}
+
+/**
+ * Asks every second about the delete of files id of repo that answered 202, until it ends, and
+ * returns the files it deleted. n is the count of the files deleted before it, for the toast id.
+ */
+async function waitForFileDelete(repo: string, deleteID: string, n: number, id: string | number): Promise<number> {
+  let updated = Date.now();
+  let failures = 0;
+  for (;;) {
+    let st;
+    try {
+      st = await api.repos.deleteStatus(repo, deleteID);
+      updated = Date.now();
+      failures = 0;
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404)
+        throw new Error(`The server restarted during the delete, after ${count(n, "file", "files")}. Delete again to remove the files that are left.`);
+      if (e instanceof ApiError && e.status < 500) throw e;
+      failures++;
+      const wait = Math.min(pollEvery * 2 ** failures, maxBackoff);
+      toast.loading(`Deleting: not updated for ${formatSpan(Date.now() - updated)}, trying again in ${formatSpan(wait)}`, { id, description: errorMessage(e) });
+      await pause(wait);
+      continue;
+    }
+    if (st.state === "failed") throw new Error(`The delete stopped after ${count(n + st.deleted, "file", "files")}: ${st.error}`);
+    if (st.state === "done") return st.deleted;
+    toast.loading(`Deleting: ${count(n + st.deleted, "file", "files")} so far`, { id, description: undefined });
+    await pause(pollEvery);
+  }
 }

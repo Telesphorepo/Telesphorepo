@@ -1,12 +1,12 @@
 // Package netrules holds the network rules of the server: named IP lists
 // (presets that the server fetches and refreshes daily, and custom lists that admins edit), the
-// client address behind trusted proxies, and the per-repo IP allow-lists for read and publish.
-// Request paths read in-memory snapshots; the database keeps the lists and the rules.
+// client address behind trusted proxies, and the allowed networks of each repo (an address in
+// them downloads from the repo). Request paths read in-memory snapshots; the database keeps the
+// lists and the networks.
 package netrules
 
 import (
 	"bufio"
-	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -118,17 +118,11 @@ type List struct {
 	CreatedAt   time.Time  `json:"created_at"`
 }
 
-// Use is one repo rule scope that names a list.
-type Use struct {
-	Repo  string `json:"repo"`
-	Scope string `json:"scope"`
-}
-
-// Usage says what names a list: repo rules and the trusted proxies (a row of
-// trusted_proxy_lists, or an entry of TR_TRUSTED_PROXIES).
+// Usage says what names a list: the allowed networks of repos (by repo name) and the trusted
+// proxies (a row of trusted_proxy_lists, or an entry of TR_TRUSTED_PROXIES).
 type Usage struct {
-	Repos          []Use `json:"repos"`
-	TrustedProxies bool  `json:"trusted_proxies"`
+	Repos          []string `json:"repos"`
+	TrustedProxies bool     `json:"trusted_proxies"`
 }
 
 func (u Usage) inUse() bool { return len(u.Repos) > 0 || u.TrustedProxies }
@@ -146,15 +140,15 @@ var (
 	ErrEnvNamed = errors.New("the trusted proxies name this list in " + TrustedProxies.Def().Env() + "; change it there before the rename")
 )
 
-// InUseError refuses to delete a list that repo rules or trusted_proxies name.
+// InUseError refuses to delete a list that the allowed networks of a repo or trusted_proxies name.
 type InUseError struct {
 	Usage Usage
 }
 
 func (e *InUseError) Error() string {
 	var parts []string
-	for _, u := range e.Usage.Repos {
-		parts = append(parts, "the "+u.Scope+" rules of "+u.Repo)
+	for _, r := range e.Usage.Repos {
+		parts = append(parts, "the allowed networks of "+r)
 	}
 	if e.Usage.TrustedProxies {
 		parts = append(parts, "the trusted proxies")
@@ -162,7 +156,8 @@ func (e *InUseError) Error() string {
 	return "the IP list is used by " + strings.Join(parts, ", ")
 }
 
-// Service keeps the IP lists, resolves client addresses and checks repo IP rules.
+// Service keeps the IP lists, resolves client addresses and keeps the allowed networks of the
+// repos.
 type Service struct {
 	rq, wq *dbq.Queries
 	d      *db.DB
@@ -189,8 +184,10 @@ type Service struct {
 
 	// rulesMu guards rules. A writer of rules or of the trusted lists, and a rename or delete of a
 	// list, holds it, so nothing names a list that is gone. Lock order: rulesMu, then listsMu.
+	// reach is the index of rules by address, replaced under rulesMu whenever rules change.
 	rulesMu sync.RWMutex
 	rules   map[int64]*repoRules
+	reach   atomic.Pointer[reachIndex]
 
 	afterRules []func(ctx context.Context, repoID int64) // set before the server serves (AfterRulesChange)
 }
@@ -384,27 +381,26 @@ func (s *Service) storeList(change func(m map[string]*listState)) {
 	s.ids.Store(&ids)
 }
 
-// Usage returns what names list name: repo rules (through repo_ip_rules_list_id) and the
-// trusted proxies.
+// Usage returns what names list name: the allowed networks of repos (through
+// repo_networks_list_id) and the trusted proxies.
 func (s *Service) Usage(ctx context.Context, name string) (Usage, error) {
 	st := (*s.lists.Load())[name]
 	if st == nil {
-		return Usage{Repos: []Use{}}, nil
+		return Usage{Repos: []string{}}, nil
 	}
 	return s.usage(ctx, s.rq, st.id)
 }
 
 func (s *Service) usage(ctx context.Context, q *dbq.Queries, id int64) (Usage, error) {
-	rows, err := q.ListRulesOfList(ctx, sql.NullInt64{Int64: id, Valid: true})
+	names, err := q.ListReposOfList(ctx, sql.NullInt64{Int64: id, Valid: true})
 	if err != nil {
 		return Usage{}, err
 	}
-	u := Usage{Repos: make([]Use, 0, len(rows)), TrustedProxies: s.trusts(id)}
-	for _, r := range rows {
-		u.Repos = append(u.Repos, Use{Repo: r.Repo, Scope: r.Scope})
+	if names == nil {
+		names = []string{}
 	}
-	slices.SortFunc(u.Repos, func(a, b Use) int { return cmp.Or(strings.Compare(a.Repo, b.Repo), strings.Compare(a.Scope, b.Scope)) })
-	return u, nil
+	slices.Sort(names)
+	return Usage{Repos: names, TrustedProxies: s.trusts(id)}, nil
 }
 
 // ListInput is a custom list as an admin writes it. A nil field keeps the current value on an
@@ -531,7 +527,7 @@ func isUnique(err error) bool {
 }
 
 // Update changes custom list name: its name, title, description and ranges, and records
-// network.list.update. Repo rules and trusted proxies name the list by its id, so a rename
+// network.list.update. Allowed networks and trusted proxies name the list by its id, so a rename
 // changes one row. A list that TR_TRUSTED_PROXIES names keeps its name (ErrEnvNamed).
 func (s *Service) Update(ctx context.Context, name string, in ListInput) (List, error) {
 	s.rulesMu.Lock()
@@ -602,7 +598,7 @@ func (s *Service) Update(ctx context.Context, name string, in ListInput) (List, 
 	return next.view(true), nil
 }
 
-// Delete removes custom list name. A list that repo rules or the trusted proxies name is
+// Delete removes custom list name. A list that allowed networks or the trusted proxies name is
 // refused with an *InUseError. It records network.list.delete.
 func (s *Service) Delete(ctx context.Context, name string) error {
 	s.rulesMu.Lock()

@@ -43,7 +43,7 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/jobs` | The job runner: one context and wait group per module, `Start`, `Run` and `Tick` of every job, on-demand tasks (`Go`), stop in reverse module order |
 | `internal/route` | The route table: each module's `Router` accepts only the paths the module owns, and every route has a `Policy` that one middleware enforces (see **Route policy**); `route.API`, the helpers that JSON handlers share (JSON body limit, base URL, error answers, pages) |
 | `internal/perm` | The permission registry: the subsystems and permissions that modules register (`perm.Subsystem`, `perm.Def`), fixed at startup; `perm.Set`, a bit mask over the registry. See **Permissions** |
-| `internal/access` | The access engine: `Engine.Decide` for every repo operation, the guards of the modules, and the access report built from the same parts |
+| `internal/access` | The access engine: `Engine.Decide` for every repo operation (grants and the allowed networks of the network module), and the access report built from the same parts |
 | `internal/token` | The token format of every token kind: `Mint`, `Parse`, `Hash`, `Check` |
 | `internal/config` | Boot env (`LoadBoot`): `TR_DATA_DIR`, `TR_LISTEN`, `TR_MASTER_KEY`, the bootstrap admin. Everything else is a setting |
 | `internal/settings` | The settings store: the groups that modules own (`settings.Group`), one immutable snapshot read through typed `Key`s and `View`s, AES-256-GCM secrets, master key, env overrides, subscribers. Declares the keys of the `general` group. See **Settings model** |
@@ -83,7 +83,7 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/files` | The file tree and the details of one file. Writes and deletes go through the byte pipeline |
 | `internal/audit` | The audit log: the action registry (`Actions`), the actor in the context (`WithActor`, `System`, `CLI`), `Record` and `RecordTx`, the list query and `Cleanup`. See **Audit log** |
 | `internal/activity` | Module `audit`: `GET /api/audit`, `GET /api/audit/actions`, `GET /api/audit/people`, `GET /api/stats`, the permission `activity.read`, the settings group `activity` and the jobs `audit.retention` and `audit.downloads` |
-| `internal/netrules` | Module `network`: client IP resolution behind trusted proxies (the client address of every request), the IP lists (presets and custom lists) and the per-repo IP rules. See **Network rules** |
+| `internal/netrules` | Module `network`: client IP resolution behind trusted proxies (the client address of every request), the IP lists (presets and custom lists) and the allowed networks of each repo. See **Network rules** |
 | `internal/api` | Module `core`: sign-in, the account, people, read tokens (token kind `trp`), repos, grants, files, uploads, search, the settings API and `/api/formats`. The JSON API of every module is under `/api/`, wrapped in `http.CrossOriginProtection` |
 | `internal/httpx` | JSON helpers, the error answers (`Error`, the problem types of `DeclareProblem`, `WriteProblem`; see **Problem documents**), `StatusError` (an error with its HTTP status), `ProblemError` (an error with its problem document), `RepoPath` (the URL check of a `{path...}`, then `repopath.Parse`), `Limit` (default 50, max 200), `AcceptsEncoding` and `GzipJSON` (see **Compression** under the JSON API) |
 | `internal/demo` | The dev demo data (`telesphorepo-server dev`): it writes repos, users and files through the byte pipeline, with the demo data of each module (`Extender.Demo`). See **Demo data** |
@@ -113,7 +113,6 @@ type assertion.
 | `Job(jobs.Job)` | A job named `<module>.<name>` with `Start`, `Run` and `Tick` |
 | `Format(format.Spec)` | A repository format; the module owns `/<name>/`. A nil `Routes` mounts `format.Standard` (see **Byte pipeline**) |
 | `RepoField(repos.Field)` | A repo value that the module keeps in its own table, e.g. `signing_key`: `Applies` (by format and repo kind), `Validate`, `Default`, `Save` (in the repo transaction), `Committed`, `Load` (from memory). It serves once the module's `Init` ran |
-| `RepoGuard(access.Guard)` | An extra rule of the access engine (the IP rules): `Name`, `Check`, `Describe` (the access report), `Refused` (search) |
 | `CIProvider(ci.Provider)` | A CI system whose tokens make build records and whose trust policies the access report describes |
 | `ResolveClient(fn)` | The client address and scheme of every request; at most one module |
 | `Host(fn)` | A host that the server answers for besides the base URL host and the loopback names, from the settings (the host of `docker.upload_url`); see **Hosts and repo domains** |
@@ -164,7 +163,7 @@ it needs and leaves the others nil. The kernel gives it these parts:
 | `audit` | `internal/activity` | | `GET /api/audit`, `GET /api/audit/actions`, `GET /api/audit/people`, `GET /api/stats`, the subsystem `activity`, the settings group `activity`, jobs `audit.retention` (every hour: events and download days) and `audit.downloads` (writes the download counters every minute and at shutdown) |
 | `storage` | `internal/move` | | `/api/storage/moves/...`, the subsystem `storage`, the settings group `storage` (its `Validate`: the S3 rules; `Test`: the probe; `Apply`: refuse a change while a move runs, probe the new store, start the move), the `storage.move.*` actions, job `storage.resume` |
 | `backup` | `internal/backup` | | `GET /api/backup`, `POST /api/backup/run`, the subsystem `backup`, the settings group `backup` (its `Test`: the server writes a probe file into the folder), the `backup.*` actions, job `backup.schedule` (every minute: a backup when one is due). No table: the backup folder holds its state |
-| `network` | `internal/netrules` | | The client address, IP lists, repo IP rules (a repo guard and the networks of the access report), the IP lists of the trusted proxies (`/api/network/trusted-proxies`), the subsystem `network`, the settings group `network` (`trusted_proxies`; its `Validate` refuses a `list:` entry in a change), the `network.*` actions, job `network.presets` (every hour) |
+| `network` | `internal/netrules` | | The client address, IP lists, the allowed networks of each repo (`access.Networks` of the engine, set in `Init`, and a check of every repo update: `repos.Service.CheckChange`), the IP lists of the trusted proxies (`/api/network/trusted-proxies`), `GET /api/network/whoami`, the subsystem `network`, the settings group `network` (`trusted_proxies`, `network.probe_hosts`, whose two hosts it answers on (`Host`); its `Validate` refuses a `list:` entry in a change), the `network.*` actions, job `network.presets` (every hour), job `network.restrict` (its `Start` makes restricted a public repo that has allowed networks) |
 | `signing` | `internal/signing` | | Signing keys and `/api/signing-keys/...`, the repo field `signing_key` (for the hosted repos of the formats with `SigningKey`), the subsystem `signing`, the `signing.key.*` actions; provides `*signing.Keys` |
 | `publish` | `internal/publish` | `audit` | Devices, publish sessions (`trs`), CI trust policies, the CI providers `github-actions` and `jenkins`, `/api/devices/...` and `/api/publish/...`, the subsystem `ci`, the settings group `publishing`, the `publish.session.*`, `device.*`, `setup_code.create` and `ci.pipeline.*` actions, job `publish.cleanup` (every minute), `/install.sh`, `/install.ps1` and `/cli/` (see **Install scripts and CLI downloads**); provides `*publish.Service` and `publish.Minter`; loads the publish sessions and devices of core bearer tokens and gives the access report its CI pipelines |
 | `edge` | `internal/edge` | `storage`, `network`, `publish` | Edge delivery (see **Edge delivery**): the subsystem `edge` with `edge.manage`, the settings group `edge`, `GET /api/edge/status`, `POST /api/edge/check`, `POST /api/edge/deploy`, `GET` and `POST /api/edge/speedtest`, `GET /api/edge/worker.zip` and `GET /api/edge/wrangler.jsonc`, the audit action `edge.deploy`, the root prefix `/.well-known/telesphorepo-edge/` (the server's answer on the reserved path of the check), the pipeline watcher, jobs `edge.outbox`, `edge.backfill`, `edge.reclass`, `edge.reconcile` (every 5 min), `edge.seen` (every minute) and `edge.deploy` (the deploy of the Worker on its own), the line of the access report that says where downloads come from |
@@ -235,7 +234,7 @@ the fresh second factor (`Proof`), and the repos of `SomeRepo` (`Managed`). No h
 | `Perm`, `AnyPerm` | A server permission ID the caller holds, or one of several |
 | `AllPerms` | Server permission IDs the caller holds every one of, on top of `Perm` and `AnyPerm` (`route.UIPerms(ids...)`: a UI session with all of them). `SomeRepo` does not stand in for them. A Nexus merge needs `nexus.manage` and `repositories.all` |
 | `SomeRepo` | A repository permission ID that passes in place of `Perm` when the caller holds it on at least one repo. The handler gets those repos in `Call.Managed` (`All`, or the repo IDs) |
-| `Repo` | `route.RepoRule{Name, Format, Op, Perm, AnyPerm, Ops, Pick}`: the repo the route acts on (default: the path value `{repo}`, else `{name}`), the format it must be of (another format is 404), the operation (`access.Meta`, `Read`, `Write`, `Delete`, `Manage`, `Mint`) and the repository permission it needs (or one of `AnyPerm`; none with `Meta` is any). With `Pick`, the operation and its permission are the entry of `Ops` (`route.RepoOp{Op, Perm}`) at the index `Pick(r)` returns, per request (an index outside `Ops` is 500); the router checks every entry at startup. The docker `DELETE /v2/...` route is the one user: an upload cancel is a `Write`, everything else a `Delete` |
+| `Repo` | `route.RepoRule{Name, Format, Op, Perm, AnyPerm, Ops, Pick, Group}`: the repo the route acts on (default: the path value `{repo}`, else `{name}`), the format it must be of (another format is 404), the operation (`access.Meta`, `Read`, `Write`, `Delete`, `Manage`, `Mint`) and the repository permission it needs (or one of `AnyPerm`; none with `Meta` is any). With `Pick`, the operation and its permission are the entry of `Ops` (`route.RepoOp{Op, Perm}`) at the index `Pick(r)` returns, per request (an index outside `Ops` is 500); the router checks every entry at startup. The docker `DELETE /v2/...` route is the one user: an upload cancel is a `Write`, everything else a `Delete`. `Group` (a `route.RepoOp`) is the operation and permission on a group in place of the others: the delete of files reads the group (`Read`, `repo.download`), and its handler asks the engine about each member it deletes in |
 | `Errors` | The writer of a refusal; nil is `route.Refuse`: a problem document under `/api/` (see **Problem documents**), `{"error": "..."}` on a format route, each with the refusal code of the decision as the member `code` (e.g. `session`, `publish_session`, `network`, `read_only_kind`). A format with its own error JSON sets it |
 | `Challenge` | The `WWW-Authenticate` of a 401, from the refusal (`route.Challenger(w, r, decision)`); nil is a Basic challenge outside `/api/` and none for a request with `X-Telesphorepo-UI: 1` |
 
@@ -280,27 +279,28 @@ The middleware runs in this order and writes the first refusal:
    repo); then `access.Engine.Decide` (see **Access engine**). A format read (a `RepoRule` with
    `Format` and `Read`: every route of `FormatRead`) of a repo that not everyone reads
    (`access.Engine.Private`) sets `Cache-Control: private` before the handler runs. Such a repo
-   has no anonymous read or has read IP rules, or it is a group with such a member. The IP rule
-   check is `access.ReadRestricter`, an optional guard method that the network guard answers
-   from its in-memory rules. So every answer of the read (file bytes, HEAD, 304, registry
-   manifests, blobs and lists) tells a shared cache, such as a CDN, not to keep it. A public repo
-   without read IP rules gets no `Cache-Control` from this step.
+   is not public (restricted, whether or not it has allowed networks), or it is a group with such
+   a member. So every answer of the read (file bytes, HEAD, 304, registry manifests, blobs and
+   lists) tells a shared cache, such as a CDN, not to keep it. A public repo gets no
+   `Cache-Control` from this step.
 
 From step 1 on, the request context holds the audit actor of the caller with the client address
-(`audit.WithActor`), so the handler, the services it calls and a guard refusal record events with
-it.
+(`audit.WithActor`), so the handler and the services it calls record events with it.
 
 **Access engine.** `access.Engine.Decide(ctx, r, p, repo, op, need)` is the one decision of repo
 access. The route middleware, the publish-session mint, the group read path and the access report
 use it. In order:
 
-1. The permissions of `p` on the repo: its grants (every repository permission with a server
-   permission that has `AllRepos`, `repositories.all`), `repo.download` for anyone on a repo with
-   anonymous read. A publish session holds, on its own repo, `repo.download` and `repo.publish` (a
-   CI session) or the user's current `repo.download`, `repo.publish` and `repo.delete` (a device or
-   manual session); on another repo what anonymous holds. A core bearer token is limited to its
-   scopes. When its scope of the repo lacks the operation (or it has none), a guard that refuses
-   the caller answers first (403, recorded); then a token that reads the repo gets the answer of
+1. The permissions of `p` on the repo (`Engine.RepoPerms`): its grants (every repository
+   permission with a server permission that has `AllRepos`, `repositories.all`), `repo.download`
+   for anyone on a public repo, and `repo.download` when the client address of the request
+   (`httpx.ClientAddr`, the address `httpx.ClientIP` reads) is in the repo's allowed networks (see
+   **Network rules**), for every credential kind and for anonymous. An address only grants: it
+   never takes a permission away. A publish session holds, on its own repo, `repo.download` and
+   `repo.publish` (a CI session) or the user's current `repo.download`, `repo.publish` and
+   `repo.delete` (a device or manual session); on another repo what anonymous holds. A core bearer
+   token is limited to its scopes first. When its scope of the repo lacks the operation (or it has
+   none), a token that reads the repo gets the answer of
    its credential: a `Write` or `Delete` on a proxy or a group is the read-only 405, a `Write`
    elsewhere is 401 `publishing needs a publish session: ...`; anything else is 401 with the code
    `scope` (the challenge of an OCI route adds `error="insufficient_scope"`). With an open publish
@@ -308,27 +308,32 @@ use it. In order:
    upload ownership and `format.OriginOf` use the same principal).
 2. The repo kind: `Write` and `Mint` on a proxy or a group, and `Delete` on a group, answer 405
    with `Allow: GET, HEAD` and the read-only text to a caller who can download; anyone else gets
-   the refusal of step 3. The cached files of a proxy can be deleted.
+   the refusal of step 3. The cached files of a proxy can be deleted. A delete of files through the
+   API on a group decides `Delete` on each member instead (see **Group deletes**).
 3. The permission: `Write` without an open publish session of this repo is 401 `publishing needs
    a publish session: ...`; anonymous is 401 `authentication required`; anyone else 403
    `permission required on <repo>: <labels>` (`forbidden` for `Meta`).
 4. The operation: a repo with an active operation (`repo_ops`, see **Repo operations**) refuses
    `Write`, `Delete` and `Mint` with 409 and the operation's message.
-5. The guards, in module start order, for `Read`, `Write`, `Delete` and `Mint` only: a refusal is
-   403 and the guard's audit event. The network guard maps `Read` to the read rules and the other
-   operations to the publish rules, and records `network.denied`.
 
-Guards never see `Meta` or `Manage`, so a holder of `repo.settings` or `repo.access` can open the repo and
-fix the rules that refuse them. `Engine.Allows` is `Decide` without the audit event of a guard (a
-group skips a member that the reader may not read). `Engine.GroupMembers(ctx, r, p, group)` is the
+The engine asks the network module through `access.Networks` (`Engine.SetNetworks`, in the
+module's `Init`): `Allows(repo, addr)`, `Reach(addr)` (the repos whose networks hold an address,
+one lookup of an in-memory index), `Has(repo)` and `Describe(repo)` (the access report). Without
+the module, no address grants anything. `Engine.Allows` is `Decide` as a yes or no (a group skips a
+member that the reader may not read). `Engine.GroupMembers(ctx, r, p, group)` is the
 one list of the members that a group read uses (the read path, the registry tags list and
-referrers): each member in read order that `Allows` with `Read` and `repo.download`. A core bearer
+referrers): each member in read order that `Allows` with `Read` and `repo.download`. When the
+client address is in the group's allowed networks, every member is in the list: the group's
+networks reach the files it serves, as if each member allowed the address too. A member's own
+networks grant reads of that member directly and through any group. A core bearer
 token names the group in its scopes, not the members. So when its scope of the group holds `Read`,
 the members are checked with `auth.Principal.InGroup(group)`: the credential behind the token
 without its scopes, the same as that credential over HTTP Basic. Each member still needs the
-credential's own `repo.download` and passes the guards. The copy exists only inside a group read
-that the token passed, so the token reads no member directly. "May this caller write to this repo
-now" is always `Decide(..., Write)` or `Decide(..., Mint)`.
+credential's own `repo.download` (or the address in its networks). The copy exists only inside a
+group read that the token passed, so the token reads no member directly. "May this caller write to
+this repo now" is always `Decide(..., Write)` or `Decide(..., Mint)`. `Engine.NetworkRepos(ctx)`
+gives the repos whose networks hold the client address; the repo lists, search and the registry
+catalog merge them with the repos of grants.
 
 **Core bearer tokens.** `auth.Service.IssueBearer(p, scopes, ttl)` returns
 `trb.<payload>.<HMAC-SHA256>.<Ed25519>` (each part base64url without padding) for at most 15
@@ -463,7 +468,7 @@ the helper knows the server of the identity token. `format.CISnippet` builds the
 `Register` once per process (then the permission registry is fixed, and the audit actions, the
 settings groups and the format registry are built); the migrations of the kernel and of each module
 (`db.Init`, in start order; see **Schema migrations**); `settings.Load` with every group; the kernel services; each module's `Init` in start order, then the
-token kinds, guards and jobs of every module; the routes; `Options.Init` of the dev command; the
+token kinds and jobs of every module; the routes; `Options.Init` of the dev command; the
 bootstrap admin; the `Start` of every job in start order (an error stops startup); listen; the
 `Run` and `Tick` loops of every job (`Tick` runs at once and then every `Every`). A module runs an
 on-demand task (a storage move copier, a Nexus sync, a repo delete) with `Host.Go`; the rebuild
@@ -538,6 +543,7 @@ Kernel tables (`internal/db/migrations`):
 | `group_count_pending` | PK `count_id` | A row of `group_counts` that the job is still counting (cascades); a reader never reads such a row. See **Group counters** |
 | `assets_search` | FTS5 trigram on `path`, contentless with deletes | The rowid is `repo_id << 40 \| id`, so the matches of one repo sit together in rowid order and a search page is one seek (see `GET /api/search`). Kept in sync by triggers; `index` rows are not indexed |
 | `assets_segments` | FTS5 unicode61 on `path` (every ASCII punctuation mark but `/` and the quotes is part of a segment), contentless with deletes | The segments of each path (its components between the slashes), keyed like `assets_search`; a search with a rare whole segment reads it (see `GET /api/search`). Kept in sync by triggers; `index` rows are not indexed |
+| `tree_entries` | PK `(repo_id, parent, kind, sort_key)` (WITHOUT ROWID); `repo_id` cascades | The children of each folder of a repo, for `GET /api/repos/{name}/tree`: one row per direct child of a folder (`parent` is `''` or ends in `/`), `kind` 0 for a folder and 1 for a file, `name`, and `sort_key`, the order of the name among its kind (see **Files, uploads and deletes**): a file's is its bytes (`repopath.FileKey`); a folder's (`repopath.FolderKey`) is the byte `0x01` and a version key for a name that starts with an ASCII digit, else the byte `0x02` and its bytes. A folder row has `files`, the count of the files under it, and goes with the last of them; a file row has `asset_id`. The byte pipeline writes the rows in the transaction of each asset insert and delete (`Commit`, `CommitAll`, `Remove`, `SeedTx`): a new file adds its row and counts one more file in each folder on its path, a replace changes nothing, a removed file the reverse. The core migration that creates the table fills it from `assets` with the SQL functions `tree_folder_key` and `tree_file_key` (`repopath.FolderKey` and `repopath.FileKey`, registered on every connection of the server) |
 | `repo_ops` | PK `id`, UNIQUE `repo_id` (cascades), idx `started_by`, partial idx `repo_ops_running (type) WHERE state = 'running'` | At most one operation per repo; an ended operation's row is deleted. `type` (a registered type: `delete`, `mirror`), `owner` (the module), `ref` (the owner's reference, e.g. the Nexus source ID), `state` `running`/`held`/`failed`, `done`, `total`, `error`, `started_by`, `started_at`, `updated_at` |
 | `upload_sessions` | PK `id` (WITHOUT ROWID), idx `repo_id`, `user_id`, `expires_at` | A resumable upload: `id` (32 lowercase hex), `repo_id` and `user_id` cascade, `publish_session_id` (the session that started it; no foreign key: the table belongs to the publish module), `received`, `created_at`, `updated_at`, `expires_at`. The bytes are in `$TR_DATA_DIR/tmp/uploads/<id>` |
 | `rebuilds` | PK `(repo_id, grp, unit)` (WITHOUT ROWID); `repo_id` cascades | The durable rebuild queue: a unit of a group of a repo that its format builds again (Debian: `grp` is the distribution, `unit` is `component/arch`; Arch: `grp` is an architecture with `unit` `db` or `fill`, or `sign` with `unit` `packages`; RPM: `grp` `repodata` with `unit` `index`, or `sign` with `unit` `packages`). `marked_at` in unix ns |
@@ -564,7 +570,7 @@ Tables of the `network` component (`internal/netrules/migrations`):
 | Table | Key / indexes | Notes |
 |---|---|---|
 | `ip_lists` | PK `id`, UNIQUE `name` | An IP list. `kind` is `preset` (the server fetches it) or `custom` (an admin edits it). `title`, `description`, `ranges` (JSON array of CIDRs), `source` (the fetch URLs of a preset), `fetched_at` (unix time), `error` (the last fetch failure, `''` after a success), `created_at` |
-| `repo_ip_rules` | PK `id`, UNIQUE partial `(repo_id, scope, cidr) WHERE cidr IS NOT NULL`, UNIQUE partial `(repo_id, scope, list_id) WHERE list_id IS NOT NULL`, idx `(repo_id, scope)`, idx `list_id` | One allow-list entry. `scope` is `read` or `publish`; a rule holds a `cidr` or the `list_id` of an IP list (exactly one; `ON DELETE RESTRICT`); `note` is free text. `repo_id` cascades. A scope without rows is unrestricted |
+| `repo_networks` | PK `id`, UNIQUE partial `(repo_id, cidr) WHERE cidr IS NOT NULL`, UNIQUE partial `(repo_id, list_id) WHERE list_id IS NOT NULL`, idx `repo_id`, idx `list_id` | One allowed network of a restricted repo: a `cidr` or the `list_id` of an IP list (exactly one; `ON DELETE RESTRICT`); `note` is free text. `repo_id` cascades. A repo without rows has no allowed networks |
 | `trusted_proxy_lists` | PK `list_id` (`ON DELETE RESTRICT`) | The IP lists that the trusted proxies include. The `list:<name>` entries of `TR_TRUSTED_PROXIES` are resolved at startup and are not rows |
 
 Tables of the `signing` component (`internal/signing/migrations`):
@@ -797,7 +803,7 @@ The `settings` package holds no feature rules and declares only the keys of the 
 | activity (audit) | `settings.general` · General | `audit.retention` (365 days), `stats.retention` (400 days) |
 | storage (storage) | `storage.manage` · `/settings/storage` | `storage` (`fs`/`s3`), `fs.root` (default `blobs/` in the data dir), `s3.endpoint`, `s3.region`, `s3.bucket`, `s3.access_key_id`, `s3.secret_access_key`*, `s3.prefix`, `s3.path_style`, `s3.redirect`, `presign_ttl` |
 | backup (backup) | `backup.manage` · `/settings/backups` | `backup.dir` (an absolute path; `""` turns backups off; the default is `""` in a plain build and `/backups` in the image, see **Backups**), `backup.interval` (`24h`, minimum `1m`), `backup.keep` (type `int`, `7`, at most 1000). See **Backups** |
-| network (network) | `network.manage` · `/settings/proxy` | `trusted_proxies` (literal entries; the IP lists of the trusted proxies are rows, see **Network rules**) |
+| network (network) | `network.manage` · `/settings/proxy` | `trusted_proxies` (literal entries; the IP lists of the trusted proxies are rows, see **Network rules**), `network.probe_hosts` (none, or an IPv4-only and an IPv6-only host name of the server) |
 | edge (edge) | `edge.manage` · `/settings/edge` | `edge.enabled` (`false`; needs `storage=s3` and a `base_url` without a path), `edge.home_hint` (`""`; one of `wnam enam weur eeur apac oc`, required when edge delivery is on), `edge.regions` (`[]`; entries `<hint>=<bucket>`, each hint once, not the home hint, not the home bucket), `edge.access_ttl` (`30s`, 0 to 5 min), `edge.cloudflare_token` (secret, `""`; the Cloudflare API token of the deploy from the server), `edge.auto_deploy` (`true`; effective only with a token). Its `Validate` checks the rules across keys and at startup turns edge delivery off instead of stopping the server; `Test` probes the home bucket and every regional bucket (with a token and an R2 endpoint, a regional bucket that does not exist passes: the deploy creates it); `Apply` marks a save, which ends "deploy needed" after a storage change. See **Edge delivery** |
 | publishing (publish) | `settings.general` · General | `publish.session_ttl` (`15m`, maximum `1h`), `publish.device_ttl` (90 days) |
 | sso (sso) | `signin.manage` · `/settings/sign-in` | `oidc.issuer`, `oidc.client_id`, `oidc.client_secret`*, `oidc.redirect_url`, `oidc.scopes` (`openid profile email`), `oidc.session_ttl` (`12h`), `oidc.approval_max_age` (`5m`, 10 s to 1 h: the oldest sign-in that approves a device), `oidc.permission_claim` (`""`; dotted paths allowed), `oidc.permission_map` (type `map`, `{}`), `signin.password_login` (`all` or `publishers`, default `all`) |
@@ -1048,20 +1054,21 @@ transaction.
 | `GET /api/overview` | a UI session | The figures of the Settings overview, each a counter or a bounded query: `{repos: {all, count, files, size}, largest: [Repo], public_repos, people?: {count, more}}`. `repos` totals every repo for a holder of `repositories.all` (`all: true`, from `repo_totals`), else the repos where the caller holds a repository permission other than `repo.download` (one lookup per grant). `largest` is up to eight of those repos that store something, the largest first (`repos (total_size, id)`). `public_repos` counts the public repos that are not groups (`repo_totals`). `people` (a holder of `people.manage`) counts the accounts up to 10,000 (`more: true` past it) |
 | `PUT /api/repos/{name}/members` | `repo.settings` | `{members: [names]}` replaces the members of a group and their order; returns the repo. 400 for 0 or more than 50 members, a member of another format, a group, a name listed twice, an unknown name, or a repo that is not a group |
 | `POST /api/repos/{name}/proxy/test` | `repo.settings` | Checks the remote of a proxy now: 200 `{ok: true}`, or a 502 problem document with the extension member `ok: false` and the reason as its detail. It records the result as the proxy's last answer or last error |
-| `PATCH /api/repos` | `repo.settings` on each repo | `{names: [...], anonymous_read: bool}`. The one way to make repos public or private: one repo update of every repo in one transaction. One `repo.update` event per repo whose value changed. 200 `{changed: n}` |
+| `PATCH /api/repos` | `repo.settings` on each repo | `{names: [...], anonymous_read: bool}`. The one way to make repos public or restricted: one repo update of every repo in one transaction. One `repo.update` event per repo whose value changed. 200 `{changed: n}`. 400 when a repo to make public has allowed networks (remove them first) |
 | `POST /api/repos/delete` | `repositories.all` | `{names: [...]}`. Checks that every repo exists (404) and that none has an operation (409 `You cannot delete <name> now. <message>`); then nothing is deleted. Then every repo gets its `delete` operation in one transaction (409 that names the repo when one got an operation meanwhile; then none starts), and each delete runs as a task of the core module (see **Repo operations**). 202 `{deleting: [{name, operation}]}` in the order of names, each with its running operation. `GET /api/repos/{name}` shows the progress in `operation` (`done` of `total` files) until it answers 404; a failed delete keeps a failed `delete` operation. One `repo.delete` event per repo, with the number of files |
 | `POST /api/repos/{name}/rename` | `repositories.all` | `{name}` renames the repo (`repos.Service.Rename`) and returns the repo; `{name}` in the path may be the repo's own name or a redirect of it. The old name becomes a redirect (see **Repository redirects**). 400 for a name that `NameRE` or the format refuses, 409 for the name of another repo or of a redirect of another repo (the message names the repo it redirects to). A redirect of the same repo may be taken back: it goes, and the name the repo had becomes the redirect. One `repo.rename` event with `detail.renamed_from` |
 | `GET /api/repos/{name}/redirects` · `POST /api/repos/{name}/redirects` · `DELETE /api/repos/{name}/redirects/{redirect}` | any repository permission · `repositories.all` · `repositories.all` | GET lists the redirects of the repo by name: `[{name, created_at, last_used_at\|null}]`; `last_used_at` includes the uses of the last minute that are still in memory. POST `{name}` adds one: 201 with the redirect, 400 for a bad name, 409 when a repo or a redirect holds the name; one `repo.redirect.add` event with `detail.redirect`. DELETE removes one: 204, 404 when the repo has no such redirect. The name is free again and answers as any unknown repo. One `repo.redirect.remove` event with `detail.redirect` |
 | `POST /api/repos/{name}/operation/resume` · `DELETE /api/repos/{name}/operation` | `repositories.all` | Resume runs the failed operation of the repo again: 200 `{ok: true}` (a delete runs on as a task until the repo is gone). Clear ends it, and the repo keeps the files that are left: 204. 409 when the repo has no operation, when it has not failed, or when its type cannot resume or clear here (a Nexus mirror ends at the cut-over). Records `repo.delete.resume` or `repo.delete.clear` |
 | `GET /api/repos/{name}/grants` | `repo.access` | `[{username, perms: [...]}]` by username; `perms` are permission IDs in registry order |
-| `GET /api/repos/{name}/access?admins=1` | a repository permission that manages the repo (one with a second-factor need: `repo.delete`, `repo.settings`, `repo.access`, `ci.pipelines`) | The access report, built from the parts of `access.Engine.Decide`: `{repo, format, kind, people, download: {public, people, admins, guards, sentence, notes}, publish: {people, admins, ci, guards, blocked, sentence}}`. `people` are `{username, perms, via}` (`permission`; with `admins=1` the holders of `repositories.all` too, via `all_repos`). `guards` maps a guard name to `{restricted, summary, detail}`; the network guard's `detail` is `{any, lists: [{name, title}], cidrs: [{cidr, note}]}`. `blocked` is null, or `{code: "read_only_kind" \| "operation", message}`: a proxy or a group (it lists no publisher and no CI pipeline) or a locked repo. Each `sentence` says the answer in words, e.g. "2 people, only from 10.0.0.0/8." A blocked publish sentence is "nobody." followed by the message. `notes` are the sentences that modules add (`access.Engine.AddDownloadNote`): while edge delivery is on, "Downloads come from the edge." or "Downloads go to the server: read rules apply." |
+| `GET /api/repos/{name}/access?admins=1` | a repository permission that manages the repo (one with a second-factor need: `repo.delete`, `repo.settings`, `repo.access`, `ci.pipelines`) | The access report, built from the parts of `access.Engine.Decide`: `{repo, format, kind, people, download: {public, people, admins, networks, sentence, notes}, publish: {people, admins, ci, blocked, sentence}}`. `people` are `{username, perms, via}` (`permission`; with `admins=1` the holders of `repositories.all` too, via `all_repos`). `networks` are the allowed networks: `{lists: [{name, title}], cidrs: [{cidr, note}], summary}` (`summary` in words, "Office and 10.0.0.0/8", `""` for none). `blocked` is null, or `{code: "read_only_kind" \| "operation", message}`: a proxy or a group (it lists no publisher and no CI pipeline) or a locked repo. Each `sentence` says the answer in words, e.g. "2 people and anyone at 10.0.0.0/8." A blocked publish sentence is "nobody." followed by the message. `notes` are the sentences that modules add (`access.Engine.AddDownloadNote`): while edge delivery is on, "Downloads come from the edge." or "Downloads go to the server, which checks the allowed networks." |
 | `GET /api/users/{username}/access` · `GET /api/me/access` | `people.manage` · password, read token or UI session | `{username, permissions, disabled, kind, can_publish, items: [{repo, format, public, perms, via}], next}`, a keyset page by repo name: with `repositories.all` of every repo, otherwise of the repos with a grant of the person and the public ones, read as one page of each side (`repos_anonymous_name` and the person's grants), never the repos in between. On a proxy or a group a person holds no `repo.publish` and no `ci.pipelines` |
 | `PUT /api/grants` | `repo.access` on each repo | `{users: [...], repos: [...], perms: [...]}`, or several sets at once: `{groups: [{users, repos, perms}, ...]}` (not both shapes in one body). Sets the repository permission set of every pair of user and repo of each group, every group in one transaction, at most 1000 pairs in all; a pair in two groups is 400. `perms: []` removes the pairs. Every group is checked as one request is, and any refusal changes nothing. 400 for an unknown permission ID, a server permission, or a permission without one it needs (e.g. `repo.publish` without `repo.download`, `ci.pipelines` without `repo.publish`); 404 for an unknown user or repo. 403 when the caller adds or removes a permission they do not hold on that repo. The auth service records one `grant.set` event with `{old, new}` per pair whose set changed, in the transaction. 200 `{changed: n}` |
 | `GET /api/repos/{name}/assets?prefix=&after=&limit=` | `repo.download` | `{items: [{path, size, sha256, content_type, kind, updated_at, repo?}], next}`, ordered by path; the prefix is a range scan. A group merges the pages of the members that the caller reads, each read from the same cursor: a path comes from the first member that has it, named in `repo` |
-| `GET /api/repos/{name}/tree?path=&after=&limit=` | `repo.download` | `{items: [{name, type: "dir"\|"file", path, size?, sha256?, updated_at?, uploaded_by?, build?}], next}`. `build` is the CI build record that wrote the file (see **CI providers and build records**). `path` is a folder (`""` or ending in `/`). A folder item's `path` and the `next` cursor end in `/`. `uploaded_by` is a username. A group answers the merged listing of its members (see **Files, uploads and deletes**), and each file item has `repo`, the member that serves it |
+| `GET /api/repos/{name}/tree?path=&after=&limit=` | `repo.download` | `{items: [{name, type: "dir"\|"file", path, size?, sha256?, updated_at?, uploaded_by?, build?}], next}`: the folders (versions first, in version order, newest first when every folder is a version), then the files by name (see **Files, uploads and deletes**). `build` is the CI build record that wrote the file (see **CI providers and build records**). `path` is a folder (`""` or ending in `/`). A folder item's `path` and the `next` cursor end in `/`. `uploaded_by` is a username. A group answers the merged listing of its members (see **Files, uploads and deletes**), and each file item has `repo`, the member that serves it |
 | `GET /api/repos/{name}/file?path=` | `repo.download` | One file with its details: `{name, path, size, sha256, content_type, kind, created_at, updated_at, uploaded_by, build}`. 404 when the path holds no file. `build` is the CI build record, or null. A group answers the file of the first member in read order that the caller reads and that stores it, with `repo`, that member |
+| `POST /api/repos/{name}/files/holders` | `repo.download`, with a UI session | `{paths?, prefixes?}` as the delete. Deletes nothing. 200 `{members: [{repo, delete, reason?}], paths: [{path, repos}], prefixes: [{path, repos}]}`: per item the members of the group that hold it, in read order, among those the caller reads through the group; per member that holds an item, whether the caller may delete there and else the refusal. A repo that is not a group is its own one member. See **Group deletes** |
 | `POST /api/repos/{name}/files/delete/plan` | as the delete | `{paths?, prefixes?}` as the delete. Deletes nothing. 200 `{files, more, notes: [{text, count, one, many}]}`: the files that exist (a folder walk reads at most 100,000 files; `more` says it stopped), and for each `delete_notes` entry of the format the count of the files its glob matches (entries without a match are left out). It walks `assets` by the `(repo_id, path)` index |
-| `POST /api/repos/{name}/files/delete` | `repo.delete`, with a UI session or a device or manual publish session of the repo | `{paths?: [...], prefixes?: [...]}`: files and folders, 1 to 1000 items together. 400 with the first bad path or prefix; then nothing is deleted. 200 `{deleted: n}`, the number of files, when the delete ends within `delete.wait` (`2s`); else 202 `{id, deleted}` (the files deleted so far) and the delete goes on in the background. A file that is gone already counts as done; an empty folder adds 0. 409 on a repo with an operation; 429 while the repo runs 4 deletes of files. 401 for a password or a read token; 403 without `repo.delete` (a CI session never deletes). One `file.delete` event per file and per folder that lost files |
+| `POST /api/repos/{name}/files/delete` | `repo.delete`, with a UI session or a device or manual publish session of the repo | `{paths?: [...], prefixes?: [...]}`: files and folders, 1 to 1000 items together. 400 with the first bad path or prefix; then nothing is deleted. 200 `{deleted: n}`, the number of files, when the delete ends within `delete.wait` (`2s`); else 202 `{id, deleted}` (the files deleted so far) and the delete goes on in the background. A file that is gone already counts as done; an empty folder adds 0. 409 on a repo with an operation; 429 while the repo runs 4 deletes of files. 401 for a password or a read token; 403 without `repo.delete` (a CI session never deletes). One `file.delete` event per file and per folder that lost files. On a group it needs `repo.download` on the group and `members` (see **Group deletes**); on another repo `members` is 400 |
 | `GET /api/repos/{name}/files/delete/{id}` | as the delete | The state of a delete that answered 202: `{state: running\|done\|failed, deleted, error}`. The deletes live in memory: 404 for an unknown id, one of another repo, one that ended more than 10 minutes ago, and every one after a restart. A server stop ends a running delete between two remove batches (each batch is one transaction), so each file is deleted or kept; the UI says to delete again |
 | `POST /api/repos/{name}/upload/plan` | publish session of the repo | What an upload of files would store; stores nothing. Multipart: the part `plan` first, `{fields, folder, files: [{path, size}], heads?}` (1 to 500 files, paths relative to the drop), then one part per listed file that a `reads` rule of the format matches, its `filename` the path, holding at most the rule's `max_bytes` from the start of the file. 200 `Plan` = `{items: [{title, files: [{path, target}], facts?, problems}], ignored: [paths], fields: [{key, label, help?, type, ..., value, read?, problem?}], heads}`. The server holds the parts it read under `heads` (32 hex; `""` when it holds none) for 30 minutes after the last use, for the same publish session and repo, at most 1 GiB of every held set together (the least recently used set goes first): a plan that names `heads` needs no part of a file that the set holds at the same size, and the server adds its new parts to the set. Such a plan that lacks the first bytes of a file the format reads answers 409 `plan-heads-gone`, and the client sends them again. 400 for an unknown field, a bad path, a head that no rule reads or that is longer than it allows. See **Files, uploads and deletes** |
 | `POST /api/repos/{name}/upload` | publish session of the repo | Multipart: the fields first, then the text part `uploads` (optional), a JSON list `[{path, id, size}]` of files that went through the resumable upload routes with the same publish session, then the files, each with its relative path as its `filename`. The server finishes each named upload with its size (no digest; 404 for an unknown upload, 400 for another size, which deletes it) and takes it as the file at its path. The files and the finished uploads together may not exceed `max_upload_size`. The server runs the format's `Upload.Plan` on the files (the first bytes of each file that a `reads` rule matches): 400 when a field or an item has a problem or no item takes a file. Then `Upload.Store` commits the files of the items through the byte pipeline (source `ui`; checksums and metadata with source `generated`). 201 `{files: [{path, status: "created"\|"replaced"\|"unchanged", size, sha256, generated?}]}`. 400 or 409 for a refusal of the format |
@@ -1069,23 +1076,24 @@ transaction.
 | `PATCH /api/repos/{name}/uploads/{id}` | the publish session that started it | Appends the body at the offset of `Content-Range: bytes <from>-<to>/*` (without the header: at the end). 202 `{received}`; 416 `{error, received}` when `from` is not the bytes received; 413 above `max_upload_size`; 404 for an unknown, expired or foreign upload. The answers carry `Range: bytes=0-<received-1>` |
 | `PUT /api/repos/{name}/uploads/{id}?path=&sha256=&size=` | the publish session that started it | Finishes the upload: the server reads the file once for its hashes, checks `sha256` (and `size` when given), then commits it at `path` with source `put` and the precondition of its `If-Match` or `If-None-Match` header: the answers of a format PUT (201, 200 with `ETag`, the format's refusal), 412 problem `precondition-failed` with `etag` when the precondition is false (the upload stays for at most 15 minutes, to finish again). 400 when the bytes do not match; the upload is deleted. A Debian repo refuses every path (400): `PUT /debian/{repo}/upload/{dist}/{component}?upload=<id>&sha256=` finishes the upload of a package |
 | `DELETE /api/repos/{name}/uploads/{id}` | the publish session that started it | Deletes the upload and its bytes: 204 |
-| `GET, PUT /api/repos/{name}/ip-rules` | `repo.settings` | `{read: [Rule], publish: [Rule]}` with `Rule` = `{kind: "cidr"\|"list", value, note}`. PUT replaces both lists and returns them in canonical form. 400 for an invalid rule or a `list` that does not exist. See **Network rules** |
-| `GET /api/ip-lists` | `network.manage`, or `repo.settings` on a repo | `[IPList]` without `ranges`: presets first, then by name. `IPList` = `{id, name, kind: "preset"\|"custom", title, description, count, ranges?, source, fetched_at\|null, error, created_at, used_by: {repos: [{repo, scope}], trusted_proxies}}` |
+| `GET, PUT /api/repos/{name}/ip-rules` | `repo.settings` | The allowed networks: `{read: [Rule]}` with `Rule` = `{kind: "cidr"\|"list", value, note}`. PUT replaces the list and returns it in canonical form. 400 for an invalid rule, a `list` that does not exist, or a non-empty list on a public repo. See **Network rules** |
+| `GET /api/ip-lists` | `network.manage`, or `repo.settings` on a repo | `[IPList]` without `ranges`: presets first, then by name. `IPList` = `{id, name, kind: "preset"\|"custom", title, description, count, ranges?, source, fetched_at\|null, error, created_at, used_by: {repos: [name], trusted_proxies}}`: `repos` are the repos whose allowed networks name the list |
 | `GET /api/ip-lists/{name}` | `network.manage` | The `IPList` with `ranges`. 404 when unknown |
 | `POST /api/ip-lists` | `network.manage` | `{name, title?, description?, ranges?}`. 201 `IPList`. 400 for invalid input, 409 when the name is taken (preset names too) |
 | `PUT /api/ip-lists/{name}` | `network.manage` | `{name?, title?, description?, ranges?}`; a missing field keeps its value. 200 `IPList`. Rules and trusted proxies name the list by its id, so a rename keeps them. 400 for a preset, 404 when unknown, 409 when the new name is taken or `TR_TRUSTED_PROXIES` names the list |
 | `DELETE /api/ip-lists/{name}` | `network.manage` | 204. 409 `{error, used_by}` while in use, 400 for a preset |
 | `POST /api/ip-lists/{name}/refresh` | `network.manage` | Fetches the preset now and returns the `IPList`. 400 for a custom list, 404 when unknown, 502 `{error}` when the fetch fails (the last good list stays) |
-| `POST /api/ip-ranges/parse` | `network.manage` | `{text}` (at most 1 MiB). Stores nothing. 200 `{ranges: [CIDR], invalid: [{line, text, reason}], duplicates: n}`. 400 for longer text or more than 100,000 ranges. See **IP lists** |
+| `POST /api/ip-ranges/parse` | `network.manage`, or `repo.settings` on a repo | `{text}` (at most 1 MiB). Stores nothing. 200 `{ranges: [CIDR], invalid: [{line, text, reason}], duplicates: n}`. 400 for longer text or more than 100,000 ranges. See **IP lists** |
 | `GET /api/signing-keys` | `signing.manage`, or `repo.settings` on a repo | `[{name, fingerprint, public_key, created_at, error?, repos: [name]}]` by name |
 | `POST /api/signing-keys` | `signing.manage` | `{name}` creates an Ed25519 key. `{name, armored, passphrase?}` imports a key. 201 with the key. 400 for a bad name or key, 409 when the name is taken |
 | `GET /api/signing-keys/{name}` | `signing.manage` | The key with its `repos`. 404 when unknown |
 | `DELETE /api/signing-keys/{name}` | `signing.manage` | 204. 409 `{error, repos}` while repos use the key |
 | `GET /api/signing-keys/{name}/public.asc` | `signing.manage` | `application/pgp-keys`, saved as `<name>.asc` |
+| `GET /api/network/whoami` | any/anon | `{ip, cidr, probes}`: the client address of the request as `httpx.ClientIP` reads it, the range to allow for it (an IPv4 address as its `/32`, an IPv6 address as its `/64`), and `https://<host>/api/network/whoami` (the base URL's scheme) for each probe host of `network.probe_hosts` (`[]` when unset). `Cache-Control: no-store`; `Access-Control-Allow-Origin` is the base URL's origin, so the Access tab reads the answer of a probe host with a plain cross-origin `GET` without credentials. It echoes only the caller's own address |
 | `GET /api/network/proxy-candidates` | `network.manage` | `[{address, last_seen, count, header}]`, newest first: the untrusted TCP peers that sent a forwarded header. See **Network rules** |
 | `GET /api/audit?after=&limit=&action=&repo=&actor=&since=&until=` | `activity.read` | `{items: [{id, at, actor, actor_user_id\|null, action, repo, target, detail, ip}], next}`, newest first. `repo` is a repo name, `actor` a username, `since` and `until` RFC 3339 (see **Audit log**, Filters) |
 | `GET /api/audit/actions` | `activity.read` | `[{id, label, subsystem}]`: every action that a module registers, in module start order. The Activity filter reads it |
-| `GET /api/search?q=&repo=&after=&limit=` | any/anon | FTS5 trigram (`assets_search`), `q` ≥ 3 chars, only repos where the caller holds `repo.download` and that its guards let it read. `{items: [{repo, path, size, sha256, kind, updated_at}], next, repos?}`: the hits of one repo come together, in the order the repo stored them, and the repos in the order they were created. A page is one seek past `after` (the index key of the last hit), and a repo that the caller cannot read is one seek past its end, so every page is full until the end and costs the same at any size. The first page (no `after`) has `repos: [{name, format, matches, more}]`: each repo with matches, in the same order, its matches counted up to 1,000 (`more`: the count stopped there); the count seeks from one repo with matches to the next. Each piece of `q` is first counted up to 1,000 paths (a probe that reads at most that). A segment of `q` (a component between its slashes: whole in the middle, the last one as a prefix; not the first, which `q` may start inside of) that fewer than 100 paths hold (its probe counts up to 100) picks the segment index (`assets_segments`). When every segment reaches 100 (a folder, or a file name that many repos share), the segments are counted again up to 1,000, the last first, each up to the fewest paths so far, and one under 1,000 picks the segment index. It matches the 2 rarest segments and keeps the paths that hold `q`, so a path, a folder, or a file name after a slash reads the rows of its rarest segment. Else a trigram of `q` that fewer than 1,000 paths hold picks the trigram index: its 3 rarest trigrams, and the paths that hold `q`. Else (`q` of 3 characters, with a character outside ASCII, or of common pieces only) `q` is one trigram phrase. The first page and the counts come from one walk of the matches |
+| `GET /api/search?q=&repo=&after=&limit=` | any/anon | FTS5 trigram (`assets_search`), `q` ≥ 3 chars, only repos where the caller holds `repo.download`: a grant, a public repo, or a repo whose allowed networks hold the client address (one lookup of the network module's index). `{items: [{repo, path, size, sha256, kind, updated_at}], next, repos?}`: the hits of one repo come together, in the order the repo stored them, and the repos in the order they were created. A page is one seek past `after` (the index key of the last hit), and a repo that the caller cannot read is one seek past its end, so every page is full until the end and costs the same at any size. The first page (no `after`) has `repos: [{name, format, matches, more}]`: each repo with matches, in the same order, its matches counted up to 1,000 (`more`: the count stopped there); the count seeks from one repo with matches to the next. Each piece of `q` is first counted up to 1,000 paths (a probe that reads at most that). A segment of `q` (a component between its slashes: whole in the middle, the last one as a prefix; not the first, which `q` may start inside of) that fewer than 100 paths hold (its probe counts up to 100) picks the segment index (`assets_segments`). When every segment reaches 100 (a folder, or a file name that many repos share), the segments are counted again up to 1,000, the last first, each up to the fewest paths so far, and one under 1,000 picks the segment index. It matches the 2 rarest segments and keeps the paths that hold `q`, so a path, a folder, or a file name after a slash reads the rows of its rarest segment. Else a trigram of `q` that fewer than 1,000 paths hold picks the trigram index: its 3 rarest trigrams, and the paths that hold `q`. Else (`q` of 3 characters, with a character outside ASCII, or of common pieces only) `q` is one trigram phrase. The first page and the counts come from one walk of the matches |
 | `GET /api/repos/{name}/status` | `repo.download` | `{pending}`: the units of the repo that wait for a rebuild of its indexes (`rebuilds`), the ones being rebuilt included; 0 for a format without a `Rebuild` |
 | `GET /api/repos/{name}/usage` | `repo.download` | `{base_url, tools: [{id, label}], snippets: [Snippet]}`: the format's `Usage` (use, a computer and by hand), then for a hosted repo the CI file of each of the format's tools for GitHub Actions and Jenkins (default trigger). A proxy or a group gets no publish snippets. `Snippet` = `{id, tool, purpose: "use"\|"publish", context: "repo"\|"artifact", via?: "computer"\|"ci"\|"hand", file?, title, lang, code, note?}`. `tools` names each tool of the snippets with its label (the format's `SnippetTools`, the CI provider titles). `base_url` is the `base_url` setting, else the request scheme and host |
 | `GET /api/repos/{name}/ci?system=github-actions\|jenkins&tool=&branches=&tags=` | `repo.download` | The CI file that publishes to a hosted repo (one `Snippet`; the whole file in `code`, and for `github-actions` and `jenkins` the change to an existing file in `diff`), built by `internal/ci/workflow.go` from the `PublishSteps` of the tool (a tool of the format; default the first). `branches` and `tags` are comma-separated names or globs (letters, digits and `. _ / * -`, at most 20 each): the GitHub Actions trigger (default: a push to `main`), and a `when { anyOf { branch; tag } }` on the Jenkins publish stage (none by default). 400 for another system, an unknown tool, a bad pattern, or a proxy or a group |
@@ -1107,7 +1115,7 @@ transaction.
 | `POST /api/edge/check` | `edge.manage` | Check now: the deployed Worker runs its gap check at once (see **The check of the Worker** under **Edge delivery**). 200 `{at, outcome: "worker"\|"refused"\|"server"\|"other"\|"unreachable"\|"error", ok, message, worker_version?}`; `ok` when the Worker of the server's version answered and ran the check. 409 problem `edge-not-configured` without storage s3 or without a base URL without a path; 429 problem `edge-check-busy` (with `Retry-After`) while a check runs or within 10 s of the start of the last one. No audit event: the check changes nothing on the server, and the page runs it every 30 s while the Worker has not reported this server's version |
 | `POST /api/edge/deploy` | `edge.manage` | Deploy now: the server deploys the Worker to Cloudflare with `edge.cloudflare_token` (see **Deploy from the server** under **Edge delivery**). 202 with `deploy` of the status; the deploy runs on, and the status follows its step. 409 problem `edge-deploy-refused` when the settings cannot deploy (no token, an S3 endpoint that names no Cloudflare account, a base URL host with a port, settings that cannot run edge delivery, a build without the Worker of its version), 409 problem `edge-deploy-busy` while a deploy runs. Records `edge.deploy` when it ends |
 | `GET /.well-known/telesphorepo-edge/check?n=<nonce>` | public | The reserved path of the check. On the server it answers that the request reached the origin: `Telesphorepo-Edge-Check: server`, 200 `{answered_by: "server"}` for the nonce of the check that runs, else 403. The Worker answers the same path on its route (see **Edge delivery**) |
-| `GET /api/edge/speedtest` | `edge.manage` | The files of the speed test (see **The speed test** under **Edge delivery**): `{base_url, unfit, files: [{repo, format, path, size, url}]}`. `base_url` is the scheme and host of the base URL (`""` when unset); `unfit` says why no pass can be issued (as `check_unfit`). `files`: the immutable files of the public, unguarded hosted and proxy repos whose format has `Edge` (the first 16 such repos, the first 500 files of each in path order), the two largest of each repo, at most 8, largest first; `url` is the download path in the URL shape of the format (`/<format>/<repo>/<path>`; on `oci` the blob or the manifest by digest) |
+| `GET /api/edge/speedtest` | `edge.manage` | The files of the speed test (see **The speed test** under **Edge delivery**): `{base_url, unfit, files: [{repo, format, path, size, url}]}`. `base_url` is the scheme and host of the base URL (`""` when unset); `unfit` says why no pass can be issued (as `check_unfit`). `files`: the immutable files of the public hosted and proxy repos whose format has `Edge` (the first 16 such repos, the first 500 files of each in path order), the two largest of each repo, at most 8, largest first; `url` is the download path in the URL shape of the format (`/<format>/<repo>/<path>`; on `oci` the blob or the manifest by digest) |
 | `POST /api/edge/speedtest` | `edge.manage` | Issues a pass of the speed test: writes `speedtest/<hex SHA-256 of the token>.json` to the home bucket and answers 200 `{token, expires_at}` (a random 256-bit token, base64url; 10 minutes). 409 problem `edge-not-configured` as `POST /api/edge/check`; 502 when the home bucket does not take the write. It deletes the pass objects older than 11 minutes after the write. No audit event: a pass changes nothing on the server and grants no access |
 | `GET /api/edge/worker.zip` | `edge.manage` | The edge Worker folder of the server's build, `application/zip`, `attachment; filename="telesphorepo-edge_<version>.zip"`, `no-store`: every file of `internal/edgedist` under `telesphorepo-edge/`, plus `telesphorepo-edge/wrangler.jsonc` for the current settings with `"main": "dist/index.js"` and `"no_bundle": true`. 409 problem `edge-not-configured` as below; 404 problem `no-edge-worker` when the build holds no Worker, or one of another version than the server |
 | `GET /api/edge/wrangler.jsonc` | `edge.manage` | The `wrangler.jsonc` of the Worker for the current settings, for a checkout of `edge/` (`"main": "src/index.ts"` and the `define`), `text/plain`, `no-store`. 409 problem `edge-not-configured` when the settings cannot run edge delivery (storage fs, a base URL with a path, no home hint) |
@@ -1325,14 +1333,14 @@ archives with their SHA-256 and the commands to install one by hand.
   | `activity` (server, audit) | `activity.read` | Read the audit log: Settings › Activity, the audit log, the publish log and the download statistics | | yes |
   | `storage` (server, storage) | `storage.manage` | Manage storage: Settings › Storage and the storage moves | | yes |
   | `backup` (server, backup) | `backup.manage` | Manage backups: Settings › Backups, Back up now and the list of backups | | yes |
-  | `network` (server, network) | `network.manage` | Manage networks and proxy: Networks (IP lists) and Network and proxy (`trusted_proxies`) | | yes |
+  | `network` (server, network) | `network.manage` | Manage networks and proxy: Networks (IP lists) and Network and proxy (`trusted_proxies`, `network.probe_hosts`) | | yes |
   | `signing` (server, signing) | `signing.manage` | Manage signing keys | | yes |
   | `signin` (server, sso) | `signin.manage` | Manage sign-in options: Settings › Sign-in options | | yes |
   | `nexus` (server, nexus) | `nexus.manage` | Manage the Nexus migration | | yes |
   | `repo` (repo, core) | `repo.download` | Download: read the files of the repository | | no |
   | `repo` (repo, core) | `repo.publish` | Publish through a publish session | `repo.download` | no |
   | `repo` (repo, core) | `repo.delete` | Delete files and folders, with the UI session or a device or manual publish session | | yes |
-  | `repo` (repo, core) | `repo.settings` | Edit settings: the repository settings, the members of a group, the remote of a proxy, the network rules and the public flag | | yes |
+  | `repo` (repo, core) | `repo.settings` | Edit settings: the repository settings, the members of a group, the remote of a proxy, the allowed networks and the public flag | | yes |
   | `repo` (repo, core) | `repo.access` | Manage access: give and remove this repository's permissions, only the ones they hold | | yes |
   | `ci` (repo, publish) | `ci.pipelines` | Manage CI pipelines that publish to this repository | `repo.publish` | yes |
 
@@ -1384,7 +1392,7 @@ Routes (`{items, next}` lists are keyset, `?after=&limit=`):
 | `POST /api/publish/setup-codes` | UI session, a fresh factor and `repo.publish` on the repo | `{repo}`; 201 `{code, link, expires_at}`. See **Project setup** |
 | `POST /api/publish/challenge` | none | `{device_id, exchange, nonce, ts, signature}` returns `{nonce, expires_at}` (32 random bytes, base64url, and the expiry). Without `exchange`: single use, 60 s, for `POST /api/publish/sessions`, `POST /api/devices/setup` or `DELETE /api/devices/self`. With `exchange: true`: a token exchange nonce that lives `publish.session_ttl`, signed for the repo `*` and sent to a format's token endpoint (the Docker credential helper). With `exchange: true` and a `nonce` that is a token exchange nonce of the device that has not expired, the answer is that nonce and its expiry, and the server writes no row. Else a new token exchange nonce needs `ts` (Unix seconds, at most 5 minutes from the server time) and `signature`: the device's Ed25519 signature over `"telesphorepo challenge v1\n<device id>\n<ts>"` (base64url, no padding), so only the holder of the device key makes the server write a row that lives that long; a missing or bad signature or time is 401. A device that is unknown, revoked or expired, or whose user is disabled, gets 401 |
 | `POST /api/publish/sessions` | none | `{device_id, repo, nonce, signature}` returns 201 `{id, token: "trs_...", repo, format, kind, expires_at}` (`format` and `kind` of the repo) |
-| `POST /api/publish/sessions/manual` | UI session and a fresh factor (`X-Telesphorepo-Proof`) | `{repo}`; same answer. The proof is `totp <code>` or `passkey <assertion>`, not a recovery code. 401 for a wrong proof, 403 `second_factor_required` without a factor, 429 with `Retry-After` when limited. `access.Engine.Decide` with `Mint` decides (405 for a proxy or a group, 409 for a locked repo, 403 for the network rules) |
+| `POST /api/publish/sessions/manual` | UI session and a fresh factor (`X-Telesphorepo-Proof`) | `{repo}`; same answer. The proof is `totp <code>` or `passkey <assertion>`, not a recovery code. 401 for a wrong proof, 403 `second_factor_required` without a factor, 429 with `Retry-After` when limited. `access.Engine.Decide` with `Mint` decides (405 for a proxy or a group, 409 for a locked repo) |
 | `POST /api/publish/sessions/oidc` | none | `{token, repo, revision?}`; same answer. `revision` is the commit of the job (40 or 64 lower-case hex digits, else 400); the build record keeps it when the token names no commit |
 | `POST /api/publish/sessions/exchange` | none (the device proof) | `{proof: "trx.<device id>.<nonce>.<signature>", repo}`; same answer, and the same session and token again for the same nonce and repo while the session is open. 401 for a bad or ended proof |
 | `GET /api/publish/sessions` | password, read token or UI session | The caller's own sessions |
@@ -1738,7 +1746,7 @@ and check time. `CommitAll` writes files of one repo in one transaction:
    (400, 404, 409). Without `Admit`, the same bytes are kept and other bytes replace the file.
 4. The digest locks; each new blob is written once (a few at a time; on the filesystem a spool on
    the store's volume is renamed into place), and its row is inserted.
-5. One transaction: the asset rows, the format's `OnCommitted` (its own rows, rebuild marks), and
+5. One transaction: the asset rows and their `tree_entries` rows, the format's `OnCommitted` (its own rows, rebuild marks), and
    one `file.upload` event per stored file whose source is `put`, `ui` or `import`. A failed
    transaction is tried again up to 3 times.
 6. The digest locks, then the path locks are released; then `AfterCommit` runs with a result per
@@ -1773,7 +1781,7 @@ filesystem). `telesphorepo-server seed` inserts rows only (`assets.SeedTx`).
 file), origin}`. It works in batches of 500 rows: the path locks in path order, then one
 transaction with the format's `OnRemoved` (the rows are still readable; it gets the folders of
 the removal, whose other files go in this or a later batch, and it may return follow-up paths,
-removed as the next batches), the row deletes and one `file.delete` event per file of
+removed as the next batches), the row deletes (with their `tree_entries` rows) and one `file.delete` event per file of
 `paths`; one event per folder of `prefixes` after its last batch. Then `AfterRemove`. A path that
 does not exist is skipped. Blob objects are never deleted here: the blob GC removes a blob that no
 file uses. While the repo has an active `delete` operation, `Remove` calls no `OnRemoved` and no
@@ -1956,7 +1964,7 @@ follow one for downloads, but uploads, `npm publish`, `docker push` and apt do n
   `repo_redirects` by its key, then the repo by id. Every request that names a repo goes through
   it: the repo step of every route policy (format routes, `/api/repos/{name}/...`), the mint routes
   and the token exchange, the Docker token endpoint, grants, CI pipeline repositories, group
-  members, network rules (by the repo of the route) and the Activity filter. `ByOwnName` skips the
+  members, allowed networks (by the repo of the route) and the Activity filter. `ByOwnName` skips the
   redirects (the edge objects); `RedirectTarget` reads one redirect without noting a use.
 - **Keys.** Everything the server keys by repo uses the repo id (assets, pointers, grants, rules,
   sessions). The names that a credential carries resolve through `ByName` and match by id: each
@@ -1970,7 +1978,7 @@ follow one for downloads, but uploads, `npm publish`, `docker push` and apt do n
   its own: that redirect goes, and the name it had becomes one.
 - **Never a chain.** A redirect holds the repo id, so a later rename of its repo keeps it answering
   for the repo under the new name.
-- **Permissions, network rules and visibility** are the repo's. **Activity records the name the
+- **Permissions, allowed networks and visibility** are the repo's. **Activity records the name the
   request used:** the route step, the mint routes and the Docker token endpoint put a redirect
   that a request named in the context (`audit.WithRepoName`), and an event of that repo records it
   as `repo`, with the repo's own name in `detail.redirect_to`.
@@ -2304,7 +2312,7 @@ region reads the same version; an immutable path has a pointer and a blob in eve
 | `config.json` | `{server_version, requires: [features], enabled, access_ttl (seconds), edge_key (base64url of the Ed25519 public key), formats: {name: {shape, prefix, immutable, mutable}}, home: {hint, bucket, ready}, regions: [{hint, binding, bucket, ready}], domains: {host: repo}}`; `home.ready`: the outbox wrote every pointer of the backfill; `bucket`: the bucket that the `bucket.json` of the binding must name; `domains`: `module.Kernel.RepoDomains`, the lines of `repo_domains` without those that name a host of the server (the repo name or a redirect name, as listed); `pointer_cache` (absent while the pointer cache is off): `{ttl (seconds), gen, hosts}`, see **The pointer cache**; a change of that list or of `edge.access_ttl` writes it again | home |
 | `bucket.json` | `{hint, bucket}` (`hint` is `home` or the region): the bucket names itself, so the Worker sees a binding to another bucket. The controller writes it into each bucket it uses (again after the wipe of a first start, and once per process start); a region becomes ready only after its `bucket.json` is written | home and each region |
 | `p/<repo id>/<sha256 hex of the path>` | `{repo, path, sha256, sha1, md5, size, ct, mod (unix), kind}`, or `{repo, path, pending: true}` while a write runs | home; also each region for an immutable path |
-| `a/repo/<name>` | `{id, format, kind, anon, private, guarded, members: [names], paths?: [[glob, immutable], ...]}`: `paths` (a hosted or proxy repo of a format with `EdgeSpec.Paths`) classifies the repo's paths in place of the format's globs, the first match deciding; `private` is `access.Engine.Private`, `guarded` is `access.Engine.Guarded` (a read IP rule, or a guard that is not a `ReadRestricter`). For a redirect name, `{redirect: <repo name>}`: the Worker reads the object of that repo next (one more read on a cache miss) and serves the request as one to that repo, whose name the scopes of a core bearer token carry; a redirect object that names another redirect sends the request to the server. A rename marks the object of the old name, the new name and every redirect of the repo; a repo delete and a removed redirect mark the redirect names | home |
+| `a/repo/<name>` | `{id, format, kind, anon, private, guarded, members: [names], paths?: [[glob, immutable], ...]}`: `paths` (a hosted or proxy repo of a format with `EdgeSpec.Paths`) classifies the repo's paths in place of the format's globs, the first match deciding; `private` is `access.Engine.Private`, `guarded` is `access.Engine.Guarded`: the repo has allowed networks, so its anonymous reads depend on the client address and the Worker passes them to the server (a group read passes when any member is `guarded`, and a `guarded` group's networks reach its members). For a redirect name, `{redirect: <repo name>}`: the Worker reads the object of that repo next (one more read on a cache miss) and serves the request as one to that repo, whose name the scopes of a core bearer token carry; a redirect object that names another redirect sends the request to the server. A rename marks the object of the old name, the new name and every redirect of the repo; a repo delete and a removed redirect mark the redirect names | home |
 | `a/user/<id>` | `{enabled, local, all, read: [repo ids]}`: `all` is a server permission with `AllRepos`, `read` the repos with `repo.download` | home |
 | `a/token/<public id>` | `{id, user, hash (hex SHA-256 of the secret), exp (unix, 0 never)}`; an expired token has none | home |
 | `a/device/<id>` | `{user, exp}`; a revoked or expired device has none | home |
@@ -2414,7 +2422,7 @@ path dirty. Until a pointer lands, the Worker finds none, or a pending one, and 
 **Access objects.** The change notices of the kernel mark the keys of the affected objects:
 `auth.Service.AfterChange` (tokens, users, permissions, grants), `repos.Service.AfterChange`
 (create, update, members, delete; a repo marks its groups too, since a group is private when a
-member is), `netrules.Service.AfterRulesChange` (IP rules) and `publish.Service.AfterDeviceChange`
+member is), `netrules.Service.AfterRulesChange` (allowed networks) and `publish.Service.AfterDeviceChange`
 (approve, setup, revoke). The outbox writes the marked keys within a second, before its pointer
 rows; `edge_written` keeps the hash of each object written. The job `edge.reconcile` computes
 every access object and `config.json` from the database every 5 minutes (the users in pages of
@@ -2858,7 +2866,7 @@ the local one, so `edge.access_ttl` (default 30 s, 0 to 5 min) is the bound.
 
 | Change | Reaches the edge | What a stale edge can serve meanwhile |
 |---|---|---|
-| Read token deleted or expired; user disabled; grant removed; repo made private; device revoked; IP read rule added | within `edge.access_ttl` plus the write (the outbox writes within a second); within 5 minutes plus the TTL after a server crash in that second | Downloads of that repo to that credential, from a data center that cached the object |
+| Read token deleted or expired; user disabled; grant removed; repo made restricted; device revoked | within `edge.access_ttl` plus the write (the outbox writes within a second); within 5 minutes plus the TTL after a server crash in that second | Downloads of that repo to that credential, from a data center that cached the object |
 | File deleted or replaced | at once (the pointer is deleted or pending, and its cached copies purged, before the commit) | nothing |
 | Edge turned off | within `edge.access_ttl` | downloads that the server would also allow |
 
@@ -2878,9 +2886,8 @@ the local one, so `edge.access_ttl` (default 30 s, 0 to 5 min) is the bound.
   carries an anonymous bearer, so the edge serves it only on an anonymous-read repo. A cached proxy
   file that is not `Changing` serves from the edge; a miss goes to the server, which fetches and
   commits it and so writes the pointer for the next client.
-- *Audit and logs.* The server records no download events, so none are lost at the edge. Guard
-  refusals (`network.denied`) stay at the server because a guarded repo is never answered by the
-  edge. Edge downloads are absent from the server's access log. The Worker never logs
+- *Audit and logs.* The server records no download events, so none are lost at the edge. Edge
+  downloads are absent from the server's access log. The Worker never logs
   `Authorization`, cookies or query strings.
 - *Uploads.* Every method other than GET and HEAD goes to the server with its body streamed.
   Cloudflare limits a request body to 100 MB on Free and Pro and 200 MB on Business, with or without
@@ -3364,11 +3371,12 @@ are dropped from memory, and the server logs the repo ids.
 - A group holds 1 to 50 members, each a hosted or proxy repo of the group's format; groups do
   not nest. A repo can be in several groups. A group with no member left (its members were
   deleted) stays and serves nothing.
-- A read of a group (e.g. `GET /maven/{group}/{path}`) needs read access to the group (the read
-  gate and the group's IP rules). The core read path (see **Byte pipeline**) serves every format
-  that takes groups. It tries the members in order and skips a member that the reader cannot read
-  (`access.Engine.Allows` with `Read`: the reader's access and the guards, the member's read rules,
-  both count; no audit event). The first member that has the file serves it. A proxy member fetches from its remote
+- A read of a group (e.g. `GET /maven/{group}/{path}`) needs read access to the group (a grant,
+  public, or the client address in the group's allowed networks). The core read path (see **Byte
+  pipeline**) serves every format that takes groups. It tries the members in order and skips a
+  member that the reader cannot read (`access.Engine.GroupMembers`: `Allows` with `Read`, where a
+  grant or the member's own allowed networks count; when the client address is in the group's
+  allowed networks, every member is read). The first member that has the file serves it. A proxy member fetches from its remote
   only when no member before it has the file. No member: 404, or 502 when a proxy member's remote
   failed. The members and the reader's grants on them are read once per request (`repos.Remember`
   for the members, `auth.Service.WithGrants` for the grants, one query).
@@ -3637,7 +3645,7 @@ catch-alls and parses the raw path (an encoded `/`, `\` or NUL is 400). Every `/
 | Route | Policy | Serves |
 |---|---|---|
 | `GET /v2/` | none (the handler reads the credential) | No `Authorization`: 401 with the challenge. A credential that `Identify` accepts (a core bearer too): 200 `{}`; a bad one: 401 |
-| `GET /v2/_catalog?n=&last=` | password, read token, publish session, device, bearer, anonymous | The images (`{"repositories": [...]}`, by full name) of the repos that the credential behind the request downloads, without the repos a guard refuses. Bearer scopes do not limit it: anonymous and a bearer without a credential see the public repos, a publish session also its own repo, a password, a read token or a device the grants of its user. A full page adds `Link: </v2/_catalog?n=&last=>; rel="next"`. A page reads only rows the caller lists: it walks the caller's repos that hold an image in name order (`ReposWithImages`) and reads each one's images through the primary key, one seek per repo it lists from; a holder of all repositories walks `docker_images_full` and seeks past each repo a guard refuses |
+| `GET /v2/_catalog?n=&last=` | password, read token, publish session, device, bearer, anonymous | The images (`{"repositories": [...]}`, by full name) of the repos that the credential behind the request downloads from the client address. Bearer scopes do not limit it: anonymous and a bearer without a credential see the public repos, a publish session also its own repo, a password, a read token or a device the grants of its user, and every caller the repos whose allowed networks hold the address (`access.Engine.NetworkRepos`). A full page adds `Link: </v2/_catalog?n=&last=>; rel="next"`. A page reads only rows the caller lists: it walks the caller's repos that hold an image in name order (`ReposWithImages`) and reads each one's images through the primary key, one seek per repo it lists from; a holder of all repositories reads one range of `docker_images_full` |
 | `GET, HEAD /v2/<name>/manifests/<tag\|digest>` | `FormatRead` + bearer | The stored bytes and media type (`Accept` is ignored), `Docker-Content-Digest`, `Content-Length`, `ETag`; never redirected. 404 `MANIFEST_UNKNOWN`, also for a reference that is neither a digest nor a valid tag |
 | `GET, HEAD /v2/<name>/blobs/<digest>` | `FormatRead` + bearer | The link of the image, with ranges; a GET may redirect to S3. 404 `BLOB_UNKNOWN` |
 | `GET /v2/<name>/tags/list?n=&last=` | `FormatRead` + bearer | `{"name","tags"}` in tag order after `last`; `n` absent is 1000, above 10000 is 10000, 0 is an empty list; a bad `n` is 400 `PAGINATION_NUMBER_INVALID`. A full page adds `Link`. An image without rows is 404 `NAME_UNKNOWN`. A proxy lists the remote's tags; a group merges the tags of its readable members (see **Proxies and groups**) |
@@ -3655,7 +3663,7 @@ catch-alls and parses the raw path (an encoded `/`, `\` or NUL is 400). Every `/
 
 A name of one segment (no image) is 404 `NAME_UNKNOWN` "name an image inside the repository:
 <host>/<repo>/<image>". The refusals map to OCI codes: an engine `anonymous`, `credentials`,
-`publish_session` or `scope` refusal is 401 `UNAUTHORIZED`; `permission` and `network` are 403
+`publish_session` or `scope` refusal is 401 `UNAUTHORIZED`; `permission` is 403
 `DENIED`; an unknown repo (or one of another format) is 404 `NAME_UNKNOWN`; a write to a proxy or
 group is 405 `UNSUPPORTED`; a repo operation is 409 `DENIED`; a rate limit is 429 `TOOMANYREQUESTS`.
 The handlers add: a bad name or path is 400 `NAME_INVALID`; a malformed upload body or
@@ -3685,7 +3693,7 @@ registered kind (`trp_`, `trs_`) checked with `auth.Service.Authenticate` (a bad
 `repository:<name>:<actions>` (`pull`, `push`, `delete`, `*`); each maps to its repo, and an
 unknown repo or a repo of another format is dropped. The answer grants a subset:
 
-- Pull: `access.Engine.Allows(Read, repo.download)` for the credential (the guards apply). A
+- Pull: `access.Engine.Allows(Read, repo.download)` for the credential (the allowed networks of the token request's address count). A
   publish session reads what anonymous reads outside its repo; a CI token reads what anonymous
   reads; a device proof reads what the device's user reads (`Minter.Check`, then the
   `auth.CredDevice` principal of the device; no session for a pull).
@@ -4133,19 +4141,29 @@ and `.nuspec`.
 **Byte pipeline**), and the core module reads manual uploads. The core names no format; it calls
 the capabilities of the repo's `format.Spec` that are set.
 
-- **Tree.** `GET /api/repos/{name}/tree` returns the direct children of a folder in path order,
-  folders and files mixed (the UI sorts folders first within a page). Each child is one indexed
-  seek on `(repo_id, path)`. After a folder, the next seek starts just past every path under it,
-  so a page costs `limit` seeks however large the repo is.
+- **Tree.** `GET /api/repos/{name}/tree` returns the direct children of a folder from
+  `tree_entries`: the folders, then the files. The files follow by the bytes of their names, so
+  a checksum or signature follows its file (`x.jar` < `x.jar.sha1`). The folders whose names
+  start with an ASCII digit (versions) come first, in version order; the others follow by their
+  bytes (`acme` < `acme-b`). In version order a name splits into parts at `.`, `-`, `+` and `_`;
+  two numbers compare by value, two texts by their bytes, a number is above a text, and a
+  missing part is below a number and above a text, so `1.2` < `1.10` and
+  `1.0-SNAPSHOT` < `1.0` < `1.0.1`; names equal that way follow by their bytes. When the name of
+  every folder starts with a digit (the versions of an artifact), the folders come newest first;
+  one seek decides it (the last folder is a version). The cursor `after` is a
+  child's name, with `/` for a folder, so it names the kind and the key; a page is one range of
+  the primary key per kind (the folders, then the files from the first), `limit` rows however
+  large the folder is.
 - **Group tree.** The tree of a group is the union of the trees of the members that the caller
   reads, in read order (`access.Engine.GroupMembers`, as a group read; a proxy member gives its
-  cached files). Each member is read with the same `after` and `limit`, and the pages merge by
-  path: a folder that several members hold is one item, and a file that several members hold is
-  the first member's, the one a group read serves; each file item names it in `repo`. The first
-  `limit` items of the merge are the first `limit` of the union, because a member's page holds all
-  its items before its `limit`-th. `next` is the last item's cursor while any item follows. A page
-  costs at most `limit` + 1 seeks per member. A group has no deletes (405), no publish sessions
-  (409) and no uploads.
+  cached files). The folders come newest first when the name of every folder of every member
+  starts with a digit (one seek per member). Each member is read from the same `after`, `limit`
+  + 1 items, and the pages merge in the order of the tree: a folder that several members hold is
+  one item, and a file that several members hold is the first member's, the one a group read
+  serves; each file item names it in `repo`. The first `limit` items of the merge are the first
+  `limit` of the union, because a member's page holds all its items before its `limit`-th.
+  `next` is the last item's cursor while any item follows. A group has no publish sessions (409)
+  and no uploads; a delete in a group deletes in its members (**Group deletes**).
 - **Group versions** (`internal/format/group.go`). The versions, builds and artifact snippets of a
   group come from the members that the caller reads, in read order (`access.Engine.GroupMembers`),
   so a group's Files tab has every view of a hosted repo of its format. `format.Spec.Versions`,
@@ -4250,9 +4268,34 @@ the capabilities of the repo's `format.Spec` that are set.
   the repo. It takes the UI session cookie of a person who holds it; that session exists only
   after the second factor (outside dev mode). It also takes a device or manual publish session of
   that repo (Basic password or `Authorization: Bearer <token>`) whose user holds `repo.delete` now,
-  through `access.Engine.Decide` with `Delete`: the repo's operation, the publish rules, and 403
+  through `access.Engine.Decide` with `Delete`: the repo's operation, and 403
   for a session of another repo. A CI session gets 403. Passwords and read tokens get 401. A repo
-  with an operation gets 409. A group gets 405.
+  with an operation gets 409. A group needs `repo.download` on the group, and each member decides
+  (**Group deletes**).
+- **Group deletes** (`internal/api/groupfiles.go`). A group holds no files: a delete there goes to
+  its members, and the group needs no Delete of its own. The route reads the group
+  (`route.RepoRule.Group`: `Read` with `repo.download`); the access engine still answers a `Delete`
+  on a group with 405, so a client's format DELETE through a group (an npm unpublish) stays
+  read-only.
+  - `POST /api/repos/{group}/files/holders` says, for the picked files and folders, which of the
+    members that the caller reads (`access.Engine.GroupMembers`) hold each, in read order (the first
+    is the member a group read serves a file from), and for each member that holds one the
+    engine's `Delete` decision with `repo.delete` (the caller's permission there, the member's
+    operation; a refusal gives its message). A file costs one point lookup of `(repo_id, path)` per
+    member, a folder one seek to its first file per member, at most 1000 items.
+  - `POST /api/repos/{group}/files/delete` with `{paths, prefixes, members}` deletes the items in
+    each member named, each a member that the caller reads through the group (400 otherwise,
+    and without `members`). Each member gets the engine's `Delete` decision with `repo.delete`; a
+    member that refuses keeps its files and is listed in `kept: [{repo, reason}]`, and when every
+    one refuses the answer is the first refusal. Each other member runs the delete of files of a
+    direct delete there (`assets.Pipeline.Remove`, its audit events, a proxy its cached copies),
+    each counting against that member's 4 deletes (429 starts none). 200 `{deleted, repos: [{repo,
+    deleted, error?}], kept}` when every delete ends within `delete.wait`, else 202 with the `id`
+    of each delete that goes on, asked at `GET /api/repos/{member}/files/delete/{id}`.
+  - The UI offers delete in a group to a person with `repo.delete` in one of its members. One
+    member holds the items: the confirm names it. Several: the person chooses Delete from all of
+    them (one request naming them all) or Only from the member that serves each item (one request
+    per serving member); the group then serves the next member's copy.
 - **Delete steps.** A prefix is always a folder (a trailing `/` is added). The server checks
   every path and prefix first, then calls `Remove` (see **Byte pipeline**): the `paths`, then each
   folder, in batches of 500. `deleted` is the number of files. The blobs stay until the blob GC
@@ -4324,16 +4367,16 @@ the capabilities of the repo's `format.Spec` that are set.
 
 ## Network rules
 
-`internal/netrules` resolves the client address, keeps the IP lists and checks the IP rules of
+`internal/netrules` resolves the client address, keeps the IP lists and the allowed networks of
 each repo. Request paths read in-memory snapshots only. The database holds the lists and the
-rules. The ranges of each IP list, the CIDRs of each rule scope and the trusted proxies are
-compiled into sorted, merged address ranges when they change, so checking an address is a binary
-search at any list size.
+networks. The ranges of each IP list, the CIDRs of each repo's networks and the trusted proxies
+are compiled into sorted, merged address ranges when they change, so checking an address is a
+binary search at any list size.
 
 **Client IP and scheme.** The network module resolves the client once per request
 (`Extender.ResolveClient`): its address and its scheme. The server attaches them to the request
-context. `httpx.ClientIP(r)` reads the address. The rate limits, the audit log, the IP rules,
-device enrollment and the access log all use it. `httpx.ClientScheme(r)` reads the scheme.
+context. `httpx.ClientIP(r)` reads the address. The rate limits, the audit log, the allowed
+networks, `GET /api/network/whoami`, device enrollment and the access log all use it. `httpx.ClientScheme(r)` reads the scheme.
 The URLs that the server builds from the request when `base_url` is empty use it: the realm of
 the registry challenge, the base URL of the snippets and of `/install.sh`, and the device
 verification URL. Without the network module, the address is the TCP peer and the scheme is that
@@ -4361,7 +4404,7 @@ of the connection.
   network module's `Init` resolves each name to its list once, and an unknown name stops startup.
 - The default trusts nothing because Docker's userland proxy and rootless Podman make every outside
   connection arrive from a private gateway address. With `private` trusted there, anyone who
-  reaches the port directly could forge `X-Forwarded-For` and get around the IP rules.
+  reaches the port directly could forge `X-Forwarded-For` and read the repos of any allowed network.
 - **Scheme.** The scheme is `https` when the connection is TLS. If the peer is trusted, the
   forwarded proto gives the scheme: the first entry of `X-Forwarded-Proto`, else the `proto` of
   the first element of `Forwarded`. A value other than `http` or `https` does not count. From a
@@ -4376,8 +4419,8 @@ of the connection.
   restart empties the list. `GET /api/network/proxy-candidates` returns it, and the UI offers
   "Trust this address", which adds the address to `trusted_proxies` with the settings PATCH.
 
-**IP lists.** An IP list is a named set of CIDRs. Repo rules and the trusted proxies refer to a
-list by its id (the API shows its name). The table is `ip_lists`.
+**IP lists.** An IP list is a named set of CIDRs. Allowed networks and the trusted proxies refer
+to a list by its id (the API shows its name). The table is `ip_lists`.
 
 - **Presets.** `cloudflare` (`https://www.cloudflare.com/ips-v4` and `/ips-v6`) and
   `github-actions` (the `actions` key of `https://api.github.com/meta`). They are read-only. The
@@ -4391,10 +4434,11 @@ list by its id (the API shows its name). The table is `ip_lists`.
   pattern. A title has at most 100 characters, a description at most 1,000, and a list at most
   10,000 ranges (CIDRs, or addresses that become `/32` or `/128`). An empty title becomes the name.
   No list may use the name of a preset. The list API checks its `ranges` strictly: each one must
-  be a CIDR or an address, and a duplicate is a 400. Repo rules and `trusted_proxies` check theirs
-  the same way.
+  be a CIDR or an address, and a duplicate is a 400. Allowed networks and `trusted_proxies` check
+  theirs the same way.
 - **Paste parsing.** `POST /api/ip-ranges/parse` (`netrules.ParseRanges`) takes text in any common
-  layout and returns the ranges in it; the UI then saves them through the strict routes. The
+  layout and returns the ranges in it; the UI then saves them through the strict routes. It needs
+  `network.manage`, or `repo.settings` on a repository (the Access tab). The
   parser splits the text into lines and cuts each line at `#` or `//`. It splits a line on
   commas, semicolons, whitespace and `|` (CSV and table columns). It removes quotes and brackets
   around a token, trailing punctuation, and a label before `=` or `:` (`ip=1.2.3.4`,
@@ -4407,34 +4451,54 @@ list by its id (the API shows its name). The table is `ip_lists`.
   invalid, when no token on it starts with a digit (`name,ip`). Duplicates are counted in
   `duplicates`, and the first one keeps its place. Limits: 1 MiB of text, 100,000 ranges, and the
   first 1,000 invalid lines, each clipped to 200 bytes.
-- **Rename.** A rename changes one row: the rules and the trusted proxies keep the list by its id.
+- **Rename.** A rename changes one row: the allowed networks and the trusted proxies keep the list
+  by its id.
   It answers 409 when `TR_TRUSTED_PROXIES` names the list, because the next start resolves the
   old name.
-- **Delete.** Refused with 409 `{error, used_by}` while a repo rule or the trusted proxies (a row
+- **Delete.** Refused with 409 `{error, used_by}` while allowed networks or the trusted proxies (a row
   or `TR_TRUSTED_PROXIES`) use the list; the foreign keys (`ON DELETE RESTRICT`) refuse it too. A
   preset cannot be deleted (400).
-- **Use.** `used_by` is `{repos: [{repo, scope}], trusted_proxies: bool}`. The index
-  `repo_ip_rules_list_id` finds the rules of a list.
+- **Use.** `used_by` is `{repos: [name], trusted_proxies: bool}`. The index
+  `repo_networks_list_id` finds the repos of a list.
 
-**Repo IP rules.** Each repo has two allow-lists, `read` and `publish`. An entry is a CIDR or an
-IP list (the API names it; the row keeps its id). An empty list is unrestricted (the default).
+**Allowed networks.** A repo is **public** (anyone downloads; `anonymous_read`) or
+**restricted**. A restricted repo has a list of allowed networks, each a CIDR or an IP list (the
+API names it; the row of `repo_networks` keeps its id). A caller downloads from a restricted repo
+when its credential grants `repo.download`, from any address, or when its client address is in
+the repo's allowed networks, with or without a credential (see **Access engine**). An address
+never takes access away, and it grants `repo.download` only: publishing always needs a publish
+session.
 
-- **Save.** `PUT /api/repos/{name}/ip-rules` replaces both lists. A CIDR is masked and an address
-  becomes `/32` or `/128`. At most 200 rules per scope and 200 characters per note. A duplicate, a
-  bad CIDR or a `list` that does not exist gives 400. The change is audited as
-  `network.rules.update` with the counts only.
-- **Read rules** apply to every format read and to the repo read routes (`tree`, `assets`, `usage`,
-  `status`), for every caller, admins included. Search leaves out the repos whose read rules
-  refuse the caller. `GET /api/repos/{name}` is exempt (`access.Meta`: guards never see it), so a holder of `repo.settings` can
-  still open the repo and change its rules.
-- **Publish rules** apply to format writes, manual upload and upload plan, deletes (a UI session
-  too) and to minting device, manual and OIDC publish sessions. The network module is a guard of
-  the access engine (`access.Guard` named `network`): it maps `Read` to the read rules and
-  `Write`, `Delete` and `Mint` to the publish rules.
-- **Refusal.** The answer is 403 with the message `your address is not allowed to read|publish this
-  repository` and the code `network` (a problem document under `/api/`, `{"error"}` on a format route) and the audit event `network.denied` with `detail.scope` and the client IP. The IP
-  appears only in the audit log.
-
+- **Save.** `PUT /api/repos/{name}/ip-rules` (`{read: [Rule]}`) replaces the list. A CIDR is masked
+  and an address becomes `/32` or `/128`. At most 200 networks and 200 characters per note. A
+  duplicate, a bad CIDR or a `list` that does not exist gives 400. The change is audited as
+  `network.rules.update` with the count only.
+- **Public and allowed networks do not mix.** A non-empty list on a public repo gives 400; the
+  check reads `repos.anonymous_read` in the write transaction of the save. Making a repo with
+  allowed networks public gives 400 that says to remove them first: the module's check of every
+  repo update (`repos.Service.CheckChange`) reads `repo_networks` in the update's transaction.
+  At start, the job `network.restrict` makes restricted (`repos.Service.Update`) each public repo
+  that still has networks, so the edge objects and the counters follow.
+- **What an allowed address reads.** Every format read and the repo read routes (`tree`,
+  `assets`, `usage`, `status`, the repo record), and the repo in `GET /api/repos`, search and the
+  registry catalog. A group's networks reach the files it serves: an address in them reads every
+  member through the group (`access.Engine.GroupMembers`). A member's own networks grant reads of
+  that member directly and through any group.
+- **The address index.** The module keeps one in-memory index from address to repo ids
+  (`netrules.reachIndex`, `reach.go`), rebuilt under the rules lock whenever the networks change:
+  the CIDRs of every repo cut into elementary ranges that each carry the repos covering them, and
+  the repos of each IP list that networks name. `Reach(addr)` is one binary search of the ranges
+  and one of each such list, whatever the number of repos with networks; a refresh of a list
+  changes only the list's own ranges. The repo lists, search and the catalog merge its answer as
+  they merge the repos of grants.
+- **Add my address.** `GET /api/network/whoami` answers the caller's address and the range to
+  allow for it. A browser reaches the server over one family; the setting `network.probe_hosts`
+  names an IPv4-only and an IPv6-only host name of this server (an A record only and an AAAA
+  record only, through the same proxy as the base URL), and the server answers on them as on the
+  base URL's host. The Access tab asks whoami on both and adds both ranges.
+- **Edge.** A repo with allowed networks is `guarded` in its edge object: its anonymous reads
+  depend on the address, so the Worker passes them to the server, which answers them with
+  `Cache-Control: private` (the repo is restricted).
 ## Signing keys
 
 `internal/signing` keeps the signing keys and the key of each repo. It loads every key and every
@@ -4458,8 +4522,8 @@ binding into memory at start, and request paths and the indexers read that copy.
   `PATCH /api/repos/{name}` take it in `fields`; an unknown key gives 400. A bind records
   `signing.key.bind`. The key is not a config key: a config with `signing_key` gives 400.
 - **Public key.** `GET|HEAD /debian/{repo}/key.asc`, `/arch/{repo}/key.asc` and `/rpm/{repo}/key.asc` return the armored public key of the repo's
-  key. It follows the read rules of the repo: anyone for a public repo, credentials for a private
-  repo.
+  key. It follows the download access of the repo: anyone for a public repo, a credential or an
+  allowed network for a restricted repo.
 - **Change of key.** When a repo changes its key, only that repo is signed again: every `Release`,
   `InRelease` and `Release.gpg` of the repo is written again; an Arch repo signs every package
   again from its saved hash state (no package is read), then every index; an RPM repo writes every
@@ -4497,7 +4561,7 @@ module (`audit.System`), the `telesphorepo-server user` commands as `cli` (`audi
 | edge | `edge` | `edge.deploy` (`target` `telesphorepo-edge`; `detail.ok`, `detail.trigger` `manual` or `auto`, `detail.version`, `detail.changed`: what the deploy changed in Cloudflare; on a failure `detail.step` and `detail.error`). Deploy now has the person as actor, the job `edge.deploy` the module |
 | storage | `storage` | `storage.move.start` (`detail.target` without secrets), `storage.move.cancel`, `storage.move.done`, `storage.move.failed` (`detail.error`), `storage.move.retry` (`detail.changed`: the keys of the body; `detail.move`: the new move), `storage.move.dismiss` |
 | backup | `backup` | `backup.done` (`target` the backup name; `detail`: `dir`, `storage`, `blobs`, `copied`, `size`, `master_key_included`, `removed` (the folders retention removed), `removed_blobs`), `backup.failed` (`detail.error`). A scheduled run has the module as actor, Back up now the person |
-| network | `network` | `network.denied` (`detail.scope` is `read` or `publish`), `network.rules.update` (counts of read and publish rules only), `network.list.create`, `network.list.update` (`detail.renamed_from` after a rename), `network.list.delete`, `network.trusted.update` (`detail.lists`: the IP lists of the trusted proxies after a change) |
+| network | `network` | `network.rules.update` (`detail.networks`: the count of allowed networks only), `network.list.create`, `network.list.update` (`detail.renamed_from` after a rename), `network.list.delete`, `network.trusted.update` (`detail.lists`: the IP lists of the trusted proxies after a change) |
 | signing | `signing` | `signing.key.create` (`detail.imported`), `signing.key.delete`, `signing.key.bind` (a repo got its key: the repo, `target` the key name) |
 | publish | `repo` | `publish.session.create` (`detail.via`; the actor is the person or the CI subject of the session), `publish.session.close`, `setup_code.create` (a setup line of the repo), `device.setup` (a project setup with a setup code; the actor is the person of the code, `detail.device_id` and `detail.new`) |
 | publish | `people` | `device.approve`, `device.revoke` (by a person in the UI, or by the device itself with `detail.by` `device`) |
@@ -4773,7 +4837,8 @@ page are in `web/src/README.md`.
   height as its minimum on wide screens, so a switch does not move the details column or the
   toolbar.
   - *List* shows a folder as a table (name, size, published, and who published it while the
-    details column is closed). The versions of an artifact are a list: each row the version with
+    details column is closed), in the order of `/tree`; the next page loads as the end of the
+    rows comes into view. Every view shows the children of a folder in that order. The versions of an artifact are a list: each row the version with
     Latest or Snapshot, then when it was published, its commit and its builds. A snapshot's
     earlier builds are a list the same way, and the files of a build a table (name, kind, size).
   - *Tree* shows the whole repo as an expandable tree. A folder loads its children from `/tree` the
@@ -4900,25 +4965,39 @@ page are in `web/src/README.md`.
     old names with their last use and Remove after a confirm that names what stops working (see
     **Repository redirects**). An old name in the address opens the settings under the new name.
   - *Access:* two cards, Download and Publish, that answer from
-    `GET /api/repos/{name}/access?admins=1` and the unsaved edits. Each person shows once, in the
-    card of their highest access, with what they hold beyond it as badges (Delete files, Edit
-    settings, Manage access, Manage CI pipelines). **Download**: the Public switch and **Give
-    access** in its header; the people whose grant has no Publish (while private, or when someone
-    holds such a grant on a public repository); then from where ("From any network", "Only from
-    GitHub Actions"). **Publish**: the people with Publish, then the holders of All repositories
-    as one read-only row ("2 administrators") that opens to their names; the CI pipelines; then
-    from where. While nobody can publish (`publish.blocked`: a group, a proxy or an operation),
-    the card says why in place of the CI pipelines and the networks. **Give access**
-    opens the grant dialog (see **Grant dialog** below) with people found through
-    `GET /api/people`. **Change** opens the picker for one person, **Remove** and a
-    pick with **Remove access** ask first. These save at once through `PUT /api/grants`. The
-    Public switch (in the download card's header) and **Change** of from where show to a holder
-    of `repo.settings`, Add CI pipeline and removing one to a holder of `ci.pipelines`. **Add CI
-    pipeline**, **Add network list** and **Add addresses** each open a short form in a dialog.
-    These edits save together from the save bar; the Public switch saves through
-    `PATCH /api/repos`. Add CI pipeline adds existing pipelines, or
-    links to `/#/settings/ci-pipelines/new?repo={name}&back=/settings/repositories/{name}/access`.
-    Each person links to their page, where the same access is also edited.
+    `GET /api/repos/{name}/access?admins=1`. Each card is one list with one **Add**; each row is
+    a name, its kind muted at the end, and × where the viewer may remove it. Every change applies
+    at once; there is no save bar.
+    **Download**: the header holds only the **Public** switch (`PATCH /api/repos`). While public,
+    the card is that header alone. Otherwise **Who can download**: the addresses and ranges
+    (monospace, with a label edited in place, "Add a label", saved on change as the rule's
+    `note`), the IP lists ("IP list"), the people with a grant of download ("Person"; one whose
+    grant has Publish says "Publishes" and has no ×, since the Publish card manages it), the
+    holders of All repositories as one row ("2 administrators", "All repositories"), and the
+    module notes of `download.notes` in one muted line under the list. Each change of the networks
+    is one `PUT /api/repos/{name}/ip-rules`, one at a time, each on the networks the last one left;
+    a failure shows in a toast. Turning Public on while the list holds networks asks first, naming
+    how many addresses and IP lists it removes; yes removes them, then makes the repo public. The
+    grants stay. Turning Public off does not ask.
+    **Publish**: **Who can publish**: the people with Publish, the CI pipelines ("CI pipeline",
+    Off when turned off, each linking to its page for a holder of `ci.pipelines`), then the
+    holders of All repositories as one read-only row that opens to their names. While nobody can
+    publish (`publish.blocked`: a group, a proxy or an operation), the card says why above the
+    list, and the CI pipelines neither show nor are offered.
+    **Add** opens the grant dialog (see **Grant dialog** below). On Download it offers **Custom
+    address**, **Add my address** and the IP lists (`repo.settings`) and people (`repo.access`;
+    Permissions for new items starts at Download); on Publish, the CI pipelines (`ci.pipelines`)
+    and people (starting at Download and Publish). Its submit gives the people their grants in
+    one `PUT /api/grants`, puts the IP lists and the addresses (each masked through
+    `POST /api/ip-ranges/parse`, its label as the note; one already listed is left out) in one PUT
+    of the networks, and adds the repository to each chosen CI pipeline. Add my address adds a
+    card with the `cidr` of `GET /api/network/whoami` (an IPv6 address as its `/64`), and with
+    `network.probe_hosts` set also one with the `cidr` of each probe host's whoami (a cross-origin
+    `GET` without credentials), so both families of the network go in.
+    A person's name opens their permissions (the picker, `repo.access`); × on a person (everything
+    on the repository goes, `PUT /api/grants`) or a CI pipeline asks first; × on a network does
+    not. The Public switch, the label and × of a network need `repo.settings`; a viewer without
+    it sees the label as text and "Public" as a badge.
   - **Grant dialog.** Give access (Access tab, person page) is one dialog of nearly the window's
     width with two columns of one fixed height, each scrolling on its own (stacked on a phone).
     Left, **Available**: a field that finds people or repositories by the start of the name, a
@@ -4933,8 +5012,13 @@ page are in `web/src/README.md`.
     permissions at a glance (their labels, or "No access" in the warning color); a click opens
     its own picker, one card at a time, and × removes it. The submit stays off while one has no
     permission, and the column says which. The dialog groups the added ones by identical sets and
-    saves them in one `PUT /api/grants` with `groups`. Change permissions (one person or a pick)
-    is the picker alone, one set for every target.
+    saves them in one `PUT /api/grants` with `groups`. On the Access tab the left column also
+    offers things without permissions (an IP list, a CI pipeline): their card is the name and
+    ×. **Custom address** never shows as added: each add puts a new card with an address field
+    and "Label (optional)"; a single IPv6 address offers **Widen to /64**
+    (`POST /api/ip-ranges/parse`), and the submit stays off while an address is empty or invalid,
+    which the column says. Change permissions (one person or a pick) is the picker alone, one set
+    for every target.
   - **Permission picker.** The grant dialog (Access tab, person page, bulk Give access) and the
     person page use one picker, read from `GET /api/permissions`: one group of checkboxes per
     subsystem, each with the subsystem's label and help, **All** and **None**, and one help line
@@ -5027,7 +5111,7 @@ page are in `web/src/README.md`.
   list** is the action of the "Your lists" section. The list page edits name, title, description
   and addresses (a list of one range per row, 200 at a time), lists where the list is used, and
   deletes. A downloaded list shows its ranges read-only.
-- **Pasted addresses.** The network list editor, the Access tab (the Add addresses dialog of each rule) and
+- **Pasted addresses.** The network list editor and
   the Network and proxy page take addresses through one paste box (`RangePaste`). The box sends the
   text to `POST /api/ip-ranges/parse` 400 ms after the last key, or at once on Check. It shows
   "8 ranges found · 0 invalid · 0 duplicates removed", the invalid lines with their numbers and
@@ -5038,7 +5122,9 @@ page are in `web/src/README.md`.
   and the IP lists of the trusted proxies (Cloudflare, and any other list) through
   `PUT /api/network/trusted-proxies`. A list that `TR_TRUSTED_PROXIES` names shows checked and
   cannot change. The proxy candidates are a list of detected proxies: each the address, then the
-  header, the number of requests and when it was last seen, and **Trust**. A Caddyfile hint takes its host from `base_url`. A setting
+  header, the number of requests and when it was last seen, and **Trust**. The address probe hosts
+  are two fields, an IPv4-only and an IPv6-only host (`network.probe_hosts`, saved through the
+  settings PATCH from the same save bar). A Caddyfile hint takes its host from `base_url`. A setting
   that an environment variable sets shows a badge and cannot change.
 - **General page.** One form with a section per settings group whose page is empty (see **Settings
   model**), with the labels and help of the server, for the groups whose permission the person
@@ -5292,11 +5378,11 @@ build three folders deep (409 for other bytes, 200 for the same) while `latest.j
 bad glob or policy is 400 naming the rule, 101 rules are 400, and a `PATCH` of the rules applies to
 the next write.
 `TestAPIFormats` covers `/api/formats`, `/status` and `/usage`; `descriptor_test.go` covers the format descriptors (each one well formed) and the CI file route with branches and tags (`TestCIWorkflowRoute`), and the delete plan (`TestDeletePlan`). `TestQueryPlans` runs `dbcheck`
-inside a server container. `migrations_test.go` covers `TestMigrations`, a real upgrade with three builds of the server (`BuildServer`, `BuildServerWith` with an overlay): the tree writes a private raw repo, a user with `repo.download` on it and a file; a build with one more core migration (`0002_e2e_probe.sql`, a new table filled from `repos` and `users`) starts on the same data volume, logs `applied migration` for that file only, and the user reads the file and its grant back; the exported database holds both core rows of `schema_migrations` and the probe rows of the older data; a build whose `0001_init.sql` has another content refuses to start with the sentence that names `core` and the file; the tree refuses the database of the newer build ("core migration 0002"); then the newer build starts on it again and applies nothing. `files_test.go` covers `TestTree`, `TestDelete` (who may delete: `repo.delete` with a publish session or a UI session, file, prefix and Bearer deletes, blobs kept for the blob GC, repo delete and name reuse), `TestManualUploadMaven` (checksums, metadata order, `mvn` resolves the uploaded and the generated pom), `TestManualUploadRaw`, `TestRepoCounters` (`file_count`, `total_size` and `last_published_at` through uploads, a replace, a file delete and a folder delete) and `TestDebianDeleteAndUpload` (the plan of a folder of `.deb` files: a broken one has problems, another file is ignored, the open folder gives the distribution, a bad distribution is a problem of its field; apt sees the package, then not; 4 by-hash files remain). `audit_test.go` covers `TestAudit`: events, filters, paging, no secret values, `activity.read` only, and no IP outside the audit log. `network_test.go` covers `TestClientIP` (with the default an `X-Forwarded-For` from the harness peer is ignored and the peer becomes a proxy candidate; trusting the candidate makes the header count and removes the candidate; `private`: a chain through a private hop, `CF-Connecting-IP` from a non-Cloudflare peer; an untrusted peer's header, an empty list, invalid entries, reset to the default). `TestIPRules` and `TestPresetIPLists` set `trusted_proxies` to `private` first, so `X-Forwarded-For` sets the client address, `TestIPRules` (validation; allowed and refused reads of the format route, tree, assets, usage and status; the repo record stays readable; search drops the repo; refused device and manual mints, PUT and admin delete, each audited with its IP and scope; empty lists lift the rule) and `TestPresetIPLists` (a second Telesphorepo server is the stub: startup fetch, a preset in read rules, a Cloudflare hop in the chain, a failed refresh that keeps the last good list, recovery, and stored lists after a restart without the stub) and `TestCustomIPLists` (create, edit, a rename that keeps the rules and the trusted proxies (by list id), use in rules and in the trusted proxies, delete while in use gives 409, an unknown list id gives 400) and `TestTrustedProxyEnvList` (`TR_TRUSTED_PROXIES` with `list:cloudflare` shows as `env_lists`) and `TestIPRangeParse` (the paste parser: one per line, comma, space, tab and `|` separated, CSV with a header row, tables, comments, labels, quotes, IPv6 and IPv4-mapped IPv6, an unmasked CIDR, duplicates, invalid lines with their numbers, the 1 MiB limit, `network.manage` only). `signing_keys_test.go` covers create, import of plain and encrypted keys, delete while in use gives 409, a per-repo key (the repo field `signing_key`; an unknown key, a key in the config and a key of a raw repo give 400) that `apt` installs from, a key change that signs again, and keys and bindings after a restart. `redirects_test.go` covers `TestRepoRedirects`: a Maven, an npm and a Docker repository renamed, then `mvn deploy`, `npm publish` and `docker push` (Docker in Docker) through the old name with a publish token minted through it, each landing in the renamed repository; the upload event records the old name with `redirect_to`; the redirect lists a last use; create and rename to a redirect's name or a repo's name give 409; a rename back takes the old name again; the catalog lists the images of before the rename under the new name; after Remove the redirect the old name answers 404 and a new repository takes it. `groups_test.go` covers `TestGroups`: a release and a snapshot member resolve through the group with `mvn` and Gradle, the merged `maven-metadata.xml` and its `.sha1`, the member order, a public group with a private member (anonymous and a reader), 405 for a PUT and 409 for a publish session, 400 for a member of another format, a nested group, an unknown name and no member, and a member delete. `groups_files_test.go` covers `TestGroupFiles`: a Maven group of a repository, a proxy of a second Telesphorepo server and a private repository, with a path in both the repository and the proxy; the group tree equals the union of the member trees at three folders and pages through it with limits 1, 3 and 200 without a gap or a duplicate, folders merge, the shared path comes from the repository with its `repo` and checksum (tree and file details), anonymous readers do not see the private member, a bad cursor is 400, and a delete (405), a publish session (409) and a PUT (405) are refused. `cache_control_test.go` covers
+inside a server container. `migrations_test.go` covers `TestMigrations`, a real upgrade with three builds of the server (`BuildServer`, `BuildServerWith` with an overlay): the tree writes a private raw repo, a user with `repo.download` on it and a file; a build with one more core migration (`0002_e2e_probe.sql`, a new table filled from `repos` and `users`) starts on the same data volume, logs `applied migration` for that file only, and the user reads the file and its grant back; the exported database holds both core rows of `schema_migrations` and the probe rows of the older data; a build whose `0001_init.sql` has another content refuses to start with the sentence that names `core` and the file; the tree refuses the database of the newer build ("core migration 0002"); then the newer build starts on it again and applies nothing. `files_test.go` covers `TestTree` (folders, then files by name; version folders newest first on every page size, across the turn from folders to files; a folder goes with its last file), `TestDelete` (who may delete: `repo.delete` with a publish session or a UI session, file, prefix and Bearer deletes, blobs kept for the blob GC, repo delete and name reuse), `TestManualUploadMaven` (checksums, metadata order, `mvn` resolves the uploaded and the generated pom), `TestManualUploadRaw`, `TestRepoCounters` (`file_count`, `total_size` and `last_published_at` through uploads, a replace, a file delete and a folder delete) and `TestDebianDeleteAndUpload` (the plan of a folder of `.deb` files: a broken one has problems, another file is ignored, the open folder gives the distribution, a bad distribution is a problem of its field; apt sees the package, then not; 4 by-hash files remain). `audit_test.go` covers `TestAudit`: events, filters, paging, no secret values, `activity.read` only, and no IP outside the audit log. `network_test.go` covers `TestClientIP` (with the default an `X-Forwarded-For` from the harness peer is ignored and the peer becomes a proxy candidate; trusting the candidate makes the header count and removes the candidate; `private`: a chain through a private hop, `CF-Connecting-IP` from a non-Cloudflare peer; an untrusted peer's header, an empty list, invalid entries, reset to the default). `TestClientIP` also covers `GET /api/network/whoami` (an IPv4 address as its `/32`, an IPv6 one as its `/64`), `network.probe_hosts` (validation, the probe URLs, the server answers on a probe host). `TestAllowedNetworks` and `TestPresetIPLists` set `trusted_proxies` to `private` first, so `X-Forwarded-For` sets the client address, `TestAllowedNetworks` (validation; an allowed address reads a restricted repo without a credential on the format route, tree, assets and the repo record, and sees it in `GET /api/repos` and search, another address gets 401 and sees neither; a password, the admin and a publish session work from any address; anonymous PUT stays 401; a group's networks reach a private member through the group but not directly; networks on a public repo and making a repo with networks public give 400; empty networks lift the grant) and `TestPresetIPLists` (a second Telesphorepo server is the stub: startup fetch, a preset in allowed networks, a Cloudflare hop in the chain, a failed refresh that keeps the last good list, recovery, and stored lists after a restart without the stub) and `TestCustomIPLists` (create, edit, a rename that keeps the allowed networks and the trusted proxies (by list id), use in allowed networks and in the trusted proxies, delete while in use gives 409, an unknown list id gives 400) and `TestTrustedProxyEnvList` (`TR_TRUSTED_PROXIES` with `list:cloudflare` shows as `env_lists`) and `TestIPRangeParse` (the paste parser: one per line, comma, space, tab and `|` separated, CSV with a header row, tables, comments, labels, quotes, IPv6 and IPv4-mapped IPv6, an unmasked CIDR, duplicates, invalid lines with their numbers, the 1 MiB limit, `network.manage` or `repo.settings` on a repo only; `TestRepoSettingsPermission` covers the latter). `signing_keys_test.go` covers create, import of plain and encrypted keys, delete while in use gives 409, a per-repo key (the repo field `signing_key`; an unknown key, a key in the config and a key of a raw repo give 400) that `apt` installs from, a key change that signs again, and keys and bindings after a restart. `redirects_test.go` covers `TestRepoRedirects`: a Maven, an npm and a Docker repository renamed, then `mvn deploy`, `npm publish` and `docker push` (Docker in Docker) through the old name with a publish token minted through it, each landing in the renamed repository; the upload event records the old name with `redirect_to`; the redirect lists a last use; create and rename to a redirect's name or a repo's name give 409; a rename back takes the old name again; the catalog lists the images of before the rename under the new name; after Remove the redirect the old name answers 404 and a new repository takes it. `groups_test.go` covers `TestGroups`: a release and a snapshot member resolve through the group with `mvn` and Gradle, the merged `maven-metadata.xml` and its `.sha1`, the member order, a public group with a private member (anonymous and a reader), 405 for a PUT and 409 for a publish session, 400 for a member of another format, a nested group, an unknown name and no member, and a member delete. `groups_files_test.go` covers `TestGroupFiles`: a Maven group of a repository, a proxy of a second Telesphorepo server and a private repository, with a path in both the repository and the proxy; the group tree equals the union of the member trees at four folders, in the order of a repository that holds every path, and pages through it with limits 1, 3 and 200 without a gap or a duplicate, folders merge, the versions of two members list newest first, the shared path comes from the repository with its `repo` and checksum (tree and file details), anonymous readers do not see the private member, a bad cursor is 400, and a delete (405), a publish session (409) and a PUT (405) are refused. `cache_control_test.go` covers
 `TestCacheControl`: HEAD, a 304 and a GET of a private Maven repo, of a public group with a
 private member (also for the public member's file) carry `Cache-Control: private`; a public repo
-and a group of public members carry none (an S3 redirect carries `no-store`); after a read IP rule
-that allows every address, the public repo and the group of it carry `private`. `proxy_test.go` covers `TestProxy` with a second Telesphorepo server as the remote: `mvn` through the proxy and no remote request on the second resolve, the `metadata_ttl` recheck with a 304 and a changed file, a remembered 404, 405 for a PUT, a group where the hosted member wins over the proxy, remote credentials (with them, 502 without them), a Caddy container that redirects to another host and refuses a request that carries credentials, `apt-get` through a Debian proxy with the remote's key, `pacman` through an Arch proxy with the remote's key, `dnf` through an RPM proxy with the remote's key, and a stopped remote (cached file served, 502, `last_error`, and a stale `maven-metadata.xml` that serves twice with one remote attempt in the log). `arch_test.go` covers `TestArch` (both stores: pacman in `archlinux:latest` installs nfpm packages from a private repo with `SigLevel = Required`, upgrades, `pacman -F`, `pacman -U` of an older version's pool URL, a lone `.sig` delete refused, the older version back after the newer one's delete, the old section name after a rename), `TestArchRules` (400 for an unlisted architecture, a version without pkgrel, a file that is not a package and a decompression bomb; an `any` package in an added architecture's index, a removed architecture's index gone; the Versions order against `vercmp` on every pair of hard versions) and `TestArchSigning` (pacman refuses an untrusted key; after a change to an imported RSA key a client that trusts only the old key refuses the repo, and one that trusts the new key installs). `rpm_test.go` covers `TestRPM` (both stores: dnf in Fedora and Rocky 9 installs nfpm packages from a private repo with `gpgcheck` and `repo_gpgcheck`, an identical re-upload 200 and a conflict 409, `dnf upgrade --refresh`, `dnf provides` through the filelists, `dnf downgrade`, the newer version gone after its delete, the old `baseurl` after a rename), `TestRPMRules` (400 for a source package, a package without a payload digest, a payload that does not match its digest, a header past its limit and a file that is not a package; `dnf makecache` of a new repo before its first upload; 409 for a file name that a package of another epoch holds; the Versions order against `rpm.vercmp` on every pair of hard versions) and `TestRPMSigning` (after a change to an imported RSA key every package is written again, a client that trusts only the old key refuses the repo, and Fedora and Rocky 8 that trust the new key install). `TestProxyStream` (both stores) checks that the first GET of an uncached 24 MiB file streams (the remote's length, no `ETag` yet) with the remote's bytes, that a later GET serves the stored file, and that three concurrent GETs of another uncached file get its bytes with one remote GET. `TestNoBrowserPasswordPrompt` (in `auth_test.go`) checks that a 401 under `/api` or with `X-Telesphorepo-UI` has no `WWW-Authenticate`. `folder_upload_test.go` covers `TestFolderUploadMaven` (a Maven-layout tree with checksum, signature and stray files; a flat folder with two poms; a bad tree that gives 400; plans store nothing; checksums and metadata) and `TestUploadHeadsAndChunks` (a plan with held heads and no parts; 409 for unknown heads, the heads of another session and another size; an upload whose part `uploads` names a resumable upload: 404 unknown, 400 another size, 201 with a file of the request). `TestStorageMove*` run each server on a named data volume: fs to
+and a group of public members carry none (an S3 redirect carries `no-store`); an anonymous read
+of the private repo through allowed networks that hold every address carries `private`. `proxy_test.go` covers `TestProxy` with a second Telesphorepo server as the remote: `mvn` through the proxy and no remote request on the second resolve, the `metadata_ttl` recheck with a 304 and a changed file, a remembered 404, 405 for a PUT, a group where the hosted member wins over the proxy, remote credentials (with them, 502 without them), a Caddy container that redirects to another host and refuses a request that carries credentials, `apt-get` through a Debian proxy with the remote's key, `pacman` through an Arch proxy with the remote's key, `dnf` through an RPM proxy with the remote's key, and a stopped remote (cached file served, 502, `last_error`, and a stale `maven-metadata.xml` that serves twice with one remote attempt in the log). `arch_test.go` covers `TestArch` (both stores: pacman in `archlinux:latest` installs nfpm packages from a private repo with `SigLevel = Required`, upgrades, `pacman -F`, `pacman -U` of an older version's pool URL, a lone `.sig` delete refused, the older version back after the newer one's delete, the old section name after a rename), `TestArchRules` (400 for an unlisted architecture, a version without pkgrel, a file that is not a package and a decompression bomb; an `any` package in an added architecture's index, a removed architecture's index gone; the Versions order against `vercmp` on every pair of hard versions) and `TestArchSigning` (pacman refuses an untrusted key; after a change to an imported RSA key a client that trusts only the old key refuses the repo, and one that trusts the new key installs). `rpm_test.go` covers `TestRPM` (both stores: dnf in Fedora and Rocky 9 installs nfpm packages from a private repo with `gpgcheck` and `repo_gpgcheck`, an identical re-upload 200 and a conflict 409, `dnf upgrade --refresh`, `dnf provides` through the filelists, `dnf downgrade`, the newer version gone after its delete, the old `baseurl` after a rename), `TestRPMRules` (400 for a source package, a package without a payload digest, a payload that does not match its digest, a header past its limit and a file that is not a package; `dnf makecache` of a new repo before its first upload; 409 for a file name that a package of another epoch holds; the Versions order against `rpm.vercmp` on every pair of hard versions) and `TestRPMSigning` (after a change to an imported RSA key every package is written again, a client that trusts only the old key refuses the repo, and Fedora and Rocky 8 that trust the new key install). `TestProxyStream` (both stores) checks that the first GET of an uncached 24 MiB file streams (the remote's length, no `ETag` yet) with the remote's bytes, that a later GET serves the stored file, and that three concurrent GETs of another uncached file get its bytes with one remote GET. `TestNoBrowserPasswordPrompt` (in `auth_test.go`) checks that a 401 under `/api` or with `X-Telesphorepo-UI` has no `WWW-Authenticate`. `folder_upload_test.go` covers `TestFolderUploadMaven` (a Maven-layout tree with checksum, signature and stray files; a flat folder with two poms; a bad tree that gives 400; plans store nothing; checksums and metadata) and `TestUploadHeadsAndChunks` (a plan with held heads and no parts; 409 for unknown heads, the heads of another session and another size; an upload whose part `uploads` names a resumable upload: 404 unknown, 400 another size, 201 with a file of the request). `TestStorageMove*` run each server on a named data volume: fs to
 SeaweedFS and back with uploads during the move, a forced failure, a restart mid-move
 (`Server.Restart`) and a cancel. The restart and the cancel hold the move on a SeaweedFS of their own
 (`StartOwnSeaweedFS`): once the move has copied a blob, the test pauses that container, so the
@@ -5340,8 +5426,8 @@ three layers (one of 20 MiB) with a device publish session, `rmi`, pull and a co
 hashes; a password and a read token pull but cannot push ("publishing needs a publish session");
 an anonymous pull of a public repo; a tag move (the old digest still pulls); a multi-platform
 index (`docker build` of two platforms and `docker push`; two platforms in the index, a pull of
-one); a read IP rule that refuses
-the pull with "not allowed to read" and records `network.denied`. `TestDockerConformance` runs the
+one); allowed networks that hold every address let an anonymous `docker pull` of the private
+repo through the token endpoint, and without them the pull fails. `TestDockerConformance` runs the
 OCI conformance suite (`conformance:v1.1.1`: pull, push, content discovery, content management).
 `TestDockerClients`: `crane copy` mounts a layer from a public repo (201), a mount from a repo
 that the token does not read starts an upload (202); `skopeo copy` of an OCI layout; ORAS push,
@@ -5617,7 +5703,9 @@ have). The three servers run at once.
   search (the full sample path), a common search (its extension), a shared search (the sample's
   artifact folder, `com/example/libN/`, whose segment `libN` the 10 Maven repos hold in under 100
   paths at 100k and in more at 1M),
-  token auth (`/api/me`) and the repo list (`limit=50`). The sample path is a path of the first
+  token auth (`/api/me`), the repo list (`limit=50`), the versions of an RPM package and a tree
+  walk of the sample's group folder (`com/example/`, `limit=100`, each request the next page).
+  The sample path is a path of the first
   Maven repo at 100k, checked at every server, so both sizes answer the same request.
 - **Warm-up.** For each operation, a burst of 32 concurrent streams per server (more than the
   reader connections, each of which has its own page cache), then blocks of 50 requests per
@@ -5659,9 +5747,9 @@ Where each part of the code lives, and the steps to add a module, a repo format 
 | Byte pipeline | `internal/assets` (`Commit`, `Remove`, `Reader`, `Uploads`), `internal/blobs` (content-addressed blobs, GC), `internal/repopath`, `internal/ops` (repo operations), `internal/rebuild` (index rebuild queue), on top of `internal/storage` |
 | UI page | `web/src/pages/**/*.svelte` (`repo/`, `account/`, `repositories/`, `server/`, `settings/repos/`); its `PageDef` (path, access, Settings nav) in the owning module's `web/src/modules/<id>/module.ts`; API calls in `web/src/lib/api/` (a format module's own routes in its own folder). See `web/src/README.md` |
 | UI of a format | The descriptor (`format.Spec` fields and `UI`, `GET /api/formats`; `web/src/lib/formats/registry.svelte.ts`); a format-specific component only as a named `formatParts` slot in `web/src/modules/<format>/module.ts` |
-| File tree, deletes, manual upload | `internal/files` (tree), `internal/api/files.go`, `internal/api/pipeline.go` (repo delete, resumable uploads), `format.Spec.Upload`; UI in `web/src/pages/repo/` (`FilesTab`, `upload/`, `delete/`) |
+| File tree, deletes, manual upload | `internal/files` (tree), `internal/api/files.go`, `internal/api/groupfiles.go` (deletes in a group), `internal/api/pipeline.go` (repo delete, resumable uploads), `format.Spec.Upload`; UI in `web/src/pages/repo/` (`FilesTab`, `upload/`, `delete/`) |
 | Repository lists, Settings overview figures | `internal/api/repolist.go` (`GET /api/repos`, `GET /api/overview`), `internal/repos/list.go` (one index per list), the grant lists in `internal/db/dbq/extra.go`, `repo_totals` in migration `0005_performance.sql`; UI: `RepoPicker`, `chain` and `RepoFormats` in `web/src/lib/load.svelte.ts` |
-| Client IP, IP lists, repo IP rules | `internal/netrules` (module `network`: `lists.go`, `rules.go`, `clientip.go`, `module.go`), `web/src/pages/settings/repos/` (Access tab), `web/src/pages/server/IPLists.svelte`, `IPListPage.svelte`, `ReverseProxy.svelte` |
+| Client IP, IP lists, allowed networks | `internal/netrules` (module `network`: `lists.go`, `rules.go` (the networks and `access.Networks`), `reach.go` (the address index), `clientip.go`, `module.go`), `web/src/pages/settings/repos/` (Access tab), `web/src/pages/server/IPLists.svelte`, `IPListPage.svelte`, `ReverseProxy.svelte` |
 | Docker / OCI registry | `internal/docker` (module `docker`: `routes.go` at `/v2/`, `token.go` the token endpoint `/docker/token`, `manifests.go`, `blobs.go`, `lists.go`, `referrers.go`, `hooks.go` (the rows of `migrations/`), `links.go` the job `docker.links`, `proxy.go` the proxy (`Classify`, `RemoteAuth`, tags list) and group tags, `usage.go` and `tools.go` the snippets and the CI tool, `versions.go`, `api.go` `/api/docker/{name}/manifest`, `importer.go` the Nexus import, `demo.go`, `seed.go`); UI part `web/src/modules/docker/`; e2e in `e2e/docker_test.go`, `e2e/docker_proxy_test.go`, `e2e/nexus_docker_test.go` and `e2e/cli_docker_test.go` (clients zone), with `StartDind` and `Dind.CopyFile` in `e2e/clients_test.go` and the OCI helpers in `e2e/oci_test.go` |
 | Telesphorepo CLI and its Docker credential helper | `cmd/telesphorepo` (MIT, its own `LICENSE`; stdlib, `golang.org/x/sys`, `BurntSushi/toml`, `klauspost/compress/zstd`, `xi2/xz` and the root package `changelog` only; imports no server package): `main.go` the commands and the error handling, `setup.go`, `publish.go`, `detect.go` the detection table (a new format adds a row), `upload.go` raw and Debian uploads, `login.go` login, logout and status, `update.go`, `compat.go` the change log check, `problem.go` problem documents and remedies, `client.go` the HTTP client, the device flow and the mints, `ci.go` the CI token, `project.go` `telesphorepo.toml`, `rules.go` its `[[when]]` rules and the version readers, `docker.go` the helper mode (program name `docker-credential-telesphorepo`), `identity.go`, `device.go`, `exchange.go`, `dockerconfig.go`, `acl_*.go`, `parent_*.go`, `tty_*.go`; built and embedded by `tools/task/cli.go`, released by `tools/task/release.go` |
 | Signing keys | `internal/signing/keys.go`, `internal/signing/module.go` (the repo field `signing_key`), `internal/signing/signing.go` (`SignSHA256State`, `DetachSignBinary`), `GET /debian/{repo}/key.asc` in `internal/debian` and `/arch/{repo}/key.asc` in `internal/arch`; UI in `web/src/pages/server/SigningKeys.svelte` and `web/src/modules/signing/` |
@@ -5687,7 +5775,7 @@ Every format and every core feature with routes is a module (`internal/module`).
 `module.Module{ID, Title, Requires, Register}`. `Register` runs once, before the database opens.
 It calls the `x.*` methods of the `Extender` to declare what the module adds: `Schema`,
 `Settings`, `Permissions`, `AuditActions`, `OpType`, `Init`, `Routes`, `RootPrefix`, `Job`,
-`Format`, `RepoField`, `RepoGuard`, `CIProvider`, `ResolveClient`,
+`Format`, `RepoField`, `CIProvider`, `ResolveClient`,
 `TokenKind`, `Demo` and `Seed`. A module edits no core file.
 
 1. Create `internal/<module>` with `func Module() module.Module`. The module ID is also the

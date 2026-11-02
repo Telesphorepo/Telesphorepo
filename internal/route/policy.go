@@ -80,6 +80,10 @@ type RepoRule struct {
 	// unused. The router checks every entry of Ops at registration.
 	Ops  []RepoOp
 	Pick func(r *http.Request) int
+	// Group is the operation on a group, in place of the one above: a route that acts on the
+	// members of a group needs this on the group, and its handler asks the engine about each
+	// member (the delete of files reads the group and deletes in each member it names).
+	Group *RepoOp
 }
 
 // RepoOp is one operation of a RepoRule with Ops: the operation and the repository permission
@@ -97,16 +101,32 @@ func (rr *RepoRule) needs() []perm.ID {
 	return rr.AnyPerm
 }
 
-// ops returns every operation the rule can take: Op, or each entry of Ops.
+// ops returns every operation the rule can take: Op, or each entry of Ops, and Group's.
 func (rr *RepoRule) ops() []access.Op {
+	var out []access.Op
 	if rr.Pick == nil {
-		return []access.Op{rr.Op}
+		out = []access.Op{rr.Op}
+	} else {
+		for _, o := range rr.Ops {
+			out = append(out, o.Op)
+		}
 	}
-	out := make([]access.Op, len(rr.Ops))
-	for i, o := range rr.Ops {
-		out[i] = o.Op
+	if rr.Group != nil {
+		out = append(out, rr.Group.Op)
 	}
 	return out
+}
+
+// onGroup returns the operation of the rule on a group and the repository permissions it needs;
+// ok is false when the rule has no Group.
+func (rr *RepoRule) onGroup() (access.Op, []perm.ID, bool) {
+	if rr.Group == nil {
+		return 0, nil, false
+	}
+	if rr.Group.Perm == "" {
+		return rr.Group.Op, nil, true
+	}
+	return rr.Group.Op, []perm.ID{rr.Group.Perm}, true
 }
 
 // pick returns the operation of request r and the repository permissions it needs; ok is false

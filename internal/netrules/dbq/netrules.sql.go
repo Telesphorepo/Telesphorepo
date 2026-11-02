@@ -45,12 +45,12 @@ func (q *Queries) DeleteCustomList(ctx context.Context, id int64) error {
 	return err
 }
 
-const deleteRepoIPRules = `-- name: DeleteRepoIPRules :exec
-DELETE FROM repo_ip_rules WHERE repo_id = ?
+const deleteRepoNetworks = `-- name: DeleteRepoNetworks :exec
+DELETE FROM repo_networks WHERE repo_id = ?
 `
 
-func (q *Queries) DeleteRepoIPRules(ctx context.Context, repoID int64) error {
-	_, err := q.db.ExecContext(ctx, deleteRepoIPRules, repoID)
+func (q *Queries) DeleteRepoNetworks(ctx context.Context, repoID int64) error {
+	_, err := q.db.ExecContext(ctx, deleteRepoNetworks, repoID)
 	return err
 }
 
@@ -90,22 +90,32 @@ func (q *Queries) EnsurePresetList(ctx context.Context, arg EnsurePresetListPara
 	return err
 }
 
-const insertRepoIPRule = `-- name: InsertRepoIPRule :exec
-INSERT INTO repo_ip_rules (repo_id, scope, cidr, list_id, note) VALUES (?, ?, ?, ?, ?)
+const hasRepoNetworks = `-- name: HasRepoNetworks :one
+SELECT EXISTS (SELECT 1 FROM repo_networks WHERE repo_id = ?)
 `
 
-type InsertRepoIPRuleParams struct {
+// Whether a repo has allowed networks, through repo_networks_repo.
+func (q *Queries) HasRepoNetworks(ctx context.Context, repoID int64) (bool, error) {
+	row := q.db.QueryRowContext(ctx, hasRepoNetworks, repoID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const insertRepoNetwork = `-- name: InsertRepoNetwork :exec
+INSERT INTO repo_networks (repo_id, cidr, list_id, note) VALUES (?, ?, ?, ?)
+`
+
+type InsertRepoNetworkParams struct {
 	RepoID int64
-	Scope  string
 	Cidr   sql.NullString
 	ListID sql.NullInt64
 	Note   string
 }
 
-func (q *Queries) InsertRepoIPRule(ctx context.Context, arg InsertRepoIPRuleParams) error {
-	_, err := q.db.ExecContext(ctx, insertRepoIPRule,
+func (q *Queries) InsertRepoNetwork(ctx context.Context, arg InsertRepoNetworkParams) error {
+	_, err := q.db.ExecContext(ctx, insertRepoNetwork,
 		arg.RepoID,
-		arg.Scope,
 		arg.Cidr,
 		arg.ListID,
 		arg.Note,
@@ -133,7 +143,7 @@ type ListIPListsParams struct {
 	Limit int64
 }
 
-// IP lists and per-repo IP rules (internal/netrules). Request paths read the in-memory copies;
+// IP lists and the allowed networks of the repos (internal/netrules). Request paths read the in-memory copies;
 // these queries run at startup, on a refresh and on an admin change.
 // Keyset page by name (pass "" for the first page).
 func (q *Queries) ListIPLists(ctx context.Context, arg ListIPListsParams) ([]IpList, error) {
@@ -170,31 +180,29 @@ func (q *Queries) ListIPLists(ctx context.Context, arg ListIPListsParams) ([]IpL
 	return items, nil
 }
 
-const listRepoIPRules = `-- name: ListRepoIPRules :many
-SELECT id, scope, cidr, list_id, note FROM repo_ip_rules WHERE repo_id = ? ORDER BY scope, id
+const listRepoNetworks = `-- name: ListRepoNetworks :many
+SELECT id, cidr, list_id, note FROM repo_networks WHERE repo_id = ? ORDER BY id
 `
 
-type ListRepoIPRulesRow struct {
+type ListRepoNetworksRow struct {
 	ID     int64
-	Scope  string
 	Cidr   sql.NullString
 	ListID sql.NullInt64
 	Note   string
 }
 
-// The rules of a repo in scope and entry order, through repo_ip_rules_repo.
-func (q *Queries) ListRepoIPRules(ctx context.Context, repoID int64) ([]ListRepoIPRulesRow, error) {
-	rows, err := q.db.QueryContext(ctx, listRepoIPRules, repoID)
+// The allowed networks of a repo in entry order, through repo_networks_repo.
+func (q *Queries) ListRepoNetworks(ctx context.Context, repoID int64) ([]ListRepoNetworksRow, error) {
+	rows, err := q.db.QueryContext(ctx, listRepoNetworks, repoID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ListRepoIPRulesRow
+	var items []ListRepoNetworksRow
 	for rows.Next() {
-		var i ListRepoIPRulesRow
+		var i ListRepoNetworksRow
 		if err := rows.Scan(
 			&i.ID,
-			&i.Scope,
 			&i.Cidr,
 			&i.ListID,
 			&i.Note,
@@ -212,30 +220,25 @@ func (q *Queries) ListRepoIPRules(ctx context.Context, repoID int64) ([]ListRepo
 	return items, nil
 }
 
-const listRulesOfList = `-- name: ListRulesOfList :many
-SELECT r.name AS repo, x.scope FROM repo_ip_rules x JOIN repos r ON r.id = x.repo_id
+const listReposOfList = `-- name: ListReposOfList :many
+SELECT r.name FROM repo_networks x JOIN repos r ON r.id = x.repo_id
 WHERE x.list_id = ?
 `
 
-type ListRulesOfListRow struct {
-	Repo  string
-	Scope string
-}
-
-// The rules that name a list, with their repos, through repo_ip_rules_list_id.
-func (q *Queries) ListRulesOfList(ctx context.Context, listID sql.NullInt64) ([]ListRulesOfListRow, error) {
-	rows, err := q.db.QueryContext(ctx, listRulesOfList, listID)
+// The repos whose allowed networks name a list, through repo_networks_list_id.
+func (q *Queries) ListReposOfList(ctx context.Context, listID sql.NullInt64) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listReposOfList, listID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ListRulesOfListRow
+	var items []string
 	for rows.Next() {
-		var i ListRulesOfListRow
-		if err := rows.Scan(&i.Repo, &i.Scope); err != nil {
+		var name string
+		if err := rows.Scan(&name); err != nil {
 			return nil, err
 		}
-		items = append(items, i)
+		items = append(items, name)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -274,16 +277,28 @@ func (q *Queries) ListTrustedProxyLists(ctx context.Context) ([]int64, error) {
 	return items, nil
 }
 
-const nextIPRuleRepo = `-- name: NextIPRuleRepo :one
-SELECT repo_id FROM repo_ip_rules WHERE repo_id > ? ORDER BY repo_id LIMIT 1
+const nextNetworkRepo = `-- name: NextNetworkRepo :one
+SELECT repo_id FROM repo_networks WHERE repo_id > ? ORDER BY repo_id LIMIT 1
 `
 
-// The next repo after repo_id that has IP rules: one seek on repo_ip_rules_repo.
-func (q *Queries) NextIPRuleRepo(ctx context.Context, repoID int64) (int64, error) {
-	row := q.db.QueryRowContext(ctx, nextIPRuleRepo, repoID)
+// The next repo after repo_id that has allowed networks: one seek on repo_networks_repo.
+func (q *Queries) NextNetworkRepo(ctx context.Context, repoID int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, nextNetworkRepo, repoID)
 	var repo_id int64
 	err := row.Scan(&repo_id)
 	return repo_id, err
+}
+
+const repoIsPublic = `-- name: RepoIsPublic :one
+SELECT anonymous_read FROM repos WHERE id = ?
+`
+
+// Whether a repo is public, read in the transaction that saves its allowed networks.
+func (q *Queries) RepoIsPublic(ctx context.Context, id int64) (bool, error) {
+	row := q.db.QueryRowContext(ctx, repoIsPublic, id)
+	var anonymous_read bool
+	err := row.Scan(&anonymous_read)
+	return anonymous_read, err
 }
 
 const savePresetRanges = `-- name: SavePresetRanges :exec

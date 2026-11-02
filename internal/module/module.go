@@ -13,7 +13,6 @@ import (
 	"regexp"
 	"slices"
 
-	"github.com/Telesphorepo/Telesphorepo/internal/access"
 	"github.com/Telesphorepo/Telesphorepo/internal/audit"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/ci"
@@ -83,7 +82,6 @@ type Manifest struct {
 	Jobs          []jobs.Job
 	Formats       []format.Spec
 	RepoFields    []repos.Field
-	Guards        []access.Guard
 	CIProviders   []ci.Provider
 	ResolveClient func(r *http.Request) httpx.Client
 	Hosts         []func(s *settings.Snapshot) string
@@ -192,10 +190,6 @@ func (x *Extender) RepoField(f repos.Field) { x.m.RepoFields = append(x.m.RepoFi
 // CIProvider adds a CI system whose tokens make build records and whose trust policies the
 // access report describes (see ci.Provider).
 func (x *Extender) CIProvider(p ci.Provider) { x.m.CIProviders = append(x.m.CIProviders, p) }
-
-// RepoGuard adds an extra rule to repo access (access.Guard), e.g. the IP rules of the network
-// module. The access engine calls g only after the module's Init ran.
-func (x *Extender) RepoGuard(g access.Guard) { x.m.Guards = append(x.m.Guards, g) }
 
 // ResolveClient resolves the client of every request once, before any handler runs: its address
 // and its scheme. Exactly one module may set it; without one the client is the TCP peer and the

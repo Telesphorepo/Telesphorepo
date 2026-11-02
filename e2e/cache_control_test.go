@@ -72,10 +72,9 @@ func TestCacheControl(t *testing.T) {
 		check(t, "a public member's file through a group with a private member", "/maven/"+mixed+"/"+pubJar, nil, "private")
 		check(t, "a file of a group of public members", "/maven/"+open+"/"+pubJar, nil, "")
 
-		// A read IP rule makes a public repo private: not every address reads it. The rule allows
-		// every address, so the test client reads.
-		putIPRules(t, s, pub, ipRules{Read: []ipRule{{Kind: "cidr", Value: "0.0.0.0/0"}, {Kind: "cidr", Value: "::/0"}}, Publish: []ipRule{}})
-		check(t, "a file of a public repo with a read IP rule", "/maven/"+pub+"/"+pubJar, nil, "private")
-		check(t, "a file of a group whose public member has a read IP rule", "/maven/"+open+"/"+pubJar, nil, "private")
+		// An anonymous read through the allowed networks of a restricted repo stays private: not
+		// every address reads it. The networks allow every address, so the test client reads.
+		putIPRules(t, s, priv, ipRules{Read: []ipRule{{Kind: "cidr", Value: "0.0.0.0/0"}, {Kind: "cidr", Value: "::/0"}}})
+		check(t, "an anonymous read of a private repo through its allowed networks", "/maven/"+priv+"/"+privJar, nil, "private")
 	})
 }

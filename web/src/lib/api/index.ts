@@ -213,6 +213,11 @@ export const api = {
      */
     deleteFiles: (name: string, target: T.FilesDelete, token?: string) =>
       request<T.DeleteResult>("POST", repo(name) + "/files/delete", { body: target, token }),
+    /** Deletes files and folders of a group in the members named, each with its own Delete files. */
+    deleteGroupFiles: (group: string, target: T.FilesDelete, members: string[]) =>
+      request<T.GroupDeleteResult>("POST", repo(group) + "/files/delete", { body: { ...target, members } }),
+    /** Which members of a group hold the picked files and folders, and where the person may delete. */
+    fileHolders: (name: string, target: T.FilesDelete) => request<T.FileHolders>("POST", repo(name) + "/files/holders", { body: target }),
     /** The state of a delete of files that answered 202. */
     deleteStatus: (name: string, id: string) => request<T.DeleteStatus>("GET", repo(name) + "/files/delete/" + encodeURIComponent(id)),
     /** What a delete of files and folders removes, with the delete notes of the format. Deletes nothing. */
@@ -267,10 +272,10 @@ export const api = {
     },
     /** Deletes the resumable upload id and its bytes. */
     cancelUpload: (name: string, id: string, token: string) => request("DELETE", repo(name) + "/uploads/" + enc(id), { token }),
-    /** Edit settings: the repo's IP allow-lists for downloads (read) and publishing. */
+    /** Edit settings: the allowed networks of a restricted repo (a public repo takes none). */
     ipRules: {
       get: (name: string) => request<T.IPRules>("GET", repo(name) + "/ip-rules"),
-      /** Replaces both lists; answers them as stored (CIDRs masked, addresses as /32 or /128). */
+      /** Replaces the list; answers it as stored (CIDRs masked, addresses as /32 or /128). */
       set: (name: string, rules: T.IPRules) => request<T.IPRules>("PUT", repo(name) + "/ip-rules", { body: rules }),
     },
     /** repo.access: each person with a grant on the repository, with their whole set. */
@@ -342,6 +347,20 @@ export const api = {
   },
 
   network: {
+    /** The address the server reads for this page, and the whoami URLs of the probe hosts. */
+    whoami: () => request<T.Whoami>("GET", "/api/network/whoami"),
+    /**
+     * A whoami URL of a probe host (another origin): a plain GET without credentials. null when
+     * it does not answer, e.g. the network has no address of that family.
+     */
+    whoamiAt: async (url: string): Promise<T.Whoami | null> => {
+      try {
+        const r = await fetch(url, { credentials: "omit", signal: AbortSignal.timeout(5000) });
+        return r.ok ? ((await r.json()) as T.Whoami) : null;
+      } catch {
+        return null;
+      }
+    },
     /** Untrusted peers that sent forwarded headers: likely reverse proxies, most recent first. */
     proxyCandidates: () => request<T.ProxyCandidate[]>("GET", "/api/network/proxy-candidates"),
   },

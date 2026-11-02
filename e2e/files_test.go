@@ -190,6 +190,11 @@ func TestTree(t *testing.T) {
 		"com/acme/lib/1.0/lib-1.0.jar", "com/acme/lib/1.0/lib-1.0.pom", "com/acme/lib/2.0/lib-2.0.jar",
 		"com/acme/other/1.0/x.txt", "com/acme-b/file.txt", "top.txt", "z/deep/er/file.txt",
 	}
+	// Version folders and files side by side.
+	for _, v := range []string{"1.0", "1.2", "1.10", "1.0-SNAPSHOT", "2.0"} {
+		files = append(files, "com/acme/ver/"+v+"/f.txt")
+	}
+	files = append(files, "com/acme/ver/a-1.10.txt", "com/acme/ver/a-1.2.txt", "com/acme/ver/1.0.txt")
 	for i := 1; i <= 12; i++ {
 		files = append(files, fmt.Sprintf("com/acme/many/v%02d/a.txt", i), fmt.Sprintf("com/acme/many/v%02d/b.txt", i))
 	}
@@ -199,11 +204,12 @@ func TestTree(t *testing.T) {
 		wantStatus(t, resp, body, http.StatusCreated)
 	}
 
-	if got, want := nodeNames(treeAll(t, s, repo, "", 50, rauth)), []string{"dir:com", "file:top.txt", "dir:z"}; !slices.Equal(got, want) {
+	// Folders first, then files.
+	if got, want := nodeNames(treeAll(t, s, repo, "", 50, rauth)), []string{"dir:com", "dir:z", "file:top.txt"}; !slices.Equal(got, want) {
 		t.Fatalf("root: %v, want %v", got, want)
 	}
-	// "acme-b/" sorts before "acme/" ('-' < '/'): the seek past a folder must not skip it.
-	if got, want := nodeNames(treeAll(t, s, repo, "com", 50, rauth)), []string{"dir:acme-b", "dir:acme"}; !slices.Equal(got, want) {
+	// A folder that is not a version follows by its bytes.
+	if got, want := nodeNames(treeAll(t, s, repo, "com", 50, rauth)), []string{"dir:acme", "dir:acme-b"}; !slices.Equal(got, want) {
 		t.Fatalf("com: %v, want %v", got, want)
 	}
 
@@ -213,8 +219,20 @@ func TestTree(t *testing.T) {
 		t.Fatalf("com/acme page 1: %v next %v, want [dir:lib dir:many] next many/", got, next)
 	}
 	items, next = treePage(t, s, repo, "com/acme/", *next, 2, rauth)
-	if got := nodeNames(items); !slices.Equal(got, []string{"dir:other"}) || next != nil {
-		t.Fatalf("com/acme page 2: %v next %v, want [dir:other] and no next", got, next)
+	if got := nodeNames(items); !slices.Equal(got, []string{"dir:other", "dir:ver"}) || next != nil {
+		t.Fatalf("com/acme page 2: %v next %v, want [dir:other dir:ver] and no next", got, next)
+	}
+	// Folders whose names all start with a digit list newest first, then the files by name; the
+	// same order on every page size, across the turn from folders to files.
+	wantVer := []string{"dir:2.0", "dir:1.10", "dir:1.2", "dir:1.0", "dir:1.0-SNAPSHOT", "file:1.0.txt", "file:a-1.10.txt", "file:a-1.2.txt"}
+	for _, limit := range []int{1, 3, 50} {
+		if got := nodeNames(treeAll(t, s, repo, "com/acme/ver/", limit, rauth)); !slices.Equal(got, wantVer) {
+			t.Fatalf("com/acme/ver, limit %d: %v, want %v", limit, got, wantVer)
+		}
+	}
+	items, next = treePage(t, s, repo, "com/acme/ver/", "1.0-SNAPSHOT/", 1, rauth)
+	if got := nodeNames(items); !slices.Equal(got, []string{"file:1.0.txt"}) || next == nil || *next != "1.0.txt" {
+		t.Fatalf("com/acme/ver after the last folder: %v next %v, want [file:1.0.txt] next 1.0.txt", got, next)
 	}
 	many := treeAll(t, s, repo, "com/acme/many", 5, rauth)
 	if len(many) != 12 || many[0].Name != "v01" || many[11].Name != "v12" || many[3].Path != "com/acme/many/v04/" {
@@ -230,6 +248,16 @@ func TestTree(t *testing.T) {
 	if jar.Size == nil || *jar.Size != int64(len("content of com/acme/lib/1.0/lib-1.0.jar")) || len(jar.SHA256) != 64 ||
 		jar.UpdatedAt == nil || jar.UploadedBy != w || jar.Path != "com/acme/lib/1.0/lib-1.0.jar" {
 		t.Fatalf("file node %+v: want size, sha256, updated_at, path and uploaded_by %s", jar, w)
+	}
+
+	// A folder goes with its last file, and so do the folders that held only it.
+	s.MustAPI(t, http.MethodPost, "/api/repos/"+repo+"/files/delete", map[string][]string{"paths": {"z/deep/er/file.txt"}}, s.Admin(), nil)
+	if got, want := nodeNames(treeAll(t, s, repo, "", 50, rauth)), []string{"dir:com", "file:top.txt"}; !slices.Equal(got, want) {
+		t.Fatalf("root after the delete of z/deep/er/file.txt: %v, want %v", got, want)
+	}
+	mustDelete(t, s, repo, "prefix", "com/acme/ver/1.10/", s.Admin(), 1)
+	if got, want := nodeNames(treeAll(t, s, repo, "com/acme/ver/", 50, rauth)), slices.Delete(slices.Clone(wantVer), 1, 2); !slices.Equal(got, want) {
+		t.Fatalf("com/acme/ver after the delete of 1.10/: %v, want %v", got, want)
 	}
 
 	// Access: anonymous 401 on a private repo; invalid paths 400.

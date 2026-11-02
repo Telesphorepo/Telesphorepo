@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Telesphorepo/Telesphorepo/internal/assets"
 	"github.com/Telesphorepo/Telesphorepo/internal/auth"
 	"github.com/Telesphorepo/Telesphorepo/internal/docker/dbq"
 	"github.com/Telesphorepo/Telesphorepo/internal/httpx"
@@ -88,7 +87,7 @@ func (f *Format) catalog(w http.ResponseWriter, r *http.Request, c *route.Call) 
 		writeOCI(w, oe)
 		return
 	}
-	ids, all, refused, err := f.downloadable(r, c.P)
+	ids, all, err := f.downloadable(r, c.P)
 	if err != nil {
 		fail(w, r, err)
 		return
@@ -96,7 +95,7 @@ func (f *Format) catalog(w http.ResponseWriter, r *http.Request, c *route.Call) 
 	last := r.URL.Query().Get("last")
 	var out []string
 	if all {
-		out, err = f.catalogAll(r.Context(), last, n, refused)
+		out, err = f.catalogAll(r.Context(), last, n)
 	} else {
 		out, err = f.catalogOf(r.Context(), ids, last, n)
 	}
@@ -110,32 +109,19 @@ func (f *Format) catalog(w http.ResponseWriter, r *http.Request, c *route.Call) 
 	httpx.WriteJSON(w, http.StatusOK, map[string][]string{"repositories": out})
 }
 
-// catalogAll returns at most n images of every repo but refused, by full name after last,
-// through docker_images_full. A row of a refused repo moves the bound past that repo: one seek
-// per refused repo (a repo whose read rules refuse the client address).
-func (f *Format) catalogAll(ctx context.Context, last string, n int, refused map[int64]bool) ([]string, error) {
+// catalogAll returns at most n images of every repo, by full name after last, through
+// docker_images_full: one range read.
+func (f *Format) catalogAll(ctx context.Context, last string, n int) ([]string, error) {
 	out := []string{}
-	after := last
-	for len(out) < n {
-		want := n - len(out)
-		rows, err := f.q.ListCatalog(ctx, dbq.ListCatalogParams{After: after, Limit: int64(want)})
-		if err != nil {
-			return nil, err
-		}
-		skipped := false
-		for _, row := range rows {
-			if !refused[row.RepoID] {
-				out = append(out, row.FullName)
-				after = row.FullName
-				continue
-			}
-			after, _ = assets.PrefixEnd(repoOfName(row.FullName) + "/")
-			skipped = true
-			break
-		}
-		if !skipped && len(rows) < want {
-			break // the end of the images
-		}
+	if n == 0 {
+		return out, nil
+	}
+	rows, err := f.q.ListCatalog(ctx, dbq.ListCatalogParams{After: last, Limit: int64(n)})
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		out = append(out, row.FullName)
 	}
 	return out, nil
 }
@@ -185,16 +171,17 @@ func (f *Format) catalogOf(ctx context.Context, ids []int64, last string, n int)
 	return out, nil
 }
 
-// downloadable returns the repos whose files the credential behind p downloads, without the
-// repos a guard refuses to r: anonymous (and a bearer token without a credential) reads the
-// anonymous repos, a publish session also its own repo, a password, a read token or a device the
-// grants of its user. A holder of all repositories gets all=true and the refused repos instead.
-func (f *Format) downloadable(r *http.Request, p *auth.Principal) (ids []int64, all bool, refused map[int64]bool, err error) {
+// downloadable returns the repos whose files the credential behind p downloads from the client
+// address of r: anonymous (and a bearer token without a credential) reads the public repos, a
+// publish session also its own repo, a password, a read token or a device the grants of its
+// user, and every caller the repos whose allowed networks hold the address. A holder of all
+// repositories gets all=true.
+func (f *Format) downloadable(r *http.Request, p *auth.Principal) (ids []int64, all bool, err error) {
 	ctx := r.Context()
 	switch {
 	case p.Is(auth.CredPublish):
 		if ids, _, err = f.h.Auth.DownloadableRepoIDs(ctx, nil); err != nil {
-			return nil, false, nil, err
+			return nil, false, err
 		}
 		ids = append(ids, p.Publish.RepoID)
 	case p.Anonymous():
@@ -202,20 +189,9 @@ func (f *Format) downloadable(r *http.Request, p *auth.Principal) (ids []int64, 
 	default:
 		ids, all, err = f.h.Auth.DownloadableRepoIDs(ctx, p)
 	}
-	if err != nil {
-		return nil, false, nil, err
+	if err != nil || all {
+		return nil, all, err
 	}
-	refused = f.h.Access.RefusedRepos(r)
-	if all {
-		return nil, true, refused, nil
-	}
-	seen := make(map[int64]bool, len(ids))
-	out := ids[:0]
-	for _, id := range ids {
-		if !seen[id] && !refused[id] {
-			seen[id] = true
-			out = append(out, id)
-		}
-	}
-	return out, false, nil, nil
+	ids = append(ids, f.h.Access.NetworkRepos(ctx)...)
+	return slices.Compact(slices.Sorted(slices.Values(ids))), false, nil
 }

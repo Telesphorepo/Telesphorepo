@@ -391,9 +391,3 @@ func (f *Format) cancelUpload(w http.ResponseWriter, r *http.Request, c *route.C
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
-
-// repoOfName returns the docker repo name of a full image name.
-func repoOfName(full string) string {
-	repo, _, _ := strings.Cut(full, "/")
-	return repo
-}

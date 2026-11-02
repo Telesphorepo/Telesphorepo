@@ -6,15 +6,37 @@ package db
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"fmt"
 	"log/slog"
 	"net/url"
 	"os"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
+
+	"github.com/Telesphorepo/Telesphorepo/internal/repopath"
 )
 
 // CoreComponent is the name of the kernel's schema component.
 const CoreComponent = "core"
+
+// The SQL functions tree_folder_key(name) and tree_file_key(name) are repopath.FolderKey and
+// repopath.FileKey, for the migration that fills tree_entries from assets. Every connection of
+// this process has them.
+func init() {
+	registerNameKey("tree_folder_key", repopath.FolderKey)
+	registerNameKey("tree_file_key", repopath.FileKey)
+}
+
+func registerNameKey(fn string, key func(string) []byte) {
+	sqlite.MustRegisterDeterministicScalarFunction(fn, 1, func(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
+		name, ok := args[0].(string)
+		if !ok {
+			return nil, fmt.Errorf("%s: want a text, got %T", fn, args[0])
+		}
+		return key(name), nil
+	})
+}
 
 // DB holds a single-connection writer pool and a multi-connection reader pool.
 // All writes (including read-then-write sequences) must go through W.

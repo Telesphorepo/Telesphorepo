@@ -7,8 +7,9 @@
 
   A proxy has the Files tab (its cached files; people with Delete files delete them) and the Use tab, and no
   publish or upload. A group has the tabs too: Files is the Files tab of a hosted repository of its
-  format over the files of its members (read-only, where the header says so; each file and version
-  names the member that serves it), Use this repository lists its members first, and
+  format over the files of its members (each file and version names the member that serves it; a
+  person with Delete files in a member deletes there through the group, else the header says it is
+  read-only), Use this repository lists its members first, and
   Publish to this repository shows to a person who publishes to one of its repositories: they pick
   one (?to=) and get that repository's Publish tab.
 
@@ -136,8 +137,11 @@
   // An upload needs a manual publish token, which only a password account gets.
   const canUpload = $derived(canWrite && !!r && !!formats.get(r.format)?.upload && auth.user?.kind === "local");
   // Who deletes files on the Files tab: people with Delete files, with the UI session; a hosted
-  // repository not while it is paused, a proxy its cached files.
-  const canDelete = $derived(!!r && !group && perms.includes("repo.delete") && (proxy || !locked));
+  // repository not while it is paused, a proxy its cached files, a group in the repositories of
+  // it where the person holds Delete files.
+  const canDelete = $derived(
+    !!r && (group ? !!auth.user && !auth.setupOnly && (r.members ?? []).some((m) => (m.permissions ?? []).includes("repo.delete")) : perms.includes("repo.delete") && (proxy || !locked)),
+  );
 
   // On a phone the tab rail scrolls: keep the open tab in view.
   let tabRail = $state<HTMLDivElement | null>(null);
@@ -233,7 +237,7 @@
         <Button href={href(repoPath(r.name, "upload"), { folder: uploadFolder || undefined })} disabled={!!locked}>
           <UploadIcon />Upload
         </Button>
-      {:else if group}
+      {:else if group && !canDelete}
         <span class="text-meta text-muted-foreground">Read-only: this group serves its members' files</span>
       {/if}
     {/snippet}

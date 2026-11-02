@@ -135,13 +135,13 @@
     navigate(listPath, { force: true });
   }
 
-  // What uses the list: a row per repository and rule, and the trusted proxies.
+  // What uses the list: a row per repository, and the trusted proxies.
   type Use = { key: string; label: string; href: string; scope: string; proxy: boolean };
   const uses = $derived.by((): Use[] => {
     const u = list.data?.used_by;
     if (!u) return [];
     return [
-      ...u.repos.map((r) => ({ key: r.repo + r.scope, label: r.repo, href: repoAccessHref(r.repo), scope: r.scope === "read" ? "Downloads" : "Publishes", proxy: false })),
+      ...u.repos.map((r) => ({ key: r, label: r, href: repoAccessHref(r), scope: "Allowed networks", proxy: false })),
       ...(u.trusted_proxies ? [{ key: "proxy", label: "Network and proxy", href: href("/settings/proxy"), scope: "Trusted proxies", proxy: true }] : []),
     ];
   });
@@ -162,7 +162,7 @@
       {#snippet title(u)}{u.label}{/snippet}
       {#snippet meta(u)}{u.scope}{/snippet}
       {#snippet empty()}
-        <CompactEmpty icon={DatabaseIcon} text="Choose this list under From where on a repository's Access tab.">
+        <CompactEmpty icon={DatabaseIcon} text="Add this list to the allowed networks on a repository's Access tab.">
           <Button variant="outline" size="sm" href={href("/settings/repositories")}>All repositories</Button>
         </CompactEmpty>
       {/snippet}

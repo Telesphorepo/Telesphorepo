@@ -428,6 +428,9 @@ func upsert(ctx context.Context, q *dbq.Queries, w *Write, b *blobs.Blob, unit s
 	if err != nil {
 		return nil, err
 	}
+	if err := treeAdd(ctx, q, w.Repo.ID, row.ID, string(w.Path)); err != nil {
+		return nil, err
+	}
 	a := &Asset{ID: row.ID, RepoID: w.Repo.ID, Path: string(w.Path), BlobID: b.ID, Size: b.Size, SHA256: b.SHA256, MD5: b.MD5, SHA1: b.SHA1,
 		ContentType: w.ContentType, Kind: row.Kind, UploadedBy: o.UserID, BuildID: o.BuildID,
 		CreatedAt: time.Unix(row.CreatedAt, 0).UTC(), UpdatedAt: time.Unix(row.UpdatedAt, 0).UTC(), RemoteETag: etag}

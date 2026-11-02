@@ -1,10 +1,12 @@
 <!--
-  Network and proxy (Network permission): the trusted proxies only, in plain words. The server
-  takes the visitor's address from X-Forwarded-For only when the connection comes from a trusted
-  proxy: none, a proxy on this machine or network ("private" in the setting trusted_proxies),
-  Cloudflare (the IP list cloudflare, through /api/network/trusted-proxies) or specific addresses
-  (each private one labeled as on this machine or network).
-  Repository network limits live on each repository's Access tab and in Networks, not here.
+  Network and proxy (Network permission): the trusted proxies, in plain words, and the address
+  probe hosts. The server takes the visitor's address from X-Forwarded-For only when the
+  connection comes from a trusted proxy: none, a proxy on this machine or network ("private" in
+  the setting trusted_proxies), Cloudflare (the IP list cloudflare, through
+  /api/network/trusted-proxies) or specific addresses (each private one labeled as on this machine
+  or network). The probe hosts (network.probe_hosts: an IPv4-only and an IPv6-only host name)
+  let Add my address on the Access tab learn both addresses of a network.
+  The allowed networks of a repository live on its Access tab and in Networks, not here.
   Proxies that sent forwarded headers without being trusted show as detected proxies, each with
   Trust. The Caddyfile is the recommended setup.
 -->
@@ -18,6 +20,8 @@
   import { count } from "$lib/words";
   import { Button } from "$lib/components/ui/button";
   import { Checkbox } from "$lib/components/ui/checkbox";
+  import { Input } from "$lib/components/ui/input";
+  import { Label } from "$lib/components/ui/label";
   import PageHeader from "$lib/components/PageHeader.svelte";
   import FormPage from "$lib/components/FormPage.svelte";
   import FormSection from "$lib/components/FormSection.svelte";
@@ -52,21 +56,26 @@
   const setting = $derived<Setting | undefined>(all.find((s) => s.key === "trusted_proxies"));
   const baseURL = $derived(String(all.find((s) => s.key === "base_url")?.value ?? ""));
   const locked = $derived(!!setting?.locked);
+  const probeSetting = $derived<Setting | undefined>(all.find((s) => s.key === "network.probe_hosts"));
 
-  // What the page edits: the literal entries of the setting (private and addresses), and the IP
-  // lists that the trusted proxies include, by id. `lists` keeps the lists other than cloudflare,
-  // so a save never drops them.
-  type Value = { local: boolean; cloudflare: boolean; custom: string[]; lists: number[] };
-  const split = (v: unknown, t: TrustedProxyLists): Value => {
+  // What the page edits: the literal entries of the setting (private and addresses), the IP
+  // lists that the trusted proxies include, by id, and the two probe hosts. `lists` keeps the
+  // lists other than cloudflare, so a save never drops them.
+  type Value = { local: boolean; cloudflare: boolean; custom: string[]; lists: number[]; v4: string; v6: string };
+  const split = (v: unknown, t: TrustedProxyLists, probes: unknown): Value => {
     const xs = Array.isArray(v) ? v.map(String) : [];
     const ids = t.lists.map((l) => l.id);
+    const ps = Array.isArray(probes) ? probes.map(String) : [];
     return {
       local: xs.includes("private"),
       cloudflare: ids.includes(cloudflareID),
       custom: xs.filter((x) => x !== "private" && !x.startsWith("list:")),
       lists: ids.filter((id) => id !== cloudflareID),
+      v4: ps[0] ?? "",
+      v6: ps[1] ?? "",
     };
   };
+  const probeHosts = (v: Value): string[] => (v.v4.trim() || v.v6.trim() ? [v.v4.trim(), v.v6.trim()] : []);
   const literals = (v: Value): string[] => [...(v.local ? ["private"] : []), ...v.custom];
   const listIDs = (v: Value): number[] => [...(v.cloudflare && cloudflareID ? [cloudflareID] : []), ...v.lists];
   const listName = (id: number) => trusted.data?.lists.find((l) => l.id === id)?.name ?? ipLists.data?.find((l) => l.id === id)?.name ?? String(id);
@@ -77,7 +86,7 @@
     const v = setting?.value;
     const t = trusted.data;
     const loaded = !!ipLists.data;
-    if (setting && t && loaded) untrack(() => (draft = new Draft(split(v, t))));
+    if (setting && t && loaded) untrack(() => (draft = new Draft(split(v, t, probeSetting?.value))));
   });
 
   // "Specific addresses" opens when it holds addresses, or when the user ticks it.
@@ -145,9 +154,14 @@
     const removed = [...was.custom.filter((a) => !v.custom.includes(a)), ...was.lists.filter((id) => !v.lists.includes(id)).map(listName)];
     if (added.length) out.push(`Trusts ${added.join(", ")}`);
     if (removed.length) out.push(`Stops trusting ${removed.join(", ")}`);
-    if (literals(v).length === 0 && listIDs(v).length === 0 && !trusted.data?.env_lists.length)
-      out.push("Trusts no proxy: the server uses the address of the direct connection");
-    out.push("Changes the visitor address that repository network limits, sign-in limits and Activity use");
+    if (out.length) {
+      if (literals(v).length === 0 && listIDs(v).length === 0 && !trusted.data?.env_lists.length)
+        out.push("Trusts no proxy: the server uses the address of the direct connection");
+      out.push("Changes the visitor address that allowed networks, sign-in limits and Activity use");
+    }
+    const ps = probeHosts(v);
+    if (!same(ps, probeHosts(was)))
+      out.push(ps.length ? `The server answers whoami on ${ps[0]} and ${ps[1]}, so you can add both addresses of your network with Add my address` : "With Add my address, you add only the address of the page's own connection");
     return out;
   });
 
@@ -157,12 +171,14 @@
     try {
       if (!same(literals(v), literals(draft.saved))) await api.settings.patch({ trusted_proxies: literals(v) });
       if (!same(listIDs(v), listIDs(draft.saved))) await api.trustedProxies.set(listIDs(v));
+      if (!same(probeHosts(v), probeHosts(draft.saved))) await api.settings.patch({ "network.probe_hosts": probeHosts(v) });
     } catch (e) {
-      throw new Error(e instanceof ApiError && e.fields?.trusted_proxies ? e.fields.trusted_proxies : errorMessage(e));
+      const f = e instanceof ApiError ? (e.fields?.trusted_proxies ?? e.fields?.["network.probe_hosts"]) : undefined;
+      throw new Error(f ?? errorMessage(e));
     }
     draft.commit();
     customOpen = false;
-    toast.success("Saved the trusted proxies");
+    toast.success("Saved the network settings");
     trusted.reload();
     candidates.reload();
   }
@@ -272,6 +288,28 @@
       {/if}
     </FormSection>
 
+    {#if probeSetting}
+      {@const probesLocked = !!probeSetting.locked}
+      <FormSection
+        title="Address probe hosts"
+        description="A browser reaches the server over IPv4 or IPv6, so the server sees one of its addresses. To add both with Add my address on a repository's Access tab, name a host of this server with only an A record and one with only an AAAA record, both through the same proxy."
+      >
+        {#snippet actions()}
+          {#if probesLocked}<StatusBadge title="Remove the environment variable {probeSetting.env} to change this here.">Set by {probeSetting.env}</StatusBadge>{/if}
+        {/snippet}
+        <div class="grid gap-4 sm:grid-cols-2">
+          <div class="flex flex-col gap-2">
+            <Label for="{id}-v4">IPv4-only host</Label>
+            <Input id="{id}-v4" placeholder="v4.{host}" disabled={probesLocked} bind:value={v.v4} />
+          </div>
+          <div class="flex flex-col gap-2">
+            <Label for="{id}-v6">IPv6-only host</Label>
+            <Input id="{id}-v6" placeholder="v6.{host}" disabled={probesLocked} bind:value={v.v6} />
+          </div>
+        </div>
+      </FormSection>
+    {/if}
+
     <FormSection
       title="Caddy"
       description="We recommend Caddy: it gets HTTPS certificates by itself and sends X-Forwarded-For without more settings. On this machine, this Caddyfile is all it needs."
@@ -283,5 +321,5 @@
 
   <SaveBar count={draft.count} onDiscard={() => { draft?.reset(); customOpen = false; }} onSave={() => (confirmOpen = true)} />
 
-  <ConfirmDialog bind:open={confirmOpen} title="Save the trusted proxies?" confirmLabel="Save changes" {changes} onConfirm={save} />
+  <ConfirmDialog bind:open={confirmOpen} title="Save the network settings?" confirmLabel="Save changes" {changes} onConfirm={save} />
 {/if}

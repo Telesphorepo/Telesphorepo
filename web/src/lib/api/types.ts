@@ -386,12 +386,11 @@ export type Permission = { username: string; perms: PermId[] };
  * holder of All repositories ("all_repos", only with ?admins=1).
  */
 export type AccessPerson = { username: string; perms: PermId[]; via: "permission" | "all_repos" };
-/** Where requests may come from: any network, or only these network lists and address ranges. */
-export type AccessNetworks = { any: boolean; lists: { name: string; title: string }[]; cidrs: { cidr: string; note: string }[] };
-/** What one guard of the access engine says about an operation; the network guard's detail is AccessNetworks. */
-export type GuardReport = { restricted: boolean; summary: string; detail: Record<string, unknown> };
-/** The guard reports of an operation, by guard name. */
-export type AccessGuards = Record<string, GuardReport>;
+/**
+ * The allowed networks of a restricted repository: anyone at these addresses downloads without
+ * signing in. summary is the networks in words ("GitHub Actions and 10.0.0.0/8"; "" for none).
+ */
+export type AccessNetworks = { lists: { name: string; title: string }[]; cidrs: { cidr: string; note: string }[]; summary: string };
 /** A CI pipeline (CI rule) that lists the repo, with what its conditions allow. Disabled ones are listed too. */
 export type AccessPipeline = {
   id: number;
@@ -410,20 +409,19 @@ export type AccessPipeline = {
  * GET /api/repos/{name}/access (Manage access, Edit settings or CI pipelines). people: each person
  * with a grant, once, with the whole set. download.people: the grants with download;
  * publish.people: the grants with publish. admins counts the enabled holders of All repositories.
- * publish.blocked says why nobody can publish now (null when people and pipelines can). The guards of
- * download and publish say what else limits them, by guard name (e.g. "network").
+ * publish.blocked says why nobody can publish now (null when people and pipelines can).
+ * download.networks are the allowed networks (none on a public repository).
  */
 export type RepoAccess = {
   repo: string;
   format: string;
   people: AccessPerson[];
   kind: RepoKind;
-  download: { public: boolean; people: AccessPerson[]; admins: number; guards: AccessGuards; sentence: string; /** Extra sentences from modules, e.g. "Downloads come from the edge." */ notes: string[] };
+  download: { public: boolean; people: AccessPerson[]; admins: number; networks: AccessNetworks; sentence: string; /** Extra sentences from modules, e.g. "Downloads come from the edge." */ notes: string[] };
   publish: {
     people: AccessPerson[];
     admins: number;
     ci: AccessPipeline[];
-    guards: AccessGuards;
     blocked: { code: "read_only_kind" | "operation"; message: string } | null;
     sentence: string;
   };
@@ -585,6 +583,26 @@ export type DeleteStatus = { state: "running" | "done" | "failed"; deleted: numb
  */
 export type DeletePlan = { files: number; more: boolean; notes: { text: string; count: number; one: string; many: string }[] };
 
+/**
+ * POST /api/repos/{name}/files/holders: the members of a group that hold each picked file and
+ * folder (repos, in read order: the first serves a file), among those the person reads, and
+ * whether the person may delete in each (reason: why not).
+ */
+export type FileHolders = {
+  members: { repo: string; delete: boolean; reason?: string }[];
+  paths: { path: string; repos: string[] }[];
+  prefixes: { path: string; repos: string[] }[];
+};
+/**
+ * POST /api/repos/{group}/files/delete with members: the delete in each member (id while it runs
+ * on, error when it failed), and the members that kept their files with the reason.
+ */
+export type GroupDeleteResult = {
+  deleted: number;
+  repos: { repo: string; deleted: number; id?: string; error?: string }[];
+  kept: { repo: string; reason?: string }[];
+};
+
 /** One stored file of a manual upload; generated marks the checksum and metadata files that the server wrote. */
 export type Uploaded = { path: string; status: "created" | "replaced" | "unchanged"; size: number; sha256: string; generated?: boolean };
 /** POST /api/repos/{name}/upload. */
@@ -620,13 +638,13 @@ export type UploadSession = { id: string; received: number; expires_at: string }
 export type FinishedUpload = { path: string; id: string; size: number };
 // --- network rules ---
 
-/** One entry of a repo's IP rule: a CIDR ("203.0.113.0/24") or the name of an IP list. */
+/** One allowed network of a repo: a CIDR ("203.0.113.0/24") or the name of an IP list. */
 export type IPRule = { kind: "cidr" | "list"; value: string; note: string };
-/** GET/PUT /api/repos/{name}/ip-rules. An empty list leaves its scope open to every address. */
-export type IPRules = { read: IPRule[]; publish: IPRule[] };
+/** GET/PUT /api/repos/{name}/ip-rules: the allowed networks of a restricted repo. */
+export type IPRules = { read: IPRule[] };
 
-/** What refers to an IP list: repo rules (by scope) and the trusted proxies. */
-export type IPListUsage = { repos: { repo: string; scope: "read" | "publish" }[]; trusted_proxies: boolean };
+/** What refers to an IP list: the allowed networks of repositories (by name) and the trusted proxies. */
+export type IPListUsage = { repos: string[]; trusted_proxies: boolean };
 /**
  * A named set of address ranges (GET /api/ip-lists). A preset is fetched by the server (source is
  * its address; fetched_at is null before the first good fetch); a custom list is edited by holders of Network.
@@ -671,6 +689,12 @@ export type SigningKey = {
 };
 /** {name} creates an Ed25519 key; armored (and its passphrase) imports a private key. */
 export type NewSigningKey = { name: string; armored?: string; passphrase?: string };
+/**
+ * GET /api/network/whoami: the address the server reads for this request, as a range to allow
+ * (an IPv4 address as its /32, an IPv6 address as its /64), and the whoami URLs of the probe
+ * hosts (an IPv4-only and an IPv6-only host; none when unset).
+ */
+export type Whoami = { ip: string; cidr: string; probes: string[] };
 /** GET /api/network/proxy-candidates: an untrusted peer that sent a forwarded header (header names which). */
 export type ProxyCandidate = { address: string; last_seen: string; count: number; header: string };
 

@@ -91,7 +91,7 @@
   const events = activity ? new Resource(async () => (await api.audit({ limit: 5 })).items) : null;
   const actions = activity ? new Resource(() => api.auditActions()) : null;
   const actionText = (a: string) => actions?.data?.find((x) => x.id === a)?.label ?? a;
-  const refusals = new Set(["signin.failed", "sso.signin.failed", "network.denied"]);
+  const refusals = new Set(["signin.failed", "sso.signin.failed"]);
 
   // --- downloads of the last 30 days, for a holder of Activity ---
   const statDays = 30;

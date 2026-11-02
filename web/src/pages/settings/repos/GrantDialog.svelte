@@ -14,6 +14,14 @@
     access" in the warning color while it has none); a click opens its PermissionPicker (one card
     open at a time), × removes it. Submit stays off while a thing has no permission, and the
     column says why. onGive gets every thing with its own set.
+    Besides things with permissions (`kind` "grant", the default), `search` may offer:
+    - `kind: "plain"`: a thing without permissions (an IP list, a CI pipeline); its card is its
+      name and `detail`, with ×.
+    - `kind: "address"`: Custom address. It never shows as added: each add puts a new card on the
+      right with an address field and a label field. A single IPv6 address offers Widen to /64
+      (POST /api/ip-ranges/parse). Submit stays off while an address is empty or invalid, and the
+      column says so. With `mine`, Add my address puts a card for each range it answers.
+    `permissions={false}` hides Permissions for new items, when nothing offered takes permissions.
   - `targets`: Change permissions. Fixed things and one PermissionPicker (no list); onGive gets
     each target with the one set.
 
@@ -27,9 +35,13 @@
 -->
 <script lang="ts" module>
   import type { PermId as Perm } from "$lib/api";
-  export type GrantChoice = { id: string; label: string; detail?: string };
-  /** One thing of the dialog with the permissions it gets. */
-  export type GrantItem = { id: string; perms: Perm[] };
+  export type GrantKind = "grant" | "plain" | "address";
+  export type GrantChoice = { id: string; label: string; detail?: string; kind?: GrantKind };
+  /**
+   * One thing of the dialog with the permissions it gets ([] for a plain thing or an address). A
+   * Custom address has the range in `value` and its label in `note`.
+   */
+  export type GrantItem = { id: string; perms: Perm[]; kind?: GrantKind; value?: string; note?: string };
 
   /** Groups items by identical permission sets, in the order the sets first appear. */
   export function bySet(items: GrantItem[]): { ids: string[]; perms: Perm[] }[] {
@@ -48,7 +60,8 @@
 <script lang="ts">
   import { tick, untrack, type Snippet } from "svelte";
   import type { Page, PermId } from "$lib/api";
-  import { errorMessage } from "$lib/api";
+  import { api, errorMessage } from "$lib/api";
+  import { checkRange } from "$lib/network";
   import { labelOf, needsOf, pickerGroups, repoPermissions, sortRepoPermissions } from "$lib/permissions";
   import { count } from "$lib/words";
   import { cn } from "$lib/utils";
@@ -79,6 +92,9 @@
     none = "",
     start = ["repo.download"],
     held,
+    permissions = true,
+    find,
+    mine,
     leading,
     submitLabel,
     onGive,
@@ -100,6 +116,12 @@
     start?: PermId[];
     /** The permissions the person can give and remove on the things; undefined: every one. */
     held?: PermId[] | ((ids: string[]) => PermId[] | undefined);
+    /** Whether things offered take permissions: Permissions for new items shows. */
+    permissions?: boolean;
+    /** The placeholder of the find field; by default "Find a {noun} by the start of the name". */
+    find?: string;
+    /** Answers the ranges of the address of this page: Add my address shows. */
+    mine?: () => Promise<string[]>;
     /** The mark before a thing's name: a FormatIcon, a small UserAvatar. */
     leading?: Snippet<[GrantChoice]>;
     /** Names the action for the count of things (and, for `targets`, the permissions). */
@@ -129,8 +151,11 @@
   let searched = $state(false);
 
   // --- the right column ---
-  type Chosen = GrantChoice & { perms: PermId[] };
+  type Chosen = GrantChoice & { perms: PermId[]; value?: string; note?: string };
   let chosen = $state<Chosen[]>([]);
+  let seq = 0;
+  const newAddress = (value: string): Chosen => ({ id: `address:${++seq}`, label: "Custom address", kind: "address", perms: [], value, note: "" });
+  const isGrant = (c: GrantChoice) => (c.kind ?? "grant") === "grant";
   let defaults = $state<PermId[]>([]);
   // The open card: a thing's id, "" for Permissions for new items, null for none.
   let expanded = $state<string | null>(null);
@@ -152,6 +177,7 @@
         defaults = [...start];
         expanded = null;
         said = "";
+        mineError = "";
       });
   });
 
@@ -203,8 +229,9 @@
 
   const chosenIds = $derived(new Set(chosen.map((c) => c.id)));
   const excluded = $derived(new Set(exclude));
-  const addable = (c: GrantChoice) => !chosenIds.has(c.id) && !excluded.has(c.id);
-  const addableShown = $derived(found.filter(addable));
+  const addable = (c: GrantChoice) => c.kind === "address" || (!chosenIds.has(c.id) && !excluded.has(c.id));
+  // Add all shown and Enter leave out Custom address: it is one blank card, added on purpose.
+  const addableShown = $derived(found.filter((c) => c.kind !== "address" && addable(c)));
 
   async function show(thing: string) {
     await tick();
@@ -223,14 +250,47 @@
   function add(things: GrantChoice[]) {
     const fresh = things.filter(addable);
     if (!fresh.length) return;
-    chosen = [...chosen, ...fresh.map((c) => ({ ...c, perms: keepHeld(c.id, defaults) }))];
-    said = fresh.length === 1 ? `Added ${fresh[0].label}.` : `Added ${count(fresh.length, noun[0], noun[1])}.`;
-    show(fresh[fresh.length - 1].id);
+    const made = fresh.map((c): Chosen => (c.kind === "address" ? newAddress("") : { ...c, perms: isGrant(c) ? keepHeld(c.id, defaults) : [] }));
+    chosen = [...chosen, ...made];
+    said = made.length === 1 ? `Added ${made[0].label}.` : `Added ${count(made.length, noun[0], noun[1])}.`;
+    show(made[made.length - 1].id);
   }
   /** A click on a row: adds it, or shows its card when it is added already. */
   function pick(c: GrantChoice) {
-    if (chosenIds.has(c.id)) show(c.id);
+    if (c.kind !== "address" && chosenIds.has(c.id)) show(c.id);
     else add([c]);
+  }
+
+  // --- Custom address ---
+  let finding = $state(false);
+  let mineError = $state("");
+  async function addMine() {
+    if (!mine) return;
+    finding = true;
+    mineError = "";
+    try {
+      const ranges = await mine();
+      if (!ranges.length) throw new Error("The server sees no address for this page.");
+      const made = ranges.map(newAddress);
+      chosen = [...chosen, ...made];
+      said = `Added ${ranges.join(" and ")}.`;
+      show(made[made.length - 1].id);
+    } catch (e) {
+      mineError = errorMessage(e);
+    } finally {
+      finding = false;
+    }
+  }
+  const setAddress = (thing: string, patch: { value?: string; note?: string }) => (chosen = chosen.map((c) => (c.id === thing ? { ...c, ...patch } : c)));
+  /** A single IPv6 address: one device, whose address changes over time. */
+  const oneDevice = (v: string) => !checkRange(v) && v.includes(":") && (!v.includes("/") || v.trim().endsWith("/128"));
+  async function widen(c: Chosen) {
+    try {
+      const parsed = await api.ipRanges.parse((c.value ?? "").trim().replace(/\/128$/, "") + "/64");
+      if (parsed.ranges[0]) setAddress(c.id, { value: parsed.ranges[0] });
+    } catch (e) {
+      mineError = `${c.value} did not widen: ${errorMessage(e)}`;
+    }
   }
   function remove(thing: string) {
     const c = chosen.find((x) => x.id === thing);
@@ -242,7 +302,7 @@
     chosen = chosen.map((c) => (c.id === thing ? { ...c, perms: p } : c));
   }
   function applyAll() {
-    chosen = chosen.map((c) => ({ ...c, perms: keepHeld(c.id, defaults) }));
+    chosen = chosen.map((c) => (isGrant(c) ? { ...c, perms: keepHeld(c.id, defaults) } : c));
     said = `Every ${noun[0]} gets the permissions for new items.`;
   }
   const toggle = (key: string) => (expanded = expanded === key ? null : key);
@@ -288,12 +348,18 @@
   }
 
   const everything = $derived(repoPermissions().length);
-  const missing = $derived(chosen.filter((c) => !c.perms.length));
+  const missing = $derived(chosen.filter((c) => isGrant(c) && !c.perms.length));
+  const badAddresses = $derived(chosen.filter((c) => c.kind === "address" && checkRange(c.value ?? "")));
 
   const ids = $derived(targets ?? chosen.map((c) => c.id));
   // A change of fixed things can clear every permission (that removes the access); a new grant needs one each.
-  const canSubmit = $derived(targets ? targets.length > 0 : chosen.length > 0 && missing.length === 0);
-  const submit = () => onGive(targets ? targets.map((t) => ({ id: t, perms })) : chosen.map((c) => ({ id: c.id, perms: c.perms })));
+  const canSubmit = $derived(targets ? targets.length > 0 : chosen.length > 0 && missing.length === 0 && badAddresses.length === 0);
+  const submit = () =>
+    onGive(
+      targets
+        ? targets.map((t) => ({ id: t, perms }))
+        : chosen.map((c) => ({ id: c.id, perms: c.perms, kind: c.kind ?? "grant", value: c.value?.trim(), note: c.note?.trim() })),
+    );
 </script>
 
 {#snippet summary(p: PermId[])}
@@ -316,7 +382,10 @@
         <div class="flex flex-col gap-3 border-b p-4">
           <div class="flex items-center gap-2">
             <h3 id="{id}-avail" class="text-label">Available</h3>
-            <Button class="-mr-2.5 ml-auto" variant="ghost" size="xs" disabled={!addableShown.length} onclick={() => add(addableShown)}>
+            {#if mine}
+              <Button class="ml-auto" variant="ghost" size="xs" disabled={finding} onclick={addMine}>Add my address</Button>
+            {/if}
+            <Button class="-mr-2.5 {mine ? '' : 'ml-auto'}" variant="ghost" size="xs" disabled={!addableShown.length} onclick={() => add(addableShown)}>
               <ListPlusIcon />Add all shown
             </Button>
           </div>
@@ -328,16 +397,16 @@
               type="search"
               autocomplete="off"
               spellcheck={false}
-              placeholder="Find a {noun[0]} by the start of the name"
-              aria-label="Find a {noun[0]}"
+              placeholder={find ?? `Find a ${noun[0]} by the start of the name`}
+              aria-label={find ?? `Find a ${noun[0]}`}
               bind:value={filter}
               onkeydown={onSearchKey}
             />
           </div>
         </div>
         <div class="min-h-0 flex-1 overflow-y-auto [scrollbar-gutter:stable] p-2">
-          {#if searchError}
-            <div class="p-2"><ErrorState inline error={searchError} /></div>
+          {#if searchError || mineError}
+            <div class="p-2"><ErrorState inline error={searchError || mineError} /></div>
           {/if}
           {#if !searched && searching}
             <div class="p-2"><Loading inline /></div>
@@ -346,7 +415,7 @@
           {/if}
           <ul class="flex flex-col gap-1" aria-label="Available {noun[1]}">
             {#each found as c (c.id)}
-              {@const isAdded = chosenIds.has(c.id)}
+              {@const isAdded = c.kind !== "address" && chosenIds.has(c.id)}
               {@const has = excluded.has(c.id)}
               <li>
                 <div
@@ -412,6 +481,7 @@
             <span class="text-meta text-muted-foreground">{chosen.length ? count(chosen.length, noun[0], noun[1]) : ""}</span>
           </div>
           <!-- Permissions for new items -->
+          {#if permissions}
           <div class="rounded-lg bg-panel">
             <div class="flex items-center gap-2 p-2">
               <button
@@ -433,12 +503,13 @@
                   id="{id}-defaults-perms"
                   groups={pickerGroups("repo")}
                   needs={needsOf("repo")}
-                  held={heldOn(chosen.map((c) => c.id))}
+                  held={heldOn(chosen.filter(isGrant).map((c) => c.id))}
                   bind:value={defaults}
                 />
               </div>
             {/if}
           </div>
+          {/if}
         </div>
         <div class="min-h-0 flex-1 overflow-y-auto [scrollbar-gutter:stable] p-2" bind:this={listEl}>
           {#if !chosen.length}
@@ -450,13 +521,67 @@
             >
               <PlusIcon class="size-6 text-muted-foreground" aria-hidden="true" />
               <p class="text-body">Drag {noun[1]} here or press +</p>
-              <p class="text-meta text-muted-foreground">Each one gets the permissions for new {noun[1]}; open it to change its own.</p>
+              {#if permissions}<p class="text-meta text-muted-foreground">Each one gets the permissions for new {noun[1]}; open it to change its own.</p>{/if}
             </div>
           {:else}
             <ul class="flex flex-col gap-2" aria-label="{noun[1]} getting access">
               {#each chosen as c (c.id)}
                 {@const isOpen = expanded === c.id}
                 <li data-thing={c.id} class="rounded-lg border bg-card">
+                  {#if c.kind === "address"}
+                    {@const problem = c.value?.trim() ? checkRange(c.value) : ""}
+                    <div class="flex items-start gap-1 p-1">
+                      {#if leading}<span class="flex shrink-0 items-center py-2 pl-2">{@render leading(c)}</span>{/if}
+                      <div class="flex min-w-0 flex-1 flex-col gap-2 p-1 sm:flex-row">
+                        <Input
+                          class="font-mono sm:flex-1"
+                          placeholder="203.0.113.0/24"
+                          aria-label="Address or range"
+                          aria-invalid={!!problem}
+                          autocomplete="off"
+                          spellcheck={false}
+                          value={c.value}
+                          oninput={(e) => setAddress(c.id, { value: e.currentTarget.value })}
+                        />
+                        <Input
+                          class="sm:flex-1"
+                          placeholder="Label (optional)"
+                          aria-label="Label"
+                          autocomplete="off"
+                          value={c.note}
+                          oninput={(e) => setAddress(c.id, { note: e.currentTarget.value })}
+                        />
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        class="mt-1.5 hover:bg-destructive/10 hover:text-destructive"
+                        aria-label="Remove {c.value || c.label}"
+                        onclick={() => remove(c.id)}><XIcon /></Button
+                      >
+                    </div>
+                    {#if problem}
+                      <p class="px-3 pb-2 text-meta text-warning">{problem}</p>
+                    {:else if oneDevice(c.value ?? "")}
+                      <div class="flex flex-wrap items-center gap-2 px-3 pb-2 text-meta text-muted-foreground">
+                        One device.
+                        <Button variant="outline" size="xs" onclick={() => widen(c)}>Widen to /64</Button>
+                      </div>
+                    {/if}
+                  {:else if !isGrant(c)}
+                    <div class="flex items-center gap-2 p-1 pl-3">
+                      {#if leading}<span class="flex shrink-0 items-center">{@render leading(c)}</span>{/if}
+                      <span class="min-w-0 flex-1 truncate text-label">{c.label}</span>
+                      {#if c.detail}<span class="hidden max-w-48 shrink-0 truncate text-meta text-muted-foreground sm:inline">{c.detail}</span>{/if}
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        class="hover:bg-destructive/10 hover:text-destructive"
+                        aria-label="Remove {c.label}"
+                        onclick={() => remove(c.id)}><XIcon /></Button
+                      >
+                    </div>
+                  {:else}
                   <div class="flex items-center gap-1 p-1">
                     <button
                       type="button"
@@ -495,6 +620,7 @@
                       />
                     </div>
                   {/if}
+                  {/if}
                 </li>
               {/each}
             </ul>
@@ -504,6 +630,12 @@
           <p class="flex items-center gap-2 border-t px-4 py-2 text-meta text-warning">
             <TriangleAlertIcon class="size-4 shrink-0" aria-hidden="true" />
             {missing.length === 1 ? `${missing[0].label} has` : `${count(missing.length, noun[0], noun[1])} have`} no permission yet: pick one or remove {missing.length === 1 ? "it" : "them"}.
+          </p>
+        {/if}
+        {#if badAddresses.length}
+          <p class="flex items-center gap-2 border-t px-4 py-2 text-meta text-warning">
+            <TriangleAlertIcon class="size-4 shrink-0" aria-hidden="true" />
+            {badAddresses.length === 1 ? "A custom address needs" : `${badAddresses.length} custom addresses need`} an address or a range: enter one or remove {badAddresses.length === 1 ? "it" : "them"}.
           </p>
         {/if}
       </section>

@@ -1,4 +1,4 @@
--- IP lists and per-repo IP rules (internal/netrules). Request paths read the in-memory copies;
+-- IP lists and the allowed networks of the repos (internal/netrules). Request paths read the in-memory copies;
 -- these queries run at startup, on a refresh and on an admin change.
 
 -- Keyset page by name (pass "" for the first page).
@@ -29,24 +29,32 @@ UPDATE ip_lists SET name = ?, title = ?, description = ?, ranges = ? WHERE id = 
 -- name: DeleteCustomList :exec
 DELETE FROM ip_lists WHERE id = ? AND kind = 'custom';
 
--- The rules that name a list, with their repos, through repo_ip_rules_list_id.
--- name: ListRulesOfList :many
-SELECT r.name AS repo, x.scope FROM repo_ip_rules x JOIN repos r ON r.id = x.repo_id
+-- The repos whose allowed networks name a list, through repo_networks_list_id.
+-- name: ListReposOfList :many
+SELECT r.name FROM repo_networks x JOIN repos r ON r.id = x.repo_id
 WHERE x.list_id = ?;
 
--- The next repo after repo_id that has IP rules: one seek on repo_ip_rules_repo.
--- name: NextIPRuleRepo :one
-SELECT repo_id FROM repo_ip_rules WHERE repo_id > ? ORDER BY repo_id LIMIT 1;
+-- The next repo after repo_id that has allowed networks: one seek on repo_networks_repo.
+-- name: NextNetworkRepo :one
+SELECT repo_id FROM repo_networks WHERE repo_id > ? ORDER BY repo_id LIMIT 1;
 
--- The rules of a repo in scope and entry order, through repo_ip_rules_repo.
--- name: ListRepoIPRules :many
-SELECT id, scope, cidr, list_id, note FROM repo_ip_rules WHERE repo_id = ? ORDER BY scope, id;
+-- The allowed networks of a repo in entry order, through repo_networks_repo.
+-- name: ListRepoNetworks :many
+SELECT id, cidr, list_id, note FROM repo_networks WHERE repo_id = ? ORDER BY id;
 
--- name: DeleteRepoIPRules :exec
-DELETE FROM repo_ip_rules WHERE repo_id = ?;
+-- Whether a repo has allowed networks, through repo_networks_repo.
+-- name: HasRepoNetworks :one
+SELECT EXISTS (SELECT 1 FROM repo_networks WHERE repo_id = ?);
 
--- name: InsertRepoIPRule :exec
-INSERT INTO repo_ip_rules (repo_id, scope, cidr, list_id, note) VALUES (?, ?, ?, ?, ?);
+-- name: DeleteRepoNetworks :exec
+DELETE FROM repo_networks WHERE repo_id = ?;
+
+-- name: InsertRepoNetwork :exec
+INSERT INTO repo_networks (repo_id, cidr, list_id, note) VALUES (?, ?, ?, ?);
+
+-- Whether a repo is public, read in the transaction that saves its allowed networks.
+-- name: RepoIsPublic :one
+SELECT anonymous_read FROM repos WHERE id = ?;
 
 -- The IP lists that trusted proxies include, by list id.
 -- name: ListTrustedProxyLists :many

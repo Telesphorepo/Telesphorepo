@@ -1,6 +1,5 @@
 <!--
-  A short form of the Access tab that adds existing things to a repository: a CI pipeline or a
-  network list. The dialog is the wide one (768px), since each row has a line of help. Each thing
+  A short form that adds existing things to a repository (the members of a group). The dialog is the wide one (768px), since each row has a line of help. Each thing
   is a checkbox row, a 4px gap between rows; the submit button names how many it adds. A link
   under the rows creates a new one on its own page. With `more` (a paged source of the items),
   "Load more" under the rows asks for the next page. The parent adds the chosen ids to its draft,

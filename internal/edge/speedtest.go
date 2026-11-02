@@ -127,7 +127,7 @@ func (m *mod) speedFiles(w http.ResponseWriter, r *http.Request, c *route.Call) 
 	scanned := 0
 	for _, repo := range all {
 		e := m.edgeOf(repo)
-		if e == nil || !repo.AnonymousRead || repo.Kind == repos.KindGroup || m.h.Access.Guarded(repo) {
+		if e == nil || !repo.AnonymousRead || repo.Kind == repos.KindGroup {
 			continue
 		}
 		if scanned++; scanned > speedRepos {

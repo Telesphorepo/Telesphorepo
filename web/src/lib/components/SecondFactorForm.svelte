@@ -52,12 +52,21 @@
   async function send(p: () => Promise<Proof>, quiet = false) {
     busy = true;
     error = "";
+    let proof: Proof;
     try {
-      await onProof(await p());
+      proof = await p();
     } catch (e) {
       // A prompt the browser would not open by itself (Safari wants a tap) or that the person
       // closed says nothing: the button is right there.
       if (!quiet) error = errorMessage(e);
+      busy = false;
+      return;
+    }
+    try {
+      await onProof(proof);
+    } catch (e) {
+      // The server's answer to a proof always shows, also after a prompt that opened by itself.
+      error = errorMessage(e);
     } finally {
       busy = false;
     }

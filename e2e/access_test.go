@@ -30,10 +30,10 @@ func peopleOf(ps []accessPerson) []string {
 	return out
 }
 
-// accessNetworks is the detail of the network guard in the access report.
+// accessNetworks are the allowed networks of the access report's download.
 type accessNetworks struct {
-	Any   bool `json:"any"`
-	Lists []struct {
+	Summary string `json:"summary"`
+	Lists   []struct {
 		Name  string `json:"name"`
 		Title string `json:"title"`
 	} `json:"lists"`
@@ -41,16 +41,6 @@ type accessNetworks struct {
 		CIDR string `json:"cidr"`
 		Note string `json:"note"`
 	} `json:"cidrs"`
-}
-
-// accessGuards are the guard reports of the access report; the network module's guard is
-// "network".
-type accessGuards struct {
-	Network struct {
-		Restricted bool           `json:"restricted"`
-		Summary    string         `json:"summary"`
-		Detail     accessNetworks `json:"detail"`
-	} `json:"network"`
 }
 
 type repoAccess struct {
@@ -62,7 +52,7 @@ type repoAccess struct {
 		Public   bool           `json:"public"`
 		People   []accessPerson `json:"people"`
 		Admins   int            `json:"admins"`
-		Guards   accessGuards   `json:"guards"`
+		Networks accessNetworks `json:"networks"`
 		Sentence string         `json:"sentence"`
 	} `json:"download"`
 	Publish struct {
@@ -79,7 +69,6 @@ type repoAccess struct {
 			Subjects     []string `json:"subjects"`
 			Disabled     bool     `json:"disabled"`
 		} `json:"ci"`
-		Guards  accessGuards `json:"guards"`
 		Blocked *struct {
 			Code    string `json:"code"`
 			Message string `json:"message"`
@@ -139,7 +128,7 @@ func TestEffectiveAccess(t *testing.T) {
 		if a.Download.Admins < 2 || a.Publish.Admins != a.Download.Admins {
 			t.Fatalf("admins = %d / %d, want the same count, at least 2", a.Download.Admins, a.Publish.Admins)
 		}
-		if !a.Download.Guards.Network.Detail.Any || !a.Publish.Guards.Network.Detail.Any || len(a.Publish.CI) != 0 || a.Publish.Blocked != nil {
+		if a.Download.Networks.Summary != "" || len(a.Download.Networks.CIDRs) != 0 || len(a.Publish.CI) != 0 || a.Publish.Blocked != nil {
 			t.Fatalf("networks, CI or blocked: %+v", a)
 		}
 		wantSentence(t, "download", a.Download.Sentence, "2 people.")
@@ -168,8 +157,7 @@ func TestEffectiveAccess(t *testing.T) {
 			Claims: map[string][]string{"repository": {"acme/app"}, "ref": {"refs/heads/main"},
 				"workflow_ref": {"acme/app/.github/workflows/release.yml@*"}}, Repos: []string{repo}})
 		s.MustAPI(t, http.MethodPut, "/api/repos/"+repo+"/ip-rules", map[string]any{
-			"read":    []map[string]string{{"kind": "cidr", "value": "10.0.0.0/8", "note": "VPN"}},
-			"publish": []map[string]string{{"kind": "list", "value": office}},
+			"read": []map[string]string{{"kind": "cidr", "value": "10.0.0.0/8", "note": "VPN"}, {"kind": "list", "value": office}},
 		}, s.Admin(), nil)
 
 		a := getAccess(t, s, repo, "")
@@ -181,19 +169,17 @@ func TestEffectiveAccess(t *testing.T) {
 			!slices.Equal(ci.Branches, []string{"main"}) || !slices.Equal(ci.Workflows, []string{".github/workflows/release.yml"}) {
 			t.Fatalf("pipeline = %+v", ci)
 		}
-		if dn := a.Download.Guards.Network; !dn.Restricted || dn.Detail.Any || len(dn.Detail.CIDRs) != 1 || dn.Detail.CIDRs[0].Note != "VPN" {
-			t.Fatalf("download networks = %+v", a.Download.Guards.Network)
+		if n := a.Download.Networks; len(n.CIDRs) != 1 || n.CIDRs[0].Note != "VPN" || len(n.Lists) != 1 || n.Lists[0].Title != "Office" {
+			t.Fatalf("download networks = %+v", n)
 		}
-		if pn := a.Publish.Guards.Network; !pn.Restricted || pn.Detail.Any || len(pn.Detail.Lists) != 1 || pn.Detail.Lists[0].Title != "Office" {
-			t.Fatalf("publish networks = %+v", a.Publish.Guards.Network)
-		}
-		wantSentence(t, "download", a.Download.Sentence, "2 people, only from 10.0.0.0/8.")
-		wantSentence(t, "publish", a.Publish.Sentence, "1 person and 1 CI pipeline (acme/app, branch main), only from Office.")
+		wantSentence(t, "download", a.Download.Sentence, "2 people and anyone at Office and 10.0.0.0/8.")
+		wantSentence(t, "publish", a.Publish.Sentence, "1 person and 1 CI pipeline (acme/app, branch main).")
 
+		// A repository with allowed networks is not made public: anyone would download already.
+		st, b := s.API(t, http.MethodPatch, "/api/repos", map[string]any{"names": []string{repo}, "anonymous_read": true}, s.Admin())
+		wantAPIStatus(t, "make a repository with allowed networks public", st, b, http.StatusBadRequest)
+		s.MustAPI(t, http.MethodPut, "/api/repos/"+repo+"/ip-rules", map[string]any{"read": []any{}}, s.Admin(), nil)
 		s.MustAPI(t, http.MethodPatch, "/api/repos", map[string]any{"names": []string{repo}, "anonymous_read": true}, s.Admin(), nil)
-		a = getAccess(t, s, repo, "")
-		wantSentence(t, "public download", a.Download.Sentence, "anyone, only from 10.0.0.0/8.")
-		s.MustAPI(t, http.MethodPut, "/api/repos/"+repo+"/ip-rules", map[string]any{"read": []any{}, "publish": []any{}}, s.Admin(), nil)
 		a = getAccess(t, s, repo, "")
 		wantSentence(t, "public download", a.Download.Sentence, "anyone on the internet.")
 		wantSentence(t, "publish", a.Publish.Sentence, "1 person and 1 CI pipeline (acme/app, branch main).")
@@ -333,7 +319,7 @@ func TestRepoSettingsPermission(t *testing.T) {
 		t.Fatalf("GET /api/me: repo_permissions %v, want only %s: [settings]", me.RepoPermissions, mine)
 	}
 
-	rules := map[string]any{"read": []map[string]string{{"kind": "cidr", "value": "10.0.0.0/8", "note": "VPN"}}, "publish": []any{}}
+	rules := map[string]any{"read": []map[string]string{{"kind": "cidr", "value": "10.0.0.0/8", "note": "VPN"}}}
 	for _, c := range []struct {
 		method, path string
 		body         any
@@ -351,8 +337,13 @@ func TestRepoSettingsPermission(t *testing.T) {
 		st, b = s.API(t, c.method, p, c.body, sess)
 		wantAPIStatus(t, c.method+" "+p+" without settings", st, b, http.StatusForbidden)
 	}
+	// The Access tab reads pasted addresses with settings on a repository.
+	st, b := s.API(t, http.MethodPost, "/api/ip-ranges/parse", map[string]any{"text": "192.0.2.1"}, sess)
+	wantAPIStatus(t, "POST /api/ip-ranges/parse with settings on a repository", st, b, http.StatusOK)
+	// A public repository takes no allowed networks.
+	s.MustAPI(t, http.MethodPut, "/api/repos/"+mine+"/ip-rules", map[string]any{"read": []any{}}, sess, nil)
 	// The public switch needs settings on every repository of the list.
-	st, b := s.API(t, http.MethodPatch, "/api/repos", map[string]any{"names": []string{mine, other}, "anonymous_read": true}, sess)
+	st, b = s.API(t, http.MethodPatch, "/api/repos", map[string]any{"names": []string{mine, other}, "anonymous_read": true}, sess)
 	wantAPIStatus(t, "PATCH /api/repos with a repository outside settings", st, b, http.StatusForbidden)
 	s.MustAPI(t, http.MethodPatch, "/api/repos", map[string]any{"names": []string{mine}, "anonymous_read": true}, sess, nil)
 

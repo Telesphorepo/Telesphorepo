@@ -22,8 +22,6 @@
     disabled = false,
     onAdd = () => {},
     onReplace,
-    buttons = true,
-    found = $bindable([]),
   }: {
     /** The id of the text box, unique on the page. */
     id: string;
@@ -31,10 +29,6 @@
     disabled?: boolean;
     /** Gets the parsed ranges (addresses as /32 or /128, ranges masked, no duplicates). */
     onAdd?: (ranges: string[]) => void;
-    /** false hides Check, Add and Replace: a dialog reads `found` and adds from its own footer. */
-    buttons?: boolean;
-    /** The ranges of the checked text; empty while the text changes or holds none. */
-    found?: string[];
     /** With it, a Replace button gives the ranges in place of the current ones. */
     onReplace?: (ranges: string[]) => void;
   } = $props();
@@ -87,9 +81,6 @@
   const current = $derived(!empty && checkedText === text);
   const shown = $derived(empty ? null : result);
   const count = $derived(current && result ? result.ranges.length : 0);
-  $effect(() => {
-    found = current && result && !checking ? result.ranges : [];
-  });
   const plural = (n: number, one: string, many: string) => `${formatCount(n)} ${n === 1 ? one : many}`;
 
   function clear() {
@@ -156,7 +147,6 @@
     </div>
   {/if}
 
-  {#if buttons}
   <div class="flex flex-wrap gap-2">
     <Button variant="outline" size="sm" disabled={disabled || empty || current || checking} onclick={check}>
       {#if checking}<Spinner />{/if}
@@ -171,5 +161,4 @@
       </Button>
     {/if}
   </div>
-  {/if}
 </div>

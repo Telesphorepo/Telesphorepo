@@ -1,7 +1,7 @@
 // Package access is the policy engine of repo access (engine.go) and the access report built from
-// the same parts: who can download from a repo and who can publish to it, what blocks publishing
-// (the repo kind, an operation on the repo), and what each guard limits (e.g. the networks of the
-// network module), each said in one plain sentence.
+// the same parts: who can download from a repo (the people, and the allowed networks of the
+// network module) and who can publish to it, and what blocks publishing (the repo kind, an
+// operation on the repo), each said in one plain sentence.
 //
 // The holders of the All repositories permission can download from and publish to every repo.
 // They are counted (admins), not listed, unless the caller asks for them; the sentences name
@@ -70,15 +70,16 @@ type DownloadNote func(ctx context.Context, repo *repos.Repo) (string, error)
 func (e *Engine) AddDownloadNote(fn DownloadNote) { e.notes = append(e.notes, fn) }
 
 // Download is who can download from a repo. People are the users with a grant of download;
-// Admins counts the enabled holders of the All repositories permission. Guards are the reports
-// of the guards, by guard name. Notes are the sentences of the DownloadNote sources.
+// Admins counts the enabled holders of the All repositories permission. Networks are the allowed
+// networks: anyone at those addresses downloads without signing in. Notes are the sentences of
+// the DownloadNote sources.
 type Download struct {
-	Public   bool                   `json:"public"`
-	People   []Person               `json:"people"`
-	Admins   int                    `json:"admins"`
-	Guards   map[string]GuardReport `json:"guards"`
-	Sentence string                 `json:"sentence"`
-	Notes    []string               `json:"notes"`
+	Public   bool          `json:"public"`
+	People   []Person      `json:"people"`
+	Admins   int           `json:"admins"`
+	Networks NetworkReport `json:"networks"`
+	Sentence string        `json:"sentence"`
+	Notes    []string      `json:"notes"`
 }
 
 // Publish is who can publish to a repo. People are the users with a grant of publish (they
@@ -87,12 +88,11 @@ type Download struct {
 // publish now (null when the people and pipelines above can); a proxy or a group lists no
 // publisher.
 type Publish struct {
-	People   []Person               `json:"people"`
-	Admins   int                    `json:"admins"`
-	CI       []Pipeline             `json:"ci"`
-	Guards   map[string]GuardReport `json:"guards"`
-	Blocked  *Blocked               `json:"blocked"`
-	Sentence string                 `json:"sentence"`
+	People   []Person   `json:"people"`
+	Admins   int        `json:"admins"`
+	CI       []Pipeline `json:"ci"`
+	Blocked  *Blocked   `json:"blocked"`
+	Sentence string     `json:"sentence"`
 }
 
 // Repo is the effective access of one repo. People lists each person with a grant once, with
@@ -189,10 +189,9 @@ func (e *Engine) Report(ctx context.Context, repo *repos.Repo, listAdmins bool) 
 		p.CI = append(p.CI, ps...)
 		slices.SortFunc(p.CI, func(a, b Pipeline) int { return strings.Compare(a.Rule, b.Rule) })
 	}
-	d.Guards, p.Guards = map[string]GuardReport{}, map[string]GuardReport{}
-	for _, gd := range e.guards {
-		d.Guards[gd.Name()] = gd.Describe(repo, Read)
-		p.Guards[gd.Name()] = gd.Describe(repo, Write)
+	d.Networks = NetworkReport{Lists: []NetworkList{}, CIDRs: []NetworkCIDR{}}
+	if e.networks != nil {
+		d.Networks = e.networks.Describe(repo.ID)
 	}
 	d.Sentence, p.Sentence = downloadSentence(d), publishSentence(p)
 	d.Notes = []string{}
@@ -206,15 +205,6 @@ func (e *Engine) Report(ctx context.Context, repo *repos.Repo, listAdmins bool) 
 		}
 	}
 	return out, nil
-}
-
-func sortedKeys[V any](m map[string]V) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
-	return keys
 }
 
 // --- sentences ---
@@ -238,52 +228,30 @@ func and(items []string) string {
 	return strings.Join(items[:len(items)-1], ", ") + " and " + items[len(items)-1]
 }
 
-// limits is ", <summary>" for each guard that restricts, in guard name order, or "".
-func limits(guards map[string]GuardReport) string {
-	out := ""
-	for _, name := range sortedKeys(guards) {
-		if g := guards[name]; g.Restricted && g.Summary != "" {
-			out += ", " + g.Summary
-		}
-	}
-	return out
-}
-
-// restricted reports whether any guard restricts.
-func restricted(guards map[string]GuardReport) bool {
-	for _, g := range guards {
-		if g.Restricted {
-			return true
-		}
-	}
-	return false
-}
-
-// downloadSentence: "anyone on the internet.", "anyone, only from GitHub Actions.",
-// "3 people.", "only admins, only from 10.0.0.0/8."
+// downloadSentence: "anyone on the internet.", "3 people.", "only admins.", "3 people and anyone
+// at GitHub Actions and 10.0.0.0/8."
 func downloadSentence(d *Download) string {
-	var who string
+	if d.Public {
+		return "anyone on the internet."
+	}
 	people := 0
 	for _, p := range d.People {
 		if p.Via == ViaPermission {
 			people++
 		}
 	}
-	switch {
-	case d.Public && !restricted(d.Guards):
-		return "anyone on the internet."
-	case d.Public:
-		who = "anyone"
-	case people > 0:
+	who := "only admins"
+	if people > 0 {
 		who = count(people, "person", "people")
-	default:
-		who = "only admins"
 	}
-	return who + limits(d.Guards) + "."
+	if d.Networks.Summary != "" {
+		who += " and anyone at " + d.Networks.Summary
+	}
+	return who + "."
 }
 
-// publishSentence: "3 people and 1 CI pipeline (acme/app, branch main), only from GitHub
-// Actions.", "only admins.", "nobody. Uploads and deletes start after the switch-over from Nexus
+// publishSentence: "3 people and 1 CI pipeline (acme/app, branch main).", "only admins.",
+// "nobody. Uploads and deletes start after the switch-over from Nexus
 // server acme." A blocked message is full sentences, so it follows "nobody." as it is.
 func publishSentence(p *Publish) string {
 	if p.Blocked != nil {
@@ -324,7 +292,7 @@ func publishSentence(p *Publish) string {
 	if who == "" {
 		who = "only admins"
 	}
-	return who + limits(p.Guards) + "."
+	return who + "."
 }
 
 // describe is "acme/app, branch main", "acme/app, tags v*", or the rule name.

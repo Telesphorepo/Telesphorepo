@@ -134,6 +134,13 @@ func ClientIP(r *http.Request) netip.Addr {
 	return PeerIP(r)
 }
 
+// ClientAddr returns the client address that WithClient attached to the request of ctx, or the
+// zero Addr for a context without one (a job, a server without the network module).
+func ClientAddr(ctx context.Context) netip.Addr {
+	c, _ := ctx.Value(clientKey{}).(Client)
+	return c.IP
+}
+
 // ClientScheme returns the scheme that the client used to reach the server: "https" or "http".
 // It is the one that WithClient attached to r, else that of the connection.
 func ClientScheme(r *http.Request) string {

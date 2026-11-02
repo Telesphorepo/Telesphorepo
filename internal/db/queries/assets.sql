@@ -72,6 +72,47 @@ LIMIT ?;
 -- name: SetAssetChecked :exec
 UPDATE assets SET checked_at = ?, remote_etag = ? WHERE repo_id = ? AND path = ?;
 
+-- The children of each folder (tree_entries), written with each asset insert and delete. A file
+-- row is new when AddTreeFile inserts it; only then do its folders count one more file.
+-- name: AddTreeFile :execrows
+INSERT INTO tree_entries (repo_id, parent, kind, sort_key, name, files, asset_id)
+VALUES (?, ?, 1, ?, ?, 0, ?)
+ON CONFLICT (repo_id, parent, kind, sort_key) DO NOTHING;
+
+-- name: DeleteTreeFile :execrows
+DELETE FROM tree_entries WHERE repo_id = ? AND parent = ? AND kind = 1 AND sort_key = ?;
+
+-- name: AddTreeFolderFile :exec
+INSERT INTO tree_entries (repo_id, parent, kind, sort_key, name, files)
+VALUES (?, ?, 0, ?, ?, 1)
+ON CONFLICT (repo_id, parent, kind, sort_key) DO UPDATE SET files = files + 1;
+
+-- name: DropTreeFolderFile :one
+UPDATE tree_entries SET files = files - 1
+WHERE repo_id = ? AND parent = ? AND kind = 0 AND sort_key = ?
+RETURNING files;
+
+-- name: DeleteTreeFolder :exec
+DELETE FROM tree_entries WHERE repo_id = ? AND parent = ? AND kind = 0 AND sort_key = ?;
+
+-- Pages of the children of a folder: one range of the primary key each. A cursor's key with a 0
+-- byte appended is the smallest key after it.
+-- name: ListTreeFolders :many
+SELECT sort_key, name FROM tree_entries
+WHERE repo_id = sqlc.arg(repo_id) AND parent = sqlc.arg(parent) AND kind = 0 AND sort_key >= sqlc.arg(lower)
+ORDER BY sort_key LIMIT sqlc.arg(limit);
+
+-- name: ListTreeFoldersDesc :many
+SELECT sort_key, name FROM tree_entries
+WHERE repo_id = sqlc.arg(repo_id) AND parent = sqlc.arg(parent) AND kind = 0 AND sort_key < sqlc.arg(upper)
+ORDER BY sort_key DESC LIMIT sqlc.arg(limit);
+
+-- name: ListTreeFiles :many
+SELECT t.sort_key, a.id, a.path, a.size, a.sha256, a.uploaded_by, a.updated_at, a.build_id
+FROM tree_entries t JOIN assets a ON a.id = t.asset_id
+WHERE t.repo_id = sqlc.arg(repo_id) AND t.parent = sqlc.arg(parent) AND t.kind = 1 AND t.sort_key >= sqlc.arg(lower)
+ORDER BY t.sort_key LIMIT sqlc.arg(limit);
+
 -- Content-addressed blobs (internal/blobs).
 
 -- name: GetBlob :one

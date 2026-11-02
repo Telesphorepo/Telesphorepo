@@ -23,10 +23,11 @@ import (
 )
 
 // walkTree reads every page of folder dir of repo, limit entries at a time, and fails on a page
-// longer than limit, a path out of order or a path twice.
+// longer than limit, a folder after a file or a path twice.
 func walkTree(t *testing.T, s *Server, repo, dir string, limit int, auth Auth) []treeNode {
 	t.Helper()
 	var out []treeNode
+	seen := map[string]bool{}
 	after := ""
 	for pages := 0; ; pages++ {
 		if pages > 1000 {
@@ -51,9 +52,13 @@ func walkTree(t *testing.T, s *Server, repo, dir string, limit int, auth Auth) [
 			t.Fatalf("tree of %s/%s: %d entries, limit %d", repo, dir, len(page.Items), limit)
 		}
 		for _, n := range page.Items {
-			if len(out) > 0 && out[len(out)-1].Path >= n.Path {
-				t.Fatalf("tree of %s/%s: %q after %q: out of order or twice", repo, dir, n.Path, out[len(out)-1].Path)
+			if seen[n.Path] {
+				t.Fatalf("tree of %s/%s: %q twice", repo, dir, n.Path)
 			}
+			if len(out) > 0 && out[len(out)-1].Type == "file" && n.Type == "dir" {
+				t.Fatalf("tree of %s/%s: the folder %q after the file %q", repo, dir, n.Path, out[len(out)-1].Path)
+			}
+			seen[n.Path] = true
 			out = append(out, n)
 		}
 		if page.Next == nil || *page.Next == "" {
@@ -64,8 +69,9 @@ func walkTree(t *testing.T, s *Server, repo, dir string, limit int, auth Auth) [
 }
 
 // unionTree is what a group lists at dir: the entries of each member in read order, a path once,
-// a file from the first member that holds it (named in Repo), a folder without a member.
-func unionTree(t *testing.T, s *Server, members []string, dir string, auth Auth) []treeNode {
+// a file from the first member that holds it (named in Repo), a folder without a member, in the
+// order that ref, a repository that holds every path of the members, lists them.
+func unionTree(t *testing.T, s *Server, members []string, ref, dir string, auth Auth) []treeNode {
 	t.Helper()
 	seen := map[string]bool{}
 	var out []treeNode
@@ -82,15 +88,16 @@ func unionTree(t *testing.T, s *Server, members []string, dir string, auth Auth)
 			out = append(out, n)
 		}
 	}
-	slices.SortFunc(out, func(a, b treeNode) int {
-		switch {
-		case a.Path < b.Path:
-			return -1
-		case a.Path > b.Path:
-			return 1
+	order := map[string]int{}
+	for i, n := range walkTree(t, s, ref, dir, 200, s.AdminBasic()) {
+		order[n.Path] = i
+	}
+	for _, n := range out {
+		if _, ok := order[n.Path]; !ok {
+			t.Fatalf("the reference %s has no %s", ref, n.Path)
 		}
-		return 0
-	})
+	}
+	slices.SortFunc(out, func(a, b treeNode) int { return order[a.Path] - order[b.Path] })
 	return out
 }
 
@@ -109,7 +116,8 @@ func sameTree(t *testing.T, what string, got, want []treeNode) {
 
 // TestGroupFiles lists the files of a Maven group of a repository, a proxy of a second server
 // and a private repository: the union of the members the reader reads, folders merged, a path
-// held by two members from the first, paged without gaps or duplicates, and no writes.
+// held by two members from the first, paged without gaps or duplicates, no writes, and deletes
+// that go to its members.
 func TestGroupFiles(t *testing.T) {
 	t.Parallel()
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
@@ -131,7 +139,7 @@ func TestGroupFiles(t *testing.T) {
 		up := RandName("upstream")
 		remote.CreateRepo(t, up, "maven", true, nil)
 		upAuth := remote.PublishAuth(t, remote.AdminUser, up)
-		remoteFiles := []string{shared, base + "proxied/1.0/proxied-1.0.txt", "org/e2e/remote/1.0/remote-1.0.txt"}
+		remoteFiles := []string{shared, base + "proxied/1.0/proxied-1.0.txt", "org/e2e/remote/1.0/remote-1.0.txt", base + "many/1.5/many-1.5-r00.txt"}
 		for i := range 6 {
 			remoteFiles = append(remoteFiles, fmt.Sprintf("%smany-1.0-r%02d.txt", many, i))
 		}
@@ -146,9 +154,12 @@ func TestGroupFiles(t *testing.T) {
 		s.CreateRepo(t, hosted, "maven", true, nil)
 		hostedAuth := s.PublishAuth(t, s.AdminUser, hosted)
 		put(s, hostedAuth, hosted, shared, "from the repository")
-		put(s, hostedAuth, hosted, base+"hosted/1.0/hosted-1.0.txt", "hosted")
+		hostedFiles := []string{base + "hosted/1.0/hosted-1.0.txt", base + "many/2.0/many-2.0-h00.txt"}
 		for i := range 6 {
-			put(s, hostedAuth, hosted, fmt.Sprintf("%smany-1.0-h%02d.txt", many, i), "hosted")
+			hostedFiles = append(hostedFiles, fmt.Sprintf("%smany-1.0-h%02d.txt", many, i))
+		}
+		for _, p := range hostedFiles {
+			put(s, hostedAuth, hosted, p, "hosted")
 		}
 		for i := range 4 {
 			put(s, hostedAuth, hosted, fmt.Sprintf("%smany-1.0-s%02d.txt", many, i), "from the repository")
@@ -165,19 +176,34 @@ func TestGroupFiles(t *testing.T) {
 		secret := RandName("secret")
 		s.CreateRepo(t, secret, "maven", false, nil)
 		secretAuth := s.PublishAuth(t, s.AdminUser, secret)
-		put(s, secretAuth, secret, base+"secret/1.0/secret-1.0.txt", "secret")
-		put(s, secretAuth, secret, many+"many-1.0-z00.txt", "secret")
+		secretFiles := []string{base + "secret/1.0/secret-1.0.txt", many + "many-1.0-z00.txt"}
+		for _, p := range secretFiles {
+			put(s, secretAuth, secret, p, "secret")
+		}
+
+		// The reference holds every path of the members: its tree is the order of the group's.
+		ref := RandName("ref")
+		s.CreateRepo(t, ref, "maven", false, nil)
+		refAuth := s.PublishAuth(t, s.AdminUser, ref)
+		for _, p := range slices.Concat(remoteFiles, hostedFiles, secretFiles) {
+			put(s, refAuth, ref, p, "reference")
+		}
 
 		grp := RandName("merged")
 		members := []string{hosted, central, secret}
 		s.CreateGroup(t, grp, "maven", true, members)
 
 		admin := s.AdminBasic()
-		for _, dir := range []string{"", base, many} {
-			want := unionTree(t, s, members, dir, admin)
+		dirs := []string{"", base, base + "many/", many}
+		for _, dir := range dirs {
+			want := unionTree(t, s, members, ref, dir, admin)
 			for _, limit := range []int{1, 3, 200} {
 				sameTree(t, fmt.Sprintf("group tree of %q, limit %d, as the administrator", dir, limit), walkTree(t, s, grp, dir, limit, admin), want)
 			}
+		}
+		// The versions that the repository (1.0, 2.0) and the proxy (1.0, 1.5) hold: newest first.
+		if got := nodeNames(walkTree(t, s, grp, base+"many/", 1, admin)); !slices.Equal(got, []string{"dir:2.0", "dir:1.5", "dir:1.0"}) {
+			t.Fatalf("group tree of %smany/: %v, want the versions 2.0, 1.5 and 1.0 newest first", base, got)
 		}
 
 		// The top folder: com/ from the repository and the proxy is one folder, org/ comes from the proxy only.
@@ -205,8 +231,8 @@ func TestGroupFiles(t *testing.T) {
 		}
 
 		// Anonymous: the private member is left out.
-		for _, dir := range []string{base, many} {
-			want := unionTree(t, s, []string{hosted, central}, dir, nil)
+		for _, dir := range dirs[1:] {
+			want := unionTree(t, s, []string{hosted, central}, ref, dir, nil)
 			for _, n := range want {
 				if n.Repo == secret {
 					t.Fatalf("anonymous union holds %s of the private member", n.Path)
@@ -234,10 +260,7 @@ func TestGroupFiles(t *testing.T) {
 			t.Fatalf("group tree with a bad cursor: status %d, want 400: %s", st, b)
 		}
 
-		// A group takes no writes: no delete, no publish token, no PUT.
-		if st, b := s.API(t, http.MethodPost, "/api/repos/"+grp+"/files/delete", map[string]any{"paths": []string{shared}}, s.Admin()); st != http.StatusMethodNotAllowed {
-			t.Fatalf("delete files of a group: status %d, want 405: %s", st, b)
-		}
+		// A group takes no writes: no publish token, no PUT.
 		if st, b := s.ManualSession(t, s.Admin(), s.AdminUser, grp); st != http.StatusConflict {
 			t.Fatalf("manual publish session for a group: status %d, want 409: %s", st, b)
 		}
@@ -246,7 +269,149 @@ func TestGroupFiles(t *testing.T) {
 		}
 		// The repository's file is still the one the group serves.
 		rawWantGet(t, s, opts.S3, "/maven/"+grp+"/"+shared, nil, []byte("from the repository"))
+
+		groupDeletes(t, s, grp, hosted, central, secret, shared, many)
 	})
+}
+
+// gfHolders is the answer of POST /api/repos/{name}/files/holders.
+type gfHolders struct {
+	Members []struct {
+		Repo   string `json:"repo"`
+		Delete bool   `json:"delete"`
+		Reason string `json:"reason"`
+	} `json:"members"`
+	Paths []struct {
+		Path  string   `json:"path"`
+		Repos []string `json:"repos"`
+	} `json:"paths"`
+	Prefixes []struct {
+		Path  string   `json:"path"`
+		Repos []string `json:"repos"`
+	} `json:"prefixes"`
+}
+
+// groupDeletes deletes files of group grp (members hosted, the proxy central and the private
+// secret) in its members: the holders of a path in one member, in two and of a folder across
+// three; a delete from the member that serves a path (the other copy then shows), a delete from
+// all, a member where the person may not delete keeps its copy; a format DELETE on a group is 405.
+func groupDeletes(t *testing.T, s *Server, grp, hosted, central, secret, shared, many string) {
+	t.Helper()
+	holders := func(auth Auth, paths, prefixes []string) gfHolders {
+		t.Helper()
+		var h gfHolders
+		s.MustAPI(t, http.MethodPost, "/api/repos/"+grp+"/files/holders", map[string]any{"paths": paths, "prefixes": prefixes}, auth, &h)
+		if len(h.Paths) != len(paths) || len(h.Prefixes) != len(prefixes) {
+			t.Fatalf("holders of %v %v: %+v, one item per path and prefix", paths, prefixes, h)
+		}
+		return h
+	}
+	hostedOnly := "com/e2e/merge/hosted/1.0/hosted-1.0.txt"
+	h := holders(s.Admin(), []string{hostedOnly, shared}, []string{many})
+	if !slices.Equal(h.Paths[0].Repos, []string{hosted}) || !slices.Equal(h.Paths[1].Repos, []string{hosted, central}) ||
+		!slices.Equal(h.Prefixes[0].Repos, []string{hosted, central, secret}) {
+		t.Fatalf("holders as the administrator: %+v, want %s in %s, %s in %s and %s, %s in all three", h, hostedOnly, hosted, shared, hosted, central, many)
+	}
+	if len(h.Members) != 3 {
+		t.Fatalf("holders as the administrator: members %+v, want the three members", h.Members)
+	}
+	for _, m := range h.Members {
+		if !m.Delete {
+			t.Fatalf("holders as the administrator: %+v, want delete in every member", m)
+		}
+	}
+
+	type deleteOut struct {
+		Deleted int64 `json:"deleted"`
+		Repos   []struct {
+			Repo    string `json:"repo"`
+			Deleted int64  `json:"deleted"`
+			Error   string `json:"error"`
+		} `json:"repos"`
+		Kept []struct {
+			Repo   string `json:"repo"`
+			Reason string `json:"reason"`
+		} `json:"kept"`
+	}
+	del := func(auth Auth, paths []string, members ...string) deleteOut {
+		t.Helper()
+		var out deleteOut
+		s.MustAPI(t, http.MethodPost, "/api/repos/"+grp+"/files/delete", map[string]any{"paths": paths, "members": members}, auth, &out)
+		for _, r := range out.Repos {
+			if r.Error != "" {
+				t.Fatalf("delete %v in %s: %s", paths, r.Repo, r.Error)
+			}
+		}
+		return out
+	}
+	servedBy := func(p string) string {
+		t.Helper()
+		var f struct {
+			Repo string `json:"repo"`
+		}
+		s.MustAPI(t, http.MethodGet, "/api/repos/"+grp+"/file?path="+url.QueryEscape(p), nil, s.AdminBasic(), &f)
+		return f.Repo
+	}
+
+	// Only from the member that serves it: the proxy's copy then shows in the group.
+	if out := del(s.Admin(), []string{shared}, hosted); out.Deleted != 1 || len(out.Repos) != 1 || out.Repos[0].Repo != hosted {
+		t.Fatalf("delete %s from %s: %+v, want one file of %s", shared, hosted, out, hosted)
+	}
+	if got := servedBy(shared); got != central {
+		t.Fatalf("the group serves %s from %q after the delete in %s, want %s", shared, got, hosted, central)
+	}
+	// From all: no member holds it any more.
+	both := many + "many-1.0-s00.txt"
+	if out := del(s.Admin(), []string{both}, hosted, central); out.Deleted != 2 || len(out.Repos) != 2 {
+		t.Fatalf("delete %s from both: %+v, want a file in each", both, out)
+	}
+	if h := holders(s.Admin(), []string{both}, nil); len(h.Paths[0].Repos) != 0 {
+		t.Fatalf("holders of %s after the delete from all: %+v, want none", both, h)
+	}
+
+	// A person who may delete in the repository but not in the proxy, and who does not read the
+	// private member: the proxy keeps its copy.
+	deleter := RandName("deleter")
+	s.CreateUser(t, deleter, "deleter-password-1")
+	s.SetPerms(t, grp, deleter, "repo.download")
+	s.SetPerms(t, hosted, deleter, "repo.download", "repo.delete")
+	s.SetPerms(t, central, deleter, "repo.download")
+	sess := s.SignIn(t, deleter, "deleter-password-1")
+	kept := many + "many-1.0-s01.txt"
+	h = holders(sess, []string{kept}, []string{many})
+	if !slices.Equal(h.Paths[0].Repos, []string{hosted, central}) || !slices.Equal(h.Prefixes[0].Repos, []string{hosted, central}) {
+		t.Fatalf("holders for %s: %+v, want %s and %s, without the private member", deleter, h, hosted, central)
+	}
+	if len(h.Members) != 2 || h.Members[0].Repo != hosted || !h.Members[0].Delete || h.Members[1].Repo != central || h.Members[1].Delete || h.Members[1].Reason == "" {
+		t.Fatalf("holders for %s: members %+v, want delete in %s only, with the reason for %s", deleter, h.Members, hosted, central)
+	}
+	out := del(sess, []string{kept}, hosted, central)
+	if out.Deleted != 1 || len(out.Repos) != 1 || out.Repos[0].Repo != hosted || len(out.Kept) != 1 || out.Kept[0].Repo != central {
+		t.Fatalf("delete %s as %s: %+v, want the file of %s deleted and %s kept", kept, deleter, out, hosted, central)
+	}
+	if h := holders(s.Admin(), []string{kept}, nil); !slices.Equal(h.Paths[0].Repos, []string{central}) {
+		t.Fatalf("holders of %s after the delete as %s: %+v, want %s", kept, deleter, h, central)
+	}
+	// Only members it may not delete in: the refusal of the member; a member it does not read: 400.
+	if st, b := s.API(t, http.MethodPost, "/api/repos/"+grp+"/files/delete", map[string]any{"paths": []string{kept}, "members": []string{central}}, sess); st != http.StatusForbidden {
+		t.Fatalf("delete in %s as %s: status %d, want 403: %s", central, deleter, st, b)
+	}
+	if st, b := s.API(t, http.MethodPost, "/api/repos/"+grp+"/files/delete", map[string]any{"paths": []string{kept}, "members": []string{secret}}, sess); st != http.StatusBadRequest {
+		t.Fatalf("delete in %s, which %s does not read: status %d, want 400: %s", secret, deleter, st, b)
+	}
+	if h := holders(s.Admin(), []string{kept}, nil); !slices.Equal(h.Paths[0].Repos, []string{central}) {
+		t.Fatalf("holders of %s after the refused deletes: %+v, want %s", kept, h, central)
+	}
+
+	// A client's DELETE on a group's format route stays read-only.
+	npmRepo, npmGrp, pkg := RandName("npmhosted"), RandName("npmgroup"), RandName("pkg")
+	s.CreateRepo(t, npmRepo, "npm", true, nil)
+	gfNPMPublish(t, s, npmRepo, pkg, "1.0.0")
+	s.CreateGroup(t, npmGrp, "npm", true, []string{npmRepo})
+	resp, b := s.Do(t, s.NewRequest(t, http.MethodDelete, "/npm/"+npmGrp+"/"+pkg+"/-rev/1-x", nil), s.PublishAuth(t, s.AdminUser, npmRepo))
+	if resp.StatusCode != http.StatusMethodNotAllowed || RefusalCode(b) != "read_only_kind" {
+		t.Fatalf("npm unpublish through the group: status %d: %s, want 405 read_only_kind", resp.StatusCode, b)
+	}
 }
 
 // groupVersion is one item of GET /api/repos/{name}/versions.
@@ -493,9 +658,9 @@ func TestGroupVersions(t *testing.T) {
 		if st, b := s.API(t, http.MethodGet, "/api/repos/"+grp+"/versions?path="+url.QueryEscape(art)+"&after=x!", nil, admin); st != http.StatusBadRequest {
 			t.Fatalf("group versions with a bad cursor: status %d, want 400: %s", st, b)
 		}
-		// Read-only: no delete, no publish session.
-		if st, b := s.API(t, http.MethodPost, "/api/repos/"+grp+"/files/delete", map[string]any{"prefixes": []string{art + "2.0/"}}, s.Admin()); st != http.StatusMethodNotAllowed {
-			t.Fatalf("delete a version of a group: status %d, want 405: %s", st, b)
+		// A delete in a group names the members it deletes in; no publish session.
+		if st, b := s.API(t, http.MethodPost, "/api/repos/"+grp+"/files/delete", map[string]any{"prefixes": []string{art + "2.0/"}}, s.Admin()); st != http.StatusBadRequest {
+			t.Fatalf("delete a version of a group without members: status %d, want 400: %s", st, b)
 		}
 		if st, b := s.ManualSession(t, s.Admin(), s.AdminUser, grp); st != http.StatusConflict {
 			t.Fatalf("manual publish session for a group: status %d, want 409: %s", st, b)

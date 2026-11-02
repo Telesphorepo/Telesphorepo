@@ -18,13 +18,14 @@
 
   People with Delete files delete files and folders here, with the UI session. In the List view they pick rows (files and folders mix): while rows are picked,
   the details column shows how many and the size of the picked files, and Delete removes them all
-  after one confirm.
+  after one confirm. In a group the delete goes to its repositories (delete/GroupDeleteDialog): each
+  repository decides with the person's own Delete files there.
 -->
 <script lang="ts">
   import { untrack } from "svelte";
   import { toast } from "svelte-sonner";
   import { api, errorMessage, type Repo } from "$lib/api";
-  import { deleteFiles } from "$lib/deletes";
+  import { deleteFiles, deleteGroupFiles, type GroupDelete } from "$lib/deletes";
   import { count, selectedText, someNames } from "$lib/words";
   import FileSize from "$lib/components/FileSize.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
@@ -50,6 +51,7 @@
   import FolderDetails from "./files/FolderDetails.svelte";
   import Loading from "$lib/components/Loading.svelte";
   import DeleteDialog from "./delete/DeleteDialog.svelte";
+  import GroupDeleteDialog from "./delete/GroupDeleteDialog.svelte";
   import { flowsHere, placeOf, versionTarget, type Place } from "./files/place";
   import { viewMin } from "./files/area";
   import { baseName, parentOf } from "./browse";
@@ -69,7 +71,7 @@
     path: string;
     query: URLSearchParams;
     base: string;
-    /** The person holds Delete files here (and the repository is not paused). */
+    /** The person holds Delete files here (and the repository is not paused); in a group, in one of its repositories. */
     canWrite: boolean;
     canUpload: boolean;
   } = $props();
@@ -193,7 +195,17 @@
   let deleting = $state<DeleteTarget | null>(null);
   let deleteOpen = $state(false);
 
+  // A group deletes in its repositories: one dialog for one item or several.
+  const group = $derived(repo.kind === "group");
+  let groupTargets = $state<DeleteTarget[]>([]);
+  let groupOpen = $state(false);
+
   function askDelete(t: DeleteTarget) {
+    if (group) {
+      groupTargets = [t];
+      groupOpen = true;
+      return;
+    }
     deleting = t;
     deleteOpen = true;
   }
@@ -205,6 +217,11 @@
   function askDeleteMany(ts: DeleteTarget[]) {
     if (ts.length === 0) return;
     if (ts.length === 1) return askDelete(ts[0]);
+    if (group) {
+      groupTargets = ts;
+      groupOpen = true;
+      return;
+    }
     many = ts;
     manyOpen = true;
   }
@@ -239,6 +256,29 @@
       (e) => {
         toast.error(errorMessage(e));
         if (mounted) place.reload();
+      },
+    );
+  }
+
+  function deleteInGroup(ts: DeleteTarget[], deletes: GroupDelete[]) {
+    if (deletes.length === 0) return;
+    const paths = ts.flatMap((t) => t.files ?? (t.dir ? [] : [t.path]));
+    const prefixes = ts.filter((t) => t.dir).map((t) => t.path);
+    picked = new Set();
+    deleteGroupFiles(repo.name, deletes).then(
+      ({ deleted, kept }) => {
+        const names = kept.map((k) => k.repo);
+        toast.success(`Deleted ${count(deleted, "file", "files")}.`, {
+          description: names.length ? `${someNames(names)} kept ${names.length === 1 ? "its copy" : "their copies"}.` : undefined,
+        });
+        if (mounted) afterDelete(ts, paths, prefixes);
+      },
+      (e) => {
+        toast.error(errorMessage(e));
+        if (mounted) {
+          version++;
+          place.reload();
+        }
       },
     );
   }
@@ -404,6 +444,10 @@
 </div>
 
 <DeleteDialog bind:open={deleteOpen} {repo} target={deleting} onConfirm={runDelete} />
+
+{#if group}
+  <GroupDeleteDialog bind:open={groupOpen} {repo} targets={groupTargets} onConfirm={(deletes) => deleteInGroup(groupTargets, deletes)} />
+{/if}
 
 <ConfirmDialog
   bind:open={manyOpen}

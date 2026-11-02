@@ -176,13 +176,14 @@ func (r *Router) Handle(pattern string, p Policy, h Handler) {
 //  4. The server permission, or the repository permission SomeRepo on at least one repo; then
 //     every permission of AllPerms.
 //  5. The repo: its name, or a redirect of it (repos.Service.ByName; the events of the request
-//     then record the redirect, audit.WithRepoName), then access.Engine.Decide. A format read of a repo that not everyone reads
+//     then record the redirect, audit.WithRepoName), then access.Engine.Decide, with the operation of
+//     RepoRule.Group on a group when the rule has one. A format read of a repo that not everyone reads
 //     (access.Engine.Private) answers with Cache-Control: private, so a shared cache
 //     in front of the server does not keep it. A public repo gets no Cache-Control here. A format
 //     read keeps the members of a group that it reads for the request (repos.Remember).
 //
 // The audit actor of the caller (with the client address) is in the request context from step 1
-// on, so the handler, the services it calls and a guard refusal record events with it.
+// on, so the handler and the services it calls record events with it.
 func (m *Mux) enforce(p Policy, h Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		c := &Call{}
@@ -291,6 +292,11 @@ func (m *Mux) enforce(p Policy, h Handler) http.HandlerFunc {
 			case rule.Format != "" && repo.Format != rule.Format:
 				fail(m.access.Missing(c.P, repo))
 				return
+			}
+			if repo.Kind == repos.KindGroup {
+				if gop, gneeds, ok := rule.onGroup(); ok {
+					op, needs = gop, gneeds
+				}
 			}
 			// A bearer token of another credential kind reads or reads metadata only with the open
 			// publish session of its scope; on a write or a delete, the engine answers from its scope.

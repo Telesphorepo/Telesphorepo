@@ -159,6 +159,9 @@ func (p *Pipeline) removeBatch(ctx context.Context, repo *repos.Repo, hooks *Hoo
 			if _, err := q.DeleteAsset(ctx, dbq.DeleteAssetParams{RepoID: repo.ID, Path: a.Path}); err != nil {
 				return err
 			}
+			if err := treeRemove(ctx, q, repo.ID, a.Path); err != nil {
+				return err
+			}
 			if each {
 				if err := p.audit.RecordTx(ctx, tx, audit.Event{Action: audit.FileDelete, RepoID: repo.ID, Repo: repo.Name,
 					Target: a.Path, Detail: map[string]any{"count": 1}}); err != nil {
