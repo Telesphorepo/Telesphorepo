@@ -198,6 +198,118 @@ func TestRaw(t *testing.T) {
 			rawWantStatus(t, resp, body, http.StatusUnauthorized)
 		})
 
+		// A signed download link reads one file of a private repo without a credential, as the
+		// person who made it, until it expires; nothing else.
+		t.Run("signed link", func(t *testing.T) {
+			const file = "dist/v1/app.bin"
+			linker := RandName("l")
+			s.CreateUser(t, linker, "linker-pass-1234")
+			s.SetPerms(t, repo, linker, "repo.download")
+			sess := s.SignIn(t, linker, "linker-pass-1234")
+			type link struct {
+				URL       string    `json:"url"`
+				ExpiresAt time.Time `json:"expires_at"`
+			}
+			makeLink := func(t *testing.T, repo, file string, ttl any) (*url.URL, link) {
+				t.Helper()
+				var l link
+				body := map[string]any{"path": file}
+				if ttl != nil {
+					body["ttl"] = ttl
+				}
+				s.MustAPI(t, http.MethodPost, "/api/repos/"+repo+"/links", body, sess, &l)
+				u, err := url.Parse(l.URL)
+				if err != nil {
+					t.Fatalf("link URL %q: %v", l.URL, err)
+				}
+				return u, l
+			}
+			u, l := makeLink(t, repo, file, nil)
+			if u.Path != path || !l.ExpiresAt.After(time.Now()) {
+				t.Fatalf("link %q expires %v: want the path %s (the file name last) and a later expiry", l.URL, l.ExpiresAt, path)
+			}
+			q := u.Query()
+			sig := q.Get("tsig")
+
+			rawWantGet(t, s, tg, u.RequestURI(), nil, data)
+			resp, body := s.Do(t, s.NewRequest(t, http.MethodHead, u.RequestURI(), nil), nil)
+			rawWantStatus(t, resp, body, http.StatusOK)
+
+			refused := func(t *testing.T, what, p string) {
+				t.Helper()
+				if st, b := rawGet(t, s, tg, p, nil); st != http.StatusUnauthorized {
+					t.Fatalf("%s: GET %s: status %d, want 401: %.200s", what, p, st, b)
+				}
+			}
+			refused(t, "another path", "/raw/"+repo+"/dist/v1/other.bin?"+q.Encode())
+			other := RandName("rawo")
+			s.CreateRepo(t, other, "raw", false, nil)
+			resp, body = rawPut(t, s, "/raw/"+other+"/"+file, data, s.PublishAuth(t, "admin", other))
+			rawWantStatus(t, resp, body, http.StatusCreated)
+			s.SetPerms(t, other, linker, "repo.download")
+			refused(t, "another repo", "/raw/"+other+"/"+file+"?"+q.Encode())
+			later := url.Values{"texp": {strconv.FormatInt(l.ExpiresAt.Unix()+60, 10)}, "tsig": {sig}}
+			refused(t, "a later expiry", path+"?"+later.Encode())
+			flipped := []byte(sig)
+			if flipped[len(flipped)-2] == 'A' {
+				flipped[len(flipped)-2] = 'B'
+			} else {
+				flipped[len(flipped)-2] = 'A'
+			}
+			refused(t, "a changed signature", path+"?"+url.Values{"texp": {q.Get("texp")}, "tsig": {string(flipped)}}.Encode())
+
+			short, _ := makeLink(t, repo, file, 1)
+			time.Sleep(2 * time.Second)
+			refused(t, "an expired link", short.RequestURI())
+
+			// A link only reads: a write with it needs a publish session, and the file stays.
+			resp, body = rawPut(t, s, u.RequestURI(), []byte("x"), nil)
+			rawWantStatus(t, resp, body, http.StatusUnauthorized)
+			resp, body = s.Do(t, s.NewRequest(t, http.MethodPost, u.RequestURI(), nil), nil)
+			if resp.StatusCode < 400 {
+				t.Fatalf("POST with a link: status %d, want a refusal: %s", resp.StatusCode, body)
+			}
+			rawWantGet(t, s, tg, u.RequestURI(), nil, data)
+
+			// Making a link: a UI session with download, a file that exists, a lifetime within
+			// links.max_ttl.
+			if st, b := s.API(t, http.MethodPost, "/api/repos/"+repo+"/links", map[string]any{"path": "dist/v1/missing.bin"}, sess); st != http.StatusNotFound {
+				t.Fatalf("link to a missing file: status %d, want 404: %s", st, b)
+			}
+			if st, b := s.API(t, http.MethodPost, "/api/repos/"+repo+"/links", map[string]any{"path": file}, Basic{linker, "linker-pass-1234"}); st != http.StatusUnauthorized {
+				t.Fatalf("link with a password: status %d, want 401: %s", st, b)
+			}
+			s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"links.max_ttl": "1h", "links.ttl": "1h"}, s.Admin(), nil)
+			if st, b := s.API(t, http.MethodPost, "/api/repos/"+repo+"/links", map[string]any{"path": file, "ttl": 7200}, sess); st != http.StatusBadRequest {
+				t.Fatalf("link longer than links.max_ttl: status %d, want 400: %s", st, b)
+			}
+
+			// The audit log names the repo, the path and the expiry, never the signature; no log
+			// line holds it either.
+			var page struct {
+				Items []struct {
+					Actor  string         `json:"actor"`
+					Target string         `json:"target"`
+					Detail map[string]any `json:"detail"`
+				} `json:"items"`
+			}
+			st, raw := s.API(t, http.MethodGet, "/api/audit?action=file.link.create&repo="+repo, nil, s.Admin())
+			if st != http.StatusOK || json.Unmarshal(raw, &page) != nil || len(page.Items) == 0 {
+				t.Fatalf("audit of links: status %d: %s", st, raw)
+			}
+			if e := page.Items[len(page.Items)-1]; e.Actor != linker || e.Target != file || e.Detail["expires_at"] == nil {
+				t.Fatalf("audit event %+v: want actor %s, target %s and detail.expires_at", e, linker, file)
+			}
+			if bytes.Contains(raw, []byte(sig)) || strings.Contains(s.Logs(t), sig) {
+				t.Fatal("the signature of a link is in the audit log or the server log")
+			}
+
+			// The link reads with the current grants of its maker.
+			s.SetPerms(t, repo, linker)
+			resp, body = s.Do(t, s.NewRequest(t, http.MethodGet, u.RequestURI(), nil), nil)
+			rawWantStatus(t, resp, body, http.StatusForbidden)
+		})
+
 		t.Run("overwrite deny", func(t *testing.T) {
 			resp, body := rawPut(t, s, path, data, writerAuth)
 			rawWantStatus(t, resp, body, http.StatusOK)

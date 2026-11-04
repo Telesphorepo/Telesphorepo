@@ -304,6 +304,7 @@ async function chosen(env: Env, config: Config, objects: Objects, region: string
 async function edge(request: Request, env: Env, ctx: ExecutionContext, override: Override | null, note: Note): Promise<Response | null> {
   const url = new URL(request.url);
   if (url.searchParams.has("_state")) return null; // a Docker upload token
+  if (url.searchParams.has("tsig")) return null; // a signed download link: the server checks it
   // The time of each step up to the answer, for Server-Timing, with where its held reads were
   // answered so far (memory, Cache API, R2). Date.now() moves only across I/O, so each step
   // measures its reads.

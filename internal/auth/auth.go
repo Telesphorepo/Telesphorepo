@@ -73,6 +73,9 @@ const (
 	// helper). It reads what its user reads; it writes only through the publish session of a
 	// bearer scope that the device minted.
 	CredDevice
+	// CredLink is a signed download link (LinkSigParam): one GET or HEAD of one file path of one
+	// repo, until it expires, with the current grants of the user who made it.
+	CredLink
 )
 
 // Principal is an authenticated caller. A nil *Principal means anonymous. A principal from an
@@ -88,6 +91,8 @@ type Principal struct {
 	// access object.
 	TokenPublicID string
 	DeviceID      int64 // CredDevice only
+	// Link is the repo of a signed download link (CredLink only).
+	Link *Link
 	// Publish is the open session of a CredPublish principal. The access engine limits such a
 	// principal to the session's repo, and the route policies to the publish routes.
 	Publish *PublishSession
@@ -175,6 +180,7 @@ type Service struct {
 	sessions     SessionLoader                   // loads the publish sessions of bearer tokens
 	devices      DeviceLoader                    // loads the devices of bearer tokens
 	deviceProofs DeviceProofVerifier             // checks device proofs on format reads
+	links        LinkVerifier                    // checks signed download links on format reads
 	sso          func() bool                     // reports whether single sign-on is on (SetSSO)
 	managed      func() bool                     // reports whether single sign-on manages the permissions of SSO accounts (SetManaged)
 

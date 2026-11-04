@@ -18,6 +18,9 @@ import (
 // public address. The route policy has checked the caller already.
 type API struct {
 	Settings settings.Provider
+	// RepoRooted reports whether a GET route serves "/<segment>/{repo}/..." (Mux.RepoRooted), e.g.
+	// the file URL of a format. The server sets it once every route is registered.
+	RepoRooted func(segment string) bool
 }
 
 // Decode reads the JSON body into v under the max_json_size setting. On failure it has answered

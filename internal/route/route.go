@@ -103,12 +103,22 @@ func (r *Router) Handle(pattern string, p Policy, h Handler) {
 	}
 	path = strings.TrimSpace(path)
 	read := method == http.MethodGet || method == http.MethodHead
-	if p.Accept&(auth.CredPassword|auth.CredReadToken|auth.CredDevice) != 0 {
+	if p.Accept&(auth.CredPassword|auth.CredReadToken|auth.CredDevice|auth.CredLink) != 0 {
 		if !read {
-			panic(fmt.Sprintf("route: %s accepts a password, a read token or a device on a method other than GET or HEAD", pattern))
+			panic(fmt.Sprintf("route: %s accepts a password, a read token, a device or a link on a method other than GET or HEAD", pattern))
 		}
 		if p.serverPerms() {
-			panic(fmt.Sprintf("route: %s accepts a password, a read token or a device on a server permission route", pattern))
+			panic(fmt.Sprintf("route: %s accepts a password, a read token, a device or a link on a server permission route", pattern))
+		}
+	}
+	if p.Accept&auth.CredLink != 0 {
+		if p.Repo == nil {
+			panic(fmt.Sprintf("route: %s accepts a signed link without a repo", pattern))
+		}
+		for _, op := range p.Repo.ops() {
+			if op != access.Read {
+				panic(fmt.Sprintf("route: %s accepts a signed link on an operation other than a read", pattern))
+			}
 		}
 	}
 	if p.Repo != nil && p.Repo.Pick != nil && len(p.Repo.Ops) == 0 {
@@ -176,7 +186,8 @@ func (r *Router) Handle(pattern string, p Policy, h Handler) {
 //  4. The server permission, or the repository permission SomeRepo on at least one repo; then
 //     every permission of AllPerms.
 //  5. The repo: its name, or a redirect of it (repos.Service.ByName; the events of the request
-//     then record the redirect, audit.WithRepoName), then access.Engine.Decide, with the operation of
+//     then record the redirect, audit.WithRepoName); a signed link (auth.CredLink) of another repo
+//     is refused with 401; then access.Engine.Decide, with the operation of
 //     RepoRule.Group on a group when the rule has one. A format read of a repo that not everyone reads
 //     (access.Engine.Private) answers with Cache-Control: private, so a shared cache
 //     in front of the server does not keep it. A public repo gets no Cache-Control here. A format
@@ -202,7 +213,7 @@ func (m *Mux) enforce(p Policy, h Handler) http.HandlerFunc {
 			cookie := p.Accept&(auth.CredSession|auth.CredSetupSession) != 0 && !OnRepoDomain(r)
 			pr, err := m.auth.Identify(r, auth.Read{
 				Cookie: cookie, Bearer: p.Bearer, TokenHeader: p.TokenHeader,
-				Device: p.Accept&auth.CredDevice != 0, URLToken: p.URLToken,
+				Device: p.Accept&auth.CredDevice != 0, Link: p.Accept&auth.CredLink != 0, URLToken: p.URLToken,
 			})
 			if err != nil {
 				if d, ok := auth.RetryAfter(err); ok {
@@ -291,6 +302,11 @@ func (m *Mux) enforce(p Policy, h Handler) http.HandlerFunc {
 				return
 			case rule.Format != "" && repo.Format != rule.Format:
 				fail(m.access.Missing(c.P, repo))
+				return
+			}
+			// A signed link reads the repo it was made for only, not another repo of that name.
+			if c.P.Is(auth.CredLink) && (c.P.Link == nil || c.P.Link.RepoID != repo.ID) {
+				fail(access.Refuse(http.StatusUnauthorized, "credentials", auth.ErrBadCredentials.Error()))
 				return
 			}
 			if repo.Kind == repos.KindGroup {
