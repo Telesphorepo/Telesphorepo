@@ -203,6 +203,8 @@
     <Button variant="outline" href={href(repoPath(r.name))}>Open the files</Button>
   </EmptyState>
 {:else}
+  <!-- The tabs sit at the right of the name and description, so the files start high on the page. -->
+  <div class="contents [--header-gap:1.5rem]">
   <PageHeader
     title={r.name}
     description={r.description || undefined}
@@ -227,6 +229,19 @@
       {/if}
     {/snippet}
     {#snippet actions()}
+      <!-- On a phone the tabs scroll sideways; the cut-off last tab shows that, without a scrollbar. -->
+      <div bind:this={tabRail} class="max-w-full min-w-0 [&>nav]:[scrollbar-width:none] [&>nav::-webkit-scrollbar]:hidden">
+      <TabNav
+        label="Repository"
+        class="mb-0"
+        items={[
+          { label: "Files", href: href(repoPath(r.name)), active: view.kind === "files", icon: FolderIcon },
+          { label: "Use this repository", href: href(repoPath(r.name, "use")), active: view.kind === "use", icon: DownloadIcon },
+          ...(canPublish ? [{ label: "Publish to this repository", href: href(repoPath(r.name, "publish")), active: view.kind === "publish", icon: SendIcon }] : []),
+        ]}
+      />
+      </div>
+
       {#if canMerge}
         <Button variant="outline" href={href("/settings/nexus/merge", { from: r.name })}><MergeIcon />Merge into {movesInto}…</Button>
       {/if}
@@ -242,6 +257,7 @@
       {/if}
     {/snippet}
   </PageHeader>
+  </div>
 
   {#if r.operation && failedForAdmin}
     <Alert.Root variant="destructive" class="mb-6">
@@ -268,18 +284,6 @@
         : ["Ends the operation", "Keeps the repository with the files that are left"]}
       onConfirm={clearOperation} />
   {/if}
-
-  <!-- On a phone the tabs scroll sideways; the cut-off last tab shows that, without a scrollbar. -->
-  <div bind:this={tabRail} class="[&>nav]:[scrollbar-width:none] [&>nav::-webkit-scrollbar]:hidden">
-  <TabNav
-    label="Repository"
-    items={[
-      { label: "Files", href: href(repoPath(r.name)), active: view.kind === "files", icon: FolderIcon },
-      { label: "Use this repository", href: href(repoPath(r.name, "use")), active: view.kind === "use", icon: DownloadIcon },
-      ...(canPublish ? [{ label: "Publish to this repository", href: href(repoPath(r.name, "publish")), active: view.kind === "publish", icon: SendIcon }] : []),
-    ]}
-  />
-  </div>
 
   {#if view.kind === "files"}
     <FilesTab repo={r} path={view.path} {query} {base} canWrite={canDelete} {canUpload} />

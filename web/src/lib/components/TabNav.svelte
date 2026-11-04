@@ -15,10 +15,13 @@
   let {
     label,
     items,
+    class: className = "",
   }: {
     /** Accessible name of the tab row. */
     label: string;
     items: { label: string; href: string; active: boolean; icon?: Component<{ class?: string }> }[];
+    /** Replaces the gap under the row, e.g. "mb-0" where the tabs sit in a page header. */
+    class?: string;
   } = $props();
 
   let row = $state<HTMLElement | null>(null);
@@ -36,7 +39,7 @@
   bind:this={row}
   aria-label={label}
   use:fadeEdges
-  class="-mx-1 mb-(--tabs-gap) flex gap-1 overflow-x-auto px-1 py-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+  class={cn("-mx-1 mb-(--tabs-gap) flex gap-1 overflow-x-auto px-1 py-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden", className)}
 >
   {#each items as t (t.href)}
     <a

@@ -4819,8 +4819,9 @@ page are in `web/src/README.md`.
   The matched text is marked in each path, and a count says how many files the loaded pages hold
   ("350+ files" while more pages wait). A row opens its folder, a link its folder or file.
 - **Repository page** (`/#/repo/{name}/...`). The header shows the name with a lock for a private
-  repo, the format (icon and title) and the description. **Upload** and **Settings** show for users
-  who may use them. A proxy shows its cached files and has no Upload and no Publish view. A group
+  repo, the format (icon and title) and the description on the left, and on the right the tabs
+  (Files, Use this repository, Publish to this repository), then **Upload** and **Settings** for
+  users who may use them; the content starts 24 px under the header. A proxy shows its cached files and has no Upload and no Publish view. A group
   has the same tabs, read-only: where Upload would be, the header says "Read-only: this group serves
   its members' files". Files is the Files tab of a hosted repo of its format, every view, the
   artifact and version pages and the file details included (see **Group versions**): each file and
