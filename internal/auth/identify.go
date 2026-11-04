@@ -167,6 +167,9 @@ type Read struct {
 	Cookie      bool   // the tr_session cookie of a UI session
 	Bearer      bool   // core bearer tokens (IssueBearer) in "Authorization: Bearer"
 	Device      bool   // a device read proof (DeviceProofPrefix) as the Basic password or as a Bearer token
+	// Link reads a signed download link (LinkSigParam in the query) of a request without an
+	// Authorization header.
+	Link bool
 	TokenHeader string // a header that carries a token of a registered kind, e.g. X-NuGet-ApiKey
 	// URLToken returns the upload token (IssueUploadToken) that the URL of r carries, and the
 	// upload of that URL. Identify reads it when the Authorization header gives no credential.
@@ -221,6 +224,9 @@ func (s *Service) Identify(r *http.Request, rd Read) (*Principal, error) {
 		if tok := strings.TrimSpace(h); rd.TokenHeader == "Authorization" && s.isToken(tok) {
 			return s.authenticate(ctx, s.clientIP(r), "", tok, true)
 		}
+	}
+	if rd.Link && r.Header.Get("Authorization") == "" && r.URL.Query().Has(LinkSigParam) {
+		return s.link(ctx, s.clientIP(r), r)
 	}
 	if rd.URLToken != nil {
 		if tok, upload := rd.URLToken(r); tok != "" {

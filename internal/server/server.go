@@ -325,6 +325,7 @@ func RunWith(ctx context.Context, boot *config.Boot, opts Options) error {
 		io.WriteString(w, "ok\n")
 	}))
 	mux.Kernel("/", web.Handler())
+	k.API.RepoRooted = mux.RepoRooted
 	hostCheck.attach(mux)
 	set.AddCheck("general", hostCheck.checkDomains)
 	hostCheck.warnShadowed(log, set.Current())

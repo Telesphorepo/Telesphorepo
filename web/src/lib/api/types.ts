@@ -1318,3 +1318,9 @@ export type TrustedProxyLists = {
   /** The lists that TR_TRUSTED_PROXIES names; they change only with the environment. */
   env_lists: string[];
 };
+
+/** A signed download link (POST /api/repos/{name}/links): the file's URL and when it stops working. */
+export type DownloadLink = {
+  url: string;
+  expires_at: string;
+};

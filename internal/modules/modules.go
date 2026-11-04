@@ -11,6 +11,7 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/debian"
 	"github.com/Telesphorepo/Telesphorepo/internal/docker"
 	"github.com/Telesphorepo/Telesphorepo/internal/edge"
+	"github.com/Telesphorepo/Telesphorepo/internal/links"
 	"github.com/Telesphorepo/Telesphorepo/internal/maven"
 	"github.com/Telesphorepo/Telesphorepo/internal/module"
 	"github.com/Telesphorepo/Telesphorepo/internal/move"
@@ -37,6 +38,7 @@ func All() []module.Module {
 		netrules.Module(), // network
 		signing.Module(),
 		publish.Module(),
+		links.Module(),
 		edge.Module(),
 		oidc.Module(), // sso
 		nexus.Module(),

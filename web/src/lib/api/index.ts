@@ -286,6 +286,13 @@ export const api = {
      */
     access: (name: string, opts: { admins?: boolean } = {}) =>
       request<T.RepoAccess>("GET", repo(name) + "/access", { query: { admins: opts.admins ? "1" : undefined } }),
+    /**
+     * A signed download link to file path of the repo: its format URL with an expiry and a
+     * signature, which reads without a credential until expires_at (ttl seconds, else the server's
+     * default). Download on the repo; 404 when the file is not there.
+     */
+    link: (name: string, path: string, ttl?: number) =>
+      request<T.DownloadLink>("POST", repo(name) + "/links", { body: { path, ttl } }),
     /** The URL a browser downloads a file from (the format's own route serves it). */
     fileURL: (format: string, name: string, path: string) =>
       `/${enc(format)}/${enc(name)}/${path.split("/").map(enc).join("/")}`,

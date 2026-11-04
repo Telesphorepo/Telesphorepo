@@ -62,6 +62,7 @@ S3-compatible bucket (Cloudflare R2, SeaweedFS, AWS). It is not compatible with 
 | `internal/auth` | Users (kinds `local`/`oidc`), argon2id passwords, Basic-auth cache, read tokens, sessions, rate limiting, permission checks. A caller is a `Principal` with one credential kind (`Cred`: password, read token, session, setup session, publish session, device). `Identify` reads the credentials a route policy names. Token kinds are verifiers by prefix (`AddTokenKind`). Also core bearer tokens (`IssueBearer`), fresh second-factor proofs (`CheckProof`, `IssueGrant`) and the session view (`View`) |
 | `internal/oidc` | Module `sso`: OIDC sign-in for any person at the provider, the server permissions from a claim (`oidc.permission_claim`, `oidc.permission_map`), and the SSO confirmations of a device approval and of a setup code: `/api/auth/oidc/login`, `/device`, `/setup` and `/callback` (go-oidc + x/oauth2, PKCE S256); owner hooks of the `sso` settings group |
 | `internal/publish` | Module `publish`: device enrollment, setup codes, nonces, trust policies, the CI token exchange, the CI providers `github-actions` and `jenkins`, the token kind `trs` of publish sessions, the device proof of format reads, the publish API, the cleanup job, and the install scripts and downloads of the Telesphorepo CLI |
+| `internal/links` | Module `links`: short-lived signed download links to one file (`POST /api/repos/{name}/links`), the settings group `links` and the verifier of the credential `auth.CredLink` (see **Signed download links**) |
 | `internal/edge` | Module `edge`: the R2 objects that the edge Worker reads (pointers, access objects, `config.json`), the pipeline watcher and the outbox that keep them, the regions, `wrangler.jsonc`, the Worker download, `/api/edge/...`. See **Edge delivery** |
 | `edge/` | The edge Worker (TypeScript, bun, wrangler at an exact version): `fetch` (serve or pass), `queue` (blob copies) and `scheduled` (the gap check); `scripts/provision.ts`. No e2e zone runs the Worker; see **Edge delivery** |
 | `internal/clidist` | The CLI archives that the server embeds (`go:embed all:dist`) and serves at `/cli/`: `Targets`, `Archive`, `FS`, `Sums`. `go tool task build`, `dev`, `cli` and `release` write them |
@@ -241,13 +242,15 @@ the fresh second factor (`Proof`), and the repos of `SomeRepo` (`Managed`). No h
 Presets: `route.Public`, `route.UI` (a full UI session), `route.Setup` (a UI session, setup-only
 too), `route.AnyUser` (password, read token, UI session), `route.UIPerm(id)`,
 `route.UIRepo(op, ids...)`, `route.RepoRead()` (a JSON read of a repo with `repo.download`),
-`route.FormatRead(format)` (anonymous, password, read token, UI session, publish session, device;
-`Read` with `repo.download`) and `route.FormatWrite(format)` (a publish session; `Write` with
+`route.FormatRead(format)` (anonymous, password, read token, UI session, publish session, device,
+signed download link; `Read` with `repo.download`) and `route.FormatWrite(format)` (a publish session; `Write` with
 `repo.publish`).
 
-The router panics at startup when a policy that accepts a password, a read token or a device
-(`auth.CredDevice`) has a method other than GET or HEAD, or a server permission (`Perm` or
-`SomeRepo`), and when a `Write` route accepts a credential other than a publish session. A route with `Bearer` has no server permission,
+The router panics at startup when a policy that accepts a password, a read token, a device
+(`auth.CredDevice`) or a signed download link (`auth.CredLink`) has a method other than GET or
+HEAD, or a server permission (`Perm` or `SomeRepo`), when a policy that accepts a link has no repo
+rule or an operation other than `Read`, and when a `Write` route accepts a credential other than a
+publish session. A route with `Bearer` has no server permission,
 and on a method other than GET or HEAD its repo rule is a `Write` or a `Delete`. So a password
 never changes state and never reaches a permission route, also inside a bearer token.
 
@@ -376,6 +379,8 @@ not expired, the device is usable, and the signature over `SignedMessage(nonce, 
 verifies. The caller is then the `CredDevice` principal with the grants of the device's user. The
 router allows `CredDevice` only on GET and HEAD routes without a server permission, so a device
 proof never writes. A proof that does not verify counts as a failed attempt of the client address.
+A signed download link (`auth.CredLink`) is read the same way from the query of a format read; see
+**Signed download links**.
 
 **Minting a publish session.** The publish module provides `publish.Minter` (`module.Use`):
 `Mint(ctx, r, MintCred, repo)` checks the credential, runs `Decide(..., Mint)` with `repo.publish`,
@@ -806,6 +811,7 @@ The `settings` package holds no feature rules and declares only the keys of the 
 | network (network) | `network.manage` · `/settings/proxy` | `trusted_proxies` (literal entries; the IP lists of the trusted proxies are rows, see **Network rules**), `network.probe_hosts` (none, or an IPv4-only and an IPv6-only host name of the server) |
 | edge (edge) | `edge.manage` · `/settings/edge` | `edge.enabled` (`false`; needs `storage=s3` and a `base_url` without a path), `edge.home_hint` (`""`; one of `wnam enam weur eeur apac oc`, required when edge delivery is on), `edge.regions` (`[]`; entries `<hint>=<bucket>`, each hint once, not the home hint, not the home bucket), `edge.access_ttl` (`30s`, 0 to 5 min), `edge.cloudflare_token` (secret, `""`; the Cloudflare API token of the deploy from the server), `edge.auto_deploy` (`true`; effective only with a token). Its `Validate` checks the rules across keys and at startup turns edge delivery off instead of stopping the server; `Test` probes the home bucket and every regional bucket (with a token and an R2 endpoint, a regional bucket that does not exist passes: the deploy creates it); `Apply` marks a save, which ends "deploy needed" after a storage change. See **Edge delivery** |
 | publishing (publish) | `settings.general` · General | `publish.session_ttl` (`15m`, maximum `1h`), `publish.device_ttl` (90 days) |
+| links (links) | `settings.general` · General | `links.ttl` (`1h`, at most `links.max_ttl`), `links.max_ttl` (`7d`, maximum 30 days), `links.secret`* (`""`; made at the first link, at least 32 characters when entered). See **Signed download links** |
 | sso (sso) | `signin.manage` · `/settings/sign-in` | `oidc.issuer`, `oidc.client_id`, `oidc.client_secret`*, `oidc.redirect_url`, `oidc.scopes` (`openid profile email`), `oidc.session_ttl` (`12h`), `oidc.approval_max_age` (`5m`, 10 s to 1 h: the oldest sign-in that approves a device), `oidc.permission_claim` (`""`; dotted paths allowed), `oidc.permission_map` (type `map`, `{}`), `signin.password_login` (`all` or `publishers`, default `all`) |
 | nexus (nexus) | `nexus.manage` · General | `nexus.sync_interval` (`15m`, minimum `1m`) |
 
@@ -1066,6 +1072,7 @@ transaction.
 | `GET /api/repos/{name}/assets?prefix=&after=&limit=` | `repo.download` | `{items: [{path, size, sha256, content_type, kind, updated_at, repo?}], next}`, ordered by path; the prefix is a range scan. A group merges the pages of the members that the caller reads, each read from the same cursor: a path comes from the first member that has it, named in `repo` |
 | `GET /api/repos/{name}/tree?path=&after=&limit=` | `repo.download` | `{items: [{name, type: "dir"\|"file", path, size?, sha256?, updated_at?, uploaded_by?, build?, side_of?}], next}`: the folders, then the files, each kind with the versions first, in version order, newest first when every name of the kind is a version (see **Files, uploads and deletes**). `build` is the CI build record that wrote the file (see **CI providers and build records**). `side_of` marks a checksum or signature (`.md5`, `.sha1`, `.sha256`, `.sha512`, `.asc`, `.sig`) whose file is in the same folder: that file's name. `path` is a folder (`""` or ending in `/`). A folder item's `path` and the `next` cursor end in `/`. `uploaded_by` is a username. A group answers the merged listing of its members (see **Files, uploads and deletes**), and each file item has `repo`, the member that serves it |
 | `GET /api/repos/{name}/file?path=` | `repo.download` | One file with its details: `{name, path, size, sha256, content_type, kind, created_at, updated_at, uploaded_by, build}`. 404 when the path holds no file. `build` is the CI build record, or null. A group answers the file of the first member in read order that the caller reads and that stores it, with `repo`, that member |
+| `POST /api/repos/{name}/links` | `repo.download`, with a UI session | `{path, ttl?}`: a signed download link to one file, `{url, expires_at}`. See **Signed download links** |
 | `POST /api/repos/{name}/files/holders` | `repo.download`, with a UI session | `{paths?, prefixes?}` as the delete. Deletes nothing. 200 `{members: [{repo, delete, reason?}], paths: [{path, repos}], prefixes: [{path, repos}]}`: per item the members of the group that hold it, in read order, among those the caller reads through the group; per member that holds an item, whether the caller may delete there and else the refusal. A repo that is not a group is its own one member. See **Group deletes** |
 | `POST /api/repos/{name}/files/delete/plan` | as the delete | `{paths?, prefixes?}` as the delete. Deletes nothing. 200 `{files, more, notes: [{text, count, one, many}]}`: the files that exist (a folder walk reads at most 100,000 files; `more` says it stopped), and for each `delete_notes` entry of the format the count of the files its glob matches (entries without a match are left out). It walks `assets` by the `(repo_id, path)` index |
 | `POST /api/repos/{name}/files/delete` | `repo.delete`, with a UI session or a device or manual publish session of the repo | `{paths?: [...], prefixes?: [...]}`: files and folders, 1 to 1000 items together. 400 with the first bad path or prefix; then nothing is deleted. 200 `{deleted: n}`, the number of files, when the delete ends within `delete.wait` (`2s`); else 202 `{id, deleted}` (the files deleted so far) and the delete goes on in the background. A file that is gone already counts as done; an empty folder adds 0. 409 on a repo with an operation; 429 while the repo runs 4 deletes of files. 401 for a password or a read token; 403 without `repo.delete` (a CI session never deletes). One `file.delete` event per file and per folder that lost files. On a group it needs `repo.download` on the group and `members` (see **Group deletes**); on another repo `members` is 400 |
@@ -1240,6 +1247,7 @@ archives with their SHA-256 and the commands to install one by hand.
 | Session `tr_session` | SHA-256(id), absolute `session_ttl` | `/api/`, and format reads (GET and HEAD) for downloads in the browser; never on a repo domain, where the policy does not read the cookie (see **Hosts and repo domains**). The only credential for permission routes and for routes that change state on `/api/`; it never writes to a format route. HttpOnly, SameSite=Strict, Secure per `cookie.secure`. The session of a person who holds `delete` may also delete files (see **Files, uploads and deletes**) |
 | Publish session `trs_<12hex>_<secret>` | SHA-256(secret) in `publish_sessions`, constant-time compare | Basic password (any username) or `Authorization: Bearer` on format routes of its one repo, `/api/publish/...`, and the upload and delete routes of its repo. The only credential that writes to a format route |
 | Device (`auth.CredDevice`) | The enrolled device key; a device proof `trx.<device id>.<nonce>.<signature>` over a token exchange nonce, as the Basic password or the Bearer value of a format read, or inside a core bearer token of a format's token exchange (the Docker credential helper) | Format reads (GET and HEAD) with the grants of the device's user, and writes through the publish session that the device minted for the repo (the bearer scope) |
+| Signed download link (`auth.CredLink`) | Nothing stored: `?texp=<unix>&tsig=<user id>.<repo id>.<mac>`, the HMAC-SHA256 under `links.secret` of the repo id, the user id, the expiry and the server path, compared in constant time | Format reads (GET and HEAD) of a request without an `Authorization` header, of exactly the signed path of the signed repo, until it expires, with the current grants of its maker. See **Signed download links** |
 
 - **Account kinds.** `local` users have a password, API tokens and Basic auth; publishers and the
   break-glass admin. `oidc` users are created on their first SSO login, keyed by
@@ -1362,6 +1370,39 @@ archives with their SHA-256 and the commands to install one by hand.
   described in **Network rules**.
 - **First start.** On first start with no users, the server creates `admin` with a random
   password and prints it once to stderr, outside the JSON log stream.
+
+### Signed download links
+
+A person copies a direct URL to one file of a repository that not everyone reads and pastes it
+into a tool that takes a plain URL (a game panel that downloads a server jar). The module `links`
+(`internal/links`) owns it; it has no table.
+
+- **Making one.** `POST /api/repos/{name}/links` `{path, ttl?}` (ttl in seconds, 1 to
+  `links.max_ttl`; absent: `links.ttl`) needs a UI session and `repo.download` on the repo. 400
+  for a bad path or ttl, 404 when the file is not in the repo (a group: in a member the person
+  reads through it), 409 for a format whose files have no URL under `/<format>/{repo}/` (Docker).
+  It answers `{url, expires_at}`: the file's format URL, the one the web UI's Download button uses,
+  on `base_url` (else the address of the request), with the query
+  `texp=<unix seconds>&tsig=<user id>.<repo id>.<mac>`. The file name stays the last path segment.
+  `mac` is base64url of HMAC-SHA256 under `links.secret` over
+  `"telesphorepo link v1\n<repo id>\n<user id>\n<texp>\n<server path>"`, where the server path
+  is `/<format>/<repo name>/<file path>`, not escaped. Each link records `file.link.create`.
+- **The key.** `links.secret` (a secret setting) is made at the first link: 32 random bytes,
+  saved like a change of the setting by that person (`settings.update`). A new value (at least 32
+  characters) or a reset of the setting ends every link; the next link makes a new key after a
+  reset.
+- **Reading with one.** `route.FormatRead` accepts `auth.CredLink`; the router allows it only on
+  GET and HEAD routes that read one repo and need no server permission. `Identify` reads it when
+  the request has `tsig` and no `Authorization` header (it then reads no session cookie). The
+  verifier checks the expiry (in the future, and at most `links.max_ttl` from now, so lowering the
+  setting shortens every link), then the MAC over the request's `URL.Path`, then the user: gone or
+  disabled is refused. The route's repo step refuses the link on another repo of that name (one
+  deleted and created again). The access engine then decides as for any read: the user's current
+  grants, plus the repo's allowed networks for the downloader's address. A failed link is 401 and
+  counts against the client address like a failed password. A write route reads no link, so a
+  link never writes. The query never reaches a log: the server logs paths only.
+- **Edge.** The Worker passes every request with `tsig` to the server (see **Edge delivery**), so
+  links are checked by the server only.
 
 ## Publishing
 
@@ -2574,7 +2615,7 @@ server:
 2. The URL parses with the format's shape and the repopath rules; a path with an encoded `/`, `\`
    or NUL, or with an empty, `.` or `..` segment, goes to the server, and so do uploads, tags
    lists, referrers, `/v2/`, the catalog, `key.asc` and a request with the query parameter
-   `_state`.
+   `_state` or `tsig` (a signed download link, which the server checks).
 3. The repo object exists, has the route's format and is not `guarded`.
 4. The caller may read the repo: no credential on an anonymous-read repo; a read token `trp_` (the
    Basic password with any username, or `Bearer trp_...`: the token object, a constant-time compare
@@ -4573,6 +4614,7 @@ module (`audit.System`), the `telesphorepo-server user` commands as `cli` (`audi
 | publish | `repo` | `publish.session.create` (`detail.via`; the actor is the person or the CI subject of the session), `publish.session.close`, `setup_code.create` (a setup line of the repo), `device.setup` (a project setup with a setup code; the actor is the person of the code, `detail.device_id` and `detail.new`) |
 | publish | `people` | `device.approve`, `device.revoke` (by a person in the UI, or by the device itself with `detail.by` `device`) |
 | publish | `ci` | `ci.pipeline.create`, `ci.pipeline.update`, `ci.pipeline.delete` |
+| links | `repo` | `file.link.create` (`target` the path, `detail.expires_at`; never the signature) |
 | sso | `signin` | `sso.signin`, `sso.signin.failed` (`detail.reason`) |
 | nexus | `nexus` | `nexus.source.create`, `nexus.source.update`, `nexus.source.delete`, `nexus.mapping.save`, `nexus.sync.start` (a manual sync, or the sync after a mapping save), `nexus.sync.cancel`, `nexus.cutover` (switch over everything), `nexus.repo.switchover` (`detail.source_repo`), `nexus.rehearsal.create` (`detail.for`, `detail.people`), `nexus.rehearsal.empty` (`detail.count`), `nexus.move.create` (`detail.into`, `detail.group`, `detail.people`), `nexus.merge.start`, `nexus.merge.done` (the counters), `nexus.merge.fail` (`detail.step`, `detail.error`), `nexus.merge.resume`, `nexus.merge.stop` (each with `detail.merge_id`) |
 
@@ -5377,7 +5419,10 @@ drives the browser flow with a cookie-jar HTTP client: a sign-in with the claim 
 permissions (409 on a change of them), a person outside the map signs in without permissions, a
 map change replaces them at the next sign-in, and without a claim a sign-in changes nothing; a map
 without a claim or with an unknown or repository permission is 400. `TestRaw` uses a curl container,
-and checks the preconditions of a PUT: `If-None-Match: *` creates and then is 412 with the ETag,
+checks a signed download link (an anonymous GET and HEAD of its file; another path, another repo, a
+later expiry, a changed signature and an expired link are 401; a PUT or POST with it is refused; a
+missing file is 404, a password 401 and a ttl over `links.max_ttl` 400; `file.link.create` without
+the signature, which no log line holds; 403 once its maker loses download), and checks the preconditions of a PUT: `If-None-Match: *` creates and then is 412 with the ETag,
 `If-Match` on a missing path is 412 with `etag` null, the conditions a write does not take are 400,
 two publish sessions race `If-Match` on one file from the same ETag for 20 rounds (one 200 and one
 412 with the winner's ETag each round), and an `If-Match` that names a file of a `deny` repo still
@@ -5750,6 +5795,7 @@ Where each part of the code lives, and the steps to add a module, a repo format 
 | New module | `internal/<module>` + one line in `internal/modules/modules.go` (see below) |
 | Format contract | `internal/format/format.go` (`format.Spec`), `kit.go` (the standard routes) |
 | JSON API route | `x.Routes` of the owning module (core: `internal/api/api.go`) + handler; shared helpers in `route.API` (`h.API`); errors via `httpx.Error` or `route.Fail` (RFC 9457 problem documents under `/api/` and `/cli/`); declare a named problem type once with `httpx.DeclareProblem` (`internal/httpx/problem.go`) |
+| Signed download links | `internal/links` (module `links`: the route, the settings group, the key, the verifier), `auth.CredLink` and `SetLinkVerifier` in `internal/auth/link.go`; `api.repos.link` in `web/src/lib/api/` |
 | Credentials, permission checks | `internal/auth` (`Identify`, sessions, tokens, second factor, bearer tokens), `internal/route/policy.go` (the policy), `internal/access/engine.go` (`Decide`, the access report) |
 | Publish sessions, devices, trust policies, CI providers | `internal/publish` (module `publish`, routes in `api.go`, `mint.go`, `providers.go`); `internal/ci` (provider registry, build records); setup codes, `/api/devices/setup`, `/api/devices/self` and `/api/publish/sessions/exchange` in `setup.go`; the install scripts and CLI downloads in `install.go`, `install.sh`, `install.ps1` with the archives of `internal/clidist` (built by `tools/task/cli.go`); sign-in and second factor routes in `internal/api/security.go` |
 | Byte pipeline | `internal/assets` (`Commit`, `Remove`, `Reader`, `Uploads`), `internal/blobs` (content-addressed blobs, GC), `internal/repopath`, `internal/ops` (repo operations), `internal/rebuild` (index rebuild queue), on top of `internal/storage` |
