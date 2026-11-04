@@ -115,6 +115,15 @@ telesphorepo status
 echo '=== publish as the publisher ==='
 cd /work/pub
 telesphorepo publish hello.txt
+echo '=== get ==='
+mkdir -p /work/dl
+cd /work/dl
+telesphorepo get "$SERVER/raw/$PUBREPO/hello.txt" "$SERVER/raw/$ANON/public.txt"
+cat hello.txt public.txt
+telesphorepo get -o - "$SERVER/raw/$PUBREPO/hello.txt" | sed 's/^/stdout: /'
+if telesphorepo get -o other.txt "$SERVER/raw/$REPO/hello.txt"; then echo 'get other: exit 0'; else echo 'get other: failed'; fi
+ls -A
+cd /work/pub
 echo '=== switch ==='
 printf '2\n' | script -qec 'telesphorepo login "$SERVER"' /dev/null
 echo '=== publish as the developer ==='
@@ -129,6 +138,14 @@ echo '=== after ==='
 cat /root/.docker/config.json
 ls -A /root/.telesphorepo
 telesphorepo status
+echo '=== anonymous get ==='
+cd /work/dl
+rm -f hello.txt public.txt
+telesphorepo get "$SERVER/raw/$ANON/public.txt"
+cat public.txt
+if telesphorepo get "$SERVER/raw/$PUBREPO/hello.txt"; then echo 'get private: exit 0'; else echo 'get private: failed'; fi
+ls -A
+ls -A /root/.telesphorepo
 echo '=== end ==='
 `
 
@@ -137,7 +154,9 @@ echo '=== end ==='
 // account with its device (the active one marked), the hook and the project. Every publish acts
 // as the active account, which login switches. Logout revokes the device of the active account
 // on the server and leaves the other account active; the logout of the last account removes
-// only the hook entries of the server and deletes the folder of the server.
+// only the hook entries of the server and deletes the folder of the server. telesphorepo get
+// reads a private file as the active account and a public one, and without an account reads
+// the public file anonymously and names telesphorepo login for the private one.
 func TestCLILogin(t *testing.T) {
 	t.Parallel()
 	c := newCLI(t)
@@ -152,12 +171,18 @@ func TestCLILogin(t *testing.T) {
 		s.SetPerms(t, repo, dev, "repo.download", "repo.publish")
 		// Only the publisher publishes to pubRepo.
 		s.SetPerms(t, pubRepo, pub, "repo.download", "repo.publish")
+		// A public repo that telesphorepo get reads with and without an account.
+		anon := RandName("public")
+		s.CreateRepo(t, anon, "raw", true, nil)
+		if resp, body := rawPut(t, s, "/raw/"+anon+"/public.txt", []byte("hello from a public repo\n"), s.PublishAuth(t, "admin", anon)); resp.StatusCode != http.StatusCreated {
+			t.Fatalf("PUT the public file: %d %s", resp.StatusCode, body)
+		}
 		host := registryHost(s)
 		home := NewDataVolume(t)
 		mounts := map[string]string{home: "/root"}
 		files := []ContainerFile{projectFile(s, "/work/app", repo), {Path: "/work/app/hello.txt", Content: "hello from a teammate\n"},
 			projectFile(s, "/work/pub", pubRepo), {Path: "/work/pub/hello.txt", Content: "hello from the publisher\n"}}
-		env := map[string]string{"HOST": host, "SERVER": s.InternalURL}
+		env := map[string]string{"HOST": host, "SERVER": s.InternalURL, "REPO": repo, "PUBREPO": pubRepo, "ANON": anon}
 
 		run := c.start(t, curlImage, "cd /work/app && telesphorepo publish hello.txt", ClientOpts{Files: files, Mounts: mounts})
 		approveDevice(t, s, dev, run.waitOutput(t, approveCodeRe, 2*time.Minute)[1])
@@ -213,6 +238,11 @@ func TestCLILogin(t *testing.T) {
 		if b := getFollowS3(t, s, opts.S3, "/raw/"+pubRepo+"/hello.txt"); string(b) != "hello from the publisher\n" {
 			t.Fatalf("GET the file that the publisher published: %q", b)
 		}
+		got := section(out, "get")
+		wantText(t, "get as the publisher", got, "Saved hello.txt", "Saved public.txt",
+			"hello from the publisher\nhello from a public repo\n", "stdout: hello from the publisher\n",
+			"/raw/"+repo+"/hello.txt answered 403", pub+" cannot read it on "+s.InternalURL, "get other: failed")
+		wantNoText(t, "get as the publisher", got, "other.txt", ".part")
 		wantText(t, "switch to the developer", section(out, "switch"), "1) Keep "+pub, "2) Switch to "+dev, "3) Log in as another account",
 			dev+" is now the active account of "+s.InternalURL+".")
 		wantText(t, "publish as the developer", section(out, "publish as the developer"), "publish: failed")
@@ -225,6 +255,10 @@ func TestCLILogin(t *testing.T) {
 		after := section(out, "after")
 		wantText(t, "after the logout", after, `"other.example": "other"`, `"auths": {}`, "This computer has no device of any server.")
 		wantNoText(t, "after the logout", after, `"`+host+`"`, s.Alias+"_8080")
+		anonGet := section(out, "anonymous get")
+		wantText(t, "get without an account", anonGet, "Saved public.txt", "hello from a public repo\n",
+			"/raw/"+pubRepo+"/hello.txt answered 401", "Run: telesphorepo login "+s.InternalURL, "get private: failed")
+		wantNoText(t, "get without an account", anonGet, "hello.txt\n", ".part", s.Alias+"_8080")
 
 		deviceOf(devSess, dev, "revoked")
 		deviceOf(pubSess, pub, "revoked")

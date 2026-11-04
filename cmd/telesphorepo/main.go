@@ -34,6 +34,7 @@ Then publish, in the project folder:
 Commands:
   setup LINK          set up the project of this folder from a setup line
   publish [FILE...]   publish the project of this folder, or upload FILEs
+  get URL...          download files, from private repositories too
   login [SERVER]      approve this computer as a device of SERVER, or switch accounts
   logout [SERVER]     revoke the device of the active account and remove its files
   status              show the accounts of this computer and the project of this folder
@@ -106,6 +107,19 @@ several repositories publish with a session for each.
 In CI the CLI mints the session with the identity token of the job: GitHub Actions (the job
 needs permissions: id-token: write) or OIDC_TOKEN (Jenkins). On a computer without a device of
 the server, it first asks a person to approve the computer in the browser.
+`,
+	"get": `Download files into this folder, as the web UI links them:
+
+  telesphorepo get https://repo.example.com/raw/releases/app/1.0/app.tar.gz
+  telesphorepo get https://repo.example.com/raw/releases/a.zip https://repo.example.com/raw/releases/b.zip
+  telesphorepo get -o app.tar.gz https://repo.example.com/raw/releases/app/latest.tar.gz
+  telesphorepo get -o - https://repo.example.com/raw/releases/app/SHA256SUMS | sha256sum -c
+
+Each file goes into this folder under the last part of its URL, over a file of that name; -o
+FILE names the file of one URL, and - writes it to stdout. A file is written only when the whole
+download arrived. On a computer that is a device of the server (telesphorepo login), the CLI reads
+as the active account, so private repositories work with no token to copy. Any other URL is read
+anonymously; a file that is not public then says to run telesphorepo login first.
 `,
 	"login": `Approve this computer as a device of a server, or switch the account it uses:
 
@@ -224,6 +238,7 @@ func run(args []string) int {
 var commands = map[string]func(context.Context, []string) error{
 	"setup":   setup,
 	"publish": publish,
+	"get":     get,
 	"login":   login,
 	"logout":  logout,
 	"status":  status,

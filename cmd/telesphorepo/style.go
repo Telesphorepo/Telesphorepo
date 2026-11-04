@@ -173,7 +173,7 @@ func highlightCommands(s string) string {
 var (
 	helpColumns = regexp.MustCompile(`^(\s+)(\S(?:\S| \S)*)(\s{2,})(\S.*)$`)
 	helpComment = regexp.MustCompile(`^(.*?\S)(\s+\([^()]*\))$`)
-	helpInline  = regexp.MustCompile(`telesphorepo (?:setup|publish|login|logout|status|update|version|help)(?: <[a-z]+>| [A-Z]+(?:\.\.\.)?)?`)
+	helpInline  = regexp.MustCompile(`telesphorepo (?:setup|publish|get|login|logout|status|update|version|help)(?: <[a-z]+>| [A-Z]+(?:\.\.\.)?)?`)
 )
 
 // renderHelp prints the help text to w, styled with p.
