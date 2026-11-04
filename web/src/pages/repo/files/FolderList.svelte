@@ -23,6 +23,7 @@
 </script>
 
 <script lang="ts">
+  import RowFileActions from "./RowFileActions.svelte";
   import { api, type Page, type Repo } from "$lib/api";
   import { Keyset, type TableSource } from "$lib/load.svelte";
   import { filesPath, href, repoPath } from "$lib/router.svelte";
@@ -46,6 +47,7 @@
     folder,
     first,
     selected,
+    base = "",
     canWrite,
     canUpload,
     compact,
@@ -60,6 +62,8 @@
     first?: Promise<Page<TreeNode>>;
     /** The file whose details show; its row is filled. */
     selected: string;
+    /** The public base URL, for Copy link. */
+    base?: string;
     canWrite: boolean;
     canUpload: boolean;
     /** The details column is open: fewer columns. */
@@ -136,6 +140,7 @@
 >
   {#snippet row(e)}
     <Cell grow>
+      <div class="flex min-w-0 items-center gap-2">
       <a
         href={open(e)}
         aria-current={e.type === "file" && e.path === selected ? "true" : undefined}
@@ -149,6 +154,8 @@
         <Truncate text={label(e)} />
         <MemberTag repo={e.repo} />
       </a>
+      {#if e.type === "file" && base}<RowFileActions {repo} path={e.path} {base} class="ml-auto" />{/if}
+      </div>
     </Cell>
     <Cell num>{#if e.size !== undefined}<FileSize bytes={e.size} />{/if}</Cell>
     <Cell num muted hideOnPhone>{#if e.type === "file"}<RelativeTime at={e.updated_at} empty="" />{/if}</Cell>

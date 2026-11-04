@@ -22,12 +22,11 @@
   repository decides with the person's own Delete files there.
 -->
 <script lang="ts">
-  import { untrack } from "svelte";
+  import { tick, untrack } from "svelte";
   import { toast } from "svelte-sonner";
   import { api, errorMessage, type Repo } from "$lib/api";
   import { deleteFiles, deleteGroupFiles, type GroupDelete } from "$lib/deletes";
-  import { count, selectedText, someNames } from "$lib/words";
-  import FileSize from "$lib/components/FileSize.svelte";
+  import { count, someNames } from "$lib/words";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import type { TreeEntry } from "$lib/api";
   import { Resource, type TableSource } from "$lib/load.svelte";
@@ -39,25 +38,20 @@
   import Breadcrumbs from "$lib/components/Breadcrumbs.svelte";
   import ViewSwitcher from "$lib/components/ViewSwitcher.svelte";
   import DataTable from "$lib/components/DataTable.svelte";
-  import DetailsColumn from "$lib/components/DetailsColumn.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import FolderList, { FOLDER_PAGE, type DeleteTarget } from "./files/FolderList.svelte";
   import VersionsView from "./files/VersionsView.svelte";
   import BuildsView from "./files/BuildsView.svelte";
   import ColumnsView from "./files/ColumnsView.svelte";
   import TreeView from "./files/TreeView.svelte";
-  import FileDetails from "./files/FileDetails.svelte";
+  import FileView from "./files/FileView.svelte";
   import ArtifactDetails from "./files/ArtifactDetails.svelte";
-  import FolderDetails from "./files/FolderDetails.svelte";
-  import Loading from "$lib/components/Loading.svelte";
   import DeleteDialog from "./delete/DeleteDialog.svelte";
   import GroupDeleteDialog from "./delete/GroupDeleteDialog.svelte";
   import { flowsHere, placeOf, versionTarget, type Place } from "./files/place";
   import { viewMin } from "./files/area";
   import { baseName, parentOf } from "./browse";
-  import DownloadIcon from "@lucide/svelte/icons/download";
   import Trash2Icon from "@lucide/svelte/icons/trash-2";
-  import PanelRightOpenIcon from "@lucide/svelte/icons/panel-right-open";
 
   let {
     repo,
@@ -146,20 +140,38 @@
     void firstPage;
   });
 
-  // The details column is always there: it shows the selected file, else the open folder (a plain
-  // folder, an artifact or a version), so it never comes and goes while the reader browses. Only
-  // Close hides it, and it stays hidden until the reader selects a file or asks for it again.
-  let closed = $state(false);
+  // A file shows in the panel in place of the open folder, which stays mounted behind it. The
+  // window's scroll is kept per open file: opening one brings the panel's top into view, and
+  // Back returns to where the reader was in the folder.
+  let panel = $state<HTMLElement | null>(null);
+  let folderScroll = 0;
+  let hadFile = false;
   $effect.pre(() => {
-    if (file) closed = false;
+    const on = !!file;
+    untrack(() => {
+      if (on && !hadFile) folderScroll = window.scrollY;
+      if (on !== hadFile) {
+        const wasFile = hadFile;
+        tick().then(() => {
+          if (on) {
+            const top = panel ? panel.getBoundingClientRect().top + window.scrollY - 96 : 0;
+            if (window.scrollY > top) window.scrollTo({ top: Math.max(0, top) });
+          } else if (wasFile) window.scrollTo({ top: folderScroll });
+        });
+      }
+      hadFile = on;
+    });
   });
-  const details = $derived(!!file || !closed);
+  const backLabel = $derived(versionQ ? `Back to ${versionQ}` : folder === "" ? `Back to ${repo.name}` : `Back to ${baseName(folder)}`);
+  function closeFile() {
+    navigate(filesPath(repo.name, folder), { query: { version: versionQ || undefined, build: build || undefined } });
+  }
+
   // While the next folder loads inside the same artifact, its details stay (no flash).
   const artifactHere = $derived.by(() => {
     const p = place.data ?? (known && known.kind !== "folder" && folder.startsWith(known.artifact.path) ? known : undefined);
     return p && p.kind !== "folder" ? p : null;
   });
-  const folderTitle = $derived(folder === "" ? repo.name : baseName(folder));
 
   // --- the pick of the List view ---
   let picked = $state(new Set<string>());
@@ -170,24 +182,10 @@
     void version;
     untrack(() => (picked = new Set()));
   });
-  const pickSummary = $derived.by(() => {
-    const files = pickedRows.filter((e) => e.type === "file");
-    return {
-      files: files.length,
-      folders: pickedRows.length - files.length,
-      size: files.reduce((n, e) => n + (e.size ?? 0), 0),
-    };
-  });
-
   const loadingSource: TableSource<never> = { items: [], loading: true, error: "" };
 
   function showList() {
     view.value = "list";
-  }
-
-  function earlierBuilds(versionFolder: string) {
-    view.value = "list";
-    navigate(filesPath(repo.name, versionFolder), { query: { earlier: "1" } });
   }
 
   // --- delete ---
@@ -320,28 +318,41 @@
   <Button variant="outline" class="hover:text-destructive" onclick={() => askDelete({ path: folder, dir: true })}><Trash2Icon />Delete folder</Button>
 {/snippet}
 
-<div class="flex flex-col gap-4 lg:flex-row lg:items-start">
-  <Card.Root class="min-w-0 flex-1 gap-0 py-0">
+<div class="flex flex-col gap-6">
+  <Card.Root bind:ref={panel} class="min-w-0 gap-0 py-0">
     <!-- The panel's toolbar: where in the repository, then how to show it. -->
     <div class="flex flex-wrap items-center gap-x-4 gap-y-2 border-b px-5 py-2 sm:px-6">
       <div class="min-w-0 flex-1 basis-48 py-1.5"><Breadcrumbs label="Folder" items={crumbs} /></div>
-      <div class="ml-auto flex items-center gap-2">
-        {#if !details}
-          <Button variant="ghost" size="sm" onclick={() => (closed = false)}><PanelRightOpenIcon />Show details</Button>
-        {/if}
-        <ViewSwitcher bind:value={view.value} {views} label="Show files as" />
-      </div>
+      {#if !file}
+        <div class="ml-auto flex items-center gap-2">
+          <ViewSwitcher bind:value={view.value} {views} label="Show files as" />
+        </div>
+      {/if}
     </div>
-    <div class="min-w-0 px-2 pt-2 pb-3 sm:px-3 {viewMin}">
+    {#if file}
+      {#key file}
+        <FileView
+          {repo}
+          path={file}
+          {base}
+          back={closeFile}
+          backLabel={backLabel}
+          {canWrite}
+          onDelete={() => askDelete({ path: file, dir: false })}
+        />
+      {/key}
+    {/if}
+    <!-- The open folder stays mounted behind a file, so Back finds its rows, open folders and scroll as they were. -->
+    <div class="min-w-0 px-2 pt-2 pb-3 sm:px-3 {viewMin}" class:hidden={!!file}>
       {#if view.value === "tree"}
-        {#key version}<TreeView {repo} {folder} {file} onEarlier={earlierBuilds} />{/key}
+        {#key version}<TreeView {repo} {folder} {file} {base} />{/key}
       {:else if !place.data && place.error}
         <div class="flex flex-wrap items-center gap-3 py-3">
           <ErrorState inline error={place.error} />
           <Button variant="outline" size="sm" onclick={place.reload}>Try again</Button>
         </div>
       {:else if view.value === "columns"}
-        {#key version}<ColumnsView {repo} {folder} {file} onEarlier={earlierBuilds} />{/key}
+        {#key version}<ColumnsView {repo} {folder} {file} />{/key}
       {:else if !place.data}
         <DataTable source={loadingSource} caption="Loading" key={() => 0} columns={[{ label: "Name", grow: true }, { label: "Size", align: "right" }]}>
           {#snippet row()}{/snippet}
@@ -371,9 +382,10 @@
               {folder}
               first={firstPage}
               selected={file}
+              {base}
               {canWrite}
               {canUpload}
-              compact={details || pickedRows.length > 0}
+              compact={false}
               bind:picked
               onPicked={(rows) => (pickedRows = rows)}
               onDelete={askDeleteMany}
@@ -384,62 +396,21 @@
     </div>
   </Card.Root>
 
-  {#if pickedRows.length}
-    {@const s = pickSummary}
-    <DetailsColumn title={selectedText(pickedRows.length)} onClose={() => (picked = new Set())}>
-      <dl class="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-4 gap-y-2 text-body">
-        <dt class="text-muted-foreground">Holds</dt>
-        <dd>{[s.folders && count(s.folders, "folder", "folders"), s.files && count(s.files, "file", "files")].filter(Boolean).join(", ")}</dd>
-        {#if s.files}
-          <dt class="text-muted-foreground">Size of files</dt>
-          <dd class="tabular-nums"><FileSize bytes={s.size} /></dd>
+  <!-- How to use the artifact or the version that is open: wide, under the panel. -->
+  {#if !file && artifactHere}
+    <Card.Root class="gap-0 py-0">
+      <div class="flex flex-wrap items-center gap-3 border-b px-5 py-3 sm:px-6">
+        <h2 class="min-w-0 flex-1 text-section font-semibold break-all">
+          {artifactHere.kind === "version" ? `${artifactHere.artifact.name || baseName(artifactHere.artifact.path)} ${artifactHere.version.version}` : artifactHere.artifact.name || baseName(artifactHere.artifact.path)}
+        </h2>
+        {#if canWrite && folder}
+          {#if artifactHere.kind === "version"}{@render deleteVersion()}{:else}{@render deleteFolder()}{/if}
         {/if}
-      </dl>
-      {#snippet actions()}
-        <Button
-          variant="outline"
-          class="hover:text-destructive"
-          onclick={() => askDeleteMany(pickedRows.map((e) => ({ path: e.path, dir: e.type === "dir" })))}><Trash2Icon />Delete</Button
-        >
-      {/snippet}
-    </DetailsColumn>
-  {:else if file}
-    <DetailsColumn
-      title={baseName(file)}
-      onClose={() => {
-        closed = true;
-        navigate(filesPath(repo.name, folder), { query: { version: versionQ || undefined, build: build || undefined } });
-      }}
-    >
-      {#key file}<FileDetails {repo} path={file} {base} />{/key}
-      {#snippet actions()}
-        <Button href={api.repos.fileURL(repo.format, repo.name, file)} download={baseName(file)}><DownloadIcon />Download</Button>
-        {#if canWrite}
-          <Button variant="outline" class="hover:text-destructive" onclick={() => askDelete({ path: file, dir: false })}><Trash2Icon />Delete</Button>
-        {/if}
-      {/snippet}
-    </DetailsColumn>
-  {:else if details}
-    <!-- On a phone a folder's details follow the list; a selected file's come first. -->
-    <div class="order-last lg:contents">
-      {#if artifactHere}
-        <DetailsColumn
-          title={artifactHere.artifact.name || baseName(artifactHere.artifact.path)}
-          onClose={() => (closed = true)}
-          actions={canWrite && folder ? (artifactHere.kind === "version" ? deleteVersion : deleteFolder) : undefined}
-        >
-          <ArtifactDetails {repo} artifact={artifactHere.artifact} version={artifactHere.kind === "version" ? artifactHere.version : null} />
-        </DetailsColumn>
-      {:else}
-        <DetailsColumn title={folderTitle} onClose={() => (closed = true)} actions={canWrite && folder ? deleteFolder : undefined}>
-          {#if place.data || place.error}
-            {#key folder + "\n" + version}<FolderDetails {repo} {folder} first={firstPage} />{/key}
-          {:else}
-            <Loading rows={2} />
-          {/if}
-        </DetailsColumn>
-      {/if}
-    </div>
+      </div>
+      <div class="grid gap-x-10 gap-y-6 px-5 py-5 sm:px-6 lg:grid-cols-2 [&>*]:min-w-0">
+        <ArtifactDetails {repo} artifact={artifactHere.artifact} version={artifactHere.kind === "version" ? artifactHere.version : null} />
+      </div>
+    </Card.Root>
   {/if}
 </div>
 

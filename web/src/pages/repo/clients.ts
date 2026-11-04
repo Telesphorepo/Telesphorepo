@@ -15,6 +15,9 @@ const use = (tool: string, code: string, note?: string): Snippet => ({
   note,
 });
 
+/** The download of one file with the Telesphorepo CLI, which signs in with the device of the computer. */
+export const cliSnippet = (url: string) => `telesphorepo get ${url}`;
+
 /** The labels of the download tools. */
 export const downloadTools: ToolLabel[] = [
   { id: "curl", label: "curl" },

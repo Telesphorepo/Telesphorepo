@@ -3,7 +3,8 @@
   the open folder, so every level stays visible. The open item of each column is filled; the
   deepest one has the selected fill. A click opens a folder in the next column or shows a file's
   details. Arrow keys move: up and down in a column, right into a folder, left back out. A version
-  folder lists only its latest build; its earlier builds open in the List view. The box scrolls
+  folder lists its latest build; "N earlier builds" opens a column of the earlier builds, and a
+  build a column of its files. The box scrolls
   sideways inside itself, never the page.
 -->
 <script lang="ts">
@@ -16,6 +17,9 @@
   import Loading from "$lib/components/Loading.svelte";
   import { viewBox } from "./area";
   import { Column, type Entry } from "./columns.svelte";
+  import RelativeTime from "$lib/components/RelativeTime.svelte";
+  import { buildInline } from "../browse";
+  import PackageIcon from "@lucide/svelte/icons/package";
   import { baseName, parentOf } from "../browse";
   import { cn } from "$lib/utils";
   import FolderIcon from "@lucide/svelte/icons/folder";
@@ -28,15 +32,12 @@
     repo,
     folder,
     file,
-    onEarlier,
   }: {
     repo: Repo;
     /** The open folder: "" or ending with "/". */
     folder: string;
     /** The selected file, or "". */
     file: string;
-    /** Opens a version's earlier builds (in the List view). */
-    onEarlier: (versionFolder: string) => void;
   } = $props();
 
   // The folders from the top down to the open one; each is a column.
@@ -59,6 +60,35 @@
       return c;
     });
   });
+
+  // The earlier builds of the last column's version, and the build open in them. They are not in
+  // the address: a file of a build is, and its folder is the version, so they stay while files open.
+  let earlierOf = $state("");
+  let buildOpen = $state("");
+  const last = $derived(columns[columns.length - 1]);
+  const earlier = $derived(last && earlierOf === last.folder ? last : null);
+  const openBuild = $derived(earlier?.earlierBuilds.find((b) => b.key === buildOpen) ?? null);
+  // A file of the open build stays selected; a file elsewhere closes the build.
+  $effect.pre(() => {
+    if (!earlier) buildOpen = "";
+  });
+  function showEarlier(c: Column) {
+    if (earlierOf === c.folder) {
+      earlierOf = "";
+      buildOpen = "";
+    } else {
+      c.loadEarlier();
+      earlierOf = c.folder;
+      buildOpen = "";
+    }
+  }
+  function earlierSentinel(node: HTMLElement, c: Column) {
+    const io = new IntersectionObserver((es) => {
+      if (es.some((x) => x.isIntersecting) && c.earlierHasMore && !c.earlierLoadingMore) c.moreEarlier();
+    });
+    io.observe(node);
+    return { destroy: () => io.disconnect() };
+  }
 
   // The item each column has open: the next folder down, or the selected file in the last one.
   const openIn = (i: number) => folders[i + 1] ?? file;
@@ -193,11 +223,16 @@
         {#if c.earlier}
           <button
             type="button"
-            onclick={() => onEarlier(c.folder)}
-            class="mt-1 flex h-8 shrink-0 items-center gap-2 rounded-lg px-2 text-left text-body text-muted-foreground outline-none hover:bg-hover hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            onclick={() => showEarlier(c)}
+            aria-expanded={earlierOf === c.folder}
+            class={cn(
+              "mt-1 flex h-8 shrink-0 items-center gap-2 rounded-lg px-2 text-left text-body outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50",
+              earlierOf === c.folder ? "bg-muted" : "text-muted-foreground hover:bg-hover hover:text-foreground",
+            )}
           >
             <HistoryIcon aria-hidden="true" class="size-4 shrink-0" />
-            <span class="truncate">{c.earlier} earlier {c.earlier === 1 ? "build" : "builds"}</span>
+            <span class="min-w-0 flex-1 truncate">{c.earlier} earlier {c.earlier === 1 ? "build" : "builds"}</span>
+            <ChevronRightIcon aria-hidden="true" class="size-4 shrink-0 opacity-60" />
           </button>
         {/if}
         {#if c.hasMore}
@@ -208,4 +243,40 @@
       {/if}
     </div>
   {/each}
+  {#if earlier}
+    <div use:reveal role="group" aria-label="Earlier builds" class="flex w-60 shrink-0 flex-col overflow-y-auto p-1 max-sm:w-[calc((100vw-2.875rem)/2)]">
+      {#if earlier.earlierLoading && !earlier.earlierBuilds.length}
+        <Loading inline class="min-h-8 px-2" />
+      {:else if earlier.earlierError && !earlier.earlierBuilds.length}
+        <div class="p-2"><ErrorState inline error={earlier.earlierError} /></div>
+      {:else}
+        {#each earlier.earlierBuilds as b (b.key)}
+          <button
+            type="button"
+            onclick={() => (buildOpen = buildOpen === b.key ? "" : b.key)}
+            aria-expanded={buildOpen === b.key}
+            class={cn(
+              "flex h-8 shrink-0 items-center gap-2 rounded-lg px-2 text-left text-body outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50",
+              buildOpen === b.key ? "bg-muted" : "hover:bg-hover",
+            )}
+          >
+            <PackageIcon aria-hidden="true" class="size-4 shrink-0 text-muted-foreground" />
+            <span class="min-w-0 flex-1 truncate">{buildInline(b.id, b.label)}</span>
+            {#if b.published_at}<span class="shrink-0 text-meta text-muted-foreground"><RelativeTime at={b.published_at} /></span>{/if}
+          </button>
+        {/each}
+        {#if earlier.earlierHasMore}
+          <div use:earlierSentinel={earlier} class="flex h-8 shrink-0 items-center gap-2 px-2 text-meta text-muted-foreground">
+            {#if earlier.earlierLoadingMore}<Spinner />{/if}More
+          </div>
+        {/if}
+      {/if}
+    </div>
+    {#if openBuild}
+      {@const bc = earlier}
+      <div use:reveal role="group" aria-label={buildInline(openBuild.id, openBuild.label)} class="flex w-60 shrink-0 flex-col overflow-y-auto p-1 max-sm:w-[calc((100vw-2.875rem)/2)]">
+        {#each openBuild.files as e (e.path)}{@render item(bc, e, columns.length)}{/each}
+      </div>
+    {/if}
+  {/if}
 </div>

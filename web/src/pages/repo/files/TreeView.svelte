@@ -2,8 +2,8 @@
   Tree view: the classic expandable tree of the whole repository, from the top folder down. A
   folder's children load the first time it opens (GET /tree, a page at a time), and they stay
   loaded while the reader moves around. The folders down to the open one start open. A version
-  folder lists the files of its latest build, as in Columns; its earlier builds open in the List
-  view.
+  folder lists the files of its latest build, then a row "N earlier builds" that expands in place
+  into the earlier builds, each of which expands into its files.
 
   A click on a folder opens it in the address and expands it; a click on the open folder, or on
   its arrow, folds it. A click on a file shows its details. Keys follow the tree pattern: up and
@@ -21,7 +21,11 @@
   import Loading from "$lib/components/Loading.svelte";
   import FileSize from "$lib/components/FileSize.svelte";
   import MemberTag from "./MemberTag.svelte";
-  import { Column, type Entry } from "./columns.svelte";
+  import RowFileActions from "./RowFileActions.svelte";
+  import { Column, type EarlierBuild, type Entry } from "./columns.svelte";
+  import RelativeTime from "$lib/components/RelativeTime.svelte";
+  import { buildInline } from "../browse";
+  import PackageIcon from "@lucide/svelte/icons/package";
   import { viewBox } from "./area";
   import { parentOf } from "../browse";
   import { cn } from "$lib/utils";
@@ -35,15 +39,15 @@
     repo,
     folder,
     file,
-    onEarlier,
+    base = "",
   }: {
     repo: Repo;
+    /** The public base URL, for Copy link. */
+    base?: string;
     /** The open folder: "" or ending with "/". */
     folder: string;
     /** The selected file, or "". */
     file: string;
-    /** Opens a version's earlier builds (in the List view). */
-    onEarlier: (versionFolder: string) => void;
   } = $props();
 
   // The loaded folders, and the ones that are open. The top folder is always open.
@@ -69,6 +73,8 @@
   type Row =
     | { kind: "entry"; key: string; e: Entry; level: number; pos: number; size: number }
     | { kind: "earlier"; key: string; folder: string; level: number; count: number }
+    | { kind: "build"; key: string; folder: string; level: number; b: EarlierBuild }
+    | { kind: "earlier-loading" | "earlier-error" | "earlier-more"; key: string; folder: string; level: number }
     | { kind: "loading" | "error" | "empty" | "more"; key: string; folder: string; level: number };
 
   // The visible rows, in reading order.
@@ -85,7 +91,21 @@
         out.push({ kind: "entry", key: e.path, e, level, pos: i + 1, size: es.length });
         if (e.type === "dir" && open.has(e.path)) walk(e.path, level + 1);
       });
-      if (c.earlier) out.push({ kind: "earlier", key: `earlier:${f}`, folder: f, level, count: c.earlier });
+      if (c.earlier) {
+        const ek = `earlier:${f}`;
+        out.push({ kind: "earlier", key: ek, folder: f, level, count: c.earlier });
+        if (open.has(ek)) {
+          const bs = c.earlierBuilds;
+          if (c.earlierLoading && !bs.length) out.push({ kind: "earlier-loading", key: `${ek}:loading`, folder: f, level: level + 1 });
+          else if (c.earlierError && !bs.length) out.push({ kind: "earlier-error", key: `${ek}:error`, folder: f, level: level + 1 });
+          bs.forEach((b) => {
+            out.push({ kind: "build", key: b.key, folder: f, level: level + 1, b });
+            if (open.has(b.key))
+              b.files.forEach((e, i) => out.push({ kind: "entry", key: e.path, e, level: level + 2, pos: i + 1, size: b.files.length }));
+          });
+          if (c.earlierHasMore) out.push({ kind: "earlier-more", key: `${ek}:more`, folder: f, level: level + 1 });
+        }
+      }
       if (c.hasMore) out.push({ kind: "more", key: `more:${f}`, folder: f, level });
     };
     walk("", 1);
@@ -93,7 +113,18 @@
   });
 
   // The rows the keys move through.
-  const stops = $derived(rows.filter((r) => r.kind === "entry" || r.kind === "earlier"));
+  const stops = $derived(rows.filter((r) => r.kind === "entry" || r.kind === "earlier" || r.kind === "build"));
+
+  // The earlier builds of a version, and each build, fold and expand like folders.
+  function toggleEarlier(f: string) {
+    const k = `earlier:${f}`;
+    if (open.has(k)) open.delete(k);
+    else {
+      cols.get(f)?.loadEarlier();
+      open.add(k);
+    }
+  }
+  const toggle = (k: string) => (open.has(k) ? open.delete(k) : open.add(k));
 
   // The row that holds the keyboard focus (roving tabindex). It follows the selection.
   let focused = $state("");
@@ -131,7 +162,8 @@
   }
 
   function activate(r: Row) {
-    if (r.kind === "earlier") onEarlier(r.folder);
+    if (r.kind === "earlier") toggleEarlier(r.folder);
+    else if (r.kind === "build") toggle(r.key);
     else if (r.kind === "entry") {
       if (r.e.type === "dir") expand(r.e.path);
       navigate(filesPath(repo.name, r.e.path));
@@ -142,7 +174,7 @@
     const i = stops.findIndex((r) => r.key === tabStop);
     const r = stops[i];
     if (!r) return;
-    const dir = r.kind === "entry" && r.e.type === "dir" ? r.e.path : null;
+    const dir = r.kind === "entry" && r.e.type === "dir" ? r.e.path : r.kind === "earlier" || r.kind === "build" ? r.key : null;
     const go: Record<string, () => void> = {
       ArrowDown: () => stops[i + 1] && moveTo(stops[i + 1].key),
       ArrowUp: () => stops[i - 1] && moveTo(stops[i - 1].key),
@@ -150,12 +182,18 @@
       End: () => stops.length && moveTo(stops[stops.length - 1].key),
       ArrowRight: () => {
         if (!dir) return;
-        if (!open.has(dir)) expand(dir);
+        if (!open.has(dir)) {
+          if (r.kind === "earlier") toggleEarlier(r.folder);
+          else if (r.kind === "build") open.add(dir);
+          else expand(dir);
+        }
         else if (stops[i + 1] && stops[i + 1].level > r.level) moveTo(stops[i + 1].key);
       },
       ArrowLeft: () => {
         if (dir && open.has(dir)) return void fold(dir);
-        const up = r.kind === "entry" ? parentOf(r.e.path) : r.folder;
+        // A file of an earlier build steps out to its build row.
+        const inBuild = r.kind === "entry" ? rows.find((x) => x.kind === "build" && x.b.files.some((e) => e.path === r.key)) : undefined;
+        const up = inBuild ? inBuild.key : r.kind === "entry" ? parentOf(r.e.path) : r.kind === "build" ? `earlier:${r.folder}` : r.folder;
         if (up !== "") moveTo(up);
       },
       Enter: () => activate(r),
@@ -196,6 +234,15 @@
     return { destroy: () => io.disconnect() };
   }
 
+  function earlierSentinel(node: HTMLElement, f: string) {
+    const io = new IntersectionObserver((es) => {
+      const c = cols.get(f);
+      if (es.some((x) => x.isIntersecting) && c?.earlierHasMore && !c.earlierLoadingMore) c.moreEarlier();
+    });
+    io.observe(node);
+    return { destroy: () => io.disconnect() };
+  }
+
   const pad = (level: number) => `padding-left: ${0.25 + (level - 1) * 1.25}rem`;
   const rowClass = "flex h-8 shrink-0 items-center gap-1.5 rounded-lg pr-2 text-body outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50";
 </script>
@@ -214,6 +261,7 @@
       {@const isDir = e.type === "dir"}
       {@const isOpen = isDir && open.has(e.path)}
       {@const on = e.path === selected}
+      <div role="none" class="group/row relative flex flex-col">
       <a
         href={href(filesPath(repo.name, e.path))}
         role="treeitem"
@@ -246,26 +294,54 @@
         <span class={cn("min-w-0 flex-1 truncate", isDir && "font-medium")} title={e.name.length > 40 ? e.name : undefined}>{e.name}</span>
         <MemberTag repo={e.repo} />
         {#if e.size !== undefined}
-          <span class={cn("shrink-0 text-meta tabular-nums", on ? "" : "text-muted-foreground")}><FileSize bytes={e.size} /></span>
+          <span class={cn("shrink-0 text-meta tabular-nums", isDir ? "" : "group-hover/row:invisible group-focus-within/row:invisible [@media(hover:none)]:hidden", on ? "" : "text-muted-foreground")}><FileSize bytes={e.size} /></span>
         {/if}
       </a>
-    {:else if r.kind === "earlier"}
+      {#if !isDir && base}<RowFileActions {repo} path={e.path} {base} class="absolute top-1 right-1" />{/if}
+      </div>
+    {:else if r.kind === "earlier" || r.kind === "build"}
+      {@const isOpen = open.has(r.key)}
       <button
         type="button"
         role="treeitem"
         aria-level={r.level}
         aria-selected="false"
+        aria-expanded={isOpen}
         data-key={r.key}
         tabindex={r.key === tabStop ? 0 : -1}
-        onclick={() => onEarlier(r.folder)}
+        onclick={() => activate(r)}
         onfocus={() => (focused = r.key)}
         style={pad(r.level)}
-        class={cn(rowClass, "text-left text-muted-foreground hover:bg-hover hover:text-foreground")}
+        class={cn(rowClass, "text-left hover:bg-hover", r.kind === "earlier" && "text-muted-foreground hover:text-foreground")}
       >
-        <span aria-hidden="true" class="size-6 shrink-0"></span>
-        <HistoryIcon aria-hidden="true" class="size-4 shrink-0" />
-        <span class="truncate">{r.count} earlier {r.count === 1 ? "build" : "builds"}</span>
+        <span aria-hidden="true" class="-my-1 flex size-6 shrink-0 items-center justify-center">
+          <ChevronRightIcon class={cn("size-4 opacity-60 transition-transform duration-150 motion-reduce:transition-none", isOpen && "rotate-90")} />
+        </span>
+        {#if r.kind === "earlier"}
+          <HistoryIcon aria-hidden="true" class="size-4 shrink-0" />
+          <span class="truncate">{r.count} earlier {r.count === 1 ? "build" : "builds"}</span>
+        {:else}
+          <PackageIcon aria-hidden="true" class="size-4 shrink-0 text-muted-foreground" />
+          <span class="min-w-0 flex-1 truncate">{buildInline(r.b.id, r.b.label)}</span>
+          {#if r.b.published_at}<span class="shrink-0 text-meta text-muted-foreground"><RelativeTime at={r.b.published_at} /></span>{/if}
+        {/if}
       </button>
+    {:else if r.kind === "earlier-loading"}
+      <div role="none" style={pad(r.level)} class="flex items-center gap-1.5">
+        <span class="size-6 shrink-0"></span><Loading inline class="min-h-8" />
+      </div>
+    {:else if r.kind === "earlier-error"}
+      {@const c = cols.get(r.folder)}
+      <div role="none" style={pad(r.level)} class="flex flex-wrap items-center gap-2 py-1">
+        <span class="size-6 shrink-0"></span>
+        <ErrorState inline error={c?.earlierError ?? ""} />
+      </div>
+    {:else if r.kind === "earlier-more"}
+      {@const c = cols.get(r.folder)}
+      <div role="none" use:earlierSentinel={r.folder} style={pad(r.level)} class="flex h-8 shrink-0 items-center gap-1.5 text-meta text-muted-foreground">
+        <span class="size-6 shrink-0"></span>
+        {#if c?.earlierLoadingMore}<Spinner class="size-4" />{/if}More
+      </div>
     {:else if r.kind === "loading"}
       <div role="none" style={pad(r.level)} class="flex items-center gap-1.5">
         <span class="size-6 shrink-0"></span><Loading inline class="min-h-8" />
