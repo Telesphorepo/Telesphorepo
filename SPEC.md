@@ -4895,8 +4895,9 @@ page are in `web/src/README.md`.
     uploads and deletes**.
 - **Views of the files.** A switcher offers **List**, **Tree** and **Columns** everywhere, and
   **Cover Flow** at an artifact or a snapshot that has several builds. The choice is remembered per
-  user in the browser, for each place. Tree, Columns and Cover Flow fill a box of one height (at
-  least 22 rem, at most 36 rem, otherwise the window height minus 24 rem). The list keeps that
+  user in the browser, for each place. Tree, Columns and Cover Flow fill a box of one height (the
+  window height minus 19 rem, at least 22 rem); a file's pane beside the view is as tall and
+  scrolls inside itself. The list keeps that
   height as its minimum on wide screens, so a switch does not move the file pane or the
   toolbar.
   - *List* shows a folder as a table (name, size, published, and who published it), in the order of `/tree`; the next page loads as the end of the

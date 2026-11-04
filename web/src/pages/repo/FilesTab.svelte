@@ -49,7 +49,7 @@
   import DeleteDialog from "./delete/DeleteDialog.svelte";
   import GroupDeleteDialog from "./delete/GroupDeleteDialog.svelte";
   import { flowsHere, placeOf, versionTarget, type Place } from "./files/place";
-  import { viewMin } from "./files/area";
+  import { paneBox, viewMin } from "./files/area";
   import { baseName, parentOf } from "./browse";
   import Trash2Icon from "@lucide/svelte/icons/trash-2";
 
@@ -364,7 +364,7 @@
       {/if}
     </div>
     {#if file}
-      <div bind:this={pane} class="min-w-0 scroll-mt-24 border-t lg:w-[min(48%,44rem)] lg:shrink-0 lg:border-t-0 lg:border-l">
+      <div bind:this={pane} class="min-w-0 scroll-mt-24 border-t lg:w-[min(48%,44rem)] lg:shrink-0 lg:border-t-0 lg:border-l {paneBox}">
         {#key file}
           <FileView {repo} path={file} {base} onClose={closeFile} {canWrite} onDelete={() => askDelete({ path: file, dir: false })} />
         {/key}
