@@ -35,7 +35,7 @@
 
 <div class="flex min-h-svh flex-col">
   <TopBar {sidebar} onMenu={sidebar ? () => (menuOpen = true) : undefined} />
-  <div data-layout={sidebar ? "settings" : "browse"} class="mx-auto w-full max-w-page flex-1 px-4 pt-10 pb-20 sm:px-6">
+  <div data-layout={sidebar ? "settings" : "browse"} class="mx-auto w-full max-w-page flex-1 px-4 pt-10 pb-10 sm:px-6">
     <AddressNotice />
     {#if sidebar}
       <div class="flex gap-10">
@@ -65,5 +65,5 @@
       <main id="main">{@render children()}</main>
     {/if}
   </div>
-  <footer class="mx-auto w-full max-w-page px-4 pb-6 text-center text-meta text-muted-foreground sm:px-6">Powered by {productName}</footer>
+  <footer class="mx-auto w-full max-w-page px-4 pb-4 text-center text-meta text-muted-foreground sm:px-6">Powered by {productName}</footer>
 </div>
