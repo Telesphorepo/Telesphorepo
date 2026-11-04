@@ -52,6 +52,7 @@
   import { paneBox, viewMin } from "./files/area";
   import { baseName, parentOf } from "./browse";
   import Trash2Icon from "@lucide/svelte/icons/trash-2";
+  import XIcon from "@lucide/svelte/icons/x";
 
   let {
     repo,
@@ -146,6 +147,13 @@
   $effect(() => {
     if (!file || !pane || window.matchMedia("(min-width: 1024px)").matches) return;
     pane.scrollIntoView({ block: "start", behavior: "smooth" });
+  });
+  // Close hides the pane of an artifact or a version until the reader opens another folder.
+  let artifactClosed = $state(false);
+  $effect.pre(() => {
+    void folder;
+    void versionQ;
+    artifactClosed = false;
   });
   function closeFile() {
     navigate(filesPath(repo.name, folder), { query: { version: versionQ || undefined, build: build || undefined } });
@@ -369,26 +377,26 @@
           <FileView {repo} path={file} {base} onClose={closeFile} {canWrite} onDelete={() => askDelete({ path: file, dir: false })} />
         {/key}
       </div>
+    {:else if artifactHere && !artifactClosed}
+      <!-- The open artifact or version: what it is and how to use it, in the same pane as a file. -->
+      {@const name = artifactHere.artifact.name || baseName(artifactHere.artifact.path)}
+      <div class="min-w-0 border-t lg:w-[min(48%,44rem)] lg:shrink-0 lg:border-t-0 lg:border-l {paneBox}">
+        <div class="flex flex-col gap-6 px-5 pt-4 pb-5">
+          <header class="flex min-w-0 items-start gap-3">
+            <h2 class="min-w-0 flex-1 pt-0.5 text-section font-semibold break-all">
+              {artifactHere.kind === "version" ? `${name} ${artifactHere.version.version}` : name}
+            </h2>
+            {#if canWrite && folder}
+              {#if artifactHere.kind === "version"}{@render deleteVersion()}{:else}{@render deleteFolder()}{/if}
+            {/if}
+            <Button variant="ghost" size="icon-sm" class="-mr-2 shrink-0" aria-label="Close the details of {name}" onclick={() => (artifactClosed = true)}><XIcon /></Button>
+          </header>
+          <ArtifactDetails {repo} artifact={artifactHere.artifact} version={artifactHere.kind === "version" ? artifactHere.version : null} />
+        </div>
+      </div>
     {/if}
     </div>
   </Card.Root>
-
-  <!-- How to use the artifact or the version that is open: wide, under the panel. -->
-  {#if !file && artifactHere}
-    <Card.Root class="gap-0 py-0">
-      <div class="flex flex-wrap items-center gap-3 border-b px-5 py-3 sm:px-6">
-        <h2 class="min-w-0 flex-1 text-section font-semibold break-all">
-          {artifactHere.kind === "version" ? `${artifactHere.artifact.name || baseName(artifactHere.artifact.path)} ${artifactHere.version.version}` : artifactHere.artifact.name || baseName(artifactHere.artifact.path)}
-        </h2>
-        {#if canWrite && folder}
-          {#if artifactHere.kind === "version"}{@render deleteVersion()}{:else}{@render deleteFolder()}{/if}
-        {/if}
-      </div>
-      <div class="grid gap-x-10 gap-y-6 px-5 py-5 sm:px-6 lg:grid-cols-2 [&>*]:min-w-0">
-        <ArtifactDetails {repo} artifact={artifactHere.artifact} version={artifactHere.kind === "version" ? artifactHere.version : null} />
-      </div>
-    </Card.Root>
-  {/if}
 </div>
 
 <DeleteDialog bind:open={deleteOpen} {repo} target={deleting} onConfirm={runDelete} />

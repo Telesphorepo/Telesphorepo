@@ -4841,9 +4841,9 @@ page are in `web/src/README.md`.
     terminal**: a public file shows curl and wget, with `telesphorepo get <url>` folded under them;
     a private file shows `telesphorepo get <url>` with how to sign in once, with curl and wget
     (read token) folded under it. Then the type, the SHA-256, the checksum links and the CI build.
-    At an artifact or a version folder, with no file selected, a card under the panel shows the
-    artifact (kind, coordinates, version facts, the build) and its snippets, with Delete version or
-    Delete folder. Every file row of the List and the Tree has Download and Copy link at its end,
+    At an artifact or a version folder, with no file selected, the same pane shows the artifact
+    (kind, coordinates, version facts, the build) and its snippets, with Delete version or Delete
+    folder; Close hides it until another folder opens. A plain folder has no pane. Every file row of the List and the Tree has Download and Copy link at its end,
     shown under the pointer or with the focus, and always on a touch screen. Copy link copies a public
     file's URL under `base_url`, and for a private file a signed link from
     `POST /api/repos/{name}/links` (see **Signed download links**); a toast says until when it works.
