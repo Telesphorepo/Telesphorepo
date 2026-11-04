@@ -225,7 +225,8 @@ func (s *Service) Identify(r *http.Request, rd Read) (*Principal, error) {
 			return s.authenticate(ctx, s.clientIP(r), "", tok, true)
 		}
 	}
-	if rd.Link && r.Header.Get("Authorization") == "" && r.URL.Query().Has(LinkSigParam) {
+	// A plain substring test first, so a read without a link never parses its query.
+	if rd.Link && strings.Contains(r.URL.RawQuery, LinkSigParam+"=") && r.Header.Get("Authorization") == "" && r.URL.Query().Has(LinkSigParam) {
 		return s.link(ctx, s.clientIP(r), r)
 	}
 	if rd.URLToken != nil {
