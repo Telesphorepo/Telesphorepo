@@ -571,7 +571,8 @@ func (s *Service) webAuthnUser(ctx context.Context, userID int64) (*webUser, err
 // base_url. The RP ID is the host name and the accepted origin is the scheme and host; the
 // browser offers a passkey only to a page of its own origin. For localhost, the dev ports (Vite
 // :5173 and the server :8080) are accepted too; no other machine can serve a page from this
-// machine's localhost.
+// machine's localhost. The server requests no extensions and ignores the extension outputs a
+// browser returns anyway: Safari on iOS adds "appid" to a security key's assertion.
 func (s *Service) webAuthn(ctx context.Context) (*webauthn.WebAuthn, error) {
 	base := strings.TrimSpace(settings.BaseURL.Get(s.set()))
 	if base == "" {
@@ -591,6 +592,8 @@ func (s *Service) webAuthn(ctx context.Context) (*webauthn.WebAuthn, error) {
 		RPDisplayName: totpIssuer,
 		RPOrigins:     origins,
 		Timeouts:      webauthn.TimeoutsConfig{Login: t, Registration: t},
+
+		ExtensionsUnsolicitedOutputPolicy: protocol.UnsolicitedOutputPolicyIgnore,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrPasskeysUnavailable, err)

@@ -1266,7 +1266,9 @@ archives with their SHA-256 and the commands to install one by hand.
   step; a step that a factor accepted is refused again), several passkeys (RP ID is the host of
   `base_url`, the one accepted origin is its scheme and host; a sign count that does not go up
   passes, because a security key keeps one counter per protocol and a phone may use the other
-  over NFC, and the stored count keeps its highest value; the server logs `passkey rejected` with
+  over NFC, and the stored count keeps its highest value; the server requests no WebAuthn
+  extensions and ignores the extension outputs a browser returns anyway, such as the `appid` that
+  Safari on iOS adds to a security key's answer; the server logs `passkey rejected` with
   go-webauthn's reason for every failed check) and
   10 one-time recovery codes (80 bits each, argon2id-hashed). Recovery codes work only at
   sign-in. While `base_url` is empty, passkeys take the scheme and host by which the browser reached

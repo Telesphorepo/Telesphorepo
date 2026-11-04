@@ -89,8 +89,9 @@ func (k *securityKey) signInOK(t *testing.T, s *Server, user string) *Session {
 	return sess
 }
 
-// A passkey signs in after a sign-out, also with a counter that did not go up: a security key
-// keeps one counter per protocol, and a phone may use the other one.
+// A passkey signs in after a sign-out, also with a counter that did not go up (a security key
+// keeps one counter per protocol, and a phone may use the other one), and with an extension output
+// the server did not request (Safari on iOS adds "appid" to a security key's answer).
 func TestPasskeySignIn(t *testing.T) {
 	t.Parallel()
 	// A passkey's relying party is a domain name, so the server's name has a dot.
@@ -107,4 +108,7 @@ func TestPasskeySignIn(t *testing.T) {
 	if _, st, b := key.signIn(t, s, user); st != http.StatusOK {
 		t.Fatalf("sign-in with a counter that did not go up: status %d: %s", st, b)
 	}
+
+	key.auth.Options.ClientExtensionResults = map[string]any{"appid": false}
+	key.signInOK(t, s, user)
 }
