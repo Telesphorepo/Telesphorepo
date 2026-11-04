@@ -158,7 +158,7 @@ func (g *getter) auth(ctx context.Context, u *url.URL) (*getAuth, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%q is not an http or https URL of a file", u.Redacted())
 		}
-		return &getAuth{id: identity{scheme: strings.ToLower(u.Scheme), host: host, port: port}}, nil
+		return &getAuth{id: identity{scheme: strings.ToLower(u.Scheme), host: host, port: port, basePath: guessBase(u)}}, nil
 	}
 	if a := g.proofs[d.id.base()]; a != nil {
 		return a, nil
@@ -179,6 +179,26 @@ func (g *getter) auth(ctx context.Context, u *url.URL) (*getAuth, error) {
 	}
 	a.d, a.secret = d, exchangeSecret(d, nonce)
 	return a, nil
+}
+
+// guessBase is the base path of the server of a file URL that no account serves: the path before
+// its format segment (/<format>/<repo>/...), so the login hint names a server under a sub-path.
+func guessBase(u *url.URL) string {
+	segs := strings.Split(strings.Trim(u.EscapedPath(), "/"), "/")
+	for i, seg := range segs {
+		if i+2 >= len(segs) {
+			break
+		}
+		for _, r := range rows {
+			if r.format == seg {
+				if i == 0 {
+					return ""
+				}
+				return "/" + strings.Join(segs[:i], "/")
+			}
+		}
+	}
+	return ""
 }
 
 // serves reports whether u is a URL of the server id: the same scheme, host and port, and a path

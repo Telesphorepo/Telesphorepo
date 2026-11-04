@@ -1172,7 +1172,7 @@ is written to it with `sudo tee -a FILE > /dev/null`.
 | Docker | Pull: `docker pull <host>/{repo}/IMAGE:TAG`; a private repo needs `docker login <host>` with a read token. Push: the setup line of the Publish tab adds the credential helper of the CLI to the Docker config once, then `docker push <host>/{repo}/IMAGE:TAG` with no `docker login`. Helm and ORAS use the same helper (see **Docker registry** and **Publishing**) |
 | NuGet | Source `HOST/nuget/{repo}/index.json` in `nuget.config` (`allowInsecureConnections="true"` for plain http); a private repo adds `packageSourceCredentials` with the user and a read token as `ClearTextPassword` (dotnet sends them after the first 401). Publishes: `telesphorepo publish` in a .NET project, or `dotnet nuget push` with a publish session as the API key |
 | pip, uv, poetry | Index `HOST/pypi/{repo}/simple/`: `index-url` in `pip.conf` (a private repo: `USER:READ_TOKEN@` in the URL; a server on http: `trusted-host`, since pip ignores an http index on any host but localhost), a `[[tool.uv.index]]` with `default = true` (a private repo: `UV_INDEX_<NAME>_USERNAME` and `_PASSWORD`), `poetry source add --priority=primary` (a private repo: `poetry config http-basic.<repo>`). A hosted repo holds only its own packages; a group of it and a PyPI proxy also serves their dependencies. Publish: `telesphorepo publish` |
-| Raw | Upload: `telesphorepo publish file.tar.gz` (with `path` in `telesphorepo.toml`). Download: `telesphorepo get HOST/raw/{repo}/path/file.tar.gz`, which reads a private repo as the account of `telesphorepo login`; without the CLI, `curl -fLO HOST/raw/{repo}/path/file.tar.gz`, and a private repo adds `-K -` with `user = "USER:READ_TOKEN"` on stdin |
+| Raw | Upload: `telesphorepo publish file.tar.gz` (with `path` in `telesphorepo.toml`). Download: a public repo leads with `curl -fLO HOST/raw/{repo}/path/file.tar.gz` and `wget`, then `telesphorepo get`; a private repo leads with `telesphorepo get HOST/raw/{repo}/path/file.tar.gz`, which reads it as the account of `telesphorepo login`, then curl with `-K -` and `user = "USER:READ_TOKEN"` on stdin and wget with `--ask-password` |
 | npm, pnpm, bun | `.npmrc` of the project: `registry=HOST/npm/{repo}/`; a private repo adds `//HOST-without-scheme/npm/{repo}/:_authToken=${NPM_TOKEN}` with a read token in `NPM_TOKEN`. Publish: `telesphorepo publish` |
 | Yarn 2+ | `.yarnrc.yml`: `npmRegistryServer: "HOST/npm/{repo}/"`; a private repo adds `npmAlwaysAuth: true` and `npmAuthToken: "${NPM_TOKEN}"` (Yarn sends no token on reads without `npmAlwaysAuth`); a plain-HTTP server adds its host name to `unsafeHttpWhitelist`; a hosted repo adds `npmMinimalAgeGate: 0` (Yarn 4 installs a version only once it is a week old), and the note of a proxy or group says to list your own packages in `npmPreapprovedPackages` |
 
@@ -4727,8 +4727,8 @@ page are in `web/src/README.md`.
   password, add a person, add a Nexus server, create a token, delete a repository (the dialog asks
   for the repository name). A card never holds a lone action button. A flow with several sections
   is a full page: create a repository, edit a CI pipeline, edit a network list, create or import a
-  signing key, upload. The only side sheet is the navigation menu under 768 px. The details of a
-  selected file show in a column inside the page.
+  signing key, upload. The only side sheet is the navigation menu under 768 px. A selected file shows
+  in a pane beside the folder, inside the Files panel.
 - **Test where the connection is set.** A page that connects to another system has a **Test**
   action in the card or the step that sets the connection. The result shows beside the button, and
   only after a test. Sign-in options and Storage have it.
@@ -4787,12 +4787,22 @@ page are in `web/src/README.md`.
   repository shows to a person who holds `repo.publish` on one of its hosted members: a select of
   those members (the first by default, the choice in `?to=<member>`), then that member's Publish
   view. One page loads the repo once and switches between these views:
-  - `files/<path>`: the folder path and one of the views below, with a details column for the selected
-    file or artifact (SHA-256, checksum links, the CI build, a curl and wget download, and the part
-    of the format's UI module that the first matching `file_details` entry names: the artifact
-    snippets of a pom or a jar, of a `.deb`). Delete shows to a person who holds `repo.delete` and
-    acts with the UI session; its confirmation lists the delete plan (the file count and the
-    delete notes of the format).
+  - `files/<path>`: the folder path and one of the views below at the full width of the panel. A
+    selected file opens in a pane beside the view, inside the panel (about half its width on wide
+    screens, under the view on narrow ones), so the view keeps its place, open folders and scroll;
+    Close returns to the folder. The pane's header holds the name, the size, when and by whom it
+    was published (and in a group the repository that serves it), **Download** and **Copy link**
+    (and Delete for a holder of `repo.delete`, with the UI session; its confirmation lists the
+    delete plan). Under it the part of the format's UI module that the first matching
+    `file_details` entry names (the artifact snippets of a pom or a jar, of a `.deb`), then **From a
+    terminal**: a public file shows curl and wget, with `telesphorepo get <url>` folded under them;
+    a private file shows `telesphorepo get <url>` with how to sign in once, with curl and wget
+    (read token) folded under it. Then the type, the SHA-256, the checksum links and the CI build.
+    At an artifact or a version folder, with no file selected, a card under the panel shows the
+    artifact (kind, coordinates, version facts, the build) and its snippets, with Delete version or
+    Delete folder. Every file row of the List and the Tree has Download and Copy link at its end,
+    shown under the pointer or with the focus, and always on a touch screen. Copy link copies the
+    file's URL under `base_url`.
   - `use`: **Use this repository**. An address card first. A public repo then has one card, "Add it
     to your build". A private repo has two numbered steps: create a read token, then add it to the
     build; the snippets already hold the credentials.
@@ -4843,10 +4853,9 @@ page are in `web/src/README.md`.
   **Cover Flow** at an artifact or a snapshot that has several builds. The choice is remembered per
   user in the browser, for each place. Tree, Columns and Cover Flow fill a box of one height (at
   least 22 rem, at most 36 rem, otherwise the window height minus 24 rem). The list keeps that
-  height as its minimum on wide screens, so a switch does not move the details column or the
+  height as its minimum on wide screens, so a switch does not move the file pane or the
   toolbar.
-  - *List* shows a folder as a table (name, size, published, and who published it while the
-    details column is closed), in the order of `/tree`; the next page loads as the end of the
+  - *List* shows a folder as a table (name, size, published, and who published it), in the order of `/tree`; the next page loads as the end of the
     rows comes into view. Every view shows the children of a folder in that order, without the
     files that `/tree` marks with `side_of`. The versions of an artifact are a list: each row the version with
     Latest or Snapshot, then when it was published, its commit and its builds. A snapshot's
@@ -4854,8 +4863,10 @@ page are in `web/src/README.md`.
   - *Tree* shows the whole repo as an expandable tree. A folder loads its children from `/tree` the
     first time it opens, a page at a time. Up and Down move, Right expands or steps in, Left folds
     or steps out, Home and End jump, Enter opens. A version folder shows the files of its latest
-    build and a row "N earlier builds".
-  - *Columns* are Miller columns.
+    build and a row "N earlier builds" that expands in place into the earlier builds (newest
+    first, a page of 50 at a time), each of which expands into its files.
+  - *Columns* are Miller columns. "N earlier builds" at the end of a version's column opens a
+    column of the earlier builds, and a build a column of its files.
   - *Cover Flow* is a timeline of tickets for the versions of an artifact, or the builds of a
     snapshot. It replaces the list in the same box. The caption of a version has Open and Delete;
     the caption of a build has "Show N files", which switches to the list with that build chosen.

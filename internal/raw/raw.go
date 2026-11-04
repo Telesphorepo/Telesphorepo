@@ -182,23 +182,32 @@ func admit(_ context.Context, w *assets.Write, existing *assets.Asset) (assets.D
 	return assets.Store, nil
 }
 
-// Usage returns curl and wget commands to download a file (a private repo takes a username and a
-// read token), and the publish command of the Telesphorepo CLI. The core adds the CI files of the
+// Usage returns the download of a file and the publish command of the Telesphorepo CLI. A public
+// repo leads with curl and wget; a private one with `telesphorepo get`, which signs in with the
+// device of the computer, then curl and wget with a read token. The core adds the CI files of the
 // tool telesphorepo.
 func (f *Format) Usage(repo *repos.Repo, baseURL string) []format.Snippet {
 	u := baseURL + "/raw/" + repo.Name + "/path/to/file.tar.gz"
-	curl, wget := "curl -fLO "+u, "wget "+u
-	note := ""
-	if !repo.AnonymousRead {
-		curl = format.ReadTokenPrompt + "\n" + format.ReadTokenConfig + " | curl -fLO -K - " + u
-		wget = "wget --user YOUR_USERNAME --ask-password " + u
-		note = "Create a read token on Your account › Tokens; it works where a password does. Enter it at the prompt."
+	publish := format.CLISnippet("telesphorepo", format.CLIPublish+" file.tar.gz",
+		"The CLI uploads each file into the folder that path names in telesphorepo.toml. Or drop the files on the Files view in the browser.")
+	get := format.Snippet{ID: "telesphorepo.download", Tool: "telesphorepo", Purpose: format.SnippetUse, Context: format.SnippetRepo,
+		Title: "Download a file", Lang: "sh", Code: "telesphorepo get " + u + "\n"}
+	if repo.AnonymousRead {
+		return []format.Snippet{
+			{ID: "curl.download", Tool: "curl", Purpose: format.SnippetUse, Context: format.SnippetRepo, Title: "Download a file", Lang: "sh", Code: "curl -fLO " + u + "\n"},
+			{ID: "wget.download", Tool: "wget", Purpose: format.SnippetUse, Context: format.SnippetRepo, Title: "Download a file", Lang: "sh", Code: "wget " + u + "\n"},
+			get, publish,
+		}
 	}
+	get.Note = "Sign in once with telesphorepo login; the CLI then downloads as you."
+	note := "Create a read token on Your account › Tokens; it works where a password does. Enter it at the prompt."
 	return []format.Snippet{
-		{ID: "curl.download", Tool: "curl", Purpose: format.SnippetUse, Context: format.SnippetRepo, Title: "Download a file", Lang: "sh", Code: curl + "\n", Note: note},
-		{ID: "wget.download", Tool: "wget", Purpose: format.SnippetUse, Context: format.SnippetRepo, Title: "Download a file", Lang: "sh", Code: wget + "\n", Note: note},
-		format.CLISnippet("telesphorepo", format.CLIPublish+" file.tar.gz",
-			"The CLI uploads each file into the folder that path names in telesphorepo.toml. Or drop the files on the Files view in the browser."),
+		get,
+		{ID: "curl.download", Tool: "curl", Purpose: format.SnippetUse, Context: format.SnippetRepo, Title: "Download a file", Lang: "sh",
+			Code: format.ReadTokenPrompt + "\n" + format.ReadTokenConfig + " | curl -fLO -K - " + u + "\n", Note: note},
+		{ID: "wget.download", Tool: "wget", Purpose: format.SnippetUse, Context: format.SnippetRepo, Title: "Download a file", Lang: "sh",
+			Code: "wget --user YOUR_USERNAME --ask-password " + u + "\n", Note: note},
+		publish,
 	}
 }
 

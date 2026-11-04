@@ -121,7 +121,7 @@
   let version = $state(0);
 
   // The first page of the open folder, asked for together with its place (not after it), so a
-  // plain folder's list does not wait for the place. FolderList and FolderDetails share it. None
+  // plain folder's list does not wait for the place. FolderList reads it. None
   // with ?version= (it names a version, whose builds show) or where a plain folder shows as a
   // Tree or Columns (they load their own pages).
   const firstPage = $derived.by(() => {
