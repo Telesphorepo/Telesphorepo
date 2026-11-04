@@ -134,19 +134,25 @@
         {/if}
         <section class="flex min-w-0 flex-col gap-3" aria-label="Download {f.name} from a terminal">
           <h3 class="text-section">From a terminal</h3>
-          <CodeSnippet value={cliSnippet(url)} />
-          <p class="text-meta text-muted-foreground">
-            {#if repo.anonymous_read}
-              Or any tool that downloads a link.
-            {:else}
+          {#if repo.anonymous_read}
+            <!-- A public file: any tool that downloads a link, curl and wget first. -->
+            <SnippetTabs snippets={others} tools={downloadTools} label="Tool" fill />
+            <details>
+              <summary class="cursor-pointer text-meta text-muted-foreground hover:text-foreground">With the Telesphorepo CLI</summary>
+              <div class="pt-3"><CodeSnippet value={cliSnippet(url)} /></div>
+            </details>
+          {:else}
+            <!-- A private file: the CLI signs in with this computer's device, so no token to paste. -->
+            <CodeSnippet value={cliSnippet(url)} />
+            <p class="text-meta text-muted-foreground">
               The CLI signs in as you once (<code class="font-mono">telesphorepo login</code>), then downloads from private repositories.
               <a class="text-link hover:underline" href={href("/install")}>Install the CLI</a>
-            {/if}
-          </p>
-          <details class="group">
-            <summary class="cursor-pointer text-meta text-muted-foreground hover:text-foreground">curl or wget</summary>
-            <div class="pt-3"><SnippetTabs snippets={others} tools={downloadTools} label="Tool" fill /></div>
-          </details>
+            </p>
+            <details>
+              <summary class="cursor-pointer text-meta text-muted-foreground hover:text-foreground">curl or wget</summary>
+              <div class="pt-3"><SnippetTabs snippets={others} tools={downloadTools} label="Tool" fill /></div>
+            </details>
+          {/if}
         </section>
       </div>
       <div class="flex min-w-0 flex-col gap-6">
