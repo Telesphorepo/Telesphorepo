@@ -458,7 +458,9 @@ func contentHeaders(w http.ResponseWriter, r *http.Request, ct, etag string, mod
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Content-Security-Policy", "default-src 'none'; sandbox")
 	if !inline(ct) {
-		h.Set("Content-Disposition", "attachment")
+		// The file name of the path, so a tool that names the download after the header (wget) does
+		// not take the query of a signed link into the name.
+		h.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": path.Base(r.URL.Path)}))
 	}
 	h.Set("Content-Type", ct)
 	h.Set("ETag", etag)

@@ -6,7 +6,7 @@
   without its "/") opens the folder instead.
 -->
 <script lang="ts">
-  import { toast } from "svelte-sonner";
+  import { copyFileLink } from "./link";
   import { api, ApiError, type FileInfo, type Repo } from "$lib/api";
   import { Resource } from "$lib/load.svelte";
   import { filesPath, href, navigate, repoPath } from "$lib/router.svelte";
@@ -79,14 +79,7 @@
   const by = $derived(f?.build ? f.build.provider_title : f?.uploaded_by || "");
   const others = $derived(downloadSnippets(repo, url));
 
-  async function copyLink() {
-    try {
-      await navigator.clipboard.writeText(url);
-      toast.success(repo.anonymous_read ? "Link copied." : "Link copied. It needs a sign-in or a read token to download.");
-    } catch {
-      toast.error("Copy failed. Select the address and copy it by hand.");
-    }
-  }
+  const copyLink = () => copyFileLink(repo, path, base);
 </script>
 
 <div class="flex flex-col gap-6 px-5 pt-4 pb-5">

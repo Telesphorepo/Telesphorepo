@@ -4,7 +4,7 @@
   has the focus, and always on a touch screen. Clicks do not reach the row's link.
 -->
 <script lang="ts">
-  import { toast } from "svelte-sonner";
+  import { copyFileLink } from "./link";
   import { api, type Repo } from "$lib/api";
   import { Button } from "$lib/components/ui/button";
   import { cn } from "$lib/utils";
@@ -16,15 +16,10 @@
 
   const rel = $derived(api.repos.fileURL(repo.format, repo.name, path));
 
-  async function copy(ev: MouseEvent) {
+  function copy(ev: MouseEvent) {
     ev.preventDefault();
     ev.stopPropagation();
-    try {
-      await navigator.clipboard.writeText(base + rel);
-      toast.success(repo.anonymous_read ? "Link copied." : "Link copied. It needs a sign-in or a read token to download.");
-    } catch {
-      toast.error("Copy failed.");
-    }
+    copyFileLink(repo, path, base);
   }
 </script>
 

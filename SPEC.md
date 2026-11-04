@@ -1861,7 +1861,7 @@ stores it; it never contacts a remote) and `Reader.ServeAsset(w, r, asset, Serve
 
 One function sets the content headers from the asset row: `Content-Type`, `ETag` (`"<sha256>"`),
 `Last-Modified`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none';
-sandbox`, `Content-Disposition: attachment` except for `text/plain`; it answers 304 to a matching
+sandbox`, `Content-Disposition: attachment` with the `filename` of the path's last segment, except for `text/plain`; it answers 304 to a matching
 `If-None-Match`, and the stream serves ranges. With S3 and `s3.redirect` on, a GET of a hosted or
 proxy file answers 302 to a presigned URL that signs `response-content-type` and
 `response-content-disposition` from the asset row, so each path of a shared blob keeps its own
@@ -4843,8 +4843,9 @@ page are in `web/src/README.md`.
     At an artifact or a version folder, with no file selected, a card under the panel shows the
     artifact (kind, coordinates, version facts, the build) and its snippets, with Delete version or
     Delete folder. Every file row of the List and the Tree has Download and Copy link at its end,
-    shown under the pointer or with the focus, and always on a touch screen. Copy link copies the
-    file's URL under `base_url`.
+    shown under the pointer or with the focus, and always on a touch screen. Copy link copies a public
+    file's URL under `base_url`, and for a private file a signed link from
+    `POST /api/repos/{name}/links` (see **Signed download links**); a toast says until when it works.
   - `use`: **Use this repository**. An address card first. A public repo then has one card, "Add it
     to your build". A private repo has two numbered steps: create a read token, then add it to the
     build; the snippets already hold the credentials.
