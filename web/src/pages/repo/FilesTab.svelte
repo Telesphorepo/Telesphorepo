@@ -140,29 +140,13 @@
     void firstPage;
   });
 
-  // A file shows in the panel in place of the open folder, which stays mounted behind it. The
-  // window's scroll is kept per open file: opening one brings the panel's top into view, and
-  // Back returns to where the reader was in the folder.
-  let panel = $state<HTMLElement | null>(null);
-  let folderScroll = 0;
-  let hadFile = false;
-  $effect.pre(() => {
-    const on = !!file;
-    untrack(() => {
-      if (on && !hadFile) folderScroll = window.scrollY;
-      if (on !== hadFile) {
-        const wasFile = hadFile;
-        tick().then(() => {
-          if (on) {
-            const top = panel ? panel.getBoundingClientRect().top + window.scrollY - 96 : 0;
-            if (window.scrollY > top) window.scrollTo({ top: Math.max(0, top) });
-          } else if (wasFile) window.scrollTo({ top: folderScroll });
-        });
-      }
-      hadFile = on;
-    });
+  // A file shows in a pane beside the open folder, inside the panel, so the place the reader
+  // came from stays on screen. On a narrow screen the pane follows the folder and comes into view.
+  let pane = $state<HTMLElement | null>(null);
+  $effect(() => {
+    if (!file || !pane || window.matchMedia("(min-width: 1024px)").matches) return;
+    pane.scrollIntoView({ block: "start", behavior: "smooth" });
   });
-  const backLabel = $derived(versionQ ? `Back to ${versionQ}` : folder === "" ? `Back to ${repo.name}` : `Back to ${baseName(folder)}`);
   function closeFile() {
     navigate(filesPath(repo.name, folder), { query: { version: versionQ || undefined, build: build || undefined } });
   }
@@ -319,31 +303,16 @@
 {/snippet}
 
 <div class="flex flex-col gap-6">
-  <Card.Root bind:ref={panel} class="min-w-0 gap-0 py-0">
+  <Card.Root class="min-w-0 gap-0 py-0">
     <!-- The panel's toolbar: where in the repository, then how to show it. -->
     <div class="flex flex-wrap items-center gap-x-4 gap-y-2 border-b px-5 py-2 sm:px-6">
       <div class="min-w-0 flex-1 basis-48 py-1.5"><Breadcrumbs label="Folder" items={crumbs} /></div>
-      {#if !file}
-        <div class="ml-auto flex items-center gap-2">
-          <ViewSwitcher bind:value={view.value} {views} label="Show files as" />
-        </div>
-      {/if}
+      <div class="ml-auto flex items-center gap-2">
+        <ViewSwitcher bind:value={view.value} {views} label="Show files as" />
+      </div>
     </div>
-    {#if file}
-      {#key file}
-        <FileView
-          {repo}
-          path={file}
-          {base}
-          back={closeFile}
-          backLabel={backLabel}
-          {canWrite}
-          onDelete={() => askDelete({ path: file, dir: false })}
-        />
-      {/key}
-    {/if}
-    <!-- The open folder stays mounted behind a file, so Back finds its rows, open folders and scroll as they were. -->
-    <div class="min-w-0 px-2 pt-2 pb-3 sm:px-3 {viewMin}" class:hidden={!!file}>
+    <div class="flex flex-col lg:flex-row lg:items-start">
+    <div class="min-w-0 flex-1 px-2 pt-2 pb-3 sm:px-3 {viewMin}">
       {#if view.value === "tree"}
         {#key version}<TreeView {repo} {folder} {file} {base} />{/key}
       {:else if !place.data && place.error}
@@ -393,6 +362,14 @@
           {/if}
         {/key}
       {/if}
+    </div>
+    {#if file}
+      <div bind:this={pane} class="min-w-0 scroll-mt-24 border-t lg:w-[min(48%,44rem)] lg:shrink-0 lg:border-t-0 lg:border-l">
+        {#key file}
+          <FileView {repo} path={file} {base} onClose={closeFile} {canWrite} onDelete={() => askDelete({ path: file, dir: false })} />
+        {/key}
+      </div>
+    {/if}
     </div>
   </Card.Root>
 

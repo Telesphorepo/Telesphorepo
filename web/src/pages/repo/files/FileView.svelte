@@ -1,9 +1,8 @@
 <!--
-  One file, shown in the Files panel in place of the open folder's view (which stays mounted
-  behind it, so Back returns to the same rows, open folders and scroll). The header holds the
-  name, one line of facts and the actions people come for: Download and Copy link. Under it, two
-  columns: what the file is (SHA-256, checksum files, the CI build) and how to use it (the
-  format's part for the file, then the command line). A path that turns out to be a folder (typed
+  One file, in a wide pane beside the open folder inside the Files panel (the folder's view stays
+  on screen and keeps its place). The header holds the name, one line of facts and the actions
+  people come for: Download and Copy link. Under it how to use the file (the format's part for
+  it, then the command line), then what it is (SHA-256, checksum files, the CI build). A path that turns out to be a folder (typed
   without its "/") opens the folder instead.
 -->
 <script lang="ts">
@@ -25,7 +24,7 @@
   import { globMatch } from "$lib/glob";
   import { formatPart } from "../../../modules";
   import { baseName, sideLabel } from "../browse";
-  import ArrowLeftIcon from "@lucide/svelte/icons/arrow-left";
+  import XIcon from "@lucide/svelte/icons/x";
   import DownloadIcon from "@lucide/svelte/icons/download";
   import LinkIcon from "@lucide/svelte/icons/link";
   import Trash2Icon from "@lucide/svelte/icons/trash-2";
@@ -35,17 +34,15 @@
     repo,
     path,
     base,
-    back,
-    backLabel,
+    onClose,
     canWrite,
     onDelete,
   }: {
     repo: Repo;
     path: string;
     base: string;
-    /** Where Back goes: the folder (with its version and build) the file was opened from. */
-    back: () => void;
-    backLabel: string;
+    /** Closes the pane: back to the folder (with its version and build) the file is in. */
+    onClose: () => void;
     canWrite: boolean;
     onDelete: () => void;
   } = $props();
@@ -92,13 +89,9 @@
   }
 </script>
 
-<div class="flex flex-col gap-6 px-3 pt-3 pb-4 sm:px-4">
-  <div>
-    <Button variant="ghost" size="sm" class="-ml-2 text-muted-foreground" onclick={back}><ArrowLeftIcon />{backLabel}</Button>
-  </div>
-
-  <header class="flex flex-col gap-4 md:flex-row md:items-start">
-    <div class="flex min-w-0 flex-1 items-start gap-3">
+<div class="flex flex-col gap-6 px-5 pt-4 pb-5">
+  <header class="flex flex-col gap-4">
+    <div class="flex min-w-0 items-start gap-3">
       <FileIcon aria-hidden="true" class="mt-1 size-6 shrink-0 text-muted-foreground" />
       <div class="flex min-w-0 flex-col gap-1">
         <h2 class="text-section font-semibold break-all">{baseName(path)}</h2>
@@ -114,8 +107,9 @@
           </p>
         {/if}
       </div>
+      <Button variant="ghost" size="icon-sm" class="-mr-2 ml-auto shrink-0" aria-label="Close {baseName(path)}" onclick={onClose}><XIcon /></Button>
     </div>
-    <div class="flex shrink-0 flex-wrap gap-2">
+    <div class="flex flex-wrap gap-2">
       <Button href={rel} download={baseName(path)}><DownloadIcon />Download</Button>
       <Button variant="outline" onclick={copyLink}><LinkIcon />Copy link</Button>
       {#if canWrite}
@@ -131,7 +125,30 @@
   {:else if !f}
     <p class="text-body text-muted-foreground">This file does not exist any more.</p>
   {:else}
-    <div class="grid gap-8 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+    <div class="flex min-w-0 flex-col gap-8">
+      <div class="flex min-w-0 flex-col gap-6">
+        {#if partLoader}
+          {#await partLoader() then mod}
+            <mod.default {repo} file={f} />
+          {/await}
+        {/if}
+        <section class="flex min-w-0 flex-col gap-3" aria-label="Download {f.name} from a terminal">
+          <h3 class="text-section">From a terminal</h3>
+          <CodeSnippet value={cliSnippet(url)} />
+          <p class="text-meta text-muted-foreground">
+            {#if repo.anonymous_read}
+              Or any tool that downloads a link.
+            {:else}
+              The CLI signs in as you once (<code class="font-mono">telesphorepo login</code>), then downloads from private repositories.
+              <a class="text-link hover:underline" href={href("/install")}>Install the CLI</a>
+            {/if}
+          </p>
+          <details class="group">
+            <summary class="cursor-pointer text-meta text-muted-foreground hover:text-foreground">curl or wget</summary>
+            <div class="pt-3"><SnippetTabs snippets={others} tools={downloadTools} label="Tool" fill /></div>
+          </details>
+        </section>
+      </div>
       <div class="flex min-w-0 flex-col gap-6">
         <dl class="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-4 gap-y-2 text-body">
           {#if f.content_type}
@@ -161,29 +178,6 @@
         {/if}
       </div>
 
-      <div class="flex min-w-0 flex-col gap-6">
-        {#if partLoader}
-          {#await partLoader() then mod}
-            <mod.default {repo} file={f} />
-          {/await}
-        {/if}
-        <section class="flex min-w-0 flex-col gap-3" aria-label="Download {f.name} from a terminal">
-          <h3 class="text-section">From a terminal</h3>
-          <CodeSnippet value={cliSnippet(url)} />
-          <p class="text-meta text-muted-foreground">
-            {#if repo.anonymous_read}
-              Or any tool that downloads a link.
-            {:else}
-              The CLI signs in as you once (<code class="font-mono">telesphorepo login</code>), then downloads from private repositories.
-              <a class="text-link hover:underline" href={href("/install")}>Install the CLI</a>
-            {/if}
-          </p>
-          <details class="group">
-            <summary class="cursor-pointer text-meta text-muted-foreground hover:text-foreground">curl or wget</summary>
-            <div class="pt-3"><SnippetTabs snippets={others} tools={downloadTools} label="Tool" fill /></div>
-          </details>
-        </section>
-      </div>
     </div>
   {/if}
 </div>
