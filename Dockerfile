@@ -17,7 +17,7 @@ COPY web/ ./
 RUN bun run build
 
 # Go cross-compiles, so this stage runs on the build platform and never under QEMU.
-FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine3.24 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine3.24 AS build
 ARG VERSION=dev
 ARG TARGETOS
 ARG TARGETARCH
