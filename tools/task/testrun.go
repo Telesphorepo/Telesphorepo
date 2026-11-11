@@ -14,7 +14,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -142,13 +141,14 @@ func (g *gate) writeRunning(r e2erun.Running) error {
 	return os.WriteFile(g.runFile, b, 0o600)
 }
 
-// setBudget records the calibration and the budget of the run, which the test binaries read.
-func (g *gate) setBudget(calibration time.Duration) error {
+// setBudget records the calibration and the budget of the zone that runs next, which its test
+// binary reads.
+func (g *gate) setBudget(calibration, budget time.Duration) error {
 	r, err := e2erun.ReadRunning()
 	if err != nil {
 		return err
 	}
-	r.Calibration, r.Budget = calibration, e2erun.Budget(calibration)
+	r.Calibration, r.Budget = calibration, budget
 	return g.writeRunning(r)
 }
 
@@ -267,9 +267,9 @@ func buildE2EImage(ctx context.Context, eng containerengine.Engine) error {
 // once of an amd64 image, which an engine of another architecture emulates, as it does the
 // RHEL-family clients of the tests.
 //
-// A run does on one computer the work that CI spreads over ciRunners machines, so the calibration
-// runs that many batches at once: the budget then compares this computer with that many CI
-// runners, each running one batch (e2erun.ReferenceCalibration).
+// A zone does on one computer the work that CI spreads over ciRunners machines, so its
+// calibration runs that many batches at once: the budget then compares this computer with that
+// many CI runners, each running one batch (e2erun.ReferenceCalibration).
 const (
 	calibrationServers   = 6
 	calibrationRounds    = 2
@@ -362,47 +362,4 @@ func calibrationServer(ctx context.Context, eng containerengine.Engine, image st
 		return fmt.Errorf("sign in to a calibration server: status %d", resp.StatusCode)
 	}
 	return nil
-}
-
-// runZones runs the zones at the same time, each a go test of its own, with prefixed output when
-// there are several. It returns the zones that failed and the last failure.
-func runZones(ctx context.Context, env []string, argvs map[string][]string, zones []string) ([]string, error) {
-	if len(zones) == 1 {
-		z := zones[0]
-		step("zone %s: %s", z, strings.Join(argvs[z], " "))
-		if err := runStep(ctx, ".", env, argvs[z]...); err != nil {
-			return []string{z}, childExit(err)
-		}
-		return nil, nil
-	}
-	colors := []string{"36", "35", "33", "32"}
-	children := make([]*child, len(zones))
-	for i, z := range zones {
-		step("zone %s: %s", z, strings.Join(argvs[z], " "))
-		c, err := startChild(z, colors[i%len(colors)], ".", env, nil, argvs[z]...)
-		if err != nil {
-			for _, c := range children[:i] {
-				c.stop()
-			}
-			return nil, err
-		}
-		children[i] = c
-	}
-	var failed []string
-	var last error
-	for i, c := range children {
-		select {
-		case <-ctx.Done():
-			for _, c := range children {
-				c.stop()
-			}
-			return nil, ctx.Err()
-		case <-c.done:
-		}
-		if c.err != nil {
-			failed, last = append(failed, zones[i]), childExit(c.err)
-		}
-	}
-	slices.Sort(failed)
-	return failed, last
 }

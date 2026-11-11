@@ -98,15 +98,15 @@ var testZones = map[string][]string{
 }
 
 // test runs e2e zones with the detected container engine. The leading arguments name the zones
-// ("core", "import", "clients", "all" for the three; core when none), which run at the same
-// time; "--now" skips the cooldown after the person at the terminal confirms it; then
+// ("core", "import", "clients", "all" for the three; core when none), which run one after
+// another; "--now" skips the cooldown after the person at the terminal confirms it; then
 // "--shard i/n" runs only every n-th top-level test of one zone from the i-th on (CI runs a zone
 // on n machines at once); the remaining args pass to go test. "scale" runs the scale zone alone,
 // with no engine and none of the rules of an e2e run.
 //
 // A run goes through the gate (openGate): one run at a time, e2erun.Cooldown between the runs of
 // a checkout, a change since the last run. Then it removes what a killed run left, builds the
-// server image once, calibrates the budget of the tests to this computer, and starts the zones.
+// server image once, and runs each zone after calibrating its budget to this computer.
 func test(ctx context.Context, args []string) error {
 	if _, err := checkGo(); err != nil {
 		return err
@@ -135,8 +135,8 @@ names:
 	if len(zones) == 0 {
 		zones = []string{"core"}
 	}
-	slices.Sort(zones)
-	zones = slices.Compact(zones)
+	// Each zone once, core first: most changes need it, so its result comes soonest.
+	zones = slices.DeleteFunc([]string{"core", "clients", "import"}, func(z string) bool { return !slices.Contains(zones, z) })
 	shard, shards := 0, 0
 	if len(args) > 1 && args[0] == "--shard" {
 		if _, err := fmt.Sscanf(args[1], "%d/%d", &shard, &shards); err != nil || shards < 1 || shard < 1 || shard > shards {
@@ -168,26 +168,35 @@ names:
 			return err
 		}
 	}
-	batches := 1
-	if shards == 0 {
-		batches = 0
-		for _, z := range zones {
-			batches += ciRunners[z]
-		}
-	}
-	step("calibrating the budget of the tests to this computer (%d CI runners' work at once)", batches)
-	cal, err := calibrate(ctx, eng, image, batches)
-	if err != nil {
-		return fmt.Errorf("calibrate: %w", err)
-	}
-	if err := g.setBudget(cal); err != nil {
-		return err
-	}
-	step("calibration %s (%s for one batch on one CI runner): the tests of each zone have %s (%s on CI)",
-		cal.Round(100*time.Millisecond), e2erun.ReferenceCalibration, bold(e2erun.Budget(cal).String()), e2erun.ReferenceBudget)
-
-	argvs := map[string][]string{}
+	// The zones run one after another: on one computer, zones side by side compete for its CPU and
+	// memory and finish later than in turn. Each zone gets the budget of its own calibration, at
+	// most what is left of the run's e2erun.MaxRun.
+	env := []string{e2erun.TicketEnv + "=" + g.ticket, "E2E_IMAGE=" + image}
+	start := time.Now()
+	var failed []string
+	var last error
 	for _, zone := range zones {
+		left := (e2erun.MaxRun - time.Since(start)).Round(time.Second)
+		if left < time.Minute {
+			out.line(red("✗ ") + fmt.Sprintf("zone %s: not started, the run has used its %s", zone, e2erun.MaxRun))
+			failed, last = append(failed, zone), exitError{1}
+			continue
+		}
+		batches := 1
+		if shards == 0 {
+			batches = ciRunners[zone]
+		}
+		cal, err := calibrate(ctx, eng, image, batches)
+		if err != nil {
+			return fmt.Errorf("calibrate: %w", err)
+		}
+		budget := min(e2erun.Budget(cal), left)
+		if err := g.setBudget(cal, budget); err != nil {
+			return err
+		}
+		step("zone %s: calibration %s for %d CI runners' work (%s for one on CI): its tests have %s, %s left in the run",
+			zone, cal.Round(100*time.Millisecond), batches, e2erun.ReferenceCalibration, bold(budget.String()), left)
+
 		argv := append([]string{"go", "test"}, testZones[zone]...)
 		argv = append(argv, "./e2e/...", "-count=1", "-v")
 		if shards > 0 {
@@ -197,12 +206,15 @@ names:
 			}
 			argv = append(argv, "-run", run)
 		}
-		argvs[zone] = append(argv, args...)
-	}
-	env := []string{e2erun.TicketEnv + "=" + g.ticket, "E2E_IMAGE=" + image}
-	failed, last := runZones(ctx, env, argvs, zones)
-	if ctx.Err() != nil {
-		return exitError{130}
+		argv = append(argv, args...)
+		step("zone %s: %s", zone, strings.Join(argv, " "))
+		err = runStep(ctx, ".", env, argv...)
+		if ctx.Err() != nil {
+			return exitError{130}
+		}
+		if err != nil {
+			failed, last = append(failed, zone), childExit(err)
+		}
 	}
 	if len(zones) > 1 && len(failed) > 0 {
 		out.line(red("✗ ") + "failed zones: " + strings.Join(failed, ", "))

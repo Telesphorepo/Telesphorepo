@@ -38,7 +38,8 @@ Linux. Use bun, not npm.
   and leave its state (user cache folder, `telesphorepo/e2e`) and `internal/e2erun` alone. Only
   the person at the terminal can skip it, with `--now`. One run at a time on a computer.
 - **The tests of a zone fit in their budget**: 4 minutes on CI's runner, scaled to this computer
-  by a calibration that the run prints first. Past it the run fails. The budget keeps the suite
+  by a calibration that the run prints first, and 10 minutes for a whole run. Past it the run
+  fails. The budget keeps the suite
   small and focused, so a test that does not fit gets leaner (fewer containers and client images,
   one check per rule) rather than split off or given more time; `e2erun.ReferenceBudget` stays as
   it is. The scale and macOS zones have no budget.
