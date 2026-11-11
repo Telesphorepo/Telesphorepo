@@ -3001,8 +3001,9 @@ starts the e2e zones (core, import, clients); the scale and macOS zones are outs
   image, which an engine of another architecture emulates, as it does the RHEL-family clients. A
   zone runs as many batches at once as CI has runners for it (`ciRunners`: core 4, one shard 1),
   because one computer does the work of all of them. The budget is
-  `ReferenceBudget × calibration / e2erun.ReferenceCalibration` (one batch on CI's runner), kept
-  within 0.5× and 3×. The run prints both.
+  `ReferenceBudget × calibration / e2erun.ReferenceCalibration` (one batch on CI's runner, about
+  5 s), kept within 0.75× and 3×: much of a test's time (downloads, JVM starts) does not shrink on a
+  faster CPU. The run prints both.
 - **Gate.** One run at a time on the computer: `running.json` in the user cache folder
   (`telesphorepo/e2e`), created exclusively, holds the run's process, its random ticket and its
   budget; the file of a process that is gone is taken over. `ledger.json` beside it is one ledger

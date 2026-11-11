@@ -32,11 +32,14 @@ const (
 	// piece of the work of the tests) on the reference computer, CI's e2e runner, which prints it
 	// at the start of each zone. A computer whose calibration takes longer gets a longer budget, a
 	// faster one a shorter (Budget).
-	ReferenceCalibration = 3 * time.Second
+	ReferenceCalibration = 5 * time.Second
 
 	// The budget of a computer stays within these multiples of ReferenceBudget, so a disturbed
-	// calibration cannot make it absurd.
-	minBudgetScale, maxBudgetScale = 0.5, 3.0
+	// calibration cannot make it absurd. The floor is higher than the calibration alone suggests
+	// for a fast computer: much of a test's time (downloads from Maven Central or npm, JVM starts)
+	// does not shrink with a faster CPU, so a computer that calibrates twice as fast as CI runs the
+	// tests only a little faster.
+	minBudgetScale, maxBudgetScale = 0.75, 3.0
 
 	// Cooldown is the least time between the end of a run on this computer and the start of the
 	// next, from any checkout or agent, so that work is batched: finish a change, then test it
@@ -59,7 +62,7 @@ const (
 )
 
 // Budget is the budget of the tests of one zone on a computer whose calibration took
-// calibration: ReferenceBudget scaled by calibration / ReferenceCalibration, within 0.5x to 3x.
+// calibration: ReferenceBudget scaled by calibration / ReferenceCalibration, within 0.75x to 3x.
 func Budget(calibration time.Duration) time.Duration {
 	scale := float64(calibration) / float64(ReferenceCalibration)
 	scale = min(max(scale, minBudgetScale), maxBudgetScale)
