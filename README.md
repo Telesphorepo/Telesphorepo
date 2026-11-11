@@ -131,7 +131,7 @@ go tool task test core clients         # several zones, one after another
 go tool task test -run TestMaven       # some tests only
 ```
 
-The e2e tests have a time budget and runs are spaced at least 5 minutes apart: finish a change,
+The e2e tests have a time budget and runs are spaced at least 3 minutes apart: finish a change,
 then test it. [AGENTS.md](AGENTS.md) has the working rules, and [SPEC.md](SPEC.md) explains how
 the server works.
 
