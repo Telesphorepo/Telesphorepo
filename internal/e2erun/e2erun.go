@@ -19,10 +19,14 @@ import (
 const (
 	// ReferenceBudget is the time the tests of one zone may take on the reference computer, CI's
 	// e2e runner, from the first test to the last; the setup before them (the image build, the
-	// pulls) does not count. The zones run at the same time, so every e2e test of the repository
-	// finishes within it. It keeps the suite small, lean and focused: a change that does not fit
+	// pulls) does not count. It keeps the suite small, lean and focused: a change that does not fit
 	// makes its tests leaner, it never raises ReferenceBudget.
 	ReferenceBudget = 4 * time.Minute
+
+	// MaxRun is the most a whole run may take from its first zone on: the zones run one after
+	// another, and each zone's budget is at most what is left of MaxRun. It holds on any computer,
+	// however slow its calibration.
+	MaxRun = 10 * time.Minute
 
 	// ReferenceCalibration is the time of the calibration of "go tool task test" (a fixed piece
 	// of the work of the tests) on the reference computer. A computer whose calibration takes
@@ -112,7 +116,7 @@ func ReadRunning() (Running, error) {
 
 // ErrNoTicket is the refusal of a test binary that "go tool task test" did not start.
 var ErrNoTicket = fmt.Errorf("start the e2e tests with \"go tool task test\" (see AGENTS.md): it builds the image once, "+
-	"runs the zones at the same time, holds their tests to a budget (%s on CI's runner) and keeps %s between the runs of a checkout", ReferenceBudget, Cooldown)
+	"holds the tests of each zone to a budget (%s on CI's runner, %s for a whole run) and keeps %s between the runs of a checkout", ReferenceBudget, MaxRun, Cooldown)
 
 // CheckTicket returns the run in progress when ticket is its ticket.
 func CheckTicket(ticket string) (Running, error) {

@@ -2911,7 +2911,7 @@ The tasks live in `tools/task`; they are Go so they work on Windows, macOS and L
 | `go tool task dev` | The backend on :8080 (rebuilt on changes to Go or migrations) and Vite with HMR on **:5173**, which proxies every path but the UI's own files to the backend. Builds this computer's CLI archive and the Worker folder once first; a failed Worker build does not stop it |
 | `go tool task build [image]` | `bin/telesphorepo-server` with the UI, the CLI archives and the Worker folder (skipped without bun) embedded. `image` also builds `telesphorepo:local` |
 | `go tool task cli`, `edge` | The CLI archives (`internal/clidist`), and the Worker folder that `GET /api/edge/worker.zip` serves (`internal/edgedist`; needs bun) |
-| `go tool task test [zones] [--now]` | Runs the named e2e zones (`core` by default, or `all`) at the same time (see **The run of the e2e tests**); `--shard i/n` runs every n-th test of one zone |
+| `go tool task test [zones] [--now]` | Runs the named e2e zones (`core` by default, or `all`) one after another (see **The run of the e2e tests**); `--shard i/n` runs every n-th test of one zone |
 | `go tool task test scale` | Runs `TestScale` and prints its verdict: `PASS` exits 0, `FAIL` as the failed test, `NOISY` 3, `INCONCLUSIVE` 4 |
 | `go tool task release [version]` | The CLI and server archives for linux, darwin and windows on amd64 and arm64, the Worker archive and `SHA256SUMS` in `bin/release/`. A given version must be a release version and `changes.toml` must have no `dev` entry (see **Change log**) |
 | `go tool task tag <version>` | Stamps `v<version>` into each `dev` entry of `changes.toml`, commits `Release v<version>` and creates the annotated tag. Pushes nothing. The tagged commit holds the stamped change log, so `release.yml` and every image build embed the same entries |
@@ -2981,22 +2981,28 @@ file (`json-file`, Podman's `k8s-file`): journald, Podman's default, drops a uni
 | import | `import` | `go tool task test import` | `TestNexus` with a Nexus container, and the Nexus imports of the formats (`e2e/nexus_*_test.go`) |
 | scale | `scale` | `go tool task test scale` | `TestScale`, with no container engine, alone on a quiet machine |
 | clients | `clients` | `go tool task test clients` | The CLI of this repo, built on the host, in containers with the real tools (`e2e/cli_*_test.go`). Needs Go on the host and the internet |
-| all | `e2e`, `import`, `clients` | `go tool task test all` | Every zone but scale, at the same time |
+| all | `e2e`, `import`, `clients` | `go tool task test all` | Every zone but scale, one after another |
 
 **The run of the e2e tests** (`internal/e2erun`, `tools/task/testrun.go`). Only `go tool task test`
 starts the e2e zones (core, import, clients); the scale and macOS zones are outside it.
 
 - **Budget.** A zone's tests, from the first to the last, finish within a budget: 4 minutes
   (`e2erun.ReferenceBudget`) on CI's e2e runner. The setup before them (image build, pulls, Maven
-  warm-up) does not count. The zones run at the same time, as CI runs them, so the whole suite
-  fits the budget. `TestMain` sets it as go test's own timeout, whose clock starts in `m.Run`; past
-  it, the binary panics and names the tests still running. It prints the time the tests took.
-- **Calibration.** Before the zones start, the run times a fixed piece of the tests' work on its
-  engine: two rounds of six servers of the run's image started at once, each until `/healthz` and
-  a sign-in answer, then removed; then four runs at once of the amd64 Rocky Linux 9 image, which an
-  engine of another architecture emulates, as it does the RHEL-family clients. The budget is
-  `ReferenceBudget × calibration / e2erun.ReferenceCalibration` (the calibration on CI's runner),
-  kept within 0.5× and 3×. The run prints both.
+  warm-up) does not count. `TestMain` sets it as go test's own timeout, whose clock starts in
+  `m.Run`; past it, the binary panics and names the tests still running. It prints the time the
+  tests took.
+- **Zones in turn, 10 minutes in all.** The zones of a run run one after another, core first:
+  side by side on one computer they compete for its CPU and memory and finish later. A whole run
+  takes at most 10 minutes (`e2erun.MaxRun`) from its first zone on; each zone's budget is at most
+  what is left of it, and a zone with less than a minute left does not start and fails the run.
+- **Calibration.** Before each zone, the run times a fixed piece of the tests' work on its
+  engine, a batch: two rounds of six servers of the run's image started at once, each until
+  `/healthz` and a sign-in answer, then removed; then four runs at once of the amd64 Rocky Linux 9
+  image, which an engine of another architecture emulates, as it does the RHEL-family clients. A
+  zone runs as many batches at once as CI has runners for it (`ciRunners`: core 4, one shard 1),
+  because one computer does the work of all of them. The budget is
+  `ReferenceBudget × calibration / e2erun.ReferenceCalibration` (one batch on CI's runner), kept
+  within 0.5× and 3×. The run prints both.
 - **Gate.** One run at a time on the computer: `running.json` in the user cache folder
   (`telesphorepo/e2e`), created exclusively, holds the run's process, its random ticket and its
   budget; the file of a process that is gone is taken over. Each checkout (by path) keeps the time

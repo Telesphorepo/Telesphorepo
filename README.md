@@ -127,7 +127,7 @@ go tool task build image               # the container image telesphorepo:local
 go tool task gen                       # regenerate the SQL code after changing queries/*.sql
 go tool task migration db add_thing    # create the next migration file
 go tool task test                      # core e2e tests
-go tool task test core clients         # several zones at once
+go tool task test core clients         # several zones, one after another
 go tool task test -run TestMaven       # some tests only
 ```
 

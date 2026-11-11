@@ -248,21 +248,40 @@ func StartDnf(t testing.TB, image string) *Dnf {
 		t.Fatalf("start the dnf container %s: %v", image, err)
 	}
 	d := &Dnf{c: c}
-	d.MustExec(t, "remove the distribution's repositories", "rm -f /etc/yum.repos.d/*.repo")
+	// assumeyes: a dnf that asks (a key import, a confirmation) answers yes instead of waiting.
+	d.MustExec(t, "remove the distribution's repositories", "rm -f /etc/yum.repos.d/*.repo && echo assumeyes=True >> /etc/dnf/dnf.conf")
 	return d
 }
+
+// dnfExecTimeout bounds one dnf command. A command past it fails the test with the state of
+// the container's processes, so a hung dnf shows what it waits on.
+const dnfExecTimeout = 3 * time.Minute
 
 // Exec runs script with bash and returns the exit code and the combined output.
 func (d *Dnf) Exec(t testing.TB, script string) (int, string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), dnfExecTimeout)
 	defer cancel()
 	code, rd, err := d.c.Exec(ctx, []string{"bash", "-c", "exec 2>&1; " + script}, tcexec.Multiplexed())
 	if err != nil {
-		t.Fatalf("dnf container exec: %v", err)
+		t.Fatalf("dnf container exec of %q: %v\n%s", script, err, d.processes())
 	}
 	out, _ := io.ReadAll(rd)
 	return code, string(out)
+}
+
+// processes lists the container's processes with what each waits on, and the open files of
+// each dnf process.
+func (d *Dnf) processes() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, rd, err := d.c.Exec(ctx, []string{"sh", "-c", `exec 2>&1; ps -eo pid,stat,wchan:32,etime,args; ` +
+		`for p in $(pgrep dnf); do echo "-- open files of $p"; ls -l /proc/$p/fd; done`}, tcexec.Multiplexed())
+	if err != nil {
+		return "list the processes: " + err.Error()
+	}
+	out, _ := io.ReadAll(rd)
+	return string(out)
 }
 
 // MustExec is Exec that fails the test on a non-zero exit.
