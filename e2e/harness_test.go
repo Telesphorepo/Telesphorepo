@@ -296,7 +296,7 @@ func (s *Server) RestartAfter(t testing.TB, whileStopped func()) {
 
 // volumeToolImage runs shell tools against a data volume. It is the curl client image, so the
 // run pulls no extra image.
-const volumeToolImage = "curlimages/curl:8.16.0"
+const volumeToolImage = "curlimages/curl:8.23.0"
 
 // NewDataVolume returns the name of a new named volume for ServerOpts.DataVolume. The volume is
 // removed at test end, after the containers that use it.
@@ -1003,7 +1003,7 @@ func startSharedSeaweed() {
 func runSeaweed(ctx context.Context, alias string) (*testcontainers.DockerContainer, string, error) {
 	img := os.Getenv("E2E_SEAWEEDFS_IMAGE")
 	if img == "" {
-		img = "chrislusf/seaweedfs:4.48"
+		img = "chrislusf/seaweedfs:4.53"
 	}
 	s3conf := fmt.Sprintf(`{"identities":[{"name":"e2e","credentials":[{"accessKey":%q,"secretKey":%q}],"actions":["Admin","Read","Write","List","Tagging"]}]}`, seaweedAccess, seaweedSecret)
 	c, err := runContainer(ctx, img,

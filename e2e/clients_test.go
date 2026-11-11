@@ -41,7 +41,7 @@ var (
 // caddyImage is the reverse proxy of the tests: a redirector, a proxy with a body limit, a
 // proxy in front of two servers and a proxy with no upstream. It is infrastructure of the tests,
 // so it stays pinned.
-const caddyImage = "caddy:2.10.2-alpine"
+const caddyImage = "caddy:2.11.9-alpine"
 
 // registryHost is the registry host of s as Docker names it: its network alias and port.
 func registryHost(s *Server) string { return s.Alias + ":8080" }
