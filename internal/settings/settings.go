@@ -353,7 +353,9 @@ type Item struct {
 	// Display and DefaultDisplay put a size or a duration in words ("512 MiB", "90 days").
 	Display        string `json:"display,omitempty"`
 	DefaultDisplay string `json:"default_display,omitempty"`
-	Source         Source `json:"source"`
+	// Empty is what an empty value means (Def.Empty).
+	Empty  string `json:"empty,omitempty"`
+	Source Source `json:"source"`
 	// Locked: forced by the environment variable Env, read-only in the UI.
 	Locked bool `json:"locked"`
 }
@@ -370,7 +372,7 @@ func (s *Service) Items(g *Group) []Item {
 	for _, def := range g.Defs {
 		it := Item{
 			Key: def.Key, Env: def.Env(), Group: g.ID, Label: def.Label, Help: def.Help,
-			Type: def.Type, Options: def.Options, Secret: def.Secret,
+			Type: def.Type, Options: def.Options, Secret: def.Secret, Empty: def.Empty,
 			Source: snap.sources[def.idx], Locked: snap.sources[def.idx] == SourceEnv,
 		}
 		switch {

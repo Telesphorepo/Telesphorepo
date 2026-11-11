@@ -18,7 +18,7 @@ var (
 		Options: []string{"fs", "s3"}, Normalize: settings.Lower})
 	FSRoot = settings.String(&settings.Def{Key: "fs.root", DataDefault: "blobs", Label: "Filesystem root",
 		Help: "The server keeps blobs in this directory when storage is fs. The default is blobs/ in the data directory.", Normalize: settings.Trim})
-	S3Endpoint = settings.String(&settings.Def{Key: "s3.endpoint", Label: "S3 endpoint",
+	S3Endpoint = settings.String(&settings.Def{Key: "s3.endpoint", Empty: "AWS", Label: "S3 endpoint",
 		Help:      "The URL of the S3 API, for example https://<account>.r2.cloudflarestorage.com or http://seaweedfs:8333. Leave it empty for AWS: the server then uses the AWS endpoint of the S3 region, so the region is required.",
 		Normalize: settings.Trim, Validate: func(v any) error {
 			if err := settings.HTTPURL(v); err != nil {
@@ -31,7 +31,7 @@ var (
 			}
 			return nil
 		}})
-	S3Region = settings.String(&settings.Def{Key: "s3.region", Label: "S3 region",
+	S3Region = settings.String(&settings.Def{Key: "s3.region", Empty: "auto", Label: "S3 region",
 		Help:      "The region of the bucket, for example us-east-1. It is required when the endpoint is empty (AWS). With an endpoint and no region, the server signs for the region auto, which Cloudflare R2 and SeaweedFS accept.",
 		Normalize: settings.Trim})
 	S3Bucket = settings.String(&settings.Def{Key: "s3.bucket", Label: "S3 bucket", Normalize: settings.Trim,
@@ -40,7 +40,7 @@ var (
 		Help: "Required when storage is s3."})
 	S3SecretAccessKey = settings.String(&settings.Def{Key: "s3.secret_access_key", Secret: true, Label: "S3 secret access key",
 		Help: "Required when storage is s3."})
-	S3Prefix = settings.String(&settings.Def{Key: "s3.prefix", Label: "S3 key prefix",
+	S3Prefix = settings.String(&settings.Def{Key: "s3.prefix", Empty: "None", Label: "S3 key prefix",
 		Help: "Every object key starts with this prefix, for example telesphorepo/. Leave it empty for no prefix.",
 		Normalize: func(v any) any {
 			s := strings.Trim(strings.TrimSpace(v.(string)), "/")

@@ -737,6 +737,8 @@ export type Setting = {
   /** A size or duration in words ("512 MiB", "90 days"), with the default's. */
   display?: string;
   default_display?: string;
+  /** What an empty value means when there is no default ("Telesphorepo"): the placeholder of an empty field. */
+  empty?: string;
   source: SettingSource;
   /** Forced by the environment variable `env`; read-only in the UI. */
   locked: boolean;

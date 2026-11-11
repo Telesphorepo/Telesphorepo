@@ -36,7 +36,7 @@ func Lower(v any) any { return strings.ToLower(strings.TrimSpace(v.(string))) }
 // The settings of the group "general" that the kernel reads. The core module registers the
 // group (General).
 var (
-	BaseURL = String(&Def{Key: "base_url", Label: "Public base URL", Dev: "http://localhost:8080",
+	BaseURL = String(&Def{Key: "base_url", Empty: "The address of the first sign-in", Label: "Public base URL", Dev: "http://localhost:8080",
 		Help:      "Clients reach this server at this URL, for example https://repo.example.com. The UI uses it in client snippets. The server sets it to the address of the first sign-in of an administrator (not a localhost address); change it if clients reach the server at another address.",
 		Normalize: func(v any) any { return strings.TrimRight(strings.TrimSpace(v.(string)), "/") },
 		Validate:  HTTPURL})
@@ -61,16 +61,16 @@ var (
 		Help: "The server deletes a resumable upload that received no data for this time."})
 	DeleteWait = Duration(&Def{Key: "delete.wait", Default: "2s", Label: "Background delete after",
 		Help: "A delete of files that takes longer than this goes on in the background, and its progress shows in a notice."})
-	TLSCertFile = String(&Def{Key: "tls.cert_file", Label: "TLS certificate file", Normalize: Trim,
+	TLSCertFile = String(&Def{Key: "tls.cert_file", Empty: "None: plain HTTP", Label: "TLS certificate file", Normalize: Trim,
 		Help: "The path of a PEM file with the certificate chain of the server. With a key file too, the server serves HTTPS with HTTP/2 itself. A renewed file applies at the next connection. Turning TLS on or off applies at the next start."})
-	TLSKeyFile = String(&Def{Key: "tls.key_file", Label: "TLS key file", Normalize: Trim,
+	TLSKeyFile = String(&Def{Key: "tls.key_file", Empty: "None: plain HTTP", Label: "TLS key file", Normalize: Trim,
 		Help: "The path of the PEM file with the private key of the TLS certificate. Turning TLS on or off applies at the next start."})
-	ServerName = String(&Def{Key: "server_name", Label: "Server name", Normalize: Trim, Validate: validName,
+	ServerName = String(&Def{Key: "server_name", Empty: "Telesphorepo", Label: "Server name", Normalize: Trim, Validate: validName,
 		Help: "The name that the top bar, the sign-in page and the browser tab show. Empty shows Telesphorepo."})
 	ServerLogo = Image(&Def{Key: "server_logo", Label: "Logo", Validate: validLogo,
 		Help: "A PNG, JPEG or WebP image of at most 256 KiB and 512 pixels on its long side, shown before the server name."})
 	RepoDomains = List(&Def{Key: "repo_domains", Label: "Repository domains",
-		Help: "Domains that each serve the files of one repository at their root, each as <domain>=<repository>, for example updater.example.com=releases. A domain only reads: GET and HEAD, with the same access as the repository's own address. Point the domain at this server first (DNS and the reverse proxy). Docker repositories cannot have one.",
+		Help:      "Domains that each serve the files of one repository at their root, each as <domain>=<repository>, for example updater.example.com=releases. A domain only reads: GET and HEAD, with the same access as the repository's own address. Point the domain at this server first (DNS and the reverse proxy). Docker repositories cannot have one.",
 		Normalize: normalizeDomains, Validate: validDomains})
 )
 

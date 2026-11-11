@@ -57,7 +57,7 @@ var DirectUploads = settings.Bool(&settings.Def{Key: "docker.direct_uploads", De
 	Help: cloudflareNote + " A larger layer fails, unless this is on. When it is on, a push still starts on the main address, and the server tells the client to send the layer bytes to the Docker upload address. Clients need no setup. This makes the IP address of the server public. Open the port of the upload address in the firewall of the server for the clients that push. Not behind Cloudflare: leave it off."})
 
 // UploadURL is the setting docker.upload_url.
-var UploadURL = settings.String(&settings.Def{Key: "docker.upload_url", Label: "Docker upload address",
+var UploadURL = settings.String(&settings.Def{Key: "docker.upload_url", Empty: "None: layers go to the main address", Label: "Docker upload address",
 	Help:      "The address of the server that takes the layer bytes when Expose the origin IP for Docker uploads is on, e.g. https://upload.repo.example.com: a DNS-only name (in Cloudflare, DNS only) or the address of the server. ORAS and Helm 4 push to this address.",
 	Normalize: func(v any) any { return strings.TrimRight(strings.TrimSpace(v.(string)), "/") },
 	Validate:  validUploadURL})

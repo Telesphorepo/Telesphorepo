@@ -50,7 +50,11 @@ type Def struct {
 	DataDefault string
 	Secret      bool
 	// Zero lets a duration or a whole number be 0 (e.g. edge.access_ttl, where 0 means no cache).
-	Zero    bool
+	Zero bool
+	// Empty says in a few words what an empty value means when the setting has no default
+	// ("Telesphorepo", "None: plain HTTP"). The settings form shows it as the placeholder of an
+	// empty field, so a blank field never hides what the server does.
+	Empty   string
 	Options []string // allowed values (lower case) of an enumerated string
 	// Normalize puts a decoded value in its canonical form (optional).
 	Normalize func(v any) any

@@ -224,6 +224,10 @@
     return Array.isArray(d) ? d.join(", ") : String(d);
   };
 
+  // The placeholder of an empty field says what the server does with it: the default, or what an
+  // empty value means (Telesphorepo for an empty server name).
+  const emptyText = (s: Setting) => (defaultText(s) ? `Default: ${defaultText(s)}` : s.empty);
+
   function edit(s: Setting, v: string | boolean) {
     const original = s.type === "bool" ? s.value === true : asText(s);
     if (v === original) drop(s.key);
@@ -409,7 +413,7 @@
           disabled={ro}
           invalid={!!err}
           describedby={described}
-          placeholder={defaultText(s) ? `Default: ${defaultText(s)}` : undefined}
+          placeholder={emptyText(s)}
           onchange={(v) => editParts(s, v)}
         />
       {:else}
@@ -421,7 +425,7 @@
           disabled={ro}
           spellcheck={false}
           autocomplete="off"
-          placeholder={look.placeholder ?? (defaultText(s) ? `Default: ${defaultText(s)}` : undefined)}
+          placeholder={look.placeholder ?? emptyText(s)}
           value={String(current(s))}
           oninput={(e) => edit(s, e.currentTarget.value)}
           aria-invalid={err ? true : undefined}

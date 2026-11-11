@@ -387,7 +387,10 @@ the server); repodata is `repodata/repomd.xml`, `repomd.xml.asc` and
 Precedence: env override, stored value, default. `telesphorepo-server dev` uses a setting's `Dev`
 value instead of `Default`. Setting types and their input syntax (sizes with binary or decimal
 units, durations such as `90 days`) are in `internal/settings/units.go` and `image.go`. An `image`
-setting, like a secret, reads back as `{set}`, never the bytes.
+setting, like a secret, reads back as `{set}`, never the bytes. A field never sits blank without
+saying what the server does with it: an empty field shows the default as its placeholder, or,
+for a setting with no default, `Def.Empty`, the meaning of an empty value ("Telesphorepo" for an
+empty server name). A setting whose empty value means something states it there.
 
 **Groups.** Each module owns its settings groups and registers them with `Extender.Settings`; the
 `settings` package holds no feature rules and declares only the `general` group

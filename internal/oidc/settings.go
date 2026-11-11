@@ -36,7 +36,7 @@ var (
 	Scopes = settings.String(&settings.Def{Key: "oidc.scopes", Default: "openid profile email", Label: "Scopes",
 		Help:      "The server asks for these space-separated scopes at sign-in. It always adds openid.",
 		Normalize: func(v any) any { return strings.Join(strings.Fields(v.(string)), " ") }})
-	PermissionClaim = settings.String(&settings.Def{Key: "oidc.permission_claim", Label: "Permission claim",
+	PermissionClaim = settings.String(&settings.Def{Key: "oidc.permission_claim", Empty: "None: permissions are set on this server", Label: "Permission claim",
 		Help:      "The claim of the ID token (then of UserInfo) whose values give server permissions, for example groups, or realm_access.roles for Keycloak realm roles. When it is set, single sign-on manages the server permissions of every SSO account at each sign-in. When it is empty, people manage the permissions on this server and a sign-in never changes them.",
 		Normalize: settings.Trim,
 		Validate: func(v any) error {
