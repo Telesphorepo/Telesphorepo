@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -24,31 +25,35 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/e2erun"
 )
 
-// An e2e run goes through a gate: one run at a time on the computer, e2erun.Cooldown between the
-// runs of a checkout, and a change to the checkout since its last run. The gate hands the run a
+// An e2e run goes through a gate: one run at a time on the computer, e2erun.Cooldown between any
+// two runs on it, and code that no run on it has tested yet. The ledger is one per computer, not
+// per checkout, so a run from another worktree or a subagent counts too. The gate hands the run a
 // ticket that the test binaries check (e2erun.CheckTicket), so "go test" alone cannot skip it.
 
-// checkoutState is what the gate keeps of the runs of one checkout.
-type checkoutState struct {
-	Root    string    `json:"root"`
+// ledger is what the gate keeps of the runs on this computer.
+type ledger struct {
 	LastRun time.Time `json:"last_run"` // the end of the last run; its start while it runs
 	Refused time.Time `json:"refused"`  // the last start refused by the cooldown
-	Tree    string    `json:"tree"`     // treeFingerprint at the start of the last run
+	Trees   []string  `json:"trees"`    // treeFingerprint of the latest runs, newest last
 }
+
+// ledgerTrees is how many tested trees the ledger remembers.
+const ledgerTrees = 50
 
 type gate struct {
-	ticket    string
-	runFile   string
-	stateFile string
-	state     checkoutState
+	ticket     string
+	runFile    string
+	ledgerFile string
+	ledger     ledger
 }
 
-const cooldownRefusal = `the e2e tests of this checkout ran less than %s ago. Running them this often means the work is not batched.
+const cooldownRefusal = `the e2e tests ran on this computer less than %s ago. Running them this often means the work is not batched.
 Do not wait for the cooldown: no sleep, no retry loop, no polling. Every refused start, this one too, starts the %s again.
 Go on with the next part of the work without running tests. Run the tests once, when a batch of changes is done and committed,
-and name every zone that batch needs in that one run (e.g. go tool task test core clients).`
+and name every zone that batch needs in that one run (e.g. go tool task test core clients).
+The cooldown is one for the whole computer: a subagent or another worktree does not get around it. The main agent runs the tests.`
 
-const unchangedRefusal = `nothing changed in this checkout since its last e2e run (the same commit and the same uncommitted changes):
+const unchangedRefusal = `this code has already been tested on this computer (the same commit and the same uncommitted changes):
 running the same code again tests nothing new. Change the code first, commit it, then run the tests once.
 A flaky test is a bug to find and fix, not a reason to run the tests again.`
 
@@ -66,12 +71,10 @@ func openGate(ctx context.Context, now bool) (*gate, error) {
 	if err != nil {
 		return nil, err
 	}
-	sum := sha256.Sum256([]byte(root))
-	g := &gate{stateFile: filepath.Join(dir, "checkout-"+hex.EncodeToString(sum[:8])+".json")}
-	if b, err := os.ReadFile(g.stateFile); err == nil {
-		_ = json.Unmarshal(b, &g.state)
+	g := &gate{ledgerFile: filepath.Join(dir, "ledger.json")}
+	if b, err := os.ReadFile(g.ledgerFile); err == nil {
+		_ = json.Unmarshal(b, &g.ledger)
 	}
-	g.state.Root = root
 	tree := treeFingerprint(ctx)
 
 	if now {
@@ -79,16 +82,16 @@ func openGate(ctx context.Context, now bool) (*gate, error) {
 			return nil, err
 		}
 	} else {
-		last := g.state.LastRun
-		if g.state.Refused.After(last) {
-			last = g.state.Refused
+		last := g.ledger.LastRun
+		if g.ledger.Refused.After(last) {
+			last = g.ledger.Refused
 		}
-		if !g.state.LastRun.IsZero() && time.Since(last) < e2erun.Cooldown {
-			g.state.Refused = time.Now()
+		if !g.ledger.LastRun.IsZero() && time.Since(last) < e2erun.Cooldown {
+			g.ledger.Refused = time.Now()
 			g.save()
 			return nil, fmt.Errorf(cooldownRefusal, e2erun.Cooldown, e2erun.Cooldown)
 		}
-		if tree != "" && tree == g.state.Tree {
+		if tree != "" && slices.Contains(g.ledger.Trees, tree) {
 			return nil, errors.New(unchangedRefusal)
 		}
 	}
@@ -98,7 +101,13 @@ func openGate(ctx context.Context, now bool) (*gate, error) {
 	}
 	// The start counts as the last run until the end replaces it, so a killed run still has its
 	// cooldown.
-	g.state.LastRun, g.state.Refused, g.state.Tree = time.Now(), time.Time{}, tree
+	g.ledger.LastRun, g.ledger.Refused = time.Now(), time.Time{}
+	if tree != "" {
+		g.ledger.Trees = append(g.ledger.Trees, tree)
+		if n := len(g.ledger.Trees); n > ledgerTrees {
+			g.ledger.Trees = g.ledger.Trees[n-ledgerTrees:]
+		}
+	}
 	g.save()
 	return g, nil
 }
@@ -154,7 +163,7 @@ func (g *gate) setBudget(calibration, budget time.Duration) error {
 
 // close ends the run: its end starts the cooldown, and the computer is free for the next run.
 func (g *gate) close() {
-	g.state.LastRun = time.Now()
+	g.ledger.LastRun = time.Now()
 	g.save()
 	if r, err := e2erun.ReadRunning(); err == nil && r.Ticket == g.ticket {
 		_ = os.Remove(g.runFile)
@@ -162,8 +171,8 @@ func (g *gate) close() {
 }
 
 func (g *gate) save() {
-	if b, err := json.MarshalIndent(g.state, "", "  "); err == nil {
-		_ = os.WriteFile(g.stateFile, b, 0o600)
+	if b, err := json.MarshalIndent(g.ledger, "", "  "); err == nil {
+		_ = os.WriteFile(g.ledgerFile, b, 0o600)
 	}
 }
 

@@ -3005,12 +3005,13 @@ starts the e2e zones (core, import, clients); the scale and macOS zones are outs
   within 0.5× and 3×. The run prints both.
 - **Gate.** One run at a time on the computer: `running.json` in the user cache folder
   (`telesphorepo/e2e`), created exclusively, holds the run's process, its random ticket and its
-  budget; the file of a process that is gone is taken over. Each checkout (by path) keeps the time
-  of its last run and a hash of its tree (the commit, `git diff HEAD` and the untracked files). A
-  run is refused when it starts less than 5 minutes (`e2erun.Cooldown`) after the checkout's last
-  run, and the refusal starts the 5 minutes again; it tells the agent to batch its work and go on
-  without waiting, and does not say how long is left. A run whose tree has not changed since the
-  last run is refused too. A run's start counts as its last run until its end replaces it, so a
+  budget; the file of a process that is gone is taken over. `ledger.json` beside it is one ledger
+  for the whole computer, whatever the checkout, worktree or agent: the time of the last run and
+  a hash of the tree of each of the latest 50 runs (the commit, `git diff HEAD` and the untracked
+  files). A run is refused when it starts less than 3 minutes (`e2erun.Cooldown`) after the last
+  run on the computer, and the refusal starts the 3 minutes again; it tells the agent to batch its
+  work and go on without waiting, and does not say how long is left. A run of a tree that a run
+  on the computer has already tested is refused too. A run's start counts as its last run until its end replaces it, so a
   killed run keeps its cooldown. `--now` skips both checks after the person at the terminal types
   `now`; without a terminal it refuses. The ticket goes to the test binaries in `E2E_RUN_TICKET`,
   and `TestMain` refuses to run without the ticket of the run in progress, so a plain `go test` of

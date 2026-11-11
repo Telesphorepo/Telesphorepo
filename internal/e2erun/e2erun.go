@@ -38,11 +38,11 @@ const (
 	// calibration cannot make it absurd.
 	minBudgetScale, maxBudgetScale = 0.5, 3.0
 
-	// Cooldown is the least time between the end of a run of a checkout and the start of its next
-	// run, so that work is batched: finish a change, then test it once. A run started during the
-	// cooldown is refused and starts it again, so waiting it out with sleep and retrying never
-	// gets through sooner than working on the next change.
-	Cooldown = 5 * time.Minute
+	// Cooldown is the least time between the end of a run on this computer and the start of the
+	// next, from any checkout or agent, so that work is batched: finish a change, then test it
+	// once. A run started during the cooldown is refused and starts it again, so waiting it out
+	// with sleep and retrying never gets through sooner than working on the next change.
+	Cooldown = 3 * time.Minute
 
 	// TicketEnv is the variable that carries the ticket of the run to the test binaries.
 	TicketEnv = "E2E_RUN_TICKET"
@@ -117,7 +117,7 @@ func ReadRunning() (Running, error) {
 
 // ErrNoTicket is the refusal of a test binary that "go tool task test" did not start.
 var ErrNoTicket = fmt.Errorf("start the e2e tests with \"go tool task test\" (see AGENTS.md): it builds the image once, "+
-	"holds the tests of each zone to a budget (%s on CI's runner, %s for a whole run) and keeps %s between the runs of a checkout", ReferenceBudget, MaxRun, Cooldown)
+	"holds the tests of each zone to a budget (%s on CI's runner, %s for a whole run) and keeps %s between the runs on this computer", ReferenceBudget, MaxRun, Cooldown)
 
 // CheckTicket returns the run in progress when ticket is its ticket.
 func CheckTicket(ticket string) (Running, error) {

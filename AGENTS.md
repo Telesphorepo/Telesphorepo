@@ -30,13 +30,17 @@ Linux. Use bun, not npm.
 - **Batch the work, then test it once.** Finish a change, commit it, then run the tests it touches
   in one run (`go tool task test core clients -run 'TestX|TestY'` names every zone it needs). A
   failure: fix it, commit, and run the failed tests once more. `go tool task test` holds this:
-  it refuses a run within 5 minutes of the checkout's last run, or of a checkout that has not
-  changed since that run. A refusal means the work is not batched yet, so carry on with the next
+  it refuses a run within 3 minutes of the last run on the computer, and a run of code that has
+  already been tested. A refusal means the work is not batched yet, so carry on with the next
   part of the work and test it all together later. Waiting the cooldown out gains nothing: each
   refused start restarts it. The gate exists to keep test runs rare, so leave it as it is: start
   the e2e zones only through `go tool task test` (a plain `go test` of them refuses to start),
   and leave its state (user cache folder, `telesphorepo/e2e`) and `internal/e2erun` alone. Only
-  the person at the terminal can skip it, with `--now`. One run at a time on a computer.
+  the person at the terminal can skip it, with `--now`.
+- **The main agent runs the tests; subagents do not.** The gate keeps one ledger for the whole
+  computer, so every checkout, worktree and agent shares one cooldown and one run at a time. A
+  subagent's run would spend the main agent's turn and refuse its run, so a subagent finishes its
+  part, commits it and reports back, and the main agent tests the batch once.
 - **The tests of a zone fit in their budget**: 4 minutes on CI's runner, scaled to this computer
   by a calibration that the run prints first, and 10 minutes for a whole run. Past it the run
   fails. The budget keeps the suite
