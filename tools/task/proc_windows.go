@@ -42,3 +42,18 @@ func enableVT() bool {
 	r, _, _ := set.Call(uintptr(h), uintptr(mode|enableVirtualTerminalProcessing))
 	return r != 0
 }
+
+// processAlive says whether a process of pid runs.
+func processAlive(pid int) bool {
+	const processQueryLimitedInformation, stillActive = 0x1000, 259
+	h, err := syscall.OpenProcess(processQueryLimitedInformation, false, uint32(pid))
+	if err != nil {
+		return false
+	}
+	defer syscall.CloseHandle(h)
+	var code uint32
+	if syscall.GetExitCodeProcess(h, &code) != nil {
+		return false
+	}
+	return code == stillActive
+}

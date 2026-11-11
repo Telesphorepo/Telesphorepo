@@ -8,11 +8,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"regexp"
-	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -24,13 +19,13 @@ import (
 	"github.com/testcontainers/testcontainers-go/network"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/containerengine"
+	"github.com/Telesphorepo/Telesphorepo/internal/e2erun"
 )
 
-const defaultImage = "telesphorepo-e2e:latest"
-
 var (
-	// ServerImage is the server image under test (E2E_IMAGE overrides).
-	ServerImage = defaultImage
+	// ServerImage is the server image under test: the one "go tool task test" built for the run,
+	// or E2E_IMAGE.
+	ServerImage = e2erun.Image
 	// TestNetwork is the shared docker network every container of the run joins.
 	TestNetwork *testcontainers.DockerNetwork
 	// SigningPrivateKey / SigningPublicKey are an armored OpenPGP key pair generated for this run
@@ -54,6 +49,13 @@ func runMain(m *testing.M) int {
 	if f := flag.Lookup("test.list"); f != nil && f.Value.String() != "" {
 		return m.Run()
 	}
+	// Only "go tool task test" starts a run: it builds the image, removes what a killed run left,
+	// holds the cooldown between runs and runs the zones at the same time.
+	run, err := e2erun.CheckTicket(os.Getenv(e2erun.TicketEnv))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "e2e:", err)
+		return 1
+	}
 	ctx := context.Background()
 	RunID = randHex(6)
 
@@ -71,13 +73,6 @@ func runMain(m *testing.M) int {
 	if img := os.Getenv("E2E_IMAGE"); img != "" {
 		ServerImage = img
 	}
-	if os.Getenv("E2E_SKIP_BUILD") != "1" {
-		if err := buildImage(ctx); err != nil {
-			fmt.Fprintln(os.Stderr, "e2e: image build failed:", err)
-			return 1
-		}
-	}
-
 	if err := pullFloating(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "e2e: floating images:", err)
 		return 1
@@ -92,8 +87,6 @@ func runMain(m *testing.M) int {
 		return 1
 	}
 
-	sweepLeftovers(ctx)
-
 	nw, err := network.New(ctx, network.WithLabels(e2eLabels))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "e2e: network:", err)
@@ -103,11 +96,24 @@ func runMain(m *testing.M) int {
 	defer func() { _ = nw.Remove(context.Background()) }()
 	defer stopSharedSeaweed()
 
-	return m.Run()
+	// The budget of the tests, which "go tool task test" scaled to this computer: go test's own
+	// timeout, whose clock starts in m.Run, after the setup above. It replaces any -timeout of the
+	// command line. Past it the binary panics and names the tests that still run.
+	if err := flag.Set("test.timeout", run.Budget.String()); err != nil {
+		fmt.Fprintln(os.Stderr, "e2e: set the budget:", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "e2e: the tests of this zone have %s in all (%s on CI's runner, e2erun.ReferenceBudget): past it the run fails. Make tests leaner; never raise the budget\n",
+		run.Budget, e2erun.ReferenceBudget)
+	start := time.Now()
+	code := m.Run()
+	fmt.Fprintf(os.Stderr, "e2e: the tests took %s of their %s\n", time.Since(start).Round(time.Second), run.Budget)
+	return code
 }
 
 // e2eLabels marks every container and network of a run. Tests remove their own at the end; a run
-// that is killed cannot, and rootless Podman has no Ryuk to do it, so the next run removes them.
+// that is killed cannot, and rootless Podman has no Ryuk to do it, so "go tool task test" removes
+// them before the next run.
 var e2eLabels = map[string]string{"telesphorepo.e2e": "1"}
 
 // e2eContainer is the option every container of a run starts with: e2eLabels, and a log kept in a
@@ -123,43 +129,6 @@ var e2eContainer testcontainers.CustomizeRequestOption = func(req *testcontainer
 	})(req)
 }
 
-// dataVolumePrefix is the prefix of the volumes that NewDataVolume names with RandName.
-const dataVolumePrefix = "telesphorepo-data"
-
-// leftoverVolume matches the volumes the harness names with RandName and the volume prefix. The
-// bare "telesphorepo-data" volume of a person's own server never matches.
-var leftoverVolume = regexp.MustCompile(`^` + regexp.QuoteMeta(dataVolumePrefix) + `-[0-9a-f]{` + strconv.Itoa(2*randNameBytes) + `}$`)
-
-// sweepLeftovers removes the containers, networks and volumes that an earlier killed run left.
-func sweepLeftovers(ctx context.Context) {
-	list := func(args ...string) []string {
-		out, err := exec.CommandContext(ctx, Engine.CLI, args...).Output()
-		if err != nil {
-			return nil
-		}
-		return strings.Fields(string(out))
-	}
-	remove := func(kind string, args []string, names []string) {
-		if len(names) == 0 {
-			return
-		}
-		if out, err := exec.CommandContext(ctx, Engine.CLI, append(args, names...)...).CombinedOutput(); err != nil {
-			fmt.Fprintf(os.Stderr, "e2e: remove leftover %s: %v\n%s", kind, err, out)
-			return
-		}
-		fmt.Fprintf(os.Stderr, "e2e: removed %d leftover %s from an earlier run\n", len(names), kind)
-	}
-	remove("containers", []string{"rm", "-f"}, list("ps", "-aq", "--filter", "label=telesphorepo.e2e"))
-	remove("networks", []string{"network", "rm", "-f"}, list("network", "ls", "-q", "--filter", "label=telesphorepo.e2e"))
-	var vols []string
-	for _, v := range list("volume", "ls", "--format", "{{.Name}}") {
-		if leftoverVolume.MatchString(v) {
-			vols = append(vols, v)
-		}
-	}
-	remove("volumes", []string{"volume", "rm", "-f"}, vols)
-}
-
 // buildArgs returns the arguments of "<engine> build" with args. With Docker it adds --load: a
 // builder other than Docker's own (CI's persistent BuildKit) keeps its result to itself unless
 // asked to load it into the engine that the tests start containers in. Podman builds into its own
@@ -170,26 +139,6 @@ func buildArgs(args ...string) []string {
 		out = append(out, "--load")
 	}
 	return append(out, args...)
-}
-
-// buildImage shells out to "<engine> build" (docker: BuildKit; podman: buildah). Both respect
-// .dockerignore and RUN --mount=type=cache.
-func buildImage(ctx context.Context) error {
-	root, err := filepath.Abs("..")
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, Engine.CLI, buildArgs("-t", ServerImage, "-f", filepath.Join(root, "Dockerfile"), root)...)
-	cmd.Env = append(os.Environ(), "DOCKER_BUILDKIT=1")
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
-	if err := cmd.Run(); err != nil {
-		os.Stderr.Write(out.Bytes())
-		return err
-	}
-	return nil
 }
 
 // generateSigningKey creates a v4 Ed25519 (legacy EdDSA, algo 22, understood by apt's gpgv) key.
