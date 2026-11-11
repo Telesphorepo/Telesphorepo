@@ -29,37 +29,57 @@ import (
 // two runs on it, and code that no run on it has tested yet. The ledger is one per computer, not
 // per checkout, so a run from another worktree or a subagent counts too. The gate hands the run a
 // ticket that the test binaries check (e2erun.CheckTicket), so "go test" alone cannot skip it.
+//
+// A final run (--final) skips the cooldown once, on facts the gate checks rather than on the
+// word of whoever starts it: every change is committed, it runs whole zones (no -run, no
+// --shard), its code is untested, and the run before it was not a final one. So a final run that
+// fails is followed by the normal cooldown, and finals never skip it twice in a row.
 
 // ledger is what the gate keeps of the runs on this computer.
 type ledger struct {
-	LastRun time.Time `json:"last_run"` // the end of the last run; its start while it runs
-	Refused time.Time `json:"refused"`  // the last start refused by the cooldown
-	Trees   []string  `json:"trees"`    // treeFingerprint of the latest runs, newest last
+	LastRun   time.Time  `json:"last_run"`   // the end of the last run; its start while it runs
+	Refused   time.Time  `json:"refused"`    // the last start refused by the cooldown
+	Trees     []string   `json:"trees"`      // treeFingerprint of the latest runs, newest last
+	LastFinal bool       `json:"last_final"` // the last run was a final run
+	Finals    []finalRun `json:"finals"`     // the latest final runs, newest last
 }
 
-// ledgerTrees is how many tested trees the ledger remembers.
-const ledgerTrees = 50
+// finalRun is the record of a final run.
+type finalRun struct {
+	Start  time.Time `json:"start"`
+	Root   string    `json:"root"`
+	Commit string    `json:"commit"`
+	Zones  []string  `json:"zones"`
+	Passed bool      `json:"passed"`
+}
+
+// ledgerTrees and ledgerFinals are how many tested trees and final runs the ledger remembers.
+const ledgerTrees, ledgerFinals = 50, 20
 
 type gate struct {
 	ticket     string
 	runFile    string
 	ledgerFile string
 	ledger     ledger
+	final      bool
 }
 
 const cooldownRefusal = `the e2e tests ran on this computer less than %s ago. Running them this often means the work is not batched.
 Do not wait for the cooldown: no sleep, no retry loop, no polling. Every refused start, this one too, starts the %s again.
 Go on with the next part of the work without running tests. Run the tests once, when a batch of changes is done and committed,
 and name every zone that batch needs in that one run (e.g. go tool task test core clients).
-The cooldown is one for the whole computer: a subagent or another worktree does not get around it. The main agent runs the tests.`
+The cooldown is one for the whole computer: a subagent or another worktree does not get around it. The main agent runs the tests.
+When the work is finished (every change committed, nothing left to do), go tool task test --final <zones> runs those whole
+zones once without the cooldown. It is refused while anything is uncommitted, with -run or --shard, and right after another final run.`
 
 const unchangedRefusal = `this code has already been tested on this computer (the same commit and the same uncommitted changes):
 running the same code again tests nothing new. Change the code first, commit it, then run the tests once.
 A flaky test is a bug to find and fix, not a reason to run the tests again.`
 
 // openGate passes a run through the gate, or says why not. now skips the cooldown and the check
-// for changes after the person at the terminal confirms it.
-func openGate(ctx context.Context, now bool) (*gate, error) {
+// for changes after the person at the terminal confirms it. final skips the cooldown when the
+// run is a final run (see above); the caller has checked that it runs whole zones.
+func openGate(ctx context.Context, now, final bool, zones []string) (*gate, error) {
 	dir, err := e2erun.Dir()
 	if err != nil {
 		return nil, err
@@ -71,7 +91,7 @@ func openGate(ctx context.Context, now bool) (*gate, error) {
 	if err != nil {
 		return nil, err
 	}
-	g := &gate{ledgerFile: filepath.Join(dir, "ledger.json")}
+	g := &gate{ledgerFile: filepath.Join(dir, "ledger.json"), final: final}
 	if b, err := os.ReadFile(g.ledgerFile); err == nil {
 		_ = json.Unmarshal(b, &g.ledger)
 	}
@@ -82,11 +102,16 @@ func openGate(ctx context.Context, now bool) (*gate, error) {
 			return nil, err
 		}
 	} else {
+		if final {
+			if err := finalAllowed(ctx, g.ledger); err != nil {
+				return nil, err
+			}
+		}
 		last := g.ledger.LastRun
 		if g.ledger.Refused.After(last) {
 			last = g.ledger.Refused
 		}
-		if !g.ledger.LastRun.IsZero() && time.Since(last) < e2erun.Cooldown {
+		if !final && !g.ledger.LastRun.IsZero() && time.Since(last) < e2erun.Cooldown {
 			g.ledger.Refused = time.Now()
 			g.save()
 			return nil, fmt.Errorf(cooldownRefusal, e2erun.Cooldown, e2erun.Cooldown)
@@ -101,7 +126,15 @@ func openGate(ctx context.Context, now bool) (*gate, error) {
 	}
 	// The start counts as the last run until the end replaces it, so a killed run still has its
 	// cooldown.
-	g.ledger.LastRun, g.ledger.Refused = time.Now(), time.Time{}
+	g.ledger.LastRun, g.ledger.Refused, g.ledger.LastFinal = time.Now(), time.Time{}, final
+	if final {
+		commit, _ := exec.CommandContext(ctx, "git", "rev-parse", "HEAD").Output()
+		g.ledger.Finals = append(g.ledger.Finals, finalRun{Start: time.Now(), Root: root, Commit: strings.TrimSpace(string(commit)), Zones: zones})
+		if n := len(g.ledger.Finals); n > ledgerFinals {
+			g.ledger.Finals = g.ledger.Finals[n-ledgerFinals:]
+		}
+		step("final run: the cooldown is skipped (every change committed, whole zones, the run before was not final)")
+	}
 	if tree != "" {
 		g.ledger.Trees = append(g.ledger.Trees, tree)
 		if n := len(g.ledger.Trees); n > ledgerTrees {
@@ -161,9 +194,29 @@ func (g *gate) setBudget(calibration, budget time.Duration) error {
 	return g.writeRunning(r)
 }
 
-// close ends the run: its end starts the cooldown, and the computer is free for the next run.
-func (g *gate) close() {
+// finalAllowed says why a final run may not skip the cooldown, or nil.
+func finalAllowed(ctx context.Context, l ledger) error {
+	if l.LastFinal {
+		return errors.New("--final: the last run on this computer was a final run, so this one waits for the cooldown like any other run. " +
+			"A final run that failed means the work is not finished: fix it, commit, and test the batch once after the cooldown")
+	}
+	out, err := exec.CommandContext(ctx, "git", "status", "--porcelain").Output()
+	if err != nil {
+		return fmt.Errorf("--final needs a git checkout: %w", err)
+	}
+	if len(strings.TrimSpace(string(out))) > 0 {
+		return errors.New("--final: there are uncommitted or untracked files, so the work is not finished. Commit every change first")
+	}
+	return nil
+}
+
+// close ends the run with its result: its end starts the cooldown, and the computer is free for
+// the next run.
+func (g *gate) close(passed bool) {
 	g.ledger.LastRun = time.Now()
+	if g.final && len(g.ledger.Finals) > 0 {
+		g.ledger.Finals[len(g.ledger.Finals)-1].Passed = passed
+	}
 	g.save()
 	if r, err := e2erun.ReadRunning(); err == nil && r.Ticket == g.ticket {
 		_ = os.Remove(g.runFile)
