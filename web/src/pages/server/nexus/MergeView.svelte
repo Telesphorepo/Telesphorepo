@@ -119,13 +119,13 @@
 </script>
 
 {#if merge.loading && !m}
-  <PageHeader title="Merge" {crumbs} />
+  <PageHeader title="Merge" description="Every file of one repository moves into another, one step at a time." {crumbs} />
   <Loading rows={6} />
 {:else if merge.error && !m}
-  <PageHeader title="Merge" {crumbs} />
+  <PageHeader title="Merge" description="Every file of one repository moves into another, one step at a time." {crumbs} />
   <ErrorState error={merge.error} title="The merge did not load" onRetry={merge.reload} />
 {:else if m}
-  <PageHeader title="Merge {m.from} into {m.into}" {crumbs}>
+  <PageHeader title="Merge {m.from} into {m.into}" description="Every file of one repository moves into another, one step at a time." {crumbs}>
     {#snippet meta()}
       <StatusBadge tone={states[m.state].tone}>{states[m.state].word}</StatusBadge>
       <span class="text-meta text-muted-foreground">

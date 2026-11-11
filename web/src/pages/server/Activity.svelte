@@ -178,7 +178,7 @@
   const until = (iso: string) => (dayKey(iso) === dayKey(new Date().toISOString()) ? timeOnly : dayAndTime).format(new Date(iso));
 </script>
 
-<PageHeader title="Activity" />
+<PageHeader title="Activity" description="Sign-ins, publishes, deletes and changes on this server, with who did them and from where." />
 
 <TabNav
   label="Activity"

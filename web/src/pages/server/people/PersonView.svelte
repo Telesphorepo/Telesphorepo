@@ -250,18 +250,18 @@
 </script>
 
 {#if u === undefined && user.error}
-  <PageHeader title={person} />
+  <PageHeader title={person} description="Their server permissions, repository access and sign-in." />
   <ErrorState error={user.error} title="The account of {person} did not load" onRetry={user.reload} />
 {:else if u === undefined}
-  <PageHeader title={person} />
+  <PageHeader title={person} description="Their server permissions, repository access and sign-in." />
   <Loading rows={6} />
 {:else if u === null}
-  <PageHeader title={person} />
+  <PageHeader title={person} description="Their server permissions, repository access and sign-in." />
   <EmptyState icon={SearchXIcon} title="Person not found" description="No account named {person} exists. It may have been renamed or never created.">
     <Button variant="outline" href={href("/settings/people")}>Show all people</Button>
   </EmptyState>
 {:else}
-  <PageHeader title={u.username}>
+  <PageHeader title={u.username} description="Their server permissions, repository access and sign-in.">
     {#snippet meta()}{#if self}<span class="text-muted-foreground">you</span>{/if}{/snippet}
   </PageHeader>
 

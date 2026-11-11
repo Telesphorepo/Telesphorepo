@@ -93,10 +93,10 @@
 </script>
 
 {#if plan.loading && !p}
-  <PageHeader title="Merge {from}{into ? ` into ${into}` : ''}" {crumbs} />
+  <PageHeader title="Merge {from}{into ? ` into ${into}` : ''}" description="Every file of one repository goes into another, which then takes uploads." {crumbs} />
   <Loading rows={6} label="Reading the files of {from}" />
 {:else if plan.error && !p}
-  <PageHeader title="Merge {from}{into ? ` into ${into}` : ''}" {crumbs} />
+  <PageHeader title="Merge {from}{into ? ` into ${into}` : ''}" description="Every file of one repository goes into another, which then takes uploads." {crumbs} />
   <ErrorState error={plan.error} title="The plan did not load" onRetry={plan.reload} />
 {:else if p}
   <PageHeader title="Merge {p.from} into {p.into}" description="Every file of {p.from} goes into {p.into}, which then takes uploads, and one of the two names stays." {crumbs}>

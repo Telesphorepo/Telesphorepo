@@ -186,14 +186,14 @@
 {/snippet}
 
 {#if list.loading && list.data === undefined}
-  <PageHeader title={isNew ? "New network list" : "Network list"} />
+  <PageHeader title={isNew ? "New network list" : "Network list"} description="Address ranges that repositories can allow downloads and publishes from." />
   <Loading rows={6} />
 {:else if list.error && list.data === undefined}
-  <PageHeader title="Network list" />
+  <PageHeader title="Network list" description="Address ranges that repositories can allow downloads and publishes from." />
   <ErrorState error={list.error} title="The network list did not load" onRetry={list.reload} />
 {:else if list.data && list.data.kind === "preset"}
   {@const l = list.data}
-  <PageHeader title={l.title} description={l.description || undefined}>
+  <PageHeader title={l.title} description={l.description || "Address ranges that repositories can allow downloads and publishes from."}>
     {#snippet actions()}
       <Button variant="outline" disabled={refreshing} onclick={refresh}>
         {#if refreshing}<Spinner />{:else}<RefreshIcon />{/if}
@@ -213,7 +213,7 @@
   </Section>
   {@render usedBy()}{:else if draft}
   {@const v = draft.value}
-  <PageHeader title={list.data ? list.data.title : "New network list"}>
+  <PageHeader title={list.data ? list.data.title : "New network list"} description={list.data?.description || "Address ranges that repositories can allow downloads and publishes from."}>
     {#snippet actions()}
       {#if list.data}
         <Button

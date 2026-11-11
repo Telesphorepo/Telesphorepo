@@ -282,7 +282,7 @@
   };
 </script>
 
-<PageHeader title="Storage" />
+<PageHeader title="Storage" description="Where the stored files live: a folder on this server or an S3-compatible bucket." />
 
 {#snippet formFor(list: Setting[], retrying: boolean)}
   <FormPage>

@@ -156,7 +156,7 @@
   }
 </script>
 
-<PageHeader title="Sign-in options" />
+<PageHeader title="Sign-in options" description="Single sign-on with an OpenID Connect provider, and the server permissions its accounts get." />
 
 {#if settings.loading && !settings.data}
   <Loading rows={6} />

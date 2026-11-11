@@ -56,7 +56,7 @@
   }
 </script>
 
-<PageHeader title="New signing key" />
+<PageHeader title="New signing key" description="Create a key on the server or import one. Repositories sign their indexes with it." />
 
 <FormPage>
   <form onsubmit={submit} autocomplete="off">

@@ -48,7 +48,7 @@
   <LogoField {id} disabled={s.locked} describedby={s.help ? `${id}-help` : undefined} onchange={settings.reload} />
 {/snippet}
 
-<PageHeader title="General" />
+<PageHeader title="General" description="The server's name, logo and public address, and the limits and timings that apply everywhere." />
 
 {#if settings.loading && !settings.data}
   <Loading rows={8} />

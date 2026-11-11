@@ -34,7 +34,9 @@
     actions,
   }: {
     title: string;
-    /** One sentence. Leave it out rather than repeat the title. */
+    /** One sentence that says what the page holds or does, in the reader's words, not "This page
+     *  lets you...". Every page of Settings and of Your account has one, in each of its states
+     *  (loading, error, loaded), so the header does not jump. */
     description?: string;
     /** Settings: the trail after the group. Browse: the whole trail. The last step is this page. */
     crumbs?: Crumb[];

@@ -767,10 +767,10 @@
 {/snippet}
 
 {#if source.loading && !d}
-  <PageHeader title="Nexus server" />
+  <PageHeader title="Nexus server" description="A Nexus server whose repositories this server copies." />
   <Loading rows={6} />
 {:else if source.error && !d}
-  <PageHeader title="Nexus server" />
+  <PageHeader title="Nexus server" description="A Nexus server whose repositories this server copies." />
   <ErrorState error={source.error} title="The Nexus server did not load" onRetry={source.reload} />
 {:else if d && draft}
   {@const v = draft.value}

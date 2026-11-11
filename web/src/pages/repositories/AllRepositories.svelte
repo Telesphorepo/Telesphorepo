@@ -110,7 +110,7 @@
   }
 </script>
 
-<PageHeader title="Repositories">
+<PageHeader title="Repositories" description="Every repository on this server. Open one to change who can use it and how it works.">
   {#snippet actions()}{#if canCreate}<Button href={newRepo}><PlusIcon />New repository</Button>{/if}{/snippet}
 </PageHeader>
 

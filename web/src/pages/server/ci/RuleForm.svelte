@@ -396,16 +396,16 @@
 </script>
 
 {#if (rule.loading && rule.data === undefined) || (!draft && !rule.error)}
-  <PageHeader title={isNew ? "New CI pipeline" : "CI pipeline"} />
+  <PageHeader title={isNew ? "New CI pipeline" : "CI pipeline"} description="The CI jobs this pipeline lets publish, matched by the identity token of each job." />
   <Loading rows={6} />
 {:else if rule.error && rule.data === undefined}
-  <PageHeader title="CI pipeline" />
+  <PageHeader title="CI pipeline" description="The CI jobs this pipeline lets publish, matched by the identity token of each job." />
   <ErrorState error={rule.error} title="The CI pipeline did not load" onRetry={rule.reload} />
 {:else if draft}
   {@const v = draft.value}
   {@const hand = byHand || v.system === "other"}
   {@const steps = v.system === "other" ? 3 : 4}
-  <PageHeader title={rule.data ? rule.data.name : "New CI pipeline"}>
+  <PageHeader title={rule.data ? rule.data.name : "New CI pipeline"} description="The CI jobs this pipeline lets publish, matched by the identity token of each job.">
     {#snippet actions()}
       {#if !isNew}<Button variant="ghost" class={quietDanger} onclick={() => (deleteOpen = true)}>Delete</Button>{/if}
     {/snippet}

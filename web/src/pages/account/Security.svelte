@@ -198,7 +198,7 @@
   }
 </script>
 
-<PageHeader title="Sign-in and security" />
+<PageHeader title="Sign-in and security" description="Your password, authenticator apps, passkeys and recovery codes." />
 
 {#if back || required}
   <Alert.Root class="mb-6">

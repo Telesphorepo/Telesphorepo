@@ -102,7 +102,7 @@
   }
 </script>
 
-<PageHeader title="People">
+<PageHeader title="People" description="The people who can sign in, with their server permissions and repository access.">
   {#snippet actions()}<Button onclick={startCreate}><PlusIcon />New account</Button>{/snippet}
 </PageHeader>
 

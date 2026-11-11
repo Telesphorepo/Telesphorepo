@@ -90,19 +90,20 @@
 </script>
 
 {#if r === undefined && repo.error}
-  <PageHeader title={params.name} crumbs={[{ label: params.name }]} />
+  <PageHeader title={params.name} description="Who can download and publish here, and how the repository works." crumbs={[{ label: params.name }]} />
   <ErrorState error={repo.error} title="The repository did not load" onRetry={repo.reload} />
 {:else if r === undefined}
-  <PageHeader title={params.name} crumbs={[{ label: params.name }]} />
+  <PageHeader title={params.name} description="Who can download and publish here, and how the repository works." crumbs={[{ label: params.name }]} />
   <Loading rows={5} />
 {:else if r === null}
-  <PageHeader title={params.name} crumbs={[{ label: params.name }]} />
+  <PageHeader title={params.name} description="Who can download and publish here, and how the repository works." crumbs={[{ label: params.name }]} />
   <EmptyState icon={SearchXIcon} title="Repository not found" description="No repository named {params.name} exists. It may have been deleted.">
     <Button variant="outline" href={href("/settings/repositories")}>Show all repositories</Button>
   </EmptyState>
 {:else}
   <PageHeader
     title={r.name}
+    description={r.description || "Who can download and publish here, and how the repository works."}
     crumbs={[]}
   >
     {#snippet meta()}

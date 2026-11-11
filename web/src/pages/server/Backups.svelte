@@ -112,7 +112,7 @@
   }
 </script>
 
-<PageHeader title="Backups">
+<PageHeader title="Backups" description="Scheduled copies of the database, the master key and, on local disk, the stored files.">
   {#snippet actions()}
     {#if dir}
       <Button onclick={backUpNow} disabled={starting || job?.running}>Back up now</Button>

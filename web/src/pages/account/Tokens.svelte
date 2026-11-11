@@ -131,7 +131,7 @@
   const noRepo = $derived(!canPublish);
 </script>
 
-<PageHeader title="Tokens" />
+<PageHeader title="Tokens" description="Read tokens download from repositories; a publish token publishes to one repository." />
 
 <Section title="Read tokens" description="A build or a script downloads with your username and a read token.">
   {#snippet actions()}

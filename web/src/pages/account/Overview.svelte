@@ -65,7 +65,7 @@
 
 </script>
 
-<PageHeader title="Overview" />
+<PageHeader title="Overview" description="Your repositories, devices and latest publishes." />
 
 {#if me}
   <Section>
