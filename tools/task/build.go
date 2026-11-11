@@ -115,7 +115,7 @@ func test(ctx context.Context, args []string) error {
 		return testScale(ctx, args[1:])
 	}
 	var zones []string
-	now := false
+	now, final := false, false
 names:
 	for len(args) > 0 {
 		switch args[0] {
@@ -125,6 +125,8 @@ names:
 			zones = append(zones, "core", "import", "clients")
 		case "--now":
 			now = true
+		case "--final":
+			final = true
 		case "scale":
 			return usageErr("the scale zone runs alone: go tool task test scale")
 		default:
@@ -148,11 +150,15 @@ names:
 		args = args[2:]
 	}
 
-	g, err := openGate(ctx, now)
+	if final && (shards > 0 || slices.Contains(args, "-run") || slices.ContainsFunc(args, func(a string) bool { return strings.HasPrefix(a, "-run=") })) {
+		return usageErr("--final runs whole zones: it takes no -run and no --shard")
+	}
+	g, err := openGate(ctx, now, final, zones)
 	if err != nil {
 		return err
 	}
-	defer g.close()
+	passed := false
+	defer func() { g.close(passed) }()
 
 	eng, err := containerengine.Detect(ctx)
 	if err != nil {
@@ -219,6 +225,7 @@ names:
 	if len(zones) > 1 && len(failed) > 0 {
 		out.line(red("✗ ") + "failed zones: " + strings.Join(failed, ", "))
 	}
+	passed = len(failed) == 0
 	return last
 }
 

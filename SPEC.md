@@ -3012,7 +3012,10 @@ starts the e2e zones (core, import, clients); the scale and macOS zones are outs
   run on the computer, and the refusal starts the 3 minutes again; it tells the agent to batch its
   work and go on without waiting, and does not say how long is left. A run of a tree that a run
   on the computer has already tested is refused too. A run's start counts as its last run until its end replaces it, so a
-  killed run keeps its cooldown. `--now` skips both checks after the person at the terminal types
+  killed run keeps its cooldown. `--final` skips the cooldown for a final run, on facts the gate
+  checks: `git status` is clean, the run has no `-run` or `--shard`, its tree is untested, and the
+  run before it was not a final run; the ledger records each final run (commit, zones, result).
+  `--now` skips both checks after the person at the terminal types
   `now`; without a terminal it refuses. The ticket goes to the test binaries in `E2E_RUN_TICKET`,
   and `TestMain` refuses to run without the ticket of the run in progress, so a plain `go test` of
   the zones does not start, while `go test -list` still does.

@@ -37,6 +37,12 @@ Linux. Use bun, not npm.
   the e2e zones only through `go tool task test` (a plain `go test` of them refuses to start),
   and leave its state (user cache folder, `telesphorepo/e2e`) and `internal/e2erun` alone. Only
   the person at the terminal can skip it, with `--now`.
+- **The final run may skip the cooldown once.** When the work is finished, with every change
+  committed and nothing left to do but test it, `go tool task test --final core clients` runs
+  those whole zones without waiting. The gate checks the facts itself: it refuses while anything
+  is uncommitted, with `-run` or `--shard`, for code already tested, and right after another
+  final run. A final run that fails means the work is not finished: fix it, commit, and test
+  again after the cooldown. The ledger records each final run with its commit and result.
 - **The main agent runs the tests; subagents do not.** The gate keeps one ledger for the whole
   computer, so every checkout, worktree and agent shares one cooldown and one run at a time. A
   subagent's run would spend the main agent's turn and refuse its run, so a subagent finishes its
