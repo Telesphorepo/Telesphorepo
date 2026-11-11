@@ -49,11 +49,25 @@ Linux. Use bun, not npm.
 - **Push a pull request once, when it is done.** Every push to an open pull request runs its whole
   CI again: batch the fixes into one push. When CI fails anyway, read its log, reproduce the
   failure here, and push the fix only after it passes here.
-- Update SPEC.md in the same change when behaviour, a rule or its reason, or a contract with a
-  client changes. SPEC.md says what the code cannot: how parts fit, rules and their reasons,
-  outside contracts. It points to the code for routes, columns and settings, not copies them.
+- Keep SPEC.md current in the same change (see **SPEC.md** below).
 - For architectural work, write a short design in `docs/superpowers/specs/` and get it approved
   first; delete it when done and keep what stays true in SPEC.md.
+
+## SPEC.md
+
+SPEC.md tells the next agent what the code cannot: how the parts fit together, the rules and the
+reason for each, the security decisions, the index or counter that keeps a path fast, and the
+contracts with clients and services outside the repo (mvn, npm, docker, dnf, the CLI across
+versions, the edge Worker, Nexus). Anything the code defines (routes and their responses, table
+columns, settings and defaults, function names, UI layout, what each test checks) stays in the
+code. In SPEC.md it gets a pointer to the file instead of a copy, because a copy drifts from the
+code and the next agent reads the code anyway.
+
+Update it in the same change when one of those things changes. Write the current behaviour only,
+in present tense, in the section the next agent would search: no history, and no "now" or "no
+longer". Edit or replace the passage the change makes stale rather than adding a new paragraph
+beside it, and keep the file about the size it is. A change that needs a long new passage
+usually means it copies code; point to the code instead.
 
 ## Performance is a feature
 

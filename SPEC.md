@@ -1,8 +1,10 @@
 # Telesphorepo: system as built
 
-This file describes what the code does today. Update it in the same change whenever behaviour
-changes. `AGENTS.md` holds the working rules for coding agents, and `README.md` is the short
-guide for people who run the server.
+This file describes what the code does today and what the code cannot say: how the parts fit,
+the rules and their reasons, and the contracts with outside clients. It points to the code for
+routes, columns and settings rather than copying them. `AGENTS.md` says when and how to update it,
+and holds the working rules for coding agents; `README.md` is the short guide for people who run
+and develop the server.
 
 ## Purpose
 
