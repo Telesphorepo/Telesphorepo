@@ -26,3 +26,9 @@ func killTree(cmd *exec.Cmd) {
 }
 
 func enableVT() bool { return true }
+
+// processAlive says whether a process of pid runs.
+func processAlive(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil || err == syscall.EPERM
+}

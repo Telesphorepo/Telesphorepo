@@ -40,6 +40,8 @@ import (
 	"github.com/testcontainers/testcontainers-go/network"
 	"github.com/testcontainers/testcontainers-go/wait"
 	_ "modernc.org/sqlite"
+
+	"github.com/Telesphorepo/Telesphorepo/internal/e2erun"
 )
 
 // Shared named volumes for build-tool caches.
@@ -302,7 +304,7 @@ const volumeToolImage = "curlimages/curl:8.23.0"
 // removed at test end, after the containers that use it.
 func NewDataVolume(t testing.TB) string {
 	t.Helper()
-	vol := RandName(dataVolumePrefix)
+	vol := RandName(e2erun.DataVolumePrefix)
 	t.Cleanup(func() {
 		if out, err := osexec.Command(Engine.CLI, "volume", "rm", "-f", vol).CombinedOutput(); err != nil {
 			t.Errorf("remove volume %s: %v\n%s", vol, err, out)
@@ -868,7 +870,7 @@ func (s *Server) DebianKey(t testing.TB, repo string, auth Auth) string {
 }
 
 // randNameBytes is the number of random bytes of RandName.
-const randNameBytes = 4
+const randNameBytes = e2erun.RandNameBytes
 
 // RandName returns prefix-<hex of randNameBytes random bytes>, safe for repo, user and alias names.
 func RandName(prefix string) string { return prefix + "-" + randHex(randNameBytes) }

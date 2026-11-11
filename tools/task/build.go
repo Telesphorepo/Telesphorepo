@@ -9,9 +9,11 @@ import (
 	"slices"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/Telesphorepo/Telesphorepo/internal/clidist"
 	"github.com/Telesphorepo/Telesphorepo/internal/containerengine"
+	"github.com/Telesphorepo/Telesphorepo/internal/e2erun"
 )
 
 const imageTag = "telesphorepo:local"
@@ -85,34 +87,56 @@ func preview(ctx context.Context) error {
 	}
 }
 
-// testZones maps each e2e zone to its go test arguments before the package.
+// testZones maps each e2e zone to its go test arguments before the package. The -timeout bounds
+// the whole binary, its setup (pulls, the Maven warm-up) too; the budget of the tests themselves
+// is e2erun's, which TestMain sets.
 var testZones = map[string][]string{
-	"core":    {"-tags", "e2e", "-timeout", "60m"},
-	"import":  {"-tags", "import", "-timeout", "45m"},
+	"core":    {"-tags", "e2e", "-timeout", "30m"},
+	"import":  {"-tags", "import", "-timeout", "30m"},
 	"scale":   {"-tags", "scale", "-run", "TestScale", "-timeout", "90m"},
-	"clients": {"-tags", "clients", "-timeout", "120m"},
+	"clients": {"-tags", "clients", "-timeout", "30m"},
 }
 
-// test runs e2e zones with the detected container engine. An optional first argument picks
-// the zone ("import", "scale", "clients" or "all"; the default is core); then "--shard i/n"
-// runs only every n-th top-level test of the zone from the i-th on (CI runs a zone on n
-// machines at once); the remaining args pass to go test. "all" runs core, import and clients
-// one after the other and fails if any fails. The scale zone runs alone and needs no engine.
+// test runs e2e zones with the detected container engine. The leading arguments name the zones
+// ("core", "import", "clients", "all" for the three; core when none), which run at the same
+// time; "--now" skips the cooldown after the person at the terminal confirms it; then
+// "--shard i/n" runs only every n-th top-level test of one zone from the i-th on (CI runs a zone
+// on n machines at once); the remaining args pass to go test. "scale" runs the scale zone alone,
+// with no engine and none of the rules of an e2e run.
+//
+// A run goes through the gate (openGate): one run at a time, e2erun.Cooldown between the runs of
+// a checkout, a change since the last run. Then it removes what a killed run left, builds the
+// server image once, calibrates the budget of the tests to this computer, and starts the zones.
 func test(ctx context.Context, args []string) error {
 	if _, err := checkGo(); err != nil {
 		return err
 	}
-	zones := []string{"core"}
-	if len(args) > 0 {
-		switch args[0] {
-		case "scale":
-			return testScale(ctx, args[1:])
-		case "import", "clients":
-			zones, args = []string{args[0]}, args[1:]
-		case "all":
-			zones, args = []string{"core", "import", "clients"}, args[1:]
-		}
+	if len(args) > 0 && args[0] == "scale" {
+		return testScale(ctx, args[1:])
 	}
+	var zones []string
+	now := false
+names:
+	for len(args) > 0 {
+		switch args[0] {
+		case "core", "import", "clients":
+			zones = append(zones, args[0])
+		case "all":
+			zones = append(zones, "core", "import", "clients")
+		case "--now":
+			now = true
+		case "scale":
+			return usageErr("the scale zone runs alone: go tool task test scale")
+		default:
+			break names
+		}
+		args = args[1:]
+	}
+	if len(zones) == 0 {
+		zones = []string{"core"}
+	}
+	slices.Sort(zones)
+	zones = slices.Compact(zones)
 	shard, shards := 0, 0
 	if len(args) > 1 && args[0] == "--shard" {
 		if _, err := fmt.Sscanf(args[1], "%d/%d", &shard, &shards); err != nil || shards < 1 || shard < 1 || shard > shards {
@@ -123,15 +147,39 @@ func test(ctx context.Context, args []string) error {
 		}
 		args = args[2:]
 	}
+
+	g, err := openGate(ctx, now)
+	if err != nil {
+		return err
+	}
+	defer g.close()
+
 	eng, err := containerengine.Detect(ctx)
 	if err != nil {
 		return err
 	}
 	eng.ApplyEnv()
 	step("container engine: %s %s", eng.Name, dim(eng.Host))
+	sweepLeftovers(ctx, eng)
+	image := os.Getenv("E2E_IMAGE")
+	if image == "" {
+		image = e2erun.Image
+		if err := buildE2EImage(ctx, eng); err != nil {
+			return err
+		}
+	}
+	step("calibrating the budget of the tests to this computer")
+	cal, err := calibrate(ctx, eng, image)
+	if err != nil {
+		return fmt.Errorf("calibrate: %w", err)
+	}
+	if err := g.setBudget(cal); err != nil {
+		return err
+	}
+	step("calibration %s (%s on CI's runner): the tests of each zone have %s (%s on CI's runner)",
+		cal.Round(100*time.Millisecond), e2erun.ReferenceCalibration, bold(e2erun.Budget(cal).String()), e2erun.ReferenceBudget)
 
-	var failed []string
-	var last error
+	argvs := map[string][]string{}
 	for _, zone := range zones {
 		argv := append([]string{"go", "test"}, testZones[zone]...)
 		argv = append(argv, "./e2e/...", "-count=1", "-v")
@@ -142,15 +190,12 @@ func test(ctx context.Context, args []string) error {
 			}
 			argv = append(argv, "-run", run)
 		}
-		argv = append(argv, args...)
-		step("zone %s: %s", zone, strings.Join(argv, " "))
-		err := runStep(ctx, ".", nil, argv...)
-		if ctx.Err() != nil {
-			return exitError{130}
-		}
-		if err != nil {
-			failed, last = append(failed, zone), childExit(err)
-		}
+		argvs[zone] = append(argv, args...)
+	}
+	env := []string{e2erun.TicketEnv + "=" + g.ticket, "E2E_IMAGE=" + image}
+	failed, last := runZones(ctx, env, argvs, zones)
+	if ctx.Err() != nil {
+		return exitError{130}
 	}
 	if len(zones) > 1 && len(failed) > 0 {
 		out.line(red("✗ ") + "failed zones: " + strings.Join(failed, ", "))
