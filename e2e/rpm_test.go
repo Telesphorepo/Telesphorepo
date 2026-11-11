@@ -220,26 +220,33 @@ func evr0(v string) string {
 // that trusts the new key installs from it, and so does Rocky 8, whose rpm checks only RSA keys.
 func TestRPMSigning(t *testing.T) {
 	t.Parallel()
+	step := func(what string) { t.Logf("TIMING %s %s", time.Now().Format("15:04:05.0"), what) } // TEMP
+	step("start")
 	pkgs := buildRPMPackages(t)
+	step("packages built")
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
 		repo := RandName("rpm")
 		s.CreateRepo(t, repo, "rpm", true, nil)
 		before := rpmMustUpload(t, s, repo, pkgs.anchor10, s.PublishAuth(t, s.AdminUser, repo), "e2e-anchor", "1.0.0-1", "x86_64")
+		step("indexed")
 		s.WaitDebianIndexed(t, repo)
 		oldKey := s.RPMKey(t, repo, nil)
 		updated := rpmUpdatedAt(t, s, repo, before.Filename)
 
+		step("fedora started")
 		d := StartDnf(t, fedoraImage)
 		d.Trust(t, repo, oldKey)
 		d.AddRepo(t, repo, rpmBaseURL(s, repo), "", "")
 		d.MustExec(t, "dnf install with the key trusted", "dnf -y install e2e-anchor && e2e-anchor")
 
+		step("dnf install done")
 		rsa := rsaSigningKey(t)
 		name := RandName("rsa")
 		s.MustAPI(t, http.MethodPost, "/api/signing-keys", map[string]any{"name": name, "armored": rsa}, s.Admin(), nil)
 		s.MustAPI(t, http.MethodPatch, "/api/repos/"+repo, map[string]any{"fields": map[string]any{"signing_key": name}}, s.Admin(), nil)
 		s.WaitDebianIndexed(t, repo)
+		step("key changed+indexed")
 		newKey := s.RPMKey(t, repo, nil)
 		if archFingerprint(t, newKey) == archFingerprint(t, oldKey) {
 			t.Fatal("key.asc did not change with the repo's key")
@@ -250,15 +257,18 @@ func TestRPMSigning(t *testing.T) {
 		if got := rpmUpdatedAt(t, s, repo, before.Filename); !got.Equal(updated) {
 			t.Fatalf("the package signed again shows the time %s, want its upload's %s", got, updated)
 		}
+		step("checks done")
 		if code, out := d.Exec(t, "dnf -y reinstall --refresh e2e-anchor"); code == 0 {
 			t.Fatalf("dnf took repodata signed with a key it does not trust:\n%s", out)
 		}
+		step("reinstall refused")
 		for _, img := range []string{fedoraImage, rocky8Image} {
 			fresh := StartDnf(t, img)
 			fresh.Trust(t, repo, newKey)
 			fresh.AddRepo(t, repo, rpmBaseURL(s, repo), "", "")
 			out := fresh.MustExec(t, "dnf install after the key change on "+img, "dnf -y install e2e-anchor && e2e-anchor")
 			archWant(t, "dnf install after the key change on "+img, out, "anchor 1.0.0\n")
+			step("fresh " + img)
 		}
 	})
 }

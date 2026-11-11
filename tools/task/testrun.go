@@ -261,11 +261,15 @@ func buildE2EImage(ctx context.Context, eng containerengine.Engine) error {
 	return nil
 }
 
-// The calibration: calibrationRounds rounds of calibrationServers servers of the run's image,
-// started at once, each until it answers /healthz and a sign-in, then removed. That is the work
-// every e2e test starts with, on the engine the tests use. Then calibrationAmd64Runs runs at once
-// of an amd64 image, which an engine of another architecture emulates, as it does the
+// The calibration batch: calibrationRounds rounds of calibrationServers servers of the run's
+// image, started at once, each until it answers /healthz and a sign-in, then removed. That is the
+// work every e2e test starts with, on the engine the tests use. Then calibrationAmd64Runs runs at
+// once of an amd64 image, which an engine of another architecture emulates, as it does the
 // RHEL-family clients of the tests.
+//
+// A run does on one computer the work that CI spreads over ciRunners machines, so the calibration
+// runs that many batches at once: the budget then compares this computer with that many CI
+// runners, each running one batch (e2erun.ReferenceCalibration).
 const (
 	calibrationServers   = 6
 	calibrationRounds    = 2
@@ -273,18 +277,28 @@ const (
 	calibrationAmd64     = "docker.io/rockylinux/rockylinux:9"
 )
 
-// calibrate times the calibration on this computer.
-func calibrate(ctx context.Context, eng containerengine.Engine, image string) (time.Duration, error) {
+// ciRunners is the number of CI machines that run each zone (the core zone's shards in
+// .github/workflows/ci.yml); a run of one shard is one machine's work.
+var ciRunners = map[string]int{"core": 4, "import": 1, "clients": 1}
+
+// calibrate times batches calibration batches at once on this computer.
+func calibrate(ctx context.Context, eng containerengine.Engine, image string, batches int) (time.Duration, error) {
 	if out, err := exec.CommandContext(ctx, eng.CLI, "pull", "-q", "--platform", "linux/amd64", calibrationAmd64).CombinedOutput(); err != nil {
 		return 0, fmt.Errorf("pull %s: %w\n%s", calibrationAmd64, err, out)
 	}
 	start := time.Now()
+	err := together(batches, func() error { return calibrationBatch(ctx, eng, image) })
+	return time.Since(start), err
+}
+
+// calibrationBatch runs one calibration batch.
+func calibrationBatch(ctx context.Context, eng containerengine.Engine, image string) error {
 	for range calibrationRounds {
 		if err := together(calibrationServers, func() error { return calibrationServer(ctx, eng, image) }); err != nil {
-			return 0, err
+			return err
 		}
 	}
-	err := together(calibrationAmd64Runs, func() error {
+	return together(calibrationAmd64Runs, func() error {
 		out, err := exec.CommandContext(ctx, eng.CLI, "run", "--rm", "--label", "telesphorepo.e2e=1", "--platform", "linux/amd64",
 			calibrationAmd64, "sh", "-c", "rpm -qa >/dev/null && rpm -Va --nofiles --nodigest rpm bash >/dev/null; true").CombinedOutput()
 		if err != nil {
@@ -292,7 +306,6 @@ func calibrate(ctx context.Context, eng containerengine.Engine, image string) (t
 		}
 		return nil
 	})
-	return time.Since(start), err
 }
 
 // together runs n copies of fn at once and returns the first error.
