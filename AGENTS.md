@@ -49,7 +49,9 @@ Linux. Use bun, not npm.
 - **Push a pull request once, when it is done.** Every push to an open pull request runs its whole
   CI again: batch the fixes into one push. When CI fails anyway, read its log, reproduce the
   failure here, and push the fix only after it passes here.
-- Update SPEC.md in the same change when behaviour, routes, tables or settings change.
+- Update SPEC.md in the same change when behaviour, a rule or its reason, or a contract with a
+  client changes. SPEC.md says what the code cannot: how parts fit, rules and their reasons,
+  outside contracts. It points to the code for routes, columns and settings, not copies them.
 - For architectural work, write a short design in `docs/superpowers/specs/` and get it approved
   first; delete it when done and keep what stays true in SPEC.md.
 
