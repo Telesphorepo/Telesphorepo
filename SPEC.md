@@ -5369,12 +5369,11 @@ project and file rows per unit. Then it runs
 | `go tool task cli [version]` | Builds the six CLI archives of `./cmd/telesphorepo` and `SHA256SUMS` into `internal/clidist/dist` (version from git by default). A given release version needs a `changes.toml` with no `dev` entry. Without `cmd/telesphorepo` it writes none and says so |
 | `go tool task edge [version]` | Runs `bun install --frozen-lockfile` in `edge/`, bundles the Worker (`wrangler deploy src/index.ts --dry-run --outdir` with `--define TELESPHOREPO_VERSION:"<version>"`; version from git by default) and packs the folder that `GET /api/edge/worker.zip` hands out into `internal/edgedist/dist`: `telesphorepo-edge.zip` with `dist/`, `package.json` without the scripts `build` and `typecheck` (its dependencies unchanged, so `bun.lock` matches it), `bun.lock`, `README.md` and `scripts/provision.ts`, and `VERSION`. It needs bun. The image build runs it with Node and the bun of the web stage. `dev` runs it with the version `dev` (the dev backend's) and goes on without it when it fails |
 | `go tool task preview` | Builds, then runs `bin/telesphorepo-server dev` on :8080 |
-| `go tool task test [go test args]` | Runs the core zone: `go test -tags e2e ./e2e/... -count=1 -v`, 60 min timeout |
-| `go tool task test import [go test args]` | Runs the import zone: `-tags import`, 45 min timeout. It starts a Nexus container |
+| `go tool task test [zones] [--now] [go test args]` | Runs e2e zones (`core`, `import`, `clients`, or `all` for the three; `core` when none is named) at the same time, each a `go test -tags <zone> ./e2e/... -count=1 -v` of its own (30 min timeout for the binary, setup included), with output prefixed by the zone when there are several. A run first passes the gate (see **The run of the e2e tests**), removes what a killed run left, builds the server image `telesphorepo-e2e:latest` once (`E2E_IMAGE` names another and skips the build) and calibrates the budget of the tests to the computer. It lists the failed zones and exits non-zero if any failed |
+| `go tool task test import [go test args]` | Runs the import zone (`-tags import`). It starts a Nexus container |
 | `go tool task test scale [go test args]` | Runs `TestScale` (`-tags scale`, 90 min timeout) with no container engine, and prints the verdict of the run that the test writes to the file of `E2E_SCALE_VERDICT`: `PASS` exits 0, `FAIL` exits as the failed test does, `NOISY` exits 3 and `INCONCLUSIVE` exits 4. It takes no `--shard` |
-| `go tool task test clients [go test args]` | Runs the clients zone: `-tags clients`, 120 min timeout. It builds the CLI of this repo on the host and runs it in containers with the real tools |
-| `go tool task test [zone] --shard i/n [go test args]` | Runs every n-th top-level test of the zone, by name, from the i-th (`go test -list`, then one `-run`); `TestMain` skips its setup while listing |
-| `go tool task test all [go test args]` | Runs core, import and clients one after the other (not scale, which runs alone). It runs every zone, lists the failed zones and exits non-zero if any failed |
+| `go tool task test clients [go test args]` | Runs the clients zone (`-tags clients`). It builds the CLI of this repo on the host and runs it in containers with the real tools |
+| `go tool task test [zone] --shard i/n [go test args]` | Runs every n-th top-level test of one zone, by name, from the i-th (`go test -list`, then one `-run`); `TestMain` skips its setup while listing |
 | `go tool task release [version]` | Builds the UI and the six CLI archives that the server embeds once. Then it cross-compiles each program whose package exists: the CLI (`./cmd/telesphorepo`, with its own `LICENSE`; the install scripts make its second name `docker-credential-telesphorepo`) and the server (`./cmd/telesphorepo-server`) for linux, darwin and windows on amd64 and arm64 (`CGO_ENABLED=0`, `-trimpath`, `-X main.version`). Each binary goes into `bin/release/<program>_<version>_<os>_<arch>.tar.gz` (`.zip` on Windows) with `LICENSE` and `README.md`. With `edge/`, it bundles the edge Worker folder once (as `go tool task edge`; it needs bun), embeds it in the server, and packs the same folder into `telesphorepo-edge_<version>.tar.gz`: `dist/`, `package.json`, `bun.lock`, `README.md` and `scripts/provision.ts`. The command writes `SHA256SUMS` of every archive. The version defaults to `git describe`. A version given as the argument must be a release version, and `changes.toml` must have no `dev` entry (see **Change log**) |
 | `go tool task tag <version>` | Makes a release. It needs a clean work tree and a new tag. It writes `v<version>` into each `dev` entry of `changes.toml`, commits the file as `Release v<version>`, and creates the annotated tag `v<version>`. It pushes nothing. The tagged commit holds the stamped change log, so `release.yml` and every image build embed the same entries |
 | `go tool task gen` | Runs `go tool sqlc generate` for every `internal/**/sqlc.yaml` |
@@ -5405,8 +5404,8 @@ stores one after the other (`ForEachStorageInTurn`), because both change the one
 harness starts each container that publishes a port with `runContainer`: rootless Podman can
 give two containers that start at the same moment one host port, and `runContainer` starts the
 second again. The containers that share the Maven cache volume lock it with files
-(`MAVEN_OPTS` with `aether.syncContext.named.factory=file-lock`). `e2e/` builds the real image (skip the
-build with `E2E_SKIP_BUILD=1`, or override the image with `E2E_IMAGE`). It runs real `mvn`,
+(`MAVEN_OPTS` with `aether.syncContext.named.factory=file-lock`). `go tool task test` builds the real image
+once per run (`E2E_IMAGE` names another image and skips the build). It runs real `mvn`,
 `gradle` and `apt` clients in containers against the server. A test whose subject is the store
 runs on `fs` and on SeaweedFS S3 (`ForEachStorage`, `E2E_SEAWEEDFS_IMAGE`): the byte path of each
 format (`TestMaven`, `TestRaw`, `TestDebian`, `TestArch`, `TestRPM`, `TestDockerRegistry`, `TestNPM`), the presigned redirects and
@@ -5565,8 +5564,8 @@ and the client helpers (`harness_test.go`, `main_test.go`, `clients_test.go`) ca
 the container zones (`e2e`, `import`, `clients`). The scale and macOS zones run the server binary
 as a process of the computer and share `native_test.go` (tags `scale` and `macos`). Each test
 removes its containers when it ends. Every container and the run network carry the label
-`telesphorepo.e2e`, and each run first removes what a killed run left: labelled containers and
-networks, and the `telesphorepo-data-*` volumes. Every container logs to a file (`json-file`, Podman's
+`telesphorepo.e2e`, and `go tool task test` first removes what a killed run left: labelled
+containers and networks, and the `telesphorepo-data-*` volumes. Every container logs to a file (`json-file`, Podman's
 `k8s-file`): journald, Podman's default, drops a unit's lines past 10,000 in 30 s, and the tests read
 the server's access log.
 | Zone | Tag | Command | Contents |
@@ -5575,7 +5574,35 @@ the server's access log.
 | import | `import` | `go tool task test import` | `TestNexus`, with the import of a Nexus docker hosted repo (`nexus_docker_test.go`: the Docker Bearer Token Realm on and `forceBasicAuth` off, so every download answers a Bearer challenge; skopeo pushes an image and a multi-platform index; the sync imports both tags and ignores the blobs; crane pulls both by tag and by digest; a second sync imports nothing) and of a Nexus nuget hosted repo (`nexus_nuget_test.go`: a package of `dotnet pack` uploaded to Nexus, imported, then restored and run with dotnet) |
 | scale | `scale` | `go tool task test scale` | `TestScale`, with no container engine, alone on a quiet machine |
 | clients | `clients` | `go tool task test clients` | The Telesphorepo CLI with the real tools: `TestCLISetup`, `TestCLILogin`, `TestCLIDocker`, `TestCLIMaven`, `TestCLIGradle`, `TestCLIJenkins`, `TestCLIGitHubActions`, `TestCLIUpload`, `TestCLINuGet`, `TestCLICompat` and `TestInstall` (`e2e/cli_*_test.go`). It needs Go on the host to build the CLI and the internet for Maven Central, Gradle, the Maven 4 download and the Jenkins plugins |
-| all | `e2e`, `import`, `clients` | `go tool task test all` | Every zone but scale |
+| all | `e2e`, `import`, `clients` | `go tool task test all` | Every zone but scale, at the same time |
+
+**The run of the e2e tests** (`internal/e2erun`, `tools/task/testrun.go`). Only `go tool task test`
+starts the e2e zones (core, import, clients). The scale and macOS zones are not part of this.
+
+- **Budget.** The tests of a zone, from the first to the last, finish within a budget: 4 minutes
+  (`e2erun.ReferenceBudget`) on CI's e2e runner. The setup before them (the image build, the
+  pulls, the Maven warm-up) does not count. The zones run at the same time, as CI runs them, so
+  the whole suite fits the budget. `TestMain` sets it as go test's own timeout, whose clock starts
+  in `m.Run`. Past it, the binary panics and names the tests still running. It prints the time
+  the tests took.
+- **Calibration.** Before the zones start, the run times a fixed piece of the work of the tests
+  on its engine: two rounds of six servers of the run's image, started at once, each until
+  `/healthz` and a sign-in answer, then removed; then four runs at once of the amd64 Rocky Linux 9
+  image, which an engine of another architecture emulates, as it does the RHEL-family clients.
+  The budget is `ReferenceBudget × calibration / e2erun.ReferenceCalibration` (the calibration
+  on CI's runner), kept within 0.5× and 3×. The run prints both.
+- **Gate.** One run at a time on the computer: `running.json` in the user cache folder
+  (`telesphorepo/e2e`), created exclusively, holds the run's process, its random ticket and its
+  budget. The file of a process that is gone is taken over. Each checkout (by its path) keeps
+  the time of its last run and a hash of its tree (the commit, `git diff HEAD` and the untracked
+  files). A run less than 5 minutes (`e2erun.Cooldown`) after the last run of the checkout is
+  refused, and the refusal starts the 5 minutes again. The refusal tells the agent to batch its
+  work and go on without waiting, and it does not say how long is left. A run whose tree has not
+  changed since the last run is refused too. A run's start counts as its last run until its end
+  replaces it, so a killed run keeps its cooldown. `--now` skips both checks after the person at
+  the terminal types `now`; without a terminal it refuses. The ticket goes to the test binaries
+  in `E2E_RUN_TICKET`. `TestMain` refuses to run without the ticket of the run in progress, so a
+  plain `go test` of the zones does not start, while `go test -list` still does.
 
 **Admin and user calls.** The API changes state only through a UI session, so the suite signs in
 the way the web UI does. `s.Admin()` is the bootstrap admin's UI session: on first use the

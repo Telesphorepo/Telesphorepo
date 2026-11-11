@@ -26,15 +26,26 @@ Linux. Use bun, not npm.
   pull request; a push to `main` publishes the `main` image, which production runs.
 - **Tests run locally; CI runs once.** CI runs on Blacksmith, which bills every run, so a pull
   request's CI is the last check of a finished branch, not a place to find bugs. The e2e tests run
-  here on Podman (start it with `podman machine start` when it is stopped; it may keep running).
-- **A test run follows a commit.** Finish the change, commit it, then run the tests it touches,
-  once (`go tool task test -run 'TestX|TestY'`). A failure: fix it, commit, and run the failed
-  tests once more. Never run tests after each edit, and never in a loop while code changes.
-  One test run at a time on a machine: never two zones, or two agents' runs, at once.
-- **Before the push, the zones the branch touches pass here:** the core zone for a change to the
-  server or the UI (`go tool task test`), the clients zone for the CLI, the scale zone
-  (`go tool task test scale`) for a hot query, an index or a request path, the import zone
-  (`go tool task test import`) for the Nexus import. Never start `e2e-extended.yml` on GitHub.
+  here on Podman or Docker (`go tool task doctor` shows which it found).
+- **Batch the work, then test it once.** Finish a change, commit it, then run the tests it touches
+  in one run (`go tool task test core clients -run 'TestX|TestY'` names every zone it needs). A
+  failure: fix it, commit, and run the failed tests once more. `go tool task test` holds this:
+  it refuses a run within 5 minutes of the checkout's last run, or of a checkout that has not
+  changed since that run. A refusal means the work is not batched yet, so carry on with the next
+  part of the work and test it all together later. Waiting the cooldown out gains nothing: each
+  refused start restarts it. The gate exists to keep test runs rare, so leave it as it is: start
+  the e2e zones only through `go tool task test` (a plain `go test` of them refuses to start),
+  and leave its state (user cache folder, `telesphorepo/e2e`) and `internal/e2erun` alone. Only
+  the person at the terminal can skip it, with `--now`. One run at a time on a computer.
+- **The tests of a zone fit in their budget**: 4 minutes on CI's runner, scaled to this computer
+  by a calibration that the run prints first. Past it the run fails. The budget keeps the suite
+  small and focused, so a test that does not fit gets leaner (fewer containers and client images,
+  one check per rule) rather than split off or given more time; `e2erun.ReferenceBudget` stays as
+  it is. The scale and macOS zones have no budget.
+- **Before the push, the zones the branch touches pass here:** core for a change to the server or
+  the UI, clients for the CLI, import for the Nexus import, and the scale zone
+  (`go tool task test scale`) for a hot query, an index or a request path. `e2e-extended.yml` is
+  for the person to start on GitHub, not an agent.
 - **Push a pull request once, when it is done.** Every push to an open pull request runs its whole
   CI again: batch the fixes into one push. When CI fails anyway, read its log, reproduce the
   failure here, and push the fix only after it passes here.
@@ -45,8 +56,8 @@ Linux. Use bun, not npm.
 ## Performance is a feature
 
 A request costs the same at 1,000,000 files, thousands of repositories and hundreds of people as
-it does on an empty server. That was the promise from the first commit (the scale test: search
-3.38 ms at 100k assets, 3.39 ms at 1M), and every change keeps it.
+it does on an empty server (the scale test measures it: search takes the same time at 100k assets
+as at 1M), and every change keeps it.
 
 - **The cost of a request follows its answer, never the data around it.** A page of 200 costs a
   page of 200; a count is a maintained counter or a bounded one ("10,000+"). Never read every row
@@ -118,4 +129,4 @@ it does on an empty server. That was the promise from the first commit (the scal
 - **CLI commands lead with the human invocation**: positional args for the obvious thing, prompts
   for secrets, flags only for optional knobs, an example-led `--help`.
 - **Keep dependencies few**: stdlib first; explain any new module.
-- Add a `changes.toml` entry when a change breaks an older CLI or server (see SPEC.md).
+- Add a `changes.toml` entry when a change breaks an older CLI or server (SPEC.md, **Change log**).
