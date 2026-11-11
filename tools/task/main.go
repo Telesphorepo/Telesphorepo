@@ -6,7 +6,7 @@
 //	go tool task dev            backend + Vite with live reload
 //	go tool task build [image]  bin/telesphorepo-server with the UI embedded (+ container image)
 //	go tool task preview        build, then run the production binary locally
-//	go tool task test [zone] [args]  e2e zone: core (default), import, scale, clients or all (all but scale); args go to "go test"
+//	go tool task test [zones] [args]  e2e zones core (default), import, clients or all, at once; or scale alone; args go to "go test"
 //	go tool task cli [version]  the six CLI archives that the server embeds (internal/clidist/dist)
 //	go tool task edge [version]  the edge Worker folder that the server embeds (internal/edgedist/dist)
 //	go tool task release [version]  cross-compiled archives and SHA256SUMS in bin/release
@@ -34,13 +34,15 @@ const usage = `Usage: go tool task <command>
   build            build bin/telesphorepo-server with the UI, the six CLI archives and the edge Worker embedded
   build image      ...and the container image telesphorepo:local (Docker or Podman)
   preview          build, then run the production binary at http://localhost:8080
-  test [args]      run the core e2e zone; args pass to go test (e.g. go tool task test -run TestMaven)
-  test --shard i/n run every n-th test of the zone from the i-th (CI runs the core zone on n machines)
-  test import      run the import zone: Nexus sources, sync and cut-over (e.g. go tool task test import -run TestNexus)
+  test [zones] [args]  run e2e zones (core, import, clients; all = the three; core when none named)
+                   at the same time; args pass to go test (e.g. go tool task test core clients -run TestMaven).
+                   The tests of each zone have 4 minutes on CI's runner, scaled to this computer by a
+                   calibration first. A run is refused within 5 minutes of the last run of the checkout
+                   (batch your work; never wait it out) and when nothing changed since that run
+  test --now ...   skip the cooldown and the check for changes; asks the person at the terminal
+  test --shard i/n run every n-th test of one zone from the i-th (CI runs the core zone on n machines)
   test scale       run the scale zone alone on a quiet machine: 100k and 1M seeded assets, each request
                    at most twice as slow at 1M (verdict PASS, FAIL, NOISY: exit 3, INCONCLUSIVE: exit 4)
-  test clients     run the clients zone: the CLI of cmd/telesphorepo with the real tools in containers
-  test all         run the core, import and clients zones one after the other; fails if any fails
   cli [version]    build the six CLI archives that the server serves at /cli/ into internal/clidist/dist
                    (the version defaults to git describe; skipped while cmd/telesphorepo does not exist).
                    A given release version needs a changes.toml with no "dev" entry
