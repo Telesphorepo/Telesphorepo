@@ -28,10 +28,11 @@ const (
 	// however slow its calibration.
 	MaxRun = 10 * time.Minute
 
-	// ReferenceCalibration is the time of the calibration of "go tool task test" (a fixed piece
-	// of the work of the tests) on the reference computer. A computer whose calibration takes
-	// longer gets a longer budget, a faster one a shorter (Budget).
-	ReferenceCalibration = 20 * time.Second
+	// ReferenceCalibration is the time of one calibration batch of "go tool task test" (a fixed
+	// piece of the work of the tests) on the reference computer, CI's e2e runner, which prints it
+	// at the start of each zone. A computer whose calibration takes longer gets a longer budget, a
+	// faster one a shorter (Budget).
+	ReferenceCalibration = 3 * time.Second
 
 	// The budget of a computer stays within these multiples of ReferenceBudget, so a disturbed
 	// calibration cannot make it absurd.
