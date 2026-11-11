@@ -168,15 +168,22 @@ names:
 			return err
 		}
 	}
-	step("calibrating the budget of the tests to this computer")
-	cal, err := calibrate(ctx, eng, image)
+	batches := 1
+	if shards == 0 {
+		batches = 0
+		for _, z := range zones {
+			batches += ciRunners[z]
+		}
+	}
+	step("calibrating the budget of the tests to this computer (%d CI runners' work at once)", batches)
+	cal, err := calibrate(ctx, eng, image, batches)
 	if err != nil {
 		return fmt.Errorf("calibrate: %w", err)
 	}
 	if err := g.setBudget(cal); err != nil {
 		return err
 	}
-	step("calibration %s (%s on CI's runner): the tests of each zone have %s (%s on CI's runner)",
+	step("calibration %s (%s for one batch on one CI runner): the tests of each zone have %s (%s on CI)",
 		cal.Round(100*time.Millisecond), e2erun.ReferenceCalibration, bold(e2erun.Budget(cal).String()), e2erun.ReferenceBudget)
 
 	argvs := map[string][]string{}
