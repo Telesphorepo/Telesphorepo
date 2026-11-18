@@ -104,7 +104,7 @@ var testZones = map[string][]string{
 // on n machines at once); the remaining args pass to go test. "scale" runs the scale zone alone,
 // with no engine and none of the rules of an e2e run.
 //
-// A run goes through the gate (openGate): one run at a time, e2erun.Cooldown between the runs of
+// A run goes through the gate (openGate): one run at a time, a cooldown between the runs of
 // a checkout, a change since the last run. Then it removes what a killed run left, builds the
 // server image once, and runs each zone after calibrating its budget to this computer.
 func test(ctx context.Context, args []string) error {

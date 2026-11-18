@@ -41,12 +41,6 @@ const (
 	// tests only a little faster.
 	minBudgetScale, maxBudgetScale = 0.75, 3.0
 
-	// Cooldown is the least time between the end of a run on this computer and the start of the
-	// next, from any checkout or agent, so that work is batched: finish a change, then test it
-	// once. A run started during the cooldown is refused and starts it again, so waiting it out
-	// with sleep and retrying never gets through sooner than working on the next change.
-	Cooldown = 3 * time.Minute
-
 	// TicketEnv is the variable that carries the ticket of the run to the test binaries.
 	TicketEnv = "E2E_RUN_TICKET"
 

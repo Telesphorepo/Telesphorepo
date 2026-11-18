@@ -3012,10 +3012,10 @@ starts the e2e zones (core, import, clients); the scale and macOS zones are outs
   budget; the file of a process that is gone is taken over. `ledger.json` beside it is one ledger
   for the whole computer, whatever the checkout, worktree or agent: the time of the last run and
   a hash of the tree of each of the latest 50 runs (the commit, `git diff HEAD` and the untracked
-  files). A run is refused when it starts within `e2erun.Cooldown` of the last run on the computer, and
-  the refusal starts the cooldown again; it tells the agent to batch its work and go on without
-  waiting, and says neither how long the cooldown is nor how much of it is left: an agent that
-  knows would wait it out. A run of a tree that a run
+  files). A run is refused during the cooldown after the last run on the computer: a new random length
+  after every run and every refused start, of which the ledger keeps only the end. The refusal
+  tells the agent to batch its work and go on without waiting, and says neither how long the
+  cooldown is nor how much is left: an agent that knew would wait it out. A run of a tree that a run
   on the computer has already tested is refused too. A run's start counts as its last run until its end replaces it, so a
   killed run keeps its cooldown. `--final` skips the cooldown for a final run, on facts the gate
   checks: `git status` is clean, the run has no `-run` or `--shard`, its tree is untested, and the

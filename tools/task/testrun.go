@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	mrand "math/rand/v2"
 	"net/http"
 	"os"
 	"os/exec"
@@ -25,8 +26,8 @@ import (
 	"github.com/Telesphorepo/Telesphorepo/internal/e2erun"
 )
 
-// An e2e run goes through a gate: one run at a time on the computer, e2erun.Cooldown between any
-// two runs on it, and code that no run on it has tested yet. The ledger is one per computer, not
+// An e2e run goes through a gate: one run at a time on the computer, a cooldown after each run
+// on it, and code that no run on it has tested yet. The ledger is one per computer, not
 // per checkout, so a run from another worktree or a subagent counts too. The gate hands the run a
 // ticket that the test binaries check (e2erun.CheckTicket), so "go test" alone cannot skip it.
 //
@@ -38,7 +39,7 @@ import (
 // ledger is what the gate keeps of the runs on this computer.
 type ledger struct {
 	LastRun   time.Time  `json:"last_run"`   // the end of the last run; its start while it runs
-	Refused   time.Time  `json:"refused"`    // the last start refused by the cooldown
+	Until     time.Time  `json:"until"`      // the end of the cooldown
 	Trees     []string   `json:"trees"`      // treeFingerprint of the latest runs, newest last
 	LastFinal bool       `json:"last_final"` // the last run was a final run
 	Finals    []finalRun `json:"finals"`     // the latest final runs, newest last
@@ -71,6 +72,17 @@ and name every zone that batch needs in that one run (e.g. go tool task test cor
 The cooldown is one for the whole computer: a subagent or another worktree does not get around it. The main agent runs the tests.
 When the work is finished (every change committed, nothing left to do), go tool task test --final <zones> runs those whole
 zones once without the cooldown. It is refused while anything is uncommitted, with -run or --shard, and right after another final run.`
+
+// The cooldown is a new random length after every run and every refused start, and the ledger
+// keeps only when it ends: so work is batched (finish a change, then test it once), and nothing in
+// the code or the messages tells an agent when the next run may start. Waiting it out with sleep
+// and retrying never gets through sooner than working on the next change.
+const cooldownLeast, cooldownSpread = 3 * time.Minute, 9 * time.Minute
+
+// cooldownEnd is the end of a new cooldown that starts now.
+func cooldownEnd() time.Time {
+	return time.Now().Add(cooldownLeast + mrand.N(cooldownSpread))
+}
 
 const unchangedRefusal = `this code has already been tested on this computer (the same commit and the same uncommitted changes):
 running the same code again tests nothing new. Change the code first, commit it, then run the tests once.
@@ -107,12 +119,8 @@ func openGate(ctx context.Context, now, final bool, zones []string) (*gate, erro
 				return nil, err
 			}
 		}
-		last := g.ledger.LastRun
-		if g.ledger.Refused.After(last) {
-			last = g.ledger.Refused
-		}
-		if !final && !g.ledger.LastRun.IsZero() && time.Since(last) < e2erun.Cooldown {
-			g.ledger.Refused = time.Now()
+		if !final && time.Now().Before(g.ledger.Until) {
+			g.ledger.Until = cooldownEnd()
 			g.save()
 			return nil, errors.New(cooldownRefusal)
 		}
@@ -126,7 +134,7 @@ func openGate(ctx context.Context, now, final bool, zones []string) (*gate, erro
 	}
 	// The start counts as the last run until the end replaces it, so a killed run still has its
 	// cooldown.
-	g.ledger.LastRun, g.ledger.Refused, g.ledger.LastFinal = time.Now(), time.Time{}, final
+	g.ledger.LastRun, g.ledger.Until, g.ledger.LastFinal = time.Now(), cooldownEnd(), final
 	if final {
 		commit, _ := exec.CommandContext(ctx, "git", "rev-parse", "HEAD").Output()
 		g.ledger.Finals = append(g.ledger.Finals, finalRun{Start: time.Now(), Root: root, Commit: strings.TrimSpace(string(commit)), Zones: zones})
@@ -213,7 +221,7 @@ func finalAllowed(ctx context.Context, l ledger) error {
 // close ends the run with its result: its end starts the cooldown, and the computer is free for
 // the next run.
 func (g *gate) close(passed bool) {
-	g.ledger.LastRun = time.Now()
+	g.ledger.LastRun, g.ledger.Until = time.Now(), cooldownEnd()
 	if g.final && len(g.ledger.Finals) > 0 {
 		g.ledger.Finals[len(g.ledger.Finals)-1].Passed = passed
 	}
