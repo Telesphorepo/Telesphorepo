@@ -66,7 +66,7 @@ var (
 	TLSKeyFile = String(&Def{Key: "tls.key_file", Empty: "None: plain HTTP", Label: "TLS key file", Normalize: Trim,
 		Help: "The path of the PEM file with the private key of the TLS certificate. Turning TLS on or off applies at the next start."})
 	ServerName = String(&Def{Key: "server_name", Empty: "Telesphorepo", Label: "Server name", Normalize: Trim, Validate: validName,
-		Help: "The name that the top bar, the sign-in page and the browser tab show. Empty shows Telesphorepo."})
+		Help: "The name that the top bar, the sign-in page and the browser tab show."})
 	ServerLogo = Image(&Def{Key: "server_logo", Label: "Logo", Validate: validLogo,
 		Help: "A PNG, JPEG or WebP image of at most 256 KiB and 512 pixels on its long side, shown before the server name."})
 	RepoDomains = List(&Def{Key: "repo_domains", Label: "Repository domains",

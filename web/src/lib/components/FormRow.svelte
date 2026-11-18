@@ -14,7 +14,9 @@
   The help sits under the control, so the controls of a row of the grid line up; it has the id
   `{for}-help`: point the control's aria-describedby at it. `more` is longer help behind a "Learn
   more" disclosure. `aka` is the technical name of the value, after `akaLabel` ("Also called"; the
-  Sign-in options page says "In your provider"). `badge` sits next to the label (e.g. "Set by
+  Sign-in options page says "In your provider"). `fallback` is what the server uses when the
+  field is empty ("Default: 12 hours", "When empty: Telesphorepo"), on a line of its own: never
+  in the placeholder, which a value hides. `badge` sits next to the label (e.g. "Set by
   TR_LISTEN"). `length` and `max` count the characters of a text control at the end of the help
   line, with the id `{for}-count`.
 -->
@@ -38,6 +40,7 @@
     help,
     aka,
     akaLabel = "Also called",
+    fallback,
     width = "full",
     full = false,
     error,
@@ -54,6 +57,8 @@
     help?: string;
     aka?: string;
     akaLabel?: string;
+    /** What the server uses when the field is empty: "Default: 12 hours". */
+    fallback?: string;
     width?: ControlWidth;
     /** Span both columns of the grid. */
     full?: boolean;
@@ -80,7 +85,7 @@
     {#if badge}<span class="-my-0.5 flex">{@render badge()}</span>{/if}
   </div>
   <div class={width === "auto" ? "flex min-h-9 items-center" : "w-full"}>{@render children()}</div>
-  {#if help || more || aka || counted}
+  {#if help || more || aka || fallback || counted}
     <div class="flex flex-col gap-0.5 text-meta text-muted-foreground">
       {#if help || more || counted}
         <div class="flex items-start justify-between gap-4">
@@ -91,6 +96,7 @@
           {#if counted}<p id={id ? `${id}-count` : undefined} class="shrink-0 tabular-nums">{formatCount(length ?? 0)} of {formatCount(max ?? 0)}</p>{/if}
         </div>
       {/if}
+      {#if fallback}<p>{fallback}</p>{/if}
       {#if aka}<p>{akaLabel}: <span class="text-foreground">{aka}</span></p>{/if}
     </div>
   {/if}

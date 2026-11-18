@@ -246,9 +246,10 @@
     return Array.isArray(d) ? d.join(", ") : String(d);
   };
 
-  // The placeholder of an empty field says what the server does with it: the default, or what an
-  // empty value means (Telesphorepo for an empty server name).
-  const emptyText = (s: Setting) => (defaultText(s) ? `Default: ${defaultText(s)}` : s.empty);
+  // What the server uses when a field is empty, on the field's own line (FormRow fallback): the
+  // default, or what an empty value means (Telesphorepo for an empty server name). A placeholder
+  // holds only an example of the format, since a value hides it.
+  const fallbackOf = (s: Setting) => (defaultText(s) ? `Default: ${defaultText(s)}` : s.empty ? `When empty: ${s.empty}` : undefined);
 
   function edit(s: Setting, v: string | boolean) {
     const original = s.type === "bool" ? s.value === true : asText(s);
@@ -383,7 +384,7 @@
   {#if s.type === "bool"}
     <SwitchRow {id} label={labelOf(s)} {help} checked={current(s) === true} disabled={ro} onCheckedChange={(v) => edit(s, v)} badge={lock} />
   {:else}
-    <FormRow label={labelOf(s)} for={id} {help} aka={look.aka} {akaLabel} error={err} badge={lock} full={s.type === "map"}>
+    <FormRow label={labelOf(s)} for={id} {help} aka={look.aka} {akaLabel} fallback={s.secret || s.options?.length ? undefined : fallbackOf(s)} error={err} badge={lock} full={s.type === "map"}>
       {#if look.control}
         {@render look.control(s, id)}
       {:else if s.type === "image"}
@@ -451,7 +452,7 @@
           disabled={ro}
           invalid={!!err}
           describedby={described}
-          placeholder={emptyText(s)}
+          placeholder={look.placeholder}
           onchange={(v) => editParts(s, v)}
         />
       {:else}
@@ -463,7 +464,7 @@
           disabled={ro}
           spellcheck={false}
           autocomplete="off"
-          placeholder={look.placeholder ?? emptyText(s)}
+          placeholder={look.placeholder}
           value={String(current(s))}
           oninput={(e) => edit(s, e.currentTarget.value)}
           aria-invalid={err ? true : undefined}
