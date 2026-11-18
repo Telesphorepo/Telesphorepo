@@ -18,6 +18,7 @@
   import ConnectionTest, { type TestResult } from "$lib/components/ConnectionTest.svelte";
   import SettingsGroupForm, { type FieldLook } from "$lib/components/SettingsGroupForm.svelte";
   import CodeSnippet from "$lib/components/CodeSnippet.svelte";
+  import FormRow from "$lib/components/FormRow.svelte";
 
   let {}: PageProps = $props();
 
@@ -86,7 +87,7 @@
   const result = $derived<TestResult | null>(
     !tested || (tested.ok && tested.quiet) ? null : tested.ok ? { ok: true, text: `Connected to ${target}` } : { ok: false, text: tested.error ?? "The test failed." },
   );
-  // The return address is fixed: the one the server uses, which the provider must hold. It is
+  // The return address is fixed, so it shows above the fields as a value to copy, not as a field: the one the server uses, which the provider must hold. It is
   // oidc.redirect_url when set (only through the API or an environment variable), else the
   // public address + /api/auth/oidc/callback. A person who cannot read Settings › General gets no
   // base_url and sees this address.
@@ -104,13 +105,6 @@
     },
     "oidc.client_id": { label: "App ID", help: "Your provider shows this ID when you add the app.", aka: "Client ID" },
     "oidc.client_secret": { label: "App secret", help: "Your provider shows this secret with the app ID.", aka: "Client secret" },
-    "oidc.redirect_url": {
-      label: "Return address",
-      help: "Copy it into the app at your provider.",
-      aka: "Redirect URI",
-      control: returnControl,
-      full: true,
-    },
     "oidc.scopes": { label: "Requested details", help: "Telesphorepo always asks for openid, also when the list leaves it out.", aka: "Scopes" },
     "oidc.permission_claim": {
       label: "Group field",
@@ -133,7 +127,8 @@
     {
       title: "Connect your provider",
       description: "Add Telesphorepo as an app at your identity provider (Okta, Entra ID, Keycloak, Google), then copy its details here.",
-      keys: ["oidc.redirect_url", "oidc.issuer", "oidc.client_id", "oidc.client_secret", "oidc.scopes"],
+      keys: ["oidc.issuer", "oidc.client_id", "oidc.client_secret", "oidc.scopes"],
+      intro: returnIntro,
       done: tested?.ok === true && !missing,
     },
     {
@@ -143,7 +138,7 @@
       keys: ["oidc.permission_claim", "oidc.permission_map"],
       done: claim !== "",
     },
-    { title: "How people sign in", keys: ["oidc.session_ttl", "signin.password_login"] },
+    { title: "How people sign in", keys: ["oidc.session_ttl", "oidc.approval_max_age", "signin.password_login"] },
   ]);
 
   const effects = (patch: Record<string, unknown>) => [
@@ -166,12 +161,14 @@
   }
 </script>
 
-{#snippet returnControl(_s: Setting, id: string)}
-  {#if returnAddress}
-    <div {id}><CodeSnippet value={returnAddress} /></div>
-  {:else}
-    <p {id} class="text-body text-muted-foreground">Set the public address on <a class="underline underline-offset-2" href="#/settings/general">General</a> first: the return address starts with it.</p>
-  {/if}
+{#snippet returnIntro()}
+  <FormRow label="Return address" help="Copy it into the app at your provider." aka="Redirect URI" akaLabel="In your provider">
+    {#if returnAddress}
+      <CodeSnippet value={returnAddress} />
+    {:else}
+      <p class="text-body text-muted-foreground">Set the public address on <a class="underline underline-offset-2" href="#/settings/general">General</a> first: the return address starts with it.</p>
+    {/if}
+  </FormRow>
 {/snippet}
 
 <PageHeader title="Sign-in options" description="Single sign-on with an OpenID Connect provider, and the server permissions its accounts get." />
@@ -182,7 +179,7 @@
   <ErrorState error={settings.error} onRetry={settings.reload} />
 {:else if group}
   <FormPage>
-    <SettingsGroupForm settings={group.settings} label="Single sign-on settings" {sections} steps extraAt={0} {fields} akaLabel="In your provider" errors={tested?.fields} {effects} onSaved={saved}>
+    <SettingsGroupForm settings={group.settings} visible={(s) => s.key !== "oidc.redirect_url"} label="Single sign-on settings" {sections} steps extraAt={0} {fields} akaLabel="In your provider" errors={tested?.fields} {effects} onSaved={saved}>
       {#snippet extra(patch)}
         {@const edits = patch()}
         <ConnectionTest

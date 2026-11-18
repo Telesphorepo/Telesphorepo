@@ -43,8 +43,6 @@
      * image setting): it gets the setting and the id of the label.
      */
     control?: Snippet<[Setting, string]>;
-    /** Span both columns of the grid (a long value). */
-    full?: boolean;
   };
 </script>
 
@@ -68,7 +66,15 @@
   import StatusBadge from "./StatusBadge.svelte";
   import { DURATION_UNITS, SIZE_UNITS, splitDuration, splitSize, type Parts, type Unit } from "$lib/units";
 
-  type Section = { title: string; description?: string; keys: string[]; /** A finished step shows a check. */ done?: boolean };
+  type Section = {
+    title: string;
+    description?: string;
+    keys: string[];
+    /** A finished step shows a check. */
+    done?: boolean;
+    /** Full-width content above the fields of the section, such as a value to copy. */
+    intro?: Snippet;
+  };
   type Patch = () => Record<string, unknown>;
 
   let {
@@ -128,13 +134,14 @@
 
   // The fields of each section; one untitled section without sections.
   const groups = $derived.by(() => {
-    if (!sections?.length) return [{ title: "", description: undefined as string | undefined, done: false, fields: shown }];
+    if (!sections?.length) return [{ title: "", description: undefined as string | undefined, done: false, intro: undefined as Snippet | undefined, fields: shown }];
     const known = new Set(sections.flatMap((s) => s.keys));
     return sections
       .map((sec, i) => ({
         title: sec.title,
         description: sec.description,
         done: sec.done ?? false,
+        intro: sec.intro,
         fields: shown
           .filter((s) => sec.keys.includes(s.key) || (i === 0 && !known.has(s.key)))
           .sort((a, b) => sec.keys.indexOf(a.key) - sec.keys.indexOf(b.key)),
@@ -347,7 +354,7 @@
   {#if s.type === "bool"}
     <SwitchRow {id} label={labelOf(s)} {help} checked={current(s) === true} disabled={ro} onCheckedChange={(v) => edit(s, v)} badge={lock} />
   {:else}
-    <FormRow label={labelOf(s)} for={id} {help} aka={look.aka} {akaLabel} error={err} badge={lock} full={s.type === "map" || look.full}>
+    <FormRow label={labelOf(s)} for={id} {help} aka={look.aka} {akaLabel} error={err} badge={lock} full={s.type === "map"}>
       {#if look.control}
         {@render look.control(s, id)}
       {:else if s.type === "image"}
@@ -442,7 +449,8 @@
   {#if extra}{@render extra(patchBody)}{/if}
 {/snippet}
 
-{#snippet grid(list: Setting[])}
+{#snippet grid(list: Setting[], intro?: Snippet)}
+  {#if intro}<div class="mb-6">{@render intro()}</div>{/if}
   <FormGrid>
     {#each list as s (s.key)}
       {@render field(s)}
@@ -455,13 +463,13 @@
   {#if steps}
     {#each groups as g, i (g.title)}
       <Step n={i + 1} title={g.title} description={g.description} done={g.done} footer={extraIn(i) ? extraRow : undefined}>
-        {@render grid(g.fields)}
+        {@render grid(g.fields, g.intro)}
       </Step>
     {/each}
   {:else}
     {#each groups as g, i (g.title)}
       <FormSection title={g.title || undefined} description={g.description} footer={extraIn(i) ? extraRow : undefined}>
-        {@render grid(g.fields)}
+        {@render grid(g.fields, g.intro)}
       </FormSection>
     {/each}
   {/if}
