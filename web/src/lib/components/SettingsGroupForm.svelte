@@ -10,7 +10,9 @@
   `sections` splits the fields into FormSections, one card each (a setting in no section goes to
   the first one), so the form is the whole body of a page: put it in a FormPage and nothing
   between sections. Without `sections` the form is one card.
-  With `steps`, the sections are numbered Steps of a setup. `fields` gives a setting a plain label,
+  A section's `intro` renders above its fields with a SectionDraft, so a step can lay out its own
+  controls (Sign-in options: the return address, and the choice of who sets server permissions)
+  and still save through the one draft. With `steps`, the sections are numbered Steps of a setup. `fields` gives a setting a plain label,
   one line of help, `aka` (its technical name, after `akaLabel`), a placeholder, or `permissionMap`
   (a map of permission IDs edits as groups with a PermissionPicker), or `control` (the control of a
   setting that its own route changes at once, such as the logo; it stays out of the draft);
@@ -30,6 +32,17 @@
   export type GroupMap = Record<string, string[]>;
   /** An unsaved edit: text for most types, a bool, null to clear a secret, or a map of a permission map. */
   export type Draft = string | boolean | null | GroupMap;
+
+  /**
+   * The draft as a section's intro sees it, for a step that lays out its own controls: a value with
+   * its unsaved edit (the text, or the map of a map setting), an edit that goes into the one draft
+   * and Save bar, and the error of a field.
+   */
+  export type SectionDraft = {
+    get: (key: string) => string | GroupMap;
+    set: (key: string, value: string | GroupMap) => void;
+    error: (key: string) => string | undefined;
+  };
 
   export type FieldLook = {
     label?: string;
@@ -72,8 +85,8 @@
     keys: string[];
     /** A finished step shows a check. */
     done?: boolean;
-    /** Full-width content above the fields of the section, such as a value to copy. */
-    intro?: Snippet;
+    /** Full-width content above the fields of the section: a value to copy, or controls of its own. */
+    intro?: Snippet<[SectionDraft]>;
   };
   type Patch = () => Record<string, unknown>;
 
@@ -134,7 +147,7 @@
 
   // The fields of each section; one untitled section without sections.
   const groups = $derived.by(() => {
-    if (!sections?.length) return [{ title: "", description: undefined as string | undefined, done: false, intro: undefined as Snippet | undefined, fields: shown }];
+    if (!sections?.length) return [{ title: "", description: undefined as string | undefined, done: false, intro: undefined as Snippet<[SectionDraft]> | undefined, fields: shown }];
     const known = new Set(sections.flatMap((s) => s.keys));
     return sections
       .map((sec, i) => ({
@@ -146,7 +159,7 @@
           .filter((s) => sec.keys.includes(s.key) || (i === 0 && !known.has(s.key)))
           .sort((a, b) => sec.keys.indexOf(a.key) - sec.keys.indexOf(b.key)),
       }))
-      .filter((g) => g.fields.length > 0);
+      .filter((g) => g.fields.length > 0 || g.intro);
   });
 
   const labelOf = (s: Setting) => fields[s.key]?.label ?? s.label;
@@ -252,6 +265,22 @@
     if (v === undefined) drop(s.key);
     else draft = { ...draft, [s.key]: v };
   }
+
+  const byKey = (key: string) => settings.find((s) => s.key === key);
+  const sectionDraft: SectionDraft = {
+    get: (key) => {
+      const s = byKey(key);
+      if (!s) return "";
+      return s.type === "map" ? mapOf(s) : String(current(s));
+    },
+    set: (key, value) => {
+      const s = byKey(key);
+      if (!s) return;
+      if (isMap(value)) editMap(s, value);
+      else edit(s, value);
+    },
+    error: (key) => fieldErrors[key] ?? errors[key],
+  };
 
   function discard() {
     draft = {};
@@ -449,13 +478,15 @@
   {#if extra}{@render extra(patchBody)}{/if}
 {/snippet}
 
-{#snippet grid(list: Setting[], intro?: Snippet)}
-  {#if intro}<div class="mb-6">{@render intro()}</div>{/if}
-  <FormGrid>
-    {#each list as s (s.key)}
-      {@render field(s)}
-    {/each}
-  </FormGrid>
+{#snippet grid(list: Setting[], intro?: Snippet<[SectionDraft]>)}
+  {#if intro}<div class={list.length ? "mb-6" : undefined}>{@render intro(sectionDraft)}</div>{/if}
+  {#if list.length}
+    <FormGrid>
+      {#each list as s (s.key)}
+        {@render field(s)}
+      {/each}
+    </FormGrid>
+  {/if}
 {/snippet}
 
 <form onsubmit={submit} autocomplete="off">
