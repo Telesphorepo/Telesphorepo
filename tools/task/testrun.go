@@ -369,6 +369,47 @@ func calibrationBatch(ctx context.Context, eng containerengine.Engine, image str
 	})
 }
 
+// podmanFirewallConf is the file of a Podman machine that sets netavark's firewall driver to
+// "none" (see ensurePodmanNetworks).
+const podmanFirewallConf = "/etc/containers/containers.conf.d/50-telesphorepo-firewall.conf"
+
+// ensurePodmanNetworks makes containers start on a network of their own on a Podman machine whose
+// kernel lacks nftables' fib expression, as the WSL2 kernel does: netavark's nftables driver uses
+// it for the DNS of a user-defined network, so every container of a test network fails with
+// "nftables error". It starts one container of image on a fresh network; on that error it sets the
+// machine's netavark firewall driver to "none" and tries again. A rootless machine publishes
+// ports and reaches the internet without netavark's firewall, so nothing else changes. A recreated
+// machine loses the file, and the next run puts it back.
+func ensurePodmanNetworks(ctx context.Context, eng containerengine.Engine, image string) error {
+	if eng.Name != "podman" {
+		return nil
+	}
+	try := func() error {
+		b := make([]byte, 4)
+		_, _ = rand.Read(b)
+		net := "telesphorepo-e2e-probe-" + hex.EncodeToString(b)
+		if _, err := engineCLI(ctx, eng, "network", "create", "--label", "telesphorepo.e2e=1", net); err != nil {
+			return fmt.Errorf("create a probe network: %w", err)
+		}
+		defer engineCLI(context.Background(), eng, "network", "rm", "-f", net) //nolint:errcheck
+		_, err := engineCLI(ctx, eng, "run", "--rm", "--label", "telesphorepo.e2e=1", "--network", net, image, "version")
+		return err
+	}
+	err := try()
+	if err == nil || !strings.Contains(err.Error(), "nftables error") {
+		return err
+	}
+	step("the Podman machine's kernel lacks nftables' fib: setting netavark's firewall driver to none (%s)", podmanFirewallConf)
+	script := "sudo mkdir -p /etc/containers/containers.conf.d && printf '[network]\\nfirewall_driver = \"none\"\\n' | sudo tee " + podmanFirewallConf + " >/dev/null"
+	if _, err := engineCLI(ctx, eng, "machine", "ssh", script); err != nil {
+		return fmt.Errorf("set the Podman machine's firewall driver: %w", err)
+	}
+	if err := try(); err != nil {
+		return fmt.Errorf("a container on a network of its own still does not start: %w", err)
+	}
+	return nil
+}
+
 // podmanCLISlots holds the Podman CLI calls of a calibration to eight at a time. On Windows and
 // macOS the Podman CLI reaches its machine over SSH, and the machine's sshd drops new connections
 // past about ten at once (MaxStartups): 24 calibration servers started together then fail with

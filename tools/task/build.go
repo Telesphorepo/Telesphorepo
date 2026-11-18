@@ -174,6 +174,9 @@ names:
 			return err
 		}
 	}
+	if err := ensurePodmanNetworks(ctx, eng, image); err != nil {
+		return err
+	}
 	// The zones run one after another: on one computer, zones side by side compete for its CPU and
 	// memory and finish later than in turn. Each zone gets the budget of its own calibration, at
 	// most what is left of the run's e2erun.MaxRun.
