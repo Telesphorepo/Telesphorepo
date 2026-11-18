@@ -24,6 +24,8 @@
   import PermissionMapInput from "$lib/components/PermissionMapInput.svelte";
   import * as RadioGroup from "$lib/components/ui/radio-group";
   import { Input } from "$lib/components/ui/input";
+  import { Button } from "$lib/components/ui/button";
+  import ExternalLinkIcon from "@lucide/svelte/icons/external-link";
   import type { PermId } from "$lib/api";
 
   let {}: PageProps = $props();
@@ -115,7 +117,7 @@
       label: "Provider address",
       help: "Your provider publishes its sign-in details at this address.",
       aka: "Issuer URL",
-      placeholder: "https://login.example.com/realms/main",
+      placeholder: "https://login.example.com",
     },
     "oidc.client_id": { label: "App ID", help: "Your provider shows this ID when you add the app.", aka: "Client ID" },
     "oidc.client_secret": { label: "App secret", help: "Your provider shows this secret with the app ID.", aka: "Client secret" },
@@ -133,7 +135,7 @@
   const sections = $derived([
     {
       title: "Connect your provider",
-      description: "Add Telesphorepo as an app at your identity provider (Okta, Entra ID, Keycloak, Google), then copy its details here.",
+      description: "Add Telesphorepo as an app at your identity provider, then copy its details here.",
       keys: ["oidc.issuer", "oidc.client_id", "oidc.client_secret", "oidc.scopes"],
       intro: returnIntro,
       done: tested?.ok === true && !missing,
@@ -212,7 +214,7 @@
       <FormRow
         label="Group field"
         for="{idBase}-claim"
-        help="The field of the sign-in token that lists the person's groups, such as groups. For Keycloak realm roles, enter realm_access.roles."
+        help="The field of the sign-in token that lists the person's groups, such as groups."
         aka="Claim"
         akaLabel="In your provider"
         error={draft.error("oidc.permission_claim")}
@@ -246,7 +248,13 @@
   {/if}
 {/snippet}
 
-<PageHeader title="Sign-in options" description="Single sign-on with an OpenID Connect provider, and the server permissions its accounts get." />
+<PageHeader title="Sign-in options" description="Single sign-on with an OpenID Connect provider, and the server permissions its accounts get.">
+  {#snippet actions()}
+    <Button variant="outline" href="https://docs.telesphorepo.com/single-sign-on/" target="_blank" rel="noopener noreferrer">
+      Setup guide<ExternalLinkIcon aria-hidden="true" />
+    </Button>
+  {/snippet}
+</PageHeader>
 
 {#if settings.loading && !settings.data}
   <Loading rows={6} />
