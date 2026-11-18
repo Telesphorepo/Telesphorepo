@@ -139,7 +139,7 @@
 <FormSection title={repo.kind === "proxy" ? "Proxy" : repo.kind === "group" ? "Group" : "Repository"}>
   <FormGrid>
     {#if canRename}
-      <FormRow label="Name" for="{id}-name" help="A new name keeps the old one working as a redirect." error={nameError}>
+      <FormRow label="Name" for="{id}-name" help="A new name keeps the old one working as a redirect." error={nameError} full>
         <Input id="{id}-name" bind:value={draft.value.name} autocomplete="off" spellcheck={false} aria-describedby="{id}-name-help" aria-invalid={nameError ? true : undefined} />
       </FormRow>
     {/if}
@@ -159,11 +159,11 @@
   {/if}
 
   <Section title={repo.kind === "proxy" ? "Cache" : "Contents"}>
-    <dl class="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-4">
+    <dl class="grid grid-cols-2 gap-3 sm:grid-cols-4">
       {#each facts as f (f.label)}
-        <div class="min-w-0">
+        <div class="flex min-w-0 flex-col gap-1 rounded-lg border bg-panel px-4 py-3">
           <dt class="text-meta text-muted-foreground">{f.label}</dt>
-          <dd class="truncate text-label tabular-nums" title={f.value}>{f.value}</dd>
+          <dd class="truncate text-2xl font-semibold tracking-tight tabular-nums" title={f.value}>{f.value}</dd>
         </div>
       {/each}
     </dl>

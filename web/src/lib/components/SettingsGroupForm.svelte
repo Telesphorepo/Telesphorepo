@@ -43,6 +43,8 @@
      * image setting): it gets the setting and the id of the label.
      */
     control?: Snippet<[Setting, string]>;
+    /** Span both columns of the grid (a long value). */
+    full?: boolean;
   };
 </script>
 
@@ -345,7 +347,7 @@
   {#if s.type === "bool"}
     <SwitchRow {id} label={labelOf(s)} {help} checked={current(s) === true} disabled={ro} onCheckedChange={(v) => edit(s, v)} badge={lock} />
   {:else}
-    <FormRow label={labelOf(s)} for={id} {help} aka={look.aka} {akaLabel} error={err} badge={lock} full={s.type === "map"}>
+    <FormRow label={labelOf(s)} for={id} {help} aka={look.aka} {akaLabel} error={err} badge={lock} full={s.type === "map" || look.full}>
       {#if look.control}
         {@render look.control(s, id)}
       {:else if s.type === "image"}

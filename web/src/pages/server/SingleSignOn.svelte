@@ -17,6 +17,7 @@
   import Loading from "$lib/components/Loading.svelte";
   import ConnectionTest, { type TestResult } from "$lib/components/ConnectionTest.svelte";
   import SettingsGroupForm, { type FieldLook } from "$lib/components/SettingsGroupForm.svelte";
+  import CodeSnippet from "$lib/components/CodeSnippet.svelte";
 
   let {}: PageProps = $props();
 
@@ -85,7 +86,15 @@
   const result = $derived<TestResult | null>(
     !tested || (tested.ok && tested.quiet) ? null : tested.ok ? { ok: true, text: `Connected to ${target}` } : { ok: false, text: tested.error ?? "The test failed." },
   );
-  const origin = location.origin;
+  // The return address is fixed: the one the server uses, which the provider must hold. It is
+  // oidc.redirect_url when set (only through the API or an environment variable), else the
+  // public address + /api/auth/oidc/callback. A person who cannot read Settings › General gets no
+  // base_url and sees this address.
+  const baseURL = $derived(settings.data?.groups.flatMap((g) => g.settings).find((s: Setting) => s.key === "base_url"));
+  const publicAddress = $derived(baseURL ? String(baseURL.value ?? "") : location.origin);
+  const returnAddress = $derived(
+    String(value("oidc.redirect_url") ?? "") || (publicAddress ? publicAddress.replace(/\/$/, "") + "/api/auth/oidc/callback" : ""),
+  );
   const fields: Record<string, FieldLook> = {
     "oidc.issuer": {
       label: "Provider address",
@@ -97,9 +106,10 @@
     "oidc.client_secret": { label: "App secret", help: "Your provider shows this secret with the app ID.", aka: "Client secret" },
     "oidc.redirect_url": {
       label: "Return address",
-      help: "Add this address to the app at your provider.",
+      help: "Copy it into the app at your provider.",
       aka: "Redirect URI",
-      placeholder: `${origin}/api/auth/oidc/callback`,
+      control: returnControl,
+      full: true,
     },
     "oidc.scopes": { label: "Requested details", help: "Telesphorepo always asks for openid, also when the list leaves it out.", aka: "Scopes" },
     "oidc.permission_claim": {
@@ -123,7 +133,7 @@
     {
       title: "Connect your provider",
       description: "Add Telesphorepo as an app at your identity provider (Okta, Entra ID, Keycloak, Google), then copy its details here.",
-      keys: ["oidc.issuer", "oidc.client_id", "oidc.client_secret", "oidc.redirect_url", "oidc.scopes"],
+      keys: ["oidc.redirect_url", "oidc.issuer", "oidc.client_id", "oidc.client_secret", "oidc.scopes"],
       done: tested?.ok === true && !missing,
     },
     {
@@ -155,6 +165,14 @@
     if (issuer) test({}, true);
   }
 </script>
+
+{#snippet returnControl(_s: Setting, id: string)}
+  {#if returnAddress}
+    <div {id}><CodeSnippet value={returnAddress} /></div>
+  {:else}
+    <p {id} class="text-body text-muted-foreground">Set the public address on <a class="underline underline-offset-2" href="#/settings/general">General</a> first: the return address starts with it.</p>
+  {/if}
+{/snippet}
 
 <PageHeader title="Sign-in options" description="Single sign-on with an OpenID Connect provider, and the server permissions its accounts get." />
 
