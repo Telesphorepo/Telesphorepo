@@ -29,6 +29,7 @@
   import GroupMembers from "./GroupMembers.svelte";
   import RemoteCard from "./RemoteCard.svelte";
   import RedirectsCard from "./RedirectsCard.svelte";
+  import Stat from "../overview/Stat.svelte";
   import { Input } from "$lib/components/ui/input";
   import { auth } from "$lib/auth.svelte";
   import { navigate, repoSettingsPath } from "$lib/router.svelte";
@@ -158,15 +159,12 @@
     <UsageCard {repo} title="Use this proxy in your build" />
   {/if}
 
-  <Section title={repo.kind === "proxy" ? "Cache" : "Contents"}>
-    <dl class="grid grid-cols-2 gap-3 sm:grid-cols-4">
+  <Section title={repo.kind === "proxy" ? "Cache" : "Contents"} plain>
+    <div class="grid grid-cols-2 gap-4 md:grid-cols-4">
       {#each facts as f (f.label)}
-        <div class="flex min-w-0 flex-col gap-1 rounded-lg border bg-panel px-4 py-3">
-          <dt class="text-meta text-muted-foreground">{f.label}</dt>
-          <dd class="truncate text-2xl font-semibold tracking-tight tabular-nums" title={f.value}>{f.value}</dd>
-        </div>
+        <Stat label={f.label} value={f.value} />
       {/each}
-    </dl>
+    </div>
     {#if status?.error}<div class="mt-4"><ErrorState inline error="The format's facts did not load: {status.error}" /></div>{/if}
   </Section>
 

@@ -1,5 +1,5 @@
 <!--
-  One stat tile of the Settings overview: its own small card, the content centered, the value in
+  One stat tile of the Settings overview and of a repository's Overview tab: its own small card, the content centered, the value in
   the title size with tabular figures and the label under it, nothing more. Tiles sit in an equal-width grid that gives a row one height, and the content
   is centered in the tile both ways. With `href` the whole tile is the link (the label is the link for the keyboard) and fills
   under the pointer.
