@@ -1,6 +1,6 @@
 <!--
   Networks (Network permission): named address ranges (network lists) that repositories allow
-  downloads and publishes from. Lists the server downloads (GitHub Actions, Cloudflare) refresh
+  download from without signing in. Lists the server downloads (GitHub Actions, Cloudflare) refresh
   every day; your own lists hold the addresses you paste. Each list is a card that opens it: its
   title, its number of ranges and what uses it, and when it was refreshed or added. A downloaded
   list refreshes from its card.
@@ -58,7 +58,7 @@
   }
 </script>
 
-<PageHeader title="Networks" description="Named address ranges that repositories allow downloads and publishes from." />
+<PageHeader title="Networks" description="Named address ranges that repositories let download without signing in." />
 
 <Section plain title="Downloaded lists" description="The server refreshes these from their owners every day.">
   <SourceGrid source={presets} label="Downloaded network lists" key={(l) => l.name}>
