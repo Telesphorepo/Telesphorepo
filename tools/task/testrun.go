@@ -361,13 +361,37 @@ func calibrationBatch(ctx context.Context, eng containerengine.Engine, image str
 		}
 	}
 	return together(calibrationAmd64Runs, func() error {
-		out, err := exec.CommandContext(ctx, eng.CLI, "run", "--rm", "--label", "telesphorepo.e2e=1", "--platform", "linux/amd64",
-			calibrationAmd64, "sh", "-c", "rpm -qa >/dev/null && rpm -Va --nofiles --nodigest rpm bash >/dev/null; true").CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("run %s: %w\n%s", calibrationAmd64, err, out)
+		if _, err := engineCLI(ctx, eng, "run", "--rm", "--label", "telesphorepo.e2e=1", "--platform", "linux/amd64",
+			calibrationAmd64, "sh", "-c", "rpm -qa >/dev/null && rpm -Va --nofiles --nodigest rpm bash >/dev/null; true"); err != nil {
+			return fmt.Errorf("run %s: %w", calibrationAmd64, err)
 		}
 		return nil
 	})
+}
+
+// podmanCLISlots holds the Podman CLI calls of a calibration to eight at a time. On Windows and
+// macOS the Podman CLI reaches its machine over SSH, and the machine's sshd drops new connections
+// past about ten at once (MaxStartups): 24 calibration servers started together then fail with
+// "ssh: handshake failed: EOF". Only the CLI calls wait for a slot; the containers they start
+// still run together. Docker's CLI talks to its socket, so it runs unthrottled.
+var podmanCLISlots = make(chan struct{}, 8)
+
+// engineCLI runs the engine's CLI with args and returns its standard output. A failure carries
+// what the CLI wrote to standard error.
+func engineCLI(ctx context.Context, eng containerengine.Engine, args ...string) ([]byte, error) {
+	if eng.Name == "podman" {
+		select {
+		case podmanCLISlots <- struct{}{}:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		defer func() { <-podmanCLISlots }()
+	}
+	out, err := exec.CommandContext(ctx, eng.CLI, args...).Output()
+	if ee, ok := errors.AsType[*exec.ExitError](err); ok && len(ee.Stderr) > 0 {
+		err = fmt.Errorf("%w: %s", err, strings.TrimSpace(string(ee.Stderr)))
+	}
+	return out, err
 }
 
 // together runs n copies of fn at once and returns the first error.
@@ -386,15 +410,15 @@ func calibrationServer(ctx context.Context, eng containerengine.Engine, image st
 	b := make([]byte, 12)
 	_, _ = rand.Read(b)
 	pass := hex.EncodeToString(b)
-	out, err := exec.CommandContext(ctx, eng.CLI, "run", "-d", "--label", "telesphorepo.e2e=1", "-p", "127.0.0.1::8080",
+	out, err := engineCLI(ctx, eng, "run", "-d", "--label", "telesphorepo.e2e=1", "-p", "127.0.0.1::8080",
 		"-e", "TR_COOKIE_SECURE=false", "-e", "TR_BASE_URL=http://localhost:8080",
-		"-e", "TR_BOOTSTRAP_ADMIN_USER=admin", "-e", "TR_BOOTSTRAP_ADMIN_PASSWORD="+pass, image).Output()
+		"-e", "TR_BOOTSTRAP_ADMIN_USER=admin", "-e", "TR_BOOTSTRAP_ADMIN_PASSWORD="+pass, image)
 	if err != nil {
 		return fmt.Errorf("start a calibration server: %w", err)
 	}
 	id := strings.TrimSpace(string(out))
-	defer exec.Command(eng.CLI, "rm", "-f", id).Run() //nolint:errcheck
-	out, err = exec.CommandContext(ctx, eng.CLI, "port", id, "8080/tcp").Output()
+	defer engineCLI(context.Background(), eng, "rm", "-f", id) //nolint:errcheck
+	out, err = engineCLI(ctx, eng, "port", id, "8080/tcp")
 	if err != nil {
 		return fmt.Errorf("the port of a calibration server: %w", err)
 	}
