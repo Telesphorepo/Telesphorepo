@@ -1,3 +1,8 @@
+# Every text file is stored and checked out with LF, whatever core.autocrlf says (Git for Windows
+# sets it to true system-wide). Without this, a Windows checkout writes CRLF, and an edit of such a
+# file commits CRLF once autocrlf is off.
+* text=auto eol=lf
+
 # The server embeds install.sh and serves it to sh, so it must keep LF endings on a Windows checkout.
 *.sh text eol=lf
 
