@@ -30,7 +30,7 @@ Linux. Use bun, not npm.
 - **Batch the work, then test it once.** Finish a change, commit it, then run the tests it touches
   in one run (`go tool task test core clients -run 'TestX|TestY'` names every zone it needs). A
   failure: fix it, commit, and run the failed tests once more. `go tool task test` holds this:
-  it refuses a run within 3 minutes of the last run on the computer, and a run of code that has
+  it refuses a run too soon after the last run on the computer, and a run of code that has
   already been tested. A refusal means the work is not batched yet, so carry on with the next
   part of the work and test it all together later. Waiting the cooldown out gains nothing: each
   refused start restarts it. The gate exists to keep test runs rare, so leave it as it is: start

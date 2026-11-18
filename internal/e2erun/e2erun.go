@@ -120,7 +120,7 @@ func ReadRunning() (Running, error) {
 
 // ErrNoTicket is the refusal of a test binary that "go tool task test" did not start.
 var ErrNoTicket = fmt.Errorf("start the e2e tests with \"go tool task test\" (see AGENTS.md): it builds the image once, "+
-	"holds the tests of each zone to a budget (%s on CI's runner, %s for a whole run) and keeps %s between the runs on this computer", ReferenceBudget, MaxRun, Cooldown)
+	"holds the tests of each zone to a budget (%s on CI's runner, %s for a whole run) and keeps a cooldown between the runs on this computer", ReferenceBudget, MaxRun)
 
 // CheckTicket returns the run in progress when ticket is its ticket.
 func CheckTicket(ticket string) (Running, error) {

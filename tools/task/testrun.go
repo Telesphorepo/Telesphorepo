@@ -64,8 +64,8 @@ type gate struct {
 	final      bool
 }
 
-const cooldownRefusal = `the e2e tests ran on this computer less than %s ago. Running them this often means the work is not batched.
-Do not wait for the cooldown: no sleep, no retry loop, no polling. Every refused start, this one too, starts the %s again.
+const cooldownRefusal = `the e2e tests ran on this computer too recently. Running them this often means the work is not batched.
+Do not wait for the cooldown: no sleep, no retry loop, no polling. Every refused start, this one too, starts the cooldown again.
 Go on with the next part of the work without running tests. Run the tests once, when a batch of changes is done and committed,
 and name every zone that batch needs in that one run (e.g. go tool task test core clients).
 The cooldown is one for the whole computer: a subagent or another worktree does not get around it. The main agent runs the tests.
@@ -114,7 +114,7 @@ func openGate(ctx context.Context, now, final bool, zones []string) (*gate, erro
 		if !final && !g.ledger.LastRun.IsZero() && time.Since(last) < e2erun.Cooldown {
 			g.ledger.Refused = time.Now()
 			g.save()
-			return nil, fmt.Errorf(cooldownRefusal, e2erun.Cooldown, e2erun.Cooldown)
+			return nil, errors.New(cooldownRefusal)
 		}
 		if tree != "" && slices.Contains(g.ledger.Trees, tree) {
 			return nil, errors.New(unchangedRefusal)

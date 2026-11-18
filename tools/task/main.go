@@ -37,7 +37,7 @@ const usage = `Usage: go tool task <command>
   test [zones] [args]  run e2e zones (core, import, clients; all = the three; core when none named)
                    one after another; args pass to go test (e.g. go tool task test core clients -run TestMaven).
                    The tests of each zone have 4 minutes on CI's runner, scaled to this computer by a
-                   calibration first, and a whole run at most 10 minutes. A run is refused within 3 minutes of the last run on this
+                   calibration first, and a whole run at most 10 minutes. A run is refused too soon after the last run on this
                    computer (batch your work; never wait it out) and for code already tested
   test --final [zones]  the finished work's one run of whole zones without the cooldown: refused while
                    anything is uncommitted, with -run or --shard, and right after another final run
