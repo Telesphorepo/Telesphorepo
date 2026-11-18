@@ -5,6 +5,7 @@
   groups whose permission they hold. Storage, Sign-in options and Network and proxy have their own
   pages. One form saves them all, with a section per settings group; Server identity comes first.
   The name saves with the form; the logo is its own action (LogoField) that applies at once.
+  Repository domains are edited on each repository's Overview (DomainsCard), not here.
 -->
 <script lang="ts">
   import type { PageProps } from "$lib/router.svelte";
@@ -58,6 +59,6 @@
   <CompactEmpty icon={SlidersIcon} text="This server has no general settings." />
 {:else}
   <FormPage>
-    <SettingsGroupForm settings={all} label="General settings" {sections} fields={{ server_logo: { control: logo }, repo_domains: { placeholder: "updater.example.com=releases, then Enter" } }} onSaved={saved} />
+    <SettingsGroupForm settings={all} visible={(s) => s.key !== "repo_domains"} label="General settings" {sections} fields={{ server_logo: { control: logo } }} onSaved={saved} />
   </FormPage>
 {/if}

@@ -5,8 +5,9 @@
   copy), each row with its state after a save (a copied repository: copying or switched over, with
   its rehearsal and moving repositories after its name and its actions at the end: Switch over, Rehearse
   publishing, Move it project by project, Empty it and Delete for a rehearsal, Merge into… for a
-  moving repository), saved with one button that also starts a sync; the
-  running or chosen sync with its progress and log; the history of syncs; the connection, saved
+  moving repository; a group: waits for its members that still copy, then switched over; a proxy:
+  switched over), saved with one button that also starts a sync; the
+  running or chosen sync with its progress and log; the history of syncs, ten a page; the connection, saved
   from the SaveBar. The parent keys it by id.
 -->
 <script lang="ts">
@@ -68,7 +69,8 @@
   const path = untrack(() => `/settings/nexus/${id}`);
 
   const source = new Resource(() => api.nexus.get(id));
-  const syncs = new Keyset((p) => api.nexus.syncs(id, p));
+  // Ten syncs a page: a sync runs every interval, so the list stays short and "Load more" reads back.
+  const syncs = new Keyset((p) => api.nexus.syncs(id, p), 10);
 
   const d = $derived(source.data);
   const mirroring = $derived(d?.state === "mirroring");
@@ -239,7 +241,14 @@
     if (r.target && copiesFiles(r) && r.offline)
       return { word: "Offline in Nexus", tone: "neutral", title: `Syncs skip it while Nexus has it offline. Switch it over to take uploads in ${r.target}.` };
     if (r.target && copiesFiles(r)) return { word: "Copying", tone: "info", title: `Copies into ${r.target} until it switches over` };
-    if (r.target) return { word: "Copied", tone: "success", title: `Copies into ${r.target}` };
+    // A group has no files of its own: it has switched over once every member that copies has.
+    if (r.target && isGroup(r)) {
+      const waiting = r.target_members.filter((m) => all.some((x) => x.name === m && copiesFiles(x) && !x.switch_over));
+      if (waiting.length) return { word: `Waits for ${count(waiting.length, "member", "members")}`, tone: "info", title: `Switches over with ${someNames(waiting)}` };
+      return { word: "Switched over", tone: "success", title: `${r.target} reads its members on this server.` };
+    }
+    // A proxy has nothing to copy: it serves from this server already.
+    if (r.target) return { word: "Switched over", tone: "success", title: `${r.target} serves from this server.` };
     if (!r.supported || !picked.has(r.name)) return null;
     const what = isGroup(r) ? "group" : r.type === "proxy" ? "proxy" : "repository";
     return { word: `New ${what}`, tone: "info", title: `Saving creates this ${what} here.` };

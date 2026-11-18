@@ -1,6 +1,6 @@
 <!--
-  Backups (Manage backups permission): the backups in the backup folder, newest first (cards, or a
-  list when there are more than 12), with Back up now; then the folder, the interval and how many to keep (the settings group "backup"), with a
+  Backups (Manage backups permission): the newest backup in the backup folder as a card, and
+  "N earlier backups" that opens the list of the others, with Back up now; then the folder, the interval and how many to keep (the settings group "backup"), with a
   test that the server can write to the folder. While a backup runs, the list header shows its
   progress and the page asks for it every two seconds (a Live, with its LiveStatus in that header).
 -->
@@ -28,6 +28,7 @@
   import ConnectionTest, { type TestResult } from "$lib/components/ConnectionTest.svelte";
   import SettingsGroupForm from "$lib/components/SettingsGroupForm.svelte";
   import ArchiveIcon from "@lucide/svelte/icons/archive";
+  import ChevronDownIcon from "@lucide/svelte/icons/chevron-down";
 
   let {}: PageProps = $props();
 
@@ -50,6 +51,29 @@
     },
     reload: overview.reload,
   };
+  // The newest backup shows on its own; "N earlier backups" opens the list of the others, as the
+  // earlier builds of a snapshot do.
+  const latestSource: TableSource<Backup> = {
+    get items() {
+      return source.items.slice(0, 1);
+    },
+    get loading() {
+      return source.loading;
+    },
+    get error() {
+      return source.error;
+    },
+    reload: overview.reload,
+  };
+  const earlierSource: TableSource<Backup> = {
+    get items() {
+      return source.items.slice(1);
+    },
+    loading: false,
+    error: "",
+    reload: overview.reload,
+  };
+  let earlierOpen = $state(false);
 
   // While a backup runs, ask for its progress every two seconds; say how it ended.
   const live = new Live({
@@ -121,8 +145,8 @@
 </PageHeader>
 
 <Section
-  plain={!!dir && source.items.length <= 12}
-  title="Kept backups"
+  plain={!!dir}
+  title="Latest backup"
   description="A backup holds the database and the master key, and with a folder store the stored files."
 >
   {#snippet actions()}
@@ -151,25 +175,33 @@
     {#snippet none()}
       <CompactEmpty icon={ArchiveIcon} text="None yet. The first backup runs within a minute, or now with Back up now." />
     {/snippet}
-    <!-- A handful of backups are cards; the number kept can be large, and many are a list. -->
-    {#if source.items.length > 12}
-      <ItemList {source} caption="Backups" key={(b) => b.name} empty={none}>
-        {#snippet leading()}<ArchiveIcon class="size-5" />{/snippet}
-        {#snippet title(b)}<span title={b.name}>{formatDateTime(b.created_at)}</span>{/snippet}
-        {#snippet badges(b)}{@render marks(b)}{/snippet}
-        {#snippet meta(b)}<span class="tabular-nums">{b.complete ? `${holds(b)} · ` : ""}version {b.version}</span>{/snippet}
-      </ItemList>
-    {:else}
-      <SourceGrid {source} label="Backups" key={(b) => b.name} empty={none}>
-        {#snippet card(b)}
-          <ItemCard title={formatDateTime(b.created_at)}>
-            {#snippet icon()}<ArchiveIcon class="size-5" />{/snippet}
-            {#snippet badges()}{@render marks(b)}{/snippet}
-            {#if b.complete}<p class="tabular-nums">{holds(b)}</p>{/if}
-            <p>Version {b.version}</p>
-          </ItemCard>
-        {/snippet}
-      </SourceGrid>
+    <SourceGrid source={latestSource} label="Latest backup" key={(b) => b.name} empty={none}>
+      {#snippet card(b)}
+        <ItemCard title={formatDateTime(b.created_at)}>
+          {#snippet icon()}<ArchiveIcon class="size-5" />{/snippet}
+          {#snippet badges()}{@render marks(b)}{/snippet}
+          {#if b.complete}<p class="tabular-nums">{holds(b)}</p>{/if}
+          <p>Version {b.version}</p>
+        </ItemCard>
+      {/snippet}
+    </SourceGrid>
+    {#if earlierSource.items.length}
+      <div class="mt-4">
+        <Button variant="ghost" size="sm" aria-expanded={earlierOpen} onclick={() => (earlierOpen = !earlierOpen)}>
+          {formatCount(earlierSource.items.length)} earlier {earlierSource.items.length === 1 ? "backup" : "backups"}
+          <ChevronDownIcon class="transition-transform {earlierOpen ? 'rotate-180' : ''}" />
+        </Button>
+      </div>
+      {#if earlierOpen}
+        <div class="mt-2">
+          <ItemList source={earlierSource} caption="Earlier backups" key={(b) => b.name}>
+            {#snippet leading()}<ArchiveIcon class="size-5" />{/snippet}
+            {#snippet title(b)}<span title={b.name}>{formatDateTime(b.created_at)}</span>{/snippet}
+            {#snippet badges(b)}{@render marks(b)}{/snippet}
+            {#snippet meta(b)}<span class="tabular-nums">{b.complete ? `${holds(b)} · ` : ""}version {b.version}</span>{/snippet}
+          </ItemList>
+        </div>
+      {/if}
     {/if}
     {#if overview.data?.error}
       <p class="mt-4 text-meta text-destructive text-pretty">{overview.data.error}</p>

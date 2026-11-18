@@ -29,6 +29,7 @@
   import GroupMembers from "./GroupMembers.svelte";
   import RemoteCard from "./RemoteCard.svelte";
   import RedirectsCard from "./RedirectsCard.svelte";
+  import DomainsCard from "./DomainsCard.svelte";
   import Stat from "../overview/Stat.svelte";
   import { Input } from "$lib/components/ui/input";
   import { auth } from "$lib/auth.svelte";
@@ -174,6 +175,7 @@
 {/if}
 
 <RedirectsCard {repo} />
+<DomainsCard {repo} />
 
 <SaveBar count={draft.count} onDiscard={draft.reset} onSave={save} />
 
