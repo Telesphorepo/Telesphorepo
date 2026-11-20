@@ -1066,7 +1066,8 @@ also reads that repo.
 **Trust policies and the CI exchange.**
 - A policy needs at least one claim, and each claim at least one allowed value. A value is exact
   or a `*` glob; `*` matches any text, `/` included. Every listed claim must match.
-- `audience` `""` means the current `base_url`, resolved at exchange time. When both are empty,
+- `audience` `""` means the current `base_url`, resolved at exchange time. A token's audience
+  matches with or without a trailing slash. When both are empty,
   the exchange refuses the token and says to set the public address or an audience. Every refusal
   of a policy match names Settings › CI pipelines as the place that fixes it. A pasted `jwks` is
   checked when the policy is saved and replaces key discovery (for a Jenkins the server cannot

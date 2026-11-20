@@ -626,7 +626,9 @@ func (s *Service) matchTrust(ctx context.Context, t trustKeys, raw string, fresh
 	if aud == "" {
 		return nil, noBaseURL
 	}
-	if !slices.Contains(tok.Audience, aud) {
+	// A CI credential may name the server URL with a trailing slash; both forms name the same server.
+	aud = strings.TrimSuffix(aud, "/")
+	if !slices.ContainsFunc(tok.Audience, func(a string) bool { return strings.TrimSuffix(a, "/") == aud }) {
 		return nil, "the token's audience is not " + aud
 	}
 	if fresh {
