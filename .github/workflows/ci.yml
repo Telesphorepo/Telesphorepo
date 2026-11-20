@@ -80,8 +80,8 @@ jobs:
           if echo "$changed" | grep -qvE '^web/src/|\.md$'; then e2e=true; else e2e=false; fi
           echo "e2e=$e2e" >> "$GITHUB_OUTPUT"
 
-  # The e2e zones run on pull requests: a change reaches main through a pull request whose zones
-  # passed, so a push to main only builds and publishes the image.
+  # The e2e zones run on pull requests. Run the affected zones locally before pushing.
+  # A push to main builds and publishes the image.
   # The core zone runs on four machines at once, each with a quarter of its tests
   # (go tool task test --shard).
   e2e-core:

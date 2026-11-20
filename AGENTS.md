@@ -22,11 +22,10 @@ Linux. Use bun, not npm.
 
 ## Workflow
 
-- Every change reaches `main` through a pull request. CI runs the build and the e2e zones on the
-  pull request; a push to `main` publishes the `main` image, which production runs.
-- **Tests run locally; CI runs once.** CI runs on Blacksmith, which bills every run, so a pull
-  request's CI is the last check of a finished branch, not a place to find bugs. The e2e tests run
-  here on Podman or Docker (`go tool task doctor` shows which it found).
+- Push directly to `main` or use a pull request. A push to `main` runs the build and publishes
+  the `main` image that production runs. Pull requests also run the e2e zones for code changes.
+- **Test locally before you push.** CI runs on Blacksmith and bills every run. Run the e2e zones
+  on Podman or Docker. Use `go tool task doctor` to see which engine is available.
 - **Batch the work, then test it once.** Finish a change, commit it, then run the tests it touches
   in one run (`go tool task test core clients -run 'TestX|TestY'` names every zone it needs). A
   failure: fix it, commit, and run the failed tests once more. `go tool task test` holds this:
@@ -57,9 +56,8 @@ Linux. Use bun, not npm.
   the UI, clients for the CLI, import for the Nexus import, and the scale zone
   (`go tool task test scale`) for a hot query, an index or a request path. `e2e-extended.yml` is
   for the person to start on GitHub, not an agent.
-- **Push a pull request once, when it is done.** Every push to an open pull request runs its whole
-  CI again: batch the fixes into one push. When CI fails anyway, read its log, reproduce the
-  failure here, and push the fix only after it passes here.
+- **Batch fixes before you push.** Each push to an open pull request starts CI again. If CI
+  fails, read its log and reproduce the failure here. Push the fix after the local check passes.
 - Keep SPEC.md current in the same change (see **SPEC.md** below).
 - For architectural work, write a short design in `docs/superpowers/specs/` and get it approved
   first; delete it when done and keep what stays true in SPEC.md.
