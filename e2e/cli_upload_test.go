@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -19,7 +20,7 @@ func cliBigUpload(t testing.TB) int64 {
 
 // TestCLIUpload: publish FILE uploads files into the folder "path" of a raw repo (a large file
 // through the resumable upload routes, in more than one chunk; --into, --if-new and --if-match,
-// whose false precondition exits 3) and .deb packages to the
+// whose false precondition exits 3; --tree, whose files keep their paths) and .deb packages to the
 // distribution and component of a Debian repo, .pkg.tar.* packages to an Arch repo and .rpm
 // packages to an RPM repo (a large package of each through the resumable upload routes as well),
 // which apt, pacman and dnf then install.
@@ -72,6 +73,12 @@ echo "stale if-match: exit $?"
 telesphorepo publish --if-match "$first" latest.json small.txt
 echo "if-match with two files: exit $?"
 set -e
+echo '=== tree publish ==='
+mkdir -p out/Plex/versions/2.0.1/builds out/Plex/channels/dev/latest/minecraft
+printf '{"build":617}\n' > out/Plex/versions/2.0.1/builds/617.json
+printf '{"latest":617}\n' > out/Plex/channels/dev/latest.json
+printf '{"minecraft":"26.2"}\n' > out/Plex/channels/dev/latest/minecraft/26.2.json
+telesphorepo publish --tree out --into api/v1
 mkdir -p /work/deb
 cd /work/deb
 echo '=== deb setup ==='
@@ -150,6 +157,23 @@ telesphorepo publish /work/pkgs/e2e-bigrpm-1.0-1.noarch.rpm
 			"--if-match names the file on the server that one FILE replaces", "if-match with two files: exit 1")
 		if b := getFollowS3(t, s, opts.S3, "/raw/"+raw+"/v1/latest.json"); string(b) != "{\"build\":2}\n" {
 			t.Fatalf("GET v1/latest.json: %q, want the second build", b)
+		}
+
+		// --tree publishes each file of the folder at its path inside it, under --into, with one
+		// session.
+		tree := section(out, "tree publish")
+		if n := strings.Count(tree, "Publishing to"); n != 1 {
+			t.Fatalf("tree publish: %d sessions, want 1:\n%s", n, tree)
+		}
+		for rel, body := range map[string]string{
+			"Plex/versions/2.0.1/builds/617.json":          "{\"build\":617}\n",
+			"Plex/channels/dev/latest.json":                "{\"latest\":617}\n",
+			"Plex/channels/dev/latest/minecraft/26.2.json": "{\"minecraft\":\"26.2\"}\n",
+		} {
+			wantText(t, "tree publish", tree, "Uploaded out/"+rel+" to "+s.InternalURL+"/raw/"+raw+"/api/v1/"+rel)
+			if b := getFollowS3(t, s, opts.S3, "/raw/"+raw+"/api/v1/"+rel); string(b) != body {
+				t.Fatalf("GET api/v1/%s: %q, want %q", rel, b, body)
+			}
 		}
 
 		// Setup names the distribution and the component that it wrote into the project file.

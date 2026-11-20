@@ -4,9 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -128,10 +131,11 @@ type putFlags struct {
 	ifMatch string  // --if-match: "*" or the SHA-256 in lower-case hex; "": none
 	ifNew   bool    // --if-new
 	into    *string // --into: the folder of this run in place of the project's path
+	tree    string  // --tree: the folder whose files publish at their paths inside it; "": none
 }
 
 // set reports whether a flag is given.
-func (pf putFlags) set() bool { return pf.ifMatch != "" || pf.ifNew || pf.into != nil }
+func (pf putFlags) set() bool { return pf.ifMatch != "" || pf.ifNew || pf.into != nil || pf.tree != "" }
 
 // conditional reports whether the flags send a precondition.
 func (pf putFlags) conditional() bool { return pf.ifMatch != "" || pf.ifNew }
@@ -149,8 +153,8 @@ func (pf putFlags) header() map[string]string {
 	return nil
 }
 
-// parsePutFlags reads --if-match ETAG, --if-new and --into FOLDER of the publish arguments and
-// returns them with the FILE arguments.
+// parsePutFlags reads --if-match ETAG, --if-new, --into FOLDER and --tree DIR of the publish
+// arguments and returns them with the FILE arguments.
 func parsePutFlags(args []string) (putFlags, []string, error) {
 	var pf putFlags
 	var files []string
@@ -181,6 +185,13 @@ func parsePutFlags(args []string) (putFlags, []string, error) {
 			pf.into = &v
 			continue
 		}
+		if v, ok := value(&i, "--tree"); ok {
+			if v == "" {
+				return pf, nil, usage("publish")
+			}
+			pf.tree = v
+			continue
+		}
 		switch {
 		case a == "--if-new":
 			pf.ifNew = true
@@ -192,6 +203,12 @@ func parsePutFlags(args []string) (putFlags, []string, error) {
 	}
 	if pf.ifMatch != "" && pf.ifNew {
 		return pf, nil, errors.New("give --if-match or --if-new, not both")
+	}
+	if pf.tree != "" && len(files) > 0 {
+		return pf, nil, errors.New("give FILE arguments or --tree DIR, not both")
+	}
+	if pf.tree != "" && pf.conditional() {
+		return pf, nil, errors.New("--if-match and --if-new take FILE arguments, not --tree DIR")
 	}
 	if pf.ifMatch != "" && len(files) != 1 {
 		return pf, nil, errors.New("--if-match names the file on the server that one FILE replaces: give one FILE")
@@ -227,8 +244,17 @@ func changed(dest string, err error) error {
 
 // uploadRaw uploads each FILE into the folder path of the project file of a raw repo (--into
 // FOLDER in its place): a PUT of the file, or the resumable upload routes for a large file. The
-// precondition of --if-match or --if-new goes on the PUT and on the finish of an upload.
+// precondition of --if-match or --if-new goes on the PUT and on the finish of an upload. With
+// --tree, the files of the tree go up together (uploadTree).
 func uploadRaw(j *job) error {
+	folder := j.p.Path
+	if j.put.into != nil {
+		folder = *j.put.into
+	}
+	folder = strings.Trim(strings.ReplaceAll(folder, `\`, "/"), "/")
+	if j.put.tree != "" {
+		return uploadTree(j, folder)
+	}
 	if err := openFiles(j.files); err != nil {
 		return err
 	}
@@ -237,11 +263,6 @@ func uploadRaw(j *job) error {
 			return err
 		}
 	}
-	folder := j.p.Path
-	if j.put.into != nil {
-		folder = *j.put.into
-	}
-	folder = strings.Trim(strings.ReplaceAll(folder, `\`, "/"), "/")
 	// The files upload at the same time, so two of them may not go to one path.
 	from := map[string]string{}
 	for _, f := range j.files {
@@ -272,6 +293,145 @@ func uploadRaw(j *job) error {
 		}
 		return fmt.Sprintf("Uploaded %s to %s/raw/%s/%s", f, j.c.id.base(), j.p.Repo, dest), nil
 	})
+}
+
+// treeFiles lists the files under dir at any depth, for --tree. publish reads the tree before it
+// mints a session, so a wrong folder costs no session (and no identity token of a CI job).
+func treeFiles(dir string) ([]string, error) {
+	st, err := os.Stat(dir)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read %s: %w", dir, unwrapPath(err))
+	}
+	if !st.IsDir() {
+		return nil, fmt.Errorf("%s is not a folder; --tree takes a folder", dir)
+	}
+	var files []string
+	err = filepath.WalkDir(dir, func(f string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		// A link to a file publishes the file it names.
+		if st, err := os.Stat(f); err != nil {
+			return fmt.Errorf("cannot read %s: %w", f, unwrapPath(err))
+		} else if !st.Mode().IsRegular() {
+			return fmt.Errorf("%s is not a file", f)
+		}
+		files = append(files, f)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("%s has no files", dir)
+	}
+	return files, nil
+}
+
+// treeUpload is a file of the tree that went through the resumable upload routes, for the part
+// "uploads" of the upload.
+type treeUpload struct {
+	Path string `json:"path"`
+	ID   string `json:"id"`
+	Size int64  `json:"size"`
+}
+
+// uploadTree publishes the files of --tree (j.files) in one upload of the repo (POST
+// /api/repos/{name}/upload): each file at its path inside the tree, under folder. The server
+// stores them in one commit under the overwrite policy of each path: all of them, or none. A file
+// of resumableFrom bytes or more goes through the resumable upload routes first, and the part
+// "uploads" names it; the other files stream in the request.
+func uploadTree(j *job, folder string) error {
+	rels := make([]string, len(j.files))
+	var big []treeUpload
+	var small []int // indexes of j.files
+	committed := false
+	defer func() {
+		if !committed {
+			for _, u := range big {
+				j.dropUpload(u.ID)
+			}
+		}
+	}()
+	for i, f := range j.files {
+		r, err := filepath.Rel(j.put.tree, f)
+		if err != nil {
+			return err
+		}
+		rels[i] = filepath.ToSlash(r)
+		st, err := os.Stat(f)
+		if err != nil {
+			return err
+		}
+		if st.Size() < resumableFrom {
+			small = append(small, i)
+			continue
+		}
+		err = j.resumable(f, st.Size(), func(id string, _ url.Values) error {
+			big = append(big, treeUpload{Path: rels[i], ID: id, Size: st.Size()})
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	pr, pw := io.Pipe()
+	mw := multipart.NewWriter(pw)
+	wrote := make(chan struct{})
+	go func() {
+		defer close(wrote)
+		pw.CloseWithError(func() error {
+			if err := mw.WriteField("folder", folder); err != nil {
+				return err
+			}
+			if len(big) > 0 {
+				b, err := json.Marshal(big)
+				if err != nil {
+					return err
+				}
+				if err := mw.WriteField("uploads", string(b)); err != nil {
+					return err
+				}
+			}
+			for _, i := range small {
+				if err := copyPart(mw, rels[i], j.files[i]); err != nil {
+					return err
+				}
+			}
+			return mw.Close()
+		}())
+	}()
+	p := "/api/repos/" + url.PathEscape(j.p.Repo) + "/upload"
+	note("POST %s%s", j.c.id.base(), p)
+	_, err := j.c.call(j.ctx, request{method: http.MethodPost, path: p, body: pr, size: -1,
+		ctype: mw.FormDataContentType(), token: j.s.Token, timeout: -1})
+	// An answer before the end of the body stops the writer.
+	pr.Close()
+	<-wrote
+	if err != nil {
+		return err
+	}
+	committed = true
+	for i, f := range j.files {
+		done("Uploaded %s to %s/raw/%s/%s", f, j.c.id.base(), j.p.Repo, path.Join(folder, rels[i]))
+	}
+	return nil
+}
+
+// copyPart writes the file f as the file part of mw named rel.
+func copyPart(mw *multipart.Writer, rel, f string) error {
+	in, err := os.Open(f)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	w, err := mw.CreateFormFile("file", rel)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(w, in)
+	return err
 }
 
 // uploadDebian uploads each FILE (a .deb) to the distribution and the component of the project
@@ -392,10 +552,7 @@ func (j *job) resumable(f string, size int64, finish func(id string, q url.Value
 	done := false
 	defer func() {
 		if !done {
-			// Also after Ctrl-C: the upload and its bytes go at once.
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			_, _ = j.c.call(ctx, request{method: http.MethodDelete, path: at, token: j.s.Token})
+			j.dropUpload(up.ID)
 		}
 	}()
 	var offset int64
@@ -430,6 +587,13 @@ func (j *job) resumable(f string, size int64, finish func(id string, q url.Value
 	}
 	done = true
 	return nil
+}
+
+// dropUpload deletes the resumable upload id of the repo and its bytes, also after Ctrl-C.
+func (j *job) dropUpload(id string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, _ = j.c.call(ctx, request{method: http.MethodDelete, path: "/api/repos/" + url.PathEscape(j.p.Repo) + "/uploads/" + url.PathEscape(id), token: j.s.Token})
 }
 
 // fileSum is the SHA-256 of the file f in lower-case hex.

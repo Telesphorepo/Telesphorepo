@@ -9,10 +9,10 @@ import (
 	"time"
 )
 
-// publish publishes the project of the current folder, or the FILE arguments to a raw, Debian, Arch or RPM
-// repo: it finds telesphorepo.toml, picks the repo by the version when the file has [[when]]
-// rules (for FILE arguments by the version of each file), and publishes to each repo with a
-// session of its own.
+// publish publishes the project of the current folder, the FILE arguments to a raw, Debian, Arch
+// or RPM repo, or the files of --tree DIR to a raw repo: it finds telesphorepo.toml, picks the
+// repo by the version when the file has [[when]] rules (for FILE arguments by the version of each
+// file), and publishes to each repo with a session of its own.
 func publish(ctx context.Context, args []string) error {
 	version, args, err := versionFlag(args)
 	if err != nil {
@@ -21,6 +21,12 @@ func publish(ctx context.Context, args []string) error {
 	put, files, err := parsePutFlags(args)
 	if err != nil {
 		return err
+	}
+	var tree []string
+	if put.tree != "" {
+		if tree, err = treeFiles(put.tree); err != nil {
+			return err
+		}
 	}
 	p, err := findProject(".")
 	if err != nil {
@@ -39,6 +45,11 @@ func publish(ctx context.Context, args []string) error {
 		return err
 	}
 	for _, t := range targets {
+		if tree != nil {
+			// The files of the tree hold no version: the rules pick one repo by --version or the
+			// project, and all of them go there.
+			t.files = tree
+		}
 		if err := publishTo(ctx, c, cp, t.p, t.files, put); err != nil {
 			return err
 		}
@@ -88,6 +99,9 @@ func publishTo(ctx context.Context, c *client, cp *compat, p *project, files []s
 	if err := cp.check(ctx, "publish/"+s.Format); err != nil {
 		return err
 	}
+	if put.set() && s.Format != "raw" {
+		return fmt.Errorf("--if-match, --if-new, --into and --tree are for raw repositories; %s is a %s repository", s.Repo, s.Format)
+	}
 
 	r, ok, err := pickRow(s.Format, p.Kind, p.dir)
 	if len(files) > 0 {
@@ -118,10 +132,6 @@ func publishTo(ctx context.Context, c *client, cp *compat, p *project, files []s
 	if !r.takesFiles() && !r.files && len(files) > 0 {
 		return fmt.Errorf("telesphorepo publish runs the %s build of %s and takes no FILE arguments; they are for raw, Debian, Arch, RPM, NuGet and PyPI repositories", r.title, p.dir)
 	}
-	if put.set() && s.Format != "raw" {
-		return fmt.Errorf("--if-match, --if-new and --into are for raw repositories; %s is a %s repository", s.Repo, s.Format)
-	}
-
 	tmp, err := os.MkdirTemp("", "telesphorepo-")
 	if err != nil {
 		return err

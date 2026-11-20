@@ -1212,8 +1212,8 @@ repo = "snapshots"
 ```
 
 Only a project file with rules makes `publish` read a version: `--version`, else the metadata of
-each FILE (FILEs that pick different repos publish one repo after the other), else the project's
-build tool or manifest (`cmd/telesphorepo/rules.go`). The CLI prints the decision for each version
+each FILE (FILEs that pick different repos publish one repo after the other; the files of `--tree`
+hold none), else the project's build tool or manifest (`cmd/telesphorepo/rules.go`). The CLI prints the decision for each version
 before it talks to the server; with no version it mints no session and stops.
 
 **Detection.** `publish` looks for the markers of the repo's format in the folder of the project
@@ -1222,7 +1222,12 @@ how the token reaches it); a new format adds a row. Build formats run their own 
 wrapper in the project over the `PATH`; raw, Arch, RPM and Debian have no marker, and the CLI
 uploads the FILEs itself. A file of 64 MiB or more goes through the resumable upload routes, and a
 failed chunk is sent again from the server's `received`. Raw `--if-new` and `--if-match` send
-`If-None-Match: *` or `If-Match`. The CLI prints each command before it runs it, without the token.
+`If-None-Match: *` or `If-Match`. Raw `--tree DIR` reads the tree before the mint and sends it as
+one multipart upload (`POST /api/repos/{name}/upload`, the folder in the field `folder`, large
+files through resumable uploads named in its part `uploads`), so a CI job whose identity token
+mints once writes several folders, all in one commit or none; that route takes no precondition,
+so `--tree` refuses `--if-new` and `--if-match`. The CLI prints each command before it runs it,
+without the token.
 The token goes only into the child's env; the config files in the temp folder (`0700`, an
 owner-only ACL on Windows, removed at exit) hold `${env}` references. A build step that only packs
 gets no token. The child env has no `OIDC_TOKEN`, so a build step cannot mint for other repos with

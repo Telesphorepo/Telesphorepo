@@ -76,7 +76,7 @@ its repository, and runs the publish command of the project with the token in th
   Cargo    cargo publish, with the index of the repository and the token in the env
   npm      npm publish, or pnpm publish, yarn npm publish or bun publish by the lockfile, with the
            repository as the registry
-  raw      uploads each FILE into the folder "path" of telesphorepo.toml
+  raw      uploads each FILE into the folder "path" of telesphorepo.toml, or the files of --tree DIR
   Debian   uploads each .deb to "dist" and "component" of telesphorepo.toml
   Arch     uploads each .pkg.tar.zst; the server reads its name, version and architecture
   RPM      uploads each .rpm; the server reads its name, version and architecture, and signs it
@@ -85,24 +85,29 @@ its repository, and runs the publish command of the project with the token in th
            each wheel and sdist
 A Docker repository publishes with docker push and the credential helper.
 
-A raw publish takes three flags:
+A raw publish takes four flags:
   telesphorepo publish --into builds/42 app.jar                 (this folder in place of "path")
   telesphorepo publish --if-new --into builds/42 app.jar        (only when the path holds no file)
   telesphorepo publish --if-match 3f2a...c9 --into v1 latest.json (only over the file of this ETag)
+  telesphorepo publish --tree out                               (each file of out at its path in it)
 --if-match takes the ETag of a GET of the file (its SHA-256, with or without quotes or W/), or * for
 any file, and one FILE. When the server holds another file than the flag says, the CLI stores
 nothing, names the ETag of the file now and exits with code 3: read the file again and publish
 again.
+--tree DIR publishes every file under DIR, in subfolders too, at its path inside DIR under "path"
+(or --into): out/api/v1/latest.json goes to <path>/api/v1/latest.json. It needs one publish
+session, and the server stores the files in one commit: all of them, or none when it refuses one,
+such as a file the repository may not overwrite. It takes no FILE, --if-new or --if-match.
 
 Rules in telesphorepo.toml pick the repository by version. The first rule whose version glob
 matches (* is any run of characters) overrides repo, path, dist or component:
   [[when]]
   version = "*-SNAPSHOT"
   repo = "snapshots"
-The version is --version VERSION, else that of each FILE (.deb, .rpm, .pkg.tar.*, .nupkg, .whl),
-else that of the project: Gradle and Maven ask the build; npm, Cargo, Python, Helm and .NET read
-package.json, Cargo.toml, pyproject.toml, Chart.yaml and <Version> of the project file. FILEs of
-several repositories publish with a session for each.
+The version is --version VERSION, else that of each FILE (.deb, .rpm, .pkg.tar.*, .nupkg, .whl;
+not the files of --tree), else that of the project: Gradle and Maven ask the build; npm, Cargo,
+Python, Helm and .NET read package.json, Cargo.toml, pyproject.toml, Chart.yaml and <Version> of
+the project file. FILEs of several repositories publish with a session for each.
 
 In CI the CLI mints the session with the identity token of the job: GitHub Actions (the job
 needs permissions: id-token: write) or OIDC_TOKEN (Jenkins). On a computer without a device of
