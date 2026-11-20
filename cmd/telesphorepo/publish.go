@@ -76,7 +76,11 @@ func publishTo(ctx context.Context, c *client, cp *compat, p *project, files []s
 	}
 	defer func() {
 		if err := c.closeSession(s); err != nil {
-			warn("Cannot close publish session %d (%v); it ends at %s.", s.ID, err, s.ExpiresAt.Local().Format(time.TimeOnly))
+			if s.RenewalKey == "" {
+				warn("Cannot close publish session %d (%v); it ends at %s.", s.ID, err, s.ExpiresAt.Local().Format(time.TimeOnly))
+			} else if !refused(err) {
+				warn("Cannot close publish session %d (%v). It expires without another renewal.", s.ID, err)
+			}
 		}
 	}()
 	mask(os.Stdout, s.Token)
@@ -126,10 +130,23 @@ func publishTo(ctx context.Context, c *client, cp *compat, p *project, files []s
 	if err := restrictDir(tmp); err != nil {
 		return err
 	}
+	if s.RenewalKey != "" {
+		// Renewal requests do not run the compatibility hook concurrently with the publish.
+		renewals := newClient(c.id)
+		var stop func()
+		ctx, stop, err = renewals.keepSession(ctx, s)
+		if err != nil {
+			return err
+		}
+		defer stop()
+	}
 	j := &job{ctx: ctx, c: c, cp: cp, p: p, s: s, tmp: tmp, files: files, put: put}
 	err = r.run(j)
+	if cause := context.Cause(ctx); err != nil && s.RenewalKey != "" && cause != nil && !errors.Is(cause, context.Canceled) {
+		return cause
+	}
 	var ee *exitError
-	if errors.As(err, &ee) && time.Now().After(s.ExpiresAt) {
+	if s.RenewalKey == "" && errors.As(err, &ee) && time.Now().After(s.ExpiresAt) {
 		warn("Publish session %d ended at %s (the server setting publish.session_ttl), before %s did. Uploads after that time fail.",
 			s.ID, s.ExpiresAt.Local().Format(time.TimeOnly), ee.name)
 	}
@@ -176,7 +193,7 @@ func mint(ctx context.Context, c *client, repo, dir string) (*session, error) {
 		nonce, _, err := c.challenge(ctx, d, false, "")
 		switch {
 		case err == nil:
-			return c.mintNonce(ctx, d, nonce, repo)
+			return c.mintNonce(ctx, d, nonce, repo, true)
 		case !refused(err):
 			return nil, err
 		}
@@ -186,7 +203,7 @@ func mint(ctx context.Context, c *client, repo, dir string) (*session, error) {
 	if d, err = loginDevice(ctx, c, deviceName()); err != nil {
 		return nil, err
 	}
-	return c.mintDevice(ctx, d, repo)
+	return c.mintDevice(ctx, d, repo, true)
 }
 
 // helperStop is the end of "publish" for a repo of the helper category: the native command

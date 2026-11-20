@@ -41,12 +41,6 @@ func wantAPIStatus(t *testing.T, what string, st int, b []byte, want ...int) {
 	}
 }
 
-// setSetting PATCHes one setting as the admin; nil resets it to its default.
-func setSetting(t *testing.T, s *Server, key string, value any) {
-	t.Helper()
-	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{key: value}, s.Admin(), nil)
-}
-
 func TestPublishGate(t *testing.T) {
 	t.Parallel()
 	s := StartServer(t, ServerOpts{})
@@ -147,7 +141,14 @@ func TestPublishGate(t *testing.T) {
 
 	t.Run("revoked device", func(t *testing.T) {
 		d := s.EnrollDevice(t, w)
-		ps := mustSession(t, "mint")(s.Mint(t, d, repo))
+		nonce := s.Challenge(t, d.ID)
+		ps := mustSession(t, "mint a renewable session")(s.API(t, http.MethodPost,
+			"/api/publish/sessions?renewable=1", map[string]any{
+				"device_id": d.ID, "repo": repo, "nonce": nonce, "signature": d.Sign(nonce, repo),
+			}, nil))
+		renew := "/api/publish/sessions/" + ps.ID + "/renew"
+		proof := map[string]string{"renewal_key": ps.RenewalKey}
+		s.MustAPI(t, http.MethodPost, renew, proof, ps.Auth(), nil)
 		resp, body := pubPut(t, s, repo, ps.Auth())
 		wantStatus(t, resp, body, http.StatusCreated)
 
@@ -173,6 +174,8 @@ func TestPublishGate(t *testing.T) {
 		// Revoking ends the device's open sessions at once.
 		resp, body = pubPut(t, s, repo, ps.Auth())
 		wantPublishRequired(t, resp, body)
+		st, b = s.API(t, http.MethodPost, renew, proof, ps.Auth())
+		wantAPIStatus(t, "renew after device revocation", st, b, http.StatusUnauthorized)
 		st, b = s.API(t, http.MethodPost, "/api/publish/challenge", map[string]any{"device_id": d.ID}, nil)
 		wantAPIStatus(t, "challenge for a revoked device", st, b, http.StatusUnauthorized)
 

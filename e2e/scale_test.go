@@ -67,9 +67,16 @@ type scaleServer struct {
 	name   string // "100k", "1M" or "A/A" (the copy of the 100k data)
 	srv    *nativeServer
 	client *http.Client
-	token  string
+	auth   scaleCredentials
 	cursor string // the asset-page walk
 	tree   string // the tree-page walk
+}
+
+type scaleCredentials struct {
+	readToken    string
+	publishToken string
+	renewPath    string
+	renewBody    string
 }
 
 // walkNext is the next of a walk of keyset pages whose cursor at is: the next page after each
@@ -93,11 +100,12 @@ func walkNext(at func(s *scaleServer) *string) func(s *scaleServer, body []byte)
 // scaleOp is one request path. path gives the path and query of the next request to s; next,
 // when set, reads the answer of a measured request (the cursor of the next page).
 type scaleOp struct {
-	name string
-	path func(s *scaleServer) string
-	hdr  map[string]string
-	ok   []int
-	next func(s *scaleServer, body []byte) error
+	name    string
+	path    func(s *scaleServer) string
+	hdr     map[string]string
+	ok      []int
+	next    func(s *scaleServer, body []byte) error
+	request func(s *scaleServer) (*http.Request, error)
 }
 
 func TestScale(t *testing.T) {
@@ -108,12 +116,12 @@ func TestScale(t *testing.T) {
 
 	sizes := []int{100_000, 1_000_000}
 	dirs := []string{t.TempDir(), t.TempDir()}
-	tokens := make([]string, len(sizes))
+	credentials := make([]scaleCredentials, len(sizes))
 	t.Run("seed", func(t *testing.T) {
 		for i, n := range sizes {
 			t.Run(strconv.Itoa(n), func(t *testing.T) {
 				t.Parallel()
-				tokens[i] = scalePrepare(t, bin, dirs[i], n)
+				credentials[i] = scalePrepare(t, bin, dirs[i], n)
 			})
 		}
 	})
@@ -134,8 +142,11 @@ func TestScale(t *testing.T) {
 	}
 	start := func(cmd *exec.Cmd) error { return startPinned(cmd, serverCPUs) }
 	var servers []*scaleServer
-	for _, c := range []struct{ name, dir, token string }{{"100k", dirs[0], tokens[0]}, {"1M", dirs[1], tokens[1]}, {"A/A", aaDir, tokens[0]}} {
-		s := &scaleServer{name: c.name, srv: startNativeServer(t, bin, c.dir, env, start), token: c.token,
+	for _, c := range []struct {
+		name, dir string
+		auth      scaleCredentials
+	}{{"100k", dirs[0], credentials[0]}, {"1M", dirs[1], credentials[1]}, {"A/A", aaDir, credentials[0]}} {
+		s := &scaleServer{name: c.name, srv: startNativeServer(t, bin, c.dir, env, start), auth: c.auth,
 			client: &http.Client{Timeout: 2 * time.Minute, Transport: &http.Transport{MaxIdleConnsPerHost: 2 * scaleBurst}}}
 		if serverCPUs != nil {
 			got, err := affinityOf(s.srv.cmd.Process.Pid)
@@ -211,6 +222,15 @@ func TestScale(t *testing.T) {
 				return "/api/repos/" + mvn + "/tree?limit=100&path=" + url.QueryEscape(path.Dir(path.Dir(shared))+"/") + "&after=" + url.QueryEscape(s.tree)
 			},
 			next: walkNext(func(s *scaleServer) *string { return &s.tree })},
+		{name: "publish-renew", ok: []int{http.StatusOK}, request: func(s *scaleServer) (*http.Request, error) {
+			req, err := http.NewRequest(http.MethodPost, s.srv.base+s.auth.renewPath, strings.NewReader(s.auth.renewBody))
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.SetBasicAuth(scaleAdmin, s.auth.publishToken)
+			return req, nil
+		}},
 	}
 	for _, s := range servers {
 		for _, op := range ops[:2] { // maven-get and domain-get: 304 for the sample
@@ -432,12 +452,19 @@ func scaleMeasure(t *testing.T, s *scaleServer, op scaleOp) float64 {
 // scaleDo sends op to s and reads the answer in full. With next it also hands the answer to
 // op.next. It returns the time in nanoseconds and the body.
 func scaleDo(s *scaleServer, op scaleOp, next bool) (int64, []byte, error) {
-	p := op.path(s)
-	req, err := http.NewRequest(http.MethodGet, s.srv.base+p, nil)
+	var req *http.Request
+	var err error
+	if op.request != nil {
+		req, err = op.request(s)
+	} else {
+		req, err = http.NewRequest(http.MethodGet, s.srv.base+op.path(s), nil)
+		if err == nil {
+			req.SetBasicAuth(scaleAdmin, s.auth.readToken)
+		}
+	}
 	if err != nil {
 		return 0, nil, err
 	}
-	req.SetBasicAuth(scaleAdmin, s.token)
 	for k, v := range op.hdr {
 		if k == "Host" {
 			req.Host = v
@@ -457,11 +484,11 @@ func scaleDo(s *scaleServer, op scaleOp, next bool) (int64, []byte, error) {
 		return 0, nil, err
 	}
 	if !slices.Contains(op.ok, resp.StatusCode) {
-		return 0, nil, fmt.Errorf("GET %s: status %d: %.300s", p, resp.StatusCode, b)
+		return 0, nil, fmt.Errorf("%s %s: status %d: %.300s", req.Method, req.URL.RequestURI(), resp.StatusCode, b)
 	}
 	if next && op.next != nil {
 		if err := op.next(s, b); err != nil {
-			return 0, nil, fmt.Errorf("GET %s: %w", p, err)
+			return 0, nil, fmt.Errorf("%s %s: %w", req.Method, req.URL.RequestURI(), err)
 		}
 	}
 	return d, b, nil
@@ -546,19 +573,32 @@ func scaleSettled(t *testing.T, s *scaleServer) {
 	}
 }
 
-// scalePrepare makes the data folder dir of n seeded assets and returns a read token of the
-// admin. A first server creates the database, the admin and the token; after it stops, "seed n"
-// adds the rows.
-func scalePrepare(t *testing.T, bin, dir string, n int) string {
+// scalePrepare creates credentials before seeding n assets in dir.
+func scalePrepare(t *testing.T, bin, dir string, n int) scaleCredentials {
 	t.Helper()
 	s := startNativeServer(t, bin, dir, []string{"TR_BOOTSTRAP_ADMIN_USER=" + scaleAdmin, "TR_BOOTSTRAP_ADMIN_PASSWORD=" + scalePass}, nil)
-	jar := s.signIn(t, &totpUser{name: scaleAdmin, pass: scalePass})
+	u := &totpUser{name: scaleAdmin, pass: scalePass}
+	jar := s.signIn(t, u)
 	var tok struct {
 		Token string `json:"token"`
 	}
 	s.mustAPI(t, jar, "", http.MethodPost, "/api/tokens", map[string]any{"name": "scale"}, &tok)
 	if tok.Token == "" {
 		t.Fatal("POST /api/tokens: no token")
+	}
+	const repo = "scale-publish"
+	s.mustAPI(t, jar, "", http.MethodPost, "/api/repos", map[string]string{"name": repo, "format": "raw"}, nil)
+	// Allow time to seed the databases before the first renewal starts the short window.
+	s.mustAPI(t, jar, "", http.MethodPatch, "/api/settings", map[string]string{"publish.session_ttl": "1h"}, nil)
+	var publish struct {
+		ID         int64  `json:"id"`
+		Token      string `json:"token"`
+		RenewalKey string `json:"renewal_key"`
+	}
+	s.mustAPI(t, jar, "totp "+u.freshCode(t), http.MethodPost, "/api/publish/sessions/manual?renewable=1",
+		map[string]string{"repo": repo}, &publish)
+	if publish.ID == 0 || publish.Token == "" || publish.RenewalKey == "" {
+		t.Fatal("managed publish mint returned incomplete credentials")
 	}
 	s.stop()
 
@@ -569,7 +609,11 @@ func scalePrepare(t *testing.T, bin, dir string, n int) string {
 		t.Fatalf("seed %d: %v\n%s", n, err, out)
 	}
 	t.Logf("seed %d: %s", n, time.Since(began).Round(time.Second))
-	return tok.Token
+	return scaleCredentials{
+		readToken: tok.Token, publishToken: publish.Token,
+		renewPath: fmt.Sprintf("/api/publish/sessions/%d/renew", publish.ID),
+		renewBody: fmt.Sprintf(`{"renewal_key":%q}`, publish.RenewalKey),
+	}
 }
 
 // scaleServerBin returns the server binary of E2E_SERVER_BIN, or builds one for this computer.

@@ -40,7 +40,7 @@ export async function sendResumable(
   onSent: (sent: number) => void,
 ): Promise<FinishedUpload> {
   if (signal.aborted) throw aborted();
-  const { id } = await api.repos.startUpload(repo, token);
+  const { id } = await api.repos.startUpload(repo, token, signal);
   try {
     let offset = 0;
     let tries = 0;
@@ -67,7 +67,7 @@ export async function sendResumable(
     }
     return { path: f.path, id, size: f.file.size };
   } catch (e) {
-    void api.repos.cancelUpload(repo, id, token).catch(() => {});
+    await api.repos.cancelUpload(repo, id, token, AbortSignal.timeout(5_000)).catch(() => {});
     throw e;
   }
 }

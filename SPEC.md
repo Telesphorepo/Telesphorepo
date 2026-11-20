@@ -983,7 +983,7 @@ into a tool that takes a plain URL (a game panel that downloads a server jar). T
 ## Publishing
 
 Every write on a format route needs a **publish session**: a random credential that the server
-generates for one repo and that lives at most `publish.session_ttl`. A leaked password or read
+generates for one repo. A fixed session lives at most `publish.session_ttl`. A leaked password or read
 token cannot publish. The Nexus sync and the storage move write in-process and do not pass this
 gate. The server generates, stores (SHA-256), scopes, expires and revokes every session; a caller
 only proves who it is:
@@ -1009,7 +1009,8 @@ The routes are in `internal/publish/api.go`. Their policies:
   routes, also not for an admin user.
 - **UI session:** `DELETE /api/devices/{id}` revokes the caller's device (any device for a holder
   of `people.manage`) and ends its open sessions.
-- **The session's own token:** `DELETE /api/publish/sessions/{id}`.
+- **The session's own token:** `DELETE /api/publish/sessions/{id}` and
+  `POST /api/publish/sessions/{id}/renew`. Renewal also takes the separate renewal key.
 - **`activity.read`:** `GET /api/publish/log`.
 - **`ci.pipelines` on a repo:** the trust policies (`/api/publish/trusts`). A holder of
   `repositories.all` sees and changes every one. Anyone else sees and changes only the policies
@@ -1088,7 +1089,13 @@ also reads that repo.
 
 **Sessions.** An open session has `closed_at` empty and `expires_at` ahead; a device session also
 needs a usable device, an OIDC session an enabled policy. A bad, unknown, closed or expired token
-counts toward the rate limit and answers 401. A job in `internal/publish` runs every minute and
+counts toward the rate limit and answers 401. The CLI and browser opt into renewal at mint. The
+initial deadline lets the client prepare the publish. While it runs, renewal gives the session up
+to 90 seconds from each renewal, bounded by `publish.session_ttl`. The client keeps the separate
+renewal key in memory and passes only the publish token to upload requests and build tools. The
+server stores the key's hash and updates the existing deadline by session ID. An ended session
+cannot renew. The client closes the token when the publish ends. If it disappears, the latest
+deadline ends the session. A job in `internal/publish` runs every minute and
 deletes, in batches of 100, expired nonces, enrollments and seen CI tokens, and sessions that
 expired more than 30 days ago (the audit trail for the **Publish log**). Each run also reads one
 batch of the build records older than 30 days, with a cursor that persists between runs, and
@@ -1167,8 +1174,8 @@ The commands, each in its own file of `cmd/telesphorepo`, keep these rules:
   (read without a signature check) holds the canonical URL of the project file's server, because
   a project file of an unchecked branch could name another server. On a computer it mints with the
   device proof, running the device flow first when the server refuses the device. FILE uploads run
-  4 at a time and the first failure cancels the rest. It runs the format's row of **Detection** and
-  closes the session at exit, also on Ctrl-C; a child's exit code passes through.
+  4 at a time and the first failure cancels the rest. It renews the session while the format's row
+  of **Detection** runs and closes it at exit, also on Ctrl-C. A child's exit code passes through.
 - **`get URL...`** downloads through a temporary file that a rename puts in place, so a failed
   download leaves no file. A URL under the canonical URL of a server of this computer (the longest
   base path wins) reads as that server's active account, with the device proof over the repo `*`
@@ -2774,8 +2781,8 @@ the UI meets the server and the rules that need a reason.
     `telesphorepo-id-token` to `OIDC_TOKEN` only in the publish stage, because Jenkins makes the
     token when `withCredentials` starts and the server takes a token for 10 minutes only.
   - *Upload* (`upload?folder=`): the fresh second-factor check, then the server's upload plan,
-    then the upload. The publish session lives in memory only. Limits and the folder filter are as
-    in **Files, uploads and deletes**.
+    then the upload. The page keeps the publish session in memory, renews it during the upload
+    and closes it when the upload ends. Limits and the folder filter are as in **Files, uploads and deletes**.
   - `/#/setup/<code>` makes no API call, and the code stays in the fragment, so it never reaches
     the server.
   - `/#/install` (**Install the CLI**, anyone) lists the archives of `GET /cli/SHA256SUMS`; a build

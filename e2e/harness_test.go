@@ -660,6 +660,12 @@ func (s *Server) Do(t testing.TB, req *http.Request, auth Auth) (*http.Response,
 	return resp, b
 }
 
+// setSetting changes one setting as the admin. nil resets the setting to its default.
+func setSetting(t testing.TB, s *Server, key string, value any) {
+	t.Helper()
+	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{key: value}, s.Admin(), nil)
+}
+
 // API sends a request to path (e.g. "/api/me"). body: nil, []byte, string, io.Reader, or any JSON-marshalable value.
 func (s *Server) API(t testing.TB, method, path string, body any, auth Auth) (int, []byte) {
 	t.Helper()
@@ -1576,9 +1582,11 @@ func (s *Server) Mint(t testing.TB, d *Device, repo string) (int, []byte) {
 
 // PublishSession is a minted session as the API returns it.
 type PublishSession struct {
-	ID    string // the {id} of DELETE /api/publish/sessions/{id}
-	Token string
-	Repo  string
+	ID         string // the {id} of DELETE /api/publish/sessions/{id}
+	Token      string
+	Repo       string
+	ExpiresAt  time.Time
+	RenewalKey string
 }
 
 // Auth returns Basic credentials that carry the session token.
@@ -1588,9 +1596,11 @@ func (p PublishSession) Auth() Basic { return Basic{User: "publisher", Pass: p.T
 func ParseSession(t testing.TB, b []byte) PublishSession {
 	t.Helper()
 	var raw struct {
-		ID    json.RawMessage `json:"id"`
-		Token string          `json:"token"`
-		Repo  string          `json:"repo"`
+		ID         json.RawMessage `json:"id"`
+		Token      string          `json:"token"`
+		Repo       string          `json:"repo"`
+		ExpiresAt  time.Time       `json:"expires_at"`
+		RenewalKey string          `json:"renewal_key"`
 	}
 	if err := json.Unmarshal(b, &raw); err != nil {
 		t.Fatalf("decode publish session %s: %v", b, err)
@@ -1598,7 +1608,10 @@ func ParseSession(t testing.TB, b []byte) PublishSession {
 	if !strings.HasPrefix(raw.Token, "trs_") || len(raw.ID) == 0 {
 		t.Fatalf("publish session answer %s: want an id and a trs_ token", b)
 	}
-	return PublishSession{ID: strings.Trim(string(raw.ID), `"`), Token: raw.Token, Repo: raw.Repo}
+	return PublishSession{
+		ID: strings.Trim(string(raw.ID), `"`), Token: raw.Token, Repo: raw.Repo,
+		ExpiresAt: raw.ExpiresAt, RenewalKey: raw.RenewalKey,
+	}
 }
 
 // mustSession returns a function that fails the test unless st is 2xx and decodes the session,

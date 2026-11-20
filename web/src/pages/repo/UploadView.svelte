@@ -1,6 +1,6 @@
 <!--
   Upload to a repository (a page: the flow is longer than a short form). First a fresh second
-  factor, which creates a publish token for the repo kept in memory (session.ts); then one drop
+  factor, which creates a publish token for the repo in memory. Then one drop
   zone for files or a folder, as the format's descriptor (upload) allows. The server plans every
   upload (POST /upload/plan stores nothing): the browser sends the list of files and the first
   bytes of the files the format reads, and shows what the plan stores, where each file goes, the
@@ -14,6 +14,7 @@
   the plan takes the first values of fields from it.
 -->
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import { toast } from "svelte-sonner";
   import {
     api,
@@ -21,6 +22,7 @@
     errorMessage,
     type FinishedUpload,
     type Proof,
+    type PublishSession,
     type Repo,
     type UploadPlan,
     type Uploaded,
@@ -47,7 +49,7 @@
   import UploadResults from "./upload/UploadResults.svelte";
   import { filesFromEntries, filesFromInput, keepOf, type FolderDrop, type FolderFile, type FolderRead } from "./upload/folder";
   import { resumableOf, sendResumable } from "./upload/send";
-  import { dropSession, keepSession, sessionToken } from "./session";
+  import { keepSession } from "./upload/renew";
   import PlusIcon from "@lucide/svelte/icons/plus";
   import UploadIcon from "@lucide/svelte/icons/upload";
 
@@ -63,37 +65,38 @@
 
   // --- the publish token (a fresh second factor) ---
 
-  // sessionToken() is not reactive: bumping tokenVersion makes `confirmed` read it again.
-  let tokenVersion = $state(0);
-  const confirmed = $derived.by(() => {
-    void tokenVersion;
-    return !!sessionToken(repo.name);
-  });
+  let session = $state.raw<PublishSession | null>(null);
+  let destroyed = false;
   let expiredNote = $state("");
 
   async function createSession(proof: Proof) {
-    keepSession(repo.name, await api.publish.manualSession(repo.name, proof));
-    expiredNote = "";
-    tokenVersion++;
-  }
-
-  /** The token for a request, or an error that asks the user to confirm again. */
-  function token(): string {
-    const t = sessionToken(repo.name);
-    if (!t) {
-      expiredNote = "Your confirmation has expired. Confirm again, then upload.";
-      tokenVersion++;
-      throw new Error(expiredNote);
+    const created = await api.publish.manualSession(repo.name, proof, true);
+    if (destroyed) {
+      closeSession(created);
+      return;
     }
-    return t;
+    session = created;
+    expiredNote = "";
+    error = "";
   }
 
-  /** Forgets a token the server no longer accepts. */
-  function checkSession(e: unknown) {
+  function closeSession(s: PublishSession) {
+    if (session === s) session = null;
+    void api.publish.closeSession(s.id, s.token).catch(() => {});
+  }
+
+  function publishSession(): PublishSession {
+    if (session && session.repo === repo.name && Date.parse(session.expires_at) > Date.now()) return session;
+    if (session) closeSession(session);
+    expiredNote = "Your confirmation has expired. Confirm again to upload.";
+    throw new Error(expiredNote);
+  }
+
+  function checkSession(e: unknown, s: PublishSession) {
     if (e instanceof ApiError && e.status === 401) {
-      dropSession(repo.name);
-      expiredNote = "Your confirmation has expired. Confirm again, then upload.";
-      tokenVersion++;
+      closeSession(s);
+      forgetHeads();
+      expiredNote = "Your confirmation has expired. Confirm again to upload.";
     }
   }
 
@@ -115,6 +118,15 @@
   let progress = $state<UploadProgress | null>(null);
   let results = $state<Uploaded[]>([]);
   let abort: (() => void) | null = null;
+
+  onDestroy(() => {
+    destroyed = true;
+    clearTimeout(planTimer);
+    planSeq++;
+    planAbort?.();
+    abort?.();
+    if (session && phase !== "sending") closeSession(session);
+  });
 
   function reset() {
     phase = "pick";
@@ -221,9 +233,9 @@
     if (!up) return;
     const mine = ++planSeq;
     planError = "";
-    let t: string;
+    let s: PublishSession;
     try {
-      t = token();
+      s = publishSession();
     } catch (e) {
       phase = "pick";
       error = errorMessage(e);
@@ -238,7 +250,7 @@
     const list = files;
     const send = (withHeads: boolean) => {
       const req = { fields: { ...typed }, folder, files: list, heads: withHeads ? heads : "", held };
-      const r = api.repos.uploadPlan(repo.name, req, reads, t, (p) => {
+      const r = api.repos.uploadPlan(repo.name, req, reads, s.token, (p) => {
         if (first && mine === planSeq) progress = p;
       });
       planAbort = r.abort;
@@ -271,7 +283,7 @@
       phase = "plan";
     } catch (e) {
       if (mine !== planSeq) return;
-      checkSession(e);
+      checkSession(e, s);
       if (first) {
         phase = files.length && plan ? "plan" : "pick";
         error = cancelled(e) ? "You cancelled the check." : errorMessage(e);
@@ -311,23 +323,37 @@
   });
 
   async function upload() {
-    if (problem || !plan) return;
+    if (problem || !plan || phase !== "plan") return;
     error = "";
     const ctl = new AbortController();
     const sent: FinishedUpload[] = [];
-    let t = "";
+    const name = repo.name;
+    let s: PublishSession | undefined;
+    let stop: (() => void) | undefined;
+    let ended = false;
     try {
-      t = token();
+      s = publishSession();
+      const t = s.token;
+      clearTimeout(planTimer);
+      planSeq++;
+      planAbort?.();
+      planAbort = null;
       const total = chosen.reduce((n, f) => n + f.file.size, 0);
       phase = "sending";
       progress = { sent: 0, total };
       abort = () => ctl.abort();
+      if (s.renewal_key) {
+        stop = await keepSession(s, s.renewal_key, ctl.signal, () => {
+          ended = true;
+          ctl.abort();
+        });
+      }
       // The large files first, each through a resumable upload in chunks.
       const big = resumableOf(chosen);
       let base = 0;
       for (const f of chosen) {
         if (!big.has(f)) continue;
-        sent.push(await sendResumable(repo.name, f, t, ctl.signal, (n) => (progress = { sent: base + n, total })));
+        sent.push(await sendResumable(name, f, t, ctl.signal, (n) => (progress = { sent: base + n, total })));
         base += f.file.size;
       }
       const form = new FormData();
@@ -336,22 +362,27 @@
       if (sent.length) form.append("uploads", JSON.stringify(sent));
       for (const f of chosen) if (!big.has(f)) form.append("file", f.file, f.path);
       if (ctl.signal.aborted) throw new DOMException("The upload was cancelled.", "AbortError");
-      const s = api.repos.upload(repo.name, form, t, (p) => (progress = { sent: base + p.sent, total: base + p.total }));
-      ctl.signal.addEventListener("abort", s.abort);
-      const a = await s.done;
+      const req = api.repos.upload(name, form, t, (p) => (progress = { sent: base + p.sent, total: base + p.total }));
+      ctl.signal.addEventListener("abort", req.abort, { once: true });
+      const a = await req.done;
       results = a.files;
       phase = "done";
-      toast.success(`Uploaded ${nItems.toLocaleString()} ${word(nItems)} to ${repo.name}`);
+      toast.success(`Uploaded ${nItems.toLocaleString()} ${word(nItems)} to ${name}`);
     } catch (e) {
-      // The uploads that the server did not finish go now.
-      for (const u of sent) void api.repos.cancelUpload(repo.name, u.id, t).catch(() => {});
-      phase = "plan";
-      if (cancelled(e)) error = "You cancelled the upload. Nothing was stored.";
-      else {
-        error = errorMessage(e);
-        checkSession(e);
+      stop?.();
+      if (s && sent.length) {
+        const t = s.token;
+        const signal = AbortSignal.timeout(5_000);
+        await Promise.allSettled(sent.map((u) => api.repos.cancelUpload(name, u.id, t, signal)));
       }
+      phase = "plan";
+      if (ended) error = "The publish session expired. Confirm again to retry the upload.";
+      else if (cancelled(e)) error = "You cancelled the upload.";
+      else error = errorMessage(e);
     } finally {
+      stop?.();
+      if (s) closeSession(s);
+      forgetHeads();
       abort = null;
       progress = null;
     }
@@ -394,12 +425,12 @@
 <FormPage>
   {#if !up}
     <EmptyState icon={UploadIcon} title="This format takes no uploads" description="Publish to {repo.name} with the tools on its publish page." />
-  {:else if !confirmed}
+  {:else if !session && phase !== "done"}
     <FormSection
       title="Confirm it is you"
-      description="Uploads need a fresh check with your authenticator app or a passkey. It lasts a short time, so you can upload several times in a row."
+      description="Confirm with your authenticator app or a passkey for this upload."
     >
-      {#if expiredNote}<div class="mb-4"><ErrorState inline error={expiredNote} /></div>{/if}
+      {#if expiredNote || error}<div class="mb-4"><ErrorState inline error={expiredNote || error} /></div>{/if}
       <FreshFactor actionLabel="Continue" onProof={createSession} />
     </FormSection>
   {:else if phase === "pick" || phase === "reading"}

@@ -1238,7 +1238,8 @@ export type SetupCode = { code: string; link: string; expires_at: string };
 export type CLIArchive = { name: string; sha256: string; os: string; arch: string; url: string };
 
 /** A minted publish session. `token` is shown once. */
-export type PublishSession = { id: number; token: string; repo: string; expires_at: string };
+export type PublishSession = { id: number; token: string; repo: string; expires_at: string; renewal_key?: string };
+export type PublishRenewal = { valid_for_ms: number; renew_after_ms: number };
 
 export type SessionInfo = {
   id: number;

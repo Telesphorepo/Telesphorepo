@@ -200,6 +200,20 @@ INSERT INTO publish_sessions (public_id, secret_hash, repo_id, user_id, device_i
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id;
 
+-- name: CreatePublishRenewal :exec
+INSERT INTO publish_session_renewals (session_id, secret_hash) VALUES (?, ?);
+
+-- name: GetPublishRenewal :one
+SELECT secret_hash FROM publish_session_renewals WHERE session_id = ?;
+
+-- name: RenewPublishSession :one
+UPDATE publish_sessions SET expires_at = unixepoch() + CAST(sqlc.arg(window_seconds) AS INTEGER)
+WHERE publish_sessions.id = sqlc.arg(id) AND publish_sessions.closed_at IS NULL AND publish_sessions.expires_at > unixepoch()
+  AND (via = 'oidc' OR EXISTS (SELECT 1 FROM users u WHERE u.id = publish_sessions.user_id AND u.disabled = 0))
+  AND (via <> 'device' OR EXISTS (SELECT 1 FROM devices d WHERE d.id = publish_sessions.device_id AND d.revoked_at IS NULL AND d.expires_at > unixepoch()))
+  AND (via <> 'oidc' OR EXISTS (SELECT 1 FROM publish_trusts t WHERE t.id = publish_sessions.trust_id AND t.disabled = 0))
+RETURNING publish_sessions.expires_at;
+
 -- A session by the public id of its token, with what the access engine checks: the repo, and the
 -- state of the device or trust policy behind it. The gate reads the user through GetPrincipal.
 -- name: GetPublishSessionAuth :one

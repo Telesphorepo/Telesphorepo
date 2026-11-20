@@ -376,6 +376,7 @@ type publishLogItem struct {
 	Via      string `json:"via"`
 	Subject  string `json:"subject"`
 	DeviceID *int64 `json:"device_id"`
+	State    string `json:"state"`
 }
 
 // publishLog returns the publish sessions of repo, newest first.
