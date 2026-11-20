@@ -384,30 +384,35 @@ func exchangeSecret(d *deviceFile, nonce string) string {
 
 // session is a publish session of one repo: the answer of the mint routes.
 type session struct {
-	ID        int64     `json:"id"`
-	Token     string    `json:"token"`
-	Repo      string    `json:"repo"`
-	Format    string    `json:"format"`
-	Kind      string    `json:"kind"`
-	ExpiresAt time.Time `json:"expires_at"`
+	ID         int64     `json:"id"`
+	Token      string    `json:"token"`
+	Repo       string    `json:"repo"`
+	Format     string    `json:"format"`
+	Kind       string    `json:"kind"`
+	ExpiresAt  time.Time `json:"expires_at"`
+	RenewalKey string    `json:"renewal_key"`
 }
 
 // mintDevice mints a session for repo with the proof of device d: a one-request nonce and the
 // device signature over the nonce and the repo.
-func (c *client) mintDevice(ctx context.Context, d *deviceFile, repo string) (*session, error) {
+func (c *client) mintDevice(ctx context.Context, d *deviceFile, repo string, renewable bool) (*session, error) {
 	nonce, _, err := c.challenge(ctx, d, false, "")
 	if err != nil {
 		return nil, err
 	}
-	return c.mintNonce(ctx, d, nonce, repo)
+	return c.mintNonce(ctx, d, nonce, repo, renewable)
 }
 
 // mintNonce mints a session for repo with the one-request nonce of device d and the device
 // signature over the nonce and the repo.
-func (c *client) mintNonce(ctx context.Context, d *deviceFile, nonce, repo string) (*session, error) {
+func (c *client) mintNonce(ctx context.Context, d *deviceFile, nonce, repo string, renewable bool) (*session, error) {
 	id := strconv.FormatInt(d.DeviceID, 10)
+	path := "/api/publish/sessions"
+	if renewable {
+		path += "?renewable=1"
+	}
 	var s session
-	_, err := c.call(ctx, request{method: http.MethodPost, path: "/api/publish/sessions", json: map[string]any{
+	_, err := c.call(ctx, request{method: http.MethodPost, path: path, json: map[string]any{
 		"device_id": d.DeviceID, "repo": repo, "nonce": nonce, "signature": d.sign(signPrefix + nonce + "\n" + id + "\n" + repo),
 	}, out: &s})
 	if err != nil {
@@ -424,7 +429,7 @@ func (c *client) mintCI(ctx context.Context, tok, repo, revision string) (*sessi
 		body["revision"] = revision
 	}
 	var s session
-	_, err := c.call(ctx, request{method: http.MethodPost, path: "/api/publish/sessions/oidc",
+	_, err := c.call(ctx, request{method: http.MethodPost, path: "/api/publish/sessions/oidc?renewable=1",
 		json: body, out: &s})
 	if err != nil {
 		return nil, err

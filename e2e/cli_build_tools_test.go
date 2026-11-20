@@ -81,14 +81,29 @@ telesphorepo publish
 `
 
 		t.Run("maven 3", func(t *testing.T) {
+			setSetting(t, s, "publish.session_ttl", "5s")
+			t.Cleanup(func() { setSetting(t, s, "publish.session_ttl", nil) })
 			// A fresh local repository, so every plugin comes through the mirror.
-			out := c.mustRun(t, mavenImage, "publish with Maven 3", publish, ClientOpts{
+			out := c.mustRun(t, mavenImage, "publish with Maven 3", `set -e
+export REAL_MVN="$(command -v mvn)"
+mkdir -p /tmp/slow-maven
+cat > /tmp/slow-maven/mvn <<'EOF'
+#!/bin/sh
+sleep 6
+exec "$REAL_MVN" "$@"
+EOF
+chmod +x /tmp/slow-maven/mvn
+export PATH="/tmp/slow-maven:$PATH"
+`+publish, ClientOpts{
 				Files:  project("1.0.0"),
 				Env:    map[string]string{"E2E_LINK": s.NewSetupCode(t, dev, repo).Link, "MAVEN_ARGS": "-B -ntp -Dmaven.repo.local=/tmp/m2"},
 				Mounts: map[string]string{devices: "/root/.telesphorepo"},
 			})
 			wantText(t, "publish with Maven 3", out, "mvn deploy")
 			requireAssets(t, s, repo, gp+"/", gp+"/hello/1.0.0/hello-1.0.0.jar", gp+"/hello/1.0.0/hello-1.0.0.pom")
+			if log := publishLog(t, s, repo); len(log) == 0 || log[0].State != "closed" {
+				t.Fatalf("publish must close its session after Maven exits: %+v", log)
+			}
 			if len(assetPaths(t, s, central, "org/apache/maven/plugins/maven-deploy-plugin/")) == 0 {
 				t.Fatalf("the mirror of settings.xml served no maven-deploy-plugin: the user's settings were not in force")
 			}

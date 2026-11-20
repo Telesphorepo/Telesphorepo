@@ -241,6 +241,20 @@ func (q *Queries) CreateNonce(ctx context.Context, arg CreateNonceParams) error 
 	return err
 }
 
+const createPublishRenewal = `-- name: CreatePublishRenewal :exec
+INSERT INTO publish_session_renewals (session_id, secret_hash) VALUES (?, ?)
+`
+
+type CreatePublishRenewalParams struct {
+	SessionID  int64
+	SecretHash []byte
+}
+
+func (q *Queries) CreatePublishRenewal(ctx context.Context, arg CreatePublishRenewalParams) error {
+	_, err := q.db.ExecContext(ctx, createPublishRenewal, arg.SessionID, arg.SecretHash)
+	return err
+}
+
 const createPublishSession = `-- name: CreatePublishSession :one
 INSERT INTO publish_sessions (public_id, secret_hash, repo_id, user_id, device_id, trust_id, build_id, via, subject, created_at, expires_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -539,6 +553,17 @@ func (q *Queries) GetExchangeSession(ctx context.Context, arg GetExchangeSession
 	var i GetExchangeSessionRow
 	err := row.Scan(&i.SessionID, &i.PublicID)
 	return i, err
+}
+
+const getPublishRenewal = `-- name: GetPublishRenewal :one
+SELECT secret_hash FROM publish_session_renewals WHERE session_id = ?
+`
+
+func (q *Queries) GetPublishRenewal(ctx context.Context, sessionID int64) ([]byte, error) {
+	row := q.db.QueryRowContext(ctx, getPublishRenewal, sessionID)
+	var secret_hash []byte
+	err := row.Scan(&secret_hash)
+	return secret_hash, err
 }
 
 const getPublishSessionAuth = `-- name: GetPublishSessionAuth :one
@@ -1331,6 +1356,27 @@ func (q *Queries) PurgePublishSessions(ctx context.Context, arg PurgePublishSess
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const renewPublishSession = `-- name: RenewPublishSession :one
+UPDATE publish_sessions SET expires_at = unixepoch() + CAST(?1 AS INTEGER)
+WHERE publish_sessions.id = ?2 AND publish_sessions.closed_at IS NULL AND publish_sessions.expires_at > unixepoch()
+  AND (via = 'oidc' OR EXISTS (SELECT 1 FROM users u WHERE u.id = publish_sessions.user_id AND u.disabled = 0))
+  AND (via <> 'device' OR EXISTS (SELECT 1 FROM devices d WHERE d.id = publish_sessions.device_id AND d.revoked_at IS NULL AND d.expires_at > unixepoch()))
+  AND (via <> 'oidc' OR EXISTS (SELECT 1 FROM publish_trusts t WHERE t.id = publish_sessions.trust_id AND t.disabled = 0))
+RETURNING publish_sessions.expires_at
+`
+
+type RenewPublishSessionParams struct {
+	WindowSeconds int64
+	ID            int64
+}
+
+func (q *Queries) RenewPublishSession(ctx context.Context, arg RenewPublishSessionParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, renewPublishSession, arg.WindowSeconds, arg.ID)
+	var expires_at int64
+	err := row.Scan(&expires_at)
+	return expires_at, err
 }
 
 const revokeDevice = `-- name: RevokeDevice :execrows

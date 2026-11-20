@@ -33,12 +33,13 @@ const (
 // username) for the publish, and it also reads the repo. Format and Kind are those of the repo,
 // so a client picks the publish command of the format.
 type Minted struct {
-	ID        int64     `json:"id"`
-	Token     string    `json:"token"`
-	Repo      string    `json:"repo"`
-	Format    string    `json:"format"`
-	Kind      string    `json:"kind"`
-	ExpiresAt time.Time `json:"expires_at"`
+	ID         int64     `json:"id"`
+	Token      string    `json:"token"`
+	Repo       string    `json:"repo"`
+	Format     string    `json:"format"`
+	Kind       string    `json:"kind"`
+	ExpiresAt  time.Time `json:"expires_at"`
+	RenewalKey string    `json:"renewal_key,omitempty"`
 
 	// For the audit log; not in the JSON answer.
 	RepoID  int64  `json:"-"`
@@ -107,13 +108,22 @@ func beforeCursor(after int64) int64 {
 
 // mint creates a session on q (a transaction or the write pool), with the build record of a CI
 // token (0: none). It retries on the rare collision of the 48-bit public id.
-func (s *Service) mint(ctx context.Context, q *dbq.Queries, repo *repos.Repo, via string, userID, deviceID, trustID, buildID int64, subject string) (*Minted, error) {
-	return s.mintKeyed(ctx, q, repo, via, userID, deviceID, trustID, buildID, subject, "")
+func (s *Service) mint(ctx context.Context, repo *repos.Repo, via string, userID, deviceID int64, subject string, renewable bool) (*Minted, error) {
+	if !renewable {
+		return s.mintKeyed(ctx, s.wq, repo, via, userID, deviceID, 0, 0, subject, "", false)
+	}
+	var out *Minted
+	err := s.db.Tx(ctx, func(tx *sql.Tx) error {
+		var err error
+		out, err = s.mintKeyed(ctx, dbq.New(tx), repo, via, userID, deviceID, 0, 0, subject, "", true)
+		return err
+	})
+	return out, err
 }
 
 // mintKeyed is mint. With a token exchange nonce, the secret of the token is exchangeSecret of
 // the nonce and the public id, so a later exchange with the same nonce gives the same token.
-func (s *Service) mintKeyed(ctx context.Context, q *dbq.Queries, repo *repos.Repo, via string, userID, deviceID, trustID, buildID int64, subject, nonce string) (*Minted, error) {
+func (s *Service) mintKeyed(ctx context.Context, q *dbq.Queries, repo *repos.Repo, via string, userID, deviceID, trustID, buildID int64, subject, nonce string, renewable bool) (*Minted, error) {
 	now := time.Now()
 	exp := now.Add(s.sessionTTL())
 	for range 3 {
@@ -133,7 +143,16 @@ func (s *Service) mintKeyed(ctx context.Context, q *dbq.Queries, repo *repos.Rep
 		if err != nil {
 			return nil, err
 		}
-		return &Minted{ID: id, Token: tok, Repo: repo.Name, Format: repo.Format, Kind: repo.Kind, ExpiresAt: unixTime(exp.Unix()),
+		var renewalKey string
+		if renewable {
+			renewalKey = randomString(32)
+			if err := q.CreatePublishRenewal(ctx, dbq.CreatePublishRenewalParams{
+				SessionID: id, SecretHash: token.Hash(renewalKey),
+			}); err != nil {
+				return nil, err
+			}
+		}
+		return &Minted{ID: id, Token: tok, Repo: repo.Name, Format: repo.Format, Kind: repo.Kind, ExpiresAt: unixTime(exp.Unix()), RenewalKey: renewalKey,
 			RepoID: repo.ID, UserID: userID, Subject: subject, Via: via,
 			Session: &auth.PublishSession{ID: id, RepoID: repo.ID, Via: via, Subject: subject, BuildID: buildID, DeviceID: deviceID,
 				Expires: unixTime(exp.Unix())}}, nil
@@ -268,6 +287,41 @@ func exchangeSecret(nonce, pid string) string {
 func decodeB64URL(s string) ([]byte, error) {
 	s = strings.TrimRight(strings.TrimSpace(s), "=")
 	return base64.RawURLEncoding.DecodeString(s)
+}
+
+type sessionRenewal struct {
+	ValidForMS   int64 `json:"valid_for_ms"`
+	RenewAfterMS int64 `json:"renew_after_ms"`
+}
+
+// RenewSession requires both the live publish token and the separate renewal key.
+func (s *Service) RenewSession(ctx context.Context, p *auth.Principal, id int64, key string) (sessionRenewal, error) {
+	denied := errorf(ErrDenied, "invalid or ended publish session renewal")
+	if !p.Is(auth.CredPublish) || p.Publish.ID != id || len(key) != 43 {
+		return sessionRenewal{}, denied
+	}
+	hash, err := s.rq.GetPublishRenewal(ctx, id)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && !token.Check(hash, key)) {
+		return sessionRenewal{}, denied
+	}
+	if err != nil {
+		return sessionRenewal{}, err
+	}
+	window := max(time.Second, min(90*time.Second, s.sessionTTL().Truncate(time.Second)))
+	expires, err := s.wq.RenewPublishSession(ctx, dbq.RenewPublishSessionParams{
+		ID: id, WindowSeconds: int64(window / time.Second),
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return sessionRenewal{}, denied
+	}
+	if err != nil {
+		return sessionRenewal{}, err
+	}
+	validFor := time.Until(unixTime(expires))
+	return sessionRenewal{
+		ValidForMS:   validFor.Milliseconds(),
+		RenewAfterMS: min(20*time.Second, window/4, validFor/4).Milliseconds(),
+	}, nil
 }
 
 // CloseSession ends session id for p, the principal of that session's token (a token of another

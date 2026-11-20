@@ -251,6 +251,57 @@ func TestUploadSessions(t *testing.T) {
 	}
 	rawWantGet(t, s, nil, "/raw/"+raw+"/big/file.bin", s.AdminBasic(), body)
 
+	t.Run("managed publish crosses its initial deadline and closes", func(t *testing.T) {
+		mint := func() PublishSession {
+			t.Helper()
+			ps := mustSession(t, "mint a renewable session")(s.API(t, http.MethodPost,
+				"/api/publish/sessions/manual?renewable=1", map[string]string{"repo": raw},
+				s.TOTPProof(t, s.Admin(), s.AdminUser)))
+			if ps.RenewalKey == "" || ps.ExpiresAt.IsZero() {
+				t.Fatal("managed mint must return a renewal key and initial deadline")
+			}
+			return ps
+		}
+		renewPath := func(ps PublishSession) string { return "/api/publish/sessions/" + ps.ID + "/renew" }
+		setSetting(t, s, "publish.session_ttl", "4s")
+		ps := mint()
+		setSetting(t, s, "publish.session_ttl", nil)
+
+		st, b := s.API(t, http.MethodPost, renewPath(ps), map[string]string{"renewal_key": strings.Repeat("x", len(ps.RenewalKey))}, ps.Auth())
+		wantAPIStatus(t, "renew with only the publish token", st, b, http.StatusUnauthorized)
+		proof := map[string]string{"renewal_key": ps.RenewalKey}
+		s.MustAPI(t, http.MethodPost, renewPath(ps), proof, ps.Auth(), nil)
+		id := start(base, ps.Auth())
+		st, b = uploadSession(t, s, http.MethodPatch, base+"/"+id, first, ps.Auth(), chunk(0, first))
+		wantAPIStatus(t, "append before the initial deadline", st, b, http.StatusAccepted)
+		time.Sleep(time.Until(ps.ExpiresAt.Add(150 * time.Millisecond)))
+		s.MustAPI(t, http.MethodPost, renewPath(ps), proof, ps.Auth(), nil)
+		st, b = uploadSession(t, s, http.MethodPatch, base+"/"+id, second, ps.Auth(), chunk(len(first), second))
+		wantAPIStatus(t, "append after the initial deadline", st, b, http.StatusAccepted)
+		st, b = uploadSession(t, s, http.MethodPut, base+"/"+id+"?path=big/renewed.bin&sha256="+sha256Hex(body), nil, ps.Auth(), nil)
+		wantAPIStatus(t, "finish after the initial deadline", st, b, http.StatusCreated)
+		rawWantGet(t, s, nil, "/raw/"+raw+"/big/renewed.bin", s.AdminBasic(), body)
+		s.MustAPI(t, http.MethodDelete, "/api/publish/sessions/"+ps.ID, nil, ps.Auth(), nil)
+		st, b = uploadSession(t, s, http.MethodPost, base, nil, ps.Auth(), nil)
+		wantAPIStatus(t, "start an upload after close", st, b, http.StatusUnauthorized)
+		st, b = s.API(t, http.MethodPost, renewPath(ps), proof, ps.Auth())
+		wantAPIStatus(t, "renew a closed session", st, b, http.StatusUnauthorized)
+
+		abandoned := mint()
+		setSetting(t, s, "publish.session_ttl", "2s")
+		var renewal struct {
+			ValidForMS int64 `json:"valid_for_ms"`
+		}
+		proof = map[string]string{"renewal_key": abandoned.RenewalKey}
+		s.MustAPI(t, http.MethodPost, renewPath(abandoned), proof, abandoned.Auth(), &renewal)
+		setSetting(t, s, "publish.session_ttl", nil)
+		time.Sleep(time.Duration(renewal.ValidForMS+150) * time.Millisecond)
+		st, b = uploadSession(t, s, http.MethodPost, base, nil, abandoned.Auth(), nil)
+		wantAPIStatus(t, "start an upload after a missed renewal", st, b, http.StatusUnauthorized)
+		st, b = s.API(t, http.MethodPost, renewPath(abandoned), proof, abandoned.Auth())
+		wantAPIStatus(t, "renew an expired session", st, b, http.StatusUnauthorized)
+	})
+
 	// The precondition of a finish is checked at the commit: a stale If-Match is 412 with the
 	// ETag of the file, and the upload stays, so the same upload finishes after a re-read.
 	s.MustAPI(t, http.MethodPatch, "/api/repos/"+raw, map[string]any{"config": map[string]any{"overwrite": "allow"}}, s.Admin(), nil)

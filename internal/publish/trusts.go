@@ -753,7 +753,7 @@ func (s *Service) checkCI(ctx context.Context, raw string) error {
 // (Minted.Token is then ""): that check skips exp and the age of iat, because the open session
 // bounds the time. A first mint needs a fresh token. revision is the commit that the job names
 // (MintCred.Revision).
-func (s *Service) ciSession(ctx context.Context, r *http.Request, raw, revision, repoName string, resolve func(context.Context) (*repos.Repo, error), reuse bool) (*Minted, error) {
+func (s *Service) ciSession(ctx context.Context, r *http.Request, raw, revision, repoName string, resolve func(context.Context) (*repos.Repo, error), reuse, renewable bool) (*Minted, error) {
 	repo, m, err := s.verifyCI(ctx, raw, repoName, resolve, !reuse)
 	if err != nil {
 		return nil, err
@@ -787,7 +787,7 @@ func (s *Service) ciSession(ctx context.Context, r *http.Request, raw, revision,
 		if err != nil {
 			return err
 		}
-		out, err = s.mint(ctx, q, repo, ViaOIDC, 0, 0, m.trust, build, m.idt.Subject)
+		out, err = s.mintKeyed(ctx, q, repo, ViaOIDC, 0, 0, m.trust, build, m.idt.Subject, "", renewable)
 		if err != nil {
 			return err
 		}

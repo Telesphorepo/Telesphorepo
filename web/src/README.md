@@ -683,9 +683,8 @@ that does not move waits for a slower process. Every such page does it the same 
 
 ## Uploads and deletes
 
-The repository page holds a publish token for the repository in memory only
-(`pages/repo/session.ts`; never in storage or the URL), and drops it 30 seconds before it
-expires or when the server answers 401.
+The upload page keeps the repository's publish token and its renewal key in memory.
+It renews the session while sending the upload and closes it when the upload ends.
 
 - **Upload** (`pages/repo/UploadView.svelte`, `/repo/:name/upload`): first `FreshFactor`, which
   mints the token with `api.publish.manualSession`. Then one `DropZone` takes files or a folder,

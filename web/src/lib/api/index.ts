@@ -258,7 +258,8 @@ export const api = {
       return { done: r.done.then((a) => ({ files: Array.isArray(a?.files) ? a.files : [] })), abort: r.abort };
     },
     /** Starts a resumable upload with a publish session token; its chunks go with appendUpload. */
-    startUpload: (name: string, token: string) => request<T.UploadSession>("POST", repo(name) + "/uploads", { token }),
+    startUpload: (name: string, token: string, signal?: AbortSignal) =>
+      request<T.UploadSession>("POST", repo(name) + "/uploads", { token, signal }),
     /**
      * Appends chunk at offset to the resumable upload id: answers the bytes the server holds. A
      * wrong offset is an ApiError 416 whose problem holds received. Reports the progress of the chunk.
@@ -271,7 +272,8 @@ export const api = {
       return { done: r.done, abort: r.abort };
     },
     /** Deletes the resumable upload id and its bytes. */
-    cancelUpload: (name: string, id: string, token: string) => request("DELETE", repo(name) + "/uploads/" + enc(id), { token }),
+    cancelUpload: (name: string, id: string, token: string, signal?: AbortSignal) =>
+      request("DELETE", repo(name) + "/uploads/" + enc(id), { token, signal }),
     /** Edit settings: the allowed networks of a restricted repo (a public repo takes none). */
     ipRules: {
       get: (name: string) => request<T.IPRules>("GET", repo(name) + "/ip-rules"),
@@ -494,8 +496,12 @@ export const api = {
     oidcSession: (token: string, repo: string) =>
       request<T.PublishSession>("POST", "/api/publish/sessions/oidc", { body: { token, repo } }),
     /** A manual publish session for one repo after a fresh second factor. */
-    manualSession: (repo: string, proof: T.FreshProof) =>
-      request<T.PublishSession>("POST", "/api/publish/sessions/manual", { body: { repo }, proof: proofHeader(proof) }),
+    manualSession: (repo: string, proof: T.FreshProof, renewable = false) =>
+      request<T.PublishSession>("POST", "/api/publish/sessions/manual", {
+        body: { repo }, proof: proofHeader(proof), query: { renewable: renewable ? 1 : undefined },
+      }),
+    renewSession: (id: number, token: string, renewal_key: string, signal: AbortSignal) =>
+      request<T.PublishRenewal>("POST", `/api/publish/sessions/${id}/renew`, { token, body: { renewal_key }, signal }),
     /** A setup code for one repo after a fresh second factor. */
     setupCode: (repo: string, proof: T.FreshProof) =>
       request<T.SetupCode>("POST", "/api/publish/setup-codes", { body: { repo }, proof: proofHeader(proof) }),

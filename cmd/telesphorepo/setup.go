@@ -287,7 +287,7 @@ func setupCI(ctx context.Context, c *client, d *deviceFile, repo, tool, dir stri
 	if sys == "" {
 		return nil
 	}
-	s, err := c.mintDevice(ctx, d, repo)
+	s, err := c.mintDevice(ctx, d, repo, false)
 	if err != nil {
 		return err
 	}

@@ -40,7 +40,7 @@ const (
 // The settings of the group "publishing".
 var (
 	SessionTTL = settings.Duration(&settings.Def{Key: "publish.session_ttl", Default: "15m", Label: "Publish session lifetime",
-		Help: "A publish session, the credential that every upload needs, lasts at most this time, for example 15m. A client ends its session when the publish is done. The maximum is 1h. A publish must end within it.",
+		Help: "A publish token has this long to start a managed upload. Manually copied tokens and clients that use a fixed deadline must finish within this time. During a managed upload, the client renews the token for up to 90s at a time and ends it when it finishes. The maximum setting is 1h.",
 		Validate: func(v any) error {
 			if v.(time.Duration) > time.Hour {
 				return errors.New("must be at most 1h")
@@ -135,6 +135,7 @@ func (m *mod) routes(r *route.Router) {
 	r.Handle("POST /api/publish/sessions/exchange", route.Public, m.exchangeSession)
 	r.Handle("GET /api/publish/sessions", route.AnyUser, m.listMySessions)
 	r.Handle("DELETE /api/publish/sessions/{id}", route.Policy{Accept: auth.CredPublish}, m.closeSession)
+	r.Handle("POST /api/publish/sessions/{id}/renew", route.Policy{Accept: auth.CredPublish}, m.renewSession)
 
 	pipelines := route.Policy{Accept: auth.CredSession, SomeRepo: PermPipelines}
 	r.Handle("GET /api/publish/trusts", pipelines, m.listTrusts)
@@ -399,10 +400,30 @@ func (m *mod) closeSession(w http.ResponseWriter, r *http.Request, c *route.Call
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (m *mod) renewSession(w http.ResponseWriter, r *http.Request, c *route.Call) {
+	id, ok := route.PathID(w, r, "invalid id")
+	if !ok {
+		return
+	}
+	var in struct {
+		RenewalKey string `json:"renewal_key"`
+	}
+	if !m.h.API.Decode(w, r, &in) {
+		return
+	}
+	renewed, err := m.svc.RenewSession(r.Context(), c.P, id, in.RenewalKey)
+	if err != nil {
+		publishFail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, renewed)
+}
+
 // mintRoute mints a session for the repo name with cred and answers 201 with the session and its
 // token. A mint that the access engine refuses answers its status, message and refusal code
 // (route.Refuse: 405 with Allow for a proxy or a group).
 func (m *mod) mintRoute(w http.ResponseWriter, r *http.Request, cred MintCred, name string) {
+	cred.Renewable = r.URL.Query().Get("renewable") == "1"
 	mt, err := m.svc.MintRoute(r.Context(), r, cred, name)
 	var refused *RefusedError
 	switch {

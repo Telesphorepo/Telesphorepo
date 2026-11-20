@@ -73,6 +73,8 @@ func (s *Service) checkExchangeProof(ctx context.Context, proof *DeviceProof) (d
 
 // MintCred is the credential of a mint; exactly one field is set.
 type MintCred struct {
+	// Renewable opts a direct mint into managed publishing.
+	Renewable bool
 	// Device is a device signature over a nonce of Challenge (Repo is the repo), or over a nonce
 	// of ExchangeChallenge (Repo is "*"). An exchange proof mints for any repo until the nonce
 	// expires, and the same nonce and repo get the same open session back.
@@ -176,11 +178,11 @@ func (s *Service) mintWith(ctx context.Context, r *http.Request, cred MintCred, 
 	var err error
 	switch {
 	case cred.Device != nil:
-		m, err = s.deviceSession(ctx, r, cred.Device, repoName, resolve, reuse)
+		m, err = s.deviceSession(ctx, r, cred.Device, repoName, resolve, reuse, cred.Renewable)
 	case cred.CIToken != "":
-		m, err = s.ciSession(ctx, r, cred.CIToken, cred.Revision, repoName, resolve, reuse)
+		m, err = s.ciSession(ctx, r, cred.CIToken, cred.Revision, repoName, resolve, reuse, cred.Renewable)
 	case cred.Fresh != nil:
-		m, err = s.manualSession(ctx, r, cred.Fresh, resolve)
+		m, err = s.manualSession(ctx, r, cred.Fresh, resolve, cred.Renewable)
 	default:
 		return nil, errorf(ErrInvalid, "no credential to mint a publish session with")
 	}
@@ -207,7 +209,7 @@ func resolveRepo(ctx context.Context, resolve func(context.Context) (*repos.Repo
 // one-repo nonce is used up by the call whatever its outcome. A token exchange nonce (repo "*")
 // works only through Minter.Mint (exchange): it stays until it expires, and each repo gets one
 // session from it (exchangeSession).
-func (s *Service) deviceSession(ctx context.Context, r *http.Request, proof *DeviceProof, repoName string, resolve func(context.Context) (*repos.Repo, error), exchange bool) (*Minted, error) {
+func (s *Service) deviceSession(ctx context.Context, r *http.Request, proof *DeviceProof, repoName string, resolve func(context.Context) (*repos.Repo, error), exchange, renewable bool) (*Minted, error) {
 	now := time.Now().Unix()
 	key := hashBytes([]byte(proof.Nonce))
 	var deviceID int64
@@ -250,7 +252,7 @@ func (s *Service) deviceSession(ctx context.Context, r *http.Request, proof *Dev
 	if proof.Repo == "*" {
 		m, err = s.exchangeSession(ctx, proof.Nonce, repo, d)
 	} else {
-		m, err = s.mint(ctx, s.wq, repo, ViaDevice, d.UserID, d.ID, 0, 0, d.Username)
+		m, err = s.mint(ctx, repo, ViaDevice, d.UserID, d.ID, d.Username, renewable)
 	}
 	if err != nil {
 		return nil, err
@@ -278,7 +280,7 @@ func (s *Service) exchangeSession(ctx context.Context, nonce string, repo *repos
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		if out, err = s.mintKeyed(ctx, q, repo, ViaDevice, d.UserID, d.ID, 0, 0, d.Username, nonce); err != nil {
+		if out, err = s.mintKeyed(ctx, q, repo, ViaDevice, d.UserID, d.ID, 0, 0, d.Username, nonce, false); err != nil {
 			return err
 		}
 		return q.InsertExchangeSession(ctx, dbq.InsertExchangeSessionParams{NonceHash: key, RepoID: repo.ID, SessionID: out.ID})
@@ -299,7 +301,7 @@ func (s *Service) exchangeSession(ctx context.Context, nonce string, repo *repos
 }
 
 // manualSession mints for a signed-in user whose request carried a fresh second factor.
-func (s *Service) manualSession(ctx context.Context, r *http.Request, p *auth.Principal, resolve func(context.Context) (*repos.Repo, error)) (*Minted, error) {
+func (s *Service) manualSession(ctx context.Context, r *http.Request, p *auth.Principal, resolve func(context.Context) (*repos.Repo, error), renewable bool) (*Minted, error) {
 	if p.Kind != auth.KindLocal {
 		return nil, errorf(ErrForbidden, "publish sessions need a local account")
 	}
@@ -310,5 +312,5 @@ func (s *Service) manualSession(ctx context.Context, r *http.Request, p *auth.Pr
 	if d := s.access.Decide(ctx, r, p, repo, access.Mint, perm.RepoPublish); !d.Allowed {
 		return nil, &RefusedError{d}
 	}
-	return s.mint(ctx, s.wq, repo, ViaManual, p.UserID, 0, 0, 0, p.Username)
+	return s.mint(ctx, repo, ViaManual, p.UserID, 0, p.Username, renewable)
 }
