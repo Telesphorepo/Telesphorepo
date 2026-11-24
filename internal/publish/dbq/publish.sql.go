@@ -1765,7 +1765,7 @@ type SearchDevicesRow struct {
 	RevokedAt  sql.NullInt64
 }
 
-// The search of every device (internal/namesearch, migration 0004_device_and_log_search.sql),
+// The search of every device (internal/namesearch, migration 0003_name_search.sql),
 // newest first: the devices below before in the rows of one gram whose name or owner's username
 // holds the text (instr on the gram row).
 func (q *Queries) SearchDevices(ctx context.Context, arg SearchDevicesParams) ([]SearchDevicesRow, error) {
@@ -1823,7 +1823,7 @@ type SearchTrustsParams struct {
 	Limit int64
 }
 
-// The search of the policy names (internal/namesearch, migration 0003_trust_name_search.sql):
+// The search of the policy names (internal/namesearch, migration 0003_name_search.sql):
 // the rows of one gram after the key (key, after) up to the folded name to, in (folded, name)
 // order, that hold the text (instr on the gram row). from is key (sqlc numbers a repeated
 // parameter, which breaks the slice): the range on folded is the seek, and the name test skips
