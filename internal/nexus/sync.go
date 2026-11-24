@@ -1143,8 +1143,9 @@ func doneLine(c dbq.NexusSyncRepo) string {
 		count(c.Skipped), count(c.Failed))
 }
 
-// page fetches one asset page, retrying a failure that is not an authorization error. Each
-// retry writes a warning to the log of sync id.
+// page fetches one asset page, retrying a failure that asking again can clear (not a client
+// error such as a missing repository or a refused credential: SourceError.Final). Each retry
+// writes a warning to the log of sync id.
 func (s *Service) page(ctx context.Context, cl *Client, id int64, source, token string) (AssetPage, error) {
 	delay := retryDelay
 	for attempt := 0; ; attempt++ {
@@ -1153,7 +1154,7 @@ func (s *Service) page(ctx context.Context, cl *Client, id int64, source, token 
 			return p, nil
 		}
 		var se *SourceError
-		if ctx.Err() != nil || attempt == pageRetries || (errors.As(err, &se) && se.Unauthorized()) {
+		if ctx.Err() != nil || attempt == pageRetries || (errors.As(err, &se) && se.Final()) {
 			return AssetPage{}, err
 		}
 		s.log.Warn("nexus: asset page failed; retrying", "source_repo", source, "error", err.Error())

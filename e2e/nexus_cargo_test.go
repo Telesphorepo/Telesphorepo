@@ -44,7 +44,7 @@ cargo publish --registry nx --no-verify
 		if time.Now().After(deadline) {
 			t.Fatalf("the Nexus cargo repo %s lists %d assets after 2 minutes, want the 2 crates: %v", src, len(paths), paths)
 		}
-		time.Sleep(2 * time.Second)
+		time.Sleep(nexusPoll)
 	}
 	t.Logf("the assets of the Nexus cargo repo: %v", paths)
 

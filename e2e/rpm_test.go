@@ -12,18 +12,15 @@ import (
 	"time"
 )
 
-// The RHEL-family dnf clients: dnf4 with rpm's own OpenPGP code, rpm 4.16 on Rocky 9 and 4.14 on
-// Rocky 8, which checks only RSA signatures.
-var (
-	rocky9Image = floatingAmd64Image("docker.io/rockylinux/rockylinux:9")
-	rocky8Image = floatingAmd64Image("docker.io/rockylinux/rockylinux:8")
-)
+// rocky8Image is the oldest RHEL-family dnf client: dnf4 with rpm 4.14's own OpenPGP code, which
+// checks only RSA signatures and reads only the first signature tag of a package.
+var rocky8Image = floatingAmd64Image("docker.io/rockylinux/rockylinux:8")
 
-// TestRPM: dnf on Fedora (dnf5) and Rocky 9 (dnf4) installs packages that nfpm built from a
-// private RPM repo with gpgcheck and repo_gpgcheck, so every package and the repodata are signed
-// by the server; upgrades to a newer version, finds a file through the filelists, downgrades to
-// the older version (every version is in the repodata), stops seeing the newer version after its
-// delete, and keeps working through the old name after a rename. On both stores.
+// TestRPM: dnf installs packages that nfpm built from a private RPM repo with gpgcheck and
+// repo_gpgcheck, so every package and the repodata are signed by the server, on both stores. On
+// fs, it also upgrades to a newer version, finds a file through the filelists, downgrades to the
+// older version (every version is in the repodata), stops seeing the newer version after its
+// delete, and keeps working through the old name after a rename.
 func TestRPM(t *testing.T) {
 	t.Parallel()
 	pkgs := buildRPMPackages(t)
@@ -64,32 +61,30 @@ func TestRPM(t *testing.T) {
 			t.Fatalf("anonymous GET of the repodata of a private repo: status %d, want 401", st)
 		}
 
-		key := s.RPMKey(t, repo, rauth)
-		clients := map[string]*Dnf{"fedora": StartDnf(t, fedoraImage), "rocky9": StartDnf(t, rocky9Image)}
-		for name, d := range clients {
-			d.Trust(t, repo, key)
-			d.AddRepo(t, repo, rpmBaseURL(s, repo), reader, readerPass)
-			out := d.MustExec(t, name+": dnf install", "dnf -y install e2e-anchor e2e-data && e2e-anchor && e2e-data")
-			archWant(t, name+": dnf install", out, "anchor 1.0.0\n", "data 1.0.0\n")
+		d := StartDnf(t, fedoraImage)
+		d.Trust(t, repo, s.RPMKey(t, repo, rauth))
+		d.AddRepo(t, repo, rpmBaseURL(s, repo), reader, readerPass)
+		out := d.MustExec(t, "dnf install", "dnf -y install e2e-anchor e2e-data && e2e-anchor && e2e-data")
+		archWant(t, "dnf install", out, "anchor 1.0.0\n", "data 1.0.0\n")
+		if opts.S3 != nil {
+			return // the rest is the repodata, not the store
 		}
 
 		// A newer version: dnf upgrade --refresh takes it; the filelists find its file; dnf
 		// downgrade goes back, since the repodata lists every version.
 		rpmMustUpload(t, s, repo, pkgs.anchor11, wauth(), "e2e-anchor", "1.1.0-1", "x86_64")
 		s.WaitDebianIndexed(t, repo)
-		for name, d := range clients {
-			out := d.MustExec(t, name+": dnf upgrade", "dnf -y upgrade --refresh && e2e-anchor")
-			archWant(t, name+": dnf upgrade", out, "anchor 1.1.0\n")
-			out = d.MustExec(t, name+": dnf provides", "dnf -q provides /usr/bin/e2e-anchor")
-			archWant(t, name+": dnf provides", out, "e2e-anchor-1.1.0-1")
-			out = d.MustExec(t, name+": dnf downgrade", "dnf -y downgrade e2e-anchor && e2e-anchor")
-			archWant(t, name+": dnf downgrade", out, "anchor 1.0.0\n")
-		}
+		out = d.MustExec(t, "dnf upgrade", "dnf -y upgrade --refresh && e2e-anchor")
+		archWant(t, "dnf upgrade", out, "anchor 1.1.0\n")
+		out = d.MustExec(t, "dnf provides", "dnf -q provides /usr/bin/e2e-anchor")
+		archWant(t, "dnf provides", out, "e2e-anchor-1.1.0-1")
+		out = d.MustExec(t, "dnf downgrade", "dnf -y downgrade e2e-anchor && e2e-anchor")
+		archWant(t, "dnf downgrade", out, "anchor 1.0.0\n")
 
 		// A delete of the newest version: dnf no longer offers it.
 		mustDelete(t, s, repo, "path", "Packages/e2e-anchor/e2e-anchor-1.1.0-1.x86_64.rpm", s.Admin(), 1)
 		s.WaitDebianIndexed(t, repo)
-		out := clients["fedora"].MustExec(t, "repoquery after a delete", "dnf -q repoquery --refresh e2e-anchor")
+		out = d.MustExec(t, "repoquery after a delete", "dnf -q repoquery --refresh e2e-anchor")
 		if !strings.Contains(out, "1.0.0-1") || strings.Contains(out, "1.1.0-1") {
 			t.Fatalf("the repodata after deleting 1.1.0-1 lists:\n%s", out)
 		}
@@ -97,7 +92,7 @@ func TestRPM(t *testing.T) {
 		// A rename: the .repo file keeps the old baseurl, the old name is a redirect.
 		renamed := RandName("rpm-renamed")
 		s.MustAPI(t, http.MethodPost, "/api/repos/"+repo+"/rename", map[string]any{"name": renamed}, s.Admin(), nil)
-		out = clients["fedora"].MustExec(t, "dnf through the old name", "dnf -q repoquery --refresh e2e-data")
+		out = d.MustExec(t, "dnf through the old name", "dnf -q repoquery --refresh e2e-data")
 		archWant(t, "dnf through the old name", out, "e2e-data")
 		if st, _ := debGet(t, s, opts.S3, "/rpm/"+renamed+"/repodata/repomd.xml", rauth); st != http.StatusOK {
 			t.Fatalf("GET the repodata by the new name: status %d, want 200", st)

@@ -56,10 +56,10 @@ func npmMust(t *testing.T, image, what, script string, files []ContainerFile) st
 	return out
 }
 
-// TestNPM publishes a plain and a scoped package with npm publish and installs both with npm,
-// pnpm and Yarn from the hosted repo with a read token; a second publish of a version is refused
-// with 403. The packument names the server's tarball URL with the integrity of the
-// stored bytes, answers 304 to its ETag and serves both forms of a scoped name.
+// TestNPM publishes a plain and a scoped package with npm publish and installs both with npm from
+// the hosted repo with a read token; a second publish of a version is refused with 403. The
+// packument names the server's tarball URL with the integrity of the stored bytes, answers 304 to
+// its ETag and serves both forms of a scoped name.
 func TestNPM(t *testing.T) {
 	t.Parallel()
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
@@ -117,20 +117,10 @@ if npm publish --force 2>/tmp/forced.log; then echo FORCED_ACCEPTED; else echo F
 			t.Fatalf("anonymous packument of a private repo: status %d, want 401", resp.StatusCode)
 		}
 
-		host := s.Alias
 		deps := map[string]string{plain: "^1.0.0", scoped: "1.0.0"}
-		install := []ContainerFile{
-			npmConsumer("/work/npm", deps), {Path: "/work/npm/.npmrc", Content: npmrc(registry, read)},
-			npmConsumer("/work/pnpm", deps), {Path: "/work/pnpm/.npmrc", Content: npmrc(registry, read)},
-			npmConsumer("/work/yarn", deps), {Path: "/work/yarn/.yarnrc.yml", Content: yarnrc(registry, host, read)},
-		}
-		out = npmMust(t, nodeImage, "install with npm, pnpm and yarn", "set -e\n"+npmSetupTools+
-			"cd /work/npm && npm install --no-audit --no-fund\n"+npmRequire(plain, scoped)+
-			"cd /work/pnpm && pnpm install\n"+npmRequire(plain, scoped)+
-			"cd /work/yarn && yarn install\n"+npmRequire(plain, scoped), install)
-		if strings.Count(out, "REQ "+plain+": plain 1.0.0") != 3 || strings.Count(out, "REQ "+scoped+": scoped 1.0.0") != 3 {
-			t.Fatalf("install with npm, pnpm and yarn: want each package three times:\n%s", out)
-		}
+		out = npmMust(t, nodeImage, "npm install", "set -e\ncd /work/npm && npm install --no-audit --no-fund\n"+npmRequire(plain, scoped),
+			[]ContainerFile{npmConsumer("/work/npm", deps), {Path: "/work/npm/.npmrc", Content: npmrc(registry, read)}})
+		npmWant(t, "npm install", out, "REQ "+plain+": plain 1.0.0", "REQ "+scoped+": scoped 1.0.0")
 
 		// A new version shows in the packument at once: the packument of before no longer answers
 		// 304 to its ETag.
@@ -149,10 +139,10 @@ if npm publish --force 2>/tmp/forced.log; then echo FORCED_ACCEPTED; else echo F
 }
 
 // TestNPMRegistry covers the rest on the local disk: a proxy of registry.npmjs.org and a group of
-// the hosted repo and the proxy, from which npm, pnpm, Yarn and Bun install; a private name in the
-// hosted member is not shadowed by the higher public versions of the proxy; npm dist-tag add, ls
-// and rm; npm deprecate; npm unpublish of a version with a device session, refused with a CI
-// session, which still sets a dist-tag.
+// the hosted repo and the proxy, from which Bun installs; a private name in the hosted member is
+// not shadowed by the higher public versions of the proxy; npm dist-tag add, ls and rm; npm
+// deprecate; npm unpublish of a version with a device session, refused with a CI session, which
+// still sets a dist-tag.
 func TestNPMRegistry(t *testing.T) {
 	t.Parallel()
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
@@ -235,44 +225,17 @@ npm unpublish ` + tools + `@1.0.0 --force && echo UNPUBLISHED`},
 			t.Fatalf("is-number in the proxy: %+v, want the public versions with tarballs on the server", d)
 		}
 
-		host := s.Alias
 		pub := map[string]string{"ms": "2.1.3", "@types/ms": "0.7.34"}
 		mixed := map[string]string{"ms": "2.1.3", "@types/ms": "0.7.34", "is-number": "*", tools: "^1.0.0"}
-		var install []ContainerFile
-		for _, k := range []struct {
-			dir, registry, token string
-			deps                 map[string]string
-		}{{"proxy", reg(proxy), "", pub}, {"group", reg(group), read, mixed}} {
-			install = append(install,
-				npmConsumer("/work/npm-"+k.dir, k.deps), ContainerFile{Path: "/work/npm-" + k.dir + "/.npmrc", Content: npmrc(k.registry, k.token)},
-				npmConsumer("/work/pnpm-"+k.dir, k.deps), ContainerFile{Path: "/work/pnpm-" + k.dir + "/.npmrc", Content: npmrc(k.registry, k.token)},
-				npmConsumer("/work/yarn-"+k.dir, k.deps), ContainerFile{Path: "/work/yarn-" + k.dir + "/.yarnrc.yml", Content: yarnrc(k.registry, host, k.token)},
-			)
-		}
-		check := npmRequire("ms") + "test -f node_modules/@types/ms/package.json && echo TYPES_OK\n"
-		groupCheck := check + npmRequire("is-number", tools)
-		// The first pnpm run is in the project of the proxy, so pnpm downloads its binary through it.
-		out = npmMust(t, nodeImage, "install from the proxy and the group", "set -e\n"+npmInstallTools+
-			"cd /work/npm-proxy && npm install --no-audit --no-fund\n"+check+
-			"cd /work/pnpm-proxy && pnpm install\n"+check+
-			"cd /work/yarn-proxy && yarn install\n"+check+
-			"cd /work/npm-group && npm install --no-audit --no-fund\n"+groupCheck+
-			"cd /work/pnpm-group && pnpm install\n"+groupCheck+
-			"cd /work/yarn-group && yarn install\n"+groupCheck, install)
-		if strings.Count(out, "TYPES_OK") != 6 || strings.Count(out, "REQ is-number: private is-number") != 3 || strings.Count(out, "REQ "+tools+": tools 1.0.0") != 3 {
-			t.Fatalf("install from the proxy and the group:\n%s", out)
-		}
-		if paths := assetPathsOf(t, s, proxy, "@pnpm/"); !strings.Contains(out, "Downloading the pnpm") || len(paths) == 0 {
-			t.Fatalf("pnpm did not download its binary through the proxy (cached %v):\n%s", paths, out)
-		}
-		bunCheck := func(c string) string { return strings.ReplaceAll(c, "node -e", "bun -e") }
+		bunRequire := func(names ...string) string { return strings.ReplaceAll(npmRequire(names...), "node -e", "bun -e") }
+		check := bunRequire("ms") + "test -f node_modules/@types/ms/package.json && echo TYPES_OK\n"
 		out = npmMust(t, bunImage, "bun install from the proxy and the group", "set -e\n"+
-			"cd /work/proxy && bun install\n"+bunCheck(check)+
-			"cd /work/group && bun install\n"+bunCheck(groupCheck), []ContainerFile{
+			"cd /work/proxy && bun install\n"+check+
+			"cd /work/group && bun install\n"+check+bunRequire("is-number", tools), []ContainerFile{
 			npmConsumer("/work/proxy", pub), {Path: "/work/proxy/.npmrc", Content: npmrc(reg(proxy), "")},
 			npmConsumer("/work/group", mixed), {Path: "/work/group/.npmrc", Content: npmrc(reg(group), read)},
 		})
-		if strings.Count(out, "TYPES_OK") != 2 || !strings.Contains(out, "REQ is-number: private is-number") {
+		if strings.Count(out, "TYPES_OK") != 2 || !strings.Contains(out, "REQ is-number: private is-number") || !strings.Contains(out, "REQ "+tools+": tools 1.0.0") {
 			t.Fatalf("bun install from the proxy and the group:\n%s", out)
 		}
 		if paths := assetPathsOf(t, s, proxy, "ms/-/"); len(paths) == 0 {

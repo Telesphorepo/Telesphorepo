@@ -61,7 +61,7 @@ func nexusWaitMerge(t *testing.T, s *Server, id int64) nexusMerge {
 		if time.Now().After(deadline) {
 			t.Fatalf("merge %d still running after %s: %+v", id, nexusSyncWait, m)
 		}
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(nexusPoll)
 	}
 }
 
@@ -75,18 +75,18 @@ func nexusMembers(t *testing.T, s *Server, name string) []string {
 	return out
 }
 
-// nexusGetFile requires that GET p answers body, through the presigned URL on S3 storage (tg).
-func nexusGetFile(t *testing.T, s *Server, tg *S3Target, p string, body []byte) {
+// nexusGetFile requires that GET p answers body.
+func nexusGetFile(t *testing.T, s *Server, p string, body []byte) {
 	t.Helper()
-	if got := getFollowS3(t, s, tg, p); !bytes.Equal(got, body) {
+	if got := getFollowS3(t, s, nil, p); !bytes.Equal(got, body) {
 		t.Fatalf("GET %s: body %q, want %q", p, got, body)
 	}
 }
 
 // nexusGetRaw requires that GET /raw/<repo>/<path> answers body.
-func nexusGetRaw(t *testing.T, s *Server, tg *S3Target, repo, path string, body []byte) {
+func nexusGetRaw(t *testing.T, s *Server, repo, path string, body []byte) {
 	t.Helper()
-	nexusGetFile(t, s, tg, "/raw/"+repo+"/"+path, body)
+	nexusGetFile(t, s, "/raw/"+repo+"/"+path, body)
 }
 
 // nexusSetOnline sets the Nexus raw repo name online or offline.
@@ -105,7 +105,7 @@ func nexusSetOnline(t *testing.T, n *Nexus, name string, online bool) {
 // while Nexus lacks its repo: the final sync fails, the merge fails before the switch-over, and a
 // resume after the repo is back, offline, finishes it (the final sync skips an offline repo),
 // keeping the moving repo's name.
-func nexusGradualMove(t *testing.T, n *Nexus, s *Server, tg *S3Target) {
+func nexusGradualMove(t *testing.T, n *Nexus, s *Server) {
 	src, first := nexusRawRepo(t, n, "src-gm")
 	same := nexusRawFile{"dist/same.txt", []byte("the same bytes " + randHex(8))}
 	clash := nexusRawFile{"dist/clash.txt", []byte("published to nexus " + randHex(8))}
@@ -159,7 +159,7 @@ func nexusGradualMove(t *testing.T, n *Nexus, s *Server, tg *S3Target) {
 			t.Fatalf("PUT %s to %s as %s: status %d, want 201: %s", f.path, moving, pub, resp.StatusCode, b)
 		}
 	}
-	nexusGetRaw(t, s, tg, moving, project.path, project.data)
+	nexusGetRaw(t, s, moving, project.path, project.data)
 
 	// The plan: one file to copy, one skipped, one conflict.
 	var plan nexusMergePlan
@@ -183,9 +183,9 @@ func nexusGradualMove(t *testing.T, n *Nexus, s *Server, tg *S3Target) {
 	if m.Name != target || m.Redirect != moving || m.Copied != 1 || m.Skipped != 1 || m.Taken != 1 || m.Kept != 0 {
 		t.Fatalf("merge of %s into %s: %+v, want %s with the redirect %s, 1 copied, 1 skipped, 1 taken", moving, target, m, target, moving)
 	}
-	nexusGetRaw(t, s, tg, target, project.path, project.data)
-	nexusGetRaw(t, s, tg, target, clash.path, theirs.data)
-	nexusGetRaw(t, s, tg, target, first.path, first.data)
+	nexusGetRaw(t, s, target, project.path, project.data)
+	nexusGetRaw(t, s, target, clash.path, theirs.data)
+	nexusGetRaw(t, s, target, first.path, first.data)
 
 	// The moving repo's name answers for the target, and the target takes uploads.
 	if r := nexusRepoInfoOf(t, s, moving); r.Format != "raw" {
@@ -202,7 +202,7 @@ func nexusGradualMove(t *testing.T, n *Nexus, s *Server, tg *S3Target) {
 	if resp, b := rawPut(t, s, "/raw/"+moving+"/"+after.path, after.data, s.PublishAuth(t, pub, moving)); resp.StatusCode != http.StatusCreated {
 		t.Fatalf("PUT through the redirect %s: status %d, want 201: %s", moving, resp.StatusCode, b)
 	}
-	nexusGetRaw(t, s, tg, target, after.path, after.data)
+	nexusGetRaw(t, s, target, after.path, after.data)
 	if r := nexusState(t, s, source.ID).repo(t, src); r.SwitchOver == nil {
 		t.Fatalf("%s after the merge: %+v, want it switched over", src, r)
 	}
@@ -249,19 +249,19 @@ func nexusGradualMove(t *testing.T, n *Nexus, s *Server, tg *S3Target) {
 	if byName.Name != moving2 {
 		t.Fatalf("GET /api/repos/%s after the merge: name %q, want %s", target2, byName.Name, moving2)
 	}
-	nexusGetRaw(t, s, tg, moving2, first2.path, first2.data)
-	nexusGetRaw(t, s, tg, target2, own.path, own.data)
+	nexusGetRaw(t, s, moving2, first2.path, first2.data)
+	nexusGetRaw(t, s, target2, own.path, own.data)
 	if resp, b := rawPut(t, s, "/raw/"+target2+"/dist/later.txt", []byte("later"), s.PublishAuth(t, s.AdminUser, target2)); resp.StatusCode != http.StatusCreated {
 		t.Fatalf("PUT through the redirect %s: status %d, want 201: %s", target2, resp.StatusCode, b)
 	}
-	nexusGetRaw(t, s, tg, moving2, "dist/later.txt", []byte("later"))
+	nexusGetRaw(t, s, moving2, "dist/later.txt", []byte("later"))
 }
 
 // nexusGradualMoveGroup moves a copied Maven repo project by project with the group
 // <target>-all: the group reads the moving repo first, then the target, so a build finds the
 // version Nexus holds and the one a project published; after the merge the group keeps
 // reading the target alone.
-func nexusGradualMoveGroup(t *testing.T, n *Nexus, s *Server, tg *S3Target, groupPath string, jar, pom []byte) {
+func nexusGradualMoveGroup(t *testing.T, n *Nexus, s *Server, groupPath string, jar, pom []byte) {
 	src := RandName("src-gmg")
 	n.mustAPI(t, http.MethodPost, "/service/rest/v1/repositories/maven/hosted", map[string]any{
 		"name": src, "online": true, "storage": nexusStorage, "maven": nexusMavenSettings}, nil)
@@ -288,8 +288,8 @@ func nexusGradualMoveGroup(t *testing.T, n *Nexus, s *Server, tg *S3Target, grou
 	if resp, b := rawPut(t, s, "/maven/"+moving+"/"+jarPath("2.0.0"), built, s.PublishAuth(t, s.AdminUser, moving)); resp.StatusCode != http.StatusCreated {
 		t.Fatalf("PUT 2.0.0 to %s: status %d, want 201: %s", moving, resp.StatusCode, b)
 	}
-	nexusGetFile(t, s, tg, "/maven/"+group+"/"+jarPath("2.0.0"), built)
-	nexusGetFile(t, s, tg, "/maven/"+group+"/"+jarPath("1.0.0"), jar)
+	nexusGetFile(t, s, "/maven/"+group+"/"+jarPath("2.0.0"), built)
+	nexusGetFile(t, s, "/maven/"+group+"/"+jarPath("1.0.0"), jar)
 
 	plan := nexusMergePlanOf(t, s, moving)
 	if plan.Into != target || !plan.Copying || plan.ConflictCount != 0 || plan.BlockedCount != 0 {
@@ -297,8 +297,8 @@ func nexusGradualMoveGroup(t *testing.T, n *Nexus, s *Server, tg *S3Target, grou
 	}
 	m := nexusMergeDone(t, s, map[string]any{"from": moving, "into": target, "keep": "target"})
 	nexusMergeSync(t, s, m, target)
-	nexusGetFile(t, s, tg, "/maven/"+target+"/"+jarPath("2.0.0"), built)
-	nexusGetFile(t, s, tg, "/maven/"+target+"/"+jarPath("1.0.0"), jar)
+	nexusGetFile(t, s, "/maven/"+target+"/"+jarPath("2.0.0"), built)
+	nexusGetFile(t, s, "/maven/"+target+"/"+jarPath("1.0.0"), jar)
 
 	// The group keeps reading the target once the moving repo is deleted.
 	deadline := time.Now().Add(2 * time.Minute)
@@ -306,7 +306,7 @@ func nexusGradualMoveGroup(t *testing.T, n *Nexus, s *Server, tg *S3Target, grou
 		if time.Now().After(deadline) {
 			t.Fatalf("group %s reads %v two minutes after the merge, want [%s]", group, got, target)
 		}
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(nexusPoll)
 	}
-	nexusGetFile(t, s, tg, "/maven/"+group+"/"+jarPath("2.0.0"), built)
+	nexusGetFile(t, s, "/maven/"+group+"/"+jarPath("2.0.0"), built)
 }

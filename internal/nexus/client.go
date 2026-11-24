@@ -109,6 +109,12 @@ func (e *SourceError) Unauthorized() bool {
 	return e.Status == http.StatusUnauthorized || e.Status == http.StatusForbidden
 }
 
+// Final reports whether asking again cannot help: a client error (a missing repository, a refused
+// credential), except a timeout or a rate limit, which can clear.
+func (e *SourceError) Final() bool {
+	return e.Status >= 400 && e.Status < 500 && e.Status != http.StatusRequestTimeout && e.Status != http.StatusTooManyRequests
+}
+
 // Repository is one Nexus repository.
 type Repository struct {
 	Name   string

@@ -65,15 +65,18 @@ func TestDebian(t *testing.T) {
 		}
 		// A repo of only "all" packages: its Release still lists the configured architectures, and
 		// each binary-<arch>/Packages holds the "all" packages, so apt on any of them reads its own
-		// index with no "doesn't support architecture" notice (debAptInstall fails on one).
-		allRepo := RandName("deball")
-		s.CreateRepo(t, allRepo, "debian", false, map[string]any{"architectures": archs})
-		s.SetPerms(t, allRepo, writer, "repo.download", "repo.publish")
-		s.SetPerms(t, allRepo, reader, "repo.download")
-		debMustUpload(t, s, allRepo, pkgs.hello1, Basic{User: "ci", Pass: PublishToken(t, s, writer, allRepo)}, "e2e-hello", "1.0", "all")
-		s.WaitDebianIndexed(t, allRepo)
-		if out := debAptInstallOf(t, s, allRepo, reader, readerPass, s.DebianKey(t, allRepo, rauth), "e2e-hello"); !strings.Contains(out, "RESULT: hello 1.0\n") {
-			t.Fatalf("apt install from a repo of only \"all\" packages:\n%s", out)
+		// index with no "doesn't support architecture" notice (debAptInstall fails on one). The
+		// index is not the store: on fs only.
+		if opts.S3 == nil {
+			allRepo := RandName("deball")
+			s.CreateRepo(t, allRepo, "debian", false, map[string]any{"architectures": archs})
+			s.SetPerms(t, allRepo, writer, "repo.download", "repo.publish")
+			s.SetPerms(t, allRepo, reader, "repo.download")
+			debMustUpload(t, s, allRepo, pkgs.hello1, Basic{User: "ci", Pass: PublishToken(t, s, writer, allRepo)}, "e2e-hello", "1.0", "all")
+			s.WaitDebianIndexed(t, allRepo)
+			if out := debAptInstallOf(t, s, allRepo, reader, readerPass, s.DebianKey(t, allRepo, rauth), "e2e-hello"); !strings.Contains(out, "RESULT: hello 1.0\n") {
+				t.Fatalf("apt install from a repo of only \"all\" packages:\n%s", out)
+			}
 		}
 
 		debMustUpload(t, s, repo, pkgs.native, w, "e2e-native", "1.0", pkgs.arch)
@@ -97,12 +100,14 @@ func TestDebian(t *testing.T) {
 			t.Fatalf("apt install of 1.0 did not produce expected output:\n%s", out)
 		}
 
-		// Second version → incremental rebuild picked up by a fresh client.
-		debMustUpload(t, s, repo, pkgs.hello2, wauth(), "e2e-hello", "2.0", "all")
-		s.WaitDebianIndexed(t, repo)
-		out = debAptInstall(t, s, repo, reader, readerPass, key)
-		if !strings.Contains(out, "RESULT: hello 2.0\n") {
-			t.Fatalf("apt install after 2.0 upload did not produce hello 2.0:\n%s", out)
+		// Second version → incremental rebuild picked up by a fresh client (the index, on fs only).
+		if opts.S3 == nil {
+			debMustUpload(t, s, repo, pkgs.hello2, wauth(), "e2e-hello", "2.0", "all")
+			s.WaitDebianIndexed(t, repo)
+			out = debAptInstall(t, s, repo, reader, readerPass, key)
+			if !strings.Contains(out, "RESULT: hello 2.0\n") {
+				t.Fatalf("apt install after 2.0 upload did not produce hello 2.0:\n%s", out)
+			}
 		}
 
 		debCheckIndexes(t, s, opts.S3, repo, rauth, key)

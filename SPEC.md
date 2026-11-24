@@ -3065,12 +3065,13 @@ run (`E2E_IMAGE` names another and skips the build). The engine comes from
   at once (as many as the host has CPUs).
 - **Stores.** A test whose subject is the store runs on `fs` and on SeaweedFS S3
   (`ForEachStorage`, at the same time): each format's byte path, presigned redirects, deletes, the
-  blob GC, the CLI's uploads and the Nexus import. Every other test runs once, on `fs`
-  (`OnLocalDisk`). `TestNexus` runs its stores one after the other (`ForEachStorageInTurn`) because
-  both change the one Nexus.
+  blob GC and the CLI's uploads. Every other test runs once, on `fs` (`OnLocalDisk`). An import
+  writes through the same byte pipeline, so `TestNexus` imports the formats on `fs`, and its
+  subtest `s3` imports one raw repo into a server on S3.
 - **Containers.** Start each container that publishes a port with `runContainer`: rootless Podman
   can give two containers started at the same moment one host port, and `runContainer` starts the
-  second again.
+  second again. `registerCleanup` kills a container at test end: a stop waits the engine's 10 s
+  for a main process that ignores SIGTERM (`sleep infinity`, a shell).
 - **Images.** The images of the tools people bring float (`floatingImage`, listed in
   `e2e/images_test.go`): each run pulls its zone's images again and prints each version.
   A Docker Hub image whose local copy has the tag's current digest is not pulled (a manifest HEAD
@@ -3164,9 +3165,10 @@ job (`E2E_GITHUB_ACTIONS` set), where a real identity token exists.
 engine: it starts the server binary of `E2E_SERVER_BIN`, installs the CLI with `install.sh` into a
 new `HOME`, and runs setup and publish for a Maven project and a raw project. Agents never run it.
 
-`TestNexus` starts the server with `TR_NEXUS_SYNC_INTERVAL=12h`, so no scheduled sync changes the
-counters. Its fixture covers hosted, proxy, group, apt, raw and npm repos, and its subtests cover
-the switch-over, the gradual move and the merges.
+`TestNexus` starts one Nexus and one server, with `TR_NEXUS_SYNC_INTERVAL=12h` so no scheduled sync
+changes the counters. Its subtests (each format, the switch-over, the gradual moves, the merges) run
+at once, each with Nexus repos and a source of its own; the Nexus settings they share (anonymous
+read, the Docker Bearer Token Realm) are set before they start.
 
 `TestScale` (`e2e/scale_test.go`) needs no container engine and refuses to start while containers
 labelled `telesphorepo.e2e` or `telesphorepo-server` processes run. It makes two data folders with

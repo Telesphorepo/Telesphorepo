@@ -335,7 +335,11 @@ func buildE2EImage(ctx context.Context, eng containerengine.Engine) error {
 // image, started at once, each until it answers /healthz and a sign-in, then removed. That is the
 // work every e2e test starts with, on the engine the tests use. Then calibrationAmd64Runs runs at
 // once of an amd64 image, which an engine of another architecture emulates, as it does the
-// RHEL-family clients of the tests.
+// RHEL-family clients of the tests. The image is a pinned Fedora release: Fedora builds for the
+// x86-64 baseline, so an emulator runs it, where EL10 images need x86-64-v3 and exit at once
+// under the emulation of an Apple silicon Mac. A newer release runs the same rpm queries in about
+// the same time (Rocky 9 0.39 s, Fedora 45 0.46 s a run on an M-series Mac), so moving the pin
+// leaves e2erun.ReferenceCalibration as it is.
 //
 // A zone does on one computer the work that CI spreads over ciRunners machines, so its
 // calibration runs that many batches at once: the budget then compares this computer with that
@@ -344,7 +348,7 @@ const (
 	calibrationServers   = 6
 	calibrationRounds    = 2
 	calibrationAmd64Runs = 4
-	calibrationAmd64     = "docker.io/rockylinux/rockylinux:9"
+	calibrationAmd64     = "registry.fedoraproject.org/fedora:45"
 )
 
 // ciRunners is the number of CI machines that run each zone (the core zone's shards in

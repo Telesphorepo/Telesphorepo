@@ -22,9 +22,10 @@ import (
 )
 
 // TestArch: pacman installs packages that nfpm built from a private Arch repo with every package
-// and index signed and SigLevel Required, upgrades to a newer version, finds a file with -F,
-// installs an older version by its URL, falls back to the older version when the newer one is
-// deleted, and keeps working through the old section name after a rename. On both stores.
+// and index signed and SigLevel Required, on both stores. On fs, it also upgrades to a newer
+// version, finds a file with -F, installs an older version by its URL, falls back to the older
+// version when the newer one is deleted, and keeps working through the old section name after a
+// rename.
 func TestArch(t *testing.T) {
 	t.Parallel()
 	pkgs := buildArchPackages(t)
@@ -78,6 +79,9 @@ func TestArch(t *testing.T) {
 		p.AddRepo(t, repo, archServer(s, reader, readerPass))
 		out := p.MustExec(t, "pacman install", "pacman -Sy --noconfirm e2e-anchor e2e-data && e2e-anchor && e2e-data")
 		archWant(t, "pacman install", out, "anchor 1.0.0\n", "data 1.0.0\n")
+		if opts.S3 != nil {
+			return // the rest is the index, not the store
+		}
 
 		// A newer version: pacman -Syu upgrades to it.
 		archMustUpload(t, s, repo, pkgs.anchor11, wauth(), "e2e-anchor", "1.1.0-1", "x86_64")
@@ -243,7 +247,7 @@ func archIndexEntries(t *testing.T, s *Server, repo, arch string) []string {
 
 // TestArchSigning: pacman refuses a repo whose key it does not trust; after the repo's key changes
 // to an imported RSA key, every package and index is signed again: a client that trusts only the
-// old key refuses the repo, and one that trusts the new key installs from it.
+// old key refuses the repo, and once it trusts the new key instead it installs from it.
 func TestArchSigning(t *testing.T) {
 	t.Parallel()
 	pkgs := buildArchPackages(t)
@@ -275,10 +279,11 @@ func TestArchSigning(t *testing.T) {
 		if code, out := p.Exec(t, "pacman -Syy"); code == 0 {
 			t.Fatalf("pacman took an index signed with a key it does not trust:\n%s", out)
 		}
-		fresh := StartPacman(t)
-		fresh.Trust(t, newKey)
-		fresh.AddRepo(t, repo, archServer(s, "", ""))
-		out := fresh.MustExec(t, "pacman install after the key change", "pacman -Sy --noconfirm e2e-anchor && e2e-anchor")
+		// The client drops the old key and trusts the new one; the cache goes too, so pacman
+		// downloads the package again and checks it against the signature of the new index.
+		p.MustExec(t, "drop the old key", "pacman-key --delete "+archFingerprint(t, oldKey)+" && rm -rf /var/cache/pacman/pkg/*")
+		p.Trust(t, newKey)
+		out := p.MustExec(t, "pacman install after the key change", "pacman -Syy --noconfirm >/dev/null && pacman -S --noconfirm e2e-anchor && e2e-anchor")
 		archWant(t, "pacman install after the key change", out, "anchor 1.0.0\n")
 	})
 }

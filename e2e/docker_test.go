@@ -15,8 +15,8 @@ import (
 )
 
 // The Docker format (OCI registry): the registry API at /v2/, the token endpoint, the real
-// Docker CLI in Docker in Docker, the OCI conformance suite, crane, skopeo, ORAS and Helm, and
-// the removal of layers that no manifest uses.
+// Docker CLI in Docker in Docker, the OCI conformance suite, and the removal of layers that no
+// manifest uses.
 
 const conformanceImage = "ghcr.io/opencontainers/distribution-spec/conformance:v1.1.1"
 
@@ -194,8 +194,8 @@ func TestDockerChallengeScheme(t *testing.T) {
 }
 
 // TestDockerRegistry drives the registry with HTTP requests and the real Docker CLI: the
-// challenge, the token scopes, push and pull, logins that cannot push, anonymous pulls, a tag
-// move, a multi-platform index and a read IP rule.
+// challenge, the token scopes, and push and pull on both stores; on fs, logins that cannot push,
+// anonymous pulls, a tag move, a multi-platform index, a read IP rule and a repo delete.
 func TestDockerRegistry(t *testing.T) {
 	t.Parallel()
 	ForEachStorage(t, func(t *testing.T, opts ServerOpts) {
@@ -272,6 +272,9 @@ cd /out && sha256sum -c /sums
 				t.Fatalf("HEAD of the pushed tag: Docker-Content-Digest %q", idx)
 			}
 		})
+		if opts.S3 != nil {
+			return // the rest is the registry, not the store
+		}
 
 		t.Run("password and read token cannot push", func(t *testing.T) {
 			readTok := s.CreateToken(t, "reader", "reader-pass-1234", "docker")
@@ -387,14 +390,14 @@ func TestDockerConformance(t *testing.T) {
 	})
 }
 
-// TestDockerClients pushes and pulls with crane (cross-repo mount), skopeo (a streamed upload of
-// an OCI layout) and ORAS (an artifact with a subject, the referrers API), and checks the catalog
-// of each kind of caller.
-func TestDockerClients(t *testing.T) {
+// TestDockerRegistryAPI checks over HTTP what the Docker CLI and the conformance suite leave out:
+// a mount across repos of the server (from a repo the token does not read it starts an upload
+// instead), the referrers API with its filter and OCI-Subject, and the catalog of each kind of
+// caller.
+func TestDockerRegistryAPI(t *testing.T) {
 	t.Parallel()
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
 		s := StartServer(t, opts)
-		host := registryHost(s)
 		priv, pub, dst := RandName("priv"), RandName("pub"), RandName("dst")
 		s.CreateRepo(t, priv, "docker", false, nil)
 		s.CreateRepo(t, pub, "docker", true, nil)
@@ -403,28 +406,23 @@ func TestDockerClients(t *testing.T) {
 		s.SetPerms(t, dst, "pusher", "repo.download", "repo.publish", "repo.delete")
 		pubAuth := Basic{"pusher", PublishToken(t, s, "pusher", pub)}
 		privAuth := Basic{"pusher", PublishToken(t, s, "pusher", priv)}
-		dstTok := PublishToken(t, s, "pusher", dst)
-		dstAuth := Basic{"pusher", dstTok}
+		dstAuth := Basic{"pusher", PublishToken(t, s, "pusher", dst)}
 		layer := rawRandom(t, 200<<10)
 		ociImage(t, s, pubAuth, pub+"/base", "v1", nil, layer)
 		ociImage(t, s, privAuth, priv+"/secret", "v1", nil, rawRandom(t, 4096))
 
-		t.Run("crane mount", func(t *testing.T) {
-			code, out := RunClient(t, craneImage, ClientOpts{Cmd: []string{fmt.Sprintf(
-				"crane auth login %[1]s -u pusher -p '%[2]s' && crane copy --insecure -v %[1]s/%[3]s/base:v1 %[1]s/%[4]s/base:v1 2>&1", host, dstTok, pub, dst)}})
-			if code != 0 {
-				t.Fatalf("crane copy: exit %d:\n%s", code, out)
-			}
-			if !strings.Contains(out, "mount=sha256%3A"+sha256Hex(layer)) && !strings.Contains(out, "mount=sha256:"+sha256Hex(layer)) || !strings.Contains(out, "201 Created") {
-				t.Fatalf("crane copy: no mount answered 201:\n%s", out)
-			}
-			resp, b := ociDo(t, s, http.MethodHead, "/v2/"+dst+"/base/blobs/sha256:"+sha256Hex(layer), nil, s.AdminBasic(), nil)
+		t.Run("mount", func(t *testing.T) {
+			st, bearer, b := registryToken(t, s, dstAuth, "repository:"+dst+"/base:pull,push", "repository:"+pub+"/base:pull")
+			wantAPIStatus(t, "token for a mount from a public repo", st, b, http.StatusOK)
+			resp, b := ociDo(t, s, http.MethodPost, "/v2/"+dst+"/base/blobs/uploads/?mount=sha256:"+sha256Hex(layer)+"&from="+pub+"/base", nil, bearer, nil)
+			wantOCI(t, "mount from a public repo", resp, b, http.StatusCreated, "")
+			resp, b = ociDo(t, s, http.MethodHead, "/v2/"+dst+"/base/blobs/sha256:"+sha256Hex(layer), nil, s.AdminBasic(), nil)
 			wantOCI(t, "HEAD the mounted layer", resp, b, http.StatusOK, "")
+			ociImage(t, s, dstAuth, dst+"/base", "v1", nil, layer)
 
 			// A mount from a repo the token does not read starts an upload instead.
-			st, bearer, b := registryToken(t, s, dstAuth, "repository:"+dst+"/copy:pull,push", "repository:"+priv+"/secret:pull")
+			st, bearer, b = registryToken(t, s, dstAuth, "repository:"+dst+"/copy:pull,push", "repository:"+priv+"/secret:pull")
 			wantAPIStatus(t, "token for a mount from a private repo", st, b, http.StatusOK)
-			secretLayer := ""
 			resp, b = ociDo(t, s, http.MethodGet, "/v2/"+priv+"/secret/manifests/v1", nil, privAuth, nil)
 			wantOCI(t, "GET the private manifest", resp, b, http.StatusOK, "")
 			var m struct {
@@ -433,61 +431,43 @@ func TestDockerClients(t *testing.T) {
 				} `json:"layers"`
 			}
 			_ = json.Unmarshal(b, &m)
-			secretLayer = m.Layers[0].Digest
-			resp, b = ociDo(t, s, http.MethodPost, "/v2/"+dst+"/copy/blobs/uploads/?mount="+secretLayer+"&from="+priv+"/secret", nil, bearer, nil)
+			resp, b = ociDo(t, s, http.MethodPost, "/v2/"+dst+"/copy/blobs/uploads/?mount="+m.Layers[0].Digest+"&from="+priv+"/secret", nil, bearer, nil)
 			wantOCI(t, "mount from a private repo", resp, b, http.StatusAccepted, "")
 			if !strings.HasPrefix(resp.Header.Get("Location"), "/v2/"+dst+"/copy/blobs/uploads/") {
 				t.Fatalf("mount fallback: Location %q", resp.Header.Get("Location"))
 			}
 		})
 
-		t.Run("skopeo", func(t *testing.T) {
-			// The layout layer is uncompressed. Without --preserve-digests, skopeo compresses it
-			// and writes a new manifest.
-			files, manifestHex := ociLayout(t, "/layout", rawRandom(t, 300<<10))
-			code, out := RunClient(t, skopeoImage, ClientOpts{Files: files, Cmd: []string{fmt.Sprintf(
-				"skopeo copy --dest-tls-verify=false --dest-creds 'pusher:%s' --preserve-digests oci:/layout:v1 docker://%s/%s/sk:v1 2>&1", dstTok, host, dst)}})
-			if code != 0 {
-				t.Fatalf("skopeo copy: exit %d:\n%s", code, out)
+		t.Run("referrers", func(t *testing.T) {
+			subjectHex, subjectBytes, _ := ociImage(t, s, dstAuth, dst+"/art", "v1", nil, rawRandom(t, 1024))
+			subject := "sha256:" + subjectHex
+			desc := map[string]any{"mediaType": "application/vnd.oci.image.manifest.v1+json", "digest": subject, "size": len(subjectBytes)}
+			// A manifest PUT with a subject answers OCI-Subject.
+			ociBlob(t, s, dstAuth, dst+"/art", []byte("{}"))
+			sig, _ := json.Marshal(map[string]any{"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
+				"artifactType": "application/vnd.test.sig", "layers": []any{}, "subject": desc,
+				"config": map[string]any{"mediaType": "application/vnd.oci.empty.v1+json", "digest": "sha256:" + sha256Hex([]byte("{}")), "size": 2}})
+			resp, b := ociDo(t, s, http.MethodPut, "/v2/"+dst+"/art/manifests/sha256:"+sha256Hex(sig), sig, dstAuth, map[string]string{"Content-Type": "application/vnd.oci.image.manifest.v1+json"})
+			wantOCI(t, "PUT a manifest with a subject", resp, b, http.StatusCreated, "")
+			if resp.Header.Get("OCI-Subject") != subject {
+				t.Fatalf("PUT a manifest with a subject: OCI-Subject %q, want %s", resp.Header.Get("OCI-Subject"), subject)
 			}
-			if got := headDigest(t, s, s.AdminBasic(), dst+"/sk", "v1"); got != "sha256:"+manifestHex {
-				t.Fatalf("skopeo push: tag v1 names %s, want sha256:%s", got, manifestHex)
-			}
-		})
+			// A referrer of another type, by tag.
+			other, _, _ := ociImage(t, s, dstAuth, dst+"/art", "signed", map[string]any{"subject": desc})
 
-		t.Run("oras", func(t *testing.T) {
-			ref := host + "/" + dst + "/art:v1"
-			code, out := RunClient(t, orasImage, ClientOpts{WorkingDir: "/tmp", Cmd: []string{fmt.Sprintf(`set -e
-cd /tmp && echo hello > a.txt && echo signature > sig.txt
-oras push --plain-http -u pusher -p '%[1]s' --artifact-type application/vnd.test.art %[2]s a.txt
-oras attach --plain-http -u pusher -p '%[1]s' --artifact-type application/vnd.test.sig %[2]s sig.txt
-oras discover --plain-http -u pusher -p '%[1]s' --format json %[2]s
-oras discover --plain-http -u pusher -p '%[1]s' --artifact-type application/vnd.test.sig --format json %[2]s
-oras pull --plain-http -u pusher -p '%[1]s' -o /tmp/out %[2]s
-cmp /tmp/out/a.txt a.txt
-`, dstTok, ref)}})
-			if code != 0 || !strings.Contains(out, "application/vnd.test.sig") {
-				t.Fatalf("oras: exit %d:\n%s", code, out)
+			resp, b = ociDo(t, s, http.MethodGet, "/v2/"+dst+"/art/referrers/"+subject, nil, s.AdminBasic(), nil)
+			wantOCI(t, "referrers", resp, b, http.StatusOK, "")
+			if !strings.Contains(string(b), sha256Hex(sig)) || !strings.Contains(string(b), other) {
+				t.Fatalf("referrers: want both referrers: %s", b)
 			}
-			subject := headDigest(t, s, s.AdminBasic(), dst+"/art", "v1")
-			resp, b := ociDo(t, s, http.MethodGet, "/v2/"+dst+"/art/referrers/"+subject+"?artifactType=application/vnd.test.sig", nil, s.AdminBasic(), nil)
+			resp, b = ociDo(t, s, http.MethodGet, "/v2/"+dst+"/art/referrers/"+subject+"?artifactType=application/vnd.test.sig", nil, s.AdminBasic(), nil)
 			wantOCI(t, "referrers with a filter", resp, b, http.StatusOK, "")
-			if resp.Header.Get("OCI-Filters-Applied") != "artifactType" || !strings.Contains(string(b), "application/vnd.test.sig") {
+			if resp.Header.Get("OCI-Filters-Applied") != "artifactType" || !strings.Contains(string(b), sha256Hex(sig)) || strings.Contains(string(b), other) {
 				t.Fatalf("referrers with a filter: OCI-Filters-Applied %q: %s", resp.Header.Get("OCI-Filters-Applied"), b)
 			}
 			resp, b = ociDo(t, s, http.MethodGet, "/v2/"+dst+"/art/referrers/sha256:"+strings.Repeat("0", 64), nil, s.AdminBasic(), nil)
 			if resp.StatusCode != http.StatusOK || !strings.Contains(string(b), `"manifests":[]`) {
 				t.Fatalf("referrers of a digest without any: status %d: %s", resp.StatusCode, b)
-			}
-			// A manifest PUT with a subject answers OCI-Subject.
-			_, _, _ = ociImage(t, s, dstAuth, dst+"/art", "signed", map[string]any{"subject": map[string]any{
-				"mediaType": "application/vnd.oci.image.manifest.v1+json", "digest": subject, "size": 10}})
-			mb := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.empty.v1+json","digest":"sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a","size":2},"layers":[],"subject":{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"` + subject + `","size":10}}`)
-			ociBlob(t, s, dstAuth, dst+"/art", []byte("{}"))
-			resp, b = ociDo(t, s, http.MethodPut, "/v2/"+dst+"/art/manifests/sha256:"+sha256Hex(mb), mb, dstAuth, map[string]string{"Content-Type": "application/vnd.oci.image.manifest.v1+json"})
-			wantOCI(t, "PUT a manifest with a subject", resp, b, http.StatusCreated, "")
-			if resp.Header.Get("OCI-Subject") != subject {
-				t.Fatalf("PUT a manifest with a subject: OCI-Subject %q, want %s", resp.Header.Get("OCI-Subject"), subject)
 			}
 		})
 

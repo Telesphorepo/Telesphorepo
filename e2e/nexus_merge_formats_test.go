@@ -58,7 +58,6 @@ func nexusMergeSync(t *testing.T, s *Server, m nexusMerge, into string) {
 // repo goes in by its links and manifests, a tag that both hold with other digests is a conflict
 // taken from the moving repo, and crane pulls through both names.
 func nexusMergeDocker(t *testing.T, n *Nexus, s *Server) {
-	n.enableDockerToken(t)
 	port := 8082 + nexusDockerPort.Add(1) - 1
 	u, err := url.Parse(n.InternalURL)
 	if err != nil {

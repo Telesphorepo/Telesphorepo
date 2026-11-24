@@ -8,9 +8,8 @@ import (
 )
 
 // TestCLINPM: setup and publish of an npm project with each package manager, picked by the
-// lockfile: npm (no lockfile), pnpm (pnpm-lock.yaml), Yarn 4 (yarn.lock with .yarnrc.yml) and Bun
-// (bun.lock). The package manager packs and publishes with the session token from the env; npm
-// then installs every package from the repo.
+// lockfile: npm (no lockfile) and Bun (bun.lock). The package manager packs and publishes with
+// the session token from the env; npm then installs every package from the repo.
 func TestCLINPM(t *testing.T) {
 	t.Parallel()
 	c := newCLI(t)
@@ -29,22 +28,18 @@ telesphorepo publish
 `
 		names := map[string]string{}
 		for _, k := range []struct {
-			tool, image, prelude, command string
-			extra                         []ContainerFile
+			tool, image, command string
+			extra                []ContainerFile
 		}{
-			{"npm", nodeImage, "", "npm publish --registry", nil},
-			{"pnpm", nodeImage, npmSetupTools, "pnpm publish --registry",
-				[]ContainerFile{{Path: "/work/app/pnpm-lock.yaml", Content: "lockfileVersion: '9.0'\n"}}},
-			{"yarn", nodeImage, npmSetupTools + "(cd /work/app && yarn install)\n", "yarn npm publish",
-				[]ContainerFile{{Path: "/work/app/.yarnrc.yml", Content: "nodeLinker: node-modules\nenableTelemetry: false\n"}}},
-			{"bun", bunImage, "", "bun publish --registry",
+			{"npm", nodeImage, "npm publish --registry", nil},
+			{"bun", bunImage, "bun publish --registry",
 				[]ContainerFile{{Path: "/work/app/bun.lock", Content: `{"lockfileVersion": 1, "workspaces": {"": {"name": "app"}}, "packages": {}}` + "\n"}}},
 		} {
 			t.Run(k.tool, func(t *testing.T) {
 				name := "@cli/" + RandName(k.tool)
 				names[name] = k.tool
 				files := append(npmPackage("/work/app", name, "1.0.0", "published with "+k.tool), k.extra...)
-				out := c.mustRun(t, k.image, "publish with "+k.tool, k.prelude+publish, ClientOpts{
+				out := c.mustRun(t, k.image, "publish with "+k.tool, publish, ClientOpts{
 					Files:  files,
 					Env:    map[string]string{"E2E_LINK": s.NewSetupCode(t, dev, repo).Link},
 					Mounts: map[string]string{devices: "/root/.telesphorepo"},

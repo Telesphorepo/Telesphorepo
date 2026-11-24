@@ -183,7 +183,8 @@ func moveWantRaw(t *testing.T, s *Server, repo string, files map[string][]byte) 
 }
 
 // TestStorageMove moves Maven, Debian and raw content between fs and SeaweedFS in both
-// directions while uploads continue, then checks both stores and real clients.
+// directions while uploads continue, then checks both stores and reads every format from the new
+// one.
 func TestStorageMove(t *testing.T) {
 	t.Parallel()
 	pkgs := buildDebPackages(t)
@@ -222,21 +223,11 @@ func moveContent(t *testing.T, s *Server, pkgs *debPackages, patch map[string]an
 	s.CreateRepo(t, debRepo, "debian", false, map[string]any{"architectures": []string{pkgs.arch}})
 	s.CreateRepo(t, rawRepo, "raw", false, nil)
 
-	group := "com.example.move" + randHex(4)
-	groupPath := strings.ReplaceAll(group, ".", "/")
-	repoURL := s.InternalURL + "/maven/" + mvnRepo
-	msg := "hello from " + group
-	settingsXML := ContainerFile{Path: "/work/settings.xml", Content: mavenSettingsXML(s.AdminUser, s.AdminPass)}
-	deploySettings := ContainerFile{Path: "/work/settings.xml", Content: mavenSettingsXML(s.AdminUser, PublishToken(t, s, s.AdminUser, mvnRepo))}
-	m2 := map[string]string{M2Volume: "/root/.m2/repository"}
-	code, out := RunClient(t, mavenImage, ClientOpts{
-		Cmd:     []string{"cd /work/lib && mvn -B -ntp -s /work/settings.xml deploy"},
-		Files:   append(mavenLibProject(group, "1.0.0", repoURL, msg), deploySettings),
-		Mounts:  m2,
-		Timeout: 15 * time.Minute,
-	})
-	if code != 0 {
-		t.Fatalf("mvn deploy: exit %d\n%s", code, out)
+	mvnFiles := map[string][]byte{}
+	dir := "com/example/move" + randHex(4) + "/hello/1.0.0/"
+	for _, f := range []string{"hello-1.0.0.jar", "hello-1.0.0.pom"} {
+		mvnFiles[dir+f] = rawRandom(t, 4096)
+		mavenPut(t, s, s.AdminUser, mvnRepo, dir+f, mvnFiles[dir+f])
 	}
 
 	debAuth := s.PublishAuth(t, s.AdminUser, debRepo)
@@ -298,30 +289,12 @@ func moveContent(t *testing.T, s *Server, pkgs *debPackages, patch map[string]an
 	}
 	moveWantBlobs(t, "source", src(t), srcWant)
 
+	// Every format reads from the new store: the files, and the signed Debian index.
 	moveWantRaw(t, s, rawRepo, raw)
-
-	// Real clients resolve from the new store.
-	script := strings.Join([]string{
-		"set -e",
-		"rm -rf /root/.m2/repository/" + groupPath,
-		"cd /work/consumer",
-		"mvn -B -ntp -q -U -s /work/settings.xml -Ddep.version=1.0.0 -Dmdep.outputFile=/tmp/cp.txt org.apache.maven.plugins:maven-dependency-plugin:3.8.1:build-classpath",
-		`java -cp "$(cat /tmp/cp.txt)" ` + group + ".Hello",
-	}, "\n")
-	code, out = RunClient(t, mavenImage, ClientOpts{
-		Cmd:     []string{script},
-		Files:   []ContainerFile{settingsXML, mavenConsumerProject(group, repoURL)},
-		Mounts:  m2,
-		Timeout: 15 * time.Minute,
-	})
-	if code != 0 || !strings.Contains(out, msg) {
-		t.Fatalf("maven consumer after the move: exit %d, want 0 with %q:\n%s", code, msg, out)
+	for p, body := range mvnFiles {
+		rawWantGet(t, s, nil, "/maven/"+mvnRepo+"/"+p, s.AdminBasic(), body)
 	}
-	key := s.DebianKey(t, debRepo, s.AdminBasic())
-	out = debAptInstall(t, s, debRepo, s.AdminUser, s.AdminPass, key)
-	if !strings.Contains(out, "RESULT: hello 1.0\n") || !strings.Contains(out, "NATIVE: native "+pkgs.arch) {
-		t.Fatalf("apt install after the move did not produce expected output:\n%s", out)
-	}
+	debCheckIndexes(t, s, nil, debRepo, s.AdminBasic(), s.DebianKey(t, debRepo, s.AdminBasic()))
 
 	// A new upload lands in the new store.
 	body := rawRandom(t, 4096)

@@ -35,7 +35,6 @@ func (n *Nexus) enableDockerToken(t *testing.T) {
 // skopeo, imports the repo into s, pulls both from s with crane by tag and by digest, and syncs
 // again with nothing new.
 func nexusDocker(t *testing.T, n *Nexus, s *Server) {
-	n.enableDockerToken(t)
 	port := 8082 + nexusDockerPort.Add(1) - 1
 	u, err := url.Parse(n.InternalURL)
 	if err != nil {

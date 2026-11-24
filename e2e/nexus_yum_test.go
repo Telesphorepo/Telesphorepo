@@ -48,7 +48,7 @@ func nexusYum(t *testing.T, n *Nexus, s *Server) {
 		if time.Now().After(deadline) {
 			t.Fatalf("the Nexus yum repo %s lists %v after 2 minutes, want the 3 packages", src, paths)
 		}
-		time.Sleep(2 * time.Second)
+		time.Sleep(nexusPoll)
 	}
 
 	source := nexusCreateSource(t, s, n)

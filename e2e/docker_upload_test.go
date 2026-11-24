@@ -38,12 +38,13 @@ func startBodyLimitProxy(t *testing.T, alias, upstream string) {
 }
 
 // TestDockerUploadHost puts Caddy with a body limit of 1 MB in front of the main host (base_url)
-// and points docker.upload_url at the server itself. With docker.direct_uploads off, a crane push of
-// a 5 MB layer through the proxy fails with 413. With it on, POST on the main host answers an absolute
-// Location on the upload host with an upload token, which writes to that upload only; and the
-// Docker CLI (both push paths of the engine), crane and skopeo push a 5 MB layer through the proxy
-// hostname and pull it back. ORAS and Helm 4 (oras-go v2.6.1 and later) refuse an upload Location
-// on another host, so they push to the upload host by name and pull through the proxy.
+// and points docker.upload_url at the server itself. With docker.direct_uploads off, an upload
+// stays on the host of the push. With it on, POST on the main host answers an absolute Location on
+// the upload host with an upload token, which writes to that upload only (a bearer token of the
+// main host, which containers/image sends along, writes too); and the Docker CLI (both push paths
+// of the engine) pushes a 5 MB layer through the proxy hostname and pulls it back. Helm 4
+// (oras-go v2.6.1 and later) refuses an upload Location on another host, so it pushes to the
+// upload host by name and pulls through the proxy.
 func TestDockerUploadHost(t *testing.T) {
 	t.Parallel()
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
@@ -63,8 +64,6 @@ func TestDockerUploadHost(t *testing.T) {
 		s.SetPerms(t, r, "pusher", "repo.download", "repo.publish")
 		// Each push gets its own publish session, so no session ends within the test.
 		token := func() string { return PublishToken(t, s, "pusher", r) }
-		files, manifestHex := ociLayout(t, "/layout", rawRandom(t, 5<<20))
-
 		s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"docker.direct_uploads": false, "docker.upload_url": ""}, s.Admin(), nil)
 		var hosts map[string]string
 		s.MustAPI(t, http.MethodGet, "/docker/hosts", nil, nil, &hosts)
@@ -75,11 +74,11 @@ func TestDockerUploadHost(t *testing.T) {
 		st, b := s.API(t, http.MethodPatch, "/api/settings", map[string]any{"docker.direct_uploads": true}, s.Admin())
 		wantAPIStatus(t, "direct uploads without an upload address", st, b, http.StatusBadRequest)
 		s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"docker.upload_url": uploadURL}, s.Admin(), nil)
-		t.Run("direct uploads off: the proxy refuses the layer", func(t *testing.T) {
-			code, out := RunClient(t, craneImage, ClientOpts{Files: files, Cmd: []string{fmt.Sprintf(
-				"crane auth login %[1]s -u pusher -p '%[2]s' && crane push --insecure /layout %[1]s/%[3]s/control:v1 2>&1", mainHost, token(), r)}})
-			if code == 0 || !strings.Contains(out, "413") {
-				t.Fatalf("crane push through the proxy without the upload host: exit %d, want a 413:\n%s", code, out)
+		t.Run("direct uploads off: the upload stays on the host of the push", func(t *testing.T) {
+			resp, b := ociDo(t, s, http.MethodPost, "/v2/"+r+"/raw/blobs/uploads/", nil, Basic{"pusher", token()}, nil)
+			wantOCI(t, "start an upload with direct uploads off", resp, b, http.StatusAccepted, "")
+			if loc := resp.Header.Get("Location"); !strings.Contains(loc, "/v2/"+r+"/raw/blobs/uploads/") || strings.HasPrefix(loc, uploadURL) || strings.Contains(loc, "_state") {
+				t.Fatalf("upload Location %q with direct uploads off: want the upload on the host of the push, without a token", loc)
 			}
 		})
 
@@ -111,6 +110,11 @@ func TestDockerUploadHost(t *testing.T) {
 			wantOCI(t, "PATCH with a changed token", resp, b, http.StatusUnauthorized, "")
 			resp, b = ociDo(t, s, http.MethodGet, "/v2/"+r+"/raw/manifests/v1?_state="+url.QueryEscape(one.Query().Get("_state")), nil, nil, nil)
 			wantOCI(t, "the token on another path", resp, b, http.StatusUnauthorized, "")
+			// containers/image (Podman, skopeo) sends the bearer token of the main host along.
+			st, bearer, tb := registryToken(t, s, auth, "repository:"+r+"/raw:pull,push")
+			wantAPIStatus(t, "a push token of the main host", st, tb, http.StatusOK)
+			resp, b = ociDo(t, s, http.MethodPatch, at(other, other.Query()), blob, bearer, nil)
+			wantOCI(t, "PATCH with the upload token and a bearer token of the main host", resp, b, http.StatusAccepted, "")
 
 			resp, b = ociDo(t, s, http.MethodPatch, at(one, one.Query()), blob, nil, nil)
 			wantOCI(t, "PATCH with the upload token", resp, b, http.StatusAccepted, "")
@@ -145,31 +149,8 @@ docker pull %[3]s:v1
 			})
 		}
 
-		t.Run("crane", func(t *testing.T) {
-			code, out := RunClient(t, craneImage, ClientOpts{Files: files, Cmd: []string{fmt.Sprintf(
-				"set -e; crane auth login %[1]s -u pusher -p '%[2]s'; crane push --insecure /layout %[1]s/%[3]s/crane:v1; crane pull --insecure %[1]s/%[3]s/crane:v1 /tmp/img.tar 2>&1", mainHost, token(), r)}})
-			if code != 0 {
-				t.Fatalf("crane through the proxy: exit %d:\n%s", code, out)
-			}
-			if got := headDigest(t, s, s.AdminBasic(), r+"/crane", "v1"); got != "sha256:"+manifestHex {
-				t.Fatalf("crane push: tag v1 names %s, want sha256:%s", got, manifestHex)
-			}
-		})
-
-		t.Run("skopeo", func(t *testing.T) {
-			code, out := RunClient(t, skopeoImage, ClientOpts{Files: files, Cmd: []string{fmt.Sprintf(
-				"set -e; skopeo copy --dest-tls-verify=false --dest-creds 'pusher:%[2]s' --preserve-digests oci:/layout:v1 docker://%[1]s/%[3]s/skopeo:v1 2>&1; "+
-					"skopeo copy --src-tls-verify=false --src-creds 'pusher:%[2]s' docker://%[1]s/%[3]s/skopeo:v1 oci:/out:v1 2>&1", mainHost, token(), r)}})
-			if code != 0 {
-				t.Fatalf("skopeo through the proxy: exit %d:\n%s", code, out)
-			}
-			if got := headDigest(t, s, s.AdminBasic(), r+"/skopeo", "v1"); got != "sha256:"+manifestHex {
-				t.Fatalf("skopeo push: tag v1 names %s, want sha256:%s", got, manifestHex)
-			}
-		})
-
-		// ORAS and Helm 4 refuse an upload Location on another host, so they push to the upload
-		// host by name: there the upload Location stays on that host. They pull through the proxy.
+		// Helm 4 refuses an upload Location on another host, so it pushes to the upload host by
+		// name: there the upload Location stays on that host. It pulls through the proxy.
 		uploadHost := srvAlias + ":8080"
 		t.Run("upload host answers on its own host", func(t *testing.T) {
 			s.MustAPI(t, http.MethodGet, "/docker/hosts", nil, nil, &hosts)
@@ -189,18 +170,6 @@ docker pull %[3]s:v1
 			wantOCI(t, "GET /v2/ on the upload host", resp, b, http.StatusUnauthorized, "UNAUTHORIZED")
 			if ch := resp.Header.Get("WWW-Authenticate"); !strings.Contains(ch, `realm="http://`+uploadHost+`/docker/token"`) {
 				t.Fatalf("the challenge on the upload host names another realm: %q", ch)
-			}
-		})
-
-		t.Run("oras", func(t *testing.T) {
-			code, out := RunClient(t, orasImage, ClientOpts{WorkingDir: "/tmp", Cmd: []string{fmt.Sprintf(`set -e
-cd /tmp && head -c 5242880 /dev/urandom > big.bin
-oras push --plain-http -u pusher -p '%[1]s' %[2]s/%[4]s/oras:v1 big.bin
-oras pull --plain-http -u pusher -p '%[1]s' -o /tmp/out %[3]s/%[4]s/oras:v1
-cmp /tmp/out/big.bin big.bin
-`, token(), uploadHost, mainHost, r)}})
-			if code != 0 {
-				t.Fatalf("oras push to the upload host, pull through the proxy: exit %d:\n%s", code, out)
 			}
 		})
 

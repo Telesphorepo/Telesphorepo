@@ -216,7 +216,9 @@ func runContainer(ctx context.Context, image string, opts ...testcontainers.Cont
 	}
 }
 
-// registerCleanup terminates c at test end, dumping its logs first if the test failed.
+// registerCleanup terminates c at test end, dumping its logs first if the test failed. The
+// container is thrown away, so it is killed at once: a stop would wait the engine's 10 s for a main
+// process that ignores SIGTERM (the `sleep infinity` of a client container, a shell as PID 1).
 func registerCleanup(t testing.TB, c *testcontainers.DockerContainer, label string) {
 	if c == nil {
 		return
@@ -227,7 +229,7 @@ func registerCleanup(t testing.TB, c *testcontainers.DockerContainer, label stri
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
-		_ = c.Terminate(ctx)
+		_ = c.Terminate(ctx, testcontainers.StopTimeout(0))
 	})
 }
 
@@ -1165,13 +1167,6 @@ func tail(s string, n int) string {
 func ForEachStorage(t *testing.T, fn func(t *testing.T, opts ServerOpts)) {
 	t.Run("fs", func(t *testing.T) { t.Parallel(); fn(t, ServerOpts{Storage: "fs"}) })
 	t.Run("seaweedfs", func(t *testing.T) { t.Parallel(); fn(t, ServerOpts{Storage: "s3", S3: StartSeaweedFS(t)}) })
-}
-
-// ForEachStorageInTurn is ForEachStorage with one store after the other, for a test whose stores
-// share an outside system that each run changes (the Nexus of TestNexus).
-func ForEachStorageInTurn(t *testing.T, fn func(t *testing.T, opts ServerOpts)) {
-	t.Run("fs", func(t *testing.T) { fn(t, ServerOpts{Storage: "fs"}) })
-	t.Run("seaweedfs", func(t *testing.T) { fn(t, ServerOpts{Storage: "s3", S3: StartSeaweedFS(t)}) })
 }
 
 // OnLocalDisk runs fn once, on the local disk store. A test whose subject is not the store takes

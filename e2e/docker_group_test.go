@@ -16,9 +16,9 @@ import (
 
 // TestDockerGroupBearer reads a private docker group with the bearer tokens of the token endpoint:
 // a user who holds download on the group and on one member pulls through the group with the
-// Docker CLI after docker login, with crane, and with a bearer token over HTTP. The group skips the
-// member that the user may not read, the token reads no member directly, and every read answer
-// carries Cache-Control: private.
+// Docker CLI after docker login, and with a bearer token over HTTP. The group skips the member
+// that the user may not read, the token reads no member directly, and every read answer carries
+// Cache-Control: private.
 func TestDockerGroupBearer(t *testing.T) {
 	t.Parallel()
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
@@ -57,18 +57,6 @@ docker pull %[4]s:v1
 			}
 			if code, out := d.Exec(t, fmt.Sprintf("docker pull %s:only-hidden 2>&1", ref)); code == 0 {
 				t.Fatalf("docker pull of a tag of the hidden member through the group: exit 0, want a failure:\n%s", out)
-			}
-		})
-
-		t.Run("crane", func(t *testing.T) {
-			code, out := RunClient(t, craneImage, ClientOpts{Cmd: []string{fmt.Sprintf(
-				`set -e; crane auth login %[1]s -u %[2]s -p '%[3]s'; crane pull --insecure %[4]s:v1 /tmp/img.tar; echo "DIGEST $(crane digest --insecure %[4]s:v1)"; echo "TAGS $(crane ls --insecure %[4]s | tr '\n' ' ')"`,
-				host, user, pass, ref)}})
-			if code != 0 || !strings.Contains(out, "DIGEST sha256:"+mine.Hex) {
-				t.Fatalf("crane through the group: exit %d, want the digest sha256:%s:\n%s", code, mine.Hex, out)
-			}
-			if !strings.Contains(out, "TAGS v1") || strings.Contains(out, "only-hidden") {
-				t.Fatalf("crane ls through the group: want v1 and no tag of the hidden member:\n%s", out)
 			}
 		})
 

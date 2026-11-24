@@ -50,7 +50,7 @@ func nexusNuGet(t *testing.T, n *Nexus, s *Server) {
 		if time.Now().After(deadline) {
 			t.Fatalf("the Nexus nuget repo %s lists no asset after a minute", src)
 		}
-		time.Sleep(time.Second)
+		time.Sleep(nexusPoll)
 	}
 	t.Logf("assets of the Nexus nuget repo: %v", paths)
 
