@@ -26,8 +26,9 @@ var Extra = map[string]string{
 
 // The lists of the repos of a caller's grants (GET /api/repos, GET /api/overview): one rowid
 // lookup per id, then sorted. sqlc numbers the parameters that follow a slice wrongly, so these
-// take the ids last: idsMark becomes one numbered parameter per id (withIDs).
-const idsMark = "/*IDS*/?"
+// take the ids last: IDsMark becomes one numbered parameter per id (withIDs), and two in the plan
+// guard (db.CheckPlans), which plans a list as one of several values.
+const IDsMark = "/*IDS*/?"
 
 const repoColumns = `r.id, r.name, r.format, r.kind, r.anonymous_read, r.config, r.created_at, r.description,
   r.file_count, r.total_size, r.last_published_at,
@@ -38,20 +39,20 @@ FROM repos r LEFT JOIN repo_ops o ON o.repo_id = r.id`
 // holds (” any), then the ids. Each parameter appears once: the plan guard binds one NULL per "?".
 const listReposIn = `SELECT ` + repoColumns + `
 WHERE r.name >= ?1 AND r.name < ?2 AND r.format = coalesce(nullif(?3, ''), r.format) AND r.kind = coalesce(nullif(?4, ''), r.kind)
-  AND instr(r.name, ?6) > 0 AND r.id IN (` + idsMark + `)
+  AND instr(r.name, ?6) > 0 AND r.id IN (` + IDsMark + `)
 ORDER BY r.name LIMIT ?5`
 
 // listReposByIDs: the repos of the ids (the members of a group), in no order.
 const listReposByIDs = `SELECT ` + repoColumns + `
-WHERE r.id IN (` + idsMark + `)`
+WHERE r.id IN (` + IDsMark + `)`
 
 // listReposInByPublished: ?1 limit, then the ids.
 const listReposInByPublished = `SELECT ` + repoColumns + `
-WHERE r.id IN (` + idsMark + `) ORDER BY r.last_published_at DESC, r.id DESC LIMIT ?1`
+WHERE r.id IN (` + IDsMark + `) ORDER BY r.last_published_at DESC, r.id DESC LIMIT ?1`
 
 // listLargestReposIn: ?1 limit, then the ids.
 const listLargestReposIn = `SELECT ` + repoColumns + `
-WHERE r.total_size > 0 AND r.id IN (` + idsMark + `) ORDER BY r.total_size DESC, r.id DESC LIMIT ?1`
+WHERE r.total_size > 0 AND r.id IN (` + IDsMark + `) ORDER BY r.total_size DESC, r.id DESC LIMIT ?1`
 
 // withIDs returns query with one placeholder per id and the arguments: args, then the ids. Each id
 // takes a numbered parameter after args (?6, ?7, ... after five args): SQLite gives a bare "?" the
@@ -68,7 +69,7 @@ func withIDs(query string, ids []int64, args ...any) (string, []any) {
 	for _, id := range ids {
 		args = append(args, id)
 	}
-	return strings.Replace(query, idsMark, marks, 1), args
+	return strings.Replace(query, IDsMark, marks, 1), args
 }
 
 // ListReposIn returns the repos of ids with a name in [from, to) that holds text, of format and

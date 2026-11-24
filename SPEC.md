@@ -347,13 +347,19 @@ cannot express (FTS5 `MATCH`, streaming rows with `iter.Seq2`) are hand-written 
 and listed in its `Extra` map.
 
 **Plan guard.** `db.CheckPlans` (`internal/db/plan.go`) runs `EXPLAIN QUERY PLAN` for every query
-of every component on a database with every schema. A SCAN of a table and any TEMP B-TREE fail; a
-SCAN of a partial index or a virtual table passes. A query that must scan goes in the component's
-`Allow` map with its reason (each is off the request path: startup, once per backup or move, a
-status poll); an `Allow` entry for a missing query or a clean plan also fails. A query that writes
-a table outside its component's schema fails: a module writes only its own tables, and kernel
-tables change only through kernel services. `TestQueryPlans` runs the guard through the hidden
-`dbcheck` command.
+of every component on a database with every schema and no statistics. A SCAN of a table and any
+TEMP B-TREE fail; a SCAN of a partial index or a virtual table passes. A list (`json_each(?)`, or a
+`sqlc.slice` or `dbq.IDsMark`, bound as two values since SQLite plans `IN (?)` as `=`) must drive
+its plan (`internal/db/planlists.go`): a `json_each` table that a join reads after another table
+fails (`json_each(?) j CROSS JOIN t` fixes the order), and so does an `IN` list whose column (each
+column of a row value) is in no SEARCH constraint, since SQLite then reads a range by a shorter key
+and filters the list. It cannot see a list behind an expression, one read by index with
+`json_extract`, nor the plans that statistics choose on a live database. A query that must scan,
+sort or filter goes in the component's `Allow` map with its reason (off the request path, or
+bounded by one caller's grants or scope); an `Allow` entry for a missing query or a clean plan
+also fails. A query that writes a table outside its component's schema fails: a module writes only
+its own tables, and kernel tables change only through kernel services. `TestQueryPlans` runs the
+guard through the hidden `dbcheck` command.
 
 ## Storage layout
 
@@ -1999,7 +2005,8 @@ estimates progress from it.
   page before it is done, so the saved token always follows a done prefix and a resume redoes the
   pages after it. Parallel imports are safe because the commit takes the path locks and the
   format's extra locks, and no importer depends on asset order.
-- **Log.** A log line holds counts, never a path, a URL, a password or a token.
+- **Log.** A log line holds counts, never a path, a URL, a password or a token. The lines of one
+  repo (`?repo=`) are one range of `nexus_sync_log_repo`, so a page costs a page.
 - **Retention.** A new sync deletes its source's syncs after the newest 100. The switch-over
   syncs stay.
 - **Scheduler.** It reads `nexus.sync_interval` live and starts a sync for each due mirroring

@@ -1298,8 +1298,7 @@ type ListNexusSyncLogRow struct {
 	Message    string
 }
 
-// Keyset page of a sync's log lines, oldest first, through nexus_sync_log_sync. The repo
-// filter is applied in Go: a sync has a few thousand lines at most.
+// Keyset page of a sync's log lines, oldest first, through nexus_sync_log_sync.
 func (q *Queries) ListNexusSyncLog(ctx context.Context, arg ListNexusSyncLogParams) ([]ListNexusSyncLogRow, error) {
 	rows, err := q.db.QueryContext(ctx, listNexusSyncLog, arg.SyncID, arg.AfterID, arg.Limit)
 	if err != nil {
@@ -1309,6 +1308,62 @@ func (q *Queries) ListNexusSyncLog(ctx context.Context, arg ListNexusSyncLogPara
 	var items []ListNexusSyncLogRow
 	for rows.Next() {
 		var i ListNexusSyncLogRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.At,
+			&i.SourceRepo,
+			&i.Level,
+			&i.Message,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listNexusSyncLogOfRepo = `-- name: ListNexusSyncLogOfRepo :many
+SELECT id, at, source_repo, level, message FROM nexus_sync_log
+WHERE sync_id = ?1 AND source_repo = ?2 AND id > ?3
+ORDER BY id LIMIT ?4
+`
+
+type ListNexusSyncLogOfRepoParams struct {
+	SyncID     int64
+	SourceRepo string
+	AfterID    int64
+	Limit      int64
+}
+
+type ListNexusSyncLogOfRepoRow struct {
+	ID         int64
+	At         int64
+	SourceRepo string
+	Level      string
+	Message    string
+}
+
+// Keyset page of the log lines of one repo of a sync, oldest first, through nexus_sync_log_repo.
+func (q *Queries) ListNexusSyncLogOfRepo(ctx context.Context, arg ListNexusSyncLogOfRepoParams) ([]ListNexusSyncLogOfRepoRow, error) {
+	rows, err := q.db.QueryContext(ctx, listNexusSyncLogOfRepo,
+		arg.SyncID,
+		arg.SourceRepo,
+		arg.AfterID,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListNexusSyncLogOfRepoRow
+	for rows.Next() {
+		var i ListNexusSyncLogOfRepoRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.At,

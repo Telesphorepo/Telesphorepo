@@ -121,11 +121,16 @@ ORDER BY id LIMIT sqlc.arg(limit);
 -- name: InsertNexusSyncLog :exec
 INSERT INTO nexus_sync_log (sync_id, at, source_repo, level, message) VALUES (?, ?, ?, ?, ?);
 
--- Keyset page of a sync's log lines, oldest first, through nexus_sync_log_sync. The repo
--- filter is applied in Go: a sync has a few thousand lines at most.
+-- Keyset page of a sync's log lines, oldest first, through nexus_sync_log_sync.
 -- name: ListNexusSyncLog :many
 SELECT id, at, source_repo, level, message FROM nexus_sync_log
 WHERE sync_id = sqlc.arg(sync_id) AND id > sqlc.arg(after_id)
+ORDER BY id LIMIT sqlc.arg(limit);
+
+-- Keyset page of the log lines of one repo of a sync, oldest first, through nexus_sync_log_repo.
+-- name: ListNexusSyncLogOfRepo :many
+SELECT id, at, source_repo, level, message FROM nexus_sync_log
+WHERE sync_id = sqlc.arg(sync_id) AND source_repo = sqlc.arg(source_repo) AND id > sqlc.arg(after_id)
 ORDER BY id LIMIT sqlc.arg(limit);
 
 -- A repo delete empties these tables batch by batch before its row goes (repos.Service.OnPurge).

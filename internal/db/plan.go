@@ -39,21 +39,25 @@ func Core() Component {
 		Queries:    Sub(queriesFS, "queries"),
 		Extra:      dbq.Extra,
 		Allow: map[string]string{
-			"ListSettings":         "loads every stored setting at startup and after a settings write, never on a request path; at most one row per registered setting",
-			"HasUsers":             "EXISTS stops at the first row; startup check for the first admin",
-			"ListRebuildGroups":    "startup: picks up every pending rebuild once per start; the rebuilds table holds only units not built yet",
-			"CountRepoTotals":      "a backup counts the repos of its database copy once per backup, never on a request path; one row per repo",
-			"ListMigrations":       "a backup records the applied migrations of its database copy once per backup; one row per migration",
-			"CountUsersUpTo":       "a bounded count: it stops at its cap (the Settings overview says 10,000+)",
-			"ListReposByPublished": "reads the first LIMIT rows of repos_published in order (at most 50), never the rest of the index",
-			"ListReposVisibleTo":   "merges one page of the public repos (repos_anonymous_name) with the sorted grants of one user (a seek through repo_permissions_user), never the repos in between",
+			"ListSettings":           "loads every stored setting at startup and after a settings write, never on a request path; at most one row per registered setting",
+			"HasUsers":               "EXISTS stops at the first row; startup check for the first admin",
+			"ListRebuildGroups":      "startup: picks up every pending rebuild once per start; the rebuilds table holds only units not built yet",
+			"CountRepoTotals":        "a backup counts the repos of its database copy once per backup, never on a request path; one row per repo",
+			"ListMigrations":         "a backup records the applied migrations of its database copy once per backup; one row per migration",
+			"CountUsersUpTo":         "a bounded count: it stops at its cap (the Settings overview says 10,000+)",
+			"ListReposByPublished":   "reads the first LIMIT rows of repos_published in order (at most 50), never the rest of the index",
+			"ListReposVisibleTo":     "merges one page of the public repos (repos_anonymous_name) with the sorted grants of one user (a seek through repo_permissions_user), never the repos in between",
+			"ListReposIn":            "sorts the repos of one caller's grants by name (a rowid lookup per id of the list), never every repo",
+			"ListReposInByPublished": "sorts the repos of one caller's grants by last publish (a rowid lookup per id of the list), never every repo",
+			"ListLargestReposIn":     "sorts the repos of one caller's grants by size (a rowid lookup per id of the list), never every repo",
 		},
 	}
 }
 
 var (
 	nameRE  = regexp.MustCompile(`^--\s*name:\s*(\w+)\s+:\w+`)
-	sqlcRE  = regexp.MustCompile(`sqlc\.(arg|narg|slice)\s*\([^)]*\)`)
+	sqlcRE  = regexp.MustCompile(`sqlc\.(arg|narg)\s*\([^)]*\)`)
+	sliceRE = regexp.MustCompile(`sqlc\.slice\s*\([^)]*\)`)
 	indexRE = regexp.MustCompile(`\bINDEX (\S+)`)
 	// tableRE finds the tables that a schema creates or renames to.
 	tableRE = regexp.MustCompile(`(?i)\bCREATE\s+(?:VIRTUAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_]\w*)|\bALTER\s+TABLE\s+\w+\s+RENAME\s+TO\s+([A-Za-z_]\w*)`)
@@ -87,8 +91,12 @@ type namedQuery struct {
 	name, origin, sql string
 }
 
+// listMarks is what the guard binds for a list of values: sqlc.slice(...) and dbq.IDsMark. Two
+// values, because SQLite plans "x IN (?)" as "x = ?", which hides the plan of a real list.
+const listMarks = "?, ?"
+
 // parseQueries reads the "-- name:" blocks of every *.sql file at the root of fsys. Comment
-// lines are dropped and sqlc.arg/narg/slice(...) become a single "?".
+// lines are dropped, sqlc.arg/narg(...) become a single "?" and sqlc.slice(...) listMarks.
 func parseQueries(fsys fs.FS) ([]namedQuery, error) {
 	files, err := fs.Glob(fsys, "*.sql")
 	if err != nil {
@@ -104,7 +112,7 @@ func parseQueries(fsys fs.FS) ([]namedQuery, error) {
 		var b strings.Builder
 		flush := func() {
 			if cur != nil {
-				cur.sql = sqlcRE.ReplaceAllString(strings.TrimSpace(b.String()), "?")
+				cur.sql = sqlcRE.ReplaceAllString(sliceRE.ReplaceAllString(strings.TrimSpace(b.String()), listMarks), "?")
 				out = append(out, *cur)
 			}
 			b.Reset()
@@ -139,12 +147,16 @@ func Sub(f embed.FS, dir string) fs.FS {
 
 // CheckPlans runs EXPLAIN QUERY PLAN on every query of sets against d, which must hold the
 // schema of every component. It fails on a SCAN of a real table (a partial index or a virtual
-// table is fine) or a temp B-tree, unless the query is in its component's Allow list. It also
-// fails on a query that writes a table outside its component's schema: a module writes only its
-// own tables, and the kernel tables change only through kernel services. The error lists every
-// offending query.
+// table is fine), a temp B-tree, or a list that does not drive the plan (listProblems), unless
+// the query is in its component's Allow list. It also fails on a query that writes a table
+// outside its component's schema: a module writes only its own tables, and the kernel tables
+// change only through kernel services. The error lists every offending query.
 func CheckPlans(ctx context.Context, d *DB, sets []Component) error {
 	partial, err := partialIndexes(ctx, d)
+	if err != nil {
+		return err
+	}
+	rowids, err := rowidColumns(ctx, d)
 	if err != nil {
 		return err
 	}
@@ -158,7 +170,7 @@ func CheckPlans(ctx context.Context, d *DB, sets []Component) error {
 			}
 		}
 		for name, q := range set.Extra {
-			qs = append(qs, namedQuery{name: name, origin: "extra", sql: q})
+			qs = append(qs, namedQuery{name: name, origin: "extra", sql: strings.ReplaceAll(q, dbq.IDsMark, listMarks)})
 		}
 		sort.Slice(qs, func(i, j int) bool { return qs[i].name < qs[j].name })
 
@@ -185,18 +197,19 @@ func CheckPlans(ctx context.Context, d *DB, sets []Component) error {
 				problems = append(problems, fmt.Sprintf("%s: %v", label, err))
 				continue
 			}
-			bad := false
-			for _, step := range plan {
-				if badStep(step, partial) {
-					bad = true
+			var found []string
+			for _, st := range plan {
+				if badStep(st.detail, partial) {
+					found = append(found, "full scan or temp B-tree")
 					break
 				}
 			}
+			found = append(found, listProblems(q.sql, plan, rowids)...)
 			_, allowed := set.Allow[q.name]
 			switch {
-			case bad && !allowed:
-				problems = append(problems, fmt.Sprintf("%s: full scan or temp B-tree:\n    %s", label, strings.Join(plan, "\n    ")))
-			case !bad && allowed:
+			case len(found) > 0 && !allowed:
+				problems = append(problems, fmt.Sprintf("%s: %s:\n    %s", label, strings.Join(found, "; "), planText(plan)))
+			case len(found) == 0 && allowed:
 				problems = append(problems, fmt.Sprintf("%s: in the allow-list but its plan is clean; remove the entry", label))
 			}
 		}
@@ -213,24 +226,42 @@ func CheckPlans(ctx context.Context, d *DB, sets []Component) error {
 	return nil
 }
 
-// explain returns the detail column of EXPLAIN QUERY PLAN, with every parameter unbound (NULL).
-func explain(ctx context.Context, d *DB, query string) ([]string, error) {
+// step is one row of EXPLAIN QUERY PLAN: the steps with the same parent are the loops of one
+// join, outer first, and the headers of its subqueries.
+type step struct {
+	id, parent int64
+	detail     string
+}
+
+// explain returns the steps of EXPLAIN QUERY PLAN, with every parameter unbound (NULL).
+func explain(ctx context.Context, d *DB, query string) ([]step, error) {
 	args := make([]any, strings.Count(query, "?"))
 	rows, err := d.R.QueryContext(ctx, "EXPLAIN QUERY PLAN "+query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var plan []string
+	var plan []step
 	for rows.Next() {
-		var id, parent, notused int64
-		var detail string
-		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+		var st step
+		var notused int64
+		if err := rows.Scan(&st.id, &st.parent, &notused, &st.detail); err != nil {
 			return nil, err
 		}
-		plan = append(plan, detail)
+		plan = append(plan, st)
 	}
 	return plan, rows.Err()
+}
+
+// planText is plan indented by depth, for an error.
+func planText(plan []step) string {
+	depth := map[int64]int{}
+	lines := make([]string, len(plan))
+	for i, st := range plan {
+		depth[st.id] = depth[st.parent] + 1
+		lines[i] = strings.Repeat("  ", depth[st.id]-1) + st.detail
+	}
+	return strings.Join(lines, "\n    ")
 }
 
 // badStep reports whether one plan step is a full scan of a real table or a temp B-tree.

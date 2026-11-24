@@ -21,6 +21,7 @@ func component() db.Component {
 			"ListTrustsInRepos":   "sorts the policies that list a repo of the caller's scope (a seek per repo of the scope through publish_trust_repos_repo), never all policies",
 			"SearchTrustsInRepos": "groups the policies that list a repo of the caller's scope once (a seek per repo of the scope through publish_trust_repos_repo), never all policies",
 			"CountTrustsUpTo":     "a bounded count: it stops at its cap (the Settings overview says 10,000+)",
+			"CountTrustsWithin":   "groups the policies that list a repo of the caller's scope once (a seek per repo of the scope through publish_trust_repos_repo), never all policies",
 		},
 	}
 }

@@ -581,41 +581,35 @@ func (s *Service) Failures(ctx context.Context, id, after int64, limit int) (out
 	return out, next, nil
 }
 
-// logScan is the number of log lines Log reads per query while it filters by repo.
-const logScan = 500
-
 // Log returns a keyset page of sync id's log lines with ids above after, oldest first. A repo
-// other than "" keeps only that repo's lines: Log reads the sync's lines through the index and
-// filters them here. next is the cursor of the next page, 0 at the end.
+// other than "" keeps only that repo's lines, a range of nexus_sync_log_repo. next is the cursor
+// of the next page, 0 at the end.
 func (s *Service) Log(ctx context.Context, id, after int64, repo string, limit int) (out []LogLine, next int64, err error) {
 	q := dbq.New(s.db.R)
 	if _, err := syncRow(q.GetNexusSync(ctx, id)); err != nil {
 		return nil, 0, err
 	}
-	out = []LogLine{}
-	scan := int64(limit)
-	if repo != "" {
-		scan = logScan
-	}
-	for {
-		rows, err := q.ListNexusSyncLog(ctx, dbq.ListNexusSyncLogParams{SyncID: id, AfterID: after, Limit: scan})
-		if err != nil {
-			return nil, 0, err
-		}
-		for _, r := range rows {
-			after = r.ID
-			if repo != "" && r.SourceRepo != repo {
-				continue
-			}
-			out = append(out, LogLine{ID: r.ID, At: time.Unix(r.At, 0).UTC(), SourceRepo: r.SourceRepo, Level: r.Level, Message: r.Message})
-			if len(out) == limit {
-				return out, r.ID, nil
-			}
-		}
-		if int64(len(rows)) < scan {
-			return out, 0, nil
+	var rows []dbq.ListNexusSyncLogRow
+	if repo == "" {
+		rows, err = q.ListNexusSyncLog(ctx, dbq.ListNexusSyncLogParams{SyncID: id, AfterID: after, Limit: int64(limit)})
+	} else {
+		var of []dbq.ListNexusSyncLogOfRepoRow
+		of, err = q.ListNexusSyncLogOfRepo(ctx, dbq.ListNexusSyncLogOfRepoParams{SyncID: id, SourceRepo: repo, AfterID: after, Limit: int64(limit)})
+		for _, r := range of {
+			rows = append(rows, dbq.ListNexusSyncLogRow(r))
 		}
 	}
+	if err != nil {
+		return nil, 0, err
+	}
+	out = make([]LogLine, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, LogLine{ID: r.ID, At: time.Unix(r.At, 0).UTC(), SourceRepo: r.SourceRepo, Level: r.Level, Message: r.Message})
+	}
+	if len(out) == limit && limit > 0 {
+		next = out[len(out)-1].ID
+	}
+	return out, next, nil
 }
 
 // Cancel stops sync id, waits for its runner to stop, marks the sync and its unfinished repos
