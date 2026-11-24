@@ -5,11 +5,9 @@ package e2e
 import (
 	"crypto/sha1"
 	"encoding/hex"
-	"fmt"
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 )
 
 // GroupRepo is the part of the repo JSON that the group tests read.
@@ -57,39 +55,6 @@ func mavenPut(t *testing.T, s *Server, user, repo, path string, body []byte) {
 	}
 }
 
-// gradleResolveProject is a Kotlin DSL build that resolves group:hello:<-Pv> from repoURL and
-// prints the name of each file of the runtime classpath.
-func gradleResolveProject(group, repoURL string) []ContainerFile {
-	build := fmt.Sprintf(`plugins {
-    java
-}
-
-repositories {
-    maven {
-        url = uri(%q)
-        isAllowInsecureProtocol = true
-    }
-}
-
-val v: String by project
-
-dependencies {
-    implementation("%s:hello:$v")
-}
-
-tasks.register("resolve") {
-    val cp = configurations.runtimeClasspath
-    doLast {
-        cp.get().files.forEach { println("RESOLVED " + it.name) }
-    }
-}
-`, repoURL, group)
-	return []ContainerFile{
-		{Path: "/work/g/settings.gradle.kts", Content: `rootProject.name = "resolve"` + "\n"},
-		{Path: "/work/g/build.gradle.kts", Content: build},
-	}
-}
-
 func TestGroups(t *testing.T) {
 	t.Parallel()
 	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
@@ -113,64 +78,47 @@ func TestGroups(t *testing.T) {
 			t.Fatalf("GET member %s: %+v, want groups [%s]", rel, g, grp)
 		}
 
-		// A release goes to one member, a snapshot to the other; both resolve through the group.
+		// A release goes to one member, a snapshot to the other, in the layout mvn deploy writes; both
+		// read through the group. How mvn and Gradle resolve is TestMaven's and TestGradlePlugin's.
 		group := "com.example.group" + randHex(4)
 		groupPath := strings.ReplaceAll(group, ".", "/")
-		mounts := map[string]string{M2Volume: "/root/.m2/repository"}
-		deploy := func(repo, version, message string) {
-			t.Helper()
-			files := append(mavenLibProject(group, version, s.InternalURL+"/maven/"+repo, message),
-				ContainerFile{Path: "/work/settings.xml", Content: mavenSettingsXML(writer, PublishToken(t, s, writer, repo))})
-			code, out := RunClient(t, mavenImage, ClientOpts{
-				Cmd: []string{"cd /work/lib && mvn -B -ntp -s /work/settings.xml deploy"}, Files: files, Mounts: mounts, Timeout: 15 * time.Minute})
-			if code != 0 {
-				t.Fatalf("deploy %s to %s: exit %d\n%s", version, repo, code, out)
+		art := groupPath + "/hello/"
+		pom := func(v string) []byte {
+			return []byte("<project><groupId>" + group + "</groupId><artifactId>hello</artifactId><version>" + v + "</version></project>\n")
+		}
+		snapFile := "hello-1.1.0-20260101.000000-1"
+		files := map[string]map[string][]byte{
+			rel: {
+				art + "1.0.0/hello-1.0.0.jar": rawRandom(t, 2048),
+				art + "1.0.0/hello-1.0.0.pom": pom("1.0.0"),
+				art + "maven-metadata.xml":    []byte("<metadata><groupId>" + group + "</groupId><artifactId>hello</artifactId><versioning><latest>1.0.0</latest><release>1.0.0</release><versions><version>1.0.0</version></versions><lastUpdated>20260101000000</lastUpdated></versioning></metadata>\n"),
+			},
+			snap: {
+				art + "1.1.0-SNAPSHOT/" + snapFile + ".jar": rawRandom(t, 2048),
+				art + "1.1.0-SNAPSHOT/" + snapFile + ".pom": pom("1.1.0-SNAPSHOT"),
+				art + "1.1.0-SNAPSHOT/maven-metadata.xml":   []byte("<metadata modelVersion=\"1.1.0\"><groupId>" + group + "</groupId><artifactId>hello</artifactId><version>1.1.0-SNAPSHOT</version><versioning><snapshot><timestamp>20260101.000000</timestamp><buildNumber>1</buildNumber></snapshot><lastUpdated>20260101000000</lastUpdated></versioning></metadata>\n"),
+				art + "maven-metadata.xml":                  []byte("<metadata><groupId>" + group + "</groupId><artifactId>hello</artifactId><versioning><latest>1.1.0-SNAPSHOT</latest><versions><version>1.1.0-SNAPSHOT</version></versions><lastUpdated>20260101000000</lastUpdated></versioning></metadata>\n"),
+			},
+		}
+		for _, repo := range []string{rel, snap} {
+			for p, body := range files[repo] {
+				if strings.HasSuffix(p, "maven-metadata.xml") {
+					continue
+				}
+				mavenPut(t, s, writer, repo, p, body)
+			}
+			for p, body := range files[repo] {
+				if strings.HasSuffix(p, "maven-metadata.xml") {
+					mavenPut(t, s, writer, repo, p, body)
+				}
 			}
 		}
-		releaseMsg, snapMsg := "group release of "+group, "group snapshot of "+group
-		deploy(rel, "1.0.0", releaseMsg)
-		deploy(snap, "1.1.0-SNAPSHOT", snapMsg)
-
-		groupURL := s.InternalURL + "/maven/" + grp
-		script := strings.Join([]string{
-			"set -e",
-			"rm -rf /root/.m2/repository/" + groupPath,
-			"cd /work/consumer",
-			"for v in 1.0.0 1.1.0-SNAPSHOT; do",
-			"mvn -B -ntp -q -U -s /work/settings.xml -Ddep.version=$v -Dmdep.outputFile=/tmp/cp-$v.txt org.apache.maven.plugins:maven-dependency-plugin:3.8.1:build-classpath;",
-			`java -cp "$(cat /tmp/cp-$v.txt)" ` + group + ".Hello;",
-			"done",
-		}, "\n")
-		code, out := RunClient(t, mavenImage, ClientOpts{
-			Cmd:     []string{script},
-			Files:   []ContainerFile{{Path: "/work/settings.xml", Content: mavenSettingsXML(writer, token)}, mavenConsumerProject(group, groupURL)},
-			Mounts:  mounts,
-			Timeout: 15 * time.Minute,
-		})
-		if code != 0 {
-			t.Fatalf("mvn through the group: exit %d\n%s", code, out)
-		}
-		for _, want := range []string{releaseMsg, snapMsg} {
-			if !strings.Contains(out, want) {
-				t.Fatalf("mvn through the group: output misses %q:\n%s", want, out)
-			}
-		}
-
-		gradle := "gradle --no-daemon --console=plain --no-configuration-cache -q resolve"
-		code, out = RunClient(t, gradleImage, ClientOpts{
-			Cmd:     []string{"cd /work/g && " + gradle + " -Pv=1.0.0 && " + gradle + " -Pv=1.1.0-SNAPSHOT"},
-			Files:   gradleResolveProject(group, groupURL),
-			Env:     map[string]string{"GRADLE_USER_HOME": "/home/gradle/.gradle"},
-			Mounts:  map[string]string{GradleVolume: "/home/gradle/.gradle"},
-			User:    "root",
-			Timeout: 15 * time.Minute,
-		})
-		if code != 0 {
-			t.Fatalf("gradle through the group: exit %d\n%s", code, out)
-		}
-		for _, want := range []string{"RESOLVED hello-1.0.0.jar", "RESOLVED hello-1.1.0-"} {
-			if !strings.Contains(out, want) {
-				t.Fatalf("gradle through the group: output misses %q:\n%s", want, out)
+		readAuth := Basic{User: writer, Pass: token}
+		for _, repo := range []string{rel, snap} {
+			for p, body := range files[repo] {
+				if !strings.HasSuffix(p, "maven-metadata.xml") {
+					rawWantGet(t, s, opts.S3, "/maven/"+grp+"/"+p, readAuth, body)
+				}
 			}
 		}
 

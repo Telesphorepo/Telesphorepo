@@ -25,17 +25,15 @@ import (
 )
 
 // Client images and helpers that several zones share: Maven projects, Debian packages and apt,
-// curl for raw files, Docker in Docker, Helm, ORAS and the Caddy reverse proxy.
+// curl for raw files, Docker in Docker, Helm and the Caddy reverse proxy.
 
-// The tools float (see images_test.go). orasImage is the newest ORAS release, which the run looks
-// up before it pulls: ORAS has no floating tag.
+// The tools float (see images_test.go).
 var (
 	mavenImage  = floatingImage("docker.io/library/maven:3")
 	gradleImage = floatingImage("docker.io/library/gradle:latest")
 	debImage    = floatingImage("docker.io/library/debian:stable")
 	curlImage   = floatingImage("docker.io/curlimages/curl:latest")
 	helmImage   = floatingImage("docker.io/alpine/helm:latest")
-	orasImage   string
 )
 
 // caddyImage is the reverse proxy of the tests: a redirector, a proxy with a body limit, a

@@ -18,7 +18,7 @@ func dindScan(t *testing.T, d *Dind, what, secret string) {
 
 // TestCLIDocker: after setup, Docker in Docker pushes and pulls with no docker login (a device
 // session); the helper answers only the hosts of the server; publish packs and pushes a Helm
-// chart; ORAS pushes and pulls through the helper. TestCLIJenkins pushes from CI.
+// chart. TestCLIJenkins pushes from CI.
 func TestCLIDocker(t *testing.T) {
 	t.Parallel()
 	c := newCLI(t)
@@ -93,17 +93,5 @@ telesphorepo publish
 			}
 		})
 
-		t.Run("oras", func(t *testing.T) {
-			c.mustRun(t, orasImage, "oras push and pull", `set -e
-mkdir -p /work /root/.docker
-cd /work
-telesphorepo setup "$E2E_LINK"
-printf '{"credHelpers": {"%s": "telesphorepo"}}\n' "$HOST" > /root/.docker/config.json
-echo hello > a.txt
-oras push --plain-http "$HOST/$REPO/art:v1" a.txt
-oras pull --plain-http -o out "$HOST/$REPO/art:v1"
-cmp out/a.txt a.txt
-`, ClientOpts{Env: map[string]string{"E2E_LINK": s.NewSetupCode(t, "builder", own).Link, "HOST": host, "REPO": own}})
-		})
 	})
 }

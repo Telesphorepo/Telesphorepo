@@ -104,13 +104,13 @@ func approveWith(t testing.TB, s *Server, jar http.CookieJar, userCode, proof st
 // TestOIDCDeviceApproval: an SSO admin approves a device after a new sign-in at Keycloak, then
 // publishes with the device. A provider that ignores prompt=login and max_age returns the old
 // auth_time of its own session, and the callback refuses the approval: the test signs in at
-// Keycloak first in a browser of its own, sets oidc.approval_max_age to 20 s, and at the end waits
+// Keycloak first in a browser of its own, sets oidc.approval_max_age to 8 s, and at the end waits
 // until that sign-in is older than that.
 func TestOIDCDeviceApproval(t *testing.T) {
 	t.Parallel()
 	kc, s := startSSOServer(t)
 	// An approval takes a sign-in of at most oidc.approval_max_age; a short one keeps the wait short.
-	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"oidc.approval_max_age": "20s"}, s.Admin(), nil)
+	s.MustAPI(t, http.MethodPatch, "/api/settings", map[string]any{"oidc.approval_max_age": "8s"}, s.Admin(), nil)
 	staleSignedIn := time.Now()
 	stale := kc.SignIn(t, s, "alice", kcAlicePassword)
 	alice := kc.SignIn(t, s, "alice", kcAlicePassword)
@@ -178,7 +178,7 @@ func TestOIDCDeviceApproval(t *testing.T) {
 
 	// The browser of stale signed in at Keycloak once, at the start, and never again.
 	t.Run("stale sign-in", func(t *testing.T) {
-		time.Sleep(time.Until(staleSignedIn.Add(25 * time.Second)))
+		time.Sleep(time.Until(staleSignedIn.Add(10 * time.Second)))
 
 		en, _ := s.StartEnrollment(t, "e2e alice stale laptop")
 		auth := kc.startDeviceSignIn(t, s, stale.Jar, en.UserCode)

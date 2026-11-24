@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"strings"
 	"testing"
-	"time"
 )
 
 // pyUpload posts one file through the legacy upload API of repo the way twine does, with the
@@ -73,17 +72,6 @@ func pyGetPage(t *testing.T, s *Server, repo, n string, auth Auth) (int, pyPage)
 	}
 	return resp.StatusCode, p
 }
-
-// poetryApp is a Poetry project at /work/app that installs dependencies only (no package of its own).
-var poetryApp = ContainerFile{Path: "/work/app/pyproject.toml", Content: `[project]
-name = "app"
-version = "0.1.0"
-requires-python = ">=3.9"
-dependencies = []
-
-[tool.poetry]
-package-mode = false
-`}
 
 // TestPyPI: twine uploads the wheel and sdist that python -m build makes to a private hosted repo;
 // the page lists both with hashes, sizes, upload times and the wheel's core metadata, whose bytes
@@ -348,102 +336,7 @@ func TestPyPIProtocol(t *testing.T) {
 	})
 }
 
-// TestPyPIClients: uv publish and poetry publish upload to a hosted repo; uv resolves from the
-// .metadata file without the wheel, and uv and poetry install the packages.
-func TestPyPIClients(t *testing.T) {
-	t.Parallel()
-	OnLocalDisk(t, func(t *testing.T, opts ServerOpts) {
-		s := StartServer(t, opts)
-		repo := RandName("py")
-		s.CreateRepo(t, repo, "pypi", false, nil)
-		writer, writerPass := RandName("writer"), randHex(12)
-		s.CreateUser(t, writer, writerPass)
-		s.SetPerms(t, repo, writer, "repo.download", "repo.publish")
-		token := s.CreateToken(t, writer, writerPass, "pypi-e2e")
-		uvName, uvMod := pyNames()
-		poName, poMod := pyNames()
-		upload := s.InternalURL + "/pypi/" + repo + "/legacy/"
-
-		code, out := RunClient(t, uvImage, ClientOpts{
-			Cmd: []string{`set -e
-cd /work/p
-uv build
-uv publish --publish-url "$URL" dist/*
-`},
-			Files: pySetuptoolsProject("/work/p", uvName, uvMod, "1.0.0", "uv "+uvName),
-			Env:   map[string]string{"URL": upload, "UV_PUBLISH_USERNAME": "__token__", "UV_PUBLISH_PASSWORD": PublishToken(t, s, writer, repo)},
-		})
-		if code != 0 {
-			t.Fatalf("uv build and uv publish: exit %d\n%s", code, out)
-		}
-		code, out = RunClient(t, pythonImage, ClientOpts{
-			Cmd: []string{`set -e
-pip install -q --root-user-action=ignore poetry
-cd /work/p
-poetry config repositories.tr "$URL"
-poetry publish --build -r tr -u __token__ -p "$TOKEN"
-`},
-			Files: pyPoetryProject("/work/p", poName, poMod, "1.0.0", "poetry "+poName),
-			Env:   map[string]string{"URL": upload, "TOKEN": PublishToken(t, s, writer, repo)},
-		})
-		if code != 0 {
-			t.Fatalf("poetry publish: exit %d\n%s", code, out)
-		}
-		have := strings.Join(mavenAssetPaths(t, s, repo, "packages/", s.Admin()), "\n") + "\n"
-		for _, want := range []string{"packages/" + uvName + "/" + uvMod + "-1.0.0-py3-none-any.whl", "packages/" + uvName + "/" + uvMod + "-1.0.0-py3-none-any.whl.metadata",
-			"packages/" + poName + "/" + poMod + "-1.0.0-py3-none-any.whl"} {
-			if !strings.Contains(have, want+"\n") {
-				t.Fatalf("asset %s not published; have:\n%s", want, have)
-			}
-		}
-
-		// A resolve reads the .metadata file and not the wheel.
-		wheel := "/pypi/" + repo + "/packages/" + uvName + "/" + uvMod + "-1.0.0-py3-none-any.whl"
-		code, out = RunClient(t, uvImage, ClientOpts{
-			Cmd: []string{`set -e
-uv pip compile --no-cache --index-url "$INDEX" /work/req.in
-`},
-			Files: []ContainerFile{{Path: "/work/req.in", Content: uvName + "\n"}},
-			Env:   map[string]string{"INDEX": pyIndex(s, repo, writer, token)},
-		})
-		if code != 0 || !strings.Contains(out, uvName+"==1.0.0") {
-			t.Fatalf("uv pip compile: exit %d\n%s", code, out)
-		}
-		if meta, whl := remoteGets(t, s, wheel+".metadata"), remoteGets(t, s, wheel); len(meta) == 0 || len(whl) != 0 {
-			t.Fatalf("uv resolve: GETs of %s.metadata %v, want some; GETs of the wheel %v, want none", wheel, meta, whl)
-		}
-
-		code, out = RunClient(t, uvImage, ClientOpts{
-			Cmd: []string{`set -e
-uv venv -q /tmp/venv
-uv pip install --no-cache --python /tmp/venv/bin/python --index-url "$INDEX" ` + uvName + ` ` + poName + `
-/tmp/venv/bin/python -c "import ` + uvMod + `, ` + poMod + `; print(` + uvMod + `.MSG); print(` + poMod + `.MSG)"
-`},
-			Env: map[string]string{"INDEX": pyIndex(s, repo, writer, token)},
-		})
-		if code != 0 || !strings.Contains(out, "uv "+uvName) || !strings.Contains(out, "poetry "+poName) {
-			t.Fatalf("uv pip install: exit %d\n%s", code, out)
-		}
-		code, out = RunClient(t, pythonImage, ClientOpts{
-			Cmd: []string{`set -e
-pip install -q --root-user-action=ignore poetry
-cd /work/app
-poetry source add --priority=primary tr "$INDEX"
-poetry config http-basic.tr "$USER" "$TOKEN"
-poetry add ` + uvName + `
-poetry run python -c "import ` + uvMod + `; print(` + uvMod + `.MSG)"
-`},
-			Files:   []ContainerFile{poetryApp},
-			Env:     map[string]string{"INDEX": pyIndex(s, repo, "", ""), "USER": writer, "TOKEN": token},
-			Timeout: 15 * time.Minute,
-		})
-		if code != 0 || !strings.Contains(out, "uv "+uvName) {
-			t.Fatalf("poetry add: exit %d\n%s", code, out)
-		}
-	})
-}
-
-// TestPyPIProxyGroup: a proxy of pypi.org serves pip, uv and poetry; its files come from the
+// TestPyPIProxyGroup: a proxy of pypi.org serves pip; its files come from the
 // files host into files/; a group of a hosted repo and the proxy serves a project of the hosted
 // repo only from it, though pypi.org has a higher version of that name.
 func TestPyPIProxyGroup(t *testing.T) {
@@ -471,18 +364,6 @@ python -c "import iniconfig; print('INICONFIG OK')"
 		if paths := mavenAssetPaths(t, s, proxy, "files/", s.Admin()); len(paths) == 0 {
 			t.Fatal("the proxy stored no file under files/")
 		}
-		code, out = RunClient(t, uvImage, ClientOpts{
-			Cmd: []string{`set -e
-uv venv -q /tmp/venv
-uv pip install --no-cache --python /tmp/venv/bin/python --index-url "$INDEX" six==1.17.0
-/tmp/venv/bin/python -c "import six; print('SIX', six.__version__)"
-`},
-			Env: map[string]string{"INDEX": pyIndex(s, proxy, "", "")},
-		})
-		if code != 0 || !strings.Contains(out, "SIX 1.17.0") {
-			t.Fatalf("uv pip install through the proxy: exit %d\n%s", code, out)
-		}
-
 		// A private project named like a public one: the hosted member owns the name.
 		file, whl := pyWheel("iniconfig", "iniconfig", "0.0.1", "private iniconfig")
 		if st, b := pyUpload(t, s, hosted, file, whl, s.PublishAuth(t, writer, hosted), nil); st != http.StatusCreated {
@@ -504,21 +385,6 @@ python -c "import iniconfig, six; print(iniconfig.MSG, 'SIX', six.__version__)"
 		})
 		if code != 0 || !strings.Contains(out, "private iniconfig SIX") {
 			t.Fatalf("pip install through the group: exit %d\n%s", code, out)
-		}
-		code, out = RunClient(t, pythonImage, ClientOpts{
-			Cmd: []string{`set -e
-pip install -q --root-user-action=ignore poetry
-cd /work/app
-poetry source add --priority=primary tr "$INDEX"
-poetry add six==1.17.0
-poetry run python -c "import six; print('SIX', six.__version__)"
-`},
-			Files:   []ContainerFile{poetryApp},
-			Env:     map[string]string{"INDEX": pyIndex(s, group, "", "")},
-			Timeout: 15 * time.Minute,
-		})
-		if code != 0 || !strings.Contains(out, "SIX 1.17.0") {
-			t.Fatalf("poetry add through the group: exit %d\n%s", code, out)
 		}
 	})
 }

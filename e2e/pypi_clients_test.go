@@ -12,12 +12,9 @@ import (
 	"strings"
 )
 
-// The Python clients of the PyPI tests: the official python image (pip, and twine, build and
-// poetry installed with pip from pypi.org) and uv's image with Python.
-var (
-	pythonImage = floatingImage("docker.io/library/python:3-slim")
-	uvImage     = floatingImage("ghcr.io/astral-sh/uv:python3.13-bookworm-slim")
-)
+// pythonImage is the Python client of the PyPI tests: the official python image (pip, and twine
+// and build installed with pip from pypi.org).
+var pythonImage = floatingImage("docker.io/library/python:3-slim")
 
 // pyNames returns a fresh project name and its import name, e.g. "tr-e2e-1a2b" and
 // "tr_e2e_1a2b".
@@ -56,27 +53,6 @@ requires-python = ">=3.8"
 
 [tool.setuptools]
 packages = [%q]
-`, name, version, mod)},
-		{Path: dir + "/" + mod + "/__init__.py", Content: fmt.Sprintf("MSG = %q\n", msg)},
-	}
-}
-
-// pyPoetryProject is a Poetry project at dir ([tool.poetry]) with module mod.
-func pyPoetryProject(dir, name, mod, version, msg string) []ContainerFile {
-	return []ContainerFile{
-		{Path: dir + "/pyproject.toml", Content: fmt.Sprintf(`[tool.poetry]
-name = %q
-version = %q
-description = "e2e package"
-authors = ["e2e <e2e@example.com>"]
-packages = [{ include = %q }]
-
-[tool.poetry.dependencies]
-python = ">=3.9"
-
-[build-system]
-requires = ["poetry-core>=2.0"]
-build-backend = "poetry.core.masonry.api"
 `, name, version, mod)},
 		{Path: dir + "/" + mod + "/__init__.py", Content: fmt.Sprintf("MSG = %q\n", msg)},
 	}

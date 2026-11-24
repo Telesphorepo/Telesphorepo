@@ -3061,6 +3061,14 @@ the rest) in containers against the real server image, which `go tool task test`
 run (`E2E_IMAGE` names another and skips the build). The engine comes from
 `internal/containerengine`; `TR_ENGINE=docker|podman` forces one.
 
+- **One reference client per format.** mvn and Gradle, npm and Bun, pip with twine and build,
+  docker and Helm, apt, pacman, dnf (Fedora, and Rocky 8 for EL8's RSA-only rpm), cargo, dotnet.
+  Other clients of the same protocol (pnpm, Yarn, uv, Poetry, ORAS, crane, skopeo as clients
+  under test, a second major of the same client) are not tested: they send the same requests,
+  and a change in one of them is that client's business. A behaviour that differs only because
+  the tests run on plain HTTP is not tested either: deployments run on HTTPS. A check that a
+  plain HTTP request can make uses one; a client container is for what only the client shows.
+
 - **Parallel.** Every test calls `t.Parallel()` and starts its own server, so a zone's tests run
   at once (as many as the host has CPUs).
 - **Stores.** A test whose subject is the store runs on `fs` and on SeaweedFS S3

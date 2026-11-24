@@ -108,28 +108,14 @@ func startRedirector(t *testing.T) {
 	startCaddy(t, caddyRedirectConf, "Caddy redirector", "redir", "recorder")
 }
 
-// debProxyAptScript installs the test packages through a Debian proxy.
-func debProxyApt(t *testing.T, s *Server, repo, key string) string {
+// proxyServesRemote checks that GET proxyPath on s answers the bytes of GET remotePath on remote.
+func proxyServesRemote(t *testing.T, s, remote *Server, proxyPath, remotePath string) {
 	t.Helper()
-	sources := fmt.Sprintf("Types: deb\nURIs: %s/debian/%s\nSuites: stable\nComponents: main\nSigned-By: /etc/apt/keyrings/remote.asc\n", s.InternalURL, repo)
-	code, out := RunClient(t, debImage, ClientOpts{
-		Cmd: []string{"sh", "/apt.sh"},
-		Files: []ContainerFile{
-			{Content: debAptScript, Path: "/apt.sh", Mode: 0o755},
-			{Content: key, Path: "/etc/apt/keyrings/remote.asc"},
-			{Content: sources, Path: "/etc/apt/sources.list.d/proxy.sources"},
-		},
-	})
-	if code != 0 {
-		t.Fatalf("apt through the proxy exited %d:\n%s", code, out)
+	st, want := debGet(t, remote, nil, remotePath, nil)
+	if st != http.StatusOK || len(want) == 0 {
+		t.Fatalf("GET %s on the remote: status %d", remotePath, st)
 	}
-	update, _, _ := strings.Cut(out, "=== end of apt-get update ===")
-	for _, bad := range []string{"NO_PUBKEY", "not signed", "insecure", "Err:"} {
-		if strings.Contains(update, bad) {
-			t.Fatalf("apt-get update through the proxy contains %q:\n%s", bad, update)
-		}
-	}
-	return out
+	rawWantGet(t, s, nil, proxyPath, nil, want)
 }
 
 func TestProxy(t *testing.T) {
@@ -150,14 +136,20 @@ func TestProxy(t *testing.T) {
 
 		group := "com.example.proxy" + randHex(4)
 		groupPath := strings.ReplaceAll(group, ".", "/")
-		mounts := map[string]string{M2Volume: "/root/.m2/repository"}
-		for _, v := range []string{"1.0.0", "1.1.0-SNAPSHOT"} {
-			files := append(mavenLibProject(group, v, remote.InternalURL+"/maven/"+up, "proxied "+v+" of "+group),
-				ContainerFile{Path: "/work/settings.xml", Content: mavenSettingsXML(uploader, PublishToken(t, remote, uploader, up))})
-			if code, out := RunClient(t, mavenImage, ClientOpts{
-				Cmd: []string{"cd /work/lib && mvn -B -ntp -s /work/settings.xml deploy"}, Files: files, Mounts: mounts, Timeout: 15 * time.Minute}); code != 0 {
-				t.Fatalf("deploy %s to the remote: exit %d\n%s", v, code, out)
+		upAuth := remote.PublishAuth(t, uploader, up)
+		// A release on the remote: the proxy serves the remote's bytes. How mvn reads a Maven repo is
+		// TestMaven's; here only what the proxy fetches and keeps matters.
+		dir := groupPath + "/hello/1.0.0/"
+		release := []string{dir + "hello-1.0.0.jar", dir + "hello-1.0.0.pom"}
+		files := map[string][]byte{release[0]: rawRandom(t, 4096), release[1]: []byte("<project><groupId>" + group + "</groupId><artifactId>hello</artifactId><version>1.0.0</version></project>\n")}
+		for _, p := range release {
+			if resp, b := rawPut(t, remote, "/maven/"+up+"/"+p, files[p], upAuth); resp.StatusCode/100 != 2 {
+				t.Fatalf("PUT %s on the remote: status %d: %s", p, resp.StatusCode, b)
 			}
+		}
+		metadata := "<metadata><groupId>" + group + "</groupId><artifactId>hello</artifactId><versioning><release>1.0.0</release><versions><version>1.0.0</version></versions><lastUpdated>20260101000000</lastUpdated></versioning></metadata>\n"
+		if resp, b := rawPut(t, remote, "/maven/"+up+"/"+groupPath+"/hello/maven-metadata.xml", []byte(metadata), upAuth); resp.StatusCode/100 != 2 {
+			t.Fatalf("PUT maven-metadata.xml on the remote: status %d: %s", resp.StatusCode, b)
 		}
 
 		central := RandName("central")
@@ -168,36 +160,14 @@ func TestProxy(t *testing.T) {
 			t.Fatalf("GET proxy: %+v", ps.Proxy)
 		}
 
-		// mvn resolves a release and a snapshot through the proxy; a second resolve makes no
-		// remote request.
-		resolve := func() string {
+		// The release reads through the proxy; a second read makes no remote request.
+		resolve := func() {
 			t.Helper()
-			script := strings.Join([]string{
-				"set -e",
-				"rm -rf /root/.m2/repository/" + groupPath,
-				"cd /work/consumer",
-				"for v in 1.0.0 1.1.0-SNAPSHOT; do",
-				"mvn -B -ntp -q -U -s /work/settings.xml -Ddep.version=$v -Dmdep.outputFile=/tmp/cp-$v.txt org.apache.maven.plugins:maven-dependency-plugin:3.8.1:build-classpath;",
-				`java -cp "$(cat /tmp/cp-$v.txt)" ` + group + ".Hello;",
-				"done",
-			}, "\n")
-			code, out := RunClient(t, mavenImage, ClientOpts{
-				Cmd:     []string{script},
-				Files:   []ContainerFile{{Path: "/work/settings.xml", Content: mavenSettingsXML(s.AdminUser, s.AdminPass)}, mavenConsumerProject(group, s.InternalURL+"/maven/"+central)},
-				Mounts:  mounts,
-				Timeout: 15 * time.Minute,
-			})
-			if code != 0 {
-				t.Fatalf("mvn through the proxy: exit %d\n%s", code, out)
+			for _, p := range release {
+				rawWantGet(t, s, opts.S3, "/maven/"+central+"/"+p, nil, files[p])
 			}
-			for _, v := range []string{"1.0.0", "1.1.0-SNAPSHOT"} {
-				if !strings.Contains(out, "proxied "+v+" of "+group) {
-					t.Fatalf("mvn through the proxy: output misses version %s:\n%s", v, out)
-				}
-			}
-			return out
 		}
-		// The deploys above also read maven-metadata.xml on the remote; count only what comes after.
+		// Count only what the reads through the proxy ask the remote for.
 		prefix := "/maven/" + up + "/" + groupPath + "/"
 		deployed := remoteGetCount(t, remote, prefix)
 		resolve()
@@ -220,7 +190,6 @@ func TestProxy(t *testing.T) {
 		// A changed maven-metadata.xml shows after metadata_ttl and not before; the recheck of an
 		// unchanged file uses 304. The test uses 3 s: checked_at has a resolution of one second.
 		s.MustAPI(t, http.MethodPatch, "/api/repos/"+central, map[string]any{"proxy": map[string]any{"metadata_ttl": 3, "not_found_ttl": 3}}, s.Admin(), nil)
-		upAuth := remote.PublishAuth(t, uploader, up)
 		mdRel := groupPath + "/hello/maven-metadata.xml"
 		mdURL := "/maven/" + central + "/" + mdRel
 		// The proxy caches the file first (a fixed version needs no maven-metadata.xml, so the
@@ -324,7 +293,9 @@ func TestProxy(t *testing.T) {
 		s.CreateProxy(t, redirected, "maven", true, map[string]any{"remote_url": "http://redir:8080/m2/", "username": "someone", "password": "s3cret-e2e"}, false)
 		rawWantGet(t, s, opts.S3, "/maven/"+redirected+"/com/e2e/r/1.0/r-1.0.txt", nil, []byte("redirected file\n"))
 
-		// Debian: apt installs through the proxy, with the remote archive's key.
+		// Debian, Arch and RPM: the proxy serves the remote's signed indexes unchanged, so a client
+		// checks them with the remote's key, and it has no key of its own. How apt, pacman and dnf
+		// read a repo is the format tests'.
 		upDeb := RandName("upstream-deb")
 		remote.CreateRepo(t, upDeb, "debian", true, nil)
 		remote.SetPerms(t, upDeb, uploader, "repo.download", "repo.publish")
@@ -338,15 +309,11 @@ func TestProxy(t *testing.T) {
 		remote.WaitDebianIndexed(t, upDeb)
 		debProxy := RandName("deb-proxy")
 		s.CreateProxy(t, debProxy, "debian", true, map[string]any{"remote_url": remote.InternalURL + "/debian/" + upDeb}, false)
-		out := debProxyApt(t, s, debProxy, remote.DebianKey(t, upDeb, nil))
-		if !strings.Contains(out, "RESULT: hello 1.0") || !strings.Contains(out, "NATIVE: native "+debs.arch) {
-			t.Fatalf("apt through the proxy did not install the packages:\n%s", out)
-		}
+		proxyServesRemote(t, s, remote, "/debian/"+debProxy+"/dists/stable/InRelease", "/debian/"+upDeb+"/dists/stable/InRelease")
 		if resp, _ := s.Do(t, s.NewRequest(t, http.MethodGet, "/debian/"+debProxy+"/key.asc", nil), nil); resp.StatusCode != http.StatusNotFound {
 			t.Fatalf("GET the key of a Debian proxy: status %d, want 404", resp.StatusCode)
 		}
 
-		// Arch: pacman installs through the proxy, with the remote repo's key and its section name.
 		upArch := RandName("upstream-arch")
 		remote.CreateRepo(t, upArch, "arch", true, nil)
 		remote.SetPerms(t, upArch, uploader, "repo.download", "repo.publish")
@@ -355,15 +322,13 @@ func TestProxy(t *testing.T) {
 		remote.WaitDebianIndexed(t, upArch)
 		archProxy := RandName("arch-proxy")
 		s.CreateProxy(t, archProxy, "arch", true, map[string]any{"remote_url": remote.InternalURL + "/arch/" + upArch}, false)
-		pm := StartPacman(t)
-		pm.Trust(t, remote.ArchKey(t, upArch, nil))
-		pm.AddRepo(t, upArch, "http://"+s.Alias+":8080/arch/"+archProxy+"/$arch")
-		pm.MustExec(t, "pacman through the proxy", "pacman -Sy --noconfirm e2e-proxied && pacman -Q e2e-proxied")
+		for _, f := range []string{upArch + ".db", upArch + ".db.sig"} {
+			proxyServesRemote(t, s, remote, "/arch/"+archProxy+"/x86_64/"+f, "/arch/"+upArch+"/x86_64/"+f)
+		}
 		if resp, _ := s.Do(t, s.NewRequest(t, http.MethodGet, "/arch/"+archProxy+"/key.asc", nil), nil); resp.StatusCode != http.StatusNotFound {
 			t.Fatalf("GET the key of an Arch proxy: status %d, want 404", resp.StatusCode)
 		}
 
-		// RPM: dnf installs through the proxy with the remote repo's key; the proxy has none.
 		upRPM := RandName("upstream-rpm")
 		remote.CreateRepo(t, upRPM, "rpm", true, nil)
 		remote.SetPerms(t, upRPM, uploader, "repo.download", "repo.publish")
@@ -371,10 +336,9 @@ func TestProxy(t *testing.T) {
 		remote.WaitDebianIndexed(t, upRPM)
 		rpmProxy := RandName("rpm-proxy")
 		s.CreateProxy(t, rpmProxy, "rpm", true, map[string]any{"remote_url": remote.InternalURL + "/rpm/" + upRPM + "/"}, false)
-		dn := StartDnf(t, fedoraImage)
-		dn.Trust(t, rpmProxy, remote.RPMKey(t, upRPM, nil))
-		dn.AddRepo(t, rpmProxy, rpmBaseURL(s, rpmProxy), "", "")
-		dn.MustExec(t, "dnf through the proxy", "dnf -y install e2e-data && e2e-data")
+		for _, f := range []string{"repodata/repomd.xml", "repodata/repomd.xml.asc"} {
+			proxyServesRemote(t, s, remote, "/rpm/"+rpmProxy+"/"+f, "/rpm/"+upRPM+"/"+f)
+		}
 		if resp, _ := s.Do(t, s.NewRequest(t, http.MethodGet, "/rpm/"+rpmProxy+"/key.asc", nil), nil); resp.StatusCode != http.StatusNotFound {
 			t.Fatalf("GET the key of an RPM proxy: status %d, want 404", resp.StatusCode)
 		}
